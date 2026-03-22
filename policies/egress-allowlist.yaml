@@ -210,6 +210,33 @@ agents:
         destination: fonts.gstatic.com
         comment: "Google Fonts static files"
 
+  support:
+    description: "External customer support. MOST RESTRICTED egress — only Muso API and Zendesk."
+    additional_rules:
+      - name: muso-api
+        protocol: tcp
+        port: 443
+        destination: api.muso.ai
+        comment: "Muso.AI public API — profile_lookup, credits_search, subscription_status"
+      - name: zendesk-api
+        protocol: tcp
+        port: 443
+        destination: "*.zendesk.com"
+        comment: "Zendesk API — create_ticket"
+    explicit_overrides:
+      - name: block-slack-api
+        protocol: tcp
+        port: 443
+        destination: api.slack.com
+        action: DENY
+        comment: "Override shared rule — support agent does NOT get Slack API access"
+      - name: block-slack-websocket
+        protocol: tcp
+        port: 443
+        destination: wss-primary.slack.com
+        action: DENY
+        comment: "Override shared rule — support agent does NOT get Slack WebSocket access"
+
   cmo:
     description: "Marketing & analytics platforms."
     additional_rules:

@@ -174,3 +174,30 @@ agents:
       - file_delete
       - secrets_read
       - slack_admin
+
+  support:
+    description: "External customer support. MOST RESTRICTED — only 4 tools allowed. Everything else denied."
+    denied:
+      - exec
+      - browser
+      - http_request
+      - github_push
+      - github_pr
+      - github_read
+      - kubectl
+      - helm
+      - docker
+      - quickbooks
+      - payroll
+      - crm_read
+      - crm_write
+      - slack_dm
+      - slack_admin
+      - vault_read
+      - vault_write
+      - db_read
+      - db_write
+      - file_write
+      - file_delete
+      - secrets_read
+      - sessions_send
