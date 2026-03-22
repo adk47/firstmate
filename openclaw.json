@@ -1,296 +1,407 @@
 {
-  "$schema": "https://openclaw.dev/schema/v1.json",
-  "version": "1.0.0",
-  "project": "hydra",
-  "description": "HYDRA 9-agent AI assistant architecture for Muso.AI",
-
-  "runtime": {
-    "sandbox": "all",
-    "dockerFallback": true,
-    "nemoClaw": {
-      "enabled": true,
-      "fallbackToDocker": true
+  "meta": {
+    "lastTouchedVersion": "2026.3.13",
+    "lastTouchedAt": "2026-03-22T21:00:00.000Z"
+  },
+  "wizard": {
+    "lastRunAt": "2026-02-19T06:12:59.869Z",
+    "lastRunVersion": "2026.2.17",
+    "lastRunCommand": "configure",
+    "lastRunMode": "local"
+  },
+  "update": {
+    "auto": {
+      "enabled": false
     }
   },
-
-  "modelProviders": {
-    "cliProxyAPI": {
-      "baseUrl": "http://localhost:8317",
-      "protocol": "openai-compatible",
+  "auth": {
+    "profiles": {}
+  },
+  "models": {
+    "providers": {
+      "anthropic": {
+        "baseUrl": "http://127.0.0.1:8317",
+        "apiKey": "VAULT:secret/muso-prod/hydra-claude-api/ANTHROPIC_API_KEY",
+        "auth": "api-key",
+        "authHeader": true,
+        "models": [
+          {
+            "id": "claude-opus-4-6",
+            "name": "claude-opus-4-6",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 16384
+          },
+          {
+            "id": "claude-sonnet-4-6",
+            "name": "claude-sonnet-4-6",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 16384
+          },
+          {
+            "id": "claude-haiku-4-5-20251001",
+            "name": "claude-haiku-4-5-20251001",
+            "input": [
+              "text",
+              "image"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "anthropic/claude-opus-4-6",
+        "fallbacks": [
+          "anthropic/claude-sonnet-4-6"
+        ]
+      },
+      "imageModel": {
+        "primary": "anthropic/claude-sonnet-4-6",
+        "fallbacks": [
+          "anthropic/claude-haiku-4-5-20251001"
+        ]
+      },
       "models": {
-        "opus": {
-          "id": "claude-opus-4-6",
-          "contextWindow": 1000000,
-          "maxOutputTokens": 32768,
-          "tier": "premium"
+        "anthropic/claude-opus-4-6": {
+          "alias": "opus"
         },
-        "sonnet": {
-          "id": "claude-sonnet-4-6",
-          "contextWindow": 200000,
-          "maxOutputTokens": 16384,
-          "tier": "standard"
+        "anthropic/claude-sonnet-4-6": {
+          "alias": "sonnet"
         },
-        "haiku": {
-          "id": "claude-haiku-4-5-20251001",
-          "contextWindow": 200000,
-          "maxOutputTokens": 8192,
-          "tier": "fast"
+        "anthropic/claude-haiku-4-5-20251001": {
+          "alias": "haiku"
+        }
+      },
+      "workspace": "/opt/hydra/workspaces/coordinator",
+      "compaction": {
+        "mode": "default",
+        "keepRecentTokens": 40000
+      },
+      "maxConcurrent": 20,
+      "subagents": {
+        "maxConcurrent": 24
+      }
+    },
+    "list": [
+      {
+        "id": "coordinator",
+        "workspace": "/opt/hydra/workspaces/coordinator",
+        "model": {
+          "primary": "anthropic/claude-opus-4-6",
+          "fallbacks": [
+            "anthropic/claude-sonnet-4-6"
+          ]
+        },
+        "default": true
+      },
+      {
+        "id": "ceo",
+        "workspace": "/opt/hydra/workspaces/ceo",
+        "model": {
+          "primary": "anthropic/claude-opus-4-6",
+          "fallbacks": [
+            "anthropic/claude-sonnet-4-6"
+          ]
+        }
+      },
+      {
+        "id": "cmo",
+        "workspace": "/opt/hydra/workspaces/cmo",
+        "model": {
+          "primary": "anthropic/claude-opus-4-6",
+          "fallbacks": [
+            "anthropic/claude-sonnet-4-6"
+          ]
+        }
+      },
+      {
+        "id": "cto",
+        "workspace": "/opt/hydra/workspaces/cto",
+        "model": {
+          "primary": "anthropic/claude-opus-4-6",
+          "fallbacks": [
+            "anthropic/claude-sonnet-4-6"
+          ]
+        }
+      },
+      {
+        "id": "qa",
+        "workspace": "/opt/hydra/workspaces/qa",
+        "model": {
+          "primary": "anthropic/claude-sonnet-4-6",
+          "fallbacks": [
+            "anthropic/claude-haiku-4-5-20251001"
+          ]
+        }
+      },
+      {
+        "id": "finance",
+        "workspace": "/opt/hydra/workspaces/finance",
+        "model": {
+          "primary": "anthropic/claude-sonnet-4-6",
+          "fallbacks": [
+            "anthropic/claude-haiku-4-5-20251001",
+            "anthropic/claude-opus-4-6"
+          ]
+        }
+      },
+      {
+        "id": "operations",
+        "workspace": "/opt/hydra/workspaces/operations",
+        "model": {
+          "primary": "anthropic/claude-sonnet-4-6",
+          "fallbacks": [
+            "anthropic/claude-haiku-4-5-20251001",
+            "anthropic/claude-opus-4-6"
+          ]
+        }
+      },
+      {
+        "id": "devops",
+        "workspace": "/opt/hydra/workspaces/devops",
+        "model": {
+          "primary": "anthropic/claude-sonnet-4-6",
+          "fallbacks": [
+            "anthropic/claude-haiku-4-5-20251001"
+          ]
+        }
+      },
+      {
+        "id": "design",
+        "workspace": "/opt/hydra/workspaces/design",
+        "model": {
+          "primary": "anthropic/claude-sonnet-4-6",
+          "fallbacks": [
+            "anthropic/claude-haiku-4-5-20251001",
+            "anthropic/claude-opus-4-6"
+          ]
         }
       }
-    }
-  },
-
-  "intelligentModelSelection": {
-    "description": "Dynamic model routing for agents with model set to 'intelligent'",
-    "tiers": {
-      "0": {
-        "model": "opus",
-        "triggers": [
-          "strategic decisions",
-          "contracts",
-          "cross-agent coordination",
-          "external-facing communication",
-          "board-level content"
-        ],
-        "expectedUsage": "~15%"
-      },
-      "1": {
-        "model": "sonnet",
-        "triggers": [
-          "standard analysis",
-          "drafting",
-          "reports",
-          "internal memos",
-          "general tasks"
-        ],
-        "default": true,
-        "expectedUsage": "~25%"
-      },
-      "2": {
-        "model": "haiku",
-        "triggers": [
-          "lookups",
-          "formatting",
-          "status checks",
-          "data extraction",
-          "simple Q&A"
-        ],
-        "expectedUsage": "~60%"
-      }
-    }
-  },
-
-  "crossAgentCommunication": {
-    "method": "sessions_send",
-    "timeoutMs": 30000,
-    "router": "coordinator",
-    "description": "All cross-department requests route through coordinator"
-  },
-
-  "eDiscovery": {
-    "auditRepo": "hydra-audit",
-    "logDestination": "audit/buffer.jsonl",
-    "commitCron": "0 * * * *",
-    "logToolInvocations": true,
-    "logParams": true,
-    "logResults": true
-  },
-
-  "filePermissions": {
-    "readOnly": [
-      "SOUL.md",
-      "AGENTS.md",
-      "TOOLS.md"
-    ],
-    "writable": [
-      "MEMORY.md",
-      "USER.md",
-      "audit/buffer.jsonl"
     ]
   },
-
-  "agents": {
-    "coordinator": {
-      "displayName": "Coordinator",
-      "description": "Routes messages, monitors heartbeats, orchestrates cross-agent communication",
-      "owner": "Aaron",
-      "model": "opus",
-      "modelSelection": "fixed",
-      "workspace": "workspaces/coordinator/",
-      "slack": {
-        "appTokenEnv": "SLACK_APP_TOKEN_COORDINATOR",
-        "socketMode": true,
-        "channels": [
-          { "id": "C_HYDRA_ROUTER", "name": "#hydra-router" },
-          { "id": "C_HYDRA_HEARTBEAT", "name": "#hydra-heartbeat" }
-        ]
-      },
-      "deniedTools": ["exec", "browser", "external_api"],
-      "permissions": {
-        "crossAgentRoute": true,
-        "heartbeatMonitor": true,
-        "canEscalate": true
+  "messages": {
+    "queue": {
+      "mode": "steer-backlog",
+      "byChannel": {
+        "slack": "steer-backlog"
       }
     },
-
-    "ceo": {
-      "displayName": "CEO",
-      "description": "Executive decisions, board prep, strategy",
-      "owner": "Aaron",
-      "model": "opus",
-      "modelSelection": "fixed",
-      "workspace": "workspaces/ceo/",
-      "slack": {
-        "appTokenEnv": "SLACK_APP_TOKEN_CEO",
-        "socketMode": true,
-        "channels": [
-          { "id": "C_EXEC", "name": "#exec" },
-          { "id": "C_BOARD", "name": "#board" },
-          { "id": "C_STRATEGY", "name": "#strategy" }
-        ],
-        "directMessages": {
-          "enabled": true,
-          "authorization": "acm_role_based"
+    "ackReaction": "eyes",
+    "ackReactionScope": "all",
+    "removeAckAfterReply": true,
+    "tts": {
+      "auto": "off",
+      "provider": "elevenlabs",
+      "elevenlabs": {
+        "apiKey": "sk_0b8a03cf43ae73f1656fa9c989dc2b12e24ebb9da6fdd237",
+        "voiceId": "NtS6nEHDYMQC9QczMQuq"
+      }
+    }
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "web": {
+    "enabled": false
+  },
+  "channels": {
+    "slack": {
+      "mode": "socket",
+      "enabled": true,
+      "streaming": "partial",
+      "nativeStreaming": true,
+      "replyToMode": "all",
+      "replyToModeByChatType": {
+        "direct": "all",
+        "group": "all",
+        "channel": "all"
+      },
+      "accounts": {
+        "coordinator": {
+          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_COORDINATOR",
+          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_COORDINATOR"
+        },
+        "ceo": {
+          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_CEO",
+          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_CEO",
+          "channels": {
+            "#general": {
+              "allow": true,
+              "requireMention": true
+            },
+            "#company-announcements": {
+              "allow": true,
+              "requireMention": true
+            }
+          },
+          "groupPolicy": "allowlist"
+        },
+        "cmo": {
+          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_CMO",
+          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_CMO",
+          "channels": {
+            "#growth-team": {
+              "allow": true,
+              "requireMention": true
+            },
+            "#social-media": {
+              "allow": true,
+              "requireMention": true
+            },
+            "#music_industry_news": {
+              "allow": true,
+              "requireMention": true
+            }
+          },
+          "groupPolicy": "allowlist"
+        },
+        "cto": {
+          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_CTO",
+          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_CTO",
+          "channels": {
+            "#engineering": {
+              "allow": true,
+              "requireMention": true
+            },
+            "#catalog-team": {
+              "allow": true,
+              "requireMention": true
+            },
+            "#pipeline-alerts": {
+              "allow": true,
+              "requireMention": true
+            },
+            "#developer-api": {
+              "allow": true,
+              "requireMention": true
+            }
+          },
+          "groupPolicy": "allowlist"
+        },
+        "qa": {
+          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_QA",
+          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_QA",
+          "channels": {
+            "#production_updates": {
+              "allow": true,
+              "requireMention": true
+            },
+            "#app-releases": {
+              "allow": true,
+              "requireMention": true
+            }
+          },
+          "groupPolicy": "allowlist"
+        },
+        "finance": {
+          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_FINANCE",
+          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_FINANCE",
+          "channels": {
+            "C08GZPWAKBJ": {
+              "allow": true,
+              "requireMention": false
+            }
+          },
+          "groupPolicy": "allowlist"
+        },
+        "operations": {
+          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_OPERATIONS",
+          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_OPERATIONS",
+          "channels": {
+            "GJAM34DT6": {
+              "allow": true,
+              "requireMention": true
+            },
+            "#ops_customer": {
+              "allow": true,
+              "requireMention": true
+            }
+          },
+          "groupPolicy": "allowlist"
+        },
+        "devops": {
+          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_DEVOPS",
+          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_DEVOPS",
+          "channels": {
+            "#data-capture-notifications": {
+              "allow": true,
+              "requireMention": true
+            }
+          },
+          "groupPolicy": "allowlist"
+        },
+        "design": {
+          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_DESIGN",
+          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_DESIGN",
+          "channels": {
+            "#product_design": {
+              "allow": true,
+              "requireMention": true
+            }
+          },
+          "groupPolicy": "allowlist"
+        },
+        "default": {
+          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_DEFAULT",
+          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_DEFAULT"
         }
-      },
-      "deniedTools": [],
-      "permissions": {
-        "ceoOverride": true,
-        "allChannelAccess": false,
-        "dmAccess": true
+      }
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": "f3beadb72aaec5fd6558aa1cdaa3217ce1c509293331a088"
+    },
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "http": {
+      "endpoints": {
+        "chatCompletions": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "slack": {
+        "enabled": true
       }
     },
-
-    "cmo": {
-      "displayName": "CMO",
-      "description": "Marketing strategy, campaigns, ads",
-      "owner": "Fede",
-      "model": "opus",
-      "modelSelection": "fixed",
-      "workspace": "workspaces/cmo/",
-      "slack": {
-        "appTokenEnv": "SLACK_APP_TOKEN_CMO",
-        "socketMode": true,
-        "channels": [
-          { "id": "C_MARKETING", "name": "#marketing" },
-          { "id": "C_MUSO_ADS", "name": "#muso-ads" },
-          { "id": "C_CAMPAIGNS", "name": "#campaigns" }
-        ]
-      },
-      "deniedTools": ["quickbooks", "payroll", "kubectl"]
-    },
-
-    "cto": {
-      "displayName": "CTO",
-      "description": "Technical architecture, engineering decisions",
-      "owners": {
-        "primary": "Nick",
-        "secondary": "Serhii"
-      },
-      "model": "opus",
-      "modelSelection": "fixed",
-      "workspace": "workspaces/cto/",
-      "slack": {
-        "appTokenEnv": "SLACK_APP_TOKEN_CTO",
-        "socketMode": true,
-        "channels": [
-          { "id": "C_ENGINEERING", "name": "#engineering" },
-          { "id": "C_ARCHITECTURE", "name": "#architecture" },
-          { "id": "C_ENG_BACKEND", "name": "#eng-backend" }
-        ]
-      },
-      "deniedTools": ["quickbooks", "payroll", "crm"]
-    },
-
-    "qa": {
-      "displayName": "QA",
-      "description": "Testing, bug tracking, quality assurance",
-      "owner": "Jay",
-      "model": "sonnet",
-      "modelSelection": "fixed",
-      "workspace": "workspaces/qa/",
-      "slack": {
-        "appTokenEnv": "SLACK_APP_TOKEN_QA",
-        "socketMode": true,
-        "channels": [
-          { "id": "C_QA", "name": "#qa" },
-          { "id": "C_TESTING", "name": "#testing" },
-          { "id": "C_BUGS", "name": "#bugs" }
-        ]
-      },
-      "deniedTools": ["quickbooks", "kubectl", "crm"]
-    },
-
-    "finance": {
-      "displayName": "Finance",
-      "description": "Financial analysis, budgets, reporting",
-      "owner": "Liza",
-      "model": "intelligent",
-      "modelSelection": "intelligent",
-      "workspace": "workspaces/finance/",
-      "slack": {
-        "appTokenEnv": "SLACK_APP_TOKEN_FINANCE",
-        "socketMode": true,
-        "channels": [
-          { "id": "C_FINANCE", "name": "#finance", "private": true }
-        ]
-      },
-      "deniedTools": ["exec", "github", "kubectl", "browser"]
-    },
-
-    "operations": {
-      "displayName": "Operations",
-      "description": "Operations management, customer support triage",
-      "owner": "Jan",
-      "model": "intelligent",
-      "modelSelection": "intelligent",
-      "workspace": "workspaces/operations/",
-      "slack": {
-        "appTokenEnv": "SLACK_APP_TOKEN_OPERATIONS",
-        "socketMode": true,
-        "channels": [
-          { "id": "C_OPERATIONS", "name": "#operations" },
-          { "id": "C_CUSTOMER_SUPPORT", "name": "#customer-support" }
-        ]
-      },
-      "deniedTools": ["quickbooks", "payroll", "github"]
-    },
-
-    "design": {
-      "displayName": "Design",
-      "description": "Design review, UX feedback",
-      "owner": "Maria",
-      "model": "intelligent",
-      "modelSelection": "intelligent",
-      "workspace": "workspaces/design/",
-      "slack": {
-        "appTokenEnv": "SLACK_APP_TOKEN_DESIGN",
-        "socketMode": true,
-        "channels": [
-          { "id": "C_DESIGN", "name": "#design" },
-          { "id": "C_UX_REVIEW", "name": "#ux-review" }
-        ]
-      },
-      "deniedTools": ["quickbooks", "payroll", "github"]
-    },
-
-    "devops": {
-      "displayName": "DevOps",
-      "description": "Infrastructure, deployments, alerts",
-      "owner": "Artem D",
-      "model": "sonnet",
-      "modelSelection": "fixed",
-      "workspace": "workspaces/devops/",
-      "slack": {
-        "appTokenEnv": "SLACK_APP_TOKEN_DEVOPS",
-        "socketMode": true,
-        "channels": [
-          { "id": "C_DEVOPS", "name": "#devops" },
-          { "id": "C_DEPLOYS", "name": "#deploys" },
-          { "id": "C_INFRA_ALERTS", "name": "#infra-alerts" }
-        ]
-      },
-      "deniedTools": ["quickbooks", "payroll", "crm"]
+    "installs": {
+      "lossless-claw": {
+        "source": "npm",
+        "spec": "@martian-engineering/lossless-claw",
+        "installPath": "/Users/admin/.openclaw/extensions/lossless-claw",
+        "version": "0.3.0",
+        "resolvedName": "@martian-engineering/lossless-claw",
+        "resolvedVersion": "0.3.0",
+        "resolvedSpec": "@martian-engineering/lossless-claw@0.3.0",
+        "integrity": "sha512-SsY0bp3SoSzEu+KB8fOBke46MFhTmslfWg6OvC4pShq34ig2+V+jkTFAHib8PTZ0MoethAddR+ZmRN9OASorAA==",
+        "shasum": "bc9725d6d59d9b1523128ab528f1258c4258fa3f",
+        "resolvedAt": "2026-03-15T16:41:53.234Z",
+        "installedAt": "2026-03-15T16:42:31.664Z"
+      }
     }
   }
 }
