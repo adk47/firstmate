@@ -1,0 +1,296 @@
+{
+  "$schema": "https://openclaw.dev/schema/v1.json",
+  "version": "1.0.0",
+  "project": "hydra",
+  "description": "HYDRA 9-agent AI assistant architecture for Muso.AI",
+
+  "runtime": {
+    "sandbox": "all",
+    "dockerFallback": true,
+    "nemoClaw": {
+      "enabled": true,
+      "fallbackToDocker": true
+    }
+  },
+
+  "modelProviders": {
+    "cliProxyAPI": {
+      "baseUrl": "http://localhost:8317",
+      "protocol": "openai-compatible",
+      "models": {
+        "opus": {
+          "id": "claude-opus-4-6",
+          "contextWindow": 1000000,
+          "maxOutputTokens": 32768,
+          "tier": "premium"
+        },
+        "sonnet": {
+          "id": "claude-sonnet-4-6",
+          "contextWindow": 200000,
+          "maxOutputTokens": 16384,
+          "tier": "standard"
+        },
+        "haiku": {
+          "id": "claude-haiku-4-5-20251001",
+          "contextWindow": 200000,
+          "maxOutputTokens": 8192,
+          "tier": "fast"
+        }
+      }
+    }
+  },
+
+  "intelligentModelSelection": {
+    "description": "Dynamic model routing for agents with model set to 'intelligent'",
+    "tiers": {
+      "0": {
+        "model": "opus",
+        "triggers": [
+          "strategic decisions",
+          "contracts",
+          "cross-agent coordination",
+          "external-facing communication",
+          "board-level content"
+        ],
+        "expectedUsage": "~15%"
+      },
+      "1": {
+        "model": "sonnet",
+        "triggers": [
+          "standard analysis",
+          "drafting",
+          "reports",
+          "internal memos",
+          "general tasks"
+        ],
+        "default": true,
+        "expectedUsage": "~25%"
+      },
+      "2": {
+        "model": "haiku",
+        "triggers": [
+          "lookups",
+          "formatting",
+          "status checks",
+          "data extraction",
+          "simple Q&A"
+        ],
+        "expectedUsage": "~60%"
+      }
+    }
+  },
+
+  "crossAgentCommunication": {
+    "method": "sessions_send",
+    "timeoutMs": 30000,
+    "router": "coordinator",
+    "description": "All cross-department requests route through coordinator"
+  },
+
+  "eDiscovery": {
+    "auditRepo": "hydra-audit",
+    "logDestination": "audit/buffer.jsonl",
+    "commitCron": "0 * * * *",
+    "logToolInvocations": true,
+    "logParams": true,
+    "logResults": true
+  },
+
+  "filePermissions": {
+    "readOnly": [
+      "SOUL.md",
+      "AGENTS.md",
+      "TOOLS.md"
+    ],
+    "writable": [
+      "MEMORY.md",
+      "USER.md",
+      "audit/buffer.jsonl"
+    ]
+  },
+
+  "agents": {
+    "coordinator": {
+      "displayName": "Coordinator",
+      "description": "Routes messages, monitors heartbeats, orchestrates cross-agent communication",
+      "owner": "Aaron",
+      "model": "opus",
+      "modelSelection": "fixed",
+      "workspace": "workspaces/coordinator/",
+      "slack": {
+        "appTokenEnv": "SLACK_APP_TOKEN_COORDINATOR",
+        "socketMode": true,
+        "channels": [
+          { "id": "C_HYDRA_ROUTER", "name": "#hydra-router" },
+          { "id": "C_HYDRA_HEARTBEAT", "name": "#hydra-heartbeat" }
+        ]
+      },
+      "deniedTools": ["exec", "browser", "external_api"],
+      "permissions": {
+        "crossAgentRoute": true,
+        "heartbeatMonitor": true,
+        "canEscalate": true
+      }
+    },
+
+    "ceo": {
+      "displayName": "CEO",
+      "description": "Executive decisions, board prep, strategy",
+      "owner": "Aaron",
+      "model": "opus",
+      "modelSelection": "fixed",
+      "workspace": "workspaces/ceo/",
+      "slack": {
+        "appTokenEnv": "SLACK_APP_TOKEN_CEO",
+        "socketMode": true,
+        "channels": [
+          { "id": "C_EXEC", "name": "#exec" },
+          { "id": "C_BOARD", "name": "#board" },
+          { "id": "C_STRATEGY", "name": "#strategy" }
+        ],
+        "directMessages": {
+          "enabled": true,
+          "authorization": "acm_role_based"
+        }
+      },
+      "deniedTools": [],
+      "permissions": {
+        "ceoOverride": true,
+        "allChannelAccess": false,
+        "dmAccess": true
+      }
+    },
+
+    "cmo": {
+      "displayName": "CMO",
+      "description": "Marketing strategy, campaigns, ads",
+      "owner": "Fede",
+      "model": "opus",
+      "modelSelection": "fixed",
+      "workspace": "workspaces/cmo/",
+      "slack": {
+        "appTokenEnv": "SLACK_APP_TOKEN_CMO",
+        "socketMode": true,
+        "channels": [
+          { "id": "C_MARKETING", "name": "#marketing" },
+          { "id": "C_MUSO_ADS", "name": "#muso-ads" },
+          { "id": "C_CAMPAIGNS", "name": "#campaigns" }
+        ]
+      },
+      "deniedTools": ["quickbooks", "payroll", "kubectl"]
+    },
+
+    "cto": {
+      "displayName": "CTO",
+      "description": "Technical architecture, engineering decisions",
+      "owners": {
+        "primary": "Nick",
+        "secondary": "Serhii"
+      },
+      "model": "opus",
+      "modelSelection": "fixed",
+      "workspace": "workspaces/cto/",
+      "slack": {
+        "appTokenEnv": "SLACK_APP_TOKEN_CTO",
+        "socketMode": true,
+        "channels": [
+          { "id": "C_ENGINEERING", "name": "#engineering" },
+          { "id": "C_ARCHITECTURE", "name": "#architecture" },
+          { "id": "C_ENG_BACKEND", "name": "#eng-backend" }
+        ]
+      },
+      "deniedTools": ["quickbooks", "payroll", "crm"]
+    },
+
+    "qa": {
+      "displayName": "QA",
+      "description": "Testing, bug tracking, quality assurance",
+      "owner": "Jay",
+      "model": "sonnet",
+      "modelSelection": "fixed",
+      "workspace": "workspaces/qa/",
+      "slack": {
+        "appTokenEnv": "SLACK_APP_TOKEN_QA",
+        "socketMode": true,
+        "channels": [
+          { "id": "C_QA", "name": "#qa" },
+          { "id": "C_TESTING", "name": "#testing" },
+          { "id": "C_BUGS", "name": "#bugs" }
+        ]
+      },
+      "deniedTools": ["quickbooks", "kubectl", "crm"]
+    },
+
+    "finance": {
+      "displayName": "Finance",
+      "description": "Financial analysis, budgets, reporting",
+      "owner": "Liza",
+      "model": "intelligent",
+      "modelSelection": "intelligent",
+      "workspace": "workspaces/finance/",
+      "slack": {
+        "appTokenEnv": "SLACK_APP_TOKEN_FINANCE",
+        "socketMode": true,
+        "channels": [
+          { "id": "C_FINANCE", "name": "#finance", "private": true }
+        ]
+      },
+      "deniedTools": ["exec", "github", "kubectl", "browser"]
+    },
+
+    "operations": {
+      "displayName": "Operations",
+      "description": "Operations management, customer support triage",
+      "owner": "Jan",
+      "model": "intelligent",
+      "modelSelection": "intelligent",
+      "workspace": "workspaces/operations/",
+      "slack": {
+        "appTokenEnv": "SLACK_APP_TOKEN_OPERATIONS",
+        "socketMode": true,
+        "channels": [
+          { "id": "C_OPERATIONS", "name": "#operations" },
+          { "id": "C_CUSTOMER_SUPPORT", "name": "#customer-support" }
+        ]
+      },
+      "deniedTools": ["quickbooks", "payroll", "github"]
+    },
+
+    "design": {
+      "displayName": "Design",
+      "description": "Design review, UX feedback",
+      "owner": "Maria",
+      "model": "intelligent",
+      "modelSelection": "intelligent",
+      "workspace": "workspaces/design/",
+      "slack": {
+        "appTokenEnv": "SLACK_APP_TOKEN_DESIGN",
+        "socketMode": true,
+        "channels": [
+          { "id": "C_DESIGN", "name": "#design" },
+          { "id": "C_UX_REVIEW", "name": "#ux-review" }
+        ]
+      },
+      "deniedTools": ["quickbooks", "payroll", "github"]
+    },
+
+    "devops": {
+      "displayName": "DevOps",
+      "description": "Infrastructure, deployments, alerts",
+      "owner": "Artem D",
+      "model": "sonnet",
+      "modelSelection": "fixed",
+      "workspace": "workspaces/devops/",
+      "slack": {
+        "appTokenEnv": "SLACK_APP_TOKEN_DEVOPS",
+        "socketMode": true,
+        "channels": [
+          { "id": "C_DEVOPS", "name": "#devops" },
+          { "id": "C_DEPLOYS", "name": "#deploys" },
+          { "id": "C_INFRA_ALERTS", "name": "#infra-alerts" }
+        ]
+      },
+      "deniedTools": ["quickbooks", "payroll", "crm"]
+    }
+  }
+}

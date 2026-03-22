@@ -1,0 +1,142 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: [self-hosted, hydra]
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: JSON Lint — validate openclaw.json
+        run: |
+          echo "::group::Validating openclaw.json"
+          if ! python3 -m json.tool openclaw.json > /dev/null 2>&1; then
+            echo "::error::openclaw.json is not valid JSON"
+            exit 1
+          fi
+          echo "openclaw.json is valid JSON"
+          echo "::endgroup::"
+
+      - name: SOUL.md check — all 9 workspaces
+        run: |
+          echo "::group::Checking SOUL.md in all workspaces"
+          EXPECTED_WORKSPACES="ceo cmo coordinator cto design devops finance operations qa"
+          MISSING=""
+          for ws in $EXPECTED_WORKSPACES; do
+            if [ ! -f "workspaces/${ws}/SOUL.md" ]; then
+              MISSING="${MISSING} ${ws}"
+              echo "::error::Missing SOUL.md in workspaces/${ws}/"
+            else
+              echo "Found SOUL.md in workspaces/${ws}/"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing SOUL.md in workspaces:${MISSING}"
+            exit 1
+          fi
+          echo "All 9 workspaces have SOUL.md"
+          echo "::endgroup::"
+
+      - name: Tool deny list audit — denials can only grow
+        run: |
+          echo "::group::Auditing tool deny lists"
+          DENY_FILE="policies/tool-deny-lists.yaml"
+
+          # Get the deny list from the main branch
+          git show origin/main:${DENY_FILE} > /tmp/deny-list-main.yaml 2>/dev/null || {
+            echo "No deny list on main branch yet — skipping comparison"
+            exit 0
+          }
+
+          # Extract all denied tool entries from main (baseline)
+          grep -E '^\s+-\s+' /tmp/deny-list-main.yaml | sed 's/^[[:space:]]*-[[:space:]]*//' | sort -u > /tmp/denials-main.txt
+
+          # Extract all denied tool entries from PR branch
+          grep -E '^\s+-\s+' ${DENY_FILE} | sed 's/^[[:space:]]*-[[:space:]]*//' | sort -u > /tmp/denials-pr.txt
+
+          # Find any denials that were REMOVED (present in main but not in PR)
+          REMOVED=$(comm -23 /tmp/denials-main.txt /tmp/denials-pr.txt)
+
+          if [ -n "$REMOVED" ]; then
+            echo "::error::Tool denials were REMOVED. Denials can only grow, never shrink."
+            echo "The following denials were removed:"
+            echo "$REMOVED"
+            echo ""
+            echo "This prevents agents from expanding their own permissions."
+            echo "If this removal is intentional, Aaron must approve it directly."
+            exit 1
+          fi
+
+          # Show what was added (informational)
+          ADDED=$(comm -13 /tmp/denials-main.txt /tmp/denials-pr.txt)
+          if [ -n "$ADDED" ]; then
+            echo "New denials added (OK):"
+            echo "$ADDED"
+          else
+            echo "No changes to deny lists"
+          fi
+          echo "::endgroup::"
+
+      - name: CODEOWNERS check — only Aaron can modify
+        run: |
+          echo "::group::Checking CODEOWNERS integrity"
+          # Check if CODEOWNERS was modified in this PR
+          CHANGED_FILES=$(git diff --name-only origin/main...HEAD)
+
+          if echo "$CHANGED_FILES" | grep -qE '(^|/)CODEOWNERS$'; then
+            # Check if the PR author is Aaron
+            PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+            if [ "$PR_AUTHOR" != "adk47" ]; then
+              echo "::error::CODEOWNERS was modified by ${PR_AUTHOR}. Only Aaron (adk47) can modify CODEOWNERS."
+              exit 1
+            fi
+            echo "CODEOWNERS modified by adk47 — allowed"
+          else
+            echo "CODEOWNERS not modified — OK"
+          fi
+          echo "::endgroup::"
+
+      - name: Egress allowlist check — no unauthorized additions
+        run: |
+          echo "::group::Checking egress allowlist changes"
+          CHANGED_FILES=$(git diff --name-only origin/main...HEAD)
+
+          # Check if any egress-related files were modified
+          EGRESS_CHANGES=$(echo "$CHANGED_FILES" | grep -i 'egress' || true)
+
+          if [ -n "$EGRESS_CHANGES" ]; then
+            PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+            if [ "$PR_AUTHOR" != "adk47" ]; then
+              echo "::error::Egress allowlist changes detected by ${PR_AUTHOR}. Only Aaron (adk47) can approve egress rule changes."
+              echo "Modified files:"
+              echo "$EGRESS_CHANGES"
+              echo ""
+              echo "Please request Aaron's review before merging."
+              # Don't fail — just require review. The branch protection rule
+              # should require adk47 approval for these paths.
+              exit 1
+            fi
+            echo "Egress changes by adk47 — allowed"
+          else
+            echo "No egress allowlist changes — OK"
+          fi
+          echo "::endgroup::"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## PR Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| JSON Lint | ${{ steps.json-lint.outcome || 'completed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SOUL.md | ${{ steps.soul-check.outcome || 'completed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deny List Audit | ${{ steps.deny-audit.outcome || 'completed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| CODEOWNERS | ${{ steps.codeowners.outcome || 'completed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Egress Allowlist | ${{ steps.egress.outcome || 'completed' }} |" >> $GITHUB_STEP_SUMMARY

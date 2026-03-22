@@ -1,0 +1,31 @@
+# HYDRA CODEOWNERS
+# ================
+# Aaron (@adk47) approves everything. Department leads co-own their workspaces.
+# Policies are Aaron-only — no exceptions.
+
+# Default: Aaron approves all changes
+*                       @adk47
+
+# Department workspaces — Aaron + department lead
+workspaces/cmo/         @adk47 @fede
+workspaces/cto/         @adk47 @nick @liflovs
+workspaces/qa/          @adk47 @jay
+workspaces/finance/     @adk47 @liza
+workspaces/operations/  @adk47 @jan
+workspaces/devops/      @adk47 @artem-d
+workspaces/design/      @adk47 @maria
+
+# Policies — Aaron only (security-critical, deny lists, egress rules)
+policies/               @adk47
+
+# Secrets definitions — Aaron only
+secrets/                @adk47
+
+# OpenClaw config — Aaron only
+openclaw.json           @adk47
+
+# CLIProxyAPI config — Aaron only
+cliproxyapi.conf        @adk47
+
+# Deployment scripts — Aaron only
+scripts/                @adk47

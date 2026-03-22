@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-950 text-gray-100;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-gray-900 border border-gray-800 rounded-lg p-6;
+  }
+  .card-hover {
+    @apply card hover:border-hydra-700 transition-colors duration-200;
+  }
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+  .badge-green {
+    @apply badge bg-green-900/50 text-green-400 border border-green-800;
+  }
+  .badge-red {
+    @apply badge bg-red-900/50 text-red-400 border border-red-800;
+  }
+  .badge-yellow {
+    @apply badge bg-yellow-900/50 text-yellow-400 border border-yellow-800;
+  }
+  .badge-blue {
+    @apply badge bg-blue-900/50 text-blue-400 border border-blue-800;
+  }
+  .btn-primary {
+    @apply px-4 py-2 bg-hydra-700 hover:bg-hydra-600 text-white rounded-lg font-medium transition-colors duration-200;
+  }
+  .btn-danger {
+    @apply px-4 py-2 bg-red-700 hover:bg-red-600 text-white rounded-lg font-medium transition-colors duration-200;
+  }
+  .btn-secondary {
+    @apply px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg font-medium transition-colors duration-200;
+  }
+}

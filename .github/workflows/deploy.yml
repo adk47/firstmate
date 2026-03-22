@@ -1,0 +1,117 @@
+name: Deploy HYDRA
+
+on:
+  push:
+    branches: [main]
+
+env:
+  KUBECONFIG: /home/runner/.kube/config
+  SLACK_WEBHOOK: ${{ secrets.HYDRA_SLACK_WEBHOOK }}
+  HYDRA_NAMESPACE: hydra
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, hydra]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync config to Node 8
+        run: |
+          echo "::group::Syncing HYDRA config"
+          rsync -avz --delete \
+            --exclude='.git' \
+            --exclude='ui/node_modules' \
+            --exclude='ui/.next' \
+            ./ /opt/hydra/config/
+          echo "Config synced to /opt/hydra/config/"
+          echo "::endgroup::"
+
+      - name: Apply K8s manifests
+        id: apply
+        run: |
+          echo "::group::Applying K8s manifests"
+
+          # Snapshot current state for rollback
+          kubectl get deployments -n ${HYDRA_NAMESPACE} -o yaml > /tmp/hydra-rollback-deployments.yaml 2>/dev/null || true
+          kubectl get configmaps -n ${HYDRA_NAMESPACE} -o yaml > /tmp/hydra-rollback-configmaps.yaml 2>/dev/null || true
+
+          # Apply all HYDRA manifests
+          kubectl apply -f k8s/prod/hydra/ --namespace=${HYDRA_NAMESPACE}
+
+          echo "K8s manifests applied"
+          echo "::endgroup::"
+
+      - name: Restart OpenClaw Gateway
+        id: restart
+        run: |
+          echo "::group::Restarting OpenClaw Gateway"
+          kubectl rollout restart deployment/openclaw-gateway -n ${HYDRA_NAMESPACE}
+
+          # Wait for rollout to complete (timeout 5 min)
+          kubectl rollout status deployment/openclaw-gateway -n ${HYDRA_NAMESPACE} --timeout=300s
+
+          echo "OpenClaw Gateway restarted successfully"
+          echo "::endgroup::"
+
+      - name: Run smoke test
+        id: smoke
+        run: |
+          echo "::group::Running smoke tests"
+          chmod +x scripts/smoke-test.sh
+          ./scripts/smoke-test.sh
+          echo "::endgroup::"
+
+      - name: Post to Slack — success
+        if: success()
+        run: |
+          COMMIT_SHA="${{ github.sha }}"
+          COMMIT_MSG=$(git log -1 --pretty=format:'%s')
+          AUTHOR="${{ github.actor }}"
+
+          curl -sS -X POST "$SLACK_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"text\": \":white_check_mark: HYDRA deployed successfully\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \":white_check_mark: *HYDRA Deploy Successful*\n\n*Commit:* \`${COMMIT_SHA:0:7}\` — ${COMMIT_MSG}\n*Author:* ${AUTHOR}\n*Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\"
+                  }
+                }
+              ]
+            }" || echo "Slack notification failed (non-fatal)"
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "::error::Deployment failed — initiating rollback"
+
+          # Run rollback script if it exists
+          if [ -f scripts/rollback.sh ]; then
+            chmod +x scripts/rollback.sh
+            ./scripts/rollback.sh || echo "Rollback script failed"
+          fi
+
+          # Restore previous deployments if snapshot exists
+          if [ -f /tmp/hydra-rollback-deployments.yaml ]; then
+            kubectl apply -f /tmp/hydra-rollback-deployments.yaml --namespace=${HYDRA_NAMESPACE} || true
+          fi
+
+          # Notify Aaron
+          curl -sS -X POST "$SLACK_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"text\": \":rotating_light: HYDRA deployment FAILED — rollback initiated\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \":rotating_light: *HYDRA Deploy FAILED*\n\n*Commit:* \`${{ github.sha }}\`\n*Author:* ${{ github.actor }}\n*Action:* Rollback initiated\n*Run:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n<@aaron> — please investigate\"
+                  }
+                }
+              ]
+            }" || echo "Slack notification failed (non-fatal)"

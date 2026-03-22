@@ -1,0 +1,176 @@
+# HYDRA Agent Tool Deny Lists
+# ===========================
+# Deny ALWAYS wins. These lists can only GROW, never shrink.
+# CI enforces this via diff check — any removal is a build failure.
+#
+# Tool categories:
+#   exec            - shell execution (subprocess, os.system)
+#   browser         - headless browser automation
+#   http_request    - raw HTTP calls (outside approved egress)
+#   github_push     - git push / merge to remote
+#   github_pr       - create/merge pull requests
+#   github_read     - read repos, issues, PRs
+#   kubectl         - Kubernetes CLI operations
+#   helm            - Helm chart install/upgrade/delete
+#   docker          - Docker build/push/run
+#   quickbooks      - QuickBooks API (accounting)
+#   payroll         - Payroll systems (Gusto, Rippling, etc.)
+#   crm_read        - CRM read access (HubSpot, Salesforce)
+#   crm_write       - CRM write access
+#   slack_dm        - Direct messages to humans
+#   slack_admin     - Slack workspace admin (create channels, manage users)
+#   vault_read      - HashiCorp Vault secret reads
+#   vault_write     - HashiCorp Vault secret writes
+#   db_read         - Direct database reads (Postgres, MongoDB)
+#   db_write        - Direct database writes
+#   file_write      - Write files to disk outside workspace
+#   file_delete     - Delete files from disk
+#   secrets_read    - Read raw secrets/credentials from any source
+
+agents:
+  coordinator:
+    description: "Routes messages between agents. No execution, no data access."
+    denied:
+      - exec
+      - browser
+      - http_request
+      - github_push
+      - github_pr
+      - kubectl
+      - helm
+      - docker
+      - quickbooks
+      - payroll
+      - crm_read
+      - crm_write
+      - vault_read
+      - vault_write
+      - db_read
+      - db_write
+      - file_write
+      - file_delete
+      - secrets_read
+      - slack_admin
+
+  ceo:
+    description: "CEO override. Full authority — no tool denials."
+    denied: []
+
+  cmo:
+    description: "Marketing & growth. No infra, no finance, no code push."
+    denied:
+      - exec
+      - quickbooks
+      - payroll
+      - kubectl
+      - helm
+      - docker
+      - github_push
+      - github_pr
+      - vault_read
+      - vault_write
+      - db_read
+      - db_write
+      - file_delete
+      - secrets_read
+      - slack_admin
+
+  cto:
+    description: "Technical leadership. No finance, no CRM, no payroll."
+    denied:
+      - quickbooks
+      - payroll
+      - crm_read
+      - crm_write
+      - slack_admin
+
+  qa:
+    description: "Quality assurance. Read-only code access, no infra, no finance."
+    denied:
+      - quickbooks
+      - payroll
+      - kubectl
+      - helm
+      - docker
+      - crm_read
+      - crm_write
+      - github_push
+      - github_pr
+      - vault_read
+      - vault_write
+      - db_write
+      - file_delete
+      - secrets_read
+      - slack_admin
+
+  finance:
+    description: "Financial operations. Most restricted — no infra, no code, no exec."
+    denied:
+      - exec
+      - browser
+      - http_request
+      - github_push
+      - github_pr
+      - github_read
+      - kubectl
+      - helm
+      - docker
+      - crm_write
+      - vault_read
+      - vault_write
+      - db_read
+      - db_write
+      - file_write
+      - file_delete
+      - secrets_read
+      - slack_admin
+      - slack_dm
+
+  operations:
+    description: "Ops & customer support. No code push, no finance internals."
+    denied:
+      - exec
+      - quickbooks
+      - payroll
+      - github_push
+      - github_pr
+      - kubectl
+      - helm
+      - docker
+      - vault_read
+      - vault_write
+      - db_write
+      - file_delete
+      - secrets_read
+      - slack_admin
+
+  devops:
+    description: "Infrastructure & deployment. No finance, no CRM, no payroll."
+    denied:
+      - quickbooks
+      - payroll
+      - crm_read
+      - crm_write
+      - slack_admin
+      - slack_dm
+
+  design:
+    description: "UI/UX design. No infra, no finance, no code push, no data."
+    denied:
+      - exec
+      - quickbooks
+      - payroll
+      - github_push
+      - github_pr
+      - kubectl
+      - helm
+      - docker
+      - crm_read
+      - crm_write
+      - vault_read
+      - vault_write
+      - db_read
+      - db_write
+      - file_delete
+      - secrets_read
+      - slack_admin

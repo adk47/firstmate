@@ -1,0 +1,245 @@
+# HYDRA Agent Egress Allowlist
+# ============================
+# NemoClaw / OpenShell network namespace rules.
+# Default: DENY ALL outbound traffic.
+# Each agent gets the shared baseline, plus role-specific additions.
+#
+# Enforcement: iptables/nftables rules applied per-container via
+# NemoClaw's network namespace isolation before the agent process starts.
+
+shared:
+  description: "Every agent gets these rules. No exceptions."
+  rules:
+    - name: dns
+      protocol: udp
+      port: 53
+      destination: kube-dns.kube-system.svc.cluster.local
+      comment: "Cluster DNS resolution"
+
+    - name: slack-api
+      protocol: tcp
+      port: 443
+      destination: api.slack.com
+      comment: "Slack Web API (HTTP)"
+
+    - name: slack-websocket
+      protocol: tcp
+      port: 443
+      destination: wss-primary.slack.com
+      comment: "Slack Socket Mode (WSS)"
+
+    - name: cliproxyapi
+      protocol: tcp
+      port: 8317
+      destination: 127.0.0.1
+      comment: "CLIProxyAPI sidecar — Claude API access. NEVER allow direct api.anthropic.com."
+
+  explicit_denies:
+    - name: block-direct-anthropic
+      protocol: tcp
+      port: 443
+      destination: api.anthropic.com
+      action: DENY
+      comment: "All Claude traffic MUST go through CLIProxyAPI for audit logging"
+
+agents:
+  coordinator:
+    description: "Message router only. No additional egress."
+    additional_rules: []
+
+  ceo:
+    description: "Full network access. CEO override."
+    additional_rules:
+      - name: unrestricted
+        protocol: tcp
+        port: "1-65535"
+        destination: "0.0.0.0/0"
+        comment: "CEO has no network restrictions"
+
+  cto:
+    description: "Code repos, package registries."
+    additional_rules:
+      - name: github
+        protocol: tcp
+        port: 443
+        destination: github.com
+        comment: "GitHub repo read/write"
+      - name: github-api
+        protocol: tcp
+        port: 443
+        destination: api.github.com
+        comment: "GitHub API"
+      - name: github-raw
+        protocol: tcp
+        port: 443
+        destination: raw.githubusercontent.com
+        comment: "GitHub raw content"
+      - name: npm-registry
+        protocol: tcp
+        port: 443
+        destination: registry.npmjs.org
+        comment: "NPM package registry"
+      - name: pypi
+        protocol: tcp
+        port: 443
+        destination: pypi.org
+        comment: "Python package index"
+      - name: pypi-files
+        protocol: tcp
+        port: 443
+        destination: files.pythonhosted.org
+        comment: "PyPI file downloads"
+
+  devops:
+    description: "Infra management — GitHub, OVH registry, monitoring."
+    additional_rules:
+      - name: github
+        protocol: tcp
+        port: 443
+        destination: github.com
+        comment: "GitHub repo access"
+      - name: github-api
+        protocol: tcp
+        port: 443
+        destination: api.github.com
+        comment: "GitHub API"
+      - name: ovh-registry
+        protocol: tcp
+        port: 443
+        destination: registry.ak.muso.ai
+        comment: "OVH container registry"
+      - name: prometheus
+        protocol: tcp
+        port: 9090
+        destination: prometheus.monitoring.svc.cluster.local
+        comment: "Prometheus metrics"
+      - name: grafana
+        protocol: tcp
+        port: 3000
+        destination: grafana.monitoring.svc.cluster.local
+        comment: "Grafana dashboards"
+      - name: alertmanager
+        protocol: tcp
+        port: 9093
+        destination: alertmanager.monitoring.svc.cluster.local
+        comment: "Alertmanager API"
+      - name: vault
+        protocol: tcp
+        port: 8200
+        destination: vault.vault.svc.cluster.local
+        comment: "HashiCorp Vault"
+
+  qa:
+    description: "Test environments and GitHub read access."
+    additional_rules:
+      - name: github-read
+        protocol: tcp
+        port: 443
+        destination: github.com
+        comment: "GitHub read access (repo/issues/PRs)"
+      - name: github-api
+        protocol: tcp
+        port: 443
+        destination: api.github.com
+        comment: "GitHub API read"
+      - name: test-api
+        protocol: tcp
+        port: 443
+        destination: "*.dev.ak.muso.ai"
+        comment: "Dev/test environment APIs"
+      - name: test-app
+        protocol: tcp
+        port: 443
+        destination: "*.dev.ak.muso.ai"
+        comment: "Dev/test environment frontends"
+
+  finance:
+    description: "Most restricted. No additional egress beyond shared baseline."
+    additional_rules: []
+
+  operations:
+    description: "Customer support tools."
+    additional_rules:
+      - name: zendesk-api
+        protocol: tcp
+        port: 443
+        destination: "*.zendesk.com"
+        comment: "Zendesk support platform"
+      - name: intercom-api
+        protocol: tcp
+        port: 443
+        destination: api.intercom.io
+        comment: "Intercom customer messaging"
+      - name: intercom-app
+        protocol: tcp
+        port: 443
+        destination: app.intercom.com
+        comment: "Intercom web app"
+
+  design:
+    description: "Design tools and font resources."
+    additional_rules:
+      - name: figma-api
+        protocol: tcp
+        port: 443
+        destination: api.figma.com
+        comment: "Figma API"
+      - name: figma-app
+        protocol: tcp
+        port: 443
+        destination: www.figma.com
+        comment: "Figma web app"
+      - name: figma-cdn
+        protocol: tcp
+        port: 443
+        destination: "*.figma.com"
+        comment: "Figma CDN and assets"
+      - name: google-fonts
+        protocol: tcp
+        port: 443
+        destination: fonts.google.com
+        comment: "Google Fonts"
+      - name: google-fonts-api
+        protocol: tcp
+        port: 443
+        destination: fonts.googleapis.com
+        comment: "Google Fonts API"
+      - name: google-fonts-static
+        protocol: tcp
+        port: 443
+        destination: fonts.gstatic.com
+        comment: "Google Fonts static files"
+
+  cmo:
+    description: "Marketing & analytics platforms."
+    additional_rules:
+      - name: google-ads-api
+        protocol: tcp
+        port: 443
+        destination: googleads.googleapis.com
+        comment: "Google Ads API"
+      - name: google-analytics
+        protocol: tcp
+        port: 443
+        destination: analyticsdata.googleapis.com
+        comment: "Google Analytics Data API"
+      - name: google-oauth
+        protocol: tcp
+        port: 443
+        destination: oauth2.googleapis.com
+        comment: "Google OAuth for API access"
+      - name: facebook-graph
+        protocol: tcp
+        port: 443
+        destination: graph.facebook.com
+        comment: "Facebook/Meta Graph API (ads)"
+      - name: facebook-business
+        protocol: tcp
+        port: 443
+        destination: business.facebook.com
+        comment: "Meta Business Suite"
+      - name: ga-measurement
+        protocol: tcp
+        port: 443
+        destination: www.google-analytics.com
+        comment: "Google Analytics measurement"

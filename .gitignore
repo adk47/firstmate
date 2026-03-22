@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+ui/node_modules/
+ui/.next/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Secrets (never commit actual secrets)
+secrets/*.yaml
+!secrets/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+ui/out/
+ui/.next/
+*.tgz
+
+# Extraction output (sensitive, gitignored by default)
+extraction/*.md
+
+# Editor
+.vscode/
+.idea/
