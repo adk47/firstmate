@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 env:
-  KUBECONFIG: /home/runner/.kube/config
+  KUBECONFIG: /root/.kube/config
   SLACK_WEBHOOK: ${{ secrets.HYDRA_SLACK_WEBHOOK }}
   HYDRA_NAMESPACE: hydra
 
@@ -19,12 +19,31 @@ jobs:
       - name: Sync config to Node 8
         run: |
           echo "::group::Syncing HYDRA config"
-          rsync -avz --delete \
+          /usr/bin/rsync -avz --delete \
             --exclude='.git' \
             --exclude='ui/node_modules' \
             --exclude='ui/.next' \
+            --exclude='skills-all' \
             ./ /opt/hydra/config/
           echo "Config synced to /opt/hydra/config/"
+          echo "::endgroup::"
+
+      - name: Sync workspaces to live
+        run: |
+          echo "::group::Syncing workspaces"
+          # Sync SOUL.md, TOOLS.md, AGENTS.md (policy files) to live workspaces
+          # Preserve MEMORY.md and other agent-written files
+          for ws in ceo cmo coordinator cto design devops finance neutral operations qa support; do
+            src="workspaces/${ws}/"
+            dst="/opt/hydra/workspaces/${ws}/"
+            if [ -d "$src" ] && [ -d "$dst" ]; then
+              /usr/bin/rsync -avz --exclude='MEMORY.md' "$src" "$dst"
+            elif [ -d "$src" ]; then
+              mkdir -p "$dst"
+              /usr/bin/rsync -avz "$src" "$dst"
+            fi
+          done
+          echo "Workspaces synced"
           echo "::endgroup::"
 
       - name: Apply K8s manifests
@@ -33,11 +52,15 @@ jobs:
           echo "::group::Applying K8s manifests"
 
           # Snapshot current state for rollback
-          kubectl get deployments -n ${HYDRA_NAMESPACE} -o yaml > /tmp/hydra-rollback-deployments.yaml 2>/dev/null || true
-          kubectl get configmaps -n ${HYDRA_NAMESPACE} -o yaml > /tmp/hydra-rollback-configmaps.yaml 2>/dev/null || true
+          /usr/local/bin/kubectl get deployments -n ${HYDRA_NAMESPACE} -o yaml > /tmp/hydra-rollback-deployments.yaml 2>/dev/null || true
+          /usr/local/bin/kubectl get configmaps -n ${HYDRA_NAMESPACE} -o yaml > /tmp/hydra-rollback-configmaps.yaml 2>/dev/null || true
 
-          # Apply all HYDRA manifests
-          kubectl apply -f k8s/prod/hydra/ --namespace=${HYDRA_NAMESPACE}
+          # Apply all HYDRA manifests (only if k8s dir exists in repo)
+          if [ -d "k8s/prod/hydra/" ]; then
+            /usr/local/bin/kubectl apply -f k8s/prod/hydra/ --namespace=${HYDRA_NAMESPACE}
+          else
+            echo "No k8s manifests in repo — skipping"
+          fi
 
           echo "K8s manifests applied"
           echo "::endgroup::"
@@ -46,10 +69,10 @@ jobs:
         id: restart
         run: |
           echo "::group::Restarting OpenClaw Gateway"
-          kubectl rollout restart deployment/openclaw-gateway -n ${HYDRA_NAMESPACE}
+          /usr/local/bin/kubectl rollout restart deployment/openclaw-gateway -n ${HYDRA_NAMESPACE}
 
           # Wait for rollout to complete (timeout 5 min)
-          kubectl rollout status deployment/openclaw-gateway -n ${HYDRA_NAMESPACE} --timeout=300s
+          /usr/local/bin/kubectl rollout status deployment/openclaw-gateway -n ${HYDRA_NAMESPACE} --timeout=300s
 
           echo "OpenClaw Gateway restarted successfully"
           echo "::endgroup::"
@@ -97,7 +120,7 @@ jobs:
 
           # Restore previous deployments if snapshot exists
           if [ -f /tmp/hydra-rollback-deployments.yaml ]; then
-            kubectl apply -f /tmp/hydra-rollback-deployments.yaml --namespace=${HYDRA_NAMESPACE} || true
+            /usr/local/bin/kubectl apply -f /tmp/hydra-rollback-deployments.yaml --namespace=${HYDRA_NAMESPACE} || true
           fi
 
           # Notify Aaron
