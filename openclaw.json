@@ -228,6 +228,7 @@
       "userTokenReadOnly": true,
       "dangerouslyAllowNameMatching": true,
       "groupPolicy": "open",
+      "requireMention": true,
       "streaming": "partial",
       "nativeStreaming": true,
       "replyToMode": "all",
@@ -236,16 +237,7 @@
         "group": "all",
         "channel": "all"
       },
-      "channels": {
-        "C08GZPWAKBJ": {
-          "allow": true,
-          "requireMention": false
-        },
-        "C7TBH462K": {
-          "allow": true,
-          "requireMention": true
-        }
-      },
+      "channels": {},
       "accounts": {
         "ceo": {
           "botToken": "VAULT",
@@ -325,6 +317,56 @@
           "streaming": "partial"
         }
       }
+    },
+    "openclaw-gmail": {
+      "enabled": true,
+      "defaultAccount": "a@muso.ai",
+      "accounts": {
+        "a@muso.ai": {
+          "email": "a@muso.ai",
+          "backend": "api",
+          "oauth": {
+            "clientId": "VAULT:google-workspace-oauth/GOOGLE_CLIENT_ID",
+            "clientSecret": "VAULT:google-workspace-oauth/GOOGLE_CLIENT_SECRET",
+            "refreshToken": "VAULT:google-workspace-oauth/GOOGLE_REFRESH_TOKEN"
+          },
+          "allowFrom": ["*"],
+          "pollIntervalMs": 60000
+        },
+        "ak@muso.ai": {
+          "email": "ak@muso.ai",
+          "backend": "api",
+          "oauth": {
+            "clientId": "VAULT:google-workspace-ak/GOOGLE_CLIENT_ID",
+            "clientSecret": "VAULT:google-workspace-ak/GOOGLE_CLIENT_SECRET",
+            "refreshToken": "VAULT:google-workspace-ak/GOOGLE_REFRESH_TOKEN"
+          },
+          "allowFrom": ["*"],
+          "pollIntervalMs": 60000
+        },
+        "aaron.k@muso.ai": {
+          "email": "aaron.k@muso.ai",
+          "backend": "api",
+          "oauth": {
+            "clientId": "VAULT:google-workspace-aaron-k/GOOGLE_CLIENT_ID",
+            "clientSecret": "VAULT:google-workspace-aaron-k/GOOGLE_CLIENT_SECRET",
+            "refreshToken": "VAULT:google-workspace-aaron-k/GOOGLE_REFRESH_TOKEN"
+          },
+          "allowFrom": ["*"],
+          "pollIntervalMs": 60000
+        },
+        "f@muso.ai": {
+          "email": "f@muso.ai",
+          "backend": "api",
+          "oauth": {
+            "clientId": "VAULT:google-workspace-f/GOOGLE_CLIENT_ID",
+            "clientSecret": "VAULT:google-workspace-f/GOOGLE_CLIENT_SECRET",
+            "refreshToken": "VAULT:google-workspace-f/GOOGLE_REFRESH_TOKEN"
+          },
+          "allowFrom": ["*"],
+          "pollIntervalMs": 60000
+        }
+      }
     }
   },
   "gateway": {
@@ -358,13 +400,39 @@
       "127.0.0.1"
     ]
   },
+  "bindings": [
+    {"match": {"channel": "slack", "accountId": "ceo"}, "agentId": "ceo"},
+    {"match": {"channel": "slack", "accountId": "cmo"}, "agentId": "cmo"},
+    {"match": {"channel": "slack", "accountId": "cto"}, "agentId": "cto"},
+    {"match": {"channel": "slack", "accountId": "qa"}, "agentId": "qa"},
+    {"match": {"channel": "slack", "accountId": "finance"}, "agentId": "finance"},
+    {"match": {"channel": "slack", "accountId": "operations"}, "agentId": "operations"},
+    {"match": {"channel": "slack", "accountId": "devops"}, "agentId": "devops"},
+    {"match": {"channel": "slack", "accountId": "design"}, "agentId": "design"},
+    {"match": {"channel": "slack", "accountId": "support"}, "agentId": "support"},
+    {"match": {"channel": "slack", "accountId": "clio"}, "agentId": "clio"},
+    {"match": {"channel": "slack", "accountId": "default"}, "agentId": "clio"}
+  ],
   "plugins": {
     "entries": {
       "slack": {
         "enabled": true
+      },
+      "openclaw-gmail": {
+        "enabled": false,
+        "_note": "Disabled: incompatible with openclaw 2026.3.22 (describeMessageTool crash). Re-enable after plugin update."
       }
     },
     "installs": {
+      "openclaw-gmail": {
+        "source": "npm",
+        "spec": "@mcinteerj/openclaw-gmail",
+        "installPath": "/root/.openclaw/extensions/openclaw-gmail",
+        "version": "1.7.3",
+        "resolvedName": "@mcinteerj/openclaw-gmail",
+        "resolvedVersion": "1.7.3",
+        "resolvedSpec": "@mcinteerj/openclaw-gmail@1.7.3"
+      },
       "lossless-claw": {
         "source": "npm",
         "spec": "@martian-engineering/lossless-claw",

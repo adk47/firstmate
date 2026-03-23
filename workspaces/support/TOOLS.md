@@ -9,7 +9,7 @@ This agent has the most restricted tool set in HYDRA. Only these 4 tools are per
 - **Wraps**: `GET api.muso.ai/v1/profiles`
 - **Returns**: Public data ONLY -- name, role, verified status, credits count
 - **Auth**: Service-level API key (injected by runtime, never visible to agent)
-- **Rate limit**: 30 requests/minute
+- **Rate limit**: 10/min per session, 30/min global
 - **PII filter**: Email, phone, address, payment details are NEVER returned
 
 ### 2. credits_search
@@ -17,7 +17,7 @@ This agent has the most restricted tool set in HYDRA. Only these 4 tools are per
 - **Wraps**: `GET api.muso.ai/v1/credits`
 - **Returns**: Public credit data -- credit role, track name, release name, release date
 - **Auth**: Service-level API key (injected by runtime, never visible to agent)
-- **Rate limit**: 30 requests/minute
+- **Rate limit**: 10/min per session, 30/min global
 - **Search params**: artist name, track name, ISRC, release title
 
 ### 3. subscription_status
@@ -25,7 +25,7 @@ This agent has the most restricted tool set in HYDRA. Only these 4 tools are per
 - **Wraps**: `GET api.muso.ai/v1/subscriptions`
 - **Returns**: Subscription plan, status (active/cancelled/past_due), renewal date
 - **Auth**: Requires user's authenticated session token (passed via widget context)
-- **Rate limit**: 10 requests/minute
+- **Rate limit**: 3/min per session, 10/min global
 - **Privacy**: Only returns data for the authenticated user -- no cross-account lookups
 
 ### 4. create_ticket
@@ -33,9 +33,19 @@ This agent has the most restricted tool set in HYDRA. Only these 4 tools are per
 - **Wraps**: `POST zendesk.com/api/v2/tickets`
 - **Returns**: Ticket ID, ticket URL
 - **Auth**: Zendesk API token (injected by runtime, never visible to agent)
-- **Rate limit**: 5 requests/minute
+- **Rate limit**: 2/session, 3/hour per user, 10/hour global
 - **Required fields**: subject, description (conversation context), requester email, priority, category
 - **Categories**: account, billing, credits, technical, other
+
+## Action Request Pattern
+
+For customer write actions (credit claims, refunds, profile updates, disputes), use `create_ticket` with structured formatting. See `skills/action-request/SKILL.md` for the full ticket format.
+
+**Key points**:
+- Tag action request tickets with `hydra-action-request` and the approval tier (`tier-1`, `tier-2`, `tier-3`)
+- Include a machine-readable JSON block in the ticket description (between `---ACTION-REQUEST---` and `---END-ACTION-REQUEST---` markers)
+- This does NOT add a new tool -- it uses `create_ticket` with structured content
+- The Operations agent picks up tickets tagged `hydra-action-request` for review and execution
 
 ## Denied Tools (EVERYTHING ELSE)
 

@@ -1,7 +1,7 @@
 # USER.md - QA Agent
 
 ## Owner
-- **Jay Ruffing** (U05SAHZT62E) — QA Lead
+- **Aaron Kaufman** (U7RP6HKUZ)
 
 ## Authorization
-- Owner and Aaron (U7RP6HKUZ) can modify policies
+- Aaron (U7RP6HKUZ) can modify policies

@@ -1,0 +1,85 @@
+# Subscriptions and Billing
+
+## Plans Overview
+
+### Lite (Free Forever)
+- Manage Credits
+- Update Profile Page
+- Access Company Page
+- Notifications
+- No credit card required
+
+### Pro ($10-12.50/month)
+- Everything in Lite
+- Profile Analytics (streaming data across 11 platforms, daily refresh at 4PM EST)
+- Catalog Audits (MLC gap detection, ISRC-to-ISWC matching)
+- Discography Playlists (AI-curated Spotify playlist)
+- Milestones & Charts
+- 1 Pro Seat included
+- Additional seats: $7.50/month each
+
+### Business ($24-30/month starting)
+- Everything in Pro
+- Company Analytics (aggregate stats for studios, labels, publishers)
+- List Analytics (track custom lists of profiles)
+- Multi-User Workspace (team collaboration with role-based access)
+- Discovery Tools (find talent by stream count, genre, independence status)
+- 5 Pro Seats included
+- 3 Users included
+
+---
+
+## Business Pricing by Roster Size
+
+| Profiles | Monthly (Annual) |
+|----------|------------------|
+| 1-5 | $24 |
+| 6-10 | $40 |
+| 11-50 | $104 |
+| 51-100 | $176 |
+| 101-250 | $384 |
+| 251-500 | $640 |
+| 501+ | $16/profile |
+
+---
+
+## Seats and Users
+
+| Term | Meaning |
+|------|---------|
+| **Seat** | A profile slot -- determines how many profiles you can track analytics for |
+| **User** | A team member account -- determines how many people can access the workspace |
+| **Profile Limit** | Maximum profiles a subscription can track analytics for |
+| **User Limit** | Maximum team members who can access a workspace |
+
+### Seat Counts by Plan
+- **Pro**: 1 seat (expandable at $7.50/month per additional seat)
+- **Business**: 5 seats included (expandable with higher roster tiers)
+
+---
+
+## Common Billing Questions
+
+### How do I upgrade from Lite to Pro?
+Log in at app.muso.ai, go to your account settings, and select the Pro plan. You can start with a monthly subscription.
+
+### How do I upgrade from Pro to Business?
+Go to account settings and select the Business plan. Choose your roster size tier.
+
+### Can I cancel my subscription?
+Yes, you can cancel anytime from your account settings. You will retain access until the end of your current billing period.
+
+### What happens when my subscription expires?
+You keep all your credits and profile data (these are free features). You lose access to Analytics, Catalog Audits, Discography Playlists, and Milestones.
+
+### Do I get a refund if I cancel?
+Refund requests are handled by our support team. Please create a support ticket and our team will review your request.
+
+### How do I add more seats?
+In your account settings under your subscription, you can add additional Pro seats at $7.50/month each.
+
+### What payment methods do you accept?
+We accept major credit cards through our payment processor.
+
+### I was charged but my subscription shows inactive
+This can happen if there was a payment processing delay. Please create a support ticket with your payment confirmation and our team will resolve it.

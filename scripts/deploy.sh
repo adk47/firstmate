@@ -99,26 +99,82 @@ rsync -azP --delete \
 log "  Config synced to $NODE8_IP:$DEPLOY_PATH/"
 
 # -------------------------------------------------------------------
-# Step 5: Restart OpenClaw Gateway pod
+# Step 5: Post-sync setup on Node 8
 # -------------------------------------------------------------------
-log "Step 5/7: Restarting OpenClaw Gateway..."
-kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" rollout restart deployment/openclaw-gateway
-kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" rollout status deployment/openclaw-gateway --timeout=120s
+log "Step 5/9: Running post-sync setup on Node 8..."
+
+ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" << 'POSTSYNC'
+set -euo pipefail
+
+# AWS credentials (from K8s secret or pre-configured)
+if [ ! -f ~/.aws/credentials ]; then
+  echo "  Setting up AWS credentials..."
+  mkdir -p ~/.aws
+  AWS_KEY=$(kubectl get secret -n hydra aws-hydra-readonly -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' 2>/dev/null | base64 -d)
+  AWS_SECRET=$(kubectl get secret -n hydra aws-hydra-readonly -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}' 2>/dev/null | base64 -d)
+  AWS_ROLE=$(kubectl get secret -n hydra aws-hydra-readonly -o jsonpath='{.data.AWS_ROLE_ARN}' 2>/dev/null | base64 -d)
+  if [ -n "$AWS_KEY" ]; then
+    cat > ~/.aws/credentials << CEOF
+[plaque]
+aws_access_key_id = ${AWS_KEY}
+aws_secret_access_key = ${AWS_SECRET}
+CEOF
+    cat > ~/.aws/config << CEOF
+[default]
+region = us-west-2
+role_arn = ${AWS_ROLE}
+source_profile = plaque
+
+[profile plaque]
+region = us-west-2
+CEOF
+    chmod 600 ~/.aws/credentials
+    echo "  AWS credentials configured."
+  else
+    echo "  WARNING: aws-hydra-readonly secret not found — skipping AWS setup."
+  fi
+fi
+
+# Apply OpenClaw mention gate patch (until upstream PR #53161 is merged)
+if [ -f /opt/hydra/scripts/patch-openclaw-mention-gate.sh ]; then
+  bash /opt/hydra/scripts/patch-openclaw-mention-gate.sh
+fi
+POSTSYNC
+
+log "  Post-sync setup complete."
+
+# -------------------------------------------------------------------
+# Step 6: Restart OpenClaw Gateway
+# -------------------------------------------------------------------
+log "Step 6/9: Restarting OpenClaw Gateway..."
+ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
+  "systemctl restart openclaw-gateway && sleep 5 && systemctl is-active openclaw-gateway" \
+  || kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" rollout restart deployment/openclaw-gateway 2>/dev/null \
+  || fail "Failed to restart OpenClaw Gateway"
 log "  OpenClaw Gateway restarted successfully."
 
 # -------------------------------------------------------------------
-# Step 6: Run smoke test
+# Step 7: Run smoke test
 # -------------------------------------------------------------------
-log "Step 6/7: Running smoke test..."
+log "Step 7/9: Running smoke test..."
 if ! "$SCRIPT_DIR/smoke-test.sh"; then
   fail "Smoke test failed after deploy"
 fi
 log "  Smoke test passed."
 
 # -------------------------------------------------------------------
-# Step 7: Post deploy status
+# Step 8: Verify AWS access
+# -------------------------------------------------------------------
+log "Step 8/9: Verifying AWS access..."
+ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
+  "aws sts get-caller-identity --region us-west-2 2>/dev/null | head -1" \
+  && log "  AWS access verified." \
+  || log "  WARNING: AWS access check failed (non-fatal)."
+
+# -------------------------------------------------------------------
+# Step 9: Post deploy status
 # -------------------------------------------------------------------
 COMMIT_SHA=$(git -C "$HYDRA_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-log "Step 7/7: Posting deploy status..."
+log "Step 9/9: Posting deploy status..."
 notify_slack ":white_check_mark: HYDRA deployed successfully. Commit: $COMMIT_SHA"
 log "Deploy complete. Commit: $COMMIT_SHA"

@@ -226,7 +226,7 @@ Analytics Worker
 |------|--------|------------------|
 | Senior Data Engineer | Andre | 80% of data pipelines, Airflow, snapshots |
 | Platform Engineer | Oleg Mamchich | Catalog microservices, capture services |
-| Engineering Lead | Jay Ruffing | Morning meetings (7:00 AM)[^56] |
+| Engineering Lead | Aaron | Morning meetings (7:00 AM)[^56] |
 | Operations | Aaron | User request handling, hiring decisions[^57] |
 
 ### Common Procedures

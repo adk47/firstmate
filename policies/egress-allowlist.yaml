@@ -34,6 +34,30 @@ shared:
       destination: 127.0.0.1
       comment: "CLIProxyAPI sidecar — Claude API access. NEVER allow direct api.anthropic.com."
 
+    - name: google-oauth
+      protocol: tcp
+      port: 443
+      destination: oauth2.googleapis.com
+      comment: "Google OAuth token refresh (a@muso.ai)"
+
+    - name: gmail-api
+      protocol: tcp
+      port: 443
+      destination: gmail.googleapis.com
+      comment: "Gmail API — send, read, modify (a@muso.ai)"
+
+    - name: sheets-api
+      protocol: tcp
+      port: 443
+      destination: sheets.googleapis.com
+      comment: "Google Sheets API (a@muso.ai)"
+
+    - name: calendar-api
+      protocol: tcp
+      port: 443
+      destination: www.googleapis.com
+      comment: "Google Calendar + Drive API (a@muso.ai)"
+
   explicit_denies:
     - name: block-direct-anthropic
       protocol: tcp

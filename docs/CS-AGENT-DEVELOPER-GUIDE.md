@@ -1,7 +1,6 @@
 # CS Agent (@CS) — Developer Guide
 
 > **Owner**: Aaron Kaufman
-> **Developers**: Jay Ruffing, Nick Sollazzo
 > **Repo**: `Muso-AI/hydra` (branch protection: PRs required, Aaron approves all merges to main)
 
 ---
@@ -465,19 +464,55 @@ Before any CS skill goes live, test these attack vectors:
 | `credits_search` | Read | 0 | No | Active |
 | `subscription_status` | Read | 0 | Yes (session) | Active |
 | `create_ticket` | Write | 1 | Optional | Active |
+| `action-request` | Pattern (uses create_ticket) | 1-3 | Varies | Active |
+| `input-sanitizer` | Pre-processor | N/A | N/A | Active |
+| `output-sanitizer` | Post-processor | N/A | N/A | Active |
+
+### Knowledge Base (Baked-In Reference Files)
+
+The CS agent has 5 curated reference files loaded into context for every conversation:
+
+| File | Content |
+|------|---------|
+| `reference/products-and-pricing.md` | Products, pricing tiers, target users, testimonials |
+| `reference/credits-and-profiles.md` | Entity model, credit roles, claiming/verification |
+| `reference/subscriptions-and-billing.md` | Plan features, pricing table, billing FAQ |
+| `reference/faq.md` | Top 50 customer questions with answers |
+| `reference/platform-features.md` | Analytics, audits, milestones, discovery |
+
+**Why baked-in, not RAG**: No GPU on Node 8 for local embeddings, external embedding APIs would need new egress rules, knowledge set is bounded and static, baked-in context has no injection vector via document retrieval. Haiku 4.5 has 200K context; the KB uses ~10-15K tokens.
+
+**Content filtering**: All reference files have been stripped of internal-only content. Zero mentions of infrastructure, databases, employee names, internal tools, or architecture details.
+
+### Action Request Pattern
+
+For write actions (credit claims, refunds, profile merges, data deletion), the CS agent uses `create_ticket` with a structured format instead of direct API access. See `skills/action-request/SKILL.md`.
+
+**Flow**: Customer request -> CS creates structured Zendesk ticket tagged `hydra-action-request` -> Operations agent picks it up -> Human review/approval -> Execution -> Customer notified via ticket update.
+
+**Why not `sessions_send`**: Maintains complete isolation (CS still cannot address any internal agent), natural audit trail (every action is a Zendesk ticket), existing approval gates apply, if CS is fully jailbroken attacker gets ticket creation (already allowed).
+
+### Input/Output Sanitization
+
+Two sanitizer skills run as pre/post processors:
+
+- **Input sanitizer** (`skills/input-sanitizer/SKILL.md`): Strips control characters, normalizes whitespace, detects encoded payloads and markdown injection, caps message length at 4,000 chars
+- **Output sanitizer** (`skills/output-sanitizer/SKILL.md`): Blocklist regex scan for internal terms, PII scan, length cap at 2,000 tokens. A CRITICAL alert fires if any blocklist term is found in output.
+
+### Rate Limiting (Three Levels)
+
+| Level | Where | CS-Specific Limits |
+|-------|-------|-------------------|
+| **A: CLIProxyAPI** | Before LLM | 30 req/min, 300 req/hr, 8K input tokens, 2K output tokens, 20 turns, 50 concurrent sessions |
+| **B: Tool-level** | Per tool | profile_lookup: 10/min/session, credits_search: 10/min/session, subscription_status: 3/min/session, create_ticket: 2/session + 3/hr |
+| **C: Session-level** | In SOUL.md | Rapid-fire detection, duplicate suppression, 60-min timeout, action request flood protection |
 
 ## Planned Skills (Need Development)
 
 | Skill | Type | Tier | Auth Required | Priority |
 |-------|------|------|---------------|----------|
-| `credit-approval-request` | Write | 1 | Yes | HIGH |
-| `profile-claim-request` | Write | 1 | Yes | HIGH |
 | `subscription-inquiry` | Read | 0 | Yes | MEDIUM |
 | `billing-history` | Read | 0 | Yes | MEDIUM |
-| `profile-update-request` | Write | 2 | Yes | MEDIUM |
-| `dispute-submission` | Write | 3 | Yes | LOW |
-| `data-export-request` | Write | 3 | Yes | LOW |
-| `account-deletion-request` | Write | 3 | Yes | LOW |
 
 ---
 
@@ -518,6 +553,5 @@ Before any CS skill goes live, test these attack vectors:
 ## Contact
 
 - **Security questions**: Aaron (Slack DM or #hydra-heartbeat)
-- **Skill development**: Nick (CTO) or Jay (QA)
 - **Operations/escalation flows**: Jan (Operations)
 - **API endpoint questions**: Check `api.muso.ai/docs` or ask in #engineering

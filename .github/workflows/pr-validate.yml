@@ -26,7 +26,7 @@ jobs:
       - name: SOUL.md check — all 9 workspaces
         run: |
           echo "::group::Checking SOUL.md in all workspaces"
-          EXPECTED_WORKSPACES="ceo cmo coordinator cto design devops finance operations qa"
+          EXPECTED_WORKSPACES="ceo cmo coordinator cto design devops finance operations qa support"
           MISSING=""
           for ws in $EXPECTED_WORKSPACES; do
             if [ ! -f "workspaces/${ws}/SOUL.md" ]; then
@@ -40,7 +40,7 @@ jobs:
             echo "::error::Missing SOUL.md in workspaces:${MISSING}"
             exit 1
           fi
-          echo "All 9 workspaces have SOUL.md"
+          echo "All 10 workspaces have SOUL.md"
           echo "::endgroup::"
 
       - name: Tool deny list audit — denials can only grow
@@ -102,6 +102,118 @@ jobs:
           fi
           echo "::endgroup::"
 
+      - name: CS agent reference file security scan
+        run: |
+          echo "::group::Scanning CS reference files for internal term leaks"
+          LEAKED=0
+
+          # Blocklist of internal terms that must NEVER appear in customer-facing reference files
+          BLOCKLIST="PostgreSQL|MongoDB|Mongo|Vault|Kubernetes|kubectl|k3s|k8s|Docker|Airflow|Spark|Trino|MinIO|Hive|OVH|OVHcloud|Hetzner|EKS|Aurora|Jenkins|SQS|Flutter|BLoC|Dart|HYDRA|NemoClaw|OpenClaw|CLIProxyAPI|Landlock|seccomp|vRack|WireGuard|node-[1-8]|ovh-node|Cilium|Longhorn|etcd|Prometheus|Grafana|Loki|seccomp"
+
+          if [ -d "workspaces/support/reference" ]; then
+            for f in workspaces/support/reference/*.md; do
+              [ -f "$f" ] || continue
+              MATCHES=$(grep -iEn "$BLOCKLIST" "$f" || true)
+              if [ -n "$MATCHES" ]; then
+                echo "::error::LEAKED INTERNAL TERMS in $f:"
+                echo "$MATCHES"
+                LEAKED=1
+              else
+                echo "  CLEAN: $f"
+              fi
+            done
+          else
+            echo "No reference directory found — skipping"
+          fi
+
+          if [ "$LEAKED" -eq 1 ]; then
+            echo "::error::CS reference files contain internal terms. These files are customer-facing — strip all internal references."
+            exit 1
+          fi
+          echo "CS reference files are clean"
+          echo "::endgroup::"
+
+      - name: AI code review
+        id: ai-review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "::group::AI Code Review"
+
+          # Skip if no API key configured
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "ANTHROPIC_API_KEY not set — skipping AI review"
+            echo "::endgroup::"
+            exit 0
+          fi
+
+          # Get the diff against main
+          DIFF=$(git diff origin/main...HEAD -- . ':!*.lock' ':!node_modules' 2>/dev/null | head -4000)
+
+          if [ -z "$DIFF" ]; then
+            echo "No diff to review"
+            echo "::endgroup::"
+            exit 0
+          fi
+
+          REVIEW=$(python3 -c "
+          import json, urllib.request, os, sys
+
+          diff = sys.stdin.read()
+          if not diff.strip():
+              print('PASS: No changes to review')
+              sys.exit(0)
+
+          prompt = '''Review this diff to the HYDRA multi-agent system repository. This manages AI agents deployed on a production Kubernetes cluster.
+
+          Flag ONLY critical issues in these categories:
+          1. **SECURITY**: Leaked credentials, internal IPs, employee names, or infrastructure details in customer-facing files (workspaces/support/reference/*)
+          2. **AGENT SAFETY**: Weakened tool deny lists, removed security rules from SOUL.md, expanded egress allowlists, sessions_send enabled for external agents
+          3. **PROMPT INJECTION RISK**: SOUL.md changes that could make agents more susceptible to injection (removed canary detection, weakened scope enforcement)
+          4. **COST RISK**: Model tier changes (Haiku→Sonnet/Opus upgrades without justification), removed rate limits, unbounded token/turn limits
+          5. **BREAKING CHANGES**: Renamed tools, changed skill triggers, modified approval tiers without documentation
+
+          Context: The support (CS) agent is the ONLY external-facing agent. It faces untrusted users. Any changes to its workspace require extra scrutiny.
+
+          If no critical issues found, respond with exactly: PASS
+          If issues found, respond with: FAIL followed by a brief list.
+          Keep response under 500 words.
+
+          Diff:
+          ''' + diff[:8000]
+
+          data = json.dumps({
+              'model': 'claude-sonnet-4-6',
+              'max_tokens': 1024,
+              'messages': [{'role': 'user', 'content': prompt}]
+          }).encode()
+
+          req = urllib.request.Request(
+              'https://api.anthropic.com/v1/messages',
+              data=data,
+              headers={
+                  'Content-Type': 'application/json',
+                  'x-api-key': os.environ['ANTHROPIC_API_KEY'],
+                  'anthropic-version': '2023-06-01'
+              }
+          )
+          try:
+              resp = urllib.request.urlopen(req, timeout=60)
+              result = json.loads(resp.read())
+              text = result['content'][0]['text']
+              print(text[:2000])
+          except Exception as e:
+              print(f'PASS (AI review unavailable: {e})')
+          " <<< "$DIFF")
+
+          echo "$REVIEW"
+
+          if echo "$REVIEW" | head -1 | grep -q "^FAIL"; then
+            echo "::warning::AI review flagged issues — review required"
+          fi
+
+          echo "::endgroup::"
+
       - name: Egress allowlist check — no unauthorized additions
         run: |
           echo "::group::Checking egress allowlist changes"
@@ -139,4 +251,6 @@ jobs:
           echo "| SOUL.md | ${{ steps.soul-check.outcome || 'completed' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Deny List Audit | ${{ steps.deny-audit.outcome || 'completed' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| CODEOWNERS | ${{ steps.codeowners.outcome || 'completed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| CS Reference Scan | ${{ steps.cs-scan.outcome || 'completed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| AI Code Review | ${{ steps.ai-review.outcome || 'completed' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Egress Allowlist | ${{ steps.egress.outcome || 'completed' }} |" >> $GITHUB_STEP_SUMMARY
