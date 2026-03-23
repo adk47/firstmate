@@ -19,6 +19,92 @@ The agent itself has no opinions about authorization. It calls skills, and the s
 
 ---
 
+## Three-Layer Defense (NemoClaw Security Model)
+
+The CS agent is the **highest-risk deployment** in HYDRA — it faces untrusted external users who will attempt prompt injection, jailbreaking, social engineering, and automated probing. Three independent security layers protect it. **An attacker must bypass ALL THREE simultaneously to cause harm.**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Layer 1 — SOUL.md (Prompt Level)                           │
+│                                                              │
+│  The CS agent's SOUL.md contains ZERO references to:        │
+│  • Internal systems (PostgreSQL, Vault, kubectl)             │
+│  • Financial data (QuickBooks, Stripe internals)             │
+│  • Employee information                                      │
+│  • Infrastructure details                                    │
+│                                                              │
+│  Even if prompt injection bypasses SOUL.md entirely,         │
+│  the agent has no internal context to leak — it simply       │
+│  doesn't know anything sensitive.                            │
+│                                                              │
+│  Failure mode: Clever prompts (known risk, expected)         │
+├─────────────────────────────────────────────────────────────┤
+│  Layer 2 — Tool Deny List (Application Level)               │
+│                                                              │
+│  Every tool in OpenClaw is DENIED except 4 read/write tools:│
+│  • profile_lookup (public data only)                         │
+│  • credits_search (public data only)                         │
+│  • subscription_status (auth required)                       │
+│  • create_ticket (Zendesk)                                   │
+│                                                              │
+│  Critically: sessions_send is DENIED — the CS agent          │
+│  CANNOT talk to any other HYDRA agent. Complete isolation.   │
+│                                                              │
+│  Even if L1 is bypassed and the agent "wants" to call        │
+│  kubectl or query the database, the tool doesn't exist       │
+│  in its sandbox. OpenClaw returns an error, not data.        │
+│                                                              │
+│  Failure mode: OpenClaw tool enforcement bug (very unlikely) │
+├─────────────────────────────────────────────────────────────┤
+│  Layer 3 — NemoClaw/OpenShell Kernel Egress (Network Level) │
+│                                                              │
+│  The sandbox's network namespace allows connections to       │
+│  EXACTLY these endpoints:                                    │
+│                                                              │
+│  • localhost:8317 (CLIProxyAPI → Claude inference)            │
+│  • api.muso.ai:443 (same public API customers already use)   │
+│  • zendesk.com:443 (ticket creation)                         │
+│                                                              │
+│  ALL other outbound traffic is silently dropped at the       │
+│  KERNEL level before DNS resolution even starts.             │
+│                                                              │
+│  Even if BOTH L1 and L2 are bypassed, and the agent          │
+│  constructs an HTTP request to an internal service            │
+│  (10.0.0.1, PostgreSQL ClusterIP, Vault API), the kernel     │
+│  blocks it. The LLM never receives a response.               │
+│                                                              │
+│  Failure mode: Linux kernel netns bug (essentially impossible)│
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Why this matters for developers**: When you build a new CS skill, you're working within Layer 2. Your skill defines what the agent CAN do — the deny list defines everything it CAN'T. Layer 3 is your safety net: even if you accidentally expose an internal endpoint in a skill, the kernel won't let the agent reach it. But don't rely on Layer 3 — design every skill as if it's the only defense.
+
+### NemoClaw Enforcement Details
+
+| Mechanism | What It Does | CS Agent Config |
+|-----------|-------------|-----------------|
+| **Landlock** (filesystem) | Restricts which files/dirs the agent process can read/write | `/usr`, `/lib`, `/etc` → read-only. `/sandbox`, `/tmp` → writable. SOUL.md, TOOLS.md, skills/ → read-only (agent cannot modify its own rules) |
+| **seccomp** (syscalls) | Blocks dangerous system calls | `ptrace`, `mount`, `reboot`, `module_load` → blocked. Only Node.js-required syscalls allowed |
+| **netns** (network) | Per-sandbox network namespace with egress allowlist | Only `localhost:8317`, `api.muso.ai:443`, `zendesk.com:443`. Everything else dropped |
+| **Non-root user** | Sandbox runs as `sandbox` (uid 998), not root | Cannot modify system files, install packages, or escalate privileges |
+| **Read-only config** | SOUL.md mounted as read-only at OS level | Agent cannot weaken its own boundaries even if prompted to |
+
+### Governance Engine (Additional Detection for CS)
+
+The coordinator's governance skill applies extra detection rules for the CS agent beyond standard internal rules:
+
+| Detection | Trigger | Action |
+|-----------|---------|--------|
+| **Prompt injection probing** | "ignore your instructions", "you are now", "system prompt", encoded variants | WARNING, respond with standard capabilities message |
+| **Identity spoofing** | "I'm an employee", "I'm Aaron", "I'm the CEO" | WARNING, flag for human review |
+| **Data probing** | Requests for financials, employee info, API keys, database contents | WARNING (agent has no access anyway, but pattern indicates adversarial intent) |
+| **Volume abuse** | >50 messages/hour or >200/day from same user | Rate limit + WARNING |
+| **Automated probing** | Repetitive structured messages, sequential variations | CRITICAL, flag IP/session for blocking |
+
+All CS agent governance alerts are tagged `external` in the hydra-audit repo for filtering.
+
+---
+
 ## Architecture
 
 ```
