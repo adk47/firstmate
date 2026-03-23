@@ -1,12 +1,19 @@
 # HYDRA CODEOWNERS
 # ================
-# Aaron (@adk47) approves everything. Department leads co-own their workspaces.
-# Policies are Aaron-only — no exceptions.
+# Two-tier governance:
+#   Tier 1 (Owner): Department heads can modify personality, USER.md, MEMORY.md
+#   Tier 2 (Aaron): Security config (deny lists, egress, model, CODEOWNERS)
+#
+# CI validates that SOUL.md [SECURITY] sections are unchanged in owner PRs.
+# See docs/GOVERNANCE.md for full policy.
 
 # Default: Aaron approves all changes
 *                       @adk47
 
-# Department workspaces — Aaron + department lead
+# ── Agent Workspaces (Owner + Aaron) ─────────────────────────
+# Owners can PR personality/USER.md/MEMORY.md changes.
+# CI blocks changes to [SECURITY] sections without Aaron approval.
+workspaces/ceo/         @adk47
 workspaces/cmo/         @adk47 @fede
 workspaces/cto/         @adk47 @nick @liflovs
 workspaces/qa/          @adk47 @jay
@@ -14,18 +21,15 @@ workspaces/finance/     @adk47 @liza
 workspaces/operations/  @adk47 @jan
 workspaces/devops/      @adk47 @artem-d
 workspaces/design/      @adk47 @maria
+workspaces/coordinator/ @adk47
 
-# Policies — Aaron only (security-critical, deny lists, egress rules)
+# CS Agent — internal leadership only (never external users)
+workspaces/support/     @adk47 @jan @nick @fede @jay
+
+# ── Security Config (Aaron ONLY — no exceptions) ────────────
 policies/               @adk47
-
-# Secrets definitions — Aaron only
 secrets/                @adk47
-
-# OpenClaw config — Aaron only
 openclaw.json           @adk47
-
-# CLIProxyAPI config — Aaron only
 cliproxyapi.conf        @adk47
-
-# Deployment scripts — Aaron only
 scripts/                @adk47
+CODEOWNERS              @adk47
