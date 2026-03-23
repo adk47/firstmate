@@ -1,0 +1,13 @@
+host: ""
+port: 8317
+
+api-keys:
+  - "sk-hydra-prod-2026"
+
+auth-dir: "/root/.cli-proxy-api"
+
+routing:
+  strategy: "round-robin"
+
+debug: false
+logging-to-file: true

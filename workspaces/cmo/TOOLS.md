@@ -2,7 +2,7 @@
 
 ## Klaviyo
 - Email marketing platform
-- API base: `https://a.]klaviyo.com/api/`
+- API base: `https://a.klaviyo.com/api/`
 - **Revision header required**: Always include `revision` header in API calls
 - **OFF-LIMITS for cold outreach** -- Klaviyo is for existing subscribers/customers ONLY
 - Use for: campaign sends, list management, flow analytics, template management

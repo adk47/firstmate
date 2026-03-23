@@ -1,0 +1,166 @@
+---
+name: muso-ops-workspaces
+description: |
+  Workspace (team) management for Muso.AI ops team. Create workspaces, manage roster,
+  add/remove users and profiles, handle seat management and cleansing.
+  
+  Replaces: Retool workspace creation and management workflows
+  
+  Use when: creating workspaces for B2B clients, managing roster profiles, adding
+  users to workspaces, workspace cleansing, seat management.
+
+  Triggers: "create workspace", "workspace", "roster", "add profile", "add user",
+  "cleansing", "seat", "b2b onboarding", "workspace setup"
+depends-on:
+  - muso-ops-admin
+  - muso-ops-audit
+  - muso-ops-profiles
+  - muso-slack-formatter
+compatibility: |
+  Requires: muso-ops-admin (API gateway), muso-ops-profiles (for profile operations).
+metadata:
+  version: "1.0"
+  source-repo: "Muso-AI/muso-skills"
+---
+
+# Muso Ops — Workspace Management
+
+B2B workspace lifecycle: create → populate → cleanse → deliver.
+
+## Access Control
+
+- Tier 1-2: All workspace operations
+- Tier 3: View workspaces, manage roster (add/remove profiles). NO create/delete workspace.
+- Tier 4: Read-only
+
+## Workspace Creation Workflow
+
+Based on Retool docs, the full B2B onboarding flow:
+
+### Step 1: Create Account
+Need: one email (main contact)
+```bash
+# Workspace = "team" in admin API
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call POST "/w/admin/team" '{"email":"contact@label.com","name":"Label Name"}'
+```
+
+### Step 2: Add Logo
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  upload "/w/admin/team/<id>/image" /tmp/logo.jpg
+```
+
+### Step 3: Add Users
+First check if user exists:
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/w/admin/user?search=user@email.com"
+```
+
+If new, create:
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call POST "/w/admin/user" '{"email":"user@email.com","firstName":"Name","password":"name+muso"}'
+```
+
+Then add to workspace:
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call POST "/w/admin/team/<id>/users" '{"userId":"<user_id>"}'
+```
+
+Or invite by email:
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call POST "/w/admin/team/<id>/invite-users" '{"emails":["user@email.com"]}'
+```
+
+⚠️ **Password note:** Once created, password can't be "fixed" — must delete and recreate user.
+
+### Step 4: Add Profiles to Roster (Seats)
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call POST "/w/admin/team/<id>/seats" '{"profileId":"<profile_id>"}'
+```
+
+Toggle seat active status:
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call PUT "/w/admin/team/<id>/seats/<seat_id>" '{"seatActive":true}'
+```
+
+### Step 5: Request Cleansing
+Post to #b2b-onboarding: "[Workspace Name] needs to be cleansed"
+Catalog team merges profiles and keeps correct ones.
+
+### Step 6: Review Analytics
+Verify analytics are populating before delivering to client.
+
+### Step 7: Send User Logins
+- Small batch: individual emails
+- Large batch (20+): use Klaviyo
+
+## Seat Management
+
+Get all seats:
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/w/admin/team/<id>/seats"
+```
+
+Toggle analytics gathering:
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call PUT "/w/admin/team/<id>/seats/<seat_id>" '{"seatActive":true}'
+```
+
+Remove seat:
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call DELETE "/w/admin/team/<id>/seats/<seat_id>"
+```
+
+## Encore Shareables
+
+For pre-sale and influencer plaque management:
+- Each influencer needs their own workspace where they're the ONLY owner
+- Can override email from the workspace settings
+
+## Workspace API Keys
+
+For partner integrations:
+```bash
+# Add key
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call POST "/w/admin/workspace/<workspace_id>/key"
+
+# Remove key
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call DELETE "/w/admin/workspace/<workspace_id>/key"
+```
+
+## Conversational Flow
+
+When ops says "set up a workspace for Label X":
+
+```
+Clio: "Setting up workspace for Label X. I need:
+1. Main contact email
+2. Logo (upload to this thread)
+3. User list (emails + names)
+4. Profile list (Muso IDs or Spotify links)
+
+What do you have?"
+
+[Ops provides info step by step]
+
+Clio: [Creates workspace, adds users, adds profiles]
+"✅ Workspace 'Label X' created:
+• 3 users added (with default passwords)
+• 12 profiles on roster (seats active)
+• Cleansing request posted to #b2b-onboarding
+• Analytics should populate within 24-48h
+
+Want me to send login credentials to users, or wait for cleansing first?"
+```

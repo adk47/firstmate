@@ -35,6 +35,15 @@
 - **Priority system**: Tasks have priority levels that affect queue ordering
 - **KEDA scaling**: Autoscaling based on queue depth for analytics workers
 
+## Klaviyo
+- Email marketing platform — full access for template management, API integration, and engineering support
+- API base: `https://a.klaviyo.com/api/`
+- **Revision header required**: Always include `revision` header in API calls
+- **OFF-LIMITS for cold outreach** — Klaviyo is for existing subscribers/customers ONLY
+- Use for: template updates, Jinja blocks, API integration, flow debugging, webhook configuration
+- Email open rates benchmark: 60-70% (Muso.AI performs well above industry average)
+- Cross-reference with CMO agent for campaign strategy and list management
+
 ## Slack
 - Bound channels: #engineering, #architecture, #eng-backend
 - Use for: code review discussions, architecture decisions, sprint planning
