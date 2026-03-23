@@ -1,0 +1,65 @@
+# Muso Access (access.muso.ai)
+
+## Overview
+
+**Muso Access** is Muso.AI's advertising platform — the #1 platform for music industry advertising. It lets brands reach 500K+ verified music professionals with hyper-targeted campaigns.
+
+The key differentiator: every user in the Muso audience is a **verified music creator** with real credits and streaming data — not just someone "interested in music" like on Meta/Google/TikTok.
+
+---
+
+## How It Works
+
+1. **Define Campaign Objective** — Brand Awareness, Exclusive Offers, or Sponsorships & Giveaways. Muso matches the objective with the right placement and audience strategy.
+
+2. **Select Placements** — Choose from 4 delivery channels and 3 in-app placements across 210 countries.
+
+3. **Hyper-Target Your Audience** — Filter by 146 role types, streams, credits, genre, and location to reach exactly who you need.
+
+---
+
+## Delivery Channels
+
+| Channel | Reach | Description |
+|---------|-------|-------------|
+| **Muso Shop & For You** | — | Curated marketplace where creators browse for tools daily |
+| **Feed Placements** | — | High-visibility placements in the main feed where creators check stats daily |
+| **Email Blasts** | 350K active subscribers | Targeted email campaigns to engaged users |
+| **Push Notifications** | 300K+ devices | Direct push to creators' phones |
+| **Weekly Newsletter** | 350K verified professionals | Premium placement in weekly newsletter |
+
+---
+
+## Why Muso Ads vs. Meta/Google/TikTok
+
+| | Traditional Platforms | Muso Access |
+|---|---|---|
+| **Targeting** | AI assumes interest from past actions | Exact audience with hyper-targeting |
+| **Audience Quality** | Fans, hobbyists, casual listeners | Verified music professionals with real credits |
+| **Data** | Inferred interests from engagement | Certified accounts with live streaming data |
+| **Example** | "Interested in music production" | "Hip-Hop Producers (USA), +150K streams, +4 credits added this year" |
+
+---
+
+## Who Is It For?
+
+- **Music Software** — DAWs, plugins, sample packs, collaboration tools
+- **Gear / Pro Audio** — Studio monitors, microphones, interfaces, controllers
+- **Music Services** — Sync licensing, mastering, legal, business services
+- **Education & Events** — Production courses, conferences, masterclasses
+- **Recruiting & Staffing** — Labels, studios, touring companies, artist management
+- **Other** — Financial services, legal, real estate, travel, insurance, lifestyle brands
+
+---
+
+## Key Stats
+
+- **500K+** verified music professionals
+- **146** targetable role types
+- **210** countries
+- **350K** email subscribers
+- **300K+** push notification reach
+
+---
+
+*Source: [access.muso.ai](https://access.muso.ai)*

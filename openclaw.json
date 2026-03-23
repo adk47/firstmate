@@ -1,7 +1,7 @@
 {
   "meta": {
     "lastTouchedVersion": "2026.3.13",
-    "lastTouchedAt": "2026-03-22T21:00:00.000Z"
+    "lastTouchedAt": "2026-03-23T05:37:17.626Z"
   },
   "wizard": {
     "lastRunAt": "2026-02-19T06:12:59.869Z",
@@ -10,6 +10,7 @@
     "lastRunMode": "local"
   },
   "update": {
+    "channel": "stable",
     "auto": {
       "enabled": false
     }
@@ -20,8 +21,8 @@
   "models": {
     "providers": {
       "anthropic": {
-        "baseUrl": "http://127.0.0.1:8317",
-        "apiKey": "VAULT:secret/muso-prod/hydra-claude-api/ANTHROPIC_API_KEY",
+        "baseUrl": "http://localhost:8317",
+        "apiKey": "VAULT",
         "auth": "api-key",
         "authHeader": true,
         "models": [
@@ -92,24 +93,20 @@
     },
     "list": [
       {
-        "id": "coordinator",
+        "id": "clio",
+        "default": true,
         "workspace": "/opt/hydra/workspaces/coordinator",
         "model": {
           "primary": "anthropic/claude-opus-4-6",
-          "fallbacks": [
-            "anthropic/claude-sonnet-4-6"
-          ]
-        },
-        "default": true
+          "fallbacks": []
+        }
       },
       {
         "id": "ceo",
         "workspace": "/opt/hydra/workspaces/ceo",
         "model": {
           "primary": "anthropic/claude-opus-4-6",
-          "fallbacks": [
-            "anthropic/claude-sonnet-4-6"
-          ]
+          "fallbacks": []
         }
       },
       {
@@ -117,9 +114,7 @@
         "workspace": "/opt/hydra/workspaces/cmo",
         "model": {
           "primary": "anthropic/claude-opus-4-6",
-          "fallbacks": [
-            "anthropic/claude-sonnet-4-6"
-          ]
+          "fallbacks": []
         }
       },
       {
@@ -178,10 +173,17 @@
         "id": "design",
         "workspace": "/opt/hydra/workspaces/design",
         "model": {
-          "primary": "anthropic/claude-sonnet-4-6",
+          "primary": "anthropic/claude-opus-4-6",
+          "fallbacks": []
+        }
+      },
+      {
+        "id": "support",
+        "workspace": "/opt/hydra/workspaces/support",
+        "model": {
+          "primary": "anthropic/claude-haiku-4-5-20251001",
           "fallbacks": [
-            "anthropic/claude-haiku-4-5-20251001",
-            "anthropic/claude-opus-4-6"
+            "anthropic/claude-sonnet-4-6"
           ]
         }
       }
@@ -221,7 +223,11 @@
   "channels": {
     "slack": {
       "mode": "socket",
+      "webhookPath": "/slack/events",
       "enabled": true,
+      "userTokenReadOnly": true,
+      "dangerouslyAllowNameMatching": true,
+      "groupPolicy": "open",
       "streaming": "partial",
       "nativeStreaming": true,
       "replyToMode": "all",
@@ -230,134 +236,93 @@
         "group": "all",
         "channel": "all"
       },
-      "accounts": {
-        "coordinator": {
-          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_COORDINATOR",
-          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_COORDINATOR"
+      "channels": {
+        "C08GZPWAKBJ": {
+          "allow": true,
+          "requireMention": false
         },
+        "C7TBH462K": {
+          "allow": true,
+          "requireMention": true
+        }
+      },
+      "accounts": {
         "ceo": {
-          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_CEO",
-          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_CEO",
-          "channels": {
-            "#general": {
-              "allow": true,
-              "requireMention": true
-            },
-            "#company-announcements": {
-              "allow": true,
-              "requireMention": true
-            }
-          },
-          "groupPolicy": "allowlist"
+          "botToken": "VAULT",
+          "appToken": "VAULT",
+          "userTokenReadOnly": true,
+          "nativeStreaming": true,
+          "streaming": "partial"
         },
         "cmo": {
-          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_CMO",
-          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_CMO",
-          "channels": {
-            "#growth-team": {
-              "allow": true,
-              "requireMention": true
-            },
-            "#social-media": {
-              "allow": true,
-              "requireMention": true
-            },
-            "#music_industry_news": {
-              "allow": true,
-              "requireMention": true
-            }
-          },
-          "groupPolicy": "allowlist"
+          "botToken": "VAULT",
+          "appToken": "VAULT",
+          "userTokenReadOnly": true,
+          "nativeStreaming": true,
+          "streaming": "partial"
         },
         "cto": {
-          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_CTO",
-          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_CTO",
-          "channels": {
-            "#engineering": {
-              "allow": true,
-              "requireMention": true
-            },
-            "#catalog-team": {
-              "allow": true,
-              "requireMention": true
-            },
-            "#pipeline-alerts": {
-              "allow": true,
-              "requireMention": true
-            },
-            "#developer-api": {
-              "allow": true,
-              "requireMention": true
-            }
-          },
-          "groupPolicy": "allowlist"
+          "botToken": "VAULT",
+          "appToken": "VAULT",
+          "userTokenReadOnly": true,
+          "nativeStreaming": true,
+          "streaming": "partial"
         },
         "qa": {
-          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_QA",
-          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_QA",
-          "channels": {
-            "#production_updates": {
-              "allow": true,
-              "requireMention": true
-            },
-            "#app-releases": {
-              "allow": true,
-              "requireMention": true
-            }
-          },
-          "groupPolicy": "allowlist"
+          "botToken": "VAULT",
+          "appToken": "VAULT",
+          "userTokenReadOnly": true,
+          "nativeStreaming": true,
+          "streaming": "partial"
         },
         "finance": {
-          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_FINANCE",
-          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_FINANCE",
-          "channels": {
-            "C08GZPWAKBJ": {
-              "allow": true,
-              "requireMention": false
-            }
-          },
-          "groupPolicy": "allowlist"
+          "botToken": "VAULT",
+          "appToken": "VAULT",
+          "userTokenReadOnly": true,
+          "nativeStreaming": true,
+          "streaming": "partial"
         },
         "operations": {
-          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_OPERATIONS",
-          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_OPERATIONS",
-          "channels": {
-            "GJAM34DT6": {
-              "allow": true,
-              "requireMention": true
-            },
-            "#ops_customer": {
-              "allow": true,
-              "requireMention": true
-            }
-          },
-          "groupPolicy": "allowlist"
+          "botToken": "VAULT",
+          "appToken": "VAULT",
+          "userTokenReadOnly": true,
+          "nativeStreaming": true,
+          "streaming": "partial"
         },
         "devops": {
-          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_DEVOPS",
-          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_DEVOPS",
-          "channels": {
-            "#data-capture-notifications": {
-              "allow": true,
-              "requireMention": true
-            }
-          },
-          "groupPolicy": "allowlist"
+          "botToken": "VAULT",
+          "appToken": "VAULT",
+          "userTokenReadOnly": true,
+          "nativeStreaming": true,
+          "streaming": "partial"
         },
         "design": {
-          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_DESIGN",
-          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_DESIGN",
-          "channels": {
-            "#product_design": {
-              "allow": true,
-              "requireMention": true
-            }
-          },
-          "groupPolicy": "allowlist"
+          "botToken": "VAULT",
+          "appToken": "VAULT",
+          "userTokenReadOnly": true,
+          "nativeStreaming": true,
+          "streaming": "partial"
         },
         "default": {
-          "botToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_BOT_TOKEN_DEFAULT",
-          "appToken": "VAULT:secret/muso-prod/hydra-slack-tokens/SLACK_APP_TOKEN_DEFAULT"
+          "botToken": "VAULT",
+          "appToken": "VAULT",
+          "userTokenReadOnly": true,
+          "nativeStreaming": true,
+          "streaming": "partial"
+        },
+        "support": {
+          "botToken": "VAULT",
+          "appToken": "VAULT",
+          "userTokenReadOnly": true,
+          "nativeStreaming": true,
+          "streaming": "partial"
+        },
+        "clio": {
+          "botToken": "VAULT",
+          "appToken": "VAULT",
+          "userTokenReadOnly": true,
+          "nativeStreaming": true,
+          "streaming": "partial"
         }
       }
     }
@@ -365,7 +330,14 @@
   "gateway": {
     "port": 18789,
     "mode": "local",
-    "bind": "loopback",
+    "bind": "lan",
+    "controlUi": {
+      "allowedOrigins": [
+        "https://hydra.muso.ai",
+        "http://hydra.muso.ai",
+        "http://localhost"
+      ]
+    },
     "auth": {
       "mode": "token",
       "token": "f3beadb72aaec5fd6558aa1cdaa3217ce1c509293331a088"
@@ -380,7 +352,11 @@
           "enabled": true
         }
       }
-    }
+    },
+    "trustedProxies": [
+      "172.17.0.0/16",
+      "127.0.0.1"
+    ]
   },
   "plugins": {
     "entries": {
