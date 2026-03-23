@@ -2,32 +2,68 @@
 
 ## Principle
 
-Each agent has an **owner** (department head) who controls their agent's personality, behavior, and knowledge — but NOT their security boundaries. Only Aaron controls what each agent can access outside its sandbox.
+Each agent has an **owner** (department head) who controls their agent's personality, behavior, knowledge, and tools — but changes that cross security boundaries require Aaron's approval. External users can NEVER modify any agent.
 
-Think of it like giving someone the keys to decorate their office however they want, but they can't install new doors to other departments.
+Think of it like giving someone the keys to their office — they can rearrange furniture, add equipment, and bring in new tools. But if they want to knock down a wall or run a cable to another department, they send a request to Aaron first.
 
 ---
 
-## Two-Tier Permission Model
+## Three-Tier Permission Model
 
-### Tier 1: Owner-Modifiable (Department Head)
+### Tier 1: Owner Self-Service (No Approval Needed)
 
-The agent owner can change these files via PR (auto-approved by CODEOWNERS):
+The agent owner can change these immediately via PR:
 
 | File | What It Controls | Example Changes |
 |------|------------------|-----------------|
-| `SOUL.md` **personality sections only** | Tone, communication style, domain expertise, how the agent introduces itself | "Be more concise", "Always use bullet points", "Start with a greeting" |
+| `SOUL.md` **personality sections** | Tone, style, domain expertise, how the agent introduces itself | "Be more concise", "Use emoji", "Always greet by name" |
 | `USER.md` | Owner preferences, team roster, working hours | Add/remove team members, update contact info |
 | `MEMORY.md` | Accumulated knowledge, project context | Agent updates this automatically during conversations |
-| `skills/` (existing skills config) | How skills behave within the sandbox | Tune Klaviyo templates, adjust report formats |
+| `skills/` (existing skill configs) | How existing skills behave | Tune Klaviyo templates, adjust report formats |
 
-### Tier 2: Aaron-Only (Security Config)
+### Tier 2: Owner-Initiated, Aaron-Approves (Tools & Integrations)
 
-Only Aaron can change these — even the agent owner cannot modify:
+Owners CAN add new tools, skills, and integrations to their agent — but the request goes to Aaron for review before activation. This prevents accidentally introducing cross-boundary access.
 
-| File/Config | What It Controls | Why Restricted |
-|-------------|------------------|----------------|
-| `policies/tool-deny-lists.yaml` | What tools the agent CAN'T use | Prevents privilege escalation |
+| Change | Process | What Aaron Checks |
+|--------|---------|-------------------|
+| **Add a new skill** | Owner PRs the skill to their workspace → CI sends DM to @Aaron | Does the skill access data outside this agent's domain? |
+| **Add an API integration** | Owner PRs TOOLS.md with new endpoint → CI sends DM to @Aaron | Does the endpoint expose internal systems? Is it in the egress allowlist? |
+| **Request new egress endpoint** | Owner asks → approval message to @Aaron | Is this a legitimate business need? Could it be used for data exfiltration? |
+| **Request a new Slack channel** | Owner asks → approval message to @Aaron | Does the channel contain data outside this agent's domain? |
+| **Change model tier** | Owner asks → approval message to @Aaron | Cost impact? Does higher reasoning increase attack surface? |
+
+**The flow:**
+1. Owner submits a PR or asks their agent for a change
+2. CI detects it's a Tier 2 change (new skill, new endpoint, egress change)
+3. CI/agent sends a Slack DM to Aaron:
+   ```
+   🔔 Approval Request
+   Agent: @CMO
+   Owner: Fede
+   Change: Add muso-google-ads skill
+   Risk: LOW — read-only Google Ads API, no internal data access
+   PR: github.com/Muso-AI/hydra/pull/15
+
+   Reply: ✅ approve | ❌ deny
+   ```
+4. Aaron reviews and responds
+5. If approved → merged and deployed
+6. If denied → PR closed with explanation
+
+**Error on the side of asking.** If CI can't determine whether a change is safe, it sends the approval DM. Better to ask Aaron once than to let something unsafe through.
+
+### Tier 3: Aaron-Only (Hard Security Boundaries)
+
+These can NEVER be modified by anyone except Aaron, regardless of the request:
+
+| Config | Why It's Locked |
+|--------|----------------|
+| `policies/tool-deny-lists.yaml` | Deny list can only grow, never shrink — prevents privilege escalation |
+| `SOUL.md` **[SECURITY] sections** | Canary detection, prompt injection defense, identity verification |
+| `AGENTS.md` | Which agents can communicate — prevents cross-domain leakage |
+| `CODEOWNERS` | Meta-governance — who approves what |
+| `openclaw.json` (structure) | Agent definitions, Slack bindings, sandbox mode |
 | `policies/egress-allowlist.yaml` | What external services the agent can reach | Prevents data exfiltration |
 | `SOUL.md` **security sections** | Canary detection, prompt injection defense, identity verification | Prevents owners from weakening defenses |
 | `AGENTS.md` | Which other agents this one can communicate with | Prevents cross-domain leakage |
@@ -156,18 +192,18 @@ The PR validation workflow enforces the two-tier model:
 
 ## Agent Owner Reference
 
-| Agent | Owner | Can Modify | Cannot Modify |
-|-------|-------|------------|---------------|
-| @Buddy | Aaron | Everything | — |
-| @CEO | Aaron | Everything | — |
-| @CMO | Fede | Personality, USER.md, MEMORY.md, skill configs | Deny list, egress, model, security rules |
-| @CTO | Nick (+ Serhii) | Personality, USER.md, MEMORY.md, skill configs | Deny list, egress, model, security rules |
-| @QA | Jay | Personality, USER.md, MEMORY.md, skill configs | Deny list, egress, model, security rules |
-| @Finance | Liza | Personality, USER.md, MEMORY.md, skill configs | Deny list, egress, model, security rules |
-| @Operations | Jan | Personality, USER.md, MEMORY.md, skill configs | Deny list, egress, model, security rules |
-| @DevOps | Artem D | Personality, USER.md, MEMORY.md, skill configs | Deny list, egress, model, security rules |
-| @Design | Mariia | Personality, USER.md, MEMORY.md, skill configs | Deny list, egress, model, security rules |
-| @CS | Jan + Leadership | Personality, USER.md (no MEMORY) | Everything else — most restricted |
+| Agent | Owner | Self-Service (Tier 1) | Needs Aaron Approval (Tier 2) | Locked (Tier 3) |
+|-------|-------|-----------------------|-------------------------------|-----------------|
+| @Buddy | Aaron | Everything | — | — |
+| @CEO | Aaron | Everything | — | — |
+| @CMO | Fede | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
+| @CTO | Nick (+ Serhii) | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
+| @QA | Jay | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
+| @Finance | Liza | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
+| @Operations | Jan | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
+| @DevOps | Artem D | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
+| @Design | Mariia | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
+| @CS | Jan + Leadership | Personality, USER.md (no MEMORY) | Add skills (rare) | Everything else — external users can NEVER modify |
 
 ---
 
