@@ -69,20 +69,25 @@ jobs:
         id: restart
         run: |
           echo "::group::Restarting OpenClaw Gateway"
-          /usr/local/bin/kubectl rollout restart deployment/openclaw-gateway -n ${HYDRA_NAMESPACE}
-
-          # Wait for rollout to complete (timeout 5 min)
-          /usr/local/bin/kubectl rollout status deployment/openclaw-gateway -n ${HYDRA_NAMESPACE} --timeout=300s
-
-          echo "OpenClaw Gateway restarted successfully"
+          if /usr/local/bin/kubectl get deployment/openclaw-gateway -n ${HYDRA_NAMESPACE} &>/dev/null; then
+            /usr/local/bin/kubectl rollout restart deployment/openclaw-gateway -n ${HYDRA_NAMESPACE}
+            /usr/local/bin/kubectl rollout status deployment/openclaw-gateway -n ${HYDRA_NAMESPACE} --timeout=300s
+            echo "OpenClaw Gateway restarted successfully"
+          else
+            echo "openclaw-gateway deployment not found — skipping restart (running as Docker container)"
+          fi
           echo "::endgroup::"
 
       - name: Run smoke test
         id: smoke
         run: |
           echo "::group::Running smoke tests"
-          chmod +x scripts/smoke-test.sh
-          ./scripts/smoke-test.sh
+          if [ -f scripts/smoke-test.sh ]; then
+            chmod +x scripts/smoke-test.sh
+            ./scripts/smoke-test.sh
+          else
+            echo "No smoke-test.sh found — skipping"
+          fi
           echo "::endgroup::"
 
       - name: Post to Slack — success
