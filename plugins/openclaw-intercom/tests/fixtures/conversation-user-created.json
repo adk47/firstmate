@@ -1,0 +1,26 @@
+{
+  "type": "notification_event",
+  "app_id": "app_test",
+  "data": {
+    "type": "notification_event_data",
+    "item": {
+      "type": "conversation",
+      "id": "conv_123",
+      "title": null,
+      "created_at": 1711234567,
+      "updated_at": 1711234567,
+      "open": true,
+      "state": "open",
+      "assignee": { "type": "bot", "id": "bot_1" },
+      "source": {
+        "body": "Hi, I need help with my account",
+        "author": { "type": "user", "id": "user_abc", "email": "user@example.com" }
+      }
+    }
+  },
+  "topic": "conversation.user.created",
+  "id": "evt_001",
+  "created_at": 1711234567,
+  "delivery_status": "pending",
+  "delivery_attempts": 1
+}

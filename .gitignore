@@ -19,6 +19,7 @@ Thumbs.db
 # Build
 ui/out/
 ui/.next/
+plugins/*/dist/
 *.tgz
 
 # Extraction output (sensitive, gitignored by default)
@@ -27,3 +28,4 @@ extraction/*.md
 # Editor
 .vscode/
 .idea/
+plugins/openclaw-intercom/pnpm-lock.yaml

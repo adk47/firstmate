@@ -1,0 +1,25 @@
+{
+  "name": "@muso/openclaw-intercom",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "openclaw": {
+    "extensions": ["./src/index.ts"],
+    "channel": {
+      "id": "intercom",
+      "label": "Intercom",
+      "blurb": "Connect OpenClaw to Intercom for customer support."
+    }
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.0",
+    "typescript": "^5.7.0"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}

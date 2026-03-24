@@ -1,0 +1,39 @@
+{
+  "id": "intercom",
+  "kind": "channel",
+  "channels": ["intercom"],
+  "name": "Intercom",
+  "description": "Intercom customer support channel plugin for HYDRA",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "intercom": {
+        "type": "object",
+        "properties": {
+          "accounts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "workspaceId": { "type": "string" },
+                "token": { "type": "string" },
+                "webhookSecret": { "type": "string" },
+                "botAdminId": { "type": "string" },
+                "defaultInboxId": { "type": "string" },
+                "fallbackSlackSupervisionChannel": { "type": "string" },
+                "fallbackAcknowledgement": { "type": "string" },
+                "requireMappedHumanAdmin": { "type": "boolean" },
+                "adminMapping": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

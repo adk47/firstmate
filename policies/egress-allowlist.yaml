@@ -66,6 +66,15 @@ shared:
       action: DENY
       comment: "All Claude traffic MUST go through CLIProxyAPI for audit logging"
 
+gateway:
+  description: "Gateway process egress (channel plugins run here, outside agent sandboxes)."
+  rules:
+    - name: intercom-api
+      protocol: tcp
+      port: 443
+      destination: api.intercom.io
+      comment: "Intercom channel plugin — webhook replies and assignment updates"
+
 agents:
   coordinator:
     description: "Message router only. No additional egress."
