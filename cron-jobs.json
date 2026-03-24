@@ -254,7 +254,7 @@
       "description": "Scan Gmail for B2B prospect replies every 15 minutes",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774377011633,
+      "updatedAtMs": 1774385106501,
       "schedule": {
         "kind": "every",
         "everyMs": 900000,
@@ -265,7 +265,7 @@
       "payload": {
         "kind": "agentTurn",
         "message": "Scan Gmail (a@muso.ai) for new B2B Ads outreach replies in the last 20 minutes. Use gog to check recent inbox. Filter for replies from B2B prospects we have emailed (cross-reference with the B2B outreach sheet). IGNORE all internal emails (from muso.ai domains), SaaS notifications, marketing emails, and anything that is not a direct reply from a B2B prospect.\n\nCRITICAL SILENCE RULE: If there are NO new B2B prospect replies, your ENTIRE response must be empty \u2014 literally produce no output at all. Do not say NO_REPLY, do not say \"nothing found\", do not summarize. Just stop. Fede does not want to see any message when there is nothing to report.\n\nOnly if you find an actual B2B prospect reply, format your response with: sender name, company, reply summary, and suggested next action. Also sync GHL pipeline stage if applicable (move to Replied or Meeting Booked).",
-        "timeoutSeconds": 120
+        "timeoutSeconds": 300
       },
       "delivery": {
         "mode": "announce",
@@ -275,13 +275,13 @@
       },
       "state": {
         "consecutiveErrors": 0,
-        "nextRunAtMs": 1774377870271,
-        "lastRunAtMs": 1774376970271,
+        "nextRunAtMs": 1774385970290,
+        "lastRunAtMs": 1774385070290,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 41362,
-        "lastDeliveryStatus": "not-delivered",
-        "lastDelivered": false
+        "lastDurationMs": 36211,
+        "lastDeliveryStatus": "delivered",
+        "lastDelivered": true
       }
     },
     {
