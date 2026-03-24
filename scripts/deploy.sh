@@ -187,6 +187,16 @@ if [ -f "$GMAIL_CHANNEL" ]; then
     echo "  Patched Gmail plugin describeMessageTool"
   fi
 fi
+
+# Patch Gmail monitor to survive initialization errors (quarantine label, prune)
+GMAIL_MONITOR="/root/.openclaw/extensions/openclaw-gmail/src/monitor.ts"
+if [ -f "$GMAIL_MONITOR" ]; then
+  if grep -q "await ensureQuarantineLabel(client, log);" "$GMAIL_MONITOR"; then
+    sed -i 's|  await ensureQuarantineLabel(client, log);|  try { await ensureQuarantineLabel(client, log); } catch (e) { log.warn(`Quarantine label setup failed (non-fatal): ${String(e)}`); }|' "$GMAIL_MONITOR"
+    sed -i 's|  await pruneGmailSessions(account, log);|  try { await pruneGmailSessions(account, log); } catch (e) { log.warn(`Prune failed (non-fatal): ${String(e)}`); }|' "$GMAIL_MONITOR"
+    echo "  Patched Gmail monitor initialization (non-fatal errors)"
+  fi
+fi
 POSTSYNC
 
 log "  Post-sync setup complete."
