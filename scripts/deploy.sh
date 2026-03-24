@@ -135,6 +135,15 @@ CEOF
   fi
 fi
 
+# Ensure GOG_KEYRING_PASSWORD is set for gog CLI (Gmail, Sheets, Calendar, Drive)
+if ! grep -q "GOG_KEYRING_PASSWORD" /root/.bashrc 2>/dev/null; then
+  GOG_PW=$(kubectl get secret -n hydra hydra-service-tokens -o jsonpath='{.data.GOG_KEYRING_PASSWORD}' 2>/dev/null | base64 -d)
+  if [ -n "$GOG_PW" ]; then
+    echo "export GOG_KEYRING_PASSWORD='${GOG_PW}'" >> /root/.bashrc
+    echo "  GOG keyring password set in .bashrc"
+  fi
+fi
+
 # Apply OpenClaw mention gate patch (until upstream PR #53161 is merged)
 if [ -f /opt/hydra/scripts/patch-openclaw-mention-gate.sh ]; then
   bash /opt/hydra/scripts/patch-openclaw-mention-gate.sh
