@@ -46,6 +46,16 @@ jobs:
           echo "Workspaces synced"
           echo "::endgroup::"
 
+      - name: Sync global skills
+        run: |
+          echo "::group::Syncing skills"
+          if [ -d "skills-all/" ]; then
+            mkdir -p /root/.openclaw/skills/skills/
+            /usr/bin/rsync -avz --delete skills-all/ /root/.openclaw/skills/skills/
+            echo "Synced $(ls /root/.openclaw/skills/skills/ | wc -l) skills"
+          fi
+          echo "::endgroup::"
+
       - name: Apply K8s manifests
         id: apply
         run: |
