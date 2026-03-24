@@ -393,7 +393,7 @@
     },
     {
       "id": "54283ee4-a231-4a0b-b88d-d684d1d7e60e",
-      "agentId": "clio",
+      "agentId": "devops",
       "name": "weekly-google-token-refresh",
       "description": "Exercise all 4 Google OAuth tokens weekly to prevent expiry",
       "enabled": true,
@@ -408,15 +408,18 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run a Google OAuth token health check. For each account (a@muso.ai, ak@muso.ai, aaron.k@muso.ai, f@muso.ai), use gog to list 1 Gmail message. This keeps the refresh tokens active. Report any failures. Do NOT post to Slack unless something fails.",
+        "message": "Run a Google OAuth token health check. For each account (a@muso.ai, ak@muso.ai, aaron.k@muso.ai, f@muso.ai), use gog to list 1 Gmail message. This keeps the refresh tokens active and prevents 6-month expiry. Report results: which accounts succeeded, which failed. Always post results.",
         "timeoutSeconds": 60
       },
       "delivery": {
-        "mode": "none",
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0ADV2W76G4",
         "bestEffort": true
       },
       "state": {
-        "consecutiveErrors": 0
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1774753200000
       }
     }
   ]
