@@ -188,13 +188,17 @@ if [ -f "$GMAIL_CHANNEL" ]; then
   fi
 fi
 
-# Patch Gmail monitor to survive initialization errors (quarantine label, prune)
+# Patch Gmail monitor — bypass gog CLI check + resilient init
 GMAIL_MONITOR="/root/.openclaw/extensions/openclaw-gmail/src/monitor.ts"
 if [ -f "$GMAIL_MONITOR" ]; then
-  if grep -q "await ensureQuarantineLabel(client, log);" "$GMAIL_MONITOR"; then
-    sed -i 's|  await ensureQuarantineLabel(client, log);|  try { await ensureQuarantineLabel(client, log); } catch (e) { log.warn(`Quarantine label setup failed (non-fatal): ${String(e)}`); }|' "$GMAIL_MONITOR"
-    sed -i 's|  await pruneGmailSessions(account, log);|  try { await pruneGmailSessions(account, log); } catch (e) { log.warn(`Prune failed (non-fatal): ${String(e)}`); }|' "$GMAIL_MONITOR"
-    echo "  Patched Gmail monitor initialization (non-fatal errors)"
+  if grep -q 'account.backend !== "api" && !(await GogGmailClient.checkExists())' "$GMAIL_MONITOR" && ! grep -q "PATCHED" "$GMAIL_MONITOR"; then
+    sed -i 's|if (account.backend !== "api" && !(await GogGmailClient.checkExists())) {|if (false \&\& account.backend !== "api" \&\& !(await GogGmailClient.checkExists())) { // PATCHED: skip gog check|' "$GMAIL_MONITOR"
+    echo "  Patched Gmail monitor gog CLI check"
+  fi
+  if grep -q "^  await ensureQuarantineLabel(client, log);" "$GMAIL_MONITOR"; then
+    sed -i '/^  await ensureQuarantineLabel(client, log);/c\  try { await ensureQuarantineLabel(client, log); } catch (e) { log.warn(`Quarantine label setup failed: ${String(e)}`); }' "$GMAIL_MONITOR"
+    sed -i '/^  await pruneGmailSessions(account, log);/c\  try { await pruneGmailSessions(account, log); } catch (e) { log.warn(`Prune failed: ${String(e)}`); }' "$GMAIL_MONITOR"
+    echo "  Patched Gmail monitor init resilience"
   fi
 fi
 POSTSYNC
