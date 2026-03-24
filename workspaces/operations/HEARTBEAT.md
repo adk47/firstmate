@@ -1,6 +1,6 @@
 # HEARTBEAT.md — Operations Agent
 
-⛔ ALL AUTOMATIONS DISABLED — Running on Clio until cutover
+✅ ALL AUTOMATIONS ACTIVE — Cutover from Clio complete (2026-03-24)
 
 ## ⚠️ POSTING RULE
 All heartbeat output → MAIN CHANNEL (top-level), never in a thread. Use `message(action=send, target=<channel_id>)` with NO `threadId`/`replyTo`.
@@ -8,14 +8,14 @@ All heartbeat output → MAIN CHANNEL (top-level), never in a thread. Use `messa
 ---
 
 ## Daily Claiming Report → #operations (GJAM34DT6)
-**Status: DISABLED — awaiting cutover from Clio**
+**Status: ACTIVE — running on HYDRA (cutover complete 2026-03-24)**
 
 Athena: `public_claiming` JOIN `public_teams`, last 24h. Summary + rejections detail + repeat requesters + missing reasons.
 
 ---
 
 ## Daily Credit Fraud Scan → #clio_analyst (C0ADREBPNQ2)
-**Status: DISABLED — awaiting cutover from Clio**
+**Status: ACTIVE — running on HYDRA (cutover complete 2026-03-24)**
 
 Approved credit_requests, last 24h, Spotify pop≥50. **MANDATORY: Web-verified, per-person fraud assessment.** Never flag on popularity alone.
 
@@ -37,6 +37,6 @@ Updated Mar 13, 2026 — Aaron requested sophistication: web research + per-pers
 ---
 
 ## Refund Processor Channel Config
-**Status: DISABLED — awaiting cutover from Clio**
+**Status: ACTIVE — running on HYDRA (cutover complete 2026-03-24)**
 
 Refund investigation and processing results posted to appropriate channels. Uses `muso-refund-processor` skill. Stripe writes require Aaron authorization.

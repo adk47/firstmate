@@ -1,6 +1,6 @@
 # HEARTBEAT.md — CTO Agent
 
-⛔ ALL AUTOMATIONS DISABLED — Running on Clio until cutover
+✅ ALL AUTOMATIONS ACTIVE — Cutover from Clio complete (2026-03-24)
 
 ### Daily PR Code Review — Production Risk
 Schedule: daily 7:00 AM PST
