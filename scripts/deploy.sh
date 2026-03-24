@@ -139,6 +139,54 @@ fi
 if [ -f /opt/hydra/scripts/patch-openclaw-mention-gate.sh ]; then
   bash /opt/hydra/scripts/patch-openclaw-mention-gate.sh
 fi
+
+# Sync cron jobs from repo (preserve live state)
+if [ -f /opt/hydra/cron-jobs.json ]; then
+  LIVE_CRON="/root/.openclaw/cron/jobs.json"
+  if [ -f "$LIVE_CRON" ]; then
+    python3 -c "
+import json
+with open('/opt/hydra/cron-jobs.json') as f:
+    repo = json.load(f)
+with open('$LIVE_CRON') as f:
+    live = json.load(f)
+live_states = {j['name']: j.get('state', {}) for j in live.get('jobs', [])}
+for j in repo.get('jobs', []):
+    if j['name'] in live_states:
+        j['state'] = live_states[j['name']]
+with open('$LIVE_CRON', 'w') as f:
+    json.dump(repo, f, indent=2)
+print(f'  Synced {len(repo.get(\"jobs\", []))} cron jobs (preserved live state)')
+"
+  else
+    cp /opt/hydra/cron-jobs.json "$LIVE_CRON"
+    echo "  Deployed cron jobs (fresh install)"
+  fi
+fi
+
+# Use local embeddings for memory search (no OpenAI dependency)
+python3 -c "
+import json
+cfg = '/root/.openclaw/openclaw.json'
+with open(cfg) as f:
+    c = json.load(f)
+defaults = c.setdefault('agents', {}).setdefault('defaults', {})
+defaults['memorySearch'] = {'enabled': True, 'provider': 'local'}
+# Remove OpenAI provider if present
+c.get('models', {}).get('providers', {}).pop('openai', None)
+with open(cfg, 'w') as f:
+    json.dump(c, f, indent=2)
+print('  Memory search: local embeddings (no OpenAI)')
+"
+
+# Patch Gmail plugin describeMessageTool (until plugin is updated for 2026.3.22+)
+GMAIL_CHANNEL="/root/.openclaw/extensions/openclaw-gmail/src/channel.ts"
+if [ -f "$GMAIL_CHANNEL" ]; then
+  if ! grep -q "describeMessageTool" "$GMAIL_CHANNEL"; then
+    sed -i 's/listActions: () => \["send"\],/listActions: () => ["send"],\n    describeMessageTool: () => ({ actions: ["send"], capabilities: ["send"] }),/' "$GMAIL_CHANNEL"
+    echo "  Patched Gmail plugin describeMessageTool"
+  fi
+fi
 POSTSYNC
 
 log "  Post-sync setup complete."

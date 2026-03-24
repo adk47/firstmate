@@ -1,0 +1,350 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "0f0ced35-1502-4657-9bcf-c42673b2ba03",
+      "agentId": "devops",
+      "name": "daily-aws-change-report",
+      "description": "Daily AWS change report — CloudTrail write events across both accounts",
+      "enabled": true,
+      "createdAtMs": 1774313970262,
+      "updatedAtMs": 1774313970262,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 0 * * *",
+        "tz": "America/New_York"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the daily AWS change report. Cover the previous 24h. Query CloudTrail write events across Flagship (068358774785) us-west-2 and Plaque (686505752817) us-east-1/us-west-2. Categorize: Human Changes, Deploys, Anomaly Flags, Scaling, Data, Security, DNS & Networking, Automated Ops. Format for Slack (bold not markdown, bullets not dashes). Post as top-level message.",
+        "timeoutSeconds": 600
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0ADV2W76G4",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1774324800000
+      }
+    },
+    {
+      "id": "786f8a98-0e9c-47a7-92e6-a1ef9329842f",
+      "agentId": "devops",
+      "name": "api-change-watch",
+      "description": "Daily scan of Muso-AI repos for API/schema/auth changes",
+      "enabled": true,
+      "createdAtMs": 1774313970262,
+      "updatedAtMs": 1774313970262,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 8 * * *"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the API change watch. For each repo (core-backend, platform-data-processing, industry-data-processing, analytics-worker, web-credits, mobile), check git log for last 24h commits. Analyze for: breaking API changes, model/schema field changes, new/removed endpoints, auth changes, SQS message format changes, database migrations. Post impact analysis.",
+        "timeoutSeconds": 300
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0ADV2W76G4",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1774339200000
+      }
+    },
+    {
+      "id": "6f95f102-0d4e-4d7a-b308-5f3ca5629d41",
+      "agentId": "clio",
+      "name": "daily-profile-movement",
+      "description": "Daily report of top profiles joining/leaving Muso.AI",
+      "enabled": true,
+      "createdAtMs": 1774313970262,
+      "updatedAtMs": 1774313970262,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the daily profile movement report. Query Athena (workgroup: clio-agent, region: us-west-2) for: 1) PAID CHURNS in last 24h — separate B2B (muso_team_business_*) and B2P (muso_team_pro_* + muso_individual_*), include emails. 2) PAID JOINS in last 24h ranked by popularity. 3) POPULAR LITE USERS — claimed profiles with popularity 90+ and no paid subscription. Format for Slack with bullets. Flag biggest red flags.",
+        "timeoutSeconds": 300
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0ADREBPNQ2",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1774342800000
+      }
+    },
+    {
+      "id": "40dc9d28-8434-4b76-a04e-edf9f1715b52",
+      "agentId": "cmo",
+      "name": "daily-churned-campaign-refresh",
+      "description": "Daily win-back campaign sheet update — append new churns",
+      "enabled": true,
+      "createdAtMs": 1774313970262,
+      "updatedAtMs": 1774313970262,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 10 * * *"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Daily Win-Back Campaign sheet update. Query Athena for new churned Pro users. Diff against existing emails in Google Sheet (1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs, account: a@muso.ai). ONLY APPEND new rows — never replace or overwrite tracking columns (AI-AN). Post summary of new additions.",
+        "timeoutSeconds": 300
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0ADREBPNQ2",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1774346400000
+      }
+    },
+    {
+      "id": "9e40f82f-2f7f-4d76-b0ba-33d1872c644e",
+      "agentId": "finance",
+      "name": "daily-dispute-handler",
+      "description": "Daily Stripe dispute check, investigation, and evidence submission",
+      "enabled": true,
+      "createdAtMs": 1774313970262,
+      "updatedAtMs": 1774313970262,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "tz": "America/Los_Angeles"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the stripe-disputes skill: check all open Stripe disputes needing response, investigate each one, submit evidence for disputes worth fighting (include ToS: https://credits.muso.ai/terms in every submission), and post a single daily summary to Slack. Update memory with results.",
+        "timeoutSeconds": 300
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C08GZPWAKBJ",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1774368000000
+      }
+    },
+    {
+      "id": "0d03b0a7-c461-4ecd-8471-68f8368b6e72",
+      "agentId": "devops",
+      "name": "daily-pr-review",
+      "description": "Daily production risk review of merged PRs",
+      "enabled": true,
+      "createdAtMs": 1774313970262,
+      "updatedAtMs": 1774313970262,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 7 * * *",
+        "tz": "America/Los_Angeles"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Daily PR Code Review. Review all PRs merged in the last 24 hours across Muso-AI repos (core-backend, platform-data-processing, industry-data-processing, analytics-worker, web-credits, mobile) for PRODUCTION RISK. For each merged PR fetch the diff. Analyze for: OOM, scaling, concurrency, data integrity, error handling, performance risks. Post results with risk ratings. Focus on real problems at production scale, not style nits.",
+        "timeoutSeconds": 600
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0ADV2W76G4",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1774360800000
+      }
+    },
+    {
+      "id": "62921c23-049e-4cd3-9181-9116b43e62f9",
+      "agentId": "cmo",
+      "name": "cmo-eod-briefing",
+      "description": "Daily 10PM CET EOD briefing for Fede",
+      "enabled": true,
+      "createdAtMs": 1774313970262,
+      "updatedAtMs": 1774313970262,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 22 * * *",
+        "tz": "Europe/Rome"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Generate the CMO EOD Briefing for Fede. Post to #clio_x_fede (C0AHN078CSH). Cover: Tech (commits/deploys/blockers), Fede mentions/tags, replies to Fede messages, highlights from #social-media #growth-team, notable a@muso.ai emails, and anything else major. Omit empty sections. Plain English, short, with links.",
+        "timeoutSeconds": 300
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0AHN078CSH",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1774386000000
+      }
+    },
+    {
+      "id": "0e39220e-d666-4f00-b871-29a479315037",
+      "agentId": "cmo",
+      "name": "b2b-reply-scanner-15m",
+      "description": "Scan Gmail for B2B prospect replies every 15 minutes",
+      "enabled": true,
+      "createdAtMs": 1774313970262,
+      "updatedAtMs": 1774321196683,
+      "schedule": {
+        "kind": "every",
+        "everyMs": 900000,
+        "anchorMs": 1774313970262
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Scan Gmail (a@muso.ai) for new B2B Ads outreach replies in the last 20 minutes. Filter for replies from B2B prospects (cross-reference with outreach sheet). IGNORE internal emails (muso.ai domains), SaaS notifications, marketing emails. CRITICAL RULE: If NO new B2B prospect replies, respond with ONLY: NO_REPLY. Only if you find an actual reply, post to #clio_x_fede (C0AHN078CSH) with: sender name, company, reply summary, suggested next action. Also sync GHL pipeline stage if applicable.",
+        "timeoutSeconds": 120
+      },
+      "delivery": {
+        "mode": "none",
+        "channel": "slack",
+        "to": "C0AHN078CSH",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1774322070290,
+        "lastRunAtMs": 1774321170290,
+        "lastRunStatus": "ok",
+        "lastStatus": "ok",
+        "lastDurationMs": 26393,
+        "lastDeliveryStatus": "not-delivered",
+        "lastDelivered": false,
+        "runningAtMs": 1774322070291
+      }
+    },
+    {
+      "id": "c7501a46-e461-42f6-a354-37d328a08ed6",
+      "agentId": "cmo",
+      "name": "amp-daily-report",
+      "description": "Daily AMP ads performance report",
+      "enabled": true,
+      "createdAtMs": 1774313970262,
+      "updatedAtMs": 1774313970262,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 11 * * *",
+        "tz": "America/Chicago"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the AMP Daily Report. Query core-backend tables public_ad_events and public_ads via Athena (workgroup: clio-agent, region: us-west-2). Build report: 1) Summary: all-time/7d/today views, clicks, CTR, unique viewers with deltas. 2) Top 5 ads by CTR. 3) Underperformers (CTR < 0.3% with >1K views). 4) AMP vs Feed breakdown. 5) Platform breakdown. 6) Daily trend 7 days. Format for Slack bullets, keep short.",
+        "timeoutSeconds": 120
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C031DKAGQSH",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1774368000000
+      }
+    },
+    {
+      "id": "4a0aadc6-aa1c-4ce0-8376-05d7970b5345",
+      "agentId": "clio",
+      "name": "nightly-slack-clickup-gap-analysis",
+      "description": "Nightly Slack to ClickUp gap analysis",
+      "enabled": true,
+      "createdAtMs": 1774313970262,
+      "updatedAtMs": 1774313970262,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 0 * * *",
+        "tz": "America/Los_Angeles"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Nightly Slack to ClickUp Gap Analysis. Read last 24h messages in #growth-team (C031DKAGQSH) and #clio_analyst (C0ADREBPNQ2). For each discussion topic, feature idea, bug report, or decision: search ClickUp for matching tasks, check repos for related code/PRs. Post gap report to #growth-team with: suggested new tasks, suggested edits, priority suggestions, communication gaps. Suggestions only — do NOT make changes.",
+        "timeoutSeconds": 300
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C031DKAGQSH",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1774335600000
+      }
+    },
+    {
+      "id": "dca0007b-3e30-4527-8d19-2dae65ea078b",
+      "agentId": "devops",
+      "name": "daily-dev-activity-report",
+      "description": "Daily developer activity report — commits, features, bugs fixed across all repos",
+      "enabled": true,
+      "createdAtMs": 1774321393095,
+      "updatedAtMs": 1774321393095,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 2 * * *",
+        "tz": "America/Chicago"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the daily dev activity report. For each developer (adk47=Aaron, liflovs=Serhii), run the dev-report.sh script or use gh CLI to get commits from the last 24h across all Muso-AI repos (core-backend, web-credits, platform-data-processing, industry-data-processing, analytics-worker, mobile, devops, feed-service, customer-api-mcp, render-service, web-encore). For each dev: 1) Big Picture — group commits into themes, explain what was accomplished and why it matters. 2) Commit stats — per-repo counts, additions/deletions. 3) Individual commits with sha and +/-. 4) Cadence — total commits, average interval. Format for Slack mrkdwn (no tables, bullets only). Post each dev report as a separate message. If zero commits, say so briefly.",
+        "timeoutSeconds": 300
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0ADV2W76G4",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1774335600000
+      }
+    }
+  ]
+}
