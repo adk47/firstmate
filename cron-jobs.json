@@ -5,10 +5,10 @@
       "id": "0f0ced35-1502-4657-9bcf-c42673b2ba03",
       "agentId": "devops",
       "name": "daily-aws-change-report",
-      "description": "Daily AWS change report — CloudTrail write events across both accounts",
+      "description": "Daily AWS change report \u2014 CloudTrail write events across both accounts",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774313970262,
+      "updatedAtMs": 1774325096085,
       "schedule": {
         "kind": "cron",
         "expr": "0 0 * * *",
@@ -28,8 +28,15 @@
         "bestEffort": true
       },
       "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774324800000
+        "consecutiveErrors": 1,
+        "nextRunAtMs": 1774411200000,
+        "lastRunAtMs": 1774324845410,
+        "lastRunStatus": "error",
+        "lastStatus": "error",
+        "lastDurationMs": 250675,
+        "lastError": "\u26a0\ufe0f \u2709\ufe0f Message failed",
+        "lastDelivered": true,
+        "lastDeliveryStatus": "delivered"
       }
     },
     {
@@ -39,7 +46,7 @@
       "description": "Daily scan of Muso-AI repos for API/schema/auth changes",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774313970262,
+      "updatedAtMs": 1774339408315,
       "schedule": {
         "kind": "cron",
         "expr": "0 8 * * *"
@@ -59,7 +66,13 @@
       },
       "state": {
         "consecutiveErrors": 0,
-        "nextRunAtMs": 1774339200000
+        "nextRunAtMs": 1774425600000,
+        "lastRunAtMs": 1774339235776,
+        "lastRunStatus": "ok",
+        "lastStatus": "ok",
+        "lastDurationMs": 172539,
+        "lastDelivered": true,
+        "lastDeliveryStatus": "delivered"
       }
     },
     {
@@ -69,7 +82,7 @@
       "description": "Daily report of top profiles joining/leaving Muso.AI",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774313970262,
+      "updatedAtMs": 1774343168757,
       "schedule": {
         "kind": "cron",
         "expr": "0 9 * * *"
@@ -78,7 +91,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run the daily profile movement report. Query Athena (workgroup: clio-agent, region: us-west-2) for: 1) PAID CHURNS in last 24h — separate B2B (muso_team_business_*) and B2P (muso_team_pro_* + muso_individual_*), include emails. 2) PAID JOINS in last 24h ranked by popularity. 3) POPULAR LITE USERS — claimed profiles with popularity 90+ and no paid subscription. Format for Slack with bullets. Flag biggest red flags.",
+        "message": "Run the daily profile movement report. Query Athena (workgroup: clio-agent, region: us-west-2) for: 1) PAID CHURNS in last 24h \u2014 separate B2B (muso_team_business_*) and B2P (muso_team_pro_* + muso_individual_*), include emails. 2) PAID JOINS in last 24h ranked by popularity. 3) POPULAR LITE USERS \u2014 claimed profiles with popularity 90+ and no paid subscription. Format for Slack with bullets. Flag biggest red flags.",
         "timeoutSeconds": 300
       },
       "delivery": {
@@ -88,18 +101,25 @@
         "bestEffort": true
       },
       "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774342800000
+        "consecutiveErrors": 1,
+        "nextRunAtMs": 1774429200000,
+        "lastRunAtMs": 1774342868749,
+        "lastRunStatus": "error",
+        "lastStatus": "error",
+        "lastDurationMs": 300008,
+        "lastError": "cron: job execution timed out",
+        "lastErrorReason": "timeout",
+        "lastDeliveryStatus": "unknown"
       }
     },
     {
       "id": "40dc9d28-8434-4b76-a04e-edf9f1715b52",
       "agentId": "cmo",
       "name": "daily-churned-campaign-refresh",
-      "description": "Daily win-back campaign sheet update — append new churns",
+      "description": "Daily win-back campaign sheet update \u2014 append new churns",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774313970262,
+      "updatedAtMs": 1774346792352,
       "schedule": {
         "kind": "cron",
         "expr": "0 10 * * *"
@@ -108,7 +128,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Daily Win-Back Campaign sheet update. Query Athena for new churned Pro users. Diff against existing emails in Google Sheet (1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs, account: a@muso.ai). ONLY APPEND new rows — never replace or overwrite tracking columns (AI-AN). Post summary of new additions.",
+        "message": "Daily Win-Back Campaign sheet update. Query Athena for new churned Pro users. Diff against existing emails in Google Sheet (1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs, account: a@muso.ai). ONLY APPEND new rows \u2014 never replace or overwrite tracking columns (AI-AN). Post summary of new additions.",
         "timeoutSeconds": 300
       },
       "delivery": {
@@ -118,8 +138,15 @@
         "bestEffort": true
       },
       "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774346400000
+        "consecutiveErrors": 1,
+        "nextRunAtMs": 1774432800000,
+        "lastRunAtMs": 1774346492347,
+        "lastRunStatus": "error",
+        "lastStatus": "error",
+        "lastDurationMs": 300005,
+        "lastError": "cron: job execution timed out",
+        "lastErrorReason": "timeout",
+        "lastDeliveryStatus": "unknown"
       }
     },
     {
@@ -150,7 +177,7 @@
       },
       "state": {
         "consecutiveErrors": 0,
-        "nextRunAtMs": 1774368000000
+        "nextRunAtMs": 1774454400000
       }
     },
     {
@@ -160,7 +187,7 @@
       "description": "Daily production risk review of merged PRs",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774313970262,
+      "updatedAtMs": 1774361021007,
       "schedule": {
         "kind": "cron",
         "expr": "0 7 * * *",
@@ -181,7 +208,13 @@
       },
       "state": {
         "consecutiveErrors": 0,
-        "nextRunAtMs": 1774360800000
+        "nextRunAtMs": 1774447200000,
+        "lastRunAtMs": 1774360800004,
+        "lastRunStatus": "ok",
+        "lastStatus": "ok",
+        "lastDurationMs": 221003,
+        "lastDelivered": true,
+        "lastDeliveryStatus": "delivered"
       }
     },
     {
@@ -222,7 +255,7 @@
       "description": "Scan Gmail for B2B prospect replies every 15 minutes",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774321196683,
+      "updatedAtMs": 1774368363579,
       "schedule": {
         "kind": "every",
         "everyMs": 900000,
@@ -242,15 +275,14 @@
         "bestEffort": true
       },
       "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774322070290,
-        "lastRunAtMs": 1774321170290,
-        "lastRunStatus": "ok",
-        "lastStatus": "ok",
-        "lastDurationMs": 26393,
-        "lastDeliveryStatus": "not-delivered",
-        "lastDelivered": false,
-        "runningAtMs": 1774322070291
+        "consecutiveErrors": 1,
+        "nextRunAtMs": 1774369770262,
+        "lastRunAtMs": 1774368243574,
+        "lastRunStatus": "error",
+        "lastStatus": "error",
+        "lastDurationMs": 120005,
+        "lastDeliveryStatus": "not-requested",
+        "lastErrorReason": "timeout"
       }
     },
     {
@@ -281,7 +313,7 @@
       },
       "state": {
         "consecutiveErrors": 0,
-        "nextRunAtMs": 1774368000000
+        "nextRunAtMs": 1774454400000
       }
     },
     {
@@ -291,7 +323,7 @@
       "description": "Nightly Slack to ClickUp gap analysis",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774313970262,
+      "updatedAtMs": 1774335925954,
       "schedule": {
         "kind": "cron",
         "expr": "0 0 * * *",
@@ -301,7 +333,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Nightly Slack to ClickUp Gap Analysis. Read last 24h messages in #growth-team (C031DKAGQSH) and #clio_analyst (C0ADREBPNQ2). For each discussion topic, feature idea, bug report, or decision: search ClickUp for matching tasks, check repos for related code/PRs. Post gap report to #growth-team with: suggested new tasks, suggested edits, priority suggestions, communication gaps. Suggestions only — do NOT make changes.",
+        "message": "Nightly Slack to ClickUp Gap Analysis. Read last 24h messages in #growth-team (C031DKAGQSH) and #clio_analyst (C0ADREBPNQ2). For each discussion topic, feature idea, bug report, or decision: search ClickUp for matching tasks, check repos for related code/PRs. Post gap report to #growth-team with: suggested new tasks, suggested edits, priority suggestions, communication gaps. Suggestions only \u2014 do NOT make changes.",
         "timeoutSeconds": 300
       },
       "delivery": {
@@ -312,17 +344,23 @@
       },
       "state": {
         "consecutiveErrors": 0,
-        "nextRunAtMs": 1774335600000
+        "nextRunAtMs": 1774422000000,
+        "lastRunAtMs": 1774335655594,
+        "lastRunStatus": "ok",
+        "lastStatus": "ok",
+        "lastDurationMs": 270360,
+        "lastDelivered": true,
+        "lastDeliveryStatus": "delivered"
       }
     },
     {
       "id": "dca0007b-3e30-4527-8d19-2dae65ea078b",
       "agentId": "devops",
       "name": "daily-dev-activity-report",
-      "description": "Daily developer activity report — commits, features, bugs fixed across all repos",
+      "description": "Daily developer activity report \u2014 commits, features, bugs fixed across all repos",
       "enabled": true,
       "createdAtMs": 1774321393095,
-      "updatedAtMs": 1774321393095,
+      "updatedAtMs": 1774336081492,
       "schedule": {
         "kind": "cron",
         "expr": "0 2 * * *",
@@ -332,7 +370,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run the daily dev activity report. For each developer (adk47=Aaron, liflovs=Serhii), run the dev-report.sh script or use gh CLI to get commits from the last 24h across all Muso-AI repos (core-backend, web-credits, platform-data-processing, industry-data-processing, analytics-worker, mobile, devops, feed-service, customer-api-mcp, render-service, web-encore). For each dev: 1) Big Picture — group commits into themes, explain what was accomplished and why it matters. 2) Commit stats — per-repo counts, additions/deletions. 3) Individual commits with sha and +/-. 4) Cadence — total commits, average interval. Format for Slack mrkdwn (no tables, bullets only). Post each dev report as a separate message. If zero commits, say so briefly.",
+        "message": "Run the daily dev activity report. For each developer (adk47=Aaron, liflovs=Serhii), run the dev-report.sh script or use gh CLI to get commits from the last 24h across all Muso-AI repos (core-backend, web-credits, platform-data-processing, industry-data-processing, analytics-worker, mobile, devops, feed-service, customer-api-mcp, render-service, web-encore). For each dev: 1) Big Picture \u2014 group commits into themes, explain what was accomplished and why it matters. 2) Commit stats \u2014 per-repo counts, additions/deletions. 3) Individual commits with sha and +/-. 4) Cadence \u2014 total commits, average interval. Format for Slack mrkdwn (no tables, bullets only). Post each dev report as a separate message. If zero commits, say so briefly.",
         "timeoutSeconds": 300
       },
       "delivery": {
@@ -342,8 +380,43 @@
         "bestEffort": true
       },
       "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774335600000
+        "consecutiveErrors": 1,
+        "nextRunAtMs": 1774422000000,
+        "lastRunAtMs": 1774335925954,
+        "lastRunStatus": "error",
+        "lastStatus": "error",
+        "lastDurationMs": 155538,
+        "lastError": "\u26a0\ufe0f \u2709\ufe0f Message failed",
+        "lastDelivered": true,
+        "lastDeliveryStatus": "delivered"
+      }
+    },
+    {
+      "id": "54283ee4-a231-4a0b-b88d-d684d1d7e60e",
+      "agentId": "clio",
+      "name": "weekly-google-token-refresh",
+      "description": "Exercise all 4 Google OAuth tokens weekly to prevent expiry",
+      "enabled": true,
+      "createdAtMs": 1774369599525,
+      "updatedAtMs": 1774369599525,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 3 * * 0",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run a Google OAuth token health check. For each account (a@muso.ai, ak@muso.ai, aaron.k@muso.ai, f@muso.ai), use gog to list 1 Gmail message. This keeps the refresh tokens active. Report any failures. Do NOT post to Slack unless something fails.",
+        "timeoutSeconds": 60
+      },
+      "delivery": {
+        "mode": "none",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0
       }
     }
   ]
