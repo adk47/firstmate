@@ -1,0 +1,217 @@
+{
+  "disputes": {
+    "du_1TBd1BLsjTo3Ar3lipvWIYK9": {
+      "amount": 12.5,
+      "customer": "cus_TXj1dFhzVFWRiL",
+      "email": "300cambeatz@gmail.com",
+      "name": "300cambeatz",
+      "reason": "duplicate",
+      "status": "won",
+      "evidence_submitted": "2026-03-16",
+      "due_by": "2026-03-27",
+      "outcome_date": "2026-03-17",
+      "notes": "WON! Monthly subscriber since Dec 2025, 4 charges on distinct billing periods. 15-month user, 3 claimed profiles, 32 API actions. Duplicate claim was baseless \u2014 won within 1 day of submission."
+    },
+    "du_1TB6peLsjTo3Ar3ljYIUvdyd": {
+      "amount": 6.5,
+      "customer": "cus_RLuCNzdD4HEY7N",
+      "email": "luisangeldrummer@gmail.com",
+      "name": "luis Bonilla",
+      "reason": "fraudulent",
+      "status": "won",
+      "evidence_submitted": "2026-03-15",
+      "due_by": "2026-03-30",
+      "outcome_date": "2026-03-17",
+      "notes": "WON! Serial disputer \u2014 3rd of 3 disputes, Jan 26 charge. All 3 Bonilla disputes now WON. Clean sweep."
+    },
+    "du_1TAznuLsjTo3Ar3luwQYS5CF": {
+      "amount": 6.5,
+      "customer": "cus_RLuCNzdD4HEY7N",
+      "email": "luisangeldrummer@gmail.com",
+      "name": "luis Bonilla",
+      "reason": "fraudulent",
+      "status": "won",
+      "evidence_submitted": "2026-03-15",
+      "due_by": "2026-03-30",
+      "outcome_date": "2026-03-17",
+      "notes": "WON! Serial disputer \u2014 2nd of 3 disputes, Feb 26 charge. All 3 Bonilla disputes now WON. Clean sweep."
+    },
+    "du_1TArBRLsjTo3Ar3lDHDioPU5": {
+      "amount": 6.25,
+      "customer": "cus_RLuCNzdD4HEY7N",
+      "email": "luisangeldrummer@gmail.com",
+      "name": "luis Bonilla",
+      "reason": "fraudulent",
+      "status": "won",
+      "evidence_submitted": "2026-03-14",
+      "due_by": "2026-03-30",
+      "outcome_date": "2026-03-16",
+      "notes": "WON! Serial disputer \u2014 1st of 3 disputes. Dec 26 charge ($6.25). Account since Jul 2023, professional profile claimed Sep 2023. 2.5+ years of active usage."
+    },
+    "du_1TA7MFLsjTo3Ar3ljG9pn75s": {
+      "amount": 85.71,
+      "customer": "cus_U4T2XGTZKi9QCD",
+      "email": "ac134899+bxop0@gmail.com",
+      "name": "Emily Harrison",
+      "reason": "fraudulent",
+      "status": "under_review",
+      "evidence_submitted": "2026-03-13",
+      "due_by": "2026-03-28",
+      "notes": "Borderline case. Mar 2 signup, plus-addressed email, Bangladesh IP, UK billing. Claimed professional profile Mar 7. Strength: Weak-Moderate."
+    },
+    "du_1T97sJLsjTo3Ar3lMl6ivPiB": {
+      "amount": 12.5,
+      "email": "charliebermudezartista@gmail.com",
+      "name": "melba e bermudez",
+      "reason": "fraudulent",
+      "status": "lost",
+      "evidence_submitted": "2026-03-09",
+      "due_by": "2026-03-25",
+      "outcome_date": "2026-03-14",
+      "notes": "LOST. Evidence submitted Mar 9, lost by Mar 14."
+    },
+    "du_1T94PyLsjTo3Ar3lSdIcEx40": {
+      "amount": 12.5,
+      "email": "michelbritoe@gmail.com",
+      "name": "Patrice manning",
+      "reason": "fraudulent",
+      "status": "lost",
+      "evidence_submitted": "2026-03-09",
+      "due_by": "2026-03-25",
+      "outcome_date": "2026-03-14",
+      "notes": "LOST. Evidence submitted Mar 9, lost by Mar 14."
+    },
+    "du_1T7pEGLsjTo3Ar3l2hJPMtB9": {
+      "amount": 63.01,
+      "customer": "cus_Twt64qBObEOiSR",
+      "email": "joykrissa+nhqdc@gmail.com",
+      "name": "ogfah",
+      "reason": "fraudulent",
+      "status": "under_review",
+      "evidence_submitted": "2026-03-06",
+      "due_by": "2026-03-30",
+      "notes": "Borderline case \u2014 gibberish name, plus-addressed email, Yemen IP. 21 API actions in 17 min. Due Mar 30."
+    },
+    "du_1T605ZLsjTo3Ar3lcz7NxJnn": {
+      "amount": 131.7,
+      "customer": "cus_P0ycOIsPQJ3vE1",
+      "email": "nicholsjimmy@me.com",
+      "name": "Jimmy Nichols",
+      "reason": "fraudulent",
+      "status": "lost",
+      "evidence_submitted": "2026-03-01",
+      "due_by": "2026-04-10",
+      "outcome_date": "2026-03-07",
+      "notes": "LOST. 2+ year annual subscriber, strong case but lost anyway."
+    },
+    "du_1T5aW6LsjTo3Ar3lwPK4Id5b": {
+      "amount": 120.0,
+      "customer": "cus_RLpZbzcUdxCY5C",
+      "email": "dom777port@gmail.com",
+      "name": "Dominic J Portillo",
+      "reason": "credit_not_processed",
+      "status": "under_review",
+      "evidence_submitted": "2026-02-28",
+      "due_by": "2026-03-15",
+      "notes": "Returning subscriber. Subscribed to annual plan and canceled 6 min later. Deadline passed Mar 15, still under review."
+    },
+    "du_1T5KXjLsjTo3Ar3luQtlVgwK": {
+      "amount": 120.0,
+      "customer": "cus_PXLjPUPjdrwjH4",
+      "email": "kjhart1996@gmail.com",
+      "name": "Cathy Hart / KJ Engineering",
+      "reason": "fraudulent",
+      "status": "under_review",
+      "evidence_submitted": "2026-02-27",
+      "due_by": "2026-03-14",
+      "notes": "3-year annual subscriber. Strong case. Deadline passed Mar 14, still under review."
+    },
+    "du_1T5EqULsjTo3Ar3ldlCPhJ4I": {
+      "amount": 12.5,
+      "customer": "cus_RZeRCEnW2JNYvz",
+      "email": "wjones1010@icloud.com",
+      "name": null,
+      "reason": "debit_not_authorized",
+      "status": "won",
+      "evidence_submitted": "2026-02-27",
+      "due_by": "2026-12-09",
+      "notes": "WON! Jan charge dispute. Evidence submitted 2026-02-27, won 2026-02-28."
+    },
+    "du_1T5EkYLsjTo3Ar3luGhEJO6i": {
+      "amount": 12.5,
+      "customer": "cus_RZeRCEnW2JNYvz",
+      "email": "wjones1010@icloud.com",
+      "name": null,
+      "reason": "debit_not_authorized",
+      "status": "won",
+      "evidence_submitted": "2026-02-27",
+      "due_by": "2026-12-09",
+      "notes": "WON! Feb charge dispute. Evidence submitted 2026-02-27, won 2026-02-28."
+    },
+    "du_1T1fX8LsjTo3Ar3l01JBNUya": {
+      "amount": 120.0,
+      "email": "fjx8f7q7fw@privaterelay.appleid.com",
+      "name": "Karen pliego",
+      "reason": "subscription_canceled",
+      "status": "lost",
+      "evidence_submitted": null,
+      "outcome_date": "2026-03-05",
+      "notes": "Lost. Apple relay email \u2014 no evidence was submitted."
+    },
+    "du_1TCf9CLsjTo3Ar3l7B7ogozU": {
+      "amount": 8.75,
+      "customer": "cus_SVTx5zjpdPvttE",
+      "email": "arcianamusic@gmail.com",
+      "name": "arciana wonderson",
+      "reason": "fraudulent",
+      "status": "under_review",
+      "evidence_submitted": "2026-03-19",
+      "due_by": "2026-04-04",
+      "outcome_date": null,
+      "notes": "EVIDENCE PARTIAL \u2014 only product_description submitted due to shell truncation of long -d flags. Activity log and uncategorized text were silently dropped. Case was strong: 8-month account, 32 API actions, 4 checkout attempts, immediate upgrade, continued use post-charge (claimed 2nd profile Mar 4). LESSON: Use temp files for long evidence text, not inline shell args."
+    },
+    "du_1TCieXLsjTo3Ar3lpM3pj9Rt": {
+      "amount": 12.25,
+      "customer": "cus_SVTx5zjpdPvttE",
+      "email": "arcianamusic@gmail.com",
+      "name": "arciana wonderson",
+      "reason": "fraudulent",
+      "status": "under_review",
+      "evidence_submitted": "2026-03-21",
+      "due_by": "2026-04-04",
+      "outcome_date": null,
+      "notes": "2nd dispute from same customer, same day charges (Dec 29). $12.25 plan upgrade. FULL evidence submitted via temp files. 32+ API actions, 4 checkout attempts, immediate upgrade, 2nd profile claimed Mar 4. Serial disputer."
+    }
+  },
+  "monthly_stats": {
+    "2026-02": {
+      "submitted": 4,
+      "won": 2,
+      "lost": 14,
+      "total_lost_amount": 1838,
+      "total_submitted_amount": 265.0,
+      "total_won_amount": 25.0
+    },
+    "2026-03": {
+      "submitted": 9,
+      "won": 4,
+      "lost": 5,
+      "total_submitted_amount": 324.42,
+      "total_won_amount": 31.75,
+      "total_lost_amount": 396.7,
+      "notes": "Mar 21: arciana wonderson 2nd dispute ($12.25) evidence submitted — serial disputer, same-day charges. Mar 17: 3 NEW WINS — 300cambeatz ($12.50) + Bonilla 2x ($6.50 each). All 3 Bonilla disputes now WON = clean sweep on serial disputer. Mar 16: 300cambeatz evidence submitted, Bonilla 1st WON. Mar 15: Bonilla 2x evidence submitted. Mar 14: Bonilla $6.25 evidence submitted. bermudez + manning both LOST. Mar 13: Emily Harrison evidence submitted. Mar 7: Jimmy Nichols LOST. Karen pliego lost Mar 5. Mar 6: ogfah evidence submitted. Mar 9: 2x $12.50 evidence submitted."
+    }
+  },
+  "all_time_stats": {
+    "total_disputes": 101,
+    "needs_response": 0,
+    "under_review": 19,
+    "won": 7,
+    "lost": 75,
+    "total_under_review_amount": 908.99,
+    "total_won_amount": 176.75,
+    "total_lost_amount": 6978.19
+  },
+  "last_run": "2026-03-21T09:05:00-07:00",
+  "notes": "1 new dispute handled: arciana wonderson 2nd dispute ($12.25, fraudulent) — evidence submitted. No status changes on existing under_review disputes. 19 under review ($908.99 at risk). Next deadlines: Gregorio Ramos ($13.00) due Mar 22, Emily Harrison ($85.71) due Mar 28, Prabhath Panchadara ($12.50) due Mar 28, ogfah ($63.01) due Mar 30, arciana wonderson 2x ($21.00) due Apr 4. March stats: 4W/5L = 44% win rate. All-time: 7W/75L."
+}

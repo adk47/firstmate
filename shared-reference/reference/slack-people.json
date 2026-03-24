@@ -1,0 +1,63 @@
+{
+  "_purpose": "Authoritative Slack ID \u2192 name mapping. EVERY report that attributes a message to someone MUST resolve the sender_id through this file. No exceptions.",
+  "U7RP6HKUZ": {
+    "name": "Aaron Kaufman",
+    "short": "Aaron",
+    "role": "CTO/Founder"
+  },
+  "U07NF5A77E2": {
+    "name": "Fede Pahlen",
+    "short": "Fede",
+    "role": "CMO"
+  },
+  "U038BM16T7W": {
+    "name": "Jan Delmo",
+    "short": "Jan",
+    "role": "Growth"
+  },
+  "U03TYGJF1N3": {
+    "name": "Serhii Ostapchuk",
+    "short": "Serhii",
+    "role": "DevOps"
+  },
+  "U0302FZQGCB": {
+    "name": "Andrey Morskoy",
+    "short": "Andrey",
+    "role": "Platform/Data Lead"
+  },
+  "U02S7TJ7QHY": {
+    "name": "Oleg",
+    "short": "Oleg",
+    "role": "Engineer"
+  },
+  "U0ADN1J282Z": {
+    "name": "Clio",
+    "short": "Clio",
+    "role": "AI Assistant"
+  },
+  "U0AL36NADEY": {
+    "name": "Nicholas Sollazzo",
+    "short": "Nick",
+    "role": "Data Ops"
+  },
+  "U03LP8YHLPK": {
+    "name": "Mariia Bubley",
+    "short": "Mariia",
+    "role": "Design/UX"
+  },
+  "U02N2NP3H7F": {
+    "name": "Ihor",
+    "short": "Ihor",
+    "role": "Engineering"
+  },
+  "U042AG73FEK": {
+    "name": "Unknown",
+    "short": "Unknown",
+    "role": "Engineering"
+  },
+  "U0A8CCTTAAG": {
+    "name": "Liza",
+    "short": "Liza",
+    "role": "Finance"
+  }
+}
