@@ -65,16 +65,60 @@ jobs:
           echo "K8s manifests applied"
           echo "::endgroup::"
 
+      - name: Install plugins
+        run: |
+          echo "::group::Installing plugins"
+          # Install any plugins in the plugins/ directory
+          if [ -d "plugins/" ]; then
+            for plugin_dir in plugins/*/; do
+              plugin_name=$(basename "$plugin_dir")
+              if [ -f "${plugin_dir}package.json" ]; then
+                echo "Installing plugin: ${plugin_name}"
+                cd "${plugin_dir}" && npm install --production 2>&1 | tail -3 && cd -
+                # Register with OpenClaw if not already installed
+                if [ ! -d "/root/.openclaw/extensions/${plugin_name}" ]; then
+                  cp -r "${plugin_dir}" "/root/.openclaw/extensions/${plugin_name}"
+                  echo "Registered ${plugin_name} in OpenClaw extensions"
+                else
+                  rsync -az --exclude='node_modules' "${plugin_dir}" "/root/.openclaw/extensions/${plugin_name}/"
+                  echo "Updated ${plugin_name} in OpenClaw extensions"
+                fi
+              fi
+            done
+          fi
+          echo "::endgroup::"
+
+      - name: Apply patches
+        run: |
+          echo "::group::Applying patches"
+          # Apply mention gate patch (until openclaw/openclaw#53161 is merged upstream)
+          if [ -f scripts/patch-openclaw-mention-gate.sh ]; then
+            chmod +x scripts/patch-openclaw-mention-gate.sh
+            bash scripts/patch-openclaw-mention-gate.sh
+          fi
+          echo "::endgroup::"
+
       - name: Restart OpenClaw Gateway
         id: restart
         run: |
           echo "::group::Restarting OpenClaw Gateway"
-          if /usr/local/bin/kubectl get deployment/openclaw-gateway -n ${HYDRA_NAMESPACE} &>/dev/null; then
+          # OpenClaw runs as systemd service on Node 8 (not K8s)
+          if systemctl is-active openclaw-gateway &>/dev/null; then
+            systemctl restart openclaw-gateway
+            sleep 5
+            if systemctl is-active openclaw-gateway &>/dev/null; then
+              echo "OpenClaw Gateway restarted successfully (systemd)"
+            else
+              echo "::error::Gateway failed to start after restart"
+              journalctl -u openclaw-gateway --no-pager -n 20
+              exit 1
+            fi
+          elif /usr/local/bin/kubectl get deployment/openclaw-gateway -n ${HYDRA_NAMESPACE} &>/dev/null; then
             /usr/local/bin/kubectl rollout restart deployment/openclaw-gateway -n ${HYDRA_NAMESPACE}
             /usr/local/bin/kubectl rollout status deployment/openclaw-gateway -n ${HYDRA_NAMESPACE} --timeout=300s
-            echo "OpenClaw Gateway restarted successfully"
+            echo "OpenClaw Gateway restarted successfully (kubectl)"
           else
-            echo "openclaw-gateway deployment not found — skipping restart (running as Docker container)"
+            echo "::warning::No gateway found (systemd or kubectl) — skipping restart"
           fi
           echo "::endgroup::"
 
