@@ -46,8 +46,8 @@ function checkEscalation(message) {
 
 // --- HMAC validation ---
 function validateHmac(body, signature) {
-  if (!signature || !signature.startsWith("sha256=")) return false;
-  const expected = "sha256=" + crypto.createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex");
+  if (!signature || !signature.startsWith("sha1=")) return false;
+  const expected = "sha1=" + crypto.createHmac("sha1", WEBHOOK_SECRET).update(body).digest("hex");
   if (expected.length !== signature.length) return false;
   return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
 }
