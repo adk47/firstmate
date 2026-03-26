@@ -270,6 +270,25 @@ agents:
         action: DENY
         comment: "Override shared rule — support agent does NOT get Slack WebSocket access"
 
+  sentinel:
+    description: "Guardian agent. CLIProxyAPI + Slack alerts + GitHub PRs + PromptGuard."
+    additional_rules:
+      - name: promptguard-sidecar
+        protocol: tcp
+        port: 18793
+        destination: 127.0.0.1
+        comment: "PromptGuard 2 local inference"
+      - name: github
+        protocol: tcp
+        port: 443
+        destination: github.com
+        comment: "GitHub — draft adaptive pattern PRs"
+      - name: github-api
+        protocol: tcp
+        port: 443
+        destination: api.github.com
+        comment: "GitHub API"
+
   cmo:
     description: "Marketing & analytics platforms."
     additional_rules:

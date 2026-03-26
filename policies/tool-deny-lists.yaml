@@ -201,3 +201,24 @@ agents:
       - file_delete
       - secrets_read
       - sessions_send
+
+  sentinel:
+    description: "Guardian agent. Audit, quarantine, alert, draft PRs. No exec, no data, no CRM."
+    denied:
+      - exec
+      - browser
+      - http_request
+      - quickbooks
+      - payroll
+      - crm_read
+      - crm_write
+      - kubectl
+      - helm
+      - docker
+      - vault_read
+      - vault_write
+      - db_read
+      - db_write
+      - file_delete
+      - secrets_read
+      - slack_admin

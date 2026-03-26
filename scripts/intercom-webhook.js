@@ -12,6 +12,24 @@ const WORKSPACE_ID = process.env.INTERCOM_WORKSPACE_ID || "";
 const DISPATCH_TIMEOUT_MS = parseInt(process.env.DISPATCH_TIMEOUT_MS || "15000", 10);
 const MAX_RETRIES = 3;
 
+// --- PromptGuard injection scanning ---
+const PROMPTGUARD_URL = process.env.PROMPTGUARD_URL || "http://localhost:18793";
+const PROMPTGUARD_TIMEOUT_MS = 50; // hard cap — fail-open if slow
+const BLOCK_THRESHOLD = parseFloat(process.env.PROMPTGUARD_BLOCK_THRESHOLD || "0.85");
+const FLAG_THRESHOLD = parseFloat(process.env.PROMPTGUARD_FLAG_THRESHOLD || "0.3");
+const OUTPUT_BLOCK_THRESHOLD = parseFloat(process.env.PROMPTGUARD_OUTPUT_BLOCK_THRESHOLD || "0.7");
+if (isNaN(BLOCK_THRESHOLD) || isNaN(FLAG_THRESHOLD) || isNaN(OUTPUT_BLOCK_THRESHOLD)) {
+  console.error("[intercom-webhook] FATAL: invalid PromptGuard threshold — must be numeric");
+  process.exit(1);
+}
+
+// --- Quarantine ---
+const QUARANTINE_PATH = process.env.QUARANTINE_PATH || "/app/sentinel/quarantine.json";
+const fs = require("fs");
+
+// --- Slack #cs_chats feed ---
+const SLACK_CS_CHATS_WEBHOOK = process.env.SLACK_CS_CHATS_WEBHOOK || "";
+
 // --- Required env vars — refuse to start without them ---
 const REQUIRED_VARS = { INTERCOM_WEBHOOK_SECRET: WEBHOOK_SECRET, INTERCOM_TOKEN, INTERCOM_BOT_ADMIN_ID: BOT_ADMIN_ID, OPENCLAW_TOKEN };
 const missing = Object.entries(REQUIRED_VARS).filter(([, v]) => !v).map(([k]) => k);
@@ -32,6 +50,100 @@ const ESCALATION_RULES = [
   { category: "security", patterns: [/\bhacked\b/i, /\bcompromised\b/i, /\bunauthorized access\b/i, /\bstolen account\b/i, /\bpassword breach\b/i] },
   { category: "abuse", patterns: [/\bharassment\b/i, /\babuse report\b/i, /\bthreatening\b/i, /\bphishing\b/i] },
 ];
+
+// --- PromptGuard scan helper ---
+async function scanWithPromptGuard(text) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROMPTGUARD_TIMEOUT_MS);
+    const res = await fetch(`${PROMPTGUARD_URL}/v1/classify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      console.error(`[intercom-webhook] PromptGuard returned HTTP ${res.status}`);
+      return { score: 0, label: "error", latency_ms: 0 };
+    }
+    return await res.json();
+  } catch (err) {
+    const isTimeout = err.name === "AbortError";
+    console.error(`[intercom-webhook] PromptGuard ${isTimeout ? "timeout" : "error"}: ${err.message || err}`);
+    return { score: 0, label: isTimeout ? "timeout" : "error", latency_ms: 0 }; // fail-open
+  }
+}
+
+// --- Quarantine check helper ---
+function getQuarantineMode() {
+  try {
+    const data = JSON.parse(fs.readFileSync(QUARANTINE_PATH, "utf8"));
+    const VALID_MODES = new Set(["soft", "hard", "critical"]);
+    const mode = data.support?.mode || null;
+    if (mode && !VALID_MODES.has(mode)) {
+      console.error(`[intercom-webhook] INVALID quarantine mode "${mode}" — treating as hard`);
+      return "hard";
+    }
+    return mode;
+  } catch (err) {
+    if (err.code === "ENOENT") return null; // file not created yet
+    console.error(`[intercom-webhook] QUARANTINE FILE UNREADABLE: ${err.message} — defaulting to hard quarantine`);
+    return "hard"; // fail-closed: can't verify quarantine state, assume the worst
+  }
+}
+
+// --- Slack #cs_chats feed ---
+function stripHtml(str) {
+  return (str || "").replace(/<[^>]*>/g, "").trim();
+}
+
+function truncate(str, len = 200) {
+  const clean = stripHtml(str);
+  return clean.length > len ? clean.substring(0, len) + "..." : clean;
+}
+
+async function postToCsChats(blocks) {
+  if (!SLACK_CS_CHATS_WEBHOOK) return;
+  try {
+    const res = await fetch(SLACK_CS_CHATS_WEBHOOK, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ blocks }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      console.error(`[intercom-webhook] slack cs_chats post failed: HTTP ${res.status} ${errBody}`);
+    }
+  } catch (err) {
+    console.warn(`[intercom-webhook] slack cs_chats post failed: ${err.message || err}`);
+  }
+}
+
+function buildInboundBlocks({ convId, customerName, message, isNew, badges }) {
+  const badgeStr = badges.length > 0 ? "  " + badges.join(" ") : "";
+  const intercomUrl = `https://app.intercom.com/a/inbox/${WORKSPACE_ID}/inbox/conversation/${convId}`;
+  const header = isNew ? ":speech_balloon: New conversation" : ":left_speech_bubble: Customer replied";
+  const lines = [
+    `*${header}*${badgeStr}`,
+    `*From:* ${customerName || "Unknown"}`,
+    `*Message:* ${truncate(message)}`,
+    `<${intercomUrl}|View in Intercom>`,
+  ];
+  return [{ type: "section", text: { type: "mrkdwn", text: lines.join("\n") } }];
+}
+
+function buildOutcomeBlocks({ convId, outcome, detail }) {
+  const intercomUrl = `https://app.intercom.com/a/inbox/${WORKSPACE_ID}/inbox/conversation/${convId}`;
+  return [{ type: "context", elements: [{ type: "mrkdwn", text: `${outcome}${detail ? " — " + detail : ""}  |  <${intercomUrl}|conv>` }] }];
+}
+
+function extractCustomerInfo(payload) {
+  const contact = payload.data?.item?.source?.author || payload.data?.item?.contacts?.contacts?.[0] || {};
+  const name = contact.name || [contact.first_name, contact.last_name].filter(Boolean).join(" ") || null;
+  const email = contact.email || null;
+  return { name, email };
+}
 
 function checkEscalation(message) {
   if (!message) return null;
@@ -231,13 +343,52 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Extract customer info for Slack feed
+      const { name: customerName } = extractCustomerInfo(payload);
+      const isNewConv = topic === "conversation.user.created";
+
       // Escalation check
       const escalation = checkEscalation(customerBody);
       if (escalation) {
         session.handoffMode = "human_takeover";
         console.log(`[intercom-webhook] ESCALATED conv=${convId} category=${escalation.category} pattern=${escalation.pattern}`);
-        // TODO: post escalation card to fallbackSlackSupervisionChannel
         await replyToIntercom(convId, "I'm connecting you with our support team for this. Someone will be with you shortly.");
+        // Post to #cs_chats — escalation
+        postToCsChats([
+          ...buildInboundBlocks({ convId, customerName, message: customerBody, isNew: isNewConv, badges: [`:rotating_light: *ESCALATED (${escalation.category})*`] }),
+          ...buildOutcomeBlocks({ convId, outcome: ":person_with_pouting_face: Handed to human rep", detail: `escalation: ${escalation.category}` }),
+        ]);
+        return;
+      }
+
+      // PromptGuard injection scan (input)
+      const pgResult = await scanWithPromptGuard(customerBody);
+      if (pgResult.score > BLOCK_THRESHOLD) {
+        console.warn(`[intercom-webhook] BLOCKED conv=${convId} promptguard=${pgResult.score} label=${pgResult.label}`);
+        await replyToIntercom(convId, "I'd be happy to help! Could you rephrase your question about Muso.AI?");
+        // Post to #cs_chats — blocked
+        postToCsChats([
+          ...buildInboundBlocks({ convId, customerName, message: customerBody, isNew: isNewConv, badges: [`:shield: *BLOCKED (pg=${pgResult.score.toFixed(2)})*`] }),
+          ...buildOutcomeBlocks({ convId, outcome: ":no_entry: PromptGuard blocked — canned response sent" }),
+        ]);
+        return;
+      }
+      const pgFlagged = pgResult.score > FLAG_THRESHOLD;
+      if (pgFlagged) {
+        console.warn(`[intercom-webhook] FLAGGED conv=${convId} promptguard=${pgResult.score} label=${pgResult.label}`);
+      }
+
+      // Quarantine check — reads sentinel's quarantine state
+      const quarantineMode = getQuarantineMode();
+      if (quarantineMode === "hard" || quarantineMode === "critical") {
+        session.handoffMode = "human_takeover";
+        console.warn(`[intercom-webhook] QUARANTINED (${quarantineMode}) conv=${convId} — handing to human`);
+        await replyToIntercom(convId, "I'm connecting you with a member of our support team. They'll be right with you.");
+        // Post to #cs_chats — quarantine handoff
+        postToCsChats([
+          ...buildInboundBlocks({ convId, customerName, message: customerBody, isNew: isNewConv, badges: [`:lock: *QUARANTINE (${quarantineMode})*`] }),
+          ...buildOutcomeBlocks({ convId, outcome: ":person_with_pouting_face: Handed to human rep", detail: `quarantine: ${quarantineMode}` }),
+        ]);
         return;
       }
 
@@ -247,12 +398,32 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Build badges for Slack notification
+      const inboundBadges = [];
+      if (pgFlagged) inboundBadges.push(`:warning: pg=${pgResult.score.toFixed(2)}`);
+      if (quarantineMode === "soft") inboundBadges.push(`:large_yellow_circle: FAQ-only`);
+
+      // Post inbound to #cs_chats (async — don't block dispatch)
+      const slackInboundBlocks = buildInboundBlocks({ convId, customerName, message: customerBody, isNew: isNewConv, badges: inboundBadges });
+
       // Dispatch to CS agent
-      console.log(`[intercom-webhook] dispatching conv=${convId} body=${customerBody.substring(0, 100)}`);
+      console.log(`[intercom-webhook] dispatching conv=${convId} body=${customerBody.substring(0, 100)}${pgFlagged ? ` [FLAGGED pg=${pgResult.score}]` : ""}`);
       const agentReply = await dispatchToAgent(convId, customerBody);
 
       if (agentReply) {
         session.consecutiveFailures = 0;
+
+        // PromptGuard output scan — catch agent misbehavior before customer sees it
+        const outputScan = await scanWithPromptGuard(agentReply);
+        let finalReply = agentReply;
+        let outputBlocked = false;
+        if (outputScan.score > OUTPUT_BLOCK_THRESHOLD) {
+          console.error(`[intercom-webhook] OUTPUT BLOCKED conv=${convId} promptguard=${outputScan.score} label=${outputScan.label}`);
+          finalReply = "I apologize, I'm having trouble with that question. Let me create a support ticket so our team can help you directly.";
+          outputBlocked = true;
+        } else if (outputScan.score > FLAG_THRESHOLD) {
+          console.warn(`[intercom-webhook] OUTPUT FLAGGED conv=${convId} promptguard=${outputScan.score} label=${outputScan.label}`);
+        }
 
         // Pre-send validation — recheck state after agent processing
         if (session.handoffMode !== "agent_active" || session.lifecycleState !== "open") {
@@ -260,7 +431,7 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        const msgId = await replyToIntercom(convId, agentReply);
+        const msgId = await replyToIntercom(convId, finalReply);
         if (msgId) {
           session.outboundMessageIds.add(msgId);
           if (session.outboundMessageIds.size > 500) {
@@ -269,6 +440,14 @@ const server = http.createServer(async (req, res) => {
           }
           console.log(`[intercom-webhook] replied conv=${convId} msgId=${msgId}`);
         }
+
+        // Post to #cs_chats — AI handled
+        const outcomeEmoji = outputBlocked ? ":warning: Output blocked — fallback sent" : ":robot_face: AI replied";
+        const replyPreview = truncate(finalReply, 150);
+        postToCsChats([
+          ...slackInboundBlocks,
+          ...buildOutcomeBlocks({ convId, outcome: outcomeEmoji, detail: replyPreview }),
+        ]);
       } else {
         // LLM failure — track consecutive failures
         session.consecutiveFailures++;
@@ -278,8 +457,18 @@ const server = http.createServer(async (req, res) => {
           session.handoffMode = "human_takeover";
           console.warn(`[intercom-webhook] auto-escalated conv=${convId} — 3+ consecutive failures`);
           await replyToIntercom(convId, "I'm connecting you with our support team. Someone will be with you shortly.");
+          // Post to #cs_chats — auto-escalated
+          postToCsChats([
+            ...slackInboundBlocks,
+            ...buildOutcomeBlocks({ convId, outcome: ":person_with_pouting_face: Auto-escalated to human", detail: "3+ consecutive AI failures" }),
+          ]);
         } else {
           await replyToIntercom(convId, "We're looking into this and will get back to you shortly.");
+          // Post to #cs_chats — AI failed but retrying
+          postToCsChats([
+            ...slackInboundBlocks,
+            ...buildOutcomeBlocks({ convId, outcome: ":hourglass: AI failed — retry pending", detail: `failure ${session.consecutiveFailures}/3` }),
+          ]);
         }
       }
 
@@ -295,8 +484,15 @@ const server = http.createServer(async (req, res) => {
 
       // Non-bot admin reply → implicit takeover
       if (adminId && adminId !== BOT_ADMIN_ID) {
+        const wasAgentActive = session.handoffMode === "agent_active";
         session.handoffMode = "human_takeover";
         console.log(`[intercom-webhook] human_takeover conv=${convId} admin=${adminId}`);
+
+        // Post to #cs_chats — human took over
+        if (wasAgentActive) {
+          const intercomUrl = `https://app.intercom.com/a/inbox/${WORKSPACE_ID}/inbox/conversation/${convId}`;
+          postToCsChats([{ type: "section", text: { type: "mrkdwn", text: `:person_with_pouting_face: *Human rep took over* conv \`${convId}\`\nAdmin ID: ${adminId}  |  <${intercomUrl}|View in Intercom>` } }]);
+        }
       }
 
     } else if (topic === "conversation.admin.assigned") {
