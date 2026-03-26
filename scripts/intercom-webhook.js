@@ -123,7 +123,8 @@ async function dispatchToAgent(convId, customerMessage) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "support",
+        model: "openclaw:support",
+        user: `intercom:${convId}`,
         messages: [{ role: "user", content: customerMessage }],
         metadata: {
           channel: "intercom",
