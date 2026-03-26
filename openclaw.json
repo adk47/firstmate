@@ -98,7 +98,9 @@
         "workspace": "/opt/hydra/workspaces/coordinator",
         "model": {
           "primary": "anthropic/claude-opus-4-6",
-          "fallbacks": []
+          "fallbacks": [
+            "anthropic/claude-sonnet-4-6"
+          ]
         }
       },
       {
@@ -106,7 +108,9 @@
         "workspace": "/opt/hydra/workspaces/ceo",
         "model": {
           "primary": "anthropic/claude-opus-4-6",
-          "fallbacks": []
+          "fallbacks": [
+            "anthropic/claude-sonnet-4-6"
+          ]
         }
       },
       {
@@ -114,7 +118,9 @@
         "workspace": "/opt/hydra/workspaces/cmo",
         "model": {
           "primary": "anthropic/claude-opus-4-6",
-          "fallbacks": []
+          "fallbacks": [
+            "anthropic/claude-sonnet-4-6"
+          ]
         }
       },
       {
@@ -174,7 +180,9 @@
         "workspace": "/opt/hydra/workspaces/design",
         "model": {
           "primary": "anthropic/claude-opus-4-6",
-          "fallbacks": []
+          "fallbacks": [
+            "anthropic/claude-sonnet-4-6"
+          ]
         }
       },
       {
