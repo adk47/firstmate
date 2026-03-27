@@ -1,0 +1,136 @@
+# Credit Verification Workflow — Ops Agent Integration
+
+**Date:** 2026-03-27
+**Status:** Draft
+**Related:** [core-backend PR #8465](https://github.com/Muso-AI/core-backend/pull/8465)
+
+## Context
+
+Core-backend PR #8465 introduces a Slack-based credit verification workflow. When a credit request's risk score meets or exceeds the threshold (default 85%), the system posts a rich Block Kit message to a dedicated Slack channel (`#credit-verification`), tagging the ops agent for review.
+
+This spec defines what hydra needs to do so the ops agent can autonomously handle these flagged credit requests.
+
+## Design
+
+### New Skill: `muso-ops-credit-verification`
+
+**Location:** `workspaces/operations/skills/muso-ops-credit-verification/SKILL.md`
+
+A dedicated skill defining the autonomous workflow triggered when the agent is tagged in the `#credit-verification` channel.
+
+#### Workflow
+
+1. **Parse** — Extract from the incoming message: credit request ID, profile ID, profile name, workspace ID, owner email, track title, artists, Spotify link, claimed roles, overall risk score, per-dimension scores (artist_risk, track_risk, role_risk), pending verification count.
+
+2. **Investigate** — Reuse existing skill logic:
+   - Athena cross-reference via `muso-ops-credits` (does this person appear in industry data for this track?)
+   - Web research via `muso-ops-fraud` (AllMusic, Discogs, LinkedIn, professional sites)
+   - Fraud signal check (bulk submissions, disposable email, genre mismatch, etc.)
+
+3. **Classify** — Map to verdict categories:
+   - **VERIFIED LEGIT** → auto-approve
+   - **UNVERIFIABLE — LOW CONCERN** → auto-approve
+   - **SUSPICIOUS** → auto-reject
+   - **UNVERIFIABLE — NEEDS REVIEW** → escalate in-thread
+
+4. **Act** — Call admin API to approve/reject, or post escalation. All actions logged via `muso-ops-audit`.
+
+5. **Report** — Post investigation summary in-thread on the original Block Kit message.
+
+#### Verdict-to-Action Mapping
+
+| Verdict | Action | Approval Gate |
+|---------|--------|---------------|
+| Verified Legit | Auto-approve | Autonomous |
+| Unverifiable — Low Concern | Auto-approve | Autonomous |
+| Suspicious | Auto-reject | Autonomous |
+| Unverifiable — Needs Review | Escalate in-thread | Requires Aaron or Jan |
+
+### Channel Binding
+
+**Channel:** `#credit-verification` (C0APB2CMM7C)
+
+Added as a bound channel in SOUL.md with a hard rule:
+
+- EVERY message in this channel triggers the `muso-ops-credit-verification` skill
+- No exceptions. No conversational responses. No clarifying questions.
+- Parse the message, investigate, act. Every time.
+
+This follows the same pattern as `#operations` being locked to refund-processor.
+
+### Approval Gate Exception
+
+**Current state:** All write operations require Aaron's explicit approval.
+
+**Change:** Add a narrow exception for credit request approve/reject (`PUT /w/admin/credit-request/<id>`):
+
+- Only when triggered from the `#credit-verification` channel (C0APB2CMM7C)
+- Only for clear verdicts: VERIFIED LEGIT, SUSPICIOUS, UNVERIFIABLE — LOW CONCERN
+- UNVERIFIABLE — NEEDS REVIEW still requires human approval
+- All actions still logged via audit skill
+
+### Escalation
+
+When verdict is UNVERIFIABLE — NEEDS REVIEW, the agent posts in-thread tagging both:
+
+- Aaron (`<@U7RP6HKUZ>`)
+- Jan Delmo (`<@U038BM16T7W>`)
+
+Either can respond. First response wins — the agent acts on it and confirms.
+
+### In-Thread Reporting Format
+
+**Auto-approve:**
+```
+✅ APPROVED — [Profile Name] as [Role] on "[Track Title]"
+
+Evidence: [1-2 sentences]
+
+Risk score: [X]% | Verdict: [Verdict]
+Credit request [ID] approved.
+```
+
+**Auto-reject:**
+```
+🔴 REJECTED — [Profile Name] as [Role] on "[Track Title]"
+
+Evidence: [1-2 sentences]
+
+Risk score: [X]% | Verdict: [Verdict]
+Credit request [ID] rejected. Reason: [standard rejection reason]
+```
+
+**Escalation:**
+```
+🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]"
+
+Evidence: [1-2 sentences]
+
+Risk score: [X]% | Verdict: Unverifiable — Needs Review
+@Aaron @Jan — please review. Reply "approve" or "reject [reason]" in this thread.
+```
+
+### Relationship to Daily Credit Fraud Scan
+
+The daily heartbeat scan (HEARTBEAT.md) stays unchanged. It serves a different purpose:
+
+- **This workflow:** Pre-approval review of flagged credits (risk >= 85%)
+- **Daily scan:** Post-approval review of approved credits on high-popularity tracks (Spotify pop >= 50)
+
+Defense in depth — the daily scan catches credits below the 85% threshold that still look suspicious after approval.
+
+## Files Changed
+
+| File | Change Type | Description |
+|------|-------------|-------------|
+| `workspaces/operations/skills/muso-ops-credit-verification/SKILL.md` | New | Autonomous credit verification workflow |
+| `workspaces/operations/SOUL.md` | Modify | Add `#credit-verification` (C0APB2CMM7C) as bound channel with hard trigger rule |
+| `workspaces/operations/TOOLS.md` | Modify | Add channel to bound list, add approval gate exception for credit approve/reject |
+
+## Cross-Repo Dependency
+
+Core-backend PR #8465 must set a rich `text` fallback in `postCreditVerification()` alongside the Block Kit `blocks` array. OpenClaw receives the `text` field as the agent's input — if it's thin (e.g., "New credit verification request"), the agent gets insufficient context to investigate.
+
+The `text` fallback must include: profile name, profile ID, credit request ID, track title, artists, claimed roles, overall risk score, per-dimension scores.
+
+**Owner:** Nick (in progress).
