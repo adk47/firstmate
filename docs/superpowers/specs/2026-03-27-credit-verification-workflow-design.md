@@ -24,6 +24,8 @@ A dedicated skill defining the autonomous workflow triggered when the agent is @
 
 1. **Parse** — Extract from the incoming message: credit request ID, profile ID, profile name, workspace ID, owner email, track title, artists, Spotify link, claimed roles, overall risk score, per-dimension scores (artist_risk, track_risk, role_risk), pending verification count. If any required field cannot be parsed, post an error in-thread listing the missing fields and skip processing — do not silently fail.
 
+   **Idempotency check:** Before investigating, query the credit request status via admin API (`GET /admin/credit-requests/:requestId`). If the status is no longer `user_verification_needed` (e.g., already approved/rejected from a retry or duplicate post), post a short note in-thread ("Already processed — status: [status]") and skip.
+
 2. **Investigate** — Reuse existing skill logic:
    - Athena cross-reference via `muso-ops-credits` (does this person appear in industry data for this track?)
    - Web research via `muso-ops-fraud` (AllMusic, Discogs, LinkedIn, professional sites)
@@ -35,7 +37,7 @@ A dedicated skill defining the autonomous workflow triggered when the agent is @
    - **SUSPICIOUS** → auto-reject
    - **UNVERIFIABLE — NEEDS REVIEW** → escalate in-thread
 
-4. **Act** — Call admin API to approve/reject, or post escalation. All actions logged via `muso-ops-audit`.
+4. **Act** — Call admin API to approve/reject, or post escalation. All actions logged via `muso-ops-audit`. For autonomous actions, use `--requester clio` (the ops agent's service identity). For escalated actions where Aaron or Jan responds, use their Slack user ID as `--requester`.
 
 5. **Report** — Post investigation summary in-thread on the original Block Kit message.
 
@@ -64,7 +66,7 @@ The trigger mechanism is the @mention from core-backend's `postCreditVerificatio
 
 **Current state:** All write operations require Aaron's explicit approval.
 
-**Change:** Add a narrow exception for credit request approve/reject (`PUT /w/admin/credit-request/<id>`):
+**Change:** Add a narrow exception for credit request approve/reject. The admin API wrapper script prepends the `/w/` prefix automatically — the logical route is `PUT /admin/credit-requests/:requestId`:
 
 - Only when triggered from the `#credit-verification` channel (C0APB2CMM7C)
 - Only for clear verdicts: VERIFIED LEGIT, SUSPICIOUS, UNVERIFIABLE — LOW CONCERN
@@ -138,7 +140,9 @@ Defense in depth — the daily scan catches credits below the 85% threshold that
 | `workspaces/operations/skills/muso-ops-credit-verification/SKILL.md` | New | Autonomous credit verification workflow |
 | `workspaces/operations/SOUL.md` | Modify | Add `#credit-verification` (C0APB2CMM7C) as bound channel with hard trigger rule. Add Jan as authorized approver for credit verification escalations. |
 | `workspaces/operations/TOOLS.md` | Modify | Add channel to bound list |
-| `workspaces/operations/skills/muso-ops-admin/SKILL.md` | Modify | Add approval gate exception: `PUT /w/admin/credit-request/<id>` is autonomous when source channel is C0APB2CMM7C and verdict is not NEEDS REVIEW |
+| `workspaces/operations/skills/muso-ops-admin/SKILL.md` | Modify | Add approval gate exception: `PUT /admin/credit-requests/:requestId` is autonomous when source channel is C0APB2CMM7C and verdict is not NEEDS REVIEW |
+
+**Note:** Jan Delmo's Slack user ID `U038BM16T7W` maps to `jay@muso.ai` in the admin API user mapping. This is the same person (Jan Roland Delmo, ops team owner).
 
 ## Cross-Repo Dependency
 
