@@ -16,11 +16,13 @@ This spec defines what hydra needs to do so the ops agent can autonomously handl
 
 **Location:** `workspaces/operations/skills/muso-ops-credit-verification/SKILL.md`
 
-A dedicated skill defining the autonomous workflow triggered when the agent is tagged in the `#credit-verification` channel.
+A dedicated skill defining the autonomous workflow triggered when the agent is @mentioned in the `#credit-verification` channel.
+
+**Dependencies:** `muso-ops-credits`, `muso-ops-fraud`, `muso-ops-admin`, `muso-ops-audit`, `muso-slack-formatter`
 
 #### Workflow
 
-1. **Parse** — Extract from the incoming message: credit request ID, profile ID, profile name, workspace ID, owner email, track title, artists, Spotify link, claimed roles, overall risk score, per-dimension scores (artist_risk, track_risk, role_risk), pending verification count.
+1. **Parse** — Extract from the incoming message: credit request ID, profile ID, profile name, workspace ID, owner email, track title, artists, Spotify link, claimed roles, overall risk score, per-dimension scores (artist_risk, track_risk, role_risk), pending verification count. If any required field cannot be parsed, post an error in-thread listing the missing fields and skip processing — do not silently fail.
 
 2. **Investigate** — Reuse existing skill logic:
    - Athena cross-reference via `muso-ops-credits` (does this person appear in industry data for this track?)
@@ -52,11 +54,11 @@ A dedicated skill defining the autonomous workflow triggered when the agent is t
 
 Added as a bound channel in SOUL.md with a hard rule:
 
-- EVERY message in this channel triggers the `muso-ops-credit-verification` skill
+- Every @mention in this channel triggers the `muso-ops-credit-verification` skill
 - No exceptions. No conversational responses. No clarifying questions.
 - Parse the message, investigate, act. Every time.
 
-This follows the same pattern as `#operations` being locked to refund-processor.
+The trigger mechanism is the @mention from core-backend's `postCreditVerification()` — OpenClaw's existing Slack dispatch handles @mention routing. The channel rule ensures the agent always uses the credit verification skill (not general-purpose handling) when the mention comes from this channel.
 
 ### Approval Gate Exception
 
@@ -69,6 +71,12 @@ This follows the same pattern as `#operations` being locked to refund-processor.
 - UNVERIFIABLE — NEEDS REVIEW still requires human approval
 - All actions still logged via audit skill
 
+#### Safety Rails
+
+- **Daily cap:** Max 50 autonomous approve/reject actions per day. Beyond that, escalate remaining requests to Aaron/Jan.
+- **Parse failure:** If the incoming message cannot be parsed, post error in-thread and skip — never auto-act on incomplete data.
+- **API failure:** If the admin API call to approve/reject fails, post error in-thread and do not retry automatically.
+
 ### Escalation
 
 When verdict is UNVERIFIABLE — NEEDS REVIEW, the agent posts in-thread tagging both:
@@ -76,7 +84,11 @@ When verdict is UNVERIFIABLE — NEEDS REVIEW, the agent posts in-thread tagging
 - Aaron (`<@U7RP6HKUZ>`)
 - Jan Delmo (`<@U038BM16T7W>`)
 
-Either can respond. First response wins — the agent acts on it and confirms.
+Either can respond. First valid response wins — the agent acts on it and confirms. Any subsequent conflicting response is acknowledged but not acted on.
+
+**Accepted response formats:** "approve", "approved", "reject [reason]", "rejected [reason]". Other messages in the thread are acknowledged but not treated as a decision.
+
+**Timeout:** If no valid response within 30 minutes, the agent posts a reminder. No auto-action on timeout — the credit stays in `user_verification_needed` status until a human decides.
 
 ### In-Thread Reporting Format
 
@@ -124,8 +136,9 @@ Defense in depth — the daily scan catches credits below the 85% threshold that
 | File | Change Type | Description |
 |------|-------------|-------------|
 | `workspaces/operations/skills/muso-ops-credit-verification/SKILL.md` | New | Autonomous credit verification workflow |
-| `workspaces/operations/SOUL.md` | Modify | Add `#credit-verification` (C0APB2CMM7C) as bound channel with hard trigger rule |
-| `workspaces/operations/TOOLS.md` | Modify | Add channel to bound list, add approval gate exception for credit approve/reject |
+| `workspaces/operations/SOUL.md` | Modify | Add `#credit-verification` (C0APB2CMM7C) as bound channel with hard trigger rule. Add Jan as authorized approver for credit verification escalations. |
+| `workspaces/operations/TOOLS.md` | Modify | Add channel to bound list |
+| `workspaces/operations/skills/muso-ops-admin/SKILL.md` | Modify | Add approval gate exception: `PUT /w/admin/credit-request/<id>` is autonomous when source channel is C0APB2CMM7C and verdict is not NEEDS REVIEW |
 
 ## Cross-Repo Dependency
 
