@@ -32,3 +32,6 @@ plugins/openclaw-intercom/pnpm-lock.yaml
 
 # Test files
 test-intercom.html
+
+# Superpowers (specs/plans are local working docs)
+docs/superpowers/
