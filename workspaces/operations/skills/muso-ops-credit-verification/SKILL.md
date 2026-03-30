@@ -41,19 +41,26 @@ not the parent message), check if the thread was initiated by a credit verificat
 workflow. If so, treat the reply as an escalation response (see Step 5 — Escalate),
 not a new trigger. Only parent messages trigger the full workflow.
 
-## Visual Feedback (Emoji Reactions)
+## Visual Feedback (Emoji Reactions) — MANDATORY
 
-React to the original message with emoji so humans can see the workflow status at a glance:
+You MUST use the message tool with `action: "react"` at these exact points.
+This is not optional. Skipping reactions is a workflow violation.
 
-| Emoji | When | Meaning |
-|-------|------|---------|
-| :eyes: | Step 0 passes | "I see this message and I'm processing it" |
-| :white_check_mark: | Auto-approved | "Verified and approved" |
-| :x: | Auto-rejected | "Suspicious, rejected" |
-| :mag: | Escalated | "Needs human review" |
+**Step 0 passes → add :eyes:**
+```
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes")
+```
 
-Apply the :eyes: reaction immediately when the format gate passes. Replace it with
-the final reaction (:white_check_mark:, :x:, or :mag:) after acting.
+**After acting (approve/reject/escalate) → remove :eyes: and add final emoji:**
+```
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="<final>")
+```
+
+Where `<final>` is:
+- `white_check_mark` — auto-approved
+- `x` — auto-rejected
+- `mag` — escalated for human review
 
 ## Workflow
 
@@ -63,10 +70,12 @@ Using **case-insensitive** matching, the message MUST contain both:
 - "credit request"
 - "risk score"
 
-If the message does not contain both markers, ignore it silently. No emoji reaction.
+If the message does not contain both markers, ignore it silently.
 
-If the message passes the format gate, react with :eyes: immediately. This tells
-humans "I see this and I'm working on it."
+If the message passes the format gate, YOU MUST immediately call:
+```
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes")
+```
 
 ### Step 1: Parse the Incoming Message
 
@@ -196,7 +205,11 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester clio call PUT "/w/admin/credit-requests/<id>" '{"status":"approved"}'
 ```
 
-Log via `muso-ops-audit` before execution. Remove :eyes: and react with :white_check_mark:.
+Log via `muso-ops-audit` before execution. Then YOU MUST call:
+```
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="white_check_mark")
+```
 
 #### Auto-Reject (SUSPICIOUS)
 
@@ -211,11 +224,20 @@ Use a specific reason based on findings. Examples:
 - "Flagged as suspicious: identity mismatch — web sources contradict claimed credits"
 - "Flagged as suspicious: bulk self-additions across unrelated genres"
 
-Log via `muso-ops-audit` before execution. Remove :eyes: and react with :x:.
+Log via `muso-ops-audit` before execution. Then YOU MUST call:
+```
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="x")
+```
 
 #### Escalate (NEEDS REVIEW)
 
-Do NOT call the admin API. Remove :eyes: and react with :mag:. Post in-thread tagging both approvers:
+Do NOT call the admin API. YOU MUST call:
+```
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="mag")
+```
+Then post in-thread tagging both approvers:
 
 ```
 🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]"
