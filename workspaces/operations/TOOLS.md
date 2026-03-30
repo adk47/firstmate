@@ -24,7 +24,7 @@
 - Never share customer account details without verifying requester's role and need-to-know
 
 ## Slack
-- Bound channels: #operations, #customer-support
+- Bound channels: #operations, #customer-support, #credit-verification
 - Use for: support triage, operational updates, process documentation
 - Customer-facing incident communication should be drafted here before publishing
 

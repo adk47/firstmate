@@ -1,0 +1,52 @@
+{
+  "_description": "Known prompt injection and jailbreak attack signatures. Updated by Sentinel as novel attacks are confirmed.",
+  "_version": "1.0.0",
+  "_updated_at": "2026-03-25T00:00:00Z",
+  "signatures": [
+    {
+      "id": "sig-001",
+      "category": "direct_injection",
+      "pattern": "ignore (all |your )?(previous |prior )?instructions",
+      "promptguard_score_range": [0.85, 1.0],
+      "severity": "critical",
+      "confirmed": true,
+      "added_at": "2026-03-25T00:00:00Z"
+    },
+    {
+      "id": "sig-002",
+      "category": "role_hijack",
+      "pattern": "you are now (a |an )?",
+      "promptguard_score_range": [0.7, 0.95],
+      "severity": "high",
+      "confirmed": true,
+      "added_at": "2026-03-25T00:00:00Z"
+    },
+    {
+      "id": "sig-003",
+      "category": "system_prompt_extraction",
+      "pattern": "(print|show|display|repeat|output) (your |the )?(system |initial )?(prompt|instructions|rules)",
+      "promptguard_score_range": [0.6, 0.9],
+      "severity": "high",
+      "confirmed": true,
+      "added_at": "2026-03-25T00:00:00Z"
+    },
+    {
+      "id": "sig-004",
+      "category": "developer_mode",
+      "pattern": "(enable |enter |activate )(developer|debug|admin|sudo|root|maintenance) mode",
+      "promptguard_score_range": [0.7, 0.95],
+      "severity": "critical",
+      "confirmed": true,
+      "added_at": "2026-03-25T00:00:00Z"
+    },
+    {
+      "id": "sig-005",
+      "category": "context_manipulation",
+      "pattern": "(forget|disregard|override|bypass) (everything|all|your|the|previous)",
+      "promptguard_score_range": [0.75, 1.0],
+      "severity": "critical",
+      "confirmed": true,
+      "added_at": "2026-03-25T00:00:00Z"
+    }
+  ]
+}

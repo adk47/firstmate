@@ -1,0 +1,97 @@
+{
+  "_description": "Per-agent trust scores and behavioral baselines. Updated every 5 minutes by audit scanner.",
+  "_version": "1.0.0",
+  "_updated_at": "2026-03-25T00:00:00Z",
+  "agents": {
+    "support": {
+      "trust_score": 1.0,
+      "state": "healthy",
+      "quarantine_mode": null,
+      "last_violation": null,
+      "violations_24h": 0,
+      "baseline": {
+        "avg_session_duration_s": null,
+        "avg_tool_calls_per_session": null,
+        "model_escalation_rate": null,
+        "avg_promptguard_input_score": null,
+        "avg_promptguard_output_score": null
+      }
+    },
+    "coordinator": {
+      "trust_score": 1.0,
+      "state": "healthy",
+      "quarantine_mode": null,
+      "last_violation": null,
+      "violations_24h": 0,
+      "baseline": {
+        "avg_messages_routed_per_hour": null,
+        "avg_cross_agent_calls_per_hour": null,
+        "error_rate": null
+      }
+    },
+    "ceo": {
+      "trust_score": 1.0,
+      "state": "healthy",
+      "quarantine_mode": null,
+      "last_violation": null,
+      "violations_24h": 0,
+      "baseline": {}
+    },
+    "cmo": {
+      "trust_score": 1.0,
+      "state": "healthy",
+      "quarantine_mode": null,
+      "last_violation": null,
+      "violations_24h": 0,
+      "baseline": {}
+    },
+    "cto": {
+      "trust_score": 1.0,
+      "state": "healthy",
+      "quarantine_mode": null,
+      "last_violation": null,
+      "violations_24h": 0,
+      "baseline": {}
+    },
+    "qa": {
+      "trust_score": 1.0,
+      "state": "healthy",
+      "quarantine_mode": null,
+      "last_violation": null,
+      "violations_24h": 0,
+      "baseline": {}
+    },
+    "finance": {
+      "trust_score": 1.0,
+      "state": "healthy",
+      "quarantine_mode": null,
+      "last_violation": null,
+      "violations_24h": 0,
+      "baseline": {}
+    },
+    "operations": {
+      "trust_score": 1.0,
+      "state": "healthy",
+      "quarantine_mode": null,
+      "last_violation": null,
+      "violations_24h": 0,
+      "baseline": {}
+    },
+    "devops": {
+      "trust_score": 1.0,
+      "state": "healthy",
+      "quarantine_mode": null,
+      "last_violation": null,
+      "violations_24h": 0,
+      "baseline": {}
+    },
+    "design": {
+      "trust_score": 1.0,
+      "state": "healthy",
+      "quarantine_mode": null,
+      "last_violation": null,
+      "violations_24h": 0,
+      "baseline": {}
+    }
+  }
+}

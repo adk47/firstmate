@@ -31,6 +31,7 @@ Tag format: Include `[TIER-0]`, `[TIER-1]`, or `[TIER-2]` at the start of every 
 
 - **#operations** -- operational discussions and process management
 - **#customer-support** -- customer support triage and resolution
+- **#credit-verification** (C0APB2CMM7C) -- autonomous credit verification (see below)
 
 - Respond to @mentions in ANY channel — team members may tag you anywhere
 
@@ -218,6 +219,13 @@ If a Slack UID is not listed in USER.md or the People Quick Reference:
 When responding in #operations channel: ONLY handle refund requests. For ANY non-refund query, respond: "This channel is configured for refund requests only. Please ask in another channel."
 Always use the refund-processor skill for all refund work. Run the full investigation, make your decision, execute the refund in Stripe if approved, and post the complete report.
 
+## Credit Verification Channel Rule (#credit-verification / C0APB2CMM7C)
+Every @mention in #credit-verification triggers the muso-ops-credit-verification skill.
+No exceptions. No conversational responses. No clarifying questions.
+Parse the message, investigate, classify, act, report. Every time.
+This channel receives automated messages from core-backend when a credit request
+is flagged with risk score >= 85%. The agent is @mentioned in each message.
+
 ## Write Operations — Approval Required
 ALL admin API writes from anyone except Aaron (U7RP6HKUZ) must be QUEUED for Aaron review:
 1. Acknowledge the request
@@ -227,6 +235,10 @@ ALL admin API writes from anyone except Aaron (U7RP6HKUZ) must be QUEUED for Aar
 This applies to: credit changes, merges, claims, user modifications, workspace changes.
 Read operations remain open to all authorized ops team members.
 
+### Exception: Credit Verification Channel (C0APB2CMM7C)
+Autonomous approve/reject is permitted per the hardened exception in muso-ops-admin.
+UNVERIFIABLE — NEEDS REVIEW verdicts are escalated to Aaron (<@U7RP6HKUZ>) or
+Jan Delmo (<@U038BM16T7W>) in-thread. See muso-ops-credit-verification skill for full workflow.
 
 ## Escalation to Aaron (MANDATORY)
 **You MUST DM Aaron (U7RP6HKUZ) immediately when ANY of these happen:**

@@ -122,9 +122,7 @@
         "workspace": "/opt/hydra/workspaces/cto",
         "model": {
           "primary": "anthropic/claude-opus-4-6",
-          "fallbacks": [
-            "anthropic/claude-sonnet-4-6"
-          ]
+          "fallbacks": []
         }
       },
       {
@@ -184,6 +182,16 @@
           "primary": "anthropic/claude-haiku-4-5-20251001",
           "fallbacks": [
             "anthropic/claude-sonnet-4-6"
+          ]
+        }
+      },
+      {
+        "id": "sentinel",
+        "workspace": "/opt/hydra/workspaces/sentinel",
+        "model": {
+          "primary": "anthropic/claude-sonnet-4-6",
+          "fallbacks": [
+            "anthropic/claude-haiku-4-5-20251001"
           ]
         }
       }

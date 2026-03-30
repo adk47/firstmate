@@ -82,6 +82,7 @@ Every ops user has a tier. Check `sender_id` before ANY operation.
 Ops commands are processed in:
 - `C0ADREBPNQ2` (#clio_analyst) — full ops access
 - `GJAM34DT6` (#operations) — claiming + credit requests only
+- `C0APB2CMM7C` (#credit-verification) — autonomous credit verification only (see Hardened Exception below)
 - Aaron's DM — full access
 
 ## ⚠️ WRITE APPROVAL GATE (MANDATORY until hardened)
@@ -98,6 +99,14 @@ Before executing ANY write:
 Read operations (GET) are always allowed without approval.
 
 This gate will be relaxed per-operation as we validate each endpoint in production.
+
+### Hardened Exception: Credit Verification (C0APB2CMM7C)
+
+`PUT /w/admin/credit-requests/<id>` (approve/reject) is autonomous when triggered by
+`muso-ops-credit-verification` from #credit-verification (C0APB2CMM7C).
+
+See the `muso-ops-credit-verification` skill for full conditions, daily cap,
+escalation rules, and safety rails.
 
 ## Environment Setup
 

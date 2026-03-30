@@ -1,0 +1,34 @@
+{
+  "_description": "Known-good SHA-256 hashes of agent configuration files. Updated by CI/CD on deploy.",
+  "_version": "1.0.0",
+  "_updated_at": "2026-03-25T00:00:00Z",
+  "_note": "Hashes are populated on first deployment by the CI/CD pipeline. Empty hashes trigger initial baseline computation.",
+  "agents": {
+    "sentinel": {
+      "SOUL.md": null,
+      "TOOLS.md": null,
+      "SECURITY.md": null,
+      "AGENTS.md": null
+    },
+    "support": {
+      "SOUL.md": null,
+      "TOOLS.md": null,
+      "SECURITY.md": null,
+      "AGENTS.md": null
+    },
+    "coordinator": {
+      "SOUL.md": null,
+      "TOOLS.md": null,
+      "SECURITY.md": null,
+      "AGENTS.md": null
+    },
+    "ceo": { "SOUL.md": null, "TOOLS.md": null },
+    "cmo": { "SOUL.md": null, "TOOLS.md": null },
+    "cto": { "SOUL.md": null, "TOOLS.md": null },
+    "qa": { "SOUL.md": null, "TOOLS.md": null },
+    "finance": { "SOUL.md": null, "TOOLS.md": null },
+    "operations": { "SOUL.md": null, "TOOLS.md": null },
+    "devops": { "SOUL.md": null, "TOOLS.md": null },
+    "design": { "SOUL.md": null, "TOOLS.md": null }
+  }
+}
