@@ -287,7 +287,13 @@
           "appToken": "VAULT",
           "userTokenReadOnly": true,
           "nativeStreaming": true,
-          "streaming": "partial"
+          "streaming": "partial",
+          "channels": {
+            "C0APB2CMM7C": {
+              "enabled": true,
+              "requireMention": false
+            }
+          }
         },
         "devops": {
           "botToken": "VAULT",

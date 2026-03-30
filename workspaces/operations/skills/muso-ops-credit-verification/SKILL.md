@@ -1,15 +1,15 @@
 ---
 name: muso-ops-credit-verification
 description: |
-  Autonomous credit verification workflow. Triggered when the ops agent is
-  @mentioned in #credit-verification (C0APB2CMM7C). Parses the flagged credit
-  request, investigates legitimacy, classifies verdict, and auto-approves,
+  Autonomous credit verification workflow. Triggered by any message in
+  #credit-verification (C0APB2CMM7C). No @mention required — the channel is
+  configured with requireMention: false in openclaw.json. Parses the flagged
+  credit request, investigates legitimacy, classifies verdict, and auto-approves,
   auto-rejects, or escalates to Aaron/Jan.
 
-  Use when: @mentioned in #credit-verification channel with a credit verification
-  request from core-backend.
+  Use when: any message arrives in #credit-verification channel.
 
-  Triggers: messages in #credit-verification (C0APB2CMM7C) that @mention this agent
+  Triggers: any message in #credit-verification (C0APB2CMM7C)
 depends-on:
   - muso-ops-credits
   - muso-ops-fraud
@@ -32,8 +32,9 @@ This skill defines how to handle those messages autonomously.
 
 ## HARD RULE
 
-**Every @mention in #credit-verification triggers this workflow. No exceptions.
-No conversational responses. No clarifying questions. Parse, investigate, act.**
+**Every message in #credit-verification is evaluated by this workflow.
+Thread replies in escalation threads are handled as escalation responses (see Step 5).
+All other messages: parse, investigate, act. No conversational responses.**
 
 **Thread-awareness:** If the message is a reply in a thread (has `thread_ts` and is
 not the parent message), check if the thread was initiated by a credit verification
@@ -41,6 +42,14 @@ workflow. If so, treat the reply as an escalation response (see Step 5 — Escal
 not a new trigger. Only parent messages trigger the full workflow.
 
 ## Workflow
+
+### Step 0: Message Format Gate
+
+Using **case-insensitive** matching, the message MUST contain both:
+- "credit request"
+- "risk score"
+
+If the message does not contain both markers, ignore it silently.
 
 ### Step 1: Parse the Incoming Message
 
