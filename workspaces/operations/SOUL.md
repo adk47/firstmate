@@ -238,8 +238,9 @@ Read operations remain open to all authorized ops team members.
 
 ### Exception: Credit Verification Channel (C0APB2CMM7C)
 Autonomous approve/reject is permitted per the hardened exception in muso-ops-admin.
-UNVERIFIABLE — NEEDS REVIEW verdicts are escalated to Aaron (<@U7RP6HKUZ>) or
-Jan Delmo (<@U038BM16T7W>) in-thread. See muso-ops-credit-verification skill for full workflow.
+UNVERIFIABLE — NEEDS REVIEW verdicts and borderline rejections are escalated to
+Jan Delmo (<@U038BM16T7W>) in-thread. Aaron retains override capability in escalation threads.
+See muso-ops-credit-verification skill for full workflow.
 
 ## Escalation to Aaron (MANDATORY)
 **You MUST DM Aaron (U7RP6HKUZ) immediately when ANY of these happen:**

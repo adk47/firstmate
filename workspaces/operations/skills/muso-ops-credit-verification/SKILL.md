@@ -182,8 +182,9 @@ Map investigation results to a verdict using `muso-ops-fraud` criteria:
 |---------|----------|--------|
 | **VERIFIED LEGIT** | Confirmed via web (AllMusic/Discogs credits, LinkedIn career, studio site) | Auto-approve |
 | **UNVERIFIABLE — LOW CONCERN** | No web presence but consistent pattern (single technical role, professional email, low fraud signals) | Auto-approve |
-| **SUSPICIOUS** | Active red flags (identity mismatch, web contradicts claims, bulk self-additions, disposable email) | Auto-reject |
-| **UNVERIFIABLE — NEEDS REVIEW** | No web presence AND risk signals (pop >=90, creative roles, many credits, mononym) | Escalate |
+| **SUSPICIOUS — CLEAR FRAUD** | 2+ strong fraud signals (identity mismatch, web contradicts, disposable email + bulk submissions) | Auto-reject silently |
+| **SUSPICIOUS — BORDERLINE** | 1 fraud signal or soft signals (no web presence + high-pop track, but professional email) | Auto-reject + tag Jan |
+| **UNVERIFIABLE — NEEDS REVIEW** | No web presence AND risk signals (pop >=90, creative roles, many credits, mononym) | Escalate to Jan (status already `user_verification_needed`) |
 
 ### Step 5: Act
 
@@ -211,7 +212,7 @@ message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="ey
 message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="white_check_mark")
 ```
 
-#### Auto-Reject (SUSPICIOUS)
+#### Auto-Reject — Clear Fraud (SUSPICIOUS — 2+ strong signals)
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
@@ -230,14 +231,39 @@ message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="ey
 message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="x")
 ```
 
+#### Auto-Reject + Notify Jan — Borderline (SUSPICIOUS — 1 or soft signals)
+
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  --requester clio call PUT "/w/admin/credit-requests/<id>" \
+  '{"status":"rejected","reason":"Flagged as suspicious during pre-approval verification: [specific reason]"}'
+```
+
+Log via `muso-ops-audit` before execution. Then YOU MUST call:
+```
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="x")
+```
+Post in-thread notifying Jan:
+```
+🔴 REJECTED — [Profile Name] as [Role] on "[Track Title]"
+
+Evidence: [1-2 sentences]
+
+Risk score: [X]% | Verdict: Suspicious (borderline)
+Credit request [ID] rejected. Reason: [reason]
+<@U038BM16T7W> — FYI, rejected with soft signals. Override if needed by replying "approve".
+```
+
 #### Escalate (NEEDS REVIEW)
 
-Do NOT call the admin API. YOU MUST call:
+The credit is already in `user_verification_needed` status (set by core-backend).
+No API call needed — just notify Jan. YOU MUST call:
 ```
 message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes", remove=true)
 message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="mag")
 ```
-Then post in-thread tagging both approvers:
+Then post in-thread tagging Jan:
 
 ```
 🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]"
@@ -245,35 +271,39 @@ Then post in-thread tagging both approvers:
 Evidence: [1-2 sentences summarizing investigation findings]
 
 Risk score: [X]% | Verdict: Unverifiable — Needs Review
-<@U7RP6HKUZ> <@U038BM16T7W> — please review. Reply "approve" or "reject [reason]" in this thread.
+<@U038BM16T7W> — please review. Reply "approve" or "reject [reason]" in this thread.
 ```
 
-**Sender verification — CRITICAL:** Only responses from Aaron (`U7RP6HKUZ`) or
-Jan Delmo (`U038BM16T7W`) are valid decisions. Verify `sender_id` from message metadata
-before acting. Responses from any other user are acknowledged but never treated as decisions.
+**Thread interaction:** Jan (or Aaron) can interact naturally in the thread:
 
-**Accepted response formats**: "approve", "approved", "reject [reason]", "rejected [reason]".
-Other messages are acknowledged but not treated as decisions.
+- **"approve"** or **"approved"** → approve the credit request
+- **"reject [reason]"** or **"rejected [reason]"** → reject with the given reason
+- **Any other message** (questions, comments, discussion) → respond conversationally,
+  answer questions about the investigation, provide more detail if asked. Use your
+  existing skills (admin API lookups, Athena queries, web research) to help Jan make
+  her decision. Stay in the thread.
 
-**First valid response wins.** Before acting, re-run the idempotency check (GET the credit
-request status). If status is no longer `user_verification_needed`, post "Already acted on"
-and do not call the API again. Otherwise, act using the responder's Slack ID as `--requester`.
-If a conflicting response arrives after, acknowledge it:
-```
-Already acted on — [action] was taken based on [name]'s response.
-```
+**Sender verification:** Only Jan Delmo (`U038BM16T7W`) or Aaron (`U7RP6HKUZ`) can
+trigger approve/reject actions. Verify `sender_id` from message metadata. Other users
+can chat in the thread but their messages never trigger status changes.
 
-**Timeout (best-effort)**: The agent is event-driven, not scheduled. It cannot wake
-itself up after 30 minutes. Instead, when the agent next processes a message in this
-thread (e.g., a follow-up question, a non-decision reply), check elapsed time since
-the escalation post. If more than 30 minutes have passed with no valid decision, post
-a reminder:
-```
-⏰ Reminder: credit request [ID] still needs review. Reply "approve" or "reject [reason]".
-```
-Stale escalations are also caught by the daily claiming report heartbeat — unresolved
-`user_verification_needed` credits will surface there.
-No auto-action on timeout. The credit stays in `user_verification_needed` until a human decides.
+**Executing a decision:** When Jan or Aaron says "approve" or "reject":
+1. First, GET the credit request to retrieve the current `credits` array — the API
+   requires it in the PUT body even for status changes
+2. Call the admin API with their Slack ID as `--requester`:
+   - Approve: `{"status":"approved","credits":[<credits from GET>]}`
+   - Reject: `{"status":"rejected","reason":"[reason from Jan]","credits":[<credits from GET>]}`
+3. The credit can be in any status (`unverified`, `user_verification_needed`, or
+   even `rejected` for borderline overrides) — execute the decision regardless.
+   If the API returns an error, post it in-thread and let Jan know it needs to be
+   done manually via admin panel.
+4. Update the emoji on the parent message. YOU MUST call:
+   ```
+   message(action="react", channelId="C0APB2CMM7C", messageId="<parent_msg_ts>", emoji="mag", remove=true)
+   message(action="react", channelId="C0APB2CMM7C", messageId="<parent_msg_ts>", emoji="white_check_mark")
+   ```
+   (Use `emoji="x"` instead of `white_check_mark` if the decision is "reject")
+5. Post confirmation in-thread
 
 #### API Failure
 
