@@ -1,15 +1,15 @@
 ---
 name: muso-ops-credit-verification
 description: |
-  Autonomous credit verification workflow. Triggered when the ops agent is
-  @mentioned in #credit-verification (C0APB2CMM7C). Parses the flagged credit
-  request, investigates legitimacy, classifies verdict, and auto-approves,
+  Autonomous credit verification workflow. Triggered by any message in
+  #credit-verification (C0APB2CMM7C). No @mention required — the channel is
+  configured with requireMention: false in openclaw.json. Parses the flagged
+  credit request, investigates legitimacy, classifies verdict, and auto-approves,
   auto-rejects, or escalates to Aaron/Jan.
 
-  Use when: @mentioned in #credit-verification channel with a credit verification
-  request from core-backend.
+  Use when: any message arrives in #credit-verification channel.
 
-  Triggers: messages in #credit-verification (C0APB2CMM7C) that @mention this agent
+  Triggers: any message in #credit-verification (C0APB2CMM7C)
 depends-on:
   - muso-ops-credits
   - muso-ops-fraud
@@ -32,7 +32,7 @@ This skill defines how to handle those messages autonomously.
 
 ## HARD RULE
 
-**Every @mention in #credit-verification triggers this workflow. No exceptions.
+**Every message in #credit-verification triggers this workflow. No exceptions.
 No conversational responses. No clarifying questions. Parse, investigate, act.**
 
 **Thread-awareness:** If the message is a reply in a thread (has `thread_ts` and is
