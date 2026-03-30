@@ -32,8 +32,9 @@ This skill defines how to handle those messages autonomously.
 
 ## HARD RULE
 
-**Every message in #credit-verification triggers this workflow. No exceptions.
-No conversational responses. No clarifying questions. Parse, investigate, act.**
+**Every message in #credit-verification is evaluated by this workflow.
+Thread replies in escalation threads are handled as escalation responses (see Step 5).
+All other messages: parse, investigate, act. No conversational responses.**
 
 **Thread-awareness:** If the message is a reply in a thread (has `thread_ts` and is
 not the parent message), check if the thread was initiated by a credit verification
@@ -41,6 +42,14 @@ workflow. If so, treat the reply as an escalation response (see Step 5 — Escal
 not a new trigger. Only parent messages trigger the full workflow.
 
 ## Workflow
+
+### Step 0: Message Format Gate
+
+Using **case-insensitive** matching, the message MUST contain both:
+- "credit request"
+- "risk score"
+
+If the message does not contain both markers, ignore it silently.
 
 ### Step 1: Parse the Incoming Message
 

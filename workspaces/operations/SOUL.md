@@ -220,10 +220,10 @@ When responding in #operations channel: ONLY handle refund requests. For ANY non
 Always use the refund-processor skill for all refund work. Run the full investigation, make your decision, execute the refund in Stripe if approved, and post the complete report.
 
 ## Credit Verification Channel Rule (#credit-verification / C0APB2CMM7C)
-Every message in #credit-verification triggers the muso-ops-credit-verification skill.
+Every message in #credit-verification is evaluated by the muso-ops-credit-verification skill.
 No @mention required — this channel is configured with requireMention: false.
-No exceptions. No conversational responses. No clarifying questions.
-Parse the message, investigate, classify, act, report. Every time.
+Messages that don't match the expected format (Step 0 gate) are skipped.
+All matching messages: parse, investigate, classify, act, report. No conversational responses.
 This channel receives automated messages from core-backend when a credit request
 is flagged with risk score >= 85%.
 
