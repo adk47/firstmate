@@ -93,22 +93,28 @@ message(action="react", channelId="C0APB2CMM7C", messageId="<data_message_ts>", 
 
 ### Step 1: Parse the Incoming Message
 
-Extract these fields from the message text:
+Extract these fields from the message text. The Credit Verification Bot posts using
+Slack block kit with bold labels. Match field values by looking for the label followed
+by the value on the same or next line. Labels may vary — use the aliases below.
 
-| Field | Required | Example |
-|-------|----------|---------|
-| Credit request ID | Yes | `cr_abc123` |
-| Profile ID | Yes | `prof_xyz789` |
-| Profile name | Yes | `John Smith` |
-| Workspace ID | Yes | `ws_456` |
-| Owner email | Yes | `owner@example.com` |
-| Track title | Yes | `"Midnight Rain"` |
-| Artists | Yes | `Taylor Swift` |
-| Spotify link | No | `https://open.spotify.com/track/...` |
-| Claimed roles | Yes | `Producer, Songwriter` |
-| Overall risk score | Yes | `87%` |
-| Per-dimension scores | Yes | `artist_risk: 92%, track_risk: 75%, role_risk: 88%` |
-| Pending verification count | No | `3 other pending` |
+| Field | Required | Bot label(s) | Example value |
+|-------|----------|-------------|---------------|
+| Credit request ID | Yes | `Credit Request ID:`, `Credit Request:` | `test-req-011`, `cr_abc123` |
+| Profile ID | Yes | `Profile ID:` | `test-profile-001`, `prof_xyz789` |
+| Profile name | Yes | `Profile:` | `Test Artist Profile` |
+| Workspace ID | Yes | `Workspace ID:`, `Workspace:` | `test-ws-001` |
+| Owner email | Yes | `Owner Email:` | `nick@muso.ai` |
+| Track title | Yes | `Track:` | `Blinding Lights` |
+| Artists | Yes | `Artists:` | `The Weeknd` |
+| Spotify link | No | `Spotify URL:`, `Spotify:` | `https://open.spotify.com/track/...` |
+| Claimed roles | Yes | `Roles:` | `Producer, Songwriter` |
+| Overall risk score | Yes | `Risk Score:` | `92%` |
+| Per-dimension scores | Yes | `Risk Breakdown:` (bullet list below) | `• artist_risk: 0.85` |
+| Pending verification count | No | `Pending Verifications:` | `3` |
+
+**Per-dimension scores** appear as a bullet list under `Risk Breakdown:`, with each
+line formatted as `• key: value` (e.g., `• artist_risk: 0.85`). Collect all bullet
+items as the per-dimension risk scores.
 
 **If any required field cannot be parsed**, post an error in-thread AND escalate:
 
