@@ -35,3 +35,6 @@ test-intercom.html
 
 # Superpowers (specs/plans are local working docs)
 docs/superpowers/
+
+# Local notes (not for version control)
+docs/local/

@@ -66,15 +66,29 @@ Where `<final>` is:
 
 ### Step 0: Message Format Gate
 
-Using **case-insensitive** matching, the message MUST contain both:
-- "credit request"
-- "risk score"
+**Path A — Direct bot message:** Using **case-insensitive** matching, the message
+contains both "credit request" and "risk score". Proceed to Step 1 using this message.
 
-If the message does not contain both markers, ignore it silently.
+**Path B — Human relay via @Ops mention:** The message does NOT contain both markers,
+but it is an explicit `@Ops` mention in this channel. No other phrases qualify —
+only direct `@Ops` mentions trigger this path. Slack does not deliver bot messages
+to other bots, so the original Credit Verification Bot message may not have reached
+you. Look at the **preceding message** in the channel (the message immediately above)
+to find the Credit Verification Bot's rich message containing the credit data. If the
+preceding message contains both "credit request" and "risk score", use THAT message's
+content for Step 1 parsing. Store the preceding message's timestamp as
+`data_message_ts` — this is the message you will react on and parse from.
 
-If the message passes the format gate, YOU MUST immediately call:
+> **TODO**: This Path B workaround is fragile (depends on message ordering). The
+> proper fix is to have core-backend post credit verifications via a webhook instead
+> of a bot user, so Slack delivers the message to the Ops agent directly. See
+> core-backend `postCreditVerification()`.
+
+**Neither path matches:** Ignore silently.
+
+If either path matches, YOU MUST immediately call (use `data_message_ts` for Path B):
 ```
-message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes")
+message(action="react", channelId="C0APB2CMM7C", messageId="<data_message_ts>", emoji="eyes")
 ```
 
 ### Step 1: Parse the Incoming Message
