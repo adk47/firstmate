@@ -122,12 +122,30 @@ Check results for:
 
 For every person in the scan results:
 
-1. **Web research** using multiple sources:
-   - AllMusic: `allmusic.com/search/all/[name]` — check for artist profile with credits
-   - Discogs: `discogs.com/search/?q=[name]&type=artist` — check for discography
-   - DuckDuckGo HTML: `duckduckgo.com/html/?q="[name]"+[role]+engineer|producer|mixing` — broad search
-   - Professional website: check if email domain has a website (e.g., `marshmastering@gmail.com` → try `marshmastering.com`)
-   - LinkedIn: look for music industry career history
+1. **Web research** using tiered sources (always check Tier 1; check Tier 2/3 as indicated):
+
+   **Tier 1 — Always check:**
+   - Spotify "Show Credits": check track credits tab for claimed name+role
+   - MusicBrainz: `musicbrainz.org/search?query=[name]&type=artist` — recording-level credits; look for specific track+role match
+   - Discogs: `discogs.com/search/?q=[name]&type=artist` — discography and credits
+   - AllMusic: `allmusic.com/search/all/[name]` — artist profile with credits
+
+   **Tier 2 — Check for writing/publishing roles (songwriter, composer, lyricist, publisher):**
+   - ASCAP: `ascap.com/repertory` — search by writer name
+   - BMI: `repertoire.bmi.com/` — search by writer name
+   - SESAC: `sesac.com` — affiliated writer search
+
+   **Tier 3 — Check if Tier 1 is inconclusive (no Tier 1 source confirms the claimed name+role):**
+   - TIDAL: search for track/artist credits (usually most detailed streaming credits)
+   - Apple Music: check album credits page
+   - Jaxsta: `jaxsta.com` — dedicated music credits database
+   - LinkedIn: music industry career history
+   - Professional website: check email domain
+   - DuckDuckGo: `"[name]"+[role]+engineer|producer|mixing`
+
+   **Investigation failure:** If more than 2 **Tier 1** sources fail (429, blocked,
+   timeout), mark that person's investigation as INCOMPLETE and classify as
+   UNVERIFIABLE — NEEDS REVIEW. Note which sources failed in the report.
 
 2. **Cross-reference analysis:**
    - Do claimed roles match their verified career? (mastering engineer claiming mastering = expected)
@@ -136,7 +154,7 @@ For every person in the scan results:
    - Specialized roles (Immersive Mixing, Dolby Atmos) suggest real technical knowledge
 
 3. **Verdict categories:**
-   - ✅ *VERIFIED LEGIT* — Confirmed via web presence (studio site, AllMusic/Discogs credits, LinkedIn career)
+   - ✅ *VERIFIED LEGIT* — Confirmed via web presence (any of: Spotify credits, MusicBrainz, Discogs, AllMusic, Jaxsta, ASCAP/BMI/SESAC, LinkedIn career, studio site)
    - 🔍 *UNVERIFIABLE — LOW CONCERN* — No web presence but consistent pattern (single technical role, professional email)
    - 🔍 *UNVERIFIABLE — NEEDS REVIEW* — No web presence AND risk signals (very high pop ≥90, creative roles, many credits, mononym)
    - 🔴 *SUSPICIOUS* — Active red flags (identity mismatch, web contradicts claims, bulk self-additions, disposable email)
