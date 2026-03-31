@@ -4,8 +4,8 @@ import { validateHmacSignature } from "../src/webhook.js";
 
 const TEST_SECRET = "test_webhook_secret_123";
 
-function sign(body: string, secret: string): string {
-  return "sha256=" + createHmac("sha256", secret).update(body).digest("hex");
+function sign(body: string, secret: string, algorithm: "sha256" | "sha1" = "sha256"): string {
+  return `${algorithm}=` + createHmac(algorithm, secret).update(body).digest("hex");
 }
 
 describe("validateHmacSignature", () => {
@@ -36,6 +36,22 @@ describe("validateHmacSignature", () => {
     const body = '{"type":"notification_event"}';
     const signature = sign(body, "wrong_secret");
     expect(validateHmacSignature(body, signature, TEST_SECRET)).toBe(false);
+  });
+
+  it("returns true for valid SHA-1 signature", () => {
+    const body = '{"type":"notification_event"}';
+    const signature = sign(body, TEST_SECRET, "sha1");
+    expect(validateHmacSignature(body, signature, TEST_SECRET)).toBe(true);
+  });
+
+  it("returns false for invalid SHA-1 signature", () => {
+    const body = '{"type":"notification_event"}';
+    expect(validateHmacSignature(body, "sha1=invalid", TEST_SECRET)).toBe(false);
+  });
+
+  it("returns false for unsupported algorithm prefix", () => {
+    const body = '{"type":"notification_event"}';
+    expect(validateHmacSignature(body, "md5=abc123", TEST_SECRET)).toBe(false);
   });
 
   it("throws on empty secret", () => {
