@@ -171,12 +171,27 @@ Does this person appear in industry data for this track?
 Is the role plausible given the track's genre/era/label?
 
 **3b. Web research** (from `muso-ops-fraud`):
-- AllMusic: `allmusic.com/search/all/[name]`
-- Discogs: `discogs.com/search/?q=[name]&type=artist`
-- MusicBrainz: `musicbrainz.org/search?query=[name]&type=artist` — has recording-level credits (engineer, producer, mixer); look for the specific track+role match, not just artist existence
-- DuckDuckGo: `"[name]"+[role]+engineer|producer|mixing`
+
+Sources are tiered by priority. Always check Tier 1. Check Tier 2 and 3 as indicated.
+
+**Tier 1 — Always check (primary credit databases):**
+- Spotify "Show Credits": use the Spotify link from the credit request to check the track's credits tab for the claimed name+role
+- MusicBrainz: `musicbrainz.org/search?query=[name]&type=artist` — recording-level credits; look for the specific track+role match, not just artist existence
+- Discogs: `discogs.com/search/?q=[name]&type=artist` — discography and credits
+- AllMusic: `allmusic.com/search/all/[name]` — artist profile with credits
+
+**Tier 2 — Check when claimed role is writing/publishing (songwriter, composer, lyricist, publisher):**
+- ASCAP: `ascap.com/repertory` — search by writer name
+- BMI: `repertoire.bmi.com/` — search by writer name
+- SESAC: `sesac.com` — affiliated writer search
+
+**Tier 3 — Check if Tier 1 is inconclusive (no Tier 1 source confirms the claimed name+role):**
+- TIDAL: search for track/artist credits (usually most detailed streaming credits)
+- Apple Music: check album credits page
+- Jaxsta: `jaxsta.com` — dedicated music credits database
 - LinkedIn: music industry career history
-- Professional website (check email domain)
+- Professional website: check email domain
+- DuckDuckGo: `"[name]"+[role]+engineer|producer|mixing`
 
 If a source returns a 429 (rate limit) or blocks the request, skip it and note it
 as a failed source. Do not retry aggressively — space requests if processing
@@ -190,7 +205,7 @@ multiple verifications in sequence.
 - Credit additions right after profile claiming?
 
 **Investigation failure — CRITICAL:** If Athena is unreachable or returns an error,
-OR if more than 2 web research sources fail, the investigation is INCOMPLETE.
+OR if more than 2 **Tier 1** sources fail, the investigation is INCOMPLETE.
 An incomplete investigation MUST result in ESCALATION (UNVERIFIABLE — NEEDS REVIEW),
 never auto-approve or auto-reject. Include in the report: "Investigation incomplete —
 [list which sources failed]. Escalating for human review."
@@ -201,7 +216,7 @@ Map investigation results to a verdict using `muso-ops-fraud` criteria:
 
 | Verdict | Criteria | Action |
 |---------|----------|--------|
-| **VERIFIED LEGIT** | Confirmed via web (AllMusic/Discogs credits, LinkedIn career, studio site) | Auto-approve |
+| **VERIFIED LEGIT** | Confirmed via web (any of: Spotify credits, MusicBrainz, Discogs, AllMusic, Jaxsta, ASCAP/BMI/SESAC, LinkedIn career, studio site) | Auto-approve |
 | **UNVERIFIABLE — LOW CONCERN** | No web presence but consistent pattern (single technical role, professional email, low fraud signals) | Auto-approve |
 | **SUSPICIOUS — CLEAR FRAUD** | 2+ strong fraud signals (identity mismatch, web contradicts, disposable email + bulk submissions) | Auto-reject silently |
 | **SUSPICIOUS — BORDERLINE** | 1 fraud signal or soft signals (no web presence + high-pop track, but professional email) | Auto-reject + tag Jan |
@@ -224,8 +239,12 @@ Map investigation results to a verdict using `muso-ops-fraud` criteria:
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/admin/credit-requests/<id>" '{"status":"approved"}'
+  call PUT "/admin/credit-requests" '{"requestIds":["<id>"],"status":"approved"}'
 ```
+
+**Important:** Use `PUT /admin/credit-requests` (bulk status endpoint), NOT
+`PUT /admin/credit-requests/:id` (that endpoint updates the credits array only
+and silently ignores the status field).
 
 Log via `muso-ops-audit` before execution. Then YOU MUST call:
 ```
@@ -237,8 +256,8 @@ message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="wh
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/admin/credit-requests/<id>" \
-  '{"status":"rejected","reason":"Flagged as suspicious during pre-approval verification: [specific reason]"}'
+  call PUT "/admin/credit-requests" \
+  '{"requestIds":["<id>"],"status":"rejected","reason":"Flagged as suspicious during pre-approval verification: [specific reason]"}'
 ```
 
 Use a specific reason based on findings. Examples:
@@ -256,8 +275,8 @@ message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="x"
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/admin/credit-requests/<id>" \
-  '{"status":"rejected","reason":"Flagged as suspicious during pre-approval verification: [specific reason]"}'
+  call PUT "/admin/credit-requests" \
+  '{"requestIds":["<id>"],"status":"rejected","reason":"Flagged as suspicious during pre-approval verification: [specific reason]"}'
 ```
 
 Log via `muso-ops-audit` before execution. Then YOU MUST call:
@@ -271,11 +290,12 @@ Post in-thread notifying Jan:
 
 Evidence: [1-2 sentence summary of fraud signals]
 
-Sources:
-• AllMusic: <url> — [what was found, or "no results"]
-• Discogs: <url> — [what was found, or "no results"]
+Sources (Tier 1):
+• Spotify credits: <url> — [what was found, or "no credits listed"]
 • MusicBrainz: <url> — [what was found, or "no results"]
-• [any additional sources checked]
+• Discogs: <url> — [what was found, or "no results"]
+• AllMusic: <url> — [what was found, or "no results"]
+[Tier 2/3 sources checked, if any]
 
 Risk score: [X]% | Verdict: Suspicious (borderline)
 Credit request [ID] rejected. Reason: [reason]
@@ -297,11 +317,12 @@ Then post in-thread tagging Jan:
 
 Evidence: [1-2 sentence summary of investigation findings]
 
-Sources:
-• AllMusic: <url> — [what was found, or "no results"]
-• Discogs: <url> — [what was found, or "no results"]
+Sources (Tier 1):
+• Spotify credits: <url> — [what was found, or "no credits listed"]
 • MusicBrainz: <url> — [what was found, or "no results"]
-• [any additional sources checked]
+• Discogs: <url> — [what was found, or "no results"]
+• AllMusic: <url> — [what was found, or "no results"]
+[Tier 2/3 sources checked, if any]
 
 Risk score: [X]% | Verdict: Unverifiable — Needs Review
 <@U038BM16T7W> — please review. Reply "approve" or "reject [reason]" in this thread.
@@ -321,22 +342,22 @@ trigger approve/reject actions. Verify `sender_id` from message metadata. Other 
 can chat in the thread but their messages never trigger status changes.
 
 **Executing a decision:** When Jan or Aaron says "approve" or "reject":
-1. First, GET the credit request to retrieve the current `credits` array — the API
-   requires it in the PUT body even for status changes
-2. Call the admin API with their Slack ID as `--requester`:
-   - Approve: `{"status":"approved","credits":[<credits from GET>]}`
-   - Reject: `{"status":"rejected","reason":"[reason from Jan]","credits":[<credits from GET>]}`
-3. The credit can be in any status (`unverified`, `user_verification_needed`, or
+1. Call the admin API with their Slack ID as `--requester`:
+   - Approve: `PUT /admin/credit-requests` with `{"requestIds":["<id>"],"status":"approved"}`
+   - Reject: `PUT /admin/credit-requests` with `{"requestIds":["<id>"],"status":"rejected","reason":"[reason from Jan]"}`
+   **Important:** Use the bulk status endpoint (`PUT /admin/credit-requests`), NOT
+   the per-request endpoint (`PUT /admin/credit-requests/:id`) which only updates credits.
+2. The credit can be in any status (`unverified`, `user_verification_needed`, or
    even `rejected` for borderline overrides) — execute the decision regardless.
    If the API returns an error, post it in-thread and let Jan know it needs to be
    done manually via admin panel.
-4. Update the emoji on the parent message. YOU MUST call:
+3. Update the emoji on the parent message. YOU MUST call:
    ```
    message(action="react", channelId="C0APB2CMM7C", messageId="<parent_msg_ts>", emoji="mag", remove=true)
    message(action="react", channelId="C0APB2CMM7C", messageId="<parent_msg_ts>", emoji="white_check_mark")
    ```
    (Use `emoji="x"` instead of `white_check_mark` if the decision is "reject")
-5. Post confirmation in-thread
+4. Post confirmation in-thread
 
 #### API Failure
 
@@ -361,11 +382,15 @@ Post investigation summary in-thread on the original message.
 
 Evidence: [1-2 sentence summary of why this is legit]
 
-Sources:
-• AllMusic: <url> — [what was found, or "no results"]
-• Discogs: <url> — [what was found, or "no results"]
+Sources (Tier 1):
+• Spotify credits: <url> — [what was found, or "no credits listed"]
 • MusicBrainz: <url> — [what was found, or "no results"]
-• [any additional sources checked: LinkedIn, studio website, YouTube, etc.]
+• Discogs: <url> — [what was found, or "no results"]
+• AllMusic: <url> — [what was found, or "no results"]
+[Tier 2 — if writing/publishing role was checked:]
+• ASCAP/BMI/SESAC: <url> — [what was found]
+[Tier 3 — if checked:]
+• [source]: <url> — [what was found]
 
 Risk score: [X]% | Verdict: [Verdict]
 Note: [1 sentence on why risk flag is a false positive, if applicable]
@@ -378,11 +403,12 @@ Credit request [ID] approved.
 
 Evidence: [1-2 sentence summary of fraud signals]
 
-Sources:
-• AllMusic: <url> — [what was found, or "no results"]
-• Discogs: <url> — [what was found, or "no results"]
+Sources (Tier 1):
+• Spotify credits: <url> — [what was found, or "no credits listed"]
 • MusicBrainz: <url> — [what was found, or "no results"]
-• [any additional sources checked]
+• Discogs: <url> — [what was found, or "no results"]
+• AllMusic: <url> — [what was found, or "no results"]
+[Tier 2/3 sources checked, if any]
 
 Risk score: [X]% | Verdict: [Verdict]
 Credit request [ID] rejected. Reason: [reason]
