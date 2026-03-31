@@ -173,6 +173,7 @@ Is the role plausible given the track's genre/era/label?
 **3b. Web research** (from `muso-ops-fraud`):
 - AllMusic: `allmusic.com/search/all/[name]`
 - Discogs: `discogs.com/search/?q=[name]&type=artist`
+- MusicBrainz: `musicbrainz.org/search?query=[name]&type=artist` — has recording-level credits (engineer, producer, mixer); look for the specific track+role match, not just artist existence
 - DuckDuckGo: `"[name]"+[role]+engineer|producer|mixing`
 - LinkedIn: music industry career history
 - Professional website (check email domain)
@@ -266,9 +267,15 @@ message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="x"
 ```
 Post in-thread notifying Jan:
 ```
-🔴 REJECTED — [Profile Name] as [Role] on "[Track Title]"
+🔴 REJECTED — [Profile Name] as [Role] on "[Track Title]" ([Artists])
 
-Evidence: [1-2 sentences]
+Evidence: [1-2 sentence summary of fraud signals]
+
+Sources:
+• AllMusic: <url> — [what was found, or "no results"]
+• Discogs: <url> — [what was found, or "no results"]
+• MusicBrainz: <url> — [what was found, or "no results"]
+• [any additional sources checked]
 
 Risk score: [X]% | Verdict: Suspicious (borderline)
 Credit request [ID] rejected. Reason: [reason]
@@ -286,9 +293,15 @@ message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="ma
 Then post in-thread tagging Jan:
 
 ```
-🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]"
+🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]" ([Artists])
 
-Evidence: [1-2 sentences summarizing investigation findings]
+Evidence: [1-2 sentence summary of investigation findings]
+
+Sources:
+• AllMusic: <url> — [what was found, or "no results"]
+• Discogs: <url> — [what was found, or "no results"]
+• MusicBrainz: <url> — [what was found, or "no results"]
+• [any additional sources checked]
 
 Risk score: [X]% | Verdict: Unverifiable — Needs Review
 <@U038BM16T7W> — please review. Reply "approve" or "reject [reason]" in this thread.
@@ -344,19 +357,32 @@ Post investigation summary in-thread on the original message.
 
 **Auto-approve format:**
 ```
-✅ APPROVED — [Profile Name] as [Role] on "[Track Title]"
+✅ APPROVED — [Profile Name] as [Role] on "[Track Title]" ([Artists])
 
-Evidence: [1-2 sentences]
+Evidence: [1-2 sentence summary of why this is legit]
+
+Sources:
+• AllMusic: <url> — [what was found, or "no results"]
+• Discogs: <url> — [what was found, or "no results"]
+• MusicBrainz: <url> — [what was found, or "no results"]
+• [any additional sources checked: LinkedIn, studio website, YouTube, etc.]
 
 Risk score: [X]% | Verdict: [Verdict]
+Note: [1 sentence on why risk flag is a false positive, if applicable]
 Credit request [ID] approved.
 ```
 
 **Auto-reject format:**
 ```
-🔴 REJECTED — [Profile Name] as [Role] on "[Track Title]"
+🔴 REJECTED — [Profile Name] as [Role] on "[Track Title]" ([Artists])
 
-Evidence: [1-2 sentences]
+Evidence: [1-2 sentence summary of fraud signals]
+
+Sources:
+• AllMusic: <url> — [what was found, or "no results"]
+• Discogs: <url> — [what was found, or "no results"]
+• MusicBrainz: <url> — [what was found, or "no results"]
+• [any additional sources checked]
 
 Risk score: [X]% | Verdict: [Verdict]
 Credit request [ID] rejected. Reason: [reason]
