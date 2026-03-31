@@ -134,10 +134,10 @@ Before investigating, query the credit request status:
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/credit-requests/<credit_request_id>"
+  call GET "/admin/credit-requests/<credit_request_id>"
 ```
 
-If the status is NOT `user_verification_needed` (e.g., already `approved` or `rejected`),
+If the status is NOT `unverified` or `user_verification_needed` (e.g., already `approved` or `rejected`),
 post a short note in-thread and stop:
 
 ```
@@ -204,7 +204,7 @@ Map investigation results to a verdict using `muso-ops-fraud` criteria:
 | **UNVERIFIABLE — LOW CONCERN** | No web presence but consistent pattern (single technical role, professional email, low fraud signals) | Auto-approve |
 | **SUSPICIOUS — CLEAR FRAUD** | 2+ strong fraud signals (identity mismatch, web contradicts, disposable email + bulk submissions) | Auto-reject silently |
 | **SUSPICIOUS — BORDERLINE** | 1 fraud signal or soft signals (no web presence + high-pop track, but professional email) | Auto-reject + tag Jan |
-| **UNVERIFIABLE — NEEDS REVIEW** | No web presence AND risk signals (pop >=90, creative roles, many credits, mononym) | Escalate to Jan (status already `user_verification_needed`) |
+| **UNVERIFIABLE — NEEDS REVIEW** | No web presence AND risk signals (pop >=90, creative roles, many credits, mononym) | Escalate to Jan (status already `unverified` or `user_verification_needed`) |
 
 ### Step 5: Act
 
@@ -223,7 +223,7 @@ Map investigation results to a verdict using `muso-ops-fraud` criteria:
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  --requester clio call PUT "/w/admin/credit-requests/<id>" '{"status":"approved"}'
+  call PUT "/admin/credit-requests/<id>" '{"status":"approved"}'
 ```
 
 Log via `muso-ops-audit` before execution. Then YOU MUST call:
@@ -236,7 +236,7 @@ message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="wh
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  --requester clio call PUT "/w/admin/credit-requests/<id>" \
+  call PUT "/admin/credit-requests/<id>" \
   '{"status":"rejected","reason":"Flagged as suspicious during pre-approval verification: [specific reason]"}'
 ```
 
@@ -255,7 +255,7 @@ message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="x"
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  --requester clio call PUT "/w/admin/credit-requests/<id>" \
+  call PUT "/admin/credit-requests/<id>" \
   '{"status":"rejected","reason":"Flagged as suspicious during pre-approval verification: [specific reason]"}'
 ```
 
@@ -277,7 +277,7 @@ Credit request [ID] rejected. Reason: [reason]
 
 #### Escalate (NEEDS REVIEW)
 
-The credit is already in `user_verification_needed` status (set by core-backend).
+The credit is already in `unverified` or `user_verification_needed` status (set by core-backend).
 No API call needed — just notify Jan. YOU MUST call:
 ```
 message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes", remove=true)
