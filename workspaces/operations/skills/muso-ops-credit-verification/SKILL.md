@@ -172,6 +172,15 @@ Is the role plausible given the track's genre/era/label?
 
 **3b. Web research** (from `muso-ops-fraud`):
 
+**Tool selection:**
+- `browser` — for checking specific URLs (Spotify credits page, MusicBrainz artist page,
+  Discogs, AllMusic, TIDAL, Apple Music, Jaxsta, ASCAP/BMI/SESAC repertory, professional
+  websites). Use browser to load the page and read credits/search results.
+- `web_search` — for general lookups (DuckDuckGo queries, LinkedIn searches, finding URLs
+  when you don't have a direct link).
+
+Do NOT use `web_fetch` — it is disabled and cannot render JavaScript-dependent pages.
+
 Sources are tiered by priority. Always check Tier 1. Check Tier 2 and 3 as indicated.
 
 **Tier 1 — Always check (primary credit databases):**
