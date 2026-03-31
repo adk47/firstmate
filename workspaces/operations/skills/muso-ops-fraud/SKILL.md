@@ -124,6 +124,12 @@ For every person in the scan results:
 
 1. **Web research** using tiered sources (always check Tier 1; check Tier 2/3 as indicated):
 
+   **Tool selection:**
+   - `browser` — for checking specific URLs (Spotify credits, MusicBrainz, Discogs, AllMusic,
+     TIDAL, Apple Music, Jaxsta, ASCAP/BMI/SESAC, professional websites).
+   - `web_search` — for general lookups (DuckDuckGo queries, LinkedIn searches, finding URLs).
+   - Do NOT use `web_fetch` — it is disabled and cannot render JS-dependent pages.
+
    **Tier 1 — Always check:**
    - Spotify "Show Credits": check track credits tab for claimed name+role
    - MusicBrainz: `musicbrainz.org/search?query=[name]&type=artist` — recording-level credits; look for specific track+role match
