@@ -2,6 +2,7 @@ import type { IntercomAccountConfig } from "./types.js";
 import { DEFAULT_FALLBACK_ACK } from "./types.js";
 
 export function listIntercomAccountIds(cfg: Record<string, unknown>): string[] {
+  if (!cfg) return [];
   const channels = cfg.channels as Record<string, unknown> | undefined;
   const intercom = channels?.intercom as Record<string, unknown> | undefined;
   const accounts = intercom?.accounts as Record<string, unknown> | undefined;
@@ -13,6 +14,7 @@ export function resolveIntercomAccount(
   accountId?: string | null,
 ): IntercomAccountConfig & { accountId: string } {
   const id = accountId ?? "default";
+  if (!cfg) throw new Error(`intercom: account "${id}" not found in config`);
   const channels = cfg.channels as Record<string, unknown> | undefined;
   const intercom = channels?.intercom as Record<string, unknown> | undefined;
   const accounts = intercom?.accounts as Record<string, unknown> | undefined;
