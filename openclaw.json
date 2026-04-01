@@ -1,7 +1,7 @@
 {
   "meta": {
-    "lastTouchedVersion": "2026.3.13",
-    "lastTouchedAt": "2026-03-23T05:37:17.626Z"
+    "lastTouchedVersion": "2026.3.23",
+    "lastTouchedAt": "2026-03-31T22:06:21.989Z"
   },
   "wizard": {
     "lastRunAt": "2026-02-19T06:12:59.869Z",
@@ -22,7 +22,7 @@
     "providers": {
       "anthropic": {
         "baseUrl": "http://localhost:8317",
-        "apiKey": "VAULT",
+        "apiKey": "sk-hydra-prod-2026",
         "auth": "api-key",
         "authHeader": true,
         "models": [
@@ -60,9 +60,7 @@
     "defaults": {
       "model": {
         "primary": "anthropic/claude-opus-4-6",
-        "fallbacks": [
-          "anthropic/claude-sonnet-4-6"
-        ]
+        "fallbacks": []
       },
       "imageModel": {
         "primary": "anthropic/claude-sonnet-4-6",
@@ -81,7 +79,10 @@
           "alias": "haiku"
         }
       },
-      "workspace": "/opt/hydra/workspaces/coordinator",
+      "workspace": "/opt/hydra/workspaces/neutral",
+      "memorySearch": {
+        "enabled": false
+      },
       "compaction": {
         "mode": "default",
         "keepRecentTokens": 40000
@@ -140,10 +141,7 @@
         "workspace": "/opt/hydra/workspaces/finance",
         "model": {
           "primary": "anthropic/claude-sonnet-4-6",
-          "fallbacks": [
-            "anthropic/claude-haiku-4-5-20251001",
-            "anthropic/claude-opus-4-6"
-          ]
+          "fallbacks": []
         }
       },
       {
@@ -151,10 +149,7 @@
         "workspace": "/opt/hydra/workspaces/operations",
         "model": {
           "primary": "anthropic/claude-sonnet-4-6",
-          "fallbacks": [
-            "anthropic/claude-haiku-4-5-20251001",
-            "anthropic/claude-opus-4-6"
-          ]
+          "fallbacks": []
         }
       },
       {
@@ -162,9 +157,7 @@
         "workspace": "/opt/hydra/workspaces/devops",
         "model": {
           "primary": "anthropic/claude-sonnet-4-6",
-          "fallbacks": [
-            "anthropic/claude-haiku-4-5-20251001"
-          ]
+          "fallbacks": []
         }
       },
       {
@@ -184,19 +177,95 @@
             "anthropic/claude-sonnet-4-6"
           ]
         }
-      },
-      {
-        "id": "sentinel",
-        "workspace": "/opt/hydra/workspaces/sentinel",
-        "model": {
-          "primary": "anthropic/claude-sonnet-4-6",
-          "fallbacks": [
-            "anthropic/claude-haiku-4-5-20251001"
-          ]
-        }
       }
     ]
   },
+  "bindings": [
+    {
+      "agentId": "ceo",
+      "match": {
+        "channel": "slack",
+        "accountId": "ceo"
+      }
+    },
+    {
+      "agentId": "cmo",
+      "match": {
+        "channel": "slack",
+        "accountId": "cmo"
+      }
+    },
+    {
+      "agentId": "cto",
+      "match": {
+        "channel": "slack",
+        "accountId": "cto"
+      }
+    },
+    {
+      "agentId": "qa",
+      "match": {
+        "channel": "slack",
+        "accountId": "qa"
+      }
+    },
+    {
+      "agentId": "finance",
+      "match": {
+        "channel": "slack",
+        "accountId": "finance"
+      }
+    },
+    {
+      "agentId": "operations",
+      "match": {
+        "channel": "slack",
+        "accountId": "operations"
+      }
+    },
+    {
+      "agentId": "devops",
+      "match": {
+        "channel": "slack",
+        "accountId": "devops"
+      }
+    },
+    {
+      "agentId": "design",
+      "match": {
+        "channel": "slack",
+        "accountId": "design"
+      }
+    },
+    {
+      "agentId": "support",
+      "match": {
+        "channel": "slack",
+        "accountId": "support"
+      }
+    },
+    {
+      "agentId": "clio",
+      "match": {
+        "channel": "slack",
+        "accountId": "clio"
+      }
+    },
+    {
+      "agentId": "clio",
+      "match": {
+        "channel": "slack",
+        "accountId": "default"
+      }
+    },
+    {
+      "agentId": "support",
+      "match": {
+        "channel": "intercom",
+        "accountId": "default"
+      }
+    }
+  ],
   "messages": {
     "queue": {
       "mode": "steer-backlog",
@@ -235,8 +304,8 @@
       "enabled": true,
       "userTokenReadOnly": true,
       "dangerouslyAllowNameMatching": true,
-      "groupPolicy": "open",
       "requireMention": true,
+      "groupPolicy": "open",
       "streaming": "partial",
       "nativeStreaming": true,
       "replyToMode": "all",
@@ -248,46 +317,46 @@
       "channels": {},
       "accounts": {
         "ceo": {
-          "botToken": "VAULT",
-          "appToken": "VAULT",
+          "botToken": "xoxb-264358207284-10738640379095-BLv8jA5GbCE8gwUzO7UUrcHi",
+          "appToken": "xapp-1-A0ANK0C88UR-10747728049043-fc595e0f9642831f901e4338d20bb02d33be1651674a3747206a4cc4aac540a8",
           "userTokenReadOnly": true,
-          "nativeStreaming": true,
-          "streaming": "partial"
+          "streaming": "partial",
+          "nativeStreaming": true
         },
         "cmo": {
-          "botToken": "VAULT",
-          "appToken": "VAULT",
+          "botToken": "xoxb-264358207284-10738651143975-Fe2xsLCEWxhHKVJshWHVhTst",
+          "appToken": "xapp-1-A0AP0B47RLG-10738668161527-53a1f1f6bfa7437269b71ee240f9708638034ad8710d922336756c005c93981e",
           "userTokenReadOnly": true,
-          "nativeStreaming": true,
-          "streaming": "partial"
+          "streaming": "partial",
+          "nativeStreaming": true
         },
         "cto": {
-          "botToken": "VAULT",
-          "appToken": "VAULT",
+          "botToken": "xoxb-264358207284-10767021749249-Q20ITV3VWq4Q7gXVPOXCUf5R",
+          "appToken": "xapp-1-A0AP0B4CP08-10754128687330-50099a03f851e7bed0edf0f0261db6d0070c1c05e0563425f15a448a05c346fa",
           "userTokenReadOnly": true,
-          "nativeStreaming": true,
-          "streaming": "partial"
+          "streaming": "partial",
+          "nativeStreaming": true
         },
         "qa": {
-          "botToken": "VAULT",
-          "appToken": "VAULT",
+          "botToken": "xoxb-264358207284-10757702542116-kuQjLB58zytZqdncE32M9ZQr",
+          "appToken": "xapp-1-A0AN2L3NW4V-10738682131751-44b019cc3720cf8078d0d0f8f86876db63ea457d07124a29d0aca1f6dc4605e1",
           "userTokenReadOnly": true,
-          "nativeStreaming": true,
-          "streaming": "partial"
+          "streaming": "partial",
+          "nativeStreaming": true
         },
         "finance": {
-          "botToken": "VAULT",
-          "appToken": "VAULT",
+          "botToken": "xoxb-264358207284-10767100804193-PWcPEMlZtcQgJpF3k8pzlD2I",
+          "appToken": "xapp-1-A0AN9P6FKU4-10767112468801-e4c75bbeaed3c96d2893a8e99892593dc8a6d871d4728d90ef83a765a2fe402a",
           "userTokenReadOnly": true,
-          "nativeStreaming": true,
-          "streaming": "partial"
+          "streaming": "partial",
+          "nativeStreaming": true
         },
         "operations": {
-          "botToken": "VAULT",
-          "appToken": "VAULT",
+          "botToken": "xoxb-264358207284-10767029891185-Se5OwpfMa6ys8bUGs8PYBXIT",
+          "appToken": "xapp-1-A0AMZM40E83-10738686680327-0aaa13ccb1e763ae929a217c9f912fd8884ca29cba034a88c95abb8fac9401d1",
           "userTokenReadOnly": true,
-          "nativeStreaming": true,
           "streaming": "partial",
+          "nativeStreaming": true,
           "channels": {
             "C0APB2CMM7C": {
               "enabled": true,
@@ -297,89 +366,113 @@
           }
         },
         "devops": {
-          "botToken": "VAULT",
-          "appToken": "VAULT",
+          "botToken": "xoxb-264358207284-10752067401878-s93Zptv9uHE8IFeM8HJZCF2D",
+          "appToken": "xapp-1-A0AN2L4CP8V-10752084514230-62b1f5263f8ab4e8faec477afa18ad3d1955b4782e794066e39e2c4b0da39ed4",
           "userTokenReadOnly": true,
-          "nativeStreaming": true,
-          "streaming": "partial"
+          "streaming": "partial",
+          "nativeStreaming": true
         },
         "design": {
-          "botToken": "VAULT",
-          "appToken": "VAULT",
+          "botToken": "xoxb-264358207284-10767034790193-dgyaLmnOZDQ6kcQDCopkc3Xh",
+          "appToken": "xapp-1-A0AN2L42ZT7-10757731989748-f452bd16c711beaefd656f9871ac5d848e87b172cc0ff2dab5585c9306936f36",
           "userTokenReadOnly": true,
-          "nativeStreaming": true,
-          "streaming": "partial"
+          "streaming": "partial",
+          "nativeStreaming": true
         },
         "default": {
-          "botToken": "VAULT",
-          "appToken": "VAULT",
+          "botToken": "xoxb-264358207284-10767000436401-eWLy29bXu71IK8WU5xUNcxmo",
+          "appToken": "xapp-1-A0AP0B43E56-10754112341106-bcf89629183c7b8af5b55b09b1a83f5c77480c6d1f99a606fa1d87bf0bd21eb2",
           "userTokenReadOnly": true,
-          "nativeStreaming": true,
-          "streaming": "partial"
+          "streaming": "partial",
+          "nativeStreaming": true
         },
         "support": {
-          "botToken": "VAULT",
-          "appToken": "VAULT",
+          "botToken": "xoxb-264358207284-10767041148305-JPk1MvuGJjr9J8mvvgKrhFtT",
+          "appToken": "xapp-1-A0AMQK8PH8X-10752091591862-9b3f765296a9ac01468fc58b2b6126cad0dee60e5914dd0930f0a5901fb1864d",
           "userTokenReadOnly": true,
-          "nativeStreaming": true,
-          "streaming": "partial"
+          "streaming": "partial",
+          "nativeStreaming": true
         },
         "clio": {
-          "botToken": "VAULT",
-          "appToken": "VAULT",
+          "botToken": "xoxb-264358207284-10767000436401-eWLy29bXu71IK8WU5xUNcxmo",
+          "appToken": "xapp-1-A0AP0B43E56-10754112341106-bcf89629183c7b8af5b55b09b1a83f5c77480c6d1f99a606fa1d87bf0bd21eb2",
           "userTokenReadOnly": true,
-          "nativeStreaming": true,
-          "streaming": "partial"
+          "streaming": "partial",
+          "nativeStreaming": true
         }
       }
     },
     "openclaw-gmail": {
       "enabled": true,
-      "defaultAccount": "a@muso.ai",
       "accounts": {
         "a@muso.ai": {
           "email": "a@muso.ai",
           "backend": "api",
           "oauth": {
-            "clientId": "VAULT:google-workspace-oauth/GOOGLE_CLIENT_ID",
-            "clientSecret": "VAULT:google-workspace-oauth/GOOGLE_CLIENT_SECRET",
-            "refreshToken": "VAULT:google-workspace-oauth/GOOGLE_REFRESH_TOKEN"
+            "clientId": "217563080401-h9t68rmd9p1hbn3vv06ealitnvnubrlm.apps.googleusercontent.com",
+            "clientSecret": "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",
+            "refreshToken": "1//0fj1cTsfVAC--CgYIARAAGA8SNwF-L9IrGYLkGLj45vIDjrFmM3l6z0kPFDE8mJFlYqto1f5GYmIb-RpAAx2DY6Et8anOKWaoyak"
           },
-          "allowFrom": ["*"],
+          "allowFrom": [
+            "*"
+          ],
           "pollIntervalMs": 60000
         },
         "ak@muso.ai": {
           "email": "ak@muso.ai",
           "backend": "api",
           "oauth": {
-            "clientId": "VAULT:google-workspace-ak/GOOGLE_CLIENT_ID",
-            "clientSecret": "VAULT:google-workspace-ak/GOOGLE_CLIENT_SECRET",
-            "refreshToken": "VAULT:google-workspace-ak/GOOGLE_REFRESH_TOKEN"
+            "clientId": "497104447931-f7hqaijcdkrk5rsukg2qkm20daq1l5f6.apps.googleusercontent.com",
+            "clientSecret": "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",
+            "refreshToken": "1//0fF5A_xOlO-BaCgYIARAAGA8SNwF-L9IryigIOAShnDDwbA_A820Qhe7U7LRue477KJw_2lh8GeD3IpeIU3sA6qXB-h2nWlRHmMw"
           },
-          "allowFrom": ["*"],
+          "allowFrom": [
+            "*"
+          ],
           "pollIntervalMs": 60000
         },
         "aaron.k@muso.ai": {
           "email": "aaron.k@muso.ai",
           "backend": "api",
           "oauth": {
-            "clientId": "VAULT:google-workspace-aaron-k/GOOGLE_CLIENT_ID",
-            "clientSecret": "VAULT:google-workspace-aaron-k/GOOGLE_CLIENT_SECRET",
-            "refreshToken": "VAULT:google-workspace-aaron-k/GOOGLE_REFRESH_TOKEN"
+            "clientId": "464547621337-dq3u8ig9spmq8eidmurpcmkqe3m04m46.apps.googleusercontent.com",
+            "clientSecret": "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",
+            "refreshToken": "1//0fR8jARDcuwm4CgYIARAAGA8SNwF-L9IrOEEd4tteQrlOOoE85wYxQRPDRwiIufFvndLthAUUlwmg1Csi-6okWdRMlp-lEjxUp8s"
           },
-          "allowFrom": ["*"],
+          "allowFrom": [
+            "*"
+          ],
           "pollIntervalMs": 60000
         },
         "f@muso.ai": {
           "email": "f@muso.ai",
           "backend": "api",
           "oauth": {
-            "clientId": "VAULT:google-workspace-f/GOOGLE_CLIENT_ID",
-            "clientSecret": "VAULT:google-workspace-f/GOOGLE_CLIENT_SECRET",
-            "refreshToken": "VAULT:google-workspace-f/GOOGLE_REFRESH_TOKEN"
+            "clientId": "649789628828-5313aa4seu5ng8jpcl35c7ag1j6kekjq.apps.googleusercontent.com",
+            "clientSecret": "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",
+            "refreshToken": "1//0fYlEETC_UrcMCgYIARAAGA8SNwF-L9Ir2NDrTr2BWiBTKH_g34W7HOxj6KYH8ZT0J1dNLV7Xj7f2TthqHsG3OFHjUFYevvA9Zx4"
           },
-          "allowFrom": ["*"],
+          "allowFrom": [
+            "*"
+          ],
           "pollIntervalMs": 60000
+        }
+      },
+      "defaultAccount": "a@muso.ai"
+    },
+    "intercom": {
+      "accounts": {
+        "default": {
+          "enabled": false,
+          "workspaceId": "dwjzhcge",
+          "token": "dG9rOjdiMzZlNGU3XzEyMjFfNGI1MF9hMzRlXzdhZTllN2NhZjY4ODoxOjA=",
+          "webhookSecret": "43c744d5-5043-4f3f-b7fb-36440af1e8d7",
+          "botAdminId": "4359478",
+          "defaultInboxId": "5465657",
+          "fallbackSlackSupervisionChannel": "",
+          "fallbackAcknowledgement": "We're looking into this and will get back to you shortly.",
+          "requireMappedHumanAdmin": true,
+          "adminMapping": {}
         }
       }
     }
@@ -399,6 +492,10 @@
       "mode": "token",
       "token": "f3beadb72aaec5fd6558aa1cdaa3217ce1c509293331a088"
     },
+    "trustedProxies": [
+      "172.17.0.0/16",
+      "127.0.0.1"
+    ],
     "tailscale": {
       "mode": "off",
       "resetOnExit": false
@@ -409,45 +506,27 @@
           "enabled": true
         }
       }
-    },
-    "trustedProxies": [
-      "172.17.0.0/16",
-      "127.0.0.1"
-    ]
+    }
   },
-  "bindings": [
-    {"match": {"channel": "slack", "accountId": "ceo"}, "agentId": "ceo"},
-    {"match": {"channel": "slack", "accountId": "cmo"}, "agentId": "cmo"},
-    {"match": {"channel": "slack", "accountId": "cto"}, "agentId": "cto"},
-    {"match": {"channel": "slack", "accountId": "qa"}, "agentId": "qa"},
-    {"match": {"channel": "slack", "accountId": "finance"}, "agentId": "finance"},
-    {"match": {"channel": "slack", "accountId": "operations"}, "agentId": "operations"},
-    {"match": {"channel": "slack", "accountId": "devops"}, "agentId": "devops"},
-    {"match": {"channel": "slack", "accountId": "design"}, "agentId": "design"},
-    {"match": {"channel": "slack", "accountId": "support"}, "agentId": "support"},
-    {"match": {"channel": "slack", "accountId": "clio"}, "agentId": "clio"},
-    {"match": {"channel": "slack", "accountId": "default"}, "agentId": "clio"}
-  ],
   "plugins": {
+    "allow": [
+      "openclaw-gmail",
+      "slack",
+      "openclaw-intercom",
+      "intercom"
+    ],
     "entries": {
       "slack": {
         "enabled": true
       },
       "openclaw-gmail": {
-        "enabled": false,
-        "_note": "Disabled: incompatible with openclaw 2026.3.22 (describeMessageTool crash). Re-enable after plugin update."
+        "enabled": true
+      },
+      "intercom": {
+        "enabled": true
       }
     },
     "installs": {
-      "openclaw-gmail": {
-        "source": "npm",
-        "spec": "@mcinteerj/openclaw-gmail",
-        "installPath": "/root/.openclaw/extensions/openclaw-gmail",
-        "version": "1.7.3",
-        "resolvedName": "@mcinteerj/openclaw-gmail",
-        "resolvedVersion": "1.7.3",
-        "resolvedSpec": "@mcinteerj/openclaw-gmail@1.7.3"
-      },
       "lossless-claw": {
         "source": "npm",
         "spec": "@martian-engineering/lossless-claw",
@@ -460,6 +539,26 @@
         "shasum": "bc9725d6d59d9b1523128ab528f1258c4258fa3f",
         "resolvedAt": "2026-03-15T16:41:53.234Z",
         "installedAt": "2026-03-15T16:42:31.664Z"
+      },
+      "openclaw-gmail": {
+        "source": "npm",
+        "spec": "@mcinteerj/openclaw-gmail",
+        "installPath": "/root/.openclaw/extensions/openclaw-gmail",
+        "version": "1.7.3",
+        "resolvedName": "@mcinteerj/openclaw-gmail",
+        "resolvedVersion": "1.7.3",
+        "resolvedSpec": "@mcinteerj/openclaw-gmail@1.7.3",
+        "integrity": "sha512-zwzp9ODqN27wxW6S2srSbsQxM/tJ+ozFIwmk/vXEqHOb7V/3yNugdL37TbotuUI2b7om8NtLyvR7wBSd/aO69A==",
+        "shasum": "cae2c32b0f5cf03862aad03d55ed4071345cdefb",
+        "resolvedAt": "2026-03-23T19:24:16.951Z",
+        "installedAt": "2026-03-23T19:24:23.644Z"
+      },
+      "intercom": {
+        "source": "path",
+        "spec": "/root/.openclaw/extensions/openclaw-intercom",
+        "installPath": "/root/.openclaw/extensions/openclaw-intercom",
+        "resolvedName": "@muso/openclaw-intercom",
+        "resolvedVersion": "0.1.0"
       }
     }
   }
