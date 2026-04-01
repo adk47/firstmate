@@ -1,23 +1,55 @@
 import type { IntercomAccountConfig } from "./types.js";
 import { DEFAULT_FALLBACK_ACK } from "./types.js";
 
-export function listIntercomAccountIds(cfg: Record<string, unknown>): string[] {
-  if (!cfg) return [];
-  const channels = cfg.channels as Record<string, unknown> | undefined;
+// Config captured at register() time — used as fallback when the Gateway
+// passes undefined to channel lifecycle callbacks.
+let capturedConfig: Record<string, unknown> | null = null;
+
+let fallbackLogged = false;
+
+export function setCapturedConfig(cfg: Record<string, unknown>): void {
+  if (capturedConfig !== null) {
+    console.warn("[intercom:config] overwriting previously captured config");
+  }
+  capturedConfig = cfg;
+  fallbackLogged = false;
+}
+
+export function clearCapturedConfig(): void {
+  capturedConfig = null;
+  fallbackLogged = false;
+}
+
+function resolveConfig(cfg: Record<string, unknown> | undefined | null): Record<string, unknown> | null {
+  if (cfg) return cfg;
+  if (capturedConfig) {
+    if (!fallbackLogged) {
+      console.warn("[intercom:config] cfg was undefined — using config captured at register() time");
+      fallbackLogged = true;
+    }
+    return capturedConfig;
+  }
+  return null;
+}
+
+export function listIntercomAccountIds(cfg: Record<string, unknown> | undefined | null): string[] {
+  const resolved = resolveConfig(cfg);
+  if (!resolved) return [];
+  const channels = resolved.channels as Record<string, unknown> | undefined;
   const intercom = channels?.intercom as Record<string, unknown> | undefined;
   const accounts = intercom?.accounts as Record<string, unknown> | undefined;
   return accounts ? Object.keys(accounts) : [];
 }
 
 export function resolveIntercomAccount(
-  cfg: Record<string, unknown>,
+  cfg: Record<string, unknown> | undefined | null,
   accountId?: string | null,
 ): IntercomAccountConfig & { accountId: string } {
   const id = accountId ?? "default";
+  const resolved = resolveConfig(cfg);
 
-  // OpenClaw calls this with cfg=undefined during health checks and startup.
-  // Return a disabled stub instead of crashing the gateway.
-  if (!cfg) {
+  // Fall back to captured config from register() time, or return disabled stub.
+  if (!resolved) {
     return {
       accountId: id,
       enabled: false,
@@ -33,7 +65,7 @@ export function resolveIntercomAccount(
     };
   }
 
-  const channels = cfg.channels as Record<string, unknown> | undefined;
+  const channels = resolved.channels as Record<string, unknown> | undefined;
   const intercom = channels?.intercom as Record<string, unknown> | undefined;
   const accounts = intercom?.accounts as Record<string, unknown> | undefined;
   const account = accounts?.[id] as Partial<IntercomAccountConfig> | undefined;
@@ -70,7 +102,7 @@ export function resolveIntercomAccount(
 }
 
 export function inspectIntercomAccount(
-  cfg: Record<string, unknown>,
+  cfg: Record<string, unknown> | undefined | null,
   accountId?: string | null,
 ): { enabled: boolean; configured: boolean } {
   try {

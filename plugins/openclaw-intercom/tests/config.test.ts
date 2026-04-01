@@ -1,5 +1,11 @@
-import { describe, it, expect } from "vitest";
-import { listIntercomAccountIds, resolveIntercomAccount, inspectIntercomAccount } from "../src/config.js";
+import { describe, it, expect, beforeEach } from "vitest";
+import {
+  listIntercomAccountIds,
+  resolveIntercomAccount,
+  inspectIntercomAccount,
+  setCapturedConfig,
+  clearCapturedConfig,
+} from "../src/config.js";
 import { DEFAULT_FALLBACK_ACK } from "../src/types.js";
 
 const validConfig = {
@@ -125,5 +131,75 @@ describe("inspectIntercomAccount", () => {
     const result = inspectIntercomAccount(validConfig, "staging");
     expect(result.enabled).toBe(false);
     expect(result.configured).toBe(true);
+  });
+});
+
+describe("config fallback (capturedConfig)", () => {
+  beforeEach(() => {
+    clearCapturedConfig();
+  });
+
+  it("listIntercomAccountIds returns [] when cfg and capturedConfig are both null", () => {
+    expect(listIntercomAccountIds(undefined)).toEqual([]);
+  });
+
+  it("listIntercomAccountIds uses capturedConfig when cfg is undefined", () => {
+    setCapturedConfig(validConfig);
+    const ids = listIntercomAccountIds(undefined);
+    expect(ids).toContain("default");
+    expect(ids).toContain("staging");
+  });
+
+  it("resolveIntercomAccount uses capturedConfig when cfg is undefined", () => {
+    setCapturedConfig(validConfig);
+    const account = resolveIntercomAccount(undefined);
+    expect(account.accountId).toBe("default");
+    expect(account.workspaceId).toBe("ws_prod");
+    expect(account.token).toBe("tok_123");
+    expect(account.enabled).toBe(true);
+  });
+
+  it("resolveIntercomAccount returns disabled stub when both cfg and capturedConfig are null", () => {
+    const account = resolveIntercomAccount(undefined);
+    expect(account.enabled).toBe(false);
+    expect(account.token).toBe("");
+    expect(account.workspaceId).toBe("");
+  });
+
+  it("explicit cfg takes precedence over capturedConfig", () => {
+    const altConfig = {
+      channels: {
+        intercom: {
+          accounts: {
+            default: {
+              enabled: false,
+              workspaceId: "ws_alt",
+              token: "tok_alt",
+              webhookSecret: "secret_alt",
+              botAdminId: "bot_alt",
+            },
+          },
+        },
+      },
+    };
+    setCapturedConfig(validConfig);
+    const account = resolveIntercomAccount(altConfig);
+    expect(account.workspaceId).toBe("ws_alt");
+    expect(account.token).toBe("tok_alt");
+  });
+
+  it("inspectIntercomAccount uses capturedConfig when cfg is undefined", () => {
+    setCapturedConfig(validConfig);
+    const result = inspectIntercomAccount(undefined);
+    expect(result.enabled).toBe(true);
+    expect(result.configured).toBe(true);
+  });
+
+  it("clearCapturedConfig resets the fallback", () => {
+    setCapturedConfig(validConfig);
+    clearCapturedConfig();
+    const account = resolveIntercomAccount(undefined);
+    expect(account.enabled).toBe(false);
+    expect(account.token).toBe("");
   });
 });
