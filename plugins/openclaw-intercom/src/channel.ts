@@ -159,9 +159,36 @@ export const intercomPlugin = createChatChannelPlugin({
                       rawBody: result.body,
                       messageId: payload.id,
                       timestamp: payload.created_at,
-                      // Outbound replies route through sendText via the outbound adapter, not this callback.
-                      deliver: async () => {
-                        log?.warn?.(`[${tag}] deliver callback invoked directly — expected route via sendText`);
+                      deliver: async (replyPayload: any) => {
+                        const text = replyPayload?.text ?? replyPayload?.body ?? "";
+                        if (!text) {
+                          log?.warn?.(`[${tag}] deliver called with empty reply for conv=${result.conversationId}`);
+                          return;
+                        }
+
+                        // Pre-send validation: check handoff state
+                        if (state && !canAgentReply(state)) {
+                          console.warn(
+                            `[${tag}] deliver dropped: ${state.handoffMode}/${state.lifecycleState} conv=${result.conversationId}`,
+                          );
+                          return;
+                        }
+
+                        const client = new RealIntercomClient(account.token);
+                        try {
+                          const { messageId } = await client.replyToConversation({
+                            conversationId: result.conversationId,
+                            adminId: account.botAdminId,
+                            body: text,
+                          });
+                          if (state) {
+                            trackOutboundMessageId(messageId, state.outboundMessageIds);
+                            state.updatedAt = new Date().toISOString();
+                          }
+                          log?.info?.(`[${tag}] replied conv=${result.conversationId} msgId=${messageId}`);
+                        } catch (err) {
+                          log?.error?.(`[${tag}] deliver reply failed conv=${result.conversationId}: ${err}`);
+                        }
                       },
                       onRecordError: (err) =>
                         log?.error?.(`[${tag}] session record error: ${err}`),
