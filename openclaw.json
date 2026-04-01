@@ -1,7 +1,7 @@
 {
   "meta": {
     "lastTouchedVersion": "2026.3.23",
-    "lastTouchedAt": "2026-03-31T22:06:21.989Z"
+    "lastTouchedAt": "2026-04-01T13:45:50.821Z"
   },
   "wizard": {
     "lastRunAt": "2026-02-19T06:12:59.869Z",
@@ -463,13 +463,13 @@
     "intercom": {
       "accounts": {
         "default": {
-          "enabled": false,
+          "enabled": true,
           "workspaceId": "dwjzhcge",
           "token": "dG9rOjdiMzZlNGU3XzEyMjFfNGI1MF9hMzRlXzdhZTllN2NhZjY4ODoxOjA=",
           "webhookSecret": "43c744d5-5043-4f3f-b7fb-36440af1e8d7",
           "botAdminId": "4359478",
           "defaultInboxId": "5465657",
-          "fallbackSlackSupervisionChannel": "",
+          "fallbackSlackSupervisionChannel": "https://hooks.slack.com/services/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",
           "fallbackAcknowledgement": "We're looking into this and will get back to you shortly.",
           "requireMappedHumanAdmin": true,
           "adminMapping": {}
@@ -512,7 +512,6 @@
     "allow": [
       "openclaw-gmail",
       "slack",
-      "openclaw-intercom",
       "intercom"
     ],
     "entries": {
@@ -555,11 +554,16 @@
       },
       "intercom": {
         "source": "path",
-        "spec": "/root/.openclaw/extensions/openclaw-intercom",
-        "installPath": "/root/.openclaw/extensions/openclaw-intercom",
-        "resolvedName": "@muso/openclaw-intercom",
+        "spec": "/root/.openclaw/extensions/intercom",
+        "installPath": "/root/.openclaw/extensions/intercom",
+        "resolvedName": "@muso/intercom",
         "resolvedVersion": "0.1.0"
       }
+    },
+    "load": {
+      "paths": [
+        "/root/.openclaw/extensions/intercom"
+      ]
     }
   }
 }
