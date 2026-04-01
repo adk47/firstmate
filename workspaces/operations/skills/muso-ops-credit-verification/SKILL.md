@@ -185,6 +185,7 @@ Sources are tiered by priority. Always check Tier 1. Check Tier 2 and 3 as indic
 
 **Tier 1 — Always check (primary credit databases):**
 - Spotify "Show Credits": use the Spotify link from the credit request to check the track's credits tab for the claimed name+role
+- Apple Music: check album credits page — detailed role-level credits for tracks
 - MusicBrainz: `musicbrainz.org/search?query=[name]&type=artist` — recording-level credits; look for the specific track+role match, not just artist existence
 - Discogs: `discogs.com/search/?q=[name]&type=artist` — discography and credits
 - AllMusic: `allmusic.com/search/all/[name]` — artist profile with credits
@@ -196,7 +197,6 @@ Sources are tiered by priority. Always check Tier 1. Check Tier 2 and 3 as indic
 
 **Tier 3 — Check if Tier 1 is inconclusive (no Tier 1 source confirms the claimed name+role):**
 - TIDAL: search for track/artist credits (usually most detailed streaming credits)
-- Apple Music: check album credits page
 - Jaxsta: `jaxsta.com` — dedicated music credits database
 - LinkedIn: music industry career history
 - Professional website: check email domain
