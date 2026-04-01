@@ -465,7 +465,7 @@
         "default": {
           "enabled": true,
           "workspaceId": "dwjzhcge",
-          "token": "dG9rOjdiMzZlNGU3XzEyMjFfNGI1MF9hMzRlXzdhZTllN2NhZjY4ODoxOjA=",
+          "token": "dG9rOjM5YzM2ODg2X2ZhZjBfNGI4NF9hMzA1XzczNzYyMjg4M2M3OToxOjA=",
           "webhookSecret": "43c744d5-5043-4f3f-b7fb-36440af1e8d7",
           "botAdminId": "4359478",
           "defaultInboxId": "5465657",
@@ -474,7 +474,8 @@
           "requireMappedHumanAdmin": true,
           "adminMapping": {}
         }
-      }
+      },
+      "enabled": true
     }
   },
   "gateway": {
