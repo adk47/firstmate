@@ -14,7 +14,25 @@ export function resolveIntercomAccount(
   accountId?: string | null,
 ): IntercomAccountConfig & { accountId: string } {
   const id = accountId ?? "default";
-  if (!cfg) throw new Error(`intercom: account "${id}" not found in config`);
+
+  // OpenClaw calls this with cfg=undefined during health checks and startup.
+  // Return a disabled stub instead of crashing the gateway.
+  if (!cfg) {
+    return {
+      accountId: id,
+      enabled: false,
+      workspaceId: "",
+      token: "",
+      webhookSecret: "",
+      botAdminId: "",
+      defaultInboxId: "",
+      fallbackSlackSupervisionChannel: "",
+      fallbackAcknowledgement: DEFAULT_FALLBACK_ACK,
+      requireMappedHumanAdmin: true,
+      adminMapping: {},
+    };
+  }
+
   const channels = cfg.channels as Record<string, unknown> | undefined;
   const intercom = channels?.intercom as Record<string, unknown> | undefined;
   const accounts = intercom?.accounts as Record<string, unknown> | undefined;
