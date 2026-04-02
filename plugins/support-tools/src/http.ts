@@ -42,7 +42,7 @@ export function createHttpClient(): HttpClient {
       return request<T>(url, { method: "GET", headers: opts.headers });
     },
     post<T>(url: string, opts: { headers?: Record<string, string>; body?: unknown }) {
-      const headers = { ...opts.headers, "Content-Type": "application/json" };
+      const headers = { "Content-Type": "application/json", ...opts.headers };
       return request<T>(url, {
         method: "POST",
         headers,

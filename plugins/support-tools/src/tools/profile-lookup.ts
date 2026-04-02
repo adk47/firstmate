@@ -1,5 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
-import type { AgentTool, AgentToolResult } from "../types.js";
+import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
 import type { HttpClient } from "../http.js";
 import type { RateLimiter } from "../rate-limiter.js";
 
@@ -43,10 +43,6 @@ export function filterProfileResults(raw: Record<string, unknown>[]): ProfileRes
     verified: Boolean(r.verified),
     creditsCount: Number(r.creditCount ?? r.creditsCount ?? 0),
   }));
-}
-
-function textResult(text: string): AgentToolResult<unknown> {
-  return { content: [{ type: "text", text }], details: {} };
 }
 
 export function createProfileLookupTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
@@ -102,6 +98,8 @@ export function createProfileLookupTool(deps: ToolDeps): AgentTool<typeof Parame
 
         if (searchResult.ok) {
           results = searchResult.data.results ?? [];
+        } else {
+          return textResult("Unable to look up profiles right now. Try again shortly or ask me to create a support ticket.");
         }
       }
 

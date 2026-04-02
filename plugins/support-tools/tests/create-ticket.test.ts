@@ -45,7 +45,7 @@ describe("createCreateTicketTool", () => {
     vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_abc123" } });
     const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc" });
     const result = await tool.execute("call_1", { actionType: "credit-claim", customerEmail: "user@example.com", summary: "Customer wants Producer credit on Track X", conversationSummary: "Customer asked about missing credit." });
-    expect(mockClient.post).toHaveBeenCalledWith("https://api.clickup.com/api/v2/list/901000600160/task", { headers: { Authorization: "pk_test", "Content-Type": "application/json" }, body: expect.objectContaining({ name: "Action Request: credit-claim", status: "to do", priority: 3, custom_fields: [{ id: "field_uuid_2", value: "user@example.com" }] }) });
+    expect(mockClient.post).toHaveBeenCalledWith("https://api.clickup.com/api/v2/list/901000600160/task", { headers: { Authorization: "pk_test" }, body: expect.objectContaining({ name: "Action Request: credit-claim", status: "to do", priority: 3, tags: ["hydra-action-request", "tier-1"], custom_fields: [{ id: "field_uuid_2", value: "user@example.com" }] }) });
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("task_abc123");
     expect(text).toContain("48 hours");
@@ -59,6 +59,7 @@ describe("createCreateTicketTool", () => {
     const fields = body.custom_fields as { id: string; value: string }[];
     expect(fields).toContainEqual({ id: "field_uuid_1", value: "prof_123" });
     expect(body.priority).toBe(2);
+    expect(body.tags).toEqual(["hydra-action-request", "tier-2"]);
   });
 
   it("blocks when rate limited", async () => {

@@ -163,6 +163,26 @@ describe("createProfileLookupTool", () => {
     });
   });
 
+  it("returns error when fallback search also fails", async () => {
+    vi.mocked(mockClient.get).mockResolvedValue({ ok: true, data: { results: [] } });
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: false, error: "API error", status: 500 });
+
+    const tool = createProfileLookupTool({
+      http: mockClient,
+      rateLimiter: limiter,
+      musoApiBase: "https://api.muso.ai",
+      musoApiKey: "test-key",
+      sessionId: "session-1",
+    });
+
+    const result = await tool.execute("call_1", { query: "Drakeo" });
+
+    expect(result.content[0]).toEqual({
+      type: "text",
+      text: expect.stringContaining("Unable to look up profiles"),
+    });
+  });
+
   it("returns error message on API failure", async () => {
     vi.mocked(mockClient.get).mockResolvedValue({ ok: false, error: "API error", status: 500 });
 

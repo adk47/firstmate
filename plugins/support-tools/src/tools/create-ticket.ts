@@ -1,5 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
-import type { AgentTool, AgentToolResult } from "../types.js";
+import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
 import type { HttpClient } from "../http.js";
 import type { RateLimiter } from "../rate-limiter.js";
 
@@ -62,10 +62,6 @@ interface ToolDeps {
   sessionId: string;
 }
 
-function textResult(text: string): AgentToolResult<unknown> {
-  return { content: [{ type: "text", text }], details: {} };
-}
-
 export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
   const { http, rateLimiter, clickupApiKey, clickupListId, clickupProfileIdFieldId, clickupUserEmailFieldId, sessionId } = deps;
 
@@ -77,6 +73,10 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
       if (!rateLimiter.check(sessionId, "create_ticket", 60, 2).allowed) {
         return textResult("You've already submitted requests this session. Our team will follow up on all of them.");
+      }
+
+      if (!(params.actionType in TIER_MAP)) {
+        console.warn(`[support-tools] Unknown actionType "${params.actionType}", defaulting to tier 1`);
       }
 
       const tier = getTierForAction(params.actionType);
@@ -99,8 +99,15 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       const result = await http.post<{ id: string }>(
         `https://api.clickup.com/api/v2/list/${clickupListId}/task`,
         {
-          headers: { Authorization: clickupApiKey, "Content-Type": "application/json" },
-          body: { name: `Action Request: ${params.actionType}`, description, status: "to do", priority, custom_fields: customFields },
+          headers: { Authorization: clickupApiKey },
+          body: {
+            name: `Action Request: ${params.actionType}`,
+            description,
+            status: "to do",
+            priority,
+            tags: ["hydra-action-request", `tier-${tier}`],
+            custom_fields: customFields,
+          },
         },
       );
 

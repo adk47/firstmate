@@ -1,5 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
-import type { AgentTool, AgentToolResult } from "../types.js";
+import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
 import type { HttpClient } from "../http.js";
 import type { RateLimiter } from "../rate-limiter.js";
 
@@ -59,10 +59,6 @@ export function filterCreditsResults(raw: Record<string, unknown>): FilteredCred
       };
     }),
   };
-}
-
-function textResult(text: string): AgentToolResult<unknown> {
-  return { content: [{ type: "text", text }], details: {} };
 }
 
 export function createCreditsSearchTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {

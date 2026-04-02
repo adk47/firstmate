@@ -41,7 +41,7 @@ Every action request ticket MUST use this structure:
 
 **Subject**: `Action Request: [action-type]`
 
-**Tags**: `hydra-action-request`, `tier-[0-3]`
+**Tags**: `hydra-action-request`, `tier-[1-3]`
 
 **Note**: Tasks are created in ClickUp list 901000600160. Tags are applied as ClickUp task tags.
 
@@ -75,7 +75,7 @@ Customer [name/email] requests: [plain English summary]
 | `profile-merge` | 2 | 5 business days | "I have two profiles, combine them" |
 | `bulk-credit-change` | 2 | 5 business days | "Update credits on multiple tracks" |
 | `profile-update` | 2 | 5 business days | "Change my profile name/details" |
-| `subscription-refund` | 3 | 5 business days | "I want a refund" |
+| `subscription-refund` | 3 | 5-10 business days | "I want a refund" |
 | `data-deletion` | 3 | 10 business days | "Delete my account and data" |
 | `dispute` | 3 | 10 business days | "I dispute this credit claim" |
 | `data-export` | 3 | 10 business days | "Export all my data" |
@@ -102,9 +102,7 @@ Customer [name/email] requests: [plain English summary]
 | Unclear action type | Ask clarifying question before creating ticket |
 
 ## Rate Limits
-- 2 action request tickets per session
-- 3 action request tickets per hour (across sessions)
-- 10 action request tickets per day (across sessions)
+- 2 action request tickets per session (60-minute window)
 
 ## Customer Communication Templates
 

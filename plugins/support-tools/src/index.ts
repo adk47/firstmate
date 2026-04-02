@@ -20,10 +20,15 @@ export default definePluginEntry({
     const clickupProfileIdFieldId = pluginConfig.clickupProfileIdFieldId ?? "";
     const clickupUserEmailFieldId = pluginConfig.clickupUserEmailFieldId ?? "";
 
+    const required = { musoApiKey, clickupApiKey, clickupListId, clickupProfileIdFieldId, clickupUserEmailFieldId };
+    const missing = Object.entries(required).filter(([, v]) => !v || v.startsWith("TODO")).map(([k]) => k);
+    if (missing.length > 0) {
+      console.warn(`[support-tools] Missing config keys: ${missing.join(", ")}. Affected tools will not function correctly.`);
+    }
+
     const http = createHttpClient();
     const rateLimiter = new RateLimiter();
 
-    // All tools registered as factories to get sessionId from context for rate limiting
     const profileLookupFactory = (ctx: any) => {
       return createProfileLookupTool({ http, rateLimiter, musoApiBase, musoApiKey, sessionId: ctx.sessionId ?? "unknown" });
     };
@@ -34,8 +39,7 @@ export default definePluginEntry({
     };
     api.registerTool(creditsSearchFactory, { name: "credits_search" });
 
-    // subscription_status: static stub (no rate limiting needed)
-    api.registerTool(createSubscriptionStatusTool());
+    api.registerTool(createSubscriptionStatusTool(), { name: "subscription_status" });
 
     const createTicketFactory = (ctx: any) => {
       return createCreateTicketTool({

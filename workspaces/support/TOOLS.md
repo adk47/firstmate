@@ -8,10 +8,10 @@ All tools are implemented as plugin-registered tools (via the `support-tools` Op
 
 ### 1. profile_lookup
 
-- **Wraps**: `GET api.muso.ai/api/c/v5/search/autocomplete`
+- **Wraps**: `GET api.muso.ai/api/c/v5/search/autocomplete` (falls back to `POST .../v5/search` when autocomplete returns no results)
 - **Returns**: Public data ONLY -- name, role, verified status, credits count
 - **Auth**: Service API key (handled by plugin, never visible to agent)
-- **Rate limit**: 10/min per session, 30/min global
+- **Rate limit**: 10/min per session
 - **PII filter**: Email, phone, address, payment details are NEVER returned
 
 ### 2. credits_search
@@ -19,26 +19,26 @@ All tools are implemented as plugin-registered tools (via the `support-tools` Op
 - **Wraps**: `GET api.muso.ai/api/c/v4/profile/{profileId}/credits`
 - **Returns**: Public credit data -- credit role, track name, release name, release date
 - **Auth**: Service API key (handled by plugin, never visible to agent)
-- **Rate limit**: 10/min per session, 30/min global
-- **Search params**: artist name, track name, ISRC, release title
+- **Rate limit**: 10/min per session
+- **Parameters**: `profileId` (required), `keyword` (optional text filter), `creditRole` (optional role filter), `limit`, `offset`
 
 ### 3. subscription_status
 
-- **Coming soon -- stub returns guidance message**
-- **Would wrap**: `GET api.muso.ai/api/c/v4/profile/{profileId}/credits`
-- **Returns**: Subscription plan, status (active/cancelled/past_due), renewal date
-- **Auth**: Requires user's authenticated session token (passed via widget context)
-- **Rate limit**: 3/min per session, 10/min global
+- **Coming soon -- stub returns guidance message offering ticket creation**
+- **Would wrap**: Subscription status endpoint (TBD)
+- **Returns (when implemented)**: Subscription plan, status (active/cancelled/past_due), renewal date
+- **Auth**: TBD -- requires user's authenticated session token
 - **Privacy**: Only returns data for the authenticated user -- no cross-account lookups
 
 ### 4. create_ticket
 
 - **Wraps**: ClickUp task creation in list 901000600160
-- **Returns**: Task ID, task URL
+- **Returns**: Task ID and confirmation message with SLA
 - **Auth**: ClickUp API key (handled by plugin, never visible to agent)
-- **Rate limit**: 2/session, 3/hour per user, 10/hour global
-- **Required fields**: subject, description (conversation context), requester email, priority, category
-- **Categories**: account, billing, credits, technical, other
+- **Rate limit**: 2 per session (60-minute window)
+- **Required fields**: `actionType`, `customerEmail`, `summary`, `conversationSummary`
+- **Optional fields**: `customerProfileId`, `details` (action-specific key-value pairs)
+- **Auto-derived**: subject (`Action Request: {actionType}`), priority (from tier), tags (`hydra-action-request`, `tier-N`)
 
 ## Action Request Pattern
 

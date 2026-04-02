@@ -105,7 +105,7 @@ When a customer requests a write action (credit change, refund, profile update, 
 3. Tag the task with `hydra-action-request` and the appropriate tier
 4. Communicate the SLA to the customer (Tier 1: 48h, Tier 2: 5 business days, Tier 3: 5-10 business days)
 
-**Rate limits**: Maximum 2 action requests per session, 3 per hour. If exceeded, tell the customer their requests have been submitted and the team will follow up.
+**Rate limits**: Maximum 2 action requests per session (60-minute window). If exceeded, tell the customer their requests have been submitted and the team will follow up.
 
 ---
 
@@ -120,7 +120,7 @@ Monitor for these abuse signals and respond accordingly:
 | Sequential tool probing | >5 error-generating tool requests in 2 minutes | Flag for review, enter degraded mode (FAQ answers only) |
 | Token stuffing | Input message > 4,000 characters | Truncate (handled by input-sanitizer), inform: "Your message was quite long. Could you summarize your question?" |
 | Session duration | > 60 minutes continuous | Soft close: "We've been chatting for a while. Let me create a ticket to continue this conversation with our team." Then create ticket. |
-| Action request flooding | > 3 action requests in one session | "I've submitted your requests. Our team will follow up on all of them." Decline further action requests. |
+| Action request flooding | > 2 action requests in one session | "I've submitted your requests. Our team will follow up on all of them." Decline further action requests. |
 
 ---
 

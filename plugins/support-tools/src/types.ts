@@ -5,6 +5,10 @@ export interface AgentToolResult<T> {
   details: T;
 }
 
+export function textResult(text: string): AgentToolResult<unknown> {
+  return { content: [{ type: "text", text }], details: {} };
+}
+
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> {
   name: string;
   label: string;
