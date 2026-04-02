@@ -176,6 +176,10 @@
           "fallbacks": [
             "anthropic/claude-sonnet-4-6"
           ]
+        },
+        "tools": {
+          "allow": ["profile_lookup", "credits_search", "create_ticket", "subscription_status", "group:web"],
+          "deny": ["exec", "browser", "http_request", "sessions_send", "db_read", "db_write"]
         }
       }
     ]
@@ -510,7 +514,8 @@
     "allow": [
       "openclaw-gmail",
       "slack",
-      "intercom"
+      "intercom",
+      "support-tools"
     ],
     "entries": {
       "slack": {
@@ -521,6 +526,15 @@
       },
       "intercom": {
         "enabled": true
+      },
+      "support-tools": {
+        "enabled": true,
+        "musoApiKey": "TODO_MUSO_SERVICE_KEY",
+        "musoApiBase": "https://api.muso.ai",
+        "clickupApiKey": "TODO_CLICKUP_API_KEY",
+        "clickupListId": "901000600160",
+        "clickupProfileIdFieldId": "TODO_FIELD_UUID",
+        "clickupUserEmailFieldId": "TODO_FIELD_UUID"
       }
     },
     "installs": {
@@ -556,11 +570,19 @@
         "installPath": "/root/.openclaw/extensions/intercom",
         "resolvedName": "@muso/intercom",
         "resolvedVersion": "0.1.0"
+      },
+      "support-tools": {
+        "source": "path",
+        "spec": "/root/.openclaw/extensions/support-tools",
+        "installPath": "/root/.openclaw/extensions/support-tools",
+        "resolvedName": "@muso/support-tools",
+        "resolvedVersion": "0.1.0"
       }
     },
     "load": {
       "paths": [
-        "/root/.openclaw/extensions/intercom"
+        "/root/.openclaw/extensions/intercom",
+        "/root/.openclaw/extensions/support-tools"
       ]
     }
   }
