@@ -12,6 +12,9 @@ importers:
         specifier: '*'
         version: 2026.4.1(@napi-rs/canvas@0.1.97)
     devDependencies:
+      '@sinclair/typebox':
+        specifier: ^0.34.49
+        version: 0.34.49
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
