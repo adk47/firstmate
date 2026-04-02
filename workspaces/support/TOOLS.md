@@ -2,27 +2,30 @@
 
 ## Allowed Tools (EXACTLY 4)
 
-This agent has the most restricted tool set in HYDRA. Only these 4 tools are permitted:
+This agent has the most restricted tool set in HYDRA. Only these 4 tools are permitted.
+
+All tools are implemented as plugin-registered tools (via the `support-tools` OpenClaw plugin). The agent calls them by name -- the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
 
 ### 1. profile_lookup
 
-- **Wraps**: `GET api.muso.ai/v1/profiles`
+- **Wraps**: `GET api.muso.ai/api/c/v5/search/autocomplete`
 - **Returns**: Public data ONLY -- name, role, verified status, credits count
-- **Auth**: Service-level API key (injected by runtime, never visible to agent)
+- **Auth**: Service API key (handled by plugin, never visible to agent)
 - **Rate limit**: 10/min per session, 30/min global
 - **PII filter**: Email, phone, address, payment details are NEVER returned
 
 ### 2. credits_search
 
-- **Wraps**: `GET api.muso.ai/v1/credits`
+- **Wraps**: `GET api.muso.ai/api/c/v4/profile/{profileId}/credits`
 - **Returns**: Public credit data -- credit role, track name, release name, release date
-- **Auth**: Service-level API key (injected by runtime, never visible to agent)
+- **Auth**: Service API key (handled by plugin, never visible to agent)
 - **Rate limit**: 10/min per session, 30/min global
 - **Search params**: artist name, track name, ISRC, release title
 
 ### 3. subscription_status
 
-- **Wraps**: `GET api.muso.ai/v1/subscriptions`
+- **Coming soon -- stub returns guidance message**
+- **Would wrap**: `GET api.muso.ai/api/c/v4/profile/{profileId}/credits`
 - **Returns**: Subscription plan, status (active/cancelled/past_due), renewal date
 - **Auth**: Requires user's authenticated session token (passed via widget context)
 - **Rate limit**: 3/min per session, 10/min global
@@ -30,9 +33,9 @@ This agent has the most restricted tool set in HYDRA. Only these 4 tools are per
 
 ### 4. create_ticket
 
-- **Wraps**: `POST zendesk.com/api/v2/tickets`
-- **Returns**: Ticket ID, ticket URL
-- **Auth**: Zendesk API token (injected by runtime, never visible to agent)
+- **Wraps**: ClickUp task creation in list 901000600160
+- **Returns**: Task ID, task URL
+- **Auth**: ClickUp API key (handled by plugin, never visible to agent)
 - **Rate limit**: 2/session, 3/hour per user, 10/hour global
 - **Required fields**: subject, description (conversation context), requester email, priority, category
 - **Categories**: account, billing, credits, technical, other
@@ -42,10 +45,10 @@ This agent has the most restricted tool set in HYDRA. Only these 4 tools are per
 For customer write actions (credit claims, refunds, profile updates, disputes), use `create_ticket` with structured formatting. See `skills/action-request/SKILL.md` for the full ticket format.
 
 **Key points**:
-- Tag action request tickets with `hydra-action-request` and the approval tier (`tier-1`, `tier-2`, `tier-3`)
-- Include a machine-readable JSON block in the ticket description (between `---ACTION-REQUEST---` and `---END-ACTION-REQUEST---` markers)
+- Tasks are created in the designated ClickUp list (901000600160) with `hydra-action-request` tag and the approval tier (`tier-1`, `tier-2`, `tier-3`)
+- Include a machine-readable JSON block in the task description (between `---ACTION-REQUEST---` and `---END-ACTION-REQUEST---` markers)
 - This does NOT add a new tool -- it uses `create_ticket` with structured content
-- The Operations agent picks up tickets tagged `hydra-action-request` for review and execution
+- The Operations agent picks up tasks tagged `hydra-action-request` for review and execution
 
 ## Denied Tools (EVERYTHING ELSE)
 
