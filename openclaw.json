@@ -268,10 +268,7 @@
   ],
   "messages": {
     "queue": {
-      "mode": "steer-backlog",
-      "byChannel": {
-        "slack": "steer-backlog"
-      }
+      "mode": "collect"
     },
     "ackReaction": "eyes",
     "ackReactionScope": "all",
