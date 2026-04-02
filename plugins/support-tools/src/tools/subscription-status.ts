@@ -1,5 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
-import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "../types.js";
 
 const Parameters = Type.Object({
   query: Type.Optional(Type.String({ description: "What the customer is asking about their subscription" })),

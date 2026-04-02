@@ -5,13 +5,11 @@ import { createProfileLookupTool } from "./tools/profile-lookup.js";
 import { createCreditsSearchTool } from "./tools/credits-search.js";
 import { createCreateTicketTool } from "./tools/create-ticket.js";
 import { createSubscriptionStatusTool } from "./tools/subscription-status.js";
-import type { OpenClawPluginToolFactory } from "openclaw/plugin-sdk";
-
 export default definePluginEntry({
   id: "support-tools",
   name: "Support Agent Tools",
   description: "Profile lookup, credits search, ticket creation, and subscription status tools for the support agent.",
-  register(api) {
+  register(api: any) {
     const config = (api.config ?? {}) as Record<string, unknown>;
     const pluginConfig = (config["support-tools"] ?? {}) as Record<string, string>;
 
@@ -26,12 +24,12 @@ export default definePluginEntry({
     const rateLimiter = new RateLimiter();
 
     // All tools registered as factories to get sessionId from context for rate limiting
-    const profileLookupFactory: OpenClawPluginToolFactory = (ctx) => {
+    const profileLookupFactory = (ctx: any) => {
       return createProfileLookupTool({ http, rateLimiter, musoApiBase, musoApiKey, sessionId: ctx.sessionId ?? "unknown" });
     };
     api.registerTool(profileLookupFactory, { name: "profile_lookup" });
 
-    const creditsSearchFactory: OpenClawPluginToolFactory = (ctx) => {
+    const creditsSearchFactory = (ctx: any) => {
       return createCreditsSearchTool({ http, rateLimiter, musoApiBase, musoApiKey, sessionId: ctx.sessionId ?? "unknown" });
     };
     api.registerTool(creditsSearchFactory, { name: "credits_search" });
@@ -39,7 +37,7 @@ export default definePluginEntry({
     // subscription_status: static stub (no rate limiting needed)
     api.registerTool(createSubscriptionStatusTool());
 
-    const createTicketFactory: OpenClawPluginToolFactory = (ctx) => {
+    const createTicketFactory = (ctx: any) => {
       return createCreateTicketTool({
         http,
         rateLimiter,
