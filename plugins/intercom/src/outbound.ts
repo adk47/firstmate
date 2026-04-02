@@ -146,6 +146,7 @@ export class RealIntercomClient implements IntercomClient {
     const response = await fetch(url, {
       method: "GET",
       headers: this.headers(),
+      signal: AbortSignal.timeout(5000),
     });
 
     this.checkRateLimit(response);

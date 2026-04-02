@@ -1,4 +1,5 @@
-import type { IntercomWebhookPayload, IntercomSessionState } from "./types.js";
+import type { IntercomWebhookPayload, IntercomSessionState, IntercomClient } from "./types.js";
+import { RateLimitError } from "./outbound.js";
 import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply } from "./filters.js";
 import { checkEscalation } from "./escalation.js";
 import {
@@ -18,11 +19,12 @@ export type HandlerAction =
   | { action: "duplicate"; eventId: string }
   | { action: "invalid_signature" };
 
-export function handleWebhookEvent(
+export async function handleWebhookEvent(
   payload: IntercomWebhookPayload,
   state: IntercomSessionState | null,
   botAdminId: string,
-): { result: HandlerAction; state: IntercomSessionState | null } {
+  client?: IntercomClient,
+): Promise<{ result: HandlerAction; state: IntercomSessionState | null }> {
   if (typeof payload?.data?.item?.id !== "string" || !payload?.topic || typeof payload?.id !== "string") {
     return { result: { action: "ignored", reason: "malformed payload: missing required fields" }, state };
   }
@@ -41,13 +43,68 @@ export function handleWebhookEvent(
 
   switch (classified.kind) {
     case "customer_message": {
-      // Check escalation before dispatching
-      const escalation = checkEscalation(classified.body);
-
       // Handle implicit reopen if conversation was closed
       if (state && state.lifecycleState === "closed") {
         handleImplicitReopen(state, botAdminId);
       }
+
+      // Live check: verify conversation assignee via Intercom API
+      if (state && client && classified.conversationId) {
+        try {
+          const conversation = await client.getConversation({
+            conversationId: classified.conversationId,
+          });
+
+          // Check lifecycle state from live data
+          if (conversation.state === "closed" || conversation.state === "snoozed") {
+            state.lifecycleState = conversation.state;
+            state.updatedAt = new Date().toISOString();
+            return {
+              result: {
+                action: "filtered",
+                conversationId: classified.conversationId,
+                reason: `live check: conversation ${conversation.state}`,
+              },
+              state,
+            };
+          }
+
+          // Check assignee from live data
+          const assigneeId = conversation.assignee?.id ?? null;
+          if (assigneeId && assigneeId !== botAdminId) {
+            state.handoffMode = "human_takeover";
+            state.currentAssigneeId = assigneeId;
+            state.updatedAt = new Date().toISOString();
+            return {
+              result: {
+                action: "filtered",
+                conversationId: classified.conversationId,
+                reason: `live check: human assignee ${assigneeId}`,
+              },
+              state,
+            };
+          }
+
+          // Bot or no assignee — restore agent_active (clears stale human_takeover)
+          state.handoffMode = "agent_active";
+          state.currentAssigneeId = assigneeId;
+          state.updatedAt = new Date().toISOString();
+        } catch (err) {
+          if (err instanceof RateLimitError) {
+            console.error(
+              `[intercom:handler] rate limited during live check conv=${classified.conversationId}, retryAfter=${err.retryAfterSeconds}s`,
+            );
+          } else {
+            console.warn(
+              `[intercom:handler] live check failed for conv=${classified.conversationId}: ${err}`,
+            );
+          }
+          // Fall through to cached state
+        }
+      }
+
+      // Check escalation before dispatching
+      const escalation = checkEscalation(classified.body);
 
       if (escalation.triggered) {
         // Escalation auto-sets human_takeover

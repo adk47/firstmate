@@ -8,13 +8,27 @@ import { validateHmacSignature } from "./webhook.js";
 import { handleWebhookEvent } from "./handler.js";
 import { createInitialSessionState, canAgentReply } from "./handoff.js";
 import { RealIntercomClient, trackOutboundMessageId } from "./outbound.js";
+import { initStateStore, loadSessions, saveSessions } from "./state-store.js";
 import type { IntercomSessionState, IntercomWebhookPayload } from "./types.js";
 
 // Module-level session store shared between startAccount (inbound) and sendText (outbound).
 // Keyed by accountId → conversationId → session state.
-// In-memory only — lost on restart. Acceptable for v1; durable state deferred until traffic patterns emerge.
-// TODO: Add TTL-based eviction when Intercom traffic volume justifies it.
+// Persisted to disk via state-store.ts; loaded on startup, saved on every state mutation.
+// At current volumes, full-file rewrite per mutation is fine. Next step if measurable: debounced/batched writes.
 export const accountSessions = new Map<string, Map<string, IntercomSessionState>>();
+
+let stateStoreHydrated = false;
+
+function hydrateFromMap(loaded: Map<string, Map<string, IntercomSessionState>>): void {
+  accountSessions.clear();
+  for (const [k, v] of loaded) accountSessions.set(k, v);
+}
+
+function countSessions(sessions: Map<string, Map<string, IntercomSessionState>>): number {
+  let count = 0;
+  for (const inner of sessions.values()) count += inner.size;
+  return count;
+}
 
 export function getOrCreateSession(
   accountId: string,
@@ -30,6 +44,9 @@ export function getOrCreateSession(
   if (!state) {
     state = createInitialSessionState(conversationId, workspaceId);
     sessions.set(conversationId, state);
+    saveSessions(accountSessions).catch((err) =>
+      console.warn(`[intercom] failed to save new session: ${err}`),
+    );
   }
   return state;
 }
@@ -89,6 +106,23 @@ export const intercomPlugin = createChatChannelPlugin({
           return;
         }
 
+        // Hydrate session state from disk (once, on first account start)
+        if (!stateStoreHydrated) {
+          stateStoreHydrated = true;
+          try {
+            const stateDir = ctx.api?.runtime?.state?.resolveStateDir?.() ?? "";
+            if (stateDir) {
+              await initStateStore(stateDir);
+              hydrateFromMap(await loadSessions());
+              ctx.log?.info?.(`[${tag}] loaded ${countSessions(accountSessions)} sessions from disk`);
+            } else {
+              ctx.log?.warn?.(`[${tag}] stateDir not available — session persistence disabled, state will be lost on restart`);
+            }
+          } catch (err) {
+            ctx.log?.warn?.(`[${tag}] failed to load sessions from disk: ${err}`);
+          }
+        }
+
         ctx.log?.info?.(`[${tag}] starting webhook monitor`);
 
         const runtime = ctx.channelRuntime;
@@ -140,11 +174,34 @@ export const intercomPlugin = createChatChannelPlugin({
                   }
 
                   const state = getOrCreateSession(account.accountId, conversationId, account.workspaceId);
-                  const { result } = handleWebhookEvent(payload, state, account.botAdminId);
+                  const client = new RealIntercomClient(account.token);
+                  const { result } = await handleWebhookEvent(payload, state, account.botAdminId, client);
+
+                  // Persist state after every webhook that may have mutated it
+                  if (result.action !== "ignored" && result.action !== "duplicate") {
+                    saveSessions(accountSessions).catch((err) =>
+                      log?.error?.(`[${tag}] failed to save sessions: ${err}`),
+                    );
+                  }
 
                   log?.info?.(`[${tag}] ${payload.topic} conv=${conversationId} → ${result.action}`);
 
                   if (result.action === "dispatch_to_agent") {
+                    // Assign conversation to bot if not already assigned (fire-and-forget)
+                    if (state.currentAssigneeId !== account.botAdminId) {
+                      client.assignConversation({
+                        conversationId: result.conversationId,
+                        adminId: account.botAdminId,
+                        assigneeId: account.botAdminId,
+                      }).then(() => {
+                        state.currentAssigneeId = account.botAdminId;
+                        saveSessions(accountSessions).catch(() => {});
+                        log?.info?.(`[${tag}] assigned conv=${result.conversationId} to bot`);
+                      }).catch((err) =>
+                        log?.warn?.(`[${tag}] failed to self-assign conv=${result.conversationId}: ${err}`),
+                      );
+                    }
+
                     await dispatchInboundDirectDmWithRuntime({
                       cfg,
                       runtime: { channel: runtime },
@@ -174,7 +231,6 @@ export const intercomPlugin = createChatChannelPlugin({
                           return;
                         }
 
-                        const client = new RealIntercomClient(account.token);
                         try {
                           const { messageId } = await client.replyToConversation({
                             conversationId: result.conversationId,
@@ -196,7 +252,6 @@ export const intercomPlugin = createChatChannelPlugin({
                         log?.error?.(`[${tag}] dispatch error (${info.kind}): ${err}`),
                     });
                   } else if (result.action === "escalate") {
-                    const client = new RealIntercomClient(account.token);
 
                     // 1. Send fallback ack to customer
                     try {
