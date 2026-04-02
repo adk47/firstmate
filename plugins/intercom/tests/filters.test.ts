@@ -22,20 +22,63 @@ describe("classifyEvent", () => {
     expect(result.kind).toBe("customer_message");
   });
 
-  it("classifies conversation.admin.replied as admin_reply", () => {
+  it("classifies conversation.admin.replied as admin_reply with type", () => {
     const result = classifyEvent(adminReplied as IntercomWebhookPayload);
     expect(result.kind).toBe("admin_reply");
     if (result.kind === "admin_reply") {
       expect(result.adminId).toBe("admin_42");
+      expect(result.adminType).toBe("admin");
       expect(result.messageId).toBe("part_1");
     }
   });
 
-  it("classifies conversation.admin.assigned as assigned", () => {
+  it("classifies conversation.admin.assigned as assigned with type", () => {
     const result = classifyEvent(assigned as IntercomWebhookPayload);
     expect(result.kind).toBe("assigned");
     if (result.kind === "assigned") {
       expect(result.assigneeId).toBe("admin_99");
+      expect(result.assigneeType).toBe("admin");
+    }
+  });
+
+  it("extracts bot assignee type from assignment payload", () => {
+    const botAssigned = {
+      ...assigned,
+      data: {
+        ...assigned.data,
+        item: {
+          ...assigned.data.item,
+          assignee: { type: "bot", id: "4359478", name: "Operator" },
+        },
+      },
+    };
+    const result = classifyEvent(botAssigned as IntercomWebhookPayload);
+    expect(result.kind).toBe("assigned");
+    if (result.kind === "assigned") {
+      expect(result.assigneeType).toBe("bot");
+    }
+  });
+
+  it("extracts bot admin type from admin reply payload", () => {
+    const botReplied = {
+      ...adminReplied,
+      data: {
+        ...adminReplied.data,
+        item: {
+          ...adminReplied.data.item,
+          conversation_parts: {
+            conversation_parts: [{
+              ...adminReplied.data.item.conversation_parts.conversation_parts[0],
+              author: { type: "bot", id: "4359478", name: "Operator" },
+            }],
+          },
+        },
+      },
+    };
+    const result = classifyEvent(botReplied as IntercomWebhookPayload);
+    expect(result.kind).toBe("admin_reply");
+    if (result.kind === "admin_reply") {
+      expect(result.adminType).toBe("bot");
     }
   });
 

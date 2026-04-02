@@ -71,9 +71,11 @@ export async function handleWebhookEvent(
 
           // Check assignee from live data
           const assigneeId = conversation.assignee?.id ?? null;
-          if (assigneeId && assigneeId !== botAdminId) {
+          const assigneeType = conversation.assignee?.type ?? null;
+          if (assigneeId && assigneeType === "admin" && assigneeId !== botAdminId) {
             state.handoffMode = "human_takeover";
             state.currentAssigneeId = assigneeId;
+            state.currentAssigneeType = assigneeType;
             state.updatedAt = new Date().toISOString();
             return {
               result: {
@@ -85,9 +87,10 @@ export async function handleWebhookEvent(
             };
           }
 
-          // Bot or no assignee — restore agent_active (clears stale human_takeover)
+          // Bot, nobody, or our bot — restore agent_active (clears stale human_takeover)
           state.handoffMode = "agent_active";
           state.currentAssigneeId = assigneeId;
+          state.currentAssigneeType = assigneeType;
           state.updatedAt = new Date().toISOString();
         } catch (err) {
           if (err instanceof RateLimitError) {
@@ -160,10 +163,10 @@ export async function handleWebhookEvent(
         };
       }
 
-      // Non-bot admin reply → implicit takeover
-      handleAdminReply(state, classified.adminId, botAdminId);
+      // Human admin reply triggers takeover; bot replies are filtered
+      handleAdminReply(state, classified.adminId, classified.adminType, botAdminId);
 
-      if (classified.adminId !== botAdminId) {
+      if (state.handoffMode === "human_takeover") {
         return {
           result: {
             action: "state_updated",
@@ -175,7 +178,7 @@ export async function handleWebhookEvent(
       }
 
       return {
-        result: { action: "filtered", conversationId: classified.conversationId, reason: "bot self-reply" },
+        result: { action: "filtered", conversationId: classified.conversationId, reason: "non-human admin reply" },
         state,
       };
     }
@@ -185,7 +188,7 @@ export async function handleWebhookEvent(
         return { result: { action: "ignored", reason: "no session for assignment" }, state };
       }
 
-      handleAssignment(state, classified.assigneeId, botAdminId);
+      handleAssignment(state, classified.assigneeId, classified.assigneeType, botAdminId);
       return {
         result: {
           action: "state_updated",

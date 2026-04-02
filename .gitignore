@@ -38,3 +38,6 @@ docs/superpowers/
 
 # Local notes (not for version control)
 docs/local/
+
+# Worktrees
+.worktrees/

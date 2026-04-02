@@ -23,37 +23,65 @@ describe("createInitialSessionState", () => {
 });
 
 describe("handleAssignment", () => {
-  it("transitions to human_takeover when assigned to non-bot admin", () => {
+  it("transitions to human_takeover when assigned to human admin", () => {
     const state = createInitialSessionState("conv_1", "ws_1");
-    handleAssignment(state, "human_admin_42", BOT_ADMIN_ID);
+    handleAssignment(state, "human_admin_42", "admin", BOT_ADMIN_ID);
     expect(state.handoffMode).toBe("human_takeover");
     expect(state.currentAssigneeId).toBe("human_admin_42");
+    expect(state.currentAssigneeType).toBe("admin");
   });
 
   it("transitions to agent_active when assigned to bot admin", () => {
     const state = createInitialSessionState("conv_1", "ws_1");
     state.handoffMode = "human_takeover";
-    handleAssignment(state, BOT_ADMIN_ID, BOT_ADMIN_ID);
+    handleAssignment(state, BOT_ADMIN_ID, "bot", BOT_ADMIN_ID);
     expect(state.handoffMode).toBe("agent_active");
   });
 
   it("stays agent_active when reassigned to bot admin", () => {
     const state = createInitialSessionState("conv_1", "ws_1");
-    handleAssignment(state, BOT_ADMIN_ID, BOT_ADMIN_ID);
+    handleAssignment(state, BOT_ADMIN_ID, "bot", BOT_ADMIN_ID);
+    expect(state.handoffMode).toBe("agent_active");
+  });
+
+  it("stays agent_active when assigned to non-bot Intercom bot (e.g. Operator)", () => {
+    const state = createInitialSessionState("conv_1", "ws_1");
+    handleAssignment(state, "operator_4359478", "bot", BOT_ADMIN_ID);
+    expect(state.handoffMode).toBe("agent_active");
+    expect(state.currentAssigneeId).toBe("operator_4359478");
+    expect(state.currentAssigneeType).toBe("bot");
+  });
+
+  it("stays agent_active when assigned to nobody_admin", () => {
+    const state = createInitialSessionState("conv_1", "ws_1");
+    handleAssignment(state, "0", "nobody_admin", BOT_ADMIN_ID);
     expect(state.handoffMode).toBe("agent_active");
   });
 });
 
 describe("handleAdminReply", () => {
-  it("transitions to human_takeover on non-bot admin reply", () => {
+  it("transitions to human_takeover on human admin reply", () => {
     const state = createInitialSessionState("conv_1", "ws_1");
-    handleAdminReply(state, "human_admin_42", BOT_ADMIN_ID);
+    handleAdminReply(state, "human_admin_42", "admin", BOT_ADMIN_ID);
     expect(state.handoffMode).toBe("human_takeover");
+  });
+
+  it("updates assignee state on human admin reply", () => {
+    const state = createInitialSessionState("conv_1", "ws_1");
+    handleAdminReply(state, "human_admin_42", "admin", BOT_ADMIN_ID);
+    expect(state.currentAssigneeId).toBe("human_admin_42");
+    expect(state.currentAssigneeType).toBe("admin");
   });
 
   it("does NOT change state on bot admin reply", () => {
     const state = createInitialSessionState("conv_1", "ws_1");
-    handleAdminReply(state, BOT_ADMIN_ID, BOT_ADMIN_ID);
+    handleAdminReply(state, BOT_ADMIN_ID, "bot", BOT_ADMIN_ID);
+    expect(state.handoffMode).toBe("agent_active");
+  });
+
+  it("does NOT trigger takeover when Operator bot replies", () => {
+    const state = createInitialSessionState("conv_1", "ws_1");
+    handleAdminReply(state, "operator_4359478", "bot", BOT_ADMIN_ID);
     expect(state.handoffMode).toBe("agent_active");
   });
 });
@@ -99,8 +127,27 @@ describe("handleImplicitReopen", () => {
     const state = createInitialSessionState("conv_1", "ws_1");
     state.lifecycleState = "closed";
     state.currentAssigneeId = "human_admin_42";
+    state.currentAssigneeType = "admin";
     handleImplicitReopen(state, BOT_ADMIN_ID);
     expect(state.handoffMode).toBe("human_takeover");
+  });
+
+  it("defaults to agent_active when assignee type is null (legacy state)", () => {
+    const state = createInitialSessionState("conv_1", "ws_1");
+    state.lifecycleState = "closed";
+    state.currentAssigneeId = "unknown_admin_99";
+    state.currentAssigneeType = null;
+    handleImplicitReopen(state, BOT_ADMIN_ID);
+    expect(state.handoffMode).toBe("agent_active");
+  });
+
+  it("restores agent_active when assigned to Operator bot on reopen", () => {
+    const state = createInitialSessionState("conv_1", "ws_1");
+    state.lifecycleState = "closed";
+    state.currentAssigneeId = "operator_4359478";
+    state.currentAssigneeType = "bot";
+    handleImplicitReopen(state, BOT_ADMIN_ID);
+    expect(state.handoffMode).toBe("agent_active");
   });
 
   it("does nothing if already open", () => {

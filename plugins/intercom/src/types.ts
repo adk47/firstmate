@@ -64,6 +64,7 @@ export interface IntercomAuthor {
 
 // --- Session state ---
 
+export type AssigneeType = "admin" | "nobody_admin" | "bot";
 export type HandoffMode = "agent_active" | "human_takeover";
 export type LifecycleState = "open" | "snoozed" | "closed";
 
@@ -73,6 +74,7 @@ export interface IntercomSessionState {
   handoffMode: HandoffMode;
   lifecycleState: LifecycleState;
   currentAssigneeId: string | null;
+  currentAssigneeType: AssigneeType | null;
   lastEventId: string | null;
   processedEventIds: string[];
   outboundMessageIds: string[];
@@ -119,8 +121,8 @@ export interface IntercomClient {
 
 export type ClassifiedEvent =
   | { kind: "customer_message"; conversationId: string; body: string; authorId: string }
-  | { kind: "admin_reply"; conversationId: string; adminId: string; messageId: string }
-  | { kind: "assigned"; conversationId: string; assigneeId: string }
+  | { kind: "admin_reply"; conversationId: string; adminId: string; adminType: AssigneeType; messageId: string }
+  | { kind: "assigned"; conversationId: string; assigneeId: string; assigneeType: AssigneeType }
   | { kind: "lifecycle"; conversationId: string; state: LifecycleState }
   | { kind: "noted"; conversationId: string }
   | { kind: "unknown"; topic: string };
