@@ -268,7 +268,7 @@
   ],
   "messages": {
     "queue": {
-      "mode": "collect"
+      "mode": "followup"
     },
     "ackReaction": "eyes",
     "ackReactionScope": "all",
