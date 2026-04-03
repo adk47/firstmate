@@ -90,7 +90,8 @@
       "maxConcurrent": 20,
       "subagents": {
         "maxConcurrent": 24
-      }
+      },
+      "timeoutSeconds": 300
     },
     "list": [
       {
