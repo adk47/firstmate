@@ -53,6 +53,7 @@ Customer [name/email] requests: [plain English summary]
   "approval_tier": [1-3],
   "customer_email": "[email from session or provided]",
   "customer_profile_id": "[if known from profile_lookup]",
+  "customer_workspace_id": "[if known from session context]",
   "details": {
     "[action-specific fields]"
   },
@@ -77,6 +78,32 @@ Customer [name/email] requests: [plain English summary]
 | `data-deletion` | 3 | 10 business days | "Delete my account and data" |
 | `dispute` | 3 | 10 business days | "I dispute this credit claim" |
 | `data-export` | 3 | 10 business days | "Export all my data" |
+
+### Retention Context (subscription-refund only)
+
+For `subscription-refund` action requests ONLY, add a `retention_context` field to the JSON block (after `details`):
+
+```
+"retention_context": {
+  "retention_attempted": true,
+  "reason_category": "[not-using-it|too-expensive|missing-feature|billing-issue|other]",
+  "reason_detail": "[1-2 sentence summary]",
+  "gates_completed": [1-3],
+  "exchange_count": [number],
+  "outcome": "[refund_requested|refund_requested_skipped_gates]"
+}
+```
+
+**Do NOT include `retention_context` for any other action type.**
+
+This tells Operations:
+- **reason_category**: Why the customer wants a refund
+- **reason_detail**: Specific details from the conversation
+- **gates_completed**: How many retention gates were completed (1-3)
+- **exchange_count**: Total back-and-forth pairs in the retention conversation
+- **outcome**: Whether the customer went through the full flow or skipped gates
+
+If the refund-retention skill was not activated (edge case), set `retention_context.retention_attempted` to `false`.
 
 ## Approval Tiers
 
