@@ -264,6 +264,13 @@
         "channel": "intercom",
         "accountId": "default"
       }
+    },
+    {
+      "agentId": "cmo",
+      "match": {
+        "channel": "openclaw-gmail",
+        "accountId": "*"
+      }
     }
   ],
   "messages": {
