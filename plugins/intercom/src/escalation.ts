@@ -9,7 +9,6 @@ const ESCALATION_RULES: EscalationRule[] = [
   {
     category: "billing",
     patterns: [
-      /\brefund\b/i,
       /\bchargeback\b/i,
       /\bbilling dispute\b/i,
       /\binvoice dispute\b/i,
