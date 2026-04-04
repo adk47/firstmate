@@ -1,12 +1,12 @@
 {
   "meta": {
-    "lastTouchedVersion": "2026.3.23",
-    "lastTouchedAt": "2026-04-01T13:45:50.821Z"
+    "lastTouchedVersion": "2026.4.2",
+    "lastTouchedAt": "2026-04-03T12:27:42.059Z"
   },
   "wizard": {
-    "lastRunAt": "2026-02-19T06:12:59.869Z",
-    "lastRunVersion": "2026.2.17",
-    "lastRunCommand": "configure",
+    "lastRunAt": "2026-04-03T12:27:42.003Z",
+    "lastRunVersion": "2026.4.2",
+    "lastRunCommand": "doctor",
     "lastRunMode": "local"
   },
   "update": {
@@ -33,7 +33,16 @@
               "text",
               "image"
             ],
-            "maxTokens": 16384
+            "maxTokens": 16384,
+            "reasoning": false,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "api": "anthropic-messages"
           },
           {
             "id": "claude-sonnet-4-6",
@@ -42,7 +51,16 @@
               "text",
               "image"
             ],
-            "maxTokens": 16384
+            "maxTokens": 16384,
+            "reasoning": false,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "api": "anthropic-messages"
           },
           {
             "id": "claude-haiku-4-5-20251001",
@@ -50,9 +68,20 @@
             "input": [
               "text",
               "image"
-            ]
+            ],
+            "reasoning": false,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192,
+            "api": "anthropic-messages"
           }
-        ]
+        ],
+        "api": "anthropic-messages"
       }
     }
   },
@@ -91,7 +120,10 @@
       "subagents": {
         "maxConcurrent": 24
       },
-      "timeoutSeconds": 300
+      "timeoutSeconds": 900,
+      "llm": {
+        "idleTimeoutSeconds": 600
+      }
     },
     "list": [
       {
@@ -265,13 +297,6 @@
         "channel": "intercom",
         "accountId": "default"
       }
-    },
-    {
-      "agentId": "cmo",
-      "match": {
-        "channel": "openclaw-gmail",
-        "accountId": "*"
-      }
     }
   ],
   "messages": {
@@ -284,9 +309,11 @@
     "tts": {
       "auto": "off",
       "provider": "elevenlabs",
-      "elevenlabs": {
-        "apiKey": "sk_0b8a03cf43ae73f1656fa9c989dc2b12e24ebb9da6fdd237",
-        "voiceId": "NtS6nEHDYMQC9QczMQuq"
+      "providers": {
+        "elevenlabs": {
+          "apiKey": "sk_0b8a03cf43ae73f1656fa9c989dc2b12e24ebb9da6fdd237",
+          "voiceId": "NtS6nEHDYMQC9QczMQuq"
+        }
       }
     }
   },
@@ -520,15 +547,23 @@
       "slack",
       "intercom"
     ],
+    "load": {
+      "paths": [
+        "/root/.openclaw/extensions/intercom"
+      ]
+    },
     "entries": {
       "slack": {
-        "enabled": true
+        "enabled": true,
+        "config": {}
       },
       "openclaw-gmail": {
-        "enabled": true
+        "enabled": true,
+        "config": {}
       },
       "intercom": {
-        "enabled": true
+        "enabled": true,
+        "config": {}
       }
     },
     "installs": {
@@ -565,11 +600,12 @@
         "resolvedName": "@muso/intercom",
         "resolvedVersion": "0.1.0"
       }
-    },
-    "load": {
-      "paths": [
-        "/root/.openclaw/extensions/intercom"
-      ]
+    }
+  },
+  "tools": {
+    "exec": {
+      "security": "full",
+      "ask": "off"
     }
   }
 }
