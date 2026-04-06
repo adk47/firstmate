@@ -13,9 +13,9 @@ export default definePluginEntry({
     const config = (api.config ?? {}) as Record<string, unknown>;
     const pluginConfig = (config["support-tools"] ?? {}) as Record<string, string>;
 
-    const musoApiBase = pluginConfig.musoApiBase ?? "https://api.muso.ai";
-    const musoApiKey = pluginConfig.musoApiKey ?? "";
-    const clickupApiKey = pluginConfig.clickupApiKey ?? "";
+    const musoApiBase = pluginConfig.musoApiBase ?? process.env.MUSO_API_BASE ?? "https://api.muso.ai";
+    const musoApiKey = pluginConfig.musoApiKey ?? process.env.MUSO_CUSTOMER_API_KEY ?? "";
+    const clickupApiKey = pluginConfig.clickupApiKey ?? process.env.CLICKUP_API_KEY ?? "";
     const clickupListId = pluginConfig.clickupListId ?? "";
     const clickupProfileIdFieldId = pluginConfig.clickupProfileIdFieldId ?? "";
     const clickupUserEmailFieldId = pluginConfig.clickupUserEmailFieldId ?? "";
