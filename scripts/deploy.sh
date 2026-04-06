@@ -307,11 +307,11 @@ log "Step 6/9: Restarting OpenClaw Gateway ($TARGET)..."
 restart_gateway() {
   local service="$1"
   if $HYDRA_LOCAL; then
-    systemctl restart "$service" && sleep 5 && systemctl is-active "$service" \
+    systemctl restart "$service" && sleep 10 && systemctl is-active --quiet "$service" \
       || fail "Failed to restart $service"
   else
     ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
-      "systemctl restart $service && sleep 5 && systemctl is-active $service" \
+      "systemctl restart $service && sleep 10 && systemctl is-active --quiet $service" \
       || fail "Failed to restart $service"
   fi
   log "  $service restarted successfully."
