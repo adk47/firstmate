@@ -13,20 +13,46 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: JSON Lint — validate openclaw.json
+      - name: JSON Lint — validate gateway configs
         run: |
-          echo "::group::Validating openclaw.json"
-          if ! python3 -m json.tool openclaw.json > /dev/null 2>&1; then
-            echo "::error::openclaw.json is not valid JSON"
-            exit 1
-          fi
-          echo "openclaw.json is valid JSON"
+          echo "::group::Validating gateway configs"
+          FAILED=0
+          for cfg in openclaw-main.json openclaw-edge.json openclaw-dev.json; do
+            if [ -f "$cfg" ]; then
+              if ! python3 -m json.tool "$cfg" > /dev/null 2>&1; then
+                echo "::error::$cfg is not valid JSON"
+                FAILED=1
+              else
+                echo "$cfg is valid JSON"
+              fi
+            else
+              echo "::error::$cfg not found"
+              FAILED=1
+            fi
+          done
+          if [ "$FAILED" -eq 1 ]; then exit 1; fi
           echo "::endgroup::"
 
-      - name: SOUL.md check — all 9 workspaces
+      - name: Shared config drift check
+        run: |
+          echo "::group::Checking shared config drift"
+          if [ -f scripts/validate-shared-config.sh ]; then
+            chmod +x scripts/validate-shared-config.sh
+            ./scripts/validate-shared-config.sh
+          else
+            echo "validate-shared-config.sh not found — skipping"
+          fi
+          echo "::endgroup::"
+
+      - name: SOUL.md check — all workspaces
         run: |
           echo "::group::Checking SOUL.md in all workspaces"
+          # Core workspaces that must always exist
           EXPECTED_WORKSPACES="ceo cmo coordinator cto design devops finance operations qa support"
+          # Add operations-dev if its workspace directory exists (arrives via PR #36)
+          if [ -d "workspaces/operations-dev" ]; then
+            EXPECTED_WORKSPACES="$EXPECTED_WORKSPACES operations-dev"
+          fi
           MISSING=""
           for ws in $EXPECTED_WORKSPACES; do
             if [ ! -f "workspaces/${ws}/SOUL.md" ]; then
@@ -40,7 +66,7 @@ jobs:
             echo "::error::Missing SOUL.md in workspaces:${MISSING}"
             exit 1
           fi
-          echo "All 10 workspaces have SOUL.md"
+          echo "All workspaces have SOUL.md"
           echo "::endgroup::"
 
       - name: Tool deny list audit — denials can only grow

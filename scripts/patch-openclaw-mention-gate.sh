@@ -11,11 +11,15 @@
 # when the event source is "app_mention" (Slack already confirmed
 # the bot was mentioned).
 #
-# Apply after OpenClaw install/update on Node 8:
-#   bash /opt/hydra/scripts/patch-openclaw-mention-gate.sh
+# DEPRECATED: This patch is no longer needed as of OpenClaw 2026.4.2.
+# The dedup race was fixed natively via an appMentionRetryKeys mechanism
+# in the message handler layer (as steipete suggested in PR #53161).
+# PR #53161 itself was never merged — they took a different approach.
 #
-# Remove this patch once openclaw/openclaw#53161 is merged and
-# the fixed version is installed.
+# Keeping this script for reference only. Safe to delete.
+#
+# Previously applied after OpenClaw install/update on Node 8:
+#   bash /opt/hydra/scripts/patch-openclaw-mention-gate.sh
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 

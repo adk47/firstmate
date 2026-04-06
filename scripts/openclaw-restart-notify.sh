@@ -4,7 +4,7 @@
 
 ACTION="${1:-pre}"
 REASON="${2:-routine maintenance}"
-CONFIG="/root/.openclaw/openclaw.json"
+CONFIG="/root/.openclaw/main/openclaw.json"
 ACTIVE_WINDOW_SEC=60
 
 # Get Clio token

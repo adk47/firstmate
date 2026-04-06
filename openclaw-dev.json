@@ -1,0 +1,211 @@
+{
+  "_comment": "Shared settings must match openclaw-main.json and openclaw-edge.json. See scripts/validate-shared-config.sh for the authoritative list.",
+  "meta": {
+    "lastTouchedVersion": "2026.3.23",
+    "lastTouchedAt": "2026-04-01T13:45:50.821Z"
+  },
+  "wizard": {
+    "lastRunAt": "2026-02-19T06:12:59.869Z",
+    "lastRunVersion": "2026.2.17",
+    "lastRunCommand": "configure",
+    "lastRunMode": "local"
+  },
+  "update": {
+    "channel": "stable",
+    "auto": {
+      "enabled": false
+    }
+  },
+  "auth": {
+    "profiles": {}
+  },
+  "models": {
+    "providers": {
+      "anthropic": {
+        "baseUrl": "http://localhost:8317",
+        "apiKey": "sk-hydra-prod-2026",
+        "auth": "api-key",
+        "authHeader": true,
+        "models": [
+          {
+            "id": "claude-opus-4-6",
+            "name": "claude-opus-4-6",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 16384
+          },
+          {
+            "id": "claude-sonnet-4-6",
+            "name": "claude-sonnet-4-6",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 16384
+          },
+          {
+            "id": "claude-haiku-4-5-20251001",
+            "name": "claude-haiku-4-5-20251001",
+            "input": [
+              "text",
+              "image"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "anthropic/claude-sonnet-4-6",
+        "fallbacks": []
+      },
+      "workspace": "/opt/hydra/workspaces/operations-dev",
+      "memorySearch": {
+        "enabled": false
+      },
+      "compaction": {
+        "mode": "default",
+        "keepRecentTokens": 40000
+      },
+      "maxConcurrent": 10,
+      "subagents": {
+        "maxConcurrent": 8
+      },
+      "timeoutSeconds": 900
+    },
+    "list": [
+      {
+        "id": "operations-dev",
+        "default": true,
+        "workspace": "/opt/hydra/workspaces/operations-dev",
+        "model": {
+          "primary": "anthropic/claude-sonnet-4-6",
+          "fallbacks": []
+        }
+      }
+    ]
+  },
+  "bindings": [
+    {
+      "agentId": "operations-dev",
+      "match": {
+        "channel": "slack",
+        "accountId": "operations-dev"
+      }
+    }
+  ],
+  "messages": {
+    "queue": {
+      "mode": "followup"
+    },
+    "ackReaction": "eyes",
+    "ackReactionScope": "all",
+    "removeAckAfterReply": true
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "web": {
+    "enabled": false
+  },
+  "channels": {
+    "slack": {
+      "mode": "socket",
+      "webhookPath": "/slack/events",
+      "enabled": true,
+      "userTokenReadOnly": true,
+      "dangerouslyAllowNameMatching": true,
+      "requireMention": true,
+      "groupPolicy": "open",
+      "streaming": "partial",
+      "nativeStreaming": true,
+      "replyToMode": "all",
+      "replyToModeByChatType": {
+        "direct": "all",
+        "group": "all",
+        "channel": "all"
+      },
+      "channels": {},
+      "accounts": {
+        "operations-dev": {
+          "botToken": "xoxb-264358207284-10859000165136-bKahYMknnkQLAHPv6lGywNJF",
+          "appToken": "xapp-1-A0AQ8A5H751-10827381578885-fa5257dfeb21abf0935be66f904a4263dabd2b14069d40d165892cbc942e8367",
+          "userTokenReadOnly": true,
+          "streaming": "partial",
+          "nativeStreaming": true,
+          "channels": {
+            "C0APZ4WC5C7": {
+              "enabled": true,
+              "requireMention": false,
+              "allowBots": true
+            }
+          }
+        }
+      }
+    }
+  },
+  "gateway": {
+    "port": 18830,
+    "mode": "local",
+    "bind": "lan",
+    "controlUi": {
+      "allowedOrigins": [
+        "https://hydra.muso.ai",
+        "http://hydra.muso.ai",
+        "http://localhost"
+      ]
+    },
+    "auth": {
+      "mode": "token",
+      "token": "f3beadb72aaec5fd6558aa1cdaa3217ce1c509293331a088"
+    },
+    "trustedProxies": [
+      "172.17.0.0/16",
+      "127.0.0.1"
+    ],
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "http": {
+      "endpoints": {
+        "chatCompletions": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "browser": {
+    "enabled": false
+  },
+  "plugins": {
+    "allow": [
+      "slack"
+    ],
+    "entries": {
+      "slack": {
+        "enabled": true
+      }
+    },
+    "installs": {},
+    "load": {
+      "paths": []
+    }
+  },
+  "tools": {
+    "exec": {
+      "security": "full",
+      "ask": "off"
+    }
+  }
+}

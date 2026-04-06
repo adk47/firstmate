@@ -3,6 +3,9 @@ node_modules/
 ui/node_modules/
 ui/.next/
 
+# Backups
+openclaw-server-backup-*.json
+
 # Environment
 .env
 .env.local

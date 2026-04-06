@@ -200,16 +200,6 @@
           "primary": "anthropic/claude-opus-4-6",
           "fallbacks": []
         }
-      },
-      {
-        "id": "support",
-        "workspace": "/opt/hydra/workspaces/support",
-        "model": {
-          "primary": "anthropic/claude-haiku-4-5-20251001",
-          "fallbacks": [
-            "anthropic/claude-sonnet-4-6"
-          ]
-        }
       }
     ]
   },
@@ -271,13 +261,6 @@
       }
     },
     {
-      "agentId": "support",
-      "match": {
-        "channel": "slack",
-        "accountId": "support"
-      }
-    },
-    {
       "agentId": "clio",
       "match": {
         "channel": "slack",
@@ -292,10 +275,10 @@
       }
     },
     {
-      "agentId": "support",
+      "agentId": "cmo",
       "match": {
-        "channel": "intercom",
-        "accountId": "default"
+        "channel": "openclaw-gmail",
+        "accountId": "*"
       }
     }
   ],
@@ -418,13 +401,6 @@
           "streaming": "partial",
           "nativeStreaming": true
         },
-        "support": {
-          "botToken": "xoxb-264358207284-10767041148305-JPk1MvuGJjr9J8mvvgKrhFtT",
-          "appToken": "xapp-1-A0AMQK8PH8X-10752091591862-9b3f765296a9ac01468fc58b2b6126cad0dee60e5914dd0930f0a5901fb1864d",
-          "userTokenReadOnly": true,
-          "streaming": "partial",
-          "nativeStreaming": true
-        },
         "clio": {
           "botToken": "xoxb-264358207284-10767000436401-eWLy29bXu71IK8WU5xUNcxmo",
           "appToken": "xapp-1-A0AP0B43E56-10754112341106-bcf89629183c7b8af5b55b09b1a83f5c77480c6d1f99a606fa1d87bf0bd21eb2",
@@ -491,23 +467,6 @@
         }
       },
       "defaultAccount": "a@muso.ai"
-    },
-    "intercom": {
-      "accounts": {
-        "default": {
-          "enabled": true,
-          "workspaceId": "dwjzhcge",
-          "token": "dG9rOjM5YzM2ODg2X2ZhZjBfNGI4NF9hMzA1XzczNzYyMjg4M2M3OToxOjA=",
-          "webhookSecret": "43c744d5-5043-4f3f-b7fb-36440af1e8d7",
-          "botAdminId": "4359478",
-          "defaultInboxId": "5465657",
-          "fallbackSlackSupervisionChannel": "https://hooks.slack.com/services/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",
-          "fallbackAcknowledgement": "We're looking into this and will get back to you shortly.",
-          "requireMappedHumanAdmin": true,
-          "adminMapping": {}
-        }
-      },
-      "enabled": true
     }
   },
   "gateway": {
@@ -544,24 +503,14 @@
   "plugins": {
     "allow": [
       "openclaw-gmail",
-      "slack",
-      "intercom"
+      "slack"
     ],
-    "load": {
-      "paths": [
-        "/root/.openclaw/extensions/intercom"
-      ]
-    },
     "entries": {
       "slack": {
         "enabled": true,
         "config": {}
       },
       "openclaw-gmail": {
-        "enabled": true,
-        "config": {}
-      },
-      "intercom": {
         "enabled": true,
         "config": {}
       }
@@ -592,14 +541,10 @@
         "shasum": "cae2c32b0f5cf03862aad03d55ed4071345cdefb",
         "resolvedAt": "2026-03-23T19:24:16.951Z",
         "installedAt": "2026-03-23T19:24:23.644Z"
-      },
-      "intercom": {
-        "source": "path",
-        "spec": "/root/.openclaw/extensions/intercom",
-        "installPath": "/root/.openclaw/extensions/intercom",
-        "resolvedName": "@muso/intercom",
-        "resolvedVersion": "0.1.0"
       }
+    },
+    "load": {
+      "paths": []
     }
   },
   "tools": {
@@ -607,5 +552,6 @@
       "security": "full",
       "ask": "off"
     }
-  }
+  },
+  "_comment": "Shared settings must match openclaw-edge.json and openclaw-dev.json. See scripts/validate-shared-config.sh for the authoritative list."
 }
