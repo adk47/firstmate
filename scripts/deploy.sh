@@ -306,15 +306,21 @@ log "  Post-sync setup complete."
 log "Step 6/9: Restarting OpenClaw Gateway ($TARGET)..."
 restart_gateway() {
   local service="$1"
+  local cmd="systemctl restart $service"
   if $HYDRA_LOCAL; then
-    systemctl restart "$service" && sleep 10 && systemctl is-active --quiet "$service" \
-      || fail "Failed to restart $service"
+    eval "$cmd"
   else
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
-      "systemctl restart $service && sleep 10 && systemctl is-active --quiet $service" \
-      || fail "Failed to restart $service"
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" "$cmd"
   fi
-  log "  $service restarted successfully."
+  # Gateway takes ~12s to start (loads all agents + plugins). Poll up to 30s.
+  for i in $(seq 1 15); do
+    sleep 2
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+      log "  $service restarted successfully (${i}x2s)."
+      return 0
+    fi
+  done
+  fail "Failed to restart $service (timed out after 30s)"
 }
 
 if needs_target "main"; then restart_gateway "openclaw-gateway-main"; fi
