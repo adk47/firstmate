@@ -3,7 +3,7 @@ set -euo pipefail
 
 # HYDRA Emergency Rollback
 # ========================
-# Reverts openclaw.json to previous version, restarts gateway, validates.
+# Reverts gateway configs to previous version, restarts all gateways, validates.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HYDRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -34,21 +34,19 @@ log "Starting emergency rollback: $CURRENT_SHA -> $PREVIOUS_SHA"
 notify_slack ":warning: HYDRA rollback initiated. Reverting $CURRENT_SHA -> $PREVIOUS_SHA"
 
 # -------------------------------------------------------------------
-# Step 1: Stop OpenClaw Gateway
+# Step 1: Revert configs to previous version
 # -------------------------------------------------------------------
-log "Step 1/5: Scaling down OpenClaw Gateway..."
-kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" scale deployment/openclaw-gateway --replicas=0
-kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" rollout status deployment/openclaw-gateway --timeout=60s || true
-log "  Gateway scaled to 0."
+log "Step 1/4: Reverting configs to HEAD~1..."
+for cfg in openclaw-main.json openclaw-edge.json openclaw-dev.json; do
+  if git -C "$HYDRA_ROOT" show "HEAD~1:$cfg" >/dev/null 2>&1; then
+    git -C "$HYDRA_ROOT" checkout HEAD~1 -- "$cfg"
+    log "  Reverted $cfg"
+  else
+    log "  WARNING: $cfg not found in HEAD~1 — skipping"
+  fi
+done
 
-# -------------------------------------------------------------------
-# Step 2: Revert openclaw.json to previous version
-# -------------------------------------------------------------------
-log "Step 2/5: Reverting openclaw.json to HEAD~1..."
-git -C "$HYDRA_ROOT" checkout HEAD~1 -- openclaw.json
-log "  openclaw.json reverted."
-
-# Sync reverted config to Node 8
+# Sync reverted configs to Node 8
 log "  Syncing reverted config to Node 8..."
 rsync -azP \
   -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" \
@@ -56,28 +54,49 @@ rsync -azP \
   --exclude='hydra docs/' \
   "$HYDRA_ROOT/" \
   "$NODE8_USER@$NODE8_IP:$DEPLOY_PATH/"
+
+# Sync to profile dirs
+ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" << 'SYNC'
+set -euo pipefail
+for profile in main edge dev; do
+  src="/opt/hydra/openclaw-${profile}.json"
+  dst="/root/.openclaw/${profile}/openclaw.json"
+  if [ -f "$src" ]; then
+    mkdir -p "/root/.openclaw/${profile}"
+    cp "$src" "$dst" && echo "  Synced ${profile} profile config" || echo "  WARNING: Failed to sync ${profile} profile config"
+  else
+    echo "  WARNING: $src not found — skipping ${profile}"
+  fi
+done
+SYNC
 log "  Config synced."
 
 # -------------------------------------------------------------------
-# Step 3: Restart Gateway
+# Step 2: Restart all gateways
 # -------------------------------------------------------------------
-log "Step 3/5: Restarting OpenClaw Gateway..."
-kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" scale deployment/openclaw-gateway --replicas=1
-kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" rollout status deployment/openclaw-gateway --timeout=120s
-log "  Gateway restarted."
+log "Step 2/4: Restarting all gateways..."
+ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" << 'RESTART'
+for svc in openclaw-gateway-main openclaw-gateway-edge openclaw-gateway-dev; do
+  if systemctl is-active "$svc" &>/dev/null || systemctl is-enabled "$svc" &>/dev/null; then
+    systemctl restart "$svc" && echo "  Restarted $svc" || echo "  WARNING: Failed to restart $svc"
+  fi
+done
+RESTART
+sleep 5
+log "  Gateways restarted."
 
 # -------------------------------------------------------------------
-# Step 4: Run smoke test
+# Step 3: Run smoke test
 # -------------------------------------------------------------------
-log "Step 4/5: Running smoke test..."
-if ! "$SCRIPT_DIR/smoke-test.sh"; then
+log "Step 3/4: Running smoke test..."
+if ! "$SCRIPT_DIR/smoke-test.sh" all; then
   fail "Smoke test FAILED after rollback. System may be in a bad state."
 fi
 log "  Smoke test passed."
 
 # -------------------------------------------------------------------
-# Step 5: Post rollback status
+# Step 4: Post rollback status
 # -------------------------------------------------------------------
-log "Step 5/5: Posting rollback status..."
+log "Step 4/4: Posting rollback status..."
 notify_slack ":rewind: HYDRA rollback complete. Now running $PREVIOUS_SHA. Smoke test passed."
 log "Rollback complete. Now running: $PREVIOUS_SHA"

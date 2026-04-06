@@ -4,6 +4,7 @@ set -euo pipefail
 # HYDRA Deploy Script
 # ===================
 # CD entrypoint: validate config, sync to Node 8, restart gateway, smoke test.
+# Supports targeted deployment: --target main|edge|dev|all
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HYDRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -16,8 +17,30 @@ NAMESPACE="${NAMESPACE:-hydra}"
 SLACK_WEBHOOK="${HYDRA_SLACK_WEBHOOK:-}"
 KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 
+# Parse --target flag
+TARGET="all"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target)
+      [[ -z "${2:-}" ]] && { echo "Error: --target requires a value (main|edge|dev|all)"; exit 1; }
+      TARGET="$2"; shift 2 ;;
+    main|edge|dev|all) TARGET="$1"; shift ;;
+    *) echo "Usage: deploy.sh [--target main|edge|dev|all]"; exit 1 ;;
+  esac
+done
+
+# Validate target value (supports comma-separated: main,edge)
+IFS=',' read -ra TARGET_PARTS <<< "$TARGET"
+for t in "${TARGET_PARTS[@]}"; do
+  case "$t" in
+    main|edge|dev|all) ;;
+    *) echo "Error: invalid target '$t'. Must be main|edge|dev|all"; exit 1 ;;
+  esac
+done
+
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"; }
-fail() { log "FATAL: $*"; notify_slack ":x: HYDRA deploy FAILED: $*"; exit 1; }
+fail() { log "FATAL: $*"; notify_slack ":x: HYDRA deploy FAILED ($TARGET): $*"; exit 1; }
+needs_target() { [[ "$TARGET" == "all" || ",$TARGET," == *",$1,"* ]]; }
 
 notify_slack() {
   if [[ -n "$SLACK_WEBHOOK" ]]; then
@@ -27,58 +50,75 @@ notify_slack() {
   fi
 }
 
-# -------------------------------------------------------------------
-# Step 1: Validate openclaw.json
-# -------------------------------------------------------------------
-log "Step 1/7: Validating openclaw.json..."
-if ! python3 -m json.tool "$HYDRA_ROOT/openclaw.json" >/dev/null 2>&1; then
-  fail "openclaw.json is not valid JSON"
-fi
-log "  openclaw.json is valid JSON."
+log "Deploy target: $TARGET"
 
 # -------------------------------------------------------------------
-# Step 2: Validate all SOUL.md files exist
+# Step 1: Validate config files
 # -------------------------------------------------------------------
-log "Step 2/7: Validating SOUL.md files..."
-AGENTS=$(python3 -c "
-import json, sys
-with open('$HYDRA_ROOT/openclaw.json') as f:
-    config = json.load(f)
-for agent in config.get('agents', []):
-    print(agent.get('id', ''))
+log "Step 1/9: Validating config files..."
+
+if needs_target "main"; then
+  python3 -m json.tool "$HYDRA_ROOT/openclaw-main.json" >/dev/null 2>&1 || fail "openclaw-main.json is not valid JSON"
+  log "  openclaw-main.json is valid JSON."
+fi
+if needs_target "edge"; then
+  python3 -m json.tool "$HYDRA_ROOT/openclaw-edge.json" >/dev/null 2>&1 || fail "openclaw-edge.json is not valid JSON"
+  log "  openclaw-edge.json is valid JSON."
+fi
+if needs_target "dev"; then
+  python3 -m json.tool "$HYDRA_ROOT/openclaw-dev.json" >/dev/null 2>&1 || fail "openclaw-dev.json is not valid JSON"
+  log "  openclaw-dev.json is valid JSON."
+fi
+
+# Run drift check when deploying all or multiple profiles
+if [[ "$TARGET" == "all" ]] || [[ "$TARGET" == *","* ]]; then
+  "$SCRIPT_DIR/validate-shared-config.sh" || fail "Shared config drift detected"
+fi
+
+# -------------------------------------------------------------------
+# Step 2: Validate SOUL.md files
+# -------------------------------------------------------------------
+log "Step 2/9: Validating SOUL.md files..."
+validate_souls() {
+  local config="$1"
+  local label="$2"
+  local agents
+  agents=$(python3 -c "
+import json
+with open('$config') as f:
+    c = json.load(f)
+for a in c.get('agents', {}).get('list', []):
+    print(a.get('id', ''))
 ")
-
-MISSING_SOULS=()
-for agent in $AGENTS; do
-  soul_path="$HYDRA_ROOT/workspaces/$agent/SOUL.md"
-  if [[ ! -f "$soul_path" ]]; then
-    MISSING_SOULS+=("$agent")
+  local missing=()
+  for agent in $agents; do
+    if [[ ! -f "$HYDRA_ROOT/workspaces/$agent/SOUL.md" ]]; then
+      missing+=("$agent")
+    fi
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    fail "Missing SOUL.md for $label agents: ${missing[*]}"
   fi
-done
+}
 
-if [[ ${#MISSING_SOULS[@]} -gt 0 ]]; then
-  fail "Missing SOUL.md for agents: ${MISSING_SOULS[*]}"
-fi
+if needs_target "main"; then validate_souls "$HYDRA_ROOT/openclaw-main.json" "main"; fi
+if needs_target "edge"; then validate_souls "$HYDRA_ROOT/openclaw-edge.json" "edge"; fi
+if needs_target "dev"; then validate_souls "$HYDRA_ROOT/openclaw-dev.json" "dev"; fi
 log "  All SOUL.md files present."
 
 # -------------------------------------------------------------------
-# Step 3: Validate tool-deny-lists.yaml (denials only grow)
+# Step 3: Validate tool-deny-lists.yaml
 # -------------------------------------------------------------------
-log "Step 3/7: Validating tool-deny-lists.yaml (deny lists can only grow)..."
+log "Step 3/9: Validating tool-deny-lists.yaml (deny lists can only grow)..."
 DENY_LIST="$HYDRA_ROOT/policies/tool-deny-lists.yaml"
 
 if [[ ! -f "$DENY_LIST" ]]; then
   fail "policies/tool-deny-lists.yaml not found"
 fi
 
-# Compare against the last committed version — removals are forbidden
 if git -C "$HYDRA_ROOT" show HEAD:"policies/tool-deny-lists.yaml" >/dev/null 2>&1; then
-  PREV_DENIALS=$(git -C "$HYDRA_ROOT" show HEAD:"policies/tool-deny-lists.yaml")
-  # Extract all denied tools from previous version
-  PREV_TOOLS=$(echo "$PREV_DENIALS" | grep -E '^\s+- ' | sed 's/^[[:space:]]*- //' | sort -u)
+  PREV_TOOLS=$(git -C "$HYDRA_ROOT" show HEAD:"policies/tool-deny-lists.yaml" | grep -E '^\s+- ' | sed 's/^[[:space:]]*- //' | sort -u)
   CURR_TOOLS=$(grep -E '^\s+- ' "$DENY_LIST" | sed 's/^[[:space:]]*- //' | sort -u)
-
-  # Check that no previously denied tool was removed
   REMOVED=$(comm -23 <(echo "$PREV_TOOLS") <(echo "$CURR_TOOLS"))
   if [[ -n "$REMOVED" ]]; then
     fail "Deny list SHRUNK. Removed tools: $REMOVED"
@@ -87,9 +127,9 @@ fi
 log "  Deny lists validated (only growth detected)."
 
 # -------------------------------------------------------------------
-# Step 4: rsync config to Node 8
+# Step 4: rsync repo to Node 8
 # -------------------------------------------------------------------
-log "Step 4/7: Syncing config to Node 8 ($NODE8_IP)..."
+log "Step 4/9: Syncing config to Node 8 ($NODE8_IP)..."
 rsync -azP --delete \
   -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" \
   --exclude='.git' \
@@ -97,6 +137,27 @@ rsync -azP --delete \
   "$HYDRA_ROOT/" \
   "$NODE8_USER@$NODE8_IP:$DEPLOY_PATH/"
 log "  Config synced to $NODE8_IP:$DEPLOY_PATH/"
+
+# Sync per-profile configs to profile state dirs
+# Note: unquoted heredoc intentional — $TARGET must resolve locally
+ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" << PROFILESYNC
+set -euo pipefail
+if [ "$TARGET" = "main" ] || [ "$TARGET" = "all" ]; then
+  mkdir -p /root/.openclaw/main
+  cp /opt/hydra/openclaw-main.json /root/.openclaw/main/openclaw.json
+  echo "  Synced main profile config"
+fi
+if [ "$TARGET" = "edge" ] || [ "$TARGET" = "all" ]; then
+  mkdir -p /root/.openclaw/edge
+  cp /opt/hydra/openclaw-edge.json /root/.openclaw/edge/openclaw.json
+  echo "  Synced edge profile config"
+fi
+if [ "$TARGET" = "dev" ] || [ "$TARGET" = "all" ]; then
+  mkdir -p /root/.openclaw/dev
+  cp /opt/hydra/openclaw-dev.json /root/.openclaw/dev/openclaw.json
+  echo "  Synced dev profile config"
+fi
+PROFILESYNC
 
 # -------------------------------------------------------------------
 # Step 5: Post-sync setup on Node 8
@@ -135,7 +196,7 @@ CEOF
   fi
 fi
 
-# Ensure GOG_KEYRING_PASSWORD is set for gog CLI (Gmail, Sheets, Calendar, Drive)
+# Ensure GOG_KEYRING_PASSWORD is set for gog CLI
 if ! grep -q "GOG_KEYRING_PASSWORD" /root/.bashrc 2>/dev/null; then
   GOG_PW=$(kubectl get secret -n hydra hydra-service-tokens -o jsonpath='{.data.GOG_KEYRING_PASSWORD}' 2>/dev/null | base64 -d)
   if [ -n "$GOG_PW" ]; then
@@ -144,10 +205,7 @@ if ! grep -q "GOG_KEYRING_PASSWORD" /root/.bashrc 2>/dev/null; then
   fi
 fi
 
-# Apply OpenClaw mention gate patch (until upstream PR #53161 is merged)
-if [ -f /opt/hydra/scripts/patch-openclaw-mention-gate.sh ]; then
-  bash /opt/hydra/scripts/patch-openclaw-mention-gate.sh
-fi
+# Note: mention gate patch (patch-openclaw-mention-gate.sh) removed — no longer needed on OpenClaw 2026.4.2+
 
 # Sync cron jobs from repo (preserve live state)
 if [ -f /opt/hydra/cron-jobs.json ]; then
@@ -173,22 +231,21 @@ print(f'  Synced {len(repo.get(\"jobs\", []))} cron jobs (preserved live state)'
   fi
 fi
 
-# Use local embeddings for memory search (no OpenAI dependency)
+# Use local embeddings for memory search on main profile
 python3 -c "
 import json
-cfg = '/root/.openclaw/openclaw.json'
+cfg = '/root/.openclaw/main/openclaw.json'
 with open(cfg) as f:
     c = json.load(f)
 defaults = c.setdefault('agents', {}).setdefault('defaults', {})
 defaults['memorySearch'] = {'enabled': True, 'provider': 'local'}
-# Remove OpenAI provider if present
 c.get('models', {}).get('providers', {}).pop('openai', None)
 with open(cfg, 'w') as f:
     json.dump(c, f, indent=2)
 print('  Memory search: local embeddings (no OpenAI)')
 "
 
-# Patch Gmail plugin describeMessageTool (until plugin is updated for 2026.3.22+)
+# Patch Gmail plugin (main profile only)
 GMAIL_CHANNEL="/root/.openclaw/extensions/openclaw-gmail/src/channel.ts"
 if [ -f "$GMAIL_CHANNEL" ]; then
   if ! grep -q "describeMessageTool" "$GMAIL_CHANNEL"; then
@@ -197,7 +254,6 @@ if [ -f "$GMAIL_CHANNEL" ]; then
   fi
 fi
 
-# Patch Gmail monitor — bypass gog CLI check + resilient init
 GMAIL_MONITOR="/root/.openclaw/extensions/openclaw-gmail/src/monitor.ts"
 if [ -f "$GMAIL_MONITOR" ]; then
   if grep -q 'account.backend !== "api" && !(await GogGmailClient.checkExists())' "$GMAIL_MONITOR" && ! grep -q "PATCHED" "$GMAIL_MONITOR"; then
@@ -215,37 +271,47 @@ POSTSYNC
 log "  Post-sync setup complete."
 
 # -------------------------------------------------------------------
-# Step 6: Restart OpenClaw Gateway
+# Step 6: Restart targeted gateway(s)
 # -------------------------------------------------------------------
-log "Step 6/9: Restarting OpenClaw Gateway..."
-ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
-  "systemctl restart openclaw-gateway && sleep 5 && systemctl is-active openclaw-gateway" \
-  || kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" rollout restart deployment/openclaw-gateway 2>/dev/null \
-  || fail "Failed to restart OpenClaw Gateway"
-log "  OpenClaw Gateway restarted successfully."
+log "Step 6/9: Restarting OpenClaw Gateway ($TARGET)..."
+restart_gateway() {
+  local service="$1"
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
+    "systemctl restart $service && sleep 5 && systemctl is-active $service" \
+    || fail "Failed to restart $service"
+  log "  $service restarted successfully."
+}
+
+if needs_target "main"; then restart_gateway "openclaw-gateway-main"; fi
+if needs_target "edge"; then restart_gateway "openclaw-gateway-edge"; fi
+if needs_target "dev"; then restart_gateway "openclaw-gateway-dev"; fi
 
 # -------------------------------------------------------------------
 # Step 7: Run smoke test
 # -------------------------------------------------------------------
 log "Step 7/9: Running smoke test..."
-if ! "$SCRIPT_DIR/smoke-test.sh"; then
+if ! "$SCRIPT_DIR/smoke-test.sh" "$TARGET"; then
   fail "Smoke test failed after deploy"
 fi
 log "  Smoke test passed."
 
 # -------------------------------------------------------------------
-# Step 8: Verify AWS access
+# Step 8: Verify AWS access (main only)
 # -------------------------------------------------------------------
-log "Step 8/9: Verifying AWS access..."
-ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
-  "aws sts get-caller-identity --region us-west-2 2>/dev/null | head -1" \
-  && log "  AWS access verified." \
-  || log "  WARNING: AWS access check failed (non-fatal)."
+if needs_target "main"; then
+  log "Step 8/9: Verifying AWS access..."
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
+    "aws sts get-caller-identity --region us-west-2 2>/dev/null | head -1" \
+    && log "  AWS access verified." \
+    || log "  WARNING: AWS access check failed (non-fatal)."
+else
+  log "Step 8/9: Skipping AWS check (not targeting main)."
+fi
 
 # -------------------------------------------------------------------
 # Step 9: Post deploy status
 # -------------------------------------------------------------------
 COMMIT_SHA=$(git -C "$HYDRA_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 log "Step 9/9: Posting deploy status..."
-notify_slack ":white_check_mark: HYDRA deployed successfully. Commit: $COMMIT_SHA"
-log "Deploy complete. Commit: $COMMIT_SHA"
+notify_slack ":white_check_mark: HYDRA deployed successfully (target: $TARGET). Commit: $COMMIT_SHA"
+log "Deploy complete. Target: $TARGET. Commit: $COMMIT_SHA"

@@ -1,12 +1,12 @@
 {
   "meta": {
-    "lastTouchedVersion": "2026.3.23",
-    "lastTouchedAt": "2026-04-01T13:45:50.821Z"
+    "lastTouchedVersion": "2026.4.2",
+    "lastTouchedAt": "2026-04-03T12:27:42.059Z"
   },
   "wizard": {
-    "lastRunAt": "2026-02-19T06:12:59.869Z",
-    "lastRunVersion": "2026.2.17",
-    "lastRunCommand": "configure",
+    "lastRunAt": "2026-04-03T12:27:42.003Z",
+    "lastRunVersion": "2026.4.2",
+    "lastRunCommand": "doctor",
     "lastRunMode": "local"
   },
   "update": {
@@ -33,7 +33,16 @@
               "text",
               "image"
             ],
-            "maxTokens": 16384
+            "maxTokens": 16384,
+            "reasoning": false,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "api": "anthropic-messages"
           },
           {
             "id": "claude-sonnet-4-6",
@@ -42,7 +51,16 @@
               "text",
               "image"
             ],
-            "maxTokens": 16384
+            "maxTokens": 16384,
+            "reasoning": false,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "api": "anthropic-messages"
           },
           {
             "id": "claude-haiku-4-5-20251001",
@@ -50,9 +68,20 @@
             "input": [
               "text",
               "image"
-            ]
+            ],
+            "reasoning": false,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192,
+            "api": "anthropic-messages"
           }
-        ]
+        ],
+        "api": "anthropic-messages"
       }
     }
   },
@@ -90,6 +119,10 @@
       "maxConcurrent": 20,
       "subagents": {
         "maxConcurrent": 24
+      },
+      "timeoutSeconds": 900,
+      "llm": {
+        "idleTimeoutSeconds": 600
       }
     },
     "list": [
@@ -242,13 +275,6 @@
       }
     },
     {
-      "agentId": "support",
-      "match": {
-        "channel": "slack",
-        "accountId": "support"
-      }
-    },
-    {
       "agentId": "clio",
       "match": {
         "channel": "slack",
@@ -263,16 +289,16 @@
       }
     },
     {
-      "agentId": "support",
+      "agentId": "cmo",
       "match": {
-        "channel": "intercom",
-        "accountId": "default"
+        "channel": "openclaw-gmail",
+        "accountId": "*"
       }
     }
   ],
   "messages": {
     "queue": {
-      "mode": "collect"
+      "mode": "followup"
     },
     "ackReaction": "eyes",
     "ackReactionScope": "all",
@@ -280,9 +306,11 @@
     "tts": {
       "auto": "off",
       "provider": "elevenlabs",
-      "elevenlabs": {
-        "apiKey": "sk_0b8a03cf43ae73f1656fa9c989dc2b12e24ebb9da6fdd237",
-        "voiceId": "NtS6nEHDYMQC9QczMQuq"
+      "providers": {
+        "elevenlabs": {
+          "apiKey": "sk_0b8a03cf43ae73f1656fa9c989dc2b12e24ebb9da6fdd237",
+          "voiceId": "NtS6nEHDYMQC9QczMQuq"
+        }
       }
     }
   },
@@ -387,13 +415,6 @@
           "streaming": "partial",
           "nativeStreaming": true
         },
-        "support": {
-          "botToken": "xoxb-264358207284-10767041148305-JPk1MvuGJjr9J8mvvgKrhFtT",
-          "appToken": "xapp-1-A0AMQK8PH8X-10752091591862-9b3f765296a9ac01468fc58b2b6126cad0dee60e5914dd0930f0a5901fb1864d",
-          "userTokenReadOnly": true,
-          "streaming": "partial",
-          "nativeStreaming": true
-        },
         "clio": {
           "botToken": "xoxb-264358207284-10767000436401-eWLy29bXu71IK8WU5xUNcxmo",
           "appToken": "xapp-1-A0AP0B43E56-10754112341106-bcf89629183c7b8af5b55b09b1a83f5c77480c6d1f99a606fa1d87bf0bd21eb2",
@@ -460,23 +481,6 @@
         }
       },
       "defaultAccount": "a@muso.ai"
-    },
-    "intercom": {
-      "accounts": {
-        "default": {
-          "enabled": true,
-          "workspaceId": "dwjzhcge",
-          "token": "dG9rOjM5YzM2ODg2X2ZhZjBfNGI4NF9hMzA1XzczNzYyMjg4M2M3OToxOjA=",
-          "webhookSecret": "43c744d5-5043-4f3f-b7fb-36440af1e8d7",
-          "botAdminId": "4359478",
-          "defaultInboxId": "5465657",
-          "fallbackSlackSupervisionChannel": "https://hooks.slack.com/services/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",
-          "fallbackAcknowledgement": "We're looking into this and will get back to you shortly.",
-          "requireMappedHumanAdmin": true,
-          "adminMapping": {}
-        }
-      },
-      "enabled": true
     }
   },
   "gateway": {
@@ -519,7 +523,8 @@
     ],
     "entries": {
       "slack": {
-        "enabled": true
+        "enabled": true,
+        "config": {}
       },
       "openclaw-gmail": {
         "enabled": true
@@ -585,5 +590,12 @@
         "/root/.openclaw/extensions/support-tools"
       ]
     }
-  }
+  },
+  "tools": {
+    "exec": {
+      "security": "full",
+      "ask": "off"
+    }
+  },
+  "_comment": "Shared settings must match openclaw-edge.json and openclaw-dev.json. See scripts/validate-shared-config.sh for the authoritative list."
 }

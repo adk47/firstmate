@@ -15,6 +15,54 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect deploy target
+        id: detect
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+
+          if [ -z "$CHANGED" ]; then
+            echo "target=all" >> $GITHUB_OUTPUT
+            echo "Deploy target: all (unable to detect changes)"
+            exit 0
+          fi
+
+          NEEDS_MAIN=false
+          NEEDS_EDGE=false
+          NEEDS_DEV=false
+
+          while IFS= read -r file; do
+            case "$file" in
+              openclaw-edge.json|plugins/intercom/*|plugins/support-tools/*|workspaces/support/*)
+                NEEDS_EDGE=true ;;
+              openclaw-dev.json|workspaces/operations-dev/*)
+                NEEDS_DEV=true ;;
+              openclaw-main.json|workspaces/ceo/*|workspaces/cmo/*|workspaces/cto/*|workspaces/coordinator/*|workspaces/qa/*|workspaces/finance/*|workspaces/operations/*|workspaces/devops/*|workspaces/design/*|workspaces/neutral/*)
+                NEEDS_MAIN=true ;;
+              scripts/*|policies/*|skills-all/*|.github/workflows/*)
+                NEEDS_MAIN=true; NEEDS_EDGE=true; NEEDS_DEV=true ;;
+              plugins/*)
+                NEEDS_MAIN=true ;;
+            esac
+          done <<< "$CHANGED"
+
+          # Build comma-separated target from flags
+          TARGETS=""
+          $NEEDS_MAIN && TARGETS="${TARGETS:+$TARGETS,}main"
+          $NEEDS_EDGE && TARGETS="${TARGETS:+$TARGETS,}edge"
+          $NEEDS_DEV && TARGETS="${TARGETS:+$TARGETS,}dev"
+
+          # Default to all if nothing matched
+          TARGET="${TARGETS:-all}"
+          # Simplify: if all three are set, just use "all"
+          if [ "$TARGET" = "main,edge,dev" ]; then TARGET="all"; fi
+
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          echo "Deploy target: $TARGET"
+          echo "Changed files:"
+          echo "$CHANGED"
 
       - name: Sync config to Node 8
         run: |
@@ -31,9 +79,7 @@ jobs:
       - name: Sync workspaces to live
         run: |
           echo "::group::Syncing workspaces"
-          # Sync SOUL.md, TOOLS.md, AGENTS.md (policy files) to live workspaces
-          # Preserve MEMORY.md and other agent-written files
-          for ws in ceo cmo coordinator cto design devops finance neutral operations qa support; do
+          for ws in ceo cmo coordinator cto design devops finance neutral operations operations-dev qa support; do
             src="workspaces/${ws}/"
             dst="/opt/hydra/workspaces/${ws}/"
             if [ -d "$src" ] && [ -d "$dst" ]; then
@@ -60,90 +106,66 @@ jobs:
         id: apply
         run: |
           echo "::group::Applying K8s manifests"
-
-          # Snapshot current state for rollback
           /usr/local/bin/kubectl get deployments -n ${HYDRA_NAMESPACE} -o yaml > /tmp/hydra-rollback-deployments.yaml 2>/dev/null || true
           /usr/local/bin/kubectl get configmaps -n ${HYDRA_NAMESPACE} -o yaml > /tmp/hydra-rollback-configmaps.yaml 2>/dev/null || true
-
-          # Apply all HYDRA manifests (only if k8s dir exists in repo)
           if [ -d "k8s/prod/hydra/" ]; then
             /usr/local/bin/kubectl apply -f k8s/prod/hydra/ --namespace=${HYDRA_NAMESPACE}
           else
             echo "No k8s manifests in repo — skipping"
           fi
-
           echo "K8s manifests applied"
           echo "::endgroup::"
 
       - name: Install plugins
         run: |
           echo "::group::Installing plugins"
-          # Install any plugins in the plugins/ directory
+          TARGET="${{ steps.detect.outputs.target }}"
           if [ -d "plugins/" ]; then
             for plugin_dir in plugins/*/; do
               plugin_name=$(basename "$plugin_dir")
               if [ -f "${plugin_dir}package.json" ]; then
-                echo "Installing plugin: ${plugin_name}"
-                cd "${plugin_dir}" && npm install --production 2>&1 | tail -3 && cd -
-                # Register with OpenClaw if not already installed
-                if [ ! -d "/root/.openclaw/extensions/${plugin_name}" ]; then
-                  cp -r "${plugin_dir}" "/root/.openclaw/extensions/${plugin_name}"
-                  echo "Registered ${plugin_name} in OpenClaw extensions"
+                PLUGIN_PROFILE="main"
+                if [ "$plugin_name" = "intercom" ] || [ "$plugin_name" = "support-tools" ]; then
+                  PLUGIN_PROFILE="edge"
+                fi
+                if [ "$TARGET" = "all" ] || [ "$TARGET" = "$PLUGIN_PROFILE" ]; then
+                  echo "Installing plugin: ${plugin_name} (profile: ${PLUGIN_PROFILE})"
+                  cd "${plugin_dir}" && npm install --production 2>&1 | tail -3 && cd -
+                  # Profile-scoped extension path
+                  if [ "$PLUGIN_PROFILE" = "main" ]; then
+                    EXT_PATH="/root/.openclaw/extensions/${plugin_name}"
+                  else
+                    EXT_PATH="/root/.openclaw/${PLUGIN_PROFILE}/extensions/${plugin_name}"
+                  fi
+                  if [ ! -d "$EXT_PATH" ]; then
+                    cp -r "${plugin_dir}" "$EXT_PATH"
+                    echo "Registered ${plugin_name} in OpenClaw extensions"
+                  else
+                    rsync -az --exclude='node_modules' "${plugin_dir}" "$EXT_PATH/"
+                    echo "Updated ${plugin_name} in OpenClaw extensions"
+                  fi
                 else
-                  rsync -az --exclude='node_modules' "${plugin_dir}" "/root/.openclaw/extensions/${plugin_name}/"
-                  echo "Updated ${plugin_name} in OpenClaw extensions"
+                  echo "Skipping plugin: ${plugin_name} (not targeting ${PLUGIN_PROFILE})"
                 fi
               fi
             done
           fi
           echo "::endgroup::"
 
-      - name: Apply patches
+      # Note: mention gate patch removed — no longer needed on OpenClaw 2026.4.2+
+
+      - name: Deploy with target
+        id: deploy
         run: |
-          echo "::group::Applying patches"
-          # Apply mention gate patch (until openclaw/openclaw#53161 is merged upstream)
-          if [ -f scripts/patch-openclaw-mention-gate.sh ]; then
-            chmod +x scripts/patch-openclaw-mention-gate.sh
-            bash scripts/patch-openclaw-mention-gate.sh
-          fi
+          echo "::group::Running deploy script"
+          TARGET="${{ steps.detect.outputs.target }}"
+          chmod +x scripts/deploy.sh
+          ./scripts/deploy.sh --target "$TARGET"
           echo "::endgroup::"
 
-      - name: Restart OpenClaw Gateway
-        id: restart
-        run: |
-          echo "::group::Restarting OpenClaw Gateway"
-          # OpenClaw runs as systemd service on Node 8 (not K8s)
-          if systemctl is-active openclaw-gateway &>/dev/null; then
-            systemctl restart openclaw-gateway
-            sleep 5
-            if systemctl is-active openclaw-gateway &>/dev/null; then
-              echo "OpenClaw Gateway restarted successfully (systemd)"
-            else
-              echo "::error::Gateway failed to start after restart"
-              journalctl -u openclaw-gateway --no-pager -n 20
-              exit 1
-            fi
-          elif /usr/local/bin/kubectl get deployment/openclaw-gateway -n ${HYDRA_NAMESPACE} &>/dev/null; then
-            /usr/local/bin/kubectl rollout restart deployment/openclaw-gateway -n ${HYDRA_NAMESPACE}
-            /usr/local/bin/kubectl rollout status deployment/openclaw-gateway -n ${HYDRA_NAMESPACE} --timeout=300s
-            echo "OpenClaw Gateway restarted successfully (kubectl)"
-          else
-            echo "::warning::No gateway found (systemd or kubectl) — skipping restart"
-          fi
-          echo "::endgroup::"
-
-      - name: Run smoke test
-        id: smoke
-        continue-on-error: true
-        run: |
-          echo "::group::Running smoke tests"
-          if [ -f scripts/smoke-test.sh ]; then
-            chmod +x scripts/smoke-test.sh
-            ./scripts/smoke-test.sh || echo "::warning::Smoke tests failed (non-blocking — gateway runs as Docker, not K8s)"
-          else
-            echo "No smoke-test.sh found — skipping"
-          fi
-          echo "::endgroup::"
+      # Smoke test runs inside deploy.sh (step 7) and fails the deploy on failure.
+      # No separate CI smoke test step needed — avoids double-run and the
+      # continue-on-error silencing issue.
 
       - name: Post to Slack — success
         if: success()
@@ -151,17 +173,18 @@ jobs:
           COMMIT_SHA="${{ github.sha }}"
           COMMIT_MSG=$(git log -1 --pretty=format:'%s')
           AUTHOR="${{ github.actor }}"
+          TARGET="${{ steps.detect.outputs.target }}"
 
           curl -sS -X POST "$SLACK_WEBHOOK" \
             -H 'Content-Type: application/json' \
             -d "{
-              \"text\": \":white_check_mark: HYDRA deployed successfully\",
+              \"text\": \":white_check_mark: HYDRA deployed successfully (target: ${TARGET})\",
               \"blocks\": [
                 {
                   \"type\": \"section\",
                   \"text\": {
                     \"type\": \"mrkdwn\",
-                    \"text\": \":white_check_mark: *HYDRA Deploy Successful*\n\n*Commit:* \`${COMMIT_SHA:0:7}\` — ${COMMIT_MSG}\n*Author:* ${AUTHOR}\n*Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\"
+                    \"text\": \":white_check_mark: *HYDRA Deploy Successful* (target: ${TARGET})\n\n*Commit:* \`${COMMIT_SHA:0:7}\` — ${COMMIT_MSG}\n*Author:* ${AUTHOR}\n*Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\"
                   }
                 }
               ]
@@ -171,19 +194,13 @@ jobs:
         if: failure()
         run: |
           echo "::error::Deployment failed — initiating rollback"
-
-          # Run rollback script if it exists
           if [ -f scripts/rollback.sh ]; then
             chmod +x scripts/rollback.sh
             ./scripts/rollback.sh || echo "Rollback script failed"
           fi
-
-          # Restore previous deployments if snapshot exists
           if [ -f /tmp/hydra-rollback-deployments.yaml ]; then
             /usr/local/bin/kubectl apply -f /tmp/hydra-rollback-deployments.yaml --namespace=${HYDRA_NAMESPACE} || true
           fi
-
-          # Notify Aaron
           curl -sS -X POST "$SLACK_WEBHOOK" \
             -H 'Content-Type: application/json' \
             -d "{
@@ -193,7 +210,7 @@ jobs:
                   \"type\": \"section\",
                   \"text\": {
                     \"type\": \"mrkdwn\",
-                    \"text\": \":rotating_light: *HYDRA Deploy FAILED*\n\n*Commit:* \`${{ github.sha }}\`\n*Author:* ${{ github.actor }}\n*Action:* Rollback initiated\n*Run:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n<@aaron> — please investigate\"
+                    \"text\": \":rotating_light: *HYDRA Deploy FAILED* (target: ${{ steps.detect.outputs.target }})\n\n*Commit:* \`${{ github.sha }}\`\n*Author:* ${{ github.actor }}\n*Action:* Rollback initiated\n*Run:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n<@aaron> — please investigate\"
                   }
                 }
               ]

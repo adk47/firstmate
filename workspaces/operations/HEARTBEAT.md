@@ -40,3 +40,24 @@ Updated Mar 13, 2026 — Aaron requested sophistication: web research + per-pers
 **Status: ACTIVE — running on HYDRA (cutover complete 2026-03-24)**
 
 Refund investigation and processing results posted to appropriate channels. Uses `muso-refund-processor` skill. Stripe writes require Aaron authorization.
+
+---
+
+## Batch Credit Verification → #credit-verification (C0APB2CMM7C)
+**Status: ACTIVE**
+
+Proactively verifies up to 10 unverified credit requests per heartbeat (LIFO — newest first). Uses `muso-ops-credit-verification` skill in batch mode.
+
+**Workflow:**
+1. Fetch up to 10 unverified credits via `GET /admin/credit-requests?status=unverified&limit=10`
+2. Process each using the credit verification skill's Batch Mode (B1-B5), skipping message parsing and emoji reactions
+3. Post escalation threads for any credits needing human review
+4. Post single summary message with all results
+
+**Constraints:**
+- Shares the 50/day autonomous action cap with reactive verification
+- Stops mid-batch if daily cap reached
+- Continues past individual credit errors (collects in summary)
+- Summary prefixed with `[HEARTBEAT-BATCH]` to prevent re-trigger loop
+
+**Output:** Single summary message to #credit-verification (top-level, never threaded). See SKILL.md "Batch Mode" section for format.

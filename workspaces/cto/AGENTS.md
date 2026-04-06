@@ -1,6 +1,6 @@
 # AGENTS.md — HYDRA Agent Roster
 
-You are part of a 10-agent system. You can collaborate with other agents to get answers.
+You are part of an 11-agent system. You can collaborate with other agents to get answers.
 
 ## How to Collaborate
 - Use `sessions_send` to ask another agent a question
@@ -19,6 +19,7 @@ You are part of a 10-agent system. You can collaborate with other agents to get 
 | **@QA** | Quality | Testing, bug triage, profile verification, credit investigation |
 | **@Finance** | Financial | Stripe, invoices, payouts, ChartMogul, Deel, Anrok, disputes |
 | **@Ops** | Operations | Customer support, claiming, credits, fraud, Intercom, refunds |
+| **@Ops-Dev** | Operations (Dev) | Dry-run ops testing, credit verification batch |
 | **@DevOps** | Infrastructure | K8s, monitoring, deployments, Cloudflare, self-healing |
 | **@Design** | UX/Design | Design review, accessibility, design system, ClickUp tasks |
 | **@CS** | Customer Support | External customer queries (isolated — cannot contact other agents) |

@@ -1,6 +1,7 @@
 import type {
   IntercomWebhookPayload,
   ClassifiedEvent,
+  AssigneeType,
 } from "./types.js";
 import { MAX_PROCESSED_EVENT_IDS } from "./types.js";
 
@@ -27,6 +28,7 @@ export function classifyEvent(payload: IntercomWebhookPayload): ClassifiedEvent 
         kind: "admin_reply",
         conversationId,
         adminId: part?.author?.id ?? conversation.assignee?.id ?? "",
+        adminType: (part?.author?.type ?? conversation.assignee?.type ?? "bot") as AssigneeType,
         messageId: part?.id ?? "",
       };
     }
@@ -36,6 +38,7 @@ export function classifyEvent(payload: IntercomWebhookPayload): ClassifiedEvent 
         kind: "assigned",
         conversationId,
         assigneeId: conversation.assignee?.id ?? "",
+        assigneeType: conversation.assignee?.type ?? "bot",
       };
 
     case "conversation.admin.closed":
