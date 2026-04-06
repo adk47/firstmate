@@ -84,16 +84,21 @@ validate_souls() {
   local label="$2"
   local agents
   agents=$(python3 -c "
-import json
+import json, os
 with open('$config') as f:
     c = json.load(f)
+defaults_ws = c.get('agents', {}).get('defaults', {}).get('workspace', '')
 for a in c.get('agents', {}).get('list', []):
-    print(a.get('id', ''))
+    ws = a.get('workspace', defaults_ws)
+    print(a['id'] + ':' + os.path.basename(ws))
 ")
   local missing=()
-  for agent in $agents; do
-    if [[ ! -f "$HYDRA_ROOT/workspaces/$agent/SOUL.md" ]]; then
-      missing+=("$agent")
+  for entry in $agents; do
+    local agent_id="${entry%%:*}"
+    local ws_dir="${entry##*:}"
+    [[ -z "$ws_dir" ]] && ws_dir="$agent_id"
+    if [[ ! -f "$HYDRA_ROOT/workspaces/$ws_dir/SOUL.md" ]]; then
+      missing+=("$agent_id")
     fi
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
