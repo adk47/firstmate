@@ -1,0 +1,23 @@
+{
+  "name": "@muso/support-tools",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@sinclair/typebox": "^0.34.49",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.0"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}

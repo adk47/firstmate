@@ -1,6 +1,6 @@
 ---
 name: action-request
-description: Submit structured action requests via Zendesk tickets for operations review
+description: Submit structured action requests via ClickUp tasks for operations review
 triggers:
   - "change my credits"
   - "add a credit"
@@ -13,13 +13,13 @@ triggers:
   - "bulk change"
 ---
 
-# Action Request (via Zendesk Ticket)
+# Action Request (via ClickUp Task)
 
 ## Purpose
 
-When a customer requests a write action (credit change, refund, profile update, dispute), the CS agent creates a structured Zendesk ticket tagged `hydra-action-request`. The Operations agent picks these up for review and execution.
+When a customer requests a write action (credit change, refund, profile update, dispute), the CS agent creates a structured ClickUp task tagged `hydra-action-request` in list 901000600160. The Operations agent picks these up for review and execution.
 
-**This skill does NOT add any new tools.** It uses the existing `create_ticket` tool with a structured format.
+**This skill does NOT add any new tools.** It uses the existing `create_ticket` plugin tool with a structured format. The actual API call is handled by the `create_ticket` plugin tool -- the agent only provides the structured content.
 
 ## Authentication Required
 - [x] Yes for Tier 2-3 actions
@@ -30,7 +30,7 @@ When a customer requests a write action (credit change, refund, profile update, 
 
 1. Customer asks for a write action
 2. CS agent determines the action type and approval tier
-3. CS agent creates a Zendesk ticket using `create_ticket` with structured fields
+3. CS agent creates a ClickUp task using `create_ticket` with structured fields
 4. CS agent tells the customer: "I've submitted your request. Our team will review it within [SLA]."
 5. Operations agent picks up tickets tagged `hydra-action-request`
 6. Operations follows the approval workflow (human review for Tier 2-3)
@@ -41,7 +41,9 @@ Every action request ticket MUST use this structure:
 
 **Subject**: `Action Request: [action-type]`
 
-**Tags**: `hydra-action-request`, `tier-[0-3]`
+**Tags**: `hydra-action-request`, `tier-[1-3]`
+
+**Note**: Tasks are created in ClickUp list 901000600160. Tags are applied as ClickUp task tags.
 
 **Description** (includes machine-readable JSON block):
 ```
@@ -74,7 +76,7 @@ Customer [name/email] requests: [plain English summary]
 | `profile-merge` | 2 | 5 business days | "I have two profiles, combine them" |
 | `bulk-credit-change` | 2 | 5 business days | "Update credits on multiple tracks" |
 | `profile-update` | 2 | 5 business days | "Change my profile name/details" |
-| `subscription-refund` | 3 | 5 business days | "I want a refund" |
+| `subscription-refund` | 3 | 5-10 business days | "I want a refund" |
 | `data-deletion` | 3 | 10 business days | "Delete my account and data" |
 | `dispute` | 3 | 10 business days | "I dispute this credit claim" |
 | `data-export` | 3 | 10 business days | "Export all my data" |
@@ -127,9 +129,7 @@ If the refund-retention skill was not activated (edge case), set `retention_cont
 | Unclear action type | Ask clarifying question before creating ticket |
 
 ## Rate Limits
-- 2 action request tickets per session
-- 3 action request tickets per hour (across sessions)
-- 10 action request tickets per day (across sessions)
+- 2 action request tickets per session (60-minute window)
 
 ## Customer Communication Templates
 
@@ -150,5 +150,5 @@ If the refund-retention skill was not activated (edge case), set `retention_cont
 - Internal team names or individual reviewers
 
 ## Error Handling
-- Zendesk API error: "I wasn't able to create a ticket right now. Please email support@muso.ai directly with your request."
+- ClickUp API error: "I wasn't able to create a ticket right now. Please email support@muso.ai directly with your request."
 - Rate limited: "You've submitted several requests. Our team will process them. For additional requests, please email support@muso.ai."

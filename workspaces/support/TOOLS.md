@@ -2,50 +2,53 @@
 
 ## Allowed Tools (EXACTLY 4)
 
-This agent has the most restricted tool set in HYDRA. Only these 4 tools are permitted:
+This agent has the most restricted tool set in HYDRA. Only these 4 tools are permitted.
+
+All tools are implemented as plugin-registered tools (via the `support-tools` OpenClaw plugin). The agent calls them by name -- the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
 
 ### 1. profile_lookup
 
-- **Wraps**: `GET api.muso.ai/v1/profiles`
+- **Wraps**: `GET api.muso.ai/api/c/v5/search/autocomplete` (falls back to `POST .../v5/search` when autocomplete returns no results)
 - **Returns**: Public data ONLY -- name, role, verified status, credits count
-- **Auth**: Service-level API key (injected by runtime, never visible to agent)
-- **Rate limit**: 10/min per session, 30/min global
+- **Auth**: Service API key (handled by plugin, never visible to agent)
+- **Rate limit**: 10/min per session
 - **PII filter**: Email, phone, address, payment details are NEVER returned
 
 ### 2. credits_search
 
-- **Wraps**: `GET api.muso.ai/v1/credits`
+- **Wraps**: `GET api.muso.ai/api/c/v4/profile/{profileId}/credits`
 - **Returns**: Public credit data -- credit role, track name, release name, release date
-- **Auth**: Service-level API key (injected by runtime, never visible to agent)
-- **Rate limit**: 10/min per session, 30/min global
-- **Search params**: artist name, track name, ISRC, release title
+- **Auth**: Service API key (handled by plugin, never visible to agent)
+- **Rate limit**: 10/min per session
+- **Parameters**: `profileId` (required), `keyword` (optional text filter), `creditRole` (optional role filter), `limit`, `offset`
 
 ### 3. subscription_status
 
-- **Wraps**: `GET api.muso.ai/v1/subscriptions`
-- **Returns**: Subscription plan, status (active/cancelled/past_due), renewal date
-- **Auth**: Requires user's authenticated session token (passed via widget context)
-- **Rate limit**: 3/min per session, 10/min global
+- **Coming soon -- stub returns guidance message offering ticket creation**
+- **Would wrap**: Subscription status endpoint (TBD)
+- **Returns (when implemented)**: Subscription plan, status (active/cancelled/past_due), renewal date
+- **Auth**: TBD -- requires user's authenticated session token
 - **Privacy**: Only returns data for the authenticated user -- no cross-account lookups
 
 ### 4. create_ticket
 
-- **Wraps**: `POST zendesk.com/api/v2/tickets`
-- **Returns**: Ticket ID, ticket URL
-- **Auth**: Zendesk API token (injected by runtime, never visible to agent)
-- **Rate limit**: 2/session, 3/hour per user, 10/hour global
-- **Required fields**: subject, description (conversation context), requester email, priority, category
-- **Categories**: account, billing, credits, technical, other
+- **Wraps**: ClickUp task creation in list 901000600160
+- **Returns**: Task ID and confirmation message with SLA
+- **Auth**: ClickUp API key (handled by plugin, never visible to agent)
+- **Rate limit**: 2 per session (60-minute window)
+- **Required fields**: `actionType`, `customerEmail`, `summary`, `conversationSummary`
+- **Optional fields**: `customerProfileId`, `details` (action-specific key-value pairs)
+- **Auto-derived**: subject (`Action Request: {actionType}`), priority (from tier), tags (`hydra-action-request`, `tier-N`)
 
 ## Action Request Pattern
 
 For customer write actions (credit claims, refunds, profile updates, disputes), use `create_ticket` with structured formatting. See `skills/action-request/SKILL.md` for the full ticket format.
 
 **Key points**:
-- Tag action request tickets with `hydra-action-request` and the approval tier (`tier-1`, `tier-2`, `tier-3`)
-- Include a machine-readable JSON block in the ticket description (between `---ACTION-REQUEST---` and `---END-ACTION-REQUEST---` markers)
+- Tasks are created in the designated ClickUp list (901000600160) with `hydra-action-request` tag and the approval tier (`tier-1`, `tier-2`, `tier-3`)
+- Include a machine-readable JSON block in the task description (between `---ACTION-REQUEST---` and `---END-ACTION-REQUEST---` markers)
 - This does NOT add a new tool -- it uses `create_ticket` with structured content
-- The Operations agent picks up tickets tagged `hydra-action-request` for review and execution
+- The Operations agent picks up tasks tagged `hydra-action-request` for review and execution
 
 ## Denied Tools (EVERYTHING ELSE)
 
