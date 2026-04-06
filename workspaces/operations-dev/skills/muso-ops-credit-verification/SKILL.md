@@ -1,0 +1,786 @@
+---
+name: muso-ops-credit-verification
+description: |
+  Autonomous credit verification workflow. Two modes:
+  1. Reactive: Triggered by any message in #credit-verification (C0APB2CMM7C).
+     No @mention required. Parses flagged credit requests, investigates, and
+     auto-approves, auto-rejects, or escalates.
+  2. Batch (heartbeat): Proactively fetches up to 10 unverified credits from
+     the API and processes them, posting a summary to #credit-verification.
+
+  Use when: any message arrives in #credit-verification channel, OR during
+  heartbeat execution of the "Batch Credit Verification" task.
+
+  Triggers: any message in #credit-verification (C0APB2CMM7C), heartbeat schedule
+depends-on:
+  - muso-ops-credits
+  - muso-ops-fraud
+  - muso-ops-admin
+  - muso-ops-audit
+  - muso-slack-formatter
+compatibility: |
+  Cross-repo dependency: core-backend PR #8465 must set rich text fallback
+  in postCreditVerification() for the agent to parse the message content.
+metadata:
+  version: "1.0"
+  source-repo: "Muso-AI/hydra"
+---
+
+# Muso Ops — Credit Verification (Autonomous)
+
+Pre-approval review of flagged credit requests. Core-backend posts a Block Kit
+message to #credit-verification when a credit request's risk score >= 85%.
+This skill defines how to handle those messages autonomously.
+
+## HARD RULE
+
+**Every message in #credit-verification is evaluated by this workflow.
+Thread replies in escalation threads are handled as escalation responses (see Step 5).
+All other messages: parse, investigate, act. No conversational responses.**
+
+**Thread-awareness:** If the message is a reply in a thread (has `thread_ts` and is
+not the parent message), check if the thread was initiated by a credit verification
+workflow. If so, treat the reply as an escalation response (see Step 5 — Escalate),
+not a new trigger. Only parent messages trigger the full workflow.
+
+## Visual Feedback (Emoji Reactions) — MANDATORY
+
+You MUST use the message tool with `action: "react"` at these exact points.
+This is not optional. Skipping reactions is a workflow violation.
+
+**Channel ID:** Use `OPS_CREDIT_VERIFICATION_CHANNEL_ID` if set; otherwise default
+to `C0APB2CMM7C`. Substitute this channel ID in all `message(...)` calls below.
+
+In examples below, use:
+- `<credit_verification_channel_id>` = `OPS_CREDIT_VERIFICATION_CHANNEL_ID` (if set) else `C0APB2CMM7C`
+
+**Step 0 passes → add :eyes:**
+```
+message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes")
+```
+
+**After acting (approve/reject/escalate) → remove :eyes: and add final emoji:**
+```
+message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="<final>")
+```
+
+Where `<final>` is:
+- `white_check_mark` — auto-approved
+- `x` — auto-rejected
+- `mag` — escalated for human review
+
+## Workflow
+
+### Step 0: Message Format Gate
+
+**Self-ignore:** If the message starts with `[HEARTBEAT-BATCH]`, ignore it silently.
+This is output from the batch verification heartbeat task — not a new credit to verify.
+
+**Dev command trigger (ops-dev only):** If the message content is exactly
+`run credit verification batch` (case-insensitive), treat it as an on-demand
+batch trigger and run **Batch Mode (B1–B5)** using the current channel ID
+(`OPS_CREDIT_VERIFICATION_CHANNEL_ID`). Do NOT treat it as a reactive credit
+message. Post the batch summary back to the same channel with the standard
+`[HEARTBEAT-BATCH]` prefix.
+
+**Path A — Direct bot message:** Using **case-insensitive** matching, the message
+contains both "credit request" and "risk score". Proceed to Step 1 using this message.
+
+**Path B — Human relay via @Ops mention:** The message does NOT contain both markers,
+but it is an explicit `@Ops` mention in this channel. No other phrases qualify —
+only direct `@Ops` mentions trigger this path. Slack does not deliver bot messages
+to other bots, so the original Credit Verification Bot message may not have reached
+you. Look at the **preceding message** in the channel (the message immediately above)
+to find the Credit Verification Bot's rich message containing the credit data. If the
+preceding message contains both "credit request" and "risk score", use THAT message's
+content for Step 1 parsing. Store the preceding message's timestamp as
+`data_message_ts` — this is the message you will react on and parse from.
+
+> **TODO**: This Path B workaround is fragile (depends on message ordering). The
+> proper fix is to have core-backend post credit verifications via a webhook instead
+> of a bot user, so Slack delivers the message to the Ops agent directly. See
+> core-backend `postCreditVerification()`.
+
+**Neither path matches:** Ignore silently.
+
+If either path matches, YOU MUST immediately call (use `data_message_ts` for Path B):
+```
+message(action="react", channelId="<credit_verification_channel_id>", messageId="<data_message_ts>", emoji="eyes")
+```
+
+### Step 1: Parse the Incoming Message
+
+Extract these fields from the message text. The Credit Verification Bot posts using
+Slack block kit with bold labels. Match field values by looking for the label followed
+by the value on the same or next line. Labels may vary — use the aliases below.
+
+| Field | Required | Bot label(s) | Example value |
+|-------|----------|-------------|---------------|
+| Credit request ID | Yes | `Credit Request ID:`, `Credit Request:` | `test-req-011`, `cr_abc123` |
+| Profile ID | Yes | `Profile ID:` | `test-profile-001`, `prof_xyz789` |
+| Profile name | Yes | `Profile:` | `Test Artist Profile` |
+| Workspace ID | Yes | `Workspace ID:`, `Workspace:` | `test-ws-001` |
+| Owner email | Yes | `Owner Email:` | `nick@muso.ai` |
+| Track title | Yes | `Track:` | `Blinding Lights` |
+| Artists | Yes | `Artists:` | `The Weeknd` |
+| Spotify link | No | `Spotify URL:`, `Spotify:` | `https://open.spotify.com/track/...` |
+| Claimed roles | Yes | `Roles:` | `Producer, Songwriter` |
+| Overall risk score | Yes | `Risk Score:` | `92%` |
+| Per-dimension scores | Yes | `Risk Breakdown:` (bullet list below) | `• artist_risk: 0.85` |
+| Pending verification count | No | `Pending Verifications:` | `3` |
+
+**Per-dimension scores** appear as a bullet list under `Risk Breakdown:`, with each
+line formatted as `• key: value` (e.g., `• artist_risk: 0.85`). Collect all bullet
+items as the per-dimension risk scores.
+
+**If any required field cannot be parsed**, post an error in-thread AND escalate:
+
+```
+⚠️ PARSE ERROR — Could not extract required fields from this message.
+
+Missing: [list of missing fields]
+
+Skipping verification. <@U7RP6HKUZ> — message format may have changed. Manual review needed.
+```
+
+Do NOT attempt to investigate or act on incomplete data.
+
+### Step 2: Idempotency Check
+
+Before investigating, query the credit request status:
+
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/credit-requests/<credit_request_id>"
+```
+
+If the status is NOT `unverified` or `user_verification_needed` (e.g., already `approved` or `rejected`),
+post a short note in-thread and stop:
+
+```
+ℹ️ Already processed — status: [current_status]. Skipping.
+```
+
+**If the GET call fails** (network error, non-200 response, timeout), post an error
+in-thread and stop — do NOT proceed with investigation on unknown state:
+
+```
+⚠️ API ERROR — Could not verify current status of credit request [ID].
+
+Error: [details]
+
+Skipping verification — manual review required. <@U7RP6HKUZ>
+```
+
+### Step 3: Investigate
+
+Use existing skill workflows:
+
+**3a. Athena cross-reference** (from `muso-ops-credits`):
+```sql
+SELECT t._id, t.title, t.popularity, t.default_release_label
+FROM "platform-industry-bi-prod".matvw_catalog_track t
+WHERE t._id = '<track_id>'
+  AND t.is_deleted = false
+```
+
+Does this person appear in industry data for this track?
+Is the role plausible given the track's genre/era/label?
+
+**3b. Web research** (from `muso-ops-fraud`):
+
+**Tool selection:**
+- `browser` — for checking specific URLs (Spotify credits page, MusicBrainz artist page,
+  Discogs, AllMusic, TIDAL, Apple Music, Jaxsta, ASCAP/BMI/SESAC repertory, professional
+  websites). Use browser to load the page and read credits/search results.
+- `web_search` — for general lookups (DuckDuckGo queries, LinkedIn searches, finding URLs
+  when you don't have a direct link).
+
+Do NOT use `web_fetch` — it is disabled and cannot render JavaScript-dependent pages.
+
+Sources are tiered by priority. Always check Tier 1. Check Tier 2 and 3 as indicated.
+
+**Tier 1 — Always check (primary credit databases):**
+- Spotify "Show Credits": use the Spotify link from the credit request to check the track's credits tab for the claimed name+role
+- Apple Music: check album credits page — detailed role-level credits for tracks
+- MusicBrainz: `musicbrainz.org/search?query=[name]&type=artist` — recording-level credits; look for the specific track+role match, not just artist existence
+- Discogs: `discogs.com/search/?q=[name]&type=artist` — discography and credits
+- AllMusic: `allmusic.com/search/all/[name]` — artist profile with credits
+
+**Tier 2 — Check when claimed role is writing/publishing (songwriter, composer, lyricist, publisher):**
+- ASCAP: `ascap.com/repertory` — search by writer name
+- BMI: `repertoire.bmi.com/` — search by writer name
+- SESAC: `sesac.com` — affiliated writer search
+
+**Tier 3 — Check if Tier 1 is inconclusive (no Tier 1 source confirms the claimed name+role):**
+- TIDAL: search for track/artist credits (usually most detailed streaming credits)
+- Jaxsta: `jaxsta.com` — dedicated music credits database
+- LinkedIn: music industry career history
+- Professional website: check email domain
+- DuckDuckGo: `"[name]"+[role]+engineer|producer|mixing`
+
+If a source returns a 429 (rate limit) or blocks the request, skip it and note it
+as a failed source. Do not retry aggressively — space requests if processing
+multiple verifications in sequence.
+
+**3c. Fraud signal check**:
+- Bulk credit submissions (>20 in one day)?
+- Disposable email?
+- Genre mismatch across submitted credits?
+- Credits to high-popularity tracks by unknown profile?
+- Credit additions right after profile claiming?
+
+**Investigation failure — CRITICAL:** If Athena is unreachable or returns an error,
+OR if more than 2 **Tier 1** sources fail, the investigation is INCOMPLETE.
+An incomplete investigation MUST result in ESCALATION (UNVERIFIABLE — NEEDS REVIEW),
+never auto-approve or auto-reject. Include in the report: "Investigation incomplete —
+[list which sources failed]. Escalating for human review."
+
+### Step 4: Classify
+
+Map investigation results to a verdict using `muso-ops-fraud` criteria:
+
+| Verdict | Criteria | Action |
+|---------|----------|--------|
+| **VERIFIED LEGIT** | Confirmed via web (any of: Spotify credits, MusicBrainz, Discogs, AllMusic, Jaxsta, ASCAP/BMI/SESAC, LinkedIn career, studio site) | Auto-approve |
+| **UNVERIFIABLE — LOW CONCERN** | No web presence but consistent pattern (single technical role, professional email, low fraud signals) | Auto-approve |
+| **SUSPICIOUS — CLEAR FRAUD** | 2+ strong fraud signals (identity mismatch, web contradicts, disposable email + bulk submissions) | Auto-reject silently |
+| **SUSPICIOUS — BORDERLINE** | 1 fraud signal or soft signals (no web presence + high-pop track, but professional email) | Auto-reject + tag Jan |
+| **UNVERIFIABLE — NEEDS REVIEW** | No web presence AND risk signals (pop >=90, creative roles, many credits, mononym) | Escalate to Jan (status already `unverified` or `user_verification_needed`) |
+
+### Step 5: Act
+
+#### Safety Rails — Check BEFORE Acting
+
+- **Daily cap**: Count today's autonomous actions by querying the audit log:
+  use `OPS_AUDIT_LOG_DIR` if set (default: `api-logs/admin`). Grep the current
+  date (UTC) in `LOG_DIR/YYYY-MM-DD.jsonl` for entries where operator is "clio"
+  AND endpoint matches `PUT` on `/credit-requests`.
+  If the log file does not exist yet today, count is 0 (first action of the day).
+  If count >= 50, escalate this request instead of auto-acting. Post:
+  ```
+  ⚠️ Daily autonomous action limit reached (50/day). Escalating for human review.
+  ```
+
+**Dry-run mode:** If `OPS_DRY_RUN=1`, still call the admin API wrapper.
+If the response includes `dry_run: true`, treat it as a successful action but
+explicitly note in the thread/report: `DRY-RUN: no changes applied`.
+
+#### Auto-Approve (VERIFIED LEGIT or LOW CONCERN)
+
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call PUT "/admin/credit-requests" '{"requestIds":["<id>"],"status":"approved"}'
+```
+
+**Important:** Use `PUT /admin/credit-requests` (bulk status endpoint), NOT
+`PUT /admin/credit-requests/:id` (that endpoint updates the credits array only
+and silently ignores the status field).
+
+Log via `muso-ops-audit` before execution. Then YOU MUST call:
+```
+message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="white_check_mark")
+```
+
+#### Auto-Reject — Clear Fraud (SUSPICIOUS — 2+ strong signals)
+
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call PUT "/admin/credit-requests" \
+  '{"requestIds":["<id>"],"status":"rejected","reason":"Flagged as suspicious during pre-approval verification: [specific reason]"}'
+```
+
+Use a specific reason based on findings. Examples:
+- "Flagged as suspicious: no web presence, disposable email, 15 bulk submissions in 24h"
+- "Flagged as suspicious: identity mismatch — web sources contradict claimed credits"
+- "Flagged as suspicious: bulk self-additions across unrelated genres"
+
+Log via `muso-ops-audit` before execution. Then YOU MUST call:
+```
+message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="x")
+```
+
+#### Auto-Reject + Notify Jan — Borderline (SUSPICIOUS — 1 or soft signals)
+
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call PUT "/admin/credit-requests" \
+  '{"requestIds":["<id>"],"status":"rejected","reason":"Flagged as suspicious during pre-approval verification: [specific reason]"}'
+```
+
+Log via `muso-ops-audit` before execution. Then YOU MUST call:
+```
+message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="x")
+```
+Post in-thread notifying Jan:
+```
+🔴 REJECTED — [Profile Name] as [Role] on "[Track Title]" ([Artists])
+
+Evidence: [1-2 sentence summary of fraud signals]
+
+Sources (Tier 1):
+• Spotify credits: <url> — [what was found, or "no credits listed"]
+• MusicBrainz: <url> — [what was found, or "no results"]
+• Discogs: <url> — [what was found, or "no results"]
+• AllMusic: <url> — [what was found, or "no results"]
+[Tier 2/3 sources checked, if any]
+
+Risk score: [X]% | Verdict: Suspicious (borderline)
+Credit request [ID] rejected. Reason: [reason]
+<@U038BM16T7W> — FYI, rejected with soft signals. Override if needed by replying "approve".
+```
+
+#### Escalate (NEEDS REVIEW)
+
+The credit is already in `unverified` or `user_verification_needed` status (set by core-backend).
+No API call needed — just notify Jan. YOU MUST call:
+```
+message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="mag")
+```
+Then post in-thread tagging Jan:
+
+```
+🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]" ([Artists])
+
+Evidence: [1-2 sentence summary of investigation findings]
+
+Sources (Tier 1):
+• Spotify credits: <url> — [what was found, or "no credits listed"]
+• MusicBrainz: <url> — [what was found, or "no results"]
+• Discogs: <url> — [what was found, or "no results"]
+• AllMusic: <url> — [what was found, or "no results"]
+[Tier 2/3 sources checked, if any]
+
+Risk score: [X]% | Verdict: Unverifiable — Needs Review
+<@U038BM16T7W> — please review. Reply "approve" or "reject [reason]" in this thread.
+```
+
+**Thread interaction:** Jan (or Aaron) can interact naturally in the thread:
+
+- **"approve"** or **"approved"** → approve the credit request
+- **"reject [reason]"** or **"rejected [reason]"** → reject with the given reason
+- **Any other message** (questions, comments, discussion) → respond conversationally,
+  answer questions about the investigation, provide more detail if asked. Use your
+  existing skills (admin API lookups, Athena queries, web research) to help Jan make
+  her decision. Stay in the thread.
+
+**Sender verification:** Only Jan Delmo (`U038BM16T7W`) or Aaron (`U7RP6HKUZ`) can
+trigger approve/reject actions. Verify `sender_id` from message metadata. Other users
+can chat in the thread but their messages never trigger status changes.
+
+**Executing a decision:** When Jan or Aaron says "approve" or "reject":
+1. Call the admin API with their Slack ID as `--requester`:
+   - Approve: `PUT /admin/credit-requests` with `{"requestIds":["<id>"],"status":"approved"}`
+   - Reject: `PUT /admin/credit-requests` with `{"requestIds":["<id>"],"status":"rejected","reason":"[reason from Jan]"}`
+   **Important:** Use the bulk status endpoint (`PUT /admin/credit-requests`), NOT
+   the per-request endpoint (`PUT /admin/credit-requests/:id`) which only updates credits.
+2. The credit can be in any status (`unverified`, `user_verification_needed`, or
+   even `rejected` for borderline overrides) — execute the decision regardless.
+   If the API returns an error, post it in-thread and let Jan know it needs to be
+   done manually via admin panel.
+3. Update the emoji on the parent message. YOU MUST call:
+   ```
+   message(action="react", channelId="<credit_verification_channel_id>", messageId="<parent_msg_ts>", emoji="mag", remove=true)
+   message(action="react", channelId="<credit_verification_channel_id>", messageId="<parent_msg_ts>", emoji="white_check_mark")
+   ```
+   (Use `emoji="x"` instead of `white_check_mark` if the decision is "reject")
+4. Post confirmation in-thread
+
+#### API Failure
+
+If the admin API call to approve/reject fails, post error in-thread:
+```
+⚠️ API ERROR — Failed to [approve/reject] credit request [ID].
+
+Error: [error details]
+
+Manual action required.
+```
+
+Do NOT retry automatically.
+
+### Step 6: Report
+
+Post investigation summary in-thread on the original message.
+
+**Auto-approve format:**
+```
+✅ APPROVED — [Profile Name] as [Role] on "[Track Title]" ([Artists])
+
+Evidence: [1-2 sentence summary of why this is legit]
+
+Sources (Tier 1):
+• Spotify credits: <url> — [what was found, or "no credits listed"]
+• MusicBrainz: <url> — [what was found, or "no results"]
+• Discogs: <url> — [what was found, or "no results"]
+• AllMusic: <url> — [what was found, or "no results"]
+[Tier 2 — if writing/publishing role was checked:]
+• ASCAP/BMI/SESAC: <url> — [what was found]
+[Tier 3 — if checked:]
+• [source]: <url> — [what was found]
+
+Risk score: [X]% | Verdict: [Verdict]
+Note: [1 sentence on why risk flag is a false positive, if applicable]
+Credit request [ID] approved.
+```
+
+**Auto-reject format:**
+```
+🔴 REJECTED — [Profile Name] as [Role] on "[Track Title]" ([Artists])
+
+Evidence: [1-2 sentence summary of fraud signals]
+
+Sources (Tier 1):
+• Spotify credits: <url> — [what was found, or "no credits listed"]
+• MusicBrainz: <url> — [what was found, or "no results"]
+• Discogs: <url> — [what was found, or "no results"]
+• AllMusic: <url> — [what was found, or "no results"]
+[Tier 2/3 sources checked, if any]
+
+Risk score: [X]% | Verdict: [Verdict]
+Credit request [ID] rejected. Reason: [reason]
+```
+
+## Relationship to Other Verification Workflows
+
+Three verification workflows exist, each serving a different purpose:
+
+- **Reactive verification (this skill, Steps 0-6):** Pre-approval review of
+  flagged credits (risk >= 85%) posted by core-backend to #credit-verification.
+  Processes one credit per message, immediately.
+
+- **Batch verification (this skill, Batch Mode):** Proactive queue processing
+  via heartbeat. Fetches up to 10 unverified credits every 6 hours and processes
+  them, posting a summary. Catches credits that reactive mode doesn't see
+  (risk < 85%). Idempotency check prevents double-processing with reactive.
+
+- **Daily fraud scan (HEARTBEAT.md):** Post-approval review of already-approved
+  credits on high-popularity tracks (Spotify pop >= 50). Different population —
+  only looks at credits that have already been approved.
+
+All three should continue running. They complement each other.
+
+---
+
+## Batch Mode (Heartbeat Task)
+
+Proactive queue processing triggered by the heartbeat schedule (every 6 hours).
+Instead of reacting to a channel message, the agent fetches unverified credits
+from the API and processes them in a batch.
+
+### When This Applies
+
+This mode applies ONLY when executing the "Batch Credit Verification" heartbeat task.
+It does NOT apply when responding to messages in #credit-verification — those use the
+reactive workflow above (Steps 0-6).
+
+### Batch Workflow
+
+#### B1. Fetch the Queue
+
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/credit-requests?status=unverified&limit=10"
+```
+
+Also fetch total queue size:
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/credit-requests/counts?status=unverified"
+```
+
+The list endpoint returns `createdAt DESC` by default (newest first = LIFO).
+
+- **If the list is empty:** Post the queue-clear message (see B5) and stop.
+- **If either API call fails:** Post an error status to `#credit-verification` and stop:
+  ```
+  [HEARTBEAT-BATCH] Credit Verification Batch — [timestamp]
+  ⚠️ API error fetching unverified queue. Skipping this cycle.
+  Error: [details]
+  ```
+
+#### B2. Process Each Credit
+
+For each credit request in the batch, run the following steps. Data comes from
+the API response — not from a Slack message.
+
+**For each credit:**
+
+1. **Idempotency check (Step 2):** Query `GET /admin/credit-requests/<id>`.
+   If status is not `unverified` or `user_verification_needed`, mark as
+   "skipped (idempotent)" and move to the next credit.
+
+2. **Daily cap check (Step 5 safety rail):** Count today's autonomous actions
+   using `OPS_AUDIT_LOG_DIR` if set (default: `api-logs/admin`).
+   If count >= 50, mark all remaining credits as "skipped (cap)" and stop
+   processing the batch.
+
+3. **Investigate (Step 3):** Run the full investigation — Athena cross-reference,
+   tiered web research, fraud signal check. Same thoroughness as reactive mode.
+
+4. **Classify (Step 4):** Map to verdict using the same criteria table.
+
+5. **Act (Step 5):** Execute the verdict (approve/reject/escalate).
+   - **Skip all emoji reactions** — there is no source message to react on.
+   - For escalations: post an individual top-level message in #credit-verification
+     with full investigation details (same format as reactive escalation in Step 5),
+     tagging @Jan. This creates a thread Jan can action independently.
+   - For approve/reject: execute the API call as normal, collect the result.
+
+6. **On error:** If any step fails for an individual credit, log the error,
+   collect it as "errored", and continue processing the remaining credits.
+   Do NOT stop the batch on individual failures.
+
+#### B3. Compose Summary
+
+After processing all credits, post a single top-level message to
+`OPS_CREDIT_VERIFICATION_CHANNEL_ID` (default: `C0APB2CMM7C`):
+
+```
+[HEARTBEAT-BATCH] Credit Verification Batch — [timestamp]
+Processed: [N]/[total unverified in queue]
+DRY-RUN: [yes/no]
+
+✅ Approved (N):
+• [Profile Name] — [Role] on "[Track]" — Risk: [X]%
+  Evidence: [1-2 sentence summary with source links]
+
+🔴 Rejected (N):
+• [Profile Name] — [Role] on "[Track]" — Risk: [X]%
+  Reason: [why rejected, with source links]
+
+🔍 Escalated (N):
+• [Profile Name] — [Role] on "[Track]" — Risk: [X]%
+  See thread — @Jan
+
+⚠️ Errored (N):
+• [Profile Name] — [Role] on "[Track]" — Error: [brief description]
+
+⏭️ Skipped (idempotent): [N] — already processed
+⏭️ Skipped (cap): [N] — daily cap reached
+Queue remaining: [X] unverified
+```
+
+Omit any section with zero items (e.g., if no errors, omit the Errored section).
+
+Use `message(action=send, target="<credit_verification_channel_id>")` with NO `threadId` or `replyTo`
+— this is a top-level message, not a thread reply.
+
+#### B4. Escalation Threads
+
+For each escalated credit, post a **separate top-level message** in
+`#credit-verification` BEFORE the summary. Use the same format as reactive
+escalations (Step 5 — Escalate section above):
+
+```
+🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]" ([Artists])
+
+Evidence: [1-2 sentence summary of investigation findings]
+
+Sources (Tier 1):
+• Spotify credits: <url> — [what was found, or "no credits listed"]
+• MusicBrainz: <url> — [what was found, or "no results"]
+• Discogs: <url> — [what was found, or "no results"]
+• AllMusic: <url> — [what was found, or "no results"]
+[Tier 2/3 sources checked, if any]
+
+Risk score: [X]% | Verdict: Unverifiable — Needs Review
+<@U038BM16T7W> — please review. Reply "approve" or "reject [reason]" in this thread.
+```
+
+Jan can reply in each escalation thread independently. Thread interaction works
+the same as reactive flow (see Step 5 — Thread interaction).
+
+The batch summary's "Escalated" line references these threads but does not
+duplicate the full investigation details.
+
+#### B5. Queue Clear
+
+If the API returns zero unverified credits:
+
+```
+[HEARTBEAT-BATCH] Credit Verification Batch — [timestamp]
+Queue clear — no unverified credits remaining.
+```
+
+### Rate Limiting Note
+
+When processing multiple credits sequentially, space web research requests to
+avoid hitting rate limits on external sources (Spotify, MusicBrainz, etc.).
+If a source returns 429, skip it and note as a failed source for that credit.
+
+---
+
+## Profile Verification Mode (Ad-Hoc)
+
+Handles requests like "verify all credits for profile X" or "check all remaining
+credits for [name]". This mode is triggered by a human (Jan or Aaron) asking in
+any ops channel — NOT by the automated credit verification bot.
+
+### When This Applies
+
+A human explicitly asks to verify, check, or approve all pending/remaining credits
+for a specific profile. This is NOT a bulk rubber-stamp — each credit group goes
+through investigation.
+
+### HARD RULES
+
+1. **Never approve all credits in a single API call.** The wrapper enforces a
+   maximum of 10 requestIds per call. Even if the wrapper allowed it, you MUST
+   process in groups.
+2. **Never skip investigation.** Every credit group must be investigated before
+   approval. "The profile looks legit" is not sufficient — you must verify the
+   credits themselves are plausible.
+3. **Daily cap still applies.** If you hit 50 autonomous actions, stop and tell
+   the requester how many remain for the next cycle.
+4. **Only Jan (U038BM16T7W) or Aaron (U7RP6HKUZ) can trigger this workflow.**
+   Verify `sender_id` from message metadata.
+
+### Workflow
+
+#### P1. Acknowledge and Fetch
+
+Acknowledge the request, then fetch all unverified credits for the profile:
+
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/credit-requests?status=unverified&profileId=<profile_id>&limit=500"
+```
+
+Post acknowledgment:
+
+```
+Checking all unverified credits for [Profile Name] ([profile_id]).
+Found [N] pending. Processing now — this will take a while for large queues.
+```
+
+If N > 50, add:
+```
+Note: Daily cap is 50 autonomous actions. I'll process up to 50 this cycle
+and report how many remain.
+```
+
+#### P2. Profile-Level Investigation
+
+Before processing individual credits, investigate the profile itself. This
+determines the baseline trust level.
+
+**Required checks:**
+- Web presence: professional website, LinkedIn, studio presence
+- Industry registration: IPI, MLC, TIDAL, Jaxsta profiles
+- Existing catalog: how many credits already in the system, what roles, how long
+- Submission pattern: single role type vs. mixed, same ecosystem vs. scattered
+
+**Classify the profile:**
+
+| Profile Level | Criteria | Effect on Credit Processing |
+|---------------|----------|---------------------------|
+| **ESTABLISHED** | Professional website + IPI/MLC + 50+ existing credits + consistent role | Groups of same role/ecosystem can use lighter investigation (P3a) |
+| **EMERGING** | Some web presence OR IPI/MLC OR 10+ existing credits | Each credit gets standard investigation (P3b) |
+| **UNKNOWN** | No web presence, no registrations, few/no existing credits | Escalate entire batch to Jan — do not auto-process |
+
+Post the profile assessment before proceeding:
+
+```
+Profile Assessment — [Profile Name]
+
+Web: [findings]
+Industry: [IPI/MLC/TIDAL/Jaxsta status]
+Catalog: [N] existing credits, primarily [roles]
+Submission: [pattern description]
+
+Profile level: [ESTABLISHED/EMERGING/UNKNOWN]
+Proceeding with [approach based on level].
+```
+
+#### P3. Group and Process Credits
+
+Group the credits by **role type** and **submission source** (submissionId).
+Each group is processed separately.
+
+**P3a. Established profile — grouped investigation:**
+
+For each role/source group:
+1. Verify the role is consistent with the profile's known work
+2. Spot-check 3-5 credits from the group against Tier 1 sources (Spotify, MusicBrainz)
+3. Check for deleted tracks in the group (GET each credit's track status)
+4. Check for outliers: different genre, unusually high popularity (pop >= 90),
+   or roles that differ from the profile's primary role
+
+If spot-checks pass and no outliers: approve the group (in batches of 10 max).
+If outliers found: pull them out and process individually per P3b.
+
+**P3b. Emerging profile — individual investigation:**
+
+Process each credit through the standard Steps 2-6 from the reactive workflow:
+- Step 2: Idempotency check
+- Step 3: Investigate (Athena + tiered web research + fraud signals)
+- Step 4: Classify
+- Step 5: Act (approve/reject/escalate)
+
+This is slower but ensures full rigor for less-established profiles.
+
+**P3c. Unknown profile — escalate:**
+
+Do NOT auto-process. Post to the channel:
+
+```
+Warning: Profile [Name] has insufficient verification data for autonomous processing.
+
+Web presence: [none/minimal]
+Industry registration: [none found]
+Existing catalog: [N] credits
+
+[N] unverified credits cannot be auto-processed. Manual review required.
+<@U038BM16T7W> — please review this profile before I process credits.
+```
+
+Wait for Jan/Aaron to respond with guidance in the thread.
+
+#### P4. Execute Approvals
+
+For each approved group, call the API in batches of 10 or fewer:
+
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  --requester <requester_slack_id> \
+  call PUT "/admin/credit-requests" \
+  '{"requestIds":["<id1>","<id2>",...max 10],"status":"approved"}'
+```
+
+Log each batch via `muso-ops-audit` before execution.
+
+For rejections, include a reason:
+
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  --requester <requester_slack_id> \
+  call PUT "/admin/credit-requests" \
+  '{"requestIds":["<id>"],"status":"rejected","reason":"[specific reason]"}'
+```
+
+#### P5. Summary Report
+
+After processing all credits (or hitting the daily cap), post a summary:
+
+```
+Profile Verification Complete — [Profile Name]
+
+Profile level: [ESTABLISHED/EMERGING/UNKNOWN]
+Total unverified: [N]
+Processed: [N]
+
+Approved: [N] ([breakdown by role group])
+Rejected: [N] ([reasons])
+Escalated: [N] ([reasons])
+Skipped (cap): [N] — daily limit reached, [N] remain for next cycle
+Skipped (deleted track): [N]
+
+[If any remain:]
+Remaining: [N] unverified credits. Will process in next cycle or on request.
+```

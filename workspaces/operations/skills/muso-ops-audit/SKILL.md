@@ -28,7 +28,6 @@ Mandatory logging layer for all ops operations. If it's not logged, it didn't ha
 ## Log Format
 
 All ops write operations are logged to: `api-logs/admin/YYYY-MM-DD.jsonl`
-(`OPS_AUDIT_LOG_DIR` overrides the directory; use this for ops-dev isolation).
 
 Each line is a JSON object:
 
@@ -98,13 +97,12 @@ Every audit entry MUST include:
 Before EVERY write operation in any muso-ops-* skill:
 
 ```bash
-# Create log dir (override with OPS_AUDIT_LOG_DIR)
-LOG_DIR="${OPS_AUDIT_LOG_DIR:-$HOME/.openclaw/workspace/api-logs/admin}"
-mkdir -p "$LOG_DIR"
+# Create log dir
+mkdir -p ~/".openclaw/workspace/api-logs/admin"
 
 # Append log entry BEFORE executing the operation
 echo '{"timestamp":"...","operator":{...},...}' >> \
-  "$LOG_DIR/$(date +%Y-%m-%d).jsonl"
+  ~/".openclaw/workspace/api-logs/admin/$(date +%Y-%m-%d).jsonl"
 ```
 
 After execution, append the response:

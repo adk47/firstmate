@@ -44,20 +44,9 @@ Refund investigation and processing results posted to appropriate channels. Uses
 ---
 
 ## Batch Credit Verification → #credit-verification (C0APB2CMM7C)
-**Status: ACTIVE**
+**Status: PAUSED — moved to operations-dev for hardening (PR #50)**
 
-Proactively verifies up to 10 unverified credit requests per heartbeat (LIFO — newest first). Uses `muso-ops-credit-verification` skill in batch mode.
+Batch mode is being tested on the dev agent with additional guardrails (batch cap,
+profile verification workflow). Will be re-enabled on production ops after validation.
 
-**Workflow:**
-1. Fetch up to 10 unverified credits via `GET /admin/credit-requests?status=unverified&limit=10`
-2. Process each using the credit verification skill's Batch Mode (B1-B5), skipping message parsing and emoji reactions
-3. Post escalation threads for any credits needing human review
-4. Post single summary message with all results
-
-**Constraints:**
-- Shares the 50/day autonomous action cap with reactive verification
-- Stops mid-batch if daily cap reached
-- Continues past individual credit errors (collects in summary)
-- Summary prefixed with `[HEARTBEAT-BATCH]` to prevent re-trigger loop
-
-**Output:** Single summary message to #credit-verification (top-level, never threaded). See SKILL.md "Batch Mode" section for format.
+To test: post `run credit verification batch` in `#operations-dev`.

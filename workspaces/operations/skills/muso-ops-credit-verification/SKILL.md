@@ -1,17 +1,15 @@
 ---
 name: muso-ops-credit-verification
 description: |
-  Autonomous credit verification workflow. Two modes:
-  1. Reactive: Triggered by any message in #credit-verification (C0APB2CMM7C).
-     No @mention required. Parses flagged credit requests, investigates, and
-     auto-approves, auto-rejects, or escalates.
-  2. Batch (heartbeat): Proactively fetches up to 10 unverified credits from
-     the API and processes them, posting a summary to #credit-verification.
+  Autonomous credit verification workflow. Triggered by any message in
+  #credit-verification (C0APB2CMM7C). No @mention required — the channel is
+  configured with requireMention: false in openclaw.json. Parses the flagged
+  credit request, investigates legitimacy, classifies verdict, and auto-approves,
+  auto-rejects, or escalates to Aaron/Jan.
 
-  Use when: any message arrives in #credit-verification channel, OR during
-  heartbeat execution of the "Batch Credit Verification" task.
+  Use when: any message arrives in #credit-verification channel.
 
-  Triggers: any message in #credit-verification (C0APB2CMM7C), heartbeat schedule
+  Triggers: any message in #credit-verification (C0APB2CMM7C)
 depends-on:
   - muso-ops-credits
   - muso-ops-fraud
@@ -48,21 +46,15 @@ not a new trigger. Only parent messages trigger the full workflow.
 You MUST use the message tool with `action: "react"` at these exact points.
 This is not optional. Skipping reactions is a workflow violation.
 
-**Channel ID:** Use `OPS_CREDIT_VERIFICATION_CHANNEL_ID` if set; otherwise default
-to `C0APB2CMM7C`. Substitute this channel ID in all `message(...)` calls below.
-
-In examples below, use:
-- `<credit_verification_channel_id>` = `OPS_CREDIT_VERIFICATION_CHANNEL_ID` (if set) else `C0APB2CMM7C`
-
 **Step 0 passes → add :eyes:**
 ```
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes")
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes")
 ```
 
 **After acting (approve/reject/escalate) → remove :eyes: and add final emoji:**
 ```
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes", remove=true)
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="<final>")
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="<final>")
 ```
 
 Where `<final>` is:
@@ -73,16 +65,6 @@ Where `<final>` is:
 ## Workflow
 
 ### Step 0: Message Format Gate
-
-**Self-ignore:** If the message starts with `[HEARTBEAT-BATCH]`, ignore it silently.
-This is output from the batch verification heartbeat task — not a new credit to verify.
-
-**Dev command trigger (ops-dev only):** If the message content is exactly
-`run credit verification batch` (case-insensitive), treat it as an on-demand
-batch trigger and run **Batch Mode (B1–B5)** using the current channel ID
-(`OPS_CREDIT_VERIFICATION_CHANNEL_ID`). Do NOT treat it as a reactive credit
-message. Post the batch summary back to the same channel with the standard
-`[HEARTBEAT-BATCH]` prefix.
 
 **Path A — Direct bot message:** Using **case-insensitive** matching, the message
 contains both "credit request" and "risk score". Proceed to Step 1 using this message.
@@ -106,7 +88,7 @@ content for Step 1 parsing. Store the preceding message's timestamp as
 
 If either path matches, YOU MUST immediately call (use `data_message_ts` for Path B):
 ```
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<data_message_ts>", emoji="eyes")
+message(action="react", channelId="C0APB2CMM7C", messageId="<data_message_ts>", emoji="eyes")
 ```
 
 ### Step 1: Parse the Incoming Message
@@ -254,18 +236,13 @@ Map investigation results to a verdict using `muso-ops-fraud` criteria:
 #### Safety Rails — Check BEFORE Acting
 
 - **Daily cap**: Count today's autonomous actions by querying the audit log:
-  use `OPS_AUDIT_LOG_DIR` if set (default: `api-logs/admin`). Grep the current
-  date (UTC) in `LOG_DIR/YYYY-MM-DD.jsonl` for entries where operator is "clio"
-  AND endpoint matches `PUT` on `/credit-requests`.
+  grep the current date (UTC) in `api-logs/admin/YYYY-MM-DD.jsonl` for entries where
+  operator is "clio" AND endpoint matches `PUT` on `/credit-requests`.
   If the log file does not exist yet today, count is 0 (first action of the day).
   If count >= 50, escalate this request instead of auto-acting. Post:
   ```
   ⚠️ Daily autonomous action limit reached (50/day). Escalating for human review.
   ```
-
-**Dry-run mode:** If `OPS_DRY_RUN=1`, still call the admin API wrapper.
-If the response includes `dry_run: true`, treat it as a successful action but
-explicitly note in the thread/report: `DRY-RUN: no changes applied`.
 
 #### Auto-Approve (VERIFIED LEGIT or LOW CONCERN)
 
@@ -280,8 +257,8 @@ and silently ignores the status field).
 
 Log via `muso-ops-audit` before execution. Then YOU MUST call:
 ```
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes", remove=true)
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="white_check_mark")
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="white_check_mark")
 ```
 
 #### Auto-Reject — Clear Fraud (SUSPICIOUS — 2+ strong signals)
@@ -299,8 +276,8 @@ Use a specific reason based on findings. Examples:
 
 Log via `muso-ops-audit` before execution. Then YOU MUST call:
 ```
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes", remove=true)
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="x")
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="x")
 ```
 
 #### Auto-Reject + Notify Jan — Borderline (SUSPICIOUS — 1 or soft signals)
@@ -313,8 +290,8 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 
 Log via `muso-ops-audit` before execution. Then YOU MUST call:
 ```
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes", remove=true)
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="x")
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="x")
 ```
 Post in-thread notifying Jan:
 ```
@@ -339,8 +316,8 @@ Credit request [ID] rejected. Reason: [reason]
 The credit is already in `unverified` or `user_verification_needed` status (set by core-backend).
 No API call needed — just notify Jan. YOU MUST call:
 ```
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes", remove=true)
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="mag")
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="eyes", remove=true)
+message(action="react", channelId="C0APB2CMM7C", messageId="<msg_ts>", emoji="mag")
 ```
 Then post in-thread tagging Jan:
 
@@ -385,8 +362,8 @@ can chat in the thread but their messages never trigger status changes.
    done manually via admin panel.
 3. Update the emoji on the parent message. YOU MUST call:
    ```
-   message(action="react", channelId="<credit_verification_channel_id>", messageId="<parent_msg_ts>", emoji="mag", remove=true)
-   message(action="react", channelId="<credit_verification_channel_id>", messageId="<parent_msg_ts>", emoji="white_check_mark")
+   message(action="react", channelId="C0APB2CMM7C", messageId="<parent_msg_ts>", emoji="mag", remove=true)
+   message(action="react", channelId="C0APB2CMM7C", messageId="<parent_msg_ts>", emoji="white_check_mark")
    ```
    (Use `emoji="x"` instead of `white_check_mark` if the decision is "reject")
 4. Post confirmation in-thread
@@ -446,170 +423,11 @@ Risk score: [X]% | Verdict: [Verdict]
 Credit request [ID] rejected. Reason: [reason]
 ```
 
-## Relationship to Other Verification Workflows
+## Relationship to Daily Credit Fraud Scan
 
-Three verification workflows exist, each serving a different purpose:
+This workflow and the daily heartbeat scan serve different purposes:
 
-- **Reactive verification (this skill, Steps 0-6):** Pre-approval review of
-  flagged credits (risk >= 85%) posted by core-backend to #credit-verification.
-  Processes one credit per message, immediately.
+- **This workflow**: Pre-approval review of flagged credits (risk >= 85%)
+- **Daily scan**: Post-approval review of approved credits on high-popularity tracks (Spotify pop >= 50)
 
-- **Batch verification (this skill, Batch Mode):** Proactive queue processing
-  via heartbeat. Fetches up to 10 unverified credits every 6 hours and processes
-  them, posting a summary. Catches credits that reactive mode doesn't see
-  (risk < 85%). Idempotency check prevents double-processing with reactive.
-
-- **Daily fraud scan (HEARTBEAT.md):** Post-approval review of already-approved
-  credits on high-popularity tracks (Spotify pop >= 50). Different population —
-  only looks at credits that have already been approved.
-
-All three should continue running. They complement each other.
-
----
-
-## Batch Mode (Heartbeat Task)
-
-Proactive queue processing triggered by the heartbeat schedule (every 6 hours).
-Instead of reacting to a channel message, the agent fetches unverified credits
-from the API and processes them in a batch.
-
-### When This Applies
-
-This mode applies ONLY when executing the "Batch Credit Verification" heartbeat task.
-It does NOT apply when responding to messages in #credit-verification — those use the
-reactive workflow above (Steps 0-6).
-
-### Batch Workflow
-
-#### B1. Fetch the Queue
-
-```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/admin/credit-requests?status=unverified&limit=10"
-```
-
-Also fetch total queue size:
-```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/admin/credit-requests/counts?status=unverified"
-```
-
-The list endpoint returns `createdAt DESC` by default (newest first = LIFO).
-
-- **If the list is empty:** Post the queue-clear message (see B5) and stop.
-- **If either API call fails:** Post an error status to `#credit-verification` and stop:
-  ```
-  [HEARTBEAT-BATCH] Credit Verification Batch — [timestamp]
-  ⚠️ API error fetching unverified queue. Skipping this cycle.
-  Error: [details]
-  ```
-
-#### B2. Process Each Credit
-
-For each credit request in the batch, run the following steps. Data comes from
-the API response — not from a Slack message.
-
-**For each credit:**
-
-1. **Idempotency check (Step 2):** Query `GET /admin/credit-requests/<id>`.
-   If status is not `unverified` or `user_verification_needed`, mark as
-   "skipped (idempotent)" and move to the next credit.
-
-2. **Daily cap check (Step 5 safety rail):** Count today's autonomous actions
-   using `OPS_AUDIT_LOG_DIR` if set (default: `api-logs/admin`).
-   If count >= 50, mark all remaining credits as "skipped (cap)" and stop
-   processing the batch.
-
-3. **Investigate (Step 3):** Run the full investigation — Athena cross-reference,
-   tiered web research, fraud signal check. Same thoroughness as reactive mode.
-
-4. **Classify (Step 4):** Map to verdict using the same criteria table.
-
-5. **Act (Step 5):** Execute the verdict (approve/reject/escalate).
-   - **Skip all emoji reactions** — there is no source message to react on.
-   - For escalations: post an individual top-level message in #credit-verification
-     with full investigation details (same format as reactive escalation in Step 5),
-     tagging @Jan. This creates a thread Jan can action independently.
-   - For approve/reject: execute the API call as normal, collect the result.
-
-6. **On error:** If any step fails for an individual credit, log the error,
-   collect it as "errored", and continue processing the remaining credits.
-   Do NOT stop the batch on individual failures.
-
-#### B3. Compose Summary
-
-After processing all credits, post a single top-level message to
-`OPS_CREDIT_VERIFICATION_CHANNEL_ID` (default: `C0APB2CMM7C`):
-
-```
-[HEARTBEAT-BATCH] Credit Verification Batch — [timestamp]
-Processed: [N]/[total unverified in queue]
-DRY-RUN: [yes/no]
-
-✅ Approved (N):
-• [Profile Name] — [Role] on "[Track]" — Risk: [X]%
-  Evidence: [1-2 sentence summary with source links]
-
-🔴 Rejected (N):
-• [Profile Name] — [Role] on "[Track]" — Risk: [X]%
-  Reason: [why rejected, with source links]
-
-🔍 Escalated (N):
-• [Profile Name] — [Role] on "[Track]" — Risk: [X]%
-  See thread — @Jan
-
-⚠️ Errored (N):
-• [Profile Name] — [Role] on "[Track]" — Error: [brief description]
-
-⏭️ Skipped (idempotent): [N] — already processed
-⏭️ Skipped (cap): [N] — daily cap reached
-Queue remaining: [X] unverified
-```
-
-Omit any section with zero items (e.g., if no errors, omit the Errored section).
-
-Use `message(action=send, target="<credit_verification_channel_id>")` with NO `threadId` or `replyTo`
-— this is a top-level message, not a thread reply.
-
-#### B4. Escalation Threads
-
-For each escalated credit, post a **separate top-level message** in
-`#credit-verification` BEFORE the summary. Use the same format as reactive
-escalations (Step 5 — Escalate section above):
-
-```
-🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]" ([Artists])
-
-Evidence: [1-2 sentence summary of investigation findings]
-
-Sources (Tier 1):
-• Spotify credits: <url> — [what was found, or "no credits listed"]
-• MusicBrainz: <url> — [what was found, or "no results"]
-• Discogs: <url> — [what was found, or "no results"]
-• AllMusic: <url> — [what was found, or "no results"]
-[Tier 2/3 sources checked, if any]
-
-Risk score: [X]% | Verdict: Unverifiable — Needs Review
-<@U038BM16T7W> — please review. Reply "approve" or "reject [reason]" in this thread.
-```
-
-Jan can reply in each escalation thread independently. Thread interaction works
-the same as reactive flow (see Step 5 — Thread interaction).
-
-The batch summary's "Escalated" line references these threads but does not
-duplicate the full investigation details.
-
-#### B5. Queue Clear
-
-If the API returns zero unverified credits:
-
-```
-[HEARTBEAT-BATCH] Credit Verification Batch — [timestamp]
-Queue clear — no unverified credits remaining.
-```
-
-### Rate Limiting Note
-
-When processing multiple credits sequentially, space web research requests to
-avoid hitting rate limits on external sources (Spotify, MusicBrainz, etc.).
-If a source returns 429, skip it and note as a failed source for that credit.
+They review different populations. Both should continue running.
