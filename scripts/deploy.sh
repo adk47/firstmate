@@ -9,10 +9,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HYDRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"
+
+# Detect if we're running on Node 8 (the HYDRA host)
+if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; then
+  HYDRA_LOCAL=true
+else
+  HYDRA_LOCAL=false
+fi
+
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/ovh_muso}"
 NODE8_IP="${NODE8_IP:-10.0.0.8}"
 NODE8_USER="${NODE8_USER:-root}"
-DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"
 NAMESPACE="${NAMESPACE:-hydra}"
 SLACK_WEBHOOK="${HYDRA_SLACK_WEBHOOK:-}"
 KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
@@ -134,43 +142,59 @@ log "  Deny lists validated (only growth detected)."
 # -------------------------------------------------------------------
 # Step 4: rsync repo to Node 8
 # -------------------------------------------------------------------
-log "Step 4/9: Syncing config to Node 8 ($NODE8_IP)..."
-rsync -azP --delete \
-  -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" \
-  --exclude='.git' \
-  --exclude='hydra docs/' \
-  "$HYDRA_ROOT/" \
-  "$NODE8_USER@$NODE8_IP:$DEPLOY_PATH/"
-log "  Config synced to $NODE8_IP:$DEPLOY_PATH/"
+if $HYDRA_LOCAL; then
+  log "Step 4/9: Local sync (running on Node 8)..."
+  rsync -a --delete \
+    --exclude='.git' \
+    --exclude='hydra docs/' \
+    "$HYDRA_ROOT/" \
+    "$DEPLOY_PATH/"
+  log "  Config synced locally to $DEPLOY_PATH/"
+else
+  log "Step 4/9: Remote sync to Node 8 ($NODE8_IP)..."
+  rsync -azP --delete \
+    -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" \
+    --exclude='.git' \
+    --exclude='hydra docs/' \
+    "$HYDRA_ROOT/" \
+    "$NODE8_USER@$NODE8_IP:$DEPLOY_PATH/"
+  log "  Config synced to $NODE8_IP:$DEPLOY_PATH/"
+fi
 
 # Sync per-profile configs to profile state dirs
-# Note: unquoted heredoc intentional — $TARGET must resolve locally
-ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" << PROFILESYNC
-set -euo pipefail
+log "  Syncing profile configs..."
 if [ "$TARGET" = "main" ] || [ "$TARGET" = "all" ]; then
-  mkdir -p /root/.openclaw/main
-  cp /opt/hydra/openclaw-main.json /root/.openclaw/main/openclaw.json
-  cp /opt/hydra/openclaw-main.json /root/.openclaw/openclaw.json
-  echo "  Synced main profile config (+ default openclaw.json)"
+  mkdir -p /root/.openclaw-main
+  cp "$DEPLOY_PATH/openclaw-main.json" /root/.openclaw-main/openclaw.json
+  cp "$DEPLOY_PATH/openclaw-main.json" /root/.openclaw/openclaw.json
+  log "  Synced main profile config (+ default openclaw.json)"
 fi
 if [ "$TARGET" = "edge" ] || [ "$TARGET" = "all" ]; then
-  mkdir -p /root/.openclaw/edge
-  cp /opt/hydra/openclaw-edge.json /root/.openclaw/edge/openclaw.json
-  echo "  Synced edge profile config"
+  mkdir -p /root/.openclaw-edge
+  cp "$DEPLOY_PATH/openclaw-edge.json" /root/.openclaw-edge/openclaw.json
+  log "  Synced edge profile config"
 fi
 if [ "$TARGET" = "dev" ] || [ "$TARGET" = "all" ]; then
-  mkdir -p /root/.openclaw/dev
-  cp /opt/hydra/openclaw-dev.json /root/.openclaw/dev/openclaw.json
-  echo "  Synced dev profile config"
+  mkdir -p /root/.openclaw-dev
+  cp "$DEPLOY_PATH/openclaw-dev.json" /root/.openclaw-dev/openclaw.json
+  log "  Synced dev profile config"
 fi
-PROFILESYNC
 
 # -------------------------------------------------------------------
 # Step 5: Post-sync setup on Node 8
 # -------------------------------------------------------------------
-log "Step 5/9: Running post-sync setup on Node 8..."
+log "Step 5/9: Running post-sync setup..."
 
-ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" << 'POSTSYNC'
+run_on_node8() {
+  if $HYDRA_LOCAL; then
+    bash -c "$1"
+  else
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" "$1"
+  fi
+}
+
+# Post-sync inline (runs locally on node-8 or via SSH)
+bash << 'POSTSYNC'
 set -euo pipefail
 
 # AWS credentials (from K8s secret or pre-configured)
@@ -282,9 +306,14 @@ log "  Post-sync setup complete."
 log "Step 6/9: Restarting OpenClaw Gateway ($TARGET)..."
 restart_gateway() {
   local service="$1"
-  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
-    "systemctl restart $service && sleep 5 && systemctl is-active $service" \
-    || fail "Failed to restart $service"
+  if $HYDRA_LOCAL; then
+    systemctl restart "$service" && sleep 5 && systemctl is-active "$service" \
+      || fail "Failed to restart $service"
+  else
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
+      "systemctl restart $service && sleep 5 && systemctl is-active $service" \
+      || fail "Failed to restart $service"
+  fi
   log "  $service restarted successfully."
 }
 
@@ -306,10 +335,16 @@ log "  Smoke test passed."
 # -------------------------------------------------------------------
 if needs_target "main"; then
   log "Step 8/9: Verifying AWS access..."
-  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
-    "aws sts get-caller-identity --region us-west-2 2>/dev/null | head -1" \
-    && log "  AWS access verified." \
-    || log "  WARNING: AWS access check failed (non-fatal)."
+  if $HYDRA_LOCAL; then
+    aws sts get-caller-identity --region us-west-2 2>/dev/null | head -1 \
+      && log "  AWS access verified." \
+      || log "  WARNING: AWS access check failed (non-fatal)."
+  else
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
+      "aws sts get-caller-identity --region us-west-2 2>/dev/null | head -1" \
+      && log "  AWS access verified." \
+      || log "  WARNING: AWS access check failed (non-fatal)."
+  fi
 else
   log "Step 8/9: Skipping AWS check (not targeting main)."
 fi

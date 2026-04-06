@@ -162,22 +162,16 @@ jobs:
       - name: AI code review
         id: ai-review
         env:
-          FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           echo "::group::AI Code Review"
 
-          # Prefer Fireworks (GLM-5/DeepSeek), fall back to Anthropic
-          if [ -n "$FIREWORKS_API_KEY" ]; then
-            AI_PROVIDER="fireworks"
-          elif [ -n "$ANTHROPIC_API_KEY" ]; then
-            AI_PROVIDER="anthropic"
-          else
-            echo "No AI API key configured — skipping AI review"
+          # Skip if no API key configured
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "ANTHROPIC_API_KEY not set — skipping AI review"
             echo "::endgroup::"
             exit 0
           fi
-          export AI_PROVIDER
 
           # Get the diff against main
           DIFF=$(git diff origin/main...HEAD -- . ':!*.lock' ':!node_modules' 2>/dev/null | head -4000)
@@ -214,45 +208,25 @@ jobs:
           Diff:
           ''' + diff[:8000]
 
-          provider = os.environ.get('AI_PROVIDER', 'fireworks')
+          data = json.dumps({
+              'model': 'claude-opus-4-6',
+              'max_tokens': 1024,
+              'messages': [{'role': 'user', 'content': prompt}]
+          }).encode()
 
-          if provider == 'fireworks':
-              data = json.dumps({
-                  'model': 'accounts/fireworks/models/deepseek-v3p2',
-                  'max_tokens': 1024,
-                  'messages': [{'role': 'user', 'content': prompt}]
-              }).encode()
-              req = urllib.request.Request(
-                  'https://api.fireworks.ai/inference/v1/chat/completions',
-                  data=data,
-                  headers={
-                      'Content-Type': 'application/json',
-                      'Authorization': 'Bearer ' + os.environ['FIREWORKS_API_KEY']
-                  }
-              )
-          else:
-              data = json.dumps({
-                  'model': 'claude-sonnet-4-6',
-                  'max_tokens': 1024,
-                  'messages': [{'role': 'user', 'content': prompt}]
-              }).encode()
-              req = urllib.request.Request(
-                  'https://api.anthropic.com/v1/messages',
-                  data=data,
-                  headers={
-                      'Content-Type': 'application/json',
-                      'x-api-key': os.environ['ANTHROPIC_API_KEY'],
-                      'anthropic-version': '2023-06-01'
-                  }
-              )
-
+          req = urllib.request.Request(
+              'https://api.anthropic.com/v1/messages',
+              data=data,
+              headers={
+                  'Content-Type': 'application/json',
+                  'x-api-key': os.environ['ANTHROPIC_API_KEY'],
+                  'anthropic-version': '2023-06-01'
+              }
+          )
           try:
               resp = urllib.request.urlopen(req, timeout=60)
               result = json.loads(resp.read())
-              if provider == 'fireworks':
-                  text = result['choices'][0]['message']['content']
-              else:
-                  text = result['content'][0]['text']
+              text = result['content'][0]['text']
               print(text[:2000])
           except Exception as e:
               print(f'PASS (AI review unavailable: {e})')
