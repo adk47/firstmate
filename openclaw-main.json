@@ -1,7 +1,7 @@
 {
   "meta": {
     "lastTouchedVersion": "2026.4.2",
-    "lastTouchedAt": "2026-04-03T12:27:42.059Z"
+    "lastTouchedAt": "2026-04-06T18:48:15.231Z"
   },
   "wizard": {
     "lastRunAt": "2026-04-03T12:27:42.003Z",
@@ -82,6 +82,52 @@
           }
         ],
         "api": "anthropic-messages"
+      },
+      "fireworks": {
+        "baseUrl": "https://api.fireworks.ai/inference/v1",
+        "apiKey": {
+          "source": "file",
+          "provider": "hydra-secrets",
+          "id": "/FIREWORKS_API_KEY"
+        },
+        "auth": "api-key",
+        "models": [
+          {
+            "id": "accounts/fireworks/models/glm-5",
+            "name": "GLM-5",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 8192,
+            "reasoning": false,
+            "cost": {
+              "input": 1,
+              "output": 3.2,
+              "cacheRead": 0.2,
+              "cacheWrite": 0
+            },
+            "contextWindow": 202752,
+            "api": "openai-completions"
+          },
+          {
+            "id": "accounts/fireworks/models/deepseek-v3p2",
+            "name": "DeepSeek-V3",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 8192,
+            "reasoning": false,
+            "cost": {
+              "input": 0.3,
+              "output": 0.9,
+              "cacheRead": 0.05,
+              "cacheWrite": 0
+            },
+            "contextWindow": 163840,
+            "api": "openai-completions"
+          }
+        ],
+        "api": "openai-completions"
       }
     }
   },
@@ -131,41 +177,54 @@
         "default": true,
         "workspace": "/opt/hydra/workspaces/coordinator",
         "model": {
-          "primary": "anthropic/claude-opus-4-6",
-          "fallbacks": []
+          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "fallbacks": [
+            "fireworks/accounts/fireworks/models/deepseek-v3p2",
+            "anthropic/claude-opus-4-6"
+          ]
         }
       },
       {
         "id": "ceo",
         "workspace": "/opt/hydra/workspaces/ceo",
         "model": {
-          "primary": "anthropic/claude-opus-4-6",
-          "fallbacks": []
+          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "fallbacks": [
+            "fireworks/accounts/fireworks/models/deepseek-v3p2",
+            "anthropic/claude-opus-4-6"
+          ]
         }
       },
       {
         "id": "cmo",
         "workspace": "/opt/hydra/workspaces/cmo",
         "model": {
-          "primary": "anthropic/claude-opus-4-6",
-          "fallbacks": []
+          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "fallbacks": [
+            "fireworks/accounts/fireworks/models/deepseek-v3p2",
+            "anthropic/claude-opus-4-6"
+          ]
         }
       },
       {
         "id": "cto",
         "workspace": "/opt/hydra/workspaces/cto",
         "model": {
-          "primary": "anthropic/claude-opus-4-6",
-          "fallbacks": []
+          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "fallbacks": [
+            "fireworks/accounts/fireworks/models/deepseek-v3p2",
+            "anthropic/claude-opus-4-6"
+          ]
         }
       },
       {
         "id": "qa",
         "workspace": "/opt/hydra/workspaces/qa",
         "model": {
-          "primary": "anthropic/claude-sonnet-4-6",
+          "primary": "fireworks/accounts/fireworks/models/glm-5",
           "fallbacks": [
-            "anthropic/claude-haiku-4-5-20251001"
+            "fireworks/accounts/fireworks/models/deepseek-v3p2",
+            "anthropic/claude-sonnet-4-6"
           ]
         }
       },
@@ -173,46 +232,55 @@
         "id": "finance",
         "workspace": "/opt/hydra/workspaces/finance",
         "model": {
-          "primary": "anthropic/claude-sonnet-4-6",
-          "fallbacks": []
+          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "fallbacks": [
+            "fireworks/accounts/fireworks/models/deepseek-v3p2",
+            "anthropic/claude-sonnet-4-6"
+          ]
         }
       },
       {
         "id": "operations",
         "workspace": "/opt/hydra/workspaces/operations",
         "model": {
-          "primary": "anthropic/claude-sonnet-4-6",
-          "fallbacks": []
+          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "fallbacks": [
+            "fireworks/accounts/fireworks/models/deepseek-v3p2",
+            "anthropic/claude-sonnet-4-6"
+          ]
         }
       },
       {
         "id": "devops",
         "workspace": "/opt/hydra/workspaces/devops",
         "model": {
-          "primary": "anthropic/claude-sonnet-4-6",
-          "fallbacks": []
+          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "fallbacks": [
+            "fireworks/accounts/fireworks/models/deepseek-v3p2",
+            "anthropic/claude-sonnet-4-6"
+          ]
         }
       },
       {
         "id": "design",
         "workspace": "/opt/hydra/workspaces/design",
         "model": {
-          "primary": "anthropic/claude-opus-4-6",
-          "fallbacks": []
+          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "fallbacks": [
+            "fireworks/accounts/fireworks/models/deepseek-v3p2",
+            "anthropic/claude-opus-4-6"
+          ]
         }
       },
       {
         "id": "support",
         "workspace": "/opt/hydra/workspaces/support",
         "model": {
-          "primary": "anthropic/claude-haiku-4-5-20251001",
+          "primary": "fireworks/accounts/fireworks/models/glm-5",
           "fallbacks": [
-            "anthropic/claude-sonnet-4-6"
+            "fireworks/accounts/fireworks/models/deepseek-v3p2",
+            "anthropic/claude-haiku-4-5-20251001"
           ]
-        },
-        "tools": {
-          "allow": ["profile_lookup", "credits_search", "create_ticket", "subscription_status", "group:web"],
-          "deny": ["exec", "browser", "http_request", "sessions_send", "db_read", "db_write"]
         }
       }
     ]
@@ -275,6 +343,13 @@
       }
     },
     {
+      "agentId": "support",
+      "match": {
+        "channel": "slack",
+        "accountId": "support"
+      }
+    },
+    {
       "agentId": "clio",
       "match": {
         "channel": "slack",
@@ -289,10 +364,10 @@
       }
     },
     {
-      "agentId": "cmo",
+      "agentId": "support",
       "match": {
-        "channel": "openclaw-gmail",
-        "accountId": "*"
+        "channel": "intercom",
+        "accountId": "default"
       }
     }
   ],
@@ -415,6 +490,13 @@
           "streaming": "partial",
           "nativeStreaming": true
         },
+        "support": {
+          "botToken": "xoxb-264358207284-10767041148305-JPk1MvuGJjr9J8mvvgKrhFtT",
+          "appToken": "xapp-1-A0AMQK8PH8X-10752091591862-9b3f765296a9ac01468fc58b2b6126cad0dee60e5914dd0930f0a5901fb1864d",
+          "userTokenReadOnly": true,
+          "streaming": "partial",
+          "nativeStreaming": true
+        },
         "clio": {
           "botToken": "xoxb-264358207284-10767000436401-eWLy29bXu71IK8WU5xUNcxmo",
           "appToken": "xapp-1-A0AP0B43E56-10754112341106-bcf89629183c7b8af5b55b09b1a83f5c77480c6d1f99a606fa1d87bf0bd21eb2",
@@ -481,6 +563,23 @@
         }
       },
       "defaultAccount": "a@muso.ai"
+    },
+    "intercom": {
+      "accounts": {
+        "default": {
+          "enabled": true,
+          "workspaceId": "dwjzhcge",
+          "token": "dG9rOjM5YzM2ODg2X2ZhZjBfNGI4NF9hMzA1XzczNzYyMjg4M2M3OToxOjA=",
+          "webhookSecret": "43c744d5-5043-4f3f-b7fb-36440af1e8d7",
+          "botAdminId": "4359478",
+          "defaultInboxId": "5465657",
+          "fallbackSlackSupervisionChannel": "https://hooks.slack.com/services/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",
+          "fallbackAcknowledgement": "We're looking into this and will get back to you shortly.",
+          "requireMappedHumanAdmin": true,
+          "adminMapping": {}
+        }
+      },
+      "enabled": true
     }
   },
   "gateway": {
@@ -593,7 +692,18 @@
     "exec": {
       "security": "full",
       "ask": "off"
+    },
+    "sessions": {
+      "visibility": "all"
     }
   },
-  "_comment": "Shared settings must match openclaw-edge.json and openclaw-dev.json. See scripts/validate-shared-config.sh for the authoritative list."
+  "secrets": {
+    "providers": {
+      "hydra-secrets": {
+        "source": "file",
+        "path": "/opt/hydra/secrets/fireworks.json",
+        "mode": "json"
+      }
+    }
+  }
 }

@@ -34,6 +34,12 @@ shared:
       destination: 127.0.0.1
       comment: "CLIProxyAPI sidecar — Claude API access. NEVER allow direct api.anthropic.com."
 
+    - name: fireworks-api
+      protocol: tcp
+      port: 443
+      destination: api.fireworks.ai
+      comment: "Fireworks.ai inference API for GLM-5 and Deepseek"
+
     - name: google-oauth
       protocol: tcp
       port: 443

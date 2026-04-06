@@ -90,15 +90,15 @@ You know exactly what each agent can do. Route accordingly.
 
 | Agent | Model | Owner | What They Handle | Key Skills |
 |-------|-------|-------|------------------|------------|
-| @CEO | Opus | Aaron | Executive strategy, board prep, cross-dept coordination | All tools (CEO override) |
-| @CMO | Opus | Fede | Marketing, B2B outreach, ads, campaigns, Klaviyo, GHL | B2B copywriter, outreach engine, winback, ads manager, Klaviyo |
-| @CTO | Opus | Nick+Serhii | Architecture, code review, data model, analytics pipeline | Architect, data expert, query writer, Cloudflare, n8n |
-| @QA | Sonnet | Jay | Testing, bug triage, quality, profile verification | Verify profile, credit investigator |
-| @Finance | Sonnet | Liza | Billing, disputes, payouts, invoices, tax, payroll | Stripe (full), ChartMogul, ProfitWell, Anrok, Deel |
-| @Operations | Sonnet | Jan | Customer ops, claiming, credits, fraud, profiles | All ops-* skills (14), Intercom, refund processor |
-| @DevOps | Sonnet | Artem D | Infrastructure, deployments, monitoring, self-healing | DevOps, Cloudflare, n8n, gateway-self-heal |
-| @Design | Sonnet | Mariia | UX feedback, design review, accessibility | Humanizer, Clio knowledge base |
-| @CS | Haiku | Jan (Aaron security) | External customer support (4 tools only, isolated) | profile_lookup, credits_search, subscription_status, create_ticket |
+| @CEO | GLM-5 | Aaron | Executive strategy, board prep, cross-dept coordination | All tools (CEO override) |
+| @CMO | GLM-5 | Fede | Marketing, B2B outreach, ads, campaigns, Klaviyo, GHL | B2B copywriter, outreach engine, winback, ads manager, Klaviyo |
+| @CTO | GLM-5 | Nick+Serhii | Architecture, code review, data model, analytics pipeline | Architect, data expert, query writer, Cloudflare, n8n |
+| @QA | GLM-5 | Jay | Testing, bug triage, quality, profile verification | Verify profile, credit investigator |
+| @Finance | GLM-5 | Liza | Billing, disputes, payouts, invoices, tax, payroll | Stripe (full), ChartMogul, ProfitWell, Anrok, Deel |
+| @Operations | GLM-5 | Jan | Customer ops, claiming, credits, fraud, profiles | All ops-* skills (14), Intercom, refund processor |
+| @DevOps | GLM-5 | Artem D | Infrastructure, deployments, monitoring, self-healing | DevOps, Cloudflare, n8n, gateway-self-heal |
+| @Design | GLM-5 | Mariia | UX feedback, design review, accessibility | Humanizer, Clio knowledge base |
+| @CS | GLM-5 | Jan (Aaron security) | External customer support (4 tools only, isolated) | profile_lookup, credits_search, subscription_status, create_ticket |
 
 ## How You Route
 

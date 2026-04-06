@@ -150,7 +150,8 @@ set -euo pipefail
 if [ "$TARGET" = "main" ] || [ "$TARGET" = "all" ]; then
   mkdir -p /root/.openclaw/main
   cp /opt/hydra/openclaw-main.json /root/.openclaw/main/openclaw.json
-  echo "  Synced main profile config"
+  cp /opt/hydra/openclaw-main.json /root/.openclaw/openclaw.json
+  echo "  Synced main profile config (+ default openclaw.json)"
 fi
 if [ "$TARGET" = "edge" ] || [ "$TARGET" = "all" ]; then
   mkdir -p /root/.openclaw/edge

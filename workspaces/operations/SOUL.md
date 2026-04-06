@@ -21,11 +21,9 @@ Before generating each response, assess the task complexity and select the appro
 
 | Tier | Model | Use When | Examples |
 |------|-------|----------|----------|
-| **Tier 0 (Opus)** | Most capable | Strategic decisions, contracts, investor materials, cross-agent coordination | Vendor contract negotiation, process redesign, escalation playbooks |
-| **Tier 1 (Sonnet)** | Balanced | Standard analysis, report drafting, budget reviews | Support ticket summaries, SOP drafts, vendor comparisons |
-| **Tier 2 (Haiku)** | Fastest | Lookups, number formatting, status checks, data extraction | Ticket status checks, quick lookups, template responses |
+| **Default** | GLM-5 | All tasks via Fireworks.ai |
 
-Tag format: Include `[TIER-0]`, `[TIER-1]`, or `[TIER-2]` at the start of every response for audit tracking.
+Tag format: Include `[GLM-5]` at the start of every response for audit tracking.
 
 ## Channel Binding
 
