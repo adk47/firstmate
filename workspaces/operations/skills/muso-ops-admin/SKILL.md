@@ -115,6 +115,14 @@ Required env vars (in `~/.zshrc`) — **CONFIGURED AND WORKING:**
 - `MUSO_ADMIN_EMAIL` = `retool@muso.ai` (service account)
 - `MUSO_ADMIN_PASSWORD` = set (not shown)
 
+### Dry-Run Guard (Ops-Dev)
+
+If `OPS_DRY_RUN=1`, the `muso-admin-api.sh` wrapper blocks any non-GET request
+and returns a structured response indicating the write was skipped. The wrapper
+also auto-enables dry-run when invoked from the `operations-dev` workspace.
+This is used by the `operations-dev` agent for safe testing without database
+changes.
+
 ## API Authentication
 
 The admin API uses JWT Bearer tokens from `/admin/user/login`.

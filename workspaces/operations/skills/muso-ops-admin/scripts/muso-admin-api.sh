@@ -19,10 +19,56 @@
 
 set -euo pipefail
 
+command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 required but not found" >&2; exit 1; }
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TOKEN_CACHE="$SCRIPT_DIR/.admin-token-cache"
 TOKEN_MAX_AGE=82800  # 23 hours in seconds
 REQUESTER_EMAIL=""   # Set via --requester flag
+
+# Normalize OPS_DRY_RUN to handle case-insensitive truthy values
+_raw_dry_run="${OPS_DRY_RUN:-0}"
+_normalized_dry_run="$(echo "$_raw_dry_run" | tr '[:upper:]' '[:lower:]')"
+case "$_normalized_dry_run" in
+    1|true|yes) OPS_DRY_RUN="1" ;;
+    *)          OPS_DRY_RUN="0" ;;
+esac
+
+is_dry_run_mode() {
+    if [[ "$OPS_DRY_RUN" == "1" ]]; then
+        return 0
+    fi
+
+    # Fallback: auto-detect from workspace directory.
+    # This is a convenience safety net — the primary mechanism is OPS_DRY_RUN=1
+    # set in the agent's openclaw profile config.
+    case "${PWD:-}" in
+        */workspaces/operations-dev|*/workspaces/operations-dev/*)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+emit_dry_run_response() {
+    local method="$1" path="$2" body="${3:-}"
+    echo "[DRY-RUN] Blocked $method $path at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+    DRY_METHOD="$method" DRY_PATH="$path" DRY_BODY="$body" python3 -c '
+import os, json
+body = os.environ.get("DRY_BODY") or None
+print(json.dumps({
+    "http_status": 200,
+    "warning": "DRY-RUN: No API call was made",
+    "body": {
+        "dry_run": True,
+        "blocked": True,
+        "method": os.environ["DRY_METHOD"],
+        "path": os.environ["DRY_PATH"],
+        "request_body": body,
+    },
+}))'
+}
 
 # --- Slack ID → Email mapping ---
 # Maps Slack user IDs to muso.ai emails for the Requester header.
@@ -110,6 +156,13 @@ cmd_call() {
     local path="${2:?Usage: call <METHOD> <path> [json-body]}"
     local body="${3:-}"
 
+    if is_dry_run_mode; then
+        if [[ "$method" != "GET" ]]; then
+            emit_dry_run_response "$method" "$path" "$body"
+            return 0
+        fi
+    fi
+
     local token
     token=$(get_token)
 
@@ -152,6 +205,12 @@ cmd_upload() {
     shift 2
 
     [[ -f "$file" ]] || die "File not found: $file"
+
+    # Uploads are always writes (POST), so block unconditionally in dry-run mode
+    if is_dry_run_mode; then
+        emit_dry_run_response "POST" "$path" "(multipart upload blocked)"
+        return 0
+    fi
 
     local token
     token=$(get_token)

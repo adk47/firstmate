@@ -85,6 +85,10 @@
         "model": {
           "primary": "anthropic/claude-sonnet-4-6",
           "fallbacks": []
+        },
+        "env": {
+          "OPS_DRY_RUN": "1",
+          "OPS_CREDIT_VERIFICATION_CHANNEL_ID": "C0APZ4WC5C7"
         }
       }
     ]
