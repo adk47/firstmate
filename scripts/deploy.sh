@@ -163,6 +163,10 @@ else
   log "  Config synced to $NODE8_IP:$DEPLOY_PATH/"
 fi
 
+# Fix script permissions (rsync doesn't preserve +x from git)
+chmod +x "$DEPLOY_PATH"/scripts/*.sh "$DEPLOY_PATH"/scripts/*.py 2>/dev/null || true
+log "  Script permissions fixed"
+
 # Sync per-profile configs to profile state dirs
 log "  Syncing profile configs..."
 if [ "$TARGET" = "main" ] || [ "$TARGET" = "all" ]; then
