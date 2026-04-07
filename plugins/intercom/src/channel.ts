@@ -10,6 +10,10 @@ import { handleWebhookEvent } from "./handler.js";
 import { createInitialSessionState, canAgentReply } from "./handoff.js";
 import { RealIntercomClient, trackOutboundMessageId } from "./outbound.js";
 import { initStateStore, loadSessions, saveSessions } from "./state-store.js";
+import {
+  buildEscalationSlackMessage,
+  buildEscalationSlackMessageMinimal,
+} from "./slack.js";
 import type { IntercomSessionState, IntercomWebhookPayload } from "./types.js";
 
 // Module-level session store shared between startAccount (inbound) and sendText (outbound).
@@ -281,35 +285,43 @@ export const intercomPlugin = createChatChannelPlugin({
                       );
                     }
 
-                    // 3. Notify team via Slack
+                    // 3. Notify team via Slack — fetch full conversation for enrichment,
+                    // but fall back to the minimal message if the API call fails so the
+                    // alert is never lost.
                     if (account.fallbackSlackSupervisionChannel) {
-                      const intercomUrl = `https://app.intercom.com/a/inbox/${account.workspaceId}/inbox/conversation/${result.conversationId}`;
+                      const escalationSummary = {
+                        conversationId: result.conversationId,
+                        category: result.category,
+                        matchedPattern: result.matchedPattern,
+                        body: result.body,
+                      };
+
+                      let slackPayload;
+                      try {
+                        const conversation = await client.getConversation({
+                          conversationId: result.conversationId,
+                        });
+                        slackPayload = buildEscalationSlackMessage(
+                          escalationSummary,
+                          conversation,
+                          account,
+                          state,
+                        );
+                      } catch (err) {
+                        log?.warn?.(
+                          `[${tag}] Slack enrichment fetch failed conv=${result.conversationId}: ${err} — posting minimal message`,
+                        );
+                        slackPayload = buildEscalationSlackMessageMinimal(
+                          escalationSummary,
+                          account,
+                        );
+                      }
+
                       try {
                         await fetch(account.fallbackSlackSupervisionChannel, {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            text: `🚨 Intercom escalation: ${result.category} — <${intercomUrl}|View conversation>`,
-                            blocks: [
-                              {
-                                type: "section",
-                                text: {
-                                  type: "mrkdwn",
-                                  text: `🚨 *Intercom Escalation*\n*Category:* ${result.category}\n*Pattern:* \`${result.matchedPattern}\`\n*Message:* ${result.body.slice(0, 200)}${result.body.length > 200 ? "…" : ""}`,
-                                },
-                              },
-                              {
-                                type: "actions",
-                                elements: [
-                                  {
-                                    type: "button",
-                                    text: { type: "plain_text", text: "View in Intercom" },
-                                    url: intercomUrl,
-                                  },
-                                ],
-                              },
-                            ],
-                          }),
+                          body: JSON.stringify(slackPayload),
                         });
                       } catch (err) {
                         log?.error?.(`[${tag}] Slack escalation notification failed: ${err}`);
