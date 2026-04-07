@@ -21,10 +21,13 @@
   "models": {
     "providers": {
       "anthropic": {
-        "baseUrl": "http://localhost:8317",
-        "apiKey": "sk-hydra-prod-2026",
+        "baseUrl": "https://api.anthropic.com",
+        "apiKey": {
+          "source": "file",
+          "provider": "hydra-secrets",
+          "id": "/ANTHROPIC_API_KEY"
+        },
         "auth": "api-key",
-        "authHeader": true,
         "models": [
           {
             "id": "claude-opus-4-6",
@@ -135,7 +138,9 @@
     "defaults": {
       "model": {
         "primary": "anthropic/claude-opus-4-6",
-        "fallbacks": []
+        "fallbacks": [
+          "fireworks/accounts/fireworks/models/glm-5"
+        ]
       },
       "imageModel": {
         "primary": "anthropic/claude-sonnet-4-6",
@@ -177,10 +182,9 @@
         "default": true,
         "workspace": "/opt/hydra/workspaces/coordinator",
         "model": {
-          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "primary": "anthropic/claude-opus-4-6",
           "fallbacks": [
-            "fireworks/accounts/fireworks/models/deepseek-v3p2",
-            "anthropic/claude-opus-4-6"
+            "fireworks/accounts/fireworks/models/glm-5"
           ]
         }
       },
@@ -188,10 +192,9 @@
         "id": "ceo",
         "workspace": "/opt/hydra/workspaces/ceo",
         "model": {
-          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "primary": "anthropic/claude-opus-4-6",
           "fallbacks": [
-            "fireworks/accounts/fireworks/models/deepseek-v3p2",
-            "anthropic/claude-opus-4-6"
+            "fireworks/accounts/fireworks/models/glm-5"
           ]
         }
       },
@@ -199,10 +202,9 @@
         "id": "cmo",
         "workspace": "/opt/hydra/workspaces/cmo",
         "model": {
-          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "primary": "anthropic/claude-opus-4-6",
           "fallbacks": [
-            "fireworks/accounts/fireworks/models/deepseek-v3p2",
-            "anthropic/claude-opus-4-6"
+            "fireworks/accounts/fireworks/models/glm-5"
           ]
         }
       },
@@ -210,10 +212,9 @@
         "id": "cto",
         "workspace": "/opt/hydra/workspaces/cto",
         "model": {
-          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "primary": "anthropic/claude-opus-4-6",
           "fallbacks": [
-            "fireworks/accounts/fireworks/models/deepseek-v3p2",
-            "anthropic/claude-opus-4-6"
+            "fireworks/accounts/fireworks/models/glm-5"
           ]
         }
       },
@@ -221,10 +222,9 @@
         "id": "qa",
         "workspace": "/opt/hydra/workspaces/qa",
         "model": {
-          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "primary": "anthropic/claude-opus-4-6",
           "fallbacks": [
-            "fireworks/accounts/fireworks/models/deepseek-v3p2",
-            "anthropic/claude-sonnet-4-6"
+            "fireworks/accounts/fireworks/models/glm-5"
           ]
         }
       },
@@ -232,10 +232,9 @@
         "id": "finance",
         "workspace": "/opt/hydra/workspaces/finance",
         "model": {
-          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "primary": "anthropic/claude-opus-4-6",
           "fallbacks": [
-            "fireworks/accounts/fireworks/models/deepseek-v3p2",
-            "anthropic/claude-sonnet-4-6"
+            "fireworks/accounts/fireworks/models/glm-5"
           ]
         }
       },
@@ -254,10 +253,9 @@
         "id": "devops",
         "workspace": "/opt/hydra/workspaces/devops",
         "model": {
-          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "primary": "anthropic/claude-opus-4-6",
           "fallbacks": [
-            "fireworks/accounts/fireworks/models/deepseek-v3p2",
-            "anthropic/claude-sonnet-4-6"
+            "fireworks/accounts/fireworks/models/glm-5"
           ]
         }
       },
@@ -265,10 +263,9 @@
         "id": "design",
         "workspace": "/opt/hydra/workspaces/design",
         "model": {
-          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "primary": "anthropic/claude-opus-4-6",
           "fallbacks": [
-            "fireworks/accounts/fireworks/models/deepseek-v3p2",
-            "anthropic/claude-opus-4-6"
+            "fireworks/accounts/fireworks/models/glm-5"
           ]
         }
       },
