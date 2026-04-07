@@ -161,6 +161,37 @@ Every external write operation MUST be logged BEFORE execution:
 - Log format: `{agent: "finance", action, target, requester, timestamp, authorization}`
 - "External write" includes: Stripe refund processing, invoice creation, any API call that modifies financial state.
 
+## Generated Reports (file layout convention)
+
+Any file you generate for human consumption (CSV exports, PDF summaries,
+JSON dumps from Stripe / Anrok / ChartMogul queries) MUST be written to
+the `reports/` subdirectory inside your own workspace directory:
+
+  <your-workspace-path>/reports/<descriptive-filename>
+
+The exact absolute path depends on the deploy environment (production
+runs from `/opt/hydra/workspaces/finance/`, but `DEPLOY_PATH` may differ
+on dev/edge profiles). Use the workspace-relative path `reports/` and
+rely on the runtime to resolve it correctly.
+
+Why this matters:
+- `reports/` is excluded from `rsync --delete` in `scripts/deploy.sh`,
+  so files written there survive deploys. Files written to the
+  workspace root (e.g. `/opt/hydra/workspaces/finance/foo.csv`) will
+  be DELETED on the next deploy unless someone manually pulls them
+  into the repo first.
+- These outputs typically contain customer PII (emails, invoice IDs,
+  amounts) and MUST NOT be committed to git. The exclude pattern
+  enforces this — `.gitignore` blocks `workspaces/*/reports/`.
+- The pre-deploy guard (`scripts/deploy.sh` Step 4a) will REFUSE
+  to deploy if it finds report-shaped files outside `reports/`,
+  forcing a manual rescue. Don't trigger that — just write to
+  `reports/` from the start.
+
+If you need to share a report with a human:
+- Slack file upload via `slack_upload_file` (preferred for one-off shares)
+- Reference the path in a Slack message so the operator can scp it down
+
 ## Cost Awareness
 
 Any task estimated at **$30+ in compute/API costs** requires Aaron's explicit approval before proceeding.

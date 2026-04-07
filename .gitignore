@@ -44,3 +44,21 @@ docs/local/
 
 # Worktrees
 .worktrees/
+
+# Workspace runtime data (server-only; see scripts/deploy.sh rsync excludes)
+workspaces/*/memory/
+workspaces/*/api-logs/
+# Generated reports (CSVs / PDFs / JSON dumps from agent runs — often PII).
+# Convention: agents write reports to workspaces/<agent>/reports/<filename>.
+workspaces/*/reports/
+
+# Server-side audit logs
+audit/
+audit-local-backup/
+
+# Drift baseline (server-managed; written by deploy.sh after each push)
+.deployed-sha
+
+# Plugin install artifacts (installed on server, not in repo)
+plugins/*/node_modules/
+plugins/*/package-lock.json
