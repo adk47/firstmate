@@ -185,3 +185,34 @@ if [ "$UNANSWERED_COUNT" -gt 0 ]; then
     python3 /opt/hydra/scripts/retrigger-unanswered.py "auto-heal" 2>/dev/null || true
   fi
 fi
+
+# --- Edge gateway (support/intercom) health check ---
+EDGE_STATUS=$(systemctl is-active openclaw-gateway-edge 2>/dev/null || echo "unknown")
+if [ "$EDGE_STATUS" != "active" ]; then
+  log "EDGE GATEWAY DOWN: status=${EDGE_STATUS} — attempting restart"
+
+  # Check if it's a config issue (don't restart if config is invalid)
+  EDGE_VALID=$(openclaw --profile edge config validate 2>&1 || true)
+  if echo "$EDGE_VALID" | grep -q "Config valid"; then
+    systemctl restart openclaw-gateway-edge
+    sleep 15
+    EDGE_NEW=$(systemctl is-active openclaw-gateway-edge 2>/dev/null || echo "unknown")
+    if [ "$EDGE_NEW" = "active" ]; then
+      log "Edge gateway recovered"
+      slack_notify ":white_check_mark: *Edge Gateway* (support/intercom) recovered — auto-restarted by watchdog."
+    else
+      log "Edge gateway restart FAILED"
+      slack_notify ":rotating_light: *Edge Gateway* (support/intercom) DOWN — auto-restart failed. Config may be invalid. Check \`openclaw --profile edge doctor\`."
+    fi
+  else
+    log "Edge config INVALID — not restarting: ${EDGE_VALID}"
+    slack_notify ":rotating_light: *Edge Gateway* config invalid — cannot restart. Fix via PR.\n\`${EDGE_VALID}\`"
+  fi
+fi
+
+# --- Dev gateway health check ---
+DEV_STATUS=$(systemctl is-active openclaw-gateway-dev 2>/dev/null || echo "unknown")
+if [ "$DEV_STATUS" != "active" ]; then
+  log "DEV GATEWAY DOWN: status=${DEV_STATUS}"
+  systemctl restart openclaw-gateway-dev 2>/dev/null || true
+fi
