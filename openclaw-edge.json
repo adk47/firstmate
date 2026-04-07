@@ -21,10 +21,13 @@
   "models": {
     "providers": {
       "anthropic": {
-        "baseUrl": "http://localhost:8317",
-        "apiKey": "sk-hydra-prod-2026",
+        "baseUrl": "https://api.anthropic.com",
+        "apiKey": {
+          "source": "file",
+          "provider": "hydra-secrets",
+          "id": "/ANTHROPIC_API_KEY"
+        },
         "auth": "api-key",
-        "authHeader": true,
         "models": [
           {
             "id": "claude-opus-4-6",
