@@ -147,6 +147,7 @@ if $HYDRA_LOCAL; then
   rsync -a --delete \
     --exclude='.git' \
     --exclude='hydra docs/' \
+    --exclude='secrets/' \
     "$HYDRA_ROOT/" \
     "$DEPLOY_PATH/"
   log "  Config synced locally to $DEPLOY_PATH/"
@@ -156,6 +157,7 @@ else
     -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" \
     --exclude='.git' \
     --exclude='hydra docs/' \
+    --exclude='secrets/' \
     "$HYDRA_ROOT/" \
     "$NODE8_USER@$NODE8_IP:$DEPLOY_PATH/"
   log "  Config synced to $NODE8_IP:$DEPLOY_PATH/"

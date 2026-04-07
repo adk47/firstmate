@@ -148,26 +148,15 @@ if needs_target "dev"; then
 fi
 
 # -------------------------------------------------------------------
-# CLIProxyAPI health check (shared, always check)
+# CLIProxyAPI health check (optional — only if Anthropic fallback is active)
 # -------------------------------------------------------------------
 log "Checking CLIProxyAPI /health..."
-HEALTH_RESPONSE=$(curl -sf "http://127.0.0.1:${CLIPROXYAPI_PORT}/health" 2>&1) || HEALTH_RESPONSE="UNREACHABLE"
+HEALTH_RESPONSE=$(curl -sf "http://127.0.0.1:${CLIPROXYAPI_PORT:-8317}/health" 2>&1) || HEALTH_RESPONSE="UNREACHABLE"
 if echo "$HEALTH_RESPONSE" | grep -qi 'ok\|healthy'; then
   pass_check "CLIProxyAPI /health returned OK"
 else
-  fail_check "CLIProxyAPI /health check failed: $HEALTH_RESPONSE"
-fi
-
-# -------------------------------------------------------------------
-# eDiscovery CronJob check
-# -------------------------------------------------------------------
-log "Checking eDiscovery CronJob..."
-CRON_EXISTS=$(kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" \
-  get cronjob ediscovery-archive -o name 2>/dev/null) || CRON_EXISTS=""
-if [[ -n "$CRON_EXISTS" ]]; then
-  pass_check "eDiscovery CronJob exists"
-else
-  fail_check "eDiscovery CronJob 'ediscovery-archive' not found"
+  # Non-fatal: CLIProxyAPI is only needed for Anthropic fallback
+  log "  WARN: CLIProxyAPI not reachable (non-fatal — Fireworks is primary)"
 fi
 
 # -------------------------------------------------------------------

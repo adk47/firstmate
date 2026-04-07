@@ -1,5 +1,4 @@
 {
-  "_comment": "Shared settings must match openclaw-main.json and openclaw-dev.json. See scripts/validate-shared-config.sh for the authoritative list.",
   "meta": {
     "lastTouchedVersion": "2026.3.23",
     "lastTouchedAt": "2026-04-01T13:45:50.821Z"
@@ -292,6 +291,15 @@
     },
     "sessions": {
       "visibility": "all"
+    }
+  },
+  "secrets": {
+    "providers": {
+      "hydra-secrets": {
+        "source": "file",
+        "path": "/opt/hydra/secrets/fireworks.json",
+        "mode": "json"
+      }
     }
   }
 }

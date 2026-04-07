@@ -617,8 +617,7 @@
     "allow": [
       "openclaw-gmail",
       "slack",
-      "intercom",
-      "support-tools"
+      "intercom"
     ],
     "entries": {
       "slack": {
@@ -630,13 +629,6 @@
       },
       "intercom": {
         "enabled": true
-      },
-      "support-tools": {
-        "enabled": true,
-        "musoApiBase": "https://api.muso.ai",
-        "clickupListId": "901000600160",
-        "clickupProfileIdFieldId": "347d23bf-ed7b-40c2-bd10-5bd6ac7210b1",
-        "clickupUserEmailFieldId": "e8618c74-d065-4b75-9a5a-86d658392409"
       }
     },
     "installs": {
@@ -672,19 +664,11 @@
         "installPath": "/root/.openclaw/extensions/intercom",
         "resolvedName": "@muso/intercom",
         "resolvedVersion": "0.1.0"
-      },
-      "support-tools": {
-        "source": "path",
-        "spec": "/root/.openclaw/extensions/support-tools",
-        "installPath": "/root/.openclaw/extensions/support-tools",
-        "resolvedName": "@muso/support-tools",
-        "resolvedVersion": "0.1.0"
       }
     },
     "load": {
       "paths": [
-        "/root/.openclaw/extensions/intercom",
-        "/root/.openclaw/extensions/support-tools"
+        "/root/.openclaw/extensions/intercom"
       ]
     }
   },

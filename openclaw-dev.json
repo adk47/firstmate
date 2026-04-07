@@ -1,5 +1,4 @@
 {
-  "_comment": "Shared settings must match openclaw-main.json and openclaw-edge.json. See scripts/validate-shared-config.sh for the authoritative list.",
   "meta": {
     "lastTouchedVersion": "2026.3.23",
     "lastTouchedAt": "2026-04-01T13:45:50.821Z"
@@ -137,10 +136,6 @@
             "fireworks/accounts/fireworks/models/deepseek-v3p2",
             "anthropic/claude-sonnet-4-6"
           ]
-        },
-        "env": {
-          "OPS_DRY_RUN": "1",
-          "OPS_CREDIT_VERIFICATION_CHANNEL_ID": "C0APZ4WC5C7"
         }
       }
     ]
@@ -265,6 +260,15 @@
     },
     "sessions": {
       "visibility": "all"
+    }
+  },
+  "secrets": {
+    "providers": {
+      "hydra-secrets": {
+        "source": "file",
+        "path": "/opt/hydra/secrets/fireworks.json",
+        "mode": "json"
+      }
     }
   }
 }
