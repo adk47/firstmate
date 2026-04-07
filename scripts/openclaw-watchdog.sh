@@ -23,18 +23,17 @@ COOLDOWN_FILE="/tmp/openclaw-watchdog-cooldown"
 COOLDOWN_MIN=30  # Don't restart more than once per 30 min
 GATEWAY_SERVICE="openclaw-gateway-main"  # PR 43: multi-gateway split
 
-log() { echo "$LOGPREFIX $1"; }
+# Expected systemd log line that indicates a (re)start.
+# systemd logs PAST TENSE ("Started ..."), NOT "Starting ...".
+# If you change this regex, the inline self-test below fails loudly.
+# Fixture captured from journalctl on node-8, 2026-04-07 (incident
+# day: an 80-min crash loop went undetected because the previous
+# version of this regex was 'Starting openclaw-gateway' which never
+# matched anything systemd actually emits).
+readonly RESTART_LOG_REGEX='Started openclaw-gateway-main\.service'
+readonly RESTART_LOG_FIXTURE='Apr 07 20:51:14 ovh-node-8 systemd[1]: Started openclaw-gateway-main.service - OpenClaw Gateway HYDRA (main profile).'
 
-# Crash loop detection: if systemd has restarted the gateway more than
-# 10 times in the last 10 minutes, something is wrong with the config.
-# Don't add more restarts — alert and stop.
-RESTART_COUNT=$(journalctl -u $GATEWAY_SERVICE --since "10 min ago" --no-pager 2>/dev/null \
-  | grep -c 'Starting openclaw-gateway' || true)
-if [ "${RESTART_COUNT:-0}" -gt 10 ]; then
-  log "CRASH LOOP DETECTED: ${RESTART_COUNT} restarts in 10 min — NOT restarting. Check openclaw.json for invalid config."
-  slack_notify ":rotating_light: *CRASH LOOP DETECTED* — Gateway restarted ${RESTART_COUNT} times in 10 min. Likely invalid config. NOT restarting. Run \`openclaw doctor --fix\` on node-8."
-  exit 0
-fi
+log() { echo "$LOGPREFIX $1"; }
 
 slack_notify() {
   local msg="$1"
@@ -58,8 +57,75 @@ print(c['channels']['slack']['accounts']['devops']['botToken'])
     -d "{\"channel\":\"${SLACK_CHANNEL}\",\"text\":\"${msg}\"}" >/dev/null 2>&1 || true
 }
 
+# ──────────────────────────────────────────────────────────────
+# Inline self-test — runs on EVERY invocation (cost: ~1ms).
+# Guards against the bug class that silently broke this watchdog
+# for months: a regex that never matched real systemd output.
+# Three independent tripwires together:
+#   1. fixture grep (catches regex drift vs real systemd format)
+#   2. function-defined check (catches the slack_notify ordering bug)
+#   3. variable-set check (catches GATEWAY_SERVICE wipeouts)
+# ──────────────────────────────────────────────────────────────
+_watchdog_self_test() {
+  local failed=0
+
+  # Assert 1: the restart regex matches the known-good systemd fixture.
+  if ! echo "$RESTART_LOG_FIXTURE" | grep -qE "$RESTART_LOG_REGEX"; then
+    echo "$LOGPREFIX SELF-TEST FAIL: RESTART_LOG_REGEX does not match RESTART_LOG_FIXTURE" >&2
+    echo "  regex:   $RESTART_LOG_REGEX" >&2
+    echo "  fixture: $RESTART_LOG_FIXTURE" >&2
+    failed=1
+  fi
+
+  # Assert 2: slack_notify is defined before any caller references it.
+  if ! declare -F slack_notify >/dev/null; then
+    echo "$LOGPREFIX SELF-TEST FAIL: slack_notify function not defined" >&2
+    failed=1
+  fi
+
+  # Assert 3: GATEWAY_SERVICE is a non-empty identifier.
+  if [[ -z "${GATEWAY_SERVICE:-}" ]]; then
+    echo "$LOGPREFIX SELF-TEST FAIL: GATEWAY_SERVICE is empty" >&2
+    failed=1
+  fi
+
+  return $failed
+}
+
+# --self-test mode: explicit invocation by smoke-test.sh and humans
+# verifying a fix. Exits 0 on pass, 1 on fail. No side effects.
+if [[ "${1:-}" == "--self-test" ]]; then
+  if _watchdog_self_test; then
+    echo "$LOGPREFIX SELF-TEST PASS"
+    exit 0
+  else
+    exit 1
+  fi
+fi
+
+# Implicit self-test on every cron run. If this fails in production,
+# abort BEFORE we can silently misbehave — loud failure beats quiet
+# safety-net rot. Best-effort Slack alert (slack_notify is defined
+# above this point).
+if ! _watchdog_self_test; then
+  echo "$LOGPREFIX ABORTING: self-test failed — watchdog is misconfigured." >&2
+  slack_notify ":rotating_light: *Watchdog self-test FAILED* on node-8 — watchdog aborted. Fix openclaw-watchdog.sh regex/function order." || true
+  exit 1
+fi
+
+# Crash loop detection: if systemd has restarted the gateway more than
+# 10 times in the last 10 minutes, something is wrong with the config.
+# Don't add more restarts — alert and stop.
+RESTART_COUNT=$(journalctl -u "$GATEWAY_SERVICE" --since "10 min ago" --no-pager 2>/dev/null \
+  | grep -cE "$RESTART_LOG_REGEX" || true)
+if [ "${RESTART_COUNT:-0}" -gt 10 ]; then
+  log "CRASH LOOP DETECTED: ${RESTART_COUNT} restarts in 10 min — NOT restarting. Check openclaw.json for invalid config."
+  slack_notify ":rotating_light: *CRASH LOOP DETECTED* — Gateway restarted ${RESTART_COUNT} times in 10 min. Likely invalid config. NOT restarting. Run \`openclaw doctor --fix\` on node-8."
+  exit 0
+fi
+
 # Grab recent logs once
-RECENT_LOGS=$(journalctl -u $GATEWAY_SERVICE --since "${CHECK_WINDOW_MIN} min ago" --no-pager 2>/dev/null || true)
+RECENT_LOGS=$(journalctl -u "$GATEWAY_SERVICE" --since "${CHECK_WINDOW_MIN} min ago" --no-pager 2>/dev/null || true)
 
 # Count successful agent runs in the last CHECK_WINDOW_MIN minutes
 SUCCESS_COUNT=$(echo "$RECENT_LOGS" | grep -c 'run agent end.*isError=false' 2>/dev/null || true)
@@ -114,7 +180,7 @@ if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -gt 0 ]; then
   fi
 
   # Capture the error pattern for the notification
-  LAST_ERROR=$(journalctl -u $GATEWAY_SERVICE --since "${CHECK_WINDOW_MIN} min ago" --no-pager 2>/dev/null \
+  LAST_ERROR=$(journalctl -u "$GATEWAY_SERVICE" --since "${CHECK_WINDOW_MIN} min ago" --no-pager 2>/dev/null \
     | grep 'isError=true' | tail -1 | sed 's/.*error=/error=/' | head -c 200 || echo "unknown")
 
   # --- Proactive outage notice: post to ALL channels with recent activity ---
@@ -122,7 +188,7 @@ if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -gt 0 ]; then
   python3 /opt/hydra/scripts/outage-notify.py "$LAST_ERROR" 2>/dev/null || true
 
   log "Restarting openclaw-gateway..."
-  systemctl restart $GATEWAY_SERVICE
+  systemctl restart "$GATEWAY_SERVICE"
 
   # Record restart time
   date +%s > "$COOLDOWN_FILE"
@@ -131,7 +197,7 @@ if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -gt 0 ]; then
   sleep 5
 
   # Verify it came back
-  STATUS=$(systemctl is-active $GATEWAY_SERVICE 2>/dev/null || echo "unknown")
+  STATUS=$(systemctl is-active "$GATEWAY_SERVICE" 2>/dev/null || echo "unknown")
 
   if [ "$STATUS" = "active" ]; then
     log "Restart successful — gateway is active"

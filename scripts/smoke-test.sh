@@ -107,6 +107,24 @@ if needs_target "main"; then
       fi
     fi
   fi
+
+  # -------------------------------------------------------------------
+  # Watchdog self-test — verifies the crash-loop detector regex still
+  # matches real systemd output and the alert path is wired correctly.
+  # Closes the loop on the 2026-04-07 incident: a typo in the watchdog
+  # regex went undetected for months because nothing exercised it. This
+  # gate fires the typo at deploy time so it cannot rot silently again.
+  # -------------------------------------------------------------------
+  if [ -x /opt/hydra/scripts/openclaw-watchdog.sh ]; then
+    if /opt/hydra/scripts/openclaw-watchdog.sh --self-test >/dev/null 2>&1; then
+      pass_check "Main: watchdog self-test passed"
+    else
+      /opt/hydra/scripts/openclaw-watchdog.sh --self-test 2>&1 | sed 's/^/    /'
+      fail_check "Main: watchdog self-test FAILED — crash-loop detection is broken"
+    fi
+  else
+    fail_check "Main: /opt/hydra/scripts/openclaw-watchdog.sh missing or not executable"
+  fi
 fi
 
 # -------------------------------------------------------------------
