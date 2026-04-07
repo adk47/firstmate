@@ -228,6 +228,18 @@ RSYNC_EXCLUDES=(
   # 8.6MB of 2026-04-07 memory snapshots created during the audit/ migration).
   # Treated like audit/ — server-owned, not synced from repo.
   --exclude='audit-local-backup/'
+  # CD-managed shadow mirror at /opt/hydra/config/. The GitHub Actions
+  # deploy workflow writes to /opt/hydra/config/ (a parallel mirror of
+  # the entire repo, ~16MB), then seeds individual workspaces from there
+  # into /opt/hydra/workspaces/. Discovered 2026-04-07 when this script's
+  # pre-flight against the live server reported it would --delete 2058
+  # files under config/, including real Sentinel skills (clawsec,
+  # audit-scanner, quarantine, trust-scorer) and Support skills
+  # (refund-retention, output-sanitizer) that exist NOWHERE else in the
+  # repo. scripts/deploy.sh and the GitHub Actions CD are two
+  # independent deploy paths operating on different roots — never let
+  # one wipe the other.
+  --exclude='config/'
   # Plugin install artifacts (server runs npm install in-place)
   --exclude='plugins/*/node_modules/'
   --exclude='plugins/*/package-lock.json'
@@ -463,6 +475,15 @@ fi
 if needs_target "dev"; then
   python3 -m json.tool "$HYDRA_ROOT/openclaw-dev.json" >/dev/null 2>&1 || fail "openclaw-dev.json is not valid JSON"
   log "  openclaw-dev.json is valid JSON."
+fi
+
+# cron-jobs.json is loaded later by Step 5's POSTSYNC (when targeting
+# main). Pre-validate the JSON here so a malformed cron file fails the
+# deploy at Step 1 with a clear message instead of inside the heredoc
+# with a generic "cron sync failed" error 30 seconds into the deploy.
+if needs_target "main" && [ -f "$HYDRA_ROOT/cron-jobs.json" ]; then
+  python3 -m json.tool "$HYDRA_ROOT/cron-jobs.json" >/dev/null 2>&1 || fail "cron-jobs.json is not valid JSON"
+  log "  cron-jobs.json is valid JSON."
 fi
 
 # Run drift check when deploying all or multiple profiles
@@ -750,7 +771,23 @@ run_on_node8() {
   fi
 }
 
-# Post-sync inline (runs locally on node-8 or via SSH)
+# Post-sync inline (runs locally on node-8).
+#
+# IMPORTANT: `bash << 'POSTSYNC'` starts a CHILD bash process. The child
+# does NOT inherit unexported parent shell variables (like HYDRA_ROOT)
+# or unexported parent shell functions (like fail/log/needs_target).
+# Any code added inside this heredoc that references parent symbols MUST
+# be preceded by an explicit `export` (or `export -f` for functions).
+#
+# These exports were added 2026-04-07 after PR #64's first version
+# referenced $HYDRA_ROOT and fail() inside the heredoc and would have
+# crashed on the very first deploy with "HYDRA_ROOT: unbound variable"
+# (set -u) plus "fail: command not found" — wrong error message AND
+# silently bypassed notify_slack(). Caught by silent-failure-hunter
+# during the second-round PR review.
+export HYDRA_ROOT TARGET DEPLOY_PATH HYDRA_LOCAL
+export -f fail log notify_slack needs_target
+
 bash << 'POSTSYNC'
 set -euo pipefail
 
@@ -794,28 +831,100 @@ fi
 
 # Note: mention gate patch (patch-openclaw-mention-gate.sh) removed — no longer needed on OpenClaw 2026.4.2+
 
-# Sync cron jobs from repo (preserve live state)
-if [ -f /opt/hydra/cron-jobs.json ]; then
-  LIVE_CRON="/root/.openclaw/cron/jobs.json"
+# Sync cron jobs from repo to the main profile data dir (preserve live state).
+# After the multi-profile migration, the main gateway is launched with
+# `--profile main`, which makes openclaw use ~/.openclaw-main/ as its data
+# dir (not ~/.openclaw/). The cron scheduler reads from
+# /root/.openclaw-main/cron/jobs.json. The previous path
+# /root/.openclaw/cron/jobs.json was the pre-migration default and is not
+# read when the gateway runs with --profile main — writing there silently
+# produced a 19-hour cron outage on 2026-04-07. Always target the
+# multi-profile path now.
+if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
+  LIVE_CRON="/root/.openclaw-main/cron/jobs.json"
+  # NOTE: the parent profile dir /root/.openclaw-main/ is guaranteed to
+  # exist by the per-profile config sync earlier in this same deploy
+  # (Step 4b "mkdir -p /root/.openclaw-main; cp openclaw-main.json ..."),
+  # so we don't need to assert it here. Earlier versions of this PR had
+  # an "if [ ! -d $PROFILE_DIR ]; then fail" check that could never fire
+  # — removed as dead code per second-round review.
+  mkdir -p "$(dirname "$LIVE_CRON")" || fail "failed to create cron dir at $(dirname "$LIVE_CRON")"
   if [ -f "$LIVE_CRON" ]; then
-    python3 -c "
-import json
-with open('/opt/hydra/cron-jobs.json') as f:
+    LIVE_CRON="$LIVE_CRON" REPO_CRON="$HYDRA_ROOT/cron-jobs.json" python3 - <<'PYEOF' || fail "cron sync failed for $LIVE_CRON"
+import json, os, sys, tempfile
+live_path = os.environ['LIVE_CRON']
+repo_path = os.environ['REPO_CRON']
+with open(repo_path) as f:
     repo = json.load(f)
-with open('$LIVE_CRON') as f:
+with open(live_path) as f:
     live = json.load(f)
-live_states = {j['name']: j.get('state', {}) for j in live.get('jobs', [])}
+
+# Schema guard: every job MUST have a stable id (we key live state on it).
+# A hand-edited cron-jobs.json missing an id would otherwise crash with
+# a bare KeyError mid-loop and the operator gets a generic "cron sync
+# failed" message. Surface the actual problem with a clear error.
 for j in repo.get('jobs', []):
-    if j['name'] in live_states:
-        j['state'] = live_states[j['name']]
-with open('$LIVE_CRON', 'w') as f:
-    json.dump(repo, f, indent=2)
-print(f'  Synced {len(repo.get(\"jobs\", []))} cron jobs (preserved live state)')
-"
+    if 'id' not in j:
+        sys.exit(f"cron-jobs.json job missing required 'id': {j.get('name', '<unnamed>')}")
+for j in live.get('jobs', []):
+    if 'id' not in j:
+        sys.exit(f"live cron file has job missing required 'id': {j.get('name', '<unnamed>')} — manual fix required")
+
+# Key live state by job id (not name) so renames preserve runtime state
+# instead of silently dropping it. The id is a stable UUID; the name is a
+# human label that may change (e.g. b2b-reply-scanner-15m -> -1h cadence
+# rename).
+live_states = {j['id']: j.get('state', {}) for j in live.get('jobs', [])}
+repo_ids = {j['id'] for j in repo.get('jobs', [])}
+preserved = 0
+for j in repo.get('jobs', []):
+    if j['id'] in live_states:
+        j['state'] = live_states[j['id']]
+        preserved += 1
+
+# Orphaned ids = jobs that exist in live but no longer exist in repo.
+# Their runtime state will be permanently dropped on the next write.
+# That's a real data-loss event (lastRunMs/nextRunMs gone forever) and
+# should fail the deploy unless explicitly allowed via env var. The
+# common cases that legitimately produce orphans are: deliberate job
+# removal (set HYDRA_ALLOW_ORPHAN_CRON=1) or a refactor that changed
+# UUIDs (write a migration instead of bypassing the guard).
+orphaned = set(live_states) - repo_ids
+if orphaned:
+    if os.environ.get('HYDRA_ALLOW_ORPHAN_CRON') == '1':
+        print(f'  HYDRA_ALLOW_ORPHAN_CRON=1: dropping live state for {len(orphaned)} job ids no longer in repo: {sorted(orphaned)}', file=sys.stderr)
+    else:
+        sys.exit(f"refusing to drop live state for {len(orphaned)} orphaned job id(s): {sorted(orphaned)}. Set HYDRA_ALLOW_ORPHAN_CRON=1 if this is intentional (e.g. you removed jobs from cron-jobs.json on purpose).")
+
+# Heal-from-empty: live file existed but had 0 jobs. This is the exact
+# state the 2026-04-07 outage left the system in. Repo file will
+# repopulate it. Print to stderr so deploy log aggregators catch it.
+if not live.get('jobs'):
+    print('  WARNING: live cron file was empty — repo file will repopulate (this is the post-outage heal path; safe on first run after a truncation, suspicious otherwise)', file=sys.stderr)
+
+# Write atomically: tmpfile + os.replace so a mid-write crash never leaves
+# the live file truncated (which would silently re-trigger the cron outage
+# this PR is fixing).
+fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(live_path), prefix='.jobs-', suffix='.tmp')
+try:
+    with os.fdopen(fd, 'w') as f:
+        json.dump(repo, f, indent=2)
+    os.replace(tmp_path, live_path)
+except Exception:
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+    raise
+print(f'  Synced {len(repo.get("jobs", []))} cron jobs to {live_path} '
+      f'({preserved} states preserved)')
+PYEOF
   else
-    cp /opt/hydra/cron-jobs.json "$LIVE_CRON"
-    echo "  Deployed cron jobs (fresh install)"
+    # Use install -m 600 instead of cp+chmod to set perms atomically on
+    # creation (no brief 0644 window). cron-jobs.json contains agent
+    # prompts with sensitive references (sheet IDs, account names).
+    install -m 600 "$HYDRA_ROOT/cron-jobs.json" "$LIVE_CRON" || fail "failed to install cron-jobs.json to $LIVE_CRON"
+    echo "  Deployed cron jobs to $LIVE_CRON (fresh install)"
   fi
+  chmod 600 "$LIVE_CRON" || fail "failed to chmod $LIVE_CRON"
 fi
 
 # Use local embeddings for memory search on main profile

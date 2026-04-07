@@ -56,6 +56,10 @@ workspaces/*/reports/
 audit/
 audit-local-backup/
 
+# CD-managed shadow mirror of the repo (server-side at /opt/hydra/config/,
+# written by GitHub Actions — see scripts/deploy.sh comment for full context)
+config/
+
 # Drift baseline (server-managed; written by deploy.sh after each push)
 .deployed-sha
 

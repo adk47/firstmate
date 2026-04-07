@@ -96,6 +96,7 @@ required_excludes=(
   "workspaces/*/HEARTBEAT.md"
   "audit/"
   "audit-local-backup/"
+  "config/"
   "plugins/*/node_modules/"
   "plugins/*/package-lock.json"
 )
@@ -190,6 +191,12 @@ else
       • workspaces/*/IDENTITY.md    → agent identity (server-owned)
       • workspaces/*/HEARTBEAT.md   → liveness signal
       • audit/                      → per-workspace memory snapshots, conv logs
+      • config/                     → CD-managed shadow mirror of the
+                                      entire repo (16MB), written by
+                                      GitHub Actions. scripts/deploy.sh
+                                      and the GH Actions CD are TWO
+                                      independent deploy paths — never
+                                      let one wipe the other.
       • audit-local-backup/         → 8.6MB pre-existing backup of memory
                                       snapshots (node-8, 2026-04-07,
                                       from the audit/ migration)

@@ -18,6 +18,10 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
+        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "fallbacks": [
+          "fireworks/accounts/fireworks/models/deepseek-v3p2"
+        ],
         "message": "Run the daily AWS change report. Cover the previous 24h. Query CloudTrail write events across Flagship (068358774785) us-west-2 and Plaque (686505752817) us-east-1/us-west-2. Categorize: Human Changes, Deploys, Anomaly Flags, Scaling, Data, Security, DNS & Networking, Automated Ops. Format for Slack (bold not markdown, bullets not dashes). Post as top-level message.",
         "timeoutSeconds": 600
       },
@@ -55,6 +59,10 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
+        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "fallbacks": [
+          "fireworks/accounts/fireworks/models/deepseek-v3p2"
+        ],
         "message": "Run the API change watch. For each repo (core-backend, platform-data-processing, industry-data-processing, analytics-worker, web-credits, mobile), check git log for last 24h commits. Analyze for: breaking API changes, model/schema field changes, new/removed endpoints, auth changes, SQS message format changes, database migrations. Post impact analysis.",
         "timeoutSeconds": 300
       },
@@ -128,6 +136,10 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
+        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "fallbacks": [
+          "fireworks/accounts/fireworks/models/deepseek-v3p2"
+        ],
         "message": "Daily Win-Back Campaign sheet update. Query Athena for new churned Pro users. Diff against existing emails in Google Sheet (1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs, account: a@muso.ai). ONLY APPEND new rows \u2014 never replace or overwrite tracking columns (AI-AN). Post summary of new additions.",
         "timeoutSeconds": 300
       },
@@ -196,6 +208,10 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
+        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "fallbacks": [
+          "fireworks/accounts/fireworks/models/deepseek-v3p2"
+        ],
         "message": "Daily PR Code Review. Review all PRs merged in the last 24 hours across Muso-AI repos (core-backend, platform-data-processing, industry-data-processing, analytics-worker, web-credits, mobile) for PRODUCTION RISK. For each merged PR fetch the diff. Analyze for: OOM, scaling, concurrency, data integrity, error handling, performance risks. Post results with risk ratings. Focus on real problems at production scale, not style nits.",
         "timeoutSeconds": 600
       },
@@ -233,6 +249,10 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
+        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "fallbacks": [
+          "fireworks/accounts/fireworks/models/deepseek-v3p2"
+        ],
         "message": "Generate the CMO EOD Briefing for Fede. Post to #clio_x_fede (C0AHN078CSH). Cover: Tech (commits/deploys/blockers), Fede mentions/tags, replies to Fede messages, highlights from #social-media #growth-team, notable a@muso.ai emails, and anything else major. Omit empty sections. Plain English, short, with links.",
         "timeoutSeconds": 300
       },
@@ -250,21 +270,26 @@
     {
       "id": "0e39220e-d666-4f00-b871-29a479315037",
       "agentId": "cmo",
-      "name": "b2b-reply-scanner-15m",
-      "description": "Scan Gmail for B2B prospect replies every 15 minutes",
+      "name": "b2b-reply-scanner-1h",
+      "description": "Scan Gmail for B2B prospect replies every hour",
       "enabled": true,
       "createdAtMs": 1774313970262,
       "updatedAtMs": 1774385106501,
       "schedule": {
         "kind": "every",
-        "everyMs": 900000,
+        "everyMs": 3600000,
         "anchorMs": 1774313970262
       },
       "sessionTarget": "isolated",
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Scan Gmail (a@muso.ai) for new B2B Ads outreach replies in the last 20 minutes. Use gog to check recent inbox. Filter for replies from B2B prospects we have emailed (cross-reference with the B2B outreach sheet). IGNORE all internal emails (from muso.ai domains), SaaS notifications, marketing emails, and anything that is not a direct reply from a B2B prospect.\n\nCRITICAL SILENCE RULE: If there are NO new B2B prospect replies, your ENTIRE response must be empty \u2014 literally produce no output at all. Do not say NO_REPLY, do not say \"nothing found\", do not summarize. Just stop. Fede does not want to see any message when there is nothing to report.\n\nOnly if you find an actual B2B prospect reply, format your response with: sender name, company, reply summary, and suggested next action. Also sync GHL pipeline stage if applicable (move to Replied or Meeting Booked).",
+        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "fallbacks": [
+          "fireworks/accounts/fireworks/models/deepseek-v3p2",
+          "anthropic/claude-haiku-4-5-20251001"
+        ],
+        "message": "Scan Gmail (a@muso.ai) for new B2B Ads outreach replies in the last 65 minutes. Use gog to check recent inbox. Filter for replies from B2B prospects we have emailed (cross-reference with the B2B outreach sheet). IGNORE all internal emails (from muso.ai domains), SaaS notifications, marketing emails, and anything that is not a direct reply from a B2B prospect.\n\nCRITICAL SILENCE RULE: If there are NO new B2B prospect replies, your ENTIRE response must be empty \u2014 literally produce no output at all. Do not say NO_REPLY, do not say \"nothing found\", do not summarize. Just stop. Fede does not want to see any message when there is nothing to report.\n\nOnly if you find an actual B2B prospect reply, format your response with: sender name, company, reply summary, and suggested next action. Also sync GHL pipeline stage if applicable (move to Replied or Meeting Booked).",
         "timeoutSeconds": 300
       },
       "delivery": {
@@ -301,6 +326,10 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
+        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "fallbacks": [
+          "fireworks/accounts/fireworks/models/deepseek-v3p2"
+        ],
         "message": "Run the AMP Daily Report. Query core-backend tables public_ad_events and public_ads via Athena (workgroup: clio-agent, region: us-west-2). Build report: 1) Summary: all-time/7d/today views, clicks, CTR, unique viewers with deltas. 2) Top 5 ads by CTR. 3) Underperformers (CTR < 0.3% with >1K views). 4) AMP vs Feed breakdown. 5) Platform breakdown. 6) Daily trend 7 days. Format for Slack bullets, keep short.",
         "timeoutSeconds": 120
       },
@@ -369,6 +398,10 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
+        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "fallbacks": [
+          "fireworks/accounts/fireworks/models/deepseek-v3p2"
+        ],
         "message": "Run the daily dev activity report. For each developer (adk47=Aaron, liflovs=Serhii), run the dev-report.sh script or use gh CLI to get commits from the last 24h across all Muso-AI repos (core-backend, web-credits, platform-data-processing, industry-data-processing, analytics-worker, mobile, devops, feed-service, customer-api-mcp, render-service, web-encore). For each dev: 1) Big Picture \u2014 group commits into themes, explain what was accomplished and why it matters. 2) Commit stats \u2014 per-repo counts, additions/deletions. 3) Individual commits with sha and +/-. 4) Cadence \u2014 total commits, average interval. Format for Slack mrkdwn (no tables, bullets only). Post each dev report as a separate message. If zero commits, say so briefly.",
         "timeoutSeconds": 300
       },
@@ -407,6 +440,10 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
+        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "fallbacks": [
+          "fireworks/accounts/fireworks/models/deepseek-v3p2"
+        ],
         "message": "Run a Google OAuth token health check. For each account (a@muso.ai, ak@muso.ai, aaron.k@muso.ai, f@muso.ai), use gog to list 1 Gmail message. This keeps the refresh tokens active and prevents 6-month expiry. Report results: which accounts succeeded, which failed. Always post results.",
         "timeoutSeconds": 60
       },

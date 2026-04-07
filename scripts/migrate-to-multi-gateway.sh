@@ -54,10 +54,37 @@ OPENCLAW_SERVICE_KIND=gateway
 SHAREDEOF
 
 # Extract all env vars from the existing service file into main.env
-# This captures every secret the old gateway had
+# This captures every secret the old gateway had.
+#
+# Note: systemd's `Environment=` directive in unit files supports specifier
+# expansion (%H = hostname, %i = instance name, etc.), so a literal `%`
+# must be escaped as `%%`. `EnvironmentFile=` (which the new multi-gateway
+# units use) bypasses systemd specifier expansion entirely and reads
+# values verbatim. Without the s/%%/%/g below, any password containing
+# `%` (e.g. GOG_KEYRING_PASSWORD) gets baked into main.env with a doubled
+# `%`, which then breaks any process that reads it (gog keyring decrypt
+# fails with a misleading "integrity check failed").
+#
+# The substitution is global on every line — safe because systemd unit
+# files would have already required a literal `%%` in the source to be
+# escaped, so any `%%` we see in extracted values IS a systemd escape.
+#
+# Edge case (vanishingly unlikely): if a value legitimately contained
+# the literal string `%%%%` (i.e. a real double-percent meant to survive
+# expansion), `s/%%/%/g` collapses it to `%%`, and the post-check below
+# trips and aborts. That's the right failure mode (loud, not silent),
+# but worth noting that this script will refuse to migrate any unit
+# file containing literal-`%%` runtime values. None of Muso's secrets
+# do today (verified 2026-04-07).
 grep '^Environment=' /etc/systemd/system/openclaw-gateway.service \
-  | sed 's/^Environment=//' \
+  | sed -e 's/^Environment=//' -e 's/%%/%/g' \
   > "$ENV_DIR/main.env"
+# Verify the unescape worked — if any `%%` survived, we'd silently ship a
+# broken main.env. Fail loudly instead.
+if grep -q '%%' "$ENV_DIR/main.env"; then
+  echo "FAIL: %% sequences survived unescape in $ENV_DIR/main.env" >&2
+  exit 1
+fi
 
 # Edge env — only what CS/Intercom needs (subset of main)
 grep -E '^(OPENAI_API_KEY|CLIPROXY_API_KEY|MUSOAI_INTERCOM_TOKEN)=' "$ENV_DIR/main.env" \

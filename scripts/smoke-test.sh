@@ -73,6 +73,40 @@ if needs_target "main"; then
     fail_check "Main: $UNHEALTHY unhealthy channels"
     echo "$CHANNEL_OUTPUT"
   fi
+
+  # Cron loading gate — guards against the silent path-drift outage class
+  # that took down all the cron jobs for 19 hours on 2026-04-07. The
+  # repo file at /opt/hydra/cron-jobs.json is the source of truth; the
+  # gateway must report the same job count via `cron status --json`. If
+  # the deploy script ever writes to a path the gateway doesn't read
+  # again, this check fails the deploy instead of silently shipping
+  # zero crons.
+  #
+  # Both sides explicitly resolved to a SCALAR COUNT to avoid the
+  # "compare integer to JSON array" footgun. The repo file's `.jobs`
+  # is an array (so we use `.jobs | length`). The CLI's `.jobs` happens
+  # to be a number today (verified live: openclaw cron status --json
+  # returns {"jobs": 12, ...}), but to be future-proof against the CLI
+  # ever switching shape, we handle both with `if type == array then
+  # length else . end`.
+  if [ ! -f /opt/hydra/cron-jobs.json ]; then
+    fail_check "Main: /opt/hydra/cron-jobs.json missing — repo file did not deploy"
+  else
+    EXPECTED_CRONS=$(jq '.jobs | length' /opt/hydra/cron-jobs.json 2>/dev/null || echo "?")
+    LOADED_RAW=$(openclaw --profile main cron status --json 2>&1) || LOADED_RAW=""
+    if [ -z "$LOADED_RAW" ]; then
+      fail_check "Main: openclaw cron status --json returned nothing (gateway not running?)"
+    else
+      LOADED_CRONS=$(echo "$LOADED_RAW" | jq 'if (.jobs | type) == "array" then (.jobs | length) else .jobs end' 2>/dev/null || echo "?")
+      if [[ "$EXPECTED_CRONS" == "?" || "$LOADED_CRONS" == "?" ]]; then
+        fail_check "Main: cron count check failed (expected=$EXPECTED_CRONS loaded=$LOADED_CRONS) — could not parse JSON. Raw output: $LOADED_RAW"
+      elif [[ "$LOADED_CRONS" == "$EXPECTED_CRONS" ]]; then
+        pass_check "Main: cron scheduler loaded $LOADED_CRONS jobs (matches repo)"
+      else
+        fail_check "Main: cron count mismatch — repo has $EXPECTED_CRONS, gateway loaded $LOADED_CRONS (was the cron file written to the wrong path?)"
+      fi
+    fi
+  fi
 fi
 
 # -------------------------------------------------------------------
