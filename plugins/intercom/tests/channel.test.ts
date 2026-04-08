@@ -3,6 +3,7 @@ import {
   parseConversationIdFromTarget,
   getOrCreateSession,
   accountSessions,
+  joinDeliveryChunks,
 } from "../src/channel.js";
 import { canAgentReply } from "../src/handoff.js";
 
@@ -103,5 +104,45 @@ describe("pre-send validation with session state", () => {
     const sameLookup = getOrCreateSession("acct_1", "conv_1", "ws_1");
     expect(sameLookup.handoffMode).toBe("human_takeover");
     expect(canAgentReply(sameLookup)).toBe(false);
+  });
+});
+
+describe("joinDeliveryChunks", () => {
+  it("passes a single chunk through unchanged", () => {
+    expect(joinDeliveryChunks(["Hello, world!"])).toBe("Hello, world!");
+  });
+
+  it("joins multiple chunks with double newlines (markdown paragraph break)", () => {
+    expect(joinDeliveryChunks(["Para one.", "Para two.", "Para three."])).toBe(
+      "Para one.\n\nPara two.\n\nPara three.",
+    );
+  });
+
+  it("drops empty and whitespace-only chunks", () => {
+    expect(joinDeliveryChunks(["", "Hello", "  ", "\n", "World"])).toBe(
+      "Hello\n\nWorld",
+    );
+  });
+
+  it("trims trailing whitespace on each chunk", () => {
+    expect(joinDeliveryChunks(["First line.   ", "Second line.\n"])).toBe(
+      "First line.\n\nSecond line.",
+    );
+  });
+
+  it("returns empty string for empty input", () => {
+    expect(joinDeliveryChunks([])).toBe("");
+  });
+
+  it("returns empty string when all chunks are blank", () => {
+    expect(joinDeliveryChunks(["", "  ", "\n\n"])).toBe("");
+  });
+
+  it("does not collapse internal whitespace within a chunk", () => {
+    // Preserve markdown structure inside each chunk — only trailing
+    // whitespace is stripped, not internal formatting.
+    expect(joinDeliveryChunks(["Line 1\n  indented", "Line 2"])).toBe(
+      "Line 1\n  indented\n\nLine 2",
+    );
   });
 });

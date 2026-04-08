@@ -24,6 +24,11 @@ export type IntercomWebhookTopic =
   | "conversation.admin.snoozed"
   | "conversation.admin.noted";
 
+// Shared across two Intercom shapes:
+//   - webhook notification payloads → `assignee` object
+//   - API v2.11 GET /conversations/{id} → `admin_assignee_id` / `team_assignee_id`
+// Both field sets are optional so a single type can represent either shape.
+// Consumers must handle both when reading assignment state.
 export interface IntercomConversation {
   type: "conversation";
   id: string;
@@ -32,11 +37,21 @@ export interface IntercomConversation {
   updated_at: number;
   open: boolean;
   state: "open" | "closed" | "snoozed";
-  assignee: {
+  // Webhook payload shape. Typically absent on API v2.11 GET responses —
+  // but consumers must handle the case where both this and the API
+  // fields are populated (e.g., if Intercom ever converges shapes).
+  assignee?: {
     type: "admin" | "nobody_admin" | "bot";
     id: string;
     name?: string;
   } | null;
+  // API v2.11 GET /conversations/{id} shape. Typically absent on webhook
+  // payloads. When both this and `assignee` are present, callers must
+  // prefer `admin_assignee_id` (see handler.ts live check + slack.ts
+  // describeAssignee — enforced by the "prefers admin_assignee_id over
+  // assignee when both are present" regression tests).
+  admin_assignee_id?: number | null;
+  team_assignee_id?: number | null;
   conversation_parts?: {
     conversation_parts: IntercomConversationPart[];
   };

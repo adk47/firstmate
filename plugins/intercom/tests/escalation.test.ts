@@ -3,12 +3,9 @@ import { checkEscalation } from "../src/escalation.js";
 
 describe("checkEscalation", () => {
   // True positives
-  it("escalates on 'refund'", () => {
-    const result = checkEscalation("I want a refund for my subscription");
-    expect(result.triggered).toBe(true);
-    expect(result.category).toBe("billing");
-  });
-
+  // Note: "refund" was removed from the billing triggers in commit
+  // 7484ade because plain-English refund requests should go through
+  // the normal agent flow, not auto-escalate.
   it("escalates on 'chargeback'", () => {
     const result = checkEscalation("I'm filing a chargeback with my bank");
     expect(result.triggered).toBe(true);
@@ -34,8 +31,9 @@ describe("checkEscalation", () => {
   });
 
   it("is case-insensitive", () => {
-    const result = checkEscalation("I need a REFUND immediately");
+    const result = checkEscalation("I'm filing a CHARGEBACK with my bank");
     expect(result.triggered).toBe(true);
+    expect(result.category).toBe("billing");
   });
 
   it("matches multi-word patterns", () => {

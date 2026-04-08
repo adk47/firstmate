@@ -34,7 +34,15 @@ export function formatRelativeTime(unixSeconds: number, now: number = Date.now()
   return `${years}y ago`;
 }
 
-function describeAssignee(assignee: IntercomConversation["assignee"]): string {
+function describeAssignee(conversation: IntercomConversation): string {
+  // API v2.11 GET /conversations/{id} uses admin_assignee_id; webhook
+  // payloads use the `assignee` object. Prefer the API field so
+  // escalation cards (built from getConversation responses) don't
+  // always show "Unassigned".
+  if (conversation.admin_assignee_id != null) {
+    return `admin:${conversation.admin_assignee_id}`;
+  }
+  const assignee = conversation.assignee;
   if (!assignee || assignee.type === "nobody_admin") return "Unassigned";
   if (assignee.type === "bot") return `Bot${assignee.name ? ` (${assignee.name})` : ""}`;
   return assignee.name ? `${assignee.name}` : `admin:${assignee.id}`;
@@ -122,7 +130,7 @@ export function buildEscalationSlackMessage(
 ): SlackMessagePayload {
   const url = intercomUrl(account, escalation.conversationId);
   const user = describeUser(conversation);
-  const assignee = describeAssignee(conversation.assignee);
+  const assignee = describeAssignee(conversation);
   const convState = conversation.state ?? (conversation.open ? "open" : "unknown");
   const started = formatRelativeTime(conversation.created_at, now);
   const updated = formatRelativeTime(conversation.updated_at, now);

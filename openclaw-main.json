@@ -113,6 +113,23 @@
             "api": "openai-completions"
           },
           {
+            "id": "accounts/fireworks/models/glm-5p1",
+            "name": "GLM-5.1",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 8192,
+            "reasoning": true,
+            "cost": {
+              "input": 1.4,
+              "output": 4.4,
+              "cacheRead": 0.26,
+              "cacheWrite": 0
+            },
+            "contextWindow": 202752,
+            "api": "openai-completions"
+          },
+          {
             "id": "accounts/fireworks/models/deepseek-v3p2",
             "name": "DeepSeek-V3",
             "input": [
@@ -242,9 +259,9 @@
         "id": "operations",
         "workspace": "/opt/hydra/workspaces/operations",
         "model": {
-          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "primary": "fireworks/accounts/fireworks/models/glm-5p1",
           "fallbacks": [
-            "fireworks/accounts/fireworks/models/deepseek-v3p2",
+            "fireworks/accounts/fireworks/models/glm-5",
             "anthropic/claude-sonnet-4-6"
           ]
         }

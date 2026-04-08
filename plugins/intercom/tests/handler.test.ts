@@ -37,7 +37,10 @@ describe("handleWebhookEvent", () => {
         item: {
           ...userCreated.data.item,
           source: {
-            body: "I want a refund for my subscription",
+            // "chargeback" (not "refund" — refund was removed from the
+            // billing escalation triggers in 7484ade because plain-English
+            // refund requests should flow through the normal agent).
+            body: "I'm filing a chargeback with my bank",
             author: { type: "user", id: "user_abc" },
           },
         },
@@ -336,6 +339,179 @@ describe("handleWebhookEvent", () => {
         expect(result.reason).toContain("live check");
       }
       expect(updated?.lifecycleState).toBe("closed");
+    });
+
+    // --- Regression tests for Intercom API v2.11 shape ---
+    // The real GET /conversations/{id} endpoint returns `admin_assignee_id`
+    // (number), not the webhook-shaped `assignee` object. Prior to the fix,
+    // the live check read `conversation.assignee?.id` and silently reset
+    // handoff state on every customer follow-up.
+
+    it("filters when live API reports admin_assignee_id for a human (v2.11 shape)", async () => {
+      const state = createInitialSessionState("conv_123", "ws_1");
+      const client = new MockIntercomClient();
+      client.getConversation = async (params) => {
+        client.calls.getConversation.push(params);
+        return {
+          type: "conversation" as const,
+          id: params.conversationId,
+          title: null,
+          created_at: Date.now() / 1000,
+          updated_at: Date.now() / 1000,
+          open: true,
+          state: "open" as const,
+          // Real API v2.11 shape — no `assignee` object.
+          admin_assignee_id: 9999,
+          team_assignee_id: null,
+        };
+      };
+
+      const payload = { ...userCreated, id: "evt_v211_human" };
+      const { result, state: updated } = await handleWebhookEvent(
+        payload as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
+      );
+      expect(result.action).toBe("filtered");
+      if (result.action === "filtered") {
+        expect(result.reason).toContain("human assignee 9999");
+      }
+      expect(updated?.handoffMode).toBe("human_takeover");
+      expect(updated?.currentAssigneeId).toBe("9999");
+      expect(updated?.currentAssigneeType).toBe("admin");
+    });
+
+    it("dispatches when live API reports admin_assignee_id for the bot (v2.11 shape)", async () => {
+      const state = createInitialSessionState("conv_123", "ws_1");
+      // BOT_ADMIN_ID is the string "bot_1" in this test suite; to match the
+      // v2.11 numeric shape we use a numeric bot id here via a local const.
+      const NUMERIC_BOT_ID = "4359478";
+      const client = new MockIntercomClient();
+      client.getConversation = async (params) => {
+        client.calls.getConversation.push(params);
+        return {
+          type: "conversation" as const,
+          id: params.conversationId,
+          title: null,
+          created_at: Date.now() / 1000,
+          updated_at: Date.now() / 1000,
+          open: true,
+          state: "open" as const,
+          admin_assignee_id: 4359478,
+          team_assignee_id: null,
+        };
+      };
+
+      const payload = { ...userCreated, id: "evt_v211_bot" };
+      const { result, state: updated } = await handleWebhookEvent(
+        payload as IntercomWebhookPayload, state, NUMERIC_BOT_ID, client,
+      );
+      expect(result.action).toBe("dispatch_to_agent");
+      expect(updated?.handoffMode).toBe("agent_active");
+      expect(updated?.currentAssigneeId).toBe("4359478");
+      expect(updated?.currentAssigneeType).toBe("admin");
+    });
+
+    it("dispatches when live API reports no admin assignee (v2.11 shape, team only)", async () => {
+      const state = createInitialSessionState("conv_123", "ws_1");
+      const client = new MockIntercomClient();
+      client.getConversation = async (params) => {
+        client.calls.getConversation.push(params);
+        return {
+          type: "conversation" as const,
+          id: params.conversationId,
+          title: null,
+          created_at: Date.now() / 1000,
+          updated_at: Date.now() / 1000,
+          open: true,
+          state: "open" as const,
+          admin_assignee_id: null,
+          team_assignee_id: 2238258,
+        };
+      };
+
+      const payload = { ...userCreated, id: "evt_v211_team" };
+      const { result, state: updated } = await handleWebhookEvent(
+        payload as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
+      );
+      expect(result.action).toBe("dispatch_to_agent");
+      expect(updated?.handoffMode).toBe("agent_active");
+      expect(updated?.currentAssigneeId).toBeNull();
+      expect(updated?.currentAssigneeType).toBeNull();
+    });
+
+    it("prefers admin_assignee_id over assignee when both are present", async () => {
+      // Regression guard: both handler.ts and slack.ts prefer `admin_assignee_id`
+      // over the legacy `assignee` object. A future refactor reordering the
+      // conditions would silently flip behavior without this test.
+      const state = createInitialSessionState("conv_123", "ws_1");
+      const client = new MockIntercomClient();
+      client.getConversation = async (params) => {
+        client.calls.getConversation.push(params);
+        return {
+          type: "conversation" as const,
+          id: params.conversationId,
+          title: null,
+          created_at: Date.now() / 1000,
+          updated_at: Date.now() / 1000,
+          open: true,
+          state: "open" as const,
+          // API says the human 5465657 owns it.
+          admin_assignee_id: 5465657,
+          // Stale webhook-shape field says the bot owns it — must be ignored.
+          assignee: { type: "admin" as const, id: BOT_ADMIN_ID, name: "Bot" },
+        };
+      };
+
+      const payload = { ...userCreated, id: "evt_v211_both" };
+      const { result, state: updated } = await handleWebhookEvent(
+        payload as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
+      );
+      // admin_assignee_id (5465657) is a real human → human_takeover.
+      expect(result.action).toBe("filtered");
+      if (result.action === "filtered") {
+        expect(result.reason).toContain("human assignee 5465657");
+      }
+      expect(updated?.handoffMode).toBe("human_takeover");
+      expect(updated?.currentAssigneeId).toBe("5465657");
+    });
+
+    it("preserves human_takeover when API response omits assignee fields entirely", async () => {
+      // Regression guard: before the fix, an API response with neither
+      // `assignee` nor `admin_assignee_id` silently reset handoffMode to
+      // agent_active. After the fix, missing signal = preserve existing
+      // state, and canAgentReply() filters the customer message because
+      // state is still human_takeover.
+      const state = createInitialSessionState("conv_123", "ws_1");
+      state.handoffMode = "human_takeover";
+      state.currentAssigneeId = "5465657";
+      state.currentAssigneeType = "admin";
+
+      const client = new MockIntercomClient();
+      client.getConversation = async (params) => {
+        client.calls.getConversation.push(params);
+        // Deliberately omit `assignee`, `admin_assignee_id`, `team_assignee_id`.
+        return {
+          type: "conversation" as const,
+          id: params.conversationId,
+          title: null,
+          created_at: Date.now() / 1000,
+          updated_at: Date.now() / 1000,
+          open: true,
+          state: "open" as const,
+        };
+      };
+
+      const payload = { ...userCreated, id: "evt_v211_missing" };
+      const { result, state: updated } = await handleWebhookEvent(
+        payload as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
+      );
+      expect(updated?.handoffMode).toBe("human_takeover");
+      expect(updated?.currentAssigneeId).toBe("5465657");
+      expect(updated?.currentAssigneeType).toBe("admin");
+      // canAgentReply() is false for human_takeover → filtered.
+      expect(result.action).toBe("filtered");
+      if (result.action === "filtered") {
+        expect(result.reason).toContain("human_takeover");
+      }
     });
   });
 });

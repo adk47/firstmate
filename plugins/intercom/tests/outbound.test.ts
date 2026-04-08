@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { MockIntercomClient, RealIntercomClient, trackOutboundMessageId } from "../src/outbound.js";
 
 describe("MockIntercomClient", () => {
@@ -33,9 +33,63 @@ describe("MockIntercomClient", () => {
 });
 
 describe("RealIntercomClient", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
   it("constructs with token", () => {
     const client = new RealIntercomClient("test_token");
     expect(client).toBeDefined();
+  });
+
+  it("replyToConversation returns the new part id, not the conversation id", async () => {
+    // Regression: Intercom's /conversations/{id}/reply endpoint returns
+    // the full conversation, whose `id` is the conversation id. The new
+    // message part is the last entry in conversation_parts. Previously
+    // we returned `data.id`, which silently broke isSelfReply() dedup.
+    globalThis.fetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          type: "conversation",
+          id: "215473828430407", // conversation id
+          conversation_parts: {
+            conversation_parts: [
+              { type: "conversation_part", id: "part_old_1" },
+              { type: "conversation_part", id: "part_new_xyz" },
+            ],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const client = new RealIntercomClient("test_token");
+    const result = await client.replyToConversation({
+      conversationId: "215473828430407",
+      adminId: "4359478",
+      body: "hi",
+    });
+    expect(result.messageId).toBe("part_new_xyz");
+    expect(result.messageId).not.toBe("215473828430407");
+  });
+
+  it("replyToConversation returns empty messageId when no parts are present", async () => {
+    globalThis.fetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({ type: "conversation", id: "conv_1" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const client = new RealIntercomClient("test_token");
+    const result = await client.replyToConversation({
+      conversationId: "conv_1",
+      adminId: "admin_1",
+      body: "hi",
+    });
+    expect(result.messageId).toBe("");
   });
 });
 
@@ -52,5 +106,15 @@ describe("trackOutboundMessageId", () => {
     expect(ids.length).toBe(500);
     expect(ids).not.toContain("msg_0");
     expect(ids).toContain("msg_new");
+  });
+
+  it("ignores empty-string messageId (poisoning guard)", () => {
+    // Regression: replyToConversation returns "" when the Intercom response
+    // has no conversation_parts. If that "" lands in outboundMessageIds,
+    // isSelfReply() false-positives on any admin_reply whose part.id also
+    // parses to "", silently filtering legitimate human-admin takeovers.
+    const ids: string[] = [];
+    trackOutboundMessageId("", ids);
+    expect(ids).toHaveLength(0);
   });
 });

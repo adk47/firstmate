@@ -8,7 +8,11 @@ import { listIntercomAccountIds, resolveIntercomAccount } from "./config.js";
 import { validateHmacSignature } from "./webhook.js";
 import { handleWebhookEvent } from "./handler.js";
 import { createInitialSessionState, canAgentReply } from "./handoff.js";
-import { RealIntercomClient, trackOutboundMessageId } from "./outbound.js";
+import {
+  RealIntercomClient,
+  trackOutboundMessageId,
+  IntercomAssignmentConflictError,
+} from "./outbound.js";
 import { initStateStore, loadSessions, saveSessions } from "./state-store.js";
 import {
   buildEscalationSlackMessage,
@@ -69,6 +73,30 @@ export function parseConversationIdFromTarget(to: string): string | null {
 }
 
 const MAX_BODY_BYTES = 1_048_576; // 1MB
+
+/**
+ * Join agent reply chunks into a single Intercom message body.
+ *
+ * The OpenClaw SDK's EmbeddedBlockChunker splits agent responses into
+ * paragraph/sentence chunks for streaming channels like Slack or IRC.
+ * For Intercom we want a single consolidated reply per agent turn,
+ * so we buffer chunks and concatenate here.
+ *
+ * Rules:
+ *   - Drop empty/whitespace-only chunks.
+ *   - Trim trailing whitespace on each chunk.
+ *   - Join with "\n\n" so markdown paragraphs survive the merge,
+ *     but only between non-empty chunks (no leading/trailing blanks).
+ *   - Single-chunk input passes through untouched (common case).
+ */
+export function joinDeliveryChunks(chunks: string[]): string {
+  const filtered = chunks
+    .map((c) => c.replace(/\s+$/u, ""))
+    .filter((c) => c.length > 0);
+  if (filtered.length === 0) return "";
+  if (filtered.length === 1) return filtered[0];
+  return filtered.join("\n\n");
+}
 
 async function readRequestBody(req: IncomingMessage): Promise<string | null> {
   const chunks: Buffer[] = [];
@@ -192,7 +220,11 @@ export const intercomPlugin = createChatChannelPlugin({
                   log?.info?.(`[${tag}] ${payload.topic} conv=${conversationId} → ${result.action}`);
 
                   if (result.action === "dispatch_to_agent") {
-                    // Assign conversation to bot if not already assigned (fire-and-forget)
+                    // Assign conversation to bot if not already assigned (fire-and-forget).
+                    // `IntercomAssignmentConflictError` means the conversation is already
+                    // assigned to the bot — expected on gateway restart, concurrent
+                    // webhooks, or manual reassigns in the Intercom UI. Treat as a no-op
+                    // state sync; don't log as an error.
                     if (state.currentAssigneeId !== account.botAdminId) {
                       client.assignConversation({
                         conversationId: result.conversationId,
@@ -202,10 +234,24 @@ export const intercomPlugin = createChatChannelPlugin({
                         state.currentAssigneeId = account.botAdminId;
                         saveSessions(accountSessions).catch(() => {});
                         log?.info?.(`[${tag}] assigned conv=${result.conversationId} to bot`);
-                      }).catch((err) =>
-                        log?.warn?.(`[${tag}] failed to self-assign conv=${result.conversationId}: ${err}`),
-                      );
+                      }).catch((err) => {
+                        if (err instanceof IntercomAssignmentConflictError) {
+                          state.currentAssigneeId = account.botAdminId;
+                          saveSessions(accountSessions).catch(() => {});
+                          return;
+                        }
+                        log?.warn?.(`[${tag}] failed to self-assign conv=${result.conversationId}: ${err}`);
+                      });
                     }
+
+                    // Buffer chunked deliveries from the SDK's EmbeddedBlockChunker
+                    // and flush as a single Intercom reply after dispatch returns.
+                    // Without this, each paragraph/sentence chunk becomes a separate
+                    // Intercom message — conv=215473826733450 on 2026-04-08 produced
+                    // 5 replies in 5 seconds for one customer message, which reads
+                    // to the customer as the bot spamming them.
+                    const bufferedChunks: string[] = [];
+                    let droppedMidStream = false;
 
                     await dispatchInboundDirectDmWithRuntime({
                       cfg,
@@ -228,34 +274,58 @@ export const intercomPlugin = createChatChannelPlugin({
                           return;
                         }
 
-                        // Pre-send validation: check handoff state
-                        if (state && !canAgentReply(state)) {
-                          console.warn(
-                            `[${tag}] deliver dropped: ${state.handoffMode}/${state.lifecycleState} conv=${result.conversationId}`,
-                          );
+                        // If the customer took over (or closed/snoozed) while the
+                        // agent was still generating, drop any further chunks.
+                        // `state` is always non-null here (captured from the
+                        // getOrCreateSession call above) — no `state &&` guard needed.
+                        if (!canAgentReply(state)) {
+                          if (!droppedMidStream) {
+                            log?.warn?.(
+                              `[${tag}] deliver dropped mid-stream: ${state.handoffMode}/${state.lifecycleState} conv=${result.conversationId}`,
+                            );
+                            droppedMidStream = true;
+                          }
                           return;
                         }
 
-                        try {
-                          const { messageId } = await client.replyToConversation({
-                            conversationId: result.conversationId,
-                            adminId: account.botAdminId,
-                            body: text,
-                          });
-                          if (state) {
-                            trackOutboundMessageId(messageId, state.outboundMessageIds);
-                            state.updatedAt = new Date().toISOString();
-                          }
-                          log?.info?.(`[${tag}] replied conv=${result.conversationId} msgId=${messageId}`);
-                        } catch (err) {
-                          log?.error?.(`[${tag}] deliver reply failed conv=${result.conversationId}: ${err}`);
-                        }
+                        bufferedChunks.push(text);
                       },
                       onRecordError: (err) =>
                         log?.error?.(`[${tag}] session record error: ${err}`),
                       onDispatchError: (err, info) =>
                         log?.error?.(`[${tag}] dispatch error (${info.kind}): ${err}`),
                     });
+
+                    // Flush buffered chunks as a single Intercom reply.
+                    // Re-check `canAgentReply` here to catch state flips that
+                    // landed between the last `deliver` call and dispatch resolve
+                    // (e.g., a human took over in the final ms of generation).
+                    if (bufferedChunks.length > 0 && canAgentReply(state)) {
+                      const joined = joinDeliveryChunks(bufferedChunks);
+                      try {
+                        const { messageId } = await client.replyToConversation({
+                          conversationId: result.conversationId,
+                          adminId: account.botAdminId,
+                          body: joined,
+                        });
+                        trackOutboundMessageId(messageId, state.outboundMessageIds);
+                        state.updatedAt = new Date().toISOString();
+                        log?.info?.(
+                          `[${tag}] replied conv=${result.conversationId} partId=${messageId || "<none>"} chunks=${bufferedChunks.length}`,
+                        );
+                      } catch (err) {
+                        // Customer-facing delivery failure: grep-able alert prefix
+                        // so ops can wire Slack/Sentry on `[intercom:ALERT]`.
+                        // TODO(follow-up): POST to account.fallbackSlackSupervisionChannel.
+                        log?.error?.(
+                          `[intercom:ALERT] [${tag}] flush failed conv=${result.conversationId} chunks=${bufferedChunks.length} error=${err}`,
+                        );
+                      }
+                    } else if (bufferedChunks.length > 0 && !droppedMidStream) {
+                      log?.warn?.(
+                        `[${tag}] deliver dropped after dispatch: ${state.handoffMode}/${state.lifecycleState} conv=${result.conversationId}`,
+                      );
+                    }
                   } else if (result.action === "escalate") {
 
                     // 1. Send fallback ack to customer

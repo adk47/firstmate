@@ -174,6 +174,37 @@ describe("buildEscalationSlackMessage", () => {
     expect(fieldTexts).toContain("unknown"); // handoff mode when state is null
   });
 
+  it("renders assignee from admin_assignee_id when API v2.11 shape is used", () => {
+    // Regression: escalation cards are built from the live API response,
+    // which uses `admin_assignee_id` (number), not the webhook `assignee`
+    // object. Prior to the fix this showed "Unassigned" in every card.
+    const apiShape = makeConversation({
+      assignee: undefined,
+      admin_assignee_id: 5465657,
+      team_assignee_id: 2238258,
+    });
+    const payload = buildEscalationSlackMessage(escalation, apiShape, account, session, NOW);
+    const fieldsBlock = (payload.blocks as any[]).find((b) => b.fields) as any;
+    const fieldTexts = fieldsBlock.fields.map((f: any) => f.text).join("\n");
+    expect(fieldTexts).toContain("admin:5465657");
+    expect(fieldTexts).not.toContain("Unassigned");
+  });
+
+  it("prefers admin_assignee_id over assignee when both are present", () => {
+    // Regression guard: describeAssignee must prefer the v2.11 API field
+    // over a stale legacy `assignee` object. A future refactor reordering
+    // the checks would silently flip the rendered assignee.
+    const mixed = makeConversation({
+      admin_assignee_id: 5465657,
+      assignee: { type: "admin", id: "stale_bot_id", name: "Stale Bot" },
+    });
+    const payload = buildEscalationSlackMessage(escalation, mixed, account, session, NOW);
+    const fieldsBlock = (payload.blocks as any[]).find((b) => b.fields) as any;
+    const fieldTexts = fieldsBlock.fields.map((f: any) => f.text).join("\n");
+    expect(fieldTexts).toContain("admin:5465657");
+    expect(fieldTexts).not.toContain("Stale Bot");
+  });
+
   it("truncates long bodies to 500 chars with ellipsis", () => {
     const long = "a".repeat(800);
     const payload = buildEscalationSlackMessage(

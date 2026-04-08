@@ -10,6 +10,12 @@ import {
   canAgentReply,
 } from "./handoff.js";
 
+// Module-level set of conversation ids we've already warned about for the
+// "unexpected API shape" branch (neither admin_assignee_id nor assignee
+// present on the live-check response). Prevents log spam while still
+// surfacing shape drift the first time it's seen per process lifetime.
+const apiShapeWarned = new Set<string>();
+
 export type HandlerAction =
   | { action: "dispatch_to_agent"; conversationId: string; body: string; authorId: string }
   | { action: "escalate"; conversationId: string; category: string; matchedPattern: string; body: string }
@@ -69,29 +75,64 @@ export async function handleWebhookEvent(
             };
           }
 
-          // Check assignee from live data
-          const assigneeId = conversation.assignee?.id ?? null;
-          const assigneeType = conversation.assignee?.type ?? null;
-          if (assigneeId && assigneeType === "admin" && assigneeId !== botAdminId) {
-            state.handoffMode = "human_takeover";
-            state.currentAssigneeId = assigneeId;
-            state.currentAssigneeType = assigneeType;
-            state.updatedAt = new Date().toISOString();
-            return {
-              result: {
-                action: "filtered",
-                conversationId: classified.conversationId,
-                reason: `live check: human assignee ${assigneeId}`,
-              },
-              state,
-            };
-          }
+          // Check assignee from live data. API v2.11 GET /conversations/{id}
+          // returns admin_assignee_id (number), not the webhook-shaped
+          // `assignee` object. Prefer the API field; fall back to `assignee`
+          // for legacy or test-shape responses (also keeps webhook-shape
+          // test fixtures exercising this branch).
+          //
+          // If neither signal is present, the API shape is unexpected —
+          // preserve existing state rather than risk wiping a legitimate
+          // human_takeover. The pre-fix code did `assignee?.id ?? null`,
+          // which collapsed the missing-field case into a definitive "no
+          // assignee" and silently reset state on every customer reply.
+          const hasApiSignal =
+            conversation.admin_assignee_id !== undefined ||
+            conversation.assignee !== undefined;
 
-          // Bot, nobody, or our bot — restore agent_active (clears stale human_takeover)
-          state.handoffMode = "agent_active";
-          state.currentAssigneeId = assigneeId;
-          state.currentAssigneeType = assigneeType;
-          state.updatedAt = new Date().toISOString();
+          if (hasApiSignal) {
+            const adminAssigneeId: string | null =
+              conversation.admin_assignee_id != null
+                ? String(conversation.admin_assignee_id)
+                : conversation.assignee?.type === "admin"
+                  ? conversation.assignee.id
+                  : null;
+
+            if (adminAssigneeId && adminAssigneeId !== botAdminId) {
+              state.handoffMode = "human_takeover";
+              state.currentAssigneeId = adminAssigneeId;
+              state.currentAssigneeType = "admin";
+              state.updatedAt = new Date().toISOString();
+              return {
+                result: {
+                  action: "filtered",
+                  conversationId: classified.conversationId,
+                  reason: `live check: human assignee ${adminAssigneeId}`,
+                },
+                state,
+              };
+            }
+
+            // Bot admin, no admin assignee, or our bot — agent_active.
+            // Only clears stale human_takeover when the live API explicitly
+            // confirms `admin_assignee_id` is null/our-bot (or, in legacy
+            // shape, the `assignee` is non-admin).
+            state.handoffMode = "agent_active";
+            state.currentAssigneeId = adminAssigneeId;
+            state.currentAssigneeType = adminAssigneeId ? "admin" : null;
+            state.updatedAt = new Date().toISOString();
+          } else {
+            // Unexpected API shape — preserve existing state, fall through.
+            // Warn once per conv per process so shape drift surfaces in logs
+            // (this is the exact class of bug the PR is fixing — we want
+            // loud observability if it ever regresses again).
+            if (!apiShapeWarned.has(classified.conversationId)) {
+              apiShapeWarned.add(classified.conversationId);
+              console.warn(
+                `[intercom:handler] live check returned unexpected shape (no admin_assignee_id or assignee) conv=${classified.conversationId} — preserving cached state ${state.handoffMode}/${state.lifecycleState}`,
+              );
+            }
+          }
         } catch (err) {
           if (err instanceof RateLimitError) {
             console.error(
