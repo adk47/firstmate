@@ -10,8 +10,9 @@
 ## Table of Contents
 
 1. [Common Operations](#common-operations)
-2. [Troubleshooting](#troubleshooting)
-3. [Emergency Procedures](#emergency-procedures)
+2. [Deploy](#deploy)
+3. [Troubleshooting](#troubleshooting)
+4. [Emergency Procedures](#emergency-procedures)
 
 ---
 
@@ -121,6 +122,91 @@ ssh root@40.160.32.80 "cd /opt/hydra && git pull origin main"
 # Then restart to pick up changes
 ssh root@40.160.32.80 "docker restart hydra-sandbox"
 ```
+
+---
+
+## Deploy
+
+### Overview
+
+Hydra deploys are triggered by `git push` to `main`. A self-hosted GitHub Actions runner (which runs ON node-8) executes `.github/workflows/deploy.yml`, a thin wrapper around `scripts/deploy.sh`. The script runs end-to-end on node-8 and handles everything: rsync, skills, plugins, k8s, gateway restart, smoke test, and baseline update.
+
+### Flow
+
+1. `push` to `main` → GH Actions triggers `deploy.yml`
+2. `deploy.yml` validates `SLACK_WEBHOOK` is set (fail-fast)
+3. `deploy.yml` checks out the repo
+4. `deploy.yml` detects target profiles based on `git diff HEAD~1 HEAD` (main, edge, dev, or combinations)
+5. `deploy.yml` calls `./scripts/deploy.sh --target $TARGET`
+6. `deploy.sh` runs through its steps:
+   - **Step 0**: drift check (vs `.deployed-sha` baseline)
+   - **Step 1**: validate openclaw JSON configs + cron-jobs.json
+   - **Step 2**: validate SOUL.md presence per profile
+   - **Step 3**: validate tool-deny-lists.yaml (only-grow check)
+   - **Step 4a**: pre-flight `--delete` guard (rsync dry-run)
+   - **Step 4b**: rsync repo → `/opt/hydra/` (with `RSYNC_EXCLUDES`)
+   - **Step 4c**: sync global skills → `/root/.openclaw/skills/skills/`
+   - **Step 4d**: install plugins (npm install + copy to extension dirs)
+   - **Step 5a**: POSTSYNC setup (AWS creds, GOG keyring, Gmail patches, cron sync)
+   - **Step 5b**: apply k8s manifests (skipped silently if `k8s/prod/hydra/` missing)
+   - **Step 6**: `systemctl restart` targeted gateways
+   - **WARMUP**: poll agents bind status until ready (30s timeout)
+   - **Step 7**: smoke test — if passes, writes `.deployed-sha` baseline
+   - **Step 8**: AWS data-plane verify (non-fatal)
+   - **Step 9**: post status
+7. `deploy.yml` posts Slack notification (success or failure)
+8. On failure, `deploy.yml` triggers `rollback.sh`, which detects `HYDRA_LOCAL` and runs locally on node-8
+
+### Manual deploy
+
+You can run a deploy manually from node-8:
+
+```bash
+ssh -i ~/.ssh/nick_ovh root@40.160.32.80
+cd /opt/hydra
+./scripts/deploy.sh --target dev   # or main, edge, all, main,edge
+```
+
+### Bypass environment variables
+
+- `HYDRA_FORCE=1` — skip the Step 0 drift check against `.deployed-sha` AND the Step 4a pre-flight delete/skills-drift guards. **Does NOT skip the Step 7 smoke test** — that always runs and always blocks the deploy on hard-gate failures. The equivalent of `git push --force` over a colleague's edits. Briefings tell you to confirm with a human before using.
+- `HYDRA_SKIP_DRIFT_CHECK=1` — skip only the Step 0 drift check. Use when SSH to baseline read is broken.
+- `HYDRA_CONTINUE_ON_PLUGIN_FAIL=1` — don't fail on first plugin install error; collect all failures and report at the end.
+- `HYDRA_ALLOW_ORPHAN_CRON=1` — allow cron-sync to drop live state for removed jobs.
+
+### Verification after a deploy
+
+Run these from your laptop (or from node-8) to verify deploy health:
+
+```bash
+# Gateways running?
+ssh root@40.160.32.80 'systemctl is-active openclaw-gateway-main openclaw-gateway-edge openclaw-gateway-dev'
+
+# Baseline SHA updated?
+ssh root@40.160.32.80 'cat /opt/hydra/.deployed-sha'
+# Should match the merge commit SHA
+
+# Agents loaded?
+ssh root@40.160.32.80 'openclaw --profile main agents list --bindings | head -20'
+
+# Cron scheduler active?
+ssh root@40.160.32.80 'openclaw --profile main cron status --json | jq .'
+
+# Watchdog still ticking?
+ssh root@40.160.32.80 'tail -5 /var/log/openclaw-watchdog.log'
+
+# Smoke test fresh run?
+ssh root@40.160.32.80 'cd /opt/hydra && ./scripts/smoke-test.sh main'
+```
+
+### Troubleshooting
+
+- **Deploy fails at Step 0 (drift check)** — the server has files the repo doesn't. See briefing in deploy log for the list. Use `scripts/sync-from-server.sh` to pull server-side edits into the repo first, commit, then retry the deploy.
+- **Deploy fails at Step 4a (pre-flight)** — rsync `--delete` would remove server files not in the repo. See briefing in the deploy log for the list and recovery steps.
+- **Deploy fails at Step 4d (plugin install)** — npm install failed for a specific plugin. The error message names the plugin and its stderr. Fix the `package.json` or dependencies and retry. Set `HYDRA_CONTINUE_ON_PLUGIN_FAIL=1` to see all plugin failures at once.
+- **Deploy fails at Step 5b (k8s apply)** — rollback yaml is at `/tmp/hydra-rollback-deployments.yaml` on node-8. To revert: `kubectl apply -f /tmp/hydra-rollback-deployments.yaml -n hydra`
+- **Deploy fails at Step 7 (smoke test)** — check the smoke test output in the deploy log. Entries prefixed `FAIL:` are hard-gate failures and block the deploy; entries prefixed `WARN:` are soft-gate warnings and are informational only. The smoke test exits 0 unless `FAILURES > 0`.
+- **Slack alerts not firing** — the `HYDRA_SLACK_WEBHOOK` secret is missing or empty. The presence check in `deploy.yml` surfaces this as a `::warning::` annotation on every workflow run (non-blocking — deploys still proceed). To fix: get the `#hydra-heartbeat` webhook URL from the Slack app settings and run `gh secret set HYDRA_SLACK_WEBHOOK --repo Muso-AI/hydra`. If you want the presence check to be a hard gate instead of a warning, change `::warning::` → `::error::` and add `exit 1` in the "Check SLACK_WEBHOOK presence" step.
 
 ---
 

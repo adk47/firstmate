@@ -33,7 +33,7 @@ shopt -s nullglob
 # ---------------------------------------------------------------
 # Check 1: every skills-all/<skill>/ has a SKILL.md
 # ---------------------------------------------------------------
-echo "  [1/3] skills-all structure"
+echo "  [1/4] skills-all structure"
 if [[ ! -d skills-all ]]; then
   fail "skills-all/ directory missing — refusing to commit (this would silently 'pass' an empty skill set)"
 fi
@@ -85,7 +85,7 @@ fi
 #       the shared array (so a future "I'll just call rsync directly"
 #       can't accidentally bypass the excludes)
 # ---------------------------------------------------------------
-echo "  [2/3] deploy.sh safety excludes"
+echo "  [2/4] deploy.sh safety excludes"
 DEPLOY_SH="scripts/deploy.sh"
 required_excludes=(
   "workspaces/*/memory/"
@@ -191,12 +191,12 @@ else
       • workspaces/*/IDENTITY.md    → agent identity (server-owned)
       • workspaces/*/HEARTBEAT.md   → liveness signal
       • audit/                      → per-workspace memory snapshots, conv logs
-      • config/                     → CD-managed shadow mirror of the
-                                      entire repo (16MB), written by
-                                      GitHub Actions. scripts/deploy.sh
-                                      and the GH Actions CD are TWO
-                                      independent deploy paths — never
-                                      let one wipe the other.
+      • config/                     → dead CD shadow mirror (~16MB)
+                                      from the pre-2026-04-08
+                                      architecture. GitHub Actions no
+                                      longer writes here. The exclude
+                                      protects it until manual cleanup
+                                      (rm -rf /opt/hydra/config/).
       • audit-local-backup/         → 8.6MB pre-existing backup of memory
                                       snapshots (node-8, 2026-04-07,
                                       from the audit/ migration)
@@ -212,9 +212,11 @@ else
        (it's hoisted there because Step 0 also reads it)
     3. Add the missing --exclude='...' line(s) listed above to the array
     4. Make sure every rsync invocation still uses "${RSYNC_EXCLUDES[@]}"
-       (this hook checks that automatically — there are 6 rsync calls
-       in deploy.sh today: dry-runs in Step 0 and Step 4a, real syncs
-       in Step 4b, each in a local + remote variant)
+       (this hook checks that automatically — there are 8 rsync calls
+       in deploy.sh today: dry-runs in Step 0 and Step 4a (each with
+       local + remote variants = 4), real syncs in Step 4b (local +
+       remote = 2), Step 4c skills sync (1), and install_plugin update
+       path (1). The exact count may grow as new steps are added.)
     5. Re-run: bash .githooks/pre-commit
 
   IF YOU INTENTIONALLY REMOVED AN EXCLUDE:
@@ -239,7 +241,7 @@ fi
 # (prevents someone accidentally committing a dispute-tracker snapshot
 # or api-log dump pulled from the server)
 # ---------------------------------------------------------------
-echo "  [3/3] staged files not under runtime-data paths"
+echo "  [3/4] staged files not under runtime-data paths"
 staged=$(git diff --cached --name-only --diff-filter=A)
 # Block paths that are 100% server-owned. We deliberately do NOT block
 # IDENTITY.md / HEARTBEAT.md / .openclaw — those are mixed (some workspaces
@@ -286,6 +288,85 @@ BRIEFING
   fi
 else
   ok "no newly-added files to check"
+fi
+
+# ---------------------------------------------------------------
+# Check 4: shellcheck on staged *.sh files
+# ---------------------------------------------------------------
+# The 6 bash bugs in smoke-test.sh that caused 2026-04-07's deploy
+# failures (broken `grep -c PATTERN || echo 0` patterns producing
+# multi-line "0\n0") would all have been caught by shellcheck
+# --severity=warning at commit time. This check makes that the
+# default going forward.
+#
+# If shellcheck isn't installed locally, print a LOUD warning but
+# don't block the commit — the CI gate (pr-validate.yml) catches
+# issues at PR time regardless.
+echo "  [4/4] shellcheck on staged *.sh files"
+if ! command -v shellcheck >/dev/null 2>&1; then
+  yellow ""
+  yellow "══════════════════════════════════════════════════════════════════════"
+  yellow "⚠  SHELLCHECK NOT INSTALLED — FLYING BLIND ON BASH BUGS"
+  yellow "══════════════════════════════════════════════════════════════════════"
+  yellow "You are committing bash code without shellcheck validation. The CI"
+  yellow "gate will still catch issues, but you won't see them until PR review."
+  yellow ""
+  yellow "Install: brew install shellcheck   (macOS)"
+  yellow "         apt install shellcheck    (debian/ubuntu)"
+  yellow ""
+  yellow "Recent bash bugs that shellcheck would have caught at commit time:"
+  yellow "  - smoke-test.sh 6x grep -c PATTERN || echo 0 (2026-04-07)"
+  yellow "  - Caused 18 smoke-test failures per deploy / silent rollback loop"
+  yellow "══════════════════════════════════════════════════════════════════════"
+  yellow ""
+  ok "skipped (shellcheck not installed)"
+else
+  # Stage detection: any *.sh AND .githooks/pre-commit (which has no
+  # extension but is the very tool we're hardening — must be linted).
+  staged_sh=$(git diff --cached --name-only --diff-filter=ACM | grep -E '(\.sh$|^\.githooks/pre-commit$)' || true)
+  if [[ -z "$staged_sh" ]]; then
+    ok "no staged *.sh files"
+  else
+    sc_failed=0
+    while IFS= read -r f; do
+      if ! shellcheck --severity=warning "$f"; then
+        sc_failed=1
+      fi
+    done <<< "$staged_sh"
+    if (( sc_failed != 0 )); then
+      fail "shellcheck failed on one or more staged *.sh files"
+      cat <<'BRIEFING'
+
+  ── BRIEFING ──────────────────────────────────────────────────────
+  WHY THIS CHECK EXISTS:
+    On 2026-04-07, 6 instances of the grep -c PATTERN || echo 0
+    antipattern shipped to production in scripts/smoke-test.sh. Every
+    deploy from that commit on FAILED silently at the smoke test with
+    18 cascading check failures because || echo 0 produced multi-line
+    "0\n0" from grep's zero-match output.
+
+    shellcheck --severity=warning catches this exact antipattern via
+    SC2126. Running shellcheck at commit time would have prevented the
+    entire outage class.
+
+  HOW TO FIX (do this — do NOT --no-verify):
+    1. Read the shellcheck output above. Each finding has a link
+       to https://www.shellcheck.net/wiki/SCxxxx with explanation.
+    2. Fix the code or silence with a targeted
+           # shellcheck disable=SCxxxx  # reason
+       comment if the warning is actually a false positive.
+    3. Re-stage and retry the commit.
+
+  WHEN BYPASSING IS OK:
+    Almost never. If you really need to bypass, use --no-verify and
+    document the reason in the commit message. The CI gate will still
+    catch it and block the PR.
+  ──────────────────────────────────────────────────────────────────
+BRIEFING
+    else
+      ok "shellcheck passed on $(echo "$staged_sh" | wc -l | tr -d ' ') staged *.sh file(s)"
+    fi
+  fi
 fi
 
 echo

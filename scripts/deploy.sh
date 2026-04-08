@@ -6,10 +6,14 @@ set -euo pipefail
 # CD entrypoint: validate config, sync to Node 8, restart gateway, smoke test.
 # Supports targeted deployment: --target main|edge|dev|all
 #
-# Quick start (laptop): you probably need
-#     export NODE8_IP=40.160.32.80      # public IP, vrack default won't reach
-#     # SSH_KEY is auto-detected — see the SSH config block below for details
-# Then: ./scripts/deploy.sh [--target main|edge|dev|all]
+# Run from node-8 itself (preferred — CI does this) or via SSH from a
+# laptop. Laptop deploys go through the rsync-over-SSH branches but the
+# POSTSYNC heredoc, Steps 4c/4d, and the profile config sync run on
+# the local box, so a laptop deploy is only viable when the local box
+# IS node-8 or a similar Linux host with /root/.openclaw/ access.
+# In practice: SSH into node-8 first, then run deploy.sh from there.
+#     ssh -i ~/.ssh/nick_ovh root@40.160.32.80
+#     cd /opt/hydra && ./scripts/deploy.sh [--target main|edge|dev|all]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HYDRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -65,7 +69,13 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/ovh_muso}"  # final fallback if no candidate exis
 NODE8_IP="${NODE8_IP:-10.0.0.8}"
 NODE8_USER="${NODE8_USER:-root}"
 NAMESPACE="${NAMESPACE:-hydra}"
-SLACK_WEBHOOK="${HYDRA_SLACK_WEBHOOK:-}"
+# SLACK_WEBHOOK: prefer the env var the GH Actions workflow exports
+# (deploy.yml line 9 maps secrets.HYDRA_SLACK_WEBHOOK → SLACK_WEBHOOK).
+# Fall back to HYDRA_SLACK_WEBHOOK for laptop operators who set the
+# repo-specific name in their shell rc. Without this fallback, every
+# deploy.sh notify_slack call from CI silently dropped because deploy.sh
+# was reading the wrong env var name (caught in PR #68 review).
+SLACK_WEBHOOK="${SLACK_WEBHOOK:-${HYDRA_SLACK_WEBHOOK:-}}"
 KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 
 # SSH options used by every ssh/rsync invocation in this script.
@@ -111,6 +121,173 @@ notify_slack() {
       -H 'Content-Type: application/json' \
       -d "{\"channel\": \"#hydra-heartbeat\", \"text\": \"$1\"}" >/dev/null 2>&1 || true
   fi
+}
+
+# -------------------------------------------------------------------
+# Plugin helpers (new in 2026-04-08 CD consolidation)
+# -------------------------------------------------------------------
+
+# plugin_profile — returns the target profile for a given plugin name.
+# Stdout is the profile string only (caller captures via $(...));
+# diagnostic notices go to stderr to avoid polluting the captured value.
+#
+#   intercom, support-tools → "edge"
+#   everything else         → "main" (with a stderr warning, so a typo
+#                                      in plugin dir name is at least
+#                                      visible in deploy logs)
+#
+# If the mapping ever grows beyond intercom/support-tools, extend the
+# case statement here — there is no other source of truth. Note that
+# no plugins currently target the dev profile; if a dev-only plugin is
+# added in the future, the case statement will need a new branch.
+plugin_profile() {
+  local plugin_name="$1"
+  case "$plugin_name" in
+    intercom|support-tools) echo "edge" ;;
+    *)
+      echo "main"
+      echo "    plugin_profile: '$plugin_name' is not in the known mapping (intercom|support-tools→edge); defaulting to main. Verify this is intended — typos in plugin directory names land here silently." >&2
+      ;;
+  esac
+}
+
+# install_plugin — installs a single plugin into its target profile's
+# openclaw extension directory. Single-arg: derives the profile
+# internally via plugin_profile. Idempotent: re-running reinstalls.
+#
+# Fails with a structured error on npm install failure. The caller
+# (Step 4d main loop) decides whether to fail-fast or collect failures
+# based on HYDRA_CONTINUE_ON_PLUGIN_FAIL.
+install_plugin() {
+  local plugin_dir="$1"
+  local plugin_name
+  plugin_name=$(basename "$plugin_dir")
+  local profile
+  profile=$(plugin_profile "$plugin_name")
+
+  if ! needs_target "$profile"; then
+    log "    Skipping plugin $plugin_name (target=$TARGET, profile=$profile)"
+    return 0
+  fi
+
+  log "    Installing plugin $plugin_name (profile=$profile)..."
+
+  # Run npm install, capture both exit code and stderr for clear
+  # error reporting.  Check the directory exists first so a missing
+  # plugin_dir reports "not found" rather than lying about npm.
+  local npm_out
+  local npm_rc=0
+  if [[ ! -d "$plugin_dir" ]]; then
+    log "    ✗ plugin_dir not found: $plugin_dir"
+    return 1
+  fi
+  npm_out=$(cd "$plugin_dir" && npm install --production 2>&1) || npm_rc=$?
+  if (( npm_rc != 0 )); then
+    log "    ✗ npm install failed for $plugin_name (rc=$npm_rc):"
+    echo "$npm_out" | sed 's/^/        /'
+    return 1
+  fi
+
+  # Determine the target extension path per profile.
+  local ext_path
+  if [[ "$profile" == "main" ]]; then
+    ext_path="/root/.openclaw/extensions/$plugin_name"
+  else
+    ext_path="/root/.openclaw/$profile/extensions/$plugin_name"
+  fi
+
+  # Copy (first install) or rsync incrementally (update).
+  #
+  # Note: the rsync update path consumes "${RSYNC_EXCLUDES[@]}" — a
+  # global array defined further down this file. This is required by
+  # .githooks/pre-commit Check 2, which enforces that EVERY rsync call
+  # in deploy.sh references the shared array (so a future "I'll just
+  # call rsync directly" can't accidentally bypass the workspace
+  # excludes). For a plugin-dir source, none of the workspace/audit
+  # patterns in RSYNC_EXCLUDES would match anything, so they're no-ops
+  # here. The coupling is intentional and is the trade-off accepted for
+  # the pre-commit invariant. If RSYNC_EXCLUDES ever gains a pattern
+  # that matches inside a plugin tree (e.g. "node_modules" without a
+  # path prefix), this rsync's behavior could change silently — keep
+  # that constraint in mind when extending the array.
+  if [[ ! -d "$ext_path" ]]; then
+    mkdir -p "$(dirname "$ext_path")" || { log "    ✗ mkdir failed for $ext_path"; return 1; }
+    cp -r "$plugin_dir" "$ext_path" || { log "    ✗ cp failed for $plugin_name"; return 1; }
+  else
+    rsync -az --exclude=node_modules "${RSYNC_EXCLUDES[@]}" "$plugin_dir/" "$ext_path/" \
+      || { log "    ✗ rsync update failed for $plugin_name"; return 1; }
+  fi
+
+  log "    ✓ $plugin_name installed to $ext_path"
+  return 0
+}
+
+# wait_for_agents_bound — polls `openclaw agents list --bindings` until
+# the BOUND count matches the expected count for the given profile,
+# or the timeout elapses. Called between Step 6 (gateway restart)
+# and Step 7 (smoke test) to close the warm-up race.
+#
+# Expected count is derived from the config file, NOT hardcoded —
+# this prevents the magic-number failure class where adding or
+# disabling an agent silently breaks the smoke test.
+#
+# Returns 0 on success, 1 on timeout. Does not fail() — the caller
+# decides what to do with a timeout (currently: log a warning and
+# continue; the smoke test will report the actual count and fail
+# explicitly if still wrong).
+wait_for_agents_bound() {
+  local profile="$1"
+  local timeout_sec="${2:-30}"
+
+  # Derive expected enabled-agent count from the config.
+  # profile and DEPLOY_PATH are passed as argv — not shell-interpolated
+  # into the Python source — to avoid any code-injection risk from
+  # unsanitised values.
+  local expected
+  expected=$(python3 - "$profile" "$DEPLOY_PATH" <<'PYEOF'
+import json, sys
+profile = sys.argv[1]
+deploy_path = sys.argv[2]
+try:
+    with open(f'{deploy_path}/openclaw-{profile}.json') as f:
+        c = json.load(f)
+    agents = c.get('agents', {}).get('list', [])
+    enabled = [a for a in agents if a.get('enabled', True)]
+    print(len(enabled))
+except Exception:
+    print(0)
+    sys.exit(1)
+PYEOF
+  ) || {
+    log "    wait_for_agents_bound: could not read ${DEPLOY_PATH}/openclaw-${profile}.json — skipping poll"
+    return 1
+  }
+
+  if (( expected == 0 )); then
+    log "    wait_for_agents_bound: 0 enabled agents in $profile — nothing to wait for"
+    return 0
+  fi
+
+  log "    Waiting for $expected agents to bind on profile=$profile (timeout ${timeout_sec}s)..."
+
+  local elapsed=0
+  local bound=0
+  while (( elapsed < timeout_sec )); do
+    # Count agent entries in the CLI output. openclaw lists each bound
+    # agent as a line starting with "- <name>" — this is the stable
+    # structural signal, not the word BOUND (which appears nowhere in
+    # recent CLI versions; verified 2026-04-08 on live main gateway).
+    bound=$(openclaw --profile "$profile" agents list --bindings 2>/dev/null | grep -c '^- ' || true)
+    if (( bound == expected )); then
+      log "    ✓ All $bound/$expected agents bound on $profile after ${elapsed}s"
+      return 0
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+
+  log "    ⚠ wait_for_agents_bound timeout on $profile: $bound/$expected bound after ${timeout_sec}s — continuing anyway"
+  return 1
 }
 
 log "Deploy target: $TARGET"
@@ -194,7 +371,14 @@ if [[ -x "$SCRIPT_DIR/setup-hooks.sh" ]] && [[ -d "$HYDRA_ROOT/.git" ]]; then
 fi
 
 # -------------------------------------------------------------------
-# RSYNC_EXCLUDES (shared by Step 0 drift check, Step 4a pre-flight, Step 4b push)
+# RSYNC_EXCLUDES — shared by every rsync invocation in this script:
+#   - Step 0 drift check (dry-run, local + remote variants)
+#   - Step 4a pre-flight (dry-run, local + remote variants)
+#   - Step 4b push (real sync, local + remote variants)
+#   - Step 4c skills sync (single local rsync)
+#   - install_plugin() rsync update path (called from Step 4d)
+# The pre-commit hook Check 2 enforces that every rsync call references
+# this array, so adding a new rsync without it will fail at commit time.
 # -------------------------------------------------------------------
 # Each path here is server-owned state that --delete would otherwise
 # silently wipe on every deploy. Confirmed by running pre-flight against
@@ -209,6 +393,13 @@ RSYNC_EXCLUDES=(
   # Workspace runtime data (real, accumulating data)
   --exclude='workspaces/*/memory/'
   --exclude='workspaces/*/api-logs/'
+  # Agent long-term memory (written by agents at runtime, should survive
+  # deploys — see docs/WORKSPACE-FILE-OWNERSHIP.md). MEMORY.md IS tracked
+  # in git as a seed, but agents modify it post-deploy and we must not
+  # overwrite those modifications with the seed on subsequent deploys.
+  --exclude='workspaces/*/MEMORY.md'
+  # Agent-created backups directory — never in repo, never overwritten.
+  --exclude='workspaces/*/backups/'
   # Generated reports (CSVs, PDFs, JSON dumps from agent runs).
   # Convention: agents that produce reports for human consumption
   # write them to workspaces/<agent>/reports/<filename>. They're
@@ -228,17 +419,17 @@ RSYNC_EXCLUDES=(
   # 8.6MB of 2026-04-07 memory snapshots created during the audit/ migration).
   # Treated like audit/ — server-owned, not synced from repo.
   --exclude='audit-local-backup/'
-  # CD-managed shadow mirror at /opt/hydra/config/. The GitHub Actions
-  # deploy workflow writes to /opt/hydra/config/ (a parallel mirror of
-  # the entire repo, ~16MB), then seeds individual workspaces from there
-  # into /opt/hydra/workspaces/. Discovered 2026-04-07 when this script's
-  # pre-flight against the live server reported it would --delete 2058
-  # files under config/, including real Sentinel skills (clawsec,
-  # audit-scanner, quarantine, trust-scorer) and Support skills
-  # (refund-retention, output-sanitizer) that exist NOWHERE else in the
-  # repo. scripts/deploy.sh and the GitHub Actions CD are two
-  # independent deploy paths operating on different roots — never let
-  # one wipe the other.
+  # Dead CD shadow mirror at /opt/hydra/config/ (~16MB). The GitHub
+  # Actions deploy workflow USED TO write here via a "Sync config to
+  # Node 8" step that mirrored the entire repo, then seeded individual
+  # workspaces from there. That step was deleted in the 2026-04-08 CD
+  # consolidation (this PR). The directory still exists on the server
+  # until the manual `rm -rf /opt/hydra/config/` cleanup is done — the
+  # smoke-test warn_check fires a reminder on every deploy until then.
+  # This exclude prevents deploy.sh from wiping the residual content
+  # (which historically included real Sentinel skills like clawsec,
+  # audit-scanner, quarantine, trust-scorer that existed NOWHERE else)
+  # before the cleanup happens.
   --exclude='config/'
   # Plugin install artifacts (server runs npm install in-place)
   --exclude='plugins/*/node_modules/'
@@ -477,7 +668,7 @@ if needs_target "dev"; then
   log "  openclaw-dev.json is valid JSON."
 fi
 
-# cron-jobs.json is loaded later by Step 5's POSTSYNC (when targeting
+# cron-jobs.json is loaded later by Step 5a's POSTSYNC (when targeting
 # main). Pre-validate the JSON here so a malformed cron file fails the
 # deploy at Step 1 with a clear message instead of inside the heredoc
 # with a generic "cron sync failed" error 30 seconds into the deploy.
@@ -730,6 +921,70 @@ else
   log "  Config synced to $NODE8_IP:$DEPLOY_PATH/"
 fi
 
+# -------------------------------------------------------------------
+# Step 4c: Sync global skills to openclaw skills dir
+# -------------------------------------------------------------------
+# Moved from deploy.yml's "Sync global skills" step on 2026-04-08
+# (CD consolidation). skills-all/ is a global library used by agents
+# across ALL profiles — muso-intercom is used by edge's support agent,
+# muso-devops by main's devops agent, etc. Runs unconditionally when
+# skills-all/ exists, regardless of --target.
+log "Step 4c/9: Syncing global skills..."
+if [[ -d "$HYDRA_ROOT/skills-all" ]]; then
+  mkdir -p /root/.openclaw/skills/skills/
+  skills_rc=0
+  # RSYNC_EXCLUDES is passed to satisfy .githooks/pre-commit Check 2,
+  # which enforces that every rsync call references the shared array.
+  # None of the workspace/audit/plugin patterns in RSYNC_EXCLUDES match
+  # anything inside skills-all/, so they're no-ops here — same rationale
+  # as the install_plugin rsync. See the comment there for more detail.
+  rsync -az --delete "${RSYNC_EXCLUDES[@]}" "$HYDRA_ROOT/skills-all/" /root/.openclaw/skills/skills/ || skills_rc=$?
+  if (( skills_rc != 0 )); then
+    fail "skills-all/ sync failed (rsync rc=$skills_rc)"
+  fi
+  skill_count=$(find /root/.openclaw/skills/skills/ -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+  log "  ✓ Synced $skill_count skills to /root/.openclaw/skills/skills/"
+else
+  log "  skills-all/ not found in repo — skipping"
+fi
+
+# -------------------------------------------------------------------
+# Step 4d: Install plugins
+# -------------------------------------------------------------------
+# Moved from deploy.yml's "Install plugins" step on 2026-04-08 (CD
+# consolidation). Uses the plugin_profile() and install_plugin()
+# helpers defined near the top of this file.
+#
+# Behavior on plugin failure:
+#   HYDRA_CONTINUE_ON_PLUGIN_FAIL unset or "0": fail on first error
+#     (default; retry is idempotent, partial state is recoverable)
+#   HYDRA_CONTINUE_ON_PLUGIN_FAIL="1": collect all failures and report
+#     at the end; useful for seeing full breakage picture at once
+log "Step 4d/9: Installing plugins..."
+if [[ -d "$HYDRA_ROOT/plugins" ]]; then
+  plugin_failures=()
+  for plugin_dir in "$HYDRA_ROOT"/plugins/*/; do
+    [[ -d "$plugin_dir" ]] || continue
+    if [[ ! -f "${plugin_dir}package.json" ]]; then
+      log "    Skipping $(basename "$plugin_dir") — no package.json"
+      continue
+    fi
+    if ! install_plugin "$plugin_dir"; then
+      plugin_name=$(basename "$plugin_dir")
+      plugin_failures+=("$plugin_name")
+      if [[ "${HYDRA_CONTINUE_ON_PLUGIN_FAIL:-0}" != "1" ]]; then
+        fail "plugin install failed: $plugin_name (set HYDRA_CONTINUE_ON_PLUGIN_FAIL=1 to collect all failures before failing)"
+      fi
+    fi
+  done
+  if (( ${#plugin_failures[@]} > 0 )); then
+    fail "plugin install: ${#plugin_failures[@]} plugin(s) failed: ${plugin_failures[*]}"
+  fi
+  log "  ✓ All plugins installed"
+else
+  log "  plugins/ not found in repo — skipping"
+fi
+
 # Fix script permissions (rsync doesn't preserve +x from git)
 chmod +x "$DEPLOY_PATH"/scripts/*.sh "$DEPLOY_PATH"/scripts/*.py 2>/dev/null || true
 log "  Script permissions fixed"
@@ -759,9 +1014,12 @@ if [ "$TARGET" = "dev" ] || [ "$TARGET" = "all" ]; then
 fi
 
 # -------------------------------------------------------------------
-# Step 5: Post-sync setup on Node 8
+# Step 5a: Post-sync setup on Node 8
 # -------------------------------------------------------------------
-log "Step 5/9: Running post-sync setup..."
+# Renamed from Step 5 → Step 5a on 2026-04-08 to make room for
+# Step 5b (k8s manifest apply). If you're grepping deploy logs for
+# "Step 5:" you'll need to update filters to "Step 5[ab]:".
+log "Step 5a/9: Running post-sync setup..."
 
 run_on_node8() {
   if $HYDRA_LOCAL; then
@@ -843,11 +1101,11 @@ fi
 if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
   LIVE_CRON="/root/.openclaw-main/cron/jobs.json"
   # NOTE: the parent profile dir /root/.openclaw-main/ is guaranteed to
-  # exist by the per-profile config sync earlier in this same deploy
-  # (Step 4b "mkdir -p /root/.openclaw-main; cp openclaw-main.json ..."),
-  # so we don't need to assert it here. Earlier versions of this PR had
-  # an "if [ ! -d $PROFILE_DIR ]; then fail" check that could never fire
-  # — removed as dead code per second-round review.
+  # exist by the profile-config-sync block that runs between Step 4d
+  # and Step 5a in this same deploy (the "mkdir -p /root/.openclaw-main;
+  # cp openclaw-main.json ..." block above), so we don't need to assert
+  # it here. Earlier versions had an "if [ ! -d $PROFILE_DIR ]; then
+  # fail" check that could never fire — removed as dead code.
   mkdir -p "$(dirname "$LIVE_CRON")" || fail "failed to create cron dir at $(dirname "$LIVE_CRON")"
   if [ -f "$LIVE_CRON" ]; then
     LIVE_CRON="$LIVE_CRON" REPO_CRON="$HYDRA_ROOT/cron-jobs.json" python3 - <<'PYEOF' || fail "cron sync failed for $LIVE_CRON"
@@ -967,6 +1225,43 @@ POSTSYNC
 log "  Post-sync setup complete."
 
 # -------------------------------------------------------------------
+# Step 5b: Apply k8s manifests
+# -------------------------------------------------------------------
+# Moved from deploy.yml's "Apply K8s manifests" step on 2026-04-08
+# (CD consolidation). Captures current state to /tmp for the
+# rollback.sh kubectl-apply path, then kubectl apply the manifests.
+# Skips silently if k8s/prod/hydra/ is missing (verified 2026-04-08:
+# directory does not currently exist on node-8 — Step 5b exercises
+# the skip branch on every live deploy until someone populates it).
+log "Step 5b/9: Applying k8s manifests..."
+if [[ -d "$HYDRA_ROOT/k8s/prod/hydra" ]]; then
+  # Capture current state for rollback. Use namespace from env, fallback
+  # to hydra which is the production namespace. The 2>/dev/null || true
+  # tolerates "namespace not found" / "kubectl not configured" so the
+  # snapshot is best-effort, but we explicitly check the resulting
+  # files are non-empty before referencing them in the failure message.
+  k8s_ns="${HYDRA_NAMESPACE:-hydra}"
+  kubectl get deployments -n "$k8s_ns" -o yaml > /tmp/hydra-rollback-deployments.yaml 2>/dev/null || true
+  kubectl get configmaps -n "$k8s_ns" -o yaml > /tmp/hydra-rollback-configmaps.yaml 2>/dev/null || true
+
+  # Apply the manifests.
+  apply_rc=0
+  kubectl apply -f "$HYDRA_ROOT/k8s/prod/hydra/" --namespace="$k8s_ns" || apply_rc=$?
+  if (( apply_rc != 0 )); then
+    # Build a recovery hint that's honest about whether the rollback
+    # snapshot actually contains anything useful.
+    rollback_hint="rollback yaml at /tmp/hydra-rollback-{deployments,configmaps}.yaml"
+    if [[ ! -s /tmp/hydra-rollback-deployments.yaml ]]; then
+      rollback_hint="WARNING: /tmp/hydra-rollback-deployments.yaml is empty (kubectl get deployments returned nothing — namespace missing or kubectl not configured?). No automatic recovery available; manual investigation required."
+    fi
+    fail "kubectl apply failed (rc=$apply_rc) — $rollback_hint. To revert manually if the snapshot is non-empty: kubectl apply -f /tmp/hydra-rollback-deployments.yaml -n $k8s_ns"
+  fi
+  log "  ✓ K8s manifests applied to namespace=$k8s_ns"
+else
+  log "  k8s/prod/hydra/ not found in repo — skipping k8s apply"
+fi
+
+# -------------------------------------------------------------------
 # Step 6: Restart targeted gateway(s)
 # -------------------------------------------------------------------
 log "Step 6/9: Restarting OpenClaw Gateway ($TARGET)..."
@@ -992,6 +1287,28 @@ restart_gateway() {
 if needs_target "main"; then restart_gateway "openclaw-gateway-main"; fi
 if needs_target "edge"; then restart_gateway "openclaw-gateway-edge"; fi
 if needs_target "dev"; then restart_gateway "openclaw-gateway-dev"; fi
+
+# -------------------------------------------------------------------
+# WARMUP: wait for agents to bind before smoke test
+# -------------------------------------------------------------------
+# Agents need time to load after a systemctl restart — about 12-20s
+# in practice. The smoke test was previously running immediately
+# after restart, which caused the cross-agent mesh test to fail on
+# timing even when the gateway was actually healthy.
+#
+# We poll openclaw's BOUND count per profile and wait up to 30s
+# before proceeding. Timeout is non-fatal — the smoke test will
+# catch any real issue with a clearer error.
+log "  Waiting for agents to bind before smoke test..."
+if needs_target "main"; then
+  wait_for_agents_bound "main" 30 || true
+fi
+if needs_target "edge"; then
+  wait_for_agents_bound "edge" 30 || true
+fi
+if needs_target "dev"; then
+  wait_for_agents_bound "dev" 30 || true
+fi
 
 # -------------------------------------------------------------------
 # Step 7: Run smoke test
@@ -1055,7 +1372,7 @@ fi
 #   - devops: daily-aws-change-report cron (CloudTrail scan)
 #   - data-expert / query-writer: Athena queries
 #   - clio: data-platform queries
-# Step 5 wrote ~/.aws/credentials on node-8 from the k3s secret
+# Step 5a wrote ~/.aws/credentials on node-8 from the k3s secret
 # `aws-hydra-readonly` (role: plaque, region: us-west-2). This step
 # runs `aws sts get-caller-identity` to confirm the credentials
 # propagated and the role is assumable. Non-fatal — a failure here

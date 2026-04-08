@@ -13,6 +13,28 @@ jobs:
   deploy:
     runs-on: [self-hosted, hydra]
     steps:
+      - name: Check SLACK_WEBHOOK presence
+        run: |
+          # Non-blocking presence check. If the secret is missing, deploys
+          # still run — but every notify_slack call will silently drop,
+          # meaning no Slack visibility into failures. This step surfaces
+          # the rot as a GitHub Actions warning annotation so it's visible
+          # in the Actions UI without blocking the pipeline.
+          #
+          # To stop this warning firing: get the #hydra-heartbeat webhook
+          # URL from Slack app settings and run
+          #     gh secret set HYDRA_SLACK_WEBHOOK --repo Muso-AI/hydra
+          #
+          # This step was originally a fail-fast (exit 1) but was softened
+          # so PR #68 could merge before Aaron returned the webhook URL.
+          # If you want to re-harden it into a hard gate, change the
+          # '::warning::' below to '::error::' and add 'exit 1'.
+          if [ -z "${SLACK_WEBHOOK:-}" ]; then
+            echo "::warning::HYDRA_SLACK_WEBHOOK secret is empty or missing — deploy will proceed but Slack notifications will be dropped. Fix at https://github.com/Muso-AI/hydra/settings/secrets/actions (ask Aaron for the #hydra-heartbeat webhook URL, then: gh secret set HYDRA_SLACK_WEBHOOK --repo Muso-AI/hydra)"
+          else
+            echo "✓ SLACK_WEBHOOK is set (length: ${#SLACK_WEBHOOK})"
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -63,94 +85,6 @@ jobs:
           echo "Deploy target: $TARGET"
           echo "Changed files:"
           echo "$CHANGED"
-
-      - name: Sync config to Node 8
-        run: |
-          echo "::group::Syncing HYDRA config"
-          /usr/bin/rsync -avz --delete \
-            --exclude='.git' \
-            --exclude='ui/node_modules' \
-            --exclude='ui/.next' \
-            --exclude='skills-all' \
-            ./ /opt/hydra/config/
-          echo "Config synced to /opt/hydra/config/"
-          echo "::endgroup::"
-
-      - name: Sync workspaces to live
-        run: |
-          echo "::group::Syncing workspaces"
-          for ws in ceo cmo coordinator cto design devops finance neutral operations operations-dev qa support; do
-            src="workspaces/${ws}/"
-            dst="/opt/hydra/workspaces/${ws}/"
-            if [ -d "$src" ] && [ -d "$dst" ]; then
-              /usr/bin/rsync -avz --exclude='MEMORY.md' "$src" "$dst"
-            elif [ -d "$src" ]; then
-              mkdir -p "$dst"
-              /usr/bin/rsync -avz "$src" "$dst"
-            fi
-          done
-          echo "Workspaces synced"
-          echo "::endgroup::"
-
-      - name: Sync global skills
-        run: |
-          echo "::group::Syncing skills"
-          if [ -d "skills-all/" ]; then
-            mkdir -p /root/.openclaw/skills/skills/
-            /usr/bin/rsync -avz --delete skills-all/ /root/.openclaw/skills/skills/
-            echo "Synced $(ls /root/.openclaw/skills/skills/ | wc -l) skills"
-          fi
-          echo "::endgroup::"
-
-      - name: Apply K8s manifests
-        id: apply
-        run: |
-          echo "::group::Applying K8s manifests"
-          /usr/local/bin/kubectl get deployments -n ${HYDRA_NAMESPACE} -o yaml > /tmp/hydra-rollback-deployments.yaml 2>/dev/null || true
-          /usr/local/bin/kubectl get configmaps -n ${HYDRA_NAMESPACE} -o yaml > /tmp/hydra-rollback-configmaps.yaml 2>/dev/null || true
-          if [ -d "k8s/prod/hydra/" ]; then
-            /usr/local/bin/kubectl apply -f k8s/prod/hydra/ --namespace=${HYDRA_NAMESPACE}
-          else
-            echo "No k8s manifests in repo — skipping"
-          fi
-          echo "K8s manifests applied"
-          echo "::endgroup::"
-
-      - name: Install plugins
-        run: |
-          echo "::group::Installing plugins"
-          TARGET="${{ steps.detect.outputs.target }}"
-          if [ -d "plugins/" ]; then
-            for plugin_dir in plugins/*/; do
-              plugin_name=$(basename "$plugin_dir")
-              if [ -f "${plugin_dir}package.json" ]; then
-                PLUGIN_PROFILE="main"
-                if [ "$plugin_name" = "intercom" ] || [ "$plugin_name" = "support-tools" ]; then
-                  PLUGIN_PROFILE="edge"
-                fi
-                if [ "$TARGET" = "all" ] || [ "$TARGET" = "$PLUGIN_PROFILE" ]; then
-                  echo "Installing plugin: ${plugin_name} (profile: ${PLUGIN_PROFILE})"
-                  cd "${plugin_dir}" && npm install --production 2>&1 | tail -3 && cd -
-                  # Profile-scoped extension path
-                  if [ "$PLUGIN_PROFILE" = "main" ]; then
-                    EXT_PATH="/root/.openclaw/extensions/${plugin_name}"
-                  else
-                    EXT_PATH="/root/.openclaw/${PLUGIN_PROFILE}/extensions/${plugin_name}"
-                  fi
-                  if [ ! -d "$EXT_PATH" ]; then
-                    cp -r "${plugin_dir}" "$EXT_PATH"
-                    echo "Registered ${plugin_name} in OpenClaw extensions"
-                  else
-                    rsync -az --exclude='node_modules' "${plugin_dir}" "$EXT_PATH/"
-                    echo "Updated ${plugin_name} in OpenClaw extensions"
-                  fi
-                else
-                  echo "Skipping plugin: ${plugin_name} (not targeting ${PLUGIN_PROFILE})"
-                fi
-              fi
-            done
-          fi
-          echo "::endgroup::"
 
       # Note: mention gate patch removed — no longer needed on OpenClaw 2026.4.2+
 

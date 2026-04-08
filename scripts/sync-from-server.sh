@@ -56,7 +56,6 @@ NODE8_IP="${NODE8_IP:-10.0.0.8}"
 NODE8_USER="${NODE8_USER:-root}"
 DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"
 
-SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes)
 SSH_OPTS_STR="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes"
 
 usage() {

@@ -266,6 +266,51 @@ jobs:
           fi
           echo "::endgroup::"
 
+  shellcheck:
+    name: Shellcheck (scripts/ + .githooks/)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck on hydra bash infrastructure
+        run: |
+          # Lint scope: scripts/ and .githooks/ only. Agent skill
+          # scripts under skills-all/ and workspaces/*/skills/ are
+          # third-party-style code with their own maintenance cadence
+          # and are out of scope for the hydra deploy pipeline gate.
+          #
+          # The .githooks/pre-commit file has no .sh extension but is
+          # 370+ lines of bash and is the very tool catching bash bugs
+          # — it must be in scope. Add it explicitly so the find -name
+          # filter doesn't skip it.
+          sh_files=$(find scripts .githooks -type f -name '*.sh' 2>/dev/null)
+          if [ -f .githooks/pre-commit ]; then
+            sh_files=$(printf '%s\n.githooks/pre-commit\n' "$sh_files")
+          fi
+          if [ -z "$sh_files" ]; then
+            echo "No *.sh files found in scripts/ or .githooks/"
+            exit 0
+          fi
+          echo "Linting the following files:"
+          echo "$sh_files"
+          echo "---"
+          failed=0
+          while IFS= read -r f; do
+            if ! shellcheck --severity=warning "$f"; then
+              failed=1
+            fi
+          done <<< "$sh_files"
+          if (( failed != 0 )); then
+            echo "::error::shellcheck found warnings or errors — fix them before merging"
+            echo "::notice::The 6 bash bugs in smoke-test.sh that caused 2026-04-07's 18-failures-per-deploy cascade were all SC2126 warnings — exactly the class this gate exists to prevent."
+            exit 1
+          fi
+          echo "✓ All *.sh files pass shellcheck --severity=warning"
+
       - name: Summary
         if: always()
         run: |

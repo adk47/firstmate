@@ -6,8 +6,6 @@ set -euo pipefail
 # 90-day rotation for all 9 Slack app bot tokens.
 # Stores new tokens in Vault, triggers ESO refresh, restarts gateway.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 NAMESPACE="${NAMESPACE:-hydra}"
 KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 VAULT_ADDR="${VAULT_ADDR:-https://vault.vault.svc.cluster.local:8200}"
@@ -113,7 +111,7 @@ log "  ESO refresh triggered."
 
 # Wait for the secret to be updated
 log "  Waiting for ExternalSecret to sync..."
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   STATUS=$(kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" \
     get externalsecret hydra-slack-tokens -o jsonpath='{.status.conditions[0].reason}' 2>/dev/null) || STATUS="Unknown"
   if [[ "$STATUS" == "SecretSynced" ]]; then

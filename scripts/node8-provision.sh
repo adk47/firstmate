@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC1078,SC1089,SC1090,SC1091
+# SC1078/SC1089: shellcheck's parser chokes on nested single quotes inside
+# double-quoted remote() arguments, e.g.:
+#   remote "cmd | awk -F': ' '{print \$2}' | tail -1"
+# The bash is correct; this is a shellcheck parser limitation. The cascade
+# also triggers false SC1090/SC1091 sourcing warnings after the first SC1089.
+# This is a one-shot provisioning script — disabling at file level is cleanest.
 set -euo pipefail
 
 # HYDRA Node 8 Provisioning

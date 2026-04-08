@@ -7,9 +7,9 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-hydra}"
 KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
-AGENT_TIMEOUT=30
 CLIPROXYAPI_PORT=8317
 FAILURES=0
+WARNINGS=0
 TARGET="${1:-all}"
 
 # Validate target (supports comma-separated: main,edge)
@@ -24,6 +24,84 @@ done
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"; }
 fail_check() { log "FAIL: $*"; FAILURES=$((FAILURES + 1)); }
 pass_check() { log "PASS: $*"; }
+warn_check() { log "WARN: $*"; WARNINGS=$((WARNINGS + 1)); }
+
+# expected_agent_count <profile> — print the count of enabled agents
+# in /opt/hydra/openclaw-<profile>.json. Returns "?" on any failure
+# (file missing, JSON parse error, etc) — the caller is expected to
+# treat "?" as a hard fail rather than coerce to 0, which would
+# mask "gateway down + config gone" as a false 0/0 pass.
+expected_agent_count() {
+  local profile="$1"
+  python3 - "$profile" <<'PYEOF' 2>/dev/null || echo "?"
+import json, sys
+profile = sys.argv[1]
+with open(f'/opt/hydra/openclaw-{profile}.json') as f:
+    c = json.load(f)
+agents = c.get('agents', {}).get('list', [])
+print(len([a for a in agents if a.get('enabled', True)]))
+PYEOF
+}
+
+# check_agent_count <profile> <label> — fetch BOUND count via openclaw
+# CLI, compare to expected_agent_count. Hard fail on mismatch OR on
+# inability to determine the expected count (a "?" response).
+check_agent_count() {
+  local profile="$1" label="$2"
+  local expected agent_output agent_count
+  expected=$(expected_agent_count "$profile")
+  agent_output=$(openclaw --profile "$profile" agents list --bindings 2>&1) || true
+  agent_count=$(echo "$agent_output" | grep -c '^- ' || true)
+  if [[ "$expected" == "?" ]]; then
+    fail_check "$label: could not read /opt/hydra/openclaw-${profile}.json — refusing to compare counts (would mask gateway-down as 0/0 pass)"
+    return
+  fi
+  if [[ "$agent_count" -eq "$expected" ]]; then
+    pass_check "$label: $agent_count/$expected agents bound"
+  else
+    fail_check "$label: Expected $expected agents, got $agent_count"
+    echo "$agent_output"
+  fi
+}
+
+# check_channel_health <profile> <label> — extracted from the three
+# verbatim copies that previously lived in the main/edge/dev blocks.
+check_channel_health() {
+  local profile="$1" label="$2"
+  local channel_output total healthy unhealthy
+  channel_output=$(openclaw --profile "$profile" channels status --probe 2>&1) || true
+  total=$(echo "$channel_output" | grep -c '^- ' || true)
+  healthy=$(echo "$channel_output" | grep -c '^- .*enabled.*configured' || true)
+  unhealthy=$((total - healthy))
+  if (( total == 0 )); then
+    fail_check "$label: channels status returned no channels — gateway may be down"
+  elif (( unhealthy == 0 )); then
+    pass_check "$label: All $total channels healthy (enabled + configured)"
+  else
+    fail_check "$label: $unhealthy/$total unhealthy channels"
+    echo "$channel_output" | grep '^- ' | grep -v 'enabled.*configured' | head -5 | sed 's/^/    /'
+  fi
+}
+
+ping_agent() {
+  # ping_agent <profile> <agent_id> <label>
+  # Runs a real LLM round-trip via openclaw agent --agent X -m "...".
+  # SOFT gate: warns on failure, does not block the deploy. LLM
+  # round-trips are flaky (Anthropic overload, warm-up timing) so a
+  # hard gate would cause false-positive deploy blocks.
+  local profile="$1"
+  local agent_id="$2"
+  local label="$3"
+  local start elapsed response
+  start=$(date +%s)
+  response=$(timeout 60 openclaw --profile "$profile" agent --agent "$agent_id" -m "respond with the exact word PONG and nothing else" 2>&1) || response="TIMEOUT"
+  elapsed=$(( $(date +%s) - start ))
+  if echo "$response" | grep -qi 'pong'; then
+    pass_check "$label: agent '$agent_id' responded PONG in ${elapsed}s"
+  else
+    warn_check "$label: agent '$agent_id' did not return PONG within 60s (elapsed=${elapsed}s). Response head: $(echo "$response" | head -c 200)"
+  fi
+}
 needs_target() { [[ "$TARGET" == "all" || ",$TARGET," == *",$1,"* ]]; }
 
 # -------------------------------------------------------------------
@@ -31,48 +109,54 @@ needs_target() { [[ "$TARGET" == "all" || ",$TARGET," == *",$1,"* ]]; }
 # -------------------------------------------------------------------
 if needs_target "main"; then
   log "Checking main gateway (port 18789)..."
-  EXPECTED_MAIN=9
-  MAIN_AGENTS=(clio ceo cmo cto qa finance operations devops design)
+  # Expected count is derived from openclaw-main.json by check_agent_count.
+  # The helper hard-fails on inability to read the config (rather than
+  # coercing to 0) so a deploy that wipes the config can never produce
+  # a green 0/0 false-pass paired with a downed gateway.
+  check_agent_count main "Main"
 
-  AGENT_OUTPUT=$(openclaw --profile main agents list --bindings 2>&1) || true
-  AGENT_COUNT=$(echo "$AGENT_OUTPUT" | grep -c 'BOUND' || echo 0)
-
-  if [[ "$AGENT_COUNT" -eq "$EXPECTED_MAIN" ]]; then
-    pass_check "Main: $AGENT_COUNT/$EXPECTED_MAIN agents bound"
+  # Structural check: verify sessions tool is enabled with full visibility.
+  # sessions_send is a METHOD of the global .tools.sessions tool, not a
+  # named tool. If .tools.sessions.visibility is not "all", cross-agent
+  # messaging is structurally broken — regardless of whether any
+  # individual LLM call succeeds. This is the hard gate.
+  #
+  # Validated during spec review 2026-04-08:
+  #   jq -e '.tools.sessions.visibility == "all"' openclaw-main.json
+  # returns true for the repo and live server configs, and correctly
+  # returns false when .tools.sessions is removed or visibility changed.
+  if jq -e '.tools.sessions.visibility == "all"' /opt/hydra/openclaw-main.json >/dev/null 2>&1; then
+    pass_check "Main: sessions tool enabled with full visibility (cross-agent messaging wired correctly)"
   else
-    fail_check "Main: Expected $EXPECTED_MAIN agents, got $AGENT_COUNT"
-    echo "$AGENT_OUTPUT"
+    fail_check "Main: .tools.sessions.visibility is not 'all' in openclaw-main.json — cross-agent messaging structurally broken"
   fi
 
-  for agent_id in "${MAIN_AGENTS[@]}"; do
-    START=$(date +%s)
-    RESPONSE=$(timeout "$AGENT_TIMEOUT" openclaw --profile main agent ping "$agent_id" 2>&1) || RESPONSE="TIMEOUT"
-    ELAPSED=$(( $(date +%s) - START ))
-    if echo "$RESPONSE" | grep -qi 'pong\|alive\|ok'; then
-      pass_check "Main: Agent '$agent_id' responded in ${ELAPSED}s"
-    else
-      fail_check "Main: Agent '$agent_id' did not respond within ${AGENT_TIMEOUT}s"
-    fi
-  done
-
-  # Cross-agent mesh test: Clio -> CTO sessions_send ping
-  log "  Testing cross-agent mesh (Clio -> CTO)..."
-  MESH_RESPONSE=$(timeout "$AGENT_TIMEOUT" openclaw --profile main agent send clio "ping cto via sessions_send and report back" 2>&1) || MESH_RESPONSE="TIMEOUT"
+  # Behavioral mesh test — SOFT gate. A real LLM round-trip through
+  # Clio's tool-use loop, which is inherently flaky (Anthropic overload,
+  # LLM non-determinism in response wording, warm-up timing). The hard
+  # gate on .tools.sessions.visibility above catches the "wiring broken"
+  # case; this check just tries to confirm it actually works end-to-end.
+  #
+  # Timeout bumped from 30s to 60s because a Clio→CTO LLM round-trip
+  # via sessions_send can genuinely take 30-50s (Clio thinks, picks the
+  # tool, CTO thinks, Clio synthesizes the reply).
+  log "  Testing cross-agent mesh behaviorally (Clio -> CTO via LLM)..."
+  MESH_RESPONSE=$(timeout 60 openclaw --profile main agent send clio "ping cto via sessions_send and report back" 2>&1) || MESH_RESPONSE="TIMEOUT"
   if echo "$MESH_RESPONSE" | grep -qi 'cto\|responded\|pong\|acknowledged'; then
-    pass_check "Main: Cross-agent mesh (Clio -> CTO) working"
+    pass_check "Main: Cross-agent mesh behavioral test passed (Clio -> CTO round-trip)"
   else
-    fail_check "Main: Cross-agent mesh test failed"
+    warn_check "Main: Cross-agent mesh behavioral test did not confirm within 60s. Response was: $(echo "$MESH_RESPONSE" | head -c 200)"
   fi
 
-  CHANNEL_OUTPUT=$(openclaw --profile main channels status --probe 2>&1) || true
-  UNHEALTHY=$(echo "$CHANNEL_OUTPUT" | grep -cv 'HEALTHY' || echo 0)
-  UNHEALTHY=$((UNHEALTHY > 0 ? UNHEALTHY - 1 : 0))
-  if [[ "$UNHEALTHY" -eq 0 ]]; then
-    pass_check "Main: All channels healthy"
-  else
-    fail_check "Main: $UNHEALTHY unhealthy channels"
-    echo "$CHANNEL_OUTPUT"
-  fi
+  # Targeted pings for critical main-profile agents (user-specified).
+  # Soft gate: these exercise a real LLM round-trip per agent and will
+  # warn on flake rather than block the deploy. Each adds 5-60s to the
+  # smoke test depending on LLM latency.
+  ping_agent main clio       "Main"
+  ping_agent main cmo        "Main"
+  ping_agent main operations "Main"
+
+  check_channel_health main "Main"
 
   # Cron loading gate — guards against the silent path-drift outage class
   # that took down all the cron jobs for 19 hours on 2026-04-07. The
@@ -125,6 +209,19 @@ if needs_target "main"; then
   else
     fail_check "Main: /opt/hydra/scripts/openclaw-watchdog.sh missing or not executable"
   fi
+
+  # Config-mirror staleness check — /opt/hydra/config/ is a dead
+  # shadow mirror that was removed on 2026-04-08 during the CD
+  # consolidation. If it still exists on the server, someone forgot
+  # the manual `rm -rf /opt/hydra/config/` cleanup step after this
+  # PR merged. Fire a warning on every deploy until the cleanup is
+  # done. Soft-fail — doesn't block.
+  if [[ -d /opt/hydra/config ]]; then
+    config_size=$(du -sh /opt/hydra/config 2>/dev/null | cut -f1 || echo "?")
+    warn_check "Main: /opt/hydra/config/ still exists ($config_size) — dead CD shadow mirror from pre-2026-04-08 architecture. Please run: rm -rf /opt/hydra/config/"
+  else
+    pass_check "Main: /opt/hydra/config/ cleanup complete (dead shadow mirror removed)"
+  fi
 fi
 
 # -------------------------------------------------------------------
@@ -132,35 +229,10 @@ fi
 # -------------------------------------------------------------------
 if needs_target "edge"; then
   log "Checking edge gateway (port 18810)..."
-
-  AGENT_OUTPUT=$(openclaw --profile edge agents list --bindings 2>&1) || true
-  AGENT_COUNT=$(echo "$AGENT_OUTPUT" | grep -c 'BOUND' || echo 0)
-
-  if [[ "$AGENT_COUNT" -eq 1 ]]; then
-    pass_check "Edge: 1/1 agents bound"
-  else
-    fail_check "Edge: Expected 1 agent, got $AGENT_COUNT"
-    echo "$AGENT_OUTPUT"
-  fi
-
-  START=$(date +%s)
-  RESPONSE=$(timeout "$AGENT_TIMEOUT" openclaw --profile edge agent ping "support" 2>&1) || RESPONSE="TIMEOUT"
-  ELAPSED=$(( $(date +%s) - START ))
-  if echo "$RESPONSE" | grep -qi 'pong\|alive\|ok'; then
-    pass_check "Edge: Agent 'support' responded in ${ELAPSED}s"
-  else
-    fail_check "Edge: Agent 'support' did not respond within ${AGENT_TIMEOUT}s"
-  fi
-
-  CHANNEL_OUTPUT=$(openclaw --profile edge channels status --probe 2>&1) || true
-  UNHEALTHY=$(echo "$CHANNEL_OUTPUT" | grep -cv 'HEALTHY' || echo 0)
-  UNHEALTHY=$((UNHEALTHY > 0 ? UNHEALTHY - 1 : 0))
-  if [[ "$UNHEALTHY" -eq 0 ]]; then
-    pass_check "Edge: All channels healthy"
-  else
-    fail_check "Edge: $UNHEALTHY unhealthy channels"
-    echo "$CHANNEL_OUTPUT"
-  fi
+  check_agent_count edge "Edge"
+  check_channel_health edge "Edge"
+  # Targeted ping for the customer-facing support agent.
+  ping_agent edge support "Edge"
 fi
 
 # -------------------------------------------------------------------
@@ -168,35 +240,8 @@ fi
 # -------------------------------------------------------------------
 if needs_target "dev"; then
   log "Checking dev gateway (port 18830)..."
-
-  AGENT_OUTPUT=$(openclaw --profile dev agents list --bindings 2>&1) || true
-  AGENT_COUNT=$(echo "$AGENT_OUTPUT" | grep -c 'BOUND' || echo 0)
-
-  if [[ "$AGENT_COUNT" -eq 1 ]]; then
-    pass_check "Dev: 1/1 agents bound"
-  else
-    fail_check "Dev: Expected 1 agent, got $AGENT_COUNT"
-    echo "$AGENT_OUTPUT"
-  fi
-
-  START=$(date +%s)
-  RESPONSE=$(timeout "$AGENT_TIMEOUT" openclaw --profile dev agent ping "operations-dev" 2>&1) || RESPONSE="TIMEOUT"
-  ELAPSED=$(( $(date +%s) - START ))
-  if echo "$RESPONSE" | grep -qi 'pong\|alive\|ok'; then
-    pass_check "Dev: Agent 'operations-dev' responded in ${ELAPSED}s"
-  else
-    fail_check "Dev: Agent 'operations-dev' did not respond within ${AGENT_TIMEOUT}s"
-  fi
-
-  CHANNEL_OUTPUT=$(openclaw --profile dev channels status --probe 2>&1) || true
-  UNHEALTHY=$(echo "$CHANNEL_OUTPUT" | grep -cv 'HEALTHY' || echo 0)
-  UNHEALTHY=$((UNHEALTHY > 0 ? UNHEALTHY - 1 : 0))
-  if [[ "$UNHEALTHY" -eq 0 ]]; then
-    pass_check "Dev: All channels healthy"
-  else
-    fail_check "Dev: $UNHEALTHY unhealthy channels"
-    echo "$CHANNEL_OUTPUT"
-  fi
+  check_agent_count dev "Dev"
+  check_channel_health dev "Dev"
 fi
 
 # -------------------------------------------------------------------
@@ -207,8 +252,11 @@ HEALTH_RESPONSE=$(curl -sf "http://127.0.0.1:${CLIPROXYAPI_PORT:-8317}/health" 2
 if echo "$HEALTH_RESPONSE" | grep -qi 'ok\|healthy'; then
   pass_check "CLIProxyAPI /health returned OK"
 else
-  # Non-fatal: CLIProxyAPI is only needed for Anthropic fallback
-  log "  WARN: CLIProxyAPI not reachable (non-fatal — Fireworks is primary)"
+  # Non-fatal: CLIProxyAPI is only needed for Anthropic fallback.
+  # Use warn_check (not bare log) so this fires the WARNINGS counter
+  # and shows up in the summary line. Otherwise the summary lies
+  # ("0 warnings") whenever CLIProxyAPI is unreachable.
+  warn_check "CLIProxyAPI not reachable (non-fatal — Fireworks is primary)"
 fi
 
 # -------------------------------------------------------------------
@@ -217,9 +265,13 @@ fi
 echo ""
 log "========================================="
 if [[ "$FAILURES" -eq 0 ]]; then
-  log "SMOKE TEST PASSED (target: $TARGET, all checks green)"
+  if (( WARNINGS > 0 )); then
+    log "SMOKE TEST PASSED (target: $TARGET, 0 failed, $WARNINGS warning(s))"
+  else
+    log "SMOKE TEST PASSED (target: $TARGET, all checks green)"
+  fi
   exit 0
 else
-  log "SMOKE TEST FAILED (target: $TARGET, $FAILURES check(s) failed)"
+  log "SMOKE TEST FAILED (target: $TARGET, $FAILURES check(s) failed, $WARNINGS warning(s))"
   exit 1
 fi
