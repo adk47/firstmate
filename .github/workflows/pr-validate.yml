@@ -266,6 +266,108 @@ jobs:
           fi
           echo "::endgroup::"
 
+  deploy-preflight:
+    name: Deploy pre-flight (rsync --delete dry-run vs /opt/hydra/)
+    # Must run on the self-hosted hydra runner because it needs to see
+    # /opt/hydra/ — the actual target of the production deploy rsync.
+    # ubuntu-latest can't do this check.
+    runs-on: [self-hosted, hydra]
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+
+      - name: Rsync dry-run against /opt/hydra/
+        # This is a "shift-left" copy of scripts/deploy.sh Step 4a. The
+        # deploy's pre-flight check catches server-state-would-be-wiped
+        # situations, but by then the PR is already merged. Running the
+        # same check at PR validation time surfaces the problem before
+        # merge — so either (a) the PR author adds excludes, (b) pulls
+        # the server-only state into the repo, or (c) the server state
+        # is cleaned up — all BEFORE the deploy is triggered.
+        #
+        # Added after PR #68's first post-merge deploy was blocked at
+        # Step 4a by 5 files the repo didn't know about (Aaron's
+        # hydra-heal.sh and 4 CMO b2b-target CSVs). If this gate had
+        # existed at the time, PR #68 would have failed validation
+        # with the file list and we'd have added the excludes before
+        # merging instead of fix-forwarding in PR #69.
+        run: |
+          set -euo pipefail
+          # Extract and eval the RSYNC_EXCLUDES array declaration from
+          # deploy.sh so this gate is always in sync with the deploy's
+          # actual excludes. Single source of truth: the array lives in
+          # deploy.sh and both the deploy itself and this CI gate read it.
+          #
+          # sed range anchor: /^)$/ matches ONLY a line that is exactly
+          # ")" with nothing else. This is tighter than /^)/ which would
+          # match any line starting with ")" (e.g., ")  # comment" or
+          # ") ; do_something") and could terminate the sed range early.
+          # The array's closing paren in deploy.sh must be at column 0
+          # on a line by itself — documented invariant.
+          #
+          # Pre-initialize RSYNC_EXCLUDES=() so set -u doesn't fire with
+          # a cryptic "unbound variable" error if the sed range fails to
+          # match anything. The explicit length check below then emits
+          # a clear actionable error.
+          RSYNC_EXCLUDES=()
+          eval "$(sed -n '/^RSYNC_EXCLUDES=(/,/^)$/p' scripts/deploy.sh)"
+          # Guard: zero or suspiciously-small array means extraction broke.
+          # Current deploy.sh has 19 entries; anything under 15 is almost
+          # certainly a truncated extraction (e.g., sed range terminated
+          # at a future bare "^)" line inside the array). Catches both
+          # total failure and partial extraction.
+          if [ "${#RSYNC_EXCLUDES[@]}" -lt 15 ]; then
+            echo "::error::RSYNC_EXCLUDES extracted only ${#RSYNC_EXCLUDES[@]} entries from scripts/deploy.sh — expected ≥15. Extraction likely truncated (check the array declaration format and closing paren placement)."
+            exit 1
+          fi
+          echo "Sourced ${#RSYNC_EXCLUDES[@]} exclude patterns from deploy.sh"
+          echo "---"
+          # Run the rsync dry-run with both stdout and stderr redirected
+          # to a tempfile, and check rsync's exit code EXPLICITLY before
+          # grepping. The previous implementation used:
+          #     deletions=$(rsync ... 2>&1 | grep '*deleting' || true)
+          # That pattern silently swallowed rsync failures: if rsync exited
+          # non-zero (target missing, permission denied, network error),
+          # its stderr flowed through 2>&1 into grep, grep filtered it out,
+          # and `|| true` converted the non-zero exit to 0 — making the
+          # gate report "zero deletions" when the dry-run never actually
+          # ran correctly. Worse than useless: false confidence.
+          rsync_out=$(mktemp)
+          trap 'rm -f "$rsync_out"' EXIT
+          rsync_rc=0
+          rsync -an --delete --itemize-changes \
+            "${RSYNC_EXCLUDES[@]}" \
+            ./ /opt/hydra/ >"$rsync_out" 2>&1 || rsync_rc=$?
+          if [ "$rsync_rc" -ne 0 ]; then
+            echo "::error::rsync dry-run failed (exit $rsync_rc) — preflight gate could not run. The gate cannot certify this PR is safe to deploy until the rsync error is resolved."
+            echo
+            echo "rsync output:"
+            sed 's/^/  /' "$rsync_out"
+            exit 1
+          fi
+          # rsync succeeded. Grep the captured output for any deletion
+          # markers. `|| true` here is correct because it only covers
+          # grep's "no match found" exit (which means zero deletions —
+          # the pass case).
+          deletions=$(grep '^\*deleting' "$rsync_out" || true)
+          if [ -n "$deletions" ]; then
+            echo "::error::This PR would delete files from /opt/hydra/ on merge-triggered deploy"
+            echo
+            echo "Files that would be wiped:"
+            echo "$deletions" | sed 's/^/  /'
+            echo
+            echo "Each deletion means one of three things:"
+            echo "  (a) Real data created on the server that the repo doesn't know about"
+            echo "      → Pull it in: scripts/sync-from-server.sh <path> --apply, then commit"
+            echo "  (b) Runtime state the server should own"
+            echo "      → Add an --exclude line to RSYNC_EXCLUDES in scripts/deploy.sh"
+            echo "        AND to required_excludes in .githooks/pre-commit"
+            echo "  (c) Actual garbage left on the server"
+            echo "      → Clean it up on node-8, then re-run this check"
+            exit 1
+          fi
+          echo "✓ Zero files would be deleted on merge — safe to deploy"
+
   shellcheck:
     name: Shellcheck (scripts/ + .githooks/)
     runs-on: ubuntu-latest

@@ -87,18 +87,30 @@ fi
 # ---------------------------------------------------------------
 echo "  [2/4] deploy.sh safety excludes"
 DEPLOY_SH="scripts/deploy.sh"
+# This list is the enforced SUBSET of deploy.sh's RSYNC_EXCLUDES. The
+# check is one-directional: it asserts every entry below is present in
+# RSYNC_EXCLUDES, so removing a load-bearing protection from deploy.sh
+# fails the commit. It deliberately omits repo-hygiene entries like
+# .git, .deployed-sha, and hydra docs/ which are in RSYNC_EXCLUDES for
+# other reasons (not data-loss protection). If you add a new exclude
+# to deploy.sh that protects live server state, add it here too.
 required_excludes=(
   "workspaces/*/memory/"
   "workspaces/*/api-logs/"
+  "workspaces/*/MEMORY.md"
+  "workspaces/*/backups/"
   "workspaces/*/reports/"
   "workspaces/*/.openclaw/"
   "workspaces/*/IDENTITY.md"
   "workspaces/*/HEARTBEAT.md"
+  "workspaces/*/*.csv"
+  "secrets/"
   "audit/"
   "audit-local-backup/"
   "config/"
   "plugins/*/node_modules/"
   "plugins/*/package-lock.json"
+  "scripts/hydra-heal.sh"
 )
 if [[ ! -f "$DEPLOY_SH" ]]; then
   fail "$DEPLOY_SH not found"
@@ -185,11 +197,22 @@ else
     above covers paths we've confirmed contain real production state:
       • workspaces/*/memory/        → dispute trackers, scan results
       • workspaces/*/api-logs/      → audit trail of external API calls
+      • workspaces/*/MEMORY.md      → agent persistent long-term memory
+                                      (written at runtime, seeded in repo)
+      • workspaces/*/backups/       → agent-created backup snapshots
       • workspaces/*/reports/       → generated reports (CSVs/PDFs/JSON
                                       from agent runs — often PII)
       • workspaces/*/.openclaw/     → runtime workspace state
       • workspaces/*/IDENTITY.md    → agent identity (server-owned)
       • workspaces/*/HEARTBEAT.md   → liveness signal
+      • workspaces/*/*.csv          → ad-hoc CSV outputs agents write to
+                                      the workspace root (currently CMO's
+                                      b2b target research — may contain
+                                      PII). Temporary until agents move
+                                      their ephemeral outputs to reports/.
+      • secrets/                    → credentials directory (deploy keys,
+                                      API tokens) — wiping this on deploy
+                                      would break EVERYTHING.
       • audit/                      → per-workspace memory snapshots, conv logs
       • config/                     → dead CD shadow mirror (~16MB)
                                       from the pre-2026-04-08
@@ -202,6 +225,12 @@ else
                                       from the audit/ migration)
       • plugins/*/node_modules/     → server-side npm install artifacts
       • plugins/*/package-lock.json
+      • scripts/hydra-heal.sh       → Aaron's incident-response health
+                                      check script written directly on
+                                      node-8 during a 2026-04-07 outage.
+                                      Contains a hardcoded Vault token
+                                      so it can't be committed until
+                                      the token is rotated.
 
     If deploy.sh stops excluding any of these, the next deploy
     silently destroys live data. There is no backup.

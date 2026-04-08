@@ -434,6 +434,27 @@ RSYNC_EXCLUDES=(
   # Plugin install artifacts (server runs npm install in-place)
   --exclude='plugins/*/node_modules/'
   --exclude='plugins/*/package-lock.json'
+  # Server-only operational tooling. Aaron wrote scripts/hydra-heal.sh
+  # directly on node-8 during a 2026-04-07 incident as a manual
+  # health-check + self-healing script (gateway restart, secrets
+  # restore from Vault, watchdog repair, etc). It contains a hardcoded
+  # Vault token that needs to be rotated before the file can safely
+  # enter version control. Until that rotation happens, deploys must
+  # NOT wipe the server-local copy.
+  # TODO(follow-up): rotate the Vault token, replace the hardcoded
+  # value with an env-var lookup, remove this exclude, and commit
+  # hydra-heal.sh to the repo like other operational scripts.
+  --exclude='scripts/hydra-heal.sh'
+  # CMO's ad-hoc CSV outputs (b2b target research iterations, agent
+  # research scratchpads). CMO currently writes these to the workspace
+  # root; they're ephemeral-ish and may contain PII from b2b
+  # prospecting.
+  # TODO(follow-up): update workspaces/cmo/SOUL.md to tell CMO to
+  # write ephemeral research outputs to workspaces/cmo/reports/
+  # instead (already excluded via workspaces/*/reports/). Once CMO
+  # follows the new convention, this broader workspace-root exclude
+  # can be removed. Tracked in project_skills_architecture_followup.md.
+  --exclude='workspaces/*/*.csv'
 )
 
 # -------------------------------------------------------------------
