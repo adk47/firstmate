@@ -6,6 +6,7 @@ Run daily as part of the heartbeat.
 """
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -13,7 +14,7 @@ from pathlib import Path
 
 SHEET_ID = "1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs"
 TAB = "High-Value Churns"
-GHL_KEY = "pit-239a5db4-6ba1-4b6e-857d-0f8cc4464410"
+GHL_KEY = os.environ.get("GHL_WINBACK_API_KEY", "")  # was hardcoded, moved to env var during 2026-04-09 rebuild
 GHL_LOCATION = "fmK5Vl9sJv49WTYA0QyP"
 GHL_PIPELINE = "AZa8jK5S7UyQ0fqfxzyB"
 GMAIL_ACCOUNT = "a@muso.ai"

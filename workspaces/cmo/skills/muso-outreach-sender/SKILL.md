@@ -1,0 +1,191 @@
+---
+name: muso-outreach-sender
+description: |
+  Sends B2B Ads outreach batches. Pulls target contacts, runs the 4 source
+  exclusion crosscheck, calls muso-outreach-writer for copy, presents batch for
+  approval, creates Gmail drafts, sends on go, labels, logs to sheet, syncs GHL,
+  and posts the Slack notification.
+
+  Called by muso-outreach-engine. Primary send pipeline for initial (non follow up)
+  outreach.
+
+  Use when: "send outreach", "send cold emails", "pull leads and draft", "execute batch"
+
+  Triggers: "send outreach", "send batch", "draft batch", "execute outreach",
+  "cold send", "send emails to contacts"
+depends-on:
+  - muso-outreach-engine
+  - muso-outreach-writer
+  - muso-outreach-ghl-sync
+  - muso-slack-formatter
+metadata:
+  version: "1.0"
+  last-updated: "2026-04-09"
+---
+
+# Muso Outreach Sender
+
+Sends initial B2B Ads outreach batches end to end.
+
+## Access Control
+
+Write access: Fede (U07NF5A77E2) and Aaron (U7RP6HKUZ) only.
+
+## Shared Config
+
+All IDs, accounts, sheets, channels, and rules are in
+`../muso-outreach-engine/references/config.md`.
+
+## Workflow
+
+### Step 0: Pre-Flight Crosscheck
+
+Build the exclusion set from the 4 primary sources. NEVER skip this.
+
+1. **Sheet logbook** (`muso-b2b-outreach-reports`): every row = touched.
+2. **`contacts_intelligence`**: every row with a non empty `Status` = touched.
+3. **GHL pipeline** (paginate ALL pages with `page=N`, not POST search):
+   extract every company + contact name across ALL stages (including Closed Lost).
+4. **Gmail B2B - Ads label** across all 4 accounts: extract recipients + last names.
+
+```bash
+for acct in a@muso.ai f@muso.ai ak@muso.ai aaron.k@muso.ai; do
+  gog gmail messages search 'label:"B2B - Ads"' --account $acct --max 1000
+done
+```
+
+Any candidate matching ANY of these is SKIPPED.
+
+### Step 1: Pick Targets
+
+From `contacts_intelligence`, filter:
+- `Status` empty (untouched)
+- `Rank` / `Job Category` matching the ask
+- Company exists in `company_intelligence` with complete `Why Muso Ads Matters`
+
+Apply the exclusion set. Drop matches.
+
+### Step 2: Parent Company Logic
+
+See `../muso-outreach-engine/references/parent-companies.md`. Target parents only.
+Collapse subsidiaries to their parent. Flag unknown parents for rollup.
+
+### Step 3: Single Contact Per Company
+
+If the company already has an active contact (any stage ≠ Closed Lost, and the
+contact did not bounce), SKIP adding a 2nd person.
+
+Exceptions allowed:
+- Original email bounced or delivery failed
+- Original contact received all 4 follow ups (FU-01 to FU-04) with zero replies
+
+### Step 4: Research & Personalize
+
+For each finalist:
+- Pull `company_intelligence` row by Domain
+- Pull `Why Muso Ads Matters` (if missing, ASK Fede or Aaron)
+- Deep research: website, LinkedIn, recent news (use `web_search` + `web_fetch`)
+- Select ICP name drops from `references/icp-name-drops.md`
+
+### Step 5: Draft Email (call muso-outreach-writer)
+
+Pass to `muso-outreach-writer`:
+- Contact row, company row
+- Template type (Initial)
+- Sender account (default `a@muso.ai`, Aaron voice)
+- Deep research hook
+
+Receive back: `subject`, `body_html`, `template_id`, `checklist_passed`.
+
+### Step 6: Present for Approval
+
+Post the batch to `#sales-alerts` (`C0ARQ021M40`) using `muso-slack-formatter`.
+
+```
+*Outreach Batch, YYYY-MM-DD* ({N} emails, from {muso_email})
+
+1. *{Contact Name}*, {Title}, {Company}
+   Email: {email}
+   Template: {template name}
+   Hook: {the company specific opening line}
+
+   {full draft}
+
+2. ...
+```
+
+Wait for explicit approval (`send`, `go`, `approved`). Never auto send.
+
+### Step 7: Create Gmail Drafts
+
+```bash
+gog gmail drafts create \
+  --to "<email>" \
+  --subject "<subject>" \
+  --body-html "<html_body>" \
+  --account <muso_email> \
+  --label "B2B - Ads"
+```
+
+Fede reviews drafts in Gmail before final go.
+
+### Step 8: Send (on final go)
+
+```bash
+gog gmail drafts send <draftId> --account <muso_email>
+gog gmail messages modify <messageId> --add "B2B - Ads" --account <muso_email>
+```
+
+**Reapply the label manually.** Drafts sent via `gog gmail drafts send` do NOT
+auto inherit the label flag.
+
+### Step 9: Log Everything
+
+Append to the logbook sheet:
+
+```bash
+gog sheets append 1o1aUpAhQ8tNuZtzWqUm9bOUFvyPaGrCHbImbB4mtmW0 \
+  --range "muso-b2b-outreach-reports" \
+  --values '[["N","YYYY-MM-DD","<muso_email>","<domain>","<contact>","<company>","<title>","<email>","Sent","Emailed","<subject>","<template_name>","<hook_summary>"]]' \
+  --account a@muso.ai
+```
+
+Also:
+- Update `contacts_intelligence.Status = Emailed` for the row
+- Bump `Times Sent` and `Last Used Date` on the template row
+- Append to `api-logs/gmail/YYYY-MM-DD.jsonl`
+
+### Step 10: GHL Sync
+
+Call `muso-outreach-ghl-sync` to create the contact and opportunity at Emailed stage.
+
+Include the `sheet_row_id` custom field (from the contact's Row ID in `contacts_intelligence`).
+
+### Step 11: Slack Notification
+
+Post summary to `#sales-alerts`:
+
+```
+📧 *Outreach Sent, YYYY-MM-DD* ({N} emails, from {muso_email})
+
+1. *{Contact}*, {Title}, {Company} → Emailed ✅
+2. ...
+
+Template: {primary template used}
+GHL: {N} opportunities created in B2B-Ads-Clio → Emailed
+Log: muso-b2b-outreach-reports
+```
+
+**HARD STEP.** Never skip.
+
+## Constraints
+
+- Never send without explicit approval
+- Never send on Saturday or Sunday
+- Never skip the 4 source crosscheck
+- Never hardcode copy (pull from email_templates)
+- Always apply `B2B - Ads` label after send
+- Always log to the logbook sheet AND api-logs
+- Always sync to GHL after send
+- Always post the Slack notification
+- Never post to `#clio_x_fede` (legacy, deprecated for sales)
