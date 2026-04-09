@@ -445,6 +445,17 @@ RSYNC_EXCLUDES=(
   # value with an env-var lookup, remove this exclude, and commit
   # hydra-heal.sh to the repo like other operational scripts.
   --exclude='scripts/hydra-heal.sh'
+  # Runtime auth token caches. `muso-admin-api.sh` (in muso-ops-admin)
+  # and `muso-ads-api.sh` (in muso-ads-manager) cache JWTs on disk for
+  # ~23h next to the script. These files are server-owned runtime state
+  # and contain real tokens — they must never be shipped via the repo.
+  # A stale copy of `.admin-token-cache` was accidentally committed in
+  # ed558ce ("Sync live Node 8 state"), which caused the drift check to
+  # block every deploy on main after the server refreshed the token.
+  # The scripts themselves also ship a local .gitignore for these
+  # patterns; this exclude is the deploy-side backstop.
+  --exclude='.admin-token-cache'
+  --exclude='.ads-token-cache'
   # CMO's ad-hoc CSV outputs (b2b target research iterations, agent
   # research scratchpads). CMO currently writes these to the workspace
   # root; they're ephemeral-ish and may contain PII from b2b

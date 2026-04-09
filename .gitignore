@@ -66,3 +66,11 @@ config/
 # Plugin install artifacts (installed on server, not in repo)
 plugins/*/node_modules/
 plugins/*/package-lock.json
+
+# Runtime auth token caches (server-owned, ~23h JWTs). Written by
+# muso-admin-api.sh and muso-ads-api.sh next to the script. Must
+# never enter git — see RSYNC_EXCLUDES in scripts/deploy.sh for the
+# deploy backstop and required_excludes in .githooks/pre-commit for
+# the structural guard.
+.admin-token-cache
+.ads-token-cache

@@ -111,6 +111,8 @@ required_excludes=(
   "plugins/*/node_modules/"
   "plugins/*/package-lock.json"
   "scripts/hydra-heal.sh"
+  ".admin-token-cache"
+  ".ads-token-cache"
 )
 if [[ ! -f "$DEPLOY_SH" ]]; then
   fail "$DEPLOY_SH not found"
