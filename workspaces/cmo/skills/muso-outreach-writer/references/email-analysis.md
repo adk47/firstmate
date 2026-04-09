@@ -1,4 +1,4 @@
-# B2B Ads Email Analysis — Lessons from Real Outreach
+# B2B Ads Email Analysis, Lessons from Real Outreach
 
 ## Dataset
 ~40 cold emails sent from a@muso.ai, labeled "B2B - Ads", Feb-Mar 2026.
@@ -22,13 +22,13 @@ Contacts: VP/Director/CMO-level at pro audio, music tech, education, and gear co
 - **Lesson:** Follow-up converted here. Persistence works when the value prop is clear.
 
 ### Oeksound (Atte Karm, Marketing)
-- **Result:** "I'm definitely intrigued, it'd be great to hear more" — same day
+- **Result:** "I'm definitely intrigued, it'd be great to hear more", same day
 - **Why it worked:** Small plugin company. Getting in front of 500K verified producers/engineers is worth more to them than a big brand.
 - **Lesson:** Smaller brands reply faster because the opportunity feels disproportionately valuable.
 
 ### EarPeace (Jay Clark, Founder)
 - **Result:** "This could be interesting... send whatever deck and ask you have"
-- **Why it worked:** Used a slightly more casual, evolved template. Jay is a founder — peer energy resonated.
+- **Why it worked:** Used a slightly more casual, evolved template. Jay is a founder, peer energy resonated.
 - **Lesson:** Founder-to-founder tone gets responses from other founders.
 
 ### GlowBright/Pearl (Federico Cappuccilli)
@@ -44,7 +44,7 @@ Contacts: VP/Director/CMO-level at pro audio, music tech, education, and gear co
 - Generic "exploring partnerships" language
 - Follow-ups were also identical templates
 
-## The Winning Template (Original — What Aaron Actually Sent)
+## The Winning Template (Original, What Aaron Actually Sent)
 
 ```
 Hi [Name],
@@ -67,7 +67,7 @@ Want in? Grab a time:
 calendar.muso.ai
 ```
 
-### Evolved Version (J. Clark — Better)
+### Evolved Version (J. Clark, Better)
 
 ```
 Hey Jay,
@@ -89,7 +89,7 @@ access.muso.ai/demo
 calendar.muso.ai
 ```
 
-### Most Personalized (GlowBright — Best Reply Rate)
+### Most Personalized (GlowBright, Best Reply Rate)
 
 ```
 Hi Fede,
@@ -127,12 +127,12 @@ window to close without reaching out one more time.
 - Segmentation: role, credits, genre, career stage, streams, geography
 - ~41K mixing engineers, ~272K US-based, ~36K UK-based
 - Credit-recency targeting (last 90 days = actively working)
-- Not available on any other ad platform — completely unique inventory
+- Not available on any other ad platform, completely unique inventory
 
 ## What to Fix (Fede's Direction)
-1. **Shorter** — original was 5 paragraphs. Cut to 3 max.
-2. **More confident** — no "exploring partnerships" or "we're looking to." State what you have.
-3. **Intriguing** — don't explain everything. Make them want to ask.
-4. **CEO energy** — warm, direct, personal. Not a sales sequence.
-5. **Company-specific hook** — use Company Intelligence data to show you've done homework.
-6. **No identical templates** — every email must have at least one line that couldn't apply to any other company.
+1. **Shorter.** Original was 5 paragraphs. Cut to 3 max.
+2. **More confident.** No "exploring partnerships" or "we're looking to." State what you have.
+3. **Intriguing.** Don't explain everything. Make them want to ask.
+4. **CEO energy.** Warm, direct, personal. Not a sales sequence.
+5. **Company specific hook.** Use Company Intelligence data to show you've done homework.
+6. **No identical templates.** Every email must have at least one line that couldn't apply to any other company.

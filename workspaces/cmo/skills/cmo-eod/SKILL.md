@@ -42,7 +42,9 @@ Use bullet points. Each bullet = 1-2 lines max. Group by section. Add a Slack or
 **Channels**
 - #social-media: posts published, content decisions, team updates
 - #growth-team: campaigns, metrics, experiments, notable discussions
-- #clio_analyst: reports, insights, data requests
+- #sales-alerts: B2B Ads outreach activity (new)
+- #win-back-alerts: churn winback activity (new)
+- #company-finder: daily company batches (new)
 
 **Marketing Systems**
 - Klaviyo: campaigns sent, flow changes, list/segment updates, template edits in last 24h
@@ -54,15 +56,20 @@ Use bullet points. Each bullet = 1-2 lines max. Group by section. Add a Slack or
 - Notable inbound or outbound from any @muso.ai address
 - New leads, partner replies, important threads
 
-**Outreach & Pipeline (3-Point Crosscheck — MANDATORY)**
-- **Always crosscheck all 3 sources:** Gmail (a@muso.ai) + GHL (B2B-ADS pipeline) + Google Sheet (clay_n8n_clio_b2b_ads)
-- Gmail: emails sent in last 24h, replies received, calendar bookings
+**Outreach & Pipeline (3 Point Crosscheck, MANDATORY)**
+- **Always crosscheck all 3 sources:** Gmail (across all 4 Muso accounts) + GHL (B2B-Ads-Clio pipeline) + Google Sheet (master leads sheet)
+- Gmail: emails sent in last 24h, replies received, calendar bookings (scan all 4 accounts)
 - GHL: pipeline stage counts, new opportunities, stage movements (use GET /opportunities/search with page=N, location_id=S5w31kRRgsBjjiVATWlP, pipeline_id=GeSt85TueSvJ0SNFZXfQ)
-- Sheet: new contacts/leads added (1Jdp-RKL8tdwx6ySk18u1K97TYTqZjvWyanDIxEWYJrQ)
-- B2B Outreach Reports sheet (1o1aUpAhQ8tNuZtzWqUm9bOUFvyPaGrCHbImbB4mtmW0) — new rows or updates
+- Sheet: master leads sheet (1OWzfmxtgX-xq-aGxgmsjAdzQoyKbb94hnU_j-jm5q6I), new contacts or leads added
+- Outreach log sheet (1o1aUpAhQ8tNuZtzWqUm9bOUFvyPaGrCHbImbB4mtmW0), new rows or updates
 - Pipeline summary: prospects queued, emails sent, replies received, meetings booked
 - **Never report partial data as complete.** If pagination fails or a source is unreachable, say so.
 - Skip section if no activity across all 3 sources
+
+**Winback & Pipeline (separate from outreach)**
+- Crosscheck: Gmail `Win-Back` label (all 4 accounts) + GHL Win Back pipeline (location `fmK5Vl9sJv49WTYA0QyP`, pipeline `AZa8jK5S7UyQ0fqfxzyB`) + Sheet `high_value_churn` (1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs)
+- Winback sent today, replies, re subscriptions, marked Lost
+- Skip section if no activity
 
 **Fede + Clio Initiatives**
 - Summarize active projects and threads from #clio_x_fede (C0AHN078CSH) in last 24h
@@ -118,7 +125,7 @@ Replies to Fede
 Channels
 - #social-media: KZ posted the Poo Bear reel. 3.2K views in 4 hours.
 - #growth-team: Push notification test results shared by Jan. 61% open rate confirmed.
-- #clio_analyst: No new reports today.
+- #sales-alerts: 12 outreach sent, 2 replies received.
 
 Email
 - Inbound from Roland rep re: NAMM follow-up. Replied by Aaron. [thread]

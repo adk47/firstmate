@@ -1,81 +1,233 @@
-# HEARTBEAT.md — CMO Agent
+# HEARTBEAT.md, CMO Automation Registry
 
-✅ ALL AUTOMATIONS ACTIVE — Cutover from Clio complete (2026-03-24). Running on HYDRA Node 8.
+Registry of all active cron jobs, automations, and scheduled tasks the CMO
+agent runs. This file documents WHAT runs, WHEN it runs, WHERE it posts, and
+WHO it alerts.
 
-## ⚠️ POSTING RULE
-All heartbeat output → MAIN CHANNEL (top-level), never in a thread. Use `message(action=send, target=<channel_id>)` with NO `threadId`/`replyTo`.
+**Not an implementation file.** Actual cron schedules live on the HYDRA server
+or in n8n workflows. This file is the source of truth for the schedule itself.
 
----
-
-## B2B Reply Scanner — Every 15min → #clio_x_fede (C0AHN078CSH)
-**Status: ACTIVE — running on HYDRA (cutover from Clio complete 2026-03-24)**
-
-Cron: `b2b-reply-scanner-15m` (every 15m, isolated). Scans Gmail (a@muso.ai) for new B2B outreach replies. **MUST be completely silent (NO_REPLY) if no new B2B prospect replies** — Fede explicitly requested no "nothing found" messages (Mar 12). Only post when an actual B2B prospect reply is detected: sender, company, reply summary, next action. Added Mar 12, 2026.
-
-**AUTO-SYNC GHL ON EVERY REPLY DETECTION (Added Mar 14, 2026 — Fede directive):**
-When the reply scanner detects a new B2B prospect reply, it MUST also:
-1. Look up the opportunity in B2B-Ads-Clio pipeline (search by company name / contact name)
-2. Move the opportunity to `Replied` stage (`1f63ca6c-a220-4bae-863c-709153ef2dce`) if not already there or further
-3. If a meeting booking is detected (calendar invite, "let's chat", scheduling language), move to `Meeting Booked` (`d652c117-dc6a-4959-a486-c75b63e7eb5a`)
-4. If no opportunity exists, create one at the appropriate stage with `Clio |` prefix
-5. Log the GHL write to `api-logs/ghl/YYYY-MM-DD.jsonl`
-6. Include the GHL update confirmation in the Slack notification (e.g. "→ GHL moved to Replied ✅")
-Pipeline should ALWAYS reflect Gmail reality without manual intervention.
-
-**MEETING BOOKED SLACK NOTIFICATION (Added Mar 19, 2026 — Fede directive):**
-In addition to reply scanning, check Google Calendar (a@muso.ai) for newly booked meetings with B2B prospects (Muso Ads calendars: "Intro | Muso Ads", "Business Pro Meetings", "Muso Ads 2"). When a new meeting is detected:
-1. Post notification to #clio_x_fede with: prospect name, company, meeting date/time, calendar link
-2. Move GHL opportunity to `Meeting Booked` stage if not already there
-3. This replaces the GHL "Meeting Booked" email workflow (which Fede disabled)
-Same silence rule: only post when a NEW meeting is found, never "no meetings" messages.
+_Updated 2026-04-09 during CMO rebuild. Channels updated to reflect the new
+split: `#sales-alerts` for outreach, `#win-back-alerts` for winback._
 
 ---
 
-## B2B Outreach — Daily Reply Scan + GHL Full Sync → #clio_x_fede (C0AHN078CSH)
-**Status: ACTIVE — running on HYDRA (cutover from Clio complete 2026-03-24)**
+## Posting Rule (Universal)
 
-⚠️ Real-time reply detection + GHL sync now handled by `b2b-reply-scanner-15m` cron (every 15min) as of Mar 12, 2026. The cron auto-moves GHL stages on reply detection (added Mar 14).
-**Daily heartbeat still does a FULL GHL reconciliation pass:** cross-check ALL Gmail B2B threads against GHL pipeline stages. Fix any drift. This is the safety net — the 15-min cron handles real-time, this catches anything it missed.
-Pipeline: `B2B-Ads-Clio` (GeSt85TueSvJ0SNFZXfQ). Also check calendar for new bookings → move to Meeting Booked.
-
----
-
-## B2B Outreach — Monday Batch Prep → #clio_x_fede (C0AHN078CSH)
-**Status: ACTIVE — running on HYDRA (cutover from Clio complete 2026-03-24)**
-
-Mondays only. Pull next 20-30 untouched contacts from Sheet. Run 3-point crosscheck (Gmail + GHL + Sheet). Draft personalized emails using muso-b2b-copywriter. Post batch to #clio_x_fede for Fede's approval. DO NOT SEND without explicit "go".
+- Heartbeat system posts → **MAIN CHANNEL** (top level), never in a thread
+- Use `message(action=send, target=<channel_id>)` with NO `threadId` or `replyTo`
+- Silent rule: if an automation has nothing new to report, POST NOTHING. Never spam "nothing found" messages.
 
 ---
 
-## B2B Outreach — Follow-up Check → #clio_x_fede (C0AHN078CSH)
-**Status: ACTIVE — running on HYDRA (cutover from Clio complete 2026-03-24)**
+## System Heartbeat (HYDRA health)
 
-Check contacts due for follow-up (3d / 7d / 40d since last touch). Cross-check Gmail for replies. Draft follow-up batch for approval. ⚠️ Follow-ups NOT active yet — Fede wants new targets first. Enable only when Fede says go.
+**Cron**: every 6 hours
+**Posts to**: `#hydra-heartbeat`
+**Payload**:
+```json
+{"agent": "cmo", "status": "healthy", "timestamp": "<ISO8601>"}
+```
 
----
-
-## Win-Back Engine (3x daily: 9am, 1pm, 5pm CST)
-**Status: ACTIVE — running on HYDRA (cutover from Clio complete 2026-03-24)**
-
-Skill: `muso-winback-engine`. Sheet: `1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs`. Three checks: reply scan (Gmail Win-Back label), new cancellations (sheet), follow-ups due (7d+). Legacy thread check in `memory/churn-winback-threads.json` — remove after 2026-03-19.
-
----
-
-## Fede's EOD Briefing (22:00 CET daily)
-**Status: ACTIVE — running on HYDRA (cutover from Clio complete 2026-03-24)**
-
-Cron: `cmo-eod-briefing`. Posts to #clio_x_fede (C0AHN078CSH). Top-level header, threaded updates.
+Part of the HYDRA agent hive standard health check. Proves CMO is alive.
 
 ---
 
-## AMP Daily Report → #growth-team (C031DKAGQSH)
-**Status: ACTIVE — running on HYDRA (cutover from Clio complete 2026-03-24)**
+## Outreach Engine Automations
 
-Cron: `amp-daily-report` (daily, 11:00 AM CST / 9:00 AM PST). Query core-backend `public_ad_events` + `public_ads` via Athena. Post summary: all-time/7d/today with deltas, top 5 ads by CTR, underperformers, AMP vs Feed, platform breakdown, daily trend. Keep short and scannable. Added Mar 18, 2026 per Fede.
+All outreach related crons post to `#sales-alerts` (`C0ARQ021M40`).
+**Never post outreach notifications to `#clio_x_fede`.** That is the old Clio channel, deprecated for sales.
+
+### Reply Scanner (every 15 minutes)
+
+**Cron**: `b2b-reply-scanner-15m`
+**Runs**: every 15 minutes
+**Scans**: Gmail label `B2B - Ads` across all 4 Muso accounts (`a@`, `f@`, `ak@`, `aaron.k@`)
+**On reply detected**:
+1. Classify reply type per `muso-outreach-reply-scanner` SKILL
+2. Move GHL opportunity stage via `muso-outreach-ghl-sync`
+3. Log to `muso-b2b-outreach-reports` sheet
+4. Bump template stats (`Replies`, `Reply Rate`)
+5. Post to `#sales-alerts` with prospect + reply type + suggested next move
+
+**Silent if no new replies.**
+
+### Calendar Scanner (every 15 minutes)
+
+**Cron**: `b2b-calendar-scanner-15m`
+**Runs**: every 15 minutes
+**Scans**: Google Calendar on `a@muso.ai` for new B2B Ads meeting bookings
+**Calendars**: `Intro | Muso Ads`, `Business Pro Meetings`, `Muso Ads 2`
+**On booking detected**:
+1. Match attendee to contact in `contacts_intelligence`
+2. Move GHL opportunity to `Meeting Booked` via `muso-outreach-ghl-sync`
+3. Log to `muso-b2b-outreach-reports`
+4. Post to `#sales-alerts` with meeting details
+
+**Silent if no new meetings.**
+
+### Daily GHL Reconciliation (once per day, 6 AM CST)
+
+**Cron**: `b2b-ghl-reconciliation-daily`
+**Runs**: daily at 6 AM CST
+**Action**: full pass through `muso-b2b-outreach-reports` sheet and GHL `B2B-Ads-Clio` pipeline to catch any drift between sources. Catches anything the 15-minute reply scanner missed.
+**Posts**: reconciliation summary to `#sales-alerts` only if drift was found.
+
+### Monday Follow Up Batch Prep
+
+**Cron**: `b2b-followup-monday`
+**Runs**: Mondays at 9 AM CST
+**Action**: `muso-outreach-followup` pulls contacts due for follow up (7d, 14d, 140d), crosschecks Gmail for replies, drafts follow up batch for approval.
+**Posts**: draft batch to `#sales-alerts` for Fede to review and approve.
+
+**Status**: NOT YET LIVE. Follow up automation is paused until GHL + sheet sync is fully working. Enable once first few batches have been tested manually.
+
+### Daily Company Finder
+
+**Cron**: `company-finder-daily`
+**Runs**: daily at 1 PM CEST (Fede's timezone)
+**Action**: `muso-outreach-discovery` finds 5 new parent companies matching target verticals, dedupes against sheet + GHL + parent-companies.md, applies rollup logic.
+**Posts**: batch of 5 new parent companies to `#company-finder` (`C0ARS7XMY93`)
+
+**Status**: PLANNED, not yet wired. Requires Datagma / Snov.io / Enrow accounts to be active first.
+
+### Outreach QA (daily)
+
+**Cron**: `muso-outreach-qa-daily`
+**Runs**: daily at 8 AM CST
+**Action**: `muso-outreach-qa` audits every outreach subskill for drift, em dash violations, stage ID correctness, sheet to GHL consistency.
+**Posts**: audit results to `#sales-alerts` (critical issues mention `@fede`)
 
 ---
 
-## Meeting Booked Notification
-**Status: ACTIVE — running on HYDRA (cutover from Clio complete 2026-03-24)**
+## Win Back Engine Automations
 
-Check Google Calendar (a@muso.ai) for newly booked meetings with B2B prospects. Post notification to #clio_x_fede with: prospect name, company, meeting date/time, calendar link. Move GHL opportunity to `Meeting Booked` stage if not already there. Same silence rule: only post when a NEW meeting is found.
+All winback related crons post to `#win-back-alerts` (`C0ARTH6U0S2`).
+**Never post winback notifications to `#clio_x_fede` or `#clio_analyst`.**
+
+### Reply Scanner (3x daily)
+
+**Cron**: `winback-reply-scanner-3x`
+**Runs**: 3x daily at 9 AM, 1 PM, 5 PM CST
+**Scans**: Gmail label `Win-Back` across all 4 Muso accounts
+**On reply detected**:
+1. Classify reply type per `muso-winback-reply-scanner` SKILL
+2. Run fresh Stripe check (user may have re subscribed)
+3. Move GHL opportunity stage via `muso-winback-ghl-sync`
+4. Update sheet `high_value_churn` tracking columns
+5. Draft contextual response with human-like delay timing
+6. Post to `#win-back-alerts`
+
+**Silent if no new replies.**
+
+### Daily Follow Up Check
+
+**Cron**: `winback-followup-daily`
+**Runs**: daily at 10 AM CST
+**Action**: `muso-winback-followup` scans sheet for Day 7, Day 45, and Day 90 candidates. Marks Day 90 no-reply as Lost. Drafts Day 7 and Day 45 follow ups.
+**Posts**: draft follow up batch to `#win-back-alerts` for approval.
+
+**Status**: NOT YET LIVE. Waiting on first send batches to test.
+
+### Daily GHL Reconciliation
+
+**Cron**: `winback-ghl-reconciliation-daily`
+**Runs**: daily at 7 AM CST
+**Action**: full pass through `high_value_churn` sheet and `Churn -> Win-back` GHL pipeline. Catches drift. Also runs a fresh Stripe check on all Emailed and Follow-up stage contacts to detect silent re subscribers.
+**Posts**: reconciliation summary to `#win-back-alerts` only if drift found.
+
+### Win Back QA (daily)
+
+**Cron**: `winback-qa-daily`
+**Runs**: daily at 8 AM CST
+**Action**: `muso-winback-qa` audits every winback subskill for drift, em dash violations, Pre Send Stripe Check compliance, BCC detection, wrong API key usage, DNS deliverability.
+**Posts**: audit results to `#win-back-alerts` (critical issues mention `@aaron` and `@fede`)
+
+### Daily Win Back Report
+
+**Cron**: `winback-report-daily`
+**Runs**: daily at 8 PM CST
+**Action**: `muso-winback-reporter` generates daily summary (sends, replies, re subscriptions, pipeline snapshot).
+**Posts**: daily summary to `#win-back-alerts`.
+
+---
+
+## Fede Personal Briefings
+
+### EOD Briefing
+
+**Cron**: `cmo-eod-briefing`
+**Runs**: daily at 22:00 CET (Fede's local evening)
+**Action**: `cmo-eod` skill generates a top-level header message with threaded updates covering: tech, Fede mentions, replies to Fede, channels, marketing systems, email, outreach and pipeline, ClickUp, other.
+**Posts**: to `#clio_x_fede` (`C0AHN078CSH`)
+
+**Note**: `#clio_x_fede` is deprecated for sales and winback notifications but is
+still the personal briefing channel for Fede. If Fede wants EOD moved too, the
+channel can be swapped in one place.
+
+**Rules**:
+- ONCE per day only. Never re-send. Track state to prevent duplicate sends.
+- Max 40 bullet points total. Brevity is the default.
+- Required 3-point crosscheck for any data (Gmail + GHL + sheet).
+- If there is nothing meaningful to report, post a single-line "quiet day" acknowledgment. Do NOT skip the briefing entirely (Fede wants to see it went out).
+
+---
+
+## AMP Daily Report
+
+**Cron**: `amp-daily-report`
+**Runs**: daily at 11:00 AM CST (9:00 AM PST)
+**Action**: Query core-backend `public_ad_events` and `public_ads` via Athena. Post summary: all-time / 7d / today with deltas, top 5 ads by CTR, underperformers, AMP vs Feed, platform breakdown, daily trend.
+**Posts**: to `#growth-team` (`C031DKAGQSH`)
+
+**Note**: "AMP" here refers to the Muso Amp product, not Muso Ads. See
+`wiki/company/product-naming.md`.
+
+---
+
+## Cron Channel Summary Table
+
+| Channel | Crons Posting Here |
+|---------|-------------------|
+| `#sales-alerts` (`C0ARQ021M40`) | b2b-reply-scanner-15m, b2b-calendar-scanner-15m, b2b-ghl-reconciliation-daily, b2b-followup-monday, muso-outreach-qa-daily |
+| `#company-finder` (`C0ARS7XMY93`) | company-finder-daily |
+| `#win-back-alerts` (`C0ARTH6U0S2`) | winback-reply-scanner-3x, winback-followup-daily, winback-ghl-reconciliation-daily, winback-qa-daily, winback-report-daily |
+| `#clio_x_fede` | cmo-eod-briefing (legacy channel, kept for EOD only) |
+| `#growth-team` (`C031DKAGQSH`) | amp-daily-report |
+| `#hydra-heartbeat` | 6-hour health check |
+
+---
+
+## Status Legend
+
+- **ACTIVE**: cron is wired and running
+- **NOT YET LIVE**: cron is documented but not yet scheduled (waiting on prerequisites)
+- **PLANNED**: cron is designed but not yet built
+
+## Current Status Check (2026-04-09)
+
+| Cron | Status | Blocker |
+|------|--------|---------|
+| HYDRA heartbeat | ACTIVE | none |
+| b2b-reply-scanner-15m | ACTIVE | verify channel migration from `#clio_x_fede` to `#sales-alerts` |
+| b2b-calendar-scanner-15m | ACTIVE | same |
+| b2b-ghl-reconciliation-daily | ACTIVE | same |
+| b2b-followup-monday | NOT YET LIVE | first manual batches pending |
+| company-finder-daily | PLANNED | enrichment stack (Datagma, Snov.io, Enrow) not yet wired |
+| muso-outreach-qa-daily | NOT YET LIVE | turn on after first batch sends |
+| winback-reply-scanner-3x | PLANNED | first win back batch not yet sent |
+| winback-followup-daily | NOT YET LIVE | first batch pending |
+| winback-ghl-reconciliation-daily | NOT YET LIVE | first batch pending |
+| winback-qa-daily | NOT YET LIVE | first batch pending |
+| winback-report-daily | NOT YET LIVE | first batch pending |
+| cmo-eod-briefing | ACTIVE | running |
+| amp-daily-report | ACTIVE | running |
+
+Update this table as crons come online.
+
+---
+
+## History
+
+- 2026-04-09: full rewrite during CMO rebuild. Channels migrated from `#clio_x_fede` / `#clio_analyst` to `#sales-alerts` / `#win-back-alerts` / `#company-finder`. Added winback QA, reporter, reply scanner crons. Marked status for each cron.
+- 2026-03-24: original "cutover from Clio complete" content (deprecated)
