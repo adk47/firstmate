@@ -1175,6 +1175,27 @@ if ! grep -q "GOG_KEYRING_PASSWORD" /root/.bashrc 2>/dev/null; then
   fi
 fi
 
+# Guard: ensure muso-ops-admin credentials are present in the main profile
+# env file. The ops agent (on the main profile) needs MUSO_ADMIN_EMAIL and
+# MUSO_ADMIN_PASSWORD to auth against the Muso admin API; without them it
+# responds to credit-verification requests with "admin API credentials are
+# not configured" and the operator has to re-route manually. These vars
+# live in /etc/openclaw/main.env (loaded as systemd EnvironmentFile by
+# openclaw-gateway-main.service) and are NOT in ~/.zshrc — the daemon
+# does not source an interactive shell. Warn loudly on drift so a future
+# main.env regeneration can't silently break the ops agent again.
+MAIN_ENV="/etc/openclaw/main.env"
+if [ -f "$MAIN_ENV" ]; then
+  MISSING_ADMIN=""
+  grep -q "^MUSO_ADMIN_EMAIL=" "$MAIN_ENV" || MISSING_ADMIN="$MISSING_ADMIN MUSO_ADMIN_EMAIL"
+  grep -q "^MUSO_ADMIN_PASSWORD=" "$MAIN_ENV" || MISSING_ADMIN="$MISSING_ADMIN MUSO_ADMIN_PASSWORD"
+  if [ -n "$MISSING_ADMIN" ]; then
+    echo "  WARN: $MAIN_ENV is missing:$MISSING_ADMIN"
+    echo "  WARN: ops agent credit-verification will fail until these are added."
+    echo "  WARN: fix with:  sudo vim $MAIN_ENV  &&  systemctl restart openclaw-gateway-main"
+  fi
+fi
+
 # Note: mention gate patch (patch-openclaw-mention-gate.sh) removed — no longer needed on OpenClaw 2026.4.2+
 
 # Sync cron jobs from repo to the main profile data dir (preserve live state).

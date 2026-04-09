@@ -101,10 +101,17 @@ This gate will be relaxed per-operation as we validate each endpoint in producti
 
 ## Environment Setup
 
-Required env vars (in `~/.zshrc`) — **CONFIGURED AND WORKING:**
+Required env vars — **CONFIGURED AND WORKING:**
 - `MUSO_API_URL` = `https://api.muso.ai/api/v3`
 - `MUSO_ADMIN_EMAIL` = `retool@muso.ai` (service account)
 - `MUSO_ADMIN_PASSWORD` = set (not shown)
+
+**Location on hydra:** `/etc/openclaw/main.env` (loaded as a systemd
+`EnvironmentFile` by `openclaw-gateway-main.service`). These are NOT in
+`~/.zshrc` — the gateway runs as a daemon and does not source an
+interactive shell. If you see "admin API credentials are not configured"
+from the ops agent, check that both vars are present in that file and
+restart the unit with `systemctl restart openclaw-gateway-main`.
 
 ## API Authentication
 
