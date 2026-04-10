@@ -660,17 +660,11 @@
         "installedAt": "2026-03-15T16:42:31.664Z"
       },
       "openclaw-gmail": {
-        "source": "npm",
-        "spec": "@mcinteerj/openclaw-gmail",
+        "source": "path",
+        "spec": "/root/.openclaw/extensions/openclaw-gmail",
         "installPath": "/root/.openclaw/extensions/openclaw-gmail",
-        "version": "1.7.3",
-        "resolvedName": "@mcinteerj/openclaw-gmail",
-        "resolvedVersion": "1.7.3",
-        "resolvedSpec": "@mcinteerj/openclaw-gmail@1.7.3",
-        "integrity": "sha512-zwzp9ODqN27wxW6S2srSbsQxM/tJ+ozFIwmk/vXEqHOb7V/3yNugdL37TbotuUI2b7om8NtLyvR7wBSd/aO69A==",
-        "shasum": "cae2c32b0f5cf03862aad03d55ed4071345cdefb",
-        "resolvedAt": "2026-03-23T19:24:16.951Z",
-        "installedAt": "2026-03-23T19:24:23.644Z"
+        "version": "1.7.3-muso.1",
+        "resolvedName": "@muso/openclaw-gmail"
       },
       "intercom": {
         "source": "path",

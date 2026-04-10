@@ -1,0 +1,52 @@
+{
+  "name": "@muso/openclaw-gmail",
+  "private": true,
+  "version": "1.7.3-muso.1",
+  "description": "Gmail channel plugin for OpenClaw — forked from @mcinteerj/openclaw-gmail@1.7.3 with delivery buffering fix",
+  "type": "module",
+  "main": "index.ts",
+  "license": "MIT",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "channel": {
+      "id": "openclaw-gmail",
+      "label": "Gmail",
+      "selectionLabel": "Gmail",
+      "detailLabel": "Gmail",
+      "docsPath": "/channels/gmail",
+      "docsLabel": "gmail",
+      "blurb": "Gmail integration via direct API or gog CLI.",
+      "systemImage": "envelope",
+      "order": 100,
+      "showConfigured": true
+    }
+  },
+  "files": [
+    "index.ts",
+    "src/**/*.ts",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "dependencies": {
+    "@googleapis/gmail": "^16.1.1",
+    "dompurify": "^3.2.3",
+    "google-auth-library": "^10.5.0",
+    "jsdom": "^25.0.1",
+    "marked": "^15.0.6",
+    "nodemailer": "^8.0.1",
+    "proper-lockfile": "^4.1.2",
+    "sanitize-html": "^2.14.0",
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.0"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.1.0"
+  }
+}

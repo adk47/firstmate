@@ -144,6 +144,7 @@ plugin_profile() {
   local plugin_name="$1"
   case "$plugin_name" in
     intercom|support-tools) echo "edge" ;;
+    openclaw-gmail) echo "main" ;;
     *)
       echo "main"
       echo "    plugin_profile: '$plugin_name' is not in the known mapping (intercom|support-tools→edge); defaulting to main. Verify this is intended — typos in plugin directory names land here silently." >&2
@@ -466,6 +467,20 @@ RSYNC_EXCLUDES=(
   # follows the new convention, this broader workspace-root exclude
   # can be removed. Tracked in project_skills_architecture_followup.md.
   --exclude='workspaces/*/*.csv'
+  # Workspace .env files contain API keys (e.g., FREEPIK_API_KEY in
+  # workspaces/cmo/.env). Server-owned secrets, must never enter git.
+  --exclude='workspaces/*/.env'
+  # Support agent pending-ticket queue. Contains customer PII (emails,
+  # profile IDs). Runtime state created by the support agent.
+  --exclude='workspaces/*/pending-tickets/'
+  # Large media artifacts generated at runtime (test renders, exports).
+  # Example: workspaces/cmo/freepik-test-studio.png (5MB).
+  --exclude='workspaces/*/*.png'
+  # Agent-generated media (Freepik renders, hero images, etc.)
+  --exclude='workspaces/*/media/'
+  --exclude='workspaces/*/generated/'
+  # Agent research scratchpads (may contain proprietary data)
+  --exclude='workspaces/*/research/'
 )
 
 # -------------------------------------------------------------------
@@ -1231,27 +1246,8 @@ with open(cfg, 'w') as f:
 print('  Memory search: local embeddings (no OpenAI)')
 "
 
-# Patch Gmail plugin (main profile only)
-GMAIL_CHANNEL="/root/.openclaw/extensions/openclaw-gmail/src/channel.ts"
-if [ -f "$GMAIL_CHANNEL" ]; then
-  if ! grep -q "describeMessageTool" "$GMAIL_CHANNEL"; then
-    sed -i 's/listActions: () => \["send"\],/listActions: () => ["send"],\n    describeMessageTool: () => ({ actions: ["send"], capabilities: ["send"] }),/' "$GMAIL_CHANNEL"
-    echo "  Patched Gmail plugin describeMessageTool"
-  fi
-fi
-
-GMAIL_MONITOR="/root/.openclaw/extensions/openclaw-gmail/src/monitor.ts"
-if [ -f "$GMAIL_MONITOR" ]; then
-  if grep -q 'account.backend !== "api" && !(await GogGmailClient.checkExists())' "$GMAIL_MONITOR" && ! grep -q "PATCHED" "$GMAIL_MONITOR"; then
-    sed -i 's|if (account.backend !== "api" && !(await GogGmailClient.checkExists())) {|if (false \&\& account.backend !== "api" \&\& !(await GogGmailClient.checkExists())) { // PATCHED: skip gog check|' "$GMAIL_MONITOR"
-    echo "  Patched Gmail monitor gog CLI check"
-  fi
-  if grep -q "^  await ensureQuarantineLabel(client, log);" "$GMAIL_MONITOR"; then
-    sed -i '/^  await ensureQuarantineLabel(client, log);/c\  try { await ensureQuarantineLabel(client, log); } catch (e) { log.warn(`Quarantine label setup failed: ${String(e)}`); }' "$GMAIL_MONITOR"
-    sed -i '/^  await pruneGmailSessions(account, log);/c\  try { await pruneGmailSessions(account, log); } catch (e) { log.warn(`Prune failed: ${String(e)}`); }' "$GMAIL_MONITOR"
-    echo "  Patched Gmail monitor init resilience"
-  fi
-fi
+# Gmail plugin patches are now baked into the forked source at
+# plugins/openclaw-gmail/ — no deploy-time sed needed.
 POSTSYNC
 
 log "  Post-sync setup complete."

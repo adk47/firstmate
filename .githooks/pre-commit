@@ -113,6 +113,12 @@ required_excludes=(
   "scripts/hydra-heal.sh"
   ".admin-token-cache"
   ".ads-token-cache"
+  "workspaces/*/.env"
+  "workspaces/*/pending-tickets/"
+  "workspaces/*/*.png"
+  "workspaces/*/media/"
+  "workspaces/*/generated/"
+  "workspaces/*/research/"
 )
 if [[ ! -f "$DEPLOY_SH" ]]; then
   fail "$DEPLOY_SH not found"

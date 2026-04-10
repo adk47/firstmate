@@ -1,0 +1,11 @@
+{
+  "id": "openclaw-gmail",
+  "channels": [
+    "openclaw-gmail"
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
