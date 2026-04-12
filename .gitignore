@@ -62,8 +62,6 @@ workspaces/*/media/
 workspaces/*/research/
 workspaces/*/pending-tickets/
 workspaces/*/.openclaw/
-workspaces/*/IDENTITY.md
-workspaces/*/HEARTBEAT.md
 workspaces/*/skills/*/references/daily-batches/
 
 # Server-side audit logs
