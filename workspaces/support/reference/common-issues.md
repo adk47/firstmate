@@ -126,7 +126,7 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
 3. If they signed up via social login (Google, Apple, etc.): try that login method instead of email/password.
 4. If they reset the password and still can't log in:
    - Check if they're using the right email — common issue is having multiple email addresses.
-5. If still blocked after all steps:
+5. If still unable to log in after all steps:
    - **Escalate:** Create a ticket with category "Login — Account Access". Include: account email (or emails they've tried), login method (email/social), error message if any. SLA: 1 business day.
 
 ---
