@@ -290,7 +290,7 @@
         "id": "support",
         "workspace": "/opt/hydra/workspaces/support",
         "model": {
-          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "primary": "fireworks/accounts/fireworks/models/glm-5p1",
           "fallbacks": [
             "fireworks/accounts/fireworks/models/deepseek-v3p2",
             "anthropic/claude-haiku-4-5-20251001"

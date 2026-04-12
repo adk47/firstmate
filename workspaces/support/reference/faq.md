@@ -6,10 +6,35 @@
 Visit app.muso.ai and sign up with your email. The Lite plan is free forever.
 
 ### How do I claim my profile?
-Search for your name on app.muso.ai. When you find your profile, click "Claim" and follow the verification steps. You may need to verify your identity with an ID scan or social media login.
+1. Search for your name at app.muso.ai
+2. When you find your profile, click "Claim"
+3. Follow the verification steps — you'll be asked to verify your identity via ID scan or social media login
+4. Once submitted, the team reviews your claim
+
+**If your claim was rejected:**
+- Check the rejection email for the specific reason
+- Common reasons: name mismatch between ID and profile, unrecognised social account, insufficient documentation
+- Resubmit with stronger documentation (government-issued ID is most reliable)
+- If you believe the rejection was in error, create a support ticket with category "Profile Claim — Rejected"
+
+**If verification is stuck (no update after 5 business days):**
+- Create a support ticket with category "Profile Claim — Pending Review"
 
 ### Can I merge duplicate profiles?
-Yes. If you appear under multiple names or variations across different sources, you can request a profile merge. Submit a merge request through your account, and our team will review it.
+Yes. If you appear under multiple names or variations across different sources:
+
+1. Log in to your account at app.muso.ai
+2. Go to your profile settings and find the merge request option
+3. Identify the duplicate profiles you want merged and submit the request
+4. Our team will review and merge them, typically within 5 business days
+
+**What to expect:**
+- Credits from all profiles are combined into one
+- The primary profile name is kept (you can specify your preference in the request)
+- You'll receive a confirmation once the merge is complete
+
+**If your merge request has no update after 5 business days:**
+- Create a support ticket with category "Profile Merge — Pending"
 
 ### How do I become an Album Admin?
 Verified artists can become Album Admins, giving them control over the credits displayed for their albums and tracks. You must first verify your artist profile.
@@ -18,20 +43,46 @@ Verified artists can become Album Admins, giving them control over the credits d
 Log in at app.muso.ai and edit your profile page directly. Changes are reflected across the platform and shared with industry partners.
 
 ### Can I delete my profile?
-Account and profile deletion requests are handled by our support team. Create a support ticket and we will process your request.
+Account and profile deletion requests are handled by our support team. Create a support ticket with category "Account -- Deletion Request" and we will process your request.
 
 ---
 
 ## Credits
 
 ### How do I add a missing credit?
-Log in to your account, navigate to the track or album, and submit a credit claim. Specify your role (producer, songwriter, engineer, etc.). Claims are reviewed by our team, usually within 48 hours.
+1. Log in to your account
+2. Navigate to the track or album where the credit is missing
+3. Use the "Add Missing Credits" feature and specify your role (producer, songwriter, engineer, etc.)
+4. Submit the claim — our team reviews it, usually within 48 hours
+
+**Before submitting, check:**
+- Is this a Muso-sourced credit or does it come from an external platform?
+- If external (e.g. a Spotify or distributor feed), you need to fix it at the source first (see below)
 
 ### My credit is incorrect. How do I fix it?
-If the credit was added through Muso.AI, you can request a correction through your account. If the credit comes from an external source like Spotify, you will need to contact your distributor or Spotify to correct the metadata first. Once fixed there, Muso will reflect the change automatically.
+
+**If the credit was added through Muso.AI:**
+- Log in and request a correction through your account
+- Our team will review and update it
+
+**If the credit comes from an external source (Spotify, distributor, label):**
+- Muso reflects what those sources report — we can't override them directly
+- Contact your distributor or the platform where the error originated
+- Ask them to correct the metadata
+- Once the source is fixed, Muso will automatically reflect the updated credit (typically within the next data sync)
+
+**If you're unsure of the source:**
+- Check whether the credit appears on the external platform as-is
+- If it does, the fix must happen there first
+- If it doesn't appear externally but shows incorrectly on Muso, create a support ticket with category "Credit Error — Muso Source"
 
 ### Why are some of my credits missing?
-Credits come from multiple industry sources. If a credit is missing, it may not yet be in our database from those sources. You can add it manually through the "Add Missing Credits" feature.
+Credits come from multiple industry sources. A missing credit usually means one of:
+- It hasn't been ingested from that source yet
+- The source doesn't have it in their database
+- There's a name/ISRC mismatch preventing the link
+
+Try adding it manually via "Add Missing Credits." If you believe it should be automatically sourced and it's not appearing, create a support ticket with category "Missing Credit — Source Discrepancy."
 
 ### How long does credit verification take?
 Credit claims are typically reviewed within 48 hours by our operations team.
@@ -53,7 +104,14 @@ We track streaming data across 11 platforms including Spotify, YouTube, YouTube 
 Analytics are updated daily at 4PM EST.
 
 ### Why are my analytics not showing?
-Analytics require an active Pro or Business subscription with an available seat assigned to your profile. If you have an active subscription but no data is showing, please create a support ticket.
+Analytics require an active Pro or Business subscription with an available seat assigned to your profile.
+
+**Check the following in order:**
+1. Is your subscription active? Go to Settings and confirm your plan shows Pro or Business
+2. Does your profile have a seat assigned? Check under your subscription settings
+3. Has it been at least 24 hours since you upgraded? Data populates after the next daily refresh at 4PM EST
+
+If all three are true and data still isn't showing, create a support ticket with category "Analytics — Missing Data."
 
 ### What are Milestones?
 Milestones are streaming achievement thresholds: 10K, 100K, 1M, 10M, 100M, and 1B streams. They help you track career progress.
@@ -90,8 +148,18 @@ The audit identifies the issues; resolution typically involves working with your
 ### Can I try Pro for free?
 Check app.muso.ai for current trial offers. The Lite plan gives you full access to credit management features at no cost.
 
+### How do I upgrade my plan?
+Go to Settings in your account and select the plan you want. Upgrades take effect immediately.
+
 ### How do I cancel my subscription?
-Go to your account settings and select cancel. You retain access until the end of your billing period.
+Go to Settings and select cancel. You retain access until the end of your billing period. Your credits and profile data are never deleted — those are free features.
+
+### I was charged but my subscription shows inactive
+This usually means a payment processing delay. First check:
+1. Does your bank statement show the charge as settled (not pending)?
+2. Is the email address on your Muso account the same one that received the payment receipt?
+
+If both look correct and your subscription still shows inactive after 24 hours, create a support ticket with category "Billing — Charged but Inactive" and include your payment confirmation.
 
 ---
 
@@ -101,10 +169,16 @@ Go to your account settings and select cancel. You retain access until the end o
 Try clearing your browser cache and cookies, then reload. If the issue persists, try a different browser. If it still doesn't work, create a support ticket.
 
 ### I can't log in to my account
-Try resetting your password via the "Forgot Password" link on the login page. If you still can't access your account, create a support ticket.
+1. Use the "Forgot Password" link on the login page to reset your password
+2. Check that you're using the correct email address
+3. If you signed up via social login (Google, etc.), try that method instead
+
+If none of the above works, create a support ticket with category "Login — Account Access."
 
 ### My streaming data seems incorrect
-Streaming data comes directly from platform APIs. If numbers seem off, it may be due to a platform reporting delay. Data is refreshed daily at 4PM EST. If the issue persists after 24 hours, create a support ticket.
+Streaming data comes directly from platform APIs. If numbers seem off:
+1. Wait until after 4PM EST — data refreshes once daily
+2. If numbers are still wrong 24 hours after the refresh, create a support ticket with category "Analytics — Incorrect Data"
 
 ### The mobile app is not working
 Make sure you have the latest version from the App Store or Google Play. Try force-closing and reopening the app. If issues persist, create a support ticket.

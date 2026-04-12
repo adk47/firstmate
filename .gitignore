@@ -74,3 +74,6 @@ plugins/*/package-lock.json
 # the structural guard.
 .admin-token-cache
 .ads-token-cache
+
+# CS analysis data (raw API dumps -- potentially PII, never commit)
+scripts/cs-analysis/data/
