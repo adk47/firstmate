@@ -3,7 +3,9 @@
 _Long-term memory. Updated by the agent during sessions._
 
 ## Lessons Learned
-_(none yet — agent will populate during operation)_
+
+### Nick (U0AL36NADEY) — Hydra PR Merges
+- Always use `--admin` flag when Nick asks to merge a PR on `Muso-AI/hydra`. Branch protection requires review approval, but Nick has delegated authority to bypass via admin merge.
 
 ## Key Context
 _(initialized 2026-03-22)_
