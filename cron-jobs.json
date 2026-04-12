@@ -457,6 +457,44 @@
         "consecutiveErrors": 0,
         "nextRunAtMs": 1774753200000
       }
+    },
+    {
+      "id": "86adfcce-fe8a-4707-9c22-ad2bd4e43260",
+      "agentId": "cmo",
+      "name": "company-finder-daily",
+      "description": "Daily parent company discovery for B2B outreach - finds 50 new companies, dedupes, posts to #company-finder for approval",
+      "enabled": true,
+      "createdAtMs": 1775766544763,
+      "updatedAtMs": 1775991735778,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 13 * * *",
+        "tz": "Europe/Rome"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the muso-outreach-discovery skill. Find 50 new companies matching Muso Ads target verticals. Dedupe against contacts_intelligence sheet, company_intelligence sheet, GHL B2B-Ads-Clio pipeline, and parent-companies.md (to skip subsidiaries of known parents). Score and select top 50. Post the batch to #company-finder (C0ARS7XMY93) for Fede's review. Follow the SKILL.md workflow exactly. SILENCE RULE: if no new companies match, produce no output at all. Reference files are in skills/muso-outreach-engine/references/ — NEVER create files at workspace root.",
+        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "timeoutSeconds": 600
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0ARS7XMY93",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1776078000000,
+        "lastRunAtMs": 1775991600008,
+        "lastRunStatus": "ok",
+        "lastStatus": "ok",
+        "lastDurationMs": 135770,
+        "lastDelivered": true,
+        "lastDeliveryStatus": "delivered"
+      }
     }
   ]
 }

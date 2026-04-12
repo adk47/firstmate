@@ -368,6 +368,69 @@ jobs:
           fi
           echo "✓ Zero files would be deleted on merge — safe to deploy"
 
+      - name: Cron job orphan check
+        # Compares cron-jobs.json in the PR against the server's live
+        # cron state. If the server has jobs not in the repo, the deploy
+        # Step 5a will block with "refusing to drop live state". Catching
+        # this at PR time means the author can either add the missing job
+        # to cron-jobs.json or confirm it should be dropped.
+        run: |
+          set -euo pipefail
+          SERVER_CRON="/root/.openclaw-main/cron/jobs.json"
+          REPO_CRON="cron-jobs.json"
+
+          if [ ! -f "$SERVER_CRON" ]; then
+            echo "No server cron state found — skipping orphan check"
+            exit 0
+          fi
+          if [ ! -f "$REPO_CRON" ]; then
+            echo "No cron-jobs.json in repo — skipping"
+            exit 0
+          fi
+
+          # Extract job IDs from both
+          server_ids=$(python3 -c "
+          import json, sys
+          with open('$SERVER_CRON') as f:
+              data = json.load(f)
+          for job in data.get('jobs', []):
+              print(job['id'])
+          " | sort)
+
+          repo_ids=$(python3 -c "
+          import json, sys
+          with open('$REPO_CRON') as f:
+              data = json.load(f)
+          for job in data.get('jobs', []):
+              print(job['id'])
+          " | sort)
+
+          # Find orphans (on server but not in repo)
+          orphans=$(comm -23 <(echo "$server_ids") <(echo "$repo_ids"))
+
+          if [ -n "$orphans" ]; then
+            echo "::error::Cron jobs exist on server but NOT in cron-jobs.json — deploy Step 5a will block"
+            echo
+            echo "Orphaned job IDs:"
+            for id in $orphans; do
+              name=$(python3 -c "
+          import json
+          with open('$SERVER_CRON') as f:
+              data = json.load(f)
+          for job in data.get('jobs', []):
+              if job['id'] == '$id':
+                  print(f\"{job.get('name', '?')} (agent: {job.get('agentId', '?')})\")
+                  break
+          ")
+              echo "  $id — $name"
+            done
+            echo
+            echo "Fix: pull the job into cron-jobs.json, or confirm it should be dropped"
+            echo "  (set HYDRA_ALLOW_ORPHAN_CRON=1 at deploy time to force-drop)"
+            exit 1
+          fi
+          echo "✓ All server cron jobs accounted for in cron-jobs.json"
+
   shellcheck:
     name: Shellcheck (scripts/ + .githooks/)
     runs-on: ubuntu-latest
