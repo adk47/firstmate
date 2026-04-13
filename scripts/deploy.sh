@@ -489,6 +489,14 @@ RSYNC_EXCLUDES=(
   --exclude='workspaces/*/tmp/'
   # Workspace state directories (send ledgers, cron run logs — runtime data)
   --exclude='workspaces/*/state/'
+  # Agent ad-hoc analysis scripts. Same category as tmp/ — iterative
+  # throwaway work the agents generate during investigations (e.g.
+  # finance wrote 10 Python scripts on 2026-04-13 for a tax jurisdiction
+  # dive: enrich-tax-v1/v2/v3.py, find-no-tax-subs-v1/v2/v3.py, etc).
+  # Never canonical, never tracked in repo. If a script graduates into
+  # something worth keeping, promote it to a proper skill under
+  # workspaces/<agent>/skills/<skill-name>/ instead.
+  --exclude='workspaces/*/scripts/'
 )
 
 # -------------------------------------------------------------------
