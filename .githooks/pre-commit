@@ -121,6 +121,8 @@ required_excludes=(
   "workspaces/*/research/"
   "workspaces/*/*.txt"
   "workspaces/*/skills/*/references/daily-batches/"
+  "workspaces/*/tmp/"
+  "workspaces/*/state/"
 )
 if [[ ! -f "$DEPLOY_SH" ]]; then
   fail "$DEPLOY_SH not found"

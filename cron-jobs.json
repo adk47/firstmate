@@ -90,7 +90,7 @@
       "description": "Daily report of top profiles joining/leaving Muso.AI",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774343168757,
+      "updatedAtMs": 1774399200000,
       "schedule": {
         "kind": "cron",
         "expr": "0 9 * * *"
@@ -100,7 +100,7 @@
       "payload": {
         "kind": "agentTurn",
         "message": "Run the daily profile movement report. Query Athena (workgroup: clio-agent, region: us-west-2) for: 1) PAID CHURNS in last 24h \u2014 separate B2B (muso_team_business_*) and B2P (muso_team_pro_* + muso_individual_*), include emails. 2) PAID JOINS in last 24h ranked by popularity. 3) POPULAR LITE USERS \u2014 claimed profiles with popularity 90+ and no paid subscription. Format for Slack with bullets. Flag biggest red flags.",
-        "timeoutSeconds": 300
+        "timeoutSeconds": 600
       },
       "delivery": {
         "mode": "announce",
@@ -127,7 +127,7 @@
       "description": "Daily win-back campaign sheet update \u2014 append new churns",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774346792352,
+      "updatedAtMs": 1774399200000,
       "schedule": {
         "kind": "cron",
         "expr": "0 10 * * *"
@@ -136,12 +136,12 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "model": "fireworks/accounts/fireworks/models/kimi-k2p5",
         "fallbacks": [
           "fireworks/accounts/fireworks/models/deepseek-v3p2"
         ],
         "message": "Daily Win-Back Campaign sheet update. Query Athena for new churned Pro users. Diff against existing emails in Google Sheet (1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs, account: a@muso.ai). ONLY APPEND new rows \u2014 never replace or overwrite tracking columns (AI-AN). Post summary of new additions.",
-        "timeoutSeconds": 300
+        "timeoutSeconds": 900
       },
       "delivery": {
         "mode": "announce",
@@ -239,7 +239,7 @@
       "description": "Daily 10PM CET EOD briefing for Fede",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774313970262,
+      "updatedAtMs": 1774399200000,
       "schedule": {
         "kind": "cron",
         "expr": "0 22 * * *",
@@ -249,7 +249,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "model": "fireworks/accounts/fireworks/models/kimi-k2p5",
         "fallbacks": [
           "fireworks/accounts/fireworks/models/deepseek-v3p2"
         ],
@@ -274,7 +274,7 @@
       "description": "Scan Gmail for B2B prospect replies every hour",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774385106501,
+      "updatedAtMs": 1774399200000,
       "schedule": {
         "kind": "every",
         "everyMs": 3600000,
@@ -284,7 +284,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "model": "fireworks/accounts/fireworks/models/minimax-m1-80k",
         "fallbacks": [
           "fireworks/accounts/fireworks/models/deepseek-v3p2",
           "anthropic/claude-haiku-4-5-20251001"
@@ -295,7 +295,7 @@
       "delivery": {
         "mode": "announce",
         "channel": "slack",
-        "to": "C0AHN078CSH",
+        "to": "C0ARQ021M40",
         "bestEffort": true
       },
       "state": {
@@ -316,7 +316,7 @@
       "description": "Daily AMP ads performance report",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774313970262,
+      "updatedAtMs": 1774399200000,
       "schedule": {
         "kind": "cron",
         "expr": "0 11 * * *",
@@ -326,12 +326,13 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "model": "fireworks/accounts/fireworks/models/minimax-m1-80k",
         "fallbacks": [
-          "fireworks/accounts/fireworks/models/deepseek-v3p2"
+          "fireworks/accounts/fireworks/models/deepseek-v3p2",
+          "anthropic/claude-haiku-4-5-20251001"
         ],
         "message": "Run the AMP Daily Report. Query core-backend tables public_ad_events and public_ads via Athena (workgroup: clio-agent, region: us-west-2). Build report: 1) Summary: all-time/7d/today views, clicks, CTR, unique viewers with deltas. 2) Top 5 ads by CTR. 3) Underperformers (CTR < 0.3% with >1K views). 4) AMP vs Feed breakdown. 5) Platform breakdown. 6) Daily trend 7 days. Format for Slack bullets, keep short.",
-        "timeoutSeconds": 120
+        "timeoutSeconds": 600
       },
       "delivery": {
         "mode": "announce",
@@ -476,7 +477,10 @@
       "payload": {
         "kind": "agentTurn",
         "message": "Run the muso-outreach-discovery skill. Find 50 new companies matching Muso Ads target verticals. Dedupe against contacts_intelligence sheet, company_intelligence sheet, GHL B2B-Ads-Clio pipeline, and parent-companies.md (to skip subsidiaries of known parents). Score and select top 50. Post the batch to #company-finder (C0ARS7XMY93) for Fede's review. Follow the SKILL.md workflow exactly. SILENCE RULE: if no new companies match, produce no output at all. Reference files are in skills/muso-outreach-engine/references/ — NEVER create files at workspace root.",
-        "model": "fireworks/accounts/fireworks/models/glm-5",
+        "model": "fireworks/accounts/fireworks/models/kimi-k2p5",
+        "fallbacks": [
+          "fireworks/accounts/fireworks/models/deepseek-v3p2"
+        ],
         "timeoutSeconds": 600
       },
       "delivery": {
