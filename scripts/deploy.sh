@@ -600,13 +600,21 @@ drift_check_against_baseline() {
   # Capture rsync exit code separately — `|| true` would let an SSH
   # failure look identical to "clean", which is the exact silent-failure
   # this whole step exists to prevent.
+  #
+  # NOTE: we use -rcn (recursive + checksum + dry-run) NOT -an (archive
+  # + dry-run). The -a flag implies -t (sync times), -p (perms), -g, -o,
+  # which causes rsync to flag files where ONLY metadata (mtime) differs.
+  # In dry-run mode, rsync may skip the full checksum and fall back to
+  # mtime+size, producing false positives on files with identical content
+  # but different timestamps (e.g., agent-edited skills on node-8).
+  # Using -rc gives a pure content-only comparison.
   local dry_out dry_rc=0
   if $HYDRA_LOCAL; then
-    dry_out=$(rsync -an --checksum --itemize-changes \
+    dry_out=$(rsync -rcn --itemize-changes \
       "${RSYNC_EXCLUDES[@]}" \
       "$HYDRA_ROOT/" "$DEPLOY_PATH/" 2>&1) || dry_rc=$?
   else
-    dry_out=$(rsync -azn --checksum --itemize-changes \
+    dry_out=$(rsync -rczn --itemize-changes \
       -e "ssh -i $SSH_KEY $SSH_OPTS_STR" \
       "${RSYNC_EXCLUDES[@]}" \
       "$HYDRA_ROOT/" "$NODE8_USER@$NODE8_IP:$DEPLOY_PATH/" 2>&1) || dry_rc=$?
@@ -809,13 +817,16 @@ log "  Deny lists validated (only growth detected)."
 # Bypass: HYDRA_FORCE=1 ./deploy.sh ...
 log "Step 4a/9: Pre-flight drift check..."
 preflight_drift_check() {
+  # Same -rcn rationale as Step 0: pure content comparison, no metadata
+  # false positives. --delete is still needed here to detect server-only
+  # files that would be wiped.
   local dry_out dry_rc=0
   if $HYDRA_LOCAL; then
-    dry_out=$(rsync -an --delete --checksum --itemize-changes \
+    dry_out=$(rsync -rcn --delete --itemize-changes \
       "${RSYNC_EXCLUDES[@]}" \
       "$HYDRA_ROOT/" "$DEPLOY_PATH/" 2>&1) || dry_rc=$?
   else
-    dry_out=$(rsync -azn --delete --checksum --itemize-changes \
+    dry_out=$(rsync -rczn --delete --itemize-changes \
       -e "ssh -i $SSH_KEY $SSH_OPTS_STR" \
       "${RSYNC_EXCLUDES[@]}" \
       "$HYDRA_ROOT/" "$NODE8_USER@$NODE8_IP:$DEPLOY_PATH/" 2>&1) || dry_rc=$?

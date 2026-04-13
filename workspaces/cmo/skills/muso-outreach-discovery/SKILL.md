@@ -189,3 +189,5 @@ cron runs silently. Never post "nothing new found" messages.
   contact data via Snov.io / Enrow / Datagma (NOT YET WIRED)
 - `muso-outreach-ghl-sync`: will create a Cold stage placeholder once contacts
   are enriched and ready for outreach
+
+<!-- synced from node-8: 2026-04-13 -->
