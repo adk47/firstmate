@@ -50,7 +50,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.draft_id:
         result = process_draft(args.draft_id, args.account, a)
         print(result)
-        return 0 if result.sent or result.reason_code else 1
+        if result.sent:
+            return 0  # sent (possibly with post-send degradation logged)
+        return 1  # blocked by gate or metadata — not an error, but not sent
 
     draft_ids = gmail_client.list_drafts_with_label(args.label, args.account)
     if not draft_ids:
