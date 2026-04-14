@@ -31,7 +31,7 @@ After every run the worker posts a batch summary to `#sales-alerts`:
 For each blocked draft, a separate `#sales-alerts` message names the
 draft ID and reason code.
 
-## Block reason codes
+## Block reason codes (email did NOT go out)
 
 | Code | What happened | Fix |
 |------|---------------|-----|
@@ -45,9 +45,19 @@ draft ID and reason code.
 | `FOLLOWUP_CAP_REACHED` | Already sent 3 follow-ups to this contact | Move GHL opp to Closed Lost or No Reply |
 | `SENDER_NOT_ALLOWED` | Draft is from an account outside the allow-list | Check the account; update config if warming is complete |
 | `UNEXPECTED_CC_BCC` | Draft has CC/BCC not in metadata's allowlist | Remove the CC/BCC, or add to metadata and re-approve |
-| `LOGBOOK_APPEND_FAILED` | Email sent but Sheets append raised | **Red alert** — manual reconciliation required |
-| `GHL_SYNC_FAILED` | Email sent + logged, GHL API failed | Advance the opp manually |
-| `SEND_FAILED_RETRIED` | `gog gmail drafts send` failed twice on this draft | Single flake; ignore unless two in a row (then batch halts) |
+| `SEND_FAILED_RETRIED` | `gog gmail drafts send` failed twice on this draft | Single flake; ignore unless two in a row (then batch halts — see `#clio_devops`) |
+
+## Post-send degradation codes (email DID go out — needs reconciliation)
+
+| Code | What happened | Fix |
+|------|---------------|-----|
+| `LOGBOOK_APPEND_FAILED` | Email sent but Sheets append raised | **Red alert in `#clio_devops`** — manual reconciliation required (see below) |
+
+> **Note on GHL sync:** every successful send currently posts an info note
+> in `#sales-alerts` ("GHL sync deferred — advance opp manually"). This
+> is by design until the stage-ID lookup lands; until then, a human must
+> advance every sent opportunity in GHL manually. See the TODO in
+> `scripts/lib/muso_outreach/worker.py`.
 
 ## Red-alert response (LOGBOOK_APPEND_FAILED)
 
