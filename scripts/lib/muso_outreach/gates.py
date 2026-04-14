@@ -17,9 +17,23 @@ def _norm(addr: str) -> str:
     return addr.strip().lower()
 
 
-def _first_outgoing_muso(thread: Thread, muso_domain: str = "@muso.ai") -> Optional[object]:
+def _email_domain(addr: str) -> str:
+    """Return the domain part of an email address, lower-cased.
+
+    Uses split('@', 1) so the comparison is exact — 'sub.muso.ai' does NOT
+    match 'muso.ai'. endswith('@muso.ai') would also be exact here (the '@'
+    anchors it), but explicit split is clearer and easier to audit.
+    """
+    parts = _norm(addr).rsplit("@", 1)
+    return parts[-1] if len(parts) == 2 else ""
+
+
+MUSO_DOMAIN = "muso.ai"
+
+
+def _first_outgoing_muso(thread: Thread) -> Optional[object]:
     for msg in thread.messages:
-        if _norm(msg.from_addr).endswith(muso_domain):
+        if _email_domain(msg.from_addr) == MUSO_DOMAIN:
             return msg
     return None
 
@@ -120,8 +134,8 @@ def gate_a_recipient_match(
 CONTACT_REPLIED = "CONTACT_REPLIED"
 
 
-def _is_muso(addr: str, muso_domain: str = "@muso.ai") -> bool:
-    return _norm(addr).endswith(muso_domain)
+def _is_muso(addr: str) -> bool:
+    return _email_domain(addr) == MUSO_DOMAIN
 
 
 def gate_b_no_contact_reply(

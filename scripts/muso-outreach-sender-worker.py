@@ -23,8 +23,7 @@ import os
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from lib.muso_outreach import gmail_client, sheets_client, slack_client, ghl_client
-from lib.muso_outreach.config import AUTO_FU_APPROVED_LABEL
+from lib.muso_outreach import gmail_client, ghl_client, sheets_client, slack_client
 from lib.muso_outreach.worker import process_batch, process_draft
 
 

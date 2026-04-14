@@ -1,30 +1,17 @@
-"""Minimal GHL adapter — only the one operation the worker needs:
-advance an opportunity stage."""
+"""GHL adapter stub — wiring deferred until stage-ID lookup ships.
+
+See docs/superpowers/specs/2026-04-14-cmo-outreach-sender-worker-design.md
+§2 step 7 and worker.py TODO(outreach-sender).
+
+The worker deliberately does NOT call advance_opportunity_stage today;
+the human advances the opp manually via the runbook. This stub ensures
+any accidental call raises immediately so the gap is visible.
+"""
 from __future__ import annotations
-
-import json
-import os
-import urllib.error
-import urllib.request
-
-from .config import GHL_LOCATION_ID
 
 
 def advance_opportunity_stage(opp_id: str, stage_id: str) -> None:
-    api_key = os.environ.get("GHL_API_KEY")
-    if not api_key:
-        raise RuntimeError("GHL_API_KEY is not set in the environment")
-    body = json.dumps({"pipelineStageId": stage_id,
-                       "locationId": GHL_LOCATION_ID}).encode()
-    req = urllib.request.Request(
-        f"https://services.leadconnectorhq.com/opportunities/{opp_id}",
-        data=body, method="PUT",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Version": "2021-07-28",
-            "Content-Type": "application/json",
-        },
+    raise NotImplementedError(
+        "GHL stage-ID lookup is not yet wired. "
+        "Advance the opp manually — see RUNBOOK-outreach-sender-worker.md."
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        if resp.status >= 300:
-            raise RuntimeError(f"GHL PUT opp {opp_id} → {resp.status}")

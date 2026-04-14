@@ -93,7 +93,7 @@ For each draft:
 4. **Send** via `gog gmail drafts send <draftId> --account <sender>`.
 5. **Re-apply label** (Gmail strips the label on draft send).
 6. **Append logbook row** in the same execution. Columns: timestamp, sender, draft_id, message_id, thread_id, recipient, sheet_row_id, opp_id, template, kind, status.
-7. **Sync GHL**: advance the opportunity stage via `muso-outreach-ghl-sync`. If this fails, the send still counts but a warning is posted (send is irreversible; the sync is not).
+7. **Sync GHL**: advance the opportunity stage via `muso-outreach-ghl-sync`. If this fails, the send still counts but a warning is posted (send is irreversible; the sync is not). **GHL stage-ID lookup is deferred** — until it ships, the worker posts an info note to `#sales-alerts` and the human must advance the opp manually (see RUNBOOK).
 8. **Post summary** to `#sales-alerts` after the batch: `X sent, Y blocked, blocked reasons: [...]`.
 
 The worker is idempotent per draft: if a draft has already been sent (identified by Gmail's `SENT` label on the resulting message), it is skipped with no further action.
@@ -176,7 +176,7 @@ Human (Fede / Aaron)
 Worker (muso-outreach-sender-worker.py)
   ├─ For each draft in batch:
   │    ├─ Parse metadata
-  │    ├─ Run precondition gate (A-F)
+  │    ├─ Run precondition gate (A-G)
   │    ├─ On pass: drafts send → reapply label → logbook append → GHL sync
   │    └─ On fail: post reason to #sales-alerts
   └─ Post batch summary
@@ -188,7 +188,7 @@ Worker (muso-outreach-sender-worker.py)
 - **gate failure**: post-per-draft reason, continue to next draft.
 - **`gog gmail drafts send` failure**: retry once with 5s backoff. On second failure for the same draft, **skip that draft** and continue the batch. The worker stops the batch only after **two consecutive drafts** both fail on retry (treated as a systemic outage signal). This avoids one flaky API call blocking the other 49 drafts in a batch, while still halting if Gmail is genuinely down.
 - **Logbook append failure after successful send**: post a red-alert to `#clio_devops` — the email went out but we have no record. Requires manual reconciliation; document this in RUNBOOK.
-- **GHL sync failure after successful send and log**: warn in `#sales-alerts`, include opp_id for manual follow-up. Do not retry automatically (could double-move the opportunity).
+- **GHL sync failure after successful send and log**: warn in `#sales-alerts`, include opp_id for manual follow-up. Do not retry automatically (could double-move the opportunity). (deferred — GHL sync not yet wired; see step 7 above)
 
 ### Testing
 

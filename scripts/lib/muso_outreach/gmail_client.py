@@ -5,23 +5,14 @@ than the underlying gog call.
 from __future__ import annotations
 
 import json
-import subprocess
 from typing import Optional
 
+from ._gog import run_gog
 from .types import Draft, Message, Thread
 
 
 def _run_gog(*args: str) -> str:
-    """Run a gog command and return stdout. Raise CalledProcessError on
-    non-zero exit."""
-    res = subprocess.run(
-        ("gog", *args),
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    return res.stdout
+    return run_gog(*args)
 
 
 def _parse_message(js: dict) -> Message:

@@ -1,14 +1,12 @@
 """Gog-CLI adapter for Slack."""
 from __future__ import annotations
 
-import subprocess
-
+from ._gog import run_gog
 from .config import DEVOPS_CHANNEL, SALES_ALERTS_CHANNEL
 
 
 def _run_gog(*args: str) -> None:
-    subprocess.run(("gog", *args), check=True, capture_output=True,
-                   text=True, timeout=15)
+    run_gog(*args, timeout=15)
 
 
 def post_sales_alert(text: str) -> None:

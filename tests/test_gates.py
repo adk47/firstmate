@@ -395,3 +395,24 @@ def test_gate_g_unexpected_bcc_blocks():
     r = gate_g_cc_bcc_match_allowlist(draft, meta)
     assert not r.passed
     assert r.reason_code == UNEXPECTED_CC_BCC
+
+
+# -------- Domain exact-match (subdomain spoofing prevention) --------
+
+def test_gate_b_subdomain_spoofed_sender_not_treated_as_muso(monkeypatch):
+    """A message from x@evil.muso.ai must NOT be treated as a muso.ai
+    sender. endswith('@muso.ai') would pass this — exact domain check blocks it."""
+    # kind=new: inbound message from a subdomain-spoofed address should block
+    # (treated as an external contact reply, not a muso internal message)
+    from scripts.lib.muso_outreach.gates import gate_b_no_contact_reply
+    meta = make_metadata(kind=Kind.NEW)
+    spoofed_msg = make_message(from_addr="bot@evil.muso.ai", date_epoch=50)
+    result = gate_b_no_contact_reply(
+        meta, thread=None,
+        inbound_messages=(spoofed_msg,),
+        bot_senders=("a@muso.ai",),
+    )
+    # The spoofed sender is not @muso.ai (exact domain), so it counts as a
+    # contact reply and gate B must block.
+    assert not result.passed
+    assert result.reason_code == "CONTACT_REPLIED"

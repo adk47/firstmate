@@ -2,22 +2,15 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from typing import Optional
 
+from ._gog import run_gog
 from .config import CONTACTS_SHEET_ID, CONTACTS_TAB, LOGBOOK_SHEET_ID, LOGBOOK_TAB
 from .types import ContactRow
 
 
 def _run_gog(*args: str) -> str:
-    res = subprocess.run(
-        ("gog", *args),
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    return res.stdout
+    return run_gog(*args)
 
 
 def get_contact_by_row_id(row_id: int, account: str = "a@muso.ai") -> Optional[ContactRow]:

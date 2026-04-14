@@ -12,6 +12,7 @@ from typing import Optional, Protocol
 
 from . import gates
 from .config import (
+    CONTACT_REPLY_LOOKBACK_DAYS_NEW,
     MAX_FOLLOWUPS_PER_CONTACT,
     MUSO_ACCOUNTS,
     OUTREACH_ALLOWED_SENDERS,
@@ -88,7 +89,7 @@ def _fetch_inbound(meta: Metadata, draft, adapters) -> tuple:
         return ()
     return adapters.gmail.search_inbound_from(
         draft.to_addrs[0],
-        days=60,
+        days=CONTACT_REPLY_LOOKBACK_DAYS_NEW,
         accounts=MUSO_ACCOUNTS,
     )
 
