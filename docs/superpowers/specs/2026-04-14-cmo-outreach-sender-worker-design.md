@@ -21,7 +21,7 @@ Prose-only skill instructions proved insufficient. Any fix must be enforced in c
 - Make it **impossible** for an outreach send to happen without a ledger row.
 - Preserve Fede/Aaron's existing approval gate (drafts visible in Gmail before send).
 - Catch the same class of error in new outreach, not just follow-ups.
-- Stand the bot down when a human teammate has already replied on a thread.
+- Stand the bot down when a human teammate has already replied on a thread (deferred to Phase 2 per rollout plan — Phase 1 still ships the other gates).
 
 ## Non-Goals
 
@@ -49,31 +49,45 @@ The CMO agent's tool allow-list is updated to **remove `gog gmail drafts send`**
 
 #### 1. Draft metadata convention
 
-Every draft created by CMO for outreach MUST include a hidden HTML comment at the bottom of the body:
+Metadata is stored in **two redundant places**, with Gmail labels as the primary authoritative source and an HTML-comment JSON blob as a fallback. Labels survive body edits; HTML comments do not (Gmail's web editor can strip comments on save).
+
+**Primary: Gmail labels (nested).** When the agent creates a draft, it applies labels of the form `muso-meta/<key>-<value>`:
+
+- `muso-meta/kind-followup` or `muso-meta/kind-new`
+- `muso-meta/row-1234` — sheet_row_id
+- `muso-meta/opp-abc` — GHL opportunity ID
+- `muso-meta/template-FU-01`
+- `muso-meta/sender-a_at_muso.ai` (colons and `@` replaced to keep label-safe)
+- `muso-meta/thread-1812f...` — only for `kind=followup`
+
+**Fallback: JSON blob in HTML comment** at the bottom of the draft body, for human legibility and for any field too long or too varied for a label (e.g., override_reason with free-form text):
 
 ```html
-<!-- muso-outreach:v1 kind=followup|new sheet_row_id=1234 opp_id=abc template=FU-01 sender=a@muso.ai original_thread_id=1812f... -->
+<!-- muso-outreach:v1 {"kind":"followup","sheet_row_id":1234,"opp_id":"abc","template":"FU-01","sender":"a@muso.ai","original_thread_id":"1812f..."} -->
 ```
 
-- `kind` — `followup` or `new`. Determines which validation rule applies.
-- `sheet_row_id` — row ID in `contacts_intelligence`. Authoritative for `new` sends.
-- `opp_id` — GHL opportunity ID. Used for GHL stage sync after send.
-- `template` — template key (e.g., `FU-01`, `Private Invite`). Logged.
-- `sender` — the muso.ai account that will send (and must match the draft's account).
-- `original_thread_id` — for `kind=followup`, the Gmail thread whose `To:` we must match. Omitted for `kind=new`.
+JSON (not space-separated key=value) eliminates quoting ambiguity when a value contains spaces.
 
-The `muso-outreach-writer` and `muso-outreach-followup` skills are updated to always emit this comment as part of the draft body.
+**Worker behavior on metadata mismatch:**
+
+- Labels present + JSON present + agree → use labels, proceed.
+- Labels present + JSON stripped/missing → use labels, log a warning (likely signal that a human edited the draft body).
+- Labels missing + JSON present → block the draft with reason: *"Metadata labels missing. This usually means the draft was created outside the agent workflow. Re-create the draft from the agent."*
+- Both missing → same block reason as above. The human-readable message in `#sales-alerts` explicitly calls out the likely cause so Fede isn't left guessing.
+- Labels present but disagree with JSON → block the draft with reason *"Metadata label/body mismatch — refusing to send. Re-create the draft."* The worker never guesses.
+
+The `muso-outreach-writer` and `muso-outreach-followup` skills are updated to emit **both** the labels and the JSON comment as part of draft creation.
 
 #### 2. Sender worker (`muso-outreach-sender-worker`)
 
 A Python script at `/opt/hydra/scripts/muso-outreach-sender-worker.py`, run in two ways:
 
 - **Interactive** (batch approval): triggered by a Slack reaction. Fede reacts ✅ on an "approval post" for a batch → a Slack event handler invokes the worker with that batch ID → worker processes every draft in the batch.
-- **Scheduled** (Monday follow-up cron): runs at `*/5 9-11 * * 1` UTC and processes all drafts labeled `B2B - Ads/auto-fu-approved`.
+- **Scheduled** (Monday follow-up cron): runs once at `0 9 * * 1` UTC and processes all drafts labeled `B2B - Ads/auto-fu-approved`. A single run is sufficient (the worker is idempotent per draft); if a run fails or a late batch arrives, trigger a manual re-run via Slack rather than running on a short interval.
 
 For each draft:
 
-1. **Parse metadata** from the hidden HTML comment. Reject the draft and post to `#sales-alerts` if the comment is missing or malformed.
+1. **Parse metadata** from the draft's `muso-meta/*` labels (primary) and the HTML-comment JSON blob (fallback). Apply the mismatch rules from §1. If metadata cannot be resolved, reject the draft with a human-readable reason pointing at the likely cause (body edited in Gmail).
 2. **Validate sender account** — draft.account must equal `sender` in metadata.
 3. **Run precondition gate** (see next section). On any failure: skip, do not send, post reason to `#sales-alerts`, advance to next draft.
 4. **Send** via `gog gmail drafts send <draftId> --account <sender>`.
@@ -91,11 +105,13 @@ All checks must pass, else the send is blocked.
 **A. Recipient match (kind-dependent)**
 
 - `kind=new`: the draft's `To:` MUST exactly match `contacts_intelligence[sheet_row_id].valid_professional_email` (case-insensitive). If the sheet value is blank, empty, or has changed since drafting, block with reason.
-- `kind=followup`: the draft's `To:` MUST exactly match the `To:` of the first message in `original_thread_id`. If the thread does not exist, has no outgoing message, or the `To:` mismatches, block with reason.
+- `kind=followup`: the draft's `To:` MUST exactly match the `To:` of the **first outgoing message from a `@muso.ai` address** in `original_thread_id`. This handles inbound-initiated threads where the first message is from the contact: we want the address *we first emailed*, not the address the thread started with. If no outgoing muso.ai message is found in the thread, or the `To:` mismatches, block with reason.
 
 **B. No contact reply**
 
 Search Gmail across all four muso accounts for any message in `original_thread_id` (or for `kind=new`, any message from the target email in the last 60 days) where the sender is **not** a `@muso.ai` address. If found, block with reason "contact already replied — move to Replied stage manually."
+
+Note on quota: one search per account per draft (4 calls) scales linearly with batch size. At 50 drafts per Monday batch that's 200 calls, well within Gmail's 250 units/sec per-user quota. If batches grow past ~150 drafts, batch the query (`in:thread:{id1} OR in:thread:{id2} OR ...`) to amortize.
 
 **C. No human-from-muso reply (the new rule)**
 
@@ -111,7 +127,11 @@ For `kind=followup`: count existing follow-up rows in the logbook for this `shee
 
 **F. Sender domain sanity**
 
-Draft's `From:` must be in the muso.ai outreach account allow-list (configurable). Blocks accidental sends from unexpected accounts.
+Draft's `From:` must be in the muso.ai outreach account allow-list (configurable). This is a **safety net** that catches wrong-domain sends entirely (e.g., a draft somehow created from a non-muso account). The precision check — that the draft's exact account matches the `sender` field in metadata — is already enforced upstream in the per-draft processing step (see §2, step 2). F guards the broader perimeter; the metadata match guards the exact alias.
+
+**G. No unexpected CC / BCC recipients**
+
+The draft MUST have no `Cc:` or `Bcc:` recipients unless the metadata explicitly declares them (`"cc": [...]` / `"bcc": [...]` in the JSON blob AND a corresponding validation rule for each — e.g., every CC must appear in the sheet or the original thread). If the draft has any unexpected CC or BCC, block with reason: *"Unexpected CC/BCC — refusing to send."* This closes the same hallucination class against the CC/BCC fields, not just `To:`.
 
 #### 4. Agent tool restrictions
 
@@ -131,7 +151,7 @@ When the gate legitimately blocks a send that a human wants to push through (edg
 
 1. Manually edit the draft in Gmail (correct `To:`).
 2. Add the label `B2B - Ads/override-approved`.
-3. Write the override reason into the hidden metadata comment (`override_reason=<text>`).
+3. Write the override reason into the JSON metadata comment (`"override_reason": "<text>"`).
 4. Re-react ✅ on the Slack approval post.
 
 The worker, on seeing `override-approved` + non-empty `override_reason`, SKIPS check A (recipient match) but runs all other checks, sends, logs the override reason, and posts a highlighted notice to `#sales-alerts`:
@@ -166,13 +186,17 @@ Worker (muso-outreach-sender-worker.py)
 
 - **Metadata missing or malformed**: draft is skipped; `#sales-alerts` gets a notice with draft ID so a human can fix and re-approve.
 - **gate failure**: post-per-draft reason, continue to next draft.
-- **`gog gmail drafts send` failure**: retry once with 5s backoff; on second failure, post to `#sales-alerts` and stop the batch (something systemic is broken).
+- **`gog gmail drafts send` failure**: retry once with 5s backoff. On second failure for the same draft, **skip that draft** and continue the batch. The worker stops the batch only after **two consecutive drafts** both fail on retry (treated as a systemic outage signal). This avoids one flaky API call blocking the other 49 drafts in a batch, while still halting if Gmail is genuinely down.
 - **Logbook append failure after successful send**: post a red-alert to `#clio_devops` — the email went out but we have no record. Requires manual reconciliation; document this in RUNBOOK.
 - **GHL sync failure after successful send and log**: warn in `#sales-alerts`, include opp_id for manual follow-up. Do not retry automatically (could double-move the opportunity).
 
 ### Testing
 
-- **Unit tests** (`tests/test_sender_worker.py`): precondition gate logic — mock Gmail API responses for each check, assert block/pass for each of A-F. Include the hallucination case: draft.to=`ow@lfrequencies.com`, thread.to=`ow@larsenstrings.com` → must block.
+- **Unit tests** (`tests/test_sender_worker.py`): precondition gate logic — mock Gmail API responses for each check, assert block/pass for each of A-G. Include:
+  - The hallucination case: draft.to=`ow@lfrequencies.com`, thread.to=`ow@larsenstrings.com` → must block under A.
+  - Inbound-initiated thread case: first message in thread is from the contact (inbound), second is our outgoing reply. Check A must compare against the *second* message's `To:`, not the first.
+  - Metadata fragility cases: labels present + JSON stripped (warn-and-proceed), labels missing (block with human-readable reason), labels vs JSON disagree (block).
+  - CC/BCC hallucination case: draft has a valid `To:` plus an unexpected `Cc:`; gate G must block.
 - **Integration test** against a staging Gmail account (separate from muso.ai): create a real draft with known metadata, run the worker, assert it sent or blocked as expected.
 - **Agent-cannot-send test**: simulate a CMO session attempting `gog gmail drafts send` under the new tool allow-list; assert tool-use is denied at the gateway level.
 - **Override test**: draft with `override-approved` label and `override_reason` set, mismatched `To:` — assert send succeeds, warning posted.
@@ -180,9 +204,9 @@ Worker (muso-outreach-sender-worker.py)
 ### Rollout
 
 1. **Phase 0 — freeze** (immediate, already partly in effect per CMO's Slack message): CMO is not sending any new follow-ups until the worker ships.
-2. **Phase 1 — metadata + worker MVP**: land draft metadata comment in writer/followup skills. Ship the worker. Ship the precondition gate for checks A, B, D, E, F. (C — human-reply detection — can land in Phase 2 if timeline pressure.)
+2. **Phase 1 — metadata + worker MVP**: land label + JSON draft metadata in writer/followup skills. Ship the worker. Ship the precondition gate for checks A, B, D, E, F, G. (C — human-reply detection — lands in Phase 2.)
 3. **Phase 2 — gate at gateway**: remove `gog gmail drafts send` from CMO's tool allow-list. Add check C.
-4. **Phase 3 — cron enable**: turn on the scheduled Monday batch run. Add dashboards for block-reason trends.
+4. **Phase 3 — cron enable + scale prep**: turn on the scheduled Monday batch run. Add dashboards for block-reason trends. Evaluate whether Sheets-backed logbook is still sized correctly (see open questions); plan Postgres migration if sustained batches exceed ~150 sends.
 
 ### Observability
 
@@ -193,7 +217,7 @@ Worker (muso-outreach-sender-worker.py)
 ### Open questions (to resolve during implementation)
 
 - Exact Slack event-handler hookup (new Slack app or extend existing devops bot?).
-- Whether to store the ledger in Google Sheets (current logbook) or a real database (longer-term durability). MVP: sheets — migrate if/when volume justifies.
+- Whether to store the ledger in Google Sheets (current logbook) or a real database (longer-term durability). MVP: sheets — migrate if/when volume justifies. **Real constraint**: Sheets has a 10M-cell hard cap and ~60 writes/min per user rate limit. At current batch sizes (≤50 drafts/week) we are comfortably inside both. Volume past ~150 sends/batch will start pressing the rate limit; plan the Postgres migration into Phase 3 if we see sustained batches above that threshold.
 - Whether to bulk-reconcile the 17 bad sends from 2026-04-14 (manual one-off — out of scope for this design).
 
 ## Summary
