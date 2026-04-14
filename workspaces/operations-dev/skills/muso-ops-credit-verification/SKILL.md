@@ -4,9 +4,12 @@ description: |
   Autonomous credit verification workflow. Two modes:
   1. Reactive: Triggered by any message in #credit-verification (C0APB2CMM7C).
      No @mention required. Parses flagged credit requests, investigates, and
-     auto-approves, auto-rejects, or escalates.
-  2. Batch (heartbeat): Proactively fetches up to 10 unverified credits from
-     the API and processes them, posting a summary to #credit-verification.
+     either auto-approves or moves to user_verification_needed. The bot does NOT
+     auto-reject — rejection is a manual override from Jan/Aaron in escalation
+     threads.
+  2. Batch (heartbeat): Proactively fetches up to N unverified credits from
+     the API every 6h (N is phased: 10 → 25 → 50 → 100) and processes them,
+     posting a summary to #credit-verification with a Jan-tagged thread reply.
 
   Use when: any message arrives in #credit-verification channel, OR during
   heartbeat execution of the "Batch Credit Verification" task.
@@ -67,8 +70,9 @@ message(action="react", channelId="<credit_verification_channel_id>", messageId=
 
 Where `<final>` is:
 - `white_check_mark` — auto-approved
-- `x` — auto-rejected
+- `warning` — auto-moved to `user_verification_needed`
 - `mag` — escalated for human review
+- `no_entry` — skipped (cap or idempotent) — rare; only in reactive mode
 
 ## Workflow
 
@@ -245,27 +249,30 @@ Map investigation results to a verdict using `muso-ops-fraud` criteria:
 |---------|----------|--------|
 | **VERIFIED LEGIT** | Confirmed via web (any of: Spotify credits, MusicBrainz, Discogs, AllMusic, Jaxsta, ASCAP/BMI/SESAC, LinkedIn career, studio site) | Auto-approve |
 | **UNVERIFIABLE — LOW CONCERN** | No web presence but consistent pattern (single technical role, professional email, low fraud signals) | Auto-approve |
-| **SUSPICIOUS — CLEAR FRAUD** | 2+ strong fraud signals (identity mismatch, web contradicts, disposable email + bulk submissions) | Auto-reject silently |
-| **SUSPICIOUS — BORDERLINE** | 1 fraud signal or soft signals (no web presence + high-pop track, but professional email) | Auto-reject + tag Jan |
+| **SUSPICIOUS — CLEAR FRAUD** | 2+ strong fraud signals (identity mismatch, web contradicts, disposable email + bulk submissions) | **Move to `user_verification_needed`** (silent per-credit; rolled into batch summary). See note on reject policy below. |
+| **SUSPICIOUS — BORDERLINE** | 1 fraud signal or soft signals (no web presence + high-pop track, but professional email) | **Move to `user_verification_needed`** (silent per-credit; rolled into batch summary) |
 | **UNVERIFIABLE — NEEDS REVIEW** | No web presence AND risk signals (pop >=90, creative roles, many credits, mononym) | Escalate to Jan (status already `unverified` or `user_verification_needed`) |
+
+> **No-reject policy (2026-04-13):** The bot does NOT auto-reject. Both SUSPICIOUS verdicts move credits to `user_verification_needed` so the user can complete their own proof step. Rejection remains available only as a manual override via `reject [reason]` in an escalation thread (see Step 5 → Escalate → Executing a decision).
 
 ### Step 5: Act
 
 #### Safety Rails — Check BEFORE Acting
 
-- **Daily cap**: Count today's autonomous actions by querying the audit log:
-  use `OPS_AUDIT_LOG_DIR` if set (default: `api-logs/admin`). Grep the current
-  date (UTC) in `LOG_DIR/YYYY-MM-DD.jsonl` for entries where operator is "clio"
-  AND endpoint matches `PUT` on `/credit-requests`.
-  If the log file does not exist yet today, count is 0 (first action of the day).
-  If count >= 50, escalate this request instead of auto-acting. Post:
-  ```
-  ⚠️ Daily autonomous action limit reached (50/day). Escalating for human review.
-  ```
+- **Daily approval cap (500/day, UTC).** The cap applies to **autonomous approvals only** — verification-needed moves and escalations are uncapped. Human-initiated approvals (Jan/Aaron override from an escalation thread) carry their Slack ID as `--requester` and do NOT count against the cap.
 
-**Dry-run mode:** If `OPS_DRY_RUN=1`, still call the admin API wrapper.
-If the response includes `dry_run: true`, treat it as a successful action but
-explicitly note in the thread/report: `DRY-RUN: no changes applied`.
+  Count today's autonomous approvals via the helper:
+  ```bash
+  COUNT=$(OPS_AUDIT_LOG_DIR="${OPS_AUDIT_LOG_DIR:-api-logs/admin}" \
+    bash "${SKILL_DIR}/scripts/count-approvals.sh")
+  ```
+  where `SKILL_DIR=~/.openclaw/skills/skills/muso-ops-credit-verification`.
+
+  The counter matches entries where **all three** are true: `operator == "clio"`, `requester == "clio"`, `status == "approved"`. Cap resets at **00:00 UTC** (log filename is `YYYY-MM-DD.jsonl` in UTC).
+
+  If `COUNT >= 500` and the current verdict is LEGITIMATE (would trigger an approve): **skip the approve**, mark the credit as `skip_cap` in the run log, and include in the batch summary. **Verification-needed moves and escalations still run** — the cap does not block them.
+
+- **Dry-run mode.** If `OPS_DRY_RUN=1`, still call the admin API wrapper. If the response includes `dry_run: true`, treat it as a successful action but explicitly note in the thread/report: `DRY-RUN: no changes applied`.
 
 #### Auto-Approve (VERIFIED LEGIT or LOW CONCERN)
 
@@ -284,55 +291,34 @@ message(action="react", channelId="<credit_verification_channel_id>", messageId=
 message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="white_check_mark")
 ```
 
-#### Auto-Reject — Clear Fraud (SUSPICIOUS — 2+ strong signals)
+#### Move to `user_verification_needed` (SUSPICIOUS — any tier)
+
+Both CLEAR FRAUD and BORDERLINE verdicts take this same action: flip the credit's status so the user is prompted to complete their own verification. The bot does NOT reject.
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call PUT "/admin/credit-requests" \
-  '{"requestIds":["<id>"],"status":"rejected","reason":"Flagged as suspicious during pre-approval verification: [specific reason]"}'
+  '{"requestIds":["<id>"],"status":"user_verification_needed","reason":"Moved to user_verification_needed during pre-approval: [specific reason]"}'
 ```
 
-Use a specific reason based on findings. Examples:
-- "Flagged as suspicious: no web presence, disposable email, 15 bulk submissions in 24h"
-- "Flagged as suspicious: identity mismatch — web sources contradict claimed credits"
-- "Flagged as suspicious: bulk self-additions across unrelated genres"
+Use a specific reason based on findings (examples):
+- "Moved to user_verification_needed during pre-approval: no web presence, disposable email, 15 bulk submissions in 24h"
+- "Moved to user_verification_needed during pre-approval: identity mismatch — web sources contradict claimed credits"
+- "Moved to user_verification_needed during pre-approval: bulk self-additions across unrelated genres"
 
-Log via `muso-ops-audit` before execution. Then YOU MUST call:
-```
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes", remove=true)
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="x")
-```
+**Fallback if gate #2 failed** (`OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1` set): skip the API call, treat this verdict as an escalation instead — post the same detail in-thread and tag Jan. This prevents silently-parked credits until the user-facing notification flow ships.
 
-#### Auto-Reject + Notify Jan — Borderline (SUSPICIOUS — 1 or soft signals)
+Log via `muso-ops-audit` before execution. Do NOT tag Jan per-credit — the batch summary handles the single rolled-up ping.
 
-```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/admin/credit-requests" \
-  '{"requestIds":["<id>"],"status":"rejected","reason":"Flagged as suspicious during pre-approval verification: [specific reason]"}'
-```
-
-Log via `muso-ops-audit` before execution. Then YOU MUST call:
+Reactive mode only: update emoji on the source message. YOU MUST call:
 ```
 message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="eyes", remove=true)
-message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="x")
+message(action="react", channelId="<credit_verification_channel_id>", messageId="<msg_ts>", emoji="warning")
 ```
-Post in-thread notifying Jan:
-```
-🔴 REJECTED — [Profile Name] as [Role] on "[Track Title]" ([Artists])
 
-Evidence: [1-2 sentence summary of fraud signals]
+(Using `warning` instead of `x` to reflect "moved, not rejected." In batch mode, no reactions since there is no source message.)
 
-Sources (Tier 1):
-• Spotify credits: <url> — [what was found, or "no credits listed"]
-• MusicBrainz: <url> — [what was found, or "no results"]
-• Discogs: <url> — [what was found, or "no results"]
-• AllMusic: <url> — [what was found, or "no results"]
-[Tier 2/3 sources checked, if any]
-
-Risk score: [X]% | Verdict: Suspicious (borderline)
-Credit request [ID] rejected. Reason: [reason]
-<@U038BM16T7W> — FYI, rejected with soft signals. Override if needed by replying "approve".
-```
+Per-credit Slack post is **removed** in both modes — the rolled-up batch summary (Batch Mode B3) carries the audit trail.
 
 #### Escalate (NEEDS REVIEW)
 
@@ -455,9 +441,11 @@ Three verification workflows exist, each serving a different purpose:
   Processes one credit per message, immediately.
 
 - **Batch verification (this skill, Batch Mode):** Proactive queue processing
-  via heartbeat. Fetches up to 10 unverified credits every 6 hours and processes
-  them, posting a summary. Catches credits that reactive mode doesn't see
-  (risk < 85%). Idempotency check prevents double-processing with reactive.
+  via heartbeat. Fetches up to `$FETCH_SIZE` (phased 10 → 100) unverified credits
+  every 6 hours and processes them, posting a summary with a Jan-tagged thread.
+  Catches credits that reactive mode doesn't see (risk < 85%). Idempotency check
+  prevents double-processing with reactive. Approvals are capped at 500/day UTC;
+  verification-needed moves are uncapped.
 
 - **Daily fraud scan (HEARTBEAT.md):** Post-approval review of already-approved
   credits on high-popularity tracks (Spotify pop >= 50). Different population —
@@ -481,17 +469,77 @@ reactive workflow above (Steps 0-6).
 
 ### Batch Workflow
 
+#### B0. Setup — lockfile, run_id, fetch_size
+
+Before any network work, initialize the run context.
+
+**0a. Verify required env.** Fail loudly if any of these are missing:
+- `OPS_BATCH_LOCK_PATH` — absolute path to lockfile (e.g. `/root/.openclaw/locks/ops-credit-batch.lock`)
+- `OPS_AUDIT_LOG_DIR` — audit log base (e.g. `/root/.openclaw/api-logs/admin`)
+- `OPS_RUNLOG_DIR` — run-log base (e.g. `/root/.openclaw/api-logs/credit-batch-runs`)
+- `OPS_WORKSPACE` — either `operations-dev` or `operations`
+- `OPS_BATCH_ENABLED` — must be `true` (default). Set to `false` to suppress batches on the twin not currently running.
+
+If `OPS_BATCH_ENABLED != "true"`, exit silently with no Slack post.
+
+**0b. Acquire lockfile.**
+
+The lockfile uses PID liveness as the primary signal and a **5h30m** mtime fallback for cases where a process was killed without releasing (SIGKILL, host crash). 5h30m sits inside the 6h heartbeat cadence — a legitimately long batch (very large queue, slow API) approaching that window CAN be self-stolen by the next heartbeat. In practice the batch never exceeds ~30min; if you see runs near 5h30m you have a deeper problem to investigate.
+
+```bash
+SKILL_DIR=~/.openclaw/skills/skills/muso-ops-credit-verification
+# Pass our own $$ so the lockfile records the long-lived caller PID, not the
+# helper script's ephemeral PID (which dies on return).
+bash "$SKILL_DIR/scripts/lockfile.sh" acquire $$
+case $? in
+  0) ;;       # acquired
+  10) exit 0 ;;  # another run holds it, exit silently
+  *) echo "Lockfile error"; exit 1 ;;
+esac
+trap 'bash "$SKILL_DIR/scripts/lockfile.sh" release' EXIT
+```
+
+**0c. Init run log and read phase variables.**
+```bash
+RUN_ID=$(bash "$SKILL_DIR/scripts/runlog.sh" init)
+FETCH_SIZE="${OPS_BATCH_FETCH_SIZE:-10}"   # ← phase knob; set OPS_BATCH_FETCH_SIZE env to ramp 10→25→50→100
+APPROVAL_CAP_LIMIT=500
+
+# CRITICAL: count-approvals.sh must succeed AND return a number. If it returns
+# empty (script errored, captured as ""), `[[ "" -ge 500 ]]` evaluates false
+# and the cap is silently disabled. Assert numeric explicitly.
+APPROVAL_CAP_USED=$(bash "$SKILL_DIR/scripts/count-approvals.sh") || {
+  echo "FATAL: count-approvals.sh failed (exit $?); aborting batch to avoid uncapped approvals" >&2
+  exit 1
+}
+if ! [[ "$APPROVAL_CAP_USED" =~ ^[0-9]+$ ]]; then
+  echo "FATAL: count-approvals.sh returned non-numeric output: '$APPROVAL_CAP_USED'; aborting batch" >&2
+  exit 1
+fi
+
+bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" run_started \
+  "$(jq -n --arg phase "${OPS_BATCH_PHASE:-0}" --argjson fs "$FETCH_SIZE" \
+          --argjson cu "$APPROVAL_CAP_USED" --argjson cl "$APPROVAL_CAP_LIMIT" \
+          '{phase:$phase, fetch_size:$fs, approval_cap_used_at_start:$cu, approval_cap_limit:$cl}')"
+```
+
 #### B1. Fetch the Queue
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/admin/credit-requests?status=unverified&limit=10"
+  call GET "/admin/credit-requests?status=unverified&limit=$FETCH_SIZE"
 ```
 
 Also fetch total queue size:
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/credit-requests/counts?status=unverified"
+```
+
+Record queue depth to the run log:
+```bash
+bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" run_started_queue \
+  "$(jq -n --argjson depth "$TOTAL_UNVERIFIED" '{queue_depth_at_start:$depth}')"
 ```
 
 The list endpoint returns `createdAt DESC` by default (newest first = LIFO).
@@ -506,70 +554,135 @@ The list endpoint returns `createdAt DESC` by default (newest first = LIFO).
 
 #### B2. Process Each Credit
 
-For each credit request in the batch, run the following steps. Data comes from
-the API response — not from a Slack message.
+Initialize in-run counters:
+```bash
+MOVES_COUNT=0
+APPROVED_IN_RUN=0
+```
 
-**For each credit:**
+For each credit request in the batch:
 
-1. **Idempotency check (Step 2):** Query `GET /admin/credit-requests/<id>`.
-   If status is not `unverified` or `user_verification_needed`, mark as
-   "skipped (idempotent)" and move to the next credit.
+1. **Log fetched.**
+   ```bash
+   bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" credit_fetched \
+     "$(jq -n --arg id "$CR_ID" --arg uid "$USER_ID" --arg pid "$PROFILE_ID" \
+            --arg st "$CURRENT_STATUS" \
+            '{cr_id:$id, userid:$uid, profileid:$pid, current_status:$st}')"
+   ```
 
-2. **Daily cap check (Step 5 safety rail):** Count today's autonomous actions
-   using `OPS_AUDIT_LOG_DIR` if set (default: `api-logs/admin`).
-   If count >= 50, mark all remaining credits as "skipped (cap)" and stop
-   processing the batch.
+2. **Idempotency check.** If current status is not `unverified` or `user_verification_needed`, log `skip_idempotent` and continue.
+   ```bash
+   bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" action_attempted \
+     "$(jq -n --arg id "$CR_ID" --arg a skip_idempotent '{cr_id:$id, action:$a}')"
+   ```
 
-3. **Investigate (Step 3):** Run the full investigation — Athena cross-reference,
-   tiered web research, fraud signal check. Same thoroughness as reactive mode.
+3. **Investigate + Classify** (Step 3 + Step 4). Log:
+   ```bash
+   bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" verdict \
+     "$(jq -n --arg id "$CR_ID" --arg v "$VERDICT" --arg r "$REASON" \
+            --argjson sig "$SIGNALS_JSON" \
+            '{cr_id:$id, verdict:$v, reason:$r, signals:$sig}')"
+   ```
 
-4. **Classify (Step 4):** Map to verdict using the same criteria table.
+4. **Approval cap check** (only for LEGITIMATE verdicts).
+   ```bash
+   if [[ "$VERDICT" == "LEGITIMATE" && "$APPROVAL_CAP_USED" -ge "$APPROVAL_CAP_LIMIT" ]]; then
+     bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" action_attempted \
+       "$(jq -n --arg id "$CR_ID" --arg a skip_cap '{cr_id:$id, action:$a}')"
+     continue   # move on, DO NOT mark as verification_needed
+   fi
+   ```
 
-5. **Act (Step 5):** Execute the verdict (approve/reject/escalate).
-   - **Skip all emoji reactions** — there is no source message to react on.
-   - For escalations: post an individual top-level message in #credit-verification
-     with full investigation details (same format as reactive escalation in Step 5),
-     tagging @Jan. This creates a thread Jan can action independently.
-   - For approve/reject: execute the API call as normal, collect the result.
+5. **Runaway safety rail** (before executing a verification_needed move).
+   ```bash
+   if [[ "$VERDICT" == "CLEAR_FRAUD" || "$VERDICT" == "BORDERLINE" ]]; then
+     MOVES_COUNT=$((MOVES_COUNT + 1))
+     # Fires when ≥90% of fetched have been moved — catches a runaway mid-batch.
+     # Round UP so small FETCH_SIZE doesn't trip on the first move:
+     #   FETCH_SIZE=10 → 9, FETCH_SIZE=25 → 23, FETCH_SIZE=100 → 90, FETCH_SIZE=1 → 1
+     THRESHOLD=$(( (FETCH_SIZE * 9 + 9) / 10 ))
+     if [[ "$MOVES_COUNT" -ge "$THRESHOLD" ]]; then
+       bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" runaway_rail_triggered \
+         "$(jq -n --argjson n "$MOVES_COUNT" --argjson fs "$FETCH_SIZE" \
+                '{moves_so_far:$n, fetch_size:$fs}')"
+       # Post to Slack (Jan only) and exit the batch.
+       # CRITICAL: this MUST actually send via the message() tool — a comment
+       # placeholder would mean the rail trips silently and Jan never finds out.
+       # Tool syntax matches the `react` calls used in Step 5 (parens + kwargs),
+       # NOT shell. The bash block above logs the event; this step is the
+       # tool-call instruction the agent executes.
+       message(action="send",
+               channelId="<credit_verification_channel_id>",
+               text="🚨 Runaway batch — $MOVES_COUNT of $FETCH_SIZE fetched credits moved to verification_needed. Pausing. <@U038BM16T7W>")
+       break
+     fi
+   fi
+   ```
 
-6. **On error:** If any step fails for an individual credit, log the error,
-   collect it as "errored", and continue processing the remaining credits.
-   Do NOT stop the batch on individual failures.
+6. **Act (Step 5).** Execute the verdict (approve / verification_needed / escalate).
+   - **Fallback override (gate #2):** If `OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1` is set AND verdict is CLEAR_FRAUD or BORDERLINE, treat the verdict as ESCALATE instead — post an individual top-level escalation message tagging Jan, do NOT call the admin API to flip status. This protects against silently-parking credits when the user-facing notification flow isn't wired yet.
+   - Before: log `action_attempted` with the API request body and `reason_storage` (`api_reason_field` if gate #1 confirmed the API stores reason; otherwise `verificationdata.ops_reason`).
+   - After: parse the bulk API response and log `action_result` with `per_id_outcome` (`success` / `error` / `unchanged`), `http_status`, and `duration_ms`.
+   - If VERDICT was LEGITIMATE and action succeeded: `APPROVED_IN_RUN=$((APPROVED_IN_RUN + 1))` and `APPROVAL_CAP_USED=$((APPROVAL_CAP_USED + 1))`.
+   - If `per_id_outcome` was `error`: `ERRORS=$((ERRORS + 1))`.
+   - **Skip all emoji reactions** — no source message in batch mode.
+   - For escalations: post an individual top-level message (existing behavior, unchanged).
+
+7. **On any per-credit error:** log `error` event with `cr_id`, `stage`, `error_message`, and a truncated `traceback_snippet`, increment `ERRORS`, then continue with the next credit.
+
+   **Error-storm escalation.** If at the end of the loop `ERRORS >= max(3, FETCHED / 2)` (i.e. half the batch errored, with a floor of 3 to avoid noise on tiny batches), post a Jan-tagged alert in addition to the normal summary:
+   ```bash
+   if [[ "$FETCHED" -gt 0 ]]; then
+     ERR_THRESHOLD=$(( FETCHED / 2 ))
+     [[ "$ERR_THRESHOLD" -lt 3 ]] && ERR_THRESHOLD=3
+     if [[ "$ERRORS" -ge "$ERR_THRESHOLD" ]]; then
+       # Tool syntax matches the `react` calls in Step 5 (not shell).
+       message(action="send",
+               channelId="<credit_verification_channel_id>",
+               text="🚨 Error storm — $ERRORS of $FETCHED credits errored this batch. Likely API degradation. <@U038BM16T7W>")
+     fi
+   fi
+   ```
 
 #### B3. Compose Summary
 
-After processing all credits, post a single top-level message to
-`OPS_CREDIT_VERIFICATION_CHANNEL_ID` (default: `C0APB2CMM7C`):
-
+**Parent message** (top-level, public, no tags, always posted to `OPS_CREDIT_VERIFICATION_CHANNEL_ID`, default `C0APB2CMM7C`):
 ```
-[HEARTBEAT-BATCH] Credit Verification Batch — [timestamp]
-Processed: [N]/[total unverified in queue]
-DRY-RUN: [yes/no]
-
-✅ Approved (N):
-• [Profile Name] — [Role] on "[Track]" — Risk: [X]%
-  Evidence: [1-2 sentence summary with source links]
-
-🔴 Rejected (N):
-• [Profile Name] — [Role] on "[Track]" — Risk: [X]%
-  Reason: [why rejected, with source links]
-
-🔍 Escalated (N):
-• [Profile Name] — [Role] on "[Track]" — Risk: [X]%
-  See thread — @Jan
-
-⚠️ Errored (N):
-• [Profile Name] — [Role] on "[Track]" — Error: [brief description]
-
-⏭️ Skipped (idempotent): [N] — already processed
-⏭️ Skipped (cap): [N] — daily cap reached
-Queue remaining: [X] unverified
+[HEARTBEAT-BATCH] Credit batch complete — {YYYY-MM-DD HH:MM UTC}
+Fetched: {FETCHED} | Approved: {APPROVED_IN_RUN} | → verification_needed: {MOVES_COUNT} | Escalated: {ESCALATED} | Skipped: {SKIPPED_IDEMPOTENT + SKIPPED_CAP}
+Approval cap used: {APPROVAL_CAP_USED}/{APPROVAL_CAP_LIMIT} today | Queue remaining: {QUEUE_REMAINING} unverified
 ```
 
-Omit any section with zero items (e.g., if no errors, omit the Errored section).
+Store the parent message's Slack ts for thread replies and for the `run_finished` event in B6.
 
-Use `message(action=send, target="<credit_verification_channel_id>")` with NO `threadId` or `replyTo`
-— this is a top-level message, not a thread reply.
+**Thread reply 1** (only if there were verification_needed moves, escalations, or skipped — i.e. non-empty detail; tags Jan):
+```
+<@U038BM16T7W> — batch summary
+
+🔴 → verification_needed ({MOVES_COUNT}):
+• {cr_id} {profile} as {role} on "{track}" — reason: {specific reason}
+• ...
+
+🔍 Escalated ({ESCALATED}):
+• {cr_id} {profile} as {role} on "{track}" — reason: {specific reason}
+• ...
+
+⏭️ Skipped idempotent ({SKIPPED_IDEMPOTENT}):
+• {cr_id} — already processed
+
+⏭️ Skipped (cap) ({SKIPPED_CAP}):
+• {cr_id} — daily approval cap reached
+```
+
+If all four detail sections (`verification_needed`, `Escalated`, `Skipped idempotent`, `Skipped (cap)`) are empty, skip this thread reply entirely.
+
+**Thread reply 2** (only if approval cap was hit during this run):
+```
+⚠️ Daily approval cap reached ({APPROVAL_CAP_LIMIT}/day). {SKIPPED_CAP} LEGITIMATE verdicts skipped — will retry next batch.
+Verification-needed moves continued uncapped.
+```
+
+Use `message(action=send, target="<credit_verification_channel_id>")` for the parent message (NO `threadId`). For thread replies, use the parent's ts as `threadId` / `replyTo`.
 
 #### B4. Escalation Threads
 
@@ -608,6 +721,29 @@ If the API returns zero unverified credits:
 Queue clear — no unverified credits remaining.
 ```
 
+#### B6. Finish — log summary, compress old logs
+
+After the parent summary message is posted (whether B3's normal summary or B5's queue-clear message), run the finalization steps.
+
+Log the `run_finished` event:
+```bash
+bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" run_finished \
+  "$(jq -n --argjson f "$FETCHED" --argjson a "$APPROVED_IN_RUN" \
+          --argjson v "$MOVES_COUNT" --argjson e "$ESCALATED" \
+          --argjson si "$SKIPPED_IDEMPOTENT" --argjson sc "$SKIPPED_CAP" \
+          --argjson errs "$ERRORS" --arg ts "$PARENT_MSG_TS" \
+          '{fetched:$f, approved:$a, verification_needed:$v, escalated:$e,
+            skipped_idempotent:$si, skipped_cap:$sc, errors:$errs,
+            summary_post_message_ts:$ts}')"
+```
+
+Run compression (idempotent; cheap no-op most days):
+```bash
+bash "$SKILL_DIR/scripts/compress-old-logs.sh" || true
+```
+
+The lockfile is released automatically by the `trap` set in B0 when the run exits.
+
 ### Rate Limiting Note
 
 When processing multiple credits sequentially, space web research requests to
@@ -636,8 +772,9 @@ through investigation.
 2. **Never skip investigation.** Every credit group must be investigated before
    approval. "The profile looks legit" is not sufficient — you must verify the
    credits themselves are plausible.
-3. **Daily cap still applies.** If you hit 50 autonomous actions, stop and tell
-   the requester how many remain for the next cycle.
+3. **Daily approval cap still applies.** If you hit 500 autonomous approvals
+   (UTC day), stop approving and tell the requester how many remain for the
+   next cycle. Verification-needed moves and escalations are uncapped.
 4. **Only Jan (U038BM16T7W) or Aaron (U7RP6HKUZ) can trigger this workflow.**
    Verify `sender_id` from message metadata.
 
@@ -659,10 +796,11 @@ Checking all unverified credits for [Profile Name] ([profile_id]).
 Found [N] pending. Processing now — this will take a while for large queues.
 ```
 
-If N > 50, add:
+If N > 500, add:
 ```
-Note: Daily cap is 50 autonomous actions. I'll process up to 50 this cycle
-and report how many remain.
+Note: Daily approval cap is 500 autonomous approvals. I'll approve up to 500
+this cycle and report how many remain. (Verification-needed moves and
+escalations are uncapped.)
 ```
 
 #### P2. Profile-Level Investigation
