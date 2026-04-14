@@ -3,6 +3,7 @@ GateResult. No I/O here — adapters fetch the data and pass it in.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
 from .types import ContactRow, Draft, GateResult, Kind, Metadata, Thread
@@ -193,4 +194,106 @@ def gate_c_no_human_reply(
                     "Bot stands down."
                 ),
             )
+    return GateResult(passed=True)
+
+
+# ---------------------------------------------------------------------------
+# Gate D — not weekend
+# ---------------------------------------------------------------------------
+
+WEEKEND_BLOCKED = "WEEKEND_BLOCKED"
+
+
+def gate_d_not_weekend(epoch: int) -> GateResult:
+    """Saturday=5, Sunday=6 in Python's weekday()."""
+    dow = datetime.fromtimestamp(epoch, tz=timezone.utc).weekday()
+    if dow >= 5:
+        return GateResult(
+            passed=False,
+            reason_code=WEEKEND_BLOCKED,
+            reason_human="Weekend send blocked per outreach policy. Push to Monday.",
+        )
+    return GateResult(passed=True)
+
+
+# ---------------------------------------------------------------------------
+# Gate E — followup cap
+# ---------------------------------------------------------------------------
+
+FOLLOWUP_CAP_REACHED = "FOLLOWUP_CAP_REACHED"
+
+
+def gate_e_followup_cap(prior_followup_count: int,
+                        cap: int = 3) -> GateResult:
+    if prior_followup_count >= cap:
+        return GateResult(
+            passed=False,
+            reason_code=FOLLOWUP_CAP_REACHED,
+            reason_human=(
+                f"Already sent {prior_followup_count} follow-ups; cap is {cap}."
+            ),
+        )
+    return GateResult(passed=True)
+
+
+# ---------------------------------------------------------------------------
+# Gate F — sender allowed
+# ---------------------------------------------------------------------------
+
+SENDER_NOT_ALLOWED = "SENDER_NOT_ALLOWED"
+
+
+def gate_f_sender_allowed(
+    draft: Draft,
+    meta: Metadata,
+    allow_list: frozenset[str],
+) -> GateResult:
+    draft_account = _norm(draft.account)
+    meta_sender = _norm(meta.sender)
+    allowed = {_norm(a) for a in allow_list}
+    if draft_account not in allowed:
+        return GateResult(
+            passed=False,
+            reason_code=SENDER_NOT_ALLOWED,
+            reason_human=(
+                f"Draft account {draft.account} is not in the outreach "
+                f"sender allow-list {sorted(allow_list)}."
+            ),
+        )
+    if draft_account != meta_sender:
+        return GateResult(
+            passed=False,
+            reason_code=SENDER_NOT_ALLOWED,
+            reason_human=(
+                f"Draft account {draft.account} disagrees with metadata "
+                f"sender {meta.sender}. Precision mismatch."
+            ),
+        )
+    return GateResult(passed=True)
+
+
+# ---------------------------------------------------------------------------
+# Gate G — CC/BCC match allowlist
+# ---------------------------------------------------------------------------
+
+UNEXPECTED_CC_BCC = "UNEXPECTED_CC_BCC"
+
+
+def gate_g_cc_bcc_match_allowlist(
+    draft: Draft,
+    meta: Metadata,
+) -> GateResult:
+    cc_allow = {_norm(a) for a in meta.cc_allowlist}
+    bcc_allow = {_norm(a) for a in meta.bcc_allowlist}
+    extra_cc = [a for a in draft.cc_addrs if _norm(a) not in cc_allow]
+    extra_bcc = [a for a in draft.bcc_addrs if _norm(a) not in bcc_allow]
+    if extra_cc or extra_bcc:
+        return GateResult(
+            passed=False,
+            reason_code=UNEXPECTED_CC_BCC,
+            reason_human=(
+                f"Unexpected CC: {extra_cc} / BCC: {extra_bcc}. "
+                "Refusing to send."
+            ),
+        )
     return GateResult(passed=True)

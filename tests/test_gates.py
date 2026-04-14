@@ -208,3 +208,105 @@ def test_gate_c_new_kind_skipped():
     meta = make_metadata(kind=Kind.NEW, original_thread_id=None)
     result = gate_c_no_human_reply(meta, thread=None, bot_senders=("a@muso.ai",))
     assert result.passed
+
+
+# -------- Gates D, E, F, G --------
+
+from scripts.lib.muso_outreach.gates import (
+    FOLLOWUP_CAP_REACHED,
+    SENDER_NOT_ALLOWED,
+    UNEXPECTED_CC_BCC,
+    WEEKEND_BLOCKED,
+    gate_d_not_weekend,
+    gate_e_followup_cap,
+    gate_f_sender_allowed,
+    gate_g_cc_bcc_match_allowlist,
+)
+
+
+# Gate D
+def test_gate_d_monday_passes():
+    # 2026-04-13 is a Monday (UTC).
+    assert gate_d_not_weekend(epoch=1776096000).passed
+
+
+def test_gate_d_saturday_blocks():
+    # 2026-04-11 is a Saturday (UTC).
+    r = gate_d_not_weekend(epoch=1775923200)
+    assert not r.passed
+    assert r.reason_code == WEEKEND_BLOCKED
+
+
+def test_gate_d_sunday_blocks():
+    # 2026-04-12 is a Sunday (UTC).
+    r = gate_d_not_weekend(epoch=1776009600)
+    assert not r.passed
+    assert r.reason_code == WEEKEND_BLOCKED
+
+
+# Gate E
+def test_gate_e_under_cap_passes():
+    assert gate_e_followup_cap(prior_followup_count=2).passed
+
+
+def test_gate_e_at_cap_blocks():
+    r = gate_e_followup_cap(prior_followup_count=3)
+    assert not r.passed
+    assert r.reason_code == FOLLOWUP_CAP_REACHED
+
+
+# Gate F
+def test_gate_f_allowed_sender_passes():
+    draft = make_draft(account="a@muso.ai")
+    meta = make_metadata(sender="a@muso.ai")
+    assert gate_f_sender_allowed(draft, meta,
+                                 allow_list=frozenset({"a@muso.ai"})).passed
+
+
+def test_gate_f_draft_from_non_allowed_account_blocks():
+    draft = make_draft(account="random@elsewhere.com")
+    meta = make_metadata(sender="a@muso.ai")
+    r = gate_f_sender_allowed(draft, meta,
+                              allow_list=frozenset({"a@muso.ai"}))
+    assert not r.passed
+    assert r.reason_code == SENDER_NOT_ALLOWED
+
+
+def test_gate_f_draft_account_mismatches_metadata_sender_blocks():
+    """The draft's actual sending account must agree with what the
+    agent declared in metadata."""
+    draft = make_draft(account="ak@muso.ai")
+    meta = make_metadata(sender="a@muso.ai")
+    r = gate_f_sender_allowed(draft, meta,
+                              allow_list=frozenset({"a@muso.ai", "ak@muso.ai"}))
+    assert not r.passed
+    assert r.reason_code == SENDER_NOT_ALLOWED
+
+
+# Gate G
+def test_gate_g_no_cc_bcc_passes():
+    draft = make_draft(cc=(), bcc=())
+    meta = make_metadata(cc_allowlist=(), bcc_allowlist=())
+    assert gate_g_cc_bcc_match_allowlist(draft, meta).passed
+
+
+def test_gate_g_unexpected_cc_blocks():
+    draft = make_draft(cc=("assistant@larsenstrings.com",))
+    meta = make_metadata(cc_allowlist=())
+    r = gate_g_cc_bcc_match_allowlist(draft, meta)
+    assert not r.passed
+    assert r.reason_code == UNEXPECTED_CC_BCC
+
+
+def test_gate_g_explicit_cc_allowlist_passes():
+    draft = make_draft(cc=("assistant@larsenstrings.com",))
+    meta = make_metadata(cc_allowlist=("assistant@larsenstrings.com",))
+    assert gate_g_cc_bcc_match_allowlist(draft, meta).passed
+
+
+def test_gate_g_unexpected_bcc_blocks():
+    draft = make_draft(bcc=("sneak@example.com",))
+    meta = make_metadata()
+    r = gate_g_cc_bcc_match_allowlist(draft, meta)
+    assert not r.passed
+    assert r.reason_code == UNEXPECTED_CC_BCC
