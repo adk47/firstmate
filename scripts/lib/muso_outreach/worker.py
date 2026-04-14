@@ -82,6 +82,7 @@ def _run_all_gates(draft, meta, thread, contact_row, adapters) -> gates.GateResu
     b = gates.gate_b_no_contact_reply(
         meta, thread,
         inbound_messages=_fetch_inbound(meta, draft, adapters),
+        bot_senders=tuple(OUTREACH_ALLOWED_SENDERS),
     )
     if not b.passed:
         return b

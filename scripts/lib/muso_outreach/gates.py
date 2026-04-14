@@ -123,11 +123,23 @@ def gate_b_no_contact_reply(
     meta: Metadata,
     thread: Optional[Thread],
     inbound_messages: tuple,  # for kind=new: prior messages from target contact
+    bot_senders: tuple[str, ...] = (),
 ) -> GateResult:
     if meta.kind is Kind.FOLLOWUP:
         if thread is None:
             return GateResult(passed=True)
+        bot_set = {_norm(s) for s in bot_senders}
+        # Find bot's last send; only messages AFTER it count as "reply".
+        last_bot_epoch = -1
         for msg in thread.messages:
+            if _norm(msg.from_addr) in bot_set:
+                last_bot_epoch = max(last_bot_epoch, msg.date_epoch)
+        if last_bot_epoch < 0:
+            # Bot hasn't sent yet -- nothing to reply to. Gate B abstains.
+            return GateResult(passed=True)
+        for msg in thread.messages:
+            if msg.date_epoch <= last_bot_epoch:
+                continue
             if not _is_muso(msg.from_addr):
                 return GateResult(
                     passed=False,

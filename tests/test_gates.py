@@ -124,7 +124,8 @@ def test_gate_b_followup_no_inbound_reply_passes():
                      to_addrs=("ow@larsenstrings.com",), date_epoch=100),
     ))
     meta = make_metadata(kind=Kind.FOLLOWUP, original_thread_id="t1")
-    result = gate_b_no_contact_reply(meta, thread=thread, inbound_messages=())
+    result = gate_b_no_contact_reply(meta, thread=thread, inbound_messages=(),
+                                     bot_senders=("a@muso.ai",))
     assert result.passed
 
 
@@ -136,7 +137,41 @@ def test_gate_b_followup_contact_replied_blocks():
                      to_addrs=("a@muso.ai",), date_epoch=200),
     ))
     meta = make_metadata(kind=Kind.FOLLOWUP, original_thread_id="t1")
-    result = gate_b_no_contact_reply(meta, thread=thread, inbound_messages=())
+    result = gate_b_no_contact_reply(meta, thread=thread, inbound_messages=(),
+                                     bot_senders=("a@muso.ai",))
+    assert not result.passed
+    assert result.reason_code == CONTACT_REPLIED
+
+
+def test_gate_b_followup_inbound_initiated_no_contact_reply_passes():
+    """Thread started by contact; our reply is the second message. The
+    contact's initial message is BEFORE our first send, so it is NOT a
+    'reply to our outreach.' Gate B must not block on it."""
+    thread = make_thread(messages=(
+        make_message(from_addr="ole@larsenstrings.com",
+                     to_addrs=("a@muso.ai",), date_epoch=100),  # inbound first
+        make_message(from_addr="a@muso.ai",
+                     to_addrs=("ole@larsenstrings.com",), date_epoch=200),  # our outreach
+    ))
+    meta = make_metadata(kind=Kind.FOLLOWUP, original_thread_id="t1")
+    result = gate_b_no_contact_reply(meta, thread=thread,
+                                     inbound_messages=(),
+                                     bot_senders=("a@muso.ai",))
+    assert result.passed
+
+
+def test_gate_b_followup_contact_replied_AFTER_bot_blocks():
+    """Contact replied after our outreach -- real reply, block."""
+    thread = make_thread(messages=(
+        make_message(from_addr="a@muso.ai",
+                     to_addrs=("ow@larsenstrings.com",), date_epoch=100),  # our send
+        make_message(from_addr="ow@larsenstrings.com",
+                     to_addrs=("a@muso.ai",), date_epoch=200),  # contact reply
+    ))
+    meta = make_metadata(kind=Kind.FOLLOWUP, original_thread_id="t1")
+    result = gate_b_no_contact_reply(meta, thread=thread,
+                                     inbound_messages=(),
+                                     bot_senders=("a@muso.ai",))
     assert not result.passed
     assert result.reason_code == CONTACT_REPLIED
 
