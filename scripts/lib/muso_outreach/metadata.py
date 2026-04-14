@@ -31,19 +31,20 @@ def _parse_labels(labels: tuple[str, ...]) -> Optional[dict]:
             continue
         key, value = m.group(1), m.group(2)
         kv[key] = value
-    # "kind" is the sentinel — without it, labels are considered missing.
-    if "kind" not in kv:
+    # Required keys for all kinds. `thread` is required only for followups.
+    required = ("kind", "row", "opp", "template", "sender")
+    if any(k not in kv for k in required):
         return None
-    # Normalize
-    out = {
+    if kv["kind"] == "followup" and "thread" not in kv:
+        return None
+    return {
         "kind": kv["kind"],
-        "sheet_row_id": int(kv["row"]) if "row" in kv else None,
-        "opp_id": kv.get("opp"),
-        "template": kv.get("template"),
-        "sender": _decode_label_email(kv["sender"]) if "sender" in kv else None,
+        "sheet_row_id": int(kv["row"]),
+        "opp_id": kv["opp"],
+        "template": kv["template"],
+        "sender": _decode_label_email(kv["sender"]),
         "original_thread_id": kv.get("thread"),
     }
-    return out
 
 
 def _parse_json_comment(body_html: str) -> Optional[dict]:

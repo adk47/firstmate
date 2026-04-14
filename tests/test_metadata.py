@@ -95,6 +95,38 @@ def test_labels_and_json_disagree_raises():
     assert exc.value.args[0] == METADATA_LABEL_DISAGREE
 
 
+def test_labels_missing_required_opp_raises_metadata_missing():
+    """If a required label key is absent (e.g., `opp`), the parser must
+    treat it as missing metadata, not silently produce None."""
+    partial_labels = (
+        "B2B - Ads",
+        "muso-meta/kind-new",
+        "muso-meta/row-55",
+        # opp missing
+        "muso-meta/template-PrivateInvite",
+        "muso-meta/sender-a_at_muso.ai",
+    )
+    draft = _draft(labels=partial_labels, body_html="")
+    with pytest.raises(ValueError) as exc:
+        parse_from_draft(draft)
+    assert exc.value.args[0] == METADATA_MISSING
+
+
+def test_labels_missing_required_sender_raises_metadata_missing():
+    partial_labels = (
+        "B2B - Ads",
+        "muso-meta/kind-new",
+        "muso-meta/row-55",
+        "muso-meta/opp-xyz",
+        "muso-meta/template-PrivateInvite",
+        # sender missing
+    )
+    draft = _draft(labels=partial_labels, body_html="")
+    with pytest.raises(ValueError) as exc:
+        parse_from_draft(draft)
+    assert exc.value.args[0] == METADATA_MISSING
+
+
 def test_new_kind_has_no_thread():
     labels = (
         "B2B - Ads",
