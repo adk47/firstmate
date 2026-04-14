@@ -124,19 +124,22 @@ Post the batch to `#sales-alerts`:
 
 Wait for explicit approval.
 
-### Step 6: Send
+### Step 6: Hand off to Sender Worker
 
-```bash
-gog gmail drafts send <draftId> --account <muso_email>
-gog gmail messages modify <messageId> --add "B2B - Ads" --account <muso_email>
-```
+Do NOT call `gog gmail drafts send`. Sending is the worker's job.
 
-### Step 7: Log + GHL Sync
+When the batch is approved (Fede reacts ✅ on the Slack approval post),
+the sender worker runs, reads every draft under label
+`B2B - Ads/auto-fu-approved`, applies the precondition gate, and sends
+only the valid drafts. The worker owns Gmail send + logbook append +
+GHL stage advance as one atomic step.
 
-- Append row to logbook: `Action = Follow-Up Sent`, `Status = Sent`
-- Move GHL opportunity stage to `Follow-up` (if not already)
-- Bump `Times Sent` on the template row
-- Post to `#sales-alerts`
+If a draft is blocked, the worker posts the reason to `#sales-alerts`.
+Fix the draft (re-create from this skill if the data changed) and
+re-approve. Do NOT attempt to bypass the gate by calling `drafts send`
+directly — the gateway allow-list denies it.
+
+See `docs/RUNBOOK-outreach-sender-worker.md` for failure-mode details.
 
 ## Auto Flagging (Monday Cron, Planned)
 

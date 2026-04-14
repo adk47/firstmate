@@ -129,54 +129,20 @@ gog gmail drafts create \
 
 Fede reviews drafts in Gmail before final go.
 
-### Step 8: Send (on final go)
+### Step 8: Hand off to Sender Worker
 
-```bash
-gog gmail drafts send <draftId> --account <muso_email>
-gog gmail messages modify <messageId> --add "B2B - Ads" --account <muso_email>
-```
+Do NOT call `gog gmail drafts send`. Sending is the worker's job.
 
-**Reapply the label manually.** Drafts sent via `gog gmail drafts send` do NOT
-auto inherit the label flag.
+Once Fede / Aaron approves the batch, the sender worker (running via
+Slack event handler) reads every draft under label `B2B - Ads` with
+`muso-meta/kind-new` applied, runs the precondition gate, and sends
+only the valid drafts. The worker owns Gmail send + logbook append +
+GHL `Emailed` stage set + Slack notification as one atomic step.
 
-### Step 9: Log Everything
+Blocked drafts appear in `#sales-alerts` with a machine-readable
+reason code. Fix and re-approve; do NOT bypass.
 
-Append to the logbook sheet:
-
-```bash
-gog sheets append 1o1aUpAhQ8tNuZtzWqUm9bOUFvyPaGrCHbImbB4mtmW0 \
-  --range "muso-b2b-outreach-reports" \
-  --values '[["N","YYYY-MM-DD","<muso_email>","<domain>","<contact>","<company>","<title>","<email>","Sent","Emailed","<subject>","<template_name>","<hook_summary>"]]' \
-  --account a@muso.ai
-```
-
-Also:
-- Update `contacts_intelligence.Status = Emailed` for the row
-- Bump `Times Sent` and `Last Used Date` on the template row
-- Append to `api-logs/gmail/YYYY-MM-DD.jsonl`
-
-### Step 10: GHL Sync
-
-Call `muso-outreach-ghl-sync` to create the contact and opportunity at Emailed stage.
-
-Include the `sheet_row_id` custom field (from the contact's Row ID in `contacts_intelligence`).
-
-### Step 11: Slack Notification
-
-Post summary to `#sales-alerts`:
-
-```
-📧 *Outreach Sent, YYYY-MM-DD* ({N} emails, from {muso_email})
-
-1. *{Contact}*, {Title}, {Company} → Emailed ✅
-2. ...
-
-Template: {primary template used}
-GHL: {N} opportunities created in B2B-Ads-Clio → Emailed
-Log: muso-b2b-outreach-reports
-```
-
-**HARD STEP.** Never skip.
+See `docs/RUNBOOK-outreach-sender-worker.md` for ops details.
 
 ## Constraints
 

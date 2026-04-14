@@ -217,3 +217,20 @@ Before handing an email back to sender, verify:
 - `../muso-outreach-engine/references/config.md`, shared config
 - `../muso-outreach-engine/references/icp-name-drops.md`, name drop table
 - `../muso-outreach-engine/references/target-verticals.md`, ICP categories
+
+## Draft Creation (Required Metadata)
+
+After generating the HTML body, ALWAYS append this HTML comment at the
+very bottom of `body_html`:
+
+    <!-- muso-outreach:v1 {"kind":"new","sheet_row_id":<N>,"opp_id":"<X>","template":"<T>","sender":"a@muso.ai","original_thread_id":null} -->
+
+(For follow-ups, use `"kind":"followup"` and set `"original_thread_id"`
+to the original thread's ID.)
+
+When creating the Gmail draft via `gog gmail drafts create`, ALWAYS
+also apply the full set of `muso-meta/*` labels described in
+`../muso-outreach-engine/references/config.md` → "Outreach Draft Metadata".
+
+Omitting either the comment or the labels will cause the sender worker
+to block the draft at send time.
