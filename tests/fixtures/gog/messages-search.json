@@ -1,0 +1,41 @@
+{
+  "messages": [
+    {
+      "id": "19d8cbcc90369fbe",
+      "threadId": "19d779406d27bd56",
+      "date": "2026-04-14 16:04",
+      "from": "Matt - HAULIX <matt@haulix.com>",
+      "subject": "Re: Private Invite - M. Brown",
+      "labels": [
+        "IMPORTANT",
+        "CATEGORY_PERSONAL",
+        "INBOX"
+      ]
+    },
+    {
+      "id": "19d8c93d1222305a",
+      "threadId": "19cd87bba49aece4",
+      "date": "2026-04-14 15:19",
+      "from": "Meredith Gaslin <meredith@jamstik.com>",
+      "subject": "Re: Jamstik x Muso.AI",
+      "labels": [
+        "IMPORTANT",
+        "CATEGORY_PERSONAL",
+        "INBOX"
+      ]
+    },
+    {
+      "id": "19d8c68fb84d9265",
+      "threadId": "19cfa19726bd25f3",
+      "date": "2026-04-14 14:33",
+      "from": "Mail Delivery Subsystem <mailer-daemon@googlemail.com>",
+      "subject": "Delivery Status Notification (Failure)",
+      "labels": [
+        "IMPORTANT",
+        "CATEGORY_UPDATES",
+        "INBOX"
+      ]
+    }
+  ],
+  "nextPageToken": "09065274665205663436"
+}

@@ -1,0 +1,61 @@
+{
+  "draft": {
+    "id": "r6470161099068266598",
+    "message": {
+      "historyId": "138241",
+      "id": "19d8cda7ac25d447",
+      "internalDate": "1776184621000",
+      "labelIds": [
+        "DRAFT"
+      ],
+      "payload": {
+        "body": {
+          "data": "PHA-dGVzdDwvcD4NCg==",
+          "size": 13
+        },
+        "headers": [
+          {
+            "name": "Received",
+            "value": "from 979463892068 named unknown by gmailapi.google.com with HTTPREST; Tue, 14 Apr 2026 09:37:01 -0700"
+          },
+          {
+            "name": "From",
+            "value": "a@muso.ai"
+          },
+          {
+            "name": "To",
+            "value": "smoke@example.invalid"
+          },
+          {
+            "name": "Subject",
+            "value": "Fixture draft"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 14 Apr 2026 09:37:01 -0700"
+          },
+          {
+            "name": "Message-Id",
+            "value": "\u003cCAPVDfZ0RrKrNT2CPe625tgTooaLwwbbjttzkgPgiK-Du_hmx=w@mail.gmail.com\u003e"
+          },
+          {
+            "name": "MIME-Version",
+            "value": "1.0"
+          },
+          {
+            "name": "Content-Type",
+            "value": "text/html; charset=\"utf-8\""
+          },
+          {
+            "name": "Content-Transfer-Encoding",
+            "value": "7bit"
+          }
+        ],
+        "mimeType": "text/html"
+      },
+      "sizeEstimate": 419,
+      "snippet": "test",
+      "threadId": "19d8cda7ac25d447"
+    }
+  }
+}

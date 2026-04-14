@@ -1,0 +1,323 @@
+{
+  "downloaded": null,
+  "thread": {
+    "historyId": "138214",
+    "id": "19d779406d27bd56",
+    "messages": [
+      {
+        "historyId": "135540",
+        "id": "19d77d02d5eb8272",
+        "internalDate": "1775831625000",
+        "labelIds": [
+          "Label_7746877054870722633",
+          "SENT"
+        ],
+        "payload": {
+          "body": {
+            "data": "PHA-SGV5IE1hdHRoZXcsPC9wPjxwPkknbSBBYXJvbiwgQ0VPIGF0IDxhIGhyZWY9Imh0dHBzOi8vbXVzby5haS8iIHN0eWxlPSJ0ZXh0LWRlY29yYXRpb246bm9uZTtjb2xvcjppbmhlcml0Ij5NdXNvLkFJPC9hPi4gV2UgaGF2ZSBjbG9zZSB0byAxTSBtdXNpYyBwcm9mZXNzaW9uYWxzIG9uIG91ciBwbGF0Zm9ybSwgZnJvbSBCYWQgQnVubnkgYW5kIFJpY2sgUnViaW4gdG8gSGFucyBaaW1tZXIsIGFsbCB2ZXJpZmllZCB0aHJvdWdoIHJlYWwgcmVsZWFzZSBjcmVkaXRzLjwvcD48cD5XZSByZWNlbnRseSBvcGVuZWQgYW4gYWQgcGxhdGZvcm0gYXJvdW5kIHRoaXMgYXVkaWVuY2UuIEhhdWxpeCBwb3dlcnMgcHJlLXJlbGVhc2UgcHJvbW8gZm9yIGxhYmVscyBhbmQgcHVibGljaXN0cy4gVGhlIDEzNEsgcHJpbWFyeSBhcnRpc3RzIGFuZCBsYWJlbCBkZWNpc2lvbi1tYWtlcnMgb24gTXVzbyBhcmUgZWl0aGVyIGFscmVhZHkgdXNpbmcgeW91IG9yIHNob3VsZCBiZS48L3A-PHA-SGFwcHkgdG8gc2hvdyB5b3UgaG93IGl0IHdvcmtzLjwvcD48cD5BYXJvbiBLYXVmbWFuPGJyPkNFTywgTXVzby5BSTwvcD4NCg==",
+            "size": 571
+          },
+          "headers": [
+            {
+              "name": "Received",
+              "value": "from 979463892068 named unknown by gmailapi.google.com with HTTPREST; Fri, 10 Apr 2026 07:33:45 -0700"
+            },
+            {
+              "name": "Received",
+              "value": "from 979463892068 named unknown by gmailapi.google.com with HTTPREST; Fri, 10 Apr 2026 22:28:02 +0900"
+            },
+            {
+              "name": "From",
+              "value": "a@muso.ai"
+            },
+            {
+              "name": "To",
+              "value": "matt@haulix.com"
+            },
+            {
+              "name": "Subject",
+              "value": "Private Invite - M. Brown"
+            },
+            {
+              "name": "Date",
+              "value": "Fri, 10 Apr 2026 07:33:45 -0700"
+            },
+            {
+              "name": "Message-Id",
+              "value": "\u003cCAPVDfZ1A9ik3yb4fEgP1yjATjxPp93StqvsZoAk9dqkAb-ESKw@mail.gmail.com\u003e"
+            },
+            {
+              "name": "MIME-Version",
+              "value": "1.0"
+            },
+            {
+              "name": "Content-Type",
+              "value": "text/html; charset=\"utf-8\""
+            },
+            {
+              "name": "Content-Transfer-Encoding",
+              "value": "7bit"
+            }
+          ],
+          "mimeType": "text/html"
+        },
+        "sizeEstimate": 1104,
+        "snippet": "Hey Matthew, I\u0026#39;m Aaron, CEO at Muso.AI. We have close to 1M music professionals on our platform, from Bad Bunny and Rick Rubin to Hans Zimmer, all verified through real release credits. We recently",
+        "threadId": "19d779406d27bd56"
+      },
+      {
+        "historyId": "138202",
+        "id": "19d8c0ace73f0a39",
+        "internalDate": "1776171010000",
+        "labelIds": [
+          "Label_7746877054870722633",
+          "SENT"
+        ],
+        "payload": {
+          "body": {},
+          "headers": [
+            {
+              "name": "MIME-Version",
+              "value": "1.0"
+            },
+            {
+              "name": "Date",
+              "value": "Tue, 14 Apr 2026 20:50:10 +0800"
+            },
+            {
+              "name": "References",
+              "value": "\u003cCAPVDfZ1A9ik3yb4fEgP1yjATjxPp93StqvsZoAk9dqkAb-ESKw@mail.gmail.com\u003e"
+            },
+            {
+              "name": "In-Reply-To",
+              "value": "\u003cCAPVDfZ1A9ik3yb4fEgP1yjATjxPp93StqvsZoAk9dqkAb-ESKw@mail.gmail.com\u003e"
+            },
+            {
+              "name": "Message-ID",
+              "value": "\u003cCAPVDfZ2xD8cepcVp6zL=apZ8xjh=mS9SO1od8RSR-kAS4buyjw@mail.gmail.com\u003e"
+            },
+            {
+              "name": "Subject",
+              "value": "Re: Private Invite - M. Brown"
+            },
+            {
+              "name": "From",
+              "value": "Aaron Kaufman \u003ca@muso.ai\u003e"
+            },
+            {
+              "name": "To",
+              "value": "matt@haulix.com"
+            },
+            {
+              "name": "Content-Type",
+              "value": "multipart/alternative; boundary=\"000000000000383955064f6b0abd\""
+            }
+          ],
+          "mimeType": "multipart/alternative",
+          "parts": [
+            {
+              "body": {
+                "data": "SGV5IE1hdHQsIEkndmUgYmVlbiBsb29raW5nIGF0IHdoYXQgSGF1bGl4IGRvZXMgYW5kIGtlZXAgdGhpbmtpbmcgdGhlcmUncw0Kc29tZXRoaW5nIHdlIGNvdWxkIGJ1aWxkIHRvZ2V0aGVyLiBBbSBJIG9mZiBiYXNlPyBXb3VsZCBsb3ZlIHRvIGhlYXIgeW91cg0KcGVyc3BlY3RpdmUuDQoNCkFhcm9uDQo=",
+                "size": 173
+              },
+              "headers": [
+                {
+                  "name": "Content-Type",
+                  "value": "text/plain; charset=\"UTF-8\""
+                }
+              ],
+              "mimeType": "text/plain",
+              "partId": "0"
+            },
+            {
+              "body": {
+                "data": "PGRpdiBkaXI9Imx0ciI-PHA-SGV5IE1hdHQsIEkmIzM5O3ZlIGJlZW4gbG9va2luZyBhdCB3aGF0IEhhdWxpeCBkb2VzIGFuZCBrZWVwIHRoaW5raW5nIHRoZXJlJiMzOTtzIHNvbWV0aGluZyB3ZSBjb3VsZCBidWlsZCB0b2dldGhlci4gQW0gSSBvZmYgYmFzZT8gV291bGQgbG92ZSB0byBoZWFyIHlvdXIgcGVyc3BlY3RpdmUuPC9wPjxwPkFhcm9uPC9wPg0KPC9kaXY-DQo=",
+                "size": 212
+              },
+              "headers": [
+                {
+                  "name": "Content-Type",
+                  "value": "text/html; charset=\"UTF-8\""
+                }
+              ],
+              "mimeType": "text/html",
+              "partId": "1"
+            }
+          ]
+        },
+        "sizeEstimate": 1053,
+        "snippet": "Hey Matt, I\u0026#39;ve been looking at what Haulix does and keep thinking there\u0026#39;s something we could build together. Am I off base? Would love to hear your perspective. Aaron",
+        "threadId": "19d779406d27bd56"
+      },
+      {
+        "historyId": "138214",
+        "id": "19d8cbcc90369fbe",
+        "internalDate": "1776182661000",
+        "labelIds": [
+          "IMPORTANT",
+          "CATEGORY_PERSONAL",
+          "INBOX"
+        ],
+        "payload": {
+          "body": {},
+          "headers": [
+            {
+              "name": "Delivered-To",
+              "value": "a@muso.ai"
+            },
+            {
+              "name": "Received",
+              "value": "by 2002:a05:7010:ef8b:b0:4fa:3458:8145 with SMTP id pp11csp393754mdb;        Tue, 14 Apr 2026 09:04:36 -0700 (PDT)"
+            },
+            {
+              "name": "X-Received",
+              "value": "by 2002:a17:907:9607:b0:b96:e0b1:ccf4 with SMTP id a640c23a62f3a-b9d72832431mr1203147966b.47.1776182675791;        Tue, 14 Apr 2026 09:04:35 -0700 (PDT)"
+            },
+            {
+              "name": "ARC-Seal",
+              "value": "i=2; a=rsa-sha256; t=1776182675; cv=pass;        d=google.com; s=arc-20240605;        b=TTNsjhqh+0n/UZ4lG9S7CppuADcV9q5+tD7KiJs8myoPFa35fSyfKBhc9KKHlFFLTL         DGTRP6IsJ+j76qZLQAuCna28bMFF5JkobXp0ISfDH0TsAKsx2jPGuWZfCELfdEUSJGbe         ZKT2tUZlStJ2u2FHCSsL3h9ZK0vvCyLuq8qCqYQTfm0jj9pjKwbKVM6BbBBFjbqBLS1s         1Aj393cKiVR1TfqIlNWm+PQb6aNo5/s3a/hEh3p1wa7azsd0t2+dnScpHg0RExdsjHFq         5lhTd7atXD1EC2rkkq33m9jqCruPuVxuFIwQ7NKLSCp5C03jV9YLLJW+fkp0moInZ/Wr         x/iQ=="
+            },
+            {
+              "name": "ARC-Message-Signature",
+              "value": "i=2; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20240605;        h=to:subject:message-id:date:from:in-reply-to:references:mime-version         :dkim-signature;        bh=e1O9zNulyByxiGZjnvwKoTRgZgNI+2K3yIYfQM4HajA=;        fh=INK5ktA1sjwDkl34+anXcROvZRCnfbkqGtd+WLfjpZo=;        b=Zjwf0ab6cWVSCFbzHaLlx7hoP/4tBY3wDW8Km8MNU8FEeXpVigI2cRUe+4DtBPa8OM         RIw1NrbSIE8w3TyUfiLuNSw7iOVPqoeTjKZ7PMP04TubouMnFLxHTPOsLR3T93+X31cP         bmnk7TrG/ImLS7RDLRvHnuCr8zcgqyjPb8lo8jc+o3caLEJvn2C4/pOPSf7BU4BzvKeK         K+HQoOqgdx452OW1Viy4y3A7V4zHVo9Xz8UTldXsyHgIMqgoSHoAdRDDsOQUn8OiaN9Y         +P9ixR+ZDlm4C8uXkfbBs5+SBK3pj2jkPPrfIjlZSujcxtQtTo8uAdCm3NMVspSQ4nAZ         5IHQ==;        dara=google.com"
+            },
+            {
+              "name": "ARC-Authentication-Results",
+              "value": "i=2; mx.google.com;       dkim=pass header.i=@haulix.com header.s=google header.b=\"E2/O4Koy\";       arc=pass (i=1);       spf=pass (google.com: domain of matt@haulix.com designates 209.85.220.41 as permitted sender) smtp.mailfrom=matt@haulix.com;       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=haulix.com;       dara=neutral header.i=@muso.ai"
+            },
+            {
+              "name": "Return-Path",
+              "value": "\u003cmatt@haulix.com\u003e"
+            },
+            {
+              "name": "Received",
+              "value": "from mail-sor-f41.google.com (mail-sor-f41.google.com. [209.85.220.41])        by mx.google.com with SMTPS id 4fb4d7f45d1cf-6708b53acf0sor2611911a12.4.2026.04.14.09.04.35        for \u003ca@muso.ai\u003e        (Google Transport Security);        Tue, 14 Apr 2026 09:04:35 -0700 (PDT)"
+            },
+            {
+              "name": "Received-SPF",
+              "value": "pass (google.com: domain of matt@haulix.com designates 209.85.220.41 as permitted sender) client-ip=209.85.220.41;"
+            },
+            {
+              "name": "Authentication-Results",
+              "value": "mx.google.com;       dkim=pass header.i=@haulix.com header.s=google header.b=\"E2/O4Koy\";       arc=pass (i=1);       spf=pass (google.com: domain of matt@haulix.com designates 209.85.220.41 as permitted sender) smtp.mailfrom=matt@haulix.com;       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=haulix.com;       dara=neutral header.i=@muso.ai"
+            },
+            {
+              "name": "ARC-Seal",
+              "value": "i=1; a=rsa-sha256; t=1776182675; cv=none;        d=google.com; s=arc-20240605;        b=XWHPfhoQjnHvc5TaryUWOq5IBiv7TRg7BbpfqyAeZYTh2Bxcolf7Zl/OsqBe1wkUfc         TgoCrJYKcoV3mMgUC5neJ3CFQHCRh+5V8WkAwLDj2iF0YCv4LnlJ1RzR/LWwBDQ4eJVP         q4mvChkUA/bSzvP9+QOfXz8dwHckRfMxQk2E8pphwf1Ur2Gm9fxvOoJbXq8mKqitbHwQ         tvwZt2iudKJsk8FNDttL7s5SH1QHBrKFNukDS6UjzzNH2vD7FdSdjAfEoic3ZXf8tOjo         hgjSAzDfloiU4ueC8b1U/W9lQn338buVEgWi4AjVCUQAi/VauD+qBu50QRnxqWLMeI1+         HaRg=="
+            },
+            {
+              "name": "ARC-Message-Signature",
+              "value": "i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20240605;        h=to:subject:message-id:date:from:in-reply-to:references:mime-version         :dkim-signature;        bh=e1O9zNulyByxiGZjnvwKoTRgZgNI+2K3yIYfQM4HajA=;        fh=INK5ktA1sjwDkl34+anXcROvZRCnfbkqGtd+WLfjpZo=;        b=K/XibO6MF7X+zU7dFE+EGqmd0VA+a9C4k8wdowedNf8mG1xd3RGjb86VMoq6dIRXFg         Wrt2lRNxvwUu+u5c2dc5ritCDPxgCnZSH2z1CvScP14wj+8+/zjgwzA8/ttS0N3EyRLi         3lcvlDtU0Z/fK6TbqpdBdjdr5cl05RHnueigEeG5l9MhzWFd8EzXxtwy6mDuBMbCBisX         BLyoKjj2uPzq81Rhao2USt05nvVatY1sCdNDanjJSvDc4Sh4qfK9DXmD+Pn/CTkHnBrL         Jp5UvQmYDCxwCEzVDC4FfkmOlsyxV8IbxpvT5F85BrYmb/eQziLs2PJvtvQBZERTW8FE         fh5g==;        darn=muso.ai"
+            },
+            {
+              "name": "ARC-Authentication-Results",
+              "value": "i=1; mx.google.com; arc=none"
+            },
+            {
+              "name": "DKIM-Signature",
+              "value": "v=1; a=rsa-sha256; c=relaxed/relaxed;        d=haulix.com; s=google; t=1776182675; x=1776787475; darn=muso.ai;        h=to:subject:message-id:date:from:in-reply-to:references:mime-version         :from:to:cc:subject:date:message-id:reply-to;        bh=e1O9zNulyByxiGZjnvwKoTRgZgNI+2K3yIYfQM4HajA=;        b=E2/O4KoyS0m9K8R7jGT1/+Cy5pEO+Up2TUyxVNGncOi5eSjN6FaKjgV4FOz7AaKqLE         1V6DHQQcEU//u+uSvrfNKQsk1CtaTe70pOouVY1iMSkYlJu5o5rtEjYyp4+J2KGFo0yb         pJ3oZ7nPYY2/n33c4oissW8TaxR3n5gzcDp8Y="
+            },
+            {
+              "name": "X-Google-DKIM-Signature",
+              "value": "v=1; a=rsa-sha256; c=relaxed/relaxed;        d=1e100.net; s=20251104; t=1776182675; x=1776787475;        h=to:subject:message-id:date:from:in-reply-to:references:mime-version         :x-gm-gg:x-gm-message-state:from:to:cc:subject:date:message-id         :reply-to;        bh=e1O9zNulyByxiGZjnvwKoTRgZgNI+2K3yIYfQM4HajA=;        b=rSST5tuBOeJgjiIqIeXdgz+CWrcfZV/AkLAMdHCUkyiYMV246moNxB2GUBCncrBbms         t0jrxCxv+c5/JHSm7RAeoik+HH2cApsSn8Q//MZ+yJrcir0i+vL6CA5yqIP3jx1oViP2         o06ueSObKV8NmlwZQZL70x1iHoY9AyJ5JSxMOgKwa1kD1B80YR3ijt1MvaKNROA3bwFI         O6tihmQfzr+wNOK95z9F/WqYLGex3Bmciud3Uy6GDO8rrqzgq+C6S3cmvHz/t8kPWI6F         tER2vz+AqPJhM5M6REzxNaqyAQCmQw8eANaVde8zROw2LS4alg9Eb3FoFZjz3EqZD0Cb         Sxjw=="
+            },
+            {
+              "name": "X-Gm-Message-State",
+              "value": "AOJu0YzYnZItI2WPypQ1rGbmrJQvORxyZJregPIcd8T426MVbLoXeCQI EHnrC/IrCT9sjOvpa73fng6DgkCLxH+EyZIsQWyCqywjVS/GjuUQq2aMaTkHuI3Zl5O7T9boAW6 W8686gophYIy0jkrJex9vPPP1zr3z1msruTgordJRBmXMetRap29c"
+            },
+            {
+              "name": "X-Gm-Gg",
+              "value": "AeBDiesav7NSVjNjVFyN0VJ1eNDl4ZQ7uv3Q5+ZAOBEX8FabY8CBOLrlcUnCrfs+RSi fgimpwKZdkxWMr1Rv2h/+sLGpDpM6oXwDULry3KJNsMx5tVseI0Rhiaw7eWlHI2R4bUJwWO4TrT MpC3qxN4uOR9l3QUYLy/BfctQLGt4nvnvFxnQNlLw0N2G1zAWocA0OvJt6Dwhi/wmb979U3Wgij c83jCYb1AISZOr3LGoGy44dKn8z5tOznXmfgEcIZvNulwu/keZEUM60XWP1itOcjtEOLzFku4+X X5/t5N1a57ddUGaurHPQ3+ugPi4dRwq5MhnOvLFRw4rR8wwj4m7pXt+QKkLbfoP3V4vI"
+            },
+            {
+              "name": "X-Received",
+              "value": "by 2002:a05:6402:24cc:b0:66e:abe5:ab22 with SMTP id 4fb4d7f45d1cf-670786a9911mr6330305a12.5.1776182674110; Tue, 14 Apr 2026 09:04:34 -0700 (PDT)"
+            },
+            {
+              "name": "MIME-Version",
+              "value": "1.0"
+            },
+            {
+              "name": "References",
+              "value": "\u003cCAPVDfZ1A9ik3yb4fEgP1yjATjxPp93StqvsZoAk9dqkAb-ESKw@mail.gmail.com\u003e \u003cCAPVDfZ2xD8cepcVp6zL=apZ8xjh=mS9SO1od8RSR-kAS4buyjw@mail.gmail.com\u003e"
+            },
+            {
+              "name": "In-Reply-To",
+              "value": "\u003cCAPVDfZ2xD8cepcVp6zL=apZ8xjh=mS9SO1od8RSR-kAS4buyjw@mail.gmail.com\u003e"
+            },
+            {
+              "name": "From",
+              "value": "Matt - HAULIX \u003cmatt@haulix.com\u003e"
+            },
+            {
+              "name": "Date",
+              "value": "Tue, 14 Apr 2026 11:04:21 -0500"
+            },
+            {
+              "name": "X-Gm-Features",
+              "value": "AQROBzAnfT--vNcFLlq2SB0Uv9ymJ7OnQb5-8F_rKvIggD73-wbJiIAalfgBR4k"
+            },
+            {
+              "name": "Message-ID",
+              "value": "\u003cCAG-MUPhXC+V3M4uPUkqjQwHrXWG59M7QwefUfYY8coUnu4M6YQ@mail.gmail.com\u003e"
+            },
+            {
+              "name": "Subject",
+              "value": "Re: Private Invite - M. Brown"
+            },
+            {
+              "name": "To",
+              "value": "Aaron Kaufman \u003ca@muso.ai\u003e"
+            },
+            {
+              "name": "Content-Type",
+              "value": "multipart/alternative; boundary=\"00000000000058dd1a064f6dc101\""
+            }
+          ],
+          "mimeType": "multipart/alternative",
+          "parts": [
+            {
+              "body": {
+                "data": "SGkgQWFyb24sDQoNClRoYW5rcyBmb3IgcmVhY2hpbmcgb3V0LiBXZSBhcmUgY3VycmVudGx5IG5hdmlnYXRpbmcgc29tZSBleGNpdGluZyB0ZWFtDQp1cGRhdGVzL3Byb2plY3RzLCBzbyB3ZSB3aWxsIGJlIGluIGEgYmV0dGVyIHBvc2l0aW9uIHRvIGNoYXQgaW4gYWJvdXQgZm91cg0KbW9udGhzLg0KDQpCZXN0IHJlZ2FyZHMsDQoNCk1hdHQgQnJvd24NCg0KT24gVHVlLCBBcHIgMTQsIDIwMjYgYXQgNzo1MOKAr0FNIEFhcm9uIEthdWZtYW4gPGFAbXVzby5haT4gd3JvdGU6DQoNCj4gSGV5IE1hdHQsIEkndmUgYmVlbiBsb29raW5nIGF0IHdoYXQgSGF1bGl4IGRvZXMgYW5kIGtlZXAgdGhpbmtpbmcgdGhlcmUncw0KPiBzb21ldGhpbmcgd2UgY291bGQgYnVpbGQgdG9nZXRoZXIuIEFtIEkgb2ZmIGJhc2U_IFdvdWxkIGxvdmUgdG8gaGVhciB5b3VyDQo-IHBlcnNwZWN0aXZlLg0KPg0KPiBBYXJvbg0KPg0KDQoNCi0tIA0KDQpNYXR0IEJyb3duIC0gSEFVTElYDQorMSg4ODgpIDQyOC01NDk1IEV4dC4gNzAwDQptYXR0QGhhdWxpeC5jb20NCg==",
+                "size": 535
+              },
+              "headers": [
+                {
+                  "name": "Content-Type",
+                  "value": "text/plain; charset=\"UTF-8\""
+                },
+                {
+                  "name": "Content-Transfer-Encoding",
+                  "value": "quoted-printable"
+                }
+              ],
+              "mimeType": "text/plain",
+              "partId": "0"
+            },
+            {
+              "body": {
+                "data": "PGRpdiBkaXI9Imx0ciI-PGRpdj5IaSBBYXJvbiw8L2Rpdj48ZGl2Pjxicj48L2Rpdj48ZGl2PlRoYW5rcyBmb3IgcmVhY2hpbmcgb3V0LiBXZSBhcmUgY3VycmVudGx5IG5hdmlnYXRpbmcgc29tZSBleGNpdGluZyB0ZWFtIHVwZGF0ZXMvcHJvamVjdHMsIHNvIHdlIHdpbGwgYmUgaW4gYSBiZXR0ZXIgcG9zaXRpb24gdG8gY2hhdCBpbiBhYm91dCBmb3VyIG1vbnRocy48L2Rpdj48ZGl2Pjxicj48L2Rpdj48ZGl2PkJlc3QgcmVnYXJkcyw8L2Rpdj48ZGl2Pjxicj48L2Rpdj48ZGl2Pk1hdHQgQnJvd248L2Rpdj48L2Rpdj48YnI-PGRpdiBjbGFzcz0iZ21haWxfcXVvdGUgZ21haWxfcXVvdGVfY29udGFpbmVyIj48ZGl2IGRpcj0ibHRyIiBjbGFzcz0iZ21haWxfYXR0ciI-T24gVHVlLCBBcHIgMTQsIDIwMjYgYXQgNzo1MOKAr0FNIEFhcm9uIEthdWZtYW4gJmx0OzxhIGhyZWY9Im1haWx0bzphQG11c28uYWkiPmFAbXVzby5haTwvYT4mZ3Q7IHdyb3RlOjxicj48L2Rpdj48YmxvY2txdW90ZSBjbGFzcz0iZ21haWxfcXVvdGUiIHN0eWxlPSJtYXJnaW46MHB4IDBweCAwcHggMC44ZXg7Ym9yZGVyLWxlZnQ6MXB4IHNvbGlkIHJnYigyMDQsMjA0LDIwNCk7cGFkZGluZy1sZWZ0OjFleCI-PGRpdiBkaXI9Imx0ciI-PHA-SGV5IE1hdHQsIEkmIzM5O3ZlIGJlZW4gbG9va2luZyBhdCB3aGF0IEhhdWxpeCBkb2VzIGFuZCBrZWVwIHRoaW5raW5nIHRoZXJlJiMzOTtzIHNvbWV0aGluZyB3ZSBjb3VsZCBidWlsZCB0b2dldGhlci4gQW0gSSBvZmYgYmFzZT8gV291bGQgbG92ZSB0byBoZWFyIHlvdXIgcGVyc3BlY3RpdmUuPC9wPjxwPkFhcm9uPC9wPg0KPC9kaXY-DQo8L2Jsb2NrcXVvdGU-PC9kaXY-PGRpdj48YnIgY2xlYXI9ImFsbCI-PC9kaXY-PGJyPjxzcGFuIGNsYXNzPSJnbWFpbF9zaWduYXR1cmVfcHJlZml4Ij4tLSA8L3NwYW4-PGJyPjxkaXYgZGlyPSJsdHIiIGNsYXNzPSJnbWFpbF9zaWduYXR1cmUiPjxkaXYgZGlyPSJsdHIiPjxkaXY-PGRpdiBkaXI9Imx0ciI-PGRpdj48ZGl2Pjxicj48L2Rpdj5NYXR0IEJyb3duIC0gSEFVTElYPGJyPjwvZGl2PjxkaXY-KzEoODg4KSA0MjgtNTQ5NSBFeHQuIDcwMDxicj48L2Rpdj48YSBocmVmPSJtYWlsdG86bWF0dEBoYXVsaXguY29tIiB0YXJnZXQ9Il9ibGFuayI-bWF0dEBoYXVsaXguY29tPC9hPjxicj48L2Rpdj48L2Rpdj48L2Rpdj48L2Rpdj4NCg==",
+                "size": 1189
+              },
+              "headers": [
+                {
+                  "name": "Content-Type",
+                  "value": "text/html; charset=\"UTF-8\""
+                },
+                {
+                  "name": "Content-Transfer-Encoding",
+                  "value": "quoted-printable"
+                }
+              ],
+              "mimeType": "text/html",
+              "partId": "1"
+            }
+          ]
+        },
+        "sizeEstimate": 8918,
+        "snippet": "Hi Aaron, Thanks for reaching out. We are currently navigating some exciting team updates/projects, so we will be in a better position to chat in about four months. Best regards, Matt Brown On Tue, Apr",
+        "threadId": "19d779406d27bd56"
+      }
+    ]
+  }
+}
