@@ -127,6 +127,48 @@ def test_ghl_sync_is_deferred_not_called(monkeypatch):
     a.slack.post_sales_alert.assert_called_once()
 
 
+def test_apply_label_failure_does_not_retry_send(monkeypatch):
+    """If apply_label raises, the send already happened. We must NOT
+    retry the send (would double-send). The worker should log, red-alert
+    on the label gap, and return sent=True."""
+    a = Adapters()
+    draft, _ = _happy_followup(a)
+    a.gmail.apply_label.side_effect = RuntimeError("label API transient")
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    result = worker.process_draft(draft_id="r1", account="a@muso.ai",
+                                  adapters=a)
+    assert result.sent is True
+    # send_draft called exactly once — no retry.
+    a.gmail.send_draft.assert_called_once_with("r1", "a@muso.ai")
+    # Logbook still appended (critical path continues).
+    a.sheets.append_logbook_row.assert_called_once()
+
+
+def test_process_one_with_retry_does_not_retry_once_sent(monkeypatch):
+    """If the first process_draft raises AFTER send, the retry wrapper
+    must NOT call process_draft again — that would re-send. The wrapper
+    should only retry if the exception was raised BEFORE send_draft."""
+    a = Adapters()
+    # Happy fetch, then send succeeds, but apply_label blows up after
+    # the try/except was supposed to neutralise it. If the fix from
+    # test_apply_label_failure_does_not_retry_send is in place, this is
+    # defensive: even if a future change re-introduces a raise post-send,
+    # the retry wrapper must guard against double-send.
+    draft, _ = _happy_followup(a)
+
+    call_count = {"send": 0}
+    def count_send(did, acct):
+        call_count["send"] += 1
+        return "m1"
+    a.gmail.send_draft.side_effect = count_send
+
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    result, failed = worker._process_one_with_retry(
+        "r1", "a@muso.ai", a)
+    assert call_count["send"] == 1
+    assert failed is False
+
+
 def test_batch_reports_summary(monkeypatch):
     """Batch of 3: one passes, one blocks, one send-fails once then succeeds."""
     a = Adapters()

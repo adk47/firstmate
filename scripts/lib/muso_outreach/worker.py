@@ -170,9 +170,33 @@ def process_draft(draft_id: str, account: str, adapters) -> ProcessResult:
                              gate_result.reason_code,
                              gate_result.reason_human)
 
-    # Send.
+    # Idempotency check. If this draft has already been sent (Gmail
+    # tags the original draft ID as `SENT` in rare paths, and more
+    # importantly the batch may re-run on a replay), skip.
+    if "SENT" in draft.labels:
+        return ProcessResult(
+            draft_id=draft_id, sent=True,
+            reason_code="ALREADY_SENT",
+            reason_human="Draft already carries SENT label — skipping idempotently.",
+            sent_message_id=None,
+        )
+
+    # Send. From this point the email is out the door; any subsequent
+    # failure is a LOGGING failure, not a send failure. We must NEVER
+    # raise out of this function after send_draft succeeds, or the
+    # retry envelope will re-send.
     sent_id = adapters.gmail.send_draft(draft_id, account)
-    adapters.gmail.apply_label(sent_id, OUTREACH_LABEL, account)
+
+    # Label re-apply is best-effort — the label on the sent message is
+    # cosmetic, the logbook is the authoritative record. Failures here
+    # get noted but do not fail the draft.
+    try:
+        adapters.gmail.apply_label(sent_id, OUTREACH_LABEL, account)
+    except Exception as e:  # noqa: BLE001
+        adapters.slack.post_sales_alert(
+            f":warning: Draft `{draft_id}` sent (message `{sent_id}`) "
+            f"but label re-apply failed: {e!r}. Logbook append continues."
+        )
 
     # Logbook append — critical. Failure here is a red alert.
     try:
@@ -204,12 +228,15 @@ def process_draft(draft_id: str, account: str, adapters) -> ProcessResult:
 def _process_one_with_retry(draft_id: str, account: str, adapters) -> tuple[ProcessResult, bool]:
     """Return (result, send_failed_after_retry).
 
-    Retries once on any exception from process_draft; the second
-    attempt uses a short backoff to avoid hammering a flaky API.
+    SAFETY: process_draft is designed to never raise after send_draft
+    has succeeded — post-send failures are caught internally and
+    surfaced via reason_code. That means any raise we see here is a
+    pre-send problem and retrying is safe (no double-send risk).
     """
     try:
         return process_draft(draft_id, account, adapters), False
     except Exception:
+        # Single retry for transient pre-send failures only.
         _time.sleep(SEND_RETRY_BACKOFF_SEC)
         try:
             return process_draft(draft_id, account, adapters), False
