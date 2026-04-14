@@ -105,3 +105,48 @@ def gate_a_recipient_match(
             ),
         )
     return GateResult(passed=True)
+
+
+# ---------------------------------------------------------------------------
+# Gate B — no contact reply
+# ---------------------------------------------------------------------------
+
+CONTACT_REPLIED = "CONTACT_REPLIED"
+
+
+def _is_muso(addr: str, muso_domain: str = "@muso.ai") -> bool:
+    return _norm(addr).endswith(muso_domain)
+
+
+def gate_b_no_contact_reply(
+    meta: Metadata,
+    thread: Optional[Thread],
+    inbound_messages: tuple,  # for kind=new: prior messages from target contact
+) -> GateResult:
+    if meta.kind is Kind.FOLLOWUP:
+        if thread is None:
+            return GateResult(passed=True)
+        for msg in thread.messages:
+            if not _is_muso(msg.from_addr):
+                return GateResult(
+                    passed=False,
+                    reason_code=CONTACT_REPLIED,
+                    reason_human=(
+                        f"Contact replied in thread {meta.original_thread_id} "
+                        f"at epoch {msg.date_epoch}. Move GHL to Replied manually."
+                    ),
+                )
+        return GateResult(passed=True)
+
+    # kind=new
+    for msg in inbound_messages:
+        if not _is_muso(msg.from_addr):
+            return GateResult(
+                passed=False,
+                reason_code=CONTACT_REPLIED,
+                reason_human=(
+                    f"Prior inbound message from target "
+                    f"{msg.from_addr} at epoch {msg.date_epoch} — do not cold-email again."
+                ),
+            )
+    return GateResult(passed=True)

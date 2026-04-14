@@ -109,3 +109,50 @@ def test_gate_a_override_reason_bypasses_mismatch():
                          override_reason="Contact asked us to CC their assistant")
     result = gate_a_recipient_match(draft, meta, thread=thread, contact_row=None)
     assert result.passed
+
+
+# -------- Gate B: no contact reply --------
+
+from scripts.lib.muso_outreach.gates import (
+    CONTACT_REPLIED, gate_b_no_contact_reply,
+)
+
+
+def test_gate_b_followup_no_inbound_reply_passes():
+    thread = make_thread(messages=(
+        make_message(from_addr="a@muso.ai",
+                     to_addrs=("ow@larsenstrings.com",), date_epoch=100),
+    ))
+    meta = make_metadata(kind=Kind.FOLLOWUP, original_thread_id="t1")
+    result = gate_b_no_contact_reply(meta, thread=thread, inbound_messages=())
+    assert result.passed
+
+
+def test_gate_b_followup_contact_replied_blocks():
+    thread = make_thread(messages=(
+        make_message(from_addr="a@muso.ai",
+                     to_addrs=("ow@larsenstrings.com",), date_epoch=100),
+        make_message(from_addr="ow@larsenstrings.com",
+                     to_addrs=("a@muso.ai",), date_epoch=200),
+    ))
+    meta = make_metadata(kind=Kind.FOLLOWUP, original_thread_id="t1")
+    result = gate_b_no_contact_reply(meta, thread=thread, inbound_messages=())
+    assert not result.passed
+    assert result.reason_code == CONTACT_REPLIED
+
+
+def test_gate_b_new_no_inbound_from_contact_passes():
+    meta = make_metadata(kind=Kind.NEW, original_thread_id=None)
+    result = gate_b_no_contact_reply(meta, thread=None, inbound_messages=())
+    assert result.passed
+
+
+def test_gate_b_new_contact_already_emailed_blocks():
+    # For kind=new, the adapter fetches any recent messages from the
+    # target contact across all muso accounts and passes them in.
+    meta = make_metadata(kind=Kind.NEW, original_thread_id=None)
+    prior = (make_message(from_addr="prospect@acme.com",
+                          to_addrs=("a@muso.ai",), date_epoch=100),)
+    result = gate_b_no_contact_reply(meta, thread=None, inbound_messages=prior)
+    assert not result.passed
+    assert result.reason_code == CONTACT_REPLIED
