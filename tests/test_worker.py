@@ -200,6 +200,35 @@ def test_batch_reports_summary(monkeypatch):
     )
 
 
+def test_slack_failure_after_send_does_not_double_send(monkeypatch):
+    """If post_sales_alert raises AFTER send_draft succeeds, the retry
+    envelope must NOT call send_draft a second time."""
+    a = Adapters()
+    _happy_followup(a)
+    a.slack.post_sales_alert.side_effect = RuntimeError("Slack 503")
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    result, failed = worker._process_one_with_retry("r1", "a@muso.ai", a)
+    # Exactly one send, even though the final info-note raised.
+    assert a.gmail.send_draft.call_count == 1
+    assert result.sent is True
+    assert failed is False
+
+
+def test_slack_failure_during_logbook_red_alert_does_not_double_send(monkeypatch):
+    """Worst case: logbook append fails AND the devops red-alert post
+    also fails. send_draft must still be called exactly once."""
+    a = Adapters()
+    _happy_followup(a)
+    a.sheets.append_logbook_row.side_effect = RuntimeError("Sheets down")
+    a.slack.post_devops_alert.side_effect = RuntimeError("Slack down too")
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    result, failed = worker._process_one_with_retry("r1", "a@muso.ai", a)
+    assert a.gmail.send_draft.call_count == 1
+    # Logbook failed -- sent=True, reason captures both failures' existence.
+    assert result.sent is True
+    assert result.reason_code == "LOGBOOK_APPEND_FAILED"
+
+
 def test_batch_halts_after_two_consecutive_send_failures(monkeypatch):
     """If two drafts in a row both fail retry, halt the batch."""
     a = Adapters()
