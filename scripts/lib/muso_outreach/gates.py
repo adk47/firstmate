@@ -150,3 +150,47 @@ def gate_b_no_contact_reply(
                 ),
             )
     return GateResult(passed=True)
+
+
+# ---------------------------------------------------------------------------
+# Gate C — no human-teammate reply
+# ---------------------------------------------------------------------------
+
+HUMAN_TEAMMATE_REPLIED = "HUMAN_TEAMMATE_REPLIED"
+
+
+def gate_c_no_human_reply(
+    meta: Metadata,
+    thread: Optional[Thread],
+    bot_senders: tuple[str, ...],
+) -> GateResult:
+    """Block if any muso.ai address that is NOT the bot sender has a
+    message in the thread after the bot's last send. Only applies to
+    followups."""
+    if meta.kind is Kind.NEW or thread is None:
+        return GateResult(passed=True)
+
+    bot_set = {_norm(s) for s in bot_senders}
+    last_bot_epoch = -1
+    for msg in thread.messages:
+        if _norm(msg.from_addr) in bot_set:
+            last_bot_epoch = max(last_bot_epoch, msg.date_epoch)
+
+    if last_bot_epoch < 0:
+        # No bot messages yet — nothing to follow up on. Gate C abstains.
+        return GateResult(passed=True)
+
+    for msg in thread.messages:
+        if msg.date_epoch <= last_bot_epoch:
+            continue
+        if _is_muso(msg.from_addr) and _norm(msg.from_addr) not in bot_set:
+            return GateResult(
+                passed=False,
+                reason_code=HUMAN_TEAMMATE_REPLIED,
+                reason_human=(
+                    f"Human teammate {msg.from_addr} replied in thread "
+                    f"{meta.original_thread_id} after the bot's last send. "
+                    "Bot stands down."
+                ),
+            )
+    return GateResult(passed=True)

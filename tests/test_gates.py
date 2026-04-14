@@ -156,3 +156,55 @@ def test_gate_b_new_contact_already_emailed_blocks():
     result = gate_b_no_contact_reply(meta, thread=None, inbound_messages=prior)
     assert not result.passed
     assert result.reason_code == CONTACT_REPLIED
+
+
+# -------- Gate C: no human-teammate reply --------
+
+from scripts.lib.muso_outreach.gates import (
+    HUMAN_TEAMMATE_REPLIED, gate_c_no_human_reply,
+)
+
+
+def test_gate_c_only_bot_sender_in_thread_passes():
+    thread = make_thread(messages=(
+        make_message(from_addr="a@muso.ai", date_epoch=100),
+        make_message(from_addr="ow@larsenstrings.com",
+                     to_addrs=("a@muso.ai",), date_epoch=200),
+        make_message(from_addr="a@muso.ai", date_epoch=300),
+    ))
+    meta = make_metadata(kind=Kind.FOLLOWUP, sender="a@muso.ai")
+    # Gate C looks at muso.ai messages AFTER the last bot-sender message.
+    # Here the last bot-sender msg is at 300 and nothing follows.
+    result = gate_c_no_human_reply(meta, thread=thread, bot_senders=("a@muso.ai",))
+    assert result.passed
+
+
+def test_gate_c_human_teammate_replied_blocks():
+    """Aaron (a human on the team) replied from aaron.k@muso.ai after
+    the bot's last send. Bot must stand down."""
+    thread = make_thread(messages=(
+        make_message(from_addr="a@muso.ai", date_epoch=100),  # bot
+        make_message(from_addr="aaron.k@muso.ai", date_epoch=200),  # human
+    ))
+    meta = make_metadata(kind=Kind.FOLLOWUP, sender="a@muso.ai")
+    result = gate_c_no_human_reply(meta, thread=thread, bot_senders=("a@muso.ai",))
+    assert not result.passed
+    assert result.reason_code == HUMAN_TEAMMATE_REPLIED
+    assert "aaron.k@muso.ai" in result.reason_human
+
+
+def test_gate_c_bot_resend_not_flagged_as_human():
+    """Multiple bot messages in sequence do not trigger the gate."""
+    thread = make_thread(messages=(
+        make_message(from_addr="a@muso.ai", date_epoch=100),
+        make_message(from_addr="a@muso.ai", date_epoch=200),
+    ))
+    meta = make_metadata(kind=Kind.FOLLOWUP, sender="a@muso.ai")
+    result = gate_c_no_human_reply(meta, thread=thread, bot_senders=("a@muso.ai",))
+    assert result.passed
+
+
+def test_gate_c_new_kind_skipped():
+    meta = make_metadata(kind=Kind.NEW, original_thread_id=None)
+    result = gate_c_no_human_reply(meta, thread=None, bot_senders=("a@muso.ai",))
+    assert result.passed
