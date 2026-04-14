@@ -89,3 +89,7 @@ plugins/*/package-lock.json
 
 # CS analysis data (raw API dumps -- potentially PII, never commit)
 scripts/cs-analysis/data/
+
+# Python bytecode
+__pycache__/
+*.pyc

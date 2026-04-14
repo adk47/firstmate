@@ -89,6 +89,28 @@ may exist on any of them).
 - Send format: always `--body-html` with `<p>` tags. Never plain text.
 - Label flag: `--label "B2B - Ads"` on drafts create. Must be reapplied after `gog gmail drafts send` (labels do not auto inherit on draft send).
 
+### Outreach Draft Metadata (REQUIRED on every outreach draft)
+
+Every draft created by CMO for outreach MUST carry both (1) a set of
+`muso-meta/*` Gmail labels and (2) a JSON HTML comment at the bottom
+of the body. Drafts lacking the labels are **refused** by the sender
+worker (see `scripts/muso-outreach-sender-worker.py`).
+
+**Labels (primary):**
+- `muso-meta/kind-followup` or `muso-meta/kind-new`
+- `muso-meta/row-<sheet_row_id>`
+- `muso-meta/opp-<ghl_opp_id>`
+- `muso-meta/template-<template_key>`
+- `muso-meta/sender-<a_at_muso.ai>` (replace `@` with `_at_`)
+- `muso-meta/thread-<thread_id>` (follow-ups only)
+
+**JSON comment (fallback):**
+
+    <!-- muso-outreach:v1 {"kind":"followup","sheet_row_id":1234,"opp_id":"abc","template":"FU-01","sender":"a@muso.ai","original_thread_id":"1812f..."} -->
+
+The worker prefers labels (they survive body edits). If the two
+disagree, the worker blocks the draft with code `METADATA_LABEL_DISAGREE`.
+
 ---
 
 ## Slack Channels
