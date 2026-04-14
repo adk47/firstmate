@@ -186,16 +186,17 @@ def process_draft(draft_id: str, account: str, adapters) -> ProcessResult:
         return ProcessResult(draft_id, True, "LOGBOOK_APPEND_FAILED",
                              f"Logbook failed: {e!r}", sent_id)
 
-    # GHL sync — best effort. Do not retry (risks double-moving the opp).
-    try:
-        adapters.ghl.advance_opportunity_stage(meta.opp_id, stage_id="")
-    except Exception as e:  # noqa: BLE001
-        adapters.slack.post_sales_alert(
-            f":warning: Draft `{draft_id}` sent, logged, but GHL sync failed "
-            f"for opp `{meta.opp_id}`: {e!r}. Advance manually."
-        )
-        return ProcessResult(draft_id, True, "GHL_SYNC_FAILED",
-                             f"GHL failed: {e!r}", sent_id)
+    # GHL sync is deferred — needs pipeline-stage ID lookup by (pipeline,
+    # kind, prior_count). See docs/superpowers/specs/2026-04-14-cmo-outreach-sender-worker-design.md
+    # §2 step 7 and workspaces/cmo/skills/muso-outreach-engine/references/pipeline-stages.md.
+    # For now: skip the sync entirely rather than 400 GHL on every send.
+    # Fede's runbook step "Advance the opp manually" remains the interim process.
+    # TODO(outreach-sender): wire in stage-id lookup and re-enable.
+    adapters.slack.post_sales_alert(
+        f":information_source: Draft `{draft_id}` sent + logged. "
+        f"GHL sync deferred — advance opp `{meta.opp_id}` manually "
+        "(see runbook)."
+    )
 
     return ProcessResult(draft_id, True, None, None, sent_id)
 

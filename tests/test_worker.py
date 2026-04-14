@@ -77,7 +77,8 @@ def test_happy_path_sends_relabels_logs_ghl(monkeypatch):
     a.gmail.apply_label.assert_called_once_with(
         "sent-msg-id", "B2B - Ads", "a@muso.ai")
     a.sheets.append_logbook_row.assert_called_once()
-    a.ghl.advance_opportunity_stage.assert_called_once()
+    # GHL sync is deferred — advance_opportunity_stage must NOT be called.
+    a.ghl.advance_opportunity_stage.assert_not_called()
 
 
 def test_hallucinated_recipient_is_blocked_not_sent(monkeypatch):
@@ -110,17 +111,19 @@ def test_logbook_failure_after_send_raises_devops_red_alert(monkeypatch):
     a.slack.post_devops_alert.assert_called_once()
 
 
-def test_ghl_failure_after_send_logs_warning_not_red_alert(monkeypatch):
+def test_ghl_sync_is_deferred_not_called(monkeypatch):
+    """Until we wire in the GHL stage-id lookup, the worker deliberately
+    does not call advance_opportunity_stage. A follow-up runbook note
+    is posted to #sales-alerts so humans advance the opp manually."""
     a = Adapters()
     _happy_followup(a)
-    a.ghl.advance_opportunity_stage.side_effect = RuntimeError("GHL 500")
     monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
     result = worker.process_draft(draft_id="r1", account="a@muso.ai",
                                   adapters=a)
     assert result.sent
-    # Logbook is OK, just GHL is flaky — not a red alert.
-    assert result.reason_code == "GHL_SYNC_FAILED"
-    a.slack.post_devops_alert.assert_not_called()
+    assert result.reason_code is None
+    a.ghl.advance_opportunity_stage.assert_not_called()
+    # The "manual GHL" info message is expected.
     a.slack.post_sales_alert.assert_called_once()
 
 
