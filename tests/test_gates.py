@@ -104,11 +104,61 @@ def test_gate_a_override_reason_bypasses_mismatch():
         make_message(from_addr="a@muso.ai",
                      to_addrs=("ow@larsenstrings.com",), date_epoch=100),
     ))
-    draft = make_draft(to=("o.wichmann@larsenstrings.com",))
+    draft = make_draft(
+        to=("o.wichmann@larsenstrings.com",),
+        labels=("B2B - Ads", "B2B - Ads/override-approved"),
+    )
     meta = make_metadata(kind=Kind.FOLLOWUP, original_thread_id="t1",
                          override_reason="Contact asked us to CC their assistant")
     result = gate_a_recipient_match(draft, meta, thread=thread, contact_row=None)
     assert result.passed
+
+
+def test_gate_a_override_reason_without_label_still_blocks():
+    """override_reason alone is NOT enough — requires human-applied label."""
+    thread = make_thread(messages=(
+        make_message(from_addr="a@muso.ai",
+                     to_addrs=("ow@larsenstrings.com",), date_epoch=100),
+    ))
+    draft = make_draft(
+        to=("o.wichmann@larsenstrings.com",),
+        labels=("B2B - Ads",),
+    )
+    meta = make_metadata(kind=Kind.FOLLOWUP, original_thread_id="t1",
+                         override_reason="Contact asked us to CC their assistant")
+    result = gate_a_recipient_match(draft, meta, thread=thread, contact_row=None)
+    assert not result.passed
+    assert result.reason_code == RECIPIENT_MISMATCH
+
+
+def test_gate_a_override_label_plus_reason_bypasses_mismatch():
+    thread = make_thread(messages=(
+        make_message(from_addr="a@muso.ai",
+                     to_addrs=("ow@larsenstrings.com",), date_epoch=100),
+    ))
+    draft = make_draft(
+        to=("o.wichmann@larsenstrings.com",),
+        labels=("B2B - Ads", "B2B - Ads/override-approved"),
+    )
+    meta = make_metadata(kind=Kind.FOLLOWUP, original_thread_id="t1",
+                         override_reason="Contact asked us to CC their assistant")
+    result = gate_a_recipient_match(draft, meta, thread=thread, contact_row=None)
+    assert result.passed
+
+
+def test_gate_a_override_label_without_reason_still_blocks():
+    thread = make_thread(messages=(
+        make_message(from_addr="a@muso.ai",
+                     to_addrs=("ow@larsenstrings.com",), date_epoch=100),
+    ))
+    draft = make_draft(
+        to=("o.wichmann@larsenstrings.com",),
+        labels=("B2B - Ads", "B2B - Ads/override-approved"),
+    )
+    meta = make_metadata(kind=Kind.FOLLOWUP, original_thread_id="t1",
+                         override_reason=None)
+    result = gate_a_recipient_match(draft, meta, thread=thread, contact_row=None)
+    assert not result.passed
 
 
 # -------- Gate B: no contact reply --------

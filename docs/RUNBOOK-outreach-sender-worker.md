@@ -74,6 +74,9 @@ The worker is idempotent per-draft; already-sent drafts are skipped.
 Only Gate A (recipient match) is overridable. For every other block
 code, the worker's decision is final.
 
+Both of these steps are required; neither alone is enough. The JSON
+comment is agent-editable so the label is the human-gated half.
+
 1. Edit the draft in Gmail: fix `To:` manually.
 2. Apply label `B2B - Ads/override-approved`.
 3. In the hidden JSON comment, add `"override_reason": "<text>"`.

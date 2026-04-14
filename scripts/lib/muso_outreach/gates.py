@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
+from .config import OVERRIDE_APPROVED_LABEL
 from .types import ContactRow, Draft, GateResult, Kind, Metadata, Thread
 
 RECIPIENT_MISMATCH = "RECIPIENT_MISMATCH"
@@ -29,8 +30,12 @@ def gate_a_recipient_match(
     thread: Optional[Thread],
     contact_row: Optional[ContactRow],
 ) -> GateResult:
-    # Override escape hatch (design §5).
-    if meta.override_reason:
+    # Override escape hatch (design §5). Requires BOTH:
+    #   - override_reason in metadata (agent-written, reviewable)
+    #   - OVERRIDE_APPROVED_LABEL on the draft (human-applied after review)
+    # The label alone or the reason alone is not enough — the JSON
+    # comment is agent-editable, so the label is the human-gated half.
+    if meta.override_reason and OVERRIDE_APPROVED_LABEL in draft.labels:
         return GateResult(passed=True)
 
     if len(draft.to_addrs) != 1:
