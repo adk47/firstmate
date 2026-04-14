@@ -198,16 +198,10 @@ def process_draft(draft_id: str, account: str, adapters) -> ProcessResult:
                              gate_result.reason_code,
                              gate_result.reason_human)
 
-    # Idempotency check. If this draft has already been sent (Gmail
-    # tags the original draft ID as `SENT` in rare paths, and more
-    # importantly the batch may re-run on a replay), skip.
-    if "SENT" in draft.labels:
-        return ProcessResult(
-            draft_id=draft_id, sent=True,
-            reason_code="ALREADY_SENT",
-            reason_human="Draft already carries SENT label — skipping idempotently.",
-            sent_message_id=None,
-        )
+    # Idempotency note: Gmail removes the draft object at send time, so
+    # a replay of this worker against the same draft_id will already
+    # have failed at fetch_draft() above with a 404. list_drafts_with_label
+    # also stops returning sent drafts. No explicit guard needed here.
 
     # Send. From this point the email is out the door; any subsequent
     # failure is a LOGGING failure, not a send failure. We must NEVER
