@@ -5,6 +5,7 @@ mock Adapters bag without the gog CLI being installed.
 """
 from __future__ import annotations
 
+import sys as _sys
 import time as _time
 from dataclasses import dataclass
 from typing import Optional, Protocol
@@ -18,6 +19,24 @@ from .config import (
 )
 from .metadata import parse_from_draft
 from .types import Kind, Metadata
+
+
+def _safe_slack(fn, *args, fallback_tag: str = "") -> None:
+    """Post to Slack; if Slack fails, degrade to stderr. Never raises.
+
+    Used ONLY in the post-send phase where a raise would corrupt the
+    retry envelope's 'pre-send failures only' invariant. Also used
+    pre-send so a Slack outage doesn't blow a retry budget.
+    """
+    try:
+        fn(*args)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[muso-outreach-sender] Slack alert degraded ({fallback_tag}): "
+            f"{e!r}. Args: {args!r}",
+            file=_sys.stderr,
+            flush=True,
+        )
 
 
 def NOW_EPOCH() -> int:
@@ -150,22 +169,30 @@ def process_draft(draft_id: str, account: str, adapters) -> ProcessResult:
             if e.args[0] == "METADATA_MISSING"
             else "Metadata label/body mismatch — refusing to send. Re-create the draft."
         )
-        adapters.slack.post_sales_alert(
-            f":no_entry: Draft `{draft_id}` blocked: {reason}"
+        _safe_slack(
+            adapters.slack.post_sales_alert,
+            f":no_entry: Draft `{draft_id}` blocked: {reason}",
+            fallback_tag="metadata-missing",
         )
         return ProcessResult(draft_id, False, e.args[0], reason)
 
     for w in warnings:
-        adapters.slack.post_sales_alert(f":warning: Draft `{draft_id}`: {w}")
+        _safe_slack(
+            adapters.slack.post_sales_alert,
+            f":warning: Draft `{draft_id}`: {w}",
+            fallback_tag="metadata-warning",
+        )
 
     thread = _fetch_thread(meta, adapters)
     contact_row = _fetch_contact_row(meta, adapters)
 
     gate_result = _run_all_gates(draft, meta, thread, contact_row, adapters)
     if not gate_result.passed:
-        adapters.slack.post_sales_alert(
+        _safe_slack(
+            adapters.slack.post_sales_alert,
             f":no_entry: Draft `{draft_id}` ({meta.kind.value}) blocked: "
-            f"{gate_result.reason_code} — {gate_result.reason_human}"
+            f"{gate_result.reason_code} — {gate_result.reason_human}",
+            fallback_tag="gate-blocked",
         )
         return ProcessResult(draft_id, False,
                              gate_result.reason_code,
@@ -194,19 +221,23 @@ def process_draft(draft_id: str, account: str, adapters) -> ProcessResult:
     try:
         adapters.gmail.apply_label(sent_id, OUTREACH_LABEL, account)
     except Exception as e:  # noqa: BLE001
-        adapters.slack.post_sales_alert(
+        _safe_slack(
+            adapters.slack.post_sales_alert,
             f":warning: Draft `{draft_id}` sent (message `{sent_id}`) "
-            f"but label re-apply failed: {e!r}. Logbook append continues."
+            f"but label re-apply failed: {e!r}. Logbook append continues.",
+            fallback_tag="apply-label-failure",
         )
 
     # Logbook append — critical. Failure here is a red alert.
     try:
         adapters.sheets.append_logbook_row(_build_logbook_row(draft, meta, sent_id))
     except Exception as e:  # noqa: BLE001
-        adapters.slack.post_devops_alert(
+        _safe_slack(
+            adapters.slack.post_devops_alert,
             f":rotating_light: RED ALERT: draft `{draft_id}` sent "
             f"(message `{sent_id}`) but logbook append failed: {e!r}. "
-            "Manual reconciliation required."
+            "Manual reconciliation required.",
+            fallback_tag="logbook-red-alert",
         )
         return ProcessResult(draft_id, True, "LOGBOOK_APPEND_FAILED",
                              f"Logbook failed: {e!r}", sent_id)
@@ -217,10 +248,12 @@ def process_draft(draft_id: str, account: str, adapters) -> ProcessResult:
     # For now: skip the sync entirely rather than 400 GHL on every send.
     # Fede's runbook step "Advance the opp manually" remains the interim process.
     # TODO(outreach-sender): wire in stage-id lookup and re-enable.
-    adapters.slack.post_sales_alert(
+    _safe_slack(
+        adapters.slack.post_sales_alert,
         f":information_source: Draft `{draft_id}` sent + logged. "
         f"GHL sync deferred — advance opp `{meta.opp_id}` manually "
-        "(see runbook)."
+        "(see runbook).",
+        fallback_tag="ghl-deferred-info",
     )
 
     return ProcessResult(draft_id, True, None, None, sent_id)
@@ -269,14 +302,18 @@ def process_batch(draft_ids: list[str], account: str, adapters) -> BatchReport:
         if failed_to_send:
             send_failed += 1
             consecutive_send_failures += 1
-            adapters.slack.post_sales_alert(
-                f":warning: Draft `{draft_id}` send failed after retry — skipping."
+            _safe_slack(
+                adapters.slack.post_sales_alert,
+                f":warning: Draft `{draft_id}` send failed after retry — skipping.",
+                fallback_tag="send-failed-retry",
             )
             if consecutive_send_failures >= 2:
                 halted = True
-                adapters.slack.post_devops_alert(
+                _safe_slack(
+                    adapters.slack.post_devops_alert,
                     f":rotating_light: Batch halted — 2 consecutive send failures. "
-                    "Gmail likely in outage state."
+                    "Gmail likely in outage state.",
+                    fallback_tag="batch-halted",
                 )
                 break
             continue
@@ -286,9 +323,11 @@ def process_batch(draft_ids: list[str], account: str, adapters) -> BatchReport:
         else:
             blocked += 1
 
-    adapters.slack.post_sales_alert(
+    _safe_slack(
+        adapters.slack.post_sales_alert,
         f":white_check_mark: Batch done — sent: {sent}, blocked: {blocked}, "
-        f"halted: {'yes' if halted else 'no'}"
+        f"halted: {'yes' if halted else 'no'}",
+        fallback_tag="batch-summary",
     )
     return BatchReport(sent_count=sent, blocked_count=blocked,
                        send_failed_count=send_failed, batch_halted=halted)
