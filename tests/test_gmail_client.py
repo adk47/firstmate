@@ -188,15 +188,72 @@ def test_list_drafts_with_label_empty():
     assert ids == []
 
 
-def test_list_drafts_with_label_multiple():
-    js = {
+def test_list_drafts_with_label_filters_client_side():
+    """gog has no filter flag, so list_drafts_with_label must list all
+    drafts then fetch each one to check its labels."""
+    list_js = {
         "drafts": [{"id": "r1"}, {"id": "r2"}, {"id": "r3"}],
         "nextPageToken": "",
     }
+    # r1 has the target label; r2 and r3 don't.
+    def draft_with_label(label: str, include: bool) -> dict:
+        return {
+            "draft": {
+                "id": "stub",
+                "message": {
+                    "id": "m",
+                    "threadId": "t",
+                    "internalDate": "1776000000000",
+                    "labelIds": ["DRAFT"] + ([f"Label_target"] if include else []),
+                    "payload": {
+                        "mimeType": "text/plain",
+                        "body": {"data": "aGVsbG8"},
+                        "headers": [{"name": "From", "value": "a@muso.ai"},
+                                    {"name": "To", "value": "x@x.com"}],
+                    },
+                },
+            }
+        }
+
+    labels_list = {
+        "labels": [
+            {"id": "DRAFT", "name": "DRAFT", "type": "system"},
+            {"id": "Label_target", "name": "B2B - Ads/auto-fu-approved",
+             "type": "user"},
+        ],
+    }
+
     with patch.object(gmail_client, "run_gog") as rg:
-        rg.return_value = json.dumps(js)
-        ids = gmail_client.list_drafts_with_label("B2B - Ads", "a@muso.ai")
-    assert ids == ["r1", "r2", "r3"]
+        rg.side_effect = [
+            json.dumps(list_js),                              # drafts list
+            json.dumps(draft_with_label("target", True)),     # fetch r1
+            json.dumps(labels_list),                          # label map (1st lookup)
+            json.dumps(draft_with_label("target", False)),    # fetch r2
+            json.dumps(draft_with_label("target", False)),    # fetch r3
+        ]
+        ids = gmail_client.list_drafts_with_label(
+            "B2B - Ads/auto-fu-approved", "a@muso.ai",
+        )
+    # list_drafts_with_label returns the list-level IDs (r1/r2/r3), not
+    # the fetched draft's inner id. r1 is the one whose fetched labels
+    # include Label_target which resolves to the target name.
+    assert ids == ["r1"]
+
+
+def test_list_drafts_with_label_skips_fetch_failures():
+    """If a draft fetch raises (permissions, race), skip it and continue."""
+    list_js = {
+        "drafts": [{"id": "r1"}, {"id": "r2"}],
+        "nextPageToken": "",
+    }
+    with patch.object(gmail_client, "run_gog") as rg:
+        rg.side_effect = [
+            json.dumps(list_js),
+            RuntimeError("boom on r1"),
+            RuntimeError("boom on r2"),
+        ]
+        ids = gmail_client.list_drafts_with_label("x", "a@muso.ai")
+    assert ids == []
 
 
 # ---------- drafts send ----------

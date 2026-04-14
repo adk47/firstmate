@@ -181,10 +181,30 @@ def fetch_thread(thread_id: str, account: str) -> Thread:
 
 
 def list_drafts_with_label(label: str, account: str) -> list[str]:
-    out = run_gog("gmail", "drafts", "list",
-                  "--label", label, "--account", account, "--json")
+    """List drafts carrying `label`.
+
+    gog's `drafts list` doesn't support filter flags (verified against
+    gog v0.12.0 on 2026-04-14), and Gmail's search scope excludes drafts,
+    so we list all drafts and filter client-side by fetching each and
+    checking its labels. O(N+1) gog calls per batch — fine at current
+    batch sizes (≤50 drafts/week).
+    """
+    out = run_gog("gmail", "drafts", "list", "--all",
+                  "--account", account, "--json")
     js = json.loads(out)
-    return [d["id"] for d in js.get("drafts") or []]
+    matching: list[str] = []
+    for d in js.get("drafts") or []:
+        did = d.get("id")
+        if not did:
+            continue
+        try:
+            draft = fetch_draft(did, account)
+        except Exception:
+            # Skip drafts we can't fetch (permissions, race, etc).
+            continue
+        if label in draft.labels:
+            matching.append(did)
+    return matching
 
 
 def send_draft(draft_id: str, account: str) -> str:
