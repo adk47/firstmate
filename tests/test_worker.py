@@ -196,7 +196,7 @@ def test_batch_reports_summary(monkeypatch):
     assert report.blocked_count == 1
     assert report.batch_halted is False
     a.slack.post_sales_alert.assert_any_call(
-        ":white_check_mark: Batch done — sent: 2, blocked: 1, halted: no"
+        ":white_check_mark: Batch done - sent: 2, blocked: 1, halted: no"
     )
 
 

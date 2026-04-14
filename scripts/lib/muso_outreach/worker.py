@@ -168,7 +168,7 @@ def process_draft(draft_id: str, account: str, adapters) -> ProcessResult:
             "created outside the agent workflow or the body was edited "
             "in Gmail. Re-create the draft from the agent."
             if e.args[0] == "METADATA_MISSING"
-            else "Metadata label/body mismatch — refusing to send. Re-create the draft."
+            else "Metadata label/body mismatch - refusing to send. Re-create the draft."
         )
         _safe_slack(
             adapters.slack.post_sales_alert,
@@ -192,7 +192,7 @@ def process_draft(draft_id: str, account: str, adapters) -> ProcessResult:
         _safe_slack(
             adapters.slack.post_sales_alert,
             f":no_entry: Draft `{draft_id}` ({meta.kind.value}) blocked: "
-            f"{gate_result.reason_code} — {gate_result.reason_human}",
+            f"{gate_result.reason_code} - {gate_result.reason_human}",
             fallback_tag="gate-blocked",
         )
         return ProcessResult(draft_id, False,
@@ -246,7 +246,7 @@ def process_draft(draft_id: str, account: str, adapters) -> ProcessResult:
     _safe_slack(
         adapters.slack.post_sales_alert,
         f":information_source: Draft `{draft_id}` sent + logged. "
-        f"GHL sync deferred — advance opp `{meta.opp_id}` manually "
+        f"GHL sync deferred - advance opp `{meta.opp_id}` manually "
         "(see runbook).",
         fallback_tag="ghl-deferred-info",
     )
@@ -299,14 +299,14 @@ def process_batch(draft_ids: list[str], account: str, adapters) -> BatchReport:
             consecutive_send_failures += 1
             _safe_slack(
                 adapters.slack.post_sales_alert,
-                f":warning: Draft `{draft_id}` send failed after retry — skipping.",
+                f":warning: Draft `{draft_id}` send failed after retry - skipping.",
                 fallback_tag="send-failed-retry",
             )
             if consecutive_send_failures >= 2:
                 halted = True
                 _safe_slack(
                     adapters.slack.post_devops_alert,
-                    f":rotating_light: Batch halted — 2 consecutive send failures. "
+                    f":rotating_light: Batch halted - 2 consecutive send failures. "
                     "Gmail likely in outage state.",
                     fallback_tag="batch-halted",
                 )
@@ -320,7 +320,7 @@ def process_batch(draft_ids: list[str], account: str, adapters) -> BatchReport:
 
     _safe_slack(
         adapters.slack.post_sales_alert,
-        f":white_check_mark: Batch done — sent: {sent}, blocked: {blocked}, "
+        f":white_check_mark: Batch done - sent: {sent}, blocked: {blocked}, "
         f"halted: {'yes' if halted else 'no'}",
         fallback_tag="batch-summary",
     )

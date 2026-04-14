@@ -26,7 +26,7 @@ CMO agent creates drafts; this worker sends them.
 
 After every run the worker posts a batch summary to `#sales-alerts`:
 
-> ✅ Batch done — sent: 12, blocked: 3, halted: no
+> ✅ Batch done - sent: 12, blocked: 3, halted: no
 
 For each blocked draft, a separate `#sales-alerts` message names the
 draft ID and reason code.
@@ -54,7 +54,7 @@ draft ID and reason code.
 | `LOGBOOK_APPEND_FAILED` | Email sent but Sheets append raised | **Red alert in `#clio_devops`** — manual reconciliation required (see below) |
 
 > **Note on GHL sync:** every successful send currently posts an info note
-> in `#sales-alerts` ("GHL sync deferred — advance opp manually"). This
+> in `#sales-alerts` ("GHL sync deferred - advance opp manually"). This
 > is by design until the stage-ID lookup lands; until then, a human must
 > advance every sent opportunity in GHL manually. See the TODO in
 > `scripts/lib/muso_outreach/worker.py`.
