@@ -388,6 +388,7 @@ RSYNC_EXCLUDES=(
   # Repo hygiene
   --exclude='.git'
   --exclude='hydra docs/'
+  --exclude='tests/'
   --exclude='secrets/'
   # Drift baseline file (server-managed, not part of the repo)
   --exclude='.deployed-sha'
