@@ -21,7 +21,7 @@ Prose-only skill instructions proved insufficient. Any fix must be enforced in c
 - Make it **impossible** for an outreach send to happen without a ledger row.
 - Preserve Fede/Aaron's existing approval gate (drafts visible in Gmail before send).
 - Catch the same class of error in new outreach, not just follow-ups.
-- Stand the bot down when a human teammate has already replied on a thread (deferred to Phase 2 per rollout plan — Phase 1 still ships the other gates).
+- Stand the bot down when a human teammate has already replied on a thread.
 
 ## Non-Goals
 
@@ -204,8 +204,8 @@ Worker (muso-outreach-sender-worker.py)
 ### Rollout
 
 1. **Phase 0 — freeze** (immediate, already partly in effect per CMO's Slack message): CMO is not sending any new follow-ups until the worker ships.
-2. **Phase 1 — metadata + worker MVP**: land label + JSON draft metadata in writer/followup skills. Ship the worker. Ship the precondition gate for checks A, B, D, E, F, G. (C — human-reply detection — lands in Phase 2.)
-3. **Phase 2 — gate at gateway**: remove `gog gmail drafts send` from CMO's tool allow-list. Add check C.
+2. **Phase 1 — metadata + worker MVP**: land label + JSON draft metadata in writer/followup skills. Ship the worker. Ship **all** precondition gates (A, B, C, D, E, F, G). Check C (human-reply detection) is a Phase 1 safety gate, not a nice-to-have — a bot follow-up landing after a human teammate has already replied on the thread is a public-facing failure mode at the same severity as sending to a hallucinated address.
+3. **Phase 2 — gate at gateway**: remove `gog gmail drafts send` and `gog gmail messages send` from CMO's tool allow-list so the worker is the only send path, not just the preferred one.
 4. **Phase 3 — cron enable + scale prep**: turn on the scheduled Monday batch run. Add dashboards for block-reason trends. Evaluate whether Sheets-backed logbook is still sized correctly (see open questions); plan Postgres migration if sustained batches exceed ~150 sends.
 
 ### Observability
