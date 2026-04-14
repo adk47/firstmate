@@ -1,4 +1,11 @@
-"""Gog-CLI adapter for Google Sheets."""
+"""Gog-CLI adapter for Google Sheets.
+
+gog surface (v0.12.0, verified 2026-04-14):
+- `sheets get <spreadsheetId> <range>` — range is positional, not a flag.
+  Returns `{"range": ..., "values": [[...], ...]}`.
+- `sheets append <spreadsheetId> <range> --values-json '[[...]]'` — range
+  positional; `--values-json` not `--values`.
+"""
 from __future__ import annotations
 
 import json
@@ -16,7 +23,7 @@ def _run_gog(*args: str) -> str:
 def get_contact_by_row_id(row_id: int, account: str = "a@muso.ai") -> Optional[ContactRow]:
     """Read one row from contacts_intelligence by its Row ID column."""
     out = _run_gog("sheets", "get", CONTACTS_SHEET_ID,
-                   "--range", f"{CONTACTS_TAB}!A:Z",
+                   f"{CONTACTS_TAB}!A:Z",
                    "--account", account, "--json")
     js = json.loads(out)
     header = js.get("values", [[]])[0]
@@ -39,7 +46,7 @@ def count_prior_followups(sheet_row_id: int, account: str = "a@muso.ai") -> int:
     """Scan the logbook for Action='Follow-Up Sent' rows with this
     sheet_row_id embedded in the notes or contact column."""
     out = _run_gog("sheets", "get", LOGBOOK_SHEET_ID,
-                   "--range", f"{LOGBOOK_TAB}!A:Z",
+                   f"{LOGBOOK_TAB}!A:Z",
                    "--account", account, "--json")
     js = json.loads(out)
     rows = js.get("values", [])
@@ -64,6 +71,6 @@ def count_prior_followups(sheet_row_id: int, account: str = "a@muso.ai") -> int:
 def append_logbook_row(values: list, account: str = "a@muso.ai") -> None:
     payload = json.dumps([values])
     _run_gog("sheets", "append", LOGBOOK_SHEET_ID,
-             "--range", LOGBOOK_TAB,
-             "--values", payload,
+             f"{LOGBOOK_TAB}!A:Z",
+             "--values-json", payload,
              "--account", account)

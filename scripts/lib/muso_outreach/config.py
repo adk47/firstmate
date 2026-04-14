@@ -10,7 +10,10 @@ from __future__ import annotations
 CONTACTS_SHEET_ID = "1OWzfmxtgX-xq-aGxgmsjAdzQoyKbb94hnU_j-jm5q6I"
 CONTACTS_TAB = "contacts_intelligence"
 LOGBOOK_SHEET_ID = "1o1aUpAhQ8tNuZtzWqUm9bOUFvyPaGrCHbImbB4mtmW0"
-LOGBOOK_TAB = "muso-b2b-outreach-reports"
+# The real tab name in the sheet is "Logobook" (sic — typo in the sheet,
+# not a bug here). Changing the tab name would break Fede's existing
+# filter views and formulas, so we match the sheet as-is.
+LOGBOOK_TAB = "Logobook"
 
 # Gmail
 OUTREACH_LABEL = "B2B - Ads"

@@ -6,6 +6,18 @@ set -euo pipefail
 
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
+# gog needs the keyring passphrase in non-interactive contexts. File is
+# mode-600, root-owned, not tracked in git. Provisioned manually on the
+# server; see docs/RUNBOOK-outreach-sender-worker.md.
+GOG_PW_FILE="/root/.gog-keyring-password"
+if [[ -r "$GOG_PW_FILE" ]]; then
+  GOG_KEYRING_PASSWORD="$(cat "$GOG_PW_FILE")"
+  export GOG_KEYRING_PASSWORD
+else
+  echo "[muso-outreach-monday] FATAL: $GOG_PW_FILE missing or unreadable" >&2
+  exit 2
+fi
+
 LOGPREFIX="[muso-outreach-monday $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
 LOCKFILE="/var/lock/muso-outreach-monday.lock"
 

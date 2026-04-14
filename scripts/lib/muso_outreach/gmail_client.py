@@ -208,13 +208,23 @@ def list_drafts_with_label(label: str, account: str) -> list[str]:
 
 
 def send_draft(draft_id: str, account: str) -> str:
-    """Returns the message_id of the sent message."""
+    """Returns the message_id of the sent message.
+
+    Real gog `drafts send --json` response shape (v0.12.0, verified
+    2026-04-14): `{"messageId": "...", "threadId": "..."}`. Note this
+    is a flat shape, not the nested `{"message": {"id": ...}}` that
+    Gmail API returns directly — gog reshapes it.
+
+    Older fallback: accept the nested `message.id` form too in case gog
+    reverts or an older build is in use. Return "" if neither is
+    present so the caller sees an empty message id rather than a
+    silently-wrong draft ID.
+    """
     out = run_gog("gmail", "drafts", "send", draft_id,
                   "--account", account, "--json")
     js = json.loads(out)
-    # Shape: {"draftId": ..., "message": {"id": ..., "threadId": ...}, "threadId": ...}
-    # If "message.id" is absent (unexpected gog version), return "" so the
-    # caller detects an empty message_id rather than a silently-wrong draft ID.
+    if isinstance(js.get("messageId"), str):
+        return js["messageId"]
     msg = js.get("message") or {}
     return msg.get("id") or ""
 
