@@ -7,9 +7,12 @@ description: |
      either auto-approves or moves to user_verification_needed. The bot does NOT
      auto-reject — rejection is a manual override from Jan/Aaron in escalation
      threads.
-  2. Batch (heartbeat): Proactively fetches up to N unverified credits from
-     the API every 6h (N is phased: 10 → 25 → 50 → 100) and processes them,
+  2. Batch (cron): Proactively fetches up to OPS_BATCH_FETCH_SIZE unverified
+     credits from the API every 4h (cron-jobs.json →
+     credit-verification-batch-4h, `0 */4 * * *` UTC) and processes them,
      posting a summary to #credit-verification with a Jan-tagged thread reply.
+     Target: 500 per run × 6 runs/day. Daily approval cap (500/UTC-day) still
+     applies — excess LEGITIMATE verdicts log as skip_cap.
 
   Use when: any message arrives in #credit-verification channel, OR during
   heartbeat execution of the "Batch Credit Verification" task.
@@ -509,8 +512,9 @@ Three verification workflows exist, each serving a different purpose:
   Processes one credit per message, immediately.
 
 - **Batch verification (this skill, Batch Mode):** Proactive queue processing
-  via heartbeat. Fetches up to `$FETCH_SIZE` (phased 10 → 100) unverified credits
-  every 6 hours and processes them, posting a summary with a Jan-tagged thread.
+  via cron (`credit-verification-batch-4h`, `0 */4 * * *` UTC). Fetches up to
+  `$FETCH_SIZE` (currently 500) unverified credits every 4 hours and processes
+  them, posting a summary with a Jan-tagged thread.
   Catches credits that reactive mode doesn't see (risk < 85%). Idempotency check
   prevents double-processing with reactive. Approvals are capped at 500/day UTC;
   verification-needed moves are uncapped.
@@ -523,17 +527,18 @@ All three should continue running. They complement each other.
 
 ---
 
-## Batch Mode (Heartbeat Task)
+## Batch Mode (Cron Task)
 
-Proactive queue processing triggered by the heartbeat schedule (every 6 hours).
-Instead of reacting to a channel message, the agent fetches unverified credits
-from the API and processes them in a batch.
+Proactive queue processing triggered by cron (`credit-verification-batch-4h`,
+`0 */4 * * *` UTC — 6 runs/day). Instead of reacting to a channel message, the
+agent fetches unverified credits from the API and processes them in a batch.
 
 ### When This Applies
 
-This mode applies ONLY when executing the "Batch Credit Verification" heartbeat task.
-It does NOT apply when responding to messages in #credit-verification — those use the
-reactive workflow above (Steps 0-6).
+This mode applies ONLY when executing the `credit-verification-batch-4h` cron or
+the on-demand Slack `run credit verification batch` trigger. It does NOT apply
+when responding to messages in #credit-verification — those use the reactive
+workflow above (Steps 0-6).
 
 ### Batch Workflow
 
@@ -552,7 +557,7 @@ If `OPS_BATCH_ENABLED != "true"`, exit silently with no Slack post.
 
 **0b. Acquire lockfile.**
 
-The lockfile uses PID liveness as the primary signal and a **5h30m** mtime fallback for cases where a process was killed without releasing (SIGKILL, host crash). 5h30m sits inside the 6h heartbeat cadence — a legitimately long batch (very large queue, slow API) approaching that window CAN be self-stolen by the next heartbeat. In practice the batch never exceeds ~30min; if you see runs near 5h30m you have a deeper problem to investigate.
+The lockfile uses PID liveness as the primary signal and a **3h30m** mtime fallback for cases where a process was killed without releasing (SIGKILL, host crash). 3h30m sits inside the 4h cron cadence — a SIGKILL-stuck lock is self-stolen by the very next tick with 30min of slack. In practice the batch never exceeds ~30min; if you see runs approaching 3h30m you have a deeper problem to investigate.
 
 ```bash
 SKILL_DIR=~/.openclaw/skills/skills/muso-ops-credit-verification
