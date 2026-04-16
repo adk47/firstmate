@@ -139,7 +139,7 @@ knows which human initiated the change. This mirrors Retool's pattern:
 - `U7RP6HKUZ` → `aaron@muso.ai`
 - `U07NF5A77E2` → `fede@muso.ai`
 - `U03TYGJF1N3` → `serhii@muso.ai`
-- `U038BM16T7W` → `jay@muso.ai`
+- `U038BM16T7W` → `jan@muso.ai`
 - `U0302FZQGCB` → `andrey@muso.ai`
 - `U02S7TJ7QHY` → `oleg@muso.ai`
 - `U0AL36NADEY` → `nick@muso.ai`

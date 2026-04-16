@@ -88,7 +88,7 @@ resolve_slack_to_email() {
         U7RP6HKUZ)  echo "aaron@muso.ai" ;;
         U07NF5A77E2) echo "fede@muso.ai" ;;
         U03TYGJF1N3) echo "serhii@muso.ai" ;;
-        U038BM16T7W) echo "jay@muso.ai" ;; # Jan Delmo
+        U038BM16T7W) echo "jan@muso.ai" ;; # Jan Delmo
         U0302FZQGCB) echo "andrey@muso.ai" ;;
         U02S7TJ7QHY) echo "oleg@muso.ai" ;;
         U0AL36NADEY) echo "nick@muso.ai" ;;

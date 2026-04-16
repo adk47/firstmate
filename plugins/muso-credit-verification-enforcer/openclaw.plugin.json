@@ -1,0 +1,8 @@
+{
+  "id": "muso-credit-verification-enforcer",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

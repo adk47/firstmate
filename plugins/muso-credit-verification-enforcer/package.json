@@ -1,0 +1,32 @@
+{
+  "name": "@muso/credit-verification-enforcer",
+  "private": true,
+  "version": "0.1.0",
+  "description": "openclaw plugin: mechanically enforce grounded credit-verification approvals (block web_search in CV context, gate PUT-approve on >=2 successful Tier 1 browser loads).",
+  "type": "module",
+  "main": "index.ts",
+  "license": "MIT",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "src/**/*.ts",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

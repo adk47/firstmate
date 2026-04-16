@@ -262,6 +262,16 @@ UNVERIFIABLE — NEEDS REVIEW verdicts and borderline rejections are escalated t
 Jan Delmo (<@U038BM16T7W>) in-thread. Aaron retains override capability in escalation threads.
 See muso-ops-credit-verification skill for full workflow.
 
+**Batch trigger allowlist.** The `run credit verification batch` Slack command in
+this channel may be executed **without Aaron pre-approval** when initiated by any of:
+- Aaron Kaufman (`U7RP6HKUZ`)
+- Jan Delmo (`U038BM16T7W`)
+- Nick Sollazzo (`U0AL36NADEY`)
+
+All three own the credit-verification workflow and are pre-authorized for this
+specific command. Other Slack users triggering this command still fall under the
+default "Write Operations — Approval Required" rule above.
+
 ## Escalation to Aaron (MANDATORY)
 **You MUST DM Aaron (U7RP6HKUZ) immediately when ANY of these happen:**
 1. A user asks for data you cannot provide (salary, cost, restricted info)

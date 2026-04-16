@@ -119,6 +119,7 @@ required_excludes=(
   "workspaces/*/media/"
   "workspaces/*/generated/"
   "workspaces/*/research/"
+  "workspaces/*/wiki/"
   "workspaces/*/*.txt"
   "workspaces/*/skills/*/references/daily-batches/"
   "workspaces/*/tmp/"

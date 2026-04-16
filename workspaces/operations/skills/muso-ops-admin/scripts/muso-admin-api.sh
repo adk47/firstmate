@@ -25,6 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TOKEN_CACHE="$SCRIPT_DIR/.admin-token-cache"
 TOKEN_MAX_AGE=82800  # 23 hours in seconds
 REQUESTER_EMAIL=""   # Set via --requester flag
+EVIDENCE_EXCERPT=""  # Set via --evidence-excerpt flag (required for autonomous credit approves)
 
 # --- Slack ID → Email mapping ---
 # Maps Slack user IDs to muso.ai emails for the Requester header.
@@ -43,7 +44,7 @@ resolve_slack_to_email() {
         U7RP6HKUZ)  echo "aaron@muso.ai" ;;
         U07NF5A77E2) echo "fede@muso.ai" ;;
         U03TYGJF1N3) echo "serhii@muso.ai" ;;
-        U038BM16T7W) echo "jay@muso.ai" ;;
+        U038BM16T7W) echo "jan@muso.ai" ;;
         U0302FZQGCB) echo "andrey@muso.ai" ;;
         U02S7TJ7QHY) echo "oleg@muso.ai" ;;
         U0AL36NADEY) echo "nick@muso.ai" ;;
@@ -106,11 +107,173 @@ cmd_login() {
     echo "OK: Token acquired (${#token} chars). Cached at $TOKEN_CACHE"
 }
 
+# --- Credit approve gate (deterministic, session-log-based) ---
+# Blocks autonomous PUT /admin/credit-requests status=approved unless the active
+# openclaw session log shows >=CV_REQUIRED_LOADS distinct Tier 1 pages that were:
+#   (a) loaded via the `browser` tool (NOT web_fetch/web_search/anything else), and
+#   (b) whose `toolResult.content[0].text` contains --evidence-excerpt as a
+#       literal substring (case-insensitive).
+# Bypassed for human-initiated approves (--requester set to non-clio identity).
+#
+# This exists because openclaw's before_tool_call plugin hook does NOT fire
+# reliably on exec calls in YOLO mode (tools.exec.security=full, ask=off).
+# The bash layer sees 100% of admin API traffic; plugins do not.
+
+CV_TIER1_HOSTS='open\.spotify\.com|music\.apple\.com|musicbrainz\.org|discogs\.com|allmusic\.com|tidal\.com'
+CV_REQUIRED_LOADS="${CV_REQUIRED_LOADS:-2}"
+if ! [[ "$CV_REQUIRED_LOADS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FATAL: CV_REQUIRED_LOADS must be a positive integer (got '${CV_REQUIRED_LOADS}')" >&2
+    exit 1
+fi
+CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
+CV_EVIDENCE_EXCERPT_MIN="${CV_EVIDENCE_EXCERPT_MIN:-8}"
+CV_EVIDENCE_EXCERPT_MAX="${CV_EVIDENCE_EXCERPT_MAX:-200}"
+
+enforce_credit_approve_gate() {
+    local method="$1" path="$2" body="$3"
+
+    [[ "$method" == "PUT" ]] || return 0
+    # Match both /admin/credit-requests and /admin/credit-requests/<id>
+    [[ "$path" == /admin/credit-requests* ]] || return 0
+    echo "$body" | grep -q '"status"[[:space:]]*:[[:space:]]*"approved"' || return 0
+
+    # Human override for per-credit verification: allow ONLY when --requester
+    # resolves to Jan or Aaron — the humans authorized to approve individual
+    # credits after reviewing them in an escalation thread. Other identities
+    # (Nick triggering a batch, etc.) do NOT constitute per-credit verification.
+    # The agent should NOT pass --requester on autonomous batch approves.
+    case "${REQUESTER_EMAIL:-}" in
+        jan@muso.ai|aaron@muso.ai)
+            return 0
+            ;;
+    esac
+
+    # Allow opt-out for explicitly non-CV admin scripts that need to approve credits
+    # (currently none — placeholder for future).
+    if [[ "${CV_APPROVE_GATE_DISABLED:-0}" == "1" ]]; then
+        return 0
+    fi
+
+    # --evidence-excerpt is MANDATORY for autonomous approves. Missing or too-short
+    # excerpts fail fast so the agent gets a clear "what to do" message.
+    local excerpt="${EVIDENCE_EXCERPT:-}"
+    if [[ -z "$excerpt" ]]; then
+        cat >&2 <<EOF
+credit_approve_gate: --evidence-excerpt is required for autonomous approves.
+Invoke like:
+    muso-admin-api.sh call PUT "/admin/credit-requests" \\
+        --evidence-excerpt "<literal string you saw on a Tier 1 page>" \\
+        '{"requestIds":["<cr_id>"],"status":"approved"}'
+The excerpt must be a short substring (>=${CV_EVIDENCE_EXCERPT_MIN} chars) that literally appears on >=${CV_REQUIRED_LOADS} distinct Tier 1 pages you loaded via the \`browser\` tool in this session. Good examples: the artist's name as rendered on MusicBrainz, the role string as it appears on AllMusic credits, a track title from Spotify.
+EOF
+        return 1
+    fi
+    if (( ${#excerpt} < CV_EVIDENCE_EXCERPT_MIN )); then
+        echo "credit_approve_gate: --evidence-excerpt must be >=${CV_EVIDENCE_EXCERPT_MIN} chars (got ${#excerpt}). Use a more specific substring." >&2
+        return 1
+    fi
+    if (( ${#excerpt} > CV_EVIDENCE_EXCERPT_MAX )); then
+        echo "credit_approve_gate: --evidence-excerpt must be <=${CV_EVIDENCE_EXCERPT_MAX} chars (got ${#excerpt}). Use a shorter substring." >&2
+        return 1
+    fi
+
+    # Locate the most-recently modified openclaw session log (any profile).
+    # Portable across GNU/BSD: find filters by age; stat resolves mtime for sort.
+    local session_log
+    session_log=$(
+        find /root/.openclaw-main/agents /root/.openclaw-dev/agents \
+            -maxdepth 3 -type f -name "*.jsonl" -mmin "-${CV_SESSION_MAX_AGE_MIN}" 2>/dev/null \
+        | while IFS= read -r f; do
+            mtime=$(stat -c '%Y' "$f" 2>/dev/null || stat -f '%m' "$f" 2>/dev/null)
+            [[ -n "$mtime" ]] && printf '%s %s\n' "$mtime" "$f"
+          done \
+        | sort -rn | head -1 | cut -d' ' -f2-
+    )
+    if [[ -z "$session_log" ]]; then
+        echo "credit_approve_gate: no active openclaw session log (mtime <${CV_SESSION_MAX_AGE_MIN} min) found; refusing autonomous approve." >&2
+        return 1
+    fi
+
+    # Content-matched evidence count. Forward scan:
+    #  1. Track toolCall blocks (tool_use): record toolCallId -> {name, url}
+    #  2. On toolResult blocks: if the toolCall was `browser` AND its URL is
+    #     Tier 1 AND the toolResult.content text contains --evidence-excerpt
+    #     (case-insensitive), count the URL's HOSTNAME as "grounded evidence".
+    # Distinct HOSTNAMES required, not distinct URLs — two loads of
+    # musicbrainz.org still count as 1 toward the bar.
+    # Per-approve freshness is enforced by the excerpt changing per cr_id:
+    # different credit → different artist/role → different excerpt string →
+    # different browser results required. No reset-on-approve marker needed
+    # (and real session logs escape those markers inside JSON strings anyway).
+    local count
+    count=$(
+        jq -R -r -n \
+            --arg excerpt "$(echo "$excerpt" | tr '[:upper:]' '[:lower:]')" \
+            --arg hosts "$CV_TIER1_HOSTS" \
+        '
+        # Build tier-1 host lookup: unescape "\." -> ".", index as object keys
+        ($hosts | split("|") | map(gsub("\\\\."; ".")) | map({(.): true}) | add) as $t1
+        |
+        # Slurp all JSONL lines as raw text (-R), parse each, skip malformed
+        [inputs | fromjson? // empty | select(type == "object")] as $lines
+        |
+        # Index toolCall entries: id -> {name, url}
+        (reduce ($lines[] | .message.content[]? | select(.type == "toolCall")) as $tc
+            ({}; . + {($tc.id): {name: $tc.name, url: $tc.arguments.url}})
+        ) as $calls
+        |
+        # Scan toolResult entries, join via toolCallId, filter, dedup
+        [
+            $lines[]
+            | .message | select(.role == "toolResult")
+            | . as $tr
+            | $calls[.toolCallId] // empty
+            | select(.name == "browser")
+            | (.url // "") | select(. != "")
+            | capture("^https?://(?:www\\.)?(?<host>[^/]+)").host
+            | select($t1[.] // false)
+            | . as $host
+            | $tr.content
+            | map(.text // "") | join(" ") | ascii_downcase
+            | select(contains($excerpt))
+            | $host
+        ]
+        | unique | length
+        ' "$session_log" 2>/dev/null || echo 0
+    )
+    count="${count:-0}"
+
+    if (( count < CV_REQUIRED_LOADS )); then
+        cat >&2 <<EOF
+credit_approve_gate: insufficient grounded evidence — found ${count}/${CV_REQUIRED_LOADS} distinct Tier 1 pages where --evidence-excerpt "${excerpt}" appears in the browser result.
+Requirements:
+  * Load >=${CV_REQUIRED_LOADS} DIFFERENT Tier 1 hostnames via the \`browser\` tool
+    (open.spotify.com, music.apple.com, musicbrainz.org, discogs.com, allmusic.com, tidal.com).
+  * Each browser result must literally contain the excerpt string.
+  * web_fetch / web_search loads do NOT count. Use \`browser\` only.
+If the excerpt is too broad or too narrow, try one that appears verbatim in the
+rendered page text (e.g. the artist name as shown on MusicBrainz, or a role
+string as rendered on AllMusic credits).
+If Tier 1 pages genuinely don't confirm the credit, downgrade the verdict to
+UNVERIFIABLE — NEEDS REVIEW and escalate to Jan (<@U038BM16T7W>).
+Session log checked: ${session_log}
+EOF
+        return 1
+    fi
+
+    return 0
+}
+
 cmd_call() {
     check_env
     local method="${1:?Usage: call <METHOD> <path> [json-body]}"
     local path="${2:?Usage: call <METHOD> <path> [json-body]}"
     local body="${3:-}"
+
+    # Credit approve gate — deterministic, runs in bash below openclaw's hook layer.
+    if ! enforce_credit_approve_gate "$method" "$path" "$body"; then
+        return 1
+    fi
 
     local token
     token=$(get_token)
@@ -191,11 +354,24 @@ cmd_upload() {
 
 # --- Main ---
 
-# Parse global options before command
+# Source-safe guard: if this file is `source`d (e.g. by bats tests), skip the
+# CLI dispatcher and only expose the function definitions. Executed directly,
+# the dispatcher runs normally.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    return 0 2>/dev/null || true
+fi
+
+# Parse global options before command.
+# Both --requester and --evidence-excerpt can appear in any order before the command.
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --requester)
             REQUESTER_EMAIL=$(resolve_slack_to_email "$2")
+            shift 2
+            ;;
+        --evidence-excerpt)
+            EVIDENCE_EXCERPT="$2"
+            export EVIDENCE_EXCERPT  # enforce_credit_approve_gate reads it from env
             shift 2
             ;;
         *) break ;;

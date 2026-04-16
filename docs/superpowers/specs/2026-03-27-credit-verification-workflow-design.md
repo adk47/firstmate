@@ -142,7 +142,7 @@ Defense in depth — the daily scan catches credits below the 85% threshold that
 | `workspaces/operations/TOOLS.md` | Modify | Add channel to bound list |
 | `workspaces/operations/skills/muso-ops-admin/SKILL.md` | Modify | Add approval gate exception: `PUT /admin/credit-requests/:requestId` is autonomous when source channel is C0APB2CMM7C and verdict is not NEEDS REVIEW |
 
-**Note:** Jan Delmo's Slack user ID `U038BM16T7W` maps to `jay@muso.ai` in the admin API user mapping. This is the same person (Jan Roland Delmo, ops team owner).
+**Note:** Jan Delmo's Slack user ID `U038BM16T7W` maps to `jan@muso.ai` in the admin API user mapping. This is the same person (Jan Roland Delmo, ops team owner).
 
 ## Cross-Repo Dependency
 

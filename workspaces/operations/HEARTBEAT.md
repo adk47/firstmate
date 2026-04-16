@@ -44,11 +44,8 @@ Refund investigation and processing results posted to appropriate channels. Uses
 ---
 
 ## Batch Credit Verification → #credit-verification (C0APB2CMM7C)
-**Status: PAUSED — moved to operations-dev for hardening (PR #50)**
+**Status: ACTIVE — re-enabled on production ops after hardening (PR #94)**
 
-Batch mode is being tested on the dev agent with additional guardrails (batch cap,
-profile verification workflow). Will be re-enabled on production ops after validation.
+Proactively fetches up to `OPS_BATCH_FETCH_SIZE` unverified credits from the API every 6h (phased: 10 → 25 → 50 → 100) and processes them, posting a summary to `#credit-verification` with a Jan-tagged thread reply. No-reject policy: SUSPICIOUS verdicts move to `user_verification_needed` instead of rejection. Daily autonomous-approval cap: 500/UTC-day.
 
-To test: post `run credit verification batch` in `#operations-dev`.
-
-**Run logs & retention.** While batch mode is paused here and runs only on `operations-dev`, each batch run writes a JSONL log to `OPS_RUNLOG_DIR/YYYY-MM-DD/<run_id>.jsonl` with a `latest.txt` pointer for quick lookup. Every batch also runs `workspaces/operations-dev/skills/muso-ops-credit-verification/scripts/compress-old-logs.sh` which gzips directories older than 30 days. Per `muso-ops-audit` policy, **logs are never deleted** — only compressed. To investigate a past batch: `cat $OPS_RUNLOG_DIR/latest.txt` then inspect the JSONL, or extract an archived day with `tar -xzf $OPS_RUNLOG_DIR/YYYY-MM-DD.tar.gz`. When prod cutover happens, copy the `scripts/` directory into the prod twin and update this path accordingly.
+**Run logs & retention.** Each batch run writes a JSONL log to `OPS_RUNLOG_DIR/YYYY-MM-DD/<run_id>.jsonl` with a `latest.txt` pointer for quick lookup. Every batch also runs `workspaces/operations/skills/muso-ops-credit-verification/scripts/compress-old-logs.sh` which gzips directories older than 30 days. Per `muso-ops-audit` policy, **logs are never deleted** — only compressed. To investigate a past batch: `cat $OPS_RUNLOG_DIR/latest.txt` then inspect the JSONL, or extract an archived day with `tar -xzf $OPS_RUNLOG_DIR/YYYY-MM-DD.tar.gz`.

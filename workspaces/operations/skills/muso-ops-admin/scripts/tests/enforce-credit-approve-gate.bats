@@ -1,0 +1,293 @@
+#!/usr/bin/env bats
+# Tests for enforce_credit_approve_gate() in muso-admin-api.sh.
+# Browser-only + content-match flavor (Phase 2).
+
+setup() {
+    TEST_ROOT="$(mktemp -d)"
+    export TEST_ROOT
+
+    mkdir -p "$TEST_ROOT/.openclaw-main/agents/operations/sessions"
+    mkdir -p "$TEST_ROOT/.openclaw-dev/agents/operations-dev/sessions"
+
+    SCRIPT="${BATS_TEST_DIRNAME}/../muso-admin-api.sh"
+    [[ -f "$SCRIPT" ]] || { echo "SCRIPT not found: $SCRIPT" >&2; return 1; }
+
+    WRAPPED="$TEST_ROOT/muso-admin-api.sh"
+    sed "s|/root/.openclaw-main/agents|$TEST_ROOT/.openclaw-main/agents|g; s|/root/.openclaw-dev/agents|$TEST_ROOT/.openclaw-dev/agents|g" "$SCRIPT" > "$WRAPPED"
+    chmod +x "$WRAPPED"
+
+    unset REQUESTER_EMAIL CV_APPROVE_GATE_DISABLED EVIDENCE_EXCERPT
+    export CV_REQUIRED_LOADS=2
+    export CV_SESSION_MAX_AGE_MIN=10
+    export CV_EVIDENCE_EXCERPT_MIN=8
+    export CV_EVIDENCE_EXCERPT_MAX=200
+}
+
+teardown() {
+    rm -rf "$TEST_ROOT"
+}
+
+source_gate() {
+    # shellcheck disable=SC1090
+    source "$WRAPPED"
+}
+
+write_session_log() {
+    local f="$TEST_ROOT/.openclaw-main/agents/operations/sessions/$1"
+    printf '%s\n' "$2" > "$f"
+    touch "$f"
+}
+
+# --- Passthrough cases (gate returns 0 without checking) ---
+
+@test "passthrough: non-PUT method" {
+    source_gate
+    run enforce_credit_approve_gate GET /admin/credit-requests '{"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "passthrough: non-credit-requests path" {
+    source_gate
+    run enforce_credit_approve_gate PUT /admin/users '{"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "passthrough: PUT but non-approved status" {
+    source_gate
+    run enforce_credit_approve_gate PUT /admin/credit-requests '{"status":"user_verification_needed","reason":"x"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "passthrough: --requester aaron@muso.ai bypasses gate (per-credit human verification)" {
+    source_gate
+    REQUESTER_EMAIL="aaron@muso.ai" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "passthrough: --requester jan@muso.ai bypasses gate" {
+    source_gate
+    REQUESTER_EMAIL="jan@muso.ai" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "Nick's --requester does NOT bypass (batch trigger != per-credit verification)" {
+    source_gate
+    write_session_log "s.jsonl" '{}'
+    REQUESTER_EMAIL="nick@muso.ai" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--evidence-excerpt is required"* ]]
+}
+
+@test "arbitrary --requester does NOT bypass (security)" {
+    source_gate
+    write_session_log "s.jsonl" '{}'
+    REQUESTER_EMAIL="someone@evil.com" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+}
+
+@test "passthrough: CV_APPROVE_GATE_DISABLED=1" {
+    source_gate
+    CV_APPROVE_GATE_DISABLED=1 run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+# --- Per-ID path also gated ---
+
+@test "block: PUT /admin/credit-requests/<id> is gated too (not just batch path)" {
+    source_gate
+    write_session_log "s.jsonl" '{}'
+    run enforce_credit_approve_gate PUT /admin/credit-requests/0c1afd71-211f-499b-8a18-dc8d4b63d2de '{"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--evidence-excerpt is required"* ]]
+}
+
+# --- Evidence-excerpt validation ---
+
+@test "block: --evidence-excerpt missing" {
+    source_gate
+    write_session_log "s.jsonl" '{}'
+    run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--evidence-excerpt is required"* ]]
+}
+
+@test "block: --evidence-excerpt too short" {
+    source_gate
+    write_session_log "s.jsonl" '{}'
+    EVIDENCE_EXCERPT="abc" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *">=8 chars"* ]]
+}
+
+@test "block: --evidence-excerpt too long" {
+    source_gate
+    write_session_log "s.jsonl" '{}'
+    EVIDENCE_EXCERPT=$(printf 'x%.0s' {1..201}) run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"<=200"* ]]
+}
+
+# --- Session log + browser-only + content-match ---
+
+@test "block: no session log found" {
+    source_gate
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no active openclaw session log"* ]]
+}
+
+@test "allow: 2 distinct Tier 1 browser results with excerpt in both" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig, Spanish engineer, credits include mixing"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig appears on the Disaia record"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "block: 2 Tier 1 browser loads but excerpt not in either result" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"No results found for this query"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"No matching artists"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"0/2"* ]]
+}
+
+@test "block: excerpt found but only on ONE Tier 1 host (second load missing excerpt)" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig, Spanish engineer"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"no results"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"1/2"* ]]
+}
+
+@test "block: excerpt found via web_fetch does NOT count (browser-only)" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"web_fetch","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"web_fetch","content":[{"type":"text","text":"Jose Roig, Spanish engineer"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"web_fetch","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"web_fetch","content":[{"type":"text","text":"Jose Roig appears"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"0/2"* ]]
+}
+
+@test "block: excerpt found but only on non-Tier-1 browser load" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://hoborec.com"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Ulf Blomberg mastering engineer"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://linkedin.com/in/ulf"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Ulf Blomberg profile"}]}}'
+    EVIDENCE_EXCERPT="Ulf Blomberg" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"0/2"* ]]
+}
+
+@test "www.allmusic.com counts the same as allmusic.com (hostname normalized)" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://www.allmusic.com/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig biography"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://www.discogs.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig discography"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "dedup: two loads of same Tier 1 hostname count as 1 (not 2)" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig appears"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig also appears"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"1/2"* ]]
+}
+
+@test "case-insensitive excerpt match" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"JOSE ROIG is credited as engineer"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"jose roig discography"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "Apple Music + TIDAL count as Tier 1" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://music.apple.com/us/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig artist page"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://tidal.com/browse/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig credits"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "Jaxsta (Tier 3) browser load does NOT count" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://jaxsta.com/profile/foo"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://jaxsta.com/recording/bar"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"0/2"* ]]
+}
+
+@test "per-approve freshness: different excerpt requires new evidence" {
+    source_gate
+    # Session has Jose Roig evidence only; approving a Kevin Moon credit with
+    # excerpt "Kevin Moon" must block because Kevin Moon isn't in any browser
+    # result. Proves per-approve binding via the excerpt (different cr_id →
+    # different excerpt → different evidence required).
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig"}]}}'
+    EVIDENCE_EXCERPT="Kevin Moon" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-2"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"0/2"* ]]
+}
+
+@test "allow: Spotify (open.spotify.com) counts as Tier 1" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://open.spotify.com/artist/6gKqRTREnE0NInWDiBhEzY"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig - Artist page on Spotify"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig, Spanish engineer"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "block: jq crash on corrupt session log still blocks (fail-closed)" {
+    source_gate
+    write_session_log "s.jsonl" 'NOT-JSON-AT-ALL binary garbage
+more garbage here'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"0/2"* ]]
+}
+
+@test "session-age: stale log (>10 min) is ignored" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig"}]}}'
+    local backdate
+    if date -v -20M +'%Y%m%d%H%M.%S' >/dev/null 2>&1; then
+        backdate=$(date -v -20M +'%Y%m%d%H%M.%S')
+        touch -t "$backdate" "$TEST_ROOT/.openclaw-main/agents/operations/sessions/s.jsonl"
+    else
+        touch -d '20 minutes ago' "$TEST_ROOT/.openclaw-main/agents/operations/sessions/s.jsonl"
+    fi
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no active openclaw session log"* ]]
+}

@@ -81,12 +81,23 @@ Where `<final>` is:
 **Self-ignore:** If the message starts with `[HEARTBEAT-BATCH]`, ignore it silently.
 This is output from the batch verification heartbeat task — not a new credit to verify.
 
-**Dev command trigger (ops-dev only):** If the message content is exactly
+**On-demand batch trigger:** If the message content is exactly
 `run credit verification batch` (case-insensitive), treat it as an on-demand
 batch trigger and run **Batch Mode (B1–B5)** using the current channel ID
 (`OPS_CREDIT_VERIFICATION_CHANNEL_ID`). Do NOT treat it as a reactive credit
 message. Post the batch summary back to the same channel with the standard
 `[HEARTBEAT-BATCH]` prefix.
+
+**Authorization.** This command is pre-authorized (no Aaron approval queue)
+**only** when the Slack sender is one of:
+- Aaron Kaufman (`U7RP6HKUZ`)
+- Jan Delmo (`U038BM16T7W`)
+- Nick Sollazzo (`U0AL36NADEY`)
+
+Verify `sender_id` from message metadata before running. If the sender is
+anyone else, fall through to the default SOUL.md "Write Operations —
+Approval Required" flow: acknowledge, prep the action, DM Aaron for
+approval, and only execute after he approves.
 
 **Path A — Direct bot message:** Using **case-insensitive** matching, the message
 contains both "credit request" and "risk score". Proceed to Step 1 using this message.
@@ -194,14 +205,13 @@ Is the role plausible given the track's genre/era/label?
 
 **3b. Web research** (from `muso-ops-fraud`):
 
-**Tool selection:**
-- `browser` — for checking specific URLs (Spotify credits page, MusicBrainz artist page,
-  Discogs, AllMusic, TIDAL, Apple Music, Jaxsta, ASCAP/BMI/SESAC repertory, professional
-  websites). Use browser to load the page and read credits/search results.
-- `web_search` — for general lookups (DuckDuckGo queries, LinkedIn searches, finding URLs
-  when you don't have a direct link).
+**Tool selection — BROWSER ONLY for credit verification:**
 
-Do NOT use `web_fetch` — it is disabled and cannot render JavaScript-dependent pages.
+- Use `browser` for **every** web lookup — specific URLs (Spotify/Apple Music/MusicBrainz/Discogs/AllMusic/TIDAL, Jaxsta, ASCAP/BMI/SESAC, studio/artist sites) AND searches (load a search engine URL with `browser open https://duckduckgo.com/?q=<url-encoded query>` or Bing/Google).
+- **Do NOT use `web_fetch`.** The admin-api credit-approve gate does not accept `web_fetch` evidence — any PUT approve backed by `web_fetch` loads will be blocked. `web_fetch` frequently returns Cloudflare challenge pages as 200 OK (false positives) and doesn't render JavaScript-dependent credit pages.
+- **Do NOT use `web_search`.** The plugin redirects `web_search` in this channel; use `browser` with a search-engine URL instead.
+
+Workflow: `browser open <tier1 URL>` → `browser snapshot` (read rendered text) → repeat for a second Tier 1 host → extract a **literal substring** from the rendered page that confirms the claim (artist name as rendered, role string, track title, etc.) — this is your `--evidence-excerpt` for the approve.
 
 Sources are tiered by priority. Always check Tier 1. Check Tier 2 and 3 as indicated.
 
@@ -211,6 +221,7 @@ Sources are tiered by priority. Always check Tier 1. Check Tier 2 and 3 as indic
 - MusicBrainz: `musicbrainz.org/search?query=[name]&type=artist` — recording-level credits; look for the specific track+role match, not just artist existence
 - Discogs: `discogs.com/search/?q=[name]&type=artist` — discography and credits
 - AllMusic: `allmusic.com/search/all/[name]` — artist profile with credits
+- TIDAL: `tidal.com` — track/artist credits page, often the most detailed streaming credits
 
 **Tier 2 — Check when claimed role is writing/publishing (songwriter, composer, lyricist, publisher):**
 - ASCAP: `ascap.com/repertory` — search by writer name
@@ -218,7 +229,6 @@ Sources are tiered by priority. Always check Tier 1. Check Tier 2 and 3 as indic
 - SESAC: `sesac.com` — affiliated writer search
 
 **Tier 3 — Check if Tier 1 is inconclusive (no Tier 1 source confirms the claimed name+role):**
-- TIDAL: search for track/artist credits (usually most detailed streaming credits)
 - Jaxsta: `jaxsta.com` — dedicated music credits database
 - LinkedIn: music industry career history
 - Professional website: check email domain
@@ -240,6 +250,62 @@ OR if more than 2 **Tier 1** sources fail, the investigation is INCOMPLETE.
 An incomplete investigation MUST result in ESCALATION (UNVERIFIABLE — NEEDS REVIEW),
 never auto-approve or auto-reject. Include in the report: "Investigation incomplete —
 [list which sources failed]. Escalating for human review."
+
+**Grounding — HARD RULE (anti-confabulation):**
+
+Every source URL cited in your verdict MUST correspond to a **successful `browser` tool call** executed in this investigation turn. Prior knowledge, training-data recall, or pattern-matching on the profile/studio/track name is NOT evidence. If you didn't load the page with `browser` and see the text in the snapshot, you don't know what it says.
+
+**Mechanical enforcement.** Autonomous approves are gated by
+`muso-admin-api.sh` at the bash layer. The gate reads the openclaw session
+log and refuses `PUT /admin/credit-requests status=approved` unless it finds:
+
+1. **≥2 distinct Tier 1 hostnames** (open.spotify.com, music.apple.com, musicbrainz.org, discogs.com, allmusic.com, tidal.com — `www.` tolerated) loaded via the **`browser`** tool (NOT `web_fetch` — those loads do not count).
+2. The `--evidence-excerpt` string you pass must appear **verbatim** (case-insensitive) in the browser result text for each of those ≥2 pages.
+
+**Invocation.** Every autonomous credit approve MUST include `--evidence-excerpt`:
+
+```bash
+bash .../muso-admin-api.sh call PUT "/admin/credit-requests" \
+    --evidence-excerpt "<literal substring on the Tier 1 page>" \
+    '{"requestIds":["<cr_id>"],"status":"approved"}'
+```
+
+Good excerpt examples (each is a literal substring you saw in a browser snapshot):
+- `"Jose Roig"` — artist name as rendered on MusicBrainz + AllMusic
+- `"Producer: Ulf Blomberg"` — role string as rendered on AllMusic credits
+- `"Tears In Your Smile"` — track title as rendered on Spotify credits
+
+Bad excerpts: generic strings like `"music"`, single words that appear everywhere (`"artist"`), or things you didn't actually see in the rendered page. The bash layer sees 100% of admin API
+traffic, so there is no way to confabulate past it.
+
+If the approve command returns `credit_approve_gate: insufficient evidence`,
+load two fresh Tier 1 pages with `browser open <url>`, run `browser snapshot`
+to confirm the excerpt is visible in the rendered text, then retry the
+approve with the updated excerpt. If Tier 1 pages genuinely don't confirm the
+credit, downgrade the verdict to **UNVERIFIABLE — NEEDS REVIEW** and escalate
+to Jan rather than approving.
+
+**Human overrides bypass the gate — narrowly.** Only passes when `--requester`
+resolves to Jan (jan@muso.ai) or Aaron (aaron@muso.ai), i.e. they replied
+"approve" in an escalation thread after reviewing the credit. Other requesters
+(including Nick triggering a batch with `run credit verification batch`) do NOT
+count as per-credit verification — the gate still requires `--evidence-excerpt`
++ browser loads.
+
+**On batch approves, do NOT pass `--requester`.** Batch-mode PUTs are autonomous
+— the batch trigger is NOT a per-credit endorsement. Passing `--requester` on
+batch approves does nothing useful (Nick is not in the human-verified list) and
+can confuse the audit trail. Reserve `--requester <slack_id>` for the
+escalation-thread "approve" reply flow only.
+
+**Verdict → Action (unchanged):**
+
+| Verdict | Action |
+|---|---|
+| VERIFIED LEGIT | Auto-approve (gate enforces evidence). |
+| UNVERIFIABLE — LOW CONCERN | Auto-approve (gate still requires ≥2 Tier 1 "checked but no results" loads). |
+| UNVERIFIABLE — NEEDS REVIEW | Escalate to Jan. |
+| SUSPICIOUS | Move to `user_verification_needed` (or escalate if `OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1`). |
 
 ### Step 4: Classify
 
@@ -278,7 +344,9 @@ Map investigation results to a verdict using `muso-ops-fraud` criteria:
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/admin/credit-requests" '{"requestIds":["<id>"],"status":"approved"}'
+  call PUT "/admin/credit-requests" \
+  --evidence-excerpt "<literal substring you saw on a Tier 1 page>" \
+  '{"requestIds":["<id>"],"status":"approved"}'
 ```
 
 **Important:** Use `PUT /admin/credit-requests` (bulk status endpoint), NOT
@@ -415,7 +483,7 @@ Note: [1 sentence on why risk flag is a false positive, if applicable]
 Credit request [ID] approved.
 ```
 
-**Auto-reject format:**
+**Manual reject format (escalation thread only — used when Jan/Aaron issue a `reject` command):**
 ```
 🔴 REJECTED — [Profile Name] as [Role] on "[Track Title]" ([Artists])
 
