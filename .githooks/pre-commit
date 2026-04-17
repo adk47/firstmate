@@ -33,7 +33,7 @@ shopt -s nullglob
 # ---------------------------------------------------------------
 # Check 1: every skills-all/<skill>/ has a SKILL.md
 # ---------------------------------------------------------------
-echo "  [1/4] skills-all structure"
+echo "  [1/5] skills-all structure"
 if [[ ! -d skills-all ]]; then
   fail "skills-all/ directory missing — refusing to commit (this would silently 'pass' an empty skill set)"
 fi
@@ -85,7 +85,7 @@ fi
 #       the shared array (so a future "I'll just call rsync directly"
 #       can't accidentally bypass the excludes)
 # ---------------------------------------------------------------
-echo "  [2/4] deploy.sh safety excludes"
+echo "  [2/5] deploy.sh safety excludes"
 DEPLOY_SH="scripts/deploy.sh"
 # This list is the enforced SUBSET of deploy.sh's RSYNC_EXCLUDES. The
 # check is one-directional: it asserts every entry below is present in
@@ -287,7 +287,7 @@ fi
 # (prevents someone accidentally committing a dispute-tracker snapshot
 # or api-log dump pulled from the server)
 # ---------------------------------------------------------------
-echo "  [3/4] staged files not under runtime-data paths"
+echo "  [3/5] staged files not under runtime-data paths"
 staged=$(git diff --cached --name-only --diff-filter=A)
 # Block paths that are 100% server-owned. We deliberately do NOT block
 # IDENTITY.md / HEARTBEAT.md / .openclaw — those are mixed (some workspaces
@@ -348,7 +348,7 @@ fi
 # If shellcheck isn't installed locally, print a LOUD warning but
 # don't block the commit — the CI gate (pr-validate.yml) catches
 # issues at PR time regardless.
-echo "  [4/4] shellcheck on staged *.sh files"
+echo "  [4/5] shellcheck on staged *.sh files"
 if ! command -v shellcheck >/dev/null 2>&1; then
   yellow ""
   yellow "══════════════════════════════════════════════════════════════════════"
@@ -412,6 +412,72 @@ BRIEFING
     else
       ok "shellcheck passed on $(echo "$staged_sh" | wc -l | tr -d ' ') staged *.sh file(s)"
     fi
+  fi
+fi
+
+# ---------------------------------------------------------------
+# Check 5: no hardcoded model names on SOUL.md **Model**: lines
+# ---------------------------------------------------------------
+# Workspace SOUL.md files used to hardcode the agent's model chain in
+# the Identity block. On 2026-04-17 Ops claimed "Using GLM-5.1" in
+# Slack one minute after the gateway had been restarted with
+# sonnet-4-6 as primary — it was reading the stale SOUL.md line, not
+# anything actually true. PR #112 + issue #117 sweep all 10 workspace
+# SOUL.md files to a uniform directive that points at openclaw.json.
+#
+# This check blocks a regression: any staged SOUL.md whose **Model**:
+# line mentions a model vendor/family gets rejected at commit time.
+echo "  [5/5] SOUL.md hardcoded model names (issue #117)"
+staged_soul=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^workspaces/[^/]+/SOUL\.md$' || true)
+if [[ -z "$staged_soul" ]]; then
+  ok "no staged workspace SOUL.md files"
+else
+  soul_failed=0
+  soul_bad_re='\*\*Model\*\*:.*(glm|claude|opus|sonnet|haiku|deepseek|kimi|gpt-|fireworks)'
+  while IFS= read -r f; do
+    if grep -niE "$soul_bad_re" "$f" >/dev/null 2>&1; then
+      soul_failed=1
+      red "    ✗ $f:"
+      grep -niE "$soul_bad_re" "$f" | sed 's/^/      /'
+    fi
+  done <<< "$staged_soul"
+  if (( soul_failed != 0 )); then
+    fail "hardcoded model name(s) on SOUL.md **Model**: line"
+    cat <<'BRIEFING'
+
+  ── BRIEFING ──────────────────────────────────────────────────────
+  WHY THIS CHECK EXISTS:
+    On 2026-04-17, Ops claimed in Slack it was running "GLM-5.1" one
+    minute after its gateway had been restarted with sonnet-4-6 as
+    primary. Root cause: workspaces/operations/SOUL.md:9 hardcoded
+    the old model chain. Agents parrot whatever SOUL.md says.
+
+    PR #112 fixed operations. Issue #117 swept the other nine. This
+    check prevents the anti-pattern from coming back.
+
+  HOW TO FIX:
+    Replace the **Model**: line with the uniform directive:
+
+      - **Model**: configured externally by the openclaw runtime; the
+        authoritative chain lives in `openclaw.json` under
+        `agents.list[<agent_id>].model`. Do NOT claim a specific
+        model name in responses unless you have just verified it —
+        this doc has drifted from reality before and caused
+        confusion. If asked which model you are, either introspect
+        via a tool that can check, or say you don't know without
+        checking.
+
+    Interpolate the right <agent_id> per file (design, devops, cto,
+    qa, ceo, sentinel, cmo, support, finance, operations).
+
+  WHEN BYPASSING IS OK:
+    Essentially never. If you genuinely need a model name in prose
+    (e.g., a historical note), put it somewhere that isn't the
+    **Model**: line of SOUL.md.
+  ──────────────────────────────────────────────────────────────────
+BRIEFING
+  else
+    ok "no hardcoded model names on staged SOUL.md $(echo "$staged_soul" | wc -l | tr -d ' ') file(s)"
   fi
 fi
 

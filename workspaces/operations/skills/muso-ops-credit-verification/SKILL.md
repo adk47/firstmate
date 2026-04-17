@@ -180,8 +180,44 @@ post a short note in-thread and stop:
 ℹ️ Already processed — status: [current_status]. Skipping.
 ```
 
-**If the GET call fails** (network error, non-200 response, timeout), post an error
-in-thread and stop — do NOT proceed with investigation on unknown state:
+**If the GET returns 404** (and ONLY 404 — not other errors), the UUID may not be a
+credit-request ID at all. Ad-hoc verification requests from Jan/Aaron sometimes
+paste a **profile** UUID instead. Before giving up, run the disambiguation ladder:
+
+**Step 2a (404 fallback): try as profile ID**
+
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/profile/<id>"
+```
+
+- If this returns 200, the input was a profile UUID. Pull the profile's unverified
+  credits:
+
+  ```bash
+  bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+    call GET "/admin/credit-requests?profileId=<id>&status=unverified&limit=500"
+  ```
+
+  Treat each returned credit-request as an individual idempotency target and
+  investigate in bulk-mode: one consolidated escalation post per profile (see
+  Step 5), not one post per credit. The post MUST state explicitly: *"Interpreted
+  as profile ID; N unverified credit requests found for this profile."* Do NOT
+  pretend you found it on the first call.
+
+  **Truncation:** `limit=500` is a hard cap. If the list response contains exactly
+  500 items, the profile may have more unverified credits than you investigated —
+  say so explicitly in the escalation: *"Note: the 500 credits investigated are
+  the first page; profile may have additional unverified credits beyond this
+  cap."* Per the HARD RULE on search-scope claims, do NOT claim you reviewed "all"
+  of the profile's credits when you only reviewed the first page.
+- If the profile lookup also returns 404, post the current `⚠️ API ERROR` (below)
+  — the ID is neither a credit-request nor a profile. Do NOT fabricate a search
+  scope (see HARD RULE — search-scope claims).
+
+**If the GET call fails for any other reason** (network error, non-404 non-200
+response, timeout), post an error in-thread and stop — do NOT proceed with
+investigation on unknown state:
 
 ```
 ⚠️ API ERROR — Could not verify current status of credit request [ID].
@@ -309,6 +345,33 @@ escalation-thread "approve" reply flow only.
 | UNVERIFIABLE — LOW CONCERN | Auto-approve (gate still requires ≥2 Tier 1 "checked but no results" loads). |
 | UNVERIFIABLE — NEEDS REVIEW | Escalate to Jan. |
 | SUSPICIOUS | Move to `user_verification_needed` (or escalate if `OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1`). |
+
+**HARD RULE — search-scope claims (anti-confabulation):**
+
+Never state a search count, scope, or endpoint set you did not actually query. This
+rule sits alongside the Grounding rule above: Grounding covers *sources you cite*,
+this covers *what you claim you searched*.
+
+Concretely:
+
+1. If you only paginated the first N items of one status, say so exactly. Do NOT
+   round up to *"all X unverified"* when you only scanned the first page, and do
+   NOT claim to have searched endpoints (submissions, profiles, claiming, etc.)
+   that you did not actually call.
+2. Before posting any "I searched …" / "I scanned …" / "I checked …" statement in
+   Slack, mentally enumerate the exact `toolCall` names + paths from this turn
+   that back the claim. If the list is empty or the counts don't line up, rewrite
+   the message — say "could not find on a lookup of `/admin/credit-requests/<id>`"
+   rather than "searched all records."
+3. If a single-record lookup 404s, say *"not found at `/admin/credit-requests/<id>`;
+   trying as profile ID"* and follow the Step 2a ladder. Do NOT post a "can't find
+   it anywhere" message until the ladder is exhausted.
+
+This is the LLM-level rule. A mechanical counterpart (session-evidence check on
+outbound Slack text) is planned as a follow-up — don't rely on the absence of
+mechanical enforcement here as permission to fabricate. (Reference:
+[incident 2026-04-17](https://muso-ai.slack.com/archives/C0APB2CMM7C) — Ops
+posted *"searched all 2,443 unverified"* after only scanning 200/status.)
 
 ### Step 4: Classify
 
