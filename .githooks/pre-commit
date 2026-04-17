@@ -127,6 +127,7 @@ required_excludes=(
   "workspaces/*/scripts/"
   "__pycache__/"
   "*.pyc"
+  "workspaces/*/.wrangler/"
 )
 if [[ ! -f "$DEPLOY_SH" ]]; then
   fail "$DEPLOY_SH not found"

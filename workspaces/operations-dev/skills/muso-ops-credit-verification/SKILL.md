@@ -393,6 +393,12 @@ Per-credit Slack post is **removed** in both modes — the rolled-up batch summa
 
 #### Escalate (NEEDS REVIEW)
 
+**Evidence attachment rule (mandatory for every escalation).** Before composing the escalation body, run `scripts/session-evidence.sh` and embed its JSON output **verbatim** inside a fenced `session_evidence` block in the Slack post. The helper scans the active openclaw session's JSONL log and reports the `browser` tool calls that actually succeeded (deduped by URL) and those that failed. You MUST NOT cite any URL in "Sources (Tier 1)" that is not present in `session_evidence.browser_loads[].url`. If `session_evidence.count_ok == 0`, the escalation body must say so plainly and omit the "Sources (Tier 1)" list entirely. This rule mirrors the bash-layer gate on `PUT status=approved` in `muso-admin-api.sh` — it closes the symmetric hole on escalations so citations cannot be confabulated.
+
+```bash
+SESSION_EVIDENCE=$(bash "$SKILL_DIR/scripts/session-evidence.sh")
+```
+
 The credit is already in `unverified` or `user_verification_needed` status (set by core-backend).
 No API call needed — just notify Jan. YOU MUST call:
 ```
@@ -404,14 +410,16 @@ Then post in-thread tagging Jan:
 ```
 🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]" ([Artists])
 
-Evidence: [1-2 sentence summary of investigation findings]
+Evidence: [1-2 sentence summary of investigation findings, grounded only in what was actually loaded — see session_evidence below]
 
-Sources (Tier 1):
-• Spotify credits: <url> — [what was found, or "no credits listed"]
-• MusicBrainz: <url> — [what was found, or "no results"]
-• Discogs: <url> — [what was found, or "no results"]
-• AllMusic: <url> — [what was found, or "no results"]
-[Tier 2/3 sources checked, if any]
+session_evidence
+```json
+<paste $SESSION_EVIDENCE verbatim>
+```
+
+Sources (Tier 1 — ONLY URLs from session_evidence.browser_loads[]):
+• [host from browser_loads[].host]: <url from browser_loads[].url> — [what was found, or "loaded but no data"]
+(omit this list entirely if session_evidence.count_ok == 0; say "No Tier 1 sources were successfully loaded in this session." instead)
 
 Risk score: [X]% | Verdict: Unverifiable — Needs Review
 <@U038BM16T7W> — please review. Reply "approve" or "reject [reason]" in this thread.
@@ -596,6 +604,46 @@ bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" run_started \
           '{phase:$phase, fetch_size:$fs, approval_cap_used_at_start:$cu, approval_cap_limit:$cl}')"
 ```
 
+**0d. Browser tool pre-flight probe.**
+
+Cron-invoked isolated sessions have silently lost `browser` tool availability in the past (2026-04-16 20:39 UTC run produced 332 escalations that cited Tier 1 URLs the agent never loaded). Before touching any credit API, verify the tool actually works in *this* session. If it doesn't, abort loudly at B0 so no confabulated escalations land downstream.
+
+Probe exactly this URL via the `browser` tool:
+
+```
+https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4
+```
+
+(Drake — a consistently available Tier 1 artist page with a predictable HTML shape.)
+
+Success criteria: the tool result must be non-error AND the returned text must contain both of these literal substrings (case-insensitive): `spotify` and `drake`. Cloudflare challenge pages and empty responses fail.
+
+**If the probe fails** (tool errored, timed out, missing markers):
+
+```bash
+# 1. Record the failure in the run log.
+bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" preflight_browser_unavailable \
+  "$(jq -n --arg url 'https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4' \
+          --arg err '<short ≤200 char summary of what went wrong>' \
+          '{probe_url:$url, error:$err}')"
+```
+
+Then post a single short message to `#credit-verification` (no thread):
+
+```
+⚠️ Batch aborted at pre-flight — browser tool unavailable in this session. Run ID: <RUN_ID>. No credits processed.
+```
+
+Exit the turn. Do NOT proceed to B1. The `trap … EXIT` set in B0b releases the lockfile automatically; no further cleanup needed.
+
+**If the probe succeeds**, log it and fall through to B1:
+
+```bash
+bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" preflight_ok \
+  "$(jq -n --arg url 'https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4' \
+          '{probe_url:$url}')"
+```
+
 #### B1. Fetch the Queue
 
 ```bash
@@ -761,19 +809,21 @@ Use `message(action=send, target="<credit_verification_channel_id>")` for the pa
 
 For each escalated credit, post a **separate top-level message** in
 `#credit-verification` BEFORE the summary. Use the same format as reactive
-escalations (Step 5 — Escalate section above):
+escalations (Step 5 — Escalate section above), **including the Evidence attachment rule**: run `scripts/session-evidence.sh` and embed its JSON output verbatim in a `session_evidence` block. Do NOT cite URLs that are not in `session_evidence.browser_loads[]`. One session_evidence block per escalation post — it reflects the state of the session at the time of the escalation.
 
 ```
 🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]" ([Artists])
 
-Evidence: [1-2 sentence summary of investigation findings]
+Evidence: [1-2 sentence summary grounded only in what was actually loaded]
 
-Sources (Tier 1):
-• Spotify credits: <url> — [what was found, or "no credits listed"]
-• MusicBrainz: <url> — [what was found, or "no results"]
-• Discogs: <url> — [what was found, or "no results"]
-• AllMusic: <url> — [what was found, or "no results"]
-[Tier 2/3 sources checked, if any]
+session_evidence
+```json
+<paste session-evidence.sh output verbatim>
+```
+
+Sources (Tier 1 — ONLY URLs from session_evidence.browser_loads[]):
+• [host]: <url> — [what was found, or "loaded but no data"]
+(omit this list if session_evidence.count_ok == 0; write "No Tier 1 sources were successfully loaded in this session.")
 
 Risk score: [X]% | Verdict: Unverifiable — Needs Review
 <@U038BM16T7W> — please review. Reply "approve" or "reject [reason]" in this thread.
