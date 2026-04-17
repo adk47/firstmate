@@ -314,7 +314,7 @@
       "agentId": "cmo",
       "name": "amp-daily-report",
       "description": "Daily AMP ads performance report",
-      "enabled": true,
+      "enabled": false,
       "createdAtMs": 1774313970262,
       "updatedAtMs": 1774399200000,
       "schedule": {
