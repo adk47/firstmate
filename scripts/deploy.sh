@@ -380,6 +380,14 @@ fi
 #   - install_plugin() rsync update path (called from Step 4d)
 # The pre-commit hook Check 2 enforces that every rsync call references
 # this array, so adding a new rsync without it will fail at commit time.
+#
+# RUNTIME MUTATION: preflight_drift_check() (Step 4a) APPENDS auto-
+# detected `workspaces/<ws>/<subdir>/` patterns to this array for any
+# subdir that rsync --delete would remove AND git has never tracked.
+# See scripts/lib/classify-deletions.sh. Entries in the static list
+# below act as a fast path for known cases and survive as documentation
+# of the historical whack-a-mole; new agent-runtime dirs do not need to
+# be added here manually.
 # -------------------------------------------------------------------
 # Each path here is server-owned state that --delete would otherwise
 # silently wipe on every deploy. Confirmed by running pre-flight against
@@ -887,6 +895,52 @@ preflight_drift_check() {
   # Deletions that --delete would perform on the server
   local deletions
   deletions=$(echo "$dry_out" | grep '^\*deleting' || true)
+
+  # -----------------------------------------------------------------
+  # Auto-exclude NEVER-TRACKED workspace subdirectories
+  # -----------------------------------------------------------------
+  # Stops the whack-a-mole pattern where every new agent-output dir
+  # (workspaces/*/clients/, .../output/, .../reports/, ...) trips a
+  # deploy and requires a manual RSYNC_EXCLUDES PR.
+  #
+  # The classifier is in a shared library so the PR-time CI gate
+  # (.github/workflows/pr-validate.yml) applies the same rule. Fail-
+  # closed semantics are enforced in the helper: git unavailability or
+  # an empty-ever-tracked-but-workspaces-populated mismatch aborts the
+  # deploy rather than silently auto-excluding everything.
+  # shellcheck source=lib/classify-deletions.sh
+  source "$SCRIPT_DIR/lib/classify-deletions.sh"
+
+  if [[ -n "$deletions" ]]; then
+    local classified
+    local classify_rc=0
+    classified=$(classify_workspace_deletions "$deletions" "$HYDRA_ROOT") || classify_rc=$?
+    if (( classify_rc != 0 )); then
+      fail "auto-exclude classifier refused to run (rc=$classify_rc) — see stderr above. Refusing to deploy blindly."
+    fi
+
+    local -a auto_excluded_subdirs=()
+    local remaining_deletions=""
+    local s
+    while IFS= read -r s; do
+      case "$s" in
+        "AUTO: "*)    auto_excluded_subdirs+=("${s#AUTO: }") ;;
+        "REMAIN: "*)  remaining_deletions+="${s#REMAIN: }"$'\n' ;;
+      esac
+    done <<< "$classified"
+
+    if (( ${#auto_excluded_subdirs[@]} > 0 )); then
+      for s in "${auto_excluded_subdirs[@]}"; do
+        RSYNC_EXCLUDES+=(--exclude="$s")
+      done
+      log "  Auto-excluding ${#auto_excluded_subdirs[@]} never-tracked workspace subdirectory/ies (agent runtime state):"
+      for s in "${auto_excluded_subdirs[@]}"; do
+        log "    + $s"
+      done
+      # Feed only the remaining suspicious deletions to the briefing.
+      deletions="${remaining_deletions%$'\n'}"
+    fi
+  fi
 
   if [[ -n "$skills_drift" ]]; then
     cat <<DRIFT_BRIEFING
