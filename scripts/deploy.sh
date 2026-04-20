@@ -497,6 +497,15 @@ RSYNC_EXCLUDES=(
   # Agent-generated media (Freepik renders, hero images, etc.)
   --exclude='workspaces/*/media/'
   --exclude='workspaces/*/generated/'
+  # Agent-generated presentation decks (iterative HTML renders, binary
+  # .pptx files) and exported long-form reports. Same category as
+  # media/ and generated/ — work product the agents iterate on, not
+  # canonical repo state. Example: workspaces/cmo/presentations/
+  # contained project-midway-v2.html, -v3.html, -v3-final.html,
+  # -v2-backup.html, project-renaissance.html, project-renaissance-v20.pptx
+  # on 2026-04-20 — tripped pre-flight on PR #126.
+  --exclude='workspaces/*/presentations/'
+  --exclude='workspaces/*/exports/'
   # Agent research scratchpads (may contain proprietary data)
   --exclude='workspaces/*/research/'
   # Agent-created wiki pages (company knowledge bases, specs, etc.)

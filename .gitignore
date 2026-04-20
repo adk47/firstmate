@@ -58,6 +58,8 @@ workspaces/*/*.png
 workspaces/*/*.jpg
 workspaces/*/*.txt
 workspaces/*/generated/
+workspaces/*/presentations/
+workspaces/*/exports/
 workspaces/*/media/
 workspaces/*/research/
 workspaces/*/pending-tickets/

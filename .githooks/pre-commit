@@ -118,6 +118,8 @@ required_excludes=(
   "workspaces/*/*.png"
   "workspaces/*/media/"
   "workspaces/*/generated/"
+  "workspaces/*/presentations/"
+  "workspaces/*/exports/"
   "workspaces/*/research/"
   "workspaces/*/wiki/"
   "workspaces/*/*.txt"
