@@ -520,8 +520,7 @@
         "message": "run credit verification batch",
         "model": "anthropic/claude-sonnet-4-6",
         "fallbacks": [
-          "fireworks/accounts/fireworks/models/kimi-k2p5",
-          "fireworks/accounts/fireworks/models/glm-5"
+          "anthropic/claude-haiku-4-5-20251001"
         ],
         "timeoutSeconds": 1800
       },

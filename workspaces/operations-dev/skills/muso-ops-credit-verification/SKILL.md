@@ -874,6 +874,14 @@ For each escalated credit, post a **separate top-level message** in
 `#credit-verification` BEFORE the summary. Use the same format as reactive
 escalations (Step 5 — Escalate section above), **including the Evidence attachment rule**: run `scripts/session-evidence.sh` and embed its JSON output verbatim in a `session_evidence` block. Do NOT cite URLs that are not in `session_evidence.browser_loads[]`. One session_evidence block per escalation post — it reflects the state of the session at the time of the escalation.
 
+**Log each escalation to the runlog BEFORE posting** so that `compute-run-summary.sh` in B6 can count it authoritatively (the bash-side `escalated` counter was historically fabricated by the agent; logging here makes it machine-derivable):
+
+```bash
+bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" escalation_posted \
+  "$(jq -n --arg id "$CR_ID" --arg reason "$REASON" \
+          '{cr_id:$id, reason:$reason}')"
+```
+
 ```
 🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]" ([Artists])
 
@@ -911,17 +919,58 @@ Queue clear — no unverified credits remaining.
 
 After the parent summary message is posted (whether B3's normal summary or B5's queue-clear message), run the finalization steps.
 
-Log the `run_finished` event:
+Log the `run_finished` event **via `compute-run-summary.sh`**, which derives
+the counters directly from the session JSONL (harness-recorded tool calls)
+rather than trusting shell variables. This prevents a confabulated agent —
+e.g. a Fireworks-fallback model during an Anthropic spend-cap event — from
+emitting a fabricated summary. See issue #124 for the 2026-04-20 incidents.
+
 ```bash
-bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" run_finished \
-  "$(jq -n --argjson f "$FETCHED" --argjson a "$APPROVED_IN_RUN" \
-          --argjson v "$MOVES_COUNT" --argjson e "$ESCALATED" \
-          --argjson si "$SKIPPED_IDEMPOTENT" --argjson sc "$SKIPPED_CAP" \
-          --argjson errs "$ERRORS" --arg ts "$PARENT_MSG_TS" \
-          '{fetched:$f, approved:$a, verification_needed:$v, escalated:$e,
-            skipped_idempotent:$si, skipped_cap:$sc, errors:$errs,
-            summary_post_message_ts:$ts}')"
+SUMMARY=$(bash "$SKILL_DIR/scripts/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS")
+echo "$SUMMARY"
+HOLLOW=$(echo "$SUMMARY" | jq -r '.hollow')
+UNGROUNDED=$(echo "$SUMMARY" | jq -r '.ungrounded')
 ```
+
+The helper writes the `run_finished` event itself, plus one of:
+
+- `run_finished_hollow` — fires when preflight passed but zero credits were
+  fetched or acted on (14:51 `51e6a2` incident class). Indicates an agent
+  that passed B0d then skipped B1–B4 entirely.
+- `run_finished_ungrounded` — fires when the derived preflight failed but the
+  agent still logged approvals or verification_needed moves (13:26 `b8b0e5`
+  incident class). Indicates fabricated evidence — e.g. `web_fetch` substituted
+  for the `browser` probe.
+
+B6 runs *after* B3 by design (the helper needs the parent message ts that
+B3 created), so the B3 summary has already been posted by the time the
+invariants are evaluated. If either invariant fires, post a visible warning
+tagging Jan **in addition to** the B3 summary.
+
+Use the same `message()` tool-call shape as the runaway rail in B2 — the
+tool call must NOT be inside a bash fence, since the LLM otherwise tries to
+`eval` it. Compose the text variable in bash, then drop out of the fence for
+the tool call:
+
+```bash
+if [[ "$HOLLOW" == "true" ]]; then
+  WARN_TEXT="🚨 Hollow batch run — preflight passed but no credits were fetched or acted on. Run ID: $RUN_ID. Likely a confabulated session (e.g. Fireworks fallback). <@U038BM16T7W>"
+elif [[ "$UNGROUNDED" == "true" ]]; then
+  WARN_TEXT="🚨 Ungrounded batch run — approvals/VN moves logged without a successful browser preflight. Run ID: $RUN_ID. Likely fabricated evidence. <@U038BM16T7W>"
+fi
+```
+
+Then, if `WARN_TEXT` was set, issue this tool call (note: not bash — this is
+openclaw `message()` syntax, same as the runaway-rail post in B2.5):
+
+```
+message(action="send", channelId="<credit_verification_channel_id>", text=WARN_TEXT)
+```
+
+The Slack warning is LLM-mediated, but the authoritative record is the
+`run_finished_hollow` / `run_finished_ungrounded` event in the runlog — those
+land regardless of whether the agent executes the `message()` call. A
+follow-up out-of-band watchdog can tail runlogs and alert on either event.
 
 Run compression (idempotent; cheap no-op most days):
 ```bash

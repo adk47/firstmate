@@ -1,0 +1,435 @@
+#!/usr/bin/env bash
+# compute-run-summary.sh — derive `run_finished` counters from the active
+# openclaw session JSONL (harness-recorded tool calls) instead of trusting
+# shell variables the agent maintains. Prevents confabulated summaries like
+# the 2026-04-20 incidents where Fireworks-fallback models (kimi-k2p5)
+# fabricated run_finished counters and skipped B1–B4 entirely while still
+# posting a neat summary table. See issue #124.
+#
+# Usage:
+#   compute-run-summary.sh <RUN_ID> <PARENT_MSG_TS>
+#
+# Behavior:
+#   1. Discovers the current session JSONL (filtered to the active workspace —
+#      see Env/OPS_WORKSPACE), falling back to mtime-sort within the workspace.
+#   2. Parses toolCall/toolResult pairs. Admin-API calls (via muso-admin-api.sh)
+#      are identified by (a) the script name in the flattened args AND (b) a
+#      response envelope containing `"http_status":N`. Counters derived:
+#        preflight_ok          — ≥1 successful `browser` load of the probe URL
+#                                whose returned text contains BOTH "spotify"
+#                                AND "drake" (case-insensitive) — mirrors the
+#                                B0d success criteria exactly.
+#        fetched               — unique credit IDs at $.body.items[].id in
+#                                successful GET /admin/credit-requests?status=
+#                                unverified… responses. Structured JSON parse,
+#                                not regex — safe against nested "id" fields.
+#        approved              — unique credit IDs listed in the requestIds of
+#                                successful status=approved PUTs (HTTP 200).
+#        verification_needed   — same for status=user_verification_needed.
+#        errors                — admin-API PUTs that either returned HTTP 4xx
+#                                or 5xx, OR whose tool call was marked isError,
+#                                OR whose response text lacked http_status
+#                                entirely (timeout / tool-layer failure).
+#   3. Reads runlog events for:
+#        escalated             — count of `escalation_posted` events, deduped
+#                                by cr_id. Requires SKILL.md B4 to log them.
+#        skipped_idempotent    — count of action_attempted with action=
+#                                skip_idempotent (inline in B2).
+#        skipped_cap           — same for action=skip_cap.
+#   4. Writes the `run_finished` event via runlog.sh with derived counters.
+#   5. If preflight_ok AND fetched==0, writes `run_finished_hollow` — the
+#      hollow-run invariant (catches sessions that passed preflight then
+#      skipped all real work, e.g. the 14:51 incident).
+#   6. If NOT preflight_ok AND approved+verification_needed > 0, writes
+#      `run_finished_ungrounded` — catches the 13:26 incident class (agent
+#      substituted web_fetch for the probe then fake-approved credits).
+#   7. Prints the computed summary object to stdout on one line. Fields:
+#      `hollow:bool`, `ungrounded:bool`, plus counters — so the caller can
+#      gate downstream behavior.
+#
+# Env:
+#   OPS_RUNLOG_DIR             required — same as runlog.sh
+#   OPS_WORKSPACE              required — "operations" or "operations-dev";
+#                                 scopes session-log discovery to the matching
+#                                 agent dir, preventing cross-agent mtime races
+#   CV_PROBE_URL               optional — override the preflight probe URL;
+#                                 default matches SKILL.md B0d
+#   CV_SESSION_LOG_OVERRIDE    optional — absolute path to JSONL; used by tests
+#   CV_SESSION_MAX_AGE_MIN     optional — default 10, mirrors session-evidence.sh
+#
+# Exit codes: 0 on success; 2 on missing env / missing args; 3 on missing
+# session log; 5 on missing runlog (B0c init was supposed to create it).
+
+set -euo pipefail
+
+RUN_ID="${1:-}"
+PARENT_MSG_TS="${2:-}"
+
+if [[ -z "${OPS_RUNLOG_DIR:-}" ]]; then
+    echo "ERROR: OPS_RUNLOG_DIR is not set" >&2
+    exit 2
+fi
+if [[ -z "${OPS_WORKSPACE:-}" ]]; then
+    echo "ERROR: OPS_WORKSPACE is not set (expected 'operations' or 'operations-dev')" >&2
+    exit 2
+fi
+if [[ -z "$RUN_ID" ]]; then
+    echo "ERROR: RUN_ID (arg 1) is required" >&2
+    exit 2
+fi
+
+CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
+CV_PROBE_URL="${CV_PROBE_URL:-https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Session-log discovery — same mtime idiom as session-evidence.sh, but scoped
+# to the active workspace (agent dir) to prevent cross-agent races.
+if [[ -n "${CV_SESSION_LOG_OVERRIDE:-}" ]]; then
+    session_log="$CV_SESSION_LOG_OVERRIDE"
+else
+    session_log=$(
+        find /root/.openclaw-main/agents /root/.openclaw-dev/agents \
+            -maxdepth 4 -type f -name "*.jsonl" \
+            -path "*/agents/${OPS_WORKSPACE}/sessions/*" \
+            -mmin "-${CV_SESSION_MAX_AGE_MIN}" 2>/dev/null \
+        | while IFS= read -r f; do
+            mtime=$(stat -c '%Y' "$f" 2>/dev/null || stat -f '%m' "$f" 2>/dev/null)
+            [[ -n "$mtime" ]] && printf '%s %s\n' "$mtime" "$f"
+          done \
+        | sort -rn | head -1 | cut -d' ' -f2-
+    )
+fi
+
+if [[ -z "$session_log" ]] || [[ ! -f "$session_log" ]]; then
+    echo "ERROR: no active session log found (workspace=${OPS_WORKSPACE}, mtime <${CV_SESSION_MAX_AGE_MIN}m)" >&2
+    exit 3
+fi
+
+# Derive counts from session JSONL. Single jq pipeline: parses JSONL, pairs
+# toolCalls with toolResults by toolCallId, then filters per tool/response
+# shape. Admin-API call *classification* uses the flattened args (tool-agnostic
+# with respect to the exec-tool argument schema), but response HTTP status is
+# read structurally from the response envelope where available.
+session_counts=$(jq -R -n \
+    --arg probe "$CV_PROBE_URL" \
+    --arg session_log "$session_log" '
+
+    # Named helpers (top-level defs must precede any data pipeline).
+    # Extract distinct credit IDs from the `"requestIds":[...]` array in an
+    # args chunk. Returns an empty stream if IDs cannot be captured (e.g. the
+    # chunk uses bash-variable interpolation like literal [dollar]CR_ID —
+    # common in real agent bash). Callers should fall back to per-invocation
+    # counting when extraction yields nothing.
+    def extract_request_ids:
+        scan("\"requestIds\"\\s*:\\s*\\[([^\\]]+)\\]")
+        | .[0]
+        | scan("\"(cr_[A-Za-z0-9_-]+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\"")
+        | .[0];
+
+    def extract_item_ids:
+        # muso-admin-api.sh emits each response envelope as a single compact
+        # JSON line starting with `{"http_status":`. So find the first such
+        # line in the chunk and parse it. Real admin API nests items at
+        # body.data.items; fixtures sometimes use body.items directly.
+        . as $chunk
+        | ($chunk | split("\n") | map(select(test("^\\s*\\{\"http_status\"")))| .[0] // "") as $line
+        | ($line | fromjson? // null) as $j
+        | (($j.body?.data?.items?) // ($j.body?.items?) // null) as $items
+        | if $items then
+              ($items | map(.id // empty) | map(select(. != "")) | .[])
+          else
+              empty
+          end;
+
+    # Parse JSONL, counting parse errors so they are visible forensically.
+    [inputs] as $raw_lines
+    |
+    ([ $raw_lines[] | fromjson? // empty ]) as $lines
+    |
+    ($raw_lines | length) as $total_lines
+    |
+    ($lines | length) as $parsed_lines
+    |
+    ($total_lines - $parsed_lines) as $parse_errors
+    |
+    # Pair toolCalls with toolResults by walking the JSONL in order.
+    # openclaw reuses toolCallId values across agent turns (e.g. `functions.exec:0`
+    # recurs on every turn), so a naive id→call map would mispair earlier
+    # results with the last-seen call of the same id. Instead, walk line-by-
+    # line and record each toolResult against the MOST RECENT preceding
+    # toolCall with the same id — that is the call it actually responded to.
+    (reduce ($lines[]) as $line
+        ({calls: {}, pairs: []};
+         ($line.message?.content // []) as $contents
+         | (reduce ($contents[] | select(.type == "toolCall")) as $tc
+              (.; .calls[$tc.id] = {
+                  name: $tc.name,
+                  args: $tc.arguments,
+                  args_repr: ([$tc.arguments? | .. | strings] | join(" "))
+              }))
+         | if ($line.message?.role == "toolResult") then
+               (.calls[$line.message.toolCallId] // null) as $call
+               | if $call != null then
+                     .pairs += [{
+                         name: $call.name,
+                         args: $call.args,
+                         args_repr: $call.args_repr,
+                         is_error: ($line.message.isError // false),
+                         text: (($line.message.content // []) | map(.text // "") | join("\n"))
+                     }]
+                 else . end
+           else . end
+        )
+    ).pairs as $pairs
+    |
+    # Preflight: B0d requires an open-probe of the Drake Tier 1 URL and a
+    # page-content read that contains BOTH "spotify" AND "drake" (case-
+    # insensitive). The openclaw browser tool emits multiple tool calls per
+    # page load (action=open returns target metadata; action=get_content
+    # returns the page text), so we check the two halves separately:
+    #   1. ≥1 successful browser open targeting the probe URL
+    #   2. ≥1 browser toolResult whose text has both markers
+    # Either alone is insufficient (open alone could just be a request; text
+    # alone could be from an unrelated Drake browse elsewhere in the session).
+    (
+        [ $pairs[]
+          | select(.name == "browser")
+          | select((.args?.url // "") == $probe
+                   or (.args?.url // "") == ($probe + "/")
+                   or ((.args?.url // "") | startswith($probe + "?")))
+          | select(.is_error | not)
+        ] | length > 0
+    ) as $probe_opened
+    |
+    (
+        [ $pairs[]
+          | select(.name == "browser")
+          | select(.is_error | not)
+          | select((.text | ascii_downcase) | (contains("spotify") and contains("drake")))
+        ] | length > 0
+    ) as $probe_rendered
+    |
+    ($probe_opened and $probe_rendered) as $preflight_ok
+    |
+    # Admin-API call identification.
+    #
+    # Agents often bundle multiple admin-api calls (e.g. approve one credit,
+    # move another to VN) inside a SINGLE exec bash script. Each invocation
+    # writes its own `{"http_status":N,"body":{...}}` envelope to the combined
+    # exec output. To classify each invocation individually, we split
+    # both the args and the response text on `muso-admin-api.sh` / `"http_status"`
+    # boundaries respectively, then pair them positionally. This assumes
+    # sequential execution order within the bash block — matches how SKILL.md
+    # B2 prescribes the batch loop.
+    [
+        $pairs[]
+        | select(.args_repr | test("muso-admin-api\\.sh"))
+        | . as $p
+        | ($p.args_repr | split("muso-admin-api\\.sh"; "")[1:] | map("muso-admin-api.sh" + .)) as $arg_chunks
+        | ($p.text | split("(?=\\{\"http_status\")"; "")[1:]) as $resp_chunks
+        | range(0; $arg_chunks | length) as $i
+        | $arg_chunks[$i] as $chunk
+        | ($resp_chunks[$i] // "") as $resp_chunk
+        | ([$resp_chunk | scan("\"http_status\"\\s*:\\s*([0-9]+)") | .[0] | tonumber] | .[0] // null) as $status
+        | {
+            status: $status,
+            is_tool_error: ($p.is_error and $status == null),
+            resp_chunk: $resp_chunk,
+            chunk: $chunk,
+            is_list_fetch: (($chunk | test("call +GET"))
+                and ($chunk | test("status=unverified"))),
+            is_put_approved: (($chunk | test("call +PUT"))
+                and ($chunk | test("credit-requests"))
+                and ($chunk | test("\"status\"\\s*:\\s*\"approved\""))),
+            is_put_vn: (($chunk | test("call +PUT"))
+                and ($chunk | test("credit-requests"))
+                and ($chunk | test("\"status\"\\s*:\\s*\"user_verification_needed\""))),
+            is_put_any_cr: (($chunk | test("call +PUT"))
+                and ($chunk | test("credit-requests")))
+          }
+    ] as $api
+    |
+    # fetched — unique credit IDs across all successful list fetches.
+    # Uses per-invocation resp_chunk so nested "id" fields in non-list
+    # responses (e.g. track.id, user.id) do not get mis-captured.
+    (
+        [
+            $api[]
+            | select(.is_list_fetch and .status == 200)
+            | .resp_chunk | extract_item_ids
+        ] | unique | length
+    ) as $fetched
+    |
+    # approved / verification_needed — prefer de-dup by extracted credit IDs
+    # (literal quoted IDs in the args); fall back to per-invocation count
+    # when the agent used bash-variable interpolation (literal [dollar]CR_ID)
+    # and no literal IDs can be captured. Either way, the count reflects the
+    # number of successful PUTs of the matching status.
+    (
+        ([$api[] | select(.is_put_approved and .status == 200)]) as $approved_invs
+        | ([$approved_invs[] | .chunk | extract_request_ids] | unique) as $ids
+        | if ($ids | length) > 0 then ($ids | length)
+          else ($approved_invs | length)
+          end
+    ) as $approved
+    |
+    (
+        ([$api[] | select(.is_put_vn and .status == 200)]) as $vn_invs
+        | ([$vn_invs[] | .chunk | extract_request_ids] | unique) as $ids
+        | if ($ids | length) > 0 then ($ids | length)
+          else ($vn_invs | length)
+          end
+    ) as $vn
+    |
+    # errors — broad: any admin-API invocation that (a) returned HTTP 4xx/5xx,
+    # (b) was flagged isError by the tool layer, or (c) has no http_status
+    # at all (timeout / tool crash / malformed response).
+    (
+        [
+            $api[]
+            | select(.is_put_any_cr or .is_list_fetch)
+            | select(.is_tool_error
+                or (.status == null)
+                or (.status != null and .status >= 400))
+        ] | length
+    ) as $errors
+    |
+    # Closed-vocabulary tool inventory for forensic events.
+    (
+        reduce ($pairs[] | .name) as $n
+            ({"browser":0, "exec":0, "web_fetch":0, "web_search":0, "message":0, "other":0};
+             if has($n) then .[$n] += 1 else .other += 1 end)
+    ) as $inventory
+    |
+    {
+        preflight_ok: $preflight_ok,
+        fetched: $fetched,
+        approved: $approved,
+        verification_needed: $vn,
+        errors: $errors,
+        tool_inventory: $inventory,
+        session_log: $session_log,
+        parse_errors: $parse_errors,
+        lines_parsed: $parsed_lines
+    }
+' "$session_log")
+
+# Structural sanity check — every expected field must be present and of the
+# right type. Catches a broken pipeline that silently emits null.
+echo "$session_counts" | jq -e '
+    (.preflight_ok | type == "boolean") and
+    (.fetched | type == "number") and
+    (.approved | type == "number") and
+    (.verification_needed | type == "number") and
+    (.errors | type == "number") and
+    (.parse_errors | type == "number")
+' >/dev/null || { echo "ERROR: session_counts pipeline produced malformed output: $session_counts" >&2; exit 6; }
+
+# Pull derived fields out of the jq result.
+PREFLIGHT_OK=$(echo "$session_counts" | jq -r '.preflight_ok')
+FETCHED=$(echo "$session_counts" | jq -r '.fetched')
+APPROVED=$(echo "$session_counts" | jq -r '.approved')
+VN=$(echo "$session_counts" | jq -r '.verification_needed')
+ERRORS=$(echo "$session_counts" | jq -r '.errors')
+
+# escalated / skipped_idempotent / skipped_cap come from the runlog. These
+# are emitted inline by SKILL.md B2 (skipped_*) and B4 (escalation_posted),
+# which means they land before the agent could fabricate run_finished.
+day="${RUN_ID:0:8}"
+runlog_path="${OPS_RUNLOG_DIR}/${day:0:4}-${day:4:2}-${day:6:2}/${RUN_ID}.jsonl"
+
+if [[ ! -f "$runlog_path" ]]; then
+    echo "ERROR: runlog $runlog_path does not exist — B0c (runlog.sh init) must precede B6" >&2
+    exit 5
+fi
+
+# One pass over the runlog for all three counters, deduping escalations by
+# cr_id. Fail loud on corrupt lines — swallowing jq parse errors here would
+# silently re-introduce the failure class this helper exists to prevent.
+runlog_counts=$(jq -s '
+    {
+        escalated: ([.[] | select(.event == "escalation_posted") | .cr_id] | unique | length),
+        skipped_idempotent: ([.[] | select(.event == "action_attempted" and .action == "skip_idempotent")] | length),
+        skipped_cap: ([.[] | select(.event == "action_attempted" and .action == "skip_cap")] | length)
+    }
+' "$runlog_path")
+
+ESCALATED=$(echo "$runlog_counts" | jq -r '.escalated')
+SKIPPED_IDEMPOTENT=$(echo "$runlog_counts" | jq -r '.skipped_idempotent')
+SKIPPED_CAP=$(echo "$runlog_counts" | jq -r '.skipped_cap')
+
+# Compute the two invariants. `hollow` catches preflight-passed-then-skipped
+# runs (14:51 incident class) — defined as preflight OK but ZERO admin-API
+# activity whatsoever: no approvals, no VN moves, no errors, no escalations,
+# no skip events. A run where the agent attempted actions but they failed
+# (errors>0) or where the list response was truncated (fetched=0 but vn>0) is
+# NOT hollow — the agent demonstrably did work. `ungrounded` catches
+# preflight-failed-then-approved runs (13:26 incident class).
+hollow="false"
+if [[ "$PREFLIGHT_OK" == "true" ]] \
+   && (( APPROVED + VN + ERRORS + ESCALATED + SKIPPED_IDEMPOTENT + SKIPPED_CAP == 0 )); then
+    hollow="true"
+fi
+
+ungrounded="false"
+if [[ "$PREFLIGHT_OK" != "true" ]] && (( APPROVED + VN > 0 )); then
+    ungrounded="true"
+fi
+
+# `derived_from` honestly lists the per-field provenance map.
+summary=$(jq -n \
+    --argjson f "$FETCHED" \
+    --argjson a "$APPROVED" \
+    --argjson v "$VN" \
+    --argjson e "$ESCALATED" \
+    --argjson si "$SKIPPED_IDEMPOTENT" \
+    --argjson sc "$SKIPPED_CAP" \
+    --argjson errs "$ERRORS" \
+    --argjson preflight "$PREFLIGHT_OK" \
+    --argjson hollow "$hollow" \
+    --argjson ungrounded "$ungrounded" \
+    --argjson parse_errors "$(echo "$session_counts" | jq -r '.parse_errors')" \
+    --arg ts "$PARENT_MSG_TS" \
+    '{
+        fetched:$f, approved:$a, verification_needed:$v, escalated:$e,
+        skipped_idempotent:$si, skipped_cap:$sc, errors:$errs,
+        summary_post_message_ts:$ts, preflight_ok:$preflight,
+        hollow:$hollow, ungrounded:$ungrounded,
+        session_parse_errors:$parse_errors,
+        derived_from:{
+            session_jsonl:["preflight_ok","fetched","approved","verification_needed","errors"],
+            runlog:["escalated","skipped_idempotent","skipped_cap"]
+        }
+    }')
+
+# Write the authoritative run_finished event.
+bash "$SCRIPT_DIR/runlog.sh" event "$RUN_ID" run_finished "$summary"
+
+# Write the invariant events when they fire. Both are authoritative forensic
+# records — they land regardless of whether the agent executes any Slack
+# warning afterwards.
+inventory=$(echo "$session_counts" | jq -c '.tool_inventory')
+
+if [[ "$hollow" == "true" ]]; then
+    hollow_payload=$(jq -n \
+        --argjson summary "$summary" \
+        --arg reason "preflight_ok logged but zero fetched items observed in session" \
+        --arg log "$session_log" \
+        --argjson inv "$inventory" \
+        '$summary + {reason:$reason, session_log:$log, tool_inventory:$inv}')
+    bash "$SCRIPT_DIR/runlog.sh" event "$RUN_ID" run_finished_hollow "$hollow_payload"
+fi
+
+if [[ "$ungrounded" == "true" ]]; then
+    ungrounded_payload=$(jq -n \
+        --argjson summary "$summary" \
+        --arg reason "approve/vn actions logged without successful B0d preflight — likely fabricated evidence" \
+        --arg log "$session_log" \
+        --argjson inv "$inventory" \
+        '$summary + {reason:$reason, session_log:$log, tool_inventory:$inv}')
+    bash "$SCRIPT_DIR/runlog.sh" event "$RUN_ID" run_finished_ungrounded "$ungrounded_payload"
+fi
+
+# Print the computed summary to stdout so the caller can inspect .hollow /
+# .ungrounded and post appropriate Slack warnings.
+echo "$summary"

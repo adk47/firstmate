@@ -295,7 +295,6 @@
         "model": {
           "primary": "anthropic/claude-sonnet-4-6",
           "fallbacks": [
-            "fireworks/accounts/fireworks/models/kimi-k2p5",
             "anthropic/claude-haiku-4-5-20251001"
           ]
         }
