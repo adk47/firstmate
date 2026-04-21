@@ -275,8 +275,7 @@
           "fallbacks": [
             "fireworks/accounts/fireworks/models/glm-5"
           ]
-        },
-        "thinkingDefault": "high"
+        }
       },
       {
         "id": "ceo",
@@ -286,8 +285,7 @@
           "fallbacks": [
             "fireworks/accounts/fireworks/models/glm-5"
           ]
-        },
-        "thinkingDefault": "high"
+        }
       },
       {
         "id": "cmo",
@@ -307,8 +305,7 @@
           "fallbacks": [
             "fireworks/accounts/fireworks/models/glm-5"
           ]
-        },
-        "thinkingDefault": "high"
+        }
       },
       {
         "id": "qa",

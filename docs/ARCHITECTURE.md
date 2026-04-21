@@ -264,7 +264,7 @@ HYDRA uses a tiered model allocation to balance capability with cost.
 
 | Tier       | Model             | Agents                     | Rationale                        |
 |------------|-------------------|----------------------------|----------------------------------|
-| **Opus**   | Claude Opus 4.7   | coordinator, ceo, cto      | Strategy with extended thinking  |
+| **Opus**   | Claude Opus 4.7   | coordinator, ceo, cto      | Complex reasoning, strategy      |
 | **Opus**   | Claude Opus 4.6   | cmo *                      | Migrating to 4.7 via PR #131     |
 | **Sonnet** | Claude Sonnet 4.6 | qa, devops                 | Technical tasks, code review     |
 | **Fireworks** | Kimi K2.6      | operations                 | Tool-heavy workflows, BrowseComp |
