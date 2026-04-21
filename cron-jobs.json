@@ -476,7 +476,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run the muso-outreach-discovery skill. Find 50 new companies matching Muso Ads target verticals. Dedupe against contacts_intelligence sheet, company_intelligence sheet, GHL B2B-Ads-Clio pipeline, and parent-companies.md (to skip subsidiaries of known parents). Score and select top 50. Return the batch as your final output — do NOT post to Slack directly; the cron runner will deliver it to #company-finder for Fede's review. Follow the SKILL.md workflow exactly. SILENCE RULE: if no new companies match, produce no output at all. Reference files are in skills/muso-outreach-engine/references/ — NEVER create files at workspace root.",
+        "message": "Run the muso-outreach-discovery skill. Find 50 new companies matching Muso Ads target verticals. Dedupe against contacts_intelligence sheet, company_intelligence sheet, GHL B2B-Ads-Clio pipeline, and parent-companies.md (to skip subsidiaries of known parents). Score and select top 50. Return the batch as your final output \u2014 do NOT post to Slack directly; the cron runner will deliver it to #company-finder for Fede's review. Follow the SKILL.md workflow exactly. SILENCE RULE: if no new companies match, produce no output at all. Reference files are in skills/muso-outreach-engine/references/ \u2014 NEVER create files at workspace root.",
         "model": "fireworks/accounts/fireworks/models/kimi-k2p5",
         "fallbacks": [
           "fireworks/accounts/fireworks/models/deepseek-v3p2"
@@ -518,10 +518,10 @@
       "payload": {
         "kind": "agentTurn",
         "message": "run credit verification batch",
-        "model": "fireworks/accounts/fireworks/models/kimi-k2p6",
+        "model": "anthropic/claude-sonnet-4-6",
         "fallbacks": [
-          "anthropic/claude-sonnet-4-6",
-          "anthropic/claude-haiku-4-5-20251001"
+          "anthropic/claude-haiku-4-5-20251001",
+          "fireworks/accounts/fireworks/models/kimi-k2p6"
         ],
         "timeoutSeconds": 1800
       },
