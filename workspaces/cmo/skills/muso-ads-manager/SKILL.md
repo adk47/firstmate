@@ -62,10 +62,17 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 
 ## Environment Setup
 
-Required env vars in `~/.zshrc`:
+Required env vars — **CONFIGURED AND WORKING:**
 - `MUSO_API_URL` — prod API base (e.g. `https://api.muso.ai`)
 - `MUSO_ADMIN_EMAIL` — admin account email
 - `MUSO_ADMIN_PASSWORD` — admin account password
+
+**Location on hydra:** `/etc/openclaw/main.env` (loaded as a systemd
+`EnvironmentFile` by `openclaw-gateway-main.service`). These are NOT in
+`~/.zshrc` — the gateway runs as a daemon and does not source an
+interactive shell. If you see "admin API credentials are not configured"
+from the ads manager, check that both vars are present in that file and
+restart the unit with `systemctl restart openclaw-gateway-main`.
 
 If any are missing, tell Aaron what's needed. Never display credential values.
 

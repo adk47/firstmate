@@ -479,8 +479,9 @@ RSYNC_EXCLUDES=(
   # A stale copy of `.admin-token-cache` was accidentally committed in
   # ed558ce ("Sync live Node 8 state"), which caused the drift check to
   # block every deploy on main after the server refreshed the token.
-  # The scripts themselves also ship a local .gitignore for these
-  # patterns; this exclude is the deploy-side backstop.
+  # Some workspace copies of muso-ops-admin/scripts/ carry a local
+  # .gitignore for .admin-token-cache; the root .gitignore and this rsync
+  # exclude are the canonical guards for all copies and for .ads-token-cache.
   --exclude='.admin-token-cache'
   --exclude='.ads-token-cache'
   # CMO's ad-hoc CSV outputs (b2b target research iterations, agent
@@ -1241,6 +1242,36 @@ if ! grep -q "GOG_KEYRING_PASSWORD" /root/.bashrc 2>/dev/null; then
   if [ -n "$GOG_PW" ]; then
     echo "export GOG_KEYRING_PASSWORD='${GOG_PW}'" >> /root/.bashrc
     echo "  GOG keyring password set in .bashrc"
+  fi
+fi
+
+# Guard: ensure muso-ops-admin credentials are present in the main profile
+# env file. The ops agent (on the main profile) needs MUSO_ADMIN_EMAIL and
+# MUSO_ADMIN_PASSWORD to auth against the Muso admin API; without them all
+# admin API operations fail — the ops agent surfaces this as "admin API
+# credentials are not configured" (first observed on credit-verification
+# requests). These vars live in /etc/openclaw/main.env (loaded as systemd
+# EnvironmentFile by openclaw-gateway-main.service) and are NOT in ~/.zshrc
+# — the daemon does not source an interactive shell. Warn loudly on drift so
+# a future main.env regeneration can't silently break the ops agent again.
+# Note: warn-only (not fail-fast) because creds are manually provisioned;
+# failing here would block deploys on new hosts where main.env doesn't exist
+# yet.
+if needs_target "main"; then
+  MAIN_ENV="/etc/openclaw/main.env"
+  if [ -f "$MAIN_ENV" ]; then
+    missing_vars=()
+    grep -qE "^MUSO_ADMIN_EMAIL=.+"    "$MAIN_ENV" || missing_vars+=(MUSO_ADMIN_EMAIL)
+    grep -qE "^MUSO_ADMIN_PASSWORD=.+" "$MAIN_ENV" || missing_vars+=(MUSO_ADMIN_PASSWORD)
+    if (( ${#missing_vars[@]} > 0 )); then
+      log "WARN: $MAIN_ENV is missing: ${missing_vars[*]}"
+      log "WARN: ops agent admin API operations will fail until these are added."
+      log "WARN: fix with:  sudo vim $MAIN_ENV  &&  systemctl restart openclaw-gateway-main"
+    fi
+  else
+    log "WARN: $MAIN_ENV does not exist — ops agent will start with no admin credentials."
+    log "WARN: create it, add MUSO_ADMIN_EMAIL= (e.g. retool@muso.ai) and MUSO_ADMIN_PASSWORD=, then:"
+    log "WARN:   systemctl restart openclaw-gateway-main"
   fi
 fi
 
