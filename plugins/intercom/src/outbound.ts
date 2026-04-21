@@ -1,5 +1,6 @@
 import type { IntercomClient, IntercomConversation } from "./types.js";
 import { MAX_OUTBOUND_MESSAGE_IDS } from "./types.js";
+import { sanitizeOutboundBody } from "./sanitize-email.js";
 
 export class MockIntercomClient implements IntercomClient {
   calls = {
@@ -192,6 +193,87 @@ export class RealIntercomClient implements IntercomClient {
 
     return await this.parseJson(response, "getConversation");
   }
+}
+
+/**
+ * Minimal structural logger shape: the wrapper only needs `.error`. Matches a
+ * subset of the OpenClaw `ctx.log` shape, and of `console`, so both work.
+ */
+export type SanitizerLogger = { error?: (msg: string) => void };
+
+/**
+ * Wraps an IntercomClient and replaces any outbound email address that is not
+ * in ALLOWED_OUTBOUND_EMAILS with `support@muso.ai` before delegating to the
+ * inner client.
+ *
+ * TypeScript `implements IntercomClient` enforces method-set completeness: if
+ * the interface gains a method, this class fails to compile until a
+ * pass-through is added. It does NOT guarantee that a new body-carrying
+ * method routes the body through the sanitizer — the author of such a
+ * method must still call `sanitizeOutboundBody` explicitly. The compiler
+ * is one of three defense layers (wrapper, factory, pre-commit lint); no
+ * single layer alone is the guarantee.
+ *
+ * See docs/2026-04-17-cs-agent-email-guardrail-design.md.
+ */
+export class SanitizingIntercomClient implements IntercomClient {
+  constructor(
+    private readonly inner: IntercomClient,
+    private readonly log?: SanitizerLogger,
+  ) {}
+
+  async replyToConversation(params: {
+    conversationId: string;
+    adminId: string;
+    body: string;
+  }): Promise<{ messageId: string }> {
+    const { body, redactions } = sanitizeOutboundBody(params.body);
+    if (redactions.length > 0) {
+      // Dedupe for the audit line so a single markdown-linked email
+      // (`[x@y.z](mailto:x@y.z)`) doesn't double-count and inflate the
+      // 7-day signal-review window described in the design doc.
+      const unique = Array.from(new Set(redactions));
+      const msg = `[intercom:email-leak] conv=${params.conversationId} count=${unique.length} redacted=${JSON.stringify(unique)}`;
+      // Logging must never block delivery: the sanitizer has already done its
+      // job by this point. If log.error throws (broken backend, buggy logger),
+      // fall through to console.error so the leak is still observable, but
+      // never let the exception propagate and drop the already-sanitized reply.
+      try {
+        this.log?.error?.(msg);
+      } catch {
+        try { console.error(msg); } catch { /* noop */ }
+      }
+    }
+    return this.inner.replyToConversation({ ...params, body });
+  }
+
+  async assignConversation(params: {
+    conversationId: string;
+    adminId: string;
+    assigneeId: string;
+  }): Promise<void> {
+    return this.inner.assignConversation(params);
+  }
+
+  async getConversation(params: {
+    conversationId: string;
+  }): Promise<IntercomConversation> {
+    return this.inner.getConversation(params);
+  }
+}
+
+/**
+ * The only sanctioned way to construct an outbound Intercom client.
+ * Always wraps `RealIntercomClient` in `SanitizingIntercomClient`.
+ *
+ * Construction of `RealIntercomClient` directly is blocked by a
+ * pre-commit lint outside this file.
+ */
+export function createIntercomClient(
+  token: string,
+  log?: SanitizerLogger,
+): IntercomClient {
+  return new SanitizingIntercomClient(new RealIntercomClient(token), log);
 }
 
 export class RateLimitError extends Error {
