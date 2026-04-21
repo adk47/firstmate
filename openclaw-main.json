@@ -30,6 +30,24 @@
         "auth": "api-key",
         "models": [
           {
+            "id": "claude-opus-4-7",
+            "name": "claude-opus-4-7",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 16384,
+            "reasoning": true,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "api": "anthropic-messages"
+          },
+          {
             "id": "claude-opus-4-6",
             "name": "claude-opus-4-6",
             "input": [
@@ -179,6 +197,23 @@
             },
             "contextWindow": 262144,
             "api": "openai-completions"
+          },
+          {
+            "id": "accounts/fireworks/models/kimi-k2p6",
+            "name": "Kimi-K2.6",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 8192,
+            "reasoning": false,
+            "cost": {
+              "input": 0.95,
+              "output": 4.0,
+              "cacheRead": 0.16,
+              "cacheWrite": 0
+            },
+            "contextWindow": 262144,
+            "api": "openai-completions"
           }
         ],
         "api": "openai-completions"
@@ -200,6 +235,9 @@
         ]
       },
       "models": {
+        "anthropic/claude-opus-4-7": {
+          "alias": "opus-4-7"
+        },
         "anthropic/claude-opus-4-6": {
           "alias": "opus"
         },
@@ -233,41 +271,45 @@
         "default": true,
         "workspace": "/opt/hydra/workspaces/coordinator",
         "model": {
-          "primary": "anthropic/claude-opus-4-6",
+          "primary": "anthropic/claude-opus-4-7",
           "fallbacks": [
             "fireworks/accounts/fireworks/models/glm-5"
           ]
-        }
+        },
+        "thinkingDefault": "high"
       },
       {
         "id": "ceo",
         "workspace": "/opt/hydra/workspaces/ceo",
         "model": {
-          "primary": "anthropic/claude-opus-4-6",
+          "primary": "anthropic/claude-opus-4-7",
           "fallbacks": [
             "fireworks/accounts/fireworks/models/glm-5"
           ]
-        }
+        },
+        "thinkingDefault": "high"
       },
       {
         "id": "cmo",
         "workspace": "/opt/hydra/workspaces/cmo",
         "model": {
-          "primary": "anthropic/claude-opus-4-6",
+          "primary": "anthropic/claude-opus-4-7",
           "fallbacks": [
             "fireworks/accounts/fireworks/models/glm-5"
           ]
-        }
+        },
+        "thinkingDefault": "xhigh"
       },
       {
         "id": "cto",
         "workspace": "/opt/hydra/workspaces/cto",
         "model": {
-          "primary": "anthropic/claude-opus-4-6",
+          "primary": "anthropic/claude-opus-4-7",
           "fallbacks": [
             "fireworks/accounts/fireworks/models/glm-5"
           ]
-        }
+        },
+        "thinkingDefault": "high"
       },
       {
         "id": "qa",
@@ -293,9 +335,9 @@
         "id": "operations",
         "workspace": "/opt/hydra/workspaces/operations",
         "model": {
-          "primary": "anthropic/claude-sonnet-4-6",
+          "primary": "fireworks/accounts/fireworks/models/kimi-k2p6",
           "fallbacks": [
-            "anthropic/claude-haiku-4-5-20251001"
+            "anthropic/claude-sonnet-4-6"
           ]
         }
       },
