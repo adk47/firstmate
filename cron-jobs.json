@@ -518,9 +518,9 @@
       "payload": {
         "kind": "agentTurn",
         "message": "run credit verification batch",
-        "model": "anthropic/claude-sonnet-4-6",
+        "model": "fireworks/accounts/fireworks/models/kimi-k2p6",
         "fallbacks": [
-          "anthropic/claude-haiku-4-5-20251001"
+          "anthropic/claude-sonnet-4-6"
         ],
         "timeoutSeconds": 1800
       },
