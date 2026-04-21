@@ -669,7 +669,7 @@ bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" run_started \
 
 **0d. Browser tool pre-flight probe.**
 
-Cron-invoked isolated sessions have silently lost `browser` tool availability in the past (2026-04-16 20:39 UTC run produced 332 escalations that cited Tier 1 URLs the agent never loaded). Before touching any credit API, verify the tool actually works in *this* session. If it doesn't, abort loudly at B0 so no confabulated escalations land downstream.
+Cron-invoked isolated sessions have silently lost `browser` tool availability in the past (2026-04-16 20:39 UTC run produced 332 escalations that cited Tier 1 URLs the agent never loaded; 2026-04-20 13:26 UTC b8b0e5 approved with `web_fetch` substituted for the probe). Before touching any credit API, verify the tool actually works in *this* session. If it doesn't, abort loudly at B0 so no confabulated escalations land downstream.
 
 Probe exactly this URL via the `browser` tool:
 
@@ -681,31 +681,35 @@ https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4
 
 Success criteria: the tool result must be non-error AND the returned text must contain both of these literal substrings (case-insensitive): `spotify` and `drake`. Cloudflare challenge pages and empty responses fail.
 
-**If the probe fails** (tool errored, timed out, missing markers):
+After the probe attempt, call the verify helper. **You MUST NOT write the `preflight_ok` or `preflight_browser_unavailable` event with `runlog.sh` directly** — the helper does it, derived from the session JSONL the harness recorded. Hand-writing these events is the failure class this step exists to close.
 
 ```bash
-# 1. Record the failure in the run log.
-bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" preflight_browser_unavailable \
-  "$(jq -n --arg url 'https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4' \
-          --arg err '<short ≤200 char summary of what went wrong>' \
-          '{probe_url:$url, error:$err}')"
+set +e
+bash "$SKILL_DIR/scripts/preflight-verify.sh" "$RUN_ID"
+PREFLIGHT_STATUS=$?
+set -e
 ```
 
-Then post a single short message to `#credit-verification` (no thread):
+| Exit code | Meaning | Required action |
+|---|---|---|
+| `0` | Probe confirmed in session JSONL. Event `preflight_ok` is already written. | Fall through to B1. |
+| `10` | No successful browser load of the probe URL with the required markers. Event `preflight_browser_unavailable` is already written. | Post the Slack abort message (below), exit the turn. |
+| `2` or `3` or other non-zero | Helper env/config/session-log error. No event written. | Post the Slack abort message with the exit code, exit the turn. Do NOT proceed — an indeterminate pre-flight is not a green light. |
 
-```
-⚠️ Batch aborted at pre-flight — browser tool unavailable in this session. Run ID: <RUN_ID>. No credits processed.
-```
+**If the helper reports failure (any non-zero exit), post a single short message to `#credit-verification` (no thread). Use the template that matches the exit code so the cause is visible at a glance:**
+
+- `10` (browser load not confirmed):
+  ```
+  ⚠️ Batch aborted at pre-flight — browser tool unavailable in this session. Run ID: <RUN_ID>. No credits processed.
+  ```
+- `2` / `3` / any other non-zero (helper env / session-log / config error):
+  ```
+  ⚠️ Batch aborted at pre-flight — helper exit <PREFLIGHT_STATUS>. Run ID: <RUN_ID>. No credits processed.
+  ```
 
 Exit the turn. Do NOT proceed to B1. The `trap … EXIT` set in B0b releases the lockfile automatically; no further cleanup needed.
 
-**If the probe succeeds**, log it and fall through to B1:
-
-```bash
-bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" preflight_ok \
-  "$(jq -n --arg url 'https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4' \
-          '{probe_url:$url}')"
-```
+**HARD RULE — no manual-override phase.** Once `preflight_browser_unavailable` is logged for a run, the turn exits. There is no "phase=manual" path, no "proceeding with caution" path, no way to continue in the same run. The mechanical counterpart: `runlog.sh` refuses every subsequent `event` call on that run with exit 20 (2026-04-20 13:19 UTC 2bfea8 is the incident this closes). If you need to retry, start a fresh run with a new lockfile + run_id.
 
 #### B1. Fetch the Queue
 

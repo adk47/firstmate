@@ -63,6 +63,20 @@ cmd_event() {
   log=$(log_path_for_run "$run_id")
   iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+  # Freeze-after-preflight-fail gate. SKILL.md B0d mandates that once the
+  # browser pre-flight probe fails, the turn exits and no further events are
+  # logged for this run. The 2026-04-20 13:19 UTC manual run (2bfea8)
+  # bypassed this by writing run_started phase="manual" immediately after
+  # preflight_browser_unavailable. Mechanically block any such continuation
+  # — the first preflight_browser_unavailable freezes the run. The helper
+  # that writes that failure (preflight-verify.sh) runs before the freeze
+  # takes effect because the gate checks for EXISTING entries; the helper's
+  # own write is the FIRST entry of that type.
+  if [[ -f "$log" ]] && jq -e 'select(.event == "preflight_browser_unavailable")' "$log" >/dev/null 2>&1; then
+    echo "ERROR: run $run_id is frozen — preflight_browser_unavailable was logged. No further events accepted. SKILL.md B0d requires the turn to exit on pre-flight failure." >&2
+    exit 20
+  fi
+
   # Merge the base envelope with the payload
   jq -c --arg ev "$event_name" --arg rid "$run_id" --arg ts "$iso" \
      '. + {event: $ev, run_id: $rid, ts: $ts}' <<< "$payload" >> "$log"
