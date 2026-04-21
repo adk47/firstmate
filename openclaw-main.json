@@ -765,6 +765,14 @@
       "visibility": "all"
     }
   },
+  "browser": {
+    "enabled": true,
+    "executablePath": "/root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome",
+    "remoteCdpTimeoutMs": 60000,
+    "remoteCdpHandshakeTimeoutMs": 60000,
+    "headless": true,
+    "noSandbox": true
+  },
   "secrets": {
     "providers": {
       "hydra-secrets": {
