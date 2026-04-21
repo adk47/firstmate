@@ -36,15 +36,15 @@
               "text",
               "image"
             ],
-            "maxTokens": 16384,
+            "maxTokens": 128000,
             "reasoning": true,
             "cost": {
-              "input": 0,
-              "output": 0,
-              "cacheRead": 0,
-              "cacheWrite": 0
+              "input": 5,
+              "output": 25,
+              "cacheRead": 0.5,
+              "cacheWrite": 6.25
             },
-            "contextWindow": 200000,
+            "contextWindow": 1000000,
             "api": "anthropic-messages"
           },
           {
@@ -293,12 +293,11 @@
         "id": "cmo",
         "workspace": "/opt/hydra/workspaces/cmo",
         "model": {
-          "primary": "anthropic/claude-opus-4-7",
+          "primary": "anthropic/claude-opus-4-6",
           "fallbacks": [
             "fireworks/accounts/fireworks/models/glm-5"
           ]
-        },
-        "thinkingDefault": "xhigh"
+        }
       },
       {
         "id": "cto",
