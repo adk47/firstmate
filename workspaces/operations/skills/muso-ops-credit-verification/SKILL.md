@@ -7,9 +7,12 @@ description: |
      either auto-approves or moves to user_verification_needed. The bot does NOT
      auto-reject — rejection is a manual override from Jan/Aaron in escalation
      threads.
-  2. Batch (heartbeat): Proactively fetches up to N unverified credits from
-     the API every 6h (N is phased: 10 → 25 → 50 → 100) and processes them,
+  2. Batch (cron): Proactively fetches up to OPS_BATCH_FETCH_SIZE unverified
+     credits from the API every 4h (cron-jobs.json →
+     credit-verification-batch-4h, `0 */4 * * *` UTC) and processes them,
      posting a summary to #credit-verification with a Jan-tagged thread reply.
+     Target: 500 per run × 6 runs/day. Daily approval cap (500/UTC-day) still
+     applies — excess LEGITIMATE verdicts log as skip_cap.
 
   Use when: any message arrives in #credit-verification channel, OR during
   heartbeat execution of the "Batch Credit Verification" task.
@@ -177,8 +180,44 @@ post a short note in-thread and stop:
 ℹ️ Already processed — status: [current_status]. Skipping.
 ```
 
-**If the GET call fails** (network error, non-200 response, timeout), post an error
-in-thread and stop — do NOT proceed with investigation on unknown state:
+**If the GET returns 404** (and ONLY 404 — not other errors), the UUID may not be a
+credit-request ID at all. Ad-hoc verification requests from Jan/Aaron sometimes
+paste a **profile** UUID instead. Before giving up, run the disambiguation ladder:
+
+**Step 2a (404 fallback): try as profile ID**
+
+```bash
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/profile/<id>"
+```
+
+- If this returns 200, the input was a profile UUID. Pull the profile's unverified
+  credits:
+
+  ```bash
+  bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+    call GET "/admin/credit-requests?profileId=<id>&status=unverified&limit=500"
+  ```
+
+  Treat each returned credit-request as an individual idempotency target and
+  investigate in bulk-mode: one consolidated escalation post per profile (see
+  Step 5), not one post per credit. The post MUST state explicitly: *"Interpreted
+  as profile ID; N unverified credit requests found for this profile."* Do NOT
+  pretend you found it on the first call.
+
+  **Truncation:** `limit=500` is a hard cap. If the list response contains exactly
+  500 items, the profile may have more unverified credits than you investigated —
+  say so explicitly in the escalation: *"Note: the 500 credits investigated are
+  the first page; profile may have additional unverified credits beyond this
+  cap."* Per the HARD RULE on search-scope claims, do NOT claim you reviewed "all"
+  of the profile's credits when you only reviewed the first page.
+- If the profile lookup also returns 404, post the current `⚠️ API ERROR` (below)
+  — the ID is neither a credit-request nor a profile. Do NOT fabricate a search
+  scope (see HARD RULE — search-scope claims).
+
+**If the GET call fails for any other reason** (network error, non-404 non-200
+response, timeout), post an error in-thread and stop — do NOT proceed with
+investigation on unknown state:
 
 ```
 ⚠️ API ERROR — Could not verify current status of credit request [ID].
@@ -307,6 +346,33 @@ escalation-thread "approve" reply flow only.
 | UNVERIFIABLE — NEEDS REVIEW | Escalate to Jan. |
 | SUSPICIOUS | Move to `user_verification_needed` (or escalate if `OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1`). |
 
+**HARD RULE — search-scope claims (anti-confabulation):**
+
+Never state a search count, scope, or endpoint set you did not actually query. This
+rule sits alongside the Grounding rule above: Grounding covers *sources you cite*,
+this covers *what you claim you searched*.
+
+Concretely:
+
+1. If you only paginated the first N items of one status, say so exactly. Do NOT
+   round up to *"all X unverified"* when you only scanned the first page, and do
+   NOT claim to have searched endpoints (submissions, profiles, claiming, etc.)
+   that you did not actually call.
+2. Before posting any "I searched …" / "I scanned …" / "I checked …" statement in
+   Slack, mentally enumerate the exact `toolCall` names + paths from this turn
+   that back the claim. If the list is empty or the counts don't line up, rewrite
+   the message — say "could not find on a lookup of `/admin/credit-requests/<id>`"
+   rather than "searched all records."
+3. If a single-record lookup 404s, say *"not found at `/admin/credit-requests/<id>`;
+   trying as profile ID"* and follow the Step 2a ladder. Do NOT post a "can't find
+   it anywhere" message until the ladder is exhausted.
+
+This is the LLM-level rule. A mechanical counterpart (session-evidence check on
+outbound Slack text) is planned as a follow-up — don't rely on the absence of
+mechanical enforcement here as permission to fabricate. (Reference:
+[incident 2026-04-17](https://muso-ai.slack.com/archives/C0APB2CMM7C) — Ops
+posted *"searched all 2,443 unverified"* after only scanning 200/status.)
+
 ### Step 4: Classify
 
 Map investigation results to a verdict using `muso-ops-fraud` criteria:
@@ -390,6 +456,12 @@ Per-credit Slack post is **removed** in both modes — the rolled-up batch summa
 
 #### Escalate (NEEDS REVIEW)
 
+**Evidence attachment rule (mandatory for every escalation).** Before composing the escalation body, run `scripts/session-evidence.sh` and embed its JSON output **verbatim** inside a fenced `session_evidence` block in the Slack post. The helper scans the active openclaw session's JSONL log and reports the `browser` tool calls that actually succeeded (deduped by URL) and those that failed. You MUST NOT cite any URL in "Sources (Tier 1)" that is not present in `session_evidence.browser_loads[].url`. If `session_evidence.count_ok == 0`, the escalation body must say so plainly and omit the "Sources (Tier 1)" list entirely. This rule mirrors the bash-layer gate on `PUT status=approved` in `muso-admin-api.sh` — it closes the symmetric hole on escalations so citations cannot be confabulated.
+
+```bash
+SESSION_EVIDENCE=$(bash "$SKILL_DIR/scripts/session-evidence.sh")
+```
+
 The credit is already in `unverified` or `user_verification_needed` status (set by core-backend).
 No API call needed — just notify Jan. YOU MUST call:
 ```
@@ -401,14 +473,16 @@ Then post in-thread tagging Jan:
 ```
 🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]" ([Artists])
 
-Evidence: [1-2 sentence summary of investigation findings]
+Evidence: [1-2 sentence summary of investigation findings, grounded only in what was actually loaded — see session_evidence below]
 
-Sources (Tier 1):
-• Spotify credits: <url> — [what was found, or "no credits listed"]
-• MusicBrainz: <url> — [what was found, or "no results"]
-• Discogs: <url> — [what was found, or "no results"]
-• AllMusic: <url> — [what was found, or "no results"]
-[Tier 2/3 sources checked, if any]
+session_evidence
+```json
+<paste $SESSION_EVIDENCE verbatim>
+```
+
+Sources (Tier 1 — ONLY URLs from session_evidence.browser_loads[]):
+• [host from browser_loads[].host]: <url from browser_loads[].url> — [what was found, or "loaded but no data"]
+(omit this list entirely if session_evidence.count_ok == 0; say "No Tier 1 sources were successfully loaded in this session." instead)
 
 Risk score: [X]% | Verdict: Unverifiable — Needs Review
 <@U038BM16T7W> — please review. Reply "approve" or "reject [reason]" in this thread.
@@ -509,8 +583,9 @@ Three verification workflows exist, each serving a different purpose:
   Processes one credit per message, immediately.
 
 - **Batch verification (this skill, Batch Mode):** Proactive queue processing
-  via heartbeat. Fetches up to `$FETCH_SIZE` (phased 10 → 100) unverified credits
-  every 6 hours and processes them, posting a summary with a Jan-tagged thread.
+  via cron (`credit-verification-batch-4h`, `0 */4 * * *` UTC). Fetches up to
+  `$FETCH_SIZE` (currently 500) unverified credits every 4 hours and processes
+  them, posting a summary with a Jan-tagged thread.
   Catches credits that reactive mode doesn't see (risk < 85%). Idempotency check
   prevents double-processing with reactive. Approvals are capped at 500/day UTC;
   verification-needed moves are uncapped.
@@ -523,17 +598,18 @@ All three should continue running. They complement each other.
 
 ---
 
-## Batch Mode (Heartbeat Task)
+## Batch Mode (Cron Task)
 
-Proactive queue processing triggered by the heartbeat schedule (every 6 hours).
-Instead of reacting to a channel message, the agent fetches unverified credits
-from the API and processes them in a batch.
+Proactive queue processing triggered by cron (`credit-verification-batch-4h`,
+`0 */4 * * *` UTC — 6 runs/day). Instead of reacting to a channel message, the
+agent fetches unverified credits from the API and processes them in a batch.
 
 ### When This Applies
 
-This mode applies ONLY when executing the "Batch Credit Verification" heartbeat task.
-It does NOT apply when responding to messages in #credit-verification — those use the
-reactive workflow above (Steps 0-6).
+This mode applies ONLY when executing the `credit-verification-batch-4h` cron or
+the on-demand Slack `run credit verification batch` trigger. It does NOT apply
+when responding to messages in #credit-verification — those use the reactive
+workflow above (Steps 0-6).
 
 ### Batch Workflow
 
@@ -552,7 +628,7 @@ If `OPS_BATCH_ENABLED != "true"`, exit silently with no Slack post.
 
 **0b. Acquire lockfile.**
 
-The lockfile uses PID liveness as the primary signal and a **5h30m** mtime fallback for cases where a process was killed without releasing (SIGKILL, host crash). 5h30m sits inside the 6h heartbeat cadence — a legitimately long batch (very large queue, slow API) approaching that window CAN be self-stolen by the next heartbeat. In practice the batch never exceeds ~30min; if you see runs near 5h30m you have a deeper problem to investigate.
+The lockfile uses PID liveness as the primary signal and a **3h30m** mtime fallback for cases where a process was killed without releasing (SIGKILL, host crash). 3h30m sits inside the 4h cron cadence — a SIGKILL-stuck lock is self-stolen by the very next tick with 30min of slack. In practice the batch never exceeds ~30min; if you see runs approaching 3h30m you have a deeper problem to investigate.
 
 ```bash
 SKILL_DIR=~/.openclaw/skills/skills/muso-ops-credit-verification
@@ -589,6 +665,46 @@ bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" run_started \
   "$(jq -n --arg phase "${OPS_BATCH_PHASE:-0}" --argjson fs "$FETCH_SIZE" \
           --argjson cu "$APPROVAL_CAP_USED" --argjson cl "$APPROVAL_CAP_LIMIT" \
           '{phase:$phase, fetch_size:$fs, approval_cap_used_at_start:$cu, approval_cap_limit:$cl}')"
+```
+
+**0d. Browser tool pre-flight probe.**
+
+Cron-invoked isolated sessions have silently lost `browser` tool availability in the past (2026-04-16 20:39 UTC run produced 332 escalations that cited Tier 1 URLs the agent never loaded). Before touching any credit API, verify the tool actually works in *this* session. If it doesn't, abort loudly at B0 so no confabulated escalations land downstream.
+
+Probe exactly this URL via the `browser` tool:
+
+```
+https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4
+```
+
+(Drake — a consistently available Tier 1 artist page with a predictable HTML shape.)
+
+Success criteria: the tool result must be non-error AND the returned text must contain both of these literal substrings (case-insensitive): `spotify` and `drake`. Cloudflare challenge pages and empty responses fail.
+
+**If the probe fails** (tool errored, timed out, missing markers):
+
+```bash
+# 1. Record the failure in the run log.
+bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" preflight_browser_unavailable \
+  "$(jq -n --arg url 'https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4' \
+          --arg err '<short ≤200 char summary of what went wrong>' \
+          '{probe_url:$url, error:$err}')"
+```
+
+Then post a single short message to `#credit-verification` (no thread):
+
+```
+⚠️ Batch aborted at pre-flight — browser tool unavailable in this session. Run ID: <RUN_ID>. No credits processed.
+```
+
+Exit the turn. Do NOT proceed to B1. The `trap … EXIT` set in B0b releases the lockfile automatically; no further cleanup needed.
+
+**If the probe succeeds**, log it and fall through to B1:
+
+```bash
+bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" preflight_ok \
+  "$(jq -n --arg url 'https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4' \
+          '{probe_url:$url}')"
 ```
 
 #### B1. Fetch the Queue
@@ -756,19 +872,29 @@ Use `message(action=send, target="<credit_verification_channel_id>")` for the pa
 
 For each escalated credit, post a **separate top-level message** in
 `#credit-verification` BEFORE the summary. Use the same format as reactive
-escalations (Step 5 — Escalate section above):
+escalations (Step 5 — Escalate section above), **including the Evidence attachment rule**: run `scripts/session-evidence.sh` and embed its JSON output verbatim in a `session_evidence` block. Do NOT cite URLs that are not in `session_evidence.browser_loads[]`. One session_evidence block per escalation post — it reflects the state of the session at the time of the escalation.
+
+**Log each escalation to the runlog BEFORE posting** so that `compute-run-summary.sh` in B6 can count it authoritatively (the bash-side `escalated` counter was historically fabricated by the agent; logging here makes it machine-derivable):
+
+```bash
+bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" escalation_posted \
+  "$(jq -n --arg id "$CR_ID" --arg reason "$REASON" \
+          '{cr_id:$id, reason:$reason}')"
+```
 
 ```
 🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]" ([Artists])
 
-Evidence: [1-2 sentence summary of investigation findings]
+Evidence: [1-2 sentence summary grounded only in what was actually loaded]
 
-Sources (Tier 1):
-• Spotify credits: <url> — [what was found, or "no credits listed"]
-• MusicBrainz: <url> — [what was found, or "no results"]
-• Discogs: <url> — [what was found, or "no results"]
-• AllMusic: <url> — [what was found, or "no results"]
-[Tier 2/3 sources checked, if any]
+session_evidence
+```json
+<paste session-evidence.sh output verbatim>
+```
+
+Sources (Tier 1 — ONLY URLs from session_evidence.browser_loads[]):
+• [host]: <url> — [what was found, or "loaded but no data"]
+(omit this list if session_evidence.count_ok == 0; write "No Tier 1 sources were successfully loaded in this session.")
 
 Risk score: [X]% | Verdict: Unverifiable — Needs Review
 <@U038BM16T7W> — please review. Reply "approve" or "reject [reason]" in this thread.
@@ -793,17 +919,58 @@ Queue clear — no unverified credits remaining.
 
 After the parent summary message is posted (whether B3's normal summary or B5's queue-clear message), run the finalization steps.
 
-Log the `run_finished` event:
+Log the `run_finished` event **via `compute-run-summary.sh`**, which derives
+the counters directly from the session JSONL (harness-recorded tool calls)
+rather than trusting shell variables. This prevents a confabulated agent —
+e.g. a Fireworks-fallback model during an Anthropic spend-cap event — from
+emitting a fabricated summary. See issue #124 for the 2026-04-20 incidents.
+
 ```bash
-bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" run_finished \
-  "$(jq -n --argjson f "$FETCHED" --argjson a "$APPROVED_IN_RUN" \
-          --argjson v "$MOVES_COUNT" --argjson e "$ESCALATED" \
-          --argjson si "$SKIPPED_IDEMPOTENT" --argjson sc "$SKIPPED_CAP" \
-          --argjson errs "$ERRORS" --arg ts "$PARENT_MSG_TS" \
-          '{fetched:$f, approved:$a, verification_needed:$v, escalated:$e,
-            skipped_idempotent:$si, skipped_cap:$sc, errors:$errs,
-            summary_post_message_ts:$ts}')"
+SUMMARY=$(bash "$SKILL_DIR/scripts/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS")
+echo "$SUMMARY"
+HOLLOW=$(echo "$SUMMARY" | jq -r '.hollow')
+UNGROUNDED=$(echo "$SUMMARY" | jq -r '.ungrounded')
 ```
+
+The helper writes the `run_finished` event itself, plus one of:
+
+- `run_finished_hollow` — fires when preflight passed but zero credits were
+  fetched or acted on (14:51 `51e6a2` incident class). Indicates an agent
+  that passed B0d then skipped B1–B4 entirely.
+- `run_finished_ungrounded` — fires when the derived preflight failed but the
+  agent still logged approvals or verification_needed moves (13:26 `b8b0e5`
+  incident class). Indicates fabricated evidence — e.g. `web_fetch` substituted
+  for the `browser` probe.
+
+B6 runs *after* B3 by design (the helper needs the parent message ts that
+B3 created), so the B3 summary has already been posted by the time the
+invariants are evaluated. If either invariant fires, post a visible warning
+tagging Jan **in addition to** the B3 summary.
+
+Use the same `message()` tool-call shape as the runaway rail in B2 — the
+tool call must NOT be inside a bash fence, since the LLM otherwise tries to
+`eval` it. Compose the text variable in bash, then drop out of the fence for
+the tool call:
+
+```bash
+if [[ "$HOLLOW" == "true" ]]; then
+  WARN_TEXT="🚨 Hollow batch run — preflight passed but no credits were fetched or acted on. Run ID: $RUN_ID. Likely a confabulated session (e.g. Fireworks fallback). <@U038BM16T7W>"
+elif [[ "$UNGROUNDED" == "true" ]]; then
+  WARN_TEXT="🚨 Ungrounded batch run — approvals/VN moves logged without a successful browser preflight. Run ID: $RUN_ID. Likely fabricated evidence. <@U038BM16T7W>"
+fi
+```
+
+Then, if `WARN_TEXT` was set, issue this tool call (note: not bash — this is
+openclaw `message()` syntax, same as the runaway-rail post in B2.5):
+
+```
+message(action="send", channelId="<credit_verification_channel_id>", text=WARN_TEXT)
+```
+
+The Slack warning is LLM-mediated, but the authoritative record is the
+`run_finished_hollow` / `run_finished_ungrounded` event in the runlog — those
+land regardless of whether the agent executes the `message()` call. A
+follow-up out-of-band watchdog can tail runlogs and alert on either event.
 
 Run compression (idempotent; cheap no-op most days):
 ```bash

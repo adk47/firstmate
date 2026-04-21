@@ -32,14 +32,29 @@ teardown() { teardown_tmp_env; }
   grep -q "^[0-9]\+:.\+:.\+$" "$OPS_BATCH_LOCK_PATH"
 }
 
-@test "acquire treats mtime >= 5h30m as stale regardless of PID" {
+@test "acquire treats mtime >= 3h30m as stale regardless of PID" {
   mkdir -p "$(dirname "$OPS_BATCH_LOCK_PATH")"
   echo "$$:test-host:operations-dev" > "$OPS_BATCH_LOCK_PATH"
-  # Backdate the file to 6 hours ago
-  touch -t "$(date -u -v-6H +%Y%m%d%H%M)" "$OPS_BATCH_LOCK_PATH" 2>/dev/null || \
-    touch -d "6 hours ago" "$OPS_BATCH_LOCK_PATH"
+  # Backdate the file to 4 hours ago — one full cron cycle, well above the
+  # 3h30m stale threshold. NOTE: no -u on the date call; touch -t interprets
+  # its arg as local time and stat returns epoch seconds, so matching local
+  # on both sides keeps the age arithmetic honest.
+  touch -t "$(date -v-4H +%Y%m%d%H%M)" "$OPS_BATCH_LOCK_PATH" 2>/dev/null || \
+    touch -d "4 hours ago" "$OPS_BATCH_LOCK_PATH"
   run "$SCRIPTS_DIR/lockfile.sh" acquire
   [ "$status" -eq 0 ]
+}
+
+@test "acquire honors live lock whose mtime is fresher than 3h30m" {
+  mkdir -p "$(dirname "$OPS_BATCH_LOCK_PATH")"
+  echo "$$:test-host:operations-dev" > "$OPS_BATCH_LOCK_PATH"
+  # Backdate to 3 hours ago — below the 3h30m stale threshold. Live PID + fresh
+  # mtime must refuse to steal (exit 10). Guards against regression if
+  # STALE_SECONDS is ever tightened further.
+  touch -t "$(date -v-3H +%Y%m%d%H%M)" "$OPS_BATCH_LOCK_PATH" 2>/dev/null || \
+    touch -d "3 hours ago" "$OPS_BATCH_LOCK_PATH"
+  run "$SCRIPTS_DIR/lockfile.sh" acquire
+  [ "$status" -eq 10 ]
 }
 
 @test "release removes the lockfile" {

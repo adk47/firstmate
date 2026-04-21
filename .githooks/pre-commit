@@ -33,7 +33,7 @@ shopt -s nullglob
 # ---------------------------------------------------------------
 # Check 1: every skills-all/<skill>/ has a SKILL.md
 # ---------------------------------------------------------------
-echo "  [1/4] skills-all structure"
+echo "  [1/6] skills-all structure"
 if [[ ! -d skills-all ]]; then
   fail "skills-all/ directory missing — refusing to commit (this would silently 'pass' an empty skill set)"
 fi
@@ -85,7 +85,7 @@ fi
 #       the shared array (so a future "I'll just call rsync directly"
 #       can't accidentally bypass the excludes)
 # ---------------------------------------------------------------
-echo "  [2/4] deploy.sh safety excludes"
+echo "  [2/6] deploy.sh safety excludes"
 DEPLOY_SH="scripts/deploy.sh"
 # This list is the enforced SUBSET of deploy.sh's RSYNC_EXCLUDES. The
 # check is one-directional: it asserts every entry below is present in
@@ -118,6 +118,8 @@ required_excludes=(
   "workspaces/*/*.png"
   "workspaces/*/media/"
   "workspaces/*/generated/"
+  "workspaces/*/presentations/"
+  "workspaces/*/exports/"
   "workspaces/*/research/"
   "workspaces/*/wiki/"
   "workspaces/*/*.txt"
@@ -127,6 +129,7 @@ required_excludes=(
   "workspaces/*/scripts/"
   "__pycache__/"
   "*.pyc"
+  "workspaces/*/.wrangler/"
 )
 if [[ ! -f "$DEPLOY_SH" ]]; then
   fail "$DEPLOY_SH not found"
@@ -286,7 +289,7 @@ fi
 # (prevents someone accidentally committing a dispute-tracker snapshot
 # or api-log dump pulled from the server)
 # ---------------------------------------------------------------
-echo "  [3/4] staged files not under runtime-data paths"
+echo "  [3/6] staged files not under runtime-data paths"
 staged=$(git diff --cached --name-only --diff-filter=A)
 # Block paths that are 100% server-owned. We deliberately do NOT block
 # IDENTITY.md / HEARTBEAT.md / .openclaw — those are mixed (some workspaces
@@ -347,7 +350,7 @@ fi
 # If shellcheck isn't installed locally, print a LOUD warning but
 # don't block the commit — the CI gate (pr-validate.yml) catches
 # issues at PR time regardless.
-echo "  [4/4] shellcheck on staged *.sh files"
+echo "  [4/6] shellcheck on staged *.sh files"
 if ! command -v shellcheck >/dev/null 2>&1; then
   yellow ""
   yellow "══════════════════════════════════════════════════════════════════════"
@@ -412,6 +415,154 @@ BRIEFING
       ok "shellcheck passed on $(echo "$staged_sh" | wc -l | tr -d ' ') staged *.sh file(s)"
     fi
   fi
+fi
+
+# ---------------------------------------------------------------
+# Check 5: no hardcoded model names on SOUL.md **Model**: lines
+# ---------------------------------------------------------------
+# Workspace SOUL.md files used to hardcode the agent's model chain in
+# the Identity block. On 2026-04-17 Ops claimed "Using GLM-5.1" in
+# Slack one minute after the gateway had been restarted with
+# sonnet-4-6 as primary — it was reading the stale SOUL.md line, not
+# anything actually true. PR #112 + issue #117 sweep all 10 workspace
+# SOUL.md files to a uniform directive that points at openclaw.json.
+#
+# This check blocks a regression: any staged SOUL.md whose **Model**:
+# line mentions a model vendor/family gets rejected at commit time.
+echo "  [5/6] SOUL.md hardcoded model names (issue #117)"
+staged_soul=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^workspaces/[^/]+/SOUL\.md$' || true)
+if [[ -z "$staged_soul" ]]; then
+  ok "no staged workspace SOUL.md files"
+else
+  soul_failed=0
+  soul_bad_re='\*\*Model\*\*:.*(glm|claude|opus|sonnet|haiku|deepseek|kimi|gpt-|fireworks)'
+  while IFS= read -r f; do
+    if grep -niE "$soul_bad_re" "$f" >/dev/null 2>&1; then
+      soul_failed=1
+      red "    ✗ $f:"
+      grep -niE "$soul_bad_re" "$f" | sed 's/^/      /'
+    fi
+  done <<< "$staged_soul"
+  if (( soul_failed != 0 )); then
+    fail "hardcoded model name(s) on SOUL.md **Model**: line"
+    cat <<'BRIEFING'
+
+  ── BRIEFING ──────────────────────────────────────────────────────
+  WHY THIS CHECK EXISTS:
+    On 2026-04-17, Ops claimed in Slack it was running "GLM-5.1" one
+    minute after its gateway had been restarted with sonnet-4-6 as
+    primary. Root cause: workspaces/operations/SOUL.md:9 hardcoded
+    the old model chain. Agents parrot whatever SOUL.md says.
+
+    PR #112 fixed operations. Issue #117 swept the other nine. This
+    check prevents the anti-pattern from coming back.
+
+  HOW TO FIX:
+    Replace the **Model**: line with the uniform directive:
+
+      - **Model**: configured externally by the openclaw runtime; the
+        authoritative chain lives in `openclaw.json` under
+        `agents.list[<agent_id>].model`. Do NOT claim a specific
+        model name in responses unless you have just verified it —
+        this doc has drifted from reality before and caused
+        confusion. If asked which model you are, either introspect
+        via a tool that can check, or say you don't know without
+        checking.
+
+    Interpolate the right <agent_id> per file (design, devops, cto,
+    qa, ceo, sentinel, cmo, support, finance, operations).
+
+  WHEN BYPASSING IS OK:
+    Essentially never. If you genuinely need a model name in prose
+    (e.g., a historical note), put it somewhere that isn't the
+    **Model**: line of SOUL.md.
+  ──────────────────────────────────────────────────────────────────
+BRIEFING
+  else
+    ok "no hardcoded model names on staged SOUL.md $(echo "$staged_soul" | wc -l | tr -d ' ') file(s)"
+  fi
+fi
+
+# ---------------------------------------------------------------
+# Check 6: SanitizingIntercomClient bypass guard
+# createIntercomClient() is the only sanctioned way to build an
+# outbound Intercom client. Direct `new RealIntercomClient(...)`
+# anywhere outside plugins/intercom/src/outbound.ts (and the tests
+# that exercise it directly) bypasses the outbound email filter
+# and re-opens the leak Caroline was disclosing on 2026-04-16.
+# ---------------------------------------------------------------
+echo "  [6/6] Intercom client construction"
+# Staged files only — we don't care about pre-existing prod code until it gets
+# touched. Include R (rename) so `git mv` can't smuggle a bypass past the check
+# by carrying an existing `new RealIntercomClient(` through a rename.
+staged_ts_files=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx)$' || true)
+bypass_hits=()
+bypass_errors=()
+if [[ -n "$staged_ts_files" ]]; then
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    # Allow the real construction inside the factory itself and anywhere
+    # under the plugin's test directory.
+    case "$f" in
+      plugins/intercom/src/outbound.ts) continue ;;
+      plugins/intercom/tests/*) continue ;;
+    esac
+    # Read staged blob explicitly and check for read failure — otherwise a
+    # `git show` error (index race, unusual path) silently becomes empty
+    # stdin and the check passes by accident.
+    if ! staged_content=$(git show ":$f" 2>/dev/null); then
+      bypass_errors+=("$f")
+      continue
+    fi
+    # Strip TS comments and string literals before grepping so a docstring
+    # or error message containing the pattern doesn't false-positive — the
+    # briefing explicitly tells devs not to `--no-verify`, and false
+    # positives train the opposite reflex.
+    #   - Line comments: // ...
+    #   - Block comments: /* ... */  (single-line form covers JSDoc snippets)
+    #   - Single/double-quoted strings, and backtick template literals
+    stripped_content=$(printf '%s\n' "$staged_content" \
+      | sed -E 's#//.*$##' \
+      | sed -E 's#/\*.*\*/##g' \
+      | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g; s/\`[^\`]*\`//g")
+    if grep -qE 'new[[:space:]]+RealIntercomClient[[:space:]]*\(' <<<"$stripped_content"; then
+      bypass_hits+=("$f")
+    fi
+  done <<< "$staged_ts_files"
+fi
+if (( ${#bypass_errors[@]} > 0 )); then
+  fail "git show failed for staged file(s) — refusing to commit:"
+  for f in "${bypass_errors[@]}"; do red "      $f"; done
+fi
+if (( ${#bypass_hits[@]} > 0 )); then
+  fail "direct RealIntercomClient construction found in:"
+  for f in "${bypass_hits[@]}"; do red "      $f"; done
+  cat <<'BRIEFING'
+
+  ── BRIEFING ──────────────────────────────────────────────────────
+  WHY THIS CHECK EXISTS:
+    `new RealIntercomClient(...)` bypasses SanitizingIntercomClient,
+    which is the only thing stopping Caroline from leaking arbitrary
+    @muso.ai email addresses into customer-facing Intercom replies.
+    Bypassing the wrapper is a prod incident class — see
+    docs/2026-04-17-cs-agent-email-guardrail-design.md for history.
+
+  HOW TO FIX (do this — do NOT --no-verify):
+    Replace:
+      new RealIntercomClient(token)
+    with:
+      createIntercomClient(token, log)   // log optional
+    Import from ./outbound.js.
+
+  WHEN BYPASSING IS OK:
+    Inside outbound.ts itself (the factory) or anywhere under
+    plugins/intercom/tests/. Those paths are already allowlisted
+    above. Comment/string occurrences of the pattern are stripped
+    before grepping, so docstrings and error messages are fine.
+  ──────────────────────────────────────────────────────────────────
+BRIEFING
+else
+  ok "no direct RealIntercomClient construction outside allowed paths"
 fi
 
 echo

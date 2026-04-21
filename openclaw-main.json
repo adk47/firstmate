@@ -293,10 +293,9 @@
         "id": "operations",
         "workspace": "/opt/hydra/workspaces/operations",
         "model": {
-          "primary": "fireworks/accounts/fireworks/models/glm-5p1",
+          "primary": "anthropic/claude-sonnet-4-6",
           "fallbacks": [
-            "fireworks/accounts/fireworks/models/glm-5",
-            "anthropic/claude-sonnet-4-6"
+            "anthropic/claude-haiku-4-5-20251001"
           ]
         }
       },
@@ -665,7 +664,8 @@
     "allow": [
       "openclaw-gmail",
       "slack",
-      "intercom"
+      "intercom",
+      "muso-credit-verification-enforcer"
     ],
     "entries": {
       "slack": {
@@ -676,6 +676,9 @@
         "enabled": true
       },
       "intercom": {
+        "enabled": true
+      },
+      "muso-credit-verification-enforcer": {
         "enabled": true
       }
     },

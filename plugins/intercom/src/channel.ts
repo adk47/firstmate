@@ -9,7 +9,7 @@ import { validateHmacSignature } from "./webhook.js";
 import { handleWebhookEvent } from "./handler.js";
 import { createInitialSessionState, canAgentReply } from "./handoff.js";
 import {
-  RealIntercomClient,
+  createIntercomClient,
   trackOutboundMessageId,
   IntercomAssignmentConflictError,
 } from "./outbound.js";
@@ -207,7 +207,7 @@ export const intercomPlugin = createChatChannelPlugin({
                   }
 
                   const state = getOrCreateSession(account.accountId, conversationId, account.workspaceId);
-                  const client = new RealIntercomClient(account.token);
+                  const client = createIntercomClient(account.token, log);
                   const { result } = await handleWebhookEvent(payload, state, account.botAdminId, client);
 
                   // Persist state after every webhook that may have mutated it
@@ -455,7 +455,9 @@ export const intercomPlugin = createChatChannelPlugin({
           };
         }
 
-        const client = new RealIntercomClient(account.token);
+        const client = createIntercomClient(account.token, {
+          error: (msg) => console.error(msg),
+        });
         const { messageId } = await client.replyToConversation({
           conversationId,
           adminId: account.botAdminId,

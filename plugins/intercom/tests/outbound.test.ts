@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { MockIntercomClient, RealIntercomClient, trackOutboundMessageId } from "../src/outbound.js";
+import { MockIntercomClient, RealIntercomClient, trackOutboundMessageId, SanitizingIntercomClient, createIntercomClient } from "../src/outbound.js";
+import type { IntercomClient, IntercomConversation } from "../src/types.js";
 
 describe("MockIntercomClient", () => {
   it("records replyToConversation calls", async () => {
@@ -116,5 +117,189 @@ describe("trackOutboundMessageId", () => {
     const ids: string[] = [];
     trackOutboundMessageId("", ids);
     expect(ids).toHaveLength(0);
+  });
+});
+
+describe("SanitizingIntercomClient", () => {
+  it("passes a clean body through unchanged and emits no log", async () => {
+    const inner = new MockIntercomClient();
+    const logged: string[] = [];
+    const client = new SanitizingIntercomClient(inner, {
+      error: (msg) => logged.push(msg),
+    });
+    await client.replyToConversation({
+      conversationId: "conv_1",
+      adminId: "admin_1",
+      body: "Email support@muso.ai for help.",
+    });
+    expect(inner.calls.replyToConversation).toHaveLength(1);
+    expect(inner.calls.replyToConversation[0].body).toBe("Email support@muso.ai for help.");
+    expect(logged).toEqual([]);
+  });
+
+  it("sanitizes a body containing a disallowed email before delegating", async () => {
+    const inner = new MockIntercomClient();
+    const logged: string[] = [];
+    const client = new SanitizingIntercomClient(inner, {
+      error: (msg) => logged.push(msg),
+    });
+    await client.replyToConversation({
+      conversationId: "conv_42",
+      adminId: "admin_1",
+      body: "Please email nick@muso.ai for help.",
+    });
+    expect(inner.calls.replyToConversation[0].body).toBe("Please email support@muso.ai for help.");
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain("[intercom:email-leak]");
+    expect(logged[0]).toContain("conv=conv_42");
+    expect(logged[0]).toContain("count=1");
+    expect(logged[0]).toContain('"nick@muso.ai"');
+  });
+
+  it("works without a logger (silent redaction)", async () => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner);
+    await client.replyToConversation({
+      conversationId: "c1",
+      adminId: "a1",
+      body: "Contact nick@muso.ai please.",
+    });
+    expect(inner.calls.replyToConversation[0].body).toBe("Contact support@muso.ai please.");
+  });
+
+  it("does not log when logger has no error method", async () => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner, {});
+    await client.replyToConversation({
+      conversationId: "c1",
+      adminId: "a1",
+      body: "Contact nick@muso.ai please.",
+    });
+    expect(inner.calls.replyToConversation[0].body).toBe("Contact support@muso.ai please.");
+  });
+
+  it("returns the inner client's messageId unchanged", async () => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner);
+    const first = await client.replyToConversation({ conversationId: "c1", adminId: "a1", body: "hi" });
+    const second = await client.replyToConversation({ conversationId: "c1", adminId: "a1", body: "hi" });
+    expect(inner.calls.replyToConversation).toHaveLength(2);
+    expect(first.messageId).toBe("mock_msg_1");
+    expect(second.messageId).toBe("mock_msg_2");
+  });
+
+  it("passes assignConversation through unmodified", async () => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner);
+    await client.assignConversation({
+      conversationId: "c1",
+      adminId: "a1",
+      assigneeId: "a2",
+    });
+    expect(inner.calls.assignConversation).toHaveLength(1);
+    expect(inner.calls.assignConversation[0]).toEqual({
+      conversationId: "c1",
+      adminId: "a1",
+      assigneeId: "a2",
+    });
+  });
+
+  it("passes getConversation through unmodified", async () => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner);
+    const result = await client.getConversation({ conversationId: "c1" });
+    expect(inner.calls.getConversation).toHaveLength(1);
+    expect(result.id).toBe("c1");
+  });
+
+  it("propagates errors from the inner client", async () => {
+    const inner = new MockIntercomClient();
+    inner.replyToConversation = async () => {
+      throw new Error("network down");
+    };
+    const client = new SanitizingIntercomClient(inner);
+    await expect(
+      client.replyToConversation({ conversationId: "c1", adminId: "a1", body: "hi" }),
+    ).rejects.toThrow("network down");
+  });
+
+  it("emits the leak log BEFORE calling the inner client (observable even if inner throws)", async () => {
+    const events: string[] = [];
+    const inner: IntercomClient = {
+      replyToConversation: async () => {
+        events.push("inner");
+        throw new Error("net");
+      },
+      assignConversation: async () => {},
+      getConversation: async () => ({} as IntercomConversation),
+    };
+    const client = new SanitizingIntercomClient(inner, {
+      error: (m) => events.push(`log:${m.slice(0, 25)}`),
+    });
+    await expect(
+      client.replyToConversation({ conversationId: "c", adminId: "a", body: "ping nick@muso.ai" }),
+    ).rejects.toThrow("net");
+    expect(events[0]).toMatch(/^log:/);
+    expect(events[1]).toBe("inner");
+  });
+
+  it("does not mutate the caller's params object", async () => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner);
+    const params = { conversationId: "c1", adminId: "a1", body: "contact nick@muso.ai please." };
+    const snapshot = { ...params };
+    await client.replyToConversation(params);
+    expect(params).toEqual(snapshot);
+    expect(params.body).toBe("contact nick@muso.ai please.");
+    expect(inner.calls.replyToConversation[0].body).toBe("contact support@muso.ai please.");
+  });
+
+  it("dedupes repeated redactions in the log line count and array", async () => {
+    const logged: string[] = [];
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner, {
+      error: (m) => logged.push(m),
+    });
+    // Markdown-style email link: same address appears twice in the body.
+    await client.replyToConversation({
+      conversationId: "c42",
+      adminId: "a1",
+      body: "See [nick@muso.ai](mailto:nick@muso.ai) for details.",
+    });
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain("count=1");
+    expect(logged[0]).toContain('["nick@muso.ai"]');
+  });
+
+  it("never drops the reply if the logger itself throws", async () => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner, {
+      error: () => {
+        throw new Error("logger broken");
+      },
+    });
+    await client.replyToConversation({
+      conversationId: "c",
+      adminId: "a",
+      body: "contact nick@muso.ai",
+    });
+    // The inner client got the sanitized body even though the logger threw.
+    expect(inner.calls.replyToConversation).toHaveLength(1);
+    expect(inner.calls.replyToConversation[0].body).toBe("contact support@muso.ai");
+  });
+});
+
+describe("createIntercomClient", () => {
+  it("returns a SanitizingIntercomClient wrapping a RealIntercomClient", () => {
+    const client = createIntercomClient("test_token");
+    expect(client).toBeInstanceOf(SanitizingIntercomClient);
+  });
+
+  it("forwards log to the wrapper", async () => {
+    const logged: string[] = [];
+    const inner = new MockIntercomClient();
+    const c = new SanitizingIntercomClient(inner, { error: (m) => logged.push(m) });
+    await c.replyToConversation({ conversationId: "c1", adminId: "a1", body: "contact nick@muso.ai" });
+    expect(logged).toHaveLength(1);
   });
 });

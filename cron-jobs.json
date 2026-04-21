@@ -314,7 +314,7 @@
       "agentId": "cmo",
       "name": "amp-daily-report",
       "description": "Daily AMP ads performance report",
-      "enabled": true,
+      "enabled": false,
       "createdAtMs": 1774313970262,
       "updatedAtMs": 1774399200000,
       "schedule": {
@@ -498,6 +498,41 @@
         "lastDurationMs": 135770,
         "lastDelivered": true,
         "lastDeliveryStatus": "delivered"
+      }
+    },
+    {
+      "id": "081a0d98-4627-49cd-8c7a-334b927fe2ff",
+      "agentId": "operations",
+      "name": "credit-verification-batch-4h",
+      "description": "Every 4h autonomous credit verification batch \u2014 fetches up to OPS_BATCH_FETCH_SIZE unverified credits, runs B1\u2013B5 workflow, posts summary to #credit-verification. No-reject policy; 500/UTC-day approval cap.",
+      "enabled": true,
+      "createdAtMs": 1776358066484,
+      "updatedAtMs": 1776358066484,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 */4 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "run credit verification batch",
+        "model": "anthropic/claude-sonnet-4-6",
+        "fallbacks": [
+          "anthropic/claude-haiku-4-5-20251001"
+        ],
+        "timeoutSeconds": 1800
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1776369600000
       }
     }
   ]

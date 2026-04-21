@@ -350,6 +350,29 @@ jobs:
           # grep's "no match found" exit (which means zero deletions —
           # the pass case).
           deletions=$(grep '^\*deleting' "$rsync_out" || true)
+
+          # Apply the same auto-exclude classifier the deploy uses for
+          # Step 4a. Any `workspaces/<ws>/<subdir>/` deletion where git
+          # has never tracked content at that subdir is agent-authored
+          # runtime state — expected, not drift. Remaining deletions
+          # (tracked paths, skills-all/, etc.) stay suspicious and
+          # fail the gate. Fail-closed: the classifier returns non-zero
+          # on git unavailability or empty-tracked-set mismatches.
+          if [ -n "$deletions" ]; then
+            # shellcheck disable=SC1091
+            . scripts/lib/classify-deletions.sh
+            classified=$(classify_workspace_deletions "$deletions" "$(pwd)") || {
+              echo "::error::auto-exclude classifier refused to run — refusing to rubber-stamp deletions"
+              exit 1
+            }
+            deletions=$(echo "$classified" | sed -n 's/^REMAIN: //p')
+            auto=$(echo "$classified" | sed -n 's/^AUTO: //p')
+            if [ -n "$auto" ]; then
+              echo "Auto-excluded $(echo "$auto" | wc -l | tr -d ' ') never-tracked workspace subdirectory/ies:"
+              echo "$auto" | sed 's/^/  + /'
+            fi
+          fi
+
           if [ -n "$deletions" ]; then
             echo "::error::This PR would delete files from /opt/hydra/ on merge-triggered deploy"
             echo
@@ -360,13 +383,13 @@ jobs:
             echo "  (a) Real data created on the server that the repo doesn't know about"
             echo "      → Pull it in: scripts/sync-from-server.sh <path> --apply, then commit"
             echo "  (b) Runtime state the server should own"
-            echo "      → Add an --exclude line to RSYNC_EXCLUDES in scripts/deploy.sh"
-            echo "        AND to required_excludes in .githooks/pre-commit"
+            echo "      → Either commit a seed file under the path (auto-exclude will then kick in)"
+            echo "        OR add an --exclude line to RSYNC_EXCLUDES in scripts/deploy.sh"
             echo "  (c) Actual garbage left on the server"
             echo "      → Clean it up on node-8, then re-run this check"
             exit 1
           fi
-          echo "✓ Zero files would be deleted on merge — safe to deploy"
+          echo "✓ Zero suspicious deletions — safe to deploy"
 
       - name: Cron job orphan check
         # Compares cron-jobs.json in the PR against the server's live

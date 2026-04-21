@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-STALE_SECONDS=$((5*3600 + 30*60))  # 5h30m
+STALE_SECONDS=$((3*3600 + 30*60))  # 3h30m — sits inside the 4h cron cadence so a SIGKILL-stuck lock is self-stolen by the next tick
 
 require_env() {
   if [[ -z "${OPS_BATCH_LOCK_PATH:-}" ]]; then
@@ -67,8 +67,9 @@ cmd_acquire() {
       if is_stale_by_mtime "$OPS_BATCH_LOCK_PATH"; then
         # Live PID but stale mtime — likely a different process reusing the PID.
         # (The held batch process never bumps mtime during a run, so any run
-        # legitimately exceeding 5h30m would be self-stolen — but that's well
-        # beyond expected runtime, and the 6h heartbeat would re-collide anyway.)
+        # legitimately exceeding 3h30m would be self-stolen. The batch never
+        # exceeds ~30min in practice, and the 4h cron cadence would re-collide
+        # on the tick after anyway.)
         # Safe to steal.
         :
       else
