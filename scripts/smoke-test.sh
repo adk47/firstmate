@@ -109,6 +109,64 @@ needs_target() { [[ "$TARGET" == "all" || ",$TARGET," == *",$1,"* ]]; }
 # -------------------------------------------------------------------
 if needs_target "main"; then
   log "Checking main gateway (port 18789)..."
+
+  # Zombie guard: the pre-multi-profile legacy unit
+  # /etc/systemd/system/openclaw-gateway.service (no '-main' suffix) binds
+  # port 18789 and runs openclaw *without* --profile. On 2026-04-21 it was
+  # found to have been `disabled` but still `active` — its openclaw process
+  # used service-mode pid-clearing to SIGTERM openclaw-gateway-main.service
+  # every ~20s, preventing main from staying up for more than one cycle.
+  # It also answered CLI queries with the pre-migration cron storePath,
+  # creating a 2-week silent drift between deploys and what the gateway read.
+  # The legacy unit file was renamed to *.legacy-disabled-<timestamp> and
+  # the service is now masked (→ /dev/null). This gate refuses to ever let
+  # it reanimate.
+  # is-enabled returns non-zero on absent units (→ stdout "not-found") AND
+  # on systemctl failures (→ empty output). We keep the `|| true` so `set -e`
+  # callers don't abort, but separate the two outcomes below: absent unit
+  # passes, empty output fails (cannot verify).
+  LEGACY_STATE=$(systemctl is-active openclaw-gateway.service 2>/dev/null || true)
+  LEGACY_ENABLED=$(systemctl is-enabled openclaw-gateway.service 2>/dev/null || true)
+  case "$LEGACY_ENABLED" in
+    masked|masked-runtime)
+      if [ "$LEGACY_STATE" = "active" ] || [ "$LEGACY_STATE" = "activating" ] || [ "$LEGACY_STATE" = "reloading" ]; then
+        LEGACY_PID=$(systemctl show --property=MainPID --value openclaw-gateway.service 2>/dev/null || echo "?")
+        LEGACY_EXEC=$(systemctl show --property=ExecStart --value openclaw-gateway.service 2>/dev/null | head -c 200 || echo "?")
+        fail_check "Legacy openclaw-gateway.service is masked but $LEGACY_STATE (MainPID=$LEGACY_PID, ExecStart=$LEGACY_EXEC) — run: systemctl stop openclaw-gateway.service; then investigate how a masked unit got started (see docs/RUNBOOK.md#legacy-openclaw-gateway-zombie)"
+      else
+        pass_check "Legacy openclaw-gateway.service is masked (zombie stays dead)"
+      fi
+      ;;
+    not-found)
+      pass_check "Legacy openclaw-gateway.service not present (no zombie possible)"
+      ;;
+    "")
+      fail_check "systemctl returned empty output for openclaw-gateway.service is-enabled — cannot verify zombie is masked (dbus down? non-systemd host? permissions?)"
+      ;;
+    *)
+      fail_check "Legacy openclaw-gateway.service is enabled=$LEGACY_ENABLED active=$LEGACY_STATE — must be masked. Run: systemctl stop openclaw-gateway.service && systemctl mask openclaw-gateway.service (see docs/RUNBOOK.md#legacy-openclaw-gateway-zombie for full remediation)"
+      ;;
+  esac
+
+  # Verify dual-write convergence: deploy.sh mirrors cron-jobs.json to
+  # both the profile path (authoritative storePath) and the legacy path
+  # (defense-in-depth vs zombie). We compare only the static job
+  # definitions — the gateway writes runtime state (lastRunAtMs,
+  # nextRunAtMs, consecutiveErrors) back to the profile path
+  # continuously, so a byte-level diff would fire on every cron tick.
+  # The invariant that matters: job id/name/schedule/prompt/delivery
+  # must match, so if the mirror step silently broke, a future zombie
+  # reanimation would read a stale job list.
+  if [ -f /root/.openclaw-main/cron/jobs.json ] && [ -f /root/.openclaw/cron/jobs.json ]; then
+    if diff <(jq -S '.jobs | map(del(.state, .updatedAtMs)) | sort_by(.id)' /root/.openclaw-main/cron/jobs.json 2>/dev/null) \
+            <(jq -S '.jobs | map(del(.state, .updatedAtMs)) | sort_by(.id)' /root/.openclaw/cron/jobs.json 2>/dev/null) \
+            >/dev/null 2>&1; then
+      pass_check "cron-jobs.json job definitions in sync across profile and legacy paths (dual-write converged)"
+    else
+      fail_check "cron-jobs.json job definitions diverged between /root/.openclaw-main/cron/jobs.json and /root/.openclaw/cron/jobs.json — deploy's dual-write step likely broke"
+    fi
+  fi
+
   # Expected count is derived from openclaw-main.json by check_agent_count.
   # The helper hard-fails on inability to read the config (rather than
   # coercing to 0) so a deploy that wipes the config can never produce

@@ -313,6 +313,87 @@ docker rm -f hydra-sandbox
 
 ---
 
+### Legacy openclaw-gateway Zombie
+
+**Symptoms:** smoke-test fails with `Legacy openclaw-gateway.service is ...
+— must be masked`, OR `openclaw-gateway-main.service` keeps dying every
+~20s with a SIGTERM it didn't ask for, OR `openclaw --profile main cron
+status --json` reports `storePath: /root/.openclaw/cron/jobs.json` (the
+pre-migration legacy path) instead of `/root/.openclaw-main/cron/jobs.json`.
+
+**Background:** Before PR #43 split the gateway into `main`/`edge`/`dev`
+profiles, there was a single `openclaw-gateway.service` (no `-main`
+suffix). After migration, that legacy unit should have been removed but
+in some environments it persisted as `disabled` — which does NOT stop a
+running instance. A `disabled`-but-`active` legacy unit binds port 18789
+without `--profile`, runs openclaw with the pre-migration data dir
+(`/root/.openclaw/`), and its service-mode pid-clearing SIGTERMs the
+real `openclaw-gateway-main.service` every ~20s. It also answers CLI
+queries with the wrong storePath, creating silent drift between deploys
+and gateway reads. One such zombie was found on node-8 on 2026-04-21
+and caused a ~90-minute gateway instability window plus ~2 hours of
+debugging chasing a phantom upstream bug.
+
+**Diagnosis:**
+
+```bash
+ssh root@40.160.32.80
+systemctl is-enabled openclaw-gateway.service  # should be 'masked' or 'not-found'
+systemctl is-active openclaw-gateway.service   # should be 'inactive' or error
+# If either is anything else — especially if is-active=active with any
+# is-enabled value — you have the zombie.
+```
+
+**Full remediation** (this is what was applied on node-8 2026-04-21 and
+what the smoke-test gate enforces on every deploy):
+
+```bash
+ssh root@40.160.32.80
+# 1. Stop any live zombie process first. `mask` alone does NOT stop a
+#    running unit — it only prevents future starts.
+systemctl stop openclaw-gateway.service 2>/dev/null || true
+
+# 2. Rename (don't delete) the legacy unit file and drop-in directory so
+#    forensics are preserved. Systemd ignores anything not matching *.service.
+TS=$(date +%Y%m%d-%H%M%S)
+if [ -f /etc/systemd/system/openclaw-gateway.service ]; then
+  mv /etc/systemd/system/openclaw-gateway.service{,.legacy-disabled-$TS}
+fi
+if [ -d /etc/systemd/system/openclaw-gateway.service.d ]; then
+  mv /etc/systemd/system/openclaw-gateway.service.d{,.legacy-disabled-$TS}
+fi
+
+# 3. Reload systemd's view and mask the unit name so future
+#    `systemctl start openclaw-gateway.service` is refused.
+systemctl daemon-reload
+systemctl mask openclaw-gateway.service
+
+# 4. Verify.
+systemctl is-enabled openclaw-gateway.service  # masked
+systemctl is-active openclaw-gateway.service   # inactive
+openclaw --profile main cron status --json | jq .storePath
+# → expect "/root/.openclaw-main/cron/jobs.json"
+
+# 5. Restart openclaw-gateway-main so it recovers cleanly.
+systemctl restart openclaw-gateway-main.service
+```
+
+**Why mask alone is not enough:** `systemctl mask` points the unit at
+`/dev/null` so new starts fail. It does not kill a process already
+running, and the drop-in dir at `/etc/systemd/system/openclaw-gateway.service.d/`
+remains — if the mask is ever lifted, the original config is still
+loadable. Renaming the unit file and drop-in dir in step 2 is the
+belt-and-suspenders part.
+
+**Prevention:** `scripts/smoke-test.sh` runs a zombie guard on every
+deploy that hard-fails if the legacy unit is anything other than
+`masked`/`masked-runtime`/`not-found`. `scripts/deploy.sh` additionally
+mirrors `cron-jobs.json` to both the profile and legacy paths so if the
+zombie ever reanimates before smoke-test catches it, the drift window
+is one deploy cycle rather than weeks.
+
+---
+
 ### NemoClaw Sandbox Issues
 
 **Symptoms**: Permission denied errors, filesystem read-only errors, or network failures

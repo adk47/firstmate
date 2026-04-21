@@ -1278,16 +1278,21 @@ fi
 # Note: mention gate patch (patch-openclaw-mention-gate.sh) removed — no longer needed on OpenClaw 2026.4.2+
 
 # Sync cron jobs from repo to the main profile data dir (preserve live state).
-# After the multi-profile migration, the main gateway is launched with
-# `--profile main`, which makes openclaw use ~/.openclaw-main/ as its data
-# dir (not ~/.openclaw/). The cron scheduler reads from
-# /root/.openclaw-main/cron/jobs.json. The previous path
-# /root/.openclaw/cron/jobs.json was the pre-migration default and is not
-# read when the gateway runs with --profile main — writing there silently
-# produced a 19-hour cron outage on 2026-04-07. Always target the
-# multi-profile path now.
+# Under `--profile main`, openclaw reads/writes cron state at
+# /root/.openclaw-main/cron/jobs.json — this is the authoritative storePath
+# (verified 2026-04-21 via `openclaw --profile main cron status --json`
+# once the legacy zombie service was masked; see the zombie guard in
+# smoke-test.sh for the full incident context).
+#
+# We ALSO mirror to /root/.openclaw/cron/jobs.json (the pre-migration
+# legacy path) as defense-in-depth. If the pre-multi-profile
+# `openclaw-gateway.service` unit ever reanimates (smoke-test hard-fails
+# the deploy if it does), at least both paths will carry the same job set
+# so the drift window is zero rather than 2 weeks. In steady state nothing
+# reads the mirror; cost is ~1 extra install -m 600 per deploy.
 if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
   LIVE_CRON="/root/.openclaw-main/cron/jobs.json"
+  LEGACY_CRON="/root/.openclaw/cron/jobs.json"
   # NOTE: the parent profile dir /root/.openclaw-main/ is guaranteed to
   # exist by the profile-config-sync block that runs between Step 4d
   # and Step 5a in this same deploy (the "mkdir -p /root/.openclaw-main;
@@ -1371,6 +1376,21 @@ PYEOF
     echo "  Deployed cron jobs to $LIVE_CRON (fresh install)"
   fi
   chmod 600 "$LIVE_CRON" || fail "failed to chmod $LIVE_CRON"
+
+  # Mirror to the legacy path as defense-in-depth against zombie
+  # reanimation (see block comment above). install -m 600 sets perms
+  # atomically on creation (no 0644 window). Symlink guard: if either
+  # path resolves to the same inode (e.g. someone symlinked
+  # /root/.openclaw/cron/jobs.json → the profile file as a manual
+  # convergence fix), skip the install — it would be a self-copy and
+  # the "mirrored" log line would be misleading.
+  mkdir -p "$(dirname "$LEGACY_CRON")" || fail "failed to create cron dir at $(dirname "$LEGACY_CRON")"
+  if [ -e "$LEGACY_CRON" ] && [ "$(readlink -f "$LIVE_CRON")" = "$(readlink -f "$LEGACY_CRON")" ]; then
+    log "  Skipped legacy mirror: $LEGACY_CRON resolves to same inode as $LIVE_CRON"
+  else
+    install -m 600 "$LIVE_CRON" "$LEGACY_CRON" || fail "failed to mirror cron-jobs.json to $LEGACY_CRON"
+    log "  Mirrored cron-jobs.json to $LEGACY_CRON (defense-in-depth vs zombie legacy service)"
+  fi
 fi
 
 # Use local embeddings for memory search on main profile
