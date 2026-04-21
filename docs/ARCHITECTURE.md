@@ -64,15 +64,16 @@ Internet
     |   |  |  |  Port 18789 (localhost only)             |   |  |
     |   |  |  |                                          |   |  |
     |   |  |  |  9 Agents:                               |   |  |
-    |   |  |  |    coordinator  (Buddy)   - Opus         |   |  |
-    |   |  |  |    ceo                    - Opus         |   |  |
-    |   |  |  |    cmo                    - Opus         |   |  |
-    |   |  |  |    cto                    - Opus         |   |  |
+    |   |  |  |    coordinator  (Buddy)   - Opus 4.7     |   |  |
+    |   |  |  |    ceo                    - Opus 4.7     |   |  |
+    |   |  |  |    cmo                    - Opus 4.6 *   |   |  |
+    |   |  |  |    cto                    - Opus 4.7     |   |  |
     |   |  |  |    qa                     - Sonnet       |   |  |
     |   |  |  |    finance                - Intelligent  |   |  |
-    |   |  |  |    operations             - Intelligent  |   |  |
+    |   |  |  |    operations             - Kimi K2.6    |   |  |
     |   |  |  |    devops                 - Sonnet       |   |  |
     |   |  |  |    design                 - Intelligent  |   |  |
+    |   |  |  |    (* cmo migrating to 4.7 via PR #131)  |   |  |
     |   |  |  +-------------------+----------------------+   |  |
     |   |  |                      | localhost:8317           |  |
     |   |  +----------------------|-------------------------+  |
@@ -92,7 +93,7 @@ Internet
     |   +------------------------------------------------------+
     |
     +-- Anthropic API (api.anthropic.com)
-    |       ^ Claude Opus 4.6 / Sonnet 4.6 / Haiku 4.5
+    |       ^ Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 / Haiku 4.5
     |
     +-- GitHub (Muso-AI/hydra, Muso-AI/hydra-audit)
 ```
@@ -203,15 +204,17 @@ Each of the 9 agents is a separate Slack application with its own identity.
 
 | Agent ID      | Slack Name | Model        | Owner   | Primary Role                          |
 |---------------|------------|--------------|---------|---------------------------------------|
-| coordinator   | @Buddy     | Opus 4.6     | Aaron   | Triage, coordination, general help    |
-| ceo           | @CEO       | Opus 4.6     | Fede    | Strategy, business decisions          |
-| cmo           | @CMO       | Opus 4.6     | Nick    | Marketing, growth, communications     |
-| cto           | @CTO       | Opus 4.6     | Jay     | Technical leadership, architecture    |
+| coordinator   | @Buddy     | Opus 4.7     | Aaron   | Triage, coordination, general help    |
+| ceo           | @CEO       | Opus 4.7     | Fede    | Strategy, business decisions          |
+| cmo           | @CMO       | Opus 4.6 *   | Nick    | Marketing, growth, communications     |
+| cto           | @CTO       | Opus 4.7     | Jay     | Technical leadership, architecture    |
 | qa            | @QA        | Sonnet 4.6   | Liza    | Testing, quality assurance            |
 | finance       | @Finance   | Intelligent  | Jan     | Financial analysis, budgeting         |
-| operations    | @Operations| Intelligent  | Artem D | Operational workflows, logistics      |
+| operations    | @Operations| Kimi K2.6    | Artem D | Operational workflows, logistics      |
 | devops        | @DevOps    | Sonnet 4.6   | Aaron   | Infrastructure, CI/CD, deployments    |
 | design        | @Design    | Intelligent  | Mariia  | UI/UX, design systems, assets         |
+
+\* cmo is migrating to Opus 4.7 via PR #131 (dedicated `anthropic-cmo` provider for isolated API key).
 
 ### How Channel Membership Works
 
@@ -257,16 +260,20 @@ identity. These files are mounted read-only in the NemoClaw sandbox.
 
 HYDRA uses a tiered model allocation to balance capability with cost.
 
-### Fixed Assignments (6 agents)
+### Fixed Assignments (7 agents)
 
-| Tier     | Model          | Agents                         | Rationale                    |
-|----------|----------------|--------------------------------|------------------------------|
-| **Opus** | Claude Opus 4.6 | coordinator, ceo, cmo, cto    | Complex reasoning, strategy  |
-| **Sonnet** | Claude Sonnet 4.6 | qa, devops                 | Technical tasks, code review |
+| Tier       | Model             | Agents                     | Rationale                        |
+|------------|-------------------|----------------------------|----------------------------------|
+| **Opus**   | Claude Opus 4.7   | coordinator, ceo, cto      | Strategy with extended thinking  |
+| **Opus**   | Claude Opus 4.6   | cmo *                      | Migrating to 4.7 via PR #131     |
+| **Sonnet** | Claude Sonnet 4.6 | qa, devops                 | Technical tasks, code review     |
+| **Fireworks** | Kimi K2.6      | operations                 | Tool-heavy workflows, BrowseComp |
 
-### Intelligent Selection (3 agents)
+\* cmo migrates to Opus 4.7 on the dedicated `anthropic-cmo` provider once PR #131 lands.
 
-The `finance`, `operations`, and `design` agents use intelligent model selection
+### Intelligent Selection (2 agents)
+
+The `finance` and `design` agents use intelligent model selection
 that picks the right model based on task complexity:
 
 | Model          | Approximate Usage | When Selected                        |
