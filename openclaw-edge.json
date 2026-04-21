@@ -67,37 +67,38 @@
         "auth": "api-key",
         "models": [
           {
-            "id": "accounts/fireworks/models/glm-5",
-            "name": "GLM-5",
+            "id": "accounts/fireworks/models/qwen3p6-plus",
+            "name": "Qwen3.6-Plus",
             "input": [
-              "text"
+              "text",
+              "image"
             ],
             "maxTokens": 8192,
-            "reasoning": false,
+            "reasoning": true,
             "cost": {
-              "input": 1,
-              "output": 3.2,
-              "cacheRead": 0.2,
+              "input": 0.5,
+              "output": 3.0,
+              "cacheRead": 0.1,
               "cacheWrite": 0
             },
-            "contextWindow": 202752,
+            "contextWindow": 262144,
             "api": "openai-completions"
           },
           {
-            "id": "accounts/fireworks/models/deepseek-v3p2",
-            "name": "DeepSeek-V3",
+            "id": "accounts/fireworks/models/glm-5p1",
+            "name": "GLM-5.1",
             "input": [
               "text"
             ],
             "maxTokens": 8192,
-            "reasoning": false,
+            "reasoning": true,
             "cost": {
-              "input": 0.3,
-              "output": 0.9,
-              "cacheRead": 0.05,
+              "input": 1.4,
+              "output": 4.4,
+              "cacheRead": 0.26,
               "cacheWrite": 0
             },
-            "contextWindow": 163840,
+            "contextWindow": 202752,
             "api": "openai-completions"
           }
         ],
@@ -108,10 +109,10 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "fireworks/accounts/fireworks/models/glm-5",
+        "primary": "fireworks/accounts/fireworks/models/qwen3p6-plus",
         "fallbacks": [
-          "fireworks/accounts/fireworks/models/deepseek-v3p2",
-          "anthropic/claude-haiku-4-5-20251001"
+          "anthropic/claude-haiku-4-5-20251001",
+          "fireworks/accounts/fireworks/models/glm-5p1"
         ]
       },
       "workspace": "/opt/hydra/workspaces/support",
@@ -134,10 +135,10 @@
         "default": true,
         "workspace": "/opt/hydra/workspaces/support",
         "model": {
-          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "primary": "fireworks/accounts/fireworks/models/qwen3p6-plus",
           "fallbacks": [
-            "fireworks/accounts/fireworks/models/deepseek-v3p2",
-            "anthropic/claude-haiku-4-5-20251001"
+            "anthropic/claude-haiku-4-5-20251001",
+            "fireworks/accounts/fireworks/models/glm-5p1"
           ]
         }
       }
