@@ -1270,7 +1270,7 @@ if needs_target "main"; then
     fi
   else
     log "WARN: $MAIN_ENV does not exist — ops agent will start with no admin credentials."
-    log "WARN: create it, add MUSO_ADMIN_EMAIL= and MUSO_ADMIN_PASSWORD=, then:"
+    log "WARN: create it, add MUSO_ADMIN_EMAIL= (e.g. retool@muso.ai) and MUSO_ADMIN_PASSWORD=, then:"
     log "WARN:   systemctl restart openclaw-gateway-main"
   fi
 fi
