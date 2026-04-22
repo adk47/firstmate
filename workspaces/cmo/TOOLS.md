@@ -62,6 +62,13 @@ _All tools the CMO agent has access to. See individual skill files for full API 
 - Bound channels: #marketing, #muso-ads, #campaigns, #clio_x_fede
 - Never post budgets/spend outside bound channels
 
+### NocoDB (Intelligence Base)
+- Airtable-like DB for intelligence / research data
+- Transport: MCP server named `NocoDB Base - Intelligence` (registered via `openclaw mcp set` on profile `main`)
+- Endpoint: `https://app.nocodb.com/mcp/nc0hvbud53e8fmrx` (bridged via `npx mcp-remote`)
+- Auth: `xc-mcp-token` header (stored in openclaw MCP config, not env)
+- Available after gateway-main restart picks up the new MCP config
+
 ---
 
 ## Connected — Read Only

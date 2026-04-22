@@ -1,147 +1,118 @@
-# MCP Servers (Notion, GitMCP, etc.) in OpenClaw
+# MCP Servers in OpenClaw
 
-This runbook describes how to connect **MCP servers** (like **Notion MCP** and **GitMCP**) to the OpenClaw gateway used by Slack.
+How MCP servers (NocoDB, Notion, GitMCP, etc.) are wired into the OpenClaw gateways used by Slack/Clio.
+
+> **2026-04-22 update:** This runbook previously described an `mcporter` CLI wrapper. OpenClaw 2026.4.15+ has **native** MCP support via `openclaw mcp` — no separate CLI or config file needed. The old mcporter instructions were superseded and have been removed.
 
 ## Mental model
 
-- OpenClaw does not ship a built-in Notion integration today (Notion access is typically via MCP).
-- OpenClaw can use the `mcporter` skill to call MCP servers.
-- `mcporter` finds MCP servers from its config file (`mcpServers`).
+- MCP servers are configured **per profile** inside the profile's `openclaw.json`, under the `mcp` / `mcpServers` key.
+- Each profile has its own config file: `/root/.openclaw-main/openclaw.json`, `/root/.openclaw-edge/openclaw.json`, `/root/.openclaw-dev/openclaw.json`.
+- All agents on a profile share the MCP server list for that profile — there is no per-agent scoping at this layer.
+- The gateway loads MCP config at start; **new sessions** pick up config changes, but in-flight sessions do not.
 
-## What needs to be installed on the OpenClaw host
+## Commands
 
-1) **The `mcporter` skill is enabled** in OpenClaw.
+Use `openclaw mcp` (add `--profile <name>` to target a non-default profile):
 
-2) **The `mcporter` CLI is installed** on the host and present on `PATH`.
+```bash
+# List configured MCP servers
+openclaw --profile main mcp list
 
-## What config files need to exist (and where)
+# Show one server's config (or the full mcp config with no arg)
+openclaw --profile main mcp show "NocoDB Base - Intelligence"
 
-### MCP server definitions
+# Add / overwrite a server
+openclaw --profile main mcp set "NocoDB Base - Intelligence" '{
+  "command": "npx",
+  "args": [
+    "mcp-remote",
+    "https://app.nocodb.com/mcp/<base-id>",
+    "--header",
+    "xc-mcp-token: <token>"
+  ]
+}'
 
-Create a `mcporter` config file on the OpenClaw host:
+# Remove a server
+openclaw --profile main mcp unset "NocoDB Base - Intelligence"
 
-- `~/.mcporter/mcporter.json` (recommended; system-wide default)
+# Bridge OpenClaw channels out over MCP stdio (rarely used day-to-day)
+openclaw --profile main mcp serve
+```
 
-Example:
+`openclaw mcp set` **overwrites** the named entry and writes a timestamped backup under the profile directory (look for `openclaw.json.bak*`). Always back up the config yourself first too when editing prod:
+
+```bash
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+cp /root/.openclaw-main/openclaw.json "/root/.openclaw-main/openclaw.json.bak-${TS}-pre-<reason>"
+```
+
+## Server types
+
+### Remote HTTP MCP bridged over stdio (`npx mcp-remote`)
+
+Use for third-party hosted MCPs that expose an HTTP endpoint and a header-based token (NocoDB, some SaaS MCPs).
 
 ```json
 {
-  "mcpServers": {
-    "notion": {
-      "baseUrl": "https://mcp.notion.com/mcp",
-      "auth": "oauth",
-      "oauthRedirectUrl": "http://localhost:0/callback"
-    }
-  },
-  "imports": []
+  "command": "npx",
+  "args": [
+    "mcp-remote",
+    "https://provider.example/mcp/<id>",
+    "--header",
+    "<auth-header>: <token>"
+  ]
 }
 ```
 
-Notes:
-- Use `imports: []` if you want fully explicit configuration (no auto-import from other MCP clients).
-- If you prefer a dedicated config path, set `MCPORTER_CONFIG` (see “Wiring into OpenClaw”).
-- `auth: "oauth"` is required for hosted Notion MCP; without it, `mcporter auth notion` will not start the browser flow.
-- If you see `InvalidGrantError: Invalid redirect URI` during Notion OAuth, set `oauthRedirectUrl` to a `localhost` loopback URL (some providers reject `127.0.0.1`):
-  - Recommended: `"oauthRedirectUrl": "http://localhost:0/callback"` (dynamic port)
+Pros: no local install beyond `npx`. Cons: cold-start latency on first call per session.
 
-### Config resolution (important for the gateway)
+### Stdio MCP via a local CLI (e.g. `uvx context7-mcp`)
 
-`mcporter` looks for config in these places (in priority order):
+Use when the provider publishes an MCP CLI you run directly.
 
-- Project config: `~/config/mcporter.json`
-- System config: `~/.mcporter/mcporter.json`
-
-The OpenClaw gateway’s working directory is typically `/`, so do **not** rely on `./config/mcporter.json` on the gateway host; prefer `~/.mcporter/mcporter.json` or set `MCPORTER_CONFIG`.
-
-### OAuth token cache (Notion hosted MCP)
-
-If you use Notion’s hosted MCP, OAuth tokens are cached by `mcporter` under:
-
-- `~/.mcporter/` (server-specific subfolders)
-
-In headless production environments, you can complete OAuth on a workstation and then copy the token cache directory onto the gateway host (same OS user that runs OpenClaw).
-
-## Setup steps (host)
-
-1) Install/enable the `mcporter` skill in OpenClaw (Control UI → Skills).
-
-2) Install `mcporter` CLI on the gateway host.
-
-3) Create `~/.mcporter/mcporter.json` with your servers (example above).
-
-4) Verify the gateway can see the servers:
-
-```bash
-mcporter list
-mcporter list notion --schema
+```json
+{
+  "command": "uvx",
+  "args": ["context7-mcp"]
+}
 ```
 
-5) If using Notion hosted MCP, complete OAuth once:
+### Hosted OAuth MCP (e.g. Notion)
+
+Hosted OAuth MCPs need an interactive browser flow to mint a token. For headless gateway hosts, complete OAuth on a workstation and copy the token cache onto the gateway host. Consult the provider's MCP docs for the token cache path.
+
+## Propagating a config change live
+
+The gateway **does not hot-reload** the MCP config. After `openclaw mcp set/unset`:
+
+1. New sessions (triggered via Slack mention, cron, etc.) pick up the change.
+2. In-flight sessions keep the old tool list until they end.
+3. If you need an immediate refresh across all sessions:
+   ```bash
+   systemctl restart openclaw-gateway-main   # (or -edge / -dev)
+   ```
+   This disrupts any live Slack conversation — prefer "let new sessions pick it up" unless the MCP is blocking time-critical work.
+
+## Verifying from the gateway
 
 ```bash
-mcporter auth notion
+# From the host
+openclaw --profile main mcp list
+openclaw --profile main mcp show "<server name>"
+
+# From a Slack DM with the agent, after a new session starts
+@cmo which MCP tools do you have access to?
 ```
 
-If you expect to take longer than 60 seconds to approve in the browser, increase the timeout:
+## Security notes
 
-```bash
-mcporter --oauth-timeout 600000 auth notion
-```
-
-6) Start a new OpenClaw session (or restart the gateway) so the updated skill/tool environment is picked up.
-
-## Wiring into OpenClaw (recommended for production)
-
-To ensure `mcporter` always uses the intended config file, inject:
-
-- `MCPORTER_CONFIG=/etc/openclaw/mcporter.json` (or another secure path)
-
-Where to inject depends on your deployment:
-
-- **systemd:** set environment in the service unit (or an `EnvironmentFile=`).
-- **Docker/ECS/EKS:** inject env vars via task definition / Kubernetes Secret.
-- **OpenClaw config:** set per-skill env at `skills.entries.mcporter.env` (if you want the gateway to inject env only for agent runs).
-
-## Recommended server entries
-
-### GitMCP (read-only repo docs/code)
-
-- URL format: `https://gitmcp.io/<owner>/<repo>`
-- No secrets required.
-- **Important:** Hosted GitMCP can only read repos that are accessible without GitHub authentication. For private repos, use the OpenClaw `github` skill (below) or self-host a Git MCP server inside your environment.
-
-### Private GitHub repos (recommended: OpenClaw `github` skill via `gh`)
-
-If you need access to **private** GitHub repos from Slack/OpenClaw, prefer the built-in OpenClaw `github` skill which uses the `gh` CLI on the gateway host.
-
-Host prerequisites:
-- Install `gh` (macOS + Homebrew): `brew install gh`
-- Ensure the gateway user is authenticated: `gh auth status -h github.com`
-
-Example commands (from the gateway host):
-```bash
-gh repo view Muso-AI/customer-api-mcp --json name,isPrivate,url
-gh search code "mcpServers" --repo Muso-AI/customer-api-mcp --limit 20
-```
-
-### Notion MCP (recommended: hosted)
-
-- URL: `https://mcp.notion.com/mcp`
-- Requires OAuth once per gateway identity.
-
-### Notion MCP (self-hosted)
-
-Use this when you need token-based auth (non-interactive) and stricter control. In that model:
-- You host a Notion MCP server inside your environment.
-- The MCP server uses a Notion integration token.
-- OpenClaw calls *your* MCP URL instead of `https://mcp.notion.com/mcp`.
+- `openclaw mcp set` writes the raw JSON (including any bearer tokens / headers) into the profile's `openclaw.json`. That file is world-readable to `root` on the gateway host — do **not** commit it. Rotate tokens if the config file is leaked.
+- `openclaw.json` is not in git; only the repo templates + skill docs are.
+- For private GitHub repo access, prefer the built-in OpenClaw `github` skill (uses `gh` CLI under the gateway user) over hosted GitMCP, which cannot reach private repos.
 
 ## Troubleshooting
 
-If `mcporter list` reports “No MCP servers configured”, it means the gateway host does not have a `mcporter` config file in any of the expected locations, and no imports produced servers.
-
-Checklist:
-- Confirm the OpenClaw host user running the gateway has `~/.mcporter/mcporter.json`.
-- Confirm `mcporter` exists on `PATH`.
-- If using `MCPORTER_CONFIG`, confirm the gateway process environment includes it.
-- If using Notion hosted MCP, confirm OAuth was completed (`mcporter auth notion`) and the token cache exists.
+- **`openclaw mcp list` returns "No MCP servers configured"** — the profile's `openclaw.json` has no `mcp`/`mcpServers` key. Run `openclaw --profile <name> mcp set` or check you're targeting the right profile with `--profile`.
+- **Agent can't see the tool after config change** — most likely the session was started before the config change. Start a new session (re-@mention in Slack or wait for the next cron run).
+- **`npx mcp-remote` fails on cold start** — check outbound HTTPS reachability from the gateway host to the MCP provider; hosted MCPs often require IP allowlisting.
