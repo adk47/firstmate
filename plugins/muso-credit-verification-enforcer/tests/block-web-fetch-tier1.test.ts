@@ -2,10 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { blockWebFetchTier1 } from "../src/hooks/block-web-fetch-tier1.js";
 import { cvSessions } from "../src/state.js";
 
-const buildCtx = (overrides: Partial<{ sessionKey: string; runId: string }> = {}) => ({
+const buildCtx = (
+  overrides: Partial<{ sessionKey: string; runId: string; agentId: string }> = {},
+) => ({
   toolName: "web_fetch",
   sessionKey: overrides.sessionKey,
   runId: overrides.runId,
+  agentId: overrides.agentId,
 });
 
 describe("blockWebFetchTier1", () => {
@@ -89,6 +92,35 @@ describe("blockWebFetchTier1", () => {
       buildCtx({ runId: "20260422-101649-e8ded0" }),
     );
     expect(r?.block).toBe(true);
+  });
+
+  it("blocks when ctx.agentId is the operations agent (issue #152 @-mention path)", () => {
+    // @-mention flows into #credit-verification don't mark cvSessions and
+    // don't set runId, but they DO run under agentId="operations". The
+    // workspace-level gate catches them.
+    const r = blockWebFetchTier1(
+      { toolName: "web_fetch", params: { url: "https://open.spotify.com/artist/abc" } },
+      buildCtx({ agentId: "operations" }),
+    );
+    expect(r?.block).toBe(true);
+  });
+
+  it("blocks when ctx.agentId is operations-dev", () => {
+    const r = blockWebFetchTier1(
+      { toolName: "web_fetch", params: { url: "https://discogs.com/artist/abc" } },
+      buildCtx({ agentId: "operations-dev" }),
+    );
+    expect(r?.block).toBe(true);
+  });
+
+  it("does NOT block when ctx.agentId is a non-CV agent", () => {
+    // Other agents (ceo, support, cmo…) still pass web_fetch through — the
+    // block is CV-scoped, not a global ban.
+    const r = blockWebFetchTier1(
+      { toolName: "web_fetch", params: { url: "https://open.spotify.com/artist/abc" } },
+      buildCtx({ agentId: "ceo" }),
+    );
+    expect(r).toBeUndefined();
   });
 
   it("does not block other tools (passthrough)", () => {

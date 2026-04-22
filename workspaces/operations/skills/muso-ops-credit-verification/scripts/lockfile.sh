@@ -88,7 +88,50 @@ cmd_acquire() {
 
 cmd_release() {
   require_env
+  # Mechanical fallback (issue #152, Gap 3). If the bot skipped SKILL.md B6,
+  # the runlog has no run_finished event and any Slack summary posted was
+  # agent-fabricated instead of derived from the session log. The trap-
+  # driven release is the last supervised action of the turn, so wire the
+  # fallback here: invoke compute-run-summary.sh to derive counters from
+  # the session JSONL. Fail-OPEN — any error is logged and the lockfile is
+  # still removed, so release never blocks on summary plumbing.
+  autofill_run_finished_if_needed || true
   rm -f "$OPS_BATCH_LOCK_PATH"
+}
+
+# Fail-OPEN. Always returns 0. Only invokes compute-run-summary.sh when
+# OPS_RUNLOG_DIR/latest.txt points at a real runlog with a canonical
+# run_id filename AND that runlog lacks any run_finished* event.
+autofill_run_finished_if_needed() {
+  [[ -n "${OPS_RUNLOG_DIR:-}" ]] || return 0
+  local latest_idx="${OPS_RUNLOG_DIR}/latest.txt"
+  [[ -f "$latest_idx" ]] || return 0
+
+  local runlog_path run_id
+  runlog_path=$(cat "$latest_idx" 2>/dev/null || true)
+  [[ -n "$runlog_path" && -f "$runlog_path" ]] || return 0
+
+  run_id=$(basename "$runlog_path" .jsonl)
+  [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || return 0
+
+  # All runlog lines are jq -c compact, so the exact-substring match is
+  # safe. Cheaper than jq -e iteration and robust to unparseable lines.
+  if grep -Eq '"event":"run_finished(_hollow|_ungrounded)?"' "$runlog_path"; then
+    return 0
+  fi
+
+  local script_dir compute_script
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  compute_script="${script_dir}/compute-run-summary.sh"
+  [[ -f "$compute_script" ]] || return 0
+
+  echo "[lockfile] no run_finished event in ${runlog_path}; invoking compute-run-summary.sh as mechanical fallback (run_id=${run_id})" >&2
+  # Pass empty PARENT_MSG_TS — compute-run-summary accepts it and the
+  # summary_post_message_ts field just ends up empty. The forensic value
+  # (derived counters, hollow/ungrounded invariants) lands regardless.
+  if ! bash "$compute_script" "$run_id" "" >/dev/null; then
+    echo "[lockfile] compute-run-summary.sh fallback exited non-zero (non-fatal); run_id=${run_id}" >&2
+  fi
 }
 
 case "${1:-}" in

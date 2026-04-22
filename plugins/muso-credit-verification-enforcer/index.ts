@@ -22,6 +22,14 @@ import { markCvSessionHook } from "./src/hooks/mark-cv-session.js";
  *     Non-Tier-1 web_fetch still passes — e.g., an artist's own site.
  *   - `session_end`: unmark the session
  *
+ * CV context detection was broadened on 2026-04-22 (issue #152) after live
+ * testing showed @-mention flows into #credit-verification slipped past the
+ * Tier 1 block because they don't re-trigger inbound_claim and don't set
+ * runId. `isCreditVerificationSession` now also treats any tool call from
+ * the `operations` / `operations-dev` agent as CV context — the workspace
+ * itself is CV-scoped, so workspace-level gating is safer than the narrow
+ * sessionKey/runId gate.
+ *
  * The three hooks that previously lived here (gate-credit-approve,
  * track-tool-call, their Tier 1 / dedup / runlog supporting code) were removed
  * because they silently no-op'd in practice — confabulation risk, no value.

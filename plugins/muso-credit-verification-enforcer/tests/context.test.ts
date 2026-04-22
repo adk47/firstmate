@@ -20,6 +20,24 @@ describe("isCreditVerificationSession", () => {
     expect(isCreditVerificationSession("unknown-session", "run-1")).toBe(true);
   });
 
+  it("returns true for the operations agent regardless of sessionKey/runId (issue #152)", () => {
+    // @-mention flows in #credit-verification don't re-trigger inbound_claim
+    // against the in-memory cvSessions Set (cleared on gateway restart), and
+    // runId only gets set on cron-triggered batch runs. The operations agent
+    // is CV-scoped as a whole — any tool call from it is in-context.
+    expect(isCreditVerificationSession(undefined, undefined, "operations")).toBe(true);
+    expect(isCreditVerificationSession("unknown", undefined, "operations")).toBe(true);
+  });
+
+  it("returns true for the operations-dev agent as well", () => {
+    expect(isCreditVerificationSession(undefined, undefined, "operations-dev")).toBe(true);
+  });
+
+  it("returns false for non-operations agents with no other CV signal", () => {
+    expect(isCreditVerificationSession(undefined, undefined, "ceo")).toBe(false);
+    expect(isCreditVerificationSession(undefined, undefined, "support")).toBe(false);
+  });
+
   it("returns false when sessionKey not marked and no runId", () => {
     expect(isCreditVerificationSession("session-unknown", undefined)).toBe(false);
     expect(isCreditVerificationSession(undefined, undefined)).toBe(false);

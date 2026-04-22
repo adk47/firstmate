@@ -2,10 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { redirectWebSearch } from "../src/hooks/redirect-web-search.js";
 import { cvSessions } from "../src/state.js";
 
-const buildCtx = (overrides: Partial<{ sessionKey: string; runId: string }> = {}) => ({
+const buildCtx = (
+  overrides: Partial<{ sessionKey: string; runId: string; agentId: string }> = {},
+) => ({
   toolName: "web_search",
   sessionKey: overrides.sessionKey,
   runId: overrides.runId,
+  agentId: overrides.agentId,
 });
 
 describe("redirectWebSearch", () => {
@@ -58,5 +61,21 @@ describe("redirectWebSearch", () => {
       buildCtx({ runId: "run-1" }),
     );
     expect(r?.block).toBe(true);
+  });
+
+  it("respects agentId=operations as CV signal (issue #152 @-mention path)", () => {
+    const r = redirectWebSearch(
+      { toolName: "web_search", params: { query: "foo" } },
+      buildCtx({ agentId: "operations" }),
+    );
+    expect(r?.block).toBe(true);
+  });
+
+  it("does NOT block when agentId is a non-CV agent", () => {
+    const r = redirectWebSearch(
+      { toolName: "web_search", params: { query: "foo" } },
+      buildCtx({ agentId: "ceo" }),
+    );
+    expect(r).toBeUndefined();
   });
 });

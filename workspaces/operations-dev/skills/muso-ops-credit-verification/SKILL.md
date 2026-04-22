@@ -1093,6 +1093,8 @@ bash "$SKILL_DIR/scripts/compress-old-logs.sh" || true
 
 The lockfile is released automatically by the `trap` set in B0 when the run exits.
 
+> **Mechanical fallback for skipped B6** (issue #152). If this whole B6 block is skipped (forgotten, crashed mid-turn, etc.), `lockfile.sh release` — invoked by the B0 `trap` — now checks the runlog and invokes `compute-run-summary.sh` itself when no `run_finished` event is present. The authoritative derived counters land either way. This is a belt-and-braces backstop, not a license to skip B6: running it explicitly here keeps the Slack summary and the forensic record aligned in the same turn.
+
 ### Rate Limiting Note
 
 When processing multiple credits sequentially, space web research requests to

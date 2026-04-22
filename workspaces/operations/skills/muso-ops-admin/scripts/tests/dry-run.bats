@@ -258,6 +258,58 @@ teardown() {
     jq -e '.run_id == null' "$OPS_DRY_RUN_AUDIT_PATH" >/dev/null
 }
 
+# Filesystem fallback (issue #152): SKILL.md B0c sets OPS_RUN_ID, but because
+# each bash tool call spawns a fresh shell, the `export OPS_RUN_ID=$RUN_ID`
+# there doesn't propagate to later calls. The audit line would fall back to
+# null. The authoritative run_id lives in $OPS_RUNLOG_DIR/latest.txt (written
+# by runlog.sh init) — read it when env is unset so the audit trail stays
+# joinable to the runlog.
+@test "audit line run_id falls back to OPS_RUNLOG_DIR/latest.txt basename when env unset" {
+    unset OPS_RUN_ID RUN_ID
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlogs"
+    mkdir -p "$OPS_RUNLOG_DIR/2026-04-22"
+    local expected_run_id="20260422-105638-f8108c"
+    local run_log_path="$OPS_RUNLOG_DIR/2026-04-22/${expected_run_id}.jsonl"
+    : > "$run_log_path"
+    echo "$run_log_path" > "$OPS_RUNLOG_DIR/latest.txt"
+
+    bash "$SCRIPT" call PUT /admin/x '{"k":"v"}' >/dev/null
+    jq -e --arg rid "$expected_run_id" '.run_id == $rid' "$OPS_DRY_RUN_AUDIT_PATH" >/dev/null
+}
+
+@test "audit line prefers OPS_RUN_ID env over filesystem fallback when both set" {
+    export OPS_RUN_ID="20260422-110000-env111"
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlogs"
+    mkdir -p "$OPS_RUNLOG_DIR/2026-04-22"
+    local fs_run_id="20260422-105638-fs2222"
+    local run_log_path="$OPS_RUNLOG_DIR/2026-04-22/${fs_run_id}.jsonl"
+    : > "$run_log_path"
+    echo "$run_log_path" > "$OPS_RUNLOG_DIR/latest.txt"
+
+    bash "$SCRIPT" call PUT /admin/x '{"k":"v"}' >/dev/null
+    jq -e '.run_id == "20260422-110000-env111"' "$OPS_DRY_RUN_AUDIT_PATH" >/dev/null
+}
+
+@test "audit line run_id stays null when env unset AND latest.txt absent" {
+    unset OPS_RUN_ID RUN_ID
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlogs"
+    mkdir -p "$OPS_RUNLOG_DIR"
+    # No latest.txt created. Fallback must be a no-op, not an error.
+    bash "$SCRIPT" call PUT /admin/x '{"k":"v"}' >/dev/null
+    jq -e '.run_id == null' "$OPS_DRY_RUN_AUDIT_PATH" >/dev/null
+}
+
+@test "audit line run_id stays null when latest.txt points at a malformed filename" {
+    unset OPS_RUN_ID RUN_ID
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlogs"
+    mkdir -p "$OPS_RUNLOG_DIR"
+    # Filename does not match the YYYYMMDD-HHMMSS-<hex> run_id shape; the
+    # fallback must reject it rather than stuffing garbage into audit lines.
+    echo "$OPS_RUNLOG_DIR/not-a-run-id.jsonl" > "$OPS_RUNLOG_DIR/latest.txt"
+    bash "$SCRIPT" call PUT /admin/x '{"k":"v"}' >/dev/null
+    jq -e '.run_id == null' "$OPS_DRY_RUN_AUDIT_PATH" >/dev/null
+}
+
 # --- Upload audit disambiguation ---
 
 @test "upload audit line uses file_path, not body, so callers can distinguish from JSON writes" {

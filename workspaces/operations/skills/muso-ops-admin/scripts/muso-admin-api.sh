@@ -75,6 +75,24 @@ write_dry_run_audit() {
     fi
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     run_id="${OPS_RUN_ID:-${RUN_ID:-}}"
+    # Filesystem fallback (issue #152). SKILL.md B0c sets OPS_RUN_ID in its
+    # shell, but every subsequent exec tool call is a fresh shell — the export
+    # doesn't propagate, so audit lines from per-call bash blocks would land
+    # with run_id=null even though a run is active. Read OPS_RUNLOG_DIR/
+    # latest.txt (written by runlog.sh init) as the filesystem source of truth
+    # and extract the run_id from its filename. Only accept a filename that
+    # matches the canonical run_id shape to avoid stuffing garbage into the
+    # audit trail if latest.txt ever gets clobbered.
+    if [[ -z "$run_id" && -n "${OPS_RUNLOG_DIR:-}" && -f "${OPS_RUNLOG_DIR}/latest.txt" ]]; then
+        local latest_path latest_base
+        latest_path=$(cat "${OPS_RUNLOG_DIR}/latest.txt" 2>/dev/null || true)
+        if [[ -n "$latest_path" ]]; then
+            latest_base=$(basename "$latest_path" .jsonl)
+            if [[ "$latest_base" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]]; then
+                run_id="$latest_base"
+            fi
+        fi
+    fi
     # Upload kind stores the local file path in its own field; call kind puts
     # the JSON body string in body. This disambiguates uploads vs JSON writes
     # for post-run review — a path in `body` would otherwise look malformed.

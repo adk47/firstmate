@@ -40,10 +40,10 @@ export function redirectWebSearch(
   ctx: ToolContext,
 ): BeforeToolCallResult | undefined {
   if (event.toolName !== "web_search") return undefined;
-  if (!isCreditVerificationSession(ctx.sessionKey, ctx.runId)) return undefined;
+  if (!isCreditVerificationSession(ctx.sessionKey, ctx.runId, ctx.agentId)) return undefined;
 
   console.warn(
-    `[credit-verification-enforcer] blocked web_search in session=${ctx.sessionKey}; redirected to browser`,
+    `[credit-verification-enforcer] blocked web_search agent=${ctx.agentId ?? "?"} session=${ctx.sessionKey ?? "?"} runId=${ctx.runId ?? "?"}; redirected to browser`,
   );
 
   return { block: true, blockReason: BLOCK_REASON };

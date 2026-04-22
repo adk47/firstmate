@@ -67,7 +67,7 @@ export function blockWebFetchTier1(
   ctx: ToolContext,
 ): BeforeToolCallResult | undefined {
   if (event.toolName !== "web_fetch") return undefined;
-  if (!isCreditVerificationSession(ctx.sessionKey, ctx.runId)) return undefined;
+  if (!isCreditVerificationSession(ctx.sessionKey, ctx.runId, ctx.agentId)) return undefined;
 
   const urlParam = event.params?.url;
   if (typeof urlParam !== "string" || urlParam.length === 0) return undefined;
@@ -77,7 +77,7 @@ export function blockWebFetchTier1(
   if (!TIER1_HOSTS.includes(host)) return undefined;
 
   console.warn(
-    `[credit-verification-enforcer] blocked web_fetch on Tier 1 host=${host} in session=${ctx.sessionKey}`,
+    `[credit-verification-enforcer] blocked web_fetch on Tier 1 host=${host} agent=${ctx.agentId ?? "?"} session=${ctx.sessionKey ?? "?"} runId=${ctx.runId ?? "?"}`,
   );
 
   return { block: true, blockReason: BLOCK_REASON };
