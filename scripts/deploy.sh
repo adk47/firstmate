@@ -225,10 +225,25 @@ install_plugin() {
       return 1
       ;;
   esac
-  # Belt-and-braces: also mirror to the legacy path. Gateways pinned to
-  # /root/.openclaw/extensions/<name> via plugins.installs keep working
-  # whether or not their installPath entry has been migrated.
-  ext_paths+=( "/root/.openclaw/extensions/$plugin_name" )
+  # Belt-and-braces: mirror to the legacy path /root/.openclaw/extensions/<name>
+  # ONLY when the profile is main. Rationale:
+  #
+  # 1. Only openclaw-main.json has `plugins.installs` entries pinned at the
+  #    legacy path today (openclaw-gmail, intercom — both main-scoped).
+  #    openclaw-edge.json and openclaw-dev.json do not pin anything at the
+  #    legacy path, so mirroring from those profiles is dead weight.
+  #
+  # 2. Without this gate, `deploy.sh --target edge` would overwrite
+  #    /root/.openclaw/extensions/<plugin> with the EDGE build. Today every
+  #    profile ships identical plugin code, so it is a no-op — but if edge
+  #    or dev ever diverges (feature flags, alternate entrypoints, vendored
+  #    deps), a last-writer-wins race silently breaks main's pinned plugins.
+  #
+  # Once all main pins are migrated to profile-specific paths, the legacy
+  # mirror can be removed entirely. See PR #154 for the path-drift context.
+  if [[ "$profile" == "main" ]]; then
+    ext_paths+=( "/root/.openclaw/extensions/$plugin_name" )
+  fi
 
   # Copy (first install) or rsync incrementally (update) to each target.
   #

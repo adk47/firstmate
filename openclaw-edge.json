@@ -276,15 +276,15 @@
     "installs": {
       "intercom": {
         "source": "path",
-        "spec": "/root/.openclaw/edge/extensions/intercom",
-        "installPath": "/root/.openclaw/edge/extensions/intercom",
+        "spec": "/root/.openclaw-edge/extensions/intercom",
+        "installPath": "/root/.openclaw-edge/extensions/intercom",
         "resolvedName": "@muso/intercom",
         "resolvedVersion": "0.1.0"
       }
     },
     "load": {
       "paths": [
-        "/root/.openclaw/edge/extensions/intercom"
+        "/root/.openclaw-edge/extensions/intercom"
       ]
     }
   },
