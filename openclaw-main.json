@@ -748,6 +748,13 @@
         "installPath": "/root/.openclaw/extensions/intercom",
         "resolvedName": "@muso/intercom",
         "resolvedVersion": "0.1.0"
+      },
+      "muso-credit-verification-enforcer": {
+        "source": "path",
+        "spec": "/root/.openclaw-main/extensions/muso-credit-verification-enforcer",
+        "installPath": "/root/.openclaw-main/extensions/muso-credit-verification-enforcer",
+        "resolvedName": "@muso/credit-verification-enforcer",
+        "resolvedVersion": "0.1.0"
       }
     },
     "load": {

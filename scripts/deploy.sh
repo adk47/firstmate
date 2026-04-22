@@ -189,15 +189,48 @@ install_plugin() {
     return 1
   fi
 
-  # Determine the target extension path per profile.
-  local ext_path
-  if [[ "$profile" == "main" ]]; then
-    ext_path="/root/.openclaw/extensions/$plugin_name"
-  else
-    ext_path="/root/.openclaw/$profile/extensions/$plugin_name"
-  fi
+  # Determine the target extension paths per profile.
+  #
+  # Historically install_plugin only wrote to the legacy unified path
+  # (/root/.openclaw/extensions/). That path pre-dates the multi-profile
+  # migration (PR #43) and the running gateway services now read from
+  # PROFILE-specific dirs:
+  #
+  #   openclaw-gateway-main.service  → /root/.openclaw-main/extensions/
+  #   openclaw-gateway-edge.service  → /root/.openclaw-edge/extensions/
+  #   openclaw-gateway-dev.service   → /root/.openclaw-dev/extensions/
+  #
+  # The -main gateway does fall back to scanning the legacy path for auto-
+  # discovered plugins, which masked the bug for a long time. The zombie
+  # `openclaw-gateway.service` (stopped 2026-04-21, memory
+  # reference_legacy_openclaw_service_zombie.md) was also loading from the
+  # legacy path, so plugin changes reached production through that service.
+  # When the zombie died, the -main gateway became sole authority and any
+  # plugin NOT pinned in openclaw-main.json `plugins.installs` started
+  # loading a stale copy from the profile dir (the muso-credit-verification-
+  # enforcer slipped its Tier 1 block hook as a consequence — issue #152).
+  #
+  # Fix: dual-write to BOTH the profile-specific path (the authoritative
+  # location the gateway loads from) AND the legacy path (preserves the
+  # existing installPath pinnings in openclaw-main.json for openclaw-gmail
+  # and intercom). Once all `installs` entries are moved to profile-specific
+  # paths, the legacy write can go.
+  local ext_paths=()
+  case "$profile" in
+    main|edge|dev)
+      ext_paths+=( "/root/.openclaw-${profile}/extensions/$plugin_name" )
+      ;;
+    *)
+      log "    ✗ unknown profile '$profile' for plugin $plugin_name"
+      return 1
+      ;;
+  esac
+  # Belt-and-braces: also mirror to the legacy path. Gateways pinned to
+  # /root/.openclaw/extensions/<name> via plugins.installs keep working
+  # whether or not their installPath entry has been migrated.
+  ext_paths+=( "/root/.openclaw/extensions/$plugin_name" )
 
-  # Copy (first install) or rsync incrementally (update).
+  # Copy (first install) or rsync incrementally (update) to each target.
   #
   # Note: the rsync update path consumes "${RSYNC_EXCLUDES[@]}" — a
   # global array defined further down this file. This is required by
@@ -211,15 +244,18 @@ install_plugin() {
   # that matches inside a plugin tree (e.g. "node_modules" without a
   # path prefix), this rsync's behavior could change silently — keep
   # that constraint in mind when extending the array.
-  if [[ ! -d "$ext_path" ]]; then
-    mkdir -p "$(dirname "$ext_path")" || { log "    ✗ mkdir failed for $ext_path"; return 1; }
-    cp -r "$plugin_dir" "$ext_path" || { log "    ✗ cp failed for $plugin_name"; return 1; }
-  else
-    rsync -az --exclude=node_modules "${RSYNC_EXCLUDES[@]}" "$plugin_dir/" "$ext_path/" \
-      || { log "    ✗ rsync update failed for $plugin_name"; return 1; }
-  fi
+  local ext_path
+  for ext_path in "${ext_paths[@]}"; do
+    if [[ ! -d "$ext_path" ]]; then
+      mkdir -p "$(dirname "$ext_path")" || { log "    ✗ mkdir failed for $ext_path"; return 1; }
+      cp -r "$plugin_dir" "$ext_path" || { log "    ✗ cp failed for $plugin_name → $ext_path"; return 1; }
+    else
+      rsync -az --exclude=node_modules "${RSYNC_EXCLUDES[@]}" "$plugin_dir/" "$ext_path/" \
+        || { log "    ✗ rsync update failed for $plugin_name → $ext_path"; return 1; }
+    fi
+    log "    ✓ $plugin_name installed to $ext_path"
+  done
 
-  log "    ✓ $plugin_name installed to $ext_path"
   return 0
 }
 
