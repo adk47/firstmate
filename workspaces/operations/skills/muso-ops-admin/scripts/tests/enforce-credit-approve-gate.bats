@@ -40,10 +40,80 @@ write_session_log() {
 
 # --- Passthrough cases (gate returns 0 without checking) ---
 
-@test "passthrough: non-PUT method" {
+@test "passthrough: GET method" {
     source_gate
     run enforce_credit_approve_gate GET /admin/credit-requests '{"status":"approved"}'
     [ "$status" -eq 0 ]
+}
+
+@test "passthrough: POST method (not an approve verb)" {
+    source_gate
+    run enforce_credit_approve_gate POST /admin/credit-requests '{"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "passthrough: DELETE method (not an approve verb)" {
+    source_gate
+    run enforce_credit_approve_gate DELETE /admin/credit-requests/cr_1 ''
+    [ "$status" -eq 0 ]
+}
+
+# --- PATCH is gated (same as PUT). This is the fix for the 2026-04-22
+# --- live-test finding: the Ops bot uses PATCH /admin/credit-requests/<id>
+# --- for individual approves, which completely bypassed the gate's old
+# --- PUT-only check. Browser-evidence enforcement now covers both verbs.
+
+@test "block: PATCH /admin/credit-requests/<id> status=approved requires evidence-excerpt" {
+    source_gate
+    write_session_log "s.jsonl" '{}'
+    run enforce_credit_approve_gate PATCH /admin/credit-requests/0c1afd71-211f-499b-8a18-dc8d4b63d2de '{"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--evidence-excerpt is required"* ]]
+}
+
+@test "passthrough: PATCH but non-approved status (e.g. user_verification_needed)" {
+    source_gate
+    run enforce_credit_approve_gate PATCH /admin/credit-requests/cr_1 '{"status":"user_verification_needed","reason":"x"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "passthrough: PATCH + --requester aaron@muso.ai bypasses gate (same human override as PUT)" {
+    source_gate
+    REQUESTER_EMAIL="aaron@muso.ai" run enforce_credit_approve_gate PATCH /admin/credit-requests/cr_1 '{"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "allow: PATCH approve with valid 2-Tier-1 evidence passes gate" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig engineer credits list"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig appears on the Disaia record"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PATCH /admin/credit-requests/cr_1 '{"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "block: PATCH with web_fetch-only evidence still fails (browser-only enforcement holds under PATCH)" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"web_fetch","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"web_fetch","content":[{"type":"text","text":"Jose Roig engineer credits list"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"web_fetch","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"web_fetch","content":[{"type":"text","text":"Jose Roig appears on the Disaia record"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PATCH /admin/credit-requests/cr_1 '{"status":"approved"}'
+    [ "$status" -eq 1 ]
+    # Now caught by the Tier 1 web_fetch block (earlier check, same semantic)
+    [[ "$output" == *"web_fetch"* ]]
+}
+
+@test "passthrough: lower-case 'patch' is case-normalized and gated too" {
+    # Defensive: if any caller passes method as 'patch' instead of 'PATCH',
+    # the gate must still fire. Matches the method-case handling in the
+    # fail-closed dry-run intercept.
+    source_gate
+    write_session_log "s.jsonl" '{}'
+    run enforce_credit_approve_gate patch /admin/credit-requests/cr_1 '{"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--evidence-excerpt is required"* ]]
 }
 
 @test "passthrough: non-credit-requests path" {
@@ -176,7 +246,8 @@ write_session_log() {
 {"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"web_fetch","content":[{"type":"text","text":"Jose Roig appears"}]}}'
     EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
     [ "$status" -eq 1 ]
-    [[ "$output" == *"0/2"* ]]
+    # Caught by the Tier 1 web_fetch block (earlier check); semantic unchanged
+    [[ "$output" == *"web_fetch"* ]]
 }
 
 @test "block: excerpt found but only on non-Tier-1 browser load" {
@@ -274,6 +345,61 @@ more garbage here'
     EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
     [ "$status" -eq 1 ]
     [[ "$output" == *"0/2"* ]]
+}
+
+@test "block: web_fetch to a Tier 1 host fails the approve (even with valid browser evidence)" {
+    # Tier 1 substitution block: if the bot loaded ANY Tier 1 hostname via
+    # web_fetch in this session, refuse the approve regardless of what browser
+    # evidence also exists. Tier 1 pages are JS-rendered; web_fetch returns the
+    # non-rendered HTML, which is a different (and often wrong) data surface.
+    # Belt + braces: the operations agent's toolDenyList blocks web_fetch
+    # entirely, but if that's ever misconfigured, this gate backstop catches it.
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"bc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig engineer credits on Spanish records"}]}}
+{"message":{"content":[{"type":"toolCall","id":"bc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig appears on Disaia records"}]}}
+{"message":{"content":[{"type":"toolCall","id":"wf-1","name":"web_fetch","arguments":{"url":"https://musicbrainz.org/search?query=foo"}}]}}
+{"message":{"role":"toolResult","toolCallId":"wf-1","toolName":"web_fetch","content":[{"type":"text","text":"HTML snapshot"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"web_fetch"* ]]
+}
+
+@test "block: web_fetch to Tier 1 also blocks PATCH approve (not just PUT)" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"bc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig engineer"}]}}
+{"message":{"content":[{"type":"toolCall","id":"bc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}
+{"message":{"content":[{"type":"toolCall","id":"wf-1","name":"web_fetch","arguments":{"url":"https://open.spotify.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"wf-1","toolName":"web_fetch","content":[{"type":"text","text":"page body"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PATCH /admin/credit-requests/cr_1 '{"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"web_fetch"* ]]
+}
+
+@test "allow: web_fetch to a NON-Tier-1 host does NOT block (gate only cares about T1 substitution)" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"bc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig engineer credits"}]}}
+{"message":{"content":[{"type":"toolCall","id":"bc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}
+{"message":{"content":[{"type":"toolCall","id":"wf-1","name":"web_fetch","arguments":{"url":"https://jaxsta.com/profile/x"}}]}}
+{"message":{"role":"toolResult","toolCallId":"wf-1","toolName":"web_fetch","content":[{"type":"text","text":"jaxsta page"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "allow: multiple browsers to Tier 1 + zero web_fetch calls still passes" {
+    # Non-regression of the happy path.
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"bc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig engineer credits"}]}}
+{"message":{"content":[{"type":"toolCall","id":"bc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
 }
 
 @test "session-age: stale log (>10 min) is ignored" {

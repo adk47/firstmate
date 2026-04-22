@@ -458,3 +458,63 @@ Credit 2 result: HTTP 200'
   echo "$output" | jq -e '.verification_needed == 1'  # VN succeeded
   echo "$output" | jq -e '.errors == 1'           # the 400
 }
+
+# ---- OPS_DRY_RUN summary annotation (issue #145) ----
+# When a run was initialized with OPS_DRY_RUN=1, runlog.sh init stamps a
+# run_header with dryRun:true. compute-run-summary MUST read that header
+# first (source of truth = the log) and only fall back to env if absent.
+# Consumers get a single dryRun bool and compute any human-facing prefix
+# themselves — no redundant summary_label field.
+
+seed_runlog_header() {
+  # Write a run_header event with the given dryRun value to the runlog file.
+  local dry="$1"
+  jq -n -c --arg rid "$RUN_ID" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson d "$dry" \
+    '{event:"run_header", run_id:$rid, ts:$ts, dryRun:$d}' >> "$RUNLOG_FILE"
+}
+
+@test "dryRun:true flows into run_finished when run_header says dryRun:true" {
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_header true
+  # Env deliberately NOT set — proves header is the source of truth.
+  unset OPS_DRY_RUN
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.dryRun == true'
+  # summary_label is gone — callers compute any prefix from .dryRun.
+  echo "$output" | jq -e 'has("summary_label") | not'
+  # Written event mirrors the stdout summary
+  jq -e 'select(.event == "run_finished") | .dryRun == true' "$RUNLOG_FILE"
+}
+
+@test "dryRun:false in run_finished when no run_header and env is unset" {
+  seed_browser_ok "c0" "$PROBE_URL"
+  unset OPS_DRY_RUN
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.dryRun == false'
+  echo "$output" | jq -e 'has("summary_label") | not'
+}
+
+@test "run_header dryRun:true takes precedence over OPS_DRY_RUN=0 env" {
+  # Scenario: agent exported OPS_DRY_RUN=1 at B0c (header stamped), then env
+  # got reset before B6. Without this, the summary would disagree with the
+  # header and post-hoc review would see dryRun:true run_header +
+  # dryRun:false run_finished.
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_header true
+  OPS_DRY_RUN=0 run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.dryRun == true'
+}
+
+@test "env fallback applies when no run_header is present" {
+  # Defensive: historical runs (pre-this-PR) have no run_header at all. The
+  # env fallback keeps behavior sensible for those cases and for any fresh
+  # run where the header didn't land.
+  seed_browser_ok "c0" "$PROBE_URL"
+  # No seed_runlog_header call — RUNLOG_FILE has no run_header line.
+  OPS_DRY_RUN=1 run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.dryRun == true'
+}

@@ -135,3 +135,74 @@ teardown() { teardown_tmp_env; }
   LOG_FILE="$OPS_RUNLOG_DIR/$TODAY/$RUN_ID.jsonl"
   [ "$(awk 'END{print NR}' "$LOG_FILE")" = "2" ]
 }
+
+# ---- OPS_DRY_RUN run header (issue #145) ----
+# When OPS_DRY_RUN=1, `init` must tag the run so downstream consumers can
+# detect dry-run from the log alone without re-reading env.
+
+@test "init writes run_header with dryRun:true when OPS_DRY_RUN=1" {
+  RUN_ID=$(OPS_DRY_RUN=1 OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID=C0T "$SCRIPTS_DIR/runlog.sh" init)
+  TODAY=$(date -u +%Y-%m-%d)
+  LOG_FILE="$OPS_RUNLOG_DIR/$TODAY/$RUN_ID.jsonl"
+  # First line is the header
+  jq -e '.event == "run_header" and .dryRun == true' < <(head -1 "$LOG_FILE")
+}
+
+@test "init writes NO run_header when OPS_DRY_RUN is unset" {
+  # Non-dry-run runs stay identical to historical behavior: the file is
+  # created empty. No run_header event, no dryRun:false noise.
+  unset OPS_DRY_RUN
+  RUN_ID=$("$SCRIPTS_DIR/runlog.sh" init)
+  TODAY=$(date -u +%Y-%m-%d)
+  LOG_FILE="$OPS_RUNLOG_DIR/$TODAY/$RUN_ID.jsonl"
+  [ ! -s "$LOG_FILE" ]
+}
+
+@test "init writes NO run_header when OPS_DRY_RUN=0" {
+  OPS_DRY_RUN=0 RUN_ID=$(OPS_DRY_RUN=0 "$SCRIPTS_DIR/runlog.sh" init)
+  TODAY=$(date -u +%Y-%m-%d)
+  LOG_FILE="$OPS_RUNLOG_DIR/$TODAY/$RUN_ID.jsonl"
+  [ ! -s "$LOG_FILE" ]
+}
+
+@test "subsequent events still land after the dry-run run_header" {
+  export OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID=C0DRYRUN
+  RUN_ID=$(OPS_DRY_RUN=1 OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID=C0DRYRUN "$SCRIPTS_DIR/runlog.sh" init)
+  "$SCRIPTS_DIR/runlog.sh" event "$RUN_ID" run_started '{"phase":"0"}'
+  TODAY=$(date -u +%Y-%m-%d)
+  LOG_FILE="$OPS_RUNLOG_DIR/$TODAY/$RUN_ID.jsonl"
+  [ "$(awk 'END{print NR}' "$LOG_FILE")" = "2" ]
+  jq -e '.event == "run_header"' < <(sed -n 1p "$LOG_FILE")
+  jq -e '.event == "run_started"' < <(sed -n 2p "$LOG_FILE")
+}
+
+# ---- Mechanical channel-env gate (review follow-up) ----
+# SKILL.md B0a says "abort if OPS_DRY_RUN=1 and OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID
+# unset". Prose alone is not enforcement — a misbehaving model can skip B0a.
+# runlog.sh init is the mandatory first B0c call; making it fail here closes
+# the hole so dry-run can't proceed without the test channel configured.
+
+@test "init fails when OPS_DRY_RUN=1 and dry-run channel env is unset" {
+  unset OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID
+  run env OPS_DRY_RUN=1 "$SCRIPTS_DIR/runlog.sh" init
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID"* ]]
+}
+
+@test "init fails when OPS_DRY_RUN=1 and dry-run channel env is empty string" {
+  run env OPS_DRY_RUN=1 OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID= "$SCRIPTS_DIR/runlog.sh" init
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID"* ]]
+}
+
+@test "init succeeds when OPS_DRY_RUN=1 and dry-run channel env is set" {
+  run env OPS_DRY_RUN=1 OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID=C0TEST123 "$SCRIPTS_DIR/runlog.sh" init
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]{6}$ ]]
+}
+
+@test "init does NOT require the dry-run channel env when OPS_DRY_RUN is unset (prod path unchanged)" {
+  unset OPS_DRY_RUN OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID
+  run "$SCRIPTS_DIR/runlog.sh" init
+  [ "$status" -eq 0 ]
+}

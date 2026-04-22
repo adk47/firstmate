@@ -7,11 +7,13 @@
 #
 # Re-applies all patches that OpenClaw updates overwrite:
 # 1. Mention gate fix (runtime JS)
-# 2. Gmail plugin describeMessageTool (plugin TS)
-# 3. Gmail monitor initialization resilience (plugin TS)
+# 2. Opus 4.7 adaptive-thinking allowlist (bundled adapter JS)
+# 3. Gmail plugin describeMessageTool (plugin TS)
+# 4. Gmail monitor initialization resilience (plugin TS)
 #
 # These patches are tracked upstream:
 # - Mention gate: https://github.com/openclaw/openclaw/pull/53161
+# - Opus 4.7 thinking: https://github.com/openclaw/openclaw/issues/67888, #68078
 # - Gmail plugin: https://github.com/mcinteerj/openclaw-gmail/issues/4
 #
 # Remove individual patches as upstream fixes are merged.
@@ -30,7 +32,14 @@ else
     echo "WARNING: patch-openclaw-mention-gate.sh not found"
 fi
 
-# 2. Gmail plugin describeMessageTool
+# 2. Opus 4.7 adaptive-thinking allowlist (openclaw#67888, #68078)
+if [ -f "$HYDRA_ROOT/scripts/patch-openclaw-opus-4-7-thinking.sh" ]; then
+    bash "$HYDRA_ROOT/scripts/patch-openclaw-opus-4-7-thinking.sh"
+else
+    echo "WARNING: patch-openclaw-opus-4-7-thinking.sh not found"
+fi
+
+# 3. Gmail plugin describeMessageTool
 GMAIL_CHANNEL="/root/.openclaw/extensions/openclaw-gmail/src/channel.ts"
 if [ -f "$GMAIL_CHANNEL" ]; then
     if ! grep -q "describeMessageTool" "$GMAIL_CHANNEL"; then
@@ -41,7 +50,7 @@ if [ -f "$GMAIL_CHANNEL" ]; then
     fi
 fi
 
-# 3. Gmail monitor — bypass gog CLI check (API backend doesn't need it)
+# 4. Gmail monitor — bypass gog CLI check (API backend doesn't need it)
 GMAIL_MONITOR="/root/.openclaw/extensions/openclaw-gmail/src/monitor.ts"
 if [ -f "$GMAIL_MONITOR" ]; then
     if grep -q 'account.backend !== "api" && !(await GogGmailClient.checkExists())' "$GMAIL_MONITOR" && ! grep -q "PATCHED" "$GMAIL_MONITOR"; then
@@ -59,4 +68,4 @@ if [ -f "$GMAIL_MONITOR" ]; then
 fi
 
 echo "=== Post-OpenClaw-Update: Complete ==="
-echo "Restart gateway: systemctl restart openclaw-gateway"
+echo "Restart gateway: systemctl restart openclaw-gateway-main"

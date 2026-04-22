@@ -1,5 +1,6 @@
 import { definePluginEntry, type OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { redirectWebSearch } from "./src/hooks/redirect-web-search.js";
+import { blockWebFetchTier1 } from "./src/hooks/block-web-fetch-tier1.js";
 import { cleanupSessionState } from "./src/hooks/lifecycle.js";
 import { markCvSessionHook } from "./src/hooks/mark-cv-session.js";
 
@@ -15,6 +16,10 @@ import { markCvSessionHook } from "./src/hooks/mark-cv-session.js";
  *   - `inbound_claim`: mark a session as CV when it arrives on the CV channel
  *   - `before_tool_call` on `web_search`: redirect to the `browser` tool
  *     (works — web_search IS routed through the hook, unlike exec)
+ *   - `before_tool_call` on `web_fetch`: block when the URL host is Tier 1
+ *     (Spotify / Apple Music / MusicBrainz / Discogs / AllMusic / Tidal).
+ *     Those pages are JS-rendered; web_fetch returns non-rendered HTML.
+ *     Non-Tier-1 web_fetch still passes — e.g., an artist's own site.
  *   - `session_end`: unmark the session
  *
  * The three hooks that previously lived here (gate-credit-approve,
@@ -54,6 +59,26 @@ export default definePluginEntry({
         } catch (err) {
           console.error(
             `[credit-verification-enforcer] redirect-web-search error: ${String(err)}`,
+          );
+          return undefined;
+        }
+      },
+      { priority: 100 },
+    );
+
+    // Block web_fetch on Tier 1 hosts — those pages are JS-rendered, so
+    // web_fetch returns a different (and often wrong) data surface than
+    // the browser tool. Fail-OPEN on error — the bash-layer approve gate
+    // (muso-admin-api.sh) catches it too, so this hook is the UX sharpener
+    // (fast feedback at call-time) rather than the sole defense.
+    api.on(
+      "before_tool_call",
+      (event, ctx) => {
+        try {
+          return blockWebFetchTier1(event, ctx);
+        } catch (err) {
+          console.error(
+            `[credit-verification-enforcer] block-web-fetch-tier1 error: ${String(err)}`,
           );
           return undefined;
         }

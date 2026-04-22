@@ -376,6 +376,20 @@ if [[ "$PREFLIGHT_OK" != "true" ]] && (( APPROVED + VN > 0 )); then
     ungrounded="true"
 fi
 
+# Dry-run tag (issue #145). Source of truth is the `run_header` event written
+# by runlog.sh init — the log captures the mode the run WAS initialized in,
+# independent of whether env got reset between B0c and B6 (cron race, shell
+# reset, agent env drift). Only fall back to OPS_DRY_RUN env if the header
+# is absent (historical runs from before this PR). The Slack-side poster
+# computes any "[DRY RUN]" prefix from this bool — no redundant label field.
+DRY_RUN_FLAG=$(jq -s 'first(.[] | select(.event == "run_header") | .dryRun // false) // null' "$runlog_path" 2>/dev/null)
+if [[ -z "$DRY_RUN_FLAG" || "$DRY_RUN_FLAG" == "null" ]]; then
+    case "$(printf %s "${OPS_DRY_RUN:-0}" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) DRY_RUN_FLAG=true ;;
+        *)             DRY_RUN_FLAG=false ;;
+    esac
+fi
+
 # `derived_from` honestly lists the per-field provenance map.
 summary=$(jq -n \
     --argjson f "$FETCHED" \
@@ -390,12 +404,14 @@ summary=$(jq -n \
     --argjson ungrounded "$ungrounded" \
     --argjson parse_errors "$(echo "$session_counts" | jq -r '.parse_errors')" \
     --arg ts "$PARENT_MSG_TS" \
+    --argjson dry "$DRY_RUN_FLAG" \
     '{
         fetched:$f, approved:$a, verification_needed:$v, escalated:$e,
         skipped_idempotent:$si, skipped_cap:$sc, errors:$errs,
         summary_post_message_ts:$ts, preflight_ok:$preflight,
         hollow:$hollow, ungrounded:$ungrounded,
         session_parse_errors:$parse_errors,
+        dryRun:$dry,
         derived_from:{
             session_jsonl:["preflight_ok","fetched","approved","verification_needed","errors"],
             runlog:["escalated","skipped_idempotent","skipped_cap"]

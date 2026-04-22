@@ -27,6 +27,108 @@ TOKEN_MAX_AGE=82800  # 23 hours in seconds
 REQUESTER_EMAIL=""   # Set via --requester flag
 EVIDENCE_EXCERPT=""  # Set via --evidence-excerpt flag (required for autonomous credit approves)
 
+# --- Dry-run mode (issue #145) ---
+# OPS_DRY_RUN=1 short-circuits every WRITE (anything that isn't GET/HEAD) in
+# cmd_call, and all of cmd_upload, with a synthetic 200 response. GET/HEAD
+# still hit the real API so the caller can read state. Every would-be write
+# is appended to OPS_DRY_RUN_AUDIT_PATH as JSONL for later review. The
+# credit-approve gate runs BEFORE the short-circuit so a broken batch still
+# fails visibly — the whole point is "what would have happened, gate included".
+#
+# The method check is fail-closed (deny-list) rather than fail-open
+# (PUT|POST|PATCH|DELETE allow-list) — lower-case `put`, typos, and future
+# verbs the admin API might add all get intercepted instead of silently
+# hitting prod. Only GET/HEAD (case-insensitive) pass through.
+case "$(printf %s "${OPS_DRY_RUN:-0}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)        OPS_DRY_RUN=1 ;;
+    0|false|no|off|"")    OPS_DRY_RUN=0 ;;
+    *)
+        # Unrecognized value — treat as false, but warn loudly. Silent
+        # fallthrough is the footgun that lets `OPS_DRY_RUN=enable` produce
+        # real writes when the user thinks they're in dry-run.
+        echo "WARN: OPS_DRY_RUN='${OPS_DRY_RUN}' not recognized; treating as false. Use 1|true|yes|on to enable." >&2
+        OPS_DRY_RUN=0
+        ;;
+esac
+OPS_DRY_RUN_AUDIT_PATH="${OPS_DRY_RUN_AUDIT_PATH:-/tmp/ops-dry-run-audit.jsonl}"
+# Tracks whether the last write_dry_run_audit call succeeded. Read by
+# emit_dry_run_response to surface audit failure in the synthetic envelope.
+DRY_RUN_AUDIT_FAILED=0
+
+is_dry_run_mode() {
+    [[ "$OPS_DRY_RUN" == "1" ]]
+}
+
+# Append a JSONL audit line for a would-be write. Uses jq -n for consistency
+# with runlog.sh / compute-run-summary.sh; arg-passing avoids shell
+# interpolation of the body entirely. On any failure to write, emits a loud
+# stderr warning and sets DRY_RUN_AUDIT_FAILED=1 — callers (emit_dry_run_response)
+# surface that flag so the caller never mistakes "audit lost" for "audited".
+write_dry_run_audit() {
+    local method="$1" path="$2" body="${3:-}" kind="${4:-call}"
+    local audit_dir ts run_id
+    audit_dir="$(dirname "$OPS_DRY_RUN_AUDIT_PATH")"
+    if ! mkdir -p "$audit_dir" 2>/dev/null; then
+        echo "WARN: could not create audit dir ${audit_dir}; dry-run audit line LOST for ${method} ${path}" >&2
+        DRY_RUN_AUDIT_FAILED=1
+        return 0
+    fi
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    run_id="${OPS_RUN_ID:-${RUN_ID:-}}"
+    # Upload kind stores the local file path in its own field; call kind puts
+    # the JSON body string in body. This disambiguates uploads vs JSON writes
+    # for post-run review — a path in `body` would otherwise look malformed.
+    local body_arg file_path_arg
+    if [[ "$kind" == "upload" ]]; then
+        body_arg=""
+        file_path_arg="$body"
+    else
+        body_arg="$body"
+        file_path_arg=""
+    fi
+    local line
+    if ! line=$(jq -n -c \
+        --arg ts "$ts" \
+        --arg kind "$kind" \
+        --arg method "$method" \
+        --arg path "$path" \
+        --arg body "$body_arg" \
+        --arg file_path "$file_path_arg" \
+        --arg requester "${REQUESTER_EMAIL:-}" \
+        --arg run_id "$run_id" \
+        '{
+            ts:$ts, kind:$kind, method:$method, path:$path,
+            body:      (if $body      == "" then null else $body      end),
+            file_path: (if $file_path == "" then null else $file_path end),
+            requester: (if $requester == "" then null else $requester end),
+            run_id:    (if $run_id    == "" then null else $run_id    end)
+         }' 2>/dev/null); then
+        echo "WARN: jq failed to build audit line; dry-run audit LOST for ${method} ${path}" >&2
+        DRY_RUN_AUDIT_FAILED=1
+        return 0
+    fi
+    if ! printf '%s\n' "$line" >> "$OPS_DRY_RUN_AUDIT_PATH" 2>/dev/null; then
+        echo "WARN: could not append to ${OPS_DRY_RUN_AUDIT_PATH}; dry-run audit LOST for ${method} ${path}" >&2
+        DRY_RUN_AUDIT_FAILED=1
+        return 0
+    fi
+}
+
+# Synthetic response used for every intercepted write. body is null (NOT a
+# stand-in {ok:true} payload) so consumers that expect real-API shape —
+# .body.items, .body.data.id — fail loudly instead of silently reading null
+# from a lying stand-in. The top-level `dryRun` key is the authoritative
+# branch signal. dryRun_audit_failed surfaces lost audit lines so callers
+# can detect them in the same envelope.
+emit_dry_run_response() {
+    local audit_failed="${DRY_RUN_AUDIT_FAILED:-0}"
+    if [[ "$audit_failed" == "1" ]]; then
+        printf '%s\n' '{"http_status":200,"dryRun":true,"dryRun_audit_failed":true,"body":null,"wouldHaveExecuted":true}'
+    else
+        printf '%s\n' '{"http_status":200,"dryRun":true,"body":null,"wouldHaveExecuted":true}'
+    fi
+}
+
 # --- Slack ID → Email mapping ---
 # Maps Slack user IDs to muso.ai emails for the Requester header.
 # The backend uses this to know which human initiated admin actions.
@@ -132,7 +234,18 @@ CV_EVIDENCE_EXCERPT_MAX="${CV_EVIDENCE_EXCERPT_MAX:-200}"
 enforce_credit_approve_gate() {
     local method="$1" path="$2" body="$3"
 
-    [[ "$method" == "PUT" ]] || return 0
+    # Gate covers PUT (batch approve: PUT /admin/credit-requests with
+    # "requestIds":[...]) AND PATCH (single-credit approve: PATCH
+    # /admin/credit-requests/<id>). The 2026-04-22 live dry-run test showed
+    # the bot using PATCH for every individual approve, which under the old
+    # PUT-only check bypassed the browser-evidence gate entirely. Normalize
+    # method case defensively: `patch` / `Patch` must gate the same as `PATCH`.
+    local method_uc
+    method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    case "$method_uc" in
+        PUT|PATCH) ;;
+        *) return 0 ;;
+    esac
     # Match both /admin/credit-requests and /admin/credit-requests/<id>
     [[ "$path" == /admin/credit-requests* ]] || return 0
     echo "$body" | grep -q '"status"[[:space:]]*:[[:space:]]*"approved"' || return 0
@@ -160,10 +273,13 @@ enforce_credit_approve_gate() {
     if [[ -z "$excerpt" ]]; then
         cat >&2 <<EOF
 credit_approve_gate: --evidence-excerpt is required for autonomous approves.
-Invoke like:
-    muso-admin-api.sh call PUT "/admin/credit-requests" \\
-        --evidence-excerpt "<literal string you saw on a Tier 1 page>" \\
-        '{"requestIds":["<cr_id>"],"status":"approved"}'
+Both verbs are gated:
+    # Batch (PUT):
+    muso-admin-api.sh --evidence-excerpt "<literal substring>" \\
+        call PUT /admin/credit-requests '{"requestIds":["<cr_id>"],"status":"approved"}'
+    # Single credit (PATCH):
+    muso-admin-api.sh --evidence-excerpt "<literal substring>" \\
+        call PATCH /admin/credit-requests/<cr_id> '{"status":"approved"}'
 The excerpt must be a short substring (>=${CV_EVIDENCE_EXCERPT_MIN} chars) that literally appears on >=${CV_REQUIRED_LOADS} distinct Tier 1 pages you loaded via the \`browser\` tool in this session. Good examples: the artist's name as rendered on MusicBrainz, the role string as it appears on AllMusic credits, a track title from Spotify.
 EOF
         return 1
@@ -191,6 +307,47 @@ EOF
     )
     if [[ -z "$session_log" ]]; then
         echo "credit_approve_gate: no active openclaw session log (mtime <${CV_SESSION_MAX_AGE_MIN} min) found; refusing autonomous approve." >&2
+        return 1
+    fi
+
+    # Tier 1 substitution block: Tier 1 hosts are JS-rendered. Using
+    # web_fetch on them returns the non-rendered HTML, which is a different
+    # (and often wrong) data surface than what the browser tool sees.
+    # Multiple real incidents (2026-04-16, 2026-04-20, 2026-04-22) featured
+    # web_fetch substituting for browser on these hosts. Primary defense is
+    # that web_fetch is in the operations agent's toolDenyList in
+    # openclaw-main.json. This is the backstop — if the tool deny is ever
+    # removed or misconfigured, the approve still refuses. Also catches
+    # sessions run from agents whose toolDenyList we don't control.
+    local tier1_webfetch_hosts
+    tier1_webfetch_hosts=$(
+        jq -R -r -n \
+            --arg hosts "$CV_TIER1_HOSTS" '
+            ($hosts | split("|") | map(gsub("\\\\."; ".")) | map({(.): true}) | add) as $t1
+            |
+            [inputs | fromjson? // empty | select(type == "object")] as $lines
+            |
+            [
+                $lines[]
+                | .message?.content[]? // empty
+                | select(.type == "toolCall" and .name == "web_fetch")
+                | (.arguments.url // "") | select(. != "")
+                | capture("^https?://(?:www\\.)?(?<host>[^/]+)").host
+                | select($t1[.] // false)
+            ]
+            | unique | .[]
+        ' "$session_log" 2>/dev/null | tr '\n' ',' | sed 's/,$//'
+    )
+    if [[ -n "$tier1_webfetch_hosts" ]]; then
+        cat >&2 <<EOF
+credit_approve_gate: web_fetch call(s) to Tier 1 host(s) detected in this session: ${tier1_webfetch_hosts}.
+Tier 1 pages (Spotify / Apple Music / MusicBrainz / Discogs / AllMusic / Tidal)
+are JS-rendered — web_fetch returns the raw HTML shell, not the data the
+browser tool sees. Every Tier 1 load for credit verification MUST go through
+the \`browser\` tool. Reload the relevant page(s) via \`browser\` and retry.
+(This check is a backstop — web_fetch should not even be callable; if you
+reached this error, something is misconfigured upstream.)
+EOF
         return 1
     fi
 
@@ -275,6 +432,26 @@ cmd_call() {
         return 1
     fi
 
+    # Dry-run short-circuit (issue #145). Gate ran above, so a broken batch
+    # still fails loudly. Fail-CLOSED method check: anything that isn't a
+    # pure read (GET/HEAD, case-insensitive) is intercepted. This prevents
+    # lower-case `put`, typos, and future verbs from bypassing dry-run.
+    if is_dry_run_mode; then
+        local method_lc
+        method_lc="$(printf %s "$method" | tr '[:upper:]' '[:lower:]')"
+        case "$method_lc" in
+            get|head)
+                : # read — fall through to real API
+                ;;
+            *)
+                DRY_RUN_AUDIT_FAILED=0
+                write_dry_run_audit "$method" "$path" "$body" "call"
+                emit_dry_run_response
+                return 0
+                ;;
+        esac
+    fi
+
     local token
     token=$(get_token)
 
@@ -317,6 +494,14 @@ cmd_upload() {
     shift 2
 
     [[ -f "$file" ]] || die "File not found: $file"
+
+    # Uploads are always writes — short-circuit unconditionally in dry-run.
+    if is_dry_run_mode; then
+        DRY_RUN_AUDIT_FAILED=0
+        write_dry_run_audit "POST" "$path" "$file" "upload"
+        emit_dry_run_response
+        return 0
+    fi
 
     local token
     token=$(get_token)

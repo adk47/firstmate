@@ -36,6 +36,28 @@ log_path_for_run() {
 
 cmd_init() {
   require_env
+
+  # Mechanical enforcement of the SKILL.md B0a rule: when OPS_DRY_RUN=1, the
+  # dry-run channel env MUST be set and non-empty. Prose alone ("abort at
+  # B0a if unset") is not enforcement — a misbehaving model can skip it and
+  # post [DRY RUN] output straight to the prod channel. runlog.sh init is
+  # the mandatory first B0c call, so failing here closes the hole before any
+  # Slack post or API call runs. Only enforced when we're actually in
+  # dry-run mode; prod runs are unaffected.
+  case "$(printf %s "${OPS_DRY_RUN:-0}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      if [[ -z "${OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID:-}" ]]; then
+        cat >&2 <<EOF
+ERROR: OPS_DRY_RUN=1 but OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID is unset.
+Dry-run mode must never silently fall back to the prod channel. Set the env
+var to the test channel ID (e.g. OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID=
+C0TEST... ) before initializing the run. Aborting.
+EOF
+        return 5
+      fi
+      ;;
+  esac
+
   local day ts short run_id log
   day=$(date -u +%Y%m%d)
   ts=$(date -u +%H%M%S)
@@ -44,6 +66,21 @@ cmd_init() {
   log=$(log_path_for_run "$run_id")
   : > "$log"  # create/truncate
   echo "$log" > "${OPS_RUNLOG_DIR}/latest.txt"
+
+  # Dry-run marker (issue #145). When OPS_DRY_RUN=1, stamp a run_header
+  # event at file-top so downstream consumers (compute-run-summary.sh,
+  # SKILL.md B6 summary poster) can detect dry-run from the log alone,
+  # without re-reading env. Non-dry-run runs stay byte-identical to
+  # historical behavior (empty file).
+  case "$(printf %s "${OPS_DRY_RUN:-0}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      local iso
+      iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+      jq -n -c --arg rid "$run_id" --arg ts "$iso" \
+        '{event:"run_header", run_id:$rid, ts:$ts, dryRun:true}' >> "$log"
+      ;;
+  esac
+
   echo "$run_id"
 }
 

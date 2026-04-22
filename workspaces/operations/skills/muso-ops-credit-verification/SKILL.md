@@ -59,6 +59,65 @@ to `C0APB2CMM7C`. Substitute this channel ID in all `message(...)` calls below.
 
 In examples below, use:
 - `<credit_verification_channel_id>` = `OPS_CREDIT_VERIFICATION_CHANNEL_ID` (if set) else `C0APB2CMM7C`
+- When `OPS_DRY_RUN=1`: `<credit_verification_channel_id>` = `OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID` (see *Dry-run mode* below)
+- `<dry_run_prefix>` = `"[DRY RUN] "` when `OPS_DRY_RUN=1`, else empty string
+
+### Dry-run mode (`OPS_DRY_RUN=1`, issue #145)
+
+Dry-run lets us canary a model bump or local-dev the end-to-end workflow
+without real API writes or Slack noise in the prod channel. At the start of
+every run, check `OPS_DRY_RUN`:
+
+```bash
+DRY_RUN="${OPS_DRY_RUN:-0}"
+case "$(printf %s "$DRY_RUN" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on) DRY_RUN=1 ;;
+  *)             DRY_RUN=0 ;;
+esac
+```
+
+When `DRY_RUN=1`:
+
+1. **Channel routing.** Every Slack post (parent summary, in-thread
+   escalations, queue-clear message, error-storm alert) goes to
+   `OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID` instead of the prod channel.
+   If that env is unset, **abort at B0a** with a clear error. `runlog.sh
+   init` enforces this mechanically: it exits non-zero when `OPS_DRY_RUN=1`
+   and the dry-run channel env is empty, so the run cannot even get past
+   B0c without the test channel configured — prose alone is not enforcement.
+2. **Prefix.** Prepend `[DRY RUN]` to every Slack post body (parent summary,
+   thread replies, queue-clear, error-storm). Use the `<dry_run_prefix>`
+   substitution in the templates.
+3. **Skip Jan's escalation queue.** Do NOT `@`-tag Jan (`<@U038BM16T7W>`) in
+   dry-run thread replies. Do NOT touch `urgent-escalations/` or any
+   Jan-facing tracking file. The run still logs `escalation_posted` to the
+   runlog so `compute-run-summary.sh` counts would-be escalations in the
+   summary — we just don't page a human for them.
+4. **API writes are short-circuited automatically.** The bash layer
+   (`muso-admin-api.sh`) intercepts **anything that isn't GET/HEAD** when
+   `OPS_DRY_RUN=1` (fail-closed deny-list — typos / lower-case / future
+   verbs all get intercepted, not silently let through) and returns
+   `{"http_status":200,"dryRun":true,"body":null,"wouldHaveExecuted":true}`.
+   `body` is `null` on purpose — consumers that expected real-API shape
+   (`.body.items`, `.body.id`) fail loudly instead of silently reading null
+   from a stand-in payload. The credit-approve gate still runs, so a batch
+   with bad evidence still fails visibly. `GET`/`HEAD` pass through to the
+   real API so the bot can read state. Every would-be write is appended as
+   JSONL to `${OPS_DRY_RUN_AUDIT_PATH:-/tmp/ops-dry-run-audit.jsonl}`
+   (including `run_id` from `OPS_RUN_ID`/`RUN_ID` env if set). If the audit
+   write fails, the response additionally carries `dryRun_audit_failed:
+   true` and a stderr warning — callers should surface this, because it
+   means the run has no forensic trail.
+5. **Runlog self-describes.** `runlog.sh init` stamps a `run_header` event
+   with `dryRun:true`, and `compute-run-summary.sh` reads that header at B6
+   (source of truth is the log, not current env) and tags `run_finished`
+   with `dryRun:true`. The Slack-side poster computes any `[DRY RUN]` prefix
+   from `.dryRun` on the summary event — no redundant label field. No extra
+   work required; these happen automatically when the env is set at B0c.
+
+The rest of the workflow (B0–B6) runs exactly as production. Gates fire,
+evidence is logged, the summary is computed. Only the API writes, the Slack
+destination, and the human paging behavior change.
 
 **Step 0 passes → add :eyes:**
 ```
@@ -90,6 +149,30 @@ batch trigger and run **Batch Mode (B1–B5)** using the current channel ID
 (`OPS_CREDIT_VERIFICATION_CHANNEL_ID`). Do NOT treat it as a reactive credit
 message. Post the batch summary back to the same channel with the standard
 `[HEARTBEAT-BATCH]` prefix.
+
+**On-demand DRY-RUN trigger:** If the triggering message contains any of
+`(dry-run)`, `[dry-run]`, `dry run`, or `dryrun` (case-insensitive —
+e.g. `run credit verification batch (dry-run)`), set `OPS_DRY_RUN=1`
+for the duration of this run:
+
+```bash
+# At the TOP of the B0c bash block, BEFORE calling runlog.sh init.
+# Quote the message content; case-insensitive match.
+MSG_LC="$(printf %s "$TRIGGER_MSG" | tr '[:upper:]' '[:lower:]')"
+case "$MSG_LC" in
+  *"(dry-run)"*|*"[dry-run]"*|*"dry run"*|*"dryrun"*)
+    export OPS_DRY_RUN=1
+    echo "[DRY RUN] message-flag detected — enabling OPS_DRY_RUN=1 for this batch" >&2
+    ;;
+esac
+```
+
+All dry-run semantics then kick in automatically: `runlog.sh init`
+emits `dryRun:true` header (and fails fast if
+`OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID` is unset — set in
+`/etc/openclaw/main.env` on node-8), the admin-API wrapper short-
+circuits every non-GET/HEAD call, and `compute-run-summary.sh` tags
+the `run_finished` event. Nothing else in the workflow changes.
 
 **Authorization.** This command is pre-authorized (no Aaron approval queue)
 **only** when the Slack sender is one of:
@@ -295,19 +378,27 @@ never auto-approve or auto-reject. Include in the report: "Investigation incompl
 Every source URL cited in your verdict MUST correspond to a **successful `browser` tool call** executed in this investigation turn. Prior knowledge, training-data recall, or pattern-matching on the profile/studio/track name is NOT evidence. If you didn't load the page with `browser` and see the text in the snapshot, you don't know what it says.
 
 **Mechanical enforcement.** Autonomous approves are gated by
-`muso-admin-api.sh` at the bash layer. The gate reads the openclaw session
-log and refuses `PUT /admin/credit-requests status=approved` unless it finds:
+`muso-admin-api.sh` at the bash layer. The gate refuses `status=approved`
+on **both** `PUT /admin/credit-requests` (batch) and
+`PATCH /admin/credit-requests/<id>` (single-credit) unless it finds in the
+active session log:
 
 1. **≥2 distinct Tier 1 hostnames** (open.spotify.com, music.apple.com, musicbrainz.org, discogs.com, allmusic.com, tidal.com — `www.` tolerated) loaded via the **`browser`** tool (NOT `web_fetch` — those loads do not count).
 2. The `--evidence-excerpt` string you pass must appear **verbatim** (case-insensitive) in the browser result text for each of those ≥2 pages.
 
-**Invocation.** Every autonomous credit approve MUST include `--evidence-excerpt`:
+**Invocation.** Every autonomous credit approve MUST include `--evidence-excerpt`, regardless of verb:
 
 ```bash
-bash .../muso-admin-api.sh call PUT "/admin/credit-requests" \
-    --evidence-excerpt "<literal substring on the Tier 1 page>" \
-    '{"requestIds":["<cr_id>"],"status":"approved"}'
+# Batch approve (preferred — single call covers all approves in the batch):
+bash .../muso-admin-api.sh --evidence-excerpt "<literal substring>" \
+    call PUT /admin/credit-requests '{"requestIds":["<cr_id>"],"status":"approved"}'
+
+# Single-credit approve (if you must use the individual endpoint):
+bash .../muso-admin-api.sh --evidence-excerpt "<literal substring>" \
+    call PATCH /admin/credit-requests/<cr_id> '{"status":"approved"}'
 ```
+
+Calling without `--evidence-excerpt` returns exit 1 with a clear error — no API request is sent.
 
 Good excerpt examples (each is a literal substring you saw in a browser snapshot):
 - `"Jose Roig"` — artist name as rendered on MusicBrainz + AllMusic
@@ -404,20 +495,24 @@ Map investigation results to a verdict using `muso-ops-fraud` criteria:
 
   If `COUNT >= 500` and the current verdict is LEGITIMATE (would trigger an approve): **skip the approve**, mark the credit as `skip_cap` in the run log, and include in the batch summary. **Verification-needed moves and escalations still run** — the cap does not block them.
 
-- **Dry-run mode.** If `OPS_DRY_RUN=1`, still call the admin API wrapper. If the response includes `dry_run: true`, treat it as a successful action but explicitly note in the thread/report: `DRY-RUN: no changes applied`.
+- **Dry-run mode.** If `OPS_DRY_RUN=1`, still call the admin API wrapper. If the response includes `dryRun: true` (camelCase — the wrapper also emits `body: null` and `wouldHaveExecuted: true`), treat it as a successful action but explicitly note in the thread/report: `DRY-RUN: no changes applied`. If the response additionally has `dryRun_audit_failed: true`, surface that loudly — it means the audit JSONL was lost and the run lacks post-mortem evidence.
 
 #### Auto-Approve (VERIFIED LEGIT or LOW CONCERN)
 
 ```bash
+# --evidence-excerpt MUST come before `call` — it's a global option consumed
+# by the wrapper, not an API parameter. The gate rejects without it.
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/admin/credit-requests" \
   --evidence-excerpt "<literal substring you saw on a Tier 1 page>" \
+  call PUT "/admin/credit-requests" \
   '{"requestIds":["<id>"],"status":"approved"}'
 ```
 
 **Important:** Use `PUT /admin/credit-requests` (bulk status endpoint), NOT
 `PUT /admin/credit-requests/:id` (that endpoint updates the credits array only
-and silently ignores the status field).
+and silently ignores the status field). The gate also covers
+`PATCH /admin/credit-requests/<id>` — if you use that verb, still pass
+`--evidence-excerpt`.
 
 Log via `muso-ops-audit` before execution. Then YOU MUST call:
 ```
@@ -623,6 +718,7 @@ Before any network work, initialize the run context.
 - `OPS_RUNLOG_DIR` — run-log base (e.g. `/root/.openclaw/api-logs/credit-batch-runs`)
 - `OPS_WORKSPACE` — either `operations-dev` or `operations`
 - `OPS_BATCH_ENABLED` — must be `true` (default). Set to `false` to suppress batches on the twin not currently running.
+- If `OPS_DRY_RUN=1`: also require `OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID`. Abort at B0a if unset — we never silently post dry-run output to the prod channel.
 
 If `OPS_BATCH_ENABLED != "true"`, exit silently with no Slack post.
 
@@ -646,6 +742,11 @@ trap 'bash "$SKILL_DIR/scripts/lockfile.sh" release' EXIT
 **0c. Init run log and read phase variables.**
 ```bash
 RUN_ID=$(bash "$SKILL_DIR/scripts/runlog.sh" init)
+# Export OPS_RUN_ID so every downstream muso-admin-api.sh invocation
+# (which reads this env) stamps its audit line with the run_id, making
+# post-mortem correlation between runlog and audit JSONL trivial.
+# Critical in dry-run mode — without this, every audit line has run_id:null.
+export OPS_RUN_ID="$RUN_ID"
 FETCH_SIZE="${OPS_BATCH_FETCH_SIZE:-10}"   # ← phase knob; set OPS_BATCH_FETCH_SIZE env to ramp 10→25→50→100
 APPROVAL_CAP_LIMIT=500
 
@@ -928,6 +1029,15 @@ the counters directly from the session JSONL (harness-recorded tool calls)
 rather than trusting shell variables. This prevents a confabulated agent —
 e.g. a Fireworks-fallback model during an Anthropic spend-cap event — from
 emitting a fabricated summary. See issue #124 for the 2026-04-20 incidents.
+
+> **CRITICAL:** The event name is literally `run_finished`. Do NOT write
+> `run_completed`, `run_done`, or any other name — downstream tooling
+> (alerting, dry-run dashboards, the hollow/ungrounded invariants in
+> `compute-run-summary.sh`) looks for `run_finished` specifically and
+> will silently miss the run otherwise. Do NOT invoke `runlog.sh event …
+> run_finished …` directly either: the helper script writes it with
+> derived counters; bash-side variables are not trusted. Call the helper
+> exactly as shown below.
 
 ```bash
 SUMMARY=$(bash "$SKILL_DIR/scripts/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS")
