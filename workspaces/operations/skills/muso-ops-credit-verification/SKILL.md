@@ -274,26 +274,74 @@ bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-a
   call GET "/admin/profile/<id>"
 ```
 
-- If this returns 200, the input was a profile UUID. Pull the profile's unverified
-  credits:
+- If this returns 200, the input was a profile UUID. Pull the profile's pending
+  credit-request counts first, then the actual rows:
 
   ```bash
+  # counts scoped to this profile
   bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-    call GET "/admin/credit-requests?profileId=<id>&status=unverified&limit=500"
+    call GET "/admin/credit-requests/counts?profilesIds=<id>"
+
+  # the actual unverified rows (server-side filtered)
+  bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+    call GET "/admin/credit-requests?profilesIds=<id>&status=unverified&limit=100&page=1"
+
+  # and user_verification_needed rows
+  bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+    call GET "/admin/credit-requests?profilesIds=<id>&status=user_verification_needed&limit=100&page=1"
   ```
 
-  Treat each returned credit-request as an individual idempotency target and
+  **⚠️ CRITICAL — param name:** The correct filter parameter is **`profilesIds`**
+  (plural, capital `I`) — NOT `profileId` (singular). Unknown query params on
+  this endpoint are **silently dropped** by Sequelize and you will get the
+  general queue back instead of the scoped list. Always spot-check the first
+  response: every row's `profileId` field must equal `<id>`. If any row has a
+  different `profileId`, you used the wrong param name and the filter was
+  dropped — fix the param and retry. Do NOT continue on unscoped data.
+
+  Paginate with `page=1, page=2, ...` until the response returns fewer items
+  than `limit`. The total count from `/admin/credit-requests/counts?profilesIds=<id>`
+  is authoritative — your paginated sum MUST match it; if it doesn't, something
+  went wrong (rate limit, backend hiccup) and you should stop and escalate.
+
+  Treat each matching credit-request as an individual idempotency target and
   investigate in bulk-mode: one consolidated escalation post per profile (see
   Step 5), not one post per credit. The post MUST state explicitly: *"Interpreted
-  as profile ID; N unverified credit requests found for this profile."* Do NOT
+  as profile ID; <N unverified> + <M user_verification_needed> credit requests
+  found for this profile (server-side filtered on profilesIds=<id>)."* Do NOT
   pretend you found it on the first call.
 
-  **Truncation:** `limit=500` is a hard cap. If the list response contains exactly
-  500 items, the profile may have more unverified credits than you investigated —
-  say so explicitly in the escalation: *"Note: the 500 credits investigated are
-  the first page; profile may have additional unverified credits beyond this
-  cap."* Per the HARD RULE on search-scope claims, do NOT claim you reviewed "all"
-  of the profile's credits when you only reviewed the first page.
+  **Zero pending requests → profile-legitimacy pivot:** If the count endpoint
+  returns zero for both `unverified` and `user_verification_needed`, the human
+  likely wants a profile-legitimacy verdict, not a credit-level one. Delegate
+  to the `muso-verify-profile` skill:
+
+  ```
+  Use skill: muso-verify-profile
+  Input: <profile_id>
+  ```
+
+  That skill produces an authenticity score (IPIs, claiming status, industry vs.
+  user-added credit mix, external cross-reference) and a Slack-formatted verdict
+  (🟢 VERIFIED / 🟡 LIKELY LEGIT / 🟠 INCONCLUSIVE / 🔴 SUSPICIOUS). Post that
+  verdict in the #credit-verification thread, prefixed with *"Interpreted as
+  profile ID; no pending credit requests found (authoritative count endpoint
+  returned 0). Shifting to profile-legitimacy verdict:"* so the human knows
+  both what you searched and why the output shape changed.
+
+  Do NOT skip the profile-legitimacy pivot in favor of a bare *"no pending
+  request found, please double-check the UUID"* response — that answers the
+  literal question but not the likely intent.
+
+  **Per-credit audit intent → `muso-audit-profile-credits`:** If the human
+  phrasing signals they want to audit every one of the profile's already-approved
+  credits (e.g. *"verify all the credits"*, *"audit the tracks of this profile"*,
+  *"go through each credit"*) rather than an aggregate legitimacy score,
+  delegate to `muso-audit-profile-credits` instead of `muso-verify-profile`.
+  That skill diffs the profile's credit list against industry-sourced catalog
+  data and produces per-track verdicts. The two pivots are NOT interchangeable:
+  aggregate legitimacy vs. per-track audit answer different questions.
+
 - If the profile lookup also returns 404, post the current `⚠️ API ERROR` (below)
   — the ID is neither a credit-request nor a profile. Do NOT fabricate a search
   scope (see HARD RULE — search-scope claims).
@@ -1276,8 +1324,13 @@ Acknowledge the request, then fetch all unverified credits for the profile:
 
 ```bash
 bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/admin/credit-requests?status=unverified&profileId=<profile_id>&limit=500"
+  call GET "/admin/credit-requests?status=unverified&profilesIds=<profile_id>&limit=500"
 ```
+
+**⚠️ Param name:** Use `profilesIds` (plural, capital `I`). `profileId`
+singular is silently ignored by the backend and returns the general queue.
+Spot-check the first row's `profileId` field matches `<profile_id>` before
+trusting the result set.
 
 Post acknowledgment:
 
