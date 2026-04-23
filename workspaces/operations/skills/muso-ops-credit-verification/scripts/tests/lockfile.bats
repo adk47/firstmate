@@ -207,3 +207,164 @@ seed_runlog_without_run_finished() {
   [ "$status" -eq 0 ]
   grep -q "^99999:" "$OPS_BATCH_LOCK_PATH"
 }
+
+# --- R4-3: renderer-missing forensic event on release -----------------------
+#
+# 2026-04-23 14:20 UTC regression: agent posted 15+ hand-composed Slack
+# messages instead of the parent+thread from render-slack-summary.sh. R2-5's
+# prose rule didn't prevent it; add mechanical detection at release so grep
+# of recent runlogs surfaces the regression and (future R5) a monitor can
+# alert on it.
+
+seed_runlog_with_run_finished() {
+  # args: approved_attempted verification_needed_attempted [fetched]
+  # Sets up OPS_RUNLOG_DIR + latest.txt pointing at a runlog with a
+  # run_finished event. Returns the run_id on stdout.
+  local approved="$1" uvn="$2" fetched="${3:-500}"
+  local day ts short run_id dir log
+  day=$(date -u +%Y%m%d)
+  ts=$(date -u +%H%M%S)
+  short="abcdef"
+  run_id="${day}-${ts}-${short}"
+  dir="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}"
+  mkdir -p "$dir"
+  log="$dir/${run_id}.jsonl"
+  jq -n -c --arg rid "$run_id" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --argjson f "$fetched" --argjson a "$approved" --argjson v "$uvn" \
+      '{event:"run_header", run_id:$rid, ts:$ts, dryRun:true}' > "$log"
+  jq -n -c --arg rid "$run_id" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --argjson f "$fetched" --argjson a "$approved" --argjson v "$uvn" \
+      '{event:"run_finished", run_id:$rid, ts:$ts,
+        fetched:$f, approved:$a, verification_needed:$v,
+        reconciliation:{approved_attempted:$a, verification_needed_attempted:$v}}' >> "$log"
+  echo "$log" > "$OPS_RUNLOG_DIR/latest.txt"
+  echo "$run_id"
+}
+
+seed_session_with_renderer_post() {
+  # Create a session log containing a message(action=send) with the
+  # canonical renderer header. R4-3 detection should treat this as a
+  # proper render-slack-summary post and NOT emit the missing event.
+  local sess="$TEST_TMPDIR/session.jsonl"
+  jq -n -c '{message:{role:"assistant", content:[{type:"toolCall", id:"msg1", name:"message",
+              arguments:{action:"send", channelId:"C0APB2CMM7C",
+                         text:"[DRY RUN] Credit batch complete — 2026-04-23 14:20 UTC\nFetched: 500 | Approved: 250 | → verification_needed: 167\nRun ID: test"}}]}}' > "$sess"
+  echo "$sess"
+}
+
+seed_session_with_freeform_posts() {
+  # Agent posted hand-composed content — every text field fails the
+  # canonical-header regex. R4-3 should emit the forensic event.
+  local sess="$TEST_TMPDIR/session.jsonl"
+  jq -n -c '{message:{role:"assistant", content:[{type:"toolCall", id:"m1", name:"message",
+              arguments:{action:"send", text:"I have completed the batch analysis. Let me explain what happened..."}}]}}' > "$sess"
+  jq -n -c '{message:{role:"assistant", content:[{type:"toolCall", id:"m2", name:"message",
+              arguments:{action:"send", text:"Summary: 44 profiles classified, 5 to UVN..."}}]}}' >> "$sess"
+  echo "$sess"
+}
+
+@test "R4-3: release emits run_finished_renderer_missing when no renderer post found" {
+  "$SCRIPTS_DIR/lockfile.sh" acquire
+  run_id=$(seed_runlog_with_run_finished 200 50)
+  export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_freeform_posts)
+
+  run "$SCRIPTS_DIR/lockfile.sh" release
+  [ "$status" -eq 0 ]
+  [ ! -f "$OPS_BATCH_LOCK_PATH" ]
+  # stderr (merged into $output) notes the detection.
+  [[ "$output" == *"run_finished_renderer_missing"* ]]
+  # Event lands in the runlog.
+  local day="${run_id:0:8}"
+  local logfile="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}/${run_id}.jsonl"
+  jq -e 'select(.event == "run_finished_renderer_missing")' < "$logfile"
+  jq -e 'select(.event == "run_finished_renderer_missing") | .approved_attempted == 200' < "$logfile"
+  jq -e 'select(.event == "run_finished_renderer_missing") | .verification_needed_attempted == 50' < "$logfile"
+}
+
+@test "R4-3: release does NOT emit event when renderer post is present" {
+  "$SCRIPTS_DIR/lockfile.sh" acquire
+  run_id=$(seed_runlog_with_run_finished 200 50)
+  export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_renderer_post)
+
+  run "$SCRIPTS_DIR/lockfile.sh" release
+  [ "$status" -eq 0 ]
+  local day="${run_id:0:8}"
+  local logfile="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}/${run_id}.jsonl"
+  run jq -e 'select(.event == "run_finished_renderer_missing")' < "$logfile"
+  [ "$status" -ne 0 ]  # jq -e exits non-zero when no match
+}
+
+@test "R4-3: release does NOT emit event when attempts == 0 (nothing to summarise)" {
+  # Hollow batch: preflight ok but no credits processed. The B5 queue-clear
+  # message is legitimate; renderer output isn't required. Don't noise the
+  # runlog with false positives.
+  "$SCRIPTS_DIR/lockfile.sh" acquire
+  run_id=$(seed_runlog_with_run_finished 0 0)
+  export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_freeform_posts)
+
+  run "$SCRIPTS_DIR/lockfile.sh" release
+  [ "$status" -eq 0 ]
+  local day="${run_id:0:8}"
+  local logfile="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}/${run_id}.jsonl"
+  run jq -e 'select(.event == "run_finished_renderer_missing")' < "$logfile"
+  [ "$status" -ne 0 ]
+}
+
+@test "R4-3: release does NOT emit event when runlog has no run_finished (autofill path)" {
+  # Pre-fallback: if compute-run-summary didn't even produce a run_finished
+  # event, the release is already abnormal and the autofill stderr is
+  # enough signal. Don't stack two events for the same pathology.
+  "$SCRIPTS_DIR/lockfile.sh" acquire
+  local day=$(date -u +%Y%m%d) ts=$(date -u +%H%M%S) short="123abc"
+  local run_id="${day}-${ts}-${short}"
+  local dir="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}"
+  mkdir -p "$dir"
+  local logfile="$dir/${run_id}.jsonl"
+  jq -n -c --arg rid "$run_id" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{event:"run_header", run_id:$rid, ts:$ts, dryRun:true}' > "$logfile"
+  echo "$logfile" > "$OPS_RUNLOG_DIR/latest.txt"
+  export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_freeform_posts)
+
+  run "$SCRIPTS_DIR/lockfile.sh" release
+  [ "$status" -eq 0 ]
+  # No renderer_missing event should be written (no run_finished precondition).
+  run jq -e 'select(.event == "run_finished_renderer_missing")' < "$logfile"
+  [ "$status" -ne 0 ]
+}
+
+@test "R4-3: release is idempotent — second release does not double-emit" {
+  "$SCRIPTS_DIR/lockfile.sh" acquire
+  run_id=$(seed_runlog_with_run_finished 200 50)
+  export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_freeform_posts)
+
+  # First release emits the event.
+  "$SCRIPTS_DIR/lockfile.sh" release
+  # Re-acquire and release again — event must not be written twice.
+  "$SCRIPTS_DIR/lockfile.sh" acquire
+  "$SCRIPTS_DIR/lockfile.sh" release
+
+  local day="${run_id:0:8}"
+  local logfile="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}/${run_id}.jsonl"
+  local count
+  count=$(grep -c '"event":"run_finished_renderer_missing"' "$logfile" || echo 0)
+  [ "$count" -eq 1 ]
+}
+
+@test "R4-3: event detection handles run_finished_silent_failure as the finishing event too" {
+  # When R1's silent-failure invariant fires, compute-run-summary writes
+  # run_finished AND run_finished_silent_failure. The missing-renderer
+  # check must still evaluate the attempts from run_finished and emit if
+  # no renderer post was found.
+  "$SCRIPTS_DIR/lockfile.sh" acquire
+  run_id=$(seed_runlog_with_run_finished 100 0)
+  # Append an additional silent-failure event.
+  local day="${run_id:0:8}"
+  local logfile="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}/${run_id}.jsonl"
+  jq -n -c --arg rid "$run_id" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{event:"run_finished_silent_failure", run_id:$rid, ts:$ts}' >> "$logfile"
+  export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_freeform_posts)
+
+  run "$SCRIPTS_DIR/lockfile.sh" release
+  [ "$status" -eq 0 ]
+  jq -e 'select(.event == "run_finished_renderer_missing")' < "$logfile"
+}

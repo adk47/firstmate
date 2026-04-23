@@ -23,6 +23,9 @@ setup() {
     export MUSO_ADMIN_PASSWORD="unused-in-dry-run"
 
     export OPS_DRY_RUN_AUDIT_PATH="$TEST_ROOT/ops-dry-run-audit.jsonl"
+    # Route the credit-request results.jsonl (PR 1 truth floor) to a writable
+    # tmp path so tests don't trip over the default /var/log location.
+    export CV_RESULTS_PATH="$TEST_ROOT/credit-results.jsonl"
     export OPS_DRY_RUN=1
 
     # Pre-seed a token cache so get_token never tries to log in during any
@@ -343,4 +346,250 @@ teardown() {
     local malicious='{"note":"`whoami`","x":"$(echo pwned)"}'
     bash "$SCRIPT" call PUT /admin/x "$malicious" >/dev/null
     jq -e --arg b "$malicious" '.body == $b' "$OPS_DRY_RUN_AUDIT_PATH" >/dev/null
+}
+
+# --- Credit-request results.jsonl (PR 1 truth floor) ---
+#
+# The results log is the authoritative source of truth for
+# compute-run-summary.sh. It is written regardless of caller redirections:
+# a caller that wraps us in `> /dev/null 2>&1` cannot hide the outcome.
+# Logged only for writes to /admin/credit-requests* (PUT or PATCH) so
+# non-credit-request traffic produces no noise.
+
+@test "results.jsonl: PUT /admin/credit-requests dry-run intercept writes outcome=dry_run_intercept" {
+    # Gate bypassed via CV_APPROVE_GATE_DISABLED (set in setup). Dry-run mode
+    # on. Must produce a results.jsonl line with dry_run_intercept outcome.
+    bash "$SCRIPT" call PUT /admin/credit-requests '{"requestIds":["cr_1","cr_2"],"status":"approved"}' >/dev/null
+    [ -f "$CV_RESULTS_PATH" ]
+    jq -e '.outcome == "dry_run_intercept" and .method == "PUT" and .path == "/admin/credit-requests" and .intended_status == "approved" and .http_status == 200' "$CV_RESULTS_PATH" >/dev/null
+    # Batch PUT carries requestIds from body into the truth log so downstream
+    # reconciliation can tally per-ID.
+    [ "$(jq -c '.request_ids' "$CV_RESULTS_PATH")" = '["cr_1","cr_2"]' ]
+}
+
+@test "results.jsonl: PATCH /admin/credit-requests/<id> captures id in request_ids" {
+    # Single-credit PATCH shape: id is in the path, not the body. Truth log
+    # reconstructs request_ids=[<id>] so batched and per-credit paths feed
+    # the same reconciliation surface.
+    bash "$SCRIPT" call PATCH /admin/credit-requests/cr-from-path '{"status":"approved","evidence_excerpt":"in_body"}' >/dev/null
+    [ -f "$CV_RESULTS_PATH" ]
+    [ "$(jq -c '.request_ids' "$CV_RESULTS_PATH")" = '["cr-from-path"]' ]
+    jq -e '.method == "PATCH" and .outcome == "dry_run_intercept"' "$CV_RESULTS_PATH" >/dev/null
+}
+
+@test "results.jsonl: non-credit-requests path writes NO line" {
+    # Scope guard: the truth floor is for /admin/credit-requests* writes only.
+    # Other admin API writes (users, credits, etc.) must NOT produce a line,
+    # or compute-run-summary.sh counts would be polluted.
+    bash "$SCRIPT" call POST /admin/credits '{"amount":1}' >/dev/null
+    bash "$SCRIPT" call PATCH /admin/users/u1 '{"name":"x"}' >/dev/null
+    [ ! -f "$CV_RESULTS_PATH" ] || [ "$(wc -l < "$CV_RESULTS_PATH")" -eq 0 ]
+}
+
+@test "results.jsonl: GET /admin/credit-requests writes NO line (reads are not writes)" {
+    # GET is allowed through to the real API (would fail at closed port).
+    # The truth floor only records writes — a read shouldn't produce a line.
+    bash "$SCRIPT" call GET /admin/credit-requests '' >/dev/null 2>&1 || true
+    [ ! -f "$CV_RESULTS_PATH" ] || [ "$(wc -l < "$CV_RESULTS_PATH")" -eq 0 ]
+}
+
+@test "results.jsonl: multiple writes append separate lines" {
+    bash "$SCRIPT" call PUT /admin/credit-requests '{"requestIds":["a"],"status":"approved"}' >/dev/null
+    bash "$SCRIPT" call PATCH /admin/credit-requests/b '{"status":"user_verification_needed","reason":"r"}' >/dev/null
+    bash "$SCRIPT" call PATCH /admin/credit-requests/c '{"status":"user_verification_needed","reason":"r"}' >/dev/null
+    [ "$(wc -l < "$CV_RESULTS_PATH")" -eq 3 ]
+    # Intended status for each entry reflects the body, so UVN flags are
+    # distinguishable from approves in the truth log.
+    [ "$(jq -s -c 'map(.intended_status)' "$CV_RESULTS_PATH")" = '["approved","user_verification_needed","user_verification_needed"]' ]
+}
+
+@test "results.jsonl: rejected_by_gate outcome fires when gate blocks" {
+    # Re-enable the gate. No EVIDENCE_EXCERPT → gate rejects at the
+    # `--evidence-excerpt is required` branch. Truth log must still
+    # record the rejection so downstream sees 0 approves reached the
+    # intercept layer.
+    unset CV_APPROVE_GATE_DISABLED
+    run bash "$SCRIPT" call PUT /admin/credit-requests '{"requestIds":["cr_x"],"status":"approved"}'
+    [ "$status" -ne 0 ]
+    [ -f "$CV_RESULTS_PATH" ]
+    jq -e '.outcome == "rejected_by_gate" and .method == "PUT" and .intended_status == "approved" and .http_status == null' "$CV_RESULTS_PATH" >/dev/null
+    [ "$(jq -c '.request_ids' "$CV_RESULTS_PATH")" = '["cr_x"]' ]
+}
+
+@test "results.jsonl: rejected_by_gate fires for PATCH too (not just PUT)" {
+    # Regression test for the 2026-04-22 silent-failure scenario: agent
+    # synthesized PATCH calls without --evidence-excerpt. Gate rejects,
+    # and the truth floor records it — no more counting iterations as
+    # successes.
+    unset CV_APPROVE_GATE_DISABLED
+    run bash "$SCRIPT" call PATCH /admin/credit-requests/cr_from_path '{"status":"approved"}'
+    [ "$status" -ne 0 ]
+    jq -e '.outcome == "rejected_by_gate" and .method == "PATCH"' "$CV_RESULTS_PATH" >/dev/null
+    [ "$(jq -c '.request_ids' "$CV_RESULTS_PATH")" = '["cr_from_path"]' ]
+}
+
+@test "results.jsonl: UVN flag in dry-run records dry_run_intercept (no gate applies)" {
+    # UVN isn't gated (no evidence required to flag for review) but still
+    # goes through the truth floor so compute-run-summary can tally
+    # uvn_ok vs uvn_error separately from approves.
+    unset CV_APPROVE_GATE_DISABLED
+    bash "$SCRIPT" call PATCH /admin/credit-requests/cr_uvn '{"status":"user_verification_needed","reason":"high_velocity"}' >/dev/null
+    jq -e '.outcome == "dry_run_intercept" and .intended_status == "user_verification_needed"' "$CV_RESULTS_PATH" >/dev/null
+}
+
+@test "results.jsonl: run_id is captured when OPS_RUN_ID is set" {
+    export OPS_RUN_ID="20260422-191608-d62a7b"
+    bash "$SCRIPT" call PUT /admin/credit-requests '{"requestIds":["cr_1"],"status":"approved"}' >/dev/null
+    jq -e --arg r "$OPS_RUN_ID" '.run_id == $r' "$CV_RESULTS_PATH" >/dev/null
+}
+
+@test "results.jsonl: run_id falls back to OPS_RUNLOG_DIR/latest.txt basename" {
+    # Same fallback as write_dry_run_audit: per-exec-call shells don't see
+    # OPS_RUN_ID via export, so the filesystem is the source of truth.
+    unset OPS_RUN_ID RUN_ID
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlog"
+    mkdir -p "$OPS_RUNLOG_DIR"
+    printf '%s\n' "$OPS_RUNLOG_DIR/20260422-191608-d62a7b.jsonl" > "$OPS_RUNLOG_DIR/latest.txt"
+    bash "$SCRIPT" call PUT /admin/credit-requests '{"requestIds":["cr_1"],"status":"approved"}' >/dev/null
+    jq -e '.run_id == "20260422-191608-d62a7b"' "$CV_RESULTS_PATH" >/dev/null
+}
+
+@test "results.jsonl: malformed latest.txt basename → run_id stays null" {
+    # Same defensive shape check as write_dry_run_audit: if latest.txt gets
+    # clobbered, don't stuff garbage into the truth log.
+    unset OPS_RUN_ID RUN_ID
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlog"
+    mkdir -p "$OPS_RUNLOG_DIR"
+    printf '%s\n' "$OPS_RUNLOG_DIR/not-a-run-id.jsonl" > "$OPS_RUNLOG_DIR/latest.txt"
+    bash "$SCRIPT" call PUT /admin/credit-requests '{"requestIds":["cr_1"],"status":"approved"}' >/dev/null
+    jq -e '.run_id == null' "$CV_RESULTS_PATH" >/dev/null
+}
+
+@test "results.jsonl: requester is captured when --requester is set" {
+    # Reconciliation needs to distinguish autonomous batches from
+    # human-authorized per-credit approves (Jan/Aaron override path).
+    bash "$SCRIPT" --requester jan@muso.ai call PATCH /admin/credit-requests/cr_1 '{"status":"approved"}' >/dev/null
+    jq -e '.requester == "jan@muso.ai"' "$CV_RESULTS_PATH" >/dev/null
+}
+
+@test "results.jsonl: caller redirecting stdout+stderr cannot hide the line" {
+    # The whole point of PR 1's design principle: truth lives on disk, not
+    # in streams. A caller that does `bash muso-admin-api.sh ... > /dev/null 2>&1`
+    # (which is exactly what the 2026-04-22 inline run_profile did) must
+    # still leave a line in results.jsonl.
+    bash "$SCRIPT" call PUT /admin/credit-requests '{"requestIds":["cr_1"],"status":"approved"}' >/dev/null 2>&1
+    [ -s "$CV_RESULTS_PATH" ]
+    jq -e '.outcome == "dry_run_intercept"' "$CV_RESULTS_PATH" >/dev/null
+}
+
+# --- Dry-run config-mismatch guard (R2-1) ---
+#
+# Prevents the 2026-04-23 09:02 UTC incident class: runlog was initialized
+# with dryRun:true at B0, but a later exec shell lost OPS_DRY_RUN=1 because
+# each openclaw exec tool call is a fresh shell. 12 UVN PATCHes hit the real
+# admin API during what was supposed to be a dry-run (saved only by URL 404s).
+# Guard refuses the write and records outcome=dry_run_config_mismatch.
+
+seed_runlog_dryrun() {
+    # args: dry_run_flag (true|false)
+    local dry="$1"
+    local runlog_dir="$TEST_ROOT/runlog"
+    mkdir -p "$runlog_dir"
+    local runlog_file="$runlog_dir/20260423-090219-testseed.jsonl"
+    jq -n -c --argjson dry "$dry" '{event:"run_header", run_id:"20260423-090219-testseed", ts:"2026-04-23T09:02:19Z", dryRun:$dry}' > "$runlog_file"
+    printf '%s\n' "$runlog_file" > "$runlog_dir/latest.txt"
+    export OPS_RUNLOG_DIR="$runlog_dir"
+}
+
+@test "guard: runlog=dryRun + OPS_DRY_RUN unset → refuse real write, outcome=dry_run_config_mismatch" {
+    # This is THE fix for the 2026-04-23 incident. If a caller forgot to
+    # export OPS_DRY_RUN in its exec shell, the write must be refused —
+    # not leaked to prod — with a loud error and a truth-floor line.
+    seed_runlog_dryrun true
+    unset OPS_DRY_RUN
+    run bash "$SCRIPT" call PATCH /admin/credit-requests/cr_uvn_1 '{"status":"user_verification_needed","reason":"x"}'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"run_header says dryRun:true but OPS_DRY_RUN env is unset"* ]]
+    [ -s "$CV_RESULTS_PATH" ]
+    jq -e '.outcome == "dry_run_config_mismatch" and .method == "PATCH" and .intended_status == "user_verification_needed"' "$CV_RESULTS_PATH" >/dev/null
+    [ "$(jq -c '.request_ids' "$CV_RESULTS_PATH")" = '["cr_uvn_1"]' ]
+}
+
+@test "guard: runlog=dryRun + OPS_DRY_RUN=1 → passes through to dry-run intercept" {
+    # Happy dry-run path: both runlog and env agree. Write is intercepted
+    # normally.
+    seed_runlog_dryrun true
+    export OPS_DRY_RUN=1
+    run bash "$SCRIPT" call PUT /admin/credit-requests '{"requestIds":["cr_1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.dryRun == true' >/dev/null
+    jq -e '.outcome == "dry_run_intercept"' "$CV_RESULTS_PATH" >/dev/null
+    # The guard must NOT have fired — only the normal dry-run intercept line.
+    ! jq -e 'select(.outcome == "dry_run_config_mismatch")' "$CV_RESULTS_PATH" >/dev/null 2>&1
+}
+
+@test "guard: runlog=false + OPS_DRY_RUN unset → real write path (not blocked)" {
+    # Prod run where both runlog and env agree. Guard must NOT fire — the
+    # real curl runs (and will fail at the closed port, but that proves
+    # we reached the real-call branch).
+    seed_runlog_dryrun false
+    unset OPS_DRY_RUN
+    run bash "$SCRIPT" call PATCH /admin/credit-requests/cr_2 '{"status":"user_verification_needed","reason":"x"}'
+    # No guard fire → no dry_run_config_mismatch line.
+    if [[ -f "$CV_RESULTS_PATH" ]]; then
+        ! jq -e 'select(.outcome == "dry_run_config_mismatch")' "$CV_RESULTS_PATH" >/dev/null 2>&1
+    fi
+}
+
+@test "guard: no runlog present (ad-hoc call outside batch) → passes through" {
+    # Ad-hoc call from a human shell has no OPS_RUNLOG_DIR — guard must be
+    # a no-op, not block the call. (Jan/Aaron escalation-thread overrides
+    # flow through this path.)
+    unset OPS_RUNLOG_DIR OPS_DRY_RUN
+    run bash "$SCRIPT" call PATCH /admin/credit-requests/cr_3 '{"status":"user_verification_needed","reason":"x"}'
+    # Guard did NOT fire (no runlog to check).
+    if [[ -f "$CV_RESULTS_PATH" ]]; then
+        ! jq -e 'select(.outcome == "dry_run_config_mismatch")' "$CV_RESULTS_PATH" >/dev/null 2>&1
+    fi
+}
+
+@test "guard: only scoped to /admin/credit-requests* — other admin writes pass through" {
+    # A dry-run mismatch on /admin/users or /admin/credits should NOT trip
+    # this guard. The guard is the credit-verification truth-floor scope.
+    seed_runlog_dryrun true
+    unset OPS_DRY_RUN
+    run bash "$SCRIPT" call PATCH /admin/users/u1 '{"name":"x"}'
+    # No dry_run_config_mismatch line even though runlog says dry + env empty,
+    # because the path isn't /admin/credit-requests*.
+    if [[ -f "$CV_RESULTS_PATH" ]]; then
+        ! jq -e 'select(.outcome == "dry_run_config_mismatch")' "$CV_RESULTS_PATH" >/dev/null 2>&1
+    fi
+}
+
+@test "guard: GET still passes through when runlog=dryRun + env unset (reads are not writes)" {
+    # GET is never a write. The guard must not fire for reads even when the
+    # runlog mismatch condition is technically met.
+    seed_runlog_dryrun true
+    unset OPS_DRY_RUN
+    run bash "$SCRIPT" call GET /admin/credit-requests ''
+    # No dry_run_config_mismatch line.
+    if [[ -f "$CV_RESULTS_PATH" ]]; then
+        ! jq -e 'select(.outcome == "dry_run_config_mismatch")' "$CV_RESULTS_PATH" >/dev/null 2>&1
+    fi
+}
+
+@test "guard: malformed latest.txt → treated as unknown, passes through" {
+    # Defense-in-depth: if latest.txt is clobbered, don't lock out all writes
+    # — just let them through (they'll be intercepted by the short-circuit if
+    # OPS_DRY_RUN=1, or go to prod if 0). The runlog is an advisory signal,
+    # not a lock.
+    local runlog_dir="$TEST_ROOT/runlog"
+    mkdir -p "$runlog_dir"
+    printf 'garbage-not-a-path\n' > "$runlog_dir/latest.txt"
+    export OPS_RUNLOG_DIR="$runlog_dir"
+    unset OPS_DRY_RUN
+    run bash "$SCRIPT" call PATCH /admin/credit-requests/cr_4 '{"status":"user_verification_needed","reason":"x"}'
+    if [[ -f "$CV_RESULTS_PATH" ]]; then
+        ! jq -e 'select(.outcome == "dry_run_config_mismatch")' "$CV_RESULTS_PATH" >/dev/null 2>&1
+    fi
 }

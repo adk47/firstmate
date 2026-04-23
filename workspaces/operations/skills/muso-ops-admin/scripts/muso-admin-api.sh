@@ -59,6 +59,48 @@ is_dry_run_mode() {
     [[ "$OPS_DRY_RUN" == "1" ]]
 }
 
+# Resolve whether the active batch runlog's header says this run is a dry-run.
+# Returns "true", "false", or empty string (unknown / no active run). Used by
+# the dry-run config-mismatch guard (R2-1) to detect the 2026-04-23 09:02 UTC
+# incident shape: agent set OPS_DRY_RUN=1 in B0 but failed to re-export it in
+# a later exec shell; 12 UVN PATCHes hit the real admin API because OPS_DRY_RUN
+# was empty in that specific shell. The runlog header is the filesystem source
+# of truth — it persists across exec shells and reflects the mode the run WAS
+# initialized in.
+#
+# Resolution chain mirrors write_credit_request_result: OPS_RUNLOG_DIR env →
+# latest.txt → grep first run_header event's dryRun field.
+resolve_run_header_dryrun() {
+    [[ -n "${OPS_RUNLOG_DIR:-}" ]] || return 0
+    local latest_idx runlog_path
+    latest_idx="${OPS_RUNLOG_DIR}/latest.txt"
+    [[ -f "$latest_idx" ]] || return 0
+    runlog_path=$(cat "$latest_idx" 2>/dev/null || true)
+    [[ -n "$runlog_path" && -f "$runlog_path" ]] || return 0
+    # First run_header event's dryRun value. If multiple run_headers (shouldn't
+    # happen — one per run), use the first. jq -s slurps; we take head -1 to
+    # bound work on a large runlog.
+    jq -s -r 'first(.[] | select(.event == "run_header") | .dryRun) // empty' "$runlog_path" 2>/dev/null | head -1
+}
+
+# R3-3: return the current run's run_started.ts (ISO-8601 string). The gate
+# uses this to scope its session-log scan — past browser loads and past
+# web_fetch calls are excluded so channel-keyed session persistence (openclaw
+# writes all turns in a channel to one file) can't bleed yesterday's
+# contamination into today's run. Empty output = no scope, caller falls back
+# to the mtime-only window. Resolution chain mirrors resolve_run_header_dryrun.
+resolve_run_started_ts() {
+    [[ -n "${OPS_RUNLOG_DIR:-}" ]] || return 0
+    local latest_idx runlog_path
+    latest_idx="${OPS_RUNLOG_DIR}/latest.txt"
+    [[ -f "$latest_idx" ]] || return 0
+    runlog_path=$(cat "$latest_idx" 2>/dev/null || true)
+    [[ -n "$runlog_path" && -f "$runlog_path" ]] || return 0
+    # runlog.sh event always stamps .ts on every event; first run_started is
+    # the canonical "batch work begins" anchor.
+    jq -s -r 'first(.[] | select(.event == "run_started") | .ts) // empty' "$runlog_path" 2>/dev/null | head -1
+}
+
 # Append a JSONL audit line for a would-be write. Uses jq -n for consistency
 # with runlog.sh / compute-run-summary.sh; arg-passing avoids shell
 # interpolation of the body entirely. On any failure to write, emits a loud
@@ -144,6 +186,118 @@ emit_dry_run_response() {
         printf '%s\n' '{"http_status":200,"dryRun":true,"dryRun_audit_failed":true,"body":null,"wouldHaveExecuted":true}'
     else
         printf '%s\n' '{"http_status":200,"dryRun":true,"body":null,"wouldHaveExecuted":true}'
+    fi
+}
+
+# --- Credit-request results log (truth floor) ---
+# Authoritative per-HTTP-call JSONL for every write to /admin/credit-requests*
+# regardless of caller or redirections. Designed so a caller that wraps us in
+# `> /dev/null 2>&1` cannot hide what actually happened — truth lives on disk.
+#
+# Downstream (compute-run-summary.sh) reads this file as the source of truth
+# for approved/rejected/uvn totals. It is written in BOTH dry-run and prod.
+#
+# Outcome values:
+#   rejected_by_gate    — enforce_credit_approve_gate returned 1
+#   dry_run_intercept   — OPS_DRY_RUN=1 write short-circuit fired
+#   ok                  — real API returned 2xx
+#   http_error          — real API returned non-2xx
+#
+# Failure mode: if we can't write the line, emit a LOUD stderr warning but
+# never break the main call. Same philosophy as write_dry_run_audit.
+#
+# CV_RESULTS_PATH overrides the default path (useful for tests).
+write_credit_request_result() {
+    local method="$1" path="$2" body="${3:-}"
+    local outcome="$4" http_status="${5:-}" error="${6:-}"
+
+    # Scope: only credit-request writes.
+    [[ "$path" == /admin/credit-requests* ]] || return 0
+    local method_uc
+    method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    case "$method_uc" in PUT|PATCH) ;; *) return 0 ;; esac
+
+    # RUN_ID resolution (env first, then OPS_RUNLOG_DIR/latest.txt — same
+    # pattern as write_dry_run_audit per #152).
+    local run_id
+    run_id="${OPS_RUN_ID:-${RUN_ID:-}}"
+    if [[ -z "$run_id" && -n "${OPS_RUNLOG_DIR:-}" && -f "${OPS_RUNLOG_DIR}/latest.txt" ]]; then
+        local latest_path latest_base
+        latest_path=$(cat "${OPS_RUNLOG_DIR}/latest.txt" 2>/dev/null || true)
+        if [[ -n "$latest_path" ]]; then
+            latest_base=$(basename "$latest_path" .jsonl)
+            if [[ "$latest_base" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]]; then
+                run_id="$latest_base"
+            fi
+        fi
+    fi
+
+    # Resolve target path. CV_RESULTS_PATH explicitly wins; otherwise derive
+    # from today's UTC date + run_id.
+    local results_path today
+    today="$(date -u +%Y-%m-%d)"
+    results_path="${CV_RESULTS_PATH:-/var/log/openclaw/credit-batch-runs/${today}/${run_id:-unknown}.results.jsonl}"
+
+    local results_dir
+    results_dir="$(dirname "$results_path")"
+    if ! mkdir -p "$results_dir" 2>/dev/null; then
+        echo "WARN: could not create results dir ${results_dir}; results line LOST for ${method_uc} ${path}" >&2
+        return 0
+    fi
+
+    # Extract request_ids + intended_status from the invocation shape:
+    #   PUT  /admin/credit-requests         body: {"requestIds":[...], "status":"..."}
+    #   PATCH /admin/credit-requests/<id>   body: {"status":"..."}
+    # If parsing fails, record an empty array rather than guessing.
+    local request_ids intended_status
+    if [[ "$method_uc" == "PUT" ]]; then
+        request_ids=$(printf '%s' "$body" | jq -c '.requestIds // []' 2>/dev/null)
+        [[ -z "$request_ids" ]] && request_ids='[]'
+    else
+        local id
+        id="${path#/admin/credit-requests/}"
+        id="${id%%\?*}"  # strip query string if present
+        if [[ -n "$id" && "$id" != "$path" ]]; then
+            request_ids=$(jq -n -c --arg id "$id" '[$id]')
+        else
+            request_ids='[]'
+        fi
+    fi
+    intended_status=$(printf '%s' "$body" | jq -r '.status // ""' 2>/dev/null || echo '')
+
+    local ts
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    local line
+    if ! line=$(jq -n -c \
+        --arg ts "$ts" \
+        --arg run_id "$run_id" \
+        --arg method "$method_uc" \
+        --arg path "$path" \
+        --argjson request_ids "$request_ids" \
+        --arg intended_status "$intended_status" \
+        --arg outcome "$outcome" \
+        --arg http_status "$http_status" \
+        --arg error "$error" \
+        --arg requester "${REQUESTER_EMAIL:-}" \
+        '{
+            ts:$ts,
+            run_id:    (if $run_id    == "" then null else $run_id    end),
+            method:$method,
+            path:$path,
+            request_ids:$request_ids,
+            intended_status: (if $intended_status == "" then null else $intended_status end),
+            outcome:$outcome,
+            http_status: (if $http_status == "" then null else ($http_status | tonumber? // $http_status) end),
+            error:     (if $error     == "" then null else $error     end),
+            requester: (if $requester == "" then null else $requester end)
+         }' 2>/dev/null); then
+        echo "WARN: jq failed to build results line; results line LOST for ${method_uc} ${path}" >&2
+        return 0
+    fi
+    if ! printf '%s\n' "$line" >> "$results_path" 2>/dev/null; then
+        echo "WARN: could not append to ${results_path}; results line LOST for ${method_uc} ${path}" >&2
+        return 0
     fi
 }
 
@@ -328,30 +482,71 @@ EOF
         return 1
     fi
 
+    # R3-3: scope the session-log scan to the current batch run. openclaw
+    # channel-keys sessions — one file persists across runs/restarts/days —
+    # so a web_fetch yesterday would still block today's approves without
+    # this filter. resolve_run_started_ts reads the current run's
+    # run_started.ts from the runlog; both jq pipelines below pass it and
+    # filter `$lines` accordingly. Empty value = no scope (backward-compat
+    # for ad-hoc or non-batch runs, which is what the old behavior was).
+    local run_started_ts
+    run_started_ts="$(resolve_run_started_ts)"
+
     # Tier 1 substitution block: Tier 1 hosts are JS-rendered. Using
     # web_fetch on them returns the non-rendered HTML, which is a different
     # (and often wrong) data surface than what the browser tool sees.
     # Multiple real incidents (2026-04-16, 2026-04-20, 2026-04-22) featured
     # web_fetch substituting for browser on these hosts. Primary defense is
-    # that web_fetch is in the operations agent's toolDenyList in
-    # openclaw-main.json. This is the backstop — if the tool deny is ever
-    # removed or misconfigured, the approve still refuses. Also catches
-    # sessions run from agents whose toolDenyList we don't control.
+    # the `muso-credit-verification-enforcer` plugin's block-web-fetch-tier1
+    # hook, which returns an error-shaped toolResult for any such call. This
+    # bash-layer check is the backstop — if the plugin hook misses a call,
+    # the approve still refuses.
+    #
+    # R4-1: only count web_fetch calls whose toolResult indicates actual data
+    # was returned. A plugin-blocked call leaves a toolCall row in the
+    # session JSONL but the toolResult has details.status=error + a
+    # plugin-block payload — no Tier-1 data leaked. Counting such blocked
+    # calls as contamination is a false positive that rejects every approve
+    # for the rest of the run (the 2026-04-23 14:20 UTC dry-run blocked
+    # all 475 approves on exactly this bug). 404s, timeouts, and other
+    # errored web_fetches get the same pass: no data returned = no risk.
     local tier1_webfetch_hosts
     tier1_webfetch_hosts=$(
         jq -R -r -n \
-            --arg hosts "$CV_TIER1_HOSTS" '
+            --arg hosts "$CV_TIER1_HOSTS" \
+            --arg run_started_ts "$run_started_ts" '
             ($hosts | split("|") | map(gsub("\\\\."; ".")) | map({(.): true}) | add) as $t1
             |
-            [inputs | fromjson? // empty | select(type == "object")] as $lines
+            [inputs | fromjson? // empty | select(type == "object")
+             | select($run_started_ts == "" or ((.timestamp // "") >= $run_started_ts))] as $lines
             |
+            # toolCallId → {name, url} for all toolCalls in scope. Same
+            # pattern as the evidence-excerpt check below.
+            (reduce ($lines[] | .message.content[]? | select(.type == "toolCall")) as $tc
+                ({}; . + {($tc.id): {name: $tc.name, url: ($tc.arguments.url // "")}})
+            ) as $calls
+            |
+            # For each toolResult, check if the originating toolCall was
+            # web_fetch to a Tier 1 host AND the result indicates success
+            # (non-error, non-empty content). Only such calls could have
+            # leaked Tier-1 data.
             [
                 $lines[]
-                | .message?.content[]? // empty
-                | select(.type == "toolCall" and .name == "web_fetch")
-                | (.arguments.url // "") | select(. != "")
+                | .message | select(.role == "toolResult")
+                | . as $tr
+                | ($calls[$tr.toolCallId] // null) as $call
+                | select($call != null and $call.name == "web_fetch")
+                | ($call.url // "") | select(. != "")
                 | capture("^https?://(?:www\\.)?(?<host>[^/]+)").host
                 | select($t1[.] // false)
+                | . as $host
+                | ($tr.isError // false) as $is_err
+                | (($tr.details // {}) | (.status // "")) as $detail_status
+                | (($tr.content // []) | map(.text // "") | join(" ") | length > 0) as $has_text
+                | select($is_err | not)
+                | select($detail_status != "error")
+                | select($has_text)
+                | $host
             ]
             | unique | .[]
         ' "$session_log" 2>/dev/null | tr '\n' ',' | sed 's/,$//'
@@ -385,12 +580,17 @@ EOF
         jq -R -r -n \
             --arg excerpt "$(echo "$excerpt" | tr '[:upper:]' '[:lower:]')" \
             --arg hosts "$CV_TIER1_HOSTS" \
+            --arg run_started_ts "$run_started_ts" \
         '
         # Build tier-1 host lookup: unescape "\." -> ".", index as object keys
         ($hosts | split("|") | map(gsub("\\\\."; ".")) | map({(.): true}) | add) as $t1
         |
-        # Slurp all JSONL lines as raw text (-R), parse each, skip malformed
-        [inputs | fromjson? // empty | select(type == "object")] as $lines
+        # Slurp all JSONL lines as raw text (-R), parse each, skip malformed.
+        # R3-3: filter by timestamp when run_started_ts is set. Untimestamped
+        # lines are excluded under scope — openclaw writes .timestamp on every
+        # real line, so absence is either a fixture or a pre-scope artefact.
+        [inputs | fromjson? // empty | select(type == "object")
+         | select($run_started_ts == "" or ((.timestamp // "") >= $run_started_ts))] as $lines
         |
         # Index toolCall entries: id -> {name, url}
         (reduce ($lines[] | .message.content[]? | select(.type == "toolCall")) as $tc
@@ -447,7 +647,45 @@ cmd_call() {
 
     # Credit approve gate — deterministic, runs in bash below openclaw's hook layer.
     if ! enforce_credit_approve_gate "$method" "$path" "$body"; then
+        # Truth floor (PR 1): log the gate rejection to the credit-request
+        # results.jsonl so compute-run-summary.sh sees it in dry-run and prod.
+        # Scoped inside the helper to credit-request writes only, so this is
+        # a no-op for any other path.
+        write_credit_request_result "$method" "$path" "$body" "rejected_by_gate" "" "evidence-excerpt missing, too short/long, no fresh session log, Tier 1 web_fetch substitution, or insufficient grounded evidence — see stderr above"
         return 1
+    fi
+
+    # Dry-run config-mismatch guard (R2-1 — 2026-04-23 incident class).
+    # The 09:02 UTC dry-run had 12 UVN PATCHes hit the real admin API because
+    # OPS_DRY_RUN=1 was set in B0's shell but NOT re-exported in a later exec.
+    # Each exec tool call is a fresh shell; env doesn't propagate across them.
+    # When the runlog header says "this run is a dry-run" but the current
+    # shell's OPS_DRY_RUN is unset, refuse the write rather than leak to prod.
+    #
+    # Scoped to /admin/credit-requests writes (PUT/PATCH) — matches the truth
+    # floor's scope. Other admin APIs can still be called directly; this guard
+    # is specifically about the credit-verification batch path.
+    if ! is_dry_run_mode; then
+        local _method_uc_for_guard
+        _method_uc_for_guard="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+        if [[ "$path" == /admin/credit-requests* ]] \
+            && { [[ "$_method_uc_for_guard" == "PUT" ]] || [[ "$_method_uc_for_guard" == "PATCH" ]]; }; then
+            local header_dryrun
+            header_dryrun="$(resolve_run_header_dryrun)"
+            if [[ "$header_dryrun" == "true" ]]; then
+                local latest_runlog
+                latest_runlog="$(cat "${OPS_RUNLOG_DIR}/latest.txt" 2>/dev/null || echo unknown)"
+                cat >&2 <<EOF
+ERROR: run_header says dryRun:true but OPS_DRY_RUN env is unset in this shell — refusing to write to real admin API.
+This prevents the 2026-04-23 incident class where a later exec shell missed OPS_DRY_RUN=1 and leaked 12 UVN PATCHes to prod.
+Export OPS_DRY_RUN=1 in every exec that makes /admin/credit-requests writes:
+    export OPS_DRY_RUN=1
+Runlog: ${latest_runlog}
+EOF
+                write_credit_request_result "$method" "$path" "$body" "dry_run_config_mismatch" "" "runlog.dryRun=true but OPS_DRY_RUN env unset in this shell — would have leaked to prod"
+                return 1
+            fi
+        fi
     fi
 
     # Dry-run short-circuit (issue #145). Gate ran above, so a broken batch
@@ -464,6 +702,7 @@ cmd_call() {
             *)
                 DRY_RUN_AUDIT_FAILED=0
                 write_dry_run_audit "$method" "$path" "$body" "call"
+                write_credit_request_result "$method" "$path" "$body" "dry_run_intercept" "200" ""
                 emit_dry_run_response
                 return 0
                 ;;
@@ -499,6 +738,15 @@ cmd_call() {
     http_code=$(echo "$response" | tail -1)
     local response_body
     response_body=$(echo "$response" | sed '$d')
+
+    # Truth floor: classify 2xx as `ok`, non-2xx as `http_error`. The helper
+    # self-scopes to credit-request writes, so non-credit-request paths are
+    # a no-op. HTTP body is included in the error field for post-mortem.
+    if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+        write_credit_request_result "$method" "$path" "$body" "ok" "$http_code" ""
+    else
+        write_credit_request_result "$method" "$path" "$body" "http_error" "$http_code" "$response_body"
+    fi
 
     # Output JSON with status
     echo "{\"http_status\": $http_code, \"body\": $response_body}" 2>/dev/null \

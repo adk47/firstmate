@@ -550,7 +550,7 @@
           "channels": {
             "C0APB2CMM7C": {
               "enabled": true,
-              "requireMention": false,
+              "requireMention": true,
               "allowBots": true
             }
           }
