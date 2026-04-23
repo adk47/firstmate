@@ -110,7 +110,7 @@ User=root
 EnvironmentFile=$ENV_DIR/shared.env
 EnvironmentFile=$ENV_DIR/main.env
 ExecStart=$OPENCLAW_BIN --profile main gateway --port 18789
-Restart=on-failure
+Restart=always
 RestartSec=10
 
 [Install]
@@ -129,7 +129,7 @@ User=root
 EnvironmentFile=$ENV_DIR/shared.env
 EnvironmentFile=$ENV_DIR/edge.env
 ExecStart=$OPENCLAW_BIN --profile edge gateway --port 18810
-Restart=on-failure
+Restart=always
 RestartSec=10
 
 [Install]
@@ -148,7 +148,7 @@ User=root
 EnvironmentFile=$ENV_DIR/shared.env
 EnvironmentFile=$ENV_DIR/dev.env
 ExecStart=$OPENCLAW_BIN --profile dev gateway --port 18830
-Restart=on-failure
+Restart=always
 RestartSec=10
 
 [Install]
