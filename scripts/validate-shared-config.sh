@@ -68,6 +68,12 @@ compare_path "gateway.auth" "Gateway auth config"
 compare_path "gateway.trustedProxies" "Trusted proxies"
 compare_path "gateway.controlUi.allowedOrigins" "Control UI allowed origins"
 compare_path "tools.exec" "Tools exec security config"
+# Bootstrap truncation guardrail (hydra issue #165). All three profiles
+# must share the same cap + warning level; a silent drop to the openclaw
+# default (12000 / "once") would reintroduce the original bug.
+compare_path "agents.defaults.bootstrapMaxChars" "Bootstrap per-file cap"
+compare_path "agents.defaults.bootstrapTotalMaxChars" "Bootstrap total cap"
+compare_path "agents.defaults.bootstrapPromptTruncationWarning" "Bootstrap truncation warning mode"
 
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
