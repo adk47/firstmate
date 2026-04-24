@@ -96,6 +96,10 @@ cmd_release() {
   # the session JSONL. Fail-OPEN — any error is logged and the lockfile is
   # still removed, so release never blocks on summary plumbing.
   autofill_run_finished_if_needed || true
+  # R4-3: forensic event when agent bypassed render-slack-summary.sh. Must
+  # come AFTER autofill so the run_finished event is already in place (the
+  # renderer check is only meaningful when there's a summary to render).
+  emit_renderer_missing_event_if_needed || true
   rm -f "$OPS_BATCH_LOCK_PATH"
 }
 
@@ -132,6 +136,121 @@ autofill_run_finished_if_needed() {
   if ! bash "$compute_script" "$run_id" "" >/dev/null; then
     echo "[lockfile] compute-run-summary.sh fallback exited non-zero (non-fatal); run_id=${run_id}" >&2
   fi
+}
+
+# R4-3: detect when the agent bypassed render-slack-summary.sh.
+#
+# The 2026-04-23 14:20 UTC dry-run posted 15+ hand-composed messages to the
+# main #credit-verification channel instead of the canonical parent+thread
+# produced by render-slack-summary.sh — exact regression R2-5 tried to
+# prevent with a hard rule. Prose-alone rules don't survive contact with new
+# failure modes; this adds mechanical detection at release time.
+#
+# Scans the current session log for a message(action=send) tool call whose
+# text starts with the canonical renderer header ("Credit batch complete —"
+# or "[DRY RUN] Credit batch complete —"). If the run had something worth
+# summarising (attempts > 0) AND no such send was found, emits a
+# `run_finished_renderer_missing` event into the runlog so:
+#   * grep of recent runlogs surfaces the regression
+#   * future R5 work can wire a real-time Slack alert when a webhook is
+#     available (today no webhook is configured, so a runlog event is the
+#     strongest signal we can land mechanically)
+#   * render-slack-summary.sh can be extended to prepend a warning on the
+#     NEXT run if any prior run in the window has this event
+#
+# Fail-OPEN. Any error is swallowed. Lockfile release never blocks on this.
+emit_renderer_missing_event_if_needed() {
+  [[ -n "${OPS_RUNLOG_DIR:-}" ]] || return 0
+  local latest_idx="${OPS_RUNLOG_DIR}/latest.txt"
+  [[ -f "$latest_idx" ]] || return 0
+
+  local runlog_path run_id
+  runlog_path=$(cat "$latest_idx" 2>/dev/null || true)
+  [[ -n "$runlog_path" && -f "$runlog_path" ]] || return 0
+  run_id=$(basename "$runlog_path" .jsonl)
+  [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || return 0
+
+  # Idempotent: if the event is already present (second release, re-run),
+  # don't double-write.
+  if grep -q '"event":"run_finished_renderer_missing"' "$runlog_path" 2>/dev/null; then
+    return 0
+  fi
+
+  # Only meaningful when a run_finished* event is already present (run had
+  # work to summarise). Skip when the run aborted at preflight / B0d.5.
+  if ! grep -Eq '"event":"run_finished(_hollow|_ungrounded|_silent_failure)?"' "$runlog_path"; then
+    return 0
+  fi
+
+  # Skip when the run had zero attempts — nothing to summarise, the agent
+  # may have legitimately posted only the B5 queue-clear message shape, not
+  # the renderer output. We care about the regression where attempts > 0
+  # produced hand-composed prose instead of renderer output.
+  local fetched approved uvn
+  fetched=$(grep -E '"event":"run_finished' "$runlog_path" | head -1 | jq -r '.fetched // 0' 2>/dev/null || echo 0)
+  approved=$(grep -E '"event":"run_finished' "$runlog_path" | head -1 | jq -r '.reconciliation.approved_attempted // .approved // 0' 2>/dev/null || echo 0)
+  uvn=$(grep -E '"event":"run_finished' "$runlog_path" | head -1 | jq -r '.reconciliation.verification_needed_attempted // .verification_needed // 0' 2>/dev/null || echo 0)
+  local total_attempts=$(( approved + uvn ))
+  if (( total_attempts == 0 )); then
+    return 0
+  fi
+
+  # Find the session log — same discovery idiom as the gate.
+  local session_log
+  if [[ -n "${CV_SESSION_LOG_OVERRIDE:-}" ]]; then
+    session_log="$CV_SESSION_LOG_OVERRIDE"
+  else
+    session_log=$(
+      find /root/.openclaw-main/agents /root/.openclaw-dev/agents \
+          -maxdepth 3 -type f -name "*.jsonl" -mmin "-10" 2>/dev/null \
+      | while IFS= read -r f; do
+          mtime=$(stat -c '%Y' "$f" 2>/dev/null || stat -f '%m' "$f" 2>/dev/null)
+          [[ -n "$mtime" ]] && printf '%s %s\n' "$mtime" "$f"
+        done \
+      | sort -rn | head -1 | cut -d' ' -f2-
+    )
+  fi
+  [[ -n "$session_log" && -f "$session_log" ]] || return 0
+
+  # Did the agent post a renderer-shaped Slack message? Scan for any
+  # message() tool call whose text parameter starts with the canonical
+  # renderer parent header. jq-safe across openclaw's minor tool arg shape
+  # variations: `text` may be a nested arg or a direct string parameter.
+  local found_renderer_post
+  found_renderer_post=$(
+    jq -s -r '
+      [.[]
+       | .message?.content[]? // empty
+       | select(.type == "toolCall")
+       | (.name // "") as $name
+       | select($name == "message" or $name == "slack_message" or $name == "send_message")
+       | (.arguments.text // .arguments.body // .arguments.markdown // "")
+       | select(type == "string")
+       | select(. | test("^(\\[DRY RUN\\] )?Credit batch complete "; "m"))
+      ] | length
+    ' "$session_log" 2>/dev/null || echo 0
+  )
+  if [[ "${found_renderer_post:-0}" -gt 0 ]]; then
+    return 0
+  fi
+
+  # No renderer post found — emit the forensic event. Append directly so the
+  # runlog.sh freeze-after-preflight gate doesn't interfere (this event is
+  # the release's own accounting, not an agent-written event).
+  local iso
+  iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  jq -n -c --arg rid "$run_id" --arg ts "$iso" \
+    --argjson fetched "$fetched" \
+    --argjson approved "$approved" \
+    --argjson uvn "$uvn" \
+    '{event:"run_finished_renderer_missing", run_id:$rid, ts:$ts,
+      fetched:$fetched, approved_attempted:$approved, verification_needed_attempted:$uvn,
+      detail:"Agent bypassed render-slack-summary.sh; Slack posts were hand-composed."}' \
+    >> "$runlog_path" 2>/dev/null || {
+      echo "[lockfile] failed to emit run_finished_renderer_missing event for run_id=${run_id}" >&2
+      return 0
+    }
+  echo "[lockfile] run_finished_renderer_missing event written for run_id=${run_id} (attempts=${total_attempts}, no renderer-shape Slack post found)" >&2
 }
 
 case "${1:-}" in

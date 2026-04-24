@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
 load helpers
 
 setup() {
@@ -204,5 +205,46 @@ teardown() { teardown_tmp_env; }
 @test "init does NOT require the dry-run channel env when OPS_DRY_RUN is unset (prod path unchanged)" {
   unset OPS_DRY_RUN OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID
   run "$SCRIPTS_DIR/runlog.sh" init
+  [ "$status" -eq 0 ]
+}
+
+# --- R4-2: refuse second init when OPS_RUN_ID is already set ---------------
+#
+# openclaw subagents inherit env from their parent. If the main agent exported
+# OPS_RUN_ID and then spawned a subagent, the subagent's B0c would run
+# `runlog.sh init` again and create a second parallel run_id, splitting the
+# truth floor. Fail here rather than letting two runlogs accumulate. SKILL.md
+# B0 HARD RULE forbids subagent-spawn; this is its mechanical counterpart.
+
+@test "R4-2: init refuses (exit 4) when OPS_RUN_ID is already set" {
+  run --separate-stderr env OPS_RUN_ID=20260423-120000-aaaaaa "$SCRIPTS_DIR/runlog.sh" init
+  [ "$status" -eq 4 ]
+  [[ "$stderr" == *"OPS_RUN_ID is already set"* ]]
+  [[ "$stderr" == *"20260423-120000-aaaaaa"* ]]
+  # stderr names the common cause so the agent can self-diagnose.
+  [[ "$stderr" == *"subagent"* ]]
+}
+
+@test "R4-2: init proceeds normally when OPS_RUN_ID is unset" {
+  unset OPS_RUN_ID
+  run "$SCRIPTS_DIR/runlog.sh" init
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]{6}$ ]]
+}
+
+@test "R4-2: explicit unset in the same invocation bypasses the guard (rare escape hatch)" {
+  # A test harness or manual debug flow can still start a fresh run in a shell
+  # that had a lingering OPS_RUN_ID — but only by deliberately unsetting first.
+  # env -u OPS_RUN_ID drops it for the child process only.
+  run env -u OPS_RUN_ID "$SCRIPTS_DIR/runlog.sh" init
+  [ "$status" -eq 0 ]
+}
+
+@test "R4-2: event (not init) is NOT affected by the OPS_RUN_ID guard" {
+  # Events write into an existing run; they don't create new run_ids. Guarding
+  # them would break the normal per-event logging pattern where B0c exports
+  # OPS_RUN_ID once and every subsequent event call relies on it.
+  first_run=$("$SCRIPTS_DIR/runlog.sh" init)
+  run env OPS_RUN_ID=20260423-120000-aaaaaa "$SCRIPTS_DIR/runlog.sh" event "$first_run" test_event '{"k":"v"}'
   [ "$status" -eq 0 ]
 }

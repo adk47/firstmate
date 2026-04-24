@@ -118,6 +118,9 @@
       "memorySearch": {
         "enabled": false
       },
+      "bootstrapMaxChars": 40000,
+      "bootstrapTotalMaxChars": 120000,
+      "bootstrapPromptTruncationWarning": "always",
       "compaction": {
         "mode": "default",
         "keepRecentTokens": 40000

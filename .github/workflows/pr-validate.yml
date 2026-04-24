@@ -33,6 +33,19 @@ jobs:
           if [ "$FAILED" -eq 1 ]; then exit 1; fi
           echo "::endgroup::"
 
+      - name: openclaw MCP config lint — reject mcp-remote stdio entries
+        # Shifts the mcp-remote leak-class regression gate left from
+        # deploy-time (Step 1 of scripts/deploy.sh) to PR-time. Without
+        # this step, a PR that commits an mcp-remote stdio entry passes
+        # validation and only fails at the deploy on Node 8 — after
+        # merge. See scripts/lint-openclaw-config.sh for the rule.
+        run: |
+          echo "::group::MCP config lint"
+          chmod +x scripts/lint-openclaw-config.sh
+          scripts/lint-openclaw-config.sh \
+            openclaw-main.json openclaw-edge.json openclaw-dev.json
+          echo "::endgroup::"
+
       - name: Shared config drift check
         run: |
           echo "::group::Checking shared config drift"

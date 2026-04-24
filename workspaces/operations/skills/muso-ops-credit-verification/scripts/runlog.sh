@@ -37,6 +37,34 @@ log_path_for_run() {
 cmd_init() {
   require_env
 
+  # R4-2: refuse to init a second run when OPS_RUN_ID is already set in this
+  # shell. A subagent inherits env from its parent — two runlog inits for one
+  # batch intent produce two parallel run_ids, two .results.jsonl files, two
+  # reconciliation windows, and main-vs-subagent recovery confusion on
+  # token-limit timeouts (2026-04-23 14:20 UTC). Fail closed here. The agent
+  # can always unset OPS_RUN_ID deliberately if it really means to start
+  # a fresh run in the same shell (rare; reserved for tests).
+  if [[ -n "${OPS_RUN_ID:-}" ]]; then
+    cat >&2 <<EOF
+ERROR: runlog.sh init refused — OPS_RUN_ID is already set to '${OPS_RUN_ID}'.
+This shell is already inside an active batch run. A second runlog init would
+create a parallel run with a distinct run_id, splitting the truth floor and
+producing a silent failure class.
+
+Common causes:
+  * A subagent was spawned mid-batch and inherited OPS_RUN_ID from its parent.
+    Per SKILL.md B0 HARD RULE, batch processing (B0-B6) must run in the main
+    agent's turn — do not use agent() / subagent-spawn.
+  * A nested 'bash runlog.sh init' in the same exec block. Only call init
+    once at B0c; subsequent events use 'runlog.sh event <run_id> ...'.
+
+If you truly need a fresh run (rare — usually a test harness): explicitly
+\`unset OPS_RUN_ID\` before calling init, acknowledging the parent run is
+abandoned.
+EOF
+    return 4
+  fi
+
   # Mechanical enforcement of the SKILL.md B0a rule: when OPS_DRY_RUN=1, the
   # dry-run channel env MUST be set and non-empty. Prose alone ("abort at
   # B0a if unset") is not enforcement — a misbehaving model can skip it and

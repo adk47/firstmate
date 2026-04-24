@@ -417,3 +417,212 @@ more garbage here'
     [ "$status" -eq 1 ]
     [[ "$output" == *"no active openclaw session log"* ]]
 }
+
+# --- R3-3: run_started.ts scope filter -----------------------------------
+#
+# The gate scans session logs that openclaw channel-keys across runs. Without
+# scoping, yesterday's web_fetch to Tier-1 or stale browser loads still count
+# toward today's approve gate — today's run gets blocked for another run's
+# sins. resolve_run_started_ts reads OPS_RUNLOG_DIR/latest.txt → runlog →
+# first run_started event's .ts, and both gate jq pipelines filter session
+# entries by (.timestamp >= that value).
+
+seed_runlog_with_run_started() {
+    # args: run_id run_started_ts [run_header_dryrun]
+    local run_id="$1" ts="$2" dry="${3:-false}"
+    local day="${run_id:0:8}"
+    local log_dir="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}"
+    mkdir -p "$log_dir"
+    local log_path="$log_dir/${run_id}.jsonl"
+    : > "$log_path"
+    jq -n -c --arg rid "$run_id" --arg ts "$ts" --argjson dry "$dry" \
+        '{event:"run_header", run_id:$rid, ts:$ts, dryRun:$dry}' >> "$log_path"
+    jq -n -c --arg rid "$run_id" --arg ts "$ts" \
+        '{event:"run_started", run_id:$rid, ts:$ts, fetch_size:500}' >> "$log_path"
+    echo "$log_path" > "$OPS_RUNLOG_DIR/latest.txt"
+}
+
+@test "R3-3: old web_fetch to Tier-1 (pre-run_started) does NOT block current run" {
+    # The exact yesterday-contamination-blocks-today-approves scenario that
+    # forced us to manually archive the session file on 2026-04-23.
+    source_gate
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlogs"
+    mkdir -p "$OPS_RUNLOG_DIR"
+    seed_runlog_with_run_started "20260423-120000-aaaaaa" "2026-04-23T12:00:00Z"
+
+    write_session_log "s.jsonl" '{"type":"message","timestamp":"2026-04-22T10:00:00Z","message":{"content":[{"type":"toolCall","id":"old-wf","name":"web_fetch","arguments":{"url":"https://open.spotify.com/artist/contaminated"}}]}}
+{"type":"message","timestamp":"2026-04-22T10:00:01Z","message":{"role":"toolResult","toolCallId":"old-wf","toolName":"web_fetch","content":[{"type":"text","text":"yesterday contamination"}]}}
+{"type":"message","timestamp":"2026-04-23T12:05:00Z","message":{"content":[{"type":"toolCall","id":"new-b1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"type":"message","timestamp":"2026-04-23T12:05:01Z","message":{"role":"toolResult","toolCallId":"new-b1","toolName":"browser","content":[{"type":"text","text":"Ben Smith bass credits"}]}}
+{"type":"message","timestamp":"2026-04-23T12:06:00Z","message":{"content":[{"type":"toolCall","id":"new-b2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"type":"message","timestamp":"2026-04-23T12:06:01Z","message":{"role":"toolResult","toolCallId":"new-b2","toolName":"browser","content":[{"type":"text","text":"Ben Smith discography"}]}}'
+    EVIDENCE_EXCERPT="Ben Smith" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "R3-3: new web_fetch to Tier-1 (post-run_started) still blocks" {
+    source_gate
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlogs"
+    mkdir -p "$OPS_RUNLOG_DIR"
+    seed_runlog_with_run_started "20260423-120000-aaaaaa" "2026-04-23T12:00:00Z"
+
+    write_session_log "s.jsonl" '{"type":"message","timestamp":"2026-04-23T12:05:00Z","message":{"content":[{"type":"toolCall","id":"new-wf","name":"web_fetch","arguments":{"url":"https://open.spotify.com/artist/bad"}}]}}
+{"type":"message","timestamp":"2026-04-23T12:05:01Z","message":{"role":"toolResult","toolCallId":"new-wf","toolName":"web_fetch","content":[{"type":"text","text":"within-run contamination"}]}}'
+    EVIDENCE_EXCERPT="Ben Smith" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"web_fetch"* ]]
+}
+
+@test "R3-3: old browser loads (pre-run_started) do NOT count toward evidence quorum" {
+    # Agent must load evidence WITHIN this run. Past browser loads can't
+    # satisfy today's quorum — otherwise a session with 2 stale Tier-1 loads
+    # would let ANY excerpt through today.
+    source_gate
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlogs"
+    mkdir -p "$OPS_RUNLOG_DIR"
+    seed_runlog_with_run_started "20260423-120000-aaaaaa" "2026-04-23T12:00:00Z"
+
+    write_session_log "s.jsonl" '{"type":"message","timestamp":"2026-04-22T10:00:00Z","message":{"content":[{"type":"toolCall","id":"old-b1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"type":"message","timestamp":"2026-04-22T10:00:01Z","message":{"role":"toolResult","toolCallId":"old-b1","toolName":"browser","content":[{"type":"text","text":"Ben Smith engineer credits"}]}}
+{"type":"message","timestamp":"2026-04-22T10:01:00Z","message":{"content":[{"type":"toolCall","id":"old-b2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"type":"message","timestamp":"2026-04-22T10:01:01Z","message":{"role":"toolResult","toolCallId":"old-b2","toolName":"browser","content":[{"type":"text","text":"Ben Smith records"}]}}'
+    EVIDENCE_EXCERPT="Ben Smith" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"0/2"* ]]
+}
+
+@test "R3-3: mix of old + new loads → only new count" {
+    source_gate
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlogs"
+    mkdir -p "$OPS_RUNLOG_DIR"
+    seed_runlog_with_run_started "20260423-120000-aaaaaa" "2026-04-23T12:00:00Z"
+
+    write_session_log "s.jsonl" '{"type":"message","timestamp":"2026-04-22T10:00:00Z","message":{"content":[{"type":"toolCall","id":"old-b","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"type":"message","timestamp":"2026-04-22T10:00:01Z","message":{"role":"toolResult","toolCallId":"old-b","toolName":"browser","content":[{"type":"text","text":"Ben Smith engineer"}]}}
+{"type":"message","timestamp":"2026-04-23T12:05:00Z","message":{"content":[{"type":"toolCall","id":"new-b","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"type":"message","timestamp":"2026-04-23T12:05:01Z","message":{"role":"toolResult","toolCallId":"new-b","toolName":"browser","content":[{"type":"text","text":"Ben Smith records"}]}}'
+    # Only 1 new Tier-1 hostname has the excerpt — not enough for CV_REQUIRED_LOADS=2.
+    EVIDENCE_EXCERPT="Ben Smith" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"1/2"* ]]
+}
+
+@test "R3-3: no OPS_RUNLOG_DIR → gate still works (backward-compat)" {
+    # Ad-hoc / single-turn approves (non-batch) don't have a runlog. The gate
+    # must still function with mtime-only bounding, as before.
+    source_gate
+    unset OPS_RUNLOG_DIR
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig engineer"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "R3-3: runlog exists but no run_started event → backward-compat (no scope)" {
+    # Just a run_header (dry-run marker), no run_started yet — gate should
+    # fall back to mtime-only so early-batch approves can still pass.
+    source_gate
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlogs"
+    mkdir -p "$OPS_RUNLOG_DIR/2026-04-23"
+    local log_path="$OPS_RUNLOG_DIR/2026-04-23/20260423-120000-bbbbbb.jsonl"
+    jq -n -c '{event:"run_header", run_id:"20260423-120000-bbbbbb", ts:"2026-04-23T12:00:00Z", dryRun:true}' > "$log_path"
+    echo "$log_path" > "$OPS_RUNLOG_DIR/latest.txt"
+
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig engineer"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+}
+
+# --- R4-1: plugin-blocked / errored web_fetch is NOT contamination -----------
+#
+# The enforcer plugin blocks web_fetch to Tier 1 hosts at the tool layer by
+# returning an error-shaped toolResult (details.status=error, no content text).
+# The gate must distinguish this from a successful web_fetch that actually
+# returned Tier 1 data. Counting blocked attempts as contamination is a
+# false positive that rejects every downstream approve (2026-04-23 14:20 UTC).
+
+@test "R4-1: plugin-blocked web_fetch does NOT flag as Tier-1 contamination" {
+    # Shape observed in the 2026-04-23 session log: plugin returns isError:false
+    # + details.status:error + content text containing the block reason. No
+    # Tier-1 data leaked → the gate must not flag this as a substitution event.
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"bc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig engineer credits"}]}}
+{"message":{"content":[{"type":"toolCall","id":"bc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}
+{"message":{"content":[{"type":"toolCall","id":"wf-blocked","name":"web_fetch","arguments":{"url":"https://open.spotify.com/artist/drake"}}]}}
+{"message":{"role":"toolResult","toolCallId":"wf-blocked","toolName":"web_fetch","content":[{"type":"text","text":"{\"status\":\"error\",\"tool\":\"web_fetch\",\"error\":\"web_fetch is disabled on Tier 1 music-data hosts during credit verification.\"}"}],"details":{"status":"error","tool":"web_fetch","error":"web_fetch is disabled on Tier 1 music-data hosts during credit verification."},"isError":false}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+    # Must NOT see the contamination message.
+    [[ "$output" != *"web_fetch call(s) to Tier 1"* ]]
+}
+
+@test "R4-1: successful web_fetch to Tier-1 host STILL blocks (no regression)" {
+    # The classic substitution case: web_fetch actually returned Tier-1 HTML.
+    # This is the real contamination the gate was designed to catch.
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"bc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig engineer credits"}]}}
+{"message":{"content":[{"type":"toolCall","id":"bc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}
+{"message":{"content":[{"type":"toolCall","id":"wf-real","name":"web_fetch","arguments":{"url":"https://open.spotify.com/artist/drake"}}]}}
+{"message":{"role":"toolResult","toolCallId":"wf-real","toolName":"web_fetch","content":[{"type":"text","text":"<html>Drake - Artist page on Spotify - 80M monthly listeners</html>"}],"isError":false}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"web_fetch call(s) to Tier 1"* ]]
+    [[ "$output" == *"open.spotify.com"* ]]
+}
+
+@test "R4-1: errored web_fetch (network/404) is NOT contamination either" {
+    # Semantic consistency: any web_fetch that didn't return Tier-1 data
+    # can't have leaked it. isError:true means the tool crashed or the HTTP
+    # layer failed — same outcome as the plugin block.
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"bc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig engineer"}]}}
+{"message":{"content":[{"type":"toolCall","id":"bc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}
+{"message":{"content":[{"type":"toolCall","id":"wf-404","name":"web_fetch","arguments":{"url":"https://allmusic.com/gone"}}]}}
+{"message":{"role":"toolResult","toolCallId":"wf-404","toolName":"web_fetch","content":[{"type":"text","text":"HTTP 404 Not Found"}],"isError":true}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"web_fetch call(s) to Tier 1"* ]]
+}
+
+@test "R4-1: empty-content web_fetch result is NOT contamination" {
+    # Edge case: web_fetch returned a toolResult but no text. Maybe an upstream
+    # bug, maybe a timeout-with-empty-body. Either way, no data.
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"bc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig"}]}}
+{"message":{"content":[{"type":"toolCall","id":"bc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}
+{"message":{"content":[{"type":"toolCall","id":"wf-empty","name":"web_fetch","arguments":{"url":"https://discogs.com/artist/x"}}]}}
+{"message":{"role":"toolResult","toolCallId":"wf-empty","toolName":"web_fetch","content":[],"isError":false}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"web_fetch call(s) to Tier 1"* ]]
+}
+
+@test "R4-1: mix of blocked and successful web_fetch → still blocks on the successful one" {
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"bc-1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig"}]}}
+{"message":{"content":[{"type":"toolCall","id":"bc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
+{"message":{"role":"toolResult","toolCallId":"bc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}
+{"message":{"content":[{"type":"toolCall","id":"wf-blocked","name":"web_fetch","arguments":{"url":"https://open.spotify.com/artist/drake"}}]}}
+{"message":{"role":"toolResult","toolCallId":"wf-blocked","toolName":"web_fetch","content":[{"type":"text","text":"blocked"}],"details":{"status":"error"},"isError":false}}
+{"message":{"content":[{"type":"toolCall","id":"wf-real","name":"web_fetch","arguments":{"url":"https://musicbrainz.org/search?query=x"}}]}}
+{"message":{"role":"toolResult","toolCallId":"wf-real","toolName":"web_fetch","content":[{"type":"text","text":"<html>MusicBrainz search results with real data</html>"}],"isError":false}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    # Should only name the successful host (musicbrainz.org), not spotify.
+    [[ "$output" == *"musicbrainz.org"* ]]
+    [[ "$output" != *"open.spotify.com"* ]]
+}

@@ -252,7 +252,7 @@ Do NOT attempt to investigate or act on incomplete data.
 Before investigating, query the credit request status:
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/credit-requests/<credit_request_id>"
 ```
 
@@ -270,30 +270,78 @@ paste a **profile** UUID instead. Before giving up, run the disambiguation ladde
 **Step 2a (404 fallback): try as profile ID**
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/profile/<id>"
 ```
 
-- If this returns 200, the input was a profile UUID. Pull the profile's unverified
-  credits:
+- If this returns 200, the input was a profile UUID. Pull the profile's pending
+  credit-request counts first, then the actual rows:
 
   ```bash
-  bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-    call GET "/admin/credit-requests?profileId=<id>&status=unverified&limit=500"
+  # counts scoped to this profile
+  bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+    call GET "/admin/credit-requests/counts?profilesIds=<id>"
+
+  # the actual unverified rows (server-side filtered)
+  bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+    call GET "/admin/credit-requests?profilesIds=<id>&status=unverified&limit=100&page=1"
+
+  # and user_verification_needed rows
+  bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+    call GET "/admin/credit-requests?profilesIds=<id>&status=user_verification_needed&limit=100&page=1"
   ```
 
-  Treat each returned credit-request as an individual idempotency target and
+  **⚠️ CRITICAL — param name:** The correct filter parameter is **`profilesIds`**
+  (plural, capital `I`) — NOT `profileId` (singular). Unknown query params on
+  this endpoint are **silently dropped** by Sequelize and you will get the
+  general queue back instead of the scoped list. Always spot-check the first
+  response: every row's `profileId` field must equal `<id>`. If any row has a
+  different `profileId`, you used the wrong param name and the filter was
+  dropped — fix the param and retry. Do NOT continue on unscoped data.
+
+  Paginate with `page=1, page=2, ...` until the response returns fewer items
+  than `limit`. The total count from `/admin/credit-requests/counts?profilesIds=<id>`
+  is authoritative — your paginated sum MUST match it; if it doesn't, something
+  went wrong (rate limit, backend hiccup) and you should stop and escalate.
+
+  Treat each matching credit-request as an individual idempotency target and
   investigate in bulk-mode: one consolidated escalation post per profile (see
   Step 5), not one post per credit. The post MUST state explicitly: *"Interpreted
-  as profile ID; N unverified credit requests found for this profile."* Do NOT
+  as profile ID; <N unverified> + <M user_verification_needed> credit requests
+  found for this profile (server-side filtered on profilesIds=<id>)."* Do NOT
   pretend you found it on the first call.
 
-  **Truncation:** `limit=500` is a hard cap. If the list response contains exactly
-  500 items, the profile may have more unverified credits than you investigated —
-  say so explicitly in the escalation: *"Note: the 500 credits investigated are
-  the first page; profile may have additional unverified credits beyond this
-  cap."* Per the HARD RULE on search-scope claims, do NOT claim you reviewed "all"
-  of the profile's credits when you only reviewed the first page.
+  **Zero pending requests → profile-legitimacy pivot:** If the count endpoint
+  returns zero for both `unverified` and `user_verification_needed`, the human
+  likely wants a profile-legitimacy verdict, not a credit-level one. Delegate
+  to the `muso-verify-profile` skill:
+
+  ```
+  Use skill: muso-verify-profile
+  Input: <profile_id>
+  ```
+
+  That skill produces an authenticity score (IPIs, claiming status, industry vs.
+  user-added credit mix, external cross-reference) and a Slack-formatted verdict
+  (🟢 VERIFIED / 🟡 LIKELY LEGIT / 🟠 INCONCLUSIVE / 🔴 SUSPICIOUS). Post that
+  verdict in the #credit-verification thread, prefixed with *"Interpreted as
+  profile ID; no pending credit requests found (authoritative count endpoint
+  returned 0). Shifting to profile-legitimacy verdict:"* so the human knows
+  both what you searched and why the output shape changed.
+
+  Do NOT skip the profile-legitimacy pivot in favor of a bare *"no pending
+  request found, please double-check the UUID"* response — that answers the
+  literal question but not the likely intent.
+
+  **Per-credit audit intent → `muso-audit-profile-credits`:** If the human
+  phrasing signals they want to audit every one of the profile's already-approved
+  credits (e.g. *"verify all the credits"*, *"audit the tracks of this profile"*,
+  *"go through each credit"*) rather than an aggregate legitimacy score,
+  delegate to `muso-audit-profile-credits` instead of `muso-verify-profile`.
+  That skill diffs the profile's credit list against industry-sourced catalog
+  data and produces per-track verdicts. The two pivots are NOT interchangeable:
+  aggregate legitimacy vs. per-track audit answer different questions.
+
 - If the profile lookup also returns 404, post the current `⚠️ API ERROR` (below)
   — the ID is neither a credit-request nor a profile. Do NOT fabricate a search
   scope (see HARD RULE — search-scope claims).
@@ -386,27 +434,55 @@ active session log:
 1. **≥2 distinct Tier 1 hostnames** (open.spotify.com, music.apple.com, musicbrainz.org, discogs.com, allmusic.com, tidal.com — `www.` tolerated) loaded via the **`browser`** tool (NOT `web_fetch` — those loads do not count).
 2. The `--evidence-excerpt` string you pass must appear **verbatim** (case-insensitive) in the browser result text for each of those ≥2 pages.
 
-**Invocation.** Every autonomous credit approve MUST include `--evidence-excerpt`, regardless of verb:
+**Invocation.** Autonomous approves and UVN flags go through **one sanctioned entry point** — `batch-verify-profile.sh` — NOT inline bash loops and NOT direct calls to `batch-approve-credits.sh` / `batch-flag-credits.sh`. R3 adds this per-profile dispatcher on top of R1's delegate wrappers so evidence-gathering is structurally tied to each profile instead of spread across the batch:
 
 ```bash
-# Batch approve (preferred — single call covers all approves in the batch):
-bash .../muso-admin-api.sh --evidence-excerpt "<literal substring>" \
-    call PUT /admin/credit-requests '{"requestIds":["<cr_id>"],"status":"approved"}'
+# Autonomous APPROVE — one invocation per profile, N credits per call.
+# The wrapper pre-flights the evidence-quorum check locally: if it would
+# fail, you get exit 3 with a remediation block telling you which Tier-1
+# pages to load next. No HTTP round-trip happens until pre-flight passes.
+bash "$SKILL_DIR/scripts/batch-verify-profile.sh" \
+    --profile-id "$PROFILE_ID" \
+    --evidence-excerpt "<literal substring from >=2 Tier 1 browser loads for THIS profile>" \
+    --ids "cr_1,cr_2,cr_3" \
+    --decision approve
 
-# Single-credit approve (if you must use the individual endpoint):
-bash .../muso-admin-api.sh --evidence-excerpt "<literal substring>" \
-    call PATCH /admin/credit-requests/<cr_id> '{"status":"approved"}'
+# Autonomous FLAG (user_verification_needed) — no evidence gate; same wrapper:
+bash "$SKILL_DIR/scripts/batch-verify-profile.sh" \
+    --profile-id "$PROFILE_ID" \
+    --evidence-excerpt "<literal substring; used for bookkeeping only>" \
+    --ids "cr_1,cr_2,cr_3" \
+    --decision flag \
+    --reason "<short reason>"
 ```
 
-Calling without `--evidence-excerpt` returns exit 1 with a clear error — no API request is sent.
+**HARD RULE — single entry point.** `batch-approve-credits.sh` and `batch-flag-credits.sh` MUST NOT be invoked directly from the agent workflow. They exist only as delegate primitives for `batch-verify-profile.sh` and the bats test suite. Any direct call is a workflow regression: it bypasses the per-profile pre-flight and the run_started session scoping the dispatcher provides, and the 2026-04-23 12:57 UTC dry-run showed what happens when evidence-gathering is not structurally per-profile (gate correctly rejected 100% of approves across 30 profiles).
+
+The dispatcher (`batch-verify-profile.sh`):
+- Runs a **contamination check** first: if any `web_fetch` to a Tier-1 host appears in the current run's session (scoped by `run_started.ts`, not just session-file mtime), exits 3 BEFORE any delegate call with a message to rotate the session.
+- Runs an **evidence quorum check** next: mirrors `enforce_credit_approve_gate` exactly — counts distinct Tier-1 hostnames whose browser-result text contains `--evidence-excerpt` (case-insensitive). If < `CV_REQUIRED_LOADS` (default 2), exits 3 with a remediation block naming the matching hosts, suggested next `browser(...)` calls, and the exact retry command.
+- On pass, delegates to `batch-approve-credits.sh` or `batch-flag-credits.sh` and propagates their exit codes honestly.
+- Refuses `--requester`. Jan/Aaron human overrides still go through direct `muso-admin-api.sh` calls in the escalation-thread flow (Step 5 → Executing a decision below) — that path uses `--requester <slack_id>` to bypass the gate.
+
+Authoritative per-call outcome lands in the `.results.jsonl` truth floor that `muso-admin-api.sh` writes inside the dry-run intercept / rejected-by-gate / real HTTP branches. `compute-run-summary.sh` reads that file as the source of truth for the Slack summary — so `⚠️ DISCREPANCY DETECTED` will prepend the summary if attempts > 0 but landed == 0.
+
+> **DO NOT DO THIS.** The 2026-04-22 19:15 incident ran inline bash along these lines:
+>
+> ```bash
+> # ❌ BROKEN — evidence in body (gate ignores it), stderr swallowed, iteration count lied about approvals
+> approve_cr() { bash muso-admin-api.sh call PATCH "/admin/credit-requests/$1" "{\"status\":\"approved\",\"evidence_excerpt\":\"$2\"}" 2>&1; }
+> for id in $IDS; do approve_cr "$id" "$excerpt" > /dev/null; C=$((C+1)); done
+> echo "$C approved"
+> ```
+>
+> The gate rejected every call (body-only evidence), `> /dev/null` hid the errors, and `$C` counted the iterations. Slack got "500 processed, 333 approved"; the DB got 0. Use the wrappers — they make this shape impossible.
 
 Good excerpt examples (each is a literal substring you saw in a browser snapshot):
 - `"Jose Roig"` — artist name as rendered on MusicBrainz + AllMusic
 - `"Producer: Ulf Blomberg"` — role string as rendered on AllMusic credits
 - `"Tears In Your Smile"` — track title as rendered on Spotify credits
 
-Bad excerpts: generic strings like `"music"`, single words that appear everywhere (`"artist"`), or things you didn't actually see in the rendered page. The bash layer sees 100% of admin API
-traffic, so there is no way to confabulate past it.
+Bad excerpts: generic strings like `"music"`, single words that appear everywhere (`"artist"`), or things you didn't actually see in the rendered page. The bash layer sees 100% of admin API traffic, so there is no way to confabulate past it.
 
 If the approve command returns `credit_approve_gate: insufficient evidence`,
 load two fresh Tier 1 pages with `browser open <url>`, run `browser snapshot`
@@ -420,13 +496,9 @@ resolves to Jan (jan@muso.ai) or Aaron (aaron@muso.ai), i.e. they replied
 "approve" in an escalation thread after reviewing the credit. Other requesters
 (including Nick triggering a batch with `run credit verification batch`) do NOT
 count as per-credit verification — the gate still requires `--evidence-excerpt`
-+ browser loads.
-
-**On batch approves, do NOT pass `--requester`.** Batch-mode PUTs are autonomous
-— the batch trigger is NOT a per-credit endorsement. Passing `--requester` on
-batch approves does nothing useful (Nick is not in the human-verified list) and
-can confuse the audit trail. Reserve `--requester <slack_id>` for the
-escalation-thread "approve" reply flow only.
++ browser loads. Because the batch wrappers refuse `--requester`, these human
+overrides are the one place that calls `muso-admin-api.sh` directly — see
+Step 5 → Executing a decision.
 
 **Verdict → Action (unchanged):**
 
@@ -489,7 +561,7 @@ Map investigation results to a verdict using `muso-ops-fraud` criteria:
   COUNT=$(OPS_AUDIT_LOG_DIR="${OPS_AUDIT_LOG_DIR:-api-logs/admin}" \
     bash "${SKILL_DIR}/scripts/count-approvals.sh")
   ```
-  where `SKILL_DIR=~/.openclaw/skills/skills/muso-ops-credit-verification`.
+  where `SKILL_DIR=/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification`.
 
   The counter matches entries where **all three** are true: `operator == "clio"`, `requester == "clio"`, `status == "approved"`. Cap resets at **00:00 UTC** (log filename is `YYYY-MM-DD.jsonl` in UTC).
 
@@ -499,20 +571,23 @@ Map investigation results to a verdict using `muso-ops-fraud` criteria:
 
 #### Auto-Approve (VERIFIED LEGIT or LOW CONCERN)
 
+Use `batch-verify-profile.sh --decision approve`. This dispatcher is the ONLY sanctioned form for autonomous approves — it pre-flights evidence locally (exits 3 with remediation text before any API call if the quorum isn't met) and delegates to `batch-approve-credits.sh` on pass.
+
 ```bash
-# --evidence-excerpt MUST come before `call` — it's a global option consumed
-# by the wrapper, not an API parameter. The gate rejects without it.
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  --evidence-excerpt "<literal substring you saw on a Tier 1 page>" \
-  call PUT "/admin/credit-requests" \
-  '{"requestIds":["<id>"],"status":"approved"}'
+bash "$SKILL_DIR/scripts/batch-verify-profile.sh" \
+  --profile-id "$PROFILE_ID" \
+  --evidence-excerpt "<literal substring you saw on >=2 Tier 1 pages for THIS profile>" \
+  --ids "<id1>,<id2>,...,<idN>" \
+  --decision approve
 ```
 
-**Important:** Use `PUT /admin/credit-requests` (bulk status endpoint), NOT
-`PUT /admin/credit-requests/:id` (that endpoint updates the credits array only
-and silently ignores the status field). The gate also covers
-`PATCH /admin/credit-requests/<id>` — if you use that verb, still pass
-`--evidence-excerpt`.
+One invocation per profile, N credits per invocation. The dispatcher's check is identical to `enforce_credit_approve_gate`: ≥`CV_REQUIRED_LOADS` (default 2) distinct Tier-1 hostnames whose browser-result text contains the excerpt, scoped to the current run's time window. On pass it delegates to `batch-approve-credits.sh` which issues one `PUT /admin/credit-requests` for the batch (`request_ids` of length N in `.results.jsonl`).
+
+**Important:** `PUT /admin/credit-requests` is the bulk status endpoint. `PUT /admin/credit-requests/<id>` is a DIFFERENT endpoint that updates the credits array only and silently ignores the status field — the delegate already targets the correct route. The gate also covers `PATCH /admin/credit-requests/<id>` (single-credit) in case a human-override flow needs it; batch approves don't use PATCH.
+
+**On exit 3 from the dispatcher:** read the remediation block. It names (a) the Tier-1 hosts currently matching, (b) suggested next `browser(...)` calls, (c) the exact retry command. Typical recovery: load the two suggested pages, confirm the excerpt appears in the rendered text, retry once. If after retry evidence still isn't there, downgrade to `--decision flag` with a `--reason` describing why Tier-1 didn't confirm.
+
+**Direct `muso-admin-api.sh` calls are reserved for the Step 5 escalation-thread flow** (Jan/Aaron `--requester` human override). Any autonomous approve that bypasses `batch-verify-profile.sh` is outside this skill's contract — the post-run reconciliation will catch it as `silent_failure_detected` if attempts don't land.
 
 Log via `muso-ops-audit` before execution. Then YOU MUST call:
 ```
@@ -524,11 +599,18 @@ message(action="react", channelId="<credit_verification_channel_id>", messageId=
 
 Both CLEAR FRAUD and BORDERLINE verdicts take this same action: flip the credit's status so the user is prompted to complete their own verification. The bot does NOT reject.
 
+Use `batch-verify-profile.sh --decision flag`. The dispatcher skips the evidence quorum check on the flag path (UVN isn't gated) and delegates to `batch-flag-credits.sh`, which iterates per-id `PATCH /admin/credit-requests/<id>` (no batch UVN endpoint exists), checks every exit code, never short-circuits on first failure, and emits a `failed_ids` list on partial failure.
+
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/admin/credit-requests" \
-  '{"requestIds":["<id>"],"status":"user_verification_needed","reason":"Moved to user_verification_needed during pre-approval: [specific reason]"}'
+bash "$SKILL_DIR/scripts/batch-verify-profile.sh" \
+  --profile-id "$PROFILE_ID" \
+  --evidence-excerpt "<short descriptor; used for bookkeeping>" \
+  --ids "<id1>,<id2>,...,<idN>" \
+  --decision flag \
+  --reason "Moved to user_verification_needed during pre-approval: [specific reason]"
 ```
+
+UVN is not gated (no browser evidence required), but it still flows through the same `.results.jsonl` truth floor — `compute-run-summary.sh` reconciles UVN counts the same way it reconciles approves, and `silent_failure_detected` fires if every PATCH errored. Exit code is 0 iff ALL ids succeeded; 1 if any failed.
 
 Use a specific reason based on findings (examples):
 - "Moved to user_verification_needed during pre-approval: no web presence, disposable email, 15 bulk submissions in 24h"
@@ -712,6 +794,16 @@ workflow above (Steps 0-6).
 
 Before any network work, initialize the run context.
 
+**HARD RULE — run the batch inline, never in a subagent.** B0–B6 execute in this turn, in the main agent's context. Do NOT use the `agent()` / subagent-spawn tool for batch processing. Three concrete failure modes from 2026-04-23 14:20 UTC:
+
+1. Subagent inherits `OPS_RUN_ID` from parent but calls `runlog.sh init` anyway → two run_ids for one intent → two `.results.jsonl` files → split reconciliation → `compute-run-summary.sh` sees only half the truth.
+2. Subagent hits its own token limit mid-batch and times out with partial work done → main agent has no way to reconcile what actually happened → improvised Slack summary.
+3. Main agent's curiosity during the wait (reading, browsing to "check on progress") leaks tool calls into the same session directory the gate scans → cross-contamination.
+
+`runlog.sh init` refuses to run when `OPS_RUN_ID` is already set (R4-2 mechanical counterpart); if you see exit code 4, you are in a subagent context — exit the batch, let the parent run it.
+
+If the token window is too small for 500 credits: lower `OPS_BATCH_FETCH_SIZE` (env var, default tuned for the current model). Split size is the supported knob. Subagent-spawn is not.
+
 **0a. Verify required env.** Fail loudly if any of these are missing:
 - `OPS_BATCH_LOCK_PATH` — absolute path to lockfile (e.g. `/root/.openclaw/locks/ops-credit-batch.lock`)
 - `OPS_AUDIT_LOG_DIR` — audit log base (e.g. `/root/.openclaw/api-logs/admin`)
@@ -727,7 +819,7 @@ If `OPS_BATCH_ENABLED != "true"`, exit silently with no Slack post.
 The lockfile uses PID liveness as the primary signal and a **3h30m** mtime fallback for cases where a process was killed without releasing (SIGKILL, host crash). 3h30m sits inside the 4h cron cadence — a SIGKILL-stuck lock is self-stolen by the very next tick with 30min of slack. In practice the batch never exceeds ~30min; if you see runs approaching 3h30m you have a deeper problem to investigate.
 
 ```bash
-SKILL_DIR=~/.openclaw/skills/skills/muso-ops-credit-verification
+SKILL_DIR=/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification
 # Pass our own $$ so the lockfile records the long-lived caller PID, not the
 # helper script's ephemeral PID (which dies on return).
 bash "$SKILL_DIR/scripts/lockfile.sh" acquire $$
@@ -812,16 +904,39 @@ Exit the turn. Do NOT proceed to B1. The `trap … EXIT` set in B0b releases the
 
 **HARD RULE — no manual-override phase.** Once `preflight_browser_unavailable` is logged for a run, the turn exits. There is no "phase=manual" path, no "proceeding with caution" path, no way to continue in the same run. The mechanical counterpart: `runlog.sh` refuses every subsequent `event` call on that run with exit 20 (2026-04-20 13:19 UTC 2bfea8 is the incident this closes). If you need to retry, start a fresh run with a new lockfile + run_id.
 
+#### B0d.5. Session Hygiene (contamination check)
+
+openclaw channel-keys sessions: the same `.jsonl` file persists across runs and gateway restarts in the Slack `#credit-verification` thread. If an earlier run made a `web_fetch` to a Tier-1 host (Spotify / Apple / MusicBrainz / Discogs / AllMusic / Tidal), those lines remain in the file and can still contaminate this run unless scoped.
+
+The gate (R3-3) already filters its scan by `run_started.ts`, so past contamination can't block today's approves. But fail-fast is still worth it — aborting here is cheaper than letting B2 spend minutes processing before every approve rejects with the same reason.
+
+```bash
+bash "$SKILL_DIR/scripts/session-evidence.sh" --check-tier1-webfetch
+```
+
+- Exit `0`: session is clean OR past web_fetch was written before this run's `run_started` (automatically excluded). Fall through to B1.
+- Exit `1`: Tier-1 `web_fetch` detected WITHIN the current run window. Post this short abort message to `#credit-verification` (no thread), then exit the turn:
+
+  ```
+  ⚠️ Batch aborted at B0d.5 — Tier-1 web_fetch detected in this run's session.
+  Run ID: <RUN_ID>. Host(s): <from stderr bullet list>.
+  The enforcer plugin's block-web-fetch-tier1 hook did not fire — escalating to Jan. <@U038BM16T7W>
+  ```
+
+  Do NOT retry within the same run — the session is tainted. The next scheduled cron tick (or a fresh `@Ops (dry-run)` post that starts a new topic-keyed session) is the recovery path.
+
+This check is belt-and-braces: the gate in R3-3 also scopes its scan, so even if B0d.5 were skipped the approves would still refuse. Running it explicitly turns a "gate rejects every approve, takes 30min to discover" failure into a "batch aborts in 2 seconds with a named host" failure.
+
 #### B1. Fetch the Queue
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/credit-requests?status=unverified&limit=$FETCH_SIZE"
 ```
 
 Also fetch total queue size:
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/credit-requests/counts?status=unverified"
 ```
 
@@ -841,31 +956,58 @@ The list endpoint returns `createdAt DESC` by default (newest first = LIFO).
   Error: [details]
   ```
 
-#### B2. Process Each Credit
+#### B2. Process Each Profile
+
+**Structural change (R3, 2026-04-23):** iteration unit is now the **profile**, not the individual credit. The gate's evidence quorum is per-profile — loading 2 artist-level pages for the whole batch doesn't satisfy it for 30 distinct profiles. Group the fetched queue by `profile_id` first, then for each group do: gather Tier-1 evidence → classify → act via `batch-verify-profile.sh`.
 
 Initialize in-run counters:
 ```bash
-MOVES_COUNT=0
-APPROVED_IN_RUN=0
+MOVES_COUNT=0           # total UVN moves across profiles — runaway rail
+APPROVED_IN_RUN=0       # total credits approved across profiles
+ERRORS=0                # total delegate/HTTP errors
 ```
 
-For each credit request in the batch:
+Group the fetched queue by `profile_id`:
+```bash
+# $QUEUE_JSON = response body of B1's GET /admin/credit-requests
+# Produce: profiles_ordered[] = array of {profile_id, userid, cr_ids:[...]}
+PROFILES_GROUPED=$(echo "$QUEUE_JSON" | jq -c '
+    .items // .body.items // []
+    | group_by(.profileId)
+    | map({
+        profile_id: (.[0].profileId // .[0].profile_id),
+        userid: (.[0].userId // .[0].user_id),
+        cr_ids: [.[] | .id]
+      })
+')
+```
 
-1. **Log fetched.**
+For each profile group:
+
+1. **Log the group.**
    ```bash
-   bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" credit_fetched \
-     "$(jq -n --arg id "$CR_ID" --arg uid "$USER_ID" --arg pid "$PROFILE_ID" \
-            --arg st "$CURRENT_STATUS" \
-            '{cr_id:$id, userid:$uid, profileid:$pid, current_status:$st}')"
+   bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" profile_group_fetched \
+     "$(jq -n --arg pid "$PROFILE_ID" --arg uid "$USER_ID" --argjson ids "$CR_IDS_JSON" \
+            '{profile_id:$pid, userid:$uid, cr_ids:$ids, count:($ids|length)}')"
    ```
 
-2. **Idempotency check.** If current status is not `unverified` or `user_verification_needed`, log `skip_idempotent` and continue.
+2. **Idempotency filter.** Within the group, drop any `cr_id` whose `current_status` is not `unverified` or `user_verification_needed`. For each dropped id, log `skip_idempotent`. If the group is empty after filtering, continue to the next profile.
+
+3. **Gather per-profile Tier-1 evidence.** This is the structural invariant R3 adds. Before making any per-credit verdict, load at least 2 Tier-1 pages for THIS profile via the `browser` tool. Typical pattern:
+   ```
+   browser(https://open.spotify.com/artist/<spotify_id_or_search_string>)
+   browser(https://www.allmusic.com/search/all?q=<artist_name>)
+   ```
+   Alternatives are Discogs, MusicBrainz, Apple Music, Tidal. Any ≥2 distinct Tier-1 hostnames whose rendered text contains your chosen `--evidence-excerpt` for this profile will satisfy both the dispatcher's pre-flight AND the gate.
+
+   Log the evidence-gathering intent:
    ```bash
-   bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" action_attempted \
-     "$(jq -n --arg id "$CR_ID" --arg a skip_idempotent '{cr_id:$id, action:$a}')"
+   bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" profile_evidence_attempted \
+     "$(jq -n --arg pid "$PROFILE_ID" --arg excerpt "$PROFILE_EVIDENCE_EXCERPT" \
+            '{profile_id:$pid, evidence_excerpt:$excerpt}')"
    ```
 
-3. **Investigate + Classify** (Step 3 + Step 4). Log:
+4. **Investigate + Classify each credit in the group** (Step 3 + Step 4 from the reactive workflow, applied to each `cr_id`). Use the browser evidence from step 3 plus any per-credit checks (track existence, role plausibility). Log one `verdict` event per credit:
    ```bash
    bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" verdict \
      "$(jq -n --arg id "$CR_ID" --arg v "$VERDICT" --arg r "$REASON" \
@@ -873,51 +1015,94 @@ For each credit request in the batch:
             '{cr_id:$id, verdict:$v, reason:$r, signals:$sig}')"
    ```
 
-4. **Approval cap check** (only for LEGITIMATE verdicts).
+5. **Partition by decision.** Bucket this profile's credits:
    ```bash
-   if [[ "$VERDICT" == "LEGITIMATE" && "$APPROVAL_CAP_USED" -ge "$APPROVAL_CAP_LIMIT" ]]; then
-     bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" action_attempted \
-       "$(jq -n --arg id "$CR_ID" --arg a skip_cap '{cr_id:$id, action:$a}')"
-     continue   # move on, DO NOT mark as verification_needed
+   APPROVE_IDS=()   # LEGITIMATE + UNVERIFIABLE_LOW_CONCERN
+   UVN_IDS=()       # CLEAR_FRAUD + BORDERLINE
+   ESCALATE_IDS=()  # UNVERIFIABLE_NEEDS_REVIEW
+   ```
+
+6. **Approval cap check** — apply BEFORE acting on `APPROVE_IDS`:
+   ```bash
+   REMAINING_CAP=$(( APPROVAL_CAP_LIMIT - APPROVAL_CAP_USED ))
+   if (( ${#APPROVE_IDS[@]} > REMAINING_CAP )); then
+     CAP_OVERFLOW=("${APPROVE_IDS[@]:$REMAINING_CAP}")
+     APPROVE_IDS=("${APPROVE_IDS[@]:0:$REMAINING_CAP}")
+     for id in "${CAP_OVERFLOW[@]}"; do
+       bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" action_attempted \
+         "$(jq -n --arg id "$id" --arg a skip_cap '{cr_id:$id, action:$a}')"
+     done
+   fi
+   ```
+   Cap-overflow credits are logged as `skip_cap` — they are NOT flagged as UVN and NOT escalated.
+
+7. **Runaway safety rail** — evaluate the projected total BEFORE acting:
+   ```bash
+   PROJECTED_MOVES=$(( MOVES_COUNT + ${#UVN_IDS[@]} ))
+   THRESHOLD=$(( (FETCH_SIZE * 9 + 9) / 10 ))
+   if (( PROJECTED_MOVES >= THRESHOLD )); then
+     bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" runaway_rail_triggered \
+       "$(jq -n --argjson n "$PROJECTED_MOVES" --argjson fs "$FETCH_SIZE" \
+              '{moves_so_far:$n, fetch_size:$fs}')"
+     message(action="send",
+             channelId="<credit_verification_channel_id>",
+             text="🚨 Runaway batch — projected $PROJECTED_MOVES of $FETCH_SIZE moves to verification_needed. Pausing. <@U038BM16T7W>")
+     break
    fi
    ```
 
-5. **Runaway safety rail** (before executing a verification_needed move).
+8. **Act — one dispatcher call per non-empty bucket:**
+
+   **APPROVE_IDS (if non-empty):**
    ```bash
-   if [[ "$VERDICT" == "CLEAR_FRAUD" || "$VERDICT" == "BORDERLINE" ]]; then
-     MOVES_COUNT=$((MOVES_COUNT + 1))
-     # Fires when ≥90% of fetched have been moved — catches a runaway mid-batch.
-     # Round UP so small FETCH_SIZE doesn't trip on the first move:
-     #   FETCH_SIZE=10 → 9, FETCH_SIZE=25 → 23, FETCH_SIZE=100 → 90, FETCH_SIZE=1 → 1
-     THRESHOLD=$(( (FETCH_SIZE * 9 + 9) / 10 ))
-     if [[ "$MOVES_COUNT" -ge "$THRESHOLD" ]]; then
-       bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" runaway_rail_triggered \
-         "$(jq -n --argjson n "$MOVES_COUNT" --argjson fs "$FETCH_SIZE" \
-                '{moves_so_far:$n, fetch_size:$fs}')"
-       # Post to Slack (Jan only) and exit the batch.
-       # CRITICAL: this MUST actually send via the message() tool — a comment
-       # placeholder would mean the rail trips silently and Jan never finds out.
-       # Tool syntax matches the `react` calls used in Step 5 (parens + kwargs),
-       # NOT shell. The bash block above logs the event; this step is the
-       # tool-call instruction the agent executes.
-       message(action="send",
-               channelId="<credit_verification_channel_id>",
-               text="🚨 Runaway batch — $MOVES_COUNT of $FETCH_SIZE fetched credits moved to verification_needed. Pausing. <@U038BM16T7W>")
-       break
-     fi
+   bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" action_attempted \
+     "$(jq -n --arg pid "$PROFILE_ID" --argjson ids "$APPROVE_IDS_JSON" \
+            '{profile_id:$pid, action:"approve", cr_ids:$ids}')"
+
+   APPROVE_RC=0
+   APPROVE_OUT=$(bash "$SKILL_DIR/scripts/batch-verify-profile.sh" \
+       --profile-id "$PROFILE_ID" \
+       --evidence-excerpt "$PROFILE_EVIDENCE_EXCERPT" \
+       --ids "$(IFS=,; echo "${APPROVE_IDS[*]}")" \
+       --decision approve) || APPROVE_RC=$?
+
+   # Exit 3 = pre-flight failed (missing evidence OR Tier-1 web_fetch). Try
+   # loading the remediation-suggested URLs once, then re-run. If it still
+   # fails, downgrade to UVN with an explicit reason rather than silently
+   # dropping the credits.
+   if [[ $APPROVE_RC -eq 3 ]]; then
+     # (retry loop: load two more Tier-1 pages per stderr remediation, re-run)
+     # If exit 3 again → UVN_IDS+=("${APPROVE_IDS[@]}") with
+     #   reason="insufficient grounded evidence on retry — downgraded from approve"
    fi
    ```
+   On delegate success (`APPROVE_RC==0` and JSON outcome `dry_run_intercept` or `ok`): `APPROVED_IN_RUN += ${#APPROVE_IDS[@]}` and `APPROVAL_CAP_USED += ${#APPROVE_IDS[@]}`. On `http_error` / non-gate `APPROVE_RC==1`: `ERRORS += ${#APPROVE_IDS[@]}`.
 
-6. **Act (Step 5).** Execute the verdict (approve / verification_needed / escalate).
-   - **Fallback override (gate #2):** If `OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1` is set AND verdict is CLEAR_FRAUD or BORDERLINE, treat the verdict as ESCALATE instead — post an individual top-level escalation message tagging Jan, do NOT call the admin API to flip status. This protects against silently-parking credits when the user-facing notification flow isn't wired yet.
-   - Before: log `action_attempted` with the API request body and `reason_storage` (`api_reason_field` if gate #1 confirmed the API stores reason; otherwise `verificationdata.ops_reason`).
-   - After: parse the bulk API response and log `action_result` with `per_id_outcome` (`success` / `error` / `unchanged`), `http_status`, and `duration_ms`.
-   - If VERDICT was LEGITIMATE and action succeeded: `APPROVED_IN_RUN=$((APPROVED_IN_RUN + 1))` and `APPROVAL_CAP_USED=$((APPROVAL_CAP_USED + 1))`.
-   - If `per_id_outcome` was `error`: `ERRORS=$((ERRORS + 1))`.
-   - **Skip all emoji reactions** — no source message in batch mode.
-   - For escalations: post an individual top-level message (existing behavior, unchanged).
+   **UVN_IDS (if non-empty):**
+   ```bash
+   MOVES_COUNT=$(( MOVES_COUNT + ${#UVN_IDS[@]} ))
+   bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" action_attempted \
+     "$(jq -n --arg pid "$PROFILE_ID" --argjson ids "$UVN_IDS_JSON" \
+            '{profile_id:$pid, action:"flag", cr_ids:$ids}')"
 
-7. **On any per-credit error:** log `error` event with `cr_id`, `stage`, `error_message`, and a truncated `traceback_snippet`, increment `ERRORS`, then continue with the next credit.
+   FLAG_RC=0
+   bash "$SKILL_DIR/scripts/batch-verify-profile.sh" \
+       --profile-id "$PROFILE_ID" \
+       --evidence-excerpt "$PROFILE_EVIDENCE_EXCERPT" \
+       --ids "$(IFS=,; echo "${UVN_IDS[*]}")" \
+       --decision flag \
+       --reason "$UVN_REASON_SUMMARY" || FLAG_RC=$?
+   # On FLAG_RC != 0: increment ERRORS by the count in failed_ids (from the
+   # delegate's stdout). Do NOT abort the batch — try the next profile.
+   ```
+
+   **Fallback override** (unchanged): if `OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1`, treat CLEAR_FRAUD/BORDERLINE credits as ESCALATE instead — post individual top-level escalation messages tagging Jan, skip the `--decision flag` call for those ids.
+
+   **ESCALATE_IDS (if non-empty):** post an individual top-level message per cr_id (existing behavior, unchanged). Log `action_attempted` with `action: escalate` for each.
+
+9. **Skip all emoji reactions** — no source message in batch mode.
+
+10. **On any per-credit / per-profile error:** log `error` event with `cr_id` (or `profile_id`), `stage`, `error_message`, and a truncated `traceback_snippet`, increment `ERRORS`, then continue with the next profile.
 
    **Error-storm escalation.** If at the end of the loop `ERRORS >= max(3, FETCHED / 2)` (i.e. half the batch errored, with a floor of 3 to avoid noise on tiny batches), post a Jan-tagged alert in addition to the normal summary:
    ```bash
@@ -935,35 +1120,53 @@ For each credit request in the batch:
 
 #### B3. Compose Summary
 
-**Parent message** (top-level, public, no tags, always posted to `OPS_CREDIT_VERIFICATION_CHANNEL_ID`, default `C0APB2CMM7C`):
-```
-[HEARTBEAT-BATCH] Credit batch complete — {YYYY-MM-DD HH:MM UTC}
-Fetched: {FETCHED} | Approved: {APPROVED_IN_RUN} | → verification_needed: {MOVES_COUNT} | Escalated: {ESCALATED} | Skipped: {SKIPPED_IDEMPOTENT + SKIPPED_CAP}
-Approval cap used: {APPROVAL_CAP_USED}/{APPROVAL_CAP_LIMIT} today | Queue remaining: {QUEUE_REMAINING} unverified
-```
+**The Slack parent + thread bodies MUST come from `render-slack-summary.sh` — not from agent prose.**
 
-Store the parent message's Slack ts for thread replies and for the `run_finished` event in B6.
+The 2026-04-23 09:02 UTC dry-run had a thread reply that claimed "174 APPROVE-ELIGIBLE credits NOT processed", "43 profiles", and named profiles ("Tom Baker", "Eric Padget") — none of these numbers or names existed in the truth floor. Agent-composed prose invents data; the renderer can only emit what `.results.jsonl` and the runlog actually contain.
 
-**Thread reply 1** (only if there were verification_needed moves, escalations, or skipped — i.e. non-empty detail; tags Jan):
-```
-<@U038BM16T7W> — batch summary
+**Hard rule (R2-5):** Every number, credit ID, and list entry in any Slack message posted from B3 MUST be a byte-for-byte copy of `render-slack-summary.sh` stdout. No agent-composed counts. No invented profile names. The ONLY free-form prose allowed in B3 is a one-line explanation (e.g. "web_fetch to musicbrainz triggered the gate") appended AFTER the renderer's thread output — explaining *why*, never *what*.
 
-🔴 → verification_needed ({MOVES_COUNT}):
-• {cr_id} {profile} as {role} on "{track}" — reason: {specific reason}
-• ...
+Flow:
 
-🔍 Escalated ({ESCALATED}):
-• {cr_id} {profile} as {role} on "{track}" — reason: {specific reason}
-• ...
+```bash
+# 1. compute-run-summary.sh first — writes run_finished + invariant events,
+#    sets up the data the renderer will read. Idempotent per R2-2, so
+#    re-invocations in the same turn return the cached event.
+SUMMARY_JSON=$(bash "$SKILL_DIR/scripts/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS")
 
-⏭️ Skipped idempotent ({SKIPPED_IDEMPOTENT}):
-• {cr_id} — already processed
-
-⏭️ Skipped (cap) ({SKIPPED_CAP}):
-• {cr_id} — daily approval cap reached
+# 2. Render. Output is two blocks separated by `===THREAD===`:
+SLACK_OUT=$(bash "$SKILL_DIR/scripts/render-slack-summary.sh" "$RUN_ID")
+PARENT_TEXT=$(awk '/^===THREAD===$/{exit} {print}' <<<"$SLACK_OUT")
+THREAD_TEXT=$(awk '/^===THREAD===$/{flag=1; next} flag' <<<"$SLACK_OUT")
 ```
 
-If all four detail sections (`verification_needed`, `Escalated`, `Skipped idempotent`, `Skipped (cap)`) are empty, skip this thread reply entirely.
+Then post the parent to `OPS_CREDIT_VERIFICATION_CHANNEL_ID` (dry-run mode uses `OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID`):
+
+```
+message(action="send", channelId="<credit_verification_channel_id>", text=PARENT_TEXT)
+```
+
+Capture the returned Slack ts, then post the thread reply against it:
+
+```
+message(action="send", channelId="<credit_verification_channel_id>", threadId=<ts>, text=THREAD_TEXT)
+```
+
+The renderer handles:
+- `[DRY RUN]` prefix when the run was initialized as dry-run.
+- `⚠️ DISCREPANCY DETECTED` banner on `silent_failure_detected` (R2-2 invariant).
+- `⚠️ N approve(s) rejected by gate` line when some landed and some didn't.
+- Credit-ID lists grouped by outcome (verification_needed landed, rejected-by-gate, http_error, config-mismatch).
+- Cap of 25 credit IDs per section with `+N more` suffix for readability.
+
+You do not compose these markers yourself; the truth floor drives them.
+
+**What NOT to do:**
+- Do NOT hand-write a thread body listing profiles. The renderer lists credit IDs by outcome from `.results.jsonl` — that's the ground-truth surface.
+- Do NOT add your own counts above/below the renderer output. If the renderer's "Approved: 0" disagrees with an in-run counter you maintained, the renderer is right.
+- Do NOT invent profile names, emails, or role descriptions in the thread. The truth floor doesn't carry them. If you want to mention a profile in the one-line explanation appended after the renderer output, reference it from verification notes you logged via `runlog.sh event` during B2 — not from memory or pattern-matching on names you saw in the queue fetch.
+
+Store the parent's Slack ts for B6's invariant-warning reply and for any per-escalation thread children. The `run_finished` event was written by `compute-run-summary.sh` above; B6 won't re-run the helper (idempotency guard catches it anyway).
 
 **Thread reply 2** (only if approval cap was hit during this run):
 ```
@@ -1020,33 +1223,19 @@ If the API returns zero unverified credits:
 Queue clear — no unverified credits remaining.
 ```
 
-#### B6. Finish — log summary, compress old logs
+#### B6. Finish — invariant warnings, compress old logs
 
-After the parent summary message is posted (whether B3's normal summary or B5's queue-clear message), run the finalization steps.
+After the parent summary message is posted (B3 or the B5 queue-clear message), evaluate the invariants and run maintenance.
 
-Log the `run_finished` event **via `compute-run-summary.sh`**, which derives
-the counters directly from the session JSONL (harness-recorded tool calls)
-rather than trusting shell variables. This prevents a confabulated agent —
-e.g. a Fireworks-fallback model during an Anthropic spend-cap event — from
-emitting a fabricated summary. See issue #124 for the 2026-04-20 incidents.
-
-> **CRITICAL:** The event name is literally `run_finished`. Do NOT write
-> `run_completed`, `run_done`, or any other name — downstream tooling
-> (alerting, dry-run dashboards, the hollow/ungrounded invariants in
-> `compute-run-summary.sh`) looks for `run_finished` specifically and
-> will silently miss the run otherwise. Do NOT invoke `runlog.sh event …
-> run_finished …` directly either: the helper script writes it with
-> derived counters; bash-side variables are not trusted. Call the helper
-> exactly as shown below.
+**Do NOT re-run `compute-run-summary.sh` here.** B3 already ran the helper to source its numbers; the `run_finished` event is already in the runlog. Re-running would write a duplicate event. Re-use the `$SUMMARY_JSON` you already have:
 
 ```bash
-SUMMARY=$(bash "$SKILL_DIR/scripts/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS")
-echo "$SUMMARY"
-HOLLOW=$(echo "$SUMMARY" | jq -r '.hollow')
-UNGROUNDED=$(echo "$SUMMARY" | jq -r '.ungrounded')
+HOLLOW=$(echo "$SUMMARY_JSON" | jq -r '.hollow')
+UNGROUNDED=$(echo "$SUMMARY_JSON" | jq -r '.ungrounded')
+SILENT_FAILURE=$(echo "$SUMMARY_JSON" | jq -r '.silent_failure_detected')
 ```
 
-The helper writes the `run_finished` event itself, plus one of:
+`compute-run-summary.sh` (invoked in B3) writes the `run_finished` event plus one of:
 
 - `run_finished_hollow` — fires when preflight passed but zero credits were
   fetched or acted on (14:51 `51e6a2` incident class). Indicates an agent
@@ -1055,22 +1244,23 @@ The helper writes the `run_finished` event itself, plus one of:
   agent still logged approvals or verification_needed moves (13:26 `b8b0e5`
   incident class). Indicates fabricated evidence — e.g. `web_fetch` substituted
   for the `browser` probe.
+- `run_finished_silent_failure` — fires when admin-api attempts > 0 but 0
+  landed for approves or UVN (2026-04-22 19:15 incident class). Indicates
+  the agent's Slack prose likely lied about totals. The `reconciliation`
+  block in the event payload carries per-category counts (approved_landed,
+  approved_rejected_by_gate, verification_needed_http_error, etc.) for the
+  post-mortem.
 
-B6 runs *after* B3 by design (the helper needs the parent message ts that
-B3 created), so the B3 summary has already been posted by the time the
-invariants are evaluated. If either invariant fires, post a visible warning
-tagging Jan **in addition to** the B3 summary.
-
-Use the same `message()` tool-call shape as the runaway rail in B2 — the
-tool call must NOT be inside a bash fence, since the LLM otherwise tries to
-`eval` it. Compose the text variable in bash, then drop out of the fence for
-the tool call:
+If any invariant fired, post a visible warning tagging Jan **in addition to** the B3 summary. Use the same `message()` tool-call shape as the runaway rail in B2 — the tool call must NOT be inside a bash fence, since the LLM otherwise tries to `eval` it. Compose the text variable in bash, then drop out of the fence for the tool call:
 
 ```bash
 if [[ "$HOLLOW" == "true" ]]; then
   WARN_TEXT="🚨 Hollow batch run — preflight passed but no credits were fetched or acted on. Run ID: $RUN_ID. Likely a confabulated session (e.g. Fireworks fallback). <@U038BM16T7W>"
 elif [[ "$UNGROUNDED" == "true" ]]; then
   WARN_TEXT="🚨 Ungrounded batch run — approvals/VN moves logged without a successful browser preflight. Run ID: $RUN_ID. Likely fabricated evidence. <@U038BM16T7W>"
+elif [[ "$SILENT_FAILURE" == "true" ]]; then
+  REJECTED=$(echo "$SUMMARY_JSON" | jq -r '.reconciliation.approved_rejected_by_gate // 0')
+  WARN_TEXT="🚨 Silent-failure batch — admin-API attempts did not land. Run ID: $RUN_ID. Rejected by gate: $REJECTED. See reconciliation in the runlog. <@U038BM16T7W>"
 fi
 ```
 
@@ -1081,10 +1271,7 @@ openclaw `message()` syntax, same as the runaway-rail post in B2.5):
 message(action="send", channelId="<credit_verification_channel_id>", text=WARN_TEXT)
 ```
 
-The Slack warning is LLM-mediated, but the authoritative record is the
-`run_finished_hollow` / `run_finished_ungrounded` event in the runlog — those
-land regardless of whether the agent executes the `message()` call. A
-follow-up out-of-band watchdog can tail runlogs and alert on either event.
+The Slack warning is LLM-mediated, but the authoritative record is the `run_finished_hollow` / `run_finished_ungrounded` / `run_finished_silent_failure` event in the runlog — those land regardless of whether the agent executes the `message()` call. A follow-up out-of-band watchdog can tail runlogs and alert on any of them.
 
 Run compression (idempotent; cheap no-op most days):
 ```bash
@@ -1093,7 +1280,7 @@ bash "$SKILL_DIR/scripts/compress-old-logs.sh" || true
 
 The lockfile is released automatically by the `trap` set in B0 when the run exits.
 
-> **Mechanical fallback for skipped B6** (issue #152). If this whole B6 block is skipped (forgotten, crashed mid-turn, etc.), `lockfile.sh release` — invoked by the B0 `trap` — now checks the runlog and invokes `compute-run-summary.sh` itself when no `run_finished` event is present. The authoritative derived counters land either way. This is a belt-and-braces backstop, not a license to skip B6: running it explicitly here keeps the Slack summary and the forensic record aligned in the same turn.
+> **Mechanical fallback for skipped B3/B6** (issue #152). If the B3 block is skipped (forgotten, crashed mid-turn, etc.) and B6 therefore has no `$SUMMARY_JSON`, `lockfile.sh release` — invoked by the B0 `trap` — checks the runlog and invokes `compute-run-summary.sh` itself when no `run_finished` event is present. The authoritative derived counters land either way. This is a belt-and-braces backstop, not a license to skip B3: running it explicitly there keeps the Slack summary and the forensic record aligned in the same turn.
 
 ### Rate Limiting Note
 
@@ -1136,9 +1323,14 @@ through investigation.
 Acknowledge the request, then fetch all unverified credits for the profile:
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/admin/credit-requests?status=unverified&profileId=<profile_id>&limit=500"
+bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/credit-requests?status=unverified&profilesIds=<profile_id>&limit=500"
 ```
+
+**⚠️ Param name:** Use `profilesIds` (plural, capital `I`). `profileId`
+singular is silently ignored by the backend and returns the general queue.
+Spot-check the first row's `profileId` field matches `<profile_id>` before
+trusting the result set.
 
 Post acknowledgment:
 
@@ -1236,7 +1428,7 @@ Wait for Jan/Aaron to respond with guidance in the thread.
 For each approved group, call the API in batches of 10 or fewer:
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester <requester_slack_id> \
   call PUT "/admin/credit-requests" \
   '{"requestIds":["<id1>","<id2>",...max 10],"status":"approved"}'
@@ -1247,7 +1439,7 @@ Log each batch via `muso-ops-audit` before execution.
 For rejections, include a reason:
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester <requester_slack_id> \
   call PUT "/admin/credit-requests" \
   '{"requestIds":["<id>"],"status":"rejected","reason":"[specific reason]"}'

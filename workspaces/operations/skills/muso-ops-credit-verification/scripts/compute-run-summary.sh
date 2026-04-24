@@ -82,6 +82,31 @@ CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
 CV_PROBE_URL="${CV_PROBE_URL:-https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# --- Idempotency guard (R2-2) ---
+# The 2026-04-23 09:02 UTC dry-run produced TWO run_finished events (09:16:21
+# and 09:16:34). Root cause: B3 and B6 both explicitly called this script —
+# B3 to source Slack counts, B6 to populate invariant-warning variables.
+# Each openclaw exec tool call is a fresh shell, so B3's $SUMMARY_JSON isn't
+# visible in B6, and the agent re-derives it by re-invoking us.
+#
+# The fix is mechanical: if a run_finished event already exists for this
+# RUN_ID, print the cached summary to stdout and exit 0 without writing any
+# new events. This keeps the caller's $SUMMARY_JSON populated for downstream
+# invariant checks without duplicating events in the runlog.
+#
+# Done before the expensive session-log parsing so the cached path is fast.
+_guard_day="${RUN_ID:0:8}"
+_guard_runlog_path="${OPS_RUNLOG_DIR}/${_guard_day:0:4}-${_guard_day:4:2}-${_guard_day:6:2}/${RUN_ID}.jsonl"
+if [[ -f "$_guard_runlog_path" ]]; then
+    _cached_summary=$(jq -s -c 'first(.[] | select(.event == "run_finished"))' "$_guard_runlog_path" 2>/dev/null || true)
+    if [[ -n "$_cached_summary" && "$_cached_summary" != "null" ]]; then
+        echo "compute-run-summary: run_finished already present for $RUN_ID — returning cached summary, no new events written." >&2
+        echo "$_cached_summary"
+        exit 0
+    fi
+fi
+unset _guard_day _guard_runlog_path _cached_summary
+
 # Session-log discovery — same mtime idiom as session-evidence.sh, but scoped
 # to the active workspace (agent dir) to prevent cross-agent races.
 if [[ -n "${CV_SESSION_LOG_OVERRIDE:-}" ]]; then
@@ -350,13 +375,41 @@ runlog_counts=$(jq -s '
     {
         escalated: ([.[] | select(.event == "escalation_posted") | .cr_id] | unique | length),
         skipped_idempotent: ([.[] | select(.event == "action_attempted" and .action == "skip_idempotent")] | length),
-        skipped_cap: ([.[] | select(.event == "action_attempted" and .action == "skip_cap")] | length)
+        skipped_cap: ([.[] | select(.event == "action_attempted" and .action == "skip_cap")] | length),
+        run_started_fetch_size: (first(.[] | select(.event == "run_started") | .fetch_size) // null),
+        run_started_queue_depth: (first(.[] | select(.event == "run_started_queue") | .queue_depth_at_start) // null)
     }
 ' "$runlog_path")
 
 ESCALATED=$(echo "$runlog_counts" | jq -r '.escalated')
 SKIPPED_IDEMPOTENT=$(echo "$runlog_counts" | jq -r '.skipped_idempotent')
 SKIPPED_CAP=$(echo "$runlog_counts" | jq -r '.skipped_cap')
+
+# Fetched-count fallback (R2-6). The 2026-04-23 09:02 UTC dry-run showed
+# fetched:0 in the summary even though the agent processed 500 credits.
+# Root cause: the list-fetch response is a ~500KB JSON blob and openclaw's
+# exec tool truncates to the last 16KB, so the {"http_status":200,"body":
+# {"data":{"items":[...]}}} envelope gets sliced off. session_counts.fetched
+# then finds no items to count.
+#
+# Fallback source of truth: run_started.fetch_size (what B0 intended to
+# fetch) capped by run_started_queue.queue_depth_at_start (what was
+# actually available). That's the "effective fetched" without needing the
+# session envelope. Session-derived takes precedence when it's > 0 (real
+# IDs observed); fallback fires only when session-derived is 0 AND the
+# runlog gives us a usable bound.
+if (( FETCHED == 0 )); then
+    _fallback_fetch_size=$(echo "$runlog_counts" | jq -r '.run_started_fetch_size // ""')
+    _fallback_queue_depth=$(echo "$runlog_counts" | jq -r '.run_started_queue_depth // ""')
+    if [[ -n "$_fallback_fetch_size" && "$_fallback_fetch_size" != "null" ]]; then
+        if [[ -n "$_fallback_queue_depth" && "$_fallback_queue_depth" != "null" ]] && (( _fallback_queue_depth < _fallback_fetch_size )); then
+            FETCHED="$_fallback_queue_depth"
+        else
+            FETCHED="$_fallback_fetch_size"
+        fi
+    fi
+    unset _fallback_fetch_size _fallback_queue_depth
+fi
 
 # Compute the two invariants. `hollow` catches preflight-passed-then-skipped
 # runs (14:51 incident class) — defined as preflight OK but ZERO admin-API
@@ -390,11 +443,130 @@ if [[ -z "$DRY_RUN_FLAG" || "$DRY_RUN_FLAG" == "null" ]]; then
     esac
 fi
 
+# --- Results.jsonl reconciliation (PR 2 of 2026-04-22 silent-failure fix) ---
+#
+# muso-admin-api.sh now writes one JSONL line per /admin/credit-requests
+# write (PR #158's truth floor) at four outcome points: rejected_by_gate,
+# dry_run_intercept, ok, http_error. This file is authoritative because it
+# is written inside the admin script itself — a caller that wraps us in
+# `> /dev/null 2>&1` cannot hide the outcome.
+#
+# The previous session-JSONL derivation has a blind spot: when the agent
+# redirects ALL output inside its exec (`approve_cr $id > /dev/null`), the
+# session log only captures the outer echo statements (e.g. "T L A
+# (VERIFIED): 124 approved"). The session-derived $APPROVED correctly
+# reports 0 in that case — but the agent's Slack prose still claims 124.
+# We need a signal that the agent ATTEMPTED many approves but none LANDED.
+# That signal lives in results.jsonl.
+#
+# Resolve the results path with the same precedence chain as the truth-
+# floor writer: CV_RESULTS_PATH env override first, then the default
+# convention under /var/log/openclaw/credit-batch-runs.
+day_short="${RUN_ID:0:8}"
+day_iso="${day_short:0:4}-${day_short:4:2}-${day_short:6:2}"
+results_path="${CV_RESULTS_PATH:-/var/log/openclaw/credit-batch-runs/${day_iso}/${RUN_ID}.results.jsonl}"
+
+# Default reconciled counters. When the file is absent we fall back to
+# session-only counts and mark reconciliation_source=session_jsonl_fallback
+# so downstream can treat the run with lower confidence.
+APPROVED_ATTEMPTED=0
+APPROVED_LANDED=0
+APPROVED_REJECTED_BY_GATE=0
+APPROVED_REJECTED_PRE_FLIGHT=0
+APPROVED_HTTP_ERROR=0
+UVN_ATTEMPTED=0
+UVN_LANDED=0
+UVN_HTTP_ERROR=0
+RECONCILIATION_SOURCE="session_jsonl_fallback"
+
+if [[ -f "$results_path" ]]; then
+    RECONCILIATION_SOURCE="results_jsonl"
+    # Single jq pass over the JSONL file: classify every line by
+    # intended_status + outcome, then sum request_ids.length (so a batch
+    # PUT with 124 ids counts as 124 landed). Uses `jq -s` to slurp and
+    # `[inputs | fromjson? // empty]` to skip malformed lines without
+    # aborting — same resilience pattern session_counts uses above.
+    #
+    # R3-final: `rejected_pre_flight` is a distinct category written by
+    # batch-verify-profile.sh when its pre-flight refuses to call the
+    # admin API. Agent's evidence-gathering step was insufficient — these
+    # are NOT the same failure class as gate rejections. Surface both so
+    # Slack readers can tell whether the agent tried and the gate refused
+    # (rejected_by_gate) vs the agent never even got to try (pre_flight).
+    reconciled=$(jq -s -R -c '
+        def landed: (.outcome == "ok" or .outcome == "dry_run_intercept");
+
+        [ split("\n")[] | select(length > 0) | fromjson? // empty ] as $rows
+        |
+        {
+            approved_attempted: ([ $rows[] | select(.intended_status == "approved") | (.request_ids | length) ] | add // 0),
+            approved_landed:    ([ $rows[] | select(.intended_status == "approved" and landed) | (.request_ids | length) ] | add // 0),
+            approved_rejected_by_gate:
+                                ([ $rows[] | select(.intended_status == "approved" and .outcome == "rejected_by_gate") | (.request_ids | length) ] | add // 0),
+            approved_rejected_pre_flight:
+                                ([ $rows[] | select(.intended_status == "approved" and .outcome == "rejected_pre_flight") | (.request_ids | length) ] | add // 0),
+            approved_http_error:
+                                ([ $rows[] | select(.intended_status == "approved" and .outcome == "http_error") | (.request_ids | length) ] | add // 0),
+            uvn_attempted:      ([ $rows[] | select(.intended_status == "user_verification_needed") | (.request_ids | length) ] | add // 0),
+            uvn_landed:         ([ $rows[] | select(.intended_status == "user_verification_needed" and landed) | (.request_ids | length) ] | add // 0),
+            uvn_http_error:     ([ $rows[] | select(.intended_status == "user_verification_needed" and .outcome == "http_error") | (.request_ids | length) ] | add // 0)
+        }
+    ' "$results_path" 2>/dev/null || true)
+
+    if [[ -n "$reconciled" ]] && echo "$reconciled" | jq -e . >/dev/null 2>&1; then
+        APPROVED_ATTEMPTED=$(echo "$reconciled" | jq -r '.approved_attempted')
+        APPROVED_LANDED=$(echo "$reconciled" | jq -r '.approved_landed')
+        APPROVED_REJECTED_BY_GATE=$(echo "$reconciled" | jq -r '.approved_rejected_by_gate')
+        APPROVED_REJECTED_PRE_FLIGHT=$(echo "$reconciled" | jq -r '.approved_rejected_pre_flight')
+        APPROVED_HTTP_ERROR=$(echo "$reconciled" | jq -r '.approved_http_error')
+        UVN_ATTEMPTED=$(echo "$reconciled" | jq -r '.uvn_attempted')
+        UVN_LANDED=$(echo "$reconciled" | jq -r '.uvn_landed')
+        UVN_HTTP_ERROR=$(echo "$reconciled" | jq -r '.uvn_http_error')
+    else
+        echo "WARN: results.jsonl at $results_path parsed to malformed reconciliation; falling back to session-only counts" >&2
+        RECONCILIATION_SOURCE="session_jsonl_fallback"
+    fi
+fi
+
+# Silent-failure invariant: the 2026-04-22 19:15 scenario is exactly
+# "attempted >> 0 AND landed == 0" for at least one verb. Either half
+# (approve or UVN) triggering is sufficient — we want to catch any silent
+# surface, not just the approve path.
+silent_failure_detected="false"
+if [[ "$RECONCILIATION_SOURCE" == "results_jsonl" ]]; then
+    if (( APPROVED_ATTEMPTED > 0 && APPROVED_LANDED == 0 )); then
+        silent_failure_detected="true"
+    elif (( UVN_ATTEMPTED > 0 && UVN_LANDED == 0 )); then
+        silent_failure_detected="true"
+    fi
+fi
+
+# When results.jsonl is available it takes precedence over session-derived
+# counts for the Slack-facing totals. That is the whole point of the truth
+# floor: Slack reports what actually HIT the API (or would have, in dry-run),
+# not what the agent's prose says. Session-derived counters remain in the
+# summary under derived_from so post-mortems can spot when they disagree.
+if [[ "$RECONCILIATION_SOURCE" == "results_jsonl" ]]; then
+    APPROVED_FOR_SUMMARY="$APPROVED_LANDED"
+    VN_FOR_SUMMARY="$UVN_LANDED"
+else
+    APPROVED_FOR_SUMMARY="$APPROVED"
+    VN_FOR_SUMMARY="$VN"
+fi
+
 # `derived_from` honestly lists the per-field provenance map.
 summary=$(jq -n \
     --argjson f "$FETCHED" \
-    --argjson a "$APPROVED" \
-    --argjson v "$VN" \
+    --argjson a "$APPROVED_FOR_SUMMARY" \
+    --argjson v "$VN_FOR_SUMMARY" \
+    --argjson a_session "$APPROVED" \
+    --argjson v_session "$VN" \
+    --argjson a_attempted "$APPROVED_ATTEMPTED" \
+    --argjson a_rejected "$APPROVED_REJECTED_BY_GATE" \
+    --argjson a_preflight "$APPROVED_REJECTED_PRE_FLIGHT" \
+    --argjson a_http_err "$APPROVED_HTTP_ERROR" \
+    --argjson v_attempted "$UVN_ATTEMPTED" \
+    --argjson v_http_err "$UVN_HTTP_ERROR" \
     --argjson e "$ESCALATED" \
     --argjson si "$SKIPPED_IDEMPOTENT" \
     --argjson sc "$SKIPPED_CAP" \
@@ -402,18 +574,37 @@ summary=$(jq -n \
     --argjson preflight "$PREFLIGHT_OK" \
     --argjson hollow "$hollow" \
     --argjson ungrounded "$ungrounded" \
+    --argjson silent "$silent_failure_detected" \
     --argjson parse_errors "$(echo "$session_counts" | jq -r '.parse_errors')" \
     --arg ts "$PARENT_MSG_TS" \
+    --arg recon_source "$RECONCILIATION_SOURCE" \
+    --arg results_path "$results_path" \
     --argjson dry "$DRY_RUN_FLAG" \
     '{
         fetched:$f, approved:$a, verification_needed:$v, escalated:$e,
         skipped_idempotent:$si, skipped_cap:$sc, errors:$errs,
         summary_post_message_ts:$ts, preflight_ok:$preflight,
         hollow:$hollow, ungrounded:$ungrounded,
+        silent_failure_detected:$silent,
+        reconciliation:{
+            source:$recon_source,
+            results_path:$results_path,
+            approved_attempted:$a_attempted,
+            approved_landed:$a,
+            approved_rejected_by_gate:$a_rejected,
+            approved_rejected_pre_flight:$a_preflight,
+            approved_http_error:$a_http_err,
+            verification_needed_attempted:$v_attempted,
+            verification_needed_landed:$v,
+            verification_needed_http_error:$v_http_err,
+            session_derived_approved:$a_session,
+            session_derived_verification_needed:$v_session
+        },
         session_parse_errors:$parse_errors,
         dryRun:$dry,
         derived_from:{
-            session_jsonl:["preflight_ok","fetched","approved","verification_needed","errors"],
+            session_jsonl:["preflight_ok","fetched","errors","session_derived_*"],
+            results_jsonl:["approved","verification_needed","approved_attempted","approved_rejected_by_gate","approved_rejected_pre_flight","approved_http_error","silent_failure_detected"],
             runlog:["escalated","skipped_idempotent","skipped_cap"]
         }
     }')
@@ -446,6 +637,20 @@ if [[ "$ungrounded" == "true" ]]; then
     bash "$SCRIPT_DIR/runlog.sh" event "$RUN_ID" run_finished_ungrounded "$ungrounded_payload"
 fi
 
+# Silent-failure invariant (2026-04-22 incident class). Fires when the
+# agent attempted writes but NONE landed — the exact lie shape of the
+# 19:15 dry-run that prompted this fix. Payload includes both attempted
+# and landed counts so the post-mortem is self-contained.
+if [[ "$silent_failure_detected" == "true" ]]; then
+    silent_payload=$(jq -n \
+        --argjson summary "$summary" \
+        --arg reason "admin-api attempts >0 but 0 landed (approves or UVN) — agent's Slack prose likely lied about totals" \
+        --arg log "$session_log" \
+        --argjson inv "$inventory" \
+        '$summary + {reason:$reason, session_log:$log, tool_inventory:$inv}')
+    bash "$SCRIPT_DIR/runlog.sh" event "$RUN_ID" run_finished_silent_failure "$silent_payload"
+fi
+
 # Print the computed summary to stdout so the caller can inspect .hollow /
-# .ungrounded and post appropriate Slack warnings.
+# .ungrounded / .silent_failure_detected and post appropriate Slack warnings.
 echo "$summary"
