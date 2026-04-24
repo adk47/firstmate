@@ -64,10 +64,10 @@ _All tools the CMO agent has access to. See individual skill files for full API 
 
 ### NocoDB (Intelligence Base)
 - Airtable-like DB for intelligence / research data
-- Transport: MCP server named `NocoDB Base - Intelligence` (registered via `openclaw mcp set` on profile `main`)
-- Endpoint: `https://app.nocodb.com/mcp/nc0hvbud53e8fmrx` (bridged via `npx mcp-remote`)
+- Transport: MCP server named `NocoDB Base - B2B ADs intelligence` (registered via `openclaw mcp set` on profile `main`)
+- Endpoint: `https://app.nocodb.com/mcp/ncsqgdprqpbcnnvb` (native `transport: "streamable-http"`)
 - Auth: `xc-mcp-token` header (stored in openclaw MCP config, not env)
-- Available after gateway-main restart picks up the new MCP config
+- Available to every agent on profile `main`; check with `openclaw --profile main mcp list` if it's not appearing
 
 ---
 

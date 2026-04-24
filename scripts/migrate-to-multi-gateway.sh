@@ -166,10 +166,11 @@ RestartSec=10
 WantedBy=multi-user.target
 DEVSVC
 
-# Install the auxiliary timer units (peer-label reconciler +
-# mcp-remote zombie reaper). Delegated to a standalone script so
-# it can be re-run on its own for unit-only updates without
-# re-triggering the full gateway migration.
+# Install the auxiliary timer units (peer-label reconciler).
+# Delegated to a standalone script so it can be re-run on its own
+# for unit-only updates without re-triggering the full gateway
+# migration. Also cleans up the retired hydra-mcp-reap units if
+# they're still present (see install-aux-units.sh docstring).
 "$HYDRA_ROOT/scripts/install-aux-units.sh" "$HYDRA_ROOT"
 
 systemctl daemon-reload
@@ -235,7 +236,7 @@ done
 log "  All 3 new gateways running. Old gateway still active on port 18789."
 log "  NOTE: main and old gateway both claim port 18789 — main may have failed to bind."
 log "  This is expected. We'll stop the old gateway in step 7."
-log "  Auxiliary timers (peer-labels, mcp-reap) installed + started by install-aux-units.sh."
+log "  Auxiliary timers (peer-labels) installed + started by install-aux-units.sh."
 
 # -------------------------------------------------------------------
 # Step 6: Update Caddy — route Intercom webhook to edge

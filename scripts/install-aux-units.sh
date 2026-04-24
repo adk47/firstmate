@@ -10,11 +10,16 @@
 #     sessions.resolve({ label: "@Role" }) keeps working for
 #     agent-to-agent messaging. Also runs on boot.
 #
-#   hydra-mcp-reap.timer / .service
-#     Kills orphaned `mcp-remote` subprocesses older than 30 min
-#     that are parented to an openclaw-gateway-* unit. Mitigates
-#     an upstream bundle-mcp leak (216 procs / 14.77 GB observed
-#     on 2026-04-24).
+# Also cleans up the retired `hydra-mcp-reap.{timer,service}` if
+# present on the host. That unit reaped orphan `mcp-remote`
+# subprocesses but sent SIGTERM to the gateway's own process group
+# (mcp-remote children inherited the gateway's pgid), taking the
+# gateway down every 15 min once orphans crossed 30m etime.
+# The root cause — bundle-mcp shelling out to `npx mcp-remote` —
+# is fixed by configuring remote MCP servers with the native
+# `transport: "streamable-http"` shape. With no mcp-remote in the
+# config, there's nothing to reap. See lint-openclaw-config.sh
+# for the regression guard.
 #
 # Safe to run on every deploy. Does NOT touch the three gateway
 # service units — those are owned by migrate-to-multi-gateway.sh.
@@ -32,10 +37,19 @@ fail() { log "FATAL: $*"; exit 1; }
 [[ $EUID -eq 0 ]] || fail "must run as root (systemd unit writes require it)"
 [[ -x "$HYDRA_ROOT/scripts/provision-peer-labels.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/provision-peer-labels.sh missing or not executable"
-[[ -x "$HYDRA_ROOT/scripts/reap-mcp-remote-zombies.sh" ]] \
-  || fail "$HYDRA_ROOT/scripts/reap-mcp-remote-zombies.sh missing or not executable"
 
 log "installing into $HYDRA_ROOT"
+
+# Retired-unit cleanup (see file header for rationale).
+for stale in hydra-mcp-reap.timer hydra-mcp-reap.service; do
+  if [[ -f "/etc/systemd/system/$stale" ]] \
+     || systemctl list-unit-files --no-pager 2>/dev/null | grep -q "^$stale"; then
+    systemctl disable --now "$stale" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/$stale"
+    systemctl reset-failed "$stale" >/dev/null 2>&1 || true
+    log "  retired stale unit: $stale"
+  fi
+done
 
 # Peer-label reconciler (all profiles).
 cat > /etc/systemd/system/hydra-peer-labels.service << PEERLABELSVC
@@ -62,38 +76,13 @@ Unit=hydra-peer-labels.service
 WantedBy=timers.target
 PEERLABELTMR
 
-# MCP-remote zombie reaper.
-cat > /etc/systemd/system/hydra-mcp-reap.service << MCPREAPSVC
-[Unit]
-Description=Hydra MCP-remote zombie reaper
-
-[Service]
-Type=oneshot
-ExecStart=$HYDRA_ROOT/scripts/reap-mcp-remote-zombies.sh 30
-MCPREAPSVC
-
-cat > /etc/systemd/system/hydra-mcp-reap.timer << MCPREAPTMR
-[Unit]
-Description=Reap orphan mcp-remote processes every 15 minutes
-
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=15min
-Unit=hydra-mcp-reap.service
-
-[Install]
-WantedBy=timers.target
-MCPREAPTMR
-
 systemctl daemon-reload
 
-for tmr in hydra-peer-labels.timer hydra-mcp-reap.timer; do
-  systemctl enable "$tmr" >/dev/null 2>&1 || log "WARN: could not enable $tmr"
-  systemctl start "$tmr" >/dev/null 2>&1 || log "WARN: could not start $tmr"
-  state=$(systemctl is-active "$tmr" 2>/dev/null || echo unknown)
-  log "  $tmr: $state"
-done
+tmr=hydra-peer-labels.timer
+systemctl enable "$tmr" >/dev/null 2>&1 || log "WARN: could not enable $tmr"
+systemctl start "$tmr" >/dev/null 2>&1 || log "WARN: could not start $tmr"
+state=$(systemctl is-active "$tmr" 2>/dev/null || echo unknown)
+log "  $tmr: $state"
 
 log "done. Next fires:"
-systemctl list-timers hydra-peer-labels.timer hydra-mcp-reap.timer --no-pager 2>/dev/null \
-  | head -4 || true
+systemctl list-timers "$tmr" --no-pager 2>/dev/null | head -4 || true

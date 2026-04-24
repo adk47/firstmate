@@ -105,6 +105,39 @@ ping_agent() {
 needs_target() { [[ "$TARGET" == "all" || ",$TARGET," == *",$1,"* ]]; }
 
 # -------------------------------------------------------------------
+# Host-wide checks (not per-profile)
+# -------------------------------------------------------------------
+
+# mcp-remote leak guard: On 2026-04-24, orphaned `npm exec mcp-remote`
+# subprocesses under the gateway pgid caused a reaper to kill the
+# whole gateway. The fix was to switch remote MCP servers to native
+# transport: "streamable-http" — which spawns zero subprocesses.
+# This check fails the smoke test if ANY mcp-remote process is ever
+# found running. A transient mcp-remote during legitimate SSE/stdio
+# fallback is not expected; if one appears, a regression has snuck
+# in via `openclaw mcp set` or a bundle-mcp behavior change.
+log "Checking mcp-remote leak guard (host-wide)..."
+MCP_REMOTE_PROCS=$(pgrep -af 'mcp-remote' 2>/dev/null | grep -v 'pgrep\|smoke-test' || true)
+if [ -z "$MCP_REMOTE_PROCS" ]; then
+  pass_check "no mcp-remote processes running (streamable-http transport holding)"
+else
+  MCP_REMOTE_COUNT=$(echo "$MCP_REMOTE_PROCS" | wc -l | tr -d ' ')
+  fail_check "$MCP_REMOTE_COUNT mcp-remote process(es) running — streamable-http migration regressed. Sample: $(echo "$MCP_REMOTE_PROCS" | head -1 | head -c 200). Run scripts/lint-openclaw-config.sh /root/.openclaw-*/openclaw.json to find the offending entry."
+fi
+
+# Retired-unit guard: hydra-mcp-reap.{timer,service} were removed in
+# PR #172 because they killed the gateway's own pgid (see above).
+# install-aux-units.sh cleans them up on every deploy. If they
+# reappear, either install-aux-units.sh regressed or something
+# outside the deploy re-installed the units — either way, loud fail.
+RESURRECTED_UNITS=$(systemctl list-unit-files 'hydra-mcp-reap.*' --no-pager 2>/dev/null | grep -E '^hydra-mcp-reap\.' || true)
+if [ -z "$RESURRECTED_UNITS" ]; then
+  pass_check "hydra-mcp-reap units retired (no reanimation)"
+else
+  fail_check "hydra-mcp-reap unit files present — they were retired in PR #172. Run install-aux-units.sh to clean up, or investigate what re-installed them: $RESURRECTED_UNITS"
+fi
+
+# -------------------------------------------------------------------
 # Main gateway checks
 # -------------------------------------------------------------------
 if needs_target "main"; then
