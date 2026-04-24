@@ -127,27 +127,38 @@ notify_slack() {
 # Plugin helpers (new in 2026-04-08 CD consolidation)
 # -------------------------------------------------------------------
 
-# plugin_profile — returns the target profile for a given plugin name.
-# Stdout is the profile string only (caller captures via $(...));
+# plugin_profile — returns the target profile(s) for a given plugin name.
+# Stdout is a space-separated list of profiles (caller iterates);
 # diagnostic notices go to stderr to avoid polluting the captured value.
 #
-#   intercom, support-tools → "edge"
-#   everything else         → "main" (with a stderr warning, so a typo
-#                                      in plugin dir name is at least
-#                                      visible in deploy logs)
+#   intercom       → "main edge"   (both main and edge reference it — see
+#                                    openclaw-main.json and openclaw-edge.json
+#                                    `plugins.installs`/`channels.intercom`)
+#   support-tools  → "edge"
+#   openclaw-gmail → "main"
+#   everything else → "main" (with a stderr warning, so a typo in plugin
+#                              dir name is at least visible in deploy logs)
 #
-# If the mapping ever grows beyond intercom/support-tools, extend the
-# case statement here — there is no other source of truth. Note that
-# no plugins currently target the dev profile; if a dev-only plugin is
-# added in the future, the case statement will need a new branch.
+# If the mapping ever grows, extend the case statement here — there is no
+# other source of truth. Note that no plugins currently target the dev
+# profile; if a dev-only plugin is added in the future, the case statement
+# will need a new branch.
+#
+# History: intercom was previously mapped to "edge" only, which caused
+# /root/.openclaw-main/extensions/intercom to drift missing even though
+# openclaw-main.json pins intercom in plugins.load.paths. The main gateway
+# crashlooped with "plugin path not found" on 2026-04-24 (deploy of PR #170)
+# until the plugin dir was hot-patched in. See memory
+# project_deploy_plugin_path_drift.md.
 plugin_profile() {
   local plugin_name="$1"
   case "$plugin_name" in
-    intercom|support-tools) echo "edge" ;;
+    intercom)       echo "main edge" ;;
+    support-tools)  echo "edge" ;;
     openclaw-gmail) echo "main" ;;
     *)
       echo "main"
-      echo "    plugin_profile: '$plugin_name' is not in the known mapping (intercom|support-tools→edge); defaulting to main. Verify this is intended — typos in plugin directory names land here silently." >&2
+      echo "    plugin_profile: '$plugin_name' is not in the known mapping (intercom→main+edge, support-tools→edge, openclaw-gmail→main); defaulting to main. Verify this is intended — typos in plugin directory names land here silently." >&2
       ;;
   esac
 }
@@ -163,15 +174,25 @@ install_plugin() {
   local plugin_dir="$1"
   local plugin_name
   plugin_name=$(basename "$plugin_dir")
-  local profile
-  profile=$(plugin_profile "$plugin_name")
+  # plugin_profile may emit multiple profiles (space-separated) for
+  # plugins that are referenced by more than one profile's openclaw-*.json
+  # (e.g. intercom is used by both main and edge).
+  local profiles
+  profiles=$(plugin_profile "$plugin_name")
 
-  if ! needs_target "$profile"; then
-    log "    Skipping plugin $plugin_name (target=$TARGET, profile=$profile)"
+  # Skip only if NO targeted profile needs this plugin. For a multi-profile
+  # plugin deployed with --target=main, we still want to install to main
+  # and silently skip edge.
+  local profile any_needed=0
+  for profile in $profiles; do
+    if needs_target "$profile"; then any_needed=1; break; fi
+  done
+  if (( any_needed == 0 )); then
+    log "    Skipping plugin $plugin_name (target=$TARGET, profiles=$profiles)"
     return 0
   fi
 
-  log "    Installing plugin $plugin_name (profile=$profile)..."
+  log "    Installing plugin $plugin_name (profiles=$profiles)..."
 
   # Run npm install, capture both exit code and stderr for clear
   # error reporting.  Check the directory exists first so a missing
@@ -216,17 +237,20 @@ install_plugin() {
   # and intercom). Once all `installs` entries are moved to profile-specific
   # paths, the legacy write can go.
   local ext_paths=()
-  case "$profile" in
-    main|edge|dev)
-      ext_paths+=( "/root/.openclaw-${profile}/extensions/$plugin_name" )
-      ;;
-    *)
-      log "    ✗ unknown profile '$profile' for plugin $plugin_name"
-      return 1
-      ;;
-  esac
+  for profile in $profiles; do
+    if ! needs_target "$profile"; then continue; fi
+    case "$profile" in
+      main|edge|dev)
+        ext_paths+=( "/root/.openclaw-${profile}/extensions/$plugin_name" )
+        ;;
+      *)
+        log "    ✗ unknown profile '$profile' for plugin $plugin_name"
+        return 1
+        ;;
+    esac
+  done
   # Belt-and-braces: mirror to the legacy path /root/.openclaw/extensions/<name>
-  # ONLY when the profile is main. Rationale:
+  # ONLY when main is in the profile list. Rationale:
   #
   # 1. Only openclaw-main.json has `plugins.installs` entries pinned at the
   #    legacy path today (openclaw-gmail, intercom — both main-scoped).
@@ -241,7 +265,7 @@ install_plugin() {
   #
   # Once all main pins are migrated to profile-specific paths, the legacy
   # mirror can be removed entirely. See PR #154 for the path-drift context.
-  if [[ "$profile" == "main" ]]; then
+  if [[ " $profiles " == *" main "* ]] && needs_target "main"; then
     ext_paths+=( "/root/.openclaw/extensions/$plugin_name" )
   fi
 
