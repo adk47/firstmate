@@ -21,6 +21,7 @@ HYDRA agent workspaces contain two categories of files:
 | `USER.md` | Owner preferences and access levels | Humans via PR | PR → merge → deploy |
 | `BOOTSTRAP.md` | One-time first-run ritual | Humans via PR | PR → merge → deploy |
 | `skills/` | All skill files (SKILL.md, scripts, references) | Humans via PR | PR → merge → deploy |
+| `reference/*.md` | Curated topic knowledge (Tier 2 of the memory layout) | Humans via PR | PR → merge → deploy. See [Tiered Memory Layout](#tiered-memory-layout-added-2026-04-24-hydra-issue-165). |
 
 ### Agent-Owned — Preserved Across Deploys
 
@@ -104,24 +105,24 @@ OpenClaw silently truncates every bootstrap file at `agents.defaults.bootstrapMa
 |-----|------------|------------------------|--------|---------|
 | 0 | `SOUL.md` | ✅ always | Humans (PR) | Identity, rules, security boundaries. Target <8 000 chars; trim aggressively. |
 | 1 | `MEMORY.md` | ✅ always | Agent (runtime) | **Index** + last ~30 days of durable facts. Target ≤3 500 chars. One line per reference topic. |
-| 2 | `reference/*.md` | ❌ read on demand | Humans (PR) + Agent | Curated topic knowledge (metrics, lessons, workflows, process rules). Deployed via rsync. |
+| 2 | `reference/*.md` | ❌ read on demand | Humans (PR) **only** | Curated topic knowledge (metrics, lessons, workflows, process rules). Deployed via rsync — **any agent-authored change here is silently overwritten on the next deploy**. Agents surface proposed promotions to humans via Slack. Filenames follow `kebab-case.md`. |
 | 3 | `memory/YYYY-MM-DD.md` | ❌ read on demand | Agent (runtime) | Optional daily working notes. Excluded from rsync. |
 
-**How this scales**: `MEMORY.md` stops being a monolithic log and becomes a pointer-index whose size grows with *distinct topics*, not total memory volume. Topic files live under `reference/` and are git-versioned, so humans can edit them directly in PRs. As a topic's content in `MEMORY.md` crystallizes, the agent (or a reviewer) moves it into the relevant `reference/<topic>.md` file and leaves only a one-line pointer in the index.
+> ⚠️ **`reference/*.md` is deploy-authoritative.** The deploy pipeline syncs from repo → `/opt/hydra/workspaces/*/reference/`, so it falls in the same "Repo-Authoritative" bucket as `SOUL.md`. If you want to add or update a reference file, open a PR. Agents must not write to this directory — any edits are silently reverted on the next deploy. (See the [File Ownership Matrix](#file-ownership-matrix) for the fuller picture.)
 
-**SOUL.md must teach the agent to use this pattern.** See `workspaces/cmo/SOUL.md` §"Memory (CRITICAL)" for the reference implementation. The key rule: on any indexed topic, read the `reference/<topic>.md` file before answering — the index is only a pointer.
+**How this scales**: `MEMORY.md` stops being a monolithic log and becomes a pointer-index whose size grows with *distinct topics*, not total memory volume. Topic files live under `reference/`, git-versioned and human-owned. When a topic's content in `MEMORY.md` crystallizes, the agent proposes a promotion to Fede/Nick (in Slack or a task), and a human opens the PR that moves the content into the matching `reference/<topic>.md` file.
 
-**First migrated agent**: `cmo` (2026-04-24) — nine topic files under `workspaces/cmo/reference/`. Its `MEMORY.md` went from 23 819 chars (54% silently truncated) to 2 062 chars.
+**SOUL.md must teach the agent to use this pattern.** See `workspaces/cmo/SOUL.md` §"Memory (CRITICAL)" for the reference implementation. The key rules: (a) on any indexed topic, read the `reference/<topic>.md` file before answering — the index is only a pointer; (b) if a referenced file is missing or unreadable, stop and escalate, don't hallucinate from the index alone.
 
-**Monitoring**: `scripts/memory-health-check.sh` runs every Monday 09:17 UTC on node-8 and posts per-agent SOUL/MEMORY sizes to `#clio_devops`, warning at 80% of cap and alerting at 100%.
+**First migrated agent**: `cmo` (2026-04-24) — nine new topic files (plus the pre-existing `muso-audience-tiers.md`, ten total) under `workspaces/cmo/reference/`. Its `MEMORY.md` went from ~24 000 chars on the live server (~54% silently truncated at the 12 000 cap) to 2 062 chars. The 12 000-char live-vs-repo-seed drift is itself a symptom of the cap-raise being the right move.
+
+**Monitoring**: `scripts/memory-health-check.sh` runs every Monday 09:17 UTC on node-8 and posts per-agent SOUL/MEMORY sizes to `#clio_devops`, warning at 80% of cap and alerting at 100%. It checks all three profile configs (main/edge/dev) so drift on any one profile surfaces.
 
 **Migration pattern for the next agent**:
 1. Pick the agent whose SOUL or MEMORY is closest to the per-file cap in the weekly health report.
-2. Split `MEMORY.md` H2 sections into `workspaces/<agent>/reference/<topic>.md` files (keep H3 substructure verbatim — zero content loss).
-3. Rewrite `MEMORY.md` as an index + "Recent durable facts" section.
-4. Add the memory-architecture block to `SOUL.md` (pattern: cmo `SOUL.md` §"Memory (CRITICAL)").
-5. Hot-sync `reference/*.md`, the new `MEMORY.md`, and the new `SOUL.md` to `/opt/hydra/workspaces/<agent>/` after backing up the live `MEMORY.md` as `MEMORY.md.bak-<timestamp>-pre-split`.
-6. Trigger a fresh session and confirm zero truncation via `grep -c truncated /root/.openclaw-main/agents/<agent>/sessions/<latest>.jsonl`.
+2. Follow the cmo migration as the canonical example — see the commit that introduced this section. It splits `MEMORY.md` H2 sections into `reference/<topic>.md` files (kebab-case, preserving every H3 verbatim), rewrites `MEMORY.md` as an index + "Recent durable facts" block, and adds the memory-architecture block to `SOUL.md`.
+3. Hot-sync the new `reference/*.md` and the new `MEMORY.md`/`SOUL.md` to `/opt/hydra/workspaces/<agent>/` per the hot-patch pattern. Back up the **live** `MEMORY.md` to `MEMORY.md.bak-<UTC-timestamp>-pre-split` first (distinct from the `openclaw.json.bak-<timestamp>-pre-bootstrap-caps` backup that covers the cap-raise).
+4. Trigger a fresh session (e.g. `sudo -u root openclaw --profile main agent --agent <name> --message 'ping'`) and confirm zero truncation by inspecting the newest file under `/root/.openclaw-main/agents/<agent>/sessions/` for the string `truncated before injection`. Exact path pattern: `<uuid>.jsonl` or `<uuid>-topic-<ts>.jsonl`.
 
 ## Recovery
 
@@ -130,6 +131,8 @@ If agent-owned files are accidentally overwritten:
 1. **From hydra-audit repo**: `git clone Muso-AI/hydra-audit`, find the latest snapshot in `workspaces/<agent>/`
 2. **From Vault**: API keys and secrets at `secret/hydra/*`
 3. **From node-8 backup**: Check `/opt/hydra/audit-local-backup/` for pre-migration snapshots
+
+For **repo-authoritative** files (`SOUL.md`, `reference/*.md`, etc.) that drifted on the server, the source of truth is the repo — just re-deploy (`deploy.sh --target main`) to restore the canonical version.
 
 ## References
 

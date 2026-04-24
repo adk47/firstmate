@@ -1,6 +1,6 @@
 # MEMORY.md — CMO Agent
 
-_Index of durable memory. Full detail lives in `reference/<topic>.md` files. Agent-writable: add new recent facts here, and promote stable knowledge to `reference/` when a topic crystallizes._
+_Index of durable memory. Full detail lives in `reference/<topic>.md` files. This file is agent-writable — add new recent facts here. `reference/` files are humans-only (deploy overwrites them); when a topic in Recent Facts crystallizes, surface it to Fede/Nick so a human can open a PR to promote it._
 
 ---
 
