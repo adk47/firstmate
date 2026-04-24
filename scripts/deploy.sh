@@ -474,6 +474,10 @@ RSYNC_EXCLUDES=(
   # from repo. Tripped the deploy pre-flight on 2026-04-14 (PR #95).
   --exclude='workspaces/*/urgent-escalations/'
   --exclude='workspaces/*/pending-tickets/'
+  # Per-skill runtime state (e.g. cmo-eod's send-ledger.jsonl and
+  # cron-runs.jsonl, written every time the cron fires). Server-owned,
+  # never seeded from repo. Tripped pre-flight on 2026-04-24.
+  --exclude='workspaces/*/skills/*/state/'
   # Python bytecode cache. Created at runtime when any python3 process
   # imports from /opt/hydra/scripts/lib/. Server-owned, rebuilt on each
   # import, never in the repo. Tripped the deploy pre-flight on
