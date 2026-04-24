@@ -96,6 +96,33 @@ The list is enforced by `.githooks/pre-commit` Check 2, which verifies that ever
 
 All rsync and exclude logic lives in `deploy.sh`.
 
+## Tiered Memory Layout (added 2026-04-24, hydra issue #165)
+
+OpenClaw silently truncates every bootstrap file at `agents.defaults.bootstrapMaxChars` (default 12 000) and the aggregate at `bootstrapTotalMaxChars` (default 60 000). We now set those to 40 000 / 120 000 in `openclaw-{main,edge,dev}.json`, but the file-cap still exists and will bite again as agents accumulate context. To keep bootstrap files small and scalable, structure each workspace as four tiers:
+
+| Tier | File / dir | Injected at bootstrap? | Writer | Purpose |
+|-----|------------|------------------------|--------|---------|
+| 0 | `SOUL.md` | ✅ always | Humans (PR) | Identity, rules, security boundaries. Target <8 000 chars; trim aggressively. |
+| 1 | `MEMORY.md` | ✅ always | Agent (runtime) | **Index** + last ~30 days of durable facts. Target ≤3 500 chars. One line per reference topic. |
+| 2 | `reference/*.md` | ❌ read on demand | Humans (PR) + Agent | Curated topic knowledge (metrics, lessons, workflows, process rules). Deployed via rsync. |
+| 3 | `memory/YYYY-MM-DD.md` | ❌ read on demand | Agent (runtime) | Optional daily working notes. Excluded from rsync. |
+
+**How this scales**: `MEMORY.md` stops being a monolithic log and becomes a pointer-index whose size grows with *distinct topics*, not total memory volume. Topic files live under `reference/` and are git-versioned, so humans can edit them directly in PRs. As a topic's content in `MEMORY.md` crystallizes, the agent (or a reviewer) moves it into the relevant `reference/<topic>.md` file and leaves only a one-line pointer in the index.
+
+**SOUL.md must teach the agent to use this pattern.** See `workspaces/cmo/SOUL.md` §"Memory (CRITICAL)" for the reference implementation. The key rule: on any indexed topic, read the `reference/<topic>.md` file before answering — the index is only a pointer.
+
+**First migrated agent**: `cmo` (2026-04-24) — nine topic files under `workspaces/cmo/reference/`. Its `MEMORY.md` went from 23 819 chars (54% silently truncated) to 2 062 chars.
+
+**Monitoring**: `scripts/memory-health-check.sh` runs every Monday 09:17 UTC on node-8 and posts per-agent SOUL/MEMORY sizes to `#clio_devops`, warning at 80% of cap and alerting at 100%.
+
+**Migration pattern for the next agent**:
+1. Pick the agent whose SOUL or MEMORY is closest to the per-file cap in the weekly health report.
+2. Split `MEMORY.md` H2 sections into `workspaces/<agent>/reference/<topic>.md` files (keep H3 substructure verbatim — zero content loss).
+3. Rewrite `MEMORY.md` as an index + "Recent durable facts" section.
+4. Add the memory-architecture block to `SOUL.md` (pattern: cmo `SOUL.md` §"Memory (CRITICAL)").
+5. Hot-sync `reference/*.md`, the new `MEMORY.md`, and the new `SOUL.md` to `/opt/hydra/workspaces/<agent>/` after backing up the live `MEMORY.md` as `MEMORY.md.bak-<timestamp>-pre-split`.
+6. Trigger a fresh session and confirm zero truncation via `grep -c truncated /root/.openclaw-main/agents/<agent>/sessions/<latest>.jsonl`.
+
 ## Recovery
 
 If agent-owned files are accidentally overwritten:
