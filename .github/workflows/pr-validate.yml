@@ -46,6 +46,42 @@ jobs:
             openclaw-main.json openclaw-edge.json openclaw-dev.json
           echo "::endgroup::"
 
+      - name: Gateway policy invariants — main profile
+        # Pins flags that enable correct cross-agent behavior on the
+        # main gateway. Without these, failures look like working
+        # sessions.resolve followed by "forbidden — Agent-to-agent
+        # messaging is disabled." (see PR #177). We enforce here so a
+        # future config reorg / reset wizard can't silently drop them.
+        run: |
+          echo "::group::Gateway policy invariants"
+          fail=0
+          # tools.agentToAgent.enabled must be true on main. Edge/dev
+          # are intentionally left default (disabled) — edge has only
+          # @CS (isolated) and dev has only @Ops-Dev (single agent).
+          a2a=$(jq -r '.tools.agentToAgent.enabled // false' openclaw-main.json)
+          if [ "$a2a" != "true" ]; then
+            echo "::error file=openclaw-main.json::tools.agentToAgent.enabled must be true on main (was: $a2a). See PR #177."
+            fail=1
+          else
+            echo "openclaw-main.json: tools.agentToAgent.enabled=true ✓"
+          fi
+          # Conversely, edge and dev must NOT enable agentToAgent —
+          # they're single-agent profiles and enabling A2A on edge in
+          # particular would expose the externally-facing @CS to the
+          # broader roster if someone ever wired a cross-profile route.
+          for profile in edge dev; do
+            cfg="openclaw-$profile.json"
+            v=$(jq -r '.tools.agentToAgent.enabled // false' "$cfg")
+            if [ "$v" = "true" ]; then
+              echo "::error file=$cfg::tools.agentToAgent.enabled must NOT be true on $profile profile (single-agent by design). See PR #177."
+              fail=1
+            else
+              echo "$cfg: agentToAgent disabled ✓"
+            fi
+          done
+          if [ "$fail" -eq 1 ]; then exit 1; fi
+          echo "::endgroup::"
+
       - name: Shared config drift check
         run: |
           echo "::group::Checking shared config drift"

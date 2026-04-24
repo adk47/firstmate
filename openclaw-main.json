@@ -773,6 +773,9 @@
     },
     "sessions": {
       "visibility": "all"
+    },
+    "agentToAgent": {
+      "enabled": true
     }
   },
   "browser": {

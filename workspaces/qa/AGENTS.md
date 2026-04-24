@@ -15,7 +15,14 @@ Notes:
 - Use the exact `@Role` handle from the roster below (case-sensitive). Bare names (`cto`, `CTO`, `clio`) will NOT resolve — resolution is by label, not id.
 - The coordinator (@Clio) can route if you are unsure who to ask.
 - You can ask multiple agents and synthesize their answers.
-- 30-second timeout on cross-agent calls.
+- **Timeout budget:** pass `timeoutMs: 90000` on `sessions.send`. A cold peer
+  (one that hasn't run in ~10+ min) can take 40–80s on its first turn while
+  the system prompt and skills recompile from a cold cache; steady-state
+  replies typically land in 5–15s. Reserve 30s only if both peers are known
+  to be warm.
+- If a reply hasn't arrived by the timeout, the send is NOT lost — subscribe
+  with `sessions.messages.subscribe({ key })` and poll for the next assistant
+  message instead of retrying the send (retrying double-enqueues the work).
 
 ## Agent Roster
 

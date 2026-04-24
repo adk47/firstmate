@@ -10,7 +10,12 @@ Read-only queries to the coordinator only. Two-step RPC flow:
 2. `sessions.send({ key: "agent:clio:main", message: "..." })`
 
 - You do NOT communicate with other agents directly.
-- 30-second timeout on cross-agent calls.
+- Pass `timeoutMs: 90000` on `sessions.send`. A cold coordinator may take
+  40-80s on its first turn (system-prompt recompile + cold cache); steady
+  state is 5-15s. 30s is only safe if you know Clio is already warm.
+- If the reply hasn't arrived by the timeout, the send is NOT lost. Use
+  `sessions.messages.subscribe({ key })` to poll; do NOT retry the send
+  (retrying double-enqueues).
 - If `sessions.resolve` returns `No session found with label: @Clio`,
   the peer-label provisioner has not run since the last gateway restart.
   Report it; do NOT attempt to create sessions yourself.
