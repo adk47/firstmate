@@ -25,15 +25,17 @@ openclaw --profile main mcp list
 # Show one server's config (or the full mcp config with no arg)
 openclaw --profile main mcp show "NocoDB Base - Intelligence"
 
-# Add / overwrite a server
-openclaw --profile main mcp set "NocoDB Base - Intelligence" '{
+# Add / overwrite a server (the server name here is the exact registered
+# name; check via `openclaw --profile main mcp list` before setting to
+# avoid creating a duplicate under a slightly-different name)
+openclaw --profile main mcp set "NocoDB Base - B2B ADs intelligence" '{
   "transport": "streamable-http",
   "url": "https://app.nocodb.com/mcp/<base-id>",
   "headers": { "xc-mcp-token": "<token>" }
 }'
 
 # Remove a server
-openclaw --profile main mcp unset "NocoDB Base - Intelligence"
+openclaw --profile main mcp unset "NocoDB Base - B2B ADs intelligence"
 
 # Bridge OpenClaw channels out over MCP stdio (rarely used day-to-day)
 openclaw --profile main mcp serve
@@ -77,19 +79,25 @@ Use when the provider publishes an MCP CLI you run directly — the subprocess i
 
 ### Hosted OAuth MCP (e.g. Notion)
 
-Hosted OAuth MCPs need an interactive browser flow to mint a token. For headless gateway hosts, complete OAuth on a workstation and copy the token cache onto the gateway host. Consult the provider's MCP docs for the token cache path. If the provider's OAuth layer only works through `mcp-remote`'s auth flow, that's the one exception where a temporary mcp-remote entry is acceptable — file an upstream issue on the provider asking for a static-token streamable-HTTP alternative and remove the mcp-remote entry as soon as they ship one.
+Hosted OAuth MCPs need an interactive browser flow to mint a token. For headless gateway hosts, complete OAuth on a workstation and copy the token cache onto the gateway host. Consult the provider's MCP docs for the token cache path. The deploy lint has no mcp-remote escape hatch — a provider that only authenticates via `mcp-remote`'s flow cannot be used in hydra until it ships a static-token streamable-HTTP path. File an upstream issue on the provider and hold off on the integration until then, rather than bypassing the lint.
 
 ## Propagating a config change live
 
-The gateway detects config changes via file-system watch and will either hot-reload or schedule a restart (`[reload] config change requires gateway restart ... deferring until N task run(s) complete`). After `openclaw mcp set/unset`:
+**All `mcp.*` config changes force a gateway restart** — openclaw's config-reload planner has no `mcp` prefix in its hot-reload rules, so any `openclaw mcp set/unset` schedules a restart. The gateway detects the edit via file-system watch and logs:
 
-1. Small changes (e.g. adding a header) can hot-reload.
-2. Transport/URL changes force a restart — the gateway drains in-flight tasks first.
-3. For an immediate forced refresh:
+```
+[reload] config change requires gateway restart ... deferring until N task run(s) complete
+```
+
+It then drains in-flight tasks (up to its `deferReloadMaxWaitMs`) before restarting. So after a config change:
+
+1. You see the "deferring until N task run(s) complete" line once. The restart happens when N reaches 0.
+2. During draining, new sessions keep starting on the **old** MCP config — that's expected.
+3. For an immediate forced refresh (cut the drain window short):
    ```bash
    systemctl restart openclaw-gateway-main   # (or -edge / -dev)
    ```
-   ~15s of downtime; disrupts any live Slack conversation.
+   ~15s of downtime; disrupts any live Slack conversation. Only do this if the MCP change is blocking time-critical work.
 
 ## Verifying from the gateway
 
@@ -120,4 +128,4 @@ ps -eo pid,pgid,comm,args --no-headers | grep -F mcp-remote | grep -v grep || ec
 - **`bundle-mcp: skipped server "X" because ...`** in the gateway log — the config shape didn't match either stdio or HTTP. Common cause: missing `url` for an HTTP server, or a `command` that's empty/invalid. Run `openclaw --profile <name> mcp show "X"` and compare against the JSON shapes above.
 - **Agent can't see the tool after config change** — most likely the session was started before the config reload. Start a new session (re-@mention in Slack or wait for the next cron run).
 - **Deploy fails with `openclaw config lint: ... mcp-remote stdio entries`** — someone committed or hot-registered a legacy `{"command": "npx", "args": ["mcp-remote", ...]}` entry. Rewrite it with `openclaw mcp set` using the streamable-HTTP shape above.
-- **Gateway RAM climbs steadily** — historically caused by accumulated `mcp-remote` orphans. With native streamable-HTTP there are no subprocesses, so this should not recur; if it does, the cause is elsewhere (check `ps --forest` under the gateway unit).
+- **Gateway RAM climbs steadily** — historically (pre-PR #172) caused by accumulated `mcp-remote` orphans; smoke-test.sh now hard-fails if any mcp-remote process appears, so this class of leak should surface on the next deploy. If RAM is still climbing with smoke-test green: first check `ps auxf --ppid $(systemctl show -p MainPID --value openclaw-gateway-main)` for any unexpected child processes, then check bundle-mcp's log output for repeated re-registrations of the same server (a different subprocess leak class).

@@ -40,17 +40,14 @@ fail() { log "FATAL: $*"; exit 1; }
 
 log "installing into $HYDRA_ROOT"
 
-# ── Retired unit cleanup ──────────────────────────────────────
-# hydra-mcp-reap was removed after the native streamable-http
-# migration made it unnecessary (and it was actively harmful —
-# see file header). Disable + remove if still installed.
+# Retired-unit cleanup (see file header for rationale).
 for stale in hydra-mcp-reap.timer hydra-mcp-reap.service; do
   if [[ -f "/etc/systemd/system/$stale" ]] \
      || systemctl list-unit-files --no-pager 2>/dev/null | grep -q "^$stale"; then
-    log "  retiring stale unit: $stale"
     systemctl disable --now "$stale" >/dev/null 2>&1 || true
     rm -f "/etc/systemd/system/$stale"
     systemctl reset-failed "$stale" >/dev/null 2>&1 || true
+    log "  retired stale unit: $stale"
   fi
 done
 

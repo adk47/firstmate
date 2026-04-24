@@ -1241,20 +1241,56 @@ sync_profile_config() {
     return
   fi
   SRC="$src" DST="$dst" python3 - <<'PYEOF' || fail "profile config sync failed for $dst"
-import json, os, sys, tempfile
+import json, os, sys, tempfile, time
 src_path = os.environ['SRC']
 dst_path = os.environ['DST']
+
+def warn(msg):
+    # Match the deploy.sh log() format so aggregators see a consistent shape.
+    sys.stderr.write(f"  WARNING: {msg}\n")
+
 with open(src_path) as f:
     repo_cfg = json.load(f)
+
+live_cfg = None
 try:
     with open(dst_path) as f:
         live_cfg = json.load(f)
-except json.JSONDecodeError:
-    # Live file is garbage — don't try to rescue servers from it.
+except json.JSONDecodeError as e:
+    # Live file is unparseable. Back it up before we overwrite — it may hold
+    # auth tokens or server definitions that can be recovered by hand. The
+    # alternative (silently treating as empty) permanently destroys that state
+    # and is the exact class of silent failure this PR is meant to eliminate.
+    ts = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+    quarantine = f"{dst_path}.corrupted.{ts}"
+    try:
+        os.rename(dst_path, quarantine)
+        warn(f"live config {dst_path} is not valid JSON ({e.msg}); "
+             f"moved to {quarantine} before overwrite")
+    except OSError as move_err:
+        warn(f"live config {dst_path} is not valid JSON and could not be "
+             f"quarantined ({move_err}); proceeding with repo copy")
     live_cfg = {}
-preserved = (live_cfg.get('mcp') or {}).get('servers') or {}
+
+preserved = {}
+if isinstance(live_cfg, dict):
+    mcp = live_cfg.get('mcp')
+    if isinstance(mcp, dict):
+        servers = mcp.get('servers')
+        if isinstance(servers, dict):
+            preserved = servers
+        elif servers is not None:
+            warn(f"live {dst_path} has non-dict .mcp.servers "
+                 f"({type(servers).__name__}); ignoring, not preserving")
+    elif mcp is not None:
+        warn(f"live {dst_path} has non-dict .mcp "
+             f"({type(mcp).__name__}); ignoring, not preserving")
+else:
+    warn(f"live {dst_path} parsed but root is not a JSON object; ignoring")
+
 if preserved:
     repo_cfg.setdefault('mcp', {})['servers'] = preserved
+
 # Atomic write to avoid torn-read by a concurrently-starting gateway.
 tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(dst_path), delete=False)
 try:
@@ -1262,26 +1298,31 @@ try:
     tmp.close()
     os.replace(tmp.name, dst_path)
 except Exception:
-    os.unlink(tmp.name)
+    try:
+        os.unlink(tmp.name)
+    except OSError:
+        pass
     raise
-print(f"  preserved {len(preserved)} live MCP server(s) in {dst_path}", file=sys.stderr)
+sys.stderr.write(f"  preserved {len(preserved)} live MCP server(s) in {dst_path}\n")
 PYEOF
 }
 
 log "  Syncing profile configs..."
-if [ "$TARGET" = "main" ] || [ "$TARGET" = "all" ]; then
+if needs_target "main"; then
   sync_profile_config "$DEPLOY_PATH/openclaw-main.json" /root/.openclaw-main/openclaw.json
   # Mirror to legacy default path as defense-in-depth (see cron sync below
-  # for the same rationale). This one is a plain copy — there's no live
-  # gateway reading from /root/.openclaw/ in steady state.
-  cp "$DEPLOY_PATH/openclaw-main.json" /root/.openclaw/openclaw.json
+  # for the same rationale) — preserve its `.mcp.servers` the same way as
+  # the profile-specific path, so if the pre-multi-profile gateway ever
+  # reanimates (smoke-test.sh hard-fails the deploy if it does) it will
+  # still have the server list rather than being silently stripped.
+  sync_profile_config "$DEPLOY_PATH/openclaw-main.json" /root/.openclaw/openclaw.json
   log "  Synced main profile config (+ default openclaw.json)"
 fi
-if [ "$TARGET" = "edge" ] || [ "$TARGET" = "all" ]; then
+if needs_target "edge"; then
   sync_profile_config "$DEPLOY_PATH/openclaw-edge.json" /root/.openclaw-edge/openclaw.json
   log "  Synced edge profile config"
 fi
-if [ "$TARGET" = "dev" ] || [ "$TARGET" = "all" ]; then
+if needs_target "dev"; then
   sync_profile_config "$DEPLOY_PATH/openclaw-dev.json" /root/.openclaw-dev/openclaw.json
   log "  Synced dev profile config"
 fi
@@ -1291,15 +1332,24 @@ fi
 # the openclaw CLI's default stdio shape — would slip past Step 1's
 # repo-only lint, survive the merge-preserve, and silently bring
 # the leak back. Catch it here while the gateway hasn't reloaded yet.
-LINT_OPENCLAW_CFG_LIVE="$SCRIPT_DIR/lint-openclaw-config.sh"
-if [ -x "$LINT_OPENCLAW_CFG_LIVE" ]; then
+# Only lint the profiles this deploy targets — otherwise a partial
+# deploy (e.g. `deploy.sh --target edge`) would be blocked by a
+# stale mcp-remote entry on an unrelated profile the operator never
+# touched.
+if [ -x "$LINT_OPENCLAW_CFG" ]; then
   live_lint_targets=()
-  [ -f /root/.openclaw-main/openclaw.json ] && live_lint_targets+=(/root/.openclaw-main/openclaw.json)
-  [ -f /root/.openclaw-edge/openclaw.json ] && live_lint_targets+=(/root/.openclaw-edge/openclaw.json)
-  [ -f /root/.openclaw-dev/openclaw.json ]  && live_lint_targets+=(/root/.openclaw-dev/openclaw.json)
+  if needs_target "main" && [ -f /root/.openclaw-main/openclaw.json ]; then
+    live_lint_targets+=(/root/.openclaw-main/openclaw.json)
+  fi
+  if needs_target "edge" && [ -f /root/.openclaw-edge/openclaw.json ]; then
+    live_lint_targets+=(/root/.openclaw-edge/openclaw.json)
+  fi
+  if needs_target "dev" && [ -f /root/.openclaw-dev/openclaw.json ]; then
+    live_lint_targets+=(/root/.openclaw-dev/openclaw.json)
+  fi
   if (( ${#live_lint_targets[@]} > 0 )); then
-    "$LINT_OPENCLAW_CFG_LIVE" "${live_lint_targets[@]}" \
-      || fail "openclaw config lint: live config has mcp-remote stdio server — rewrite with \`openclaw --profile <p> mcp set\` to transport: \"streamable-http\""
+    "$LINT_OPENCLAW_CFG" "${live_lint_targets[@]}" \
+      || fail "openclaw config lint failed on live config — see preceding stderr for the profile + server name; rewrite with \`openclaw --profile <p> mcp set\` to transport: \"streamable-http\""
     log "  Live openclaw configs free of mcp-remote stdio entries."
   fi
 fi
