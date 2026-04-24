@@ -110,6 +110,15 @@ User=root
 EnvironmentFile=$ENV_DIR/shared.env
 EnvironmentFile=$ENV_DIR/main.env
 ExecStart=$OPENCLAW_BIN --profile main gateway --port 18789
+# After each (re)start, populate peer-message labels so
+# sessions.resolve({ label: "@Role" }) works for agent-to-agent
+# messaging. The provisioner waits up to 30s for the gateway
+# to respond, so running it as ExecStartPost is safe even on
+# slow boots. See scripts/provision-peer-labels.sh.
+ExecStartPost=$HYDRA_ROOT/scripts/provision-peer-labels.sh main
+# Restart=always (was on-failure): SIGUSR1 config reloads emit
+# a zero exit, which the on-failure policy treated as "clean
+# shutdown" and the gateway never came back. Landed via PR #169.
 Restart=always
 RestartSec=10
 
@@ -129,6 +138,7 @@ User=root
 EnvironmentFile=$ENV_DIR/shared.env
 EnvironmentFile=$ENV_DIR/edge.env
 ExecStart=$OPENCLAW_BIN --profile edge gateway --port 18810
+ExecStartPost=$HYDRA_ROOT/scripts/provision-peer-labels.sh edge
 Restart=always
 RestartSec=10
 
@@ -148,12 +158,19 @@ User=root
 EnvironmentFile=$ENV_DIR/shared.env
 EnvironmentFile=$ENV_DIR/dev.env
 ExecStart=$OPENCLAW_BIN --profile dev gateway --port 18830
+ExecStartPost=$HYDRA_ROOT/scripts/provision-peer-labels.sh dev
 Restart=always
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 DEVSVC
+
+# Install the auxiliary timer units (peer-label reconciler +
+# mcp-remote zombie reaper). Delegated to a standalone script so
+# it can be re-run on its own for unit-only updates without
+# re-triggering the full gateway migration.
+"$HYDRA_ROOT/scripts/install-aux-units.sh" "$HYDRA_ROOT"
 
 systemctl daemon-reload
 log "  Created 3 systemd service files (secrets in EnvironmentFile, not inline)."
@@ -218,6 +235,7 @@ done
 log "  All 3 new gateways running. Old gateway still active on port 18789."
 log "  NOTE: main and old gateway both claim port 18789 — main may have failed to bind."
 log "  This is expected. We'll stop the old gateway in step 7."
+log "  Auxiliary timers (peer-labels, mcp-reap) installed + started by install-aux-units.sh."
 
 # -------------------------------------------------------------------
 # Step 6: Update Caddy — route Intercom webhook to edge

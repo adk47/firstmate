@@ -737,15 +737,15 @@
       },
       "openclaw-gmail": {
         "source": "path",
-        "spec": "/root/.openclaw/extensions/openclaw-gmail",
-        "installPath": "/root/.openclaw/extensions/openclaw-gmail",
+        "spec": "/root/.openclaw-main/extensions/openclaw-gmail",
+        "installPath": "/root/.openclaw-main/extensions/openclaw-gmail",
         "version": "1.7.3-muso.1",
         "resolvedName": "@muso/openclaw-gmail"
       },
       "intercom": {
         "source": "path",
-        "spec": "/root/.openclaw/extensions/intercom",
-        "installPath": "/root/.openclaw/extensions/intercom",
+        "spec": "/root/.openclaw-main/extensions/intercom",
+        "installPath": "/root/.openclaw-main/extensions/intercom",
         "resolvedName": "@muso/intercom",
         "resolvedVersion": "0.1.0"
       },
@@ -759,7 +759,7 @@
     },
     "load": {
       "paths": [
-        "/root/.openclaw/extensions/intercom"
+        "/root/.openclaw-main/extensions/intercom"
       ]
     }
   },

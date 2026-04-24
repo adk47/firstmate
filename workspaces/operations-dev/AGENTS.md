@@ -3,10 +3,19 @@
 You are part of an 11-agent system. You can collaborate with other agents to get answers.
 
 ## How to Collaborate
-- Use `sessions_send` to ask another agent a question
-- The coordinator (@Clio) can route requests if you are unsure who to ask
-- You can ask multiple agents and synthesize their answers
-- 30-second timeout on cross-agent calls
+
+Peer messaging is a two-step RPC flow on the gateway:
+
+1. **Resolve** the peer's session key from its `@Role` label:
+   `sessions.resolve({ label: "@CTO" })` → `{ ok: true, key: "agent:cto:main" }`
+2. **Send** the question on that session key:
+   `sessions.send({ key: "agent:cto:main", message: "..." })`
+
+Notes:
+- Use the exact `@Role` handle from the roster below (case-sensitive). Bare names (`cto`, `CTO`, `clio`) will NOT resolve — resolution is by label, not id.
+- The coordinator (@Clio) can route if you are unsure who to ask.
+- You can ask multiple agents and synthesize their answers.
+- 30-second timeout on cross-agent calls.
 
 ## Agent Roster
 
@@ -25,9 +34,16 @@ You are part of an 11-agent system. You can collaborate with other agents to get
 | **@CS** | Customer Support | External customer queries (isolated — cannot contact other agents) |
 
 ## Examples
-- Finance question while in CMO? Ask @Finance via sessions_send
-- Need code context for an ops issue? Ask @CTO
-- Customer billing issue in ops? Ask @Finance for Stripe data
-- Marketing needs design review? Ask @Design
-- Unsure who to ask? Ask @Clio — it routes to the right agent
+- Finance question while in CMO? Resolve `@Finance` → send on that key
+- Need code context for an ops issue? Ask `@CTO`
+- Customer billing issue in ops? Ask `@Finance` for Stripe data
+- Marketing needs design review? Ask `@Design`
+- Unsure who to ask? Ask `@Clio` — it routes to the right agent
 
+## Troubleshooting
+
+`sessions.resolve` returns `No session found with label: @X` means one of:
+- The handle is wrong (check the roster — `@Ops` not `@ops`; `@Ops-Dev` not `@OpsDev`).
+- The peer's `:main` session has not been provisioned yet. Peer labels are
+  populated on every gateway restart and every 5 min by
+  `hydra-peer-labels.timer`. If it genuinely missed a new agent, page DevOps.
