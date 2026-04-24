@@ -841,6 +841,25 @@ if needs_target "main" && [ -f "$HYDRA_ROOT/cron-jobs.json" ]; then
   log "  cron-jobs.json is valid JSON."
 fi
 
+# Reject committed MCP servers that use the `npx mcp-remote` stdio
+# bridge — those leak subprocesses that share the gateway's pgid, so
+# any reap-by-pgid takes the whole gateway down (Clio outage
+# 2026-04-24). Native `transport: "streamable-http"` has zero
+# subprocesses and is supported by bundle-mcp + sdk v1.10+. The
+# live file is re-linted after the Step 5a merge-preserve, but
+# catching it here means a bad commit fails before we touch Node 8.
+LINT_OPENCLAW_CFG="$SCRIPT_DIR/lint-openclaw-config.sh"
+if [ -x "$LINT_OPENCLAW_CFG" ]; then
+  lint_targets=()
+  needs_target "main" && lint_targets+=("$HYDRA_ROOT/openclaw-main.json")
+  needs_target "edge" && lint_targets+=("$HYDRA_ROOT/openclaw-edge.json")
+  needs_target "dev"  && lint_targets+=("$HYDRA_ROOT/openclaw-dev.json")
+  if (( ${#lint_targets[@]} > 0 )); then
+    "$LINT_OPENCLAW_CFG" "${lint_targets[@]}" || fail "openclaw config lint: repo contains mcp-remote stdio entries"
+    log "  openclaw configs free of mcp-remote stdio entries."
+  fi
+fi
+
 # Run drift check when deploying all or multiple profiles
 if [[ "$TARGET" == "all" ]] || [[ "$TARGET" == *","* ]]; then
   "$SCRIPT_DIR/validate-shared-config.sh" || fail "Shared config drift detected"
@@ -1207,23 +1226,82 @@ log "  Script permissions fixed"
 # know the deploy actually works — a half-failed deploy would leave a
 # stale baseline that masks real drift on the next run.
 
-# Sync per-profile configs to profile state dirs
+# Sync per-profile configs to profile state dirs.
+# Preserves `.mcp.servers` from the live file across deploys so
+# server-side `openclaw mcp set` registrations (e.g. NocoDB, which
+# carries an auth token we don't want to commit) survive. The repo
+# copy wins for every other field. Mirrors the cron-state preservation
+# pattern used in Step 5a (below) for the same reason: deploys must
+# not silently wipe server-registered runtime state.
+sync_profile_config() {
+  local src="$1" dst="$2"
+  mkdir -p "$(dirname "$dst")"
+  if [ ! -f "$dst" ]; then
+    cp "$src" "$dst"
+    return
+  fi
+  SRC="$src" DST="$dst" python3 - <<'PYEOF' || fail "profile config sync failed for $dst"
+import json, os, sys, tempfile
+src_path = os.environ['SRC']
+dst_path = os.environ['DST']
+with open(src_path) as f:
+    repo_cfg = json.load(f)
+try:
+    with open(dst_path) as f:
+        live_cfg = json.load(f)
+except json.JSONDecodeError:
+    # Live file is garbage — don't try to rescue servers from it.
+    live_cfg = {}
+preserved = (live_cfg.get('mcp') or {}).get('servers') or {}
+if preserved:
+    repo_cfg.setdefault('mcp', {})['servers'] = preserved
+# Atomic write to avoid torn-read by a concurrently-starting gateway.
+tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(dst_path), delete=False)
+try:
+    json.dump(repo_cfg, tmp, indent=2)
+    tmp.close()
+    os.replace(tmp.name, dst_path)
+except Exception:
+    os.unlink(tmp.name)
+    raise
+print(f"  preserved {len(preserved)} live MCP server(s) in {dst_path}", file=sys.stderr)
+PYEOF
+}
+
 log "  Syncing profile configs..."
 if [ "$TARGET" = "main" ] || [ "$TARGET" = "all" ]; then
-  mkdir -p /root/.openclaw-main
-  cp "$DEPLOY_PATH/openclaw-main.json" /root/.openclaw-main/openclaw.json
+  sync_profile_config "$DEPLOY_PATH/openclaw-main.json" /root/.openclaw-main/openclaw.json
+  # Mirror to legacy default path as defense-in-depth (see cron sync below
+  # for the same rationale). This one is a plain copy — there's no live
+  # gateway reading from /root/.openclaw/ in steady state.
   cp "$DEPLOY_PATH/openclaw-main.json" /root/.openclaw/openclaw.json
   log "  Synced main profile config (+ default openclaw.json)"
 fi
 if [ "$TARGET" = "edge" ] || [ "$TARGET" = "all" ]; then
-  mkdir -p /root/.openclaw-edge
-  cp "$DEPLOY_PATH/openclaw-edge.json" /root/.openclaw-edge/openclaw.json
+  sync_profile_config "$DEPLOY_PATH/openclaw-edge.json" /root/.openclaw-edge/openclaw.json
   log "  Synced edge profile config"
 fi
 if [ "$TARGET" = "dev" ] || [ "$TARGET" = "all" ]; then
-  mkdir -p /root/.openclaw-dev
-  cp "$DEPLOY_PATH/openclaw-dev.json" /root/.openclaw-dev/openclaw.json
+  sync_profile_config "$DEPLOY_PATH/openclaw-dev.json" /root/.openclaw-dev/openclaw.json
   log "  Synced dev profile config"
+fi
+
+# Re-lint the live configs after the merge: a live-only (never-
+# committed) `npx mcp-remote` entry — e.g. one added long ago via
+# the openclaw CLI's default stdio shape — would slip past Step 1's
+# repo-only lint, survive the merge-preserve, and silently bring
+# the leak back. Catch it here while the gateway hasn't reloaded yet.
+LINT_OPENCLAW_CFG_LIVE="$SCRIPT_DIR/lint-openclaw-config.sh"
+if [ -x "$LINT_OPENCLAW_CFG_LIVE" ]; then
+  live_lint_targets=()
+  [ -f /root/.openclaw-main/openclaw.json ] && live_lint_targets+=(/root/.openclaw-main/openclaw.json)
+  [ -f /root/.openclaw-edge/openclaw.json ] && live_lint_targets+=(/root/.openclaw-edge/openclaw.json)
+  [ -f /root/.openclaw-dev/openclaw.json ]  && live_lint_targets+=(/root/.openclaw-dev/openclaw.json)
+  if (( ${#live_lint_targets[@]} > 0 )); then
+    "$LINT_OPENCLAW_CFG_LIVE" "${live_lint_targets[@]}" \
+      || fail "openclaw config lint: live config has mcp-remote stdio server — rewrite with \`openclaw --profile <p> mcp set\` to transport: \"streamable-http\""
+    log "  Live openclaw configs free of mcp-remote stdio entries."
+  fi
 fi
 
 # -------------------------------------------------------------------
