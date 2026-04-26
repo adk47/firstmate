@@ -1,4 +1,4 @@
-import { OAuth2Client } from "google-auth-library";
+import { OAuth2Client, JWT } from "google-auth-library";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -12,9 +12,36 @@ export interface OAuthCredentials {
   refreshToken: string;
 }
 
+// Service account key file path. Provisioned out-of-band (Vault → /opt/hydra/secrets/).
+// NEVER committed to repo. See H-DevOps/scripts/node8-provision/README.md.
+const SA_KEY_PATH = "/opt/hydra/secrets/google-sa-hydra.json";
+
 /**
- * Read gog CLI's credentials.json to reuse its OAuth client_id/client_secret.
- * Returns null if the file doesn't exist or is malformed.
+ * Try to create an authenticated client using the Google service account
+ * with domain-wide delegation. This never expires.
+ * Falls back to null if key file missing.
+ */
+export function createServiceAccountClient(email: string): OAuth2Client | null {
+  try {
+    if (!fs.existsSync(SA_KEY_PATH)) {
+      return null;
+    }
+    const keyData = JSON.parse(fs.readFileSync(SA_KEY_PATH, "utf-8"));
+    const jwtClient = new JWT({
+      email: keyData.client_email,
+      key: keyData.private_key,
+      scopes: ["https://mail.google.com/"],
+      subject: email,
+    });
+    return jwtClient as unknown as OAuth2Client;
+  } catch (err) {
+    console.error("[openclaw-gmail] Service account auth failed for", email, ":", String(err));
+    return null;
+  }
+}
+
+/**
+ * Read gog CLI credentials.json to reuse its OAuth client_id/client_secret.
  */
 export function readGogCredentials(): { clientId: string; clientSecret: string } | null {
   const credPath = path.join(os.homedir(), ".config", "gogcli", "credentials.json");
@@ -31,11 +58,7 @@ export function readGogCredentials(): { clientId: string; clientSecret: string }
 }
 
 /**
- * Resolve OAuth credentials from config, falling back to gog's credentials.json
- * for client_id/client_secret.
- *
- * Returns full credentials (including refreshToken) only if all three parts are available.
- * Returns null if refresh token is missing (caller should run the OAuth flow).
+ * Resolve OAuth credentials from config, falling back to gog credentials.json.
  */
 export function resolveOAuthCredentials(
   accountEmail: string,
@@ -55,7 +78,6 @@ export function resolveOAuthCredentials(
     };
   }
 
-  // If we have a refresh token in config but client creds come from gog
   if (oauth?.refreshToken) {
     const gogCreds = readGogCredentials();
     if (gogCreds) {
@@ -71,8 +93,7 @@ export function resolveOAuthCredentials(
 }
 
 /**
- * Resolve just the client_id/client_secret pair (without refresh token).
- * Useful for initiating the OAuth flow.
+ * Resolve just the client_id/client_secret pair.
  */
 export function resolveClientCredentials(
   accountEmail: string,
@@ -92,41 +113,39 @@ export function resolveClientCredentials(
 }
 
 /**
- * Create an authenticated OAuth2Client with auto-refresh.
+ * Create an authenticated OAuth2Client.
+ * Prefers service account (never expires) over refresh token.
  */
-export function createOAuth2Client(creds: OAuthCredentials): OAuth2Client {
+export function createOAuth2Client(creds: OAuthCredentials, email?: string): OAuth2Client {
+  if (email) {
+    const saClient = createServiceAccountClient(email);
+    if (saClient) {
+      console.error("[openclaw-gmail] Using service account for", email);
+      return saClient;
+    }
+  }
+
+  console.error("[openclaw-gmail] Using OAuth refresh token for", email || "unknown");
   const client = new OAuth2Client(creds.clientId, creds.clientSecret);
   client.setCredentials({ refresh_token: creds.refreshToken });
   return client;
 }
 
-/**
- * Open a URL in the user's default browser.
- */
 function openBrowser(url: string): void {
   const cmd = process.platform === "darwin" ? "open" : "xdg-open";
   execFile(cmd, [url], (err) => {
     if (err) {
-      // If browser open fails, the URL is already printed to console
+      // URL is already printed to console
     }
   });
 }
 
-/**
- * Run the browser-based OAuth2 consent flow.
- *
- * 1. Starts a local HTTP server on 127.0.0.1
- * 2. Opens the consent URL in the user's browser
- * 3. Waits for the redirect callback with the auth code
- * 4. Exchanges the code for tokens
- * 5. Returns the refresh_token
- */
 export async function runOAuthFlow(
   clientId: string,
   clientSecret: string,
   opts?: { port?: number },
 ): Promise<string> {
-  const port = opts?.port ?? 0; // 0 = OS picks a free port
+  const port = opts?.port ?? 0;
 
   return new Promise<string>((resolve, reject) => {
     const server = http.createServer();
@@ -187,21 +206,21 @@ export async function runOAuthFlow(
           const { tokens } = await oauth2Client.getToken(code);
           if (!tokens.refresh_token) {
             res.writeHead(200, { "Content-Type": "text/html" });
-            res.end("<h1>Error</h1><p>No refresh token received. Try revoking access at <a href='https://myaccount.google.com/permissions'>Google Account Permissions</a> and retry.</p>");
+            res.end("<h1>Error</h1><p>No refresh token. Revoke access and retry.</p>");
             clearTimeout(timeout);
             server.close();
-            reject(new Error("No refresh_token received. Revoke app access and retry with prompt=consent."));
+            reject(new Error("No refresh_token received."));
             return;
           }
 
           res.writeHead(200, { "Content-Type": "text/html" });
-          res.end("<h1>Authorization successful!</h1><p>You can close this tab and return to the terminal.</p>");
+          res.end("<h1>Authorization successful!</h1><p>You can close this tab.</p>");
           clearTimeout(timeout);
           server.close();
           resolve(tokens.refresh_token);
         } catch (err) {
           res.writeHead(500, { "Content-Type": "text/html" });
-          res.end("<h1>Token exchange failed</h1><p>Check the terminal for details.</p>");
+          res.end("<h1>Token exchange failed</h1>");
           clearTimeout(timeout);
           server.close();
           reject(err);
