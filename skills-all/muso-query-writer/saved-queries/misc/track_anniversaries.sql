@@ -24,7 +24,7 @@ with a as (
 -- 			year(current_date + interval '1' month) - year(date(from_unixtime(release_timestamp / 1000))),
 -- 			year(current_date) - year(date(from_unixtime(release_timestamp / 1000)))
 -- 		) as years_anniversary
-	from "platform-industry-bi-prod".matvw_catalog_track
+	from hive.default.matvw_catalog_track
 	where not is_deleted
 		and popularity > 50
 		and default_raw_recording_id like 'spotify:%'

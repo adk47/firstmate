@@ -4,7 +4,8 @@ title: [ML] Get links added to tracks by ops
 athena_id: 9c57881f-86df-442f-bc79-7209648e23f0
 primary_tag: ml
 tags: [ml]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -19,7 +20,7 @@ with tl_ops as (
 			from_iso8601_timestamp(replace(createdat, ' ', 'T'))
 		) as request_time,
 		max_by(email, createdat) as request_by
-	from "platform-core-backend-export-prod".public_action_log
+	from postgresql_core.public.public_action_log
 	where service = 'retool'
 		and route like '%analytics-sources%'
 	group by 1,
@@ -38,8 +39,8 @@ tl as (
 		end as link,
 		external_id,
 		from_unixtime(l.created_timestamp / 1000) as added_time
-	from "platform-industry-bi-prod".matvw_analytics_link as l
-		join "platform-industry-bi-prod".matvw_catalog_track as t ON (t._id = track_id)
+	from hive.default.matvw_analytics_link as l
+		join hive.default.matvw_catalog_track as t ON (t._id = track_id)
 	where not t.is_deleted
 		and track_id in (
 			select distinct track_id

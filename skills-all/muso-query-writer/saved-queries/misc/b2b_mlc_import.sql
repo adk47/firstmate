@@ -4,7 +4,8 @@ title: [HubSpot][B2B] MLC Import
 athena_id: e9ce76b4-f4a3-4b82-a1a9-b9ea418285cf
 primary_tag: hubspot
 tags: [hubspot]
-athena_database: platform-industry-mlc-bi-prod
+trino_catalog: hive
+trino_schema: mlc
 description: No description provided
 status: one_off
 pii: unknown
@@ -14,7 +15,7 @@ last_exported: 2025-01-31
 with mp as (
 	select 'mlc:' || cast(feedproviderspartyid as varchar) as rpid,
 		*
-	from "platform-industry-mlc-bi-prod".parties
+	from hive.mlc.parties
 )
 select name,
 	credits_count,
@@ -59,7 +60,7 @@ from (
 				'contactaddress: ' || arbitrary(contactaddress) || '<br>',
 				''
 			) ] as note_lines
-		from "platform-industry-bi-prod".matvw_catalog_profile as p
+		from hive.default.matvw_catalog_profile as p
 			cross join unnest(raw_profile_ids) as r(rpid)
 			join mp USING(rpid)
 		where not is_deleted

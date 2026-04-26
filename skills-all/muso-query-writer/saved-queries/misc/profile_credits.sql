@@ -34,7 +34,7 @@ with p AS (
 			COALESCE("credits_count", 1),
 			COALESCE("tracks_count", 1)
 		) AS num_credits
-	FROM "platform-industry-bi-prod"."matvw_catalog_profile" AS p
+	FROM hive.default."matvw_catalog_profile" AS p
 	where _id in (
 			'e32ace23-880c-49f0-8db9-836492c6610e',
 			'3fcc41ff-0dc5-4b94-9938-c5fabdd95361',
@@ -3643,9 +3643,9 @@ select distinct profile_id,
 	credit.child,
 	credit.classification,
 	credit.instrument_family
-from "platform-industry-bi-prod"."matvw_catalog_master_credit" AS c
+from hive.default."matvw_catalog_master_credit" AS c
 	join p USING(profile_id)
-	join "platform-industry-bi-prod"."matvw_catalog_track" AS t ON (t._id = c.master_track_id)
+	join hive.default."matvw_catalog_track" AS t ON (t._id = c.master_track_id)
 	cross join unnest("catalog_credits") AS cc(credit)
 where lower(credit.parent) not in ('other')
 limit 10000

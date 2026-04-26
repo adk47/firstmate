@@ -4,7 +4,8 @@ title: [catalog] Catalog API credits/collabs
 athena_id: c71bd001-9c78-493e-a351-baa5cbbdf06e
 primary_tag: catalog
 tags: [catalog]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown

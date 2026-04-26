@@ -4,7 +4,8 @@ title: [Audit] Find profile MLC IDs through songwriter tracks
 athena_id: 8bb372ed-dfce-47c5-8809-1eb099fdc8f7
 primary_tag: audit
 tags: [audit]
-athena_database: platform-industry-mlc-bi-prod
+trino_catalog: hive
+trino_schema: mlc
 description: No description provided
 status: one_off
 pii: unknown
@@ -13,7 +14,7 @@ last_exported: 2025-01-31
 
 with m as (
 	select substr(rid, 5) as feedprovidersrecordingid
-	from "platform-industry-bi-prod".matvw_catalog_track
+	from hive.default.matvw_catalog_track
 		cross join unnest(raw_recording_ids) as r(rid)
 	where not is_deleted
 		and cardinality(
@@ -35,9 +36,9 @@ select feedproviderspartyid,
 	min(fullname) as fullname,
 	count(distinct feedprovidersworkid) as num_works,
 	count(1) as num_contributions
-from "platform-industry-mlc-bi-prod".workrightshares as ws
-	join "platform-industry-mlc-bi-prod".worksrecordings as w USING(feedprovidersworkid)
-	join "platform-industry-mlc-bi-prod".parties as p USING(feedproviderspartyid)
+from hive.mlc.workrightshares as ws
+	join hive.mlc.worksrecordings as w USING(feedprovidersworkid)
+	join hive.mlc.parties as p USING(feedproviderspartyid)
 	join m USING(feedprovidersrecordingid)
 where partyrole in (
 		'ComposerLyricist',

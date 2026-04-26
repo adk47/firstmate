@@ -105,7 +105,7 @@ select chart,
 	name,
 	common_credits,
 	total_streams
-from "platform-data-merging-catalog-prod"."catalog_industry_db_profile"
+from postgresql_industry.public."catalog_industry_db_profile"
 	JOIN top_profiles ON(profile_id = _id)
 order by 1,
 	2

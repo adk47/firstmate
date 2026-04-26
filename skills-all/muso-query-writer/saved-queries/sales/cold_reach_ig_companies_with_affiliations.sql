@@ -4,7 +4,8 @@ title: [Sales] Cold reach IG companies with affiliations
 athena_id: 8b68cd3e-2b55-4460-a1e8-33c5166ad095
 primary_tag: sales
 tags: [sales]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -17,7 +18,7 @@ with s as (
         TRUE as is_in_seats,
         BOOL_OR(status='active') as is_pro,
         BOOL_OR(type='organization') as is_org
-    from "platform-core-backend-export-prod".public_roster_seats 
+    from postgresql_core.public.public_roster_seats 
     group by 1
 ),
 cl as (
@@ -25,7 +26,7 @@ cl as (
         profileid as _id,
         TRUE as is_claiming_attempted,
         BOOL_OR(status='processed') as is_claimed
-    from "platform-core-backend-export-prod".public_claiming 
+    from postgresql_core.public.public_claiming 
     group by 1
 ),
 a as (
@@ -56,9 +57,9 @@ a as (
 ig AS (
     select c._id,
         arbitrary(contact.value) AS ig
-    from "platform-industry-bi-prod".matvw_catalog_profile as c
+    from hive.default.matvw_catalog_profile as c
         cross join unnest(raw_profile_ids) AS cr(rid)
-        join "platform-industry-bi-prod".matvw_raw_profile AS r ON (r._id = rid)
+        join hive.default.matvw_raw_profile AS r ON (r._id = rid)
         cross join unnest(r.contacts) AS rc(contact)
     where nullif(contact.value, '') is not null
         and contact.type = 'instagram'
@@ -72,7 +73,7 @@ select
     roles,
     credits_count,
     ig
-from "platform-industry-bi-prod".matvw_catalog_profile as p 
+from hive.default.matvw_catalog_profile as p 
 join a USING(_id)
 join ig USING(_id)
 left join s USING(_id)

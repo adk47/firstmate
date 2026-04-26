@@ -11,7 +11,7 @@ pii: unknown
 last_exported: 2025-01-31
 */
 
-select * from "platform-core-backend-export-prod".public_credit_requests 
+select * from postgresql_core.public.public_credit_requests 
 limit 10
 
 -- summary
@@ -37,17 +37,17 @@ select
         credit_rule_risk_percent MAP(varchar, map(varchar, double))
     )) AS verif_data,
     id
-from "platform-core-backend-export-prod".public_credit_requests 
+from postgresql_core.public.public_credit_requests 
 ),
 ce AS (
     select 
         distinct profileid, trackid, child AS credit, TRUE as is_on_source
-    from "platform-industry-bi-prod".matvw_raw_recording_credit
+    from hive.default.matvw_raw_recording_credit
     join (
     select 
         profile_id,
         _id AS profileid
-    from "platform-industry-bi-prod".matvw_catalog_profile
+    from hive.default.matvw_catalog_profile
     cross join unnest (raw_profile_ids) AS r(profile_id)
     where profile_id not like 'muso:%'
     ) USING(profile_id)
@@ -55,7 +55,7 @@ ce AS (
     select 
         recording_id,
         _id AS trackid
-    from "platform-industry-bi-prod".matvw_catalog_track
+    from hive.default.matvw_catalog_track
     cross join unnest (raw_recording_ids) AS r(recording_id)
     where recording_id not like 'muso:%'
     ) USING(recording_id)
@@ -109,7 +109,7 @@ select
         credit_rule_risk_percent MAP(varchar, map(varchar, double))
     )) AS verif_data,
     id
-from "platform-core-backend-export-prod".public_credit_requests 
+from postgresql_core.public.public_credit_requests 
 )
 select 
     artist.name AS artist_name,
@@ -142,7 +142,7 @@ select
         credit_rule_risk_percent MAP(varchar, map(varchar, double))
     )) AS verif_data,
     id
-from "platform-core-backend-export-prod".public_credit_requests 
+from postgresql_core.public.public_credit_requests 
 )
 select 
     fullname AS user_name,
@@ -152,7 +152,7 @@ select
     count_if(verif_data.is_approved) AS num_auto_approved,
     count(distinct cr.id) AS num_requests
 from cr 
-join "platform-core-backend-export-prod".public_users AS u ON (u.id=userid)
+join postgresql_core.public.public_users AS u ON (u.id=userid)
 -- where status='approved'
 group by 1
 order by 2 desc
@@ -174,7 +174,7 @@ select
         credit_rule_risk_percent MAP(varchar, map(varchar, double))
     )) AS verif_data,
     id
-from "platform-core-backend-export-prod".public_credit_requests 
+from postgresql_core.public.public_credit_requests 
 )
 select 
     IF(verif_data.is_approved, 'auto-approved', 'verification-needed') AS initial_status,
@@ -196,7 +196,7 @@ select
     split(substr(credits, 2, length(credits)-2), ',') AS credits,
     coalesce(spotifypopularity, 0) AS spotify_popularity,
     id
-from "platform-core-backend-export-prod".public_credit_requests 
+from postgresql_core.public.public_credit_requests 
 )
 select 
     popularity,
@@ -207,7 +207,7 @@ join (
         _id as trackid,
         coalesce(popularity, 0) AS popularity,
         coalesce(rank, 5) AS rank
-    from "platform-industry-bi-prod".matvw_catalog_track
+    from hive.default.matvw_catalog_track
     -- where not is_deleted
 ) using(trackid)
 where status='approved'
@@ -225,7 +225,7 @@ select
     split(substr(credits, 2, length(credits)-2), ',') AS credits,
     coalesce(spotifypopularity, 0) AS spotify_popularity,
     id
-from "platform-core-backend-export-prod".public_credit_requests 
+from postgresql_core.public.public_credit_requests 
 )
 select 
     spotify_popularity,
@@ -236,7 +236,7 @@ from cr
 --         _id as profileid,
 --         coalesce(popularity, 0) AS popularity,
 --         coalesce(rank, 5) AS rank
---     from "platform-industry-bi-prod".matvw_catalog_profile
+--     from hive.default.matvw_catalog_profile
 --     -- where not is_deleted
 -- ) using(profileid)
 where status='approved'
@@ -253,7 +253,7 @@ select
     substr(createdat, 1, 10) AS day,
     split(substr(credits, 2, length(credits)-2), ',') AS credits,
     id
-from "platform-core-backend-export-prod".public_credit_requests 
+from postgresql_core.public.public_credit_requests 
 )
 select 
     popularity,
@@ -264,7 +264,7 @@ join (
         _id as profileid,
         coalesce(popularity, 0) AS popularity,
         coalesce(rank, 5) AS rank
-    from "platform-industry-bi-prod".matvw_catalog_profile
+    from hive.default.matvw_catalog_profile
     -- where not is_deleted
 ) using(profileid)
 where status='approved'
@@ -282,7 +282,7 @@ select
     substr(createdat, 1, 10) AS day,
     split(substr(credits, 2, length(credits)-2), ',') AS credits,
     id
-from "platform-core-backend-export-prod".public_credit_requests 
+from postgresql_core.public.public_credit_requests 
 )
 select 
     parent,
@@ -309,7 +309,7 @@ select
     trackid,
     status,
     substr(createdat, 1, 10) AS day 
-from "platform-core-backend-export-prod".public_credit_requests 
+from postgresql_core.public.public_credit_requests 
 )
 select 
     day,

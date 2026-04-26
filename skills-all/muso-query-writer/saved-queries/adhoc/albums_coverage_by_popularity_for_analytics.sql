@@ -16,7 +16,7 @@ select
     default_release_id, 
     coalesce(max(popularity), 0) AS track_popularity,
     count(1) AS num_tracks
-from "platform-industry-bi-prod".matvw_catalog_track
+from hive.default.matvw_catalog_track
 group by 1
 )
 select 

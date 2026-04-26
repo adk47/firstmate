@@ -4,7 +4,8 @@ title: [charts] For review
 athena_id: 5e903853-55a2-4c42-b6ac-cf938138b785
 primary_tag: charts
 tags: [charts]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown

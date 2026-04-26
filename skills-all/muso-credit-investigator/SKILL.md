@@ -132,7 +132,7 @@ Calculate:
 SELECT id, profileid, credits, spotifytracktitle, spotifypopularity,
   spotifytrackid, spotifytrackartists, status, createdat,
   verificationdata, metadata
-FROM "platform-core-backend-export-prod".public_credit_requests
+FROM postgresql_core.public.public_credit_requests
 WHERE userid = {userid}
 ORDER BY createdat DESC
 LIMIT 200
@@ -171,14 +171,14 @@ ORDER BY streams_attributed DESC
 **User lookup:**
 ```sql
 SELECT id, email, firstname, lastname, createdat
-FROM "platform-core-backend-export-prod".public_users
+FROM postgresql_core.public.public_users
 WHERE id = {userid}
 ```
 
 **User's multiple profiles:**
 ```sql
 SELECT DISTINCT profileid, COUNT(*) as credit_count
-FROM "platform-core-backend-export-prod".public_credit_requests
+FROM postgresql_core.public.public_credit_requests
 WHERE userid = {userid} AND status = 'approved'
 GROUP BY profileid
 ```

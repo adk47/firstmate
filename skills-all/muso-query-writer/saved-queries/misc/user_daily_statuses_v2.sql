@@ -4,7 +4,8 @@ title: User Daily Statuses v2
 athena_id: 67386d82-6ac6-4190-b1fa-718e85baec34
 primary_tag: misc
 tags: [misc]
-athena_database: bi
+trino_catalog: postgresql_analytics
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown

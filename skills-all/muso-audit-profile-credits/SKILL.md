@@ -107,7 +107,7 @@ SELECT
   t.default_release_label      AS label,
   t.release_timestamp          AS released,
   TRANSFORM(t.profiles, p -> p.role) AS roles_on_track
-FROM "platform-industry-bi-prod".matvw_catalog_track t
+FROM hive.default.matvw_catalog_track t
 WHERE contains(TRANSFORM(t.profiles, p -> p.profile_id), '<PROFILE_ID>')
   AND t.is_deleted = false
 ORDER BY t.popularity DESC

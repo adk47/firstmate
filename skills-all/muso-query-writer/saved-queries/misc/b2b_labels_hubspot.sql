@@ -23,7 +23,7 @@ with album AS (
 			partition by label
 			ORDER BY popularity DESC
 		) AS top
-	from "platform-industry-bi-prod"."matvw_raw_release"
+	from hive.default."matvw_raw_release"
 	where batch_id = '0'
 ),
 artist AS (
@@ -68,7 +68,7 @@ muso_genre AS (
 				regional_sub_genre VARCHAR
 			)
 		) AS muso_genre
-	from "platform-data-merging-catalog-prod"."catalog_industry_db_genres_mapping"
+	from postgresql_industry.public."catalog_industry_db_genres_mapping"
 ),
 label_genre AS (
 	select label,

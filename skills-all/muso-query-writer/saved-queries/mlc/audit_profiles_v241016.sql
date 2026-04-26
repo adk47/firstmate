@@ -4,7 +4,8 @@ title: [MLC] Audit profiles v241016
 athena_id: a820cf5d-3969-4a3b-a726-0a30fca4fbd6
 primary_tag: mlc
 tags: [mlc]
-athena_database: audit-prod
+trino_catalog: hive
+trino_schema: audit
 description: No description provided
 status: one_off
 pii: unknown
@@ -17,8 +18,8 @@ mlc_w as (
 		arbitrary(iswc) as iswc,
 		BOOL_OR(lower(partyrole) like '%publisher%') as has_publisher,
 		SUM(rightsharepercentage) as total_work_share_pct
-	from "platform-industry-mlc-bi-prod".works
-		left join "platform-industry-mlc-bi-prod".workrightshares USING(feedprovidersworkid)
+	from hive.mlc.works
+		left join hive.mlc.workrightshares USING(feedprovidersworkid)
 	group by 1
 ),
 mlc as (
@@ -31,8 +32,8 @@ mlc as (
 		GREATEST(100.0 - MAX(total_work_share_pct), 0.0) as missing_shares_pct,
 		array_agg(distinct iswc) as iswcs
 	from mlc_w
-		join "platform-industry-mlc-bi-prod".worksrecordings as wr USING(feedprovidersworkid)
-		right join "platform-industry-mlc-bi-prod".recordings as r USING(feedprovidersrecordingid)
+		join hive.mlc.worksrecordings as wr USING(feedprovidersworkid)
+		right join hive.mlc.recordings as r USING(feedprovidersrecordingid)
 	group by 1
 ),
 t as (
@@ -64,7 +65,7 @@ t as (
 			':',
 			2
 		) as spotify_id
-	from "platform-industry-bi-prod".matvw_catalog_track
+	from hive.default.matvw_catalog_track
 		cross join unnest(isrcs) as i(isrc)
 		left join mlc ON(upper(replace(i.isrc, '-', '')) = mlc.isrc)
 	where not is_deleted -- 	filter by profile 

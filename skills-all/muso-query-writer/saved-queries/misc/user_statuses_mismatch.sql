@@ -4,7 +4,8 @@ title: User Statuses Mismatch
 athena_id: e9534dce-6478-4332-97a9-4114ff68e8f4
 primary_tag: misc
 tags: [misc]
-athena_database: bi
+trino_catalog: postgresql_analytics
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown

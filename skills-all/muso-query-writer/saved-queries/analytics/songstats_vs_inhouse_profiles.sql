@@ -13,8 +13,8 @@ last_exported: 2025-01-31
 
 with pro as (
 	select distinct seatid as profileid
-	from "platform-core-backend-export-prod".public_roster_seats as s
-		join "platform-core-backend-export-prod".public_teams as t ON (t.id = s.teamid)
+	from postgresql_core.public.public_roster_seats as s
+		join postgresql_core.public.public_teams as t ON (t.id = s.teamid)
 	where s.status = 'active'
 		and not t.inhouseanalyticsenabled
 ),
@@ -28,7 +28,7 @@ old AS (
     		SUM(
     			COALESCE(spotifystreams, 0) + COALESCE(soundcloudstreams, 0) + COALESCE(youtubeviews, 0)
     		) AS old_streams
-    	from "platform-core-backend-export-prod"."public_profile_track_stats"
+    	from postgresql_core.public."public_profile_track_stats"
     		join pro USING(profileid)
     	group by 1,
     		2
@@ -62,6 +62,6 @@ from (
 		from new
 			join old USING(profile_id)
 	) AS s
-	join "platform-industry-bi-prod".matvw_catalog_profile AS p ON (p._id = profile_id)
+	join hive.default.matvw_catalog_profile AS p ON (p._id = profile_id)
 where old_streams > 0
 order by abs_diff desc

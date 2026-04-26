@@ -4,7 +4,8 @@ title: [B2B] Publishers research
 athena_id: ff69f386-1e3d-43e6-ac7a-9150996aae8e
 primary_tag: b2b
 tags: [b2b]
-athena_database: platform-industry-mlc-bi-prod
+trino_catalog: hive
+trino_schema: mlc
 description: No description provided
 status: one_off
 pii: unknown
@@ -45,9 +46,9 @@ order by 2 desc
 with wr as (
 	select distinct isrc,
 		iswc
-	from "platform-industry-mlc-bi-prod".worksrecordings
-		join "platform-industry-mlc-bi-prod".works USING(feedprovidersworkid)
-		join "platform-industry-mlc-bi-prod".recordings USING(feedprovidersrecordingid)
+	from hive.mlc.worksrecordings
+		join hive.mlc.works USING(feedprovidersworkid)
+		join hive.mlc.recordings USING(feedprovidersrecordingid)
 	where nullif(isrc, '') is not null
 		and nullif(iswc, '') is not null
 )
@@ -57,9 +58,9 @@ select
     count(distinct isrc) as num_isrcs
 from workrightshares 
 join parties USING (feedproviderspartyid)
-join "platform-industry-mlc-bi-prod".worksrecordings USING(feedprovidersworkid)
-join "platform-industry-mlc-bi-prod".works USING(feedprovidersworkid)
-join "platform-industry-mlc-bi-prod".recordings USING(feedprovidersrecordingid)
+join hive.mlc.worksrecordings USING(feedprovidersworkid)
+join hive.mlc.works USING(feedprovidersworkid)
+join hive.mlc.recordings USING(feedprovidersrecordingid)
 where nullif(isrc, '') is not null
 	and nullif(iswc, '') is not null
 group by 1
@@ -85,9 +86,9 @@ from (
 with wr as (
 	select distinct isrc,
 		iswc
-	from "platform-industry-mlc-bi-prod".worksrecordings
-		join "platform-industry-mlc-bi-prod".works USING(feedprovidersworkid)
-		join "platform-industry-mlc-bi-prod".recordings USING(feedprovidersrecordingid)
+	from hive.mlc.worksrecordings
+		join hive.mlc.works USING(feedprovidersworkid)
+		join hive.mlc.recordings USING(feedprovidersrecordingid)
 	where nullif(isrc, '') is not null
 		and nullif(iswc, '') is not null
 )
@@ -107,7 +108,7 @@ from (
 			min(custom_data.popularity) AS popularity,
 			count(distinct iswc) AS num_works
 		from wr
-			full outer join "platform-industry-bi-prod".matvw_raw_recording USING(isrc)
+			full outer join hive.default.matvw_raw_recording USING(isrc)
 		group by 1
 	)
 group by 1

@@ -14,8 +14,8 @@ last_exported: 2025-01-31
 with pro AS (
 	select s.seatid AS profile_id,
 		BOOL_OR(COALESCE(s.status, '') = 'active') AS is_pro
-	from "platform-core-backend-export-prod".public_roster_seats AS s
-	where teamid not in (select id from "platform-core-backend-export-prod".public_teams where email like '%@muso.ai')
+	from postgresql_core.public.public_roster_seats AS s
+	where teamid not in (select id from postgresql_core.public.public_teams where email like '%@muso.ai')
 	group by 1
 ),
 s AS (
@@ -23,7 +23,7 @@ s AS (
 		SUM(
 			COALESCE(spotifystreams, 0) + COALESCE(soundcloudstreams, 0) + COALESCE(youtubeviews, 0)
 		) AS streams
-	from "platform-core-backend-export-prod"."public_profile_track_stats"
+	from postgresql_core.public."public_profile_track_stats"
 	group by 1
 )
 select case
@@ -36,7 +36,7 @@ select case
 	count(is_pro) AS num_subscribers,
 	count_if(is_pro) AS num_pro,
 	approx_percentile(streams, 0.5) AS streams_p50
-from "platform-industry-bi-prod".matvw_catalog_profile
+from hive.default.matvw_catalog_profile
 	left join pro ON(profile_id = _id)
 	left join s USING(profile_id)
 where not is_deleted

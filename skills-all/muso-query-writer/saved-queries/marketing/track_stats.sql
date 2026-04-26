@@ -16,7 +16,7 @@ with t AS (
 		title,
 		ARRAY_JOIN(transform(artists, a->a.name), ', ') AS artists,
 		popularity
-	from "platform-industry-bi-prod".matvw_catalog_track
+	from hive.default.matvw_catalog_track
 ),
 ts AS (
 	select track_id,

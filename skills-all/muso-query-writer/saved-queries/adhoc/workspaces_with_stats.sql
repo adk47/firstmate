@@ -29,7 +29,7 @@ with w AS (
 wt AS (
 	select workspace_id,
 		count(distinct master_track_id) AS num_tracks
-	from "platform-industry-bi-prod".matvw_catalog_profile AS p
+	from hive.default.matvw_catalog_profile AS p
 		join (
 			select profile_id,
 				workspace_id
@@ -37,7 +37,7 @@ wt AS (
 				cross join unnest(active_profile_ids) as p(profile_id)
 			where profile_id is not null
 		) ON(p._id = profile_id)
-		join "platform-industry-bi-prod".matvw_catalog_master_credit AS c using(profile_id)
+		join hive.default.matvw_catalog_master_credit AS c using(profile_id)
 	where not p.is_deleted
 	group by 1
 )
@@ -51,7 +51,7 @@ select workspace_id,
 	count(distinct _id) AS num_profiles,
 	count(distinct if(profile_type = 'organization', _id)) AS num_orgs,
 	AVG(p.popularity) AS avg_profile_popularity
-from "platform-industry-bi-prod".matvw_catalog_profile AS p
+from hive.default.matvw_catalog_profile AS p
 	join (
 		select _id,
 			w.*

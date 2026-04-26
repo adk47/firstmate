@@ -4,7 +4,8 @@ title: [adhoc] Users channels learned about muso from
 athena_id: 4d6742ed-244e-4326-a037-f5163bf3eb3c
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-core-backend-export-prod
+trino_catalog: postgresql_core
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown
@@ -19,7 +20,7 @@ from (
 		select json_extract_scalar(onboarding, '$.marketingChannel') as channel,
 			json_extract_scalar(onboarding, '$.role') as role,
 			count(1) AS num_users
-		from "platform-core-backend-export-prod".public_users
+		from postgresql_core.public.public_users
 		group by 1,
 			2
 	)

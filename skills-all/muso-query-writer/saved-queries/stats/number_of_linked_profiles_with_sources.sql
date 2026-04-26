@@ -4,7 +4,8 @@ title: [stats] Number of linked profiles with sources
 athena_id: 17787da0-443c-4d72-a89e-707e483df4e9
 primary_tag: stats
 tags: [stats]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown

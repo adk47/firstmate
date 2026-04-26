@@ -4,7 +4,8 @@ title: [quality] Top albums low on credits
 athena_id: 06daca27-1478-4968-9e37-4332113a96ca
 primary_tag: quality
 tags: [quality]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -27,8 +28,8 @@ from (
 					r->r like 'tidal:%'
 				)
 			) > 0 AS has_tidal
-		from "platform-industry-bi-prod"."matvw_catalog_track" AS t
-			join "platform-industry-bi-prod"."matvw_catalog_release" AS r ON (default_release_id = r._id)
+		from hive.default."matvw_catalog_track" AS t
+			join hive.default."matvw_catalog_release" AS r ON (default_release_id = r._id)
 		where NOT t.is_deleted
 			and not r.is_deleted and r.release_type <> 'compilation'
 		GROUP BY 1

@@ -4,7 +4,8 @@ title: [marketing] Top 1K Recording Engineers by streams
 athena_id: e46bc42b-69df-4489-9d57-52b377079d38
 primary_tag: marketing
 tags: [marketing]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -15,7 +16,7 @@ with
 ptc AS (
 	select _id as track_id,
 		profile.profile_id
-	from "platform-industry-bi-prod".matvw_catalog_track
+	from hive.default.matvw_catalog_track
 		cross join unnest(profiles) AS p(profile)
 		cross join unnest(profile.catalog_credits) AS c(credit)
 		where credit.child = 'Engineer'
@@ -30,7 +31,7 @@ s AS (
 			select profile_id,
 				track_id,
 				max_by(streams, date) as streams
-			from "platform-industry-bi-prod".matvw_analytics_track_daily
+			from hive.default.matvw_analytics_track_daily
 				join ptc USING(track_id)
 			group by 1,
 				2
@@ -47,6 +48,6 @@ select
     credits_count as num_all_credits,
     'https://credits.muso.ai/profile/' || profile_id as muso_url
 from s
-join "platform-industry-bi-prod".matvw_catalog_profile as p ON (_id=profile_id)
+join hive.default.matvw_catalog_profile as p ON (_id=profile_id)
 order by total_streams desc 
 limit 1000

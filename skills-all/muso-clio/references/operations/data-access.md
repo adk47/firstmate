@@ -145,52 +145,53 @@ export MUSO_DB_STATS_PASSWORD=$(aws ssm get-parameter --name "/muso/prod/db/stat
 
 ---
 
-## Athena Access
+## Trino on OVH (replaces Athena, 2026-04-25)
 
-### AWS Profiles
+AWS Athena, Glue, and workgroups are retired. All queries now go to Trino on OVH (HMS + Hive on OVH S3 IO + PostgreSQL connectors for live PG).
 
-| Profile | Account | Resources |
-|---------|---------|-----------|
-| `muso-flagship-readonly` | Flagship | Athena, Glue (91 DBs), Route53, Lambda, ECS, EKS |
-| `muso-readonly` | Plaque | S3 buckets |
-
-### CRITICAL: Region Policy
-
-**All Muso resources (dev AND prod) are in `us-west-2`. Do NOT search other regions.**
-
-Both dev (`*-dev`) and prod (`*-prod`) environments are in us-west-2. Resources in eu-west-1, us-east-1, etc. are abandoned staging/test artifacts from 2022. If a query returns empty results, report "no resources found" — do not search other regions.
-
-### Workgroups
-
-| Workgroup | Engine | Use For |
-|-----------|--------|---------|
-| `primary` | Athena v3 | Standard SQL queries (~50+ saved) |
-| `data-engineering` | Athena v3 | Data team queries |
-| `growth-dev` | Athena v3 | Growth analytics |
-| `Spark_primary` | PySpark v3 | Spark notebooks/jobs |
+| Catalog | Backed by | Equivalent old Athena DB |
+|---------|-----------|--------------------------|
+| `hive.default` | OVH S3 IO + HMS | `"platform-industry-bi-prod"` (matvw_*) |
+| `hive.audit` | OVH S3 IO + HMS | `"audit-prod"` |
+| `hive.mlc` | OVH S3 IO + HMS | `"platform-industry-mlc-bi-prod"` |
+| `postgresql_core.public` | OVH PG node-18 (live) | `"platform-core-backend-export-prod"` |
+| `postgresql_analytics.public` | OVH PG node-18 | `bi` |
+| `postgresql_industry.public` | OVH PG node-18 | `"platform-data-merging-catalog-prod"` |
+| `postgresql_stats.public` | OVH PG node-18 | Aurora `platform-stats` |
+| `postgresql_olap.public` | OVH PG node-18 | Aurora `platform-industry-olap` |
 
 ### Running Queries
 
 ```bash
-# Start a query
-aws athena start-query-execution \
-  --query-string "SELECT * FROM \"platform-industry-bi-prod\".matvw_catalog_profile LIMIT 10" \
-  --work-group primary \
-  --profile muso-flagship-readonly \
-  --region us-west-2
+# Use the trino-query.sh wrapper — auto-rewrites legacy Athena DB names
+bash /opt/hydra/scripts/trino-query.sh \
+  "SELECT * FROM hive.default.matvw_catalog_profile LIMIT 10"
 
-# Get results
-aws athena get-query-results \
-  --query-execution-id <execution-id> \
-  --profile muso-flagship-readonly \
-  --region us-west-2
+# Old Athena queries still work — wrapper rewrites the DB names
+bash /opt/hydra/scripts/trino-query.sh \
+  'SELECT * FROM "platform-industry-bi-prod".matvw_catalog_profile LIMIT 10'
 
-# List saved queries
-aws athena list-named-queries --profile muso-flagship-readonly --region us-west-2
+# Direct Trino CLI from any pod that can reach trino.data-processing.svc.cluster.local
+kubectl exec -n data-processing trino-coordinator-0 -- trino \
+  --catalog hive --schema default \
+  --execute "SELECT count(*) FROM matvw_catalog_track WHERE is_deleted=false"
 
-# List Glue databases (91 available)
-aws glue get-databases --profile muso-flagship-readonly --region us-west-2
+# Discovery
+bash /opt/hydra/scripts/trino-query.sh "SHOW CATALOGS"
+bash /opt/hydra/scripts/trino-query.sh "SHOW SCHEMAS FROM hive"
+bash /opt/hydra/scripts/trino-query.sh "SHOW TABLES FROM hive.default"
+bash /opt/hydra/scripts/trino-query.sh "DESCRIBE hive.default.matvw_catalog_profile"
 ```
+
+### What changed from Athena CLI?
+- ❌ `aws athena start-query-execution --workgroup primary --profile muso-flagship-readonly --region us-west-2`
+  ✅ `trino-query.sh` (no profile, no region, no workgroup)
+- ❌ `aws athena get-query-execution --query-execution-id <ID>` (poll for results)
+  ✅ Trino returns synchronously
+- ❌ Workgroups (`primary`, `data-engineering`, `growth-dev`)
+  ✅ Single Trino cluster, no workgroups
+- ❌ `aws glue get-databases` (91 Glue DBs)
+  ✅ `bash /opt/hydra/scripts/trino-query.sh "SHOW SCHEMAS FROM hive"`
 
 ---
 
@@ -263,7 +264,7 @@ When users report sudden stream count decreases, check for merged tracks in the 
 ```sql
 -- Find merged tracks from last 360 days
 -- Useful for explaining sudden stream count changes
--- Run in Athena against platform-industry-bi-prod or via direct Postgres
+-- Run via Trino against hive.default or postgresql_core.public
 
 SELECT
     t.id AS track_id,

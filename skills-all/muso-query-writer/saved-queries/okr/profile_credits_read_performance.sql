@@ -4,7 +4,8 @@ title: [OKR] Profile Credits Read Performance
 athena_id: 9616384e-5654-43cf-91ba-e991bf77950f
 primary_tag: okr
 tags: [okr]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: experimental
 pii: unknown

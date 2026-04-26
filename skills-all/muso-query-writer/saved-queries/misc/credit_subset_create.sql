@@ -16,7 +16,7 @@ last_exported: 2025-01-31
 -- 	format = 'JSON'
 -- ) AS
 -- select *
--- from "platform-data-merging-catalog-prod"."catalog_industry_db_credit"
+-- from postgresql_industry.public."catalog_industry_db_credit"
 -- where profile_id in (
 -- 		'ff7a7b1c-6e11-4390-b08e-e62de4bb16ca', -- Jay
 -- 		'c9b9b1d4-dc8d-4cc9-aa5d-1b03089aeb7d' -- Mr. Probz
@@ -28,5 +28,5 @@ CREATE TABLE "sandbox-oleg"."industry_db_recording__subset" WITH (
 ) AS
 select master_id,
 	r.*
-from "platform-data-merging-catalog-prod"."catalog_industry_db_recording" AS r
+from postgresql_industry.public."catalog_industry_db_recording" AS r
 	JOIN "sandbox-oleg"."industry_db_credit__subset" USING(master_id)

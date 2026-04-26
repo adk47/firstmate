@@ -4,7 +4,8 @@ title: [Audit] Isrcs/track industry-wide catalog
 athena_id: c50ab718-7d6a-48bf-823a-ca5456d99d01
 primary_tag: audit
 tags: [audit]
-athena_database: audit-prod
+trino_catalog: hive
+trino_schema: audit
 description: No description provided
 status: one_off
 pii: unknown
@@ -22,7 +23,7 @@ select case
 	count_if(isrc_popularity >= 20) as num_isrcs_20_popularity,
 	count_if(isrc_popularity >= 50) as num_isrcs_50_popularity,
 	sum(streams_weighted) as streams_weighted
-from "audit-prod".audit_isrc_track
+from hive.audit.audit_isrc_track
 where track_rank = 1
 group by 1
 -- TRACK
@@ -37,7 +38,7 @@ select case
 	count_if(track_popularity >= 20) as num_tracks_20_popularity,
 	count_if(track_popularity >= 50) as num_tracks_50_popularity,
 	sum(streams) as streams
-from "audit-prod".audit_track
+from hive.audit.audit_track
 group by 1
 
-select * from "audit-prod".audit_track limit 10
+select * from hive.audit.audit_track limit 10

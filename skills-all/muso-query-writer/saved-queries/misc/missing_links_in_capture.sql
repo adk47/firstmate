@@ -14,7 +14,7 @@ last_exported: 2025-01-31
 with _s AS (
 	select distinct source_recording_id as external_id,
 		SPLIT_PART(release_id, ':', 2) AS entity_id
-	from "platform-industry-bi-prod".matvw_raw_recording
+	from hive.default.matvw_raw_recording
 		cross join unnest(release_ids) AS r(release_id)
 	where source = 'spotify'
 ),
@@ -22,7 +22,7 @@ ind as (
 	select distinct source,
 		IF(source = 'spotify', entity_id, external_id) AS entity_id,
 		entity_type
-	from "platform-industry-bi-prod".matvw_analytics_link AS l
+	from hive.default.matvw_analytics_link AS l
 		left join _s USING(external_id)
 		left join (
 			select 'youtube' AS source,

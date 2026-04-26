@@ -4,7 +4,8 @@ title: [analytics] Stale streams profiles
 athena_id: 7e68cfe9-455d-415a-9c08-cf9166f95a45
 primary_tag: analytics
 tags: [analytics]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown

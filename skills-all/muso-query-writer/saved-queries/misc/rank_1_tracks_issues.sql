@@ -4,7 +4,8 @@ title: [review] Rank 1 tracks issues
 athena_id: c8355eeb-f4ab-41b6-a3cd-528dcecf7676
 primary_tag: review
 tags: [review]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -43,8 +44,8 @@ select t._id AS track_id,
 			r->r like 'tidal:%'
 		)
 	) > 0 as has_tidal_links
-from "platform-industry-bi-prod"."matvw_catalog_track" AS t
-	left join "platform-industry-bi-prod"."matvw_catalog_master_credit" AS c ON (t._id = c.master_track_id)
+from hive.default."matvw_catalog_track" AS t
+	left join hive.default."matvw_catalog_master_credit" AS c ON (t._id = c.master_track_id)
 where t.rank = 1
 group by 1
 order by 2 desc

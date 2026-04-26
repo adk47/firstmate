@@ -4,7 +4,8 @@ title: [charts] For Ops Review
 athena_id: 1d7a18fb-efcb-4755-badd-dba7baa5b9cc
 primary_tag: charts
 tags: [charts]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -16,7 +17,7 @@ with p AS (
 		profile_type,
 		try(images [ 1 ].url) AS avatar_url,
 		name
-	from "platform-industry-bi-prod".matvw_catalog_profile
+	from hive.default.matvw_catalog_profile
 	where profile_type in ('artist', 'professional')
 		and not regexp_like(
 			lower(name),
@@ -101,7 +102,7 @@ c AS (
 	group by profile_id
 )
 select c.*
-from "platform-industry-bi-prod".matvw_catalog_profile AS p
+from hive.default.matvw_catalog_profile AS p
 	right join c ON (profile_id = p._id)
 where p.images is null
 	or cardinality(p.images) = 0

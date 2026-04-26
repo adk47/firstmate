@@ -4,7 +4,8 @@ title: [AdHoc] User profile ranks
 athena_id: eaf5e92c-2acb-4489-8caf-6bbcabb5595c
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -14,15 +15,15 @@ last_exported: 2025-01-31
 with uc as (
 	select distinct u.id as user_id,
 		c.profileid as profile_id
-	from "platform-core-backend-export-prod".public_users as u
-		join "platform-core-backend-export-prod".public_claiming as c ON (c.teamid = u.defaultteamid)
+	from postgresql_core.public.public_users as u
+		join postgresql_core.public.public_claiming as c ON (c.teamid = u.defaultteamid)
 	where c.status = 'processed'
 ),
 us as (
 	select distinct u.id as user_id,
 		s.seatid as profile_id
-	from "platform-core-backend-export-prod".public_users as u
-		join "platform-core-backend-export-prod".public_roster_seats as s ON (s.teamid = u.defaultteamid)
+	from postgresql_core.public.public_users as u
+		join postgresql_core.public.public_roster_seats as s ON (s.teamid = u.defaultteamid)
 		left join (
 			select distinct user_id
 			from uc
@@ -32,14 +33,14 @@ us as (
 p as (
 	select _id as profile_id,
 		COALESCE(rank, 5) as rank
-	from "platform-industry-bi-prod".matvw_catalog_profile
+	from hive.default.matvw_catalog_profile
 	where not is_deleted
 ),
 u as (
 	select u.id as user_id,
 		BOOL_OR(coalesce(s.status = 'active', false)) as is_paid
-	from "platform-core-backend-export-prod".public_subscriptions as s
-		right join "platform-core-backend-export-prod".public_users as u ON (s.teamid = u.defaultteamid)
+	from postgresql_core.public.public_subscriptions as s
+		right join postgresql_core.public.public_users as u ON (s.teamid = u.defaultteamid)
 	group by 1
 )
 select COALESCE(cast(user_rank as varchar), 'N/A') as user_rank,

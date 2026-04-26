@@ -4,7 +4,8 @@ title: [AdHoc] Churn - cancelled on muso by plan and month
 athena_id: 5ae3f39c-de7b-4c65-96e9-7134fe6b5eae
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-core-backend-export-prod
+trino_catalog: postgresql_core
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown
@@ -32,7 +33,7 @@ select
         '$.expiresAt'
     ) as bigint) / 1000) as expires_at,
     date(substr(updatedat, 1, 10)) as last_updated
-from "platform-core-backend-export-prod".public_subscriptions 
+from postgresql_core.public.public_subscriptions 
 where status = 'cancelled' and plan <> 'vip'
 )
 where date_diff('day', period_start, expires_at) > 14

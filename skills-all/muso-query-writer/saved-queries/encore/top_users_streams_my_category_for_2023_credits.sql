@@ -4,7 +4,8 @@ title: [encore23] Top users streams my category for 2023 credits
 athena_id: 91c97c9e-386d-4317-a493-85051eefb9f6
 primary_tag: encore
 tags: [encore]
-athena_database: platform-core-backend-export-prod
+trino_catalog: postgresql_core
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown
@@ -13,14 +14,14 @@ last_exported: 2025-01-31
 
 with t23 AS (
 	select _id AS track_id
-	from "platform-industry-bi-prod".matvw_catalog_track
+	from hive.default.matvw_catalog_track
 	where year(from_unixtime(release_timestamp / 1000)) = 2023
 ),
 pro AS (
 	select s.seatid AS profile_id,
 		ARRAY_JOIN(ARRAY_AGG(distinct t.email), ', ') AS emails
-	from "platform-core-backend-export-prod".public_teams AS t
-		join "platform-core-backend-export-prod".public_roster_seats AS s ON (s.teamid = t.id)
+	from postgresql_core.public.public_teams AS t
+		join postgresql_core.public.public_roster_seats AS s ON (s.teamid = t.id)
 	where s.status = 'active'
 	group by 1
 ),
@@ -47,7 +48,7 @@ ptc AS (
 			),
 			ct->ct is not null
 		) as categories
-	from "platform-industry-bi-prod".matvw_catalog_master_credit
+	from hive.default.matvw_catalog_master_credit
 		cross join unnest(catalog_credits) AS c(credit)
 		join t23 ON (track_id = master_track_id)
 	group by 1,
@@ -127,7 +128,7 @@ s AS (
 				SUM(
 					COALESCE(spotifystreams, 0) + COALESCE(soundcloudstreams, 0) + COALESCE(youtubeviews, 0)
 				) AS streams
-			from "platform-core-backend-export-prod"."public_profile_track_stats"
+			from postgresql_core.public."public_profile_track_stats"
 			group by 1,
 				2
 -- 			having min(date) >= '2023-01-01'
@@ -158,7 +159,7 @@ from (
 			credits_count as total_credits_count,
 			emails
 		from s
-			join "platform-industry-bi-prod".matvw_catalog_profile ON (_id = profile_id)
+			join hive.default.matvw_catalog_profile ON (_id = profile_id)
 			join pro USING(profile_id)
 			cross join unnest(cat_stats) AS c(category, numbers)
 	)

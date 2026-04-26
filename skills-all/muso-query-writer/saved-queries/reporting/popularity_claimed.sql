@@ -15,7 +15,7 @@ select popularity,
 	count(1) AS num,
 	count(is_claimed) AS num_claimed,
 	count(in_seats) AS num_in_seats
-from "platform-industry-bi-prod".matvw_catalog_profile
+from hive.default.matvw_catalog_profile
 	left join (
 		select distinct profileid as _id,
 			TRUE as is_claimed

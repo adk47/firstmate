@@ -4,7 +4,8 @@ title: [adhoc] Claimed vs PRO profiles
 athena_id: fcde3f8b-edae-4741-b7bd-c1af9bb60535
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown

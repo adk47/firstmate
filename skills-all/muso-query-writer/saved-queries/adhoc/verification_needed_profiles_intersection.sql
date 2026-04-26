@@ -4,7 +4,8 @@ title: [adhoc] Verification needed profiles intersection
 athena_id: 332bdfa6-9abf-4533-b646-d7a6ee64afcb
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -24,7 +25,7 @@ c AS (
 		profile_id,
 		profileid AS requested_profile_id,
 		cardinality(filter(catalog_credits, c->c.parent='Artist')) > 0 AS is_track_artist
-	from "platform-industry-bi-prod".matvw_catalog_master_credit
+	from hive.default.matvw_catalog_master_credit
 		right join v ON (master_track_id = trackid)
 )
 select count(distinct trackid) AS total_tracks,

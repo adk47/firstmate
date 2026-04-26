@@ -4,7 +4,8 @@ title: [Export] Tidal merged profile ids
 athena_id: 6f18bc92-1f9f-4f02-9374-a9ac3d837a0a
 primary_tag: export
 tags: [export]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: experimental
 pii: unknown
@@ -19,7 +20,7 @@ with mt as (
         min(name) as name,
         max(credits_count) as credits_count,
         coalesce(max(popularity), 0) as popularity
-    from "platform-industry-bi-prod".matvw_catalog_profile
+    from hive.default.matvw_catalog_profile
     cross join unnest(raw_profile_ids) as pr(rid)
     where not is_deleted and rid like 'tidal:%' and try_cast(split_part(rid, ':', 2) as bigint) is not null
     group by 1

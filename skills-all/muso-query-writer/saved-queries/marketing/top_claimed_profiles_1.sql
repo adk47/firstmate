@@ -14,7 +14,7 @@ last_exported: 2025-01-31
 with o as (
 	select distinct teamid,
 		json_extract_scalar(item, '$.details.profile.id') AS profile_id
-	from "platform-core-backend-export-prod".public_orders
+	from postgresql_core.public.public_orders
 		CROSS JOIN UNNEST(
 			cast(json_extract(details, '$.items') AS ARRAY(JSON))
 		) AS i(item)
@@ -26,9 +26,9 @@ s AS (
 		BOOL_OR(coalesce(s.status = 'active', FALSE)) AS is_pro,
 		ARBITRARY(o.profile_id) IS NOT NULL AS ordered_black_card,
 		BOOL_OR(coalesce(c.status = 'processed', FALSE)) AS is_claimed
-	from "platform-core-backend-export-prod".public_teams AS t
-		join "platform-core-backend-export-prod".public_roster_seats as s ON (t.id = s.teamid)
-		left join "platform-core-backend-export-prod".public_claiming as c ON (
+	from postgresql_core.public.public_teams AS t
+		join postgresql_core.public.public_roster_seats as s ON (t.id = s.teamid)
+		left join postgresql_core.public.public_claiming as c ON (
 			t.id = c.teamid
 			and s.seatid = profileid
 		)
@@ -63,7 +63,7 @@ select s.*,
 	name as profile_name,
 	popularity,
 	c.*
-from "platform-industry-bi-prod".matvw_catalog_profile AS p
+from hive.default.matvw_catalog_profile AS p
 	join s ON (profile_id = _id)
 	left join c USING(profile_id)
 	where is_claimed and is_pro and not ordered_black_card

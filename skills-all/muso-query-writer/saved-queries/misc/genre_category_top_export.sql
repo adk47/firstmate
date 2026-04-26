@@ -4,7 +4,8 @@ title: Genre category top export
 athena_id: 6789c51c-b9c2-42a0-b007-1ee942dff08e
 primary_tag: misc
 tags: [misc]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: experimental
 pii: unknown
@@ -83,12 +84,12 @@ from (
 									MAX(coalesce(t.popularity, 0)) as popularity,
 									array_agg(distinct genre) as original_genres,
 									arbitrary(profiles) as profiles
-								from "platform-industry-bi-prod".matvw_catalog_track as t
-								    join "platform-industry-bi-prod".matvw_raw_recording as r ON (default_raw_recording_id=r._id)
+								from hive.default.matvw_catalog_track as t
+								    join hive.default.matvw_raw_recording as r ON (default_raw_recording_id=r._id)
 									cross join unnest(artist_ids) as tp(artist_id)
-									join "platform-industry-bi-prod".matvw_raw_profile as rp ON(artist_id = rp._id)
+									join hive.default.matvw_raw_profile as rp ON(artist_id = rp._id)
 									cross join unnest(genres) as rpg(genre)
-									join "platform-industry-bi-prod".matvw_dict_genre as g ON (g._id = genre)
+									join hive.default.matvw_dict_genre as g ON (g._id = genre)
 									cross join unnest(catalog_genres) as cg(catalog_genre)
 								where not r.is_deleted
 									and not t.is_deleted
@@ -111,7 +112,7 @@ from (
 			2,
 			3
 	) as c
-	join "platform-industry-bi-prod".matvw_catalog_profile as p ON (p._id = profile_id)
+	join hive.default.matvw_catalog_profile as p ON (p._id = profile_id)
 	where 
 	    not p.is_deleted 
 	    and TRY(images[1].url) is not null 

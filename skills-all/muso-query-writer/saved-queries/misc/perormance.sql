@@ -4,7 +4,8 @@ title: [NFC] Perormance
 athena_id: a6c8336a-132a-49ea-ba06-a3214c025797
 primary_tag: nfc
 tags: [nfc]
-athena_database: platform-industry-mlc-bi-prod
+trino_catalog: hive
+trino_schema: mlc
 description: No description provided
 status: one_off
 pii: unknown
@@ -29,13 +30,13 @@ p as (
 		profileid as profile_id,
 		workspaceid as workspace_id,
 		userid as user_id
-	from "platform-core-backend-export-prod".public_nfc_card
+	from postgresql_core.public.public_nfc_card
 ),
 cp as (
 	select _id as profile_id,
 		name as profile_name,
 		popularity
-	from "platform-industry-bi-prod".matvw_catalog_profile
+	from hive.default.matvw_catalog_profile
 )
 select 
 	count(distinct profile_id) as num_profiles,

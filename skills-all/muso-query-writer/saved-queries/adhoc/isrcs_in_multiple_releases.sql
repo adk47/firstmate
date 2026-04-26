@@ -4,7 +4,8 @@ title: [AdHoc] ISRCs in multiple releases
 athena_id: a20f9278-b5ed-4bf1-8f35-19e3e40cd7d3
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -30,8 +31,8 @@ select distinct
 	i.isrc,
 	upc,
 	'https://open.spotify.com/album/' || split_part(release_id, ':', 2) as spotify_url
-from "platform-industry-bi-prod".matvw_raw_recording as r
+from hive.default.matvw_raw_recording as r
 	join i ON(i.isrc = upper(r.isrc))
 	cross join unnest (release_ids) as rl(release_id)
-	join "platform-industry-bi-prod".matvw_raw_release as re ON (re._id = release_id)
+	join hive.default.matvw_raw_release as re ON (re._id = release_id)
 where source = 'spotify'

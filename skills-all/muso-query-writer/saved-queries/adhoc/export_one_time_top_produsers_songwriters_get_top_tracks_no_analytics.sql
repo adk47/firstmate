@@ -13,11 +13,11 @@ last_exported: 2025-01-31
 
 drop TABLE `platform-data-merging-catalog-prod`.adhoc_CU_86953w9yf
 
-select count(1) from "platform-data-merging-catalog-prod"."adhoc_CU_86953w9yf"
+select count(1) from postgresql_industry.public."adhoc_CU_86953w9yf"
 
-select * from "platform-data-merging-catalog-prod"."adhoc_CU_86953w9yf" limit 10
+select * from postgresql_industry.public."adhoc_CU_86953w9yf" limit 10
 
-CREATE TABLE "platform-data-merging-catalog-prod"."adhoc_CU_86953w9yf" WITH (
+CREATE TABLE postgresql_industry.public."adhoc_CU_86953w9yf" WITH (
 	external_location = 's3://platform-data-processing-lake-prod/merging/catalog/industry_db/analytics/adhoc/CU_86953w9yf/v2/',
 	format = 'JSON'
 ) AS with pf as (
@@ -42,7 +42,7 @@ CREATE TABLE "platform-data-merging-catalog-prod"."adhoc_CU_86953w9yf" WITH (
 		country,
 		common_credits,
 		popularity
-	from "platform-industry-bi-prod".matvw_catalog_profile
+	from hive.default.matvw_catalog_profile
 		join pf ON (profile_id = _id)
 	where not is_deleted
 ),
@@ -73,10 +73,10 @@ pt as (
 		arbitrary(common_credits) as common_credits,
 		arbitrary(p.popularity) as popularity,
 		max(streams) as streams
-	from "platform-industry-bi-prod".matvw_catalog_track as t
+	from hive.default.matvw_catalog_track as t
 		cross join unnest(profiles) as tpc(tp)
 		join p ON(tp.profile_id = p.profile_id)
-		left join "platform-data-merging-catalog-prod"."industry_data_processing_analytics_maintenance_track_final_stats" as ts ON (ts.track_id = t._id)
+		left join postgresql_industry.public."industry_data_processing_analytics_maintenance_track_final_stats" as ts ON (ts.track_id = t._id)
 	where not is_deleted
 	group by 1,
 		2
@@ -101,7 +101,7 @@ t as (
 a as (
 	select distinct try(release_ids [ 1 ]) as raw_release_id
 	from t
-		join "platform-industry-bi-prod".matvw_raw_recording USING (_id)
+		join hive.default.matvw_raw_recording USING (_id)
 )
 select 'create' AS action,
 	'spotify' as source,

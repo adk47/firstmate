@@ -4,7 +4,8 @@ title: Claim, active funnel
 athena_id: 58d8e4a3-5121-4a28-94c7-835ce5e97fbb
 primary_tag: misc
 tags: [misc]
-athena_database: platform-core-backend-export-prod
+trino_catalog: postgresql_core
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown
@@ -30,11 +31,11 @@ from (
 			COUNT(distinct s.seatid) as num_seats,
 			COUNT(distinct IF(s.status='active', s.seatid)) as num_active_seats,
 			COUNT(distinct c.profileid) as num_claimed
-		from "platform-core-backend-export-prod".public_users as u
-			left join "platform-core-backend-export-prod".public_team_users as tu ON (u.id = tu.userid)
-			left join "platform-core-backend-export-prod".public_teams as t ON (tu.teamid = t.id)
-			left join "platform-core-backend-export-prod".public_roster_seats AS s ON (t.id = s.teamid)
-			left join "platform-core-backend-export-prod".public_claiming AS c ON (
+		from postgresql_core.public.public_users as u
+			left join postgresql_core.public.public_team_users as tu ON (u.id = tu.userid)
+			left join postgresql_core.public.public_teams as t ON (tu.teamid = t.id)
+			left join postgresql_core.public.public_roster_seats AS s ON (t.id = s.teamid)
+			left join postgresql_core.public.public_claiming AS c ON (
 				t.id = c.teamid
 				and c.deletedat is null
 				and c.status = 'processed'

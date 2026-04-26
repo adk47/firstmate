@@ -4,7 +4,8 @@ title: [legacy analytics] Profiles inflated left
 athena_id: b1874eb3-f188-4210-8e84-5d7db588b526
 primary_tag: legacy-analytics
 tags: [legacy-analytics]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -17,7 +18,7 @@ with l as (
 		real_youtube_streams as rys,
 		inflated_youtube_streams as iys,
 		_id as profile_id
-	from "platform-industry-bi-prod".matvw_dict_legacy_profile_stats
+	from hive.default.matvw_dict_legacy_profile_stats
 ),
 c as (
 	select profile_id,

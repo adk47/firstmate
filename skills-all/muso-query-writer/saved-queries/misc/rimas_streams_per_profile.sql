@@ -15,7 +15,7 @@ with usr AS (
 	select _id AS profile_id,
 		name,
 		ARRAY_JOIN(common_credits, ', ') AS common_credits
-	from "platform-industry-bi-prod".matvw_catalog_profile AS p
+	from hive.default.matvw_catalog_profile AS p
 		join "production-musomvp".public_roster_seats AS s ON(p._id = s.seatid)
 	where s.status = 'active'
 		and s.teamid = 'aa9fcc0f-516f-487d-8456-c90111891681'

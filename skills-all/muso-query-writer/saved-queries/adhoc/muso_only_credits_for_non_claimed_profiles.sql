@@ -4,7 +4,8 @@ title: [AdHoc] Muso-only credits for non-claimed profiles
 athena_id: 947b3aa2-fe2b-4deb-beb0-f1eed5d09643
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -16,14 +17,14 @@ with s as (
 		TRUE as is_in_seats,
 		BOOL_OR(status = 'active') as is_pro,
 		BOOL_OR(type = 'organization') as is_org
-	from "platform-core-backend-export-prod".public_roster_seats
+	from postgresql_core.public.public_roster_seats
 	group by 1
 ),
 cl as (
 	select profileid as _id,
 		TRUE as is_claiming_attempted,
 		BOOL_OR(status = 'processed') as is_claimed
-	from "platform-core-backend-export-prod".public_claiming
+	from postgresql_core.public.public_claiming
 	group by 1
 ),
 rt as (
@@ -32,7 +33,7 @@ rt as (
 	from (
 			select _id as track_id,
 				array_union(raw_recording_ids, ARRAY [ 'muso:' || _id ]) as rids
-			from "platform-industry-bi-prod".matvw_catalog_track
+			from hive.default.matvw_catalog_track
 			where not is_deleted
 		)
 		cross join unnest(rids) as r(rrid)
@@ -43,7 +44,7 @@ rp as (
 	from (
 			select _id as profile_id,
 				array_union(raw_profile_ids, ARRAY [ 'muso:' || _id ]) as rids
-			from "platform-industry-bi-prod".matvw_catalog_profile
+			from hive.default.matvw_catalog_profile
 			where not is_deleted
 		)
 		cross join unnest(rids) as r(rpid)
@@ -58,7 +59,7 @@ c as (
 		array_agg(distinct created_by) as raw_created_by,
 		from_unixtime(min(created_timestamp) / 1000) as raw_min_added_time,
 		from_unixtime(max(created_timestamp) / 1000) as raw_max_added_time
-	from "platform-industry-bi-prod".matvw_raw_recording_credit as c
+	from hive.default.matvw_raw_recording_credit as c
 		join rp USING(profile_id)
 		join rt USING(recording_id)
 	group by 1,
@@ -83,10 +84,10 @@ select p._id as profile_id,
 	raw_created_by,
 	raw_min_added_time,
 	raw_max_added_time
-from "platform-industry-bi-prod".matvw_catalog_track as t
+from hive.default.matvw_catalog_track as t
 	join c ON(t._id = muso_track_id)
 	left join cl ON(cl._id = muso_profile_id)
-	join "platform-industry-bi-prod".matvw_catalog_profile as p ON(p._id = muso_profile_id)
+	join hive.default.matvw_catalog_profile as p ON(p._id = muso_profile_id)
 where not t.is_deleted
 	and t.popularity > 30
 	and not COALESCE(is_claimed, FALSE)

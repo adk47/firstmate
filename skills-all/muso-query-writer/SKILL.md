@@ -1,74 +1,65 @@
 ---
 name: muso-query-writer
 description: |
-  Muso.AI query and analytics expert. Write queries for Athena, MongoDB, and Aurora.
+  Muso.AI query and analytics expert. Write queries for Trino (on OVH), MongoDB, and PostgreSQL.
 
-  Use when: writing Athena/Presto queries, analyzing streaming stats, finding profiles,
+  Use when: writing Trino/Presto SQL queries, analyzing streaming stats, finding profiles,
   auditing MLC gaps, business metrics, or any data lake queries.
 
-  Triggers: "athena", "query", "sql", "stats", "streaming", "analytics", "data lake"
+  Triggers: "trino", "query", "sql", "stats", "streaming", "analytics", "data lake"
 compatibility: |
-  Optional: AWS CLI configured for Muso (e.g., `muso-flagship-readonly` profile) for running commands.
+  Use `bash /opt/hydra/scripts/trino-query.sh "<SQL>"` from node-8 (HYDRA host).
+  AWS Athena was retired 2026-04-25; this skill targets the new OVH Trino cluster only.
 metadata:
-  version: "1.0"
+  version: "2.0"
   source-repo: "Muso-AI/muso-skills"
 ---
 
 # Muso Query Writer
 
-Write efficient, cost-aware queries against Muso.AI's data infrastructure.
+Write efficient, cost-aware Trino queries against Muso.AI's OVH data platform.
 
 ## Quick Start
 
-**AWS Profile:** `muso-flagship-readonly` | **Region:** `us-west-2` | **Workgroup:** `primary`
+**Engine:** Trino on OVH | **Cluster:** `trino.data-processing.svc.cluster.local:8080` | **Wrapper:** `bash /opt/hydra/scripts/trino-query.sh "<SQL>"`
 
-### CRITICAL: Region Policy
-
-**All Muso resources (dev AND prod) are in `us-west-2`. Do NOT search other regions.**
-
-If a query returns empty results, report "no resources found" — do not search other regions. Resources in eu-west-1, us-east-1, etc. are abandoned staging/test artifacts from 2022.
-
-### AWS CLI Access
+### Trino access (replaces Athena)
 
 ```bash
-# Athena queries (Flagship account)
-aws athena start-query-execution \
-    --query-string "SELECT * FROM ..." \
-    --work-group primary \
-    --profile muso-flagship-readonly \
-    --region us-west-2
+# Run a query (wrapper auto-rewrites legacy Athena DB names → Trino catalog.schema)
+bash /opt/hydra/scripts/trino-query.sh "SELECT * FROM hive.default.matvw_catalog_profile LIMIT 10"
 
-# List saved queries (50+ available)
-aws athena list-named-queries --profile muso-flagship-readonly --region us-west-2
+# Discovery
+bash /opt/hydra/scripts/trino-query.sh "SHOW CATALOGS"
+bash /opt/hydra/scripts/trino-query.sh "SHOW SCHEMAS FROM hive"
+bash /opt/hydra/scripts/trino-query.sh "SHOW TABLES FROM hive.default"
+bash /opt/hydra/scripts/trino-query.sh "DESCRIBE hive.default.matvw_catalog_profile"
 
-# List Glue databases (91 databases)
-aws glue get-databases --profile muso-flagship-readonly --region us-west-2
+# Saved queries are checked into the repo at:
+ls /opt/hydra/skills-all/muso-query-writer/saved-queries/
 ```
 
-### Workgroups
-
-| Workgroup | Engine | Use For |
-|-----------|--------|---------|
-| `primary` | Athena v3 | Standard SQL queries |
-| `data-engineering` | Athena v3 | Data team queries |
-| `growth-dev` | Athena v3 | Growth analytics |
-| `Spark_primary` | PySpark v3 | Spark notebooks/jobs |
+### What changed from Athena (2026-04-25 cutover)
+- ❌ AWS Athena workgroups (`primary`, `data-engineering`, `growth-dev`) → ✅ Single Trino cluster
+- ❌ AWS Glue databases (91 of them) → ✅ `hive.*` schemas + `postgresql_*` connectors
+- ❌ `aws athena start-query-execution` (async, poll for results) → ✅ Synchronous `trino-query.sh`
+- ❌ `--profile muso-flagship-readonly --region us-west-2` → ✅ No AWS auth needed
 
 ### Most Used Tables
 
-| Table | Database | Rows | Use For |
-|-------|----------|------|---------|
-| `matvw_catalog_profile` | platform-industry-bi-prod | 29M | Profile lookup, credits |
-| `matvw_catalog_track` | platform-industry-bi-prod | 190M | Track metadata, ISRCs |
-| `matvw_stats_track_daily` | platform-industry-bi-prod | 3.3B | Streaming analytics |
-| `public_users` | platform-core-backend-export-prod | 339K | User data |
-| `public_subscriptions` | platform-core-backend-export-prod | 60K | Subscription status |
+| Table | Catalog.Schema | Rows | Use For |
+|-------|----------------|------|---------|
+| `matvw_catalog_profile` | hive.default | 29M | Profile lookup, credits |
+| `matvw_catalog_track` | hive.default | 190M | Track metadata, ISRCs |
+| `matvw_stats_track_daily` | hive.default | 3.3B | Streaming analytics |
+| `users` | postgresql_core.public | 339K | User data (live, no export delay) |
+| `subscriptions` | postgresql_core.public | 60K | Subscription status (live) |
 
 ## Reference Files
 
 | File | Content |
 |------|---------|
-| [athena-schemas.md](./athena-schemas.md) | **Real schemas, costs, CTEs** - Actual table definitions, 13 reusable query patterns, performance checklist |
+| [trino-schemas.md](./trino-schemas.md) | **Real schemas, costs, CTEs** - Actual table definitions, 13 reusable query patterns, performance checklist |
 | [reference.md](./reference.md) | **Architecture & concepts** - Data flow, when to use MongoDB vs Athena, troubleshooting |
 | muso-clio → `references/data-model/source-map.md` | **Entity → source of truth mapping** - Where data lives (MongoDB, PostgreSQL, ES, S3) |
 | muso-clio → `references/data-model/data-dictionary.md` | **Field definitions** - What each field means, quirks, sources |
@@ -147,13 +138,13 @@ Data freshness: daily dumps in 99% of cases.
 ### MongoDB Snapshots (Catalog DB)
 | Database | Description |
 |----------|-------------|
-| `platform-industry-bi-prod` | Materialized views (`matvw_*`) - weekly dump + daily deltas. Faster/cheaper than full snapshots |
+| `hive.default` | Materialized views (`matvw_*`) - weekly dump + daily deltas. Faster/cheaper than full snapshots |
 | `platform-industry-db-industry-prod` | Full weekly MongoDB snapshot (slower, complete) |
 
 ### PostgreSQL Snapshots
 | Database | Description |
 |----------|-------------|
-| `platform-core-backend-export-prod` | Growth Core DB - users, teams, subscriptions, claiming |
+| `postgresql_core.public` | Growth Core DB - users, teams, subscriptions, claiming |
 | `platform-stats-export-prod` | Aurora Stats DB - analytics processing, raw data for Industry APIs |
 | `platform-feed-export-prod` | Feed DB - currently only "follow" table |
 | `platform-industry-calculations-export-prod` | Milestones, calculations |
@@ -170,7 +161,7 @@ Data freshness: daily dumps in 99% of cases.
 |----------|-------------|
 | `platform-industry-amplitude-bi-prod` | Amplitude analytics export |
 | `platform-import-payments-prod` | Stripe, Apple, Google payments |
-| `platform-industry-mlc-bi-prod` | MLC mechanical licensing data |
+| `hive.mlc` | MLC mechanical licensing data |
 | `platform-industry-zyteig-bi-prod` | Zyte scraped data |
 | `platform-anghami-bi-prod` | Anghami streams |
 | `platform-qobuz-bi-prod` | Qobuz streams |
@@ -196,7 +187,7 @@ Data freshness: daily dumps in 99% of cases.
 ### Find a profile
 ```sql
 SELECT _id, name, popularity, credits_count
-FROM "platform-industry-bi-prod".matvw_catalog_profile
+FROM hive.default.matvw_catalog_profile
 WHERE lower(name) LIKE '%drake%' AND NOT is_deleted
 ORDER BY popularity DESC
 LIMIT 20
@@ -206,12 +197,12 @@ LIMIT 20
 ```sql
 WITH profile_tracks AS (
     SELECT t._id AS track_id
-    FROM "platform-industry-bi-prod".matvw_catalog_track t
+    FROM hive.default.matvw_catalog_track t
     CROSS JOIN UNNEST(t.profiles) AS p(profile)
     WHERE profile.profile_id = 'PROFILE_ID' AND NOT t.is_deleted
 )
 SELECT SUM(streams) AS total_streams
-FROM "platform-industry-bi-prod".matvw_stats_track_daily s
+FROM hive.default.matvw_stats_track_daily s
 JOIN profile_tracks pt ON s.track_id = pt.track_id
 WHERE s.date >= date_format(date_add('day', -30, current_date), '%Y-%m-%d')
 ```
@@ -219,21 +210,21 @@ WHERE s.date >= date_format(date_add('day', -30, current_date), '%Y-%m-%d')
 ### Check if profile is claimed/pro
 ```sql
 WITH claimed AS (
-    SELECT profileid AS profile_id FROM "platform-core-backend-export-prod".public_claiming
+    SELECT profileid AS profile_id FROM postgresql_core.public.public_claiming
     WHERE status = 'processed' GROUP BY 1
 ),
 pro AS (
-    SELECT seatid AS profile_id FROM "platform-core-backend-export-prod".public_roster_seats
+    SELECT seatid AS profile_id FROM postgresql_core.public.public_roster_seats
     WHERE status = 'active' GROUP BY 1
 )
 SELECT
     p._id, p.name,
     cl.profile_id IS NOT NULL AS is_claimed,
     pr.profile_id IS NOT NULL AS is_pro
-FROM "platform-industry-bi-prod".matvw_catalog_profile p
+FROM hive.default.matvw_catalog_profile p
 LEFT JOIN claimed cl ON cl.profile_id = p._id
 LEFT JOIN pro pr ON pr.profile_id = p._id
 WHERE p._id = 'PROFILE_ID'
 ```
 
-See [athena-schemas.md](./athena-schemas.md) for 13 more reusable CTE patterns.
+See [trino-schemas.md](./trino-schemas.md) for 13 more reusable CTE patterns.

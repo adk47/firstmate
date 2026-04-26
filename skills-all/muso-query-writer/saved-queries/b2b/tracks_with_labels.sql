@@ -4,7 +4,8 @@ title: [B2B] Tracks with labels
 athena_id: 950ad686-ffaf-436a-b9d1-c71ea5bb12c0
 primary_tag: b2b
 tags: [b2b]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -17,7 +18,7 @@ with lr as (
         label,
         raw_recording_id,
         album_id
-    from "platform-industry-bi-prod".matvw_catalog_release
+    from hive.default.matvw_catalog_release
     cross join unnest(recording_ids) as r(raw_recording_id)
     where release_type in ('single', 'album') and not is_deleted
 ),
@@ -27,7 +28,7 @@ tl AS (
         _id as track_id,
         COUNT(distinct album_id) AS num_albums,
         MAX(COALESCE(popularity, 0)) AS track_popularity
-    from "platform-industry-bi-prod".matvw_catalog_track
+    from hive.default.matvw_catalog_track
     cross join unnest(raw_recording_ids) as r(raw_recording_id)
     join lr USING(raw_recording_id)
     where not is_deleted

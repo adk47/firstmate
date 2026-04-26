@@ -4,7 +4,8 @@ title: [MLC] Audit - isrc
 athena_id: 48c42407-4c73-4c18-b2e5-7933cd701d62
 primary_tag: mlc
 tags: [mlc]
-athena_database: audit-prod
+trino_catalog: hive
+trino_schema: audit
 description: No description provided
 status: one_off
 pii: unknown
@@ -31,7 +32,7 @@ select isrc,
 	end as action,
 	track_isrcs_with_work as other_track_isrcs_with_work,
 	if(not has_work, predicted_missing_mlc_codes) as predicted_work
-from "audit-prod".audit_isrc
+from hive.audit.audit_isrc
 where cardinality(
 		filter(
 			writer_profile_ids,

@@ -4,7 +4,8 @@ title: [SMM] Top albums last week
 athena_id: 62f73350-6a03-4706-b8f1-b35573ec431a
 primary_tag: smm
 tags: [smm]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -19,9 +20,9 @@ select
     max(p.popularity) as top_artist_popularity, 
     'https://credits.muso.ai/album/' || album_id as muso_url,
     MIN(r.images[1].url) as image_url
-from "platform-industry-bi-prod".matvw_catalog_release as r
+from hive.default.matvw_catalog_release as r
 cross join unnest(artists) as ra(artist)
-join "platform-industry-bi-prod".matvw_catalog_profile as p ON (p._id=artist.catalog_profile_id)
+join hive.default.matvw_catalog_profile as p ON (p._id=artist.catalog_profile_id)
 where 
     not r.is_deleted 
     and is_default_release

@@ -12,14 +12,14 @@ SELECT
     name,
     is_deleted,
     m.*
-FROM "platform-industry-bi-prod".matvw_catalog_profile AS p
+FROM hive.default.matvw_catalog_profile AS p
 CROSS JOIN UNNEST(raw_profile_ids) AS pr(rid)
 RIGHT JOIN (
     SELECT
         'mlc:' || CAST(feedproviderspartyid AS VARCHAR) AS rid,
         ipinamenumber,
         fullname
-    FROM "platform-industry-mlc-bi-prod".parties
+    FROM hive.mlc.parties
     WHERE ipinamenumber IN (
         1026291486  -- Replace with IPI(s) to look up
     )

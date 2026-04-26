@@ -4,7 +4,8 @@ title: SongStats Export V2
 athena_id: 88f4d33e-de23-4333-a2c0-edc0c8936c13
 primary_tag: misc
 tags: [misc]
-athena_database: bi
+trino_catalog: postgresql_analytics
+trino_schema: public
 description: No description provided
 status: experimental
 pii: unknown

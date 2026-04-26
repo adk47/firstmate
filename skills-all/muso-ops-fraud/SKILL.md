@@ -156,8 +156,8 @@ Run as part of daily ops:
 SELECT c.userid, u.email, COUNT(*) as claim_count,
        COUNT(CASE WHEN c.status = 'rejected' THEN 1 END) as rejected,
        COUNT(CASE WHEN c.status = 'reverted' THEN 1 END) as reverted
-FROM "platform-core-backend-export-prod".public_claiming c
-JOIN "platform-core-backend-export-prod".public_users u ON c.userid = u.id
+FROM postgresql_core.public.public_claiming c
+JOIN postgresql_core.public.public_users u ON c.userid = u.id
 GROUP BY c.userid, u.email
 HAVING COUNT(*) > 3 OR COUNT(CASE WHEN c.status IN ('rejected','reverted') THEN 1 END) > 1
 ORDER BY claim_count DESC
@@ -167,7 +167,7 @@ ORDER BY claim_count DESC
 -- Recently created profiles with high credits (potential padding)
 SELECT _id, name, profile_type, credits_count, common_credits,
        popularity, rank
-FROM "platform-industry-bi-prod".matvw_catalog_profile
+FROM hive.default.matvw_catalog_profile
 WHERE credits_count > 50
   AND common_credits < 5
   AND is_deleted = false

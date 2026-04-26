@@ -4,7 +4,8 @@ title: [OKR] Sync % (tracks)
 athena_id: 1a61be29-91e2-4adf-bf9b-66b19f5748ad
 primary_tag: okr
 tags: [okr]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: experimental
 pii: unknown
@@ -13,12 +14,12 @@ last_exported: 2025-01-31
 
 with r as (
 	select _id
-	from "platform-industry-bi-prod"."matvw_raw_recording"
+	from hive.default."matvw_raw_recording"
 	where not coalesce(is_deleted, false)
 ),
 c as (
 	select raw_id
-	from "platform-industry-bi-prod"."matvw_catalog_track"
+	from hive.default."matvw_catalog_track"
 		cross join unnest(raw_recording_ids) as t(raw_id)
 ),
 counts as (

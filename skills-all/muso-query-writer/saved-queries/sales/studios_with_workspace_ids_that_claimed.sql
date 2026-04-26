@@ -4,7 +4,8 @@ title: [Sales] Studios with workspace IDs that claimed
 athena_id: 21170e5f-d26a-4a6f-8f2b-058e509fa98f
 primary_tag: sales
 tags: [sales]
-athena_database: platform-core-backend-export-prod
+trino_catalog: postgresql_core
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown
@@ -15,7 +16,7 @@ with pt as (
     select 
          profileid as _id,
          array_join(array_agg(distinct teamid), ', ') as workspace_ids
-    from "platform-core-backend-export-prod".public_claiming
+    from postgresql_core.public.public_claiming
     where status = 'processed'
     group by 1
 )
@@ -27,7 +28,7 @@ select
     workspace_ids as claimed_workspace_ids,
     common_credits,
     roles
-from "platform-industry-bi-prod".matvw_catalog_profile
+from hive.default.matvw_catalog_profile
 left join pt USING(_id)
 where 
     not is_deleted 

@@ -4,7 +4,8 @@ title: MLC works recordings vs Alternative version Muso
 athena_id: 5d112452-5f6b-4edc-af65-34c73fa4276e
 primary_tag: misc
 tags: [misc]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -23,9 +24,9 @@ _mlc as (
     select 
         iswc, 
         array_agg(isrc) AS mlc_isrcs
-    from "platform-industry-mlc-bi-prod".works
-    	join "platform-industry-mlc-bi-prod".worksrecordings USING(feedprovidersworkid)
-    	join "platform-industry-mlc-bi-prod".recordings USING(feedprovidersrecordingid)
+    from hive.mlc.works
+    	join hive.mlc.worksrecordings USING(feedprovidersworkid)
+    	join hive.mlc.recordings USING(feedprovidersrecordingid)
     	group by 1 
     	having count(1) > 1
 ),
@@ -42,7 +43,7 @@ pt as (
         title,
         isrcs,
         _id
-    from "platform-industry-bi-prod".matvw_catalog_track
+    from hive.default.matvw_catalog_track
     cross join unnest(profiles) as p(pc)
     cross join unnest(pc.catalog_credits) as p(cc)
     where not is_deleted and cc.parent = 'Songwriter'

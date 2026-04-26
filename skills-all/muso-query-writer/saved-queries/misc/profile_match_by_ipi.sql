@@ -4,7 +4,8 @@ title: [TikTok] Profile match by IPI
 athena_id: 4bad4902-b389-4d03-af65-ca28c1b07c8c
 primary_tag: tiktok
 tags: [tiktok]
-athena_database: platform-industry-mlc-bi-prod
+trino_catalog: hive
+trino_schema: mlc
 description: No description provided
 status: one_off
 pii: unknown
@@ -15,7 +16,7 @@ with mlc as (
     select 
         'mlc:'|| cast(feedproviderspartyid as varchar) as rid, 
         ipinamenumber
-    from "platform-industry-mlc-bi-prod".parties 
+    from hive.mlc.parties 
     where ipinamenumber in (
         2852023,
 21007060,
@@ -149,14 +150,14 @@ r as (
         seatid as _id,
         TRUE as in_roster,
         count_if(status = 'active') > 0 as is_paid
-    from "platform-core-backend-export-prod".public_roster_seats 
+    from postgresql_core.public.public_roster_seats 
     group by 1 
 ),
 c as (
     select distinct
         profileid as _id,
         TRUE as is_claimed
-    from "platform-core-backend-export-prod".public_claiming 
+    from postgresql_core.public.public_claiming 
     where status = 'processed'
 )
 select 
@@ -167,7 +168,7 @@ select
     coalesce(is_claimed, FALSE) as is_claimed,
     coalesce(is_paid, FALSE) as is_paid,
     'https://credits.muso.ai/profile/'||_id as muso_url
-from "platform-industry-bi-prod".matvw_catalog_profile
+from hive.default.matvw_catalog_profile
 cross join unnest(raw_profile_ids) as pr(rid)
 join mlc USING(rid)
 left join r USING(_id)

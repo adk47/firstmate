@@ -4,7 +4,8 @@ title: Luminate Users List
 athena_id: e78b2fab-73e9-4a2b-a0a5-7c138581fa9b
 primary_tag: misc
 tags: [misc]
-athena_database: bi
+trino_catalog: postgresql_analytics
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown

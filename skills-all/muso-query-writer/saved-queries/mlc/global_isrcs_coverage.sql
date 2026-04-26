@@ -4,7 +4,8 @@ title: [MLC][Global] ISRCs coverage
 athena_id: d96cbde4-0b22-46b7-9720-5d407aa4c687
 primary_tag: mlc
 tags: [mlc]
-athena_database: audit-prod
+trino_catalog: hive
+trino_schema: audit
 description: No description provided
 status: one_off
 pii: unknown
@@ -37,7 +38,7 @@ from (
         sum(if(is_registered, streams, 0)) as streams_is_registered,
         sum(if(has_work, streams, 0)) as streams_has_work,
         sum(if(has_iswc, streams, 0)) as streams_has_iswc
-    from "audit-prod".audit_isrc
+    from hive.audit.audit_isrc
     group by 1 
 )
 order by 1

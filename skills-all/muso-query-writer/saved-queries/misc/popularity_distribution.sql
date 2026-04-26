@@ -4,7 +4,8 @@ title: [research] Popularity distribution
 athena_id: a30dcb10-a199-49a8-b20d-0f0af75edc85
 primary_tag: research
 tags: [research]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown

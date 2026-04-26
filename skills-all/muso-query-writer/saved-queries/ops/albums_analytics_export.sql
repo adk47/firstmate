@@ -4,7 +4,8 @@ title: [Ops] Albums analytics export
 athena_id: a3dd7a34-2025-4d2f-9b54-60c438304410
 primary_tag: ops
 tags: [ops]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: experimental
 pii: unknown
@@ -26,9 +27,9 @@ al as (
 		MIN(r.title) as album_title,
 		array_join(transform(arbitrary(r.artists), a->a.name), ',') as artists,
 		array_agg(distinct upc) as upcs
-	from "platform-industry-bi-prod".matvw_catalog_track as t
+	from hive.default.matvw_catalog_track as t
 		cross join unnest(catalog_release_ids) as c(release_id)
-		join "platform-industry-bi-prod".matvw_catalog_release as r ON(r._id = release_id)
+		join hive.default.matvw_catalog_release as r ON(r._id = release_id)
 	where not t.is_deleted
 		and not r.is_deleted
 		and cardinality(

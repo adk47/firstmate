@@ -4,7 +4,8 @@ title: [adhoc] Organization credits source vs muso
 athena_id: b4f85e38-fa2a-445c-9edf-7a7305724841
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown

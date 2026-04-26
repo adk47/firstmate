@@ -4,7 +4,8 @@ title: [encore23] Profile metrics
 athena_id: e0511330-1615-4f0b-92c3-3ae5ce08595c
 primary_tag: encore
 tags: [encore]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -14,7 +15,7 @@ last_exported: 2025-01-31
 with t AS (
 	select _id AS track_id,
 		year(from_unixtime(release_timestamp / 1000)) AS release_year
-	from "platform-industry-bi-prod".matvw_catalog_track
+	from hive.default.matvw_catalog_track
 ),
 s AS (
 	select profile_id,
@@ -56,6 +57,6 @@ select p.name,
 	array_join(p.common_credits, ', ') AS common_credits,
 	s.*
 from s
-	join "platform-industry-bi-prod".matvw_catalog_profile AS p ON (p._id = profile_id)
+	join hive.default.matvw_catalog_profile AS p ON (p._id = profile_id)
 where not p.is_deleted
 order by streams desc

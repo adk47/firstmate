@@ -63,7 +63,7 @@ This error is **misleading** — it almost never means credits have run out. The
 
 ## Stripe CLI (Pre-Configured)
 
-Stripe CLI is ready — use `stripe` directly for all payment/billing queries. **For refunds, payments, customers, subscriptions, invoices — always use Stripe CLI first, not Athena.** Stripe is the source of truth for payment data; database imports may be delayed.
+Stripe CLI is ready — use `stripe` directly for all payment/billing queries. **For refunds, payments, customers, subscriptions, invoices — always use Stripe CLI first, not Trino.** Stripe is the source of truth for payment data; database imports may be delayed.
 
 ```bash
 stripe refunds list --limit 500 -d "created[gte]=TIMESTAMP" -d "created[lt]=TIMESTAMP"
@@ -73,7 +73,7 @@ stripe subscriptions list -d "customer=cus_XXX" -d "status=all"
 stripe invoices list -d "customer=cus_XXX"
 ```
 
-Use Athena for: analytics trends, cross-system joins, historical analysis, or when Stripe CLI fails.
+Use Trino (`bash /opt/hydra/scripts/trino-query.sh`) for: analytics trends, cross-system joins, historical analysis, or when Stripe CLI fails.
 
 ## File Output (Slack/OpenClaw only)
 
@@ -270,7 +270,7 @@ Load the reference directory matching your task:
 - **Architecture / Services** → `references/architecture/`
 - **Operations / Support** → `references/operations/`
 - **Retool / Admin Panel** → `references/operations/retool.md`
-- **Athena SQL** → `references/athena/athena-query-reference.md` (profile: muso-flagship-readonly, region: us-west-2 ONLY)
+- **Trino SQL** → `references/trino/trino-query-reference.md` (use `bash /opt/hydra/scripts/trino-query.sh "<SQL>"`; AWS Athena retired 2026-04-25)
 
 ## Repository Index
 
@@ -322,42 +322,47 @@ gh api repos/Muso-AI/analytics-worker/contents/processor/spotify_processor --jq 
 gh api repos/Muso-AI/analytics-worker/contents/processor/spotify_processor/spotify_processor.py --jq '.content' | base64 -d
 ```
 
-## AWS Access
+## OVH Access (AWS retired 2026-04-25)
 
-**You HAVE AWS CLI access. EVERY command MUST include `--region us-west-2` and `--profile muso-flagship-readonly`.**
-
-ALL Muso resources are in us-west-2. Other regions have only abandoned 2022 artifacts. Empty results in us-west-2 means "no data" — do NOT search other regions.
+All Muso production infrastructure now runs on OVH bare-metal K3s (Vint Hill, VA). No AWS CLI calls required for any operational task.
 
 ```bash
-# Verify access
-aws sts get-caller-identity --profile muso-flagship-readonly --region us-west-2
+# Verify K3s access from node-1 (control plane)
+kubectl --context=ovh-prod get nodes
 ```
 
-### AWS Profiles
+### Infrastructure Inventory (OVH)
 
-- `muso-flagship-readonly` — Flagship (068358774785). Full audit: CloudTrail, EKS/ECS/RDS/ElastiCache/MWAA/Lambda/S3, IAM read, Cost Explorer, VPC/SG.
-- `muso-readonly` — Plaque account. S3 only.
+- **K3s cluster:** 11 active nodes + bare-metal PG (node-18 primary, node-19 replica)
+- **PostgreSQL:** Bare-metal PG 17 on node-18 (primary), node-19 (streaming replica), 11 DBs
+- **MongoDB:** rs0 on node-16 (primary, bare-metal) + node-13 (secondary) + node-1 arbiter
+- **Redis/Valkey:** K3s `valkey-node` StatefulSet in `databases` ns
+- **Airflow:** OVH-hosted on node-6-new + node-21
+- **S3:** OVH S3 IO + HP tiers (`s3.us-east-va.io.cloud.ovh.us` / `s3.us-east-va.perf.cloud.ovh.us`)
+- **Trino:** `trino.data-processing.svc.cluster.local:8080` (1 coord + 3 workers)
+- **Vault:** `vault-0` in `vault` ns on node-19 (canonical secrets store)
 
-### Infrastructure Inventory (us-west-2)
+### Legacy AWS Profile (do NOT use)
 
-- **EKS (4):** core-dev, core-prod, platform-data-processing-pipelines-dev, platform-data-processing-pipelines-prod
-- **RDS (6):** core-backend-dev/prod (PG), analytics-dev/prod (PG), platform-stats-dev/prod (Aurora PG)
-- **ElastiCache (2):** core-backend-dev/prod (Redis)
-- **MWAA (2):** dev, prod (Airflow)
-- **S3 (20+):** Data pipelines, Athena results, integrations
+The previously-used `(retired 2026-04-25)` profile and AWS CLI commands are decommissioned. Any historical references to `aws athena`, `aws s3 cp s3://muso-data-lake-prod/`, `aws ssm get-parameter` should now be:
+- `aws athena` → `bash /opt/hydra/scripts/trino-query.sh`
+- `aws s3 cp s3://muso-data-lake-prod/` → `aws --endpoint-url https://s3.us-east-va.io.cloud.ovh.us s3 cp s3://muso-data-lake-hp/` (creds in Vault `secret/muso-prod/ovh-s3-io`)
+- `aws ssm get-parameter` → `vault kv get secret/<path>`
 
-## Data Lake (Athena)
+## Data Lake (Trino on OVH)
 
-| Database | Records | Purpose |
-|----------|---------|---------|
-| `platform-industry-bi-prod` | 190M tracks, 29M profiles, 3.3B daily stats | Industry analytics |
-| `platform-core-backend-export-prod` | 339K users, 60K subscriptions | User/business data |
-| `bi` | - | Business intelligence/reporting |
-| `audit-prod` | - | Catalog audits |
+| Catalog.Schema | Records | Purpose | Backed by |
+|----------------|---------|---------|-----------|
+| `hive.default` | 190M tracks, 29M profiles, 3.3B daily stats | Industry analytics (matvw_*) | OVH S3 IO + HMS |
+| `postgresql_core.public` | 339K users, 60K subscriptions | Live user/business data | OVH PG node-18 |
+| `postgresql_analytics.public` | - | Business intelligence/reporting | OVH PG node-18 |
+| `hive.audit` | - | Catalog audits | OVH S3 IO + HMS |
+| `postgresql_stats.public` | - | analytics_link_*, analytics_video_* | OVH PG node-18 |
+| `hive.mlc` | - | MLC raw parties/works | OVH S3 IO + HMS |
 
-**AWS Profile:** `muso-flagship-readonly` | **Region:** `us-west-2` (only)
+**Query via:** `bash /opt/hydra/scripts/trino-query.sh "<SQL>"` (no AWS profile, no region, no workgroup needed).
 
-Load `references/athena/athena-query-reference.md` for full schema and query patterns.
+Load `references/trino/trino-query-reference.md` for full schema, query patterns, and Athena→Trino DB-name mapping.
 
 ## Key Domain Concepts
 

@@ -28,9 +28,9 @@ select
     count_if(
     DATE(from_unixtime(t.release_timestamp / 1000)) > date('2023-03-30')
     ) AS num_released_1y
-from "platform-industry-bi-prod".matvw_catalog_track as t
+from hive.default.matvw_catalog_track as t
 	cross join unnest(profiles) as _tp(tp)
-	join "platform-industry-bi-prod".matvw_catalog_profile as p ON (
+	join hive.default.matvw_catalog_profile as p ON (
 		tp.profile_id=p._id
 	)
 where 

@@ -4,7 +4,8 @@ title: [AdHoc] Encore profile popularities distribution
 athena_id: 2e47eb06-16a9-4850-acee-f3ca99dab014
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-core-backend-export-prod
+trino_catalog: postgresql_core
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown
@@ -16,7 +17,7 @@ with s AS (
 		date(cast(createdat as timestamp)) AS seat_added_date,
 		createdat,
 		teamid
-	from "platform-core-backend-export-prod".public_roster_seats
+	from postgresql_core.public.public_roster_seats
 	where status = 'active'
 )
 select 
@@ -43,7 +44,7 @@ select
     approx_percentile(popularity, 0.5) AS p50_popularity,
     approx_percentile(popularity, 0.75) AS p75_popularity,
     approx_percentile(popularity, 0.9) AS p90_popularity
-from "platform-industry-bi-prod".matvw_catalog_profile AS p
+from hive.default.matvw_catalog_profile AS p
 join s ON (seatid=_id) 
 group by 1 
 order by 1

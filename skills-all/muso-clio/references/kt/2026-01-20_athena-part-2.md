@@ -1,5 +1,8 @@
 # KT Session: Athena Part 2 - Database Deep Dive
 
+> ⚠️ **HISTORICAL DOC** — This was knowledge transfer about AWS Athena. AWS Athena was retired on **2026-04-25** in favor of Trino on OVH. The data model concepts described below are still valid (same SQL engine family, same tables), but execution commands and DB names have changed. See [trino-query-reference.md](../trino/trino-query-reference.md) for current syntax.
+
+
 **Date:** 2026-01-20
 **Presenter:** Oleg Mamchich
 **Attendees:** Jay Ruffing, Serhii Ostapchuk, Ihor Shchuruk, Federico Cappuccilli

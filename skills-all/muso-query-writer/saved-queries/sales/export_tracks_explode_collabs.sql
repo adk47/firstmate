@@ -4,7 +4,8 @@ title: [Sales] Export tracks explode collabs
 athena_id: e6848fa8-d892-490d-b436-6cc3ba717037
 primary_tag: sales
 tags: [sales]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: experimental
 pii: unknown
@@ -42,9 +43,9 @@ t as (
 			),
 			' | '
 		) as spotify_urls
-	from "platform-industry-bi-prod".matvw_catalog_track as t
+	from hive.default.matvw_catalog_track as t
 		cross join unnest(profiles) as tp(pc)
-		join "platform-industry-bi-prod".matvw_catalog_profile as p ON (p._id = pc.profile_id)
+		join hive.default.matvw_catalog_profile as p ON (p._id = pc.profile_id)
 		cross join unnest(array_distinct(transform(pc.catalog_credits, c->c.child))) as ccc(role)
 	where cardinality(
 			filter(

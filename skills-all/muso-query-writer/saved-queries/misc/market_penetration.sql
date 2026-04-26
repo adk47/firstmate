@@ -4,7 +4,8 @@ title: [Product] Market penetration
 athena_id: 30a64804-8161-4985-8840-b13006a6229e
 primary_tag: product
 tags: [product]
-athena_database: platform-core-backend-export-prod
+trino_catalog: postgresql_core
+trino_schema: public
 description: No description provided
 status: experimental
 pii: unknown
@@ -21,7 +22,7 @@ with p as (
             profile_type='organization' as is_company,
             coalesce(popularity, 0) as popularity,
             coalesce(credits_count, 0) as credits_count
-        from "platform-industry-bi-prod".matvw_catalog_profile
+        from hive.default.matvw_catalog_profile
         where not is_deleted and profile_type in ('organization', 'artist', 'professional')
     )
 ),
@@ -55,13 +56,13 @@ s as (
 c as (
     select 
         distinct profileid as profile_id, TRUE as is_claimed
-    from "platform-core-backend-export-prod".public_claiming 
+    from postgresql_core.public.public_claiming 
     where status = 'processed'
 ),
 r as (
     select 
         distinct seatid as profile_id, TRUE as in_roster
-    from "platform-core-backend-export-prod".public_roster_seats
+    from postgresql_core.public.public_roster_seats
 )
 select 
     is_company,

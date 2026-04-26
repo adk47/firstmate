@@ -14,12 +14,12 @@ last_exported: 2025-01-31
 with p AS (
 	select _id AS profileid,
 		_id as profile_id
-	from "platform-industry-bi-prod".matvw_catalog_profile as p
+	from hive.default.matvw_catalog_profile as p
 	where not p.is_deleted
 	union
 	select split_part(pid, ':', 2) AS profileid,
 		_id as profile_id
-	from "platform-industry-bi-prod".matvw_catalog_profile as p
+	from hive.default.matvw_catalog_profile as p
 		cross join unnest(raw_profile_ids) AS r(pid)
 	where not p.is_deleted
 		and pid like 'muso:'
@@ -78,7 +78,7 @@ select profile_id,
 	num_member_ofs,
 	min_position AS top_category_position,
 	cardinality(p.raw_profile_ids) AS num_raw_profiles
-from "platform-data-merging-catalog-prod".ops_for_review__staging_profiles AS p
+from postgresql_industry.public.ops_for_review__staging_profiles AS p
 	JOIN c USING(profile_id)
 	left join m using(profile_id)
 	left join mo using(profile_id)

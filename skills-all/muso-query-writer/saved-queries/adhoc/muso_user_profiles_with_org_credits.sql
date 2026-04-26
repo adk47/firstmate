@@ -4,7 +4,8 @@ title: [adhoc] Muso User Profiles with org credits
 athena_id: 877dc162-33d2-4f68-b466-ee257e7b71b2
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -27,7 +28,7 @@ with c AS (
         seatid as _id, 
         TRUE AS in_seats ,
         BOOL_OR(COALESCE(status='active', false)) AS has_analytics
-    from "platform-core-backend-export-prod".public_roster_seats
+    from postgresql_core.public.public_roster_seats
     group by 1
 )
 select 

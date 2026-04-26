@@ -25,7 +25,7 @@ and audio_id=632566784064754
 order by import_date desc
 limit 100
 
-select count(1) from "platform-data-merging-catalog-prod"."zyte_capture__ig_messages"
+select count(1) from postgresql_industry.public."zyte_capture__ig_messages"
 
 
 select

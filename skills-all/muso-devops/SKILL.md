@@ -21,7 +21,7 @@ Source: [DevOps Knowledge Transfer (Notion)](https://www.notion.so/DevOps-Knowle
 
 | Profile | Account | Resources | Region |
 |---------|---------|-----------|--------|
-| `muso-flagship-readonly` | Flagship | Athena, Glue (91 DBs), Route53, Lambda, ECS, EKS | us-west-2 |
+| `(retired 2026-04-25)` | Flagship | Athena, Glue (91 DBs), Route53, Lambda, ECS, EKS | us-west-2 |
 | `muso-readonly` | Plaque | S3 buckets | us-west-2 |
 
 ### CRITICAL: Region Policy
@@ -35,14 +35,16 @@ Source: [DevOps Knowledge Transfer (Notion)](https://www.notion.so/DevOps-Knowle
 
 ```bash
 # Athena/Glue (Flagship)
-aws athena list-named-queries --profile muso-flagship-readonly --region us-west-2
-aws glue get-databases --profile muso-flagship-readonly --region us-west-2
+# RETIRED 2026-04-25 — saved queries now in skills-all/muso-query-writer/saved-queries/
+# (legacy: aws athena list-named-queries) 
+# RETIRED 2026-04-25 — use bash /opt/hydra/scripts/trino-query.sh "SHOW SCHEMAS FROM hive"
+# (legacy: aws glue get-databases) 
 
 # Lambda (Flagship) - us-west-2 ONLY
-aws lambda list-functions --profile muso-flagship-readonly --region us-west-2
+aws lambda list-functions 
 
 # S3 (Plaque)
-aws s3 ls --profile muso-readonly --region us-west-2
+aws s3 ls --profile muso-readonly 
 ```
 
 ## When to Use

@@ -4,7 +4,8 @@ title: [AdHoc] Non claimed profiles muso credits
 athena_id: 10fbca53-6f96-4a66-b30a-ff71af04a33f
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -16,14 +17,14 @@ with s as (
 		TRUE as is_in_seats,
 		BOOL_OR(status = 'active') as is_pro,
 		BOOL_OR(type = 'organization') as is_org
-	from "platform-core-backend-export-prod".public_roster_seats
+	from postgresql_core.public.public_roster_seats
 	group by 1
 ),
 cl as (
 	select profileid as _id,
 		TRUE as is_claiming_attempted,
 		BOOL_OR(status = 'processed') as is_claimed
-	from "platform-core-backend-export-prod".public_claiming
+	from postgresql_core.public.public_claiming
 	group by 1
 )
 select p._id as profile_id,
@@ -36,12 +37,12 @@ select p._id as profile_id,
 	arbitrary(p.profile_type) as profile_type,
 	arbitrary(p.common_credits) as profile_common_credits
 from "platform-industry-calc-common-prod".calc_profile_track_credits as c
-	join "platform-industry-bi-prod".matvw_catalog_track as t ON (t._id=c.master_track_id)
-	join "platform-industry-bi-prod".matvw_catalog_profile as p ON (c.profile_id = p._id)
+	join hive.default.matvw_catalog_track as t ON (t._id=c.master_track_id)
+	join hive.default.matvw_catalog_profile as p ON (c.profile_id = p._id)
 	left join s ON(s._id = p._id)
 	left join cl ON(cl._id = p._id)
 	cross join unnest(raw_recording_credit_ids) AS cr(rcid)
-	join "platform-industry-bi-prod".matvw_raw_recording_credit AS r ON(rcid = r._id)
+	join hive.default.matvw_raw_recording_credit AS r ON(rcid = r._id)
 where not p.is_deleted
 	and not t.is_deleted
 -- 	and t.popularity > 0 -- and p.profile_type in ('artist', 'professional')

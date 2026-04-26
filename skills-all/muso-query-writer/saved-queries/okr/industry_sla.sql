@@ -20,7 +20,7 @@ with p AS (
 		cast(
 			from_unixtime(created_timestamp / 1000) as date
 		) AS created
-	from "platform-industry-bi-prod"."matvw_catalog_profile"
+	from hive.default."matvw_catalog_profile"
 	where profile_type in ('professional', 'artist')
 		and not COALESCE(is_deleted, false)
 ),
@@ -32,7 +32,7 @@ c AS (
 				from_unixtime(updated_timestamp / 1000) as date
 			)
 		) AS crd_upd
-	from "platform-industry-bi-prod"."matvw_catalog_master_credit"
+	from hive.default."matvw_catalog_master_credit"
 		right join p USING(profile_id)
 	group by 1
 )

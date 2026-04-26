@@ -4,7 +4,8 @@ title: Muso Alternatives not in MLC
 athena_id: b915c82c-21c9-49be-b3ff-7c3a5ac4e6f2
 primary_tag: misc
 tags: [misc]
-athena_database: platform-industry-mlc-bi-prod
+trino_catalog: hive
+trino_schema: mlc
 description: No description provided
 status: one_off
 pii: unknown
@@ -19,9 +20,9 @@ _mlc as (
     select 
         iswc, 
         array_agg(isrc) AS mlc_isrcs
-    from "platform-industry-mlc-bi-prod".works
-    	join "platform-industry-mlc-bi-prod".worksrecordings USING(feedprovidersworkid)
-    	join "platform-industry-mlc-bi-prod".recordings USING(feedprovidersrecordingid)
+    from hive.mlc.works
+    	join hive.mlc.worksrecordings USING(feedprovidersworkid)
+    	join hive.mlc.recordings USING(feedprovidersrecordingid)
     	group by 1 
     	having count(1) > 1
 ),
@@ -40,7 +41,7 @@ pt as (
         isrcs,
         _id,
         popularity
-    from "platform-industry-bi-prod".matvw_catalog_track
+    from hive.default.matvw_catalog_track
     cross join unnest(profiles) as p(pc)
     cross join unnest(pc.catalog_credits) as p(cc)
     where not is_deleted and cc.parent = 'Songwriter'

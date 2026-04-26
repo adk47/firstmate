@@ -14,17 +14,18 @@
 
 | Profile | Account | Resources | Region |
 |---------|---------|-----------|--------|
-| `muso-flagship-readonly` | Flagship | Athena, Glue (91 DBs), Route53 | us-west-2 |
+| `(retired 2026-04-25)` | Flagship | Athena, Glue (91 DBs), Route53 | us-west-2 |
 | `muso-readonly` | Plaque | S3 buckets | us-west-2 |
 
 ```bash
 # Configure read-only profiles
-aws configure --profile muso-flagship-readonly
+aws configure 
 aws configure --profile muso-readonly
 
 # Test access
-aws athena list-named-queries --profile muso-flagship-readonly --region us-west-2
-aws s3 ls --profile muso-readonly --region us-west-2
+# RETIRED 2026-04-25 — saved queries now in skills-all/muso-query-writer/saved-queries/
+# (legacy: aws athena list-named-queries) 
+aws s3 ls --profile muso-readonly 
 
 # For infrastructure management (write access)
 aws configure --profile muso-dev

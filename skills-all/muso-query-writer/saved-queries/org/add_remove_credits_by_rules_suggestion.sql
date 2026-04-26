@@ -4,7 +4,8 @@ title: [org] Add/remove credits by rules suggestion
 athena_id: f5cd5f82-9baf-4b5e-a3e9-8f759866ae5c
 primary_tag: org
 tags: [org]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -16,8 +17,8 @@ with o AS (
 		arbitrary(t.name) AS workspace_name,
 		arbitrary(if(type = 'organization', seatid)) AS org_id,
 		array_agg(seatid) AS profile_ids
-	from "platform-core-backend-export-prod".public_roster_seats AS s
-		join "platform-core-backend-export-prod".public_teams AS t ON (teamid = t.id)
+	from postgresql_core.public.public_roster_seats AS s
+		join postgresql_core.public.public_teams AS t ON (teamid = t.id)
 	where status = 'active'
 	group by 1
 	having count_if(type = 'organization') = 1
@@ -34,14 +35,14 @@ op AS (
 		name AS org_name,
 		o.*
 	from o
-		join "platform-industry-bi-prod".matvw_catalog_profile ON (_id = org_id)
+		join hive.default.matvw_catalog_profile ON (_id = org_id)
 ),
 pc AS (
 	select master_track_id AS track_id,
 		org_id,
 		arbitrary(org_name) AS org_name,
 		arbitrary(workspace_name) AS workspace_name
-	from "platform-industry-bi-prod".matvw_catalog_master_credit
+	from hive.default.matvw_catalog_master_credit
 		join (
 			select profile_id,
 				org_id,
@@ -75,7 +76,7 @@ oc AS (
 		org_id,
 		arbitrary(org_name) AS org_name,
 		arbitrary(workspace_name) AS workspace_name
-	from "platform-industry-bi-prod".matvw_catalog_master_credit
+	from hive.default.matvw_catalog_master_credit
 		join op ON (profile_id = org_id)
 	where cardinality(common_credits) > 0
 	group by 1,
@@ -99,5 +100,5 @@ select workspace_name,
 	popularity,
 	'https://credits.muso.ai/track/' || track_id AS track_url
 from t
-join "platform-industry-bi-prod".matvw_catalog_track ON (_id=track_id)
+join hive.default.matvw_catalog_track ON (_id=track_id)
 order by 1,2,3, popularity desc

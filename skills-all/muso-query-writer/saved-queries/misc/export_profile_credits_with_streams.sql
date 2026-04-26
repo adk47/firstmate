@@ -4,7 +4,8 @@ title: [User Request] Export profile credits with streams
 athena_id: 620f3a61-59aa-43fd-b383-5a20b4121f16
 primary_tag: user-request
 tags: [user-request]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: experimental
 pii: unknown
@@ -30,8 +31,8 @@ select t._id as muso_track_id,
 		', '
 	) AS credits,
 	array_join(array_distinct(isrcs), ', ') AS isrcs
-from "platform-industry-bi-prod".matvw_catalog_master_credit as c
-	join "platform-industry-bi-prod".matvw_catalog_track as t ON (t._id = c.master_track_id)
+from hive.default.matvw_catalog_master_credit as c
+	join hive.default.matvw_catalog_track as t ON (t._id = c.master_track_id)
 	left join (
 		select track_id,
 			ce_streams as streams

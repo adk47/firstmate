@@ -4,7 +4,8 @@ title: [email] No images profile claimed
 athena_id: 8347a4ed-7a19-42ae-8df8-540b9b46d8c7
 primary_tag: email
 tags: [email]
-athena_database: platform-core-backend-export-prod
+trino_catalog: postgresql_core
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown
@@ -18,9 +19,9 @@ from (
 		select p._id AS profile_id,
 			count_if(cardinality(p.images) > 0) > 0 AS has_image,
 			count_if(s.status = 'active') > 0 AS is_pro
-		from "platform-core-backend-export-prod".public_claiming AS c
-			join "platform-industry-bi-prod".matvw_catalog_profile AS p ON (c.profileid = p._id)
-			join "platform-core-backend-export-prod".public_roster_seats AS s ON (seatid = p._id)
+		from postgresql_core.public.public_claiming AS c
+			join hive.default.matvw_catalog_profile AS p ON (c.profileid = p._id)
+			join postgresql_core.public.public_roster_seats AS s ON (seatid = p._id)
 		where c.status = 'processed'
 		group by 1
 	)

@@ -4,7 +4,8 @@ title: [org] Label smaller groups
 athena_id: 51405a26-af1d-40ca-9e33-9fa2bff3bd9d
 primary_tag: org
 tags: [org]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -14,7 +15,7 @@ last_exported: 2025-01-31
 with lr AS (
 	select custom_data.label AS label,
 		rid
-	from "platform-industry-bi-prod".matvw_raw_release
+	from hive.default.matvw_raw_release
 		cross join unnest(
 			array_distinct(transform(recordings, r->r.recording_id))
 		) AS r(rid)
@@ -27,7 +28,7 @@ lt as (
 		max(coalesce(popularity, 0)) as popularity,
 		min(from_unixtime(release_timestamp / 1000)) > date('2023-01-01') AS is_new,
 		min(from_unixtime(release_timestamp / 1000)) > date('2022-01-01') AS is_last_2_years
-	from "platform-industry-bi-prod".matvw_catalog_track AS t
+	from hive.default.matvw_catalog_track AS t
 		cross join unnest(raw_recording_ids) AS r(rid)
 		join lr USING(rid)
 	where not t.is_deleted 

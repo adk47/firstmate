@@ -4,7 +4,8 @@ title: [marketing] Profile Contacts
 athena_id: 0e89413a-4e11-4a8b-9283-0a293b354b0c
 primary_tag: marketing
 tags: [marketing]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -37,11 +38,11 @@ select c._id AS profile_id,
 	arbitrary(IF(contact.type = 'twitter', contact.value)) AS twitter,
 	arbitrary(IF(contact.type = 'website', contact.value)) AS website,
 	arbitrary(claim_verification_links) AS claim_verification_links
-from "platform-industry-bi-prod".matvw_catalog_profile as c
+from hive.default.matvw_catalog_profile as c
 	left join pro ON(c._id = pro.profile_id)
 	left join claimed ON(c._id = claimed.profile_id)
 	cross join unnest(raw_profile_ids) AS cr(rid)
-	join "platform-industry-bi-prod".matvw_raw_profile AS r ON (r._id = rid)
+	join hive.default.matvw_raw_profile AS r ON (r._id = rid)
 	cross join unnest(r.contacts) AS rc(contact)
 where nullif(contact.value, '') is not null
 	OR NULLIF(claim_verification_links, '') is not null

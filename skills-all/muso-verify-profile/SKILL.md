@@ -47,7 +47,7 @@ SELECT _id, name, profile_type, profile_sub_type, roles, common_credits,
        credits_count, credits_count_1y, collaborations_count,
        popularity, rank, country, ipis, about, years_active,
        genres, primary_genre, decades, known_as_names, legal_name
-FROM "platform-industry-bi-prod".matvw_catalog_profile
+FROM hive.default.matvw_catalog_profile
 WHERE _id = '<PROFILE_ID>'
   AND is_deleted = false
 ```
@@ -64,7 +64,7 @@ Key signals:
 ```sql
 SELECT id, status, reason, profiletype, verificationlinks,
        createdat, updatedat, teamid, userid, extraprofileids
-FROM "platform-core-backend-export-prod".public_claiming
+FROM postgresql_core.public.public_claiming
 WHERE profileid = '<PROFILE_ID>'
 ```
 
@@ -78,7 +78,7 @@ Interpretation:
 If claimed, also check the team/user:
 ```sql
 SELECT t.name, t.email, t.createdat, t.stripecustomerid
-FROM "platform-core-backend-export-prod".public_teams t
+FROM postgresql_core.public.public_teams t
 WHERE t.id = '<TEAM_ID>'
 ```
 
@@ -90,7 +90,7 @@ Get the profile's top tracks and analyze credit patterns:
 -- Use TRANSFORM + filter to avoid full scan
 SELECT t._id as track_id, t.title, t.popularity, t.default_release_label,
        t.release_timestamp
-FROM "platform-industry-bi-prod".matvw_catalog_track t
+FROM hive.default.matvw_catalog_track t
 WHERE contains(TRANSFORM(t.profiles, x -> x.profile_id), '<PROFILE_ID>')
   AND t.is_deleted = false
 ORDER BY t.popularity DESC
@@ -111,7 +111,7 @@ If profile has IPI numbers, check for duplicates/conflicts:
 ```sql
 -- Check if multiple profiles share the same IPIs (potential merge candidates or fraud)
 SELECT _id, name, profile_type, common_credits, credits_count, ipis
-FROM "platform-industry-bi-prod".matvw_catalog_profile
+FROM hive.default.matvw_catalog_profile
 WHERE (contains(ipis, <IPI_1>) OR contains(ipis, <IPI_2>))
   AND is_deleted = false
 ```

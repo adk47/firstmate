@@ -14,7 +14,7 @@ last_exported: 2025-01-31
 WITH t as (
 	select _id as track_id,
 		from_unixtime(release_timestamp / 1000) >= date('2025-01-01') as is_released_this_year
-	from "platform-industry-bi-prod".matvw_catalog_track
+	from hive.default.matvw_catalog_track
 	where not is_deleted
 ),
 cur_s AS (
@@ -22,7 +22,7 @@ cur_s AS (
 		'2025-11-18' AS date,
 		is_released_this_year,
 		streams
-	FROM "platform-data-merging-catalog-prod".industry_data_processing_analytics_maintenance_daily_v2_track_stats_to_insert
+	FROM postgresql_industry.public.industry_data_processing_analytics_maintenance_daily_v2_track_stats_to_insert
 		left join t USING(track_id)
 ),
 db as (
@@ -34,7 +34,7 @@ db as (
 calc as (
 	select track_id,
 		streams
-	from "platform-data-merging-catalog-prod".industry_data_processing_analytics_maintenance_update_history
+	from postgresql_industry.public.industry_data_processing_analytics_maintenance_update_history
 	where date = '2024-12-31'
 ),
 prev_s AS (

@@ -4,7 +4,8 @@ title: [charts] Top PRODUCERs by country
 athena_id: 9bcd13d4-1357-4d41-8e7f-1d51a9a865c4
 primary_tag: charts
 tags: [charts]
-athena_database: platform-core-backend-export-prod
+trino_catalog: postgresql_core
+trino_schema: public
 description: No description provided
 status: experimental
 pii: unknown
@@ -39,7 +40,7 @@ from (
 					p.name,
 					score
 				from "platform-industry-calc-prod"."calc_credit_score_charts_entries_history" AS s
-					join "platform-industry-bi-prod".matvw_catalog_profile AS p ON (s.profile_id = p._id)
+					join hive.default.matvw_catalog_profile AS p ON (s.profile_id = p._id)
 				where date = '2024-11-28'
 					and category in ('Producer')
 			)

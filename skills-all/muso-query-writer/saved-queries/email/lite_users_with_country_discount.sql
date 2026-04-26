@@ -4,7 +4,8 @@ title: [Emails] Lite users with country discount
 athena_id: b032d3ca-5499-4159-973a-dc09ad040044
 primary_tag: email
 tags: [email]
-athena_database: platform-core-backend-export-prod
+trino_catalog: postgresql_core
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown
@@ -209,19 +210,19 @@ with du as (
 ts as (
 	select t.id as teamid,
 		count_if(status = 'active') > 0 as is_active
-	from "platform-core-backend-export-prod".public_teams as t
-		left join "platform-core-backend-export-prod".public_subscriptions as s ON(t.id = s.teamid)
+	from postgresql_core.public.public_teams as t
+		left join postgresql_core.public.public_subscriptions as s ON(t.id = s.teamid)
 	group by 1
 ),
 lu as (
 	select distinct userid as id
-	from "platform-core-backend-export-prod".public_team_users as tu
+	from postgresql_core.public.public_team_users as tu
 		join ts using(teamid)
 	where not coalesce(is_active, false)
 )
 select email,
 	max(country)
-from "platform-core-backend-export-prod".public_users
+from postgresql_core.public.public_users
 	join lu USING(id)
 	join du USING(id)
 group by 1

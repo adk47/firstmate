@@ -4,7 +4,8 @@ title: [Finance] User historical growth
 athena_id: 99b52fdc-4541-4a96-9633-8d29e4a5df51
 primary_tag: finance
 tags: [finance]
-athena_database: platform-industry-mlc-bi-prod
+trino_catalog: hive
+trino_schema: mlc
 description: No description provided
 status: one_off
 pii: unknown
@@ -26,11 +27,11 @@ select u.id AS user_id,
                 teamid,
                 defaultteamid,
                 teamid <> defaultteamid AS is_b2b_workspace
-            FROM "platform-core-backend-export-prod"."public_users" AS u
-                left join "platform-core-backend-export-prod"."public_team_users" AS tu ON (u.id = userid)
-                left join "platform-core-backend-export-prod"."public_subscriptions" AS su USING (teamid)
-                left join "platform-core-backend-export-prod"."public_roster_seats" AS s USING (teamid)
-                left join "platform-industry-bi-prod"."matvw_catalog_profile" AS p ON (s.seatid = p._id)
+            FROM postgresql_core.public."public_users" AS u
+                left join postgresql_core.public."public_team_users" AS tu ON (u.id = userid)
+                left join postgresql_core.public."public_subscriptions" AS su USING (teamid)
+                left join postgresql_core.public."public_roster_seats" AS s USING (teamid)
+                left join hive.default."matvw_catalog_profile" AS p ON (s.seatid = p._id)
             where date_diff(
                     'day',
                     CAST(SUBSTR(u.createdat, 1, 10) AS date),
@@ -39,7 +40,7 @@ select u.id AS user_id,
             order by u.createdat desc
             
 select *
-from "platform-core-backend-export-prod"."public_subscriptions"
+from postgresql_core.public."public_subscriptions"
 order by createdat asc
 limit 10
 
@@ -54,9 +55,9 @@ from (
         date_trunc('month', date(substr(u.createdat, 1, 10))) as month,
         count(distinct u.id) as num_new,
         count(distinct IF(su.status='active', u.id)) as num_active
-    from "platform-core-backend-export-prod"."public_users" as u
-    left join "platform-core-backend-export-prod"."public_team_users" AS tu ON (u.id = userid)
-    left join "platform-core-backend-export-prod"."public_subscriptions" AS su USING (teamid)
+    from postgresql_core.public."public_users" as u
+    left join postgresql_core.public."public_team_users" AS tu ON (u.id = userid)
+    left join postgresql_core.public."public_subscriptions" AS su USING (teamid)
     group by 1
 )
 order by 1
@@ -75,9 +76,9 @@ from (
             date(substr(u.createdat, 1, 10)) as day,
             count(distinct u.id) as num_new,
             count(distinct IF(su.status='active', u.id)) as num_active
-        from "platform-core-backend-export-prod"."public_users" as u
-        left join "platform-core-backend-export-prod"."public_team_users" AS tu ON (u.id = userid)
-        left join "platform-core-backend-export-prod"."public_subscriptions" AS su USING (teamid)
+        from postgresql_core.public."public_users" as u
+        left join postgresql_core.public."public_team_users" AS tu ON (u.id = userid)
+        left join postgresql_core.public."public_subscriptions" AS su USING (teamid)
         group by 1
     )
 )

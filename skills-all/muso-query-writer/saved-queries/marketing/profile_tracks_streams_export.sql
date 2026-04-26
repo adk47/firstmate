@@ -4,7 +4,8 @@ title: [marketing] Profile Tracks streams export
 athena_id: ee76807e-83e1-42ce-b147-64af36588135
 primary_tag: marketing
 tags: [marketing]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: experimental
 pii: unknown
@@ -26,8 +27,8 @@ with a AS (
 				max(
 					COALESCE(spotifystreams, 0) + COALESCE(soundcloudstreams, 0) + COALESCE(youtubeviews, 0)
 				) AS streams
-			from "platform-core-backend-export-prod"."public_profile_track_stats"
-				join "platform-industry-bi-prod".matvw_catalog_master_credit ON (
+			from postgresql_core.public."public_profile_track_stats"
+				join hive.default.matvw_catalog_master_credit ON (
 					profile_id = profileid
 					and trackid = master_track_id
 				)
@@ -52,7 +53,7 @@ select _id AS track_id,
 		', '
 	) AS artist_names,
 	streams
-from "platform-industry-bi-prod".matvw_catalog_track
+from hive.default.matvw_catalog_track
 	join a USING(_id)
 where not is_deleted
 order by streams desc

@@ -4,7 +4,8 @@ title: [MLC] Top 10K missing ISRCs v2
 athena_id: 1769b314-f791-4451-99ed-486c05a7488d
 primary_tag: mlc
 tags: [mlc]
-athena_database: platform-industry-mlc-bi-prod
+trino_catalog: hive
+trino_schema: mlc
 description: No description provided
 status: one_off
 pii: unknown
@@ -13,10 +14,10 @@ last_exported: 2025-01-31
 
 with mlc as (
 	select distinct isrc, true as is_mlc
-	from "platform-industry-mlc-bi-prod".parties as p
-		join "platform-industry-mlc-bi-prod".workrightshares as ws USING(feedproviderspartyid)
-		join "platform-industry-mlc-bi-prod".worksrecordings as wr USING(feedprovidersworkid)
-		join "platform-industry-mlc-bi-prod".recordings as r USING(feedprovidersrecordingid)
+	from hive.mlc.parties as p
+		join hive.mlc.workrightshares as ws USING(feedproviderspartyid)
+		join hive.mlc.worksrecordings as wr USING(feedprovidersworkid)
+		join hive.mlc.recordings as r USING(feedprovidersrecordingid)
 	where lower(ws.partyrole) like '%publisher%'
 ),
 t as (
@@ -27,7 +28,7 @@ t as (
 		    array_join(transform(artists, a->a.name), ', '),
 		    title
 		) as artists
-	from "platform-industry-bi-prod".matvw_catalog_track
+	from hive.default.matvw_catalog_track
 		cross join unnest(isrcs) as i(isrc)
 		left join mlc ON(
 		    UPPER(replace(i.isrc,'-',''))=UPPER(mlc.isrc)

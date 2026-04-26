@@ -4,7 +4,8 @@ title: [merge] Exact track dups
 athena_id: a4c15acf-6246-4d1c-96c0-6da2ff01f1ce
 primary_tag: merge
 tags: [merge]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -20,7 +21,7 @@ with t as (
 		) AS spotify_ids,
 		popularity,
 		cardinality(raw_recording_ids) AS num_raw_ids
-	from "platform-industry-bi-prod"."matvw_catalog_track"
+	from hive.default."matvw_catalog_track"
 	where not COALESCE(is_deleted, FALSE)
 )
 select 'merge' AS action_type,

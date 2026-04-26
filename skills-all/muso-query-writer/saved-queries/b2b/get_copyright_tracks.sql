@@ -4,7 +4,8 @@ title: [B2B] Get copyright tracks
 athena_id: ba900773-7020-48a9-a003-48e404832602
 primary_tag: b2b
 tags: [b2b]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -31,10 +32,10 @@ select distinct rel.source_release_id AS spotify_album_id,
 	ARBITRARY(r_rec.title) AS recording_title,
 	array_join(ARRAY_AGG(distinct r_p.name), ', ') AS recording_artists
 from rel
-	join "platform-industry-bi-prod"."matvw_raw_release" AS r_rel ON (r_rel.upc = rel.upc)
+	join hive.default."matvw_raw_release" AS r_rel ON (r_rel.upc = rel.upc)
 	cross join unnest(r_rel.recordings) AS rr(recording)
-	join "platform-industry-bi-prod"."matvw_raw_recording" AS r_rec ON (r_rec._id = recording.recording_id)
+	join hive.default."matvw_raw_recording" AS r_rec ON (r_rec._id = recording.recording_id)
 	cross join unnest(r_rec.artist_ids) AS ra(raw_artist_id)
-	join "platform-industry-bi-prod"."matvw_raw_profile" AS r_p ON (r_p._id = raw_artist_id)
+	join hive.default."matvw_raw_profile" AS r_p ON (r_p._id = raw_artist_id)
 where r_rel._id like 'spotify:%'
 group by 1,2 

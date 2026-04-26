@@ -4,7 +4,8 @@ title: [analytics] Total tracks to process
 athena_id: fa5fb307-19a7-4402-8069-294d21173943
 primary_tag: analytics
 tags: [analytics]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -34,7 +35,7 @@ with up AS (
 	WHERE try_cast(profile_id as uuid) is not null
 )
 select count(distinct t._id) AS num_tracks, count(distinct isrc) AS num_isrcs, count(1) as num_profile_track_isrcs
-from "platform-industry-bi-prod".matvw_catalog_master_credit as c
+from hive.default.matvw_catalog_master_credit as c
 	join up USING(profile_id)
-	join "platform-industry-bi-prod".matvw_catalog_track AS t ON (c.master_track_id = t._id)
+	join hive.default.matvw_catalog_track AS t ON (c.master_track_id = t._id)
 	cross join unnest(isrcs) AS i(isrc)

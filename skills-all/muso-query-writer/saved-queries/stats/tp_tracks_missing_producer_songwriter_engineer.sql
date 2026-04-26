@@ -4,7 +4,8 @@ title: [stats] Tp tracks missing producer, songwriter, engineer
 athena_id: e77c0c3c-302d-4126-afc7-e9691fe18e40
 primary_tag: stats
 tags: [stats]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: experimental
 pii: unknown

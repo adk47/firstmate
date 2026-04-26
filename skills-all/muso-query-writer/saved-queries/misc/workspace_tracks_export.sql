@@ -4,7 +4,8 @@ title: [customer] Workspace tracks export
 athena_id: 094e098a-4d01-48a1-a05e-448751307de3
 primary_tag: customer
 tags: [customer]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: experimental
 pii: unknown
@@ -44,9 +45,9 @@ c AS (
 		profile_id,
 		transform(catalog_credits, c->c.child) AS child_credits,
 		p.name AS profile_name
-	from "platform-industry-bi-prod".matvw_catalog_master_credit
+	from hive.default.matvw_catalog_master_credit
 		join s USING(profile_id)
-		join "platform-industry-bi-prod".matvw_catalog_profile AS p ON (p._id = profile_id)
+		join hive.default.matvw_catalog_profile AS p ON (p._id = profile_id)
 )
 select profile_id AS roster_profile_id,
 	profile_name AS roster_profile_name,
@@ -65,7 +66,7 @@ select profile_id AS roster_profile_id,
 		) || '%',
 		'N/A'
 	) AS streams_ytd_pct
-from "platform-industry-bi-prod".matvw_catalog_track
+from hive.default.matvw_catalog_track
 	join a USING(_id)
 	join c USING(_id)
 	cross join unnest(artists) AS a(artist)

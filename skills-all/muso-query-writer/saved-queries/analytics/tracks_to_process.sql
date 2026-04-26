@@ -34,6 +34,6 @@ select count(distinct isrc) AS num_isrcs,
 	count(distinct t._id) AS num_tracks,
 	count(1) AS num_pairs
 from pro
-	join "platform-industry-bi-prod".matvw_catalog_master_credit as c USING(profile_id)
-	join "platform-industry-bi-prod".matvw_catalog_track as t ON(c.master_track_id = t._id)
+	join hive.default.matvw_catalog_master_credit as c USING(profile_id)
+	join hive.default.matvw_catalog_track as t ON(c.master_track_id = t._id)
 	cross join unnest(isrcs) AS i(isrc)

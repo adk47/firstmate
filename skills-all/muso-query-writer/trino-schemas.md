@@ -1,11 +1,11 @@
 ---
-name: muso-athena-query
-description: Write Athena SQL queries against Muso.AI data lake. Use when analyzing music industry data, streaming stats, profiles, credits, MLC gaps, or business metrics.
+name: muso-trino-query
+description: Write Trino SQL queries against Muso.AI's OVH data platform (replaces AWS Athena, retired 2026-04-25). Use when analyzing music industry data, streaming stats, profiles, credits, MLC gaps, or business metrics.
 ---
 
-# Muso.AI Athena Query Writer
+# Muso.AI Trino Query Writer
 
-Write correct, efficient Athena SQL queries for Muso.AI's data lake.
+Write correct, efficient Trino SQL queries for Muso.AI's OVH data platform (Hive on OVH S3 IO + PostgreSQL connectors). AWS Athena was retired 2026-04-25; the SQL grammar is essentially identical (Trino is the engine Athena v3 was built on), but catalog/schema names and execution differ.
 
 ## Quick Reference
 
@@ -13,15 +13,15 @@ Write correct, efficient Athena SQL queries for Muso.AI's data lake.
 
 | Database | Purpose | Key Tables |
 |----------|---------|------------|
-| `platform-industry-bi-prod` | Industry analytics (main) | catalog_track, catalog_profile, stats_track_daily |
-| `platform-core-backend-export-prod` | Users, teams, subscriptions | public_users, public_teams, public_subscriptions |
+| `hive.default` | Industry analytics (main) | catalog_track, catalog_profile, stats_track_daily |
+| `postgresql_core.public` | Users, teams, subscriptions | public_users, public_teams, public_subscriptions |
 | `bi` | Business intelligence | marketing_*, reporting_weekly_* |
-| `audit-prod` | Catalog audits | audit_profile, audit_track, audit_isrc |
+| `hive.audit` | Catalog audits | audit_profile, audit_track, audit_isrc |
 
 ### Table Naming Convention
 
-- Tables in `platform-industry-bi-prod` use prefix `matvw_` (materialized view)
-- Tables in `platform-core-backend-export-prod` use prefix `public_`
+- Tables in `hive.default` use prefix `matvw_` (materialized view)
+- Tables in `postgresql_core.public` use prefix `public_`
 - Always use double quotes for database names with hyphens
 
 ## Core Tables Schema
@@ -44,7 +44,7 @@ SELECT
     images,                     -- array<struct> of cover images
     preview_url,                -- Spotify preview URL
     is_deleted                  -- Soft delete flag
-FROM "platform-industry-bi-prod".matvw_catalog_track
+FROM hive.default.matvw_catalog_track
 WHERE is_deleted = false
 ```
 
@@ -75,7 +75,7 @@ SELECT
     about,                      -- Bio text
     years_active,               -- Years in industry
     is_deleted                  -- Soft delete flag
-FROM "platform-industry-bi-prod".matvw_catalog_profile
+FROM hive.default.matvw_catalog_profile
 WHERE is_deleted = false
 ```
 
@@ -107,7 +107,7 @@ SELECT
     shazams,                    -- Total shazams
     views,                      -- Total video views
     videos                      -- Total video count
-FROM "platform-industry-bi-prod".matvw_stats_track_daily
+FROM hive.default.matvw_stats_track_daily
 ```
 
 ### public_users (339K users)
@@ -125,7 +125,7 @@ SELECT
     emailconfirmed,
     referralcode,
     referredbyuserid
-FROM "platform-core-backend-export-prod".public_users
+FROM postgresql_core.public.public_users
 ```
 
 ### public_teams (339K teams/workspaces)
@@ -138,7 +138,7 @@ SELECT
     stripecustomerid,
     isdefault,                  -- Is personal workspace
     inhouseanalyticsenabled
-FROM "platform-core-backend-export-prod".public_teams
+FROM postgresql_core.public.public_teams
 ```
 
 ### public_subscriptions (60K subscriptions)
@@ -155,7 +155,7 @@ SELECT
     userslimit,                 -- User limit
     externalsubid,              -- External subscription ID
     createdat, updatedat
-FROM "platform-core-backend-export-prod".public_subscriptions
+FROM postgresql_core.public.public_subscriptions
 ```
 
 ## Common Query Patterns
@@ -163,7 +163,7 @@ FROM "platform-core-backend-export-prod".public_subscriptions
 ### Find profile by name
 ```sql
 SELECT _id, name, roles, credits_count, popularity
-FROM "platform-industry-bi-prod".matvw_catalog_profile
+FROM hive.default.matvw_catalog_profile
 WHERE lower(name) LIKE lower('%drake%')
   AND is_deleted = false
 ORDER BY popularity DESC
@@ -173,7 +173,7 @@ LIMIT 20
 ### Get tracks for a profile
 ```sql
 SELECT t._id, t.title, t.isrcs, t.release_timestamp
-FROM "platform-industry-bi-prod".matvw_catalog_track t
+FROM hive.default.matvw_catalog_track t
 CROSS JOIN UNNEST(t.profiles) AS p(profile)
 WHERE profile.profile_id = 'PROFILE_ID_HERE'
   AND t.is_deleted = false
@@ -184,7 +184,7 @@ ORDER BY t.release_timestamp DESC
 ```sql
 WITH profile_tracks AS (
     SELECT t._id as track_id
-    FROM "platform-industry-bi-prod".matvw_catalog_track t
+    FROM hive.default.matvw_catalog_track t
     CROSS JOIN UNNEST(t.profiles) AS p(profile)
     WHERE profile.profile_id = 'PROFILE_ID_HERE'
       AND t.is_deleted = false
@@ -193,7 +193,7 @@ SELECT
     SUM(s.spotify_streams) as total_spotify,
     SUM(s.youtube_streams) as total_youtube,
     SUM(s.streams) as total_streams
-FROM "platform-industry-bi-prod".matvw_stats_track_daily s
+FROM hive.default.matvw_stats_track_daily s
 JOIN profile_tracks pt ON s.track_id = pt.track_id
 WHERE s.date >= date_format(date_add('day', -30, current_date), '%Y-%m-%d')
 ```
@@ -201,7 +201,7 @@ WHERE s.date >= date_format(date_add('day', -30, current_date), '%Y-%m-%d')
 ### Find tracks by ISRC
 ```sql
 SELECT _id, title, artists, release_timestamp
-FROM "platform-industry-bi-prod".matvw_catalog_track
+FROM hive.default.matvw_catalog_track
 WHERE contains(isrcs, 'USRC12345678')
   AND is_deleted = false
 ```
@@ -213,8 +213,8 @@ SELECT
     t.title,
     t.artists[1].name as primary_artist,
     SUM(s.streams) as total_streams
-FROM "platform-industry-bi-prod".matvw_stats_track_daily s
-JOIN "platform-industry-bi-prod".matvw_catalog_track t ON s.track_id = t._id
+FROM hive.default.matvw_stats_track_daily s
+JOIN hive.default.matvw_catalog_track t ON s.track_id = t._id
 WHERE s.date >= date_format(date_add('day', -30, current_date), '%Y-%m-%d')
   AND t.is_deleted = false
 GROUP BY t._id, t.title, t.artists[1].name
@@ -228,7 +228,7 @@ SELECT
     plan,
     service,
     COUNT(*) as subscriber_count
-FROM "platform-core-backend-export-prod".public_subscriptions
+FROM postgresql_core.public.public_subscriptions
 WHERE status = 'active'
 GROUP BY plan, service
 ORDER BY subscriber_count DESC
@@ -239,7 +239,7 @@ ORDER BY subscriber_count DESC
 SELECT
     date_trunc('month', date_parse(createdat, '%Y-%m-%d %H:%i:%s')) as month,
     COUNT(*) as new_users
-FROM "platform-core-backend-export-prod".public_users
+FROM postgresql_core.public.public_users
 WHERE createdat IS NOT NULL
 GROUP BY 1
 ORDER BY 1
@@ -250,7 +250,7 @@ ORDER BY 1
 SELECT
     c.status,
     COUNT(*) as profile_count
-FROM "platform-industry-bi-prod".matvw_muso_claiming c
+FROM hive.default.matvw_muso_claiming c
 GROUP BY c.status
 ```
 
@@ -260,13 +260,13 @@ GROUP BY c.status
 ```sql
 -- Get all ISRCs from a track
 SELECT t._id, isrc
-FROM "platform-industry-bi-prod".matvw_catalog_track t
+FROM hive.default.matvw_catalog_track t
 CROSS JOIN UNNEST(t.isrcs) AS i(isrc)
 WHERE t._id = 'TRACK_ID'
 
 -- Get all artists from tracks
 SELECT t._id, artist.catalog_profile_id, artist.name
-FROM "platform-industry-bi-prod".matvw_catalog_track t
+FROM hive.default.matvw_catalog_track t
 CROSS JOIN UNNEST(t.artists) AS a(artist)
 ```
 
@@ -279,7 +279,7 @@ SELECT
     audio_features.energy,
     audio_features.danceability,
     audio_features.tempo
-FROM "platform-industry-bi-prod".matvw_catalog_track
+FROM hive.default.matvw_catalog_track
 WHERE audio_features IS NOT NULL
 ```
 
@@ -305,27 +305,27 @@ Athena charges ~$5 per TB scanned. These tables can be expensive:
 
 ```sql
 -- 1. ALWAYS use LIMIT when exploring
-SELECT * FROM "platform-industry-bi-prod".matvw_catalog_track
+SELECT * FROM hive.default.matvw_catalog_track
 LIMIT 100;  -- Never omit during development
 
 -- 2. Test JOINs on small subsets first
 WITH sample_tracks AS (
-    SELECT _id FROM "platform-industry-bi-prod".matvw_catalog_track
+    SELECT _id FROM hive.default.matvw_catalog_track
     LIMIT 1000  -- Sample first!
 )
 SELECT s.*
-FROM "platform-industry-bi-prod".matvw_stats_track_daily s
+FROM hive.default.matvw_stats_track_daily s
 JOIN sample_tracks t ON s.track_id = t._id
 LIMIT 100;
 
 -- 3. Use date filters on stats tables IMMEDIATELY
-SELECT * FROM "platform-industry-bi-prod".matvw_stats_track_daily
+SELECT * FROM hive.default.matvw_stats_track_daily
 WHERE date >= '2025-01-01'  -- Always filter date first!
   AND date <= '2025-01-07'  -- Narrow window for testing
 LIMIT 100;
 
 -- 4. Check row counts before full queries
-SELECT COUNT(*) FROM "platform-industry-bi-prod".matvw_catalog_track
+SELECT COUNT(*) FROM hive.default.matvw_catalog_track
 WHERE lower(title) LIKE '%beatles%';  -- Know what you're dealing with
 ```
 
@@ -333,10 +333,10 @@ WHERE lower(title) LIKE '%beatles%';  -- Know what you're dealing with
 
 ```sql
 -- BAD: Full table scan on 3.3B rows
-SELECT SUM(streams) FROM "platform-industry-bi-prod".matvw_stats_track_daily;
+SELECT SUM(streams) FROM hive.default.matvw_stats_track_daily;
 
 -- GOOD: Filter by date range
-SELECT SUM(streams) FROM "platform-industry-bi-prod".matvw_stats_track_daily
+SELECT SUM(streams) FROM hive.default.matvw_stats_track_daily
 WHERE date >= '2025-01-01' AND date < '2025-02-01';
 
 -- BAD: Cross join without limits during development
@@ -423,24 +423,24 @@ Before running any query, verify:
 ```sql
 -- BAD: Join then filter (memory explosion)
 SELECT p.name, SUM(s.streams)
-FROM "platform-industry-bi-prod".matvw_stats_track_daily s
-JOIN "platform-industry-bi-prod".matvw_catalog_track t ON s.track_id = t._id
+FROM hive.default.matvw_stats_track_daily s
+JOIN hive.default.matvw_catalog_track t ON s.track_id = t._id
 CROSS JOIN UNNEST(t.profiles) AS pr(profile)
-JOIN "platform-industry-bi-prod".matvw_catalog_profile p ON p._id = profile.profile_id
+JOIN hive.default.matvw_catalog_profile p ON p._id = profile.profile_id
 WHERE p._id = 'TARGET_PROFILE_ID'
 GROUP BY 1;
 
 -- GOOD: Filter in CTE first, then join
 WITH target_tracks AS (
     SELECT t._id AS track_id
-    FROM "platform-industry-bi-prod".matvw_catalog_track t
+    FROM hive.default.matvw_catalog_track t
     CROSS JOIN UNNEST(t.profiles) AS pr(profile)
     WHERE profile.profile_id = 'TARGET_PROFILE_ID'
       AND NOT t.is_deleted
 ),
 filtered_stats AS (
     SELECT track_id, SUM(streams) AS total_streams
-    FROM "platform-industry-bi-prod".matvw_stats_track_daily
+    FROM hive.default.matvw_stats_track_daily
     WHERE date >= date_format(date_add('day', -30, current_date), '%Y-%m-%d')
     GROUP BY 1
 )
@@ -455,13 +455,13 @@ JOIN filtered_stats fs ON fs.track_id = tt.track_id;
 
 ```sql
 -- BAD: Unnest all 190M tracks then filter
-SELECT * FROM "platform-industry-bi-prod".matvw_catalog_track t
+SELECT * FROM hive.default.matvw_catalog_track t
 CROSS JOIN UNNEST(t.profiles) AS p(profile)
 WHERE profile.profile_id = 'TARGET_ID';
 
 -- GOOD: Filter tracks first using contains(), then unnest
 SELECT t._id, t.title, profile.profile_id, credit.child AS role
-FROM "platform-industry-bi-prod".matvw_catalog_track t
+FROM hive.default.matvw_catalog_track t
 CROSS JOIN UNNEST(t.profiles) AS p(profile)
 CROSS JOIN UNNEST(profile.catalog_credits) AS c(credit)
 WHERE contains(transform(t.profiles, x -> x.profile_id), 'TARGET_ID')  -- Filter first!
@@ -479,12 +479,12 @@ SELECT * FROM tracks WHERE artist_name = 'Drake';
 
 -- GOOD: Resolve name to ID first, then use ID
 WITH target_profile AS (
-    SELECT _id FROM "platform-industry-bi-prod".matvw_catalog_profile
+    SELECT _id FROM hive.default.matvw_catalog_profile
     WHERE lower(name) = 'drake' AND NOT is_deleted
     ORDER BY popularity DESC LIMIT 1
 )
 SELECT t.*
-FROM "platform-industry-bi-prod".matvw_catalog_track t
+FROM hive.default.matvw_catalog_track t
 CROSS JOIN UNNEST(t.profiles) AS p(profile)
 WHERE profile.profile_id = (SELECT _id FROM target_profile)
   AND NOT t.is_deleted;
@@ -497,12 +497,12 @@ WHERE profile.profile_id = (SELECT _id FROM target_profile)
 ```sql
 -- BAD: Still scans full table despite LIMIT
 SELECT COUNT(*), AVG(streams)
-FROM "platform-industry-bi-prod".matvw_stats_track_daily
+FROM hive.default.matvw_stats_track_daily
 LIMIT 1000;
 
 -- GOOD: Sample 0.1% of data for exploratory queries
 SELECT COUNT(*) * 1000 AS estimated_count, AVG(streams)
-FROM "platform-industry-bi-prod".matvw_stats_track_daily
+FROM hive.default.matvw_stats_track_daily
 TABLESAMPLE BERNOULLI (0.1);
 ```
 
@@ -512,10 +512,10 @@ TABLESAMPLE BERNOULLI (0.1);
 
 ```sql
 -- BAD: Memory explosion on huge tables
-SELECT COUNT(DISTINCT track_id) FROM "platform-industry-bi-prod".matvw_stats_track_daily;
+SELECT COUNT(DISTINCT track_id) FROM hive.default.matvw_stats_track_daily;
 
 -- GOOD: ~2% error but 10x faster
-SELECT approx_distinct(track_id) FROM "platform-industry-bi-prod".matvw_stats_track_daily
+SELECT approx_distinct(track_id) FROM hive.default.matvw_stats_track_daily
 WHERE date >= date_format(date_add('day', -30, current_date), '%Y-%m-%d');
 ```
 
@@ -534,7 +534,7 @@ WITH external_isrcs AS (
     SELECT UPPER(REPLACE(isrc, '-', '')) AS isrc FROM external_data
 )
 SELECT t._id, t.title, e.isrc
-FROM "platform-industry-bi-prod".matvw_catalog_track t
+FROM hive.default.matvw_catalog_track t
 CROSS JOIN UNNEST(t.isrcs) AS i(isrc)
 JOIN external_isrcs e ON UPPER(REPLACE(i.isrc, '-', '')) = e.isrc
 WHERE NOT t.is_deleted;
@@ -570,7 +570,7 @@ SELECT LPAD(CAST(ipi AS VARCHAR), 11, '0') AS padded_ipi
 
 | Profile | Account | Resources |
 |---------|---------|-----------|
-| `muso-flagship-readonly` | Flagship | Athena, Glue (91 DBs), Route53, Lambda, ECS, EKS |
+| `(retired 2026-04-25)` | Flagship | Athena, Glue (91 DBs), Route53, Lambda, ECS, EKS |
 | `muso-readonly` | Plaque | S3 buckets |
 
 ### CRITICAL: Region Policy
@@ -595,39 +595,45 @@ SELECT LPAD(CAST(ipi AS VARCHAR), 11, '0') AS padded_ipi
 
 ```bash
 # Start a query
-aws athena start-query-execution \
+# RETIRED 2026-04-25 — use bash /opt/hydra/scripts/trino-query.sh "<SQL>" instead
+# (legacy: aws athena start-query-execution) \
     --query-string "SELECT * FROM \"platform-industry-bi-prod\".matvw_catalog_profile LIMIT 10" \
     --work-group primary \
-    --profile muso-flagship-readonly \
-    --region us-west-2
+     \
+    
 
 # Check query status
 aws athena get-query-execution \
     --query-execution-id QUERY_ID \
-    --profile muso-flagship-readonly \
-    --region us-west-2
+     \
+    
 
 # Get results
-aws athena get-query-results \
+# RETIRED 2026-04-25 — Trino returns synchronously, no separate get-query-results step
+# (legacy: aws athena get-query-results) \
     --query-execution-id QUERY_ID \
-    --profile muso-flagship-readonly \
-    --region us-west-2
+     \
+    
 ```
 
 ### Exploring Resources
 
 ```bash
 # List saved queries (50+ available)
-aws athena list-named-queries --profile muso-flagship-readonly --region us-west-2
+# RETIRED 2026-04-25 — saved queries now in skills-all/muso-query-writer/saved-queries/
+# (legacy: aws athena list-named-queries) 
 
 # Get a specific saved query
-aws athena get-named-query --named-query-id QUERY_ID --profile muso-flagship-readonly --region us-west-2
+# RETIRED 2026-04-25 — see skills-all/muso-query-writer/saved-queries/
+# (legacy: aws athena get-named-query) --named-query-id QUERY_ID 
 
 # List Glue databases (91 databases)
-aws glue get-databases --profile muso-flagship-readonly --region us-west-2
+# RETIRED 2026-04-25 — use bash /opt/hydra/scripts/trino-query.sh "SHOW SCHEMAS FROM hive"
+# (legacy: aws glue get-databases) 
 
 # Get tables in a database
-aws glue get-tables --database-name platform-industry-bi-prod --profile muso-flagship-readonly --region us-west-2
+# RETIRED 2026-04-25 — use bash /opt/hydra/scripts/trino-query.sh "SHOW TABLES FROM <catalog>.<schema>"
+# (legacy: aws glue get-tables) --database-name platform-industry-bi-prod 
 ```
 
 ## Reusable CTEs & Patterns
@@ -643,8 +649,8 @@ WITH claimed AS (
         TRUE AS is_claimed,
         min_by(t.email, c.createdat) AS claim_email,
         min_by(teamid, c.createdat) AS claim_team_id
-    FROM "platform-core-backend-export-prod".public_claiming AS c
-    JOIN "platform-core-backend-export-prod".public_teams AS t ON (c.teamid = t.id)
+    FROM postgresql_core.public.public_claiming AS c
+    JOIN postgresql_core.public.public_teams AS t ON (c.teamid = t.id)
     WHERE c.status = 'processed'
     GROUP BY 1
 )
@@ -658,7 +664,7 @@ WITH pro AS (
         seatid AS profile_id,
         TRUE AS is_pro,
         BOOL_OR(type = 'organization') AS is_org
-    FROM "platform-core-backend-export-prod".public_roster_seats
+    FROM postgresql_core.public.public_roster_seats
     WHERE status = 'active'
     GROUP BY 1
 )
@@ -673,7 +679,7 @@ WITH team_subs AS (
         count_if(status = 'active') > 0 AS has_active_sub,
         count_if(status = 'active' AND json_extract_scalar(details, '$.autoRenew') = 'false') > 0 AS is_suspended,
         count_if(status = 'canceled') > 0 AS is_canceled
-    FROM "platform-core-backend-export-prod".public_subscriptions
+    FROM postgresql_core.public.public_subscriptions
     GROUP BY 1
 )
 ```
@@ -685,7 +691,7 @@ Expand profiles to their raw source IDs:
 SELECT
     _id AS profile_id,
     split_part(rid, ':', 2) AS spotify_id
-FROM "platform-industry-bi-prod".matvw_catalog_profile
+FROM hive.default.matvw_catalog_profile
 CROSS JOIN UNNEST(raw_profile_ids) AS r(rid)
 WHERE NOT is_deleted
   AND rid LIKE 'spotify:%'
@@ -695,7 +701,7 @@ SELECT
     _id AS profile_id,
     rid AS raw_profile_id,
     split_part(rid, ':', 1) AS source
-FROM "platform-industry-bi-prod".matvw_catalog_profile
+FROM hive.default.matvw_catalog_profile
 CROSS JOIN UNNEST(raw_profile_ids) AS r(rid)
 WHERE NOT is_deleted
 ```
@@ -709,7 +715,7 @@ SELECT
     profile.profile_id,
     credit.parent AS credit_category,
     credit.child AS credit_role
-FROM "platform-industry-bi-prod".matvw_catalog_track AS t
+FROM hive.default.matvw_catalog_track AS t
 CROSS JOIN UNNEST(t.profiles) AS p(profile)
 CROSS JOIN UNNEST(profile.catalog_credits) AS c(credit)
 WHERE NOT t.is_deleted
@@ -723,7 +729,7 @@ SELECT
     t.title,
     artist.catalog_profile_id AS artist_id,
     artist.name AS artist_name
-FROM "platform-industry-bi-prod".matvw_catalog_track AS t
+FROM hive.default.matvw_catalog_track AS t
 CROSS JOIN UNNEST(t.artists) AS a(artist)
 WHERE NOT t.is_deleted
 ```
@@ -736,7 +742,7 @@ WITH mlc_parties AS (
         cast(feedproviderspartyid AS varchar) AS mlc_party_id,
         ipinamenumber AS ipi,
         fullname AS mlc_name
-    FROM "platform-industry-mlc-bi-prod".parties
+    FROM hive.mlc.parties
     WHERE ipinamenumber > 0
 )
 SELECT
@@ -744,7 +750,7 @@ SELECT
     p.name,
     m.ipi,
     m.mlc_name
-FROM "platform-industry-bi-prod".matvw_catalog_profile AS p
+FROM hive.default.matvw_catalog_profile AS p
 CROSS JOIN UNNEST(p.ipis) AS i(ipi)
 JOIN mlc_parties AS m ON (i.ipi = m.ipi)
 WHERE NOT p.is_deleted
@@ -758,7 +764,7 @@ WITH company_roster AS (
         profile_id AS company_id,
         member_id AS profile_id,
         membership_type  -- 'record_label', 'manager', 'publisher'
-    FROM "platform-industry-bi-prod".matvw_catalog_member
+    FROM hive.default.matvw_catalog_member
     WHERE NOT is_deleted
       AND membership_type IN ('record_label', 'manager', 'publisher')
 )
@@ -769,7 +775,7 @@ SELECT
     p.name,
     p.popularity
 FROM company_roster cr
-JOIN "platform-industry-bi-prod".matvw_catalog_profile AS p ON (p._id = cr.profile_id)
+JOIN hive.default.matvw_catalog_profile AS p ON (p._id = cr.profile_id)
 WHERE NOT p.is_deleted
 ```
 
@@ -786,7 +792,7 @@ WITH ranked_profiles AS (
             PARTITION BY profile_type
             ORDER BY popularity DESC, credits_count DESC
         ) AS popularity_rank
-    FROM "platform-industry-bi-prod".matvw_catalog_profile
+    FROM hive.default.matvw_catalog_profile
     WHERE NOT is_deleted
       AND profile_type IN ('organization', 'artist', 'professional')
 )
@@ -802,7 +808,7 @@ SELECT
     title,
     DATE(FROM_UNIXTIME(release_timestamp / 1000)) AS release_date,
     YEAR(FROM_UNIXTIME(release_timestamp / 1000)) AS release_year
-FROM "platform-industry-bi-prod".matvw_catalog_track
+FROM hive.default.matvw_catalog_track
 
 -- Filter tracks released this year
 WHERE FROM_UNIXTIME(release_timestamp / 1000) >= DATE_TRUNC('year', current_date)
@@ -812,7 +818,7 @@ SELECT
     _id,
     title,
     YEAR(CURRENT_DATE) - YEAR(FROM_UNIXTIME(release_timestamp / 1000)) AS years_since_release
-FROM "platform-industry-bi-prod".matvw_catalog_track
+FROM hive.default.matvw_catalog_track
 ```
 
 ### JSON Extraction from Details
@@ -826,7 +832,7 @@ SELECT
     json_extract_scalar(details, '$.created') AS created_timestamp,
     FROM_UNIXTIME(TRY_CAST(json_extract_scalar(details, '$.periodStart') AS bigint) / 1000) AS period_start,
     FROM_UNIXTIME(TRY_CAST(json_extract_scalar(details, '$.expiresAt') AS bigint) / 1000) AS expires_at
-FROM "platform-core-backend-export-prod".public_subscriptions
+FROM postgresql_core.public.public_subscriptions
 ```
 
 ### Array Operations
@@ -858,13 +864,13 @@ WITH current_stats AS (
     SELECT
         track_id,
         streams
-    FROM "platform-data-merging-catalog-prod".industry_data_processing_analytics_maintenance_daily_v2_track_stats_to_insert
+    FROM postgresql_industry.public.industry_data_processing_analytics_maintenance_daily_v2_track_stats_to_insert
 )
 SELECT
     t._id,
     t.title,
     s.streams
-FROM "platform-industry-bi-prod".matvw_catalog_track AS t
+FROM hive.default.matvw_catalog_track AS t
 LEFT JOIN current_stats AS s ON (s.track_id = t._id)
 WHERE NOT t.is_deleted
 ```
@@ -874,13 +880,13 @@ Common pattern for profile analysis with claiming, pro status, and stats:
 ```sql
 WITH claimed AS (
     SELECT profileid AS profile_id, TRUE AS is_claimed
-    FROM "platform-core-backend-export-prod".public_claiming
+    FROM postgresql_core.public.public_claiming
     WHERE status = 'processed'
     GROUP BY 1
 ),
 pro AS (
     SELECT seatid AS profile_id, TRUE AS is_pro
-    FROM "platform-core-backend-export-prod".public_roster_seats
+    FROM postgresql_core.public.public_roster_seats
     WHERE status = 'active'
     GROUP BY 1
 ),
@@ -888,7 +894,7 @@ profile_tracks AS (
     SELECT
         profile.profile_id,
         t._id AS track_id
-    FROM "platform-industry-bi-prod".matvw_catalog_track AS t
+    FROM hive.default.matvw_catalog_track AS t
     CROSS JOIN UNNEST(t.profiles) AS p(profile)
     WHERE NOT t.is_deleted
 ),
@@ -897,7 +903,7 @@ profile_stats AS (
         pt.profile_id,
         SUM(s.streams) AS total_streams
     FROM profile_tracks pt
-    JOIN "platform-industry-bi-prod".matvw_stats_track_daily AS s ON (s.track_id = pt.track_id)
+    JOIN hive.default.matvw_stats_track_daily AS s ON (s.track_id = pt.track_id)
     WHERE s.date >= date_format(date_add('day', -365, current_date), '%Y-%m-%d')
     GROUP BY 1
 )
@@ -908,7 +914,7 @@ SELECT
     COALESCE(cl.is_claimed, FALSE) AS is_claimed,
     COALESCE(pr.is_pro, FALSE) AS is_pro,
     COALESCE(ps.total_streams, 0) AS streams_last_year
-FROM "platform-industry-bi-prod".matvw_catalog_profile AS p
+FROM hive.default.matvw_catalog_profile AS p
 LEFT JOIN claimed AS cl ON (cl.profile_id = p._id)
 LEFT JOIN pro AS pr ON (pr.profile_id = p._id)
 LEFT JOIN profile_stats AS ps ON (ps.profile_id = p._id)

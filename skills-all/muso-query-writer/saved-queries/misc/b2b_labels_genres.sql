@@ -73,7 +73,7 @@ label_genre AS (
 		) AS top
 	from label_artist
 		cross join unnest(artist_genres) AS g(genre)
-		join "platform-data-merging-catalog-prod"."catalog_industry_db_genres_mapping" ON (original = genre)
+		join postgresql_industry.public."catalog_industry_db_genres_mapping" ON (original = genre)
 	group by 1,
 		2
 )

@@ -22,7 +22,7 @@ with t as (
 		cardinality(profiles) as num_collabs,
 		default_release.title as main_album_title,
 		default_release.label as main_album_label
-	from "platform-industry-bi-prod".matvw_catalog_track
+	from hive.default.matvw_catalog_track
 		cross join unnest(profiles) as tp(p)
 	where p.profile_id = 'e37a6853-05b5-4537-b8cf-ffcb57a595d5'
 -- 		and cardinality(

@@ -244,5 +244,5 @@ select _id as track_id,
 		),
 		','
 	) as spotify_ids
-from "platform-industry-bi-prod".matvw_catalog_track as t
+from hive.default.matvw_catalog_track as t
 	join a USING(_id)

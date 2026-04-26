@@ -4,7 +4,8 @@ title: [catalog] Top unlinked profiles
 athena_id: 69e45618-4771-43f2-9a21-10a998462cc4
 primary_tag: catalog
 tags: [catalog]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown

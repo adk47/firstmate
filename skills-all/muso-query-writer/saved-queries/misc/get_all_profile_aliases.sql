@@ -4,7 +4,8 @@ title: [AI] Get all profile aliases
 athena_id: 8526a964-3859-44b7-a15e-0a75fdf4a3de
 primary_tag: ai
 tags: [ai]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown

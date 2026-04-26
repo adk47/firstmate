@@ -48,7 +48,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 # Supplement with Athena for richer context
 SELECT id, status, reason, profileid, profiletype, userid, teamid,
        verificationlinks, createdat, updatedat
-FROM "platform-core-backend-export-prod".public_claiming
+FROM postgresql_core.public.public_claiming
 WHERE status = 'pending'
 ORDER BY createdat DESC
 LIMIT 20
@@ -82,14 +82,14 @@ Note: Claims list = `GET /w/admin/claiming`, single claim = `GET /w/admin/claimi
 SELECT _id, name, profile_type, credits_count, common_credits,
        collaborations_count, popularity, rank, ipis, country,
        genres, primary_genre, years_active
-FROM "platform-industry-bi-prod".matvw_catalog_profile
+FROM hive.default.matvw_catalog_profile
 WHERE _id = '<profile_id>' AND is_deleted = false
 ```
 
 **Step 3: Check claim history (repeat claimers)**
 ```sql
 SELECT id, status, reason, createdat, userid, teamid
-FROM "platform-core-backend-export-prod".public_claiming
+FROM postgresql_core.public.public_claiming
 WHERE profileid = '<profile_id>'
 ORDER BY createdat DESC
 ```

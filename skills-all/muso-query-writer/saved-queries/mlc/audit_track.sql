@@ -4,7 +4,8 @@ title: [MLC] Audit - track
 athena_id: 244a7836-3e54-452a-8c34-939632577b05
 primary_tag: mlc
 tags: [mlc]
-athena_database: audit-prod
+trino_catalog: hive
+trino_schema: audit
 description: No description provided
 status: one_off
 pii: unknown
@@ -71,7 +72,7 @@ from (
 			NOT BOOL_OR(has_work) as is_missing_work,
 			NOT BOOL_OR(has_iswc) as is_missing_iswcs,
 			NOT BOOL_OR(has_publisher) as is_missing_publisher
-		from "audit-prod".audit_isrc_track
+		from hive.audit.audit_isrc_track
 		where cardinality(
 				filter(
 					profile_ids,

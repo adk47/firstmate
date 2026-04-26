@@ -4,7 +4,8 @@ title: [encore23] Insights Ranks Analytics
 athena_id: 7b9c5abc-29db-47f3-a397-d6ba3395f17d
 primary_tag: encore
 tags: [encore]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -14,7 +15,7 @@ last_exported: 2025-01-31
 with t AS (
 	select _id AS track_id,
 		year(from_unixtime(release_timestamp / 1000)) AS release_year
-	from "platform-industry-bi-prod".matvw_catalog_track
+	from hive.default.matvw_catalog_track
 ),
 s AS (
 	select profile_id,
@@ -39,7 +40,7 @@ s AS (
 				SUM(
 					COALESCE(tiktokviews, 0) + COALESCE(youtubeshortsviews, 0) + COALESCE(instagramviews, 0)
 				) AS video_views
-			from "platform-core-backend-export-prod"."public_profile_track_stats"
+			from postgresql_core.public."public_profile_track_stats"
 			group by 1,
 				2
 			having date_diff(

@@ -41,7 +41,7 @@ from (
 					count(is_claimed) AS num_claimed,
 					count_if(in_seats) AS num_in_seats,
 					count_if(in_active_seats) AS num_in_active_seats
-				from "platform-industry-bi-prod".matvw_catalog_profile
+				from hive.default.matvw_catalog_profile
 					left join (
 						select distinct profileid as _id,
 							TRUE as is_claimed

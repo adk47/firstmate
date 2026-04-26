@@ -69,7 +69,7 @@ muso_genre AS (
 				regional_sub_genre VARCHAR
 			)
 		) AS muso_genre
-	from "platform-data-merging-catalog-prod"."catalog_industry_db_genres_mapping"
+	from postgresql_industry.public."catalog_industry_db_genres_mapping"
 )
 select lower(genre) AS missing_mapping_genre,
 	count(distinct label) AS num_labels

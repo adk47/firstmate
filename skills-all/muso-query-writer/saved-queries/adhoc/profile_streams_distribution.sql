@@ -4,7 +4,8 @@ title: [adhoc] Profile streams distribution
 athena_id: 973c521d-e89e-456b-82d7-a8eace7fe5d6
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-core-backend-export-prod
+trino_catalog: postgresql_core
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown

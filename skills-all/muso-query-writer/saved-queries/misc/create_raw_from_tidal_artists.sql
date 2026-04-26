@@ -4,7 +4,8 @@ title: [sqs] Create raw from tidal artists
 athena_id: ce26f948-e312-474f-b07c-a929160792bf
 primary_tag: sqs
 tags: [sqs]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -24,9 +25,9 @@ from (
 			count(1) AS num_credits,
 			count_if(rrc.credit not like '%artist%') AS num_prof_credits,
 			count(distinct if(rrc.credit not like '%artist%', recording_id)) AS num_recordings
-		from "platform-industry-bi-prod"."matvw_catalog_profile" AS cp
+		from hive.default."matvw_catalog_profile" AS cp
 			cross join unnest(raw_profile_ids) AS rp(rpid)
-			right join "platform-industry-bi-prod"."matvw_raw_profile" AS rp ON (rpid = rp._id)
+			right join hive.default."matvw_raw_profile" AS rp ON (rpid = rp._id)
 			join "platform-industry-db-industry-prod"."raw_recording_credit" AS rrc ON (rp._id = rrc.profile_id)
 		where rp."profile_type" = 'artist'
 			and rp.source = 'tidal'

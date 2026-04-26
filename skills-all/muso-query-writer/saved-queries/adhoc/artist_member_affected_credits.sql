@@ -4,7 +4,8 @@ title: [adhoc] Artist Member affected credits
 athena_id: 06085358-fdbd-48d0-ab4a-fa7ede26835a
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
@@ -58,7 +59,7 @@ from (
 						streams,
 						0
 					) AS affected_streams
-				from "platform-industry-bi-prod".matvw_catalog_master_credit
+				from hive.default.matvw_catalog_master_credit
 					join ts USING(master_track_id)
 			)
 		group by 1

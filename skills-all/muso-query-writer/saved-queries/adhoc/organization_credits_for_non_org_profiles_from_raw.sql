@@ -4,7 +4,8 @@ title: [adhoc] Organization credits for non-org profiles from raw
 athena_id: b129b286-8237-48a4-ab67-ea49e55826c7
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown

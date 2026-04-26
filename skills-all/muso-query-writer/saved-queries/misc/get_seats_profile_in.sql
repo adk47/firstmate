@@ -4,7 +4,8 @@ title: [helper] Get seats profile in
 athena_id: e9bf8892-32b7-4794-b093-eebb628ff021
 primary_tag: helper
 tags: [helper]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown

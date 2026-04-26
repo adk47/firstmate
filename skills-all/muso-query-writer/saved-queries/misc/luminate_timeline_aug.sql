@@ -4,7 +4,8 @@ title: Luminate Timeline Aug
 athena_id: 0cfb9804-2a1a-42f2-b87a-436729a38294
 primary_tag: misc
 tags: [misc]
-athena_database: bi
+trino_catalog: postgresql_analytics
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown

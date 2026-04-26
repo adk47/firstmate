@@ -4,7 +4,8 @@ title: [adhoc] Inhouse analytics links views comparison
 athena_id: dd376447-513e-433b-a27f-d2073b5f45f7
 primary_tag: adhoc
 tags: [adhoc]
-athena_database: platform-core-backend-export-prod
+trino_catalog: postgresql_core
+trino_schema: public
 description: No description provided
 status: one_off
 pii: unknown
@@ -20,7 +21,7 @@ with ss AS (
 		) || ':' || regexp_replace(src.sourceUrl, '.*/', '') AS _id,
 		src.count as views,
 		src.sourceUrl as url
-	from "platform-core-backend-export-prod"."public_track_activities"
+	from postgresql_core.public."public_track_activities"
 		cross join unnest(
 			CAST(
 				json_extract(sources, '$') AS ARRAY(
@@ -43,7 +44,7 @@ ms as (
 		_id,
 		views,
 		url
-	from "platform-industry-bi-prod".matvw_analytics_video
+	from hive.default.matvw_analytics_video
 )
 select track_id,
 	sum(ms.views) AS views_muso,

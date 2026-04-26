@@ -4,7 +4,8 @@ title: [B2B] Get Publisher isrcs
 athena_id: 34040f05-ae0d-410f-b42e-d54341d12d58
 primary_tag: b2b
 tags: [b2b]
-athena_database: platform-industry-mlc-bi-prod
+trino_catalog: hive
+trino_schema: mlc
 description: No description provided
 status: one_off
 pii: unknown
@@ -12,11 +13,11 @@ last_exported: 2025-01-31
 */
 
 select distinct isrc
-from "platform-industry-mlc-bi-prod".workrightshares
-	join "platform-industry-mlc-bi-prod".parties USING (feedproviderspartyid)
-	join "platform-industry-mlc-bi-prod".works USING(feedprovidersworkid)
-	join "platform-industry-mlc-bi-prod".worksrecordings USING(feedprovidersworkid)
-	join "platform-industry-mlc-bi-prod".recordings USING(feedprovidersrecordingid)
+from hive.mlc.workrightshares
+	join hive.mlc.parties USING (feedproviderspartyid)
+	join hive.mlc.works USING(feedprovidersworkid)
+	join hive.mlc.worksrecordings USING(feedprovidersworkid)
+	join hive.mlc.recordings USING(feedprovidersrecordingid)
 where lower(partyrole) like '%publisher%'
 and nullif(isrc, '') is not null
 -- 	and fullname = 'ONE MUSIC ENTERTAINMENT PUBLISHING'

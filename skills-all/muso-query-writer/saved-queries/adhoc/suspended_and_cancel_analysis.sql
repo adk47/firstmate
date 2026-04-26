@@ -24,23 +24,23 @@ with ss as (
 			status = 'active'
 			and coalesce(json_extract_scalar(details, '$.autoRenew'), '') <> 'false'
 		) > 0 as is_active
-	from "platform-core-backend-export-prod"."public_subscriptions"
+	from postgresql_core.public."public_subscriptions"
 	group by 1
 	
--- 	select status, count(1) from "platform-core-backend-export-prod"."public_subscriptions" group by 1
+-- 	select status, count(1) from postgresql_core.public."public_subscriptions" group by 1
 ),
 cl as (
 	select distinct profileid as profile_id,
 		TRUE as is_claimed,
 		teamid
-	from "platform-core-backend-export-prod".public_claiming
+	from postgresql_core.public.public_claiming
 	where status = 'processed'
 ),
 r as (
 	select distinct seatid as profile_id,
 		status = 'active' as is_active_seat,
 		teamid
-	from "platform-core-backend-export-prod".public_roster_seats
+	from postgresql_core.public.public_roster_seats
 ),
 tp as (
 	select teamid,

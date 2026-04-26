@@ -4,7 +4,8 @@ title: [NFC] Usage
 athena_id: 177964a8-3fef-4c06-ac06-04d588b18aab
 primary_tag: nfc
 tags: [nfc]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown

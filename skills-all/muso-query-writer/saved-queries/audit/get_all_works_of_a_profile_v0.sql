@@ -4,7 +4,8 @@ title: [Audit] Get all works of a profile v0
 athena_id: 7bddadc2-fc66-403d-b456-3ff3ca749be5
 primary_tag: audit
 tags: [audit]
-athena_database: audit-prod
+trino_catalog: hive
+trino_schema: audit
 description: No description provided
 status: one_off
 pii: unknown
@@ -15,16 +16,16 @@ with p as (
     select 
         m.feedprovidersworkid as mlc_work_id,
         array_agg(distinct pa.fullname) as represented_by 
-    from "platform-industry-mlc-bi-prod".workrightshares as m
-    join "platform-industry-mlc-bi-prod".workrightshares as p ON p.feedprovidersworkrightshareid = m.feedprovidersparentworkrightshareid
-    join "platform-industry-mlc-bi-prod".parties as pa ON (m.feedproviderspartyid=pa.feedproviderspartyid)
+    from hive.mlc.workrightshares as m
+    join hive.mlc.workrightshares as p ON p.feedprovidersworkrightshareid = m.feedprovidersparentworkrightshareid
+    join hive.mlc.parties as pa ON (m.feedproviderspartyid=pa.feedproviderspartyid)
     where 
         m.partyrole = 'OriginalPublisher' 
         and p.partyrole in ( 'ComposerLyricist', 'Composer', 'Lyricist', 'Arranger', 'SubLyricist', 'Adapter' )
         and p.feedproviderspartyid in (
             select 
                  cast(substr(rid, 5) as int) as rid
-            from "platform-industry-bi-prod".matvw_catalog_profile 
+            from hive.default.matvw_catalog_profile 
             cross join unnest(raw_profile_ids) as r(rid)
             where _id = 'b299b6c9-0f5f-49ea-8a6a-636507ac097b' and rid like 'mlc:%'
         )
@@ -40,7 +41,7 @@ select
     array_join(array_distinct(flatten(array_agg(represented_by))), ', ') as represented_by,
     'https://credits.muso.ai/track/' || min_by(track_id, length(title)) as muso_track_url,
     min_by(spotify_url, length(title)) as spotify_track_url
-from "audit-prod".audit_profile_track
+from hive.audit.audit_profile_track
 cross join unnest(coalesce(split(nullif(mlc_codes, ''), ','), array[cast(NULL as varchar)])) as w (mlc_work_id)
 left join p USING(mlc_work_id)
 where profile_id = 'b299b6c9-0f5f-49ea-8a6a-636507ac097b'

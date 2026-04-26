@@ -4,7 +4,8 @@ title: [WAF] credits.muso.ai IPs to block
 athena_id: 0a2a823e-c461-40c7-b138-baa1400d6e13
 primary_tag: waf
 tags: [waf]
-athena_database: platform-industry-bi-prod
+trino_catalog: hive
+trino_schema: default
 description: No description provided
 status: one_off
 pii: unknown
