@@ -519,6 +519,41 @@ RSYNC_EXCLUDES=(
   --exclude='workspaces/*/.openclaw/'
   --exclude='workspaces/*/IDENTITY.md'
   --exclude='workspaces/*/HEARTBEAT.md'
+  # TOOLS.md follows the same seed-but-runtime-owned pattern as
+  # MEMORY.md/IDENTITY.md/HEARTBEAT.md. The repo carries an initial
+  # seed but agents append/edit at runtime (e.g. when an operator
+  # adds a new MCP-tool entry to a workspace's TOOLS.md from inside
+  # Slack). Tripped pre-flight 2026-04-26 against workspaces/cmo/
+  # and workspaces/finance/. Server-owned post-deploy.
+  --exclude='workspaces/*/TOOLS.md'
+  # Auto-generated TOOLS.md.bak-<ts> files. deploy.sh creates these
+  # right before overwriting TOOLS.md (legacy code path), so they
+  # accumulate on the server. They are recoverable from the live
+  # TOOLS.md, never need to enter version control. Pattern matches
+  # any timestamp-suffixed backup. Tripped pre-flight 2026-04-26.
+  --exclude='workspaces/*/TOOLS.md.bak-*'
+  --exclude='workspaces/*/*.md.bak-*'
+  # Agent-generated images (jpeg/png/webp) — e.g. CMO marketing
+  # mock-ups, Design wireframes. These are output artifacts, not
+  # source-controlled. Already excluded *.png in pre-commit but the
+  # full set of image extensions wasn't covered. Tripped pre-flight
+  # 2026-04-26 against workspaces/cmo/producer-studio-flux2.jpeg.
+  --exclude='workspaces/*/*.jpeg'
+  --exclude='workspaces/*/*.jpg'
+  --exclude='workspaces/*/*.webp'
+  --exclude='workspaces/*/*.gif'
+  # `gog` — Google search/scrape skill installed at runtime via the
+  # openclaw plugin loader; node-8 owns the SKILL.md content per
+  # workspace. Operator-installed, not source-controlled. Tripped
+  # pre-flight 2026-04-26 against workspaces/{ceo,cmo,finance}/skills/gog/.
+  --exclude='workspaces/*/skills/gog/'
+  # Agent-curated knowledge bases — large markdown collections that
+  # agents build incrementally (e.g. CMO outreach team building up
+  # muso-ads-knowledge-base.md from research). Server-owned because
+  # editing them via PR adds friction the agents shouldn't have.
+  # Convention: any file matching *-knowledge-base.md under a skill
+  # references/ dir. Tripped 2026-04-26.
+  --exclude='workspaces/*/skills/*/references/*-knowledge-base.md'
   # Audit logs (per-workspace memory snapshots, conversation logs)
   --exclude='audit/'
   # Manual audit backup (pre-existing on node-8 at /opt/hydra/audit-local-backup/,
