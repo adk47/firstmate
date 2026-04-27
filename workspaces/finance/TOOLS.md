@@ -30,6 +30,12 @@
 - Use for: expense categorization, P&L reports, balance sheet, cash flow
 - Financial data is HIGHLY SENSITIVE -- never share outside #finance without authorization
 
+## Google Workspace (`gog` CLI)
+- Full access to Gmail, Sheets, Drive, Docs via the `gog` CLI on the host
+- Auth: OAuth tokens for `a@muso.ai`, `f@muso.ai`, `ak@muso.ai`, `aaron.k@muso.ai` pre-configured in the server keyring; `GOG_KEYRING_PASSWORD` is injected via the gateway service env — no extra setup needed inside agent turns.
+- Use for: contract/invoice emails (`muso-contract-invoicer`), financial report exports, reading shared finance Sheets
+- Full command reference: `skills/gog/SKILL.md`
+
 ## Slack
 - Bound channel: #finance (PRIVATE)
 - Never share financial data in public channels

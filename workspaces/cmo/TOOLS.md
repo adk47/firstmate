@@ -45,17 +45,21 @@ _All tools the CMO agent has access to. See individual skill files for full API 
 - Access: **Read/Write** (Fede + Aaron only)
 - Skill: `muso-docusign`
 
-### Google Sheets
-- Lead lists, data bridges, tracking
-- Auth: Google service account / OAuth
-- Use for: outreach lead lists, win-back tracking, activity logging
-- Skill: referenced in `muso-outreach-engine`, `muso-winback-engine`
+### Google Workspace (`gog` CLI)
+- Full access to Gmail, Sheets, Drive, Calendar, Docs, Contacts via the `gog` CLI on the host
+- Auth: OAuth tokens for `a@muso.ai`, `f@muso.ai`, `ak@muso.ai`, `aaron.k@muso.ai` pre-configured in the server keyring. `GOG_KEYRING_PASSWORD` is injected via `/etc/openclaw/main.env` (gateway service env) — no extra setup needed inside agent turns.
+- Sheets read: `gog sheets get <sheetId> 'Tab!A1:D10' --account a@muso.ai --json`
+- Sheets append/update: `gog sheets append <sheetId> 'Tab!A:Z' --values-json '[[...]]' --input USER_ENTERED --account a@muso.ai`
+- Gmail search: `gog gmail messages search "in:inbox" --account a@muso.ai --max 20` (no Clio routing needed)
+- Gmail send: `gog gmail send --to ... --subject ... --body-file - --account a@muso.ai`
+- Use for: outreach lead lists, win-back tracking, activity logging, inbound reply scanning, invoice emails
+- Full command reference: `skills/gog/SKILL.md`
 
-### Gmail
-- Email sending/reading (a@muso.ai, f@muso.ai)
-- Access: via Clio routing (`sessions_send` to Clio) or direct API
-- Primary send address: `a@muso.ai` (CEO-level outreach)
-- Alt addresses: `f@muso.ai`, `ak@muso.ai`, `aaron.k@muso.ai`
+### Gmail accounts & send rotation
+- Primary send address: `a@muso.ai` (CEO voice — cold + follow up)
+- Alt accounts available: `f@muso.ai`, `ak@muso.ai`, `aaron.k@muso.ai`
+- **Current rule**: ALL production sends from `a@muso.ai` only until ~2026-05-21 (other accounts are warming via Snov.io)
+- Gmail scanning (inbound reply detection) runs across all 4 accounts
 
 ### Slack
 - Team communication
