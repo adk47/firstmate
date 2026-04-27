@@ -61,7 +61,7 @@ For the track being credited:
 ```sql
 -- Check existing credits on the track
 SELECT t._id, t.title, t.popularity, t.default_release_label
-FROM hive.default.matvw_catalog_track t
+FROM hive."platform-industry-bi-prod".matvw_catalog_track t
 WHERE t._id = '<track_id>'
   AND t.is_deleted = false
 ```

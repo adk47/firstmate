@@ -44,7 +44,7 @@ ms as (
 		_id,
 		views,
 		url
-	from hive.default.matvw_analytics_video
+	from hive."platform-industry-bi-prod".matvw_analytics_video
 )
 select track_id,
 	sum(ms.views) AS views_muso,

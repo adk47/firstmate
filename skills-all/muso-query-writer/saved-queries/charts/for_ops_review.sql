@@ -17,7 +17,7 @@ with p AS (
 		profile_type,
 		try(images [ 1 ].url) AS avatar_url,
 		name
-	from hive.default.matvw_catalog_profile
+	from hive."platform-industry-bi-prod".matvw_catalog_profile
 	where profile_type in ('artist', 'professional')
 		and not regexp_like(
 			lower(name),
@@ -102,7 +102,7 @@ c AS (
 	group by profile_id
 )
 select c.*
-from hive.default.matvw_catalog_profile AS p
+from hive."platform-industry-bi-prod".matvw_catalog_profile AS p
 	right join c ON (profile_id = p._id)
 where p.images is null
 	or cardinality(p.images) = 0

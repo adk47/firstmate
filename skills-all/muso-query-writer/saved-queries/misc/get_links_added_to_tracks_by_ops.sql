@@ -20,7 +20,7 @@ with tl_ops as (
 			from_iso8601_timestamp(replace(createdat, ' ', 'T'))
 		) as request_time,
 		max_by(email, createdat) as request_by
-	from postgresql_core.public.public_action_log
+	from postgresql_core.public.action_log
 	where service = 'retool'
 		and route like '%analytics-sources%'
 	group by 1,
@@ -39,8 +39,8 @@ tl as (
 		end as link,
 		external_id,
 		from_unixtime(l.created_timestamp / 1000) as added_time
-	from hive.default.matvw_analytics_link as l
-		join hive.default.matvw_catalog_track as t ON (t._id = track_id)
+	from hive."platform-industry-bi-prod".matvw_analytics_link as l
+		join hive."platform-industry-bi-prod".matvw_catalog_track as t ON (t._id = track_id)
 	where not t.is_deleted
 		and track_id in (
 			select distinct track_id

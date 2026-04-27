@@ -30,8 +30,8 @@ select case
 	ARRAY_JOIN(p.common_credits, ', ') AS profile_common_credits,
 	updatedat AS updated_time
 from "production-musomvp".public_track_milestones AS m
-join hive.default.matvw_catalog_track AS t ON (t._id=m.trackid)
-join hive.default.matvw_catalog_profile AS p ON (p._id=m.profileid)
+join hive."platform-industry-bi-prod".matvw_catalog_track AS t ON (t._id=m.trackid)
+join hive."platform-industry-bi-prod".matvw_catalog_profile AS p ON (p._id=m.profileid)
 where date_diff(
 		'day',
 		TRY(DATE(substr("updatedat", 1, 10))),

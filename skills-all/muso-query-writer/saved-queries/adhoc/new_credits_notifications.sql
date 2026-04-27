@@ -18,9 +18,9 @@ with up AS (
 		userid as user_id,
 		count(1) over (partition by teamid, seatid) > 1 as is_multi_user_workspace,
 		BOOL_OR(u.email like '%@muso.ai' or u.email in ('aarondkaufman@gmail.com')) AS is_muso_user
-	from postgresql_core.public.public_roster_seats
-		join postgresql_core.public.public_team_users USING(teamid)
-		join postgresql_core.public.public_users as u ON(userid = u.id)
+	from postgresql_core.public.roster_seats
+		join postgresql_core.public.team_users USING(teamid)
+		join postgresql_core.public.users as u ON(userid = u.id)
 -- 	where email not like '%@muso.ai'
 	group by 1,
 		2,
@@ -38,7 +38,7 @@ a as (
 		count(distinct workspace_id || profile_id) AS num_notifs,
 		bool_or(is_multi_user_workspace) as is_multi_user_workspace,
 		bool_or(is_muso_user) as is_muso_user
-	from hive.default.matvw_catalog_master_credit
+	from hive."platform-industry-bi-prod".matvw_catalog_master_credit
 		join up USING(profile_id)
 		cross join unnest(catalog_credits) AS cc(c)
 	where c."added"."by"."type" = 'raw'

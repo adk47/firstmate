@@ -13,8 +13,8 @@ last_exported: 2025-01-31
 
 with pro as (
 	select distinct seatid as profile_id
-	from postgresql_core.public.public_roster_seats as s
-		join postgresql_core.public.public_teams as t ON (t.id = s.teamid)
+	from postgresql_core.public.roster_seats as s
+		join postgresql_core.public.teams as t ON (t.id = s.teamid)
 	where s.status = 'active'
 		and t.inhouseanalyticsenabled
 )

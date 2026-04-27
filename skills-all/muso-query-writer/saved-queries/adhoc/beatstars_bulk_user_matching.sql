@@ -26,34 +26,34 @@ n as (
 	from (
 			select p._id as m_id,
 				rp.name as m_name
-			from hive.default.matvw_catalog_profile as p
+			from hive."platform-industry-bi-prod".matvw_catalog_profile as p
 				cross join unnest(raw_profile_ids) as r(rpid)
-				join hive.default.matvw_raw_profile as rp ON (rpid = rp._id)
+				join hive."platform-industry-bi-prod".matvw_raw_profile as rp ON (rpid = rp._id)
 			where not p.is_deleted
 				and not rp.is_deleted
 				and length(rp.name) > 1
 			union all
 			select _id as m_id,
 				name as m_name
-			from hive.default.matvw_catalog_profile
+			from hive."platform-industry-bi-prod".matvw_catalog_profile
 			where not is_deleted
 				and length(name) > 1
 			union all
 			select _id as m_id,
 				legal_name as m_name
-			from hive.default.matvw_catalog_profile
+			from hive."platform-industry-bi-prod".matvw_catalog_profile
 			where not is_deleted
 				and length(legal_name) > 1
 			union all
 			select _id as m_id,
 				first_name || ' ' || coalesce(last_name, '') as m_name
-			from hive.default.matvw_catalog_profile
+			from hive."platform-industry-bi-prod".matvw_catalog_profile
 			where not is_deleted
 				and length(first_name) > 1
 			union all
 			select _id as m_id,
 				k_name as m_name
-			from hive.default.matvw_catalog_profile
+			from hive."platform-industry-bi-prod".matvw_catalog_profile
 				cross join unnest(known_as_names) as n(k_name)
 			where not is_deleted
 				and length(k_name) > 1
@@ -65,10 +65,10 @@ m as (
 		replace(lower(isrc), '-', '') as isrc,
 		arbitrary(name) as m_name,
 		count() over (partition by profile.profile_id) as num_m_isrcs
-	from hive.default.matvw_catalog_track as t
+	from hive."platform-industry-bi-prod".matvw_catalog_track as t
 		cross join unnest(isrcs) as i(isrc)
 		cross join unnest(profiles) as tp(profile)
-		join hive.default.matvw_catalog_profile as p ON (profile.profile_id = p._id)
+		join hive."platform-industry-bi-prod".matvw_catalog_profile as p ON (profile.profile_id = p._id)
 	where not p.is_deleted
 		and not t.is_deleted
 	GROUP BY 1,

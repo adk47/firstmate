@@ -16,13 +16,13 @@ with u AS (
 select 
     t.email,
     arbitrary(s.seatid) as _id
-from postgresql_core.public.public_teams as t
-join postgresql_core.public.public_roster_seats AS s ON (t.id=s.teamid)
+from postgresql_core.public.teams as t
+join postgresql_core.public.roster_seats AS s ON (t.id=s.teamid)
 group by 1
 having count(distinct s.seatid) = 1
 )
 select 
     email AS "Email Address",
     COALESCE(rank, 5) AS "Muso Rank"
-from hive.default.matvw_catalog_profile as p 
+from hive."platform-industry-bi-prod".matvw_catalog_profile as p 
 join u USING (_id)

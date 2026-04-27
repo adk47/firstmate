@@ -15,8 +15,8 @@ last_exported: 2025-01-31
 with pro AS (
 	select s.seatid AS profile_id,
 		ARRAY_JOIN(ARRAY_AGG(distinct t.email), ', ') AS emails
-	from postgresql_core.public.public_teams AS t
-		join postgresql_core.public.public_roster_seats AS s ON (s.teamid = t.id)
+	from postgresql_core.public.teams AS t
+		join postgresql_core.public.roster_seats AS s ON (s.teamid = t.id)
 	where s.status = 'active'
 	group by 1
 ),
@@ -42,7 +42,7 @@ ptc AS (
 			),
 			ct->ct is not null
 		) as categories
-	from hive.default.matvw_catalog_master_credit
+	from hive."platform-industry-bi-prod".matvw_catalog_master_credit
 		cross join unnest(catalog_credits) AS c(credit)
 	group by 1,
 		2
@@ -119,7 +119,7 @@ from (
 			credits_count,
 			emails
 		from s
-			join hive.default.matvw_catalog_profile ON (_id = profile_id)
+			join hive."platform-industry-bi-prod".matvw_catalog_profile ON (_id = profile_id)
 			join pro USING(profile_id)
 			cross join unnest(cat_stats) AS c(category, streams)
 	)

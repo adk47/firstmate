@@ -43,9 +43,9 @@ t as (
 			),
 			' | '
 		) as spotify_urls
-	from hive.default.matvw_catalog_track as t
+	from hive."platform-industry-bi-prod".matvw_catalog_track as t
 		cross join unnest(profiles) as tp(pc)
-		join hive.default.matvw_catalog_profile as p ON (p._id = pc.profile_id)
+		join hive."platform-industry-bi-prod".matvw_catalog_profile as p ON (p._id = pc.profile_id)
 		cross join unnest(array_distinct(transform(pc.catalog_credits, c->c.child))) as ccc(role)
 	where cardinality(
 			filter(

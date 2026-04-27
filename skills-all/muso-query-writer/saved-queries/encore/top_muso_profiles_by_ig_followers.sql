@@ -31,7 +31,7 @@ p as (
         _id as profile_id,
         profile_type,
         name
-    from hive.default.matvw_catalog_profile
+    from hive."platform-industry-bi-prod".matvw_catalog_profile
     where not is_deleted
 ),
 ig as (
@@ -65,8 +65,8 @@ claimed as (
 	select profileid as profile_id,
 		TRUE as is_claimed,
 		min_by(t.email, nullif(c.createdat, '2025-12-31')) as claim_email
-	from postgresql_core.public.public_claiming as c
-	join postgresql_core.public.public_teams as t ON (c.teamid=t.id)
+	from postgresql_core.public.claiming as c
+	join postgresql_core.public.teams as t ON (c.teamid=t.id)
 	where c.status = 'processed'
 	group by 1
 ),
@@ -74,7 +74,7 @@ pro AS (
 	select seatid as profile_id,
 		BOOL_OR(status = 'active') AS is_pro,
 		TRUE as in_roster
-	from postgresql_core.public.public_roster_seats
+	from postgresql_core.public.roster_seats
 	group by 1
 )
 select 

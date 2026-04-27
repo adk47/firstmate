@@ -44,8 +44,8 @@ select t._id AS track_id,
 			r->r like 'tidal:%'
 		)
 	) > 0 as has_tidal_links
-from hive.default."matvw_catalog_track" AS t
-	left join hive.default."matvw_catalog_master_credit" AS c ON (t._id = c.master_track_id)
+from hive."platform-industry-bi-prod"."matvw_catalog_track" AS t
+	left join hive."platform-industry-bi-prod"."matvw_catalog_master_credit" AS c ON (t._id = c.master_track_id)
 where t.rank = 1
 group by 1
 order by 2 desc

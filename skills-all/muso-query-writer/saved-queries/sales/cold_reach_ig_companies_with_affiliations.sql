@@ -18,7 +18,7 @@ with s as (
         TRUE as is_in_seats,
         BOOL_OR(status='active') as is_pro,
         BOOL_OR(type='organization') as is_org
-    from postgresql_core.public.public_roster_seats 
+    from postgresql_core.public.roster_seats 
     group by 1
 ),
 cl as (
@@ -26,7 +26,7 @@ cl as (
         profileid as _id,
         TRUE as is_claiming_attempted,
         BOOL_OR(status='processed') as is_claimed
-    from postgresql_core.public.public_claiming 
+    from postgresql_core.public.claiming 
     group by 1
 ),
 a as (
@@ -57,9 +57,9 @@ a as (
 ig AS (
     select c._id,
         arbitrary(contact.value) AS ig
-    from hive.default.matvw_catalog_profile as c
+    from hive."platform-industry-bi-prod".matvw_catalog_profile as c
         cross join unnest(raw_profile_ids) AS cr(rid)
-        join hive.default.matvw_raw_profile AS r ON (r._id = rid)
+        join hive."platform-industry-bi-prod".matvw_raw_profile AS r ON (r._id = rid)
         cross join unnest(r.contacts) AS rc(contact)
     where nullif(contact.value, '') is not null
         and contact.type = 'instagram'
@@ -73,7 +73,7 @@ select
     roles,
     credits_count,
     ig
-from hive.default.matvw_catalog_profile as p 
+from hive."platform-industry-bi-prod".matvw_catalog_profile as p 
 join a USING(_id)
 join ig USING(_id)
 left join s USING(_id)

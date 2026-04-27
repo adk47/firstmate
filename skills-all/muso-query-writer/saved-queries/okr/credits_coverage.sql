@@ -19,7 +19,7 @@ with _track AS (
 			when popularity > 20 then 3
 			when popularity > 0 then 4 else 5
 		end AS track_rank
-	from hive.default."matvw_catalog_track"
+	from hive."platform-industry-bi-prod"."matvw_catalog_track"
 	where not is_deleted
 ),
 tracks AS (

@@ -100,7 +100,7 @@ SELECT
     ct.title,
     r.rid AS raw_id,
     split_part(r.rid, ':', 1) AS source
-FROM hive.default.matvw_catalog_track ct
+FROM hive."platform-industry-bi-prod".matvw_catalog_track ct
 CROSS JOIN UNNEST(ct.raw_recording_ids) AS r(rid)
 WHERE ct.release_timestamp >= to_unixtime(current_date - interval '365' day) * 1000
   AND NOT ct.is_deleted
@@ -119,7 +119,7 @@ SELECT
     t.title,
     p.profile.role,
     p.profile.profile_id
-FROM hive.default.matvw_catalog_track t
+FROM hive."platform-industry-bi-prod".matvw_catalog_track t
 CROSS JOIN UNNEST(t.profiles) AS p(profile)
 WHERE p.profile.profile_id = 'TARGET_PROFILE_ID'
     AND p.profile.role = 'producer'
@@ -162,7 +162,7 @@ SELECT
     _id,
     title,
     release_date
-FROM hive.default.matvw_catalog_track
+FROM hive."platform-industry-bi-prod".matvw_catalog_track
 WHERE NOT is_deleted
 LIMIT 100
 ```

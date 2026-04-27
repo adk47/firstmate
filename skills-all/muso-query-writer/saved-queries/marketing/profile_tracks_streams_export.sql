@@ -28,7 +28,7 @@ with a AS (
 					COALESCE(spotifystreams, 0) + COALESCE(soundcloudstreams, 0) + COALESCE(youtubeviews, 0)
 				) AS streams
 			from postgresql_core.public."public_profile_track_stats"
-				join hive.default.matvw_catalog_master_credit ON (
+				join hive."platform-industry-bi-prod".matvw_catalog_master_credit ON (
 					profile_id = profileid
 					and trackid = master_track_id
 				)
@@ -53,7 +53,7 @@ select _id AS track_id,
 		', '
 	) AS artist_names,
 	streams
-from hive.default.matvw_catalog_track
+from hive."platform-industry-bi-prod".matvw_catalog_track
 	join a USING(_id)
 where not is_deleted
 order by streams desc

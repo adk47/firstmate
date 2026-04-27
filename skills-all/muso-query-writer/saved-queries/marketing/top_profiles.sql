@@ -35,16 +35,16 @@ from (
 			)
 			and profile_id not in (
 				select distinct seatid as profile_id
-				from postgresql_core.public.public_roster_seats
+				from postgresql_core.public.roster_seats
 				where status = 'active'
 					and teamid not in (
 						select id
-						from postgresql_core.public.public_teams
+						from postgresql_core.public.teams
 						where email like '%@muso.ai'
 					)
 				union
 				select distinct profileid as profile_id
-				from postgresql_core.public.public_claiming
+				from postgresql_core.public.claiming
 				where status = 'processed'
 			)
 			and position <= 1000

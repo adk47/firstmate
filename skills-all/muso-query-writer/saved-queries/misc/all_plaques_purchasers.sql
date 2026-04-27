@@ -13,10 +13,10 @@ last_exported: 2025-01-31
 */
 
 with pu as (select distinct userid as id
-from postgresql_core.public.public_orders
+from postgresql_core.public.orders
 where status in ('PAID', 'SHIPPED', 'PROCESSING')
 )
 select distinct
     email
-from postgresql_core.public.public_users
+from postgresql_core.public.users
 join pu USING(id)

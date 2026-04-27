@@ -15,13 +15,13 @@ last_exported: 2025-01-31
 with credits AS (
 	select distinct profile_id,
 		master_track_id AS track_id
-	from hive.default."matvw_catalog_master_credit" as c -- cross join unnest("catalog_credits") AS cc(credit)
+	from hive."platform-industry-bi-prod"."matvw_catalog_master_credit" as c -- cross join unnest("catalog_credits") AS cc(credit)
 	where not coalesce(is_deleted, false)
 ),
 _rp AS (
 	select raw_profile_id,
 		_id AS profile_id
-	from hive.default."matvw_catalog_profile"
+	from hive."platform-industry-bi-prod"."matvw_catalog_profile"
 		cross join unnest(raw_profile_ids) AS r(raw_profile_id)
 	where not is_deleted
 ),
@@ -30,7 +30,7 @@ _rt AS (
         recording_id,
         rank,
         _id AS track_id
-    from hive.default."matvw_catalog_track"
+    from hive."platform-industry-bi-prod"."matvw_catalog_track"
     cross join unnest(raw_recording_ids) AS r(recording_id)
     where not coalesce(is_deleted, false)
 		and COALESCE(rank, 5) = 5
@@ -38,7 +38,7 @@ _rt AS (
 cred_del AS (
 	select distinct substr(profile_id, 6) AS profile_id,
 		substr(recording_id, 6) AS track_id
-	from hive.default."matvw_raw_recording_credit"
+	from hive."platform-industry-bi-prod"."matvw_raw_recording_credit"
 	where profile_id like 'muso:%'
 		and recording_id like 'muso:%'
 		and is_deleted
@@ -46,7 +46,7 @@ cred_del AS (
 final as (
 	select _rp.profile_id,
 		_rt.track_id
-	from hive.default."matvw_raw_recording_credit" AS c
+	from hive."platform-industry-bi-prod"."matvw_raw_recording_credit" AS c
 		join _rp ON (
 			c.profile_id = _rp.raw_profile_id
 		)

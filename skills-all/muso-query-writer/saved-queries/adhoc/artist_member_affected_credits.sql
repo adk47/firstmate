@@ -59,7 +59,7 @@ from (
 						streams,
 						0
 					) AS affected_streams
-				from hive.default.matvw_catalog_master_credit
+				from hive."platform-industry-bi-prod".matvw_catalog_master_credit
 					join ts USING(master_track_id)
 			)
 		group by 1

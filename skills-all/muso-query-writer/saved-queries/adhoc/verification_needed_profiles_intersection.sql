@@ -25,7 +25,7 @@ c AS (
 		profile_id,
 		profileid AS requested_profile_id,
 		cardinality(filter(catalog_credits, c->c.parent='Artist')) > 0 AS is_track_artist
-	from hive.default.matvw_catalog_master_credit
+	from hive."platform-industry-bi-prod".matvw_catalog_master_credit
 		right join v ON (master_track_id = trackid)
 )
 select count(distinct trackid) AS total_tracks,

@@ -19,7 +19,7 @@ from (
 			MAX(COALESCE(custom_data.popularity, 0)) AS popularity,
 			MIN(release_date) AS release_date,
 			min(title) AS title
-		from hive.default.matvw_raw_recording
+		from hive."platform-industry-bi-prod".matvw_raw_recording
 		where not is_deleted
 			and split_part(_id, ':', 1) = 'spotify'
 			and nullif(isrc, '') is not null 

@@ -25,9 +25,9 @@ from (
 			count(
 				distinct if(rrc.credit not like '%artist%', recording_id)
 			) AS num_recordings
-		from hive.default."matvw_catalog_profile" AS cp
+		from hive."platform-industry-bi-prod"."matvw_catalog_profile" AS cp
 			cross join unnest(raw_profile_ids) AS rp(rpid)
-			right join hive.default."matvw_raw_profile" AS rp ON (rpid = rp._id)
+			right join hive."platform-industry-bi-prod"."matvw_raw_profile" AS rp ON (rpid = rp._id)
 			join "platform-industry-db-industry-prod"."raw_recording_credit" AS rrc ON (rp._id = rrc.profile_id)
 		where rp."profile_type" = 'artist'
 			and rp.source = 'tidal'

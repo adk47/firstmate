@@ -36,7 +36,7 @@ select
     array_agg(distinct s.seatid) AS seat_ids
 from "production-musomvp".public_teams as t
 join "production-musomvp".public_roster_seats AS s ON(teamid=t.id)
-join hive.default.matvw_catalog_profile as p ON (s.seatid=p._id)
+join hive."platform-industry-bi-prod".matvw_catalog_profile as p ON (s.seatid=p._id)
 join sub USING(teamid)
 where s.status='active' and nullif(t.email, '') is not null and not p.is_deleted
 group by 1

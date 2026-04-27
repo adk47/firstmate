@@ -38,11 +38,11 @@ select c._id AS profile_id,
 	arbitrary(IF(contact.type = 'twitter', contact.value)) AS twitter,
 	arbitrary(IF(contact.type = 'website', contact.value)) AS website,
 	arbitrary(claim_verification_links) AS claim_verification_links
-from hive.default.matvw_catalog_profile as c
+from hive."platform-industry-bi-prod".matvw_catalog_profile as c
 	left join pro ON(c._id = pro.profile_id)
 	left join claimed ON(c._id = claimed.profile_id)
 	cross join unnest(raw_profile_ids) AS cr(rid)
-	join hive.default.matvw_raw_profile AS r ON (r._id = rid)
+	join hive."platform-industry-bi-prod".matvw_raw_profile AS r ON (r._id = rid)
 	cross join unnest(r.contacts) AS rc(contact)
 where nullif(contact.value, '') is not null
 	OR NULLIF(claim_verification_links, '') is not null

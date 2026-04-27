@@ -14,7 +14,7 @@ last_exported: 2025-01-31
 
 with mp as (
 	select p._id AS profile_id
-	FROM hive.default."matvw_catalog_profile" AS p
+	FROM hive."platform-industry-bi-prod"."matvw_catalog_profile" AS p
 	where _id in (
 			'e32ace23-880c-49f0-8db9-836492c6610e'
 ,'3fcc41ff-0dc5-4b94-9938-c5fabdd95361'
@@ -3429,9 +3429,9 @@ with mp as (
 mpc AS (
 	select distinct c1.profile_id AS profile_id,
 		c2.profile_id AS collaborator_id
-	from hive.default."matvw_catalog_master_credit" AS c1
+	from hive."platform-industry-bi-prod"."matvw_catalog_master_credit" AS c1
 		join mp ON(c1.profile_id = mp.profile_id)
-		join hive.default."matvw_catalog_master_credit" AS c2 USING(master_track_id)
+		join hive."platform-industry-bi-prod"."matvw_catalog_master_credit" AS c2 USING(master_track_id)
 ),
 p AS (
 	select _id AS profile_id,
@@ -3455,7 +3455,7 @@ p AS (
 			COALESCE("credits_count", 1),
 			COALESCE("tracks_count", 1)
 		) AS num_credits
-	FROM hive.default."matvw_catalog_profile"
+	FROM hive."platform-industry-bi-prod"."matvw_catalog_profile"
 	where _id in (
 			select distinct collaborator_id
 			from mpc
@@ -3471,10 +3471,10 @@ p_genres AS (
 					partition by p.profile_id
 					order by count(1) desc
 				) AS num
-			from hive.default."matvw_catalog_master_credit" AS c1
+			from hive."platform-industry-bi-prod"."matvw_catalog_master_credit" AS c1
 				join p ON(c1.profile_id = p.profile_id)
-				join hive.default."matvw_catalog_master_credit" AS c2 USING(master_track_id)
-				join hive.default."matvw_catalog_profile" AS cp ON (cp._id = c2.profile_id)
+				join hive."platform-industry-bi-prod"."matvw_catalog_master_credit" AS c2 USING(master_track_id)
+				join hive."platform-industry-bi-prod"."matvw_catalog_profile" AS cp ON (cp._id = c2.profile_id)
 				cross join unnest(cp."raw_profile_ids") AS cpr(raw_profile_id)
 				join "platform-industry-db-industry-prod"."raw_profile" AS rp ON (raw_profile_id = rp._id)
 				cross join unnest(genres) AS rpg(genre)

@@ -17,8 +17,8 @@ with wu as (
 		arbitrary(t.email) as workspace_email,
 		max_by(s.status, s.updatedat) as status,
 		max_by(plan, s.updatedat) as plan
-	from postgresql_core.public.public_teams as t
-		left join postgresql_core.public.public_subscriptions as s ON (t.id = s.teamid)
+	from postgresql_core.public.teams as t
+		left join postgresql_core.public.subscriptions as s ON (t.id = s.teamid)
 	group by 1
 ),
 wuu as (
@@ -26,8 +26,8 @@ wuu as (
 		email,
 		count_if(status = 'active') > 0 as is_active
 	from wu
-		join postgresql_core.public.public_team_users as tu ON (workspace_id = teamid)
-		join postgresql_core.public.public_users as u ON (tu.userid = u.id)
+		join postgresql_core.public.team_users as tu ON (workspace_id = teamid)
+		join postgresql_core.public.users as u ON (tu.userid = u.id)
 	where visible
 		and nullif(email, '') is not null
 		and status in ('active', 'cancelled') -- 		and roles like '%owner%'
@@ -44,7 +44,7 @@ wcl as (
 			status = 'processed'
 			and coalesce(profiletype, 'artist') <> 'organization'
 		) > 0 as is_profile_claimed
-	from postgresql_core.public.public_claiming as c
+	from postgresql_core.public.claiming as c
 	group by 1
 )
 select email,

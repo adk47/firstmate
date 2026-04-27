@@ -17,8 +17,8 @@ with o AS (
 		arbitrary(t.name) AS workspace_name,
 		arbitrary(if(type = 'organization', seatid)) AS org_id,
 		array_agg(seatid) AS profile_ids
-	from postgresql_core.public.public_roster_seats AS s
-		join postgresql_core.public.public_teams AS t ON (teamid = t.id)
+	from postgresql_core.public.roster_seats AS s
+		join postgresql_core.public.teams AS t ON (teamid = t.id)
 	where status = 'active'
 	group by 1
 	having count_if(type = 'organization') = 1
@@ -35,14 +35,14 @@ op AS (
 		name AS org_name,
 		o.*
 	from o
-		join hive.default.matvw_catalog_profile ON (_id = org_id)
+		join hive."platform-industry-bi-prod".matvw_catalog_profile ON (_id = org_id)
 ),
 pc AS (
 	select master_track_id AS track_id,
 		org_id,
 		arbitrary(org_name) AS org_name,
 		arbitrary(workspace_name) AS workspace_name
-	from hive.default.matvw_catalog_master_credit
+	from hive."platform-industry-bi-prod".matvw_catalog_master_credit
 		join (
 			select profile_id,
 				org_id,
@@ -76,7 +76,7 @@ oc AS (
 		org_id,
 		arbitrary(org_name) AS org_name,
 		arbitrary(workspace_name) AS workspace_name
-	from hive.default.matvw_catalog_master_credit
+	from hive."platform-industry-bi-prod".matvw_catalog_master_credit
 		join op ON (profile_id = org_id)
 	where cardinality(common_credits) > 0
 	group by 1,
@@ -100,5 +100,5 @@ select workspace_name,
 	popularity,
 	'https://credits.muso.ai/track/' || track_id AS track_url
 from t
-join hive.default.matvw_catalog_track ON (_id=track_id)
+join hive."platform-industry-bi-prod".matvw_catalog_track ON (_id=track_id)
 order by 1,2,3, popularity desc

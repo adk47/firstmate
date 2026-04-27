@@ -32,7 +32,7 @@ r AS (
 		streams,
 		nullif(release_date, '') AS release_date,
 		title
-	from hive.default.matvw_raw_recording AS r
+	from hive."platform-industry-bi-prod".matvw_raw_recording AS r
 		JOIN a ON ('spotify:' || spotify_id = r._id)
 	where r.source = 'spotify'
 		and nullif(isrc, '') is not null

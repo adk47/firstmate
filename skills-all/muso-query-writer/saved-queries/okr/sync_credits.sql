@@ -16,7 +16,7 @@ with r as (
 	select distinct profile_id,
 		recording_id,
 		lower(cat_cred.child) AS child
-	from hive.default."matvw_raw_recording_credit" AS c
+	from hive."platform-industry-bi-prod"."matvw_raw_recording_credit" AS c
 		join "platform-industry-db-industry-prod"."dict_credit" AS d ON (c.credit = d._id)
 		cross join unnest(d.catalog_credits) AS cc(cat_cred)
 	where not coalesce(c.is_deleted, false)
@@ -26,7 +26,7 @@ m AS (
 		split_part(recording_id, ':', 1) AS track_id,
 		credit AS child,
 		TRUE AS muso_deleted
-	from hive.default."matvw_raw_recording_credit"
+	from hive."platform-industry-bi-prod"."matvw_raw_recording_credit"
 	where is_deleted
 		and profile_id like 'muso:%'
 		and recording_id like 'muso:%'
@@ -36,9 +36,9 @@ c as (
 		recording_id,
 		lower(credit.child) AS child,
 		TRUE AS in_catalog
-	from hive.default."matvw_catalog_master_credit" AS c
-		join hive.default."matvw_catalog_profile" AS p ON (p._id = c.profile_id)
-		join hive.default."matvw_catalog_track" AS t ON (t._id = c.master_track_id)
+	from hive."platform-industry-bi-prod"."matvw_catalog_master_credit" AS c
+		join hive."platform-industry-bi-prod"."matvw_catalog_profile" AS p ON (p._id = c.profile_id)
+		join hive."platform-industry-bi-prod"."matvw_catalog_track" AS t ON (t._id = c.master_track_id)
 		cross join unnest(catalog_credits) as cc(credit)
 		cross join unnest(raw_profile_ids) as rp(raw_profile_id)
 		cross join unnest(raw_recording_ids) as tr(recording_id)

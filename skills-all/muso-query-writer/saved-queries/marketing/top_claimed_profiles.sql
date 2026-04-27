@@ -17,15 +17,15 @@ with claimed as (
 		min_by(verificationlinks, c.createdat) AS claim_verification_links,
 		TRUE as is_claimed,
 		min_by(t.email, c.createdat) as claim_email
-	from postgresql_core.public.public_claiming as c
-	join postgresql_core.public.public_teams as t ON (c.teamid=t.id)
+	from postgresql_core.public.claiming as c
+	join postgresql_core.public.teams as t ON (c.teamid=t.id)
 	where c.status = 'processed'
 	group by 1
 ),
 pro AS (
 	select seatid as profile_id,
 		TRUE AS is_pro
-	from postgresql_core.public.public_roster_seats
+	from postgresql_core.public.roster_seats
 	where status = 'active'
 	group by 1
 )
@@ -41,11 +41,11 @@ select c._id AS profile_id,
 	arbitrary(IF(contact.type = 'twitter', contact.value)) AS twitter,
 	arbitrary(IF(contact.type = 'website', contact.value)) AS website,
 	arbitrary(claim_verification_links) AS claim_verification_links
-from hive.default.matvw_catalog_profile as c
+from hive."platform-industry-bi-prod".matvw_catalog_profile as c
 	join claimed ON(c._id = claimed.profile_id)
 	left join pro ON(c._id = pro.profile_id)
 	cross join unnest(raw_profile_ids) AS cr(rid)
-	join hive.default.matvw_raw_profile AS r ON (r._id = rid)
+	join hive."platform-industry-bi-prod".matvw_raw_profile AS r ON (r._id = rid)
 	cross join unnest(r.contacts) AS rc(contact)
 group by 1
 order by 4 desc

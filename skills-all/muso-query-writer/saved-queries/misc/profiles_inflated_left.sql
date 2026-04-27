@@ -18,7 +18,7 @@ with l as (
 		real_youtube_streams as rys,
 		inflated_youtube_streams as iys,
 		_id as profile_id
-	from hive.default.matvw_dict_legacy_profile_stats
+	from hive."platform-industry-bi-prod".matvw_dict_legacy_profile_stats
 ),
 c as (
 	select profile_id,

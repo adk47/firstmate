@@ -16,7 +16,7 @@ with m as (
 	select distinct profile_id as company_id,
 		member_id as profile_id,
 		membership_type
-	from hive.default.matvw_catalog_member
+	from hive."platform-industry-bi-prod".matvw_catalog_member
 	where not is_deleted
 		and membership_type in ('record_label', 'manager', 'publisher')
 		and profile_id in (
@@ -35,7 +35,7 @@ c as (
 			from_unixtime(release_timestamp / 1000),
 			current_date
 		) < 366 as is_new
-	from hive.default.matvw_catalog_track as t
+	from hive."platform-industry-bi-prod".matvw_catalog_track as t
 		cross join unnest(profiles) as tp(p)
 		join m ON (m.profile_id = p.profile_id)
 	where not is_deleted
@@ -58,7 +58,7 @@ p as (
 	select _id as profile_id,
 		name,
 		array_join(common_credits, ',') as common_credits
-	from hive.default.matvw_catalog_profile
+	from hive."platform-industry-bi-prod".matvw_catalog_profile
 	where not is_deleted
 ),
 ts as (

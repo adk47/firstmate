@@ -47,7 +47,7 @@ Supplement with Athena for richer results:
 ```sql
 SELECT _id, name, profile_type, credits_count, common_credits,
        collaborations_count, popularity, rank, country, primary_genre
-FROM hive.default.matvw_catalog_profile
+FROM hive."platform-industry-bi-prod".matvw_catalog_profile
 WHERE lower(name) LIKE '%john producer%'
   AND is_deleted = false
 ORDER BY popularity DESC
@@ -66,17 +66,17 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 
 ```sql
 -- Athena: full profile data
-SELECT * FROM hive.default.matvw_catalog_profile
+SELECT * FROM hive."platform-industry-bi-prod".matvw_catalog_profile
 WHERE _id = '<profile_id>' AND is_deleted = false
 
 -- Athena: claiming status
-SELECT * FROM postgresql_core.public.public_claiming
+SELECT * FROM postgresql_core.public.claiming
 WHERE profileid = '<profile_id>'
 
 -- Athena: team/workspace
 SELECT t.name, t.email, rs.status as seat_status
-FROM postgresql_core.public.public_roster_seats rs
-JOIN postgresql_core.public.public_teams t ON rs.teamid = t.id
+FROM postgresql_core.public.roster_seats rs
+JOIN postgresql_core.public.teams t ON rs.teamid = t.id
 WHERE rs.profileid = '<profile_id>'
 ```
 

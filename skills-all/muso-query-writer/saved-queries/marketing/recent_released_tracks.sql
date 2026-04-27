@@ -22,9 +22,9 @@ select 'https://credits.muso.ai/track/' || t._id AS track_url,
 			from_unixtime(release_timestamp / 1000)
 		)
 	) AS release_date
-from hive.default.matvw_catalog_track AS t
+from hive."platform-industry-bi-prod".matvw_catalog_track AS t
 	cross join unnest(artists) AS a(artist)
-	join hive.default.matvw_catalog_profile AS p ON (p._id = artist.catalog_profile_id)
+	join hive."platform-industry-bi-prod".matvw_catalog_profile AS p ON (p._id = artist.catalog_profile_id)
 where profile_type = 'artist'
 	and p.rank in (1, 2)
 	and date_diff(

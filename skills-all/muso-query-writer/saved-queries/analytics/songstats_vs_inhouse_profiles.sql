@@ -13,8 +13,8 @@ last_exported: 2025-01-31
 
 with pro as (
 	select distinct seatid as profileid
-	from postgresql_core.public.public_roster_seats as s
-		join postgresql_core.public.public_teams as t ON (t.id = s.teamid)
+	from postgresql_core.public.roster_seats as s
+		join postgresql_core.public.teams as t ON (t.id = s.teamid)
 	where s.status = 'active'
 		and not t.inhouseanalyticsenabled
 ),
@@ -62,6 +62,6 @@ from (
 		from new
 			join old USING(profile_id)
 	) AS s
-	join hive.default.matvw_catalog_profile AS p ON (p._id = profile_id)
+	join hive."platform-industry-bi-prod".matvw_catalog_profile AS p ON (p._id = profile_id)
 where old_streams > 0
 order by abs_diff desc

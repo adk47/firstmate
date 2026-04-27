@@ -15,16 +15,16 @@ last_exported: 2025-01-31
 with ts as (
 	select t.id as team_id,
 		count_if(status = 'active') > 0 as is_active
-	from postgresql_core.public.public_teams as t
-		left join postgresql_core.public.public_subscriptions as s ON(t.id = s.teamid)
+	from postgresql_core.public.teams as t
+		left join postgresql_core.public.subscriptions as s ON(t.id = s.teamid)
 	group by 1
 ),
 cl as (
 	select t.id as team_id,
 		c.profileid as profile_id,
 		arbitrary(t.email) as email
-	from postgresql_core.public.public_claiming as c
-		join postgresql_core.public.public_teams as t ON (t.id = c.teamid)
+	from postgresql_core.public.claiming as c
+		join postgresql_core.public.teams as t ON (t.id = c.teamid)
 	where status = 'processed' and profiletype = 'organization'
 	group by 1,
 		2

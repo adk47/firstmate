@@ -32,7 +32,7 @@ with pf as (
 		country,
 		common_credits,
 		popularity
-	from hive.default.matvw_catalog_profile
+	from hive."platform-industry-bi-prod".matvw_catalog_profile
 		join pf ON (profile_id = _id)
 	where not is_deleted
 ),
@@ -62,7 +62,7 @@ pt as (
 		arbitrary(common_credits) as common_credits,
 		arbitrary(p.popularity) as popularity,
 		max(streams) as streams
-	from hive.default.matvw_catalog_track as t
+	from hive."platform-industry-bi-prod".matvw_catalog_track as t
 		cross join unnest(profiles) as tpc(tp)
 		join p ON(tp.profile_id = p.profile_id)
 		left join postgresql_industry.public."industry_data_processing_analytics_maintenance_track_final_stats" as ts ON (ts.track_id = t._id)

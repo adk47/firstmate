@@ -46,9 +46,9 @@ order by 2 desc
 with wr as (
 	select distinct isrc,
 		iswc
-	from hive.mlc.worksrecordings
-		join hive.mlc.works USING(feedprovidersworkid)
-		join hive.mlc.recordings USING(feedprovidersrecordingid)
+	from hive."platform-industry-mlc-bi-prod".worksrecordings
+		join hive."platform-industry-mlc-bi-prod".works USING(feedprovidersworkid)
+		join hive."platform-industry-mlc-bi-prod".recordings USING(feedprovidersrecordingid)
 	where nullif(isrc, '') is not null
 		and nullif(iswc, '') is not null
 )
@@ -58,9 +58,9 @@ select
     count(distinct isrc) as num_isrcs
 from workrightshares 
 join parties USING (feedproviderspartyid)
-join hive.mlc.worksrecordings USING(feedprovidersworkid)
-join hive.mlc.works USING(feedprovidersworkid)
-join hive.mlc.recordings USING(feedprovidersrecordingid)
+join hive."platform-industry-mlc-bi-prod".worksrecordings USING(feedprovidersworkid)
+join hive."platform-industry-mlc-bi-prod".works USING(feedprovidersworkid)
+join hive."platform-industry-mlc-bi-prod".recordings USING(feedprovidersrecordingid)
 where nullif(isrc, '') is not null
 	and nullif(iswc, '') is not null
 group by 1
@@ -86,9 +86,9 @@ from (
 with wr as (
 	select distinct isrc,
 		iswc
-	from hive.mlc.worksrecordings
-		join hive.mlc.works USING(feedprovidersworkid)
-		join hive.mlc.recordings USING(feedprovidersrecordingid)
+	from hive."platform-industry-mlc-bi-prod".worksrecordings
+		join hive."platform-industry-mlc-bi-prod".works USING(feedprovidersworkid)
+		join hive."platform-industry-mlc-bi-prod".recordings USING(feedprovidersrecordingid)
 	where nullif(isrc, '') is not null
 		and nullif(iswc, '') is not null
 )
@@ -108,7 +108,7 @@ from (
 			min(custom_data.popularity) AS popularity,
 			count(distinct iswc) AS num_works
 		from wr
-			full outer join hive.default.matvw_raw_recording USING(isrc)
+			full outer join hive."platform-industry-bi-prod".matvw_raw_recording USING(isrc)
 		group by 1
 	)
 group by 1

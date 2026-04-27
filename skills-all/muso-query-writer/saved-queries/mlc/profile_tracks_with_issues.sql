@@ -17,8 +17,8 @@ with mlc_w as (
 	    arbitrary(iswc) as iswc,
 		BOOL_OR(lower(partyrole) like '%publisher%') as has_publisher,
 		SUM(rightsharepercentage) as total_work_share_pct
-	from hive.mlc.works
-		left join hive.mlc.workrightshares USING(feedprovidersworkid)
+	from hive."platform-industry-mlc-bi-prod".works
+		left join hive."platform-industry-mlc-bi-prod".workrightshares USING(feedprovidersworkid)
 	group by 1
 ),
 mlc as (
@@ -29,8 +29,8 @@ mlc as (
 		GREATEST(100.0 - MAX(total_work_share_pct), 0.0) as missing_shares_pct,
 		array_agg(distinct iswc) as iswcs
 	from mlc_w
-		join hive.mlc.worksrecordings as wr USING(feedprovidersworkid)
-		right join hive.mlc.recordings as r USING(feedprovidersrecordingid)
+		join hive."platform-industry-mlc-bi-prod".worksrecordings as wr USING(feedprovidersworkid)
+		right join hive."platform-industry-mlc-bi-prod".recordings as r USING(feedprovidersrecordingid)
 	group by 1
 ),
 t as (
@@ -46,7 +46,7 @@ t as (
 		coalesce(BOOL_OR(has_work), false) as has_work,
 		COALESCE(MIN(missing_shares_pct), 0) as missing_shares_pct,
 		array_distinct(flatten(array_agg(iswcs))) as iswcs
-	from hive.default.matvw_catalog_track
+	from hive."platform-industry-bi-prod".matvw_catalog_track
 		cross join unnest(isrcs) as i(isrc)
 		left join mlc ON(upper(replace(i.isrc, '-', '')) = mlc.isrc)
 	where not is_deleted -- 	filter by profile 

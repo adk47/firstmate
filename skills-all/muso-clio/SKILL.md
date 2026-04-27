@@ -353,7 +353,7 @@ The previously-used `(retired 2026-04-25)` profile and AWS CLI commands are deco
 
 | Catalog.Schema | Records | Purpose | Backed by |
 |----------------|---------|---------|-----------|
-| `hive.default` | 190M tracks, 29M profiles, 3.3B daily stats | Industry analytics (matvw_*) | OVH S3 IO + HMS |
+| `hive."platform-industry-bi-prod"` | 190M tracks, 29M profiles, 3.3B daily stats | Industry analytics (matvw_*) | OVH S3 IO + HMS |
 | `postgresql_core.public` | 339K users, 60K subscriptions | Live user/business data | OVH PG node-18 |
 | `postgresql_analytics.public` | - | Business intelligence/reporting | OVH PG node-18 |
 | `hive.audit` | - | Catalog audits | OVH S3 IO + HMS |

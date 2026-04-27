@@ -22,7 +22,7 @@ with p as (
             profile_type='organization' as is_company,
             coalesce(popularity, 0) as popularity,
             coalesce(credits_count, 0) as credits_count
-        from hive.default.matvw_catalog_profile
+        from hive."platform-industry-bi-prod".matvw_catalog_profile
         where not is_deleted and profile_type in ('organization', 'artist', 'professional')
     )
 ),
@@ -56,13 +56,13 @@ s as (
 c as (
     select 
         distinct profileid as profile_id, TRUE as is_claimed
-    from postgresql_core.public.public_claiming 
+    from postgresql_core.public.claiming 
     where status = 'processed'
 ),
 r as (
     select 
         distinct seatid as profile_id, TRUE as in_roster
-    from postgresql_core.public.public_roster_seats
+    from postgresql_core.public.roster_seats
 )
 select 
     is_company,

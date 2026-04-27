@@ -15,7 +15,7 @@ last_exported: 2025-01-31
 with lr AS (
 	select custom_data.label AS label,
 		rid
-	from hive.default.matvw_raw_release
+	from hive."platform-industry-bi-prod".matvw_raw_release
 		cross join unnest(
 			array_distinct(transform(recordings, r->r.recording_id))
 		) AS r(rid)
@@ -27,7 +27,7 @@ lt as (
 		min(coalesce(rank, 5)) as rank,
 		max(coalesce(popularity, 0)) as popularity,
 		min(from_unixtime(release_timestamp / 1000)) > date('2023-01-01') AS is_new
-	from hive.default.matvw_catalog_track AS t
+	from hive."platform-industry-bi-prod".matvw_catalog_track AS t
 		cross join unnest(raw_recording_ids) AS r(rid)
 		join lr USING(rid)
 	where not t.is_deleted

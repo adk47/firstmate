@@ -30,5 +30,5 @@ select _id,
 		),
 		','
 	) AS spotify_ids
-from hive.default.matvw_catalog_track as t
+from hive."platform-industry-bi-prod".matvw_catalog_track as t
 	join s using(_id)

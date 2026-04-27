@@ -28,8 +28,8 @@ from (
 					r->r like 'tidal:%'
 				)
 			) > 0 AS has_tidal
-		from hive.default."matvw_catalog_track" AS t
-			join hive.default."matvw_catalog_release" AS r ON (default_release_id = r._id)
+		from hive."platform-industry-bi-prod"."matvw_catalog_track" AS t
+			join hive."platform-industry-bi-prod"."matvw_catalog_release" AS r ON (default_release_id = r._id)
 		where NOT t.is_deleted
 			and not r.is_deleted and r.release_type <> 'compilation'
 		GROUP BY 1

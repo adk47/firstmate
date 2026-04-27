@@ -16,7 +16,7 @@ with pt as (
     select 
          profileid as _id,
          array_join(array_agg(distinct teamid), ', ') as workspace_ids
-    from postgresql_core.public.public_claiming
+    from postgresql_core.public.claiming
     where status = 'processed'
     group by 1
 )
@@ -28,7 +28,7 @@ select
     workspace_ids as claimed_workspace_ids,
     common_credits,
     roles
-from hive.default.matvw_catalog_profile
+from hive."platform-industry-bi-prod".matvw_catalog_profile
 left join pt USING(_id)
 where 
     not is_deleted 

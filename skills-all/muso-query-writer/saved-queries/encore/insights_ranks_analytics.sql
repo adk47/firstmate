@@ -15,7 +15,7 @@ last_exported: 2025-01-31
 with t AS (
 	select _id AS track_id,
 		year(from_unixtime(release_timestamp / 1000)) AS release_year
-	from hive.default.matvw_catalog_track
+	from hive."platform-industry-bi-prod".matvw_catalog_track
 ),
 s AS (
 	select profile_id,

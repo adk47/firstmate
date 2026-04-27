@@ -18,7 +18,7 @@ with lr as (
         label,
         raw_recording_id,
         album_id
-    from hive.default.matvw_catalog_release
+    from hive."platform-industry-bi-prod".matvw_catalog_release
     cross join unnest(recording_ids) as r(raw_recording_id)
     where release_type in ('single', 'album') and not is_deleted
 ),
@@ -28,7 +28,7 @@ tl AS (
         _id as track_id,
         COUNT(distinct album_id) AS num_albums,
         MAX(COALESCE(popularity, 0)) AS track_popularity
-    from hive.default.matvw_catalog_track
+    from hive."platform-industry-bi-prod".matvw_catalog_track
     cross join unnest(raw_recording_ids) as r(raw_recording_id)
     join lr USING(raw_recording_id)
     where not is_deleted

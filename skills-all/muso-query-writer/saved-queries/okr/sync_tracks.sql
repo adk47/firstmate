@@ -14,12 +14,12 @@ last_exported: 2025-01-31
 
 with r as (
 	select _id
-	from hive.default."matvw_raw_recording"
+	from hive."platform-industry-bi-prod"."matvw_raw_recording"
 	where not coalesce(is_deleted, false)
 ),
 c as (
 	select raw_id
-	from hive.default."matvw_catalog_track"
+	from hive."platform-industry-bi-prod"."matvw_catalog_track"
 		cross join unnest(raw_recording_ids) as t(raw_id)
 ),
 counts as (

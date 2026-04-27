@@ -14,8 +14,8 @@ last_exported: 2025-01-31
 
 with cl as (
     select distinct c.profileid as _id
-    from postgresql_core.public.public_claiming as c
-    join postgresql_core.public.public_teams as t ON (t.id=c.teamid) 
+    from postgresql_core.public.claiming as c
+    join postgresql_core.public.teams as t ON (t.id=c.teamid) 
     where status = 'processed'
 ), 
 m as (
@@ -23,7 +23,7 @@ m as (
         cast(feedproviderspartyid as varchar) as mlc_id, 
         ipinamenumber as ipi, 
         fullname as mlc_full_name
-    from hive.mlc.parties
+    from hive."platform-industry-mlc-bi-prod".parties
     where ipinamenumber > 0
 )
 select 
@@ -33,7 +33,7 @@ select
     min(name) as name,
     max(popularity) as popularity,
     max(credits_count) as credits_count
-from hive.default.matvw_catalog_profile as c
+from hive."platform-industry-bi-prod".matvw_catalog_profile as c
 join cl USING(_id)
 cross join unnest(raw_profile_ids) as r(rid)
 join m ON (rid='mlc:'||mlc_id)

@@ -117,7 +117,7 @@ from (
             l.track_id,
             l.source,
             l.external_id
-        from hive.default.matvw_catalog_track as t 
+        from hive."platform-industry-bi-prod".matvw_catalog_track as t 
         join l on(l.track_id=t._id)
         where not is_deleted
     )
@@ -136,7 +136,7 @@ limit 1000
 -- )
 -- full outer join (
 -- select 'v1' as v, originaldataprovidername as source, count(1) as cnt_v1
--- from hive.mlc.recordings
+-- from hive."platform-industry-mlc-bi-prod".recordings
 -- group by 2
 -- ) using(source)
 -- order by cnt_v1 desc

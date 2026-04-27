@@ -20,9 +20,9 @@ select
     max(p.popularity) as top_artist_popularity, 
     'https://credits.muso.ai/album/' || album_id as muso_url,
     MIN(r.images[1].url) as image_url
-from hive.default.matvw_catalog_release as r
+from hive."platform-industry-bi-prod".matvw_catalog_release as r
 cross join unnest(artists) as ra(artist)
-join hive.default.matvw_catalog_profile as p ON (p._id=artist.catalog_profile_id)
+join hive."platform-industry-bi-prod".matvw_catalog_profile as p ON (p._id=artist.catalog_profile_id)
 where 
     not r.is_deleted 
     and is_default_release

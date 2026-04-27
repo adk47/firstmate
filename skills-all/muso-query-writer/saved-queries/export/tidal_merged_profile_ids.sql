@@ -20,7 +20,7 @@ with mt as (
         min(name) as name,
         max(credits_count) as credits_count,
         coalesce(max(popularity), 0) as popularity
-    from hive.default.matvw_catalog_profile
+    from hive."platform-industry-bi-prod".matvw_catalog_profile
     cross join unnest(raw_profile_ids) as pr(rid)
     where not is_deleted and rid like 'tidal:%' and try_cast(split_part(rid, ':', 2) as bigint) is not null
     group by 1

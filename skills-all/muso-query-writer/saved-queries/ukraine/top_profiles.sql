@@ -21,14 +21,14 @@ up AS (
 	select _id as profile_id,
 		common_credits,
 		name
-	from hive.default.matvw_catalog_profile
+	from hive."platform-industry-bi-prod".matvw_catalog_profile
 	where lower(country) = 'ukraine'
 		and not is_deleted
 ),
 ut AS (
 	select master_track_id,
 		profile_id
-	from hive.default.matvw_catalog_master_credit
+	from hive."platform-industry-bi-prod".matvw_catalog_master_credit
 		join up using(profile_id)
 	where not is_deleted
 ),
@@ -42,7 +42,7 @@ uc AS (
 					order by count(1) desc
 				) AS rn
 			from ut
-				join hive.default.matvw_catalog_master_credit AS c USING(master_track_id)
+				join hive."platform-industry-bi-prod".matvw_catalog_master_credit AS c USING(master_track_id)
 			where not is_deleted
 				and ut.profile_id <> c.profile_id
 			group by 1,
@@ -63,7 +63,7 @@ select profile_id,
 	overall_score,
 	country
 from p
-	join hive.default.matvw_catalog_profile AS cp ON(profile_id = _id)
+	join hive."platform-industry-bi-prod".matvw_catalog_profile AS cp ON(profile_id = _id)
 	join s USING(profile_id)
 where coalesce(nullif(lower(country), ''), 'ukraine') = 'ukraine'
 order by overall_score desc

@@ -40,7 +40,7 @@ from (
 					p.name,
 					score
 				from "platform-industry-calc-prod"."calc_credit_score_charts_entries_history" AS s
-					join hive.default.matvw_catalog_profile AS p ON (s.profile_id = p._id)
+					join hive."platform-industry-bi-prod".matvw_catalog_profile AS p ON (s.profile_id = p._id)
 				where date = '2024-11-28'
 					and category in ('Producer')
 			)

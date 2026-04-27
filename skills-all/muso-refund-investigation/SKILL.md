@@ -92,13 +92,13 @@ Build a complete picture of who this person is in the music industry.
 -- Full user record
 SELECT u.id, u.email, u.firstname, u.lastname, u.createdat, u.updatedat,
   u.country, u.state, u.city, u.phone, u.company, u.jobtitle
-FROM postgresql_core.public.public_users u
+FROM postgresql_core.public.users u
 WHERE u.email = 'USER_EMAIL';
 
 -- Did they claim a profile?
 SELECT pp.profileid, pp.permission, pp.createdat as claim_date
-FROM postgresql_core.public.public_profile_permissions pp
-JOIN postgresql_core.public.public_users u ON u.id = pp.userid
+FROM postgresql_core.public.profile_permissions pp
+JOIN postgresql_core.public.users u ON u.id = pp.userid
 WHERE u.email = 'USER_EMAIL';
 ```
 
@@ -108,7 +108,7 @@ WHERE u.email = 'USER_EMAIL';
 SELECT _id, name, legal_name, known_as_names, profile_type, profile_sub_type,
   popularity, rank, credits_count, collaborations_count,
   common_credits, primary_genre, country, city, about, years_active
-FROM hive.default.matvw_catalog_profile
+FROM hive."platform-industry-bi-prod".matvw_catalog_profile
 WHERE _id = 'PROFILE_ID';
 ```
 
@@ -116,9 +116,9 @@ WHERE _id = 'PROFILE_ID';
 ```sql
 -- Are they part of an organization/workspace?
 SELECT t.id as team_id, t.name as team_name, t.plan, wm.role
-FROM postgresql_core.public.public_workspace_members wm
-JOIN postgresql_core.public.public_teams t ON t.id = wm.teamid
-JOIN postgresql_core.public.public_users u ON u.id = wm.userid
+FROM postgresql_core.public.workspace_members wm
+JOIN postgresql_core.public.teams t ON t.id = wm.teamid
+JOIN postgresql_core.public.users u ON u.id = wm.userid
 WHERE u.email = 'USER_EMAIL';
 ```
 

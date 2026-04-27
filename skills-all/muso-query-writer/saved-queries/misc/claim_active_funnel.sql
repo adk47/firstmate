@@ -31,11 +31,11 @@ from (
 			COUNT(distinct s.seatid) as num_seats,
 			COUNT(distinct IF(s.status='active', s.seatid)) as num_active_seats,
 			COUNT(distinct c.profileid) as num_claimed
-		from postgresql_core.public.public_users as u
-			left join postgresql_core.public.public_team_users as tu ON (u.id = tu.userid)
-			left join postgresql_core.public.public_teams as t ON (tu.teamid = t.id)
-			left join postgresql_core.public.public_roster_seats AS s ON (t.id = s.teamid)
-			left join postgresql_core.public.public_claiming AS c ON (
+		from postgresql_core.public.users as u
+			left join postgresql_core.public.team_users as tu ON (u.id = tu.userid)
+			left join postgresql_core.public.teams as t ON (tu.teamid = t.id)
+			left join postgresql_core.public.roster_seats AS s ON (t.id = s.teamid)
+			left join postgresql_core.public.claiming AS c ON (
 				t.id = c.teamid
 				and c.deletedat is null
 				and c.status = 'processed'

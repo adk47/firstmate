@@ -32,10 +32,10 @@ select distinct rel.source_release_id AS spotify_album_id,
 	ARBITRARY(r_rec.title) AS recording_title,
 	array_join(ARRAY_AGG(distinct r_p.name), ', ') AS recording_artists
 from rel
-	join hive.default."matvw_raw_release" AS r_rel ON (r_rel.upc = rel.upc)
+	join hive."platform-industry-bi-prod"."matvw_raw_release" AS r_rel ON (r_rel.upc = rel.upc)
 	cross join unnest(r_rel.recordings) AS rr(recording)
-	join hive.default."matvw_raw_recording" AS r_rec ON (r_rec._id = recording.recording_id)
+	join hive."platform-industry-bi-prod"."matvw_raw_recording" AS r_rec ON (r_rec._id = recording.recording_id)
 	cross join unnest(r_rec.artist_ids) AS ra(raw_artist_id)
-	join hive.default."matvw_raw_profile" AS r_p ON (r_p._id = raw_artist_id)
+	join hive."platform-industry-bi-prod"."matvw_raw_profile" AS r_p ON (r_p._id = raw_artist_id)
 where r_rel._id like 'spotify:%'
 group by 1,2 

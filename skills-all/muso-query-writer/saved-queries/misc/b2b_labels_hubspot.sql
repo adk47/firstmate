@@ -23,7 +23,7 @@ with album AS (
 			partition by label
 			ORDER BY popularity DESC
 		) AS top
-	from hive.default."matvw_raw_release"
+	from hive."platform-industry-bi-prod"."matvw_raw_release"
 	where batch_id = '0'
 ),
 artist AS (

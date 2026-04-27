@@ -79,23 +79,23 @@ stripe customers retrieve cus_XXX | jq '.balance'
 ```bash
 # User lookup
 SELECT id, email, createdat, updatedat 
-FROM postgresql_core.public.public_users 
+FROM postgresql_core.public.users 
 WHERE email = 'USER_EMAIL'
 
 # Action log (shows every API call the user made)
 SELECT createdat, route, requestmethod 
-FROM postgresql_core.public.public_user_action_log 
+FROM postgresql_core.public.user_action_log 
 WHERE userid = USER_ID 
 ORDER BY createdat DESC LIMIT 100
 
 # Profile claims
 SELECT id, status, profileid, profiletype, createdat 
-FROM postgresql_core.public.public_claiming 
+FROM postgresql_core.public.claiming 
 WHERE userid = USER_ID
 
 # User's claimed profiles
 SELECT profileid, createdat 
-FROM postgresql_core.public.public_user_profiles 
+FROM postgresql_core.public.user_profiles 
 WHERE userid = USER_ID
 ```
 

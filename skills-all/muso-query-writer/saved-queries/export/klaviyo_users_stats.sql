@@ -133,7 +133,7 @@ with usr AS (
 	    left join "production-musomvp"."public_team_users" AS tu ON (u.id=tu.userid)
 	    left join "production-musomvp"."public_subscriptions" AS sb ON (sb.teamid=tu.teamid)
 		left join "production-musomvp"."public_roster_seats" AS s ON (tu.teamid = s.teamid)
-		left join hive.default."matvw_catalog_profile" AS p ON (
+		left join hive."platform-industry-bi-prod"."matvw_catalog_profile" AS p ON (
 			COALESCE(s.seatid, u."neptuneprofessionalid") = p._id
 		)
 		left join "production-musomvp"."public_claiming" as c ON (tu.teamid=c.teamid and p._id=c.profileid)

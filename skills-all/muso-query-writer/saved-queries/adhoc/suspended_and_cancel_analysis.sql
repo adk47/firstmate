@@ -33,14 +33,14 @@ cl as (
 	select distinct profileid as profile_id,
 		TRUE as is_claimed,
 		teamid
-	from postgresql_core.public.public_claiming
+	from postgresql_core.public.claiming
 	where status = 'processed'
 ),
 r as (
 	select distinct seatid as profile_id,
 		status = 'active' as is_active_seat,
 		teamid
-	from postgresql_core.public.public_roster_seats
+	from postgresql_core.public.roster_seats
 ),
 tp as (
 	select teamid,

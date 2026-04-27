@@ -13,10 +13,10 @@ last_exported: 2025-01-31
 
 with mlc as (
 	select distinct isrc, true as is_mlc
-	from hive.mlc.parties as p
-		join hive.mlc.workrightshares as ws USING(feedproviderspartyid)
-		join hive.mlc.worksrecordings as wr USING(feedprovidersworkid)
-		join hive.mlc.recordings as r USING(feedprovidersrecordingid)
+	from hive."platform-industry-mlc-bi-prod".parties as p
+		join hive."platform-industry-mlc-bi-prod".workrightshares as ws USING(feedproviderspartyid)
+		join hive."platform-industry-mlc-bi-prod".worksrecordings as wr USING(feedprovidersworkid)
+		join hive."platform-industry-mlc-bi-prod".recordings as r USING(feedprovidersrecordingid)
 	where lower(ws.partyrole) like '%publisher%'
 ),
 t as (
@@ -27,7 +27,7 @@ t as (
 		    array_join(transform(artists, a->a.name), ', '),
 		    title
 		) as artists
-	from hive.default.matvw_catalog_track
+	from hive."platform-industry-bi-prod".matvw_catalog_track
 		cross join unnest(isrcs) as i(isrc)
 		left join mlc USING(isrc)
 	where not is_deleted

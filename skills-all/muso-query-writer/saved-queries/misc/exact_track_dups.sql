@@ -21,7 +21,7 @@ with t as (
 		) AS spotify_ids,
 		popularity,
 		cardinality(raw_recording_ids) AS num_raw_ids
-	from hive.default."matvw_catalog_track"
+	from hive."platform-industry-bi-prod"."matvw_catalog_track"
 	where not COALESCE(is_deleted, FALSE)
 )
 select 'merge' AS action_type,

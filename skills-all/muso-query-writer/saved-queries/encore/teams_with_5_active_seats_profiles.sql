@@ -20,7 +20,7 @@ with ts as (
         teamid,
         count(distinct seatid) as num_seats,
         count(distinct IF(status='active', seatid)) as num_active_seats
-    from postgresql_core.public.public_roster_seats 
+    from postgresql_core.public.roster_seats 
     group by 1
     )
     where num_active_seats > 4
@@ -31,10 +31,10 @@ tu as (
         max_by(t.name, row(num_active_seats, num_seats, teamid)) as team_name,
         max(num_active_seats) as num_active_seats,
         'https://musoai.retool.com/apps/c0f441da-6e5c-11ee-bc6e-07ffdf65af60/Growth/Workspace%20Details?workspaceId=' || max_by(teamid, row(num_active_seats, num_seats, teamid)) as team_url
-	from postgresql_core.public.public_team_users as tu
+	from postgresql_core.public.team_users as tu
 		join ts USING(teamid)
-		join postgresql_core.public.public_teams as t ON(teamid=t.id)
-		join postgresql_core.public.public_users as u ON (tu.userid = u.id)
+		join postgresql_core.public.teams as t ON(teamid=t.id)
+		join postgresql_core.public.users as u ON (tu.userid = u.id)
 	where roles like '%owner%' and u.email not like '%muso.ai%'
 	group by 1
 )

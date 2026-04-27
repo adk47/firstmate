@@ -44,9 +44,9 @@ pt as (
         category,
         p._id as profile_id,
         t._id as track_id
-    from hive.default.matvw_catalog_track as t
+    from hive."platform-industry-bi-prod".matvw_catalog_track as t
     cross join unnest(profiles) as tp(profile)
-    join hive.default.matvw_catalog_profile as p ON (p._id=profile.profile_id)
+    join hive."platform-industry-bi-prod".matvw_catalog_profile as p ON (p._id=profile.profile_id)
     cross join unnest(profile.catalog_credits) as pc(catalog_credit)
     join c ON (p.profile_type=c.profile_type and (catalog_credit.child=c.child or c.child='none' and c.parent=catalog_credit.parent))
     where not t.is_deleted and not p.is_deleted
@@ -70,5 +70,5 @@ from (
     group by 1, 2
 -- where profile_id = '86bd5f90-e94e-01c4-ff21-5f8b6bb6d308'
 ) as s
-join hive.default.matvw_catalog_profile as p ON(profile_id=_id)
+join hive."platform-industry-bi-prod".matvw_catalog_profile as p ON(profile_id=_id)
 where position < 21

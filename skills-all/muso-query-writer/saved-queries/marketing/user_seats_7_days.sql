@@ -14,9 +14,9 @@ last_exported: 2025-01-31
 with ig AS (
 	select c._id AS profile_id,
 		arbitrary(contact.value) AS instagram
-	from hive.default.matvw_catalog_profile as c
+	from hive."platform-industry-bi-prod".matvw_catalog_profile as c
 		cross join unnest(raw_profile_ids) AS cr(rid)
-		join hive.default.matvw_raw_profile AS r ON (r._id = rid)
+		join hive."platform-industry-bi-prod".matvw_raw_profile AS r ON (r._id = rid)
 		cross join unnest(r.contacts) AS rc(contact)
 	where nullif(contact.value, '') is not null
 		and contact.type = 'instagram'
@@ -42,7 +42,7 @@ select
 FROM "production-musomvp"."public_users" AS u
 	left join "production-musomvp"."public_team_users" AS tu ON (u.id = userid)
 	left join "production-musomvp"."public_roster_seats" AS s USING (teamid)
-	left join hive.default."matvw_catalog_profile" AS p ON (s.seatid=p._id)
+	left join hive."platform-industry-bi-prod"."matvw_catalog_profile" AS p ON (s.seatid=p._id)
 	left join ig on (p._id=ig.profile_id)
 where date_diff('day', CAST(SUBSTR(u.createdat, 1, 10) AS date), current_date) < 7
 order by u.createdat desc

@@ -14,9 +14,9 @@ last_exported: 2025-01-31
 with ig AS (
 	select c._id AS profile_id,
 		arbitrary(contact.value) AS instagram
-	from hive.default.matvw_catalog_profile as c
+	from hive."platform-industry-bi-prod".matvw_catalog_profile as c
 		cross join unnest(raw_profile_ids) AS cr(rid)
-		join hive.default.matvw_raw_profile AS r ON (r._id = rid)
+		join hive."platform-industry-bi-prod".matvw_raw_profile AS r ON (r._id = rid)
 		cross join unnest(r.contacts) AS rc(contact)
 	where nullif(contact.value, '') is not null
 		and contact.type = 'instagram'
@@ -45,7 +45,7 @@ select s.profile_id,
 	popularity,
 	rank,
 	instagram
-from hive.default.matvw_catalog_profile AS p
+from hive."platform-industry-bi-prod".matvw_catalog_profile AS p
 	join s ON (p._id = s.profile_id)
 	left join ig ON (s.profile_id = ig.profile_id)
 where profile_type in ('professional', 'artist')

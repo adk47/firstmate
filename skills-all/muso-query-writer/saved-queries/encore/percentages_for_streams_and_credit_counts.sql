@@ -74,7 +74,7 @@ pc as (
 	select p,
 		approx_percentile(try_cast(credits_count as bigint), p) as credits_count,
 		approx_percentile(try_cast(credits_count_1y as bigint), p) as credits_count_1y
-	from hive.default.matvw_catalog_profile,
+	from hive."platform-industry-bi-prod".matvw_catalog_profile,
 		pe
 	where not is_deleted
 		and try_cast(credits_count as bigint) > 0

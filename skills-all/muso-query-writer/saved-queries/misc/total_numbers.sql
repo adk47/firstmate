@@ -13,7 +13,7 @@ last_exported: 2025-01-31
 
 with p AS (
 	select distinct seatid AS profile_id
-	from postgresql_core.public.public_roster_seats
+	from postgresql_core.public.roster_seats
 	where status = 'active'
 )
 select count(1) AS num_daily_track_stats,

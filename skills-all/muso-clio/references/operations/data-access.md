@@ -151,7 +151,7 @@ AWS Athena, Glue, and workgroups are retired. All queries now go to Trino on OVH
 
 | Catalog | Backed by | Equivalent old Athena DB |
 |---------|-----------|--------------------------|
-| `hive.default` | OVH S3 IO + HMS | `"platform-industry-bi-prod"` (matvw_*) |
+| `hive."platform-industry-bi-prod"` | OVH S3 IO + HMS | `"platform-industry-bi-prod"` (matvw_*) |
 | `hive.audit` | OVH S3 IO + HMS | `"audit-prod"` |
 | `hive.mlc` | OVH S3 IO + HMS | `"platform-industry-mlc-bi-prod"` |
 | `postgresql_core.public` | OVH PG node-18 (live) | `"platform-core-backend-export-prod"` |
@@ -165,7 +165,7 @@ AWS Athena, Glue, and workgroups are retired. All queries now go to Trino on OVH
 ```bash
 # Use the trino-query.sh wrapper — auto-rewrites legacy Athena DB names
 bash /opt/hydra/scripts/trino-query.sh \
-  "SELECT * FROM hive.default.matvw_catalog_profile LIMIT 10"
+  "SELECT * FROM hive."platform-industry-bi-prod".matvw_catalog_profile LIMIT 10"
 
 # Old Athena queries still work — wrapper rewrites the DB names
 bash /opt/hydra/scripts/trino-query.sh \
@@ -179,8 +179,8 @@ kubectl exec -n data-processing trino-coordinator-0 -- trino \
 # Discovery
 bash /opt/hydra/scripts/trino-query.sh "SHOW CATALOGS"
 bash /opt/hydra/scripts/trino-query.sh "SHOW SCHEMAS FROM hive"
-bash /opt/hydra/scripts/trino-query.sh "SHOW TABLES FROM hive.default"
-bash /opt/hydra/scripts/trino-query.sh "DESCRIBE hive.default.matvw_catalog_profile"
+bash /opt/hydra/scripts/trino-query.sh "SHOW TABLES FROM hive."platform-industry-bi-prod""
+bash /opt/hydra/scripts/trino-query.sh "DESCRIBE hive."platform-industry-bi-prod".matvw_catalog_profile"
 ```
 
 ### What changed from Athena CLI?
@@ -264,7 +264,7 @@ When users report sudden stream count decreases, check for merged tracks in the 
 ```sql
 -- Find merged tracks from last 360 days
 -- Useful for explaining sudden stream count changes
--- Run via Trino against hive.default or postgresql_core.public
+-- Run via Trino against or postgresql_core.public
 
 SELECT
     t.id AS track_id,

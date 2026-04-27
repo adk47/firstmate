@@ -20,9 +20,9 @@ _mlc as (
     select 
         iswc, 
         array_agg(isrc) AS mlc_isrcs
-    from hive.mlc.works
-    	join hive.mlc.worksrecordings USING(feedprovidersworkid)
-    	join hive.mlc.recordings USING(feedprovidersrecordingid)
+    from hive."platform-industry-mlc-bi-prod".works
+    	join hive."platform-industry-mlc-bi-prod".worksrecordings USING(feedprovidersworkid)
+    	join hive."platform-industry-mlc-bi-prod".recordings USING(feedprovidersrecordingid)
     	group by 1 
     	having count(1) > 1
 ),
@@ -41,7 +41,7 @@ pt as (
         isrcs,
         _id,
         popularity
-    from hive.default.matvw_catalog_track
+    from hive."platform-industry-bi-prod".matvw_catalog_track
     cross join unnest(profiles) as p(pc)
     cross join unnest(pc.catalog_credits) as p(cc)
     where not is_deleted and cc.parent = 'Songwriter'

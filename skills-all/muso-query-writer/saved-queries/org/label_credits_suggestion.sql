@@ -15,7 +15,7 @@ last_exported: 2025-01-31
 with lr AS (
 	select custom_data.label AS label,
 		recording_id
-	from hive.default.matvw_raw_release
+	from hive."platform-industry-bi-prod".matvw_raw_release
 		cross join unnest(
 			array_distinct(transform(recordings, r->r.recording_id))
 		) AS r(recording_id)
@@ -29,7 +29,7 @@ with lr AS (
 c AS (
 	select distinct master_track_id AS _id,
 		true as already_added
-	from hive.default.matvw_catalog_master_credit
+	from hive."platform-industry-bi-prod".matvw_catalog_master_credit
 	where profile_id = '71b4cc1d-7089-4a84-ae1f-87ef51bdd238'
 )
 select 'Boosted Entertainment' AS workspace_name,
@@ -42,7 +42,7 @@ select 'Boosted Entertainment' AS workspace_name,
 	) AS artists,
 	popularity,
 	'https://credits.muso.ai/track/' || _id AS track_url
-from hive.default.matvw_catalog_track AS t
+from hive."platform-industry-bi-prod".matvw_catalog_track AS t
 	cross join unnest(raw_recording_ids) AS r(recording_id)
 	join lr using(recording_id)
 	left join c using(_id)

@@ -14,15 +14,15 @@ last_exported: 2025-01-31
 
 with _track AS (
 	select distinct master_track_id
-	from hive.default."matvw_catalog_master_credit" AS c
-		join hive.default."matvw_catalog_profile" AS p ON (p._id = c.profile_id)
+	from hive."platform-industry-bi-prod"."matvw_catalog_master_credit" AS c
+		join hive."platform-industry-bi-prod"."matvw_catalog_profile" AS p ON (p._id = c.profile_id)
 	where not c.is_deleted
 		and not p.is_deleted
 		and p.profile_type in ('artist', 'professional')
 		and p.rank in (1, 2)
 	union
 	select _id AS master_track_id
-	from hive.default."matvw_catalog_track"
+	from hive."platform-industry-bi-prod"."matvw_catalog_track"
 	where rank in (1, 2)
 		and not is_deleted
 ),
@@ -52,7 +52,7 @@ tracks AS (
 				)
 			) > 0
 		) > 0 AS has_songwriter
-	from hive.default."matvw_catalog_master_credit"
+	from hive."platform-industry-bi-prod"."matvw_catalog_master_credit"
 		RIGHT JOIN _track USING(master_track_id)
 	GROUP BY 1
 )

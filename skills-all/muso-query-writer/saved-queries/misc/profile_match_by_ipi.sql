@@ -16,7 +16,7 @@ with mlc as (
     select 
         'mlc:'|| cast(feedproviderspartyid as varchar) as rid, 
         ipinamenumber
-    from hive.mlc.parties 
+    from hive."platform-industry-mlc-bi-prod".parties 
     where ipinamenumber in (
         2852023,
 21007060,
@@ -150,14 +150,14 @@ r as (
         seatid as _id,
         TRUE as in_roster,
         count_if(status = 'active') > 0 as is_paid
-    from postgresql_core.public.public_roster_seats 
+    from postgresql_core.public.roster_seats 
     group by 1 
 ),
 c as (
     select distinct
         profileid as _id,
         TRUE as is_claimed
-    from postgresql_core.public.public_claiming 
+    from postgresql_core.public.claiming 
     where status = 'processed'
 )
 select 
@@ -168,7 +168,7 @@ select
     coalesce(is_claimed, FALSE) as is_claimed,
     coalesce(is_paid, FALSE) as is_paid,
     'https://credits.muso.ai/profile/'||_id as muso_url
-from hive.default.matvw_catalog_profile
+from hive."platform-industry-bi-prod".matvw_catalog_profile
 cross join unnest(raw_profile_ids) as pr(rid)
 join mlc USING(rid)
 left join r USING(_id)

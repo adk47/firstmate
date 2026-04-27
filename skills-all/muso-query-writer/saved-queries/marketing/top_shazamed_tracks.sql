@@ -16,7 +16,7 @@ with t as (
 select 
     track_id as _id,
     MAX(streams) as shazams
-from hive.default.matvw_analytics_link
+from hive."platform-industry-bi-prod".matvw_analytics_link
 where source='shazam'
 group by 1
 )
@@ -25,7 +25,7 @@ select
     title,
     array_join(transform(artists, a->a.name), ',') as artists,
     shazams
-from hive.default.matvw_catalog_track 
+from hive."platform-industry-bi-prod".matvw_catalog_track 
 join t USING(_id)
 where not is_deleted and cardinality(artists) > 0
 order by shazams desc 

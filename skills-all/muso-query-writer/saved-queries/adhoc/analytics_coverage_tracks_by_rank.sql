@@ -27,7 +27,7 @@ select
     coalesce(rank, 5) AS rank,
     count(distinct _id) AS num_tracks,
     count(distinct IF(in_analytics, _id)) AS num_analytics_tracks
-from hive.default.matvw_catalog_track
+from hive."platform-industry-bi-prod".matvw_catalog_track
 cross join unnest(raw_recording_ids) AS r(rid)
 left join c USING(rid)
 group by 1

@@ -15,15 +15,15 @@ last_exported: 2025-01-31
 with uc as (
 	select distinct u.id as user_id,
 		c.profileid as profile_id
-	from postgresql_core.public.public_users as u
-		join postgresql_core.public.public_claiming as c ON (c.teamid = u.defaultteamid)
+	from postgresql_core.public.users as u
+		join postgresql_core.public.claiming as c ON (c.teamid = u.defaultteamid)
 	where c.status = 'processed'
 ),
 us as (
 	select distinct u.id as user_id,
 		s.seatid as profile_id
-	from postgresql_core.public.public_users as u
-		join postgresql_core.public.public_roster_seats as s ON (s.teamid = u.defaultteamid)
+	from postgresql_core.public.users as u
+		join postgresql_core.public.roster_seats as s ON (s.teamid = u.defaultteamid)
 		left join (
 			select distinct user_id
 			from uc
@@ -33,14 +33,14 @@ us as (
 p as (
 	select _id as profile_id,
 		COALESCE(rank, 5) as rank
-	from hive.default.matvw_catalog_profile
+	from hive."platform-industry-bi-prod".matvw_catalog_profile
 	where not is_deleted
 ),
 u as (
 	select u.id as user_id,
 		BOOL_OR(coalesce(s.status = 'active', false)) as is_paid
-	from postgresql_core.public.public_subscriptions as s
-		right join postgresql_core.public.public_users as u ON (s.teamid = u.defaultteamid)
+	from postgresql_core.public.subscriptions as s
+		right join postgresql_core.public.users as u ON (s.teamid = u.defaultteamid)
 	group by 1
 )
 select COALESCE(cast(user_rank as varchar), 'N/A') as user_rank,

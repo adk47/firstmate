@@ -14,7 +14,7 @@ last_exported: 2025-01-31
 
 with m as (
 	select substr(rid, 5) as feedprovidersrecordingid
-	from hive.default.matvw_catalog_track
+	from hive."platform-industry-bi-prod".matvw_catalog_track
 		cross join unnest(raw_recording_ids) as r(rid)
 	where not is_deleted
 		and cardinality(
@@ -36,9 +36,9 @@ select feedproviderspartyid,
 	min(fullname) as fullname,
 	count(distinct feedprovidersworkid) as num_works,
 	count(1) as num_contributions
-from hive.mlc.workrightshares as ws
-	join hive.mlc.worksrecordings as w USING(feedprovidersworkid)
-	join hive.mlc.parties as p USING(feedproviderspartyid)
+from hive."platform-industry-mlc-bi-prod".workrightshares as ws
+	join hive."platform-industry-mlc-bi-prod".worksrecordings as w USING(feedprovidersworkid)
+	join hive."platform-industry-mlc-bi-prod".parties as p USING(feedproviderspartyid)
 	join m USING(feedprovidersrecordingid)
 where partyrole in (
 		'ComposerLyricist',

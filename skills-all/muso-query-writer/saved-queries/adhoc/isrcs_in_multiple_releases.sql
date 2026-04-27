@@ -31,8 +31,8 @@ select distinct
 	i.isrc,
 	upc,
 	'https://open.spotify.com/album/' || split_part(release_id, ':', 2) as spotify_url
-from hive.default.matvw_raw_recording as r
+from hive."platform-industry-bi-prod".matvw_raw_recording as r
 	join i ON(i.isrc = upper(r.isrc))
 	cross join unnest (release_ids) as rl(release_id)
-	join hive.default.matvw_raw_release as re ON (re._id = release_id)
+	join hive."platform-industry-bi-prod".matvw_raw_release as re ON (re._id = release_id)
 where source = 'spotify'

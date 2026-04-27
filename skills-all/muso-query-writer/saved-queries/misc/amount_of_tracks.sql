@@ -20,10 +20,10 @@ with pro_profiles AS (
 prs AS (
 	select raw_recording_id AS _id,
 		ARBITRARY(pp.profile_id) IS NOT NULL AS is_pro_recording
-	from hive.default."matvw_catalog_profile" AS p
+	from hive."platform-industry-bi-prod"."matvw_catalog_profile" AS p
 		JOIN pro_profiles AS pp ON (p._id = pp.profile_id)
-		JOIN hive.default."matvw_catalog_master_credit" AS c ON (p._id = c.profile_id)
-		JOIN hive.default."matvw_catalog_track" AS t ON (c.master_track_id = t._id)
+		JOIN hive."platform-industry-bi-prod"."matvw_catalog_master_credit" AS c ON (p._id = c.profile_id)
+		JOIN hive."platform-industry-bi-prod"."matvw_catalog_track" AS t ON (c.master_track_id = t._id)
 		cross join unnest(raw_recording_ids) AS tr(raw_recording_id)
 	where not coalesce(p.is_deleted, FALSE)
 		and p.profile_type in ('professional', 'artist', 'organization')
@@ -86,7 +86,7 @@ from (
 				DATE('2023-04-01')
 			) AS updated_date,
 			COALESCE(is_pro_recording, FALSE) AS is_pro_recording
-		FROM hive.default."matvw_raw_recording"
+		FROM hive."platform-industry-bi-prod"."matvw_raw_recording"
 			LEFT JOIN prs USING(_id)
 		WHERE source = 'spotify'
 	)

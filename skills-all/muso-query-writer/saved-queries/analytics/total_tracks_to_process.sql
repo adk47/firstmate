@@ -35,7 +35,7 @@ with up AS (
 	WHERE try_cast(profile_id as uuid) is not null
 )
 select count(distinct t._id) AS num_tracks, count(distinct isrc) AS num_isrcs, count(1) as num_profile_track_isrcs
-from hive.default.matvw_catalog_master_credit as c
+from hive."platform-industry-bi-prod".matvw_catalog_master_credit as c
 	join up USING(profile_id)
-	join hive.default.matvw_catalog_track AS t ON (c.master_track_id = t._id)
+	join hive."platform-industry-bi-prod".matvw_catalog_track AS t ON (c.master_track_id = t._id)
 	cross join unnest(isrcs) AS i(isrc)

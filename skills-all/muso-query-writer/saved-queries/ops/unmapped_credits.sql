@@ -17,7 +17,7 @@ select credit,
 	count_if(recording_id like 'tidal%') AS count_tidal,
 	count_if(recording_id like 'jaxsta%') AS count_jaxsta,
 	count_if(recording_id like 'genius%') AS count_genius
-from hive.default."matvw_raw_recording_credit"
+from hive."platform-industry-bi-prod"."matvw_raw_recording_credit"
 where lower(credit) not in (
 		select distinct lower(credit)
 		from "platform-industry-db-industry-prod"."dict_credit"

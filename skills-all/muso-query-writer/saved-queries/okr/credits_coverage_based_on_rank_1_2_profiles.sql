@@ -13,7 +13,7 @@ last_exported: 2025-01-31
 
 with _profiles AS (
 	select distinct _id as profile_id
-	from hive.default."matvw_catalog_profile"
+	from hive."platform-industry-bi-prod"."matvw_catalog_profile"
 	where rank in (1, 2)
 		and profile_type in ('professional', 'artist')
 ),
@@ -43,7 +43,7 @@ tracks AS (
 				)
 			) > 0
 		) > 0 AS has_songwriter
-	from hive.default."matvw_catalog_master_credit"
+	from hive."platform-industry-bi-prod"."matvw_catalog_master_credit"
 		RIGHT JOIN _profiles USING(profile_id)
 	GROUP BY 1
 )

@@ -28,7 +28,7 @@ with c AS (
         seatid as _id, 
         TRUE AS in_seats ,
         BOOL_OR(COALESCE(status='active', false)) AS has_analytics
-    from postgresql_core.public.public_roster_seats
+    from postgresql_core.public.roster_seats
     group by 1
 )
 select 

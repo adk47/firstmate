@@ -17,7 +17,7 @@ with s AS (
 		date(cast(createdat as timestamp)) AS seat_added_date,
 		createdat,
 		teamid
-	from postgresql_core.public.public_roster_seats
+	from postgresql_core.public.roster_seats
 	where status = 'active'
 )
 select 
@@ -44,7 +44,7 @@ select
     approx_percentile(popularity, 0.5) AS p50_popularity,
     approx_percentile(popularity, 0.75) AS p75_popularity,
     approx_percentile(popularity, 0.9) AS p90_popularity
-from hive.default.matvw_catalog_profile AS p
+from hive."platform-industry-bi-prod".matvw_catalog_profile AS p
 join s ON (seatid=_id) 
 group by 1 
 order by 1

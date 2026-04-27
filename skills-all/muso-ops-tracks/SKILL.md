@@ -44,7 +44,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 
 ```sql
 SELECT _id, title, popularity, default_release_label, release_timestamp
-FROM hive.default.matvw_catalog_track
+FROM hive."platform-industry-bi-prod".matvw_catalog_track
 WHERE lower(title) LIKE '%track name%'
   AND is_deleted = false
 ORDER BY popularity DESC

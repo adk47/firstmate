@@ -10,14 +10,14 @@
 > The main differences are catalog/schema names and how queries are executed.
 >
 > Use `bash /opt/hydra/scripts/trino-query.sh "<SQL>"` from node-8 — it
-> auto-rewrites the legacy `hive.default` style DB names to
+> auto-rewrites the legacy `hive."platform-industry-bi-prod"` style DB names to
 > their Trino equivalents, so old saved queries keep working.
 >
 > **Mapping table** (also in trino-query-reference.md):
 >
 > | Old Athena DB | New Trino reference |
 > |---------------|---------------------|
-> | `hive.default` | `hive.default` |
+> | `hive."platform-industry-bi-prod"` | `hive."platform-industry-bi-prod"` |
 > | `postgresql_core.public` | `postgresql_core.public` |
 > | `hive.audit` | `hive.audit` |
 > | `bi` | `postgresql_analytics.public` |

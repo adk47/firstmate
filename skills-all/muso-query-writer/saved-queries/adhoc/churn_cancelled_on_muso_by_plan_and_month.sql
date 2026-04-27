@@ -33,7 +33,7 @@ select
         '$.expiresAt'
     ) as bigint) / 1000) as expires_at,
     date(substr(updatedat, 1, 10)) as last_updated
-from postgresql_core.public.public_subscriptions 
+from postgresql_core.public.subscriptions 
 where status = 'cancelled' and plan <> 'vip'
 )
 where date_diff('day', period_start, expires_at) > 14

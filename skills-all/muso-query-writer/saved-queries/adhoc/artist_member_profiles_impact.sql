@@ -17,7 +17,7 @@ with m AS (
 		name as member_of_name,
 		p.credits_count
 	from "platform-industry-db-industry-prod".catalog_member
-		join hive.default.matvw_catalog_profile as p ON (profile_id = p._id)
+		join hive."platform-industry-bi-prod".matvw_catalog_profile as p ON (profile_id = p._id)
 	where not coalesce(deleted.is_deleted, FALSE)
 		and not is_deleted
 ),
@@ -28,7 +28,7 @@ p as (
 		max_by(member_of_id, m.credits_count) AS main_member_id,
 		max_by(member_of_name, m.credits_count) AS main_member_name
 	from "production-musomvp".public_roster_seats AS s
-		join hive.default.matvw_catalog_profile as p ON (seatid = p._id)
+		join hive."platform-industry-bi-prod".matvw_catalog_profile as p ON (seatid = p._id)
 		left join m USING(seatid)
 	where s.status = 'active'
 		and not p.is_deleted
@@ -80,7 +80,7 @@ from (
 						streams,
 						0
 					) AS affected_streams
-				from hive.default.matvw_catalog_master_credit
+				from hive."platform-industry-bi-prod".matvw_catalog_master_credit
 					join ts USING(master_track_id)
 			)
 			join p ON (profileid = profile_id)

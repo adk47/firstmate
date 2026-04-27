@@ -31,7 +31,7 @@ select u.id AS user_id,
                 left join postgresql_core.public."public_team_users" AS tu ON (u.id = userid)
                 left join postgresql_core.public."public_subscriptions" AS su USING (teamid)
                 left join postgresql_core.public."public_roster_seats" AS s USING (teamid)
-                left join hive.default."matvw_catalog_profile" AS p ON (s.seatid = p._id)
+                left join hive."platform-industry-bi-prod"."matvw_catalog_profile" AS p ON (s.seatid = p._id)
             where date_diff(
                     'day',
                     CAST(SUBSTR(u.createdat, 1, 10) AS date),

@@ -31,8 +31,8 @@ select t._id as track_id,
 		),
 		','
 	) as credits
-from hive.default.matvw_catalog_master_credit as c
-	join hive.default.matvw_catalog_track as t ON (t._id = c.master_track_id)
+from hive."platform-industry-bi-prod".matvw_catalog_master_credit as c
+	join hive."platform-industry-bi-prod".matvw_catalog_track as t ON (t._id = c.master_track_id)
 where profile_id = '1d4e45dd-b101-4dc8-9c37-df4566fb6bce'
 	and not c.is_deleted
 	and not t.is_deleted

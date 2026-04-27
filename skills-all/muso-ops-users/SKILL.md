@@ -51,7 +51,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 **Step 2: Athena (account data)**
 ```sql
 SELECT id, email, first_name, last_name, createdat, updatedat, status
-FROM postgresql_core.public.public_users
+FROM postgresql_core.public.users
 WHERE lower(email) = 'john@example.com'
 ```
 

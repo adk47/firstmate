@@ -27,13 +27,13 @@ Write efficient, cost-aware Trino queries against Muso.AI's OVH data platform.
 
 ```bash
 # Run a query (wrapper auto-rewrites legacy Athena DB names → Trino catalog.schema)
-bash /opt/hydra/scripts/trino-query.sh "SELECT * FROM hive.default.matvw_catalog_profile LIMIT 10"
+bash /opt/hydra/scripts/trino-query.sh "SELECT * FROM hive."platform-industry-bi-prod".matvw_catalog_profile LIMIT 10"
 
 # Discovery
 bash /opt/hydra/scripts/trino-query.sh "SHOW CATALOGS"
 bash /opt/hydra/scripts/trino-query.sh "SHOW SCHEMAS FROM hive"
-bash /opt/hydra/scripts/trino-query.sh "SHOW TABLES FROM hive.default"
-bash /opt/hydra/scripts/trino-query.sh "DESCRIBE hive.default.matvw_catalog_profile"
+bash /opt/hydra/scripts/trino-query.sh "SHOW TABLES FROM hive."platform-industry-bi-prod""
+bash /opt/hydra/scripts/trino-query.sh "DESCRIBE hive."platform-industry-bi-prod".matvw_catalog_profile"
 
 # Saved queries are checked into the repo at:
 ls /opt/hydra/skills-all/muso-query-writer/saved-queries/
@@ -49,9 +49,9 @@ ls /opt/hydra/skills-all/muso-query-writer/saved-queries/
 
 | Table | Catalog.Schema | Rows | Use For |
 |-------|----------------|------|---------|
-| `matvw_catalog_profile` | hive.default | 29M | Profile lookup, credits |
-| `matvw_catalog_track` | hive.default | 190M | Track metadata, ISRCs |
-| `matvw_stats_track_daily` | hive.default | 3.3B | Streaming analytics |
+| `matvw_catalog_profile` | | 29M | Profile lookup, credits |
+| `matvw_catalog_track` | | 190M | Track metadata, ISRCs |
+| `matvw_stats_track_daily` | | 3.3B | Streaming analytics |
 | `users` | postgresql_core.public | 339K | User data (live, no export delay) |
 | `subscriptions` | postgresql_core.public | 60K | Subscription status (live) |
 
@@ -138,7 +138,7 @@ Data freshness: daily dumps in 99% of cases.
 ### MongoDB Snapshots (Catalog DB)
 | Database | Description |
 |----------|-------------|
-| `hive.default` | Materialized views (`matvw_*`) - weekly dump + daily deltas. Faster/cheaper than full snapshots |
+| `hive."platform-industry-bi-prod"` | Materialized views (`matvw_*`) - weekly dump + daily deltas. Faster/cheaper than full snapshots |
 | `platform-industry-db-industry-prod` | Full weekly MongoDB snapshot (slower, complete) |
 
 ### PostgreSQL Snapshots
@@ -187,7 +187,7 @@ Data freshness: daily dumps in 99% of cases.
 ### Find a profile
 ```sql
 SELECT _id, name, popularity, credits_count
-FROM hive.default.matvw_catalog_profile
+FROM hive."platform-industry-bi-prod".matvw_catalog_profile
 WHERE lower(name) LIKE '%drake%' AND NOT is_deleted
 ORDER BY popularity DESC
 LIMIT 20
@@ -197,12 +197,12 @@ LIMIT 20
 ```sql
 WITH profile_tracks AS (
     SELECT t._id AS track_id
-    FROM hive.default.matvw_catalog_track t
+    FROM hive."platform-industry-bi-prod".matvw_catalog_track t
     CROSS JOIN UNNEST(t.profiles) AS p(profile)
     WHERE profile.profile_id = 'PROFILE_ID' AND NOT t.is_deleted
 )
 SELECT SUM(streams) AS total_streams
-FROM hive.default.matvw_stats_track_daily s
+FROM hive."platform-industry-bi-prod".matvw_stats_track_daily s
 JOIN profile_tracks pt ON s.track_id = pt.track_id
 WHERE s.date >= date_format(date_add('day', -30, current_date), '%Y-%m-%d')
 ```
@@ -210,18 +210,18 @@ WHERE s.date >= date_format(date_add('day', -30, current_date), '%Y-%m-%d')
 ### Check if profile is claimed/pro
 ```sql
 WITH claimed AS (
-    SELECT profileid AS profile_id FROM postgresql_core.public.public_claiming
+    SELECT profileid AS profile_id FROM postgresql_core.public.claiming
     WHERE status = 'processed' GROUP BY 1
 ),
 pro AS (
-    SELECT seatid AS profile_id FROM postgresql_core.public.public_roster_seats
+    SELECT seatid AS profile_id FROM postgresql_core.public.roster_seats
     WHERE status = 'active' GROUP BY 1
 )
 SELECT
     p._id, p.name,
     cl.profile_id IS NOT NULL AS is_claimed,
     pr.profile_id IS NOT NULL AS is_pro
-FROM hive.default.matvw_catalog_profile p
+FROM hive."platform-industry-bi-prod".matvw_catalog_profile p
 LEFT JOIN claimed cl ON cl.profile_id = p._id
 LEFT JOIN pro pr ON pr.profile_id = p._id
 WHERE p._id = 'PROFILE_ID'

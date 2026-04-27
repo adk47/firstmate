@@ -20,7 +20,7 @@ from (
 		select json_extract_scalar(onboarding, '$.marketingChannel') as channel,
 			json_extract_scalar(onboarding, '$.role') as role,
 			count(1) AS num_users
-		from postgresql_core.public.public_users
+		from postgresql_core.public.users
 		group by 1,
 			2
 	)

@@ -14,9 +14,9 @@ last_exported: 2025-01-31
 select distinct email
 from (
 		select email
-		from postgresql_core.public.public_users
+		from postgresql_core.public.users
 		union all
 		select email
-		from postgresql_core.public.public_teams
+		from postgresql_core.public.teams
 	)
 where email not like '%appleid%' and email not like '%muso%'

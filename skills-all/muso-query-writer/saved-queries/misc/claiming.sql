@@ -14,12 +14,12 @@ last_exported: 2025-01-31
 with p AS (
 	select _id AS profileid,
 		_id as profile_id
-	from hive.default.matvw_catalog_profile as p
+	from hive."platform-industry-bi-prod".matvw_catalog_profile as p
 	where not p.is_deleted
 	union
 	select split_part(pid, ':', 2) AS profileid,
 		_id as profile_id
-	from hive.default.matvw_catalog_profile as p
+	from hive."platform-industry-bi-prod".matvw_catalog_profile as p
 		cross join unnest(raw_profile_ids) AS r(pid)
 	where not p.is_deleted
 		and pid like 'muso:'

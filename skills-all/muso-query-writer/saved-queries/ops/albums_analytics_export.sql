@@ -27,9 +27,9 @@ al as (
 		MIN(r.title) as album_title,
 		array_join(transform(arbitrary(r.artists), a->a.name), ',') as artists,
 		array_agg(distinct upc) as upcs
-	from hive.default.matvw_catalog_track as t
+	from hive."platform-industry-bi-prod".matvw_catalog_track as t
 		cross join unnest(catalog_release_ids) as c(release_id)
-		join hive.default.matvw_catalog_release as r ON(r._id = release_id)
+		join hive."platform-industry-bi-prod".matvw_catalog_release as r ON(r._id = release_id)
 	where not t.is_deleted
 		and not r.is_deleted
 		and cardinality(

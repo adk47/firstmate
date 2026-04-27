@@ -30,13 +30,13 @@ p as (
 		profileid as profile_id,
 		workspaceid as workspace_id,
 		userid as user_id
-	from postgresql_core.public.public_nfc_card
+	from postgresql_core.public.nfc_card
 ),
 cp as (
 	select _id as profile_id,
 		name as profile_name,
 		popularity
-	from hive.default.matvw_catalog_profile
+	from hive."platform-industry-bi-prod".matvw_catalog_profile
 )
 select 
 	count(distinct profile_id) as num_profiles,

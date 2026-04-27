@@ -84,12 +84,12 @@ from (
 									MAX(coalesce(t.popularity, 0)) as popularity,
 									array_agg(distinct genre) as original_genres,
 									arbitrary(profiles) as profiles
-								from hive.default.matvw_catalog_track as t
-								    join hive.default.matvw_raw_recording as r ON (default_raw_recording_id=r._id)
+								from hive."platform-industry-bi-prod".matvw_catalog_track as t
+								    join hive."platform-industry-bi-prod".matvw_raw_recording as r ON (default_raw_recording_id=r._id)
 									cross join unnest(artist_ids) as tp(artist_id)
-									join hive.default.matvw_raw_profile as rp ON(artist_id = rp._id)
+									join hive."platform-industry-bi-prod".matvw_raw_profile as rp ON(artist_id = rp._id)
 									cross join unnest(genres) as rpg(genre)
-									join hive.default.matvw_dict_genre as g ON (g._id = genre)
+									join hive."platform-industry-bi-prod".matvw_dict_genre as g ON (g._id = genre)
 									cross join unnest(catalog_genres) as cg(catalog_genre)
 								where not r.is_deleted
 									and not t.is_deleted
@@ -112,7 +112,7 @@ from (
 			2,
 			3
 	) as c
-	join hive.default.matvw_catalog_profile as p ON (p._id = profile_id)
+	join hive."platform-industry-bi-prod".matvw_catalog_profile as p ON (p._id = profile_id)
 	where 
 	    not p.is_deleted 
 	    and TRY(images[1].url) is not null 

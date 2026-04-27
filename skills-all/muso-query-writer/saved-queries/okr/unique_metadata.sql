@@ -13,7 +13,7 @@ last_exported: 2025-01-31
 
 select count(1) AS cnt_changes,
 	count(distinct profile_id) AS cnt_profiles
-from hive.default."matvw_raw_recording_credit"
+from hive."platform-industry-bi-prod"."matvw_raw_recording_credit"
 where (
 		recording_id like 'muso:%'
 		or profile_id like 'muso:%'

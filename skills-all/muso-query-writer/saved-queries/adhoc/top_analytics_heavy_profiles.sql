@@ -16,13 +16,13 @@ with st AS (
 	select profileid AS profile_id,
 		count(1) as num_rows,
 		count(distinct trackid) as num_tracks
-	from postgresql_core.public.public_profile_track_stats
+	from postgresql_core.public.profile_track_stats
 	group by 1
 ),
 ac AS (
 	select distinct seatid AS profile_id,
 		TRUE as is_active
-	from postgresql_core.public.public_roster_seats
+	from postgresql_core.public.roster_seats
 	where status = 'active'
 )
 select *

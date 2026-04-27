@@ -15,7 +15,7 @@ last_exported: 2025-01-31
 with mp as (
 	select 'mlc:' || cast(feedproviderspartyid as varchar) as rpid,
 		*
-	from hive.mlc.parties
+	from hive."platform-industry-mlc-bi-prod".parties
 )
 select name,
 	credits_count,
@@ -60,7 +60,7 @@ from (
 				'contactaddress: ' || arbitrary(contactaddress) || '<br>',
 				''
 			) ] as note_lines
-		from hive.default.matvw_catalog_profile as p
+		from hive."platform-industry-bi-prod".matvw_catalog_profile as p
 			cross join unnest(raw_profile_ids) as r(rpid)
 			join mp USING(rpid)
 		where not is_deleted
