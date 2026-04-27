@@ -55,10 +55,21 @@ SQL=$(echo "$SQL" | sed -E '
   s/"audit-prod"\./hive.audit./g
   s/"platform-industry-mlc-bi-prod"\./hive."platform-industry-mlc-bi-prod"./g
   s/"platform-data-merging-catalog-prod"\./hive."platform-data-merging-catalog-prod"./g
+  s/"platform-core-backend-export-prod"\.public_/postgresql_core.public./g
   s/"platform-core-backend-export-prod"\./postgresql_core.public./g
   s/"bi"\./postgresql_analytics.public./g
   s/(^|[[:space:]])bi\./\1postgresql_analytics.public./g
 ')
+
+# ── Strip the Glue `public_` table-name prefix when targeting raw PG ──
+# Athena's Glue catalog mirrored Postgres tables with a `public_` prefix
+# (so `platform-core-backend-export-prod`.public_users matched the public
+# schema's `users` table). Raw PG via the Trino postgresql connector
+# exposes the bare table name (`users`, not `public_users`). After the
+# schema rewrite above, fix up the table prefix too — but only when the
+# query is now hitting postgresql_core.public.* (don't touch hive.* tables
+# whose names legitimately start with public_).
+SQL=$(echo "$SQL" | sed -E 's/(postgresql_core\.public\.)public_/\1/g')
 
 # ── Step 2: locate trino-coordinator pod ──
 TRINO_NS="${TRINO_NS:-data-processing}"
