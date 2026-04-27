@@ -41,13 +41,21 @@ fi
 SQL="$*"
 
 # ── Step 1: rewrite legacy Athena DB names → Trino catalog.schema ──
-# Edit this table when new mappings come up.
+# IMPORTANT: OVH Hive Metastore preserved the original Athena schema
+# names verbatim (lift-and-shift from AWS Glue catalog), so the
+# matvw_* tables still live in `hive."platform-industry-bi-prod"`,
+# NOT in `hive.default`. Rewrites just prepend the `hive.` catalog
+# prefix and keep the quoted schema name intact.
+#
+# Live PG tables (users, teams, subscriptions, etc.) are accessible
+# via the postgresql_* catalogs (faster than going through HMS, no
+# export delay).
 SQL=$(echo "$SQL" | sed -E '
-  s/"platform-industry-bi-prod"\./hive.default./g
-  s/"platform-core-backend-export-prod"\./postgresql_core.public./g
+  s/"platform-industry-bi-prod"\./hive."platform-industry-bi-prod"./g
   s/"audit-prod"\./hive.audit./g
-  s/"platform-industry-mlc-bi-prod"\./hive.mlc./g
-  s/"platform-data-merging-catalog-prod"\./postgresql_industry.public./g
+  s/"platform-industry-mlc-bi-prod"\./hive."platform-industry-mlc-bi-prod"./g
+  s/"platform-data-merging-catalog-prod"\./hive."platform-data-merging-catalog-prod"./g
+  s/"platform-core-backend-export-prod"\./postgresql_core.public./g
   s/"bi"\./postgresql_analytics.public./g
   s/(^|[[:space:]])bi\./\1postgresql_analytics.public./g
 ')
