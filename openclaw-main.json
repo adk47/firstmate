@@ -485,7 +485,14 @@
     "ownerDisplay": "raw"
   },
   "session": {
-    "dmScope": "per-channel-peer"
+    "dmScope": "per-channel-peer",
+    "maintenance": {
+      "mode": "enforce",
+      "pruneAfter": "14d",
+      "maxEntries": 100,
+      "rotateBytes": "20mb",
+      "resetArchiveRetention": "7d"
+    }
   },
   "web": {
     "enabled": false
