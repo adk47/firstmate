@@ -146,8 +146,8 @@ seed_runlog_escalation() {
 
   [ -f "$RUNLOG_FILE" ]
   jq -e 'select(.event=="run_finished" and .fetched==3 and .approved==2)' < "$RUNLOG_FILE"
-  ! jq -e 'select(.event=="run_finished_hollow")' < "$RUNLOG_FILE" > /dev/null
-  ! jq -e 'select(.event=="run_finished_ungrounded")' < "$RUNLOG_FILE" > /dev/null
+  ! jq -e 'select(.event=="run_finished_hollow")' < "$RUNLOG_FILE" > /dev/null || return 1
+  ! jq -e 'select(.event=="run_finished_ungrounded")' < "$RUNLOG_FILE" > /dev/null || return 1
 }
 
 # ---- incident-shape tests ----
@@ -667,6 +667,81 @@ setup_cv_results() {
   echo "$output" | jq -e '.reconciliation.source == "results_jsonl"'
 }
 
+# ---- Read-side silent-zero (2026-04-27 incident class) ----
+#
+# The 2026-04-27 10:06 UTC dry-run posted "Queue clear — 0 unverified" while
+# the live API had 13891 unverified credits. Root cause: agent's improvised
+# B1 jq paths (`.body.items // .items // []`) silently fell through to `[]`
+# because the real envelope is `.body.data.items`. The PRIMARY defense is
+# `fetch-queue.sh`'s exit-11 invariant (caught at fetch time before any bad
+# summary is computed). The BACKSTOP defense — these tests — fires inside
+# compute-run-summary.sh when run_started_queue.queue_depth_at_start says
+# the queue was non-empty but session-derived fetched is 0. This catches
+# any future B1 code path that bypasses fetch-queue.sh.
+
+@test "READ-SIDE SILENT-ZERO INVARIANT: queue_depth>0 but session fetched=0 → silent_failure_detected=true" {
+  # Replay the 2026-04-27 shape AS IF B1 had logged the truth:
+  #   - run_started_queue.queue_depth_at_start = 13891 (counts API was right)
+  #   - session JSONL has no successful list response (improv jq returned [])
+  # Note today's incident actually logged queue_depth=0 because the agent's
+  # bash also misread counts. With fetch-queue.sh in place, queue_depth
+  # comes from the locked path, so this hypothetical (script-bypassed-but-
+  # counts-still-logged-correctly) is what the backstop covers.
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13891
+  # Crucially: NO seed_exec_admin for the list fetch — session has nothing.
+  # Without our fix, the R2-6 fallback would set FETCHED=500 (queue<fetch),
+  # and silent_failure_detected would stay false. The new SESSION_DERIVED_
+  # FETCHED capture preserves the raw 0 for the silent-zero check.
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == true'
+
+  # run_finished_silent_failure event lands in the runlog with the new reason.
+  jq -e 'select(.event=="run_finished_silent_failure" and (.reason | test("read_side_silent_zero")))' < "$RUNLOG_FILE"
+  jq -e 'select(.event=="run_finished_silent_failure" and (.reason | test("queue_depth_at_start=13891")))' < "$RUNLOG_FILE"
+}
+
+@test "read-side silent-zero: false when queue_depth==0 (genuine empty queue)" {
+  # The legitimate "queue clear" path. queue_depth=0 with fetched=0 is fine.
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 0
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == false'
+}
+
+@test "read-side silent-zero: false when session DID observe items (truncation case)" {
+  # The 2026-04-23 truncation class — queue_depth=12008, fetched parsed as
+  # the real number from session JSONL — must NOT trip the read-side check.
+  # Session-derived fetched > 0 means the fetch worked; only the run_finished
+  # SUMMARY needs the R2-6 fallback for accurate Slack totals.
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 12008
+  seed_exec_admin "c1" \
+    "bash muso-admin-api.sh call GET /admin/credit-requests?status=unverified&limit=500" \
+    '{"http_status":200,"body":{"data":{"items":[{"id":"a"},{"id":"b"},{"id":"c"}]}}}'
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == false'
+}
+
+@test "read-side silent-zero: write-side reason takes precedence when both fire" {
+  # If the write-side check ALREADY flagged silent failure (rejected_by_gate
+  # all-zero-landed), the read-side branch must NOT clobber the write-side
+  # reason — the write-side incident class is more specific.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13891
+  seed_results approved rejected_by_gate '["cr_1","cr_2","cr_3"]'
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == true'
+  # Write-side reason wins. Read-side reason MUST NOT appear.
+  jq -e 'select(.event=="run_finished_silent_failure" and (.reason | test("admin-api attempts >0")))' < "$RUNLOG_FILE"
+  ! jq -e 'select(.event=="run_finished_silent_failure" and (.reason | test("read_side_silent_zero")))' < "$RUNLOG_FILE" || return 1
+}
+
 @test "reconciliation: session_derived_approved preserved even when overridden" {
   # Post-mortem fidelity: if the agent's session JSONL-observed approves
   # disagree with the authoritative .results.jsonl number, both must be
@@ -703,8 +778,9 @@ setup_cv_results() {
   run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
   [ "$status" -eq 0 ]
   [ "$(jq -s 'map(select(.event == "run_finished")) | length' "$RUNLOG_FILE")" -eq 1 ]
-  # Also no duplicate silent_failure / hollow / ungrounded events.
-  [ "$(jq -s 'map(select(.event == "run_finished_silent_failure")) | length' "$RUNLOG_FILE")" -le 1 ]
+  # Also no silent_failure / hollow / ungrounded events written at all
+  # (cached path skips all event writes, and fixture is the happy path).
+  [ "$(jq -s 'map(select(.event == "run_finished_silent_failure")) | length' "$RUNLOG_FILE")" -eq 0 ]
 }
 
 @test "idempotency: second invocation returns the cached summary JSON identically" {

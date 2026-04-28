@@ -50,15 +50,21 @@ set -euo pipefail
 
 FETCH_SIZE="${1:-${OPS_BATCH_FETCH_SIZE:-10}}"
 
-if ! [[ "$FETCH_SIZE" =~ ^[0-9]+$ ]]; then
+if ! [[ "$FETCH_SIZE" =~ ^[0-9]+$ ]] || (( FETCH_SIZE == 0 )); then
     echo "ERROR: fetch_size must be a positive integer, got: '$FETCH_SIZE'" >&2
     exit 2
 fi
 
 ADMIN_API_SH="${ADMIN_API_SH:-/opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh}"
 
-if [[ ! -x "$ADMIN_API_SH" ]] && [[ ! -r "$ADMIN_API_SH" ]]; then
-    echo "ERROR: admin-API wrapper not found at $ADMIN_API_SH" >&2
+# We invoke via `bash $ADMIN_API_SH`, which only requires read access.
+# Reject non-files (directory / broken symlink / device node) explicitly:
+# `[[ -r dir ]]` is true for readable directories but `bash <dir>` would
+# fail with a confusing error. The `-f` check also makes the "unreadable
+# wrapper" test deterministic under root, where `[[ -r ]]` bypasses
+# file-mode bits.
+if [[ ! -f "$ADMIN_API_SH" ]] || [[ ! -r "$ADMIN_API_SH" ]]; then
+    echo "ERROR: admin-API wrapper not found or not readable at $ADMIN_API_SH" >&2
     exit 2
 fi
 

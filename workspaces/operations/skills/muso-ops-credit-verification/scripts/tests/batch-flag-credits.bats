@@ -1,10 +1,15 @@
 #!/usr/bin/env bats
 bats_require_minimum_version 1.5.0
 # Tests for batch-flag-credits.sh — the sanctioned wrapper for UVN flagging.
-# Symmetric with batch-approve-credits.sh: same arg-validation discipline,
-# same refusal of --requester, same truth-floor reliance. The key structural
-# difference is that flag batches iterate PATCH per-id (the API has no
-# batch UVN endpoint), so we assert per-id exit-code tallying.
+#
+# 2026-04-27 endpoint correction: the wrapper used to issue per-id
+# `PATCH /admin/credit-requests/<id>` in a loop, but core-backend never
+# registered that route — every PATCH returned HTTP 404 ("Cannot PATCH
+# /api/v3/admin/credit-requests/<id>"). The 2026-04-27 15:42 UTC real run
+# was the post-mortem (25/25 errored). The wrapper now uses the same
+# batch endpoint as approves: one `PUT /admin/credit-requests` with
+# `{requestIds:[...],status:"user_verification_needed"}`. The backend
+# `updateStatus` handler accepts every CreditRequests.STATUSES value.
 
 setup() {
     TEST_ROOT="$(mktemp -d)"
@@ -16,13 +21,12 @@ setup() {
     ADMIN_LOG="$TEST_ROOT/admin-invocations.log"
     export ADMIN_LOG
 
-    # Fake admin script with per-call behavior. STUB_MODE can be a global
-    # default; STUB_MODE_<id> overrides for a specific id so we can simulate
-    # a partial failure (2 succeed, 1 fails) and assert the tally.
+    # Fake admin script. Single STUB_MODE selects behavior — there is no
+    # per-id override anymore because the wrapper makes one batch call,
+    # not N per-id calls. Logs invocation args + body for assertions.
     ADMIN_API_SH="$TEST_ROOT/fake-muso-admin-api.sh"
     cat > "$ADMIN_API_SH" <<'STUB'
 #!/usr/bin/env bash
-# Log the invocation for later assertions.
 {
     printf 'ARGS:'
     for a in "$@"; do printf '\n  %s' "$a"; done
@@ -32,20 +36,7 @@ setup() {
     fi
 } >> "${ADMIN_LOG:-/dev/null}"
 
-# Extract id from the PATCH path: /admin/credit-requests/<id>.
-id_from_path=""
-for a in "$@"; do
-    if [[ "$a" == /admin/credit-requests/* ]]; then
-        id_from_path="${a#/admin/credit-requests/}"
-    fi
-done
-
-# Per-id override (e.g. STUB_MODE_cr_2=http_500). Fallback to the global
-# STUB_MODE. Uses indirect expansion so the lookup matches exactly.
-mode_var="STUB_MODE_${id_from_path}"
-mode="${!mode_var:-${STUB_MODE:-success_dryrun}}"
-
-case "$mode" in
+case "${STUB_MODE:-success_dryrun}" in
     success_dryrun)
         printf '%s\n' '{"http_status":200,"dryRun":true,"body":null,"wouldHaveExecuted":true}'
         exit 0
@@ -58,12 +49,19 @@ case "$mode" in
         printf '%s\n' '{"http_status":500,"body":{"error":"boom"}}'
         exit 0
         ;;
+    http_404_patch_legacy)
+        # Captures the exact 2026-04-27 prod failure shape — the bug we
+        # fixed by switching to PUT. This stub mode exists so a future
+        # regression that revives PATCH would trip a test, not prod.
+        printf '%s\n' '{"http_status":404,"body":"Cannot PATCH /api/v3/admin/credit-requests/<id>"}'
+        exit 0
+        ;;
     connection_refused)
-        echo "curl: (7) Failed to connect to ${id_from_path}" >&2
+        echo "curl: (7) Failed to connect" >&2
         exit 7
         ;;
     *)
-        echo "stub: unknown mode=${mode}" >&2
+        echo "stub: unknown STUB_MODE=${STUB_MODE}" >&2
         exit 99
         ;;
 esac
@@ -85,7 +83,7 @@ teardown() {
     [ ! -f "$ADMIN_LOG" ]
 }
 
-@test "missing --reason → exit 2" {
+@test "missing --reason → exit 2 (caller discipline; never UVN reasonless)" {
     run bash "$WRAPPER" --profile-id p1 --ids "cr_1"
     [ "$status" -eq 2 ]
     [[ "$output" == *"--reason is required"* ]]
@@ -119,75 +117,89 @@ teardown() {
     [[ "$output" == *"unknown argument"* ]]
 }
 
-# --- Successful paths ---
+# --- Endpoint shape (the 2026-04-27 fix) ---
 
-@test "happy path (dry-run) → exit 0, each id gets its own PATCH" {
-    STUB_MODE=success_dryrun run bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3"
-    [ "$status" -eq 0 ]
-    echo "$output" | jq -e '.requested == 3 and .succeeded == 3 and .failed == 0 and .outcome == "ok" and .failed_ids == []' >/dev/null
-    # Three ARGS headers → three invocations.
-    [ "$(grep -c '^ARGS:' "$ADMIN_LOG")" -eq 3 ]
-    # Each invocation targets /admin/credit-requests/<id>.
-    grep -qF '/admin/credit-requests/cr_1' "$ADMIN_LOG"
-    grep -qF '/admin/credit-requests/cr_2' "$ADMIN_LOG"
-    grep -qF '/admin/credit-requests/cr_3' "$ADMIN_LOG"
-    # Body is user_verification_needed with the reason.
-    body_lines=$(grep '^LAST_ARG:' "$ADMIN_LOG" | sed 's/^LAST_ARG: //')
-    for line in $body_lines; do : ; done  # no-op, just counting
-    # Parse each body line and assert shape.
-    while IFS= read -r line; do
-        echo "$line" | jq -e '.status == "user_verification_needed" and .reason == "high_velocity"' >/dev/null
-    done < <(grep '^LAST_ARG:' "$ADMIN_LOG" | sed 's/^LAST_ARG: //')
+@test "ENDPOINT INVARIANT: uses PUT /admin/credit-requests with batch body" {
+    STUB_MODE=success_dryrun bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3" >/dev/null
+    # Single invocation (NOT N per-id calls)
+    [ "$(grep -c '^ARGS:' "$ADMIN_LOG")" -eq 1 ]
+    # PUT not PATCH; collection path not /<id>
+    grep -qF 'PUT' "$ADMIN_LOG"
+    ! grep -qF 'PATCH' "$ADMIN_LOG"
+    grep -qF '/admin/credit-requests' "$ADMIN_LOG"
+    ! grep -qF '/admin/credit-requests/cr_' "$ADMIN_LOG"
+    # Body shape: requestIds array + status, no reason field.
+    body=$(grep '^LAST_ARG:' "$ADMIN_LOG" | sed 's/^LAST_ARG: //' | head -1)
+    echo "$body" | jq -e '.status == "user_verification_needed"' >/dev/null
+    echo "$body" | jq -e '.requestIds == ["cr_1","cr_2","cr_3"]' >/dev/null
+    # Backend updateStatus does not consume `reason` — must NOT be in body.
+    echo "$body" | jq -e 'has("reason") | not' >/dev/null
 }
 
-@test "happy path (real 200): no --evidence-excerpt flag in invocation (UVN is ungated)" {
-    STUB_MODE=success_200 bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1" >/dev/null
-    # UVN does NOT need evidence, so the wrapper must NOT pass the flag.
-    # If it did, a future gate that also enforces for UVN would block batches.
+@test "ENDPOINT INVARIANT: trims whitespace from --ids before serializing" {
+    STUB_MODE=success_dryrun bash "$WRAPPER" --profile-id p1 --reason r --ids " cr_1 , cr_2 ,cr_3 " >/dev/null
+    body=$(grep '^LAST_ARG:' "$ADMIN_LOG" | sed 's/^LAST_ARG: //' | head -1)
+    echo "$body" | jq -e '.requestIds == ["cr_1","cr_2","cr_3"]' >/dev/null
+}
+
+@test "REGRESSION GUARD: PATCH /admin/credit-requests/<id> would 404 (legacy bug shape)" {
+    # If a future change resurrects per-id PATCH, the legacy stub mode
+    # returns the exact 404 the real backend produces. Wrapper must treat
+    # it as http_error (not "ok") and exit 1. This test exists to lock the
+    # 2026-04-27 incident shape into CI.
+    STUB_MODE=http_404_patch_legacy run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1"
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.outcome == "http_error" and .http_status == 404' >/dev/null
+}
+
+# --- Successful paths ---
+
+@test "happy path (dry-run) → exit 0, outcome=dry_run_intercept" {
+    STUB_MODE=success_dryrun run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.profile_id == "p1" and .requested == 3 and .outcome == "dry_run_intercept" and .http_status == 200' >/dev/null
+}
+
+@test "happy path (real 200) → exit 0, outcome=ok, no --evidence-excerpt flag" {
+    STUB_MODE=success_200 run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.outcome == "ok" and .http_status == 200 and .requested == 2' >/dev/null
+    # UVN is ungated — wrapper must NOT pass --evidence-excerpt.
     ! grep -qF -- '--evidence-excerpt' "$ADMIN_LOG"
 }
 
-# --- Partial failure (the core exit-code discipline) ---
-
-@test "partial failure: 2 of 3 succeed → exit 1 with failed_ids list" {
-    # Simulate: cr_1 ok, cr_2 http_500, cr_3 ok. Must still PATCH all three
-    # (never terminate on first failure) so reconciliation sees the full
-    # attempted batch. Exit is 1 because there was at least one failure.
-    export STUB_MODE=success_dryrun
-    export STUB_MODE_cr_2=http_500
-    run bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3"
-    [ "$status" -eq 1 ]
-    echo "$output" | jq -e '.requested == 3 and .succeeded == 2 and .failed == 1 and .failed_ids == ["cr_2"] and .outcome == "partial_failure"' >/dev/null
-    # Prove we still attempted all three — loop did not short-circuit.
-    [ "$(grep -c '^ARGS:' "$ADMIN_LOG")" -eq 3 ]
+@test "reason is forwarded to stderr (audit grep), NOT to API body" {
+    STUB_MODE=success_dryrun run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1"
+    [ "$status" -eq 0 ]
+    [[ "$stderr" == *"reason=\"high_velocity\""* ]]
+    [[ "$stderr" == *"profile=p1"* ]]
+    body=$(grep '^LAST_ARG:' "$ADMIN_LOG" | sed 's/^LAST_ARG: //' | head -1)
+    echo "$body" | jq -e 'has("reason") | not' >/dev/null
 }
 
-@test "all fail (HTTP 500 on every id) → exit 1, failed == requested" {
-    export STUB_MODE=http_500
-    run bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2"
+# --- Failure paths ---
+
+@test "HTTP 500 from updateStatus → exit 1, outcome=http_error" {
+    STUB_MODE=http_500 run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2"
     [ "$status" -eq 1 ]
-    echo "$output" | jq -e '.requested == 2 and .succeeded == 0 and .failed == 2 and (.failed_ids | sort) == ["cr_1","cr_2"]' >/dev/null
+    echo "$output" | jq -e '.outcome == "http_error" and .http_status == 500 and .requested == 2' >/dev/null
 }
 
-@test "connection refused on one id → that id counted as failed, stderr surfaces" {
-    # Non-zero admin-api rc (curl 7) must be counted as a failure, not a
-    # success. This is the direct analog of the approve wrapper's silent-
-    # failure regression pin, for UVN.
-    export STUB_MODE=success_dryrun
-    export STUB_MODE_cr_2=connection_refused
-    run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3"
+@test "connection refused (curl 7) → exit 1, stderr surfaces" {
+    STUB_MODE=connection_refused run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3"
     [ "$status" -eq 1 ]
-    echo "$output" | jq -e '.failed == 1 and .failed_ids == ["cr_2"]' >/dev/null
-    [[ "$stderr" == *"Failed to connect to cr_2"* ]]
+    echo "$output" | jq -e '.outcome == "http_error"' >/dev/null
+    [[ "$stderr" == *"Failed to connect"* ]]
 }
 
-# --- Regression invariant ---
+# --- Silent-failure regression invariant ---
 
 @test "CORE INVARIANT: redirecting stdout+stderr does NOT produce exit 0 on failure" {
-    # The exact failure shape from 2026-04-22's inline flag_uvn loop.
-    export STUB_MODE=http_500
+    # The exact failure shape from 2026-04-22's inline flag_uvn loop:
+    # stderr swallowed, exit code ignored. Wrapper must propagate non-zero
+    # even when its outputs are redirected.
     rc=0
-    bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1" >/dev/null 2>&1 || rc=$?
+    STUB_MODE=http_500 bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1" >/dev/null 2>&1 || rc=$?
     [ "$rc" -ne 0 ]
 }
 

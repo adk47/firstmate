@@ -994,9 +994,14 @@ Group the fetched queue by `profile_id`:
 # fallbacks here. The 2026-04-27 silent-zero incident is exactly the failure
 # mode of guessing admin-API envelope shapes from inside SKILL.md.
 # Produce: profiles_ordered[] = array of {profile_id, userid, cr_ids:[...]}
+# NOTE: jq's group_by requires sorted input to coalesce same-profile items
+# into a single group. The admin API may return items in createdAt DESC
+# order, which interleaves multiple profiles — without sort_by first, the
+# same profile appears as multiple groups, causing duplicate batch calls.
 PROFILES_GROUPED=$(echo "$QUEUE_JSON" | jq -c '
     .items
-    | group_by(.profileId)
+    | sort_by(.profileId // .profile_id)
+    | group_by(.profileId // .profile_id)
     | map({
         profile_id: (.[0].profileId // .[0].profile_id),
         userid: (.[0].userId // .[0].user_id),
