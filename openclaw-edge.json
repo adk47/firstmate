@@ -355,7 +355,7 @@
     "providers": {
       "hydra-secrets": {
         "source": "file",
-        "path": "/opt/hydra/secrets/fireworks.json",
+        "path": "/opt/hydra/secrets/llm-provider-keys.json",
         "mode": "json"
       }
     }
