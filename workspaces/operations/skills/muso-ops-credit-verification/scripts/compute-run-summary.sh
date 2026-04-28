@@ -385,6 +385,13 @@ ESCALATED=$(echo "$runlog_counts" | jq -r '.escalated')
 SKIPPED_IDEMPOTENT=$(echo "$runlog_counts" | jq -r '.skipped_idempotent')
 SKIPPED_CAP=$(echo "$runlog_counts" | jq -r '.skipped_cap')
 
+# Capture the original session-derived fetched count BEFORE the R2-6
+# fallback can overwrite it. The read-side silent-zero check below uses
+# this raw signal — the truncation fallback (designed for the 2026-04-23
+# 09:02 UTC class) would mask the 2026-04-27 silent-zero class by inferring
+# a non-zero fetched from queue_depth, hiding the read-side failure.
+SESSION_DERIVED_FETCHED="$FETCHED"
+
 # Fetched-count fallback (R2-6). The 2026-04-23 09:02 UTC dry-run showed
 # fetched:0 in the summary even though the agent processed 500 credits.
 # Root cause: the list-fetch response is a ~500KB JSON blob and openclaw's
@@ -531,14 +538,41 @@ fi
 # Silent-failure invariant: the 2026-04-22 19:15 scenario is exactly
 # "attempted >> 0 AND landed == 0" for at least one verb. Either half
 # (approve or UVN) triggering is sufficient — we want to catch any silent
-# surface, not just the approve path.
+# surface, not just the approve path. The 2026-04-27 read-side silent-zero
+# class extends this to the fetch path: queue_depth > 0 logged but zero
+# items observed in the session.
 silent_failure_detected="false"
+silent_reason=""
 if [[ "$RECONCILIATION_SOURCE" == "results_jsonl" ]]; then
     if (( APPROVED_ATTEMPTED > 0 && APPROVED_LANDED == 0 )); then
         silent_failure_detected="true"
+        silent_reason="admin-api attempts >0 but 0 landed (approves or UVN) — agent's Slack prose likely lied about totals"
     elif (( UVN_ATTEMPTED > 0 && UVN_LANDED == 0 )); then
         silent_failure_detected="true"
+        silent_reason="admin-api attempts >0 but 0 landed (approves or UVN) — agent's Slack prose likely lied about totals"
     fi
+fi
+
+# Read-side silent-zero (2026-04-27 incident class). Fires when B1's
+# runlog says there ARE unverified credits but the session shows zero
+# items fetched. Independent of RECONCILIATION_SOURCE — it's the FETCH
+# that lied, not the writes. Uses SESSION_DERIVED_FETCHED captured before
+# the R2-6 truncation fallback so the fallback's queue_depth-based fill
+# doesn't mask this case.
+#
+# Note this is a backstop. The primary defense is fetch-queue.sh's exit
+# 11 (unverified_count_items_mismatch), which prevents the bad summary
+# from ever getting computed. This branch catches future B1 code paths
+# that bypass the script.
+if [[ "$silent_failure_detected" != "true" ]]; then
+    _q_depth=$(echo "$runlog_counts" | jq -r '.run_started_queue_depth // 0')
+    if [[ "$_q_depth" =~ ^[0-9]+$ ]] \
+       && (( _q_depth > 0 )) \
+       && (( SESSION_DERIVED_FETCHED == 0 )); then
+        silent_failure_detected="true"
+        silent_reason="read_side_silent_zero: queue_depth_at_start=${_q_depth} but session-derived fetched=0 — B1 fetch silently returned no items despite a non-empty queue"
+    fi
+    unset _q_depth
 fi
 
 # When results.jsonl is available it takes precedence over session-derived
@@ -644,7 +678,7 @@ fi
 if [[ "$silent_failure_detected" == "true" ]]; then
     silent_payload=$(jq -n \
         --argjson summary "$summary" \
-        --arg reason "admin-api attempts >0 but 0 landed (approves or UVN) — agent's Slack prose likely lied about totals" \
+        --arg reason "$silent_reason" \
         --arg log "$session_log" \
         --argjson inv "$inventory" \
         '$summary + {reason:$reason, session_log:$log, tool_inventory:$inv}')

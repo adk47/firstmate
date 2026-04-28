@@ -7,14 +7,28 @@
 # user_verification_needed never required browser evidence — but every other
 # failure mode is identical: an agent that swallows stderr + counts loop
 # iterations will claim success regardless. This wrapper takes that surface
-# away by checking each exit code and refusing to continue past failures
-# without counting them honestly.
+# away by checking exit code + envelope shape and refusing to claim success
+# without a 2xx (or dry-run intercept) from the API.
 #
-# Unlike approve (which batches via PUT /admin/credit-requests), the backend
-# only supports per-id PATCH for user_verification_needed — that matches
-# what production has been doing successfully (167 UVN writes on 2026-04-22
-# 19:19 UTC). So the loop is unavoidable; the discipline is to propagate
-# every failure and emit a structured per-ID result.
+# Endpoint: PUT /admin/credit-requests with body
+#   {"requestIds":[...],"status":"user_verification_needed"}
+# This is the SAME route batch-approve-credits.sh uses — the backend
+# `updateStatus` handler (`core-backend/src/apis/_admin/credit-requests/
+# updateStatus.js`) accepts every value of CreditRequests.STATUSES,
+# including USER_VERIFICATION_NEEDED. Per-id PATCH was never registered
+# in core-backend's routing table (`core-backend/src/apis/index.w.js`);
+# the prior implementation here issued PATCH /admin/credit-requests/<id>
+# in a loop and got HTTP 404 ("Cannot PATCH …") for every id — the
+# 2026-04-27 15:42 UTC real run is the post-mortem (25/25 errored).
+#
+# !! Failure-semantics caveat (was: per-id loop, now: single PUT) !!
+# updateStatus.js processes the requestIds array via Promise.mapSeries
+# with no visible transaction wrapper. Partial in-loop failures inside
+# the API DO NOT surface in the HTTP response — a 200 OK does not prove
+# every id transitioned. Reconciliation MUST come from compute-run-
+# summary.sh reading .results.jsonl against a fresh queue fetch, NOT
+# from this wrapper's exit code. Treat exit 0 here as "request was
+# accepted by the API", not as "all ids are now UVN".
 #
 # Usage:
 #   batch-flag-credits.sh \
@@ -23,15 +37,18 @@
 #       --ids "<id1>,<id2>,<id3>"
 #
 # Contract:
-#   * One PATCH /admin/credit-requests/<id> per ID, body {"status":
-#     "user_verification_needed","reason":"<reason>"}.
+#   * One PUT /admin/credit-requests for the entire batch. The backend
+#     atomically transitions each matching request from UNVERIFIED to
+#     USER_VERIFICATION_NEEDED (per updateStatus.js line 51-56).
+#   * --reason is REQUIRED for caller discipline (don't UVN without an
+#     intent), but is NOT sent to the backend — updateStatus does not
+#     consume a reason field. The reason is forwarded to stderr so it
+#     lands in the agent transcript / audit capture.
 #   * --requester is REFUSED. Consistent with batch-approve-credits.sh.
-#   * Exit 0 iff EVERY id succeeded (HTTP 2xx or dry-run intercept).
-#   * Exit 1 if one or more ids failed. Failing fast would leave partial
-#     state hard to reconcile; instead we attempt every id, tally failures,
-#     and report them in the stdout summary.
+#   * Exit 0 on HTTP 2xx or dry-run intercept.
+#   * Exit 1 on API failure (HTTP error, network error).
 #   * Exit 2 on arg validation failures. No API call is attempted.
-#   * Stdout: a single compact JSON summary line. Per-id truth lives in
+#   * Stdout: a single compact JSON summary line. Per-call truth lives in
 #     .results.jsonl (PR #158 truth-floor) — this stdout is a convenience.
 
 set -euo pipefail
@@ -53,20 +70,22 @@ Usage:
 Required:
   --profile-id  The profile UUID whose credits are being flagged. Used only
                 for stdout bookkeeping and .results.jsonl reconciliation.
-  --reason      A short string for the 'reason' field on each PATCH. Typical
-                values: "high_velocity", "unverifiable", "record_label_role".
+  --reason      A short string describing why these are UVN. Forwarded to
+                stderr / agent transcript only — the backend updateStatus
+                handler does NOT consume a reason field. Required for
+                caller discipline so flagging is never reasonless.
   --ids         Comma-separated list of credit-request IDs to flag.
 
 Forbidden:
   --requester   Not allowed. This wrapper is for autonomous batches only.
 
 Exit codes:
-  0    every id succeeded (HTTP 2xx or dry-run intercept)
-  1    one or more ids failed — details in stdout summary
+  0    success (HTTP 2xx or dry-run intercept)
+  1    API failure (HTTP error, network error)
   2    argument validation failure (no API call attempted)
 
-Stdout: one compact JSON line with requested/succeeded/failed counts.
-Stderr: muso-admin-api.sh's stderr forwarded verbatim for each call.
+Stdout: one compact JSON line summarising the batch outcome.
+Stderr: muso-admin-api.sh's stderr forwarded verbatim.
 EOF
 }
 
@@ -113,9 +132,9 @@ if [[ -z "$IDS_RAW" ]]; then
     exit 2
 fi
 
-# Parse + trim IDs. Same defensive treatment as batch-approve-credits.sh:
-# reject empty entries rather than sending "user_verification_needed" to an
-# empty path like /admin/credit-requests/.
+# Parse + trim IDs. Reject empty entries from "a,,b" or leading/trailing
+# commas so we never send `"requestIds":[""]` to the API, which the
+# backend would silently ignore.
 IFS=',' read -r -a ID_ARR <<< "$IDS_RAW"
 for i in "${!ID_ARR[@]}"; do
     id_trimmed="${ID_ARR[$i]#"${ID_ARR[$i]%%[![:space:]]*}"}"
@@ -132,69 +151,69 @@ if [[ ! -f "$ADMIN_API_SH" ]]; then
     exit 2
 fi
 
-# PATCH body shape is the same for every id in the batch.
+# Forward the human-readable reason to stderr so it lands in the agent
+# transcript / openclaw session log even though the API doesn't store it.
+# Audit grep-ability without API surface coupling.
+echo "[batch-flag-credits] profile=$PROFILE_ID reason=\"$REASON\" ids=${#ID_ARR[@]}" >&2
+
+# Build the JSON body via jq so embedded shell metacharacters in IDs (if
+# any ever contain them) don't get interpolated into a string-concat body.
 body=$(jq -n -c \
-    --arg reason "$REASON" \
-    '{status: "user_verification_needed", reason: $reason}')
+    --arg raw "$IDS_RAW" \
+    '{
+        requestIds: ($raw | split(",") | map(. | gsub("^\\s+|\\s+$"; ""))),
+        status: "user_verification_needed"
+     }')
 
 requested=${#ID_ARR[@]}
-succeeded=0
-failed=0
-declare -a failed_ids=()
 
-# Per-id loop. Do NOT swallow stderr; do NOT redirect stdout. Each call's
-# exit code is checked, and failures don't terminate the loop — we want to
-# try every id so the reconciliation surface in .results.jsonl reflects
-# the full attempted batch.
-for id in "${ID_ARR[@]}"; do
-    local_rc=0
-    response=$(bash "$ADMIN_API_SH" \
-        call PATCH "/admin/credit-requests/${id}" "$body") || local_rc=$?
+# DELIBERATELY DO NOT redirect stderr — HTTP errors and network failures
+# must surface to the agent transcript. Capture stdout to classify the
+# outcome.
+response=""
+rc=0
+response=$(bash "$ADMIN_API_SH" \
+    call PUT /admin/credit-requests "$body") || rc=$?
 
-    if [[ $local_rc -ne 0 ]]; then
-        failed=$((failed + 1))
-        failed_ids+=("$id")
-        continue
-    fi
-
-    # Success shapes: dryRun:true OR http_status 2xx. Anything else counts
-    # as a failure even with rc=0, mirroring batch-approve-credits.sh.
+outcome="unknown"
+http_status=""
+if [[ $rc -eq 0 ]]; then
+    # Branch on dryRun first (truth floor classifies as dry_run_intercept),
+    # then on http_status 2xx. Anything else downgrades to http_error even
+    # though rc=0 — belt + braces against a future admin-api refactor that
+    # returns 0 on API failures.
     if printf '%s' "$response" | jq -e '.dryRun == true' >/dev/null 2>&1; then
-        succeeded=$((succeeded + 1))
+        outcome="dry_run_intercept"
+        http_status=$(printf '%s' "$response" | jq -r '.http_status // empty' 2>/dev/null)
     else
-        http_status=$(printf '%s' "$response" | jq -r '.http_status // empty' 2>/dev/null || echo "")
+        http_status=$(printf '%s' "$response" | jq -r '.http_status // empty' 2>/dev/null)
         if [[ "$http_status" =~ ^2[0-9][0-9]$ ]]; then
-            succeeded=$((succeeded + 1))
+            outcome="ok"
         else
-            failed=$((failed + 1))
-            failed_ids+=("$id")
+            outcome="http_error"
+            rc=1
         fi
     fi
-done
-
-# Build the summary. failed_ids is always present (empty array when none
-# failed) so downstream parsers don't need conditional null handling.
-failed_ids_json="[]"
-if [[ ${#failed_ids[@]} -gt 0 ]]; then
-    failed_ids_json=$(printf '%s\n' "${failed_ids[@]}" | jq -R . | jq -s -c)
+else
+    # Non-zero rc: most likely a curl-layer failure (network error,
+    # connection refused). The admin script's stderr has already printed
+    # the human-readable reason. Normalize to 1.
+    outcome="http_error"
+    rc=1
 fi
 
+# Emit the summary line. Authoritative per-call truth is in .results.jsonl —
+# this stdout is just a compact convenience for the caller.
 jq -n -c \
     --arg profile_id "$PROFILE_ID" \
     --argjson requested "$requested" \
-    --argjson succeeded "$succeeded" \
-    --argjson failed "$failed" \
-    --argjson failed_ids "$failed_ids_json" \
+    --arg outcome "$outcome" \
+    --arg http_status "$http_status" \
     '{
         profile_id: $profile_id,
         requested: $requested,
-        succeeded: $succeeded,
-        failed: $failed,
-        failed_ids: $failed_ids,
-        outcome: (if $failed == 0 then "ok" else "partial_failure" end)
+        outcome: $outcome,
+        http_status: (if $http_status == "" then null else ($http_status | tonumber? // $http_status) end)
      }'
 
-if [[ $failed -gt 0 ]]; then
-    exit 1
-fi
-exit 0
+exit $rc

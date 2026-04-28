@@ -505,13 +505,22 @@ jobs:
 
   shellcheck:
     name: Shellcheck (scripts/ + .githooks/)
-    runs-on: ubuntu-latest
+    # Was ubuntu-latest, but GitHub-hosted runners stopped being assignable
+    # for this repo around 2026-04-24 (job completes in ~3s with
+    # runner_id=0, runner_name="" — runner never assigned). Until that
+    # org-level issue is resolved (Actions billing / runner pool), use
+    # the self-hosted hydra-node8 runner the other jobs run on.
+    runs-on: [self-hosted, hydra]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Ensure shellcheck installed
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y shellcheck
+          fi
+          shellcheck --version | head -1
 
       - name: Run shellcheck on hydra bash infrastructure
         run: |

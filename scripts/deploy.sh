@@ -508,6 +508,19 @@ RSYNC_EXCLUDES=(
   # 2026-04-14 (PR #102) after running worker sanity checks on node-8.
   --exclude='__pycache__/'
   --exclude='*.pyc'
+  # Hot-patch timestamped backups (convention: <orig>.bak.YYYYMMDDTHHMMSSZ).
+  # Created on the live server when an operator hot-patches a script or
+  # SKILL.md and copies the original aside before editing — see
+  # feedback_hot_patch_pattern memory note. The .bak files are operator
+  # safety nets, not durable repo content. Server-owned, never seeded
+  # from repo, would trip pre-flight if not excluded.
+  --exclude='*.bak.*'
+  # Agent-generated audio binaries (cmo-onboarding-guide currently emits
+  # ~14MB of .mp3 narration via upload_onboarding.py). Server-owned —
+  # the *.py generator IS in the repo, the rendered output is not, same
+  # pattern as a build artifact. Tripped pre-flight on 2026-04-28 when
+  # the rendered MP3s landed under workspaces/cmo/skills/cmo-onboarding-guide/audio/.
+  --exclude='*.mp3'
   # Cloudflare Workers build cache. Created when `wrangler` runs inside a
   # workspace (currently operations/ — tripped pre-flight on 2026-04-17
   # as `workspaces/operations/.wrangler/cache/wrangler-account.json`).

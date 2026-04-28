@@ -95,3 +95,15 @@ scripts/cs-analysis/data/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Hot-patch timestamped backups (e.g. SKILL.md.bak.20260427T120838Z).
+# Created on the live server during operator hot-patches. deploy.sh
+# RSYNC_EXCLUDES has the deploy-side backstop; this entry is the
+# git-side belt to match it.
+*.bak.*
+
+# Agent-generated audio rendered by skill scripts (currently
+# cmo-onboarding-guide). Generators (.py) are tracked; rendered
+# binaries are not — same pattern as a build artifact. deploy.sh
+# RSYNC_EXCLUDES is the deploy-side backstop.
+*.mp3

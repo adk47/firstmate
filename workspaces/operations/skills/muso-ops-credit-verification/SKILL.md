@@ -599,7 +599,7 @@ message(action="react", channelId="<credit_verification_channel_id>", messageId=
 
 Both CLEAR FRAUD and BORDERLINE verdicts take this same action: flip the credit's status so the user is prompted to complete their own verification. The bot does NOT reject.
 
-Use `batch-verify-profile.sh --decision flag`. The dispatcher skips the evidence quorum check on the flag path (UVN isn't gated) and delegates to `batch-flag-credits.sh`, which iterates per-id `PATCH /admin/credit-requests/<id>` (no batch UVN endpoint exists), checks every exit code, never short-circuits on first failure, and emits a `failed_ids` list on partial failure.
+Use `batch-verify-profile.sh --decision flag`. The dispatcher skips the evidence quorum check on the flag path (UVN isn't gated) and delegates to `batch-flag-credits.sh`, which issues a single `PUT /admin/credit-requests` for the entire batch with `{"requestIds":[...],"status":"user_verification_needed"}`. This is the SAME route batch-approve-credits.sh uses; the backend `updateStatus` handler accepts every `CreditRequests.STATUSES` value, so one call atomically transitions all matching requests from UNVERIFIED → USER_VERIFICATION_NEEDED. The earlier per-id `PATCH /admin/credit-requests/<id>` design was wrong — that route was never registered in core-backend, and the 2026-04-27 15:42 UTC real run confirmed it (25/25 PUTs got HTTP 404 "Cannot PATCH …").
 
 ```bash
 bash "$SKILL_DIR/scripts/batch-verify-profile.sh" \
@@ -610,7 +610,7 @@ bash "$SKILL_DIR/scripts/batch-verify-profile.sh" \
   --reason "Moved to user_verification_needed during pre-approval: [specific reason]"
 ```
 
-UVN is not gated (no browser evidence required), but it still flows through the same `.results.jsonl` truth floor — `compute-run-summary.sh` reconciles UVN counts the same way it reconciles approves, and `silent_failure_detected` fires if every PATCH errored. Exit code is 0 iff ALL ids succeeded; 1 if any failed.
+UVN is not gated (no browser evidence required), but it still flows through the same `.results.jsonl` truth floor — `compute-run-summary.sh` reconciles UVN counts the same way it reconciles approves, and `silent_failure_detected` fires if `vn_attempted > 0 && vn_landed == 0`. The wrapper exits 0 on HTTP 2xx (or dry-run intercept) and 1 on any HTTP/network failure.
 
 Use a specific reason based on findings (examples):
 - "Moved to user_verification_needed during pre-approval: no web presence, disposable email, 15 bulk submissions in 24h"
@@ -929,31 +929,50 @@ This check is belt-and-braces: the gate in R3-3 also scopes its scan, so even if
 
 #### B1. Fetch the Queue
 
+**HARD RULE — single entry point.** The queue is fetched ONLY through `fetch-queue.sh`. Do NOT invoke `muso-admin-api.sh` directly for `/admin/credit-requests` or `/admin/credit-requests/counts` from B1, and do NOT improvise jq parsing of admin-API responses. The 2026-04-27 10:06 UTC dry-run posted a green "Queue clear" while the live API had 13891 unverified credits queued — root cause was agent-improvised `.body.items // .items // [] | length` falling silently through to `0` because the real envelope is `.body.data.items[]`. The script locks the jq paths, asserts HTTP status, and fails LOUD on the silent-zero pattern.
+
 ```bash
-bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/admin/credit-requests?status=unverified&limit=$FETCH_SIZE"
+set +e
+QUEUE_JSON=$(bash "$SKILL_DIR/scripts/fetch-queue.sh" "$FETCH_SIZE")
+RC=$?
+set -e
 ```
 
-Also fetch total queue size:
-```bash
-bash /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/admin/credit-requests/counts?status=unverified"
-```
+The script's stdout (on RC=0) is a single JSON object: `{"queue_depth": <int>, "items": [...], "fetch_size": <int>}`. **Do not re-parse `.body.data.items` anywhere downstream — the script has already unwrapped it.** B2 reads `$QUEUE_JSON | .items` directly.
 
-Record queue depth to the run log:
+Dispatch on `$RC`:
+
+| RC | Meaning | Required action |
+|----|---------|-----------------|
+| `0` | Success — `$QUEUE_JSON` is the normalized envelope. | Continue. If `.queue_depth == 0` AND `.items|length == 0` this is a genuine queue-clear; route through B5. |
+| `2` | Wrapper missing or non-numeric `fetch_size`. | Post API-error status (template below), stop. |
+| `3` or `4` | List or counts endpoint returned non-200. | Post API-error status (template below), stop. Stderr from the script has the wrapper response body. |
+| `5` or `6` | **Envelope shape drift.** List response missing `.body.data.items` (5) or counts response missing `.body.data[0].count` (6). The admin API schema has changed under us. | Do NOT post queue-clear. Post the shape-drift escalation template (below) tagging Jan, then stop. |
+| `11` | **`unverified_count_items_mismatch`** — counts say there are unverified credits but the list returned zero items. The exact silent-zero pattern this script exists to catch. | Do NOT post queue-clear. Post the shape-drift escalation template tagging Jan, then stop. |
+
+Record queue depth to the run log on RC=0:
 ```bash
+TOTAL_UNVERIFIED=$(echo "$QUEUE_JSON" | jq -r '.queue_depth')
 bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" run_started_queue \
   "$(jq -n --argjson depth "$TOTAL_UNVERIFIED" '{queue_depth_at_start:$depth}')"
 ```
 
 The list endpoint returns `createdAt DESC` by default (newest first = LIFO).
 
-- **If the list is empty:** Post the queue-clear message (see B5) and stop.
-- **If either API call fails:** Post an error status to `#credit-verification` and stop:
+- **If `.queue_depth == 0` and `.items|length == 0`:** Post the queue-clear message (see B5) and stop. This is exit 0 from `fetch-queue.sh` — never inferred from missing fields.
+- **If RC ∈ {2, 3, 4}:** Post the API-error status to `#credit-verification` and stop:
   ```
   [HEARTBEAT-BATCH] Credit Verification Batch — [timestamp]
   ⚠️ API error fetching unverified queue. Skipping this cycle.
-  Error: [details]
+  Error: [stderr from fetch-queue.sh]
+  ```
+- **If RC ∈ {5, 6, 11}:** Post the shape-drift / silent-zero escalation to `#credit-verification` (no thread, prepend `<dry_run_prefix>`) and stop. Tag Jan ONLY in production (skip the `@`-tag in dry-run per the `OPS_DRY_RUN=1` rules above):
+  ```
+  [HEARTBEAT-BATCH] Credit Verification Batch — [timestamp]
+  ⚠️ Batch aborted at B1 — admin API envelope drift OR silent-zero (count>0, items=0).
+  fetch-queue.sh exit: <RC>
+  Error: [stderr from fetch-queue.sh]
+  Escalating: <@U038BM16T7W>
   ```
 
 #### B2. Process Each Profile
@@ -969,10 +988,14 @@ ERRORS=0                # total delegate/HTTP errors
 
 Group the fetched queue by `profile_id`:
 ```bash
-# $QUEUE_JSON = response body of B1's GET /admin/credit-requests
+# $QUEUE_JSON is the normalized envelope from B1's fetch-queue.sh:
+# {"queue_depth": <int>, "items": [...], "fetch_size": <int>}.
+# `.items` is already unwrapped — DO NOT add `.body.items` / `.body.data.items`
+# fallbacks here. The 2026-04-27 silent-zero incident is exactly the failure
+# mode of guessing admin-API envelope shapes from inside SKILL.md.
 # Produce: profiles_ordered[] = array of {profile_id, userid, cr_ids:[...]}
 PROFILES_GROUPED=$(echo "$QUEUE_JSON" | jq -c '
-    .items // .body.items // []
+    .items
     | group_by(.profileId)
     | map({
         profile_id: (.[0].profileId // .[0].profile_id),
