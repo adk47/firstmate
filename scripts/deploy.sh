@@ -508,6 +508,11 @@ RSYNC_EXCLUDES=(
   # cron-runs.jsonl, written every time the cron fires). Server-owned,
   # never seeded from repo. Tripped pre-flight on 2026-04-24.
   --exclude='workspaces/*/skills/*/state/'
+  # Per-agent write-activity.log — runtime audit journal of GitHub
+  # merges and other agent-observed events (currently coordinator only,
+  # but pattern is forward-compatible). Server-owned, never seeded.
+  # Tripped pre-flight on 2026-04-29 right after PR #224's merge deploy.
+  --exclude='workspaces/*/write-activity.log'
   # Python bytecode cache. Created at runtime when any python3 process
   # imports from /opt/hydra/scripts/lib/. Server-owned, rebuilt on each
   # import, never in the repo. Tripped the deploy pre-flight on

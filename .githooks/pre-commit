@@ -112,6 +112,7 @@ required_excludes=(
   "workspaces/*/*.gif"
   "workspaces/*/skills/gog/"
   "workspaces/*/skills/*/references/*-knowledge-base.md"
+  "workspaces/*/write-activity.log"
   "workspaces/*/*.csv"
   "secrets/"
   "audit/"
