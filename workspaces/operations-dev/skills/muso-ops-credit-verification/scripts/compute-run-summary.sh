@@ -2,7 +2,7 @@
 # compute-run-summary.sh — derive `run_finished` counters from the active
 # openclaw session JSONL (harness-recorded tool calls) instead of trusting
 # shell variables the agent maintains. Prevents confabulated summaries like
-# the 2026-04-20 incidents where Fireworks-fallback models (kimi-k2p5)
+# the 2026-04-20 incidents where fallback models (then kimi-k2p5 via Fireworks)
 # fabricated run_finished counters and skipped B1–B4 entirely while still
 # posting a neat summary table. See issue #124.
 #

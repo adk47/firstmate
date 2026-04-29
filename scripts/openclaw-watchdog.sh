@@ -147,20 +147,13 @@ if [ "$MSG_COUNT" -eq 0 ]; then
   exit 0
 fi
 
-# Check if errors are all API overloads (529 Anthropic or 429 Fireworks) — if so, don't restart, it won't help
-OVERLOAD_COUNT=$(echo "$RECENT_LOGS" | grep -c 'overloaded_error\|Overloaded' 2>/dev/null || true)
+# Check if errors are all upstream overloads (Anthropic 529 / OpenRouter 429) — if so,
+# don't restart, it won't help.
+OVERLOAD_COUNT=$(echo "$RECENT_LOGS" | grep -c 'overloaded_error\|Overloaded\|429.*overloaded\|rate limit reached' 2>/dev/null || true)
 OVERLOAD_COUNT=${OVERLOAD_COUNT:-0}
-FIREWORKS_429=$(echo "$RECENT_LOGS" | grep -c '429.*overloaded\|rate limit reached' 2>/dev/null || true)
-FIREWORKS_429=${FIREWORKS_429:-0}
-TOTAL_OVERLOAD=$((OVERLOAD_COUNT + FIREWORKS_429))
 
-if [ "$FIREWORKS_429" -gt 10 ]; then
-  log "FIREWORKS 429 ALERT: ${FIREWORKS_429} rate limit errors in last ${CHECK_WINDOW_MIN}min — GLM-5 capacity issue"
-  slack_notify ":warning: *Fireworks GLM-5 Rate Limit* — ${FIREWORKS_429} 429 errors in last ${CHECK_WINDOW_MIN}min. Requests failing, Anthropic fallback also broken. Consider switching to DeepSeek V3 or hybrid plan."
-fi
-
-if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -gt 0 ] && [ "$TOTAL_OVERLOAD" -ge "$ERROR_COUNT" ] && [ "$ERROR_COUNT" -gt 0 ]; then
-  log "API OVERLOADED: ${TOTAL_OVERLOAD} overload errors (Anthropic: ${OVERLOAD_COUNT}, Fireworks 429: ${FIREWORKS_429}) — NOT restarting (won't help)."
+if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -gt 0 ] && [ "$OVERLOAD_COUNT" -ge "$ERROR_COUNT" ] && [ "$ERROR_COUNT" -gt 0 ]; then
+  log "API OVERLOADED: ${OVERLOAD_COUNT} upstream overload errors — NOT restarting (won't help)."
   exit 0
 fi
 

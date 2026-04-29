@@ -1027,8 +1027,9 @@ After the parent summary message is posted (whether B3's normal summary or B5's 
 Log the `run_finished` event **via `compute-run-summary.sh`**, which derives
 the counters directly from the session JSONL (harness-recorded tool calls)
 rather than trusting shell variables. This prevents a confabulated agent —
-e.g. a Fireworks-fallback model during an Anthropic spend-cap event — from
-emitting a fabricated summary. See issue #124 for the 2026-04-20 incidents.
+e.g. a fallback model during an upstream spend-cap or rate-limit event — from
+emitting a fabricated summary. See issue #124 for the 2026-04-20 incidents
+(then a Fireworks-routed Kimi K2.5 fallback; provider is gone, mechanism is not).
 
 > **CRITICAL:** The event name is literally `run_finished`. Do NOT write
 > `run_completed`, `run_done`, or any other name — downstream tooling
@@ -1068,7 +1069,7 @@ the tool call:
 
 ```bash
 if [[ "$HOLLOW" == "true" ]]; then
-  WARN_TEXT="🚨 Hollow batch run — preflight passed but no credits were fetched or acted on. Run ID: $RUN_ID. Likely a confabulated session (e.g. Fireworks fallback). <@U038BM16T7W>"
+  WARN_TEXT="🚨 Hollow batch run — preflight passed but no credits were fetched or acted on. Run ID: $RUN_ID. Likely a confabulated session (e.g. fallback-model session under load). <@U038BM16T7W>"
 elif [[ "$UNGROUNDED" == "true" ]]; then
   WARN_TEXT="🚨 Ungrounded batch run — approvals/VN moves logged without a successful browser preflight. Run ID: $RUN_ID. Likely fabricated evidence. <@U038BM16T7W>"
 fi

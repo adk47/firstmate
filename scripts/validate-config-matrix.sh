@@ -8,10 +8,6 @@
 # Each check encodes a rule that, if broken, has historically
 # caused a production incident:
 #
-#   - Fireworks model in any agent primary/fallback or cron payload:
-#     2026-04-21 credit-clearing regression (kimi-k2p6 bypassed
-#     SKILL → 317 heuristic approvals + Slack-spam loop).
-#
 #   - Agent missing thinkingDefault, or thinkingDefault == "off":
 #     2026-04-28 ops batch ran a bash for-loop with thinkingLevel
 #     "off" → BORDERLINE-flag for every credit ID, zero browser
@@ -73,23 +69,7 @@ for cfg in "${PROFILES[@]}"; do
     continue
   fi
 
-  # 1. No fireworks/ in agent primaries or fallbacks.
-  bad=$(jq -r '
-    [
-      (.. | objects | select(has("primary")) | .primary),
-      (.. | objects | select(has("fallbacks")) | .fallbacks[])
-    ]
-    | map(select(type == "string" and startswith("fireworks/")))
-    | unique[]
-  ' "$cfg")
-  if [[ -n "$bad" ]]; then
-    while IFS= read -r line; do
-      echo "ERROR: $cfg has fireworks/ model in agent chain: $line" >&2
-    done <<< "$bad"
-    fail=1
-  fi
-
-  # 2. Every agent in agents.list[] has thinkingDefault, none "off".
+  # 1. Every agent in agents.list[] has thinkingDefault, none "off".
   bad=$(jq -r --argjson allowed "$AGENT_THINKING_LEVELS" '
     .agents.list // []
     | .[]
@@ -104,7 +84,7 @@ for cfg in "${PROFILES[@]}"; do
     fail=1
   fi
 
-  # 3. agents.defaults.thinkingDefault must be set (not "off").
+  # 2. agents.defaults.thinkingDefault must be set (not "off").
   defv=$(jq -r '.agents.defaults.thinkingDefault // "MISSING"' "$cfg")
   if [[ "$defv" == "MISSING" || "$defv" == "off" ]]; then
     echo "ERROR: $cfg agents.defaults.thinkingDefault must be set (was: $defv) — prevents silent runtime fallback to off for any future agent without an explicit thinkingDefault" >&2
@@ -116,14 +96,15 @@ for cfg in "${PROFILES[@]}"; do
     fail=1
   fi
 
-  # 4. Claude 4.x models with reasoning declared must have reasoning=true.
+  # 3. Claude 4.x models with reasoning declared must have reasoning=true.
   #    (Upstream pi-ai catalog declares true; project must agree to keep
   #    resolveThinkingDefaultForModel from returning "off".)
+  #    Models live under the openrouter provider as anthropic/claude-* now.
   bad=$(jq -r '
-    .models.providers.anthropic.models // []
+    .models.providers.openrouter.models // []
     | .[]
     | select(
-        ((.id // "") | test("^claude-(opus|sonnet|haiku)-4-(5|6|7)"))
+        ((.id // "") | test("^anthropic/claude-(opus|sonnet|haiku|4\\.[567])"))
         and (.reasoning != true)
       )
     | "  - " + (.id // "<no-id>") + " (reasoning=" + ((.reasoning // "missing") | tostring) + ")"
@@ -135,7 +116,7 @@ for cfg in "${PROFILES[@]}"; do
   fi
 done
 
-# 5. Cron payload thinking values must be in the allowed enum.
+# 4. Cron payload thinking values must be in the allowed enum.
 if [[ -n "$CRON" && -f "$CRON" ]]; then
   if ! jq empty "$CRON" >/dev/null 2>&1; then
     echo "ERROR: $CRON is not valid JSON" >&2
@@ -151,22 +132,6 @@ if [[ -n "$CRON" && -f "$CRON" ]]; then
     if [[ -n "$bad" ]]; then
       while IFS= read -r line; do
         echo "ERROR: $CRON cron job has invalid thinking value: $line" >&2
-      done <<< "$bad"
-      fail=1
-    fi
-
-    # 6. Cron payloads must not reference fireworks/ models.
-    bad=$(jq -r '
-      [
-        (.jobs // [] | .[] | .payload.model // empty),
-        (.jobs // [] | .[] | .payload.fallbacks // [] | .[])
-      ]
-      | map(select(type == "string" and startswith("fireworks/")))
-      | unique[]
-    ' "$CRON")
-    if [[ -n "$bad" ]]; then
-      while IFS= read -r line; do
-        echo "ERROR: $CRON cron payload references fireworks/ model: $line" >&2
       done <<< "$bad"
       fail=1
     fi

@@ -1295,7 +1295,7 @@ If any invariant fired, post a visible warning tagging Jan **in addition to** th
 
 ```bash
 if [[ "$HOLLOW" == "true" ]]; then
-  WARN_TEXT="🚨 Hollow batch run — preflight passed but no credits were fetched or acted on. Run ID: $RUN_ID. Likely a confabulated session (e.g. Fireworks fallback). <@U038BM16T7W>"
+  WARN_TEXT="🚨 Hollow batch run — preflight passed but no credits were fetched or acted on. Run ID: $RUN_ID. Likely a confabulated session (e.g. fallback-model session under load). <@U038BM16T7W>"
 elif [[ "$UNGROUNDED" == "true" ]]; then
   WARN_TEXT="🚨 Ungrounded batch run — approvals/VN moves logged without a successful browser preflight. Run ID: $RUN_ID. Likely fabricated evidence. <@U038BM16T7W>"
 elif [[ "$SILENT_FAILURE" == "true" ]]; then

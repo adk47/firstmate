@@ -134,15 +134,6 @@ ssh root@40.160.32.80 "docker exec hydra-sandbox openclaw agents list"
 After a restart, all 9 agents will reconnect to Slack via Socket Mode. This typically
 takes 10-15 seconds.
 
-### Restarting CLIProxyAPI
-
-```bash
-ssh root@40.160.32.80 "docker restart cliproxyapi"
-
-# Verify it is healthy
-ssh root@40.160.32.80 "docker logs cliproxyapi --tail 20"
-```
-
 ### Adding/Removing Slack Channels
 
 Agents see messages only in channels where their Slack app has been added.
@@ -169,13 +160,11 @@ No server-side changes are needed. Channel membership is entirely managed in Sla
 4. ESO will sync to the K8s secret automatically
 5. Restart the gateway: `docker restart hydra-sandbox`
 
-**CLIProxyAPI OAuth tokens:**
-- These auto-refresh and normally require no manual intervention
-- If the Claude Max subscription is revoked or the account is locked:
-  1. SSH to Node 8
-  2. `docker exec -it cliproxyapi claude-login`
-  3. Complete the OAuth flow
-  4. Restart: `docker restart cliproxyapi`
+**OpenRouter API key** (`OPENROUTER_API_KEY` — sole inference path):
+1. Issue a new key at https://openrouter.ai/keys
+2. Update Vault: `vault kv put secret/hydra/openrouter api_key=sk-or-...`
+3. ESO syncs to `/opt/hydra/secrets/llm-provider-keys.json` automatically
+4. Restart: `docker restart hydra-sandbox`
 
 ### Reading Audit Logs
 
@@ -237,7 +226,7 @@ and pushes this to the hydra-audit repo.
 |------------------------|-------------------------------------------------------|
 | Gateway health         | `docker ps` -- check hydra-sandbox is running         |
 | Agent connectivity     | `docker exec hydra-sandbox openclaw agents list`      |
-| CLIProxyAPI health     | `docker logs cliproxyapi --tail 10`                   |
+| OpenRouter reachable   | `docker exec hydra-sandbox curl -sS -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models` |
 | Audit pipeline         | Check hydra-audit repo for hourly commits             |
 | Node 8 resources       | `htop`, `df -h`, `docker stats`                       |
 | K3s node status        | `kubectl get nodes` (from any control plane node)     |
@@ -255,7 +244,6 @@ the `#ops-alerts` Slack channel.
 Muso-AI/hydra/
 |-- .github/
 |   +-- workflows/          # CI/CD pipelines
-|-- cliproxyapi.conf         # CLIProxyAPI configuration
 |-- CODEOWNERS               # PR approval rules
 |-- docs/
 |   |-- ARCHITECTURE.md      # This architecture document
@@ -346,6 +334,5 @@ docker restart hydra-sandbox
 | File              | Purpose                                                     |
 |-------------------|-------------------------------------------------------------|
 | `openclaw.json`   | Master config -- defines all agents, models, workspace paths |
-| `cliproxyapi.conf`| CLIProxyAPI settings -- proxy endpoint, token refresh config |
 | `CODEOWNERS`      | Who must approve PRs for which files                        |
 | `workspaces/*/SOUL.md` | The most important file per agent -- its identity and rules |

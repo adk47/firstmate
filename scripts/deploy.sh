@@ -475,6 +475,12 @@ RSYNC_EXCLUDES=(
   --exclude='secrets/'
   # Drift baseline file (server-managed, not part of the repo)
   --exclude='.deployed-sha'
+  # Decommissioned CLIProxyAPI sidecar (PR #224). Files no longer in the
+  # repo but may still exist on /opt/hydra/ until ops cleanup. Excluded
+  # so rsync --delete doesn't trip the deploy pre-flight gate; safe to
+  # remove from node-8 manually anytime.
+  --exclude='cliproxyapi.conf'
+  --exclude='cliproxyapi.yaml'
   # Workspace runtime data (real, accumulating data)
   --exclude='workspaces/*/memory/'
   --exclude='workspaces/*/api-logs/'

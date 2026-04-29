@@ -3,6 +3,14 @@
 > **Version**: 2.0 | **Date**: 2026-03-23 | **Author**: Aaron (adk47)
 >
 > Voice interface for HYDRA agents. Self-hosted, CPU-only, $0/month additional cost.
+>
+> ⚠️ **STALE — needs revision.** This plan was written when Claude was reached via the
+> CLIProxyAPI sidecar (localhost:8317). That sidecar was decommissioned when all model
+> traffic moved to OpenRouter (see ARCHITECTURE.md, Layer 1). The voice pipeline should
+> now call `https://openrouter.ai/api/v1/messages` (or `/chat/completions`) using the
+> shared `OPENROUTER_API_KEY`. Endpoint, env-var, and rate-limit sections below
+> reference CLIProxyAPI and need to be re-derived against OpenRouter before this plan
+> is implemented.
 
 ---
 

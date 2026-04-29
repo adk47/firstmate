@@ -7,7 +7,6 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-hydra}"
 KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
-CLIPROXYAPI_PORT=8317
 FAILURES=0
 WARNINGS=0
 TARGET="${1:-all}"
@@ -336,18 +335,14 @@ if needs_target "dev"; then
 fi
 
 # -------------------------------------------------------------------
-# CLIProxyAPI health check (optional — only if Anthropic fallback is active)
+# OpenRouter reachability (sole inference path for all profiles)
 # -------------------------------------------------------------------
-log "Checking CLIProxyAPI /health..."
-HEALTH_RESPONSE=$(curl -sf "http://127.0.0.1:${CLIPROXYAPI_PORT:-8317}/health" 2>&1) || HEALTH_RESPONSE="UNREACHABLE"
-if echo "$HEALTH_RESPONSE" | grep -qi 'ok\|healthy'; then
-  pass_check "CLIProxyAPI /health returned OK"
+log "Checking OpenRouter reachability..."
+OR_HTTP=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://openrouter.ai/api/v1/models 2>/dev/null || echo "000")
+if [[ "$OR_HTTP" == "200" ]]; then
+  pass_check "OpenRouter /api/v1/models returned 200"
 else
-  # Non-fatal: CLIProxyAPI is only needed for the Anthropic fallback path.
-  # Use warn_check (not bare log) so this fires the WARNINGS counter
-  # and shows up in the summary line. Otherwise the summary lies
-  # ("0 warnings") whenever CLIProxyAPI is unreachable.
-  warn_check "CLIProxyAPI not reachable (non-fatal — primaries are gpt-5.5 / opus-4-7, not Anthropic-direct)"
+  fail_check "OpenRouter /api/v1/models returned ${OR_HTTP} — every agent will fail until this clears"
 fi
 
 # -------------------------------------------------------------------

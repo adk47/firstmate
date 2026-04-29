@@ -22,10 +22,11 @@
   - Skip `nemoclaw onboard` entirely — it's designed for standalone deployments
 - **Tracking**: Watch https://github.com/NVIDIA/NemoClaw for releases. When they support "bring your own cluster" mode, adopt it.
 
-### CLIProxyAPI (model proxy)
-- **Current**: v6.9.0 (Docker `eceasy/cli-proxy-api:latest`)
-- **Update strategy**: Pin Docker image digest, not `:latest`. Test new versions against Claude API.
-- **Token management**: OAuth tokens in `/root/.cli-proxy-api/` auto-refresh. No manual rotation needed unless account-level revocation.
+### OpenRouter (sole model gateway)
+- **Endpoint**: `https://openrouter.ai/api/v1` (managed externally)
+- **Auth**: `OPENROUTER_API_KEY` from `hydra-secrets` (`/opt/hydra/secrets/llm-provider-keys.json`)
+- **Model-ID convention**: `openrouter/<provider>/<model-id>` — e.g. `openrouter/anthropic/claude-opus-4.7`, `openrouter/openai/gpt-5.5`
+- **Rotation**: rotate the key in OpenRouter dashboard, update Vault → ESO syncs to node-8 → restart `hydra-sandbox`
 
 ## Version Pinning
 
@@ -34,7 +35,6 @@
 {
   "openclaw": "2026.3.13",
   "nemoclaw": "0.1.0",
-  "cliproxyapi": "6.9.0",
   "k3s": "v1.34.5+k3s1",
   "node": "22.22.1"
 }

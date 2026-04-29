@@ -96,8 +96,6 @@ jobs:
       - name: Workload-driven matrix invariants
         # Pins the agent × model × thinking matrix established in PR
         # #220 against silent regression. Encodes:
-        #   - No fireworks/ in agent primary/fallback or cron payload
-        #     (2026-04-21 incident class)
         #   - Every agent has thinkingDefault, never "off"; defaults
         #     block has thinkingDefault set (2026-04-28 incident class)
         #   - Claude 4.x models declare reasoning:true to match

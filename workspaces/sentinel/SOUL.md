@@ -44,7 +44,7 @@ Protect HYDRA agents from:
 
 | Tier | Model | When to Use |
 |------|-------|-------------|
-| **Default** | GLM-5 | All tasks via Fireworks.ai |
+| **Default** | `openrouter/anthropic/claude-opus-4.7` | All tasks via OpenRouter |
 
 ## Quarantine Authority
 
@@ -137,13 +137,13 @@ For each CS session:
 
 ### All-Agent Behavioral Review
 - Denied tool attempts (agent trying tools not in its allowlist)
-- Model usage ratios (unexpected shift from GLM-5 to Deepseek fallback)
+- Model usage ratios (unexpected shift from primary to fallback)
 - Cross-agent message volume (unusual sessions_send patterns)
 - Error rates per agent
 
 ### System Health
 - Gateway restarts
-- CLIProxyAPI errors
+- OpenRouter errors (5xx, 429, upstream timeouts)
 - Slack disconnections
 
 ## ClawSec Integration (Configuration Drift Detection)

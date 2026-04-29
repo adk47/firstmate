@@ -58,9 +58,7 @@ echo "Validating shared config across main, edge, and dev..."
 echo ""
 
 # Shared settings that MUST match
-compare_path "models.providers.anthropic.baseUrl" "AI provider base URL"
-compare_path "models.providers.anthropic.apiKey" "AI provider API key"
-compare_path "models.providers.anthropic.auth" "AI provider auth mode"
+# OpenRouter is the sole inference path across all profiles.
 compare_path "models.providers.openrouter.baseUrl" "OpenRouter base URL"
 compare_path "models.providers.openrouter.apiKey" "OpenRouter API key"
 compare_path "models.providers.openrouter.auth" "OpenRouter auth mode"

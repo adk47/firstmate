@@ -41,7 +41,7 @@ For each of the 10 monitored agents:
 
 ### Step 3: System Health Check
 1. Gateway restart count in scan window
-2. CLIProxyAPI error rate
+2. OpenRouter error rate (5xx, 429 from gateway logs)
 3. Slack WebSocket connection status
 4. PromptGuard sidecar health (`GET localhost:18793/health`)
 

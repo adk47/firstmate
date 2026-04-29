@@ -75,25 +75,18 @@ Internet
     |   |  |  |    design                 - Intelligent  |   |  |
     |   |  |  |    (* cmo migrating to 4.7 via PR #131)  |   |  |
     |   |  |  +-------------------+----------------------+   |  |
-    |   |  |                      | localhost:8317           |  |
-    |   |  +----------------------|-------------------------+  |
-    |   |                         |                            |
-    |   |  +----------------------v-----------------------+    |
-    |   |  |  CLIProxyAPI v6.9.0                          |    |
-    |   |  |  (Docker container: cliproxyapi)             |    |
-    |   |  |  OAuth -> Claude Max subscription            |    |
-    |   |  |  Auto-refresh tokens                         |    |
-    |   |  +----------------------+-----------------------+    |
-    |   |                         |                            |
-    |   |  +----------------------v-----------------------+    |
-    |   |  |  iptables Firewall                           |    |
-    |   |  |  Default: DENY all inbound                   |    |
-    |   |  |  Allow: SSH, vRack (10.0.0.0/24), K3s ports  |    |
-    |   |  +----------------------------------------------+    |
+    |   |  |                                                  |  |
+    |   |  +--------------------------------------------------+  |
+    |   |                                                        |
+    |   |  +----------------------------------------------+      |
+    |   |  |  iptables Firewall                           |      |
+    |   |  |  Default: DENY all inbound                   |      |
+    |   |  |  Allow: SSH, vRack (10.0.0.0/24), K3s ports  |      |
+    |   |  +----------------------------------------------+      |
     |   +------------------------------------------------------+
     |
-    +-- Anthropic API (api.anthropic.com)
-    |       ^ Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 / Haiku 4.5
+    +-- OpenRouter (openrouter.ai)
+    |       ^ Claude (Opus 4.7 / Sonnet 4.6 / Haiku) + GPT-5.5 / 5.4-mini — sole inference path
     |
     +-- GitHub (Muso-AI/hydra, Muso-AI/hydra-audit)
 ```
@@ -103,7 +96,6 @@ Internet
 | Component         | Container Name   | Port       | Purpose                                      |
 |-------------------|------------------|------------|----------------------------------------------|
 | OpenClaw Gateway  | hydra-sandbox    | 18789      | Multi-agent orchestration, Slack integration  |
-| CLIProxyAPI       | cliproxyapi      | 8317       | Claude model proxy with OAuth token mgmt      |
 | NemoClaw/OpenShell| (wraps hydra-sandbox) | --    | Kernel-level sandboxing (Landlock, seccomp)   |
 
 ---
@@ -124,14 +116,14 @@ The innermost layer provides OS-level isolation for the agent runtime.
 | **L7 Policies** | Layer-7 network policies control which domains agents can reach |
 | **Non-root**  | All agent processes run as user `sandbox` (uid 998)               |
 
-### Layer 1: CLIProxyAPI (Single Inference Endpoint)
+### Layer 1: OpenRouter (Single Inference Endpoint)
 
-All Claude model traffic is funneled through a single proxy container.
+All model traffic — Claude *and* GPT — is funneled through OpenRouter.
 
-- Agents cannot directly call the Anthropic API
-- CLIProxyAPI manages OAuth tokens for a Claude Max subscription
-- Token auto-refresh eliminates manual credential rotation
-- Single point of monitoring for all inference requests
+- Agents only have egress to `openrouter.ai`; direct Anthropic / OpenAI / Fireworks reach is disallowed by the egress allowlist
+- A single API key (`OPENROUTER_API_KEY`) gates every model call across every profile
+- OpenRouter's per-key dashboard provides per-call request logs
+- Model-ID convention: `openrouter/<provider>/<model-id>` (e.g. `openrouter/anthropic/claude-opus-4.7`, `openrouter/openai/gpt-5.5`)
 
 ### Layer 2: OpenClaw Gateway (Agent Management)
 
@@ -180,7 +172,7 @@ The end-to-end path of a user message through HYDRA:
 5. Agent constructs inference request
        |
        v
-6. Request --> CLIProxyAPI (localhost:8317) --> Anthropic API --> response
+6. Request --> OpenRouter (openrouter.ai) --> upstream provider --> response
        |
        v
 7. Agent posts response back to Slack channel
@@ -262,14 +254,15 @@ HYDRA uses a tiered model allocation to balance capability with cost.
 
 ### Fixed Assignments (7 agents)
 
-| Tier       | Model             | Agents                     | Rationale                        |
-|------------|-------------------|----------------------------|----------------------------------|
-| **Opus**   | Claude Opus 4.7   | coordinator, ceo, cto      | Complex reasoning, strategy      |
-| **Opus**   | Claude Opus 4.6   | cmo *                      | Migrating to 4.7 via PR #131     |
-| **Sonnet** | Claude Sonnet 4.6 | qa, devops                 | Technical tasks, code review     |
-| **Fireworks** | Kimi K2.6      | operations                 | Tool-heavy workflows, BrowseComp |
+All inference is routed via OpenRouter. The current workload-driven matrix
+(see `openclaw-main.json`, `agents.list[]`) primary assignments:
 
-\* cmo migrates to Opus 4.7 on the dedicated `anthropic-cmo` provider once PR #131 lands.
+| Provider/Model                                        | Agents (primary)                          | Rationale                       |
+|-------------------------------------------------------|-------------------------------------------|---------------------------------|
+| `openrouter/anthropic/claude-opus-4.7`                | clio, cmo, finance                        | Complex reasoning, strategy     |
+| `openrouter/openai/gpt-5.5`                           | ceo, cto, qa, operations, devops, design, support | Cost/latency-balanced default   |
+| `openrouter/anthropic/claude-4.6-sonnet-20260217`     | imageModel default; ops fallback          | Multimodal + analysis           |
+| `openrouter/anthropic/claude-haiku-latest`            | imageModel + support fallback             | Cheap fast fallback             |
 
 ### Intelligent Selection (2 agents)
 
@@ -300,7 +293,6 @@ Node 8 serves a dual role: it is both a K3s agent node and the HYDRA Docker host
 ### What Runs in Docker (Outside K3s)
 
 - **hydra-sandbox** (OpenClaw Gateway inside NemoClaw sandbox)
-- **cliproxyapi** (CLIProxyAPI for model access)
 
 The gateway MUST run as a Docker container rather than a K8s pod because the
 NemoClaw/OpenShell sandbox requires direct control over Linux kernel security

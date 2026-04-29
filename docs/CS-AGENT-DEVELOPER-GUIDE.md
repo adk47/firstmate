@@ -60,7 +60,7 @@ The CS agent is the **highest-risk deployment** in HYDRA — it faces untrusted 
 │  The sandbox's network namespace allows connections to       │
 │  EXACTLY these endpoints:                                    │
 │                                                              │
-│  • localhost:8317 (CLIProxyAPI → Claude inference)            │
+│  • openrouter.ai:443 (OpenRouter — sole inference path)      │
 │  • api.muso.ai:443 (same public API customers already use)   │
 │  • zendesk.com:443 (ticket creation)                         │
 │                                                              │
@@ -157,7 +157,7 @@ Step 5: The DNS query is silently dropped. No NXDOMAIN, no timeout
         message — just silence.
 Step 6: The connect() call fails. The agent cannot reach evil.com.
 Step 7: The only hosts reachable are:
-        - localhost:8317 (CLIProxyAPI — sends to Anthropic for inference)
+        - openrouter.ai:443 (OpenRouter — sole inference path)
         - api.muso.ai:443 (same public API the web app uses)
         - zendesk.com:443 (ticket creation)
         That's it. Three endpoints. Everything else is a black hole.
@@ -503,7 +503,7 @@ Two sanitizer skills run as pre/post processors:
 
 | Level | Where | CS-Specific Limits |
 |-------|-------|-------------------|
-| **A: CLIProxyAPI** | Before LLM | 30 req/min, 300 req/hr, 8K input tokens, 2K output tokens, 20 turns, 50 concurrent sessions |
+| **A: Account-level** | OpenRouter | Account-wide rate + spend caps configured in the OpenRouter dashboard (shared across every agent, not CS-specific). The previous per-agent CLIProxyAPI caps (30 req/min, 8K input cap, 20-turn cap, 50 concurrent) are NOT yet replicated post-decommission — see `## Open Risks` and follow-up issue. |
 | **B: Tool-level** | Per tool | profile_lookup: 10/min/session, credits_search: 10/min/session, subscription_status: 3/min/session, create_ticket: 2/session + 3/hr |
 | **C: Session-level** | In SOUL.md | Rapid-fire detection, duplicate suppression, 60-min timeout, action request flood protection |
 

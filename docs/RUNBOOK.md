@@ -27,7 +27,6 @@ ssh root@40.160.32.80 "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Por
 # Expected output:
 # NAMES            STATUS          PORTS
 # hydra-sandbox    Up X hours      127.0.0.1:18789->18789/tcp
-# cliproxyapi      Up X hours      127.0.0.1:8317->8317/tcp
 ```
 
 ### Check Agent Status
@@ -49,15 +48,6 @@ ssh root@40.160.32.80 "docker restart hydra-sandbox"
 ssh root@40.160.32.80 "docker logs hydra-sandbox --tail 30"
 ```
 
-### Restart CLIProxyAPI
-
-```bash
-ssh root@40.160.32.80 "docker restart cliproxyapi"
-
-# Verify
-ssh root@40.160.32.80 "docker logs cliproxyapi --tail 20"
-```
-
 ### View Gateway Logs
 
 ```bash
@@ -69,12 +59,6 @@ ssh root@40.160.32.80 "docker logs hydra-sandbox -f"
 
 # Logs from a specific time window
 ssh root@40.160.32.80 "docker logs hydra-sandbox --since '2026-03-22T10:00:00' --until '2026-03-22T11:00:00'"
-```
-
-### View CLIProxyAPI Logs
-
-```bash
-ssh root@40.160.32.80 "docker logs cliproxyapi --tail 50"
 ```
 
 ### Check Slack Connections
@@ -239,44 +223,35 @@ ssh root@40.160.32.80 'cd /opt/hydra && ./scripts/smoke-test.sh main'
    ssh root@40.160.32.80 "docker logs hydra-sandbox --tail 100 2>&1 | grep -i error"
    ```
 
-5. **Is CLIProxyAPI healthy?**
+5. **Is OpenRouter reachable?**
    ```bash
-   ssh root@40.160.32.80 "docker logs cliproxyapi --tail 20"
+   ssh root@40.160.32.80 "docker exec hydra-sandbox curl -sS -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models"
    ```
-   If CLIProxyAPI is down, the agent receives the message but cannot generate a response.
+   `200` = healthy. Anything else (timeout, 401, 5xx) means inference will fail for every agent.
 
-**Resolution**: Usually one of: restart gateway, add agent to channel, or fix CLIProxyAPI.
+**Resolution**: Usually one of: restart gateway, add agent to channel, or wait out an OpenRouter / upstream provider incident.
 
 ---
 
-### CLIProxyAPI Down
+### OpenRouter Outage
 
-**Symptoms**: Agents receive messages but never respond, or respond with error messages.
+**Symptoms**: Agents receive messages but never respond, or respond with error messages mentioning 5xx / timeout / `upstream`.
 
 **Diagnosis:**
 
 ```bash
-ssh root@40.160.32.80 "docker ps | grep cliproxyapi"
-ssh root@40.160.32.80 "docker logs cliproxyapi --tail 30"
+ssh root@40.160.32.80 "docker exec hydra-sandbox curl -sS -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models"
+ssh root@40.160.32.80 "docker logs hydra-sandbox --tail 50 2>&1 | grep -iE 'openrouter|429|529|overloaded'"
 ```
 
 **Common causes and fixes:**
 
-| Cause                          | Fix                                               |
-|--------------------------------|---------------------------------------------------|
-| Container crashed              | `docker restart cliproxyapi`                      |
-| OAuth token expired            | Usually auto-refreshes; if not, see below         |
-| Account-level token revocation | `docker exec -it cliproxyapi claude-login`        |
-| Anthropic API outage           | Wait for Anthropic to resolve; check status.anthropic.com |
-
-**Manual OAuth re-login (last resort):**
-```bash
-ssh root@40.160.32.80
-docker exec -it cliproxyapi claude-login
-# Follow the OAuth flow in your browser
-# Then restart
-docker restart cliproxyapi
-```
+| Cause                              | Fix                                                              |
+|------------------------------------|------------------------------------------------------------------|
+| OpenRouter incident                | Watch https://status.openrouter.ai/ — wait, then retry           |
+| `OPENROUTER_API_KEY` revoked / 401 | Rotate the key in `/opt/hydra/secrets/llm-provider-keys.json`, restart gateway |
+| Rate limit (429)                   | Reduce concurrency or temporarily lower `maxConcurrent` per profile |
+| Upstream Anthropic / OpenAI outage | OR returns 5xx; wait for upstream to recover                     |
 
 ---
 
@@ -409,7 +384,7 @@ ssh root@40.160.32.80 "docker exec hydra-sandbox whoami"
 ssh root@40.160.32.80 "docker exec hydra-sandbox ls -la /opt/hydra/workspaces/coordinator/"
 
 # Check network connectivity from inside sandbox
-ssh root@40.160.32.80 "docker exec hydra-sandbox curl -s http://localhost:8317/health"
+ssh root@40.160.32.80 "docker exec hydra-sandbox curl -sS -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models"
 ```
 
 **Fix: Full sandbox recreation:**
@@ -437,11 +412,12 @@ vault kv put secret/hydra/{agent-id}/slack bot_token=xoxb-... app_token=xapp-...
 ssh root@40.160.32.80 "docker restart hydra-sandbox"
 ```
 
-**CLIProxyAPI tokens:**
-CLIProxyAPI auto-refreshes OAuth tokens. If auto-refresh fails:
+**OpenRouter API key:**
+If `OPENROUTER_API_KEY` is rotated or revoked, update it in
+`/opt/hydra/secrets/llm-provider-keys.json` (the `hydra-secrets` file
+provider) and restart the gateway:
 ```bash
-ssh root@40.160.32.80 "docker exec -it cliproxyapi claude-login"
-ssh root@40.160.32.80 "docker restart cliproxyapi"
+ssh root@40.160.32.80 "docker restart hydra-sandbox"
 ```
 
 ---
@@ -577,16 +553,15 @@ If a security incident requires rotating all secrets:
    vault kv put secret/hydra/{agent-id}/slack bot_token=xoxb-... app_token=xapp-...
    ```
 
-2. **Rotate CLIProxyAPI OAuth:**
-   ```bash
-   ssh root@40.160.32.80 "docker exec -it cliproxyapi claude-login"
-   ```
+2. **Rotate `OPENROUTER_API_KEY`:**
+   - Issue a new key at https://openrouter.ai/keys
+   - Update Vault: `vault kv put secret/hydra/openrouter api_key=sk-or-...`
 
 3. **Wait for ESO sync** (typically 30-60 seconds)
 
 4. **Restart everything:**
    ```bash
-   ssh root@40.160.32.80 "docker restart cliproxyapi && docker restart hydra-sandbox"
+   ssh root@40.160.32.80 "docker restart hydra-sandbox"
    ```
 
 5. **Verify all agents reconnect:**
@@ -604,9 +579,8 @@ If a security incident requires rotating all secrets:
 |-----------------------------|----------------------------------------------------------------|
 | Check containers            | `ssh root@40.160.32.80 "docker ps"`                           |
 | Restart gateway             | `ssh root@40.160.32.80 "docker restart hydra-sandbox"`        |
-| Restart CLIProxyAPI         | `ssh root@40.160.32.80 "docker restart cliproxyapi"`          |
 | View gateway logs           | `ssh root@40.160.32.80 "docker logs hydra-sandbox --tail 50"` |
-| View proxy logs             | `ssh root@40.160.32.80 "docker logs cliproxyapi --tail 50"`   |
+| Check OpenRouter reachable  | `ssh root@40.160.32.80 "docker exec hydra-sandbox curl -sS -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models"` |
 | List agents                 | `ssh root@40.160.32.80 "docker exec hydra-sandbox openclaw agents list"` |
 | Check Slack connections     | `ssh root@40.160.32.80 "docker logs hydra-sandbox 2>&1 \| grep 'socket mode'"` |
 | Check node in K3s           | `ssh root@10.0.0.1 "kubectl get node ovh-node-8"`             |
