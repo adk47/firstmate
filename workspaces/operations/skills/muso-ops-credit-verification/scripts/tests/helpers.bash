@@ -15,3 +15,19 @@ teardown_tmp_env() {
 }
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Cross-platform helper to print a `touch -t`-compatible timestamp string
+# representing now minus N seconds. Works on both macOS (BSD date) and
+# Linux (GNU date) without leaking stderr noise. `touch -t` interprets
+# its arg as local time on both platforms, so we generate local time too.
+#
+# Usage: touch -t "$(past_touch_stamp 14400)" "$file"   # 4 hours ago
+past_touch_stamp() {
+  local seconds_ago="$1" epoch
+  epoch=$(($(date +%s) - seconds_ago))
+  if date --version >/dev/null 2>&1; then
+    date -d "@$epoch" +%Y%m%d%H%M.%S
+  else
+    date -r "$epoch" +%Y%m%d%H%M.%S
+  fi
+}

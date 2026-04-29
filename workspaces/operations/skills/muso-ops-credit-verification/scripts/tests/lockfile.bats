@@ -36,11 +36,8 @@ teardown() { teardown_tmp_env; }
   mkdir -p "$(dirname "$OPS_BATCH_LOCK_PATH")"
   echo "$$:test-host:operations-dev" > "$OPS_BATCH_LOCK_PATH"
   # Backdate the file to 4 hours ago — one full cron cycle, well above the
-  # 3h30m stale threshold. NOTE: no -u on the date call; touch -t interprets
-  # its arg as local time and stat returns epoch seconds, so matching local
-  # on both sides keeps the age arithmetic honest.
-  touch -t "$(date -v-4H +%Y%m%d%H%M)" "$OPS_BATCH_LOCK_PATH" 2>/dev/null || \
-    touch -d "4 hours ago" "$OPS_BATCH_LOCK_PATH"
+  # 3h30m stale threshold.
+  touch -t "$(past_touch_stamp 14400)" "$OPS_BATCH_LOCK_PATH"
   run "$SCRIPTS_DIR/lockfile.sh" acquire
   [ "$status" -eq 0 ]
 }
@@ -51,8 +48,7 @@ teardown() { teardown_tmp_env; }
   # Backdate to 3 hours ago — below the 3h30m stale threshold. Live PID + fresh
   # mtime must refuse to steal (exit 10). Guards against regression if
   # STALE_SECONDS is ever tightened further.
-  touch -t "$(date -v-3H +%Y%m%d%H%M)" "$OPS_BATCH_LOCK_PATH" 2>/dev/null || \
-    touch -d "3 hours ago" "$OPS_BATCH_LOCK_PATH"
+  touch -t "$(past_touch_stamp 10800)" "$OPS_BATCH_LOCK_PATH"
   run "$SCRIPTS_DIR/lockfile.sh" acquire
   [ "$status" -eq 10 ]
 }
@@ -90,11 +86,18 @@ seed_runlog_without_run_finished() {
   echo "$run_id"
 }
 
-@test "release invokes compute-run-summary.sh when runlog lacks run_finished" {
+@test "release --final invokes compute-run-summary.sh when runlog lacks run_finished AND is quiescent" {
   "$SCRIPTS_DIR/lockfile.sh" acquire
-  seed_runlog_without_run_finished >/dev/null
+  local run_id
+  run_id=$(seed_runlog_without_run_finished)
+  # Backdate the runlog past the 120s quiescence window so the autofill
+  # is allowed to fire. Without this, the quiescence guard would skip
+  # autofill (correct behavior — see Failure 2 fix).
+  local day="${run_id:0:8}"
+  local log="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}/${run_id}.jsonl"
+  touch -t "$(past_touch_stamp 300)" "$log"
 
-  run "$SCRIPTS_DIR/lockfile.sh" release
+  run "$SCRIPTS_DIR/lockfile.sh" release --final
   # Fail-OPEN: release always succeeds; lockfile is always removed.
   [ "$status" -eq 0 ]
   [ ! -f "$OPS_BATCH_LOCK_PATH" ]
@@ -102,6 +105,51 @@ seed_runlog_without_run_finished() {
   # by bats `run`), proving compute-run-summary was attempted.
   [[ "$output" == *"no run_finished event"* ]]
   [[ "$output" == *"compute-run-summary.sh"* ]]
+}
+
+@test "release WITHOUT --final does NOT invoke compute-run-summary even when runlog lacks run_finished (Failure 2 fix)" {
+  # 2026-04-28 15:35:00 UTC: when gpt-5.5 split B0+B1 and B2+ across two
+  # exec calls, the trap-on-EXIT in exec 1 fired release, which previously
+  # autofilled run_finished_hollow 53s before B2 actually ran. Now release
+  # (without --final) skips the autofill — only an explicit terminal
+  # release writes run_finished.
+  "$SCRIPTS_DIR/lockfile.sh" acquire
+  seed_runlog_without_run_finished >/dev/null
+
+  run "$SCRIPTS_DIR/lockfile.sh" release
+  [ "$status" -eq 0 ]
+  [ ! -f "$OPS_BATCH_LOCK_PATH" ]
+  # The fallback-invocation marker MUST NOT appear.
+  [[ "$output" != *"no run_finished event"* ]]
+  [[ "$output" != *"invoking compute-run-summary"* ]]
+}
+
+@test "release --final WITH fresh runlog (mtime <120s) skips autofill (quiescence guard)" {
+  # Even with --final, decline the autofill if the runlog was just
+  # written. A truly-terminal release with a fresh run_started_queue is
+  # almost certainly NOT terminal — likely a retry or a misconfigured
+  # caller. Skip cleanly; the next compute-run-summary call (with --final)
+  # handles it.
+  "$SCRIPTS_DIR/lockfile.sh" acquire
+  seed_runlog_without_run_finished >/dev/null
+
+  run "$SCRIPTS_DIR/lockfile.sh" release --final
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"quiescence window"* ]]
+  [[ "$output" != *"invoking compute-run-summary"* ]]
+}
+
+@test "release --final via OPS_BATCH_TERMINAL=1 env opt-in works the same as the flag" {
+  "$SCRIPTS_DIR/lockfile.sh" acquire
+  local run_id
+  run_id=$(seed_runlog_without_run_finished)
+  local day="${run_id:0:8}"
+  local log="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}/${run_id}.jsonl"
+  touch -t "$(past_touch_stamp 300)" "$log"
+
+  run env OPS_BATCH_TERMINAL=1 "$SCRIPTS_DIR/lockfile.sh" release
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"invoking compute-run-summary"* ]]
 }
 
 @test "release does NOT invoke compute-run-summary when runlog already has run_finished" {

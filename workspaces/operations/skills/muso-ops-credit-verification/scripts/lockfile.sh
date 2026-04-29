@@ -37,8 +37,12 @@ is_stale_by_mtime() {
   local file="$1"
   local now mtime age
   now=$(date +%s)
-  # macOS and Linux have different stat flags
-  mtime=$(stat -f %m "$file" 2>/dev/null || stat -c %Y "$file")
+  # macOS and Linux have different stat flags. Try GNU (`-c`) first: on
+  # Linux, `stat -f %m` is parsed as `--file-system` and dumps multi-line
+  # filesystem info to stdout before failing — that garbage then leaks
+  # into the captured value via the `||` fallback's stdout concatenation
+  # and breaks the arithmetic below.
+  mtime=$(stat -c %Y "$file" 2>/dev/null || stat -f %m "$file")
   age=$((now - mtime))
   [[ "$age" -ge "$STALE_SECONDS" ]]
 }
@@ -88,17 +92,42 @@ cmd_acquire() {
 
 cmd_release() {
   require_env
+  local terminal=0
+  for arg in "$@"; do
+    case "$arg" in --final) terminal=1 ;; esac
+  done
+  if [[ "${OPS_BATCH_TERMINAL:-0}" == "1" ]]; then
+    terminal=1
+  fi
+
   # Mechanical fallback (issue #152, Gap 3). If the bot skipped SKILL.md B6,
   # the runlog has no run_finished event and any Slack summary posted was
   # agent-fabricated instead of derived from the session log. The trap-
-  # driven release is the last supervised action of the turn, so wire the
-  # fallback here: invoke compute-run-summary.sh to derive counters from
-  # the session JSONL. Fail-OPEN — any error is logged and the lockfile is
-  # still removed, so release never blocks on summary plumbing.
-  autofill_run_finished_if_needed || true
+  # driven release WAS the last supervised action of the turn, so the
+  # fallback used to fire unconditionally on every release.
+  #
+  # 2026-04-28 15:35:00 UTC update: that unconditional firing caused a
+  # premature run_finished_hollow when gpt-5.5 split B0+B1 and B2+ across
+  # two exec calls — exec 1's trap fired release, autofill wrote the
+  # hollow event 53s before B2 ran. Now the autofill only runs when the
+  # caller opts in via `--final` flag or OPS_BATCH_TERMINAL=1 env. The
+  # outermost exec at the end of B6 is the only place that should set
+  # this; mid-batch traps release without --final and just remove the
+  # lockfile.
+  #
+  # Belt-and-braces: even with --final, autofill_run_finished_if_needed
+  # adds a quiescence check so a tight back-to-back trap (within 120s of
+  # run_started_queue) still doesn't autofill. Fail-OPEN throughout — any
+  # error is logged and the lockfile is still removed.
+  if [[ "$terminal" == "1" ]]; then
+    autofill_run_finished_if_needed || true
+  fi
   # R4-3: forensic event when agent bypassed render-slack-summary.sh. Must
   # come AFTER autofill so the run_finished event is already in place (the
   # renderer check is only meaningful when there's a summary to render).
+  # This stays unconditional — it's idempotent and post-hoc, only fires
+  # when work happened (attempts > 0) and a run_finished event already
+  # exists. No false-positive cost from running it on every release.
   emit_renderer_missing_event_if_needed || true
   rm -f "$OPS_BATCH_LOCK_PATH"
 }
@@ -124,16 +153,35 @@ autofill_run_finished_if_needed() {
     return 0
   fi
 
+  # Quiescence guard (added 2026-04-28). Even when the caller opts in via
+  # --final, decline the autofill if the runlog was just written to. A
+  # terminal release with a fresh run_started_queue (≤120s old) is almost
+  # certainly NOT a terminal release — the caller likely fired --final
+  # erroneously, OR the agent is still mid-batch. Better to skip and let
+  # the next compute-run-summary call (with --final) handle it cleanly
+  # than to write a stale snapshot.
+  local now mtime age
+  now=$(date +%s)
+  mtime=$(stat -c %Y "$runlog_path" 2>/dev/null || stat -f %m "$runlog_path" 2>/dev/null || echo 0)
+  age=$((now - mtime))
+  if [[ "$age" -lt 120 ]]; then
+    echo "[lockfile] runlog mtime is ${age}s old (<120s quiescence window); skipping autofill for run_id=${run_id}" >&2
+    return 0
+  fi
+
   local script_dir compute_script
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   compute_script="${script_dir}/compute-run-summary.sh"
   [[ -f "$compute_script" ]] || return 0
 
   echo "[lockfile] no run_finished event in ${runlog_path}; invoking compute-run-summary.sh as mechanical fallback (run_id=${run_id})" >&2
-  # Pass empty PARENT_MSG_TS — compute-run-summary accepts it and the
+  # Pass --final so compute-run-summary's in-flight guard does not refuse
+  # the call. We've already established this is the terminal release
+  # (caller opted in) and the runlog has been quiescent for ≥120s.
+  # PARENT_MSG_TS is empty — compute-run-summary accepts it; the
   # summary_post_message_ts field just ends up empty. The forensic value
   # (derived counters, hollow/ungrounded invariants) lands regardless.
-  if ! bash "$compute_script" "$run_id" "" >/dev/null; then
+  if ! bash "$compute_script" --final "$run_id" "" >/dev/null; then
     echo "[lockfile] compute-run-summary.sh fallback exited non-zero (non-fatal); run_id=${run_id}" >&2
   fi
 }
@@ -255,6 +303,6 @@ emit_renderer_missing_event_if_needed() {
 
 case "${1:-}" in
   acquire) shift; cmd_acquire "$@" ;;
-  release) cmd_release ;;
+  release) shift; cmd_release "$@" ;;
   *) echo "usage: $0 {acquire [<caller_pid>]|release}" >&2; exit 64 ;;
 esac

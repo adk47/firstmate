@@ -831,6 +831,10 @@ esac
 trap 'bash "$SKILL_DIR/scripts/lockfile.sh" release' EXIT
 ```
 
+**Multi-exec note (added 2026-04-28).** The trap above releases the lock WITHOUT `--final` — it does NOT autofill `run_finished` via `compute-run-summary.sh`. Mid-batch exec calls (e.g. agent splits B0+B1 and B2+ across two execs) can therefore fire the trap safely without polluting the runlog with a premature hollow event.
+
+The TERMINAL release at the end of B6 must opt-in by passing `--final` (or `OPS_BATCH_TERMINAL=1`). The B6 wrap-up (see below) does this explicitly via `compute-run-summary.sh --final`. Do NOT add `--final` to the B0b trap above — that would re-introduce the 2026-04-28 15:35 UTC `run_finished_hollow` race.
+
 **0c. Init run log and read phase variables.**
 ```bash
 RUN_ID=$(bash "$SKILL_DIR/scripts/runlog.sh" init)
@@ -864,7 +868,7 @@ bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" run_started \
 
 Cron-invoked isolated sessions have silently lost `browser` tool availability in the past (2026-04-16 20:39 UTC run produced 332 escalations that cited Tier 1 URLs the agent never loaded; 2026-04-20 13:26 UTC b8b0e5 approved with `web_fetch` substituted for the probe). Before touching any credit API, verify the tool actually works in *this* session. If it doesn't, abort loudly at B0 so no confabulated escalations land downstream.
 
-Probe exactly this URL via the `browser` tool:
+The probe URL is:
 
 ```
 https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4
@@ -873,6 +877,8 @@ https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4
 (Drake — a consistently available Tier 1 artist page with a predictable HTML shape.)
 
 Success criteria: the tool result must be non-error AND the returned text must contain both of these literal substrings (case-insensitive): `spotify` and `drake`. Cloudflare challenge pages and empty responses fail.
+
+**Do NOT call the `browser` tool yourself.** The 2026-04-28 14:24/14:28/14:51 UTC dry-runs all failed because the openai/gpt-5.5 model's tool-schema defaults (`mode: "efficient", depth: 0, snapshotFormat: "ai", compact: true`) produced a 0-char snapshot that fails the markers check. SKILL.md instructions to "use these exact args instead" did not override the schema defaults — the model kept emitting them. The mechanical layer is the only fix: `preflight-verify.sh` runs the probe via `openclaw browser` CLI directly, with correct args, bypassing the agent's tool-call construction entirely.
 
 After the probe attempt, call the verify helper. **You MUST NOT write the `preflight_ok` or `preflight_browser_unavailable` event with `runlog.sh` directly** — the helper does it, derived from the session JSONL the harness recorded. Hand-writing these events is the failure class this step exists to close.
 
@@ -944,7 +950,7 @@ Dispatch on `$RC`:
 
 | RC | Meaning | Required action |
 |----|---------|-----------------|
-| `0` | Success — `$QUEUE_JSON` is the normalized envelope. | Continue. If `.queue_depth == 0` AND `.items|length == 0` this is a genuine queue-clear; route through B5. |
+| `0` | Success — `$QUEUE_JSON` is the normalized envelope. | **Proceed directly to B2 (per-profile processing).** If `.queue_depth == 0` AND `.items\|length == 0` this is a genuine queue-clear; route through B5. **HARD RULE — do NOT post any Slack summary at this point.** A non-empty queue means the run continues through B2 → B3, where B3 composes the single batch summary post. The 2026-04-28 15:13 UTC dry-run failed this rule: agent posted "Queue fetch succeeded — no writes were executed" after B1 and stopped, producing a `run_finished_hollow` event because `fetched=500` but `approved+verification_needed=0`. Dry-run does NOT short-circuit the workflow — it intercepts API writes via the wrapper, but B2-B5 still run end-to-end so the gate, classification, and summary code all get exercised. |
 | `2` | Wrapper missing or non-numeric `fetch_size`. | Post API-error status (template below), stop. |
 | `3` or `4` | List or counts endpoint returned non-200. | Post API-error status (template below), stop. Stderr from the script has the wrapper response body. |
 | `5` or `6` | **Envelope shape drift.** List response missing `.body.data.items` (5) or counts response missing `.body.data[0].count` (6). The admin API schema has changed under us. | Do NOT post queue-clear. Post the shape-drift escalation template (below) tagging Jan, then stop. |
@@ -1154,31 +1160,29 @@ The 2026-04-23 09:02 UTC dry-run had a thread reply that claimed "174 APPROVE-EL
 
 **Hard rule (R2-5):** Every number, credit ID, and list entry in any Slack message posted from B3 MUST be a byte-for-byte copy of `render-slack-summary.sh` stdout. No agent-composed counts. No invented profile names. The ONLY free-form prose allowed in B3 is a one-line explanation (e.g. "web_fetch to musicbrainz triggered the gate") appended AFTER the renderer's thread output — explaining *why*, never *what*.
 
-Flow:
+Flow (sanctioned, two-script):
 
 ```bash
-# 1. compute-run-summary.sh first — writes run_finished + invariant events,
-#    sets up the data the renderer will read. Idempotent per R2-2, so
-#    re-invocations in the same turn return the cached event.
-SUMMARY_JSON=$(bash "$SKILL_DIR/scripts/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS")
+# 1. compute-run-summary.sh --final — writes the terminal run_finished
+#    event + invariant warnings (hollow / ungrounded / silent_failure).
+#    The --final flag bypasses the in-flight guard added 2026-04-28
+#    (Failure 2 fix). Idempotent per R2-2: re-invocations in the same
+#    turn return the cached event without re-writing.
+SUMMARY_JSON=$(bash "$SKILL_DIR/scripts/compute-run-summary.sh" --final "$RUN_ID" "$PARENT_MSG_TS")
 
-# 2. Render. Output is two blocks separated by `===THREAD===`:
-SLACK_OUT=$(bash "$SKILL_DIR/scripts/render-slack-summary.sh" "$RUN_ID")
-PARENT_TEXT=$(awk '/^===THREAD===$/{exit} {print}' <<<"$SLACK_OUT")
-THREAD_TEXT=$(awk '/^===THREAD===$/{flag=1; next} flag' <<<"$SLACK_OUT")
+# 2. post-batch-summary.sh — sanctioned wrapper that reads the runlog
+#    truth floor, refuses to post if run_finished is missing or the
+#    in-flight (B1-only) shape is detected, composes the parent + thread
+#    via render-slack-summary.sh, and posts via the openclaw CLI directly.
+#    Bypasses the agent's MCP message tool entirely so the enforcer
+#    plugin's block-unsanctioned-batch-message hook can't accidentally
+#    block the canonical post.
+bash "$SKILL_DIR/scripts/post-batch-summary.sh" "$RUN_ID"
 ```
 
-Then post the parent to `OPS_CREDIT_VERIFICATION_CHANNEL_ID` (dry-run mode uses `OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID`):
+**Do NOT call the `message` tool with `channelId=<credit_verification_channel_id>` for the batch summary.** The enforcer plugin's `block-unsanctioned-batch-message` hook intercepts those posts and rejects them with a structured error — this is the mechanical layer that closes the 2026-04-28 15:13 / 15:26 UTC failure (gpt-5.5 hand-composed "Queue fetch succeeded — no writes" hallucinated wrap-ups). The post-batch-summary.sh script is the ONLY path that should reach the channel.
 
-```
-message(action="send", channelId="<credit_verification_channel_id>", text=PARENT_TEXT)
-```
-
-Capture the returned Slack ts, then post the thread reply against it:
-
-```
-message(action="send", channelId="<credit_verification_channel_id>", threadId=<ts>, text=THREAD_TEXT)
-```
+Channel selection (prod vs dry-run) and `[DRY RUN]` prefixing are handled inside `post-batch-summary.sh` based on the runlog `run_header.dryRun` flag — you don't pick the channel yourself.
 
 The renderer handles:
 - `[DRY RUN]` prefix when the run was initialized as dry-run.
@@ -1194,7 +1198,12 @@ You do not compose these markers yourself; the truth floor drives them.
 - Do NOT add your own counts above/below the renderer output. If the renderer's "Approved: 0" disagrees with an in-run counter you maintained, the renderer is right.
 - Do NOT invent profile names, emails, or role descriptions in the thread. The truth floor doesn't carry them. If you want to mention a profile in the one-line explanation appended after the renderer output, reference it from verification notes you logged via `runlog.sh event` during B2 — not from memory or pattern-matching on names you saw in the queue fetch.
 
-Store the parent's Slack ts for B6's invariant-warning reply and for any per-escalation thread children. The `run_finished` event was written by `compute-run-summary.sh` above; B6 won't re-run the helper (idempotency guard catches it anyway).
+`post-batch-summary.sh` owns the parent send, thread reply send, and parent
+message id/ts capture. If the openclaw parent response does not expose a
+threadable id (`messageId`, `ts`, `id`, or `message.ts`), the script fails
+closed and does not send the thread reply as a top-level message. The
+`run_finished` event was written by `compute-run-summary.sh` above; B6 won't
+re-run the helper (idempotency guard catches it anyway).
 
 **Thread reply 2** (only if approval cap was hit during this run):
 ```
@@ -1202,7 +1211,10 @@ Store the parent's Slack ts for B6's invariant-warning reply and for any per-esc
 Verification-needed moves continued uncapped.
 ```
 
-Use `message(action=send, target="<credit_verification_channel_id>")` for the parent message (NO `threadId`). For thread replies, use the parent's ts as `threadId` / `replyTo`.
+Do not use `message(...)` for the batch parent or thread reply. Direct
+`message(...)` calls remain appropriate only for non-summary operational posts
+such as runaway-batch alerts, error-storm alerts, invariant warnings, and
+per-credit escalations.
 
 #### B4. Escalation Threads
 
@@ -1255,7 +1267,7 @@ Queue clear — no unverified credits remaining.
 
 After the parent summary message is posted (B3 or the B5 queue-clear message), evaluate the invariants and run maintenance.
 
-**Do NOT re-run `compute-run-summary.sh` here.** B3 already ran the helper to source its numbers; the `run_finished` event is already in the runlog. Re-running would write a duplicate event. Re-use the `$SUMMARY_JSON` you already have:
+**Do NOT re-run `compute-run-summary.sh` here.** B3 already ran the helper with `--final` to source its numbers; the `run_finished` event is already in the runlog. Re-running would write a duplicate event (idempotency guard catches it, but the spurious invocation is wasted work). Re-use the `$SUMMARY_JSON` you already have:
 
 ```bash
 HOLLOW=$(echo "$SUMMARY_JSON" | jq -r '.hollow')
@@ -1308,7 +1320,11 @@ bash "$SKILL_DIR/scripts/compress-old-logs.sh" || true
 
 The lockfile is released automatically by the `trap` set in B0 when the run exits.
 
-> **Mechanical fallback for skipped B3/B6** (issue #152). If the B3 block is skipped (forgotten, crashed mid-turn, etc.) and B6 therefore has no `$SUMMARY_JSON`, `lockfile.sh release` — invoked by the B0 `trap` — checks the runlog and invokes `compute-run-summary.sh` itself when no `run_finished` event is present. The authoritative derived counters land either way. This is a belt-and-braces backstop, not a license to skip B3: running it explicitly there keeps the Slack summary and the forensic record aligned in the same turn.
+> **Mechanical fallback for skipped B3/B6** (issue #152, refined 2026-04-28). The B0b `trap` does NOT autofill `run_finished` by default — that opt-in semantic was added after the 2026-04-28 15:35 UTC race where a multi-exec mid-batch trap fired `compute-run-summary.sh` 53s before B2 actually ran, polluting the runlog with a premature `run_finished_hollow`. The trap now only autofills when (a) the caller passes `--final` (or sets `OPS_BATCH_TERMINAL=1`), AND (b) the runlog has been quiescent for ≥ 120s.
+>
+> If B3 explicitly runs `compute-run-summary.sh --final` (which it does), the truth-floor `run_finished` event lands cleanly in the same turn — no fallback needed. If B3 is genuinely skipped (agent crash, infrastructure failure) AND the run was the terminal one AND ≥ 120s have passed, a future invocation of `lockfile.sh release --final` (e.g. via a watchdog or follow-up turn) can still land the autofill. This is intentionally narrower than the pre-2026-04-28 always-fire fallback: better to leave the runlog incomplete than to write false-positive hollow flags on a healthy run.
+>
+> The unrelated `run_finished_renderer_missing` post-hoc detector (R4-3) still fires on every release regardless of `--final`. It scans the session for renderer-shaped messages and emits the forensic event when work happened (attempts > 0) but the agent bypassed `post-batch-summary.sh` / `render-slack-summary.sh`. Idempotent and safe to fire repeatedly.
 
 ### Rate Limiting Note
 

@@ -62,6 +62,26 @@
 
 set -euo pipefail
 
+# Parse args: support `--final` flag before or after positional args. The flag
+# (or OPS_BATCH_TERMINAL=1 env) opts into writing run_finished when the run
+# has the in-flight shape (queue_depth_at_start > 0, action_attempted == 0).
+# Without it, we refuse — protecting against the lockfile-trap-on-EXIT race
+# that fired premature run_finished_hollow at 2026-04-28 15:35:00 UTC, 53s
+# before B2 actually ran.
+FINAL_FLAG=0
+if [[ "${OPS_BATCH_TERMINAL:-0}" == "1" ]]; then
+    FINAL_FLAG=1
+fi
+_positional=()
+for _arg in "$@"; do
+    case "$_arg" in
+        --final) FINAL_FLAG=1 ;;
+        *)       _positional+=("$_arg") ;;
+    esac
+done
+set -- "${_positional[@]:-}"
+unset _positional _arg
+
 RUN_ID="${1:-}"
 PARENT_MSG_TS="${2:-}"
 
@@ -105,6 +125,40 @@ if [[ -f "$_guard_runlog_path" ]]; then
         exit 0
     fi
 fi
+
+# --- In-flight guard (Failure 2 from 2026-04-28 15:35:00 UTC) ---
+# When the agent splits B0+B1 and B2+ across multiple exec calls, the bash
+# trap-on-EXIT in exec 1 fires lockfile.sh release, which historically called
+# this script as a crash-recovery fallback. That wrote a premature
+# run_finished_hollow + run_finished_silent_failure 53s before B2 actually
+# ran (and successfully moved 25 credits to verification_needed via PUT).
+#
+# Refuse to write run_finished if the run is plausibly still in flight —
+# i.e. queue_depth_at_start > 0 and zero action_attempted events have
+# landed. The caller can override with --final (or OPS_BATCH_TERMINAL=1)
+# when this IS the terminal call (B6 explicit invocation, or a confirmed
+# terminal release).
+#
+# Empty-queue runs (queue_depth_at_start == 0) are unaffected — guard
+# returns immediately and the script proceeds to write a normal queue-clear
+# run_finished. This guard only triggers on the exact Failure 2 shape.
+if [[ "$FINAL_FLAG" -ne 1 && -f "$_guard_runlog_path" ]]; then
+    # Avoid the `grep -c PATTERN || echo 0` antipattern — grep -c emits "0"
+    # AND exits 1 on no-match, so combining `||` produces multi-line "0\n0"
+    # that breaks numeric comparisons. Count via `|| true` instead, which
+    # preserves grep's stdout (a single "0\n" on no-match) without
+    # appending.
+    _attempts=$(grep -c '"event":"action_attempted"' "$_guard_runlog_path" 2>/dev/null || true)
+    _attempts="${_attempts:-0}"
+    _qdepth=$(jq -s -r 'first(.[] | select(.event=="run_started_queue") | .queue_depth_at_start // 0) // 0' "$_guard_runlog_path" 2>/dev/null || echo 0)
+    if [[ "$_attempts" -eq 0 && "$_qdepth" -gt 0 ]]; then
+        echo "compute-run-summary: refusing to write run_finished — queue_depth_at_start=$_qdepth but action_attempted=0; run plausibly still in flight. Pass --final or set OPS_BATCH_TERMINAL=1 to override." >&2
+        unset _guard_day _guard_runlog_path _cached_summary _attempts _qdepth
+        exit 8
+    fi
+    unset _attempts _qdepth
+fi
+
 unset _guard_day _guard_runlog_path _cached_summary
 
 # Session-log discovery — same mtime idiom as session-evidence.sh, but scoped
@@ -209,29 +263,57 @@ session_counts=$(jq -R -n \
     |
     # Preflight: B0d requires an open-probe of the Drake Tier 1 URL and a
     # page-content read that contains BOTH "spotify" AND "drake" (case-
-    # insensitive). The openclaw browser tool emits multiple tool calls per
-    # page load (action=open returns target metadata; action=get_content
-    # returns the page text), so we check the two halves separately:
-    #   1. ≥1 successful browser open targeting the probe URL
-    #   2. ≥1 browser toolResult whose text has both markers
-    # Either alone is insufficient (open alone could just be a request; text
-    # alone could be from an unrelated Drake browse elsewhere in the session).
+    # insensitive). Two acceptable evidence shapes:
+    #
+    #   A. Direct browser-tool probe (legacy path). One or more successful
+    #      browser opens targeting the probe URL AND one or more browser
+    #      toolResults whose text has both markers. Used when the model
+    #      tool-schema permits non-broken snapshot args.
+    #
+    #   B. preflight-verify.sh@cli probe (2026-04-28+). One or more successful
+    #      exec calls whose command contains "preflight-verify.sh" AND whose
+    #      stdout has both markers. The script runs the openclaw CLI probe
+    #      mechanically, bypassing tool-schema defaults like mode=efficient
+    #      and depth=0 that produced 0-char snapshots in the 14:24, 14:28,
+    #      and 14:51 UTC dry-runs. Markers come from the snapshot stdout the
+    #      script prints; a faking agent would still need a real exec result
+    #      containing them, which the CLI probe attests.
+    #
+    # Either path satisfies preflight; the runlog event is written by
+    # preflight-verify.sh in both cases.
     (
-        [ $pairs[]
-          | select(.name == "browser")
-          | select((.args?.url // "") == $probe
-                   or (.args?.url // "") == ($probe + "/")
-                   or ((.args?.url // "") | startswith($probe + "?")))
-          | select(.is_error | not)
-        ] | length > 0
+        # Path A: browser tool with probe URL
+        ([ $pairs[]
+           | select(.name == "browser")
+           | select((.args?.url // "") == $probe
+                    or (.args?.url // "") == ($probe + "/")
+                    or ((.args?.url // "") | startswith($probe + "?")))
+           | select(.is_error | not)
+         ] | length > 0)
+        or
+        # Path B: exec call to preflight-verify.sh that completed without error
+        ([ $pairs[]
+           | select(.name == "exec")
+           | select(.args_repr | test("preflight-verify\\.sh"))
+           | select(.is_error | not)
+         ] | length > 0)
     ) as $probe_opened
     |
     (
-        [ $pairs[]
-          | select(.name == "browser")
-          | select(.is_error | not)
-          | select((.text | ascii_downcase) | (contains("spotify") and contains("drake")))
-        ] | length > 0
+        # Path A: browser tool result with markers
+        ([ $pairs[]
+           | select(.name == "browser")
+           | select(.is_error | not)
+           | select((.text | ascii_downcase) | (contains("spotify") and contains("drake")))
+         ] | length > 0)
+        or
+        # Path B: exec call to preflight-verify.sh whose stdout has markers
+        ([ $pairs[]
+           | select(.name == "exec")
+           | select(.args_repr | test("preflight-verify\\.sh"))
+           | select(.is_error | not)
+           | select((.text | ascii_downcase) | (contains("spotify") and contains("drake")))
+         ] | length > 0)
     ) as $probe_rendered
     |
     ($probe_opened and $probe_rendered) as $preflight_ok
@@ -377,13 +459,23 @@ runlog_counts=$(jq -s '
         skipped_idempotent: ([.[] | select(.event == "action_attempted" and .action == "skip_idempotent")] | length),
         skipped_cap: ([.[] | select(.event == "action_attempted" and .action == "skip_cap")] | length),
         run_started_fetch_size: (first(.[] | select(.event == "run_started") | .fetch_size) // null),
-        run_started_queue_depth: (first(.[] | select(.event == "run_started_queue") | .queue_depth_at_start) // null)
+        run_started_queue_depth: (first(.[] | select(.event == "run_started_queue") | .queue_depth_at_start) // null),
+        profile_group_fetched_count: ([.[] | select(.event == "profile_group_fetched") | (.count // 0)] | add // 0),
+        cli_preflight_ok: (any(.[]; .event == "preflight_ok" and .source == "preflight-verify.sh@cli"))
     }
 ' "$runlog_path")
 
 ESCALATED=$(echo "$runlog_counts" | jq -r '.escalated')
 SKIPPED_IDEMPOTENT=$(echo "$runlog_counts" | jq -r '.skipped_idempotent')
 SKIPPED_CAP=$(echo "$runlog_counts" | jq -r '.skipped_cap')
+
+# The CLI preflight helper writes an authoritative runlog event. Prefer that
+# event when present; the corresponding stdout can appear in an openclaw
+# `process` poll result rather than the original `exec` result when the
+# command runs long enough to be backgrounded.
+if [[ "$(echo "$runlog_counts" | jq -r '.cli_preflight_ok')" == "true" ]]; then
+    PREFLIGHT_OK="true"
+fi
 
 # Capture the original session-derived fetched count BEFORE the R2-6
 # fallback can overwrite it. The read-side silent-zero check below uses
@@ -566,13 +658,16 @@ fi
 # that bypass the script.
 if [[ "$silent_failure_detected" != "true" ]]; then
     _q_depth=$(echo "$runlog_counts" | jq -r '.run_started_queue_depth // 0')
+    _profile_group_count=$(echo "$runlog_counts" | jq -r '.profile_group_fetched_count // 0')
     if [[ "$_q_depth" =~ ^[0-9]+$ ]] \
+       && [[ "$_profile_group_count" =~ ^[0-9]+$ ]] \
        && (( _q_depth > 0 )) \
+       && (( _profile_group_count == 0 )) \
        && (( SESSION_DERIVED_FETCHED == 0 )); then
         silent_failure_detected="true"
         silent_reason="read_side_silent_zero: queue_depth_at_start=${_q_depth} but session-derived fetched=0 — B1 fetch silently returned no items despite a non-empty queue"
     fi
-    unset _q_depth
+    unset _q_depth _profile_group_count
 fi
 
 # When results.jsonl is available it takes precedence over session-derived
@@ -586,6 +681,21 @@ if [[ "$RECONCILIATION_SOURCE" == "results_jsonl" ]]; then
 else
     APPROVED_FOR_SUMMARY="$APPROVED"
     VN_FOR_SUMMARY="$VN"
+fi
+
+# Re-evaluate invariants after reconciliation. The results.jsonl truth floor
+# is authoritative for write counts; otherwise long-running / redirected execs
+# can leave session-derived approved/VN at 0 and falsely mark a live run as
+# hollow or ungrounded.
+hollow="false"
+if [[ "$PREFLIGHT_OK" == "true" ]] \
+   && (( APPROVED_FOR_SUMMARY + VN_FOR_SUMMARY + ERRORS + ESCALATED + SKIPPED_IDEMPOTENT + SKIPPED_CAP == 0 )); then
+    hollow="true"
+fi
+
+ungrounded="false"
+if [[ "$PREFLIGHT_OK" != "true" ]] && (( APPROVED_FOR_SUMMARY + VN_FOR_SUMMARY > 0 )); then
+    ungrounded="true"
 fi
 
 # `derived_from` honestly lists the per-field provenance map.

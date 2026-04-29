@@ -1,6 +1,7 @@
 import { definePluginEntry, type OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { redirectWebSearch } from "./src/hooks/redirect-web-search.js";
 import { blockWebFetchTier1 } from "./src/hooks/block-web-fetch-tier1.js";
+import { blockUnsanctionedBatchMessage } from "./src/hooks/block-unsanctioned-batch-message.js";
 import { cleanupSessionState } from "./src/hooks/lifecycle.js";
 import { markCvSessionHook } from "./src/hooks/mark-cv-session.js";
 
@@ -87,6 +88,33 @@ export default definePluginEntry({
         } catch (err) {
           console.error(
             `[credit-verification-enforcer] block-web-fetch-tier1 error: ${String(err)}`,
+          );
+          return undefined;
+        }
+      },
+      { priority: 100 },
+    );
+
+    // Block hand-composed [HEARTBEAT-BATCH] / "Credit batch complete"
+    // posts to #credit-verification — the agent must use
+    // post-batch-summary.sh (which posts via the openclaw CLI directly,
+    // bypassing this hook). Closes the 2026-04-28 15:13 / 15:26 UTC
+    // failure where gpt-5.5 posted "Queue fetch succeeded — no writes"
+    // hand-composed messages after only running B0+B1.
+    //
+    // Unlike the exec-tool hooks (silently no-op in YOLO mode per the
+    // narrowing comment above), the message tool IS reliably hooked —
+    // it runs in agent foreground, not autonomous exec. Fail-OPEN
+    // throughout: the lockfile.sh emit_renderer_missing_event_if_needed
+    // detector catches bypasses post-hoc as a belt-and-braces.
+    api.on(
+      "before_tool_call",
+      (event, ctx) => {
+        try {
+          return blockUnsanctionedBatchMessage(event, ctx);
+        } catch (err) {
+          console.error(
+            `[credit-verification-enforcer] block-unsanctioned-batch-message error: ${String(err)}`,
           );
           return undefined;
         }

@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
 load helpers
 
 # compute-run-summary.sh tests. See scripts/compute-run-summary.sh for
@@ -22,6 +23,13 @@ setup() {
   mkdir -p "$RUNLOG_DIR"
   export RUNLOG_FILE="$RUNLOG_DIR/${RUN_ID}.jsonl"
   : > "$RUNLOG_FILE"
+  # All existing tests model the B6 terminal call (compute-run-summary.sh
+  # invoked at the end of a run with the agent expecting invariant
+  # detection — silent_failure, hollow, ungrounded). Set OPS_BATCH_TERMINAL=1
+  # so the in-flight guard added 2026-04-28 (Failure 2 fix) does NOT short-
+  # circuit these scenarios. Tests for the guard itself unset this in their
+  # own bodies.
+  export OPS_BATCH_TERMINAL=1
 }
 teardown() { teardown_tmp_env; }
 
@@ -726,6 +734,28 @@ setup_cv_results() {
   echo "$output" | jq -e '.silent_failure_detected == false'
 }
 
+@test "read-side silent-zero: false when runlog profile groups prove fetch succeeded" {
+  # Current CLI-batch shape: queue JSON is persisted to a temp file instead
+  # of printed in full, so session-derived fetched can be 0. The runlog's
+  # profile_group_fetched events prove B1 returned real items and B2 grouped
+  # them, so the read-side silent-zero backstop must not fire.
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13839
+  jq -n -c --arg rid "$RUN_ID" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{event:"profile_group_fetched", run_id:$rid, ts:$ts, profile_id:"p1", userid:"u1", cr_ids:["cr_1","cr_2"], count:2}' >> "$RUNLOG_FILE"
+
+  setup_cv_results
+  seed_results user_verification_needed ok '["cr_1","cr_2"]'
+
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == false'
+  echo "$output" | jq -e '.hollow == false'
+  echo "$output" | jq -e '.verification_needed == 2'
+  ! jq -e 'select(.event=="run_finished_silent_failure")' < "$RUNLOG_FILE" >/dev/null || return 1
+  ! jq -e 'select(.event=="run_finished_hollow")' < "$RUNLOG_FILE" >/dev/null || return 1
+}
+
 @test "read-side silent-zero: write-side reason takes precedence when both fire" {
   # If the write-side check ALREADY flagged silent failure (rejected_by_gate
   # all-zero-landed), the read-side branch must NOT clobber the write-side
@@ -740,6 +770,23 @@ setup_cv_results() {
   # Write-side reason wins. Read-side reason MUST NOT appear.
   jq -e 'select(.event=="run_finished_silent_failure" and (.reason | test("admin-api attempts >0")))' < "$RUNLOG_FILE"
   ! jq -e 'select(.event=="run_finished_silent_failure" and (.reason | test("read_side_silent_zero")))' < "$RUNLOG_FILE" || return 1
+}
+
+@test "CLI preflight runlog event overrides missing session exec result" {
+  # When a long-running exec is polled via openclaw's process tool, the
+  # preflight-verify.sh stdout can land in a process result instead of the
+  # original exec result. The helper-written runlog event is authoritative.
+  jq -n -c --arg rid "$RUN_ID" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{event:"preflight_ok", run_id:$rid, ts:$ts, probe_url:"https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4", source:"preflight-verify.sh@cli"}' >> "$RUNLOG_FILE"
+
+  setup_cv_results
+  seed_results user_verification_needed ok '["cr_1"]'
+
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.preflight_ok == true'
+  echo "$output" | jq -e '.hollow == false'
+  echo "$output" | jq -e '.ungrounded == false'
 }
 
 @test "reconciliation: session_derived_approved preserved even when overridden" {
@@ -985,4 +1032,69 @@ seed_runlog_run_started() {
   echo "$output" | jq -e '.reconciliation.approved_rejected_by_gate == 3'
   # 1 of 6 landed — not all-zero, so silent_failure is false.
   echo "$output" | jq -e '.silent_failure_detected == false'
+}
+
+
+# ---- In-flight guard (Failure 2 from 2026-04-28 15:35:00 UTC) ----
+#
+# When the agent splits B0+B1 and B2+ across multiple exec calls, the bash
+# trap-on-EXIT in exec 1 historically fired lockfile.sh release, which
+# invoked compute-run-summary.sh as a crash-recovery fallback. That wrote
+# run_finished_hollow + run_finished_silent_failure 53s before B2 actually
+# ran. Compute-run-summary.sh now refuses to write run_finished if
+# queue_depth_at_start > 0 AND zero action_attempted events, unless the
+# caller passes --final or sets OPS_BATCH_TERMINAL=1.
+
+@test "in-flight guard: refuses without --final when queue_depth>0 and attempts==0 (exit 8)" {
+  unset OPS_BATCH_TERMINAL
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13864
+  run --separate-stderr "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 8 ]
+  [[ "$stderr" == *"refusing to write run_finished"* ]]
+  [[ "$stderr" == *"queue_depth_at_start=13864"* ]]
+  [[ "$stderr" == *"action_attempted=0"* ]]
+  # No run_finished event written.
+  ! jq -e 'select(.event=="run_finished")' < "$RUNLOG_FILE" >/dev/null 2>&1 || return 1
+}
+
+@test "in-flight guard: --final flag overrides and writes run_finished" {
+  unset OPS_BATCH_TERMINAL
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13864
+  run "$SCRIPTS_DIR/compute-run-summary.sh" --final "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  # silent_failure_detected fires (queue_depth>0 but session-derived fetched=0)
+  echo "$output" | jq -e '.silent_failure_detected == true'
+  jq -e 'select(.event=="run_finished")' < "$RUNLOG_FILE" >/dev/null
+}
+
+@test "in-flight guard: OPS_BATCH_TERMINAL=1 env overrides the same way --final does" {
+  unset OPS_BATCH_TERMINAL
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13864
+  OPS_BATCH_TERMINAL=1 run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  jq -e 'select(.event=="run_finished")' < "$RUNLOG_FILE" >/dev/null
+}
+
+@test "in-flight guard: empty queue (queue_depth_at_start==0) is not blocked even without --final" {
+  # Empty-queue case is NOT in-flight — no work to do, immediate run_finished
+  # with hollow=false, fetched=0 is the correct shape. Guard must not fire.
+  unset OPS_BATCH_TERMINAL
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 0
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  jq -e 'select(.event=="run_finished")' < "$RUNLOG_FILE" >/dev/null
+}
+
+@test "in-flight guard: action_attempted seeded → not blocked even without --final" {
+  unset OPS_BATCH_TERMINAL
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13864
+  seed_runlog_action approve "cr_1"
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  jq -e 'select(.event=="run_finished")' < "$RUNLOG_FILE" >/dev/null
 }
