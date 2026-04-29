@@ -22,8 +22,9 @@ compatibility: |
   Requires: muso-ops-admin (API gateway), muso-verify-profile (authenticity scoring),
   web_search (external verification), Athena (claim history).
 metadata:
-  version: "1.0"
+  version: "1.1"
   source-repo: "Muso-AI/muso-skills"
+  verified-against: "core-backend/src/apis/index.w.js (2026-04-28)"
 ---
 
 # Muso Ops — Claiming
@@ -43,7 +44,7 @@ Check sender_id tier from `muso-ops-admin` SKILL.md before ANY operation.
 ```bash
 # Via admin API
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/claimings?status=pending&limit=20&offset=0"
+  call GET "/admin/claiming?status=pending&limit=20&offset=0"
 
 # Supplement with Athena for richer context
 SELECT id, status, reason, profileid, profiletype, userid, teamid,
@@ -73,9 +74,9 @@ When ops says "review claim 12345" or "check claim 12345":
 **Step 1: Pull claim details**
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/claiming/<id>"
+  call GET "/admin/claiming/<id>"
 ```
-Note: Claims list = `GET /w/admin/claiming`, single claim = `GET /w/admin/claiming/:id`
+Note: Claims list = `GET /admin/claiming`, single claim = `GET /admin/claiming/:id`
 
 **Step 2: Pull profile data (Athena)**
 ```sql
@@ -158,7 +159,7 @@ After investigation + confirmation:
 
 # Approve = verify
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/claiming/<id>/verify"
+  call POST "/admin/claiming/<id>/verify"
 ```
 
 Post confirmation:
@@ -174,7 +175,7 @@ ALWAYS require a reason:
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/claiming/<id>/reject" '{"reason":"[reason]"}'
+  call POST "/admin/claiming/<id>/reject" '{"reason":"[reason]"}'
 ```
 
 Standard rejection reasons:
@@ -191,7 +192,7 @@ When a previously approved claim needs to be undone:
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/claiming/<id>/revert"
+  call POST "/admin/claiming/<id>/revert"
 ```
 
 ### Batch Review

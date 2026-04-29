@@ -19,8 +19,9 @@ depends-on:
 compatibility: |
   Requires: muso-ops-admin (API gateway), Athena (credit analysis).
 metadata:
-  version: "1.0"
+  version: "1.1"
   source-repo: "Muso-AI/muso-skills"
+  verified-against: "core-backend/src/apis/index.w.js (2026-04-28)"
 ---
 
 # Muso Ops — Credit Requests
@@ -39,21 +40,29 @@ Check sender_id tier from `muso-ops-admin`:
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/credit-requests?status=pending&limit=20"
+  call GET "/admin/credit-requests?status=pending&limit=20"
 ```
 
 Also get pending counts:
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/credit-requests/counts"
+  call GET "/admin/credit-requests/counts"
 ```
 
 ### Review Credit Request
 
 **Step 1: Pull request details**
+
+There is no single-credit-request GET endpoint. Filter the list by profile or track instead:
+
 ```bash
+# By profile
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/credit-request/<id>"
+  call GET "/admin/credit-requests?profilesIds=<profile_id>&limit=20"
+
+# By track
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/credit-requests?trackId=<track_id>&limit=20"
 ```
 
 **Step 2: Verify credit legitimacy**
@@ -73,21 +82,33 @@ WHERE t._id = '<track_id>'
 
 **Step 4: Present verdict with recommendation**
 
-### Approve Credit Request
+### Approve / Reject Credit Request
 
+Status changes use the **collection** endpoint (`PUT /admin/credit-requests`) — NOT
+`PUT /admin/credit-requests/:requestId`, which only consumes a `credits` field
+and ignores `status`.
+
+Backend handler: `core-backend/src/apis/_admin/credit-requests/updateStatus.js`
+Body: `{ requestIds: [<id>, ...], status: <status> }` (or `profileId` instead of
+`requestIds` to bulk-update everything for a profile). Valid statuses: `pending`,
+`processing`, `approved`, `rejected`, `unverified`, `user_verification_needed`.
+
+The handler does NOT read a `reason` field — track rejection reasons in the
+audit log only, not in the request body.
+
+**Approve:**
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/w/admin/credit-request/<id>" '{"status":"approved"}'
+  call PUT "/admin/credit-requests" '{"requestIds":["<id>"],"status":"approved"}'
 ```
 
-### Reject Credit Request
-
+**Reject:**
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/w/admin/credit-request/<id>" '{"status":"rejected","reason":"[reason]"}'
+  call PUT "/admin/credit-requests" '{"requestIds":["<id>"],"status":"rejected"}'
 ```
 
-Standard rejection reasons:
+Standard rejection reasons (record in audit log, not request body):
 - "No matching credits found in industry data sources"
 - "Credit already exists from verified industry feed"
 - "Track metadata doesn't support this credit role"
@@ -97,7 +118,7 @@ Standard rejection reasons:
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/credit-requests/profiles"
+  call GET "/admin/credit-requests/profiles"
 ```
 
 Useful for: identifying high-volume submitters, potential spam, or workspaces

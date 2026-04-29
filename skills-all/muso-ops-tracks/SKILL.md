@@ -19,8 +19,9 @@ depends-on:
 compatibility: |
   Requires: muso-ops-admin (API gateway), Athena (track data).
 metadata:
-  version: "1.0"
+  version: "1.1"
   source-repo: "Muso-AI/muso-skills"
+  verified-against: "core-backend/src/apis/index.w.js (2026-04-28)"
 ---
 
 # Muso Ops — Track Management
@@ -39,7 +40,7 @@ Track lifecycle: search → investigate → modify → verify.
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/tracks/search?q=track+name&limit=10"
+  call GET "/admin/tracks/search?keyword=track+name&limit=10"
 ```
 
 ```sql
@@ -55,7 +56,7 @@ LIMIT 20
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/track/<track_id>"
+  call GET "/admin/track/<track_id>"
 ```
 
 ### Manage Analytics Links
@@ -63,27 +64,27 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 **List links:**
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/track/<track_id>/analytics-sources"
+  call GET "/admin/track/<track_id>/analytics-sources"
 ```
 
 **Add link:**
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/track/<track_id>/analytics-sources" \
+  call POST "/admin/track/<track_id>/analytics-sources" \
   '{"url":"https://open.spotify.com/track/..."}'
 ```
 
 **Remove link:**
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call DELETE "/w/admin/track/<track_id>/analytics-sources" \
+  call DELETE "/admin/track/<track_id>/analytics-sources" \
   '{"linkId":"<link_id>"}'
 ```
 
 **Move link between tracks:**
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PATCH "/w/admin/track/<track_id>/analytics-sources" \
+  call PATCH "/admin/track/<track_id>/analytics-sources" \
   '{"linkId":"<link_id>","fromTrackId":"<source_track_id>"}'
 ```
 
@@ -99,9 +100,14 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 Pre-merge: compare both tracks (credits, analytics links, popularity).
 
 ```bash
-# /admin/tracks/merge (plural, body contains IDs)
+# Direction: mergeInto = SURVIVOR (kept). tracksIds = LOSERS (soft-deleted, redirected to survivor).
+# Endpoint: POST /admin/tracks/merge
+# Body: { mergeInto: <primary_id>, tracksIds: [<duplicate_id>, ...] }
+# Backend handler: core-backend/src/apis/_admin/track/mergeTracks.js
+# A missing `mergeInto` returns "Track ID is required"; missing `tracksIds` returns "Tracks IDs are required". Field names are exact.
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/tracks/merge" '{"sourceTrackId":"<secondary_id>","targetTrackId":"<primary_id>"}'
+  call POST "/admin/tracks/merge" \
+  '{"mergeInto":"<primary_id>","tracksIds":["<duplicate_id>"]}'
 ```
 
 ### Unmerge Tracks
@@ -109,16 +115,20 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 ⚠️ Tier 2+ only.
 
 ```bash
-# /admin/tracks/unmerge (plural)
+# Direction: unmergeFrom = the SURVIVOR (kept). tracksIds = the merged-in tracks to extract back out.
+# Endpoint: POST /admin/tracks/unmerge
+# Body: { unmergeFrom: <primary_id>, tracksIds: [<merged_in_id>, ...] }
+# Backend handler: core-backend/src/apis/_admin/track/unmergeTracks.js
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/tracks/unmerge" '{"trackId":"<track_id>"}'
+  call POST "/admin/tracks/unmerge" \
+  '{"unmergeFrom":"<primary_id>","tracksIds":["<merged_in_id>"]}'
 ```
 
 ### View Raw Credits
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/track/<track_id>/raw-credits"
+  call GET "/admin/track/<track_id>/raw-credits"
 ```
 
 ### Add/Remove Credits
@@ -126,14 +136,14 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 **Add credit:**
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/track/<track_id>/profile/<profile_id>/credits" \
+  call POST "/admin/track/<track_id>/profile/<profile_id>/credits" \
   '{"role":"producer"}'
 ```
 
 **Remove credit:**
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call DELETE "/w/admin/track/<track_id>/profile/<profile_id>/credits"
+  call DELETE "/admin/track/<track_id>/profile/<profile_id>/credits"
 ```
 
 ### Trigger Capture
@@ -142,14 +152,14 @@ Force-refresh analytics data for a track:
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/track/capture/<track_id>"
+  call POST "/admin/track/capture/<track_id>"
 ```
 
 ### Enrich Track from URL
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/track/enrich-by-url" '{"url":"https://open.spotify.com/track/..."}'
+  call POST "/admin/track/enrichByUrl" '{"enrichmentUrl":"https://open.spotify.com/track/..."}'
 ```
 
 ## Common Issues (from Retool docs)

@@ -19,8 +19,9 @@ depends-on:
 compatibility: |
   Requires: muso-ops-admin (API gateway), muso-ops-profiles (for profile operations).
 metadata:
-  version: "1.0"
+  version: "1.1"
   source-repo: "Muso-AI/muso-skills"
+  verified-against: "core-backend/src/apis/index.w.js (2026-04-28)"
 ---
 
 # Muso Ops — Workspace Management
@@ -42,38 +43,38 @@ Need: one email (main contact)
 ```bash
 # Workspace = "team" in admin API
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/team" '{"email":"contact@label.com","name":"Label Name"}'
+  call POST "/admin/team" '{"email":"contact@label.com","name":"Label Name"}'
 ```
 
 ### Step 2: Add Logo
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  upload "/w/admin/team/<id>/image" /tmp/logo.jpg
+  upload "/admin/team/<id>/image" /tmp/logo.jpg
 ```
 
 ### Step 3: Add Users
 First check if user exists:
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/user?search=user@email.com"
+  call GET "/admin/user?keyword=user@email.com"
 ```
 
 If new, create:
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/user" '{"email":"user@email.com","firstName":"Name","password":"name+muso"}'
+  call POST "/admin/user" '{"email":"user@email.com","firstName":"Name","password":"name+muso"}'
 ```
 
 Then add to workspace:
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/team/<id>/users" '{"userId":"<user_id>"}'
+  call POST "/admin/team/<id>/users" '{"userId":"<user_id>"}'
 ```
 
 Or invite by email:
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/team/<id>/invite-users" '{"emails":["user@email.com"]}'
+  call POST "/admin/team/<id>/invite-users" '{"emails":["user@email.com"]}'
 ```
 
 ⚠️ **Password note:** Once created, password can't be "fixed" — must delete and recreate user.
@@ -81,13 +82,13 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 ### Step 4: Add Profiles to Roster (Seats)
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/team/<id>/seats" '{"profileId":"<profile_id>"}'
+  call POST "/admin/team/<id>/seats" '{"profileId":"<profile_id>"}'
 ```
 
 Toggle seat active status:
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/w/admin/team/<id>/seats/<seat_id>" '{"seatActive":true}'
+  call PUT "/admin/team/<id>/seats/<seat_id>" '{"seatActive":true}'
 ```
 
 ### Step 5: Request Cleansing
@@ -106,19 +107,19 @@ Verify analytics are populating before delivering to client.
 Get all seats:
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/team/<id>/seats"
+  call GET "/admin/team/<id>/seats"
 ```
 
 Toggle analytics gathering:
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/w/admin/team/<id>/seats/<seat_id>" '{"seatActive":true}'
+  call PUT "/admin/team/<id>/seats/<seat_id>" '{"seatActive":true}'
 ```
 
 Remove seat:
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call DELETE "/w/admin/team/<id>/seats/<seat_id>"
+  call DELETE "/admin/team/<id>/seats/<seat_id>"
 ```
 
 ## Encore Shareables
@@ -133,11 +134,11 @@ For partner integrations:
 ```bash
 # Add key
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/workspace/<workspace_id>/key"
+  call POST "/admin/workspace/<workspace_id>/key"
 
 # Remove key
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call DELETE "/w/admin/workspace/<workspace_id>/key"
+  call DELETE "/admin/workspace/<workspace_id>/key"
 ```
 
 ## Conversational Flow

@@ -10,7 +10,8 @@ description: |
   managing profile data, searching for profiles, profile investigation.
 
   Triggers: "merge profile", "unmerge", "link spotify", "enrich profile", "profile search",
-  "find profile", "profile details", "link external", "unlink", "avatar upload"
+  "find profile", "profile details", "link external", "avatar upload",
+  "unlink raw profile", "remove raw profile", "remove spotify link", "remove tidal link"
 depends-on:
   - muso-ops-admin
   - muso-ops-audit
@@ -20,8 +21,9 @@ depends-on:
 compatibility: |
   Requires: muso-ops-admin (API gateway), Athena (profile data), web_search.
 metadata:
-  version: "1.0"
+  version: "1.2"
   source-repo: "Muso-AI/muso-skills"
+  verified-against: "core-backend/src/apis/index.w.js (2026-04-28)"
 ---
 
 # Muso Ops — Profile Management
@@ -40,7 +42,7 @@ Full profile lifecycle: search → investigate → modify → verify.
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/profiles/search?q=John+Producer&limit=10"
+  call GET "/admin/profile/search?keyword=John+Producer&limit=10"
 ```
 
 Supplement with Athena for richer results:
@@ -61,7 +63,7 @@ Combine admin API + Athena for complete picture:
 ```bash
 # Admin API
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/profile/<profile_id>"
+  call GET "/admin/profile/<profile_id>"
 ```
 
 ```sql
@@ -114,9 +116,15 @@ Proceed? (yes/no)
 
 Execute:
 ```bash
-# Note: merge endpoint is /admin/profiles/merge (plural), takes source+target in body
+# Direction: mergeInto = SURVIVOR (kept). profilesIds = LOSERS (soft-deleted, redirected to survivor).
+# Endpoint: POST /admin/profiles/merge
+# Body: { mergeInto: <primary_id>, profilesIds: [<duplicate_id>, ...] }
+# Backend handler: core-backend/src/apis/_admin/profile/mergeProfiles.js
+# A missing `mergeInto` returns "Profile ID is required"; a missing `profilesIds`
+# returns "Profiles IDs are required". Field names are exact — do not rename.
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/profiles/merge" '{"sourceProfileId":"<secondary_id>","targetProfileId":"<primary_id>"}'
+  call POST "/admin/profiles/merge" \
+  '{"mergeInto":"<primary_id>","profilesIds":["<duplicate_id>"]}'
 ```
 
 ### Unmerge Profile
@@ -129,44 +137,86 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 3. Confirm the unmerge target
 
 ```bash
-# Note: unmerge is also at /admin/profiles/unmerge (plural)
+# Direction: unmergeFrom = the SURVIVOR (kept). profilesIds = the merged-in profiles to extract back out.
+# Endpoint: POST /admin/profiles/unmerge
+# Body: { unmergeFrom: <primary_id>, profilesIds: [<merged_in_id>, ...] }
+# Backend handler: core-backend/src/apis/_admin/profile/unmergeProfiles.js
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/profiles/unmerge" '{"profileId":"<profile_id>"}'
+  call POST "/admin/profiles/unmerge" \
+  '{"unmergeFrom":"<primary_id>","profilesIds":["<merged_in_id>"]}'
 ```
 
 **Post-unmerge:** Verify both profiles have correct credits. Full update takes up to 24h.
 
-### Link External ID (Spotify, etc.)
+### Link / Unlink External ID (IPI only)
 
+> ⚠️ Despite the section name's history, `link-external` / `unlink-external` only
+> handle **IPI** for profiles. The handler accepts `{externalColumn, externalId}`
+> and downstream validation in `industry-data-processing` rejects every column
+> except `"ipi"` (`profile_operations.link_external_columns()` returns `["ipi"]`).
+> Source platform IDs (Spotify, Tidal, etc.) go through **Unlink Raw Profile** below.
+
+Link an IPI:
 ```bash
+# Endpoint: POST /admin/profile/:profileId/link-external
+# Body: { externalColumn: "ipi" /* ONLY legal value; all others rejected downstream */, externalId: "<ipi_number>" }
+# Backend handler: core-backend/src/apis/_admin/profile/linkExternalIds.js
+# Downstream constraint: industry-data-processing/processors/catalog/operations/profile_operations.py:33
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/profile/<profile_id>/link-external" \
-  '{"platform":"spotify","externalId":"spotify_artist_id"}'
+  call POST "/admin/profile/<profile_id>/link-external" \
+  '{"externalColumn":"ipi","externalId":"00123456789"}'
 ```
 
-Before linking: verify the external ID actually belongs to this profile.
-Web search + API check to confirm.
+Unlink an IPI:
+```bash
+# Endpoint: POST /admin/profile/:profileId/unlink-external
+# Body: { externalColumn: "ipi" /* ONLY legal value */, externalId: "<ipi_number>" }
+# Backend handler: core-backend/src/apis/_admin/profile/unlinkExternalIds.js
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call POST "/admin/profile/<profile_id>/unlink-external" \
+  '{"externalColumn":"ipi","externalId":"00123456789"}'
+```
 
-### Unlink External ID
+Before linking: verify the IPI actually belongs to this profile (web search + IPI registry).
+
+### Unlink Raw Profile (Spotify, Tidal, etc.)
+
+For source-platform raw profile IDs (NOT IPI). Raw IDs are passed in
+`<source>:<external_id>` form. Valid sources are defined in
+`industry-data-processing/common/common_values.py` → `Source`:
+`spotify`, `tidal`, `genius`, `jaxsta`, `youtube_music`, `mlc`, `muso`.
 
 ```bash
+# Endpoint: POST /admin/profile/:profileId/unlink
+# Body: { rawIds: ["<source>:<external_id>", ...] }
+# Backend handler: core-backend/src/apis/_admin/profile/unlinkProfile.js
+# Missing/empty rawIds returns "Raw IDs are required".
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/profile/<profile_id>/unlink-external" \
-  '{"platform":"spotify","externalId":"spotify_artist_id"}'
+  call POST "/admin/profile/<profile_id>/unlink" \
+  '{"rawIds":["spotify:<spotify_artist_id>","tidal:<tidal_artist_id>"]}'
 ```
+
+Pre-flight checks:
+1. List the profile's raw links first (admin GET on the profile, or Athena
+   `"platform-industry-bi-prod".matvw_catalog_profile.raw_ids`) so the operator has a known starting set.
+2. Confirm in Slack which raw IDs to drop, then echo them back before submit.
+
+Post-unlink: only release-date fields update in real time; the catalog pipeline
+takes up to 24h to reflect the unlink across credits and analytics.
 
 ### Enrich Profile
 
-From URL:
+From URL (handler reads `enrichmentUrl` + optional `profileId`):
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/profile/enrich-by-url" '{"url":"https://open.spotify.com/artist/..."}'
+  call POST "/admin/profile/enrichByUrl" \
+  '{"enrichmentUrl":"https://open.spotify.com/artist/...","profileId":"<profile_id>"}'
 ```
 
-From Spotify ID:
+From Spotify ID (path takes the spotify artist id):
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/profile/enrich-by-spotify" '{"spotifyId":"..."}'
+  call POST "/admin/artist/<spotify_artist_id>/enrich"
 ```
 
 ### Upload Avatar
@@ -176,22 +226,25 @@ When ops uploads an image to Slack for a profile avatar:
 2. Upload via admin API multipart endpoint
 
 ```bash
+# Method PUT, route segment is /image (not /avatar). The wrapper's `upload` uses PUT.
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  upload "/w/admin/profile/<profile_id>/avatar" /tmp/avatar.jpg
+  upload "/admin/profile/<profile_id>/image" /tmp/avatar.jpg
 ```
 
 ### Clear Profile Cache
 
 ```bash
+# Method DELETE, route segment is /cache (not /clear-cache).
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/profile/<profile_id>/clear-cache"
+  call DELETE "/admin/profile/<profile_id>/cache"
 ```
 
 ### Export Credits
 
 ```bash
+# Method GET, path uses /admin/professional/:id/credits/export.
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/profile/<profile_id>/export-credits"
+  call GET "/admin/professional/<profile_id>/credits/export"
 ```
 
 ## Merge Prevention Rules (from Retool docs)

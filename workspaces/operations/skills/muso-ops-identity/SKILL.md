@@ -18,8 +18,9 @@ depends-on:
 compatibility: |
   Requires: muso-ops-admin (API gateway).
 metadata:
-  version: "1.0"
+  version: "1.1"
   source-repo: "Muso-AI/muso-skills"
+  verified-against: "core-backend/src/apis/index.w.js (2026-04-28)"
 ---
 
 # Muso Ops — Identity Resolution
@@ -37,14 +38,14 @@ Review and manage the identity resolution system that links user accounts to cat
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/identity-resolution"
+  call GET "/admin/identity-resolution"
 ```
 
 ### View Identity by User
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/identity-resolution/<user_id>"
+  call GET "/admin/identity-resolution/<user_id>"
 ```
 
 ### Confirm Identity Match
@@ -53,7 +54,7 @@ After reviewing that the user account genuinely matches the catalog profile:
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/w/admin/identity-resolution/<id>/confirm"
+  call PUT "/admin/identity-resolution/<id>/confirm"
 ```
 
 ### Reject Identity Match
@@ -62,7 +63,7 @@ When the match is incorrect:
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/w/admin/identity-resolution/<id>/reject"
+  call PUT "/admin/identity-resolution/<id>/reject"
 ```
 
 ## Investigation Checklist

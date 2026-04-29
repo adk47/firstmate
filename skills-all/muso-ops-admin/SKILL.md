@@ -23,7 +23,7 @@ compatibility: |
 metadata:
   version: "2.0"
   source-repo: "Muso-AI/muso-skills"
-  verified-against: "core-backend/src/apis/index.w.js (2026-03-15)"
+  verified-against: "core-backend/src/apis/index.w.js (2026-04-28)"
 ---
 
 # Muso Ops Admin — Core API Gateway
@@ -42,7 +42,7 @@ Clio (this skill)
     ├─── Athena (read-only data)      ← existing, no changes
     ├─── Stripe CLI (payments)         ← existing, no changes
     ├─── Admin API (core-backend)      ← NEW: replaces Retool
-    │        └── JWT auth, /w/admin/* endpoints
+    │        └── JWT auth, /admin/* endpoints
     ├─── Web Search (verification)     ← NEW: fraud/claiming checks
     └─── Audit Log (api-logs/)         ← NEW: mandatory logging
 ```
@@ -143,7 +143,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 
 # Using email directly
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  --requester aaron@muso.ai call PUT "/admin/claiming/12345/verify" '{}'
+  --requester aaron@muso.ai call POST "/admin/claiming/12345/verify" '{}'
 ```
 
 **Never make a write call without `--requester`.** This is the backend's audit trail.
@@ -182,7 +182,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh resolve-
 
 ## Admin API Route Map (139 verified routes)
 
-_Source: `core-backend/src/apis/index.w.js` verified 2026-03-15_
+_Source: `core-backend/src/apis/index.w.js` verified 2026-04-28_
 _Base: `https://api.muso.ai/api/v3` — all routes use `/admin/*` prefix (NO `/w/` prefix)_
 Full route map: `references/admin-api-routes.md`
 
@@ -214,8 +214,8 @@ Full route map: `references/admin-api-routes.md`
 
 ### Credit Requests (`/admin/credit-requests/*`)
 - `GET /admin/credit-requests` — list credit requests
-- `PUT /admin/credit-requests` — bulk update status
-- `PUT /admin/credit-requests/:requestId` — update single request
+- `PUT /admin/credit-requests` — bulk update status (body: `{requestIds[], status}` or `{profileId, status}`)
+- `PUT /admin/credit-requests/:requestId` — updates `credits` field ONLY; ignores `status`. Use the collection endpoint above for approve/reject.
 - `GET /admin/credit-requests/counts` — counts by status
 - `GET /admin/credit-requests/profiles` — profiles with pending requests
 
@@ -307,10 +307,10 @@ Log format: `api-logs/admin/YYYY-MM-DD.jsonl`
   "timestamp": "2026-03-07T17:30:00Z",
   "operator": {"slack_id": "U7RP6HKUZ", "name": "Aaron Kaufman"},
   "operation": "claiming_approve",
-  "endpoint": "PUT /w/admin/claiming/12345",
+  "endpoint": "POST /admin/claiming/12345/verify",
   "target": {"claiming_id": 12345, "profile_id": "abc-123"},
   "reason": "Verified via Spotify credits + IPI match",
-  "request_body": {"status": "processed"},
+  "request_body": {},
   "response_status": 200,
   "response_summary": "Claim approved successfully",
   "channel": "C0ADREBPNQ2",

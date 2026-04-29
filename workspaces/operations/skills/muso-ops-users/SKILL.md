@@ -22,8 +22,9 @@ compatibility: |
   Requires: muso-ops-admin (API gateway), Athena, Amplitude, Stripe, Intercom
   for comprehensive user investigation.
 metadata:
-  version: "1.0"
+  version: "1.1"
   source-repo: "Muso-AI/muso-skills"
+  verified-against: "core-backend/src/apis/index.w.js (2026-04-28)"
 ---
 
 # Muso Ops — User Management
@@ -45,7 +46,7 @@ When ops says "find user john@example.com", pull from ALL sources:
 **Step 1: Admin API**
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/w/admin/user/list?search=john@example.com&limit=10"
+  call GET "/admin/user?keyword=john@example.com&limit=10"
 ```
 
 **Step 2: Athena (account data)**
@@ -100,21 +101,21 @@ Check for any open conversations or recent support tickets.
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/user/<user_id>/reset-password"
+  call POST "/admin/user/<user_id>/reset-password"
 ```
 
 ### Confirm Email
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/w/admin/user/<user_id>/confirm-email"
+  call POST "/admin/user/<user_id>/email-confirmed"
 ```
 
 ### Update User
 
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PUT "/w/admin/user/<user_id>" '{"field":"value"}'
+  call PUT "/admin/user/<user_id>" '{"field":"value"}'
 ```
 
 ### Delete User ⚠️ AARON ONLY
@@ -122,7 +123,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 ```bash
 # REQUIRES: sender_id == U7RP6HKUZ
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call DELETE "/w/admin/user/<user_id>"
+  call DELETE "/admin/user/<user_id>"
 ```
 
 ### Upload User Image
@@ -130,7 +131,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 When ops shares an image in Slack:
 ```bash
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  upload "/w/admin/user/<user_id>/image" /tmp/user-image.jpg
+  upload "/admin/user/<user_id>/image" /tmp/user-image.jpg
 ```
 
 ## Multi-Step Workflows

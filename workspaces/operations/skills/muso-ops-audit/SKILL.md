@@ -17,8 +17,9 @@ depends-on:
 compatibility: |
   Required by ALL muso-ops-* skills. No external dependencies.
 metadata:
-  version: "1.0"
+  version: "1.1"
   source-repo: "Muso-AI/muso-skills"
+  verified-against: "core-backend/src/apis/index.w.js (2026-04-28)"
 ---
 
 # Muso Ops — Audit Trail
@@ -41,7 +42,7 @@ Each line is a JSON object:
   },
   "operation": "claiming_approve",
   "category": "claiming",
-  "endpoint": "PUT /w/admin/claiming/12345",
+  "endpoint": "POST /admin/claiming/12345/verify",
   "target": {
     "type": "claiming",
     "id": "12345",
@@ -54,7 +55,7 @@ Each line is a JSON object:
     "fraud_flags": [],
     "alternatives_offered": false
   },
-  "request_body": {"status": "processed"},
+  "request_body": {},
   "response": {
     "http_status": 200,
     "success": true,
