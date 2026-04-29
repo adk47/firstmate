@@ -60,10 +60,11 @@ interface ToolDeps {
   clickupApiKey: string; clickupListId: string;
   clickupProfileIdFieldId: string; clickupUserEmailFieldId: string;
   sessionId: string;
+  profileMergeAssigneeId?: number;
 }
 
 export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
-  const { http, rateLimiter, clickupApiKey, clickupListId, clickupProfileIdFieldId, clickupUserEmailFieldId, sessionId } = deps;
+  const { http, rateLimiter, clickupApiKey, clickupListId, clickupProfileIdFieldId, clickupUserEmailFieldId, sessionId, profileMergeAssigneeId } = deps;
 
   return {
     name: "create_ticket",
@@ -96,19 +97,21 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         customFields.push({ id: clickupProfileIdFieldId, value: params.customerProfileId });
       }
 
+      const body: Record<string, unknown> = {
+        name: `Action Request: ${params.actionType}`,
+        description,
+        status: "to do",
+        priority,
+        tags: ["hydra-action-request", `tier-${tier}`],
+        custom_fields: customFields,
+      };
+      if (params.actionType === "profile-merge" && profileMergeAssigneeId) {
+        body.assignees = [profileMergeAssigneeId];
+      }
+
       const result = await http.post<{ id: string }>(
         `https://api.clickup.com/api/v2/list/${clickupListId}/task`,
-        {
-          headers: { Authorization: clickupApiKey },
-          body: {
-            name: `Action Request: ${params.actionType}`,
-            description,
-            status: "to do",
-            priority,
-            tags: ["hydra-action-request", `tier-${tier}`],
-            custom_fields: customFields,
-          },
-        },
+        { headers: { Authorization: clickupApiKey }, body },
       );
 
       if (!result.ok) {

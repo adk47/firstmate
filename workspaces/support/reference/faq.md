@@ -21,20 +21,13 @@ Visit app.muso.ai and sign up with your email. The Lite plan is free forever.
 - Create a support ticket with category "Profile Claim — Pending Review"
 
 ### Can I merge duplicate profiles?
-Yes. If you appear under multiple names or variations across different sources:
-
-1. Log in to your account at app.muso.ai
-2. Go to your profile settings and find the merge request option
-3. Identify the duplicate profiles you want merged and submit the request
-4. Our team will review and merge them, typically within 5 business days
+Yes — our team handles profile merges directly. To get started, share the link to the profile you want to keep as your main, plus the link(s) to the duplicate(s). Caroline will open a merge request for you.
 
 **What to expect:**
 - Credits from all profiles are combined into one
-- The primary profile name is kept (you can specify your preference in the request)
-- You'll receive a confirmation once the merge is complete
-
-**If your merge request has no update after 5 business days:**
-- Create a support ticket with category "Profile Merge — Pending"
+- The profile you mark as "main" is kept; duplicates are merged into it
+- Merges typically complete within 5 business days
+- You'll receive a confirmation once the merge is done
 
 ### How do I become an Album Admin?
 Verified artists can become Album Admins, giving them control over the credits displayed for their albums and tracks. You must first verify your artist profile.

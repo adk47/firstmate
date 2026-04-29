@@ -19,6 +19,20 @@ export default definePluginEntry({
     const clickupListId = pluginConfig.clickupListId ?? "";
     const clickupProfileIdFieldId = pluginConfig.clickupProfileIdFieldId ?? "";
     const clickupUserEmailFieldId = pluginConfig.clickupUserEmailFieldId ?? "";
+    const DEFAULT_PROFILE_MERGE_ASSIGNEE_ID = 66250052;
+    const profileMergeAssigneeIdRaw = pluginConfig.profileMergeAssigneeId ?? process.env.PROFILE_MERGE_ASSIGNEE_ID ?? "";
+    let profileMergeAssigneeId: number | undefined;
+    if (profileMergeAssigneeIdRaw) {
+      const parsed = Number(profileMergeAssigneeIdRaw);
+      if (Number.isFinite(parsed)) {
+        profileMergeAssigneeId = parsed;
+      } else {
+        console.warn(`[support-tools] Invalid profileMergeAssigneeId override "${profileMergeAssigneeIdRaw}" — falling back to default.`);
+        profileMergeAssigneeId = DEFAULT_PROFILE_MERGE_ASSIGNEE_ID;
+      }
+    } else {
+      profileMergeAssigneeId = DEFAULT_PROFILE_MERGE_ASSIGNEE_ID;
+    }
 
     const required = { musoApiKey, clickupApiKey, clickupListId, clickupProfileIdFieldId, clickupUserEmailFieldId };
     const missing = Object.entries(required).filter(([, v]) => !v || v.startsWith("TODO")).map(([k]) => k);
@@ -50,6 +64,7 @@ export default definePluginEntry({
         clickupProfileIdFieldId,
         clickupUserEmailFieldId,
         sessionId: ctx.sessionId ?? "unknown",
+        profileMergeAssigneeId,
       });
     };
     api.registerTool(createTicketFactory, { name: "create_ticket" });

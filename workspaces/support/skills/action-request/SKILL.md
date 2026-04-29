@@ -73,7 +73,7 @@ Customer [name/email] requests: [plain English summary]
 | `credit-correction` | 1 | 48 hours | "My role is listed wrong" |
 | `profile-claim` | 1 | 48 hours | "I want to claim this profile" |
 | `support-general` | 1 | 48 hours | General questions needing ops follow-up |
-| `profile-merge` | 2 | 5 business days | "I have two profiles, combine them" |
+| `profile-merge` | 2 | 5 business days | "I have two profiles, combine them" (require `main_profile_url` and `duplicate_profile_urls[]` in `details` — no self-service merge UI exists, so URLs are the only way ops can act) |
 | `bulk-credit-change` | 2 | 5 business days | "Update credits on multiple tracks" |
 | `profile-update` | 2 | 5 business days | "Change my profile name/details" |
 | `subscription-refund` | 3 | 5-10 business days | "I want a refund" |

@@ -39,15 +39,20 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
 
 **Customer says:** "I show up twice / under different names. Can you merge them?"
 
+There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to "Settings > Profile > Merge Request" or any similar in-app flow — it does not exist. Profile merges are handled by the operations team via support ticket.
+
 **Resolution path:**
-1. Confirm they have an account at app.muso.ai and are logged in.
-2. Direct them to: profile settings > merge request > identify duplicates > submit.
-3. Set expectation: the team reviews and merges within 5 business days. The primary profile name is kept (they can specify preference in the request).
-4. If they've already submitted a merge request:
-   - Ask how long ago.
-   - If less than 5 business days: it's within normal time, wait.
-   - If more than 5 business days:
-     - **Escalate:** Create a ticket with category "Profile Merge — Pending". Include: account email, profile URLs involved, date of merge request submission. SLA: 2 business days.
+1. Ask the customer for the link to the profile they want to keep as their **main** profile (e.g., `https://credits.muso.ai/profile/<id>` or `https://app.muso.ai/profile/<id>`).
+2. Ask for the link(s) to the **duplicate** profile(s) to merge into the main.
+3. Once both are provided, create an action-request ticket with `actionType: "profile-merge"` (Tier 2). Include in `details`:
+   - `main_profile_url` — the URL the customer wants kept
+   - `duplicate_profile_urls` — array of duplicate profile URLs to merge in
+4. Set expectation: "Our team will review and merge typically within 5 business days. You'll get a confirmation once it's done."
+
+**Notes:**
+- Never share an internal team member's email or assign a specific reviewer by name — the operations team triages from the ticket queue.
+- Never reference internal tools or URLs (e.g., admin dashboards, retool). Customer-facing URLs only.
+- If the customer can't provide URLs and only knows profile names, run `profile_lookup` to confirm matches before opening the ticket — include the resolved profile IDs in `details` instead of (or alongside) URLs.
 
 ---
 

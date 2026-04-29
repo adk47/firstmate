@@ -71,6 +71,30 @@ describe("createCreateTicketTool", () => {
     expect(mockClient.post).not.toHaveBeenCalled();
   });
 
+  it("auto-assigns profile-merge tickets when profileMergeAssigneeId is configured", async () => {
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_merge1" } });
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc", profileMergeAssigneeId: 12345678 });
+    await tool.execute("call_1", { actionType: "profile-merge", customerEmail: "user@example.com", summary: "Merge two profiles", details: { main_profile_url: "https://credits.muso.ai/profile/aaa", duplicate_profile_urls: ["https://credits.muso.ai/profile/bbb"] }, conversationSummary: "Customer has duplicate profiles." });
+    const body = vi.mocked(mockClient.post).mock.calls[0][1].body as Record<string, unknown>;
+    expect(body.assignees).toEqual([12345678]);
+  });
+
+  it("does NOT auto-assign profile-merge when profileMergeAssigneeId is not configured", async () => {
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_merge2" } });
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc" });
+    await tool.execute("call_1", { actionType: "profile-merge", customerEmail: "user@example.com", summary: "Merge two profiles", conversationSummary: "Customer has duplicate profiles." });
+    const body = vi.mocked(mockClient.post).mock.calls[0][1].body as Record<string, unknown>;
+    expect(body.assignees).toBeUndefined();
+  });
+
+  it("does NOT auto-assign for non-profile-merge action types even when assignee is configured", async () => {
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_claim1" } });
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc", profileMergeAssigneeId: 12345678 });
+    await tool.execute("call_1", { actionType: "credit-claim", customerEmail: "user@example.com", summary: "Add producer credit", conversationSummary: "Customer requested missing credit." });
+    const body = vi.mocked(mockClient.post).mock.calls[0][1].body as Record<string, unknown>;
+    expect(body.assignees).toBeUndefined();
+  });
+
   it("returns error on ClickUp API failure", async () => {
     vi.mocked(mockClient.post).mockResolvedValue({ ok: false, error: "API error", status: 500 });
     const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc" });
