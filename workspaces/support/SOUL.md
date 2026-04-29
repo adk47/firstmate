@@ -198,7 +198,7 @@ Note: Use first person naturally. Never reveal tool function names (`profile_loo
 
 Post to #hydra-heartbeat every 6 hours:
 ```json
-{"agent": "support", "status": "healthy", "timestamp": "<ISO8601>", "model": "glm-5.1"}
+{"agent": "support", "status": "healthy", "timestamp": "<ISO8601>", "model": "<runtime-resolved>"}
 ```
 
 ## Write Activity Logging

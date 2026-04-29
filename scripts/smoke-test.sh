@@ -343,11 +343,11 @@ HEALTH_RESPONSE=$(curl -sf "http://127.0.0.1:${CLIPROXYAPI_PORT:-8317}/health" 2
 if echo "$HEALTH_RESPONSE" | grep -qi 'ok\|healthy'; then
   pass_check "CLIProxyAPI /health returned OK"
 else
-  # Non-fatal: CLIProxyAPI is only needed for Anthropic fallback.
+  # Non-fatal: CLIProxyAPI is only needed for the Anthropic fallback path.
   # Use warn_check (not bare log) so this fires the WARNINGS counter
   # and shows up in the summary line. Otherwise the summary lies
   # ("0 warnings") whenever CLIProxyAPI is unreachable.
-  warn_check "CLIProxyAPI not reachable (non-fatal — Fireworks is primary)"
+  warn_check "CLIProxyAPI not reachable (non-fatal — primaries are gpt-5.5 / opus-4-7, not Anthropic-direct)"
 fi
 
 # -------------------------------------------------------------------

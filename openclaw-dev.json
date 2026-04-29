@@ -36,7 +36,8 @@
               "text",
               "image"
             ],
-            "maxTokens": 16384
+            "maxTokens": 16384,
+            "reasoning": true
           },
           {
             "id": "claude-sonnet-4-6",
@@ -45,7 +46,8 @@
               "text",
               "image"
             ],
-            "maxTokens": 16384
+            "maxTokens": 16384,
+            "reasoning": true
           },
           {
             "id": "claude-haiku-4-5-20251001",
@@ -53,7 +55,8 @@
             "input": [
               "text",
               "image"
-            ]
+            ],
+            "reasoning": true
           }
         ]
       },
@@ -152,12 +155,12 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "fireworks/accounts/fireworks/models/glm-5",
+        "primary": "anthropic/claude-sonnet-4-6",
         "fallbacks": [
-          "fireworks/accounts/fireworks/models/deepseek-v3p2",
-          "anthropic/claude-sonnet-4-6"
+          "openrouter/openai/gpt-5.4-mini"
         ]
       },
+      "thinkingDefault": "low",
       "workspace": "/opt/hydra/workspaces/operations-dev",
       "memorySearch": {
         "enabled": false
@@ -181,12 +184,12 @@
         "default": true,
         "workspace": "/opt/hydra/workspaces/operations-dev",
         "model": {
-          "primary": "fireworks/accounts/fireworks/models/glm-5",
+          "primary": "anthropic/claude-sonnet-4-6",
           "fallbacks": [
-            "fireworks/accounts/fireworks/models/deepseek-v3p2",
-            "anthropic/claude-sonnet-4-6"
+            "openrouter/openai/gpt-5.4-mini"
           ]
-        }
+        },
+        "thinkingDefault": "low"
       }
     ]
   },

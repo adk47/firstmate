@@ -5,7 +5,7 @@
       "id": "0f0ced35-1502-4657-9bcf-c42673b2ba03",
       "agentId": "devops",
       "name": "daily-aws-change-report",
-      "description": "Daily AWS change report \u2014 CloudTrail write events across both accounts",
+      "description": "Daily AWS change report — CloudTrail write events across both accounts",
       "enabled": true,
       "createdAtMs": 1774313970262,
       "updatedAtMs": 1774325096085,
@@ -18,12 +18,9 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "model": "fireworks/accounts/fireworks/models/glm-5",
-        "fallbacks": [
-          "fireworks/accounts/fireworks/models/deepseek-v3p2"
-        ],
         "message": "Run the daily AWS change report. Cover the previous 24h. Query CloudTrail write events across Flagship (068358774785) us-west-2 and Plaque (686505752817) us-east-1/us-west-2. Categorize: Human Changes, Deploys, Anomaly Flags, Scaling, Data, Security, DNS & Networking, Automated Ops. Format for Slack (bold not markdown, bullets not dashes). Post as top-level message.",
-        "timeoutSeconds": 600
+        "timeoutSeconds": 600,
+        "thinking": "low"
       },
       "delivery": {
         "mode": "announce",
@@ -38,7 +35,7 @@
         "lastRunStatus": "error",
         "lastStatus": "error",
         "lastDurationMs": 250675,
-        "lastError": "\u26a0\ufe0f \u2709\ufe0f Message failed",
+        "lastError": "⚠️ ✉️ Message failed",
         "lastDelivered": true,
         "lastDeliveryStatus": "delivered"
       }
@@ -59,12 +56,9 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "model": "fireworks/accounts/fireworks/models/glm-5",
-        "fallbacks": [
-          "fireworks/accounts/fireworks/models/deepseek-v3p2"
-        ],
         "message": "Run the API change watch. For each repo (core-backend, platform-data-processing, industry-data-processing, analytics-worker, web-credits, mobile), check git log for last 24h commits. Analyze for: breaking API changes, model/schema field changes, new/removed endpoints, auth changes, SQS message format changes, database migrations. Post impact analysis.",
-        "timeoutSeconds": 300
+        "timeoutSeconds": 300,
+        "thinking": "low"
       },
       "delivery": {
         "mode": "announce",
@@ -99,8 +93,13 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run the daily profile movement report. Query Athena (workgroup: clio-agent, region: us-west-2) for: 1) PAID CHURNS in last 24h \u2014 separate B2B (muso_team_business_*) and B2P (muso_team_pro_* + muso_individual_*), include emails. 2) PAID JOINS in last 24h ranked by popularity. 3) POPULAR LITE USERS \u2014 claimed profiles with popularity 90+ and no paid subscription. Format for Slack with bullets. Flag biggest red flags.",
-        "timeoutSeconds": 600
+        "message": "Run the daily profile movement report. Query Athena (workgroup: clio-agent, region: us-west-2) for: 1) PAID CHURNS in last 24h — separate B2B (muso_team_business_*) and B2P (muso_team_pro_* + muso_individual_*), include emails. 2) PAID JOINS in last 24h ranked by popularity. 3) POPULAR LITE USERS — claimed profiles with popularity 90+ and no paid subscription. Format for Slack with bullets. Flag biggest red flags.",
+        "timeoutSeconds": 600,
+        "model": "openrouter/openai/gpt-5.5",
+        "thinking": "low",
+        "fallbacks": [
+          "anthropic/claude-haiku-4-5-20251001"
+        ]
       },
       "delivery": {
         "mode": "announce",
@@ -124,7 +123,7 @@
       "id": "40dc9d28-8434-4b76-a04e-edf9f1715b52",
       "agentId": "cmo",
       "name": "daily-churned-campaign-refresh",
-      "description": "Daily win-back campaign sheet update \u2014 append new churns",
+      "description": "Daily win-back campaign sheet update — append new churns",
       "enabled": true,
       "createdAtMs": 1774313970262,
       "updatedAtMs": 1774399200000,
@@ -136,11 +135,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "model": "fireworks/accounts/fireworks/models/kimi-k2p5",
-        "fallbacks": [
-          "fireworks/accounts/fireworks/models/deepseek-v3p2"
-        ],
-        "message": "Daily Win-Back Campaign sheet update. Query Athena for new churned Pro users. Diff against existing emails in Google Sheet (1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs, account: a@muso.ai). ONLY APPEND new rows \u2014 never replace or overwrite tracking columns (AI-AN). Return a short summary of new additions as your final output \u2014 do NOT post to Slack directly; the cron runner will deliver it to #win-back-alerts.",
+        "message": "Daily Win-Back Campaign sheet update. Query Athena for new churned Pro users. Diff against existing emails in Google Sheet (1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs, account: a@muso.ai). ONLY APPEND new rows — never replace or overwrite tracking columns (AI-AN). Return a short summary of new additions as your final output — do NOT post to Slack directly; the cron runner will deliver it to #win-back-alerts.",
         "timeoutSeconds": 900
       },
       "delivery": {
@@ -178,7 +173,12 @@
       "payload": {
         "kind": "agentTurn",
         "message": "Run the stripe-disputes skill: check all open Stripe disputes needing response, investigate each one, submit evidence for disputes worth fighting (include ToS: https://credits.muso.ai/terms in every submission), and post a single daily summary to Slack. Update memory with results.",
-        "timeoutSeconds": 300
+        "timeoutSeconds": 300,
+        "model": "openrouter/openai/gpt-5.5",
+        "thinking": "high",
+        "fallbacks": [
+          "anthropic/claude-opus-4-7"
+        ]
       },
       "delivery": {
         "mode": "announce",
@@ -208,10 +208,6 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "model": "fireworks/accounts/fireworks/models/glm-5",
-        "fallbacks": [
-          "fireworks/accounts/fireworks/models/deepseek-v3p2"
-        ],
         "message": "Daily PR Code Review. Review all PRs merged in the last 24 hours across Muso-AI repos (core-backend, platform-data-processing, industry-data-processing, analytics-worker, web-credits, mobile) for PRODUCTION RISK. For each merged PR fetch the diff. Analyze for: OOM, scaling, concurrency, data integrity, error handling, performance risks. Post results with risk ratings. Focus on real problems at production scale, not style nits.",
         "timeoutSeconds": 600
       },
@@ -249,11 +245,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "model": "fireworks/accounts/fireworks/models/glm-5",
-        "fallbacks": [
-          "fireworks/accounts/fireworks/models/deepseek-v3p2"
-        ],
-        "message": "Generate the CMO EOD Briefing for Fede for today. Cover: Tech (commits/deploys/blockers), Fede mentions/tags, replies to Fede messages, highlights from #social-media #growth-team, notable a@muso.ai emails, and anything else major. Omit empty sections. Plain English, short, with links. Return the briefing as your final output \u2014 do NOT post to Slack directly; the cron runner will deliver it to #clio_x_fede.",
+        "message": "Generate the CMO EOD Briefing for Fede for today. Cover: Tech (commits/deploys/blockers), Fede mentions/tags, replies to Fede messages, highlights from #social-media #growth-team, notable a@muso.ai emails, and anything else major. Omit empty sections. Plain English, short, with links. Return the briefing as your final output — do NOT post to Slack directly; the cron runner will deliver it to #clio_x_fede.",
         "timeoutSeconds": 300
       },
       "delivery": {
@@ -284,12 +276,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "model": "fireworks/accounts/fireworks/models/minimax-m1-80k",
-        "fallbacks": [
-          "fireworks/accounts/fireworks/models/deepseek-v3p2",
-          "anthropic/claude-haiku-4-5-20251001"
-        ],
-        "message": "Scan Gmail (a@muso.ai) for new B2B Ads outreach replies in the last 65 minutes. Use gog to check recent inbox. Filter for replies from B2B prospects we have emailed (cross-reference with the B2B outreach sheet). IGNORE all internal emails (from muso.ai domains), SaaS notifications, marketing emails, and anything that is not a direct reply from a B2B prospect.\n\nCRITICAL SILENCE RULE: If there are NO new B2B prospect replies, your ENTIRE response must be empty \u2014 literally produce no output at all. Do not say NO_REPLY, do not say \"nothing found\", do not summarize. Just stop. Fede does not want to see any message when there is nothing to report.\n\nOnly if you find an actual B2B prospect reply, format your response with: sender name, company, reply summary, and suggested next action. Also sync GHL pipeline stage if applicable (move to Replied or Meeting Booked).",
+        "message": "Scan Gmail (a@muso.ai) for new B2B Ads outreach replies in the last 65 minutes. Use gog to check recent inbox. Filter for replies from B2B prospects we have emailed (cross-reference with the B2B outreach sheet). IGNORE all internal emails (from muso.ai domains), SaaS notifications, marketing emails, and anything that is not a direct reply from a B2B prospect.\n\nCRITICAL SILENCE RULE: If there are NO new B2B prospect replies, your ENTIRE response must be empty — literally produce no output at all. Do not say NO_REPLY, do not say \"nothing found\", do not summarize. Just stop. Fede does not want to see any message when there is nothing to report.\n\nOnly if you find an actual B2B prospect reply, format your response with: sender name, company, reply summary, and suggested next action. Also sync GHL pipeline stage if applicable (move to Replied or Meeting Booked).",
         "timeoutSeconds": 300
       },
       "delivery": {
@@ -326,13 +313,13 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "model": "fireworks/accounts/fireworks/models/minimax-m1-80k",
+        "model": "openrouter/openai/gpt-5.5",
         "fallbacks": [
-          "fireworks/accounts/fireworks/models/deepseek-v3p2",
           "anthropic/claude-haiku-4-5-20251001"
         ],
         "message": "Run the AMP Daily Report. Query core-backend tables public_ad_events and public_ads via Athena (workgroup: clio-agent, region: us-west-2). Build report: 1) Summary: all-time/7d/today views, clicks, CTR, unique viewers with deltas. 2) Top 5 ads by CTR. 3) Underperformers (CTR < 0.3% with >1K views). 4) AMP vs Feed breakdown. 5) Platform breakdown. 6) Daily trend 7 days. Format for Slack bullets, keep short.",
-        "timeoutSeconds": 600
+        "timeoutSeconds": 600,
+        "thinking": "low"
       },
       "delivery": {
         "mode": "announce",
@@ -362,7 +349,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Nightly Slack to ClickUp Gap Analysis. Read last 24h messages in #growth-team (C031DKAGQSH) and #clio_analyst (C0ADREBPNQ2). For each discussion topic, feature idea, bug report, or decision: search ClickUp for matching tasks, check repos for related code/PRs. Post gap report to #growth-team with: suggested new tasks, suggested edits, priority suggestions, communication gaps. Suggestions only \u2014 do NOT make changes.",
+        "message": "Nightly Slack to ClickUp Gap Analysis. Read last 24h messages in #growth-team (C031DKAGQSH) and #clio_analyst (C0ADREBPNQ2). For each discussion topic, feature idea, bug report, or decision: search ClickUp for matching tasks, check repos for related code/PRs. Post gap report to #growth-team with: suggested new tasks, suggested edits, priority suggestions, communication gaps. Suggestions only — do NOT make changes.",
         "timeoutSeconds": 300
       },
       "delivery": {
@@ -386,7 +373,7 @@
       "id": "dca0007b-3e30-4527-8d19-2dae65ea078b",
       "agentId": "devops",
       "name": "daily-dev-activity-report",
-      "description": "Daily developer activity report \u2014 commits, features, bugs fixed across all repos",
+      "description": "Daily developer activity report — commits, features, bugs fixed across all repos",
       "enabled": true,
       "createdAtMs": 1774321393095,
       "updatedAtMs": 1774336081492,
@@ -399,12 +386,9 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "model": "fireworks/accounts/fireworks/models/glm-5",
-        "fallbacks": [
-          "fireworks/accounts/fireworks/models/deepseek-v3p2"
-        ],
-        "message": "Run the daily dev activity report. For each developer (adk47=Aaron, liflovs=Serhii), run the dev-report.sh script or use gh CLI to get commits from the last 24h across all Muso-AI repos (core-backend, web-credits, platform-data-processing, industry-data-processing, analytics-worker, mobile, devops, feed-service, customer-api-mcp, render-service, web-encore). For each dev: 1) Big Picture \u2014 group commits into themes, explain what was accomplished and why it matters. 2) Commit stats \u2014 per-repo counts, additions/deletions. 3) Individual commits with sha and +/-. 4) Cadence \u2014 total commits, average interval. Format for Slack mrkdwn (no tables, bullets only). Post each dev report as a separate message. If zero commits, say so briefly.",
-        "timeoutSeconds": 300
+        "message": "Run the daily dev activity report. For each developer (adk47=Aaron, liflovs=Serhii), run the dev-report.sh script or use gh CLI to get commits from the last 24h across all Muso-AI repos (core-backend, web-credits, platform-data-processing, industry-data-processing, analytics-worker, mobile, devops, feed-service, customer-api-mcp, render-service, web-encore). For each dev: 1) Big Picture — group commits into themes, explain what was accomplished and why it matters. 2) Commit stats — per-repo counts, additions/deletions. 3) Individual commits with sha and +/-. 4) Cadence — total commits, average interval. Format for Slack mrkdwn (no tables, bullets only). Post each dev report as a separate message. If zero commits, say so briefly.",
+        "timeoutSeconds": 300,
+        "thinking": "low"
       },
       "delivery": {
         "mode": "announce",
@@ -419,7 +403,7 @@
         "lastRunStatus": "error",
         "lastStatus": "error",
         "lastDurationMs": 155538,
-        "lastError": "\u26a0\ufe0f \u2709\ufe0f Message failed",
+        "lastError": "⚠️ ✉️ Message failed",
         "lastDelivered": true,
         "lastDeliveryStatus": "delivered"
       }
@@ -441,12 +425,9 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "model": "fireworks/accounts/fireworks/models/glm-5",
-        "fallbacks": [
-          "fireworks/accounts/fireworks/models/deepseek-v3p2"
-        ],
         "message": "Run a Google OAuth token health check. For each account (a@muso.ai, ak@muso.ai, aaron.k@muso.ai, f@muso.ai), use gog to list 1 Gmail message. This keeps the refresh tokens active and prevents 6-month expiry. Report results: which accounts succeeded, which failed. Always post results.",
-        "timeoutSeconds": 60
+        "timeoutSeconds": 60,
+        "thinking": "low"
       },
       "delivery": {
         "mode": "announce",
@@ -476,11 +457,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run the muso-outreach-discovery skill. Find 50 new companies matching Muso Ads target verticals. Dedupe against contacts_intelligence sheet, company_intelligence sheet, GHL B2B-Ads-Clio pipeline, and parent-companies.md (to skip subsidiaries of known parents). Score and select top 50. Return the batch as your final output \u2014 do NOT post to Slack directly; the cron runner will deliver it to #company-finder for Fede's review. Follow the SKILL.md workflow exactly. SILENCE RULE: if no new companies match, produce no output at all. Reference files are in skills/muso-outreach-engine/references/ \u2014 NEVER create files at workspace root.",
-        "model": "fireworks/accounts/fireworks/models/kimi-k2p5",
-        "fallbacks": [
-          "fireworks/accounts/fireworks/models/deepseek-v3p2"
-        ],
+        "message": "Run the muso-outreach-discovery skill. Find 50 new companies matching Muso Ads target verticals. Dedupe against contacts_intelligence sheet, company_intelligence sheet, GHL B2B-Ads-Clio pipeline, and parent-companies.md (to skip subsidiaries of known parents). Score and select top 50. Return the batch as your final output — do NOT post to Slack directly; the cron runner will deliver it to #company-finder for Fede's review. Follow the SKILL.md workflow exactly. SILENCE RULE: if no new companies match, produce no output at all. Reference files are in skills/muso-outreach-engine/references/ — NEVER create files at workspace root.",
         "timeoutSeconds": 600
       },
       "delivery": {
@@ -504,7 +481,7 @@
       "id": "081a0d98-4627-49cd-8c7a-334b927fe2ff",
       "agentId": "operations",
       "name": "credit-verification-batch-4h",
-      "description": "Every 4h autonomous credit verification batch \u2014 fetches up to OPS_BATCH_FETCH_SIZE unverified credits, runs B1\u2013B5 workflow, posts summary to #credit-verification. No-reject policy; 500/UTC-day approval cap.",
+      "description": "Every 4h autonomous credit verification batch — fetches up to OPS_BATCH_FETCH_SIZE unverified credits, runs B1–B5 workflow, posts summary to #credit-verification. No-reject policy; 500/UTC-day approval cap.",
       "enabled": true,
       "createdAtMs": 1776358066484,
       "updatedAtMs": 1776358066484,
@@ -518,10 +495,11 @@
       "payload": {
         "kind": "agentTurn",
         "message": "run credit verification batch",
-        "model": "anthropic/claude-sonnet-4-6",
+        "model": "openrouter/openai/gpt-5.5",
+        "thinking": "high",
         "fallbacks": [
-          "anthropic/claude-haiku-4-5-20251001",
-          "fireworks/accounts/fireworks/models/kimi-k2p6"
+          "anthropic/claude-sonnet-4-6",
+          "anthropic/claude-haiku-4-5-20251001"
         ],
         "timeoutSeconds": 1800
       },

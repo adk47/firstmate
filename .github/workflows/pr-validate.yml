@@ -93,6 +93,26 @@ jobs:
           fi
           echo "::endgroup::"
 
+      - name: Workload-driven matrix invariants
+        # Pins the agent × model × thinking matrix established in PR
+        # #220 against silent regression. Encodes:
+        #   - No fireworks/ in agent primary/fallback or cron payload
+        #     (2026-04-21 incident class)
+        #   - Every agent has thinkingDefault, never "off"; defaults
+        #     block has thinkingDefault set (2026-04-28 incident class)
+        #   - Claude 4.x models declare reasoning:true to match
+        #     upstream pi-ai catalog (otherwise default-thinking
+        #     resolver returns "off" and re-creates the 04-28 shape)
+        #   - Cron payload thinking values inside the schema enum
+        # Without this gate, a future PR or `openclaw mcp set` write
+        # could silently revert the matrix and the regression would
+        # only surface in production.
+        run: |
+          echo "::group::Workload-driven matrix invariants"
+          chmod +x scripts/validate-config-matrix.sh
+          scripts/validate-config-matrix.sh
+          echo "::endgroup::"
+
       - name: SOUL.md check — all workspaces
         run: |
           echo "::group::Checking SOUL.md in all workspaces"
