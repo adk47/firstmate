@@ -362,6 +362,12 @@
     "ackReaction": "eyes",
     "ackReactionScope": "all",
     "removeAckAfterReply": true,
+    "statusReactions": {
+      "enabled": true
+    },
+    "groupChat": {
+      "visibleReplies": "automatic"
+    },
     "tts": {
       "auto": "off",
       "provider": "elevenlabs",
