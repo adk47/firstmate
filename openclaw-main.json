@@ -116,7 +116,7 @@
           "openrouter/openai/gpt-5.5"
         ]
       },
-      "thinkingDefault": "low",
+      "thinkingDefault": "medium",
       "imageModel": {
         "primary": "openrouter/anthropic/claude-4.6-sonnet-20260217",
         "fallbacks": [

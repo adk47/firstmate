@@ -68,7 +68,16 @@ check_agent_count() {
 check_channel_health() {
   local profile="$1" label="$2"
   local channel_output total healthy unhealthy
-  channel_output=$(openclaw --profile "$profile" channels status --probe 2>&1) || true
+  # 2>/dev/null (NOT 2>&1): openclaw 2026.4.27 prints
+  # `Config warnings:\n- plugins.entries.<plugin>: ...` to stderr at every
+  # CLI invocation. Mixing those into stdout via 2>&1 falsely counted each
+  # warning bullet as an unhealthy channel (manifested as
+  # "FAIL: Main: 4/20 unhealthy channels" in PR #228's 2026-04-30 09:11
+  # UTC deploy run even though all channels were fine). The same warnings
+  # also render to stdout as a `@clack/prompts`-style box, but those lines
+  # carry a `│  -` prefix (not column-0 `- `) so the existing `^- ` regex
+  # correctly skips them.
+  channel_output=$(openclaw --profile "$profile" channels status --probe 2>/dev/null) || true
   total=$(echo "$channel_output" | grep -c '^- ' || true)
   healthy=$(echo "$channel_output" | grep -c '^- .*enabled.*configured' || true)
   unhealthy=$((total - healthy))
@@ -267,7 +276,15 @@ if needs_target "main"; then
     fail_check "Main: /opt/hydra/cron-jobs.json missing — repo file did not deploy"
   else
     EXPECTED_CRONS=$(jq '.jobs | length' /opt/hydra/cron-jobs.json 2>/dev/null || echo "?")
-    LOADED_RAW=$(openclaw --profile main cron status --json 2>&1) || LOADED_RAW=""
+    # 2>/dev/null (NOT 2>&1): same reason as check_channel_health above —
+    # openclaw 2026.4.27 emits `Config warnings:\n- plugins.entries.*` on
+    # stderr at every CLI invocation, which corrupted the jq parse here
+    # and produced "FAIL: cron count check failed (expected=14 loaded=?)"
+    # in PR #228's 2026-04-30 09:11 UTC deploy run. The intercom +
+    # openclaw-gmail manifests are missing channelConfigs metadata
+    # (separate tech debt to fix at the plugin source), but the smoke
+    # test should not block deploys on stderr-only warnings.
+    LOADED_RAW=$(openclaw --profile main cron status --json 2>/dev/null) || LOADED_RAW=""
     if [ -z "$LOADED_RAW" ]; then
       fail_check "Main: openclaw cron status --json returned nothing (gateway not running?)"
     else

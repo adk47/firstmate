@@ -86,7 +86,7 @@
           "openrouter/openai/gpt-5.4-mini"
         ]
       },
-      "thinkingDefault": "low",
+      "thinkingDefault": "medium",
       "workspace": "/opt/hydra/workspaces/operations-dev",
       "memorySearch": {
         "enabled": false
