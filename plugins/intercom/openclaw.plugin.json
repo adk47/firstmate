@@ -35,5 +35,30 @@
         }
       }
     }
+  },
+  "channelConfigs": {
+    "intercom": {
+      "label": "Intercom",
+      "description": "Per-account Intercom workspace configuration (token, webhook secret, bot admin id, fallback Slack channel).",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "workspaceId": { "type": "string" },
+          "token": { "type": "string" },
+          "webhookSecret": { "type": "string" },
+          "botAdminId": { "type": "string" },
+          "defaultInboxId": { "type": "string" },
+          "fallbackSlackSupervisionChannel": { "type": "string" },
+          "fallbackAcknowledgement": { "type": "string" },
+          "requireMappedHumanAdmin": { "type": "boolean" },
+          "adminMapping": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          }
+        }
+      }
+    }
   }
 }
