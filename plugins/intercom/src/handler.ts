@@ -1,7 +1,13 @@
-import type { IntercomWebhookPayload, IntercomSessionState, IntercomClient } from "./types.js";
+import type {
+  IntercomWebhookPayload,
+  IntercomSessionState,
+  IntercomClient,
+  RiskAssessment,
+} from "./types.js";
 import { RateLimitError } from "./outbound.js";
 import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply } from "./filters.js";
-import { checkEscalation } from "./escalation.js";
+import { checkEscalation, assessRisk, type AssessRiskDeps } from "./escalation.js";
+import { updateKnownFacts } from "./extractors.js";
 import {
   handleAssignment,
   handleAdminReply,
@@ -18,18 +24,26 @@ const apiShapeWarned = new Set<string>();
 
 export type HandlerAction =
   | { action: "dispatch_to_agent"; conversationId: string; body: string; authorId: string }
-  | { action: "escalate"; conversationId: string; category: string; matchedPattern: string; body: string }
+  | { action: "escalate"; conversationId: string; assessment: RiskAssessment; body: string }
+  | { action: "escalate_legacy"; conversationId: string; category: string; matchedPattern: string; body: string }
   | { action: "state_updated"; conversationId: string; description: string }
   | { action: "filtered"; conversationId: string; reason: string }
   | { action: "ignored"; reason: string }
   | { action: "duplicate"; eventId: string }
   | { action: "invalid_signature" };
 
+export interface HandlerOptions {
+  riskAssessment?: { enabled: boolean };
+  riskDeps?: AssessRiskDeps;
+  recentParts?: { author: "user" | "bot"; body: string }[];
+}
+
 export async function handleWebhookEvent(
   payload: IntercomWebhookPayload,
   state: IntercomSessionState | null,
   botAdminId: string,
   client?: IntercomClient,
+  options?: HandlerOptions,
 ): Promise<{ result: HandlerAction; state: IntercomSessionState | null }> {
   if (typeof payload?.data?.item?.id !== "string" || !payload?.topic || typeof payload?.id !== "string") {
     return { result: { action: "ignored", reason: "malformed payload: missing required fields" }, state };
@@ -147,25 +161,63 @@ export async function handleWebhookEvent(
         }
       }
 
-      // Check escalation before dispatching
-      const escalation = checkEscalation(classified.body);
+      // Update pinned facts from the customer message.
+      if (state) {
+        state.knownFacts = updateKnownFacts(classified.body, state.knownFacts ?? {});
+        // Increment user-turn count (only on customer messages).
+        state.userTurnCount = (state.userTurnCount ?? 0) + 1;
+        state.updatedAt = new Date().toISOString();
+      }
 
-      if (escalation.triggered) {
-        // Escalation auto-sets human_takeover
-        if (state) {
-          state.handoffMode = "human_takeover";
-          state.updatedAt = new Date().toISOString();
+      const flagOn = options?.riskAssessment?.enabled === true;
+
+      if (flagOn) {
+        const assessment = await assessRisk(
+          classified.body,
+          options?.recentParts ?? [],
+          state ?? ({ userTurnCount: 0 } as IntercomSessionState),
+          options?.riskDeps ?? {},
+        );
+
+        const isMagic = assessment.source === "user_request";
+        const alreadyFired = !!state?.escalationFiredAt;
+
+        if (assessment.triggered && (isMagic || !alreadyFired)) {
+          if (state) {
+            state.handoffMode = "human_takeover";
+            state.updatedAt = new Date().toISOString();
+          }
+          return {
+            result: {
+              action: "escalate",
+              conversationId: classified.conversationId,
+              assessment,
+              body: classified.body,
+            },
+            state,
+          };
         }
-        return {
-          result: {
-            action: "escalate",
-            conversationId: classified.conversationId,
-            category: escalation.category!,
-            matchedPattern: escalation.matchedPattern!,
-            body: classified.body,
-          },
-          state,
-        };
+      } else {
+        // Legacy path — runs whenever riskAssessment.enabled is false. Delete
+        // once that flag is true on all profiles and one week of clean traffic
+        // has elapsed.
+        const escalation = checkEscalation(classified.body);
+        if (escalation.triggered) {
+          if (state) {
+            state.handoffMode = "human_takeover";
+            state.updatedAt = new Date().toISOString();
+          }
+          return {
+            result: {
+              action: "escalate_legacy",
+              conversationId: classified.conversationId,
+              category: escalation.category!,
+              matchedPattern: escalation.matchedPattern!,
+              body: classified.body,
+            },
+            state,
+          };
+        }
       }
 
       // Suppress dispatch if agent cannot reply (human_takeover, snoozed, closed)

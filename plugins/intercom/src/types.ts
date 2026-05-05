@@ -95,6 +95,9 @@ export interface IntercomSessionState {
   outboundMessageIds: string[];
   createdAt: string;
   updatedAt: string;
+  knownFacts?: KnownFacts;
+  escalationFiredAt?: string | null;
+  userTurnCount?: number;
 }
 
 // --- Config ---
@@ -110,6 +113,19 @@ export interface IntercomAccountConfig {
   fallbackAcknowledgement: string;
   requireMappedHumanAdmin: boolean;
   adminMapping: Record<string, string>;
+  riskAssessment?: {
+    enabled: boolean;
+    judgeModel?: string;
+    judgeMinTurnCount?: number;
+    turnCountHardCap?: number;
+    openrouterApiKey?: string;
+  };
+  clickup?: {
+    apiKey: string;
+    listId: string;
+    userEmailFieldId: string;
+    profileIdFieldId: string;
+  };
 }
 
 // --- Intercom Client ---
@@ -150,8 +166,64 @@ export interface EscalationResult {
   matchedPattern?: string;
 }
 
+// --- Pinned facts ---
+
+export interface KnownFacts {
+  accountEmail?: string;
+  musoProfileUrl?: string;
+  musoProfileId?: string;
+  factsLastUpdated?: string;
+}
+
+// --- Risk assessment (replaces narrow EscalationResult for the new path) ---
+
+export type RiskSource = "user_request" | "rule" | "judge";
+
+export type RiskActionType =
+  | "subscription-refund"
+  | "dispute"
+  | "support-general";
+
+export interface RiskAssessment {
+  triggered: boolean;
+  source?: RiskSource;
+  reason?: string;
+  matchedPattern?: string;
+  suggestedActionType?: RiskActionType;
+  confidence?: "low" | "medium" | "high";
+}
+
 // --- Constants ---
 
 export const MAX_PROCESSED_EVENT_IDS = 1000;
 export const MAX_OUTBOUND_MESSAGE_IDS = 500;
 export const DEFAULT_FALLBACK_ACK = "We're looking into this and will get back to you shortly.";
+
+// Risk-assessment defaults — single source of truth, referenced by escalation.ts
+// and channel.ts so the two stay in sync.
+export const DEFAULT_JUDGE_MIN_TURNS = 4;
+export const DEFAULT_TURN_HARD_CAP = 6;
+export const DEFAULT_JUDGE_MODEL = "anthropic/claude-haiku-4-5-20251001";
+
+// SLA strings surfaced verbatim to the customer in the escalation farewell.
+// Source of truth: support team runbook. If support's published SLA changes,
+// update this map — there is no other authoritative source.
+export const TIER_SLA: Record<1 | 2 | 3, string> = {
+  1: "48 hours",
+  2: "5 business days",
+  3: "5-10 business days",
+};
+
+// ClickUp priority maps to support tier (lower number = more urgent).
+export const TIER_PRIORITY: Record<1 | 2 | 3, 1 | 2 | 3> = {
+  1: 3,
+  2: 2,
+  3: 1,
+};
+
+// Action-type → tier ladder. Action types that don't appear here default to tier 1.
+export const TIER_BY_ACTION: Record<RiskActionType, 1 | 2 | 3> = {
+  "subscription-refund": 3,
+  "dispute": 3,
+  "support-general": 1,
+};

@@ -166,11 +166,17 @@ RestartSec=10
 WantedBy=multi-user.target
 DEVSVC
 
-# Install the auxiliary timer units (peer-label reconciler).
-# Delegated to a standalone script so it can be re-run on its own
-# for unit-only updates without re-triggering the full gateway
-# migration. Also cleans up the retired hydra-mcp-reap units if
-# they're still present (see install-aux-units.sh docstring).
+# Install the auxiliary timer units (peer-label reconciler), the
+# gateway pre-start-heal drop-ins (.service.d/override.conf), the
+# out-of-band write audit path/service, and the 2-min watchdog
+# cron file. Delegated to a standalone script so it can be re-run
+# on its own for unit-only updates without re-triggering the full
+# gateway migration. Also cleans up the retired hydra-mcp-reap
+# units if they're still present (see install-aux-units.sh
+# docstring). The drop-ins live in /etc/systemd/system/openclaw-
+# gateway-<profile>.service.d/ — re-running THIS migration script
+# rewrites the base unit files but does NOT touch the drop-in
+# directory, so the heal infrastructure survives a re-migration.
 "$HYDRA_ROOT/scripts/install-aux-units.sh" "$HYDRA_ROOT"
 
 systemctl daemon-reload

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { handleWebhookEvent } from "../src/handler.js";
 import { createInitialSessionState } from "../src/handoff.js";
 import { MockIntercomClient } from "../src/outbound.js";
-import type { IntercomWebhookPayload } from "../src/types.js";
+import type { IntercomWebhookPayload, IntercomSessionState } from "../src/types.js";
 import userCreated from "./fixtures/conversation-user-created.json";
 import adminReplied from "./fixtures/conversation-admin-replied.json";
 import assigned from "./fixtures/conversation-assigned.json";
@@ -48,8 +48,8 @@ describe("handleWebhookEvent", () => {
     };
     const state = createInitialSessionState("conv_123", "ws_1");
     const { result, state: updatedState } = await handleWebhookEvent(payload as IntercomWebhookPayload, state, BOT_ADMIN_ID);
-    expect(result.action).toBe("escalate");
-    if (result.action === "escalate") {
+    expect(result.action).toBe("escalate_legacy");
+    if (result.action === "escalate_legacy") {
       expect(result.category).toBe("billing");
     }
     expect(updatedState?.handoffMode).toBe("human_takeover");
@@ -513,5 +513,164 @@ describe("handleWebhookEvent", () => {
         expect(result.reason).toContain("human_takeover");
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Helpers for flag-on / flag-off test suites below
+// ---------------------------------------------------------------------------
+
+function makeUserPayload(body: string, eventId = "evt-" + Math.random()): IntercomWebhookPayload {
+  return {
+    type: "notification_event",
+    app_id: "app",
+    data: {
+      type: "notification_event_data",
+      item: {
+        type: "conversation",
+        id: "conv1",
+        title: null,
+        created_at: 0,
+        updated_at: 0,
+        open: true,
+        state: "open",
+        source: { body, author: { type: "user", id: "u1" } },
+      } as any,
+    },
+    topic: "conversation.user.replied",
+    id: eventId,
+    created_at: 0,
+    delivery_status: "ok",
+    delivery_attempts: 1,
+  };
+}
+
+function makeState(): IntercomSessionState {
+  return {
+    conversationId: "conv1",
+    workspaceId: "ws1",
+    handoffMode: "agent_active",
+    lifecycleState: "open",
+    currentAssigneeId: null,
+    currentAssigneeType: null,
+    lastEventId: null,
+    processedEventIds: [],
+    outboundMessageIds: [],
+    createdAt: "",
+    updatedAt: "",
+    userTurnCount: 0,
+    escalationFiredAt: null,
+    knownFacts: {},
+  };
+}
+
+describe("handler — flag off (legacy escalation path)", () => {
+  it("does NOT escalate on plain 'refund' (legacy rules unchanged from pre-PR baseline)", async () => {
+    const state = makeState();
+    const { result } = await handleWebhookEvent(
+      makeUserPayload("i want a refund"),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: false } },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+  });
+
+  it("DOES escalate on 'chargeback' via legacy rules", async () => {
+    const state = makeState();
+    const { result } = await handleWebhookEvent(
+      makeUserPayload("i'm filing a chargeback"),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: false } },
+    );
+    expect(result.action).toBe("escalate_legacy");
+    if (result.action === "escalate_legacy") {
+      expect(result.category).toBe("billing");
+    }
+  });
+
+  it("does NOT escalate on 'cancel my subscription' via legacy (would only fire on new path)", async () => {
+    const state = makeState();
+    const { result } = await handleWebhookEvent(
+      makeUserPayload("i want to cancel my subscription"),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: false } },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+  });
+});
+
+describe("handler — flag on (assessRisk path)", () => {
+  it("dispatches to agent for benign messages", async () => {
+    const state = makeState();
+    const { result, state: out } = await handleWebhookEvent(
+      makeUserPayload("hi"),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: true } },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+    expect(out!.userTurnCount).toBe(1);
+  });
+
+  it("returns escalate action when refund intent fires", async () => {
+    const state = makeState();
+    const { result } = await handleWebhookEvent(
+      makeUserPayload("i want a refund"),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: true } },
+    );
+    expect(result.action).toBe("escalate");
+    if (result.action === "escalate") {
+      expect(result.assessment.reason).toBe("refund_intent");
+    }
+  });
+
+  it("short-circuits subsequent customer turns once escalationFiredAt is set", async () => {
+    const state = makeState();
+    state.escalationFiredAt = "2026-05-04T00:00:00Z";
+    state.handoffMode = "human_takeover";
+    const { result } = await handleWebhookEvent(
+      makeUserPayload("any reply"),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: true } },
+    );
+    expect(result.action).toBe("filtered");
+  });
+
+  it("magic keyword bypasses escalationFiredAt (user re-requests human)", async () => {
+    const state = makeState();
+    state.escalationFiredAt = "2026-05-04T00:00:00Z";
+    state.handoffMode = "human_takeover";
+    const { result } = await handleWebhookEvent(
+      makeUserPayload("can i talk to a human"),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: true } },
+    );
+    expect(result.action).toBe("escalate");
+  });
+
+  it("pinned-fact extractor runs and updates knownFacts", async () => {
+    const state = makeState();
+    const { state: out } = await handleWebhookEvent(
+      makeUserPayload("you can email me at me@example.com"),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: true } },
+    );
+    expect(out!.knownFacts?.accountEmail).toBe("me@example.com");
   });
 });

@@ -100,4 +100,49 @@ describe("state-store", () => {
     expect(loaded.get("acct_2")?.size).toBe(1);
     expect(loaded.get("acct_2")?.get("conv_3")?.workspaceId).toBe("ws_2");
   });
+
+  describe("state-store backward-compat defaults", () => {
+    let dir: string;
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), "intercom-state-"));
+    });
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("defaults userTurnCount to 0 and escalationFiredAt to null when missing from on-disk state", async () => {
+      await initStateStore(dir);
+      const filePath = join(dir, "plugins", "intercom", "sessions.json");
+      const legacy = {
+        version: 1,
+        sessions: {
+          acct1: {
+            conv1: {
+              conversationId: "conv1",
+              workspaceId: "ws1",
+              handoffMode: "agent_active",
+              lifecycleState: "open",
+              currentAssigneeId: null,
+              currentAssigneeType: null,
+              lastEventId: null,
+              processedEventIds: [],
+              outboundMessageIds: [],
+              createdAt: "2026-01-01T00:00:00Z",
+              updatedAt: "2026-01-01T00:00:00Z",
+            },
+          },
+        },
+      };
+      await writeFile(filePath, JSON.stringify(legacy), "utf8");
+
+      const loaded = await loadSessions();
+      const state = loaded.get("acct1")!.get("conv1")!;
+
+      expect(state.userTurnCount).toBe(0);
+      expect(state.escalationFiredAt).toBeNull();
+      expect(state.knownFacts).toEqual({});
+    });
+  });
 });

@@ -4,7 +4,7 @@ import { runPassiveAccountLifecycle } from "openclaw/plugin-sdk/channel-lifecycl
 import { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-ingress";
 import { dispatchInboundDirectDmWithRuntime } from "openclaw/plugin-sdk/channel-inbound";
 import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
-import { listIntercomAccountIds, resolveIntercomAccount } from "./config.js";
+import { listIntercomAccountIds, resolveIntercomAccount, validateClickupConfig } from "./config.js";
 import { validateHmacSignature } from "./webhook.js";
 import { handleWebhookEvent } from "./handler.js";
 import { createInitialSessionState, canAgentReply } from "./handoff.js";
@@ -18,7 +18,10 @@ import {
   buildEscalationSlackMessage,
   buildEscalationSlackMessageMinimal,
 } from "./slack.js";
-import type { IntercomSessionState, IntercomWebhookPayload } from "./types.js";
+import { createOpenRouterJudge } from "./judge.js";
+import { createClickupTicket } from "./clickup.js";
+import type { IntercomSessionState, IntercomWebhookPayload, KnownFacts, IntercomAccountConfig } from "./types.js";
+import { DEFAULT_JUDGE_MIN_TURNS, DEFAULT_TURN_HARD_CAP, DEFAULT_JUDGE_MODEL } from "./types.js";
 
 // Module-level session store shared between startAccount (inbound) and sendText (outbound).
 // Keyed by accountId → conversationId → session state.
@@ -98,6 +101,89 @@ export function joinDeliveryChunks(chunks: string[]): string {
   return filtered.join("\n\n");
 }
 
+// Strip our own delimiter markers from inbound customer text before injecting
+// it into the agent prompt — defense against a customer pasting a forged
+// [CONVERSATION_CONTEXT] block that the agent would otherwise treat as
+// authoritative ground truth.
+const INJECTION_MARKER_REGEX = /\[\/?(?:CONVERSATION_CONTEXT|CUSTOMER_MESSAGE)\]/gi;
+
+export function sanitizeCustomerMessage(message: string): string {
+  if (!INJECTION_MARKER_REGEX.test(message)) return message;
+  return message.replace(INJECTION_MARKER_REGEX, "").trim();
+}
+
+/**
+ * Render KnownFacts as a [CONVERSATION_CONTEXT] block prepended to the
+ * customer message. Empty knownFacts produces no block (no noise on first
+ * contact). The agent's SOUL.md instructs it to treat this block as
+ * authoritative ground truth and never echo it.
+ */
+export function buildAgentRawBody(message: string, facts: KnownFacts): string {
+  const sanitized = sanitizeCustomerMessage(message);
+  const lines: string[] = [];
+  if (facts.accountEmail) lines.push(`- account email: ${facts.accountEmail}`);
+  if (facts.musoProfileUrl) lines.push(`- muso profile: ${facts.musoProfileUrl}`);
+  if (lines.length === 0) return sanitized;
+  return [
+    "[CONVERSATION_CONTEXT]",
+    "Known about this user (do not re-ask):",
+    ...lines,
+    "[/CONVERSATION_CONTEXT]",
+    "[CUSTOMER_MESSAGE]",
+    sanitized,
+  ].join("\n");
+}
+
+/**
+ * Outbound regurgitation guard — strips any [CONVERSATION_CONTEXT] block from
+ * agent replies before they hit Intercom. SOUL.md tells the agent not to echo;
+ * this is cheap insurance, and the warn log surfaces every actual leak so we
+ * can tell whether the SOUL rule is holding.
+ */
+const CONTEXT_BLOCK_REGEX = /\[CONVERSATION_CONTEXT\][\s\S]*?\[\/CONVERSATION_CONTEXT\]\s*/g;
+const CONTEXT_OPEN_LINE_REGEX = /^\[CONVERSATION_CONTEXT\][^\n]*\n?/gm;
+
+export function stripConversationContext(
+  reply: string,
+  log?: { warn: (msg: string) => void },
+  context?: { conversationId?: string },
+): string {
+  if (!reply.includes("[CONVERSATION_CONTEXT]")) return reply;
+  log?.warn?.(
+    `[intercom] outbound stripped [CONVERSATION_CONTEXT] regurgitation conv=${context?.conversationId ?? "?"} sample=${reply.slice(0, 200)}`,
+  );
+  return reply.replace(CONTEXT_BLOCK_REGEX, "").replace(CONTEXT_OPEN_LINE_REGEX, "").trim();
+}
+
+// Construct the per-webhook risk-assessment options. When the flag is on AND
+// an OpenRouter key is configured, the LLM-judge backstop is wired; otherwise
+// only Layer 0/1/1b (magic-keyword + content rules + turn-count cap) run.
+export function buildRiskOptions(
+  account: IntercomAccountConfig,
+  log: { warn: (msg: string) => void } | undefined,
+): { riskAssessment: { enabled: boolean }; riskDeps?: import("./escalation.js").AssessRiskDeps } {
+  if (!account.riskAssessment?.enabled) {
+    return { riskAssessment: { enabled: false } };
+  }
+  const cfg = account.riskAssessment;
+  const judge = cfg.openrouterApiKey
+    ? createOpenRouterJudge({
+        openrouterApiKey: cfg.openrouterApiKey,
+        model: cfg.judgeModel ?? DEFAULT_JUDGE_MODEL,
+        log: log ? { warn: (m) => log.warn(m) } : undefined,
+      })
+    : undefined;
+  return {
+    riskAssessment: { enabled: true },
+    riskDeps: {
+      judge,
+      judgeMinTurnCount: cfg.judgeMinTurnCount ?? DEFAULT_JUDGE_MIN_TURNS,
+      turnCountHardCap: cfg.turnCountHardCap ?? DEFAULT_TURN_HARD_CAP,
+      log: log ? { warn: (m) => log.warn(m) } : undefined,
+    },
+  };
+}
+
 async function readRequestBody(req: IncomingMessage): Promise<string | null> {
   const chunks: Buffer[] = [];
   let totalBytes = 0;
@@ -125,6 +211,27 @@ export const intercomPlugin = createChatChannelPlugin({
       startAccount: async (ctx: any) => {
         const account = resolveIntercomAccount(ctx.cfg, ctx.accountId);
         const tag = `intercom:${account.accountId}`;
+
+        // Boot-time ClickUp config validation: log loudly if a partial block
+        // was provided. Without this, missing fields produce silent 401s on
+        // every escalation and ops finds out only via Slack pings.
+        const clickupGap = validateClickupConfig(account);
+        if (clickupGap) {
+          ctx.log?.error?.(
+            `[${tag}] ClickUp config has partial block: missing ${clickupGap} — escalations will skip ticket creation`,
+          );
+        }
+
+        const createTicket = account.clickup && !clickupGap
+          ? (p: import("./escalation-action.js").CreateTicketParams) =>
+              createClickupTicket(
+                {
+                  cfg: account.clickup!,
+                  log: { error: (m) => ctx.log?.error?.(m) },
+                },
+                p,
+              )
+          : async () => ({ ok: false as const, error: "ClickUp not configured" });
 
         if (!account.enabled) {
           ctx.log?.info?.(`[${tag}] channel disabled, skipping`);
@@ -156,7 +263,12 @@ export const intercomPlugin = createChatChannelPlugin({
           }
         }
 
-        ctx.log?.info?.(`[${tag}] starting webhook monitor`);
+        const riskEnabled = account.riskAssessment?.enabled === true;
+        const judgeWired = riskEnabled && Boolean(account.riskAssessment?.openrouterApiKey);
+        ctx.log?.info?.(
+          `[${tag}] starting webhook monitor riskAssessment=${riskEnabled} judge=${judgeWired ? "wired" : "off"} ` +
+            `clickup=${account.clickup && !clickupGap ? "configured" : "off"}`,
+        );
 
         const runtime = ctx.channelRuntime;
         const cfg = ctx.cfg;
@@ -208,7 +320,14 @@ export const intercomPlugin = createChatChannelPlugin({
 
                   const state = getOrCreateSession(account.accountId, conversationId, account.workspaceId);
                   const client = createIntercomClient(account.token, log);
-                  const { result } = await handleWebhookEvent(payload, state, account.botAdminId, client);
+                  const riskOptions = buildRiskOptions(account, log);
+                  const { result } = await handleWebhookEvent(
+                    payload,
+                    state,
+                    account.botAdminId,
+                    client,
+                    riskOptions,
+                  );
 
                   // Persist state after every webhook that may have mutated it
                   if (result.action !== "ignored" && result.action !== "duplicate") {
@@ -264,7 +383,7 @@ export const intercomPlugin = createChatChannelPlugin({
                       senderAddress: `intercom:${result.authorId}`,
                       recipientAddress: `intercom:${account.botAdminId}`,
                       conversationLabel: `Intercom conversation ${result.conversationId}`,
-                      rawBody: result.body,
+                      rawBody: buildAgentRawBody(result.body, state.knownFacts ?? {}),
                       messageId: payload.id,
                       timestamp: payload.created_at,
                       deliver: async (replyPayload: any) => {
@@ -306,7 +425,7 @@ export const intercomPlugin = createChatChannelPlugin({
                         const { messageId } = await client.replyToConversation({
                           conversationId: result.conversationId,
                           adminId: account.botAdminId,
-                          body: joined,
+                          body: stripConversationContext(joined, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId }),
                         });
                         trackOutboundMessageId(messageId, state.outboundMessageIds);
                         state.updatedAt = new Date().toISOString();
@@ -327,8 +446,39 @@ export const intercomPlugin = createChatChannelPlugin({
                       );
                     }
                   } else if (result.action === "escalate") {
-
-                    // 1. Send fallback ack to customer
+                    const { executeEscalation } = await import("./escalation-action.js");
+                    await executeEscalation({
+                      state,
+                      conversationId: result.conversationId,
+                      assessment: result.assessment,
+                      currentMessage: result.body,
+                      account,
+                      client,
+                      saveState: async () => { await saveSessions(accountSessions); },
+                      createTicket,
+                      postSlack: account.fallbackSlackSupervisionChannel
+                        ? async (payload) => {
+                            await fetch(account.fallbackSlackSupervisionChannel, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify(payload),
+                            });
+                          }
+                        : async () => {},
+                      log: {
+                        info: (m) => log?.info?.(m),
+                        warn: (m) => log?.warn?.(m),
+                        error: (m) => log?.error?.(m),
+                      },
+                    });
+                    log?.warn?.(
+                      `[${tag}] ESCALATED conv=${result.conversationId} ` +
+                      `source=${result.assessment.source} reason=${result.assessment.reason}`,
+                    );
+                  } else if (result.action === "escalate_legacy") {
+                    // Legacy path — runs whenever riskAssessment.enabled is false.
+                    // Delete once that flag is true on all profiles and one week of
+                    // clean traffic has elapsed.
                     try {
                       await client.replyToConversation({
                         conversationId: result.conversationId,
@@ -336,28 +486,18 @@ export const intercomPlugin = createChatChannelPlugin({
                         body: account.fallbackAcknowledgement,
                       });
                     } catch (err) {
-                      log?.error?.(
-                        `[${tag}] escalation ack failed conv=${result.conversationId}: ${err}`,
-                      );
+                      log?.error?.(`[${tag}] escalation ack failed conv=${result.conversationId}: ${err}`);
                     }
-
-                    // 2. Reassign conversation away from bot to human team
                     try {
                       await client.assignConversation({
                         conversationId: result.conversationId,
                         adminId: account.botAdminId,
-                        assigneeId: account.defaultInboxId || "0", // team ID, or "0" for Unassigned
+                        assigneeId: account.defaultInboxId || "0",
                       });
                       log?.info?.(`[${tag}] reassigned conv=${result.conversationId} to ${account.defaultInboxId || "Unassigned"}`);
                     } catch (err) {
-                      log?.error?.(
-                        `[${tag}] reassignment failed conv=${result.conversationId}: ${err}`,
-                      );
+                      log?.error?.(`[${tag}] reassignment failed conv=${result.conversationId}: ${err}`);
                     }
-
-                    // 3. Notify team via Slack — fetch full conversation for enrichment,
-                    // but fall back to the minimal message if the API call fails so the
-                    // alert is never lost.
                     if (account.fallbackSlackSupervisionChannel) {
                       const escalationSummary = {
                         conversationId: result.conversationId,
@@ -365,28 +505,14 @@ export const intercomPlugin = createChatChannelPlugin({
                         matchedPattern: result.matchedPattern,
                         body: result.body,
                       };
-
                       let slackPayload;
                       try {
-                        const conversation = await client.getConversation({
-                          conversationId: result.conversationId,
-                        });
-                        slackPayload = buildEscalationSlackMessage(
-                          escalationSummary,
-                          conversation,
-                          account,
-                          state,
-                        );
+                        const conversation = await client.getConversation({ conversationId: result.conversationId });
+                        slackPayload = buildEscalationSlackMessage(escalationSummary, conversation, account, state);
                       } catch (err) {
-                        log?.warn?.(
-                          `[${tag}] Slack enrichment fetch failed conv=${result.conversationId}: ${err} — posting minimal message`,
-                        );
-                        slackPayload = buildEscalationSlackMessageMinimal(
-                          escalationSummary,
-                          account,
-                        );
+                        log?.warn?.(`[${tag}] Slack enrichment fetch failed conv=${result.conversationId}: ${err} — posting minimal`);
+                        slackPayload = buildEscalationSlackMessageMinimal(escalationSummary, account);
                       }
-
                       try {
                         await fetch(account.fallbackSlackSupervisionChannel, {
                           method: "POST",
@@ -397,9 +523,8 @@ export const intercomPlugin = createChatChannelPlugin({
                         log?.error?.(`[${tag}] Slack escalation notification failed: ${err}`);
                       }
                     }
-
                     log?.warn?.(
-                      `[${tag}] ESCALATED conv=${result.conversationId} ` +
+                      `[${tag}] ESCALATED (legacy) conv=${result.conversationId} ` +
                       `category=${result.category} pattern=${result.matchedPattern}`,
                     );
                   }
@@ -461,7 +586,7 @@ export const intercomPlugin = createChatChannelPlugin({
         const { messageId } = await client.replyToConversation({
           conversationId,
           adminId: account.botAdminId,
-          body: text,
+          body: stripConversationContext(text),
         });
 
         // Track outbound message ID for self-reply filtering

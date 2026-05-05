@@ -51,6 +51,10 @@ export async function loadSessions(): Promise<Map<string, Map<string, IntercomSe
   for (const [accountId, convMap] of Object.entries(sessions)) {
     const inner = new Map<string, IntercomSessionState>();
     for (const [convId, state] of Object.entries(convMap as Record<string, IntercomSessionState>)) {
+      // Backward-compat: default new optional fields if missing from on-disk state.
+      if (state.userTurnCount === undefined) state.userTurnCount = 0;
+      if (state.escalationFiredAt === undefined) state.escalationFiredAt = null;
+      if (state.knownFacts === undefined) state.knownFacts = {};
       inner.set(convId, state);
     }
     result.set(accountId, inner);

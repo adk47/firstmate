@@ -10,15 +10,26 @@ export default definePluginEntry({
   name: "Support Agent Tools",
   description: "Profile lookup, credits search, ticket creation, and subscription status tools for the support agent.",
   register(api: any) {
-    const config = (api.config ?? {}) as Record<string, unknown>;
-    const pluginConfig = (config["support-tools"] ?? {}) as Record<string, string>;
+    // OpenClaw passes the entry's `config` block (from
+    // openclaw-*.json plugins.entries["support-tools"].config) as
+    // `api.pluginConfig`. The legacy `api.config["support-tools"]` path
+    // was a misread: `api.config` is the full openclaw config, which
+    // does not have a top-level "support-tools" key. Fall back to the
+    // legacy path AND env vars so old deploys keep working during the
+    // rollout.
+    const pluginConfig: Record<string, string> = {
+      ...(((api.config ?? {}) as Record<string, unknown>)["support-tools"] as Record<string, string> | undefined ?? {}),
+      ...((api.pluginConfig ?? {}) as Record<string, string>),
+    };
 
     const musoApiBase = pluginConfig.musoApiBase ?? process.env.MUSO_API_BASE ?? "https://api.muso.ai";
     const musoApiKey = pluginConfig.musoApiKey ?? process.env.MUSO_CUSTOMER_API_KEY ?? "";
     const clickupApiKey = pluginConfig.clickupApiKey ?? process.env.CLICKUP_API_KEY ?? "";
-    const clickupListId = pluginConfig.clickupListId ?? "";
-    const clickupProfileIdFieldId = pluginConfig.clickupProfileIdFieldId ?? "";
-    const clickupUserEmailFieldId = pluginConfig.clickupUserEmailFieldId ?? "";
+    const clickupListId = pluginConfig.clickupListId ?? process.env.CLICKUP_LIST_ID ?? "";
+    const clickupProfileIdFieldId =
+      pluginConfig.clickupProfileIdFieldId ?? process.env.CLICKUP_PROFILE_ID_FIELD_ID ?? "";
+    const clickupUserEmailFieldId =
+      pluginConfig.clickupUserEmailFieldId ?? process.env.CLICKUP_USER_EMAIL_FIELD_ID ?? "";
     const DEFAULT_PROFILE_MERGE_ASSIGNEE_ID = 66250052;
     const profileMergeAssigneeIdRaw = pluginConfig.profileMergeAssigneeId ?? process.env.PROFILE_MERGE_ASSIGNEE_ID ?? "";
     let profileMergeAssigneeId: number | undefined;

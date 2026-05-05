@@ -62,6 +62,8 @@ export function resolveIntercomAccount(
       fallbackAcknowledgement: DEFAULT_FALLBACK_ACK,
       requireMappedHumanAdmin: true,
       adminMapping: {},
+      riskAssessment: undefined,
+      clickup: undefined,
     };
   }
 
@@ -98,7 +100,27 @@ export function resolveIntercomAccount(
     fallbackAcknowledgement: account.fallbackAcknowledgement ?? DEFAULT_FALLBACK_ACK,
     requireMappedHumanAdmin: account.requireMappedHumanAdmin ?? true,
     adminMapping: account.adminMapping ?? {},
+    riskAssessment: account.riskAssessment,
+    clickup: account.clickup,
   };
+}
+
+// Validate that account.clickup, when present, has all required fields populated.
+// Returns null if config is fully valid; otherwise returns the name of the first
+// missing/empty field. Use at boot to fail loudly rather than getting silent
+// 401s from ClickUp on every escalation.
+export function validateClickupConfig(account: IntercomAccountConfig): string | null {
+  if (!account.clickup) return null; // ClickUp is optional
+  const required: (keyof NonNullable<IntercomAccountConfig["clickup"]>)[] = [
+    "apiKey",
+    "listId",
+    "userEmailFieldId",
+    "profileIdFieldId",
+  ];
+  for (const key of required) {
+    if (!account.clickup[key]) return key;
+  }
+  return null;
 }
 
 export function inspectIntercomAccount(

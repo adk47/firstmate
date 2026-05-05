@@ -134,7 +134,9 @@ notify_slack() {
 #   intercom       → "main edge"   (both main and edge reference it — see
 #                                    openclaw-main.json and openclaw-edge.json
 #                                    `plugins.installs`/`channels.intercom`)
-#   support-tools  → "edge"
+#   support-tools  → "main edge"   (main enables it via plugins.allow + entries
+#                                    so the support agent's create_ticket tool
+#                                    is wired; edge keeps its existing usage)
 #   openclaw-gmail → "main"
 #   everything else → "main" (with a stderr warning, so a typo in plugin
 #                              dir name is at least visible in deploy logs)
@@ -154,11 +156,11 @@ plugin_profile() {
   local plugin_name="$1"
   case "$plugin_name" in
     intercom)       echo "main edge" ;;
-    support-tools)  echo "edge" ;;
+    support-tools)  echo "main edge" ;;
     openclaw-gmail) echo "main" ;;
     *)
       echo "main"
-      echo "    plugin_profile: '$plugin_name' is not in the known mapping (intercom→main+edge, support-tools→edge, openclaw-gmail→main); defaulting to main. Verify this is intended — typos in plugin directory names land here silently." >&2
+      echo "    plugin_profile: '$plugin_name' is not in the known mapping (intercom→main+edge, support-tools→main+edge, openclaw-gmail→main); defaulting to main. Verify this is intended — typos in plugin directory names land here silently." >&2
       ;;
   esac
 }
@@ -1410,6 +1412,24 @@ if needs_target "dev"; then
   log "  Synced dev profile config"
 fi
 
+# Schema validate the post-merge result for every profile we just touched.
+# sync_profile_config preserves only `.mcp.servers` from live, so a clean
+# repo config should produce a clean merge — but the openclaw schema gets
+# stricter across versions (2026-04-30: `plugins.config` removed,
+# `subagents` rejected, `streaming` shape changed) and a deploy that
+# leaves an invalid config on disk turns into a crash-loop the moment the
+# next gateway restart fires. Catch it now while we still hold control,
+# instead of finding out via the smoke test (which only sees the
+# downstream "0 agents bound" symptom and can't tell us what's wrong).
+for _profile in main edge dev; do
+  needs_target "$_profile" || continue
+  _validate_out=$(openclaw --profile "$_profile" config validate 2>&1 || true)
+  if ! echo "$_validate_out" | grep -q "Config valid"; then
+    fail "post-sync openclaw schema validation failed on profile=${_profile}: ${_validate_out}"
+  fi
+done
+log "  Post-sync openclaw schema validation passed."
+
 # Re-lint the live configs after the merge: a live-only (never-
 # committed) `npx mcp-remote` entry — e.g. one added long ago via
 # the openclaw CLI's default stdio shape — would slip past Step 1's
@@ -1714,6 +1734,28 @@ if [[ -d "$HYDRA_ROOT/k8s/prod/hydra" ]]; then
   log "  ✓ K8s manifests applied to namespace=$k8s_ns"
 else
   log "  k8s/prod/hydra/ not found in repo — skipping k8s apply"
+fi
+
+# -------------------------------------------------------------------
+# Step 5c: Install/refresh aux units (drop-ins, audit, watchdog cron)
+# -------------------------------------------------------------------
+# Reconciles the systemd drop-ins that wire ExecStartPre self-heal
+# and a restart ceiling onto the three gateway services, plus the
+# openclaw-config-write-audit.path watcher and the 2-min watchdog
+# cron file. Idempotent — safe to run on every deploy. Must come
+# BEFORE Step 6's gateway restart so the next start picks up the
+# drop-in's ExecStartPre.
+if $HYDRA_LOCAL; then
+  log "Step 5c/9: Installing/refreshing aux systemd units..."
+  if [ -x "$DEPLOY_PATH/scripts/install-aux-units.sh" ]; then
+    "$DEPLOY_PATH/scripts/install-aux-units.sh" "$DEPLOY_PATH" \
+      || fail "install-aux-units.sh failed — see preceding output"
+    log "  Aux units installed/refreshed."
+  else
+    log "  install-aux-units.sh missing or not executable — skipping (laptop deploy?)"
+  fi
+else
+  log "Step 5c/9: skipping aux-units install (not running on node-8)"
 fi
 
 # -------------------------------------------------------------------

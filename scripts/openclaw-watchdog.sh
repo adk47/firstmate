@@ -2,26 +2,43 @@
 # ──────────────────────────────────────────────────────────────
 # OpenClaw Gateway Watchdog
 #
-# Runs every 10 minutes via cron ON NODE-8 (local to the gateway).
-# Checks journalctl for successful agent runs. If zero successes
-# in the last 15 minutes, restarts openclaw-gateway and posts
-# to #clio_devops via the devops bot token.
+# Runs every 2 minutes via cron ON NODE-8 (local to the gateway).
+# Checks journalctl for successful agent runs and validates each
+# gateway profile's config. Restarts openclaw-gateway if there
+# are agent runs but zero successes (and it's not just upstream
+# rate limiting), and posts to #clio_devops via the devops bot
+# token on any anomaly.
 #
-# Install on node-8:
-#   cp scripts/openclaw-watchdog.sh /opt/hydra/scripts/openclaw-watchdog.sh
-#   chmod +x /opt/hydra/scripts/openclaw-watchdog.sh
-#   crontab -e:
-#     */10 * * * * /opt/hydra/scripts/openclaw-watchdog.sh >> /var/log/openclaw-watchdog.log 2>&1
+# Cadence dropped from 10 min → 2 min after the 2026-05-05
+# main-gateway crash-loop outage: the worst-case detection lag
+# was the dominant component of the ~30 min ops-silent window.
+# Validating 3 profiles + counting journal hits is ~100ms total.
+#
+# Install on node-8: managed by scripts/install-aux-units.sh
+# (writes /etc/cron.d/openclaw-watchdog idempotently). Manual
+# crontab installs are no longer the source of truth.
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
 LOGPREFIX="[openclaw-watchdog $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
 OPENCLAW_CONFIG="/root/.openclaw-main/openclaw.json"
-SLACK_CHANNEL="C0ADV2W76G4"  # #clio_devops
 CHECK_WINDOW_MIN=15
 COOLDOWN_FILE="/tmp/openclaw-watchdog-cooldown"
 COOLDOWN_MIN=30  # Don't restart more than once per 30 min
 GATEWAY_SERVICE="openclaw-gateway-main"  # PR 43: multi-gateway split
+
+# Source the shared Slack helper. Both this watchdog and the new
+# openclaw-pre-start-heal.sh need to post to the same #clio_devops
+# channel using the devops bot token from the main-profile config.
+# Locating sibling lib via this script's own directory rather than
+# a hard /opt/hydra path keeps the script working when invoked from
+# a worktree (laptop test) or a deploy mirror.
+_WATCHDOG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC2034  # consumed by lib/slack-notify.sh via :- default
+SLACK_NOTIFY_CONFIG="$OPENCLAW_CONFIG"
+export SLACK_NOTIFY_CONFIG
+# shellcheck source=lib/slack-notify.sh
+source "$_WATCHDOG_DIR/lib/slack-notify.sh"
 
 # Expected systemd log line that indicates a (re)start.
 # systemd logs PAST TENSE ("Started ..."), NOT "Starting ...".
@@ -35,27 +52,10 @@ readonly RESTART_LOG_FIXTURE='Apr 07 20:51:14 ovh-node-8 systemd[1]: Started ope
 
 log() { echo "$LOGPREFIX $1"; }
 
-slack_notify() {
-  local msg="$1"
-  # Read devops bot token from openclaw config
-  local token
-  token=$(python3 -c "
-import json
-with open('${OPENCLAW_CONFIG}') as f:
-    c = json.load(f)
-print(c['channels']['slack']['accounts']['devops']['botToken'])
-" 2>/dev/null) || true
-
-  if [ -z "$token" ]; then
-    log "WARN: Could not read devops bot token — skipping Slack notify"
-    return
-  fi
-
-  curl -sf -X POST "https://slack.com/api/chat.postMessage" \
-    -H "Authorization: Bearer ${token}" \
-    -H "Content-Type: application/json" \
-    -d "{\"channel\":\"${SLACK_CHANNEL}\",\"text\":\"${msg}\"}" >/dev/null 2>&1 || true
-}
+# slack_notify is provided by lib/slack-notify.sh sourced above.
+# It silently no-ops if the devops bot token can't be read (e.g., the
+# main-profile config is itself broken — the exact case the new
+# pre-start-heal flow handles).
 
 # ──────────────────────────────────────────────────────────────
 # Inline self-test — runs on EVERY invocation (cost: ~1ms).
@@ -112,6 +112,23 @@ if ! _watchdog_self_test; then
   slack_notify ":rotating_light: *Watchdog self-test FAILED* on node-8 — watchdog aborted. Fix openclaw-watchdog.sh regex/function order." || true
   exit 1
 fi
+
+# Schema validity check (all profiles). Today's outage (2026-05-05) was a
+# crash-loop on main caused by an out-of-band write that added schema-
+# invalid keys (`subagents`, `agents.llm.idleTimeoutSeconds`, etc.). The
+# crash-loop detector below catches restarts but only after journal entries
+# accumulate; a fresh schema-invalid config that takes the gateway down
+# during a quiet hour produces no agent activity → idle path → silent rot.
+# Validate every cron tick instead. The crash-loop alert below has no
+# cooldown either, so we match that pattern: alert every 10 min while
+# broken (operator can ack/silence in Slack).
+for profile in main edge dev; do
+  PROFILE_VALID=$(openclaw --profile "$profile" config validate 2>&1 || true)
+  if ! echo "$PROFILE_VALID" | grep -q "Config valid"; then
+    log "INVALID CONFIG on profile=${profile}: ${PROFILE_VALID}"
+    slack_notify ":rotating_light: *${profile} profile config INVALID* on node-8 — gateway will not start (or will crash-loop). Run \`openclaw --profile ${profile} config validate\` and fix.\n\`\`\`${PROFILE_VALID}\`\`\`"
+  fi
+done
 
 # Crash loop detection: if systemd has restarted the gateway more than
 # 10 times in the last 10 minutes, something is wrong with the config.
