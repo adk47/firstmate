@@ -1,0 +1,9 @@
+{
+  "id": "support-tools",
+  "name": "Support Agent Tools",
+  "description": "Profile lookup, credits search, ticket creation, and subscription status tools for the support agent.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

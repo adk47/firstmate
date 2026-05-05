@@ -256,10 +256,5 @@
         "mode": "json"
       }
     }
-  },
-  "subagents": {
-    "maxConcurrent": 8,
-    "maxChildrenPerAgent": 10,
-    "maxSpawnDepth": 2
   }
 }

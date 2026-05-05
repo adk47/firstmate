@@ -780,10 +780,5 @@
         ]
       }
     }
-  },
-  "subagents": {
-    "maxConcurrent": 12,
-    "maxChildrenPerAgent": 10,
-    "maxSpawnDepth": 2
   }
 }

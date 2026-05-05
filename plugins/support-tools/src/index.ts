@@ -17,10 +17,20 @@ export default definePluginEntry({
     // does not have a top-level "support-tools" key. Fall back to the
     // legacy path AND env vars so old deploys keep working during the
     // rollout.
-    const pluginConfig: Record<string, string> = {
-      ...(((api.config ?? {}) as Record<string, unknown>)["support-tools"] as Record<string, string> | undefined ?? {}),
-      ...((api.pluginConfig ?? {}) as Record<string, string>),
-    };
+    //
+    // openclaw 4.27 passes the raw entry.config block — including
+    // unresolved secret-ref objects like {source: "env", id: "X"} — as
+    // api.pluginConfig. Filter to string-only values so the secret-ref
+    // shapes fall through to the env-var fallbacks below instead of
+    // crashing the required-keys .startsWith() check on register
+    // (which on 2026-05-05 took main gateway into a 60+ restart
+    // crash-loop after PR #238 deployed).
+    const _legacy = (((api.config ?? {}) as Record<string, unknown>)["support-tools"] ?? {}) as Record<string, unknown>;
+    const _entry = (api.pluginConfig ?? {}) as Record<string, unknown>;
+    const pluginConfig: Record<string, string> = {};
+    for (const [_k, _v] of Object.entries({ ..._legacy, ..._entry })) {
+      if (typeof _v === "string") pluginConfig[_k] = _v;
+    }
 
     const musoApiBase = pluginConfig.musoApiBase ?? process.env.MUSO_API_BASE ?? "https://api.muso.ai";
     const musoApiKey = pluginConfig.musoApiKey ?? process.env.MUSO_CUSTOMER_API_KEY ?? "";
