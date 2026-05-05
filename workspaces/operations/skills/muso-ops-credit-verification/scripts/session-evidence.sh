@@ -44,7 +44,7 @@ set -euo pipefail
 CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
 # Same Tier-1 list as enforce_credit_approve_gate. When adding/removing, update
 # both places OR set CV_TIER1_HOSTS in the environment for both callers.
-CV_TIER1_HOSTS="${CV_TIER1_HOSTS:-open\\.spotify\\.com|music\\.apple\\.com|musicbrainz\\.org|discogs\\.com|allmusic\\.com|tidal\\.com}"
+CV_TIER1_HOSTS="${CV_TIER1_HOSTS:-music\\.apple\\.com|musicbrainz\\.org|discogs\\.com|allmusic\\.com}"
 
 MODE="evidence"
 for arg in "$@"; do
@@ -156,7 +156,7 @@ if [[ "$MODE" == "tier1_check" ]]; then
             done <<< "$offending"
             cat <<'EOF'
 
-Tier 1 pages (Spotify / Apple Music / MusicBrainz / Discogs / AllMusic / Tidal)
+Tier 1 pages (Apple Music / MusicBrainz / Discogs / AllMusic)
 are JS-rendered — web_fetch returns the raw HTML shell, not the data the
 browser tool sees. Every Tier 1 load for credit verification MUST go through
 the `browser` tool. Rotate the session (start a new topic) before running

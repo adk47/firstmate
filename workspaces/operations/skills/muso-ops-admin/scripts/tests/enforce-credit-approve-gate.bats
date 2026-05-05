@@ -16,7 +16,16 @@ setup() {
     sed "s|/root/.openclaw-main/agents|$TEST_ROOT/.openclaw-main/agents|g; s|/root/.openclaw-dev/agents|$TEST_ROOT/.openclaw-dev/agents|g" "$SCRIPT" > "$WRAPPED"
     chmod +x "$WRAPPED"
 
-    unset REQUESTER_EMAIL CV_APPROVE_GATE_DISABLED EVIDENCE_EXCERPT
+    # Hermetic env: sandbox OPS_RUNLOG_DIR (and any other CV gate env the
+    # host may have set) to a fresh empty TEST_ROOT subdir. Without this,
+    # resolve_run_started_ts() picks up the host's runlog and scopes out
+    # fixture rows that have no .timestamp — a 2026-05-05 review of PR #237
+    # caught the host-state leak on a hydra dev box where OPS_RUNLOG_DIR
+    # was inherited from /var/log/openclaw/credit-batch-runs.
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlogs"
+    mkdir -p "$OPS_RUNLOG_DIR"
+    unset REQUESTER_EMAIL CV_APPROVE_GATE_DISABLED EVIDENCE_EXCERPT \
+          CV_SESSION_LOG_OVERRIDE CV_SESSION_RUN_STARTED_TS
     export CV_REQUIRED_LOADS=2
     export CV_SESSION_MAX_AGE_MIN=10
     export CV_EVIDENCE_EXCERPT_MIN=8
@@ -292,14 +301,30 @@ write_session_log() {
     [ "$status" -eq 0 ]
 }
 
-@test "Apple Music + TIDAL count as Tier 1" {
+@test "Apple Music + Discogs count as Tier 1 (Tidal is Tier-2 for quorum)" {
+    # Tidal browser loads do NOT count toward the >=2 quorum (it stays
+    # supporting/Tier-2). Apple + Discogs together satisfy the bar.
     source_gate
     write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://music.apple.com/us/artist/abc"}}]}}
 {"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig artist page"}]}}
-{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://tidal.com/browse/artist/xyz"}}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://discogs.com/artist/xyz"}}]}}
 {"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig credits"}]}}'
     EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
     [ "$status" -eq 0 ]
+}
+
+@test "Tidal browser load does NOT count toward Tier-1 quorum (supporting only)" {
+    # Two Tidal loads cannot satisfy the >=2 quorum — Tidal is Tier-2 (used
+    # only as a backend album-credits URL). The web_fetch contamination check
+    # still treats Tidal as JS-rendered (separate variable).
+    source_gate
+    write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://tidal.com/album/123/credits"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig songwriter"}]}}
+{"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://tidal.com/album/456/credits"}}]}}
+{"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig producer"}]}}'
+    EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"0/2"* ]]
 }
 
 @test "Jaxsta (Tier 3) browser load does NOT count" {
@@ -328,14 +353,17 @@ write_session_log() {
     [[ "$output" == *"0/2"* ]]
 }
 
-@test "allow: Spotify (open.spotify.com) counts as Tier 1" {
+@test "block: Spotify is NOT Tier 1 (login-gated, dropped 2026-05-05)" {
+    # Spotify credits dialog is login-gated for headless browsers. A single
+    # spotify load + 1 musicbrainz load is only 1 quorum-counting host.
     source_gate
     write_session_log "s.jsonl" '{"message":{"content":[{"type":"toolCall","id":"tc-1","name":"browser","arguments":{"url":"https://open.spotify.com/artist/6gKqRTREnE0NInWDiBhEzY"}}]}}
 {"message":{"role":"toolResult","toolCallId":"tc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig - Artist page on Spotify"}]}}
 {"message":{"content":[{"type":"toolCall","id":"tc-2","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
 {"message":{"role":"toolResult","toolCallId":"tc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig, Spanish engineer"}]}}'
     EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"1/2"* ]]
 }
 
 @test "block: jq crash on corrupt session log still blocks (fail-closed)" {
@@ -372,7 +400,7 @@ more garbage here'
 {"message":{"role":"toolResult","toolCallId":"bc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig engineer"}]}}
 {"message":{"content":[{"type":"toolCall","id":"bc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
 {"message":{"role":"toolResult","toolCallId":"bc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}
-{"message":{"content":[{"type":"toolCall","id":"wf-1","name":"web_fetch","arguments":{"url":"https://open.spotify.com/artist/xyz"}}]}}
+{"message":{"content":[{"type":"toolCall","id":"wf-1","name":"web_fetch","arguments":{"url":"https://tidal.com/album/123"}}]}}
 {"message":{"role":"toolResult","toolCallId":"wf-1","toolName":"web_fetch","content":[{"type":"text","text":"page body"}]}}'
     EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PATCH /admin/credit-requests/cr_1 '{"status":"approved"}'
     [ "$status" -eq 1 ]
@@ -450,7 +478,7 @@ seed_runlog_with_run_started() {
     mkdir -p "$OPS_RUNLOG_DIR"
     seed_runlog_with_run_started "20260423-120000-aaaaaa" "2026-04-23T12:00:00Z"
 
-    write_session_log "s.jsonl" '{"type":"message","timestamp":"2026-04-22T10:00:00Z","message":{"content":[{"type":"toolCall","id":"old-wf","name":"web_fetch","arguments":{"url":"https://open.spotify.com/artist/contaminated"}}]}}
+    write_session_log "s.jsonl" '{"type":"message","timestamp":"2026-04-22T10:00:00Z","message":{"content":[{"type":"toolCall","id":"old-wf","name":"web_fetch","arguments":{"url":"https://tidal.com/album/123/credits"}}]}}
 {"type":"message","timestamp":"2026-04-22T10:00:01Z","message":{"role":"toolResult","toolCallId":"old-wf","toolName":"web_fetch","content":[{"type":"text","text":"yesterday contamination"}]}}
 {"type":"message","timestamp":"2026-04-23T12:05:00Z","message":{"content":[{"type":"toolCall","id":"new-b1","name":"browser","arguments":{"url":"https://musicbrainz.org/artist/abc"}}]}}
 {"type":"message","timestamp":"2026-04-23T12:05:01Z","message":{"role":"toolResult","toolCallId":"new-b1","toolName":"browser","content":[{"type":"text","text":"Ben Smith bass credits"}]}}
@@ -466,7 +494,7 @@ seed_runlog_with_run_started() {
     mkdir -p "$OPS_RUNLOG_DIR"
     seed_runlog_with_run_started "20260423-120000-aaaaaa" "2026-04-23T12:00:00Z"
 
-    write_session_log "s.jsonl" '{"type":"message","timestamp":"2026-04-23T12:05:00Z","message":{"content":[{"type":"toolCall","id":"new-wf","name":"web_fetch","arguments":{"url":"https://open.spotify.com/artist/bad"}}]}}
+    write_session_log "s.jsonl" '{"type":"message","timestamp":"2026-04-23T12:05:00Z","message":{"content":[{"type":"toolCall","id":"new-wf","name":"web_fetch","arguments":{"url":"https://tidal.com/album/456"}}]}}
 {"type":"message","timestamp":"2026-04-23T12:05:01Z","message":{"role":"toolResult","toolCallId":"new-wf","toolName":"web_fetch","content":[{"type":"text","text":"within-run contamination"}]}}'
     EVIDENCE_EXCERPT="Ben Smith" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
     [ "$status" -eq 1 ]
@@ -555,7 +583,7 @@ seed_runlog_with_run_started() {
 {"message":{"role":"toolResult","toolCallId":"bc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig engineer credits"}]}}
 {"message":{"content":[{"type":"toolCall","id":"bc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
 {"message":{"role":"toolResult","toolCallId":"bc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}
-{"message":{"content":[{"type":"toolCall","id":"wf-blocked","name":"web_fetch","arguments":{"url":"https://open.spotify.com/artist/drake"}}]}}
+{"message":{"content":[{"type":"toolCall","id":"wf-blocked","name":"web_fetch","arguments":{"url":"https://tidal.com/album/drake"}}]}}
 {"message":{"role":"toolResult","toolCallId":"wf-blocked","toolName":"web_fetch","content":[{"type":"text","text":"{\"status\":\"error\",\"tool\":\"web_fetch\",\"error\":\"web_fetch is disabled on Tier 1 music-data hosts during credit verification.\"}"}],"details":{"status":"error","tool":"web_fetch","error":"web_fetch is disabled on Tier 1 music-data hosts during credit verification."},"isError":false}}'
     EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
     [ "$status" -eq 0 ]
@@ -571,12 +599,12 @@ seed_runlog_with_run_started() {
 {"message":{"role":"toolResult","toolCallId":"bc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig engineer credits"}]}}
 {"message":{"content":[{"type":"toolCall","id":"bc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
 {"message":{"role":"toolResult","toolCallId":"bc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}
-{"message":{"content":[{"type":"toolCall","id":"wf-real","name":"web_fetch","arguments":{"url":"https://open.spotify.com/artist/drake"}}]}}
+{"message":{"content":[{"type":"toolCall","id":"wf-real","name":"web_fetch","arguments":{"url":"https://tidal.com/album/drake"}}]}}
 {"message":{"role":"toolResult","toolCallId":"wf-real","toolName":"web_fetch","content":[{"type":"text","text":"<html>Drake - Artist page on Spotify - 80M monthly listeners</html>"}],"isError":false}}'
     EVIDENCE_EXCERPT="Jose Roig" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
     [ "$status" -eq 1 ]
     [[ "$output" == *"web_fetch call(s) to Tier 1"* ]]
-    [[ "$output" == *"open.spotify.com"* ]]
+    [[ "$output" == *"tidal.com"* ]]
 }
 
 @test "R4-1: errored web_fetch (network/404) is NOT contamination either" {
@@ -616,7 +644,7 @@ seed_runlog_with_run_started() {
 {"message":{"role":"toolResult","toolCallId":"bc-1","toolName":"browser","content":[{"type":"text","text":"Jose Roig"}]}}
 {"message":{"content":[{"type":"toolCall","id":"bc-2","name":"browser","arguments":{"url":"https://allmusic.com/artist/xyz"}}]}}
 {"message":{"role":"toolResult","toolCallId":"bc-2","toolName":"browser","content":[{"type":"text","text":"Jose Roig records"}]}}
-{"message":{"content":[{"type":"toolCall","id":"wf-blocked","name":"web_fetch","arguments":{"url":"https://open.spotify.com/artist/drake"}}]}}
+{"message":{"content":[{"type":"toolCall","id":"wf-blocked","name":"web_fetch","arguments":{"url":"https://tidal.com/album/drake"}}]}}
 {"message":{"role":"toolResult","toolCallId":"wf-blocked","toolName":"web_fetch","content":[{"type":"text","text":"blocked"}],"details":{"status":"error"},"isError":false}}
 {"message":{"content":[{"type":"toolCall","id":"wf-real","name":"web_fetch","arguments":{"url":"https://musicbrainz.org/search?query=x"}}]}}
 {"message":{"role":"toolResult","toolCallId":"wf-real","toolName":"web_fetch","content":[{"type":"text","text":"<html>MusicBrainz search results with real data</html>"}],"isError":false}}'
@@ -624,5 +652,5 @@ seed_runlog_with_run_started() {
     [ "$status" -eq 1 ]
     # Should only name the successful host (musicbrainz.org), not spotify.
     [[ "$output" == *"musicbrainz.org"* ]]
-    [[ "$output" != *"open.spotify.com"* ]]
+    [[ "$output" != *"tidal.com"* ]]
 }

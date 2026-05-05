@@ -30,8 +30,8 @@
         "auth": "api-key",
         "models": [
           {
-            "id": "anthropic/claude-haiku-latest",
-            "name": "anthropic/claude-haiku-latest",
+            "id": "anthropic/claude-haiku-4.5",
+            "name": "anthropic/claude-haiku-4.5",
             "input": [
               "text",
               "image"
@@ -83,7 +83,7 @@
       "model": {
         "primary": "openrouter/openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/anthropic/claude-haiku-latest",
+          "openrouter/anthropic/claude-haiku-4.5",
           "openrouter/openai/gpt-5.4-mini"
         ]
       },
@@ -113,7 +113,7 @@
         "model": {
           "primary": "openrouter/openai/gpt-5.5",
           "fallbacks": [
-            "openrouter/anthropic/claude-haiku-latest",
+            "openrouter/anthropic/claude-haiku-4.5",
             "openrouter/openai/gpt-5.4-mini"
           ]
         },
@@ -289,5 +289,10 @@
         "mode": "json"
       }
     }
+  },
+  "subagents": {
+    "maxConcurrent": 8,
+    "maxChildrenPerAgent": 10,
+    "maxSpawnDepth": 2
   }
 }

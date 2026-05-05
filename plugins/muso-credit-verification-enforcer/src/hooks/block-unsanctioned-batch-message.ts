@@ -161,17 +161,34 @@ export function blockUnsanctionedBatchMessage(
   }
 
   const { target, text } = extractTargetAndText(event.params ?? {});
-  if (!isCvChannel(target)) return undefined;
 
   // No text — nothing to police. Treat as pass-through (e.g. a reaction
   // tool call coming through the same hook bus).
   if (typeof text !== "string" || text.length === 0) return undefined;
 
   if (isOperationalMessage(text)) return undefined;
-  if (!isSummaryShaped(text)) return undefined;
+
+  // 2026-04-30 fail-closed widening (run 20260430-081740-585500 leaked):
+  // when the agent posts with target="" / undefined, openclaw resolves it
+  // downstream to the operations agent's default Slack channel — which IS
+  // the CV channel. The hook never sees that resolution. Result: a blank
+  // target slipped through because the prior `if (!isCvChannel(target))
+  // return undefined` short-circuited.
+  //
+  // For CV-context summary-shaped posts, target resolution is irrelevant.
+  // The operations workspace has zero legitimate paths that hand-compose
+  // a `[HEARTBEAT-BATCH]` / `Credit batch complete` message via the MCP
+  // message tool — `post-batch-summary.sh` posts via the openclaw CLI,
+  // bypassing this hook entirely. So: if the message is summary-shaped
+  // and we're in CV context, BLOCK regardless of target. Non-summary
+  // messages (operational allowlist, ad-hoc replies) still need a CV
+  // channel target to qualify for blocking — those are pass-through.
+  const summaryShaped = isSummaryShaped(text);
+  if (!summaryShaped && !isCvChannel(target)) return undefined;
+  if (!summaryShaped) return undefined;
 
   console.warn(
-    `[credit-verification-enforcer] blocked unsanctioned ${event.toolName} to CV channel target=${target} agent=${ctx.agentId ?? "?"} session=${ctx.sessionKey ?? "?"} runId=${ctx.runId ?? "?"} text="${text.slice(0, 80)}…"`,
+    `[credit-verification-enforcer] blocked unsanctioned ${event.toolName} to CV channel target=${target ?? "(empty)"} agent=${ctx.agentId ?? "?"} session=${ctx.sessionKey ?? "?"} runId=${ctx.runId ?? "?"} text="${text.slice(0, 80)}…"`,
   );
 
   return { block: true, blockReason: BLOCK_REASON };

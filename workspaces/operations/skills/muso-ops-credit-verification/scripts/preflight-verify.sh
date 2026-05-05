@@ -68,7 +68,7 @@ if [[ -z "$RUN_ID" ]]; then
     exit 2
 fi
 
-CV_PROBE_URL="${CV_PROBE_URL:-https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4}"
+CV_PROBE_URL="${CV_PROBE_URL:-https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d}"
 OPS_OPENCLAW_PROFILE="${OPS_OPENCLAW_PROFILE:-main}"
 CV_PROBE_HYDRATION_SLEEP="${CV_PROBE_HYDRATION_SLEEP:-5}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -109,19 +109,41 @@ sleep "$CV_PROBE_HYDRATION_SLEEP"
 
 # 3. Snapshot in aria format with explicit limit. NO --efficient, NO depth=0
 #    — those are the args that broke the agent's attempts.
-SNAP_OUT=$(openclaw --profile "$OPS_OPENCLAW_PROFILE" browser snapshot --format aria --limit 200 2>&1) \
-    || fail_probe "browser snapshot failed" "$SNAP_OUT"
+#
+#    Tab-recovery: gateway restarts invalidate previously-opened tab handles.
+#    The first snapshot after a restart returns "tab not found" even though
+#    `browser open` above succeeded — the open operation creates a fresh tab
+#    but the snapshot CLI defaults to the most recently *referenced* tab
+#    (which may be a pre-restart stale handle in the gateway state).
+#
+#    Recovery: on "tab not found", explicitly open the URL again and retry
+#    the snapshot once. If the second attempt also fails, treat as real
+#    browser failure (gateway/node truly unavailable).
+SNAP_OUT=$(openclaw --profile "$OPS_OPENCLAW_PROFILE" browser snapshot --format aria --limit 200 2>&1) || SNAP_RC=$?
+SNAP_RC="${SNAP_RC:-0}"
+
+if [[ "$SNAP_RC" -ne 0 ]] && [[ "$SNAP_OUT" == *"tab not found"* ]]; then
+    echo "preflight: 'tab not found' on first snapshot — re-opening tab and retrying once" >&2
+    OPEN_OUT=$(openclaw --profile "$OPS_OPENCLAW_PROFILE" browser open "$CV_PROBE_URL" 2>&1) \
+        || fail_probe "browser open (recovery) failed" "$OPEN_OUT"
+    sleep "$CV_PROBE_HYDRATION_SLEEP"
+    unset SNAP_RC
+    SNAP_OUT=$(openclaw --profile "$OPS_OPENCLAW_PROFILE" browser snapshot --format aria --limit 200 2>&1) \
+        || fail_probe "browser snapshot failed after tab-recovery retry" "$SNAP_OUT"
+elif [[ "$SNAP_RC" -ne 0 ]]; then
+    fail_probe "browser snapshot failed" "$SNAP_OUT"
+fi
 
 # 4. Check markers. Lower-case the snapshot once for case-insensitive match.
 SNAP_LC=$(printf '%s' "$SNAP_OUT" | tr '[:upper:]' '[:lower:]')
-if [[ "$SNAP_LC" != *"spotify"* ]] || [[ "$SNAP_LC" != *"drake"* ]]; then
-    fail_probe "snapshot rendered but lacks 'drake' and/or 'spotify' markers" \
+if [[ "$SNAP_LC" != *"musicbrainz"* ]] || [[ "$SNAP_LC" != *"drake"* ]]; then
+    fail_probe "snapshot rendered but lacks 'drake' and/or 'musicbrainz' markers" \
         "$(printf '%s' "$SNAP_OUT" | head -c 500)"
 fi
 
 # 5. Success. Write runlog event AND print snapshot to stdout so the agent's
 #    exec toolResult content carries the markers — compute-run-summary.sh's
-#    session-derived check sees `spotify` + `drake` in the exec output and
+#    session-derived check sees `musicbrainz` + `drake` in the exec output and
 #    recognizes this as a valid preflight (matching the existing trust
 #    model: markers must appear in a successful tool result the harness
 #    recorded, not just in agent-written runlog events).
@@ -134,8 +156,8 @@ write_event preflight_ok \
 # snapshot dump here was observed (2026-04-28 15:13 UTC) to confuse
 # gpt-5.5 into treating the bash output as a "final result" and posting
 # a summary instead of progressing to B2. The RootWebArea title alone
-# carries both `drake` and `spotify` tokens.
+# carries both `drake` and `musicbrainz` tokens.
 ROOT_LINE=$(printf '%s' "$SNAP_OUT" | grep -i RootWebArea | head -1)
 echo "PREFLIGHT_OK: probe markers present in snapshot"
-echo "snapshot title: ${ROOT_LINE:-RootWebArea (parsed) — markers: spotify drake}"
+echo "snapshot title: ${ROOT_LINE:-RootWebArea (parsed) — markers: musicbrainz drake}"
 exit 0

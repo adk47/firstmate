@@ -8,8 +8,8 @@ load helpers
 # (toolCall + toolResult pairs in the shape openclaw writes) and verify the
 # helper's output and side-effects.
 
-PROBE_URL="https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4"
-PROBE_TEXT="Drake · Spotify · Artist page"   # contains "spotify" and "drake"
+PROBE_URL="https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d"
+PROBE_TEXT="Drake · MusicBrainz · Artist page"   # contains "musicbrainz" and "drake"
 
 setup() {
   setup_tmp_env
@@ -181,7 +181,7 @@ seed_runlog_escalation() {
 @test "ungrounded run (13:26 b8b0e5 style): web_fetch substituted for probe + fake approve" {
   # Agent used web_fetch for the probe URL (not browser). Then faked an
   # approved PUT. Derived preflight is false; ungrounded invariant fires.
-  seed_web_fetch "c0" "$PROBE_URL" "Drake spotify page"
+  seed_web_fetch "c0" "$PROBE_URL" "Drake musicbrainz page"
   seed_exec_admin "c1" \
     "bash muso-admin-api.sh call GET /admin/credit-requests?status=unverified&limit=10" \
     '{"http_status":200,"body":{"items":[{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}]}}'
@@ -213,14 +213,14 @@ seed_runlog_escalation() {
 
 @test "preflight: Cloudflare challenge page with non-error response is rejected" {
   # A Cloudflare page can return HTTP 200 with non-empty body that lacks
-  # "spotify" and "drake" — B0d explicitly requires both.
+  # "musicbrainz" and "drake" — B0d explicitly requires both.
   seed_browser "c0" "$PROBE_URL" "false" "Please wait while we verify you are human."
   run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.preflight_ok == false'
 }
 
-@test "preflight: text containing only 'spotify' (not 'drake') is rejected" {
+@test "preflight: text containing only 'musicbrainz' (not 'drake') is rejected" {
   seed_browser "c0" "$PROBE_URL" "false" "Open Spotify · Error page"
   run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
   [ "$status" -eq 0 ]
@@ -777,7 +777,7 @@ setup_cv_results() {
   # preflight-verify.sh stdout can land in a process result instead of the
   # original exec result. The helper-written runlog event is authoritative.
   jq -n -c --arg rid "$RUN_ID" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{event:"preflight_ok", run_id:$rid, ts:$ts, probe_url:"https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4", source:"preflight-verify.sh@cli"}' >> "$RUNLOG_FILE"
+    '{event:"preflight_ok", run_id:$rid, ts:$ts, probe_url:"https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d", source:"preflight-verify.sh@cli"}' >> "$RUNLOG_FILE"
 
   setup_cv_results
   seed_results user_verification_needed ok '["cr_1"]'

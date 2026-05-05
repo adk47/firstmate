@@ -16,7 +16,7 @@
 #      are identified by (a) the script name in the flattened args AND (b) a
 #      response envelope containing `"http_status":N`. Counters derived:
 #        preflight_ok          — ≥1 successful `browser` load of the probe URL
-#                                whose returned text contains BOTH "spotify"
+#                                whose returned text contains BOTH "musicbrainz"
 #                                AND "drake" (case-insensitive) — mirrors the
 #                                B0d success criteria exactly.
 #        fetched               — unique credit IDs at $.body.items[].id in
@@ -99,7 +99,7 @@ if [[ -z "$RUN_ID" ]]; then
 fi
 
 CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
-CV_PROBE_URL="${CV_PROBE_URL:-https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4}"
+CV_PROBE_URL="${CV_PROBE_URL:-https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Idempotency guard (R2-2) ---
@@ -262,7 +262,7 @@ session_counts=$(jq -R -n \
     ).pairs as $pairs
     |
     # Preflight: B0d requires an open-probe of the Drake Tier 1 URL and a
-    # page-content read that contains BOTH "spotify" AND "drake" (case-
+    # page-content read that contains BOTH "musicbrainz" AND "drake" (case-
     # insensitive). Two acceptable evidence shapes:
     #
     #   A. Direct browser-tool probe (legacy path). One or more successful
@@ -304,7 +304,7 @@ session_counts=$(jq -R -n \
         ([ $pairs[]
            | select(.name == "browser")
            | select(.is_error | not)
-           | select((.text | ascii_downcase) | (contains("spotify") and contains("drake")))
+           | select((.text | ascii_downcase) | (contains("musicbrainz") and contains("drake")))
          ] | length > 0)
         or
         # Path B: exec call to preflight-verify.sh whose stdout has markers
@@ -312,7 +312,7 @@ session_counts=$(jq -R -n \
            | select(.name == "exec")
            | select(.args_repr | test("preflight-verify\\.sh"))
            | select(.is_error | not)
-           | select((.text | ascii_downcase) | (contains("spotify") and contains("drake")))
+           | select((.text | ascii_downcase) | (contains("musicbrainz") and contains("drake")))
          ] | length > 0)
     ) as $probe_rendered
     |

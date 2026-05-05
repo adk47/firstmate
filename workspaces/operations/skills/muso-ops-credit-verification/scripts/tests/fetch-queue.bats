@@ -61,6 +61,59 @@ if [[ "$url" == *"/admin/credit-requests/counts"* ]]; then
     exit 0
 fi
 
+if [[ "$url" =~ ^/admin/track/[^/]+/sources$ ]]; then
+    # Tier-1 enrichment: per-item Tidal sources lookup. Modes:
+    #   STUB_TRACK_SOURCES_MODE = has_tidal | no_tidal | http_500
+    case "${STUB_TRACK_SOURCES_MODE:-no_tidal}" in
+        has_tidal)
+            printf '%s\n' '{"http_status":200,"body":{"data":{"sources":[{"source":"tidal","items":[{"id":"tidal_t_1","url":"https://listen.tidal.com/track/tidal_t_1"}]}]}}}'
+            ;;
+        no_tidal)
+            printf '%s\n' '{"http_status":200,"body":{"data":{"sources":[]}}}'
+            ;;
+        http_500)
+            printf '%s\n' '{"http_status":500,"body":{"error":"sources boom"}}'
+            ;;
+    esac
+    exit 0
+fi
+
+if [[ "$url" =~ ^/admin/track/[^/]+$ ]]; then
+    # Tier-1 enrichment: per-item track lookup. Modes:
+    #   STUB_TRACK_MODE = ok | not_found | wrapper_fail
+    # Default `ok` matches the happy-path enrichment: track with album.
+    case "${STUB_TRACK_MODE:-ok}" in
+        ok)
+            printf '%s\n' '{"http_status":200,"body":{"data":{"id":"t_x","album":{"id":"a_x"}}}}'
+            ;;
+        not_found)
+            printf '%s\n' '{"http_status":404,"body":{"error":"track not found"}}'
+            ;;
+        wrapper_fail)
+            echo "stub: track wrapper crash" >&2
+            exit 7
+            ;;
+    esac
+    exit 0
+fi
+
+if [[ "$url" =~ ^/admin/album/[^/]+/sources$ ]]; then
+    # Tier-1 enrichment: per-item album sources lookup. Modes:
+    #   STUB_ALBUM_SOURCES_MODE = has_tidal | no_tidal | not_found
+    case "${STUB_ALBUM_SOURCES_MODE:-no_tidal}" in
+        has_tidal)
+            printf '%s\n' '{"http_status":200,"body":{"data":{"sources":[{"source":"tidal","items":[{"id":"tidal_a_1","url":"https://listen.tidal.com/album/tidal_a_1"}]}]}}}'
+            ;;
+        no_tidal)
+            printf '%s\n' '{"http_status":200,"body":{"data":{"sources":[{"source":"spotify","items":[{"id":"sp_a_1"}]}]}}}'
+            ;;
+        not_found)
+            printf '%s\n' '{"http_status":404,"body":{"error":"album not found"}}'
+            ;;
+    esac
+    exit 0
+fi
+
 if [[ "$url" == *"/admin/credit-requests"* ]]; then
     case "${STUB_LIST_MODE:-real_with_items}" in
         real_with_items)
@@ -132,6 +185,14 @@ teardown() { teardown_tmp_env; }
     # would exceed Linux MAX_ARG_STRLEN (~128 KB) and trip "Argument list
     # too long" — closing the gap noted in the original PR review (small
     # fixtures wouldn't have caught a regression to argv).
+    #
+    # 2026-05-04: fetch-queue.sh now applies a default OPS_BATCH_FETCH_HARD_CAP
+    # of 200 to align with subagent-pool throughput. The ARG_MAX bug is about
+    # serialized argv size not credit count, so we override the cap to 500
+    # here to keep the regression coverage at the size that originally broke
+    # prod. Production cron runs intentionally CAN'T request 500 (cap kicks in
+    # before this code path) — that's covered by the next test.
+    OPS_BATCH_FETCH_HARD_CAP=500 \
     STUB_LIST_MODE=real_with_items STUB_LIST_COUNT=500 STUB_LIST_REALISTIC=1 \
     STUB_COUNTS_MODE=real_nonzero  STUB_COUNT_VALUE=500 \
         run bash "$SCRIPT" 500
@@ -141,6 +202,19 @@ teardown() { teardown_tmp_env; }
     echo "$output" | jq -e '.items[-1].id == "cr_500"' >/dev/null
     # Pin the realistic shape so a future stub edit can't silently shrink it.
     echo "$output" | jq -e '.items[-1].hashKey | length == 64' >/dev/null
+}
+
+@test "default OPS_BATCH_FETCH_HARD_CAP=200: requesting 500 caps to 200 with WARN on stderr" {
+    # 2026-05-04: production default cap is 200. Without OPS_BATCH_FETCH_HARD_CAP
+    # override, requesting 500 must be silently capped to 200 with a clear
+    # warning on stderr (so the operator can see the cap fired in cron logs).
+    STUB_LIST_MODE=real_with_items STUB_LIST_COUNT=200 \
+    STUB_COUNTS_MODE=real_nonzero  STUB_COUNT_VALUE=1000 \
+        run --separate-stderr bash "$SCRIPT" 500
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.fetch_size == 200 and (.items | length == 200)' >/dev/null
+    [[ "$stderr" == *"exceeds hard cap 200"* ]]
+    [[ "$stderr" == *"capping to 200"* ]]
 }
 
 @test "happy path with default fetch_size from env" {
@@ -155,11 +229,14 @@ teardown() { teardown_tmp_env; }
 # --- Genuinely empty queue --------------------------------------------
 
 @test "genuinely empty queue: items==[] AND count==0 → exit 0" {
+    # Use a fetch_size at-or-below the 200-credit hard cap so this test
+    # exercises empty-queue handling, not the cap interaction (covered
+    # separately by the cap test above).
     STUB_LIST_MODE=real_empty \
     STUB_COUNTS_MODE=real_zero \
-        run bash "$SCRIPT" 500
+        run bash "$SCRIPT" 200
     [ "$status" -eq 0 ]
-    echo "$output" | jq -e '.queue_depth == 0 and (.items | length == 0) and .fetch_size == 500' >/dev/null
+    echo "$output" | jq -e '.queue_depth == 0 and (.items | length == 0) and .fetch_size == 200' >/dev/null
 }
 
 # --- The bug we're fixing: silent-zero --------------------------------
@@ -260,4 +337,131 @@ teardown() { teardown_tmp_env; }
     [ "$status" -eq 0 ]
     # Anchor: don't accidentally match limit=250, limit=2500, etc.
     grep -qE 'limit=25($|[^0-9])' "$ADMIN_LOG"
+}
+
+# --- Tier-1 source enrichment ----------------------------------------
+#
+# Per-item Tier-1 source resolution runs after items are fetched. Each
+# item gets a `tier1_sources` field with backend_tier1_count + URLs.
+# SKILL.md B3 branches on the count.
+
+@test "enrichment: items with no trackId/spotifyTrackId → tier1_sources=count:0, helper not called" {
+    # The existing real_with_items stub emits items with no trackId or
+    # spotifyTrackId. The enrichment path must short-circuit to a default
+    # all-null envelope WITHOUT calling the resolve helper (would exit 2
+    # otherwise). The output must still be valid JSON with tier1_sources.
+    STUB_LIST_MODE=real_with_items STUB_LIST_COUNT=3 \
+    STUB_COUNTS_MODE=real_nonzero  STUB_COUNT_VALUE=3 \
+        run bash "$SCRIPT" 3
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '
+      (.items | length == 3)
+      and (all(.items[]; .tier1_sources.backend_tier1_count == 0))
+      and (all(.items[]; .tier1_sources.tidal_album_credits_url == null))
+    ' >/dev/null
+    # The enrichment helper must NOT have called the admin-api for these
+    # items — both args were empty so the helper would have exit 2.
+    ! grep -qE '/admin/track/[^/]+(/sources)?$' "$ADMIN_LOG"
+    ! grep -qE '/admin/album/[^/]+/sources$' "$ADMIN_LOG"
+}
+
+@test "enrichment: trackId populated + tidal in catalog → tier1_sources.backend_tier1_count=1" {
+    # Stub items with trackId so the enrichment loop calls the helper.
+    # Override the real_with_items list to include trackId fields.
+    cat > "$ADMIN_API_SH" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'ARGS:'; for a in "$@"; do printf '\n  %s' "$a"; done; printf '\n'; } >> "${ADMIN_LOG:-/dev/null}"
+url="${3:-}"
+case "$url" in
+  *"/admin/credit-requests/counts"*)
+    printf '%s\n' '{"http_status":200,"body":{"data":[{"status":"unverified","count":2}]}}' ;;
+  *"/admin/credit-requests"*)
+    printf '%s\n' '{"http_status":200,"body":{"data":{"items":[
+      {"id":"cr_1","profileId":"p_1","trackId":"track_a"},
+      {"id":"cr_2","profileId":"p_2","trackId":"track_b"}
+    ]}}}' ;;
+  /admin/track/track_a)
+    printf '%s\n' '{"http_status":200,"body":{"data":{"album":{"id":"alb_a"}}}}' ;;
+  /admin/track/track_b)
+    printf '%s\n' '{"http_status":200,"body":{"data":{"album":{"id":"alb_b"}}}}' ;;
+  /admin/album/alb_a/sources)
+    printf '%s\n' '{"http_status":200,"body":{"data":{"sources":[{"source":"tidal","items":[{"id":"519563107"}]}]}}}' ;;
+  /admin/album/alb_b/sources)
+    printf '%s\n' '{"http_status":200,"body":{"data":{"sources":[{"source":"spotify","items":[{"id":"sp_x"}]}]}}}' ;;
+  /admin/track/track_a/sources)
+    printf '%s\n' '{"http_status":200,"body":{"data":{"sources":[{"source":"tidal","items":[{"id":"514666065"}]}]}}}' ;;
+  /admin/track/track_b/sources)
+    printf '%s\n' '{"http_status":200,"body":{"data":{"sources":[]}}}' ;;
+  *) echo "stub: unrecognized URL: $url" >&2; exit 98 ;;
+esac
+STUB
+    chmod +x "$ADMIN_API_SH"
+
+    run bash "$SCRIPT" 2
+    [ "$status" -eq 0 ]
+    # Item 1 (track_a, alb_a) has tidal in catalog → count=1, credits URL populated
+    echo "$output" | jq -e '
+      (.items[0].tier1_sources.backend_tier1_count == 1)
+      and (.items[0].tier1_sources.tidal_album_id == "519563107")
+      and (.items[0].tier1_sources.tidal_album_credits_url == "https://tidal.com/album/519563107/credits")
+    ' >/dev/null
+    # Item 2 (track_b, alb_b) has only spotify in catalog → count=0
+    echo "$output" | jq -e '
+      .items[1].tier1_sources.backend_tier1_count == 0
+      and .items[1].tier1_sources.tidal_album_credits_url == null
+    ' >/dev/null
+}
+
+@test "enrichment: per-item helper failure does not block the rest of the queue" {
+    # Item track_bad makes the track endpoint exit non-zero; item track_a
+    # is a clean tidal hit. Both must appear in the output, with track_bad's
+    # tier1_sources.backend_tier1_count == 0 (silent degrade).
+    cat > "$ADMIN_API_SH" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'ARGS:'; for a in "$@"; do printf '\n  %s' "$a"; done; printf '\n'; } >> "${ADMIN_LOG:-/dev/null}"
+url="${3:-}"
+case "$url" in
+  *"/admin/credit-requests/counts"*)
+    printf '%s\n' '{"http_status":200,"body":{"data":[{"status":"unverified","count":2}]}}' ;;
+  *"/admin/credit-requests"*)
+    printf '%s\n' '{"http_status":200,"body":{"data":{"items":[
+      {"id":"cr_bad","profileId":"p_b","trackId":"track_bad"},
+      {"id":"cr_ok","profileId":"p_a","trackId":"track_a"}
+    ]}}}' ;;
+  /admin/track/track_bad)
+    echo "stub: simulated track endpoint crash" >&2; exit 9 ;;
+  /admin/track/track_a)
+    printf '%s\n' '{"http_status":200,"body":{"data":{"album":{"id":"alb_a"}}}}' ;;
+  /admin/album/alb_a/sources)
+    printf '%s\n' '{"http_status":200,"body":{"data":{"sources":[{"source":"tidal","items":[{"id":"519563107"}]}]}}}' ;;
+  /admin/track/track_a/sources)
+    printf '%s\n' '{"http_status":200,"body":{"data":{"sources":[]}}}' ;;
+  *) echo "stub: unrecognized URL: $url" >&2; exit 98 ;;
+esac
+STUB
+    chmod +x "$ADMIN_API_SH"
+
+    run bash "$SCRIPT" 2
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '
+      (.items | length == 2)
+      and (.items[0].id == "cr_bad")
+      and (.items[0].tier1_sources.backend_tier1_count == 0)
+      and (.items[1].id == "cr_ok")
+      and (.items[1].tier1_sources.backend_tier1_count == 1)
+    ' >/dev/null
+}
+
+@test "enrichment: empty queue path skips enrichment entirely" {
+    # When items==[] (and counts==0 too, no silent-zero), the enrichment
+    # loop is gated by ITEMS_LEN > 0 — it should not run, and the output
+    # envelope must still carry items: [] (not items: null or items: [{}]).
+    STUB_LIST_MODE=real_empty \
+    STUB_COUNTS_MODE=real_zero \
+        run bash "$SCRIPT" 5
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.queue_depth == 0 and (.items | length == 0)' >/dev/null
+    # No track or album lookups should have happened.
+    ! grep -qE '/admin/track/[^/]+' "$ADMIN_LOG"
+    ! grep -qE '/admin/album/[^/]+' "$ADMIN_LOG"
 }

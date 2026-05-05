@@ -6,8 +6,8 @@ load helpers
 # tests stub openclaw on PATH and assert both the runlog contract and the exact
 # CLI probe shape.
 
-PROBE_URL="https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4"
-SNAPSHOT_OK='RootWebArea "Drake | Spotify"'
+PROBE_URL="https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d"
+SNAPSHOT_OK='RootWebArea "Drake | MusicBrainz"'
 
 setup() {
   setup_tmp_env
@@ -49,7 +49,7 @@ case "$*" in
       echo "${OPENCLAW_SNAPSHOT_ERR:-snapshot exploded}" >&2
       exit "$OPENCLAW_SNAPSHOT_RC"
     fi
-    printf '%s\n' "${OPENCLAW_SNAPSHOT_TEXT:-RootWebArea \"Drake | Spotify\"}"
+    printf '%s\n' "${OPENCLAW_SNAPSHOT_TEXT:-RootWebArea \"Drake | MusicBrainz\"}"
     ;;
   *)
     echo "unexpected openclaw args: $*" >&2
@@ -112,12 +112,12 @@ assert_probe_calls() {
 }
 
 @test "snapshot marker-missing failure exits 10 and writes failure event" {
-  export OPENCLAW_SNAPSHOT_TEXT='RootWebArea "Open Spotify"'
+  export OPENCLAW_SNAPSHOT_TEXT='RootWebArea "Open MusicBrainz"'
 
   run --separate-stderr "$SCRIPTS_DIR/preflight-verify.sh" "$RUN_ID"
   [ "$status" -eq 10 ]
-  [[ "$stderr" == *"lacks 'drake' and/or 'spotify' markers"* ]]
-  jq -e 'select(.event=="preflight_browser_unavailable" and .error=="snapshot rendered but lacks '\''drake'\'' and/or '\''spotify'\'' markers" and .source=="preflight-verify.sh@cli")' < "$RUNLOG_FILE"
+  [[ "$stderr" == *"lacks 'drake' and/or 'musicbrainz' markers"* ]]
+  jq -e 'select(.event=="preflight_browser_unavailable" and .error=="snapshot rendered but lacks '\''drake'\'' and/or '\''musicbrainz'\'' markers" and .source=="preflight-verify.sh@cli")' < "$RUNLOG_FILE"
   assert_probe_calls
 }
 
@@ -125,8 +125,8 @@ assert_probe_calls() {
   run "$SCRIPTS_DIR/preflight-verify.sh" "$RUN_ID"
   [ "$status" -eq 0 ]
   [[ "$output" == *"PREFLIGHT_OK: probe markers present in snapshot"* ]]
-  [[ "$output" == *"Drake | Spotify"* ]]
-  jq -e 'select(.event=="preflight_ok" and .probe_url=="https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4" and .source=="preflight-verify.sh@cli")' < "$RUNLOG_FILE"
+  [[ "$output" == *"Drake | MusicBrainz"* ]]
+  jq -e 'select(.event=="preflight_ok" and .probe_url=="https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d" and .source=="preflight-verify.sh@cli")' < "$RUNLOG_FILE"
   ! jq -e 'select(.event=="preflight_browser_unavailable")' < "$RUNLOG_FILE" > /dev/null
   assert_probe_calls
 }
@@ -143,7 +143,7 @@ assert_probe_calls() {
 }
 
 @test "second invocation on a frozen run exits 20 from runlog freeze gate" {
-  export OPENCLAW_SNAPSHOT_TEXT='RootWebArea "Open Spotify"'
+  export OPENCLAW_SNAPSHOT_TEXT='RootWebArea "Open MusicBrainz"'
   run "$SCRIPTS_DIR/preflight-verify.sh" "$RUN_ID"
   [ "$status" -eq 10 ]
 

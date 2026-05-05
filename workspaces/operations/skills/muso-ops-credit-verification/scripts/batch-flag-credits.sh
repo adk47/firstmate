@@ -33,8 +33,16 @@
 # Usage:
 #   batch-flag-credits.sh \
 #       --profile-id <profile_id> \
+#       --credited-name "<name>" \
+#       --track-title  "<track title>" \
+#       --role         "<role[,role2,...]>" \
 #       --reason "<short reason>" \
+#       --flag-reason <enum> \
 #       --ids "<id1>,<id2>,<id3>"
+#
+# --credited-name / --track-title / --role are forwarded to the admin-API
+# wrapper via OPS_CREDITED_NAME / OPS_TRACK_TITLE / OPS_ROLE env vars so the
+# .results.jsonl truth-floor row records what claim was being flagged.
 #
 # Contract:
 #   * One PUT /admin/credit-requests for the entire batch. The backend
@@ -55,8 +63,20 @@ set -euo pipefail
 
 ADMIN_API_SH="${ADMIN_API_SH:-/opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh}"
 
+# Closed-list flag reasons (added 2026-04-30, tightened same day after the
+# evidence_quorum_failed/human_review_requested bypass loophole leaked 460
+# credits — see batch-verify-profile.sh head comment for the incident notes).
+# Same enum as batch-verify-profile.sh; the dispatcher validates it before
+# calling here, but we accept + forward to .results.jsonl unchanged so the
+# truth-floor row carries the structured signal.
+FLAG_REASONS_REGEX="^(name_mismatch|popularity_anomaly|no_tier1_match|metadata_inconsistent)$"
+
 PROFILE_ID=""
+CREDITED_NAME=""
+TRACK_TITLE=""
+ROLE=""
 REASON=""
+FLAG_REASON=""
 IDS_RAW=""
 
 usage() {
@@ -65,16 +85,20 @@ Usage:
   batch-flag-credits.sh \\
       --profile-id <profile_id> \\
       --reason "<short reason>" \\
+      --flag-reason <enum> \\
       --ids "<id1>,<id2>,..."
 
 Required:
-  --profile-id  The profile UUID whose credits are being flagged. Used only
-                for stdout bookkeeping and .results.jsonl reconciliation.
-  --reason      A short string describing why these are UVN. Forwarded to
-                stderr / agent transcript only — the backend updateStatus
-                handler does NOT consume a reason field. Required for
-                caller discipline so flagging is never reasonless.
-  --ids         Comma-separated list of credit-request IDs to flag.
+  --profile-id   The profile UUID whose credits are being flagged. Used only
+                 for stdout bookkeeping and .results.jsonl reconciliation.
+  --reason       A short prose string describing why these are UVN. Forwarded
+                 to stderr / agent transcript only — the backend updateStatus
+                 handler does NOT consume a reason field. Required for caller
+                 discipline so flagging is never reasonless.
+  --flag-reason  Closed-list enum (categorical signal logged to .results.jsonl
+                 as flag_reason). One of: name_mismatch, popularity_anomaly,
+                 no_tier1_match, metadata_inconsistent.
+  --ids          Comma-separated list of credit-request IDs to flag.
 
 Forbidden:
   --requester   Not allowed. This wrapper is for autonomous batches only.
@@ -95,8 +119,24 @@ while [[ $# -gt 0 ]]; do
             PROFILE_ID="${2:-}"
             shift 2
             ;;
+        --credited-name)
+            CREDITED_NAME="${2:-}"
+            shift 2
+            ;;
+        --track-title)
+            TRACK_TITLE="${2:-}"
+            shift 2
+            ;;
+        --role)
+            ROLE="${2:-}"
+            shift 2
+            ;;
         --reason)
             REASON="${2:-}"
+            shift 2
+            ;;
+        --flag-reason)
+            FLAG_REASON="${2:-}"
             shift 2
             ;;
         --ids)
@@ -127,6 +167,15 @@ if [[ -z "$REASON" ]]; then
     echo "ERROR: --reason is required (short string describing why these are UVN)." >&2
     exit 2
 fi
+if [[ -z "$FLAG_REASON" ]]; then
+    echo "ERROR: --flag-reason is required (closed-list enum: name_mismatch, popularity_anomaly, no_tier1_match, metadata_inconsistent)." >&2
+    exit 2
+fi
+if ! [[ "$FLAG_REASON" =~ $FLAG_REASONS_REGEX ]]; then
+    echo "ERROR: --flag-reason '$FLAG_REASON' is not a valid enum value." >&2
+    echo "       Valid: name_mismatch, popularity_anomaly, no_tier1_match, metadata_inconsistent" >&2
+    exit 2
+fi
 if [[ -z "$IDS_RAW" ]]; then
     echo "ERROR: --ids is required (comma-separated credit-request IDs)." >&2
     exit 2
@@ -151,10 +200,20 @@ if [[ ! -f "$ADMIN_API_SH" ]]; then
     exit 2
 fi
 
-# Forward the human-readable reason to stderr so it lands in the agent
-# transcript / openclaw session log even though the API doesn't store it.
-# Audit grep-ability without API surface coupling.
-echo "[batch-flag-credits] profile=$PROFILE_ID reason=\"$REASON\" ids=${#ID_ARR[@]}" >&2
+# Forward the human-readable reason + categorical flag_reason to stderr so
+# they land in the agent transcript / openclaw session log even though the
+# API doesn't store them. Audit grep-ability without API surface coupling.
+echo "[batch-flag-credits] profile=$PROFILE_ID reason=\"$REASON\" flag_reason=$FLAG_REASON ids=${#ID_ARR[@]}" >&2
+
+# Propagate the closed-list flag_reason + claim metadata to muso-admin-api.sh's
+# truth-floor writer (write_credit_request_result reads OPS_FLAG_REASON +
+# OPS_CREDITED_NAME / OPS_TRACK_TITLE / OPS_ROLE when present). Exported only
+# for the duration of this single PUT — admin-api inherits it in the subshell,
+# downstream callers of this script do not.
+export OPS_FLAG_REASON="$FLAG_REASON"
+export OPS_CREDITED_NAME="$CREDITED_NAME"
+export OPS_TRACK_TITLE="$TRACK_TITLE"
+export OPS_ROLE="$ROLE"
 
 # Build the JSON body via jq so embedded shell metacharacters in IDs (if
 # any ever contain them) don't get interpolated into a string-concat body.

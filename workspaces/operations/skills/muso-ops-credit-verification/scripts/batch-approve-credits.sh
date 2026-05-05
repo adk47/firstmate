@@ -25,8 +25,17 @@
 # Usage:
 #   batch-approve-credits.sh \
 #       --profile-id <profile_id> \
+#       --credited-name "<name>" \
+#       --track-title  "<track title>" \
+#       --role         "<role[,role2,...]>" \
 #       --evidence-excerpt "<literal substring from ≥2 Tier 1 browser loads>" \
 #       --ids "<id1>,<id2>,<id3>"
+#
+# --credited-name / --track-title / --role are forwarded to the admin-API
+# wrapper via OPS_CREDITED_NAME / OPS_TRACK_TITLE / OPS_ROLE env vars so the
+# .results.jsonl truth-floor row records what claim was being verified. The
+# dispatcher (batch-verify-profile.sh) already validated them structurally
+# against the excerpt; this script just propagates them.
 #
 # Contract:
 #   * One batched PUT /admin/credit-requests per invocation (one profile's
@@ -62,6 +71,9 @@ CV_EVIDENCE_EXCERPT_MIN="${CV_EVIDENCE_EXCERPT_MIN:-8}"
 CV_EVIDENCE_EXCERPT_MAX="${CV_EVIDENCE_EXCERPT_MAX:-200}"
 
 PROFILE_ID=""
+CREDITED_NAME=""
+TRACK_TITLE=""
+ROLE=""
 EVIDENCE_EXCERPT=""
 IDS_RAW=""
 
@@ -107,6 +119,18 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --profile-id)
             PROFILE_ID="${2:-}"
+            shift 2
+            ;;
+        --credited-name)
+            CREDITED_NAME="${2:-}"
+            shift 2
+            ;;
+        --track-title)
+            TRACK_TITLE="${2:-}"
+            shift 2
+            ;;
+        --role)
+            ROLE="${2:-}"
             shift 2
             ;;
         --evidence-excerpt)
@@ -187,6 +211,14 @@ if [[ ! -f "$ADMIN_API_SH" ]]; then
     echo "ERROR: muso-admin-api.sh not found at $ADMIN_API_SH — set ADMIN_API_SH env var to override for local tests." >&2
     exit 2
 fi
+
+# Forward claim metadata to the admin-API wrapper via env so the truth-floor
+# row in .results.jsonl records what claim was being approved. The dispatcher
+# already validated the structural rule; this is just propagation. Exported
+# only for the duration of this single PUT.
+export OPS_CREDITED_NAME="$CREDITED_NAME"
+export OPS_TRACK_TITLE="$TRACK_TITLE"
+export OPS_ROLE="$ROLE"
 
 # Invoke muso-admin-api.sh with the flag in its documented position
 # (before `call`). DELIBERATELY DO NOT redirect stderr — the whole point of

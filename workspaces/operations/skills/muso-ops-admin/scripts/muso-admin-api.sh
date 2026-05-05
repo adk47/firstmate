@@ -269,6 +269,15 @@ write_credit_request_result() {
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     local line
+    # OPS_FLAG_REASON (added 2026-04-30) — set by batch-flag-credits.sh before
+    # calling, propagates the closed-list enum into the truth-floor row so
+    # compute-run-summary.sh + auditors can categorize UVN actions without
+    # parsing back through the agent transcript. Null on approve / non-flag.
+    #
+    # OPS_CREDITED_NAME / OPS_TRACK_TITLE / OPS_ROLE — set by both delegates;
+    # carries the claim metadata the dispatcher validated structurally against
+    # the excerpt. Lets post-batch auditing answer "what was being verified?"
+    # without parsing back through the inbound message.
     if ! line=$(jq -n -c \
         --arg ts "$ts" \
         --arg run_id "$run_id" \
@@ -280,6 +289,10 @@ write_credit_request_result() {
         --arg http_status "$http_status" \
         --arg error "$error" \
         --arg requester "${REQUESTER_EMAIL:-}" \
+        --arg flag_reason "${OPS_FLAG_REASON:-}" \
+        --arg credited_name "${OPS_CREDITED_NAME:-}" \
+        --arg track_title "${OPS_TRACK_TITLE:-}" \
+        --arg role "${OPS_ROLE:-}" \
         '{
             ts:$ts,
             run_id:    (if $run_id    == "" then null else $run_id    end),
@@ -290,6 +303,10 @@ write_credit_request_result() {
             outcome:$outcome,
             http_status: (if $http_status == "" then null else ($http_status | tonumber? // $http_status) end),
             error:     (if $error     == "" then null else $error     end),
+            flag_reason: (if $flag_reason == "" then null else $flag_reason end),
+            credited_name: (if $credited_name == "" then null else $credited_name end),
+            track_title: (if $track_title == "" then null else $track_title end),
+            role: (if $role == "" then null else $role end),
             requester: (if $requester == "" then null else $requester end)
          }' 2>/dev/null); then
         echo "WARN: jq failed to build results line; results line LOST for ${method_uc} ${path}" >&2
@@ -393,7 +410,17 @@ cmd_login() {
 # reliably on exec calls in YOLO mode (tools.exec.security=full, ask=off).
 # The bash layer sees 100% of admin API traffic; plugins do not.
 
-CV_TIER1_HOSTS='open\.spotify\.com|music\.apple\.com|musicbrainz\.org|discogs\.com|allmusic\.com|tidal\.com'
+# Hosts that count toward the >=CV_REQUIRED_LOADS browse-quorum for an approve.
+# Must match lib/browser-evidence.sh:67 in muso-ops-credit-verification — the
+# dispatcher already filters by that regex, so this gate is a backstop and
+# strictly cannot count more hosts than the dispatcher does.
+CV_TIER1_HOSTS='music\.apple\.com|musicbrainz\.org|discogs\.com|allmusic\.com'
+# Hosts where web_fetch is JS-shell-only and substituting it for browser
+# always produces empty/wrong evidence — every Tier-1 web_fetch refuses the
+# approve. Superset of CV_TIER1_HOSTS: Tidal's track/album SPAs are also
+# JS-rendered, even though Tidal is Tier-2 for the browse-quorum (it's only
+# used as a backend album-credits URL, not as a free-form quorum host).
+CV_TIER1_WEBFETCH_BLOCKED='music\.apple\.com|musicbrainz\.org|discogs\.com|allmusic\.com|tidal\.com'
 CV_REQUIRED_LOADS="${CV_REQUIRED_LOADS:-2}"
 if ! [[ "$CV_REQUIRED_LOADS" =~ ^[1-9][0-9]*$ ]]; then
     echo "FATAL: CV_REQUIRED_LOADS must be a positive integer (got '${CV_REQUIRED_LOADS}')" >&2
@@ -452,7 +479,7 @@ Both verbs are gated:
     # Single credit (PATCH):
     muso-admin-api.sh --evidence-excerpt "<literal substring>" \\
         call PATCH /admin/credit-requests/<cr_id> '{"status":"approved"}'
-The excerpt must be a short substring (>=${CV_EVIDENCE_EXCERPT_MIN} chars) that literally appears on >=${CV_REQUIRED_LOADS} distinct Tier 1 pages you loaded via the \`browser\` tool in this session. Good examples: the artist's name as rendered on MusicBrainz, the role string as it appears on AllMusic credits, a track title from Spotify.
+The excerpt must be a short substring (>=${CV_EVIDENCE_EXCERPT_MIN} chars) that literally appears on >=${CV_REQUIRED_LOADS} distinct Tier 1 pages you loaded via the \`browser\` tool in this session. Good examples: the artist's name as rendered on MusicBrainz, the role string as it appears on AllMusic credits, a track title as it appears on Apple Music or Discogs.
 EOF
         return 1
     fi
@@ -513,7 +540,7 @@ EOF
     local tier1_webfetch_hosts
     tier1_webfetch_hosts=$(
         jq -R -r -n \
-            --arg hosts "$CV_TIER1_HOSTS" \
+            --arg hosts "$CV_TIER1_WEBFETCH_BLOCKED" \
             --arg run_started_ts "$run_started_ts" '
             ($hosts | split("|") | map(gsub("\\\\."; ".")) | map({(.): true}) | add) as $t1
             |
@@ -554,7 +581,7 @@ EOF
     if [[ -n "$tier1_webfetch_hosts" ]]; then
         cat >&2 <<EOF
 credit_approve_gate: web_fetch call(s) to Tier 1 host(s) detected in this session: ${tier1_webfetch_hosts}.
-Tier 1 pages (Spotify / Apple Music / MusicBrainz / Discogs / AllMusic / Tidal)
+Tier 1 pages (Apple Music / MusicBrainz / Discogs / AllMusic / Tidal)
 are JS-rendered — web_fetch returns the raw HTML shell, not the data the
 browser tool sees. Every Tier 1 load for credit verification MUST go through
 the \`browser\` tool. Reload the relevant page(s) via \`browser\` and retry.
@@ -623,7 +650,9 @@ EOF
 credit_approve_gate: insufficient grounded evidence — found ${count}/${CV_REQUIRED_LOADS} distinct Tier 1 pages where --evidence-excerpt "${excerpt}" appears in the browser result.
 Requirements:
   * Load >=${CV_REQUIRED_LOADS} DIFFERENT Tier 1 hostnames via the \`browser\` tool
-    (open.spotify.com, music.apple.com, musicbrainz.org, discogs.com, allmusic.com, tidal.com).
+    (music.apple.com, musicbrainz.org, discogs.com, allmusic.com).
+    Tidal counts as Tier-2 (supporting evidence only) — it does not contribute
+    to the quorum even though web_fetch on tidal.com refuses the approve.
   * Each browser result must literally contain the excerpt string.
   * web_fetch / web_search loads do NOT count. Use \`browser\` only.
 If the excerpt is too broad or too narrow, try one that appears verbatim in the

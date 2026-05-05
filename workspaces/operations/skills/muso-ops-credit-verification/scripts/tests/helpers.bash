@@ -7,6 +7,13 @@ setup_tmp_env() {
   export OPS_BATCH_LOCK_PATH="$TEST_TMPDIR/locks/ops-credit-batch.lock"
   export OPS_RUNLOG_DIR="$TEST_TMPDIR/credit-batch-runs"
   export OPS_WORKSPACE="${OPS_WORKSPACE:-operations}"
+  # Hermetic-env defense: clear gate-resolution env vars the host may have
+  # inherited (CV_SESSION_LOG_OVERRIDE points at a real session log on the
+  # ops box and would silently override our fixtures). Tests that need
+  # these can opt back in. CV_DISABLE_VERDICT_GATE / CV_REQUIRED_PROFILE_BROWSE
+  # are similar test-escape hatches that must not leak in from the shell.
+  unset CV_SESSION_LOG_OVERRIDE CV_SESSION_RUN_STARTED_TS \
+        CV_DISABLE_VERDICT_GATE CV_REQUIRED_PROFILE_BROWSE
   mkdir -p "$OPS_AUDIT_LOG_DIR" "$(dirname "$OPS_BATCH_LOCK_PATH")" "$OPS_RUNLOG_DIR"
 }
 

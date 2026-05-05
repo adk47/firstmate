@@ -19,10 +19,10 @@ describe("blockWebFetchTier1", () => {
     cvSessions.clear();
   });
 
-  it("blocks web_fetch to open.spotify.com in CV context", () => {
+  it("blocks web_fetch to musicbrainz.org in CV context", () => {
     cvSessions.add("s-A");
     const r = blockWebFetchTier1(
-      { toolName: "web_fetch", params: { url: "https://open.spotify.com/artist/abc" } },
+      { toolName: "web_fetch", params: { url: "https://musicbrainz.org/artist/abc" } },
       buildCtx({ sessionKey: "s-A" }),
     );
     expect(r?.block).toBe(true);
@@ -32,13 +32,15 @@ describe("blockWebFetchTier1", () => {
 
   it("blocks each Tier 1 host", () => {
     cvSessions.add("s-A");
+    // Spotify dropped 2026-05-05 (login-gated for headless). Tidal added
+    // because its track/album SPAs are JS-rendered like the other Tier-1
+    // hosts — web_fetch returns the empty shell.
     const hosts = [
-      "https://open.spotify.com/artist/a",
       "https://music.apple.com/us/artist/a/123",
       "https://musicbrainz.org/artist/abc",
       "https://discogs.com/artist/abc",
       "https://allmusic.com/artist/abc",
-      "https://tidal.com/browse/artist/123",
+      "https://tidal.com/album/123/credits",
     ];
     for (const url of hosts) {
       const r = blockWebFetchTier1(
@@ -59,9 +61,13 @@ describe("blockWebFetchTier1", () => {
   });
 
   it("does NOT block web_fetch to non-Tier-1 hosts in CV context", () => {
-    // Artist websites, WHOIS, non-JS blogs etc. are still legitimate fetches.
+    // Artist websites, WHOIS, non-JS blogs, and supporting sources (Spotify
+    // — dropped from Tier-1 because credits dialog is login-gated; Jaxsta,
+    // Genius, …) are still legitimate fetches. Tidal is now Tier-1 (its SPAs
+    // are JS-rendered) so it has moved out of this list.
     cvSessions.add("s-A");
     const nonTier1 = [
+      "https://open.spotify.com/artist/abc",
       "https://jaxsta.com/profile/xyz",
       "https://arrowsmith.me",
       "https://bandcamp.com/artist/abc",
@@ -78,7 +84,7 @@ describe("blockWebFetchTier1", () => {
 
   it("does not block web_fetch outside CV context (no sessionKey in CV set, no runId)", () => {
     const r = blockWebFetchTier1(
-      { toolName: "web_fetch", params: { url: "https://open.spotify.com/artist/abc" } },
+      { toolName: "web_fetch", params: { url: "https://musicbrainz.org/artist/abc" } },
       buildCtx({ sessionKey: "s-A" }),
     );
     expect(r).toBeUndefined();
@@ -99,7 +105,7 @@ describe("blockWebFetchTier1", () => {
     // don't set runId, but they DO run under agentId="operations". The
     // workspace-level gate catches them.
     const r = blockWebFetchTier1(
-      { toolName: "web_fetch", params: { url: "https://open.spotify.com/artist/abc" } },
+      { toolName: "web_fetch", params: { url: "https://musicbrainz.org/artist/abc" } },
       buildCtx({ agentId: "operations" }),
     );
     expect(r?.block).toBe(true);
@@ -117,7 +123,7 @@ describe("blockWebFetchTier1", () => {
     // Other agents (ceo, support, cmo…) still pass web_fetch through — the
     // block is CV-scoped, not a global ban.
     const r = blockWebFetchTier1(
-      { toolName: "web_fetch", params: { url: "https://open.spotify.com/artist/abc" } },
+      { toolName: "web_fetch", params: { url: "https://musicbrainz.org/artist/abc" } },
       buildCtx({ agentId: "ceo" }),
     );
     expect(r).toBeUndefined();
@@ -126,7 +132,7 @@ describe("blockWebFetchTier1", () => {
   it("does not block other tools (passthrough)", () => {
     cvSessions.add("s-A");
     const r = blockWebFetchTier1(
-      { toolName: "browser", params: { url: "https://open.spotify.com/artist/abc" } },
+      { toolName: "browser", params: { url: "https://musicbrainz.org/artist/abc" } },
       { toolName: "browser", sessionKey: "s-A" },
     );
     expect(r).toBeUndefined();
@@ -150,4 +156,5 @@ describe("blockWebFetchTier1", () => {
       ),
     ).toBeUndefined();
   });
+
 });

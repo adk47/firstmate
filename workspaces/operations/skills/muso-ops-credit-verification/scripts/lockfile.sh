@@ -299,6 +299,51 @@ emit_renderer_missing_event_if_needed() {
       return 0
     }
   echo "[lockfile] run_finished_renderer_missing event written for run_id=${run_id} (attempts=${total_attempts}, no renderer-shape Slack post found)" >&2
+
+  # 2026-04-30: post a Slack alert in the same channel/thread so the bypass
+  # is visible in real-time, not just buried in the runlog. Belt-and-braces
+  # behind the enforcer plugin (block-unsanctioned-batch-message hook):
+  # if a future variant slips past the hook, the alert still fires here.
+  # Fail-OPEN — alert posting failures are non-fatal.
+  emit_renderer_missing_slack_alert "$run_id" "$runlog_path" "$total_attempts"
+}
+
+# Post a :rotating_light: Slack alert when the renderer-missing event fires.
+# Routes to dry-run channel if the run was dry-run, else prod CV channel.
+# Fail-OPEN: any failure (no openclaw CLI, no env, send error) is swallowed.
+emit_renderer_missing_slack_alert() {
+  local run_id="$1" runlog_path="$2" attempts="$3"
+  command -v openclaw >/dev/null 2>&1 || return 0
+
+  local dry_run_flag target_channel profile account
+  dry_run_flag=$(jq -s -r 'first(.[] | select(.event | test("^run_finished")) | .dryRun // false) // false' \
+                 "$runlog_path" 2>/dev/null || echo false)
+  if [[ "$dry_run_flag" == "true" ]]; then
+    target_channel="${OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID:-}"
+    [[ -z "$target_channel" ]] && return 0
+  else
+    target_channel="${OPS_CREDIT_VERIFICATION_CHANNEL_ID:-C0APB2CMM7C}"
+  fi
+  profile="${OPS_OPENCLAW_PROFILE:-main}"
+  # --account is REQUIRED for slack sends; without it openclaw can't
+  # resolve which account binding owns the channel id and returns
+  # channel_not_found. Same issue post-batch-summary.sh hit prior to
+  # 2026-04-30. Default matches the operations agent binding.
+  account="${OPS_OPENCLAW_ACCOUNT:-operations}"
+
+  local body
+  body=":rotating_light: Batch summary did NOT come from the canonical renderer for run \`${run_id}\` (attempts=${attempts}).
+The agent posted a hand-composed message instead of using \`render-slack-summary.sh\` via \`post-batch-summary.sh\`.
+The numbers in any prior \`[HEARTBEAT-BATCH]\` post in this thread may not match \`.results.jsonl\`.
+See runlog: \`${runlog_path}\` (event: \`run_finished_renderer_missing\`)."
+
+  openclaw --profile "$profile" message send \
+    --account "$account" \
+    --channel slack \
+    --target "$target_channel" \
+    --message "$body" >/dev/null 2>&1 || {
+      echo "[lockfile] renderer-missing Slack alert failed (target=${target_channel} profile=${profile} account=${account}); event still in runlog for grep" >&2
+    }
 }
 
 case "${1:-}" in

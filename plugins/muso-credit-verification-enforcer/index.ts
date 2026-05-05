@@ -2,6 +2,7 @@ import { definePluginEntry, type OpenClawPluginApi } from "openclaw/plugin-sdk/c
 import { redirectWebSearch } from "./src/hooks/redirect-web-search.js";
 import { blockWebFetchTier1 } from "./src/hooks/block-web-fetch-tier1.js";
 import { blockUnsanctionedBatchMessage } from "./src/hooks/block-unsanctioned-batch-message.js";
+import { blockEscalationWithoutBrowse } from "./src/hooks/block-escalation-without-browse.js";
 import { cleanupSessionState } from "./src/hooks/lifecycle.js";
 import { markCvSessionHook } from "./src/hooks/mark-cv-session.js";
 
@@ -18,7 +19,7 @@ import { markCvSessionHook } from "./src/hooks/mark-cv-session.js";
  *   - `before_tool_call` on `web_search`: redirect to the `browser` tool
  *     (works — web_search IS routed through the hook, unlike exec)
  *   - `before_tool_call` on `web_fetch`: block when the URL host is Tier 1
- *     (Spotify / Apple Music / MusicBrainz / Discogs / AllMusic / Tidal).
+ *     (Spotify / Apple Music / MusicBrainz / Discogs / AllMusic).
  *     Those pages are JS-rendered; web_fetch returns non-rendered HTML.
  *     Non-Tier-1 web_fetch still passes — e.g., an artist's own site.
  *   - `session_end`: unmark the session
@@ -115,6 +116,28 @@ export default definePluginEntry({
         } catch (err) {
           console.error(
             `[credit-verification-enforcer] block-unsanctioned-batch-message error: ${String(err)}`,
+          );
+          return undefined;
+        }
+      },
+      { priority: 100 },
+    );
+
+    // Block 🔍 ESCALATION posts that have ZERO browser activity in the
+    // current run window. Counterpart to the dispatcher's per-profile
+    // browse-required gate (PR #232 change 2): the dispatcher covers
+    // approve+flag, this hook covers the escalation surface (which goes
+    // straight through the message tool, bypassing the dispatcher).
+    // Closes the 2026-04-30 failure mode where 500 escalations landed
+    // with 1 browser call across the entire run. Fail-OPEN on errors.
+    api.on(
+      "before_tool_call",
+      (event, ctx) => {
+        try {
+          return blockEscalationWithoutBrowse(event, ctx);
+        } catch (err) {
+          console.error(
+            `[credit-verification-enforcer] block-escalation-without-browse error: ${String(err)}`,
           );
           return undefined;
         }

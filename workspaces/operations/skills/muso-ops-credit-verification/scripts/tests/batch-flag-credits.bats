@@ -77,14 +77,14 @@ teardown() {
 # --- Arg validation ---
 
 @test "missing --profile-id → exit 2" {
-    run bash "$WRAPPER" --reason high_velocity --ids "cr_1"
+    run bash "$WRAPPER" --reason high_velocity --ids "cr_1" --flag-reason name_mismatch
     [ "$status" -eq 2 ]
     [[ "$output" == *"--profile-id is required"* ]]
     [ ! -f "$ADMIN_LOG" ]
 }
 
 @test "missing --reason → exit 2 (caller discipline; never UVN reasonless)" {
-    run bash "$WRAPPER" --profile-id p1 --ids "cr_1"
+    run bash "$WRAPPER" --profile-id p1 --ids "cr_1" --flag-reason name_mismatch
     [ "$status" -eq 2 ]
     [[ "$output" == *"--reason is required"* ]]
     [ ! -f "$ADMIN_LOG" ]
@@ -98,14 +98,14 @@ teardown() {
 }
 
 @test "empty --ids entry → exit 2" {
-    run bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,,cr_2"
+    run bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,,cr_2" --flag-reason name_mismatch
     [ "$status" -eq 2 ]
     [[ "$output" == *"empty entry"* ]]
     [ ! -f "$ADMIN_LOG" ]
 }
 
 @test "--requester is refused → exit 2" {
-    run bash "$WRAPPER" --requester aaron@muso.ai --profile-id p1 --reason high_velocity --ids "cr_1"
+    run bash "$WRAPPER" --requester aaron@muso.ai --profile-id p1 --reason high_velocity --ids "cr_1" --flag-reason name_mismatch
     [ "$status" -eq 2 ]
     [[ "$output" == *"--requester is forbidden"* ]]
     [ ! -f "$ADMIN_LOG" ]
@@ -117,10 +117,37 @@ teardown() {
     [[ "$output" == *"unknown argument"* ]]
 }
 
+@test "missing --flag-reason → exit 2" {
+    run bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--flag-reason is required"* ]]
+}
+
+@test "invalid --flag-reason value → exit 2" {
+    run bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1" --flag-reason looks_off
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"not a valid enum value"* ]]
+}
+
+@test "--flag-reason exported as OPS_FLAG_REASON for admin-api truth-floor write" {
+    # The wrapper must export OPS_FLAG_REASON before invoking admin-api so
+    # write_credit_request_result can include the categorical signal in the
+    # .results.jsonl row. Stub admin captures env via printenv.
+    cat > "$ADMIN_API_SH" <<'STUB'
+#!/usr/bin/env bash
+echo "ENV_OPS_FLAG_REASON=${OPS_FLAG_REASON:-UNSET}" >> "${ADMIN_LOG:-/dev/null}"
+printf '%s\n' '{"http_status":200,"dryRun":true,"body":null}'
+STUB
+    chmod +x "$ADMIN_API_SH"
+    run bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1" --flag-reason name_mismatch
+    [ "$status" -eq 0 ]
+    grep -qF 'ENV_OPS_FLAG_REASON=name_mismatch' "$ADMIN_LOG"
+}
+
 # --- Endpoint shape (the 2026-04-27 fix) ---
 
 @test "ENDPOINT INVARIANT: uses PUT /admin/credit-requests with batch body" {
-    STUB_MODE=success_dryrun bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3" >/dev/null
+    STUB_MODE=success_dryrun bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3" --flag-reason name_mismatch >/dev/null
     # Single invocation (NOT N per-id calls)
     [ "$(grep -c '^ARGS:' "$ADMIN_LOG")" -eq 1 ]
     # PUT not PATCH; collection path not /<id>
@@ -137,7 +164,7 @@ teardown() {
 }
 
 @test "ENDPOINT INVARIANT: trims whitespace from --ids before serializing" {
-    STUB_MODE=success_dryrun bash "$WRAPPER" --profile-id p1 --reason r --ids " cr_1 , cr_2 ,cr_3 " >/dev/null
+    STUB_MODE=success_dryrun bash "$WRAPPER" --profile-id p1 --reason r --ids " cr_1 , cr_2 ,cr_3 " --flag-reason name_mismatch >/dev/null
     body=$(grep '^LAST_ARG:' "$ADMIN_LOG" | sed 's/^LAST_ARG: //' | head -1)
     echo "$body" | jq -e '.requestIds == ["cr_1","cr_2","cr_3"]' >/dev/null
 }
@@ -147,7 +174,7 @@ teardown() {
     # returns the exact 404 the real backend produces. Wrapper must treat
     # it as http_error (not "ok") and exit 1. This test exists to lock the
     # 2026-04-27 incident shape into CI.
-    STUB_MODE=http_404_patch_legacy run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1"
+    STUB_MODE=http_404_patch_legacy run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1" --flag-reason name_mismatch
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '.outcome == "http_error" and .http_status == 404' >/dev/null
 }
@@ -155,13 +182,13 @@ teardown() {
 # --- Successful paths ---
 
 @test "happy path (dry-run) → exit 0, outcome=dry_run_intercept" {
-    STUB_MODE=success_dryrun run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3"
+    STUB_MODE=success_dryrun run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3" --flag-reason name_mismatch
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.profile_id == "p1" and .requested == 3 and .outcome == "dry_run_intercept" and .http_status == 200' >/dev/null
 }
 
 @test "happy path (real 200) → exit 0, outcome=ok, no --evidence-excerpt flag" {
-    STUB_MODE=success_200 run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2"
+    STUB_MODE=success_200 run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2" --flag-reason name_mismatch
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.outcome == "ok" and .http_status == 200 and .requested == 2' >/dev/null
     # UVN is ungated — wrapper must NOT pass --evidence-excerpt.
@@ -169,7 +196,7 @@ teardown() {
 }
 
 @test "reason is forwarded to stderr (audit grep), NOT to API body" {
-    STUB_MODE=success_dryrun run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1"
+    STUB_MODE=success_dryrun run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1" --flag-reason name_mismatch
     [ "$status" -eq 0 ]
     [[ "$stderr" == *"reason=\"high_velocity\""* ]]
     [[ "$stderr" == *"profile=p1"* ]]
@@ -180,13 +207,13 @@ teardown() {
 # --- Failure paths ---
 
 @test "HTTP 500 from updateStatus → exit 1, outcome=http_error" {
-    STUB_MODE=http_500 run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2"
+    STUB_MODE=http_500 run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2" --flag-reason name_mismatch
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '.outcome == "http_error" and .http_status == 500 and .requested == 2' >/dev/null
 }
 
 @test "connection refused (curl 7) → exit 1, stderr surfaces" {
-    STUB_MODE=connection_refused run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3"
+    STUB_MODE=connection_refused run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3" --flag-reason name_mismatch
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '.outcome == "http_error"' >/dev/null
     [[ "$stderr" == *"Failed to connect"* ]]
@@ -205,7 +232,7 @@ teardown() {
 
 @test "admin script absent → exit 2 (plumbing failure surfaces)" {
     ADMIN_API_SH=/nonexistent/muso-admin-api.sh \
-        run bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1"
+        run bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1" --flag-reason name_mismatch
     [ "$status" -eq 2 ]
     [[ "$output" == *"muso-admin-api.sh not found"* ]]
 }

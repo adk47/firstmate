@@ -32,7 +32,6 @@ type BeforeToolCallResult = {
  * leading `www.` prefix on the URL.
  */
 const TIER1_HOSTS = [
-  "open.spotify.com",
   "music.apple.com",
   "musicbrainz.org",
   "discogs.com",
@@ -42,8 +41,8 @@ const TIER1_HOSTS = [
 
 const BLOCK_REASON =
   "web_fetch is disabled on Tier 1 music-data hosts during credit verification.\n\n" +
-  "Tier 1 sources (Spotify / Apple Music / MusicBrainz / Discogs / AllMusic /\n" +
-  "Tidal) are JavaScript-rendered — web_fetch returns the raw HTML shell, not\n" +
+  "Tier 1 sources (Apple Music / MusicBrainz / Discogs / AllMusic / Tidal)\n" +
+  "are JavaScript-rendered — web_fetch returns the raw HTML shell, not\n" +
   "the data the browser tool sees. Multiple credit-verification incidents have\n" +
   "involved web_fetch substituting for browser on these hosts, producing\n" +
   "'grounded' approvals based on empty or wrong data.\n\n" +

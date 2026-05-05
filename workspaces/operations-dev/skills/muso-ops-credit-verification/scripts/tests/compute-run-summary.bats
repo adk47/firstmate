@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
 load helpers
 
 # compute-run-summary.sh tests. See scripts/compute-run-summary.sh for
@@ -7,8 +8,8 @@ load helpers
 # (toolCall + toolResult pairs in the shape openclaw writes) and verify the
 # helper's output and side-effects.
 
-PROBE_URL="https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4"
-PROBE_TEXT="Drake · Spotify · Artist page"   # contains "spotify" and "drake"
+PROBE_URL="https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d"
+PROBE_TEXT="Drake · MusicBrainz · Artist page"   # contains "musicbrainz" and "drake"
 
 setup() {
   setup_tmp_env
@@ -22,6 +23,13 @@ setup() {
   mkdir -p "$RUNLOG_DIR"
   export RUNLOG_FILE="$RUNLOG_DIR/${RUN_ID}.jsonl"
   : > "$RUNLOG_FILE"
+  # All existing tests model the B6 terminal call (compute-run-summary.sh
+  # invoked at the end of a run with the agent expecting invariant
+  # detection — silent_failure, hollow, ungrounded). Set OPS_BATCH_TERMINAL=1
+  # so the in-flight guard added 2026-04-28 (Failure 2 fix) does NOT short-
+  # circuit these scenarios. Tests for the guard itself unset this in their
+  # own bodies.
+  export OPS_BATCH_TERMINAL=1
 }
 teardown() { teardown_tmp_env; }
 
@@ -146,8 +154,8 @@ seed_runlog_escalation() {
 
   [ -f "$RUNLOG_FILE" ]
   jq -e 'select(.event=="run_finished" and .fetched==3 and .approved==2)' < "$RUNLOG_FILE"
-  ! jq -e 'select(.event=="run_finished_hollow")' < "$RUNLOG_FILE" > /dev/null
-  ! jq -e 'select(.event=="run_finished_ungrounded")' < "$RUNLOG_FILE" > /dev/null
+  ! jq -e 'select(.event=="run_finished_hollow")' < "$RUNLOG_FILE" > /dev/null || return 1
+  ! jq -e 'select(.event=="run_finished_ungrounded")' < "$RUNLOG_FILE" > /dev/null || return 1
 }
 
 # ---- incident-shape tests ----
@@ -173,7 +181,7 @@ seed_runlog_escalation() {
 @test "ungrounded run (13:26 b8b0e5 style): web_fetch substituted for probe + fake approve" {
   # Agent used web_fetch for the probe URL (not browser). Then faked an
   # approved PUT. Derived preflight is false; ungrounded invariant fires.
-  seed_web_fetch "c0" "$PROBE_URL" "Drake spotify page"
+  seed_web_fetch "c0" "$PROBE_URL" "Drake musicbrainz page"
   seed_exec_admin "c1" \
     "bash muso-admin-api.sh call GET /admin/credit-requests?status=unverified&limit=10" \
     '{"http_status":200,"body":{"items":[{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}]}}'
@@ -205,14 +213,14 @@ seed_runlog_escalation() {
 
 @test "preflight: Cloudflare challenge page with non-error response is rejected" {
   # A Cloudflare page can return HTTP 200 with non-empty body that lacks
-  # "spotify" and "drake" — B0d explicitly requires both.
+  # "musicbrainz" and "drake" — B0d explicitly requires both.
   seed_browser "c0" "$PROBE_URL" "false" "Please wait while we verify you are human."
   run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.preflight_ok == false'
 }
 
-@test "preflight: text containing only 'spotify' (not 'drake') is rejected" {
+@test "preflight: text containing only 'musicbrainz' (not 'drake') is rejected" {
   seed_browser "c0" "$PROBE_URL" "false" "Open Spotify · Error page"
   run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
   [ "$status" -eq 0 ]
@@ -517,4 +525,576 @@ seed_runlog_header() {
   OPS_DRY_RUN=1 run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.dryRun == true'
+}
+
+# ---- Reconciliation: results.jsonl as authoritative source (PR 2) ----
+#
+# PR #158 adds a truth-floor results.jsonl inside muso-admin-api.sh that is
+# written for every /admin/credit-requests write regardless of caller
+# redirection. These tests assert that compute-run-summary.sh prefers that
+# file over session-derived counts when it exists, and fires the
+# silent_failure_detected invariant when attempts > 0 but nothing landed —
+# the exact 2026-04-22 19:15 lie shape.
+
+# Helper: write a single line to the run-scoped results.jsonl.
+seed_results() {
+  # args: intended_status outcome request_ids_json
+  local status="$1" outcome="$2" ids="$3"
+  local path="$CV_RESULTS_PATH"
+  mkdir -p "$(dirname "$path")"
+  jq -n -c --arg s "$status" --arg o "$outcome" --argjson ids "$ids" --arg rid "$RUN_ID" \
+    '{ts:"2026-04-22T19:19:00Z", run_id:$rid, method:"PUT", path:"/admin/credit-requests",
+       request_ids:$ids, intended_status:$s, outcome:$o,
+       http_status:(if $o == "ok" or $o == "dry_run_intercept" then 200 else null end),
+       error:null, requester:null}' >> "$path"
+}
+
+setup_cv_results() {
+  # Point CV_RESULTS_PATH at a tmp file so we don't write to /var/log in CI.
+  export CV_RESULTS_PATH="$TEST_TMPDIR/credit-results.jsonl"
+}
+
+@test "reconciliation: results.jsonl absent → source=session_jsonl_fallback, silent_failure_detected=false" {
+  # No results.jsonl exists. Fall through to legacy session-derived counts.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.reconciliation.source == "session_jsonl_fallback"'
+  # Defaults: no attempts logged, no failure detected.
+  echo "$output" | jq -e '.silent_failure_detected == false'
+  echo "$output" | jq -e '.reconciliation.approved_attempted == 0'
+  # Legacy session count still populates the top-level approved field.
+  echo "$output" | jq -e '.approved == 0'
+}
+
+@test "reconciliation: results.jsonl present → source=results_jsonl, counts match file" {
+  # Happy path: agent ran batch-approve-credits.sh and it succeeded.
+  # Dry-run intercept is the mode: counts as "landed" for Slack purposes.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_results approved dry_run_intercept '["cr_1","cr_2","cr_3"]'
+  seed_results user_verification_needed dry_run_intercept '["cr_4"]'
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.reconciliation.source == "results_jsonl"'
+  echo "$output" | jq -e '.reconciliation.approved_attempted == 3'
+  echo "$output" | jq -e '.reconciliation.approved_landed == 3'
+  echo "$output" | jq -e '.reconciliation.verification_needed_attempted == 1'
+  echo "$output" | jq -e '.reconciliation.verification_needed_landed == 1'
+  echo "$output" | jq -e '.approved == 3'
+  echo "$output" | jq -e '.verification_needed == 1'
+  echo "$output" | jq -e '.silent_failure_detected == false'
+}
+
+@test "reconciliation: batch PUT with 124 request_ids counts as 124 approved (not 1)" {
+  # Real-world shape: one PUT /admin/credit-requests with N ids. request_ids
+  # length is what matters for the Slack number, not invocation count.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  # Build a 124-id array.
+  ids=$(jq -n -c '[range(0;124) | "cr_" + tostring]')
+  seed_results approved dry_run_intercept "$ids"
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.approved == 124'
+  echo "$output" | jq -e '.reconciliation.approved_landed == 124'
+}
+
+@test "SILENT FAILURE INVARIANT: all approves rejected_by_gate → silent_failure_detected=true" {
+  # The EXACT 2026-04-22 19:15 scenario replayed through the truth floor:
+  # 333 approves attempted, all rejected by the gate (body-only evidence).
+  # Slack prose claimed success; the invariant catches the lie.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  # T L A: 124 approves rejected
+  ids_tla=$(jq -n -c '[range(0;124) | "tla_" + tostring]')
+  seed_results approved rejected_by_gate "$ids_tla"
+  # André Six: 11 approves rejected
+  ids_as=$(jq -n -c '[range(0;11) | "as_" + tostring]')
+  seed_results approved rejected_by_gate "$ids_as"
+  # 167 UVN landed (actual 19:19 number)
+  ids_uvn=$(jq -n -c '[range(0;167) | "uvn_" + tostring]')
+  seed_results user_verification_needed dry_run_intercept "$ids_uvn"
+
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == true'
+  echo "$output" | jq -e '.approved == 0'
+  echo "$output" | jq -e '.reconciliation.approved_attempted == 135'
+  echo "$output" | jq -e '.reconciliation.approved_rejected_by_gate == 135'
+  # UVN is fine — the invariant fires on APPROVE silent failure alone.
+  echo "$output" | jq -e '.verification_needed == 167'
+
+  # run_finished_silent_failure event lands in the runlog.
+  jq -e 'select(.event=="run_finished_silent_failure")' < "$RUNLOG_FILE"
+  jq -e 'select(.event=="run_finished_silent_failure" and .reconciliation.approved_rejected_by_gate == 135)' < "$RUNLOG_FILE"
+}
+
+@test "silent_failure_detected: fires for UVN attempts with zero landed too" {
+  # Symmetry: UVN has no gate but could still suffer network failures or
+  # http_error. If 0 of N UVN attempts landed, that's silent failure.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_results user_verification_needed http_error '["uvn_1","uvn_2","uvn_3"]'
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == true'
+  echo "$output" | jq -e '.reconciliation.verification_needed_attempted == 3'
+  echo "$output" | jq -e '.reconciliation.verification_needed_landed == 0'
+  echo "$output" | jq -e '.reconciliation.verification_needed_http_error == 3'
+}
+
+@test "silent_failure_detected: false when ANY approves land (partial success still counts as alive)" {
+  # 2 of 3 approved, 1 rejected → not silent failure. Truth in the numbers
+  # is enough; partial failures are surfaced via reconciliation.approved_*
+  # fields, not an invariant.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_results approved ok '["cr_1","cr_2"]'
+  seed_results approved rejected_by_gate '["cr_3"]'
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == false'
+  echo "$output" | jq -e '.approved == 2'
+  echo "$output" | jq -e '.reconciliation.approved_attempted == 3'
+  echo "$output" | jq -e '.reconciliation.approved_rejected_by_gate == 1'
+}
+
+@test "silent_failure_detected: false when attempted == 0 (no work to silently fail)" {
+  # Empty batch (queue was drained or filtered to nothing). No invariant
+  # should fire — we didn't try anything, we didn't lie about anything.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  # Touch the file so reconciliation runs, but don't add any lines.
+  : > "$CV_RESULTS_PATH"
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == false'
+  echo "$output" | jq -e '.reconciliation.approved_attempted == 0'
+  echo "$output" | jq -e '.reconciliation.source == "results_jsonl"'
+}
+
+# ---- Read-side silent-zero (2026-04-27 incident class) ----
+#
+# The 2026-04-27 10:06 UTC dry-run posted "Queue clear — 0 unverified" while
+# the live API had 13891 unverified credits. Root cause: agent's improvised
+# B1 jq paths (`.body.items // .items // []`) silently fell through to `[]`
+# because the real envelope is `.body.data.items`. The PRIMARY defense is
+# `fetch-queue.sh`'s exit-11 invariant (caught at fetch time before any bad
+# summary is computed). The BACKSTOP defense — these tests — fires inside
+# compute-run-summary.sh when run_started_queue.queue_depth_at_start says
+# the queue was non-empty but session-derived fetched is 0. This catches
+# any future B1 code path that bypasses fetch-queue.sh.
+
+@test "READ-SIDE SILENT-ZERO INVARIANT: queue_depth>0 but session fetched=0 → silent_failure_detected=true" {
+  # Replay the 2026-04-27 shape AS IF B1 had logged the truth:
+  #   - run_started_queue.queue_depth_at_start = 13891 (counts API was right)
+  #   - session JSONL has no successful list response (improv jq returned [])
+  # Note today's incident actually logged queue_depth=0 because the agent's
+  # bash also misread counts. With fetch-queue.sh in place, queue_depth
+  # comes from the locked path, so this hypothetical (script-bypassed-but-
+  # counts-still-logged-correctly) is what the backstop covers.
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13891
+  # Crucially: NO seed_exec_admin for the list fetch — session has nothing.
+  # Without our fix, the R2-6 fallback would set FETCHED=500 (queue<fetch),
+  # and silent_failure_detected would stay false. The new SESSION_DERIVED_
+  # FETCHED capture preserves the raw 0 for the silent-zero check.
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == true'
+
+  # run_finished_silent_failure event lands in the runlog with the new reason.
+  jq -e 'select(.event=="run_finished_silent_failure" and (.reason | test("read_side_silent_zero")))' < "$RUNLOG_FILE"
+  jq -e 'select(.event=="run_finished_silent_failure" and (.reason | test("queue_depth_at_start=13891")))' < "$RUNLOG_FILE"
+}
+
+@test "read-side silent-zero: false when queue_depth==0 (genuine empty queue)" {
+  # The legitimate "queue clear" path. queue_depth=0 with fetched=0 is fine.
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 0
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == false'
+}
+
+@test "read-side silent-zero: false when session DID observe items (truncation case)" {
+  # The 2026-04-23 truncation class — queue_depth=12008, fetched parsed as
+  # the real number from session JSONL — must NOT trip the read-side check.
+  # Session-derived fetched > 0 means the fetch worked; only the run_finished
+  # SUMMARY needs the R2-6 fallback for accurate Slack totals.
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 12008
+  seed_exec_admin "c1" \
+    "bash muso-admin-api.sh call GET /admin/credit-requests?status=unverified&limit=500" \
+    '{"http_status":200,"body":{"data":{"items":[{"id":"a"},{"id":"b"},{"id":"c"}]}}}'
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == false'
+}
+
+@test "read-side silent-zero: false when runlog profile groups prove fetch succeeded" {
+  # Current CLI-batch shape: queue JSON is persisted to a temp file instead
+  # of printed in full, so session-derived fetched can be 0. The runlog's
+  # profile_group_fetched events prove B1 returned real items and B2 grouped
+  # them, so the read-side silent-zero backstop must not fire.
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13839
+  jq -n -c --arg rid "$RUN_ID" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{event:"profile_group_fetched", run_id:$rid, ts:$ts, profile_id:"p1", userid:"u1", cr_ids:["cr_1","cr_2"], count:2}' >> "$RUNLOG_FILE"
+
+  setup_cv_results
+  seed_results user_verification_needed ok '["cr_1","cr_2"]'
+
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == false'
+  echo "$output" | jq -e '.hollow == false'
+  echo "$output" | jq -e '.verification_needed == 2'
+  ! jq -e 'select(.event=="run_finished_silent_failure")' < "$RUNLOG_FILE" >/dev/null || return 1
+  ! jq -e 'select(.event=="run_finished_hollow")' < "$RUNLOG_FILE" >/dev/null || return 1
+}
+
+@test "read-side silent-zero: write-side reason takes precedence when both fire" {
+  # If the write-side check ALREADY flagged silent failure (rejected_by_gate
+  # all-zero-landed), the read-side branch must NOT clobber the write-side
+  # reason — the write-side incident class is more specific.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13891
+  seed_results approved rejected_by_gate '["cr_1","cr_2","cr_3"]'
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.silent_failure_detected == true'
+  # Write-side reason wins. Read-side reason MUST NOT appear.
+  jq -e 'select(.event=="run_finished_silent_failure" and (.reason | test("admin-api attempts >0")))' < "$RUNLOG_FILE"
+  ! jq -e 'select(.event=="run_finished_silent_failure" and (.reason | test("read_side_silent_zero")))' < "$RUNLOG_FILE" || return 1
+}
+
+@test "CLI preflight runlog event overrides missing session exec result" {
+  # When a long-running exec is polled via openclaw's process tool, the
+  # preflight-verify.sh stdout can land in a process result instead of the
+  # original exec result. The helper-written runlog event is authoritative.
+  jq -n -c --arg rid "$RUN_ID" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{event:"preflight_ok", run_id:$rid, ts:$ts, probe_url:"https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d", source:"preflight-verify.sh@cli"}' >> "$RUNLOG_FILE"
+
+  setup_cv_results
+  seed_results user_verification_needed ok '["cr_1"]'
+
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.preflight_ok == true'
+  echo "$output" | jq -e '.hollow == false'
+  echo "$output" | jq -e '.ungrounded == false'
+}
+
+@test "reconciliation: session_derived_approved preserved even when overridden" {
+  # Post-mortem fidelity: if the agent's session JSONL-observed approves
+  # disagree with the authoritative .results.jsonl number, both must be
+  # visible. Session-observed lives under reconciliation.session_derived_*.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  # Session shows no actual 200 response (the > /dev/null pattern):
+  # session-derived approved stays 0. Results.jsonl shows 5 landed.
+  seed_results approved dry_run_intercept '["a","b","c","d","e"]'
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.approved == 5'
+  echo "$output" | jq -e '.reconciliation.session_derived_approved == 0'
+}
+
+# ---- Idempotency guard (R2-2) ----
+#
+# 2026-04-23 09:02 UTC produced two run_finished events because B3 and B6
+# both explicitly invoked this script. The fix: if a run_finished event
+# already exists for $RUN_ID in the runlog, return the cached summary and
+# skip all event writes.
+
+@test "idempotency: second invocation does not write duplicate run_finished events" {
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_results approved dry_run_intercept '["cr_1","cr_2"]'
+
+  # First invocation: normal path, writes run_finished.
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  [ "$(jq -s 'map(select(.event == "run_finished")) | length' "$RUNLOG_FILE")" -eq 1 ]
+
+  # Second invocation: cached path, no new writes.
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  [ "$(jq -s 'map(select(.event == "run_finished")) | length' "$RUNLOG_FILE")" -eq 1 ]
+  # Also no silent_failure / hollow / ungrounded events written at all
+  # (cached path skips all event writes, and fixture is the happy path).
+  [ "$(jq -s 'map(select(.event == "run_finished_silent_failure")) | length' "$RUNLOG_FILE")" -eq 0 ]
+}
+
+@test "idempotency: second invocation returns the cached summary JSON identically" {
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_results approved dry_run_intercept '["cr_1","cr_2","cr_3"]'
+
+  first_out=$("$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS")
+  second_out=$("$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS")
+
+  # Both invocations emit the same counts. The cached-path output is the
+  # exact run_finished line from the runlog (which == the first_out payload
+  # with .event/.ts/.run_id fields attached).
+  [ "$(echo "$first_out" | jq -r '.approved')" = "$(echo "$second_out" | jq -r '.approved')" ]
+  [ "$(echo "$first_out" | jq -r '.verification_needed')" = "$(echo "$second_out" | jq -r '.verification_needed')" ]
+  [ "$(echo "$first_out" | jq -r '.reconciliation.source')" = "$(echo "$second_out" | jq -r '.reconciliation.source')" ]
+}
+
+@test "idempotency: cached path emits stderr note so re-invocations are visible post-mortem" {
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_results approved dry_run_intercept '["cr_1"]'
+
+  "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS" >/dev/null
+  # Second call — capture stderr separately.
+  stderr_out=$("$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS" 2>&1 >/dev/null)
+  [[ "$stderr_out" == *"run_finished already present"* ]]
+  [[ "$stderr_out" == *"no new events written"* ]]
+}
+
+@test "idempotency: third+ invocations still stable (cached path fully idempotent)" {
+  # Pathological: run 5 times. Runlog should still have exactly 1 run_finished.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_results approved dry_run_intercept '["cr_1"]'
+
+  for _ in 1 2 3 4 5; do
+    "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS" >/dev/null 2>&1
+  done
+  [ "$(jq -s 'map(select(.event == "run_finished")) | length' "$RUNLOG_FILE")" -eq 1 ]
+}
+
+@test "idempotency: invariant events from first run are preserved (not re-written)" {
+  # Silent-failure invariant fires on first call. Second call must not
+  # write a duplicate silent_failure event either.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  # All approves rejected → silent_failure_detected fires on first call.
+  seed_results approved rejected_by_gate '["cr_1","cr_2","cr_3"]'
+
+  "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS" >/dev/null
+  [ "$(jq -s 'map(select(.event == "run_finished_silent_failure")) | length' "$RUNLOG_FILE")" -eq 1 ]
+
+  "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS" >/dev/null
+  # Still exactly 1 — cached path skipped all writes.
+  [ "$(jq -s 'map(select(.event == "run_finished_silent_failure")) | length' "$RUNLOG_FILE")" -eq 1 ]
+  [ "$(jq -s 'map(select(.event == "run_finished")) | length' "$RUNLOG_FILE")" -eq 1 ]
+}
+
+# ---- Fetched fallback (R2-6) ----
+#
+# The 2026-04-23 09:02 UTC dry-run had fetched:0 in the summary even though
+# the agent processed 500 credits. Root cause: openclaw's exec tool truncated
+# the list-response body (~500KB) to the last 16KB, slicing off the
+# {"http_status":200,"body":{...}} envelope. session_counts.fetched saw no
+# parseable items.
+#
+# Fallback: when session-derived FETCHED is 0, read the intended batch size
+# from the run_started event and the queue depth from run_started_queue, and
+# use min(fetch_size, queue_depth) as the authoritative "fetched" figure.
+
+seed_runlog_run_started() {
+  # args: fetch_size queue_depth (queue_depth optional — use "" to skip)
+  local fs="$1" qd="${2:-}"
+  jq -n -c --arg rid "$RUN_ID" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson fs "$fs" \
+    '{event:"run_started", run_id:$rid, ts:$ts, phase:"0", fetch_size:$fs}' >> "$RUNLOG_FILE"
+  if [[ -n "$qd" ]]; then
+    jq -n -c --arg rid "$RUN_ID" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson qd "$qd" \
+      '{event:"run_started_queue", run_id:$rid, ts:$ts, queue_depth_at_start:$qd}' >> "$RUNLOG_FILE"
+  fi
+}
+
+@test "fetched fallback: when session-derived is 0 and response truncated, use run_started.fetch_size" {
+  # Replay the 2026-04-23 shape: no parseable fetch in session JSONL,
+  # runlog has fetch_size=500 and queue_depth=12008.
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 12008
+  # No seed_exec_admin for the list fetch — simulating the truncated envelope.
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  # Queue (12008) >> fetch_size (500), so fetched = 500.
+  echo "$output" | jq -e '.fetched == 500'
+}
+
+@test "fetched fallback: caps at queue_depth when queue_depth < fetch_size" {
+  # Small queue edge case: fetch_size=500 but only 42 credits in queue.
+  # Authoritative fetched = 42 (we can't fetch more than exist).
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 42
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.fetched == 42'
+}
+
+@test "fetched fallback: session-derived takes precedence when > 0" {
+  # If the session log DOES have a parseable fetch response, use it (we
+  # know it's accurate). The fallback only kicks in for the truncated case.
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 12008
+  seed_exec_admin "c1" \
+    "bash muso-admin-api.sh call GET /admin/credit-requests?status=unverified&limit=10" \
+    '{"http_status":200,"body":{"data":{"items":[{"id":"aa"},{"id":"bb"},{"id":"cc"}]}}}'
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  # Session saw 3 items → 3 wins over the 500 fallback.
+  echo "$output" | jq -e '.fetched == 3'
+}
+
+@test "fetched fallback: no run_started event → stays 0 (no invented number)" {
+  # Defense-in-depth: if there's no run_started event either, the fallback
+  # can't fabricate a number. Better to report 0 than guess.
+  seed_browser_ok "c0" "$PROBE_URL"
+  # No seed_runlog_run_started call — runlog only has our browser seed.
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.fetched == 0'
+}
+
+@test "fetched fallback: run_started without queue_depth → uses fetch_size directly" {
+  # Older runlog shape missing run_started_queue — fetch_size alone suffices.
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 250 ""
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.fetched == 250'
+}
+
+# --- R3-final: rejected_pre_flight bucket ------------------------------------
+#
+# batch-verify-profile.sh writes rows with outcome=rejected_pre_flight when
+# its local pre-flight refuses (missing Tier-1 evidence OR in-run web_fetch
+# contamination). These are a distinct failure class from gate rejections —
+# the agent never reached the gate because its evidence-gathering step
+# didn't supply what was needed. Surface as its own reconciliation field so
+# Slack consumers can distinguish "the agent tried and was caught" from
+# "the agent never even attempted the HTTP call".
+
+@test "reconciliation: rejected_pre_flight rows surface as distinct bucket" {
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  # Simulate the 2026-04-23 12:57 UTC shape: 30 profiles × avg ~3 credits =
+  # 102 approve attempts pre-flight-refused because per-profile evidence
+  # wasn't loaded. This is the shape we want the reconciliation to show,
+  # NOT rejected_by_gate.
+  ids_batch=$(jq -n -c '[range(0;102) | "cr_" + tostring]')
+  jq -n -c --arg rid "$RUN_ID" --argjson ids "$ids_batch" \
+    '{ts:"2026-04-23T12:57:30Z", run_id:$rid, method:"PUT", path:"/admin/credit-requests",
+       request_ids:$ids, intended_status:"approved",
+       outcome:"rejected_pre_flight", pre_flight:"missing_evidence",
+       http_status:null, error:null, requester:null}' >> "$CV_RESULTS_PATH"
+
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.reconciliation.approved_attempted == 102'
+  echo "$output" | jq -e '.reconciliation.approved_rejected_pre_flight == 102'
+  echo "$output" | jq -e '.reconciliation.approved_rejected_by_gate == 0'
+  # rejected_pre_flight also counts as a silent failure (0 landed of 102).
+  echo "$output" | jq -e '.silent_failure_detected == true'
+}
+
+@test "reconciliation: rejected_pre_flight rows from web_fetch_tier1 contamination" {
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  jq -n -c --arg rid "$RUN_ID" \
+    '{ts:"2026-04-23T12:57:30Z", run_id:$rid, method:"PUT", path:"/admin/credit-requests",
+       request_ids:["cr_a","cr_b"], intended_status:"approved",
+       outcome:"rejected_pre_flight", pre_flight:"web_fetch_tier1",
+       http_status:null, error:null, requester:null}' >> "$CV_RESULTS_PATH"
+
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.reconciliation.approved_rejected_pre_flight == 2'
+}
+
+@test "reconciliation: pre_flight and gate buckets are independent" {
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  # Mixed batch: some pre-flight-refused, some gate-rejected, some landed.
+  jq -n -c --arg rid "$RUN_ID" \
+    '{ts:"2026-04-23T12:57:30Z", run_id:$rid, method:"PUT", path:"/admin/credit-requests",
+       request_ids:["cr_1","cr_2"], intended_status:"approved",
+       outcome:"rejected_pre_flight", pre_flight:"missing_evidence",
+       http_status:null, error:null, requester:null}' >> "$CV_RESULTS_PATH"
+  seed_results approved rejected_by_gate '["cr_3","cr_4","cr_5"]'
+  seed_results approved dry_run_intercept '["cr_6"]'
+
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.reconciliation.approved_attempted == 6'
+  echo "$output" | jq -e '.reconciliation.approved_landed == 1'
+  echo "$output" | jq -e '.reconciliation.approved_rejected_pre_flight == 2'
+  echo "$output" | jq -e '.reconciliation.approved_rejected_by_gate == 3'
+  # 1 of 6 landed — not all-zero, so silent_failure is false.
+  echo "$output" | jq -e '.silent_failure_detected == false'
+}
+
+
+# ---- In-flight guard (Failure 2 from 2026-04-28 15:35:00 UTC) ----
+#
+# When the agent splits B0+B1 and B2+ across multiple exec calls, the bash
+# trap-on-EXIT in exec 1 historically fired lockfile.sh release, which
+# invoked compute-run-summary.sh as a crash-recovery fallback. That wrote
+# run_finished_hollow + run_finished_silent_failure 53s before B2 actually
+# ran. Compute-run-summary.sh now refuses to write run_finished if
+# queue_depth_at_start > 0 AND zero action_attempted events, unless the
+# caller passes --final or sets OPS_BATCH_TERMINAL=1.
+
+@test "in-flight guard: refuses without --final when queue_depth>0 and attempts==0 (exit 8)" {
+  unset OPS_BATCH_TERMINAL
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13864
+  run --separate-stderr "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 8 ]
+  [[ "$stderr" == *"refusing to write run_finished"* ]]
+  [[ "$stderr" == *"queue_depth_at_start=13864"* ]]
+  [[ "$stderr" == *"action_attempted=0"* ]]
+  # No run_finished event written.
+  ! jq -e 'select(.event=="run_finished")' < "$RUNLOG_FILE" >/dev/null 2>&1 || return 1
+}
+
+@test "in-flight guard: --final flag overrides and writes run_finished" {
+  unset OPS_BATCH_TERMINAL
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13864
+  run "$SCRIPTS_DIR/compute-run-summary.sh" --final "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  # silent_failure_detected fires (queue_depth>0 but session-derived fetched=0)
+  echo "$output" | jq -e '.silent_failure_detected == true'
+  jq -e 'select(.event=="run_finished")' < "$RUNLOG_FILE" >/dev/null
+}
+
+@test "in-flight guard: OPS_BATCH_TERMINAL=1 env overrides the same way --final does" {
+  unset OPS_BATCH_TERMINAL
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13864
+  OPS_BATCH_TERMINAL=1 run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  jq -e 'select(.event=="run_finished")' < "$RUNLOG_FILE" >/dev/null
+}
+
+@test "in-flight guard: empty queue (queue_depth_at_start==0) is not blocked even without --final" {
+  # Empty-queue case is NOT in-flight — no work to do, immediate run_finished
+  # with hollow=false, fetched=0 is the correct shape. Guard must not fire.
+  unset OPS_BATCH_TERMINAL
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 0
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  jq -e 'select(.event=="run_finished")' < "$RUNLOG_FILE" >/dev/null
+}
+
+@test "in-flight guard: action_attempted seeded → not blocked even without --final" {
+  unset OPS_BATCH_TERMINAL
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 13864
+  seed_runlog_action approve "cr_1"
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  jq -e 'select(.event=="run_finished")' < "$RUNLOG_FILE" >/dev/null
 }

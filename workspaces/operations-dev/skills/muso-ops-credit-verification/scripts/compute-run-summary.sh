@@ -16,7 +16,7 @@
 #      are identified by (a) the script name in the flattened args AND (b) a
 #      response envelope containing `"http_status":N`. Counters derived:
 #        preflight_ok          — ≥1 successful `browser` load of the probe URL
-#                                whose returned text contains BOTH "spotify"
+#                                whose returned text contains BOTH "musicbrainz"
 #                                AND "drake" (case-insensitive) — mirrors the
 #                                B0d success criteria exactly.
 #        fetched               — unique credit IDs at $.body.items[].id in
@@ -62,6 +62,26 @@
 
 set -euo pipefail
 
+# Parse args: support `--final` flag before or after positional args. The flag
+# (or OPS_BATCH_TERMINAL=1 env) opts into writing run_finished when the run
+# has the in-flight shape (queue_depth_at_start > 0, action_attempted == 0).
+# Without it, we refuse — protecting against the lockfile-trap-on-EXIT race
+# that fired premature run_finished_hollow at 2026-04-28 15:35:00 UTC, 53s
+# before B2 actually ran.
+FINAL_FLAG=0
+if [[ "${OPS_BATCH_TERMINAL:-0}" == "1" ]]; then
+    FINAL_FLAG=1
+fi
+_positional=()
+for _arg in "$@"; do
+    case "$_arg" in
+        --final) FINAL_FLAG=1 ;;
+        *)       _positional+=("$_arg") ;;
+    esac
+done
+set -- "${_positional[@]:-}"
+unset _positional _arg
+
 RUN_ID="${1:-}"
 PARENT_MSG_TS="${2:-}"
 
@@ -79,8 +99,67 @@ if [[ -z "$RUN_ID" ]]; then
 fi
 
 CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
-CV_PROBE_URL="${CV_PROBE_URL:-https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4}"
+CV_PROBE_URL="${CV_PROBE_URL:-https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# --- Idempotency guard (R2-2) ---
+# The 2026-04-23 09:02 UTC dry-run produced TWO run_finished events (09:16:21
+# and 09:16:34). Root cause: B3 and B6 both explicitly called this script —
+# B3 to source Slack counts, B6 to populate invariant-warning variables.
+# Each openclaw exec tool call is a fresh shell, so B3's $SUMMARY_JSON isn't
+# visible in B6, and the agent re-derives it by re-invoking us.
+#
+# The fix is mechanical: if a run_finished event already exists for this
+# RUN_ID, print the cached summary to stdout and exit 0 without writing any
+# new events. This keeps the caller's $SUMMARY_JSON populated for downstream
+# invariant checks without duplicating events in the runlog.
+#
+# Done before the expensive session-log parsing so the cached path is fast.
+_guard_day="${RUN_ID:0:8}"
+_guard_runlog_path="${OPS_RUNLOG_DIR}/${_guard_day:0:4}-${_guard_day:4:2}-${_guard_day:6:2}/${RUN_ID}.jsonl"
+if [[ -f "$_guard_runlog_path" ]]; then
+    _cached_summary=$(jq -s -c 'first(.[] | select(.event == "run_finished"))' "$_guard_runlog_path" 2>/dev/null || true)
+    if [[ -n "$_cached_summary" && "$_cached_summary" != "null" ]]; then
+        echo "compute-run-summary: run_finished already present for $RUN_ID — returning cached summary, no new events written." >&2
+        echo "$_cached_summary"
+        exit 0
+    fi
+fi
+
+# --- In-flight guard (Failure 2 from 2026-04-28 15:35:00 UTC) ---
+# When the agent splits B0+B1 and B2+ across multiple exec calls, the bash
+# trap-on-EXIT in exec 1 fires lockfile.sh release, which historically called
+# this script as a crash-recovery fallback. That wrote a premature
+# run_finished_hollow + run_finished_silent_failure 53s before B2 actually
+# ran (and successfully moved 25 credits to verification_needed via PUT).
+#
+# Refuse to write run_finished if the run is plausibly still in flight —
+# i.e. queue_depth_at_start > 0 and zero action_attempted events have
+# landed. The caller can override with --final (or OPS_BATCH_TERMINAL=1)
+# when this IS the terminal call (B6 explicit invocation, or a confirmed
+# terminal release).
+#
+# Empty-queue runs (queue_depth_at_start == 0) are unaffected — guard
+# returns immediately and the script proceeds to write a normal queue-clear
+# run_finished. This guard only triggers on the exact Failure 2 shape.
+if [[ "$FINAL_FLAG" -ne 1 && -f "$_guard_runlog_path" ]]; then
+    # Avoid the `grep -c PATTERN || echo 0` antipattern — grep -c emits "0"
+    # AND exits 1 on no-match, so combining `||` produces multi-line "0\n0"
+    # that breaks numeric comparisons. Count via `|| true` instead, which
+    # preserves grep's stdout (a single "0\n" on no-match) without
+    # appending.
+    _attempts=$(grep -c '"event":"action_attempted"' "$_guard_runlog_path" 2>/dev/null || true)
+    _attempts="${_attempts:-0}"
+    _qdepth=$(jq -s -r 'first(.[] | select(.event=="run_started_queue") | .queue_depth_at_start // 0) // 0' "$_guard_runlog_path" 2>/dev/null || echo 0)
+    if [[ "$_attempts" -eq 0 && "$_qdepth" -gt 0 ]]; then
+        echo "compute-run-summary: refusing to write run_finished — queue_depth_at_start=$_qdepth but action_attempted=0; run plausibly still in flight. Pass --final or set OPS_BATCH_TERMINAL=1 to override." >&2
+        unset _guard_day _guard_runlog_path _cached_summary _attempts _qdepth
+        exit 8
+    fi
+    unset _attempts _qdepth
+fi
+
+unset _guard_day _guard_runlog_path _cached_summary
 
 # Session-log discovery — same mtime idiom as session-evidence.sh, but scoped
 # to the active workspace (agent dir) to prevent cross-agent races.
@@ -183,30 +262,58 @@ session_counts=$(jq -R -n \
     ).pairs as $pairs
     |
     # Preflight: B0d requires an open-probe of the Drake Tier 1 URL and a
-    # page-content read that contains BOTH "spotify" AND "drake" (case-
-    # insensitive). The openclaw browser tool emits multiple tool calls per
-    # page load (action=open returns target metadata; action=get_content
-    # returns the page text), so we check the two halves separately:
-    #   1. ≥1 successful browser open targeting the probe URL
-    #   2. ≥1 browser toolResult whose text has both markers
-    # Either alone is insufficient (open alone could just be a request; text
-    # alone could be from an unrelated Drake browse elsewhere in the session).
+    # page-content read that contains BOTH "musicbrainz" AND "drake" (case-
+    # insensitive). Two acceptable evidence shapes:
+    #
+    #   A. Direct browser-tool probe (legacy path). One or more successful
+    #      browser opens targeting the probe URL AND one or more browser
+    #      toolResults whose text has both markers. Used when the model
+    #      tool-schema permits non-broken snapshot args.
+    #
+    #   B. preflight-verify.sh@cli probe (2026-04-28+). One or more successful
+    #      exec calls whose command contains "preflight-verify.sh" AND whose
+    #      stdout has both markers. The script runs the openclaw CLI probe
+    #      mechanically, bypassing tool-schema defaults like mode=efficient
+    #      and depth=0 that produced 0-char snapshots in the 14:24, 14:28,
+    #      and 14:51 UTC dry-runs. Markers come from the snapshot stdout the
+    #      script prints; a faking agent would still need a real exec result
+    #      containing them, which the CLI probe attests.
+    #
+    # Either path satisfies preflight; the runlog event is written by
+    # preflight-verify.sh in both cases.
     (
-        [ $pairs[]
-          | select(.name == "browser")
-          | select((.args?.url // "") == $probe
-                   or (.args?.url // "") == ($probe + "/")
-                   or ((.args?.url // "") | startswith($probe + "?")))
-          | select(.is_error | not)
-        ] | length > 0
+        # Path A: browser tool with probe URL
+        ([ $pairs[]
+           | select(.name == "browser")
+           | select((.args?.url // "") == $probe
+                    or (.args?.url // "") == ($probe + "/")
+                    or ((.args?.url // "") | startswith($probe + "?")))
+           | select(.is_error | not)
+         ] | length > 0)
+        or
+        # Path B: exec call to preflight-verify.sh that completed without error
+        ([ $pairs[]
+           | select(.name == "exec")
+           | select(.args_repr | test("preflight-verify\\.sh"))
+           | select(.is_error | not)
+         ] | length > 0)
     ) as $probe_opened
     |
     (
-        [ $pairs[]
-          | select(.name == "browser")
-          | select(.is_error | not)
-          | select((.text | ascii_downcase) | (contains("spotify") and contains("drake")))
-        ] | length > 0
+        # Path A: browser tool result with markers
+        ([ $pairs[]
+           | select(.name == "browser")
+           | select(.is_error | not)
+           | select((.text | ascii_downcase) | (contains("musicbrainz") and contains("drake")))
+         ] | length > 0)
+        or
+        # Path B: exec call to preflight-verify.sh whose stdout has markers
+        ([ $pairs[]
+           | select(.name == "exec")
+           | select(.args_repr | test("preflight-verify\\.sh"))
+           | select(.is_error | not)
+           | select((.text | ascii_downcase) | (contains("musicbrainz") and contains("drake")))
+         ] | length > 0)
     ) as $probe_rendered
     |
     ($probe_opened and $probe_rendered) as $preflight_ok
@@ -350,13 +457,58 @@ runlog_counts=$(jq -s '
     {
         escalated: ([.[] | select(.event == "escalation_posted") | .cr_id] | unique | length),
         skipped_idempotent: ([.[] | select(.event == "action_attempted" and .action == "skip_idempotent")] | length),
-        skipped_cap: ([.[] | select(.event == "action_attempted" and .action == "skip_cap")] | length)
+        skipped_cap: ([.[] | select(.event == "action_attempted" and .action == "skip_cap")] | length),
+        run_started_fetch_size: (first(.[] | select(.event == "run_started") | .fetch_size) // null),
+        run_started_queue_depth: (first(.[] | select(.event == "run_started_queue") | .queue_depth_at_start) // null),
+        profile_group_fetched_count: ([.[] | select(.event == "profile_group_fetched") | (.count // 0)] | add // 0),
+        cli_preflight_ok: (any(.[]; .event == "preflight_ok" and .source == "preflight-verify.sh@cli"))
     }
 ' "$runlog_path")
 
 ESCALATED=$(echo "$runlog_counts" | jq -r '.escalated')
 SKIPPED_IDEMPOTENT=$(echo "$runlog_counts" | jq -r '.skipped_idempotent')
 SKIPPED_CAP=$(echo "$runlog_counts" | jq -r '.skipped_cap')
+
+# The CLI preflight helper writes an authoritative runlog event. Prefer that
+# event when present; the corresponding stdout can appear in an openclaw
+# `process` poll result rather than the original `exec` result when the
+# command runs long enough to be backgrounded.
+if [[ "$(echo "$runlog_counts" | jq -r '.cli_preflight_ok')" == "true" ]]; then
+    PREFLIGHT_OK="true"
+fi
+
+# Capture the original session-derived fetched count BEFORE the R2-6
+# fallback can overwrite it. The read-side silent-zero check below uses
+# this raw signal — the truncation fallback (designed for the 2026-04-23
+# 09:02 UTC class) would mask the 2026-04-27 silent-zero class by inferring
+# a non-zero fetched from queue_depth, hiding the read-side failure.
+SESSION_DERIVED_FETCHED="$FETCHED"
+
+# Fetched-count fallback (R2-6). The 2026-04-23 09:02 UTC dry-run showed
+# fetched:0 in the summary even though the agent processed 500 credits.
+# Root cause: the list-fetch response is a ~500KB JSON blob and openclaw's
+# exec tool truncates to the last 16KB, so the {"http_status":200,"body":
+# {"data":{"items":[...]}}} envelope gets sliced off. session_counts.fetched
+# then finds no items to count.
+#
+# Fallback source of truth: run_started.fetch_size (what B0 intended to
+# fetch) capped by run_started_queue.queue_depth_at_start (what was
+# actually available). That's the "effective fetched" without needing the
+# session envelope. Session-derived takes precedence when it's > 0 (real
+# IDs observed); fallback fires only when session-derived is 0 AND the
+# runlog gives us a usable bound.
+if (( FETCHED == 0 )); then
+    _fallback_fetch_size=$(echo "$runlog_counts" | jq -r '.run_started_fetch_size // ""')
+    _fallback_queue_depth=$(echo "$runlog_counts" | jq -r '.run_started_queue_depth // ""')
+    if [[ -n "$_fallback_fetch_size" && "$_fallback_fetch_size" != "null" ]]; then
+        if [[ -n "$_fallback_queue_depth" && "$_fallback_queue_depth" != "null" ]] && (( _fallback_queue_depth < _fallback_fetch_size )); then
+            FETCHED="$_fallback_queue_depth"
+        else
+            FETCHED="$_fallback_fetch_size"
+        fi
+    fi
+    unset _fallback_fetch_size _fallback_queue_depth
+fi
 
 # Compute the two invariants. `hollow` catches preflight-passed-then-skipped
 # runs (14:51 incident class) — defined as preflight OK but ZERO admin-API
@@ -390,11 +542,175 @@ if [[ -z "$DRY_RUN_FLAG" || "$DRY_RUN_FLAG" == "null" ]]; then
     esac
 fi
 
+# --- Results.jsonl reconciliation (PR 2 of 2026-04-22 silent-failure fix) ---
+#
+# muso-admin-api.sh now writes one JSONL line per /admin/credit-requests
+# write (PR #158's truth floor) at four outcome points: rejected_by_gate,
+# dry_run_intercept, ok, http_error. This file is authoritative because it
+# is written inside the admin script itself — a caller that wraps us in
+# `> /dev/null 2>&1` cannot hide the outcome.
+#
+# The previous session-JSONL derivation has a blind spot: when the agent
+# redirects ALL output inside its exec (`approve_cr $id > /dev/null`), the
+# session log only captures the outer echo statements (e.g. "T L A
+# (VERIFIED): 124 approved"). The session-derived $APPROVED correctly
+# reports 0 in that case — but the agent's Slack prose still claims 124.
+# We need a signal that the agent ATTEMPTED many approves but none LANDED.
+# That signal lives in results.jsonl.
+#
+# Resolve the results path with the same precedence chain as the truth-
+# floor writer: CV_RESULTS_PATH env override first, then the default
+# convention under /var/log/openclaw/credit-batch-runs.
+day_short="${RUN_ID:0:8}"
+day_iso="${day_short:0:4}-${day_short:4:2}-${day_short:6:2}"
+results_path="${CV_RESULTS_PATH:-/var/log/openclaw/credit-batch-runs/${day_iso}/${RUN_ID}.results.jsonl}"
+
+# Default reconciled counters. When the file is absent we fall back to
+# session-only counts and mark reconciliation_source=session_jsonl_fallback
+# so downstream can treat the run with lower confidence.
+APPROVED_ATTEMPTED=0
+APPROVED_LANDED=0
+APPROVED_REJECTED_BY_GATE=0
+APPROVED_REJECTED_PRE_FLIGHT=0
+APPROVED_HTTP_ERROR=0
+UVN_ATTEMPTED=0
+UVN_LANDED=0
+UVN_HTTP_ERROR=0
+RECONCILIATION_SOURCE="session_jsonl_fallback"
+
+if [[ -f "$results_path" ]]; then
+    RECONCILIATION_SOURCE="results_jsonl"
+    # Single jq pass over the JSONL file: classify every line by
+    # intended_status + outcome, then sum request_ids.length (so a batch
+    # PUT with 124 ids counts as 124 landed). Uses `jq -s` to slurp and
+    # `[inputs | fromjson? // empty]` to skip malformed lines without
+    # aborting — same resilience pattern session_counts uses above.
+    #
+    # R3-final: `rejected_pre_flight` is a distinct category written by
+    # batch-verify-profile.sh when its pre-flight refuses to call the
+    # admin API. Agent's evidence-gathering step was insufficient — these
+    # are NOT the same failure class as gate rejections. Surface both so
+    # Slack readers can tell whether the agent tried and the gate refused
+    # (rejected_by_gate) vs the agent never even got to try (pre_flight).
+    reconciled=$(jq -s -R -c '
+        def landed: (.outcome == "ok" or .outcome == "dry_run_intercept");
+
+        [ split("\n")[] | select(length > 0) | fromjson? // empty ] as $rows
+        |
+        {
+            approved_attempted: ([ $rows[] | select(.intended_status == "approved") | (.request_ids | length) ] | add // 0),
+            approved_landed:    ([ $rows[] | select(.intended_status == "approved" and landed) | (.request_ids | length) ] | add // 0),
+            approved_rejected_by_gate:
+                                ([ $rows[] | select(.intended_status == "approved" and .outcome == "rejected_by_gate") | (.request_ids | length) ] | add // 0),
+            approved_rejected_pre_flight:
+                                ([ $rows[] | select(.intended_status == "approved" and .outcome == "rejected_pre_flight") | (.request_ids | length) ] | add // 0),
+            approved_http_error:
+                                ([ $rows[] | select(.intended_status == "approved" and .outcome == "http_error") | (.request_ids | length) ] | add // 0),
+            uvn_attempted:      ([ $rows[] | select(.intended_status == "user_verification_needed") | (.request_ids | length) ] | add // 0),
+            uvn_landed:         ([ $rows[] | select(.intended_status == "user_verification_needed" and landed) | (.request_ids | length) ] | add // 0),
+            uvn_http_error:     ([ $rows[] | select(.intended_status == "user_verification_needed" and .outcome == "http_error") | (.request_ids | length) ] | add // 0)
+        }
+    ' "$results_path" 2>/dev/null || true)
+
+    if [[ -n "$reconciled" ]] && echo "$reconciled" | jq -e . >/dev/null 2>&1; then
+        APPROVED_ATTEMPTED=$(echo "$reconciled" | jq -r '.approved_attempted')
+        APPROVED_LANDED=$(echo "$reconciled" | jq -r '.approved_landed')
+        APPROVED_REJECTED_BY_GATE=$(echo "$reconciled" | jq -r '.approved_rejected_by_gate')
+        APPROVED_REJECTED_PRE_FLIGHT=$(echo "$reconciled" | jq -r '.approved_rejected_pre_flight')
+        APPROVED_HTTP_ERROR=$(echo "$reconciled" | jq -r '.approved_http_error')
+        UVN_ATTEMPTED=$(echo "$reconciled" | jq -r '.uvn_attempted')
+        UVN_LANDED=$(echo "$reconciled" | jq -r '.uvn_landed')
+        UVN_HTTP_ERROR=$(echo "$reconciled" | jq -r '.uvn_http_error')
+    else
+        echo "WARN: results.jsonl at $results_path parsed to malformed reconciliation; falling back to session-only counts" >&2
+        RECONCILIATION_SOURCE="session_jsonl_fallback"
+    fi
+fi
+
+# Silent-failure invariant: the 2026-04-22 19:15 scenario is exactly
+# "attempted >> 0 AND landed == 0" for at least one verb. Either half
+# (approve or UVN) triggering is sufficient — we want to catch any silent
+# surface, not just the approve path. The 2026-04-27 read-side silent-zero
+# class extends this to the fetch path: queue_depth > 0 logged but zero
+# items observed in the session.
+silent_failure_detected="false"
+silent_reason=""
+if [[ "$RECONCILIATION_SOURCE" == "results_jsonl" ]]; then
+    if (( APPROVED_ATTEMPTED > 0 && APPROVED_LANDED == 0 )); then
+        silent_failure_detected="true"
+        silent_reason="admin-api attempts >0 but 0 landed (approves or UVN) — agent's Slack prose likely lied about totals"
+    elif (( UVN_ATTEMPTED > 0 && UVN_LANDED == 0 )); then
+        silent_failure_detected="true"
+        silent_reason="admin-api attempts >0 but 0 landed (approves or UVN) — agent's Slack prose likely lied about totals"
+    fi
+fi
+
+# Read-side silent-zero (2026-04-27 incident class). Fires when B1's
+# runlog says there ARE unverified credits but the session shows zero
+# items fetched. Independent of RECONCILIATION_SOURCE — it's the FETCH
+# that lied, not the writes. Uses SESSION_DERIVED_FETCHED captured before
+# the R2-6 truncation fallback so the fallback's queue_depth-based fill
+# doesn't mask this case.
+#
+# Note this is a backstop. The primary defense is fetch-queue.sh's exit
+# 11 (unverified_count_items_mismatch), which prevents the bad summary
+# from ever getting computed. This branch catches future B1 code paths
+# that bypass the script.
+if [[ "$silent_failure_detected" != "true" ]]; then
+    _q_depth=$(echo "$runlog_counts" | jq -r '.run_started_queue_depth // 0')
+    _profile_group_count=$(echo "$runlog_counts" | jq -r '.profile_group_fetched_count // 0')
+    if [[ "$_q_depth" =~ ^[0-9]+$ ]] \
+       && [[ "$_profile_group_count" =~ ^[0-9]+$ ]] \
+       && (( _q_depth > 0 )) \
+       && (( _profile_group_count == 0 )) \
+       && (( SESSION_DERIVED_FETCHED == 0 )); then
+        silent_failure_detected="true"
+        silent_reason="read_side_silent_zero: queue_depth_at_start=${_q_depth} but session-derived fetched=0 — B1 fetch silently returned no items despite a non-empty queue"
+    fi
+    unset _q_depth _profile_group_count
+fi
+
+# When results.jsonl is available it takes precedence over session-derived
+# counts for the Slack-facing totals. That is the whole point of the truth
+# floor: Slack reports what actually HIT the API (or would have, in dry-run),
+# not what the agent's prose says. Session-derived counters remain in the
+# summary under derived_from so post-mortems can spot when they disagree.
+if [[ "$RECONCILIATION_SOURCE" == "results_jsonl" ]]; then
+    APPROVED_FOR_SUMMARY="$APPROVED_LANDED"
+    VN_FOR_SUMMARY="$UVN_LANDED"
+else
+    APPROVED_FOR_SUMMARY="$APPROVED"
+    VN_FOR_SUMMARY="$VN"
+fi
+
+# Re-evaluate invariants after reconciliation. The results.jsonl truth floor
+# is authoritative for write counts; otherwise long-running / redirected execs
+# can leave session-derived approved/VN at 0 and falsely mark a live run as
+# hollow or ungrounded.
+hollow="false"
+if [[ "$PREFLIGHT_OK" == "true" ]] \
+   && (( APPROVED_FOR_SUMMARY + VN_FOR_SUMMARY + ERRORS + ESCALATED + SKIPPED_IDEMPOTENT + SKIPPED_CAP == 0 )); then
+    hollow="true"
+fi
+
+ungrounded="false"
+if [[ "$PREFLIGHT_OK" != "true" ]] && (( APPROVED_FOR_SUMMARY + VN_FOR_SUMMARY > 0 )); then
+    ungrounded="true"
+fi
+
 # `derived_from` honestly lists the per-field provenance map.
 summary=$(jq -n \
     --argjson f "$FETCHED" \
-    --argjson a "$APPROVED" \
-    --argjson v "$VN" \
+    --argjson a "$APPROVED_FOR_SUMMARY" \
+    --argjson v "$VN_FOR_SUMMARY" \
+    --argjson a_session "$APPROVED" \
+    --argjson v_session "$VN" \
+    --argjson a_attempted "$APPROVED_ATTEMPTED" \
+    --argjson a_rejected "$APPROVED_REJECTED_BY_GATE" \
+    --argjson a_preflight "$APPROVED_REJECTED_PRE_FLIGHT" \
+    --argjson a_http_err "$APPROVED_HTTP_ERROR" \
+    --argjson v_attempted "$UVN_ATTEMPTED" \
+    --argjson v_http_err "$UVN_HTTP_ERROR" \
     --argjson e "$ESCALATED" \
     --argjson si "$SKIPPED_IDEMPOTENT" \
     --argjson sc "$SKIPPED_CAP" \
@@ -402,18 +718,37 @@ summary=$(jq -n \
     --argjson preflight "$PREFLIGHT_OK" \
     --argjson hollow "$hollow" \
     --argjson ungrounded "$ungrounded" \
+    --argjson silent "$silent_failure_detected" \
     --argjson parse_errors "$(echo "$session_counts" | jq -r '.parse_errors')" \
     --arg ts "$PARENT_MSG_TS" \
+    --arg recon_source "$RECONCILIATION_SOURCE" \
+    --arg results_path "$results_path" \
     --argjson dry "$DRY_RUN_FLAG" \
     '{
         fetched:$f, approved:$a, verification_needed:$v, escalated:$e,
         skipped_idempotent:$si, skipped_cap:$sc, errors:$errs,
         summary_post_message_ts:$ts, preflight_ok:$preflight,
         hollow:$hollow, ungrounded:$ungrounded,
+        silent_failure_detected:$silent,
+        reconciliation:{
+            source:$recon_source,
+            results_path:$results_path,
+            approved_attempted:$a_attempted,
+            approved_landed:$a,
+            approved_rejected_by_gate:$a_rejected,
+            approved_rejected_pre_flight:$a_preflight,
+            approved_http_error:$a_http_err,
+            verification_needed_attempted:$v_attempted,
+            verification_needed_landed:$v,
+            verification_needed_http_error:$v_http_err,
+            session_derived_approved:$a_session,
+            session_derived_verification_needed:$v_session
+        },
         session_parse_errors:$parse_errors,
         dryRun:$dry,
         derived_from:{
-            session_jsonl:["preflight_ok","fetched","approved","verification_needed","errors"],
+            session_jsonl:["preflight_ok","fetched","errors","session_derived_*"],
+            results_jsonl:["approved","verification_needed","approved_attempted","approved_rejected_by_gate","approved_rejected_pre_flight","approved_http_error","silent_failure_detected"],
             runlog:["escalated","skipped_idempotent","skipped_cap"]
         }
     }')
@@ -446,6 +781,20 @@ if [[ "$ungrounded" == "true" ]]; then
     bash "$SCRIPT_DIR/runlog.sh" event "$RUN_ID" run_finished_ungrounded "$ungrounded_payload"
 fi
 
+# Silent-failure invariant (2026-04-22 incident class). Fires when the
+# agent attempted writes but NONE landed — the exact lie shape of the
+# 19:15 dry-run that prompted this fix. Payload includes both attempted
+# and landed counts so the post-mortem is self-contained.
+if [[ "$silent_failure_detected" == "true" ]]; then
+    silent_payload=$(jq -n \
+        --argjson summary "$summary" \
+        --arg reason "$silent_reason" \
+        --arg log "$session_log" \
+        --argjson inv "$inventory" \
+        '$summary + {reason:$reason, session_log:$log, tool_inventory:$inv}')
+    bash "$SCRIPT_DIR/runlog.sh" event "$RUN_ID" run_finished_silent_failure "$silent_payload"
+fi
+
 # Print the computed summary to stdout so the caller can inspect .hollow /
-# .ungrounded and post appropriate Slack warnings.
+# .ungrounded / .silent_failure_detected and post appropriate Slack warnings.
 echo "$summary"

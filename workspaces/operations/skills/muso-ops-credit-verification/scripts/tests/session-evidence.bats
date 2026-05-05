@@ -56,13 +56,13 @@ seed_result_plugin_blocked() {
 }
 
 @test "counts a single successful browser load" {
-  seed_toolcall "c1" "browser" "https://open.spotify.com/artist/drake"
+  seed_toolcall "c1" "browser" "https://musicbrainz.org/artist/drake"
   seed_result_ok "c1" "<html><title>Drake on Spotify</title></html>"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run "$SCRIPTS_DIR/session-evidence.sh"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.count_ok == 1 and .count_err == 0'
-  echo "$output" | jq -e '.browser_loads[0].url == "https://open.spotify.com/artist/drake"'
-  echo "$output" | jq -e '.browser_loads[0].host == "open.spotify.com"'
+  echo "$output" | jq -e '.browser_loads[0].url == "https://musicbrainz.org/artist/drake"'
+  echo "$output" | jq -e '.browser_loads[0].host == "musicbrainz.org"'
   echo "$output" | jq -e '.browser_loads[0].ok == true'
 }
 
@@ -98,18 +98,18 @@ seed_result_plugin_blocked() {
 
 @test "ignores non-browser tool calls" {
   # web_fetch is explicitly forbidden by the skill — must not appear in evidence.
-  seed_toolcall "c1" "web_fetch" "https://open.spotify.com/artist/should-not-count"
+  seed_toolcall "c1" "web_fetch" "https://musicbrainz.org/artist/should-not-count"
   seed_result_ok "c1" "fetched body"
-  seed_toolcall "c2" "browser" "https://open.spotify.com/artist/real"
+  seed_toolcall "c2" "browser" "https://musicbrainz.org/artist/real"
   seed_result_ok "c2" "real body"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run "$SCRIPTS_DIR/session-evidence.sh"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.count_ok == 1'
-  echo "$output" | jq -e '.browser_loads[0].url == "https://open.spotify.com/artist/real"'
+  echo "$output" | jq -e '.browser_loads[0].url == "https://musicbrainz.org/artist/real"'
 }
 
 @test "mixed successes and errors produce accurate counts" {
-  seed_toolcall "c1" "browser" "https://open.spotify.com/artist/a"
+  seed_toolcall "c1" "browser" "https://musicbrainz.org/artist/a"
   seed_result_ok "c1" "ok body"
   seed_toolcall "c2" "browser" "https://musicbrainz.org/artist/b"
   seed_result_error "c2"
@@ -124,7 +124,7 @@ seed_result_plugin_blocked() {
 
 @test "toolCall with no matching toolResult is ignored (in-flight call)" {
   # An orphan toolCall without a toolResult must not be counted either way.
-  seed_toolcall "c1" "browser" "https://open.spotify.com/artist/pending"
+  seed_toolcall "c1" "browser" "https://musicbrainz.org/artist/pending"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run "$SCRIPTS_DIR/session-evidence.sh"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.count_ok == 0 and .count_err == 0'
@@ -132,7 +132,7 @@ seed_result_plugin_blocked() {
 
 @test "malformed JSONL lines are skipped without failing the run" {
   printf 'not valid json\n' >> "$SESSION_LOG"
-  seed_toolcall "c1" "browser" "https://open.spotify.com/artist/resilient"
+  seed_toolcall "c1" "browser" "https://musicbrainz.org/artist/resilient"
   seed_result_ok "c1" "ok"
   printf '{"truncated":\n' >> "$SESSION_LOG"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run "$SCRIPTS_DIR/session-evidence.sh"
@@ -141,7 +141,7 @@ seed_result_plugin_blocked() {
 }
 
 @test "output is valid JSON fit for pasting into a Slack fenced block" {
-  seed_toolcall "c1" "browser" "https://open.spotify.com/artist/json-safe"
+  seed_toolcall "c1" "browser" "https://musicbrainz.org/artist/json-safe"
   seed_result_ok "c1" 'body with "quotes" and \backslashes\\'
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run "$SCRIPTS_DIR/session-evidence.sh"
   [ "$status" -eq 0 ]
@@ -170,21 +170,21 @@ seed_result_ok_at() {
 }
 
 @test "CV_SESSION_RUN_STARTED_TS filters out older browser_loads (evidence mode)" {
-  seed_toolcall_at "2026-04-22T10:00:00Z" "c_old" "browser" "https://open.spotify.com/artist/old"
+  seed_toolcall_at "2026-04-22T10:00:00Z" "c_old" "browser" "https://musicbrainz.org/artist/old"
   seed_result_ok_at "2026-04-22T10:00:01Z" "c_old" "old body"
-  seed_toolcall_at "2026-04-23T12:00:00Z" "c_new" "browser" "https://open.spotify.com/artist/new"
+  seed_toolcall_at "2026-04-23T12:00:00Z" "c_new" "browser" "https://musicbrainz.org/artist/new"
   seed_result_ok_at "2026-04-23T12:00:01Z" "c_new" "new body"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" CV_SESSION_RUN_STARTED_TS="2026-04-23T11:00:00Z" \
     run "$SCRIPTS_DIR/session-evidence.sh"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.count_ok == 1'
-  echo "$output" | jq -e '.browser_loads[0].url == "https://open.spotify.com/artist/new"'
+  echo "$output" | jq -e '.browser_loads[0].url == "https://musicbrainz.org/artist/new"'
 }
 
 @test "CV_SESSION_RUN_STARTED_TS unset → no filtering (backward compat)" {
-  seed_toolcall_at "2026-04-22T10:00:00Z" "c_old" "browser" "https://open.spotify.com/artist/old"
+  seed_toolcall_at "2026-04-22T10:00:00Z" "c_old" "browser" "https://musicbrainz.org/artist/old"
   seed_result_ok_at "2026-04-22T10:00:01Z" "c_old" "old body"
-  seed_toolcall_at "2026-04-23T12:00:00Z" "c_new" "browser" "https://open.spotify.com/artist/new"
+  seed_toolcall_at "2026-04-23T12:00:00Z" "c_new" "browser" "https://musicbrainz.org/artist/new"
   seed_result_ok_at "2026-04-23T12:00:01Z" "c_new" "new body"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run "$SCRIPTS_DIR/session-evidence.sh"
   [ "$status" -eq 0 ]
@@ -193,19 +193,19 @@ seed_result_ok_at() {
 
 @test "CV_SESSION_RUN_STARTED_TS set, line has no .timestamp → line excluded" {
   # Safer default: untimestamped lines can't prove they belong to current run.
-  seed_toolcall "c_untimed" "browser" "https://open.spotify.com/artist/untimed"
+  seed_toolcall "c_untimed" "browser" "https://musicbrainz.org/artist/untimed"
   seed_result_ok "c_untimed" "body"
-  seed_toolcall_at "2026-04-23T12:00:00Z" "c_new" "browser" "https://open.spotify.com/artist/new"
+  seed_toolcall_at "2026-04-23T12:00:00Z" "c_new" "browser" "https://musicbrainz.org/artist/new"
   seed_result_ok_at "2026-04-23T12:00:01Z" "c_new" "body"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" CV_SESSION_RUN_STARTED_TS="2026-04-23T11:00:00Z" \
     run "$SCRIPTS_DIR/session-evidence.sh"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.count_ok == 1'
-  echo "$output" | jq -e '.browser_loads[0].url == "https://open.spotify.com/artist/new"'
+  echo "$output" | jq -e '.browser_loads[0].url == "https://musicbrainz.org/artist/new"'
 }
 
 @test "CV_SESSION_RUN_STARTED_TS boundary is inclusive (entry at exact ts counts)" {
-  seed_toolcall_at "2026-04-23T11:00:00Z" "c_edge" "browser" "https://open.spotify.com/artist/edge"
+  seed_toolcall_at "2026-04-23T11:00:00Z" "c_edge" "browser" "https://musicbrainz.org/artist/edge"
   seed_result_ok_at "2026-04-23T11:00:00Z" "c_edge" "body"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" CV_SESSION_RUN_STARTED_TS="2026-04-23T11:00:00Z" \
     run "$SCRIPTS_DIR/session-evidence.sh"
@@ -220,7 +220,7 @@ seed_result_ok_at() {
 # gate, with a clear Slack message path.
 
 @test "--check-tier1-webfetch exit 0 on a clean session (browser only)" {
-  seed_toolcall "c1" "browser" "https://open.spotify.com/artist/a"
+  seed_toolcall "c1" "browser" "https://musicbrainz.org/artist/a"
   seed_result_ok "c1" "body"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run "$SCRIPTS_DIR/session-evidence.sh" --check-tier1-webfetch
   [ "$status" -eq 0 ]
@@ -234,35 +234,35 @@ seed_result_ok_at() {
 }
 
 @test "--check-tier1-webfetch exit 1 + stderr names host on Tier-1 contamination" {
-  seed_toolcall "c1" "web_fetch" "https://open.spotify.com/artist/bad"
+  seed_toolcall "c1" "web_fetch" "https://musicbrainz.org/artist/bad"
   seed_result_ok "c1" "body"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run --separate-stderr "$SCRIPTS_DIR/session-evidence.sh" --check-tier1-webfetch
   [ "$status" -eq 1 ]
-  [[ "$stderr" == *"open.spotify.com"* ]]
+  [[ "$stderr" == *"musicbrainz.org"* ]]
   [[ "$stderr" == *"Tier"* ]]
 }
 
 @test "--check-tier1-webfetch lists all distinct offending hosts" {
   seed_toolcall "c1" "web_fetch" "https://musicbrainz.org/artist/x"
   seed_result_ok "c1" "body1"
-  seed_toolcall "c2" "web_fetch" "https://open.spotify.com/artist/y"
+  seed_toolcall "c2" "web_fetch" "https://musicbrainz.org/artist/y"
   seed_result_ok "c2" "body2"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run --separate-stderr "$SCRIPTS_DIR/session-evidence.sh" --check-tier1-webfetch
   [ "$status" -eq 1 ]
   [[ "$stderr" == *"musicbrainz.org"* ]]
-  [[ "$stderr" == *"open.spotify.com"* ]]
+  [[ "$stderr" == *"musicbrainz.org"* ]]
 }
 
 @test "--check-tier1-webfetch dedupes repeated fetches to same host" {
-  seed_toolcall "c1" "web_fetch" "https://open.spotify.com/artist/one"
+  seed_toolcall "c1" "web_fetch" "https://musicbrainz.org/artist/one"
   seed_result_ok "c1" "body1"
-  seed_toolcall "c2" "web_fetch" "https://open.spotify.com/artist/two"
+  seed_toolcall "c2" "web_fetch" "https://musicbrainz.org/artist/two"
   seed_result_ok "c2" "body2"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run --separate-stderr "$SCRIPTS_DIR/session-evidence.sh" --check-tier1-webfetch
   [ "$status" -eq 1 ]
   # Host appears exactly once in the stderr bullet list.
   local host_lines
-  host_lines=$(echo "$stderr" | grep -c '^  - open.spotify.com$' || true)
+  host_lines=$(echo "$stderr" | grep -c '^  - musicbrainz.org$' || true)
   [ "$host_lines" = "1" ]
 }
 
@@ -280,7 +280,7 @@ seed_result_ok_at() {
 }
 
 @test "--check-tier1-webfetch ignores browser calls to Tier-1 (only web_fetch is contamination)" {
-  seed_toolcall "c1" "browser" "https://open.spotify.com/artist/legit"
+  seed_toolcall "c1" "browser" "https://musicbrainz.org/artist/legit"
   seed_result_ok "c1" "body"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run "$SCRIPTS_DIR/session-evidence.sh" --check-tier1-webfetch
   [ "$status" -eq 0 ]
@@ -288,9 +288,9 @@ seed_result_ok_at() {
 
 @test "--check-tier1-webfetch + CV_SESSION_RUN_STARTED_TS → old web_fetch ignored" {
   # Yesterday's contamination must not poison today's run when scope applied.
-  seed_toolcall_at "2026-04-22T10:00:00Z" "c_old" "web_fetch" "https://open.spotify.com/artist/contaminated"
+  seed_toolcall_at "2026-04-22T10:00:00Z" "c_old" "web_fetch" "https://musicbrainz.org/artist/contaminated"
   seed_result_ok_at "2026-04-22T10:00:01Z" "c_old" "body"
-  seed_toolcall_at "2026-04-23T12:00:00Z" "c_new" "browser" "https://open.spotify.com/artist/new"
+  seed_toolcall_at "2026-04-23T12:00:00Z" "c_new" "browser" "https://musicbrainz.org/artist/new"
   seed_result_ok_at "2026-04-23T12:00:01Z" "c_new" "body"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" CV_SESSION_RUN_STARTED_TS="2026-04-23T11:00:00Z" \
     run "$SCRIPTS_DIR/session-evidence.sh" --check-tier1-webfetch
@@ -298,12 +298,12 @@ seed_result_ok_at() {
 }
 
 @test "--check-tier1-webfetch + CV_SESSION_RUN_STARTED_TS → new web_fetch still caught" {
-  seed_toolcall_at "2026-04-23T12:05:00Z" "c_bad" "web_fetch" "https://open.spotify.com/artist/new-bad"
+  seed_toolcall_at "2026-04-23T12:05:00Z" "c_bad" "web_fetch" "https://musicbrainz.org/artist/new-bad"
   seed_result_ok_at "2026-04-23T12:05:01Z" "c_bad" "body"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" CV_SESSION_RUN_STARTED_TS="2026-04-23T11:00:00Z" \
     run --separate-stderr "$SCRIPTS_DIR/session-evidence.sh" --check-tier1-webfetch
   [ "$status" -eq 1 ]
-  [[ "$stderr" == *"open.spotify.com"* ]]
+  [[ "$stderr" == *"musicbrainz.org"* ]]
 }
 
 @test "unknown flag → exit 2" {
@@ -319,7 +319,7 @@ seed_result_ok_at() {
 # is a risk.
 
 @test "R4-1: --check-tier1-webfetch ignores plugin-blocked web_fetch" {
-  seed_toolcall "wf" "web_fetch" "https://open.spotify.com/artist/drake"
+  seed_toolcall "wf" "web_fetch" "https://musicbrainz.org/artist/drake"
   seed_result_plugin_blocked "wf"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run "$SCRIPTS_DIR/session-evidence.sh" --check-tier1-webfetch
   [ "$status" -eq 0 ]
@@ -327,11 +327,11 @@ seed_result_ok_at() {
 
 @test "R4-1: --check-tier1-webfetch still flags successful web_fetch to Tier-1" {
   # The genuine contamination case — non-regression.
-  seed_toolcall "wf" "web_fetch" "https://open.spotify.com/artist/drake"
+  seed_toolcall "wf" "web_fetch" "https://musicbrainz.org/artist/drake"
   seed_result_ok "wf" "<html>Drake - Spotify artist page real data</html>"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run --separate-stderr "$SCRIPTS_DIR/session-evidence.sh" --check-tier1-webfetch
   [ "$status" -eq 1 ]
-  [[ "$stderr" == *"open.spotify.com"* ]]
+  [[ "$stderr" == *"musicbrainz.org"* ]]
 }
 
 @test "R4-1: --check-tier1-webfetch ignores errored (isError=true) web_fetch" {
@@ -349,13 +349,13 @@ seed_result_ok_at() {
 }
 
 @test "R4-1: --check-tier1-webfetch flags only the successful call in a mix" {
-  # Plugin-blocked spotify + successful musicbrainz → flag musicbrainz only.
-  seed_toolcall "wf1" "web_fetch" "https://open.spotify.com/artist/drake"
+  # Plugin-blocked tidal + successful musicbrainz → flag musicbrainz only.
+  seed_toolcall "wf1" "web_fetch" "https://tidal.com/album/drake"
   seed_result_plugin_blocked "wf1"
   seed_toolcall "wf2" "web_fetch" "https://musicbrainz.org/search?q=x"
   seed_result_ok "wf2" "<html>MusicBrainz search results real data</html>"
   CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" run --separate-stderr "$SCRIPTS_DIR/session-evidence.sh" --check-tier1-webfetch
   [ "$status" -eq 1 ]
   [[ "$stderr" == *"musicbrainz.org"* ]]
-  [[ "$stderr" != *"open.spotify.com"* ]]
+  [[ "$stderr" != *"tidal.com"* ]]
 }

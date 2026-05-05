@@ -215,7 +215,24 @@ describe("blockUnsanctionedBatchMessage", () => {
     expect(r).toBeUndefined();
   });
 
-  it("allows free-form post to non-CV channels unconditionally", () => {
+  it("allows free-form (non-summary) post to non-CV channels unconditionally", () => {
+    // Non-summary text + non-CV channel → pass-through. Summary-shaped text
+    // from operations agent is blocked regardless of channel — covered below.
+    const r = blockUnsanctionedBatchMessage(
+      buildEvent("message", {
+        target: OTHER_CHANNEL,
+        text: "Quick clarification on the migration timeline.",
+      }),
+      buildCtx(),
+    );
+    expect(r).toBeUndefined();
+  });
+
+  it("blocks summary-shaped text from operations agent even to a non-CV channel (target leaks)", () => {
+    // 2026-04-30 widening: there is no legitimate path that hand-composes a
+    // [HEARTBEAT-BATCH] / Credit batch complete message via the MCP message
+    // tool. Block regardless of target — operations agent must use
+    // post-batch-summary.sh.
     const r = blockUnsanctionedBatchMessage(
       buildEvent("message", {
         target: OTHER_CHANNEL,
@@ -223,7 +240,7 @@ describe("blockUnsanctionedBatchMessage", () => {
       }),
       buildCtx(),
     );
-    expect(r).toBeUndefined();
+    expect(r?.block).toBe(true);
   });
 
   it("allows non-summary post once runlog has run_finished (post-finish phase)", () => {
@@ -294,25 +311,74 @@ describe("blockUnsanctionedBatchMessage", () => {
     expect(r?.block).toBe(true);
   });
 
-  it("uses OPS_CREDIT_VERIFICATION_CHANNEL_ID env override over the hardcoded prod default", () => {
+  it("uses OPS_CREDIT_VERIFICATION_CHANNEL_ID env override over the hardcoded prod default (non-summary path)", () => {
+    // The env override matters for NON-summary messages where target gating
+    // decides the verdict. Summary-shaped text is now blocked regardless of
+    // target (see "blocks summary-shaped text from operations agent even
+    // to a non-CV channel" above), so we use a non-summary text here to
+    // exercise the channel-resolution branch specifically.
     process.env.OPS_CREDIT_VERIFICATION_CHANNEL_ID = "C_CUSTOM_PROD";
+    // Non-summary text → blocking depends on whether target is policed.
+    // Currently the hook only blocks summary-shaped text, so non-summary
+    // posts pass through whether target is CV or not. This test guards
+    // the future case where a non-summary CV-channel block is added.
     const r1 = blockUnsanctionedBatchMessage(
       buildEvent("message", {
         target: "C_CUSTOM_PROD",
-        text: "Queue fetch succeeded — no writes.",
+        text: "Investigating degraded admin API response for run 20260428-153425-0ac365.",
       }),
       buildCtx(),
     );
-    expect(r1?.block).toBe(true);
-    // The hardcoded default should now NOT be policed.
+    expect(r1).toBeUndefined();
     const r2 = blockUnsanctionedBatchMessage(
       buildEvent("message", {
         target: PROD_CHANNEL,
-        text: "Queue fetch succeeded — no writes.",
+        text: "Investigating degraded admin API response for run 20260428-153425-0ac365.",
       }),
       buildCtx(),
     );
     expect(r2).toBeUndefined();
+  });
+
+  it("blocks summary-shaped post with target='' (the 2026-04-30 leak shape)", () => {
+    // Run 20260430-081740-585500 leaked because the agent posted with
+    // params.target = "" (empty string). The old isCvChannel("") returned
+    // false → hook bailed → message slipped through and downstream openclaw
+    // resolved the empty target to the CV channel. The widened gate now
+    // blocks summary-shaped CV-context posts regardless of target.
+    const r = blockUnsanctionedBatchMessage(
+      buildEvent("message", {
+        target: "",
+        text: "[HEARTBEAT-BATCH] Credit batch complete — 2026-04-30 08:17 UTC\nFetched: 10 | Approved: 0 | → verification_needed: 10",
+      }),
+      buildCtx(),
+    );
+    expect(r?.block).toBe(true);
+  });
+
+  it("blocks summary-shaped post with no target field at all", () => {
+    // Same as above but target is undefined (key not set in params).
+    const r = blockUnsanctionedBatchMessage(
+      buildEvent("message", {
+        text: "Credit batch complete — 2026-04-30 08:17 UTC\nFetched: 10 | Approved: 0",
+      }),
+      buildCtx(),
+    );
+    expect(r?.block).toBe(true);
+  });
+
+  it("allows operational template (B0d preflight abort) with empty target — operational allowlist beats target gating", () => {
+    // Operational allowlist matches happen before the summary-shape check,
+    // so operational templates pass through even with no target. This
+    // preserves the operational template flow regardless of target shape.
+    const r = blockUnsanctionedBatchMessage(
+      buildEvent("message", {
+        target: "",
+        text: "⚠️ Batch aborted at pre-flight — browser tool unavailable in this session. Run ID: x. No credits processed.",
+      }),
+      buildCtx(),
+    );
+    expect(r).toBeUndefined();
   });
 
   it("does not require OPS_RUNLOG_DIR to block summary-shaped text", () => {

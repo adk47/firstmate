@@ -377,7 +377,7 @@ Is the role plausible given the track's genre/era/label?
 
 **Tool selection — BROWSER ONLY for credit verification:**
 
-- Use `browser` for **every** web lookup — specific URLs (Spotify/Apple Music/MusicBrainz/Discogs/AllMusic/TIDAL, Jaxsta, ASCAP/BMI/SESAC, studio/artist sites) AND searches (load a search engine URL with `browser open https://duckduckgo.com/?q=<url-encoded query>` or Bing/Google).
+- Use `browser` for **every** web lookup — specific URLs (Apple Music/MusicBrainz/Discogs/AllMusic, TIDAL, Jaxsta, ASCAP/BMI/SESAC, studio/artist sites) AND searches (load a search engine URL with `browser open https://duckduckgo.com/?q=<url-encoded query>` or Bing/Google).
 - **Do NOT use `web_fetch`.** The admin-api credit-approve gate does not accept `web_fetch` evidence — any PUT approve backed by `web_fetch` loads will be blocked. `web_fetch` frequently returns Cloudflare challenge pages as 200 OK (false positives) and doesn't render JavaScript-dependent credit pages.
 - **Do NOT use `web_search`.** The plugin redirects `web_search` in this channel; use `browser` with a search-engine URL instead.
 
@@ -386,14 +386,18 @@ Workflow: `browser open <tier1 URL>` → `browser snapshot` (read rendered text)
 Sources are tiered by priority. Always check Tier 1. Check Tier 2 and 3 as indicated.
 
 **Tier 1 — Always check (primary credit databases):**
-- Spotify "Show Credits": use the Spotify link from the credit request to check the track's credits tab for the claimed name+role
+- Apple Music / MusicBrainz / Discogs / AllMusic: load the artist + track pages and check the credits panel / track-listing for the claimed name+role. Spotify "Show Credits" is unusable for unauthenticated headless browsing (login-gated; rows render as `-` for guests) — dropped 2026-05-05.
 - Apple Music: check album credits page — detailed role-level credits for tracks
 - MusicBrainz: `musicbrainz.org/search?query=[name]&type=artist` — recording-level credits; look for the specific track+role match, not just artist existence
 - Discogs: `discogs.com/search/?q=[name]&type=artist` — discography and credits
 - AllMusic: `allmusic.com/search/all/[name]` — artist profile with credits
-- TIDAL: `tidal.com` — track/artist credits page, often the most detailed streaming credits
 
-**Tier 2 — Check when claimed role is writing/publishing (songwriter, composer, lyricist, publisher):**
+**Tier 2 — Supporting sources:**
+
+*Streaming-credit cross-check (any role):*
+- TIDAL: `tidal.com` — track/artist credits page; useful as supporting evidence but less reliably populated than Tier 1, so it does not count toward the Tier-1 quorum.
+
+*Writing/publishing roles (songwriter, composer, lyricist, publisher):*
 - ASCAP: `ascap.com/repertory` — search by writer name
 - BMI: `repertoire.bmi.com/` — search by writer name
 - SESAC: `sesac.com` — affiliated writer search
@@ -408,6 +412,17 @@ If a source returns a 429 (rate limit) or blocks the request, skip it and note i
 as a failed source. Do not retry aggressively — space requests if processing
 multiple verifications in sequence.
 
+**Risk-breakdown steering (PR #233).** The inbound message includes a `Risk Breakdown` bullet list (Step 1 line 230–236) with per-dimension scores like `artist_risk: 0.85`. The overall `Risk Score` is a *trigger*, not a verdict — `100%` does not mean the credit is 100% fraud. Use the per-dimension breakdown to focus investigation:
+
+| Risk dimension high (≥0.7) | Investigation focus |
+|---|---|
+| `artist_risk` | Verify artist legitimacy: Spotify monthly listeners, MusicBrainz IPI presence, claiming status on `/admin/profile/<id>` |
+| `track_risk` | Verify track + credit match: Athena `matvw_catalog_track` row, Apple Music or MusicBrainz credits panel |
+| `user_risk` / `email_risk` | Check submission velocity (last 24h), email domain (disposable?), bulk-add pattern |
+| `claim_recency_risk` | Compare claiming timestamp vs credit-add timestamp via `/admin/profile/<id>` |
+
+This *steers* investigation; it does not replace the source taxonomy above. A high `artist_risk` means look harder at artist legitimacy on Tier 1; a high `track_risk` means cross-reference Athena's catalog row against the credit claim.
+
 **3c. Fraud signal check**:
 - Bulk credit submissions (>20 in one day)?
 - Disposable email?
@@ -417,9 +432,13 @@ multiple verifications in sequence.
 
 **Investigation failure — CRITICAL:** If Athena is unreachable or returns an error,
 OR if more than 2 **Tier 1** sources fail, the investigation is INCOMPLETE.
-An incomplete investigation MUST result in ESCALATION (UNVERIFIABLE — NEEDS REVIEW),
-never auto-approve or auto-reject. Include in the report: "Investigation incomplete —
-[list which sources failed]. Escalating for human review."
+An incomplete investigation MUST result in **INCONCLUSIVE — TIER-1 UNREACHABLE**
+with `verdict.reason` containing the literal string `tier1_unreachable` (required by the
+runlog gate; see PR #235). The default action is **move to `user_verification_needed`**
+(2026-05-05); per-credit Slack escalation is opt-in via
+`OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1`. Never auto-approve or auto-reject. Include
+in the report: "Investigation incomplete — [list which sources failed with HTTP/error
+codes]."
 
 **Grounding — HARD RULE (anti-confabulation):**
 
@@ -431,7 +450,7 @@ on **both** `PUT /admin/credit-requests` (batch) and
 `PATCH /admin/credit-requests/<id>` (single-credit) unless it finds in the
 active session log:
 
-1. **≥2 distinct Tier 1 hostnames** (open.spotify.com, music.apple.com, musicbrainz.org, discogs.com, allmusic.com, tidal.com — `www.` tolerated) loaded via the **`browser`** tool (NOT `web_fetch` — those loads do not count).
+1. **≥2 distinct Tier 1 hostnames** (music.apple.com, musicbrainz.org, discogs.com, allmusic.com — `www.` tolerated) loaded via the **`browser`** tool (NOT `web_fetch` — those loads do not count). Spotify is NOT in this set (dropped 2026-05-05): its credits dialog is login-gated for headless browsers and produces no verifiable credit data. Tidal is supporting (Tier-2) — useful corroboration but does not count toward the Tier-1 quorum (see `lib/browser-evidence.sh:67` for the canonical regex).
 2. The `--evidence-excerpt` string you pass must appear **verbatim** (case-insensitive) in the browser result text for each of those ≥2 pages.
 
 **Invocation.** Autonomous approves and UVN flags go through **one sanctioned entry point** — `batch-verify-profile.sh` — NOT inline bash loops and NOT direct calls to `batch-approve-credits.sh` / `batch-flag-credits.sh`. R3 adds this per-profile dispatcher on top of R1's delegate wrappers so evidence-gathering is structurally tied to each profile instead of spread across the batch:
@@ -439,21 +458,49 @@ active session log:
 ```bash
 # Autonomous APPROVE — one invocation per profile, N credits per call.
 # The wrapper pre-flights the evidence-quorum check locally: if it would
-# fail, you get exit 3 with a remediation block telling you which Tier-1
-# pages to load next. No HTTP round-trip happens until pre-flight passes.
+# fail, you get exit 3/5/6 with a remediation block telling you what to
+# fix. No HTTP round-trip happens until pre-flight passes.
+#
+# --credited-name / --track-title / --role come from the inbound message
+# Step 1 fields (Profile / Track / Roles). The dispatcher uses them to
+# validate the excerpt structurally:
+#   approve: excerpt must contain credited_name AND (track_title OR role)
+#   flag:    excerpt must contain (track_title OR role) AND NOT credited_name
+# Failing structural validation is exit 6 (excerpt_does_not_prove_claim).
 bash "$SKILL_DIR/scripts/batch-verify-profile.sh" \
     --profile-id "$PROFILE_ID" \
-    --evidence-excerpt "<literal substring from >=2 Tier 1 browser loads for THIS profile>" \
+    --credited-name "Pau Romero" \
+    --track-title  "Yellow Submarine" \
+    --role         "songwriter" \
+    --evidence-excerpt "Pau Romero, songwriter — Yellow Submarine credits" \
     --ids "cr_1,cr_2,cr_3" \
     --decision approve
 
-# Autonomous FLAG (user_verification_needed) — no evidence gate; same wrapper:
+# Autonomous FLAG (user_verification_needed) — same wrapper. PR #233 raised
+# the flag bar to match approve in rigor:
+#   (a) >=1 successful browser load whose URL contains $PROFILE_ID in the
+#       current run window (browse-required prerequisite, exit 5 otherwise);
+#   (b) inverted structural rule: excerpt must contain track_title or role
+#       AND must NOT contain credited_name (exit 6 otherwise — proves the
+#       agent saw the credit area and verified the person's absence);
+#   (c) excerpt must appear on >=2 distinct Tier-1 browser snapshots
+#       (exit 3 with missing_flag_evidence otherwise — raised from >=1);
+#   (d) a closed-list --flag-reason from the 4-value enum below.
+# No bypass — the prior `evidence_quorum_failed` / `human_review_requested`
+# reasons were removed after run 20260430-111343-1605a8 used them as a
+# universal escape hatch (460 credits flagged with 1 browser call).
+# Placeholder excerpts ("batch conservative review", "n/a", etc.) are
+# rejected at arg validation regardless of decision.
 bash "$SKILL_DIR/scripts/batch-verify-profile.sh" \
     --profile-id "$PROFILE_ID" \
-    --evidence-excerpt "<literal substring; used for bookkeeping only>" \
+    --credited-name "Pau Romero" \
+    --track-title  "Yellow Submarine" \
+    --role         "songwriter" \
+    --evidence-excerpt "Yellow Submarine — songwriters: Lennon, McCartney" \
     --ids "cr_1,cr_2,cr_3" \
     --decision flag \
-    --reason "<short reason>"
+    --reason "Pau Romero not in songwriter credits on Tier-1 sources" \
+    --flag-reason <enum: name_mismatch|popularity_anomaly|no_tier1_match|metadata_inconsistent>
 ```
 
 **HARD RULE — single entry point.** `batch-approve-credits.sh` and `batch-flag-credits.sh` MUST NOT be invoked directly from the agent workflow. They exist only as delegate primitives for `batch-verify-profile.sh` and the bats test suite. Any direct call is a workflow regression: it bypasses the per-profile pre-flight and the run_started session scoping the dispatcher provides, and the 2026-04-23 12:57 UTC dry-run showed what happens when evidence-gathering is not structurally per-profile (gate correctly rejected 100% of approves across 30 profiles).
@@ -480,7 +527,7 @@ Authoritative per-call outcome lands in the `.results.jsonl` truth floor that `m
 Good excerpt examples (each is a literal substring you saw in a browser snapshot):
 - `"Jose Roig"` — artist name as rendered on MusicBrainz + AllMusic
 - `"Producer: Ulf Blomberg"` — role string as rendered on AllMusic credits
-- `"Tears In Your Smile"` — track title as rendered on Spotify credits
+- `"Tears In Your Smile"` — track title as rendered on Apple Music or MusicBrainz
 
 Bad excerpts: generic strings like `"music"`, single words that appear everywhere (`"artist"`), or things you didn't actually see in the rendered page. The bash layer sees 100% of admin API traffic, so there is no way to confabulate past it.
 
@@ -488,8 +535,10 @@ If the approve command returns `credit_approve_gate: insufficient evidence`,
 load two fresh Tier 1 pages with `browser open <url>`, run `browser snapshot`
 to confirm the excerpt is visible in the rendered text, then retry the
 approve with the updated excerpt. If Tier 1 pages genuinely don't confirm the
-credit, downgrade the verdict to **UNVERIFIABLE — NEEDS REVIEW** and escalate
-to Jan rather than approving.
+credit, the credit is either **SUSPICIOUS** (move to user_verification_needed)
+or **INCONCLUSIVE — TIER-1 UNREACHABLE** (also moves to user_verification_needed
+since 2026-05-05; reason MUST contain `tier1_unreachable`). Per-credit Slack
+escalation is opt-in via `OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1`.
 
 **Human overrides bypass the gate — narrowly.** Only passes when `--requester`
 resolves to Jan (jan@muso.ai) or Aaron (aaron@muso.ai), i.e. they replied
@@ -500,14 +549,15 @@ count as per-credit verification — the gate still requires `--evidence-excerpt
 overrides are the one place that calls `muso-admin-api.sh` directly — see
 Step 5 → Executing a decision.
 
-**Verdict → Action (unchanged):**
+**Verdict → Action (PR #235 — escape-hatch labels removed):**
 
 | Verdict | Action |
 |---|---|
-| VERIFIED LEGIT | Auto-approve (gate enforces evidence). |
-| UNVERIFIABLE — LOW CONCERN | Auto-approve (gate still requires ≥2 Tier 1 "checked but no results" loads). |
-| UNVERIFIABLE — NEEDS REVIEW | Escalate to Jan. |
-| SUSPICIOUS | Move to `user_verification_needed` (or escalate if `OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1`). |
+| VERIFIED LEGIT | Auto-approve (gate enforces ≥2 Tier-1 evidence + claim-proving excerpt). |
+| SUSPICIOUS — CLEAR FRAUD / BORDERLINE | Move to `user_verification_needed`. |
+| INCONCLUSIVE — TIER-1 UNREACHABLE | Move to `user_verification_needed` (2026-05-05). `reason` MUST contain `tier1_unreachable`; the runlog gate enforces ≥2 distinct Tier-1 attempts + ≥1 search-engine browser load for the profile before accepting this verdict. Per-credit Slack escalation is opt-in via `OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1`. |
+
+The pre-PR-#235 `UNVERIFIABLE_LOW_CONCERN` (auto-approve when "no web presence but consistent pattern") and `UNVERIFIABLE_NEEDS_REVIEW` (escalate when "no web presence + risk signals") labels are removed. The agent had collapsed both into "I didn't browse but here's a label" — see Step B5 forbidden-labels note. There is no auto-approve path that does not surface positive Tier-1 evidence; there is no escalate path that does not document attempted Tier-1 browses.
 
 **HARD RULE — search-scope claims (anti-confabulation):**
 
@@ -542,11 +592,10 @@ Map investigation results to a verdict using `muso-ops-fraud` criteria:
 
 | Verdict | Criteria | Action |
 |---------|----------|--------|
-| **VERIFIED LEGIT** | Confirmed via web (any of: Spotify credits, MusicBrainz, Discogs, AllMusic, Jaxsta, ASCAP/BMI/SESAC, LinkedIn career, studio site) | Auto-approve |
-| **UNVERIFIABLE — LOW CONCERN** | No web presence but consistent pattern (single technical role, professional email, low fraud signals) | Auto-approve |
-| **SUSPICIOUS — CLEAR FRAUD** | 2+ strong fraud signals (identity mismatch, web contradicts, disposable email + bulk submissions) | **Move to `user_verification_needed`** (silent per-credit; rolled into batch summary). See note on reject policy below. |
-| **SUSPICIOUS — BORDERLINE** | 1 fraud signal or soft signals (no web presence + high-pop track, but professional email) | **Move to `user_verification_needed`** (silent per-credit; rolled into batch summary) |
-| **UNVERIFIABLE — NEEDS REVIEW** | No web presence AND risk signals (pop >=90, creative roles, many credits, mononym) | Escalate to Jan (status already `unverified` or `user_verification_needed`) |
+| **VERIFIED LEGIT** | Confirmed via Tier-1 web sources: ≥2 distinct Tier-1 hosts (Apple Music / MusicBrainz / Discogs / AllMusic) show the credited person at the credit context for this track + role. Tier-2 (Tidal album-credits, ASCAP/BMI/SESAC, Jaxsta, LinkedIn, studio site) is supporting only — never the sole basis. | Auto-approve |
+| **SUSPICIOUS — CLEAR FRAUD** | 2+ strong fraud signals (identity mismatch, web contradicts, disposable email + bulk submissions). Browser evidence MUST show the absence (≥2 Tier-1 hosts checked, name not in credits). | **Move to `user_verification_needed`** (silent per-credit; rolled into batch summary). See note on reject policy below. |
+| **SUSPICIOUS — BORDERLINE** | 1 fraud signal or soft signals. Browser evidence MUST show ≥2 Tier-1 hosts attempted. | **Move to `user_verification_needed`** (silent per-credit; rolled into batch summary) |
+| **INCONCLUSIVE — TIER-1 UNREACHABLE** | Browser attempted ≥2 Tier-1 hosts and loaded a search-engine URL via browser but found no confirming evidence — either sources existed but couldn't be read (captcha / 5xx / network) or sources had no entry for this credit (typical for indie tracks). The runlog `verdict.reason` MUST contain the literal string `tier1_unreachable` for the runlog gate to accept it; the gate also enforces ≥2 distinct Tier-1 attempts + ≥1 search-engine browser load for the profile. | **Move to `user_verification_needed`** (2026-05-05; was previously per-credit Slack escalation). Indie-track-heavy queues legitimately produce many of these — UVN scales via the Muso admin UI. The `OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1` override restores per-credit Slack escalation for fraud-review traffic. |
 
 > **No-reject policy (2026-04-13):** The bot does NOT auto-reject. Both SUSPICIOUS verdicts move credits to `user_verification_needed` so the user can complete their own proof step. Rejection remains available only as a manual override via `reject [reason]` in an escalation thread (see Step 5 → Escalate → Executing a decision).
 
@@ -576,16 +625,30 @@ Use `batch-verify-profile.sh --decision approve`. This dispatcher is the ONLY sa
 ```bash
 bash "$SKILL_DIR/scripts/batch-verify-profile.sh" \
   --profile-id "$PROFILE_ID" \
-  --evidence-excerpt "<literal substring you saw on >=2 Tier 1 pages for THIS profile>" \
+  --credited-name "$CREDITED_NAME" \
+  --track-title  "$TRACK_TITLE" \
+  --role         "$ROLE" \
+  --evidence-excerpt "<literal substring containing credited_name AND (track_title OR role) from >=2 Tier 1 pages>" \
   --ids "<id1>,<id2>,...,<idN>" \
   --decision approve
 ```
 
-One invocation per profile, N credits per invocation. The dispatcher's check is identical to `enforce_credit_approve_gate`: ≥`CV_REQUIRED_LOADS` (default 2) distinct Tier-1 hostnames whose browser-result text contains the excerpt, scoped to the current run's time window. On pass it delegates to `batch-approve-credits.sh` which issues one `PUT /admin/credit-requests` for the batch (`request_ids` of length N in `.results.jsonl`).
+One invocation per profile, N credits per invocation. The dispatcher's check is identical to `enforce_credit_approve_gate`: ≥`CV_REQUIRED_LOADS` (default 2) distinct Tier-1 hostnames whose browser-result text contains the excerpt, scoped to the current run's time window. PR #233 adds the structural rule on top: the excerpt must contain `--credited-name` AND (`--track-title` OR any `--role` token). On pass it delegates to `batch-approve-credits.sh` which issues one `PUT /admin/credit-requests` for the batch (`request_ids` of length N in `.results.jsonl`).
 
 **Important:** `PUT /admin/credit-requests` is the bulk status endpoint. `PUT /admin/credit-requests/<id>` is a DIFFERENT endpoint that updates the credits array only and silently ignores the status field — the delegate already targets the correct route. The gate also covers `PATCH /admin/credit-requests/<id>` (single-credit) in case a human-override flow needs it; batch approves don't use PATCH.
 
-**On exit 3 from the dispatcher:** read the remediation block. It names (a) the Tier-1 hosts currently matching, (b) suggested next `browser(...)` calls, (c) the exact retry command. Typical recovery: load the two suggested pages, confirm the excerpt appears in the rendered text, retry once. If after retry evidence still isn't there, downgrade to `--decision flag` with a `--reason` describing why Tier-1 didn't confirm.
+**On exit 3 from the dispatcher:** read the remediation block. It names (a) the Tier-1 hosts currently matching, (b) suggested next `browser(...)` calls, (c) the exact retry command. Typical recovery: load the two suggested pages, confirm the excerpt appears in the rendered text, retry once.
+
+**On exit 5 from the dispatcher:** the browse-required prerequisite tripped — no successful browser load in the current run window has a URL containing `$PROFILE_ID`. Load a Tier-1 page whose URL or response text references the profile (`browser(https://musicbrainz.org/artist/<mbid>)` or `browser(https://music.apple.com/<region>/artist/<id>)`), then retry. Exit 5 is structurally distinct from exit 3 — it means the agent skipped step 3 entirely for this profile. Do NOT try to bypass with placeholder excerpts; the dispatcher's deny-list will reject those even if you somehow get past exit 5.
+
+**On exit 6 from the dispatcher (PR #233):** the excerpt was found on the page, but doesn't prove the claim. The remediation block names what's missing (or unexpectedly present, for flag). Recovery:
+- **Approve**: load the credit area of the Tier-1 page (MusicBrainz recording-level credits, AllMusic credits panel, Apple Music track page, Discogs release tracklist). Find a substring containing BOTH the credited person's name AND either the role or the track title. Examples: `"Pau Romero, songwriter"`, `"Pau Romero — Yellow Submarine"`, `"Songwriter: Pau Romero"`.
+- **Flag**: load the credit area, find a substring containing the role/track BUT not containing the credited person's name (proving they're not credited there). If the credited person IS on the page in the credit list, flag is wrong — approve or escalate instead.
+
+If after retry evidence still isn't there, **do NOT bulk-flag the whole queue with a placeholder excerpt** (the dispatcher's deny-list will reject that anyway as of 2026-04-30). Two correct paths instead:
+
+1. **Per-credit flag with real evidence**: load 1 Tier-1 page that confirms the flag-worthy signal (name not credited, popularity anomaly, etc.) and use a literal substring from that snapshot as `--evidence-excerpt`, plus a `--flag-reason` enum value matching what you saw (`name_mismatch`, `popularity_anomaly`, `no_tier1_match`, `metadata_inconsistent`).
+2. **Escalate** (when sources are genuinely unreachable, OR a human asked for the flag without per-profile evidence): use the per-credit escalation path (Step 5 → Escalate). Bypass `--flag-reason` values were removed 2026-04-30 after run `20260430-111343-1605a8` used `evidence_quorum_failed` 460 times with 1 browser call across the run — there is no longer a flag path that skips the snapshot-match gate.
 
 **Direct `muso-admin-api.sh` calls are reserved for the Step 5 escalation-thread flow** (Jan/Aaron `--requester` human override). Any autonomous approve that bypasses `batch-verify-profile.sh` is outside this skill's contract — the post-run reconciliation will catch it as `silent_failure_detected` if attempts don't land.
 
@@ -599,18 +662,31 @@ message(action="react", channelId="<credit_verification_channel_id>", messageId=
 
 Both CLEAR FRAUD and BORDERLINE verdicts take this same action: flip the credit's status so the user is prompted to complete their own verification. The bot does NOT reject.
 
-Use `batch-verify-profile.sh --decision flag`. The dispatcher skips the evidence quorum check on the flag path (UVN isn't gated) and delegates to `batch-flag-credits.sh`, which issues a single `PUT /admin/credit-requests` for the entire batch with `{"requestIds":[...],"status":"user_verification_needed"}`. This is the SAME route batch-approve-credits.sh uses; the backend `updateStatus` handler accepts every `CreditRequests.STATUSES` value, so one call atomically transitions all matching requests from UNVERIFIED → USER_VERIFICATION_NEEDED. The earlier per-id `PATCH /admin/credit-requests/<id>` design was wrong — that route was never registered in core-backend, and the 2026-04-27 15:42 UTC real run confirmed it (25/25 PUTs got HTTP 404 "Cannot PATCH …").
+Use `batch-verify-profile.sh --decision flag`. The dispatcher delegates to `batch-flag-credits.sh`, which issues a single `PUT /admin/credit-requests` for the entire batch with `{"requestIds":[...],"status":"user_verification_needed"}`. This is the SAME route batch-approve-credits.sh uses; the backend `updateStatus` handler accepts every `CreditRequests.STATUSES` value, so one call atomically transitions all matching requests from UNVERIFIED → USER_VERIFICATION_NEEDED. The earlier per-id `PATCH /admin/credit-requests/<id>` design was wrong — that route was never registered in core-backend, and the 2026-04-27 15:42 UTC real run confirmed it (25/25 PUTs got HTTP 404 "Cannot PATCH …").
+
+**Flag has its own evidence gate** with the same rigor as approve as of PR #233 (built on top of PR #232's earlier flag gate). The dispatcher requires:
+- a non-placeholder `--evidence-excerpt`,
+- a closed-list `--flag-reason` enum,
+- the structural prerequisite (PR #232): ≥1 successful browser load whose URL contains `--profile-id` in the current run window,
+- the inverted structural rule (PR #233): excerpt must contain `--track-title` or any `--role` token AND must NOT contain `--credited-name` (proves the person is verifiably absent from the credit area),
+- the raised quorum (PR #233): excerpt must appear on ≥2 distinct Tier-1 hosts (was ≥1).
+
+**No bypass reasons** — every flag must carry a literal Tier-1 snapshot excerpt that proves verified absence.
 
 ```bash
 bash "$SKILL_DIR/scripts/batch-verify-profile.sh" \
   --profile-id "$PROFILE_ID" \
-  --evidence-excerpt "<short descriptor; used for bookkeeping>" \
+  --credited-name "$CREDITED_NAME" \
+  --track-title  "$TRACK_TITLE" \
+  --role         "$ROLE" \
+  --evidence-excerpt "<literal substring with track/role, NOT containing credited_name, from >=2 Tier-1 pages>" \
   --ids "<id1>,<id2>,...,<idN>" \
   --decision flag \
-  --reason "Moved to user_verification_needed during pre-approval: [specific reason]"
+  --reason "Moved to user_verification_needed during pre-approval: [specific reason]" \
+  --flag-reason <name_mismatch|popularity_anomaly|no_tier1_match|metadata_inconsistent>
 ```
 
-UVN is not gated (no browser evidence required), but it still flows through the same `.results.jsonl` truth floor — `compute-run-summary.sh` reconciles UVN counts the same way it reconciles approves, and `silent_failure_detected` fires if `vn_attempted > 0 && vn_landed == 0`. The wrapper exits 0 on HTTP 2xx (or dry-run intercept) and 1 on any HTTP/network failure.
+UVN flows through the same `.results.jsonl` truth floor as approves — `compute-run-summary.sh` reconciles UVN counts the same way and `silent_failure_detected` fires if `vn_attempted > 0 && vn_landed == 0`. The `flag_reason` enum is recorded on each row, alongside `credited_name` / `track_title` / `role` (PR #233), so post-batch auditing can categorize and inspect UVN actions without parsing back through the agent transcript. The wrapper exits 0 on HTTP 2xx (or dry-run intercept), 1 on HTTP/network failure, 3 on flag quorum failure (`missing_flag_evidence`), 2 on arg validation failure (placeholder excerpt, missing/invalid `--flag-reason`, missing `--credited-name`/`--track-title`/`--role`), 5 on missing per-profile browse, and 6 on excerpt that doesn't prove the claim (structural rule).
 
 Use a specific reason based on findings (examples):
 - "Moved to user_verification_needed during pre-approval: no web presence, disposable email, 15 bulk submissions in 24h"
@@ -649,6 +725,7 @@ Then post in-thread tagging Jan:
 
 ```
 🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]" ([Artists])
+Profile-ID: [profile_id]
 
 Evidence: [1-2 sentence summary of investigation findings, grounded only in what was actually loaded — see session_evidence below]
 
@@ -664,6 +741,8 @@ Sources (Tier 1 — ONLY URLs from session_evidence.browser_loads[]):
 Risk score: [X]% | Verdict: Unverifiable — Needs Review
 <@U038BM16T7W> — please review. Reply "approve" or "reject [reason]" in this thread.
 ```
+
+**Profile-ID line is required (PR #233 follow-up).** The literal string `Profile-ID: <uuid>` must appear in the escalation body. The `block-escalation-without-browse` plugin hook extracts the UUID via regex and enforces a per-profile floor: at least 2 distinct successful browser loads in the run window must reference this specific profile (either via the muso.ai/profile/<uuid> internal page OR a Tier-1 URL whose query/path contains the UUID). The session-wide ≥2-Tier-1 floor still applies as a fallback when the Profile-ID line is missing — but escalations without the line will be visibly older-style and easier to audit. The new per-profile floor closes the "investigate one profile, escalate the rest with boilerplate" pattern observed in the 2026-05-01 09:33 UTC dry-run (10 escalations, only 1 profile actually browsed).
 
 **Thread interaction:** Jan (or Aaron) can interact naturally in the thread:
 
@@ -720,7 +799,7 @@ Post investigation summary in-thread on the original message.
 Evidence: [1-2 sentence summary of why this is legit]
 
 Sources (Tier 1):
-• Spotify credits: <url> — [what was found, or "no credits listed"]
+• Apple Music credits: <url> — [what was found, or "no credits listed"]
 • MusicBrainz: <url> — [what was found, or "no results"]
 • Discogs: <url> — [what was found, or "no results"]
 • AllMusic: <url> — [what was found, or "no results"]
@@ -741,7 +820,7 @@ Credit request [ID] approved.
 Evidence: [1-2 sentence summary of fraud signals]
 
 Sources (Tier 1):
-• Spotify credits: <url> — [what was found, or "no credits listed"]
+• Apple Music credits: <url> — [what was found, or "no credits listed"]
 • MusicBrainz: <url> — [what was found, or "no results"]
 • Discogs: <url> — [what was found, or "no results"]
 • AllMusic: <url> — [what was found, or "no results"]
@@ -802,7 +881,16 @@ Before any network work, initialize the run context.
 
 `runlog.sh init` refuses to run when `OPS_RUN_ID` is already set (R4-2 mechanical counterpart); if you see exit code 4, you are in a subagent context — exit the batch, let the parent run it.
 
-If the token window is too small for 500 credits: lower `OPS_BATCH_FETCH_SIZE` (env var, default tuned for the current model). Split size is the supported knob. Subagent-spawn is not.
+If the token window is too small: lower `OPS_BATCH_FETCH_SIZE` (env var, default tuned for the current model).
+
+**Sizing the cron window (post-PR-#236).** The per-profile subagent investigation pool is the throughput bottleneck, not the API or token window. `fetch-queue.sh` enforces a hard cap of 200 credits per run (`OPS_BATCH_FETCH_HARD_CAP`); requests above that are silently capped and a warning is logged. Math:
+
+- 30-min cron window × 10-slot subagent pool × ~30s per HTTP-only investigation = ~600 profile-slots theoretical
+- Realistic: ~50 profile groups (≈200 credits at 4 credits/profile) accounting for retry, timeout, partial failure, network variance
+
+To drain the 12k+ unverified queue faster, run **more cron windows** (every 4h) — not larger batches. Larger batches that exceed pool throughput just panic-finalize via the runlog gate (exit 7 `acted_without_investigation`) and produce zero progress with truth-floor noise.
+
+`OPS_BATCH_FETCH_HARD_CAP` can be raised for one-off backfill runs supervised by a human, but never as a default.
 
 **0a. Verify required env.** Fail loudly if any of these are missing:
 - `OPS_BATCH_LOCK_PATH` — absolute path to lockfile (e.g. `/root/.openclaw/locks/ops-credit-batch.lock`)
@@ -864,6 +952,20 @@ bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" run_started \
           '{phase:$phase, fetch_size:$fs, approval_cap_used_at_start:$cu, approval_cap_limit:$cl}')"
 ```
 
+**0c.5. Browser tab hygiene — close stale tabs.**
+
+Run 20260504-215412-2067ce hit a degraded browser state: 17 stale tabs (captcha challenge pages, service workers, blob: URLs from prior runs) had piled up in the headless Chrome process. Browser snapshots for fresh Tier-1 loads came back empty (`Source: Browser\n---\n` wrapper, ~769 bytes, no content) for discogs / musicbrainz / google / tidal — even though those URLs work fine from a clean browser. The agent correctly declined to fabricate verdicts and the run finished hollow, but the run wasted the cron window on an environment problem.
+
+Close all tabs and reopen a single fresh `about:blank` BEFORE the pre-flight probe so the probe (and B3 browsing) starts from clean state. The helper does this via the `openclaw browser` CLI directly — the agent's `browser` tool can't enumerate-and-close tabs reliably from inside the same session.
+
+```bash
+bash "$SKILL_DIR/scripts/cleanup-browser-tabs.sh" 2>&1 | tail -1
+# Logs a single JSON line: {"closed": <int>, "remaining": <int>}
+# remaining should always be 1 (the fresh about:blank).
+```
+
+This step is best-effort — a non-zero exit (e.g. CLI not on PATH) doesn't abort the batch; B0d (the pre-flight probe below) will fail loudly anyway if the browser is unusable.
+
 **0d. Browser tool pre-flight probe.**
 
 Cron-invoked isolated sessions have silently lost `browser` tool availability in the past (2026-04-16 20:39 UTC run produced 332 escalations that cited Tier 1 URLs the agent never loaded; 2026-04-20 13:26 UTC b8b0e5 approved with `web_fetch` substituted for the probe). Before touching any credit API, verify the tool actually works in *this* session. If it doesn't, abort loudly at B0 so no confabulated escalations land downstream.
@@ -871,12 +973,12 @@ Cron-invoked isolated sessions have silently lost `browser` tool availability in
 The probe URL is:
 
 ```
-https://open.spotify.com/artist/3TVXtAsR1Inumwj472S9r4
+https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d
 ```
 
 (Drake — a consistently available Tier 1 artist page with a predictable HTML shape.)
 
-Success criteria: the tool result must be non-error AND the returned text must contain both of these literal substrings (case-insensitive): `spotify` and `drake`. Cloudflare challenge pages and empty responses fail.
+Success criteria: the tool result must be non-error AND the returned text must contain both of these literal substrings (case-insensitive): `musicbrainz` and `drake`. Cloudflare challenge pages and empty responses fail.
 
 **Do NOT call the `browser` tool yourself.** The 2026-04-28 14:24/14:28/14:51 UTC dry-runs all failed because the openai/gpt-5.5 model's tool-schema defaults (`mode: "efficient", depth: 0, snapshotFormat: "ai", compact: true`) produced a 0-char snapshot that fails the markers check. SKILL.md instructions to "use these exact args instead" did not override the schema defaults — the model kept emitting them. The mechanical layer is the only fix: `preflight-verify.sh` runs the probe via `openclaw browser` CLI directly, with correct args, bypassing the agent's tool-call construction entirely.
 
@@ -912,7 +1014,7 @@ Exit the turn. Do NOT proceed to B1. The `trap … EXIT` set in B0b releases the
 
 #### B0d.5. Session Hygiene (contamination check)
 
-openclaw channel-keys sessions: the same `.jsonl` file persists across runs and gateway restarts in the Slack `#credit-verification` thread. If an earlier run made a `web_fetch` to a Tier-1 host (Spotify / Apple / MusicBrainz / Discogs / AllMusic / Tidal), those lines remain in the file and can still contaminate this run unless scoped.
+openclaw channel-keys sessions: the same `.jsonl` file persists across runs and gateway restarts in the Slack `#credit-verification` thread. If an earlier run made a `web_fetch` to a Tier-1 host (Apple / MusicBrainz / Discogs / AllMusic), those lines remain in the file and can still contaminate this run unless scoped.
 
 The gate (R3-3) already filters its scan by `run_started.ts`, so past contamination can't block today's approves. But fail-fast is still worth it — aborting here is cheaper than letting B2 spend minutes processing before every approve rejects with the same reason.
 
@@ -963,6 +1065,21 @@ bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" run_started_queue \
   "$(jq -n --argjson depth "$TOTAL_UNVERIFIED" '{queue_depth_at_start:$depth}')"
 ```
 
+**B1.5 — Post the in-thread "starting" announcement (REQUIRED).** Immediately after the queue is fetched and before B2 begins per-profile work, post a brief reply in the parent thread so the user sees activity right away. This is mechanical, not optional — `browser-evidence-audit.sh` refuses the final summary post if the runlog has any `profile_group_fetched` events but no `batch_announced` event.
+
+```bash
+# QUEUE_JSON is already in scope from the fetch-queue.sh call above. Persist
+# it to the canonical path so post-batch-announce.sh can group items by profile.
+echo "$QUEUE_JSON" > "/tmp/${RUN_ID}.queue.json"
+
+# Pass the parent thread ts as arg 2 (the same value used by compute-run-summary.sh
+# below in B3). Cron runs set it explicitly; reactive runs inherit from the
+# inbound thread. The script also reads OPS_PARENT_MSG_TS as a fallback.
+bash "$SKILL_DIR/scripts/post-batch-announce.sh" "$RUN_ID" "$PARENT_MSG_TS"
+```
+
+The script posts via the openclaw CLI with `--reply-to "$OPS_PARENT_MSG_TS"` (so it lands in the same thread, not as a top-level channel message), writes a `batch_announced` runlog event, and is idempotent on repeated invocation. If the openclaw CLI emits "Config warnings:" prelude before the JSON response, the script tolerates it and writes a `script_warning` event for forensics.
+
 The list endpoint returns `createdAt DESC` by default (newest first = LIFO).
 
 - **If `.queue_depth == 0` and `.items|length == 0`:** Post the queue-clear message (see B5) and stop. This is exit 0 from `fetch-queue.sh` — never inferred from missing fields.
@@ -1005,56 +1122,358 @@ Group the fetched queue by `profile_id`:
 # order, which interleaves multiple profiles — without sort_by first, the
 # same profile appears as multiple groups, causing duplicate batch calls.
 PROFILES_GROUPED=$(echo "$QUEUE_JSON" | jq -c '
+    # Preserve external IDs per credit so build-search-url.sh can use direct
+    # entity URLs instead of fragile search URLs (PR #236 Phase 2).
+    # Field names verified against live admin API 2026-05-01:
+    #   .trackId             - muso internal track UUID
+    #   .spotifyTrackId      - Spotify track ID (NOT .spotifyId — that lives on .profile)
+    #   .spotifyTrackTitle   - track title as Spotify reports it (often cleaner)
+    #   .spotifyTrackArtists - [{id, name}] with Spotify artist IDs
+    #   .metadata.isrc       - ISRC string (nested, not top-level)
+    #   .credits             - ARRAY OF ROLE NAME STRINGS for this credit-request
+    #                          (e.g. ["Mixing", "Mastering"]) — not nested objects
+    # API does NOT (today) return: appleMusicId, musicbrainzId, tidalId,
+    # discogsId. Build-search-url.sh accepts those flags for future use; for
+    # now those env vars are emitted empty and the helper falls back to
+    # encoded search URLs for those hosts.
+    def credit_ids: {
+      cr_id:               .id,
+      track_id:            (.trackId // null),
+      spotify_track_id:    (.spotifyTrackId // null),
+      spotify_track_title: (.spotifyTrackTitle // null),
+      spotify_artist_ids:  ((.spotifyTrackArtists // []) | map(.id) | map(select(. != null))),
+      isrc:                (.metadata.isrc // null),
+      label:               (.metadata.label // null),
+      roles:               (.credits // []),
+      popularity:          (.spotifyPopularity // null),
+      risk_total:          (.verificationData.total_risk_percent // null)
+    };
     .items
     | sort_by(.profileId // .profile_id)
     | group_by(.profileId // .profile_id)
     | map({
         profile_id: (.[0].profileId // .[0].profile_id),
         userid: (.[0].userId // .[0].user_id),
-        cr_ids: [.[] | .id]
+        # Profile-level signals used by the risk-steering table in Step 3
+        profile_credit_count: (.[0].profile.creditCount // null),
+        profile_popularity:   (.[0].profile.popularity // null),
+        profile_spotify_id:   (.[0].profile.spotifyId // null),
+        profile_name:         (.[0].profile.name // null),
+        cr_ids: [.[] | .id],
+        credits: [.[] | credit_ids]
       })
 ')
 ```
 
 For each profile group:
 
-1. **Log the group.**
+1. **Log the group.** Include `credited_name`, `track_title`, `role` so the dispatcher (B3a) and runlog gate (PR #235) can resolve them per profile. Also include the `credits[]` array (with per-credit external IDs from B2's grouping) so the dispatcher can pass `--spotify-id`/`--isrc`/etc. to `build-search-url.sh` and use direct entity URLs.
    ```bash
+   # $CREDITS_JSON is the .credits array from this profile's group in
+   # PROFILES_GROUPED — it carries one object per cr_id with track_id,
+   # spotify_id, isrc, apple_music_id, musicbrainz_id, tidal_id, discogs_id
+   # (any of which may be null if the API didn't return them).
    bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" profile_group_fetched \
-     "$(jq -n --arg pid "$PROFILE_ID" --arg uid "$USER_ID" --argjson ids "$CR_IDS_JSON" \
-            '{profile_id:$pid, userid:$uid, cr_ids:$ids, count:($ids|length)}')"
+     "$(jq -n --arg pid "$PROFILE_ID" --arg uid "$USER_ID" \
+            --arg cn "$CREDITED_NAME" --arg tt "$TRACK_TITLE" --arg rl "$ROLE" \
+            --argjson ids "$CR_IDS_JSON" --argjson credits "$CREDITS_JSON" \
+            '{profile_id:$pid, userid:$uid, cr_ids:$ids, count:($ids|length),
+              credited_name:$cn, track_title:$tt, role:$rl, credits:$credits}')"
    ```
 
 2. **Idempotency filter.** Within the group, drop any `cr_id` whose `current_status` is not `unverified` or `user_verification_needed`. For each dropped id, log `skip_idempotent`. If the group is empty after filtering, continue to the next profile.
 
-3. **Gather per-profile Tier-1 evidence.** This is the structural invariant R3 adds. Before making any per-credit verdict, load at least 2 Tier-1 pages for THIS profile via the `browser` tool. Typical pattern:
-   ```
-   browser(https://open.spotify.com/artist/<spotify_id_or_search_string>)
-   browser(https://www.allmusic.com/search/all?q=<artist_name>)
-   ```
-   Alternatives are Discogs, MusicBrainz, Apple Music, Tidal. Any ≥2 distinct Tier-1 hostnames whose rendered text contains your chosen `--evidence-excerpt` for this profile will satisfy both the dispatcher's pre-flight AND the gate.
+3. **Gather per-profile Tier-1 evidence — MANDATORY before step 4.**
 
-   Log the evidence-gathering intent:
-   ```bash
-   bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" profile_evidence_attempted \
-     "$(jq -n --arg pid "$PROFILE_ID" --arg excerpt "$PROFILE_EVIDENCE_EXCERPT" \
-            '{profile_id:$pid, evidence_excerpt:$excerpt}')"
-   ```
+---
 
-4. **Investigate + Classify each credit in the group** (Step 3 + Step 4 from the reactive workflow, applied to each `cr_id`). Use the browser evidence from step 3 plus any per-credit checks (track existence, role plausibility). Log one `verdict` event per credit:
+### B3. Per-profile inline browser investigation — the only path TODAY
+
+Per-profile evidence collection runs **inline in the parent agent** using the `browser` tool. The parent has a working browser node binding; subagents do not (their `browser.open()` calls time out with "No connected browser-capable nodes" — see `templates/investigate-profile.md` for the deferred-work note). When subagent browser access is wired in a future PR, this section will switch to a fan-out pool. Until then: serial inline.
+
+**🚫 NEVER use `web_fetch` for Tier-1 hosts.** Apple Music / MusicBrainz / Discogs / AllMusic / Tidal are JS-rendered SPAs. `web_fetch` returns the empty HTML shell with no credit data. The plugin hook `block-web-fetch-tier1` will refuse the call; the bash gate in `muso-admin-api.sh` will refuse any approve where Tier-1 web_fetch was used. Use `browser` only. (See `feedback_browser_only_for_tier1.md`.)
+
+**🚫 Spotify is NOT Tier-1** (dropped 2026-05-05). The Spotify credits dialog is login-gated for unauthenticated headless browsers — even with the More options → View credits click sequence the dialog rows are `-` for many tracks, and even when populated the values are hidden for guests. Do NOT load `open.spotify.com/track/<id>` in the browser to count toward Tier-1 quorum — neither the canonical regex (`lib/browser-evidence.sh:67`) nor the bash gate (`muso-admin-api.sh` `CV_TIER1_HOSTS`) accept `open.spotify.com` anymore. The `spotifyTrackId` field on a credit-request item is used internally for muso UUID resolution only.
+
+**Why no batch-level shortcut:** runs `20260501-100843-d27818`, `20260501-122847-b476d5`, and `20260501-135646-ecff37` all proved the inline-loop main agent converges on heuristic shortcuts under time pressure. The defense is no longer "fresh-context subagents" — it's the **mechanical gates**, which now hold:
+
+- `runlog.sh` exit 7 `acted_without_investigation` refuses any `action_attempted` event whose `profile_id` lacks a successful per-profile browser load
+- `runlog.sh` exit 7 `verdict_without_evidence` refuses any `verdict` / `escalation_posted` event likewise
+- `batch-verify-profile.sh` exit 5 `missing_profile_browse` refuses any PUT-write
+- The plugin `block-escalation-without-browse` refuses Slack escalation posts likewise
+- The plugin `block-web-fetch-tier1` refuses Tier-1 web_fetch attempts (the obvious workaround)
+
+The agent CAN'T cheat without one of these firing. If subagents can't ground a verdict, the safe behavior is **exit early with `run_finished_browse_unavailable`** — cron retries next window. Do NOT bulk-fire `action_attempted` to "let the gate decide" — the runlog gate refuses those too.
+
+**Workflow (after B0-B2 complete + ALL `profile_group_fetched` events logged):**
+
+For each profile group from B2, the parent agent runs the following loop. Profile groups are processed serially — performance budget is ~20s per profile (anchor load + 2 Tier-1 loads + verdict logging), ~17 min for 50 profiles in a 30-min cron window.
+
+```bash
+# Pseudocode — actual tool calls are browser.open / browser.snapshot from the agent
+for profile in profiles_grouped:
+  PROFILE_ID = profile.profile_id
+  CREDITED_NAME = profile.credited_name
+  TRACK_TITLE   = profile.track_title
+  ROLE          = profile.role
+  CR_IDS        = profile.cr_ids
+  CREDITS_JSON  = profile.credits  # has spotify_track_id, isrc, spotify_artist_ids[], etc.
+
+  # 1. TIER-1 VERIFICATION — at least 2 distinct hosts.
+  #    The runlog gate counts a "successful per-profile browse" as a Tier-1
+  #    browser.open whose response text contains CREDITED_NAME AND either
+  #    TRACK_TITLE or one of the role tokens. The muso website anchor was
+  #    dropped 2026-05-04 — per-profile evidence now comes purely from
+  #    Tier-1 pages.
+  #
+  #    TIER-1 HOSTS (4, mechanically enforced by lib/browser-evidence.sh:67
+  #    and plugins/muso-credit-verification-enforcer/.../block-*.ts):
+  #      (open.spotify.com was Tier-1 until 2026-05-05; dropped because the
+  #       credits dialog is login-gated for headless. Load the corresponding
+  #       MusicBrainz / Apple Music page instead.)
+  #                            `browser` not `web_fetch`; the login wall on
+  #                            individual track pages is fine — credits live
+  #                            on the artist/album view).
+  #      - music.apple.com   — credit panel (Performing Artists / Composition &
+  #                            Lyrics / Production & Engineering). Use the US
+  #                            storefront uniformly: music.apple.com/us/song/...
+  #                            (rewrite kg/gb/jp/... → us; Apple serves the
+  #                            same track from the US catalog for any track
+  #                            it has, pinning the storefront keeps URLs
+  #                            canonical for audit and excerpt-quorum dedup).
+  #      - musicbrainz.org   — recording-level credits, open
+  #      - discogs.com       — release-level credits (writers, producers,
+  #                            mixing/mastering, instruments per performer)
+  #      - allmusic.com      — album credits panel
+  #
+  #    SUPPORTING (Tier-2, does NOT count toward the Tier-1 quorum):
+  #      - tidal.com         — /album/<id>/credits useful corroboration; the
+  #                            backend `/admin/album/<id>/sources` endpoint
+  #                            still returns these IDs to seed the search
+  #                            URL builder, but the gate counts only the 5
+  #                            hosts above.
+  #
+  #    THREE-BRANCH DECISION on cr.tier1_sources.backend_tier1_count
+  #    (populated by fetch-queue.sh from /admin/track/<id>/sources +
+  #     /admin/album/<id>/sources — today only Tidal is in the muso catalog;
+  #     Apple/MB/Discogs/AllMusic IDs land via hydra issue #236):
+  #
+  #     >= 2 backend hits → open the backend Tier-1 URLs only, snapshot,
+  #                         claim-match. Skip the search-and-click chain
+  #                         entirely. (Rare today; common after #236.)
+  #
+  #     == 1 backend hit  → open the backend Tier-1 URL FIRST, then run
+  #                         search-and-click for ONE more host (priority:
+  #                         music.apple.com). Stop once 2 hosts confirm
+  #                         OR after attempting 2 search-and-clicks.
+  #                         (Typical today: backend has Tidal album from
+  #                         /admin/album/<id>/sources.)
+  #
+  #     == 0 backend hits → full search-and-click chain in priority order:
+  #                         musicbrainz → apple → discogs → allmusic →
+  #                         tidal-search. Stop once 2 hosts confirm.
+  #                         (Common for fresh / indie tracks not yet in
+  #                         the muso catalog, or tracks where trackId is
+  #                         null at fetch time.)
+  #
+  #    URL building: use scripts/build-search-url.sh. For backend Tidal,
+  #    pass --tidal-album-id "$TIER1.tidal_album_id" — the helper emits
+  #    https://tidal.com/album/<id>/credits which is the credits-panel
+  #    page (verified live 2026-05-04). For all other hosts, pass any
+  #    available external IDs (--spotify-id used internally for catalog
+  #    lookups, --isrc, --musicbrainz-id, --apple-music-id, --discogs-id);
+  #    the helper falls back to canonical search URLs when no ID is set.
+
+  TIER1=$(jq -c '.tier1_sources // {backend_tier1_count:0}' <<<"$cr")
+  BACKEND_COUNT=$(jq -r '.backend_tier1_count // 0' <<<"$TIER1")
+  TIDAL_ALBUM_ID=$(jq -r '.tidal_album_id // empty' <<<"$TIER1")
+
+  CONFIRMED_HOSTS=()  # 2-element ceiling — once it hits 2, stop loading
+
+  # Helper: open one URL, snapshot, claim-match against credited_name and
+  # (track_title | role). On match, append the host to CONFIRMED_HOSTS.
+  # The exact match logic the gate uses is in lib/browser-evidence.sh; we
+  # just need the snapshot text to contain CREDITED_NAME plus (TRACK_TITLE
+  # OR a role token).
+
+  # Branch A: backend ≥ 2 — open backend URLs only, no searches.
+  if (( BACKEND_COUNT >= 2 )); then
+    for backend_url in <each tier1_sources.*_url that is non-null>:
+      browser.open("$backend_url"); snapshot = browser.snapshot()
+      if claim_matches(snapshot, CREDITED_NAME, TRACK_TITLE, ROLE):
+        CONFIRMED_HOSTS+=(<host>)
+      [[ ${#CONFIRMED_HOSTS[@]} -ge 2 ]] && break
+
+  # Branch B: backend == 1 — backend URL + 1 search-and-click (Apple first).
+  elif (( BACKEND_COUNT == 1 )); then
+    # Backend URL (today: tidal album-credits)
+    if [[ -n "$TIDAL_ALBUM_ID" ]]; then
+      URL=$(bash "$SKILL_DIR/scripts/build-search-url.sh" --host tidal \
+            --credited-name "$CREDITED_NAME" --track-title "$TRACK_TITLE" \
+            --tidal-album-id "$TIDAL_ALBUM_ID")
+      browser.open("$URL"); snapshot = browser.snapshot()
+      if claim_matches(snapshot, ...): CONFIRMED_HOSTS+=("tidal")
+    fi
+
+    # One search-and-click — Apple Music first (most reliable open credits
+    # panel). If that doesn't confirm, fall through to a second host.
+    for host in ["apple", "musicbrainz", "discogs", "allmusic"]:
+      [[ ${#CONFIRMED_HOSTS[@]} -ge 2 ]] && break
+      URL=$(bash "$SKILL_DIR/scripts/build-search-url.sh" --host $host \
+            --credited-name "$CREDITED_NAME" --track-title "$TRACK_TITLE" \
+            ${ISRC:+--isrc "$ISRC"})
+      browser.open("$URL"); snapshot = browser.snapshot()
+      # Search results page → click the right result → snapshot → claim-match.
+      if claim_matches(snapshot, ...): CONFIRMED_HOSTS+=("$host")
+
+  # Branch C: backend == 0 — full search-and-click chain.
+  else
+    for host in ["apple", "musicbrainz", "discogs", "allmusic", "tidal"]:
+      [[ ${#CONFIRMED_HOSTS[@]} -ge 2 ]] && break
+      URL=$(bash "$SKILL_DIR/scripts/build-search-url.sh" --host $host \
+            --credited-name "$CREDITED_NAME" --track-title "$TRACK_TITLE" \
+            ${ISRC:+--isrc "$ISRC"})
+      browser.open("$URL"); snapshot = browser.snapshot()
+      # Search results page → click → snapshot → claim-match.
+      if claim_matches(snapshot, ...): CONFIRMED_HOSTS+=("$host")
+  fi
+
+  # Capture a verbatim ~150-char excerpt from a confirming snapshot showing
+  # CREDITED_NAME near a ROLE token or TRACK_TITLE. Save for
+  # batch-verify-profile.sh --evidence-excerpt. The gate uses the same
+  # rule (CREDITED_NAME + role|title in the response text); once 2
+  # distinct Tier-1 hosts confirm, the gate is satisfied for this profile.
+
+  # 1b. SEARCH-ENGINE FALLBACK — last resort BEFORE invoking tier1_unreachable.
+  #     If fewer than 2 Tier-1 hosts confirmed the credit, load a search-
+  #     engine URL via `browser` for supplementary corroboration BEFORE
+  #     giving up. This is NOT a path to APPROVE — snippet results are not
+  #     authoritative enough to write the admin API on. It IS a path to
+  #     downgrade what would otherwise be ESCALATE → user_verification_needed
+  #     (a human will confirm). It also surfaces fraud signals the agent
+  #     might otherwise miss.
+  #
+  #     Why browser, not web_search: the muso-credit-verification-enforcer
+  #     plugin BLOCKS `web_search` in CV sessions (the gateway's DuckDuckGo
+  #     backend is bot-detected and returns nothing useful — GH issue #107).
+  #     Loading a search-engine URL in `browser` works around that and is
+  #     the sanctioned alternative — see plugin redirect-web-search hook.
+  #     Recognized search-engine hosts (the gate counts ANY of these):
+  #       - https://duckduckgo.com/?q=<URL-encoded query>
+  #       - https://www.bing.com/search?q=<URL-encoded query>
+  #       - https://www.google.com/search?q=<URL-encoded query>
+  #
+  #     Examples of credible search-engine corroboration (any 1+ supports UVN):
+  #       - Label/publisher site listing the credit (BMI, ASCAP, label roster)
+  #       - Press release / interview where the credited person discusses
+  #         the track/role
+  #       - Artist's own verified site/bio mentioning the credit
+  #       - Wikipedia article citing the credit with a published source
+  #
+  #     Examples that do NOT support UVN (too weak / adversarial):
+  #       - User-generated lyrics sites (genius.com, azlyrics, etc.)
+  #         unless they cite a label source
+  #       - Social-media bio claims by the credited person without
+  #         independent corroboration
+  #       - SEO-spam aggregator pages
+  if tier1_confirmed_hosts < 2:
+    QUERY=urlencode("\"$CREDITED_NAME\" \"$TRACK_TITLE\" $ROLE")
+    browser.open("https://duckduckgo.com/?q=$QUERY")
+    snapshot = browser.snapshot()
+    # Capture the strongest corroborating snippet (or note "no credible
+    # corroboration found"). Save it for the verdict reason. The runlog
+    # gate counts the browser load itself — the snapshot doesn't have to
+    # succeed (a captcha here is itself "tier1_unreachable" evidence).
+
+  # 2. CHOOSE VERDICT (exactly one), based on Tier-1 + search-engine results:
+  #   - LEGITIMATE                    → APPROVE_IDS += CR_IDS
+  #     Requires: ≥2 Tier-1 hosts confirm CREDITED_NAME + (TRACK_TITLE|ROLE)
+  #   - SUSPICIOUS_CLEAR_FRAUD        → UVN_IDS += CR_IDS
+  #     Requires: Tier-1 evidence shows the credit DOES NOT belong to
+  #     CREDITED_NAME (e.g. MusicBrainz lists Lennon as composer, not us)
+  #   - SUSPICIOUS_BORDERLINE         → UVN_IDS += CR_IDS
+  #     Requires: <2 Tier-1 confirms BUT step 1b's search-engine browser
+  #     load surfaced credible corroboration (label/publisher/press).
+  #     Reason MUST quote the corroborating snippet + URL — gives the
+  #     human reviewer a starting point.
+  #   - INCONCLUSIVE_TIER1_UNREACHABLE → UVN_IDS += CR_IDS
+  #     Requires: <2 Tier-1 confirms AND the search-engine browser load
+  #     surfaced no credible corroboration. Reason MUST contain
+  #     'tier1_unreachable' AND name each Tier-1 host tried + how each
+  #     failed (rate-limit, no match, captcha, dialog empty), AND note
+  #     the search-engine outcome.
+  #     2026-05-05 update: this case maps to UVN (verification_needed
+  #     queue) not ESCALATE. Indie-track-heavy queues legitimately produce
+  #     no Tier-1 coverage; flooding Slack with one escalation thread per
+  #     credit is unscalable. UVN moves the credit to the verification_
+  #     needed queue where humans can review at scale via the Muso admin
+  #     UI, and the runlog/audit gates still enforce that the agent
+  #     actually tried (≥2 Tier-1 attempts + ≥1 search-engine browser load) before this
+  #     verdict can land. ESCALATE is now reserved for the
+  #     `OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1` override (see step 8b
+  #     below) and for hollow-run failure cases where verdicts can't be
+  #     written at all.
+
+  # 3. LOG VERDICT (per-credit). Runlog gate refuses if step 1 produced 0 Tier-1
+  #    loads whose response text proves the claim (exit 7). Always include profile_id.
+  for CR_ID in $CR_IDS:
+    bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" verdict \
+      "$(jq -n --arg id "$CR_ID" --arg pid "$PROFILE_ID" --arg v "$VERDICT" --arg r "$REASON" \
+             '{cr_id:$id, profile_id:$pid, verdict:$v, reason:$r, signals:[]}')"
+
+  # 4. ACT — handled by Step B8 (action_attempted is also gated on per-profile Tier-1 evidence).
+```
+
+**`tier1_unreachable` bypass — MECHANICALLY ENFORCED preconditions (2026-05-04 round 4).** The bypass is the LAST resort, only after backend Tier-1 + at least one search-and-click + the search-engine fallback all fail. It is NOT a fall-through for "the first source didn't have it, give up."
+
+Two preconditions are now enforced by `runlog.sh` (write-time, exit 7 `tier1_unreachable_insufficient_effort`) AND `browser-evidence-audit.sh` (read-time, status 1 with `bypass_anchored_profiles` empty for the profile):
+
+- **(a) ≥2 distinct Tier-1 browser opens for the profile** — the URL or response text must mention the profile's `credited_name` or `track_title`. A single-host attempt (e.g. only Apple Music) followed by `tier1_unreachable` will be REFUSED at write time.
+- **(b) ≥1 search-engine browser load** in the run window — a `browser` toolCall whose URL is `duckduckgo.com / bing.com / google.com` (with optional `www.`) and whose `?q=` query mentions `credited_name` or `track_title`. SKILL.md step 1b must actually fire — labeling the verdict `tier1_unreachable` without that browser load will be REFUSED. (web_search itself is plugin-blocked in CV sessions; the search-engine browser load is the sanctioned alternative.)
+
+If either precondition is unmet, the gate refuses the verdict / action_attempted / escalation_posted event (exit 7) with a clear `tier1_unreachable_insufficient_effort` message naming both counts. There is NO test escape hatch besides `CV_DISABLE_VERDICT_GATE=1` (tests only).
+
+In addition to the mechanical enforcement, the `reason` field MUST cite WHICH Tier-1 hosts were tried and WHAT failure each returned (the audit doesn't enforce text content but you'll get a clearer human review):
+
+1. **If `tier1_sources.backend_tier1_count >= 1`:** loaded the backend URL(s) and observed the response text — none confirmed the credit
+2. **At least one search-and-click attempt** on a non-backend Tier-1 host (priority: music.apple.com when in branch B; the full chain in branch C)
+3. **Load a search-engine URL via browser (step 1b)** for the credit and recorded the outcome — either the search surfaced no credible corroboration, or what it surfaced was adversarial / too weak to count
+4. The `reason` field cites WHICH Tier-1 hosts were tried and WHAT failure each returned (e.g. `tier1_unreachable: tidal album-credits showed no row for credited name; apple no song-page result; musicbrainz no recording match; search-engine returned only genius.com lyrics + 2 SEO aggregators, no credible source`)
+
+If the search-engine load surfaced credible corroboration (a label site, a press piece, BMI/ASCAP listing) the verdict is `SUSPICIOUS_BORDERLINE` (UVN, not escalate) so a human can confirm — the credit *might* be legit, the agent just couldn't get it past the Tier-1 quorum bar alone.
+
+If only 1 host was tried, the verdict is `SUSPICIOUS_BORDERLINE` (not `INCONCLUSIVE_TIER1_UNREACHABLE`) — the agent didn't gather enough evidence to claim unreachability. NEVER fabricate excerpts to satisfy the gate.
+
+**Forbidden in B3:**
+- Skipping per-profile browse and inventing verdicts. The runlog gate (exit 7) refuses verdict / action_attempted / escalation_posted events without per-profile browser evidence. There is no "I'll let the gate decide" workaround — the gate will refuse and the run will hang.
+- Calling `web_fetch` on any Tier-1 host. The plugin hook refuses. Use `browser` only.
+- Reusing a previous profile's snapshot for the current profile. Each profile needs its own Tier-1 evidence — the gate counts loads whose response text mentions THIS profile's `CREDITED_NAME` and either `TRACK_TITLE` or a role token.
+- Rote-classification template excerpts like `"<track> <role>"` (run 135646 pattern). Must be a verbatim substring from the rendered snapshot.
+
+4. **Verdict event schema (logged in B3's step-4 loop).** The verdict event written for each credit MUST have shape:
    ```bash
    bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" verdict \
-     "$(jq -n --arg id "$CR_ID" --arg v "$VERDICT" --arg r "$REASON" \
+     "$(jq -n --arg id "$CR_ID" --arg pid "$PROFILE_ID" --arg v "$VERDICT" --arg r "$REASON" \
             --argjson sig "$SIGNALS_JSON" \
-            '{cr_id:$id, verdict:$v, reason:$r, signals:$sig}')"
+            '{cr_id:$id, profile_id:$pid, verdict:$v, reason:$r, signals:$sig}')"
    ```
+   **`profile_id` is REQUIRED.** The runlog gate refuses verdict events that name a `profile_id` without ≥1 successful per-profile browser load OR successful subagent investigation in the current run window (exit 7). Verdicts that omit `profile_id` entirely are accepted but flagged as `silent_failure_detected: true` in compute-run-summary — the per-profile evidence link cannot be checked. Always include the `profile_id` you're operating on; the only exception is the global `INCONCLUSIVE_TIER1_UNREACHABLE` case where reason MUST contain `tier1_unreachable`.
 
-5. **Partition by decision.** Bucket this profile's credits:
+5. **Partition by decision.** Bucket this profile's credits using the `VERDICT` from the subagent JSON:
    ```bash
-   APPROVE_IDS=()   # LEGITIMATE + UNVERIFIABLE_LOW_CONCERN
-   UVN_IDS=()       # CLEAR_FRAUD + BORDERLINE
-   ESCALATE_IDS=()  # UNVERIFIABLE_NEEDS_REVIEW
+   APPROVE_IDS=()   # only VERIFIED LEGIT (≥2 Tier-1 hosts show name + role/track)
+   UVN_IDS=()       # SUSPICIOUS_CLEAR_FRAUD + SUSPICIOUS_BORDERLINE +
+                    # INCONCLUSIVE_TIER1_UNREACHABLE (default mapping —
+                    # 2026-05-05). Indie credits with no Tier-1 coverage go
+                    # to the verification_needed queue for human review at
+                    # scale. The runlog/audit gates still require ≥2 Tier-1
+                    # attempts + ≥1 search-engine browser load before this verdict can land.
+   ESCALATE_IDS=()  # Only when OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1
+                    # (see step 8b override). In normal batch runs this
+                    # bucket stays empty; per-credit Slack escalation is
+                    # opt-in for fraud-review traffic, not the default.
    ```
+   **Forbidden verdict labels:** `UNVERIFIABLE_LOW_CONCERN` and `UNVERIFIABLE_NEEDS_REVIEW` are not permitted. Both runlog gate (exit 7) and `batch-verify-profile.sh` (exit 5) reject verdicts without per-profile evidence. The only sanctioned bypass is `INCONCLUSIVE_TIER1_UNREACHABLE` with `reason` containing `tier1_unreachable`, and that bypass itself requires evidence of an attempted fetch (≥2 Tier-1 attempts + ≥1 search-engine browser load enforced by the runlog gate).
 
 6. **Approval cap check** — apply BEFORE acting on `APPROVE_IDS`:
    ```bash
@@ -1130,13 +1549,20 @@ For each profile group:
    # delegate's stdout). Do NOT abort the batch — try the next profile.
    ```
 
-   **Fallback override** (unchanged): if `OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1`, treat CLEAR_FRAUD/BORDERLINE credits as ESCALATE instead — post individual top-level escalation messages tagging Jan, skip the `--decision flag` call for those ids.
+   **8b. Fallback override (`OPS_VERIFICATION_FALLBACK_TO_ESCALATE=1`).** When this env is set, ALL UVN-bound credits (CLEAR_FRAUD + BORDERLINE + INCONCLUSIVE_TIER1_UNREACHABLE) are routed to `ESCALATE_IDS` instead — post individual top-level escalation messages tagging Jan, skip the `--decision flag` call for those ids. This is the opt-in path for fraud-review traffic where a human should be paged immediately rather than the credit waiting in the verification_needed queue. Default behavior (env unset) keeps everything in UVN, which is what cron and on-demand batch runs want.
 
-   **ESCALATE_IDS (if non-empty):** post an individual top-level message per cr_id (existing behavior, unchanged). Log `action_attempted` with `action: escalate` for each.
+   **ESCALATE_IDS (if non-empty):** post an individual top-level message per cr_id (existing behavior). Log `action_attempted` with `action: escalate` for each. In normal batch runs this bucket is empty unless the override above is set.
 
-9. **Skip all emoji reactions** — no source message in batch mode.
+9. **Post a per-profile progress tick (REQUIRED).** After this profile's verdict / action_attempted / escalation_posted events have landed in the runlog, post a brief in-thread tick so the user sees activity. The script handles cumulative counting (decisioned vs. fetched profiles), throttles back-to-back ticks within 5s into a `progress_throttled` event (to avoid Slack spam), and writes a `progress` runlog event regardless. All ticks land in the SAME thread as the announce (B1.5) and final summary (B3) via `--reply-to "$PARENT_MSG_TS"`.
+   ```bash
+   OPS_PARENT_MSG_TS="$PARENT_MSG_TS" \
+       bash "$SKILL_DIR/scripts/post-progress-tick.sh" "$RUN_ID" "$PROFILE_ID" "$CREDITED_NAME" || true
+   ```
+   The `|| true` is intentional: a failed tick should not abort the batch. The script's exit status is captured in the `script_exited` runlog event for forensics.
 
-10. **On any per-credit / per-profile error:** log `error` event with `cr_id` (or `profile_id`), `stage`, `error_message`, and a truncated `traceback_snippet`, increment `ERRORS`, then continue with the next profile.
+10. **Skip all emoji reactions** — no source message in batch mode.
+
+11. **On any per-credit / per-profile error:** log `error` event with `cr_id` (or `profile_id`), `stage`, `error_message`, and a truncated `traceback_snippet`, increment `ERRORS`, then continue with the next profile.
 
    **Error-storm escalation.** If at the end of the loop `ERRORS >= max(3, FETCHED / 2)` (i.e. half the batch errored, with a floor of 3 to avoid noise on tiny batches), post a Jan-tagged alert in addition to the normal summary:
    ```bash
@@ -1226,12 +1652,15 @@ escalations (Step 5 — Escalate section above), **including the Evidence attach
 
 ```bash
 bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" escalation_posted \
-  "$(jq -n --arg id "$CR_ID" --arg reason "$REASON" \
-          '{cr_id:$id, reason:$reason}')"
+  "$(jq -n --arg id "$CR_ID" --arg pid "$PROFILE_ID" --arg reason "$REASON" \
+          '{cr_id:$id, profile_id:$pid, reason:$reason}')"
 ```
+
+**`profile_id` is REQUIRED** as of PR #235. The runlog gate refuses escalation_posted events that name a `profile_id` without ≥1 successful per-profile browser load (exit 7). The only bypass is `reason` containing `tier1_unreachable`, which itself implies attempted browses (network err / 5xx / captcha logged separately).
 
 ```
 🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]" ([Artists])
+Profile-ID: [profile_id]
 
 Evidence: [1-2 sentence summary grounded only in what was actually loaded]
 
@@ -1329,7 +1758,7 @@ The lockfile is released automatically by the `trap` set in B0 when the run exit
 ### Rate Limiting Note
 
 When processing multiple credits sequentially, space web research requests to
-avoid hitting rate limits on external sources (Spotify, MusicBrainz, etc.).
+avoid hitting rate limits on external sources (MusicBrainz, Apple Music, Discogs, AllMusic, etc.).
 If a source returns 429, skip it and note as a failed source for that credit.
 
 ---
@@ -1432,7 +1861,7 @@ Each group is processed separately.
 
 For each role/source group:
 1. Verify the role is consistent with the profile's known work
-2. Spot-check 3-5 credits from the group against Tier 1 sources (Spotify, MusicBrainz)
+2. Spot-check 3-5 credits from the group against Tier 1 sources (MusicBrainz, Apple Music, Discogs, AllMusic)
 3. Check for deleted tracks in the group (GET each credit's track status)
 4. Check for outliers: different genre, unusually high popularity (pop >= 90),
    or roles that differ from the profile's primary role

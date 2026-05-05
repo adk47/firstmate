@@ -83,6 +83,25 @@ if [[ ! -f "$runlog_path" ]]; then
     exit 5
 fi
 
+# Diagnostic breadcrumb: prove this script ran, with what flags, in the runlog.
+# Written via direct append (NOT runlog.sh) to bypass cookie-cutter / browser
+# gates — this is metadata, not a decision event. If the agent skips
+# post-batch-summary.sh, the runlog won't have this trail and the next
+# audit can detect the bypass.
+_pbs_now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+jq -n -c --arg rid "$RUN_ID" --arg ts "$_pbs_now" --arg dr "$DRY_RUN_CLI" \
+    '{event:"script_invoked", script:"post-batch-summary.sh", dry_run_cli:($dr|tonumber), run_id:$rid, ts:$ts}' \
+    >> "$runlog_path"
+_pbs_emit_exit() {
+    local rc="$1" reason="${2:-}"
+    local now
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    jq -n -c --arg rid "$RUN_ID" --arg ts "$now" --argjson rc "$rc" --arg reason "$reason" \
+        '{event:"script_exited", script:"post-batch-summary.sh", rc:$rc, reason:$reason, run_id:$rid, ts:$ts}' \
+        >> "$runlog_path" 2>/dev/null || true
+}
+trap '_pbs_emit_exit "$?" ""' EXIT
+
 # --- Refusal gate 1: no run_finished event ----------------------------------
 # render-slack-summary.sh would also exit 6 in this case, but we want the
 # error path to be ours so callers can distinguish "post-batch-summary
@@ -105,6 +124,27 @@ qdepth=$(jq -s -r 'first(.[] | select(.event=="run_started_queue") | .queue_dept
 if [[ "$attempts" -eq 0 && "$qdepth" -gt 0 ]]; then
     echo "ERROR: post-batch-summary refusing — queue_depth_at_start=$qdepth but action_attempted=0; this is the Failure 1 shape (B1-only run with no B2-B5 work). Slack summary suppressed." >&2
     exit 7
+fi
+
+# --- Refusal gate 3: browser evidence audit --------------------------------
+# The append-time runlog gates can be bypassed if an agent rewrites the JSONL
+# directly and reruns this poster. Re-derive the decision profile set from the
+# runlog and cross-check it against actual browser profile anchors in the
+# session log. This catches the 2026-05-04 failure where one profile/Spotify
+# browse was mutated into "Escalated: 50".
+AUDIT_SCRIPT="$SCRIPT_DIR/browser-evidence-audit.sh"
+if [[ ! -r "$AUDIT_SCRIPT" ]]; then
+    echo "ERROR: post-batch-summary refusing — browser evidence audit script missing at $AUDIT_SCRIPT. Slack summary suppressed." >&2
+    exit 11
+fi
+set +e
+audit_out=$(bash "$AUDIT_SCRIPT" --assert "$RUN_ID" 2>&1)
+audit_rc=$?
+set -e
+if [[ "$audit_rc" -ne 0 ]]; then
+    echo "ERROR: post-batch-summary refusing — browser evidence audit failed. Slack summary suppressed." >&2
+    printf '%s\n' "$audit_out" >&2
+    exit 11
 fi
 
 # --- Compose --------------------------------------------------------------
@@ -141,6 +181,15 @@ else
 fi
 
 OPS_OPENCLAW_PROFILE="${OPS_OPENCLAW_PROFILE:-main}"
+# 2026-04-30: --account is REQUIRED for slack sends. Without it openclaw
+# can't determine which account binding owns C0APB2CMM7C and returns
+# channel_not_found. Run 20260430-111343-1605a8 surfaced this — the agent's
+# escalation said "post-batch-summary.sh failed with channel_not_found via
+# CLI after successful run; fallback summary posted manually". The "fallback"
+# was a hand-composed [HEARTBEAT-BATCH] summary, which the enforcer plugin
+# correctly blocked. Net effect: every batch's Slack summary has been silently
+# broken on the canonical path and falling back to escalation.
+OPS_OPENCLAW_ACCOUNT="${OPS_OPENCLAW_ACCOUNT:-operations}"
 
 # --- Test/preview mode ----------------------------------------------------
 if [[ "$DRY_RUN_CLI" -eq 1 ]]; then
@@ -160,7 +209,38 @@ if ! command -v openclaw >/dev/null 2>&1; then
     exit 10
 fi
 
+# --- openclaw --json stdout extraction ------------------------------------
+# Run 20260504-124537-3fd64c (rc=10): openclaw CLI prepends "Config warnings:
+# …" lines to its --json stdout when the intercom + openclaw-gmail plugin
+# manifests are missing channelConfigs metadata. Plain `jq` on the whole
+# stdout chokes on the prelude, the parent message id can't be extracted,
+# the thread reply is refused, and the agent falls back to the gateway
+# auto-reply path — which bypasses the gate entirely.
+#
+# Strip non-JSON prelude before parsing. `awk '/^[[:space:]]*{/{p=1} p'`
+# captures from the first JSON-opening line onward, which works whether the
+# JSON is single-line or pretty-printed across multiple lines.
+extract_openclaw_json() {
+    awk '/^[[:space:]]*\{/{p=1} p'
+}
+
+# Detect whether stdout had a non-JSON prelude (a "Config warnings:" line is
+# the known case). When it does, write a script_warning runlog event so the
+# upstream issue is observable from the runlog alone — keeps fix B (manifest
+# channelConfigs) honest.
+record_openclaw_warning() {
+    local resp="$1" stage="$2"
+    if printf '%s\n' "$resp" | grep -q '^Config warnings:'; then
+        local now
+        now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        jq -n -c --arg rid "$RUN_ID" --arg ts "$now" --arg stage "$stage" \
+            '{event:"script_warning", script:"post-batch-summary.sh", stage:$stage, source:"openclaw_cli_config_warnings", run_id:$rid, ts:$ts}' \
+            >> "$runlog_path" 2>/dev/null || true
+    fi
+}
+
 parent_resp=$(openclaw --profile "$OPS_OPENCLAW_PROFILE" message send \
+    --account "$OPS_OPENCLAW_ACCOUNT" \
     --channel slack \
     --target "$target_channel" \
     --message "$parent_text" \
@@ -169,23 +249,25 @@ parent_resp=$(openclaw --profile "$OPS_OPENCLAW_PROFILE" message send \
     echo "$parent_resp" >&2
     exit 10
 }
+record_openclaw_warning "$parent_resp" "parent"
 
 # Slack message id (ts) for threading. Different openclaw versions emit
 # slightly different JSON shapes — try a few common fields.
-parent_msg_id=$(echo "$parent_resp" | jq -r '.messageId // .ts // .id // .message.ts // empty' 2>/dev/null || true)
+parent_msg_id=$(printf '%s\n' "$parent_resp" | extract_openclaw_json | jq -r '.messageId // .ts // .id // .message.ts // .payload.result.messageId // .payload.messageId // .result.messageId // empty' 2>/dev/null || true)
 if [[ -z "$parent_msg_id" ]]; then
     echo "ERROR: parent posted but couldn't extract message id/ts from response; refusing to send thread reply without --reply-to. Response was:" >&2
     echo "$parent_resp" >&2
     exit 10
 fi
 
-thread_resp_args=(--channel slack --target "$target_channel" --message "$thread_text")
+thread_resp_args=(--account "$OPS_OPENCLAW_ACCOUNT" --channel slack --target "$target_channel" --message "$thread_text")
 thread_resp_args+=(--reply-to "$parent_msg_id")
 thread_resp=$(openclaw --profile "$OPS_OPENCLAW_PROFILE" message send "${thread_resp_args[@]}" --json 2>&1) || {
     echo "ERROR: openclaw message send (thread) failed:" >&2
     echo "$thread_resp" >&2
     exit 10
 }
+record_openclaw_warning "$thread_resp" "thread"
 
 echo "POST_BATCH_SUMMARY_OK: parent=$parent_msg_id channel=$target_channel"
 exit 0
