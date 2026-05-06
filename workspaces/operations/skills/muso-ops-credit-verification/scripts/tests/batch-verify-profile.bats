@@ -895,3 +895,391 @@ count_lines() { awk 'END{print NR}' "$1" 2>/dev/null || echo 0; }
     jq -e '.track_title == "Yellow Submarine"' "$CV_RESULTS_PATH"
     jq -e '.role == "songwriter"' "$CV_RESULTS_PATH"
 }
+
+# ============================================================================
+# Tier-0 path — wire profile-audit.sh into the dispatcher so a real batch run
+# actually exercises Tier-0. CLI: batch-verify-profile.sh --tier0 --profile-id <pid>
+# ============================================================================
+
+# Helper — install stubs for profile-audit.sh and muso-admin-api.sh that
+# log every invocation. Each test sets MODE env vars to control behavior.
+setup_tier0_stubs() {
+    PROFILE_AUDIT_LOG="$TEST_ROOT/profile-audit-invocations.log"
+    ADMIN_API_LOG="$TEST_ROOT/admin-api-invocations.log"
+    export PROFILE_AUDIT_LOG ADMIN_API_LOG
+    : > "$PROFILE_AUDIT_LOG"
+    : > "$ADMIN_API_LOG"
+
+    export PROFILE_AUDIT_SH="$TEST_ROOT/fake-profile-audit.sh"
+    cat > "$PROFILE_AUDIT_SH" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'ARGS:'; for a in "$@"; do printf '\n  %s' "$a"; done; printf '\nENV_OPS_TIER0_ENABLED=%s\n' "${OPS_TIER0_ENABLED:-}"; } >> "${PROFILE_AUDIT_LOG:-/dev/null}"
+case "${TIER0_AUDIT_MODE:-pass}" in
+    pass)     echo "profile_audit:cc=694,pop=68,batch=50,industry=0.96,only_vel=1.00,br_max=1/1,roles_ok=1,art=0.56,lbl=0.46"; exit 0 ;;
+    skip)     echo "[fake-audit] skip" >&2; exit 1 ;;
+    disabled) echo "Tier-0 disabled" >&2; exit 2 ;;
+    bad_receipt) echo "garbled output without prefix"; exit 0 ;;
+    *)        echo "unknown TIER0_AUDIT_MODE=${TIER0_AUDIT_MODE}" >&2; exit 99 ;;
+esac
+STUB
+    chmod +x "$PROFILE_AUDIT_SH"
+
+    export MUSO_ADMIN_API_SH="$TEST_ROOT/fake-admin-api.sh"
+    cat > "$MUSO_ADMIN_API_SH" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'ARGS:'; for a in "$@"; do printf '\n  %s' "$a"; done; printf '\n'; } >> "${ADMIN_API_LOG:-/dev/null}"
+
+# Mode A: GET /admin/credit-requests?...status=unverified — return queue.
+# Args layout: [--evidence-excerpt v --profile-audit-id v --requester v] call <METHOD> <PATH> [body]
+# Find METHOD + PATH by scanning for "call".
+method=""
+path=""
+body=""
+i=1
+while (( i <= $# )); do
+    eval "tok=\${$i}"
+    if [[ "$tok" == "call" ]]; then
+        i=$((i+1)); eval "method=\${$i}"
+        i=$((i+1)); eval "path=\${$i}"
+        i=$((i+1)); eval "body=\${$i:-}"
+        break
+    fi
+    i=$((i+1))
+done
+
+if [[ "$method" == "GET" && "$path" == /admin/credit-requests* && "$path" == *status=unverified* ]]; then
+    case "${TIER0_QUEUE_MODE:-three}" in
+        empty) echo '{"http_status":200,"body":{"result":"ok","data":{"items":[]}}}'; exit 0 ;;
+        three) echo '{"http_status":200,"body":{"result":"ok","data":{"items":[{"id":"cr_a"},{"id":"cr_b"},{"id":"cr_c"}]}}}'; exit 0 ;;
+        http500) echo '{"http_status":500,"body":{"error":"upstream"}}'; exit 0 ;;
+        empty_resp) echo ""; exit 0 ;;
+    esac
+fi
+
+if [[ "$method" == "PUT" && "$path" == "/admin/credit-requests" ]]; then
+    case "${TIER0_PUT_MODE:-ok}" in
+        ok)   echo '{"http_status":200,"body":{"result":"ok","approved":3}}'; exit 0 ;;
+        fail) echo "admin-api: gate rejected" >&2; exit 1 ;;
+    esac
+fi
+
+echo "fake-admin-api: unhandled invocation" >&2
+exit 99
+STUB
+    chmod +x "$MUSO_ADMIN_API_SH"
+}
+
+@test "tier0: audit passes → dispatcher calls admin-api with receipt + profile-audit-id + requester" {
+    setup_tier0_stubs
+    TIER0_AUDIT_MODE=pass TIER0_QUEUE_MODE=three TIER0_PUT_MODE=ok \
+        run bash "$WRAPPER" --tier0 --profile-id pid-123
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"tier0: approved 3 credits for profile pid-123"* ]]
+    [[ "$output" == *"profile_audit:cc=694"* ]]
+    # profile-audit.sh was invoked with the profile id and OPS_TIER0_ENABLED=1.
+    grep -q "pid-123" "$PROFILE_AUDIT_LOG"
+    grep -q "ENV_OPS_TIER0_ENABLED=1" "$PROFILE_AUDIT_LOG"
+    # admin-api was called twice (GET unverified, PUT approve).
+    grep -q "GET" "$ADMIN_API_LOG"
+    grep -q "PUT" "$ADMIN_API_LOG"
+    grep -q -- "--evidence-excerpt" "$ADMIN_API_LOG"
+    grep -q "profile_audit:cc=694" "$ADMIN_API_LOG"
+    grep -q -- "--profile-audit-id" "$ADMIN_API_LOG"
+    grep -q "pid-123" "$ADMIN_API_LOG"
+    grep -q -- "--requester" "$ADMIN_API_LOG"
+    grep -q "clio" "$ADMIN_API_LOG"
+    grep -q "tier0_profile_audit" "$ADMIN_API_LOG"
+    grep -q '"requestIds":\["cr_a","cr_b","cr_c"\]' "$ADMIN_API_LOG"
+}
+
+@test "tier0: audit skips → dispatcher exits 1 with fall-through message, no admin-api call" {
+    setup_tier0_stubs
+    TIER0_AUDIT_MODE=skip \
+        run bash "$WRAPPER" --tier0 --profile-id pid-skip
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"fall-through"* ]]
+    [[ "$output" == *"pid-skip"* ]]
+    # admin-api must not be invoked when audit skips.
+    [ ! -s "$ADMIN_API_LOG" ]
+}
+
+@test "tier0: audit disabled → dispatcher exits 2" {
+    setup_tier0_stubs
+    TIER0_AUDIT_MODE=disabled \
+        run bash "$WRAPPER" --tier0 --profile-id pid-disabled
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"disabled"* ]] || [[ "$output" == *"profile-audit exit 2"* ]]
+    [ ! -s "$ADMIN_API_LOG" ]
+}
+
+@test "tier0: audit pre-set OPS_TIER0_ENABLED=0 propagated (audit exits 2 → exit 2)" {
+    setup_tier0_stubs
+    # Caller explicitly disabled — dispatcher must not silently re-enable.
+    OPS_TIER0_ENABLED=0 TIER0_AUDIT_MODE=disabled \
+        run bash "$WRAPPER" --tier0 --profile-id pid-env-off
+    [ "$status" -eq 2 ]
+    grep -q "ENV_OPS_TIER0_ENABLED=0" "$PROFILE_AUDIT_LOG"
+}
+
+@test "tier0: empty unverified queue → audit passes but no admin-api PUT, exit 0" {
+    setup_tier0_stubs
+    TIER0_AUDIT_MODE=pass TIER0_QUEUE_MODE=empty \
+        run bash "$WRAPPER" --tier0 --profile-id pid-empty
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"unverified queue is empty"* ]] || [[ "$output" == *"nothing to approve"* ]]
+    # GET happened; PUT did not.
+    grep -q "GET" "$ADMIN_API_LOG"
+    ! grep -q "PUT" "$ADMIN_API_LOG"
+}
+
+@test "tier0: queue fetch HTTP 500 → exit 1, no PUT" {
+    setup_tier0_stubs
+    TIER0_AUDIT_MODE=pass TIER0_QUEUE_MODE=http500 \
+        run bash "$WRAPPER" --tier0 --profile-id pid-500
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"HTTP 500"* ]]
+    ! grep -q "PUT" "$ADMIN_API_LOG"
+}
+
+@test "tier0: admin-api PUT fails → exit 1" {
+    setup_tier0_stubs
+    TIER0_AUDIT_MODE=pass TIER0_QUEUE_MODE=three TIER0_PUT_MODE=fail \
+        run bash "$WRAPPER" --tier0 --profile-id pid-put-fail
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"PUT failed"* ]]
+    grep -q "PUT" "$ADMIN_API_LOG"
+}
+
+@test "tier0: profile-audit returns exit 0 but garbled receipt → exit 1, no PUT" {
+    setup_tier0_stubs
+    TIER0_AUDIT_MODE=bad_receipt \
+        run bash "$WRAPPER" --tier0 --profile-id pid-bad-receipt
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no valid receipt"* ]]
+    ! grep -q "PUT" "$ADMIN_API_LOG"
+}
+
+@test "tier0: dry-run mode passes through — OPS_DRY_RUN=1 forwarded to admin-api" {
+    setup_tier0_stubs
+    # The fake admin-api echoes the env back via its argv log; inspect that.
+    # Easier: have the stub also dump OPS_DRY_RUN. We can patch the stub here.
+    cat > "$MUSO_ADMIN_API_SH" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'OPS_DRY_RUN=%s ARGS:' "${OPS_DRY_RUN:-}"; for a in "$@"; do printf '\n  %s' "$a"; done; printf '\n'; } >> "${ADMIN_API_LOG:-/dev/null}"
+method=""; path=""; body=""; i=1
+while (( i <= $# )); do
+    eval "tok=\${$i}"
+    if [[ "$tok" == "call" ]]; then
+        i=$((i+1)); eval "method=\${$i}"
+        i=$((i+1)); eval "path=\${$i}"
+        i=$((i+1)); eval "body=\${$i:-}"
+        break
+    fi
+    i=$((i+1))
+done
+if [[ "$method" == "GET" ]]; then
+    echo '{"http_status":200,"body":{"result":"ok","data":{"items":[{"id":"cr_a"}]}}}'
+    exit 0
+fi
+echo '{"http_status":200,"body":{"result":"ok","approved":1}}'
+exit 0
+STUB
+    chmod +x "$MUSO_ADMIN_API_SH"
+    OPS_DRY_RUN=1 TIER0_AUDIT_MODE=pass \
+        run bash "$WRAPPER" --tier0 --profile-id pid-dry
+    [ "$status" -eq 0 ]
+    grep -q "OPS_DRY_RUN=1" "$ADMIN_API_LOG"
+}
+
+@test "tier0: rejects per-credit args — --evidence-excerpt with --tier0 → exit 2" {
+    setup_tier0_stubs
+    run bash "$WRAPPER" --tier0 --profile-id pid-mix --evidence-excerpt "Ben Smith bass"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--evidence-excerpt is not allowed with --tier0"* ]]
+    [ ! -s "$PROFILE_AUDIT_LOG" ]
+}
+
+@test "tier0: rejects per-credit args — --decision with --tier0 → exit 2" {
+    setup_tier0_stubs
+    run bash "$WRAPPER" --tier0 --profile-id pid-mix --decision approve
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--decision is not allowed with --tier0"* ]]
+}
+
+@test "tier0: --tier0 without --profile-id → exit 2 (existing arg validation)" {
+    setup_tier0_stubs
+    run bash "$WRAPPER" --tier0
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--profile-id is required"* ]]
+}
+
+@test "regression: per-credit path still works without --tier0" {
+    # The existing per-credit approve flow must remain unchanged. Mirrors the
+    # canonical "2 Tier-1 hostnames match → exit 0" test, no --tier0 flag.
+    seed_browser_toolcall_ok "b1" "https://musicbrainz.org/artist/p1" "Ben Smith bass credits"
+    seed_browser_toolcall_ok "b2" "https://allmusic.com/artist/x"      "Ben Smith bass on this record"
+    run run_w --profile-id p1 \
+        --evidence-excerpt "Ben Smith bass" --ids "cr_1,cr_2" --decision approve
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.pre_flight == "ok" and .delegate_exit == 0'
+    [ -f "$APPROVE_LOG" ]
+}
+
+# ============================================================================
+# Tier-0 action_attempted emit — fix for the post-batch summary refusing to
+# post when a Tier-0 bulk-approve run had queue_depth_at_start > 0 but zero
+# action_attempted events (Failure 1 shape). The dispatcher must emit one
+# action_attempted event per successful Tier-0 PUT with the correct shape so
+# downstream reconciliation + the in-flight gate recognize the work.
+# ============================================================================
+
+@test "tier0: emits action_attempted with tier0_profile_audit evidence_kind on success" {
+    setup_tier0_stubs
+
+    # Real runlog dir + RUN_ID + runlog.sh stub so the dispatcher can write
+    # an action_attempted event. We use a stubbed runlog.sh so we can
+    # assert on the exact arguments without depending on cookie-cutter /
+    # verdict gate behavior in this test.
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlog"
+    mkdir -p "$OPS_RUNLOG_DIR"
+    export OPS_RUN_ID="20260506-180000-deadbe"
+
+    RUNLOG_LOG="$TEST_ROOT/runlog-invocations.log"
+    : > "$RUNLOG_LOG"
+    export RUNLOG_LOG
+    export RUNLOG_SH="$TEST_ROOT/fake-runlog.sh"
+    cat > "$RUNLOG_SH" <<'STUB'
+#!/usr/bin/env bash
+# Capture invocation: subcommand + run_id + event_name + payload, plus the
+# values of the gate-disable env vars (so the test can assert the dispatcher
+# disabled them for tier0 emits).
+{
+    printf 'CV_DISABLE_COOKIE_CUTTER_GATE=%s\n' "${CV_DISABLE_COOKIE_CUTTER_GATE:-}"
+    printf 'CV_DISABLE_VERDICT_GATE=%s\n' "${CV_DISABLE_VERDICT_GATE:-}"
+    printf 'ARGS:'
+    for a in "$@"; do printf '\n  %s' "$a"; done
+    printf '\n---\n'
+} >> "${RUNLOG_LOG:-/dev/null}"
+exit 0
+STUB
+    chmod +x "$RUNLOG_SH"
+
+    TIER0_AUDIT_MODE=pass TIER0_QUEUE_MODE=three TIER0_PUT_MODE=ok \
+        run bash "$WRAPPER" --tier0 --profile-id pid-aa-emit
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"approved 3 credits"* ]]
+
+    # Exactly one action_attempted call to runlog.sh.
+    aa_count=$(grep -c 'action_attempted' "$RUNLOG_LOG" || true)
+    [ "$aa_count" -eq 1 ]
+
+    # Pull out the JSON payload from the runlog invocation. Walk the captured
+    # ARGS to find the last positional arg (the payload).
+    payload=$(awk '/^ARGS:/{p=1; next} /^---$/{p=0} p' "$RUNLOG_LOG" | tail -1 | sed 's/^  //')
+    echo "captured payload: $payload" >&2
+
+    # Assert shape: profile_id, action=approve, cr_ids=[cr_a,cr_b,cr_c],
+    # count=3, evidence_kind=tier0_profile_audit, evidence_excerpt is the
+    # receipt.
+    echo "$payload" | jq -e '.profile_id == "pid-aa-emit"'
+    echo "$payload" | jq -e '.action == "approve"'
+    echo "$payload" | jq -e '.cr_ids == ["cr_a","cr_b","cr_c"]'
+    echo "$payload" | jq -e '.count == 3'
+    echo "$payload" | jq -e '.evidence_kind == "tier0_profile_audit"'
+    echo "$payload" | jq -e '.evidence_excerpt | startswith("profile_audit:")'
+
+    # Cookie-cutter + verdict gates must be disabled for the emit so Tier-0
+    # bulk-approves do not trip the runlog gates (receipts are similar by
+    # design and Tier-0 has no browser anchor).
+    grep -q 'CV_DISABLE_COOKIE_CUTTER_GATE=1' "$RUNLOG_LOG"
+    grep -q 'CV_DISABLE_VERDICT_GATE=1' "$RUNLOG_LOG"
+}
+
+@test "tier0: empty queue → no action_attempted emit (nothing to approve)" {
+    setup_tier0_stubs
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlog"
+    mkdir -p "$OPS_RUNLOG_DIR"
+    export OPS_RUN_ID="20260506-180000-empty0"
+
+    RUNLOG_LOG="$TEST_ROOT/runlog-invocations.log"
+    : > "$RUNLOG_LOG"
+    export RUNLOG_LOG
+    export RUNLOG_SH="$TEST_ROOT/fake-runlog.sh"
+    cat > "$RUNLOG_SH" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'ARGS:'; for a in "$@"; do printf '\n  %s' "$a"; done; printf '\n---\n'; } >> "${RUNLOG_LOG:-/dev/null}"
+exit 0
+STUB
+    chmod +x "$RUNLOG_SH"
+
+    TIER0_AUDIT_MODE=pass TIER0_QUEUE_MODE=empty \
+        run bash "$WRAPPER" --tier0 --profile-id pid-empty
+    [ "$status" -eq 0 ]
+    # Empty queue means PUT did not run, so no action_attempted should be emitted.
+    ! grep -q 'action_attempted' "$RUNLOG_LOG"
+}
+
+@test "tier0: PUT failure → no action_attempted emit (no work landed)" {
+    setup_tier0_stubs
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlog"
+    mkdir -p "$OPS_RUNLOG_DIR"
+    export OPS_RUN_ID="20260506-180000-putf00"
+
+    RUNLOG_LOG="$TEST_ROOT/runlog-invocations.log"
+    : > "$RUNLOG_LOG"
+    export RUNLOG_LOG
+    export RUNLOG_SH="$TEST_ROOT/fake-runlog.sh"
+    cat > "$RUNLOG_SH" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'ARGS:'; for a in "$@"; do printf '\n  %s' "$a"; done; printf '\n---\n'; } >> "${RUNLOG_LOG:-/dev/null}"
+exit 0
+STUB
+    chmod +x "$RUNLOG_SH"
+
+    TIER0_AUDIT_MODE=pass TIER0_QUEUE_MODE=three TIER0_PUT_MODE=fail \
+        run bash "$WRAPPER" --tier0 --profile-id pid-put-fail
+    [ "$status" -eq 1 ]
+    # PUT failed, so no action_attempted should be emitted.
+    ! grep -q 'action_attempted' "$RUNLOG_LOG"
+}
+
+@test "tier0: cookie-cutter gate exempts evidence_kind=tier0_profile_audit (3 batches in same run)" {
+    # Real runlog.sh (no stub) so we exercise the actual cookie-cutter path.
+    # Three Tier-0 batches in one run produce 3 action_attempted events with
+    # similar evidence_excerpts (profile_audit:cc=...). The cookie-cutter
+    # detector would normally fire on the 3rd; the evidence_kind exemption
+    # must allow all 3 through.
+    setup_tier0_stubs
+    export OPS_RUNLOG_DIR="$TEST_ROOT/runlog"
+    mkdir -p "$OPS_RUNLOG_DIR"
+    export OPS_RUN_ID="20260506-180000-cookie"
+
+    # Use the REAL runlog.sh — bare RUNLOG_SH unset → defaults to
+    # $SCRIPT_DIR/runlog.sh in batch-verify-profile.sh.
+    unset RUNLOG_SH
+
+    # Pre-create the runlog file (runlog.sh event uses log_path_for_run).
+    day="${OPS_RUN_ID:0:8}"
+    runlog_file="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}/$OPS_RUN_ID.jsonl"
+    mkdir -p "$(dirname "$runlog_file")"
+    : > "$runlog_file"
+
+    # Run the dispatcher 3 times with different profile_ids — 3 distinct
+    # tier0 PUTs, 3 action_attempted writes that the cookie-cutter detector
+    # would normally collapse on byte-identical receipt text. The fake
+    # profile-audit emits the exact same receipt every call (same fixture).
+    for pid in pid-cc-1 pid-cc-2 pid-cc-3; do
+        TIER0_AUDIT_MODE=pass TIER0_QUEUE_MODE=three TIER0_PUT_MODE=ok \
+            bash "$WRAPPER" --tier0 --profile-id "$pid" >/dev/null 2>&1
+        rc=$?
+        [ "$rc" -eq 0 ] || { echo "iteration for $pid failed rc=$rc" >&2; cat "$runlog_file" >&2; return 1; }
+    done
+
+    # All 3 action_attempted events must have landed despite identical receipts.
+    aa_count=$(grep -c '"event":"action_attempted"' "$runlog_file")
+    [ "$aa_count" -eq 3 ]
+
+    # Each must carry evidence_kind=tier0_profile_audit.
+    kinds=$(jq -r 'select(.event=="action_attempted") | .evidence_kind' "$runlog_file" | sort -u)
+    [ "$kinds" = "tier0_profile_audit" ]
+}

@@ -161,7 +161,22 @@ cmd_event() {
   CV_RUNLOG_COOKIE_CUTTER_THRESHOLD="${CV_RUNLOG_COOKIE_CUTTER_THRESHOLD:-3}"
   case "$event_name" in
     verdict|escalation_posted|action_attempted)
-      if [[ "${CV_DISABLE_COOKIE_CUTTER_GATE:-0}" != "1" && -f "$log" ]]; then
+      # Tier-0 evidence_kind exemption: Tier-0 bulk-approves emit
+      # action_attempted with evidence_kind=tier0_profile_audit and an
+      # evidence_excerpt that is the profile_audit:cc=...,pop=...,... receipt.
+      # By design these receipts are structurally similar across profiles
+      # (same key set, similar threshold values) — the cookie-cutter detector
+      # would fire on every Tier-0 batch of ≥3 profiles and reject the very
+      # event the post-batch summary needs. Tier-0 has its own
+      # anti-fabrication defense: each receipt is independently re-verified
+      # against live admin-api data by _tier0_audit_recompute_gate before
+      # the PUT lands, and a tier0_audit_verified event is emitted for the
+      # browser-evidence-audit cross-check.
+      local _ev_kind
+      _ev_kind=$(jq -r '.evidence_kind // empty' <<<"$payload" 2>/dev/null)
+      if [[ "$_ev_kind" == "tier0_profile_audit" ]]; then
+        :  # exempt — fall through to verdict gate below
+      elif [[ "${CV_DISABLE_COOKIE_CUTTER_GATE:-0}" != "1" && -f "$log" ]]; then
         local new_reason prior_count
         new_reason=$(jq -r '.reason // empty' <<<"$payload" 2>/dev/null)
         if [[ -n "$new_reason" ]]; then

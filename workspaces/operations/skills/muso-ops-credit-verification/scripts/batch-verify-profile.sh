@@ -80,6 +80,14 @@ SESSION_EVIDENCE_SH="${SESSION_EVIDENCE_SH:-$SCRIPT_DIR/session-evidence.sh}"
 BATCH_APPROVE_SH="${BATCH_APPROVE_SH:-$SCRIPT_DIR/batch-approve-credits.sh}"
 BATCH_FLAG_SH="${BATCH_FLAG_SH:-$SCRIPT_DIR/batch-flag-credits.sh}"
 
+# Tier-0 path. Spec §8 Phase A — when invoked with --tier0 the dispatcher
+# delegates to profile-audit.sh, then on a passing 8-gate audit calls
+# muso-admin-api.sh PUT /admin/credit-requests with the receipt as
+# --evidence-excerpt + --profile-audit-id <pid>. The admin-api gate
+# (_tier0_audit_recompute_gate) re-verifies the receipt against live data.
+PROFILE_AUDIT_SH="${PROFILE_AUDIT_SH:-$SCRIPT_DIR/profile-audit.sh}"
+MUSO_ADMIN_API_SH="${MUSO_ADMIN_API_SH:-/opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh}"
+
 # Closed-list flag reasons (added 2026-04-30, tightened later same day after
 # run 20260430-111343-1605a8 leaked 460 credits). Forces the agent to
 # categorize why a UVN flag was applied instead of typing free-form prose.
@@ -127,6 +135,7 @@ IDS_RAW=""
 DECISION=""
 REASON=""
 FLAG_REASON=""
+TIER0_MODE=0
 
 usage() {
     cat >&2 <<EOF
@@ -199,6 +208,7 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --tier0)             TIER0_MODE=1;               shift 1 ;;
         --profile-id)        PROFILE_ID="${2:-}";        shift 2 ;;
         --credited-name)     CREDITED_NAME="${2:-}";     shift 2 ;;
         --track-title)       TRACK_TITLE="${2:-}";       shift 2 ;;
@@ -224,6 +234,151 @@ if [[ -z "$PROFILE_ID" ]]; then
     echo "ERROR: --profile-id is required." >&2
     exit 2
 fi
+
+# --- Tier-0 mode: short-circuit the per-credit validation + flow ---
+# Tier-0 only needs --profile-id. The dispatcher delegates the audit to
+# profile-audit.sh, fetches the unverified queue, and (on a passing audit)
+# calls muso-admin-api.sh with the receipt as --evidence-excerpt. Per-credit
+# args (--evidence-excerpt, --ids, --decision, --credited-name, etc.) are
+# forbidden in this mode — the receipt IS the evidence and the queue IS
+# the id list.
+if [[ "$TIER0_MODE" == "1" ]]; then
+    # Reject any per-credit args that don't make sense for Tier-0. Better to
+    # fail loud than silently ignore — the caller is mixing modes.
+    for forbidden_pair in "EVIDENCE_EXCERPT --evidence-excerpt" \
+                          "IDS_RAW --ids" \
+                          "DECISION --decision" \
+                          "REASON --reason" \
+                          "FLAG_REASON --flag-reason" \
+                          "CREDITED_NAME --credited-name" \
+                          "TRACK_TITLE --track-title" \
+                          "ROLE --role"; do
+        var="${forbidden_pair% *}"
+        flag="${forbidden_pair#* }"
+        if [[ -n "${!var}" ]]; then
+            echo "ERROR: ${flag} is not allowed with --tier0 (the receipt + audit-id is the evidence)." >&2
+            exit 2
+        fi
+    done
+
+    # Default OPS_TIER0_ENABLED on if the caller hasn't set it. Spec says the
+    # dispatcher should set this if not already set; we honor a pre-set 0/false
+    # by passing it through (profile-audit.sh will exit 2 → we propagate exit 2).
+    case "$(printf %s "${OPS_TIER0_ENABLED:-}" | tr '[:upper:]' '[:lower:]')" in
+        ""|unset) export OPS_TIER0_ENABLED=1 ;;
+    esac
+
+    audit_stdout_file="$(mktemp)"
+    audit_rc=0
+    bash "$PROFILE_AUDIT_SH" "$PROFILE_ID" >"$audit_stdout_file" 2>&2 || audit_rc=$?
+
+    case "$audit_rc" in
+        0)
+            receipt="$(tr -d '\r\n' < "$audit_stdout_file")"
+            rm -f "$audit_stdout_file"
+            if [[ -z "$receipt" || "$receipt" != profile_audit:* ]]; then
+                echo "[batch-verify-profile.sh] tier0: profile-audit.sh exited 0 but emitted no valid receipt — refusing to call admin-api." >&2
+                exit 1
+            fi
+
+            # Fetch the unverified queue for this profile to build the
+            # requestIds list. Empty queue → log + exit 0 with approved=0
+            # (audit passed but there's nothing to approve, e.g. another
+            # process drained the queue between audit + dispatch).
+            queue_resp="$(bash "$MUSO_ADMIN_API_SH" call GET \
+                "/admin/credit-requests?profilesIds=${PROFILE_ID}&status=unverified&limit=1000" 2>/dev/null || true)"
+            if [[ -z "$queue_resp" ]]; then
+                echo "[batch-verify-profile.sh] tier0: admin-api fetch returned empty for profile $PROFILE_ID" >&2
+                exit 1
+            fi
+            queue_http="$(printf '%s' "$queue_resp" | jq -r '.http_status // "unknown"' 2>/dev/null || echo unknown)"
+            if [[ "$queue_http" != "200" ]]; then
+                echo "[batch-verify-profile.sh] tier0: admin-api unverified fetch returned HTTP $queue_http for profile $PROFILE_ID" >&2
+                exit 1
+            fi
+            ids_array="$(printf '%s' "$queue_resp" | jq -c '[.body.data.items[]?.id // empty]' 2>/dev/null || echo '[]')"
+            ids_count="$(printf '%s' "$ids_array" | jq 'length' 2>/dev/null || echo 0)"
+            if (( ids_count == 0 )); then
+                echo "[batch-verify-profile.sh] tier0: audit passed for $PROFILE_ID but unverified queue is empty — nothing to approve" >&2
+                exit 0
+            fi
+
+            body="$(jq -n -c --argjson ids "$ids_array" \
+                '{requestIds:$ids, status:"approved", reason:"tier0_profile_audit"}')"
+
+            api_rc=0
+            bash "$MUSO_ADMIN_API_SH" \
+                --evidence-excerpt "$receipt" \
+                --profile-audit-id "$PROFILE_ID" \
+                --requester clio \
+                call PUT /admin/credit-requests "$body" || api_rc=$?
+            if (( api_rc != 0 )); then
+                echo "[batch-verify-profile.sh] tier0: admin-api PUT failed (rc=$api_rc) for profile $PROFILE_ID" >&2
+                exit 1
+            fi
+
+            # Tier-0 success: emit an action_attempted event so post-batch
+            # reconciliation (compute-run-summary.sh + post-batch-summary.sh's
+            # in-flight gate) recognizes this profile's bulk-approve. Without
+            # this, a Tier-0-only run looks like Failure 1 shape
+            # (queue_depth_at_start > 0 AND action_attempted == 0) and the
+            # final Slack post is suppressed even though credits did land.
+            #
+            # evidence_kind="tier0_profile_audit" is the discriminator
+            # downstream gates (browser-evidence-audit.sh) use to route this
+            # event through the Tier-0 evidence path (matched against a
+            # tier0_audit_verified event written by muso-admin-api.sh's
+            # _tier0_audit_recompute_gate) instead of the Tier-1 browser
+            # anchor rule. Tier-0 doesn't use a browser, so a browser anchor
+            # would be impossible.
+            #
+            # The runlog gate's cookie-cutter detector is exempted for
+            # evidence_kind=tier0_profile_audit (see runlog.sh) — Tier-0
+            # receipts are intentionally similar across profiles.
+            if [[ -n "${OPS_RUN_ID:-}" ]]; then
+                runlog_sh="${RUNLOG_SH:-$SCRIPT_DIR/runlog.sh}"
+                if [[ -f "$runlog_sh" ]]; then
+                    aa_payload=$(jq -n -c \
+                        --arg pid "$PROFILE_ID" \
+                        --arg action "approve" \
+                        --argjson cr_ids "$ids_array" \
+                        --arg evidence_kind "tier0_profile_audit" \
+                        --arg evidence_excerpt "$receipt" \
+                        '{profile_id:$pid, action:$action, cr_ids:$cr_ids, count:($cr_ids|length),
+                          evidence_kind:$evidence_kind, evidence_excerpt:$evidence_excerpt}')
+                    # Disable the cookie-cutter + verdict gates: Tier-0 emits
+                    # similar receipts by design (each per-profile audit
+                    # produces a profile_audit:cc=...,pop=... shape) and has
+                    # no Tier-1 browser load to anchor against. The
+                    # tier0_audit_verified event written by the admin-api
+                    # gate is the parallel grounding signal for Tier-0.
+                    CV_DISABLE_COOKIE_CUTTER_GATE=1 CV_DISABLE_VERDICT_GATE=1 \
+                        bash "$runlog_sh" event "$OPS_RUN_ID" action_attempted "$aa_payload" \
+                        >/dev/null 2>&1 || true
+                fi
+            fi
+
+            echo "[batch-verify-profile.sh] tier0: approved $ids_count credits for profile $PROFILE_ID ($receipt)"
+            exit 0
+            ;;
+        1)
+            rm -f "$audit_stdout_file"
+            echo "[batch-verify-profile.sh] tier0: fall-through for profile $PROFILE_ID — audit skipped (gate fail or low volume); caller should fall back to per-credit Tier-1 flow" >&2
+            exit 1
+            ;;
+        2)
+            rm -f "$audit_stdout_file"
+            echo "[batch-verify-profile.sh] tier0: disabled or arg error for profile $PROFILE_ID (profile-audit exit 2)" >&2
+            exit 2
+            ;;
+        *)
+            rm -f "$audit_stdout_file"
+            echo "[batch-verify-profile.sh] tier0: profile-audit.sh exited $audit_rc for profile $PROFILE_ID" >&2
+            exit 1
+            ;;
+    esac
+fi
+
 if [[ -z "$EVIDENCE_EXCERPT" ]]; then
     echo "ERROR: --evidence-excerpt is required." >&2
     exit 2
