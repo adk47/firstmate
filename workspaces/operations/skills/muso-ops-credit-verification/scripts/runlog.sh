@@ -128,18 +128,29 @@ cmd_event() {
   log=$(log_path_for_run "$run_id")
   iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-  # Freeze-after-preflight-fail gate. SKILL.md B0d mandates that once the
-  # browser pre-flight probe fails, the turn exits and no further events are
-  # logged for this run. The 2026-04-20 13:19 UTC manual run (2bfea8)
-  # bypassed this by writing run_started phase="manual" immediately after
-  # preflight_browser_unavailable. Mechanically block any such continuation
-  # — the first preflight_browser_unavailable freezes the run. The helper
-  # that writes that failure (preflight-verify.sh) runs before the freeze
-  # takes effect because the gate checks for EXISTING entries; the helper's
-  # own write is the FIRST entry of that type.
+  # Browser-preflight gate. The 2026-04-20 incident drove this: a manual run
+  # logged preflight_browser_unavailable then continued anyway. Mechanically
+  # block continuation when the run depends on browser as primary evidence.
+  #
+  # 2026-05-06 cutover: under CV_EVIDENCE_MODE=api the run does NOT depend
+  # on browser as primary — credits clear via API helpers + AllMusic
+  # fallback. Demote to a warning so a transient browser failure (Cloudflare
+  # spike, SSL hiccup) doesn't strand a run that could clear via APIs.
+  # Browser-mode (legacy rollback) keeps the freeze.
   if [[ -f "$log" ]] && jq -e 'select(.event == "preflight_browser_unavailable")' "$log" >/dev/null 2>&1; then
-    echo "ERROR: run $run_id is frozen — preflight_browser_unavailable was logged. No further events accepted. SKILL.md B0d requires the turn to exit on pre-flight failure." >&2
-    exit 20
+    case "${CV_EVIDENCE_MODE:-api}" in
+      browser)
+        echo "ERROR: run $run_id is frozen — preflight_browser_unavailable was logged. No further events accepted. SKILL.md B0d requires the turn to exit on pre-flight failure." >&2
+        exit 20
+        ;;
+      api|both)
+        # Soft warning: continue under api-mode. Only emit on the first event
+        # after the preflight failure to avoid log spam.
+        if ! jq -e 'select(.event == "preflight_browser_warning_acknowledged")' "$log" >/dev/null 2>&1; then
+          echo "WARN: run $run_id has preflight_browser_unavailable, but CV_EVIDENCE_MODE=${CV_EVIDENCE_MODE:-api} permits continuation via API helpers + AllMusic fallback." >&2
+        fi
+        ;;
+    esac
   fi
 
   # Cookie-cutter reason gate. 2026-05-04 (run 20260504-103236-97741c1):
@@ -234,9 +245,18 @@ EOF
         # Only gate when the event names a profile_id — backwards-compat for
         # legacy events that lacked the field.
         if [[ -n "$pid" ]]; then
-          local lib_path
-          # shellcheck source=lib/browser-evidence.sh
-          lib_path="$(dirname "$0")/lib/browser-evidence.sh"
+          local lib_path mode
+          mode="${CV_EVIDENCE_MODE:-api}"
+          # api/both: source api-evidence.sh and use count_profile_evidence_sources
+          # against the credited name as the binding token. browser (legacy):
+          # source browser-evidence.sh and use count_profile_browser_loads.
+          if [[ "$mode" == "browser" ]]; then
+            # shellcheck source=lib/browser-evidence.sh
+            lib_path="$(dirname "$0")/lib/browser-evidence.sh"
+          else
+            # shellcheck source=lib/api-evidence.sh
+            lib_path="$(dirname "$0")/lib/api-evidence.sh"
+          fi
           if [[ -f "$lib_path" ]]; then
             # shellcheck disable=SC1090
             source "$lib_path"
@@ -262,22 +282,13 @@ EOF
               export CV_PROFILE_CREDITED_NAME CV_PROFILE_TRACK_TITLE CV_PROFILE_ROLES
             fi
 
-            if [[ "$reason" == *"tier1_unreachable"* ]]; then
+            if [[ "$reason" == *"tier1_unreachable"* && "$mode" == "browser" ]]; then
               # tier1_unreachable bypass — refuse single-host give-up + require
               # search-engine fallback per SKILL.md step 1b. The 2026-05-04 17:44
               # run shipped 5 profiles all stamped tier1_unreachable with thin
               # evidence (1 of 5 had multi-host loads, 0 of 5 ran a search).
-              # The audit accepted them via bypass parity. This gate now
-              # refuses bypass invocations whose preconditions aren't met:
-              #   (a) ≥2 distinct Tier-1 hosts loaded for this profile
-              #       (URL or response text mentions credited_name/track_title)
-              #   (b) ≥1 search-engine browser load (duckduckgo / bing / google)
-              #       whose ?q= mentions credited_name or track_title.
-              #       NB: web_search the tool is plugin-blocked in CV sessions
-              #       (DuckDuckGo backend bot-detected; GH issue #107) — the
-              #       sanctioned alternative is loading a search-engine URL via
-              #       the `browser` tool. count_profile_web_searches counts
-              #       those browser loads (despite the legacy function name).
+              # Browser-mode (legacy rollback) only — under api-mode the
+              # tier1_unreachable label is meaningless because Tier-1 ≠ browser.
               local attempts searches
               attempts=$(count_profile_tier1_attempts "$pid")
               searches=$(count_profile_web_searches "$pid")
@@ -315,36 +326,40 @@ EOF
               fi
             else
               local count
-              count=$(count_profile_browser_loads "$pid")
+              if [[ "$mode" == "browser" ]]; then
+                count=$(count_profile_browser_loads "$pid")
+              else
+                # api-mode: count distinct evidence sources (api helpers +
+                # AllMusic browser fallback + future citations) keyed by the
+                # credited name. The api-evidence functions take an excerpt
+                # as their first arg; CV_PROFILE_CREDITED_NAME is the
+                # natural per-profile binding.
+                count=$(count_profile_evidence_sources "${CV_PROFILE_CREDITED_NAME:-}")
+              fi
               if (( count < 1 )); then
                 local label="verdict_without_evidence"
                 [[ "$event_name" == "action_attempted" ]] && label="acted_without_investigation"
+                local mode_blurb
+                if [[ "$mode" == "browser" ]]; then
+                  mode_blurb="Tier-1 browser snapshot (music.apple.com / musicbrainz.org / discogs.com / allmusic.com)"
+                else
+                  mode_blurb="evidence source (API helper hit OR AllMusic browser load)"
+                fi
                 cat >&2 <<EOF
-ERROR: runlog.sh ${event_name} refused (${label}) — no successful Tier-1
-browser load found whose response text proves the claim for profile_id
+ERROR: runlog.sh ${event_name} refused (${label}) — no successful
+${mode_blurb} found whose response text proves the claim for profile_id
 '${pid}' in the current run window.
-
-Per SKILL.md Step 3, every per-profile decision (verdict, escalation_posted,
-OR action_attempted) must be grounded in at least one Tier-1 browser
-snapshot (music.apple.com / musicbrainz.org / discogs.com / allmusic.com)
-whose response text contains the credited
-person's name AND either the track title or one of the role tokens.
 
 Resolved claim for this profile (from profile_group_fetched):
   credited_name: '${CV_PROFILE_CREDITED_NAME:-<missing>}'
   track_title:   '${CV_PROFILE_TRACK_TITLE:-<missing>}'
   roles:         '${CV_PROFILE_ROLES:-<missing>}'
 
-Load Tier-1 pages and capture verbatim excerpts that include the credited
-name near the track title or role. If sources are genuinely unreachable
-(captcha, 5xx, network), include 'tier1_unreachable' in the .reason field
-— that is the ONLY allowed bypass and itself requires evidence of an
-attempted browse (≥2 Tier-1 hosts AND ≥1 search-engine browser load).
-
-action_attempted in particular cannot be used as a "shortcut to acting
-without investigating" — if subagents fail to produce verdicts, the run
-must exit early via run_finished_subagent_pool_failed, not bulk-fire
-actions.
+CV_EVIDENCE_MODE=${mode}. Under api-mode every per-profile decision must be
+backed by at least one of: a *-isrc-lookup.sh API helper invocation whose
+toolResult contains the credited name, OR an AllMusic browser load whose
+snapshot text contains the credited name. Set CV_EVIDENCE_MODE=browser to
+fall back to the legacy Tier-1 browser quorum (rollback only).
 EOF
                 exit 7
               fi

@@ -2,7 +2,7 @@
   "name": "@muso/credit-verification-enforcer",
   "private": true,
   "version": "0.1.0",
-  "description": "openclaw plugin: mechanically enforce grounded credit-verification approvals (block web_search in CV context, gate PUT-approve on >=2 successful Tier 1 browser loads).",
+  "description": "openclaw plugin: mark credit-verification sessions and block hand-composed batch-complete messages. Approve-gate enforcement is in muso-admin-api.sh (CV_EVIDENCE_MODE=api default since 2026-05-06).",
   "type": "module",
   "main": "index.ts",
   "license": "MIT",
