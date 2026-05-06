@@ -463,6 +463,74 @@ Skipping verification — manual review required. <@U7RP6HKUZ>
 
 ### Step 3: Investigate
 
+> ## ⚠️ MANDATORY UNDER `CV_EVIDENCE_MODE=api` (default since 2026-05-06)
+>
+> **Every per-credit verdict, flag, escalation, AND action_attempted MUST
+> be preceded by EITHER:**
+>
+>   (a) a successful `musicbrainz-isrc-lookup.sh` call whose JSON contains
+>       the credited name (≥1 evidence source), AND/OR
+>   (b) an AllMusic browser load whose snapshot text contains the credited
+>       name (≥1 evidence source).
+>
+> **The runlog gate (`exit 7 verdict_without_evidence`) and the bash
+> approve gate (`insufficient api-evidence`) WILL refuse any verdict /
+> flag / escalation that doesn't have at least 1 source for non-cron
+> approves and ≥2 sources for autonomous approves. Bulk-UVN without
+> investigation is the failure mode that 2026-05-06 batch
+> 20260506-202031-675159 demonstrated — 73 attempts, 73 refusals.**
+>
+> **The agent MUST NOT skip the API helper just because the legacy prose
+> in this Step 3 talks about Tier-1 browser loads.** The legacy prose
+> below stays in the file as a `CV_EVIDENCE_MODE=browser` rollback
+> reference — it is NOT the active playbook. Read step §3α below first.
+>
+> ### Step 3α — API-FIRST INVESTIGATION (THE ACTIVE PLAYBOOK)
+>
+> For each credit you intend to verdict (approve OR UVN), do this in
+> order. Stop as soon as you have 2 sources for autonomous approve, or
+> 1 source for a UVN flag:
+>
+>   1. **MusicBrainz ISRC** — only if the credit ships an ISRC:
+>      ```bash
+>      bash /opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/musicbrainz-isrc-lookup.sh \
+>        "$ISRC" --credited-name "$CREDITED_NAME" --role "$ROLE"
+>      ```
+>      Free, no auth, ~1.1s/call rate-limited. If JSON shows
+>      `"name_match":true`, that's evidence source 1 — capture
+>      `evidence_excerpt` from the JSON for the approve `--evidence-excerpt`.
+>
+>   2. **AllMusic browser load** — load `https://www.allmusic.com/search/all/<URL-encoded credited-name>`,
+>      snapshot the page, find the credit. AllMusic has no API; this is
+>      the only sanctioned browser destination under api-mode.
+>
+>   3. **If both miss:** the credit is unverifiable today. Escalate to
+>      Jan (`<@U038BM16T7W>`) with verdict `UNVERIFIABLE — NEEDS REVIEW`
+>      via post-batch-summary.sh — DO NOT bulk-UVN flag, the gate will
+>      refuse it.
+>
+> **Inert helpers (DO NOT call until tokens land):**
+>   - `discogs-isrc-lookup.sh` — exits 4 (creds_missing). Tracked in
+>     [#255](https://github.com/Muso-AI/hydra/issues/255).
+>   - `spotify-track-lookup.sh` — exits 4 (creds_missing). Tracked in
+>     [#256](https://github.com/Muso-AI/hydra/issues/256).
+>   Calling them today wastes a turn for no benefit.
+>
+> **Browser hosts that count for nothing under api-mode:**
+> apple.music.com, musicbrainz.org, discogs.com, spotify.com, tidal.com.
+> The api-evidence library doesn't count their results — they're
+> JS-rendered and the browser snapshot doesn't capture credits. AllMusic
+> is the only sanctioned browser destination.
+>
+> **Rollback knob:** `CV_EVIDENCE_MODE=browser` in
+> `/etc/openclaw/main.env` + gateway restart returns to the legacy
+> Tier-1 browser quorum. Operator-only; not the agent's call.
+>
+> ----
+>
+> *Below this line: legacy `CV_EVIDENCE_MODE=browser` reference. NOT the
+> active playbook. Skip to Step 4 unless explicitly running browser-mode.*
+
 Use existing skill workflows:
 
 **3a. Athena cross-reference** (from `muso-ops-credits`):
