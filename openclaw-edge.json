@@ -157,7 +157,6 @@
       "mode": "enforce",
       "pruneAfter": "14d",
       "maxEntries": 100,
-      "rotateBytes": "20mb",
       "resetArchiveRetention": "7d"
     }
   },
@@ -173,8 +172,6 @@
       "dangerouslyAllowNameMatching": true,
       "requireMention": true,
       "groupPolicy": "open",
-      "streaming": "partial",
-      "nativeStreaming": true,
       "replyToMode": "all",
       "replyToModeByChatType": {
         "direct": "all",
@@ -187,9 +184,15 @@
           "botToken": "xoxb-264358207284-10767041148305-JPk1MvuGJjr9J8mvvgKrhFtT",
           "appToken": "xapp-1-A0AMQK8PH8X-10752091591862-9b3f765296a9ac01468fc58b2b6126cad0dee60e5914dd0930f0a5901fb1864d",
           "userTokenReadOnly": true,
-          "streaming": "partial",
-          "nativeStreaming": true
+          "streaming": {
+            "mode": "partial",
+            "nativeTransport": true
+          }
         }
+      },
+      "streaming": {
+        "mode": "partial",
+        "nativeTransport": true
       }
     },
     "intercom": {
