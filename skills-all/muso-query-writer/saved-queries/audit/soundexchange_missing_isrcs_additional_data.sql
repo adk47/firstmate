@@ -4,8 +4,7 @@ title: [Audit] SoundExchange missing ISRCs additional data
 athena_id: 64194d8a-c314-460c-855d-6a4e39c25999
 primary_tag: audit
 tags: [audit]
-trino_catalog: hive
-trino_schema: default
+athena_database: platform-industry-bi-prod
 description: No description provided
 status: one_off
 pii: unknown
@@ -20,9 +19,9 @@ with rec as (
         arbitrary(title) as track_title,
         array_join(array_agg(distinct p.name), ', ') as track_artists,
         row_number() over (partition by isrc order by max(popularity) desc, min(release_date)) as recording_priority
-    from hive."platform-industry-bi-prod".matvw_raw_recording as r
+    from "platform-industry-bi-prod".matvw_raw_recording as r
     cross join unnest(artist_ids) as a(artist_id)
-    join hive."platform-industry-bi-prod".matvw_raw_profile as p ON (p._id=artist_id)
+    join "platform-industry-bi-prod".matvw_raw_profile as p ON (p._id=artist_id)
     where 
     not r.is_deleted 
     and r._id like 'spotify:%'
@@ -368,9 +367,9 @@ from (
         arbitrary(custom_data.label) as release_label,
         min(recording_priority) as recording_priority
     from rec 
-    join hive."platform-industry-bi-prod".matvw_raw_release as r ON (r._id=release_id)
+    join "platform-industry-bi-prod".matvw_raw_release as r ON (r._id=release_id)
     cross join unnest(artist_ids) as a(artist_id)
-        left join hive."platform-industry-bi-prod".matvw_raw_profile as p ON (p._id=artist_id)
+        left join "platform-industry-bi-prod".matvw_raw_profile as p ON (p._id=artist_id)
     -- where 
     --     not r.is_deleted 
     group by recording_id, release_id

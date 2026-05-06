@@ -37,7 +37,7 @@ from (
         sum(if(is_registered, streams, 0)) as streams_is_registered,
         sum(if(has_work, streams, 0)) as streams_has_work,
         sum(if(has_iswc, streams, 0)) as streams_has_iswc
-    from hive.audit.audit_isrc
+    from "audit-prod".audit_isrc
     group by 1 
 )
 order by 1

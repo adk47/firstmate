@@ -78,9 +78,13 @@ workspaces/*/skills/*/state/
 # agent puts here is intended to be ephemeral.
 workspaces/*/tmp/
 
-# Server-side audit logs
+# Server-side audit logs. The blanket `audit/` matches every audit dir
+# in the tree, so negate the saved-queries/audit/ dir under
+# muso-query-writer — those are committed SQL templates, not logs.
 audit/
 audit-local-backup/
+!skills-all/muso-query-writer/saved-queries/audit/
+!workspaces/**/skills/muso-query-writer/saved-queries/audit/
 
 # CD-managed shadow mirror of the repo (server-side at /opt/hydra/config/,
 # written by GitHub Actions — see scripts/deploy.sh comment for full context).
