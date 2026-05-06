@@ -53,7 +53,7 @@ notify_slack ":warning: HYDRA rollback initiated. Reverting $CURRENT_SHA -> $PRE
 # Step 1: Revert configs to previous version
 # -------------------------------------------------------------------
 log "Step 1/4: Reverting configs to HEAD~1..."
-for cfg in openclaw-main.json openclaw-edge.json openclaw-dev.json; do
+for cfg in openclaw-main.json openclaw-edge.json; do
   if git -C "$HYDRA_ROOT" show "HEAD~1:$cfg" >/dev/null 2>&1; then
     git -C "$HYDRA_ROOT" checkout HEAD~1 -- "$cfg"
     log "  Reverted $cfg"
@@ -115,7 +115,7 @@ fi
 # Sync to profile dirs
 if $HYDRA_LOCAL; then
   set +e
-  for profile in main edge dev; do
+  for profile in main edge; do
     src="/opt/hydra/openclaw-${profile}.json"
     dst="/root/.openclaw/${profile}/openclaw.json"
     if [ -f "$src" ]; then
@@ -129,7 +129,7 @@ if $HYDRA_LOCAL; then
 else
   ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" << 'SYNC'
 set -euo pipefail
-for profile in main edge dev; do
+for profile in main edge; do
   src="/opt/hydra/openclaw-${profile}.json"
   dst="/root/.openclaw/${profile}/openclaw.json"
   if [ -f "$src" ]; then
@@ -148,14 +148,14 @@ log "  Config synced."
 # -------------------------------------------------------------------
 log "Step 2/4: Restarting all gateways..."
 if $HYDRA_LOCAL; then
-  for svc in openclaw-gateway-main openclaw-gateway-edge openclaw-gateway-dev; do
+  for svc in openclaw-gateway-main openclaw-gateway-edge; do
     if systemctl is-active "$svc" &>/dev/null || systemctl is-enabled "$svc" &>/dev/null; then
       systemctl restart "$svc" && echo "  Restarted $svc" || echo "  WARNING: Failed to restart $svc"
     fi
   done
 else
   ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" << 'RESTART'
-for svc in openclaw-gateway-main openclaw-gateway-edge openclaw-gateway-dev; do
+for svc in openclaw-gateway-main openclaw-gateway-edge; do
   if systemctl is-active "$svc" &>/dev/null || systemctl is-enabled "$svc" &>/dev/null; then
     systemctl restart "$svc" && echo "  Restarted $svc" || echo "  WARNING: Failed to restart $svc"
   fi

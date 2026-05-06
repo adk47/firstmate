@@ -28,7 +28,7 @@ import { markCvSessionHook } from "./src/hooks/mark-cv-session.js";
  * testing showed @-mention flows into #credit-verification slipped past the
  * Tier 1 block because they don't re-trigger inbound_claim and don't set
  * runId. `isCreditVerificationSession` now also treats any tool call from
- * the `operations` / `operations-dev` agent as CV context — the workspace
+ * the `operations` agent as CV context — the workspace
  * itself is CV-scoped, so workspace-level gating is safer than the narrow
  * sessionKey/runId gate.
  *

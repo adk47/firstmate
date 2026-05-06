@@ -77,13 +77,20 @@ Every ops user has a tier. Check `sender_id` before ANY operation.
 - Profile deletions
 - Any operation flagged as "escalate" below
 
-### Channel Restrictions
+### Channel Scope
 
-Ops commands are processed in:
-- `C0ADREBPNQ2` (#clio_analyst) — full ops access
-- `GJAM34DT6` (#operations) — claiming + credit requests only
-- `C0APB2CMM7C` (#credit-verification) — autonomous credit verification only (see Hardened Exception below)
-- Aaron's DM — full access
+Ops commands are processed in **every channel and every DM** the agent is
+in. There is no per-channel narrowing for #operations, #clio_analyst, DMs,
+or anywhere else — the full ops surface is available everywhere. The Write
+Approval Gate below remains the actual access control; channel ID is not a
+gate.
+
+The `#credit-verification` channel (`C0APB2CMM7C`) requires @mention
+just like every other channel as of 2026-05-06. It still has the hardened
+autonomous-write exception described below (autonomous approve / move to
+user_verification_needed without per-write Aaron sign-off), but the
+trigger is an explicit @mention on a flagged credit request — not every
+message that lands in the channel.
 
 ## ⚠️ WRITE APPROVAL GATE (MANDATORY until hardened)
 
@@ -244,8 +251,8 @@ Full route map: `references/admin-api-routes.md`
 - `POST /admin/profile/:profileId/credits` — add credits
 - `PUT /admin/profile/:profileId/credits` — update credits
 - `DELETE /admin/profile/:profileId/credits` — delete credits
-- `POST /admin/profiles/merge` — merge profiles ⚠️ AARON APPROVAL
-- `POST /admin/profiles/unmerge` — unmerge profiles ⚠️ AARON APPROVAL
+- `POST /admin/profiles/merge` — merge profiles ⚠️ AARON APPROVAL — see `muso-ops-profiles/SKILL.md` "Merge Profiles" for the mandatory pre-state capture, post-merge verification, and STOP-rule (incident 2026-04-29). Run with `OPS_DRY_RUN=1` first.
+- `POST /admin/profiles/unmerge` — unmerge profiles ⚠️ AARON APPROVAL — same checklist applies; see `muso-ops-profiles/SKILL.md` "Unmerge Profile".
 - `POST /admin/profile/:profileId/link-external` — link external IDs
 - `POST /admin/profile/:profileId/unlink-external` — unlink external IDs
 - `POST /admin/profile/:profileId/unlink` — unlink profile

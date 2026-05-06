@@ -2,11 +2,16 @@
 name: muso-ops-credit-verification
 description: |
   Autonomous credit verification workflow. Two modes:
-  1. Reactive: Triggered by any message in #credit-verification (C0APB2CMM7C).
-     No @mention required. Parses flagged credit requests, investigates, and
-     either auto-approves or moves to user_verification_needed. The bot does NOT
-     auto-reject — rejection is a manual override from Jan/Aaron in escalation
-     threads.
+  1. Reactive: Triggered when a human (Aaron, Jan, Nick, etc.)
+     **@mentions** the agent in #credit-verification (C0APB2CMM7C) with a
+     credit request to verify — typically a `credits.muso.ai` URL, a list
+     of credit IDs, or a specific user/profile to check. As of 2026-05-06
+     this channel uses `requireMention: true`; the old auto-fire-on-every-
+     message behavior and the core-backend Block Kit auto-post integration
+     have both been removed. On match: parse, investigate, and either
+     auto-approve or move to user_verification_needed. The bot does NOT
+     auto-reject — rejection is a manual override from Jan/Aaron in
+     escalation threads.
   2. Batch (cron): Proactively fetches up to OPS_BATCH_FETCH_SIZE unverified
      credits from the API every 4h (cron-jobs.json →
      credit-verification-batch-4h, `0 */4 * * *` UTC) and processes them,
@@ -14,10 +19,12 @@ description: |
      Target: 500 per run × 6 runs/day. Daily approval cap (500/UTC-day) still
      applies — excess LEGITIMATE verdicts log as skip_cap.
 
-  Use when: any message arrives in #credit-verification channel, OR during
-  heartbeat execution of the "Batch Credit Verification" task.
+  Use when: the agent is @mentioned in #credit-verification on a flagged
+  credit request, OR during heartbeat execution of the "Batch Credit
+  Verification" task.
 
-  Triggers: any message in #credit-verification (C0APB2CMM7C), heartbeat schedule
+  Triggers: @mention in #credit-verification (C0APB2CMM7C) with a flagged
+  credit request, heartbeat schedule
 depends-on:
   - muso-ops-credits
   - muso-ops-fraud
@@ -25,8 +32,10 @@ depends-on:
   - muso-ops-audit
   - muso-slack-formatter
 compatibility: |
-  Cross-repo dependency: core-backend PR #8465 must set rich text fallback
-  in postCreditVerification() for the agent to parse the message content.
+  No cross-repo dependency. The previous core-backend integration
+  (postCreditVerification → Block Kit post on risk ≥ 85%) was removed —
+  triggers are now (a) human @mention in #credit-verification and (b)
+  the cron batch fetching credits directly from the admin API.
 metadata:
   version: "1.0"
   source-repo: "Muso-AI/hydra"
@@ -34,15 +43,20 @@ metadata:
 
 # Muso Ops — Credit Verification (Autonomous)
 
-Pre-approval review of flagged credit requests. Core-backend posts a Block Kit
-message to #credit-verification when a credit request's risk score >= 85%.
-This skill defines how to handle those messages autonomously.
+Pre-approval review of flagged credit requests. Triggered by (a) human
+@mention in #credit-verification with credit URLs/IDs, or (b) the
+4-hourly cron batch that fetches unverified credits directly from the
+admin API. The previous core-backend Block Kit auto-post integration
+(risk-score ≥ 85% → Slack message → bot parses) was removed.
 
 ## HARD RULE
 
-**Every message in #credit-verification is evaluated by this workflow.
-Thread replies in escalation threads are handled as escalation responses (see Step 5).
-All other messages: parse, investigate, act. No conversational responses.**
+**The agent only fires in #credit-verification when explicitly
+@mentioned** (the channel uses `requireMention: true` as of
+2026-05-06). Thread replies in escalation threads are handled as
+escalation responses (see Step 5). All other matching messages: parse,
+investigate, act. No conversational responses. Posts that don't @mention
+the agent are ignored.
 
 **Thread-awareness:** If the message is a reply in a thread (has `thread_ts` and is
 not the parent message), check if the thread was initiated by a credit verification
@@ -198,10 +212,13 @@ preceding message contains both "credit request" and "risk score", use THAT mess
 content for Step 1 parsing. Store the preceding message's timestamp as
 `data_message_ts` — this is the message you will react on and parse from.
 
-> **TODO**: This Path B workaround is fragile (depends on message ordering). The
-> proper fix is to have core-backend post credit verifications via a webhook instead
-> of a bot user, so Slack delivers the message to the Ops agent directly. See
-> core-backend `postCreditVerification()`.
+> **NOTE (2026-05-06):** The core-backend `postCreditVerification()`
+> integration that posted Block Kit messages to this channel has been
+> removed. Path A above (parsing a direct bot post) is therefore
+> effectively dead in production — it remains documented only as a
+> guard in case the integration is ever re-enabled. The active reactive
+> trigger is human @mention with credit URLs/IDs in the user's own
+> message body; the cron batch is the other live trigger.
 
 **Neither path matches:** Ignore silently.
 
@@ -834,17 +851,22 @@ Credit request [ID] rejected. Reason: [reason]
 
 Three verification workflows exist, each serving a different purpose:
 
-- **Reactive verification (this skill, Steps 0-6):** Pre-approval review of
-  flagged credits (risk >= 85%) posted by core-backend to #credit-verification.
-  Processes one credit per message, immediately.
+- **Reactive verification (this skill, Steps 0-6):** Pre-approval review
+  triggered by a human @mention in #credit-verification (Aaron / Jan /
+  Nick pasting a `credits.muso.ai` URL or list of credit IDs to verify).
+  Processes one credit (or a small explicit list) per mention, immediately.
+  The previous core-backend auto-post pipeline (risk ≥ 85% Block Kit
+  message) has been removed; reactive mode now only fires from explicit
+  human @mentions, never from upstream bot posts.
 
-- **Batch verification (this skill, Batch Mode):** Proactive queue processing
-  via cron (`credit-verification-batch-4h`, `0 */4 * * *` UTC). Fetches up to
-  `$FETCH_SIZE` (currently 500) unverified credits every 4 hours and processes
-  them, posting a summary with a Jan-tagged thread.
-  Catches credits that reactive mode doesn't see (risk < 85%). Idempotency check
-  prevents double-processing with reactive. Approvals are capped at 500/day UTC;
-  verification-needed moves are uncapped.
+- **Batch verification (this skill, Batch Mode):** Proactive queue
+  processing via cron (`credit-verification-batch-4h`, `0 */4 * * *`
+  UTC). Fetches up to `$FETCH_SIZE` (currently 500) unverified credits
+  every 4 hours and processes them, posting a summary with a Jan-tagged
+  thread. With the core-backend reactive feed gone, batch mode is the
+  primary mechanism for catching unverified credits at scale. Idempotency
+  check still prevents double-processing across modes. Approvals capped
+  at 500/day UTC; verification-needed moves are uncapped.
 
 - **Daily fraud scan (HEARTBEAT.md):** Post-approval review of already-approved
   credits on high-popularity tracks (Spotify pop >= 50). Different population —
@@ -896,8 +918,8 @@ To drain the 12k+ unverified queue faster, run **more cron windows** (every 4h) 
 - `OPS_BATCH_LOCK_PATH` — absolute path to lockfile (e.g. `/root/.openclaw/locks/ops-credit-batch.lock`)
 - `OPS_AUDIT_LOG_DIR` — audit log base (e.g. `/root/.openclaw/api-logs/admin`)
 - `OPS_RUNLOG_DIR` — run-log base (e.g. `/root/.openclaw/api-logs/credit-batch-runs`)
-- `OPS_WORKSPACE` — either `operations-dev` or `operations`
-- `OPS_BATCH_ENABLED` — must be `true` (default). Set to `false` to suppress batches on the twin not currently running.
+- `OPS_WORKSPACE` — must be `operations`
+- `OPS_BATCH_ENABLED` — must be `true` (default). Set to `false` to suppress batches.
 - If `OPS_DRY_RUN=1`: also require `OPS_CREDIT_VERIFICATION_DRY_RUN_CHANNEL_ID`. Abort at B0a if unset — we never silently post dry-run output to the prod channel.
 
 If `OPS_BATCH_ENABLED != "true"`, exit silently with no Slack post.
@@ -973,10 +995,10 @@ Cron-invoked isolated sessions have silently lost `browser` tool availability in
 The probe URL is:
 
 ```
-https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d
+https://musicbrainz.org/artist/9fff2f8a-21e6-47de-a2b8-7f449929d43f
 ```
 
-(Drake — a consistently available Tier 1 artist page with a predictable HTML shape.)
+(Drake — the Canadian rapper, MusicBrainz UUID `9fff2f8a-21e6-47de-a2b8-7f449929d43f`. Consistently available Tier 1 artist page with a predictable HTML shape. The substrings check (`musicbrainz` + `drake`) plus the standard artist-page layout match this UUID; do not swap to a different "Drake" entity without re-validating.)
 
 Success criteria: the tool result must be non-error AND the returned text must contain both of these literal substrings (case-insensitive): `musicbrainz` and `drake`. Cloudflare challenge pages and empty responses fail.
 

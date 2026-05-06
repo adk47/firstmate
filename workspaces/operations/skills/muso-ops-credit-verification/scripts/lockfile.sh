@@ -15,7 +15,7 @@
 #
 # Env:
 #   OPS_BATCH_LOCK_PATH   required — absolute path to lockfile
-#   OPS_WORKSPACE         optional — "operations-dev" or "operations" (default: unknown)
+#   OPS_WORKSPACE         optional — "operations" (default: unknown)
 
 set -euo pipefail
 
@@ -249,7 +249,7 @@ emit_renderer_missing_event_if_needed() {
     session_log="$CV_SESSION_LOG_OVERRIDE"
   else
     session_log=$(
-      find /root/.openclaw-main/agents /root/.openclaw-dev/agents \
+      find /root/.openclaw-main/agents \
           -maxdepth 3 -type f -name "*.jsonl" -mmin "-10" 2>/dev/null \
       | while IFS= read -r f; do
           mtime=$(stat -c '%Y' "$f" 2>/dev/null || stat -f '%m' "$f" 2>/dev/null)

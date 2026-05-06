@@ -22,10 +22,28 @@ set -euo pipefail
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 required but not found" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TOKEN_CACHE="$SCRIPT_DIR/.admin-token-cache"
+# ADMIN_TOKEN_CACHE_PATH override exists so tests can redirect the cache out
+# of the production scripts directory; production calls leave it unset and
+# get the canonical path next to this script.
+TOKEN_CACHE="${ADMIN_TOKEN_CACHE_PATH:-$SCRIPT_DIR/.admin-token-cache}"
 TOKEN_MAX_AGE=82800  # 23 hours in seconds
 REQUESTER_EMAIL=""   # Set via --requester flag
 EVIDENCE_EXCERPT=""  # Set via --evidence-excerpt flag (required for autonomous credit approves)
+CONFIRMED_BY=""      # Set via --confirmed-by flag (required for tier-2 writes — see enforce_tier2_approval_gate)
+APPROVAL_MSG_ID=""   # Set via --approval-msg-id flag (Slack message ID/ts of the in-thread approval — for audit)
+
+# Tier-2 enforcement state. Persisted to disk so the reverse-direction guard
+# fires across separate shell invocations (each agent exec is a new shell).
+# /var/log/muso-ops is hydra's canonical location; tests can override with
+# MUSO_OPS_STATE_DIR. Created lazily on first write.
+MUSO_OPS_STATE_DIR="${MUSO_OPS_STATE_DIR:-/var/log/muso-ops}"
+RECENT_MERGES_PATH="${RECENT_MERGES_PATH:-${MUSO_OPS_STATE_DIR}/recent-merges.jsonl}"
+TIER2_AUDIT_PATH="${TIER2_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/tier2-audit.jsonl}"
+TIER2_APPROVERS_PATH="${TIER2_APPROVERS_PATH:-${SCRIPT_DIR}/../config/tier2-approvers.txt}"
+TIER2_ENDPOINTS_PATH="${TIER2_ENDPOINTS_PATH:-${SCRIPT_DIR}/../config/tier2-endpoints.txt}"
+# Reverse-direction guard window. A second merge that points the OTHER way
+# within this many seconds is the 2026-04-29 incident pattern; refuse it.
+TIER2_REVERSE_WINDOW_SECS="${TIER2_REVERSE_WINDOW_SECS:-300}"
 
 # --- Dry-run mode (issue #145) ---
 # OPS_DRY_RUN=1 short-circuits every WRITE (anything that isn't GET/HEAD) in
@@ -325,7 +343,7 @@ EOF
     # Portable across GNU/BSD: find filters by age; stat resolves mtime for sort.
     local session_log
     session_log=$(
-        find /root/.openclaw-main/agents /root/.openclaw-dev/agents \
+        find /root/.openclaw-main/agents \
             -maxdepth 3 -type f -name "*.jsonl" -mmin "-${CV_SESSION_MAX_AGE_MIN}" 2>/dev/null \
         | while IFS= read -r f; do
             mtime=$(stat -c '%Y' "$f" 2>/dev/null || stat -f '%m' "$f" 2>/dev/null)
@@ -449,6 +467,276 @@ EOF
     return 0
 }
 
+# --- Tier-2 approval gate (incident 2026-04-29) ---
+# Tier 2 = high-blast-radius admin writes that require Aaron's explicit
+# in-thread approval before the agent may execute. The gate refuses to issue
+# the call unless --confirmed-by matches the approver allowlist AND
+# --approval-msg-id is set (so the audit trail can point back to the exact
+# Slack message that authorized the action).
+#
+# Endpoints in scope are loaded from $TIER2_ENDPOINTS_PATH (one METHOD PATH
+# per line, '#' comments allowed). Approvers from $TIER2_APPROVERS_PATH (one
+# handle per line). If either file is missing, the gate fails CLOSED on
+# tier-2 writes — never silently allow.
+#
+# Dry-run mode skips the gate entirely (dry-runs don't mutate prod, so
+# requiring approval would just block local debugging).
+
+is_tier2_endpoint() {
+    local method="$1" path="$2"
+    local method_uc
+    method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    [[ -f "$TIER2_ENDPOINTS_PATH" ]] || return 1
+    # Each line: "METHOD /path/pattern" with leading '#' for comments.
+    # Path comparison is exact prefix (no globs) — keep the allowlist explicit.
+    while IFS= read -r line; do
+        line="${line%%#*}"  # strip comment
+        line="${line## }"
+        line="${line%% }"
+        [[ -z "$line" ]] && continue
+        local m p
+        m="$(printf %s "$line" | awk '{print $1}' | tr '[:lower:]' '[:upper:]')"
+        p="$(printf %s "$line" | awk '{print $2}')"
+        if [[ "$m" == "$method_uc" && "$path" == "$p" ]]; then
+            return 0
+        fi
+    done < "$TIER2_ENDPOINTS_PATH"
+    return 1
+}
+
+is_tier2_approver() {
+    local handle="$1"
+    [[ -n "$handle" ]] || return 1
+    [[ -f "$TIER2_APPROVERS_PATH" ]] || return 1
+    local handle_lc
+    handle_lc="$(printf %s "$handle" | tr '[:upper:]' '[:lower:]')"
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        line="${line## }"
+        line="${line%% }"
+        [[ -z "$line" ]] && continue
+        local approver_lc
+        approver_lc="$(printf %s "$line" | tr '[:upper:]' '[:lower:]')"
+        [[ "$handle_lc" == "$approver_lc" ]] && return 0
+    done < "$TIER2_APPROVERS_PATH"
+    return 1
+}
+
+enforce_tier2_approval_gate() {
+    local method="$1" path="$2"
+
+    # Fail-closed if the endpoint allowlist file is missing. Without it,
+    # is_tier2_endpoint cannot decide scope and would silently pass every
+    # call through. The file ships in the repo (config/tier2-endpoints.txt);
+    # absence here means a packaging or rsync regression.
+    if [[ ! -f "$TIER2_ENDPOINTS_PATH" ]]; then
+        echo "MUSO_TIER2_CONFIG_MISSING: TIER2_ENDPOINTS_PATH (${TIER2_ENDPOINTS_PATH}) is missing — refusing every write until the tier-2 allowlist is restored." >&2
+        return 1
+    fi
+
+    # Only fire on tier-2 writes. Non-tier-2 paths and reads pass through.
+    is_tier2_endpoint "$method" "$path" || return 0
+
+    # Dry-run: skip — synthetic response, no prod mutation.
+    if is_dry_run_mode; then
+        return 0
+    fi
+
+    if [[ -z "$CONFIRMED_BY" ]]; then
+        cat >&2 <<EOF
+MUSO_TIER2_APPROVAL_REQUIRED: ${method} ${path} is a tier-2 admin write.
+Pass --confirmed-by <handle> with explicit in-thread approval from one of:
+$(cat "$TIER2_APPROVERS_PATH" 2>/dev/null | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | sed 's/^/  - /' || echo "  (approver allowlist file missing: ${TIER2_APPROVERS_PATH})")
+
+Also pass --approval-msg-id <slack_msg_ts> so the audit trail can link back to the approval.
+
+Example:
+  bash $0 --requester <slack_id> --confirmed-by aaron --approval-msg-id 1777474838.796239 \\
+    call ${method} "${path}" '<body>'
+
+This gate exists because of incident 2026-04-29 (profile merge). See muso-ops-profiles/SKILL.md "Merge Profiles" stop-rule.
+EOF
+        return 1
+    fi
+
+    if ! is_tier2_approver "$CONFIRMED_BY"; then
+        cat >&2 <<EOF
+MUSO_TIER2_APPROVAL_INVALID: --confirmed-by '${CONFIRMED_BY}' is not in the tier-2 approver allowlist.
+Allowed approvers (from $TIER2_APPROVERS_PATH):
+$(cat "$TIER2_APPROVERS_PATH" 2>/dev/null | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | sed 's/^/  - /' || echo "  (file missing)")
+EOF
+        return 1
+    fi
+
+    if [[ -z "$APPROVAL_MSG_ID" ]]; then
+        echo "MUSO_TIER2_APPROVAL_REQUIRED: --approval-msg-id <slack_msg_ts> is required alongside --confirmed-by for tier-2 writes (audit trail)." >&2
+        return 1
+    fi
+
+    # Audit the approval BEFORE executing. Fail-closed if we can't write —
+    # the audit trail is the entire authorization story for tier-2 writes
+    # and "merge applied, no record of who approved it" is a worse failure
+    # mode than "operator gets a clear error and retries after fixing disk".
+    if ! mkdir -p "$(dirname "$TIER2_AUDIT_PATH")" 2>/dev/null; then
+        echo "MUSO_TIER2_AUDIT_UNWRITABLE: cannot create $(dirname "$TIER2_AUDIT_PATH") — refusing tier-2 write to preserve audit trail. Fix the directory permissions and retry." >&2
+        return 1
+    fi
+    local ts audit_rc=0
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq -n -c \
+        --arg ts "$ts" \
+        --arg method "$method" \
+        --arg path "$path" \
+        --arg requester "${REQUESTER_EMAIL:-}" \
+        --arg confirmed_by "$CONFIRMED_BY" \
+        --arg approval_msg_id "$APPROVAL_MSG_ID" \
+        '{ts:$ts, method:$method, path:$path, requester:$requester, confirmed_by:$confirmed_by, approval_msg_id:$approval_msg_id}' \
+        >> "$TIER2_AUDIT_PATH" || audit_rc=$?
+    if (( audit_rc != 0 )); then
+        echo "MUSO_TIER2_AUDIT_UNWRITABLE: append to $TIER2_AUDIT_PATH failed (rc=$audit_rc) — refusing tier-2 write to preserve audit trail." >&2
+        return 1
+    fi
+    return 0
+}
+
+# --- Reverse-direction guard for /admin/profiles/merge (incident 2026-04-29) ---
+# Refuses to issue a merge whose mergeInto appears in any recent profilesIds[]
+# (or whose profilesIds[] intersects any recent mergeInto) within
+# TIER2_REVERSE_WINDOW_SECS. This is the call pattern that destroyed prod state
+# on 2026-04-29: agent issued mergeInto=A profilesIds=[B], thought it failed,
+# then issued mergeInto=B profilesIds=[A] to "test the reverse direction" —
+# which moved A's claim/workspace/playlist onto B.
+
+merge_body_extract_ids() {
+    # Stdin: JSON body. Stdout: two lines — "INTO=<id>" then "IDS=<id1,id2,...>".
+    # Returns 0 if both fields parsed, 1 otherwise.
+    local body="$1"
+    local into ids
+    into=$(printf '%s' "$body" | jq -r '.mergeInto // empty' 2>/dev/null) || return 1
+    ids=$(printf '%s' "$body" | jq -r '(.profilesIds // []) | join(",")' 2>/dev/null) || return 1
+    [[ -n "$into" && -n "$ids" ]] || return 1
+    printf 'INTO=%s\nIDS=%s\n' "$into" "$ids"
+}
+
+enforce_merge_reverse_direction_guard() {
+    local method="$1" path="$2" body="$3"
+
+    [[ "$path" == "/admin/profiles/merge" ]] || return 0
+    is_dry_run_mode && return 0
+
+    # Malformed body on a tier-2 merge is a fail-closed condition. The
+    # backend's own input validation may tolerate shapes the guard can't
+    # parse — we'd rather refuse here than skip the reverse-direction
+    # check on a valid-but-unparseable-by-us body.
+    local extracted into ids
+    if ! extracted=$(merge_body_extract_ids "$body"); then
+        echo "MUSO_MERGE_BODY_UNPARSEABLE: refusing /admin/profiles/merge — body did not parse as {mergeInto: <id>, profilesIds: [<id>, ...]}." >&2
+        return 1
+    fi
+    into=$(printf '%s' "$extracted" | sed -n 's/^INTO=//p')
+    ids=$(printf '%s' "$extracted" | sed -n 's/^IDS=//p')
+
+    # First run: state file doesn't exist yet, so there's nothing to
+    # compare against. This is the only case we let pass — record_merge_call
+    # will create the file on the first 2xx.
+    [[ -f "$RECENT_MERGES_PATH" ]] || return 0
+
+    # Window cutoff in epoch seconds. `date +%s` is POSIX and portable
+    # (works on both BSD and GNU); subtraction is just bash arithmetic.
+    local cutoff_epoch=$(( $(date +%s) - TIER2_REVERSE_WINDOW_SECS ))
+
+    # Find any recent entry where:
+    #   (a) the new mergeInto matches an old profilesIds entry, OR
+    #   (b) any new profilesIds entry matches an old mergeInto.
+    local conflict
+    conflict=$(
+        jq -R -r -n \
+            --arg into "$into" \
+            --arg ids_csv "$ids" \
+            --argjson cutoff "$cutoff_epoch" \
+        '
+        ($ids_csv | split(",")) as $new_ids
+        |
+        [inputs | fromjson? // empty | select(type == "object")]
+        | map(select((.epoch // 0) >= $cutoff))
+        | map(. as $entry | select(
+              (($entry.profilesIds // []) | index($into))
+              or
+              ([$entry.mergeInto // ""] | inside($new_ids))
+              or
+              ($new_ids | any(. as $i | ($entry.profilesIds // []) | index($i)))
+          ))
+        | .[0] // empty
+        | tojson
+        ' "$RECENT_MERGES_PATH" 2>/dev/null
+    )
+
+    if [[ -n "$conflict" ]]; then
+        cat >&2 <<EOF
+MUSO_MERGE_OVERLAPPING_IDS_BLOCKED: refusing /admin/profiles/merge.
+
+A recent merge (within ${TIER2_REVERSE_WINDOW_SECS}s) has overlapping IDs with this call:
+  new: mergeInto=${into}, profilesIds=[${ids}]
+  prior conflicting entry: ${conflict}
+
+The guard fires on either of these patterns:
+  - Reverse direction (mergeInto/profilesIds swapped) — the call shape that
+    caused production damage on 2026-04-29 (workspace/claim/playlist moved
+    off the intended survivor).
+  - Same-direction retry after the prior call completed — the prior merge
+    may not yet be fully observable (async industry pipeline), and re-issuing
+    is rarely the correct answer.
+
+In both cases: do NOT retry, do NOT flip the direction. See muso-ops-profiles/SKILL.md "Merge Profiles" STOP-rule. Escalate to Aaron in the same Slack thread and wait.
+
+If you genuinely need to issue this call (e.g. legitimate corrective merge after a wait), you must:
+  1. Wait until ${TIER2_REVERSE_WINDOW_SECS}s have passed since the prior merge, OR
+  2. Manually clear the relevant entries from ${RECENT_MERGES_PATH} after explicit Aaron approval.
+EOF
+        return 1
+    fi
+    return 0
+}
+
+record_merge_call() {
+    local method="$1" path="$2" body="$3" http_code="$4"
+    [[ "$path" == "/admin/profiles/merge" ]] || return 0
+    # Match any 2xx — the backend currently returns 200, but a future
+    # contract change to 201/204 would otherwise leave the merge unrecorded
+    # and silently disable the reverse-direction guard for the next call.
+    [[ "$http_code" =~ ^2[0-9][0-9]$ ]] || return 0
+    is_dry_run_mode && return 0
+
+    local extracted into ids_csv
+    extracted=$(merge_body_extract_ids "$body") || return 0
+    into=$(printf '%s' "$extracted" | sed -n 's/^INTO=//p')
+    ids_csv=$(printf '%s' "$extracted" | sed -n 's/^IDS=//p')
+
+    mkdir -p "$(dirname "$RECENT_MERGES_PATH")" 2>/dev/null || return 0
+    local epoch ts
+    epoch=$(date +%s)
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq -n -c \
+        --arg ts "$ts" \
+        --argjson epoch "$epoch" \
+        --arg method "$method" \
+        --arg path "$path" \
+        --arg mergeInto "$into" \
+        --arg ids_csv "$ids_csv" \
+        --arg requester "${REQUESTER_EMAIL:-}" \
+        --arg confirmed_by "$CONFIRMED_BY" \
+        --arg approval_msg_id "$APPROVAL_MSG_ID" \
+        '{
+            ts:$ts, epoch:$epoch, method:$method, path:$path,
+            mergeInto:$mergeInto,
+            profilesIds:($ids_csv | split(",")),
+            requester:$requester,
+            confirmed_by:$confirmed_by,
+            approval_msg_id:$approval_msg_id
+        }' \
+        >> "$RECENT_MERGES_PATH" 2>/dev/null || true
+}
+
 cmd_call() {
     check_env
     local method="${1:?Usage: call <METHOD> <path> [json-body]}"
@@ -457,6 +745,16 @@ cmd_call() {
 
     # Credit approve gate — deterministic, runs in bash below openclaw's hook layer.
     if ! enforce_credit_approve_gate "$method" "$path" "$body"; then
+        return 1
+    fi
+
+    # Tier-2 approval gate (incident 2026-04-29). Skipped in dry-run mode.
+    if ! enforce_tier2_approval_gate "$method" "$path"; then
+        return 1
+    fi
+
+    # Reverse-direction guard for /admin/profiles/merge (incident 2026-04-29).
+    if ! enforce_merge_reverse_direction_guard "$method" "$path" "$body"; then
         return 1
     fi
 
@@ -509,6 +807,9 @@ cmd_call() {
     http_code=$(echo "$response" | tail -1)
     local response_body
     response_body=$(echo "$response" | sed '$d')
+
+    # Record successful merges for the reverse-direction guard.
+    record_merge_call "$method" "$path" "$body" "$http_code"
 
     # Output JSON with status
     echo "{\"http_status\": $http_code, \"body\": $response_body}" 2>/dev/null \
@@ -585,6 +886,14 @@ while [[ $# -gt 0 ]]; do
         --evidence-excerpt)
             EVIDENCE_EXCERPT="$2"
             export EVIDENCE_EXCERPT  # enforce_credit_approve_gate reads it from env
+            shift 2
+            ;;
+        --confirmed-by)
+            CONFIRMED_BY="$2"
+            shift 2
+            ;;
+        --approval-msg-id)
+            APPROVAL_MSG_ID="$2"
             shift 2
             ;;
         *) break ;;

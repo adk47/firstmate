@@ -9,7 +9,7 @@ How MCP servers (NocoDB, Notion, GitMCP, etc.) are wired into the OpenClaw gatew
 ## Mental model
 
 - MCP servers are configured **per profile** inside the profile's `openclaw.json`, under the `mcp.servers` key.
-- Each profile has its own config file: `/root/.openclaw-main/openclaw.json`, `/root/.openclaw-edge/openclaw.json`, `/root/.openclaw-dev/openclaw.json`.
+- Each profile has its own config file: `/root/.openclaw-main/openclaw.json`, `/root/.openclaw-edge/openclaw.json`.
 - All agents on a profile share the MCP server list for that profile — there is no per-agent scoping at this layer.
 - The gateway loads MCP config at start; **new sessions** pick up config changes, but in-flight sessions do not.
 - `deploy.sh` preserves live `.mcp.servers` across deploys, so server-side registrations (like NocoDB's auth token) don't need to live in the repo.

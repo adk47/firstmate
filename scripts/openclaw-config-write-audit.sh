@@ -41,10 +41,10 @@ set -euo pipefail
 
 WATCHED="${1:-}"
 if [ -z "$WATCHED" ]; then
-  # Fallback: scan all three. The systemd template in
+  # Fallback: scan both profiles. The systemd template in
   # install-aux-units.sh passes the specific path, but a manual
   # invocation should still produce useful output.
-  for p in /root/.openclaw-main/openclaw.json /root/.openclaw-edge/openclaw.json /root/.openclaw-dev/openclaw.json; do
+  for p in /root/.openclaw-main/openclaw.json /root/.openclaw-edge/openclaw.json; do
     [ -f "$p" ] && "$0" "$p"
   done
   exit 0
@@ -71,7 +71,7 @@ source "$SCRIPT_DIR/lib/slack-notify.sh"
 # Identify gateway PIDs across all three profiles. Any of them
 # writing to *its own* openclaw.json is normal (the gateway
 # persists state via the config-io module on every observation).
-GATEWAY_PIDS=$(pgrep -f 'openclaw/dist/index.js --profile (main|edge|dev) gateway' || true)
+GATEWAY_PIDS=$(pgrep -f 'openclaw/dist/index.js --profile (main|edge) gateway' || true)
 
 # Try to find a current writer via lsof. lsof prints space-
 # delimited rows; column 2 is PID, column 4 is FD (we want

@@ -35,7 +35,6 @@ Notes:
 | **@QA** | Quality | Testing, bug triage, profile verification, credit investigation |
 | **@Finance** | Financial | Stripe, invoices, payouts, ChartMogul, Deel, Anrok, disputes |
 | **@Ops** | Operations | Customer support, claiming, credits, fraud, Intercom, refunds |
-| **@Ops-Dev** | Operations (Dev) | Dry-run ops testing, credit verification batch |
 | **@DevOps** | Infrastructure | K8s, monitoring, deployments, Cloudflare, self-healing |
 | **@Design** | UX/Design | Design review, accessibility, design system, ClickUp tasks |
 | **@CS** | Customer Support | External customer queries (isolated — cannot contact other agents) |
@@ -50,7 +49,7 @@ Notes:
 ## Troubleshooting
 
 `sessions.resolve` returns `No session found with label: @X` means one of:
-- The handle is wrong (check the roster — `@Ops` not `@ops`; `@Ops-Dev` not `@OpsDev`).
+- The handle is wrong (check the roster — `@DevOps` not `@Devops`, `@CS` not `@cs` — case-sensitive, hyphens preserved).
 - The peer's `:main` session has not been provisioned yet. Peer labels are
   populated on every gateway restart and every 5 min by
   `hydra-peer-labels.timer`. If it genuinely missed a new agent, page DevOps.

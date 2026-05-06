@@ -30,20 +30,20 @@
 
 ## Version Pinning
 
-```
-# versions.json — source of truth for all dependency versions
-{
-  "openclaw": "2026.3.13",
-  "nemoclaw": "0.1.0",
-  "k3s": "v1.34.5+k3s1",
-  "node": "22.22.1"
-}
-```
+The openclaw runtime is pinned in `scripts/deploy.sh` via the
+`OPENCLAW_VERSION` constant. `install_openclaw()` runs as Step 4c.5 of
+the deploy and is idempotent — same-version deploys skip the global
+`npm install -g`.
+
+Currently pinned: **`openclaw@2026.5.5`**
+
+Other runtime versions (nemoclaw, k3s, node) are not centrally pinned
+in this repo today; they live with the K8s manifests in the infra repo.
 
 ## Update Workflow
 
 1. **Dependency update detected** (Dependabot, manual check, or team notification)
-2. **Create branch**: `update/openclaw-2026.3.14`
+2. **Create branch**: `update/openclaw-2026.5.6`
 3. **Test locally**: Run `openclaw doctor` against current config
 4. **Fix config**: If schema changed, update `openclaw.json`
 5. **PR with CI validation**: `pr-validate.yml` checks JSON lint, SOUL.md presence, deny-list immutability

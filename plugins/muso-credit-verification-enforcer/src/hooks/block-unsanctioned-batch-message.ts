@@ -39,8 +39,8 @@ type BeforeToolCallResult = {
  * posting directly via the openclaw CLI), it forces every batch summary
  * post through the truth-floor renderer.
  *
- * The hook fires only in CV context (operations / operations-dev agents,
- * or sessions marked via the inbound_claim hook). It blocks `message` /
+ * The hook fires only in CV context (operations agent, or sessions marked
+ * via the inbound_claim hook). It blocks `message` /
  * `slack_message` / `send_message` tool calls to the prod or dry-run CV
  * channel only when the text is summary-shaped: `[HEARTBEAT-BATCH]`,
  * `Credit batch complete`, `[DRY RUN] Credit batch complete`, or known

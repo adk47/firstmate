@@ -32,8 +32,8 @@ OPENCLAW_JSON="${OPENCLAW_HOME}/openclaw.json"
 OPENCLAW_BIN="${OPENCLAW_BIN:-/usr/bin/openclaw}"
 
 # Port + label map by profile. Only main hosts the 10-agent roster.
-# Edge/dev have isolated single-agent workflows (support, operations-dev)
-# and do not need peer resolution.
+# Edge has an isolated single-agent workflow (support) and does not need
+# peer resolution.
 case "$PROFILE" in
   main)
     GATEWAY_URL="ws://127.0.0.1:18789/"
@@ -54,12 +54,8 @@ case "$PROFILE" in
     GATEWAY_URL="ws://127.0.0.1:18810/"
     declare -A PEERS=( [support]="@CS" )
     ;;
-  dev)
-    GATEWAY_URL="ws://127.0.0.1:18830/"
-    declare -A PEERS=( [operations-dev]="@Ops-Dev" )
-    ;;
   *)
-    echo "ERROR: unknown profile '$PROFILE' (expected main/edge/dev)" >&2
+    echo "ERROR: unknown profile '$PROFILE' (expected main/edge)" >&2
     exit 2
     ;;
 esac

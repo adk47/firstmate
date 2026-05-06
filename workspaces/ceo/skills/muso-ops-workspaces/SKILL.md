@@ -19,7 +19,7 @@ depends-on:
 compatibility: |
   Requires: muso-ops-admin (API gateway), muso-ops-profiles (for profile operations).
 metadata:
-  version: "1.1"
+  version: "1.2"
   source-repo: "Muso-AI/muso-skills"
   verified-against: "core-backend/src/apis/index.w.js (2026-04-28)"
 ---
@@ -33,6 +33,55 @@ B2B workspace lifecycle: create → populate → cleanse → deliver.
 - Tier 1-2: All workspace operations
 - Tier 3: View workspaces, manage roster (add/remove profiles). NO create/delete workspace.
 - Tier 4: Read-only
+
+## Quick Check: "Does email X have a workspace?"
+
+⚡ **FAST PATH — one Trino query (via `trino-query.sh`), batch-friendly. Run this immediately, don't pre-announce.**
+
+The admin API has no `/admin/team?keyword=<email>` filter — `GET /admin/team/details`
+needs a team id, and `GET /admin/user?keyword=<email>` only returns the user.
+Per-email API roundtrips are slow and the workspace-lookup endpoint variants
+return errors when called this way (see 2026-05-01 #operations triage).
+Skip the API and go straight to the join below — fast and reliable.
+
+```bash
+bash /opt/hydra/scripts/trino-query.sh "
+SELECT
+  u.email                          AS user_email,
+  u.id                             AS user_id,
+  t.id                             AS workspace_id,
+  t.name                           AS workspace_name,
+  t.email                          AS workspace_email,
+  wm.role                          AS role,
+  (t.id = u.defaultteamid)         AS is_default_workspace
+FROM \"platform-core-backend-export-prod\".public_users u
+LEFT JOIN \"platform-core-backend-export-prod\".public_workspace_members wm
+  ON wm.userid = u.id
+LEFT JOIN \"platform-core-backend-export-prod\".public_teams t
+  ON t.id = wm.teamid
+WHERE lower(u.email) IN ('email1@example.com','email2@example.com')
+ORDER BY u.email, is_default_workspace DESC
+"
+```
+
+**Result interpretation:**
+- Email **not in any row** → no Muso user account for that email.
+- Email present, `workspace_id` IS NULL → user exists, no workspace memberships.
+- Multiple rows per email → user belongs to multiple workspaces (rare for B2B).
+
+**Reply format (post one block per email; this is what Aaron expects):**
+```
+<email>
+Has workspace: yes/no
+User id: <user_id>
+Workspace id: <workspace_id>
+Workspace email: <workspace_email>
+Role: <role>
+Default workspace: yes/no
+```
+
+Target round-trip: under 30s for any number of emails. If the query errors,
+report the actual error verbatim — don't silently retry through the API.
 
 ## Workspace Creation Workflow
 

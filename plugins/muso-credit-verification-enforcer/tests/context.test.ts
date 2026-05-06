@@ -29,13 +29,12 @@ describe("isCreditVerificationSession", () => {
     expect(isCreditVerificationSession("unknown", undefined, "operations")).toBe(true);
   });
 
-  it("returns true for the operations-dev agent as well", () => {
-    expect(isCreditVerificationSession(undefined, undefined, "operations-dev")).toBe(true);
-  });
-
   it("returns false for non-operations agents with no other CV signal", () => {
     expect(isCreditVerificationSession(undefined, undefined, "ceo")).toBe(false);
     expect(isCreditVerificationSession(undefined, undefined, "support")).toBe(false);
+    // operations-dev was retired with the dev profile — it's no longer
+    // a CV agent and should not get free passage.
+    expect(isCreditVerificationSession(undefined, undefined, "operations-dev")).toBe(false);
   });
 
   it("returns false when sessionKey not marked and no runId", () => {

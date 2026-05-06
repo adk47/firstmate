@@ -94,23 +94,18 @@ const ROLES_RE = /Roles?:\s*([^\r\n]+)/i;
 const MESSAGE_TOOL_NAMES = new Set(["message", "slack_message", "send_message"]);
 
 // Map agentId → the openclaw profile + agent dir its session logs live under.
-// Operations agent runs on the main gateway; operations-dev on the dev gateway.
-// Used by resolveSessionLog() to scope discovery to the correct tree — without
-// this, a concurrent ops-dev session can win the most-recently-modified contest
-// against an ops escalation (or vice versa) and become the "evidence" for a
-// run that didn't produce it. Mirrors browser-evidence-audit.sh:283-287's
+// Operations agent runs on the main gateway. Used by resolveSessionLog() to
+// scope discovery to the correct tree — mirrors browser-evidence-audit.sh's
 // workspace-scoped session-search-root, but keyed on agentId (the audit
 // keys on script path because it's invoked from within the workspace).
 const AGENT_SESSION_DIRS: Record<string, string> = {
   operations: "/root/.openclaw-main/agents/operations/sessions",
-  "operations-dev": "/root/.openclaw-dev/agents/operations-dev/sessions",
 };
-// Fallback search roots for legacy callers that don't supply agentId. Kept as
-// the original wide net so older shapes still get blocked, just without the
+// Fallback search root for legacy callers that don't supply agentId. Kept as
+// the original net so older shapes still get blocked, just without the
 // per-agent scoping guarantee.
 const FALLBACK_SESSION_DIRS = [
   "/root/.openclaw-main/agents",
-  "/root/.openclaw-dev/agents",
 ];
 const SESSION_MAX_AGE_MIN = 10;
 
@@ -205,11 +200,14 @@ function walkJsonl(dir: string, depth: number, cb: (p: string) => void): void {
  *
  * Discovery order:
  *   1. CV_SESSION_LOG_OVERRIDE — explicit override (used by tests).
- *   2. agentId-scoped lookup — restricts the search to the openclaw profile
- *      that hosts this agent (main vs dev). This is the workspace-scoping
- *      Clio's review flagged: a concurrent ops-dev session can otherwise
- *      false-pass or false-block an ops escalation (and vice versa) by
- *      winning the most-recently-modified contest.
+ *   2. agentId-scoped lookup — restricts the search to
+ *      `/root/.openclaw-main/agents/<agentId>/sessions` instead of the
+ *      whole `/root/.openclaw-main/agents/` tree. This excludes the other
+ *      workspace agents that share the main gateway (ceo / cmo / etc.) so
+ *      a stray non-operations log can't win the most-recently-modified
+ *      contest. (Originally this also separated ops vs ops-dev; ops-dev
+ *      has since been retired but the per-agent dir still narrows the
+ *      search by ~10× on a busy gateway.)
  *      Within the scoped dir we prefer:
  *        a. a file whose basename or path contains `sessionKey` (exact
  *           per-session pin — the precise scope when openclaw names files

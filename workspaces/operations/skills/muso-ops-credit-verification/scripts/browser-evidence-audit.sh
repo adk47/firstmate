@@ -63,8 +63,6 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 ASSERT=0
 if [[ "${1:-}" == "--assert" ]]; then
     ASSERT=1
@@ -269,21 +267,10 @@ fi
 if [[ -n "${CV_SESSION_LOG_OVERRIDE:-}" ]]; then
     session_log="$CV_SESSION_LOG_OVERRIDE"
 else
-    # Scope session-log discovery to the workspace this script lives in.
-    # Without scoping, a concurrent or stale jsonl in the OTHER tree (ops vs
-    # ops-dev) can win the most-recently-modified contest and become the
-    # "evidence" for a run that didn't produce it — false-pass / false-fail.
-    #
-    # Tree detection: prefer CV_AUDIT_INVOKED_FROM (set by the operations-dev
-    # delegating wrapper before exec'ing this canonical script — its own
-    # SCRIPT_DIR is overwritten by our line above). Fall back to SCRIPT_DIR
-    # for direct invocations.
-    _cv_origin="${CV_AUDIT_INVOKED_FROM:-$SCRIPT_DIR}"
-    case "$_cv_origin" in
-        */workspaces/operations-dev/*) session_search_root="/root/.openclaw-dev/agents/operations-dev/sessions" ;;
-        */workspaces/operations/*)     session_search_root="/root/.openclaw-main/agents/operations/sessions" ;;
-        *) session_search_root="/root/.openclaw-main/agents/operations/sessions" ;;
-    esac
+    # Scope session-log discovery to the operations agent dir, ignoring
+    # stray non-operations agent logs that could otherwise win the
+    # most-recently-modified contest under a busy gateway.
+    session_search_root="/root/.openclaw-main/agents/operations/sessions"
     session_log=$(
         find "$session_search_root" \
             -maxdepth 2 -type f -name "*.jsonl" ! -name "*.trajectory.jsonl" \

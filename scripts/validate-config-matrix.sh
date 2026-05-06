@@ -25,7 +25,7 @@
 #
 # Usage:  validate-config-matrix.sh [config.json ...]
 #         (no args → checks openclaw-main.json, openclaw-edge.json,
-#          openclaw-dev.json, cron-jobs.json from CWD)
+#          cron-jobs.json from CWD)
 # Exit:   0 clean, 1 invariant violated, 2 arg/dependency error
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -38,7 +38,7 @@ fi
 PROFILES=()
 CRON=""
 if (( $# == 0 )); then
-  PROFILES=(openclaw-main.json openclaw-edge.json openclaw-dev.json)
+  PROFILES=(openclaw-main.json openclaw-edge.json)
   CRON="cron-jobs.json"
 else
   for f in "$@"; do

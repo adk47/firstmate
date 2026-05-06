@@ -231,7 +231,7 @@
             "openrouter/anthropic/claude-4.6-sonnet-20260217"
           ]
         },
-        "thinkingDefault": "medium",
+        "thinkingDefault": "high",
         "skills": [
           "muso-ops-credit-verification",
           "muso-ops-admin",

@@ -53,18 +53,15 @@ jobs:
 
           NEEDS_MAIN=false
           NEEDS_EDGE=false
-          NEEDS_DEV=false
 
           while IFS= read -r file; do
             case "$file" in
               openclaw-edge.json|plugins/intercom/*|plugins/support-tools/*|workspaces/support/*)
                 NEEDS_EDGE=true ;;
-              openclaw-dev.json|workspaces/operations-dev/*)
-                NEEDS_DEV=true ;;
               openclaw-main.json|workspaces/ceo/*|workspaces/cmo/*|workspaces/cto/*|workspaces/coordinator/*|workspaces/qa/*|workspaces/finance/*|workspaces/operations/*|workspaces/devops/*|workspaces/design/*|workspaces/neutral/*)
                 NEEDS_MAIN=true ;;
               scripts/*|policies/*|skills-all/*|.github/workflows/*)
-                NEEDS_MAIN=true; NEEDS_EDGE=true; NEEDS_DEV=true ;;
+                NEEDS_MAIN=true; NEEDS_EDGE=true ;;
               plugins/*)
                 NEEDS_MAIN=true ;;
             esac
@@ -74,12 +71,11 @@ jobs:
           TARGETS=""
           $NEEDS_MAIN && TARGETS="${TARGETS:+$TARGETS,}main"
           $NEEDS_EDGE && TARGETS="${TARGETS:+$TARGETS,}edge"
-          $NEEDS_DEV && TARGETS="${TARGETS:+$TARGETS,}dev"
 
           # Default to all if nothing matched
           TARGET="${TARGETS:-all}"
-          # Simplify: if all three are set, just use "all"
-          if [ "$TARGET" = "main,edge,dev" ]; then TARGET="all"; fi
+          # Simplify: if both profiles are set, just use "all"
+          if [ "$TARGET" = "main,edge" ]; then TARGET="all"; fi
 
           echo "target=$TARGET" >> $GITHUB_OUTPUT
           echo "Deploy target: $TARGET"

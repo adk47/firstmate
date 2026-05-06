@@ -7,13 +7,12 @@ setup() {
     export TEST_ROOT
 
     mkdir -p "$TEST_ROOT/.openclaw-main/agents/operations/sessions"
-    mkdir -p "$TEST_ROOT/.openclaw-dev/agents/operations-dev/sessions"
 
     SCRIPT="${BATS_TEST_DIRNAME}/../muso-admin-api.sh"
     [[ -f "$SCRIPT" ]] || { echo "SCRIPT not found: $SCRIPT" >&2; return 1; }
 
     WRAPPED="$TEST_ROOT/muso-admin-api.sh"
-    sed "s|/root/.openclaw-main/agents|$TEST_ROOT/.openclaw-main/agents|g; s|/root/.openclaw-dev/agents|$TEST_ROOT/.openclaw-dev/agents|g" "$SCRIPT" > "$WRAPPED"
+    sed "s|/root/.openclaw-main/agents|$TEST_ROOT/.openclaw-main/agents|g" "$SCRIPT" > "$WRAPPED"
     chmod +x "$WRAPPED"
 
     # Hermetic env: sandbox OPS_RUNLOG_DIR (and any other CV gate env the

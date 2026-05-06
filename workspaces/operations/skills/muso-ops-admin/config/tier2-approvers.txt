@@ -1,0 +1,12 @@
+# Tier-2 approver allowlist for muso-admin-api.sh.
+# Each entry is matched case-insensitively against --confirmed-by.
+# Lines starting with '#' and blank lines are ignored.
+# Both bare handles and full emails are accepted (the gate compares
+# the whole string against the whole flag value).
+#
+# To add an approver, add their handle and/or email below. Keep this
+# list narrow — every entry can authorize a hard-to-reverse production
+# write (profile/track merges, deletes, etc.).
+
+aaron
+aaron@muso.ai

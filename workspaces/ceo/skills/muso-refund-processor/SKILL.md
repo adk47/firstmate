@@ -27,11 +27,6 @@ metadata:
 
 Autonomous refund handling: investigate → decide → execute → report.
 
-## Channel Restriction
-
-When triggered from #operations: ONLY handle refund requests. Reject all other queries with:
-> "This channel is configured for refund requests only. Please ask your question in another channel."
-
 ## Workflow
 
 ### Step 1: Investigation

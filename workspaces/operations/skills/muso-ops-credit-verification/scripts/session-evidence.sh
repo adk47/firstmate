@@ -79,7 +79,7 @@ if [[ -n "${CV_SESSION_LOG_OVERRIDE:-}" ]]; then
 else
     # Portable GNU/BSD mtime discovery — same idiom as the approve-gate.
     session_log=$(
-        find /root/.openclaw-main/agents /root/.openclaw-dev/agents \
+        find /root/.openclaw-main/agents \
             -maxdepth 3 -type f -name "*.jsonl" -mmin "-${CV_SESSION_MAX_AGE_MIN}" 2>/dev/null \
         | while IFS= read -r f; do
             mtime=$(stat -c '%Y' "$f" 2>/dev/null || stat -f '%m' "$f" 2>/dev/null)

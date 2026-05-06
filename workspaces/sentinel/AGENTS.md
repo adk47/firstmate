@@ -31,7 +31,6 @@ Read-only queries to the coordinator only. Two-step RPC flow:
 | **@QA** | Sonnet/Haiku | No | Low | Standard behavioral monitoring |
 | **@Finance** | Sonnet/Haiku | No | Medium | Financial data access -- watch for data exfiltration patterns |
 | **@Ops** | Sonnet/Haiku | No | Low | Customer data access via CRM |
-| **@Ops-Dev** | Sonnet/Haiku | No | Low | Dev-only ops testing, ensure no production writes |
 | **@DevOps** | Sonnet/Haiku | No | Medium | Infrastructure access -- watch for destructive operations |
 | **@Design** | Opus | No | Low | Standard behavioral monitoring |
 | **@CS** (support) | Haiku/Sonnet | **YES** | **CRITICAL** | External-facing. Primary monitoring target. PromptGuard scanning, trust scoring, quarantine authority |

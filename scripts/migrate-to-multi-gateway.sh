@@ -27,10 +27,8 @@ fail() { log "FATAL: $*"; exit 1; }
 log "Pre-flight checks..."
 [[ -f "$HYDRA_ROOT/openclaw-main.json" ]] || fail "openclaw-main.json not found in $HYDRA_ROOT — sync the repo first"
 [[ -f "$HYDRA_ROOT/openclaw-edge.json" ]] || fail "openclaw-edge.json not found in $HYDRA_ROOT"
-[[ -f "$HYDRA_ROOT/openclaw-dev.json" ]] || fail "openclaw-dev.json not found in $HYDRA_ROOT"
 python3 -m json.tool "$HYDRA_ROOT/openclaw-main.json" > /dev/null || fail "openclaw-main.json is invalid JSON"
 python3 -m json.tool "$HYDRA_ROOT/openclaw-edge.json" > /dev/null || fail "openclaw-edge.json is invalid JSON"
-python3 -m json.tool "$HYDRA_ROOT/openclaw-dev.json" > /dev/null || fail "openclaw-dev.json is invalid JSON"
 log "  All configs present and valid."
 
 # -------------------------------------------------------------------
@@ -90,10 +88,6 @@ fi
 grep -E '^(OPENAI_API_KEY|CLIPROXY_API_KEY|MUSOAI_INTERCOM_TOKEN)=' "$ENV_DIR/main.env" \
   > "$ENV_DIR/edge.env"
 
-# Dev env — minimal (just API proxy access)
-grep -E '^(OPENAI_API_KEY|CLIPROXY_API_KEY)=' "$ENV_DIR/main.env" \
-  > "$ENV_DIR/dev.env"
-
 # Lock down permissions — only root can read
 chmod 600 "$ENV_DIR"/*.env
 log "  Environment files created in $ENV_DIR/ (mode 600)"
@@ -146,26 +140,6 @@ RestartSec=10
 WantedBy=multi-user.target
 EDGESVC
 
-# Dev gateway service (minimal — only what dev agents need)
-cat > /etc/systemd/system/openclaw-gateway-dev.service << DEVSVC
-[Unit]
-Description=OpenClaw Gateway HYDRA (dev profile — operations-dev)
-After=network-online.target docker.service
-
-[Service]
-Type=simple
-User=root
-EnvironmentFile=$ENV_DIR/shared.env
-EnvironmentFile=$ENV_DIR/dev.env
-ExecStart=$OPENCLAW_BIN --profile dev gateway --port 18830
-ExecStartPost=$HYDRA_ROOT/scripts/provision-peer-labels.sh dev
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-DEVSVC
-
 # Install the auxiliary timer units (peer-label reconciler), the
 # gateway pre-start-heal drop-ins (.service.d/override.conf), the
 # out-of-band write audit path/service, and the 2-min watchdog
@@ -180,14 +154,14 @@ DEVSVC
 "$HYDRA_ROOT/scripts/install-aux-units.sh" "$HYDRA_ROOT"
 
 systemctl daemon-reload
-log "  Created 3 systemd service files (secrets in EnvironmentFile, not inline)."
+log "  Created 2 systemd service files (secrets in EnvironmentFile, not inline)."
 
 # -------------------------------------------------------------------
 # Step 2: Create profile directories and copy configs
 # -------------------------------------------------------------------
 log "Step 2/7: Setting up profile directories..."
 
-for profile in main edge dev; do
+for profile in main edge; do
   mkdir -p "/root/.openclaw/${profile}"
   cp "$HYDRA_ROOT/openclaw-${profile}.json" "/root/.openclaw/${profile}/openclaw.json"
   log "  ${profile}: config copied to /root/.openclaw/${profile}/openclaw.json"
@@ -198,7 +172,7 @@ done
 # -------------------------------------------------------------------
 log "Step 3/7: Running profile setup..."
 
-for profile in main edge dev; do
+for profile in main edge; do
   log "  Setting up ${profile} profile..."
   openclaw --profile "$profile" setup --non-interactive 2>&1 | tail -3 || log "  WARNING: ${profile} setup returned non-zero (may be OK if already set up)"
 done
@@ -226,7 +200,7 @@ fi
 # -------------------------------------------------------------------
 log "Step 5/7: Starting new gateway services..."
 
-for profile in main edge dev; do
+for profile in main edge; do
   systemctl enable "openclaw-gateway-${profile}"
   systemctl start "openclaw-gateway-${profile}"
   sleep 3
@@ -300,10 +274,9 @@ log ""
 log "Active services:"
 log "  openclaw-gateway-main  → port 18789 (9 core agents)"
 log "  openclaw-gateway-edge  → port 18810 (support + Intercom)"
-log "  openclaw-gateway-dev   → port 18830 (operations-dev)"
 log ""
 log "Old service: openclaw-gateway (stopped + disabled)"
 log "Caddy: /intercom/webhook → localhost:18810"
 log ""
 log "Next: merge PR #43 and verify the first deploy succeeds."
-log "Rollback: systemctl start openclaw-gateway && systemctl stop openclaw-gateway-{main,edge,dev}"
+log "Rollback: systemctl start openclaw-gateway && systemctl stop openclaw-gateway-{main,edge}"

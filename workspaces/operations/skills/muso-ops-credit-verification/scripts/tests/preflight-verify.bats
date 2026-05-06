@@ -6,7 +6,7 @@ load helpers
 # tests stub openclaw on PATH and assert both the runlog contract and the exact
 # CLI probe shape.
 
-PROBE_URL="https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d"
+PROBE_URL="https://musicbrainz.org/artist/9fff2f8a-21e6-47de-a2b8-7f449929d43f"
 SNAPSHOT_OK='RootWebArea "Drake | MusicBrainz"'
 
 setup() {
@@ -126,7 +126,7 @@ assert_probe_calls() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"PREFLIGHT_OK: probe markers present in snapshot"* ]]
   [[ "$output" == *"Drake | MusicBrainz"* ]]
-  jq -e 'select(.event=="preflight_ok" and .probe_url=="https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d" and .source=="preflight-verify.sh@cli")' < "$RUNLOG_FILE"
+  jq -e 'select(.event=="preflight_ok" and .probe_url=="https://musicbrainz.org/artist/9fff2f8a-21e6-47de-a2b8-7f449929d43f" and .source=="preflight-verify.sh@cli")' < "$RUNLOG_FILE"
   ! jq -e 'select(.event=="preflight_browser_unavailable")' < "$RUNLOG_FILE" > /dev/null
   assert_probe_calls
 }

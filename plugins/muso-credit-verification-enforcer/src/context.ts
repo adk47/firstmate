@@ -9,7 +9,7 @@ import { cvSessions } from "./state.js";
  *  batch runs — so web_fetch-to-Tier-1 calls from @-mention runs slipped
  *  past the block-web-fetch-tier1 hook entirely. The narrow scope was the
  *  failure mode; workspace-level gating is safer. */
-const CV_AGENTS = new Set(["operations", "operations-dev"]);
+const CV_AGENTS = new Set(["operations"]);
 
 /** True if this session/run is part of a credit-verification flow.
  *
@@ -17,8 +17,8 @@ const CV_AGENTS = new Set(["operations", "operations-dev"]);
  *  session contexts (only on message/inbound contexts). So we can't detect CV
  *  from tool hooks directly. Instead:
  *
- *  - `agentId` is "operations" / "operations-dev" for the credit-verification
- *    workspace — any tool call from those agents is CV context.
+ *  - `agentId` is "operations" for the credit-verification workspace —
+ *    any tool call from that agent is CV context.
  *  - The `inbound_claim` hook marks a sessionKey as CV when it first sees a
  *    message on the CV channel. Tool hooks then check `cvSessions` — useful
  *    when agentId is absent on the context (e.g. legacy paths).

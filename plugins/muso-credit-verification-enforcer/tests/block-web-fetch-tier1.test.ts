@@ -111,14 +111,6 @@ describe("blockWebFetchTier1", () => {
     expect(r?.block).toBe(true);
   });
 
-  it("blocks when ctx.agentId is operations-dev", () => {
-    const r = blockWebFetchTier1(
-      { toolName: "web_fetch", params: { url: "https://discogs.com/artist/abc" } },
-      buildCtx({ agentId: "operations-dev" }),
-    );
-    expect(r?.block).toBe(true);
-  });
-
   it("does NOT block when ctx.agentId is a non-CV agent", () => {
     // Other agents (ceo, support, cmo…) still pass web_fetch through — the
     // block is CV-scoped, not a global ban.

@@ -84,15 +84,27 @@ WHERE rs.profileid = '<profile_id>'
 
 ### Merge Profiles
 
-⚠️ Tier 2+ only. This is a significant, hard-to-undo operation.
+⚠️ **Tier 2 — Aaron approval required.** Significant, hard-to-undo. Reversing a merge by calling it again with `mergeInto`/`profilesIds[]` swapped is a documented production-damage pattern (incident 2026-04-29; see "Stop-rule" below).
+
+**What the endpoint actually does** (verified against `core-backend:src/apis/_admin/profile/mergeProfiles.js` + `services/discovery-seats/handleProfileIdChange.js`):
+
+| Side                         | Synchronous (200 means done) | Asynchronous (queued via `requestDataIngestion`, may take minutes–hours, may silently never arrive) |
+| ---------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------- |
+| Where it lands               | core-backend Postgres        | industry-data-processing pipeline                                                                   |
+| What moves loser → survivor  | `Claiming`, `ProfilePlaylist`, `RosterSeats` (teams), `NfcCard` | `merged_to_id` set on loser; credits, IPIs, raw profile IDs (Spotify/Tidal) folded into survivor    |
+| Visible in `GET /admin/profile/:id` immediately? | Yes — `isClaimed`, `workspaces[]`, `playlist` reflect the transfer | **No.** `merged: null, deleted: null` and `rawProfiles[]` do **NOT** update synchronously. Querying loser's GET right after a 200 will still return a normal-looking profile. **Do not use this as a "did it merge?" signal.** |
+
+**Known bug (do not rely on as a guard):** the handler's safety check is `if (claimedProfiles?.length > 1) throw ...` — it only blocks when *more than one* loser is claimed. A merge where exactly one of `mergeInto`/`profilesIds[]` is claimed will proceed and silently transfer the claim. This is what enabled 2026-04-29's reverse-direction call to destroy production state. Treat the API as if it has no safety on claimed profiles.
 
 **Pre-merge checklist (MANDATORY):**
 
-1. **Confirm same person** — compare names, aliases, IPIs, credits, genres
-2. **Check credit intersection** — shared tracks between profiles
-3. **Identify primary** — which profile keeps its ID (usually higher popularity/credits)
-4. **Check claiming status** — claimed profiles need extra care
-5. **Show side-by-side comparison**
+1. **Aaron approved this exact direction in the same Slack thread.** Jan, Nick, Serhii, anyone else asking is a *requester*, not an *approver*. If Aaron has not posted `:white_check_mark:` (or equivalent explicit "go") in-thread for *this* `mergeInto`/`profilesIds`, stop and ask.
+2. **Confirm same person** — names, aliases, IPIs, credits, genres.
+3. **Check credit intersection** — shared tracks.
+4. **Identify primary** — usually higher popularity/credits/claim status.
+5. **Capture pre-state for verification** — GET both profiles now and record `isClaimed`, `workspaces[]`, `playlist.id`, `rawProfiles[].id` for each. You will compare against post-state.
+6. **Dry-run first.** Run the call once with `OPS_DRY_RUN=1` and confirm the wrapper's intercept summary lists the exact `mergeInto` and `profilesIds[]` you intend. If anything mismatches, stop.
+7. **Show side-by-side comparison** to the requester before the real call.
 
 ```
 🔀 *Profile Merge Preview*
@@ -102,7 +114,7 @@ WHERE rs.profileid = '<profile_id>'
 • IPI: 123456789 (ASCAP)
 • Claimed: Yes (team: label@example.com)
 
-*Secondary (merges into primary):*
+*Secondary (transfers in):*
 • [Name B] — 45 credits, 12 collabs, rank #89,000
 • IPI: none
 • Claimed: No
@@ -110,22 +122,49 @@ WHERE rs.profileid = '<profile_id>'
 *Credit Intersection:* 8 shared tracks
 *Name Similarity:* 95% (alias match)
 
-⚠️ This will merge [Name B] → [Name A]. The secondary profile will be marked deleted.
+⚠️ This will queue a merge of [Name B] → [Name A]. Synchronous: claim/workspace/playlist/teams transfer. Async (industry pipeline, ETA minutes–hours, no SLA): credits, IPIs, raw Spotify/Tidal IDs.
 Proceed? (yes/no)
 ```
 
 Execute:
 ```bash
-# Direction: mergeInto = SURVIVOR (kept). profilesIds = LOSERS (soft-deleted, redirected to survivor).
+# Direction: mergeInto = SURVIVOR (keeps its ID and receives transferred state).
+#            profilesIds = LOSERS (their claim/playlist/teams/NFC move onto the survivor;
+#            their credits/IPIs/raw IDs move later via the async industry pipeline).
 # Endpoint: POST /admin/profiles/merge
 # Body: { mergeInto: <primary_id>, profilesIds: [<duplicate_id>, ...] }
 # Backend handler: core-backend/src/apis/_admin/profile/mergeProfiles.js
 # A missing `mergeInto` returns "Profile ID is required"; a missing `profilesIds`
-# returns "Profiles IDs are required". Field names are exact — do not rename.
+# returns "Profiles IDs are required". Field names are exact — do not invent
+# `sourceId/targetId` or `profileId` (incident 2026-04-29 wasted two calls on this).
+#
+# Tier-2 gate (post-incident-2026-04-29): `--confirmed-by <handle>` and
+# `--approval-msg-id <slack_ts>` are MANDATORY for live calls. Both come from
+# the explicit Aaron-approval Slack message you cited in step 1 of the
+# pre-merge checklist. The wrapper hard-fails with `MUSO_TIER2_APPROVAL_REQUIRED`
+# without them. `--requester` is the Slack id of who is asking (audit-log only).
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  --requester <slack_id> \
+  --confirmed-by aaron \
+  --approval-msg-id <slack_msg_ts> \
   call POST "/admin/profiles/merge" \
   '{"mergeInto":"<primary_id>","profilesIds":["<duplicate_id>"]}'
 ```
+
+**Post-merge verification (MANDATORY — within 30s of the 200 ok):**
+
+GET both profiles and assert against the pre-state you captured in step 5:
+- **Loser:** if it was claimed pre-merge, the survivor's GET must now show its workspace under `workspaces[]`. The loser's GET should show `isClaimed: false` and `workspaces: []`. Loser's `playlist` should be `null` (or — if the survivor already had its own playlist — unchanged on loser, since the handler destroys the loser's in that case). **Do NOT check `merged` or `deleted` — those are async.**
+- **Loser had nothing claim-side?** Then the synchronous side is a no-op, both GETs will look identical to pre-state, and the only thing the call did is queue the async data-ingestion job. This is normal — it does *not* mean the call failed. Tell the requester explicitly: "Sync part: nothing to transfer; async credit/IPI/rawID merge queued, ETA minutes–hours, will not be visible in the admin GET."
+
+**STOP-RULE — read this before you do anything if verification looks off:**
+
+> If post-merge verification doesn't match expectations, you do **NOT**:
+> - Retry with mutated body shapes (`sourceId/targetId`, `profileId`, etc.). The backend rejects those with 400 — you don't gain information, you just spam the audit log.
+> - Retry with the merge direction reversed (`mergeInto` and `profilesIds` swapped). This is the call pattern that caused 2026-04-29's production damage: it does not "test what the endpoint does," it actively transfers state in the wrong direction.
+> - Call any other admin write endpoint to "fix" or "compensate." There is no compensating write that's safe to issue without a human in the loop.
+>
+> You **DO**: post the failure, your audit log lines, and the pre/post GETs to the requester in Slack and wait for Aaron. The cost of waiting is a delayed task. The cost of guessing is a multi-hour incident.
 
 ### Unmerge Profile
 
@@ -141,7 +180,11 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 # Endpoint: POST /admin/profiles/unmerge
 # Body: { unmergeFrom: <primary_id>, profilesIds: [<merged_in_id>, ...] }
 # Backend handler: core-backend/src/apis/_admin/profile/unmergeProfiles.js
+# Tier-2 gate: same `--confirmed-by` + `--approval-msg-id` requirement as merge.
 bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  --requester <slack_id> \
+  --confirmed-by aaron \
+  --approval-msg-id <slack_msg_ts> \
   call POST "/admin/profiles/unmerge" \
   '{"unmergeFrom":"<primary_id>","profilesIds":["<merged_in_id>"]}'
 ```

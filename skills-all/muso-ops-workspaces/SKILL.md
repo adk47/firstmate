@@ -36,7 +36,7 @@ B2B workspace lifecycle: create → populate → cleanse → deliver.
 
 ## Quick Check: "Does email X have a workspace?"
 
-⚡ **FAST PATH — one Athena query, batch-friendly. Run this immediately, don't pre-announce.**
+⚡ **FAST PATH — one Trino query (via `trino-query.sh`), batch-friendly. Run this immediately, don't pre-announce.**
 
 The admin API has no `/admin/team?keyword=<email>` filter — `GET /admin/team/details`
 needs a team id, and `GET /admin/user?keyword=<email>` only returns the user.

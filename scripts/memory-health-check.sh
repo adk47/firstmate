@@ -29,10 +29,9 @@ LOGPREFIX="[memory-health-check $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
 PROFILES=(
   "main:/root/.openclaw-main/openclaw.json"
   "edge:/root/.openclaw-edge/openclaw.json"
-  "dev:/root/.openclaw-dev/openclaw.json"
 )
 # The "authoritative" config for pulling the Slack token and the
-# shared-cap expectation is main — edge/dev should match but we
+# shared-cap expectation is main — edge should match but we
 # alert on any drift rather than picking one silently.
 AUTH_CONFIG="/root/.openclaw-main/openclaw.json"
 SLACK_CHANNEL="${MEMORY_HEALTH_SLACK_CHANNEL:-C0ADV2W76G4}"  # #clio_devops

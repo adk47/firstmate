@@ -4,7 +4,7 @@ set -euo pipefail
 # HYDRA Deploy Script
 # ===================
 # CD entrypoint: validate config, sync to Node 8, restart gateway, smoke test.
-# Supports targeted deployment: --target main|edge|dev|all
+# Supports targeted deployment: --target main|edge|all
 #
 # Run from node-8 itself (preferred — CI does this) or via SSH from a
 # laptop. Laptop deploys go through the rsync-over-SSH branches but the
@@ -13,12 +13,17 @@ set -euo pipefail
 # IS node-8 or a similar Linux host with /root/.openclaw/ access.
 # In practice: SSH into node-8 first, then run deploy.sh from there.
 #     ssh -i ~/.ssh/nick_ovh root@40.160.32.80
-#     cd /opt/hydra && ./scripts/deploy.sh [--target main|edge|dev|all]
+#     cd /opt/hydra && ./scripts/deploy.sh [--target main|edge|all]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HYDRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"
+
+# Pinned openclaw runtime version. Updated together with this file so the
+# version change appears in git history alongside any deploy-script tweaks
+# the upgrade requires. Bump in lockstep with docs/REPO-MANAGEMENT.md.
+OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.5.5}"
 
 # Detect if we're running on Node 8 (the HYDRA host)
 if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; then
@@ -95,10 +100,10 @@ TARGET="all"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target)
-      [[ -z "${2:-}" ]] && { echo "Error: --target requires a value (main|edge|dev|all)"; exit 1; }
+      [[ -z "${2:-}" ]] && { echo "Error: --target requires a value (main|edge|all)"; exit 1; }
       TARGET="$2"; shift 2 ;;
-    main|edge|dev|all) TARGET="$1"; shift ;;
-    *) echo "Usage: deploy.sh [--target main|edge|dev|all]"; exit 1 ;;
+    main|edge|all) TARGET="$1"; shift ;;
+    *) echo "Usage: deploy.sh [--target main|edge|all]"; exit 1 ;;
   esac
 done
 
@@ -106,8 +111,8 @@ done
 IFS=',' read -ra TARGET_PARTS <<< "$TARGET"
 for t in "${TARGET_PARTS[@]}"; do
   case "$t" in
-    main|edge|dev|all) ;;
-    *) echo "Error: invalid target '$t'. Must be main|edge|dev|all"; exit 1 ;;
+    main|edge|all) ;;
+    *) echo "Error: invalid target '$t'. Must be main|edge|all"; exit 1 ;;
   esac
 done
 
@@ -142,9 +147,7 @@ notify_slack() {
 #                              dir name is at least visible in deploy logs)
 #
 # If the mapping ever grows, extend the case statement here — there is no
-# other source of truth. Note that no plugins currently target the dev
-# profile; if a dev-only plugin is added in the future, the case statement
-# will need a new branch.
+# other source of truth.
 #
 # History: intercom was previously mapped to "edge" only, which caused
 # /root/.openclaw-main/extensions/intercom to drift missing even though
@@ -163,6 +166,60 @@ plugin_profile() {
       echo "    plugin_profile: '$plugin_name' is not in the known mapping (intercom→main+edge, support-tools→main+edge, openclaw-gmail→main); defaulting to main. Verify this is intended — typos in plugin directory names land here silently." >&2
       ;;
   esac
+}
+
+# install_openclaw — pins the global openclaw CLI to OPENCLAW_VERSION.
+# Idempotent: skips the npm install when the live binary already reports
+# the target version. Re-applies the opus-4-7 thinking patch afterward
+# (the patch script is itself idempotent and self-skipping).
+#
+# Runs on whichever host this script is executing on. Like Steps 4c/4d
+# below, it assumes deploy.sh is being run on node-8 (CD path) or that
+# the caller is otherwise on the host where the gateway lives. SSH from
+# a laptop deploys are out of scope; the deploy header at the top of
+# this file already documents that constraint.
+#
+# Returns non-zero on npm-install or patch-script failure. The single
+# caller (Step 4c.5) treats that as fatal — npm's default leaves the
+# previous global binary in place on a failed install, so aborting the
+# deploy avoids continuing on a half-updated runtime.
+install_openclaw() {
+  local installed
+  installed=$(openclaw --version 2>/dev/null | awk 'NR==1 {print $2}' || true)
+  if [[ -z "$installed" ]]; then
+    log "    install_openclaw: openclaw CLI not found in PATH; running fresh install of $OPENCLAW_VERSION"
+  elif [[ "$installed" == "$OPENCLAW_VERSION" ]]; then
+    log "    openclaw already at $OPENCLAW_VERSION — skipping global install"
+    return 0
+  else
+    log "    Upgrading openclaw $installed → $OPENCLAW_VERSION"
+  fi
+
+  local npm_out
+  local npm_rc=0
+  npm_out=$(npm install -g "openclaw@${OPENCLAW_VERSION}" 2>&1) || npm_rc=$?
+  if (( npm_rc != 0 )); then
+    log "    ✗ npm install -g openclaw@${OPENCLAW_VERSION} failed (rc=$npm_rc):"
+    echo "$npm_out" | sed 's/^/        /'
+    return 1
+  fi
+
+  # Re-apply the opus-4-7 adaptive-thinking allowlist patch. The patch
+  # script is idempotent (skips files that already contain "opus-4-7")
+  # and fails loudly if the BEFORE strings no longer match — which is
+  # itself useful signal that the new openclaw bundle has changed shape.
+  local patch_script="$SCRIPT_DIR/patch-openclaw-opus-4-7-thinking.sh"
+  if [[ -x "$patch_script" ]]; then
+    local patch_rc=0
+    "$patch_script" || patch_rc=$?
+    if (( patch_rc != 0 )); then
+      log "    ⚠ opus-4-7 thinking patch returned rc=$patch_rc — investigate before relying on Opus 4.7 thinking"
+      return 1
+    fi
+  else
+    log "    ⚠ patch-openclaw-opus-4-7-thinking.sh not found at $patch_script — skipping (Opus 4.7 thinking may regress)"
+  fi
+  return 0
 }
 
 # install_plugin — installs a single plugin into its target profile's
@@ -221,7 +278,6 @@ install_plugin() {
   #
   #   openclaw-gateway-main.service  → /root/.openclaw-main/extensions/
   #   openclaw-gateway-edge.service  → /root/.openclaw-edge/extensions/
-  #   openclaw-gateway-dev.service   → /root/.openclaw-dev/extensions/
   #
   # The -main gateway does fall back to scanning the legacy path for auto-
   # discovered plugins, which masked the bug for a long time. The zombie
@@ -242,7 +298,7 @@ install_plugin() {
   for profile in $profiles; do
     if ! needs_target "$profile"; then continue; fi
     case "$profile" in
-      main|edge|dev)
+      main|edge)
         ext_paths+=( "/root/.openclaw-${profile}/extensions/$plugin_name" )
         ;;
       *)
@@ -256,14 +312,14 @@ install_plugin() {
   #
   # 1. Only openclaw-main.json has `plugins.installs` entries pinned at the
   #    legacy path today (openclaw-gmail, intercom — both main-scoped).
-  #    openclaw-edge.json and openclaw-dev.json do not pin anything at the
-  #    legacy path, so mirroring from those profiles is dead weight.
+  #    openclaw-edge.json does not pin anything at the legacy path, so
+  #    mirroring from that profile is dead weight.
   #
   # 2. Without this gate, `deploy.sh --target edge` would overwrite
   #    /root/.openclaw/extensions/<plugin> with the EDGE build. Today every
   #    profile ships identical plugin code, so it is a no-op — but if edge
-  #    or dev ever diverges (feature flags, alternate entrypoints, vendored
-  #    deps), a last-writer-wins race silently breaks main's pinned plugins.
+  #    ever diverges (feature flags, alternate entrypoints, vendored deps),
+  #    a last-writer-wins race silently breaks main's pinned plugins.
   #
   # Once all main pins are migrated to profile-specific paths, the legacy
   # mirror can be removed entirely. See PR #154 for the path-drift context.
@@ -912,11 +968,6 @@ if needs_target "edge"; then
   python3 -m json.tool "$HYDRA_ROOT/openclaw-edge.json" >/dev/null 2>&1 || fail "openclaw-edge.json is not valid JSON"
   log "  openclaw-edge.json is valid JSON."
 fi
-if needs_target "dev"; then
-  python3 -m json.tool "$HYDRA_ROOT/openclaw-dev.json" >/dev/null 2>&1 || fail "openclaw-dev.json is not valid JSON"
-  log "  openclaw-dev.json is valid JSON."
-fi
-
 # cron-jobs.json is loaded later by Step 5a's POSTSYNC (when targeting
 # main). Pre-validate the JSON here so a malformed cron file fails the
 # deploy at Step 1 with a clear message instead of inside the heredoc
@@ -938,7 +989,6 @@ if [ -x "$LINT_OPENCLAW_CFG" ]; then
   lint_targets=()
   needs_target "main" && lint_targets+=("$HYDRA_ROOT/openclaw-main.json")
   needs_target "edge" && lint_targets+=("$HYDRA_ROOT/openclaw-edge.json")
-  needs_target "dev"  && lint_targets+=("$HYDRA_ROOT/openclaw-dev.json")
   if (( ${#lint_targets[@]} > 0 )); then
     "$LINT_OPENCLAW_CFG" "${lint_targets[@]}" || fail "openclaw config lint: repo contains mcp-remote stdio entries"
     log "  openclaw configs free of mcp-remote stdio entries."
@@ -983,7 +1033,6 @@ for a in c.get('agents', {}).get('list', []):
 
 if needs_target "main"; then validate_souls "$HYDRA_ROOT/openclaw-main.json" "main"; fi
 if needs_target "edge"; then validate_souls "$HYDRA_ROOT/openclaw-edge.json" "edge"; fi
-if needs_target "dev"; then validate_souls "$HYDRA_ROOT/openclaw-dev.json" "dev"; fi
 log "  All SOUL.md files present."
 
 # -------------------------------------------------------------------
@@ -1266,6 +1315,19 @@ else
 fi
 
 # -------------------------------------------------------------------
+# Step 4c.5: Pin openclaw runtime version
+# -------------------------------------------------------------------
+# Sits between skills sync (4c) and plugin install (4d) so that any
+# plugin scripts which shell out to the openclaw CLI during their own
+# install hooks see the pinned version. Idempotent — same-version
+# deploys skip the npm install. See OPENCLAW_VERSION near the top of
+# the file and install_openclaw() up by install_plugin().
+log "Step 4c.5/9: Pinning openclaw runtime to ${OPENCLAW_VERSION}..."
+if ! install_openclaw; then
+  fail "openclaw runtime pin failed (target ${OPENCLAW_VERSION})"
+fi
+
+# -------------------------------------------------------------------
 # Step 4d: Install plugins
 # -------------------------------------------------------------------
 # Moved from deploy.yml's "Install plugins" step on 2026-04-08 (CD
@@ -1407,11 +1469,6 @@ if needs_target "edge"; then
   sync_profile_config "$DEPLOY_PATH/openclaw-edge.json" /root/.openclaw-edge/openclaw.json
   log "  Synced edge profile config"
 fi
-if needs_target "dev"; then
-  sync_profile_config "$DEPLOY_PATH/openclaw-dev.json" /root/.openclaw-dev/openclaw.json
-  log "  Synced dev profile config"
-fi
-
 # Schema validate the post-merge result for every profile we just touched.
 # sync_profile_config preserves only `.mcp.servers` from live, so a clean
 # repo config should produce a clean merge — but the openclaw schema gets
@@ -1421,7 +1478,7 @@ fi
 # next gateway restart fires. Catch it now while we still hold control,
 # instead of finding out via the smoke test (which only sees the
 # downstream "0 agents bound" symptom and can't tell us what's wrong).
-for _profile in main edge dev; do
+for _profile in main edge; do
   needs_target "$_profile" || continue
   _validate_out=$(openclaw --profile "$_profile" config validate 2>&1 || true)
   if ! echo "$_validate_out" | grep -q "Config valid"; then
@@ -1446,9 +1503,6 @@ if [ -x "$LINT_OPENCLAW_CFG" ]; then
   fi
   if needs_target "edge" && [ -f /root/.openclaw-edge/openclaw.json ]; then
     live_lint_targets+=(/root/.openclaw-edge/openclaw.json)
-  fi
-  if needs_target "dev" && [ -f /root/.openclaw-dev/openclaw.json ]; then
-    live_lint_targets+=(/root/.openclaw-dev/openclaw.json)
   fi
   if (( ${#live_lint_targets[@]} > 0 )); then
     "$LINT_OPENCLAW_CFG" "${live_lint_targets[@]}" \
@@ -1783,7 +1837,6 @@ restart_gateway() {
 
 if needs_target "main"; then restart_gateway "openclaw-gateway-main"; fi
 if needs_target "edge"; then restart_gateway "openclaw-gateway-edge"; fi
-if needs_target "dev"; then restart_gateway "openclaw-gateway-dev"; fi
 
 # -------------------------------------------------------------------
 # WARMUP: wait for agents to bind before smoke test
@@ -1802,9 +1855,6 @@ if needs_target "main"; then
 fi
 if needs_target "edge"; then
   wait_for_agents_bound "edge" 30 || true
-fi
-if needs_target "dev"; then
-  wait_for_agents_bound "dev" 30 || true
 fi
 
 # -------------------------------------------------------------------

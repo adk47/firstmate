@@ -77,12 +77,14 @@ Every ops user has a tier. Check `sender_id` before ANY operation.
 - Profile deletions
 - Any operation flagged as "escalate" below
 
-### Channel Restrictions
+### Channel Scope
 
-Ops commands are processed in:
-- `C0ADREBPNQ2` (#clio_analyst) — full ops access
-- `GJAM34DT6` (#operations) — claiming + credit requests only
-- Aaron's DM — full access
+Ops commands are processed in **every channel and every DM** the agent is
+in. There is no per-channel narrowing — `#operations`, `#clio_analyst`,
+`#customer-support`, project channels, and DMs all accept the full ops
+surface. The Write Approval Gate below (and the credit-verification batch
+allowlist in SOUL.md) remain the actual access controls; channel ID is
+not a gate.
 
 ## ⚠️ WRITE APPROVAL GATE (MANDATORY until hardened)
 
@@ -230,8 +232,8 @@ Full route map: `references/admin-api-routes.md`
 - `POST /admin/profile/:profileId/credits` — add credits
 - `PUT /admin/profile/:profileId/credits` — update credits
 - `DELETE /admin/profile/:profileId/credits` — delete credits
-- `POST /admin/profiles/merge` — merge profiles ⚠️ AARON APPROVAL
-- `POST /admin/profiles/unmerge` — unmerge profiles ⚠️ AARON APPROVAL
+- `POST /admin/profiles/merge` — merge profiles ⚠️ AARON APPROVAL — see `muso-ops-profiles/SKILL.md` "Merge Profiles" for the mandatory pre-state capture, post-merge verification, and STOP-rule (incident 2026-04-29). Run with `OPS_DRY_RUN=1` first.
+- `POST /admin/profiles/unmerge` — unmerge profiles ⚠️ AARON APPROVAL — same checklist applies; see `muso-ops-profiles/SKILL.md` "Unmerge Profile".
 - `POST /admin/profile/:profileId/link-external` — link external IDs
 - `POST /admin/profile/:profileId/unlink-external` — unlink external IDs
 - `POST /admin/profile/:profileId/unlink` — unlink profile

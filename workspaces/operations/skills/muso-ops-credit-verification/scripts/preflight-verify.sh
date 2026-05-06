@@ -43,7 +43,7 @@
 #
 # Env:
 #   OPS_RUNLOG_DIR             required — base dir (same as runlog.sh)
-#   OPS_WORKSPACE              required — "operations" or "operations-dev"
+#   OPS_WORKSPACE              required — must be "operations"
 #   CV_PROBE_URL               optional — default matches SKILL.md B0d
 #   OPS_OPENCLAW_PROFILE       optional — default "main"
 #   CV_PROBE_HYDRATION_SLEEP   optional — seconds to wait between open and
@@ -60,7 +60,7 @@ if [[ -z "${OPS_RUNLOG_DIR:-}" ]]; then
     exit 2
 fi
 if [[ -z "${OPS_WORKSPACE:-}" ]]; then
-    echo "ERROR: OPS_WORKSPACE is not set (expected 'operations' or 'operations-dev')" >&2
+    echo "ERROR: OPS_WORKSPACE is not set (expected 'operations')" >&2
     exit 2
 fi
 if [[ -z "$RUN_ID" ]]; then
@@ -68,7 +68,7 @@ if [[ -z "$RUN_ID" ]]; then
     exit 2
 fi
 
-CV_PROBE_URL="${CV_PROBE_URL:-https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d}"
+CV_PROBE_URL="${CV_PROBE_URL:-https://musicbrainz.org/artist/9fff2f8a-21e6-47de-a2b8-7f449929d43f}"
 OPS_OPENCLAW_PROFILE="${OPS_OPENCLAW_PROFILE:-main}"
 CV_PROBE_HYDRATION_SLEEP="${CV_PROBE_HYDRATION_SLEEP:-5}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

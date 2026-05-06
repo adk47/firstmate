@@ -164,7 +164,7 @@ Run these from your laptop (or from node-8) to verify deploy health:
 
 ```bash
 # Gateways running?
-ssh root@40.160.32.80 'systemctl is-active openclaw-gateway-main openclaw-gateway-edge openclaw-gateway-dev'
+ssh root@40.160.32.80 'systemctl is-active openclaw-gateway-main openclaw-gateway-edge'
 
 # Baseline SHA updated?
 ssh root@40.160.32.80 'cat /opt/hydra/.deployed-sha'

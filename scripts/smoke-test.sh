@@ -15,8 +15,8 @@ TARGET="${1:-all}"
 IFS=',' read -ra TARGET_PARTS <<< "$TARGET"
 for t in "${TARGET_PARTS[@]}"; do
   case "$t" in
-    main|edge|dev|all) ;;
-    *) echo "Error: invalid target '$t'. Must be main|edge|dev|all"; exit 1 ;;
+    main|edge|all) ;;
+    *) echo "Error: invalid target '$t'. Must be main|edge|all"; exit 1 ;;
   esac
 done
 
@@ -359,15 +359,6 @@ if needs_target "edge"; then
   check_channel_health edge "Edge"
   # Targeted ping for the customer-facing support agent.
   ping_agent edge support "Edge"
-fi
-
-# -------------------------------------------------------------------
-# Dev gateway checks
-# -------------------------------------------------------------------
-if needs_target "dev"; then
-  log "Checking dev gateway (port 18830)..."
-  check_agent_count dev "Dev"
-  check_channel_health dev "Dev"
 fi
 
 # -------------------------------------------------------------------

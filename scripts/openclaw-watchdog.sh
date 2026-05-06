@@ -122,7 +122,7 @@ fi
 # Validate every cron tick instead. The crash-loop alert below has no
 # cooldown either, so we match that pattern: alert every 10 min while
 # broken (operator can ack/silence in Slack).
-for profile in main edge dev; do
+for profile in main edge; do
   PROFILE_VALID=$(openclaw --profile "$profile" config validate 2>&1 || true)
   if ! echo "$PROFILE_VALID" | grep -q "Config valid"; then
     log "INVALID CONFIG on profile=${profile}: ${PROFILE_VALID}"
@@ -284,11 +284,4 @@ if [ "$EDGE_STATUS" != "active" ]; then
     log "Edge config INVALID — not restarting: ${EDGE_VALID}"
     slack_notify ":rotating_light: *Edge Gateway* config invalid — cannot restart. Fix via PR.\n\`${EDGE_VALID}\`"
   fi
-fi
-
-# --- Dev gateway health check ---
-DEV_STATUS=$(systemctl is-active openclaw-gateway-dev 2>/dev/null || echo "unknown")
-if [ "$DEV_STATUS" != "active" ]; then
-  log "DEV GATEWAY DOWN: status=${DEV_STATUS}"
-  systemctl restart openclaw-gateway-dev 2>/dev/null || true
 fi

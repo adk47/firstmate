@@ -94,7 +94,7 @@ resolve_session_log() {
     # log so the most-recently-modified heuristic picks them by default
     # and the audit/gate find no toolCalls. Verified on hydra 2026-05-04
     # with run 20260504-151755-7964e0.
-    find /root/.openclaw-main/agents /root/.openclaw-dev/agents \
+    find /root/.openclaw-main/agents \
         -maxdepth 3 -type f -name "*.jsonl" ! -name "*.trajectory.jsonl" \
         -mmin "-${CV_SESSION_MAX_AGE_MIN}" 2>/dev/null \
     | while IFS= read -r f; do

@@ -9,17 +9,16 @@ HYDRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 MAIN="$HYDRA_ROOT/openclaw-main.json"
 EDGE="$HYDRA_ROOT/openclaw-edge.json"
-DEV="$HYDRA_ROOT/openclaw-dev.json"
 FAILURES=0
 
 fail() { echo "DRIFT: $*"; FAILURES=$((FAILURES + 1)); }
 pass() { echo "OK: $*"; }
 
-# Compare a JSON path across all three configs
+# Compare a JSON path across both gateway configs
 compare_path() {
   local path="$1"
   local label="$2"
-  local main_val edge_val dev_val
+  local main_val edge_val
 
   extract() {
     python3 -c "
@@ -36,7 +35,6 @@ print(json.dumps(v, sort_keys=True))
 
   main_val=$(extract "$MAIN")
   edge_val=$(extract "$EDGE")
-  dev_val=$(extract "$DEV")
 
   # Catch missing paths (extract returns {} for nonexistent keys)
   if [[ "$main_val" == "{}" ]]; then
@@ -44,17 +42,16 @@ print(json.dumps(v, sort_keys=True))
     return
   fi
 
-  if [[ "$main_val" == "$edge_val" ]] && [[ "$main_val" == "$dev_val" ]]; then
+  if [[ "$main_val" == "$edge_val" ]]; then
     pass "$label"
   else
     fail "$label differs between configs"
     echo "  main: $main_val"
     echo "  edge: $edge_val"
-    echo "  dev:  $dev_val"
   fi
 }
 
-echo "Validating shared config across main, edge, and dev..."
+echo "Validating shared config across main and edge..."
 echo ""
 
 # Shared settings that MUST match

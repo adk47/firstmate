@@ -10,7 +10,7 @@
 #     sessions.resolve({ label: "@Role" }) keeps working for
 #     agent-to-agent messaging. Also runs on boot.
 #
-#   openclaw-gateway-{main,edge,dev}.service.d/override.conf
+#   openclaw-gateway-{main,edge}.service.d/override.conf
 #     Drop-ins that add ExecStartPre self-heal + a restart ceiling
 #     so a schema-invalid openclaw.json can't crash-loop the
 #     gateway indefinitely. Added 2026-05-05 after a 30-min main-
@@ -20,7 +20,7 @@
 #     scripts/aux-units/openclaw-gateway.override.conf.
 #
 #   openclaw-config-write-audit.path / .service
-#     Watches /root/.openclaw-{main,edge,dev}/openclaw.json for
+#     Watches /root/.openclaw-{main,edge}/openclaw.json for
 #     writes and runs scripts/openclaw-config-write-audit.sh,
 #     which Slack-alerts on any writer that isn't the gateway
 #     itself. Plugs the audit gap in openclaw's own config-io
@@ -75,11 +75,13 @@ fail() { log "FATAL: $*"; exit 1; }
 log "installing into $HYDRA_ROOT"
 
 # Retired-unit cleanup (see file header for rationale).
-for stale in hydra-mcp-reap.timer hydra-mcp-reap.service; do
+# - hydra-mcp-reap.{timer,service}: replaced by per-gateway pgid handling.
+# - openclaw-gateway-dev.service: dev profile retired with operations-dev workspace.
+for stale in hydra-mcp-reap.timer hydra-mcp-reap.service openclaw-gateway-dev.service; do
   if [[ -f "/etc/systemd/system/$stale" ]] \
      || systemctl list-unit-files --no-pager 2>/dev/null | grep -q "^$stale"; then
     systemctl disable --now "$stale" >/dev/null 2>&1 || true
-    rm -f "/etc/systemd/system/$stale"
+    rm -rf "/etc/systemd/system/$stale" "/etc/systemd/system/${stale}.d"
     systemctl reset-failed "$stale" >/dev/null 2>&1 || true
     log "  retired stale unit: $stale"
   fi
@@ -94,7 +96,6 @@ Description=Hydra peer-label reconciler (all profiles)
 Type=oneshot
 ExecStart=$HYDRA_ROOT/scripts/provision-peer-labels.sh main
 ExecStart=$HYDRA_ROOT/scripts/provision-peer-labels.sh edge
-ExecStart=$HYDRA_ROOT/scripts/provision-peer-labels.sh dev
 PEERLABELSVC
 
 cat > /etc/systemd/system/hydra-peer-labels.timer << PEERLABELTMR
@@ -131,7 +132,7 @@ systemctl list-timers "$tmr" --no-pager 2>/dev/null | head -4 || true
 # survives. We daemon-reload + reset-failed at the end so a
 # previously-tripped restart limit doesn't stick around after
 # the heal infrastructure is in place.
-for profile in main edge dev; do
+for profile in main edge; do
   drop_dir="/etc/systemd/system/openclaw-gateway-${profile}.service.d"
   mkdir -p "$drop_dir"
   cat > "$drop_dir/override.conf" << GATEWAYDROP
@@ -169,7 +170,6 @@ Description=Watch openclaw.json files for writes (out-of-band audit)
 [Path]
 PathChanged=/root/.openclaw-main/openclaw.json
 PathChanged=/root/.openclaw-edge/openclaw.json
-PathChanged=/root/.openclaw-dev/openclaw.json
 
 [Install]
 WantedBy=multi-user.target
@@ -208,7 +208,7 @@ log "  openclaw-config-write-audit.path: $audit_state"
 
 # Clear any previously-tripped restart limits on the gateways so
 # the new ExecStartPre gets a fresh restart budget.
-for profile in main edge dev; do
+for profile in main edge; do
   systemctl reset-failed "openclaw-gateway-${profile}.service" >/dev/null 2>&1 || true
 done
 

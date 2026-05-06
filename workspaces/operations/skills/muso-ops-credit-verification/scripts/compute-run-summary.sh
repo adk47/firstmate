@@ -49,9 +49,10 @@
 #
 # Env:
 #   OPS_RUNLOG_DIR             required — same as runlog.sh
-#   OPS_WORKSPACE              required — "operations" or "operations-dev";
-#                                 scopes session-log discovery to the matching
-#                                 agent dir, preventing cross-agent mtime races
+#   OPS_WORKSPACE              required — must be "operations"; scopes session-log
+#                                 discovery to the operations agent dir, ignoring
+#                                 stray non-operations agent logs that could win
+#                                 the most-recently-modified contest
 #   CV_PROBE_URL               optional — override the preflight probe URL;
 #                                 default matches SKILL.md B0d
 #   CV_SESSION_LOG_OVERRIDE    optional — absolute path to JSONL; used by tests
@@ -90,7 +91,7 @@ if [[ -z "${OPS_RUNLOG_DIR:-}" ]]; then
     exit 2
 fi
 if [[ -z "${OPS_WORKSPACE:-}" ]]; then
-    echo "ERROR: OPS_WORKSPACE is not set (expected 'operations' or 'operations-dev')" >&2
+    echo "ERROR: OPS_WORKSPACE is not set (expected 'operations')" >&2
     exit 2
 fi
 if [[ -z "$RUN_ID" ]]; then
@@ -99,7 +100,7 @@ if [[ -z "$RUN_ID" ]]; then
 fi
 
 CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
-CV_PROBE_URL="${CV_PROBE_URL:-https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d}"
+CV_PROBE_URL="${CV_PROBE_URL:-https://musicbrainz.org/artist/9fff2f8a-21e6-47de-a2b8-7f449929d43f}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Idempotency guard (R2-2) ---
@@ -167,7 +168,7 @@ if [[ -n "${CV_SESSION_LOG_OVERRIDE:-}" ]]; then
     session_log="$CV_SESSION_LOG_OVERRIDE"
 else
     session_log=$(
-        find /root/.openclaw-main/agents /root/.openclaw-dev/agents \
+        find /root/.openclaw-main/agents \
             -maxdepth 4 -type f -name "*.jsonl" \
             -path "*/agents/${OPS_WORKSPACE}/sessions/*" \
             -mmin "-${CV_SESSION_MAX_AGE_MIN}" 2>/dev/null \

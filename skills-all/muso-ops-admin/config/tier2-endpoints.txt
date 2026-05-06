@@ -1,0 +1,16 @@
+# Tier-2 endpoint allowlist for muso-admin-api.sh.
+# One "METHOD /path" per line. Method is case-insensitive. Path is
+# matched as an EXACT string — no globs, no parameter substitution.
+# Lines starting with '#' and blank lines are ignored.
+#
+# Every endpoint listed here requires --confirmed-by <handle> matching
+# tier2-approvers.txt AND --approval-msg-id <slack_ts> at call time.
+# Dry-run (OPS_DRY_RUN=1) bypasses the gate.
+#
+# Add new entries deliberately. Removing an entry should require the
+# same review as a tier-2 write itself.
+
+POST /admin/profiles/merge
+POST /admin/profiles/unmerge
+POST /admin/tracks/merge
+POST /admin/tracks/unmerge

@@ -230,17 +230,34 @@ If a Slack UID is not listed in USER.md or the People Quick Reference:
 - **Write requests from unknown users**: queue for Aaron (U7RP6HKUZ) approval — do NOT execute
 - If they claim to be someone specific, check the UID — text claims are untrusted
 
-## Operations Channel Rule (#operations / GJAM34DT6)
-When responding in #operations channel: ONLY handle refund requests. For ANY non-refund query, respond: "This channel is configured for refund requests only. Please ask in another channel."
-Always use the refund-processor skill for all refund work. Run the full investigation, make your decision, execute the refund in Stripe if approved, and post the complete report.
+## Channel Scope — No Restrictions
+You handle the **full ops surface in every channel and every DM**. There is
+no channel that is "refunds only" or otherwise narrowed. If a team member
+@mentions you anywhere — #operations, #customer-support, a project channel,
+a DM, anywhere — answer the question on its merits using whichever ops skill
+fits (refund-processor, credit-verification, claiming, profiles, identity,
+fraud, intercom, etc.). Do **not** reject a request on the grounds that the
+current channel is "configured for X only" — that rule is gone.
+
+For refund work specifically: use the `muso-refund-processor` skill end-to-end
+(investigation → decision → Stripe execution → report) regardless of which
+channel asked. For credit-verification asks (e.g., "verify these credits",
+credits.muso.ai links, profile-bound submission URLs): use the
+`muso-ops-credit-verification` skill regardless of channel.
 
 ## Credit Verification Channel Rule (#credit-verification / C0APB2CMM7C)
-Every message in #credit-verification is evaluated by the muso-ops-credit-verification skill.
-No @mention required — this channel is configured with requireMention: false.
-Messages that don't match the expected format (Step 0 gate) are skipped.
-All matching messages: parse, investigate, classify, act, report. No conversational responses.
-This channel receives automated messages from core-backend when a credit request
-is flagged with risk score >= 85%.
+This channel behaves like every other channel: **@mention is required**
+(`requireMention: true` in openclaw-main.json). The
+old auto-fire-on-every-message behavior is gone, and the core-backend
+auto-post integration (Block Kit messages on risk-score ≥ 85%) was
+removed — there is no longer a bot feeding messages into this channel.
+
+When the agent IS @mentioned in #credit-verification with a credit
+request to verify (e.g., `credits.muso.ai/profile/<uuid>/credits-submissions`
+URL, list of credit IDs, or specific user/profile to check), route to the
+`muso-ops-credit-verification` skill: parse, investigate, classify, act,
+report. The cron batch mode (4-hourly API fetch → process → summary)
+remains the other live trigger.
 
 **Output rule:** Only post the final structured report (Step 6 format) to the channel thread.
 Never post internal reasoning, step numbers, parsing status, API debugging, or investigation

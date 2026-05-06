@@ -266,7 +266,7 @@
       "description": "Scan Gmail for B2B prospect replies every hour",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774399200000,
+      "updatedAtMs": 1777901208348,
       "schedule": {
         "kind": "every",
         "everyMs": 3600000,
@@ -276,8 +276,9 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Scan Gmail (a@muso.ai) for new B2B Ads outreach replies in the last 65 minutes. Use gog to check recent inbox. Filter for replies from B2B prospects we have emailed (cross-reference with the B2B outreach sheet). IGNORE all internal emails (from muso.ai domains), SaaS notifications, marketing emails, and anything that is not a direct reply from a B2B prospect.\n\nCRITICAL SILENCE RULE: If there are NO new B2B prospect replies, your ENTIRE response must be empty — literally produce no output at all. Do not say NO_REPLY, do not say \"nothing found\", do not summarize. Just stop. Fede does not want to see any message when there is nothing to report.\n\nOnly if you find an actual B2B prospect reply, format your response with: sender name, company, reply summary, and suggested next action. Also sync GHL pipeline stage if applicable (move to Replied or Meeting Booked).",
-        "timeoutSeconds": 300
+        "message": "Scan Gmail (a@muso.ai) for new B2B Ads outreach replies in the last 65 minutes. Use gog to check recent inbox. Filter for replies from B2B prospects we have emailed (cross-reference with the B2B outreach sheet). IGNORE all internal emails (from muso.ai domains), SaaS notifications, marketing emails, and anything that is not a direct reply from a B2B prospect.\n\nAlways emit a visible final assistant message. Never end the run with a thinking-only response. The visible message MUST be one of these two forms and nothing else:\n\n(A) If there are no new B2B prospect replies, your final visible message is exactly: NO_REPLY (uppercase, nothing else — no preamble, no explanation, no markdown, no punctuation, no quotes). OpenClaw recognises this token and will silently complete the run without posting to Slack.\n\n(B) If you find an actual B2B prospect reply, format the visible message as: sender name, company, reply summary, and suggested next action. Also sync GHL pipeline stage if applicable (move to Replied or Meeting Booked).",
+        "timeoutSeconds": 300,
+        "thinking": "off"
       },
       "delivery": {
         "mode": "announce",
@@ -447,7 +448,7 @@
       "description": "Daily parent company discovery for B2B outreach - finds 50 new companies, dedupes, posts to #company-finder for approval",
       "enabled": true,
       "createdAtMs": 1775766544763,
-      "updatedAtMs": 1775991735778,
+      "updatedAtMs": 1777540784441,
       "schedule": {
         "kind": "cron",
         "expr": "0 13 * * *",
@@ -457,7 +458,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run the muso-outreach-discovery skill. Find 50 new companies matching Muso Ads target verticals. Dedupe against contacts_intelligence sheet, company_intelligence sheet, GHL B2B-Ads-Clio pipeline, and parent-companies.md (to skip subsidiaries of known parents). Score and select top 50. Return the batch as your final output — do NOT post to Slack directly; the cron runner will deliver it to #company-finder for Fede's review. Follow the SKILL.md workflow exactly. SILENCE RULE: if no new companies match, produce no output at all. Reference files are in skills/muso-outreach-engine/references/ — NEVER create files at workspace root.",
+        "message": "Run the muso-outreach-discovery skill. Find 50 new companies matching Muso Ads target verticals. Dedupe against contacts_intelligence sheet, company_intelligence sheet, GHL B2B-Ads-Clio pipeline, and parent-companies.md (to skip subsidiaries of known parents). Score and select top 50. Return the batch as your final output — do NOT post to Slack directly; the cron runner will deliver it to #company-finder for Fede's review. Follow the SKILL.md workflow exactly. If no new companies match, your final assistant reply must be exactly the single token NO_REPLY and nothing else — no preamble, no explanation, no markdown, no punctuation. OpenClaw recognises this token and will silently complete the run without posting to Slack. Reference files are in skills/muso-outreach-engine/references/ — NEVER create files at workspace root.",
         "timeoutSeconds": 600
       },
       "delivery": {

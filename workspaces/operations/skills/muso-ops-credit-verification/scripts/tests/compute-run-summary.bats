@@ -8,7 +8,7 @@ load helpers
 # (toolCall + toolResult pairs in the shape openclaw writes) and verify the
 # helper's output and side-effects.
 
-PROBE_URL="https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d"
+PROBE_URL="https://musicbrainz.org/artist/9fff2f8a-21e6-47de-a2b8-7f449929d43f"
 PROBE_TEXT="Drake · MusicBrainz · Artist page"   # contains "musicbrainz" and "drake"
 
 setup() {
@@ -777,7 +777,7 @@ setup_cv_results() {
   # preflight-verify.sh stdout can land in a process result instead of the
   # original exec result. The helper-written runlog event is authoritative.
   jq -n -c --arg rid "$RUN_ID" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{event:"preflight_ok", run_id:$rid, ts:$ts, probe_url:"https://musicbrainz.org/artist/072e9356-1cf1-4096-b9f1-3878a9e4961d", source:"preflight-verify.sh@cli"}' >> "$RUNLOG_FILE"
+    '{event:"preflight_ok", run_id:$rid, ts:$ts, probe_url:"https://musicbrainz.org/artist/9fff2f8a-21e6-47de-a2b8-7f449929d43f", source:"preflight-verify.sh@cli"}' >> "$RUNLOG_FILE"
 
   setup_cv_results
   seed_results user_verification_needed ok '["cr_1"]'
