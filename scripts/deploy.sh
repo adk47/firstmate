@@ -170,8 +170,7 @@ plugin_profile() {
 
 # install_openclaw — pins the global openclaw CLI to OPENCLAW_VERSION.
 # Idempotent: skips the npm install when the live binary already reports
-# the target version. Re-applies the opus-4-7 thinking patch afterward
-# (the patch script is itself idempotent and self-skipping).
+# the target version.
 #
 # Runs on whichever host this script is executing on. Like Steps 4c/4d
 # below, it assumes deploy.sh is being run on node-8 (CD path) or that
@@ -179,10 +178,21 @@ plugin_profile() {
 # a laptop deploys are out of scope; the deploy header at the top of
 # this file already documents that constraint.
 #
-# Returns non-zero on npm-install or patch-script failure. The single
-# caller (Step 4c.5) treats that as fatal — npm's default leaves the
-# previous global binary in place on a failed install, so aborting the
-# deploy avoids continuing on a half-updated runtime.
+# History: openclaw < 2026.5.5 needed a follow-on patch (scripts/patch-
+# openclaw-opus-4-7-thinking.sh) to add opus-4-7 to the adaptive-thinking
+# allowlist — without it, every first-turn request to Opus 4.7 returned
+# 400 "thinking.type.enabled is not supported … use thinking.type.adaptive".
+# 2026.5.5 ships opus-4-7 natively in the allowlist (verified in
+# dist/extensions/anthropic-vertex/stream-runtime.js + pi-ai's anthropic.js)
+# and also restructured the bundled adapter into a facade pattern that
+# broke the patch's anchor strings. The patch was retired together with
+# this version pin; if we ever roll back to < 2026.5.5 we'll need to
+# resurrect it from git history.
+#
+# Returns non-zero on npm-install failure. The single caller (Step 4c.5)
+# treats that as fatal — npm's default leaves the previous global binary
+# in place on a failed install, so aborting the deploy avoids continuing
+# on a half-updated runtime.
 install_openclaw() {
   local installed
   installed=$(openclaw --version 2>/dev/null | awk 'NR==1 {print $2}' || true)
@@ -202,22 +212,6 @@ install_openclaw() {
     log "    ✗ npm install -g openclaw@${OPENCLAW_VERSION} failed (rc=$npm_rc):"
     echo "$npm_out" | sed 's/^/        /'
     return 1
-  fi
-
-  # Re-apply the opus-4-7 adaptive-thinking allowlist patch. The patch
-  # script is idempotent (skips files that already contain "opus-4-7")
-  # and fails loudly if the BEFORE strings no longer match — which is
-  # itself useful signal that the new openclaw bundle has changed shape.
-  local patch_script="$SCRIPT_DIR/patch-openclaw-opus-4-7-thinking.sh"
-  if [[ -x "$patch_script" ]]; then
-    local patch_rc=0
-    "$patch_script" || patch_rc=$?
-    if (( patch_rc != 0 )); then
-      log "    ⚠ opus-4-7 thinking patch returned rc=$patch_rc — investigate before relying on Opus 4.7 thinking"
-      return 1
-    fi
-  else
-    log "    ⚠ patch-openclaw-opus-4-7-thinking.sh not found at $patch_script — skipping (Opus 4.7 thinking may regress)"
   fi
   return 0
 }
