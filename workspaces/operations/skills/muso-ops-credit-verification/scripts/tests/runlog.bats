@@ -343,7 +343,10 @@ seed_bypass_eligible_session() {
     "$SCRIPTS_DIR/runlog.sh" event "$RUN_ID" verdict \
     "$(jq -nc --arg pid "$PID" --arg id cr_1 '{cr_id:$id, profile_id:$pid, verdict:"LEGITIMATE"}')"
   [ "$status" -eq 7 ]
-  [[ "$output" == *"no successful browser load found"* ]]
+  # Message is mode-aware after the 2026-05-06 cutover. Browser-mode says
+  # "Tier-1 browser snapshot"; api-mode says "evidence source". The label
+  # `verdict_without_evidence` is mode-independent — assert on that.
+  [[ "$output" == *"verdict_without_evidence"* ]]
   [[ "$output" == *"$PID"* ]]
 }
 
