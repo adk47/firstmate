@@ -6,6 +6,11 @@ setup() {
   setup_tmp_env
   export OPS_RUNLOG_DIR="$TEST_TMPDIR/credit-batch-runs"
   mkdir -p "$OPS_RUNLOG_DIR"
+  # 2026-05-06 cutover: existing cases assert legacy browser-mode semantics
+  # (preflight freeze on browser failure, count_profile_browser_loads,
+  # tier1_unreachable bypass). Pin to browser so they keep covering the
+  # rollback path. The default mode flipped to api with this cutover.
+  export CV_EVIDENCE_MODE=browser
 }
 teardown() { teardown_tmp_env; }
 

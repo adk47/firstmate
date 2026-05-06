@@ -12,6 +12,12 @@ setup() {
   mkdir -p "$RUN_DIR"
   : > "$RUNLOG_FILE"
   : > "$SESSION_LOG"
+  # 2026-05-06 cutover: existing cases assert browser-anchor enforcement
+  # (missing_anchor_profile_count gates audit_ok). Pin to browser so they
+  # cover the legacy rollback path. The default flipped to api at the
+  # cutover; under api the browser-anchor check is short-circuited because
+  # the bash gate + runlog gate already enforce api-evidence per decision.
+  export CV_EVIDENCE_MODE=browser
 }
 teardown() { teardown_tmp_env; }
 

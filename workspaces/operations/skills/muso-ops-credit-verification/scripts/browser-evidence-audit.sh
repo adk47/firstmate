@@ -81,6 +81,21 @@ fi
 
 CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
 CV_AUDIT_COOKIE_CUTTER_THRESHOLD="${CV_AUDIT_COOKIE_CUTTER_THRESHOLD:-3}"
+CV_EVIDENCE_MODE="${CV_EVIDENCE_MODE:-api}"
+
+# 2026-05-06 cutover: under CV_EVIDENCE_MODE=api the per-decision evidence
+# requirement is enforced by muso-admin-api.sh::enforce_credit_approve_gate
+# (api-evidence quorum) and runlog.sh::event (api-evidence count). The
+# browser-anchor check this script performs is redundant — and worse, it
+# would refuse legitimate api-mode runs (most cleared profiles will have
+# zero browser activity by design). Skip the browser-anchor block under
+# api-mode while keeping the runlog-only checks (coverage / reconciliation /
+# cookie-cutter), which remain mode-independent. Browser-mode (legacy
+# rollback) keeps the full anchor enforcement path.
+CV_AUDIT_SKIP_BROWSER_ANCHOR=0
+if [[ "$CV_EVIDENCE_MODE" == "api" ]]; then
+    CV_AUDIT_SKIP_BROWSER_ANCHOR=1
+fi
 
 day_short="${RUN_ID:0:8}"
 day_iso="${day_short:0:4}-${day_short:4:2}-${day_short:6:2}"
@@ -394,7 +409,8 @@ audit_json=$(
         --arg runlog_path "$runlog_path" \
         --arg session_log "$session_log" \
         --arg run_started_ts "$run_started_ts" \
-        --argjson runlog_audit "$runlog_audit" '
+        --argjson runlog_audit "$runlog_audit" \
+        --argjson skip_browser_anchor "$CV_AUDIT_SKIP_BROWSER_ANCHOR" '
         def normhost:
             try (capture("^https?://(?:www\\.)?(?<host>[^/]+)").host) catch "";
 
@@ -578,7 +594,13 @@ audit_json=$(
         # Union them with browser-anchored + bypass-anchored.
         (($runlog_audit.tier0_anchored_profiles // [])) as $tier0_anchored_local
         |
-        (($tier1_by_profile | keys) + $bypass_anchored_profiles + $tier0_anchored_local | unique) as $anchor_profiles
+        (($tier1_by_profile | keys) + $bypass_anchored_profiles + $tier0_anchored_local | unique) as $anchor_profiles_browser
+        |
+        # Under CV_EVIDENCE_MODE=api the bash gate + runlog gate have already
+        # enforced api-evidence for every decision. Treat all decision
+        # profiles as anchored to short-circuit the browser-anchor check.
+        # Browser-mode keeps the original union semantics.
+        (if $skip_browser_anchor == 1 then $decision_profiles else $anchor_profiles_browser end) as $anchor_profiles
         |
         ($decision_profiles - $anchor_profiles) as $missing_anchor_profiles
         |
