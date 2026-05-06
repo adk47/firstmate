@@ -63,6 +63,92 @@ not the parent message), check if the thread was initiated by a credit verificat
 workflow. If so, treat the reply as an escalation response (see Step 5 — Escalate),
 not a new trigger. Only parent messages trigger the full workflow.
 
+## EVIDENCE MODEL — 2026-05-06 CUTOVER (READ BEFORE ANYTHING ELSE)
+
+**This block overrides every later "browser-only Tier-1" instruction in
+this SKILL.md.** When you encounter prose below telling you to load
+`music.apple.com` / `musicbrainz.org` / `discogs.com` / Spotify in the
+browser as primary evidence — that prose is the legacy playbook and stays
+in the file as a rollback reference. Use the model in this block instead.
+
+**Why we cut over.** Cloudflare has been blocking the Tier-1 browser path
+for 6+ months (search engines fail with Turnstile; Tier-1 sites
+intermittently captcha or lazy-render after the snapshot fires). The
+50% Tier-1 failure rate, 15-min run timeouts, the May 6 Bram Fidder
+incident, and the B2 dry-run stall all trace back to it. We now have
+deterministic API helpers that close the loop without the browser.
+
+**The new evidence model under `CV_EVIDENCE_MODE=api` (default).** A
+credit is approvable when ≥2 distinct **evidence sources** agree on the
+claim. Today, two sources are operational:
+
+  1. `musicbrainz-isrc-lookup.sh <ISRC> --credited-name <N> --role <R>`
+     returning `name_match: true` (and `role_match: true` for non-performer
+     roles). Free, no auth. Best coverage on indie / non-US / classical.
+  2. **AllMusic browser fallback.** Open `https://www.allmusic.com/...`
+     in the `browser` tool and rely on the snapshot text containing the
+     credited name + role/track. AllMusic has no public API, so it remains
+     the second source in the steady state.
+
+**Other helpers exist but are inert today** (shipped + tested, but exit 4
+"creds_missing" until provisioned):
+
+  - `discogs-isrc-lookup.sh` — needs `DISCOGS_TOKEN`. Tracked in
+    [hydra#255](https://github.com/Muso-AI/hydra/issues/255). Will close
+    the engineering / mastering / mixing coverage gap on mainstream pop.
+  - `spotify-track-lookup.sh` — needs `SPOTIFY_CLIENT_ID` /
+    `SPOTIFY_CLIENT_SECRET`. Tracked in
+    [hydra#256](https://github.com/Muso-AI/hydra/issues/256). Performer-
+    role only when enabled.
+
+Until those tokens are provisioned, **do NOT call those helpers** in B3 —
+they always exit 4 today and the wasted call slows the run. The bash gate
+already disregards their inert output, so there's no correctness risk,
+only latency.
+
+**Do NOT use the browser on apple.music.com, musicbrainz.org, discogs.com,
+or spotify.com** — those hosts are JS-rendered SPAs whose credits are NOT
+in the HTML shell, and the api-evidence library doesn't count their
+results. AllMusic is the only sanctioned browser destination for
+credit verification. (The `block-web-fetch-tier1` plugin hook that
+previously enforced this was removed at the cutover; the gate now
+silently ignores Tier-1 web_fetch / browser results.)
+
+**B3 investigation order (api-mode, today's tokens).** For each credit:
+
+  1. If the credit ships an ISRC: call `musicbrainz-isrc-lookup.sh`.
+  2. If MB hits with `name_match=true`: that's evidence source #1. Capture
+     its `evidence_excerpt` field — that's what you pass to
+     `--evidence-excerpt`.
+  3. Open AllMusic in the `browser` tool. If the snapshot text contains
+     the credited name + role/track: that's evidence source #2 → approve.
+  4. If MB misses OR AllMusic doesn't carry the credit: escalate to Jan
+     (`<@U038BM16T7W>`) with `UNVERIFIABLE — NEEDS REVIEW`. Don't
+     fabricate browser snapshots; the gate will reject them.
+
+When [#255](https://github.com/Muso-AI/hydra/issues/255) /
+[#256](https://github.com/Muso-AI/hydra/issues/256) land, B3 expands to
+chain MB → Discogs → Spotify → AllMusic, stopping after 2 hits.
+
+The evidence excerpt you pass to `--evidence-excerpt` should be the
+helper's `evidence_excerpt` field when the hit came from MusicBrainz
+(format: `<credited_name> – <role-or-track>`), or a verbatim ≥10-char
+substring from the AllMusic page text otherwise.
+
+**Rollback knob.** If the api-mode gate misfires in production, set
+`CV_EVIDENCE_MODE=browser` in the gateway env and restart. That re-enables
+the legacy ≥2-distinct-Tier-1-browser-loads quorum and the
+preflight-browser-unavailable freeze. Browser-mode prose later in this
+file (search-engine browser loads, tier1_unreachable bypass requirements,
+the B0d preflight gate) is then in force again. Rollback should be a
+last resort — if the api path fails for a genuine reason (helper down,
+session log unreadable), fix the root cause first.
+
+**Tier-0 (Profile Audit) is unaffected.** The 8-gate per-profile audit
+that emits `profile_audit:cc=...,pop=...,...` receipts continues to clear
+without any browser activity at all. Its independent re-verification gate
+(`_tier0_audit_recompute_gate` in muso-admin-api.sh) runs unchanged.
+
 ## Visual Feedback (Emoji Reactions) — MANDATORY
 
 You MUST use the message tool with `action: "react"` at these exact points.

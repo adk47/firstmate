@@ -142,7 +142,13 @@ assert_probe_calls() {
   jq -e 'select(.event=="preflight_browser_unavailable") | .source == "preflight-verify.sh@cli"' < "$RUNLOG_FILE"
 }
 
-@test "second invocation on a frozen run exits 20 from runlog freeze gate" {
+@test "second invocation on a frozen run exits 20 from runlog freeze gate (browser-mode rollback)" {
+  # The freeze-on-second-invocation behavior is browser-mode-specific. Under
+  # CV_EVIDENCE_MODE=api (default since 2026-05-06) the same condition is a
+  # soft warning so a transient browser failure doesn't strand a run that
+  # could clear via APIs. Pin to browser to assert the legacy path stays
+  # functional as a rollback knob.
+  export CV_EVIDENCE_MODE=browser
   export OPENCLAW_SNAPSHOT_TEXT='RootWebArea "Open MusicBrainz"'
   run "$SCRIPTS_DIR/preflight-verify.sh" "$RUN_ID"
   [ "$status" -eq 10 ]
@@ -155,4 +161,13 @@ assert_probe_calls() {
   [ "$status" -eq 20 ]
   second_count=$(grep -c '"event":"preflight_browser_unavailable"' "$RUNLOG_FILE")
   [ "$second_count" -eq 1 ]
+}
+
+@test "api-mode: second invocation on a 'frozen' run does NOT exit 20 (warning only)" {
+  export CV_EVIDENCE_MODE=api
+  export OPENCLAW_SNAPSHOT_TEXT='RootWebArea "Open MusicBrainz"'
+  run "$SCRIPTS_DIR/preflight-verify.sh" "$RUN_ID"
+  [ "$status" -eq 10 ]
+  run "$SCRIPTS_DIR/preflight-verify.sh" "$RUN_ID"
+  [ "$status" -ne 20 ]
 }

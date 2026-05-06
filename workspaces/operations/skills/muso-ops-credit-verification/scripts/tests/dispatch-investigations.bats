@@ -44,8 +44,10 @@ seed_runlog() {
   [ "$status" -eq 0 ]
   prompt_path=$(echo "$output" | jq -r '.profiles[0].prompt_path')
   [ -f "$prompt_path" ]
-  # The template body should be present (look for the required-steps heading)
-  grep -q "Required steps" "$prompt_path"
+  # The template body should be present. The current template is the
+  # deferred-subagent notice that points back at SKILL.md B3 (today's
+  # inline path); match its actual heading.
+  grep -q "Investigate one profile" "$prompt_path"
   # ENV header should mention this profile
   grep -q "profile-001" "$prompt_path"
 }
