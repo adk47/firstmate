@@ -540,6 +540,118 @@ seed_webfetch_tier1() {
     echo "$output" | jq -e '.delegate_exit == 1'
 }
 
+# --- R4-3 follow-up: action_attempted runlog event for non-Tier-0 delegates ---
+#
+# 2026-05-07 13:36 UTC: a manual @Ops batch hand-composed a [HEARTBEAT-BATCH]
+# Slack post because post-batch-summary.sh exited 11 — browser-evidence-audit
+# refused. Root cause: the bulk-approve and bulk-flag delegates landed 250
+# API writes but emitted ZERO decision rows to the runlog (only the Tier-0
+# branch at lines 338-358 emits action_attempted). The audit's
+# mode-independent coverage check (every profile_group_fetched.profile_id
+# needs >=1 verdict / action_attempted / escalation_posted with the same
+# profile_id) flagged 30/30 fetched profiles as uncovered.
+#
+# Fix: emit one action_attempted runlog event per profile group on a
+# successful delegate, mirroring the Tier-0 emit pattern. These tests
+# capture the runlog.sh invocation via a stub so we can assert payload
+# shape without standing up real runlog state.
+
+# Helper: stub RUNLOG_SH to capture invocations to $RUNLOG_CALLS_FILE.
+# Each call writes a header line ("CALL <run_id> <event_name>") followed
+# by the payload JSON on the next line — easy to grep / jq.
+stub_runlog_sh() {
+    RUNLOG_CALLS_FILE="$TEST_ROOT/runlog.calls"
+    : > "$RUNLOG_CALLS_FILE"
+    export RUNLOG_CALLS_FILE
+    export RUNLOG_SH="$TEST_ROOT/fake-runlog.sh"
+    cat > "$RUNLOG_SH" <<'STUB'
+#!/usr/bin/env bash
+# args: event <run_id> <event_name> <payload_json>
+if [[ "${1:-}" == "event" ]]; then
+    printf 'CALL %s %s\n%s\n' "$2" "$3" "$4" >> "$RUNLOG_CALLS_FILE"
+fi
+exit 0
+STUB
+    chmod +x "$RUNLOG_SH"
+}
+
+@test "approve: successful delegate emits action_attempted to runlog" {
+    stub_runlog_sh
+    seed_browser_toolcall_ok "b1" "https://musicbrainz.org/artist/p1" "Ben Smith bass"
+    seed_browser_toolcall_ok "b2" "https://allmusic.com/artist/x"      "Ben Smith bass on record"
+    run run_w --profile-id p1 \
+        --evidence-excerpt "Ben Smith bass" --ids "cr_1, cr_2 ,cr_3" --decision approve
+    [ "$status" -eq 0 ]
+    # Exactly one CALL line in the stub log.
+    [ "$(grep -c '^CALL ' "$RUNLOG_CALLS_FILE")" -eq 1 ]
+    [[ "$(head -1 "$RUNLOG_CALLS_FILE")" == "CALL ${OPS_RUN_ID} action_attempted" ]]
+    # Payload shape: profile_id, action, evidence_kind, cr_ids array (3 entries,
+    # whitespace trimmed), evidence_excerpt, count = cr_ids.length.
+    local payload
+    payload=$(sed -n '2p' "$RUNLOG_CALLS_FILE")
+    echo "$payload" | jq -e '.profile_id == "p1"'
+    echo "$payload" | jq -e '.action == "approve"'
+    echo "$payload" | jq -e '.evidence_kind == "excerpt_quorum_approve"'
+    echo "$payload" | jq -e '.evidence_excerpt == "Ben Smith bass"'
+    echo "$payload" | jq -e '.cr_ids == ["cr_1","cr_2","cr_3"]'
+    echo "$payload" | jq -e '.count == 3'
+}
+
+@test "approve: failed delegate (gate rejection) emits NO action_attempted" {
+    stub_runlog_sh
+    seed_browser_toolcall_ok "b1" "https://musicbrainz.org/artist/p1" "Ben Smith bass"
+    seed_browser_toolcall_ok "b2" "https://allmusic.com/artist/x"      "Ben Smith bass on record"
+    APPROVE_MODE=gate run run_w --profile-id p1 \
+        --evidence-excerpt "Ben Smith bass" --ids "cr_1" --decision approve
+    [ "$status" -eq 1 ]
+    # Coverage row would be a lie if the delegate didn't actually land the writes.
+    [ ! -s "$RUNLOG_CALLS_FILE" ]
+}
+
+@test "flag: successful delegate emits action_attempted to runlog" {
+    stub_runlog_sh
+    seed_browser_toolcall_ok "b1" "https://musicbrainz.org/artist/p1" "Yellow Submarine songwriter Lennon. Pau Romero discography"
+    seed_browser_toolcall_ok "b2" "https://music.apple.com/us/artist/p1" "Yellow Submarine songwriter section. Pau Romero — see also"
+    CREDITED_NAME_OVERRIDE="Pau Romero" TRACK_TITLE_OVERRIDE="Yellow Submarine" ROLE_OVERRIDE="songwriter" \
+    run run_w --profile-id p1 --evidence-excerpt "Yellow Submarine songwriter" \
+        --ids "cr_1,cr_2,cr_3" --decision flag --reason "name not credited" --flag-reason name_mismatch
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^CALL ' "$RUNLOG_CALLS_FILE")" -eq 1 ]
+    [[ "$(head -1 "$RUNLOG_CALLS_FILE")" == "CALL ${OPS_RUN_ID} action_attempted" ]]
+    local payload
+    payload=$(sed -n '2p' "$RUNLOG_CALLS_FILE")
+    echo "$payload" | jq -e '.profile_id == "p1"'
+    echo "$payload" | jq -e '.action == "flag"'
+    echo "$payload" | jq -e '.evidence_kind == "excerpt_quorum_flag"'
+    echo "$payload" | jq -e '.evidence_excerpt == "Yellow Submarine songwriter"'
+    echo "$payload" | jq -e '.cr_ids == ["cr_1","cr_2","cr_3"]'
+    echo "$payload" | jq -e '.count == 3'
+}
+
+@test "flag: failed delegate emits NO action_attempted" {
+    stub_runlog_sh
+    seed_browser_toolcall_ok "b1" "https://musicbrainz.org/artist/p1" "Yellow Submarine songwriter Lennon. Pau Romero discography"
+    seed_browser_toolcall_ok "b2" "https://music.apple.com/us/artist/p1" "Yellow Submarine songwriter section. Pau Romero — see also"
+    CREDITED_NAME_OVERRIDE="Pau Romero" TRACK_TITLE_OVERRIDE="Yellow Submarine" ROLE_OVERRIDE="songwriter" \
+    FLAG_MODE=partial run run_w --profile-id p1 --evidence-excerpt "Yellow Submarine songwriter" \
+        --ids "cr_1,cr_2,cr_3" --decision flag --reason "unverifiable" --flag-reason no_tier1_match
+    [ "$status" -eq 1 ]
+    [ ! -s "$RUNLOG_CALLS_FILE" ]
+}
+
+@test "approve: action_attempted suppressed when OPS_RUN_ID unset" {
+    # If the wrapper is invoked outside a batch (no OPS_RUN_ID), don't write
+    # to the runlog. Same precedent as the Tier-0 emit at line 338.
+    stub_runlog_sh
+    unset OPS_RUN_ID
+    seed_browser_toolcall_ok "b1" "https://musicbrainz.org/artist/p1" "Ben Smith bass"
+    seed_browser_toolcall_ok "b2" "https://allmusic.com/artist/x"      "Ben Smith bass on record"
+    run run_w --profile-id p1 \
+        --evidence-excerpt "Ben Smith bass" --ids "cr_1" --decision approve
+    [ "$status" -eq 0 ]
+    [ ! -s "$RUNLOG_CALLS_FILE" ]
+}
+
 # --- IDs + summary shape ------------------------------------------------------
 
 @test "summary JSON: ids split correctly, whitespace-trimmed" {

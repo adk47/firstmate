@@ -895,6 +895,35 @@ EOF
         --reason "$REASON" \
         --flag-reason "$FLAG_REASON" \
         --ids "$IDS_RAW" >/dev/null || delegate_rc=$?
+
+    # On a successful flag delegate, emit one action_attempted runlog event
+    # so browser-evidence-audit.sh's mode-independent coverage check (every
+    # profile_group_fetched.profile_id needs >=1 decision row) treats this
+    # profile as covered. Without this, post-batch-summary.sh refuses to
+    # post the canonical batch summary on any UVN-heavy run and the agent
+    # is forced to hand-compose a [HEARTBEAT-BATCH] message — which is
+    # exactly what the 2026-05-07 13:36 UTC run hit. Mirrors the Tier-0
+    # emit at lines 338-358; the verdict gate is left enabled because the
+    # upstream flag-evidence quorum already proved the excerpt is countable
+    # on >=CV_REQUIRED_LOADS Tier-1 anchors. Fail-OPEN: a runlog write
+    # failure must not back out the API write that already landed.
+    if [[ "$delegate_rc" -eq 0 && -n "${OPS_RUN_ID:-}" ]]; then
+        runlog_sh="${RUNLOG_SH:-$SCRIPT_DIR/runlog.sh}"
+        if [[ -f "$runlog_sh" ]]; then
+            ids_array=$(printf '%s' "$IDS_RAW" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))')
+            aa_payload=$(jq -n -c \
+                --arg pid "$PROFILE_ID" \
+                --arg action "flag" \
+                --argjson cr_ids "$ids_array" \
+                --arg evidence_kind "excerpt_quorum_flag" \
+                --arg evidence_excerpt "$EVIDENCE_EXCERPT" \
+                '{profile_id:$pid, action:$action, cr_ids:$cr_ids, count:($cr_ids|length),
+                  evidence_kind:$evidence_kind, evidence_excerpt:$evidence_excerpt}')
+            bash "$runlog_sh" event "$OPS_RUN_ID" action_attempted "$aa_payload" \
+                >/dev/null 2>&1 || true
+        fi
+    fi
+
     emit_summary "ok" "$delegate_rc"
     exit "$delegate_rc"
 fi
@@ -1022,6 +1051,30 @@ bash "$BATCH_APPROVE_SH" \
     --role "$ROLE" \
     --evidence-excerpt "$EVIDENCE_EXCERPT" \
     --ids "$IDS_RAW" >/dev/null || delegate_rc=$?
+
+# On a successful approve delegate, emit one action_attempted runlog event
+# so browser-evidence-audit.sh's mode-independent coverage check (every
+# profile_group_fetched.profile_id needs >=1 decision row) treats this
+# profile as covered. Mirrors the Tier-0 emit at lines 338-358 and the
+# flag-path emit above. Verdict gate stays enabled because the upstream
+# evidence-quorum check at lines 978-1013 already proved the excerpt is
+# countable on >=CV_REQUIRED_LOADS Tier-1 anchors. Fail-OPEN.
+if [[ "$delegate_rc" -eq 0 && -n "${OPS_RUN_ID:-}" ]]; then
+    runlog_sh="${RUNLOG_SH:-$SCRIPT_DIR/runlog.sh}"
+    if [[ -f "$runlog_sh" ]]; then
+        ids_array=$(printf '%s' "$IDS_RAW" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))')
+        aa_payload=$(jq -n -c \
+            --arg pid "$PROFILE_ID" \
+            --arg action "approve" \
+            --argjson cr_ids "$ids_array" \
+            --arg evidence_kind "excerpt_quorum_approve" \
+            --arg evidence_excerpt "$EVIDENCE_EXCERPT" \
+            '{profile_id:$pid, action:$action, cr_ids:$cr_ids, count:($cr_ids|length),
+              evidence_kind:$evidence_kind, evidence_excerpt:$evidence_excerpt}')
+        bash "$runlog_sh" event "$OPS_RUN_ID" action_attempted "$aa_payload" \
+            >/dev/null 2>&1 || true
+    fi
+fi
 
 emit_summary "ok" "$delegate_rc"
 exit "$delegate_rc"

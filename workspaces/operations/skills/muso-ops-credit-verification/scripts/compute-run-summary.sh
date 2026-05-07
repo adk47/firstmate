@@ -628,6 +628,27 @@ if [[ -f "$results_path" ]]; then
     fi
 fi
 
+# 2026-05-07: when results.jsonl is the reconciliation source, FETCHED
+# must equal sum_buckets so the audit's reconciliation invariant holds.
+# The 13:32 UTC run hit this: the R2-6 fallback at lines 501-512 set
+# FETCHED=500 from run_started.fetch_size (the cap, not the actual
+# fetch) because the 200-credit list response exceeded openclaw's 16KB
+# truncation window — but results.jsonl said 250 attempts (82 approved +
+# 168 UVN). browser-evidence-audit.sh's reconciliation check is
+# `fetched - sum_buckets`; with FETCHED=500 and sum_buckets=250 it
+# returned mismatch=250, post-batch-summary.sh exited 11, and the
+# canonical Slack summary never posted. results.jsonl is the truth
+# floor for write counts (PR #158), so derive FETCHED from it when it's
+# the source. ESCALATED / SKIPPED_* / ERRORS are runlog-derived and
+# already set above (lines 441, 469-471).
+if [[ "$RECONCILIATION_SOURCE" == "results_jsonl" ]]; then
+    _rj_sum=$((APPROVED_ATTEMPTED + UVN_ATTEMPTED + ESCALATED + SKIPPED_IDEMPOTENT + SKIPPED_CAP + ERRORS))
+    if (( _rj_sum > 0 )); then
+        FETCHED="$_rj_sum"
+    fi
+    unset _rj_sum
+fi
+
 # Silent-failure invariant: the 2026-04-22 19:15 scenario is exactly
 # "attempted >> 0 AND landed == 0" for at least one verb. Either half
 # (approve or UVN) triggering is sufficient — we want to catch any silent
