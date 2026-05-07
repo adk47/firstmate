@@ -15,6 +15,26 @@ setup_tmp_env() {
   unset CV_SESSION_LOG_OVERRIDE CV_SESSION_RUN_STARTED_TS \
         CV_DISABLE_VERDICT_GATE CV_REQUIRED_PROFILE_BROWSE
   mkdir -p "$OPS_AUDIT_LOG_DIR" "$(dirname "$OPS_BATCH_LOCK_PATH")" "$OPS_RUNLOG_DIR"
+
+  # Hermetic openclaw: production scripts (lockfile.sh's renderer-missing
+  # alert, post-batch-summary.sh's parent+thread sends) call `openclaw
+  # message send …` directly. Without a PATH shadow, any test that fires
+  # those send paths (e.g. R4-3's `release --final` with seeded runlog
+  # state) posts REAL :rotating_light: alerts to the prod
+  # #credit-verification channel on any host that has openclaw on PATH —
+  # notably hydra itself, where post-merge agent reviewers and CD steps
+  # run the suite. Same failure as PR #245 (memory:
+  # feedback_bats_must_stub_openclaw.md) and 2026-05-07 16:47-16:52 UTC.
+  # Tests that need to assert on invocations can read
+  # "$TEST_TMPDIR/openclaw.calls".
+  mkdir -p "$TEST_TMPDIR/bin"
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
+#!/usr/bin/env bash
+printf 'CALL %q\n' "$*" >> "${TEST_TMPDIR:-/tmp}/openclaw.calls"
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+  export PATH="$TEST_TMPDIR/bin:$PATH"
 }
 
 teardown_tmp_env() {
