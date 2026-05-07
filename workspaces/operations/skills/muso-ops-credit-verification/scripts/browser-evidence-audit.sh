@@ -81,6 +81,21 @@ fi
 
 CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
 CV_AUDIT_COOKIE_CUTTER_THRESHOLD="${CV_AUDIT_COOKIE_CUTTER_THRESHOLD:-3}"
+CV_EVIDENCE_MODE="${CV_EVIDENCE_MODE:-api}"
+
+# 2026-05-06 cutover: under CV_EVIDENCE_MODE=api the per-decision evidence
+# requirement is enforced by muso-admin-api.sh::enforce_credit_approve_gate
+# (api-evidence quorum) and runlog.sh::event (api-evidence count). The
+# browser-anchor check this script performs is redundant — and worse, it
+# would refuse legitimate api-mode runs (most cleared profiles will have
+# zero browser activity by design). Skip the browser-anchor block under
+# api-mode while keeping the runlog-only checks (coverage / reconciliation /
+# cookie-cutter), which remain mode-independent. Browser-mode (legacy
+# rollback) keeps the full anchor enforcement path.
+CV_AUDIT_SKIP_BROWSER_ANCHOR=0
+if [[ "$CV_EVIDENCE_MODE" == "api" ]]; then
+    CV_AUDIT_SKIP_BROWSER_ANCHOR=1
+fi
 
 day_short="${RUN_ID:0:8}"
 day_iso="${day_short:0:4}-${day_short:4:2}-${day_short:6:2}"
@@ -113,6 +128,47 @@ runlog_audit=$(jq -s -c \
      ] | unique) as $decision_profiles_local
     |
     ($fetched_profiles - $decision_profiles_local) as $uncovered_fetched_profiles
+    |
+    # Tier-0 evidence path. A decision event with
+    # evidence_kind=="tier0_profile_audit" is grounded for audit purposes
+    # by a tier0_audit_verified event with the same profile_id and matching
+    # receipt (event.receipt == decision.evidence_excerpt) in the same run.
+    # Tier-0 does not use a browser, so the Tier-1 browser-anchor rule
+    # does not apply. The anti-fabrication property comes from
+    # _tier0_audit_recompute_gate in muso-admin-api.sh, which independently
+    # re-runs the 8 Tier-0 gates against live admin-API data before the
+    # PUT lands and emits tier0_audit_verified iff all 8 still pass.
+    # An attacker cannot synthesize a matching tier0_audit_verified row
+    # without making the live admin-API surfaces agree — same trust
+    # property as forging Tier-1 browser-load text.
+    ([ $events[]
+       | select(.event == "tier0_audit_verified")
+       | {pid: (.profile_id // ""), receipt: (.receipt // "")}
+       | select(.pid != "")
+     ]) as $tier0_verified_events
+    |
+    # Decision profiles that are tier0-anchored: the decision event must
+    # carry evidence_kind=="tier0_profile_audit" AND there must be a
+    # tier0_audit_verified event with the same profile_id whose receipt
+    # equals the decision evidence_excerpt. We only count a profile if
+    # ALL its tier0-kinded decisions are matched (one-bad-apple semantics —
+    # if a decision claims tier0 grounding but no matching verified event
+    # exists, the profile is NOT tier0-anchored).
+    ([ $events[]
+       | select(.event == "verdict" or .event == "action_attempted" or .event == "escalation_posted")
+       | select((.evidence_kind // "") == "tier0_profile_audit")
+       | select((.profile_id // "") != "")
+       | . as $d
+       | ($tier0_verified_events
+          | map(select(.pid == $d.profile_id and .receipt == ($d.evidence_excerpt // "")))
+          | length) as $matched_count
+       | {pid: $d.profile_id, matched: ($matched_count > 0)}
+     ]
+     | group_by(.pid)
+     | map({pid: .[0].pid, all_matched: (all(.[]; .matched))})
+     | map(select(.all_matched))
+     | map(.pid)
+     | unique) as $tier0_anchored_profiles
     |
     # last() not first(): compute-run-summary.sh can fire twice per run when
     # the agent re-runs --final after escalation_posted events land. Run
@@ -168,6 +224,7 @@ runlog_audit=$(jq -s -c \
         cookie_cutter_reasons: $cookie_cutter,
         cookie_cutter_count: ($cookie_cutter | length),
         cookie_cutter_threshold: $cookie_cutter_threshold,
+        tier0_anchored_profiles: $tier0_anchored_profiles,
         announce_count: $announce_count,
         announce_missing: (($fetched_profiles | length) > 0 and $announce_count == 0),
         runlog_ok: (
@@ -284,6 +341,63 @@ else
 fi
 
 if [[ -z "$session_log" || ! -f "$session_log" ]]; then
+    # Tier-0 short-circuit: a Tier-0-only run can legitimately have no
+    # session log because Tier-0 doesn't use the browser tool. If every
+    # decision profile is Tier-0-anchored (matched tier0_audit_verified
+    # event), report runlog-derived audit truth and exit 0.
+    decision_profiles_list=$(jq -s -c '
+        [.[] | select(.event == "verdict" or .event == "action_attempted" or .event == "escalation_posted")
+             | .profile_id // empty | select(. != "")
+        ] | unique
+    ' "$runlog_path" 2>/dev/null || echo '[]')
+    tier0_anchored_list=$(jq -c '.tier0_anchored_profiles' <<<"$runlog_audit" 2>/dev/null || echo '[]')
+    all_tier0=$(jq -n -c \
+        --argjson dec "$decision_profiles_list" \
+        --argjson t0  "$tier0_anchored_list" \
+        '($dec - $t0) | length == 0 and ($dec | length > 0)')
+    if [[ "$all_tier0" == "true" ]]; then
+        audit_json=$(jq -n -c \
+            --arg run_id "$RUN_ID" \
+            --arg runlog_path "$runlog_path" \
+            --argjson dec "$decision_profiles_list" \
+            --argjson t0 "$tier0_anchored_list" \
+            --argjson runlog_audit "$runlog_audit" \
+            '{
+                run_id:$run_id,
+                runlog_path:$runlog_path,
+                session_log:null,
+                run_started_ts:null,
+                decision_profiles:$dec,
+                decision_profile_count:($dec | length),
+                decision_events_without_profile_id:0,
+                browser_anchor_profiles:[],
+                browser_anchor_profile_count:0,
+                tier1_hosts_by_profile:{},
+                tier0_anchored_profiles:$t0,
+                missing_anchor_profiles:[],
+                missing_anchor_profile_count:0,
+                fetched_profiles:$runlog_audit.fetched_profiles,
+                fetched_profile_count:$runlog_audit.fetched_profile_count,
+                uncovered_fetched_profiles:$runlog_audit.uncovered_fetched_profiles,
+                uncovered_fetched_profile_count:$runlog_audit.uncovered_fetched_profile_count,
+                reconciliation:$runlog_audit.reconciliation,
+                cookie_cutter_reasons:$runlog_audit.cookie_cutter_reasons,
+                cookie_cutter_count:$runlog_audit.cookie_cutter_count,
+                cookie_cutter_threshold:$runlog_audit.cookie_cutter_threshold,
+                announce_count:$runlog_audit.announce_count,
+                announce_missing:$runlog_audit.announce_missing,
+                ok:$runlog_audit.runlog_ok
+            }')
+        printf '%s\n' "$audit_json"
+        if [[ "$ASSERT" -eq 1 ]]; then
+            ok=$(jq -r '.ok' <<<"$audit_json")
+            if [[ "$ok" != "true" ]]; then
+                echo "ERROR: browser evidence audit failed (tier0-only path) — runlog-only checks failed" >&2
+                exit 1
+            fi
+        fi
+        exit 0
+    fi
     echo "ERROR: no session log found for browser evidence audit" >&2
     exit 3
 fi
@@ -295,7 +409,8 @@ audit_json=$(
         --arg runlog_path "$runlog_path" \
         --arg session_log "$session_log" \
         --arg run_started_ts "$run_started_ts" \
-        --argjson runlog_audit "$runlog_audit" '
+        --argjson runlog_audit "$runlog_audit" \
+        --argjson skip_browser_anchor "$CV_AUDIT_SKIP_BROWSER_ANCHOR" '
         def normhost:
             try (capture("^https?://(?:www\\.)?(?<host>[^/]+)").host) catch "";
 
@@ -474,7 +589,18 @@ audit_json=$(
            ))
         ) as $bypass_anchored_profiles
         |
-        (($tier1_by_profile | keys) + $bypass_anchored_profiles | unique) as $anchor_profiles
+        # Tier-0 anchored profiles come pre-computed from $runlog_audit
+        # (runlog-only signal — no session-log derivation required).
+        # Union them with browser-anchored + bypass-anchored.
+        (($runlog_audit.tier0_anchored_profiles // [])) as $tier0_anchored_local
+        |
+        (($tier1_by_profile | keys) + $bypass_anchored_profiles + $tier0_anchored_local | unique) as $anchor_profiles_browser
+        |
+        # Under CV_EVIDENCE_MODE=api the bash gate + runlog gate have already
+        # enforced api-evidence for every decision. Treat all decision
+        # profiles as anchored to short-circuit the browser-anchor check.
+        # Browser-mode keeps the original union semantics.
+        (if $skip_browser_anchor == 1 then $decision_profiles else $anchor_profiles_browser end) as $anchor_profiles
         |
         ($decision_profiles - $anchor_profiles) as $missing_anchor_profiles
         |
@@ -492,6 +618,7 @@ audit_json=$(
             tier1_attempts_by_profile: $tier1_attempts_by_profile,
             web_searches_by_profile: $web_searches_by_profile,
             bypass_anchored_profiles: $bypass_anchored_profiles,
+            tier0_anchored_profiles: $tier0_anchored_local,
             missing_anchor_profiles: $missing_anchor_profiles,
             missing_anchor_profile_count: ($missing_anchor_profiles | length),
             fetched_profiles: $runlog_audit.fetched_profiles,

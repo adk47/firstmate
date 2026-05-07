@@ -12,6 +12,12 @@ setup() {
   mkdir -p "$RUN_DIR"
   : > "$RUNLOG_FILE"
   : > "$SESSION_LOG"
+  # 2026-05-06 cutover: existing cases assert browser-anchor enforcement
+  # (missing_anchor_profile_count gates audit_ok). Pin to browser so they
+  # cover the legacy rollback path. The default flipped to api at the
+  # cutover; under api the browser-anchor check is short-circuited because
+  # the bash gate + runlog gate already enforce api-evidence per decision.
+  export CV_EVIDENCE_MODE=browser
 }
 teardown() { teardown_tmp_env; }
 
@@ -483,4 +489,119 @@ seed_web_search_for() {
   [ "$status" -eq 1 ]
   echo "$output" | head -1 | jq -e '.missing_anchor_profile_count == 1'
   echo "$output" | head -1 | jq -e '(.tier1_attempts_by_profile["36b8d0e3-fc80-46a9-a19a-a74c0ebefbd0"] // 0) == 1'
+}
+
+# ============================================================================
+# Tier-0 evidence path — a decision event with
+# evidence_kind="tier0_profile_audit" is grounded by a matching
+# tier0_audit_verified event (same profile_id, receipt == evidence_excerpt).
+# Tier-0 does not use a browser, so no Tier-1 anchor is required.
+# ============================================================================
+
+@test "tier0: action_attempted with matching tier0_audit_verified passes audit (no browser load)" {
+  # Tier-0-only run: the bulk-approve dispatcher emitted action_attempted
+  # with evidence_kind=tier0_profile_audit and the admin-api gate emitted
+  # tier0_audit_verified for the same profile after re-running the 8 gates.
+  # No browser activity in the session at all — the Tier-0 path must accept
+  # the decision on the strength of the verified event alone.
+  pid="36b8d0e3-fc80-46a9-a19a-a74c0ebefbd0"
+  receipt="profile_audit:cc=694,pop=68,batch=50,industry=0.96,only_vel=1.00,br_max=1/1,roles_ok=1,art=0.56,lbl=0.46"
+  runlog_event run_started '{"phase":"0"}'
+  runlog_event batch_announced '{"queue_depth":50,"fetch_size":50,"profile_count":1,"parent_msg_ts":"1.1"}'
+  seed_profile_group "$pid"
+  runlog_event tier0_audit_verified "$(jq -nc \
+    --arg pid "$pid" --arg r "$receipt" \
+    '{profile_id:$pid, receipt:$r, live_cc:694, live_pop:68, batch:50}')"
+  runlog_event action_attempted "$(jq -nc \
+    --arg pid "$pid" --arg r "$receipt" \
+    '{profile_id:$pid, action:"approve", cr_ids:["cr_1","cr_2","cr_3"], count:3,
+      evidence_kind:"tier0_profile_audit", evidence_excerpt:$r}')"
+  # 3 approved credits × 1 batch → fetched:3, approved:3 reconciles cleanly
+  runlog_event run_finished '{"fetched":3,"approved":3,"verification_needed":0,"escalated":0,"skipped_idempotent":0,"skipped_cap":0}'
+
+  # Note: no seed_browser_ok / seed_tier1_anchor_for calls — the session log
+  # is empty.
+  run env CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" "$SCRIPTS_DIR/browser-evidence-audit.sh" --assert "$RUN_ID"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == true'
+  echo "$output" | jq -e '.tier0_anchored_profiles == ["36b8d0e3-fc80-46a9-a19a-a74c0ebefbd0"]'
+  echo "$output" | jq -e '.missing_anchor_profile_count == 0'
+}
+
+@test "tier0: action_attempted WITHOUT matching tier0_audit_verified fails audit" {
+  # Forged Tier-0: dispatcher claims tier0_profile_audit grounding but no
+  # tier0_audit_verified row exists. Without the verified event, there is
+  # no anti-fabrication signal — the audit must refuse.
+  pid="36b8d0e3-fc80-46a9-a19a-a74c0ebefbd0"
+  receipt="profile_audit:cc=694,pop=68,batch=50"
+  runlog_event run_started '{"phase":"0"}'
+  runlog_event batch_announced '{"queue_depth":50,"fetch_size":50,"profile_count":1,"parent_msg_ts":"1.1"}'
+  seed_profile_group "$pid"
+  # NO tier0_audit_verified event seeded.
+  runlog_event action_attempted "$(jq -nc \
+    --arg pid "$pid" --arg r "$receipt" \
+    '{profile_id:$pid, action:"approve", cr_ids:["cr_1"], count:1,
+      evidence_kind:"tier0_profile_audit", evidence_excerpt:$r}')"
+  runlog_event run_finished '{"fetched":1,"approved":1,"verification_needed":0,"escalated":0,"skipped_idempotent":0,"skipped_cap":0}'
+
+  run env CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" "$SCRIPTS_DIR/browser-evidence-audit.sh" --assert "$RUN_ID"
+  [ "$status" -eq 1 ]
+  echo "$output" | head -1 | jq -e '.tier0_anchored_profiles == []'
+  echo "$output" | head -1 | jq -e '.missing_anchor_profile_count == 1'
+  echo "$output" | head -1 | jq -e '.ok == false'
+}
+
+@test "tier0: receipt mismatch between action_attempted and tier0_audit_verified fails audit" {
+  # Defense-in-depth: the verified event exists but its receipt does NOT
+  # equal the decision evidence_excerpt. Could happen if the dispatcher
+  # logged a stale receipt or an attacker swapped one. Audit must refuse.
+  pid="36b8d0e3-fc80-46a9-a19a-a74c0ebefbd0"
+  verified_receipt="profile_audit:cc=694,pop=68"
+  decision_receipt="profile_audit:cc=999,pop=99"  # different
+  runlog_event run_started '{"phase":"0"}'
+  runlog_event batch_announced '{"queue_depth":50,"fetch_size":50,"profile_count":1,"parent_msg_ts":"1.1"}'
+  seed_profile_group "$pid"
+  runlog_event tier0_audit_verified "$(jq -nc \
+    --arg pid "$pid" --arg r "$verified_receipt" \
+    '{profile_id:$pid, receipt:$r}')"
+  runlog_event action_attempted "$(jq -nc \
+    --arg pid "$pid" --arg r "$decision_receipt" \
+    '{profile_id:$pid, action:"approve", cr_ids:["cr_1"], count:1,
+      evidence_kind:"tier0_profile_audit", evidence_excerpt:$r}')"
+  runlog_event run_finished '{"fetched":1,"approved":1,"verification_needed":0,"escalated":0,"skipped_idempotent":0,"skipped_cap":0}'
+
+  run env CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" "$SCRIPTS_DIR/browser-evidence-audit.sh" --assert "$RUN_ID"
+  [ "$status" -eq 1 ]
+  echo "$output" | head -1 | jq -e '.tier0_anchored_profiles == []'
+  echo "$output" | head -1 | jq -e '.missing_anchor_profile_count == 1'
+}
+
+@test "tier0: mixed run — Tier-0 profile + Tier-1 profile both pass audit" {
+  # A run that bulk-approves one profile via Tier-0 and verifies another via
+  # Tier-1 browser. Each profile is anchored by its own evidence path.
+  t0_pid="11111111-1111-1111-1111-111111111111"
+  t1_pid="22222222-2222-2222-2222-222222222222"
+  receipt="profile_audit:cc=500,pop=80"
+  runlog_event run_started '{"phase":"0"}'
+  runlog_event batch_announced '{"queue_depth":51,"fetch_size":51,"profile_count":2,"parent_msg_ts":"1.1"}'
+  # Tier-0 profile
+  seed_profile_group "$t0_pid"
+  runlog_event tier0_audit_verified "$(jq -nc --arg pid "$t0_pid" --arg r "$receipt" \
+    '{profile_id:$pid, receipt:$r}')"
+  runlog_event action_attempted "$(jq -nc --arg pid "$t0_pid" --arg r "$receipt" \
+    '{profile_id:$pid, action:"approve", cr_ids:["cr_t0_1"], count:1,
+      evidence_kind:"tier0_profile_audit", evidence_excerpt:$r}')"
+  # Tier-1 profile
+  seed_profile_group "$t1_pid"
+  runlog_event verdict "$(jq -nc --arg pid "$t1_pid" '{profile_id:$pid, cr_id:"cr_t1_1", reason:"approve: confirmed on apple+mb"}')"
+  runlog_event action_attempted "$(jq -nc --arg pid "$t1_pid" '{profile_id:$pid, action:"approve", cr_ids:["cr_t1_1"]}')"
+  seed_tier1_anchor_for c1 "$t1_pid"
+  runlog_event run_finished '{"fetched":2,"approved":2,"verification_needed":0,"escalated":0,"skipped_idempotent":0,"skipped_cap":0}'
+
+  run env CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" "$SCRIPTS_DIR/browser-evidence-audit.sh" --assert "$RUN_ID"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == true'
+  echo "$output" | jq -e '.tier0_anchored_profiles | length == 1'
+  echo "$output" | jq -e '.tier0_anchored_profiles[0] == "11111111-1111-1111-1111-111111111111"'
+  echo "$output" | jq -e '.browser_anchor_profile_count == 2'
 }

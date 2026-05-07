@@ -965,6 +965,103 @@ seed_runlog_run_started() {
   echo "$output" | jq -e '.fetched == 250'
 }
 
+# 2026-05-07: the manual @Ops batch (run 20260507-133229-7dd133) hit the
+# audit's reconciliation invariant. The R2-6 fallback computed
+# fetched=500 (run_started.fetch_size, the cap, not the actual fetch
+# of 200 credits across 31 profile groups), but results.jsonl recorded
+# only 250 actual attempts (82 approved + 168 UVN). Audit's
+# `fetched - sum_buckets` returned mismatch=250, post-batch-summary.sh
+# refused to post the canonical Slack summary, the agent improvised a
+# [HEARTBEAT-BATCH] message, and the renderer-missing :rotating_light:
+# alert correctly fired.
+#
+# Fix: when results.jsonl is the reconciliation source, re-derive
+# FETCHED from the bucket sums it produced, so the audit's invariant
+# `fetched == sum_buckets` holds by construction. Truncated
+# session-derived fetched no longer leaks the fallback's overstated
+# cap into Slack.
+
+@test "fetched: results.jsonl source overrides fetch_size fallback to match sum_buckets" {
+  # Replay the 13:32 UTC shape: list response truncated → session-derived
+  # FETCHED stays 0 → R2-6 fallback would set 500 — but results.jsonl says
+  # 250 actual attempts. New behavior: when results.jsonl is the source,
+  # FETCHED = approved_attempted + UVN_attempted (+ escalated/skipped/errors).
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 20347
+  # No seed_exec_admin — simulating the truncated envelope.
+  # results.jsonl: 82 approved landed + 168 UVN landed.
+  ids_appr=$(jq -n -c '[range(0;82) | "appr_" + tostring]')
+  ids_uvn=$(jq -n -c '[range(0;168) | "uvn_" + tostring]')
+  seed_results approved ok "$ids_appr"
+  seed_results user_verification_needed ok "$ids_uvn"
+
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  # fetched now matches sum_buckets (250) — not the overstated 500 fallback.
+  echo "$output" | jq -e '.reconciliation.source == "results_jsonl"'
+  echo "$output" | jq -e '.fetched == 250'
+  echo "$output" | jq -e '.approved == 82'
+  echo "$output" | jq -e '.verification_needed == 168'
+  # Reconciliation invariant: audit's mismatch = fetched - sum_buckets = 0.
+  echo "$output" | jq -e '(.fetched - (.approved + .verification_needed + .escalated + .skipped_idempotent + .skipped_cap + .errors)) == 0'
+}
+
+@test "fetched: results.jsonl source — empty attempts AND truncated session falls through to fetch_size" {
+  # Defensive: when results.jsonl exists but is empty (no attempts logged),
+  # the override guard `_rj_sum > 0` keeps the legacy fetch_size fallback.
+  # Otherwise we'd zero out a legitimate truncated fetch and silence
+  # signal that work happened.
+  setup_cv_results
+  : > "$CV_RESULTS_PATH"  # empty file → source=results_jsonl, sum=0
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_runlog_run_started 500 12008
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.reconciliation.source == "results_jsonl"'
+  # _rj_sum == 0, guard skips the override, R2-6 fallback wins.
+  echo "$output" | jq -e '.fetched == 500'
+}
+
+@test "fetched: results.jsonl source preserves session-derived fetched when it's accurate" {
+  # When the session log DID parse cleanly (small-batch happy path),
+  # session-derived FETCHED already equals sum_buckets and the override
+  # is a no-op. Regression guard for the existing happy-path semantics.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_exec_admin "c1" \
+    "bash muso-admin-api.sh call GET /admin/credit-requests?status=unverified&limit=10" \
+    '{"http_status":200,"body":{"data":{"items":[{"id":"cr_1"},{"id":"cr_2"},{"id":"cr_3"}]}}}'
+  seed_results approved ok '["cr_1","cr_2"]'
+  seed_results user_verification_needed ok '["cr_3"]'
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.reconciliation.source == "results_jsonl"'
+  echo "$output" | jq -e '.fetched == 3'   # session-derived 3 == sum_buckets 3
+  echo "$output" | jq -e '.approved == 2'
+  echo "$output" | jq -e '.verification_needed == 1'
+}
+
+@test "fetched: results.jsonl source — session-derived diverges from results buckets, results wins" {
+  # Edge: if the session log shows 5 items fetched but results.jsonl recorded
+  # 7 attempts (e.g. retries, or a fetch went through a different path), the
+  # results.jsonl truth-floor takes precedence so the audit's reconciliation
+  # holds. The session-derived count remains in `derived_from` for forensics.
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_exec_admin "c1" \
+    "bash muso-admin-api.sh call GET /admin/credit-requests?status=unverified&limit=10" \
+    '{"http_status":200,"body":{"data":{"items":[{"id":"a"},{"id":"b"},{"id":"c"},{"id":"d"},{"id":"e"}]}}}'
+  ids_appr=$(jq -n -c '[range(0;4) | "appr_" + tostring]')
+  ids_uvn=$(jq -n -c '[range(0;3) | "uvn_" + tostring]')
+  seed_results approved ok "$ids_appr"
+  seed_results user_verification_needed ok "$ids_uvn"
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.fetched == 7'
+  echo "$output" | jq -e '(.fetched - (.approved + .verification_needed)) == 0'
+}
+
 # --- R3-final: rejected_pre_flight bucket ------------------------------------
 #
 # batch-verify-profile.sh writes rows with outcome=rejected_pre_flight when

@@ -121,14 +121,19 @@ cmd_release() {
   # error is logged and the lockfile is still removed.
   if [[ "$terminal" == "1" ]]; then
     autofill_run_finished_if_needed || true
+    # R4-3: forensic event when agent bypassed render-slack-summary.sh. Must
+    # come AFTER autofill so the run_finished event is already in place (the
+    # renderer check is only meaningful when there's a summary to render).
+    # 2026-05-07: gated on --final/terminal (was unconditional). On the
+    # 2026-05-06/07 batches the detector raced ahead of post-batch-summary.sh
+    # — release at 11:00, canonical post at 11:02 — so the session-log scan
+    # found nothing on every healthy run and posted a :rotating_light: alert
+    # to #credit-verification. Even on the terminal release, the canonical
+    # path now goes through `openclaw CLI` from a bash subshell (not the MCP
+    # message tool), so the function also short-circuits when post-batch-
+    # summary.sh has written its summary_posted_canonical success event.
+    emit_renderer_missing_event_if_needed || true
   fi
-  # R4-3: forensic event when agent bypassed render-slack-summary.sh. Must
-  # come AFTER autofill so the run_finished event is already in place (the
-  # renderer check is only meaningful when there's a summary to render).
-  # This stays unconditional — it's idempotent and post-hoc, only fires
-  # when work happened (attempts > 0) and a run_finished event already
-  # exists. No false-positive cost from running it on every release.
-  emit_renderer_missing_event_if_needed || true
   rm -f "$OPS_BATCH_LOCK_PATH"
 }
 
@@ -221,6 +226,16 @@ emit_renderer_missing_event_if_needed() {
   # Idempotent: if the event is already present (second release, re-run),
   # don't double-write.
   if grep -q '"event":"run_finished_renderer_missing"' "$runlog_path" 2>/dev/null; then
+    return 0
+  fi
+
+  # Direct evidence beats heuristics. post-batch-summary.sh writes a
+  # `summary_posted_canonical` event on a successful parent+thread send;
+  # if it's there, the canonical path completed and the session-log
+  # heuristic below would only manufacture a false positive (the canonical
+  # path goes through `openclaw CLI` from a bash subshell, leaving no MCP
+  # `message` toolCall for the scan to find).
+  if grep -q '"event":"summary_posted_canonical"' "$runlog_path" 2>/dev/null; then
     return 0
   fi
 

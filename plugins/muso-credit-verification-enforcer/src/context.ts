@@ -24,6 +24,11 @@ const CV_AGENTS = new Set(["operations"]);
  *    when agentId is absent on the context (e.g. legacy paths).
  *  - Batch mode (the heartbeat cron) sets `runId` on the tool context; we
  *    treat any run with `runId` as CV (the batch skill only runs in CV flows).
+ *
+ *  Today this only gates `block-unsanctioned-batch-message`. The browser-
+ *  forcing hooks (block-web-fetch-tier1 etc.) that motivated the broadened
+ *  agentId-based detection were removed 2026-05-06; the gate logic itself
+ *  is now in muso-admin-api.sh.
  */
 export function isCreditVerificationSession(
   sessionKey: string | undefined,
