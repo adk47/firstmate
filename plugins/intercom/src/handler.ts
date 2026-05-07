@@ -127,11 +127,19 @@ export async function handleWebhookEvent(
               };
             }
 
-            // Bot admin, no admin assignee, or our bot — agent_active.
-            // Only clears stale human_takeover when the live API explicitly
-            // confirms `admin_assignee_id` is null/our-bot (or, in legacy
-            // shape, the `assignee` is non-admin).
-            state.handoffMode = "agent_active";
+            // No human admin assigned per the API. DO NOT touch handoffMode
+            // — a prior handleAdminReply may have set human_takeover without
+            // changing assignment (Intercom allows admins to reply without
+            // assigning, and the bot self-assigns every dispatch so the API
+            // ~always reports the bot as assignee). Downgrades back to
+            // agent_active belong to the explicit
+            // conversation.admin.assigned (handleAssignment) and
+            // conversation.admin.opened (handleImplicitReopen) webhook
+            // paths. Reproduced via conv=215474192304895 on 2026-05-06:
+            // Jan replied → handoff = human_takeover; customer replied 7
+            // min later → live check saw bot as assignee (because we'd
+            // self-assigned earlier) → unconditional reset wiped Jan's
+            // takeover and the bot replied over him.
             state.currentAssigneeId = adminAssigneeId;
             state.currentAssigneeType = adminAssigneeId ? "admin" : null;
             state.updatedAt = new Date().toISOString();

@@ -262,7 +262,15 @@ describe("handleWebhookEvent", () => {
       expect(result.action).toBe("dispatch_to_agent");
     });
 
-    it("restores agent_active when live check finds bot on human_takeover conversation", async () => {
+    it("preserves human_takeover when live check finds non-human assignee (bot/no human)", async () => {
+      // Live check is monotonic: it can ESCALATE to human_takeover when the
+      // API reports a human assignee, but it must NOT downgrade back to
+      // agent_active when the API reports the bot/no-one is assigned. A
+      // human admin can reply (handleAdminReply → human_takeover) without
+      // re-assigning, and our bot self-assigns every dispatch so the API
+      // ~always reports the bot as assignee. Downgrade is the job of the
+      // explicit conversation.admin.assigned and conversation.admin.opened
+      // webhooks (handleAssignment / handleImplicitReopen).
       const state = createInitialSessionState("conv_123", "ws_1");
       state.handoffMode = "human_takeover";
       state.currentAssigneeId = "human_admin_1";
@@ -286,8 +294,11 @@ describe("handleWebhookEvent", () => {
       const { result, state: updated } = await handleWebhookEvent(
         payload as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
       );
-      expect(result.action).toBe("dispatch_to_agent");
-      expect(updated?.handoffMode).toBe("agent_active");
+      expect(updated?.handoffMode).toBe("human_takeover");
+      expect(result.action).toBe("filtered");
+      if (result.action === "filtered") {
+        expect(result.reason).toContain("human_takeover");
+      }
     });
 
     it("falls through to cached state when API call fails", async () => {
@@ -508,6 +519,78 @@ describe("handleWebhookEvent", () => {
       expect(updated?.currentAssigneeId).toBe("5465657");
       expect(updated?.currentAssigneeType).toBe("admin");
       // canAgentReply() is false for human_takeover → filtered.
+      expect(result.action).toBe("filtered");
+      if (result.action === "filtered") {
+        expect(result.reason).toContain("human_takeover");
+      }
+    });
+
+    // Regression for conv=215474192304895 (Jan, 2026-05-06): a human admin
+    // replied without re-assigning, the bot self-assigns on every dispatch
+    // so the API reports admin_assignee_id == bot, and the live check used
+    // to unconditionally downgrade handoffMode back to agent_active —
+    // wiping the human_takeover that handleAdminReply had just set.
+    it("preserves human_takeover when human admin replied without assigning (live API reports bot as assignee)", async () => {
+      const NUMERIC_BOT_ID = "4359478";
+      const state = createInitialSessionState("conv_123", "ws_1");
+      state.handoffMode = "human_takeover";
+      state.currentAssigneeId = "5465657";
+      state.currentAssigneeType = "admin";
+
+      const client = new MockIntercomClient();
+      client.getConversation = async (params) => {
+        client.calls.getConversation.push(params);
+        return {
+          type: "conversation" as const,
+          id: params.conversationId,
+          title: null,
+          created_at: Date.now() / 1000,
+          updated_at: Date.now() / 1000,
+          open: true,
+          state: "open" as const,
+          admin_assignee_id: 4359478,
+          team_assignee_id: null,
+        };
+      };
+
+      const payload = { ...userCreated, id: "evt_jan_followup" };
+      const { result, state: updated } = await handleWebhookEvent(
+        payload as IntercomWebhookPayload, state, NUMERIC_BOT_ID, client,
+      );
+      expect(updated?.handoffMode).toBe("human_takeover");
+      expect(result.action).toBe("filtered");
+      if (result.action === "filtered") {
+        expect(result.reason).toContain("human_takeover");
+      }
+    });
+
+    it("preserves human_takeover when API reports null admin_assignee_id", async () => {
+      const state = createInitialSessionState("conv_123", "ws_1");
+      state.handoffMode = "human_takeover";
+      state.currentAssigneeId = "5465657";
+      state.currentAssigneeType = "admin";
+
+      const client = new MockIntercomClient();
+      client.getConversation = async (params) => {
+        client.calls.getConversation.push(params);
+        return {
+          type: "conversation" as const,
+          id: params.conversationId,
+          title: null,
+          created_at: Date.now() / 1000,
+          updated_at: Date.now() / 1000,
+          open: true,
+          state: "open" as const,
+          admin_assignee_id: null,
+          team_assignee_id: null,
+        };
+      };
+
+      const payload = { ...userCreated, id: "evt_no_assignee" };
+      const { result, state: updated } = await handleWebhookEvent(
+        payload as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
+      );
+      expect(updated?.handoffMode).toBe("human_takeover");
       expect(result.action).toBe("filtered");
       if (result.action === "filtered") {
         expect(result.reason).toContain("human_takeover");
