@@ -133,12 +133,15 @@ count_profile_api_evidence() {
     [inputs | fromjson? // empty | select(type == "object")
      | select($run_started_ts == "" or ((.timestamp // "") >= $run_started_ts))] as $lines
     |
-    # Index bash toolCalls by id -> {command, helper_source}.
+    # Index shell toolCalls by id -> {command, helper_source}.
+    # The OpenClaw shell tool is named "exec" in the live runtime; "bash" is
+    # accepted too as a defensive alias (some test fixtures used it before
+    # the live tool name was confirmed 2026-05-07 from session JSONL).
     # helper_source is one of "musicbrainz", "spotify", "discogs", "" (none).
     # We extract the source name from the matched basename so multiple
     # invocations of the same helper collapse to the same source bucket.
     (reduce ($lines[] | .message.content[]?
-             | select(.type == "toolCall" and .name == "bash")) as $tc
+             | select(.type == "toolCall" and (.name == "exec" or .name == "bash"))) as $tc
         ({};
             ($tc.arguments.command // "" | tostring) as $cmd
             | ($cmd | ascii_downcase) as $cmd_lc

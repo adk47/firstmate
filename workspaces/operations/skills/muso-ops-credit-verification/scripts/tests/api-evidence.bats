@@ -182,3 +182,20 @@ call_lib() {
   [ "$status" -eq 0 ]
   [ "$output" = "0" ]
 }
+
+# ---------- regression: openclaw's live tool name is "exec" --------------
+
+@test "api_evidence: tool name 'exec' (openclaw live) is recognized as a helper invocation" {
+  # 2026-05-07: production session JSONLs from openclaw 2026.5.5 stamp the
+  # shell tool as "exec", not "bash". The first deployed batch
+  # 20260506-202031-675159 had the agent call helpers via "exec", and the
+  # api-evidence library counted 0 sources because it filtered on "bash"
+  # only. Both are accepted now to keep test fixtures portable, with
+  # "exec" being the production-truth name.
+  sl '{"timestamp":"2026-05-07T08:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"e1","name":"exec","arguments":{"command":"bash /opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/musicbrainz-isrc-lookup.sh USXX1 --credited-name \"Bram Fidder\""}}]}}'
+  sl '{"timestamp":"2026-05-07T08:00:01Z","message":{"role":"toolResult","toolCallId":"e1","content":[{"type":"text","text":"{\"name_match\":true,\"evidence_excerpt\":\"Bram Fidder – mastering\"}"}]}}'
+
+  run call_lib count_profile_api_evidence "Bram Fidder"
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+}
