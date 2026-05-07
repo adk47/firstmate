@@ -267,3 +267,80 @@ EOF
   [ "$status" -eq 0 ]
   ! grep -q '"event":"script_warning"' "$RUNLOG_FILE"
 }
+
+@test "writes summary_posted_canonical event after both sends succeed (lockfile R4-3 short-circuit)" {
+  # Direct success marker for lockfile.sh's renderer-missing detector. Added
+  # 2026-05-07 to replace the broken session-log heuristic that fired on
+  # every healthy batch because the canonical path went through the
+  # openclaw CLI (no MCP message toolCall to find).
+  seed_finished_runlog 100 5 false
+
+  local bin_dir calls
+  bin_dir="$TEST_TMPDIR/bin"
+  calls="$TEST_TMPDIR/openclaw.calls"
+  mkdir -p "$bin_dir"
+  cat > "$bin_dir/openclaw" <<'EOF'
+#!/usr/bin/env bash
+printf 'CALL %q\n' "$*" >> "$OPENCLAW_CALLS"
+printf '{"ok":true,"messageId":"1788000000.111111","ts":"1788000000.111111"}\n'
+EOF
+  chmod +x "$bin_dir/openclaw"
+  export OPENCLAW_CALLS="$calls"
+  export PATH="$bin_dir:$PATH"
+
+  run env CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" "$SCRIPTS_DIR/post-batch-summary.sh" "$RUN_ID"
+  [ "$status" -eq 0 ]
+  # Marker event landed with the parent message id, channel, and dry_run flag.
+  jq -e 'select(.event == "summary_posted_canonical")' < "$RUNLOG_FILE"
+  jq -e 'select(.event == "summary_posted_canonical") | .parent_msg_id == "1788000000.111111"' < "$RUNLOG_FILE"
+  jq -e 'select(.event == "summary_posted_canonical") | .channel == "C_TESTPROD"' < "$RUNLOG_FILE"
+  jq -e 'select(.event == "summary_posted_canonical") | .dry_run == false' < "$RUNLOG_FILE"
+  jq -e 'select(.event == "summary_posted_canonical") | .script == "post-batch-summary.sh"' < "$RUNLOG_FILE"
+}
+
+@test "summary_posted_canonical records dry_run=true when runlog dryRun=true" {
+  seed_finished_runlog 100 5 true
+
+  local bin_dir calls
+  bin_dir="$TEST_TMPDIR/bin"
+  calls="$TEST_TMPDIR/openclaw.calls"
+  mkdir -p "$bin_dir"
+  cat > "$bin_dir/openclaw" <<'EOF'
+#!/usr/bin/env bash
+printf 'CALL %q\n' "$*" >> "$OPENCLAW_CALLS"
+printf '{"ok":true,"messageId":"1788000001.222222","ts":"1788000001.222222"}\n'
+EOF
+  chmod +x "$bin_dir/openclaw"
+  export OPENCLAW_CALLS="$calls"
+  export PATH="$bin_dir:$PATH"
+
+  run env CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" "$SCRIPTS_DIR/post-batch-summary.sh" "$RUN_ID"
+  [ "$status" -eq 0 ]
+  jq -e 'select(.event == "summary_posted_canonical") | .dry_run == true' < "$RUNLOG_FILE"
+  jq -e 'select(.event == "summary_posted_canonical") | .channel == "C_TESTDRY"' < "$RUNLOG_FILE"
+}
+
+@test "no summary_posted_canonical event when parent send fails" {
+  # Negative test: if the openclaw send errors out, the script must NOT
+  # write the success marker. Otherwise the lockfile detector would
+  # short-circuit on a half-completed run.
+  seed_finished_runlog 100 5 false
+
+  local bin_dir calls
+  bin_dir="$TEST_TMPDIR/bin"
+  calls="$TEST_TMPDIR/openclaw.calls"
+  mkdir -p "$bin_dir"
+  cat > "$bin_dir/openclaw" <<'EOF'
+#!/usr/bin/env bash
+printf 'CALL %q\n' "$*" >> "$OPENCLAW_CALLS"
+echo "ERROR: simulated openclaw failure" >&2
+exit 1
+EOF
+  chmod +x "$bin_dir/openclaw"
+  export OPENCLAW_CALLS="$calls"
+  export PATH="$bin_dir:$PATH"
+
+  run env CV_SESSION_LOG_OVERRIDE="$SESSION_LOG" "$SCRIPTS_DIR/post-batch-summary.sh" "$RUN_ID"
+  [ "$status" -eq 10 ]
+  ! grep -q '"event":"summary_posted_canonical"' "$RUNLOG_FILE"
+}
