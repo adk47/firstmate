@@ -332,6 +332,17 @@ emit_renderer_missing_event_if_needed() {
 # Fail-OPEN: any failure (no openclaw CLI, no env, send error) is swallowed.
 emit_renderer_missing_slack_alert() {
   local run_id="$1" runlog_path="$2" attempts="$3"
+
+  # Test-environment short-circuit. Belt-and-braces with the openclaw
+  # PATH-shadow that helpers.bash::setup_tmp_env installs: even if a
+  # future test path bypasses the helper, BATS_TEST_NAME or a /tmp/
+  # runlog path is enough to prove we're under bats and must NOT post
+  # a real Slack message. Same failure mode as PR #245 (2026-05-06)
+  # and 2026-05-07 16:47-16:52 UTC.
+  if [[ -n "${BATS_TEST_NAME:-}" ]] || [[ "$runlog_path" == /tmp/* ]]; then
+    return 0
+  fi
+
   command -v openclaw >/dev/null 2>&1 || return 0
 
   local dry_run_flag target_channel profile account

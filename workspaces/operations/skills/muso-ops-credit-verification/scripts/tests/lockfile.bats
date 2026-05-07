@@ -327,6 +327,15 @@ seed_session_with_freeform_posts() {
   jq -e 'select(.event == "run_finished_renderer_missing")' < "$logfile"
   jq -e 'select(.event == "run_finished_renderer_missing") | .approved_attempted == 200' < "$logfile"
   jq -e 'select(.event == "run_finished_renderer_missing") | .verification_needed_attempted == 50' < "$logfile"
+
+  # 2026-05-07 16:47 UTC regression guard: under bats, the renderer-missing
+  # detector must NEVER reach the openclaw CLI. helpers.bash::setup_tmp_env
+  # PATH-shadows openclaw with a stub that logs invocations to
+  # $TEST_TMPDIR/openclaw.calls; lockfile.sh::emit_renderer_missing_slack_alert
+  # also short-circuits on BATS_TEST_NAME / /tmp/ runlog paths. Either guard
+  # is sufficient; here we assert the stub recorded zero CALL lines, proving
+  # the in-script guard fired before reaching the openclaw subshell.
+  [ ! -s "$TEST_TMPDIR/openclaw.calls" ]
 }
 
 @test "R4-3: release --final does NOT emit event when renderer post is present" {
