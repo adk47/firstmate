@@ -224,8 +224,11 @@ emit_renderer_missing_event_if_needed() {
   [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || return 0
 
   # Idempotent: if the event is already present (second release, re-run),
-  # don't double-write.
-  if grep -q '"event":"run_finished_renderer_missing"' "$runlog_path" 2>/dev/null; then
+  # don't double-write. Use jq select rather than substring grep so a
+  # different event whose payload happens to mention this string can't
+  # spoof the check.
+  if jq -e -s '[.[] | select(.event == "run_finished_renderer_missing")] | length > 0' \
+       "$runlog_path" >/dev/null 2>&1; then
     return 0
   fi
 
@@ -235,7 +238,8 @@ emit_renderer_missing_event_if_needed() {
   # heuristic below would only manufacture a false positive (the canonical
   # path goes through `openclaw CLI` from a bash subshell, leaving no MCP
   # `message` toolCall for the scan to find).
-  if grep -q '"event":"summary_posted_canonical"' "$runlog_path" 2>/dev/null; then
+  if jq -e -s '[.[] | select(.event == "summary_posted_canonical")] | length > 0' \
+       "$runlog_path" >/dev/null 2>&1; then
     return 0
   fi
 

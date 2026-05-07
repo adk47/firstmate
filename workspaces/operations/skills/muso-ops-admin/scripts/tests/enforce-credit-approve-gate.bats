@@ -938,7 +938,11 @@ api_setup() {
     [ "$status" -eq 0 ]
 }
 
-@test "api-mode: 1 API helper + 1 AllMusic browser load → approve" {
+@test "api-mode: 1 API helper + 1 AllMusic browser load → reject (AllMusic no longer counts post-2026-05-07)" {
+    # Regression guard for the AllMusic removal. Pre-cutover this combo
+    # would have approved (1 API + 1 AllMusic = 2). Post-cutover AllMusic
+    # is not a sanctioned source under api-mode; the gate must see 1/2
+    # and refuse.
     api_setup
     source_gate
     write_session_log "s.jsonl" '{"timestamp":"2026-05-06T18:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"bash musicbrainz-isrc-lookup.sh USXX1"}}]}}
@@ -947,7 +951,9 @@ api_setup() {
 {"timestamp":"2026-05-06T18:00:03Z","message":{"role":"toolResult","toolCallId":"b1","content":[{"type":"text","text":"AllMusic credits Bram Fidder mastering"}]}}'
     EVIDENCE_EXCERPT="Bram Fidder mastering" run enforce_credit_approve_gate \
         PUT /admin/credit-requests '{"requestIds":["cr_a"],"status":"approved"}'
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"insufficient api-evidence"* ]]
+    [[ "$output" == *"1/2"* ]]
 }
 
 @test "api-mode: 1 source only (under quorum) → reject with api-mode message" {

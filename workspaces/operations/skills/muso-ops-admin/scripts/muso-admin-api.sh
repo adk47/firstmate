@@ -953,13 +953,13 @@ Sources counted under CV_EVIDENCE_MODE=api:
     discogs-isrc-lookup.sh) whose toolResult JSON contains the excerpt.
     Each helper script counts as ONE source — two MusicBrainz hits don't
     double-count.
-  * AllMusic browser load (browser tool to allmusic.com) whose snapshot text
-    contains the excerpt. AllMusic has no public API, so it remains the
-    long-tail browser fallback.
-  * web_search citations: not yet counted (stub — implemented in step 4 of
-    plans/remove-the-browser-partitioned-shell.md).
-If the API helpers and AllMusic don't surface this credit, downgrade the
-verdict to UNVERIFIABLE — NEEDS REVIEW and escalate to Jan (<@U038BM16T7W>).
+  * Tier-2 native web_search citations: each distinct hostname in an
+    assistant message that mentions the excerpt counts as ONE source
+    (www. stripped, hostnames lowercased).
+Browser is NOT a sanctioned source under api-mode (AllMusic fallback was
+removed 2026-05-07). If Tier-1 API helpers and Tier-2 web_search don't
+sum to ${CV_REQUIRED_LOADS} for this credit, downgrade the verdict to
+UNVERIFIABLE — NEEDS REVIEW and escalate to Jan (<@U038BM16T7W>).
 For emergency rollback to the legacy browser-only quorum, set
 CV_EVIDENCE_MODE=browser in the gateway env.
 Session log checked: ${session_log}
@@ -988,11 +988,11 @@ EOF
     # web_fetch on them returns the non-rendered HTML, which is a different
     # (and often wrong) data surface than what the browser tool sees.
     # Multiple real incidents (2026-04-16, 2026-04-20, 2026-04-22) featured
-    # web_fetch substituting for browser on these hosts. Primary defense is
-    # the `muso-credit-verification-enforcer` plugin's block-web-fetch-tier1
-    # hook, which returns an error-shaped toolResult for any such call. This
-    # bash-layer check is the backstop — if the plugin hook misses a call,
-    # the approve still refuses.
+    # web_fetch substituting for browser on these hosts. The plugin
+    # block-web-fetch-tier1 hook was the primary defense until 2026-05-07
+    # when it was deleted as part of the api-mode cutover; this bash check
+    # is now the sole enforcement under both api-mode (default) and the
+    # browser-mode rollback path.
     #
     # R4-1: only count web_fetch calls whose toolResult indicates actual data
     # was returned. A plugin-blocked call leaves a toolCall row in the
@@ -1189,8 +1189,10 @@ is_tier2_godmode_requester() {
     handle_lc="$(printf %s "$handle" | tr '[:upper:]' '[:lower:]')"
     while IFS= read -r line; do
         line="${line%%#*}"
-        line="${line## }"
-        line="${line%% }"
+        # Trim ALL surrounding whitespace incl. tabs and \r — IDE-saved
+        # files commonly carry trailing spaces or CRLF, and a fragile trim
+        # silently locks self-approving requesters out of god-mode.
+        line="$(printf %s "$line" | tr -d '[:space:]\r')"
         [[ -z "$line" ]] && continue
         local entry_lc
         entry_lc="$(printf %s "$line" | tr '[:upper:]' '[:lower:]')"
