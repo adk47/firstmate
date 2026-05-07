@@ -576,12 +576,25 @@ write_pre_flight_rejection() {
 }
 
 # --- Shared helpers used by both flag-evidence + approve paths ---
-# resolve_run_started_ts, resolve_session_log, and count_profile_browser_loads
-# are sourced from lib/browser-evidence.sh — single source of truth. The
-# library's gate logic must match the runlog.sh write-time gate exactly,
-# which is why both call into the same helpers.
+# Two libs are sourced — the gate logic must match the runlog.sh write-time
+# gate exactly, and runlog.sh switches between them based on
+# CV_EVIDENCE_MODE. Both define resolve_run_started_ts + resolve_session_log
+# (idempotent — duplicated definitions just shadow each other safely).
 # shellcheck source=lib/browser-evidence.sh
 . "$SCRIPT_DIR/lib/browser-evidence.sh"
+# shellcheck source=lib/api-evidence.sh
+. "$SCRIPT_DIR/lib/api-evidence.sh"
+
+# CV_EVIDENCE_MODE dispatch (matches the gate + runlog write-time gate):
+#   api (default) — count_profile_evidence_sources(excerpt) sums API helpers
+#                   + AllMusic browser fallback + Tier-2 citation hostnames.
+#   browser       — legacy ≥2-distinct-Tier-1-browser-loads quorum.
+#   both          — api short-circuits success; browser path is fallback.
+CV_EVIDENCE_MODE="${CV_EVIDENCE_MODE:-api}"
+case "$CV_EVIDENCE_MODE" in
+    api|browser|both) ;;
+    *) echo "FATAL: CV_EVIDENCE_MODE must be one of api|browser|both (got '${CV_EVIDENCE_MODE}')" >&2; exit 1 ;;
+esac
 
 # --- Structural excerpt validator (claim-proving rule) ---
 # This is a pure check on EVIDENCE_EXCERPT vs the claim metadata
@@ -723,7 +736,14 @@ if [[ "${CV_REQUIRED_PROFILE_BROWSE:-1}" != "0" ]]; then
     export CV_PROFILE_CREDITED_NAME="$CREDITED_NAME"
     export CV_PROFILE_TRACK_TITLE="$TRACK_TITLE"
     export CV_PROFILE_ROLES="$ROLE"
-    pb_count="$(count_profile_browser_loads "$PROFILE_ID")"
+    if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+        pb_count="$(count_profile_browser_loads "$PROFILE_ID")"
+    else
+        # api / both: at least one evidence source for the excerpt is
+        # the api-mode equivalent of "agent did real work for this profile".
+        # Falls through to the quorum check below; this is just the >=1 floor.
+        pb_count="$(count_profile_evidence_sources "$EVIDENCE_EXCERPT" "$PROFILE_ID")"
+    fi
     pb_count="${pb_count:-0}"
     if (( pb_count < 1 )); then
         cat >&2 <<EOF
@@ -822,8 +842,15 @@ EOF
     run_started_ts="$(resolve_run_started_ts)"
     export CV_SESSION_RUN_STARTED_TS="$run_started_ts"
     flag_session_log="$(resolve_session_log)"
-    flag_match_json="$(count_excerpt_matches "$flag_session_log" "$run_started_ts")"
-    flag_match_count=$(printf '%s' "$flag_match_json" | jq -r '.matched_count')
+    if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+        flag_match_json="$(count_excerpt_matches "$flag_session_log" "$run_started_ts")"
+        flag_match_count=$(printf '%s' "$flag_match_json" | jq -r '.matched_count')
+    else
+        api_n="$(count_profile_evidence_sources "$EVIDENCE_EXCERPT" "$PROFILE_ID")"
+        flag_match_count="${api_n:-0}"
+        flag_match_json="$(jq -nc --argjson n "$flag_match_count" \
+            '{matched_count:$n, matched_hosts:[]}')"
+    fi
     flag_match_count="${flag_match_count:-0}"
 
     if (( flag_match_count < CV_REQUIRED_LOADS )); then
@@ -910,26 +937,42 @@ export CV_SESSION_RUN_STARTED_TS="$run_started_ts"
 
 # 2. Contamination check — Tier-1 web_fetch detected in current run window?
 # session-evidence.sh --check-tier1-webfetch honors CV_SESSION_RUN_STARTED_TS,
-# so only within-run contamination counts.
-cf_rc=0
-cf_stderr_file="$(mktemp)"
-bash "$SESSION_EVIDENCE_SH" --check-tier1-webfetch 2>"$cf_stderr_file" || cf_rc=$?
-if [[ $cf_rc -ne 0 ]]; then
-    cat "$cf_stderr_file" >&2
+# so only within-run contamination counts. Browser-mode only — under api the
+# bash gate's api-evidence library doesn't count web_fetch results, so the
+# contamination is a no-op signal (and the SKILL.md cutover block already
+# tells the agent not to web_fetch Tier-1 hosts).
+if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+    cf_rc=0
+    cf_stderr_file="$(mktemp)"
+    bash "$SESSION_EVIDENCE_SH" --check-tier1-webfetch 2>"$cf_stderr_file" || cf_rc=$?
+    if [[ $cf_rc -ne 0 ]]; then
+        cat "$cf_stderr_file" >&2
+        rm -f "$cf_stderr_file"
+        write_pre_flight_rejection "web_fetch_tier1"
+        emit_summary "web_fetch_tier1" "null"
+        exit 3
+    fi
     rm -f "$cf_stderr_file"
-    write_pre_flight_rejection "web_fetch_tier1"
-    emit_summary "web_fetch_tier1" "null"
-    exit 3
 fi
-rm -f "$cf_stderr_file"
 
-# 3. Evidence quorum: shared helper count_excerpt_matches (defined above).
-# Mirrors enforce_credit_approve_gate — when count >= CV_REQUIRED_LOADS the
-# delegate is allowed; otherwise we emit remediation text naming which
-# Tier-1 hosts are currently matching.
+# 3. Evidence quorum.
+# Browser mode: legacy count_excerpt_matches over Tier-1 browser snapshots.
+# API mode: count_profile_evidence_sources sums API helpers + AllMusic
+#   browser fallback + Tier-2 citation hostnames whose surrounding text
+#   contains the excerpt. Both compare to CV_REQUIRED_LOADS.
 session_log="$(resolve_session_log)"
-matched_json="$(count_excerpt_matches "$session_log" "$run_started_ts")"
-matched_count=$(printf '%s' "$matched_json" | jq -r '.matched_count')
+if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+    matched_json="$(count_excerpt_matches "$session_log" "$run_started_ts")"
+    matched_count=$(printf '%s' "$matched_json" | jq -r '.matched_count')
+else
+    api_n="$(count_profile_evidence_sources "$EVIDENCE_EXCERPT" "$PROFILE_ID")"
+    matched_count="${api_n:-0}"
+    # Compose a matched_json shape compatible with the remediation
+    # rendering below. Hosts list is empty under api-mode because the
+    # sources include API helpers (no host) — the count is what matters.
+    matched_json="$(jq -nc --argjson n "$matched_count" \
+        '{matched_count:$n, matched_hosts:[]}')"
+fi
 matched_count="${matched_count:-0}"
 
 if (( matched_count < CV_REQUIRED_LOADS )); then

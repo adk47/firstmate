@@ -63,6 +63,14 @@ STUB
     export CV_REQUIRED_LOADS=2
     export CV_SESSION_MAX_AGE_MIN=10
     unset OPS_RUNLOG_DIR CV_SESSION_RUN_STARTED_TS
+    # 2026-05-07 cutover: existing tests assert legacy browser-mode
+    # semantics (count_excerpt_matches over Tier-1 browser snapshots,
+    # tier1_webfetch contamination check). Pin to browser so they
+    # cover the rollback path. New api-mode behavior is exercised by
+    # the gate suite + api-evidence.bats — adding equivalent cases
+    # here would require rebuilding the entire fixture stack on the
+    # api-evidence shape, which is out of scope.
+    export CV_EVIDENCE_MODE=browser
 }
 
 teardown() { rm -rf "$TEST_ROOT"; }
