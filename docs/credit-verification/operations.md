@@ -107,9 +107,10 @@ All under `workspaces/operations/skills/muso-ops-credit-verification/scripts/` u
 | `batch-verify-profile.sh` | `batch-verify-profile.sh --tier0 --profile-id <pid>` | Tier-0 dispatcher: runs audit, captures receipt, calls admin API |
 | `batch-verify-profile.sh` | `batch-verify-profile.sh --decision approve\|flag --ids ... --evidence-excerpt ...` | Per-credit dispatcher (B2 path); pre-flights browser-evidence quorum |
 | `musicbrainz-isrc-lookup.sh` | `musicbrainz-isrc-lookup.sh <ISRC> [--credited-name N --role R]` | Tier-1 MB by ISRC |
-| `spotify-track-lookup.sh` | `spotify-track-lookup.sh <spotify_track_id> [--credited-name N --role R]` | Tier-1 Spotify by trackId (awaits creds) |
+| `spotify-track-lookup.sh` | `spotify-track-lookup.sh <spotify_track_id> [--credited-name N --role R]` | Tier-1 Spotify by trackId (awaits creds — exit 4 until SPOTIFY_CLIENT_ID/SECRET land) |
+| `discogs-isrc-lookup.sh` | `discogs-isrc-lookup.sh <ISRC> [--credited-name N --role R]` | Tier-1 Discogs by ISRC (awaits token — exit 4 until DISCOGS_TOKEN lands) |
 | `runlog.sh` | `runlog.sh init` / `runlog.sh event <run_id> <name> <json>` | JSONL event writer; freeze-after-fail |
-| `preflight-verify.sh` | `preflight-verify.sh <run_id>` | Browser probe (Björk MB page); B0d gate |
+| `preflight-verify.sh` | `preflight-verify.sh <run_id>` | Browser probe (Björk MB page); B0d gate (browser-mode rollback only — bypassed under api-mode default) |
 | `count-approvals.sh` | `count-approvals.sh` | Daily approval count (matches `operator==clio AND requester==clio AND status==approved`) |
 | `compute-run-summary.sh` | `compute-run-summary.sh --final <run_id>` | Emits `run_finished` event from runlog + results.jsonl reconciliation |
 | `post-batch-summary.sh` | `post-batch-summary.sh <run_id>` | Posts the Slack summary message; refuses on failure shapes |
@@ -191,7 +192,7 @@ Same as dry-run but without the `(dry-run)` suffix:
 - [ ] Are there spot-check eyes available (someone watching the audit log live)?
 - [ ] Does `journalctl -u openclaw-gateway-main` show the gateway healthy?
 - [ ] Is the daily approval cap (500/UTC-day per `count-approvals.sh`) far enough below ceiling that a 200-500-credit batch won't push us over?
-- [ ] Is `cron-jobs.json` task `credit-verification-batch-4h` currently in `skipped` status? If so, why? Investigate before triggering.
+- [ ] Is `cron-jobs.json` task `credit-verification-batch-4h` currently in `skipped` status? If so, the known cause is the `payload.kind` schema migration documented in [§9](#cron-task-credit-verification-batch-4h-shows-skipped); investigate before triggering if the symptom differs.
 
 ## 7. Configuring Tier-2
 
@@ -291,15 +292,17 @@ Untested as of 2026-05-06; ship as part of the browser-removal iteration.
 
 ### Cron task `credit-verification-batch-4h` shows `skipped`
 
-The autonomous 4-hourly cron shows `skipped` in `openclaw cron list` for several recent runs. Pre-existing issue, root cause not yet investigated. Reactive `@Ops` triggers work fine; only the autonomous schedule is affected. Suspect a watchdog disable or scheduler-state issue. Investigate before relying on cron for autonomous operation.
+The autonomous 4-hourly cron shows `skipped` in `openclaw cron list`. Root cause is known: openclaw 2026.5.5 rejects the cron job because `payload.kind` is still `"agentTurn"` from the pre-2026.5.5 schema; main-cron now requires `payload.kind="systemEvent"`. Reactive `@Ops` triggers take a different code path that doesn't hit the cron schema, which is why they continue to work.
+
+Fix: edit `cron-jobs.json` so the credit-verification-batch-4h job's payload is `{"kind":"systemEvent","text":"run credit verification batch"}` (drop `model`/`thinking`/`fallbacks`/`timeoutSeconds` — those come from the agent's own config under `sessionTarget=main`). See [lessons.md § 3.2](./lessons.md#32-medium-cron-job-schema-migration--payloadkindsystemevent) for the full migration note.
 
 ### Spotify Web API helper is deployed but creds are missing
 
 `spotify-track-lookup.sh` returns exit 4 (`credentials missing`) until `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` are propagated from k8s secrets into `/etc/openclaw/main.env`. Helper, tests, and integration are otherwise complete. Estimated 10 min for someone with k8s access.
 
-### Discogs not yet integrated
+### Discogs Tier-1 helper is deployed but token is missing
 
-No token. Sign up at https://www.discogs.com/settings/developers (30s, free), set `DISCOGS_TOKEN` in `/etc/openclaw/main.env`, and a future helper script `discogs-isrc-lookup.sh` can be added (currently stub-only). High value for engineer/mastering credits which dominate the unverified queue.
+`discogs-isrc-lookup.sh` is shipped (with full bats coverage) but returns exit 4 (`credentials missing`) until `DISCOGS_TOKEN` is set in `/etc/openclaw/main.env`. Sign up at https://www.discogs.com/settings/developers (30s, free), drop the token into the env, and the Tier-1 quorum becomes 2-source on its own (MB + Discogs) without needing Tier-2 fallback. High value for engineer/mastering credits which dominate the unverified queue. Tracked in [#255](https://github.com/Muso-AI/hydra/issues/255).
 
 ## 10. Emergency: rollback
 

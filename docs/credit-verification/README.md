@@ -32,7 +32,7 @@ Tier-0 is the load-bearing piece that moved the needle from 3.4% to a measured 2
 | Tier-0 audit script | [`workspaces/operations/skills/muso-ops-credit-verification/scripts/profile-audit.sh`](../../workspaces/operations/skills/muso-ops-credit-verification/scripts/profile-audit.sh) |
 | Dispatcher (Tier-0 mode) | [`workspaces/operations/skills/muso-ops-credit-verification/scripts/batch-verify-profile.sh`](../../workspaces/operations/skills/muso-ops-credit-verification/scripts/batch-verify-profile.sh) — invoked as `--tier0 --profile-id <pid>` |
 | Approve gate (with Tier-0 evidence path) | [`workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh`](../../workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh) — see `_tier0_audit_recompute_gate` |
-| Tier-1 helpers | `scripts/musicbrainz-isrc-lookup.sh`, `scripts/spotify-track-lookup.sh` (same dir) |
+| Tier-1 helpers | `scripts/musicbrainz-isrc-lookup.sh`, `scripts/spotify-track-lookup.sh`, `scripts/discogs-isrc-lookup.sh` (same dir) |
 | Skill prose (drives the LLM) | [`workspaces/operations/skills/muso-ops-credit-verification/SKILL.md`](../../workspaces/operations/skills/muso-ops-credit-verification/SKILL.md) — see §B1.6 |
 | Tests | `scripts/tests/*.bats` in each skill's scripts dir |
 | Live env | `/etc/openclaw/main.env` (sources `OPS_TIER0_ENABLED=1` etc.) |

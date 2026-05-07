@@ -8,10 +8,10 @@
 # helpers (musicbrainz-isrc-lookup.sh, spotify-track-lookup.sh,
 # discogs-isrc-lookup.sh) that return deterministic JSON with an
 # `evidence_excerpt` populated when name_match is true. This library
-# counts those helper invocations as evidence sources, plus AllMusic
-# browser fallback (no public API), plus eventual web_search citation
-# domains once openclaw's local web_search is dropped from the operations
-# agent's tool list.
+# counts those helper invocations as evidence sources, plus distinct
+# citation domains in OpenRouter native web_search responses. Browser is
+# not a sanctioned source under api-mode; see the AllMusic-removal note
+# below.
 #
 # Evidence-source semantics:
 #   "API helper hit" = a bash toolCall whose command invoked one of the
@@ -51,16 +51,8 @@
 #   OPS_RUNLOG_DIR              required for resolve_run_started_ts
 #   CV_SESSION_LOG_OVERRIDE     test override for the session log path
 #   CV_SESSION_MAX_AGE_MIN      default 10; how far back to scan agent sessions
-#   CV_API_HELPER_PATTERNS      OPTIONAL pipe-separated regex of helper script
-#                               basenames. Default catches the three known.
 
 CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
-
-# Default helper-script basename regex. Matches the canonical names emitted
-# by `bash workspaces/operations/skills/muso-ops-credit-verification/scripts/<name>`
-# OR by direct invocation like `./<name>`. Pipe-separated; the bash command
-# is matched as a substring.
-CV_API_HELPER_PATTERNS="${CV_API_HELPER_PATTERNS:-musicbrainz-isrc-lookup\.sh|spotify-track-lookup\.sh|discogs-isrc-lookup\.sh}"
 
 # Resolve the ISO8601 timestamp of the current run's run_started event, or
 # empty when no scope is active. Identical to browser-evidence.sh — kept
@@ -98,8 +90,8 @@ resolve_session_log() {
 # (case-insensitive) within the current run window.
 #
 # A source is identified by the helper script name. Two musicbrainz hits
-# count as 1 source. The gate compares the SUM (api + allmusic + citations)
-# against CV_REQUIRED_LOADS, so distinct sources is the right semantic.
+# count as 1 source. The gate compares the SUM (api + citations) against
+# CV_REQUIRED_LOADS, so distinct sources is the right semantic.
 #
 # Args:
 #   $1 evidence_excerpt (required, non-empty, case-insensitive matching)
@@ -120,7 +112,6 @@ count_profile_api_evidence() {
 
     jq -R -r -n \
         --arg excerpt "$(printf '%s' "$excerpt" | tr '[:upper:]' '[:lower:]')" \
-        --arg helper_re "$CV_API_HELPER_PATTERNS" \
         --arg run_started_ts "$run_started_ts" \
     '
     [inputs | fromjson? // empty | select(type == "object")
