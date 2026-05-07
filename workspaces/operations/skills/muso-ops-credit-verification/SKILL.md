@@ -245,6 +245,35 @@ batch trigger and run **Batch Mode (B1–B5)** using the current channel ID
 message. Post the batch summary back to the same channel with the standard
 `[HEARTBEAT-BATCH]` prefix.
 
+> ## ⚠️ DO NOT delegate to `openclaw cron run`
+>
+> "Run Batch Mode (B1–B5)" means invoke the batch workflow scripts in this
+> SKILL.md **directly** from this session — `runlog.sh init`, `fetch-queue.sh`,
+> `profile-audit.sh`, `dispatch-investigations.sh` (or the inline B3 path),
+> `batch-verify-profile.sh`, `post-batch-summary.sh`. **It does NOT mean
+> firing `openclaw cron run <id>` against the cron job named
+> `credit-verification-batch-4h`.** That path delegates to a system-event
+> dispatcher with a different payload schema, may be skipped silently
+> (cron-level deduplication, `payload.kind` mismatches, lockfile guards),
+> and the user can't see what happened.
+>
+> The on-demand @-mention case is *the same workflow as the cron* — but
+> executed inline in the current agent session so its tool calls land in
+> this session's JSONL where the runlog gate, the api-evidence library,
+> and the human reading Slack can all observe progress. **Always run
+> inline. Never delegate.** If you find yourself reading `cron-jobs.json`
+> or running `openclaw cron --help` while handling an @-mention, you have
+> taken the wrong turn — back out and follow the Batch Mode steps
+> directly.
+>
+> Concretely, on receipt of "run credit verification batch":
+>
+>   1. Skip Steps 1–2 (parse / idempotency); they're for reactive
+>      single-credit messages.
+>   2. Go directly to **Batch Mode** (further down this SKILL.md) and
+>      execute B0c → B0d → B1 → B2 → B3 → B4 → B5 → B6 in this session.
+>   3. Post the `[HEARTBEAT-BATCH]` summary via `post-batch-summary.sh`.
+
 **On-demand DRY-RUN trigger:** If the triggering message contains any of
 `(dry-run)`, `[dry-run]`, `dry run`, or `dryrun` (case-insensitive —
 e.g. `run credit verification batch (dry-run)`), set `OPS_DRY_RUN=1`
