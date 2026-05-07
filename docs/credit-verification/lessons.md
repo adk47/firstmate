@@ -135,9 +135,105 @@ If that's empty AND the response has URLs, the model improvised — the plugin p
 
 **Principle:** when integrating with a third-party API, prefer explicit values over defaults. UI docs aren't always API contract.
 
+### 1.9 openclaw 2026.5.5 shell tool is named `exec`, not `bash`
+
+**Symptom:** `lib/api-evidence.sh::count_profile_api_evidence` always returned 0 in production. Bats fixtures used `name=="bash"` and passed; the live session JSONLs used `name=="exec"` so the jq filter never matched real invocations. Discovered when tailing a live session at 08:53 UTC and seeing `"name":"exec"` on every shell call.
+
+**Root cause:** openclaw 2026.5.5 names its shell tool `exec` in session JSONLs at `/root/.openclaw-main/agents/<agent>/sessions/*.jsonl`. Earlier convention (and some test fixtures) used `bash`. The schema accepts the old name in some places, so writing fixtures with `bash` doesn't fail any check — until the live filter doesn't match anything.
+
+**Fix:** `select(.name=="exec" or .name=="bash")` in any jq pipeline that scans shell calls. Production-truth name is `exec`; the alias keeps tests portable.
+
+**Principle:** when fixtures and production diverge on tool names, both should pass. Verify with a real session JSONL before committing a filter that depends on a name. One-line sanity check:
+```bash
+jq -r 'select(.message.content[]?.type=="toolCall") | .message.content[]?.name' \
+  /root/.openclaw-main/agents/operations/sessions/*.jsonl | sort -u
+```
+
+### 1.10 Apostrophes in comments inside single-quoted jq scripts terminate the heredoc
+
+**Symptom:** `lib/api-evidence.sh` failed with `bash: line 143: syntax error near unexpected token \`$lines[]'\``. Line 143 was `(reduce ($lines[] | ...` — perfectly valid jq, but bash refused to parse it.
+
+**Root cause:** the jq filter was wrapped in a single-quoted bash heredoc (`jq '... script ...'`). A comment several lines up read `# OpenClaw's shell tool is named "exec"...`. The apostrophe in `OpenClaw's` closed the bash quote. Bash then interpreted the remaining jq lines as code.
+
+**Fix:** plain English in jq comments. `OpenClaw's` → `The OpenClaw`. `don't` → `do not`. Single-quote-safe by construction. `bash -n` after editing catches it immediately because parsing fails before runtime.
+
+**Principle:** bash single quotes have no escape mechanism. Anything between `'…'` is literal except for closing `'`. Multi-line jq filters wrapped in `'…'` are landmines; alternatives are heredoc with `<<'JQ'` (delimiter quoted means no interpolation, apostrophes are safe) or `--from-file <(cat <<'JQ' ... JQ)`.
+
+### 1.11 Three credit-verification gates must move in lockstep on CV_EVIDENCE_MODE
+
+**Symptom:** During the 2026-05-07 cutover live test, the agent correctly invoked Tier-1 (MB) + Tier-2 (got `vuproductions.gr` citation), but the approve attempt got `rejected_pre_flight: missing_profile_browse`. 196 retries before the agent gave up and bulk-UVN'd the rest. Root cause: I'd only made TWO of THREE evidence gates `CV_EVIDENCE_MODE`-aware.
+
+**Root cause:** there are three gates in the credit-verification approve path, each with its own evidence-quorum check:
+
+1. `muso-admin-api.sh::enforce_credit_approve_gate` (the bash gate the API call passes through)
+2. `runlog.sh` event-write gate (refuses `verdict_without_evidence`)
+3. `batch-verify-profile.sh` pre-flight (browse-required + quorum, runs *before* the API call)
+
+I patched (1) and (2) to consult `lib/api-evidence.sh` under `CV_EVIDENCE_MODE=api`, but (3) still called the old browser-only `count_profile_browser_loads` and `count_excerpt_matches`. Result: every Tier-1+Tier-2 approve attempt died at gate (3) before reaching gate (1) which would have accepted it.
+
+**Fix:** PR #260 commit `239a2d6` added the `CV_EVIDENCE_MODE` dispatch to `batch-verify-profile.sh` too — sources both libs, picks the count function based on mode, mirrors the pattern used in (1) and (2).
+
+**Principle:** before changing the evidence model, list every gate that consults it. Grep is mandatory:
+```bash
+grep -rn 'count_profile_browser_loads\|count_excerpt_matches\|browser-evidence' workspaces/operations/skills/ scripts/
+```
+Three gates, three patches, one PR. Missing one means "the system rejects evidence for the right reason in the wrong gate."
+
+### 1.12 The agent will pattern-match cron job names to `openclaw cron run` if SKILL.md doesn't explicitly forbid it
+
+**Symptom:** Nick @-mentioned the bot with `run credit verification batch`. SKILL.md §Step 0 says this should fire **Batch Mode (B1–B5) inline** in the current session. Instead the agent ran `openclaw cron --help` → `cron show 081a0d98-...` → `cron run 081a0d98-... --expect-final --timeout 1800000` against the cron job named `credit-verification-batch-4h`. The cron run was rejected by openclaw 2026.5.5 schema (separate bug — cron payload still on `agentTurn` instead of `systemEvent`) and silently went nowhere; agent posted "Starting it now…" to Slack but no batch ran.
+
+**Root cause:** the agent's reconnaissance found a cron job named "credit-verification-batch-4h" and pattern-matched the user's "run credit verification batch" to "fire that cron job". The original SKILL.md prose said run B1-B5 inline but didn't *forbid* the cron-delegate path, so the agent inferred delegation was acceptable. (The agent's stated reasoning even said "I'll let the batch post its normal `[HEARTBEAT-BATCH]` summary back here when it finishes" — perfectly plausible if the cron run actually worked.)
+
+**Fix:** explicit `⚠️ DO NOT delegate to openclaw cron run` block at SKILL.md §Step 0 (commit `bb1b63f`). Spells out: "Run Batch Mode" means invoke the workflow scripts directly from this session; if you find yourself reading `cron-jobs.json` or running `openclaw cron --help` while handling an @-mention, you have taken the wrong turn.
+
+**Principle:** if there's a plausible alternative path that the SKILL.md doesn't explicitly forbid, the agent will eventually take it. Prose like "do X" doesn't preclude "also do Y" — agents bias toward action they can justify. When two paths could plausibly satisfy a directive, name the wrong one and reject it explicitly.
+
+### 1.13 `bats` 1.13 silently passes failing `[[ ]]` assertions when followed by another assertion
+
+**Symptom:** A test with three `[[ ]]` assertions in a row passed locally on bats 1.13.0 but failed on node-8 with bats 1.10.0. The middle assertion's substring was missing from the actual output; both bats versions ran the same code; only the harness behavior differed.
+
+**Root cause:** bats 1.13's test runner appears to evaluate intermediate `[[ … ]]` exit codes non-strictly when followed by another assertion that succeeds. bats 1.10 evaluates strictly — every failed `[[ ]]` fails the test. So a test asserting:
+```bash
+[ "$status" -eq 7 ]
+[[ "$output" == *"no successful browser load found"* ]]   # FALSE in reality
+[[ "$output" == *"$PID"* ]]                                # TRUE — PID is in output
+```
+…passes on 1.13 (final assertion succeeded) but fails on 1.10 (middle assertion failed).
+
+**Fix:** assert against substrings actually present in the new error message. The test was checking for legacy prose ("no successful browser load found") that I'd refactored to mode-aware text ("no successful Tier-1 browser snapshot" or "no successful evidence source"). Switched to the mode-independent `verdict_without_evidence` label.
+
+**Principle:** local bats green ≠ CI bats green. Confirm assertions actually fire by inverting one and watching it fail. Don't assume `[[ ]]` short-circuits to test failure — explicit `&& failure_message; false` is more portable. And: hot-patched live runs are a good final integration test that fixtures aren't enough on their own.
+
 ---
 
 ## 2. Changelog
+
+### 2026-05-07 — Cutover deployed (PR #260)
+
+**Shipped the documented 4-tier pipeline end-to-end.** The browser-removal work proposed on 2026-05-06 (originally scoped at 1 week per §3.1 below) compressed to one session of hot-patches + one PR.
+
+**Built and deployed:**
+
+- `lib/api-evidence.sh` (replacement for `lib/browser-evidence.sh`) — counts API helper hits + native web_search citation domains. 19 bats tests.
+- `discogs-isrc-lookup.sh` (third API helper, gated on `DISCOGS_TOKEN` per #255). 12 bats tests.
+- Three credit-verification gates made `CV_EVIDENCE_MODE`-aware in lockstep: `enforce_credit_approve_gate` (`muso-admin-api.sh`), runlog.sh verdict gate, `batch-verify-profile.sh` pre-flight. `api` is the default, `browser` remains as the rollback knob.
+- openclaw config: `agents.list[6].params.extra_body.plugins[{id:"web", engine:"native", max_results:5}]` + `tools.deny += ["web_search"]` (drops the local web_search shadow tool — see §1.8).
+- Three browser-forcing plugin hooks deleted: `block-web-fetch-tier1`, `redirect-web-search`, `block-escalation-without-browse`. Surviving hooks: `mark-cv-session`, `block-unsanctioned-batch-message`, `cleanup-session-state`.
+- `browser-evidence-audit.sh` short-circuits the browser-anchor check under `api`-mode (the bash + runlog gates already enforce evidence per decision).
+- AllMusic browser fallback removed entirely (commit `e655dfe`) after AllMusic went offline ("being updated") mid-test and Discogs `web_fetch` hit Cloudflare. Browser is no longer a sanctioned source under api-mode.
+- SKILL.md: top-level "EVIDENCE MODEL — 2026-05-06 CUTOVER" block, mandatory api-first preamble at §3α with explicit bash commands, explicit `⚠️ DO NOT delegate to openclaw cron run` rule at §Step 0 (see §1.12).
+
+**Test totals after deploy:** 633 bats tests across the impacted surface, 633 pass.
+
+**Live verification (four runs in one session):**
+
+- `20260506-202031-675159` — pre-cutover; gates correctly refused 73 unsupported UVNs.
+- `20260507-085537-c83be3` — surfaced the `exec` vs `bash` tool-name bug (§1.9, fixed mid-run in commit `e0d2710`).
+- `20260507-120856-5a2337` — first end-to-end Tier-1+Tier-2 hit (`vuproductions.gr` cited for Nasos Nomikos); surfaced the three-gate lockstep gap (§1.11, fixed mid-run in commit `239a2d6`).
+- `20260507-133229-7dd133` — clean 4-min run, 0 errors, 0 browser/web_fetch attempts, 0 cron delegations, Tier-0 cleared 91 credits + 30 UVN flags. Tier-2 still skipped by the agent (deferred follow-up — see §3.1 below).
+
+**Bugs caught and fixed:** five new lessons added above (§1.9–1.13).
 
 ### 2026-05-06 — Tier-0 ships, browser-removal proposed
 
@@ -184,27 +280,43 @@ Key milestones referenced there:
 
 In priority order:
 
-### 3.1 (high) Drop browser as the credit-verification primary path
+### 3.1 (high) Make agent actually exercise Tier-2 — #259
 
-**Why:** browser is the cause of (a) Cloudflare blocks, (b) 15-min run timeouts, (c) the B2 stall observed in production dry-runs, (d) ~250 lines of plugin enforcement that exists *only* because browser keeps producing bad evidence. All of browser's jobs in credit verification have better paths now.
+**Status:** infrastructure shipped 2026-05-07 (PR #260) but live runs show the agent goes MB-miss → bulk-UVN, skipping Tier-2 entirely. 0 web_search attempts across 2 batches of fall-through profiles. The system is *safe* (everything goes to humans) but throughput is degraded — Tier-2 should be clearing ~10–15% of the queue per [design.md:81](./design.md).
 
-**What:**
+**Why the prose alone isn't enough:** SKILL.md §3α step 2 explicitly tells the agent to ask the model to research before UVN-flagging. The agent reads it, sometimes acknowledges it ("Tier-2 uses the LLM's native web search via OpenRouter plugin"), then UVN-flags anyway. The safe-default attractor (UVN rather than risk a bad approve) dominates.
 
-1. Get `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` propagated from k8s secrets into `/etc/openclaw/main.env` (already in `audit/.../analytics.yaml`)
-2. Get a Discogs developer token (https://www.discogs.com/settings/developers, 30s, free); add as `DISCOGS_TOKEN`
-3. Drop `web_search` from operations agent's `tools.deny` list — leaves OpenRouter plugin as only path. Smoke-test by triggering a web-search probe and verifying citations come back as inline Markdown URLs (not via openclaw's tool channel)
-4. Update SKILL.md B2 prose: replace "load Tier-1 site via browser" with "call `tier1-api-verify.sh` (deterministic) then LLM tail with native search for the gap"
-5. Update `enforce_credit_approve_gate` to count "≥2 distinct API confirmations OR ≥2 distinct citation domains" as evidence equivalent to "≥2 distinct Tier-1 browser hosts"
-6. Archive `plugins/muso-credit-verification-enforcer/src/hooks/block-web-fetch-tier1.ts` and `redirectWebSearch.ts` — no longer needed
-7. Run a third dry-run; expect Tier-0 + Tier-1 + Tier-2 to all fire cleanly
+**Recommended fix (per #259):** mechanical Tier-2-attempt gate in `batch-verify-profile.sh` flag path. Refuse UVN flag for fall-through profiles unless the session contains evidence of a Tier-2 attempt for the credit (an assistant message that names the credited person AND has either a search-hint phrase or ≥1 URL). This forces the agent through the path without forcing approval — it can still UVN-flag, it just has to *try* first.
 
-**Estimated effort:** 1 week of work, mostly deletions. Most risky step is #5; has the most existing test coverage to update.
+**Out of scope for this iteration:** Tier-2 quality (citation reputation, snippet quality). That's a tightening task once the path is firing.
 
-### 3.2 (high) Tier-2 web search local-tool collision fix (subset of 3.1)
+### 3.2 (medium) Cron job schema migration — `payload.kind="systemEvent"`
 
-Just step 3 above. ~5 minutes + smoke test. Unblocks OpenRouter native search even before the rest of the browser-removal work.
+**Status:** the autonomous 4-hourly `credit-verification-batch-4h` cron fires but openclaw 2026.5.5 rejects with `Error: main cron jobs require payload.kind="systemEvent"`. The cron job in `cron-jobs.json` still has `payload.kind="agentTurn"`. This was missed in the 2026.5.5 schema migration (commit `26d22f4`).
 
-### 3.3 (medium) B6 EXIT trap so summary always posts
+**Why it didn't surface earlier:** manual @-mention triggers (`run credit verification batch`) take a different code path that doesn't hit the cron schema. So the inline Batch Mode flow works fine; only the autonomous 4-hourly cron auto-fire is silently skipped.
+
+**Fix:** edit the cron job's payload to:
+```json
+"payload": { "kind": "systemEvent", "text": "run credit verification batch" }
+```
+(Drop `model`, `thinking`, `fallbacks`, `timeoutSeconds` — those come from the agent's own config under `sessionTarget=main`. The agent already has the model + extra_body wired since 2026-05-07.)
+
+**Estimated effort:** 5 minutes + reload via `openclaw cron update <id>`. File a separate issue if not done before the next autonomous run is needed.
+
+### 3.3 (medium) Runlog verdict gate's `profile_id`-empty bypass
+
+**Status:** during run `20260507-120856-5a2337`, 202 verdict events were written with `profile_id: null`. The runlog gate at `runlog.sh:236` only fires when `[[ -n "$pid" ]]`, so all 202 verdicts bypassed the api-evidence check. The bash gate (`enforce_credit_approve_gate`) caught the corresponding actual API calls — but only because they had non-null payloads. Verdicts as a separate event type are unguarded.
+
+**Fix:** make the runlog gate fail-closed on empty `profile_id`. Refuse the verdict with a clear remediation message ("verdict events must carry profile_id"). One-line edit + bats coverage.
+
+### 3.4 (medium) Cookie-cutter detector ISRC-anchored fabrication shape
+
+**Status:** the existing cookie-cutter gate refuses ≥3 verdicts with byte-identical `.reason` text. During `20260507-120856-5a2337` the agent embedded each unique `cr_id` in the reason text, breaking byte-identity, and got 142 verdicts citing the same single MB result through. Same fabrication shape as the 2026-05-04 incident the gate was supposed to catch — just dressed in api-mode clothing.
+
+**Fix:** strengthen the detector to also flag when ≥N verdicts cite the same ISRC string, MB recording id, or "MusicBrainz lookup" anchor phrase. ~5-line jq edit in `runlog.sh`.
+
+### 3.5 (medium) B6 EXIT trap so summary always posts
 
 Add an EXIT trap on the B0-B1 bash blob:
 
@@ -218,39 +330,38 @@ Required: `post-batch-summary.sh` needs to gracefully handle "Tier-0 succeeded, 
 
 **Estimated effort:** 30 min including bats tests.
 
-### 3.4 (medium) Cron task investigation — `credit-verification-batch-4h` last status `skipped`
-
-Pre-existing issue (memory entry suggests intermittent for a while). Not blocked by today's work. Worth a 30-min dig before relying on autonomous 4-hourly runs.
-
-### 3.5 (low) UVN feedback loop (Tier-3)
+### 3.6 (low) UVN feedback loop (Tier-3)
 
 Future work; not on the critical path for this iteration. See [design.md § 8 Tier-3](./design.md#8-tier-3-uvn-feedback-loop) for the scoping.
+
+### 3.7 (low) Provision API tokens for Discogs (#255) + Spotify (#256)
+
+`discogs-isrc-lookup.sh` and `spotify-track-lookup.sh` are shipped + tested but inert (exit 4: creds_missing). Once tokens land, the Tier-1 quorum becomes 2-source on its own (MB + Discogs, or MB + Spotify) without needing Tier-2 — partially mitigates §3.1 too.
 
 ---
 
 ## 4. Recommended next iteration
 
-If/when committing to "drop browser, ship the rest":
+The 2026-05-07 cutover shipped what was prescribed below. The next iteration's goal is now **getting the agent to actually use Tier-2** (§3.1).
 
 ### Iteration goals
 
-1. Browser no longer drives credit verification (remains available for other ops flows)
-2. Tier-2 web search actually fires
-3. Summary always posts (even on B2 partial)
-4. Real-mode test: 1 profile (Alpha Mastering) approved via Tier-0 in production, Jan/Aaron spot-check
+1. ~~Browser no longer drives credit verification~~ — done 2026-05-07
+2. ~~Tier-2 web search actually fires~~ infrastructure-wise — but agent doesn't invoke it (§3.1)
+3. Mechanical Tier-2-attempt gate → agent forced through Tier-2 before UVN
+4. Real-mode batch: ≥10% of fall-through credits clear via Tier-2 citations
 
 ### Sequencing (dependency-respecting parallel)
 
-- **Track A** (1 day): drop `web_search` from operations agent's tools.deny; smoke-test OpenRouter native search; verify citations come back; add `tier2-citations-extract.sh` parser helper
-- **Track B** (2 days, parallel with A): EXIT trap in B0-B1 bash blob; `post-batch-summary.sh --allow-partial` mode; bats tests; fresh dry-run that posts even when B2 incomplete
-- **Track C** (after A+B): rewrite `enforce_credit_approve_gate` evidence-counting; replace browser-snapshot grep with API-confirmation + citation-domain counter; test updates; SKILL.md B2 prose rewrite
-- **Track D** (after C): archive browser-tier1 enforcer hook; remove browser-evidence-audit's tier1 path; full bats sweep
-- **Track E** (parallel, 30 min when scheduled): Discogs token + smoke-test `discogs-isrc-lookup.sh`
+- **Track A** (1 day): mechanical Tier-2-attempt gate (§3.1). Add `count_profile_tier2_attempts` to `lib/api-evidence.sh`; require ≥1 attempt in `batch-verify-profile.sh` flag path before allowing UVN. Bats coverage. Hot-patch live; observe one cron cycle.
+- **Track B** (parallel, 30 min): cron schema migration (§3.2). One config write + `openclaw cron update`.
+- **Track C** (parallel, 1 day): runlog `profile_id`-empty fail-closed (§3.3) + cookie-cutter ISRC-anchor detector (§3.4). Both small jq edits + bats tests.
+- **Track D** (parallel, 30 min when scheduled): Discogs / Spotify token provisioning (#255, #256). Removes the dependency on Tier-2 since Tier-1 alone reaches quorum once two API helpers fire.
 
 ### Done criteria
 
-- Real-mode batch: 200 credits fetched, Tier-0 clears the trusted profiles bulk, Tier-1 API + Tier-2 LLM-search clears more, residue goes to UVN
-- Slack summary shows: "Tier-0: N profiles, M credits | Tier-1 API: K credits | Tier-2 LLM+web: J credits | UVN: U credits | Errors: 0"
-- Jan/Aaron spot-check 5 random Tier-0 approves; all are correct
-- No "browser tool unavailable" Slack messages for 7 consecutive days
-- Production approve rate climbs from ~3.4%/day to >40%/day on the eligible queue
+- Real-mode batch: 200 credits fetched, Tier-0 clears trusted profiles, Tier-1 API + Tier-2 LLM-search clears more, residue goes to UVN.
+- Slack summary shows: `Tier-0: N profiles, M credits | Tier-1 API: K credits | Tier-2 LLM+web: J credits | UVN: U credits | Errors: 0`.
+- Jan/Aaron spot-check 5 random Tier-0 approves; all correct.
+- ≥10% of non-Tier-0 credits clear via Tier-2 citations (matches design.md throughput target).
+- Production approve rate climbs from ~3.4%/day toward the design.md target of ~25% via Tier-0 alone + 10–15% via Tier-2 = ~40% on the eligible queue.
