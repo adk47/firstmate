@@ -145,12 +145,90 @@ call_lib() {
   [ "$output" = "0" ]
 }
 
-# ---------- citation_domains stub returns 0 ------------------------------
+# ---------- citation_domains: empty session → 0 --------------------------
 
-@test "citation_domains: stub returns 0 (filled in step 4 of remove-browser plan)" {
+@test "citation_domains: no assistant messages → 0" {
   run call_lib count_profile_citation_domains "Bram Fidder"
   [ "$status" -eq 0 ]
   [ "$output" = "0" ]
+}
+
+# ---------- citation_domains: inline URLs (gpt-5/gemini shape) -----------
+
+@test "citation_domains: 2 distinct inline URLs in assistant text matching excerpt → 2" {
+  # Assistant message with bare URLs in the text body — the typical
+  # OpenRouter native-search output for gpt-5 / gemini models.
+  sl '{"timestamp":"2026-05-07T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"According to https://example.com/credits/bram-fidder Bram Fidder is credited as mastering engineer; corroborated at https://other-source.org/index.html which lists Bram Fidder mastering on the same release."}]}}'
+
+  run call_lib count_profile_citation_domains "Bram Fidder"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+}
+
+# ---------- citation_domains: collapse www and dupes --------------------
+
+@test "citation_domains: www.host and host count as 1; same host twice = 1" {
+  sl '{"timestamp":"2026-05-07T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"Bram Fidder mastering credit found at https://www.example.com/a and confirmed at https://example.com/b plus https://example.com/c"}]}}'
+
+  run call_lib count_profile_citation_domains "Bram Fidder"
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+}
+
+# ---------- citation_domains: structured citations field (claude shape) ---
+
+@test "citation_domains: structured citations[] on text content block → counted" {
+  # OpenRouter passes claude-style citations as a per-block array.
+  sl '{"timestamp":"2026-05-07T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"Confirmed: Bram Fidder mastering credit on the release.","citations":[{"url":"https://citelib1.com/page","title":"Credit listing"},{"url":"https://citelib2.org/page","title":"Confirmation"}]}]}}'
+
+  run call_lib count_profile_citation_domains "Bram Fidder"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+}
+
+# ---------- citation_domains: top-level message.citations[] --------------
+
+@test "citation_domains: top-level message.citations[] (alt shape) → counted" {
+  # Some OpenRouter routes put citations at message-level instead of per-block.
+  sl '{"timestamp":"2026-05-07T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"Bram Fidder mastering confirmed."}],"citations":[{"url":"https://topcite1.com/p"},{"url":"https://topcite2.net/p"}]}}'
+
+  run call_lib count_profile_citation_domains "Bram Fidder"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+}
+
+# ---------- citation_domains: excerpt not present → 0 (fail closed) ------
+
+@test "citation_domains: URLs present but excerpt missing → 0" {
+  # The model talked about something else entirely with citations. Must
+  # not count those as evidence for OUR excerpt.
+  sl '{"timestamp":"2026-05-07T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"Some unrelated topic at https://a.com and https://b.com"}]}}'
+
+  run call_lib count_profile_citation_domains "Bram Fidder"
+  [ "$status" -eq 0 ]
+  [ "$output" = "0" ]
+}
+
+# ---------- citation_domains: trailing punctuation stripped --------------
+
+@test "citation_domains: URL trailing comma/period/paren stripped from host" {
+  sl '{"timestamp":"2026-05-07T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"Bram Fidder mastering credit (see https://citehost.com/x), and https://citehost.com/y."}]}}'
+
+  run call_lib count_profile_citation_domains "Bram Fidder"
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+}
+
+# ---------- evidence_sources: citation_domains feeds the sum -------------
+
+@test "evidence_sources: api(1) + citations(2) = 3 (citation path now active)" {
+  sl '{"timestamp":"2026-05-07T10:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"exec","arguments":{"command":"bash musicbrainz-isrc-lookup.sh USXX1"}}]}}'
+  sl '{"timestamp":"2026-05-07T10:00:01Z","message":{"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"{\"name_match\":true,\"evidence_excerpt\":\"Bram Fidder – mastering\"}"}]}}'
+  sl '{"timestamp":"2026-05-07T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"After MB miss I checked the web. Bram Fidder mastering corroborated at https://citelib1.com/p and https://citelib2.org/p"}]}}'
+
+  run call_lib count_profile_evidence_sources "Bram Fidder"
+  [ "$status" -eq 0 ]
+  [ "$output" = "3" ]
 }
 
 # ---------- evidence_sources: sums all paths -----------------------------

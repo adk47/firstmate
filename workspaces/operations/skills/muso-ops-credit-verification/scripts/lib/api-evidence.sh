@@ -27,19 +27,20 @@
 #                      the long-tail fallback because AllMusic has no
 #                      public API.
 #
-#   "web_search citation" = STUB for now (returns 0). Filled in once the
-#                      openclaw operations agent stops carrying the local
-#                      web_search tool and OpenRouter native search becomes
-#                      the only path. See plan
-#                      /Users/nick/.claude/plans/remove-the-browser-partitioned-shell.md
-#                      step 1.
+#   "web_search citation" = an assistant message in the run window
+#                      whose content text contains the gate's excerpt
+#                      AND carries one or more citation URLs (either
+#                      inline `https://...` references or a structured
+#                      `citations[]` array). Each distinct hostname
+#                      counts as 1 source. Hostnames lowercased and
+#                      `www.` stripped to dedupe.
 #
 # Public functions (all stdout-only; no side effects):
 #   resolve_run_started_ts                -> ISO8601 of first run_started event, or empty
 #   resolve_session_log                   -> path to most recent agent session JSONL, or empty
 #   count_profile_api_evidence            -> distinct API helper sources matching excerpt
 #   count_profile_allmusic_fallback       -> 1 if AllMusic browser load matches excerpt, else 0
-#   count_profile_citation_domains        -> STUB (returns 0 until web_search is the path)
+#   count_profile_citation_domains        -> distinct citation hostnames in run-window assistant messages whose text contains EXCERPT
 #   count_profile_evidence_sources        -> sum of all three (the value gate compares
 #                                            against CV_REQUIRED_LOADS)
 #
@@ -221,23 +222,97 @@ count_profile_allmusic_fallback() {
     ' "$session_log" 2>/dev/null || echo 0
 }
 
-# STUB. Returns 0 until web_search becomes the path (i.e., until openclaw
-# drops its local web_search tool from the operations agent's tool list,
-# leaving OpenRouter native search via the openrouter plugin as the only
-# route — at which point this should count distinct citation hostnames in
-# the assistant message stream that reference the excerpt).
+# Count distinct citation domains in assistant messages within the run
+# window where (a) a citation URL is present in the message content and
+# (b) the message text in proximity to that URL contains the excerpt
+# (case-insensitive).
 #
-# Why a stub: today every web_search call is plugin-blocked by the
-# muso-credit-verification-enforcer's redirect-web-search hook, and
-# OpenRouter native search is not yet enabled in the operations profile
-# config, so there are no citations to count. Counting them as 0 fails
-# closed (the gate still requires CV_REQUIRED_LOADS sources from the API
-# + AllMusic paths). Lift to real implementation in step 4 of the
-# remove-browser plan.
+# Citation extraction handles two shapes that OpenRouter native web search
+# emits depending on the upstream model:
+#
+#   1. Inline URL citations (gpt-5+, gemini): URLs embedded in the
+#      assistant text content, often as `[caption](https://...)` or as
+#      bare https URLs adjacent to the cited claim.
+#   2. Structured citations field (claude-4+ when configured): a
+#      top-level `citations: [{url, title, ...}]` array on the message
+#      object, OR per-content-block `citations: [...]` on text blocks.
+#
+# Both shapes are pulled. Hostnames are lowercased and stripped of a
+# leading `www.` so `www.allmusic.com` and `allmusic.com` collapse to
+# one source.
+#
+# Excerpt-proximity: we require the excerpt to appear ANYWHERE in the
+# assistant message that carries the citation. Per-URL substring scoping
+# would be more precise but is hard to express in jq without false
+# negatives — the message-level scope is the documented Tier-2 evidence
+# rule (see docs/credit-verification/design.md:247-249) and is robust to
+# both citation shapes.
+#
+# Args:
+#   $1 evidence_excerpt (required, non-empty, case-insensitive matching)
+#   $2 profile_id (optional, signature compat; not used today)
+# Stdout: a single integer (distinct citation hostnames; 0 if anything
+#         is missing/unresolvable).
 count_profile_citation_domains() {
-    local _excerpt="${1:-}"
-    local _pid="${2:-}"
-    echo 0
+    local excerpt="$1"
+    [[ -n "$excerpt" ]] || { echo 0; return 0; }
+
+    local session_log run_started_ts
+    session_log=$(resolve_session_log)
+    run_started_ts=$(resolve_run_started_ts)
+
+    if [[ -z "$session_log" || ! -f "$session_log" ]]; then
+        echo 0
+        return 0
+    fi
+
+    jq -R -r -n \
+        --arg excerpt "$(printf '%s' "$excerpt" | tr '[:upper:]' '[:lower:]')" \
+        --arg run_started_ts "$run_started_ts" \
+    '
+    # URL extractor: finds bare https URLs and Markdown-link URLs in text.
+    # Trailing punctuation is stripped because URLs at end-of-sentence
+    # commonly have a trailing comma / period / paren / bracket / quote.
+    def extract_urls($text):
+        ($text | [scan("https?://[^\\s<>\"\\)\\]]+")] | map(rtrimstr(".") | rtrimstr(",") | rtrimstr(";")));
+
+    # Hostname normalize: lowercase, strip leading www.
+    def normhost($url):
+        ((try ($url | capture("^https?://(?<h>[^/?#]+)").h) catch null) // "")
+        | ascii_downcase | sub("^www\\."; "");
+
+    [inputs | fromjson? // empty | select(type == "object")
+     | select($run_started_ts == "" or ((.timestamp // "") >= $run_started_ts))] as $lines
+    |
+    [
+        $lines[]
+        | .message | select(.role == "assistant")
+        | . as $msg
+        # Collapse all text content + every "title" / annotation field
+        # OpenRouter routes through to a single lowercased haystack we
+        # can substring-search for the excerpt.
+        | (
+            ([$msg.content[]? | (.text // "")] | join(" "))
+            + " "
+            + ([$msg.content[]?.citations[]? // empty | (.title // "") + " " + (.url // "")] | join(" "))
+            + " "
+            + ([$msg.citations[]? // empty | (.title // "") + " " + (.url // "")] | join(" "))
+          ) as $hay
+        | ($hay | ascii_downcase) as $hay_lc
+        | select($hay_lc | contains($excerpt))
+        |
+        # Now collect URLs from all the same shapes.
+        (
+            ([$msg.content[]? | extract_urls(.text // "") | .[]?])
+            + ([$msg.content[]?.citations[]? // empty | .url // empty])
+            + ([$msg.citations[]? // empty | .url // empty])
+        ) as $urls
+        | $urls[]
+        | select(length > 0)
+        | normhost(.)
+        | select(length > 0)
+    ] | unique | length
+    ' "$session_log" 2>/dev/null || echo 0
 }
 
 # Sum of (api_evidence + allmusic_fallback + citation_domains) — the value

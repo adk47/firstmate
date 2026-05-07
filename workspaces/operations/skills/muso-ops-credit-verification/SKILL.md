@@ -80,60 +80,55 @@ deterministic API helpers that close the loop without the browser.
 
 **The new evidence model under `CV_EVIDENCE_MODE=api` (default).** A
 credit is approvable when ≥2 distinct **evidence sources** agree on the
-claim. Today, two sources are operational:
+claim. The full architecture is in
+[`docs/credit-verification/design.md`](../../../../docs/credit-verification/design.md);
+the active 4-tier pipeline is:
 
-  1. `musicbrainz-isrc-lookup.sh <ISRC> --credited-name <N> --role <R>`
-     returning `name_match: true` (and `role_match: true` for non-performer
-     roles). Free, no auth. Best coverage on indie / non-US / classical.
-  2. **AllMusic browser fallback.** Open `https://www.allmusic.com/...`
-     in the `browser` tool and rely on the snapshot text containing the
-     credited name + role/track. AllMusic has no public API, so it remains
-     the second source in the steady state.
+| Tier | What | Who fires it | Status today |
+|---|---|---|---|
+| **0** | `profile-audit.sh` 8-gate algorithm — bulk-approves a profile when its unverified batch aligns with its already-approved corpus | The dispatcher, before per-credit work | Working (~25% of queue) |
+| **1** | Deterministic API lookups by ISRC: MusicBrainz / Spotify / Discogs | The agent, per credit | MB only (Spotify [#256](https://github.com/Muso-AI/hydra/issues/256), Discogs [#255](https://github.com/Muso-AI/hydra/issues/255) blocked on tokens) |
+| **2** | LLM with **OpenRouter native web search** via `extra_body.plugins[{id:"web", engine:"native"}]`. Returns inline citations | The agent, per credit when Tier-1 is incomplete | **MUST be used today** — Tier-1 alone is 1 source, falls short of the 2-source quorum |
+| **3** | UVN flag — route to humans | The agent, when Tier-1+2 don't reach quorum | Working |
 
-**Other helpers exist but are inert today** (shipped + tested, but exit 4
-"creds_missing" until provisioned):
+**Source counting:**
+- Each successful API helper hit = 1 source (collapsed by helper name —
+  two MB hits don't double-count).
+- Each distinct citation hostname in a Tier-2 model response = 1 source
+  (collapsed by host — `www.x.com` and `x.com` are 1 source).
+- AllMusic browser load = 1 source (corner-case fallback only — see §3α).
+- The bash gate sums across all three paths and compares to
+  `CV_REQUIRED_LOADS=2`.
 
-  - `discogs-isrc-lookup.sh` — needs `DISCOGS_TOKEN`. Tracked in
-    [hydra#255](https://github.com/Muso-AI/hydra/issues/255). Will close
-    the engineering / mastering / mixing coverage gap on mainstream pop.
-  - `spotify-track-lookup.sh` — needs `SPOTIFY_CLIENT_ID` /
-    `SPOTIFY_CLIENT_SECRET`. Tracked in
-    [hydra#256](https://github.com/Muso-AI/hydra/issues/256). Performer-
-    role only when enabled.
-
-Until those tokens are provisioned, **do NOT call those helpers** in B3 —
-they always exit 4 today and the wasted call slows the run. The bash gate
-already disregards their inert output, so there's no correctness risk,
-only latency.
+**Tokens out of scope today** ([#255](https://github.com/Muso-AI/hydra/issues/255), [#256](https://github.com/Muso-AI/hydra/issues/256)): `discogs-isrc-lookup.sh`
+and `spotify-track-lookup.sh` exit 4 (creds_missing) until provisioned.
+**Do NOT call them today** — calling wastes a turn for no benefit.
 
 **Do NOT use the browser on apple.music.com, musicbrainz.org, discogs.com,
-or spotify.com** — those hosts are JS-rendered SPAs whose credits are NOT
-in the HTML shell, and the api-evidence library doesn't count their
-results. AllMusic is the only sanctioned browser destination for
-credit verification. (The `block-web-fetch-tier1` plugin hook that
-previously enforced this was removed at the cutover; the gate now
-silently ignores Tier-1 web_fetch / browser results.)
+spotify.com, or tidal.com** — those are JS-rendered SPAs and the snapshot
+doesn't capture credits. The api-evidence library silently ignores their
+results. Use the API helper (Tier-1) or native web search (Tier-2)
+instead. AllMusic is the only sanctioned browser destination, and only
+as a corner-case fallback (§3α).
 
-**B3 investigation order (api-mode, today's tokens).** For each credit:
+**Today's B3 path** (agent's responsibility per credit, given Tier-0
+already ran):
 
-  1. If the credit ships an ISRC: call `musicbrainz-isrc-lookup.sh`.
-  2. If MB hits with `name_match=true`: that's evidence source #1. Capture
-     its `evidence_excerpt` field — that's what you pass to
+  1. **Tier-1**: call `musicbrainz-isrc-lookup.sh` if the credit ships an
+     ISRC. If `name_match: true`, that's source #1 — capture
+     `evidence_excerpt`.
+  2. **Tier-2**: ask the model to research the credit on the web. The
+     model triggers OpenRouter native search on its own; cite ≥2 distinct
+     domains in the response that mention the credit. **Skipping Tier-2
+     is the failure mode of run 20260507-085537 — agent went MB →
+     UVN-bulk and 200 credits ended up with humans that Tier-2 could have
+     cleared.**
+  3. **Approve** when sources sum to ≥2 (typically: 1 MB + 1 Tier-2
+     citation = 2). Pass the citation snippet (verbatim ≥10 chars) as
      `--evidence-excerpt`.
-  3. Open AllMusic in the `browser` tool. If the snapshot text contains
-     the credited name + role/track: that's evidence source #2 → approve.
-  4. If MB misses OR AllMusic doesn't carry the credit: escalate to Jan
-     (`<@U038BM16T7W>`) with `UNVERIFIABLE — NEEDS REVIEW`. Don't
-     fabricate browser snapshots; the gate will reject them.
-
-When [#255](https://github.com/Muso-AI/hydra/issues/255) /
-[#256](https://github.com/Muso-AI/hydra/issues/256) land, B3 expands to
-chain MB → Discogs → Spotify → AllMusic, stopping after 2 hits.
-
-The evidence excerpt you pass to `--evidence-excerpt` should be the
-helper's `evidence_excerpt` field when the hit came from MusicBrainz
-(format: `<credited_name> – <role-or-track>`), or a verbatim ≥10-char
-substring from the AllMusic page text otherwise.
+  4. **Tier-3 (UVN)** only if Tier-1 + Tier-2 don't reach 2 sources. Use
+     verdict `UNVERIFIABLE — NEEDS REVIEW`, status
+     `user_verification_needed`. Don't fabricate.
 
 **Rollback knob.** If the api-mode gate misfires in production, set
 `CV_EVIDENCE_MODE=browser` in the gateway env and restart. That re-enables
@@ -485,46 +480,92 @@ Skipping verification — manual review required. <@U7RP6HKUZ>
 > below stays in the file as a `CV_EVIDENCE_MODE=browser` rollback
 > reference — it is NOT the active playbook. Read step §3α below first.
 >
-> ### Step 3α — API-FIRST INVESTIGATION (THE ACTIVE PLAYBOOK)
+> ### Step 3α — THE 4-TIER PROGRESSIVE PIPELINE (ACTIVE PLAYBOOK)
 >
-> For each credit you intend to verdict (approve OR UVN), do this in
-> order. Stop as soon as you have 2 sources for autonomous approve, or
-> 1 source for a UVN flag:
+> This matches `docs/credit-verification/design.md:35-82`. Each credit
+> flows through tiers in order until it reaches a decision. **Stop at the
+> first tier that produces ≥2 evidence sources for an autonomous approve,
+> or fall through to UVN.**
 >
->   1. **MusicBrainz ISRC** — only if the credit ships an ISRC:
->      ```bash
->      bash /opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/musicbrainz-isrc-lookup.sh \
->        "$ISRC" --credited-name "$CREDITED_NAME" --role "$ROLE"
->      ```
->      Free, no auth, ~1.1s/call rate-limited. If JSON shows
->      `"name_match":true`, that's evidence source 1 — capture
->      `evidence_excerpt` from the JSON for the approve `--evidence-excerpt`.
+> #### Tier-0 — our algorithm (handled by the dispatcher; the agent does NOT call it)
 >
->   2. **AllMusic browser load** — load `https://www.allmusic.com/search/all/<URL-encoded credited-name>`,
->      snapshot the page, find the credit. AllMusic has no API; this is
->      the only sanctioned browser destination under api-mode.
+> `profile-audit.sh` runs the 8-gate heuristic when a profile has ≥20
+> unverified credits. If all 8 gates pass, the dispatcher emits a
+> `profile_audit:cc=...,pop=...,...` receipt and bulk-approves the whole
+> profile via `_tier0_audit_recompute_gate` in `muso-admin-api.sh`. The
+> agent receives "this profile cleared via Tier-0" — no per-credit work
+> needed. ~25% of queue clears here.
 >
->   3. **If both miss:** the credit is unverifiable today. Escalate to
->      Jan (`<@U038BM16T7W>`) with verdict `UNVERIFIABLE — NEEDS REVIEW`
->      via post-batch-summary.sh — DO NOT bulk-UVN flag, the gate will
->      refuse it.
+> #### Tier-1 — deterministic API lookup
 >
-> **Inert helpers (DO NOT call until tokens land):**
->   - `discogs-isrc-lookup.sh` — exits 4 (creds_missing). Tracked in
->     [#255](https://github.com/Muso-AI/hydra/issues/255).
->   - `spotify-track-lookup.sh` — exits 4 (creds_missing). Tracked in
->     [#256](https://github.com/Muso-AI/hydra/issues/256).
->   Calling them today wastes a turn for no benefit.
+> ```bash
+> bash /opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/musicbrainz-isrc-lookup.sh \
+>   "$ISRC" --credited-name "$CREDITED_NAME" --role "$ROLE"
+> ```
+>
+> Free, no auth, ~1.1s/call rate-limited. If JSON shows `"name_match":true`,
+> that's evidence source #1 — capture `evidence_excerpt` from the JSON.
+>
+> **Sibling helpers (inert today, do NOT call):**
+> - `discogs-isrc-lookup.sh` — needs `DISCOGS_TOKEN` ([#255](https://github.com/Muso-AI/hydra/issues/255)).
+> - `spotify-track-lookup.sh` — needs `SPOTIFY_CLIENT_ID/SECRET` ([#256](https://github.com/Muso-AI/hydra/issues/256)).
+>
+> When tokens land, Tier-1 alone can hit ≥2 sources (MB + Discogs, or
+> MB + Spotify) and the agent approves immediately. Today, MB alone is
+> 1 source — must continue to Tier-2 to reach the quorum.
+>
+> #### Tier-2 — LLM with native web search (THE STEP TODAY'S RUNS HAVE BEEN SKIPPING)
+>
+> When Tier-1 is incomplete (today, *always* — only MB works), prompt
+> the model to research the credit. OpenRouter native web search is wired
+> via `agents.list[ops].params.extra_body.plugins[{id:"web", engine:"native"}]`
+> (the local `web_search` tool is denied). Just write a normal prompt;
+> the model will trigger native search on its own.
+>
+> Phrasing that works: "I need to verify whether `<CREDITED_NAME>` was
+> credited as `<ROLE>` on `<TRACK>` (ISRC `<ISRC>`). Search the web for
+> credible sources confirming this. Cite at least two distinct domains
+> in your answer." Look for the model's response containing ≥2 URLs from
+> distinct hostnames where the surrounding text mentions the credited
+> name + role/track.
+>
+> **Tier-2 evidence rule** (per `design.md:247-249`): ≥2 distinct citation
+> hostnames in an assistant message whose text contains the
+> `--evidence-excerpt`. The api-evidence library extracts URLs from both
+> inline-text citations (gpt-5+) and structured `citations[]` arrays
+> (claude-4+). It strips trailing punctuation and collapses `www.` so
+> dupes don't double-count.
+>
+> **Capture the excerpt:** quote a verbatim ≥10-char substring from one
+> of the citation snippets (the bit of model text that names the credited
+> person + role) and pass it as `--evidence-excerpt`. The bash gate will
+> check the excerpt appears in proximity to the citation URLs in the
+> session log.
+>
+> #### Tier-3 — UVN (route to humans)
+>
+> Tier-2 didn't produce ≥2 citation domains? UVN-flag the credit with
+> reason `INCONCLUSIVE_TIER1_UNREACHABLE`, status
+> `user_verification_needed`, no `--evidence-excerpt` required. Jan and
+> Aaron handle these in escalation threads.
+>
+> **AllMusic browser fallback (corner case):** AllMusic has no public
+> API but isn't behind Cloudflare. If Tier-2 keeps missing on a specific
+> indie / non-Western catalog where AllMusic has coverage, you may load
+> `https://www.allmusic.com/search/all/<URL-encoded name>` in the
+> `browser` tool — that's the ONLY sanctioned browser destination under
+> api-mode. Counts as 1 source. Use sparingly; native search via Tier-2
+> is faster and broader.
 >
 > **Browser hosts that count for nothing under api-mode:**
 > apple.music.com, musicbrainz.org, discogs.com, spotify.com, tidal.com.
 > The api-evidence library doesn't count their results — they're
-> JS-rendered and the browser snapshot doesn't capture credits. AllMusic
-> is the only sanctioned browser destination.
+> JS-rendered SPAs and the browser snapshot doesn't capture credits. Hit
+> them with the API helper instead (Tier-1).
 >
-> **Rollback knob:** `CV_EVIDENCE_MODE=browser` in
-> `/etc/openclaw/main.env` + gateway restart returns to the legacy
-> Tier-1 browser quorum. Operator-only; not the agent's call.
+> **Rollback knob:** `CV_EVIDENCE_MODE=browser` in `/etc/openclaw/main.env`
+> + gateway restart returns to the legacy Tier-1 browser quorum.
+> Operator-only; not the agent's call.
 >
 > ----
 >
