@@ -361,14 +361,16 @@ resolve_slack_to_email() {
     esac
     # Resolve Slack ID to email
     case "$input" in
-        U7RP6HKUZ)  echo "aaron@muso.ai" ;;
-        U07NF5A77E2) echo "fede@muso.ai" ;;
-        U03TYGJF1N3) echo "serhii@muso.ai" ;;
-        U038BM16T7W) echo "jan@muso.ai" ;;
-        U0302FZQGCB) echo "andrey@muso.ai" ;;
-        U02S7TJ7QHY) echo "oleg@muso.ai" ;;
-        U0AL36NADEY) echo "nick@muso.ai" ;;
-        U0A8CCTTAAG) echo "liza@muso.ai" ;;
+        U7RP6HKUZ)   echo "aaron@muso.ai" ;;   # Aaron Kaufman (CEO)
+        U07NF5A77E2) echo "fede@muso.ai" ;;    # Federico Cappuccilli (CMO)
+        U03TYGJF1N3) echo "serhii@muso.ai" ;;  # Serhii Ostapchuk (CTO)
+        U038BM16T7W) echo "jan@muso.ai" ;;     # Jan Delmo (Head of Operations) — NOT jay@
+        U0AL36NADEY) echo "nick@muso.ai" ;;    # Nicholas Sollazzo (Chief Agent Officer)
+        U0A8CCTTAAG) echo "liza@muso.ai" ;;    # Liza Basco (Accountant)
+        U03LP8YHLPK) echo "mariia@muso.ai" ;;  # Mariia Bubley (Head of Product / UI & UX)
+        U02N2NP3H7F) echo "artem@muso.ai" ;;   # Artem (Mobile Developer)
+        U0AV9C7CFRQ) echo "faith@muso.ai" ;;   # Faith Undie (Community & Social Media)
+        U02S7C96CGN) echo "f@muso.ai" ;;       # McLaren Amberti (Sales Ops) — NOT mclaren@, single letter f
         *)
             # Unknown Slack ID — return as-is
             echo "$input"
