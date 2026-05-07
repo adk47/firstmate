@@ -96,20 +96,30 @@ the active 4-tier pipeline is:
   two MB hits don't double-count).
 - Each distinct citation hostname in a Tier-2 model response = 1 source
   (collapsed by host — `www.x.com` and `x.com` are 1 source).
-- AllMusic browser load = 1 source (corner-case fallback only — see §3α).
-- The bash gate sums across all three paths and compares to
+- The bash gate sums across both paths and compares to
   `CV_REQUIRED_LOADS=2`.
+- **Browser is NOT a sanctioned source under api-mode** (removed
+  2026-05-07 after AllMusic went offline and Discogs returned Cloudflare
+  challenges in the cutover test). All non-API evidence comes through
+  Tier-2 native web_search citations.
 
 **Tokens out of scope today** ([#255](https://github.com/Muso-AI/hydra/issues/255), [#256](https://github.com/Muso-AI/hydra/issues/256)): `discogs-isrc-lookup.sh`
 and `spotify-track-lookup.sh` exit 4 (creds_missing) until provisioned.
 **Do NOT call them today** — calling wastes a turn for no benefit.
 
-**Do NOT use the browser on apple.music.com, musicbrainz.org, discogs.com,
-spotify.com, or tidal.com** — those are JS-rendered SPAs and the snapshot
-doesn't capture credits. The api-evidence library silently ignores their
-results. Use the API helper (Tier-1) or native web search (Tier-2)
-instead. AllMusic is the only sanctioned browser destination, and only
-as a corner-case fallback (§3α).
+**Do NOT use `browser` or `web_fetch` on ANY of:** apple.music.com,
+musicbrainz.org, discogs.com, spotify.com, tidal.com, allmusic.com.
+- Apple/MusicBrainz/Discogs/Spotify/Tidal are JS-rendered SPAs — the
+  snapshot doesn't capture credits and Cloudflare often returns
+  challenge pages anyway.
+- AllMusic was a corner-case fallback until 2026-05-07; removed after it
+  went offline mid-test ("being updated") and we pivoted to native
+  web_search exclusively.
+- The api-evidence library silently ignores results from any of these
+  hosts under api-mode — calling them wastes a turn.
+- For non-API evidence, use **Tier-2 native web_search citations**
+  (described in §3α below) — the model's web search has no host
+  exclusions and returns inline citations the gate counts.
 
 **Today's B3 path** (agent's responsibility per credit, given Tier-0
 already ran):
@@ -494,8 +504,9 @@ Skipping verification — manual review required. <@U7RP6HKUZ>
 >
 >   (a) a successful `musicbrainz-isrc-lookup.sh` call whose JSON contains
 >       the credited name (≥1 evidence source), AND/OR
->   (b) an AllMusic browser load whose snapshot text contains the credited
->       name (≥1 evidence source).
+>   (b) an assistant message containing ≥1 distinct citation hostname
+>       (URL via Tier-2 native web_search) whose surrounding text
+>       contains the credited name + role/track.
 >
 > **The runlog gate (`exit 7 verdict_without_evidence`) and the bash
 > approve gate (`insufficient api-evidence`) WILL refuse any verdict /
@@ -571,29 +582,25 @@ Skipping verification — manual review required. <@U7RP6HKUZ>
 > check the excerpt appears in proximity to the citation URLs in the
 > session log.
 >
-> #### Tier-3 — UVN (route to humans)
+ #### Tier-3 — UVN (route to humans)
 >
 > Tier-2 didn't produce ≥2 citation domains? UVN-flag the credit with
 > reason `INCONCLUSIVE_TIER1_UNREACHABLE`, status
 > `user_verification_needed`, no `--evidence-excerpt` required. Jan and
 > Aaron handle these in escalation threads.
 >
-> **AllMusic browser fallback (corner case):** AllMusic has no public
-> API but isn't behind Cloudflare. If Tier-2 keeps missing on a specific
-> indie / non-Western catalog where AllMusic has coverage, you may load
-> `https://www.allmusic.com/search/all/<URL-encoded name>` in the
-> `browser` tool — that's the ONLY sanctioned browser destination under
-> api-mode. Counts as 1 source. Use sparingly; native search via Tier-2
-> is faster and broader.
->
-> **Browser hosts that count for nothing under api-mode:**
-> apple.music.com, musicbrainz.org, discogs.com, spotify.com, tidal.com.
-> The api-evidence library doesn't count their results — they're
-> JS-rendered SPAs and the browser snapshot doesn't capture credits. Hit
-> them with the API helper instead (Tier-1).
+> **No browser fallback under api-mode** (changed 2026-05-07). AllMusic
+> was the corner-case fallback until it went offline ("being updated")
+> mid-test, and Discogs `web_fetch` attempts returned Cloudflare
+> challenge pages. Browser/web_fetch on any music-database host is now
+> wasted work — the api-evidence library doesn't count their results.
+> Tier-2 native web_search is the only path for non-API evidence; it
+> has no host exclusions and the model's search engine routes around
+> Cloudflare/JS-render issues automatically.
 >
 > **Rollback knob:** `CV_EVIDENCE_MODE=browser` in `/etc/openclaw/main.env`
-> + gateway restart returns to the legacy Tier-1 browser quorum.
+> + gateway restart returns to the legacy Tier-1 browser quorum (still
+> uses lib/browser-evidence.sh which has its own AllMusic logic).
 > Operator-only; not the agent's call.
 >
 > ----
@@ -2165,7 +2172,7 @@ The lockfile is released automatically by the `trap` set in B0 when the run exit
 >
 > If B3 explicitly runs `compute-run-summary.sh --final` (which it does), the truth-floor `run_finished` event lands cleanly in the same turn — no fallback needed. If B3 is genuinely skipped (agent crash, infrastructure failure) AND the run was the terminal one AND ≥ 120s have passed, a future invocation of `lockfile.sh release --final` (e.g. via a watchdog or follow-up turn) can still land the autofill. This is intentionally narrower than the pre-2026-04-28 always-fire fallback: better to leave the runlog incomplete than to write false-positive hollow flags on a healthy run.
 >
-> The unrelated `run_finished_renderer_missing` post-hoc detector (R4-3) still fires on every release regardless of `--final`. It scans the session for renderer-shaped messages and emits the forensic event when work happened (attempts > 0) but the agent bypassed `post-batch-summary.sh` / `render-slack-summary.sh`. Idempotent and safe to fire repeatedly.
+> The `run_finished_renderer_missing` post-hoc detector (R4-3) is gated on the same `--final`/`OPS_BATCH_TERMINAL=1` opt-in as the autofill (tightened 2026-05-07 — previously fired on every release and posted a `:rotating_light:` Slack alert on every healthy batch because the canonical path migrated to `openclaw CLI` and the session-log heuristic stopped seeing it). On the terminal release the detector now short-circuits when `post-batch-summary.sh` has written its `summary_posted_canonical` event into the runlog — direct success evidence beats the legacy MCP-toolCall scan. The session-log scan remains as a fallback for the original regression target: an agent that genuinely skips `post-batch-summary.sh` and hand-composes a `[HEARTBEAT-BATCH]` post via the `message` tool.
 
 ### Rate Limiting Note
 

@@ -22,11 +22,6 @@
 #                        spotify-track-lookup.sh     -> source="spotify"
 #                        discogs-isrc-lookup.sh      -> source="discogs"
 #
-#   "AllMusic browser fallback" = a browser toolCall to allmusic.com whose
-#                      toolResult text contains the gate's excerpt. Kept as
-#                      the long-tail fallback because AllMusic has no
-#                      public API.
-#
 #   "web_search citation" = an assistant message in the run window
 #                      whose content text contains the gate's excerpt
 #                      AND carries one or more citation URLs (either
@@ -35,14 +30,17 @@
 #                      counts as 1 source. Hostnames lowercased and
 #                      `www.` stripped to dedupe.
 #
+#   AllMusic browser fallback was removed 2026-05-07 — AllMusic was
+#   observed offline ("being updated") during the cutover test, and we
+#   pivoted to native web_search exclusively for non-API evidence.
+#
 # Public functions (all stdout-only; no side effects):
 #   resolve_run_started_ts                -> ISO8601 of first run_started event, or empty
 #   resolve_session_log                   -> path to most recent agent session JSONL, or empty
 #   count_profile_api_evidence            -> distinct API helper sources matching excerpt
-#   count_profile_allmusic_fallback       -> 1 if AllMusic browser load matches excerpt, else 0
 #   count_profile_citation_domains        -> distinct citation hostnames in run-window assistant messages whose text contains EXCERPT
-#   count_profile_evidence_sources        -> sum of all three (the value gate compares
-#                                            against CV_REQUIRED_LOADS)
+#   count_profile_evidence_sources        -> sum of api_evidence + citation_domains (the
+#                                            value gate compares against CV_REQUIRED_LOADS)
 #
 # All functions take EXCERPT as first arg and (optionally) profile_id as
 # second arg. profile_id is currently unused — the excerpt is per-credit and
@@ -55,8 +53,6 @@
 #   CV_SESSION_MAX_AGE_MIN      default 10; how far back to scan agent sessions
 #   CV_API_HELPER_PATTERNS      OPTIONAL pipe-separated regex of helper script
 #                               basenames. Default catches the three known.
-#   CV_FALLBACK_BROWSER_HOSTS_REGEX  OPTIONAL regex for browser fallback hosts.
-#                                    Default: ^allmusic\.com$
 
 CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
 
@@ -65,10 +61,6 @@ CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
 # OR by direct invocation like `./<name>`. Pipe-separated; the bash command
 # is matched as a substring.
 CV_API_HELPER_PATTERNS="${CV_API_HELPER_PATTERNS:-musicbrainz-isrc-lookup\.sh|spotify-track-lookup\.sh|discogs-isrc-lookup\.sh}"
-
-# Browser fallback for hosts with no public API. AllMusic only by default;
-# can be widened to other captcha-free non-API hosts via env.
-CV_FALLBACK_BROWSER_HOSTS_REGEX="${CV_FALLBACK_BROWSER_HOSTS_REGEX:-^allmusic\\.com$}"
 
 # Resolve the ISO8601 timestamp of the current run's run_started event, or
 # empty when no scope is active. Identical to browser-evidence.sh — kept
@@ -173,54 +165,15 @@ count_profile_api_evidence() {
     ' "$session_log" 2>/dev/null || echo 0
 }
 
-# Count AllMusic (or other CV_FALLBACK_BROWSER_HOSTS_REGEX-matching) browser
-# loads in the run window whose toolResult text contains $1. Returns 0 or 1
-# (collapses multiple loads of the same host to one source).
-#
-# Args: same as count_profile_api_evidence.
-count_profile_allmusic_fallback() {
-    local excerpt="$1"
-    [[ -n "$excerpt" ]] || { echo 0; return 0; }
-
-    local session_log run_started_ts
-    session_log=$(resolve_session_log)
-    run_started_ts=$(resolve_run_started_ts)
-
-    if [[ -z "$session_log" || ! -f "$session_log" ]]; then
-        echo 0
-        return 0
-    fi
-
-    jq -R -r -n \
-        --arg excerpt "$(printf '%s' "$excerpt" | tr '[:upper:]' '[:lower:]')" \
-        --arg fallback_re "$CV_FALLBACK_BROWSER_HOSTS_REGEX" \
-        --arg run_started_ts "$run_started_ts" \
-    '
-    [inputs | fromjson? // empty | select(type == "object")
-     | select($run_started_ts == "" or ((.timestamp // "") >= $run_started_ts))] as $lines
-    |
-    (reduce ($lines[] | .message.content[]? | select(.type == "toolCall")) as $tc
-        ({}; . + {($tc.id): {name: $tc.name, url: ($tc.arguments.url // "")}})
-    ) as $calls
-    |
-    [
-        $lines[]
-        | .message | select(.role == "toolResult")
-        | . as $tr
-        | ($calls[$tr.toolCallId] // null) as $call
-        | select($call != null and $call.name == "browser")
-        | ($call.url // "") as $url
-        | select($url != "")
-        | (try ($url | capture("^https?://(?:www\\.)?(?<host>[^/]+)").host) catch "") as $host
-        | select($host != "" and ($host | test($fallback_re)))
-        | (($tr.isError // false) | not) as $not_err
-        | (($tr.content // []) | map(.text // "") | join(" ") | ascii_downcase) as $text_lc
-        | select($not_err and ($text_lc | length) > 0)
-        | select($text_lc | contains($excerpt))
-        | $host
-    ] | unique | length
-    ' "$session_log" 2>/dev/null || echo 0
-}
+# [removed 2026-05-07] count_profile_allmusic_fallback used to count AllMusic
+# browser loads as a corner-case third source. Removed when AllMusic was
+# observed offline ("being updated") during the 2026-05-07 cutover test
+# run, and the agent's parallel attempt at web_fetch on Discogs returned
+# Cloudflare challenge pages. The api-mode evidence model is now strictly:
+#   Tier-1 API helpers + Tier-2 native web_search citations.
+# Browser is no longer a sanctioned source under api-mode. Rollback to
+# CV_EVIDENCE_MODE=browser still uses lib/browser-evidence.sh which has
+# its own AllMusic logic for the legacy quorum.
 
 # Count distinct citation domains in assistant messages within the run
 # window where (a) a citation URL is present in the message content and
@@ -315,9 +268,13 @@ count_profile_citation_domains() {
     ' "$session_log" 2>/dev/null || echo 0
 }
 
-# Sum of (api_evidence + allmusic_fallback + citation_domains) — the value
-# the gate compares against CV_REQUIRED_LOADS. This is the api-mode
-# replacement for browser-evidence.sh::count_profile_browser_loads.
+# Sum of (api_evidence + citation_domains) — the value the gate compares
+# against CV_REQUIRED_LOADS. This is the api-mode replacement for
+# browser-evidence.sh::count_profile_browser_loads.
+#
+# AllMusic browser fallback was removed 2026-05-07 (see header); under
+# api-mode browser is not a sanctioned source. Rollback via
+# CV_EVIDENCE_MODE=browser still uses lib/browser-evidence.sh.
 #
 # Args:
 #   $1 evidence_excerpt (required, non-empty)
@@ -327,11 +284,10 @@ count_profile_evidence_sources() {
     local pid="${2:-}"
     [[ -n "$excerpt" ]] || { echo 0; return 0; }
 
-    local api_n allmusic_n cite_n
+    local api_n cite_n
     api_n=$(count_profile_api_evidence "$excerpt" "$pid")
-    allmusic_n=$(count_profile_allmusic_fallback "$excerpt" "$pid")
     cite_n=$(count_profile_citation_domains "$excerpt" "$pid")
 
     # Defensive: each function returns "0" on any failure, so arithmetic is safe.
-    echo $(( api_n + allmusic_n + cite_n ))
+    echo $(( api_n + cite_n ))
 }

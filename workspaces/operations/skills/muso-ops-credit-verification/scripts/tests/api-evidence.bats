@@ -123,27 +123,10 @@ call_lib() {
   [ "$output" = "0" ]
 }
 
-# ---------- allmusic fallback: hit ---------------------------------------
-
-@test "allmusic_fallback: browser load to allmusic.com matching excerpt → 1" {
-  sl '{"timestamp":"2026-05-06T18:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"b1","name":"browser","arguments":{"url":"https://www.allmusic.com/album/example-mw0000123"}}]}}'
-  sl '{"timestamp":"2026-05-06T18:00:01Z","message":{"role":"toolResult","toolCallId":"b1","content":[{"type":"text","text":"AllMusic page text mentioning Bram Fidder as engineer"}]}}'
-
-  run call_lib count_profile_allmusic_fallback "Bram Fidder"
-  [ "$status" -eq 0 ]
-  [ "$output" = "1" ]
-}
-
-# ---------- allmusic fallback: non-fallback host → 0 ---------------------
-
-@test "allmusic_fallback: musicbrainz browser load (Tier-1 but not allmusic) → 0" {
-  sl '{"timestamp":"2026-05-06T18:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"b1","name":"browser","arguments":{"url":"https://musicbrainz.org/recording/abc"}}]}}'
-  sl '{"timestamp":"2026-05-06T18:00:01Z","message":{"role":"toolResult","toolCallId":"b1","content":[{"type":"text","text":"Bram Fidder mastering"}]}}'
-
-  run call_lib count_profile_allmusic_fallback "Bram Fidder"
-  [ "$status" -eq 0 ]
-  [ "$output" = "0" ]
-}
+# [removed 2026-05-07] allmusic_fallback test cases — count_profile_allmusic_fallback
+# was removed from lib/api-evidence.sh when AllMusic went offline ("being
+# updated") during the cutover test and we pivoted to native web_search
+# exclusively. Browser is no longer a sanctioned source under api-mode.
 
 # ---------- citation_domains: empty session → 0 --------------------------
 
@@ -231,17 +214,30 @@ call_lib() {
   [ "$output" = "3" ]
 }
 
-# ---------- evidence_sources: sums all paths -----------------------------
+# ---------- evidence_sources: sums api + citations (allmusic removed) ----
 
-@test "evidence_sources: api(1) + allmusic(1) + citations(0) = 2" {
-  sl '{"timestamp":"2026-05-06T18:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"bash musicbrainz-isrc-lookup.sh USXX1"}}]}}'
-  sl '{"timestamp":"2026-05-06T18:00:01Z","message":{"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"{\"name_match\":true,\"evidence_excerpt\":\"Bram Fidder – mastering\"}"}]}}'
-  sl '{"timestamp":"2026-05-06T18:00:02Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"b1","name":"browser","arguments":{"url":"https://allmusic.com/album/x"}}]}}'
-  sl '{"timestamp":"2026-05-06T18:00:03Z","message":{"role":"toolResult","toolCallId":"b1","content":[{"type":"text","text":"AllMusic credits include Bram Fidder"}]}}'
+@test "evidence_sources: api(1) + citations(1) = 2 (the canonical 2-source quorum)" {
+  # The canonical Tier-1+Tier-2 approval pattern: 1 MB API hit + 1 web
+  # citation domain. AllMusic browser fallback was removed 2026-05-07.
+  sl '{"timestamp":"2026-05-07T10:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"exec","arguments":{"command":"bash musicbrainz-isrc-lookup.sh USXX1"}}]}}'
+  sl '{"timestamp":"2026-05-07T10:00:01Z","message":{"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"{\"name_match\":true,\"evidence_excerpt\":\"Bram Fidder mastering\"}"}]}}'
+  sl '{"timestamp":"2026-05-07T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Bram Fidder mastering corroborated at https://vuproductions.gr/about-us"}]}}'
 
-  run call_lib count_profile_evidence_sources "Bram Fidder"
+  run call_lib count_profile_evidence_sources "Bram Fidder mastering"
   [ "$status" -eq 0 ]
   [ "$output" = "2" ]
+}
+
+@test "evidence_sources: AllMusic browser load no longer counts (post-removal)" {
+  # Defensive regression test: even if the agent loads AllMusic, that
+  # browser load is no longer a sanctioned evidence source under api-mode.
+  # Without an MB API hit or web citation, the count is 0.
+  sl '{"timestamp":"2026-05-07T10:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"b1","name":"browser","arguments":{"url":"https://www.allmusic.com/x"}}]}}'
+  sl '{"timestamp":"2026-05-07T10:00:01Z","message":{"role":"toolResult","toolCallId":"b1","content":[{"type":"text","text":"AllMusic credits include Bram Fidder mastering"}]}}'
+
+  run call_lib count_profile_evidence_sources "Bram Fidder mastering"
+  [ "$status" -eq 0 ]
+  [ "$output" = "0" ]
 }
 
 # ---------- evidence_sources: empty excerpt → 0 --------------------------
