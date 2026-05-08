@@ -39,14 +39,14 @@ Credits edited through Muso.AI are shared with industry partners: Music Story, A
 
 | Feature | Description |
 |---------|-------------|
-| **Lifetime Streaming Data** | View all-time total streams across 11 platforms |
-| **Daily Updates** | Track credit performance with daily refresh (4PM EST) |
-| **Multi-Platform** | Spotify, SoundCloud, YouTube, TikTok, Shazam, and more |
+| **Lifetime Streaming Data** | View all-time total streams across 7 platforms |
+| **Multi-Platform** | Coverage across Spotify, YouTube, YouTube Music, Shazam, TikTok, SoundCloud, and Instagram |
 | **Filter by Role** | Sort stats by track, album, role, and collaborator |
 | **Milestones & Charts** | Track career achievements and chart positions |
 | **Discovery** | Find new and rising artists with data-driven insights |
 
-**Platforms Tracked**: Spotify, YouTube / YouTube Music, SoundCloud, TikTok, Shazam, and more (11 total).
+**Platforms Tracked**: Spotify, YouTube, YouTube Music, Shazam, TikTok,
+SoundCloud, and Instagram (7 total).
 
 ### 3. Catalog Audits (Pro)
 

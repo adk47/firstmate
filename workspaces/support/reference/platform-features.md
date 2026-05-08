@@ -5,12 +5,11 @@
 Turn your credits into daily stats. Available on Pro and Business plans.
 
 ### Streaming Data
-- Lifetime streaming data across 11 platforms
-- Daily updates at 4PM EST
+- Lifetime data across 7 platforms
 - Filter by track, album, role, and collaborator
 
 ### Supported Platforms
-Spotify, YouTube, YouTube Music, SoundCloud, TikTok, Shazam, and more (11 total).
+Spotify, YouTube, YouTube Music, Shazam, TikTok, SoundCloud, and Instagram (7 total).
 
 ### Milestones
 Track career achievements at streaming thresholds:

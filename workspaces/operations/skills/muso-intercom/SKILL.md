@@ -22,7 +22,7 @@ metadata:
 
 Query and manage Muso.AI customer messaging and support data from Intercom.
 
-## Write Access Control (MANDATORY — check FIRST)
+## Write Access Control (MANDATORY – check FIRST)
 
 **Write operations (send messages, update contacts, tag, close conversations, etc.):**
 - `U7RP6HKUZ` (Aaron) → full write access

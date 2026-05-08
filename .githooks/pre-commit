@@ -33,7 +33,7 @@ shopt -s nullglob
 # ---------------------------------------------------------------
 # Check 1: every skills-all/<skill>/ has a SKILL.md
 # ---------------------------------------------------------------
-echo "  [1/6] skills-all structure"
+echo "  [1/7] skills-all structure"
 if [[ ! -d skills-all ]]; then
   fail "skills-all/ directory missing — refusing to commit (this would silently 'pass' an empty skill set)"
 fi
@@ -85,7 +85,7 @@ fi
 #       the shared array (so a future "I'll just call rsync directly"
 #       can't accidentally bypass the excludes)
 # ---------------------------------------------------------------
-echo "  [2/6] deploy.sh safety excludes"
+echo "  [2/7] deploy.sh safety excludes"
 DEPLOY_SH="scripts/deploy.sh"
 # This list is the enforced SUBSET of deploy.sh's RSYNC_EXCLUDES. The
 # check is one-directional: it asserts every entry below is present in
@@ -299,7 +299,7 @@ fi
 # (prevents someone accidentally committing a dispute-tracker snapshot
 # or api-log dump pulled from the server)
 # ---------------------------------------------------------------
-echo "  [3/6] staged files not under runtime-data paths"
+echo "  [3/7] staged files not under runtime-data paths"
 staged=$(git diff --cached --name-only --diff-filter=A)
 # Block paths that are 100% server-owned. We deliberately do NOT block
 # IDENTITY.md / HEARTBEAT.md / .openclaw — those are mixed (some workspaces
@@ -360,7 +360,7 @@ fi
 # If shellcheck isn't installed locally, print a LOUD warning but
 # don't block the commit — the CI gate (pr-validate.yml) catches
 # issues at PR time regardless.
-echo "  [4/6] shellcheck on staged *.sh files"
+echo "  [4/7] shellcheck on staged *.sh files"
 if ! command -v shellcheck >/dev/null 2>&1; then
   yellow ""
   yellow "══════════════════════════════════════════════════════════════════════"
@@ -439,7 +439,7 @@ fi
 #
 # This check blocks a regression: any staged SOUL.md whose **Model**:
 # line mentions a model vendor/family gets rejected at commit time.
-echo "  [5/6] SOUL.md hardcoded model names (issue #117)"
+echo "  [5/7] SOUL.md hardcoded model names (issue #117)"
 staged_soul=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^workspaces/[^/]+/SOUL\.md$' || true)
 if [[ -z "$staged_soul" ]]; then
   ok "no staged workspace SOUL.md files"
@@ -501,7 +501,7 @@ fi
 # that exercise it directly) bypasses the outbound email filter
 # and re-opens the leak Caroline was disclosing on 2026-04-16.
 # ---------------------------------------------------------------
-echo "  [6/6] Intercom client construction"
+echo "  [6/7] Intercom client construction"
 # Staged files only — we don't care about pre-existing prod code until it gets
 # touched. Include R (rename) so `git mv` can't smuggle a bypass past the check
 # by carrying an existing `new RealIntercomClient(` through a rename.
@@ -573,6 +573,52 @@ if (( ${#bypass_hits[@]} > 0 )); then
 BRIEFING
 else
   ok "no direct RealIntercomClient construction outside allowed paths"
+fi
+
+# ---------------------------------------------------------------
+# Check 7: no em-dashes (U+2014) in Caroline's customer-facing surface
+# Fede's analytics-tone rule (SOUL.md, common-issues.md §7) requires
+# en-dashes only across workspaces/support/, skills-all/muso-intercom/,
+# and every workspaces/<agent>/skills/muso-intercom/ mirror. The lint
+# script does dynamic mirror discovery so a new agent copy can't slip
+# past — see scripts/lint-no-em-dash.sh.
+# ---------------------------------------------------------------
+echo "  [7/7] no em-dashes in customer-facing surface"
+staged_caroline_files=$(git diff --cached --name-only --diff-filter=ACMR \
+  | grep -E '^(workspaces/support/|skills-all/muso-intercom/|workspaces/[^/]+/skills/muso-intercom/)' \
+  || true)
+if [[ -z "$staged_caroline_files" ]]; then
+  ok "no staged Caroline-surface files; skipping em-dash scan"
+else
+  if bash scripts/lint-no-em-dash.sh > /tmp/em-dash-lint.$$ 2>&1; then
+    ok "no em-dashes in staged Caroline surface"
+    rm -f /tmp/em-dash-lint.$$
+  else
+    fail "em-dash(es) found in customer-facing knowledge base:"
+    sed 's/^/      /' /tmp/em-dash-lint.$$
+    rm -f /tmp/em-dash-lint.$$
+    cat <<'BRIEFING'
+
+  ── BRIEFING ──────────────────────────────────────────────────────
+  WHY THIS CHECK EXISTS:
+    Fede's analytics-tone rule (SOUL.md, common-issues.md §7) requires
+    en-dashes (U+2013, `–`) only in Caroline's customer-facing surface.
+    Em-dashes (U+2014, `—`) are a forbidden character class — Caroline
+    learns voice from these files and would otherwise mirror them in
+    customer replies. Past sweeps have been undone by single-file edits
+    that didn't get re-linted.
+
+  HOW TO FIX (do this — do NOT --no-verify):
+    1. Open each file printed above and replace `—` (em-dash) with
+       `–` (en-dash). On macOS: `perl -i -pe 's/\x{2014}/\x{2013}/g' <file>`
+    2. Re-run: `bash scripts/lint-no-em-dash.sh`
+    3. Re-stage and retry the commit.
+
+  WHEN BYPASSING IS OK:
+    Never. There are no legitimate em-dashes in this surface.
+  ──────────────────────────────────────────────────────────────────
+BRIEFING
+  fi
 fi
 
 echo

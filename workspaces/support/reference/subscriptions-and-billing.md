@@ -11,7 +11,7 @@
 
 ### Pro ($10-12.50/month)
 - Everything in Lite
-- Profile Analytics (streaming data across 11 platforms, daily refresh at 4PM EST)
+- Profile Analytics (data across 7 platforms: Spotify, YouTube, YouTube Music, Shazam, TikTok, SoundCloud, Instagram)
 - Catalog Audits (MLC gap detection, ISRC-to-ISWC matching)
 - Discography Playlists (AI-curated Spotify playlist)
 - Milestones & Charts
@@ -103,13 +103,13 @@ Step-by-step instructions for the most common subscription actions.
 3. Find your current subscription and select Cancel
 4. Confirm the cancellation
 5. You keep access until the end of your current billing period
-6. Your credits and profile data are never deleted — those are free features
+6. Your credits and profile data are never deleted – those are free features
 
 ### How to update your payment method
 1. Log in at app.muso.ai
 2. Go to Settings > Billing
 3. Update your card details
-4. Save changes — new payment method applies to your next renewal
+4. Save changes – new payment method applies to your next renewal
 
 ### How to check your renewal date
 1. Log in at app.muso.ai
@@ -120,7 +120,7 @@ Step-by-step instructions for the most common subscription actions.
 - You keep all credits and profile data (these are free, always)
 - You lose access to: Analytics, Catalog Audits, Discography Playlists, Milestones
 - For Business: you lose Company Analytics, List Analytics, Multi-User Workspace, Discovery Tools
-- Your account stays active on the Lite plan — nothing is deleted
+- Your account stays active on the Lite plan – nothing is deleted
 
 ### How to add more seats (Pro)
 1. Log in at app.muso.ai

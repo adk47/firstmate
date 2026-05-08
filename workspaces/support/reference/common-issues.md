@@ -1,4 +1,4 @@
-# Common Issues — Troubleshooting Guide
+# Common Issues – Troubleshooting Guide
 
 Decision-tree reference for the 10 most frequent customer scenarios, based on real conversation data.
 
@@ -12,10 +12,10 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
 1. Confirm the action they want
    - If upgrading: direct to Settings > subscription > select new plan. Takes effect immediately.
    - If cancelling: direct to Settings > subscription > cancel. Access continues until billing period ends. Credits and profile data are never deleted.
-   - If downgrading (Pro to Lite): same as cancel — access to paid features ends at period end.
+   - If downgrading (Pro to Lite): same as cancel – access to paid features ends at period end.
 2. If they can't find the setting in the app:
    - Walk them through Settings > Billing or Subscription section
-3. **Escalate:** If they're unable to make the change after following the steps, create a ticket with category "Billing — Self-Service Failure". SLA: 1 business day.
+3. **Escalate:** If they're unable to make the change after following the steps, create a ticket with category "Billing – Self-Service Failure". SLA: 1 business day.
 
 ---
 
@@ -29,30 +29,30 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
    - If no email at all: ask how long ago they submitted.
 2. If submitted less than 5 business days ago: let them know it's within normal review time and to wait.
 3. If more than 5 business days with no update:
-   - **Escalate:** Create a ticket with category "Profile Claim — Pending Review". Include: account email, profile URL they tried to claim, date of submission. SLA: 2 business days.
+   - **Escalate:** Create a ticket with category "Profile Claim – Pending Review". Include: account email, profile URL they tried to claim, date of submission. SLA: 2 business days.
 4. If claim was rejected and resubmission also rejected:
-   - **Escalate:** Create a ticket with category "Profile Claim — Rejected". Include: account email, profile URL, documentation provided. SLA: 2 business days.
+   - **Escalate:** Create a ticket with category "Profile Claim – Rejected". Include: account email, profile URL, documentation provided. SLA: 2 business days.
 
 ---
 
-## 3. Duplicate profiles — merge request
+## 3. Duplicate profiles – merge request
 
 **Customer says:** "I show up twice / under different names. Can you merge them?"
 
-There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to "Settings > Profile > Merge Request" or any similar in-app flow — it does not exist. Profile merges are handled by the operations team via support ticket.
+There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to "Settings > Profile > Merge Request" or any similar in-app flow – it does not exist. Profile merges are handled by the operations team via support ticket.
 
 **Resolution path:**
 1. Ask the customer for the link to the profile they want to keep as their **main** profile (e.g., `https://credits.muso.ai/profile/<id>` or `https://app.muso.ai/profile/<id>`).
 2. Ask for the link(s) to the **duplicate** profile(s) to merge into the main.
 3. Once both are provided, create an action-request ticket with `actionType: "profile-merge"` (Tier 2). Include in `details`:
-   - `main_profile_url` — the URL the customer wants kept
-   - `duplicate_profile_urls` — array of duplicate profile URLs to merge in
+   - `main_profile_url` – the URL the customer wants kept
+   - `duplicate_profile_urls` – array of duplicate profile URLs to merge in
 4. Set expectation: "Our team will review and merge typically within 5 business days. You'll get a confirmation once it's done."
 
 **Notes:**
-- Never share an internal team member's email or assign a specific reviewer by name — the operations team triages from the ticket queue.
+- Never share an internal team member's email or assign a specific reviewer by name – the operations team triages from the ticket queue.
 - Never reference internal tools or URLs (e.g., admin dashboards, retool). Customer-facing URLs only.
-- If the customer can't provide URLs and only knows profile names, run `profile_lookup` to confirm matches before opening the ticket — include the resolved profile IDs in `details` instead of (or alongside) URLs.
+- If the customer can't provide URLs and only knows profile names, run `profile_lookup` to confirm matches before opening the ticket – include the resolved profile IDs in `details` instead of (or alongside) URLs.
 
 ---
 
@@ -68,7 +68,7 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
    - Ask: does the incorrect credit appear on Spotify, Apple Music, or their distributor in the same wrong form?
    - If **yes (external source)**: explain that Muso reflects what the source reports. They need to contact their distributor or that platform to correct the metadata. Once fixed at the source, Muso updates automatically.
    - If **no (Muso source or unsure)**: they can request a correction through their account. If that doesn't work, escalate.
-3. **Escalate:** Create a ticket with category "Credit Error — Muso Source" or "Credit Error — Source Discrepancy". Include: account email, track/album URL, the incorrect credit detail, what the correct credit should be. SLA: 2 business days.
+3. **Escalate:** Create a ticket with category "Credit Error – Muso Source" or "Credit Error – Source Discrepancy". Include: account email, track/album URL, the incorrect credit detail, what the correct credit should be. SLA: 2 business days.
 
 ---
 
@@ -87,7 +87,7 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
    - Ask what role they're claiming (producer, writer, engineer, etc.) and guide them toward the most relevant doc type above.
 4. If they have no documentation at all:
    - Explain that without supporting documentation claims are harder to verify, but they can still submit and explain the context in the claim notes.
-5. **Escalate:** If they've submitted documentation and the claim has been open more than 5 business days with no update, create a ticket with category "Credit Claim — Documentation Submitted". SLA: 2 business days.
+5. **Escalate:** If they've submitted documentation and the claim has been open more than 5 business days with no update, create a ticket with category "Credit Claim – Documentation Submitted". SLA: 2 business days.
 
 ---
 
@@ -103,20 +103,78 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
 3. If charge is settled and email matches but account still shows inactive:
    - Wait up to 24 hours from payment settlement before escalating.
 4. If 24+ hours have passed and subscription is still inactive:
-   - **Escalate:** Create a ticket with category "Billing — Charged but Inactive". Include: account email, payment confirmation or receipt, amount and date charged. SLA: 1 business day.
+   - **Escalate:** Create a ticket with category "Billing – Charged but Inactive". Include: account email, payment confirmation or receipt, amount and date charged. SLA: 1 business day.
 
 ---
 
-## 7. Analytics not showing
+## 7. Analytics not showing / streams not updating
 
-**Customer says:** "I'm on Pro but I can't see any streaming data."
+**Customer says:** "My analytics aren't updating," "I just upgraded but no
+streams," "My Spotify shows X streams but Muso shows Y," "I'm on Pro but I
+see nothing."
+
+The analytics pipeline is being upgraded. We are shipping a new version of
+analytics with better data and additional features. Caroline does NOT know
+the current refresh cadence and MUST NOT quote specific timing (no "24
+hours," "48–96 hours," "Friday 4PM EST," etc.). Aaron and engineering own
+this; Caroline's job is to keep the customer warm and file a ticket if they
+push back.
+
+**Tone (read this before responding):**
+
+- Do NOT apologize. No "sorry for the delay," no "I understand your
+  frustration."
+- Position the gap as us actively improving, not as a problem we're hiding.
+- Be direct and confident, not defensive.
+- Never promise rewards, credits, free months, or specific timing.
 
 **Resolution path:**
-1. Confirm they have an active Pro or Business subscription (not Lite).
-2. Confirm their profile has a seat assigned. They can check in account settings under their subscription.
-3. If they just upgraded: analytics populate after the next daily refresh at 4PM EST. Ask if it's been at least 24 hours.
-4. If subscription is active, seat is assigned, and 24+ hours have passed:
-   - **Escalate:** Create a ticket with category "Analytics — Missing Data". Include: account email, profile URL, subscription plan, when they upgraded. SLA: 1 business day.
+
+1. Confirm the basics – these are real prerequisites, not stalls:
+   - Active Pro or Business subscription (not Lite). If they're on Lite,
+     that's the answer.
+   - Their profile has a seat assigned (Settings > Subscription).
+   - If they're asking specifically about Apple Music data, see faq.md →
+     "Why don't I see Apple Music streams?"
+
+2. If subscription + seat are good and they're seeing missing or stale data,
+   deflect with confidence. Use phrasing along the lines of:
+
+   > "We're upgrading the analytics infrastructure and rolling out a new
+   > version of analytics with better data and new features. Things are
+   > landing in stages, so you'll see your numbers improve as it ships. If
+   > you want me to flag your account so the team can check on yours
+   > specifically, I can open a ticket."
+
+3. Expect pushback ("I want it working now"). Do NOT repeat the same line,
+   do NOT get defensive. Acknowledge directly and offer the ticket:
+
+   > "Totally fair. I can't speed it up from here, but I can make sure the
+   > team has eyes on your account – want me to open a ticket?"
+
+4. **Escalate** when any of these are true:
+   - Customer accepts the ticket offer.
+   - High-catalog customer asking specific data questions Caroline can't
+     answer.
+   - Customer is clearly frustrated after one deflection cycle.
+
+   Ticket category: "Analytics – Data Question." Include account email,
+   profile URL, subscription plan, what they're seeing vs what they
+   expected. SLA: 1 business day.
+
+5. **Never promise:**
+   - Specific timing for fixes, refreshes, or data backfills.
+   - Rewards, credits, free months, or compensation of any kind.
+   - Apple Music data (we don't have it yet – see FAQ).
+   - Feature parity with Spotify-for-Artists or any other platform.
+
+**Forbidden phrasing (verbatim from human-agent scripts; do NOT use):**
+
+- "Please allow 48–96 hours…"
+- "Please allow 72–120 hours…"
+- "Milestones refresh every Friday at 4 PM EST."
+- "Sorry for the inconvenience."
+- "Once subscribed, please be patient as it takes time to populate."
 
 ---
 
@@ -130,9 +188,9 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
 2. Direct them to use "Forgot Password" on the login page.
 3. If they signed up via social login (Google, Apple, etc.): try that login method instead of email/password.
 4. If they reset the password and still can't log in:
-   - Check if they're using the right email — common issue is having multiple email addresses.
+   - Check if they're using the right email – common issue is having multiple email addresses.
 5. If still unable to log in after all steps:
-   - **Escalate:** Create a ticket with category "Login — Account Access". Include: account email (or emails they've tried), login method (email/social), error message if any. SLA: 1 business day.
+   - **Escalate:** Create a ticket with category "Login – Account Access". Include: account email (or emails they've tried), login method (email/social), error message if any. SLA: 1 business day.
 
 ---
 
@@ -141,13 +199,13 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
 **Customer says:** "I want a refund."
 
 **Resolution path:**
-1. Ask why they're requesting the refund — this helps route the ticket correctly:
+1. Ask why they're requesting the refund – this helps route the ticket correctly:
    - Charged in error (duplicate charge, charged after cancel)
    - Didn't use the subscription / not what they expected
    - Technical issue prevented them from using the product
-2. There is no self-service refund path — all refund requests go to the support team.
+2. There is no self-service refund path – all refund requests go to the support team.
 3. Let the customer know refund requests are reviewed by the team and they'll receive a response by email.
-4. **Escalate:** Create a ticket with category "Billing — Refund Request". Include: account email, reason for refund, amount and charge date, any relevant context. SLA: 2 business days.
+4. **Escalate:** Create a ticket with category "Billing – Refund Request". Include: account email, reason for refund, amount and charge date, any relevant context. SLA: 2 business days.
 
 ---
 
@@ -162,4 +220,4 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
 2. If they only want to stop being charged: direct them to Settings > cancel subscription. Account stays intact.
 3. If they want full deletion:
    - There is no self-service account deletion.
-   - **Escalate:** Create a ticket with category "Account — Deletion Request". Include: account email, confirmation that they understand deletion is permanent and all data will be removed. SLA: 3 business days.
+   - **Escalate:** Create a ticket with category "Account – Deletion Request". Include: account email, confirmation that they understand deletion is permanent and all data will be removed. SLA: 3 business days.
