@@ -311,12 +311,12 @@ seed_session_with_freeform_posts() {
   echo "$sess"
 }
 
-@test "R4-3: release emits run_finished_renderer_missing when no renderer post found" {
+@test "R4-3: release --final emits run_finished_renderer_missing when no renderer post found" {
   "$SCRIPTS_DIR/lockfile.sh" acquire
   run_id=$(seed_runlog_with_run_finished 200 50)
   export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_freeform_posts)
 
-  run "$SCRIPTS_DIR/lockfile.sh" release
+  run "$SCRIPTS_DIR/lockfile.sh" release --final
   [ "$status" -eq 0 ]
   [ ! -f "$OPS_BATCH_LOCK_PATH" ]
   # stderr (merged into $output) notes the detection.
@@ -327,14 +327,23 @@ seed_session_with_freeform_posts() {
   jq -e 'select(.event == "run_finished_renderer_missing")' < "$logfile"
   jq -e 'select(.event == "run_finished_renderer_missing") | .approved_attempted == 200' < "$logfile"
   jq -e 'select(.event == "run_finished_renderer_missing") | .verification_needed_attempted == 50' < "$logfile"
+
+  # 2026-05-07 16:47 UTC regression guard: under bats, the renderer-missing
+  # detector must NEVER reach the openclaw CLI. helpers.bash::setup_tmp_env
+  # PATH-shadows openclaw with a stub that logs invocations to
+  # $TEST_TMPDIR/openclaw.calls; lockfile.sh::emit_renderer_missing_slack_alert
+  # also short-circuits on BATS_TEST_NAME / /tmp/ runlog paths. Either guard
+  # is sufficient; here we assert the stub recorded zero CALL lines, proving
+  # the in-script guard fired before reaching the openclaw subshell.
+  [ ! -s "$TEST_TMPDIR/openclaw.calls" ]
 }
 
-@test "R4-3: release does NOT emit event when renderer post is present" {
+@test "R4-3: release --final does NOT emit event when renderer post is present" {
   "$SCRIPTS_DIR/lockfile.sh" acquire
   run_id=$(seed_runlog_with_run_finished 200 50)
   export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_renderer_post)
 
-  run "$SCRIPTS_DIR/lockfile.sh" release
+  run "$SCRIPTS_DIR/lockfile.sh" release --final
   [ "$status" -eq 0 ]
   local day="${run_id:0:8}"
   local logfile="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}/${run_id}.jsonl"
@@ -342,12 +351,36 @@ seed_session_with_freeform_posts() {
   [ "$status" -ne 0 ]  # jq -e exits non-zero when no match
 }
 
-@test "R4-3: release does NOT emit event when attempts == 0 (nothing to summarise)" {
-  # Hollow batch: preflight ok but no credits processed. The B5 queue-clear
-  # message is legitimate; renderer output isn't required. Don't noise the
-  # runlog with false positives.
+@test "R4-3: release --final does NOT emit event when summary_posted_canonical is present (post-batch-summary.sh ran)" {
+  # 2026-05-07: the canonical path goes through `openclaw CLI` from a bash
+  # subshell, so the session-log scan can't see it and would manufacture a
+  # false-positive renderer-missing event on every healthy batch. The
+  # detector now short-circuits on the direct success marker that
+  # post-batch-summary.sh writes after both parent + thread sends succeed.
   "$SCRIPTS_DIR/lockfile.sh" acquire
-  run_id=$(seed_runlog_with_run_finished 0 0)
+  run_id=$(seed_runlog_with_run_finished 200 50)
+  # Append the success marker as post-batch-summary.sh would.
+  local day="${run_id:0:8}"
+  local logfile="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}/${run_id}.jsonl"
+  jq -n -c --arg rid "$run_id" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{event:"summary_posted_canonical", script:"post-batch-summary.sh",
+        run_id:$rid, ts:$ts, parent_msg_id:"1.1", channel:"C_TEST", dry_run:false}' >> "$logfile"
+  # Even with a session that has only freeform posts, the marker wins.
+  export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_freeform_posts)
+
+  run "$SCRIPTS_DIR/lockfile.sh" release --final
+  [ "$status" -eq 0 ]
+  run jq -e 'select(.event == "run_finished_renderer_missing")' < "$logfile"
+  [ "$status" -ne 0 ]
+}
+
+@test "R4-3: release WITHOUT --final does NOT emit event (gate added 2026-05-07)" {
+  # Mid-batch traps and intermediate releases must not fire the detector —
+  # post-batch-summary.sh may not have run yet (B6 timing race observed in
+  # 2026-05-06/07 batches: release at 11:00, canonical post at 11:02). Only
+  # the terminal release should emit the forensic event.
+  "$SCRIPTS_DIR/lockfile.sh" acquire
+  run_id=$(seed_runlog_with_run_finished 200 50)
   export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_freeform_posts)
 
   run "$SCRIPTS_DIR/lockfile.sh" release
@@ -358,7 +391,23 @@ seed_session_with_freeform_posts() {
   [ "$status" -ne 0 ]
 }
 
-@test "R4-3: release does NOT emit event when runlog has no run_finished (autofill path)" {
+@test "R4-3: release --final does NOT emit event when attempts == 0 (nothing to summarise)" {
+  # Hollow batch: preflight ok but no credits processed. The B5 queue-clear
+  # message is legitimate; renderer output isn't required. Don't noise the
+  # runlog with false positives.
+  "$SCRIPTS_DIR/lockfile.sh" acquire
+  run_id=$(seed_runlog_with_run_finished 0 0)
+  export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_freeform_posts)
+
+  run "$SCRIPTS_DIR/lockfile.sh" release --final
+  [ "$status" -eq 0 ]
+  local day="${run_id:0:8}"
+  local logfile="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}/${run_id}.jsonl"
+  run jq -e 'select(.event == "run_finished_renderer_missing")' < "$logfile"
+  [ "$status" -ne 0 ]
+}
+
+@test "R4-3: release --final does NOT emit event when runlog has no run_finished (autofill path)" {
   # Pre-fallback: if compute-run-summary didn't even produce a run_finished
   # event, the release is already abnormal and the autofill stderr is
   # enough signal. Don't stack two events for the same pathology.
@@ -373,23 +422,23 @@ seed_session_with_freeform_posts() {
   echo "$logfile" > "$OPS_RUNLOG_DIR/latest.txt"
   export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_freeform_posts)
 
-  run "$SCRIPTS_DIR/lockfile.sh" release
+  run "$SCRIPTS_DIR/lockfile.sh" release --final
   [ "$status" -eq 0 ]
   # No renderer_missing event should be written (no run_finished precondition).
   run jq -e 'select(.event == "run_finished_renderer_missing")' < "$logfile"
   [ "$status" -ne 0 ]
 }
 
-@test "R4-3: release is idempotent — second release does not double-emit" {
+@test "R4-3: release --final is idempotent — second release does not double-emit" {
   "$SCRIPTS_DIR/lockfile.sh" acquire
   run_id=$(seed_runlog_with_run_finished 200 50)
   export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_freeform_posts)
 
   # First release emits the event.
-  "$SCRIPTS_DIR/lockfile.sh" release
+  "$SCRIPTS_DIR/lockfile.sh" release --final
   # Re-acquire and release again — event must not be written twice.
   "$SCRIPTS_DIR/lockfile.sh" acquire
-  "$SCRIPTS_DIR/lockfile.sh" release
+  "$SCRIPTS_DIR/lockfile.sh" release --final
 
   local day="${run_id:0:8}"
   local logfile="$OPS_RUNLOG_DIR/${day:0:4}-${day:4:2}-${day:6:2}/${run_id}.jsonl"
@@ -412,7 +461,7 @@ seed_session_with_freeform_posts() {
       '{event:"run_finished_silent_failure", run_id:$rid, ts:$ts}' >> "$logfile"
   export CV_SESSION_LOG_OVERRIDE=$(seed_session_with_freeform_posts)
 
-  run "$SCRIPTS_DIR/lockfile.sh" release
+  run "$SCRIPTS_DIR/lockfile.sh" release --final
   [ "$status" -eq 0 ]
   jq -e 'select(.event == "run_finished_renderer_missing")' < "$logfile"
 }

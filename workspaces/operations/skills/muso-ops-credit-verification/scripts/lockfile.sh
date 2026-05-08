@@ -121,14 +121,19 @@ cmd_release() {
   # error is logged and the lockfile is still removed.
   if [[ "$terminal" == "1" ]]; then
     autofill_run_finished_if_needed || true
+    # R4-3: forensic event when agent bypassed render-slack-summary.sh. Must
+    # come AFTER autofill so the run_finished event is already in place (the
+    # renderer check is only meaningful when there's a summary to render).
+    # 2026-05-07: gated on --final/terminal (was unconditional). On the
+    # 2026-05-06/07 batches the detector raced ahead of post-batch-summary.sh
+    # — release at 11:00, canonical post at 11:02 — so the session-log scan
+    # found nothing on every healthy run and posted a :rotating_light: alert
+    # to #credit-verification. Even on the terminal release, the canonical
+    # path now goes through `openclaw CLI` from a bash subshell (not the MCP
+    # message tool), so the function also short-circuits when post-batch-
+    # summary.sh has written its summary_posted_canonical success event.
+    emit_renderer_missing_event_if_needed || true
   fi
-  # R4-3: forensic event when agent bypassed render-slack-summary.sh. Must
-  # come AFTER autofill so the run_finished event is already in place (the
-  # renderer check is only meaningful when there's a summary to render).
-  # This stays unconditional — it's idempotent and post-hoc, only fires
-  # when work happened (attempts > 0) and a run_finished event already
-  # exists. No false-positive cost from running it on every release.
-  emit_renderer_missing_event_if_needed || true
   rm -f "$OPS_BATCH_LOCK_PATH"
 }
 
@@ -219,8 +224,22 @@ emit_renderer_missing_event_if_needed() {
   [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || return 0
 
   # Idempotent: if the event is already present (second release, re-run),
-  # don't double-write.
-  if grep -q '"event":"run_finished_renderer_missing"' "$runlog_path" 2>/dev/null; then
+  # don't double-write. Use jq select rather than substring grep so a
+  # different event whose payload happens to mention this string can't
+  # spoof the check.
+  if jq -e -s '[.[] | select(.event == "run_finished_renderer_missing")] | length > 0' \
+       "$runlog_path" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Direct evidence beats heuristics. post-batch-summary.sh writes a
+  # `summary_posted_canonical` event on a successful parent+thread send;
+  # if it's there, the canonical path completed and the session-log
+  # heuristic below would only manufacture a false positive (the canonical
+  # path goes through `openclaw CLI` from a bash subshell, leaving no MCP
+  # `message` toolCall for the scan to find).
+  if jq -e -s '[.[] | select(.event == "summary_posted_canonical")] | length > 0' \
+       "$runlog_path" >/dev/null 2>&1; then
     return 0
   fi
 
@@ -313,6 +332,17 @@ emit_renderer_missing_event_if_needed() {
 # Fail-OPEN: any failure (no openclaw CLI, no env, send error) is swallowed.
 emit_renderer_missing_slack_alert() {
   local run_id="$1" runlog_path="$2" attempts="$3"
+
+  # Test-environment short-circuit. Belt-and-braces with the openclaw
+  # PATH-shadow that helpers.bash::setup_tmp_env installs: even if a
+  # future test path bypasses the helper, BATS_TEST_NAME or a /tmp/
+  # runlog path is enough to prove we're under bats and must NOT post
+  # a real Slack message. Same failure mode as PR #245 (2026-05-06)
+  # and 2026-05-07 16:47-16:52 UTC.
+  if [[ -n "${BATS_TEST_NAME:-}" ]] || [[ "$runlog_path" == /tmp/* ]]; then
+    return 0
+  fi
+
   command -v openclaw >/dev/null 2>&1 || return 0
 
   local dry_run_flag target_channel profile account

@@ -1,0 +1,25 @@
+# Tier-2 god-mode allowlist for muso-admin-api.sh.
+#
+# Anyone whose --requester resolves to a value below may execute tier-2
+# admin writes (POST /admin/profiles/merge, etc.) WITHOUT --confirmed-by /
+# --approval-msg-id. The audit row still fires with bypass=god_mode_self_approve.
+#
+# Match is case-insensitive, exact-string against --requester after Slack-ID
+# resolution. Both bare handles, full emails, and raw Slack IDs are accepted.
+# Lines starting with '#' and blank lines are ignored.
+#
+# Keep this list narrow — every entry can authorize hard-to-reverse production
+# writes with no second pair of eyes. Adding or removing an entry should be
+# treated as a tier-2 policy change in itself.
+
+aaron
+aaron@muso.ai
+U7RP6HKUZ
+
+jan
+jan@muso.ai
+U038BM16T7W
+
+nick
+nick@muso.ai
+U0AL36NADEY

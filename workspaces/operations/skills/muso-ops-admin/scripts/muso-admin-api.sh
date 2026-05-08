@@ -28,6 +28,7 @@ TOKEN_CACHE="${ADMIN_TOKEN_CACHE_PATH:-$SCRIPT_DIR/.admin-token-cache}"
 TOKEN_MAX_AGE=82800  # 23 hours in seconds
 REQUESTER_EMAIL=""   # Set via --requester flag
 EVIDENCE_EXCERPT=""  # Set via --evidence-excerpt flag (required for autonomous credit approves)
+PROFILE_AUDIT_ID=""  # Set via --profile-audit-id flag (Tier-0 profile-audit evidence path: dispatcher passes the profile_id behind the receipt so the gate can re-fetch + re-verify)
 CONFIRMED_BY=""      # Set via --confirmed-by flag (required for tier-2 writes — see enforce_tier2_approval_gate)
 APPROVAL_MSG_ID=""   # Set via --approval-msg-id flag (Slack message ID/ts of the in-thread approval — for audit)
 
@@ -40,6 +41,7 @@ RECENT_MERGES_PATH="${RECENT_MERGES_PATH:-${MUSO_OPS_STATE_DIR}/recent-merges.js
 TIER2_AUDIT_PATH="${TIER2_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/tier2-audit.jsonl}"
 TIER2_APPROVERS_PATH="${TIER2_APPROVERS_PATH:-${SCRIPT_DIR}/../config/tier2-approvers.txt}"
 TIER2_ENDPOINTS_PATH="${TIER2_ENDPOINTS_PATH:-${SCRIPT_DIR}/../config/tier2-endpoints.txt}"
+TIER2_GODMODE_PATH="${TIER2_GODMODE_PATH:-${SCRIPT_DIR}/../config/tier2-godmode-allowlist.txt}"
 # Reverse-direction guard window. A second merge that points the OTHER way
 # within this many seconds is the 2026-04-29 incident pattern; refuse it.
 TIER2_REVERSE_WINDOW_SECS="${TIER2_REVERSE_WINDOW_SECS:-300}"
@@ -347,16 +349,28 @@ resolve_slack_to_email() {
         echo "$input"
         return 0
     fi
+    # Synthetic identities (bot self-identifies as 'clio' in count-approvals
+    # and elsewhere). Recognize them explicitly so they don't trip the
+    # unknown-input return-1 path below — which under `set -e` would silently
+    # exit the caller's command-substitution and abort the script.
+    case "$input" in
+        clio)
+            echo "clio"
+            return 0
+            ;;
+    esac
     # Resolve Slack ID to email
     case "$input" in
-        U7RP6HKUZ)  echo "aaron@muso.ai" ;;
-        U07NF5A77E2) echo "fede@muso.ai" ;;
-        U03TYGJF1N3) echo "serhii@muso.ai" ;;
-        U038BM16T7W) echo "jan@muso.ai" ;;
-        U0302FZQGCB) echo "andrey@muso.ai" ;;
-        U02S7TJ7QHY) echo "oleg@muso.ai" ;;
-        U0AL36NADEY) echo "nick@muso.ai" ;;
-        U0A8CCTTAAG) echo "liza@muso.ai" ;;
+        U7RP6HKUZ)   echo "aaron@muso.ai" ;;   # Aaron Kaufman (CEO)
+        U07NF5A77E2) echo "fede@muso.ai" ;;    # Federico Cappuccilli (CMO)
+        U03TYGJF1N3) echo "serhii@muso.ai" ;;  # Serhii Ostapchuk (CTO)
+        U038BM16T7W) echo "jan@muso.ai" ;;     # Jan Delmo (Head of Operations) — NOT jay@
+        U0AL36NADEY) echo "nick@muso.ai" ;;    # Nicholas Sollazzo (Chief Agent Officer)
+        U0A8CCTTAAG) echo "liza@muso.ai" ;;    # Liza Basco (Accountant)
+        U03LP8YHLPK) echo "mariia@muso.ai" ;;  # Mariia Bubley (Head of Product / UI & UX)
+        U02N2NP3H7F) echo "artem@muso.ai" ;;   # Artem (Mobile Developer)
+        U0AV9C7CFRQ) echo "faith@muso.ai" ;;   # Faith Undie (Community & Social Media)
+        U02S7C96CGN) echo "f@muso.ai" ;;       # McLaren Amberti (Sales Ops) — NOT mclaren@, single letter f
         *)
             # Unknown Slack ID — return as-is
             echo "$input"
@@ -447,6 +461,363 @@ CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
 CV_EVIDENCE_EXCERPT_MIN="${CV_EVIDENCE_EXCERPT_MIN:-8}"
 CV_EVIDENCE_EXCERPT_MAX="${CV_EVIDENCE_EXCERPT_MAX:-200}"
 
+# Evidence mode: which library decides whether the excerpt is grounded.
+#   api     (default) — count distinct API-helper sources + AllMusic browser
+#                       fallback (+ stubbed web_search citations) via
+#                       lib/api-evidence.sh. The post-Cloudflare default.
+#   browser           — count distinct Tier-1 browser loads via the legacy
+#                       lib/browser-evidence.sh path. Kept as an emergency
+#                       rollback knob; flip via env if api-mode misfires.
+#   both              — accept on EITHER library reaching CV_REQUIRED_LOADS.
+#                       Useful for one validation cycle when transitioning;
+#                       not a steady-state mode.
+CV_EVIDENCE_MODE="${CV_EVIDENCE_MODE:-api}"
+case "$CV_EVIDENCE_MODE" in
+    api|browser|both) ;;
+    *)
+        echo "FATAL: CV_EVIDENCE_MODE must be one of api|browser|both (got '${CV_EVIDENCE_MODE}')" >&2
+        exit 1
+        ;;
+esac
+
+# --- Tier-0 thresholds (must mirror profile-audit.sh defaults) -------------
+# Defense-in-depth: even if profile-audit.sh is compromised or its receipt
+# forged, the gate independently re-fetches the same admin-API surfaces and
+# recomputes the 8 gates from live data. Threshold env-var names are shared
+# so a single override flips both producer + verifier in lock-step.
+CV_TIER0_MIN_BATCH="${CV_TIER0_MIN_BATCH:-20}"
+CV_TIER0_MIN_CC="${CV_TIER0_MIN_CC:-100}"
+CV_TIER0_MIN_POP="${CV_TIER0_MIN_POP:-50}"
+CV_TIER0_MIN_INDUSTRY="${CV_TIER0_MIN_INDUSTRY:-0.70}"
+CV_TIER0_MIN_ONLY_VEL="${CV_TIER0_MIN_ONLY_VEL:-0.70}"
+CV_TIER0_MIN_ARTIST_OVERLAP="${CV_TIER0_MIN_ARTIST_OVERLAP:-0.40}"
+CV_TIER0_MIN_LABEL_OVERLAP="${CV_TIER0_MIN_LABEL_OVERLAP:-0.30}"
+# Popularity drifts (e.g. Spotify recomputes daily). Allow a ±5% delta
+# between the receipt's recorded value and the live re-fetch before
+# rejecting on cc/pop mismatch.
+CV_TIER0_POP_TOLERANCE_FRAC="${CV_TIER0_POP_TOLERANCE_FRAC:-0.05}"
+
+# Emit a tier0_* runlog event. Best-effort; mirrors profile-audit.sh.
+# Disables CV verdict + cookie-cutter gates inside runlog.sh because tier0
+# events are upstream of the browser path and intentionally repetitive.
+_tier0_emit_event() {
+    local name="$1" payload="$2"
+    if [[ -z "${OPS_RUNLOG_DIR:-}" || -z "${OPS_RUN_ID:-}" ]]; then
+        return 0
+    fi
+    local runlog_sh="${RUNLOG_SH:-}"
+    if [[ -z "$runlog_sh" ]]; then
+        # Same workspace layout as profile-audit.sh
+        runlog_sh="${SCRIPT_DIR}/../../muso-ops-credit-verification/scripts/runlog.sh"
+    fi
+    if [[ ! -x "$runlog_sh" && ! -f "$runlog_sh" ]]; then
+        return 0
+    fi
+    CV_DISABLE_VERDICT_GATE=1 CV_DISABLE_COOKIE_CUTTER_GATE=1 \
+        bash "$runlog_sh" event "$OPS_RUN_ID" "$name" "$payload" \
+        >/dev/null 2>&1 || true
+}
+
+# Parse `profile_audit:k=v,k=v,...` receipts. Echo a JSON object on success;
+# return 1 on parse failure (no `profile_audit:` prefix or no kv pairs).
+_tier0_parse_receipt() {
+    local excerpt="$1"
+    [[ "$excerpt" == profile_audit:* ]] || return 1
+    local payload="${excerpt#profile_audit:}"
+    [[ -n "$payload" ]] || return 1
+    printf '%s' "$payload" | jq -R -s -c '
+        split(",")
+        | map(select(length > 0))
+        | map(split("=") | select(length == 2) | {(.[0]): .[1]})
+        | add // {}'
+}
+
+# Tier-0 evidence path: receipt looks like
+#   profile_audit:cc=694,pop=68,batch=50,industry=0.96,only_vel=1.00,br_max=1/1,roles_ok=1,art=0.56,lbl=0.46
+# Re-runs the 8 gates against LIVE admin-API data and accepts only if all
+# 8 still pass. Returns 0 on accept, 1 on reject (with stderr explanation +
+# tier0_audit_rejected_by_gate runlog event).
+_tier0_audit_recompute_gate() {
+    local excerpt="$1"
+    local pid="${PROFILE_AUDIT_ID:-}"
+    local admin_api_script="${ADMIN_API_SCRIPT:-${BASH_SOURCE[0]}}"
+
+    if [[ -z "$pid" ]]; then
+        echo "credit_approve_gate: profile_audit: receipt requires --profile-audit-id <profile_id> so the gate can re-verify against live data." >&2
+        _tier0_emit_event tier0_audit_rejected_by_gate \
+            "$(jq -n -c --arg r "$excerpt" '{reason:"missing_profile_audit_id", receipt:$r}')"
+        return 1
+    fi
+
+    local kv
+    kv="$(_tier0_parse_receipt "$excerpt")" || {
+        echo "credit_approve_gate: malformed profile_audit: receipt (no parsable k=v pairs)." >&2
+        _tier0_emit_event tier0_audit_rejected_by_gate \
+            "$(jq -n -c --arg r "$excerpt" --arg pid "$pid" \
+                '{profile_id:$pid, reason:"malformed_receipt", receipt:$r}')"
+        return 1
+    }
+
+    # Pull receipt-claimed values used for receipt-vs-live cross-check.
+    # Only cc + pop are cross-checked (cc exact, pop within tolerance).
+    # The other receipt fields (batch/industry/only_vel/art/lbl/br_max/roles_ok)
+    # are informational; the gate re-runs all 8 gates on live data, so the
+    # live recompute is authoritative for those.
+    local r_cc r_pop
+    r_cc="$(jq -r '.cc // ""' <<<"$kv")"
+    r_pop="$(jq -r '.pop // ""' <<<"$kv")"
+
+    _t0_reject() {
+        local reason="$1" extra_json="${2:-{\}}"
+        echo "credit_approve_gate: tier0_audit_rejected_by_gate.${reason} for profile $pid" >&2
+        _tier0_emit_event tier0_audit_rejected_by_gate \
+            "$(jq -n -c \
+                --arg pid "$pid" \
+                --arg r "$excerpt" \
+                --arg reason "$reason" \
+                --argjson extra "$extra_json" \
+                '{profile_id:$pid, receipt:$r, reason:$reason} + $extra')"
+        return 1
+    }
+
+    # --- Step 1: live profile (uses cc + pop from a credit row, same as
+    # the audit script). Pull the unverified queue.
+    local unv_resp unv_http
+    unv_resp=$(bash "$admin_api_script" call GET "/admin/credit-requests?profilesIds=$pid&status=unverified&limit=1000" 2>/dev/null) || {
+        _t0_reject "admin_api_unverified_failed"; return 1; }
+    unv_http=$(jq -r '.http_status // "unknown"' <<<"$unv_resp" 2>/dev/null || echo unknown)
+    if [[ "$unv_http" != "200" ]]; then
+        _t0_reject "profile_not_found_or_admin_error" \
+            "$(jq -n -c --arg s "$unv_http" '{http_status:$s}')"
+        return 1
+    fi
+
+    local unv_items unv_count
+    unv_items=$(jq -c '.body.data.items // []' <<<"$unv_resp")
+    unv_count=$(jq 'length' <<<"$unv_items")
+
+    # G0: minimum batch size
+    if (( unv_count < CV_TIER0_MIN_BATCH )); then
+        _t0_reject "g0_low_volume" \
+            "$(jq -n -c --argjson n "$unv_count" --argjson min "$CV_TIER0_MIN_BATCH" \
+                '{unverified_count:$n, min_batch:$min}')"
+        return 1
+    fi
+
+    # Pull live cc + pop (fail-closed if both null)
+    local live_cc live_pop
+    live_cc=$(jq -r '.[0].profile.creditCount // 0' <<<"$unv_items")
+    live_pop=$(jq -r '.[0].profile.popularity // 0' <<<"$unv_items")
+    live_cc=${live_cc:-0}
+    live_pop=${live_pop:-0}
+
+    # Receipt-vs-live cross-check (defense-in-depth: forged receipt detection).
+    # cc must match exactly; pop allowed to drift within tolerance.
+    if [[ -n "$r_cc" ]] && [[ "$r_cc" != "$live_cc" ]]; then
+        _t0_reject "cc_mismatch" \
+            "$(jq -n -c --arg rcc "$r_cc" --argjson lcc "$live_cc" \
+                '{receipt_cc:$rcc, live_cc:$lcc}')"
+        return 1
+    fi
+    if [[ -n "$r_pop" ]]; then
+        # |live_pop - r_pop| / max(r_pop, 1) <= tolerance
+        local pop_ok
+        pop_ok=$(awk -v r="$r_pop" -v l="$live_pop" -v tol="$CV_TIER0_POP_TOLERANCE_FRAC" 'BEGIN{
+            denom = (r > 0) ? r : 1;
+            d = (l - r); if (d < 0) d = -d;
+            print (d / denom <= tol) ? "1" : "0";
+        }')
+        if [[ "$pop_ok" != "1" ]]; then
+            _t0_reject "pop_mismatch" \
+                "$(jq -n -c --arg rpop "$r_pop" --argjson lpop "$live_pop" --arg tol "$CV_TIER0_POP_TOLERANCE_FRAC" \
+                    '{receipt_pop:$rpop, live_pop:$lpop, tolerance_frac:$tol}')"
+            return 1
+        fi
+    fi
+
+    # G1 / G2: live cc + pop thresholds
+    if (( live_cc < CV_TIER0_MIN_CC )); then
+        _t0_reject "g1_creditCount" \
+            "$(jq -n -c --argjson lcc "$live_cc" --argjson min "$CV_TIER0_MIN_CC" \
+                '{live_cc:$lcc, threshold:$min}')"
+        return 1
+    fi
+    if (( live_pop < CV_TIER0_MIN_POP )); then
+        _t0_reject "g2_popularity" \
+            "$(jq -n -c --argjson lpop "$live_pop" --argjson min "$CV_TIER0_MIN_POP" \
+                '{live_pop:$lpop, threshold:$min}')"
+        return 1
+    fi
+
+    # Compute facts on unverified
+    local facts_unv
+    facts_unv=$(jq -c '
+        def only_velocity:
+            (.verificationData.rule_risk_percent // {}) as $r
+            | (($r.reject_high_velocity_profile // 0) > 0)
+              and
+              ([
+                  $r | to_entries[]
+                  | select(.key | startswith("reject_"))
+                  | select(.key != "reject_high_velocity_profile")
+                  | select((.value // 0) > 0)
+              ] | length == 0);
+        def role_set: (.credits // []) | map(ascii_downcase | gsub("^\\s+|\\s+$"; ""));
+        {
+            count: length,
+            industry_count: ([.[] | select((.metadata.source // "") == "industry")] | length),
+            only_velocity_count: ([.[] | select(only_velocity)] | length),
+            max_breadth: ([.[] | (.credits // []) | length] | max // 0),
+            roles_set: ([.[] | role_set[]] | unique),
+            labels_per_credit: [.[] | (.metadata.label // "" | ascii_downcase | gsub("^\\s+|\\s+$"; ""))],
+            artists_per_credit: [.[] | (.spotifyTrackArtists // []) | map(.name // "" | ascii_downcase | gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))]
+        }' <<<"$unv_items")
+
+    local industry_frac only_vel_frac unv_max_breadth
+    industry_frac=$(jq -r 'if .count == 0 then 0 else (.industry_count / .count) end' <<<"$facts_unv")
+    only_vel_frac=$(jq -r 'if .count == 0 then 0 else (.only_velocity_count / .count) end' <<<"$facts_unv")
+    unv_max_breadth=$(jq -r '.max_breadth' <<<"$facts_unv")
+
+    # Float-compare helper (bash arithmetic is integer only)
+    _t0_fcmp() {
+        awk -v l="$1" -v r="$3" -v op="$2" 'BEGIN{
+            if (op==">=") exit (l >= r) ? 0 : 1;
+            if (op==">")  exit (l >  r) ? 0 : 1;
+            exit 2;
+        }'
+    }
+
+    # G3 / G4
+    if ! _t0_fcmp "$industry_frac" ">=" "$CV_TIER0_MIN_INDUSTRY"; then
+        _t0_reject "g3_industry_fraction" \
+            "$(jq -n -c --arg actual "$industry_frac" --arg t "$CV_TIER0_MIN_INDUSTRY" \
+                '{actual:$actual, threshold:$t}')"
+        return 1
+    fi
+    if ! _t0_fcmp "$only_vel_frac" ">=" "$CV_TIER0_MIN_ONLY_VEL"; then
+        _t0_reject "g4_only_velocity_fraction" \
+            "$(jq -n -c --arg actual "$only_vel_frac" --arg t "$CV_TIER0_MIN_ONLY_VEL" \
+                '{actual:$actual, threshold:$t}')"
+        return 1
+    fi
+
+    # Approved corpus
+    local ap_resp ap_http ap_items ap_count
+    ap_resp=$(bash "$admin_api_script" call GET "/admin/credit-requests?profilesIds=$pid&status=approved&limit=1000" 2>/dev/null) || {
+        _t0_reject "admin_api_approved_failed"; return 1; }
+    ap_http=$(jq -r '.http_status // "unknown"' <<<"$ap_resp" 2>/dev/null || echo unknown)
+    if [[ "$ap_http" != "200" ]]; then
+        _t0_reject "approved_corpus_admin_error" \
+            "$(jq -n -c --arg s "$ap_http" '{http_status:$s}')"
+        return 1
+    fi
+    ap_items=$(jq -c '.body.data.items // []' <<<"$ap_resp")
+    ap_count=$(jq 'length' <<<"$ap_items")
+
+    if (( ap_count == 0 )); then
+        _t0_reject "no_approved_corpus" "$(jq -n -c '{}')"
+        return 1
+    fi
+
+    local facts_ap
+    facts_ap=$(jq -c '
+        def role_set: (.credits // []) | map(ascii_downcase | gsub("^\\s+|\\s+$"; ""));
+        {
+            count: length,
+            max_breadth: ([.[] | (.credits // []) | length] | max // 0),
+            roles_set: ([.[] | role_set[]] | unique),
+            labels: ([.[] | .metadata.label // empty] | map(ascii_downcase) | unique),
+            artist_names: ([.[] | (.spotifyTrackArtists // [])[] | .name // "" | ascii_downcase | gsub("^\\s+|\\s+$"; "")] | map(select(. != "")) | unique)
+        }' <<<"$ap_items")
+
+    local ap_max_breadth allow_breadth
+    ap_max_breadth=$(jq -r '.max_breadth' <<<"$facts_ap")
+    allow_breadth=$(( ap_max_breadth + 1 ))
+
+    # G5: profile-relative breadth
+    if (( unv_max_breadth > allow_breadth )); then
+        _t0_reject "g5_breadth" \
+            "$(jq -n -c --argjson u "$unv_max_breadth" --argjson a "$ap_max_breadth" \
+                '{unv_max_breadth:$u, ap_max_breadth:$a}')"
+        return 1
+    fi
+
+    # G6: roles ⊆ approved roles
+    local roles_ok
+    roles_ok=$(jq -n -c \
+        --argjson unv "$facts_unv" \
+        --argjson ap "$facts_ap" '
+        ($unv.roles_set - $ap.roles_set) as $extra
+        | {ok: ($extra | length == 0), extra: $extra}')
+    if [[ "$(jq -r '.ok' <<<"$roles_ok")" != "true" ]]; then
+        local extras
+        extras=$(jq -c '.extra' <<<"$roles_ok")
+        _t0_reject "g6_role_subset" \
+            "$(jq -n -c --argjson e "$extras" '{extra_roles:$e}')"
+        return 1
+    fi
+
+    # G7: artist overlap
+    local artist_overlap
+    artist_overlap=$(jq -n -r \
+        --argjson unv "$facts_unv" \
+        --argjson ap "$facts_ap" '
+        ($ap.artist_names) as $set
+        | ($unv.artists_per_credit) as $per
+        | if ($per | length) == 0 then 0
+          else
+              ([$per[] | select(any(.[]; . as $n | $set | index($n) != null))] | length) / ($per | length)
+          end')
+    if ! _t0_fcmp "$artist_overlap" ">=" "$CV_TIER0_MIN_ARTIST_OVERLAP"; then
+        _t0_reject "g7_artist_overlap" \
+            "$(jq -n -c --arg actual "$artist_overlap" --arg t "$CV_TIER0_MIN_ARTIST_OVERLAP" \
+                '{actual:$actual, threshold:$t}')"
+        return 1
+    fi
+
+    # G8: label overlap
+    local label_overlap
+    label_overlap=$(jq -n -r \
+        --argjson unv "$facts_unv" \
+        --argjson ap "$facts_ap" '
+        ($ap.labels | map(select(. != null and . != ""))) as $labelset
+        | ($unv.labels_per_credit) as $per
+        | if ($per | length) == 0 then 0
+          else
+              ([$per[] | . as $cur | select($cur != "" and ($labelset | index($cur) != null))] | length) / ($per | length)
+          end')
+    if ! _t0_fcmp "$label_overlap" ">=" "$CV_TIER0_MIN_LABEL_OVERLAP"; then
+        _t0_reject "g8_label_overlap" \
+            "$(jq -n -c --arg actual "$label_overlap" --arg t "$CV_TIER0_MIN_LABEL_OVERLAP" \
+                '{actual:$actual, threshold:$t}')"
+        return 1
+    fi
+
+    # All 8 gates passed live. Note: profile-audit.sh already emits
+    # tier0_audit_passed when it produced the receipt, so to avoid event-name
+    # collision the gate emits tier0_audit_verified — "the gate independently
+    # re-verified the receipt against live data and agreed."
+    _tier0_emit_event tier0_audit_verified \
+        "$(jq -n -c \
+            --arg pid "$pid" \
+            --arg r "$excerpt" \
+            --argjson lcc "$live_cc" \
+            --argjson lpop "$live_pop" \
+            --argjson batch "$unv_count" \
+            --arg industry "$industry_frac" \
+            --arg only_vel "$only_vel_frac" \
+            --argjson unv_breadth "$unv_max_breadth" \
+            --argjson ap_breadth "$ap_max_breadth" \
+            --arg art "$artist_overlap" \
+            --arg lbl "$label_overlap" \
+            '{profile_id:$pid, receipt:$r, live_cc:$lcc, live_pop:$lpop, batch:$batch,
+              industry:$industry, only_velocity:$only_vel,
+              unverified_max_breadth:$unv_breadth, approved_max_breadth:$ap_breadth,
+              artist_overlap:$art, label_overlap:$lbl}')"
+    echo "credit_approve_gate: tier0_audit_verified for profile $pid (8/8 gates pass live)" >&2
+    return 0
+}
+
 enforce_credit_approve_gate() {
     local method="$1" path="$2" body="$3"
 
@@ -509,6 +880,24 @@ EOF
         return 1
     fi
 
+    # --- Tier-0 profile-audit evidence path ---------------------------------
+    # If excerpt is a `profile_audit:...` receipt, hand off to the recompute
+    # gate. Tier-0 doesn't have browser snapshots to grep, so this branch
+    # never falls through to the browser-evidence logic below — it terminates
+    # the gate with accept (return 0) or reject (return 1).
+    #
+    # Defense-in-depth: the gate re-fetches the same admin-API surfaces
+    # profile-audit.sh used and recomputes all 8 gates from live data. Even
+    # if the receipt is forged or the audit script is compromised, the gate
+    # is the source of truth for "should this approve."
+    if [[ "$excerpt" == profile_audit:* ]]; then
+        if _tier0_audit_recompute_gate "$excerpt"; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+
     # Locate the most-recently modified openclaw session log on the main
     # gateway (the operations workspace).
     # Portable across GNU/BSD: find filters by age; stat resolves mtime for sort.
@@ -527,6 +916,64 @@ EOF
         return 1
     fi
 
+    # CV_EVIDENCE_MODE dispatch: api (default) | browser (legacy rollback) | both.
+    # Under api/both, source lib/api-evidence.sh and check for >=CV_REQUIRED_LOADS
+    # distinct evidence sources matching the excerpt. Under api, that's the
+    # whole gate — return immediately. Under both, success short-circuits;
+    # failure falls through to the browser-evidence pipeline below. Under
+    # browser, skip this block entirely.
+    if [[ "$CV_EVIDENCE_MODE" == "api" || "$CV_EVIDENCE_MODE" == "both" ]]; then
+        # CV_API_EVIDENCE_LIB lets tests redirect; production resolves via
+        # SCRIPT_DIR — the workspaces/operations/skills/muso-ops-admin script
+        # is one workspace-skill hop away from credit-verification.
+        local api_evidence_lib="${CV_API_EVIDENCE_LIB:-${SCRIPT_DIR}/../../muso-ops-credit-verification/scripts/lib/api-evidence.sh}"
+        if [[ ! -f "$api_evidence_lib" ]]; then
+            echo "credit_approve_gate: CV_EVIDENCE_MODE=${CV_EVIDENCE_MODE} but lib/api-evidence.sh not found at $api_evidence_lib" >&2
+            return 1
+        fi
+        # Source in a sub-shell so the lib's globals don't leak. The lib reads
+        # $CV_SESSION_LOG_OVERRIDE (we set it to the resolved session_log so
+        # both libs scan the exact same file the gate already chose) and
+        # writes a single integer to stdout.
+        local api_count
+        api_count=$(
+            CV_SESSION_LOG_OVERRIDE="$session_log" \
+            CV_SESSION_MAX_AGE_MIN="$CV_SESSION_MAX_AGE_MIN" \
+            bash -c "source '$api_evidence_lib'; count_profile_evidence_sources \"\$1\"" _ "$excerpt"
+        )
+        api_count="${api_count:-0}"
+        if (( api_count >= CV_REQUIRED_LOADS )); then
+            return 0
+        fi
+        if [[ "$CV_EVIDENCE_MODE" == "api" ]]; then
+            cat >&2 <<EOF
+credit_approve_gate: insufficient api-evidence — found ${api_count}/${CV_REQUIRED_LOADS} distinct evidence sources for --evidence-excerpt "${excerpt}" in this session.
+Sources counted under CV_EVIDENCE_MODE=api:
+  * API-helper invocations (musicbrainz-isrc-lookup.sh, spotify-track-lookup.sh,
+    discogs-isrc-lookup.sh) whose toolResult JSON contains the excerpt.
+    Each helper script counts as ONE source — two MusicBrainz hits don't
+    double-count.
+  * Tier-2 native web_search citations: each distinct hostname in an
+    assistant message that mentions the excerpt counts as ONE source
+    (www. stripped, hostnames lowercased).
+Browser is NOT a sanctioned source under api-mode (AllMusic fallback was
+removed 2026-05-07). If Tier-1 API helpers and Tier-2 web_search don't
+sum to ${CV_REQUIRED_LOADS} for this credit, downgrade the verdict to
+UNVERIFIABLE — NEEDS REVIEW and escalate to Jan (<@U038BM16T7W>).
+For emergency rollback to the legacy browser-only quorum, set
+CV_EVIDENCE_MODE=browser in the gateway env.
+Session log checked: ${session_log}
+EOF
+            return 1
+        fi
+        # CV_EVIDENCE_MODE=both: api count fell short; fall through to browser path.
+    fi
+
+    if [[ "$CV_EVIDENCE_MODE" == "api" ]]; then
+        # Defensive — should be unreachable; the api block above already returned.
+        return 0
+    fi
+
     # R3-3: scope the session-log scan to the current batch run. openclaw
     # channel-keys sessions — one file persists across runs/restarts/days —
     # so a web_fetch yesterday would still block today's approves without
@@ -541,11 +988,11 @@ EOF
     # web_fetch on them returns the non-rendered HTML, which is a different
     # (and often wrong) data surface than what the browser tool sees.
     # Multiple real incidents (2026-04-16, 2026-04-20, 2026-04-22) featured
-    # web_fetch substituting for browser on these hosts. Primary defense is
-    # the `muso-credit-verification-enforcer` plugin's block-web-fetch-tier1
-    # hook, which returns an error-shaped toolResult for any such call. This
-    # bash-layer check is the backstop — if the plugin hook misses a call,
-    # the approve still refuses.
+    # web_fetch substituting for browser on these hosts. The plugin
+    # block-web-fetch-tier1 hook was the primary defense until 2026-05-07
+    # when it was deleted as part of the api-mode cutover; this bash check
+    # is now the sole enforcement under both api-mode (default) and the
+    # browser-mode rollback path.
     #
     # R4-1: only count web_fetch calls whose toolResult indicates actual data
     # was returned. A plugin-blocked call leaves a toolCall row in the
@@ -729,6 +1176,31 @@ is_tier2_approver() {
     return 1
 }
 
+# Self-approving requesters for tier-2 writes. Anyone whose --requester
+# resolves to a value in tier2-godmode-allowlist.txt may execute tier-2
+# writes WITHOUT --confirmed-by/--approval-msg-id. The audit row still
+# fires (with bypass=god_mode_self_approve) so writes remain traceable.
+# Fail-closed when the file is missing — bypass is opt-in.
+is_tier2_godmode_requester() {
+    local handle="$1"
+    [[ -n "$handle" ]] || return 1
+    [[ -f "$TIER2_GODMODE_PATH" ]] || return 1
+    local handle_lc
+    handle_lc="$(printf %s "$handle" | tr '[:upper:]' '[:lower:]')"
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        # Trim ALL surrounding whitespace incl. tabs and \r — IDE-saved
+        # files commonly carry trailing spaces or CRLF, and a fragile trim
+        # silently locks self-approving requesters out of god-mode.
+        line="$(printf %s "$line" | tr -d '[:space:]\r')"
+        [[ -z "$line" ]] && continue
+        local entry_lc
+        entry_lc="$(printf %s "$line" | tr '[:upper:]' '[:lower:]')"
+        [[ "$handle_lc" == "$entry_lc" ]] && return 0
+    done < "$TIER2_GODMODE_PATH"
+    return 1
+}
+
 enforce_tier2_approval_gate() {
     local method="$1" path="$2"
 
@@ -745,6 +1217,33 @@ enforce_tier2_approval_gate() {
     if is_dry_run_mode; then
         return 0
     fi
+
+    # God-mode bypass: requester self-authorizes (no --confirmed-by /
+    # --approval-msg-id needed). Audit row still records who+when with
+    # bypass=god_mode_self_approve. Match against email or raw flag value
+    # so both `--requester jan@muso.ai` and `--requester U038BM16T7W`
+    # (resolved to email upstream) work.
+    if is_tier2_godmode_requester "${REQUESTER_EMAIL:-}"; then
+        if ! mkdir -p "$(dirname "$TIER2_AUDIT_PATH")" 2>/dev/null; then
+            echo "MUSO_TIER2_AUDIT_UNWRITABLE: cannot create $(dirname "$TIER2_AUDIT_PATH") — refusing tier-2 write to preserve audit trail." >&2
+            return 1
+        fi
+        local gm_ts gm_rc=0
+        gm_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        jq -n -c \
+            --arg ts "$gm_ts" \
+            --arg method "$method" \
+            --arg path "$path" \
+            --arg requester "${REQUESTER_EMAIL:-}" \
+            '{ts:$ts, method:$method, path:$path, requester:$requester, confirmed_by:$requester, approval_msg_id:"god-mode", bypass:"god_mode_self_approve"}' \
+            >> "$TIER2_AUDIT_PATH" || gm_rc=$?
+        if (( gm_rc != 0 )); then
+            echo "MUSO_TIER2_AUDIT_UNWRITABLE: append to $TIER2_AUDIT_PATH failed (rc=$gm_rc) — refusing tier-2 write to preserve audit trail." >&2
+            return 1
+        fi
+        return 0
+    fi
+
     if [[ -z "$CONFIRMED_BY" ]]; then
         cat >&2 <<EOF
 MUSO_TIER2_APPROVAL_REQUIRED: ${method} ${path} is a tier-2 admin write.
@@ -1102,12 +1601,22 @@ fi
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --requester)
-            REQUESTER_EMAIL=$(resolve_slack_to_email "$2")
+            # Defense in depth: if resolve_slack_to_email returns 1 (unknown
+            # input), fall back to using the raw value. Without the `||`
+            # fallback, `set -e` aborts the script silently here on any
+            # unrecognized identity. The downstream gate handles arbitrary
+            # string values fine (only jan@/aaron@ bypass).
+            REQUESTER_EMAIL=$(resolve_slack_to_email "$2") || REQUESTER_EMAIL="$2"
             shift 2
             ;;
         --evidence-excerpt)
             EVIDENCE_EXCERPT="$2"
             export EVIDENCE_EXCERPT  # enforce_credit_approve_gate reads it from env
+            shift 2
+            ;;
+        --profile-audit-id)
+            PROFILE_AUDIT_ID="$2"
+            export PROFILE_AUDIT_ID  # enforce_credit_approve_gate reads it from env
             shift 2
             ;;
         --confirmed-by)

@@ -63,6 +63,103 @@ not the parent message), check if the thread was initiated by a credit verificat
 workflow. If so, treat the reply as an escalation response (see Step 5 — Escalate),
 not a new trigger. Only parent messages trigger the full workflow.
 
+## EVIDENCE MODEL — 2026-05-06 CUTOVER (READ BEFORE ANYTHING ELSE)
+
+**This block overrides every later "browser-only Tier-1" instruction in
+this SKILL.md.** When you encounter prose below telling you to load
+`music.apple.com` / `musicbrainz.org` / `discogs.com` / Spotify in the
+browser as primary evidence — that prose is the legacy playbook and stays
+in the file as a rollback reference. Use the model in this block instead.
+
+**Why we cut over.** Cloudflare has been blocking the Tier-1 browser path
+for 6+ months (search engines fail with Turnstile; Tier-1 sites
+intermittently captcha or lazy-render after the snapshot fires). The
+50% Tier-1 failure rate, 15-min run timeouts, the May 6 Bram Fidder
+incident, and the B2 dry-run stall all trace back to it. We now have
+deterministic API helpers that close the loop without the browser.
+
+**The new evidence model under `CV_EVIDENCE_MODE=api` (default).** A
+credit is approvable when ≥2 distinct **evidence sources** agree on the
+claim. The full architecture is in
+[`docs/credit-verification/design.md`](../../../../docs/credit-verification/design.md);
+the active 4-tier pipeline is:
+
+| Tier | What | Who fires it | Status today |
+|---|---|---|---|
+| **0** | `profile-audit.sh` 8-gate algorithm — bulk-approves a profile when its unverified batch aligns with its already-approved corpus | The dispatcher, before per-credit work | Working (~25% of queue) |
+| **1** | Deterministic API lookups by ISRC: MusicBrainz / Spotify / Discogs | The agent, per credit | MB only (Spotify [#256](https://github.com/Muso-AI/hydra/issues/256), Discogs [#255](https://github.com/Muso-AI/hydra/issues/255) blocked on tokens) |
+| **2** | LLM with **OpenRouter native web search** via `extra_body.plugins[{id:"web", engine:"native"}]`. Returns inline citations | The agent, per credit when Tier-1 is incomplete | **MUST be used today** — Tier-1 alone is 1 source, falls short of the 2-source quorum |
+| **3** | UVN flag — route to humans | The agent, when Tier-1+2 don't reach quorum | Working |
+
+**Source counting:**
+- Each successful API helper hit = 1 source (collapsed by helper name —
+  two MB hits don't double-count).
+- Each distinct citation hostname in a Tier-2 model response = 1 source
+  (collapsed by host — `www.x.com` and `x.com` are 1 source).
+- The bash gate sums across both paths and compares to
+  `CV_REQUIRED_LOADS=2`.
+- **Browser is NOT a sanctioned source under api-mode** (removed
+  2026-05-07 after AllMusic went offline and Discogs returned Cloudflare
+  challenges in the cutover test). All non-API evidence comes through
+  Tier-2 native web_search citations.
+
+**Tokens out of scope today** ([#255](https://github.com/Muso-AI/hydra/issues/255), [#256](https://github.com/Muso-AI/hydra/issues/256)): `discogs-isrc-lookup.sh`
+and `spotify-track-lookup.sh` exit 4 (creds_missing) until provisioned.
+**Do NOT call them today** — calling wastes a turn for no benefit.
+
+**Do NOT use `browser` or `web_fetch` on ANY of:** apple.music.com,
+musicbrainz.org, discogs.com, spotify.com, tidal.com, allmusic.com.
+- Apple/MusicBrainz/Discogs/Spotify/Tidal are JS-rendered SPAs — the
+  snapshot doesn't capture credits and Cloudflare often returns
+  challenge pages anyway.
+- AllMusic was a corner-case fallback until 2026-05-07; removed after it
+  went offline mid-test ("being updated") and we pivoted to native
+  web_search exclusively.
+- The api-evidence library silently ignores results from any of these
+  hosts under api-mode — calling them wastes a turn.
+- For non-API evidence, use **Tier-2 native web_search citations**
+  (described in §3α below) — the model's web search has no host
+  exclusions and returns inline citations the gate counts.
+
+**Today's B3 path** (agent's responsibility per credit, given Tier-0
+already ran):
+
+  1. **Tier-1**: call `musicbrainz-isrc-lookup.sh` if the credit ships an
+     ISRC. If `name_match: true`, that's source #1 — capture
+     `evidence_excerpt`.
+  2. **Tier-2**: ask the model to research the credit on the web. The
+     model triggers OpenRouter native search on its own; cite ≥2 distinct
+     domains in the response that mention the credit. **Skipping Tier-2
+     is the failure mode of run 20260507-085537 — agent went MB →
+     UVN-bulk and 200 credits ended up with humans that Tier-2 could have
+     cleared.**
+  3. **Approve** when sources sum to ≥2 (typically: 1 MB + 1 Tier-2
+     citation = 2). Pass `--evidence-excerpt` as a *clean* "name + role"
+     or "name + track" phrase (≥10 chars, no filler words) — e.g.
+     `"Bram Fidder mastering"` or `"Bram Fidder Loud and Clear"`. The
+     gate normalizes en-dashes/em-dashes/hyphens to spaces and collapses
+     whitespace before substring-matching, so the same excerpt resolves
+     against MB's `<name> – <role>` helper output AND your Tier-2
+     citation prose. Wordy excerpts (`"is credited as mastering on..."`)
+     won't substring-match the helper JSON and silently lose a source.
+  4. **Tier-3 (UVN)** only if Tier-1 + Tier-2 don't reach 2 sources. Use
+     verdict `UNVERIFIABLE — NEEDS REVIEW`, status
+     `user_verification_needed`. Don't fabricate.
+
+**Rollback knob.** If the api-mode gate misfires in production, set
+`CV_EVIDENCE_MODE=browser` in the gateway env and restart. That re-enables
+the legacy ≥2-distinct-Tier-1-browser-loads quorum and the
+preflight-browser-unavailable freeze. Browser-mode prose later in this
+file (search-engine browser loads, tier1_unreachable bypass requirements,
+the B0d preflight gate) is then in force again. Rollback should be a
+last resort — if the api path fails for a genuine reason (helper down,
+session log unreadable), fix the root cause first.
+
+**Tier-0 (Profile Audit) is unaffected.** The 8-gate per-profile audit
+that emits `profile_audit:cc=...,pop=...,...` receipts continues to clear
+without any browser activity at all. Its independent re-verification gate
+(`_tier0_audit_recompute_gate` in muso-admin-api.sh) runs unchanged.
+
 ## Visual Feedback (Emoji Reactions) — MANDATORY
 
 You MUST use the message tool with `action: "react"` at these exact points.
@@ -129,7 +226,7 @@ When `DRY_RUN=1`:
    from `.dryRun` on the summary event — no redundant label field. No extra
    work required; these happen automatically when the env is set at B0c.
 
-The rest of the workflow (B0–B6) runs exactly as production. Gates fire,
+The rest of the workflow (B0–B6, plus B1.5 announce and the opt-in B1.6 Tier-0 audit between B1 and B2 when `OPS_TIER0_ENABLED=1`) runs exactly as production. Gates fire,
 evidence is logged, the summary is computed. Only the API writes, the Slack
 destination, and the human paging behavior change.
 
@@ -163,6 +260,35 @@ batch trigger and run **Batch Mode (B1–B5)** using the current channel ID
 (`OPS_CREDIT_VERIFICATION_CHANNEL_ID`). Do NOT treat it as a reactive credit
 message. Post the batch summary back to the same channel with the standard
 `[HEARTBEAT-BATCH]` prefix.
+
+> ## ⚠️ DO NOT delegate to `openclaw cron run`
+>
+> "Run Batch Mode (B1–B5)" means invoke the batch workflow scripts in this
+> SKILL.md **directly** from this session — `runlog.sh init`, `fetch-queue.sh`,
+> `profile-audit.sh`, `dispatch-investigations.sh` (or the inline B3 path),
+> `batch-verify-profile.sh`, `post-batch-summary.sh`. **It does NOT mean
+> firing `openclaw cron run <id>` against the cron job named
+> `credit-verification-batch-4h`.** That path delegates to a system-event
+> dispatcher with a different payload schema, may be skipped silently
+> (cron-level deduplication, `payload.kind` mismatches, lockfile guards),
+> and the user can't see what happened.
+>
+> The on-demand @-mention case is *the same workflow as the cron* — but
+> executed inline in the current agent session so its tool calls land in
+> this session's JSONL where the runlog gate, the api-evidence library,
+> and the human reading Slack can all observe progress. **Always run
+> inline. Never delegate.** If you find yourself reading `cron-jobs.json`
+> or running `openclaw cron --help` while handling an @-mention, you have
+> taken the wrong turn — back out and follow the Batch Mode steps
+> directly.
+>
+> Concretely, on receipt of "run credit verification batch":
+>
+>   1. Skip Steps 1–2 (parse / idempotency); they're for reactive
+>      single-credit messages.
+>   2. Go directly to **Batch Mode** (further down this SKILL.md) and
+>      execute B0c → B0d → B1 → B2 → B3 → B4 → B5 → B6 in this session.
+>   3. Post the `[HEARTBEAT-BATCH]` summary via `post-batch-summary.sh`.
 
 **On-demand DRY-RUN trigger:** If the triggering message contains any of
 `(dry-run)`, `[dry-run]`, `dry run`, or `dryrun` (case-insensitive —
@@ -376,6 +502,120 @@ Skipping verification — manual review required. <@U7RP6HKUZ>
 ```
 
 ### Step 3: Investigate
+
+> ## ⚠️ MANDATORY UNDER `CV_EVIDENCE_MODE=api` (default since 2026-05-06)
+>
+> **Every per-credit verdict, flag, escalation, AND action_attempted MUST
+> be preceded by EITHER:**
+>
+>   (a) a successful `musicbrainz-isrc-lookup.sh` call whose JSON contains
+>       the credited name (≥1 evidence source), AND/OR
+>   (b) an assistant message containing ≥1 distinct citation hostname
+>       (URL via Tier-2 native web_search) whose surrounding text
+>       contains the credited name + role/track.
+>
+> **The runlog gate (`exit 7 verdict_without_evidence`) and the bash
+> approve gate (`insufficient api-evidence`) WILL refuse any verdict /
+> flag / escalation that doesn't have at least 1 source for non-cron
+> approves and ≥2 sources for autonomous approves. Bulk-UVN without
+> investigation is the failure mode that 2026-05-06 batch
+> 20260506-202031-675159 demonstrated — 73 attempts, 73 refusals.**
+>
+> **The agent MUST NOT skip the API helper just because the legacy prose
+> in this Step 3 talks about Tier-1 browser loads.** The legacy prose
+> below stays in the file as a `CV_EVIDENCE_MODE=browser` rollback
+> reference — it is NOT the active playbook. Read step §3α below first.
+>
+> ### Step 3α — THE 4-TIER PROGRESSIVE PIPELINE (ACTIVE PLAYBOOK)
+>
+> This matches `docs/credit-verification/design.md:35-82`. Each credit
+> flows through tiers in order until it reaches a decision. **Stop at the
+> first tier that produces ≥2 evidence sources for an autonomous approve,
+> or fall through to UVN.**
+>
+> #### Tier-0 — our algorithm (handled by the dispatcher; the agent does NOT call it)
+>
+> `profile-audit.sh` runs the 8-gate heuristic when a profile has ≥20
+> unverified credits. If all 8 gates pass, the dispatcher emits a
+> `profile_audit:cc=...,pop=...,...` receipt and bulk-approves the whole
+> profile via `_tier0_audit_recompute_gate` in `muso-admin-api.sh`. The
+> agent receives "this profile cleared via Tier-0" — no per-credit work
+> needed. ~25% of queue clears here.
+>
+> #### Tier-1 — deterministic API lookup
+>
+> ```bash
+> bash /opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/musicbrainz-isrc-lookup.sh \
+>   "$ISRC" --credited-name "$CREDITED_NAME" --role "$ROLE"
+> ```
+>
+> Free, no auth, ~1.1s/call rate-limited. If JSON shows `"name_match":true`,
+> that's evidence source #1 — capture `evidence_excerpt` from the JSON.
+>
+> **Sibling helpers (inert today, do NOT call):**
+> - `discogs-isrc-lookup.sh` — needs `DISCOGS_TOKEN` ([#255](https://github.com/Muso-AI/hydra/issues/255)).
+> - `spotify-track-lookup.sh` — needs `SPOTIFY_CLIENT_ID/SECRET` ([#256](https://github.com/Muso-AI/hydra/issues/256)).
+>
+> When tokens land, Tier-1 alone can hit ≥2 sources (MB + Discogs, or
+> MB + Spotify) and the agent approves immediately. Today, MB alone is
+> 1 source — must continue to Tier-2 to reach the quorum.
+>
+> #### Tier-2 — LLM with native web search (THE STEP TODAY'S RUNS HAVE BEEN SKIPPING)
+>
+> When Tier-1 is incomplete (today, *always* — only MB works), prompt
+> the model to research the credit. OpenRouter native web search is wired
+> via `agents.list[ops].params.extra_body.plugins[{id:"web", engine:"native"}]`
+> (the local `web_search` tool is denied). Just write a normal prompt;
+> the model will trigger native search on its own.
+>
+> Phrasing that works: "I need to verify whether `<CREDITED_NAME>` was
+> credited as `<ROLE>` on `<TRACK>` (ISRC `<ISRC>`). Search the web for
+> credible sources confirming this. Cite at least two distinct domains
+> in your answer." Look for the model's response containing ≥2 URLs from
+> distinct hostnames where the surrounding text mentions the credited
+> name + role/track.
+>
+> **Tier-2 evidence rule** (per `design.md:247-249`): ≥2 distinct citation
+> hostnames in an assistant message whose text contains the
+> `--evidence-excerpt`. The api-evidence library extracts URLs from both
+> inline-text citations (gpt-5+) and structured `citations[]` arrays
+> (claude-4+). It strips trailing punctuation and collapses `www.` so
+> dupes don't double-count.
+>
+> **Capture the excerpt:** quote a *clean* "name + role" or
+> "name + track" phrase (≥10 chars, no filler words) and pass it as
+> `--evidence-excerpt`. The bash gate normalizes en-dashes/em-dashes/
+> hyphens to spaces and collapses whitespace before substring-matching,
+> so the same excerpt resolves against both the MB helper's
+> `<name> – <role>` JSON output AND the model's Tier-2 citation prose.
+> Wordy quotes that include filler ("is credited as", "according to")
+> won't substring-match the helper JSON and silently lose a source.
+>
+ #### Tier-3 — UVN (route to humans)
+>
+> Tier-2 didn't produce ≥2 citation domains? UVN-flag the credit with
+> reason `INCONCLUSIVE_TIER1_UNREACHABLE`, status
+> `user_verification_needed`, no `--evidence-excerpt` required. Jan and
+> Aaron handle these in escalation threads.
+>
+> **No browser fallback under api-mode** (changed 2026-05-07). AllMusic
+> was the corner-case fallback until it went offline ("being updated")
+> mid-test, and Discogs `web_fetch` attempts returned Cloudflare
+> challenge pages. Browser/web_fetch on any music-database host is now
+> wasted work — the api-evidence library doesn't count their results.
+> Tier-2 native web_search is the only path for non-API evidence; it
+> has no host exclusions and the model's search engine routes around
+> Cloudflare/JS-render issues automatically.
+>
+> **Rollback knob:** `CV_EVIDENCE_MODE=browser` in `/etc/openclaw/main.env`
+> + gateway restart returns to the legacy Tier-1 browser quorum (still
+> uses lib/browser-evidence.sh which has its own AllMusic logic).
+> Operator-only; not the agent's call.
+>
+> ----
+>
+> *Below this line: legacy `CV_EVIDENCE_MODE=browser` reference. NOT the
+> active playbook. Skip to Step 4 unless explicitly running browser-mode.*
 
 Use existing skill workflows:
 
@@ -895,7 +1135,7 @@ workflow above (Steps 0-6).
 
 Before any network work, initialize the run context.
 
-**HARD RULE — run the batch inline, never in a subagent.** B0–B6 execute in this turn, in the main agent's context. Do NOT use the `agent()` / subagent-spawn tool for batch processing. Three concrete failure modes from 2026-04-23 14:20 UTC:
+**HARD RULE — run the batch inline, never in a subagent.** B0–B6 (plus the B1.5 announce and, when `OPS_TIER0_ENABLED=1`, the B1.6 Tier-0 audit) execute in this turn, in the main agent's context. Do NOT use the `agent()` / subagent-spawn tool for batch processing. Three concrete failure modes from 2026-04-23 14:20 UTC:
 
 1. Subagent inherits `OPS_RUN_ID` from parent but calls `runlog.sh init` anyway → two run_ids for one intent → two `.results.jsonl` files → split reconciliation → `compute-run-summary.sh` sees only half the truth.
 2. Subagent hits its own token limit mid-batch and times out with partial work done → main agent has no way to reconcile what actually happened → improvised Slack summary.
@@ -1074,7 +1314,7 @@ Dispatch on `$RC`:
 
 | RC | Meaning | Required action |
 |----|---------|-----------------|
-| `0` | Success — `$QUEUE_JSON` is the normalized envelope. | **Proceed directly to B2 (per-profile processing).** If `.queue_depth == 0` AND `.items\|length == 0` this is a genuine queue-clear; route through B5. **HARD RULE — do NOT post any Slack summary at this point.** A non-empty queue means the run continues through B2 → B3, where B3 composes the single batch summary post. The 2026-04-28 15:13 UTC dry-run failed this rule: agent posted "Queue fetch succeeded — no writes were executed" after B1 and stopped, producing a `run_finished_hollow` event because `fetched=500` but `approved+verification_needed=0`. Dry-run does NOT short-circuit the workflow — it intercepts API writes via the wrapper, but B2-B5 still run end-to-end so the gate, classification, and summary code all get exercised. |
+| `0` | Success — `$QUEUE_JSON` is the normalized envelope. | **Proceed to B1.5 (announce), then to B1.6 Tier-0 audit if `OPS_TIER0_ENABLED=1`, then to B2 (per-profile processing).** If `.queue_depth == 0` AND `.items\|length == 0` this is a genuine queue-clear; route through B5. **HARD RULE — do NOT post any Slack summary at this point.** A non-empty queue means the run continues through B2 → B3, where B3 composes the single batch summary post. The 2026-04-28 15:13 UTC dry-run failed this rule: agent posted "Queue fetch succeeded — no writes were executed" after B1 and stopped, producing a `run_finished_hollow` event because `fetched=500` but `approved+verification_needed=0`. Dry-run does NOT short-circuit the workflow — it intercepts API writes via the wrapper, but B2-B5 still run end-to-end so the gate, classification, and summary code all get exercised. |
 | `2` | Wrapper missing or non-numeric `fetch_size`. | Post API-error status (template below), stop. |
 | `3` or `4` | List or counts endpoint returned non-200. | Post API-error status (template below), stop. Stderr from the script has the wrapper response body. |
 | `5` or `6` | **Envelope shape drift.** List response missing `.body.data.items` (5) or counts response missing `.body.data[0].count` (6). The admin API schema has changed under us. | Do NOT post queue-clear. Post the shape-drift escalation template (below) tagging Jan, then stop. |
@@ -1120,9 +1360,163 @@ The list endpoint returns `createdAt DESC` by default (newest first = LIFO).
   Escalating: <@U038BM16T7W>
   ```
 
+#### B1.6. Tier-0 Profile Audit (Bulk-Approve Trusted Profiles)
+
+> **Numbering note.** The label `B1.5` is already taken by the in-thread "starting" announcement above (mechanical, gated by `browser-evidence-audit.sh`). This step is `B1.6` so the announce-then-audit ordering is unambiguous: announce FIRST so users see activity, then run Tier-0, then fall through to B2 for any profile that didn't pass.
+
+After fetching the queue (B1) and posting the announce (B1.5), group the queue
+by `profileId`. For each profile with **>=20 unverified credits in the batch**,
+run the profile-audit script BEFORE falling through to per-credit investigation
+(B2). This is the high-volume short-cut that auto-clears established profiles
+like Bram Fidder / Alpha Mastering / Sam Feldt without LLM cost.
+
+**Why:** the existing B2 per-credit flow assumes Tier-1 browser scrapes for
+evidence. For high-volume mastering engineers / multi-role artists with
+hundreds of approved credits already in Muso's catalog, the unverified batch
+is "more of the same" — same labels, same role, same collaborators. Tier-0
+detects this profile-level alignment from Muso's own data with zero external
+API calls and zero LLM tokens.
+
+**Tier ordering reminder.** Tier-0 is the FIRST tier — a profile-level bulk
+short-cut. It does NOT replace Tier-1 (browser evidence), Tier-2, or Tier-3;
+those still run in B2 + the escalation paths for any profile that didn't
+clear Tier-0 (gate fail, low volume, or `OPS_TIER0_ENABLED` unset/`0`).
+
+**Enable flag.** Tier-0 is **opt-in** — set `OPS_TIER0_ENABLED=1` to run it.
+If the env is absent or `0`, skip this whole step and proceed directly to B2.
+
+**The 8 gates** (mechanically enforced by `profile-audit.sh` — see § 2.5 in
+`/Users/nick/.claude/plans/ok-explain-to-me-modular-hamster.md` for the full
+spec):
+
+- G1 — credit count `>= 100`
+- G2 — popularity `>= 50`
+- G3 — industry share `>= 70%`
+- G4 — only-velocity share `>= 70%`
+- G5 — profile-relative breadth
+- G6 — roles ⊆ approved roles
+- G7 — artist-overlap `>= 40%`
+- G8 — label-overlap `>= 30%`
+
+**Required env (already set by B0c unless noted):**
+
+- `OPS_TIER0_ENABLED=1` (opt-in flag — absent or `0` disables this step)
+- `OPS_RUNLOG_DIR` + `OPS_RUN_ID` (set by B0c)
+- `OPS_DRY_RUN` is respected — `muso-admin-api.sh` intercepts the API write
+  the same as in the per-credit flow
+
+**Deterministic loop (MANDATORY — bash drives the iteration, not the LLM).**
+
+Run this block VERBATIM. It is not pseudo-code and it is not optional shape.
+The 2026-05-06 dry-run `20260506-171316-57e0d9` failed because the LLM read the
+old pseudo-flow as guidance, audited 2 of 38 eligible profiles, and bailed into
+B2 setup. Bash MUST iterate every eligible profile before the agent touches
+B2 — that is the whole point of this step.
+
+```bash
+# B1.6 — Tier-0 deterministic loop (mechanically iterate ALL >=20-credit profiles)
+# Without this, the LLM tends to interleave Tier-0 with B2 and bail early. Bash
+# iterates ALL eligible profiles before the agent touches anything.
+TIER0_PASSED_FILE="/tmp/${RUN_ID}.tier0_passed.txt"
+TIER0_LOG_FILE="/tmp/${RUN_ID}.tier0.log"
+: > "$TIER0_PASSED_FILE"
+: > "$TIER0_LOG_FILE"
+TIER0_TOTAL_APPROVED=0
+TIER0_PROFILES_PASSED=0
+TIER0_PROFILES_FAILED=0
+if [ "${OPS_TIER0_ENABLED:-0}" = "1" ]; then
+    # Group queue by profileId; only audit profiles with >=20 unverified.
+    for pid in $(echo "$QUEUE_JSON" | jq -r '.items[].profileId' \
+                 | sort | uniq -c | awk '$1>=20 {print $2}'); do
+        n=$(echo "$QUEUE_JSON" | jq --arg p "$pid" \
+            '[.items[] | select(.profileId==$p)] | length')
+        bash "$SKILL_DIR/scripts/batch-verify-profile.sh" \
+            --tier0 --profile-id "$pid" >> "$TIER0_LOG_FILE" 2>&1
+        rc=$?
+        if [ $rc -eq 0 ]; then
+            echo "$pid" >> "$TIER0_PASSED_FILE"
+            TIER0_TOTAL_APPROVED=$((TIER0_TOTAL_APPROVED + n))
+            TIER0_PROFILES_PASSED=$((TIER0_PROFILES_PASSED + 1))
+            bash "$SKILL_DIR/scripts/runlog.sh" event "$OPS_RUN_ID" tier0_profile_passed \
+              "$(jq -n --arg pid "$pid" --argjson n "$n" \
+                    '{profile_id:$pid, credits_approved:$n}')"
+        elif [ $rc -eq 1 ]; then
+            # Gate fail or low-volume — falls through to B2.
+            bash "$SKILL_DIR/scripts/runlog.sh" event "$OPS_RUN_ID" tier0_profile_fell_through \
+              "$(jq -n --arg pid "$pid" '{profile_id:$pid}')"
+        else
+            TIER0_PROFILES_FAILED=$((TIER0_PROFILES_FAILED + 1))
+            bash "$SKILL_DIR/scripts/runlog.sh" event "$OPS_RUN_ID" tier0_profile_error \
+              "$(jq -n --arg pid "$pid" --argjson rc "$rc" '{profile_id:$pid, rc:$rc}')"
+        fi
+    done
+fi
+echo "TIER0_PROFILES_PASSED=$TIER0_PROFILES_PASSED"
+echo "TIER0_CREDITS_APPROVED=$TIER0_TOTAL_APPROVED"
+echo "TIER0_PROFILES_FAILED=$TIER0_PROFILES_FAILED"
+echo "TIER0_PASSED_FILE=$TIER0_PASSED_FILE"
+```
+
+The `for pid in $(…)` loop is the deterministic part. The shell expands the
+list of eligible profile IDs ONCE, then the loop body runs for every entry
+without re-consulting the LLM. Even if `batch-verify-profile.sh` errors on a
+specific profile, the loop continues to the next pid — no profile is silently
+skipped because the agent "got distracted by B2 inline browser path."
+
+`$TIER0_PASSED_FILE` is the contract surface between B1.6 and B2: any
+profileId in that file has already had ALL its unverified credits bulk-approved
+this run, and B2 MUST exclude those profiles from its dispatch loop (see B2
+below).
+
+`$TIER0_LOG_FILE` captures stderr+stdout from each `batch-verify-profile.sh`
+invocation for forensics; it is not consumed by downstream steps.
+
+**Hard rule on safety.** Tier-0 calls
+`muso-admin-api.sh --evidence-excerpt "<receipt>" --profile-audit-id "$pid"`.
+The gate's `_tier0_audit_recompute_gate` re-fetches the live data and
+re-runs all 8 gates independently — **defense in depth**. A forged receipt
+or a compromised audit script can't slip through; the gate is the
+authoritative ledger. Receipt format and field semantics live in the
+script + spec § 2.5; do NOT improvise an audit JSON shape from this skill
+file.
+
+**Cap interaction.** Tier-0 approves count against the daily 500-cap (per
+`count-approvals.sh`, same source B0c reads). If a Tier-0 profile would
+push the run over `APPROVAL_CAP_LIMIT`, the dispatcher limits the bulk-
+approve to remaining-cap and the rest get logged as `skip_cap` — same
+semantics as B2's cap behavior. No new cap accounting is needed here; the
+audit script defers to the same counter.
+
+**Pass/fall-through semantics summary:**
+
+| `profile-audit.sh` exit | Meaning | Effect on the queue |
+|---|---|---|
+| `0` | All 8 gates passed, bulk-approve emitted, gate accepted. | Profile's credits removed from queue — B2 skips this profile. |
+| `1` | Gate fail OR profile had `<20` unverified in batch. | Profile's credits remain — B2 handles them per-credit. |
+| `*` (other) | Script error / API failure / cap exhausted mid-profile. | Profile's credits remain — B2 handles them per-credit. `tier0_profile_error` logged for forensics. |
+
 #### B2. Process Each Profile
 
 **Structural change (R3, 2026-04-23):** iteration unit is now the **profile**, not the individual credit. The gate's evidence quorum is per-profile — loading 2 artist-level pages for the whole batch doesn't satisfy it for 30 distinct profiles. Group the fetched queue by `profile_id` first, then for each group do: gather Tier-1 evidence → classify → act via `batch-verify-profile.sh`.
+
+> **HARD RULE — Tier-0 already cleared some profiles.** Before B2 dispatches
+> per-credit work, exclude all profiles in `$TIER0_PASSED_FILE`. They've been
+> bulk-approved in B1.6; their credits are already done. Use:
+>
+> ```bash
+> # Strip out tier0-passed profiles from the queue before B2 dispatching.
+> if [ -s "$TIER0_PASSED_FILE" ]; then
+>     PASSED_IDS=$(jq -R . < "$TIER0_PASSED_FILE" | jq -s .)
+>     B2_QUEUE_JSON=$(echo "$QUEUE_JSON" | jq --argjson passed "$PASSED_IDS" \
+>         '.items |= map(select(.profileId as $p | $passed | index($p) | not))')
+> else
+>     B2_QUEUE_JSON="$QUEUE_JSON"
+> fi
+> ```
+>
+> The B2 dispatch loop below MUST use `$B2_QUEUE_JSON`, not `$QUEUE_JSON`.
+> Re-grouping the unfiltered `$QUEUE_JSON` would re-process the Tier-0-cleared
+> profiles per-credit and double-charge against the daily approval cap.
 
 Initialize in-run counters:
 ```bash
@@ -1131,9 +1525,10 @@ APPROVED_IN_RUN=0       # total credits approved across profiles
 ERRORS=0                # total delegate/HTTP errors
 ```
 
-Group the fetched queue by `profile_id`:
+Group the (Tier-0-filtered) queue by `profile_id`:
 ```bash
-# $QUEUE_JSON is the normalized envelope from B1's fetch-queue.sh:
+# $B2_QUEUE_JSON is $QUEUE_JSON with Tier-0-passed profiles stripped (see the
+# HARD RULE block above). The normalized envelope shape is unchanged from B1:
 # {"queue_depth": <int>, "items": [...], "fetch_size": <int>}.
 # `.items` is already unwrapped — DO NOT add `.body.items` / `.body.data.items`
 # fallbacks here. The 2026-04-27 silent-zero incident is exactly the failure
@@ -1143,7 +1538,7 @@ Group the fetched queue by `profile_id`:
 # into a single group. The admin API may return items in createdAt DESC
 # order, which interleaves multiple profiles — without sort_by first, the
 # same profile appears as multiple groups, causing duplicate batch calls.
-PROFILES_GROUPED=$(echo "$QUEUE_JSON" | jq -c '
+PROFILES_GROUPED=$(echo "$B2_QUEUE_JSON" | jq -c '
     # Preserve external IDs per credit so build-search-url.sh can use direct
     # entity URLs instead of fragile search URLs (PR #236 Phase 2).
     # Field names verified against live admin API 2026-05-01:
@@ -1638,6 +2033,15 @@ The renderer handles:
 - `⚠️ N approve(s) rejected by gate` line when some landed and some didn't.
 - Credit-ID lists grouped by outcome (verification_needed landed, rejected-by-gate, http_error, config-mismatch).
 - Cap of 25 credit IDs per section with `+N more` suffix for readability.
+- **Tier-0 cleared:** the renderer reports Tier-0 bulk-approves separately as
+  a line `Tier-0 cleared: N profiles, M credits` BEFORE the per-credit verdict
+  counts. Numbers are sourced from `compute-run-summary.sh`, which counts
+  `tier0_profile_passed` events (and the parallel `action_attempted` events
+  with `evidence_kind=tier0_profile_audit` once that wiring lands). The
+  per-credit "Approved: X" / "Verification-needed: Y" / "Escalated: Z"
+  counters reflect ONLY the B2 path — Tier-0 credits are NOT folded into
+  those buckets, otherwise readers can't tell mechanical bulk-approves apart
+  from per-credit Tier-1 verdicts.
 
 You do not compose these markers yourself; the truth floor drives them.
 
@@ -1718,7 +2122,9 @@ Queue clear — no unverified credits remaining.
 
 After the parent summary message is posted (B3 or the B5 queue-clear message), evaluate the invariants and run maintenance.
 
-**Do NOT re-run `compute-run-summary.sh` here.** B3 already ran the helper with `--final` to source its numbers; the `run_finished` event is already in the runlog. Re-running would write a duplicate event (idempotency guard catches it, but the spurious invocation is wasted work). Re-use the `$SUMMARY_JSON` you already have:
+**Do NOT re-run `compute-run-summary.sh` here.** B3 already ran the helper with `--final` to source its numbers; the `run_finished` event is already in the runlog. Re-running would write a duplicate event (idempotency guard catches it, but the spurious invocation is wasted work). Re-use the `$SUMMARY_JSON` you already have.
+
+**Tier-0 numbers are already in the renderer output** — the B3 summary line `Tier-0 cleared: N profiles, M credits` is composed from `tier0_profile_passed` events by `compute-run-summary.sh` / `render-slack-summary.sh`. Do NOT re-emit Tier-0 totals from the bash variables `$TIER0_PROFILES_PASSED` / `$TIER0_TOTAL_APPROVED` here — the runlog is the truth floor and the renderer already read it.
 
 ```bash
 HOLLOW=$(echo "$SUMMARY_JSON" | jq -r '.hollow')
@@ -1775,7 +2181,7 @@ The lockfile is released automatically by the `trap` set in B0 when the run exit
 >
 > If B3 explicitly runs `compute-run-summary.sh --final` (which it does), the truth-floor `run_finished` event lands cleanly in the same turn — no fallback needed. If B3 is genuinely skipped (agent crash, infrastructure failure) AND the run was the terminal one AND ≥ 120s have passed, a future invocation of `lockfile.sh release --final` (e.g. via a watchdog or follow-up turn) can still land the autofill. This is intentionally narrower than the pre-2026-04-28 always-fire fallback: better to leave the runlog incomplete than to write false-positive hollow flags on a healthy run.
 >
-> The unrelated `run_finished_renderer_missing` post-hoc detector (R4-3) still fires on every release regardless of `--final`. It scans the session for renderer-shaped messages and emits the forensic event when work happened (attempts > 0) but the agent bypassed `post-batch-summary.sh` / `render-slack-summary.sh`. Idempotent and safe to fire repeatedly.
+> The `run_finished_renderer_missing` post-hoc detector (R4-3) is gated on the same `--final`/`OPS_BATCH_TERMINAL=1` opt-in as the autofill (tightened 2026-05-07 — previously fired on every release and posted a `:rotating_light:` Slack alert on every healthy batch because the canonical path migrated to `openclaw CLI` and the session-log heuristic stopped seeing it). On the terminal release the detector now short-circuits when `post-batch-summary.sh` has written its `summary_posted_canonical` event into the runlog — direct success evidence beats the legacy MCP-toolCall scan. The session-log scan remains as a fallback for the original regression target: an agent that genuinely skips `post-batch-summary.sh` and hand-composes a `[HEARTBEAT-BATCH]` post via the `message` tool.
 
 ### Rate Limiting Note
 

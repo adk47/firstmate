@@ -80,6 +80,14 @@ SESSION_EVIDENCE_SH="${SESSION_EVIDENCE_SH:-$SCRIPT_DIR/session-evidence.sh}"
 BATCH_APPROVE_SH="${BATCH_APPROVE_SH:-$SCRIPT_DIR/batch-approve-credits.sh}"
 BATCH_FLAG_SH="${BATCH_FLAG_SH:-$SCRIPT_DIR/batch-flag-credits.sh}"
 
+# Tier-0 path. Spec §8 Phase A — when invoked with --tier0 the dispatcher
+# delegates to profile-audit.sh, then on a passing 8-gate audit calls
+# muso-admin-api.sh PUT /admin/credit-requests with the receipt as
+# --evidence-excerpt + --profile-audit-id <pid>. The admin-api gate
+# (_tier0_audit_recompute_gate) re-verifies the receipt against live data.
+PROFILE_AUDIT_SH="${PROFILE_AUDIT_SH:-$SCRIPT_DIR/profile-audit.sh}"
+MUSO_ADMIN_API_SH="${MUSO_ADMIN_API_SH:-/opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh}"
+
 # Closed-list flag reasons (added 2026-04-30, tightened later same day after
 # run 20260430-111343-1605a8 leaked 460 credits). Forces the agent to
 # categorize why a UVN flag was applied instead of typing free-form prose.
@@ -127,6 +135,7 @@ IDS_RAW=""
 DECISION=""
 REASON=""
 FLAG_REASON=""
+TIER0_MODE=0
 
 usage() {
     cat >&2 <<EOF
@@ -199,6 +208,7 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --tier0)             TIER0_MODE=1;               shift 1 ;;
         --profile-id)        PROFILE_ID="${2:-}";        shift 2 ;;
         --credited-name)     CREDITED_NAME="${2:-}";     shift 2 ;;
         --track-title)       TRACK_TITLE="${2:-}";       shift 2 ;;
@@ -224,6 +234,151 @@ if [[ -z "$PROFILE_ID" ]]; then
     echo "ERROR: --profile-id is required." >&2
     exit 2
 fi
+
+# --- Tier-0 mode: short-circuit the per-credit validation + flow ---
+# Tier-0 only needs --profile-id. The dispatcher delegates the audit to
+# profile-audit.sh, fetches the unverified queue, and (on a passing audit)
+# calls muso-admin-api.sh with the receipt as --evidence-excerpt. Per-credit
+# args (--evidence-excerpt, --ids, --decision, --credited-name, etc.) are
+# forbidden in this mode — the receipt IS the evidence and the queue IS
+# the id list.
+if [[ "$TIER0_MODE" == "1" ]]; then
+    # Reject any per-credit args that don't make sense for Tier-0. Better to
+    # fail loud than silently ignore — the caller is mixing modes.
+    for forbidden_pair in "EVIDENCE_EXCERPT --evidence-excerpt" \
+                          "IDS_RAW --ids" \
+                          "DECISION --decision" \
+                          "REASON --reason" \
+                          "FLAG_REASON --flag-reason" \
+                          "CREDITED_NAME --credited-name" \
+                          "TRACK_TITLE --track-title" \
+                          "ROLE --role"; do
+        var="${forbidden_pair% *}"
+        flag="${forbidden_pair#* }"
+        if [[ -n "${!var}" ]]; then
+            echo "ERROR: ${flag} is not allowed with --tier0 (the receipt + audit-id is the evidence)." >&2
+            exit 2
+        fi
+    done
+
+    # Default OPS_TIER0_ENABLED on if the caller hasn't set it. Spec says the
+    # dispatcher should set this if not already set; we honor a pre-set 0/false
+    # by passing it through (profile-audit.sh will exit 2 → we propagate exit 2).
+    case "$(printf %s "${OPS_TIER0_ENABLED:-}" | tr '[:upper:]' '[:lower:]')" in
+        ""|unset) export OPS_TIER0_ENABLED=1 ;;
+    esac
+
+    audit_stdout_file="$(mktemp)"
+    audit_rc=0
+    bash "$PROFILE_AUDIT_SH" "$PROFILE_ID" >"$audit_stdout_file" 2>&2 || audit_rc=$?
+
+    case "$audit_rc" in
+        0)
+            receipt="$(tr -d '\r\n' < "$audit_stdout_file")"
+            rm -f "$audit_stdout_file"
+            if [[ -z "$receipt" || "$receipt" != profile_audit:* ]]; then
+                echo "[batch-verify-profile.sh] tier0: profile-audit.sh exited 0 but emitted no valid receipt — refusing to call admin-api." >&2
+                exit 1
+            fi
+
+            # Fetch the unverified queue for this profile to build the
+            # requestIds list. Empty queue → log + exit 0 with approved=0
+            # (audit passed but there's nothing to approve, e.g. another
+            # process drained the queue between audit + dispatch).
+            queue_resp="$(bash "$MUSO_ADMIN_API_SH" call GET \
+                "/admin/credit-requests?profilesIds=${PROFILE_ID}&status=unverified&limit=1000" 2>/dev/null || true)"
+            if [[ -z "$queue_resp" ]]; then
+                echo "[batch-verify-profile.sh] tier0: admin-api fetch returned empty for profile $PROFILE_ID" >&2
+                exit 1
+            fi
+            queue_http="$(printf '%s' "$queue_resp" | jq -r '.http_status // "unknown"' 2>/dev/null || echo unknown)"
+            if [[ "$queue_http" != "200" ]]; then
+                echo "[batch-verify-profile.sh] tier0: admin-api unverified fetch returned HTTP $queue_http for profile $PROFILE_ID" >&2
+                exit 1
+            fi
+            ids_array="$(printf '%s' "$queue_resp" | jq -c '[.body.data.items[]?.id // empty]' 2>/dev/null || echo '[]')"
+            ids_count="$(printf '%s' "$ids_array" | jq 'length' 2>/dev/null || echo 0)"
+            if (( ids_count == 0 )); then
+                echo "[batch-verify-profile.sh] tier0: audit passed for $PROFILE_ID but unverified queue is empty — nothing to approve" >&2
+                exit 0
+            fi
+
+            body="$(jq -n -c --argjson ids "$ids_array" \
+                '{requestIds:$ids, status:"approved", reason:"tier0_profile_audit"}')"
+
+            api_rc=0
+            bash "$MUSO_ADMIN_API_SH" \
+                --evidence-excerpt "$receipt" \
+                --profile-audit-id "$PROFILE_ID" \
+                --requester clio \
+                call PUT /admin/credit-requests "$body" || api_rc=$?
+            if (( api_rc != 0 )); then
+                echo "[batch-verify-profile.sh] tier0: admin-api PUT failed (rc=$api_rc) for profile $PROFILE_ID" >&2
+                exit 1
+            fi
+
+            # Tier-0 success: emit an action_attempted event so post-batch
+            # reconciliation (compute-run-summary.sh + post-batch-summary.sh's
+            # in-flight gate) recognizes this profile's bulk-approve. Without
+            # this, a Tier-0-only run looks like Failure 1 shape
+            # (queue_depth_at_start > 0 AND action_attempted == 0) and the
+            # final Slack post is suppressed even though credits did land.
+            #
+            # evidence_kind="tier0_profile_audit" is the discriminator
+            # downstream gates (browser-evidence-audit.sh) use to route this
+            # event through the Tier-0 evidence path (matched against a
+            # tier0_audit_verified event written by muso-admin-api.sh's
+            # _tier0_audit_recompute_gate) instead of the Tier-1 browser
+            # anchor rule. Tier-0 doesn't use a browser, so a browser anchor
+            # would be impossible.
+            #
+            # The runlog gate's cookie-cutter detector is exempted for
+            # evidence_kind=tier0_profile_audit (see runlog.sh) — Tier-0
+            # receipts are intentionally similar across profiles.
+            if [[ -n "${OPS_RUN_ID:-}" ]]; then
+                runlog_sh="${RUNLOG_SH:-$SCRIPT_DIR/runlog.sh}"
+                if [[ -f "$runlog_sh" ]]; then
+                    aa_payload=$(jq -n -c \
+                        --arg pid "$PROFILE_ID" \
+                        --arg action "approve" \
+                        --argjson cr_ids "$ids_array" \
+                        --arg evidence_kind "tier0_profile_audit" \
+                        --arg evidence_excerpt "$receipt" \
+                        '{profile_id:$pid, action:$action, cr_ids:$cr_ids, count:($cr_ids|length),
+                          evidence_kind:$evidence_kind, evidence_excerpt:$evidence_excerpt}')
+                    # Disable the cookie-cutter + verdict gates: Tier-0 emits
+                    # similar receipts by design (each per-profile audit
+                    # produces a profile_audit:cc=...,pop=... shape) and has
+                    # no Tier-1 browser load to anchor against. The
+                    # tier0_audit_verified event written by the admin-api
+                    # gate is the parallel grounding signal for Tier-0.
+                    CV_DISABLE_COOKIE_CUTTER_GATE=1 CV_DISABLE_VERDICT_GATE=1 \
+                        bash "$runlog_sh" event "$OPS_RUN_ID" action_attempted "$aa_payload" \
+                        >/dev/null 2>&1 || true
+                fi
+            fi
+
+            echo "[batch-verify-profile.sh] tier0: approved $ids_count credits for profile $PROFILE_ID ($receipt)"
+            exit 0
+            ;;
+        1)
+            rm -f "$audit_stdout_file"
+            echo "[batch-verify-profile.sh] tier0: fall-through for profile $PROFILE_ID — audit skipped (gate fail or low volume); caller should fall back to per-credit Tier-1 flow" >&2
+            exit 1
+            ;;
+        2)
+            rm -f "$audit_stdout_file"
+            echo "[batch-verify-profile.sh] tier0: disabled or arg error for profile $PROFILE_ID (profile-audit exit 2)" >&2
+            exit 2
+            ;;
+        *)
+            rm -f "$audit_stdout_file"
+            echo "[batch-verify-profile.sh] tier0: profile-audit.sh exited $audit_rc for profile $PROFILE_ID" >&2
+            exit 1
+            ;;
+    esac
+fi
+
 if [[ -z "$EVIDENCE_EXCERPT" ]]; then
     echo "ERROR: --evidence-excerpt is required." >&2
     exit 2
@@ -421,12 +576,26 @@ write_pre_flight_rejection() {
 }
 
 # --- Shared helpers used by both flag-evidence + approve paths ---
-# resolve_run_started_ts, resolve_session_log, and count_profile_browser_loads
-# are sourced from lib/browser-evidence.sh — single source of truth. The
-# library's gate logic must match the runlog.sh write-time gate exactly,
-# which is why both call into the same helpers.
+# Two libs are sourced — the gate logic must match the runlog.sh write-time
+# gate exactly, and runlog.sh switches between them based on
+# CV_EVIDENCE_MODE. Both define resolve_run_started_ts + resolve_session_log
+# (idempotent — duplicated definitions just shadow each other safely).
 # shellcheck source=lib/browser-evidence.sh
 . "$SCRIPT_DIR/lib/browser-evidence.sh"
+# shellcheck source=lib/api-evidence.sh
+. "$SCRIPT_DIR/lib/api-evidence.sh"
+
+# CV_EVIDENCE_MODE dispatch (matches the gate + runlog write-time gate):
+#   api (default) — count_profile_evidence_sources(excerpt) sums API-helper
+#                   hits + Tier-2 native-search citation hostnames whose
+#                   assistant text contains the normalized excerpt.
+#   browser       — legacy ≥2-distinct-Tier-1-browser-loads quorum.
+#   both          — api short-circuits success; browser path is fallback.
+CV_EVIDENCE_MODE="${CV_EVIDENCE_MODE:-api}"
+case "$CV_EVIDENCE_MODE" in
+    api|browser|both) ;;
+    *) echo "FATAL: CV_EVIDENCE_MODE must be one of api|browser|both (got '${CV_EVIDENCE_MODE}')" >&2; exit 1 ;;
+esac
 
 # --- Structural excerpt validator (claim-proving rule) ---
 # This is a pure check on EVIDENCE_EXCERPT vs the claim metadata
@@ -568,10 +737,18 @@ if [[ "${CV_REQUIRED_PROFILE_BROWSE:-1}" != "0" ]]; then
     export CV_PROFILE_CREDITED_NAME="$CREDITED_NAME"
     export CV_PROFILE_TRACK_TITLE="$TRACK_TITLE"
     export CV_PROFILE_ROLES="$ROLE"
-    pb_count="$(count_profile_browser_loads "$PROFILE_ID")"
+    if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+        pb_count="$(count_profile_browser_loads "$PROFILE_ID")"
+    else
+        # api / both: at least one evidence source for the excerpt is
+        # the api-mode equivalent of "agent did real work for this profile".
+        # Falls through to the quorum check below; this is just the >=1 floor.
+        pb_count="$(count_profile_evidence_sources "$EVIDENCE_EXCERPT" "$PROFILE_ID")"
+    fi
     pb_count="${pb_count:-0}"
     if (( pb_count < 1 )); then
-        cat >&2 <<EOF
+        if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+            cat >&2 <<EOF
 ERROR: batch-verify-profile: --decision ${DECISION} requires at least 1
 Tier-1 browser snapshot whose response text proves the claim for profile
 '${PROFILE_ID}' in the current run window, but 0 were found.
@@ -596,6 +773,38 @@ If sources are unreachable, ESCALATE via the existing Step 5 path with
 real evidence about why you can't reach them; do NOT bulk-flag or bulk-
 escalate without per-profile Tier-1 evidence.
 EOF
+        else
+            # api / both — under api-mode, browser/web_fetch on Tier-1 hosts is
+            # explicitly forbidden and AllMusic is no longer counted as evidence.
+            # Steer the agent back to the API helpers + native web_search.
+            cat >&2 <<EOF
+ERROR: batch-verify-profile: --decision ${DECISION} requires at least 1
+evidence source (Tier-1 API helper hit OR Tier-2 native-search citation
+domain) whose response text proves the claim for profile '${PROFILE_ID}'
+in the current run window, but 0 were found.
+
+Resolved claim:
+  credited_name: '${CREDITED_NAME}'
+  track_title:   '${TRACK_TITLE}'
+  role:          '${ROLE}'
+
+Tier-1 (API helpers): if the credit ships an ISRC, run
+  bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
+A successful helper call (name_match: true) counts as 1 source.
+(Spotify / Discogs helpers exist but exit creds_missing until the
+tokens in issues #255 / #256 land — don't bother calling them.)
+
+Tier-2 (native web_search): ask the model to research the credit on the
+web in plain language. The reply's inline citation URLs are counted by
+distinct hostname when the assistant text contains the --evidence-excerpt.
+
+Browser / web_fetch on music-database hosts is FORBIDDEN under api-mode
+(allmusic / discogs / musicbrainz / apple-music) — the api-evidence
+library does not count their results. Tier-3 (UVN) is the right exit
+when Tier-1 + Tier-2 cannot reach quorum; do NOT bulk-flag or bulk-
+escalate without per-profile evidence.
+EOF
+        fi
         write_pre_flight_rejection "missing_profile_browse"
         emit_summary "missing_profile_browse" "null"
         exit 5
@@ -667,8 +876,15 @@ EOF
     run_started_ts="$(resolve_run_started_ts)"
     export CV_SESSION_RUN_STARTED_TS="$run_started_ts"
     flag_session_log="$(resolve_session_log)"
-    flag_match_json="$(count_excerpt_matches "$flag_session_log" "$run_started_ts")"
-    flag_match_count=$(printf '%s' "$flag_match_json" | jq -r '.matched_count')
+    if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+        flag_match_json="$(count_excerpt_matches "$flag_session_log" "$run_started_ts")"
+        flag_match_count=$(printf '%s' "$flag_match_json" | jq -r '.matched_count')
+    else
+        api_n="$(count_profile_evidence_sources "$EVIDENCE_EXCERPT" "$PROFILE_ID")"
+        flag_match_count="${api_n:-0}"
+        flag_match_json="$(jq -nc --argjson n "$flag_match_count" \
+            '{matched_count:$n, matched_hosts:[]}')"
+    fi
     flag_match_count="${flag_match_count:-0}"
 
     if (( flag_match_count < CV_REQUIRED_LOADS )); then
@@ -681,7 +897,8 @@ EOF
             matched_hosts_block="  (none)"$'\n'
         fi
         excerpt_enc=$(printf '%s' "$EVIDENCE_EXCERPT" | jq -sRr @uri)
-        cat >&2 <<EOF
+        if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+            cat >&2 <<EOF
 ERROR: batch-verify-profile: --decision flag requires the excerpt
 '${EVIDENCE_EXCERPT}' to appear on >=${CV_REQUIRED_LOADS} distinct Tier-1
 browser snapshots in the current run window, but only ${flag_match_count}
@@ -699,6 +916,27 @@ If you can't reach Tier-1 sources (rate-limited, blocked, etc.) or a human
 asked you to flag this profile, ESCALATE via the existing Step 5 escalation
 path. Do NOT bulk-flag without evidence.
 EOF
+        else
+            cat >&2 <<EOF
+ERROR: batch-verify-profile: --decision flag requires excerpt
+'${EVIDENCE_EXCERPT}' to be backed by >=${CV_REQUIRED_LOADS} distinct
+evidence sources (API helpers + Tier-2 citation domains) in the current
+run window, but only ${flag_match_count} matched.
+
+Need ${missing} more distinct source(s). Tier-1 (API helpers) and Tier-2
+(native web_search citations) are the sanctioned options:
+  bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
+  (Spotify / Discogs helpers exist but exit creds_missing until issues
+  #255 / #256 land — don't bother calling them.)
+
+  Tier-2: research the credit in plain language; the model's inline
+  citations count when the assistant text contains the excerpt.
+
+Browser / web_fetch on music-database hosts is NOT a sanctioned source
+under api-mode. If neither tier reaches quorum, ESCALATE via Step 5
+(UVN) instead of bulk-flagging without evidence.
+EOF
+        fi
         write_pre_flight_rejection "missing_flag_evidence"
         emit_summary "missing_flag_evidence" "null"
         exit 3
@@ -713,6 +951,35 @@ EOF
         --reason "$REASON" \
         --flag-reason "$FLAG_REASON" \
         --ids "$IDS_RAW" >/dev/null || delegate_rc=$?
+
+    # On a successful flag delegate, emit one action_attempted runlog event
+    # so browser-evidence-audit.sh's mode-independent coverage check (every
+    # profile_group_fetched.profile_id needs >=1 decision row) treats this
+    # profile as covered. Without this, post-batch-summary.sh refuses to
+    # post the canonical batch summary on any UVN-heavy run and the agent
+    # is forced to hand-compose a [HEARTBEAT-BATCH] message — which is
+    # exactly what the 2026-05-07 13:36 UTC run hit. Mirrors the Tier-0
+    # emit at lines 338-358; the verdict gate is left enabled because the
+    # upstream flag-evidence quorum already proved the excerpt is countable
+    # on >=CV_REQUIRED_LOADS Tier-1 anchors. Fail-OPEN: a runlog write
+    # failure must not back out the API write that already landed.
+    if [[ "$delegate_rc" -eq 0 && -n "${OPS_RUN_ID:-}" ]]; then
+        runlog_sh="${RUNLOG_SH:-$SCRIPT_DIR/runlog.sh}"
+        if [[ -f "$runlog_sh" ]]; then
+            ids_array=$(printf '%s' "$IDS_RAW" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))')
+            aa_payload=$(jq -n -c \
+                --arg pid "$PROFILE_ID" \
+                --arg action "flag" \
+                --argjson cr_ids "$ids_array" \
+                --arg evidence_kind "excerpt_quorum_flag" \
+                --arg evidence_excerpt "$EVIDENCE_EXCERPT" \
+                '{profile_id:$pid, action:$action, cr_ids:$cr_ids, count:($cr_ids|length),
+                  evidence_kind:$evidence_kind, evidence_excerpt:$evidence_excerpt}')
+            bash "$runlog_sh" event "$OPS_RUN_ID" action_attempted "$aa_payload" \
+                >/dev/null 2>&1 || true
+        fi
+    fi
+
     emit_summary "ok" "$delegate_rc"
     exit "$delegate_rc"
 fi
@@ -755,26 +1022,43 @@ export CV_SESSION_RUN_STARTED_TS="$run_started_ts"
 
 # 2. Contamination check — Tier-1 web_fetch detected in current run window?
 # session-evidence.sh --check-tier1-webfetch honors CV_SESSION_RUN_STARTED_TS,
-# so only within-run contamination counts.
-cf_rc=0
-cf_stderr_file="$(mktemp)"
-bash "$SESSION_EVIDENCE_SH" --check-tier1-webfetch 2>"$cf_stderr_file" || cf_rc=$?
-if [[ $cf_rc -ne 0 ]]; then
-    cat "$cf_stderr_file" >&2
+# so only within-run contamination counts. Browser-mode only — under api the
+# bash gate's api-evidence library doesn't count web_fetch results, so the
+# contamination is a no-op signal (and the SKILL.md cutover block already
+# tells the agent not to web_fetch Tier-1 hosts).
+if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+    cf_rc=0
+    cf_stderr_file="$(mktemp)"
+    bash "$SESSION_EVIDENCE_SH" --check-tier1-webfetch 2>"$cf_stderr_file" || cf_rc=$?
+    if [[ $cf_rc -ne 0 ]]; then
+        cat "$cf_stderr_file" >&2
+        rm -f "$cf_stderr_file"
+        write_pre_flight_rejection "web_fetch_tier1"
+        emit_summary "web_fetch_tier1" "null"
+        exit 3
+    fi
     rm -f "$cf_stderr_file"
-    write_pre_flight_rejection "web_fetch_tier1"
-    emit_summary "web_fetch_tier1" "null"
-    exit 3
 fi
-rm -f "$cf_stderr_file"
 
-# 3. Evidence quorum: shared helper count_excerpt_matches (defined above).
-# Mirrors enforce_credit_approve_gate — when count >= CV_REQUIRED_LOADS the
-# delegate is allowed; otherwise we emit remediation text naming which
-# Tier-1 hosts are currently matching.
+# 3. Evidence quorum.
+# Browser mode: legacy count_excerpt_matches over Tier-1 browser snapshots.
+# API mode: count_profile_evidence_sources sums API helper hits + Tier-2
+#   native-search citation hostnames whose assistant text contains the
+#   normalized excerpt. AllMusic browser fallback was removed 2026-05-07.
+#   Both modes compare against CV_REQUIRED_LOADS.
 session_log="$(resolve_session_log)"
-matched_json="$(count_excerpt_matches "$session_log" "$run_started_ts")"
-matched_count=$(printf '%s' "$matched_json" | jq -r '.matched_count')
+if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+    matched_json="$(count_excerpt_matches "$session_log" "$run_started_ts")"
+    matched_count=$(printf '%s' "$matched_json" | jq -r '.matched_count')
+else
+    api_n="$(count_profile_evidence_sources "$EVIDENCE_EXCERPT" "$PROFILE_ID")"
+    matched_count="${api_n:-0}"
+    # Compose a matched_json shape compatible with the remediation
+    # rendering below. Hosts list is empty under api-mode because the
+    # sources include API helpers (no host) — the count is what matters.
+    matched_json="$(jq -nc --argjson n "$matched_count" \
+        '{matched_count:$n, matched_hosts:[]}')"
+fi
 matched_count="${matched_count:-0}"
 
 if (( matched_count < CV_REQUIRED_LOADS )); then
@@ -793,7 +1077,8 @@ if (( matched_count < CV_REQUIRED_LOADS )); then
     # least-surprise option across GNU/BSD shells.
     excerpt_enc=$(printf '%s' "$EVIDENCE_EXCERPT" | jq -sRr @uri)
 
-    cat >&2 <<EOF
+    if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+        cat >&2 <<EOF
 ERROR: batch-verify-profile: evidence excerpt '${EVIDENCE_EXCERPT}' found on ${matched_count}/${CV_REQUIRED_LOADS} required Tier-1 hostnames.
 
 Currently matching:
@@ -809,6 +1094,34 @@ After loading, re-run:
 If Tier 1 pages genuinely do not confirm these credits, downgrade to flag
 (user_verification_needed) with --decision flag --reason "<short reason>".
 EOF
+    else
+        # api / both — under api-mode the evidence universe is API-helper
+        # hits + Tier-2 native-search citations. Browser/web_fetch on Tier-1
+        # hosts is forbidden and AllMusic is no longer counted.
+        cat >&2 <<EOF
+ERROR: batch-verify-profile: evidence excerpt '${EVIDENCE_EXCERPT}' has ${matched_count}/${CV_REQUIRED_LOADS} required sources (API helpers + Tier-2 citation domains).
+
+Need ${missing} more distinct evidence source(s) where the response text
+contains '${EVIDENCE_EXCERPT}' (or its normalized form — punctuation /
+en-dash / hyphen folded to spaces). Suggested next steps:
+
+  Tier-1 (API helpers, deterministic):
+    bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
+  (Spotify / Discogs helpers exist but exit creds_missing until issues
+  #255 / #256 land — don't bother calling them.)
+
+  Tier-2 (native web_search): research the credit in plain language;
+    the model's inline citations count as distinct hostnames when the
+    assistant text contains the excerpt.
+
+After capturing more evidence, re-run:
+  batch-verify-profile.sh --profile-id '${PROFILE_ID}' --evidence-excerpt '${EVIDENCE_EXCERPT}' --ids '${IDS_RAW}' --decision approve
+
+Browser / web_fetch on music-database hosts is NOT a sanctioned source
+under api-mode. If neither Tier-1 nor Tier-2 reach quorum, downgrade to
+flag (user_verification_needed) with --decision flag --reason "<short reason>".
+EOF
+    fi
     write_pre_flight_rejection "missing_evidence"
     emit_summary "missing_evidence" "null"
     exit 3
@@ -824,6 +1137,30 @@ bash "$BATCH_APPROVE_SH" \
     --role "$ROLE" \
     --evidence-excerpt "$EVIDENCE_EXCERPT" \
     --ids "$IDS_RAW" >/dev/null || delegate_rc=$?
+
+# On a successful approve delegate, emit one action_attempted runlog event
+# so browser-evidence-audit.sh's mode-independent coverage check (every
+# profile_group_fetched.profile_id needs >=1 decision row) treats this
+# profile as covered. Mirrors the Tier-0 emit at lines 338-358 and the
+# flag-path emit above. Verdict gate stays enabled because the upstream
+# evidence-quorum check at lines 978-1013 already proved the excerpt is
+# countable on >=CV_REQUIRED_LOADS Tier-1 anchors. Fail-OPEN.
+if [[ "$delegate_rc" -eq 0 && -n "${OPS_RUN_ID:-}" ]]; then
+    runlog_sh="${RUNLOG_SH:-$SCRIPT_DIR/runlog.sh}"
+    if [[ -f "$runlog_sh" ]]; then
+        ids_array=$(printf '%s' "$IDS_RAW" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))')
+        aa_payload=$(jq -n -c \
+            --arg pid "$PROFILE_ID" \
+            --arg action "approve" \
+            --argjson cr_ids "$ids_array" \
+            --arg evidence_kind "excerpt_quorum_approve" \
+            --arg evidence_excerpt "$EVIDENCE_EXCERPT" \
+            '{profile_id:$pid, action:$action, cr_ids:$cr_ids, count:($cr_ids|length),
+              evidence_kind:$evidence_kind, evidence_excerpt:$evidence_excerpt}')
+        bash "$runlog_sh" event "$OPS_RUN_ID" action_attempted "$aa_payload" \
+            >/dev/null 2>&1 || true
+    fi
+fi
 
 emit_summary "ok" "$delegate_rc"
 exit "$delegate_rc"

@@ -269,5 +269,24 @@ thread_resp=$(openclaw --profile "$OPS_OPENCLAW_PROFILE" message send "${thread_
 }
 record_openclaw_warning "$thread_resp" "thread"
 
+# Direct success marker for lockfile.sh's R4-3 renderer-missing detector.
+# The session-log heuristic was written when the canonical path went
+# through the agent's MCP message tool; it now goes through the openclaw
+# CLI from a bash subshell and leaves no toolCall to find — every healthy
+# run looked like a bypass. This event is the unambiguous signal that the
+# canonical path completed both the parent and thread sends. Fail-OPEN:
+# both Slack sends already succeeded, so a runlog write failure must not
+# turn this into a non-zero exit.
+_pbs_done_now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+jq -n -c \
+    --arg rid "$RUN_ID" \
+    --arg ts "$_pbs_done_now" \
+    --arg pmid "$parent_msg_id" \
+    --arg ch "$target_channel" \
+    --argjson dr "$dry_run_flag" \
+    '{event:"summary_posted_canonical", script:"post-batch-summary.sh",
+      run_id:$rid, ts:$ts, parent_msg_id:$pmid, channel:$ch, dry_run:$dr}' \
+    >> "$runlog_path" 2>/dev/null || true
+
 echo "POST_BATCH_SUMMARY_OK: parent=$parent_msg_id channel=$target_channel"
 exit 0

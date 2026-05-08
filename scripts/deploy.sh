@@ -651,6 +651,12 @@ RSYNC_EXCLUDES=(
   # Plugin install artifacts (server runs npm install in-place)
   --exclude='plugins/*/node_modules/'
   --exclude='plugins/*/package-lock.json'
+  # CTO scratch / draft HTML authored directly on node-8 (workspaces/cto/),
+  # not tracked in repo and not intended to be. Excluded so rsync --delete
+  # doesn't wipe Aaron's working copy. Tripped pre-flight 2026-05-08 on
+  # PR #263. If a future cto/ HTML drops in via the same path it can be
+  # added alongside this entry.
+  --exclude='workspaces/cto/project_renaissance_v20.html'
   # Server-only operational tooling. Aaron wrote scripts/hydra-heal.sh
   # directly on node-8 during a 2026-04-07 incident as a manual
   # health-check + self-healing script (gateway restart, secrets

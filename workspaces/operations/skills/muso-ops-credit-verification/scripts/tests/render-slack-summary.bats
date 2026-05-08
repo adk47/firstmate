@@ -119,14 +119,16 @@ seed_run_finished() {
 
 @test "partial silent (some landed, some blocked): banner on parent, no DISCREPANCY" {
     # Not technically silent_failure (some approves landed), but surface the
-    # rejected count so Slack readers see it.
+    # rejected count so Slack readers see it. The renderer's partial-silent
+    # branch lumps pre-flight + gate into a single "blocked" total; the
+    # split-out wording is reserved for the full DISCREPANCY path.
     seed_run_finished true false 100 50 5 0
     seed_results approved ok '["cr_1","cr_2","cr_3","cr_4","cr_5"]'
     seed_results approved rejected_by_gate '["cr_x","cr_y","cr_z","cr_p","cr_q"]'
     run "$SCRIPTS_DIR/render-slack-summary.sh" "$RUN_ID"
     [ "$status" -eq 0 ]
     [[ "$output" != *"DISCREPANCY DETECTED"* ]]
-    [[ "$output" == *"5 approve(s) rejected by gate"* ]]
+    [[ "$output" == *"5 approve(s) blocked (pre-flight + gate)"* ]]
 }
 
 # --- Thread reply content ---

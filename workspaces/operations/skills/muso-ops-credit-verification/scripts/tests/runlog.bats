@@ -6,6 +6,11 @@ setup() {
   setup_tmp_env
   export OPS_RUNLOG_DIR="$TEST_TMPDIR/credit-batch-runs"
   mkdir -p "$OPS_RUNLOG_DIR"
+  # 2026-05-06 cutover: existing cases assert legacy browser-mode semantics
+  # (preflight freeze on browser failure, count_profile_browser_loads,
+  # tier1_unreachable bypass). Pin to browser so they keep covering the
+  # rollback path. The default mode flipped to api with this cutover.
+  export CV_EVIDENCE_MODE=browser
 }
 teardown() { teardown_tmp_env; }
 
@@ -338,7 +343,10 @@ seed_bypass_eligible_session() {
     "$SCRIPTS_DIR/runlog.sh" event "$RUN_ID" verdict \
     "$(jq -nc --arg pid "$PID" --arg id cr_1 '{cr_id:$id, profile_id:$pid, verdict:"LEGITIMATE"}')"
   [ "$status" -eq 7 ]
-  [[ "$output" == *"no successful browser load found"* ]]
+  # Message is mode-aware after the 2026-05-06 cutover. Browser-mode says
+  # "Tier-1 browser snapshot"; api-mode says "evidence source". The label
+  # `verdict_without_evidence` is mode-independent — assert on that.
+  [[ "$output" == *"verdict_without_evidence"* ]]
   [[ "$output" == *"$PID"* ]]
 }
 
