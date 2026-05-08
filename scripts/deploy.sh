@@ -1387,10 +1387,12 @@ sync_profile_config() {
     cp "$src" "$dst"
     return
   fi
-  SRC="$src" DST="$dst" python3 - <<'PYEOF' || fail "profile config sync failed for $dst"
-import json, os, sys, tempfile, time
+  SRC="$src" DST="$dst" ANNOUNCE_HELPER="$SCRIPT_DIR/lib/announce-legit-write.sh" \
+    python3 - <<'PYEOF' || fail "profile config sync failed for $dst"
+import hashlib, json, os, subprocess, sys, tempfile, time
 src_path = os.environ['SRC']
 dst_path = os.environ['DST']
+announce_helper = os.environ.get('ANNOUNCE_HELPER', '')
 
 def warn(msg):
     # Match the deploy.sh log() format so aggregators see a consistent shape.
@@ -1442,7 +1444,21 @@ if preserved:
 tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(dst_path), delete=False)
 try:
     json.dump(repo_cfg, tmp, indent=2)
+    tmp.flush()
+    os.fsync(tmp.fileno())
     tmp.close()
+    # Announce the legitimate write before renaming so
+    # openclaw-config-write-audit.sh's inotify-triggered alert can
+    # match on path+sha256 and suppress the "out-of-band write" Slack
+    # page. See scripts/lib/announce-legit-write.sh.
+    if announce_helper and os.path.isfile(announce_helper):
+        with open(tmp.name, 'rb') as fh:
+            sha = hashlib.sha256(fh.read()).hexdigest()
+        subprocess.run(
+            [announce_helper, 'deploy.sh', dst_path],
+            check=False,
+            env={**os.environ, 'ANNOUNCE_SHA': sha},
+        )
     os.replace(tmp.name, dst_path)
 except Exception:
     try:

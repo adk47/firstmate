@@ -126,6 +126,14 @@ for cand in "${CANDIDATES[@]}"; do
   # rename into place.
   tmp="${CONFIG}.candidate-${TS}"
   cp -p "$cand" "$tmp"
+  # Announce the legitimate atomic-rename write so
+  # openclaw-config-write-audit.sh can match path+sha256 and
+  # suppress its "out-of-band" Slack alert. Best-effort — if the
+  # helper is missing we fall through to today's behavior.
+  if [ -x "$SCRIPT_DIR/lib/announce-legit-write.sh" ]; then
+    ANNOUNCE_SHA=$(sha256sum "$tmp" | awk '{print $1}') \
+      "$SCRIPT_DIR/lib/announce-legit-write.sh" pre-start-heal "$CONFIG" || true
+  fi
   mv "$tmp" "$CONFIG"
   if is_valid; then
     log "RECOVERED from $(basename "$cand"). Original corrupt file at ${BROKEN_PATH}."

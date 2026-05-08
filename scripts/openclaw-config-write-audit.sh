@@ -50,7 +50,8 @@ if [ -z "$WATCHED" ]; then
   exit 0
 fi
 
-LOGFILE="/var/log/openclaw-config-writes.log"
+LOGFILE="${OPENCLAW_AUDIT_LOG:-/var/log/openclaw-config-writes.log}"
+LEGIT_LOG="${OPENCLAW_LEGIT_LOG:-/var/log/openclaw-legitimate-writes.log}"
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 LOGPREFIX="[openclaw-config-write-audit ${TS}] ${WATCHED}:"
 
@@ -86,6 +87,29 @@ for pid in $WRITERS; do
 done
 
 if [ -z "$WRITERS" ]; then
+  # Atomic-rename writer is gone — lsof has nothing. Before
+  # falling through to the alarming "out-of-band" path, check
+  # the legit-writes log: known-good callers (deploy.sh,
+  # pre-start-heal.sh) announce themselves before each atomic
+  # rename. Match on path AND sha256 so a stale legit entry
+  # can't shadow a hostile write to the same path within the
+  # freshness window. See scripts/lib/announce-legit-write.sh.
+  WATCHED_REAL=$(realpath "$WATCHED" 2>/dev/null || echo "$WATCHED")
+  ON_DISK_SHA=$(sha256sum "$WATCHED" 2>/dev/null | awk '{print $1}')
+  CUTOFF=$(( $(date -u +%s) - 120 ))
+  LEGIT=""
+  if [ -f "$LEGIT_LOG" ] && [ -n "$ON_DISK_SHA" ]; then
+    LEGIT=$(awk -v c="$CUTOFF" -v t="$WATCHED_REAL" -v h="$ON_DISK_SHA" '
+      $1 >= c && $NF == t {
+        s=""
+        for (i=1; i<=NF; i++) if ($i ~ /^sha256=/) { split($i, a, "="); s=a[2] }
+        if (s == h) print
+      }' "$LEGIT_LOG" 2>/dev/null | tail -1)
+  fi
+  if [ -n "$LEGIT" ]; then
+    log "[legit] in-band atomic-rename write — no alert: $LEGIT"
+    exit 0
+  fi
   log "no current writer (atomic-rename or fast-close); falling back to journald correlation"
   source_evidence="rename-style write (no live writer); see SSH session log below"
 elif [ -z "$NON_GATEWAY_WRITERS" ]; then
