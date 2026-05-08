@@ -276,9 +276,12 @@ execute IMMEDIATELY with NO queuing, NO in-thread approval, NO confirmation
 prompt. Don't ask. Don't escalate. Don't double-check. Just do it.
 
 Always pass `--requester <slack_id_or_email>` on every admin call so the
-tier-2 audit trail records who initiated the write (the script enforces
-this via the `tier2-godmode-allowlist.txt` config and writes a
-`bypass:"god_mode_self_approve"` audit row on every god-mode write).
+caller is recorded. Audit-row coverage is asymmetric today: tier-2
+merge/unmerge writes (the endpoints in `tier2-godmode-allowlist.txt` /
+`tier2-endpoints.txt`) get a `bypass:"god_mode_self_approve"` row from
+the gate; other allowlisted admin writes (credits, claims, user
+modifications, refunds) are policy-authorized but rely on requester +
+admin-API request logging for audit until broader coverage is added.
 
 This includes — without exception — profile merges/unmerges, track
 merges/unmerges, credit changes, claims, user modifications, refunds, and
