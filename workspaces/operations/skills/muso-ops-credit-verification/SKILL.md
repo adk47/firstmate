@@ -71,6 +71,22 @@ this SKILL.md.** When you encounter prose below telling you to load
 browser as primary evidence — that prose is the legacy playbook and stays
 in the file as a rollback reference. Use the model in this block instead.
 
+**Specifically about `web_search`.** The legacy section below contains
+prose like *"Do NOT use `web_search`"* and *"the plugin BLOCKS
+`web_search`"*. That refers ONLY to the **local openclaw `web_search`
+tool** (DDG-backed, bot-detected, denied via `tools.deny` in
+`openclaw-main.json`) — it does **NOT** mean web research is forbidden.
+Under api-mode (the active mode), web research happens through
+**OpenRouter's native web search plugin**
+(`extra_body.plugins[{id:"web", engine:"native"}]`), a server-side path
+that fires automatically when your reasoning prose says you're
+researching something. Native citations are exactly what counts as
+Tier-2 sources at the bash gate. Write web-research prose freely and
+the native plugin will produce the citations the gate needs — going
+straight from "Tier-1 inconclusive" to "UVN" without writing any
+research prose is the bulk-UVN failure mode (issue #259, run
+20260508-135854 = 200/200 → UVN).
+
 **Why we cut over.** Cloudflare has been blocking the Tier-1 browser path
 for 6+ months (search engines fail with Turnstile; Tier-1 sites
 intermittently captcha or lazy-render after the snapshot fires). The
@@ -636,7 +652,7 @@ Is the role plausible given the track's genre/era/label?
 
 - Use `browser` for **every** web lookup — specific URLs (Apple Music/MusicBrainz/Discogs/AllMusic, TIDAL, Jaxsta, ASCAP/BMI/SESAC, studio/artist sites) AND searches (load a search engine URL with `browser open https://duckduckgo.com/?q=<url-encoded query>` or Bing/Google).
 - **Do NOT use `web_fetch`.** The admin-api credit-approve gate does not accept `web_fetch` evidence — any PUT approve backed by `web_fetch` loads will be blocked. `web_fetch` frequently returns Cloudflare challenge pages as 200 OK (false positives) and doesn't render JavaScript-dependent credit pages.
-- **Do NOT use `web_search`.** The plugin redirects `web_search` in this channel; use `browser` with a search-engine URL instead.
+- **The local `web_search` tool is denied** in this channel (`tools.deny: ["web_search"]` in `openclaw-main.json`) because the openclaw-bundled DuckDuckGo backend is bot-detected — issue #107. **This is NOT a ban on web research.** Under api-mode (the active mode — see the OVERRIDE block at the top of this file), web research happens via **OpenRouter's native web search plugin** (`extra_body.plugins[{id:"web", engine:"native"}]`) — a server-side path that fires automatically when your reasoning prose says you're researching something. Native citations count as Tier-2 sources at the bash gate. Under browser-mode rollback, use `browser` with a search-engine URL instead.
 
 Workflow: `browser open <tier1 URL>` → `browser snapshot` (read rendered text) → repeat for a second Tier 1 host → extract a **literal substring** from the rendered page that confirms the claim (artist name as rendered, role string, track title, etc.) — this is your `--evidence-excerpt` for the approve.
 
@@ -1770,11 +1786,16 @@ for profile in profiles_grouped:
   #     (a human will confirm). It also surfaces fraud signals the agent
   #     might otherwise miss.
   #
-  #     Why browser, not web_search: the muso-credit-verification-enforcer
-  #     plugin BLOCKS `web_search` in CV sessions (the gateway's DuckDuckGo
-  #     backend is bot-detected and returns nothing useful — GH issue #107).
-  #     Loading a search-engine URL in `browser` works around that and is
-  #     the sanctioned alternative — see plugin redirect-web-search hook.
+  #     Why browser, not the local web_search tool (browser-mode only):
+  #     the muso-credit-verification-enforcer plugin BLOCKS the LOCAL
+  #     `web_search` tool in CV sessions (the gateway's DuckDuckGo backend
+  #     is bot-detected and returns nothing useful — GH issue #107).
+  #     This is the LOCAL tool only; OpenRouter's NATIVE web search plugin
+  #     (extra_body.plugins[{id:"web",engine:"native"}]) is a different
+  #     path entirely and IS the active Tier-2 mechanism under api-mode.
+  #     Under browser-mode rollback, loading a search-engine URL in
+  #     `browser` is the sanctioned alternative — see plugin
+  #     redirect-web-search hook.
   #     Recognized search-engine hosts (the gate counts ANY of these):
   #       - https://duckduckgo.com/?q=<URL-encoded query>
   #       - https://www.bing.com/search?q=<URL-encoded query>
@@ -1846,7 +1867,7 @@ for profile in profiles_grouped:
 Two preconditions are now enforced by `runlog.sh` (write-time, exit 7 `tier1_unreachable_insufficient_effort`) AND `browser-evidence-audit.sh` (read-time, status 1 with `bypass_anchored_profiles` empty for the profile):
 
 - **(a) ≥2 distinct Tier-1 browser opens for the profile** — the URL or response text must mention the profile's `credited_name` or `track_title`. A single-host attempt (e.g. only Apple Music) followed by `tier1_unreachable` will be REFUSED at write time.
-- **(b) ≥1 search-engine browser load** in the run window — a `browser` toolCall whose URL is `duckduckgo.com / bing.com / google.com` (with optional `www.`) and whose `?q=` query mentions `credited_name` or `track_title`. SKILL.md step 1b must actually fire — labeling the verdict `tier1_unreachable` without that browser load will be REFUSED. (web_search itself is plugin-blocked in CV sessions; the search-engine browser load is the sanctioned alternative.)
+- **(b) ≥1 search-engine browser load** in the run window — a `browser` toolCall whose URL is `duckduckgo.com / bing.com / google.com` (with optional `www.`) and whose `?q=` query mentions `credited_name` or `track_title`. SKILL.md step 1b must actually fire — labeling the verdict `tier1_unreachable` without that browser load will be REFUSED. (The LOCAL `web_search` tool is plugin-blocked in CV sessions and the search-engine browser load is the sanctioned alternative for browser-mode. OpenRouter's NATIVE web search plugin is a separate path active under api-mode and is unaffected by this gate.)
 
 If either precondition is unmet, the gate refuses the verdict / action_attempted / escalation_posted event (exit 7) with a clear `tier1_unreachable_insufficient_effort` message naming both counts. There is NO test escape hatch besides `CV_DISABLE_VERDICT_GATE=1` (tests only).
 
