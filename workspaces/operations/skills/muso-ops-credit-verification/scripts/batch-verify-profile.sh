@@ -790,9 +790,9 @@ Resolved claim:
 
 Tier-1 (API helpers): if the credit ships an ISRC, run
   bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
-  bash spotify-track-lookup.sh   <spotify_track_id> --credited-name '${CREDITED_NAME}'
-  bash discogs-isrc-lookup.sh    <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
 A successful helper call (name_match: true) counts as 1 source.
+(Spotify / Discogs helpers exist but exit creds_missing until the
+tokens in issues #255 / #256 land — don't bother calling them.)
 
 Tier-2 (native web_search): ask the model to research the credit on the
 web in plain language. The reply's inline citation URLs are counted by
@@ -926,8 +926,8 @@ run window, but only ${flag_match_count} matched.
 Need ${missing} more distinct source(s). Tier-1 (API helpers) and Tier-2
 (native web_search citations) are the sanctioned options:
   bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
-  bash spotify-track-lookup.sh   <spotify_track_id> --credited-name '${CREDITED_NAME}'
-  bash discogs-isrc-lookup.sh    <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
+  (Spotify / Discogs helpers exist but exit creds_missing until issues
+  #255 / #256 land — don't bother calling them.)
 
   Tier-2: research the credit in plain language; the model's inline
   citations count when the assistant text contains the excerpt.
@@ -1107,8 +1107,8 @@ en-dash / hyphen folded to spaces). Suggested next steps:
 
   Tier-1 (API helpers, deterministic):
     bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
-    bash spotify-track-lookup.sh   <spotify_track_id> --credited-name '${CREDITED_NAME}'
-    bash discogs-isrc-lookup.sh    <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
+  (Spotify / Discogs helpers exist but exit creds_missing until issues
+  #255 / #256 land — don't bother calling them.)
 
   Tier-2 (native web_search): research the credit in plain language;
     the model's inline citations count as distinct hostnames when the
