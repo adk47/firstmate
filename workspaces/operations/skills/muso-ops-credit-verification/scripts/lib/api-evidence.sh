@@ -54,6 +54,20 @@
 
 CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
 
+# Substring matching across the two evidence streams (helper JSON, assistant
+# prose) uses a `cv_normalize` jq function defined inline in each query
+# below. Both the agent-supplied excerpt and the haystack are normalized:
+#   - lowercased
+#   - en-dash (U+2013) / em-dash (U+2014) / ascii hyphen → single space
+#   - runs of whitespace collapsed to one space
+#
+# Why: helpers emit `<name> – <role>` (en-dash, see musicbrainz-isrc-lookup.sh
+# line 280) but the agent's Tier-2 citation prose uses natural language. A
+# single --evidence-excerpt like "Bram Fidder mastering" must substring-match
+# both the helper text and the prose; without normalization the en-dash form
+# never aligns, and the canonical "MB(1) + Tier-2(1) = 2" quorum collapses
+# to 1. See PR #263 review.
+
 # Resolve the ISO8601 timestamp of the current run's run_started event, or
 # empty when no scope is active. Identical to browser-evidence.sh — kept
 # duplicated rather than sourced because both libs may be loaded together
@@ -111,9 +125,17 @@ count_profile_api_evidence() {
     fi
 
     jq -R -r -n \
-        --arg excerpt "$(printf '%s' "$excerpt" | tr '[:upper:]' '[:lower:]')" \
+        --arg excerpt_raw "$excerpt" \
         --arg run_started_ts "$run_started_ts" \
     '
+    def cv_normalize:
+        ascii_downcase
+        | gsub("[–—-]"; " ")
+        | gsub("\\s+"; " ")
+        | sub("^ "; "") | sub(" $"; "");
+
+    ($excerpt_raw | cv_normalize) as $excerpt
+    |
     [inputs | fromjson? // empty | select(type == "object")
      | select($run_started_ts == "" or ((.timestamp // "") >= $run_started_ts))] as $lines
     |
@@ -148,9 +170,9 @@ count_profile_api_evidence() {
         | ($calls[$tr.toolCallId] // null) as $call
         | select($call != null and ($call.source // "") != "")
         | (($tr.isError // false) | not) as $not_err
-        | (($tr.content // []) | map(.text // "") | join(" ") | ascii_downcase) as $text_lc
-        | select($not_err and ($text_lc | length) > 0)
-        | select($text_lc | contains($excerpt))
+        | (($tr.content // []) | map(.text // "") | join(" ") | cv_normalize) as $text
+        | select($not_err and ($text | length) > 0)
+        | select($text | contains($excerpt))
         | $call.source
     ] | unique | length
     ' "$session_log" 2>/dev/null || echo 0
@@ -211,9 +233,18 @@ count_profile_citation_domains() {
     fi
 
     jq -R -r -n \
-        --arg excerpt "$(printf '%s' "$excerpt" | tr '[:upper:]' '[:lower:]')" \
+        --arg excerpt_raw "$excerpt" \
         --arg run_started_ts "$run_started_ts" \
     '
+    # See header comment for the cv_normalize contract — must mirror the
+    # definition in count_profile_api_evidence so both streams use identical
+    # normalization for the substring check.
+    def cv_normalize:
+        ascii_downcase
+        | gsub("[–—-]"; " ")
+        | gsub("\\s+"; " ")
+        | sub("^ "; "") | sub(" $"; "");
+
     # URL extractor: finds bare https URLs and Markdown-link URLs in text.
     # Trailing punctuation is stripped because URLs at end-of-sentence
     # commonly have a trailing comma / period / paren / bracket / quote.
@@ -225,6 +256,8 @@ count_profile_citation_domains() {
         ((try ($url | capture("^https?://(?<h>[^/?#]+)").h) catch null) // "")
         | ascii_downcase | sub("^www\\."; "");
 
+    ($excerpt_raw | cv_normalize) as $excerpt
+    |
     [inputs | fromjson? // empty | select(type == "object")
      | select($run_started_ts == "" or ((.timestamp // "") >= $run_started_ts))] as $lines
     |
@@ -233,8 +266,8 @@ count_profile_citation_domains() {
         | .message | select(.role == "assistant")
         | . as $msg
         # Collapse all text content + every "title" / annotation field
-        # OpenRouter routes through to a single lowercased haystack we
-        # can substring-search for the excerpt.
+        # OpenRouter routes through to a single haystack we can
+        # substring-search for the excerpt (after cv_normalize).
         | (
             ([$msg.content[]? | (.text // "")] | join(" "))
             + " "
@@ -242,8 +275,8 @@ count_profile_citation_domains() {
             + " "
             + ([$msg.citations[]? // empty | (.title // "") + " " + (.url // "")] | join(" "))
           ) as $hay
-        | ($hay | ascii_downcase) as $hay_lc
-        | select($hay_lc | contains($excerpt))
+        | ($hay | cv_normalize) as $hay_norm
+        | select($hay_norm | contains($excerpt))
         |
         # Now collect URLs from all the same shapes.
         (

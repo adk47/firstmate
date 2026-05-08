@@ -586,8 +586,9 @@ write_pre_flight_rejection() {
 . "$SCRIPT_DIR/lib/api-evidence.sh"
 
 # CV_EVIDENCE_MODE dispatch (matches the gate + runlog write-time gate):
-#   api (default) — count_profile_evidence_sources(excerpt) sums API helpers
-#                   + AllMusic browser fallback + Tier-2 citation hostnames.
+#   api (default) — count_profile_evidence_sources(excerpt) sums API-helper
+#                   hits + Tier-2 native-search citation hostnames whose
+#                   assistant text contains the normalized excerpt.
 #   browser       — legacy ≥2-distinct-Tier-1-browser-loads quorum.
 #   both          — api short-circuits success; browser path is fallback.
 CV_EVIDENCE_MODE="${CV_EVIDENCE_MODE:-api}"
@@ -746,7 +747,8 @@ if [[ "${CV_REQUIRED_PROFILE_BROWSE:-1}" != "0" ]]; then
     fi
     pb_count="${pb_count:-0}"
     if (( pb_count < 1 )); then
-        cat >&2 <<EOF
+        if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+            cat >&2 <<EOF
 ERROR: batch-verify-profile: --decision ${DECISION} requires at least 1
 Tier-1 browser snapshot whose response text proves the claim for profile
 '${PROFILE_ID}' in the current run window, but 0 were found.
@@ -771,6 +773,38 @@ If sources are unreachable, ESCALATE via the existing Step 5 path with
 real evidence about why you can't reach them; do NOT bulk-flag or bulk-
 escalate without per-profile Tier-1 evidence.
 EOF
+        else
+            # api / both — under api-mode, browser/web_fetch on Tier-1 hosts is
+            # explicitly forbidden and AllMusic is no longer counted as evidence.
+            # Steer the agent back to the API helpers + native web_search.
+            cat >&2 <<EOF
+ERROR: batch-verify-profile: --decision ${DECISION} requires at least 1
+evidence source (Tier-1 API helper hit OR Tier-2 native-search citation
+domain) whose response text proves the claim for profile '${PROFILE_ID}'
+in the current run window, but 0 were found.
+
+Resolved claim:
+  credited_name: '${CREDITED_NAME}'
+  track_title:   '${TRACK_TITLE}'
+  role:          '${ROLE}'
+
+Tier-1 (API helpers): if the credit ships an ISRC, run
+  bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
+  bash spotify-track-lookup.sh   <spotify_track_id> --credited-name '${CREDITED_NAME}'
+  bash discogs-isrc-lookup.sh    <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
+A successful helper call (name_match: true) counts as 1 source.
+
+Tier-2 (native web_search): ask the model to research the credit on the
+web in plain language. The reply's inline citation URLs are counted by
+distinct hostname when the assistant text contains the --evidence-excerpt.
+
+Browser / web_fetch on music-database hosts is FORBIDDEN under api-mode
+(allmusic / discogs / musicbrainz / apple-music) — the api-evidence
+library does not count their results. Tier-3 (UVN) is the right exit
+when Tier-1 + Tier-2 cannot reach quorum; do NOT bulk-flag or bulk-
+escalate without per-profile evidence.
+EOF
+        fi
         write_pre_flight_rejection "missing_profile_browse"
         emit_summary "missing_profile_browse" "null"
         exit 5
@@ -863,7 +897,8 @@ EOF
             matched_hosts_block="  (none)"$'\n'
         fi
         excerpt_enc=$(printf '%s' "$EVIDENCE_EXCERPT" | jq -sRr @uri)
-        cat >&2 <<EOF
+        if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+            cat >&2 <<EOF
 ERROR: batch-verify-profile: --decision flag requires the excerpt
 '${EVIDENCE_EXCERPT}' to appear on >=${CV_REQUIRED_LOADS} distinct Tier-1
 browser snapshots in the current run window, but only ${flag_match_count}
@@ -881,6 +916,27 @@ If you can't reach Tier-1 sources (rate-limited, blocked, etc.) or a human
 asked you to flag this profile, ESCALATE via the existing Step 5 escalation
 path. Do NOT bulk-flag without evidence.
 EOF
+        else
+            cat >&2 <<EOF
+ERROR: batch-verify-profile: --decision flag requires excerpt
+'${EVIDENCE_EXCERPT}' to be backed by >=${CV_REQUIRED_LOADS} distinct
+evidence sources (API helpers + Tier-2 citation domains) in the current
+run window, but only ${flag_match_count} matched.
+
+Need ${missing} more distinct source(s). Tier-1 (API helpers) and Tier-2
+(native web_search citations) are the sanctioned options:
+  bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
+  bash spotify-track-lookup.sh   <spotify_track_id> --credited-name '${CREDITED_NAME}'
+  bash discogs-isrc-lookup.sh    <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
+
+  Tier-2: research the credit in plain language; the model's inline
+  citations count when the assistant text contains the excerpt.
+
+Browser / web_fetch on music-database hosts is NOT a sanctioned source
+under api-mode. If neither tier reaches quorum, ESCALATE via Step 5
+(UVN) instead of bulk-flagging without evidence.
+EOF
+        fi
         write_pre_flight_rejection "missing_flag_evidence"
         emit_summary "missing_flag_evidence" "null"
         exit 3
@@ -986,9 +1042,10 @@ fi
 
 # 3. Evidence quorum.
 # Browser mode: legacy count_excerpt_matches over Tier-1 browser snapshots.
-# API mode: count_profile_evidence_sources sums API helpers + AllMusic
-#   browser fallback + Tier-2 citation hostnames whose surrounding text
-#   contains the excerpt. Both compare to CV_REQUIRED_LOADS.
+# API mode: count_profile_evidence_sources sums API helper hits + Tier-2
+#   native-search citation hostnames whose assistant text contains the
+#   normalized excerpt. AllMusic browser fallback was removed 2026-05-07.
+#   Both modes compare against CV_REQUIRED_LOADS.
 session_log="$(resolve_session_log)"
 if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
     matched_json="$(count_excerpt_matches "$session_log" "$run_started_ts")"
@@ -1020,7 +1077,8 @@ if (( matched_count < CV_REQUIRED_LOADS )); then
     # least-surprise option across GNU/BSD shells.
     excerpt_enc=$(printf '%s' "$EVIDENCE_EXCERPT" | jq -sRr @uri)
 
-    cat >&2 <<EOF
+    if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
+        cat >&2 <<EOF
 ERROR: batch-verify-profile: evidence excerpt '${EVIDENCE_EXCERPT}' found on ${matched_count}/${CV_REQUIRED_LOADS} required Tier-1 hostnames.
 
 Currently matching:
@@ -1036,6 +1094,34 @@ After loading, re-run:
 If Tier 1 pages genuinely do not confirm these credits, downgrade to flag
 (user_verification_needed) with --decision flag --reason "<short reason>".
 EOF
+    else
+        # api / both — under api-mode the evidence universe is API-helper
+        # hits + Tier-2 native-search citations. Browser/web_fetch on Tier-1
+        # hosts is forbidden and AllMusic is no longer counted.
+        cat >&2 <<EOF
+ERROR: batch-verify-profile: evidence excerpt '${EVIDENCE_EXCERPT}' has ${matched_count}/${CV_REQUIRED_LOADS} required sources (API helpers + Tier-2 citation domains).
+
+Need ${missing} more distinct evidence source(s) where the response text
+contains '${EVIDENCE_EXCERPT}' (or its normalized form — punctuation /
+en-dash / hyphen folded to spaces). Suggested next steps:
+
+  Tier-1 (API helpers, deterministic):
+    bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
+    bash spotify-track-lookup.sh   <spotify_track_id> --credited-name '${CREDITED_NAME}'
+    bash discogs-isrc-lookup.sh    <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
+
+  Tier-2 (native web_search): research the credit in plain language;
+    the model's inline citations count as distinct hostnames when the
+    assistant text contains the excerpt.
+
+After capturing more evidence, re-run:
+  batch-verify-profile.sh --profile-id '${PROFILE_ID}' --evidence-excerpt '${EVIDENCE_EXCERPT}' --ids '${IDS_RAW}' --decision approve
+
+Browser / web_fetch on music-database hosts is NOT a sanctioned source
+under api-mode. If neither Tier-1 nor Tier-2 reach quorum, downgrade to
+flag (user_verification_needed) with --decision flag --reason "<short reason>".
+EOF
+    fi
     write_pre_flight_rejection "missing_evidence"
     emit_summary "missing_evidence" "null"
     exit 3

@@ -329,9 +329,10 @@ EOF
               if [[ "$mode" == "browser" ]]; then
                 count=$(count_profile_browser_loads "$pid")
               else
-                # api-mode: count distinct evidence sources (api helpers +
-                # AllMusic browser fallback + future citations) keyed by the
-                # credited name. The api-evidence functions take an excerpt
+                # api-mode: count distinct evidence sources (API-helper
+                # hits + Tier-2 native-search citation hostnames) keyed by
+                # the credited name. AllMusic browser fallback was removed
+                # 2026-05-07. The api-evidence functions take an excerpt
                 # as their first arg; CV_PROFILE_CREDITED_NAME is the
                 # natural per-profile binding.
                 count=$(count_profile_evidence_sources "${CV_PROFILE_CREDITED_NAME:-}")
@@ -343,7 +344,7 @@ EOF
                 if [[ "$mode" == "browser" ]]; then
                   mode_blurb="Tier-1 browser snapshot (music.apple.com / musicbrainz.org / discogs.com / allmusic.com)"
                 else
-                  mode_blurb="evidence source (API helper hit OR AllMusic browser load)"
+                  mode_blurb="evidence source (API helper hit OR Tier-2 native-search citation)"
                 fi
                 cat >&2 <<EOF
 ERROR: runlog.sh ${event_name} refused (${label}) — no successful
@@ -357,9 +358,11 @@ Resolved claim for this profile (from profile_group_fetched):
 
 CV_EVIDENCE_MODE=${mode}. Under api-mode every per-profile decision must be
 backed by at least one of: a *-isrc-lookup.sh API helper invocation whose
-toolResult contains the credited name, OR an AllMusic browser load whose
-snapshot text contains the credited name. Set CV_EVIDENCE_MODE=browser to
-fall back to the legacy Tier-1 browser quorum (rollback only).
+toolResult contains the credited name, OR an assistant message carrying a
+native-search citation URL whose surrounding text contains the credited
+name. AllMusic / browser fallback is no longer counted (removed 2026-05-07).
+Set CV_EVIDENCE_MODE=browser to fall back to the legacy Tier-1 browser
+quorum (rollback only).
 EOF
                 exit 7
               fi

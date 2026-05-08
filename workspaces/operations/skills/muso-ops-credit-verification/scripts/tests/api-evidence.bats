@@ -228,6 +228,39 @@ call_lib() {
   [ "$output" = "2" ]
 }
 
+@test "evidence_sources: realistic en-dash MB output + natural Tier-2 prose still quorum-ready (regression)" {
+  # PR #263 review (Clio 2026-05-08): the live MB helper emits its
+  # evidence_excerpt as `<name> – <role>` with a literal en-dash
+  # (musicbrainz-isrc-lookup.sh:280), but the agent's Tier-2 citation prose
+  # uses natural language. Without punctuation/whitespace normalization in
+  # api-evidence.sh's substring check, a single --evidence-excerpt cannot
+  # match both streams and the canonical "MB(1) + Tier-2(1) = 2" quorum
+  # collapses to 1.
+  #
+  # This fixture uses the en-dash form the live helper actually emits and
+  # natural Tier-2 prose. The fix in api-evidence.sh normalizes en-dash /
+  # em-dash / hyphen to space and collapses runs of whitespace before
+  # comparison, so excerpt "Bram Fidder mastering" matches both.
+  sl '{"timestamp":"2026-05-07T10:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"exec","arguments":{"command":"bash musicbrainz-isrc-lookup.sh USXX1"}}]}}'
+  sl '{"timestamp":"2026-05-07T10:00:01Z","message":{"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"{\"name_match\":true,\"role_match\":true,\"evidence_excerpt\":\"Bram Fidder – mastering\"}"}]}}'
+  sl '{"timestamp":"2026-05-07T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Bram Fidder mastering credit is corroborated on https://vuproductions.gr/about-us"}]}}'
+
+  run call_lib count_profile_evidence_sources "Bram Fidder mastering"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+}
+
+@test "api_evidence: agent excerpt with en-dash matches helper output without one (and vice-versa)" {
+  # Same normalization, opposite direction: agent passes the en-dash form
+  # and the helper output happens to use a hyphen / no dash.
+  sl '{"timestamp":"2026-05-07T10:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"exec","arguments":{"command":"bash musicbrainz-isrc-lookup.sh USXX1"}}]}}'
+  sl '{"timestamp":"2026-05-07T10:00:01Z","message":{"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"{\"name_match\":true,\"evidence_excerpt\":\"Bram Fidder mastering\"}"}]}}'
+
+  run call_lib count_profile_api_evidence "Bram Fidder – mastering"
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+}
+
 @test "evidence_sources: AllMusic browser load no longer counts (post-removal)" {
   # Defensive regression test: even if the agent loads AllMusic, that
   # browser load is no longer a sanctioned evidence source under api-mode.

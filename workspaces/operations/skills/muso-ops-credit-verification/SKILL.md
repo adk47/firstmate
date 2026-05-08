@@ -134,8 +134,14 @@ already ran):
      UVN-bulk and 200 credits ended up with humans that Tier-2 could have
      cleared.**
   3. **Approve** when sources sum to ≥2 (typically: 1 MB + 1 Tier-2
-     citation = 2). Pass the citation snippet (verbatim ≥10 chars) as
-     `--evidence-excerpt`.
+     citation = 2). Pass `--evidence-excerpt` as a *clean* "name + role"
+     or "name + track" phrase (≥10 chars, no filler words) — e.g.
+     `"Bram Fidder mastering"` or `"Bram Fidder Loud and Clear"`. The
+     gate normalizes en-dashes/em-dashes/hyphens to spaces and collapses
+     whitespace before substring-matching, so the same excerpt resolves
+     against MB's `<name> – <role>` helper output AND your Tier-2
+     citation prose. Wordy excerpts (`"is credited as mastering on..."`)
+     won't substring-match the helper JSON and silently lose a source.
   4. **Tier-3 (UVN)** only if Tier-1 + Tier-2 don't reach 2 sources. Use
      verdict `UNVERIFIABLE — NEEDS REVIEW`, status
      `user_verification_needed`. Don't fabricate.
@@ -576,11 +582,14 @@ Skipping verification — manual review required. <@U7RP6HKUZ>
 > (claude-4+). It strips trailing punctuation and collapses `www.` so
 > dupes don't double-count.
 >
-> **Capture the excerpt:** quote a verbatim ≥10-char substring from one
-> of the citation snippets (the bit of model text that names the credited
-> person + role) and pass it as `--evidence-excerpt`. The bash gate will
-> check the excerpt appears in proximity to the citation URLs in the
-> session log.
+> **Capture the excerpt:** quote a *clean* "name + role" or
+> "name + track" phrase (≥10 chars, no filler words) and pass it as
+> `--evidence-excerpt`. The bash gate normalizes en-dashes/em-dashes/
+> hyphens to spaces and collapses whitespace before substring-matching,
+> so the same excerpt resolves against both the MB helper's
+> `<name> – <role>` JSON output AND the model's Tier-2 citation prose.
+> Wordy quotes that include filler ("is credited as", "according to")
+> won't substring-match the helper JSON and silently lose a source.
 >
  #### Tier-3 — UVN (route to humans)
 >
