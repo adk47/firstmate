@@ -239,15 +239,8 @@
           "muso-verify-profile",
           "muso-audit-profile-credits"
         ],
-        "params": {
-          "extra_body": {
-            "plugins": [
-              { "id": "web", "engine": "native", "max_results": 5 }
-            ]
-          }
-        },
         "tools": {
-          "deny": ["web_search"]
+          "deny": ["web_search", "web_fetch"]
         }
       },
       {

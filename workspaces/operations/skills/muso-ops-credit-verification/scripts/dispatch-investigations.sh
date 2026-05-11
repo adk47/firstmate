@@ -52,17 +52,16 @@ ERROR: dispatch-investigations.sh refused (deprecated_under_api_mode).
 
 Under CV_EVIDENCE_MODE=api (the default), credit verification runs the
 per-credit inline B3 loop in the parent agent session, NOT a subagent
-investigation pool. Subagent sessions cannot emit OpenRouter native
-web_search citations into the parent session's JSONL, so the api-mode
-evidence gate (batch-verify-profile.sh flag pre-flight,
-count_profile_evidence_sources) cannot count their work. Run
-20260511-080209-d66d3f shipped 0/152 UVNs through this path.
+investigation pool. Subagent sessions cannot emit evidence sources into
+the parent session's JSONL, so the api-mode evidence gate cannot count
+their work. Run 20260511-080209-d66d3f shipped 0/152 UVNs through this
+path.
 
-Use the inline loop from SKILL.md §B3 (CV_EVIDENCE_MODE=api):
+Use the inline loop from SKILL.md §B3:
   - One assistant turn per credit
   - Tier-1: bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '<name>' --role '<role>'
-  - Tier-2: a natural-language research paragraph in the same turn
-  - Then call batch-verify-profile.sh per credit with the decision
+  - On Tier-1 miss: batch-verify-profile.sh --decision flag --flag-reason no_tier1_match
+    (Tier-2 web research is OFFLINE — see #271)
 
 If you genuinely need the subagent path (rollback): export
 CV_EVIDENCE_MODE=browser before invoking. Note that subagent browser

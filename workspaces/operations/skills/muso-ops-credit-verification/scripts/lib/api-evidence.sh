@@ -180,13 +180,68 @@ count_profile_api_evidence() {
 
 # [removed 2026-05-07] count_profile_allmusic_fallback used to count AllMusic
 # browser loads as a corner-case third source. Removed when AllMusic was
-# observed offline ("being updated") during the 2026-05-07 cutover test
-# run, and the agent's parallel attempt at web_fetch on Discogs returned
-# Cloudflare challenge pages. The api-mode evidence model is now strictly:
-#   Tier-1 API helpers + Tier-2 native web_search citations.
-# Browser is no longer a sanctioned source under api-mode. Rollback to
-# CV_EVIDENCE_MODE=browser still uses lib/browser-evidence.sh which has
-# its own AllMusic logic for the legacy quorum.
+# observed offline mid-test.
+
+# Count Tier-1 API helper INVOCATIONS for a given credited_name in the run
+# window, regardless of response content. This is the "did the agent
+# actually try?" signal — distinct from count_profile_api_evidence, which
+# additionally requires the response to contain the excerpt.
+#
+# Used by the --decision flag --flag-reason no_tier1_match path in
+# batch-verify-profile.sh to permit UVN when the agent has demonstrably
+# attempted Tier-1 (the helper was called with the credited_name) and
+# the response did NOT confirm a match. Without this counter, the only
+# evidence-source signal counts only SUCCESSFUL matches, which by
+# definition will be 0 for any genuine no_tier1_match credit.
+#
+# Args:
+#   $1 credited_name (required, non-empty)
+# Stdout: integer count of distinct Tier-1 helper invocations
+#         whose command args include this credited_name (0 if missing).
+count_profile_tier1_attempts_for_name() {
+    local credited_name="$1"
+    [[ -n "$credited_name" ]] || { echo 0; return 0; }
+
+    local session_log run_started_ts
+    session_log=$(resolve_session_log)
+    run_started_ts=$(resolve_run_started_ts)
+
+    if [[ -z "$session_log" || ! -f "$session_log" ]]; then
+        echo 0
+        return 0
+    fi
+
+    jq -R -r -n \
+        --arg name_raw "$credited_name" \
+        --arg run_started_ts "$run_started_ts" \
+    '
+    # Lower-case + dash-fold the name so "Pau Romero" matches the literal
+    # --credited-name value in the command after we apply the same
+    # transform to it. We DO NOT collapse hyphens to spaces on the command
+    # itself, because that would destroy the helper script name (the
+    # regex needs "musicbrainz-isrc-lookup.sh" intact).
+    def normalize_name:
+        ascii_downcase
+        | gsub("[–—]"; "-")
+        | gsub("\\s+"; " ")
+        | sub("^ "; "") | sub(" $"; "");
+
+    ($name_raw | normalize_name) as $name
+    |
+    [inputs | fromjson? // empty | select(type == "object")
+     | select($run_started_ts == "" or ((.timestamp // "") >= $run_started_ts))] as $lines
+    |
+    [
+        $lines[] | .message.content[]?
+        | select(.type == "toolCall" and (.name == "exec" or .name == "bash"))
+        | (.arguments.command // "" | tostring) as $cmd_raw
+        | ($cmd_raw | ascii_downcase) as $cmd_lc
+        | select($cmd_lc | test("musicbrainz-isrc-lookup\\.sh|spotify-track-lookup\\.sh|discogs-isrc-lookup\\.sh"))
+        | select($cmd_lc | gsub("[–—]"; "-") | contains($name))
+        | 1
+    ] | length
+    ' "$session_log" 2>/dev/null || echo 0
+}
 
 # Count distinct citation domains in assistant messages within the run
 # window where (a) a citation URL is present in the message content and

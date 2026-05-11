@@ -262,17 +262,17 @@ CV_EVIDENCE_MODE=api this label is reserved for genuine Tier-1 outages and
 should be rare; runs that ship N in a row are the bash-wrapper failure
 mode (2026-05-11 run 20260511-080209-d66d3f: 153 stamped, 0 UVNs landed).
 
-Under api-mode each UVN/flag credit needs its own assistant turn so
-OpenRouter's native web_search plugin can emit Tier-2 citations into this
-session's JSONL. A bash wrapper running through openclaw 'process' cannot
-trigger the plugin — its UVN attempts will always fail
-batch-verify-profile.sh's flag pre-flight (missing_flag_evidence).
+Under api-mode each UVN/flag credit needs its own assistant turn so that
+the agent's per-credit Tier-1 helper call (musicbrainz-isrc-lookup.sh)
+lands in this session's JSONL where the evidence gate can find it. A
+bash wrapper running through openclaw 'process' makes those calls
+invisible to the gate.
 
-Switch to the per-credit inline B3 loop (SKILL.md §B3 api-mode):
+Switch to the per-credit inline B3 loop (SKILL.md §B3):
   - One assistant turn per credit
   - Tier-1: bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '<name>' --role '<role>'
-  - Tier-2: a natural-language research paragraph in the same turn
-  - Then call batch-verify-profile.sh once with the resulting decision
+  - On Tier-1 miss: batch-verify-profile.sh --decision flag --flag-reason no_tier1_match
+    (Tier-2 web research is OFFLINE — see #271)
 
 Refused reason text:
   ${_reason}

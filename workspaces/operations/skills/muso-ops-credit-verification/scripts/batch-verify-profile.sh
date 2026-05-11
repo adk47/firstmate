@@ -746,6 +746,22 @@ if [[ "${CV_REQUIRED_PROFILE_BROWSE:-1}" != "0" ]]; then
         pb_count="$(count_profile_evidence_sources "$EVIDENCE_EXCERPT" "$PROFILE_ID")"
     fi
     pb_count="${pb_count:-0}"
+    # no_tier1_match UVN bypass (#272): when Tier-2 is offline (#271) and the
+    # agent's only Tier-1 helper (MB ISRC lookup) returns no match, the
+    # source-content count is 0 by definition. The sanctioned route in that
+    # case is --decision flag --flag-reason no_tier1_match → UVN. Bypass the
+    # ≥1 floor when the agent demonstrably attempted Tier-1 (≥1 helper exec
+    # with this credited_name in the run window). The structural rule and
+    # the quorum check below also have a parallel bypass for the same
+    # condition. Without this, the agent has no way to route Tier-1 misses
+    # to UVN through the canonical wrapper and falls back to direct
+    # admin-api calls (the failure mode that fired in run 9a1147 today).
+    if (( pb_count < 1 )) && [[ "$DECISION" == "flag" && "$FLAG_REASON" == "no_tier1_match" && "$CV_EVIDENCE_MODE" != "browser" ]]; then
+        _t1_attempts="$(count_profile_tier1_attempts_for_name "$CREDITED_NAME")"
+        if (( ${_t1_attempts:-0} >= 1 )); then
+            pb_count=1  # synthetic: attempt counts as the floor
+        fi
+    fi
     if (( pb_count < 1 )); then
         if [[ "$CV_EVIDENCE_MODE" == "browser" ]]; then
             cat >&2 <<EOF
@@ -774,35 +790,33 @@ real evidence about why you can't reach them; do NOT bulk-flag or bulk-
 escalate without per-profile Tier-1 evidence.
 EOF
         else
-            # api / both — under api-mode, browser/web_fetch on Tier-1 hosts is
-            # explicitly forbidden and AllMusic is no longer counted as evidence.
-            # Steer the agent back to the API helpers + native web_search.
+            # api / both — Tier-2 is OFFLINE (#271). Browser/web_fetch/web_search
+            # are denied at config level.
             cat >&2 <<EOF
 ERROR: batch-verify-profile: --decision ${DECISION} requires at least 1
-evidence source (Tier-1 API helper hit OR Tier-2 native-search citation
-domain) whose response text proves the claim for profile '${PROFILE_ID}'
-in the current run window, but 0 were found.
+evidence source whose response text proves the claim for profile
+'${PROFILE_ID}' in the current run window, but 0 were found.
 
 Resolved claim:
   credited_name: '${CREDITED_NAME}'
   track_title:   '${TRACK_TITLE}'
   role:          '${ROLE}'
 
-Tier-1 (API helpers): if the credit ships an ISRC, run
+Tier-1 (only working today): if the credit ships an ISRC, run
   bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
 A successful helper call (name_match: true) counts as 1 source.
-(Spotify / Discogs helpers exist but exit creds_missing until the
-tokens in issues #255 / #256 land — don't bother calling them.)
+(Spotify / Discogs helpers exit creds_missing until tokens land
+#255 / #256 — don't bother calling them.)
 
-Tier-2 (native web_search): ask the model to research the credit on the
-web in plain language. The reply's inline citation URLs are counted by
-distinct hostname when the assistant text contains the --evidence-excerpt.
+Tier-2 web research is OFFLINE — see #271. \`web_search\` and \`web_fetch\`
+are denied at config level; do not attempt them.
 
-Browser / web_fetch on music-database hosts is FORBIDDEN under api-mode
-(allmusic / discogs / musicbrainz / apple-music) — the api-evidence
-library does not count their results. Tier-3 (UVN) is the right exit
-when Tier-1 + Tier-2 cannot reach quorum; do NOT bulk-flag or bulk-
-escalate without per-profile evidence.
+On Tier-1 miss with no other sources, the correct exit is:
+  --decision flag --flag-reason no_tier1_match --reason "..."
+That path bypasses this evidence gate when a Tier-1 helper attempt for
+this credited_name is in the session — proof of the attempt is what the
+bypass requires. The structural rule (excerpt contains track/role and
+not credited_name) still applies.
 EOF
         fi
         write_pre_flight_rejection "missing_profile_browse"
@@ -887,6 +901,20 @@ EOF
     fi
     flag_match_count="${flag_match_count:-0}"
 
+    # no_tier1_match UVN bypass (#272, parallel to the floor bypass above):
+    # when the agent has attempted Tier-1 for this credited_name and is
+    # routing to UVN via --flag-reason no_tier1_match, the source-content
+    # quorum cannot be reached (the helper response by definition does NOT
+    # contain a match), so the gate would otherwise refuse the only correct
+    # exit. Bypass the CV_REQUIRED_LOADS quorum for this specific
+    # reason+mode combination, gated on a confirmed helper invocation.
+    if (( flag_match_count < CV_REQUIRED_LOADS )) && [[ "$FLAG_REASON" == "no_tier1_match" && "$CV_EVIDENCE_MODE" != "browser" ]]; then
+        _t1_attempts2="$(count_profile_tier1_attempts_for_name "$CREDITED_NAME")"
+        if (( ${_t1_attempts2:-0} >= 1 )); then
+            flag_match_count=$CV_REQUIRED_LOADS  # synthetic: attempt counts
+        fi
+    fi
+
     if (( flag_match_count < CV_REQUIRED_LOADS )); then
         missing=$(( CV_REQUIRED_LOADS - flag_match_count ))
         matched_hosts_block=""
@@ -919,22 +947,20 @@ EOF
         else
             cat >&2 <<EOF
 ERROR: batch-verify-profile: --decision flag requires excerpt
-'${EVIDENCE_EXCERPT}' to be backed by >=${CV_REQUIRED_LOADS} distinct
-evidence sources (API helpers + Tier-2 citation domains) in the current
-run window, but only ${flag_match_count} matched.
+'${EVIDENCE_EXCERPT}' to be backed by >=${CV_REQUIRED_LOADS} evidence
+sources in the current run window, but only ${flag_match_count} matched.
 
-Need ${missing} more distinct source(s). Tier-1 (API helpers) and Tier-2
-(native web_search citations) are the sanctioned options:
-  bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '${CREDITED_NAME}' --role '${ROLE}'
-  (Spotify / Discogs helpers exist but exit creds_missing until issues
-  #255 / #256 land — don't bother calling them.)
+Tier-2 web research is OFFLINE — see #271. \`web_search\` and \`web_fetch\`
+are denied at config level. Today only \`musicbrainz-isrc-lookup.sh\` is
+wired (Spotify / Discogs blocked on tokens #255 / #256), so reaching
+${CV_REQUIRED_LOADS} sources via the standard quorum is rare.
 
-  Tier-2: research the credit in plain language; the model's inline
-  citations count when the assistant text contains the excerpt.
-
-Browser / web_fetch on music-database hosts is NOT a sanctioned source
-under api-mode. If neither tier reaches quorum, ESCALATE via Step 5
-(UVN) instead of bulk-flagging without evidence.
+If you've already called \`musicbrainz-isrc-lookup.sh\` for this credited
+name and the response did NOT confirm a match, use:
+  --flag-reason no_tier1_match
+which bypasses this quorum. Without that reason (or without the helper
+attempt), the gate refuses the write — escalate via Step 5 instead of
+bulk-flagging without evidence.
 EOF
         fi
         write_pre_flight_rejection "missing_flag_evidence"

@@ -1403,3 +1403,118 @@ STUB
     kinds=$(jq -r 'select(.event=="action_attempted") | .evidence_kind' "$runlog_file" | sort -u)
     [ "$kinds" = "tier0_profile_audit" ]
 }
+
+# --- no_tier1_match UVN bypass (#272) ---
+# When Tier-2 is OFFLINE (#271), the agent's only Tier-1 helper
+# (musicbrainz-isrc-lookup.sh) caps at 1 source. The source-content gate
+# refuses both the ≥1 floor and the ≥CV_REQUIRED_LOADS quorum when MB
+# misses, leaving the agent with no canonical UVN path. The
+# no_tier1_match bypass allows --decision flag --flag-reason no_tier1_match
+# when the agent has demonstrably attempted the Tier-1 helper for this
+# credited_name (helper invocation in session JSONL within run window).
+# Without this bypass the docs and the gate disagree (Clio's review of
+# PR #272 caught the mismatch).
+
+seed_mb_helper_attempt() {
+    # Seed a musicbrainz-isrc-lookup.sh exec call for a credited_name.
+    # Only the command line + credited_name need to match; the response
+    # content doesn't matter (the bypass counts attempts, not matches).
+    local credited_name="$1"
+    local id="${2:-mb_attempt_$$}"
+    printf '%s\n' "$(jq -n -c --arg id "$id" --arg cn "$credited_name" \
+        '{message:{role:"assistant",content:[{type:"toolCall",id:$id,name:"exec",arguments:{command:("bash musicbrainz-isrc-lookup.sh FRX011234567 --credited-name \"" + $cn + "\" --role songwriter")}}]}}')" >> "$SESSION_LOG"
+    printf '%s\n' "$(jq -n -c --arg id "$id" --arg cn "$credited_name" \
+        '{message:{role:"toolResult",toolCallId:$id,isError:false,content:[{type:"text",text:("{\"found\":true,\"name_match\":false,\"artists_in_release\":[\"Different Person\"]}")}]}}')" >> "$SESSION_LOG"
+}
+
+@test "no_tier1_match bypass: api-mode flag with MB attempt for credited_name → exit 0" {
+    # Agent called the MB helper for Pau Romero, response did not confirm
+    # name match. Agent dispatches --flag-reason no_tier1_match to route
+    # this credit to UVN. The bypass should fire: gate exits 0, delegate
+    # is called.
+    export CV_EVIDENCE_MODE=api
+    seed_mb_helper_attempt "Pau Romero"
+
+    CREDITED_NAME_OVERRIDE="Pau Romero" TRACK_TITLE_OVERRIDE="Yellow Submarine" ROLE_OVERRIDE="songwriter" \
+    FLAG_MODE=ok \
+    run --separate-stderr run_w --profile-id p1 \
+        --evidence-excerpt "Yellow Submarine songwriter" \
+        --ids "cr_1,cr_2,cr_3" \
+        --decision flag \
+        --reason "INCONCLUSIVE_TIER1_UNREACHABLE: MB returned no match for Pau Romero on FRX011234567" \
+        --flag-reason no_tier1_match
+    [ "$status" -eq 0 ]
+    [ -f "$FLAG_LOG" ]
+    grep -q "no_tier1_match" "$FLAG_LOG"
+}
+
+@test "no_tier1_match bypass: api-mode flag WITHOUT MB attempt → still refused (exit 5)" {
+    # Agent skipped the helper call but tried to UVN. The bypass requires
+    # proof of attempt; without it the gate refuses as before.
+    export CV_EVIDENCE_MODE=api
+    # No seed — empty session for this credited_name.
+
+    CREDITED_NAME_OVERRIDE="Pau Romero" TRACK_TITLE_OVERRIDE="Yellow Submarine" ROLE_OVERRIDE="songwriter" \
+    run --separate-stderr run_w --profile-id p1 \
+        --evidence-excerpt "Yellow Submarine songwriter" \
+        --ids "cr_1" \
+        --decision flag \
+        --reason "no MB attempted" \
+        --flag-reason no_tier1_match
+    [ "$status" -eq 5 ]
+    [ ! -f "$FLAG_LOG" ]
+}
+
+@test "no_tier1_match bypass: helper attempt for a DIFFERENT name → still refused (exit 5)" {
+    # Agent called MB for someone else (or reused a stale helper call from
+    # another credit). The bypass checks the credited_name in the helper
+    # args matches the --credited-name arg of this dispatch.
+    export CV_EVIDENCE_MODE=api
+    seed_mb_helper_attempt "Some Other Person"
+
+    CREDITED_NAME_OVERRIDE="Pau Romero" TRACK_TITLE_OVERRIDE="Yellow Submarine" ROLE_OVERRIDE="songwriter" \
+    run --separate-stderr run_w --profile-id p1 \
+        --evidence-excerpt "Yellow Submarine songwriter" \
+        --ids "cr_1" \
+        --decision flag \
+        --reason "wrong-name helper attempt should not satisfy bypass" \
+        --flag-reason no_tier1_match
+    [ "$status" -eq 5 ]
+    [ ! -f "$FLAG_LOG" ]
+}
+
+@test "no_tier1_match bypass: api-mode flag with OTHER flag-reasons still requires source quorum" {
+    # The bypass is scoped to flag-reason no_tier1_match specifically.
+    # Other reasons (name_mismatch / popularity_anomaly / metadata_inconsistent)
+    # still require the source-content quorum. This isolates the bypass to
+    # the narrowest case it's designed for.
+    export CV_EVIDENCE_MODE=api
+    seed_mb_helper_attempt "Pau Romero"
+
+    CREDITED_NAME_OVERRIDE="Pau Romero" TRACK_TITLE_OVERRIDE="Yellow Submarine" ROLE_OVERRIDE="songwriter" \
+    run --separate-stderr run_w --profile-id p1 \
+        --evidence-excerpt "Yellow Submarine songwriter" \
+        --ids "cr_1" \
+        --decision flag \
+        --reason "wrong reason for this path" \
+        --flag-reason name_mismatch
+    [ "$status" -eq 5 ]
+    [ ! -f "$FLAG_LOG" ]
+}
+
+@test "no_tier1_match bypass: browser-mode is unaffected (bypass api-only)" {
+    # CV_EVIDENCE_MODE=browser still uses the legacy browser-quorum path.
+    # The new bypass is api-mode-scoped — must NOT fire in browser-mode.
+    export CV_EVIDENCE_MODE=browser
+    seed_mb_helper_attempt "Pau Romero"
+
+    CREDITED_NAME_OVERRIDE="Pau Romero" TRACK_TITLE_OVERRIDE="Yellow Submarine" ROLE_OVERRIDE="songwriter" \
+    run --separate-stderr run_w --profile-id p1 \
+        --evidence-excerpt "Yellow Submarine songwriter" \
+        --ids "cr_1" \
+        --decision flag \
+        --reason "browser-mode should not accept no_tier1_match bypass" \
+        --flag-reason no_tier1_match
+    [ "$status" -eq 5 ]
+    [ ! -f "$FLAG_LOG" ]
+}
