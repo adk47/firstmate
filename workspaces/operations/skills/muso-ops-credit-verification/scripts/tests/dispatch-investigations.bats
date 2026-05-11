@@ -9,6 +9,13 @@ setup() {
   # The skill root is its parent.
   export SKILL_DIR="$(dirname "$SCRIPTS_DIR")"
   mkdir -p "$OPS_RUN_DIR"
+  # The dispatcher is deprecated under CV_EVIDENCE_MODE=api (the 2026-05-07
+  # default) — it exits 64 because the subagent-fanout pattern cannot land
+  # Tier-2 citations in the parent session's JSONL where the api-mode
+  # evidence gate looks. These tests cover the rollback path
+  # (CV_EVIDENCE_MODE=browser), which still uses the manifest. The
+  # api-mode rejection is asserted in its own block below.
+  export CV_EVIDENCE_MODE=browser
 }
 teardown() { teardown_tmp_env; }
 
@@ -195,4 +202,35 @@ seed_runlog_with_credits() {
   [ "$(echo "$envb" | jq -r '.SPOTIFY_TRACK_ID')" = "" ]
   [ "$(echo "$envb" | jq -r '.ISRC')"             = "" ]
   [ "$(echo "$envb" | jq -r '.CREDITS_JSON')"     = "[]" ]
+}
+
+# ---- api-mode deprecation gate ----
+# Under the default CV_EVIDENCE_MODE=api (post-2026-05-07 cutover), the
+# subagent-fanout pattern this script enables cannot satisfy the api-mode
+# evidence gate (citations must land in the parent session's JSONL, but
+# subagents have separate sessions). The script must exit 64 with a
+# remediation message pointing at SKILL.md §B3 inline path.
+
+@test "dispatch: refused with exit 64 when CV_EVIDENCE_MODE=api (default)" {
+  RID=$(seed_runlog 1)
+  run env -u CV_EVIDENCE_MODE "$SCRIPTS_DIR/dispatch-investigations.sh" --run-id "$RID"
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"deprecated_under_api_mode"* ]]
+  [[ "$output" == *"per-credit inline B3 loop"* ]]
+}
+
+@test "dispatch: refused with exit 64 when CV_EVIDENCE_MODE=api (explicit)" {
+  RID=$(seed_runlog 1)
+  run env CV_EVIDENCE_MODE=api "$SCRIPTS_DIR/dispatch-investigations.sh" --run-id "$RID"
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"deprecated_under_api_mode"* ]]
+}
+
+@test "dispatch: refused with exit 64 when CV_EVIDENCE_MODE=both" {
+  # Defensive: any non-browser mode (including the legacy "both" rollout
+  # value) routes through the api-mode evidence library, so the rejection
+  # applies there too.
+  RID=$(seed_runlog 1)
+  run env CV_EVIDENCE_MODE=both "$SCRIPTS_DIR/dispatch-investigations.sh" --run-id "$RID"
+  [ "$status" -eq 64 ]
 }

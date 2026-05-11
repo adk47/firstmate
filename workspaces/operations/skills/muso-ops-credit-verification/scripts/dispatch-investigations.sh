@@ -26,6 +26,52 @@
 
 set -euo pipefail
 
+# Deprecated under CV_EVIDENCE_MODE=api (the 2026-05-07 default). Run
+# 20260511-080209-d66d3f shipped 0/152 UVN landings because the agent used
+# this script's subagent-fanout pattern (per legacy SKILL.md prose) and the
+# api-mode evidence library only counts citations that land in the *parent*
+# session JSONL — subagents have a separate session, so their work is
+# invisible to the gate. Per templates/investigate-profile.md line 1 the
+# subagent investigation pool is itself deferred (no browser-capable nodes
+# wired). Two-pronged failure: the script could not produce evidence in the
+# right place even if subagents were wired, AND subagents can't browse.
+#
+# SKILL.md §B3 api-mode now mandates a per-credit inline loop in the parent
+# session. This script is kept on disk for the eventual subagent-browser
+# rollout but must not be called from the active flow today.
+#
+# Browser-mode (legacy rollback) is unaffected — the manifest is still
+# useful there because browser-mode does evidence via local browser tabs.
+case "${CV_EVIDENCE_MODE:-api}" in
+  browser)
+    : # rollback path — proceed
+    ;;
+  *)
+    cat >&2 <<'EOF'
+ERROR: dispatch-investigations.sh refused (deprecated_under_api_mode).
+
+Under CV_EVIDENCE_MODE=api (the default), credit verification runs the
+per-credit inline B3 loop in the parent agent session, NOT a subagent
+investigation pool. Subagent sessions cannot emit OpenRouter native
+web_search citations into the parent session's JSONL, so the api-mode
+evidence gate (batch-verify-profile.sh flag pre-flight,
+count_profile_evidence_sources) cannot count their work. Run
+20260511-080209-d66d3f shipped 0/152 UVNs through this path.
+
+Use the inline loop from SKILL.md §B3 (CV_EVIDENCE_MODE=api):
+  - One assistant turn per credit
+  - Tier-1: bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '<name>' --role '<role>'
+  - Tier-2: a natural-language research paragraph in the same turn
+  - Then call batch-verify-profile.sh per credit with the decision
+
+If you genuinely need the subagent path (rollback): export
+CV_EVIDENCE_MODE=browser before invoking. Note that subagent browser
+access is still deferred (templates/investigate-profile.md line 1).
+EOF
+    exit 64
+    ;;
+esac
+
 RUN_ID=""
 POOL_SIZE="${OPS_INVESTIGATION_POOL_SIZE:-10}"
 

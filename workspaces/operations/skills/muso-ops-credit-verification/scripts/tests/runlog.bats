@@ -730,6 +730,108 @@ seed_bypass_eligible_session() {
   [ "$(jq -s '[.[] | select(.event=="batch_announced")] | length' < "$LOG_FILE")" = "1" ]
 }
 
+# ---- wrapper-pattern detector (api-mode only) ----
+# Run 20260511-080209-d66d3f (Nick triggered 500-credit batch) shipped 153
+# verdicts labeled INCONCLUSIVE_TIER1_UNREACHABLE from a single bash wrapper
+# at /tmp/cv-batch-run-*.sh: no per-credit assistant turns, so OpenRouter
+# native web_search never fired, 0 Tier-2 citations landed, all 152 UVNs
+# rejected pre-flight (missing_flag_evidence). Threshold 5 catches the
+# wrapper while leaving room for genuine Tier-1 outages.
+
+@test "wrapper-detector: api-mode refuses 5th tier1_unreachable verdict (exit 13)" {
+  CV_EVIDENCE_MODE=api
+  RUN_ID=$("$SCRIPTS_DIR/runlog.sh" init)
+  # First 4 are accepted (verdict gate disabled so the wrapper detector
+  # is the only gate exercised here).
+  for n in 1 2 3 4; do
+    REASON="tier1_unreachable: musicbrainz miss for credit cr_$n"
+    run env CV_EVIDENCE_MODE=api CV_DISABLE_VERDICT_GATE=1 \
+      "$SCRIPTS_DIR/runlog.sh" event "$RUN_ID" verdict \
+      "$(jq -nc --arg pid "p$n" --arg cr "cr_$n" --arg r "$REASON" \
+          '{profile_id:$pid, cr_id:$cr, reason:$r}')"
+    [ "$status" -eq 0 ]
+  done
+  # 5th must be refused with the wrapper-pattern label.
+  REASON="tier1_unreachable: musicbrainz miss for credit cr_5"
+  run env CV_EVIDENCE_MODE=api CV_DISABLE_VERDICT_GATE=1 \
+    "$SCRIPTS_DIR/runlog.sh" event "$RUN_ID" verdict \
+    "$(jq -nc --arg pid "p5" --arg cr "cr_5" --arg r "$REASON" \
+        '{profile_id:$pid, cr_id:$cr, reason:$r}')"
+  [ "$status" -eq 13 ]
+  [[ "$output" == *"wrapper_pattern_detected"* ]]
+  [[ "$output" == *"per-credit inline B3 loop"* ]]
+}
+
+@test "wrapper-detector: api-mode allows verdicts WITHOUT tier1_unreachable past threshold" {
+  # Different reasons (SUSPICIOUS_BORDERLINE, etc.) must not count toward
+  # the wrapper threshold even if there are many of them. Cookie-cutter
+  # also wouldn't fire here since each reason is distinct per profile.
+  CV_EVIDENCE_MODE=api
+  RUN_ID=$("$SCRIPTS_DIR/runlog.sh" init)
+  for n in 1 2 3 4 5 6 7; do
+    REASON="SUSPICIOUS_BORDERLINE: only 1 of 2 sources matched for cr_$n"
+    run env CV_EVIDENCE_MODE=api CV_DISABLE_VERDICT_GATE=1 \
+      "$SCRIPTS_DIR/runlog.sh" event "$RUN_ID" verdict \
+      "$(jq -nc --arg pid "p$n" --arg cr "cr_$n" --arg r "$REASON" \
+          '{profile_id:$pid, cr_id:$cr, reason:$r}')"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "wrapper-detector: browser-mode is exempt (legacy tier1_unreachable_insufficient_effort gate handles it)" {
+  CV_EVIDENCE_MODE=browser
+  RUN_ID=$("$SCRIPTS_DIR/runlog.sh" init)
+  # In browser mode the existing per-profile evidence gate (and the
+  # tier1_unreachable bypass-requirements gate at runlog.sh:285) will
+  # fire first; the new api-mode wrapper detector must NOT engage. We
+  # disable the verdict gate to isolate just the wrapper detector — it
+  # should accept all 7 tier1_unreachable verdicts in browser mode.
+  for n in 1 2 3 4 5 6 7; do
+    REASON="tier1_unreachable: musicbrainz 503 cr_$n"
+    run env CV_EVIDENCE_MODE=browser CV_DISABLE_VERDICT_GATE=1 \
+      "$SCRIPTS_DIR/runlog.sh" event "$RUN_ID" verdict \
+      "$(jq -nc --arg pid "p$n" --arg cr "cr_$n" --arg r "$REASON" \
+          '{profile_id:$pid, cr_id:$cr, reason:$r}')"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "wrapper-detector: CV_DISABLE_WRAPPER_DETECT_GATE=1 disables the detector (test escape hatch)" {
+  # The detector has its own bypass flag — parallel to
+  # CV_DISABLE_COOKIE_CUTTER_GATE — so tests/staging can opt out without
+  # also disabling the per-profile evidence gate.
+  CV_EVIDENCE_MODE=api
+  RUN_ID=$("$SCRIPTS_DIR/runlog.sh" init)
+  for n in 1 2 3 4 5 6 7 8 9 10; do
+    REASON="tier1_unreachable: musicbrainz miss cr_$n"
+    run env CV_EVIDENCE_MODE=api \
+      CV_DISABLE_VERDICT_GATE=1 \
+      CV_DISABLE_WRAPPER_DETECT_GATE=1 \
+      "$SCRIPTS_DIR/runlog.sh" event "$RUN_ID" verdict \
+      "$(jq -nc --arg pid "p$n" --arg cr "cr_$n" --arg r "$REASON" \
+          '{profile_id:$pid, cr_id:$cr, reason:$r}')"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "wrapper-detector: tier0 action_attempted events are NOT counted (action_attempted is not verdict)" {
+  # The detector only fires on event_name=verdict. Tier-0 emits
+  # action_attempted with evidence_kind=tier0_profile_audit, which can run
+  # many in a batch with similar receipts. Regression check.
+  CV_EVIDENCE_MODE=api
+  RUN_ID=$("$SCRIPTS_DIR/runlog.sh" init)
+  for n in 1 2 3 4 5 6 7; do
+    REASON="tier1_unreachable would never apply to tier0 but check anyway cr_$n"
+    run env CV_EVIDENCE_MODE=api CV_DISABLE_VERDICT_GATE=1 \
+      CV_DISABLE_COOKIE_CUTTER_GATE=1 \
+      "$SCRIPTS_DIR/runlog.sh" event "$RUN_ID" action_attempted \
+      "$(jq -nc --arg pid "p$n" --arg cr "cr_$n" --arg r "$REASON" \
+          '{profile_id:$pid, action:"approve", cr_ids:[$cr], count:1,
+            evidence_kind:"tier0_profile_audit", reason:$r}')"
+    [ "$status" -eq 0 ]
+  done
+}
+
 @test "cookie-cutter: gate scoped per event_name (verdict + escalation_posted counted separately)" {
   RUN_ID=$("$SCRIPTS_DIR/runlog.sh" init)
   SESSION=$(seed_bypass_eligible_session "Drezar" "Yellow Submarine")

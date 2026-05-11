@@ -281,7 +281,10 @@ message. Post the batch summary back to the same channel with the standard
 >
 > "Run Batch Mode (B1–B5)" means invoke the batch workflow scripts in this
 > SKILL.md **directly** from this session — `runlog.sh init`, `fetch-queue.sh`,
-> `profile-audit.sh`, `dispatch-investigations.sh` (or the inline B3 path),
+> `profile-audit.sh`, the **api-mode B3 inline per-credit path** (defined
+> at the top of this file in the OVERRIDE block; the legacy B3 sub-section
+> further down is browser-mode rollback only and the
+> `dispatch-investigations.sh` subagent flow is deferred — see B3 below),
 > `batch-verify-profile.sh`, `post-batch-summary.sh`. **It does NOT mean
 > firing `openclaw cron run <id>` against the cron job named
 > `credit-verification-batch-4h`.** That path delegates to a system-event
@@ -1620,7 +1623,88 @@ For each profile group:
 
 ---
 
-### B3. Per-profile inline browser investigation — the only path TODAY
+### B3. Per-credit api-mode investigation — the active path under `CV_EVIDENCE_MODE=api`
+
+**This is the live B3 path under the default api-mode.** It maps to the
+per-credit Tier-1 + Tier-2 flow described in the OVERRIDE block at the
+top of this file (~lines 124–147). Run it inline in the parent agent
+session — no subagent dispatch, no browser tool calls.
+
+**Do NOT call** under api-mode:
+
+- `dispatch-investigations.sh` — emits a manifest for a subagent
+  investigation pool that depends on subagents having a browser-capable
+  node attached. Subagents do not have one today (every `browser.open()`
+  from a subagent times out with "No connected browser-capable nodes").
+  See `templates/investigate-profile.md` line 1: *"DEFERRED (subagent
+  infrastructure not yet wired)"*. The script still exists in the skill
+  for the eventual subagent-browser rollout, but it must not be invoked
+  in the api-mode flow today.
+- The legacy `### B3 (legacy browser-mode rollback)` sub-section
+  immediately below this one — that path is gated on
+  `CV_EVIDENCE_MODE=browser` and uses the `browser` tool against
+  Tier-1 hosts, which the api-mode evidence library silently ignores.
+
+**The api-mode B3 loop** (per credit in the queue, after Tier-0 has
+already bulk-approved its eligible subset):
+
+1. **Tier-1 — `musicbrainz-isrc-lookup.sh "$isrc"`** if the credit ships
+   an ISRC. Capture the script's stdout JSON. If `name_match: true`,
+   that's source #1; capture `evidence_excerpt`. If `found: false` or
+   `name_match: false`, no Tier-1 source — proceed to Tier-2.
+   (Discogs `discogs-isrc-lookup.sh` and Spotify `spotify-track-lookup.sh`
+   exit 4 `creds_missing` until tokens land — #255, #256. Don't call.)
+
+2. **Tier-2 — write a research paragraph in this assistant turn.** A
+   normal natural-language sentence such as
+   *"Researching `<credited_name>` for `<track_title>` (`<role>`) on
+   the open web…"* triggers OpenRouter's native web search plugin
+   (`extra_body.plugins[{id:"web", engine:"native"}]`) transparently.
+   The plugin returns inline citations the api-evidence library counts
+   as Tier-2 sources (deduped by hostname). Two distinct citation
+   hostnames that both reference the credit context = 2 sources.
+   See `scripts/lib/api-evidence.sh` `count_profile_citation_domains`
+   for the exact extraction logic — it handles both inline-URL
+   citations (gpt-5/gemini) and the structured `citations[]` array
+   (claude-4+).
+
+3. **Decide and write.** Sources sum across Tier-1 + Tier-2:
+
+   - **`>= CV_REQUIRED_LOADS` (default 2)**: invoke
+     `muso-admin-api.sh credit-approve …` per profile via the
+     `batch-verify-profile.sh` wrapper. The wrapper pre-flights the
+     evidence-quorum check locally and only writes once it passes.
+   - **`< CV_REQUIRED_LOADS`**: invoke
+     `muso-admin-api.sh user_verification_needed …` (Tier-3). Don't
+     fabricate sources, don't bulk-flag without writing the Tier-2
+     research paragraph first — that's the failure mode #259 / run
+     `20260508-135854-80a2f0` (200/200 → UVN).
+
+**Skipping the Tier-2 research paragraph is the bulk-UVN failure
+mode.** If you go straight from a Tier-1 MB miss to
+`user_verification_needed` without writing any web research prose, the
+native plugin never fires, no citations are produced, and the gate
+sees only 1 source (the MB miss) per credit — guaranteeing UVN. The
+mechanical gates (`runlog.sh` exit 7, `batch-verify-profile.sh` exit 3)
+will refuse approves without ≥2 sources, so the safety floor holds —
+but real verification work doesn't happen and the unverified queue
+grows.
+
+**No batch-level shortcut.** Run the per-credit loop sequentially in
+this session so each credit's Tier-2 search citations land in this
+session's JSONL, where the api-evidence library can find them. A
+"summarize all 200 credits in one prompt and approve in bulk" attempt
+will produce zero per-credit citations and convert to UVN-bulk.
+
+---
+
+### B3 (legacy browser-mode rollback) — only when `CV_EVIDENCE_MODE=browser`
+
+> **Skip this whole sub-section under the default api-mode.** It is the
+> rollback playbook used when the api-mode gate is explicitly disabled
+> via `CV_EVIDENCE_MODE=browser` in the gateway env. The api-mode
+> evidence library silently ignores `browser` results from Tier-1
+> hosts, so executing the prose below under api-mode wastes the run.
 
 Per-profile evidence collection runs **inline in the parent agent** using the `browser` tool. The parent has a working browser node binding; subagents do not (their `browser.open()` calls time out with "No connected browser-capable nodes" — see `templates/investigate-profile.md` for the deferred-work note). When subagent browser access is wired in a future PR, this section will switch to a fan-out pool. Until then: serial inline.
 

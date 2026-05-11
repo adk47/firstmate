@@ -216,6 +216,74 @@ EOF
       ;;
   esac
 
+  # Wrapper-pattern detector (api-mode). Run 20260511-080209-d66d3f shipped
+  # 153 verdicts labeled INCONCLUSIVE_TIER1_UNREACHABLE from a single bash
+  # wrapper the agent wrote at /tmp/cv-batch-run-*.sh. The wrapper ran the
+  # whole batch inside one openclaw `process` PTY: no assistant turn fired
+  # between credits, so OpenRouter's native web_search plugin never ran,
+  # and 0 Tier-2 citations landed in the parent session. All 152 UVN
+  # attempts then failed at batch-verify-profile.sh's flag pre-flight
+  # (missing_flag_evidence). The runlog cookie-cutter detector did not
+  # fire because each reason carried a distinct track title.
+  #
+  # Under CV_EVIDENCE_MODE=api the `tier1_unreachable` label is mostly
+  # legacy — SKILL.md §B3 directs the agent to use SUSPICIOUS_BORDERLINE
+  # (UVN) instead, since "Tier-1 unreachable" only describes browser-mode
+  # behavior. A small handful may appear when a real Tier-1 helper is
+  # genuinely down with no Tier-2 corroboration; many in a row indicates
+  # the wrapper pattern. Threshold 5 catches the wrapper while leaving
+  # headroom for genuine one-offs.
+  #
+  # Bypassable via CV_DISABLE_WRAPPER_DETECT_GATE=1 (its own escape hatch,
+  # parallel to CV_DISABLE_COOKIE_CUTTER_GATE — so tests that disable the
+  # per-profile evidence gate via CV_DISABLE_VERDICT_GATE=1 can still
+  # exercise this detector in isolation). Browser-mode is exempt (its own
+  # tier1_unreachable_insufficient_effort gate further down catches
+  # browser-mode misuse).
+  CV_WRAPPER_DETECT_THRESHOLD="${CV_WRAPPER_DETECT_THRESHOLD:-5}"
+  case "$event_name" in
+    verdict)
+      if [[ "${CV_DISABLE_WRAPPER_DETECT_GATE:-0}" != "1" \
+            && "${CV_EVIDENCE_MODE:-api}" != "browser" \
+            && -f "$log" ]]; then
+        local _reason _prior_count
+        _reason=$(jq -r '.reason // empty' <<<"$payload" 2>/dev/null)
+        if [[ "$_reason" == *"tier1_unreachable"* ]]; then
+          _prior_count=$(jq -s -r \
+            '[.[] | select(.event == "verdict")
+                  | select(((.reason // "") | contains("tier1_unreachable")))] | length' \
+            "$log" 2>/dev/null || echo 0)
+          if (( _prior_count + 1 >= CV_WRAPPER_DETECT_THRESHOLD )); then
+            cat >&2 <<EOF
+ERROR: runlog.sh verdict refused (wrapper_pattern_detected) — this would be
+the $((_prior_count + 1))th verdict in run ${run_id} with 'tier1_unreachable'
+in the reason, threshold ${CV_WRAPPER_DETECT_THRESHOLD}. Under
+CV_EVIDENCE_MODE=api this label is reserved for genuine Tier-1 outages and
+should be rare; runs that ship N in a row are the bash-wrapper failure
+mode (2026-05-11 run 20260511-080209-d66d3f: 153 stamped, 0 UVNs landed).
+
+Under api-mode each UVN/flag credit needs its own assistant turn so
+OpenRouter's native web_search plugin can emit Tier-2 citations into this
+session's JSONL. A bash wrapper running through openclaw 'process' cannot
+trigger the plugin — its UVN attempts will always fail
+batch-verify-profile.sh's flag pre-flight (missing_flag_evidence).
+
+Switch to the per-credit inline B3 loop (SKILL.md §B3 api-mode):
+  - One assistant turn per credit
+  - Tier-1: bash musicbrainz-isrc-lookup.sh <isrc> --credited-name '<name>' --role '<role>'
+  - Tier-2: a natural-language research paragraph in the same turn
+  - Then call batch-verify-profile.sh once with the resulting decision
+
+Refused reason text:
+  ${_reason}
+EOF
+            exit 13
+          fi
+        fi
+      fi
+      ;;
+  esac
+
   # Per-profile evidence gate. Three incidents drove this:
   #   - 100843-d27818 (PR #235): 10 verdicts + 5 escalation_posted in 1 sec
   #     with 0 per-profile browses. Closed by gating verdict/escalation_posted.
