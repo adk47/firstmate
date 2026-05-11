@@ -1,7 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
-import type { HttpClient } from "../http.js";
 import type { RateLimiter } from "../rate-limiter.js";
+import type { MusoAdminClient } from "../muso-admin-client.js";
 
 const Parameters = Type.Object({
   profileId: Type.String({ description: "Profile ID from profile_lookup. Required." }),
@@ -27,33 +27,41 @@ interface FilteredCreditsResult {
   credits: FilteredCredit[];
 }
 
+// Admin endpoint wraps items one level deeper: { data: { items: [...] } }
+interface AdminCreditsResponse {
+  data: {
+    items: Record<string, unknown>[];
+    totalCount?: number;
+    hasMoreToLoad?: boolean;
+  };
+}
+
 interface ToolDeps {
-  http: HttpClient;
+  adminClient: MusoAdminClient;
   rateLimiter: RateLimiter;
-  musoApiBase: string;
-  musoApiKey: string;
   sessionId: string;
 }
 
 export function filterCreditsResults(raw: Record<string, unknown>): FilteredCreditsResult {
   const items = (raw.items as Record<string, unknown>[]) ?? [];
   return {
-    totalCount: Number(raw.totalCount ?? 0),
+    totalCount: Number(raw.totalCount ?? items.length),
     hasMore: Boolean(raw.hasMoreToLoad),
     credits: items.map((item) => {
       const rawCredits = (item.credits as unknown[]) ?? [];
       const creditRoles = rawCredits.map((c) =>
         typeof c === "string" ? c : String((c as Record<string, unknown>).child ?? "")
       );
-      const track = (item.track as Record<string, unknown>) ?? {};
-      const album = (item.album as Record<string, unknown>) ?? {};
+      // Admin endpoint: title is at item level, no nested track/album objects
+      const trackTitle = String(item.title ?? "");
+      const albumTitle = ""; // admin endpoint does not return album title
       const artists = ((item.artists as Record<string, unknown>[]) ?? []).map((a) =>
         String(a.name ?? "")
       );
       return {
         creditRoles,
-        trackTitle: String(track.title ?? ""),
-        albumTitle: String(album.title ?? ""),
+        trackTitle,
+        albumTitle,
         releaseDate: String(item.releaseDate ?? ""),
         artists,
       };
@@ -62,8 +70,7 @@ export function filterCreditsResults(raw: Record<string, unknown>): FilteredCred
 }
 
 export function createCreditsSearchTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
-  const { http, rateLimiter, musoApiBase, musoApiKey, sessionId } = deps;
-  const headers = { "x-api-key": musoApiKey };
+  const { adminClient, rateLimiter, sessionId } = deps;
 
   return {
     name: "credits_search",
@@ -75,9 +82,7 @@ export function createCreditsSearchTool(deps: ToolDeps): AgentTool<typeof Parame
       const { profileId, keyword, creditRole, limit = 20, offset = 0 } = params;
 
       if (!rateLimiter.check(sessionId, "credits_search", 1, 10).allowed) {
-        return textResult(
-          "Too many credit lookups. Please wait a moment before trying again."
-        );
+        return textResult(JSON.stringify({ ok: false, reason: "rate_limited" }));
       }
 
       const queryParams = new URLSearchParams();
@@ -86,22 +91,22 @@ export function createCreditsSearchTool(deps: ToolDeps): AgentTool<typeof Parame
       queryParams.set("limit", String(limit));
       queryParams.set("offset", String(offset));
 
-      const url = `${musoApiBase}/api/c/v4/profile/${encodeURIComponent(profileId)}/credits?${queryParams}`;
-      const result = await http.get<Record<string, unknown>>(url, { headers });
+      const path = `/api/v3/admin/profile/${encodeURIComponent(profileId)}/credits?${queryParams}`;
+      const result = await adminClient.get<AdminCreditsResponse>(path);
 
       if (!result.ok) {
-        return textResult(
-          "Unable to search credits right now. Try again shortly or ask me to create a support ticket."
-        );
+        return textResult(JSON.stringify({ ok: false, reason: "lookup_unavailable" }));
       }
 
-      const filtered = filterCreditsResults(result.data);
+      // Admin endpoint wraps result one level deeper in data.data
+      const innerData = (result.data as any)?.data ?? result.data ?? {};
+      const filtered = filterCreditsResults(innerData as Record<string, unknown>);
 
-      if (filtered.totalCount === 0) {
-        return textResult("No credits found for this profile.");
+      if (filtered.credits.length === 0) {
+        return textResult(JSON.stringify({ ok: true, totalCount: 0, hasMore: false, credits: [] }));
       }
 
-      return textResult(JSON.stringify(filtered));
+      return textResult(JSON.stringify({ ok: true, ...filtered }));
     },
   };
 }

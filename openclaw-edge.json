@@ -250,7 +250,8 @@
   "plugins": {
     "allow": [
       "slack",
-      "intercom"
+      "intercom",
+      "support-tools"
     ],
     "entries": {
       "slack": {
@@ -258,6 +259,18 @@
       },
       "intercom": {
         "enabled": true
+      },
+      "support-tools": {
+        "enabled": true,
+        "config": {
+          "musoApiBase":             "https://api.muso.ai",
+          "adminEmail":              { "source": "env", "provider": "hydra-env", "id": "MUSO_ADMIN_EMAIL" },
+          "adminPassword":           { "source": "env", "provider": "hydra-env", "id": "MUSO_ADMIN_PASSWORD" },
+          "clickupApiKey":           { "source": "env", "provider": "hydra-env", "id": "CLICKUP_API_KEY" },
+          "clickupListId":           { "source": "env", "provider": "hydra-env", "id": "CLICKUP_LIST_ID" },
+          "clickupUserEmailFieldId": { "source": "env", "provider": "hydra-env", "id": "CLICKUP_USER_EMAIL_FIELD_ID" },
+          "clickupProfileIdFieldId": { "source": "env", "provider": "hydra-env", "id": "CLICKUP_PROFILE_ID_FIELD_ID" }
+        }
       }
     },
     "installs": {
@@ -271,7 +284,8 @@
     },
     "load": {
       "paths": [
-        "/root/.openclaw-edge/extensions/intercom"
+        "/root/.openclaw-edge/extensions/intercom",
+        "/root/.openclaw-edge/extensions/support-tools"
       ]
     }
   },
@@ -290,6 +304,17 @@
         "source": "file",
         "path": "/opt/hydra/secrets/llm-provider-keys.json",
         "mode": "json"
+      },
+      "hydra-env": {
+        "source": "env",
+        "allowlist": [
+          "CLICKUP_API_KEY",
+          "CLICKUP_LIST_ID",
+          "CLICKUP_USER_EMAIL_FIELD_ID",
+          "CLICKUP_PROFILE_ID_FIELD_ID",
+          "MUSO_ADMIN_EMAIL",
+          "MUSO_ADMIN_PASSWORD"
+        ]
       }
     }
   }

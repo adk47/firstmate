@@ -287,6 +287,36 @@ describe("SanitizingIntercomClient", () => {
     expect(inner.calls.replyToConversation).toHaveLength(1);
     expect(inner.calls.replyToConversation[0].body).toBe("contact support@muso.ai");
   });
+
+  it("scrubs tool-leak tokens via SanitizingIntercomClient", async () => {
+    const inner = new MockIntercomClient();
+    const log = { error: vi.fn() };
+    const client = new SanitizingIntercomClient(inner, log);
+    await client.replyToConversation({
+      conversationId: "c1",
+      adminId: "a",
+      body: "Let me call profile_status — actually I'll just check.",
+    });
+    expect(inner.calls.replyToConversation[0].body).not.toContain("profile_status");
+    expect(inner.calls.replyToConversation[0].body).toContain("[REDACTED]");
+    expect(log.error).toHaveBeenCalledWith(expect.stringContaining("[intercom:tool-leak]"));
+  });
+
+  it("scrubs both email AND tool-leak in one body", async () => {
+    const inner = new MockIntercomClient();
+    const log = { error: vi.fn() };
+    const client = new SanitizingIntercomClient(inner, log);
+    await client.replyToConversation({
+      conversationId: "c1",
+      adminId: "a",
+      body: "Email nick@example.com or call profile_lookup directly.",
+    });
+    const body = inner.calls.replyToConversation[0].body;
+    expect(body).not.toMatch(/nick@example\.com|profile_lookup/);
+    const lines = (log.error.mock.calls as any[]).map((c) => c[0] as string);
+    expect(lines.some((l) => l.includes("[intercom:email-leak]"))).toBe(true);
+    expect(lines.some((l) => l.includes("[intercom:tool-leak]"))).toBe(true);
+  });
 });
 
 describe("createIntercomClient", () => {

@@ -1,6 +1,7 @@
 import type { IntercomClient, IntercomConversation } from "./types.js";
 import { MAX_OUTBOUND_MESSAGE_IDS } from "./types.js";
 import { sanitizeOutboundBody } from "./sanitize-email.js";
+import { sanitizeToolLeak } from "./sanitize-tool-leak.js";
 
 export class MockIntercomClient implements IntercomClient {
   calls = {
@@ -227,12 +228,12 @@ export class SanitizingIntercomClient implements IntercomClient {
     adminId: string;
     body: string;
   }): Promise<{ messageId: string }> {
-    const { body, redactions } = sanitizeOutboundBody(params.body);
-    if (redactions.length > 0) {
+    const emailPass = sanitizeOutboundBody(params.body);
+    if (emailPass.redactions.length > 0) {
       // Dedupe for the audit line so a single markdown-linked email
       // (`[x@y.z](mailto:x@y.z)`) doesn't double-count and inflate the
       // 7-day signal-review window described in the design doc.
-      const unique = Array.from(new Set(redactions));
+      const unique = Array.from(new Set(emailPass.redactions));
       const msg = `[intercom:email-leak] conv=${params.conversationId} count=${unique.length} redacted=${JSON.stringify(unique)}`;
       // Logging must never block delivery: the sanitizer has already done its
       // job by this point. If log.error throws (broken backend, buggy logger),
@@ -244,7 +245,19 @@ export class SanitizingIntercomClient implements IntercomClient {
         try { console.error(msg); } catch { /* noop */ }
       }
     }
-    return this.inner.replyToConversation({ ...params, body });
+    const toolPass = sanitizeToolLeak(emailPass.body);
+    if (toolPass.redactions.length > 0) {
+      // Dedupe for the audit line — mirrors the email-leak dedup logic above.
+      const unique = Array.from(new Set(toolPass.redactions));
+      const msg = `[intercom:tool-leak] conv=${params.conversationId} count=${unique.length} redacted=${JSON.stringify(unique)}`;
+      // Logging must never block delivery (same contract as email path above).
+      try {
+        this.log?.error?.(msg);
+      } catch {
+        try { console.error(msg); } catch { /* noop */ }
+      }
+    }
+    return this.inner.replyToConversation({ ...params, body: toolPass.body });
   }
 
   async assignConversation(params: {

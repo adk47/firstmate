@@ -66,6 +66,21 @@ Scan every outgoing response for the following patterns. If ANY match is found, 
 - `AWS|Amazon Web Services|EKS|Aurora`
 - `vRack|WireGuard`
 
+**Tool Names and Tool-Failure Phrasing** (case-insensitive):
+- `profile_status`
+- `profile_lookup`
+- `credits_search`
+- `subscription_status`
+- `create_ticket`
+- `tool failed`
+- `error fetching`
+- `unable to look up`
+- `the system says`
+- `my system`
+- `there was an issue with`
+
+These overlap with the mechanical sanitizer in `plugins/intercom/src/sanitize-tool-leak.ts`. The mechanical layer is the enforcement guarantee; this list is paired instruction-layer defense to prevent the model from emitting them in the first place.
+
 ### 2. PII Scan
 
 Scan for and redact patterns that could be PII leakage:

@@ -1,10 +1,12 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { createHttpClient } from "./http.js";
+import { createMusoAdminClient } from "./muso-admin-client.js";
 import { RateLimiter } from "./rate-limiter.js";
 import { createProfileLookupTool } from "./tools/profile-lookup.js";
 import { createCreditsSearchTool } from "./tools/credits-search.js";
 import { createCreateTicketTool } from "./tools/create-ticket.js";
 import { createSubscriptionStatusTool } from "./tools/subscription-status.js";
+import { createProfileStatusTool } from "./tools/profile-status.js";
 export default definePluginEntry({
   id: "support-tools",
   name: "Support Agent Tools",
@@ -33,7 +35,8 @@ export default definePluginEntry({
     }
 
     const musoApiBase = pluginConfig.musoApiBase ?? process.env.MUSO_API_BASE ?? "https://api.muso.ai";
-    const musoApiKey = pluginConfig.musoApiKey ?? process.env.MUSO_CUSTOMER_API_KEY ?? "";
+    const adminEmail = pluginConfig.adminEmail ?? process.env.MUSO_ADMIN_EMAIL ?? "";
+    const adminPassword = pluginConfig.adminPassword ?? process.env.MUSO_ADMIN_PASSWORD ?? "";
     const clickupApiKey = pluginConfig.clickupApiKey ?? process.env.CLICKUP_API_KEY ?? "";
     const clickupListId = pluginConfig.clickupListId ?? process.env.CLICKUP_LIST_ID ?? "";
     const clickupProfileIdFieldId =
@@ -55,24 +58,30 @@ export default definePluginEntry({
       profileMergeAssigneeId = DEFAULT_PROFILE_MERGE_ASSIGNEE_ID;
     }
 
-    const required = { musoApiKey, clickupApiKey, clickupListId, clickupProfileIdFieldId, clickupUserEmailFieldId };
+    const required = { adminEmail, adminPassword, clickupApiKey, clickupListId, clickupProfileIdFieldId, clickupUserEmailFieldId };
     const missing = Object.entries(required).filter(([, v]) => !v || v.startsWith("TODO")).map(([k]) => k);
     if (missing.length > 0) {
       console.warn(`[support-tools] Missing config keys: ${missing.join(", ")}. Affected tools will not function correctly.`);
     }
 
     const http = createHttpClient();
+    const musoAdminClient = createMusoAdminClient({ http, musoApiBase, adminEmail, adminPassword });
     const rateLimiter = new RateLimiter();
 
     const profileLookupFactory = (ctx: any) => {
-      return createProfileLookupTool({ http, rateLimiter, musoApiBase, musoApiKey, sessionId: ctx.sessionId ?? "unknown" });
+      return createProfileLookupTool({ adminClient: musoAdminClient, rateLimiter, sessionId: ctx.sessionId ?? "unknown" });
     };
     api.registerTool(profileLookupFactory, { name: "profile_lookup" });
 
     const creditsSearchFactory = (ctx: any) => {
-      return createCreditsSearchTool({ http, rateLimiter, musoApiBase, musoApiKey, sessionId: ctx.sessionId ?? "unknown" });
+      return createCreditsSearchTool({ adminClient: musoAdminClient, rateLimiter, sessionId: ctx.sessionId ?? "unknown" });
     };
     api.registerTool(creditsSearchFactory, { name: "credits_search" });
+
+    const profileStatusFactory = (ctx: any) => {
+      return createProfileStatusTool({ adminClient: musoAdminClient, rateLimiter, sessionId: ctx.sessionId ?? "unknown" });
+    };
+    api.registerTool(profileStatusFactory, { name: "profile_status" });
 
     api.registerTool(createSubscriptionStatusTool(), { name: "subscription_status" });
 

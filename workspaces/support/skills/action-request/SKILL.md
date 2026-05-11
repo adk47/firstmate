@@ -31,7 +31,12 @@ When a customer requests a write action (credit change, refund, profile update, 
 1. Customer asks for a write action
 2. CS agent determines the action type and approval tier
 3. CS agent creates a ClickUp task using `create_ticket` with structured fields
-4. CS agent tells the customer: "I've submitted your request. Our team will review it within [SLA]."
+4. CS agent reads `create_ticket`'s structured response (JSON), then composes the customer-facing reply:
+   - `{ submitted: true, ticket_id, sla, action_type, tier }` – say: *"I've flagged your request for our team. You'll hear back within `<sla>`."*
+   - `{ submitted: false, reason: "rate_limited" }` – acknowledge and stop: *"Looks like a request is already on the way to our team for you. You'll hear back soon."*
+   - `{ submitted: false, reason: "queue_busy" }` – ask the customer to retry their message: *"Could you send that to me one more time? I want to make sure our team gets the full picture."*
+
+   Never use the words "ticket", "ClickUp", "task", or `support@muso.ai` in the customer-facing reply.
 5. Operations agent picks up tickets tagged `hydra-action-request`
 6. Operations follows the approval workflow (human review for Tier 2-3)
 
@@ -69,10 +74,10 @@ Customer [name/email] requests: [plain English summary]
 
 | Action Type | Tier | SLA | Examples |
 |-------------|------|-----|---------|
-| `credit-claim` | 1 | 48 hours | "I produced this track, add my credit" |
-| `credit-correction` | 1 | 48 hours | "My role is listed wrong" |
-| `profile-claim` | 1 | 48 hours | "I want to claim this profile" |
-| `support-general` | 1 | 48 hours | General questions needing ops follow-up |
+| `credit-claim` | 1 | 2 business days | "I produced this track, add my credit" |
+| `credit-correction` | 1 | 2 business days | "My role is listed wrong" |
+| `profile-claim` | 1 | 2 business days | "I want to claim this profile" |
+| `support-general` | 1 | 2 business days | General questions needing ops follow-up |
 | `profile-merge` | 2 | 5 business days | "I have two profiles, combine them" (require `main_profile_url` and `duplicate_profile_urls[]` in `details` – no self-service merge UI exists, so URLs are the only way ops can act) |
 | `bulk-credit-change` | 2 | 5 business days | "Update credits on multiple tracks" |
 | `profile-update` | 2 | 5 business days | "Change my profile name/details" |
@@ -121,7 +126,7 @@ If the refund-retention skill was not activated (edge case), set `retention_cont
 |-----------|--------|
 | Customer is authenticated (session token) | Include verified email and profile ID in ticket |
 | Customer is NOT authenticated | Accept for Tier 1 only; require auth for Tier 2-3 |
-| Action type maps to Tier 1 | Create ticket, tell customer "48 hours" |
+| Action type maps to Tier 1 | Create ticket, use `sla` from structured response |
 | Action type maps to Tier 2 | Create ticket with priority:high, tell customer "5 business days" |
 | Action type maps to Tier 3 | Create ticket with priority:urgent, tell customer "our leadership team will review" |
 | Customer has already submitted 2 action requests this session | Decline further: "I've submitted your requests. Our team will follow up on all of them." |
@@ -133,14 +138,23 @@ If the refund-retention skill was not activated (edge case), set `retention_cont
 
 ## Customer Communication Templates
 
-### Tier 1 (Auto-queue)
-"I've submitted your [action] request. Our team will review it within 48 hours. You'll receive an update at [email]. Your reference number is [ticket ID]."
+Read `create_ticket`'s JSON response and choose the template:
 
-### Tier 2 (Human-in-loop)
-"I've escalated your [action] request to our operations team. This type of request requires manual review and typically takes up to 5 business days. Your reference number is [ticket ID]."
+### Submitted (`submitted: true`)
 
-### Tier 3 (Leadership)
-"I've submitted your [action] request for leadership review. Given the nature of this request, our senior team will review it personally. You can expect a response within 5-10 business days. Your reference number is [ticket ID]."
+Use `ticket_id` as the reference and `sla` verbatim from the response:
+
+**Tier 1:** "I've flagged your request for our team. You'll hear back within `<sla>`. Your reference is `<ticket_id>`."
+
+**Tier 2:** "I've escalated your request to our operations team. This type of request requires manual review – you'll hear back within `<sla>`. Your reference is `<ticket_id>`."
+
+**Tier 3:** "I've passed your request to our senior team for review. You can expect a response within `<sla>`. Your reference is `<ticket_id>`."
+
+### Not submitted – rate limited (`submitted: false, reason: "rate_limited"`)
+"Looks like a request is already on the way to our team for you. You'll hear back soon."
+
+### Not submitted – queue busy (`submitted: false, reason: "queue_busy"`)
+"Could you send that to me one more time? I want to make sure our team gets the full picture."
 
 ## Data NOT Included in Tickets
 - Other customers' data
@@ -150,5 +164,8 @@ If the refund-retention skill was not activated (edge case), set `retention_cont
 - Internal team names or individual reviewers
 
 ## Error Handling
-- ClickUp API error: "I wasn't able to create a ticket right now. Please email support@muso.ai directly with your request."
-- Rate limited: "You've submitted several requests. Our team will process them. For additional requests, please email support@muso.ai."
+
+All failure cases are signalled via the structured JSON response – do not fall back to `support@muso.ai` or expose internal system names.
+
+- `{ submitted: false, reason: "rate_limited" }` – "Looks like a request is already on the way to our team for you. You'll hear back soon."
+- `{ submitted: false, reason: "queue_busy" }` – "Could you send that to me one more time? I want to make sure our team gets the full picture."

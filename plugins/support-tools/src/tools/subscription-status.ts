@@ -11,12 +11,13 @@ export function createSubscriptionStatusTool(): AgentTool<typeof Parameters, unk
   return {
     name: "subscription_status",
     label: "Subscription Status",
-    description: "Check a customer's subscription status, plan, or billing information. Note: this feature is not yet available — will offer to create a support ticket instead.",
+    description: "Check a customer's subscription status, plan, or billing information. Note: this feature is not yet available — returns a structured not-implemented response. Caroline should suggest a follow-up via create_ticket.",
     parameters: Parameters,
     async execute(_toolCallId: string, _params: Params): Promise<AgentToolResult<unknown>> {
       return textResult(JSON.stringify({
-        message: "Subscription status lookup is not yet available. To check subscription details, I can create a support ticket for the team to investigate.",
-        suggestTicket: true,
+        ok: false,
+        reason: "not_implemented",
+        suggest_followup: true,
       }));
     },
   };

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createProfileLookupTool, filterProfileResults, extractProfileIdFromUrl } from "../src/tools/profile-lookup.js";
-import type { HttpClient } from "../src/http.js";
+import type { MusoAdminClient } from "../src/muso-admin-client.js";
 import { RateLimiter } from "../src/rate-limiter.js";
 
 describe("extractProfileIdFromUrl", () => {
@@ -26,13 +26,13 @@ describe("extractProfileIdFromUrl", () => {
 });
 
 describe("filterProfileResults", () => {
-  it("strips internal fields and keeps only public data", () => {
+  it("strips internal fields and keeps only public data (admin shape: isClaimed)", () => {
     const raw = [
       {
         id: "prof_123",
         name: "Drake",
         type: "artist",
-        verified: true,
+        isClaimed: true,
         creditCount: 500,
         spotifyId: "spotify:abc",
         email: "drake@example.com",
@@ -53,152 +53,136 @@ describe("filterProfileResults", () => {
     ]);
   });
 
+  it("falls back to verified field when isClaimed is absent", () => {
+    const raw = [{ id: "x", name: "Y", type: "artist", verified: true, creditCount: 1 }];
+    const filtered = filterProfileResults(raw);
+    expect(filtered[0].verified).toBe(true);
+  });
+
   it("handles empty results", () => {
     expect(filterProfileResults([])).toEqual([]);
   });
 });
 
 describe("createProfileLookupTool", () => {
-  let mockClient: HttpClient;
+  let mockAdminClient: MusoAdminClient;
   let limiter: RateLimiter;
 
   beforeEach(() => {
-    mockClient = {
+    mockAdminClient = {
       get: vi.fn(),
-      post: vi.fn(),
     };
     limiter = new RateLimiter();
   });
 
-  it("calls autocomplete endpoint for name queries", async () => {
-    vi.mocked(mockClient.get).mockResolvedValue({
+  it("calls admin profile/search endpoint for name queries", async () => {
+    vi.mocked(mockAdminClient.get).mockResolvedValue({
       ok: true,
-      data: { results: [{ id: "prof_1", name: "Drake", type: "artist", verified: true, creditCount: 200 }] },
+      status: 200,
+      data: { data: [{ id: "prof_1", name: "Drake", type: "artist", isClaimed: true, creditCount: 200 }] },
     });
 
     const tool = createProfileLookupTool({
-      http: mockClient,
+      adminClient: mockAdminClient,
       rateLimiter: limiter,
-      musoApiBase: "https://api.muso.ai",
-      musoApiKey: "test-key",
       sessionId: "session-1",
     });
 
     const result = await tool.execute("call_1", { query: "Drake" });
 
-    expect(mockClient.get).toHaveBeenCalledWith(
-      "https://api.muso.ai/api/c/v5/search/autocomplete?q=Drake&types=profiles&limit=5",
-      { headers: { "x-api-key": "test-key" } },
+    expect(mockAdminClient.get).toHaveBeenCalledWith(
+      "/api/v3/admin/profile/search?keyword=Drake&limit=5",
     );
     expect(result.content[0]).toEqual({ type: "text", text: expect.stringContaining("Drake") });
   });
 
-  it("falls back to full search when autocomplete returns 0 results", async () => {
-    vi.mocked(mockClient.get).mockResolvedValue({ ok: true, data: { results: [] } });
-    vi.mocked(mockClient.post).mockResolvedValue({
-      ok: true,
-      data: { results: [{ id: "prof_1", name: "Drakeo The Ruler", type: "artist", verified: false, creditCount: 50 }] },
-    });
-
-    const tool = createProfileLookupTool({
-      http: mockClient,
-      rateLimiter: limiter,
-      musoApiBase: "https://api.muso.ai",
-      musoApiKey: "test-key",
-      sessionId: "session-1",
-    });
-
-    const result = await tool.execute("call_1", { query: "Drakeo" });
-
-    expect(mockClient.post).toHaveBeenCalledWith(
-      "https://api.muso.ai/api/c/v5/search",
-      {
-        headers: { "x-api-key": "test-key" },
-        body: { keyword: "Drakeo", type: ["profile"], limit: 10 },
-      },
-    );
-    expect(result.content[0]).toEqual({ type: "text", text: expect.stringContaining("Drakeo The Ruler") });
-  });
-
-  it("returns error message when rate limited", async () => {
+  it("returns structured JSON with ok:false reason:rate_limited when rate limited", async () => {
     const strictLimiter = new RateLimiter();
     for (let i = 0; i < 10; i++) {
       strictLimiter.check("session-1", "profile_lookup", 1, 10);
     }
 
     const tool = createProfileLookupTool({
-      http: mockClient,
+      adminClient: mockAdminClient,
       rateLimiter: strictLimiter,
-      musoApiBase: "https://api.muso.ai",
-      musoApiKey: "test-key",
       sessionId: "session-1",
     });
 
     const result = await tool.execute("call_1", { query: "Drake" });
+    const parsed = JSON.parse((result.content[0] as any).text);
 
-    expect(result.content[0]).toEqual({
-      type: "text",
-      text: expect.stringContaining("Too many profile lookups"),
-    });
-    expect(mockClient.get).not.toHaveBeenCalled();
+    expect(parsed).toEqual({ ok: false, reason: "rate_limited" });
+    expect(mockAdminClient.get).not.toHaveBeenCalled();
   });
 
-  it("returns no-results message when both endpoints return empty", async () => {
-    vi.mocked(mockClient.get).mockResolvedValue({ ok: true, data: { results: [] } });
-    vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { results: [] } });
+  it("returns structured JSON with ok:true and empty profiles array when admin search returns no results", async () => {
+    vi.mocked(mockAdminClient.get).mockResolvedValue({ ok: true, status: 200, data: { data: [] } });
 
     const tool = createProfileLookupTool({
-      http: mockClient,
+      adminClient: mockAdminClient,
       rateLimiter: limiter,
-      musoApiBase: "https://api.muso.ai",
-      musoApiKey: "test-key",
       sessionId: "session-1",
     });
 
     const result = await tool.execute("call_1", { query: "xyznonexistent" });
+    const parsed = JSON.parse((result.content[0] as any).text);
 
-    expect(result.content[0]).toEqual({
-      type: "text",
-      text: expect.stringContaining("No profiles found"),
-    });
+    expect(parsed).toEqual({ ok: true, profiles: [], count: 0 });
   });
 
-  it("returns error when fallback search also fails", async () => {
-    vi.mocked(mockClient.get).mockResolvedValue({ ok: true, data: { results: [] } });
-    vi.mocked(mockClient.post).mockResolvedValue({ ok: false, error: "API error", status: 500 });
+  it("returns structured JSON with ok:false reason:lookup_unavailable on admin client failure", async () => {
+    vi.mocked(mockAdminClient.get).mockResolvedValue({ ok: false, status: 500, error: "API error" });
 
     const tool = createProfileLookupTool({
-      http: mockClient,
+      adminClient: mockAdminClient,
       rateLimiter: limiter,
-      musoApiBase: "https://api.muso.ai",
-      musoApiKey: "test-key",
-      sessionId: "session-1",
-    });
-
-    const result = await tool.execute("call_1", { query: "Drakeo" });
-
-    expect(result.content[0]).toEqual({
-      type: "text",
-      text: expect.stringContaining("Unable to look up profiles"),
-    });
-  });
-
-  it("returns error message on API failure", async () => {
-    vi.mocked(mockClient.get).mockResolvedValue({ ok: false, error: "API error", status: 500 });
-
-    const tool = createProfileLookupTool({
-      http: mockClient,
-      rateLimiter: limiter,
-      musoApiBase: "https://api.muso.ai",
-      musoApiKey: "test-key",
       sessionId: "session-1",
     });
 
     const result = await tool.execute("call_1", { query: "Drake" });
+    const parsed = JSON.parse((result.content[0] as any).text);
 
-    expect(result.content[0]).toEqual({
-      type: "text",
-      text: expect.stringContaining("Unable to look up profiles"),
+    expect(parsed).toEqual({ ok: false, reason: "lookup_unavailable" });
+  });
+
+  it("extracts profile ID from URL without calling admin client", async () => {
+    const tool = createProfileLookupTool({
+      adminClient: mockAdminClient,
+      rateLimiter: limiter,
+      sessionId: "session-1",
+    });
+
+    const result = await tool.execute("call_1", { query: "https://app.muso.ai/profile/abc-123" });
+
+    expect(mockAdminClient.get).not.toHaveBeenCalled();
+    const parsed = JSON.parse((result.content[0] as any).text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.profileId).toBe("abc-123");
+  });
+
+  it("output shape has ok:true + profileId/name/type/verified/creditsCount (agent-facing contract)", async () => {
+    vi.mocked(mockAdminClient.get).mockResolvedValue({
+      ok: true,
+      status: 200,
+      data: { data: [{ id: "p1", name: "Rihanna", type: "artist", isClaimed: false, creditCount: 99 }] },
+    });
+
+    const tool = createProfileLookupTool({
+      adminClient: mockAdminClient,
+      rateLimiter: limiter,
+      sessionId: "session-1",
+    });
+
+    const result = await tool.execute("call_1", { query: "Rihanna" });
+    const parsed = JSON.parse((result.content[0] as any).text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.count).toBe(1);
+    expect(parsed.profiles[0]).toEqual({
+      profileId: "p1",
+      name: "Rihanna",
+      type: "artist",
+      verified: false,
+      creditsCount: 99,
     });
   });
 });

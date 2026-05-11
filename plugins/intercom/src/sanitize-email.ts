@@ -11,7 +11,6 @@
 
 export const ALLOWED_OUTBOUND_EMAILS: ReadonlySet<string> = new Set([
   "support@muso.ai",
-  "jan@muso.ai",
 ]);
 
 const REPLACEMENT = "support@muso.ai";

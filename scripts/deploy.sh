@@ -168,6 +168,71 @@ plugin_profile() {
   esac
 }
 
+# verify_plugin_env_for_profile — fails (returns 1) if any env-source secret
+# reference under plugins.entries[plugin].config is not present in
+# /etc/openclaw/shared.env or /etc/openclaw/<profile>.env. Skips silently
+# when there is no plugins.entries entry for the plugin (the plugin does not
+# need any env vars on that profile).
+#
+# If /etc/openclaw/ does not exist (dev machine, CI runner), the check is
+# skipped and returns 0 — we are not on a deploy host and there are no env
+# files to validate against.
+verify_plugin_env_for_profile() {
+  local plugin_name="$1"
+  local profile="$2"
+  local repo_root="$3"
+
+  if [[ ! -d /etc/openclaw ]]; then
+    log "    skip env check: /etc/openclaw not present (not on a deploy host)"
+    return 0
+  fi
+
+  local config_file="${repo_root}/openclaw-${profile}.json"
+  if [[ ! -f "$config_file" ]]; then
+    log "    skip env check: $config_file not present"
+    return 0
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    log "    ✗ jq is required for env-var verification but is not installed"
+    return 1
+  fi
+
+  local refs
+  refs=$(jq -r --arg p "$plugin_name" \
+    '.plugins.entries[$p].config // empty
+     | to_entries[]?
+     | select(.value | type == "object")
+     | select(.value.source == "env")
+     | .value.id' \
+    "$config_file" 2>/dev/null | sort -u)
+
+  if [[ -z "$refs" ]]; then
+    return 0
+  fi
+
+  local shared_env="/etc/openclaw/shared.env"
+  local profile_env="/etc/openclaw/${profile}.env"
+  local missing=()
+  while IFS= read -r var; do
+    [[ -z "$var" ]] && continue
+    if grep -qE "^${var}=" "$shared_env" 2>/dev/null \
+    || grep -qE "^${var}=" "$profile_env" 2>/dev/null; then
+      continue
+    fi
+    missing+=("$var")
+  done <<< "$refs"
+
+  if (( ${#missing[@]} > 0 )); then
+    log "    ✗ Plugin $plugin_name on profile '$profile' needs these env vars but they are not in $shared_env or $profile_env:"
+    printf '        - %s\n' "${missing[@]}"
+    log "      Remediation: add the missing variables to $profile_env (or move them to $shared_env if they should be visible to all profiles), then 'systemctl daemon-reload && systemctl restart openclaw-gateway-${profile}.service' before re-running deploy."
+    return 1
+  fi
+
+  return 0
+}
+
 # install_openclaw — pins the global openclaw CLI to OPENCLAW_VERSION.
 # Idempotent: skips the npm install when the live binary already reports
 # the target version.
@@ -256,12 +321,61 @@ install_plugin() {
     log "    ✗ plugin_dir not found: $plugin_dir"
     return 1
   fi
-  npm_out=$(cd "$plugin_dir" && npm install --production 2>&1) || npm_rc=$?
+  npm_out=$(cd "$plugin_dir" && npm install 2>&1) || npm_rc=$?
   if (( npm_rc != 0 )); then
     log "    ✗ npm install failed for $plugin_name (rc=$npm_rc):"
     echo "$npm_out" | sed 's/^/        /'
     return 1
   fi
+
+  # Build the plugin if it declares a build script. Required for plugins that
+  # expose tools through TypeScript entries -- openclaw 4.27+ rejects ./src/*.ts
+  # entries without compiled output unless the plugin is kind=channel. Channel
+  # plugins (intercom) load fine without dist; tool plugins (support-tools) do not.
+  if ! command -v jq >/dev/null 2>&1; then
+    log "    ✗ jq is required to detect plugin build scripts but is not installed"
+    return 1
+  fi
+  local build_script
+  build_script=$(jq -r '.scripts.build // empty' "$plugin_dir/package.json")
+  if [[ -n "$build_script" ]]; then
+    local build_rc=0
+    local build_out
+    build_out=$(cd "$plugin_dir" && npm run build 2>&1) || build_rc=$?
+    if (( build_rc != 0 )); then
+      log "    ✗ npm run build failed for $plugin_name (rc=$build_rc):"
+      echo "$build_out" | sed 's/^/        /'
+      return 1
+    fi
+    # Module-load self-check: confirm dist/index.js doesn't throw at import time.
+    # This catches syntax errors / missing imports / circular dep issues that
+    # tsc would not flag but Node will at require()-time. If this fails we're
+    # better off failing the deploy here than after rsync, when the openclaw
+    # gateway will crash-loop instead.
+    if [[ -f "$plugin_dir/dist/index.js" ]]; then
+      local load_rc=0
+      local load_out
+      load_out=$(cd "$plugin_dir" && node --input-type=module -e "import('./dist/index.js').then(() => process.exit(0)).catch(e => { console.error(e); process.exit(1); })" 2>&1) || load_rc=$?
+      if (( load_rc != 0 )); then
+        log "    ✗ dist/index.js failed to load for $plugin_name (rc=$load_rc):"
+        echo "$load_out" | sed 's/^/        /'
+        return 1
+      fi
+    fi
+  fi
+
+  # Pre-rsync: verify the target profile(s) have access to every env var
+  # referenced by this plugin's config. The openclaw runtime will warn on
+  # missing config keys but tools will fail silently at call time. Better
+  # to fail the deploy here than chase 401s on a "successful" deploy.
+  local repo_root
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  for profile in $profiles; do
+    if ! needs_target "$profile"; then continue; fi
+    if ! verify_plugin_env_for_profile "$plugin_name" "$profile" "$repo_root"; then
+      return 1
+    fi
+  done
 
   # Determine the target extension paths per profile.
   #

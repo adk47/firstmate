@@ -30,7 +30,7 @@ describe("buildTicketDescription", () => {
 });
 
 describe("TIER_SLAS", () => {
-  it("maps tier 1 to 48h", () => { expect(TIER_SLAS[1]).toBe("48 hours"); });
+  it("tier 1 is '2 business days'", () => { expect(TIER_SLAS[1]).toBe("2 business days"); });
   it("maps tier 2 to 5 business days", () => { expect(TIER_SLAS[2]).toBe("5 business days"); });
   it("maps tier 3 to 5-10 business days", () => { expect(TIER_SLAS[3]).toBe("5-10 business days"); });
 });
@@ -47,8 +47,14 @@ describe("createCreateTicketTool", () => {
     const result = await tool.execute("call_1", { actionType: "credit-claim", customerEmail: "user@example.com", summary: "Customer wants Producer credit on Track X", conversationSummary: "Customer asked about missing credit." });
     expect(mockClient.post).toHaveBeenCalledWith("https://api.clickup.com/api/v2/list/901000600160/task", { headers: { Authorization: "pk_test" }, body: expect.objectContaining({ name: "Action Request: credit-claim", status: "to do", priority: 3, tags: ["hydra-action-request", "tier-1"], custom_fields: [{ id: "field_uuid_2", value: "user@example.com" }] }) });
     const text = (result.content[0] as { type: "text"; text: string }).text;
-    expect(text).toContain("task_abc123");
-    expect(text).toContain("48 hours");
+    const parsed = JSON.parse(text);
+    expect(parsed).toEqual({
+      submitted: true,
+      ticket_id: "task_abc123",
+      sla: "2 business days",
+      action_type: "credit-claim",
+      tier: 1,
+    });
   });
 
   it("includes profile ID custom field when provided", async () => {
@@ -67,7 +73,9 @@ describe("createCreateTicketTool", () => {
     for (let i = 0; i < 2; i++) { strictLimiter.check("session_abc", "create_ticket", 60, 2); }
     const tool = createCreateTicketTool({ http: mockClient, rateLimiter: strictLimiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc" });
     const result = await tool.execute("call_1", { actionType: "credit-claim", customerEmail: "user@example.com", summary: "Test", conversationSummary: "Test." });
-    expect(result.content[0]).toEqual({ type: "text", text: expect.stringContaining("already submitted") });
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    const parsed = JSON.parse(text);
+    expect(parsed).toEqual({ submitted: false, reason: "rate_limited" });
     expect(mockClient.post).not.toHaveBeenCalled();
   });
 
@@ -95,10 +103,106 @@ describe("createCreateTicketTool", () => {
     expect(body.assignees).toBeUndefined();
   });
 
-  it("returns error on ClickUp API failure", async () => {
+  it("returns structured queue_busy on ClickUp API failure", async () => {
     vi.mocked(mockClient.post).mockResolvedValue({ ok: false, error: "API error", status: 500 });
     const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc" });
     const result = await tool.execute("call_1", { actionType: "credit-claim", customerEmail: "user@example.com", summary: "Test", conversationSummary: "Test." });
-    expect(result.content[0]).toEqual({ type: "text", text: expect.stringContaining("Unable to create a ticket") });
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    const parsed = JSON.parse(text);
+    expect(parsed).toEqual({ submitted: false, reason: "queue_busy" });
+  });
+});
+
+function makeHttp(overrides: Partial<HttpClient> = {}): HttpClient {
+  return {
+    get: vi.fn(async () => ({ ok: true, data: {} as any })),
+    post: vi.fn(async () => ({ ok: true, data: { id: "abc123" } as any })),
+    put: vi.fn(async () => ({ ok: true, data: {} as any })),
+    ...overrides,
+  } as unknown as HttpClient;
+}
+
+function makeDeps(overrides: Partial<Parameters<typeof createCreateTicketTool>[0]> = {}) {
+  return {
+    http: makeHttp(),
+    rateLimiter: new RateLimiter(),
+    clickupApiKey: "k",
+    clickupListId: "list",
+    clickupProfileIdFieldId: "pf",
+    clickupUserEmailFieldId: "ef",
+    sessionId: "sess-1",
+    ...overrides,
+  };
+}
+
+describe("createCreateTicketTool — structured returns", () => {
+  it("returns structured success on ticket creation", async () => {
+    const tool = createCreateTicketTool(makeDeps());
+    const result = await tool.execute("call-1", {
+      actionType: "analytics-followup",
+      customerEmail: "u@example.com",
+      summary: "stuck streams",
+      conversationSummary: "customer reports stale dashboard",
+    } as any);
+    const parsed = JSON.parse((result.content[0] as any).text as string);
+    expect(parsed).toEqual({
+      submitted: true,
+      ticket_id: "abc123",
+      sla: "2 business days",
+      action_type: "analytics-followup",
+      tier: 1,
+    });
+  });
+
+  it("returns structured queue_busy on ClickUp 5xx", async () => {
+    const http = makeHttp({ post: vi.fn(async () => ({ ok: false, status: 503, error: "upstream" } as any)) });
+    const tool = createCreateTicketTool(makeDeps({ http }));
+    const result = await tool.execute("call-1", {
+      actionType: "analytics-followup",
+      customerEmail: "u@example.com",
+      summary: "x",
+      conversationSummary: "y",
+    } as any);
+    const parsed = JSON.parse((result.content[0] as any).text as string);
+    expect(parsed).toEqual({ submitted: false, reason: "queue_busy" });
+  });
+
+  it("returns structured rate_limited when session cap exceeded", async () => {
+    const deps = makeDeps();
+    const tool = createCreateTicketTool(deps);
+    await tool.execute("c1", { actionType: "support-general", customerEmail: "u@example.com", summary: "s", conversationSummary: "c" } as any);
+    await tool.execute("c2", { actionType: "support-general", customerEmail: "u@example.com", summary: "s", conversationSummary: "c" } as any);
+    const result = await tool.execute("c3", { actionType: "support-general", customerEmail: "u@example.com", summary: "s", conversationSummary: "c" } as any);
+    const parsed = JSON.parse((result.content[0] as any).text as string);
+    expect(parsed).toEqual({ submitted: false, reason: "rate_limited" });
+  });
+
+  it("never returns customer-facing English in any path", async () => {
+    const deps = makeDeps({ http: makeHttp({ post: vi.fn(async () => ({ ok: false, status: 500, error: "x" } as any)) }) });
+    const tool = createCreateTicketTool(deps);
+    const result = await tool.execute("call-1", {
+      actionType: "analytics-followup",
+      customerEmail: "u@example.com",
+      summary: "s",
+      conversationSummary: "c",
+    } as any);
+    const text = (result.content[0] as any).text as string;
+    expect(() => JSON.parse(text)).not.toThrow();
+    expect(text).not.toMatch(/ticket|support@muso\.ai|already submitted|Unable/i);
+  });
+
+  it("includes analytics-followup in tags passed to ClickUp", async () => {
+    const post = vi.fn(async () => ({ ok: true, data: { id: "abc" } as any }));
+    const tool = createCreateTicketTool(makeDeps({ http: makeHttp({ post }) }));
+    await tool.execute("c", {
+      actionType: "analytics-followup",
+      customerEmail: "u@example.com",
+      summary: "s",
+      conversationSummary: "c",
+    } as any);
+    const calledBody = (post.mock.calls[0]?.[1] as any)?.body;
+    expect(calledBody?.tags).toContain("analytics-followup");
+    expect(calledBody?.tags).toContain("hydra-action-request");
+    expect(calledBody?.tags).toContain("tier-1");
   });
 });

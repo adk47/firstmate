@@ -701,26 +701,13 @@
       "support-tools": {
         "enabled": true,
         "config": {
-          "clickupApiKey": {
-            "source": "env",
-            "provider": "hydra-env",
-            "id": "CLICKUP_API_KEY"
-          },
-          "clickupListId": {
-            "source": "env",
-            "provider": "hydra-env",
-            "id": "CLICKUP_LIST_ID"
-          },
-          "clickupUserEmailFieldId": {
-            "source": "env",
-            "provider": "hydra-env",
-            "id": "CLICKUP_USER_EMAIL_FIELD_ID"
-          },
-          "clickupProfileIdFieldId": {
-            "source": "env",
-            "provider": "hydra-env",
-            "id": "CLICKUP_PROFILE_ID_FIELD_ID"
-          }
+          "musoApiBase": "https://api.muso.ai",
+          "adminEmail":              { "source": "env", "provider": "hydra-env", "id": "MUSO_ADMIN_EMAIL" },
+          "adminPassword":           { "source": "env", "provider": "hydra-env", "id": "MUSO_ADMIN_PASSWORD" },
+          "clickupApiKey":           { "source": "env", "provider": "hydra-env", "id": "CLICKUP_API_KEY" },
+          "clickupListId":           { "source": "env", "provider": "hydra-env", "id": "CLICKUP_LIST_ID" },
+          "clickupUserEmailFieldId": { "source": "env", "provider": "hydra-env", "id": "CLICKUP_USER_EMAIL_FIELD_ID" },
+          "clickupProfileIdFieldId": { "source": "env", "provider": "hydra-env", "id": "CLICKUP_PROFILE_ID_FIELD_ID" }
         }
       }
     },
@@ -762,7 +749,8 @@
     },
     "load": {
       "paths": [
-        "/root/.openclaw-main/extensions/intercom"
+        "/root/.openclaw-main/extensions/intercom",
+        "/root/.openclaw-main/extensions/support-tools"
       ]
     }
   },
@@ -799,7 +787,9 @@
           "CLICKUP_API_KEY",
           "CLICKUP_LIST_ID",
           "CLICKUP_USER_EMAIL_FIELD_ID",
-          "CLICKUP_PROFILE_ID_FIELD_ID"
+          "CLICKUP_PROFILE_ID_FIELD_ID",
+          "MUSO_ADMIN_EMAIL",
+          "MUSO_ADMIN_PASSWORD"
         ]
       }
     }

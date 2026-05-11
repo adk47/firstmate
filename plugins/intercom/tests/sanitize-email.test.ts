@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { sanitizeOutboundBody, ALLOWED_OUTBOUND_EMAILS } from "../src/sanitize-email.js";
 
 describe("ALLOWED_OUTBOUND_EMAILS", () => {
-  it("contains exactly support@muso.ai and jan@muso.ai (lowercase)", () => {
-    expect(ALLOWED_OUTBOUND_EMAILS).toEqual(new Set(["support@muso.ai", "jan@muso.ai"]));
+  it("contains exactly support@muso.ai (jan@muso.ai removed 2026-05-11)", () => {
+    expect(ALLOWED_OUTBOUND_EMAILS).toEqual(new Set(["support@muso.ai"]));
   });
 });
 
@@ -20,10 +20,10 @@ describe("sanitizeOutboundBody", () => {
     expect(redactions).toEqual([]);
   });
 
-  it("passes jan@muso.ai through unchanged", () => {
+  it("scrubs jan@muso.ai (removed from allowlist 2026-05-11)", () => {
     const { body, redactions } = sanitizeOutboundBody("Escalating to jan@muso.ai.");
-    expect(body).toBe("Escalating to jan@muso.ai.");
-    expect(redactions).toEqual([]);
+    expect(body).toBe("Escalating to support@muso.ai.");
+    expect(redactions).toEqual(["jan@muso.ai"]);
   });
 
   it("swaps a single disallowed email and reports it", () => {
@@ -46,12 +46,12 @@ describe("sanitizeOutboundBody", () => {
     expect(redactions).toEqual(["nick@muso.ai"]);
   });
 
-  it("allowlist match is case-insensitive and preserves original casing of allowed emails", () => {
+  it("allowlist match is case-insensitive; Support@Muso.AI allowed, JAN@muso.ai now scrubbed (2026-05-11)", () => {
     const { body, redactions } = sanitizeOutboundBody(
-      "Email Support@Muso.AI or JAN@muso.ai — both fine.",
+      "Email Support@Muso.AI or JAN@muso.ai — only support allowed.",
     );
-    expect(body).toBe("Email Support@Muso.AI or JAN@muso.ai — both fine.");
-    expect(redactions).toEqual([]);
+    expect(body).toBe("Email Support@Muso.AI or support@muso.ai — only support allowed.");
+    expect(redactions).toEqual(["JAN@muso.ai"]);
   });
 
   it("redacts a disallowed email that only differs in casing from allowed ones (e.g. Nick@Muso.AI)", () => {
@@ -185,5 +185,17 @@ describe("sanitizeOutboundBody", () => {
     const { redactions } = sanitizeOutboundBody(pathological);
     expect(redactions).toContain("nick@muso.ai");
     expect(redactions.some((r) => r.startsWith("<truncated:"))).toBe(true);
+  });
+
+  it("scrubs jan@muso.ai (removed from allowlist 2026-05-11)", () => {
+    const result = sanitizeOutboundBody("Email Jan at jan@muso.ai for help.");
+    expect(result.body).toBe("Email Jan at support@muso.ai for help.");
+    expect(result.redactions).toEqual(["jan@muso.ai"]);
+  });
+
+  it("allows support@muso.ai unchanged", () => {
+    const result = sanitizeOutboundBody("Email support@muso.ai.");
+    expect(result.body).toBe("Email support@muso.ai.");
+    expect(result.redactions).toEqual([]);
   });
 });

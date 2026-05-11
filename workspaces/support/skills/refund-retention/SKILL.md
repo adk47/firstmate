@@ -19,7 +19,7 @@ prerequisite_for: action-request (subscription-refund type only)
 
 When a customer requests a refund, Caroline runs this 3-gate retention flow BEFORE creating a `subscription-refund` action-request ticket. The goal is to understand the real problem and try to help – many refund requests come from users who don't know how to use the platform, not from users who genuinely want out.
 
-**This skill does NOT add any new tools.** It uses the existing 4 tools (profile_lookup, credits_search, subscription_status, create_ticket) and the reference knowledge base.
+**This skill does NOT add any new tools.** It uses the existing 5 tools (profile_lookup, credits_search, subscription_status, create_ticket, profile_status) and the reference knowledge base.
 
 ## When to Activate
 
@@ -141,6 +141,14 @@ If the customer:
 ## Handoff to action-request
 
 When all gates are exhausted and the customer confirms they want a refund, proceed to the `action-request` skill with action type `subscription-refund` (Tier 3).
+
+After calling `create_ticket`, read the structured JSON response and reply:
+
+- `{ submitted: true, ticket_id, sla, ... }` – use `sla` verbatim from the response: *"I've passed your refund request to our team. You'll hear back within `<sla>`. Your reference is `<ticket_id>`."*
+- `{ submitted: false, reason: "rate_limited" }` – "Looks like a request is already on the way to our team for you. You'll hear back soon."
+- `{ submitted: false, reason: "queue_busy" }` – "Could you send that to me one more time? I want to make sure our team gets the full picture."
+
+Never use the words "ticket", "ClickUp", "task", or `support@muso.ai` in the customer-facing reply.
 
 **Add a retention-context block** inside the `---ACTION-REQUEST---` markers:
 

@@ -4,7 +4,7 @@ import type { HttpClient } from "../http.js";
 import type { RateLimiter } from "../rate-limiter.js";
 
 const Parameters = Type.Object({
-  actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, profile-claim, support-general, profile-merge, bulk-credit-change, profile-update, subscription-refund, data-deletion, dispute, data-export" }),
+  actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, profile-claim, support-general, analytics-followup, profile-merge, bulk-credit-change, profile-update, subscription-refund, data-deletion, dispute, data-export" }),
   customerEmail: Type.String({ description: "Customer's email address" }),
   summary: Type.String({ description: "Plain English description of what the customer is requesting" }),
   customerProfileId: Type.Optional(Type.String({ description: "Customer's Muso profile ID, if known from profile_lookup" })),
@@ -15,7 +15,7 @@ const Parameters = Type.Object({
 type Params = Static<typeof Parameters>;
 
 const TIER_MAP: Record<string, number> = {
-  "credit-claim": 1, "credit-correction": 1, "profile-claim": 1, "support-general": 1,
+  "credit-claim": 1, "credit-correction": 1, "profile-claim": 1, "support-general": 1, "analytics-followup": 1,
   "profile-merge": 2, "bulk-credit-change": 2, "profile-update": 2,
   "subscription-refund": 3, "data-deletion": 3, "dispute": 3, "data-export": 3,
 };
@@ -23,7 +23,7 @@ const TIER_MAP: Record<string, number> = {
 const TIER_TO_PRIORITY: Record<number, number> = { 1: 3, 2: 2, 3: 1 };
 
 export const TIER_SLAS: Record<number, string> = {
-  1: "48 hours",
+  1: "2 business days",
   2: "5 business days",
   3: "5-10 business days",
 };
@@ -69,11 +69,11 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
   return {
     name: "create_ticket",
     label: "Create Support Ticket",
-    description: "Create a support ticket in the team's task system for customer requests that require human action (credit claims, profile merges, refunds, data deletion, etc.).",
+    description: "Create a support ticket in the team's task system for customer requests that require human action (credit claims, profile merges, analytics followups, refunds, data deletion, etc.).",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
       if (!rateLimiter.check(sessionId, "create_ticket", 60, 2).allowed) {
-        return textResult("You've already submitted requests this session. Our team will follow up on all of them.");
+        return textResult(JSON.stringify({ submitted: false, reason: "rate_limited" }));
       }
 
       if (!(params.actionType in TIER_MAP)) {
@@ -82,7 +82,7 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
 
       const tier = getTierForAction(params.actionType);
       const priority = TIER_TO_PRIORITY[tier] ?? 3;
-      const sla = TIER_SLAS[tier] ?? "48 hours";
+      const sla = TIER_SLAS[tier] ?? "2 business days";
 
       const description = buildTicketDescription({
         summary: params.summary, actionType: params.actionType, tier,
@@ -97,12 +97,15 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         customFields.push({ id: clickupProfileIdFieldId, value: params.customerProfileId });
       }
 
+      const tags = ["hydra-action-request", `tier-${tier}`];
+      if (params.actionType === "analytics-followup") tags.push("analytics-followup");
+
       const body: Record<string, unknown> = {
         name: `Action Request: ${params.actionType}`,
         description,
         status: "to do",
         priority,
-        tags: ["hydra-action-request", `tier-${tier}`],
+        tags,
         custom_fields: customFields,
       };
       if (params.actionType === "profile-merge" && profileMergeAssigneeId) {
@@ -115,13 +118,10 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       );
 
       if (!result.ok) {
-        return textResult("Unable to create a ticket right now. Please email support@muso.ai directly.");
+        return textResult(JSON.stringify({ submitted: false, reason: "queue_busy" }));
       }
 
-      return textResult(JSON.stringify({
-        ticketId: result.data.id,
-        message: `Support request #${result.data.id} created. Our team will review it within ${sla}.`,
-      }));
+      return textResult(JSON.stringify({ submitted: true, ticket_id: result.data.id, sla, action_type: params.actionType, tier }));
     },
   };
 }

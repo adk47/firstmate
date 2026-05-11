@@ -209,7 +209,7 @@ export const DEFAULT_JUDGE_MODEL = "anthropic/claude-haiku-4-5-20251001";
 // Source of truth: support team runbook. If support's published SLA changes,
 // update this map — there is no other authoritative source.
 export const TIER_SLA: Record<1 | 2 | 3, string> = {
-  1: "48 hours",
+  1: "2 business days",
   2: "5 business days",
   3: "5-10 business days",
 };

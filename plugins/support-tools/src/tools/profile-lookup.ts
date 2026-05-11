@@ -1,7 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
-import type { HttpClient } from "../http.js";
 import type { RateLimiter } from "../rate-limiter.js";
+import type { MusoAdminClient } from "../muso-admin-client.js";
 
 const Parameters = Type.Object({
   query: Type.String({ description: "Name, partial name, or muso.ai profile URL to search for" }),
@@ -18,10 +18,8 @@ interface ProfileResult {
 }
 
 interface ToolDeps {
-  http: HttpClient;
+  adminClient: MusoAdminClient;
   rateLimiter: RateLimiter;
-  musoApiBase: string;
-  musoApiKey: string;
   sessionId: string;
 }
 
@@ -40,14 +38,13 @@ export function filterProfileResults(raw: Record<string, unknown>[]): ProfileRes
     profileId: String(r.id ?? ""),
     name: String(r.name ?? ""),
     type: String(r.type ?? "unknown"),
-    verified: Boolean(r.verified),
+    verified: Boolean(r.isClaimed ?? r.verified),
     creditsCount: Number(r.creditCount ?? r.creditsCount ?? 0),
   }));
 }
 
 export function createProfileLookupTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
-  const { http, rateLimiter, musoApiBase, musoApiKey, sessionId } = deps;
-  const headers = { "x-api-key": musoApiKey };
+  const { adminClient, rateLimiter, sessionId } = deps;
 
   return {
     name: "profile_lookup",
@@ -59,7 +56,7 @@ export function createProfileLookupTool(deps: ToolDeps): AgentTool<typeof Parame
       const { query } = params;
 
       if (!rateLimiter.check(sessionId, "profile_lookup", 1, 10).allowed) {
-        return textResult("Too many profile lookups. Please wait a moment before trying again.");
+        return textResult(JSON.stringify({ ok: false, reason: "rate_limited" }));
       }
 
       // Check if query is a profile URL
@@ -67,48 +64,31 @@ export function createProfileLookupTool(deps: ToolDeps): AgentTool<typeof Parame
       if (profileId) {
         return textResult(
           JSON.stringify({
+            ok: true,
             profileId,
             note: "Profile ID extracted from URL. Use credits_search with this ID to look up their credits.",
           }),
         );
       }
 
-      // Try autocomplete first
+      // Search using admin endpoint
       const encodedQuery = encodeURIComponent(query);
-      const autocompleteResult = await http.get<{ results: Record<string, unknown>[] }>(
-        `${musoApiBase}/api/c/v5/search/autocomplete?q=${encodedQuery}&types=profiles&limit=5`,
-        { headers },
+      const searchResult = await adminClient.get<{ data: Record<string, unknown>[] }>(
+        `/api/v3/admin/profile/search?keyword=${encodedQuery}&limit=5`,
       );
 
-      if (!autocompleteResult.ok) {
-        return textResult("Unable to look up profiles right now. Try again shortly or ask me to create a support ticket.");
+      if (!searchResult.ok) {
+        return textResult(JSON.stringify({ ok: false, reason: "lookup_unavailable" }));
       }
 
-      let results = autocompleteResult.data.results ?? [];
-
-      // Fall back to full search if autocomplete returns 0 results
-      if (results.length === 0) {
-        const searchResult = await http.post<{ results: Record<string, unknown>[] }>(
-          `${musoApiBase}/api/c/v5/search`,
-          {
-            headers,
-            body: { keyword: query, type: ["profile"], limit: 10 },
-          },
-        );
-
-        if (searchResult.ok) {
-          results = searchResult.data.results ?? [];
-        } else {
-          return textResult("Unable to look up profiles right now. Try again shortly or ask me to create a support ticket.");
-        }
-      }
+      const results: Record<string, unknown>[] = searchResult.data?.data ?? [];
 
       if (results.length === 0) {
-        return textResult(`No profiles found matching '${query}'. Check the name or spelling.`);
+        return textResult(JSON.stringify({ ok: true, profiles: [], count: 0 }));
       }
 
       const filtered = filterProfileResults(results);
-      return textResult(JSON.stringify({ profiles: filtered, count: filtered.length }));
+      return textResult(JSON.stringify({ ok: true, profiles: filtered, count: filtered.length }));
     },
   };
 }
