@@ -267,9 +267,9 @@
           "adminEmail":              { "source": "env", "provider": "hydra-env", "id": "MUSO_ADMIN_EMAIL" },
           "adminPassword":           { "source": "env", "provider": "hydra-env", "id": "MUSO_ADMIN_PASSWORD" },
           "clickupApiKey":           { "source": "env", "provider": "hydra-env", "id": "CLICKUP_API_KEY" },
-          "clickupListId":           { "source": "env", "provider": "hydra-env", "id": "CLICKUP_LIST_ID" },
-          "clickupUserEmailFieldId": { "source": "env", "provider": "hydra-env", "id": "CLICKUP_USER_EMAIL_FIELD_ID" },
-          "clickupProfileIdFieldId": { "source": "env", "provider": "hydra-env", "id": "CLICKUP_PROFILE_ID_FIELD_ID" }
+          "clickupListId":           "901000600160",
+          "clickupUserEmailFieldId": "e8618c74-d065-4b75-9a5a-86d658392409",
+          "clickupProfileIdFieldId": "347d23bf-ed7b-40c2-bd10-5bd6ac7210b1"
         }
       }
     },
@@ -309,9 +309,6 @@
         "source": "env",
         "allowlist": [
           "CLICKUP_API_KEY",
-          "CLICKUP_LIST_ID",
-          "CLICKUP_USER_EMAIL_FIELD_ID",
-          "CLICKUP_PROFILE_ID_FIELD_ID",
           "MUSO_ADMIN_EMAIL",
           "MUSO_ADMIN_PASSWORD"
         ]
