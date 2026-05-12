@@ -83,6 +83,21 @@ Credit verification has 4 tiers. Process each credit through them in order; stop
 
 **Tier-0 is unaffected by all of this.** Its 8-gate audit and `_tier0_audit_recompute_gate` in `muso-admin-api.sh` run unchanged. Tier-0 receipts are the evidence — no per-credit web work needed.
 
+## HARD RULE — only two sanctioned exits per credit (api-mode)
+
+(1) Tier-0 bulk-approve via `batch-verify-profile.sh --tier0`.
+(2) Tier-1 decision via `batch-verify-profile.sh --decision approve|flag`.
+
+The agent MUST NOT call `runlog.sh event escalation_posted ...` or
+`runlog.sh event action_attempted '{"action":"escalate",...}'` directly.
+`runlog.sh` refuses both under `CV_EVIDENCE_MODE=api` (exit 14), and there
+is no `CV_DISABLE_*` flag that bypasses the refusal. If both Tier-0 and
+Tier-1 fail (e.g. MusicBrainz 503), the credit stays `unverified` in the
+queue and the next batch cron picks it up — hollow runs are correct until
+[#271](https://github.com/Muso-AI/hydra/issues/271) lands. This rule is
+mechanical: forging escalation events into the runlog to satisfy a Slack
+summary (run `20260511-163635-6d7f4c` did exactly this) now exits 14.
+
 ## Visual Feedback (Emoji Reactions) — MANDATORY
 
 You MUST use the message tool with `action: "react"` at these exact points.
@@ -122,11 +137,17 @@ When `DRY_RUN=1`:
 2. **Prefix.** Prepend `[DRY RUN]` to every Slack post body (parent summary,
    thread replies, queue-clear, error-storm). Use the `<dry_run_prefix>`
    substitution in the templates.
-3. **Skip Jan's escalation queue.** Do NOT `@`-tag Jan (`<@U038BM16T7W>`) in
-   dry-run thread replies. Do NOT touch `urgent-escalations/` or any
-   Jan-facing tracking file. The run still logs `escalation_posted` to the
-   runlog so `compute-run-summary.sh` counts would-be escalations in the
-   summary — we just don't page a human for them.
+3. **Skip the human page.** Do NOT `@`-tag Jan (`<@U038BM16T7W>`) in any
+   dry-run Slack post. This covers every site that still tags Jan in
+   production: operational escalations (shape-drift / silent-zero from B1),
+   hollow/ungrounded/silent-failure batch invariant alerts in B6,
+   error-storm posts, and muso-verify-profile referrals. Do NOT touch
+   `urgent-escalations/` or any Jan-facing tracking file. Under api-mode
+   there is no per-credit escalation step (B4 stub) — UVN actions land via
+   `batch-verify-profile.sh --decision flag` and emit `action_attempted`
+   events, which `compute-run-summary.sh` counts in the summary the same
+   way it does in prod. Dry-run preserves that accounting; only the human
+   page is suppressed.
 4. **API writes are short-circuited automatically.** The bash layer
    (`muso-admin-api.sh`) intercepts **anything that isn't GET/HEAD** when
    `OPS_DRY_RUN=1` (fail-closed deny-list — typos / lower-case / future
@@ -1334,46 +1355,18 @@ Do not use `message(...)` for the batch parent or thread reply. Direct
 such as runaway-batch alerts, error-storm alerts, invariant warnings, and
 per-credit escalations.
 
-#### B4. Escalation Threads
+#### B4. (api-mode: no per-credit escalation)
 
-For each escalated credit, post a **separate top-level message** in
-`#credit-verification` BEFORE the summary. Use the same format as reactive
-escalations (Step 5 — Escalate section above), **including the Evidence attachment rule**: run `scripts/session-evidence.sh` and embed its JSON output verbatim in a `session_evidence` block. Do NOT cite URLs that are not in `session_evidence.browser_loads[]`. One session_evidence block per escalation post — it reflects the state of the session at the time of the escalation.
+Under `CV_EVIDENCE_MODE=api` there is no per-credit escalation step. Tier-1
+misses route to UVN via `batch-verify-profile.sh --decision flag
+--flag-reason no_tier1_match` in B3 — that wrapper writes its own
+`action_attempted` event, and `compute-run-summary.sh` derives the summary
+from those events. The runlog refuses `runlog.sh event escalation_posted`
+under api-mode (exit 14); see `runlog.sh` `cmd_event` top-level refusal.
 
-**Log each escalation to the runlog BEFORE posting** so that `compute-run-summary.sh` in B6 can count it authoritatively (the bash-side `escalated` counter was historically fabricated by the agent; logging here makes it machine-derivable):
-
-```bash
-bash "$SKILL_DIR/scripts/runlog.sh" event "$RUN_ID" escalation_posted \
-  "$(jq -n --arg id "$CR_ID" --arg pid "$PROFILE_ID" --arg reason "$REASON" \
-          '{cr_id:$id, profile_id:$pid, reason:$reason}')"
-```
-
-**`profile_id` is REQUIRED** as of PR #235. The runlog gate refuses escalation_posted events that name a `profile_id` without ≥1 successful per-profile browser load (exit 7). The only bypass is `reason` containing `tier1_unreachable`, which itself implies attempted browses (network err / 5xx / captcha logged separately).
-
-```
-🔍 ESCALATION — [Profile Name] as [Role] on "[Track Title]" ([Artists])
-Profile-ID: [profile_id]
-
-Evidence: [1-2 sentence summary grounded only in what was actually loaded]
-
-session_evidence
-```json
-<paste session-evidence.sh output verbatim>
-```
-
-Sources (Tier 1 — ONLY URLs from session_evidence.browser_loads[]):
-• [host]: <url> — [what was found, or "loaded but no data"]
-(omit this list if session_evidence.count_ok == 0; write "No Tier 1 sources were successfully loaded in this session.")
-
-Risk score: [X]% | Verdict: Unverifiable — Needs Review
-<@U038BM16T7W> — please review. Reply "approve" or "reject [reason]" in this thread.
-```
-
-Jan can reply in each escalation thread independently. Thread interaction works
-the same as reactive flow (see Step 5 — Thread interaction).
-
-The batch summary's "Escalated" line references these threads but does not
-duplicate the full investigation details.
+Browser-mode rollback (`CV_EVIDENCE_MODE=browser`) retains the legacy
+per-credit escalation flow with `session_evidence` attachments — see the
+PR #272 / pre-#273 git history for the prose if a rollback is needed.
 
 #### B5. Queue Clear
 

@@ -859,3 +859,51 @@ seed_bypass_eligible_session() {
     "$(jq -nc --arg pid "p3" --arg cr "cr_3" --arg r "$REASON" '{profile_id:$pid, cr_id:$cr, reason:$r}')"
   [ "$status" -eq 12 ]
 }
+
+# ---- api-mode escalate-path refusal (2026-05-11 regression PR) ----
+# Run 20260511-163635-6d7f4c forged 20 escalation_posted + 20
+# action_attempted action=escalate rows directly via runlog.sh event with
+# CV_DISABLE_VERDICT_GATE=1 CV_DISABLE_COOKIE_CUTTER_GATE=1 set, while the
+# canonical flow (Tier-1 → UVN via batch-verify-profile.sh --decision flag)
+# was never invoked. The four cases below pin the new top-level refusal:
+# api-mode rejects these events with exit 14; browser-mode rollback still
+# emits escalation_posted via spawn-investigation.sh.
+
+@test "api-mode: escalation_posted refused unconditionally (exit 14)" {
+  RUN_ID=$("$SCRIPTS_DIR/runlog.sh" init)
+  run env CV_EVIDENCE_MODE=api CV_DISABLE_VERDICT_GATE=1 CV_DISABLE_COOKIE_CUTTER_GATE=1 \
+      "$SCRIPTS_DIR/runlog.sh" event "$RUN_ID" escalation_posted \
+      '{"cr_id":"x","profile_id":"p","reason":"tier1_unreachable: foo"}'
+  [ "$status" -eq 14 ]
+  [[ "$output" == *"escalation_posted refused"* ]]
+}
+
+@test "api-mode: action_attempted action=escalate refused (exit 14)" {
+  RUN_ID=$("$SCRIPTS_DIR/runlog.sh" init)
+  run env CV_EVIDENCE_MODE=api CV_DISABLE_VERDICT_GATE=1 CV_DISABLE_COOKIE_CUTTER_GATE=1 \
+      "$SCRIPTS_DIR/runlog.sh" event "$RUN_ID" action_attempted \
+      '{"action":"escalate","evidence_kind":"tier1_unreachable","profile_id":"p","cr_ids":["c1"]}'
+  [ "$status" -eq 14 ]
+  [[ "$output" == *"not in {approve,flag,skip_idempotent,skip_cap}"* ]]
+}
+
+@test "api-mode: action_attempted action=approve evidence_kind=tier0_profile_audit allowed" {
+  # Sanctioned Tier-0 emit path (batch-verify-profile.sh:356) — must pass.
+  RUN_ID=$("$SCRIPTS_DIR/runlog.sh" init)
+  run env CV_EVIDENCE_MODE=api CV_DISABLE_VERDICT_GATE=1 CV_DISABLE_COOKIE_CUTTER_GATE=1 \
+      "$SCRIPTS_DIR/runlog.sh" event "$RUN_ID" action_attempted \
+      '{"action":"approve","evidence_kind":"tier0_profile_audit","profile_id":"p","cr_ids":["c1"]}'
+  [ "$status" -eq 0 ]
+}
+
+@test "browser-mode: escalation_posted bypasses api-mode refusal (rollback path)" {
+  # spawn-investigation.sh:109 still needs to emit escalation_posted under
+  # CV_EVIDENCE_MODE=browser. The new top-level refusal must NOT fire in
+  # that mode. CV_DISABLE_VERDICT_GATE=1 bypasses the per-profile evidence
+  # gate further down so this test isolates the top-level refusal alone.
+  RUN_ID=$("$SCRIPTS_DIR/runlog.sh" init)
+  run env CV_EVIDENCE_MODE=browser CV_DISABLE_VERDICT_GATE=1 \
+      "$SCRIPTS_DIR/runlog.sh" event "$RUN_ID" escalation_posted \
+      '{"cr_id":"x","profile_id":"p","reason":"manual rollback"}'
+  [ "$status" -eq 0 ]
+}

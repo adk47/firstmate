@@ -124,6 +124,47 @@ cmd_event() {
     exit 3
   fi
 
+  # api-mode hard refusal: no per-credit escalate exit under
+  # CV_EVIDENCE_MODE=api (#271 removed Tier-2; only sanctioned exits are
+  # Tier-0 audit and Tier-1 decision, both via batch-verify-profile.sh).
+  # Run 20260511-163635-6d7f4c forged 20 escalation_posted rows here with
+  # CV_DISABLE_VERDICT_GATE=1 CV_DISABLE_COOKIE_CUTTER_GATE=1 set; both of
+  # those disable flags short-circuit gates further down. This block sits
+  # ABOVE them on purpose — no flag bypass except CV_EVIDENCE_MODE=browser.
+  if [[ "${CV_EVIDENCE_MODE:-api}" != "browser" ]]; then
+    case "$event_name" in
+      escalation_posted)
+        cat >&2 <<EOF
+ERROR: runlog.sh escalation_posted refused under CV_EVIDENCE_MODE=api.
+Tier-1 misses route to UVN via:
+  batch-verify-profile.sh --decision flag --flag-reason no_tier1_match
+That wrapper emits its own action_attempted event. To restore browser-mode
+escalation set CV_EVIDENCE_MODE=browser.
+EOF
+        exit 14
+        ;;
+      action_attempted)
+        local _aa_action _aa_kind
+        _aa_action=$(jq -r '.action // empty'        <<<"$payload" 2>/dev/null)
+        _aa_kind=$(  jq -r '.evidence_kind // empty' <<<"$payload" 2>/dev/null)
+        case "$_aa_action" in
+          approve|flag|skip_idempotent|skip_cap) : ;;
+          *)
+            echo "ERROR: runlog.sh action_attempted refused — action='${_aa_action}' not in {approve,flag,skip_idempotent,skip_cap} under api-mode." >&2
+            exit 14
+            ;;
+        esac
+        case "$_aa_kind" in
+          tier0_profile_audit|excerpt_quorum_flag|excerpt_quorum_approve|"") : ;;
+          *)
+            echo "ERROR: runlog.sh action_attempted refused — evidence_kind='${_aa_kind}' not in allowlist under api-mode." >&2
+            exit 14
+            ;;
+        esac
+        ;;
+    esac
+  fi
+
   local log iso
   log=$(log_path_for_run "$run_id")
   iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
