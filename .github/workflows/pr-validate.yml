@@ -529,6 +529,62 @@ jobs:
           fi
           echo "✓ All server cron jobs accounted for in cron-jobs.json"
 
+      - name: Plugin env-var preflight (shift-left of deploy.sh Step 4d)
+        # Mirrors scripts/deploy.sh Step 4d / install_plugin's call to
+        # verify_plugin_env_for_profile against /etc/openclaw/<profile>.env
+        # on the self-hosted hydra runner (node-8). Added 2026-05-12 after
+        # Deploy HYDRA #163 failed post-merge on commit d167108: PR #270
+        # extended support-tools to load on the edge profile but the three
+        # secrets it references (CLICKUP_API_KEY, MUSO_ADMIN_EMAIL,
+        # MUSO_ADMIN_PASSWORD) had only ever been provisioned in
+        # /etc/openclaw/main.env. PR validation passed because no gate
+        # invoked the deploy guard at PR time. Same shift-left pattern
+        # PR #275 applied to the rsync --delete preflight.
+        run: |
+          set -euo pipefail
+          # shellcheck source=../../scripts/lib/plugin-env.sh
+          . scripts/lib/plugin-env.sh
+
+          # Enumerate every plugin entry across both profile configs and
+          # intersect with plugins/<name>/ on disk. We only check plugins
+          # the deploy actually installs (scripts/deploy.sh Step 4d loops
+          # over plugins/*/ — built-in openclaw stock plugins like "slack"
+          # appear in config entries but are not installed from this repo
+          # and have no env-var validation to perform).
+          entries=$(jq -r '.plugins.entries // {} | keys[]' openclaw-main.json openclaw-edge.json 2>/dev/null | sort -u)
+          if [ -z "$entries" ]; then
+            echo "No plugins.entries found in either config — nothing to check"
+            exit 0
+          fi
+          plugins=""
+          while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            if [ -d "plugins/$p" ]; then
+              plugins="${plugins}${p}"$'\n'
+            else
+              echo "  (skip $p — not a repo plugin, deploy.sh does not install it)"
+            fi
+          done <<< "$entries"
+          if [ -z "$plugins" ]; then
+            echo "No repo plugins found in plugins.entries — nothing to check"
+            exit 0
+          fi
+
+          fail=0
+          while IFS= read -r plugin; do
+            [ -z "$plugin" ] && continue
+            for profile in $(plugin_profile "$plugin"); do
+              echo "→ checking $plugin / $profile"
+              verify_plugin_env_for_profile "$plugin" "$profile" "$PWD" || fail=1
+            done
+          done <<< "$plugins"
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::Plugin env-var preflight failed — see lines above for which (plugin, profile) pair is missing which variables. Fix the profile env file on node-8 before merging."
+            exit 1
+          fi
+          echo "✓ All plugin env-var references resolve in /etc/openclaw/{shared,<profile>}.env"
+
   shellcheck:
     name: Shellcheck (scripts/ + .githooks/)
     # Was ubuntu-latest, but GitHub-hosted runners stopped being assignable
