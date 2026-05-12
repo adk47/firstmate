@@ -685,13 +685,15 @@ RSYNC_EXCLUDES=(
   # 2026-04-14 (PR #102) after running worker sanity checks on node-8.
   --exclude='__pycache__/'
   --exclude='*.pyc'
-  # Hot-patch timestamped backups (convention: <orig>.bak.YYYYMMDDTHHMMSSZ).
-  # Created on the live server when an operator hot-patches a script or
-  # SKILL.md and copies the original aside before editing — see
-  # feedback_hot_patch_pattern memory note. The .bak files are operator
-  # safety nets, not durable repo content. Server-owned, never seeded
-  # from repo, would trip pre-flight if not excluded.
+  # Hot-patch timestamped backups (convention: <orig>.bak.YYYYMMDDTHHMMSSZ
+  # OR <orig>.bak-YYYYMMDDTHHMMSSZ-<tag>). Created on the live server when
+  # an operator hot-patches a script or SKILL.md and copies the original
+  # aside before editing — see feedback_hot_patch_pattern memory note.
+  # The .bak files are operator safety nets, not durable repo content.
+  # Server-owned, never seeded from repo, would trip pre-flight if not
+  # excluded. Both dot and hyphen separators are conventional in-tree.
   --exclude='*.bak.*'
+  --exclude='*.bak-*'
   # Agent-generated audio binaries (cmo-onboarding-guide currently emits
   # ~14MB of .mp3 narration via upload_onboarding.py). Server-owned —
   # the *.py generator IS in the repo, the rendered output is not, same
@@ -765,6 +767,13 @@ RSYNC_EXCLUDES=(
   # Plugin install artifacts (server runs npm install in-place)
   --exclude='plugins/*/node_modules/'
   --exclude='plugins/*/package-lock.json'
+  # Plugin build outputs. gitignored (`plugins/*/dist/`) so the repo never
+  # carries them; the deploy build step regenerates dist/ on the server
+  # post-rsync. Excluded so rsync --delete doesn't blow away the freshly-
+  # built artifacts every preflight pass — same logic as node_modules/.
+  # Tripped pre-flight 2026-05-11 after PR #270 (support-tools/Caroline)
+  # deployed and left plugins/support-tools/dist/ on /opt/hydra/.
+  --exclude='plugins/*/dist/'
   # CTO scratch / draft HTML authored directly on node-8 (workspaces/cto/),
   # not tracked in repo and not intended to be. Excluded so rsync --delete
   # doesn't wipe Aaron's working copy. Tripped pre-flight 2026-05-08 on
