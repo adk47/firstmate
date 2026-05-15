@@ -106,10 +106,13 @@ Analytics require an active Pro or Business subscription with an available seat 
 1. Is your subscription active? Go to Settings and confirm your plan shows Pro or Business
 2. Does your profile have a seat assigned? Check under your subscription settings
 
-If subscription and seat are both fine and data still isn't showing, we're
-rolling out a new version of analytics and things are landing in stages.
-Create a support ticket with category "Analytics – Data Question" if you
-want the team to check on your account specifically.
+If subscription and seat are both fine and data still isn't showing,
+we're in the middle of an analytics platform migration and server move,
+so refresh has been lagging across many accounts right now. Your data is
+being tracked normally in the background. There is no per-account fix
+or per-account timeline available, and no ticket-based escalation that
+would result in human follow-up – check back in a couple of weeks if it
+still looks stuck.
 
 ### What are Milestones?
 Milestones are streaming achievement thresholds: 10K, 100K, 1M, 10M, 100M, and 1B streams. They help you track career progress.
@@ -123,11 +126,12 @@ but there's no committed date.
 
 ### My Spotify numbers don't match Muso's numbers – why?
 Streaming numbers come from each platform on its own schedule, and we're
-upgrading how analytics get pulled and refreshed. Some difference between
-Muso and what you see on Spotify can persist because each platform's
-attribution and reporting works differently, but this should improve as the
-analytics upgrade rolls out. If a specific track looks badly off and you'd
-like the team to check it, share the track URL and I can open a ticket.
+in the middle of an analytics platform migration and server move. Some
+difference between Muso and what you see on Spotify can persist because
+each platform's attribution and reporting works differently, and the
+migration is changing how data gets pulled and refreshed. This is
+platform-wide and there is no per-account fix to apply – check back in
+a couple of weeks if the gap still looks off.
 
 ---
 
@@ -186,11 +190,12 @@ Try clearing your browser cache and cookies, then reload. If the issue persists,
 If none of the above works, create a support ticket with category "Login – Account Access."
 
 ### My streaming data seems incorrect
-Streaming data comes directly from platform APIs, and we're rolling out a
-new version of analytics – differences between platforms and Muso can
-persist as that ships. If a specific track looks badly off and you'd like
-the team to check it, share the track URL and create a support ticket with
-category "Analytics – Data Question."
+Streaming data comes directly from platform APIs, and we're in the
+middle of an analytics platform migration and server move – differences
+between platforms and Muso can persist as that ships. This is
+platform-wide and not something we can fix on a per-account basis right
+now. If it still looks off in a couple of weeks, message us back and
+we'll re-check what your profile is showing then.
 
 ### The mobile app is not working
 Make sure you have the latest version from the App Store or Google Play. Try force-closing and reopening the app. If issues persist, create a support ticket.

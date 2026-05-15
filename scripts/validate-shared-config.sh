@@ -148,6 +148,65 @@ print(json.dumps(c.get('session', {}).get('dmScope', '')))
 ")
 caroline_check "edge.session.dmScope" '"per-channel-peer"' "$dmscope"
 
+# --- Parity checks on MAIN ---
+# Support agent is bound on main for both slack + intercom (accountId=default),
+# so the same safety invariants must hold there. If main's support memorySearch
+# diverges from edge's, SOUL.md's "EXACTLY 7" instruction becomes a lie when
+# traffic lands on main.
+
+# 6. memory-lancedb absent from main plugins.allow.
+main_lancedb=$(python3 -c "
+import json
+with open('$MAIN') as f:
+    c = json.load(f)
+allow = c.get('plugins', {}).get('allow', [])
+print('true' if 'memory-lancedb' in allow else 'false')
+")
+caroline_check "main.plugins.allow.memory-lancedb-absent" "false" "$main_lancedb"
+
+# 7. active-memory absent from main plugins.allow.
+main_am=$(python3 -c "
+import json
+with open('$MAIN') as f:
+    c = json.load(f)
+allow = c.get('plugins', {}).get('allow', [])
+print('true' if 'active-memory' in allow else 'false')
+")
+caroline_check "main.plugins.allow.active-memory-absent" "false" "$main_am"
+
+# 8. memory-core dreaming disabled on main.
+main_dreaming=$(python3 -c "
+import json
+with open('$MAIN') as f:
+    c = json.load(f)
+try:
+    v = c['plugins']['entries']['memory-core']['config']['dreaming']['enabled']
+    print('true' if v is True else 'false')
+except KeyError:
+    print('false')
+")
+caroline_check "main.memory-core.dreaming.enabled" "false" "$main_dreaming"
+
+# 9. main support memorySearch.extraPaths must equal ["reference"] (same as edge).
+main_extra_paths=$(python3 -c "
+import json
+with open('$MAIN') as f:
+    c = json.load(f)
+support = next((a for a in c.get('agents', {}).get('list', []) if a.get('id') == 'support'), {})
+paths = support.get('memorySearch', {}).get('extraPaths', [])
+print(json.dumps(paths))
+")
+caroline_check "main.support.memorySearch.extraPaths" '["reference"]' "$main_extra_paths"
+
+# 10. main session dmScope must match edge (per-conversation isolation).
+main_dmscope=$(python3 -c "
+import json
+with open('$MAIN') as f:
+    c = json.load(f)
+print(json.dumps(c.get('session', {}).get('dmScope', '')))
+")
+caroline_check "main.session.dmScope" '"per-channel-peer"' "$main_dmscope"
+
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "All shared settings match."

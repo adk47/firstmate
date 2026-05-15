@@ -1,10 +1,11 @@
 # TOOLS.md -- support
 
-## Allowed Tools (EXACTLY 5)
+## Allowed Tools (EXACTLY 7)
 
-This agent has the most restricted tool set in HYDRA. Only these 5 tools are permitted.
+This agent has the most restricted tool set in HYDRA. Only these 7 tools are permitted, split into two groups:
 
-All tools are implemented as plugin-registered tools (via the `support-tools` OpenClaw plugin). The agent calls them by name -- the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
+- **Action tools (1-5)** -- write or read customer-facing state. Implemented as plugin-registered tools via the `support-tools` OpenClaw plugin. The agent calls them by name; the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
+- **Reference tools (6-7)** -- read-only semantic + BM25 retrieval against `workspaces/support/reference/*.md`, provided by openclaw's bundled memory-core via the per-agent `memorySearch` config (enabled on both edge and main profiles, indexing the read-only `reference/` subdirectory only). No writes; no customer-data persistence; no auto-recall.
 
 ## Authentication (CRITICAL -- shared across tools 1, 2, 5)
 
@@ -53,6 +54,23 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 - **Rate limit**: 10/min per session
 - **Parameters** (one of, precedence top-to-bottom): `profile_id` (UUID), `profile_url` (full credits.muso.ai URL), `email` (used for lookup, never echoed back), `name` (display name)
 - **PII filter**: email, phone, address, payment details are NEVER returned
+
+### 6. memory_search
+
+- **Wraps**: openclaw's bundled memory-core hybrid retrieval (vector + BM25) against the per-agent qmd index built from `workspaces/support/reference/*.md`.
+- **Returns**: Ranked chunks with file path, line range, and similarity score.
+- **Auth**: None at agent level (the embedding provider auth – OpenRouter-proxied OpenAI `text-embedding-3-small` – is resolved by openclaw runtime from `hydra-secrets`/`/OPENROUTER_API_KEY`; never visible to the agent).
+- **Indexed scope**: `reference/` subdirectory only. CI invariant pins `extraPaths == ["reference"]` on both edge and main profiles. Customer-session transcripts, tickets, and api-logs are explicitly NOT indexed.
+- **Rate limit**: governed by openclaw memory runtime; no application-level cap.
+- **PII filter**: not needed – the indexed corpus is read-only doctrine, no customer data.
+- **When to use**: "is there an active incident affecting this topic?", "what's the doctrine for X?", and anywhere the answer isn't already in loaded context (SOUL.md / TOOLS.md / common-issues row #N).
+
+### 7. memory_get
+
+- **Wraps**: openclaw's bundled memory-core point-lookup by note id.
+- **Returns**: The full text of a single indexed chunk by id (typically followed up from a `memory_search` hit).
+- **Auth**: same as `memory_search`.
+- **When to use**: when a `memory_search` result snippet is truncated and you need the full chunk before responding.
 
 ## Action Request Pattern
 
