@@ -19,13 +19,15 @@
 #     scripts/openclaw-pre-start-heal.sh; reference template in
 #     scripts/aux-units/openclaw-gateway.override.conf.
 #
-#   openclaw-config-write-audit.path / .service
-#     Watches /root/.openclaw-{main,edge}/openclaw.json for
-#     writes and runs scripts/openclaw-config-write-audit.sh,
+#   openclaw-config-write-audit@<profile>.path / .service
+#     Per-profile template instances (@main, @edge). Each watches
+#     /root/.openclaw-<profile>/openclaw.json and runs
+#     scripts/openclaw-config-write-audit.sh against that path,
 #     which Slack-alerts on any writer that isn't the gateway
 #     itself. Plugs the audit gap in openclaw's own config-io
 #     module (out-of-band writes leave no audit-log trace — see
-#     reference_openclaw_config_audit_gap.md).
+#     reference_openclaw_config_audit_gap.md). The singleton form
+#     (pre-2026-05-12) is auto-disabled by this installer if found.
 #
 #   /etc/cron.d/openclaw-watchdog
 #     Schedules scripts/openclaw-watchdog.sh every 2 minutes.
@@ -148,32 +150,51 @@ GATEWAYDROP
   log "  installed drop-in for openclaw-gateway-${profile}.service"
 done
 
-# ─── Out-of-band write audit (.path + .service) ───────────────
-# Watches the three live openclaw.json files. On any write event
-# (including atomic-rename), runs the audit logger which captures
-# the writer and Slack-alerts when it isn't the gateway itself.
-cat > /etc/systemd/system/openclaw-config-write-audit.service << AUDITSVC
+# ─── Out-of-band write audit (@.path + @.service per profile) ─
+# One .path + .service instance per profile, so each instance
+# knows exactly which openclaw.json fired and the audit script
+# doesn't have to scan both profiles (the pre-2026-05-12 singleton
+# did that, producing cross-profile false-positive Slack alerts on
+# every deploy — see scripts/aux-units/openclaw-config-write-audit@.path
+# header).
+cat > /etc/systemd/system/openclaw-config-write-audit@.service << AUDITSVC
 [Unit]
-Description=Audit openclaw.json writes and identify non-gateway writers
+Description=Audit /root/.openclaw-%i/openclaw.json writes and identify non-gateway writers
+# StartLimit* are [Unit]-level directives. The pre-2026-05-15
+# singleton put them under [Service] and systemd silently ignored
+# them; this template gets them right. Caught in PR #288 review.
+StartLimitBurst=10
+StartLimitIntervalSec=60
 
 [Service]
 Type=oneshot
-ExecStart=$HYDRA_ROOT/scripts/openclaw-config-write-audit.sh
-StartLimitBurst=10
-StartLimitIntervalSec=60
+ExecStart=$HYDRA_ROOT/scripts/openclaw-config-write-audit.sh /root/.openclaw-%i/openclaw.json
 AUDITSVC
 
-cat > /etc/systemd/system/openclaw-config-write-audit.path << AUDITPATH
+cat > /etc/systemd/system/openclaw-config-write-audit@.path << AUDITPATH
 [Unit]
-Description=Watch openclaw.json files for writes (out-of-band audit)
+Description=Watch /root/.openclaw-%i/openclaw.json for writes (out-of-band audit)
 
 [Path]
-PathChanged=/root/.openclaw-main/openclaw.json
-PathChanged=/root/.openclaw-edge/openclaw.json
+PathChanged=/root/.openclaw-%i/openclaw.json
 
 [Install]
 WantedBy=multi-user.target
 AUDITPATH
+
+# Idempotent cleanup of the pre-2026-05-12 singleton units. If a
+# deploy lands on a host that still has them, both the singleton
+# and the per-profile instances would fire — doubling the audit
+# work and re-introducing the cross-profile false positive.
+for legacy in openclaw-config-write-audit.path openclaw-config-write-audit.service; do
+  if [[ -f "/etc/systemd/system/$legacy" ]] \
+     || systemctl list-unit-files --no-pager 2>/dev/null | grep -q "^$legacy"; then
+    systemctl disable --now "$legacy" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/$legacy"
+    systemctl reset-failed "$legacy" >/dev/null 2>&1 || true
+    log "  retired stale singleton: $legacy"
+  fi
+done
 
 # ─── Watchdog cron at 2-min cadence ───────────────────────────
 # Owned by /etc/cron.d/openclaw-watchdog rather than a per-user
@@ -198,13 +219,16 @@ fi
 
 systemctl daemon-reload
 
-# Activate the audit watcher.
-systemctl enable openclaw-config-write-audit.path >/dev/null 2>&1 \
-  || log "WARN: could not enable openclaw-config-write-audit.path"
-systemctl restart openclaw-config-write-audit.path >/dev/null 2>&1 \
-  || log "WARN: could not restart openclaw-config-write-audit.path"
-audit_state=$(systemctl is-active openclaw-config-write-audit.path 2>/dev/null || echo unknown)
-log "  openclaw-config-write-audit.path: $audit_state"
+# Activate the per-profile audit watchers.
+for profile in main edge; do
+  unit="openclaw-config-write-audit@${profile}.path"
+  systemctl enable "$unit" >/dev/null 2>&1 \
+    || log "WARN: could not enable $unit"
+  systemctl restart "$unit" >/dev/null 2>&1 \
+    || log "WARN: could not restart $unit"
+  state=$(systemctl is-active "$unit" 2>/dev/null || echo unknown)
+  log "  $unit: $state"
+done
 
 # Clear any previously-tripped restart limits on the gateways so
 # the new ExecStartPre gets a fresh restart budget.

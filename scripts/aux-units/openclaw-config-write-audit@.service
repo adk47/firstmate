@@ -1,0 +1,27 @@
+# Installed at: /etc/systemd/system/openclaw-config-write-audit@.service
+#
+# Template-instance form. Triggered by openclaw-config-write-audit@%i.path
+# when /root/.openclaw-%i/openclaw.json is written. Runs the audit
+# logger against THAT specific path so the script doesn't have to
+# guess which watched file fired (pre-2026-05-12 the singleton
+# version ran the script with no args and the script's no-arg
+# fallback scanned both profiles → cross-profile false positives).
+#
+# The logger Slack-alerts only when the writer is neither the
+# gateway itself nor a known announced legit writer (deploy.sh,
+# pre-start-heal.sh).
+[Unit]
+Description=Audit /root/.openclaw-%i/openclaw.json writes and identify non-gateway writers
+# A burst of writes (e.g. atomic-rename via tmp + rename) can fire
+# the .path unit several times in quick succession. Coalesce:
+# StartLimitBurst caps the number of starts and StartLimitIntervalSec
+# defines the window. These are [Unit]-level directives — putting
+# them under [Service] makes systemd silently ignore them with
+# "Unknown key name 'StartLimitIntervalSec' in section 'Service'"
+# at daemon-reload (pre-2026-05-15 singleton had this bug).
+StartLimitBurst=10
+StartLimitIntervalSec=60
+
+[Service]
+Type=oneshot
+ExecStart=/opt/hydra/scripts/openclaw-config-write-audit.sh /root/.openclaw-%i/openclaw.json

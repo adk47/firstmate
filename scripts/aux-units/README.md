@@ -9,5 +9,5 @@ If you change a unit shape, update **both** the template here and the heredoc in
 ## Inventory
 
 - `openclaw-gateway.override.conf` — drop-in for `openclaw-gateway-{main,edge,dev}.service`. Adds `ExecStartPre` self-heal + a restart ceiling so a corrupt config can't crash-loop indefinitely.
-- `openclaw-config-write-audit.path` — inotify watch on the three live `openclaw.json` paths.
-- `openclaw-config-write-audit.service` — triggered by the `.path` unit; runs the audit logger and Slack-alerts on non-gateway writers.
+- `openclaw-config-write-audit@.path` — template-instance inotify watch. One instance per profile (`@main`, `@edge`), each watching exactly one `openclaw.json`. Pre-2026-05-12 there was a singleton `.path` watching both profiles; it produced cross-profile false-positive alerts on every deploy.
+- `openclaw-config-write-audit@.service` — triggered by the matching `@.path` instance; runs the audit logger against the specific profile's `openclaw.json` and Slack-alerts on non-gateway writers.

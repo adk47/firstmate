@@ -1838,7 +1838,7 @@ fi
 # -------------------------------------------------------------------
 # Reconciles the systemd drop-ins that wire ExecStartPre self-heal
 # and a restart ceiling onto the three gateway services, plus the
-# openclaw-config-write-audit.path watcher and the 2-min watchdog
+# openclaw-config-write-audit@<profile>.path watchers and the 2-min watchdog
 # cron file. Idempotent — safe to run on every deploy. Must come
 # BEFORE Step 6's gateway restart so the next start picks up the
 # drop-in's ExecStartPre.

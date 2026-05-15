@@ -1,8 +1,10 @@
 #!/bin/bash
 # ──────────────────────────────────────────────────────────────
 # openclaw-config-write-audit.sh — invoked by
-# openclaw-config-write-audit.service when the matching .path
-# unit detects a write to /root/.openclaw-<profile>/openclaw.json.
+# openclaw-config-write-audit@<profile>.service when the matching
+# @<profile>.path unit detects a write to
+# /root/.openclaw-<profile>/openclaw.json. The .service passes the
+# watched path as $1.
 #
 # Goal: capture *what* wrote to the config, so out-of-band edits
 # (which leave no trace in openclaw's own config-audit.jsonl —
@@ -109,6 +111,32 @@ if [ -z "$WRITERS" ]; then
   if [ -n "$LEGIT" ]; then
     log "[legit] in-band atomic-rename write — no alert: $LEGIT"
     exit 0
+  fi
+  # Gateway-startup suppression: openclaw's config-io module re-persists
+  # the config on startup via atomic-rename (close fd before rename), so
+  # lsof on the watched path turns up nothing and the legit-log has no
+  # entry (the gateway doesn't announce). Without this branch, every
+  # `systemctl restart openclaw-gateway-<profile>` during a deploy fires
+  # a spurious Slack alert. Bounded to a 15s window after the gateway
+  # entered active state, keyed on a systemd-owned timestamp the script
+  # can't be tricked into setting. Glob match so the bats tests'
+  # sandboxed $WATCHED (which lives under TEST_TMPDIR/.openclaw-main/...)
+  # exercises this branch too.
+  profile=""
+  case "$WATCHED" in
+    */.openclaw-main/openclaw.json) profile=main ;;
+    */.openclaw-edge/openclaw.json) profile=edge ;;
+  esac
+  if [ -n "$profile" ]; then
+    active_iso=$(systemctl show -p ActiveEnterTimestamp --value "openclaw-gateway-${profile}.service" 2>/dev/null || true)
+    if [ -n "$active_iso" ]; then
+      active_epoch=$(date -d "$active_iso" +%s 2>/dev/null || echo 0)
+      now_epoch=$(date -u +%s)
+      if [ "$active_epoch" -gt 0 ] && [ $((now_epoch - active_epoch)) -lt 15 ]; then
+        log "[legit] openclaw-gateway-${profile} entered active state $((now_epoch - active_epoch))s ago — startup config persist, no alert"
+        exit 0
+      fi
+    fi
   fi
   log "no current writer (atomic-rename or fast-close); falling back to journald correlation"
   source_evidence="rename-style write (no live writer); see SSH session log below"

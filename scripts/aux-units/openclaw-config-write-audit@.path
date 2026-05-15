@@ -1,0 +1,25 @@
+# Installed at: /etc/systemd/system/openclaw-config-write-audit@.path
+#
+# Template-instance form. Enable one instance per profile, e.g.
+#   systemctl enable --now openclaw-config-write-audit@main.path
+#   systemctl enable --now openclaw-config-write-audit@edge.path
+#
+# Each instance watches exactly ONE openclaw.json. This replaces the
+# pre-2026-05-12 singleton that put two PathChanged= lines in one
+# unit and triggered cross-profile false-positive alerts: a write to
+# profile A would fire the singleton, the audit script would scan
+# BOTH files, and profile B's unchanged sha would not match any
+# recent legit-writes entry → spurious "Out-of-band write" Slack
+# alert against the profile that was never touched.
+#
+# See scripts/openclaw-config-write-audit.sh for the audit logic and
+# scripts/lib/announce-legit-write.sh for the legit-writes log
+# format that suppresses in-band writes.
+[Unit]
+Description=Watch /root/.openclaw-%i/openclaw.json for writes (out-of-band audit)
+
+[Path]
+PathChanged=/root/.openclaw-%i/openclaw.json
+
+[Install]
+WantedBy=multi-user.target
