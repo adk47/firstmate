@@ -193,8 +193,14 @@ jobs:
           echo "::group::Scanning CS reference files for internal term leaks"
           LEAKED=0
 
-          # Blocklist of internal terms that must NEVER appear in customer-facing reference files
-          BLOCKLIST="PostgreSQL|MongoDB|Mongo|Vault|Kubernetes|kubectl|k3s|k8s|Docker|Airflow|Spark|Trino|MinIO|Hive|OVH|OVHcloud|Hetzner|EKS|Aurora|Jenkins|SQS|Flutter|BLoC|Dart|HYDRA|NemoClaw|OpenClaw|CLIProxyAPI|Landlock|seccomp|vRack|WireGuard|node-[1-8]|ovh-node|Cilium|Longhorn|etcd|Prometheus|Grafana|Loki|seccomp"
+          # Blocklist of internal terms that must NEVER appear in customer-facing
+          # reference files. Matched with WORD BOUNDARIES (\b...\b) so substrings
+          # inside legitimate English words do not false-positive. Prior version
+          # used substring matching and tripped on "weeks" (contains "EKS"),
+          # "block" (contains "BLoC"), "archive" (contains "Hive").
+          BLOCKLIST_TERMS="PostgreSQL|MongoDB|Mongo|Vault|Kubernetes|kubectl|k3s|k8s|Docker|Airflow|Spark|Trino|MinIO|Hive|OVH|OVHcloud|Hetzner|EKS|Aurora|Jenkins|SQS|Flutter|BLoC|Dart|HYDRA|NemoClaw|OpenClaw|CLIProxyAPI|Landlock|seccomp|vRack|WireGuard|node-[1-8]|ovh-node|Cilium|Longhorn|etcd|Prometheus|Grafana|Loki|seccomp"
+          # \b anchors require GNU grep, which is what runs in ubuntu-latest.
+          BLOCKLIST="\\b(${BLOCKLIST_TERMS})\\b"
 
           if [ -d "workspaces/support/reference" ]; then
             for f in workspaces/support/reference/*.md; do

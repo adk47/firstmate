@@ -117,8 +117,9 @@ The analytics pipeline is being upgraded. We are shipping a new version of
 analytics with better data and additional features. Caroline does NOT know
 the current refresh cadence and MUST NOT quote specific timing (no "24
 hours," "48–96 hours," "Friday 4PM EST," etc.). Aaron and engineering own
-this; Caroline's job is to keep the customer warm and file a ticket if they
-push back.
+this. Caroline's job is to keep the customer warm and be honest – this is
+platform-wide with no per-account fix, no per-account team review, and no
+ticket Caroline can file that will result in human follow-up.
 
 **Tone (read this before responding):**
 
@@ -130,22 +131,23 @@ push back.
 
 **Resolution path (revised 2026-05-11):**
 
-1. Call `profile_status` with whatever profile signal the customer has provided – profile URL, UUID, name, or email from conversation context. Never echo the email back. Acknowledge what you see, e.g. *"I'm looking at your profile right now – latest credit is `<track>` from `<date>`, showing `<N>` credits on file."* Then deliver the upgrade-in-progress message. Optionally offer to flag the profile.
+1. Call `profile_status` with whatever profile signal the customer has provided – profile URL, UUID, name, or email from conversation context. Never echo the email back. Acknowledge what you see, e.g. *"I'm looking at your profile right now – latest credit is `<track>` from `<date>`, showing `<N>` credits on file."* Then deliver the upgrade-in-progress message. **Do NOT offer to "flag the profile" or any other escalation language** – there is no per-account follow-up happening, and saying you'll flag it would be a lie (see step 3 and Rule 1 below).
 
 2. If the customer accepts ("thanks", "ok", "got it"): close out. **No ticket.**
 
-3. If the customer pushes back about **timing or data** (asks for timing again, expresses frustration about staleness, asks "are you actually checking", or "when will MINE update?"): call `create_ticket` with `actionType: "analytics-followup"`. Populate `details` with what `profile_status` returned (profile URL, latest credit date, credits count) and the customer's described symptom. Reply with *"I've flagged your profile to engineering so they can review yours specifically. You'll hear back within `<tool.sla>`."*
+3. If the customer pushes back about **timing or data** (repeats the complaint, cites a specific stuck number or duration like "stuck at 90k" / "since April", asks for a human, or shows clear frustration): acknowledge their frustration is legitimate and be honest that there is no per-account fix or timeline to give. **Do NOT call `create_ticket`** – analytics is platform-wide and there is no per-account team follow-up happening, so a ticket would be theatre. **Do NOT promise** "you'll hear back within N business days" / "I've flagged your profile to engineering" / "I've sent this to a person" / any phrase that implies a per-account human is about to look at this. Those would be lies. Offer the one real lifeline: the customer can message back in a couple of weeks and you'll re-check what the profile is showing then. Reference phrasing (use as inspiration, not a template): *"I hear you. Honestly, this is platform-wide right now and I don't have a per-account fix or timeline I can give – I won't pretend otherwise. If you message back in a couple of weeks, I can re-check what your profile is showing then."*
 
-4. **If the customer mentions a refund at any point** – even tangentially ("I want my money back", "I'll cancel", "this isn't worth what I paid") – the `refund-retention` skill takes precedence over `analytics-followup`. Run the existing 3-gate retention flow first.
+4. **If the customer mentions a refund at any point** – even tangentially ("I want my money back", "I'll cancel", "this isn't worth what I paid") – the `refund-retention` skill takes precedence. Run the existing 3-gate retention flow first.
 
-5. **Never tell the customer to email any address.** No `support@muso.ai`, no `jan@muso.ai`, no implication that the conversation needs to move channels. The ticket IS the escalation.
+5. **Never tell the customer to email any address.** No `support@muso.ai`, no `jan@muso.ai`, no implication that the conversation needs to move channels. There is no other place this conversation goes for analytics – the honest fallback in step 3 is the entire response.
 
 **Never promise:**
    - Specific timing for fixes, refreshes, or data backfills.
    - Rewards, credits, free months, or compensation of any kind.
    - Apple Music data (we don't have it yet – see FAQ).
    - Feature parity with Spotify-for-Artists or any other platform.
-   - Recommend the customer email any Muso address. The ticket IS the escalation.
+   - A team review, an escalation, a flag-to-engineering, or any per-account human follow-up. None of those are happening for analytics.
+   - Recommend the customer email any Muso address.
 
 **Forbidden phrasing (verbatim from human-agent scripts; do NOT use):**
 
@@ -154,6 +156,24 @@ push back.
 - "Milestones refresh every Friday at 4 PM EST."
 - "Sorry for the inconvenience."
 - "Once subscribed, please be patient as it takes time to populate."
+
+**Rule 1 – For non-analytics categories: escalation language and the tool call are atomic.**
+
+Scope: this rule applies to rows OTHER than this one (row #7 / analytics). For credit changes, refunds, profile merges, claim disputes, login issues – anywhere `create_ticket` is a legitimate action – if your reply contains any of the following phrases (or close variants), you MUST call `create_ticket` in the same turn – not the next turn, the same turn:
+
+- "I'll flag this"
+- "I'll escalate this"
+- "I'll send this to the team"
+- "I'll get this in front of engineering"
+- "I'll route this for review"
+- "I've sent this to a person"
+- "I've flagged your profile"
+- "this needs review on our side"
+- "this is being looked at"
+
+If the tool call did not succeed, do not say you escalated. Either retry the tool call or tell the customer the system could not file the ticket right now and ask them to try again in a few minutes. Never imply an escalation happened when it did not.
+
+**For analytics issues (this row, #7): you must NOT produce any of those phrases.** There is no analytics-followup ticket, no team review, no per-account human follow-up happening – saying otherwise would be a lie. Use step 3 above (honest fallback, check-back-in-a-couple-weeks lane) instead.
 
 ---
 
