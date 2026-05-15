@@ -1984,6 +1984,28 @@ else
 fi
 
 # -------------------------------------------------------------------
+# Post-flight: Caroline RAG smoke test (non-fatal)
+# -------------------------------------------------------------------
+# Runs only when targeting edge (the only profile with memorySearch
+# enabled on the support agent). Surfaces stale index / broken
+# embedding-provider auth via Slack rather than blocking the deploy.
+if needs_target "edge" && [ -x "$SCRIPT_DIR/validate-caroline-rag.sh" ]; then
+  log "Post-flight: Caroline RAG check (edge/support)..."
+  rag_rc=0
+  PROFILE=edge AGENT=support "$SCRIPT_DIR/validate-caroline-rag.sh" || rag_rc=$?
+  if [ "$rag_rc" -eq 0 ]; then
+    log "  Caroline RAG check passed."
+  else
+    log "  Caroline RAG check FAILED (rc=$rag_rc). Continuing deploy."
+    if [ -n "${SLACK_WEBHOOK:-}" ]; then
+      curl -s -X POST -H "Content-type: application/json" \
+        --data "{\"text\":\":warning: Caroline RAG post-deploy check failed (rc=$rag_rc). Run: ssh hydra PROFILE=edge AGENT=support ${DEPLOY_PATH}/scripts/validate-caroline-rag.sh\"}" \
+        "$SLACK_WEBHOOK" >/dev/null || true
+    fi
+  fi
+fi
+
+# -------------------------------------------------------------------
 # Step 9: Post deploy status
 # -------------------------------------------------------------------
 COMMIT_SHA=$(git -C "$HYDRA_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")

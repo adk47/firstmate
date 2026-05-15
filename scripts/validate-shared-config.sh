@@ -73,6 +73,81 @@ compare_path "agents.defaults.bootstrapMaxChars" "Bootstrap per-file cap"
 compare_path "agents.defaults.bootstrapTotalMaxChars" "Bootstrap total cap"
 compare_path "agents.defaults.bootstrapPromptTruncationWarning" "Bootstrap truncation warning mode"
 
+# --- Caroline RAG safety invariants (added 2026-05-14) ---
+# See PR B: feat/caroline-rag-enablement
+# Layer 2 (search-tools-only) ships with bundled memory-core. memory-lancedb and
+# active-memory are unsafe for our multi-agent gateway today (lancedb claims
+# global memory slot, breaking per-agent isolation; active-memory has open
+# upstream regressions #77864 / #79026 / #72015 / #79611 as of 2026-05).
+
+caroline_check() {
+  local label="$1" expected="$2" actual="$3"
+  if [ "$actual" = "$expected" ]; then
+    pass "$label = $expected"
+  else
+    fail "$label expected $expected, got $actual"
+  fi
+}
+
+# 1. memory-lancedb must NEVER be in plugins.allow (would claim global slot,
+#    break per-agent isolation across support / main / ops / cron).
+lancedb_present=$(python3 -c "
+import json
+with open('$EDGE') as f:
+    c = json.load(f)
+allow = c.get('plugins', {}).get('allow', [])
+print('true' if 'memory-lancedb' in allow else 'false')
+")
+caroline_check "edge.plugins.allow.memory-lancedb-absent" "false" "$lancedb_present"
+
+# 2. active-memory must NEVER be in plugins.allow until upstream regressions
+#    are resolved (see openclaw issues #77864, #79026, #72015, #79611).
+am_present=$(python3 -c "
+import json
+with open('$EDGE') as f:
+    c = json.load(f)
+allow = c.get('plugins', {}).get('allow', [])
+print('true' if 'active-memory' in allow else 'false')
+")
+caroline_check "edge.plugins.allow.active-memory-absent" "false" "$am_present"
+
+# 3. memory-core dreaming must remain disabled (upstream issues #63921 PII,
+#    #65374 cross-agent contamination, #65550 runaway loop, #66947 daily-file
+#    pollution).
+dreaming_enabled=$(python3 -c "
+import json
+with open('$EDGE') as f:
+    c = json.load(f)
+try:
+    v = c['plugins']['entries']['memory-core']['config']['dreaming']['enabled']
+    print('true' if v is True else 'false')
+except KeyError:
+    print('false')
+")
+caroline_check "edge.memory-core.dreaming.enabled" "false" "$dreaming_enabled"
+
+# 4. support agent memorySearch.extraPaths must be exactly ["reference"] (no
+#    sessions/, tickets/, api-logs/, or any other dir that could leak customer
+#    transcripts into the indexed corpus).
+extra_paths=$(python3 -c "
+import json
+with open('$EDGE') as f:
+    c = json.load(f)
+support = next((a for a in c.get('agents', {}).get('list', []) if a.get('id') == 'support'), {})
+paths = support.get('memorySearch', {}).get('extraPaths', [])
+print(json.dumps(paths))
+")
+caroline_check "edge.support.memorySearch.extraPaths" '["reference"]' "$extra_paths"
+
+# 5. Session scope must remain per-channel-peer for per-conversation isolation.
+dmscope=$(python3 -c "
+import json
+with open('$EDGE') as f:
+    c = json.load(f)
+print(json.dumps(c.get('session', {}).get('dmScope', '')))
+")
+caroline_check "edge.session.dmScope" '"per-channel-peer"' "$dmscope"
+
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "All shared settings match."

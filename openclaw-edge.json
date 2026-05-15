@@ -117,7 +117,19 @@
             "openrouter/openai/gpt-5.4-mini"
           ]
         },
-        "thinkingDefault": "medium"
+        "thinkingDefault": "medium",
+        "memorySearch": {
+          "enabled": true,
+          "provider": "openai",
+          "model": "text-embedding-3-small",
+          "remote": {
+            "baseUrl": "https://openrouter.ai/api/v1",
+            "apiKey": { "source": "file", "provider": "hydra-secrets", "id": "/OPENROUTER_API_KEY" }
+          },
+          "extraPaths": ["reference"],
+          "store": { "vector": { "enabled": true } },
+          "query": { "hybrid": { "enabled": true } }
+        }
       }
     ]
   },
