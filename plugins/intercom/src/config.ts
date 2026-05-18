@@ -64,6 +64,7 @@ export function resolveIntercomAccount(
       adminMapping: {},
       riskAssessment: undefined,
       clickup: undefined,
+      blockedChannelTags: [],
     };
   }
 
@@ -102,6 +103,9 @@ export function resolveIntercomAccount(
     adminMapping: account.adminMapping ?? {},
     riskAssessment: account.riskAssessment,
     clickup: account.clickup,
+    blockedChannelTags: Array.isArray(account.blockedChannelTags)
+      ? account.blockedChannelTags.filter((t): t is string => typeof t === "string" && t.length > 0)
+      : [],
   };
 }
 

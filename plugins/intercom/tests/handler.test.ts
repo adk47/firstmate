@@ -757,3 +757,93 @@ describe("handler — flag on (assessRisk path)", () => {
     expect(out!.knownFacts?.accountEmail).toBe("me@example.com");
   });
 });
+
+// ---------------------------------------------------------------------------
+// blockedChannelTags — social-channel hard skip (instagram, facebook, etc.)
+// ---------------------------------------------------------------------------
+
+function makeUserPayloadWithTags(body: string, tagNames: string[]): IntercomWebhookPayload {
+  const p = makeUserPayload(body);
+  (p.data.item as any).tags = {
+    type: "tag.list",
+    tags: tagNames.map((name, i) => ({ id: String(i), name })),
+  };
+  return p;
+}
+
+describe("handler — blockedChannelTags", () => {
+  it("filters customer message when conv tag matches blocked list", async () => {
+    const state = makeState();
+    const { result } = await handleWebhookEvent(
+      makeUserPayloadWithTags("hello", ["instagram"]),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: false }, blockedChannelTags: ["instagram", "facebook"] },
+    );
+    expect(result.action).toBe("filtered");
+    if (result.action === "filtered") {
+      expect(result.reason).toBe("blocked-channel: instagram");
+    }
+  });
+
+  it("matches case-insensitively", async () => {
+    const state = makeState();
+    const { result } = await handleWebhookEvent(
+      makeUserPayloadWithTags("hello", ["Instagram"]),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: false }, blockedChannelTags: ["instagram"] },
+    );
+    expect(result.action).toBe("filtered");
+  });
+
+  it("dispatches when conv has no matching tag", async () => {
+    const state = makeState();
+    const { result } = await handleWebhookEvent(
+      makeUserPayloadWithTags("hello", ["VIP", "Refund"]),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: false }, blockedChannelTags: ["instagram"] },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+  });
+
+  it("dispatches when conv has no tags at all", async () => {
+    const state = makeState();
+    const { result } = await handleWebhookEvent(
+      makeUserPayload("hello"),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: false }, blockedChannelTags: ["instagram"] },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+  });
+
+  it("dispatches when blockedChannelTags is empty (default behavior)", async () => {
+    const state = makeState();
+    const { result } = await handleWebhookEvent(
+      makeUserPayloadWithTags("hello", ["instagram"]),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: false }, blockedChannelTags: [] },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+  });
+
+  it("dispatches when blockedChannelTags is omitted", async () => {
+    const state = makeState();
+    const { result } = await handleWebhookEvent(
+      makeUserPayloadWithTags("hello", ["instagram"]),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: false } },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+  });
+});

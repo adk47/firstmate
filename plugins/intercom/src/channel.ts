@@ -326,7 +326,7 @@ export const intercomPlugin = createChatChannelPlugin({
                     state,
                     account.botAdminId,
                     client,
-                    riskOptions,
+                    { ...riskOptions, blockedChannelTags: account.blockedChannelTags ?? [] },
                   );
 
                   // Persist state after every webhook that may have mutated it
@@ -336,7 +336,8 @@ export const intercomPlugin = createChatChannelPlugin({
                     );
                   }
 
-                  log?.info?.(`[${tag}] ${payload.topic} conv=${conversationId} → ${result.action}`);
+                  const reason = result.action === "filtered" ? `: ${result.reason}` : "";
+                  log?.info?.(`[${tag}] ${payload.topic} conv=${conversationId} → ${result.action}${reason}`);
 
                   if (result.action === "dispatch_to_agent") {
                     // Assign conversation to bot if not already assigned (fire-and-forget).

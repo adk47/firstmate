@@ -59,6 +59,10 @@ export interface IntercomConversation {
     body: string;
     author: IntercomAuthor;
   };
+  tags?: {
+    type: "tag.list";
+    tags: Array<{ id: string; name: string }>;
+  } | null;
 }
 
 export interface IntercomConversationPart {
@@ -126,6 +130,14 @@ export interface IntercomAccountConfig {
     userEmailFieldId: string;
     profileIdFieldId: string;
   };
+  // Hard-skip dispatch for any inbound customer message on a conversation
+  // tagged with one of these names (case-insensitive). Used to disable
+  // Caroline on social-media channels (instagram, facebook, x, etc.) when
+  // the upstream platform connector can't be cleanly turned off at the
+  // source. Tag-based because Intercom collapses all of these channels into
+  // source.type="conversation" and the only reliable channel signal in the
+  // webhook payload is the workflow-applied tag. Default: no blocking.
+  blockedChannelTags?: string[];
 }
 
 // --- Intercom Client ---

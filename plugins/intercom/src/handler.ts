@@ -36,6 +36,11 @@ export interface HandlerOptions {
   riskAssessment?: { enabled: boolean };
   riskDeps?: AssessRiskDeps;
   recentParts?: { author: "user" | "bot"; body: string }[];
+  // When present and non-empty, any customer message on a conversation whose
+  // tags include one of these names (case-insensitive) is filtered before
+  // the live-check and risk paths run. Used to disable Caroline on social
+  // channels (instagram, facebook, x, etc.). See IntercomAccountConfig.
+  blockedChannelTags?: string[];
 }
 
 export async function handleWebhookEvent(
@@ -63,6 +68,32 @@ export async function handleWebhookEvent(
 
   switch (classified.kind) {
     case "customer_message": {
+      // Channel-tag hard skip — runs before live-check, no API call needed.
+      // The webhook payload includes the conversation's current tags; if any
+      // matches a configured blocked channel (case-insensitive) we drop the
+      // dispatch entirely. Lifecycle/state mutations are also skipped so the
+      // conv stays in whatever state Intercom owns (typically "open" in the
+      // team inbox for a human to handle).
+      const blockedTags = options?.blockedChannelTags ?? [];
+      if (blockedTags.length > 0) {
+        const blockedLower = new Set(blockedTags.map((t) => t.toLowerCase()));
+        const convTags = payload.data.item.tags?.tags ?? [];
+        const matched = convTags
+          .map((t) => t?.name)
+          .filter((name): name is string => typeof name === "string")
+          .find((name) => blockedLower.has(name.toLowerCase()));
+        if (matched) {
+          return {
+            result: {
+              action: "filtered",
+              conversationId: classified.conversationId,
+              reason: `blocked-channel: ${matched.toLowerCase()}`,
+            },
+            state,
+          };
+        }
+      }
+
       // Handle implicit reopen if conversation was closed
       if (state && state.lifecycleState === "closed") {
         handleImplicitReopen(state, botAdminId);
