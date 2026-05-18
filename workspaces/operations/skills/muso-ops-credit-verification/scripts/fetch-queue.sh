@@ -55,20 +55,13 @@ if ! [[ "$FETCH_SIZE" =~ ^[0-9]+$ ]] || (( FETCH_SIZE == 0 )); then
     exit 2
 fi
 
-# --- Hard cap aligned to subagent-pool throughput -----------------------
-# Run 20260501-135646-ecff37 fetched 500 credits → 117 profile groups, but
-# the subagent pool only managed 6 spawns in 5 min. Asking for more credits
-# than the pool can investigate in one cron window (30 min) just produces
-# panic-finalize (gate-blocked action_attempted) + truth-floor pollution.
-#
-# Window math: 30 min × 10 pool-slot × ~30s per HTTP-only subagent
-#   = ~600 profile-slots theoretical. Realistic ~50 with overhead +
-#   subagent failure rate. Default cap is 200 credits (matches ~50
-#   profile groups at ~4 credits/profile). Override with
-#   OPS_BATCH_FETCH_HARD_CAP only for one-off backfill runs supervised
-#   by a human; the cron schedule (every 4h) is the right way to drain
-#   the queue, not larger batches.
-HARD_CAP="${OPS_BATCH_FETCH_HARD_CAP:-200}"
+# --- Hard cap aligned to Lobster pipeline throughput --------------------
+# Raised from 200 to 500 on 2026-05-18 with the Lobster cutover. The old
+# 200 was sized for the subagent-pool batch loop (which is gone — see
+# PR #290). The Lobster pipeline runs deterministic bash steps with no
+# agent fan-out; the bottleneck is MusicBrainz at 1 req/sec, sized via
+# `timeout: 800` in the dispatcher. 500 credits ≈ 12.5 min wall-clock.
+HARD_CAP="${OPS_BATCH_FETCH_HARD_CAP:-500}"
 if (( FETCH_SIZE > HARD_CAP )); then
     echo "WARN: fetch_size $FETCH_SIZE exceeds hard cap $HARD_CAP — capping to $HARD_CAP. " \
          "To raise the cap intentionally, set OPS_BATCH_FETCH_HARD_CAP. " \
@@ -89,27 +82,7 @@ if [[ ! -f "$ADMIN_API_SH" ]] || [[ ! -r "$ADMIN_API_SH" ]]; then
     exit 2
 fi
 
-# --- List fetch ---------------------------------------------------------
-LIST_RESP=$(bash "$ADMIN_API_SH" call GET "/admin/credit-requests?status=unverified&limit=${FETCH_SIZE}")
-
-LIST_HTTP=$(echo "$LIST_RESP" | jq -r '.http_status // "unknown"')
-if [[ "$LIST_HTTP" != "200" ]]; then
-    echo "ERROR: list endpoint HTTP $LIST_HTTP" >&2
-    echo "$LIST_RESP" >&2
-    exit 3
-fi
-
-# Locked jq path — no `//` fallback for the primary shape. A missing
-# .body.data.items is shape drift and must trip exit 5, not silently
-# return [].
-ITEMS=$(echo "$LIST_RESP" | jq -c '.body.data.items')
-if [[ -z "$ITEMS" || "$ITEMS" == "null" ]]; then
-    echo "ERROR: envelope_shape_drift: list response missing .body.data.items" >&2
-    echo "$LIST_RESP" | jq -c '.body | {keys: (. | keys), data_keys: (.data? | if type=="object" then keys elif type=="array" then ["<array>", length] else null end)}' >&2 || true
-    exit 5
-fi
-
-# --- Counts fetch -------------------------------------------------------
+# --- Counts fetch (FIRST — we need it to compute last_page for FIFO) ----
 COUNTS_RESP=$(bash "$ADMIN_API_SH" call GET "/admin/credit-requests/counts?status=unverified")
 
 COUNTS_HTTP=$(echo "$COUNTS_RESP" | jq -r '.http_status // "unknown"')
@@ -119,14 +92,63 @@ if [[ "$COUNTS_HTTP" != "200" ]]; then
     exit 4
 fi
 
-# Counts envelope is `body.data: [{status, count}]`. We asked for status=
-# unverified explicitly, so we trust position [0] — but assert it's
-# numeric, not null, before continuing.
 COUNT=$(echo "$COUNTS_RESP" | jq -r '.body.data[0].count // empty')
 if [[ -z "$COUNT" ]] || ! [[ "$COUNT" =~ ^[0-9]+$ ]]; then
     echo "ERROR: envelope_shape_drift: counts response missing .body.data[0].count (got: '$COUNT')" >&2
     echo "$COUNTS_RESP" >&2
     exit 6
+fi
+
+# --- List fetch (FIFO via reverse pagination) ---------------------------
+# The admin LIST endpoint:
+#   1. Always returns DESC by createdAt (newest first).
+#   2. Silently ignores all sort params (verified: orderBy, sort,
+#      sortBy, direction, order all return identical newest-first lists).
+# So FIFO requires fetching the LAST page (oldest items live there).
+#
+# Strategy:
+#   - last_page = ceil(COUNT / FETCH_SIZE) — page where the absolute
+#     oldest credits live (partial page; count % FETCH_SIZE items).
+#   - Walk pages backwards from last_page until we've accumulated at
+#     least FETCH_SIZE items, then sort ASC by createdAt and take the
+#     first FETCH_SIZE. The +id tiebreaker is for deterministic order
+#     when two credits share a millisecond timestamp.
+#
+# Empty queue (COUNT == 0) → emit empty envelope; the silent-zero
+# invariant below still catches the count>0/items==0 drift case.
+
+ITEMS='[]'
+if (( COUNT > 0 )); then
+    LAST_PAGE=$(( (COUNT + FETCH_SIZE - 1) / FETCH_SIZE ))
+    PAGE_N="$LAST_PAGE"
+    while (( PAGE_N > 0 )); do
+        LIST_RESP=$(bash "$ADMIN_API_SH" call GET "/admin/credit-requests?status=unverified&limit=${FETCH_SIZE}&page=${PAGE_N}")
+        LIST_HTTP=$(echo "$LIST_RESP" | jq -r '.http_status // "unknown"')
+        if [[ "$LIST_HTTP" != "200" ]]; then
+            echo "ERROR: list endpoint HTTP $LIST_HTTP (page=$PAGE_N)" >&2
+            echo "$LIST_RESP" >&2
+            exit 3
+        fi
+
+        PAGE_ITEMS=$(echo "$LIST_RESP" | jq -c '.body.data.items')
+        if [[ -z "$PAGE_ITEMS" || "$PAGE_ITEMS" == "null" ]]; then
+            echo "ERROR: envelope_shape_drift: list response missing .body.data.items (page=$PAGE_N)" >&2
+            echo "$LIST_RESP" | jq -c '.body | {keys: (. | keys)}' >&2 || true
+            exit 5
+        fi
+
+        # printf builtin (no execve, no ARG_MAX) → jq stdin via slurp.
+        # Plain `--argjson` overflows ARG_MAX once accumulated items > ~128KB.
+        ITEMS=$(printf '%s\n%s\n' "$ITEMS" "$PAGE_ITEMS" | jq -sc 'add')
+        ITEMS_LEN_SO_FAR=$(echo "$ITEMS" | jq 'length')
+        if (( ITEMS_LEN_SO_FAR >= FETCH_SIZE )); then
+            break
+        fi
+        PAGE_N=$(( PAGE_N - 1 ))
+    done
+
+    # Sort oldest-first, tie-break by id, then take the requested count.
+    ITEMS=$(echo "$ITEMS" | jq -c "sort_by(.createdAt, .id) | .[:${FETCH_SIZE}]")
 fi
 
 # --- Silent-zero invariant ---------------------------------------------
@@ -141,44 +163,16 @@ if (( COUNT > 0 )) && (( ITEMS_LEN == 0 )); then
     exit 11
 fi
 
-# --- Per-item enrichment: backend Tier-1 source resolution -------------
-# Each credit-request item gets a `tier1_sources` envelope describing the
-# backend-known Tier-1 URLs (today: Tidal album-credits via
-# /admin/track/<id>/sources + /admin/album/<id>/sources). SKILL.md B3
-# branches on `tier1_sources.backend_tier1_count`:
-#   >=2 → backend-only verify; ==1 → backend + 1 search-and-click;
-#   ==0 → full search-and-click chain.
-#
-# Resolution failure for any single item degrades silently to a count=0
-# envelope (the helper never exits non-zero outside missing-args). The
-# item still flows through the queue — the agent will fall back to the
-# search-and-click chain for it.
-RESOLVE_SH="$(dirname "$0")/resolve-tier1-sources.sh"
-if (( ITEMS_LEN > 0 )); then
-    ENRICHED_ITEMS=$(echo "$ITEMS" | jq -c '.[]' | while IFS= read -r item; do
-        track_id=$(jq -r '.trackId // empty' <<<"$item")
-        spotify_track_id=$(jq -r '.spotifyTrackId // empty' <<<"$item")
-        cr_id=$(jq -r '.id // empty' <<<"$item")
-
-        tier1_args=()
-        [[ -n "$track_id" ]]         && tier1_args+=(--track-id "$track_id")
-        [[ -n "$spotify_track_id" ]] && tier1_args+=(--spotify-track-id "$spotify_track_id")
-        [[ -n "$cr_id" ]]            && tier1_args+=(--cr-id "$cr_id")
-
-        # If neither track-id nor spotify-track-id is set, skip the helper
-        # (it would exit 2). Default envelope keeps backend_tier1_count=0
-        # so the agent falls back to search-and-click.
-        if (( ${#tier1_args[@]} == 0 )) || \
-           { [[ -z "$track_id" ]] && [[ -z "$spotify_track_id" ]]; }; then
-            tier1='{"muso_track_id":null,"muso_album_id":null,"tidal_track_id":null,"tidal_track_url":null,"tidal_album_id":null,"tidal_album_credits_url":null,"backend_tier1_count":0}'
-        else
-            tier1=$(bash "$RESOLVE_SH" "${tier1_args[@]}" 2>>"${OPS_AUDIT_LOG_DIR:-/tmp}/resolve-tier1-sources.stderr.log" \
-                || echo '{"muso_track_id":null,"muso_album_id":null,"tidal_track_id":null,"tidal_track_url":null,"tidal_album_id":null,"tidal_album_credits_url":null,"backend_tier1_count":0}')
-        fi
-        jq -c --argjson t "$tier1" '. + {tier1_sources: $t}' <<<"$item"
-    done | jq -s -c '.')
-    ITEMS="$ENRICHED_ITEMS"
-fi
+# --- Per-item enrichment REMOVED (2026-05-18, Lobster cutover) ----------
+# The legacy enrichment loop ran resolve-tier1-sources.sh for every item,
+# adding a `tier1_sources` envelope consumed by the deleted agent-batch
+# flow's Tier-1 branching. None of the Lobster pipeline steps
+# (score-backend-signals, run-mb-batch, verdict-engine, apply-verdicts,
+# render-dry-run-summary) read that field — verified by grep on
+# 2026-05-18. At N=500 the loop made ~1500 admin-API calls and exceeded
+# the dispatcher's 800s timeout. Removing it makes the fetch run in
+# ~1 second total. resolve-tier1-sources.sh is still on disk for ad-hoc
+# debugging.
 
 # --- Success: emit normalized envelope ---------------------------------
 # `--argjson items "$ITEMS"` would put the entire items array on jq's

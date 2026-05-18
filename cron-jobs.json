@@ -492,8 +492,8 @@
       "id": "081a0d98-4627-49cd-8c7a-334b927fe2ff",
       "agentId": "operations",
       "name": "credit-verification-batch-4h",
-      "description": "Every 4h autonomous credit verification batch — fetches up to OPS_BATCH_FETCH_SIZE unverified credits, runs B1–B5 workflow, posts summary to #credit-verification. No-reject policy; 500/UTC-day approval cap.",
-      "enabled": true,
+      "description": "Disabled 2026-05-18 with the Lobster cutover (PR #290). The legacy agent batch flow is gone; credit verification is now @-mention-only via the Lobster pipeline. Re-enable only after migrating the payload to the new dispatcher.",
+      "enabled": false,
       "createdAtMs": 1776358066484,
       "updatedAtMs": 1776358066484,
       "schedule": {

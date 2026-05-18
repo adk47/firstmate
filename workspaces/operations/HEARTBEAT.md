@@ -43,9 +43,15 @@ Refund investigation and processing results posted to appropriate channels. Uses
 
 ---
 
-## Batch Credit Verification → #credit-verification (C0APB2CMM7C)
-**Status: ACTIVE — re-enabled on production ops after hardening (PR #94)**
+## Credit Verification → #credit-verification (C0APB2CMM7C)
+**Status: @-mention only (cron disabled 2026-05-18 with the Lobster cutover, PR #290)**
 
-Proactively fetches up to `OPS_BATCH_FETCH_SIZE` unverified credits from the API every 4h (`cron-jobs.json` → `credit-verification-batch-4h`, `0 */4 * * *` UTC) and processes them, posting a summary to `#credit-verification` with a Jan-tagged thread reply. Target throughput: 500 per run × 6 runs/day = up to 3000 credits/day processed. No-reject policy: SUSPICIOUS verdicts move to `user_verification_needed` instead of rejection. Daily autonomous-approval cap: 500/UTC-day — once hit, LEGITIMATE verdicts are logged as `skip_cap` in remaining runs (verification-needed moves and escalations still run).
+Triggered by @-mention in `#credit-verification` matching
+`^run credit verification(?:\s+dry)?(?:\s*\((\d+)\))?$`. Real apply is
+the default; pass `dry` for a no-write summary. Default batch = 500.
+See `workspaces/operations/skills/muso-ops-credit-verification/SKILL.md`
+for the dispatch contract. The 4h cron
+(`credit-verification-batch-4h`) is disabled and will not fire until a
+follow-up PR migrates its payload to the new dispatcher.
 
 **Run logs & retention.** Each batch run writes a JSONL log to `OPS_RUNLOG_DIR/YYYY-MM-DD/<run_id>.jsonl` with a `latest.txt` pointer for quick lookup. Every batch also runs `workspaces/operations/skills/muso-ops-credit-verification/scripts/compress-old-logs.sh` which gzips directories older than 30 days. Per `muso-ops-audit` policy, **logs are never deleted** — only compressed. To investigate a past batch: `cat $OPS_RUNLOG_DIR/latest.txt` then inspect the JSONL, or extract an archived day with `tar -xzf $OPS_RUNLOG_DIR/YYYY-MM-DD.tar.gz`.

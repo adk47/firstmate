@@ -690,10 +690,13 @@
   },
   "plugins": {
     "allow": [
-      "openclaw-gmail",
-      "slack",
+      "browser",
       "intercom",
+      "lobster",
       "muso-credit-verification-enforcer",
+      "openclaw-gmail",
+      "openrouter",
+      "slack",
       "support-tools"
     ],
     "entries": {
@@ -721,6 +724,15 @@
           "clickupUserEmailFieldId": "e8618c74-d065-4b75-9a5a-86d658392409",
           "clickupProfileIdFieldId": "347d23bf-ed7b-40c2-bd10-5bd6ac7210b1"
         }
+      },
+      "browser": {
+        "enabled": true
+      },
+      "openrouter": {
+        "enabled": true
+      },
+      "lobster": {
+        "enabled": true
       }
     },
     "installs": {
@@ -767,6 +779,7 @@
     }
   },
   "tools": {
+    "alsoAllow": ["lobster"],
     "exec": {
       "security": "full",
       "ask": "off"
