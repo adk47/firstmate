@@ -492,8 +492,8 @@
       "id": "081a0d98-4627-49cd-8c7a-334b927fe2ff",
       "agentId": "operations",
       "name": "credit-verification-batch-4h",
-      "description": "Disabled 2026-05-18 with the Lobster cutover (PR #290). The legacy agent batch flow is gone; credit verification is now @-mention-only via the Lobster pipeline. Re-enable only after migrating the payload to the new dispatcher.",
-      "enabled": false,
+      "description": "Autonomous drain of the unverified-credits queue via the Lobster pipeline. Fires every 4h, triggers a real-apply 500-credit FIFO batch through the @Ops dispatcher (matches the regex in muso-ops-credit-verification/SKILL.md). Each fire ~3 min wall-clock; ~250 approved + ~250 user_verification_needed per run.",
+      "enabled": true,
       "createdAtMs": 1776358066484,
       "updatedAtMs": 1776358066484,
       "schedule": {
@@ -501,11 +501,11 @@
         "expr": "0 */4 * * *",
         "tz": "UTC"
       },
-      "sessionTarget": "main",
+      "sessionTarget": "isolated",
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "run credit verification batch",
+        "message": "run credit verification",
         "model": "openrouter/openai/gpt-5.5",
         "thinking": "high",
         "fallbacks": [

@@ -138,9 +138,10 @@ Examples:
 - Credit, dry:      `bash dispatch-cv-batch.sh 1 "<TS>" dry credit b490eaad-...`
 
 `timeout: 800` (seconds) and `yieldMs: 800000` (ms) are sized for up to
-500 credits at MusicBrainz's 1 req/sec rate (`~1.5 * N + 30` seconds).
-Do NOT shrink — under-timeout SIGKILLs the wrapper, Lobster aborts,
-user sees nothing.
+500 credits in chunked apply mode (10 PUT chunks × ~30s each + fetch/
+score/verdict overhead ≈ ~3 min typical, generous headroom for
+chunk-level retries). Do NOT shrink — under-timeout SIGKILLs the
+wrapper, Lobster aborts, user sees nothing.
 
 ## What the pipeline does
 

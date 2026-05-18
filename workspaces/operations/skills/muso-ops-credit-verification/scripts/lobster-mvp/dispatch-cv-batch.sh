@@ -14,9 +14,10 @@
 #   dispatch-cv-batch.sh [<batch_size>] [<thread_ts>] [<apply_mode>] [<selector_kind>] [<selector_id>]
 #
 # Args:
-#   batch_size       1..500, default 500 if missing or invalid
+#   batch_size       1..500. Missing → safe default 500. Non-integer → exit 2.
 #   thread_ts        Slack thread timestamp for the reply; "" if none
-#   apply_mode       "real" (default; bulk PUT writes) or "dry" (summary only)
+#   apply_mode       Missing → safe default "real". Must be in
+#                    {real|REAL|dry|DRY|false|FALSE|true|TRUE} or exit 2.
 #   selector_kind    "queue" (default) | "profile" | "credit"
 #   selector_id      UUID for profile/credit modes; empty for queue
 #
@@ -27,14 +28,25 @@ set -euo pipefail
 
 # --- args ------------------------------------------------------------------
 
-BATCH_SIZE="${1:-500}"
+BATCH_SIZE_RAW="${1:-}"
 THREAD_TS="${2:-}"
-APPLY_MODE="${3:-real}"     # "real" (default, writes via admin API) or "dry"
+APPLY_MODE_RAW="${3:-}"
 SELECTOR_KIND="${4:-queue}" # "queue" | "profile" | "credit"
 SELECTOR_ID="${5:-}"
 
-if ! [[ "$BATCH_SIZE" =~ ^[0-9]+$ ]]; then
+# Validate batch_size. Empty → safe default 500. Non-numeric → fail loud.
+# Previously, garbage like `--help` silently became BATCH_SIZE=500 and
+# APPLY_MODE=real, firing a 500-credit real apply on any typo. Verified
+# live 2026-05-18 when a diagnostic probe `dispatch-cv-batch.sh --help`
+# unintentionally landed 500 admin-API writes (PR #290 post-merge).
+if [[ -z "$BATCH_SIZE_RAW" ]]; then
   BATCH_SIZE=500
+elif [[ "$BATCH_SIZE_RAW" =~ ^[0-9]+$ ]]; then
+  BATCH_SIZE="$BATCH_SIZE_RAW"
+else
+  echo "ERROR: batch_size must be a non-negative integer (got: '$BATCH_SIZE_RAW')" >&2
+  echo "Usage: dispatch-cv-batch.sh [<batch_size>] [<thread_ts>] [<apply_mode>] [<selector_kind>] [<selector_id>]" >&2
+  exit 2
 fi
 if (( BATCH_SIZE < 1 )); then
   BATCH_SIZE=1
@@ -42,10 +54,17 @@ elif (( BATCH_SIZE > 500 )); then
   BATCH_SIZE=500
 fi
 
-# Normalize APPLY_MODE → dry_run boolean string passed into pipeline argsJson.
-case "$APPLY_MODE" in
-  real|REAL|false|FALSE) DRY_RUN_STR="false" ;;
-  *)                     DRY_RUN_STR="true"  ;;
+# Validate apply_mode. Empty → safe default real. Anything else must be
+# one of the known tokens. Unknown tokens (typos, --help, etc.) MUST
+# fail loud — silently routing to "real" or "dry" is a footgun either way.
+case "$APPLY_MODE_RAW" in
+  ""|real|REAL|false|FALSE) DRY_RUN_STR="false" ;;
+  dry|DRY|true|TRUE)        DRY_RUN_STR="true"  ;;
+  *)
+    echo "ERROR: apply_mode must be 'real' or 'dry' (got: '$APPLY_MODE_RAW')" >&2
+    echo "Usage: dispatch-cv-batch.sh [<batch_size>] [<thread_ts>] [<apply_mode>] [<selector_kind>] [<selector_id>]" >&2
+    exit 2
+    ;;
 esac
 
 # Validate selector. Profile/credit modes REQUIRE a UUID; queue mode ignores ID.
