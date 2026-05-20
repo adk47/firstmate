@@ -1,0 +1,6 @@
+{
+  "id": "bbbb-bbbb", "name": "Ali Z.", "legal_name": "", "known_as_names": [],
+  "raw_ids": ["spotify:abc123"], "ipis": ["00123456789"],
+  "popularity": 12, "credit_count": 7, "country": "US",
+  "claim": {"user_id": null, "status": null}
+}

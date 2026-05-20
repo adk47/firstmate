@@ -1,0 +1,6 @@
+{
+  "id": "aaaa", "name": "John Smith", "legal_name": "", "known_as_names": [],
+  "raw_ids": ["spotify:111"], "ipis": ["00000000001"],
+  "popularity": 5, "credit_count": 2, "country": "US",
+  "claim": {"user_id": null, "status": null}
+}

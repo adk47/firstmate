@@ -60,7 +60,12 @@ describe("createCreateTicketTool", () => {
   it("includes profile ID custom field when provided", async () => {
     vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_def456" } });
     const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc" });
-    await tool.execute("call_1", { actionType: "profile-merge", customerEmail: "user@example.com", customerProfileId: "prof_123", summary: "Merge two profiles", conversationSummary: "Customer has duplicate profiles." });
+    await tool.execute("call_1", {
+      actionType: "profile-merge", customerEmail: "user@example.com", customerProfileId: "prof_123",
+      summary: "Merge two profiles",
+      details: { main_profile_url: "https://credits.muso.ai/profile/aaa", duplicate_profile_urls: ["https://credits.muso.ai/profile/bbb"] },
+      conversationSummary: "Customer has duplicate profiles.",
+    });
     const body = vi.mocked(mockClient.post).mock.calls[0][1].body as Record<string, unknown>;
     const fields = body.custom_fields as { id: string; value: string }[];
     expect(fields).toContainEqual({ id: "field_uuid_1", value: "prof_123" });
@@ -82,7 +87,12 @@ describe("createCreateTicketTool", () => {
   it("auto-assigns profile-merge tickets when profileMergeAssigneeId is configured", async () => {
     vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_merge1" } });
     const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc", profileMergeAssigneeId: 12345678 });
-    await tool.execute("call_1", { actionType: "profile-merge", customerEmail: "user@example.com", summary: "Merge two profiles", details: { main_profile_url: "https://credits.muso.ai/profile/aaa", duplicate_profile_urls: ["https://credits.muso.ai/profile/bbb"] }, conversationSummary: "Customer has duplicate profiles." });
+    await tool.execute("call_1", {
+      actionType: "profile-merge", customerEmail: "user@example.com", customerProfileId: "prof_main",
+      summary: "Merge two profiles",
+      details: { main_profile_url: "https://credits.muso.ai/profile/aaa", duplicate_profile_urls: ["https://credits.muso.ai/profile/bbb"] },
+      conversationSummary: "Customer has duplicate profiles.",
+    });
     const body = vi.mocked(mockClient.post).mock.calls[0][1].body as Record<string, unknown>;
     expect(body.assignees).toEqual([12345678]);
   });
@@ -90,9 +100,97 @@ describe("createCreateTicketTool", () => {
   it("does NOT auto-assign profile-merge when profileMergeAssigneeId is not configured", async () => {
     vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_merge2" } });
     const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc" });
-    await tool.execute("call_1", { actionType: "profile-merge", customerEmail: "user@example.com", summary: "Merge two profiles", conversationSummary: "Customer has duplicate profiles." });
+    await tool.execute("call_1", {
+      actionType: "profile-merge", customerEmail: "user@example.com", customerProfileId: "prof_main",
+      summary: "Merge two profiles",
+      details: { main_profile_url: "https://credits.muso.ai/profile/aaa", duplicate_profile_urls: ["https://credits.muso.ai/profile/bbb"] },
+      conversationSummary: "Customer has duplicate profiles.",
+    });
     const body = vi.mocked(mockClient.post).mock.calls[0][1].body as Record<string, unknown>;
     expect(body.assignees).toBeUndefined();
+  });
+
+  it("rejects profile-merge missing customerProfileId", async () => {
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc" });
+    const result = await tool.execute("call_1", {
+      actionType: "profile-merge", customerEmail: "user@example.com",
+      summary: "Merge two profiles",
+      details: { main_profile_url: "https://credits.muso.ai/profile/aaa", duplicate_profile_urls: ["https://credits.muso.ai/profile/bbb"] },
+      conversationSummary: "Customer has duplicate profiles.",
+    });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+    expect(parsed.submitted).toBe(false);
+    expect(parsed.reason).toBe("profile_merge_capture_incomplete");
+    expect(parsed.missing).toContain("customerProfileId");
+    expect(mockClient.post).not.toHaveBeenCalled();
+  });
+
+  it("rejects profile-merge missing details.duplicate_profile_urls", async () => {
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc" });
+    const result = await tool.execute("call_1", {
+      actionType: "profile-merge", customerEmail: "user@example.com", customerProfileId: "prof_main",
+      summary: "Merge two profiles",
+      details: { main_profile_url: "https://credits.muso.ai/profile/aaa" },
+      conversationSummary: "Customer has duplicate profiles.",
+    });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+    expect(parsed.submitted).toBe(false);
+    expect(parsed.reason).toBe("profile_merge_capture_incomplete");
+    expect(parsed.missing).toContain("details.duplicate_profile_urls");
+    expect(mockClient.post).not.toHaveBeenCalled();
+  });
+
+  it("rejects profile-merge missing details.main_profile_url", async () => {
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc" });
+    const result = await tool.execute("call_1", {
+      actionType: "profile-merge", customerEmail: "user@example.com", customerProfileId: "prof_main",
+      summary: "Merge two profiles",
+      details: { duplicate_profile_urls: ["https://credits.muso.ai/profile/bbb"] },
+      conversationSummary: "Customer has duplicate profiles.",
+    });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+    expect(parsed.submitted).toBe(false);
+    expect(parsed.reason).toBe("profile_merge_capture_incomplete");
+    expect(parsed.missing).toContain("details.main_profile_url");
+    expect(mockClient.post).not.toHaveBeenCalled();
+  });
+
+  it("validation rejection does NOT consume rate-limit budget", async () => {
+    // Per silent-failure review: a malformed profile-merge call must not eat
+    // one of the 2-per-60s slots, otherwise the agent's retry-with-fixed-fields
+    // gets a misleading rate_limited error.
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_rl" });
+    // Fire 3 malformed calls — should all be rejected for incomplete capture,
+    // not for rate-limit, because validation runs first.
+    for (let i = 0; i < 3; i++) {
+      const r = await tool.execute(`call_${i}`, {
+        actionType: "profile-merge", customerEmail: "user@example.com",
+        summary: "merge", conversationSummary: "duplicate.",
+      });
+      const parsed = JSON.parse((r.content[0] as { text: string }).text);
+      expect(parsed.reason).toBe("profile_merge_capture_incomplete");
+    }
+    // A well-formed call after 3 rejections should still succeed (budget intact).
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "t_after_retry" } });
+    const ok = await tool.execute("call_ok", {
+      actionType: "profile-merge", customerEmail: "user@example.com", customerProfileId: "prof_main",
+      summary: "merge",
+      details: { main_profile_url: "https://credits.muso.ai/profile/aaa", duplicate_profile_urls: ["https://credits.muso.ai/profile/bbb"] },
+      conversationSummary: "duplicate.",
+    });
+    const parsedOk = JSON.parse((ok.content[0] as { text: string }).text);
+    expect(parsedOk.submitted).toBe(true);
+  });
+
+  it("does NOT auto-reject other action types for missing profile-merge fields", async () => {
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_x" } });
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc" });
+    const result = await tool.execute("call_1", {
+      actionType: "credit-claim", customerEmail: "user@example.com",
+      summary: "Add credit", conversationSummary: "Missing producer credit.",
+    });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+    expect(parsed.submitted).toBe(true);
   });
 
   it("does NOT auto-assign for non-profile-merge action types even when assignee is configured", async () => {

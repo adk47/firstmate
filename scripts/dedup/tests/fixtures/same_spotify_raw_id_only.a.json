@@ -1,0 +1,12 @@
+{
+  "id": "aaaa-aaaa",
+  "name": "Ali Zain",
+  "legal_name": "",
+  "known_as_names": [],
+  "raw_ids": ["spotify:abc123"],
+  "ipis": [],
+  "popularity": 50,
+  "credit_count": 38,
+  "country": "US",
+  "claim": {"user_id": "user_x", "status": "processed"}
+}

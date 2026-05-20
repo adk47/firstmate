@@ -86,6 +86,31 @@ Customer [name/email] requests: [plain English summary]
 | `dispute` | 3 | 10 business days | "I dispute this credit claim" |
 | `data-export` | 3 | 10 business days | "Export all my data" |
 
+### Profile-Merge Required Fields (HARD GATE)
+
+The `create_ticket` tool will **refuse** any `profile-merge` AR that's missing any of:
+- `customerProfileId` — the profile the customer wants to keep
+- `details.main_profile_url` — full `https://credits.muso.ai/profile/<uuid>` URL
+- `details.duplicate_profile_urls` — non-empty array of full URLs for every profile to merge in
+
+The 2026-05-19 backlog audit found 2 of 27 (~7%) profile-merge tickets had null `customer_profile_id` and 15 of 27 (~56%) of open tickets had been silently merged but not closed — partly because ops can't act without these fields. Before emitting:
+
+1. Resolve the customer's main profile (via `profile_lookup` / `profile_status`) and capture its UUID.
+2. Read ALL duplicate-profile URLs the customer mentioned in the conversation. If they only gave names, ask:
+   > "Could you share the full Muso profile URLs for both the profile you want to keep and the one(s) you'd like merged in? They look like `https://credits.muso.ai/profile/<uuid>`."
+3. Only call `create_ticket` once you have all three. If the tool returns `{submitted: false, reason: "profile_merge_capture_incomplete"}`, that's your cue — ask the customer for whatever's in `missing[]` and retry.
+
+Example `details` block:
+
+```json
+"details": {
+  "main_profile_url": "https://credits.muso.ai/profile/54a99ccc-8313-42e3-9056-d6f8cc54133a",
+  "duplicate_profile_urls": [
+    "https://credits.muso.ai/profile/46ac72f3-231c-4e07-8f43-3b553c9ea192"
+  ]
+}
+```
+
 ### Retention Context (subscription-refund only)
 
 For `subscription-refund` action requests ONLY, add a `retention_context` field to the JSON block (after `details`):

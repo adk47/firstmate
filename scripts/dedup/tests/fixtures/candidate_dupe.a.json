@@ -1,0 +1,12 @@
+{
+  "id": "cand-a",
+  "name": "Brian Daggett",
+  "legal_name": "",
+  "known_as_names": [],
+  "raw_ids": ["muso:cand-a"],
+  "ipis": [],
+  "popularity": 30,
+  "credit_count": 12,
+  "country": "US",
+  "claim": {"user_id": null, "status": null}
+}

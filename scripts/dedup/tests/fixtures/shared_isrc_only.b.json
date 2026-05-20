@@ -1,0 +1,11 @@
+{
+  "id": "bbbb", "name": "Mixer B", "legal_name": "", "known_as_names": [],
+  "raw_ids": ["spotify:mixer_b"], "ipis": [],
+  "popularity": 20, "credit_count": 40, "country": "US",
+  "claim": {"user_id": null, "status": null},
+  "credits": [
+    {"isrc": "USABC1234567", "track_id": "t1", "roles": ["Mixing Engineer"]},
+    {"isrc": "USABC1234568", "track_id": "t2", "roles": ["Mixing Engineer"]},
+    {"isrc": "USABC1234569", "track_id": "t3", "roles": ["Mixing Engineer"]}
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "id": "bbbb", "name": "John Smith", "legal_name": "", "known_as_names": [],
+  "raw_ids": ["spotify:222"], "ipis": ["00000000002"],
+  "popularity": 6, "credit_count": 3, "country": "UK",
+  "claim": {"user_id": null, "status": null}
+}

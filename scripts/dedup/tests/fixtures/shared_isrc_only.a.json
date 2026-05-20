@@ -1,0 +1,11 @@
+{
+  "id": "aaaa", "name": "Producer A", "legal_name": "", "known_as_names": [],
+  "raw_ids": ["spotify:prod_a"], "ipis": [],
+  "popularity": 30, "credit_count": 50, "country": "US",
+  "claim": {"user_id": null, "status": null},
+  "credits": [
+    {"isrc": "USABC1234567", "track_id": "t1", "roles": ["Producer"]},
+    {"isrc": "USABC1234568", "track_id": "t2", "roles": ["Producer"]},
+    {"isrc": "USABC1234569", "track_id": "t3", "roles": ["Producer"]}
+  ]
+}

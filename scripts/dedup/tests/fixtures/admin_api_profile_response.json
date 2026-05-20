@@ -1,0 +1,23 @@
+{
+  "body": {
+    "code": "OK",
+    "result": "ok",
+    "data": {
+      "id": "d9840461-d027-42ed-8252-77fadbf35153",
+      "name": "Ali Zain",
+      "legalName": "Ali Zain Hussain",
+      "knownAsNames": ["AZ"],
+      "rawProfiles": [
+        {"source": "spotify", "id": "abc123", "name": "Ali Zain", "url": "https://open.spotify.com/artist/abc123"},
+        {"source": "tidal",   "id": "xyz",    "name": null,        "url": null}
+      ],
+      "ipis": [123456789],
+      "popularity": 50,
+      "creditCount": 38,
+      "country": "PK",
+      "isClaimed": true,
+      "claiming": {"userId": "user_x", "status": "processed"}
+    }
+  },
+  "http_status": 200
+}

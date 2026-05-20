@@ -14,6 +14,24 @@ const Parameters = Type.Object({
 
 type Params = Static<typeof Parameters>;
 
+// Discriminated union of every shape this tool returns. Centralized so that
+// a typo on one branch doesn't slip through; consumers can rely on `reason`
+// to differentiate failure modes.
+export type CreateTicketResult =
+  | { submitted: true; ticket_id: string; sla: string; action_type: string; tier: number }
+  | { submitted: false; reason: "rate_limited" }
+  | { submitted: false; reason: "queue_busy" }
+  | {
+      submitted: false;
+      reason: "profile_merge_capture_incomplete";
+      missing: string[];
+      hint: string;
+    };
+
+function ticketResult(r: CreateTicketResult): AgentToolResult<unknown> {
+  return textResult(JSON.stringify(r));
+}
+
 const TIER_MAP: Record<string, number> = {
   "credit-claim": 1, "credit-correction": 1, "profile-claim": 1, "support-general": 1, "analytics-followup": 1,
   "profile-merge": 2, "bulk-credit-change": 2, "profile-update": 2,
@@ -72,8 +90,34 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
     description: "Create a support ticket in the team's task system for customer requests that require human action (credit claims, profile merges, analytics followups, refunds, data deletion, etc.).",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
+      // Validate BEFORE the rate-limit check. A malformed profile-merge call
+      // shouldn't consume the 2-per-60s budget — the agent will retry once it
+      // gets the missing fields from the customer, and that retry should be
+      // unaffected by previous validation failures.
+      if (params.actionType === "profile-merge") {
+        const missing: string[] = [];
+        if (!params.customerProfileId || !params.customerProfileId.trim()) {
+          missing.push("customerProfileId");
+        }
+        const details = params.details ?? {};
+        const mainUrl = typeof details.main_profile_url === "string" ? details.main_profile_url.trim() : "";
+        if (!mainUrl) missing.push("details.main_profile_url");
+        const dupUrls = Array.isArray(details.duplicate_profile_urls)
+          ? details.duplicate_profile_urls.filter((u): u is string => typeof u === "string" && u.trim().length > 0)
+          : [];
+        if (dupUrls.length === 0) missing.push("details.duplicate_profile_urls");
+        if (missing.length > 0) {
+          return ticketResult({
+            submitted: false,
+            reason: "profile_merge_capture_incomplete",
+            missing,
+            hint: "Profile-merge tickets need customer_profile_id, details.main_profile_url, and details.duplicate_profile_urls[]. Ask the customer for both the profile they want to keep AND each duplicate URL before retrying.",
+          });
+        }
+      }
+
       if (!rateLimiter.check(sessionId, "create_ticket", 60, 2).allowed) {
-        return textResult(JSON.stringify({ submitted: false, reason: "rate_limited" }));
+        return ticketResult({ submitted: false, reason: "rate_limited" });
       }
 
       if (!(params.actionType in TIER_MAP)) {
@@ -118,10 +162,10 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       );
 
       if (!result.ok) {
-        return textResult(JSON.stringify({ submitted: false, reason: "queue_busy" }));
+        return ticketResult({ submitted: false, reason: "queue_busy" });
       }
 
-      return textResult(JSON.stringify({ submitted: true, ticket_id: result.data.id, sla, action_type: params.actionType, tier }));
+      return ticketResult({ submitted: true, ticket_id: result.data.id, sla, action_type: params.actionType, tier });
     },
   };
 }
