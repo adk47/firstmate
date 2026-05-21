@@ -199,8 +199,11 @@ printf "869dadcrq\n" \
 
 **Pre-checklist:**
 
-1. `INTERCOM_ADMIN_ID` must be set in env — there's no default. Pick the
-   admin you want the customer to see (founder voice = aaron's admin id).
+1. `INTERCOM_ADMIN_ID` defaults to `5763097` (Caroline) so the reply
+   appears under the same admin that handled the rest of the Intercom
+   thread. Only set the env var if you deliberately want a different
+   teammate's avatar on the reply — using Aaron's id here, for example,
+   causes a jarring identity switch mid-conversation.
 2. Per-conv dedup is automatic: if two tickets resolve to the same
    Intercom conversation, only the first triggers a reply.
 3. Customers whose email isn't in Intercom get a `skip: no Intercom conv`
@@ -250,8 +253,9 @@ with the survivor/loser pair already chosen.
   `scan-name-clusters.sh` (commit `7df6444`). Do not lower
   `--max-cluster-size` above 50 without manually eyeballing the cluster.
 - **`notify-merged-customers.py` is the only customer-facing write in
-  this skill.** Three guardrails: dry-run default, `INTERCOM_ADMIN_ID`
-  required, per-conv dedup.
+  this skill.** Three guardrails: dry-run default, posts as Caroline
+  (admin `5763097`) so the reply matches the rest of the thread, per-conv
+  dedup.
 - **Catalog mode (`--catalog`) emits `hard_dupe` rows only.** Use it for
   bulk scans; do not auto-merge from its output without per-cluster
   human triage.

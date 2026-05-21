@@ -88,7 +88,7 @@ customer-reply audit.
 |---|---|---|
 | `CLICKUP_API_KEY` | (required) | ClickUp personal token |
 | `MUSOAI_INTERCOM_TOKEN` | (required) | Intercom Bearer |
-| `INTERCOM_ADMIN_ID` | (required for `--apply`) | Admin user the reply is posted AS — there is no default; pick the admin you want the customer to see |
+| `INTERCOM_ADMIN_ID` | `5763097` (Caroline) | Admin user the reply is posted AS — defaults to Caroline so the merge confirmation matches the rest of the Intercom thread; override only when you intentionally want a different teammate's avatar on the reply |
 
 ### Safety contract
 
@@ -104,8 +104,9 @@ customer-reply audit.
   honored (no double-message).
 - Message: `hi! just confirming your profile merge request is done. the
   credits we found are now consolidated under your main profile. let me
-  know if anything's off.` — founder-voice rules (lowercase, no em-dash,
-  no corporate filler) per memory:feedback_founder_voice_rules.
+  know if anything's off.` — Caroline tone (lowercase, no em-dash, no
+  corporate filler), same conventions as the founder-voice rules in
+  memory:feedback_founder_voice_rules.
 
 ### Validation log
 

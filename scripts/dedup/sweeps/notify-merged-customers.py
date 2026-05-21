@@ -21,15 +21,19 @@ Designed to be safe in the wrong hands: --dry-run is the default, --apply
 is explicit, and the script refuses to send if any of (email, conv, merge
 timestamp) is missing or ambiguous.
 
-Voice: founder-voice template (lowercase, no em-dashes, no corporate
-filler — see memory:feedback_founder_voice_rules.md).
+Voice: Caroline tone (lowercase, no em-dashes, no corporate filler) —
+same conventions as the founder-voice rules in
+memory:feedback_founder_voice_rules.md, applied to a Caroline message
+so the merge confirmation matches the rest of the Intercom thread.
 
 Env:
   CLICKUP_API_KEY        required
   MUSOAI_INTERCOM_TOKEN  required
-  INTERCOM_ADMIN_ID      required when --apply (the admin/team user ID
-                         the reply is sent AS — there is no default to
-                         avoid accidentally impersonating a teammate)
+  INTERCOM_ADMIN_ID      optional — defaults to 5763097 (Caroline) so the
+                         merge confirmation lands under the same admin
+                         that handled the rest of the Intercom thread.
+                         Override only when you intentionally want a
+                         different teammate's avatar on the reply.
 
 Exit codes:
   0 — all input rows processed cleanly
@@ -41,7 +45,7 @@ import argparse, datetime as dt, json, os, sys, urllib.request, urllib.error
 CLICKUP_API = os.environ.get("CLICKUP_API", "https://api.clickup.com/api/v2")
 INTERCOM_API = "https://api.intercom.io"
 
-# Aaron-voice template (lowercase, no em-dash, no corporate filler).
+# Caroline-voice template (lowercase, no em-dash, no corporate filler).
 # Single-paragraph, no profile-name interpolation — Caroline tickets don't
 # carry a clean profile name and "your profile" reads better than mistakenly
 # embedding a URL UUID.
@@ -50,6 +54,13 @@ MESSAGE = (
     "the credits we found are now consolidated under your main profile. "
     "let me know if anything's off."
 )
+
+# Caroline's Intercom admin id — same admin that handles the rest of the
+# Intercom thread (see openclaw-main.json `botAdminId`). Defaulting here
+# keeps the merge-done reply from flipping to a different admin avatar
+# mid-thread. Override via env INTERCOM_ADMIN_ID if you really mean to
+# post as someone else.
+CAROLINE_ADMIN_ID = "5763097"
 
 
 def http(method, url, headers, body=None, timeout=30):
@@ -272,13 +283,13 @@ def main():
     env = {
         "CLICKUP_API_KEY": os.environ.get("CLICKUP_API_KEY"),
         "MUSOAI_INTERCOM_TOKEN": os.environ.get("MUSOAI_INTERCOM_TOKEN"),
-        "INTERCOM_ADMIN_ID": os.environ.get("INTERCOM_ADMIN_ID"),
+        # `or CAROLINE_ADMIN_ID` collapses unset + exported-but-empty to
+        # the Caroline default, so the reply always lands under the same
+        # admin that handled the rest of the thread unless deliberately
+        # overridden.
+        "INTERCOM_ADMIN_ID": os.environ.get("INTERCOM_ADMIN_ID") or CAROLINE_ADMIN_ID,
     }
-    # Treat empty strings as missing — an exported-but-empty INTERCOM_ADMIN_ID
-    # would otherwise pass this check, then trip per-ticket halfway through
-    # the run and silently drop remaining stdin ids.
-    missing = [k for k, v in env.items()
-               if not v and (k != "INTERCOM_ADMIN_ID" or args.apply)]
+    missing = [k for k, v in env.items() if not v]
     if missing:
         print(f"notify-merged-customers: env required: {missing}",
               file=sys.stderr)
