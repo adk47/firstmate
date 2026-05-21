@@ -4,20 +4,22 @@
   "version": "0.1.0",
   "description": "openclaw plugin: mark credit-verification sessions and block hand-composed batch-complete messages. Approve-gate enforcement is in muso-admin-api.sh (CV_EVIDENCE_MODE=api default since 2026-05-06).",
   "type": "module",
-  "main": "index.ts",
+  "main": "dist/index.js",
   "license": "MIT",
   "openclaw": {
     "extensions": [
-      "./index.ts"
+      "./dist/index.js"
     ]
   },
   "files": [
+    "dist",
     "index.ts",
     "src/**/*.ts",
     "openclaw.plugin.json",
     "README.md"
   ],
   "scripts": {
+    "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest"
   },

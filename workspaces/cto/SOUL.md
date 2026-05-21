@@ -24,7 +24,7 @@ If you need to email someone:
 1. Use `sessions_send` to **Clio** (coordinator)
 2. Message: "Please send this email on my behalf: to=<recipient>, subject=<subject>, body=<body>"
 3. Include: recipient, subject, body, and any file paths
-4. NEVER attempt `openclaw-gmail` or any email tool — it WILL fail with "cross-context denied"
+4. NEVER attempt to send email directly — your only path is `sessions_send` to Clio. There is no email tool in your runtime.
 
 Example:
 ```

@@ -591,6 +591,161 @@ jobs:
           fi
           echo "✓ All plugin env-var references resolve in /etc/openclaw/{shared,<profile>}.env"
 
+  bats-tests:
+    name: Bats (scripts/dedup + scripts/tests)
+    # Added 2026-05-20 after PR #297: Clio caught a `set -u` regression in
+    # find-dupes.sh --catalog that emitted "unbound variable" to stderr
+    # while still exiting 0 — bats picked it up locally but the suite
+    # never ran in CI, so the PR merged green. Wire it in here so future
+    # PRs can't ship a regression the suite already covers.
+    #
+    # Self-hosted hydra runner: matches the shellcheck job below (the
+    # ubuntu-latest GitHub-hosted assignment issue from 2026-04-24 is
+    # still present at org level).
+    runs-on: [self-hosted, hydra]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure bats + jq installed
+        run: |
+          set -e
+          if ! command -v bats >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y bats
+          fi
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+          bats --version
+          jq --version
+
+      - name: Run all bats suites under scripts/
+        # Discovers every *.bats file under scripts/ so a future
+        # sibling suite (e.g., scripts/credit-verification/tests) is
+        # picked up automatically without another CI edit. Current
+        # coverage: scripts/dedup/tests/ (80 tests, find-dupes modes,
+        # score-pair matrix, sweeps, create-ticket capture contract)
+        # and scripts/tests/openclaw-config-write-audit.bats (the
+        # write-audit watcher gate).
+        run: |
+          set -euo pipefail
+          files=$(find scripts -type f -name '*.bats' | sort)
+          if [ -z "$files" ]; then
+            echo "::warning::no *.bats files found under scripts/ — skipping"
+            exit 0
+          fi
+          count=$(echo "$files" | wc -l | tr -d ' ')
+          echo "Running $count bats file(s):"
+          echo "$files" | sed 's/^/  /'
+          # shellcheck disable=SC2086
+          bats $files
+
+  py-syntax:
+    name: Python syntax check (py_compile)
+    # Added 2026-05-20 alongside the bats wiring: 44 .py files exist
+    # under scripts/, skills-all/, and workspaces/ but nothing in CI
+    # catches a syntax typo before deploy. py_compile is ~5s and
+    # surfaces typos / mis-paste / partial saves immediately.
+    runs-on: [self-hosted, hydra]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: py_compile every .py file in operational paths
+        run: |
+          set -euo pipefail
+          files=$(find scripts skills-all workspaces -type f -name '*.py' 2>/dev/null | sort)
+          if [ -z "$files" ]; then
+            echo "No .py files found — skipping"
+            exit 0
+          fi
+          count=$(echo "$files" | wc -l | tr -d ' ')
+          echo "Compiling $count file(s)…"
+          # shellcheck disable=SC2086
+          python3 -m py_compile $files
+          echo "✓ All Python files parse cleanly"
+
+  plugin-tests:
+    name: Plugin tests (vitest)
+    # Added 2026-05-20: 3 plugins under plugins/ (intercom, support-tools,
+    # muso-credit-verification-enforcer) ship test files that never ran
+    # in CI before this PR. PR #297's TypeScript changes in
+    # create-ticket.ts could only be verified by running `pnpm test`
+    # locally. With this job, plugin regressions surface at PR time.
+    #
+    # Runs `pnpm build` + `dist/index.js` existence + `pnpm test` for
+    # every in-tree plugin. The build gate catches the 2026.5.19 plugin-
+    # loading regression: openclaw stopped accepting `./src/index.ts`
+    # as a runtime entry, requiring compiled `dist/index.js`. Without
+    # this CI check the failure only surfaces post-deploy when the
+    # gateway can't load the plugin (incident PR #302).
+    runs-on: [self-hosted, hydra]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Ensure pnpm available
+        # The hydra runner doesn't have pnpm pre-installed (the gateway
+        # uses `openclaw plugins install` which handles deps internally,
+        # not pnpm). Install via npm if missing. node is present because
+        # the gateway runs on it.
+        run: |
+          set -e
+          if ! command -v node >/dev/null 2>&1; then
+            echo "::error::node not found on runner"
+            exit 1
+          fi
+          if ! command -v pnpm >/dev/null 2>&1; then
+            echo "pnpm not found — installing via npm…"
+            npm install -g pnpm@10
+          fi
+          pnpm --version
+          node --version
+      - name: Test each plugin
+        # Discovers every plugins/*/package.json so future plugins are
+        # auto-included in the build+dist gate without another CI edit.
+        # Skips dirs without package.json so partial scaffolding doesn't
+        # false-positive.
+        run: |
+          set -euo pipefail
+          fail=0
+          shopt -s nullglob
+          for pkg in plugins/*/package.json; do
+            plugin=$(dirname "$pkg")
+            echo "::group::$plugin"
+            pushd "$plugin" >/dev/null
+            if ! pnpm install --frozen-lockfile; then
+              echo "::error::$plugin: pnpm install --frozen-lockfile failed (regenerate pnpm-lock.yaml if openclaw was bumped)"
+              fail=1
+              popd >/dev/null
+              echo "::endgroup::"
+              continue
+            fi
+            if ! pnpm run build; then
+              echo "::error::$plugin: pnpm run build failed — openclaw 2026.5.19 requires compiled dist/"
+              fail=1
+              popd >/dev/null
+              echo "::endgroup::"
+              continue
+            fi
+            if [ ! -f dist/index.js ]; then
+              echo "::error::$plugin: dist/index.js not produced after build — openclaw 2026.5.19 will refuse to load this plugin"
+              fail=1
+              popd >/dev/null
+              echo "::endgroup::"
+              continue
+            fi
+            if ! pnpm test; then
+              echo "::error::$plugin: pnpm test failed"
+              fail=1
+            fi
+            popd >/dev/null
+            echo "::endgroup::"
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::One or more plugin gates failed — see groups above"
+            exit 1
+          fi
+          echo "✓ All plugin tests pass"
+
   shellcheck:
     name: Shellcheck (scripts/ + .githooks/)
     # Was ubuntu-latest, but GitHub-hosted runners stopped being assignable

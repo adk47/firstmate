@@ -25,6 +25,12 @@ DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"
 # the upgrade requires. Bump in lockstep with docs/REPO-MANAGEMENT.md.
 OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.5.19}"
 
+# Pinned @openclaw/slack version. 2026.5.12 externalized Slack into this
+# npm package; the bundled `channels.slack` plugin no longer ships. Kept
+# in lockstep with OPENCLAW_VERSION by default — the SDK pluginApi compat
+# range tracks the core release.
+OPENCLAW_SLACK_VERSION="${OPENCLAW_SLACK_VERSION:-${OPENCLAW_VERSION}}"
+
 # Detect if we're running on Node 8 (the HYDRA host)
 if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; then
   HYDRA_LOCAL=true
@@ -162,6 +168,35 @@ notify_slack() {
 # treats that as fatal — npm's default leaves the previous global binary
 # in place on a failed install, so aborting the deploy avoids continuing
 # on a half-updated runtime.
+install_external_plugin_slack() {
+  # Pins @openclaw/slack per-profile under ~/.openclaw-<profile>/npm/.
+  # Idempotent: skips when the live package.json already reports the
+  # target version. Mirrors install_openclaw()'s pattern.
+  local profile pkg_json installed
+  for profile in main edge; do
+    if ! needs_target "$profile"; then continue; fi
+    pkg_json="/root/.openclaw-${profile}/npm/node_modules/@openclaw/slack/package.json"
+    if [[ -f "$pkg_json" ]]; then
+      installed=$(jq -r '.version // empty' "$pkg_json" 2>/dev/null || echo "")
+    else
+      installed=""
+    fi
+    if [[ "$installed" == "$OPENCLAW_SLACK_VERSION" ]]; then
+      log "    @openclaw/slack already $OPENCLAW_SLACK_VERSION on $profile — skipping"
+      continue
+    fi
+    log "    Installing @openclaw/slack@$OPENCLAW_SLACK_VERSION on $profile (was: ${installed:-not installed})"
+    local install_out install_rc=0
+    install_out=$(openclaw --profile "$profile" plugins install "@openclaw/slack@$OPENCLAW_SLACK_VERSION" 2>&1) || install_rc=$?
+    if (( install_rc != 0 )); then
+      log "    ✗ openclaw plugins install @openclaw/slack@$OPENCLAW_SLACK_VERSION ($profile) failed (rc=$install_rc):"
+      echo "$install_out" | sed 's/^/        /'
+      return 1
+    fi
+  done
+  return 0
+}
+
 install_openclaw() {
   local installed
   installed=$(openclaw --version 2>/dev/null | awk 'NR==1 {print $2}' || true)
@@ -303,9 +338,9 @@ install_plugin() {
   #
   # Fix: dual-write to BOTH the profile-specific path (the authoritative
   # location the gateway loads from) AND the legacy path (preserves the
-  # existing installPath pinnings in openclaw-main.json for openclaw-gmail
-  # and intercom). Once all `installs` entries are moved to profile-specific
-  # paths, the legacy write can go.
+  # existing installPath pinning in openclaw-main.json for intercom).
+  # Once all `installs` entries are moved to profile-specific paths, the
+  # legacy write can go.
   local ext_paths=()
   for profile in $profiles; do
     if ! needs_target "$profile"; then continue; fi
@@ -323,7 +358,7 @@ install_plugin() {
   # ONLY when main is in the profile list. Rationale:
   #
   # 1. Only openclaw-main.json has `plugins.installs` entries pinned at the
-  #    legacy path today (openclaw-gmail, intercom — both main-scoped).
+  #    legacy path today (intercom — main-scoped).
   #    openclaw-edge.json does not pin anything at the legacy path, so
   #    mirroring from that profile is dead weight.
   #
@@ -1395,6 +1430,18 @@ fi
 chmod +x "$DEPLOY_PATH"/scripts/*.sh "$DEPLOY_PATH"/scripts/*.py 2>/dev/null || true
 log "  Script permissions fixed"
 
+# -------------------------------------------------------------------
+# Step 4d.5: Install externalized plugins (Slack)
+# -------------------------------------------------------------------
+# Slack was bundled in the openclaw npm package through 2026.5.11 and
+# externalized into @openclaw/slack from 2026.5.12 onward. Without this
+# step the gateway emits "plugins.entries.slack: plugin not installed"
+# and #muso-hydra goes silent (incident PR #302).
+log "Step 4d.5/9: Pinning externalized plugins to OPENCLAW_SLACK_VERSION=${OPENCLAW_SLACK_VERSION}..."
+if ! install_external_plugin_slack; then
+  fail "@openclaw/slack pin failed (target ${OPENCLAW_SLACK_VERSION})"
+fi
+
 # NOTE: drift baseline (.deployed-sha) is updated AFTER Step 7 (smoke test
 # passes), not here. Writing it now would advance the baseline before we
 # know the deploy actually works — a half-failed deploy would leave a
@@ -1789,9 +1836,6 @@ with open(cfg, 'w') as f:
     json.dump(c, f, indent=2)
 print('  Memory search: local embeddings (no OpenAI)')
 "
-
-# Gmail plugin patches are now baked into the forked source at
-# plugins/openclaw-gmail/ — no deploy-time sed needed.
 POSTSYNC
 
 log "  Post-sync setup complete."

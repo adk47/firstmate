@@ -2,7 +2,7 @@
 name: gog
 description: Google Workspace CLI for Gmail, Calendar, Drive, Contacts, Sheets, and Docs.
 homepage: https://gogcli.sh
-snapshot-source: openclaw-gmail plugin node_modules (openclaw package)
+snapshot-source: gogcli (https://gogcli.sh) — `gog` binary at /usr/local/bin/gog, brew formula steipete/tap/gogcli
 snapshot-date: 2026-04-24
 metadata:
   {

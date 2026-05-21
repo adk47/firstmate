@@ -199,11 +199,18 @@ async function readRequestBody(req: IncomingMessage): Promise<string | null> {
 export const intercomPlugin = createChatChannelPlugin({
   base: {
     id: "intercom",
-    meta: { label: "Intercom", order: 100 },
+    meta: {
+      id: "intercom",
+      label: "Intercom",
+      selectionLabel: "Intercom",
+      docsPath: "/channels/intercom",
+      blurb: "Connect OpenClaw to Intercom for customer support.",
+      order: 100,
+    },
     capabilities: { chatTypes: ["direct"] },
     config: {
       listAccountIds: (cfg: any) => listIntercomAccountIds(cfg),
-      resolveAccount: ({ cfg, accountId }: { cfg: any; accountId?: string | null }) =>
+      resolveAccount: (cfg: any, accountId?: string | null) =>
         resolveIntercomAccount(cfg, accountId),
       isConfigured: (account: any) => Boolean(account.token && account.workspaceId),
     },
@@ -279,7 +286,7 @@ export const intercomPlugin = createChatChannelPlugin({
           start: async () => {
             const unregister = registerPluginHttpRoute({
               path: "/intercom/webhook",
-              auth: "none", // HMAC validation happens inside the handler
+              auth: "plugin", // HMAC validation happens inside the handler; "plugin" tells the gateway not to gate on its own auth.
               pluginId: "intercom",
               accountId: account.accountId,
               source: "intercom-webhook",
@@ -556,6 +563,7 @@ export const intercomPlugin = createChatChannelPlugin({
   },
   threading: { topLevelReplyToMode: "reply" },
   outbound: {
+    base: { deliveryMode: "direct" },
     attachedResults: {
       channel: "intercom",
       sendText: async ({ cfg, to, text, accountId }: any) => {

@@ -299,10 +299,10 @@ if needs_target "main"; then
     # openclaw 2026.4.27 emits `Config warnings:\n- plugins.entries.*` on
     # stderr at every CLI invocation, which corrupted the jq parse here
     # and produced "FAIL: cron count check failed (expected=14 loaded=?)"
-    # in PR #228's 2026-04-30 09:11 UTC deploy run. The intercom +
-    # openclaw-gmail manifests are missing channelConfigs metadata
-    # (separate tech debt to fix at the plugin source), but the smoke
-    # test should not block deploys on stderr-only warnings.
+    # in PR #228's 2026-04-30 09:11 UTC deploy run. The intercom manifest
+    # is missing channelConfigs metadata (separate tech debt to fix at
+    # the plugin source), but the smoke test should not block deploys
+    # on stderr-only warnings.
     LOADED_RAW=$(openclaw --profile main cron status --json 2>/dev/null) || LOADED_RAW=""
     if [ -z "$LOADED_RAW" ]; then
       fail_check "Main: openclaw cron status --json returned nothing (gateway not running?)"

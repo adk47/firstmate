@@ -30,7 +30,6 @@ fi
 #
 #   intercom       → "main edge"
 #   support-tools  → "main edge"
-#   openclaw-gmail → "main"
 #   everything else → "main" (with a stderr warning so typos surface)
 #
 # History: intercom was previously mapped to "edge" only, which caused
@@ -44,11 +43,10 @@ plugin_profile() {
   case "$plugin_name" in
     intercom)                          echo "main edge" ;;
     support-tools)                     echo "main edge" ;;
-    openclaw-gmail)                    echo "main" ;;
     muso-credit-verification-enforcer) echo "main" ;;
     *)
       echo "main"
-      echo "    plugin_profile: '$plugin_name' is not in the known mapping (intercom→main+edge, support-tools→main+edge, openclaw-gmail→main, muso-credit-verification-enforcer→main); defaulting to main. Verify this is intended — typos in plugin directory names land here silently." >&2
+      echo "    plugin_profile: '$plugin_name' is not in the known mapping (intercom→main+edge, support-tools→main+edge, muso-credit-verification-enforcer→main); defaulting to main. Verify this is intended — typos in plugin directory names land here silently." >&2
       ;;
   esac
 }

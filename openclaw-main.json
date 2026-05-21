@@ -246,7 +246,10 @@
           "muso-audit-profile-credits"
         ],
         "tools": {
-          "deny": ["web_search", "web_fetch"]
+          "deny": [
+            "web_search",
+            "web_fetch"
+          ]
         }
       },
       {
@@ -288,11 +291,25 @@
           "model": "text-embedding-3-small",
           "remote": {
             "baseUrl": "https://openrouter.ai/api/v1",
-            "apiKey": { "source": "file", "provider": "hydra-secrets", "id": "/OPENROUTER_API_KEY" }
+            "apiKey": {
+              "source": "file",
+              "provider": "hydra-secrets",
+              "id": "/OPENROUTER_API_KEY"
+            }
           },
-          "extraPaths": ["reference"],
-          "store": { "vector": { "enabled": true } },
-          "query": { "hybrid": { "enabled": true } }
+          "extraPaths": [
+            "reference"
+          ],
+          "store": {
+            "vector": {
+              "enabled": true
+            }
+          },
+          "query": {
+            "hybrid": {
+              "enabled": true
+            }
+          }
         }
       }
     ]
@@ -554,64 +571,6 @@
         "nativeTransport": true
       }
     },
-    "openclaw-gmail": {
-      "enabled": true,
-      "accounts": {
-        "a@muso.ai": {
-          "email": "a@muso.ai",
-          "backend": "api",
-          "oauth": {
-            "clientId": "217563080401-h9t68rmd9p1hbn3vv06ealitnvnubrlm.apps.googleusercontent.com",
-            "clientSecret": "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",
-            "refreshToken": "1//0fj1cTsfVAC--CgYIARAAGA8SNwF-L9IrGYLkGLj45vIDjrFmM3l6z0kPFDE8mJFlYqto1f5GYmIb-RpAAx2DY6Et8anOKWaoyak"
-          },
-          "allowFrom": [
-            "*"
-          ],
-          "pollIntervalMs": 60000
-        },
-        "ak@muso.ai": {
-          "email": "ak@muso.ai",
-          "backend": "api",
-          "oauth": {
-            "clientId": "497104447931-f7hqaijcdkrk5rsukg2qkm20daq1l5f6.apps.googleusercontent.com",
-            "clientSecret": "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",
-            "refreshToken": "1//0fF5A_xOlO-BaCgYIARAAGA8SNwF-L9IryigIOAShnDDwbA_A820Qhe7U7LRue477KJw_2lh8GeD3IpeIU3sA6qXB-h2nWlRHmMw"
-          },
-          "allowFrom": [
-            "*"
-          ],
-          "pollIntervalMs": 60000
-        },
-        "aaron.k@muso.ai": {
-          "email": "aaron.k@muso.ai",
-          "backend": "api",
-          "oauth": {
-            "clientId": "464547621337-dq3u8ig9spmq8eidmurpcmkqe3m04m46.apps.googleusercontent.com",
-            "clientSecret": "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",
-            "refreshToken": "1//0fR8jARDcuwm4CgYIARAAGA8SNwF-L9IrOEEd4tteQrlOOoE85wYxQRPDRwiIufFvndLthAUUlwmg1Csi-6okWdRMlp-lEjxUp8s"
-          },
-          "allowFrom": [
-            "*"
-          ],
-          "pollIntervalMs": 60000
-        },
-        "f@muso.ai": {
-          "email": "f@muso.ai",
-          "backend": "api",
-          "oauth": {
-            "clientId": "649789628828-5313aa4seu5ng8jpcl35c7ag1j6kekjq.apps.googleusercontent.com",
-            "clientSecret": "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",
-            "refreshToken": "1//0fYlEETC_UrcMCgYIARAAGA8SNwF-L9Ir2NDrTr2BWiBTKH_g34W7HOxj6KYH8ZT0J1dNLV7Xj7f2TthqHsG3OFHjUFYevvA9Zx4"
-          },
-          "allowFrom": [
-            "*"
-          ],
-          "pollIntervalMs": 60000
-        }
-      },
-      "defaultAccount": "a@muso.ai"
-    },
     "intercom": {
       "accounts": {
         "default": {
@@ -710,7 +669,6 @@
       "intercom",
       "lobster",
       "muso-credit-verification-enforcer",
-      "openclaw-gmail",
       "openrouter",
       "slack",
       "support-tools"
@@ -719,9 +677,6 @@
       "slack": {
         "enabled": true,
         "config": {}
-      },
-      "openclaw-gmail": {
-        "enabled": true
       },
       "intercom": {
         "enabled": true
@@ -733,10 +688,22 @@
         "enabled": true,
         "config": {
           "musoApiBase": "https://api.muso.ai",
-          "adminEmail":              { "source": "env", "provider": "hydra-env", "id": "MUSO_ADMIN_EMAIL" },
-          "adminPassword":           { "source": "env", "provider": "hydra-env", "id": "MUSO_ADMIN_PASSWORD" },
-          "clickupApiKey":           { "source": "env", "provider": "hydra-env", "id": "CLICKUP_API_KEY" },
-          "clickupListId":           "901000600160",
+          "adminEmail": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_ADMIN_EMAIL"
+          },
+          "adminPassword": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_ADMIN_PASSWORD"
+          },
+          "clickupApiKey": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "CLICKUP_API_KEY"
+          },
+          "clickupListId": "901000600160",
           "clickupUserEmailFieldId": "e8618c74-d065-4b75-9a5a-86d658392409",
           "clickupProfileIdFieldId": "347d23bf-ed7b-40c2-bd10-5bd6ac7210b1"
         }
@@ -765,13 +732,6 @@
         "resolvedAt": "2026-03-15T16:41:53.234Z",
         "installedAt": "2026-03-15T16:42:31.664Z"
       },
-      "openclaw-gmail": {
-        "source": "path",
-        "spec": "/root/.openclaw-main/extensions/openclaw-gmail",
-        "installPath": "/root/.openclaw-main/extensions/openclaw-gmail",
-        "version": "1.7.3-muso.1",
-        "resolvedName": "@muso/openclaw-gmail"
-      },
       "intercom": {
         "source": "path",
         "spec": "/root/.openclaw-main/extensions/intercom",
@@ -795,7 +755,9 @@
     }
   },
   "tools": {
-    "alsoAllow": ["lobster"],
+    "alsoAllow": [
+      "lobster"
+    ],
     "exec": {
       "security": "full",
       "ask": "off"
