@@ -699,6 +699,48 @@ jobs:
           fi
           pnpm --version
           node --version
+      - name: openclaw version alignment (deploy.sh vs plugin lockfiles)
+        # Catches the class-of-bug from PR #303's review: lockfile-frozen
+        # `pnpm install` quietly resolves a stale openclaw, the build
+        # passes against the wrong SDK, and the regression only surfaces
+        # at deploy time. Procedure when this step fails: in each plugin
+        # dir, `rm pnpm-lock.yaml && pnpm install` to regenerate against
+        # current OPENCLAW_VERSION, then commit the refreshed lockfiles.
+        run: |
+          set -euo pipefail
+          DEPLOY_VER=$(grep '^OPENCLAW_VERSION=' scripts/deploy.sh \
+            | sed -E 's/.*-([0-9.]+)\}.*/\1/')
+          if [ -z "$DEPLOY_VER" ]; then
+            echo "::error::could not parse OPENCLAW_VERSION from scripts/deploy.sh"
+            exit 1
+          fi
+          echo "scripts/deploy.sh OPENCLAW_VERSION = $DEPLOY_VER"
+          fail=0
+          shopt -s nullglob
+          for lock in plugins/*/pnpm-lock.yaml; do
+            # Compare the FULL unique set of openclaw@<ver> entries in the
+            # lockfile against DEPLOY_VER, not just the first one. A lockfile
+            # can legitimately resolve multiple openclaw entries (top-level
+            # peer + a transitive sub-dep) and we want any of them differing
+            # from the deploy pin to fail the gate.
+            LOCK_VERS=$(grep -oE 'openclaw@[0-9.]+' "$lock" | sort -u | cut -d@ -f2)
+            if [ -z "$LOCK_VERS" ]; then
+              echo "::warning::$lock has no openclaw pin — skipping"
+              continue
+            fi
+            MISMATCH=$(printf '%s\n' "$LOCK_VERS" | grep -vFx "$DEPLOY_VER" || true)
+            if [ -z "$MISMATCH" ]; then
+              entry_count=$(printf '%s\n' "$LOCK_VERS" | wc -l | tr -d ' ')
+              echo "  ✓ $lock pins openclaw@$DEPLOY_VER ($entry_count unique entr$([ "$entry_count" = "1" ] && echo y || echo ies))"
+            else
+              mismatch_csv=$(printf '%s\n' "$MISMATCH" | paste -sd, -)
+              echo "::error::$lock contains openclaw version(s) other than $DEPLOY_VER: $mismatch_csv — regenerate with: (cd $(dirname $lock) && rm pnpm-lock.yaml && pnpm install)"
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
       - name: Test each plugin
         # Discovers every plugins/*/package.json so future plugins are
         # auto-included in the build+dist gate without another CI edit.

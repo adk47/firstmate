@@ -267,10 +267,12 @@ install_plugin() {
     return 1
   fi
 
-  # Build the plugin if it declares a build script. Required for plugins that
-  # expose tools through TypeScript entries -- openclaw 4.27+ rejects ./src/*.ts
-  # entries without compiled output unless the plugin is kind=channel. Channel
-  # plugins (intercom) load fine without dist; tool plugins (support-tools) do not.
+  # Build the plugin if it declares a build script. Required for every
+  # installed plugin since openclaw 2026.5.19: the runtime now rejects
+  # ./src/*.ts entries without compiled dist/index.js, with no kind=channel
+  # exception (the legacy fallback that let intercom load src-only is gone).
+  # See PR #303 for the incident that surfaced this — same gate is also
+  # enforced at PR time by .github/workflows/pr-validate.yml plugin-tests.
   if ! command -v jq >/dev/null 2>&1; then
     log "    ✗ jq is required to detect plugin build scripts but is not installed"
     return 1
