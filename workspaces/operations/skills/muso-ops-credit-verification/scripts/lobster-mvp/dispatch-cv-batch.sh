@@ -148,7 +148,14 @@ batch_size=$BATCH_SIZE | error.type=\`$ERR_TYPE\`
 ${ERR_MSG}
 \`\`\`
 No credits were processed."
-    OPENCLAW_BIN="${OPENCLAW_CLI:-openclaw}"
+    # Don't read OPENCLAW_CLI as a path — openclaw sets it to "1" as a
+    # marker (see openclaw/dist/openclaw-exec-env.js:9-12 +
+    # entry.js:117 ensureOpenClawExecMarkerOnProcess), which would resolve
+    # OPENCLAW_BIN to literal "1" in any context where the marker leaks
+    # (e.g., direct-exec subprocesses of the agent). Use OPENCLAW_BIN as
+    # the explicit override and OPENCLAW_CLI_PATH (openclaw's own path env
+    # at server.js:9325) as a secondary fallback before plain PATH lookup.
+    OPENCLAW_BIN="${OPENCLAW_BIN:-${OPENCLAW_CLI_PATH:-openclaw}}"
     OPENCLAW_PROFILE="${OPENCLAW_PROFILE:-main}"
     TARGET_CHANNEL="${TARGET_CHANNEL:-C0APB2CMM7C}"
     if command -v "$OPENCLAW_BIN" >/dev/null 2>&1; then

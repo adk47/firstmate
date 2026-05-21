@@ -60,3 +60,8 @@ steps:
     stdin: $apply.stdout
     env:
       THREAD_TS: ${thread_ts}
+      # When THREAD_TS is empty (cron path), post the summary as a top-level
+      # parent message in #credit-verification rather than dropping it.
+      # See hydra#305 — without this the cron-fired runs left users with
+      # only the agent's "Credit verification batch is running." placeholder.
+      POST_PARENT_TO_CHANNEL: "1"

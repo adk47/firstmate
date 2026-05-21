@@ -162,7 +162,13 @@ The wrapper invokes the `verify-credit-batch-mvp.lobster` pipeline:
    Cloudflare's 100s origin timeout. Audit log:
    `/var/log/openclaw/lobster-apply.jsonl`. Refuses to claim "landed"
    if any response carries `dryRun:true`.
-5. `render-dry-run-summary.sh` — posts the Slack thread reply.
+5. `render-dry-run-summary.sh` — posts the Slack summary. With a non-empty
+   `THREAD_TS` (the @-mention path) it replies in the user's thread; with an
+   empty `THREAD_TS` (the autonomous 4h cron path) the pipeline sets
+   `POST_PARENT_TO_CHANNEL=1` and it posts as a top-level parent in
+   `#credit-verification` instead. Either way the rich summary lands in
+   Slack from the pipeline itself — the agent's final-reply text is no
+   longer on the user-facing delivery path (see hydra#305).
 
 (MusicBrainz lookup was removed 2026-05-18: it contributed 0 confirmed
 approvals on real data while consuming ~73% of pipeline wall-clock. The

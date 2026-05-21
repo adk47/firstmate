@@ -4,15 +4,28 @@
 #
 # Stdin: verdict-engine.sh output (queue_depth, fetch_size, counts, partitioned credits)
 # Stdout: the summary text we posted (so Lobster's step output captures it)
-# Side effect: posts a Slack message via `openclaw message send` if THREAD_TS
-#              is set and non-empty. Otherwise just emits to stdout (test mode).
+# Side effect: posts a Slack message via `openclaw message send`.
+#   - THREAD_TS set                              → post as thread reply
+#   - THREAD_TS empty + POST_PARENT_TO_CHANNEL=1 → post as top-level parent in $TARGET_CHANNEL
+#   - THREAD_TS empty + POST_PARENT_TO_CHANNEL=0 → stdout only (direct-CLI / bats test mode)
 #
 # Env:
-#   THREAD_TS            optional — thread to reply in. Empty = stdout only.
-#   TARGET_CHANNEL       optional — default C0APB2CMM7C (#credit-verification).
-#                        Caller can override for testing.
-#   OPENCLAW_CLI         optional — path to openclaw binary. Default: openclaw.
-#   OPENCLAW_PROFILE     optional — default "main".
+#   THREAD_TS              optional — thread to reply in. Empty = no thread context.
+#   POST_PARENT_TO_CHANNEL optional — "1" enables top-level parent posting when
+#                          THREAD_TS is empty. Set by the pipeline's summary step
+#                          (verify-credit-batch-mvp.lobster) so cron-fired runs
+#                          announce themselves without depending on the agent's
+#                          final-reply being relayed (hydra#305). Default "0".
+#   TARGET_CHANNEL         optional — default C0APB2CMM7C (#credit-verification).
+#                          Caller can override for testing.
+#   OPENCLAW_BIN           optional — explicit path to openclaw binary.
+#   OPENCLAW_CLI_PATH      optional — openclaw's own path env (server.js:9325).
+#                          Used as fallback for OPENCLAW_BIN. NOTE: do not use
+#                          OPENCLAW_CLI here — openclaw sets that to "1" as a
+#                          marker (openclaw-exec-env.js + entry.js:117), so
+#                          reading it as a path would silently resolve to "1"
+#                          in any subprocess where the marker leaks.
+#   OPENCLAW_PROFILE       optional — default "main".
 
 set -euo pipefail
 
@@ -20,7 +33,8 @@ INPUT=$(cat)
 
 TARGET_CHANNEL="${TARGET_CHANNEL:-C0APB2CMM7C}"
 THREAD_TS="${THREAD_TS:-}"
-OPENCLAW_BIN="${OPENCLAW_CLI:-openclaw}"
+POST_PARENT_TO_CHANNEL="${POST_PARENT_TO_CHANNEL:-0}"
+OPENCLAW_BIN="${OPENCLAW_BIN:-${OPENCLAW_CLI_PATH:-openclaw}}"
 OPENCLAW_PROFILE="${OPENCLAW_PROFILE:-main}"
 
 QUEUE_DEPTH=$(echo "$INPUT" | jq -r '.queue_depth')
@@ -95,23 +109,42 @@ fi
 # Always echo the summary text to stdout so Lobster's step output captures it.
 printf '%s\n' "$TEXT"
 
-# If THREAD_TS is set, post via openclaw message send.
+# Post to Slack. Two modes:
+#   - THREAD_TS set                              → thread reply (@-mention path)
+#   - THREAD_TS empty + POST_PARENT_TO_CHANNEL=1 → top-level parent (cron path; hydra#305)
+# Otherwise (THREAD_TS empty, no opt-in) → stdout only, used by bats/CLI.
+post_mode=""
 if [[ -n "$THREAD_TS" ]]; then
+  post_mode="thread"
+elif [[ "$POST_PARENT_TO_CHANNEL" == "1" ]]; then
+  post_mode="parent"
+fi
+
+if [[ -n "$post_mode" ]]; then
   if ! command -v "$OPENCLAW_BIN" >/dev/null 2>&1; then
     echo "WARN: openclaw binary not found ($OPENCLAW_BIN); skipping Slack post" >&2
   else
     set +e
-    "$OPENCLAW_BIN" --profile "$OPENCLAW_PROFILE" message send \
-      --account operations \
-      --channel slack \
-      --target "$TARGET_CHANNEL" \
-      --reply-to "$THREAD_TS" \
-      --message "$TEXT" \
-      >/dev/null
+    if [[ "$post_mode" == "thread" ]]; then
+      "$OPENCLAW_BIN" --profile "$OPENCLAW_PROFILE" message send \
+        --account operations \
+        --channel slack \
+        --target "$TARGET_CHANNEL" \
+        --reply-to "$THREAD_TS" \
+        --message "$TEXT" \
+        >/dev/null
+    else
+      "$OPENCLAW_BIN" --profile "$OPENCLAW_PROFILE" message send \
+        --account operations \
+        --channel slack \
+        --target "$TARGET_CHANNEL" \
+        --message "$TEXT" \
+        >/dev/null
+    fi
     RC=$?
     set -e
     if [[ $RC -ne 0 ]]; then
-      echo "WARN: slack post failed rc=$RC" >&2
+      echo "WARN: slack post failed rc=$RC mode=$post_mode" >&2
     fi
   fi
 fi
