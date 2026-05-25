@@ -5,7 +5,7 @@ import { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-ingress";
 import { dispatchInboundDirectDmWithRuntime } from "openclaw/plugin-sdk/channel-inbound";
 import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
 import { listIntercomAccountIds, resolveIntercomAccount, validateClickupConfig } from "./config.js";
-import { validateHmacSignature } from "./webhook.js";
+import { isMonitorProbe, validateHmacSignature } from "./webhook.js";
 import { handleWebhookEvent } from "./handler.js";
 import { createInitialSessionState, canAgentReply } from "./handoff.js";
 import {
@@ -309,6 +309,13 @@ export const intercomPlugin = createChatChannelPlugin({
                   log?.error?.(`[${tag}] invalid HMAC signature — rejected`);
                   res.writeHead(401);
                   res.end();
+                  return;
+                }
+
+                const userAgent = (req.headers["user-agent"] as string) ?? "";
+                if (isMonitorProbe(userAgent, rawBody)) {
+                  res.writeHead(200, { "Content-Type": "application/json" });
+                  res.end(JSON.stringify({ ok: true, probe: "monitor" }));
                   return;
                 }
 

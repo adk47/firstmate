@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createHmac } from "node:crypto";
-import { validateHmacSignature } from "../src/webhook.js";
+import { isMonitorProbe, validateHmacSignature } from "../src/webhook.js";
 
 const TEST_SECRET = "test_webhook_secret_123";
 
@@ -57,5 +57,37 @@ describe("validateHmacSignature", () => {
   it("throws on empty secret", () => {
     const body = '{"type":"notification_event"}';
     expect(() => validateHmacSignature(body, "sha256=abc", "")).toThrow("Webhook secret is not configured");
+  });
+});
+
+describe("isMonitorProbe", () => {
+  it("returns true for muso-webhook-monitor/1 with empty body", () => {
+    expect(isMonitorProbe("muso-webhook-monitor/1", "{}")).toBe(true);
+  });
+
+  it("returns true for any muso-webhook-monitor/<version> prefix", () => {
+    expect(isMonitorProbe("muso-webhook-monitor/2", "{}")).toBe(true);
+    expect(isMonitorProbe("muso-webhook-monitor/99 (debug)", "{}")).toBe(true);
+  });
+
+  it("returns false for monitor UA with non-empty body", () => {
+    // A monitor that ever sends real-looking payloads should not be
+    // short-circuited — fall through to the normal handler so we don't
+    // mask real bugs in the monitor.
+    expect(isMonitorProbe("muso-webhook-monitor/1", '{"type":"notification_event"}')).toBe(false);
+    expect(isMonitorProbe("muso-webhook-monitor/1", "")).toBe(false);
+    expect(isMonitorProbe("muso-webhook-monitor/1", "{} ")).toBe(false);
+  });
+
+  it("returns false for Intercom's real webhook delivery agent", () => {
+    expect(isMonitorProbe("Intercom/Parrot 1.3", "{}")).toBe(false);
+  });
+
+  it("returns false for missing UA", () => {
+    expect(isMonitorProbe("", "{}")).toBe(false);
+  });
+
+  it("does not match UA substrings — must be a prefix", () => {
+    expect(isMonitorProbe("evil-muso-webhook-monitor/1", "{}")).toBe(false);
   });
 });

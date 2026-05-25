@@ -1860,35 +1860,48 @@ log "  Post-sync setup complete."
 # Moved from deploy.yml's "Apply K8s manifests" step on 2026-04-08
 # (CD consolidation). Captures current state to /tmp for the
 # rollback.sh kubectl-apply path, then kubectl apply the manifests.
-# Skips silently if k8s/prod/hydra/ is missing (verified 2026-04-08:
-# directory does not currently exist on node-8 — Step 5b exercises
-# the skip branch on every live deploy until someone populates it).
+#
+# Convention: k8s/prod/<namespace>/*.yaml — directory name is the target
+# namespace. Each subdir is applied with --namespace=<dir-name>.
+# HYDRA_NAMESPACE env (legacy override for test/staging) only redirects
+# the k8s/prod/hydra/ subdir, not other namespaces' manifests, because
+# kubectl 1.34+ rejects --namespace mismatches when the yaml declares one.
+# Skips silently if no k8s/prod/<ns>/ dirs exist.
 log "Step 5b/9: Applying k8s manifests..."
-if [[ -d "$HYDRA_ROOT/k8s/prod/hydra" ]]; then
-  # Capture current state for rollback. Use namespace from env, fallback
-  # to hydra which is the production namespace. The 2>/dev/null || true
-  # tolerates "namespace not found" / "kubectl not configured" so the
-  # snapshot is best-effort, but we explicitly check the resulting
-  # files are non-empty before referencing them in the failure message.
-  k8s_ns="${HYDRA_NAMESPACE:-hydra}"
-  kubectl get deployments -n "$k8s_ns" -o yaml > /tmp/hydra-rollback-deployments.yaml 2>/dev/null || true
-  kubectl get configmaps -n "$k8s_ns" -o yaml > /tmp/hydra-rollback-configmaps.yaml 2>/dev/null || true
-
-  # Apply the manifests.
-  apply_rc=0
-  kubectl apply -f "$HYDRA_ROOT/k8s/prod/hydra/" --namespace="$k8s_ns" || apply_rc=$?
-  if (( apply_rc != 0 )); then
-    # Build a recovery hint that's honest about whether the rollback
-    # snapshot actually contains anything useful.
-    rollback_hint="rollback yaml at /tmp/hydra-rollback-{deployments,configmaps}.yaml"
-    if [[ ! -s /tmp/hydra-rollback-deployments.yaml ]]; then
-      rollback_hint="WARNING: /tmp/hydra-rollback-deployments.yaml is empty (kubectl get deployments returned nothing — namespace missing or kubectl not configured?). No automatic recovery available; manual investigation required."
-    fi
-    fail "kubectl apply failed (rc=$apply_rc) — $rollback_hint. To revert manually if the snapshot is non-empty: kubectl apply -f /tmp/hydra-rollback-deployments.yaml -n $k8s_ns"
-  fi
-  log "  ✓ K8s manifests applied to namespace=$k8s_ns"
+shopt -s nullglob
+k8s_ns_dirs=("$HYDRA_ROOT"/k8s/prod/*/)
+shopt -u nullglob
+if (( ${#k8s_ns_dirs[@]} == 0 )); then
+  log "  no k8s/prod/<ns>/ dirs found — skipping k8s apply"
 else
-  log "  k8s/prod/hydra/ not found in repo — skipping k8s apply"
+  for ns_dir in "${k8s_ns_dirs[@]}"; do
+    dir_ns=$(basename "$ns_dir")
+    if [[ "$dir_ns" == "hydra" ]]; then
+      apply_ns="${HYDRA_NAMESPACE:-hydra}"
+    else
+      apply_ns="$dir_ns"
+    fi
+
+    # Capture per-namespace rollback snapshot. The 2>/dev/null || true
+    # tolerates "namespace not found" / "kubectl not configured" so the
+    # snapshot is best-effort, but we explicitly check the resulting
+    # files are non-empty before referencing them in the failure message.
+    rollback_dep="/tmp/hydra-rollback-deployments-${apply_ns}.yaml"
+    rollback_cm="/tmp/hydra-rollback-configmaps-${apply_ns}.yaml"
+    kubectl get deployments -n "$apply_ns" -o yaml > "$rollback_dep" 2>/dev/null || true
+    kubectl get configmaps -n "$apply_ns" -o yaml > "$rollback_cm" 2>/dev/null || true
+
+    apply_rc=0
+    kubectl apply -f "$ns_dir" --namespace="$apply_ns" || apply_rc=$?
+    if (( apply_rc != 0 )); then
+      rollback_hint="rollback yaml at $rollback_dep / $rollback_cm"
+      if [[ ! -s "$rollback_dep" ]]; then
+        rollback_hint="WARNING: $rollback_dep is empty (kubectl get deployments returned nothing — namespace missing or kubectl not configured?). No automatic recovery available; manual investigation required."
+      fi
+      fail "kubectl apply to namespace=$apply_ns failed (rc=$apply_rc) — $rollback_hint. To revert manually if the snapshot is non-empty: kubectl apply -f $rollback_dep -n $apply_ns"
+    fi
+    log "  ✓ K8s manifests applied to namespace=$apply_ns (from $ns_dir)"
+  done
 fi
 
 # -------------------------------------------------------------------

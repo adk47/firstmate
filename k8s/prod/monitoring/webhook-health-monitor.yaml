@@ -1,0 +1,183 @@
+# webhook-health-monitor — every 5 min, probes critical webhook endpoints.
+#
+# Applied by deploy.sh Step 5b: `kubectl apply -f k8s/prod/monitoring/` with
+# --namespace=monitoring (derived from the directory name).
+#
+# The Intercom probe is signed end-to-end (HMAC-SHA256) — a 401 means real
+# signature drift, not "expected." This requires the `webhook-monitor-intercom`
+# Secret in the monitoring namespace, mirrored from the gateway's openclaw.json.
+#
+# Bootstrap / rotation (run once on the cluster, NOT via deploy.sh):
+#
+#   SECRET=$(jq -r '.channels.intercom.accounts.default.webhookSecret' \
+#     /root/.openclaw-edge/openclaw.json)
+#   kubectl create secret generic webhook-monitor-intercom \
+#     -n monitoring \
+#     --from-literal=INTERCOM_HMAC_SECRET="$SECRET" \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+# The Slack credentials Secret (`webhook-monitor-slack`, keys SLACK_BOT_TOKEN
+# and SLACK_CHANNEL) is assumed to already exist; it is not managed here.
+#
+# An earlier iteration sent unsigned bodies and accepted 401 as healthy, which
+# was structurally blind to HMAC drift AND self-noised the edge gateway log
+# with hundreds of invalid-HMAC lines per day. Signing closes both gaps.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webhook-monitor-config
+  namespace: monitoring
+data:
+  webhooks.json: |
+    [
+      {"label": "hydra-intercom-webhook",   "url": "https://hydra.muso.ai/intercom/webhook",                  "method": "POST", "expected": "200", "sign": "intercom"},
+      {"label": "s3-public",                "url": "https://s3.muso.ai/",                                     "method": "GET",  "expected": "200,401,403"},
+      {"label": "stripe-webhook",           "url": "https://api.muso.ai/api/w/v2/payment/stripe-webhook",     "method": "POST", "expected": "200,400,401"},
+      {"label": "paypal-webhook",           "url": "https://api.muso.ai/api/w/v2/payment/paypal-webhook",     "method": "POST", "expected": "200,400,401,500"},
+      {"label": "google-webhook",           "url": "https://api.muso.ai/api/w/v2/payment/google-webhook",     "method": "POST", "expected": "200,400,401"},
+      {"label": "apple-webhook",            "url": "https://api.muso.ai/api/w/v2/payment/apple-webhook",      "method": "POST", "expected": "200,400,401"},
+      {"label": "prodigi-webhook",          "url": "https://api.muso.ai/api/w/v2/payment/prodigi-webhook",    "method": "POST", "expected": "200,400,401,500"},
+      {"label": "klaviyo-event-webhook",    "url": "https://api.muso.ai/api/wh/klaviyo/event",                "method": "POST", "expected": "200,401"},
+      {"label": "integration-auth",         "url": "https://api.muso.ai/api/i/auth/find-or-create-user",      "method": "POST", "expected": "200,401"},
+      {"label": "api-muso-health",          "url": "https://api.muso.ai/health",                              "method": "GET",  "expected": "200"}
+    ]
+  probe.py: |
+    #!/usr/bin/env python3
+    """Webhook health probe — runs once per CronJob fire, posts on regression.
+    Intercom probes are HMAC-signed so a 401 means real signature drift, not "expected"."""
+    import hashlib, hmac, json, os, sys, urllib.request, urllib.error, ssl
+
+    CFG = json.load(open(os.environ.get("WEBHOOKS_CFG", "/etc/webhook-monitor/webhooks.json")))
+    INTERCOM_SECRET = os.environ.get("INTERCOM_HMAC_SECRET", "").strip()
+    SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "").strip()
+    SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL", "").strip()
+    DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
+    # Cert validity is part of endpoint health — use the system default
+    # context (verifies chain + hostname). If a probed endpoint serves an
+    # expired or wrong-name cert the probe should fail, not silently pass.
+    ctx = ssl.create_default_context()
+
+    def sign_intercom(body: bytes) -> str:
+        if not INTERCOM_SECRET:
+            raise RuntimeError("INTERCOM_HMAC_SECRET env not set — cannot sign probe")
+        digest = hmac.new(INTERCOM_SECRET.encode(), body, hashlib.sha256).hexdigest()
+        return f"sha256={digest}"
+
+    failures = []
+    summary = []
+    for entry in CFG:
+        url = entry["url"]
+        method = entry.get("method", "GET")
+        expected = {int(c) for c in str(entry.get("expected", "200")).split(",") if c.strip()}
+        label = entry.get("label", url)
+        sign = entry.get("sign", "")
+        body = b"{}" if method in ("POST", "PUT") else None
+        headers = {"Content-Type": "application/json", "User-Agent": "muso-webhook-monitor/2"}
+        if sign == "intercom" and body is not None:
+            headers["X-Hub-Signature"] = sign_intercom(body)
+        try:
+            req = urllib.request.Request(url, method=method, data=body, headers=headers)
+            with urllib.request.urlopen(req, timeout=8, context=ctx) as r:
+                code = r.status
+        except urllib.error.HTTPError as e:
+            code = e.code
+        except Exception as e:
+            code = 0
+            print(f"  CONNECT_ERROR {label}: {type(e).__name__}: {str(e)[:120]}")
+
+        ok = code in expected
+        marker = "OK " if ok else "X  "
+        summary.append(f"{marker}{code:>3} {label}")
+        if not ok:
+            failures.append(f"*{label}*  ->  expected `{sorted(expected)}` got `{code}`  ·  {url}")
+
+    print("\n".join(summary))
+    if not failures:
+        sys.exit(0)
+
+    if not SLACK_TOKEN or not SLACK_CHANNEL:
+        print("\n[WARN] Slack creds not configured — printing failures only")
+        sys.exit(1)
+    if DRY_RUN:
+        print("\n[DRY_RUN] Would post to Slack:")
+        for f in failures: print("  " + f)
+        sys.exit(1)
+
+    body = {
+        "channel": SLACK_CHANNEL,
+        "text": ":rotating_light: Webhook regression detected",
+        "blocks": [
+            {"type": "header", "text": {"type": "plain_text", "text": ":rotating_light: Webhook regression detected"}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(failures)}},
+            {"type": "context", "elements": [{"type": "mrkdwn",
+                "text": f"`webhook-health-monitor` CronJob in `monitoring` ns · {len(failures)}/{len(CFG)} probes failing"}]},
+        ],
+    }
+    req = urllib.request.Request("https://slack.com/api/chat.postMessage",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {SLACK_TOKEN}", "Content-Type": "application/json; charset=utf-8"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            d = json.loads(r.read())
+            if d.get("ok"):
+                print(f"\nposted to slack: ts={d.get('ts')} channel={d.get('channel')}")
+            else:
+                print(f"\nslack error: {d}")
+    except Exception as e:
+        print(f"\nslack post failed: {e}")
+    sys.exit(1)
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: webhook-health-monitor
+  namespace: monitoring
+spec:
+  schedule: "*/5 * * * *"
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 1800
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: probe
+              image: python:3.13-alpine
+              imagePullPolicy: IfNotPresent
+              command: ["python3", "/etc/webhook-monitor/probe.py"]
+              env:
+                - name: SLACK_BOT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: webhook-monitor-slack
+                      key: SLACK_BOT_TOKEN
+                - name: SLACK_CHANNEL
+                  valueFrom:
+                    secretKeyRef:
+                      name: webhook-monitor-slack
+                      key: SLACK_CHANNEL
+                - name: INTERCOM_HMAC_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: webhook-monitor-intercom
+                      key: INTERCOM_HMAC_SECRET
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              volumeMounts:
+                - name: cfg
+                  mountPath: /etc/webhook-monitor
+          volumes:
+            - name: cfg
+              configMap:
+                name: webhook-monitor-config
+                defaultMode: 0755
