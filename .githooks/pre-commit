@@ -121,6 +121,7 @@ required_excludes=(
   "plugins/*/node_modules/"
   "plugins/*/package-lock.json"
   "scripts/hydra-heal.sh"
+  "workspaces/cmo/parent-companies.md"
   ".admin-token-cache"
   ".ads-token-cache"
   "workspaces/*/.env"

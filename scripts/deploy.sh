@@ -721,6 +721,18 @@ RSYNC_EXCLUDES=(
   # PR #263. If a future cto/ HTML drops in via the same path it can be
   # added alongside this entry.
   --exclude='workspaces/cto/project_renaissance_v20.html'
+  # CMO agent scratchpad. The canonical parent-companies doc lives under
+  # workspaces/cmo/skills/muso-outreach-engine/references/parent-companies.md
+  # (referenced by every outreach skill), but the cmo agent sometimes
+  # writes a parallel copy at the workspace root — partially redundant,
+  # partially confabulated (e.g. it placed audio-technica.com under
+  # HARMAN, which is wrong; Audio-Technica is independent). Excluded so
+  # the agent's scratchpad doesn't block the deploy pre-flight gate.
+  # Tripped pre-flight 2026-05-25 right after PR #314 merge.
+  # TODO(follow-up): teach the cmo agent to only edit the canonical
+  # engine-reference path, then remove this exclude and clean the
+  # orphan file off node-8.
+  --exclude='workspaces/cmo/parent-companies.md'
   # Server-only operational tooling. Aaron wrote scripts/hydra-heal.sh
   # directly on node-8 during a 2026-04-07 incident as a manual
   # health-check + self-healing script (gateway restart, secrets
