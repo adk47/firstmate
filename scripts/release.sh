@@ -162,8 +162,16 @@ while IFS= read -r subject; do
     revert\(*|revert:*|Revert*)REVERT_LINES+=("${subject#revert}") ;;
     chore\(*|chore:*)          CHORE_LINES+=("${subject#chore}") ;;
     docs\(*|docs:*)            DOCS_LINES+=("${subject#docs}") ;;
-    test\(*|test:*|ci\(*|ci:*|build\(*|build:*|style\(*|style:*)
-                               CHORE_LINES+=("${subject}") ;;
+    # test/ci/build/style fold into Chores. Strip the type prefix so
+    # render_bullet can clean up "(scope): " uniformly — without
+    # this, "ci(pr-validate): foo" rendered as "ci(pr-validate: foo"
+    # (unmatched paren) because render_bullet's `): ` → `: ` substitution
+    # left the leading "(" intact when nothing stripped "ci" first.
+    # Surfaced in v2026.5.26 DRY_RUN of PR #345's bullet.
+    test\(*|test:*)            CHORE_LINES+=("${subject#test}") ;;
+    ci\(*|ci:*)                CHORE_LINES+=("${subject#ci}") ;;
+    build\(*|build:*)          CHORE_LINES+=("${subject#build}") ;;
+    style\(*|style:*)          CHORE_LINES+=("${subject#style}") ;;
     Merge\ pull\ request*)     ;;  # squash absorbs these; drop any stragglers
     *)                         OTHER_LINES+=("$subject") ;;
   esac
@@ -200,8 +208,20 @@ emit_section() {
 }
 
 # Build the diff link from PRIOR_REF (always set — see range section).
+# Resolve PRIOR_REF for the GitHub compare URL: GitHub understands tag
+# names and shas but NOT "HEAD~N" or other local-only refs. Keep tags
+# readable in the URL; resolve everything else to a short sha. Surfaced
+# in v2026.5.26 bootstrap DRY_RUN where --from=HEAD~11 produced a 404
+# compare link.
 REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo Muso-AI/hydra)"
-DIFF_LINE="**Full changelog**: https://github.com/${REPO}/compare/${PRIOR_REF}...${VERSION}"
+if git rev-parse --verify "refs/tags/${PRIOR_REF}" >/dev/null 2>&1; then
+  PRIOR_URL_REF="$PRIOR_REF"
+elif [[ "$PRIOR_REF" =~ ^[0-9a-f]{7,40}$ ]]; then
+  PRIOR_URL_REF="$PRIOR_REF"
+else
+  PRIOR_URL_REF=$(git rev-parse --short "$PRIOR_REF")
+fi
+DIFF_LINE="**Full changelog**: https://github.com/${REPO}/compare/${PRIOR_URL_REF}...${VERSION}"
 
 {
   printf '# %s\n\n' "$VERSION"
@@ -273,7 +293,7 @@ fi
 # failures do NOT propagate to release.sh's exit status. Caught in
 # Clio's review of PR #330.
 RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
-COMPARE_URL="https://github.com/${REPO}/compare/${PRIOR_REF}...${VERSION}"
+COMPARE_URL="https://github.com/${REPO}/compare/${PRIOR_URL_REF}...${VERSION}"
 
 if [[ -r "$HYDRA_ROOT/scripts/lib/slack-notify.sh" ]]; then
   (
