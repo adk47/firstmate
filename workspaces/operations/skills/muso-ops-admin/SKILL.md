@@ -26,6 +26,8 @@ metadata:
   verified-against: "core-backend/src/apis/index.w.js (2026-04-28)"
 ---
 
+<!-- WORKSPACE-DIVERGENCE: workspace contains tier2-godmode-allowlist.txt that MUST NOT propagate to canonical (would leak privilege to ceo/cmo/cto/caroline via rank-4 fallback); also has newer credit-verification hardened-exception block. See feedback_scope_new_agent_write_surfaces_outside_skills_all.md. -->
+
 # Muso Ops Admin — Core API Gateway
 
 The shared admin API layer for all Muso operations skills. Handles JWT auth,

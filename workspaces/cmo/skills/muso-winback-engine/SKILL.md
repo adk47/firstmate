@@ -27,6 +27,8 @@ metadata:
   last-updated: "2026-04-09"
 ---
 
+<!-- WORKSPACE-DIVERGENCE: newer-than-canonical orchestrator architecture (v2.0); depends on workspace-only muso-winback-* subskills not present in skills-all/. Backport/converge tracked separately. -->
+
 # Muso Win Back Engine (Orchestrator)
 
 Entry point for all churned Pro win back work. This skill does not do the work

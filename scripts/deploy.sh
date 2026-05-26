@@ -1379,28 +1379,49 @@ else
 fi
 
 # -------------------------------------------------------------------
-# Step 4c: Sync global skills to openclaw skills dir
+# Step 4c: Sync global skills to openclaw managed-skills dirs (per profile)
 # -------------------------------------------------------------------
-# Moved from deploy.yml's "Sync global skills" step on 2026-04-08
-# (CD consolidation). skills-all/ is a global library used by agents
-# across ALL profiles — muso-intercom is used by edge's support agent,
-# muso-devops by main's devops agent, etc. Runs unconditionally when
-# skills-all/ exists, regardless of --target.
-log "Step 4c/9: Syncing global skills..."
+# skills-all/ is the canonical source of truth for shared skills used
+# across ALL profiles — muso-intercom by edge's support, muso-devops by
+# main's devops, etc.
+#
+# Path discovery (2026-05-26, hydra #336): openclaw 2026.5.19's resolver
+# loads "managed" skills at tier 4 from `<CONFIG_DIR>/skills/`, where
+# CONFIG_DIR = dirname(OPENCLAW_CONFIG_PATH) when --profile is used. So
+# the gateway started with `--profile main` resolves CONFIG_DIR to
+# `/root/.openclaw-main/`, and reads managed skills from
+# `/root/.openclaw-main/skills/<skill>/SKILL.md`.
+#
+# Pre-#336 this step rsynced to `/root/.openclaw/skills/skills/` — both
+# wrong dir (no `-main`/`-edge` profile suffix) AND wrong nesting (extra
+# `skills/`). The result: managed tier was silently empty, and every
+# agent loaded skills exclusively from its workspace rank-1 dir
+# (`/opt/hydra/workspaces/<agent>/skills/`). That's why 11 agents froze
+# on stale workspace doctrine — they had no canonical fallback at all.
+#
+# Fix: rsync to each profile's managed-skills dir. Runs unconditionally
+# when skills-all/ exists, regardless of --target.
+log "Step 4c/9: Syncing global skills to per-profile managed-skills dirs..."
 if [[ -d "$HYDRA_ROOT/skills-all" ]]; then
-  mkdir -p /root/.openclaw/skills/skills/
   skills_rc=0
-  # RSYNC_EXCLUDES is passed to satisfy .githooks/pre-commit Check 2,
-  # which enforces that every rsync call references the shared array.
-  # None of the workspace/audit/plugin patterns in RSYNC_EXCLUDES match
-  # anything inside skills-all/, so they're no-ops here — same rationale
-  # as the install_plugin rsync. See the comment there for more detail.
-  rsync -az --delete "${RSYNC_EXCLUDES[@]}" "$HYDRA_ROOT/skills-all/" /root/.openclaw/skills/skills/ || skills_rc=$?
-  if (( skills_rc != 0 )); then
-    fail "skills-all/ sync failed (rsync rc=$skills_rc)"
-  fi
-  skill_count=$(find /root/.openclaw/skills/skills/ -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
-  log "  ✓ Synced $skill_count skills to /root/.openclaw/skills/skills/"
+  for profile in main edge dev; do
+    profile_config="/root/.openclaw-${profile}/openclaw.json"
+    # Only sync for profiles that actually exist on this server.
+    [[ -f "$profile_config" ]] || continue
+    profile_skills_dir="/root/.openclaw-${profile}/skills"
+    mkdir -p "$profile_skills_dir"
+    # RSYNC_EXCLUDES is passed to satisfy .githooks/pre-commit Check 2,
+    # which enforces that every rsync call references the shared array.
+    # None of the workspace/audit/plugin patterns in RSYNC_EXCLUDES match
+    # anything inside skills-all/, so they're no-ops here — same rationale
+    # as the install_plugin rsync. See the comment there for more detail.
+    rsync -az --delete "${RSYNC_EXCLUDES[@]}" "$HYDRA_ROOT/skills-all/" "$profile_skills_dir/" || {
+      skills_rc=$?
+      fail "skills-all/ → $profile_skills_dir/ sync failed (rsync rc=$skills_rc)"
+    }
+    skill_count=$(find "$profile_skills_dir" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+    log "  ✓ profile=$profile: synced $skill_count skills to $profile_skills_dir/"
+  done
 else
   log "  skills-all/ not found in repo — skipping"
 fi

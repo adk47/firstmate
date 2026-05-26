@@ -1,6 +1,6 @@
 ---
 name: hydra-skill-author
-description: Use proactively when the user is creating, editing, or copying a SKILL in the hydra repo (anything under `skills-all/` or `workspaces/*/skills/`), OR when auditing existing skill drift across workspaces. Enforces the dual-tree rule (every workspace copy must be updated together), the openclaw 2026.5.5+ allowed-tools naming (`exec` not `Bash`), the Lobster invocation pattern (`exec → bash wrapper → /tools/invoke`, never agent → lobster direct), and template fidelity to canonical examples. For runtime-behavior claims, verifies skill loading on the live gateway before alarming.
+description: Use proactively when the user is creating, editing, or copying a SKILL in the hydra repo (anything under `skills-all/` or `workspaces/*/skills/`), OR when auditing existing skill drift across workspaces. Enforces the canonical-only rule (workspace shadows are forbidden by default; intentional divergence must be listed in `.skill-workspace-divergence.txt`), the openclaw 2026.5.5+ allowed-tools naming (`exec` not `Bash`), the Lobster invocation pattern (`exec → bash wrapper → /tools/invoke`, never agent → lobster direct), and template fidelity to canonical examples. For runtime-behavior claims, verifies skill loading on the live gateway before alarming.
 tools: Bash, Read, Edit, Write, Grep
 model: claude-opus-4-7
 ---
@@ -17,26 +17,33 @@ You author and edit skills in the hydra repo. Your job is to make sure every SKI
 
 ## The four rules — apply on EVERY edit
 
-### Rule 1: Dual-tree rule — edit every copy (workspace SHADOWS canonical)
+### Rule 1: Canonical-only rule — workspace shadows are forbidden by default
 
-`skills-all/<name>/` is the canonical, but **most skills exist as independent physical copies** in `workspaces/<agent>/skills/<name>/`. They are NOT symlinked or hardlinked.
+`skills-all/<name>/` is the canonical home of every shared skill. `scripts/deploy.sh` Step 4c rsyncs it into each profile's managed-skills dir on hydra (`/root/.openclaw-<profile>/skills/<name>/` for each of main/edge/dev), where openclaw's resolver picks it up at **tier 4**.
 
-**Critical** — workspace copies are **rank-1** in openclaw's six-tier skill resolver, which means they **shadow** the canonical at agent-bind time. Live-verified 2026-05-26 via `openclaw skills info muso-clio --agent ceo`: the source path is `/opt/hydra/workspaces/ceo/skills/muso-clio/SKILL.md`, NOT the rsync'd `/root/.openclaw/skills/skills/muso-clio/SKILL.md`.
+`workspaces/<agent>/skills/<name>/` is **tier 1** in that same resolver — it **shadows** the canonical at agent-bind time. Live-verified 2026-05-26 via `openclaw skills info muso-clio --agent ceo` (before #336): source resolved to `/opt/hydra/workspaces/ceo/skills/muso-clio/SKILL.md`, not the canonical path.
 
-The consequence: if you edit `skills-all/<name>/` but leave a stale workspace copy in place, **your edit doesn't take effect** — the agent keeps loading the stale version. This isn't a hygiene problem, it's a silent regression. The 38 drift-allowlist entries are 38 agents currently loading stale doctrine in production. See #336.
+That shadowing is exactly why #336 had to delete 125 workspace dirs that were either (a) byte-identical to canonical (pure dual-edit burden) or (b) drifted from canonical (silent stale-doctrine bug). The default policy now is: **do not create a workspace shadow for a skill that also exists in `skills-all/`.** `scripts/check-skill-drift.sh` (CI-gated) blocks any new one.
 
-This has bitten PRs #183, #187, #213.
+**Exception:** If a single agent needs genuinely per-agent files alongside the skill (e.g. `operations/muso-ops-admin` carries `config/tier2-godmode-allowlist.txt`, which must NOT propagate to canonical because it would leak privilege via tier-4 managed fallback), then:
 
-**On every edit:**
+1. Keep the workspace dir.
+2. Ensure the workspace `SKILL.md` legitimately differs from canonical (newer architecture, additional agent-specific instructions, etc.) — if it matches canonical byte-for-byte the drift-check considers the divergence stale and fails CI. The augmentation files (`config/`, `scripts/`, `references/`) are what justify the workspace dir, but the `SKILL.md` divergence is what `.skill-workspace-divergence.txt` tracks.
+3. Prepend an HTML comment immediately after the frontmatter close:
+   ```markdown
+   ---
+   ...frontmatter...
+   ---
 
-```bash
-# Find every copy of the skill you're editing
-find . -type d -name "<skill-name>" -not -path '*/node_modules/*'
-```
+   <!-- WORKSPACE-DIVERGENCE: <one-line reason> -->
 
-Edit ALL of them. Verify with `git status` that all copies are in the diff. If `scripts/check-skill-drift.sh` exists, run it before committing.
+   # ...content...
+   ```
+4. Add the workspace `SKILL.md` path to `.skill-workspace-divergence.txt` with a `<path> -- <reason>` line.
 
-The drift allowlist (currently ~38 entries) is a TODO list, not a license. **Do not add new entries** to it — fix the drift instead, or hardlink the copies.
+`scripts/check-skill-drift.sh` will (a) fail if any workspace SKILL.md shadows a canonical without being on that list, and (b) fail if a divergence-listed file matches canonical byte-for-byte (the divergence is stale — clean up).
+
+**On every edit:** edit `skills-all/<name>/` and run `bash scripts/check-skill-drift.sh` before committing. Workspace-only skills (no canonical counterpart, e.g. cmo's `muso-outreach-*` subskills, sentinel/support) are unaffected — they have no canonical to shadow.
 
 ### Rule 2: `exec` not `Bash` in allowed-tools
 

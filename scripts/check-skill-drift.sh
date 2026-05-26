@@ -1,114 +1,163 @@
 #!/usr/bin/env bash
-# check-skill-drift.sh — detect drift between skills-all/<skill>/SKILL.md and
-# every workspaces/<agent>/skills/<skill>/SKILL.md copy.
+# check-skill-drift.sh — enforce the workspace-shadow-deletion model from #336.
 #
-# Why: per memory `feedback_skill_dual_tree.md`, skill fixes have repeatedly
-# landed in skills-all/ but not in some workspace copies (PRs #183, #187, #213).
-# A full agent-side bug each time. This script + CI hook makes drift block PRs.
+# Background: openclaw's six-tier skill resolver loads
+# `workspaces/<agent>/skills/<name>/` at rank 1 (highest) and the per-profile
+# managed dir `/root/.openclaw-<profile>/skills/<name>/` (which deploy.sh
+# Step 4c populates from `skills-all/`) at rank 4. A workspace copy SHADOWS
+# the canonical. When workspace and canonical drift, the agent silently
+# keeps loading the workspace version forever, which is how 11 agents ended
+# up loading month-old doctrine (issue #336).
 #
-# Scope (this iteration): SKILL.md only. Wrapper scripts (.sh, .bats) are
-# excluded because pre-existing drift in muso-admin-api.sh would block the
-# bootstrap PR; that drift is tracked separately.
+# Old model (pre-#336): scan every workspace SKILL.md, allow drift via
+# `.skill-drift-allowlist.txt`. Problem: it normalized shadowing as default
+# state — every new workspace copy could either match canonical (pointless
+# duplication) or drift (production regression risk).
 #
-# Allow-list: .skill-drift-allowlist.txt at repo root, one path per line,
-# `#` comments. Each allow-listed path must include a paired-line reason after
-# `--`. Allow-listing is meant to defer fixes to a tracked follow-up, not to
-# permanently sanction divergence.
+# New model: presence + intentional-divergence list.
+#   - Any workspaces/*/skills/<name>/SKILL.md where <name> also lives in
+#     skills-all/ MUST EITHER be deleted (let the canonical-managed dir
+#     `/root/.openclaw-<profile>/skills/<name>/` fall through at rank 4)
+#     OR be explicitly listed in `.skill-workspace-divergence.txt` with a
+#     reason.
+#   - Workspace shadows that match canonical byte-for-byte are also
+#     forbidden — they are pure dual-edit burden with no per-agent value.
+#     Delete them.
+#   - Workspace-only skills (no canonical counterpart, e.g. cmo's
+#     muso-outreach-* subskills, sentinel/support) are unaffected by this
+#     check.
 #
 # Exit codes:
-#   0 — no unallowed drift
-#   1 — drift found (or invalid allow-list entries)
-#   2 — script-level error (missing dirs, etc.)
+#   0 — no violations
+#   1 — violation found (drift outside divergence list, or stale divergence
+#       entry, or workspace shadow matching canonical, or invalid file)
+#   2 — script-level error
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SKILLS_ALL="${REPO_ROOT}/skills-all"
 WORKSPACES="${REPO_ROOT}/workspaces"
-ALLOWLIST_FILE="${REPO_ROOT}/.skill-drift-allowlist.txt"
+DIVERGENCE_FILE="${REPO_ROOT}/.skill-workspace-divergence.txt"
 
 [[ -d "$SKILLS_ALL" ]] || { echo "FATAL: $SKILLS_ALL not found" >&2; exit 2; }
 [[ -d "$WORKSPACES" ]] || { echo "FATAL: $WORKSPACES not found" >&2; exit 2; }
 
-# Load allow-list. Each entry is the relative-to-repo-root path of a
-# workspace SKILL.md that is permitted to differ from canonical.
-# Stored as a newline-separated string (portable across bash 3.2 / 4+).
-ALLOWED_PATHS=""
-if [[ -f "$ALLOWLIST_FILE" ]]; then
+# Load divergence list. Each entry is the relative path of a workspace
+# SKILL.md that is permitted (and required) to differ from canonical.
+DIVERGENCE_PATHS=""
+if [[ -f "$DIVERGENCE_FILE" ]]; then
     while IFS= read -r line; do
         line="${line%%#*}"
-        # Trim leading/trailing whitespace (any class). awk handles
-        # tabs and CR/LF, which the previous `${line## }` only handled
-        # for a single literal space.
         line=$(printf '%s' "$line" | awk '{$1=$1};1')
         [[ -z "$line" ]] && continue
-        # Each line: "<path> -- <reason>". Reason is mandatory.
         local_path="${line%% -- *}"
         reason="${line#* -- }"
         if [[ "$local_path" == "$line" || -z "$reason" || "$reason" == "$line" ]]; then
-            echo "FATAL: allow-list entry missing ' -- <reason>' tail: ${line}" >&2
+            echo "FATAL: divergence entry missing ' -- <reason>' tail: ${line}" >&2
             exit 1
         fi
-        ALLOWED_PATHS="${ALLOWED_PATHS}${local_path}"$'\n'
-    done < "$ALLOWLIST_FILE"
+        DIVERGENCE_PATHS="${DIVERGENCE_PATHS}${local_path}"$'\n'
+    done < "$DIVERGENCE_FILE"
 fi
 
-is_allowed() {
+is_listed() {
     local path="$1"
-    printf '%s' "$ALLOWED_PATHS" | grep -Fxq "$path"
+    printf '%s' "$DIVERGENCE_PATHS" | grep -Fxq "$path"
 }
 
-DRIFT_FOUND=0
-ALLOWED_DRIFT=0
+VIOLATIONS=0
+LISTED_OK=0
 
-# For every skills-all/<skill>/SKILL.md
-while IFS= read -r canonical; do
-    rel="${canonical#${REPO_ROOT}/}"
-    skill_name="$(basename "$(dirname "$canonical")")"
+# Pass 1: every workspace SKILL.md that shadows a canonical must be on the
+# divergence list AND must differ from canonical (otherwise it's dead weight).
+while IFS= read -r workspace_copy; do
+    [[ -z "$workspace_copy" ]] && continue
+    ws_rel="${workspace_copy#${REPO_ROOT}/}"
+    skill_name="$(basename "$(dirname "$workspace_copy")")"
+    canonical="${SKILLS_ALL}/${skill_name}/SKILL.md"
 
-    # Find every workspace copy of the same skill
-    while IFS= read -r workspace_copy; do
-        [[ -z "$workspace_copy" ]] && continue
-        ws_rel="${workspace_copy#${REPO_ROOT}/}"
-        if ! diff -q "$canonical" "$workspace_copy" >/dev/null 2>&1; then
-            if is_allowed "$ws_rel"; then
-                ALLOWED_DRIFT=$((ALLOWED_DRIFT + 1))
-                echo "  ALLOWED: ${ws_rel} differs from ${rel} (in ${ALLOWLIST_FILE})"
-            else
-                DRIFT_FOUND=$((DRIFT_FOUND + 1))
-                echo ""
-                echo "DRIFT: ${ws_rel}"
-                echo "       differs from canonical: ${rel}"
-                echo "       (skill: ${skill_name})"
-                echo "       To fix: either copy canonical over the workspace file,"
-                echo "       or — if the divergence is intentional and tracked —"
-                echo "       add to ${ALLOWLIST_FILE} with a ' -- <reason>' tail."
-                # `|| true`: under `set -o pipefail`, head closing the pipe early
-                # makes diff exit non-zero (SIGPIPE), which would kill the loop.
-                { diff -u "$canonical" "$workspace_copy" 2>&1 | head -40 | sed 's/^/         /'; } || true
-            fi
+    # No canonical counterpart → workspace-only skill, out of scope.
+    [[ -f "$canonical" ]] || continue
+
+    if diff -q "$canonical" "$workspace_copy" >/dev/null 2>&1; then
+        # Workspace copy matches canonical exactly — dead shadow.
+        VIOLATIONS=$((VIOLATIONS + 1))
+        echo ""
+        echo "VIOLATION: ${ws_rel}"
+        echo "  Workspace SKILL.md is byte-identical to canonical (${skill_name})."
+        echo "  This is dual-edit burden with no per-agent value. Delete it:"
+        echo "    git rm -r \"$(dirname "$ws_rel")\""
+        echo "  The agent will fall through to skills-all/ via openclaw's rank-4 resolver."
+    else
+        # Workspace differs from canonical.
+        if is_listed "$ws_rel"; then
+            LISTED_OK=$((LISTED_OK + 1))
+            echo "  OK: ${ws_rel} intentionally diverges (listed in ${DIVERGENCE_FILE##*/})"
+        else
+            VIOLATIONS=$((VIOLATIONS + 1))
+            echo ""
+            echo "VIOLATION: ${ws_rel}"
+            echo "  Drifts from canonical skills-all/${skill_name}/SKILL.md without being listed."
+            echo "  To resolve:"
+            echo "    a) Delete the workspace shadow (preferred): git rm -r \"$(dirname "$ws_rel")\""
+            echo "    b) Reconcile workspace SKILL.md with canonical (cp + commit)"
+            echo "    c) Document intentional divergence: add to ${DIVERGENCE_FILE##*/} with a ' -- <reason>' tail"
+            # Show a snippet to help reviewers judge.
+            { diff -u "$canonical" "$workspace_copy" 2>&1 | head -20 | sed 's/^/    /'; } || true
         fi
-    # `find` stderr is left visible — this is the only CI gate against
-    # the dual-tree drift problem (memory feedback_skill_dual_tree.md);
-    # silencing errors here means a permissions/symlink failure could
-    # silently report "OK: no drift" while drift exists.
-    done < <(find "$WORKSPACES" -mindepth 4 -maxdepth 5 -type f \
-        -path "*/skills/${skill_name}/SKILL.md")
+    fi
+done < <(find "$WORKSPACES" -mindepth 4 -maxdepth 4 -type f -name SKILL.md -path "*/skills/*/SKILL.md")
 
-done < <(find "$SKILLS_ALL" -mindepth 2 -maxdepth 2 -type f -name SKILL.md)
+# Pass 2: every divergence-list entry must point to a real workspace SKILL.md
+# that actually differs from canonical (otherwise it's a stale entry).
+if [[ -n "$DIVERGENCE_PATHS" ]]; then
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        workspace_copy="${REPO_ROOT}/${entry}"
+        skill_name="$(basename "$(dirname "$workspace_copy")")"
+        canonical="${SKILLS_ALL}/${skill_name}/SKILL.md"
+
+        if [[ ! -f "$workspace_copy" ]]; then
+            VIOLATIONS=$((VIOLATIONS + 1))
+            echo ""
+            echo "VIOLATION: ${entry}"
+            echo "  Listed in ${DIVERGENCE_FILE##*/} but the workspace SKILL.md does not exist."
+            echo "  Remove the entry from ${DIVERGENCE_FILE##*/}."
+            continue
+        fi
+
+        if [[ ! -f "$canonical" ]]; then
+            VIOLATIONS=$((VIOLATIONS + 1))
+            echo ""
+            echo "VIOLATION: ${entry}"
+            echo "  Listed in ${DIVERGENCE_FILE##*/} but no canonical exists at skills-all/${skill_name}/SKILL.md."
+            echo "  Workspace-only skills don't need a divergence entry — remove it."
+            continue
+        fi
+
+        if diff -q "$canonical" "$workspace_copy" >/dev/null 2>&1; then
+            VIOLATIONS=$((VIOLATIONS + 1))
+            echo ""
+            echo "VIOLATION: ${entry}"
+            echo "  Listed in ${DIVERGENCE_FILE##*/} but content matches canonical byte-for-byte."
+            echo "  The divergence has been reconciled — remove the entry (and consider deleting the now-redundant workspace shadow)."
+        fi
+    done < <(printf '%s' "$DIVERGENCE_PATHS")
+fi
 
 echo ""
-if (( DRIFT_FOUND > 0 )); then
-    echo "FAIL: ${DRIFT_FOUND} unallowed SKILL.md drift(s) detected." >&2
-    if (( ALLOWED_DRIFT > 0 )); then
-        echo "(${ALLOWED_DRIFT} drift(s) allowed via ${ALLOWLIST_FILE} were ignored.)" >&2
+if (( VIOLATIONS > 0 )); then
+    echo "FAIL: ${VIOLATIONS} skill-drift violation(s) detected." >&2
+    if (( LISTED_OK > 0 )); then
+        echo "(${LISTED_OK} intentional divergence(s) on the documented list were accepted.)" >&2
     fi
     exit 1
 fi
 
-if (( ALLOWED_DRIFT > 0 )); then
-    echo "OK: no unallowed drift. (${ALLOWED_DRIFT} known drift(s) allow-listed for follow-up.)"
+if (( LISTED_OK > 0 )); then
+    echo "OK: no drift violations. (${LISTED_OK} intentional divergence(s) documented in ${DIVERGENCE_FILE##*/}.)"
 else
-    echo "OK: no SKILL.md drift between skills-all/ and workspaces/*/skills/."
+    echo "OK: no workspace skill shadows. All agents resolve through skills-all/ via openclaw's resolver."
 fi
 exit 0

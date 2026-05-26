@@ -75,15 +75,20 @@ skills, 5 orphan scripts, and a dead Gmail plugin (rationale + cleanup in issue 
 4. **Deterministic multi-step pipeline, no LLM in the loop**? → Lobster `.lobster`
    file invoked via `exec → bash wrapper.sh` (never agent → lobster direct)
 5. **Git push / PR open / CI**? → `.github/workflows/*.yml`
-6. **Procedure ≥2 agents need in-context**? → SKILL — **edit `skills-all/<name>/`
-   AND every `workspaces/<agent>/skills/<name>/` copy together**. Workspace copies
-   are **rank-1** in openclaw's resolver and **shadow** the canonical at agent-bind
-   time. If you edit `skills-all/` but leave a stale workspace copy, the agent keeps
-   loading the stale version — your edit doesn't reach production. Verified
-   2026-05-26: `ceo` loads `muso-clio` from `/opt/hydra/workspaces/ceo/skills/`,
-   NOT the rsync'd `/root/.openclaw/skills/`. The 38 drift-allowlist entries are
-   38 agents loading stale doctrine right now (tracked in #336). Drift has bitten
-   PRs #183, #187, #213.
+6. **Procedure ≥2 agents need in-context**? → SKILL in `skills-all/<name>/` only.
+   Workspace shadows under `workspaces/<agent>/skills/<name>/` are **forbidden**
+   by default — `scripts/check-skill-drift.sh` (gated by CI) will block any new
+   one. Workspace copies are **rank-1** in openclaw's resolver and **shadow** the
+   canonical at agent-bind time, so a shadow either silently duplicates canonical
+   (dual-edit burden) or silently freezes stale doctrine for the agent. Either way
+   it's a bug, which is why the default is "no shadows."
+   The only exception is when a single agent needs genuinely per-agent content
+   (e.g. `operations/muso-ops-admin` carries `config/tier2-godmode-allowlist.txt`
+   which must NOT propagate to canonical). For those, list the workspace
+   `SKILL.md` path in `.skill-workspace-divergence.txt` with a one-line reason,
+   and prepend a `<!-- WORKSPACE-DIVERGENCE: ... -->` HTML comment after the
+   frontmatter close. The 38 historical drift entries that bit us in PRs #183,
+   #187, #213 (and pre-#336) were exactly the absence of this rule.
 7. **One shell line**? → just call `exec` directly, no wrapper, no skill
 8. **Complex helper, agent + human callable, not Lobster-shaped**? → `scripts/`
    (one language per concern — don't add `foo.ts` next to `foo.sh`)

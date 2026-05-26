@@ -1,0 +1,26 @@
+# .skill-workspace-divergence.txt — workspaces/<agent>/skills/<name>/SKILL.md
+# paths that are INTENTIONALLY divergent from skills-all/<name>/SKILL.md.
+#
+# Format: <relative-path-to-workspace-SKILL.md> -- <reason>
+#
+# Semantics enforced by scripts/check-skill-drift.sh:
+#   1. Any workspaces/*/skills/<name>/SKILL.md whose <name> also exists in
+#      skills-all/ but is NOT on this list will fail CI — either delete the
+#      workspace shadow or add an entry here justifying the divergence.
+#   2. Any entry on this list whose workspace SKILL.md matches canonical
+#      byte-for-byte will fail CI — the divergence has been reconciled,
+#      remove the entry.
+#   3. Workspace skills with no canonical counterpart (e.g. cmo's
+#      muso-outreach-* subskills, sentinel/support skills) are out of scope
+#      of this check — no entry needed.
+#
+# Background: per memory `feedback_skill_dual_tree.md` + hydra/#336, the
+# default expectation is that every shared skill lives canonically in
+# `skills-all/` and is rsync'd by deploy.sh Step 4c into each profile's
+# managed-skills dir (`/root/.openclaw-<profile>/skills/<name>/`), which
+# openclaw resolves at tier 4. Workspace copies shadow at openclaw's tier 1,
+# so a workspace shadow silently freezes agent doctrine in place. This file
+# gates the exception cases explicitly.
+workspaces/cmo/skills/muso-outreach-engine/SKILL.md -- newer-than-canonical orchestrator (v4.0) depending on workspace-only muso-outreach-* subskills; backport/converge tracked separately
+workspaces/cmo/skills/muso-winback-engine/SKILL.md -- newer-than-canonical orchestrator (v2.0) depending on workspace-only muso-winback-* subskills; backport/converge tracked separately
+workspaces/operations/skills/muso-ops-admin/SKILL.md -- workspace contains tier2-godmode-allowlist.txt that MUST NOT propagate to canonical (would leak privilege to ceo/cmo/cto/caroline via tier-4 managed fallback); plus newer credit-verification hardened-exception block
