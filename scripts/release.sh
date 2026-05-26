@@ -28,6 +28,15 @@ DRY_RUN="${DRY_RUN:-0}"
 log() { echo "[release] $*"; }
 die() { echo "[release] ERROR: $*" >&2; exit 1; }
 
+# Distinct exit code for "no commits in range — nothing to release."
+# This is the intentionally-quiet case (no notes ⇒ no release) and the
+# cron's systemd service whitelists it via SuccessExitStatus=0 10 so
+# quiet weekday mornings don't fire a unit-failed alert. All OTHER
+# failure modes keep exit 1, so real failures stay loud (dirty tree,
+# auth failure, tag already exists, gh release create failure, etc.).
+# Caught in Clio's review of PR #340.
+exit_no_release() { echo "[release] $*" >&2; exit 10; }
+
 # ─── Parse args ─────────────────────────────────────────────────────
 VERSION=""
 NO_EDIT=0
@@ -212,7 +221,7 @@ TOTAL=$(( ${#FEAT_LINES[@]} + ${#FIX_LINES[@]} + ${#PERF_LINES[@]} + ${#REFACTOR
 
 if [[ "$TOTAL" -eq 0 ]]; then
   rm -f "$DRAFT_FILE"
-  die "no commits in $RANGE — nothing to release."
+  exit_no_release "no commits in $RANGE — nothing to release."
 fi
 
 log "Drafted $TOTAL commit(s) → $DRAFT_FILE"

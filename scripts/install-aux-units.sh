@@ -37,6 +37,25 @@
 #     detection lag was the dominant component of the outage's
 #     ops-silent window.
 #
+#   hydra-release.timer / .service
+#     Daily-release cron. Mon..Fri 08:00 Europe/Rome. Invokes
+#     scripts/release-cron.sh, which:
+#       1. cd's to a DEDICATED git checkout at /var/lib/hydra-release/
+#          (NOT /opt/hydra — that's the rsync target with no .git).
+#          Initialized below on first deploy, fetched + reset to
+#          origin/main on every fire.
+#       2. Date-gates the FIRST real fire to 2026-05-28T06:00Z
+#          (Thursday 8am Rome, CEST). Before that, the script logs
+#          "not yet active" and exits 0 — the gate lets the timer be
+#          enabled now without auto-publishing before Aaron has had
+#          a day to validate the manual v2026.5.26 cut.
+#       3. Execs release.sh --no-edit.
+#     SuccessExitStatus on the service whitelists exit 10 (release.sh's
+#     "no commits in range — nothing to release") but NOT exit 1 (all
+#     other failures, e.g. dirty tree, auth, push failed). Caught in
+#     Clio's review of PR #340; pre-fix `0 1` would have masked real
+#     broken-release failures as success.
+#
 # Also cleans up the retired `hydra-mcp-reap.{timer,service}` if
 # present on the host. That unit reaped orphan `mcp-remote`
 # subprocesses but sent SIGTERM to the gateway's own process group
@@ -73,6 +92,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/openclaw-config-write-audit.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/openclaw-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/openclaw-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 
 log "installing into $HYDRA_ROOT"
 
@@ -235,5 +256,96 @@ done
 for profile in main edge; do
   systemctl reset-failed "openclaw-gateway-${profile}.service" >/dev/null 2>&1 || true
 done
+
+# ─── Release checkout (dedicated git clone for the cron) ──────
+# release-cron.sh operates against THIS directory, NOT /opt/hydra
+# (which has no .git — RSYNC_EXCLUDES strips it). Initialize on
+# first deploy via `gh repo clone` so the credential helper that
+# `gh auth setup-git` configures works for subsequent git push
+# of the release tag. Idempotent: skipped if the .git dir already
+# exists on a re-run.
+#
+# Identity for annotated tag creation (release.sh: `git tag -a`).
+# Without user.{name,email}, `git tag -a` errors. Local config so
+# it doesn't leak into other root git operations on this host.
+# Caught in Clio's review of PR #340.
+RELEASE_REPO_PARENT="/var/lib/hydra-release"
+RELEASE_REPO_DIR="$RELEASE_REPO_PARENT/repo"
+if [[ ! -d "$RELEASE_REPO_DIR/.git" ]]; then
+  log "  initializing release checkout at $RELEASE_REPO_DIR..."
+  mkdir -p "$RELEASE_REPO_PARENT"
+  # Configure git to use gh's credential helper for HTTPS pushes
+  # (release.sh does `git push origin <tag>`). Requires `gh auth
+  # login` to have happened for root previously — release.sh's
+  # preflight will die loudly if not.
+  if ! gh auth setup-git >/dev/null 2>&1; then
+    log "  WARN: gh auth setup-git failed — release tag pushes may need credentials"
+  fi
+  if gh repo clone Muso-AI/hydra "$RELEASE_REPO_DIR" -- --quiet >/dev/null 2>&1; then
+    git -C "$RELEASE_REPO_DIR" config user.name "Hydra Release Bot"
+    git -C "$RELEASE_REPO_DIR" config user.email "releases@muso.ai"
+    log "  release checkout ready at $RELEASE_REPO_DIR"
+  else
+    log "  WARN: release checkout clone failed — hydra-release.service will refuse to fire until repaired"
+  fi
+else
+  log "  release checkout already present at $RELEASE_REPO_DIR (no re-clone needed)"
+fi
+
+# ─── Daily-release cron (Mon..Fri 08:00 Europe/Rome) ──────────
+# Invokes scripts/release-cron.sh (which lives in /opt/hydra/scripts/
+# — synced by Step 4b — but operates AGAINST $RELEASE_REPO_DIR).
+# Until 2026-05-28T06:00Z the wrapper logs "not yet active" and
+# exits 0; first real release is Thu 5/28.
+#
+# SuccessExitStatus=0 10: release.sh uses exit 10 (via
+# exit_no_release()) ONLY for "no commits in range — nothing to
+# release". Every other failure mode keeps exit 1, so systemd
+# will mark this unit as failed and alert on real breakage. The
+# pre-2026-05-26 form `SuccessExitStatus=0 1` was a foot-gun that
+# masked all release.sh failures as success (Clio's PR #340 review).
+cat > /etc/systemd/system/hydra-release.service << RELEASESVC
+[Unit]
+Description=Hydra daily release (cuts a tag + GH release off main)
+
+[Service]
+Type=oneshot
+# Wrapper cd's into \$RELEASE_REPO_DIR itself; no WorkingDirectory needed.
+ExecStart=$HYDRA_ROOT/scripts/release-cron.sh
+# Exit 10 = "no commits to release" (release.sh's exit_no_release).
+# Exit 1 = real failure (NOT whitelisted — surfaces as service failed).
+SuccessExitStatus=0 10
+# Keep gh + git working: HOME for gh's config, PATH for system tools.
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RELEASESVC
+
+cat > /etc/systemd/system/hydra-release.timer << RELEASETMR
+[Unit]
+Description=Cut a HYDRA release Mon..Fri at 08:00 Europe/Rome
+
+[Timer]
+# 08:00 Europe/Rome (CEST UTC+2 / CET UTC+1). systemd interprets
+# the timezone qualifier and DST shifts itself.
+OnCalendar=Mon..Fri *-*-* 08:00:00 Europe/Rome
+# Persistent=true: if hydra was down at 08:00, fire on next boot
+# (catches Tuesday-morning power blips). For releases this is the
+# right tradeoff — we'd rather fire late than skip.
+Persistent=true
+# Avoid the thundering herd if anything else triggers at 08:00.
+RandomizedDelaySec=30s
+Unit=hydra-release.service
+
+[Install]
+WantedBy=timers.target
+RELEASETMR
+
+systemctl daemon-reload
+
+tmr=hydra-release.timer
+systemctl enable "$tmr" >/dev/null 2>&1 || log "WARN: could not enable $tmr"
+systemctl start "$tmr" >/dev/null 2>&1 || log "WARN: could not start $tmr"
+state=$(systemctl is-active "$tmr" 2>/dev/null || echo unknown)
+log "  $tmr: $state (first real fire gated to 2026-05-28T06:00Z)"
 
 log "post-2026-05-05 hardening: drop-ins, write-audit, and 2-min watchdog cron installed."

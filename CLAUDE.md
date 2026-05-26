@@ -35,6 +35,18 @@ release branches, no canary; tag is a labeling event, not a gate).
   without tagging or publishing.
 - **No CHANGELOG.md**: GitHub releases are the changelog. Don't
   introduce a tracked CHANGELOG file.
+- **Cron**: `hydra-release.timer` fires Mon..Fri 08:00 Europe/Rome
+  on node-8, invoking `scripts/release-cron.sh`. The wrapper operates
+  against a **dedicated git checkout at `/var/lib/hydra-release/repo`**
+  — NOT `/opt/hydra/`, which is the rsync target and has no `.git`.
+  `install-aux-units.sh` initializes the checkout on first deploy
+  (clone via `gh repo clone` + local `user.name`/`user.email` for tag
+  identity). Each fire: `git fetch && git reset --hard origin/main`
+  then `release.sh --no-edit`. Date-gated to first fire on
+  2026-05-28T06:00Z; disable with
+  `systemctl disable --now hydra-release.timer` if commit-subject
+  hygiene goes bad. Inspect upcoming fires with
+  `systemctl list-timers hydra-release.timer`.
 
 ## Hot-patching skills on node-8
 
