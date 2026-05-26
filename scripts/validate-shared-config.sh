@@ -55,10 +55,16 @@ echo "Validating shared config across main and edge..."
 echo ""
 
 # Shared settings that MUST match
-# OpenRouter is the sole inference path across all profiles.
+# OpenRouter remains the fallback inference path across all profiles.
 compare_path "models.providers.openrouter.baseUrl" "OpenRouter base URL"
 compare_path "models.providers.openrouter.apiKey" "OpenRouter API key"
 compare_path "models.providers.openrouter.auth" "OpenRouter auth mode"
+# Codex (ChatGPT Pro OAuth) is the primary path for openai/gpt-* model refs.
+# Drift between main and edge on these blocks would mean one profile reaches
+# OpenAI direct and the other does not — silent provider asymmetry.
+compare_path "models.providers.openai" "OpenAI (Codex) provider block"
+compare_path "auth.order.openai" "OpenAI auth profile ordering"
+compare_path "plugins.entries.codex" "Codex harness plugin enable"
 compare_path "messages.queue" "Message queue config"
 compare_path "messages.ackReaction" "Message ack reaction"
 compare_path "messages.ackReactionScope" "Message ack reaction scope"

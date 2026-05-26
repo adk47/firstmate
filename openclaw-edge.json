@@ -16,10 +16,32 @@
     }
   },
   "auth": {
-    "profiles": {}
+    "profiles": {},
+    "order": {
+      "openai": [
+        "openai-codex:aaron@muso.ai",
+        "openai-codex:aaronkaufman@me.com"
+      ]
+    }
   },
   "models": {
     "providers": {
+      "openai": {
+        "models": [
+          {
+            "id": "gpt-5.5",
+            "name": "gpt-5.5",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 128000,
+            "reasoning": true,
+            "contextWindow": 1050000,
+            "api": "openai-completions"
+          }
+        ]
+      },
       "openrouter": {
         "baseUrl": "https://openrouter.ai/api/v1",
         "apiKey": {
@@ -271,11 +293,15 @@
   },
   "plugins": {
     "allow": [
+      "codex",
       "slack",
       "intercom",
       "support-tools"
     ],
     "entries": {
+      "codex": {
+        "enabled": true
+      },
       "slack": {
         "enabled": true
       },
