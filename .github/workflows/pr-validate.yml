@@ -13,6 +13,78 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Rebase staleness check — flag overlapping changes on main
+        # Why this gate exists: GitHub's "merge" button doesn't refuse to
+        # merge a PR that's behind main, even when both touch the same
+        # file. The squash-merge will auto-resolve textually if the edits
+        # are in different sections, and the post-merge deploy will run
+        # against the squashed state — but no CI run ever validated the
+        # combined state. PR #339 vs #330 (2026-05-26) is the canonical
+        # case: both edited deploy.sh + CLAUDE.md in different sections,
+        # the merge succeeded, the deploy was clean — but it was luck,
+        # not a tested invariant.
+        #
+        # This step fails when the PR branch is behind main AND touches
+        # at least one file that also changed on main since the branch
+        # diverged. It does NOT fail just for being behind main — only
+        # when behind + overlap, where rebasing is the cheapest way to
+        # make CI actually validate what merge will produce.
+        run: |
+          set -euo pipefail
+          echo "::group::Rebase staleness check"
+          base_ref="${{ github.event.pull_request.base.ref }}"
+          head_sha="${{ github.event.pull_request.head.sha }}"
+
+          # Fetch latest base to ensure origin/<base_ref> is current
+          # (actions/checkout pinned the ref at workflow-trigger time).
+          git fetch origin "$base_ref" --depth=200 --quiet
+
+          base_tip=$(git rev-parse "origin/${base_ref}")
+          merge_base=$(git merge-base "$head_sha" "$base_tip")
+
+          if [ "$merge_base" = "$base_tip" ]; then
+            echo "✓ Branch is up to date with $base_ref — no overlap check needed"
+            echo "::endgroup::"
+            exit 0
+          fi
+
+          behind=$(git rev-list --count "$head_sha..$base_tip")
+
+          # Files this PR touches relative to its divergence point
+          pr_files=$(git diff --name-only "${merge_base}...${head_sha}" | sort -u)
+          # Files changed on main since the PR branch diverged
+          base_files=$(git diff --name-only "${merge_base}..${base_tip}" | sort -u)
+          # Intersection
+          overlap=$(comm -12 <(echo "$pr_files") <(echo "$base_files") || true)
+
+          if [ -z "$overlap" ]; then
+            echo "Branch is $behind commit(s) behind $base_ref but touches no files"
+            echo "that also changed there — no rebase needed."
+            echo "(The CI run on this commit reflects pre-merge state; the merge's"
+            echo "actual diff has no textual conflict possible against this PR.)"
+            echo "::endgroup::"
+            exit 0
+          fi
+
+          echo "::endgroup::"
+          echo "::error::This PR's branch is $behind commit(s) behind $base_ref and touches files that also changed on $base_ref since the branch diverged. Rebase before merging so CI validates the actual post-merge state."
+          echo
+          echo "Overlapping files:"
+          echo "$overlap" | sed 's/^/  /'
+          echo
+          echo "Why this matters:"
+          echo "  Even when the squash-merge auto-resolves textually, CI never ran"
+          echo "  against the combined state. If both PRs touched the same logic in"
+          echo "  different sections of the same file, only a rebase + re-CI proves"
+          echo "  the merged result still passes."
+          echo
+          echo "Fix:"
+          echo "  git fetch origin $base_ref"
+          echo "  git rebase origin/$base_ref"
+          echo "  # resolve conflicts if any"
+          echo "  git push --force-with-lease"
+          exit 1
+
       - name: JSON Lint — validate gateway configs
         run: |
           echo "::group::Validating gateway configs"
