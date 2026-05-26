@@ -1177,6 +1177,21 @@ preflight_drift_check() {
     | awk '{ if (substr($0,2,1)=="f" && (substr($0,3,1)=="c" || substr($0,4,1)=="s")) print }' \
     | grep -F 'skills-all/' || true)
 
+  # Hot-patch acknowledgement: remove lines from $skills_drift (the
+  # in-memory rsync-itemize string, not the announce log) whose
+  # server-side sha256 was pre-announced by an operator on node-8
+  # within the ack window (default 1h). rsync still overwrites
+  # server bytes with repo HEAD bytes in Step 4b — this only
+  # suppresses the halt for files the operator explicitly
+  # pre-authorised. See scripts/lib/announce-skill-hot-patch.sh
+  # for the writer side and the 2026-05-26 deploy-26443889421
+  # incident for context.
+  # shellcheck source=lib/acknowledge-hot-patch-drift.sh
+  source "$SCRIPT_DIR/lib/acknowledge-hot-patch-drift.sh"
+  if [[ -n "$skills_drift" ]]; then
+    skills_drift=$(acknowledge_announced_hotpatches "$skills_drift")
+  fi
+
   # Deletions that --delete would perform on the server
   local deletions
   deletions=$(echo "$dry_out" | grep '^\*deleting' || true)

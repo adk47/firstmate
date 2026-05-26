@@ -20,3 +20,28 @@ treat it as a hypothesis to verify, not a fact to act on. Both can be wrong.
 This applies in both directions: when reviewers flag bugs that aren't real,
 and when I believe my own work is correct but a reviewer thinks otherwise.
 Disagreement is information; suppress it and we both lose signal.
+
+## Hot-patching skills on node-8
+
+Before editing any file under `/opt/hydra/skills-all/` directly on node-8
+(e.g. previewing a fix on the live server before merging the PR), announce
+the imminent write so the next deploy doesn't halt at Step 4a:
+
+```bash
+sha=$(sha256sum new-content.md | awk '{print $1}')
+ANNOUNCE_SHA="$sha" \
+  /opt/hydra/scripts/lib/announce-skill-hot-patch.sh nick \
+    /opt/hydra/skills-all/<path>
+install -m 644 new-content.md /opt/hydra/skills-all/<path>
+```
+
+The next deploy's pre-flight drift check accepts the divergence (rsync still
+overwrites server bytes with the PR's HEAD bytes — the announce only
+suppresses the halt, never the sync). Without an announcement, Step 4a
+halts with the existing `DEPLOY BLOCKED — skills-all/ content drift`
+runbook (`scripts/sync-from-server.sh skills --apply` → commit → re-deploy
+or `HYDRA_FORCE=1` after verification).
+
+Ack window is 1h by default (`HYDRA_HOTPATCH_ACK_WINDOW`); stale
+announcements stop shielding after that. See `scripts/lib/announce-skill-hot-patch.sh`
+and `scripts/lib/acknowledge-hot-patch-drift.sh`.
