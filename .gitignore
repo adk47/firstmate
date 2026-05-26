@@ -127,3 +127,8 @@ __pycache__/
 # binaries are not — same pattern as a build artifact. deploy.sh
 # RSYNC_EXCLUDES is the deploy-side backstop.
 *.mp3
+
+# Release notes scratch file. Written by scripts/release.sh between
+# "draft" and "gh release create", removed on success. Only ever
+# present mid-release on the operator's laptop.
+RELEASE_NOTES_DRAFT.md

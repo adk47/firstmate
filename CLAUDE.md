@@ -21,6 +21,21 @@ This applies in both directions: when reviewers flag bugs that aren't real,
 and when I believe my own work is correct but a reviewer thinks otherwise.
 Disagreement is information; suppress it and we both lose signal.
 
+## Releases
+
+Hydra cuts daily releases off `main` (mirroring openclaw's pattern — no
+release branches, no canary; tag is a labeling event, not a gate).
+
+- **Tag format**: `vYYYY.M.D` with no leading zero on month/day
+  (e.g., `v2026.5.26`). Multi-cut days append `.N` (`v2026.5.26.1`).
+- **How to cut**: `./scripts/release.sh` — opens generated notes in
+  `$EDITOR`, then tags, pushes, creates the GH release, and posts a
+  Block Kit announcement to #clio_devops via the devops bot.
+- **Dry-run**: `DRY_RUN=1 ./scripts/release.sh` previews the notes
+  without tagging or publishing.
+- **No CHANGELOG.md**: GitHub releases are the changelog. Don't
+  introduce a tracked CHANGELOG file.
+
 ## Hot-patching skills on node-8
 
 Before editing any file under `/opt/hydra/skills-all/` directly on node-8

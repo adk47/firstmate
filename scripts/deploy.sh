@@ -2095,6 +2095,10 @@ fi
 # Step 9: Post deploy status
 # -------------------------------------------------------------------
 COMMIT_SHA=$(git -C "$HYDRA_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+# `git describe` prints either the current tag (`v2026.5.26`) or the most
+# recent tag plus distance + sha (`v2026.5.26-3-gabc1234`). Bare commit-sha
+# fallback for the pre-first-release window where no tags exist yet.
+RELEASE_REF=$(git -C "$HYDRA_ROOT" describe --tags --always 2>/dev/null || echo "$COMMIT_SHA")
 log "Step 9/9: Posting deploy status..."
-notify_slack ":white_check_mark: HYDRA deployed successfully (target: $TARGET). Commit: $COMMIT_SHA"
+notify_slack ":white_check_mark: HYDRA deployed successfully (target: $TARGET). Release: $RELEASE_REF (sha: $COMMIT_SHA)"
 log "Deploy complete. Target: $TARGET. Commit: $COMMIT_SHA"

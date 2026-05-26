@@ -27,15 +27,19 @@
 : "${SLACK_CHANNEL:=C0ADV2W76G4}"
 : "${SLACK_NOTIFY_CONFIG:=/root/.openclaw-main/openclaw.json}"
 
-slack_notify() {
-  local msg="$1"
-  local token
-  token=$(python3 -c "
+_slack_read_token() {
+  python3 -c "
 import json
 with open('${SLACK_NOTIFY_CONFIG}') as f:
     c = json.load(f)
 print(c['channels']['slack']['accounts']['devops']['botToken'])
-" 2>/dev/null) || true
+" 2>/dev/null || true
+}
+
+slack_notify() {
+  local msg="$1"
+  local token
+  token=$(_slack_read_token)
 
   if [ -z "$token" ]; then
     # Best-effort: don't fail the caller. Pre-start-heal in particular
@@ -48,4 +52,23 @@ print(c['channels']['slack']['accounts']['devops']['botToken'])
     -H "Authorization: Bearer ${token}" \
     -H "Content-Type: application/json" \
     -d "{\"channel\":\"${SLACK_CHANNEL}\",\"text\":\"${msg}\"}" >/dev/null 2>&1 || true
+}
+
+# slack_notify_payload_file <path-to-json>
+# Posts the exact JSON payload at <path> via chat.postMessage. Caller is
+# responsible for the payload shape — typically {channel, text, blocks}.
+# Use this for Block Kit messages: build the JSON in Python (apostrophes
+# in commit subjects will break naive bash heredocs — see the 2026-05-07
+# api-evidence.sh apostrophe-in-heredoc burn).
+slack_notify_payload_file() {
+  local payload_file="$1"
+  [ -r "$payload_file" ] || return 0
+  local token
+  token=$(_slack_read_token)
+  [ -z "$token" ] && return 0
+
+  curl -sf -X POST "https://slack.com/api/chat.postMessage" \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json; charset=utf-8" \
+    --data-binary "@${payload_file}" >/dev/null 2>&1 || true
 }
