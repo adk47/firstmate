@@ -2,8 +2,8 @@
 name: gog
 description: Google Workspace CLI for Gmail, Calendar, Drive, Contacts, Sheets, and Docs.
 homepage: https://gogcli.sh
-snapshot-source: gogcli (https://gogcli.sh) — `gog` binary at /usr/local/bin/gog, brew formula steipete/tap/gogcli
-snapshot-date: 2026-04-24
+snapshot-source: gogcli (https://gogcli.sh) — `gog` binary at /usr/local/bin/gog, brew formula steipete/tap/gogcli. Verified against v0.12.0.
+snapshot-date: 2026-05-25
 metadata:
   {
     "openclaw":
@@ -56,14 +56,38 @@ Common commands
 - Calendar update event: `gog calendar update <calendarId> <eventId> --summary "New Title" --event-color 4`
 - Calendar show colors: `gog calendar colors`
 - Drive search: `gog drive search "query" --max 10`
+- Drive ls: `gog drive ls --account a@muso.ai`
+- Drive upload: `gog drive upload <localPath> --account a@muso.ai --json`
+- Drive mkdir: `gog drive mkdir "<folderName>" --account a@muso.ai`
+- Drive share: `gog drive share <fileId> --email <requester@domain> --role writer --account a@muso.ai` (gog `writer` = Google UI's "Editor"; other valid value is `reader`)
+- Drive permissions: `gog drive permissions <fileId> --account a@muso.ai`
+- Drive url: `gog drive url <fileId>`
+- Drive delete: `gog drive delete <fileId> --account a@muso.ai`
 - Contacts: `gog contacts list --max 20`
+- Sheets create: `gog sheets create "<title>" --account a@muso.ai --json` (returns `spreadsheetId` + `spreadsheetUrl`)
 - Sheets get: `gog sheets get <sheetId> "Tab!A1:D10" --json`
 - Sheets update: `gog sheets update <sheetId> "Tab!A1:B2" --values-json '[["A","B"],["1","2"]]' --input USER_ENTERED`
 - Sheets append: `gog sheets append <sheetId> "Tab!A:C" --values-json '[["x","y","z"]]' --insert INSERT_ROWS`
 - Sheets clear: `gog sheets clear <sheetId> "Tab!A2:Z"`
 - Sheets metadata: `gog sheets metadata <sheetId> --json`
+- Sheets add-tab: `gog sheets add-tab <sheetId> "<tabName>"`
+- Sheets export: `gog sheets export <sheetId> --format csv --out /tmp/x.csv` (also `xlsx`, `pdf`)
 - Docs export: `gog docs export <docId> --format txt --out /tmp/doc.txt`
 - Docs cat: `gog docs cat <docId>`
+
+Sheet / Drive creation policy
+
+- Default `--account a@muso.ai` for any sheet or drive *create*. Never use the
+  `hydra-automation` service account for Drive ops — it has zero Drive quota
+  and is scoped to Gmail only (writes will fail with `storageQuota` /
+  permission-denied).
+- When creating a sheet or file on behalf of a requester, immediately share
+  with the requester's email at `writer` role (= Google UI's "Editor"):
+  `gog drive share <fileId> --email <requester> --role writer --account a@muso.ai`.
+- Typical end-to-end pattern: `sheets create "Title"` → capture `spreadsheetId`
+  → `sheets append <id> "Sheet1!A:Z" --values-json '[[...]]'` →
+  `drive share <id> --email <requester> --role writer`.
+- Confirm before sharing externally (recipient not on `@muso.ai`).
 
 Calendar Colors
 

@@ -34,6 +34,7 @@
 - Full access to Gmail, Sheets, Drive, Docs via the `gog` CLI on the host
 - Auth: OAuth tokens for `a@muso.ai`, `f@muso.ai`, `ak@muso.ai`, `aaron.k@muso.ai` pre-configured in the server keyring; `GOG_KEYRING_PASSWORD` is injected via the gateway service env — no extra setup needed inside agent turns.
 - Use for: contract/invoice emails (`muso-contract-invoicer`), financial report exports, reading shared finance Sheets
+- Sheet / Drive *create* (e.g., new report sheet, share invoice PDF): default `--account a@muso.ai`, then `gog drive share <fileId> --email <requester> --role writer`. Never use `hydra-automation` SA for Drive — quota 0.
 - Full command reference: `skills/gog/SKILL.md`
 
 ## Slack

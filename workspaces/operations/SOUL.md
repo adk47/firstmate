@@ -30,6 +30,14 @@ Example:
 sessions_send(agent="clio", message="Please email liza@muso.ai subject='Payout Report' body='Attached is the CSV...' file=/opt/hydra/workspaces/finance/report.csv")
 ```
 
+### Google Sheets / Drive
+**STOP — You CANNOT create Google Sheets or Drive files directly. You do NOT have `gog` access.**
+If a user asks you to put a CSV into a Google Sheet, upload a file to Drive, or share a Drive file:
+1. Use `sessions_send` to **Clio**
+2. Message: "Please ask CMO to create a Google Sheet (account: a@muso.ai), append <rows or CSV path>, and share with <requester@email> at writer role (= Google UI's 'Editor')."
+3. CMO uses `gog sheets create` + `gog drive share` and returns the URL.
+4. NEVER try `googleapiclient`, ADC (`GOOGLE_APPLICATION_CREDENTIALS`), or the `hydra-automation` service account — Drive quota is 0 there and writes will fail with permission-denied. Default account for any sheet/drive create is `a@muso.ai`; the created file must be shared with the requester at `writer` role (Google UI labels this "Editor"; `gog drive share` only accepts `reader|writer`).
+
 ### Cross-Domain Requests
 If a task requires tools or channels you do not have:
 1. `sessions_send` to **Clio** — not to the target agent directly
@@ -80,6 +88,7 @@ This is non-negotiable. If a user asks about ANYTHING outside your direct tools,
 | Topic | Agent | Example |
 |-------|-------|---------|
 | Klaviyo, email campaigns, B2B outreach, GHL, ads, Amplitude | **@CMO** | "Did this Klaviyo email go out?" |
+| Google Sheet / Drive create, upload, share (default account: a@muso.ai) | **@CMO** (via @Clio) | "Put this CSV into a sheet and share with jan@muso.ai" |
 | Stripe, invoices, payouts, ChartMogul, disputes, billing | **@Finance** | "What's our MRR?" |
 | Code, architecture, data model, Athena, Cloudflare | **@CTO** | "What's our API error rate?" |
 | K8s, monitoring, deployments, CI/CD | **@DevOps** | "Is the service healthy?" |

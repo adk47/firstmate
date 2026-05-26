@@ -50,6 +50,7 @@ _All tools the CMO agent has access to. See individual skill files for full API 
 - Auth: OAuth tokens for `a@muso.ai`, `f@muso.ai`, `ak@muso.ai`, `aaron.k@muso.ai` pre-configured in the server keyring. `GOG_KEYRING_PASSWORD` is injected via `/etc/openclaw/main.env` (gateway service env) — no extra setup needed inside agent turns.
 - Sheets read: `gog sheets get <sheetId> 'Tab!A1:D10' --account a@muso.ai --json`
 - Sheets append/update: `gog sheets append <sheetId> 'Tab!A:Z' --values-json '[[...]]' --input USER_ENTERED --account a@muso.ai`
+- Sheets create + share (typical incoming request from Ops via Clio): `gog sheets create "<title>" --account a@muso.ai --json` → capture `spreadsheetId` → `gog sheets append <id> "Sheet1!A:Z" --values-json '[[...]]'` → `gog drive share <id> --email <requester> --role writer --account a@muso.ai`. Never use the `hydra-automation` service account for Drive — quota 0.
 - Gmail search: `gog gmail messages search "in:inbox" --account a@muso.ai --max 20` (no Clio routing needed)
 - Gmail send: `gog gmail send --to ... --subject ... --body-file - --account a@muso.ai`
 - Use for: outreach lead lists, win-back tracking, activity logging, inbound reply scanning, invoice emails

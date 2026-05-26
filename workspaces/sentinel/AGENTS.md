@@ -10,9 +10,11 @@ Read-only queries to the coordinator only. Two-step RPC flow:
 2. `sessions.send({ key: "agent:clio:main", message: "..." })`
 
 - You do NOT communicate with other agents directly.
-- Pass `timeoutMs: 90000` on `sessions.send`. A cold coordinator may take
-  40-80s on its first turn (system-prompt recompile + cold cache); steady
-  state is 5-15s. 30s is only safe if you know Clio is already warm.
+- Pass `timeoutMs: 300000` on `sessions.send`. A cold coordinator may take
+  40-80s on first turn (system-prompt recompile + cold cache), longer when
+  Clio relays to a peer running multi-step shell work; steady state is
+  5-15s. 60-90s is only safe if you know Clio is already warm and the
+  question is single-shot.
 - If the reply hasn't arrived by the timeout, the send is NOT lost. Use
   `sessions.messages.subscribe({ key })` to poll; do NOT retry the send
   (retrying double-enqueues).

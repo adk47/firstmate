@@ -4,6 +4,7 @@
 - Full access to Google Drive, Docs, Sheets, Calendar
 - Use for board deck preparation, strategy documents, meeting scheduling
 - Aaron's primary workspace for document collaboration
+- Sheet / Drive *create*: default `--account a@muso.ai`, then `gog drive share <fileId> --email <requester> --role writer`. Never use `hydra-automation` SA for Drive — quota 0.
 
 ## ClickUp
 - **Team ID**: 2283334
