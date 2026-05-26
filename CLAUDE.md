@@ -45,3 +45,68 @@ or `HYDRA_FORCE=1` after verification).
 Ack window is 1h by default (`HYDRA_HOTPATCH_ACK_WINDOW`); stale
 announcements stop shielding after that. See `scripts/lib/announce-skill-hot-patch.sh`
 and `scripts/lib/acknowledge-hot-patch-drift.sh`.
+
+## Picking the right extension mechanism
+
+Before writing new code in this repo, walk this decision tree top-down and stop at
+the first YES. Picking the wrong mechanism is how this repo accumulated 38 drifted
+skills, 5 orphan scripts, and a dead Gmail plugin (rationale + cleanup in issue #329).
+
+1. **External event into the gateway** (Slack / Intercom channel / `/hooks/agent` webhook)? → openclaw plugin in `plugins/<name>/`
+2. **External MCP server I don't own**? → wire via `mcp.servers` in
+   `openclaw-*.json` (transport: `streamable-http`)
+3. **Wall-clock schedule, no human in the loop**? → openclaw cron in
+   `cron-jobs.json` (sessionTarget=main)
+4. **Deterministic multi-step pipeline, no LLM in the loop**? → Lobster `.lobster`
+   file invoked via `exec → bash wrapper.sh` (never agent → lobster direct)
+5. **Git push / PR open / CI**? → `.github/workflows/*.yml`
+6. **Procedure ≥2 agents need in-context**? → SKILL — **edit `skills-all/<name>/`
+   AND every `workspaces/<agent>/skills/<name>/` copy together**. Workspace copies
+   are **rank-1** in openclaw's resolver and **shadow** the canonical at agent-bind
+   time. If you edit `skills-all/` but leave a stale workspace copy, the agent keeps
+   loading the stale version — your edit doesn't reach production. Verified
+   2026-05-26: `ceo` loads `muso-clio` from `/opt/hydra/workspaces/ceo/skills/`,
+   NOT the rsync'd `/root/.openclaw/skills/`. The 38 drift-allowlist entries are
+   38 agents loading stale doctrine right now (tracked in #336). Drift has bitten
+   PRs #183, #187, #213.
+7. **One shell line**? → just call `exec` directly, no wrapper, no skill
+8. **Complex helper, agent + human callable, not Lobster-shaped**? → `scripts/`
+   (one language per concern — don't add `foo.ts` next to `foo.sh`)
+9. **Claude Code research persona**? → `.claude/agents/<name>.md`
+
+### Anti-patterns that have bitten us
+
+- Skill wrapping a single bash command → inline in SOUL.md or call `exec` directly
+- Plugin exposing one tool with no callbacks → that's a script behind JSON-RPC
+- Agent → lobster tool direct → schema bleed forces hallucinated `flowId`; use
+  `exec → bash wrapper → /tools/invoke`
+- Hand-rolled session pruning / log rotation / cron maintenance → grep openclaw
+  config for a native key first (`session.maintenance`, `statusReactions`,
+  `tools.deny`, `extra_body.plugins`, `/hooks/agent`)
+- `before_tool_call` hook as YOLO-mode safety → silent no-op for exec; enforce at
+  the bash boundary instead
+- Writing to `/root/.openclaw-*/openclaw.json` out of band → must call
+  `announce-legit-write.sh` first or the audit watcher fires a Slack false-positive
+- GH Actions for runtime ops (as opposed to CI gates) → has caused two-CD-paths
+  drift before
+
+### Specialist subagents (in `.claude/agents/`)
+
+When uncertain about *which* mechanism to use, or when authoring a skill or plugin,
+route to the right specialist instead of guessing:
+
+- `hydra-extension-picker` — "where does this go?" / "plugin or skill?" questions
+- `hydra-skill-author` — creating, editing, or copying a SKILL (enforces dual-tree
+  rule, `exec` allowed-tools naming, Lobster wrapper pattern)
+- `hydra-plugin-author` — creating or editing an in-tree plugin under `plugins/`
+  (enforces openclaw 2026.5.x packaging contract: `dist/index.js`, build script,
+  pnpm-lock against deploy SDK)
+- `openclaw-expert` — any general OpenClaw infrastructure question (gateway config,
+  hooks, cron, /tools/invoke, model fallback, session lifecycle)
+
+### When in doubt
+
+- The decision tree exists because past me kept getting it wrong. Trust the tree.
+- If the new work feels like it spans multiple buckets, it probably needs to be
+  split.
+- The full rationale lives in GitHub issue #329 (the consolidation issue).
