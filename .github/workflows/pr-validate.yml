@@ -9,7 +9,7 @@ jobs:
     runs-on: [self-hosted, hydra]
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -427,7 +427,7 @@ jobs:
     runs-on: [self-hosted, hydra]
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Rsync dry-run against /opt/hydra/
         # This is a "shift-left" copy of scripts/deploy.sh Step 4a. The
@@ -677,7 +677,7 @@ jobs:
     runs-on: [self-hosted, hydra]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Ensure bats + jq installed
         run: |
@@ -721,7 +721,7 @@ jobs:
     runs-on: [self-hosted, hydra]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: py_compile every .py file in operational paths
         run: |
           set -euo pipefail
@@ -753,7 +753,7 @@ jobs:
     runs-on: [self-hosted, hydra]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Ensure pnpm available
         # The hydra runner doesn't have pnpm pre-installed (the gateway
         # uses `openclaw plugins install` which handles deps internally,
@@ -870,7 +870,7 @@ jobs:
     runs-on: [self-hosted, hydra]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Ensure shellcheck installed
         run: |
