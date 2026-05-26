@@ -4,7 +4,7 @@ import type { HttpClient } from "../http.js";
 import type { RateLimiter } from "../rate-limiter.js";
 
 const Parameters = Type.Object({
-  actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, profile-claim, support-general, analytics-followup, profile-merge, bulk-credit-change, profile-update, subscription-refund, data-deletion, dispute, data-export" }),
+  actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, profile-claim, support-general, analytics-followup, profile-merge, unmerge-request, bulk-credit-change, profile-update, subscription-refund, data-deletion, dispute, data-export" }),
   customerEmail: Type.String({ description: "Customer's email address" }),
   summary: Type.String({ description: "Plain English description of what the customer is requesting" }),
   customerProfileId: Type.Optional(Type.String({ description: "Customer's Muso profile ID, if known from profile_lookup" })),
@@ -34,7 +34,7 @@ function ticketResult(r: CreateTicketResult): AgentToolResult<unknown> {
 
 const TIER_MAP: Record<string, number> = {
   "credit-claim": 1, "credit-correction": 1, "profile-claim": 1, "support-general": 1, "analytics-followup": 1,
-  "profile-merge": 2, "bulk-credit-change": 2, "profile-update": 2,
+  "profile-merge": 2, "unmerge-request": 2, "bulk-credit-change": 2, "profile-update": 2,
   "subscription-refund": 3, "data-deletion": 3, "dispute": 3, "data-export": 3,
 };
 

@@ -7,10 +7,11 @@ import { createCreditsSearchTool } from "./tools/credits-search.js";
 import { createCreateTicketTool } from "./tools/create-ticket.js";
 import { createSubscriptionStatusTool } from "./tools/subscription-status.js";
 import { createProfileStatusTool } from "./tools/profile-status.js";
+import { createRemoveCreditsTool, DEFAULT_REMOVE_CREDITS_SCRIPT } from "./tools/remove-credits.js";
 export default definePluginEntry({
   id: "support-tools",
   name: "Support Agent Tools",
-  description: "Profile lookup, credits search, ticket creation, and subscription status tools for the support agent.",
+  description: "Support agent tools: profile lookup/status, credits search, subscription status, ticket creation, and self-service credit removal.",
   register(api: any) {
     // OpenClaw passes the entry's `config` block (from
     // openclaw-*.json plugins.entries["support-tools"].config) as
@@ -98,5 +99,16 @@ export default definePluginEntry({
       });
     };
     api.registerTool(createTicketFactory, { name: "create_ticket" });
+
+    const removeCreditsScriptPath =
+      pluginConfig.removeCreditsScriptPath ?? DEFAULT_REMOVE_CREDITS_SCRIPT;
+    const removeCreditsFactory = (ctx: any) => {
+      return createRemoveCreditsTool({
+        scriptPath: removeCreditsScriptPath,
+        rateLimiter,
+        sessionId: ctx.sessionId ?? "unknown",
+      });
+    };
+    api.registerTool(removeCreditsFactory, { name: "remove_credits" });
   },
 });

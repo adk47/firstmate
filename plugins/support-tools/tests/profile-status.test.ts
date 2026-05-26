@@ -67,12 +67,59 @@ describe("profile_status", () => {
       id: "p1",
       name: "Aasis Beats",
       verified: true,
+      isClaimed: true,
       primary_role: "Producer",
       credits_count: 142,
+      workspaces: [],
+      knownAsNames: [],
     });
     // sorted by releaseDate desc: A (May 8), C (May 2), B (Apr 30)
     expect(out.latest_credits.map((c: any) => c.track)).toEqual(["Track A", "Track C", "Track B"]);
     expect(out.latest_credit_date).toBe("2026-05-08");
+  });
+
+  it("exposes workspaces[] and knownAsNames for ownership-check (customer-credit-removal)", async () => {
+    const adminClient = makeAdminClient({
+      get: vi.fn(async (path: string) => {
+        if (path.includes("/profile/p9/credits")) {
+          return {
+            ok: true,
+            status: 200,
+            data: { data: { items: [], totalCount: 0, hasMoreToLoad: false } },
+          } as AdminClientResult<unknown>;
+        }
+        if (path.includes("/profile/p9")) {
+          return {
+            ok: true,
+            status: 200,
+            data: {
+              data: {
+                id: "p9",
+                name: "Achille G",
+                isClaimed: true,
+                commonCredits: ["Producer"],
+                creditCount: 17,
+                knownAsNames: ["Achille G", "Achille"],
+                workspaces: [
+                  { isClaimed: true, email: "owner@example.com" },
+                  { isClaimed: false, email: "other@example.com" },
+                ],
+              },
+            },
+          } as AdminClientResult<unknown>;
+        }
+        return { ok: true, status: 200, data: {} } as AdminClientResult<unknown>;
+      }) as MusoAdminClient["get"],
+    });
+    const tool = createProfileStatusTool(makeDeps({ adminClient }));
+    const out = await call(tool, { profile_id: "p9" });
+    expect(out.found).toBe(true);
+    expect(out.profile.isClaimed).toBe(true);
+    expect(out.profile.knownAsNames).toEqual(["Achille G", "Achille"]);
+    expect(out.profile.workspaces).toEqual([
+      { email: "owner@example.com", isClaimed: true },
+      { email: "other@example.com", isClaimed: false },
+    ]);
   });
 
   it("returns no_match when search returns empty data array", async () => {

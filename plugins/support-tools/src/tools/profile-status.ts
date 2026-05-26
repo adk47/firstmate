@@ -130,18 +130,40 @@ async function fetchCreditsAndAssemble(
     .sort((a, b) => b.date.localeCompare(a.date))
     .slice(0, 3);
 
+  // Ownership-check fields for the customer-credit-removal skill's Step 2
+  // (PR #337 review item #5). Workspace emails here are the profile-owner's
+  // own emails (Caroline already sees the same email via Intercom contact),
+  // not third-party PII, so safe to expose. Each workspace is reduced to
+  // the two fields the skill actually reads.
+  const rawWorkspaces = Array.isArray(profileRow.workspaces) ? profileRow.workspaces : [];
+  const workspaces = rawWorkspaces.map((w) => {
+    const ws = w as Record<string, unknown>;
+    return {
+      email: String(ws.email ?? ""),
+      isClaimed: Boolean(ws.isClaimed),
+    };
+  });
+  const rawKnownAs = Array.isArray(profileRow.knownAsNames) ? profileRow.knownAsNames : [];
+  const knownAsNames = rawKnownAs.map((n) => String(n));
+
   const output = {
     found: true,
     profile: {
       id: profileId,
       name: String(profileRow.name ?? ""),
+      // `verified` is the legacy collapsed boolean (kept for back-compat);
+      // `isClaimed` is the raw upstream field that the ownership-check
+      // chain in remove-credits.sh reads.
       verified: Boolean(profileRow.isClaimed ?? profileRow.verified),
+      isClaimed: Boolean(profileRow.isClaimed),
       primary_role: (() => {
         const cc = profileRow.commonCredits;
         if (Array.isArray(cc) && cc.length > 0) return String(cc[0]);
         return String(profileRow.role ?? profileRow.primaryRole ?? "");
       })(),
       credits_count: Number(profileRow.creditCount ?? profileRow.creditsCount ?? 0),
+      workspaces,
+      knownAsNames,
     },
     latest_credits: latest,
     latest_credit_date: latest[0]?.date ?? "",

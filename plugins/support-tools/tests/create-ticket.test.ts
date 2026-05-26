@@ -6,6 +6,7 @@ import { RateLimiter } from "../src/rate-limiter.js";
 describe("getTierForAction", () => {
   it("returns tier 1 for credit-claim", () => { expect(getTierForAction("credit-claim")).toBe(1); });
   it("returns tier 2 for profile-merge", () => { expect(getTierForAction("profile-merge")).toBe(2); });
+  it("returns tier 2 for unmerge-request", () => { expect(getTierForAction("unmerge-request")).toBe(2); });
   it("returns tier 3 for data-deletion", () => { expect(getTierForAction("data-deletion")).toBe(3); });
   it("defaults to tier 1 for unknown action types", () => { expect(getTierForAction("unknown-action")).toBe(1); });
 });

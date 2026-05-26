@@ -1,14 +1,15 @@
 {
   "id": "support-tools",
   "name": "Support Agent Tools",
-  "description": "Profile lookup, credits search, ticket creation, profile status, and subscription status tools for the support agent.",
+  "description": "Profile lookup, credits search, ticket creation, profile status, subscription status, and self-service credit-removal tools for the support agent.",
   "contracts": {
     "tools": [
       "profile_lookup",
       "credits_search",
       "profile_status",
       "subscription_status",
-      "create_ticket"
+      "create_ticket",
+      "remove_credits"
     ]
   },
   "configSchema": {

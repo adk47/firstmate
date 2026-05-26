@@ -77,8 +77,9 @@ Customer [name/email] requests: [plain English summary]
 | `credit-claim` | 1 | 2 business days | "I produced this track, add my credit" |
 | `credit-correction` | 1 | 2 business days | "My role is listed wrong" |
 | `profile-claim` | 1 | 2 business days | "I want to claim this profile" |
-| `support-general` | 1 | 2 business days | General questions needing ops follow-up |
+| `support-general` | 1 | 2 business days | General questions needing ops follow-up. **Also used for human-handoff bail-outs** — when the customer asks for a human, gets frustrated, or the conversation loops, file with `details.escalation_reason` (see "Human Handoff" section below). |
 | `profile-merge` | 2 | 5 business days | "I have two profiles, combine them" (require `main_profile_url` and `duplicate_profile_urls[]` in `details` – no self-service merge UI exists, so URLs are the only way ops can act) |
+| `unmerge-request` | 2 | 5 business days | Caroline-flagged: customer asked to remove tracks, but most listed tracks share an artist not on the profile — likely a wrong merge. See "Unmerge Request" section below for required `details` shape. |
 | `bulk-credit-change` | 2 | 5 business days | "Update credits on multiple tracks" |
 | `profile-update` | 2 | 5 business days | "Change my profile name/details" |
 | `subscription-refund` | 3 | 5-10 business days | "I want a refund" |
@@ -110,6 +111,68 @@ Example `details` block:
   ]
 }
 ```
+
+### Human Handoff (`support-general` with `escalation_reason`)
+
+When the customer-credit-removal skill (or any future skill) decides to bail out and hand off to a teammate, file `support-general` with a `details.escalation_reason`:
+
+| `escalation_reason` | Trigger | Notes |
+|---------------------|---------|-------|
+| `customer_requested_human` | Customer said "talk to a human", "let me speak to a manager", "are you a bot", or any explicit ask for a person | Highest-priority signal — file immediately |
+| `frustration_detected` | Profanity, "this is ridiculous/frustrating", "I'm done", "wasting my time" | The customer may not have asked for a human explicitly but is clearly stuck |
+| `loop_detected` | 3+ back-and-forth turns without resolution, OR customer restated same complaint twice without progress | Caroline isn't getting them unblocked; human eyes needed |
+
+Required `details` block:
+
+```json
+"details": {
+  "escalation_reason": "customer_requested_human",
+  "original_ask": "<plain-English summary of what they were trying to do>",
+  "conversation_excerpt": "<verbatim last ~3 customer turns, redact obvious PII>"
+}
+```
+
+Customer-facing reply: *"Sorry this has been frustrating — I've passed you over to one of our teammates, they'll pick this up shortly."*
+
+After filing, **stop the current skill flow.** Don't propose further fixes or ask more clarifying questions. The teammate will take over.
+
+### Unmerge Request (`unmerge-request` only)
+
+Filed by the `customer-credit-removal` skill when it detects that a customer's "remove these tracks" request looks like a wrong-merge case. Trigger: 10+ listed tracks share a single primary artist NOT on the profile's roster (i.e., not in `profile.name` or `profile.knownAsNames`), AND the profile owner has no production-side role on those tracks (see canonical role list below). Caroline does NOT execute the unmerge — Aaron approval is required (see `muso-ops-profiles/SKILL.md`). This ticket gives Aaron pre-fetched context so he can decide in seconds.
+
+**Canonical production-side role list** (used by Caroline's unmerge-detection AND by the wrapper script's `refused_production_role_on_track` guard):
+
+`Producer`, `Co-Producer`, `Songwriter`, `Composer`, `Lyricist`, `Mixing`, `Mixing Engineer`, `Mastering`, `Mastering Engineer`, `Engineer`, `Recording Engineer`, `Arranger`.
+
+The wrapper script enforces this list mechanically per row — if a customer asks to remove a track where their profile holds any of these roles, the script refuses with `refused_production_role_on_track` and Caroline routes to `action-request` (`credit-correction`) for ops review. The list is the same in both places by design; if you update one, update the other.
+
+**False-positive guardrail (do NOT file `unmerge-request` for these)**:
+- Producer / songwriter / engineer profiles where the profile owner's `credits[]` on most tracks is one of the production-side roles above. Producers and writers legitimately appear on records where they aren't the primary artist — that's the work they do. If you're tempted to file `unmerge-request` for a profile like this, stop and re-check the role distribution before escalating. This was the ticket 869ck6tv6 lesson.
+
+Required `details` block (everything Caroline can supply from `profile_status` + the conversation):
+
+```json
+"details": {
+  "suspect_artist_names": ["Don Pero"],
+  "suspect_track_count": 12,
+  "total_listed_count": 17,
+  "profile_name": "Achille G",
+  "profile_known_as": ["Achille G", "Achille"],
+  "customer_verbatim_request": "Hey, can you remove these tracks from my profile, they're not mine: ...",
+  "suggested_action": "investigate_as_unmerge"
+}
+```
+
+Fields:
+- `suspect_artist_names[]` — the artist(s) Caroline flagged as not belonging on the profile
+- `suspect_track_count` — how many of the listed tracks share that artist
+- `total_listed_count` — total tracks the customer asked about (the ratio matters)
+- `profile_name`, `profile_known_as[]` — what the profile is supposed to be (read from `profile.name` and `profile.knownAsNames` in the `profile_status` response)
+- `customer_verbatim_request` — the customer's words, unmodified
+- `suggested_action` — currently always `"investigate_as_unmerge"`; reserved for future enums
+
+**Not supplied by Caroline** — fetched by ops at triage time:
+- `raw_profile_sources[]` — the upstream sources this profile pulls from. `profile_status` doesn't expose `rawProfiles[]`, so Caroline can't include it. Ops fetches it directly via the admin API when investigating (it's the load-bearing field for "which raw_profile brought the unwanted tracks in").
 
 ### Retention Context (subscription-refund only)
 
