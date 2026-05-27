@@ -162,6 +162,25 @@ jobs:
           fi
           echo "::endgroup::"
 
+      - name: OpenRouter model ref resolvability
+        # Validates every "openrouter/X" model ref in configs against
+        # GET /v1/models/:id/endpoints — catches "syntactically fine but
+        # provider-unroutable" model IDs that validate-shared-config.sh +
+        # validate-config-matrix.sh both miss (PR #351 review lesson).
+        # Skips with a non-fatal WARN when OPENROUTER_API_KEY isn't set
+        # in CI secrets — wire the secret to activate enforcement.
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          echo "::group::OpenRouter model ref resolvability"
+          if [ -f scripts/validate-openrouter-models.sh ]; then
+            chmod +x scripts/validate-openrouter-models.sh
+            ./scripts/validate-openrouter-models.sh
+          else
+            echo "validate-openrouter-models.sh not found — skipping"
+          fi
+          echo "::endgroup::"
+
       - name: Workload-driven matrix invariants
         # Pins the agent × model × thinking matrix established in PR
         # #220 against silent regression. Encodes:

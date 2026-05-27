@@ -75,7 +75,7 @@ for prof in main edge; do
   if [ "$pin" != "codex" ]; then
     fail "openclaw-${prof}.json: models.providers.openai.agentRuntime.id must be \"codex\" (got: $pin)"
   else
-    ok "openclaw-${prof}.json: agentRuntime pinned to codex"
+    pass "openclaw-${prof}.json: agentRuntime pinned to codex"
   fi
 done
 compare_path "messages.queue" "Message queue config"

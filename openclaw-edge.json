@@ -136,10 +136,9 @@
         "default": true,
         "workspace": "/opt/hydra/workspaces/support",
         "model": {
-          "primary": "openrouter/openai/gpt-5.5",
+          "primary": "openai/gpt-5.5",
           "fallbacks": [
-            "openrouter/anthropic/claude-haiku-4.5",
-            "openrouter/openai/gpt-5.4-mini"
+            "openrouter/anthropic/claude-4.6-sonnet-20260217"
           ]
         },
         "thinkingDefault": "medium",
