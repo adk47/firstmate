@@ -579,7 +579,12 @@
     ],
     "entries": {
       "codex": {
-        "enabled": true
+        "enabled": true,
+        "config": {
+          "appServer": {
+            "mode": "yolo"
+          }
+        }
       },
       "slack": {
         "enabled": true,
