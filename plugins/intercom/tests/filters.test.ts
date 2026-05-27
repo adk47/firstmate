@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply } from "../src/filters.js";
-import type { IntercomWebhookPayload } from "../src/types.js";
+import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, extractImageAttachments } from "../src/filters.js";
+import type { IntercomWebhookPayload, IntercomPartAttachment } from "../src/types.js";
 import userCreated from "./fixtures/conversation-user-created.json";
 import userReplied from "./fixtures/conversation-user-replied.json";
 import adminReplied from "./fixtures/conversation-admin-replied.json";
@@ -150,5 +150,333 @@ describe("isSelfReply", () => {
 
   it("returns false for unknown messageId", () => {
     expect(isSelfReply("msg_3", ["msg_1", "msg_2"])).toBe(false);
+  });
+});
+
+describe("extractImageAttachments", () => {
+  // WHY: the gateway can't forward image bytes if classify drops them.
+  // These tests pin every accept/reject branch so a future "just trust
+  // the structured field" refactor doesn't silently regress the HTML
+  // fallback path (which we need because older Intercom Messenger
+  // clients embed images via <img> only, no `attachments[]`).
+
+  const img = (over: Partial<IntercomPartAttachment>): IntercomPartAttachment => ({
+    type: "upload",
+    name: "screenshot.png",
+    url: "https://downloads.intercomcdn.com/i/o/abc/screenshot.png",
+    content_type: "image/png",
+    ...over,
+  });
+
+  it("keeps a structured PNG attachment with its content_type", () => {
+    const result = extractImageAttachments([img({})], "");
+    expect(result).toEqual([{
+      url: "https://downloads.intercomcdn.com/i/o/abc/screenshot.png",
+      contentType: "image/png",
+      name: "screenshot.png",
+    }]);
+  });
+
+  it("normalizes image/jpg to image/jpeg", () => {
+    const result = extractImageAttachments(
+      [img({ url: "https://downloads.intercomcdn.com/i/o/x.jpg", content_type: "image/jpg" })],
+      "",
+    );
+    expect(result[0].contentType).toBe("image/jpeg");
+  });
+
+  it("drops non-image MIMEs (audio/PDF/video) — out of scope for v1", () => {
+    const result = extractImageAttachments(
+      [
+        img({ content_type: "application/pdf", name: "doc.pdf" }),
+        img({ content_type: "audio/mpeg", name: "voice.mp3" }),
+        img({ content_type: "video/mp4", name: "clip.mp4" }),
+      ],
+      "",
+    );
+    expect(result).toEqual([]);
+  });
+
+  it("extracts inline <img> from HTML body when no structured attachments present", () => {
+    // WHY: older Intercom Messenger flows embed images via <img> only,
+    // with no `attachments[]` array. Without this fallback, classify
+    // would see "no attachments" and we'd silently re-introduce the
+    // hallucination class of bugs PR #358 mitigated.
+    const html = '<p>look at this</p><img src="https://downloads.intercomcdn.com/i/o/inline/foo.png" alt="x">';
+    const result = extractImageAttachments(undefined, html);
+    expect(result).toEqual([{
+      url: "https://downloads.intercomcdn.com/i/o/inline/foo.png",
+      contentType: "image/png",
+    }]);
+  });
+
+  it("supports single-quoted src attributes in HTML", () => {
+    const html = "<img src='https://downloads.intercomcdn.com/i/o/inline/bar.jpg'>";
+    const result = extractImageAttachments(undefined, html);
+    expect(result[0]?.url).toBe("https://downloads.intercomcdn.com/i/o/inline/bar.jpg");
+    expect(result[0]?.contentType).toBe("image/jpeg");
+  });
+
+  it("ignores non-Intercom CDN <img> hosts (defense against XSS-style leakage)", () => {
+    // WHY: A customer could paste a forged <img src="https://evil.com/...">
+    // hoping we'd fetch+forward an attacker-controlled URL. The CDN host
+    // allowlist refuses anything not on intercomcdn.{com,io}.
+    const html = '<img src="https://evil.example.com/payload.png">';
+    expect(extractImageAttachments(undefined, html)).toEqual([]);
+  });
+
+  it("merges structured + inline HTML, deduping by URL", () => {
+    const sharedUrl = "https://downloads.intercomcdn.com/i/o/shared.png";
+    const html = `<img src="${sharedUrl}"><img src="https://downloads.intercomcdn.com/i/o/extra.jpg">`;
+    const result = extractImageAttachments([img({ url: sharedUrl })], html);
+    expect(result.map((r) => r.url)).toEqual([
+      sharedUrl,
+      "https://downloads.intercomcdn.com/i/o/extra.jpg",
+    ]);
+  });
+
+  it("drops inline <img> with no recognizable image extension", () => {
+    // We can't tell what an extensionless CDN URL contains without
+    // fetching, and we never want to fetch URLs of unknown type — could
+    // be HTML, a tracking pixel, or anything. Drop is the right call.
+    const html = '<img src="https://downloads.intercomcdn.com/i/o/unknown">';
+    expect(extractImageAttachments(undefined, html)).toEqual([]);
+  });
+
+  it("handles undefined inputs gracefully", () => {
+    expect(extractImageAttachments(undefined, undefined)).toEqual([]);
+    expect(extractImageAttachments([], "")).toEqual([]);
+  });
+});
+
+describe("classifyEvent — attachments", () => {
+  // WHY: it's not enough that extractImageAttachments works in isolation —
+  // we need to verify the classify layer plumbs them through onto the
+  // `customer_message` variant, which is the only path downstream consumers
+  // read. Pre-#358 the field didn't exist.
+
+  const baseUserCreated = (over: Partial<IntercomWebhookPayload["data"]["item"]>): IntercomWebhookPayload => ({
+    type: "notification_event",
+    app_id: "app_test",
+    data: {
+      type: "notification_event_data",
+      item: {
+        type: "conversation",
+        id: "conv_attach",
+        title: null,
+        created_at: 1711234567,
+        updated_at: 1711234567,
+        open: true,
+        state: "open",
+        ...over,
+      } as IntercomWebhookPayload["data"]["item"],
+    },
+    topic: "conversation.user.created",
+    id: "evt_attach",
+    created_at: 1711234567,
+    delivery_status: "pending",
+    delivery_attempts: 1,
+  });
+
+  it("attaches images extracted from the last conversation_part", () => {
+    const payload = baseUserCreated({
+      conversation_parts: {
+        conversation_parts: [{
+          type: "conversation_part",
+          id: "part_1",
+          body: "look at this",
+          part_type: "comment",
+          created_at: 1711234567,
+          author: { type: "user", id: "user_xyz" },
+          attachments: [{
+            type: "upload",
+            name: "shot.png",
+            url: "https://downloads.intercomcdn.com/i/o/x/shot.png",
+            content_type: "image/png",
+          }],
+        }],
+      } as IntercomWebhookPayload["data"]["item"]["conversation_parts"],
+    });
+    const result = classifyEvent(payload);
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.attachments).toHaveLength(1);
+      expect(result.attachments?.[0].contentType).toBe("image/png");
+    }
+  });
+
+  it("classifies as customer_message even when body is empty IF an image is attached", () => {
+    // WHY: drag-drop-an-image-with-no-caption is a common case. Pre-fix,
+    // empty body returned `unknown:empty_body` and the image was dropped.
+    const payload = baseUserCreated({
+      conversation_parts: {
+        conversation_parts: [{
+          type: "conversation_part",
+          id: "part_1",
+          body: "",
+          part_type: "comment",
+          created_at: 1711234567,
+          author: { type: "user", id: "user_xyz" },
+          attachments: [{
+            type: "upload",
+            name: "shot.png",
+            url: "https://downloads.intercomcdn.com/i/o/x/shot.png",
+            content_type: "image/png",
+          }],
+        }],
+      } as IntercomWebhookPayload["data"]["item"]["conversation_parts"],
+    });
+    const result = classifyEvent(payload);
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.body).toBe("");
+      expect(result.attachments).toHaveLength(1);
+    }
+  });
+
+  it("still returns unknown:empty_body when body AND attachments are empty", () => {
+    const payload = baseUserCreated({
+      conversation_parts: {
+        conversation_parts: [{
+          type: "conversation_part",
+          id: "part_1",
+          body: "",
+          part_type: "comment",
+          created_at: 1711234567,
+          author: { type: "user", id: "user_xyz" },
+        }],
+      } as IntercomWebhookPayload["data"]["item"]["conversation_parts"],
+    });
+    const result = classifyEvent(payload);
+    expect(result.kind).toBe("unknown");
+    if (result.kind === "unknown") expect(result.topic).toContain("empty_body");
+  });
+
+  it("omits the `attachments` key entirely on plain text messages (preserves prior shape)", () => {
+    // WHY: HandlerAction matches on attachments?: ... — undefined means
+    // "text-only, no extraContext needed at dispatch." Keeping the field
+    // omitted (vs `attachments: []`) avoids any chance of an empty-array
+    // false positive in downstream consumers that loosely check
+    // `if (action.attachments) …`.
+    const payload = baseUserCreated({
+      source: {
+        body: "hi",
+        author: { type: "user", id: "u1", email: "u@example.com" },
+      } as IntercomWebhookPayload["data"]["item"]["source"],
+    });
+    const result = classifyEvent(payload);
+    if (result.kind === "customer_message") {
+      expect("attachments" in result).toBe(false);
+    }
+  });
+
+  it("forwards image-only new conversations whose attachments live on source.attachments (no conversation_part yet)", () => {
+    // WHY: Clio review of PR #360 caught this. A fresh
+    // `conversation.user.created` for an image-only message may carry the
+    // attachment on `conversation.source.attachments` rather than on a
+    // `conversation_part`, because no part has been split out yet. Pre-fix,
+    // structured-attachment extraction only inspected `lastPart?.attachments`,
+    // so the very class of message this PR is meant to forward was being
+    // silently dropped as `unknown:empty_body`. Locks the source-fallback in.
+    const payload = baseUserCreated({
+      conversation_parts: {
+        conversation_parts: [],
+      } as IntercomWebhookPayload["data"]["item"]["conversation_parts"],
+      source: {
+        body: "",
+        author: { type: "user", id: "u_initial", email: "i@example.com" },
+        attachments: [{
+          type: "upload",
+          name: "screenshot.png",
+          url: "https://downloads.intercomcdn.com/i/o/x/screenshot.png",
+          content_type: "image/png",
+        }],
+      } as IntercomWebhookPayload["data"]["item"]["source"],
+    });
+    const result = classifyEvent(payload);
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.body).toBe("");
+      expect(result.attachments).toHaveLength(1);
+      expect(result.attachments?.[0].contentType).toBe("image/png");
+      expect(result.attachments?.[0].url).toContain("intercomcdn.com");
+    }
+  });
+
+  it("prefers lastPart.attachments over source.attachments when both are present (matches body fallback chain)", () => {
+    // WHY: defends against accidental shape drift. If a future change ever
+    // swaps the precedence, the part-level attachments (the customer's most
+    // recent action) would be replaced by stale source attachments (the
+    // conversation's initial message). Lock the same precedence the body
+    // fallback uses so the two stay coherent.
+    const payload = baseUserCreated({
+      conversation_parts: {
+        conversation_parts: [{
+          type: "conversation_part",
+          id: "part_recent",
+          body: "newer caption",
+          part_type: "comment",
+          created_at: 1711234999,
+          author: { type: "user", id: "u_recent" },
+          attachments: [{
+            type: "upload",
+            name: "new.png",
+            url: "https://downloads.intercomcdn.com/i/o/x/new.png",
+            content_type: "image/png",
+          }],
+        }],
+      } as IntercomWebhookPayload["data"]["item"]["conversation_parts"],
+      source: {
+        body: "old initial body",
+        author: { type: "user", id: "u_initial" },
+        attachments: [{
+          type: "upload",
+          name: "old.jpg",
+          url: "https://downloads.intercomcdn.com/i/o/x/old.jpg",
+          content_type: "image/jpeg",
+        }],
+      } as IntercomWebhookPayload["data"]["item"]["source"],
+    });
+    const result = classifyEvent(payload);
+    if (result.kind === "customer_message") {
+      expect(result.attachments).toHaveLength(1);
+      expect(result.attachments?.[0].url).toContain("/new.png");
+    }
+  });
+});
+
+describe("extractImageAttachments — structured CDN host allowlist", () => {
+  // WHY: Clio review of PR #360 noticed the inline-<img> branch enforces
+  // INTERCOM_CDN_HOST_RE but the structured branch didn't. Without the
+  // allowlist, a payload that claims `content_type: image/png` paired with
+  // an arbitrary host could coerce the plugin into fetching from anywhere.
+  // These tests lock the structured branch into the same posture as the
+  // inline one. Defense-in-depth — the webhook HMAC is the first line.
+
+  it("drops a structured attachment whose URL is off the Intercom CDN, even with an allowlisted MIME", () => {
+    const result = extractImageAttachments(
+      [{
+        type: "upload",
+        name: "evil.png",
+        url: "https://attacker.example.com/evil.png",
+        content_type: "image/png",
+      }],
+      "",
+    );
+    expect(result).toEqual([]);
+  });
+
+  it("accepts structured attachments hosted on the Intercom CDN (sanity counter-test)", () => {
+    const result = extractImageAttachments(
+      [{
+        type: "upload",
+        name: "ok.png",
+        url: "https://downloads.intercomcdn.com/i/o/x/ok.png",
+        content_type: "image/png",
+      }],
+      "",
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0].url).toContain("intercomcdn.com");
   });
 });

@@ -58,6 +58,11 @@ export interface IntercomConversation {
   source?: {
     body: string;
     author: IntercomAuthor;
+    // Initial-message attachments live HERE on a fresh conversation.user.created —
+    // there's no conversation_part yet, so `conversation_parts[].attachments`
+    // is empty. Without this, image-only first messages get dropped as
+    // `unknown:empty_body`. (Clio review of PR #360.)
+    attachments?: IntercomPartAttachment[];
   };
   tags?: {
     type: "tag.list";
@@ -72,6 +77,36 @@ export interface IntercomConversationPart {
   part_type: string;
   created_at: number;
   author: IntercomAuthor;
+  // Intercom delivers attachments uploaded by the customer as a sibling
+  // `attachments` array on the conversation_part (sometimes typed
+  // `part_attachments` in older API docs — both observed in the wild, but
+  // v2.11 webhooks emit `attachments`). Optional because most parts have
+  // none. URLs are short-lived signed downloads.intercomcdn.com links
+  // (~30 min TTL) — fetch bytes synchronously at receive time.
+  attachments?: IntercomPartAttachment[];
+}
+
+// Intercom v2.11 webhook `attachment` shape. Most fields are present on
+// image uploads (height/width/filesize) but typed optional because future
+// content types (audio/PDF) may omit them.
+export interface IntercomPartAttachment {
+  type: string;
+  name: string;
+  url: string;
+  content_type: string;
+  filesize?: number;
+  height?: number;
+  width?: number;
+}
+
+// Lightweight reference passed through classify → handle → dispatch. Carries
+// only what downstream consumers need (the URL to download from, the MIME so
+// we can persist with a sensible extension, and an opt name for diagnostics).
+// Filtered to image MIMEs at classify time.
+export interface ImageAttachmentRef {
+  url: string;
+  contentType: string;
+  name?: string;
 }
 
 export interface IntercomAuthor {
@@ -163,7 +198,7 @@ export interface IntercomClient {
 // --- Event classification ---
 
 export type ClassifiedEvent =
-  | { kind: "customer_message"; conversationId: string; body: string; authorId: string }
+  | { kind: "customer_message"; conversationId: string; body: string; authorId: string; attachments?: ImageAttachmentRef[] }
   | { kind: "admin_reply"; conversationId: string; adminId: string; adminType: AssigneeType; messageId: string }
   | { kind: "assigned"; conversationId: string; assigneeId: string; assigneeType: AssigneeType }
   | { kind: "lifecycle"; conversationId: string; state: LifecycleState }

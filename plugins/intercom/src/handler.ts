@@ -3,6 +3,7 @@ import type {
   IntercomSessionState,
   IntercomClient,
   RiskAssessment,
+  ImageAttachmentRef,
 } from "./types.js";
 import { RateLimitError } from "./outbound.js";
 import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply } from "./filters.js";
@@ -23,7 +24,7 @@ import {
 const apiShapeWarned = new Set<string>();
 
 export type HandlerAction =
-  | { action: "dispatch_to_agent"; conversationId: string; body: string; authorId: string }
+  | { action: "dispatch_to_agent"; conversationId: string; body: string; authorId: string; attachments?: ImageAttachmentRef[] }
   | { action: "escalate"; conversationId: string; assessment: RiskAssessment; body: string }
   | { action: "escalate_legacy"; conversationId: string; category: string; matchedPattern: string; body: string }
   | { action: "state_updated"; conversationId: string; description: string }
@@ -277,6 +278,9 @@ export async function handleWebhookEvent(
           conversationId: classified.conversationId,
           body: classified.body,
           authorId: classified.authorId,
+          ...(classified.attachments && classified.attachments.length > 0
+            ? { attachments: classified.attachments }
+            : {}),
         },
         state,
       };

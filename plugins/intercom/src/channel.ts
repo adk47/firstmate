@@ -20,6 +20,12 @@ import {
 } from "./slack.js";
 import { createOpenRouterJudge } from "./judge.js";
 import { createClickupTicket } from "./clickup.js";
+import {
+  downloadImageAttachments,
+  buildMediaExtraContext,
+  type PersistedAttachment,
+} from "./attachments.js";
+import path from "node:path";
 import type { IntercomSessionState, IntercomWebhookPayload, KnownFacts, IntercomAccountConfig } from "./types.js";
 import { DEFAULT_JUDGE_MIN_TURNS, DEFAULT_TURN_HARD_CAP, DEFAULT_JUDGE_MODEL } from "./types.js";
 
@@ -387,6 +393,64 @@ export const intercomPlugin = createChatChannelPlugin({
                     const bufferedChunks: string[] = [];
                     let droppedMidStream = false;
 
+                    // If the customer attached images, fetch them NOW (Intercom
+                    // CDN URLs are signed with ~30 min TTL) and persist under
+                    // <stateDir>/media/intercom/<conv>/<msg>/N.<ext>. We then
+                    // pass the persisted paths to the agent runtime through
+                    // `extraContext.MediaPaths` — openclaw's MsgContext shape
+                    // (`channels/inbound-event/media`) the gateway turns into
+                    // base64 image content blocks for vision-capable models.
+                    // Empty `attachments` array → no extraContext, no behavior
+                    // change for text-only messages.
+                    let persisted: PersistedAttachment[] = [];
+                    if (result.attachments && result.attachments.length > 0) {
+                      const stateDir = resolveStateDir();
+                      if (stateDir) {
+                        try {
+                          persisted = await downloadImageAttachments({
+                            refs: result.attachments,
+                            conversationId: result.conversationId,
+                            mediaRoot: path.join(stateDir, "media"),
+                            messageId: payload.id,
+                            deps: { log: log ? { warn: (m) => log.warn?.(m), info: (m) => log.info?.(m) } : undefined },
+                          });
+                          if (persisted.length > 0) {
+                            log?.info?.(
+                              `[${tag}] persisted ${persisted.length}/${result.attachments.length} image attachment(s) conv=${result.conversationId} bytes=${persisted.reduce((s, p) => s + p.size, 0)}`,
+                            );
+                          } else {
+                            log?.warn?.(
+                              `[${tag}] all ${result.attachments.length} image attachment(s) failed to persist conv=${result.conversationId} — dispatching text-only`,
+                            );
+                          }
+                        } catch (err) {
+                          // downloadImageAttachments swallows per-image errors
+                          // internally — this catch covers only the directory-
+                          // creation path, which shouldn't normally fail.
+                          log?.error?.(
+                            `[${tag}] image-attachment pipeline failed conv=${result.conversationId}: ${err}`,
+                          );
+                        }
+                      } else {
+                        log?.warn?.(
+                          `[${tag}] stateDir unavailable — cannot persist ${result.attachments.length} image attachment(s) conv=${result.conversationId}, dispatching text-only`,
+                        );
+                      }
+                    }
+
+                    const mediaExtraContext = buildMediaExtraContext(persisted);
+
+                    // Customer can drag-drop an image with no caption — the
+                    // text body is then empty. Substitute a synthetic prompt
+                    // so the agent receives a non-empty turn alongside the
+                    // image content block. Only applies when we actually
+                    // have media to show; pure empty-body+no-media events
+                    // are filtered upstream in classifyEvent.
+                    const bodyForDispatch =
+                      result.body.length === 0 && persisted.length > 0
+                        ? `(Customer sent ${persisted.length === 1 ? "an image" : `${persisted.length} images`} with no caption.)`
+                        : result.body;
+
                     await dispatchInboundDirectDmWithRuntime({
                       cfg,
                       runtime: { channel: runtime },
@@ -398,9 +462,10 @@ export const intercomPlugin = createChatChannelPlugin({
                       senderAddress: `intercom:${result.authorId}`,
                       recipientAddress: `intercom:${account.botAdminId}`,
                       conversationLabel: `Intercom conversation ${result.conversationId}`,
-                      rawBody: buildAgentRawBody(result.body, state.knownFacts ?? {}),
+                      rawBody: buildAgentRawBody(bodyForDispatch, state.knownFacts ?? {}),
                       messageId: payload.id,
                       timestamp: payload.created_at,
+                      extraContext: mediaExtraContext,
                       deliver: async (replyPayload: any) => {
                         const text = replyPayload?.text ?? replyPayload?.body ?? "";
                         if (!text) {
