@@ -168,10 +168,10 @@ print(json.dumps(c.get('session', {}).get('dmScope', '')))
 caroline_check "edge.session.dmScope" '"per-channel-peer"' "$dmscope"
 
 # --- Parity checks on MAIN ---
-# Support agent is bound on main for both slack + intercom (accountId=default),
-# so the same safety invariants must hold there. If main's support memorySearch
-# diverges from edge's, SOUL.md's "EXACTLY 7" instruction becomes a lie when
-# traffic lands on main.
+# Profile-level memory safety invariants (memory-lancedb / active-memory /
+# dreaming) must hold on main as well as edge — main runs the other 9 agents
+# and the same memory plugin gotchas apply. (The support-specific memorySearch
+# check is edge-only since support no longer lives on main.)
 
 # 6. memory-lancedb absent from main plugins.allow.
 main_lancedb=$(python3 -c "
@@ -206,16 +206,9 @@ except KeyError:
 ")
 caroline_check "main.memory-core.dreaming.enabled" "false" "$main_dreaming"
 
-# 9. main support memorySearch.extraPaths must equal ["reference"] (same as edge).
-main_extra_paths=$(python3 -c "
-import json
-with open('$MAIN') as f:
-    c = json.load(f)
-support = next((a for a in c.get('agents', {}).get('list', []) if a.get('id') == 'support'), {})
-paths = support.get('memorySearch', {}).get('extraPaths', [])
-print(json.dumps(paths))
-")
-caroline_check "main.support.memorySearch.extraPaths" '["reference"]' "$main_extra_paths"
+# (Removed: main.support.memorySearch.extraPaths check — support agent
+# was removed from main and consolidated onto edge. Edge's check #4 above
+# still enforces the invariant; there is no longer a main/support to drift.)
 
 # 10. main session dmScope must match edge (per-conversation isolation).
 main_dmscope=$(python3 -c "

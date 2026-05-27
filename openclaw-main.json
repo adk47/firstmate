@@ -298,43 +298,6 @@
           ]
         },
         "thinkingDefault": "low"
-      },
-      {
-        "id": "support",
-        "workspace": "/opt/hydra/workspaces/support",
-        "model": {
-          "primary": "openai/gpt-5.5",
-          "fallbacks": [
-            "openrouter/anthropic/claude-4.6-sonnet-20260217"
-          ]
-        },
-        "thinkingDefault": "medium",
-        "memorySearch": {
-          "enabled": true,
-          "provider": "openai",
-          "model": "text-embedding-3-small",
-          "remote": {
-            "baseUrl": "https://openrouter.ai/api/v1",
-            "apiKey": {
-              "source": "file",
-              "provider": "hydra-secrets",
-              "id": "/OPENROUTER_API_KEY"
-            }
-          },
-          "extraPaths": [
-            "reference"
-          ],
-          "store": {
-            "vector": {
-              "enabled": true
-            }
-          },
-          "query": {
-            "hybrid": {
-              "enabled": true
-            }
-          }
-        }
       }
     ]
   },
@@ -396,13 +359,6 @@
       }
     },
     {
-      "agentId": "support",
-      "match": {
-        "channel": "slack",
-        "accountId": "support"
-      }
-    },
-    {
       "agentId": "clio",
       "match": {
         "channel": "slack",
@@ -413,13 +369,6 @@
       "agentId": "clio",
       "match": {
         "channel": "slack",
-        "accountId": "default"
-      }
-    },
-    {
-      "agentId": "support",
-      "match": {
-        "channel": "intercom",
         "accountId": "default"
       }
     }
@@ -571,15 +520,6 @@
             "nativeTransport": true
           }
         },
-        "support": {
-          "botToken": "xoxb-264358207284-10767041148305-JPk1MvuGJjr9J8mvvgKrhFtT",
-          "appToken": "xapp-1-A0AMQK8PH8X-10752091591862-9b3f765296a9ac01468fc58b2b6126cad0dee60e5914dd0930f0a5901fb1864d",
-          "userTokenReadOnly": true,
-          "streaming": {
-            "mode": "partial",
-            "nativeTransport": true
-          }
-        },
         "clio": {
           "botToken": "xoxb-264358207284-10767000436401-eWLy29bXu71IK8WU5xUNcxmo",
           "appToken": "xapp-1-A0AP0B43E56-10754112341106-bcf89629183c7b8af5b55b09b1a83f5c77480c6d1f99a606fa1d87bf0bd21eb2",
@@ -594,66 +534,6 @@
         "mode": "partial",
         "nativeTransport": true
       }
-    },
-    "intercom": {
-      "accounts": {
-        "default": {
-          "enabled": true,
-          "workspaceId": "dwjzhcge",
-          "token": "dG9rOjM5YzM2ODg2X2ZhZjBfNGI4NF9hMzA1XzczNzYyMjg4M2M3OToxOjA=",
-          "webhookSecret": "43c744d5-5043-4f3f-b7fb-36440af1e8d7",
-          "botAdminId": "5763097",
-          "defaultInboxId": "5465657",
-          "fallbackSlackSupervisionChannel": "https://hooks.slack.com/services/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",
-          "fallbackAcknowledgement": "We're looking into this and will get back to you shortly.",
-          "requireMappedHumanAdmin": true,
-          "adminMapping": {},
-          "blockedChannelTags": [
-            "instagram",
-            "facebook",
-            "twitter",
-            "x",
-            "whatsapp",
-            "messenger",
-            "tiktok",
-            "sms"
-          ],
-          "riskAssessment": {
-            "enabled": false,
-            "judgeModel": "anthropic/claude-haiku-4-5-20251001",
-            "judgeMinTurnCount": 4,
-            "turnCountHardCap": 6,
-            "openrouterApiKey": {
-              "source": "env",
-              "provider": "hydra-env",
-              "id": "OPENROUTER_API_KEY"
-            }
-          },
-          "clickup": {
-            "apiKey": {
-              "source": "env",
-              "provider": "hydra-env",
-              "id": "CLICKUP_API_KEY"
-            },
-            "listId": {
-              "source": "env",
-              "provider": "hydra-env",
-              "id": "CLICKUP_LIST_ID"
-            },
-            "userEmailFieldId": {
-              "source": "env",
-              "provider": "hydra-env",
-              "id": "CLICKUP_USER_EMAIL_FIELD_ID"
-            },
-            "profileIdFieldId": {
-              "source": "env",
-              "provider": "hydra-env",
-              "id": "CLICKUP_PROFILE_ID_FIELD_ID"
-            }
-          }
-        }
-      },
-      "enabled": true
     }
   },
   "gateway": {
@@ -691,7 +571,6 @@
     "allow": [
       "browser",
       "codex",
-      "intercom",
       "lobster",
       "muso-credit-verification-enforcer",
       "openrouter",
@@ -705,9 +584,6 @@
       "slack": {
         "enabled": true,
         "config": {}
-      },
-      "intercom": {
-        "enabled": true
       },
       "muso-credit-verification-enforcer": {
         "enabled": true
@@ -760,13 +636,6 @@
         "resolvedAt": "2026-03-15T16:41:53.234Z",
         "installedAt": "2026-03-15T16:42:31.664Z"
       },
-      "intercom": {
-        "source": "path",
-        "spec": "/root/.openclaw-main/extensions/intercom",
-        "installPath": "/root/.openclaw-main/extensions/intercom",
-        "resolvedName": "@muso/intercom",
-        "resolvedVersion": "0.1.0"
-      },
       "muso-credit-verification-enforcer": {
         "source": "path",
         "spec": "/root/.openclaw-main/extensions/muso-credit-verification-enforcer",
@@ -777,7 +646,6 @@
     },
     "load": {
       "paths": [
-        "/root/.openclaw-main/extensions/intercom",
         "/root/.openclaw-main/extensions/support-tools"
       ]
     }
