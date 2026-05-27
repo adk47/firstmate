@@ -64,6 +64,24 @@ shared:
       destination: www.googleapis.com
       comment: "Google Calendar + Drive API (a@muso.ai)"
 
+    - name: chatgpt-oauth
+      protocol: tcp
+      port: 443
+      destination: chatgpt.com
+      comment: "ChatGPT/Codex SSO entry point (OAuth device-code flow)"
+
+    - name: openai-auth
+      protocol: tcp
+      port: 443
+      destination: auth.openai.com
+      comment: "OpenAI OAuth token issuance + refresh"
+
+    - name: openai-api
+      protocol: tcp
+      port: 443
+      destination: api.openai.com
+      comment: "Codex harness completions — openai/gpt-5.5 primary path"
+
   explicit_denies:
     - name: block-direct-anthropic
       protocol: tcp
