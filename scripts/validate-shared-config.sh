@@ -65,6 +65,19 @@ compare_path "models.providers.openrouter.auth" "OpenRouter auth mode"
 compare_path "models.providers.openai" "OpenAI (Codex) provider block"
 compare_path "auth.order.openai" "OpenAI auth profile ordering"
 compare_path "plugins.entries.codex" "Codex harness plugin enable"
+
+# Explicit agentRuntime pin assertion: this MUST be {id: "codex"} on both profiles.
+# Without it, openclaw auto-mode silently falls back to direct OpenAI Platform API
+# via OPENAI_API_KEY env, making qa-pilot smoke meaningless (passes via fallback).
+# See openclaw bug #81326 + docs.openclaw.ai/concepts/agent-runtimes.
+for prof in main edge; do
+  pin=$(jq -r '.models.providers.openai.agentRuntime.id // "MISSING"' "openclaw-${prof}.json" 2>/dev/null)
+  if [ "$pin" != "codex" ]; then
+    fail "openclaw-${prof}.json: models.providers.openai.agentRuntime.id must be \"codex\" (got: $pin)"
+  else
+    ok "openclaw-${prof}.json: agentRuntime pinned to codex"
+  fi
+done
 compare_path "messages.queue" "Message queue config"
 compare_path "messages.ackReaction" "Message ack reaction"
 compare_path "messages.ackReactionScope" "Message ack reaction scope"
