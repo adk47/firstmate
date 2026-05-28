@@ -19,7 +19,7 @@ Deel is Muso.AI's contractor payroll platform. All team members are hired as con
 ## Wrapper Script
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-deel/scripts/deel-api.sh <METHOD> <endpoint> [json_body]
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-deel/scripts/deel-api.sh <METHOD> <endpoint> [json_body]
 ```
 
 Source `~/.zshrc` before calling to ensure `DEEL_API_TOKEN` is set.

@@ -24,7 +24,7 @@ Slack vs CU vs commits. Week-over-week trends. Post to #growth-team.
 ## Dev Activity Report — Aaron (00:00 PST daily)
 **Status: ACTIVE — running on HYDRA (cutover complete 2026-03-24)**
 
-Run: `bash ~/.openclaw/skills/skills/dev-activity-report/scripts/dev-report.sh adk47 24`. Post to #devops_opsworks (C0ACLSLFXAR).
+Run: `bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/dev-activity-report/scripts/dev-report.sh adk47 24`. Post to #devops_opsworks (C0ACLSLFXAR).
 ⚠️ Was #clio_devops — moved Mar 16, 2026.
 
 ---

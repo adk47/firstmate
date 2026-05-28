@@ -37,14 +37,14 @@ Review and manage the identity resolution system that links user accounts to cat
 ### List Identity Candidates
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/identity-resolution"
 ```
 
 ### View Identity by User
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/identity-resolution/<user_id>"
 ```
 
@@ -53,7 +53,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 After reviewing that the user account genuinely matches the catalog profile:
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call PUT "/admin/identity-resolution/<id>/confirm"
 ```
 
@@ -62,7 +62,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 When the match is incorrect:
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call PUT "/admin/identity-resolution/<id>/reject"
 ```
 

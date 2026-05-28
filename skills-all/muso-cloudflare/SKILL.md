@@ -28,25 +28,25 @@ description: |
 Use the wrapper script for all queries:
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-cloudflare/scripts/cf-api.sh GET ENDPOINT [jq-filter]
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-cloudflare/scripts/cf-api.sh GET ENDPOINT [jq-filter]
 ```
 
 Examples:
 ```bash
 # List all DNS records
-bash ~/.openclaw/skills/skills/muso-cloudflare/scripts/cf-api.sh GET \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-cloudflare/scripts/cf-api.sh GET \
   "zones/0e22833a0ee96130f67c1a994a3d2226/dns_records?per_page=100"
 
 # Get zone settings
-bash ~/.openclaw/skills/skills/muso-cloudflare/scripts/cf-api.sh GET \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-cloudflare/scripts/cf-api.sh GET \
   "zones/0e22833a0ee96130f67c1a994a3d2226/settings"
 
 # Filter DNS by type
-bash ~/.openclaw/skills/skills/muso-cloudflare/scripts/cf-api.sh GET \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-cloudflare/scripts/cf-api.sh GET \
   "zones/0e22833a0ee96130f67c1a994a3d2226/dns_records?type=CNAME&per_page=100"
 
 # 24h analytics
-bash ~/.openclaw/skills/skills/muso-cloudflare/scripts/cf-api.sh GET \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-cloudflare/scripts/cf-api.sh GET \
   "zones/0e22833a0ee96130f67c1a994a3d2226/analytics/dashboard?since=-1440&continuous=true"
 ```
 

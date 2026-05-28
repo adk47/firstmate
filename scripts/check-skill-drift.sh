@@ -146,6 +146,32 @@ if [[ -n "$DIVERGENCE_PATHS" ]]; then
     done < <(printf '%s' "$DIVERGENCE_PATHS")
 fi
 
+# Pass 3: skill-script references in SKILL.md / workspace doctrine must use the
+# profile-aware `${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/` idiom, never a
+# hardcoded managed-skills path. This catches two dead/wrong forms:
+#   - doubled `~/.openclaw/skills/skills/...` — the pre-#339 layout, points at a
+#     dir that no longer exists (the agent following it emits failed-tool noise);
+#   - hardcoded profile `~/.openclaw-main/skills/...` — a SKILL.md deploys to
+#     EVERY profile, so `-main` is a cross-profile ref that's wrong for edge and
+#     any future gateway.
+# A line referencing `.openclaw…/skills/` is accepted only if it goes through
+# OPENCLAW_STATE_DIR (openclaw's own idiom; see its gh-issues/session-logs skills).
+while IFS= read -r doc; do
+    [[ -z "$doc" ]] && continue
+    bad=$(grep -nE '\.openclaw[A-Za-z0-9./-]*/skills/' "$doc" 2>/dev/null | grep -v 'OPENCLAW_STATE_DIR' || true)
+    if [[ -n "$bad" ]]; then
+        VIOLATIONS=$((VIOLATIONS + 1))
+        doc_rel="${doc#${REPO_ROOT}/}"
+        echo ""
+        echo "VIOLATION: ${doc_rel}"
+        echo "  Hardcoded managed-skills path. Use \${OPENCLAW_STATE_DIR:-\$HOME/.openclaw}/skills/<name>/scripts/... instead"
+        echo "  (profile-agnostic; both doubled 'skills/skills/' and hardcoded '-main' fail here). See PR #339/#366."
+        { printf '%s\n' "$bad" | head -5 | sed 's/^/    /'; } || true
+    fi
+done < <(find "$SKILLS_ALL" "$WORKSPACES" -type f \
+    \( -name 'SKILL.md' -o -name 'SOUL.md' -o -name 'AGENTS.md' \
+       -o -name 'MEMORY.md' -o -name 'HEARTBEAT.md' -o -name 'IDENTITY.md' \))
+
 echo ""
 if (( VIOLATIONS > 0 )); then
     echo "FAIL: ${VIOLATIONS} skill-drift violation(s) detected." >&2

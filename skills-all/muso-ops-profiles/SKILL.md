@@ -41,7 +41,7 @@ Full profile lifecycle: search → investigate → modify → verify.
 ### Search Profiles
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/profile/search?keyword=John+Producer&limit=10"
 ```
 
@@ -62,7 +62,7 @@ Combine admin API + Athena for complete picture:
 
 ```bash
 # Admin API
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/profile/<profile_id>"
 ```
 
@@ -143,7 +143,7 @@ Execute:
 # the explicit Aaron-approval Slack message you cited in step 1 of the
 # pre-merge checklist. The wrapper hard-fails with `MUSO_TIER2_APPROVAL_REQUIRED`
 # without them. `--requester` is the Slack id of who is asking (audit-log only).
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester <slack_id> \
   --confirmed-by aaron \
   --approval-msg-id <slack_msg_ts> \
@@ -181,7 +181,7 @@ GET both profiles and assert against the pre-state you captured in step 5:
 # Body: { unmergeFrom: <primary_id>, profilesIds: [<merged_in_id>, ...] }
 # Backend handler: core-backend/src/apis/_admin/profile/unmergeProfiles.js
 # Tier-2 gate: same `--confirmed-by` + `--approval-msg-id` requirement as merge.
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester <slack_id> \
   --confirmed-by aaron \
   --approval-msg-id <slack_msg_ts> \
@@ -205,7 +205,7 @@ Link an IPI:
 # Body: { externalColumn: "ipi" /* ONLY legal value; all others rejected downstream */, externalId: "<ipi_number>" }
 # Backend handler: core-backend/src/apis/_admin/profile/linkExternalIds.js
 # Downstream constraint: industry-data-processing/processors/catalog/operations/profile_operations.py:33
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/profile/<profile_id>/link-external" \
   '{"externalColumn":"ipi","externalId":"00123456789"}'
 ```
@@ -215,7 +215,7 @@ Unlink an IPI:
 # Endpoint: POST /admin/profile/:profileId/unlink-external
 # Body: { externalColumn: "ipi" /* ONLY legal value */, externalId: "<ipi_number>" }
 # Backend handler: core-backend/src/apis/_admin/profile/unlinkExternalIds.js
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/profile/<profile_id>/unlink-external" \
   '{"externalColumn":"ipi","externalId":"00123456789"}'
 ```
@@ -234,7 +234,7 @@ For source-platform raw profile IDs (NOT IPI). Raw IDs are passed in
 # Body: { rawIds: ["<source>:<external_id>", ...] }
 # Backend handler: core-backend/src/apis/_admin/profile/unlinkProfile.js
 # Missing/empty rawIds returns "Raw IDs are required".
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/profile/<profile_id>/unlink" \
   '{"rawIds":["spotify:<spotify_artist_id>","tidal:<tidal_artist_id>"]}'
 ```
@@ -251,14 +251,14 @@ takes up to 24h to reflect the unlink across credits and analytics.
 
 From URL (handler reads `enrichmentUrl` + optional `profileId`):
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/profile/enrichByUrl" \
   '{"enrichmentUrl":"https://open.spotify.com/artist/...","profileId":"<profile_id>"}'
 ```
 
 From Spotify ID (path takes the spotify artist id):
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/artist/<spotify_artist_id>/enrich"
 ```
 
@@ -270,7 +270,7 @@ When ops uploads an image to Slack for a profile avatar:
 
 ```bash
 # Method PUT, route segment is /image (not /avatar). The wrapper's `upload` uses PUT.
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   upload "/admin/profile/<profile_id>/image" /tmp/avatar.jpg
 ```
 
@@ -278,7 +278,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 
 ```bash
 # Method DELETE, route segment is /cache (not /clear-cache).
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call DELETE "/admin/profile/<profile_id>/cache"
 ```
 
@@ -286,7 +286,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 
 ```bash
 # Method GET, path uses /admin/professional/:id/credits/export.
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/professional/<profile_id>/credits/export"
 ```
 

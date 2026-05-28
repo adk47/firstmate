@@ -167,7 +167,27 @@
       },
       "workspace": "/opt/hydra/workspaces/neutral",
       "memorySearch": {
-        "enabled": false
+        "enabled": true,
+        "provider": "openai",
+        "model": "text-embedding-3-small",
+        "remote": {
+          "baseUrl": "https://openrouter.ai/api/v1",
+          "apiKey": {
+            "source": "file",
+            "provider": "hydra-secrets",
+            "id": "/OPENROUTER_API_KEY"
+          }
+        },
+        "store": {
+          "vector": {
+            "enabled": true
+          }
+        },
+        "query": {
+          "hybrid": {
+            "enabled": true
+          }
+        }
       },
       "bootstrapMaxChars": 40000,
       "bootstrapTotalMaxChars": 120000,

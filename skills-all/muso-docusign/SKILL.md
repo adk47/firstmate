@@ -34,7 +34,7 @@ Required env vars (set in `~/.zshrc`):
 
 ## Scripts
 
-All scripts are in `~/.openclaw/skills/skills/muso-docusign/scripts/`.
+All scripts are in `${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-docusign/scripts/`.
 
 ### API Wrapper
 ```bash

@@ -19,7 +19,7 @@ Anrok is Muso.AI's global sales tax and VAT solution for SaaS. Handles tax calcu
 - **API docs:** `https://apidocs.anrok.com` (OpenAPI v1.1 spec, Redoc)
 - **Tutorials:** `https://apidocs.anrok.com/tutorials/`
 - **Help center:** `https://help-center.anrok.com`
-- **Wrapper:** `bash ~/.openclaw/skills/skills/muso-anrok/scripts/anrok-api.sh <endpoint> [json-body] [jq-filter]`
+- **Wrapper:** `bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-anrok/scripts/anrok-api.sh <endpoint> [json-body] [jq-filter]`
 
 ## Endpoints (Complete — from official API docs)
 

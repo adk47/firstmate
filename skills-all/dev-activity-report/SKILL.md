@@ -20,7 +20,7 @@ Generate formatted developer activity reports from GitHub commits across all Mus
 
 Run the collection script:
 ```bash
-~/.openclaw/skills/skills/dev-activity-report/scripts/dev-report.sh <github_username> [hours_back]
+${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/dev-activity-report/scripts/dev-report.sh <github_username> [hours_back]
 ```
 
 Default: 24 hours. The script scans: core-backend, web-credits, platform-data-processing,

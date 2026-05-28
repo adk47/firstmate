@@ -45,7 +45,7 @@ When ops says "find user john@example.com", pull from ALL sources:
 
 **Step 1: Admin API**
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/user?keyword=john@example.com&limit=10"
 ```
 
@@ -100,21 +100,21 @@ Check for any open conversations or recent support tickets.
 ### Reset Password
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/user/<user_id>/reset-password"
 ```
 
 ### Confirm Email
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/user/<user_id>/email-confirmed"
 ```
 
 ### Update User
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call PUT "/admin/user/<user_id>" '{"field":"value"}'
 ```
 
@@ -122,7 +122,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 
 ```bash
 # REQUIRES: sender_id == U7RP6HKUZ
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call DELETE "/admin/user/<user_id>"
 ```
 
@@ -130,7 +130,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 
 When ops shares an image in Slack:
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   upload "/admin/user/<user_id>/image" /tmp/user-image.jpg
 ```
 

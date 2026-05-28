@@ -62,7 +62,7 @@ credits — it produces a recommendation list.
 ### Step 1: Profile baseline (Admin API)
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester "$REQUESTER" \
   call GET "/admin/profile/$PROFILE_ID"
 ```
@@ -78,7 +78,7 @@ and stop. Do NOT continue to Step 2.
 ### Step 2: Full credit list (Admin API, paginated)
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester "$REQUESTER" \
   call GET "/admin/profile/$PROFILE_ID/credits?limit=500&offset=0"
 ```

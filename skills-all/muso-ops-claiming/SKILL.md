@@ -43,7 +43,7 @@ Check sender_id tier from `muso-ops-admin` SKILL.md before ANY operation.
 
 ```bash
 # Via admin API
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/claiming?status=pending&limit=20&offset=0"
 
 # Supplement with Athena for richer context
@@ -73,7 +73,7 @@ When ops says "review claim 12345" or "check claim 12345":
 
 **Step 1: Pull claim details**
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/claiming/<id>"
 ```
 Note: Claims list = `GET /admin/claiming`, single claim = `GET /admin/claiming/:id`
@@ -158,7 +158,7 @@ After investigation + confirmation:
 # ... (audit log entry)
 
 # Approve = verify
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/claiming/<id>/verify"
 ```
 
@@ -174,7 +174,7 @@ Logged to audit trail.
 ALWAYS require a reason:
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/claiming/<id>/reject" '{"reason":"[reason]"}'
 ```
 
@@ -191,7 +191,7 @@ When a previously approved claim needs to be undone:
 ⚠️ This is a significant action — always ask WHY and confirm.
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/claiming/<id>/revert"
 ```
 

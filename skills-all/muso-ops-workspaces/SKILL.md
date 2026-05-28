@@ -91,38 +91,38 @@ Based on Retool docs, the full B2B onboarding flow:
 Need: one email (main contact)
 ```bash
 # Workspace = "team" in admin API
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/team" '{"email":"contact@label.com","name":"Label Name"}'
 ```
 
 ### Step 2: Add Logo
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   upload "/admin/team/<id>/image" /tmp/logo.jpg
 ```
 
 ### Step 3: Add Users
 First check if user exists:
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/user?keyword=user@email.com"
 ```
 
 If new, create:
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/user" '{"email":"user@email.com","firstName":"Name","password":"name+muso"}'
 ```
 
 Then add to workspace:
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/team/<id>/users" '{"userId":"<user_id>"}'
 ```
 
 Or invite by email:
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/team/<id>/invite-users" '{"emails":["user@email.com"]}'
 ```
 
@@ -130,13 +130,13 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 
 ### Step 4: Add Profiles to Roster (Seats)
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/team/<id>/seats" '{"profileId":"<profile_id>"}'
 ```
 
 Toggle seat active status:
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call PUT "/admin/team/<id>/seats/<seat_id>" '{"seatActive":true}'
 ```
 
@@ -155,19 +155,19 @@ Verify analytics are populating before delivering to client.
 
 Get all seats:
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/team/<id>/seats"
 ```
 
 Toggle analytics gathering:
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call PUT "/admin/team/<id>/seats/<seat_id>" '{"seatActive":true}'
 ```
 
 Remove seat:
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call DELETE "/admin/team/<id>/seats/<seat_id>"
 ```
 
@@ -182,11 +182,11 @@ For pre-sale and influencer plaque management:
 For partner integrations:
 ```bash
 # Add key
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/workspace/<workspace_id>/key"
 
 # Remove key
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call DELETE "/admin/workspace/<workspace_id>/key"
 ```
 

@@ -48,13 +48,13 @@ knows which human initiated the change (same pattern as Retool's admin panel).
 
 Example:
 ```bash
-bash ~/.openclaw/skills/skills/muso-ads-manager/scripts/muso-ads-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ads-manager/scripts/muso-ads-api.sh \
   --requester aaron@muso.ai create --logo /tmp/logo.png --media /tmp/banner.jpg ...
 ```
 
 For the shared admin API:
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester aaron@muso.ai call PUT "/w/admin/ads/123" '{"isActive": false}'
 ```
 
@@ -78,7 +78,7 @@ If any are missing, tell Aaron what's needed. Never display credential values.
 
 ## API Script
 
-Wrapper: `bash ~/.openclaw/skills/skills/muso-ads-manager/scripts/muso-ads-api.sh <command>`
+Wrapper: `bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ads-manager/scripts/muso-ads-api.sh <command>`
 
 Commands: `login`, `create`, `list`, `get <slug>`, `events <slug>`
 
@@ -111,7 +111,7 @@ Walk the user through each field conversationally. Collect in this order:
 
 ```bash
 # Get admin token first, then:
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call PUT "/w/admin/ads/<ad_id>" '{"field":"value"}'
 ```
 

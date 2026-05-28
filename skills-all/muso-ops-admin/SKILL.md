@@ -140,11 +140,11 @@ knows which human initiated the change. This mirrors Retool's pattern:
 Pass Slack ID OR email via `--requester` flag:
 ```bash
 # Using Slack ID (auto-resolved to email)
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester U7RP6HKUZ call GET "/admin/claiming?limit=20"
 
 # Using email directly
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester aaron@muso.ai call POST "/admin/claiming/12345/verify" '{}'
 ```
 
@@ -154,7 +154,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 
 ```bash
 # Login and cache token (23h TTL)
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh login
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh login
 ```
 
 Token is cached for 23 hours at `scripts/.admin-token-cache`.
@@ -163,23 +163,23 @@ Token is cached for 23 hours at `scripts/.admin-token-cache`.
 
 ```bash
 # Generic admin API call (always include --requester for writes)
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester <slack_id|email> call <METHOD> <path> [json-body]
 
 # Read (GET) — always allowed
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester U7RP6HKUZ call GET "/admin/claiming?status=pending&limit=20"
 
 # Write (POST/PUT/DELETE) — requires Aaron approval first
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester U7RP6HKUZ call POST "/admin/claiming/12345/verify" '{}'
 
 # File upload
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester U7RP6HKUZ upload "/admin/profile/abc123/image" /path/to/file.jpg
 
 # Resolve Slack ID to email
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh resolve-email U7RP6HKUZ
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh resolve-email U7RP6HKUZ
 ```
 
 ## Admin API Route Map (139 verified routes)

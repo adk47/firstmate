@@ -1889,20 +1889,6 @@ PYEOF
     log "  Mirrored cron-jobs.json to $LEGACY_CRON (defense-in-depth vs zombie legacy service)"
   fi
 fi
-
-# Use local embeddings for memory search on main profile
-python3 -c "
-import json
-cfg = '/root/.openclaw/main/openclaw.json'
-with open(cfg) as f:
-    c = json.load(f)
-defaults = c.setdefault('agents', {}).setdefault('defaults', {})
-defaults['memorySearch'] = {'enabled': True, 'provider': 'local'}
-c.get('models', {}).get('providers', {}).pop('openai', None)
-with open(cfg, 'w') as f:
-    json.dump(c, f, indent=2)
-print('  Memory search: local embeddings (no OpenAI)')
-"
 POSTSYNC
 
 log "  Post-sync setup complete."

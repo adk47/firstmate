@@ -19,7 +19,7 @@ Generate per-charge CSV report for any Stripe payout, matching the standard Stri
 
 1. Run the report script:
    ```bash
-   python3 ~/.openclaw/skills/skills/muso-stripe-payout-report/scripts/payout_report.py <PAYOUT_ID> ~/.openclaw/workspace/payout-report-<PAYOUT_ID>.csv
+   python3 ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-stripe-payout-report/scripts/payout_report.py <PAYOUT_ID> ~/.openclaw/workspace/payout-report-<PAYOUT_ID>.csv
    ```
    ⚠️ ALWAYS save to `~/.openclaw/workspace/` — never `/tmp/`. The gateway cannot attach files from `/tmp/` to Slack.
 

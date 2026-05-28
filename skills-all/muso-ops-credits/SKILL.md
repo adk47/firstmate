@@ -39,13 +39,13 @@ Check sender_id tier from `muso-ops-admin`:
 ### List Pending Credit Requests
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/credit-requests?status=pending&limit=20"
 ```
 
 Also get pending counts:
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/credit-requests/counts"
 ```
 
@@ -57,11 +57,11 @@ There is no single-credit-request GET endpoint. Filter the list by profile or tr
 
 ```bash
 # By profile
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/credit-requests?profilesIds=<profile_id>&limit=20"
 
 # By track
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/credit-requests?trackId=<track_id>&limit=20"
 ```
 
@@ -98,13 +98,13 @@ audit log only, not in the request body.
 
 **Approve:**
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call PUT "/admin/credit-requests" '{"requestIds":["<id>"],"status":"approved"}'
 ```
 
 **Reject:**
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call PUT "/admin/credit-requests" '{"requestIds":["<id>"],"status":"rejected"}'
 ```
 
@@ -117,7 +117,7 @@ Standard rejection reasons (record in audit log, not request body):
 ### Profiles with Pending Requests
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/credit-requests/profiles"
 ```
 

@@ -45,52 +45,52 @@ mcporter call n8n.execute_workflow workflowId=X --args '{"inputs":{"type":"webho
 
 Use the wrapper script for all other API calls:
 ```bash
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh <method> <endpoint> [json-body]
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh <method> <endpoint> [json-body]
 ```
 
 Examples:
 ```bash
 # List all workflows
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh GET /workflows
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh GET /workflows
 
 # Get a specific workflow
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh GET /workflows/123
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh GET /workflows/123
 
 # Activate a workflow
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh POST /workflows/123/activate
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh POST /workflows/123/activate
 
 # Deactivate a workflow
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh POST /workflows/123/deactivate
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh POST /workflows/123/deactivate
 
 # List executions (with filters)
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh GET "/executions?status=error&limit=10"
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh GET "/executions?status=error&limit=10"
 
 # Retry a failed execution
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh POST /executions/456/retry
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh POST /executions/456/retry
 
 # Stop a running execution
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh POST /executions/456/stop
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh POST /executions/456/stop
 
 # List credentials
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh GET /credentials
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh GET /credentials
 
 # List tags
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh GET /tags
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh GET /tags
 
 # List variables
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh GET /variables
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh GET /variables
 
 # List users
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh GET /users
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh GET /users
 
 # Security audit
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh POST /audit
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh POST /audit
 
 # List projects
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh GET /projects
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh GET /projects
 
 # Source control pull
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh POST /source-control/pull '{"force": true}'
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh POST /source-control/pull '{"force": true}'
 ```
 
 ## API Resources
@@ -200,13 +200,13 @@ All list endpoints support cursor-based pagination:
 ### Monitor Failed Executions
 ```bash
 # Get recent failures
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh GET "/executions?status=error&limit=20"
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh GET "/executions?status=error&limit=20"
 ```
 
 ### Workflow Inventory
 ```bash
 # List all active workflows
-bash ~/.openclaw/skills/skills/muso-n8n/scripts/n8n-api.sh GET "/workflows?active=true"
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-n8n/scripts/n8n-api.sh GET "/workflows?active=true"
 ```
 
 ### Troubleshooting

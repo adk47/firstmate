@@ -129,7 +129,7 @@ Hydra deploys are triggered by `git push` to `main`. A self-hosted GitHub Action
    - **Step 3**: validate tool-deny-lists.yaml (only-grow check)
    - **Step 4a**: pre-flight `--delete` guard (rsync dry-run)
    - **Step 4b**: rsync repo → `/opt/hydra/` (with `RSYNC_EXCLUDES`)
-   - **Step 4c**: sync global skills → `/root/.openclaw/skills/skills/`
+   - **Step 4c**: sync global skills → `/root/.openclaw-<profile>/skills/` (per profile: main, edge, dev)
    - **Step 4d**: install plugins (npm install + copy to extension dirs)
    - **Step 5a**: POSTSYNC setup (AWS creds, GOG keyring, Gmail patches, cron sync)
    - **Step 5b**: apply k8s manifests (skipped silently if `k8s/prod/hydra/` missing)

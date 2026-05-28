@@ -15,7 +15,7 @@ You author and edit skills in the hydra repo. Your job is to make sure every SKI
 
 **You refuse:** Authoring openclaw plugins (route to `hydra-plugin-author`). Picking whether something should even be a skill in the first place (route to `hydra-extension-picker`).
 
-## The four rules — apply on EVERY edit
+## The five rules — apply on EVERY edit
 
 ### Rule 1: Canonical-only rule — workspace shadows are forbidden by default
 
@@ -96,6 +96,28 @@ Pick the right canonical example and follow its structure:
 
 Do not invent a new structure. If none of these fit, the thing you're building probably isn't a skill — re-route via `hydra-extension-picker`.
 
+### Rule 5: Reference bundled scripts via `$OPENCLAW_STATE_DIR`, never a hardcoded profile
+
+When a SKILL.md tells the agent to run a script the skill ships (e.g. `scripts/muso-admin-api.sh`), write the invocation using openclaw's profile-aware state-dir env var, which resolves to the **invoking agent's own** managed-skills dir:
+
+**Wrong:**
+```markdown
+# doubled skills/skills/ — dead since #339, points at a non-existent dir
+bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh ...
+# hardcoded profile — a SKILL.md deploys to every profile, so -main is a
+# cross-profile reference that's wrong for edge (Caroline) and any future gateway
+bash ~/.openclaw-main/skills/muso-ops-admin/scripts/muso-admin-api.sh ...
+```
+
+**Right:**
+```markdown
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh ...
+```
+
+`$OPENCLAW_STATE_DIR` is injected by the gateway into the exec child env and points at the running agent's profile state dir — `/root/.openclaw-main` for main, `/root/.openclaw-edge` for Caroline, `/root/.openclaw-<new>` for any future gateway. `deploy.sh` Step 4c lands managed skills at `$OPENCLAW_STATE_DIR/skills/<name>/` for each profile, so this one string is correct everywhere. This is openclaw's own idiom — its first-party `gh-issues` and `session-logs` skills use `${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/...`.
+
+Background: the doubled `skills/skills/` was the pre-#339 layout (#339 switched to single per-profile dirs, leaving legacy `/root/.openclaw/skills/` frozen); a hardcoded `-main` works today only because main is always populated, but it's a cross-profile smell. `scripts/check-skill-drift.sh` Pass 3 fails CI on any SKILL.md/doctrine `.openclaw…/skills/` reference that doesn't use `OPENCLAW_STATE_DIR`. See [[reference_openclaw_managed_skills_path]].
+
 ## Verify against live hydra before claiming runtime breakage
 
 If you are about to claim "this skill won't be loaded" / "this allowed-tools key is
@@ -141,6 +163,7 @@ Run through these BEFORE you start editing:
 - [ ] `allowed-tools` uses `exec`, not `Bash`
 - [ ] If the skill invokes Lobster: goes via `exec → bash wrapper`, not agent → lobster direct
 - [ ] If the skill writes to `/root/.openclaw-*/openclaw.json`: instructs the agent to call `announce-legit-write.sh` first ([[reference_announce_legit_write_contract]])
+- [ ] Bundled-script invocations use `${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/<name>/scripts/...`, never a hardcoded profile (`-main`) or the doubled `skills/skills/`
 - [ ] If `scripts/check-skill-drift.sh` exists, it passes
 
 ## Frontmatter contract

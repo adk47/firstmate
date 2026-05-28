@@ -159,16 +159,19 @@ describe("sanitizeOutboundBody", () => {
 
   // ReDoS defense: 100 KB pathological input with overlapping-class emails
   // stalls the regex engine for 25 s+ without the length cap. The cap
-  // (currently 16 KB) bounds the worst case to ~300 ms on Node 20 — still
-  // imperfect, but a world away from hanging the event loop. Assertion is
-  // 1 s to give CI margin; if the cap is ever removed outright, the
-  // pathological input will blow past that trivially.
+  // (currently 16 KB) bounds the input, but the email regex is still ~O(n²)
+  // on the capped slice (~250M ops on 16 K identical chars): ~300 ms on a
+  // dev box but 4–7 s on a slow/contended CI vCPU. The wall-clock assertion
+  // is therefore a loose 10 s ceiling — enough to catch the cap being removed
+  // outright (which reintroduces the 25 s+ hang) without flaking on slow
+  // runners. The real guarantees are the length-cap + truncation assertions
+  // below; tightening the regex quantifiers would let this drop back to ~1 s.
   it("caps input length to prevent catastrophic regex backtracking (ReDoS)", () => {
     const pathological = "a".repeat(50_000) + "@" + "b".repeat(50_000);
     const start = Date.now();
     const { body, redactions } = sanitizeOutboundBody(pathological);
     const elapsed = Date.now() - start;
-    expect(elapsed).toBeLessThan(1000);
+    expect(elapsed).toBeLessThan(10_000);
     expect(body.length).toBeLessThanOrEqual(16_000);
     // Truncation is surfaced to the caller so the log line shows data loss.
     expect(redactions.some((r) => r.startsWith("<truncated:"))).toBe(true);

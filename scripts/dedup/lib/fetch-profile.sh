@@ -5,7 +5,7 @@ set -euo pipefail
 profile_id="${1:?usage: fetch-profile.sh <profile_uuid>}"
 
 dir="$(cd "$(dirname "$0")" && pwd)"
-api="${MUSO_ADMIN_API:-$HOME/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh}"
+api="${MUSO_ADMIN_API:-${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh}"
 
 raw=$(bash "$api" call GET "/admin/profile/$profile_id") || {
   echo "fetch-profile: admin-api call failed for $profile_id" >&2

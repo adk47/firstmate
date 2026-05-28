@@ -184,10 +184,10 @@ log "Step 4/7: Installing Intercom plugin in edge profile..."
 
 # Copy the plugin from the global extensions to the edge profile
 INTERCOM_SRC="/root/.openclaw/extensions/intercom"
-INTERCOM_DST="/root/.openclaw/edge/extensions/intercom"
+INTERCOM_DST="/root/.openclaw-edge/extensions/intercom"
 
 if [[ -d "$INTERCOM_SRC" ]]; then
-  mkdir -p "/root/.openclaw/edge/extensions"
+  mkdir -p "/root/.openclaw-edge/extensions"
   cp -r "$INTERCOM_SRC" "$INTERCOM_DST"
   log "  Intercom plugin copied to $INTERCOM_DST"
 else

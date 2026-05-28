@@ -39,7 +39,7 @@ Track lifecycle: search → investigate → modify → verify.
 ### Search Tracks
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/tracks/search?keyword=track+name&limit=10"
 ```
 
@@ -55,7 +55,7 @@ LIMIT 20
 ### View Track Details
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/track/<track_id>"
 ```
 
@@ -63,27 +63,27 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 
 **List links:**
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/track/<track_id>/analytics-sources"
 ```
 
 **Add link:**
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/track/<track_id>/analytics-sources" \
   '{"url":"https://open.spotify.com/track/..."}'
 ```
 
 **Remove link:**
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call DELETE "/admin/track/<track_id>/analytics-sources" \
   '{"linkId":"<link_id>"}'
 ```
 
 **Move link between tracks:**
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call PATCH "/admin/track/<track_id>/analytics-sources" \
   '{"linkId":"<link_id>","fromTrackId":"<source_track_id>"}'
 ```
@@ -105,7 +105,7 @@ Pre-merge: compare both tracks (credits, analytics links, popularity).
 # Body: { mergeInto: <primary_id>, tracksIds: [<duplicate_id>, ...] }
 # Backend handler: core-backend/src/apis/_admin/track/mergeTracks.js
 # A missing `mergeInto` returns "Track ID is required"; missing `tracksIds` returns "Tracks IDs are required". Field names are exact.
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/tracks/merge" \
   '{"mergeInto":"<primary_id>","tracksIds":["<duplicate_id>"]}'
 ```
@@ -119,7 +119,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 # Endpoint: POST /admin/tracks/unmerge
 # Body: { unmergeFrom: <primary_id>, tracksIds: [<merged_in_id>, ...] }
 # Backend handler: core-backend/src/apis/_admin/track/unmergeTracks.js
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/tracks/unmerge" \
   '{"unmergeFrom":"<primary_id>","tracksIds":["<merged_in_id>"]}'
 ```
@@ -127,7 +127,7 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 ### View Raw Credits
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call GET "/admin/track/<track_id>/raw-credits"
 ```
 
@@ -135,14 +135,14 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 
 **Add credit:**
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/track/<track_id>/profile/<profile_id>/credits" \
   '{"role":"producer"}'
 ```
 
 **Remove credit:**
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call DELETE "/admin/track/<track_id>/profile/<profile_id>/credits"
 ```
 
@@ -151,14 +151,14 @@ bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
 Force-refresh analytics data for a track:
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/track/capture/<track_id>"
 ```
 
 ### Enrich Track from URL
 
 ```bash
-bash ~/.openclaw/skills/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/track/enrichByUrl" '{"enrichmentUrl":"https://open.spotify.com/track/..."}'
 ```
 
