@@ -60,7 +60,7 @@ SSH_OPTS_STR="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes"
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/sync-from-server.sh <target> [--apply]
+Usage: scripts/sync-from-server.sh <target> [--apply] [--only <path> ...]
 
 Targets:
   skills        Pull skills-all/ from node-8 into repo
@@ -70,6 +70,11 @@ Targets:
 
 Flags:
   --apply       Actually copy files. Without this, runs as a dry-run.
+  --only <path> Pull ONLY this repo-relative path instead of the whole target
+                subdir. Repeatable. Use this to capture a single drifted file
+                (e.g. one a drift gate flagged SERVER-AHEAD) WITHOUT clobbering
+                other locally-modified files in the same tree. The path must
+                live under the target's subdir (e.g. skills → skills-all/...).
 
 Examples:
   # Check if anyone edited skills on the server
@@ -80,6 +85,9 @@ Examples:
   git status skills-all/
   git diff skills-all/
 
+  # Capture just one flagged file (safe alongside other PR edits):
+  scripts/sync-from-server.sh skills --apply --only skills-all/muso-anrok/SKILL.md
+
   # If the diff looks legitimate, commit it:
   git add skills-all/ && git commit -m "chore: pull skill edits from node-8"
 
@@ -89,23 +97,31 @@ USAGE
   exit 1
 }
 
-# Parse args. --apply is positional-flexible: it can appear before or
-# after the target, so `--apply skills` and `skills --apply` both work.
+# Parse args. --apply is positional-flexible (before or after the target).
+# --only <path> is repeatable and takes the next arg as a value.
 TARGET=""
 APPLY=false
-for arg in "$@"; do
-  case "$arg" in
+ONLY=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --apply) APPLY=true ;;
+    --only)
+      shift
+      [[ $# -gt 0 ]] || { echo "--only requires a <path> argument" >&2; usage; }
+      ONLY+=("$1")
+      ;;
+    --only=*) ONLY+=("${1#--only=}") ;;
     -h|--help) usage ;;
-    -*) echo "Unknown flag: $arg" >&2; usage ;;
+    -*) echo "Unknown flag: $1" >&2; usage ;;
     *)
       if [[ -z "$TARGET" ]]; then
-        TARGET="$arg"
+        TARGET="$1"
       else
-        echo "Unexpected extra argument: $arg" >&2; usage
+        echo "Unexpected extra argument: $1" >&2; usage
       fi
       ;;
   esac
+  shift
 done
 [[ -z "$TARGET" ]] && usage
 
@@ -155,13 +171,83 @@ pull() {
   fi
 }
 
-case "$TARGET" in
-  skills)     pull "skills-all" ;;
-  workspaces) pull "workspaces" ;;
-  audit)      pull "audit" ;;
-  all)        pull "skills-all"; pull "workspaces" ;;
-  *)          usage ;;
-esac
+# Allowed path prefixes for the chosen target — used to validate --only paths.
+target_prefixes() {
+  case "$TARGET" in
+    skills)     printf '%s\n' "skills-all/" ;;
+    workspaces) printf '%s\n' "workspaces/" ;;
+    audit)      printf '%s\n' "audit/" ;;
+    all)        printf '%s\n' "skills-all/" "workspaces/" ;;
+    *)          usage ;;
+  esac
+}
+
+# Reject any --only path that doesn't live under the target's subdir, so a
+# typo can't pull (and on --apply, write) an unexpected tree.
+validate_only_paths() {
+  local p pre ok prefixes pretty
+  prefixes=$(target_prefixes)
+  pretty=$(printf '%s' "$prefixes" | tr '\n' ' ')
+  for p in "${ONLY[@]}"; do
+    # Reject absolute paths and '..' traversal BEFORE the prefix check: a path
+    # like skills-all/../scripts/foo passes the "starts with skills-all/" test
+    # but escapes the target tree once rsync resolves it (the /./ anchor in
+    # pull_files would write outside skills-all/).
+    if [[ "$p" == /* ]] || [[ "$p" =~ (^|/)\.\.(/|$) ]]; then
+      red "  --only path '$p' is invalid (no absolute paths or '..' traversal)"
+      exit 1
+    fi
+    ok=false
+    while IFS= read -r pre; do
+      [[ "$p" == "$pre"* ]] && { ok=true; break; }
+    done <<< "$prefixes"
+    if ! $ok; then
+      red "  --only path '$p' is not under the '$TARGET' target (expected prefix: $pretty)"
+      exit 1
+    fi
+  done
+}
+
+# Pull only the named repo-relative paths. -R recreates the relative path
+# (parent dirs included) under HYDRA_ROOT; the /./ anchor marks where the
+# relative portion begins. No --delete — same safety contract as pull().
+pull_files() {
+  local mode="DRY-RUN"
+  $APPLY && mode="APPLY"
+  : > "$TMP"
+  local p
+  for p in "${ONLY[@]}"; do
+    log "Pulling $p  ($mode)"
+    if ! rsync -az $DRY_FLAG -R --checksum --itemize-changes \
+         -e "ssh -i $SSH_KEY $SSH_OPTS_STR" \
+         "$NODE8_USER@$NODE8_IP:$DEPLOY_PATH/./$p" \
+         "$HYDRA_ROOT/" \
+         | tee -a "$TMP" ; then
+      red "  rsync failed for $p"
+      exit 1
+    fi
+  done
+  local n
+  n=$(grep -cE '^[<>]f' "$TMP" || true)
+  if (( n > 0 )); then
+    if $APPLY; then yellow "  → $n file(s) pulled"; else yellow "  → $n file(s) would be pulled"; fi
+  else
+    green "  → repo already matches server (no changes)"
+  fi
+}
+
+if (( ${#ONLY[@]} > 0 )); then
+  validate_only_paths
+  pull_files
+else
+  case "$TARGET" in
+    skills)     pull "skills-all" ;;
+    workspaces) pull "workspaces" ;;
+    audit)      pull "audit" ;;
+    all)        pull "skills-all"; pull "workspaces" ;;
+    *)          usage ;;
+  esac
+fi
 
 echo
 if ! $APPLY; then

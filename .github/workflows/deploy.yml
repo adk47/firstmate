@@ -38,7 +38,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         with:
-          fetch-depth: 2
+          # Full history: Step 4a's baseline-aware skill-drift check resolves
+          # `git show <.deployed-sha>:<path>`, and that baseline can lag main by
+          # more than one commit. (HEAD~1 target detection still works.)
+          fetch-depth: 0
 
       - name: Detect deploy target
         id: detect

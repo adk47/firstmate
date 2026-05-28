@@ -447,6 +447,11 @@ jobs:
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@v5
+        with:
+          # Full history so the skill-drift gate can resolve the node-8
+          # baseline blob (git show <.deployed-sha>:<path>); that baseline
+          # can lag this PR by many commits.
+          fetch-depth: 0
 
       - name: Rsync dry-run against /opt/hydra/
         # This is a "shift-left" copy of scripts/deploy.sh Step 4a. The
@@ -483,13 +488,16 @@ jobs:
           # a clear actionable error.
           RSYNC_EXCLUDES=()
           eval "$(sed -n '/^RSYNC_EXCLUDES=(/,/^)$/p' scripts/deploy.sh)"
-          # Guard: zero or suspiciously-small array means extraction broke.
-          # Current deploy.sh has 19 entries; anything under 15 is almost
-          # certainly a truncated extraction (e.g., sed range terminated
-          # at a future bare "^)" line inside the array). Catches both
-          # total failure and partial extraction.
-          if [ "${#RSYNC_EXCLUDES[@]}" -lt 15 ]; then
-            echo "::error::RSYNC_EXCLUDES extracted only ${#RSYNC_EXCLUDES[@]} entries from scripts/deploy.sh — expected ≥15. Extraction likely truncated (check the array declaration format and closing paren placement)."
+          # Guard: self-calibrating. Independently count the --exclude= lines
+          # in the array block and require the eval'd array to match exactly
+          # (catches an eval that silently drops entries) and to clear a modest
+          # floor (catches gross truncation / total failure). Replaces the old
+          # hardcoded "expected ≥15 (deploy.sh has 19)", which went stale as
+          # the array grew past 60 entries and would no longer catch a 40-entry
+          # truncation.
+          declared=$(sed -n '/^RSYNC_EXCLUDES=(/,/^)$/p' scripts/deploy.sh | grep -c -- "--exclude=")
+          if [ "${#RSYNC_EXCLUDES[@]}" -ne "$declared" ] || [ "${#RSYNC_EXCLUDES[@]}" -lt 15 ]; then
+            echo "::error::RSYNC_EXCLUDES extraction problem: eval'd ${#RSYNC_EXCLUDES[@]} entries but the deploy.sh array block declares $declared --exclude= lines (expected equal, and ≥15). The sed range or array format likely changed."
             exit 1
           fi
           echo "Sourced ${#RSYNC_EXCLUDES[@]} exclude patterns from deploy.sh"
@@ -562,6 +570,21 @@ jobs:
             exit 1
           fi
           echo "✓ Zero suspicious deletions — safe to deploy"
+
+      - name: Skill drift 3-way gate (server-ahead / conflict vs node-8)
+        # Shift-left of the deploy's baseline-aware skill-drift check
+        # (scripts/lib/drift-check.sh, used by deploy.sh Step 4a). Surfaces
+        # SERVER-AHEAD edits (capture them) and CONFLICTs (reconcile) BEFORE
+        # merge, while letting the PR's own REPO-AHEAD edits through (the
+        # #366 false-block fix). Runs on the self-hosted runner so /opt/hydra/
+        # is local. The merge-deploy Step 4a stays the authoritative backstop;
+        # this gate is intentionally stricter than the deploy (it does not
+        # honor the hot-patch ack window) and warns-not-blocks when no node-8
+        # baseline is available.
+        run: |
+          set -euo pipefail
+          chmod +x scripts/pr-skill-drift-gate.sh
+          REPO_ROOT="$(pwd)" SERVER_ROOT=/opt/hydra scripts/pr-skill-drift-gate.sh
 
       - name: Cron job orphan check
         # Compares cron-jobs.json in the PR against the server's live
