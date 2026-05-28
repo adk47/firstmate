@@ -22,7 +22,12 @@ import { createOpenRouterJudge } from "./judge.js";
 import { createClickupTicket } from "./clickup.js";
 import {
   downloadImageAttachments,
+  downloadDocumentAttachments,
   buildMediaExtraContext,
+  capMediaEntries,
+  MAX_IMAGE_ATTACHMENTS_PER_TURN,
+  MAX_MEDIA_ENTRIES_PER_TURN,
+  STATEDIR_MEDIA_FALLBACK,
   type PersistedAttachment,
 } from "./attachments.js";
 import path from "node:path";
@@ -36,6 +41,30 @@ import { DEFAULT_JUDGE_MIN_TURNS, DEFAULT_TURN_HARD_CAP, DEFAULT_JUDGE_MODEL } f
 export const accountSessions = new Map<string, Map<string, IntercomSessionState>>();
 
 let stateStoreHydrated = false;
+
+// Resolve the root under which inbound attachments are persisted.
+//
+// PREFERRED: the support agent's workspace dir, so files land at
+//   <workspace>/intercom/<conv>/<msg>/...  (e.g. workspaces/support/intercom/…)
+// which (a) is inside openclaw's inbound-path allowlist — the runtime merges
+// the bound agent's workspaceDir into the allowed roots
+// (resolveMediaAttachmentLocalRoots, verified 2026.5.19) — and (b) lets
+// Caroline browse the raw files herself.
+//
+// The plugin doesn't receive the bound agent's workspaceDir at webhook time,
+// so we read it from INTERCOM_MEDIA_WORKSPACE_DIR (set per-profile in the
+// env-file; on edge this is /opt/hydra/workspaces/support). This is the single
+// switch the task calls for: flip the env var to change the persistence root.
+//
+// FALLBACK: <stateDir>/media — the pre-existing, known-allowed location — used
+// when the env var is unset OR if the workspace-rooted path turns out to be
+// rejected at dispatch (UNVERIFIED e2e for the Intercom channel as of this
+// change). Either way the original CDN URL still rides along in MediaUrls.
+function resolveMediaRoot(stateDir: string): string {
+  const workspaceDir = process.env.INTERCOM_MEDIA_WORKSPACE_DIR?.trim();
+  if (workspaceDir) return workspaceDir;
+  return path.join(stateDir, STATEDIR_MEDIA_FALLBACK);
+}
 
 function hydrateFromMap(loaded: Map<string, Map<string, IntercomSessionState>>): void {
   accountSessions.clear();
@@ -393,62 +422,104 @@ export const intercomPlugin = createChatChannelPlugin({
                     const bufferedChunks: string[] = [];
                     let droppedMidStream = false;
 
-                    // If the customer attached images, fetch them NOW (Intercom
-                    // CDN URLs are signed with ~30 min TTL) and persist under
-                    // <stateDir>/media/intercom/<conv>/<msg>/N.<ext>. We then
+                    // If the customer attached images and/or PDFs, fetch them
+                    // NOW (Intercom CDN URLs are signed with ~30 min TTL) and
+                    // persist under <mediaRoot>/intercom/<conv>/<msg>/. We then
                     // pass the persisted paths to the agent runtime through
                     // `extraContext.MediaPaths` — openclaw's MsgContext shape
                     // (`channels/inbound-event/media`) the gateway turns into
-                    // base64 image content blocks for vision-capable models.
-                    // Empty `attachments` array → no extraContext, no behavior
-                    // change for text-only messages.
+                    // base64 image content blocks for vision-capable models, and
+                    // (for application/pdf entries) feeds to the document-extract
+                    // plugin for text. PDFs are page-rasterized to PNG so vision
+                    // can also "see" them. Empty attachments+documents → no
+                    // extraContext, no behavior change for text-only messages.
+                    const imageRefs = result.attachments ?? [];
+                    const documentRefs = result.documents ?? [];
                     let persisted: PersistedAttachment[] = [];
-                    if (result.attachments && result.attachments.length > 0) {
+                    if (imageRefs.length > 0 || documentRefs.length > 0) {
                       const stateDir = resolveStateDir();
                       if (stateDir) {
+                        const mediaRoot = resolveMediaRoot(stateDir);
+                        const dlDeps = { log: log ? { warn: (m: string) => log.warn?.(m), info: (m: string) => log.info?.(m) } : undefined };
                         try {
-                          persisted = await downloadImageAttachments({
-                            refs: result.attachments,
-                            conversationId: result.conversationId,
-                            mediaRoot: path.join(stateDir, "media"),
-                            messageId: payload.id,
-                            deps: { log: log ? { warn: (m) => log.warn?.(m), info: (m) => log.info?.(m) } : undefined },
-                          });
+                          // Reserve the slots images will take (capped) and give
+                          // the document pipeline only the remainder as its budget,
+                          // so PDFs aren't downloaded/rasterized just to be discarded
+                          // by the post-hoc cap. Images are cheap (no rasterization)
+                          // and always <= MAX_IMAGE_ATTACHMENTS_PER_TURN.
+                          const imagesPlanned = Math.min(imageRefs.length, MAX_IMAGE_ATTACHMENTS_PER_TURN);
+                          const docBudget = Math.max(0, MAX_MEDIA_ENTRIES_PER_TURN - imagesPlanned);
+                          // Order matters: image entries first, then document
+                          // entries (rasterized PNG pages then original PDF per
+                          // doc). normalizeAttachments pairs path/url/type by
+                          // index, so this order is what the agent receives.
+                          const [images, documents] = await Promise.all([
+                            imageRefs.length > 0
+                              ? downloadImageAttachments({
+                                  refs: imageRefs,
+                                  conversationId: result.conversationId,
+                                  mediaRoot,
+                                  messageId: payload.id,
+                                  deps: dlDeps,
+                                })
+                              : Promise.resolve([] as PersistedAttachment[]),
+                            documentRefs.length > 0 && docBudget > 0
+                              ? downloadDocumentAttachments({
+                                  refs: documentRefs,
+                                  conversationId: result.conversationId,
+                                  mediaRoot,
+                                  messageId: payload.id,
+                                  budget: docBudget,
+                                  deps: dlDeps,
+                                })
+                              : Promise.resolve([] as PersistedAttachment[]),
+                          ]);
+                          // Defensive final cap on the COMBINED media list. The
+                          // document pipeline is already budgeted upstream (docBudget),
+                          // so this normally won't truncate; it's a backstop in case
+                          // image downloads plus a full doc budget ever exceed the cap.
+                          const capped = capMediaEntries(images, documents);
+                          if (capped.truncated) {
+                            log?.warn?.(
+                              `[${tag}] truncated media entries count=${capped.total} cap=${MAX_MEDIA_ENTRIES_PER_TURN} conv=${result.conversationId}`,
+                            );
+                          }
+                          persisted = capped.entries;
                           if (persisted.length > 0) {
                             log?.info?.(
-                              `[${tag}] persisted ${persisted.length}/${result.attachments.length} image attachment(s) conv=${result.conversationId} bytes=${persisted.reduce((s, p) => s + p.size, 0)}`,
+                              `[${tag}] persisted ${persisted.length} media entr(ies) (img_refs=${imageRefs.length} doc_refs=${documentRefs.length}) conv=${result.conversationId} root=${mediaRoot} bytes=${persisted.reduce((s, p) => s + p.size, 0)}`,
                             );
                           } else {
                             log?.warn?.(
-                              `[${tag}] all ${result.attachments.length} image attachment(s) failed to persist conv=${result.conversationId} — dispatching text-only`,
+                              `[${tag}] all attachments failed to persist (img_refs=${imageRefs.length} doc_refs=${documentRefs.length}) conv=${result.conversationId} — dispatching text-only`,
                             );
                           }
                         } catch (err) {
-                          // downloadImageAttachments swallows per-image errors
+                          // The download fns swallow per-attachment errors
                           // internally — this catch covers only the directory-
                           // creation path, which shouldn't normally fail.
                           log?.error?.(
-                            `[${tag}] image-attachment pipeline failed conv=${result.conversationId}: ${err}`,
+                            `[${tag}] attachment pipeline failed conv=${result.conversationId}: ${err}`,
                           );
                         }
                       } else {
                         log?.warn?.(
-                          `[${tag}] stateDir unavailable — cannot persist ${result.attachments.length} image attachment(s) conv=${result.conversationId}, dispatching text-only`,
+                          `[${tag}] stateDir unavailable — cannot persist ${imageRefs.length} image + ${documentRefs.length} doc attachment(s) conv=${result.conversationId}, dispatching text-only`,
                         );
                       }
                     }
 
                     const mediaExtraContext = buildMediaExtraContext(persisted);
 
-                    // Customer can drag-drop an image with no caption — the
+                    // Customer can drag-drop an image/PDF with no caption — the
                     // text body is then empty. Substitute a synthetic prompt
                     // so the agent receives a non-empty turn alongside the
-                    // image content block. Only applies when we actually
+                    // media content block(s). Only applies when we actually
                     // have media to show; pure empty-body+no-media events
                     // are filtered upstream in classifyEvent.
                     const bodyForDispatch =
                       result.body.length === 0 && persisted.length > 0
-                        ? `(Customer sent ${persisted.length === 1 ? "an image" : `${persisted.length} images`} with no caption.)`
+                        ? `(Customer sent ${documentRefs.length > 0 ? "a document/attachment" : persisted.length === 1 ? "an image" : `${persisted.length} images`} with no caption.)`
                         : result.body;
 
                     await dispatchInboundDirectDmWithRuntime({

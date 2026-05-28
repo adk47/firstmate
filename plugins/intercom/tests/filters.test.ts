@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, extractImageAttachments } from "../src/filters.js";
+import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, extractImageAttachments, extractDocumentAttachments } from "../src/filters.js";
 import type { IntercomWebhookPayload, IntercomPartAttachment } from "../src/types.js";
 import userCreated from "./fixtures/conversation-user-created.json";
 import userReplied from "./fixtures/conversation-user-replied.json";
@@ -185,7 +185,11 @@ describe("extractImageAttachments", () => {
     expect(result[0].contentType).toBe("image/jpeg");
   });
 
-  it("drops non-image MIMEs (audio/PDF/video) — out of scope for v1", () => {
+  it("drops non-image MIMEs from the IMAGE extractor (PDF goes via extractDocumentAttachments; audio/video unsupported)", () => {
+    // PDFs are intentionally NOT image refs — they take the document path
+    // (persist original + rasterize). The image extractor must still reject
+    // them so a PDF can't be persisted with an image extension / fed straight
+    // to vision unrasterized.
     const result = extractImageAttachments(
       [
         img({ content_type: "application/pdf", name: "doc.pdf" }),
@@ -246,6 +250,50 @@ describe("extractImageAttachments", () => {
   it("handles undefined inputs gracefully", () => {
     expect(extractImageAttachments(undefined, undefined)).toEqual([]);
     expect(extractImageAttachments([], "")).toEqual([]);
+  });
+});
+
+describe("extractDocumentAttachments", () => {
+  // WHY: PDFs need a distinct extractor — they are rasterized for vision AND
+  // forwarded verbatim for document-extract. These tests pin the accept/reject
+  // branches so a future change can't (a) let an image slip into the doc path,
+  // or (b) coerce us into fetching a non-CDN URL claiming application/pdf.
+
+  const doc = (over: Partial<IntercomPartAttachment>): IntercomPartAttachment => ({
+    type: "upload",
+    name: "invoice.pdf",
+    url: "https://downloads.intercomcdn.com/i/o/abc/invoice.pdf",
+    content_type: "application/pdf",
+    ...over,
+  });
+
+  it("keeps a structured PDF attachment with content_type + name", () => {
+    expect(extractDocumentAttachments([doc({})])).toEqual([{
+      url: "https://downloads.intercomcdn.com/i/o/abc/invoice.pdf",
+      contentType: "application/pdf",
+      name: "invoice.pdf",
+    }]);
+  });
+
+  it("drops image MIMEs (those belong to extractImageAttachments)", () => {
+    expect(extractDocumentAttachments([doc({ content_type: "image/png", name: "a.png" })])).toEqual([]);
+  });
+
+  it("ignores non-Intercom CDN hosts even if content_type claims application/pdf", () => {
+    // Defense against a forged/malformed payload coercing an out-of-band fetch.
+    expect(extractDocumentAttachments([doc({ url: "https://evil.example.com/x.pdf" })])).toEqual([]);
+  });
+
+  it("dedupes by URL", () => {
+    const sharedUrl = "https://downloads.intercomcdn.com/i/o/abc/dup.pdf";
+    const result = extractDocumentAttachments([doc({ url: sharedUrl }), doc({ url: sharedUrl })]);
+    expect(result).toHaveLength(1);
+  });
+
+  it("does NOT scrape inline HTML (PDFs are never <img> tags)", () => {
+    // extractDocumentAttachments has no body param — only structured refs.
+    expect(extractDocumentAttachments(undefined)).toEqual([]);
+    expect(extractDocumentAttachments([])).toEqual([]);
   });
 });
 
@@ -441,6 +489,111 @@ describe("classifyEvent — attachments", () => {
     if (result.kind === "customer_message") {
       expect(result.attachments).toHaveLength(1);
       expect(result.attachments?.[0].url).toContain("/new.png");
+    }
+  });
+
+  it("plumbs PDF documents onto customer_message.documents (separate key from attachments)", () => {
+    const payload = baseUserCreated({
+      conversation_parts: {
+        conversation_parts: [{
+          type: "conversation_part",
+          id: "part_1",
+          body: "here's my receipt",
+          part_type: "comment",
+          created_at: 1711234567,
+          author: { type: "user", id: "user_xyz" },
+          attachments: [{
+            type: "upload",
+            name: "receipt.pdf",
+            url: "https://downloads.intercomcdn.com/i/o/x/receipt.pdf",
+            content_type: "application/pdf",
+          }],
+        }],
+      } as IntercomWebhookPayload["data"]["item"]["conversation_parts"],
+    });
+    const result = classifyEvent(payload);
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.documents).toHaveLength(1);
+      expect(result.documents?.[0].contentType).toBe("application/pdf");
+      // image attachments key stays omitted when there are none
+      expect("attachments" in result).toBe(false);
+    }
+  });
+
+  it("classifies as customer_message even when body is empty IF only a PDF is attached", () => {
+    const payload = baseUserCreated({
+      conversation_parts: {
+        conversation_parts: [{
+          type: "conversation_part",
+          id: "part_1",
+          body: "",
+          part_type: "comment",
+          created_at: 1711234567,
+          author: { type: "user", id: "user_xyz" },
+          attachments: [{
+            type: "upload",
+            name: "doc.pdf",
+            url: "https://downloads.intercomcdn.com/i/o/x/doc.pdf",
+            content_type: "application/pdf",
+          }],
+        }],
+      } as IntercomWebhookPayload["data"]["item"]["conversation_parts"],
+    });
+    const result = classifyEvent(payload);
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.body).toBe("");
+      expect(result.documents).toHaveLength(1);
+    }
+  });
+
+  it("carries BOTH images and documents when a message mixes them", () => {
+    const payload = baseUserCreated({
+      conversation_parts: {
+        conversation_parts: [{
+          type: "conversation_part",
+          id: "part_1",
+          body: "screenshot + the pdf",
+          part_type: "comment",
+          created_at: 1711234567,
+          author: { type: "user", id: "user_xyz" },
+          attachments: [
+            {
+              type: "upload",
+              name: "shot.png",
+              url: "https://downloads.intercomcdn.com/i/o/x/shot.png",
+              content_type: "image/png",
+            },
+            {
+              type: "upload",
+              name: "report.pdf",
+              url: "https://downloads.intercomcdn.com/i/o/x/report.pdf",
+              content_type: "application/pdf",
+            },
+          ],
+        }],
+      } as IntercomWebhookPayload["data"]["item"]["conversation_parts"],
+    });
+    const result = classifyEvent(payload);
+    if (result.kind === "customer_message") {
+      expect(result.attachments).toHaveLength(1);
+      expect(result.attachments?.[0].contentType).toBe("image/png");
+      expect(result.documents).toHaveLength(1);
+      expect(result.documents?.[0].contentType).toBe("application/pdf");
+    }
+  });
+
+  it("omits the `documents` key entirely on messages with no PDFs", () => {
+    const payload = baseUserCreated({
+      source: {
+        body: "just text",
+        author: { type: "user", id: "u1", email: "u@example.com" },
+      } as IntercomWebhookPayload["data"]["item"]["source"],
+    });
+    const result = classifyEvent(payload);
+    if (result.kind === "customer_message") {
+      expect("documents" in result).toBe(false);
     }
   });
 });

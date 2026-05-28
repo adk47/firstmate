@@ -109,6 +109,16 @@ export interface ImageAttachmentRef {
   name?: string;
 }
 
+// Same shape as ImageAttachmentRef but filtered to DOCUMENT_MIME_ALLOWLIST
+// (today: application/pdf only) at classify time. Kept as a distinct type so
+// the document pipeline (persist original + rasterize pages) can't be
+// accidentally fed an image ref or vice versa. See attachments.ts.
+export interface DocumentAttachmentRef {
+  url: string;
+  contentType: string;
+  name?: string;
+}
+
 export interface IntercomAuthor {
   type: "user" | "admin" | "bot";
   id: string;
@@ -198,7 +208,7 @@ export interface IntercomClient {
 // --- Event classification ---
 
 export type ClassifiedEvent =
-  | { kind: "customer_message"; conversationId: string; body: string; authorId: string; attachments?: ImageAttachmentRef[] }
+  | { kind: "customer_message"; conversationId: string; body: string; authorId: string; attachments?: ImageAttachmentRef[]; documents?: DocumentAttachmentRef[] }
   | { kind: "admin_reply"; conversationId: string; adminId: string; adminType: AssigneeType; messageId: string }
   | { kind: "assigned"; conversationId: string; assigneeId: string; assigneeType: AssigneeType }
   | { kind: "lifecycle"; conversationId: string; state: LifecycleState }

@@ -316,7 +316,8 @@
       "codex",
       "slack",
       "intercom",
-      "support-tools"
+      "support-tools",
+      "document-extract"
     ],
     "entries": {
       "codex": {
@@ -331,6 +332,9 @@
         "enabled": true
       },
       "intercom": {
+        "enabled": true
+      },
+      "document-extract": {
         "enabled": true
       },
       "support-tools": {

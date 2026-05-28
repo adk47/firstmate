@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# remove-credits.sh — Caroline self-service track removal from a customer's own profile.
+# remove-credits.sh – Caroline self-service track removal from a customer's own profile.
 #
 # Architecture: bash-only mutation surface for capability A of the
 # customer-credit-removal skill. The plugin's MusoAdminClient stays GET-only;
 # this script is the single audit + cap-enforcement surface for destructive
 # customer-initiated track removals.
 #
-# Invoked by Caroline via `exec bash <this>`. Fixed argv contract — no
+# Invoked by Caroline via `exec bash <this>`. Fixed argv contract – no
 # free-form parameters reach this script through a tool schema. The agent
 # assembles a plain-text tracks file (one "Artist - Title" per line) and
 # passes its path.
@@ -47,7 +47,7 @@ set -euo pipefail
 # bash 4.4+. macOS dev hosts have bash 3.2 which doesn't support this option;
 # in that case we silently fall back to the default behavior (the explicit
 # `|| echo 0` fallbacks on every jq -r extraction are the load-bearing
-# defense — inherit_errexit is belt-and-suspenders for hydra prod).
+# defense – inherit_errexit is belt-and-suspenders for hydra prod).
 shopt -s inherit_errexit 2>/dev/null || true
 
 # --- Constants / caps ---
@@ -73,7 +73,7 @@ JQ_OWNER_EMAILS='[.body.data.workspaces[]? | select(.isClaimed==true) | .email]'
 # --- Locate muso-admin-api.sh ---
 # Hydra deploy syncs the repo into /opt/hydra (DEPLOY_PATH default per
 # scripts/deploy.sh:21). The skill canonically lives in /opt/hydra/skills-all/
-# after deploy. The /root/hydra-src tree exists but is stale on node-8 — do
+# after deploy. The /root/hydra-src tree exists but is stale on node-8 – do
 # NOT prefer it: an out-of-date muso-admin-api.sh there would bypass newer
 # admin-wrapper guards (e.g., the OPS_DRY_RUN refusal added 2026-05-26).
 MUSO_ADMIN_API="${MUSO_ADMIN_API_SCRIPT:-/opt/hydra/skills-all/muso-ops-admin/scripts/muso-admin-api.sh}"
@@ -116,7 +116,7 @@ _audit_probe() {
 }
 
 # Append a JSONL audit row. Never fails the script if the log dir is
-# unwritable — write a stderr warning so any silent-failure mode surfaces
+# unwritable – write a stderr warning so any silent-failure mode surfaces
 # via the TS-layer stderr capture. The fail-closed gate is `_audit_probe`
 # at script start; this helper is intentionally lenient mid-run so a
 # refusal path never gets clobbered by a transient append failure.
@@ -198,7 +198,7 @@ _verify_intercom_email() {
 
 # Audit-log scan: confirm a recent `would_remove` row exists for every
 # track_id we're about to apply. Enforces the dry-run-before-apply rule
-# mechanically (SKILL.md prose alone is not enforcement — per
+# mechanically (SKILL.md prose alone is not enforcement – per
 # feedback_llm_instruction_insufficient.md).
 #
 # Args: profile_id requester_email_lc track_id  →  returns 0 if matched, 1 if not
@@ -207,7 +207,7 @@ _recent_dry_run_exists() {
   [[ -f "$AUDIT_LOG" ]] || return 1
   local cutoff_epoch
   cutoff_epoch=$(( $(date -u +%s) - DRY_RUN_RECENCY_SECS ))
-  # Date math via jq — fromdateiso8601 is POSIX-portable.
+  # Date math via jq – fromdateiso8601 is POSIX-portable.
   jq -e --arg profile_id "$profile_id" \
         --arg email "$requester_email_lc" \
         --arg track_id "$track_id" \
@@ -237,7 +237,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)           apply=0; shift ;;
     -h|--help)
       cat <<'EOF'
-remove-credits.sh — Caroline self-service track removal
+remove-credits.sh – Caroline self-service track removal
 
 Required:
   --profile-id <uuid>            Target profile UUID (from the URL the customer pasted)
@@ -280,7 +280,7 @@ if ! [[ "$requester_email" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]
 fi
 
 # When supplied, intercom_conv_id is interpolated directly into the Intercom
-# GET URL — restrict to a safe alphanumeric character set so a poisoned
+# GET URL – restrict to a safe alphanumeric character set so a poisoned
 # value can't change URL semantics (e.g., '?', '/', '#', encoded escapes).
 # Intercom conv IDs in practice are short numeric strings.
 if [[ -n "$intercom_conv_id" ]] && ! [[ "$intercom_conv_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
@@ -294,11 +294,11 @@ requester_email_lc="$(printf %s "$requester_email" | tr '[:upper:]' '[:lower:]')
 # "dryRun":true,"wouldHaveExecuted":true} response. Without an explicit
 # refusal here, a real --apply call would parade through DELETE-handling
 # logic, see "200", audit `status:"removed"`, and report success to the
-# customer — but no credit would have actually been deleted. This silent
+# customer – but no credit would have actually been deleted. This silent
 # integrity drift is the worst-case failure mode for this script.
 # Pass-3 DELETE handling also reads `.dryRun` per-row as a second line.
 if [[ "${OPS_DRY_RUN:-0}" == "1" ]]; then
-  _emit_error "ops_dry_run_set" "OPS_DRY_RUN=1 is set in env; refusing — would short-circuit DELETEs into synthetic 200s"
+  _emit_error "ops_dry_run_set" "OPS_DRY_RUN=1 is set in env; refusing – would short-circuit DELETEs into synthetic 200s"
   exit 0
 fi
 
@@ -320,7 +320,7 @@ if (( apply == 1 )) && [[ -z "$intercom_conv_id" ]]; then
   exit 0
 fi
 
-# Read input — strip blank lines + dedupe while preserving first-seen order.
+# Read input – strip blank lines + dedupe while preserving first-seen order.
 # Portable read loop (bash 3.2 on macOS doesn't have mapfile).
 # Also strip trailing \r so CRLF-pasted track lists from Windows clipboards
 # don't get treated as distinct values from the LF-canonical credits.
@@ -336,7 +336,7 @@ if (( input_count > MAX_PER_REQUEST )); then
   exit 0
 fi
 
-# Per-day cap — count today's status=removed entries for this requester.
+# Per-day cap – count today's status=removed entries for this requester.
 # Scoped to apply mode only: dry-run is preview-shaped and should never
 # refuse a customer at 95/100 from seeing what the next 6 would do.
 # Uses `jq -R 'fromjson?'` so a single corrupted JSONL line in the audit
@@ -462,7 +462,7 @@ done
 
 # --- Title-to-trackId resolution ---
 # Build normalized lookup ONCE from the credits file, then per-row match
-# reads via stdin redirect — no argv blowup.
+# reads via stdin redirect – no argv blowup.
 # `roles` captures the profile owner's role(s) on each track; the producer-
 # role guard below refuses removal when any production-side role is present
 # (Alexxx false-positive pattern, ticket 869ck6tv6).
@@ -491,7 +491,7 @@ jq -c '
 ' < "$credits_file" > "$lookup_file"
 
 # Per-row processing.
-# Pass 1 — resolution + dry-run audit. For apply mode, exactly-one-match rows
+# Pass 1 – resolution + dry-run audit. For apply mode, exactly-one-match rows
 # get queued into the pending_apply arrays; we DO NOT issue any DELETE in
 # pass 1 so we can preflight the whole batch against the dry-run-recency
 # gate before any destructive call fires.
@@ -512,7 +512,7 @@ pending_apply_track_ids=()
 pending_apply_titles=()
 
 for raw_line in "${input_lines[@]}"; do
-  # Parse "Artist - Title" — split on first " - ".
+  # Parse "Artist - Title" – split on first " - ".
   customer_artist=""
   customer_title="$raw_line"
   if [[ "$raw_line" == *" - "* ]]; then
@@ -576,7 +576,7 @@ for raw_line in "${input_lines[@]}"; do
 
   # Producer-role guard: refuse if the profile owner has a production-side
   # role on this track. Forces the customer through action-request for
-  # role-aware ops review instead of mechanical removal — closes the
+  # role-aware ops review instead of mechanical removal – closes the
   # Alexxx false-positive pattern at the mechanical layer (the SKILL.md
   # prose-only check was deemed insufficient per
   # feedback_llm_instruction_insufficient.md).
@@ -623,10 +623,10 @@ for raw_line in "${input_lines[@]}"; do
   pending_apply_titles+=("$match_title")
 done
 
-# Pass 2 — dry-run-before-apply gate (Hardening 2). Only in apply mode.
+# Pass 2 – dry-run-before-apply gate (Hardening 2). Only in apply mode.
 # Every track in the pending queue must have a `would_remove` audit row
 # from this same (profile_id, requester_email) within DRY_RUN_RECENCY_SECS.
-# Refuse the WHOLE batch atomically if any track is missing its dry-run —
+# Refuse the WHOLE batch atomically if any track is missing its dry-run –
 # never partial-apply.
 if (( apply == 1 )) && (( ${#pending_apply_track_ids[@]} > 0 )); then
   missing_dry_run=()
@@ -648,7 +648,7 @@ if (( apply == 1 )) && (( ${#pending_apply_track_ids[@]} > 0 )); then
   fi
 fi
 
-# Pass 3 — issue DELETEs (apply mode only). Preflight passed; safe to act.
+# Pass 3 – issue DELETEs (apply mode only). Preflight passed; safe to act.
 for i in "${!pending_apply_track_ids[@]}"; do
   raw_line="${pending_apply_lines[$i]}"
   track_id="${pending_apply_track_ids[$i]}"

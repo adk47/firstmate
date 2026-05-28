@@ -4,19 +4,33 @@ import type {
   ClassifiedEvent,
   AssigneeType,
   ImageAttachmentRef,
+  DocumentAttachmentRef,
 } from "./types.js";
 import { MAX_PROCESSED_EVENT_IDS } from "./types.js";
 
-// MIME allowlist for vision forwarding. Audio/PDF/video deliberately
-// excluded for the first cut — they need separate handling (transcription
-// for audio, page-render for PDF) that doesn't fit a single content-block
-// path. Add here when those paths exist.
+// MIME allowlist for vision forwarding. Audio/video still excluded — they
+// need separate handling (transcription for audio) that doesn't fit a single
+// content-block path. PDFs are handled via DOCUMENT_MIME_ALLOWLIST below:
+// they're page-rasterized to image/png (so vision sees them) AND forwarded as
+// the original application/pdf (so openclaw's document-extract reads the text).
 export const IMAGE_MIME_ALLOWLIST = new Set<string>([
   "image/png",
   "image/jpeg",
   "image/jpg", // some clients emit jpg, normalize on the way out
-  "image/gif",
   "image/webp",
+  "image/gif",
+]);
+
+// MIME allowlist for document forwarding. PDF only today. Documents take a
+// two-pronged path in attachments.ts: the original bytes are persisted and
+// forwarded as application/pdf (consumed by openclaw's bundled document-extract
+// plugin, which is keyed on that exact MIME), AND up to MAX_PDF_PAGES pages are
+// rasterized to image/png so vision-capable models can visually "see" the PDF
+// (incl. scanned docs). The inbound vision path silently drops non-image/* MIMEs
+// — verified in openclaw 2026.5.19 (isImageAgentTurnAttachment) — so the
+// rasterization is mandatory, not a nicety.
+export const DOCUMENT_MIME_ALLOWLIST = new Set<string>([
+  "application/pdf",
 ]);
 
 // Intercom delivers attachments via two paths:
@@ -97,6 +111,30 @@ export function extractImageAttachments(
   return out;
 }
 
+// Extract document (PDF) attachments from the structured `attachments[]` only.
+// Deliberately NO inline-HTML scraping path: Intercom embeds PDFs as a download
+// link/attachment, not an `<img>` tag, and we don't want to fetch arbitrary
+// hrefs from the body. CDN host allowlist enforced — parity with the image
+// branch — so a forged/malformed payload can't coerce us into fetching an
+// out-of-band URL even if it claims application/pdf.
+export function extractDocumentAttachments(
+  structured: IntercomPartAttachment[] | undefined,
+): DocumentAttachmentRef[] {
+  const seen = new Set<string>();
+  const out: DocumentAttachmentRef[] = [];
+
+  for (const att of structured ?? []) {
+    if (!att?.url || seen.has(att.url)) continue;
+    if (!INTERCOM_CDN_HOST_RE.test(att.url)) continue;
+    const ct = (att.content_type ?? "").toLowerCase();
+    if (!DOCUMENT_MIME_ALLOWLIST.has(ct)) continue;
+    seen.add(att.url);
+    out.push({ url: att.url, contentType: ct, name: att.name });
+  }
+
+  return out;
+}
+
 export function classifyEvent(payload: IntercomWebhookPayload): ClassifiedEvent {
   const { topic, data } = payload;
   const conversation = data.item;
@@ -115,16 +153,20 @@ export function classifyEvent(payload: IntercomWebhookPayload): ClassifiedEvent 
       const structuredAttachments =
         lastPart?.attachments ?? conversation.source?.attachments;
       const attachments = extractImageAttachments(structuredAttachments, body);
-      // Allow empty body if at least one image attachment was extracted —
-      // a customer can drag-drop an image with no caption and we still
-      // want to forward it. Otherwise treat empty as a malformed event.
-      if (!body && attachments.length === 0) {
+      const documents = extractDocumentAttachments(structuredAttachments);
+      // Allow empty body if at least one image OR document attachment was
+      // extracted — a customer can drag-drop an image/PDF with no caption and
+      // we still want to forward it. Otherwise treat empty as a malformed event.
+      if (!body && attachments.length === 0 && documents.length === 0) {
         return { kind: "unknown", topic: `${topic}:empty_body` };
       }
       const authorId = lastPart?.author?.id ?? conversation.source?.author?.id ?? "";
-      return attachments.length > 0
-        ? { kind: "customer_message", conversationId, body, authorId, attachments }
-        : { kind: "customer_message", conversationId, body, authorId };
+      const base = { kind: "customer_message" as const, conversationId, body, authorId };
+      return {
+        ...base,
+        ...(attachments.length > 0 ? { attachments } : {}),
+        ...(documents.length > 0 ? { documents } : {}),
+      };
     }
 
     case "conversation.admin.replied": {

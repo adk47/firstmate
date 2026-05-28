@@ -1,13 +1,13 @@
 #!/usr/bin/env bats
 
-# Tests for remove-credits.sh — the destructive bash mutation surface for
+# Tests for remove-credits.sh – the destructive bash mutation surface for
 # Caroline self-service credit removal.
 #
 # Stubs (via PATH-shadow):
-#   - muso-admin-api.sh   — emits canned response from $MUSO_API_RESPONSE_FILE
+#   - muso-admin-api.sh   – emits canned response from $MUSO_API_RESPONSE_FILE
 #                           (one envelope per request, in order; cycles to
 #                           last on overflow).
-#   - curl                — emits $CURL_STUB_RESPONSE for Intercom verify.
+#   - curl                – emits $CURL_STUB_RESPONSE for Intercom verify.
 #
 # NEVER hits real APIs / real Slack. Follows the discipline codified by
 # feedback_bats_must_stub_openclaw.md.
@@ -20,7 +20,7 @@ setup() {
   TRACKS_FILE="$TEST_TMP/tracks.txt"
   echo "Some Artist - Some Track" > "$TRACKS_FILE"
 
-  # Stub muso-admin-api.sh — reads sequential responses from a file.
+  # Stub muso-admin-api.sh – reads sequential responses from a file.
   cat > "$STUB_DIR/muso-admin-api.sh" <<'STUBEOF'
 #!/usr/bin/env bash
 # Called as: muso-admin-api.sh call <METHOD> <PATH>
@@ -43,7 +43,7 @@ sed -n "${n}p" "$RESP"
 STUBEOF
   chmod +x "$STUB_DIR/muso-admin-api.sh"
 
-  # Stub curl — only Intercom verify uses curl; others go through muso-admin-api.sh
+  # Stub curl – only Intercom verify uses curl; others go through muso-admin-api.sh
   cat > "$STUB_DIR/curl" <<'STUBEOF'
 #!/usr/bin/env bash
 if [[ -n "${CURL_STUB_RESPONSE:-}" ]]; then
@@ -95,7 +95,7 @@ JSON
 }
 
 # Credits page with one matching track. Uses `totalCount` (the live admin
-# API field) rather than `total` — the wrapper's pagination loop reads
+# API field) rather than `total` – the wrapper's pagination loop reads
 # `.totalCount // .total // 0` for forward-compat.
 one_credit_envelope() {
   local track_id="$1"
@@ -216,7 +216,7 @@ JSON
 
 @test "audit_unwritable when audit dir is not writable" {
   # Use a path where mkdir -p deterministically fails because a regular
-  # file blocks the parent — works under root (chmod 555 wouldn't, since
+  # file blocks the parent – works under root (chmod 555 wouldn't, since
   # root bypasses DAC perms). The blocker file makes
   # `mkdir -p $TEST_TMP/blocker/nested` fail with ENOTDIR for every user.
   : > "$TEST_TMP/blocker"
@@ -430,7 +430,7 @@ EOF
   [ "$(jget '.results[0].status')" = "would_remove" ]
 }
 
-@test "apply: OPS_DRY_RUN trapdoor — dryRun:true response treated as error, not removed" {
+@test "apply: OPS_DRY_RUN trapdoor – dryRun:true response treated as error, not removed" {
   fresh_ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
   cat > "$AUDIT_LOG" <<EOF
 {"ts":"$fresh_ts","profile_id":"$PROFILE_ID","requester_email":"$REQUESTER_EMAIL","intercom_conv_id":"$CONV_ID","mode":"dry-run","status":"would_remove","track_id":"deadbeef-dead-dead-dead-deadbeefcafe","title":"Some Track","reason":null,"http_status":null}
