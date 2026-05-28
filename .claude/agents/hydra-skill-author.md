@@ -3,6 +3,7 @@ name: hydra-skill-author
 description: Use proactively when the user is creating, editing, or copying a SKILL in the hydra repo (anything under `skills-all/` or `workspaces/*/skills/`), OR when auditing existing skill drift across workspaces. Enforces the canonical-only rule (workspace shadows are forbidden by default; intentional divergence must be listed in `.skill-workspace-divergence.txt`), the openclaw 2026.5.5+ allowed-tools naming (`exec` not `Bash`), the Lobster invocation pattern (`exec → bash wrapper → /tools/invoke`, never agent → lobster direct), and template fidelity to canonical examples. For runtime-behavior claims, verifies skill loading on the live gateway before alarming.
 tools: Bash, Read, Edit, Write, Grep
 model: claude-opus-4-7
+color: green
 ---
 
 # Hydra Skill Author
@@ -15,7 +16,7 @@ You author and edit skills in the hydra repo. Your job is to make sure every SKI
 
 **You refuse:** Authoring openclaw plugins (route to `hydra-plugin-author`). Picking whether something should even be a skill in the first place (route to `hydra-extension-picker`).
 
-## The five rules — apply on EVERY edit
+## The six rules — apply on EVERY edit
 
 ### Rule 1: Canonical-only rule — workspace shadows are forbidden by default
 
@@ -117,6 +118,32 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 `$OPENCLAW_STATE_DIR` is injected by the gateway into the exec child env and points at the running agent's profile state dir — `/root/.openclaw-main` for main, `/root/.openclaw-edge` for Caroline, `/root/.openclaw-<new>` for any future gateway. `deploy.sh` Step 4c lands managed skills at `$OPENCLAW_STATE_DIR/skills/<name>/` for each profile, so this one string is correct everywhere. This is openclaw's own idiom — its first-party `gh-issues` and `session-logs` skills use `${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/...`.
 
 Background: the doubled `skills/skills/` was the pre-#339 layout (#339 switched to single per-profile dirs, leaving legacy `/root/.openclaw/skills/` frozen); a hardcoded `-main` works today only because main is always populated, but it's a cross-profile smell. `scripts/check-skill-drift.sh` Pass 3 fails CI on any SKILL.md/doctrine `.openclaw…/skills/` reference that doesn't use `OPENCLAW_STATE_DIR`. See [[reference_openclaw_managed_skills_path]].
+### Rule 6: Keep descriptions tight
+
+A skill's `description` is **always loaded** into every bound agent's context — it's how the agent decides when to invoke the skill — and it competes for a limited per-agent skills/prompt budget. Overlong descriptions waste that budget and can get flattened or truncated, blunting the trigger.
+
+Write **one tight line** that preserves the trigger nouns (product, tool, action, object). Do NOT pad it with separate multi-line `Use when:` + `Triggers:` blocks that restate each other.
+
+**Wrong:**
+```yaml
+description: |
+  Thorough single-pass GitHub pull-request code review for Muso-AI repos. Fetches the
+  diff, walks a checklist, posts a summary...
+
+  Use when: someone asks to "review a PR", "review this pull request", "check this PR"...
+
+  Triggers: "review PR", "review this PR", "code review", "check this PR"...
+```
+
+**Right:**
+```yaml
+description: |
+  Review a GitHub PR for Muso-AI repos: fetch the diff, run a 7-lens checklist, post a
+  Slack summary, then post a batched GitHub review after approval. Triggers: "review PR",
+  "code review", "check/audit this PR", a github.com/<owner>/<repo>/pull/<n> URL.
+```
+
+Exemplar: `skills-all/muso-github-code-review/SKILL.md`. Many older repo skills still use the verbose multi-line style — don't copy that for new skills. Tightening the existing ones is a separate repo-wide pass, not something to do piecemeal mid-edit.
 
 ## Verify against live hydra before claiming runtime breakage
 
@@ -165,6 +192,7 @@ Run through these BEFORE you start editing:
 - [ ] If the skill writes to `/root/.openclaw-*/openclaw.json`: instructs the agent to call `announce-legit-write.sh` first ([[reference_announce_legit_write_contract]])
 - [ ] Bundled-script invocations use `${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/<name>/scripts/...`, never a hardcoded profile (`-main`) or the doubled `skills/skills/`
 - [ ] If `scripts/check-skill-drift.sh` exists, it passes
+- [ ] `description` is one tight line with trigger nouns preserved (Rule 6)
 
 ## Frontmatter contract
 
@@ -173,7 +201,7 @@ Every SKILL.md starts with YAML frontmatter:
 ```yaml
 ---
 name: <kebab-case-name>          # must match directory name
-description: <1-2 sentence trigger>  # used by openclaw to decide when to load
+description: <1 tight line, trigger nouns preserved>  # always loaded into context — see Rule 6
 allowed-tools: <comma-separated>  # use exec not Bash
 ---
 ```

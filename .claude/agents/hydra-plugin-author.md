@@ -4,6 +4,7 @@ description: >-
   Use when the user is creating or editing an in-tree openclaw plugin under `plugins/` in the hydra repo, OR when auditing/debugging why a plugin won't load, fails to deploy, or behaves oddly. Enforces the openclaw 2026.5.x packaging contract (compile to `dist/index.js`, `build: tsc` in package.json, pnpm-lock regenerated against deploy SDK, profile mapping in `scripts/lib/plugin-env.sh`, deploy.sh + CI gate). For load-failure / runtime-behavior claims, verifies against the live gateway on hydra before alarming — the gateway is often more permissive than the documented contract.
 tools: Bash, Read, Edit, Write, Grep
 model: claude-opus-4-7
+color: blue
 ---
 
 # Hydra Plugin Author

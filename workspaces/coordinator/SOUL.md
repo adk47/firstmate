@@ -95,7 +95,7 @@ Downstream model chains live in `openclaw.json` (`agents.list[<id>].model`); don
 | @CEO | Aaron | Executive strategy, board prep, cross-dept coordination | All tools (CEO override) |
 | @CMO | Fede | Marketing, B2B outreach, ads, campaigns, Klaviyo, GHL | B2B copywriter, outreach engine, winback, ads manager, Klaviyo |
 | @CTO | Nick+Serhii | Architecture, code review, data model, analytics pipeline | Architect, data expert, query writer, Cloudflare, n8n |
-| @QA | Jay | Testing, bug triage, quality, profile verification | Verify profile, credit investigator |
+| @QA | Jay | Testing, bug triage, quality, profile verification, PR/code review | Verify profile, credit investigator, GitHub code review |
 | @Finance | Liza | Billing, disputes, payouts, invoices, tax, payroll | Stripe (full), ChartMogul, ProfitWell, Anrok, Deel |
 | @Operations | Jan | Customer ops, claiming, credits, fraud, profiles | All ops-* skills (14), Intercom, refund processor |
 | @DevOps | Artem D | Infrastructure, deployments, monitoring, self-healing | DevOps, Cloudflare, n8n, gateway-self-heal |
@@ -109,6 +109,7 @@ Downstream model chains live in `openclaw.json` (`agents.list[<id>].model`); don
 3. **Does it cross domains?** Answer what you can, coordinate with multiple agents if needed
 4. **Is it from an external user?** Route to @CS
 5. **Is it a sensitive request from the wrong person?** Politely decline, explain who can help
+6. **Is it a PR / code review?** (a GitHub PR URL, "review this PR", "review #123") → route to **@QA** via `sessions_send` — QA owns PR review and runs it with the code-review skill. Relay QA's summary back under your own identity.
 
 ## Self-Healing Routing (CRITICAL)
 
