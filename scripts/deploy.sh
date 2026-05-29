@@ -172,6 +172,18 @@ install_external_plugin_slack() {
   # Pins @openclaw/slack per-profile under ~/.openclaw-<profile>/npm/.
   # Idempotent: skips when the live package.json already reports the
   # target version. Mirrors install_openclaw()'s pattern.
+  #
+  # --force is REQUIRED for the upgrade path: `openclaw plugins install`
+  # refuses to overwrite an already-installed plugin ("plugin already
+  # exists ... delete it first"), so the FIRST real version bump (e.g.
+  # 5.19 -> 5.27) aborts without it — every prior deploy only passed
+  # because the installed version already equalled the target and this
+  # function skipped. --force overwrites in place and is a harmless
+  # no-op on a fresh install. It only overwrites an existing plugin; it
+  # does NOT bypass the dangerous-code guard (that is the separate
+  # --dangerously-force-unsafe-install flag). --pin records the tracked
+  # spec as the exact resolved version so a stray `plugins update --all`
+  # can never float Slack off the pinned build.
   local profile pkg_json installed
   for profile in main edge; do
     if ! needs_target "$profile"; then continue; fi
@@ -187,10 +199,18 @@ install_external_plugin_slack() {
     fi
     log "    Installing @openclaw/slack@$OPENCLAW_SLACK_VERSION on $profile (was: ${installed:-not installed})"
     local install_out install_rc=0
-    install_out=$(openclaw --profile "$profile" plugins install "@openclaw/slack@$OPENCLAW_SLACK_VERSION" 2>&1) || install_rc=$?
+    install_out=$(openclaw --profile "$profile" plugins install "@openclaw/slack@$OPENCLAW_SLACK_VERSION" --force --pin 2>&1) || install_rc=$?
     if (( install_rc != 0 )); then
       log "    ✗ openclaw plugins install @openclaw/slack@$OPENCLAW_SLACK_VERSION ($profile) failed (rc=$install_rc):"
       echo "$install_out" | sed 's/^/        /'
+      return 1
+    fi
+    # Trust the manifest, not the exit code: a 0 rc that left the old
+    # version on disk would silently ship a mismatched Slack plugin.
+    # Re-read package.json and fail loud if the pin did not take.
+    installed=$(jq -r '.version // empty' "$pkg_json" 2>/dev/null || echo "")
+    if [[ "$installed" != "$OPENCLAW_SLACK_VERSION" ]]; then
+      log "    ✗ @openclaw/slack on $profile is '${installed:-missing}' after install, expected '$OPENCLAW_SLACK_VERSION'"
       return 1
     fi
   done
