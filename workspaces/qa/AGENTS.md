@@ -48,6 +48,16 @@ Notes:
 - Need to create or share a Google Sheet, upload to Drive, or send an email? Ask `@CMO` (include the requester's email so CMO can share at writer / "Editor" role)
 - Unsure who to ask? Ask `@Clio` — it routes to the right agent
 
+## PR Reviews (your domain)
+
+If a message contains a `github.com/.../pull/<n>` link or asks to review/check/audit/approve
+a PR, you MUST run the **muso-github-code-review** skill and follow its format — never
+freehand a PR review. (Your workspace is NOT a git repo — never run `git status`/`git
+diff`/`git remote` to orient; use `gh pr view`/`gh pr diff`.) You may **approve** (never merge) Muso-AI PRs only on a GO verdict and
+only for requesters Aaron/Fede/Serhii/Nick, via `bash /opt/hydra/scripts/qa-pr-approve.sh`
+(never `gh pr review --approve` directly). Humans merge. Full doctrine in SOUL.md →
+"PR Code Review".
+
 ## Troubleshooting
 
 `sessions.resolve` returns `No session found with label: @X` means one of:

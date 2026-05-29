@@ -1,10 +1,11 @@
 ---
 name: muso-github-code-review
 description: |
-  Review a GitHub PR for Muso-AI repos: fetch the diff, run a 7-lens checklist, post
-  a severity-tagged Slack summary, then post a batched GitHub review after human
-  approval. Triggers: "review PR"/"review this pull request", "code review",
-  "check/audit this PR", a github.com/<owner>/<repo>/pull/<n> URL.
+  Review and (when satisfied) approve a GitHub PR in Muso-AI repos: fetch the diff,
+  run a 7-lens checklist, post a severity-tagged Slack summary, and on a GO verdict
+  approve via the gated wrapper (never merge). Triggers: "review PR"/"review this
+  pull request", "approve PR", "code review", "check/audit this PR", any
+  github.com/<owner>/<repo>/pull/<n> link.
 depends-on:
   - muso-slack-formatter
 compatibility: |
@@ -64,6 +65,12 @@ Read the PR description — it is the requirements context for the review. Note 
 author, scope (files / +/-), and whether it is a draft.
 
 ## Step 2 — Get the diff
+
+> ⚠️ **No local clone exists.** Your workspace (`/opt/hydra/workspaces/qa`) is **not a
+> git repo** — `git status` / `git diff` / `git remote` there fail with "not a git
+> repository". Do **not** run local `git` to "orient" yourself. `gh` reads the PR
+> remotely; use it for everything. Local `git` is valid **only** inside a fresh clone
+> for the optional Step 3b test run — never in your workspace.
 
 No local checkout is needed; `gh` fetches the diff directly:
 
@@ -207,9 +214,10 @@ JSONEOF
 gh api "repos/$OWNER/$REPO/pulls/$PR/reviews" --method POST --input /tmp/pr-review.json
 ```
 
-- `event`: use **`COMMENT`** by default. Use `REQUEST_CHANGES` only when the human
-  asks to formally block. Use `APPROVE` only on explicit human instruction — never
-  auto-approve.
+- `event`: use **`COMMENT`** for the inline review comments. Use `REQUEST_CHANGES`
+  only when the human asks to formally block. Do **not** use the reviews-API
+  `APPROVE` event to record a formal approval — the sanctioned approval path is the
+  gated wrapper in Step 7.
 - Inline comments use `line` (line number in the NEW file version) + `side: "RIGHT"`;
   for a multi-line range add `start_line` + `start_side`. Do NOT use `position` (it is
   closing down — use `line`), and do NOT add `subject_type` here — the batched reviews
@@ -234,6 +242,31 @@ EOF
 ```
 
 If you cannot log it, do not post it.
+
+## Step 7 — Approve the PR (approve-only, gated)
+
+Approve **only** when BOTH hold:
+- your verdict is **GO** — no 🔴 Critical and no 🟡 Important findings; and
+- the requester's Slack UID is one of: **Aaron, Fede, Serhii, Nick**.
+
+Approve through the gated wrapper — **never** call `gh pr review --approve` directly.
+The wrapper enforces Muso-AI-only, self-approval refusal, the requester allowlist, and
+the audit log:
+
+```bash
+bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "Approved by QA after code review."
+```
+
+- `<repo>` is the short name (e.g. `core-backend`) or `Muso-AI/<repo>`;
+  `<requester-slack-uid>` is the `sender_id` from message metadata — never a name.
+- **You approve; you never merge.** A human merges — say so to the requester.
+- If the wrapper exits non-zero, relay the reason and do NOT retry blindly:
+  `exit 4` = PR is authored by Aaron's account (GitHub blocks self-approval — another
+  reviewer is needed); `exit 5` = requester not authorized; `exit 3` = not a Muso-AI repo.
+- Report the wrapper's post-check (`reviewDecision` / `mergeStateStatus`). If GitHub still
+  shows the PR blocked (CODEOWNERS, required checks pending), tell the requester what's
+  outstanding — don't imply it's ready to merge.
+- If the verdict is **not** GO, do NOT approve: post the findings and stop.
 
 ## Pitfalls
 
