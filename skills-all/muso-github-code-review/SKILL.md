@@ -79,6 +79,19 @@ gh pr diff "$PR" --repo "$OWNER/$REPO"                 # full diff
 gh pr diff "$PR" --repo "$OWNER/$REPO" --name-only     # changed files
 ```
 
+To view **one file's** diff, use the files API — `gh pr diff` has **no** path
+filter:
+
+```bash
+gh api "repos/$OWNER/$REPO/pulls/$PR/files" \
+  --jq '.[] | select(.filename=="<path>") | .patch'
+```
+
+> **Do NOT** write `gh pr diff "$PR" -- <path>`. `gh pr diff` does not accept a
+> `-- <pathspec>` (git-style path filtering); it fails with
+> *"accepts at most 1 arg(s), received 2"*. For a single file use the files-API
+> recipe above; to drop noise from the full diff, use `--exclude '<glob>'`.
+
 For full-file context around a hunk (diffs alone hide issues), read the file at the
 PR head:
 
@@ -270,8 +283,9 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "Appr
 
 ## Pitfalls
 
-- **Large PRs**: review file-by-file with `gh pr diff --name-only` then per file;
-  don't try to hold a 3000-line diff at once.
+- **Large PRs**: list files with `gh pr diff --name-only`, then pull each file's
+  diff via the files-API recipe in Step 2 — `gh pr diff … -- <path>` is NOT valid
+  and will fail. Don't try to hold a 3000-line diff at once.
 - **Draft PRs**: default to `event: COMMENT` and say findings are preliminary.
 - **No GitHub write scope**: that's an expected outcome, not a failure — deliver the
   Slack summary and say a human needs to post it.
