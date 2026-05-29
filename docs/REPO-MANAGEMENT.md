@@ -35,7 +35,7 @@ The openclaw runtime is pinned in `scripts/deploy.sh` via the
 the deploy and is idempotent — same-version deploys skip the global
 `npm install -g`.
 
-Currently pinned: **`openclaw@2026.5.19`**
+Currently pinned: **`openclaw@2026.5.27`**
 
 Other runtime versions (nemoclaw, k3s, node) are not centrally pinned
 in this repo today; they live with the K8s manifests in the infra repo.

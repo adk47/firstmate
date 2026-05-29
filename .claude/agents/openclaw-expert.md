@@ -45,7 +45,7 @@ These memories are authoritative for THIS deployment. If a memory contradicts th
 
 Gateway binary + bundled extensions:
 
-- **OpenClaw runtime**: `/usr/lib/node_modules/openclaw/` (version 2026.5.5 as of 2026-05-15). 96 bundled extensions in `dist/extensions/`. Source is minified but greppable.
+- **OpenClaw runtime**: `/usr/lib/node_modules/openclaw/`. **deploy.sh pins `2026.5.27`** (bumped 2026-05-28), but the **live gateway runtime is still `2026.5.19`** until that PR deploys — always confirm with `openclaw --version`, never trust the pin alone. The deploy is a 5.19 → 5.27 hop in a single step: 5.21 + 5.23 were never published, 5.24/5.25 were beta-only, and 5.26 + 5.27 are the stable releases it carries. The `@openclaw/codex` plugin is already at 2026.5.22 on the live box (ahead of the 5.19 runtime — an existing skew), bundling Codex CLI 0.132.0 → 0.134.0 once 5.27 lands. Source is minified but greppable.
 - **Plugin SDK**: `/usr/lib/node_modules/openclaw/dist/plugin-sdk/` — has `bundled-plugin-metadata.generated.d.ts` (canonical list of bundled plugins at build time, but **note**: this can drift from runtime — verify with `openclaw plugins list`).
 - **Installed (non-bundled) plugins**: `/root/.openclaw-main/npm/node_modules/` — e.g., `@openclaw/lobster` lives here AFTER `openclaw plugins install`.
 - **Skills**: `/usr/lib/node_modules/openclaw/skills/` (built-in) and `/root/.openclaw-main/skills/` (global, if it exists) and `<workspaces>/<agent>/skills/` (workspace-scoped).
@@ -97,6 +97,56 @@ Known relevant upstream issues to be aware of:
 - **#65981** — Isolated cron sessions lose tools (closed; workaround was sessionTarget=main)
 - **#65374**, **#65550**, **#66360**, **#66947**, **#72015**, **#77864**, **#79026**, **#79611** — Various memory/lancedb/RAG bugs
 
+## Recent release knowledge — 5.20 + 5.22 + 5.26 + 5.27 (audited 2026-05-28)
+
+Hydra is bumping `OPENCLAW_VERSION` from 2026.5.19 → 2026.5.27 (the live runtime stays 2026.5.19 until that PR deploys). 5.21 + 5.23 were never published; 5.24/5.25 were beta-only; 5.26 + 5.27 are the stable releases in the hop. When asked about a 5.20/5.22/5.26/5.27 feature, consult this section before re-deriving from release notes.
+
+**CRITICAL CORRECTION — do not repeat this past mistake:** the 5.22 Anthropic 1M-context GA migration (#45613) is **IRRELEVANT to hydra**. Hydra does NOT route Claude through Anthropic-direct; it routes via OpenRouter (`openrouter/anthropic/claude-opus-4.7`). The live config (audited 2026-05-27 across main + edge profiles) contains **zero** occurrences of `context-1m-2025-08-07` or any `[1m]` model-id suffix, and the default runtime model is actually `openai/gpt-5.5` via Codex agentRuntime (#348). An earlier draft of this agent's research conflated *Claude Code session models* with *hydra runtime models* and flagged this as the #1 critical pre-upgrade blocker. It was not. If asked about Anthropic 1M context on hydra, state plainly that it doesn't apply.
+
+**Features that DO matter for hydra:**
+
+| Feature | Release | Relevance | Source |
+|---|---|---|---|
+| Codex `deactivated_workspace` → permanent auth failure / fallback advance | 5.22 (#55893) | Directly supports the 2-seat Codex failover pilot landed in hydra PR #348–350 (default gpt-5.5 now routes via Codex agentRuntime). Was "irrelevant" pre-#348; now a real win. | release notes |
+| OpenRouter honors `params.provider` routing policy via `models.providers.openrouter.params.provider` | 5.20 | Relevant — `claude-opus-4.7` still routes via OpenRouter; opens up provider-pinning if needed. | release notes |
+| Cron main-session "wake lane" (cron turns don't block interactive main-session chat) | 5.20 (#82766/#82767) | Enabled by default in 5.20+, no config knob. Improves the cron-vs-interactive interleaving Aaron has flagged. | release notes |
+| `openclaw status` shows configured default + session-pinned model + drift reason + docs link | 5.20 | Useful for diagnosing model-fallback drift (e.g., the 2026-04-21 kimi-k2p6 incident pattern). | release notes |
+| Doctor warns on plaintext secrets in `openclaw.json` (incl. provider keys + sensitive headers) | 5.20 (#84718) | Hydra audit 2026-05-27 found this fires **zero** warnings — configs already use env-var substitution. Future-proofing only. | live doctor `--lint` run |
+| Denied exec is terminal (no follow-up replay) | 5.22 (#69386/#85194) | Minor correctness improvement; no hydra code change. | release notes |
+| Slack reasoning payloads suppressed before reply delivery | 5.22 (#84319/#84322) | Cleaner replies on #credit-verification + #clio Slack channels. | release notes |
+| Shared skill dirs watched once across workspaces (EMFILE fix) | 5.22 (#84968/#85130) | Hydra gateways have `Max open files = 524288` (huge headroom), so we weren't fd-starved today. The benefit is reduced watcher / inotify pressure across main+edge. Future-proofing. | live `/proc/$pid/limits` check |
+| `tools.exec.pathPrepend` runs before user PATH on POSIX | 5.22 (#81403) | No hydra wrappers currently use this pattern; lets us drop any `PATH=…:$PATH` hacks if added later. | live grep on `scripts/lib/` 2026-05-27 |
+| Default subagent bootstrap trimmed (excludes persona/identity/user/memory/heartbeat/setup; only `AGENTS.md` + `TOOLS.md` injected) | 5.22 (#85283) | Hydra runs **top-level** agents (clio, caroline, cmo, ops, credit-verification, churn) — not openclaw "subagents" in the spawning sense. Likely irrelevant. If a feature ever uses subagent-spawning, audit personas for SOUL.md injection assumption first. | release notes + repo audit |
+| Codex CLI bundled bump 0.132.0 → 0.134.0 | 5.26 (#86772) | Moves with the already-installed `@openclaw/codex` plugin; hardens the Codex agentRuntime + yolo path (hydra PR #348–350). | release notes |
+| yolo approval honored **only** for `never` + `danger-full-access` | 5.26 (#85909) | **Direct hydra impact** — main+edge run `appServer.mode: "yolo"`. Must confirm the live Codex appServer still resolves to that exact pairing (see 5.27 validation checklist) — if it doesn't, Codex turns start prompting/blocking. | release notes |
+| Codex auth bootstrap from `CODEX_API_KEY`/`OPENAI_API_KEY` when no Codex profile | 5.26 (#85542) | hydra's `auth.order.openai` lists `openai-codex:` seats but the gateway env carries `OPENAI_API_KEY` — i.e. the live posture is API-key bootstrap (billing via API, not subscription). Re-verify the billing path didn't silently shift post-upgrade. | release notes + live env |
+| Preserve shared app-server clients after startup / spawned-helper failures | 5.27 (#87403) | Resilience win for the 2-seat Codex failover pilot — a helper crash no longer drops the shared client. | release notes |
+| Resolve Codex runtime models **before** generic routing | 5.27 (#87383) | Ensures `gpt-5.5` via the Codex agentRuntime resolves correctly even though an `openrouter/openai/gpt-5.5` model entry also exists in config. | release notes |
+| New core OpenAI-compatible embedding provider; embedding-provider **registration deprecated** | 5.27 (#85269) | No in-tree plugin registers an embedding provider (verified) — future-proofing only; relevant if/when the memory/RAG bugs above get revisited. | release notes + repo grep |
+
+**5.27 security / breaking changes — hydra exposure** (validated read-only on live node-8 2026-05-28 — verdict **GO**, all PASS). Verdicts are from the 5.27 PR diffs + the bundled-on-hydra 5.27 docs, since the live binary is still 5.19 — a one-shot non-prod 5.27 `doctor` is recommended to fully close. **The issue-title framing is misleading; the verified mechanics are:**
+
+- **#87292 "block side-effecting command wrappers"** — **PASS, not what it sounds like.** It blocks only the wrapper *binaries* `script` and `time -o/-a` (which hide the inner command from allowlist matching), NOT hydra's `exec → bash wrapper → /tools/invoke` dispatch architecture. Our Lobster + exec wrappers shell out via plain `curl`; live grep found zero `script`/`time -o` usage. No exposure.
+- **#87308 "reject unsafe Node runtime env overrides"** — **PASS.** It's an explicit key set (`NODE_OPTIONS`, `NODE_PATH`, `NODE_REDIRECT_WARNINGS`, `NODE_REPL_*`, `NODE_V8_COVERAGE`), NOT a `NODE_` prefix sweep, and is scoped to stdio-MCP `env` / node-host `--env` / `system.run` / skill env overrides — NOT the gateway's own systemd `EnvironmentFile=`. hydra's only NODE_* vars (`NODE_EXTRA_CA_CERTS`, `NODE_USE_SYSTEM_CA`) are in the kept-safe set and arrive via systemd env anyway. No TLS breakage.
+- **#87146 "node/device-role approvals require admin"** — **PASS.** Only non-operator *node* roles now need `operator.admin`; operator-role approvals still work. hydra authenticates via `gateway.auth.token` (bearer) + an operator-role paired device — no node-role self-approval.
+- **`/allowlist configWrites` origin policy** — **PASS.** This is the *pre-existing* channel slash-command origin policy (#72360/#72361), NOT a new 5.27 PR (#87144 is actually "route untrusted group prompts outside system prompt"). It governs config writes *originating from a chat `/allowlist` command*, not OS-level atomic-rename writers like `announce-legit-write.sh`. No `configWrites` key needed.
+
+**Pre-existing workarounds still required** (these were NOT fixed in 5.20 or 5.22 — do not recommend dropping them):
+
+- `before_tool_call` hook silently no-ops on `exec` in YOLO mode (#7597) — enforce at bash boundary instead.
+- Lobster `flowId` / `flowExpectedRevision` schema bleed — agents must call `exec → bash wrapper.sh → /tools/invoke`, never `lobster` tool direct.
+- `mcp set` writer rejects configs with legacy `plugins.installs` block (runtime tolerates it) — hot-patch via `jq` + `announce-legit-write.sh`.
+- mcp-remote children share gateway pgid → reap kills gateway — must use `transport: streamable-http`, not `npx mcp-remote`.
+- `plugin disable` doesn't validate channel dependencies (caused 2026-04-07 80-min Clio outage).
+
+**No-ops at hydra** (verified empty/clean on 2026-05-27, so the 5.20/5.22 changes don't bite us):
+
+- `thinkingFormat` doctor-strip (5.20 #77803): main + edge configs have no `thinkingFormat` values.
+- `cat SKILL.md && printf …` exec-allowlist removal (5.20): no occurrences anywhere under `skills-all/` or `workspaces/`.
+- `loadSessionStore` deprecation (5.22 #84693): no usage in any in-tree plugin.
+- Retired-catalog model refs (groq/xai/copilot/old-claude): none present; `gpt-5.5` + `claude-opus-4.7` are current.
+- SDK channel-turn aliases + Vitest-helper exports removed (5.27 #85072): all three in-tree plugins import only stable `openclaw/plugin-sdk/*` subpaths and pull vitest from `vitest/config` (not the SDK). Verified building + import-loading clean against the 5.27 SDK on 2026-05-28 (intercom 364 / cv-enforcer 42 / support-tools 114 tests green).
+
 ## Verification protocol
 
 Every non-obvious claim in your answer MUST be backed by:
@@ -139,7 +189,7 @@ Every non-obvious claim in your answer MUST be backed by:
    ```
    NOT `{"name":"lobster","arguments":{...}}` — that's MCP-style and the OpenClaw gateway rejects it. Top-level keys are `tool`, `action`, `args`. Inside `args`: `pipeline`, `argsJson` (string-of-json for workflow files), `timeoutMs`, `cwd`, `maxStdoutBytes`. For `action: resume` only: `flowId`, `flowExpectedRevision`.
 1. **`gateway.auth.token` IS the bearer for /tools/invoke** — same token as the control UI uses. Don't recommend generating a separate device-pairing token unless the user explicitly asks for least-privilege separation.
-2. **`@openclaw/lobster` is NOT bundled in 2026.5.5** despite a stale `bundled-plugin-metadata.generated.d.ts` in some extensions' vendored node_modules. Install via `openclaw plugins install @openclaw/lobster`. Verify with `openclaw plugins list --json | jq '.plugins[] | select(.id == "lobster")'`.
+2. **`@openclaw/lobster` is NOT bundled** despite a stale `bundled-plugin-metadata.generated.d.ts` in some extensions' vendored node_modules (last verified at 2026.5.5 on 2026-05-15; 5.20/5.22 release notes don't mention a bundling change, but re-verify on hydra if asked). Install via `openclaw plugins install @openclaw/lobster`. Verify with `openclaw plugins list --json | jq '.plugins[] | select(.id == "lobster")'`.
 3. **The `lobster` tool's gateway schema advertises `flowId` and `flowExpectedRevision`** because the same tool handles `run` + `resume`. Lobster's `run` handler REJECTS them. Schema-driven agents fill them in unprompted. Mechanical fix: route agent → `exec → bash wrapper.sh` instead of agent → `lobster` direct.
 4. **`tools.alsoAllow: ["lobster"]`** is the correct enablement for both agents AND `/tools/invoke` HTTP. NOT `gateway.tools.allow` (that only un-denies tools on the built-in HTTP deny list, which doesn't include `lobster`).
 5. **Lobster `${arg}` interpolation works in `command:` lines but is UNVERIFIED for `env:` blocks** (live-tested 2026-05-15 — env interpolation didn't propagate). Use positional CLI args instead.

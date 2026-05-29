@@ -152,6 +152,7 @@ haven't checked the live gateway.
 | Plugin missing from live gateway | No `plugin_profile()` entry | Add to `scripts/lib/plugin-env.sh` |
 | Audit watcher fires Slack alert on config write | Atomic-rename to openclaw.json without announce | `bash announce-legit-write.sh <plugin-name> <path>` |
 | Slack plugin breaks after openclaw upgrade | Slack externalized to `@openclaw/slack` since 2026.5.12 | Bump `@openclaw/slack` pin in deploy.sh |
+| Plugin fails to load post-5.27 with a missing-export error | 5.27 (#85072) trimmed the public SDK — channel-turn runtime aliases removed, Vitest test helpers no longer exported | Import only stable `openclaw/plugin-sdk/*` subpaths and pull vitest from `vitest/config`; our 3 plugins already comply (audited + built clean against 5.27 on 2026-05-28) |
 | Repo manifest declares `./src/index.ts` instead of `./dist/index.js` | Documented contract violation per memory | **Verify load status on live gateway first** — runtime may pick up `dist/` regardless. If loaded, downgrade to "hardening opportunity, not urgent" |
 
 ## Output style
