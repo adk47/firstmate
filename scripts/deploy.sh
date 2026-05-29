@@ -31,6 +31,17 @@ OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.5.27}"
 # range tracks the core release.
 OPENCLAW_SLACK_VERSION="${OPENCLAW_SLACK_VERSION:-${OPENCLAW_VERSION}}"
 
+# Pinned @openclaw/codex version. The Codex agent harness ships as this
+# separate npm package; its supports()/ABI tracks the core runtime.
+# openclaw 2026.5.20 made the runtime validate a forced harness's
+# supports() BEFORE pinning it, so a Codex plugin older than the runtime
+# silently rejects `openai/*` models and every Codex-pinned agent falls
+# back to its secondary model. Incident 2026-05-29: the runtime bumped
+# 5.19 -> 5.27 but the 5.19 Codex plugin stayed (deploy only pinned
+# Slack), so ceo/cto/qa/operations/devops/design rejected openai/gpt-5.5
+# and ran on Sonnet. Keep in lockstep with OPENCLAW_VERSION.
+OPENCLAW_CODEX_VERSION="${OPENCLAW_CODEX_VERSION:-${OPENCLAW_VERSION}}"
+
 # Detect if we're running on Node 8 (the HYDRA host)
 if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; then
   HYDRA_LOCAL=true
@@ -168,10 +179,11 @@ notify_slack() {
 # treats that as fatal — npm's default leaves the previous global binary
 # in place on a failed install, so aborting the deploy avoids continuing
 # on a half-updated runtime.
-install_external_plugin_slack() {
-  # Pins @openclaw/slack per-profile under ~/.openclaw-<profile>/npm/.
-  # Idempotent: skips when the live package.json already reports the
-  # target version. Mirrors install_openclaw()'s pattern.
+install_external_plugin() {
+  # Pins ONE externalized @openclaw/* plugin per-profile under
+  # ~/.openclaw-<profile>/npm/. Args: <pkg> <version> (e.g.
+  # "@openclaw/slack" "2026.5.27"). Idempotent: skips when the live
+  # package.json already reports the target version.
   #
   # --force is REQUIRED for the upgrade path: `openclaw plugins install`
   # refuses to overwrite an already-installed plugin ("plugin already
@@ -183,34 +195,35 @@ install_external_plugin_slack() {
   # does NOT bypass the dangerous-code guard (that is the separate
   # --dangerously-force-unsafe-install flag). --pin records the tracked
   # spec as the exact resolved version so a stray `plugins update --all`
-  # can never float Slack off the pinned build.
+  # can never float it off the pinned build.
+  local pkg="$1" version="$2"
   local profile pkg_json installed
   for profile in main edge; do
     if ! needs_target "$profile"; then continue; fi
-    pkg_json="/root/.openclaw-${profile}/npm/node_modules/@openclaw/slack/package.json"
+    pkg_json="/root/.openclaw-${profile}/npm/node_modules/${pkg}/package.json"
     if [[ -f "$pkg_json" ]]; then
       installed=$(jq -r '.version // empty' "$pkg_json" 2>/dev/null || echo "")
     else
       installed=""
     fi
-    if [[ "$installed" == "$OPENCLAW_SLACK_VERSION" ]]; then
-      log "    @openclaw/slack already $OPENCLAW_SLACK_VERSION on $profile — skipping"
+    if [[ "$installed" == "$version" ]]; then
+      log "    ${pkg} already $version on $profile — skipping"
       continue
     fi
-    log "    Installing @openclaw/slack@$OPENCLAW_SLACK_VERSION on $profile (was: ${installed:-not installed})"
+    log "    Installing ${pkg}@$version on $profile (was: ${installed:-not installed})"
     local install_out install_rc=0
-    install_out=$(openclaw --profile "$profile" plugins install "@openclaw/slack@$OPENCLAW_SLACK_VERSION" --force --pin 2>&1) || install_rc=$?
+    install_out=$(openclaw --profile "$profile" plugins install "${pkg}@${version}" --force --pin 2>&1) || install_rc=$?
     if (( install_rc != 0 )); then
-      log "    ✗ openclaw plugins install @openclaw/slack@$OPENCLAW_SLACK_VERSION ($profile) failed (rc=$install_rc):"
+      log "    ✗ openclaw plugins install ${pkg}@${version} ($profile) failed (rc=$install_rc):"
       echo "$install_out" | sed 's/^/        /'
       return 1
     fi
     # Trust the manifest, not the exit code: a 0 rc that left the old
-    # version on disk would silently ship a mismatched Slack plugin.
+    # version on disk would silently ship a mismatched plugin.
     # Re-read package.json and fail loud if the pin did not take.
     installed=$(jq -r '.version // empty' "$pkg_json" 2>/dev/null || echo "")
-    if [[ "$installed" != "$OPENCLAW_SLACK_VERSION" ]]; then
-      log "    ✗ @openclaw/slack on $profile is '${installed:-missing}' after install, expected '$OPENCLAW_SLACK_VERSION'"
+    if [[ "$installed" != "$version" ]]; then
+      log "    ✗ ${pkg} on $profile is '${installed:-missing}' after install, expected '$version'"
       return 1
     fi
   done
@@ -1543,16 +1556,46 @@ chmod +x "$DEPLOY_PATH"/scripts/*.sh "$DEPLOY_PATH"/scripts/*.py 2>/dev/null || 
 log "  Script permissions fixed"
 
 # -------------------------------------------------------------------
-# Step 4d.5: Install externalized plugins (Slack)
+# Step 4d.5: Install externalized plugins (Slack + Codex)
 # -------------------------------------------------------------------
-# Slack was bundled in the openclaw npm package through 2026.5.11 and
-# externalized into @openclaw/slack from 2026.5.12 onward. Without this
-# step the gateway emits "plugins.entries.slack: plugin not installed"
-# and #muso-hydra goes silent (incident PR #302).
-log "Step 4d.5/9: Pinning externalized plugins to OPENCLAW_SLACK_VERSION=${OPENCLAW_SLACK_VERSION}..."
-if ! install_external_plugin_slack; then
+# Several harness/channel plugins ship as separate @openclaw/* npm
+# packages whose ABI tracks the core runtime, so a runtime bump must
+# re-pin them IN LOCKSTEP or they silently mis-behave:
+#   - @openclaw/slack: externalized from 2026.5.12; without it the
+#     gateway emits "plugins.entries.slack: plugin not installed" and
+#     #muso-hydra goes silent (incident PR #302).
+#   - @openclaw/codex: a stale plugin under a newer runtime rejects
+#     `openai/*` models so Codex-pinned agents fall back to Sonnet
+#     (incident 2026-05-29 — runtime went 5.19->5.27 but the deploy
+#     only pinned Slack, leaving the 5.19 Codex plugin behind).
+log "Step 4d.5/9: Pinning externalized plugins (slack=${OPENCLAW_SLACK_VERSION}, codex=${OPENCLAW_CODEX_VERSION})..."
+if ! install_external_plugin "@openclaw/slack" "$OPENCLAW_SLACK_VERSION"; then
   fail "@openclaw/slack pin failed (target ${OPENCLAW_SLACK_VERSION})"
 fi
+if ! install_external_plugin "@openclaw/codex" "$OPENCLAW_CODEX_VERSION"; then
+  fail "@openclaw/codex pin failed (target ${OPENCLAW_CODEX_VERSION})"
+fi
+
+# Surface (warn, don't fail) any OTHER externalized @openclaw/* plugin
+# that has drifted from the runtime, so a silent skew like the
+# 2026-05-29 Codex incident can't hide again. These are deliberately NOT
+# auto-pinned because their version policy is independent of the core
+# runtime (e.g. @openclaw/lobster tracks its own validated build) — bump
+# them on purpose, not implicitly.
+for _profile in main edge; do
+  needs_target "$_profile" || continue
+  for _pj in /root/.openclaw-${_profile}/npm/node_modules/@openclaw/*/package.json; do
+    [[ -f "$_pj" ]] || continue
+    _name=$(jq -r '.name // empty' "$_pj" 2>/dev/null || echo "")
+    case "$_name" in
+      @openclaw/slack|@openclaw/codex|"") continue ;;
+    esac
+    _ver=$(jq -r '.version // empty' "$_pj" 2>/dev/null || echo "")
+    if [[ "$_ver" != "$OPENCLAW_VERSION" ]]; then
+      log "    ⚠ ${_name} is ${_ver:-unknown} on ${_profile} (runtime ${OPENCLAW_VERSION}) — drift; not auto-pinned, bump deliberately"
+    fi
+  done
+done
 
 # NOTE: drift baseline (.deployed-sha) is updated AFTER Step 7 (smoke test
 # passes), not here. Writing it now would advance the baseline before we
