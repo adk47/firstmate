@@ -21,4 +21,4 @@
 > | `postgresql_core.public` | `postgresql_core.public` |
 > | `hive.audit` | `hive.audit` |
 > | `bi` | `postgresql_analytics.public` |
-> | `hive.mlc` | `hive.mlc` |
+> | `"platform-industry-mlc-bi-prod"` | `hive."platform-industry-mlc-bi-prod"` (bare `hive.mlc` does NOT exist) |

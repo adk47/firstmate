@@ -112,6 +112,11 @@ Lists
 
 ### OLAP Cubes
 
+These live in the **`postgresql_olap`** catalog and are **sharded** by entity index
+(`cube_analytics_<dimension>_<index>`, e.g. `cube_analytics_album_627`). Query the daily-rotated
+**view** (e.g. `postgresql_olap.public.cube_analytics_album_view`), not a numbered shard; see
+`references/kt/2026-01-20_athena-part-2.md` for shard/view resolution.
+
 | Table | Purpose |
 |-------|---------|
 | `cube_analytics_profile` | Profile analytics aggregations |

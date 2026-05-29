@@ -17,6 +17,7 @@ Write correct, efficient Trino SQL queries for Muso.AI's OVH data platform (Hive
 | `postgresql_core.public` | Users, teams, subscriptions | public_users, public_teams, public_subscriptions |
 | `bi` | Business intelligence | marketing_*, reporting_weekly_* |
 | `hive.audit` | Catalog audits | audit_profile, audit_track, audit_isrc |
+| `postgresql_stats.public` | Streaming/analytics stats (live PG; legacy `platform-stats-export-prod`) | track_daily, profile_track, album_track |
 
 ### Table Naming Convention
 
@@ -983,7 +984,7 @@ FROM calcul_common.calc_profile_track_credits
 
 ### OLAP Cubes (Views)
 
-OLAP cubes are **rebuilt daily** by Spark. Always query **views**, not numbered tables.
+OLAP cubes live in the **`postgresql_olap`** catalog (NOT `postgresql_analytics`). They are **rebuilt daily** by Spark — always query **views**, not the numbered shard tables.
 
 | View | Dimensions |
 |------|------------|

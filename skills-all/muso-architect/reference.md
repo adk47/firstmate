@@ -42,7 +42,7 @@ Capture Scheduler Service
   |
   v
 Analytics Worker
-  |--> S3 Data Lake --> Athena (query)
+  |--> S3 Data Lake --> Trino (query, OVH — Athena retired 2026-04-25)
   `--> Aurora Catalog DB
 ```
 

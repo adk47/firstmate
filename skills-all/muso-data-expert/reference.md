@@ -18,7 +18,7 @@ The **muso-data-expert** skill provides comprehensive knowledge of Muso.AI's dat
 
 **Stats DB**: An Aurora PostgreSQL database containing pre-aggregated analytics data including daily track statistics, analytics links, and video data.[^6]
 
-**Data Lake**: S3-based storage containing raw data dumps and snapshots from various databases, queryable via Athena for analytics and exploration.[^7]
+**Data Lake**: S3-based storage containing raw data dumps and snapshots from various databases, queryable via Trino for analytics and exploration (AWS Athena retired 2026-04-25).[^7]
 
 **ISRC (International Standard Recording Code)**: A key identifier for catalog tracks used to link recordings across different platforms.[^8]
 
@@ -51,7 +51,7 @@ Data Lake
   Industry DB --> S3 (daily snapshots)
   Core DB     --> S3 (daily snapshots)
   Stats DB    --> S3 (full snapshot)
-  S3          --> Athena (query)
+  S3          --> Trino (query, OVH — Athena retired 2026-04-25)
 ```
 
 ### Key Database Instances
@@ -291,7 +291,7 @@ When raw entity refreshes:
 - **Delta Snapshots**: Incremental changes (Core Backend exports)
 - **Weekly Dumps**: Large dataset exports to S3[^34]
 
-**Athena Access**: Raw data stored in S3 is queryable via Athena for statistical analysis[^35]
+**Trino Access**: Raw data stored in OVH S3 is queryable via Trino — `bash /opt/hydra/scripts/trino-query.sh "<SQL>"` — for statistical analysis (AWS Athena was retired 2026-04-25)[^35]
 
 ## Service Integration
 

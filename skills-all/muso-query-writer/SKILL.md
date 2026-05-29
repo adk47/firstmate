@@ -131,7 +131,11 @@ Credits link profiles to tracks with roles (producer, songwriter, engineer).
 > - **MongoDB**: `db.catalog_profile.updateOne({_id: 'UUID'}, {$set: {profile_type: 'Producer Collective, Artist'}})`
 > - **DB Access Guide**: https://www.notion.so/1e30aeed21ad80d08d62fc7f9757fd19"
 
-## All Data Sources (Athena Databases)
+## All Data Sources
+
+> **AWS Athena was retired 2026-04-25 → OVH Trino.** Query via `bash /opt/hydra/scripts/trino-query.sh "<SQL>"`.
+> The legacy Athena DB names below are auto-rewritten to their Trino `catalog.schema` (see the "Trino
+> reference" column); you may also write the Trino name directly.
 
 Data freshness: daily dumps in 99% of cases.
 
@@ -142,13 +146,13 @@ Data freshness: daily dumps in 99% of cases.
 | `platform-industry-db-industry-prod` | Full weekly MongoDB snapshot (slower, complete) |
 
 ### PostgreSQL Snapshots
-| Database | Description |
-|----------|-------------|
-| `postgresql_core.public` | Growth Core DB - users, teams, subscriptions, claiming |
-| `platform-stats-export-prod` | Aurora Stats DB - analytics processing, raw data for Industry APIs |
-| `platform-feed-export-prod` | Feed DB - currently only "follow" table |
-| `platform-industry-calculations-export-prod` | Milestones, calculations |
-| `platform-catalog-export-prod` | Aurora Catalog DB |
+| Legacy Athena DB | Trino reference | Description |
+|----------|----------|-------------|
+| `postgresql_core.public` | `postgresql_core.public` | Growth Core DB - users, teams, subscriptions, claiming |
+| `platform-stats-export-prod` | `postgresql_stats.public` | Aurora Stats DB - analytics (e.g. `track_daily` streaming stats) |
+| `platform-feed-export-prod` | `postgresql_feed.public` | Feed DB (`activity*` tables) |
+| `platform-industry-calculations-export-prod` | `postgresql_industry.public` ⚠️ | Milestones, calculations — Trino role lacks SELECT grant (permission denied); grant pending |
+| `platform-catalog-export-prod` | `postgresql_catalog.public` | Aurora Catalog DB |
 
 ### Platform Tables (Pipeline-generated)
 | Database | Description |
@@ -161,7 +165,7 @@ Data freshness: daily dumps in 99% of cases.
 |----------|-------------|
 | `platform-industry-amplitude-bi-prod` | Amplitude analytics export |
 | `platform-import-payments-prod` | Stripe, Apple, Google payments |
-| `hive.mlc` | MLC mechanical licensing data |
+| `hive."platform-industry-mlc-bi-prod"` | MLC mechanical licensing data |
 | `platform-industry-zyteig-bi-prod` | Zyte scraped data |
 | `platform-anghami-bi-prod` | Anghami streams |
 | `platform-qobuz-bi-prod` | Qobuz streams |

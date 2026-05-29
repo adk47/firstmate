@@ -153,10 +153,11 @@ AWS Athena, Glue, and workgroups are retired. All queries now go to Trino on OVH
 |---------|-----------|--------------------------|
 | `hive."platform-industry-bi-prod"` | OVH S3 IO + HMS | `"platform-industry-bi-prod"` (matvw_*) |
 | `hive.audit` | OVH S3 IO + HMS | `"audit-prod"` |
-| `hive.mlc` | OVH S3 IO + HMS | `"platform-industry-mlc-bi-prod"` |
+| `hive."platform-industry-mlc-bi-prod"` | OVH S3 IO + HMS | `"platform-industry-mlc-bi-prod"` (MLC raw; bare `hive.mlc` does NOT exist) |
+| `hive."platform-data-merging-catalog-prod"` | OVH S3 IO + HMS | `"platform-data-merging-catalog-prod"` |
 | `postgresql_core.public` | OVH PG node-18 (live) | `"platform-core-backend-export-prod"` |
 | `postgresql_analytics.public` | OVH PG node-18 | `bi` |
-| `postgresql_industry.public` | OVH PG node-18 | `"platform-data-merging-catalog-prod"` |
+| `postgresql_industry.public` | OVH PG node-18 (⚠️ SELECT grant pending) | `"platform-industry-calculations-export-prod"` |
 | `postgresql_stats.public` | OVH PG node-18 | Aurora `platform-stats` |
 | `postgresql_olap.public` | OVH PG node-18 | Aurora `platform-industry-olap` |
 

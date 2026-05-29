@@ -11,15 +11,20 @@ Write correct, efficient Trino SQL queries against Muso.AI's OVH data platform.
 | Old Athena DB (Muso-internal name) | New Trino reference | Backed by |
 |---------------|---------------------|-----------|
 | platform-industry-bi-prod | `hive."platform-industry-bi-prod"` | OVH S3 IO + HMS (matvw_*) |
-| platform-core-backend-export-prod | `postgresql_core.public` | OVH PG node-18 (live, no export delay) |
+| platform-industry-mlc-bi-prod | `hive."platform-industry-mlc-bi-prod"` | OVH S3 IO + HMS |
+| platform-data-merging-catalog-prod | `hive."platform-data-merging-catalog-prod"` | OVH S3 IO + HMS |
 | audit-prod | `hive.audit` | OVH S3 IO + HMS |
+| platform-core-backend-export-prod | `postgresql_core.public` | OVH PG node-18 (live, no export delay) |
+| platform-stats-export-prod | `postgresql_stats.public` | OVH PG node-18 (live — track_daily streams, etc.) |
+| platform-feed-export-prod | `postgresql_feed.public` | OVH PG node-18 (live — activity tables) |
+| platform-catalog-export-prod | `postgresql_catalog.public` | OVH PG node-18 (live) |
+| platform-industry-calculations-export-prod | `postgresql_industry.public` | OVH PG node-18 — ⚠️ Trino role lacks SELECT grant (permission denied); grant pending |
 | bi | `postgresql_analytics.public` | OVH PG node-18 |
-| platform-industry-mlc-bi-prod | `hive.mlc` | OVH S3 IO + HMS |
-| platform-data-merging-catalog-prod | `postgresql_industry.public` | OVH PG (live) |
-| Aurora platform-stats | `postgresql_stats.public` | OVH PG node-18 |
-| Aurora platform-core-backend | `postgresql_core.public` | OVH PG (same as above) |
-| Aurora platform-industry-calculations | `postgresql_industry.public` | OVH PG node-18 |
-| Aurora platform-industry-olap | `postgresql_olap.public` | OVH PG node-18 |
+| Aurora platform-industry-olap | `postgresql_olap.public` | OVH PG node-18 (`cube_analytics_*` — sharded) |
+
+> `trino-query.sh` auto-rewrites the **bare** legacy name (e.g. `"platform-stats-export-prod".public_track_daily`
+> → `postgresql_stats.public.track_daily`). An explicit `hive."<legacy-name>"` is left untouched — the
+> legacy names also exist as hive schemas, so that form is the escape hatch to the S3/HMS export.
 
 ### Available catalogs
 ```

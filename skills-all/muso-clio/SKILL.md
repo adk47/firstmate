@@ -358,7 +358,7 @@ The previously-used `(retired 2026-04-25)` profile and AWS CLI commands are deco
 | `postgresql_analytics.public` | - | Business intelligence/reporting | OVH PG node-18 |
 | `hive.audit` | - | Catalog audits | OVH S3 IO + HMS |
 | `postgresql_stats.public` | - | analytics_link_*, analytics_video_* | OVH PG node-18 |
-| `hive.mlc` | - | MLC raw parties/works | OVH S3 IO + HMS |
+| `hive."platform-industry-mlc-bi-prod"` | - | MLC raw parties/works | OVH S3 IO + HMS |
 
 **Query via:** `bash /opt/hydra/scripts/trino-query.sh "<SQL>"` (no AWS profile, no region, no workgroup needed).
 

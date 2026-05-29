@@ -50,13 +50,38 @@ SQL="$*"
 # Live PG tables (users, teams, subscriptions, etc.) are accessible
 # via the postgresql_* catalogs (faster than going through HMS, no
 # export delay).
+# Each quoted-name rule is anchored with `(^|[^.])` so it fires ONLY when the
+# legacy name sits at a token boundary, NOT when it is already
+# catalog-qualified. That makes the rewrite idempotent and gives an escape
+# hatch:
+#   - `hive."platform-industry-bi-prod"` is left alone instead of becoming
+#     `hive.hive."…"` (Trino: "Too many dots in table name").
+#   - `hive."platform-stats-export-prod"` stays on the S3/HMS export (the
+#     legacy names ALSO exist as hive schemas), while the BARE form maps to
+#     the live `postgresql_*` catalog (fresher, no export delay — same choice
+#     the platform-core-backend-export-prod rule already makes).
+# `\1` re-emits the consumed boundary char. Order matters: `.public_`
+# variants precede the bare `.` variant so the Glue `public_` prefix is
+# stripped during rewrite.
+# The `hive.mlc.` rule fixes a half-migrated shorthand in saved queries:
+# the schema is `hive."platform-industry-mlc-bi-prod"` (parties/works/…);
+# bare `hive.mlc` (Athena's old DB name) does not exist in Trino.
 SQL=$(echo "$SQL" | sed -E '
-  s/"platform-industry-bi-prod"\./hive."platform-industry-bi-prod"./g
-  s/"audit-prod"\./hive.audit./g
-  s/"platform-industry-mlc-bi-prod"\./hive."platform-industry-mlc-bi-prod"./g
-  s/"platform-data-merging-catalog-prod"\./hive."platform-data-merging-catalog-prod"./g
-  s/"platform-core-backend-export-prod"\.public_/postgresql_core.public./g
-  s/"platform-core-backend-export-prod"\./postgresql_core.public./g
+  s/(^|[^.])"platform-industry-bi-prod"\./\1hive."platform-industry-bi-prod"./g
+  s/(^|[^.])"platform-industry-mlc-bi-prod"\./\1hive."platform-industry-mlc-bi-prod"./g
+  s/(^|[^[:alnum:]_])hive\.mlc\./\1hive."platform-industry-mlc-bi-prod"./g
+  s/(^|[^.])"platform-data-merging-catalog-prod"\./\1hive."platform-data-merging-catalog-prod"./g
+  s/(^|[^.])"audit-prod"\./\1hive.audit./g
+  s/(^|[^.])"platform-core-backend-export-prod"\.public_/\1postgresql_core.public./g
+  s/(^|[^.])"platform-core-backend-export-prod"\./\1postgresql_core.public./g
+  s/(^|[^.])"platform-stats-export-prod"\.public_/\1postgresql_stats.public./g
+  s/(^|[^.])"platform-stats-export-prod"\./\1postgresql_stats.public./g
+  s/(^|[^.])"platform-feed-export-prod"\.public_/\1postgresql_feed.public./g
+  s/(^|[^.])"platform-feed-export-prod"\./\1postgresql_feed.public./g
+  s/(^|[^.])"platform-catalog-export-prod"\.public_/\1postgresql_catalog.public./g
+  s/(^|[^.])"platform-catalog-export-prod"\./\1postgresql_catalog.public./g
+  s/(^|[^.])"platform-industry-calculations-export-prod"\.public_/\1postgresql_industry.public./g
+  s/(^|[^.])"platform-industry-calculations-export-prod"\./\1postgresql_industry.public./g
   s/"bi"\./postgresql_analytics.public./g
   s/(^|[[:space:]])bi\./\1postgresql_analytics.public./g
 ')
@@ -66,10 +91,19 @@ SQL=$(echo "$SQL" | sed -E '
 # (so `platform-core-backend-export-prod`.public_users matched the public
 # schema's `users` table). Raw PG via the Trino postgresql connector
 # exposes the bare table name (`users`, not `public_users`). After the
-# schema rewrite above, fix up the table prefix too — but only when the
-# query is now hitting postgresql_core.public.* (don't touch hive.* tables
-# whose names legitimately start with public_).
-SQL=$(echo "$SQL" | sed -E 's/(postgresql_core\.public\.)public_/\1/g')
+# schema rewrite above, fix up the table prefix too — but only on the
+# rewritten live-PG catalogs (don't touch hive.* tables whose names
+# legitimately start with public_).
+SQL=$(echo "$SQL" | sed -E 's/(postgresql_(core|stats|feed|catalog|industry)\.public\.)public_/\1/g')
+
+# ── Dry-run hook: print the rewritten SQL and stop (no cluster needed) ──
+# Used by scripts/tests/trino-query.bats to assert the rewrite layer without
+# a live trino-coordinator, and handy for debugging a rewrite by hand:
+#   TRINO_REWRITE_ONLY=1 trino-query.sh '<SQL>'
+if [ "${TRINO_REWRITE_ONLY:-}" = "1" ]; then
+  echo "$SQL"
+  exit 0
+fi
 
 # ── Step 2: locate trino-coordinator pod ──
 TRINO_NS="${TRINO_NS:-data-processing}"
