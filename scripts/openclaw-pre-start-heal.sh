@@ -67,6 +67,21 @@ export SLACK_NOTIFY_CONFIG
 # shellcheck source=lib/slack-notify.sh
 source "$SCRIPT_DIR/lib/slack-notify.sh"
 
+# ── Healer: Codex (ChatGPT OAuth) auth centralization (fleet-wide) ──
+# Re-point every agent's Codex auth store at the ONE canonical main store
+# via symlink BEFORE the gateway starts. openclaw snapshots OAuth creds
+# into memory at startup (it does NOT re-read auth-profiles.json per
+# request), so the symlinks must be in place before ExecStart; a
+# deploy/rsync may also have replaced a link with a regular file. The
+# helper is fleet-wide, idempotent, skips the canonical dir, and ALWAYS
+# exits 0 — it never blocks gateway start. This is what keeps edge's
+# Caroline (openai/gpt-5.5 via Codex) sharing main's continuously-rotated
+# token instead of fanning out a single-use refresh token (the #356
+# shape). See CLAUDE.md "Codex / OAuth auth is centralized".
+if [ -x "$SCRIPT_DIR/lib/ensure-codex-auth.sh" ]; then
+  "$SCRIPT_DIR/lib/ensure-codex-auth.sh" || log "WARN: ensure-codex-auth.sh returned non-zero (non-fatal)"
+fi
+
 is_valid() {
   # Returns 0 if `openclaw --profile <p> config validate` reports clean.
   # The CLI prints "Config valid: <path>" on stdout when ok and a multi-

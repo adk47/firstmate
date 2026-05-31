@@ -130,6 +130,59 @@ for profile in main edge; do
   fi
 done
 
+# Edge Codex (Caroline) silent-degradation watch. Runs on EVERY tick,
+# independent of the success/idle/restart logic below (Caroline can be busy
+# and failing while main is idle). Caroline = the support agent on edge,
+# primary openai/gpt-5.5 via the Codex agentRuntime, with an
+# openrouter/sonnet text fallback AND an agents.defaults.imageModel vision
+# pin. Those fallbacks mean a Codex auth failure does NOT take her down —
+# she SILENTLY degrades (text -> sonnet, the gpt-5.5 upgrade lost) and, on
+# vision exhaustion, loses image understanding. None of that surfaces in the
+# config-validate counters above. Codex auth on edge does NOT log
+# reason=auth; it logs the literal OAuth string and the image/pdf
+# "All image models failed" summary — see scripts/lib/codex-health.sh.
+# shellcheck source=lib/codex-health.sh
+source "$_WATCHDOG_DIR/lib/codex-health.sh"
+
+EDGE_AUTH_PROFILES="/root/.openclaw-edge/agents/support/agent/auth-profiles.json"
+CODEX_COOLDOWN_MIN=60  # token rotation is ~10-day; hourly re-alert is plenty
+
+# _codex_cooldown_ok <stampfile> <minutes> — true if last alert older than N min.
+_codex_cooldown_ok() {
+  local f="$1" mins="$2" last now
+  [ -f "$f" ] || return 0
+  last=$(cat "$f" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  [ "$(( (now - last) / 60 ))" -ge "$mins" ]
+}
+
+EDGE_LOGS=$(journalctl -u openclaw-gateway-edge --since "${CHECK_WINDOW_MIN} min ago" --no-pager 2>/dev/null || true)
+CODEX_AUTHFAIL=$(printf '%s\n' "$EDGE_LOGS" | codex_count_auth_invalidated)
+CODEX_VISIONFAIL=$(printf '%s\n' "$EDGE_LOGS" | codex_count_vision_failures)
+
+if [ "${CODEX_AUTHFAIL:-0}" -gt 0 ] && _codex_cooldown_ok /tmp/openclaw-watchdog-codex-auth-cooldown "$CODEX_COOLDOWN_MIN"; then
+  log "EDGE CODEX AUTH DEAD: ${CODEX_AUTHFAIL} 'token invalidated' lines in last ${CHECK_WINDOW_MIN}min"
+  slack_notify ":rotating_light: *Edge Codex auth FAILING* (Caroline/support) — ${CODEX_AUTHFAIL}x 'authentication token has been invalidated' in last ${CHECK_WINDOW_MIN}min. She has silently degraded to the sonnet text fallback (replies still work; gpt-5.5 upgrade lost) — this is the #356 shape. The edge auth symlink self-heals on \`systemctl restart openclaw-gateway-edge\` (ExecStartPre re-points it at a fresh main codex token via ensure-codex-auth). If it keeps firing after a restart, the main codex token is itself stale → re-auth codex on main."
+  date +%s > /tmp/openclaw-watchdog-codex-auth-cooldown
+fi
+
+if [ "${CODEX_VISIONFAIL:-0}" -gt 0 ] && _codex_cooldown_ok /tmp/openclaw-watchdog-codex-vision-cooldown "$CODEX_COOLDOWN_MIN"; then
+  log "EDGE VISION DOWN: ${CODEX_VISIONFAIL} 'All image models failed' lines in last ${CHECK_WINDOW_MIN}min"
+  slack_notify ":rotating_light: *Edge vision DOWN* (Caroline/support) — ${CODEX_VISIONFAIL}x 'All image models failed' in last ${CHECK_WINDOW_MIN}min. Customers sending screenshots/PDFs get no image understanding. imageModel is codex/gpt-5.5 → openrouter gemini → haiku, so this means codex AND both OpenRouter fallbacks failed — check OPENROUTER_API_KEY, codex auth, and \`openclaw --profile edge config validate\`."
+  date +%s > /tmp/openclaw-watchdog-codex-vision-cooldown
+fi
+
+# Symlink-integrity tripwire: edge auth durability rests on
+# auth-profiles.json being a symlink to a fresh main codex token. A deploy
+# clobbering it (regular file), a dangling link, or a main token near expiry
+# all silently re-introduce #356 — alert before it bites.
+CODEX_SYMLINK_STATUS=$(codex_edge_auth_symlink_status "$EDGE_AUTH_PROFILES" 24)
+if [ "$CODEX_SYMLINK_STATUS" != "ok" ] && _codex_cooldown_ok /tmp/openclaw-watchdog-codex-symlink-cooldown "$CODEX_COOLDOWN_MIN"; then
+  log "EDGE CODEX AUTH SYMLINK status=${CODEX_SYMLINK_STATUS}"
+  slack_notify ":warning: *Edge Codex auth store* (Caroline/support) symlink status: \`${CODEX_SYMLINK_STATUS}\` (expected \`ok\`). not-symlink=a deploy clobbered it; dangling=main source moved; stale=shared token within 24h of expiry; missing=never provisioned. \`systemctl restart openclaw-gateway-edge\` re-runs ensure-codex-auth (ExecStartPre). If 'stale', re-auth codex on main."
+  date +%s > /tmp/openclaw-watchdog-codex-symlink-cooldown
+fi
+
 # Crash loop detection: if systemd has restarted the gateway more than
 # 10 times in the last 10 minutes, something is wrong with the config.
 # Don't add more restarts — alert and stop.

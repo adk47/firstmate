@@ -422,6 +422,65 @@ ssh root@40.160.32.80 "docker restart hydra-sandbox"
 
 ---
 
+### Codex Auth Invalidated / Silent Sonnet Fallback
+
+**Symptoms**: codex agents (`openai/gpt-5.5` via the codex agentRuntime,
+ChatGPT OAuth) silently degrade to their Sonnet fallback; logs show
+`auth refresh request timed out after 10s` or `authentication token has
+been invalidated`; agents appear to be "running twice" as concurrent
+refreshes race. Usually hits multiple/all codex agents at once.
+
+**Background:** Codex OAuth credentials must live in ONE canonical store —
+the `main` agent at `/root/.openclaw-main/agents/main/agent/auth-profiles.json`
+— with every other agent's `auth-profiles.json` + `auth-state.json` a symlink
+to it. OpenAI codex uses single-use rotating refresh tokens under a
+per-profile lock (upstream #26322). If any agent gets an independent
+(copied/seeded) auth store, parallel refreshes mutually invalidate the token
+and take down ALL codex agents (incident 2026-05-29: 6 agents on Sonnet
+fallback for hours). See CLAUDE.md §"Codex / OAuth auth is centralized".
+
+**Diagnosis:**
+```bash
+ssh root@40.160.32.80
+# Names any agent store that is NOT a symlink to canonical (exit 1 = drift)
+/opt/hydra/scripts/lib/ensure-codex-auth.sh --check
+# Confirm the silent-fallback signature in the logs
+journalctl -u openclaw-gateway-main --since '-2h' \
+  | grep -iE 'auth refresh request timed out|authentication token has been invalidated'
+```
+
+**Remediation:**
+```bash
+ssh root@40.160.32.80
+# 1. Stop the gateway so no agent refreshes mid-repair.
+systemctl stop openclaw-gateway-main.service
+
+# 2. Re-symlink every agent store back to the canonical main store.
+/opt/hydra/scripts/lib/ensure-codex-auth.sh
+
+# 3. Re-auth into the CANONICAL main store. Without --agent this writes to
+#    the configured-default agent (clio), NOT main — pass --agent main
+#    (or rely on clio being symlinked to canonical so the write follows it).
+#    Both accounts must be logged in.
+openclaw models auth login --provider openai-codex --agent main  # aaron@muso.ai
+openclaw models auth login --provider openai-codex --agent main  # aaronkaufman@me.com
+
+# 4. Verify links are clean, then restart.
+/opt/hydra/scripts/lib/ensure-codex-auth.sh --check
+systemctl restart openclaw-gateway-main.service
+```
+
+**Rollback:** pre-repair auth stores are backed up to
+`/root/codex-auth-backups/` (timestamped). If re-auth makes things worse,
+restore the most recent backup into the canonical `main` path, re-run
+`ensure-codex-auth.sh` to re-symlink, and restart.
+
+**Prevention:** the `ensure-codex-auth.sh` self-heal + the codex-health
+watchdog (fail-loud on `authentication token has been invalidated`) landed
+fleet-wide via PR #376. NEVER copy/seed a per-agent codex `auth-profiles.json`.
+
+---
+
 ### Node 8 Unreachable
 
 **Symptoms**: Cannot SSH to 40.160.32.80, agents are all offline.

@@ -183,6 +183,7 @@ Any task estimated at **$30+ in compute/API costs** requires Aaron's explicit ap
 - Always propose a rollback plan before any production change.
 - For deployments, follow the runbook at docs/production-cutover-runbook.md.
 - DNS changes require Aaron's explicit approval -- NEVER modify DNS independently.
+- Codex/OAuth auth is centralized in the `main` agent store -- never write per-agent codex auth copies; see CLAUDE.md.
 
 ## Tool Permissions
 

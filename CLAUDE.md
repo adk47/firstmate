@@ -73,6 +73,38 @@ Ack window is 1h by default (`HYDRA_HOTPATCH_ACK_WINDOW`); stale
 announcements stop shielding after that. See `scripts/lib/announce-skill-hot-patch.sh`
 and `scripts/lib/acknowledge-hot-patch-drift.sh`.
 
+## Codex / OAuth auth is centralized
+
+Codex (`openai/gpt-5.5` via the codex agentRuntime, ChatGPT OAuth)
+credentials live in ONE canonical store: the `main` agent at
+`/root/.openclaw-main/agents/main/agent/auth-profiles.json` (openclaw's
+`DEFAULT_AGENT_ID="main"` is the inheritance base). Every OTHER agent's
+`auth-profiles.json` + `auth-state.json` is a **symlink** to it — openclaw
+resolves the symlink to its target before its atomic rename, so the links
+survive token refresh.
+
+- **NEVER copy, seed, or fan-out codex `auth-profiles.json` into per-agent
+  stores.** OpenAI codex uses single-use rotating refresh tokens under a
+  per-profile lock (upstream #26322); independent per-agent refreshes
+  mutually invalidate the token and kill ALL codex agents at once
+  (incident 2026-05-29: 6 agents degraded to Sonnet fallback for hours).
+- **Detect**: `scripts/lib/ensure-codex-auth.sh --check` (exit 1 + names the
+  offending stores). **Remediate**: `scripts/lib/ensure-codex-auth.sh`
+  (re-symlinks every agent store back to canonical). The codex-health
+  watchdog independently alerts on `authentication token has been
+  invalidated`.
+- **Re-auth GOTCHA**: `openclaw models auth login --provider openai-codex`
+  with no `--agent` writes to the CONFIGURED-default agent (`clio`), NOT
+  `main`. Re-auth MUST land in the canonical `main` store — pass
+  `--agent main`, or rely on `clio` already being symlinked to canonical
+  (the write follows the symlink). Both accounts (`aaron@muso.ai`,
+  `aaronkaufman@me.com`) must be logged in.
+
+This generalizes PR #376 (edge/Caroline symlink self-heal + fail-loud
+codex-health watchdog) to the whole fleet. Prose alone is not enforcement —
+the script and watchdog are. See RUNBOOK §Troubleshooting → "Codex auth
+invalidated / silent Sonnet fallback" for the recovery sequence.
+
 ## Picking the right extension mechanism
 
 Before writing new code in this repo, walk this decision tree top-down and stop at
