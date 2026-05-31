@@ -203,7 +203,8 @@
     },
     "ackReaction": "eyes",
     "ackReactionScope": "all",
-    "removeAckAfterReply": true
+    "removeAckAfterReply": true,
+    "visibleReplies": "automatic"
   },
   "commands": {
     "native": "auto",
