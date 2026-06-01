@@ -162,6 +162,34 @@ npm test                     # = vitest run
 - **`vitest: not found` alone is NOT a finding** — it just means the install step was
   skipped. A real finding is when `pnpm install` or the tests themselves fail.
 
+## Step 3c — Check CI status (read-only, repo-pinned)
+
+CI state is context for the verdict ("hold until green"), not a separate review. Get the
+rollup with one repo-pinned command:
+
+```bash
+gh pr checks "$PR" --repo "$OWNER/$REPO"        # every check, its state, and a run link
+```
+
+To drill into a **failing** check, view only its failed steps — pass `--repo` and use
+`--log-failed` (plain `--log` dumps the entire run and is enormous). Take `<run-id>` from
+the failing check's link:
+
+```bash
+gh run view <run-id> --repo "$OWNER/$REPO" --log-failed
+# target one job instead with:  gh run view --repo "$OWNER/$REPO" --job <job-id> --log-failed
+```
+
+> ⚠️ **Always pass `--repo "$OWNER/$REPO"` to `gh run` / `gh pr checks`.** Your workspace is
+> NOT a git repo, so without it gh fails immediately with *"failed to determine base repo:
+> … not a git repository"* and never fetches the run. This is the same non-git-workspace
+> trap that applies to `git` and `gh pr diff` (Step 2). Do **not** pass a `<run-id>`
+> positional *and* `--job` together — use one or the other.
+
+A red check that is **unrelated to this PR's diff** (e.g. a deploy pre-flight / cron-orphan
+gate failing on pre-existing repo state) is not a finding against the PR: note it as
+context ("CI red on an unrelated gate") and do not raise it to 🔴/🟡.
+
 ## Step 4 — Post the Slack summary
 
 Number findings sequentially so the requester can reference them ("drop #3"); the
