@@ -247,6 +247,40 @@ describe("extractImageAttachments", () => {
     expect(extractImageAttachments(undefined, html)).toEqual([]);
   });
 
+  it("keeps a structured upload on the intercom-attachments-<N> host (the real Messenger-widget host)", () => {
+    // REGRESSION (2026-06-01): a customer widget upload's STRUCTURED attachment
+    // is served from `<workspace>.intercom-attachments-<N>.com`, NOT intercomcdn.
+    // The pre-fix host regex only matched intercomcdn → every widget image was
+    // silently dropped at the structured branch (Caroline "can't see the image").
+    // Confirmed live via the Intercom conversations API. This is the exact URL
+    // shape from that incident (conv 215474527942736).
+    const url =
+      "https://musoai.intercom-attachments-3.com/i/o/dwjzhcge/2446934281/abc/image.png?expires=1&signature=x";
+    const result = extractImageAttachments([img({ url, content_type: "image/png" })], "");
+    expect(result).toEqual([{ url, contentType: "image/png", name: "screenshot.png" }]);
+  });
+
+  it("keeps the bare intercom-attachments.com host (no numeric suffix)", () => {
+    const url = "https://musoai.intercom-attachments.com/i/o/x/image.jpg";
+    const result = extractImageAttachments([img({ url, content_type: "image/jpeg" })], "");
+    expect(result[0]?.url).toBe(url);
+  });
+
+  it("still rejects look-alike hosts (allowlist not loosened into a substring match)", () => {
+    // Defense: the widened regex must not accept an attacker host that merely
+    // CONTAINS the allowlisted token (e.g. intercom-attachments.evil.com or
+    // intercomcdn.com.evil.com). Anchored ^https:// + host-segment boundary.
+    expect(
+      extractImageAttachments(
+        [img({ url: "https://intercom-attachments-3.com.evil.com/x.png" })],
+        "",
+      ),
+    ).toEqual([]);
+    expect(
+      extractImageAttachments(undefined, '<img src="https://evil.com/intercomcdn.com/x.png">'),
+    ).toEqual([]);
+  });
+
   it("handles undefined inputs gracefully", () => {
     expect(extractImageAttachments(undefined, undefined)).toEqual([]);
     expect(extractImageAttachments([], "")).toEqual([]);

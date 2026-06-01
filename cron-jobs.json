@@ -520,6 +520,39 @@
         "consecutiveErrors": 0,
         "nextRunAtMs": 1776369600000
       }
+    },
+    {
+      "id": "9096a243-af2b-40a1-a900-2cc84b757928",
+      "agentId": "operations",
+      "name": "codex-usage-report-aaron-twice-daily",
+      "description": "DM Aaron twice daily with current Hydra Codex OAuth usage for aaron@muso.ai and aaronkaufman@me.com. Requested by Aaron on 2026-05-31.",
+      "enabled": true,
+      "createdAtMs": 1780244998319,
+      "updatedAtMs": 1780282900238,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9,22 * * *",
+        "tz": "America/Chicago"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Prepare Aaron's scheduled Hydra Codex account usage report. Check current OpenClaw/Codex usage/quota for the configured Hydra Codex OAuth accounts `aaron@muso.ai` and `aaronkaufman@me.com`. Use available OpenClaw status/session tools and local read-only config/state if needed; do not expose secrets or internal config details. Include: timestamp in America/Chicago, per-account daily-window/5h quota remaining if available, weekly quota remaining if available, which account is currently active, and any account whose fresh quota cannot be read. Keep the Slack DM concise, using Slack mrkdwn bullets and no tables. If one account has no fresh snapshot, say that plainly rather than guessing.",
+        "model": "openai/gpt-5.5",
+        "thinking": "low",
+        "timeoutSeconds": 600
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "user:U7RP6HKUZ",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0,
+        "nextRunAtMs": 1780322400000
+      }
     }
   ]
 }

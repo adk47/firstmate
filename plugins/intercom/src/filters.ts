@@ -42,10 +42,20 @@ export const DOCUMENT_MIME_ALLOWLIST = new Set<string>([
 //      in the official schema but reliably present.
 // We extract from both and dedupe by URL. Either branch may yield zero
 // (typical text-only message), one, or many.
-// CDN host allowlist is enforced on BOTH branches (structured and inline)
-// to keep the plugin from being coerced into fetching arbitrary URLs if
-// the upstream payload is ever malformed or forged. (Clio review of PR #360.)
-export const INTERCOM_CDN_HOST_RE = /^https:\/\/(?:[a-z0-9-]+\.)*intercomcdn\.(?:com|io)\//i;
+// Host allowlist is enforced on BOTH branches (structured and inline) to
+// keep the plugin from being coerced into fetching arbitrary URLs if the
+// upstream payload is ever malformed or forged. (Clio review of PR #360.)
+//
+// Intercom serves attachments from TWO host families, BOTH must be allowed:
+//   - `*.intercomcdn.{com,io}` — the inline `<img>` body URLs (downloads.intercomcdn.com).
+//   - `<workspace>.intercom-attachments-<N>.com` — the STRUCTURED `attachments[].url`
+//     host the Messenger widget actually uploads to (e.g. musoai.intercom-attachments-3.com).
+//     Confirmed live 2026-06-01 via the Intercom conversations API: a widget image upload's
+//     structured attachment is served from this host, NOT intercomcdn. The pre-2026-06-01
+//     regex only matched intercomcdn, so every widget upload was silently dropped at the
+//     structured branch — the bare `intercom-attachments` family was missing.
+export const INTERCOM_CDN_HOST_RE =
+  /^https:\/\/(?:[a-z0-9-]+\.)*(?:intercomcdn\.(?:com|io)|intercom-attachments(?:-[0-9]+)?\.com)\//i;
 const HTML_IMG_SRC_RE = /<img\b[^>]*\bsrc=(?:"([^"]+)"|'([^']+)')[^>]*>/gi;
 
 function inferContentTypeFromUrl(url: string): string | undefined {
