@@ -33,6 +33,12 @@ set -euo pipefail
 GH="${GH:-gh}"
 LOG_DIR="${QA_PR_APPROVE_LOG_DIR:-api-logs/github}"
 
+# Identity note: the approval is recorded by GitHub as the host account (adk47),
+# because that account is the universal CODEOWNER and so its approval unblocks the
+# merge. We do NOT have a dedicated bot user account, so the *body* is branded
+# "Muso QA Bot" (see the default below) to make clear it is an automated QA
+# action, not a manual review by Aaron.
+
 # Approval allowlist — Slack UIDs of the only people who may trigger an approval.
 # Aaron U7RP6HKUZ, Fede U07NF5A77E2, Serhii U03TYGJF1N3, Nick U0AL36NADEY.
 ALLOWED_UIDS=("U7RP6HKUZ" "U07NF5A77E2" "U03TYGJF1N3" "U0AL36NADEY")
@@ -43,7 +49,7 @@ die() { echo "qa-pr-approve: $2" >&2; exit "$1"; }
 repo_arg="$1"
 pr="$2"
 requester="$3"
-body="${4:-Approved by QA after code review. (Merge remains a human action.)}"
+body="${4:-🤖 Approved by Muso QA Bot (automated review): CI is green and there are no blocking findings. Recorded via QA automation on the adk47 account, not a manual review by Aaron. A human still performs the merge.}"
 
 # --- Guard 2: Muso-AI repos only -------------------------------------------
 if [[ "$repo_arg" == */* ]]; then

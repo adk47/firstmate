@@ -32,13 +32,59 @@ approval → batched GitHub review. You run the whole thing yourself in one sess
 PR review is your job — do NOT bounce it back to CTO. Run the review, then relay your
 finished summary to whoever delegated so they can post it under their own identity.
 
+## Auto mode (automated dispatch — no human in the loop)
+
+When the triggering message says **AUTO-REVIEW** (dispatched by
+`scripts/qa-dispatch-pr-review.sh` from the `qa-autoreview` GitHub Action), you are
+running headless: there is no person in the thread to approve, and the dispatch +
+the gates below ARE the authorization. You keep the PR author updated in a Slack DM
+(opening note → threaded result) and run the same review — diff fetch, 7 lenses,
+CI check, batched-review API, the `qa-pr-approve.sh` wrapper, logging — with these
+overrides. The dispatch message gives you the author's Slack UID.
+
+**Identity — brand everything "Muso QA Bot".** GitHub records the review/approval
+under the host account (Aaron / adk47); there is no separate bot user. So lead the
+GitHub **review body** and the **approval body** with a clear `🤖 Muso QA Bot
+(automated review)` banner so it reads as automation, not a manual review by Aaron.
+The Slack DMs go out as the QA app — still self-identify as Muso QA Bot in the text.
+
+1. **FIRST, DM the author an opening note and keep the returned thread ts.** This is
+   how they know a review started. Capture the ts so the result threads under it:
+   ```bash
+   ts=$(bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "Muso QA Bot here -- reviewing PR #<pr> (Muso-AI/<repo>) now. I will post the full review on GitHub and update you in this thread.")
+   ```
+   Best-effort: if it fails, log it and continue the review anyway.
+2. **Skip Step 5 (the human-approval gate).** Do not ask "Want me to post this?" —
+   post the batched review to GitHub yourself (Step 6), after writing the
+   Step-"Logging" audit line (set `"requester"` to the author UID and
+   `"authorization":"auto-review-dispatch"`).
+3. **Approve (Step 7) only if ALL of these hold** — otherwise post the review and
+   stop without approving, and say which gate failed:
+   - **CI is fully green** — `gh pr checks <pr> --repo Muso-AI/hydra` shows every
+     check passed, with none `fail` or `pending`. In auto mode be strict: do NOT
+     apply Step 3c's "unrelated red gate" allowance — any non-green check means do
+     not approve.
+   - **Verdict is GO** — no 🔴 Critical and no 🟡 Important findings.
+   - The gated wrapper accepts the author UID.
+4. **Never merge** (unchanged). A human merges.
+5. **LAST, DM the author the result as a threaded reply under the opening ts:**
+   ```bash
+   bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "Approved -- CI green, no blocking findings. Safe to merge: <pr-url>" "$ts"
+   # or, if not approved:
+   bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "Reviewed -- <N> blocking finding(s), not approved (<one-line reason>). Details on the PR: <pr-url>" "$ts"
+   ```
+   Keep it to one line; the full review lives on the PR. (If you never got an opening
+   ts, send it un-threaded rather than skipping it.)
+
 ## Access control
 
 - **Requesting a review** (read-only): any Tier 0–2 user. Tier 3 / unknown users
   get the Slack summary only, never a GitHub write.
 - **Posting the review to GitHub is an external write.** It requires (a) explicit
   human approval in-thread and (b) a write-activity log entry before execution
-  (see "Logging" below). Never post without both.
+  (see "Logging" below). Never post without both. *(Exception: **Auto mode** above
+  substitutes the automated dispatch + the CI-green/GO/allowlist gate for the
+  in-thread approval; the write-activity log is still required.)*
 
 ## Setup
 
@@ -244,7 +290,7 @@ cat > /tmp/pr-review.json <<JSONEOF
 {
   "commit_id": "<headRefOid>",
   "event": "COMMENT",
-  "body": "PR review summary (see inline comments).",
+  "body": "🤖 **Muso QA Bot** (automated review) — see inline comments. Posted via QA automation on the adk47 account, not a manual review by Aaron.",
   "comments": [
     {"path": "src/auth.js", "line": 45, "side": "RIGHT", "body": "🔴 **Critical:** user input passed straight into the query — parameterize it."},
     {"path": "src/util.js", "line": 8,  "side": "RIGHT", "body": "🔵 **Suggestion:** duplicates logic in core/utils.js:34."}
@@ -295,7 +341,7 @@ The wrapper enforces Muso-AI-only, self-approval refusal, the requester allowlis
 the audit log:
 
 ```bash
-bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "Approved by QA after code review."
+bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "🤖 Approved by Muso QA Bot (automated review). Recorded on the adk47 account, not a manual review by Aaron."
 ```
 
 - `<repo>` is the short name (e.g. `core-backend`) or `Muso-AI/<repo>`;

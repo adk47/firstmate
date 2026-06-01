@@ -1,0 +1,73 @@
+name: qa-autoreview
+
+# Auto-review of Nick's hydra PRs by the QA agent.
+#
+# Fires AFTER the "PR Validation" workflow (pr-validate.yml) completes (so CI is settled before
+# we decide "green"), resolves the PR, scope-guards it, and dispatches the qa
+# agent to run the muso-github-code-review skill in auto mode. See
+# scripts/qa-dispatch-pr-review.sh and skills-all/muso-github-code-review/SKILL.md.
+#
+# workflow_run runs from the DEFAULT-branch copy of this file, so a PR branch
+# cannot alter the trigger, the scope guard, or the dispatcher it calls
+# (the checkout below is the default branch, not the PR head). Approval is gated
+# in the skill + qa-pr-approve.sh to CI-green + GO verdict + allowlist, and it
+# NEVER merges — a human merges.
+
+on:
+  workflow_run:
+    # Must match the validation workflow's `name:` ("PR Validation"), NOT its
+    # filename (pr-validate.yml) — workflow_run keys off the workflow name.
+    workflows: ["PR Validation"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dispatch:
+    # Same on-box runner as pr-validate; the openclaw CLI + gateway live here.
+    runs-on: [self-hosted, hydra]
+    # pr-validate only runs on pull_request, but guard explicitly anyway.
+    if: github.event.workflow_run.event == 'pull_request'
+    steps:
+      - name: Checkout (default branch — main's dispatcher, not PR code)
+        uses: actions/checkout@v5
+
+      - name: Resolve PR, scope-guard, and dispatch QA auto-review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          # Resolve the open PR that owns this commit.
+          prjson="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" \
+            --jq '[.[] | select(.state=="open")][0] // empty')"
+          if [ -z "$prjson" ]; then
+            echo "No open PR for ${HEAD_SHA} — nothing to review."
+            exit 0
+          fi
+
+          PR="$(jq -r '.number' <<<"$prjson")"
+          AUTHOR="$(jq -r '.user.login' <<<"$prjson")"
+          DRAFT="$(jq -r '.draft' <<<"$prjson")"
+          BASE="$(jq -r '.base.ref' <<<"$prjson")"
+
+          # Scope (for now): Nick's non-draft PRs targeting main, in hydra.
+          if [ "$AUTHOR" != "nsollazzo" ]; then
+            echo "PR #${PR} author=${AUTHOR} (not nsollazzo) — skipping auto-review."
+            exit 0
+          fi
+          if [ "$DRAFT" = "true" ]; then
+            echo "PR #${PR} is a draft — skipping auto-review."
+            exit 0
+          fi
+          if [ "$BASE" != "main" ]; then
+            echo "PR #${PR} base=${BASE} (not main) — skipping auto-review."
+            exit 0
+          fi
+
+          echo "Dispatching QA auto-review of PR #${PR} @ ${HEAD_SHA}"
+          bash scripts/qa-dispatch-pr-review.sh "$PR" "$HEAD_SHA"
