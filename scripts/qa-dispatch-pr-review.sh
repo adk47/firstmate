@@ -70,8 +70,10 @@ ${pr_url}  (head commit ${sha})
 PR author to keep updated over Slack DM: Slack user ${REQUESTER_UID}.
 
 Follow the skill Auto mode section exactly. In short:
-- FIRST DM the author an opening note and KEEP the returned thread ts:
-    bash /opt/hydra/scripts/qa-slack-dm.sh ${REQUESTER_UID} "Muso QA Bot here -- reviewing PR #${pr} (${REPO}) now. I will post the full review on GitHub and update you in this thread."
+- FIRST send the author the opening note and KEEP the printed thread-root ts. Use the
+  per-PR thread helper so re-reviews of this PR thread under the first review instead
+  of starting a new top-level DM (it owns the wording and prints the thread-root ts):
+    bash /opt/hydra/scripts/qa-pr-thread-dm.sh ${REPO} ${pr} ${REQUESTER_UID}
 - Skip the Step 5 human gate; post the batched review (Step 6, COMMENT) to GitHub
   yourself after the audit-log line. Check CI with "gh pr checks ${pr} --repo ${REPO}".
 - Approve (Step 7, scripts/qa-pr-approve.sh, requester ${REQUESTER_UID}) ONLY IF every

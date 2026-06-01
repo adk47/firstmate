@@ -49,11 +49,15 @@ GitHub **review body** and the **approval body** with a clear `🤖 Muso QA Bot
 The Slack DMs go out as the QA app — still self-identify as Muso QA Bot in the text.
 
 1. **FIRST, DM the author an opening note and keep the returned thread ts.** This is
-   how they know a review started. Capture the ts so the result threads under it:
+   how they know a review started. Use the per-PR thread helper (not `qa-slack-dm.sh`
+   directly) so re-reviews of the same PR land in ONE Slack thread instead of a new
+   top-level message each push. It owns the opening wording (first review vs
+   "re-reviewing … after a new push") and prints the canonical thread-root ts —
+   capture it so the result threads under it:
    ```bash
-   ts=$(bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "Muso QA Bot here -- reviewing PR #<pr> (Muso-AI/<repo>) now. I will post the full review on GitHub and update you in this thread.")
+   ts=$(bash /opt/hydra/scripts/qa-pr-thread-dm.sh <owner>/<repo> <pr> <author-uid>)
    ```
-   Best-effort: if it fails, log it and continue the review anyway.
+   Best-effort: if it fails (empty ts), log it and continue the review anyway.
 2. **Skip Step 5 (the human-approval gate).** Do not ask "Want me to post this?" —
    post the batched review to GitHub yourself (Step 6), after writing the
    Step-"Logging" audit line (set `"requester"` to the author UID and

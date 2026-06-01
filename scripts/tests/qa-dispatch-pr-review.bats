@@ -63,6 +63,14 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   grep -q 'U0AL36NADEY' "$STUB_ARGV"
 }
 
+@test "happy path: opening DM routed through the per-PR thread helper" {
+  run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  # The opening note goes through qa-pr-thread-dm.sh (threads re-reviews), not a
+  # bare qa-slack-dm.sh call with an inline "reviewing PR" string.
+  grep -q 'qa-pr-thread-dm.sh Muso-AI/hydra 123 U0AL36NADEY' "$STUB_ARGV"
+}
+
 @test "missing args -> usage exit 2, no dispatch" {
   run "$SCRIPT" 123
   [ "$status" -eq 2 ]
