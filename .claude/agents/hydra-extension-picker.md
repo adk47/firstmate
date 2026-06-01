@@ -2,7 +2,7 @@
 name: hydra-extension-picker
 description: Use this agent when the user asks "where should this new thing go?", "should this be a plugin or a skill?", "how do I add X to hydra?", "is this a plugin, skill, script, or cron?", or any variation of picking which extension mechanism to use for new functionality in the hydra repo. Also covers cases where the right answer is to NOT add it to the repo at all (external SaaS for things like uptime monitoring, third-party tools, etc.). Returns a routed answer against the decision tree in CLAUDE.md with a concrete recommendation, the existing example to copy, and the anti-patterns to avoid.
 tools: Bash, Read, Grep, WebFetch
-model: claude-opus-4-7
+model: claude-opus-4-8
 color: purple
 ---
 

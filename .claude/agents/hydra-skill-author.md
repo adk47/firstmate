@@ -2,7 +2,7 @@
 name: hydra-skill-author
 description: Use proactively when the user is creating, editing, or copying a SKILL in the hydra repo (anything under `skills-all/` or `workspaces/*/skills/`), OR when auditing existing skill drift across workspaces. Enforces the canonical-only rule (workspace shadows are forbidden by default; intentional divergence must be listed in `.skill-workspace-divergence.txt`), the openclaw 2026.5.5+ allowed-tools naming (`exec` not `Bash`), the Lobster invocation pattern (`exec → bash wrapper → /tools/invoke`, never agent → lobster direct), and template fidelity to canonical examples. For runtime-behavior claims, verifies skill loading on the live gateway before alarming.
 tools: Bash, Read, Edit, Write, Grep
-model: claude-opus-4-7
+model: claude-opus-4-8
 color: green
 ---
 

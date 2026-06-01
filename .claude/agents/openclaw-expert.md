@@ -2,7 +2,7 @@
 name: openclaw-expert
 description: Use proactively for ANY question about OpenClaw infrastructure — gateway config, plugins (install/enable/disable/Lobster/MCP/skills), cron-jobs, /tools/invoke HTTP API, hooks (before_tool_call, etc.), session.maintenance, model fallback semantics, sessionTarget rules, agent runtime mechanics, tool schemas. Returns a focused, source-cited answer. Has read access to hydra (40.160.32.80) for live config + source inspection, plus docs.openclaw.ai and the openclaw GitHub repo. NOT for credit-verification policy, Muso business logic, fraud analysis, customer support, or any other Muso-specific domain decisions.
 tools: Bash, Read, Grep, WebFetch, WebSearch
-model: claude-opus-4-7
+model: claude-opus-4-8
 color: red
 ---
 

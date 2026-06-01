@@ -813,6 +813,60 @@ jobs:
           fi
           pnpm --version
           node --version
+      - name: deploy install path matches CI (pnpm --frozen-lockfile)
+        # Guards the #385 / Deploy HYDRA #217 class-of-bug: this CI job
+        # installs plugins with `pnpm install --frozen-lockfile` (pinned,
+        # reproducible), but if deploy.sh install_plugin() ever reverts to
+        # bare `npm install` it free-resolves version ranges and can pull
+        # an unpublished transitive dep (the 2026-06-01 vite-node@3.2.5
+        # ETARGET that aborted the post-merge deploy). CI was green the
+        # whole time because it used the lockfile — i.e. "CI green" had
+        # silently stopped implying "deploy installs cleanly". This step
+        # re-couples them: it FAILS if install_plugin() doesn't install via
+        # `pnpm install --frozen-lockfile`, or if a bare `npm install`
+        # (no -g) creeps back into that function. Cheap structural assert,
+        # not a runtime test.
+        run: |
+          set -euo pipefail
+          if ! grep -q 'install_plugin()' scripts/deploy.sh; then
+            echo "::error::could not find install_plugin() in scripts/deploy.sh — this guard's assumptions changed; review the deploy plugin-install path"
+            exit 1
+          fi
+          # Extract the install_plugin() function body (def line → next top-level
+          # `}` at column 0), then STRIP COMMENTS. Both checks below operate on
+          # comment-free code so the function's own explanatory comments (which
+          # quote both "pnpm install --frozen-lockfile" AND "bare npm install")
+          # can't satisfy/trip the asserts. QA on PR #389 caught that the prior
+          # version grepped the raw body — a revert to `npm ci` with comments
+          # intact would pass. We now anchor to the EXECUTABLE install command:
+          # the `$(cd "$plugin_dir" && <pkg-manager> …)` command-substitution,
+          # a form that appears only in real code, never in comments/log strings.
+          # NOTE: capture grep output into a var with `|| true` and test `-n`,
+          # rather than piping into `grep -q` — under `set -euo pipefail` a
+          # `grep -q` early-exit SIGPIPEs the upstream grep and muddies the
+          # pipeline status. Capture-then-test is deterministic.
+          code=$(awk '/^install_plugin\(\) \{/{f=1} f{print} f&&/^\}/{exit}' scripts/deploy.sh | sed 's/#.*//')
+          if [ -z "$code" ]; then
+            echo "::error::failed to extract install_plugin() body from scripts/deploy.sh"
+            exit 1
+          fi
+          # Positive: the dependency-install command must be an executable
+          # `$(cd "$plugin_dir" && pnpm install --frozen-lockfile …)`.
+          pnpm_ok=$(printf '%s\n' "$code" | grep -E '\$\(cd "\$plugin_dir" && pnpm install --frozen-lockfile' || true)
+          if [ -z "$pnpm_ok" ]; then
+            echo "::error::scripts/deploy.sh install_plugin() must run 'pnpm install --frozen-lockfile' as its dependency-install command (mirrors this CI job). It does not — see PR #385 / Deploy HYDRA #217: bare 'npm install' free-resolves ranges and ETARGETs on unpublished transitive deps. Do NOT revert to npm install / npm ci / --omit=dev / yarn."
+            exit 1
+          fi
+          # Negative: NO `$(cd "$plugin_dir" && …)` install-style command may use
+          # npm / yarn / bun (catches `npm install`, `npm ci`, `yarn`, `bun i`).
+          # The global `npm install -g openclaw` in install_openclaw() is a
+          # different function and not matched by this anchor.
+          bad_pm=$(printf '%s\n' "$code" | grep -E '\$\(cd "\$plugin_dir" && (npm|yarn|bun)\b' || true)
+          if [ -n "$bad_pm" ]; then
+            echo "::error::scripts/deploy.sh install_plugin() runs a non-pnpm package manager in its install command — that's the #217 regression class. Use 'pnpm install --frozen-lockfile'. Offending line(s): $bad_pm"
+            exit 1
+          fi
+          echo "✓ deploy.sh install_plugin() installs via 'pnpm install --frozen-lockfile' (matches CI; npm/npm ci/yarn/bun rejected)"
       - name: openclaw version alignment (deploy.sh vs plugin lockfiles)
         # Catches the class-of-bug from PR #303's review: lockfile-frozen
         # `pnpm install` quietly resolves a stale openclaw, the build
