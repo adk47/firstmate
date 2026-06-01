@@ -128,6 +128,23 @@
             },
             "contextWindow": 400000,
             "api": "openai-completions"
+          },
+          {
+            "id": "google/gemini-3.5-flash",
+            "name": "google/gemini-3.5-flash",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 65536,
+            "reasoning": true,
+            "cost": {
+              "input": 1.5,
+              "output": 9,
+              "cacheRead": 0.15
+            },
+            "contextWindow": 1048576,
+            "api": "openai-completions"
           }
         ]
       }
@@ -163,6 +180,9 @@
         },
         "openrouter/openai/gpt-5.4-mini": {
           "alias": "gpt-5p4-mini"
+        },
+        "openrouter/google/gemini-3.5-flash": {
+          "alias": "gemini-flash"
         }
       },
       "workspace": "/opt/hydra/workspaces/neutral",
@@ -210,7 +230,8 @@
         "model": {
           "primary": "openrouter/anthropic/claude-opus-4.7",
           "fallbacks": [
-            "openrouter/openai/gpt-5.5"
+            "openrouter/google/gemini-3.5-flash",
+            "openrouter/anthropic/claude-4.6-sonnet-20260217"
           ]
         },
         "thinkingDefault": "high"
@@ -221,6 +242,7 @@
         "model": {
           "primary": "openai/gpt-5.5",
           "fallbacks": [
+            "openrouter/google/gemini-3.5-flash",
             "openrouter/anthropic/claude-4.6-sonnet-20260217"
           ]
         },
@@ -232,7 +254,8 @@
         "model": {
           "primary": "openrouter/anthropic/claude-opus-4.7",
           "fallbacks": [
-            "openrouter/openai/gpt-5.5"
+            "openrouter/google/gemini-3.5-flash",
+            "openrouter/anthropic/claude-4.6-sonnet-20260217"
           ]
         },
         "thinkingDefault": "high"
@@ -243,6 +266,7 @@
         "model": {
           "primary": "openai/gpt-5.5",
           "fallbacks": [
+            "openrouter/google/gemini-3.5-flash",
             "openrouter/anthropic/claude-4.6-sonnet-20260217"
           ]
         },
@@ -254,10 +278,11 @@
         "model": {
           "primary": "openai/gpt-5.5",
           "fallbacks": [
+            "openrouter/google/gemini-3.5-flash",
             "openrouter/anthropic/claude-4.6-sonnet-20260217"
           ]
         },
-        "thinkingDefault": "low"
+        "thinkingDefault": "high"
       },
       {
         "id": "finance",
@@ -265,10 +290,11 @@
         "model": {
           "primary": "openai/gpt-5.5",
           "fallbacks": [
+            "openrouter/google/gemini-3.5-flash",
             "openrouter/anthropic/claude-4.6-sonnet-20260217"
           ]
         },
-        "thinkingDefault": "medium"
+        "thinkingDefault": "high"
       },
       {
         "id": "operations",
@@ -276,6 +302,7 @@
         "model": {
           "primary": "openai/gpt-5.5",
           "fallbacks": [
+            "openrouter/google/gemini-3.5-flash",
             "openrouter/anthropic/claude-4.6-sonnet-20260217"
           ]
         },
@@ -303,6 +330,7 @@
         "model": {
           "primary": "openai/gpt-5.5",
           "fallbacks": [
+            "openrouter/google/gemini-3.5-flash",
             "openrouter/anthropic/claude-4.6-sonnet-20260217"
           ]
         },
@@ -314,6 +342,7 @@
         "model": {
           "primary": "openai/gpt-5.5",
           "fallbacks": [
+            "openrouter/google/gemini-3.5-flash",
             "openrouter/anthropic/claude-4.6-sonnet-20260217"
           ]
         },
