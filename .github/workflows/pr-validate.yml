@@ -606,12 +606,19 @@ jobs:
             exit 0
           fi
 
-          # Extract job IDs from both
+          # Extract job IDs from both. Skip ephemeral qa-autoreview-pr-<N>
+          # crons: the QA auto-review bot (PR #391) creates these one-shot
+          # review jobs at runtime to review each PR; they are never committed
+          # to cron-jobs.json by design, so they must not be flagged as orphans
+          # (otherwise this gate blocks every PR the bot has reviewed — including
+          # the bot's review cron for the PR currently under validation).
           server_ids=$(python3 -c "
           import json, sys
           with open('$SERVER_CRON') as f:
               data = json.load(f)
           for job in data.get('jobs', []):
+              if str(job.get('name', '')).startswith('qa-autoreview-pr-'):
+                  continue
               print(job['id'])
           " | sort)
 
