@@ -190,6 +190,17 @@ The PR validation workflow enforces the two-tier model:
 
 ---
 
+## GitHub Branch Protection (`main`)
+
+These are GitHub server-side settings (classic branch protection), **not** in-repo config — change them via `gh api .../branches/main/protection` (admin only), not a PR.
+
+- **Required approving reviews: 1**, and **code-owner review required**. CODEOWNERS sets `* @adk47`, so an approval from `@adk47` satisfies both — which is why the QA auto-review (recorded on the adk47 account) can unblock a merge.
+- **`dismiss_stale_reviews: true`** (enabled 2026-06-01). A new push to an open PR dismisses prior approvals, so the standing approval always reflects the current HEAD, not an earlier commit. Matters for the QA auto-review, which re-reviews each push: a stale approval can no longer mask an un-re-reviewed (or re-review-rejected) commit.
+- **No required status checks** — "PR Validation" CI is informational at the protection layer; the QA auto-review is what gates approval on green.
+- **`enforce_admins: false`** — Aaron (admin) can bypass; non-admin contributors (`write`, e.g. Nick) cannot, so the code-owner approval is genuinely required for them.
+
+---
+
 ## Agent Owner Reference
 
 | Agent | Owner | Self-Service (Tier 1) | Needs Aaron Approval (Tier 2) | Locked (Tier 3) |
