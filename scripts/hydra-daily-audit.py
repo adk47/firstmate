@@ -24,8 +24,8 @@ import glob
 
 CONFIG_PATH = "/root/.openclaw/openclaw.json"
 WORKSPACE_ROOT = "/opt/hydra/workspaces"
-MEMORY_WARN_CHARS = 15000
-MEMORY_CRIT_CHARS = 20000
+MEMORY_BLOAT_CHARS = 15000      # latency/cost hygiene warning (tiered-memory target ~3500)
+MEMORY_TRUNCATE_CHARS = 40000   # real bootstrap cap; see openclaw-main.json:192 (PR #165)
 SLACK_CHANNEL = "C0ADV2W76G4"  # #clio_devops
 OPENCLAW_REPO = "open-claw/open-claw"  # GitHub repo for releases/PRs
 WATCHED_REPOS = [
@@ -131,13 +131,14 @@ def audit_memory_sizes():
     for md in glob.glob(WORKSPACE_ROOT + "/*/MEMORY.md"):
         agent = md.split("/")[-2]
         try:
-            size = os.path.getsize(md)
-            if size > MEMORY_CRIT_CHARS:
+            with open(md, encoding="utf-8", errors="replace") as fh:
+                size = len(fh.read())
+            if size > MEMORY_TRUNCATE_CHARS:
                 findings.append(("memory", "critical",
-                    "@" + agent + " MEMORY.md is " + str(size) + " chars (limit " + str(MEMORY_CRIT_CHARS) + ") - will be truncated, may cause timeouts"))
-            elif size > MEMORY_WARN_CHARS:
+                    "@" + agent + " MEMORY.md is " + str(size) + " chars (cap " + str(MEMORY_TRUNCATE_CHARS) + ") - WILL be truncated at bootstrap, may cause timeouts"))
+            elif size > MEMORY_BLOAT_CHARS:
                 findings.append(("memory", "warn",
-                    "@" + agent + " MEMORY.md is " + str(size) + " chars - approaching limit"))
+                    "@" + agent + " MEMORY.md is " + str(size) + " chars - bloated (target ~3500, hard cap " + str(MEMORY_TRUNCATE_CHARS) + "); prune for latency/cost, not yet truncated"))
         except Exception:
             pass
     if not findings:
