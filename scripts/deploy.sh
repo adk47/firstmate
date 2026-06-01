@@ -257,7 +257,7 @@ install_openclaw() {
 # openclaw extension directory. Single-arg: derives the profile
 # internally via plugin_profile. Idempotent: re-running reinstalls.
 #
-# Fails with a structured error on npm install failure. The caller
+# Fails with a structured error on dependency-install failure. The caller
 # (Step 4d main loop) decides whether to fail-fast or collect failures
 # based on HYDRA_CONTINUE_ON_PLUGIN_FAIL.
 install_plugin() {
@@ -284,19 +284,37 @@ install_plugin() {
 
   log "    Installing plugin $plugin_name (profiles=$profiles)..."
 
-  # Run npm install, capture both exit code and stderr for clear
-  # error reporting.  Check the directory exists first so a missing
-  # plugin_dir reports "not found" rather than lying about npm.
-  local npm_out
-  local npm_rc=0
+  # Install deps with pnpm + the committed lockfile — the SAME path CI uses
+  # (.github/workflows/pr-validate.yml: `pnpm install --frozen-lockfile`). Do
+  # NOT use bare `npm install` here: it ignores pnpm-lock.yaml and free-resolves
+  # version ranges, so "CI green" stopped implying "deploy installs cleanly".
+  # On 2026-06-01 that gap aborted Deploy HYDRA #217: bare npm install resolved
+  # vitest@^3.2.0 → 3.2.5, which pins the transitive vite-node@3.2.5 EXACTLY —
+  # a version vitest published without publishing vite-node@3.2.5 (registry tops
+  # out at 3.2.4) → ETARGET → whole deploy rolled back. --frozen-lockfile pins to
+  # the exact versions CI validated. node_modules is rsync-excluded below, so
+  # this is build-time only; the runtime resolves openclaw/* from the global
+  # install regardless of which package manager laid down node_modules here.
+  # Check the directory exists first so a missing plugin_dir reports "not found".
+  local install_out
+  local install_rc=0
   if [[ ! -d "$plugin_dir" ]]; then
     log "    ✗ plugin_dir not found: $plugin_dir"
     return 1
   fi
-  npm_out=$(cd "$plugin_dir" && npm install 2>&1) || npm_rc=$?
-  if (( npm_rc != 0 )); then
-    log "    ✗ npm install failed for $plugin_name (rc=$npm_rc):"
-    echo "$npm_out" | sed 's/^/        /'
+  if ! command -v pnpm >/dev/null 2>&1; then
+    log "    ✗ pnpm required for plugin install (mirrors CI's --frozen-lockfile path) but not on PATH"
+    return 1
+  fi
+  if [[ ! -f "$plugin_dir/pnpm-lock.yaml" ]]; then
+    log "    ✗ $plugin_name has no pnpm-lock.yaml — every in-tree plugin must ship one (CI enforces it). Refusing un-pinned npm fallback."
+    return 1
+  fi
+  install_out=$(cd "$plugin_dir" && pnpm install --frozen-lockfile 2>&1) || install_rc=$?
+  if (( install_rc != 0 )); then
+    log "    ✗ pnpm install --frozen-lockfile failed for $plugin_name (rc=$install_rc):"
+    echo "$install_out" | sed 's/^/        /'
+    log "      (if the lockfile drifted — e.g. after an OpenClaw version bump — regenerate it: cd $plugin_dir && pnpm install --lockfile-only, then commit pnpm-lock.yaml)"
     return 1
   fi
 
@@ -315,9 +333,9 @@ install_plugin() {
   if [[ -n "$build_script" ]]; then
     local build_rc=0
     local build_out
-    build_out=$(cd "$plugin_dir" && npm run build 2>&1) || build_rc=$?
+    build_out=$(cd "$plugin_dir" && pnpm run build 2>&1) || build_rc=$?
     if (( build_rc != 0 )); then
-      log "    ✗ npm run build failed for $plugin_name (rc=$build_rc):"
+      log "    ✗ pnpm run build failed for $plugin_name (rc=$build_rc):"
       echo "$build_out" | sed 's/^/        /'
       return 1
     fi
@@ -738,7 +756,7 @@ RSYNC_EXCLUDES=(
   # audit-scanner, quarantine, trust-scorer that existed NOWHERE else)
   # before the cleanup happens.
   --exclude='config/'
-  # Plugin install artifacts (server runs npm install in-place)
+  # Plugin install artifacts (server runs pnpm install --frozen-lockfile in-place)
   --exclude='plugins/*/node_modules/'
   --exclude='plugins/*/package-lock.json'
   # Plugin build outputs. gitignored (`plugins/*/dist/`) so the repo never
