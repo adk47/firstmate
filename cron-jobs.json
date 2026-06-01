@@ -21,7 +21,11 @@
         "message": "Run the daily AWS change report. Cover the previous 24h. Query CloudTrail write events across Flagship (068358774785) us-west-2 and Plaque (686505752817) us-east-1/us-west-2. Categorize: Human Changes, Deploys, Anomaly Flags, Scaling, Data, Security, DNS & Networking, Automated Ops. Format for Slack (bold not markdown, bullets not dashes). Post as top-level message.",
         "timeoutSeconds": 600,
         "thinking": "low",
-        "model": "openrouter/anthropic/claude-haiku-4.5"
+        "model": "openai/gpt-5.5",
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ]
       },
       "delivery": {
         "mode": "announce",
@@ -60,7 +64,11 @@
         "message": "Run the API change watch. For each repo (core-backend, platform-data-processing, industry-data-processing, analytics-worker, web-credits, mobile), check git log for last 24h commits. Analyze for: breaking API changes, model/schema field changes, new/removed endpoints, auth changes, SQS message format changes, database migrations. Post impact analysis.",
         "timeoutSeconds": 300,
         "thinking": "low",
-        "model": "openrouter/anthropic/claude-haiku-4.5"
+        "model": "openai/gpt-5.5",
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ]
       },
       "delivery": {
         "mode": "announce",
@@ -97,10 +105,11 @@
         "kind": "agentTurn",
         "message": "Run the daily profile movement report. Query Athena (workgroup: clio-agent, region: us-west-2) for: 1) PAID CHURNS in last 24h — separate B2B (muso_team_business_*) and B2P (muso_team_pro_* + muso_individual_*), include emails. 2) PAID JOINS in last 24h ranked by popularity. 3) POPULAR LITE USERS — claimed profiles with popularity 90+ and no paid subscription. Format for Slack with bullets. Flag biggest red flags.",
         "timeoutSeconds": 600,
-        "model": "openrouter/anthropic/claude-haiku-4.5",
+        "model": "openai/gpt-5.5",
         "thinking": "low",
         "fallbacks": [
-          "openrouter/anthropic/claude-haiku-4.5"
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
       "delivery": {
@@ -139,7 +148,11 @@
         "kind": "agentTurn",
         "message": "Daily Win-Back Campaign sheet update. Query Athena for new churned Pro users. Diff against existing emails in Google Sheet (1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs, account: a@muso.ai). ONLY APPEND new rows — never replace or overwrite tracking columns (AI-AN). Return a short summary of new additions as your final output — do NOT post to Slack directly; the cron runner will deliver it to #win-back-alerts.",
         "timeoutSeconds": 900,
-        "model": "openrouter/anthropic/claude-haiku-4.5"
+        "model": "openai/gpt-5.5",
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ]
       },
       "delivery": {
         "mode": "announce",
@@ -180,6 +193,7 @@
         "model": "openai/gpt-5.5",
         "thinking": "high",
         "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -213,7 +227,11 @@
         "kind": "agentTurn",
         "message": "Daily PR Code Review. Review all PRs merged in the last 24 hours across Muso-AI repos (core-backend, platform-data-processing, industry-data-processing, analytics-worker, web-credits, mobile) for PRODUCTION RISK. For each merged PR fetch the diff. Analyze for: OOM, scaling, concurrency, data integrity, error handling, performance risks. Post results with risk ratings. Focus on real problems at production scale, not style nits.",
         "timeoutSeconds": 600,
-        "model": "openrouter/anthropic/claude-haiku-4.5"
+        "model": "openai/gpt-5.5",
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ]
       },
       "delivery": {
         "mode": "announce",
@@ -251,7 +269,11 @@
         "kind": "agentTurn",
         "message": "Generate the CMO EOD Briefing for Fede for today. Cover: Tech (commits/deploys/blockers), Fede mentions/tags, replies to Fede messages, highlights from #social-media #growth-team, notable a@muso.ai emails, and anything else major. Omit empty sections. Plain English, short, with links. Return the briefing as your final output — do NOT post to Slack directly; the cron runner will deliver it to #clio_x_fede.",
         "timeoutSeconds": 300,
-        "model": "openrouter/anthropic/claude-haiku-4.5"
+        "model": "openai/gpt-5.5",
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ]
       },
       "delivery": {
         "mode": "announce",
@@ -284,7 +306,11 @@
         "message": "Scan Gmail (a@muso.ai) for new B2B Ads outreach replies in the last 245 minutes (4h plus 5min overlap). Use gog to check recent inbox. Filter for replies from B2B prospects we have emailed (cross-reference with the B2B outreach sheet). IGNORE all internal emails (from muso.ai domains), SaaS notifications, marketing emails, and anything that is not a direct reply from a B2B prospect.\n\nAlways emit a visible final assistant message. Never end the run with a thinking-only response. The visible message MUST be one of these two forms and nothing else:\n\n(A) If there are no new B2B prospect replies, your final visible message is exactly: NO_REPLY (uppercase, nothing else — no preamble, no explanation, no markdown, no punctuation, no quotes). OpenClaw recognises this token and will silently complete the run without posting to Slack.\n\n(B) If you find an actual B2B prospect reply, format the visible message as: sender name, company, reply summary, and suggested next action. Also sync GHL pipeline stage if applicable (move to Replied or Meeting Booked).",
         "timeoutSeconds": 300,
         "thinking": "off",
-        "model": "openrouter/anthropic/claude-haiku-4.5"
+        "model": "openai/gpt-5.5",
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ]
       },
       "delivery": {
         "mode": "announce",
@@ -322,6 +348,7 @@
         "kind": "agentTurn",
         "model": "openai/gpt-5.5",
         "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ],
         "message": "Run the AMP Daily Report. Query core-backend tables public_ad_events and public_ads via Athena (workgroup: clio-agent, region: us-west-2). Build report: 1) Summary: all-time/7d/today views, clicks, CTR, unique viewers with deltas. 2) Top 5 ads by CTR. 3) Underperformers (CTR < 0.3% with >1K views). 4) AMP vs Feed breakdown. 5) Platform breakdown. 6) Daily trend 7 days. Format for Slack bullets, keep short.",
@@ -358,7 +385,11 @@
         "kind": "agentTurn",
         "message": "Nightly Slack to ClickUp Gap Analysis. Read last 24h messages in #growth-team (C031DKAGQSH) and #clio_analyst (C0ADREBPNQ2). For each discussion topic, feature idea, bug report, or decision: search ClickUp for matching tasks, check repos for related code/PRs. Post gap report to #growth-team with: suggested new tasks, suggested edits, priority suggestions, communication gaps. Suggestions only — do NOT make changes.",
         "timeoutSeconds": 300,
-        "model": "openrouter/anthropic/claude-haiku-4.5"
+        "model": "openai/gpt-5.5",
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ]
       },
       "delivery": {
         "mode": "announce",
@@ -397,7 +428,11 @@
         "message": "Run the daily dev activity report. For each developer (adk47=Aaron, liflovs=Serhii), run the dev-report.sh script or use gh CLI to get commits from the last 24h across all Muso-AI repos (core-backend, web-credits, platform-data-processing, industry-data-processing, analytics-worker, mobile, devops, feed-service, customer-api-mcp, render-service, web-encore). For each dev: 1) Big Picture — group commits into themes, explain what was accomplished and why it matters. 2) Commit stats — per-repo counts, additions/deletions. 3) Individual commits with sha and +/-. 4) Cadence — total commits, average interval. Format for Slack mrkdwn (no tables, bullets only). Post each dev report as a separate message. If zero commits, say so briefly.",
         "timeoutSeconds": 300,
         "thinking": "low",
-        "model": "openrouter/anthropic/claude-haiku-4.5"
+        "model": "openai/gpt-5.5",
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ]
       },
       "delivery": {
         "mode": "announce",
@@ -437,7 +472,11 @@
         "message": "Run a Google OAuth token health check. For each account (a@muso.ai, ak@muso.ai, aaron.k@muso.ai, f@muso.ai), use gog to list 1 Gmail message. This keeps the refresh tokens active and prevents 6-month expiry. Report results: which accounts succeeded, which failed. Always post results.",
         "timeoutSeconds": 60,
         "thinking": "low",
-        "model": "openrouter/anthropic/claude-haiku-4.5"
+        "model": "openai/gpt-5.5",
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ]
       },
       "delivery": {
         "mode": "announce",
@@ -469,7 +508,11 @@
         "kind": "agentTurn",
         "message": "Run the muso-outreach-discovery skill. Find 50 new companies matching Muso Ads target verticals. Dedupe against contacts_intelligence sheet, company_intelligence sheet, GHL B2B-Ads-Clio pipeline, and parent-companies.md (to skip subsidiaries of known parents). Score and select top 50. Return the batch as your final output — do NOT post to Slack directly; the cron runner will deliver it to #company-finder for Fede's review. Follow the SKILL.md workflow exactly. If no new companies match, your final assistant reply must be exactly the single token NO_REPLY and nothing else — no preamble, no explanation, no markdown, no punctuation. OpenClaw recognises this token and will silently complete the run without posting to Slack. Reference files are in skills/muso-outreach-engine/references/ — NEVER create files at workspace root.",
         "timeoutSeconds": 600,
-        "model": "openrouter/anthropic/claude-haiku-4.5"
+        "model": "openai/gpt-5.5",
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ]
       },
       "delivery": {
         "mode": "announce",
@@ -509,6 +552,7 @@
         "model": "openai/gpt-5.5",
         "thinking": "high",
         "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ],
         "timeoutSeconds": 1800
@@ -541,7 +585,11 @@
         "message": "Run this exact command via the shell (exec) tool and post its entire stdout to me verbatim, with no edits, no extra commentary, and no tables: `bash /opt/hydra/scripts/codex-usage-report.sh`. The script emits a complete Slack-ready report (America/Chicago timestamp, per-account 5h and weekly Codex usage, which account is active, and a plain note for any account whose fresh quota cannot be read). Do NOT hand-roll jq against auth-profiles.json or any auth/state file; it holds only token expiry, never usage, and indexing it directly is the exact bug this cron previously hit. If the command fails to run at all, send one short line saying the codex usage report script failed, including its stderr.",
         "model": "openai/gpt-5.5",
         "thinking": "low",
-        "timeoutSeconds": 600
+        "timeoutSeconds": 600,
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ]
       },
       "delivery": {
         "mode": "announce",
@@ -574,7 +622,11 @@
         "message": "Run this exact command via the shell (exec) tool and post its entire stdout to me verbatim, with no edits, no extra commentary, and no tables: `bash /opt/hydra/scripts/codex-usage-report.sh`. The script emits a complete Slack-ready report (America/Chicago timestamp, per-account 5h and weekly Codex usage, which account is active, and a plain note for any account whose fresh quota cannot be read). Do NOT hand-roll jq against auth-profiles.json or any auth/state file; it holds only token expiry, never usage, and indexing it directly is the exact bug this cron previously hit. If the command fails to run at all, send one short line saying the codex usage report script failed, including its stderr.",
         "model": "openai/gpt-5.5",
         "thinking": "low",
-        "timeoutSeconds": 600
+        "timeoutSeconds": 600,
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ]
       },
       "delivery": {
         "mode": "announce",

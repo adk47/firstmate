@@ -135,6 +135,34 @@ if [[ -n "$CRON" && -f "$CRON" ]]; then
       done <<< "$bad"
       fail=1
     fi
+
+    # 5. Every cron payload must run on codex (openai/gpt-5.5) with the full
+    #    intended fallback chain: gemini-3.5-flash first, then claude-sonnet as
+    #    the last-resort backstop. Pins the 2026-06 cutover that moved all crons
+    #    off Opus/Haiku onto codex+gemini→sonnet: a future cron with any other
+    #    primary silently re-introduces OpenRouter Opus spend, a non-gemini
+    #    first fallback drops the intended cheap fallback hop, and dropping the
+    #    sonnet second fallback removes the quality backstop the money-touching
+    #    crons (credit-verification, dispute-handler) rely on — all while still
+    #    passing CI if we only checked the primary + first fallback.
+    REQUIRED_CRON_MODEL="openai/gpt-5.5"
+    REQUIRED_CRON_FALLBACK1="openrouter/google/gemini-3.5-flash"
+    REQUIRED_CRON_FALLBACK2="openrouter/anthropic/claude-4.6-sonnet-20260217"
+    bad=$(jq -r --arg m "$REQUIRED_CRON_MODEL" --arg fb1 "$REQUIRED_CRON_FALLBACK1" --arg fb2 "$REQUIRED_CRON_FALLBACK2" '
+      .jobs // []
+      | .[]
+      | (.payload.model // "MISSING") as $model
+      | (.payload.fallbacks[0] // "MISSING") as $f1
+      | (.payload.fallbacks[1] // "MISSING") as $f2
+      | select($model != $m or $f1 != $fb1 or $f2 != $fb2)
+      | .name + " (model=" + ($model | tostring) + ", fallbacks=[" + ($f1 | tostring) + ", " + ($f2 | tostring) + "])"
+    ' "$CRON")
+    if [[ -n "$bad" ]]; then
+      while IFS= read -r line; do
+        echo "ERROR: $CRON cron job must be on $REQUIRED_CRON_MODEL with fallbacks [$REQUIRED_CRON_FALLBACK1, $REQUIRED_CRON_FALLBACK2] (gemini-flash first, sonnet backstop): $line" >&2
+      done <<< "$bad"
+      fail=1
+    fi
   fi
 fi
 

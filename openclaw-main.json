@@ -153,9 +153,10 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "openrouter/anthropic/claude-opus-4.7",
+        "primary": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/openai/gpt-5.5"
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
       "thinkingDefault": "medium",
@@ -228,7 +229,7 @@
         "default": true,
         "workspace": "/opt/hydra/workspaces/coordinator",
         "model": {
-          "primary": "openrouter/anthropic/claude-opus-4.7",
+          "primary": "openai/gpt-5.5",
           "fallbacks": [
             "openrouter/google/gemini-3.5-flash",
             "openrouter/anthropic/claude-4.6-sonnet-20260217"
