@@ -1,0 +1,21 @@
+# bulk-destructive-exclude.txt — DENY-LIST for the bulk-destructive gate.
+#
+# DELETE calls whose path matches a glob below do NOT count toward the
+# bulk-destructive budget (muso-admin-api.sh: is_bulk_destructive_op /
+# enforce_bulk_destructive_gate). Every other DELETE counts.
+#
+# IMPORTANT SEMANTICS:
+#   - A MISSING file means EVERYTHING counts (fail-safe). The 2026-05-26
+#     incident that motivated this gate was an endpoint on no list at all,
+#     so the safe default is "count it".
+#   - `*` is a shell glob (matched with bash `[[ == ]]`) and matches ACROSS
+#     path segments. The verb is always DELETE; list path globs only.
+#   - Adding an entry WEAKENS the gate. Treat any addition with the same
+#     scrutiny as widening the admin write surface — it is a tier-2 policy
+#     change. Keep a one-line justification on every entry.
+#
+# One path glob per line. '#' comments and blank lines are ignored.
+
+# Profile cache is regenerable — clearing it destroys no durable data, and
+# ops legitimately clears profile caches in batches during refreshes.
+/admin/profile/*/cache

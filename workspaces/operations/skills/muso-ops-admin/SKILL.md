@@ -109,6 +109,38 @@ Read operations (GET) are always allowed without approval.
 
 This gate will be relaxed per-operation as we validate each endpoint in production.
 
+## 🛑 BULK DESTRUCTIVE GATE (enforced in muso-admin-api.sh — incident 2026-05-26)
+
+A deterministic gate in `muso-admin-api.sh` caps the blast radius of mass
+deletions. After **10 destructive `DELETE` calls within 15 minutes**, every
+further destructive `DELETE` is **refused** until an explicit second human
+approval is supplied. This runs in bash below the agent — you cannot talk your
+way past it.
+
+**Scope:** the `DELETE` verb (e.g. `DELETE /admin/track/:id/analytics-sources`,
+`DELETE /admin/track/:id/profile/:pid/credits`, `DELETE /admin/profile/:id/member`).
+`DELETE /admin/profile/:id/cache` is exempt (regenerable). POSTs are NOT counted.
+
+**This gate is NOT bypassed by requester identity** (and, on the operations
+agent, not by god-mode either). Being Aaron, Jan, or Nick — or stamping
+`--requester` with one of them — does not lift it. It exists because on
+2026-05-26 the agent deleted 285 analytics-source links off a single vague
+"sources aren't capturing, fix it", collapsing a profile's stream count. A
+vague request is never authorization to delete in bulk.
+
+**When you hit `MUSO_BULK_DESTRUCTIVE_APPROVAL_REQUIRED`:**
+1. STOP. Do not loop, and do not split the work across calls to dodge the counter.
+2. Post the running count and exactly what you propose to delete (which
+   tracks/links, how many) to the Slack thread.
+3. Get an explicit human "yes, delete those N" from a tier-2 approver (Aaron).
+4. Re-issue with `--confirmed-by aaron --approval-msg-id <ts-of-that-message>`.
+   Each call past the threshold needs genuine approval — do not reuse a stale
+   `--approval-msg-id`. If the batch is genuinely large, hand it to a human.
+
+If a delete *looks* like cleanup of "broken" rows, remember the incident: the
+"broken-looking" `in_progress=true, name=null` stubs carried the real stream
+data. Confirm what a row holds before deleting it.
+
 ### Hardened Exception: Credit Verification (C0APB2CMM7C)
 
 `PUT /admin/credit-requests` (collection endpoint, body `{requestIds, status}`) is
@@ -287,7 +319,7 @@ Full route map: `references/admin-api-routes.md`
 - `GET /admin/track/:trackId/analytics-sources` — get analytics links
 - `POST /admin/track/:trackId/analytics-sources` — add analytics link
 - `PATCH /admin/track/:trackId/analytics-sources` — move analytics link
-- `DELETE /admin/track/:trackId/analytics-sources` — remove analytics link
+- `DELETE /admin/track/:trackId/analytics-sources` — remove analytics link 🛑 bulk-gated (see Bulk Destructive Gate)
 - `GET /admin/track/:trackId/raw-credits` — get raw credits
 - `POST /admin/track/:trackId/profile/:profileId/credits` — add track-profile credits
 - `DELETE /admin/track/:trackId/profile/:profileId/credits` — remove credits

@@ -706,7 +706,7 @@ jobs:
           echo "✓ All plugin env-var references resolve in /etc/openclaw/{shared,<profile>}.env"
 
   bats-tests:
-    name: Bats (scripts/dedup + scripts/tests)
+    name: Bats (scripts/ + ops-admin gates)
     # Added 2026-05-20 after PR #297: Clio caught a `set -u` regression in
     # find-dupes.sh --catalog that emitted "unbound variable" to stderr
     # while still exiting 0 — bats picked it up locally but the suite
@@ -733,7 +733,7 @@ jobs:
           bats --version
           jq --version
 
-      - name: Run all bats suites under scripts/
+      - name: Run all bats suites under scripts/ + ops-admin gate tests
         # Discovers every *.bats file under scripts/ so a future
         # sibling suite (e.g., scripts/credit-verification/tests) is
         # picked up automatically without another CI edit. Current
@@ -741,11 +741,21 @@ jobs:
         # score-pair matrix, sweeps, create-ticket capture contract)
         # and scripts/tests/openclaw-config-write-audit.bats (the
         # write-audit watcher gate).
+        #
+        # ALSO discovers the muso-admin-api.sh gate suites (tier-2 approval,
+        # credit-approve, dry-run, bulk-destructive — added with the
+        # 2026-05-26 bulk-destructive gate). These live next to the workspace
+        # script and had never run in CI. Scoped to that one tests dir on
+        # purpose: a blanket `find workspaces` would also drag in ~30 never-run
+        # credit-verification suites and could block every PR. All four are
+        # hermetic (closed-port MUSO_API_URL, no openclaw binary invocation).
         run: |
           set -euo pipefail
-          files=$(find scripts -type f -name '*.bats' | sort)
+          files=$(find scripts \
+                       workspaces/operations/skills/muso-ops-admin/scripts/tests \
+                       -type f -name '*.bats' | sort)
           if [ -z "$files" ]; then
-            echo "::warning::no *.bats files found under scripts/ — skipping"
+            echo "::warning::no *.bats files found — skipping"
             exit 0
           fi
           count=$(echo "$files" | wc -l | tr -d ' ')

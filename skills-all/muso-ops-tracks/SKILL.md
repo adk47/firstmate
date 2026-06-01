@@ -81,6 +81,13 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
   '{"linkId":"<link_id>"}'
 ```
 
+🛑 **Bulk-gated (incident 2026-05-26).** This DELETE counts toward the bulk
+destructive budget — after 10 destructive DELETEs in 15 minutes the gate
+refuses further ones until you pass `--confirmed-by aaron --approval-msg-id <ts>`.
+Removing analytics links in bulk to "clean up broken/pending sources" is the
+exact action that wiped 285 real source rows; the `in_progress=true, name=null`
+stubs carried live stream data. See `muso-ops-admin` → **Bulk Destructive Gate**.
+
 **Move link between tracks:**
 ```bash
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \

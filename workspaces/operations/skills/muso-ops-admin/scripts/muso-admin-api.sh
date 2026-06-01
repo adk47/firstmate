@@ -46,6 +46,31 @@ TIER2_GODMODE_PATH="${TIER2_GODMODE_PATH:-${SCRIPT_DIR}/../config/tier2-godmode-
 # within this many seconds is the 2026-04-29 incident pattern; refuse it.
 TIER2_REVERSE_WINDOW_SECS="${TIER2_REVERSE_WINDOW_SECS:-300}"
 
+# --- Bulk destructive-operation gate (incident 2026-05-26) ---
+# On 2026-05-26 the ops agent autonomously issued ~285 DELETE
+# /admin/track/:id/analytics-sources calls in one run off a vague "fix it",
+# wiping the only Spotify analytics link on 10 tracks and collapsing a
+# profile's lifetime stream count. This gate caps the blast radius: once
+# BULK_DESTRUCTIVE_THRESHOLD destructive DELETEs land within
+# BULK_DESTRUCTIVE_WINDOW_SECS, every further destructive DELETE is refused
+# unless an explicit second human approval (--confirmed-by + --approval-msg-id)
+# is supplied. Unlike the tier-2 gate, god-mode does NOT bypass this — the
+# agent auto-stamps --requester with whoever is in-thread, so requester
+# identity is not evidence that a human reviewed a mass deletion.
+BULK_DESTRUCTIVE_PATH="${BULK_DESTRUCTIVE_PATH:-${MUSO_OPS_STATE_DIR}/destructive-ops.jsonl}"
+BULK_DESTRUCTIVE_AUDIT_PATH="${BULK_DESTRUCTIVE_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/bulk-destructive-audit.jsonl}"
+BULK_DESTRUCTIVE_THRESHOLD="${BULK_DESTRUCTIVE_THRESHOLD:-10}"
+BULK_DESTRUCTIVE_WINDOW_SECS="${BULK_DESTRUCTIVE_WINDOW_SECS:-900}"
+BULK_DESTRUCTIVE_EXCLUDE_PATH="${BULK_DESTRUCTIVE_EXCLUDE_PATH:-${SCRIPT_DIR}/../config/bulk-destructive-exclude.txt}"
+if ! [[ "$BULK_DESTRUCTIVE_THRESHOLD" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FATAL: BULK_DESTRUCTIVE_THRESHOLD must be a positive integer (got '${BULK_DESTRUCTIVE_THRESHOLD}')" >&2
+    exit 1
+fi
+if ! [[ "$BULK_DESTRUCTIVE_WINDOW_SECS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FATAL: BULK_DESTRUCTIVE_WINDOW_SECS must be a positive integer (got '${BULK_DESTRUCTIVE_WINDOW_SECS}')" >&2
+    exit 1
+fi
+
 # --- Dry-run mode (issue #145) ---
 # OPS_DRY_RUN=1 short-circuits every WRITE (anything that isn't GET/HEAD) in
 # cmd_call, and all of cmd_upload, with a synthetic 200 response. GET/HEAD
@@ -1410,6 +1435,164 @@ record_merge_call() {
         >> "$RECENT_MERGES_PATH" 2>/dev/null || true
 }
 
+# --- Bulk destructive-operation gate helpers (incident 2026-05-26) ---
+
+# is_bulk_destructive_op METHOD PATH -> 0 if this call counts toward the
+# destructive-delete budget, 1 if it should be ignored.
+#
+# Scope: the DELETE verb only. POSTs are excluded by design — claim
+# reject/revert run 50+ per legitimate fraud sweep, and merge/unmerge are
+# already tier-2 gated per-call. A small DENY-LIST of harmless/regenerable
+# DELETE path globs is excluded (see $BULK_DESTRUCTIVE_EXCLUDE_PATH).
+#
+# Deliberately FAIL-OPEN-TO-COUNTING: a missing exclude file means EVERYTHING
+# counts. This is the opposite of is_tier2_endpoint (which fails closed-to-not-
+# tier2) and is intentional — the 2026-05-26 incident was an endpoint on no
+# list at all, so the safe default here is "count it".
+is_bulk_destructive_op() {
+    local method="$1" path="$2"
+    local method_uc
+    method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    [[ "$method_uc" == "DELETE" ]] || return 1
+    # Strip any query string before matching the deny-list globs.
+    path="${path%%\?*}"
+    if [[ -f "$BULK_DESTRUCTIVE_EXCLUDE_PATH" ]]; then
+        while IFS= read -r line; do
+            line="${line%%#*}"
+            line="${line## }"
+            line="${line%% }"
+            [[ -z "$line" ]] && continue
+            # Glob match: RHS intentionally unquoted so `*` is active.
+            # shellcheck disable=SC2053
+            if [[ "$path" == $line ]]; then
+                return 1
+            fi
+        done < "$BULK_DESTRUCTIVE_EXCLUDE_PATH"
+    fi
+    return 0
+}
+
+# count_recent_destructive_ops -> prints the count of recorded destructive
+# DELETEs within the last BULK_DESTRUCTIVE_WINDOW_SECS. Window-only (NOT
+# per-run): a simple "N in the last X minutes" rate limit is both simpler and
+# strictly safer than per-run scoping (per-run resets the counter every run
+# and is more permissive). jq -R -n + inputs idiom mirrors the reverse guard.
+count_recent_destructive_ops() {
+    [[ -f "$BULK_DESTRUCTIVE_PATH" ]] || { echo 0; return 0; }
+    local cutoff_epoch=$(( $(date +%s) - BULK_DESTRUCTIVE_WINDOW_SECS ))
+    jq -R -r -n \
+        --argjson cutoff "$cutoff_epoch" \
+        '[inputs | fromjson? // empty | select(type == "object")]
+         | map(select((.epoch // 0) >= $cutoff))
+         | length' \
+        "$BULK_DESTRUCTIVE_PATH" 2>/dev/null || echo 0
+}
+
+# enforce_bulk_destructive_gate METHOD PATH -> 0 allow / 1 block.
+# Runs in cmd_call after the merge guard, before the dry-run short-circuit.
+enforce_bulk_destructive_gate() {
+    local method="$1" path="$2"
+    is_bulk_destructive_op "$method" "$path" || return 0
+    is_dry_run_mode && return 0
+
+    local count
+    count="$(count_recent_destructive_ops)"
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    if (( count >= BULK_DESTRUCTIVE_THRESHOLD )); then
+        # Threshold reached. Require an EXPLICIT second approval REGARDLESS of
+        # requester — god-mode intentionally does NOT bypass this gate (do not
+        # call is_tier2_godmode_requester here; that omission is the point).
+        if [[ -z "$CONFIRMED_BY" ]]; then
+            cat >&2 <<EOF
+MUSO_BULK_DESTRUCTIVE_APPROVAL_REQUIRED: ${count} destructive DELETE(s) in the last ${BULK_DESTRUCTIVE_WINDOW_SECS}s have reached the bulk threshold (${BULK_DESTRUCTIVE_THRESHOLD}).
+This is the 2026-05-26 incident class (285 analytics-source DELETEs off one vague request). STOP autonomous deletion now.
+
+To proceed you must have an EXPLICIT in-thread human decision to delete this many records, then pass BOTH:
+    --confirmed-by <handle>   (one of: $(cat "$TIER2_APPROVERS_PATH" 2>/dev/null | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | tr '\n' ' '))
+    --approval-msg-id <slack_ts>
+
+God-mode (--requester on the allowlist) does NOT bypass this gate, and a stale/reused approval-msg-id is not a substitute for a real per-batch decision. Each call past the threshold needs genuine approval. If the operation is genuinely this large, hand it to a human to run.
+EOF
+            return 1
+        fi
+        if ! is_tier2_approver "$CONFIRMED_BY"; then
+            cat >&2 <<EOF
+MUSO_BULK_DESTRUCTIVE_APPROVAL_INVALID: --confirmed-by '${CONFIRMED_BY}' is not in the tier-2 approver allowlist.
+Allowed approvers (from $TIER2_APPROVERS_PATH):
+$(cat "$TIER2_APPROVERS_PATH" 2>/dev/null | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | sed 's/^/  - /' || echo "  (file missing)")
+EOF
+            return 1
+        fi
+        if [[ -z "$APPROVAL_MSG_ID" ]]; then
+            echo "MUSO_BULK_DESTRUCTIVE_APPROVAL_REQUIRED: --approval-msg-id <slack_ts> is required alongside --confirmed-by for bulk-destructive writes (audit trail)." >&2
+            return 1
+        fi
+
+        # Audit the approved bulk-destructive write BEFORE executing. Fail-closed
+        # if the audit can't be written — "deleted en masse, no record of who
+        # approved it" is the worse failure mode.
+        if ! mkdir -p "$(dirname "$BULK_DESTRUCTIVE_AUDIT_PATH")" 2>/dev/null; then
+            echo "MUSO_BULK_DESTRUCTIVE_AUDIT_UNWRITABLE: cannot create $(dirname "$BULK_DESTRUCTIVE_AUDIT_PATH") — refusing bulk-destructive write to preserve audit trail." >&2
+            return 1
+        fi
+        local ts audit_rc=0
+        ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        jq -n -c \
+            --arg ts "$ts" \
+            --arg method "$method" \
+            --arg path "$path" \
+            --arg requester "${REQUESTER_EMAIL:-}" \
+            --arg confirmed_by "$CONFIRMED_BY" \
+            --arg approval_msg_id "$APPROVAL_MSG_ID" \
+            --argjson count_at_trip "$count" \
+            --argjson threshold "$BULK_DESTRUCTIVE_THRESHOLD" \
+            --argjson window_secs "$BULK_DESTRUCTIVE_WINDOW_SECS" \
+            '{ts:$ts, method:$method, path:$path, requester:$requester, confirmed_by:$confirmed_by, approval_msg_id:$approval_msg_id, count_at_trip:$count_at_trip, threshold:$threshold, window_secs:$window_secs}' \
+            >> "$BULK_DESTRUCTIVE_AUDIT_PATH" || audit_rc=$?
+        if (( audit_rc != 0 )); then
+            echo "MUSO_BULK_DESTRUCTIVE_AUDIT_UNWRITABLE: append to $BULK_DESTRUCTIVE_AUDIT_PATH failed (rc=$audit_rc) — refusing bulk-destructive write to preserve audit trail." >&2
+            return 1
+        fi
+    fi
+
+    # Record this attempt BEFORE the DELETE is issued, and FAIL CLOSED if it
+    # cannot be persisted. Otherwise an unwritable state dir leaves the counter
+    # at 0 forever and silently disables the gate — unlimited deletes with no
+    # threshold (QA, PR #390). Runs for BOTH under-threshold and approved calls.
+    if ! record_destructive_op "$method" "$path"; then
+        echo "MUSO_BULK_DESTRUCTIVE_COUNTER_UNWRITABLE: cannot persist the destructive-op counter (${BULK_DESTRUCTIVE_PATH}) — refusing the DELETE. The gate must record this call to bound the blast radius; fix the state dir (MUSO_OPS_STATE_DIR=${MUSO_OPS_STATE_DIR}) and retry." >&2
+        return 1
+    fi
+    return 0
+}
+
+# record_destructive_op METHOD PATH -> 0 recorded (or no-op), 1 could-not-persist.
+# Records the destructive DELETE ATTEMPT to the rolling counter. FAIL-CLOSED: a
+# write failure returns non-zero so the caller (enforce_bulk_destructive_gate)
+# refuses the DELETE rather than letting the counter sit at 0 forever and
+# silently disable the guard (QA, PR #390). Called from the gate BEFORE the curl
+# — counting the attempt (not only a 2xx) lands the record before the
+# irreversible call and over-counts toward safety.
+record_destructive_op() {
+    local method="$1" path="$2"
+    is_bulk_destructive_op "$method" "$path" || return 0
+    is_dry_run_mode && return 0
+    local _path="${path%%\?*}"
+    mkdir -p "$(dirname "$BULK_DESTRUCTIVE_PATH")" 2>/dev/null || return 1
+    local epoch ts line
+    epoch=$(date +%s)
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    line=$(jq -n -c \
+        --arg ts "$ts" \
+        --argjson epoch "$epoch" \
+        --arg method "$method" \
+        --arg path "$_path" \
+        --arg requester "${REQUESTER_EMAIL:-}" \
+        '{ts:$ts, epoch:$epoch, method:$method, path:$path, requester:$requester}' 2>/dev/null) || return 1
+    printf '%s\n' "$line" >> "$BULK_DESTRUCTIVE_PATH" 2>/dev/null || return 1
+    return 0
+}
+
 cmd_call() {
     check_env
     local method="${1:?Usage: call <METHOD> <path> [json-body]}"
@@ -1433,6 +1616,12 @@ cmd_call() {
 
     # Reverse-direction guard for /admin/profiles/merge (incident 2026-04-29).
     if ! enforce_merge_reverse_direction_guard "$method" "$path" "$body"; then
+        return 1
+    fi
+
+    # Bulk destructive-operation gate (incident 2026-05-26). Caps the blast
+    # radius of mass DELETEs; god-mode does NOT bypass it. Self-skips in dry-run.
+    if ! enforce_bulk_destructive_gate "$method" "$path"; then
         return 1
     fi
 
