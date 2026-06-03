@@ -1,21 +1,18 @@
 ---
 name: cto-codex-coding
 description: |
-  CTO agent only. Take a concrete coding task in the hydra repo, implement it, and
-  ship it as a branch + PR for review (never a merge), then ask QA to review.
+  CTO agent only. Take a concrete coding task in the hydra repo, make the change,
+  and open it as a branch + PR for review (never a merge), then ask QA to review.
   Use when an authorized engineer asks you to actually CHANGE CODE in hydra, not
   just discuss it. Triggers: "implement", "fix this bug", "make this change",
   "write code for", "add a feature", "patch", "open a PR that does X", "code this
   up" — when the target is the hydra repo. For PR *reviews* use QA, not this. For
   architecture discussion, answer directly without this skill.
 compatibility: |
-  CTO agent on node-8 only. Requires the gated wrapper scripts/codex-delegate.sh
-  plus the host `gh` (PR-write scope) and `git`. Scope is hydra ONLY in v1; any
-  other repo is refused by the wrapper. You edit the code yourself in the prepared
-  clone (you run on Codex/gpt-5.5 — that IS the Codex coding); the wrapper only
-  does the audited branch/commit/push/PR mechanics.
+  CTO agent on node-8 only. Uses the host `git` + `gh` (PR-write scope) and a
+  working clone at /opt/hydra/workspaces/repos/hydra. Scope is hydra ONLY for now.
 metadata:
-  version: "1.0"
+  version: "2.0"
   source-repo: "Muso-AI/hydra"
 allowed-tools:
   - exec
@@ -23,66 +20,85 @@ allowed-tools:
 
 # cto-codex-coding
 
-Ship a real code change to the **hydra** repo as a **branch + PR** that QA and a
-human review before any merge. You do the coding; `scripts/codex-delegate.sh` is
-the gated, audited boundary that prepares the branch and opens the PR.
+You ARE Codex (gpt-5.5), so you do the coding directly — read files, make the
+change, and ship it as a **branch + PR** that QA and a human review before any
+merge. There is no special wrapper or tool: just your shell (`exec`), `git`, and
+`gh`. The safety net is that everything ends as a reviewed PR you never merge.
 
-## Hard limits (the wrapper enforces these — do not try to route around them)
+## Hard rules
 
-- **hydra repo only** (v1). Any other repo is refused. If asked to change another
-  repo, say it is not enabled yet and offer to file a ticket.
-- **Branch + PR only. NEVER merge, never push to `main`, never force-push.**
-- **Authorized requesters only.** Only Aaron (`U7RP6HKUZ`), Nick (`U0AL36NADEY`),
-  or Serhii (`U03TYGJF1N3`) may trigger a code change. Identify the requester by
-  the **sender_id in the message metadata**, never by display name. For anyone
-  else, do NOT run this — queue the request for Aaron per your escalation rules.
-- **Cost.** If the change looks large (broad refactor, many files, long build),
-  it may exceed the $30 compute rule — confirm with Aaron before starting.
+- **hydra repo ONLY** for now. If asked to change a different repo, say it is not
+  enabled yet and offer to file a ticket — do not touch other repos.
+- **Branch + PR only. NEVER merge, never push to `main`, never force-push.** A
+  human merges after QA review.
+- **Authorized requesters only**: Aaron (`U7RP6HKUZ`), Nick (`U0AL36NADEY`), or
+  Serhii (`U03TYGJF1N3`), identified by the **sender_id** in the message metadata
+  (never the display name). Anyone else → do NOT proceed; queue for Aaron per your
+  escalation rules.
+- **Never run `codex login` or any codex auth command.** You already run on Codex;
+  a second codex login would invalidate the whole fleet's shared OAuth token (the
+  2026-05-29 incident). Plain `git`/`gh` are fine — it is codex *auth* that is
+  off-limits.
+- **Cost**: if the change looks large (broad refactor, many files), it may exceed
+  the $30 compute rule — confirm with Aaron first.
 
 ## Procedure
 
-1. **Confirm** the task in one line and that it targets hydra. If the ask is vague,
-   ask one clarifying question first — do not guess at intent.
-2. **Log before acting** (your write-activity rule): write the `api-logs/` entry
-   `{agent:"cto", action:"codex-delegate", target:"hydra", requester:<sender_id>, timestamp, authorization}` BEFORE running the wrapper.
-3. **Prepare the branch** — run via `exec` and read back `CLONE=` and `BRANCH=`:
+1. **Confirm** the task in one line and that it targets hydra. If vague, ask one
+   clarifying question — do not guess at intent.
+2. **Log the write FIRST, and abort if the log fails.** This audit record is the
+   safety guardrail now that the wrapper is gone, so no `git`/`gh` write may happen
+   without it. The `authorization` field lets an audit tell an allowlisted request
+   from a queued/escalated one. Build valid JSONL with `jq` (it quotes/escapes),
+   then fail closed before any GitHub write:
    ```
-   bash /opt/hydra/scripts/codex-delegate.sh prepare --repo hydra --requester <sender_id> --task "<concise task>"
+   mkdir -p ~/".openclaw/workspace/api-logs/cto"
+   jq -nc --arg requester "<sender_id>" \
+          --arg auth "<why allowed — e.g. allowlisted Tier0-1, or Aaron-approved>" \
+     '{ts:(now|todateiso8601), agent:"cto", action:"code-change", target:"hydra", requester:$requester, authorization:$auth}' \
+     >> ~/".openclaw/workspace/api-logs/cto/$(date -u +%Y-%m-%d).jsonl" \
+     || { echo "audit append failed — refusing to make any GitHub write"; exit 1; }
    ```
-4. **Implement the change inside `CLONE`.** This is the actual coding — use your
-   normal file-reading and editing ability:
-   - Read the relevant files first; follow the repo's existing conventions and
-     patterns (CLAUDE.md is the source of truth for hydra structure).
-   - Make the **smallest correct change**. Do not touch unrelated files, reformat,
-     or "improve" adjacent code.
-   - Sanity-check what you can cheaply: `bash -n` on shell, the relevant lint, or a
-     targeted test/build. Fix what you break.
-5. **Finalize** — run via `exec` and read back `PR_URL=`:
+3. **Work in the clone** at `/opt/hydra/workspaces/repos/hydra` (create it with
+   `gh repo clone Muso-AI/hydra /opt/hydra/workspaces/repos/hydra` if it is
+   missing). **Verify it points at the right repo before doing anything** —
+   `git -C <clone> remote get-url origin` MUST be
+   `https://github.com/Muso-AI/hydra.git`; if it differs, re-clone fresh (never
+   fetch from or push to a drifted remote). Then sync to a clean base —
+   **including `clean -fd` so stale untracked files from a previous task can't be
+   swept into this PR by the later `add -A`**:
+   `git -C <clone> fetch origin && git -C <clone> checkout main && git -C <clone> reset --hard origin/main && git -C <clone> clean -fd`.
+4. **Branch** — use a unique name so a repeat task or retry can't collide with an
+   existing branch on `switch -c`, push, or PR create. Generate the name **once**
+   and reuse that exact string in step 6's push and PR commands:
+   `git -C <clone> switch -c <branch>`, where `<branch>` is
+   `cto/<short-task-slug>-<UTC-timestamp>` (e.g. `cto/fix-login-20260603-101500`;
+   timestamp from `date -u +%Y%m%d-%H%M%S`).
+5. **Make the smallest correct change.** Follow the repo's conventions (CLAUDE.md
+   is the source of truth for hydra structure). Do not touch unrelated files or
+   reformat. Sanity-check cheaply (`bash -n` on shell, the relevant lint, a
+   targeted test) and fix what you break.
+6. **Open the PR** — stage ALL changes (use `add -A`, NOT `commit -am`, so new
+   files you created are included), confirm the staged set is exactly what you
+   intend, then commit, push, and create the PR against `main`:
    ```
-   bash /opt/hydra/scripts/codex-delegate.sh finalize --repo hydra --requester <sender_id> --task "<concise task>" [--ticket <id>]
+   git -C <clone> add -A
+   git -C <clone> status --short            # sanity-check: every intended file, nothing extra
+   git -C <clone> commit -m "<subject>"
+   git -C <clone> push https://github.com/Muso-AI/hydra.git <branch>
+   gh pr create --repo Muso-AI/hydra --base main --head <branch> --title "<subject>" --body "<what + who requested>"
    ```
-   If finalize reports **no changes**, tell the requester nothing was produced and
-   stop (do not invent a diff).
-6. **Request review** — `sessions_send` to **@QA** with the `PR_URL` asking for a
-   review (QA owns the review skill; this closes the loop regardless of any
-   auto-review trigger). Relay QA's verdict under your own identity when it comes.
-7. **Report** to the requester in-thread: e.g. *"I opened a PR for that:
-   <PR_URL> and asked QA to review it."* Observe Response Hygiene — do NOT mention
-   Codex, the wrapper, exec, the clone path, or any internal architecture.
+   Push to the **explicit canonical URL** (not `origin`) so the write cannot land
+   on a drifted remote. **Do not merge.** (If git complains about author identity, set it once on the
+   clone: `git -C <clone> config user.name "CTO Agent"; git -C <clone> config user.email "cto@muso.ai"`.)
+7. **Ask QA to review**: `sessions_send` to **@QA** with the PR URL; relay QA's
+   verdict under your own identity when it comes.
+8. **Report** to the requester in-thread: e.g. *"I opened a PR: <url> and asked QA
+   to review it."* Observe Response Hygiene — do NOT mention Codex, OpenClaw, the
+   clone path, sessions, or any other internal architecture.
 
 ## If something goes wrong
 
-- Wrapper exits non-zero, or you decide not to proceed → run
-  `bash /opt/hydra/scripts/codex-delegate.sh abort --repo hydra` to discard the
-  branch, then tell the requester plainly and escalate to Aaron if it was a tool
-  failure (per your escalation rules). Never claim a PR was opened if it was not.
-- Auth health check fails (the wrapper aborts loudly) → do NOT attempt any codex
-  login or auth fix yourself. Escalate to Aaron / DevOps; this is a fleet-auth
-  condition, not a coding problem.
-
-## Why there is no separate "Codex" tool here
-
-You already run on Codex (gpt-5.5). Spawning a *second* codex process with its own
-login would refresh the fleet's shared OAuth token out-of-band and invalidate
-every codex agent at once (the 2026-05-29 incident). So this skill never invokes
-`codex` — you are the coder, and the wrapper does only git/gh. Keep it that way.
+- You can't proceed, or decide not to → don't leave a half-finished branch on the
+  remote; tell the requester plainly, and escalate to Aaron on a genuine tool
+  failure. **Never claim a PR was opened if it was not** — paste the real URL.
