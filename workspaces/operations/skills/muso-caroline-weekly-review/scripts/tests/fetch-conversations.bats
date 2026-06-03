@@ -281,3 +281,28 @@ EOF
   printf '%s' "$line" | grep -q '"body":"FRESH"'
   ! printf '%s' "$line" | grep -q '"body":"STALE"'
 }
+
+@test "normalizes null/absent conversation_part body to empty string (not null)" {
+  # Intercom note/system parts can carry a null (or absent) body. If that null
+  # reaches the grader, an LLM-composed (.body|test(...)) errors ("null cannot be
+  # matched") and aborts the whole run — the 2026-06-03 proof-run failure. Every
+  # emitted part body must be a string.
+  search_one c1 1000
+  cat > "$TEST_TMPDIR/conv-c1.json" <<EOF
+{"id":"c1","contact_id":"x1",
+ "source":{"author":{"type":"user","id":"x1"},"body":"how do I export?"},
+ "conversation_parts":{"conversation_parts":[
+   {"author":{"type":"admin","id":"caroline-admin-123"},"body":"sure","created_at":$NOW},
+   {"author":{"type":"user","id":"x1"},"body":null,"created_at":$NOW},
+   {"author":{"type":"user","id":"x1"},"created_at":$NOW}
+ ]}}
+EOF
+  run "$SCRIPTS_DIR/fetch-conversations.sh"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$WORKDIR/conversations.jsonl")" -eq 1 ]
+  # every emitted part body is a string (null/absent -> "")
+  jq -e '[.parts[].body] | all(type == "string")' "$WORKDIR/conversations.jsonl"
+  # the exact grader pattern that crashed in the proof-run now runs without error
+  run jq -r 'select(any(.parts[]; (.body|test("—")))) | .id' "$WORKDIR/conversations.jsonl"
+  [ "$status" -eq 0 ]
+}

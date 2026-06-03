@@ -160,3 +160,17 @@ EOF
   [ "$(wc -l < "$WORKDIR/conversations.redacted.jsonl")" -eq 1 ]
   [ -s "$WORKDIR/conversations.redacted.jsonl" ]
 }
+
+@test "a null part body survives redaction as a string, safe for grader (.body|test(...))" {
+  # Belt-and-suspenders for the proof-run crash: even fed a null body directly,
+  # the redacted LLM input must carry a string body so a grader-composed
+  # (.body|test(...)) cannot error and abort the run.
+  cat > "$WORKDIR/conversations.jsonl" <<EOF
+{"id":"c1","contact_id":"x1","customer_email":"a@b.com","customer_first_name":"Al","customer_last_name":"Roe","parts":[{"author":{"type":"admin","id":"x"},"body":"hi — there"},{"author":{"type":"user"},"body":null}]}
+EOF
+  run "$SCRIPTS_DIR/redact.sh" "$WORKDIR/conversations.jsonl" "$WORKDIR/conversations.redacted.jsonl"
+  [ "$status" -eq 0 ]
+  jq -e '[.parts[].body] | all(type == "string")' "$WORKDIR/conversations.redacted.jsonl"
+  run jq -r 'select(any(.parts[]; (.body|test("—")))) | .id' "$WORKDIR/conversations.redacted.jsonl"
+  [ "$status" -eq 0 ]
+}

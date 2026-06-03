@@ -142,7 +142,10 @@ fi
 # with stale voice/sentiment evidence. The .source opener is always kept as the
 # question-context anchor: it is the customer's words (never Caroline's voice, so
 # it cannot pollute the voice/sentiment grade) and is needed to judge whether the
-# in-window reply was appropriate. Normalize.
+# in-window reply was appropriate. Normalize. Part body defaults to "" — Intercom
+# note/system parts can have a null/absent body, and a null reaching the LLM grader
+# crashes any (.body|test(...)) it composes ("null cannot be matched"), aborting the
+# run; keeping body a string makes the grading input null-safe at the source.
 while IFS= read -r id; do
   [ -n "$id" ] || continue
   conv=$(intercom_request GET "$API/conversations/$id?display_as=plaintext")
@@ -160,7 +163,7 @@ while IFS= read -r id; do
         [.source | select((.body // "") != "") | {author: .author, body: .body}]
         + [.conversation_parts.conversation_parts[]?
            | select((.created_at // 0) >= $cutoff)
-           | {author: .author, body: .body}]
+           | {author: .author, body: (.body // "")}]
       ),
       started_at: .created_at,
       closed_at: .updated_at
