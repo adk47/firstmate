@@ -673,6 +673,42 @@
       "state": {
         "consecutiveErrors": 0
       }
+    },
+    {
+      "id": "03695380-8cee-4305-bedd-96dfbd3fbb18",
+      "agentId": "operations",
+      "name": "caroline-weekly-review",
+      "description": "Weekly Caroline review — 7d Intercom grade across voice/tools/KB/sentiment, post to #cs_chats, open PR for repeated KB gaps. Lands disabled — manual shadow-channel run required before flipping enabled.",
+      "enabled": false,
+      "createdAtMs": 1778773317394,
+      "updatedAtMs": 1778773317394,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * 1",
+        "tz": "Europe/Rome"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the muso-caroline-weekly-review skill. Window: last 7 days. Return the final review text as your final assistant message — do NOT post to Slack directly; the cron runner will deliver it to #cs_chats.",
+        "model": "openai/gpt-5.5",
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ],
+        "thinking": "high",
+        "timeoutSeconds": 1500
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0ANM0PN9L5",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0
+      }
     }
   ]
 }
