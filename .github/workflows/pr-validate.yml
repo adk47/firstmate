@@ -860,6 +860,26 @@ jobs:
           python3 -m py_compile $files
           echo "✓ All Python files parse cleanly"
 
+  py-tests:
+    name: Python unit tests (watchdog)
+    # Added 2026-06-03 (PR #411): the Intercom intake-outage watchdog
+    # (scripts/intercom-intake-watchdog.py) is the ONLY tripwire for the
+    # April-2026 silent-intake-outage class. py_compile (above) proves it
+    # parses; this proves its health *decisions* still hold — is_processed's
+    # ai:*/admin-reply/closed signals, pagination, the threshold/min-volume
+    # judgement, alert-vs-no-alert, and clean exits on API/usage errors.
+    # Stdlib unittest only (no pip, no network) — same bare python3 as
+    # py-syntax. Target the module by name on purpose: a broad discover would
+    # import the pytest-based tests/ outreach suite, which has no CI deps.
+    runs-on: [self-hosted, hydra]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Run watchdog behavioral tests
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_intercom_intake_watchdog
+
   plugin-tests:
     name: Plugin tests (vitest)
     # Added 2026-05-20: 3 plugins under plugins/ (intercom, support-tools,

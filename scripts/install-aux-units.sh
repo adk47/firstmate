@@ -145,6 +145,47 @@ log "  $tmr: $state"
 log "done. Next fires:"
 systemctl list-timers "$tmr" --no-pager 2>/dev/null | head -4 || true
 
+# ─── Intercom intake-outage watchdog ─────────────────────────
+# Alerts #clio_devops (C0ADV2W76G4) via the devops bot when inbound
+# Intercom conversations stop being processed — the failure that
+# silently stranded ~808 customers during the April 2026 webhook
+# outage (memory:project_intercom_webhook_outage_2026-04-28). Read-only
+# against Intercom; posts Slack only when the processed-fraction drops
+# below threshold over a window that has had time to be handled.
+# Token: MUSOAI_INTERCOM_TOKEN from the env files; devops botToken from
+# the openclaw config (resolved in the script). See
+# scripts/intercom-intake-watchdog.py.
+cat > /etc/systemd/system/intercom-intake-watchdog.service << INTAKEWDSVC
+[Unit]
+Description=Intercom intake-outage watchdog (alerts #clio_devops)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/intercom-intake-watchdog.py --alert
+INTAKEWDSVC
+
+cat > /etc/systemd/system/intercom-intake-watchdog.timer << INTAKEWDTMR
+[Unit]
+Description=Run the Intercom intake-outage watchdog every 2h
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=2h
+Unit=intercom-intake-watchdog.service
+
+[Install]
+WantedBy=timers.target
+INTAKEWDTMR
+
+systemctl daemon-reload
+wd=intercom-intake-watchdog.timer
+systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
+systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
+log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
 # ─── Gateway pre-start self-heal drop-ins ─────────────────────
 # One drop-in per profile, hard-coded with the profile name (the
 # base units are not systemd templates so %i is unavailable). The
