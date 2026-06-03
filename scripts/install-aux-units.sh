@@ -348,4 +348,56 @@ systemctl start "$tmr" >/dev/null 2>&1 || log "WARN: could not start $tmr"
 state=$(systemctl is-active "$tmr" 2>/dev/null || echo unknown)
 log "  $tmr: $state (first real fire gated to 2026-05-28T06:00Z)"
 
+# ─── Daily self-improvement audit (08:00 UTC) ─────────────────
+# Was a hand-installed root crontab line (untracked, lost on node
+# rebuild). Now a tracked systemd timer. The script is synced into
+# /opt/hydra/scripts/ by deploy; it reads journald + the main
+# openclaw config and posts a digest to #clio_devops.
+cat > /etc/systemd/system/hydra-daily-audit.service << AUDITSVC
+[Unit]
+Description=HYDRA daily self-improvement audit (posts digest to #clio_devops)
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/hydra-daily-audit.py
+# HOME for gh's config (release/PR checks), PATH for journalctl + gh.
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=append:/var/log/hydra-daily-audit.log
+StandardError=append:/var/log/hydra-daily-audit.log
+AUDITSVC
+
+cat > /etc/systemd/system/hydra-daily-audit.timer << AUDITTMR
+[Unit]
+Description=Run the HYDRA daily audit at 08:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 UTC
+# If the box was down at 08:00, fire on next boot rather than skip a day.
+Persistent=true
+RandomizedDelaySec=60s
+Unit=hydra-daily-audit.service
+
+[Install]
+WantedBy=timers.target
+AUDITTMR
+
+systemctl daemon-reload
+
+# Retire the legacy hand-installed crontab line so it doesn't double-fire.
+if crontab -l 2>/dev/null | grep -q "hydra-daily-audit.py"; then
+  # `|| true`: when the audit line is the ONLY crontab entry, grep -v yields no
+  # output and exits 1, which under `set -euo pipefail` would abort the installer
+  # before the timer is enabled. An empty result is a valid "clear it" case; a real
+  # `crontab -` failure still surfaces.
+  ( crontab -l 2>/dev/null | grep -v "hydra-daily-audit.py" || true ) | crontab -
+  log "  removed legacy hydra-daily-audit crontab line (now handled by the timer)"
+fi
+
+atmr=hydra-daily-audit.timer
+systemctl enable "$atmr" >/dev/null 2>&1 || log "WARN: could not enable $atmr"
+systemctl start "$atmr" >/dev/null 2>&1 || log "WARN: could not start $atmr"
+astate=$(systemctl is-active "$atmr" 2>/dev/null || echo unknown)
+log "  $atmr: $astate (fires daily 08:00 UTC)"
+
 log "post-2026-05-05 hardening: drop-ins, write-audit, and 2-min watchdog cron installed."
