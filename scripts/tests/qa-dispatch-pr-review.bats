@@ -101,8 +101,12 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ ! -s "$STUB_CALLS" ]
 }
 
-@test "no --announce flag (skill owns Slack delivery)" {
+@test "fallback delivery disabled via --no-deliver (skill owns Slack delivery)" {
   run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
-  ! grep -qx -- '--announce' "$STUB_ARGV"
+  # --no-deliver is the actual off-switch for the runner's fallback delivery. Without
+  # it the isolated cron's final text delivery fails with "Delivering to Slack requires
+  # target ..." (omitting --announce alone does NOT disable the fallback).
+  grep -qx -- '--no-deliver' "$STUB_ARGV"
+  ! grep -qx -- '--announce'  "$STUB_ARGV"
 }

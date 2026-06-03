@@ -29,10 +29,10 @@ set -euo pipefail
 # Usage:
 #   qa-dispatch-pr-review.sh <pr-number> <head-sha>
 #
-# Env overrides (mainly for tests / delivery tuning):
-#   OPENCLAW                  openclaw binary (default: openclaw)
-#   QA_AUTOREVIEW_DELIVER_TO  Slack delivery target for the result notification
-#                             (default: user:<Nick> DM)
+# Env overrides (mainly for tests):
+#   OPENCLAW   openclaw binary (default: openclaw)
+# (No delivery-target override: the cron uses --no-deliver and the skill owns all
+# Slack delivery itself, so there is nothing for the cron to target.)
 # Exit codes: 0 dispatched | 2 usage.
 
 OPENCLAW="${OPENCLAW:-openclaw}"
@@ -95,9 +95,16 @@ while IFS= read -r id; do
   "$OPENCLAW" --profile "$PROFILE" cron rm "$id" >/dev/null 2>&1 || true
 done <<< "$old_ids"
 
-# Fire-and-forget one-shot. --delete-after-run cleans up on success. No
-# --announce: the skill owns delivery (opening + threaded result DM to the author
-# via qa-slack-dm.sh), so the cron itself delivers nothing (mode none).
+# Fire-and-forget one-shot. --delete-after-run cleans up on success.
+#
+# --no-deliver: the skill owns ALL Slack delivery (opening + threaded result DM to
+# the author via qa-slack-dm.sh, posted with explicit targets mid-turn), so the cron
+# must NOT also deliver its final assistant text. Omitting --announce is NOT enough:
+# the runner's fallback delivery is on by default and tries to deliver to chat "last",
+# which an isolated cron has no concept of -> the turn ends in
+# `outcome=error error="Delivering to Slack requires target ..."` ~26-30x/day and the
+# failed one-shot is never --delete-after-run'd. --no-deliver disables that fallback
+# (the CLI equivalent of a `"mode": "none"` job). Verified: openclaw 2026.5.27.
 "$OPENCLAW" --profile "$PROFILE" cron add \
   --name "$job_name" \
   --at "+5s" \
@@ -105,6 +112,7 @@ done <<< "$old_ids"
   --session isolated \
   --message "$message" \
   --timeout-seconds "$TIMEOUT_SECONDS" \
+  --no-deliver \
   --delete-after-run \
   --json
 
