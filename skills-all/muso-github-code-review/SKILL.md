@@ -67,13 +67,17 @@ The Slack DMs go out as the QA app — still self-identify as Muso QA Bot in the
    - **CI is fully green** — `gh pr checks <pr> --repo Muso-AI/hydra` shows every
      check passed, with none `fail` or `pending`. In auto mode be strict: do NOT
      apply Step 3c's "unrelated red gate" allowance — any non-green check means do
-     not approve.
-   - **Verdict is GO** — no 🔴 Critical and no 🟡 Important findings.
+     not approve. (Ignore the `qa-review` row in `gh pr checks` — that is your OWN status from Step 6b; the approval wrapper excludes it to avoid a circular dependency.)
+   - **Verdict is GO** — no 🔴 Critical and no 🟡 Important findings, AND every prior
+     unresolved 🔴/🟡 thread cleared per "Carry forward prior findings". A fresh-pass
+     0/0 is not GO if an earlier blocker is still open.
    - The gated wrapper accepts the author UID.
-4. **Never merge** (unchanged). A human merges.
-5. **LAST, DM the author the result as a threaded reply under the opening ts:**
+4. **Publish the `qa-review` commit status (Step 6b)** (best-effort — skip if the token lacks status scope, same as the Step 6 403 fallback) — `failure` on NO-GO,
+   `success` on GO — before the result DM, so the PR shows a red/green QA signal.
+5. **Never merge** (unchanged). A human merges.
+6. **LAST, DM the author the result as a threaded reply under the opening ts:**
    ```bash
-   bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "Approved -- CI green, no blocking findings. Safe to merge: <pr-url>" "$ts"
+   bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "Approved -- CI green and 0 unresolved blocking findings (fresh pass + carried-forward threads). Safe to merge: <pr-url>" "$ts"
    # or, if not approved:
    bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "Reviewed -- <N> blocking finding(s), not approved (<one-line reason>). Details on the PR: <pr-url>" "$ts"
    ```
@@ -305,6 +309,18 @@ JSONEOF
 gh api "repos/$OWNER/$REPO/pulls/$PR/reviews" --method POST --input /tmp/pr-review.json
 ```
 
+- **NEVER pass review/PR/diff text inline via `-f body='...'` or `-f body="..."`.** Always
+  build the JSON with a heredoc into a temp file and use `--input <file>` (as above), or
+  `--field body=@<file>`. PR titles, diffs, and existing comments routinely contain
+  backticks, `$(...)`, `>`, `<`, or `|`; inline `-f body=` re-parses that text through your
+  shell, so a code-span like `` `updated_at > seven_days_ago` `` runs as command
+  substitution plus a redirect. On PR #287 exactly that silently created
+  `workspaces/qa/seven_days_ago` in the deploy tree (broke Deploy pre-flight) — and the
+  same path is a latent code-execution vector. This applies to **every** `gh api` write
+  whose body is or quotes PR content: the batched review (Step 6), and any comment
+  reply/edit (`POST`/`PATCH .../pulls/comments/...`) or issue comment. Fixed, literal,
+  metacharacter-free bodies (e.g. the Step 6b commit-status `-f description=`/`-f state=`)
+  are fine.
 - `event`: use **`COMMENT`** for the inline review comments. Use `REQUEST_CHANGES`
   only when the human asks to formally block. Do **not** use the reviews-API
   `APPROVE` event to record a formal approval — the sanctioned approval path is the
@@ -316,9 +332,33 @@ gh api "repos/$OWNER/$REPO/pulls/$PR/reviews" --method POST --input /tmp/pr-revi
   `POST .../pulls/<n>/comments` endpoint).
 - `line` MUST be a line that appears in the PR diff, or the call 422s. If a finding can't
   be tied to a changed line (file-level or whole-PR), put it in the review `body` summary
-  rather than as an inline comment.
+  rather than as an inline comment. Prefer placing 🔴 Critical / 🟡 Important findings as inline comments (review threads) whenever possible, so the approval wrapper's carry-forward check (Guard 7) can gate them; a blocker placed only in the review body is invisible to that mechanical gate and rests on the qa-review status plus your verdict.
 - If the call returns a 403 / scope error, the gateway token lacks PR-write scope:
   report this to the requester and leave the Slack summary as the deliverable.
+
+## Step 6b — Publish the verdict as a commit status
+
+After posting the review, publish your verdict as a commit status on the head SHA so
+it is a visible green/red signal on the PR (and can be made a required check). Set it
+on every review — `success` on GO, `failure` on NO-GO:
+
+```bash
+verdict_state=success     # use "failure" when the verdict is NO-GO
+verdict_desc="GO — 0 blocking findings"   # or: "NO-GO — <N> blocking finding(s)"
+HEAD_SHA="$(gh pr view "$PR" --repo "$OWNER/$REPO" --json headRefOid --jq .headRefOid)"
+gh api "repos/$OWNER/$REPO/statuses/$HEAD_SHA" --method POST \
+  -f state="$verdict_state" \
+  -f context="qa-review" \
+  -f description="$verdict_desc" \
+  -f target_url="https://github.com/$OWNER/$REPO/pull/$PR/files"
+```
+
+`$HEAD_SHA` is the head commit you reviewed. A new push creates a new SHA with no
+`qa-review` status yet, so a re-review must run before the PR is green again (pairs
+with `dismiss_stale_reviews`). On NO-GO you set `failure` and stop — do not approve.
+Best-effort: if the Step 6 review POST already failed with a 403/scope error, the
+status POST will too — skip it, rely on the Slack DM, and do not loop or report a hard
+failure.
 
 ## Logging (before any GitHub write)
 
@@ -334,10 +374,58 @@ EOF
 
 If you cannot log it, do not post it.
 
+## Carry forward prior findings (before any GO)
+
+A fresh 7-lens pass is NOT enough: a GO must also clear every still-open finding
+from earlier rounds — yours or a human's. (PR #287 was wrongly approved because a
+fresh pass scored 0/0 while its own 🔴/🟡 comments from 9 minutes earlier sat
+unaddressed.) Before deciding GO:
+
+1. List the PR's unresolved review threads:
+
+   ```bash
+   gh api graphql -f query='
+     query($owner:String!,$repo:String!,$pr:Int!){
+       repository(owner:$owner,name:$repo){
+         pullRequest(number:$pr){
+           reviewThreads(first:100){ nodes{
+             id isResolved
+             comments(first:1){ nodes{ body path line } }
+           } }
+         }
+       }
+     }' -f owner="$OWNER" -f repo="$REPO" -F pr="$PR"
+   ```
+
+2. For each **unresolved** thread:
+   - **Your own prior finding** (body tagged 🔴/🟡/🟢/🔵): re-check the current diff
+     at that location. If the fix is in place, resolve the thread; if not, it stays a
+     blocker. Resolve with:
+     ```bash
+     gh api graphql -f query='mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{ isResolved } } }' -f id="$THREAD_ID"
+     ```
+     (`$THREAD_ID` is the `id` field of the thread from the list query above.)
+   Resolving a thread asserts you verified the fix in the current diff — the approval
+   wrapper (Guard 7) trusts that resolution. Never resolve a thread you have not
+   confirmed fixed; an un-verified resolution is exactly how a blocker slips through.
+   (Mechanical fix-verification arrives with the autofix loop in Part B.)
+   - **A human/Clio thread** (no severity emoji): assess it with the 7 lenses. If you
+     judge it Critical/Important and it is unaddressed, it is a blocker. Do not resolve
+     someone else's thread on their behalf — leave it and call it out.
+
+3. **Verdict rule:** GO requires no 🔴 Critical and no 🟡 Important findings **from the
+   fresh pass OR from any unresolved prior thread.** If any blocker remains, the verdict
+   is NO-GO even if this run's fresh pass found nothing.
+
+The gated wrapper (Step 7) independently re-checks unresolved 🔴/🟡 threads and CI, and
+will refuse to approve (exit 9 / exit 8) if you try to approve with a blocker open — so
+keep this ledger honest.
+
 ## Step 7 — Approve the PR (approve-only, gated)
 
 Approve **only** when BOTH hold:
-- your verdict is **GO** — no 🔴 Critical and no 🟡 Important findings; and
+- your verdict is **GO** — no 🔴 Critical and no 🟡 Important findings, including any
+  carried-forward unresolved thread (see "Carry forward prior findings"); and
 - the requester's Slack UID is one of: **Aaron, Fede, Serhii, Nick**.
 
 Approve through the gated wrapper — **never** call `gh pr review --approve` directly.
@@ -352,8 +440,10 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "🤖
   `<requester-slack-uid>` is the `sender_id` from message metadata — never a name.
 - **You approve; you never merge.** A human merges — say so to the requester.
 - If the wrapper exits non-zero, relay the reason and do NOT retry blindly:
-  `exit 4` = PR is authored by Aaron's account (GitHub blocks self-approval — another
-  reviewer is needed); `exit 5` = requester not authorized; `exit 3` = not a Muso-AI repo.
+  `exit 3` = not a Muso-AI repo; `exit 4` = PR authored by the gateway account (GitHub
+  blocks self-approval — another reviewer is needed); `exit 5` = requester not authorized;
+  `exit 8` = CI is not green; `exit 9` = an unresolved Critical/Important thread is still
+  open (carry it forward — fix it or resolve the thread, do not approve around it).
 - Report the wrapper's post-check (`reviewDecision` / `mergeStateStatus`). If GitHub still
   shows the PR blocked (CODEOWNERS, required checks pending), tell the requester what's
   outstanding — don't imply it's ready to merge.

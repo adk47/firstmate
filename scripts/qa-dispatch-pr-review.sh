@@ -76,6 +76,8 @@ Follow the skill Auto mode section exactly. In short:
     bash /opt/hydra/scripts/qa-pr-thread-dm.sh ${REPO} ${pr} ${REQUESTER_UID}
 - Skip the Step 5 human gate; post the batched review (Step 6, COMMENT) to GitHub
   yourself after the audit-log line. Check CI with "gh pr checks ${pr} --repo ${REPO}".
+- Before any GO, carry prior findings forward (skill "Carry forward prior findings"):
+  resolve confirmed-fixed threads, treat any unresolved Critical/Important as a blocker.
 - Approve (Step 7, scripts/qa-pr-approve.sh, requester ${REQUESTER_UID}) ONLY IF every
   CI check passed, the verdict is GO (no Critical, no Important), and the wrapper
   allowlist passes. Otherwise post the review and DO NOT approve. Never merge.

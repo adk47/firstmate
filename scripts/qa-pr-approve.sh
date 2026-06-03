@@ -27,6 +27,7 @@ set -euo pipefail
 #
 # Exit codes: 0 ok | 2 usage | 3 repo-not-muso | 4 self-approval-blocked
 #             5 requester-not-allowed | 6 log-failed | 7 gh-approve-failed
+#             8 ci-not-green | 9 open-blocking-findings
 #
 # Env (mainly for tests): GH=gh override; QA_PR_APPROVE_LOG_DIR override log dir.
 
@@ -75,6 +76,53 @@ author="$("$GH" pr view "$pr" --repo "$owner/$repo" --json author --jq .author.l
 if [ -n "$me" ] && [ "$(printf '%s' "$me" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$author" | tr '[:upper:]' '[:lower:]')" ]; then
   die 4 "PR #$pr is authored by the gateway account ($author) — GitHub blocks self-approval. A different reviewer must approve it."
 fi
+
+# --- Guard 6: CI must be green --------------------------------------------
+# Re-derive CI status here rather than trusting the agent's "CI green" claim
+# (root cause of the PR #287 mis-approval). Exclude the qa-review context
+# itself to avoid a circular dependency (QA sets it just before calling this).
+# Fail closed: refuse if the rollup can't be read (ERR), if ANY non-qa-review
+# check is not passing, OR if there are NO non-qa-review checks at all -- an
+# empty rollup is not proof CI ran, so it must not read as green (QA #398).
+bad_checks="$("$GH" pr view "$pr" --repo "$owner/$repo" --json statusCheckRollup \
+  --jq '[.statusCheckRollup[]? | select((.context // .name) != "qa-review")]
+         | if length == 0 then "NO-CHECKS"
+           else ([.[] | (((.conclusion // .state) // "PENDING") | ascii_upcase)
+                  | select(. != "SUCCESS" and . != "NEUTRAL" and . != "SKIPPED")] | length | tostring)
+           end' \
+  2>/dev/null || echo "ERR")"
+[ "$bad_checks" = "0" ] || die 8 "CI not green for $owner/$repo#$pr (non-passing/absent checks: $bad_checks) — refusing to approve."
+
+# --- Guard 7: no unresolved Critical/Important review threads ---------------
+# Carry findings forward mechanically: any unresolved thread whose first comment
+# is tagged Critical/Important blocks the approval. This re-reads thread-resolution
+# state independently of the agent's GO verdict -- but note it TRUSTS isResolved,
+# which QA itself can set. It catches an UN-resolved blocker, not a wrongly-resolved
+# one; mechanical fix-verification is Part B (the CTO fix-and-re-review loop).
+# Fail closed: if threads can't be read, refuse.
+read -r -d '' gql <<'GQL' || true
+query($owner:String!,$repo:String!,$pr:Int!){
+  repository(owner:$owner,name:$repo){
+    pullRequest(number:$pr){
+      reviewThreads(first:100){
+        pageInfo{ hasNextPage }
+        nodes{ isResolved comments(first:1){ nodes{ body } } }
+      }
+    }
+  }
+}
+GQL
+# Fail closed on >100 threads: if there is a second page we cannot see a blocker
+# that lives past the first 100, so refuse rather than approve blind (QA #398).
+open_blockers="$("$GH" api graphql -f query="$gql" -f owner="$owner" -f repo="$repo" -F pr="$pr" \
+  --jq '.data.repository.pullRequest.reviewThreads
+         | if .pageInfo.hasNextPage then "MORE"
+           else ([.nodes[]? | select(.isResolved == false)
+                  | (.comments.nodes[0].body // "")
+                  | select(test("🔴|🟡"))] | length | tostring)
+           end' \
+  2>/dev/null || echo "ERR")"
+[ "$open_blockers" = "0" ] || die 9 "$owner/$repo#$pr has unresolved Critical/Important review thread(s), or >100 threads to verify ($open_blockers) — refusing until they are addressed/resolved (or a human reviews)."
 
 # --- Guard 5: log BEFORE the write ------------------------------------------
 ts="$(date -u +%FT%TZ)"

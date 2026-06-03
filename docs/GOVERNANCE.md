@@ -198,6 +198,20 @@ These are GitHub server-side settings (classic branch protection), **not** in-re
 - **`dismiss_stale_reviews: true`** (enabled 2026-06-01). A new push to an open PR dismisses prior approvals, so the standing approval always reflects the current HEAD, not an earlier commit. Matters for the QA auto-review, which re-reviews each push: a stale approval can no longer mask an un-re-reviewed (or re-review-rejected) commit.
 - **No required status checks** — "PR Validation" CI is informational at the protection layer; the QA auto-review is what gates approval on green.
 - **`enforce_admins: false`** — Aaron (admin) can bypass; non-admin contributors (`write`, e.g. Nick) cannot, so the code-owner approval is genuinely required for them.
+- **QA verdict gate (PR #391+ hardening):** the QA bot publishes a `qa-review` commit
+  status — `success` on GO, `failure` on NO-GO (see `skills-all/muso-github-code-review/SKILL.md`
+  Step 6b) — so a NO-GO is visibly red on the PR. Enforcement is mechanical, not on the
+  agent's word: the gated `scripts/qa-pr-approve.sh` refuses to record the code-owner
+  approval unless CI is green (exit 8) and no unresolved Critical/Important review thread
+  remains (exit 9). Because the required code-owner approval (`* @adk47`) is what gates
+  merge, withholding the approval blocks the merge.
+- **`qa-review` is intentionally NOT a required status check.** Required checks are
+  repo-wide, but the QA auto-review only runs on `nsollazzo` PRs (`qa-autoreview.yml`),
+  so requiring `qa-review` would permanently block every other contributor's PR on a
+  status that is never reported. Revisit only if/when QA reviews **all** PRs to `main`
+  (scope expansion — out of scope here). Until then the red status is a visible signal +
+  defense-in-depth, and the wrapper refusal (no approval) is the real merge block for
+  Nick's PRs.
 
 ---
 
