@@ -176,7 +176,7 @@ agents:
       - slack_admin
 
   support:
-    description: "External customer support. MOST RESTRICTED — only 4 tools allowed. Everything else denied."
+    description: "External customer support. MOST RESTRICTED — only 9 tools allowed. Everything else denied."
     denied:
       - exec
       - browser

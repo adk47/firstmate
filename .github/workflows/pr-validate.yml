@@ -151,6 +151,71 @@ jobs:
           if [ "$fail" -eq 1 ]; then exit 1; fi
           echo "::endgroup::"
 
+      - name: Edge support agent tool lockdown — policy↔runtime sync
+        # Caroline (the `support` agent) is the ONLY customer-facing agent and
+        # ingests untrusted Intercom text. policies/tool-deny-lists.yaml DECLARES
+        # her denials ("MOST RESTRICTED"), but that file is never translated into
+        # the openclaw runtime — only agents.list[].tools.deny in openclaw-edge.json
+        # actually constrains the live gateway (issue #408). Without enforcement a
+        # prompt-injection could shell out via `exec` to muso-admin-api.sh and
+        # self-approve a tier-2 merge/unmerge. This gate couples the two files:
+        # every policy-declared support denial that maps to a REAL openclaw tool
+        # must be enforced in the edge runtime config, so the prose can never again
+        # drift from what the gateway enforces.
+        run: |
+          echo "::group::Edge support tool lockdown"
+          fail=0
+
+          # Bridge the policy file's conceptual taxonomy (exec, kubectl, db_read…)
+          # to openclaw's ACTUAL tool identifiers. Only listed names are runtime-
+          # enforceable; grow this set as more policy categories gain a real
+          # openclaw tool id. `exec` is the #408 capability with a path to
+          # privileged admin writes.
+          REAL_OPENCLAW_TOOLS="exec"
+
+          # Is a tool effectively DENIED for support on edge? Denied if it is in
+          # tools.deny, OR (should the agent ever switch to an allowlist) absent
+          # from tools.allow. Handles either mechanism.
+          is_denied() {
+            jq -r --arg t "$1" '
+              (.agents.list[] | select(.id=="support")) as $s
+              | (($s.tools.deny  // []) | index($t)) as $d
+              | ($s.tools.allow // null) as $a
+              | if $d != null then "yes"
+                elif ($a != null and ($a | index($t)) == null) then "yes"
+                else "no" end
+            ' openclaw-edge.json
+          }
+
+          # 1. Hard guarantee (#408): support must deny exec on edge.
+          if [ "$(is_denied exec)" != "yes" ]; then
+            echo "::error file=openclaw-edge.json::support agent must deny 'exec' on edge (issue #408) — it is customer-facing with a path to privileged admin writes. Add agents.list[support].tools.deny:[\"exec\"]."
+            fail=1
+          else
+            echo "openclaw-edge.json: support denies exec ✓"
+          fi
+
+          # 2. Policy↔runtime sync: every support.denied entry from the policy file
+          #    that maps to a real openclaw tool must be enforced in the runtime.
+          declared=$(awk '
+            /^  support:/ {inblk=1; next}
+            inblk && /^  [A-Za-z]/ {inblk=0}
+            inblk && /^      - / {sub(/^      - /,""); print}
+          ' policies/tool-deny-lists.yaml)
+          for t in $REAL_OPENCLAW_TOOLS; do
+            if printf '%s\n' "$declared" | grep -qx "$t"; then
+              if [ "$(is_denied "$t")" != "yes" ]; then
+                echo "::error file=openclaw-edge.json::policies/tool-deny-lists.yaml declares support denies '$t', but openclaw-edge.json does not enforce it. Add it to agents.list[support].tools.deny."
+                fail=1
+              else
+                echo "policy↔runtime: support '$t' declared denied AND enforced ✓"
+              fi
+            fi
+          done
+
+          if [ "$fail" -eq 1 ]; then exit 1; fi
+          echo "::endgroup::"
+
       - name: Shared config drift check
         run: |
           echo "::group::Checking shared config drift"

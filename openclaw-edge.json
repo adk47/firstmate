@@ -178,6 +178,9 @@
           "extraPaths": ["reference"],
           "store": { "vector": { "enabled": true } },
           "query": { "hybrid": { "enabled": true } }
+        },
+        "tools": {
+          "deny": ["exec"]
         }
       }
     ]
