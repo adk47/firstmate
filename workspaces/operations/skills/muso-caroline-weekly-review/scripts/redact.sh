@@ -5,6 +5,13 @@
 # so it must be clean here — redact-output.sh's phone/Stripe pass runs only on the
 # final Slack/PR text, after the model has already seen the input.
 #
+# ALL scrubbing happens inside one jq program operating on the PARSED object's
+# string values, so the output is ALWAYS valid JSON. An earlier sed-on-raw-line
+# approach corrupted the JSON when a customer name/body contained a backslash (an
+# invalid \-escape was injected); the two downstream jq passes then failed to
+# parse the line, redact fell back to emitting the corrupted line, and the
+# grader's `jq -s` choked on it and aborted the whole weekly run.
+#
 # Usage: redact.sh <input.jsonl> <output.jsonl>
 
 set -euo pipefail
@@ -12,101 +19,46 @@ set -euo pipefail
 INPUT="${1:?input.jsonl required}"
 OUTPUT="${2:?output.jsonl required}"
 
-EMAIL_RE='[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
-
-# Escape regex metacharacters in a string for safe interpolation into sed -E.
-# Uses chained sed calls to avoid BSD-sed bracket-class bugs with \\ and /.
-escape_re() {
-  local s="$1"
-  s=$(printf '%s' "$s" | sed 's/\\/\\\\/g')
-  s=$(printf '%s' "$s" | sed 's/\./\\./g')
-  s=$(printf '%s' "$s" | sed 's/+/\\+/g')
-  s=$(printf '%s' "$s" | sed 's/\*/\\*/g')
-  s=$(printf '%s' "$s" | sed 's/?/\\?/g')
-  s=$(printf '%s' "$s" | sed 's/\^/\\^/g')
-  s=$(printf '%s' "$s" | sed 's/\$/\\$/g')
-  s=$(printf '%s' "$s" | sed 's/{/\\{/g')
-  s=$(printf '%s' "$s" | sed 's/}/\\}/g')
-  s=$(printf '%s' "$s" | sed 's/(/\\(/g')
-  s=$(printf '%s' "$s" | sed 's/)/\\)/g')
-  s=$(printf '%s' "$s" | sed 's/|/\\|/g')
-  s=$(printf '%s' "$s" | sed 's/\[/\\[/g')
-  s=$(printf '%s' "$s" | sed 's/\]/\\]/g')
-  printf '%s' "$s"
-}
-
 line_no=0
 while IFS= read -r line; do
   line_no=$((line_no + 1))
+  [ -n "$line" ] || continue   # never emit an empty line
 
-  # Parse fields. If jq fails on a malformed line, DROP the line entirely —
-  # passing it through unscrubbed would leak PII (the redaction sed passes
-  # only run when jq succeeds). One malformed input line shouldn't ship a
-  # customer email into the LLM-graded fixture.
-  if ! parsed=$(printf '%s' "$line" | jq -r '[.customer_first_name // "", .customer_last_name // ""] | @tsv' 2>/dev/null); then
-    echo "redact: WARN: dropping malformed JSON at line $line_no" >&2
+  # One jq program does everything on parsed string fields, so the result is
+  # guaranteed valid JSON. If the input line is not valid JSON (or the program
+  # errors), DROP it with a warning — emitting it would either leak unscrubbed
+  # PII or hand the grader a malformed line.
+  if ! redacted=$(printf '%s' "$line" | jq -c '
+        # Escape regex metacharacters so a name matches literally.
+        def re_escape: gsub("(?<c>[.+*?^$(){}|\\[\\]\\\\])"; "\\\(.c)");
+        # PII patterns shared with redact-output.sh (keep in sync; the
+        # redact.bats phone/stripe cases guard against drift). Phone is
+        # digit-fenced so it never fires inside a longer digit run.
+        def scrub_pii:
+          gsub("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"; "<email>")
+          | gsub("(?<pre>^|[^0-9])((\\+?[0-9]{1,3}[ .-]?)?\\(?[0-9]{3}\\)?[ .-]?[0-9]{3}[ .-]?[0-9]{4})(?<post>[^0-9]|$)"; "\(.pre)<phone>\(.post)")
+          | gsub("(?<b>^|[[:space:]]|\\()(cus|pi|ch)_[A-Za-z0-9_]+"; "\(.b)<stripe_id>");
+        (.customer_first_name // "") as $first
+        | (.customer_last_name // "") as $last
+        | ($last[0:1]) as $li
+        # Transcript bodies: PII scrub, then "First Last" -> "First L.", then a
+        # bare surname (word-bounded, len>=3) -> "L.". Oniguruma \b is reliable
+        # (unlike BSD sed), so no boundary-char juggling. .body defaults to "" so
+        # a null/absent body can never crash a grader-composed (.body|test(...)).
+        | .parts = [ .parts[]?
+            | .body = ((.body // "")
+                | scrub_pii
+                | (if ($first | length) > 0 and ($last | length) > 0
+                   then gsub(($first | re_escape) + " " + ($last | re_escape); $first + " " + $li + ".")
+                   else . end)
+                | (if ($last | length) >= 3
+                   then gsub("\\b" + ($last | re_escape) + "\\b"; $li + ".")
+                   else . end)) ]
+        | (if (.customer_email // null) != null then .customer_email = (.customer_email | scrub_pii) else . end)
+        | (if ($last | length) > 0 then .customer_last_name = ($li + ".") else . end)
+      ' 2>/dev/null); then
+    echo "redact: WARN: dropping line $line_no (malformed JSON or scrub error)" >&2
     continue
   fi
-  first_name=$(printf '%s' "$parsed" | cut -f1)
-  last_name=$(printf '%s' "$parsed" | cut -f2)
-
-  redacted="$line"
-
-  # 1. Strip emails everywhere in the raw line (covers body fields and customer_email)
-  redacted=$(printf '%s' "$redacted" | sed -E "s/${EMAIL_RE}/<email>/g")
-
-  # 2. In transcript bodies: "First Last" -> "First L." (portable, no \b needed)
-  if [ -n "$first_name" ] && [ -n "$last_name" ]; then
-    initial="${last_name:0:1}"
-    first_esc=$(escape_re "$first_name")
-    last_esc=$(escape_re "$last_name")
-    redacted=$(printf '%s' "$redacted" | sed -E "s/${first_esc} ${last_esc}/${first_name} ${initial}./g")
-  fi
-
-  # 2b. Scrub bare last-name occurrences in the body that are NOT adjacent to
-  # the first name (e.g. a sign-off "regards, Smith"). Step 2 only catches
-  # "First Last"; a lone surname would otherwise survive into the LLM and the
-  # final #cs_chats review. Word-bounded on both sides so we never clip a
-  # longer word ("Smithfield"); guarded on length>=3 to avoid mangling very
-  # short surnames. BSD sed has no \b, so use explicit POSIX boundaries.
-  if [ -n "$last_name" ] && [ "${#last_name}" -ge 3 ]; then
-    initial="${last_name:0:1}"
-    last_esc=$(escape_re "$last_name")
-    redacted=$(printf '%s' "$redacted" | sed -E "s/(^|[^A-Za-z])${last_esc}([^A-Za-z]|\$)/\1${initial}.\2/g")
-  fi
-
-  # 3. Scrub customer_last_name JSON field value via jq (handles bare last-name
-  #    occurrences in the structured metadata without sed-regex portability issues).
-  if [ -n "$last_name" ]; then
-    initial="${last_name:0:1}"
-    _before_jq="$redacted"
-    if ! redacted=$(printf '%s' "$redacted" | jq -c --arg init "$initial." '.customer_last_name = $init' 2>/dev/null); then
-      echo "redact: WARN: customer_last_name scrub failed at line $line_no — passing through un-last-name-scrubbed" >&2
-      redacted="$_before_jq"
-    fi
-  fi
-
-  # 4. Scrub phone numbers and Stripe/payment IDs from transcript bodies. This is
-  #    the file the LLM grades, so the input must be clean — the phone/Stripe
-  #    regexes in redact-output.sh run only on the FINAL Slack/PR text, AFTER the
-  #    model has already read conversations.redacted.jsonl. Scope to .parts[].body
-  #    via jq (NOT a line-level sed) so the scrub never touches structural fields
-  #    like the numeric id/contact_id. The phone regex is also digit-fenced
-  #    ((?<pre>^|[^0-9]) ... (?<post>[^0-9]|$)) so it won't fire inside a longer
-  #    digit run (e.g. an order number a customer pasted). Same phone+Stripe
-  #    regexes as redact-output.sh; the redact.bats phone/stripe cases are the
-  #    guard against the two scrubbers drifting apart again (that divergence is
-  #    what leaked these to the LLM).
-  _before_pii="$redacted"
-  if ! redacted=$(printf '%s' "$redacted" | jq -c '
-        def scrub:
-          gsub("(?<pre>^|[^0-9])((\\+?[0-9]{1,3}[ .-]?)?\\(?[0-9]{3}\\)?[ .-]?[0-9]{3}[ .-]?[0-9]{4})(?<post>[^0-9]|$)"; "\(.pre)<phone>\(.post)")
-          | gsub("(?<b>^|[[:space:]]|\\()(cus|pi|ch)_[A-Za-z0-9_]+"; "\(.b)<stripe_id>");
-        .parts = ([.parts[]? | .body = ((.body // "") | scrub)])
-      ' 2>/dev/null); then
-    echo "redact: WARN: phone/stripe body scrub failed at line $line_no — passing through un-phone/stripe-scrubbed" >&2
-    redacted="$_before_pii"
-  fi
-
   printf '%s\n' "$redacted"
 done < "$INPUT" > "$OUTPUT"

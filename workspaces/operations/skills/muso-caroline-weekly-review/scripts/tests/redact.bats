@@ -174,3 +174,25 @@ EOF
   run jq -r 'select(any(.parts[]; (.body|test("—")))) | .id' "$WORKDIR/conversations.redacted.jsonl"
   [ "$status" -eq 0 ]
 }
+
+@test "emits valid JSON even when a name/body contains a backslash (no sed corruption)" {
+  # The 2026-06-03 proof-run died because redact's sed-on-raw-line name scrub
+  # injected an invalid \-escape into a body whose customer carried a backslash
+  # in their name, producing a malformed line; the grader's slurp (jq -s) then
+  # aborted the whole run. Redacting via jq on parsed values must always emit
+  # valid JSON. (This fixture produces invalid JSON under the old sed code.)
+  cat > "$WORKDIR/conversations.jsonl" <<'EOF'
+{"id":"c1","contact_id":"x1","customer_email":"a@b.com","customer_first_name":"Bo\\","customer_last_name":"Smith","parts":[{"author":{"type":"user"},"body":"hi Bo\\ Smith here, mail a@b.com"}]}
+{"id":"c2","contact_id":"x2","customer_email":"c@d.com","customer_first_name":"Al","customer_last_name":"Field","parts":[{"author":{"type":"admin","id":"x"},"body":"path C:\\Users\\Al and ok"}]}
+EOF
+  run "$SCRIPTS_DIR/redact.sh" "$WORKDIR/conversations.jsonl" "$WORKDIR/conversations.redacted.jsonl"
+  [ "$status" -eq 0 ]
+  # every output line is valid JSON, and the grader's whole-file slurp succeeds
+  run jq -s 'length' "$WORKDIR/conversations.redacted.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 2 ]
+  # PII still scrubbed despite the backslash
+  ! grep -q "a@b.com" "$WORKDIR/conversations.redacted.jsonl"
+  ! grep -q "Smith" "$WORKDIR/conversations.redacted.jsonl"
+  grep -q "<email>" "$WORKDIR/conversations.redacted.jsonl"
+}
