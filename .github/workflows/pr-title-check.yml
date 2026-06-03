@@ -1,0 +1,80 @@
+name: PR Title Check
+
+# Why this gate exists: for a multi-commit PR, GitHub's squash-merge takes the
+# *PR title* as the commit subject (repo setting squash_merge_commit_title =
+# COMMIT_OR_PR_TITLE), and scripts/release.sh categorizes release notes by the
+# conventional-commit prefix of each subject. So a stale or mistyped PR title
+# becomes a wrong commit subject AND a miscategorized release-note entry.
+# Canonical miss: PR #405 grew from a doc into the full dedupe feature but its
+# title stayed "docs(dedupe): design spec ...", so the squash landed a 700-line
+# feature on main as a "docs" change.
+#
+# Lives in its own workflow (not pr-validate.yml) so it can trigger on `edited`
+# — the dev fixing the title gets a fresh check — without re-running the heavy
+# validate suite on every title/description edit.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  pr-title:
+    runs-on: [self-hosted, hydra]
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Validate PR title (conventional format + type matches files changed)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          echo "::group::PR title check"
+          echo "Title: $PR_TITLE"
+
+          # 1. Conventional-commit format (lowercase type — release.sh case-matches
+          #    on a lowercase prefix, so an uppercase 'Feat:' would miscategorize).
+          types='feat|fix|docs|chore|refactor|perf|test|build|ci|revert|style'
+          if ! printf '%s' "$PR_TITLE" | grep -qE "^(${types})(\([a-z0-9._/-]+\))?!?: .+"; then
+            echo "::error::PR title must be conventional-commit: '<type>(<scope>): <summary>' (lowercase type). Allowed: ${types//|/ }."
+            exit 1
+          fi
+          type=$(printf '%s' "$PR_TITLE" | sed -E 's/^([a-z]+).*/\1/')
+
+          # 2. type-vs-files — the check that catches the #405 class (docs-typed
+          #    PR that actually ships code). Files changed relative to the merge
+          #    base, mirroring the rebase-staleness step in pr-validate.yml.
+          git fetch origin "$BASE_REF" --depth=200 --quiet
+          base_tip=$(git rev-parse "origin/${BASE_REF}")
+          merge_base=$(git merge-base "$HEAD_SHA" "$base_tip")
+          files=$(git diff --name-only "${merge_base}...${HEAD_SHA}" | sort -u)
+          echo "Changed files:"; printf '%s\n' "$files" | sed 's/^/  /'
+
+          case "$type" in
+            docs)
+              # A docs PR may only touch documentation.
+              offenders=$(printf '%s\n' "$files" | grep -vE '(\.md$|\.mdx$|\.txt$|^docs/)' || true)
+              if [ -n "$offenders" ]; then
+                echo "::error::PR is typed 'docs:' but changes non-doc files — use feat/fix/refactor/etc. Offending files:"
+                printf '%s\n' "$offenders" | sed 's/^/  /'
+                exit 1
+              fi
+              ;;
+            chore)
+              # A chore must not add/modify application source under */src/.
+              offenders=$(printf '%s\n' "$files" | grep -E '/src/.*\.(ts|tsx|js|jsx)$' || true)
+              if [ -n "$offenders" ]; then
+                echo "::error::PR is typed 'chore:' but changes application source under */src/ — use feat/fix/refactor. Offending files:"
+                printf '%s\n' "$offenders" | sed 's/^/  /'
+                exit 1
+              fi
+              ;;
+          esac
+
+          echo "✓ PR title OK"
+          echo "::endgroup::"
