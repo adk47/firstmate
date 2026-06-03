@@ -67,6 +67,7 @@ describe("integration: built plugin loads through a contracts-enforcing api stub
     expect(registered.sort()).toEqual([
       "create_ticket",
       "credits_search",
+      "dedupe_check",
       "profile_lookup",
       "profile_status",
       "remove_credits",

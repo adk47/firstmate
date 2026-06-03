@@ -8,6 +8,8 @@ import { createCreateTicketTool } from "./tools/create-ticket.js";
 import { createSubscriptionStatusTool } from "./tools/subscription-status.js";
 import { createProfileStatusTool } from "./tools/profile-status.js";
 import { createRemoveCreditsTool, DEFAULT_REMOVE_CREDITS_SCRIPT } from "./tools/remove-credits.js";
+import { createDedupeCheckTool } from "./tools/dedupe-check.js";
+import { createIntercomReader } from "./intercom-client.js";
 export default definePluginEntry({
   id: "support-tools",
   name: "Support Agent Tools",
@@ -110,5 +112,25 @@ export default definePluginEntry({
       });
     };
     api.registerTool(removeCreditsFactory, { name: "remove_credits" });
+
+    // dedupe_check — read-only profile-merge verifier. The Intercom token is
+    // read from process.env (it lives in edge.env); it is NOT a hydra-env
+    // secret-ref and NOT a hard-required key — when absent the tool fails
+    // CLOSED (owner_undetermined), it does not break the other tools.
+    const intercomToken = pluginConfig.intercomToken ?? process.env.MUSOAI_INTERCOM_TOKEN ?? "";
+    if (!intercomToken) {
+      console.warn("[support-tools] MUSOAI_INTERCOM_TOKEN not set; dedupe_check will fail closed (no ownership verification).");
+    }
+    const intercomReader = createIntercomReader(http);
+    const dedupeCheckFactory = (ctx: any) => {
+      return createDedupeCheckTool({
+        adminClient: musoAdminClient,
+        intercomReader,
+        rateLimiter,
+        sessionId: ctx.sessionId ?? "unknown",
+        intercomToken,
+      });
+    };
+    api.registerTool(dedupeCheckFactory, { name: "dedupe_check" });
   },
 });

@@ -9,7 +9,8 @@
       "profile_status",
       "subscription_status",
       "create_ticket",
-      "remove_credits"
+      "remove_credits",
+      "dedupe_check"
     ]
   },
   "configSchema": {

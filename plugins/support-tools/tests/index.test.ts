@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import pluginEntry from "../src/index.js";
 
 describe("support-tools plugin entry — tool registration", () => {
-  it("registers exactly 6 tools", () => {
+  it("registers exactly 7 tools", () => {
     const registered: string[] = [];
     const api = {
       pluginConfig: {
@@ -19,6 +19,7 @@ describe("support-tools plugin entry — tool registration", () => {
     expect(registered.sort()).toEqual([
       "create_ticket",
       "credits_search",
+      "dedupe_check",
       "profile_lookup",
       "profile_status",
       "remove_credits",
