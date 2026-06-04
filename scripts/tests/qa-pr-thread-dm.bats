@@ -30,6 +30,16 @@ printf '%s\n' "$STUB_TS"
 STUB
   chmod +x "$QA_SLACK_DM"
 
+  # gh stub: the script fetches the PR title best-effort for a scannable link.
+  # Keep it off the network and deterministic — print a fixed title regardless of
+  # args. The title-fetch-failure test overrides this to exit 1.
+  export GH="$STUBBIN/gh"
+  cat > "$GH" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "Guard reasoning leak"
+STUB
+  chmod +x "$GH"
+
   STATE_FILE="$QA_THREAD_STATE_DIR/Muso-AI__hydra-pr-123.ts"
 }
 teardown() { rm -rf "$TEST_TMPDIR"; }
@@ -40,8 +50,10 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ "$output" = "1717171717.000100" ]
   # No thread_ts on the first send (top-level).
   [ "$(cat "$STUB_THREAD")" = "" ]
-  # First-review wording, not the re-review variant.
-  grep -q -- '-- reviewing PR #123 (Muso-AI/hydra) now' "$STUB_TEXT"
+  # First-review wording with the clickable titled link, not the re-review variant.
+  grep -q -- '#123: Guard reasoning leak' "$STUB_TEXT"
+  grep -q -- 'https://github.com/Muso-AI/hydra/pull/123' "$STUB_TEXT"
+  grep -q -- "I'll update this thread" "$STUB_TEXT"
   ! grep -q -- 're-reviewing' "$STUB_TEXT"
   # The thread root is persisted for next time.
   [ "$(cat "$STATE_FILE")" = "1717171717.000100" ]
@@ -57,10 +69,29 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ "$output" = "1111111111.000001" ]
   # The send was threaded under the root.
   [ "$(cat "$STUB_THREAD")" = "1111111111.000001" ]
-  # Re-review wording.
-  grep -q -- '-- re-reviewing PR #123 (Muso-AI/hydra) after a new push' "$STUB_TEXT"
+  # Re-review wording with the clickable titled link.
+  grep -q -- 're-reviewing' "$STUB_TEXT"
+  grep -q -- '#123: Guard reasoning leak' "$STUB_TEXT"
+  grep -q -- 'https://github.com/Muso-AI/hydra/pull/123' "$STUB_TEXT"
   # Root is unchanged (still the original).
   [ "$(cat "$STATE_FILE")" = "1111111111.000001" ]
+}
+
+@test "title fetch fails: best-effort -> title-less link, message still posts" {
+  # gh unavailable / errors. The opening note must still go out, degraded to the
+  # number-only label (never worse than the pre-title behavior).
+  cat > "$GH" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+  chmod +x "$GH"
+  run "$SCRIPT" Muso-AI/hydra 123 U0AL36NADEY
+  [ "$status" -eq 0 ]
+  [ "$output" = "1717171717.000100" ]
+  # Falls back to the title-less link, not a broken/empty one.
+  grep -q -- '<https://github.com/Muso-AI/hydra/pull/123|PR #123>' "$STUB_TEXT"
+  ! grep -q -- 'Guard reasoning leak' "$STUB_TEXT"
+  [ "$(cat "$STATE_FILE")" = "1717171717.000100" ]
 }
 
 @test "stale root: threaded send fails -> falls back to top-level and re-anchors" {

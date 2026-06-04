@@ -31,11 +31,13 @@ set -euo pipefail
 #   QA_THREAD_STATE_DIR  per-PR thread-root store (default: /var/lib/hydra-qa/pr-threads)
 #                        — lives outside /opt/hydra so deploys don't wipe it.
 #   QA_SLACK_DM          path to qa-slack-dm.sh (default: sibling of this script)
+#   GH                   GitHub CLI binary, for the best-effort PR-title lookup (default: gh)
 # Exit codes: 0 ok | 2 usage | 1 slack send failure (nothing delivered).
 
 QA_THREAD_STATE_DIR="${QA_THREAD_STATE_DIR:-/var/lib/hydra-qa/pr-threads}"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QA_SLACK_DM="${QA_SLACK_DM:-$SELF_DIR/qa-slack-dm.sh}"
+GH="${GH:-gh}"
 
 die() { echo "qa-pr-thread-dm: $2" >&2; exit "$1"; }
 
@@ -55,11 +57,23 @@ mkdir -p "$QA_THREAD_STATE_DIR" 2>/dev/null || true
 root_ts=""
 [ -f "$state_file" ] && root_ts="$(cat "$state_file" 2>/dev/null || true)"
 
+# Best-effort PR title so the note is scannable at a glance. A gh hiccup
+# (network/auth/missing PR) must never block the DM -> fall back to no title.
+# Strip <>| and newlines so the title can't break the Slack <url|label> link.
+pr_url="https://github.com/${repo}/pull/${pr}"
+title="$("$GH" pr view "$pr" --repo "$repo" --json title --jq .title 2>/dev/null || true)"
+title="$(printf '%s' "$title" | tr -d '<>|\n\r')"
+if [ -n "$title" ]; then
+  link="<${pr_url}|#${pr}: ${title}>"
+else
+  link="<${pr_url}|PR #${pr}>"
+fi
+
 # Opening note — reads as a follow-up once a thread root already exists.
 if [ -n "$root_ts" ]; then
-  text="Muso QA Bot here -- re-reviewing PR #${pr} (${repo}) after a new push. I will post the updated review on GitHub and follow up in this thread."
+  text="🔄 *Muso QA Bot* — re-reviewing ${link} after a new push. Updated review going to GitHub; I'll follow up here."
 else
-  text="Muso QA Bot here -- reviewing PR #${pr} (${repo}) now. I will post the full review on GitHub and update you in this thread."
+  text="🔍 *Muso QA Bot* — reviewing ${link} now. Full review going to GitHub; I'll update this thread."
 fi
 
 # Post via qa-slack-dm.sh. Echoes the message ts on success, empty on failure

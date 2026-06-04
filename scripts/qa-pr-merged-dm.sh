@@ -28,11 +28,13 @@ set -euo pipefail
 #   QA_THREAD_STATE_DIR  per-PR thread-root store (default: /var/lib/hydra-qa/pr-threads)
 #                        — the same store qa-pr-thread-dm.sh writes.
 #   QA_SLACK_DM          path to qa-slack-dm.sh (default: sibling of this script)
+#   GH                   GitHub CLI binary, for the best-effort PR-title lookup (default: gh)
 # Exit codes: 0 ok / no-op / best-effort skip | 2 usage.
 
 QA_THREAD_STATE_DIR="${QA_THREAD_STATE_DIR:-/var/lib/hydra-qa/pr-threads}"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QA_SLACK_DM="${QA_SLACK_DM:-$SELF_DIR/qa-slack-dm.sh}"
+GH="${GH:-gh}"
 
 die() { echo "qa-pr-merged-dm: $2" >&2; exit "$1"; }
 
@@ -58,7 +60,19 @@ if [ -z "$root_ts" ]; then
   exit 0
 fi
 
-text="Muso QA Bot here -- PR #${pr} (${repo}) was just merged. Closing out this review thread."
+# Best-effort PR title for a scannable closure note (only now that we know there
+# is a thread to close). A gh hiccup must never sink the cosmetic post -> no title.
+# Strip <>| and newlines so the title can't break the Slack <url|label> link.
+pr_url="https://github.com/${repo}/pull/${pr}"
+title="$("$GH" pr view "$pr" --repo "$repo" --json title --jq .title 2>/dev/null || true)"
+title="$(printf '%s' "$title" | tr -d '<>|\n\r')"
+if [ -n "$title" ]; then
+  link="<${pr_url}|#${pr}: ${title}>"
+else
+  link="<${pr_url}|PR #${pr}>"
+fi
+
+text="🎉 ${link} was just merged. Closing out this review thread."
 
 # Thread the closure under the recorded root. Best-effort: swallow a Slack hiccup
 # so a cosmetic note never sinks the merge workflow.

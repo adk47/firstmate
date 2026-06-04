@@ -30,6 +30,15 @@ printf '%s\n' "$STUB_TS"
 STUB
   chmod +x "$QA_SLACK_DM"
 
+  # gh stub: the script fetches the PR title best-effort for a scannable link.
+  # Keep it off the network and deterministic — print a fixed title regardless of args.
+  export GH="$STUBBIN/gh"
+  cat > "$GH" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "Guard reasoning leak"
+STUB
+  chmod +x "$GH"
+
   STATE_FILE="$QA_THREAD_STATE_DIR/Muso-AI__hydra-pr-123.ts"
 }
 teardown() { rm -rf "$TEST_TMPDIR"; }
@@ -41,7 +50,9 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ "$status" -eq 0 ]
   # Sent exactly once, threaded under the root (not top-level).
   [ "$(cat "$STUB_THREAD")" = "1111111111.000001" ]
-  grep -q -- 'PR #123 (Muso-AI/hydra) was just merged' "$STUB_TEXT"
+  # Closure note with the clickable titled link.
+  grep -q -- '#123: Guard reasoning leak' "$STUB_TEXT"
+  grep -q -- 'was just merged' "$STUB_TEXT"
   # The state file is left intact (the thread may still be referenced elsewhere).
   [ "$(cat "$STATE_FILE")" = "1111111111.000001" ]
 }
@@ -67,7 +78,8 @@ STUB
   # A Slack failure on a cosmetic post-merge note must never fail the merge workflow.
   [ "$status" -eq 0 ]
   # It still attempted the post.
-  grep -q -- 'PR #123 (Muso-AI/hydra) was just merged' "$STUB_TEXT"
+  grep -q -- '#123: Guard reasoning leak' "$STUB_TEXT"
+  grep -q -- 'was just merged' "$STUB_TEXT"
 }
 
 @test "repo slug with slash is sanitized to the same state-file name as the opener" {

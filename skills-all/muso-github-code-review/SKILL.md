@@ -75,11 +75,13 @@ The Slack DMs go out as the QA app — still self-identify as Muso QA Bot in the
 4. **Publish the `qa-review` commit status (Step 6b)** (best-effort — skip if the token lacks status scope, same as the Step 6 403 fallback) — `failure` on NO-GO,
    `success` on GO — before the result DM, so the PR shows a red/green QA signal.
 5. **Never merge** (unchanged). A human merges.
-6. **LAST, DM the author the result as a threaded reply under the opening ts:**
+6. **LAST, DM the author the result as a threaded reply under the opening ts.** Lead
+   with the state emoji (✅ approved / ⛔ not approved) and make `#<PR>` a clickable
+   Slack link to the PR (`<url|#N>` mrkdwn) so it is scannable at a glance:
    ```bash
-   bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "Approved -- CI green and 0 unresolved blocking findings (fresh pass + carried-forward threads). Safe to merge: <pr-url>" "$ts"
+   bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "✅ Approved <https://github.com/Muso-AI/hydra/pull/<PR>|#<PR>> — CI green and 0 unresolved blocking findings (fresh pass + carried-forward threads). Safe to merge." "$ts"
    # or, if not approved:
-   bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "Reviewed -- <N> blocking finding(s), not approved (<one-line reason>). Details on the PR: <pr-url>" "$ts"
+   bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "⛔ Reviewed <https://github.com/Muso-AI/hydra/pull/<PR>|#<PR>> — <N> blocking finding(s), not approved (<one-line reason>). Details on the PR." "$ts"
    ```
    Keep it to one line; the full review lives on the PR. (If you never got an opening
    ts, send it un-threaded rather than skipping it.)
