@@ -37,6 +37,11 @@ Env:
   CLICKUP_INTERCOM_LINK_FIELD_ID optional, default c32dbf6e-... (#417 link field)
   CLOSE_SHADOW_LOG              optional, default /var/log/close-resolved-shadow.jsonl
                                 (falls back to /tmp if that path is not writable)
+  CLOSE_NOTIFY                  optional, "1" = post a #cs_chats summary (== --notify)
+  CLOSE_SUMMARY_CHANNEL        optional, default C0ANM0PN9L5 (#cs_chats)
+  CLOSE_SUMMARY_SLACK_ACCOUNT  optional, default operations (which Slack bot posts)
+  SLACK_NOTIFY_CONFIG          optional, default /root/.openclaw-main/openclaw.json
+                                (openclaw config holding the Slack bot token)
 
 Flags:
   --apply       actually close (default: dry-run — list only, no writes)
@@ -44,6 +49,9 @@ Flags:
                 email (no #417 link). Off by default so the unattended timer
                 only closes conversations precisely linked to a resolved ticket.
   --limit N     cap the number closed this run (ramp safely)
+  --notify      after an --apply run that closed >=1, post a summary (count +
+                clickable ClickUp + Intercom links) to #cs_chats as the
+                operations Slack bot. No-op on dry-run or when nothing closed.
 
 Exit codes: 0 ok; 1 usage/env error; 3 at least one close failed.
 """
@@ -69,6 +77,10 @@ INTERCOM_LINK_FIELD = os.environ.get(
     "CLICKUP_INTERCOM_LINK_FIELD_ID", "c32dbf6e-f680-4ff1-a532-192bb96245c3")
 _CONV_ID_RE = re.compile(r"/conversation/([^/?#\s]+)")
 DEFAULT_LIST_ID = "901000600160"
+CLICKUP_TASK_URL = "https://app.clickup.com/t/{}"
+SLACK_API = "https://slack.com/api/chat.postMessage"
+DEFAULT_SUMMARY_CHANNEL = "C0ANM0PN9L5"  # #cs_chats
+SUMMARY_MAX_LINES = 25
 
 
 def _retry_json(req, attempts=4):
@@ -113,9 +125,14 @@ def build_ticket_index(key, list_id):
 
     email_states: email(lower) -> set[bool]  — loose, by "User Email" field.
                   Used only by --backfill for the pre-#417 backlog.
-    conv_states:  intercom_conv_id -> set[bool]  — precise, by the #417
-                  "Intercom Link" field. The default matching path.
-    Each bool is True iff that ticket is resolved/closed.
+    conv_states:  intercom_conv_id -> {
+                    "resolved": set[bool],                # True iff each linked ticket resolved
+                    "tickets":  {task_id: {"name","url"}},# linked ClickUp tickets (for summary links)
+                    "intercom_url": str,                  # the #417 "Intercom Link" deeplink
+                  }
+                  — precise, by the #417 "Intercom Link" field. The default
+                  matching path. Eligibility reads only ["resolved"]; "tickets"
+                  and "intercom_url" exist purely to build the #cs_chats summary.
     """
     email_states, conv_states = {}, {}
     page = 0
@@ -127,6 +144,8 @@ def build_ticket_index(key, list_id):
             break
         for t in tasks:
             done = _ticket_resolved(t)
+            tid = t.get("id")
+            tname = t.get("name") or tid
             for cf in t.get("custom_fields", []):
                 cid, val = cf.get("id"), cf.get("value")
                 if not val:
@@ -136,7 +155,12 @@ def build_ticket_index(key, list_id):
                 elif cid == INTERCOM_LINK_FIELD:
                     conv_id = _conv_id_from_link(val)
                     if conv_id:
-                        conv_states.setdefault(conv_id, set()).add(done)
+                        cs = conv_states.setdefault(
+                            conv_id, {"resolved": set(), "tickets": {}, "intercom_url": str(val)})
+                        cs["resolved"].add(done)
+                        cs["intercom_url"] = str(val)
+                        if tid:
+                            cs["tickets"][tid] = {"name": tname, "url": CLICKUP_TASK_URL.format(tid)}
         page += 1
         if data.get("last_page"):
             break
@@ -189,7 +213,7 @@ def is_eligible(conv, email_states, conv_states, backfill=False):
         return False
     cid = conv["id"]
     if cid in conv_states:  # precise linkage is authoritative
-        return all(conv_states[cid])
+        return all(conv_states[cid]["resolved"])
     if not backfill:  # steady-state: precise links only, never loose email
         return False
     em = conv["email"]
@@ -219,12 +243,93 @@ def open_shadow_log():
             return None, None
 
 
+def _slack_escape(s):
+    """Escape free text for Slack mrkdwn, esp. inside <url|text> link labels.
+
+    Per Slack's API the only characters to escape are & < > — in that order so
+    the & in the entities isn't itself re-escaped. A ClickUp ticket title like
+    "Refund <urgent> & stuff" would otherwise break the link rendering.
+    """
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def format_slack_summary(closed, conv_states, when, shadow_path=None, max_lines=SUMMARY_MAX_LINES):
+    """Slack mrkdwn summary of the conversations closed this run.
+
+    `closed` is the list of closed conv dicts (id, email). Hyperlinks use Slack
+    mrkdwn `<url|text>` (blue clickable text). Conversations with no #417 link
+    (email-backfill closes) degrade to plain conv-id text — never a broken link.
+    """
+    n = len(closed)
+    plural = "" if n == 1 else "s"
+    lines = [f":white_check_mark: *Closed {n} resolved-ticket conversation{plural}* — {when}"]
+    for c in closed[:max_lines]:
+        meta = conv_states.get(c["id"]) or {}
+        url = meta.get("intercom_url")
+        conv_ref = f"<{url}|conversation {c['id']}>" if url else f"conversation {c['id']}"
+        tickets = meta.get("tickets") or {}
+        ticket_refs = (", ".join(f"<{t['url']}|{_slack_escape(t['name'])}>" for t in tickets.values())
+                       if tickets else "_no linked ticket_")
+        lines.append(f"• {conv_ref} — {ticket_refs} ({_slack_escape(c.get('email') or 'no email')})")
+    if n > max_lines:
+        lines.append(f"…and {n - max_lines} more")
+    if shadow_path:
+        lines.append(f"_Reversible — full log: {shadow_path}_")
+    return "\n".join(lines)
+
+
+def _read_slack_token(config_path, account):
+    """Read a Slack bot token from an openclaw config (channels.slack.accounts.<account>)."""
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+        return cfg["channels"]["slack"]["accounts"][account]["botToken"]
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+
+
+def post_slack_summary(text, channel, config_path, account):
+    """Best-effort post to Slack. NEVER raises — the closes already happened and
+    are shadow-logged, so a Slack failure must not fail the run. Returns bool."""
+    token = _read_slack_token(config_path, account)
+    if not token:
+        print(f"WARN: no Slack token for account '{account}' in {config_path}; notify skipped", file=sys.stderr)
+        return False
+    try:
+        req = urllib.request.Request(
+            SLACK_API,
+            data=json.dumps({"channel": channel, "text": text,
+                             "unfurl_links": False, "unfurl_media": False}).encode(),
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json; charset=utf-8"},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = json.load(resp)
+        if not body.get("ok"):
+            print(f"WARN: Slack post failed: {body.get('error')}", file=sys.stderr)
+            return False
+        return True
+    except Exception as e:  # noqa: BLE001 — best-effort by contract: a read
+        # timeout (socket.timeout/TimeoutError), connection reset (OSError),
+        # IncompleteRead (http.client.HTTPException) or bad JSON must NOT fail
+        # the run after conversations were already closed + shadow-logged.
+        print(f"WARN: Slack post error: {type(e).__name__}: {str(e)[:140]}", file=sys.stderr)
+        return False
+
+
+def should_notify(apply, notify_enabled, ok):
+    """Gate for the #cs_chats summary: only a real (--apply) run that closed >=1."""
+    return bool(apply and notify_enabled and ok > 0)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Silently close conversations whose ClickUp ticket is resolved")
     ap.add_argument("--apply", action="store_true", help="actually close (default: dry-run)")
     ap.add_argument("--backfill", action="store_true",
                     help="also close pre-#417 conversations matched loosely by email")
     ap.add_argument("--limit", type=int, default=0, help="cap closes this run (0 = no cap)")
+    ap.add_argument("--notify", action="store_true",
+                    help="post a #cs_chats summary after an --apply run that closed >=1")
     args = ap.parse_args()
 
     token = os.environ.get("MUSOAI_INTERCOM_TOKEN")
@@ -255,7 +360,7 @@ def main():
 
     targets = eligible[:args.limit] if args.limit > 0 else eligible
     shadow, shadow_path = open_shadow_log()
-    ok, fail = 0, []
+    closed, fail = [], []
     for c in targets:
         try:
             res = close_conversation(token, admin_id, c["id"])
@@ -263,15 +368,27 @@ def main():
                 shadow.write(json.dumps({"id": c["id"], "closed_at": int(time.time()),
                                          "email": c["email"], "new_state": res.get("state")}) + "\n")
                 shadow.flush()
-            ok += 1
+            closed.append(c)
         except (urllib.error.URLError, ValueError) as e:
             fail.append((c["id"], str(e)[:140]))
         time.sleep(0.3)
     if shadow:
         shadow.close()
+    ok = len(closed)
     print(f"closed_ok={ok} failed={len(fail)} (shadow log: {shadow_path})")
     for f in fail[:15]:
         print(f"  FAIL {f}", file=sys.stderr)
+
+    notify_enabled = args.notify or os.environ.get("CLOSE_NOTIFY") == "1"
+    if should_notify(args.apply, notify_enabled, ok):
+        when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
+        text = format_slack_summary(closed, conv_states, when, shadow_path)
+        channel = os.environ.get("CLOSE_SUMMARY_CHANNEL", DEFAULT_SUMMARY_CHANNEL)
+        cfg = os.environ.get("SLACK_NOTIFY_CONFIG", "/root/.openclaw-main/openclaw.json")
+        account = os.environ.get("CLOSE_SUMMARY_SLACK_ACCOUNT", "operations")
+        posted = post_slack_summary(text, channel, cfg, account)
+        print(f"slack notify: {'posted' if posted else 'skipped/failed'} -> {channel}")
+
     return 3 if fail else 0
 
 

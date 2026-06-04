@@ -193,7 +193,9 @@ log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
 # Conservative + reversible: never closes a chat that has an open ticket, a
 # customer waiting on us, or one that was never answered; every close is
 # shadow-logged to /var/log/close-resolved-shadow.jsonl. No customer-facing
-# message. See scripts/close-resolved-conversations.py.
+# message. --notify posts a per-run summary (counts + clickable ClickUp +
+# Intercom links) to #cs_chats as the operations bot, but ONLY on runs that
+# closed >=1 (no daily noise). See scripts/close-resolved-conversations.py.
 cat > /etc/systemd/system/close-resolved-conversations.service << CLOSERESVC
 [Unit]
 Description=Close Intercom conversations whose ClickUp ticket is resolved
@@ -203,7 +205,7 @@ After=network-online.target
 Type=oneshot
 EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/edge.env
-ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/close-resolved-conversations.py --apply
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/close-resolved-conversations.py --apply --notify
 CLOSERESVC
 
 cat > /etc/systemd/system/close-resolved-conversations.timer << CLOSERESTMR
