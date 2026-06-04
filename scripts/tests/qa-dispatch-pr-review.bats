@@ -32,7 +32,8 @@ for a in "$@"; do
   prev="$a"
 done
 case "$sub" in
-  list) echo '{"jobs":[]}' ;;            # no pre-existing jobs to clean up
+  # `cron list` returns STUB_LIST_JSON if a test set one, else no jobs.
+  list) if [ -f "${STUB_LIST_JSON:-}" ]; then cat "${STUB_LIST_JSON}"; else echo '{"jobs":[]}'; fi ;;
   add)  echo "cron-add" >> "$STUB_CALLS"; echo '{"ok":true}' ;;
   rm)   echo "cron-rm"  >> "$STUB_CALLS" ;;
 esac
@@ -109,4 +110,23 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   # target ..." (omitting --announce alone does NOT disable the fallback).
   grep -qx -- '--no-deliver' "$STUB_ARGV"
   ! grep -qx -- '--announce'  "$STUB_ARGV"
+}
+
+@test "sweeps stale qa-autoreview-pr-* one-shots, leaves fresh + non-qa jobs alone" {
+  now_ms=$(( $(date -u +%s) * 1000 ))
+  stale_ms=$(( now_ms - 7200000 ))   # 2h ago — a done/failed run
+  fresh_ms=$(( now_ms - 60000 ))     # 1m ago — possibly in-flight
+  export STUB_LIST_JSON="$TEST_TMPDIR/list.json"
+  cat > "$STUB_LIST_JSON" <<JSON
+{"jobs":[
+  {"id":"STALEQA","name":"qa-autoreview-pr-999","createdAtMs":$stale_ms},
+  {"id":"FRESHQA","name":"qa-autoreview-pr-998","createdAtMs":$fresh_ms},
+  {"id":"OTHERCRON","name":"some-other-cron","createdAtMs":$stale_ms}
+]}
+JSON
+  run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  grep -qx 'STALEQA' "$STUB_ARGV"      # stale qa-autoreview job removed
+  ! grep -qx 'FRESHQA' "$STUB_ARGV"    # fresh (in-flight) qa-autoreview job left alone
+  ! grep -qx 'OTHERCRON' "$STUB_ARGV"  # non-qa job never touched, even when stale
 }

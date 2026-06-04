@@ -125,6 +125,14 @@ author, scope (files / +/-), and whether it is a draft.
 > repository". Do **not** run local `git` to "orient" yourself. `gh` reads the PR
 > remotely; use it for everything. Local `git` is valid **only** inside a fresh clone
 > for the optional Step 3b test run — never in your workspace.
+>
+> **Run only the commands this skill prescribes.** Don't freelance scratch steps — they
+> routinely fail and (in this cron context) a failed command can mark the whole run
+> `outcome=error` even though your review succeeded. Specifically: do **not** `git clone`
+> the repo into `/tmp` unless Step 3b's optional test run genuinely requires it; do **not**
+> re-read this SKILL file from disk (it's already in your context; trying to print/read it
+> from a managed-skills path just fails); do **not** create scratch folders. The only temp
+> file you need is `/tmp/pr-review.json` for the batched review (Step 6).
 
 No local checkout is needed; `gh` fetches the diff directly:
 
@@ -222,8 +230,14 @@ CI state is context for the verdict ("hold until green"), not a separate review.
 rollup with one repo-pinned command:
 
 ```bash
-gh pr checks "$PR" --repo "$OWNER/$REPO"        # every check, its state, and a run link
+gh pr checks "$PR" --repo "$OWNER/$REPO" || true   # every check, its state, and a run link
 ```
+
+`gh pr checks` **exits non-zero by design** when any check is pending or failing — that is
+the *normal* state of a PR you're about to hold. The `|| true` keeps that expected non-zero
+exit from surfacing as a failed tool call (which would otherwise mark this whole cron run
+`outcome=error` even though your review succeeded). You still read the printed rollup to
+judge green/red — only the exit code is neutralized.
 
 To drill into a **failing** check, view only its failed steps — pass `--repo` and use
 `--log-failed` (plain `--log` dumps the entire run and is enormous). Take `<run-id>` from
@@ -433,9 +447,16 @@ The wrapper enforces Muso-AI-only, self-approval refusal, the requester allowlis
 the audit log:
 
 ```bash
-bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "🤖 Approved by Muso QA Bot (automated review). Recorded on the adk47 account, not a manual review by Aaron."
+bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "🤖 Approved by Muso QA Bot (automated review). Recorded on the adk47 account, not a manual review by Aaron." \
+  || echo "qa-pr-approve: declined (exit $?) — a NO-GO / gate refusal is a normal review outcome; post the review, relay the reason, do not approve."
 ```
 
+- The `|| echo …` is **intentional and required**: a gate refusal (CI not green, open blocker,
+  not allowlisted) is a *normal* review outcome, not a failure. Capturing the wrapper's non-zero
+  exit this way keeps that expected decline from surfacing as a failed tool call — which would
+  otherwise mark this whole cron run `outcome=error` (and prevent the one-shot from self-deleting)
+  even though you reviewed correctly. The wrapper still refuses to approve on non-zero exactly as
+  before; you read the captured exit code to relay the reason. Do **not** approve around a decline.
 - `<repo>` is the short name (e.g. `core-backend`) or `Muso-AI/<repo>`;
   `<requester-slack-uid>` is the `sender_id` from message metadata — never a name.
 - **You approve; you never merge.** A human merges — say so to the requester.

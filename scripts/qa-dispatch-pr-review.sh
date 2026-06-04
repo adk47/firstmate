@@ -95,6 +95,22 @@ while IFS= read -r id; do
   "$OPENCLAW" --profile "$PROFILE" cron rm "$id" >/dev/null 2>&1 || true
 done <<< "$old_ids"
 
+# Sweep stale qa-autoreview-pr-* one-shots left behind by earlier runs. A failed run is
+# NOT reaped by --delete-after-run (deletion is gated on outcome=ok), so dead jobs pile up
+# in the cron list. A review finishes well inside the 1200s timeout, so any qa-autoreview
+# job created >1h ago is definitely done (a succeeded one already self-deleted) and safe to
+# remove. The >1h cutoff leaves any in-flight review (other PR) untouched. Conservative on
+# missing timestamps (default far-future = never swept). Best-effort — never fail dispatch.
+stale_cutoff_ms=$(( ($(date -u +%s) - 3600) * 1000 ))
+stale_ids="$("$OPENCLAW" --profile "$PROFILE" cron list --json 2>/dev/null \
+  | jq -r --argjson c "$stale_cutoff_ms" \
+      '.jobs[]? | select((.name // "") | startswith("qa-autoreview-pr-"))
+                | select((.createdAtMs // 9999999999999) < $c) | .id' 2>/dev/null || true)"
+while IFS= read -r id; do
+  [ -n "$id" ] || continue
+  "$OPENCLAW" --profile "$PROFILE" cron rm "$id" >/dev/null 2>&1 || true
+done <<< "$stale_ids"
+
 # Fire-and-forget one-shot. --delete-after-run cleans up on success.
 #
 # --no-deliver: the skill owns ALL Slack delivery (opening + threaded result DM to
