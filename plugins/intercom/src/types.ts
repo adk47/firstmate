@@ -203,6 +203,25 @@ export interface IntercomClient {
   getConversation(params: {
     conversationId: string;
   }): Promise<IntercomConversation>;
+
+  // Close a conversation. `body` is an optional admin close-note (sanitized by
+  // SanitizingIntercomClient when present). Dormant capability — no consumer
+  // wires this yet; it exists so ops sweeps / a future consent-close can
+  // transition a conversation to "closed" instead of leaving it open forever.
+  closeConversation(params: {
+    conversationId: string;
+    adminId: string;
+    body?: string;
+  }): Promise<void>;
+
+  // Snooze a conversation until `snoozedUntil` (unix seconds). Dormant — used
+  // by a future consent-close flow to park a conversation while awaiting a
+  // customer reply. No consumer wires this yet.
+  snoozeConversation(params: {
+    conversationId: string;
+    adminId: string;
+    snoozedUntil: number;
+  }): Promise<void>;
 }
 
 // --- Event classification ---

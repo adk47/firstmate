@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createCreateTicketTool, buildTicketDescription, getTierForAction, TIER_SLAS } from "../src/tools/create-ticket.js";
+import { createCreateTicketTool, buildTicketDescription, getTierForAction, TIER_SLAS, parseIntercomSession, intercomDeeplink, teamOptionFor } from "../src/tools/create-ticket.js";
 import type { HttpClient } from "../src/http.js";
 import { RateLimiter } from "../src/rate-limiter.js";
 
@@ -46,7 +46,7 @@ describe("createCreateTicketTool", () => {
     vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_abc123" } });
     const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc" });
     const result = await tool.execute("call_1", { actionType: "credit-claim", customerEmail: "user@example.com", summary: "Customer wants Producer credit on Track X", conversationSummary: "Customer asked about missing credit." });
-    expect(mockClient.post).toHaveBeenCalledWith("https://api.clickup.com/api/v2/list/901000600160/task", { headers: { Authorization: "pk_test" }, body: expect.objectContaining({ name: "Action Request: credit-claim", status: "to do", priority: 3, tags: ["hydra-action-request", "tier-1"], custom_fields: [{ id: "field_uuid_2", value: "user@example.com" }] }) });
+    expect(mockClient.post).toHaveBeenCalledWith("https://api.clickup.com/api/v2/list/901000600160/task", { headers: { Authorization: "pk_test" }, body: expect.objectContaining({ name: "Action Request: credit-claim | user@example.com", status: "to do", priority: 3, tags: ["hydra-action-request", "tier-1", "action:credit-claim"], custom_fields: [{ id: "field_uuid_2", value: "user@example.com" }] }) });
     const text = (result.content[0] as { type: "text"; text: string }).text;
     const parsed = JSON.parse(text);
     expect(parsed).toEqual({
@@ -71,7 +71,7 @@ describe("createCreateTicketTool", () => {
     const fields = body.custom_fields as { id: string; value: string }[];
     expect(fields).toContainEqual({ id: "field_uuid_1", value: "prof_123" });
     expect(body.priority).toBe(2);
-    expect(body.tags).toEqual(["hydra-action-request", "tier-2"]);
+    expect(body.tags).toEqual(["hydra-action-request", "tier-2", "action:profile-merge"]);
   });
 
   it("blocks when rate limited", async () => {
@@ -303,5 +303,72 @@ describe("createCreateTicketTool — structured returns", () => {
     expect(calledBody?.tags).toContain("analytics-followup");
     expect(calledBody?.tags).toContain("hydra-action-request");
     expect(calledBody?.tags).toContain("tier-1");
+  });
+});
+
+describe("create-ticket enrichment + tier-2 validation", () => {
+  const INTERCOM_SESSION = "agent:support:intercom:dwjzhcge:conversation:215473921553266";
+
+  it("parseIntercomSession parses the support session key and rejects other shapes", () => {
+    expect(parseIntercomSession(INTERCOM_SESSION)).toEqual({ workspaceId: "dwjzhcge", conversationId: "215473921553266" });
+    expect(parseIntercomSession("unknown")).toBeNull();
+    expect(parseIntercomSession("agent:cmo:slack:xyz")).toBeNull();
+    expect(parseIntercomSession("")).toBeNull();
+  });
+
+  it("sets the Intercom Link field from the session key when the field id is configured", async () => {
+    const post = vi.fn(async () => ({ ok: true, data: { id: "t1" } as any }));
+    const tool = createCreateTicketTool(makeDeps({ http: makeHttp({ post }), sessionId: INTERCOM_SESSION, clickupIntercomLinkFieldId: "il" }));
+    await tool.execute("c", { actionType: "credit-claim", customerEmail: "u@example.com", summary: "s", conversationSummary: "c" } as any);
+    const fields = (post.mock.calls[0][1] as any).body.custom_fields as { id: string; value: string }[];
+    expect(fields).toContainEqual({ id: "il", value: intercomDeeplink("dwjzhcge", "215473921553266") });
+  });
+
+  it("omits the Intercom Link for non-Intercom sessions and still files the ticket", async () => {
+    const post = vi.fn(async () => ({ ok: true, data: { id: "t1" } as any }));
+    const tool = createCreateTicketTool(makeDeps({ http: makeHttp({ post }), sessionId: "unknown", clickupIntercomLinkFieldId: "il" }));
+    const res = await tool.execute("c", { actionType: "credit-claim", customerEmail: "u@example.com", summary: "s", conversationSummary: "c" } as any);
+    const fields = (post.mock.calls[0][1] as any).body.custom_fields as { id: string; value: string }[];
+    expect(fields.find((f) => f.id === "il")).toBeUndefined();
+    expect(JSON.parse((res.content[0] as any).text).submitted).toBe(true);
+  });
+
+  it("sets the Muso URL field from the profile id when configured", async () => {
+    const post = vi.fn(async () => ({ ok: true, data: { id: "t1" } as any }));
+    const tool = createCreateTicketTool(makeDeps({ http: makeHttp({ post }), clickupMusoUrlFieldId: "mu" }));
+    await tool.execute("c", { actionType: "credit-claim", customerEmail: "u@example.com", customerProfileId: "abc123", summary: "s", conversationSummary: "c" } as any);
+    const fields = (post.mock.calls[0][1] as any).body.custom_fields as { id: string; value: string }[];
+    expect(fields).toContainEqual({ id: "mu", value: "https://credits.muso.ai/profile/abc123" });
+  });
+
+  it("sets the Team field, mapping catalog vs growth actions to distinct options", async () => {
+    expect(teamOptionFor("credit-claim")).not.toBe(teamOptionFor("subscription-refund"));
+    const post = vi.fn(async () => ({ ok: true, data: { id: "t1" } as any }));
+    const tool = createCreateTicketTool(makeDeps({ http: makeHttp({ post }), clickupTeamFieldId: "tm" }));
+    await tool.execute("c", { actionType: "subscription-refund", customerEmail: "u@example.com", summary: "s", conversationSummary: "c" } as any);
+    const fields = (post.mock.calls[0][1] as any).body.custom_fields as { id: string; value: string }[];
+    expect(fields).toContainEqual({ id: "tm", value: teamOptionFor("subscription-refund") });
+  });
+
+  it("blocks tier-2 profile-mutating actions without a profile id, but never tier-1", async () => {
+    const post = vi.fn(async () => ({ ok: true, data: { id: "t1" } as any }));
+    const tool = createCreateTicketTool(makeDeps({ http: makeHttp({ post }) }));
+    const blocked = await tool.execute("c1", { actionType: "profile-update", customerEmail: "u@example.com", summary: "change name", conversationSummary: "c" } as any);
+    const bp = JSON.parse((blocked.content[0] as any).text);
+    expect(bp.submitted).toBe(false);
+    expect(bp.reason).toBe("capture_incomplete");
+    expect(bp.action_type).toBe("profile-update");
+    expect(post).not.toHaveBeenCalled();
+    const ok = await tool.execute("c2", { actionType: "credit-claim", customerEmail: "u@example.com", summary: "s", conversationSummary: "c" } as any);
+    expect(JSON.parse((ok.content[0] as any).text).submitted).toBe(true);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("includes the short profile id in the ticket title when known", async () => {
+    const post = vi.fn(async () => ({ ok: true, data: { id: "t1" } as any }));
+    const tool = createCreateTicketTool(makeDeps({ http: makeHttp({ post }) }));
+    await tool.execute("c", { actionType: "credit-claim", customerEmail: "u@example.com", customerProfileId: "abcd1234efgh", summary: "s", conversationSummary: "c" } as any);
+    const name = (post.mock.calls[0][1] as any).body.name as string;
+    expect(name).toBe("Action Request: credit-claim | u@example.com | abcd1234");
   });
 });

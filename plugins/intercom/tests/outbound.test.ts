@@ -94,6 +94,85 @@ describe("RealIntercomClient", () => {
   });
 });
 
+describe("close/snooze primitives (dormant capability)", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("MockIntercomClient records closeConversation and snoozeConversation calls", async () => {
+    const client = new MockIntercomClient();
+    await client.closeConversation({ conversationId: "c1", adminId: "a1" });
+    await client.snoozeConversation({ conversationId: "c2", adminId: "a1", snoozedUntil: 123 });
+    expect(client.calls.closeConversation).toHaveLength(1);
+    expect(client.calls.closeConversation[0].conversationId).toBe("c1");
+    expect(client.calls.snoozeConversation).toHaveLength(1);
+    expect(client.calls.snoozeConversation[0].snoozedUntil).toBe(123);
+  });
+
+  it("RealIntercomClient.closeConversation POSTs a close part to /parts", async () => {
+    let captured: { url: string; body: any } | null = null;
+    globalThis.fetch = vi.fn(async (url: any, init: any) => {
+      captured = { url: String(url), body: JSON.parse(init.body) };
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as unknown as typeof fetch;
+
+    const client = new RealIntercomClient("tok");
+    await client.closeConversation({ conversationId: "215", adminId: "5763097" });
+
+    expect(captured!.url).toBe("https://api.intercom.io/conversations/215/parts");
+    expect(captured!.body).toMatchObject({ message_type: "close", type: "admin", admin_id: "5763097" });
+    expect(captured!.body.body).toBeUndefined();
+  });
+
+  it("RealIntercomClient.closeConversation includes an optional body when provided", async () => {
+    let captured: any = null;
+    globalThis.fetch = vi.fn(async (_url: any, init: any) => {
+      captured = JSON.parse(init.body);
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const client = new RealIntercomClient("tok");
+    await client.closeConversation({ conversationId: "215", adminId: "a1", body: "all set" });
+    expect(captured.body).toBe("all set");
+  });
+
+  it("RealIntercomClient.snoozeConversation POSTs a snoozed part with snoozed_until", async () => {
+    let captured: any = null;
+    globalThis.fetch = vi.fn(async (_url: any, init: any) => {
+      captured = JSON.parse(init.body);
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const client = new RealIntercomClient("tok");
+    await client.snoozeConversation({ conversationId: "215", adminId: "a1", snoozedUntil: 1780000000 });
+    expect(captured).toMatchObject({ message_type: "snoozed", admin_id: "a1", snoozed_until: 1780000000 });
+  });
+
+  it("RealIntercomClient.closeConversation throws on a non-ok response", async () => {
+    globalThis.fetch = vi.fn(async () => new Response("nope", { status: 500 })) as unknown as typeof fetch;
+    const client = new RealIntercomClient("tok");
+    await expect(
+      client.closeConversation({ conversationId: "c", adminId: "a" }),
+    ).rejects.toThrow(/closeConversation failed/);
+  });
+
+  it("SanitizingIntercomClient.closeConversation passes through and sanitizes a leaked email in the body", async () => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner);
+    await client.closeConversation({ conversationId: "c1", adminId: "a1", body: "reach me at random@gmail.com" });
+    expect(inner.calls.closeConversation).toHaveLength(1);
+    expect(inner.calls.closeConversation[0].body).not.toContain("random@gmail.com");
+  });
+
+  it("SanitizingIntercomClient.snoozeConversation passes through to the inner client", async () => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner);
+    await client.snoozeConversation({ conversationId: "c1", adminId: "a1", snoozedUntil: 5 });
+    expect(inner.calls.snoozeConversation).toHaveLength(1);
+  });
+});
+
 describe("trackOutboundMessageId", () => {
   it("adds message ID to array", () => {
     const ids: string[] = [];

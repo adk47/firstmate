@@ -46,6 +46,15 @@ export default definePluginEntry({
       pluginConfig.clickupProfileIdFieldId ?? process.env.CLICKUP_PROFILE_ID_FIELD_ID ?? "";
     const clickupUserEmailFieldId =
       pluginConfig.clickupUserEmailFieldId ?? process.env.CLICKUP_USER_EMAIL_FIELD_ID ?? "";
+    // Enrichment field ids — default to the known ClickUp field UUIDs for list
+    // 901000600160 so ticket enrichment works without a config change; still
+    // overridable via config/env if the list/fields ever move.
+    const clickupIntercomLinkFieldId =
+      pluginConfig.clickupIntercomLinkFieldId ?? process.env.CLICKUP_INTERCOM_LINK_FIELD_ID ?? "c32dbf6e-f680-4ff1-a532-192bb96245c3";
+    const clickupMusoUrlFieldId =
+      pluginConfig.clickupMusoUrlFieldId ?? process.env.CLICKUP_MUSO_URL_FIELD_ID ?? "fb08a61a-2870-4b2f-b6cd-c404dccfb97e";
+    const clickupTeamFieldId =
+      pluginConfig.clickupTeamFieldId ?? process.env.CLICKUP_TEAM_FIELD_ID ?? "552c2c28-dc56-48bc-a6a6-6b9a76344acc";
     const DEFAULT_PROFILE_MERGE_ASSIGNEE_ID = 66250052;
     const profileMergeAssigneeIdRaw = pluginConfig.profileMergeAssigneeId ?? process.env.PROFILE_MERGE_ASSIGNEE_ID ?? "";
     let profileMergeAssigneeId: number | undefined;
@@ -96,6 +105,9 @@ export default definePluginEntry({
         clickupListId,
         clickupProfileIdFieldId,
         clickupUserEmailFieldId,
+        clickupIntercomLinkFieldId,
+        clickupMusoUrlFieldId,
+        clickupTeamFieldId,
         sessionId: ctx.sessionId ?? "unknown",
         profileMergeAssigneeId,
       });

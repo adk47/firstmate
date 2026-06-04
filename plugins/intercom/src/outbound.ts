@@ -8,6 +8,8 @@ export class MockIntercomClient implements IntercomClient {
     replyToConversation: [] as Array<{ conversationId: string; adminId: string; body: string }>,
     assignConversation: [] as Array<{ conversationId: string; adminId: string; assigneeId: string }>,
     getConversation: [] as Array<{ conversationId: string }>,
+    closeConversation: [] as Array<{ conversationId: string; adminId: string; body?: string }>,
+    snoozeConversation: [] as Array<{ conversationId: string; adminId: string; snoozedUntil: number }>,
   };
 
   private messageCounter = 0;
@@ -49,6 +51,22 @@ export class MockIntercomClient implements IntercomClient {
       state: "open",
       assignee: null,
     };
+  }
+
+  async closeConversation(params: {
+    conversationId: string;
+    adminId: string;
+    body?: string;
+  }): Promise<void> {
+    this.calls.closeConversation.push(params);
+  }
+
+  async snoozeConversation(params: {
+    conversationId: string;
+    adminId: string;
+    snoozedUntil: number;
+  }): Promise<void> {
+    this.calls.snoozeConversation.push(params);
   }
 }
 
@@ -194,6 +212,60 @@ export class RealIntercomClient implements IntercomClient {
 
     return await this.parseJson(response, "getConversation");
   }
+
+  async closeConversation(params: {
+    conversationId: string;
+    adminId: string;
+    body?: string;
+  }): Promise<void> {
+    // Closing is a "close" part on the same /parts endpoint as assignment.
+    // A `body`, when present, is posted as the closing comment (sanitized
+    // upstream by SanitizingIntercomClient). We omit `body` entirely when
+    // absent so the close stays silent (no customer-visible message).
+    const url = `${this.baseUrl}/conversations/${params.conversationId}/parts`;
+    const payload: Record<string, unknown> = {
+      message_type: "close",
+      type: "admin",
+      admin_id: params.adminId,
+    };
+    if (params.body) payload.body = params.body;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(payload),
+    });
+
+    this.checkRateLimit(response);
+
+    if (!response.ok) {
+      const errorBody = await this.readErrorBody(response);
+      throw new Error(`Intercom closeConversation failed: ${response.status} ${response.statusText} - ${errorBody}`);
+    }
+  }
+
+  async snoozeConversation(params: {
+    conversationId: string;
+    adminId: string;
+    snoozedUntil: number;
+  }): Promise<void> {
+    const url = `${this.baseUrl}/conversations/${params.conversationId}/parts`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({
+        message_type: "snoozed",
+        admin_id: params.adminId,
+        snoozed_until: params.snoozedUntil,
+      }),
+    });
+
+    this.checkRateLimit(response);
+
+    if (!response.ok) {
+      const errorBody = await this.readErrorBody(response);
+      throw new Error(`Intercom snoozeConversation failed: ${response.status} ${response.statusText} - ${errorBody}`);
+    }
+  }
 }
 
 /**
@@ -272,6 +344,30 @@ export class SanitizingIntercomClient implements IntercomClient {
     conversationId: string;
   }): Promise<IntercomConversation> {
     return this.inner.getConversation(params);
+  }
+
+  async closeConversation(params: {
+    conversationId: string;
+    adminId: string;
+    body?: string;
+  }): Promise<void> {
+    // No close-note is passed today, but if one ever is, route it through the
+    // same email + tool-leak sanitizer as replyToConversation (defense-in-depth)
+    // before it can reach a customer.
+    if (params.body) {
+      const emailPass = sanitizeOutboundBody(params.body);
+      const toolPass = sanitizeToolLeak(emailPass.body);
+      return this.inner.closeConversation({ ...params, body: toolPass.body });
+    }
+    return this.inner.closeConversation(params);
+  }
+
+  async snoozeConversation(params: {
+    conversationId: string;
+    adminId: string;
+    snoozedUntil: number;
+  }): Promise<void> {
+    return this.inner.snoozeConversation(params);
   }
 }
 
