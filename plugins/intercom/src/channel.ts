@@ -13,6 +13,7 @@ import {
   trackOutboundMessageId,
   IntercomAssignmentConflictError,
 } from "./outbound.js";
+import { sanitizeReasoningLeak } from "./sanitize-reasoning-leak.js";
 import { initStateStore, loadSessions, saveSessions } from "./state-store.js";
 import {
   buildEscalationSlackMessage,
@@ -572,24 +573,68 @@ export const intercomPlugin = createChatChannelPlugin({
                     // (e.g., a human took over in the final ms of generation).
                     if (bufferedChunks.length > 0 && canAgentReply(state)) {
                       const joined = joinDeliveryChunks(bufferedChunks);
-                      try {
-                        const { messageId } = await client.replyToConversation({
-                          conversationId: result.conversationId,
-                          adminId: account.botAdminId,
-                          body: stripConversationContext(joined, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId }),
-                        });
-                        trackOutboundMessageId(messageId, state.outboundMessageIds);
-                        state.updatedAt = new Date().toISOString();
-                        log?.info?.(
-                          `[${tag}] replied conv=${result.conversationId} partId=${messageId || "<none>"} chunks=${bufferedChunks.length}`,
-                        );
-                      } catch (err) {
-                        // Customer-facing delivery failure: grep-able alert prefix
-                        // so ops can wire Slack/Sentry on `[intercom:ALERT]`.
-                        // TODO(follow-up): POST to account.fallbackSlackSupervisionChannel.
+                      const stripped = stripConversationContext(joined, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId });
+                      // Outbound reasoning-preamble guard. The reasoning model
+                      // (gpt-5.5/codex) intermittently writes its internal plan into
+                      // the reply content -- a preamble, a `---`, then the real reply
+                      // (incident 2026-05-29). Strip a recoverable preamble; when we
+                      // cannot safely recover a clean reply, hand the conversation to
+                      // a human rather than ship leaked reasoning. Runs before the
+                      // email/tool passes inside replyToConversation so it sees the
+                      // original structure.
+                      const guard = sanitizeReasoningLeak(stripped);
+                      if (guard.action === "escalate") {
                         log?.error?.(
-                          `[intercom:ALERT] [${tag}] flush failed conv=${result.conversationId} chunks=${bufferedChunks.length} error=${err}`,
+                          `[intercom:reasoning-leak] [${tag}] ESCALATED conv=${result.conversationId} reason=${guard.reason} markers=${JSON.stringify(guard.matchedMarkers)} sample=${JSON.stringify(guard.droppedSample ?? "")}`,
                         );
+                        try {
+                          await client.assignConversation({
+                            conversationId: result.conversationId,
+                            adminId: account.botAdminId,
+                            assigneeId: account.defaultInboxId || "0",
+                          });
+                          log?.info?.(`[${tag}] reassigned conv=${result.conversationId} to ${account.defaultInboxId || "Unassigned"} (reasoning-leak)`);
+                        } catch (err) {
+                          log?.error?.(`[${tag}] reasoning-leak reassignment failed conv=${result.conversationId}: ${err}`);
+                        }
+                        if (account.fallbackSlackSupervisionChannel) {
+                          try {
+                            await fetch(account.fallbackSlackSupervisionChannel, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                text: `:warning: Caroline suppressed a reply that leaked internal reasoning (conv ${result.conversationId}, reason=${guard.reason}). The conversation was handed to a human — please follow up.`,
+                              }),
+                            });
+                          } catch (err) {
+                            log?.error?.(`[${tag}] reasoning-leak Slack notify failed conv=${result.conversationId}: ${err}`);
+                          }
+                        }
+                      } else {
+                        if (guard.action === "stripped") {
+                          log?.error?.(
+                            `[intercom:reasoning-leak] [${tag}] conv=${result.conversationId} action=stripped markers=${JSON.stringify(guard.matchedMarkers)} sample=${JSON.stringify(guard.droppedSample ?? "")}`,
+                          );
+                        }
+                        try {
+                          const { messageId } = await client.replyToConversation({
+                            conversationId: result.conversationId,
+                            adminId: account.botAdminId,
+                            body: guard.body,
+                          });
+                          trackOutboundMessageId(messageId, state.outboundMessageIds);
+                          state.updatedAt = new Date().toISOString();
+                          log?.info?.(
+                            `[${tag}] replied conv=${result.conversationId} partId=${messageId || "<none>"} chunks=${bufferedChunks.length}`,
+                          );
+                        } catch (err) {
+                          // Customer-facing delivery failure: grep-able alert prefix
+                          // so ops can wire Slack/Sentry on `[intercom:ALERT]`.
+                          // TODO(follow-up): POST to account.fallbackSlackSupervisionChannel.
+                          log?.error?.(
+                            `[intercom:ALERT] [${tag}] flush failed conv=${result.conversationId} chunks=${bufferedChunks.length} error=${err}`,
+                          );
+                        }
                       }
                     } else if (bufferedChunks.length > 0 && !droppedMidStream) {
                       log?.warn?.(

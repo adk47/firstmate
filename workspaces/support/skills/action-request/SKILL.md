@@ -31,12 +31,7 @@ When a customer requests a write action (credit change, refund, profile update, 
 1. Customer asks for a write action
 2. CS agent determines the action type and approval tier
 3. CS agent creates a ClickUp task using `create_ticket` with structured fields
-4. CS agent reads `create_ticket`'s structured response (JSON), then composes the customer-facing reply:
-   - `{ submitted: true, ticket_id, sla, action_type, tier }` – say: *"I've flagged your request for our team. You'll hear back within `<sla>`."*
-   - `{ submitted: false, reason: "rate_limited" }` – acknowledge and stop: *"Looks like a request is already on the way to our team for you. You'll hear back soon."*
-   - `{ submitted: false, reason: "queue_busy" }` – ask the customer to retry their message: *"Could you send that to me one more time? I want to make sure our team gets the full picture."*
-
-   Never use the words "ticket", "ClickUp", "task", or `support@muso.ai` in the customer-facing reply.
+4. CS agent reads `create_ticket`'s structured response and replies using the matching template from "Customer Communication Templates" (below). The structured response, its fields, the tier, and the ticket internals are for your own use only — send the customer the template text and nothing else. Do not paste the JSON, restate the branch logic, or work through the rules in the reply.
 5. Operations agent picks up tickets tagged `hydra-action-request`
 6. Operations follows the approval workflow (human review for Tier 2-3)
 
