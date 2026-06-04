@@ -186,6 +186,45 @@ systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
 
+# ─── Close resolved-ticket conversations (steady-state sync) ──
+# Silently closes Intercom conversations whose ClickUp ticket(s) are all
+# resolved AND where we replied last — keeps "ticket resolved" and "chat
+# closed" in sync so the open-conversation pile stops regrowing on that axis.
+# Conservative + reversible: never closes a chat that has an open ticket, a
+# customer waiting on us, or one that was never answered; every close is
+# shadow-logged to /var/log/close-resolved-shadow.jsonl. No customer-facing
+# message. See scripts/close-resolved-conversations.py.
+cat > /etc/systemd/system/close-resolved-conversations.service << CLOSERESVC
+[Unit]
+Description=Close Intercom conversations whose ClickUp ticket is resolved
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/close-resolved-conversations.py --apply
+CLOSERESVC
+
+cat > /etc/systemd/system/close-resolved-conversations.timer << CLOSERESTMR
+[Unit]
+Description=Daily sync — close resolved-ticket conversations
+
+[Timer]
+OnBootSec=20min
+OnUnitActiveSec=24h
+Unit=close-resolved-conversations.service
+
+[Install]
+WantedBy=timers.target
+CLOSERESTMR
+
+systemctl daemon-reload
+cr=close-resolved-conversations.timer
+systemctl enable "$cr" >/dev/null 2>&1 || log "WARN: could not enable $cr"
+systemctl start "$cr" >/dev/null 2>&1 || log "WARN: could not start $cr"
+log "  $cr: $(systemctl is-active "$cr" 2>/dev/null || echo unknown)"
+
 # ─── Gateway pre-start self-heal drop-ins ─────────────────────
 # One drop-in per profile, hard-coded with the profile name (the
 # base units are not systemd templates so %i is unavailable). The

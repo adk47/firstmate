@@ -879,6 +879,15 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_intake_watchdog
+      - name: Run close-resolved-conversations predicate tests
+        # The unattended daily close job (scripts/close-resolved-conversations.py)
+        # silently closes customer conversations; these lock its is_eligible
+        # safety predicate (we-spoke-last + precise #417-link tie) so a
+        # regression can't bury live conversations unnoticed. Same bare
+        # stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_close_resolved_conversations
 
   plugin-tests:
     name: Plugin tests (vitest)
