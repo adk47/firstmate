@@ -1,0 +1,103 @@
+name: qa-pr-merged
+
+# Post-merge bookend for the QA auto-review (see qa-autoreview.yml).
+#
+# When a QA-reviewed PR is merged, this:
+#   1. posts a one-line "PR #N merged" closure into that PR's existing QA Slack
+#      DM thread (so the review thread doesn't just go silent after merge), and
+#   2. removes any stray review scratch left directly under
+#      /opt/hydra/workspaces/qa/ (the historical seven_days_ago class) so it
+#      can't red the next deploy's Step 4a pre-flight.
+#
+# Trigger is `push: main` (NOT `pull_request: closed`) on purpose: like deploy.yml
+# it runs from the merged copy on main, so a PR branch cannot alter this workflow,
+# its guards, or the scripts it calls (the same defensive reason qa-autoreview.yml
+# avoids a PR-head trigger). The merged PR is resolved from the pushed commit.
+#
+# NOTE (race, by design): deploy.yml also fires on this same push, so for the
+# CLEANUP half there is no ordering guarantee — if the deploy pre-flight runs
+# first, that one merge can still flap red and this cleanup just makes the NEXT
+# deploy clean. The closure DM is race-free. A race-free cleanup would mean moving
+# it into deploy.sh Step 4a (the safety-critical path), deliberately not done here.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: qa-pr-merged-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  closeout:
+    # Same on-box runner as qa-autoreview/deploy — needs /opt/hydra and the qa
+    # Slack bot token, both only on node-8.
+    runs-on: [self-hosted, hydra]
+    steps:
+      - name: Checkout (merged main — the scripts + tracked-set baseline)
+        uses: actions/checkout@v5
+
+      - name: Resolve merged PR, scope-guard, close out + clean scratch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          # Nick — the QA DM target (same constant as qa-dispatch-pr-review.sh).
+          REQUESTER_UID: U0AL36NADEY
+        run: |
+          set -euo pipefail
+
+          # Resolve the PR this commit merged. Prefer the commit<->PR association;
+          # fall back to the squash-commit subject "(#N)" hydra uses.
+          PR="$(gh api "repos/${REPO}/commits/${SHA}/pulls" \
+                 --jq '[.[] | select(.merged_at != null)][0].number // empty' 2>/dev/null || true)"
+          if [ -z "$PR" ]; then
+            PR="$(git log -1 --format='%s' | grep -oE '\(#[0-9]+\)' | tr -dc '0-9' || true)"
+          fi
+          if [ -z "$PR" ]; then
+            echo "No merged PR resolved for ${SHA} — nothing to close out."
+            exit 0
+          fi
+
+          # Re-read the canonical PR object for the scope guards + merged state.
+          prjson="$(gh api "repos/${REPO}/pulls/${PR}" 2>/dev/null || true)"
+          if [ -z "$prjson" ]; then
+            echo "Could not read PR #${PR} — skipping."
+            exit 0
+          fi
+          AUTHOR="$(jq -r '.user.login' <<<"$prjson")"
+          BASE="$(jq -r '.base.ref' <<<"$prjson")"
+          MERGED="$(jq -r '.merged' <<<"$prjson")"
+
+          if [ "$MERGED" != "true" ]; then
+            echo "PR #${PR} is not merged (merged=${MERGED}) — skipping."
+            exit 0
+          fi
+          if [ "$AUTHOR" != "nsollazzo" ]; then
+            echo "PR #${PR} author=${AUTHOR} (not nsollazzo) — skipping."
+            exit 0
+          fi
+          if [ "$BASE" != "main" ]; then
+            echo "PR #${PR} base=${BASE} (not main) — skipping."
+            exit 0
+          fi
+
+          # The precise "QA actually reviewed this PR" signal: a thread-root file
+          # exists (written by qa-pr-thread-dm.sh during review). If absent, QA
+          # never opened a thread — close-out DM no-ops, but still run cleanup
+          # (stray qa scratch from any review should be swept on a qa-PR merge).
+          SAFE_REPO="${REPO//\//__}"
+          STATE_FILE="/var/lib/hydra-qa/pr-threads/${SAFE_REPO}-pr-${PR}.ts"
+          if [ -f "$STATE_FILE" ]; then
+            echo "Closing out QA review thread for PR #${PR}."
+            bash scripts/qa-pr-merged-dm.sh "$REPO" "$PR" "$REQUESTER_UID" || true
+          else
+            echo "No QA review thread for PR #${PR} (not QA-reviewed) — skipping close-out DM."
+          fi
+
+          echo "Sweeping stray qa review scratch."
+          bash scripts/qa-clean-merge-scratch.sh /opt/hydra/workspaces/qa || true
