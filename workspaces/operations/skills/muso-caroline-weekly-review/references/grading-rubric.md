@@ -12,12 +12,19 @@ Daily pulse: dimensions A (voice + leak), B (tools), D (sentiment), E (reasoning
 
 ## Dimension A: Voice + leak audit
 
-Mechanical scans first:
-- Em-dash count in outbound bodies, cite conversation IDs.
-- Phrase blacklist: "Great question", "I understand your frustration", "investigate", "sorry the analytics are delayed", "sorry for the latency".
+Mechanical scans are PRECOMPUTED — read the files, do NOT compose your own scan
+(a hand-rolled jq/bash scan under the pipeline's `set -euo pipefail` has aborted the
+whole run; the deterministic scripts exist so this can't happen):
+- `${WORKDIR}/voice-scan.jsonl` (from `scan-voice.sh`): one row per voice tell in a
+  Caroline-authored body. `{kind:"dash", marker:"em-dash"|"en-dash", count}` rows are
+  dash occurrences — cite the `conv` ids. `{kind:"blacklist", marker}` rows are
+  phrase-blacklist hits (the blacklist is "Great question", "I understand your
+  frustration", "investigate", "sorry the analytics are delayed", "sorry for the
+  latency"); count them.
 - Audit-line count from `audit.jsonl`. Any non-zero is the **top-line of the Slack post**.
 
-Score: 5 if zero leaks AND zero blacklist hits; -1 per blacklist hit; floor 0.
+Score: 5 if zero leaks AND zero blacklist hits; -1 per blacklist hit (one per
+`{kind:"blacklist"}` row); floor 0.
 
 ## Dimension B: Tool usage + escalation hygiene
 
