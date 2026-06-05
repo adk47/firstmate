@@ -37,13 +37,13 @@ scripts/fetch-conversations.sh   # writes ${WORKDIR}/conversations.jsonl
 scripts/fetch-audit.sh           # writes ${WORKDIR}/audit.jsonl  (leak + reasoning_leak guard lines)
 scripts/redact.sh "${WORKDIR}/conversations.jsonl" "${WORKDIR}/conversations.redacted.jsonl"  # required args: <input> <output>
 scripts/scan-shipped-leaks.sh    # writes ${WORKDIR}/shipped-leaks.jsonl  (Dim-E source 2; reads the redacted file, so run AFTER redact.sh)
-scripts/scan-voice.sh            # writes ${WORKDIR}/voice-scan.jsonl  (Dim-A em-dash + phrase-blacklist scan; reads the redacted file, so run AFTER redact.sh)
+scripts/scan-voice.sh            # writes ${WORKDIR}/voice-scan.jsonl (per-hit evidence) + ${WORKDIR}/voice-summary.txt (the aggregate the grader reads); Dim-A em-dash + phrase-blacklist scan; reads the redacted file, so run AFTER redact.sh
 scripts/check-escalated.sh       # writes ${WORKDIR}/escalated-status.jsonl  (reads audit.jsonl, so run AFTER fetch-audit.sh)
 ```
 
 ### Phase 2 — Grade (LLM)
 
-Read `references/grading-rubric.md`. Read `${WORKDIR}/conversations.redacted.jsonl` and `${WORKDIR}/audit.jsonl`. Produce structured findings for dimensions A (voice + leak), B (tools), D (sentiment), and E (reasoning-leak / guard health). For A, read `${WORKDIR}/voice-scan.jsonl` (the deterministic em-dash + phrase-blacklist scan) and COUNT its rows — do NOT compose your own dash/blacklist scan (a hand-rolled scan under the pipeline's `set -euo pipefail` has aborted the whole run). For E, additionally read `${WORKDIR}/shipped-leaks.jsonl` (source 2: guard-missed) and `${WORKDIR}/escalated-status.jsonl` (which escalations a human has answered), and apply the rubric's two-source no-conflation rule: a source-2 hit is a P0 even when source 1 is empty. Do NOT cluster KB gaps or invoke `scripts/cluster-questions.sh` / `scripts/open-kb-pr.sh` from the daily run — that is the weekly KB roll-up's job (SP2).
+Read `references/grading-rubric.md`. Read `${WORKDIR}/conversations.redacted.jsonl` and `${WORKDIR}/audit.jsonl`. Produce structured findings for dimensions A (voice + leak), B (tools), D (sentiment), and E (reasoning-leak / guard health). For A, read `${WORKDIR}/voice-summary.txt` (the deterministic aggregate `scan-voice.sh` precomputes: per-marker tell totals, distinct-conv counts, top repeat convs, and the blacklist tally) and use its numbers VERBATIM in the digest. Do NOT run `jq`/`awk`/`group_by` over `${WORKDIR}/voice-scan.jsonl` yourself — that file is the per-hit evidence for drill-down only (cite a `conv` id from it when you need an example), and hand-aggregating it has aborted the whole run (a `group_by` without `-s` threw "Cannot index string with string"). For E, additionally read `${WORKDIR}/shipped-leaks.jsonl` (source 2: guard-missed) and `${WORKDIR}/escalated-status.jsonl` (which escalations a human has answered), and apply the rubric's two-source no-conflation rule: a source-2 hit is a P0 even when source 1 is empty. Do NOT cluster KB gaps or invoke `scripts/cluster-questions.sh` / `scripts/open-kb-pr.sh` from the daily run — that is the weekly KB roll-up's job (SP2).
 
 ### Phase 3 — Output
 

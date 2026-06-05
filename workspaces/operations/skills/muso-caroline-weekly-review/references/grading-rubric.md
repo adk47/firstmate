@@ -12,19 +12,25 @@ Daily pulse: dimensions A (voice + leak), B (tools), D (sentiment), E (reasoning
 
 ## Dimension A: Voice + leak audit
 
-Mechanical scans are PRECOMPUTED — read the files, do NOT compose your own scan
-(a hand-rolled jq/bash scan under the pipeline's `set -euo pipefail` has aborted the
-whole run; the deterministic scripts exist so this can't happen):
-- `${WORKDIR}/voice-scan.jsonl` (from `scan-voice.sh`): one row per voice tell in a
-  Caroline-authored body. `{kind:"dash", marker:"em-dash"|"en-dash", count}` rows are
-  dash occurrences — cite the `conv` ids. `{kind:"blacklist", marker}` rows are
-  phrase-blacklist hits (the blacklist is "Great question", "I understand your
-  frustration", "investigate", "sorry the analytics are delayed", "sorry for the
-  latency"); count them.
+Mechanical scans are PRECOMPUTED — read the summary file, do NOT compose your own scan
+OR aggregation (a hand-rolled scan, or a `group_by` over the rows WITHOUT `-s`, under
+the pipeline's `set -euo pipefail` has aborted the whole run; the deterministic scripts
+exist so this can't happen):
+- `${WORKDIR}/voice-summary.txt` (from `scan-voice.sh`): the aggregate to read VERBATIM
+  — per-marker dash tell totals, distinct-conv counts, the `top-dash-convs` repeat list,
+  and `blacklist-total` / `blacklist-by-marker`. Use these numbers directly; never
+  recompute them.
+- `${WORKDIR}/voice-scan.jsonl` (from `scan-voice.sh`): the per-hit EVIDENCE behind the
+  summary, one row per voice tell in a Caroline-authored body —
+  `{kind:"dash", marker:"em-dash"|"en-dash", count}` dash occurrences and
+  `{kind:"blacklist", marker}` phrase-blacklist hits (the blacklist is "Great question",
+  "I understand your frustration", "investigate", "sorry the analytics are delayed",
+  "sorry for the latency"). Read it only to cite an example `conv` id; never aggregate
+  it by hand.
 - Audit-line count from `audit.jsonl`. Any non-zero is the **top-line of the Slack post**.
 
-Score: 5 if zero leaks AND zero blacklist hits; -1 per blacklist hit (one per
-`{kind:"blacklist"}` row); floor 0.
+Score: 5 if zero leaks AND zero blacklist hits; -1 per blacklist hit (`blacklist-total`
+in `voice-summary.txt`); floor 0.
 
 ## Dimension B: Tool usage + escalation hygiene
 

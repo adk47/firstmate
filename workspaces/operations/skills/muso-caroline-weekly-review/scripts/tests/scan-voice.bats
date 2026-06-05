@@ -95,3 +95,74 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(wc -l < "$WORKDIR/voice-scan.jsonl" 2>/dev/null || echo 0)" -eq 0 ]
 }
+
+# --- voice-summary.txt: the deterministic AGGREGATE the grader reads verbatim. ---
+# scan-voice.sh emits per-hit rows (voice-scan.jsonl) AND a precomputed summary so the
+# grader never aggregates the JSONL itself. Letting the LLM aggregate caused the
+# 2026-06-04 shadow proof-run to error: the codex agent ran `group_by(.kind+":"+.marker)`
+# over voice-scan.jsonl WITHOUT `-s`, jq threw "Cannot index string with string", and the
+# whole daily run failed with nothing delivered (slurp must happen inside the script).
+
+@test "voice-summary.txt aggregates em/en dash totals and distinct conv counts" {
+  write_convs <<'EOF'
+{"id":"111","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"a — b — c"},{"author":{"type":"admin","id":"caroline-admin-123"},"body":"one more —"}]}
+{"id":"222","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"x – y – z – w"}]}
+EOF
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$WORKDIR/voice-summary.txt" ]
+  grep -qx 'em-dash: 3 tells across 1 convs' "$WORKDIR/voice-summary.txt"
+  grep -qx 'en-dash: 3 tells across 1 convs' "$WORKDIR/voice-summary.txt"
+  grep -qx 'dash-total: 6 tells' "$WORKDIR/voice-summary.txt"
+  # conv 111 = 3 em-dash tells, conv 222 = 3 en-dash tells -> both surface in top-dash-convs
+  grep -q '111(3)' "$WORKDIR/voice-summary.txt"
+  grep -q '222(3)' "$WORKDIR/voice-summary.txt"
+}
+
+@test "voice-summary.txt tallies phrase-blacklist hits by marker" {
+  write_convs <<'EOF'
+{"id":"333","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"Great question! I will investigate this."}]}
+EOF
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  grep -qx 'blacklist-total: 2' "$WORKDIR/voice-summary.txt"
+  grep -q 'great-question:1' "$WORKDIR/voice-summary.txt"
+  grep -q 'investigate:1' "$WORKDIR/voice-summary.txt"
+}
+
+@test "voice-summary.txt blacklist-by-marker counts HITS (rows), consistent with blacklist-total, when a marker repeats across parts in one conv" {
+  # Regression (QA #432): blacklist-total counts rows and the rubric scores -1 PER hit
+  # (per {kind:"blacklist"} row), so blacklist-by-marker must also be a hit count. Two
+  # "Great question" hits in ONE conversation = 2 rows -> total 2 AND great-question:2,
+  # not 1 (a distinct-conv count would disagree with the total and the score).
+  write_convs <<'EOF'
+{"id":"555","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"Great question, let me look."},{"author":{"type":"admin","id":"caroline-admin-123"},"body":"Great question again, checking now."}]}
+EOF
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  [ "$(jq -rs 'map(select(.kind=="blacklist"))|length' "$WORKDIR/voice-scan.jsonl")" -eq 2 ]
+  grep -qx 'blacklist-total: 2' "$WORKDIR/voice-summary.txt"
+  grep -q 'great-question:2' "$WORKDIR/voice-summary.txt"
+}
+
+@test "voice-summary.txt reports all-zero on a clean run" {
+  write_convs <<'EOF'
+{"id":"444","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"Thanks for reaching out, your export is ready."}]}
+EOF
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  grep -qx 'em-dash: 0 tells across 0 convs' "$WORKDIR/voice-summary.txt"
+  grep -qx 'dash-total: 0 tells' "$WORKDIR/voice-summary.txt"
+  grep -qx 'top-dash-convs: (none)' "$WORKDIR/voice-summary.txt"
+  grep -qx 'blacklist-total: 0' "$WORKDIR/voice-summary.txt"
+  grep -qx 'blacklist-by-marker: (none)' "$WORKDIR/voice-summary.txt"
+}
+
+@test "voice-summary.txt is written (all-zero) even when there is no input file" {
+  rm -f "$WORKDIR/conversations.redacted.jsonl"
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$WORKDIR/voice-summary.txt" ]
+  grep -qx 'dash-total: 0 tells' "$WORKDIR/voice-summary.txt"
+  grep -qx 'blacklist-total: 0' "$WORKDIR/voice-summary.txt"
+}
