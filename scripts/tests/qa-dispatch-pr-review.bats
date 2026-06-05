@@ -48,10 +48,11 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
-  # targets the qa agent, the main profile, and the per-PR job name
+  # targets the qa agent, the main profile, and the per-PR job name (now
+  # namespaced by repo: the 2-arg default resolves to Muso-AI/hydra).
   grep -qx 'qa' "$STUB_ARGV"
   grep -qx 'main' "$STUB_ARGV"
-  grep -qx 'qa-autoreview-pr-123' "$STUB_ARGV"
+  grep -qx 'qa-autoreview-pr-Muso-AI-hydra-123' "$STUB_ARGV"
   grep -qx 'isolated' "$STUB_ARGV"
   grep -qx -- '--delete-after-run' "$STUB_ARGV"
 }
@@ -78,8 +79,8 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ ! -s "$STUB_CALLS" ]
 }
 
-@test "too many args -> usage exit 2, no dispatch" {
-  run "$SCRIPT" 123 "$GOOD_SHA" extra
+@test "too many args (>4) -> usage exit 2, no dispatch" {
+  run "$SCRIPT" 123 "$GOOD_SHA" "Muso-AI/ads-manager" "U03TYGJF1N3" extra
   [ "$status" -eq 2 ]
   [ ! -s "$STUB_CALLS" ]
 }
@@ -98,6 +99,47 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 
 @test "bad SHA (too short) -> exit 2" {
   run "$SCRIPT" 123 "abc"
+  [ "$status" -eq 2 ]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "4-arg form: dispatches an ads-manager review with the passed repo + UID" {
+  run "$SCRIPT" 123 "$GOOD_SHA" "Muso-AI/ads-manager" "U03TYGJF1N3"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+  # job name namespaced by repo (no collision with hydra#123)
+  grep -qx 'qa-autoreview-pr-Muso-AI-ads-manager-123' "$STUB_ARGV"
+  # the message points the skill at ads-manager, not hydra
+  grep -q 'github.com/Muso-AI/ads-manager/pull/123' "$STUB_ARGV"
+  grep -q 'U03TYGJF1N3' "$STUB_ARGV"
+  grep -q 'qa-pr-thread-dm.sh Muso-AI/ads-manager 123 U03TYGJF1N3' "$STUB_ARGV"
+  grep -q 'gh pr checks 123 --repo Muso-AI/ads-manager' "$STUB_ARGV"
+}
+
+@test "env overrides set repo + requester when positionals are absent" {
+  QA_REVIEW_REPO="Muso-AI/ads-manager" QA_REVIEW_REQUESTER_UID="U03TYGJF1N3" \
+    run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  grep -qx 'qa-autoreview-pr-Muso-AI-ads-manager-123' "$STUB_ARGV"
+  grep -q 'github.com/Muso-AI/ads-manager/pull/123' "$STUB_ARGV"
+}
+
+@test "positional repo/UID win over env" {
+  QA_REVIEW_REPO="Muso-AI/hydra" QA_REVIEW_REQUESTER_UID="U0AL36NADEY" \
+    run "$SCRIPT" 123 "$GOOD_SHA" "Muso-AI/ads-manager" "U03TYGJF1N3"
+  [ "$status" -eq 0 ]
+  grep -qx 'qa-autoreview-pr-Muso-AI-ads-manager-123' "$STUB_ARGV"
+  grep -q 'U03TYGJF1N3' "$STUB_ARGV"
+}
+
+@test "non-Muso-AI repo -> exit 2 BEFORE any openclaw call" {
+  run "$SCRIPT" 123 "$GOOD_SHA" "evil-org/ads-manager"
+  [ "$status" -eq 2 ]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "malformed requester UID -> exit 2 BEFORE any openclaw call" {
+  run "$SCRIPT" 123 "$GOOD_SHA" "Muso-AI/ads-manager" "not-a-uid"
   [ "$status" -eq 2 ]
   [ ! -s "$STUB_CALLS" ]
 }

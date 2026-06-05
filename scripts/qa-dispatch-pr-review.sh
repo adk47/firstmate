@@ -22,37 +22,52 @@ set -euo pipefail
 # 274 runs — so the historical isolated-tool-loss concern does not apply on this
 # build (verified on node-8, not assumed).
 #
-# Scope (for now): hydra only, Nick's PRs only. The requester UID handed to the
-# approve wrapper is hard-pinned to Nick; the qa-autoreview workflow already
-# filters to author=nsollazzo, so this is defense-in-depth.
+# Scope: hydra PRs (default) AND any other Muso-AI repo passed explicitly — e.g.
+# Muso-AI/ads-manager via .github/workflows/external-pr-review.yml. The repo and
+# the requester/Slack-DM UID are now parameters (positional or env); when omitted
+# they default to hydra + Nick, preserving the original single-repo behavior. The
+# requester UID is BOTH the qa-pr-approve allowlist gate and the Slack DM target,
+# so a caller that wants the bot to approve must pass an allowlisted UID.
 #
 # Usage:
-#   qa-dispatch-pr-review.sh <pr-number> <head-sha>
+#   qa-dispatch-pr-review.sh <pr-number> <head-sha> [repo] [requester-uid]
 #
-# Env overrides (mainly for tests):
-#   OPENCLAW   openclaw binary (default: openclaw)
+# Args / env overrides (positional wins over env; env mainly for tests):
+#   repo           ${QA_REVIEW_REPO:-Muso-AI/hydra}        (must be Muso-AI/<name>)
+#   requester-uid  ${QA_REVIEW_REQUESTER_UID:-U0AL36NADEY} (Slack UID; approve+DM)
+#   OPENCLAW       openclaw binary (default: openclaw)
 # (No delivery-target override: the cron uses --no-deliver and the skill owns all
 # Slack delivery itself, so there is nothing for the cron to target.)
-# Exit codes: 0 dispatched | 2 usage.
+# Exit codes: 0 dispatched | 2 usage/validation.
 
 OPENCLAW="${OPENCLAW:-openclaw}"
 PROFILE="main"
 AGENT="qa"
-REPO="Muso-AI/hydra"
-REQUESTER_UID="U0AL36NADEY"   # Nick — qa-pr-approve allowlist + the Slack DM target for updates
 TIMEOUT_SECONDS="1200"
 
 die() { echo "qa-dispatch-pr-review: $2" >&2; exit "$1"; }
 
 # --- Arg validation: fail loud. A silent no-op dispatcher is worse than none
 #     (cf. dispatch-cv-batch.sh --help typo that fired 500 real writes). --------
-[ "$#" -eq 2 ] || die 2 "usage: qa-dispatch-pr-review.sh <pr-number> <head-sha>"
+[ "$#" -ge 2 ] && [ "$#" -le 4 ] \
+  || die 2 "usage: qa-dispatch-pr-review.sh <pr-number> <head-sha> [repo] [requester-uid]"
 pr="$1"
 sha="$2"
+# repo/requester are optional positionals; fall back to env, then the hydra defaults.
+REPO="${3:-${QA_REVIEW_REPO:-Muso-AI/hydra}}"
+REQUESTER_UID="${4:-${QA_REVIEW_REQUESTER_UID:-U0AL36NADEY}}"
 [[ "$pr" =~ ^[0-9]+$ ]] || die 2 "pr-number must be numeric, got '$pr'."
 [[ "$sha" =~ ^[0-9a-fA-F]{7,40}$ ]] || die 2 "head-sha must be a 7-40 char hex sha, got '$sha'."
+# Only Muso-AI repos: matches the owner guard in qa-pr-approve.sh, and keeps a
+# forged/typo'd repo from steering the review at a non-Muso target.
+[[ "$REPO" =~ ^Muso-AI/[A-Za-z0-9._-]+$ ]] || die 2 "repo must be Muso-AI/<name>, got '$REPO'."
+[[ "$REQUESTER_UID" =~ ^U[A-Z0-9]+$ ]] || die 2 "requester-uid must be a Slack UID (U...), got '$REQUESTER_UID'."
 
-job_name="qa-autoreview-pr-${pr}"
+# Namespace the one-shot job by repo so hydra#123 and ads-manager#123 never
+# collide in the cron list (idempotency cleanup keys on the full name below).
+# Keep the literal "qa-autoreview-pr-" prefix: the pr-validate orphan-check and
+# the stale-sweep below both match on it, so neither needs to change.
+job_name="qa-autoreview-pr-${REPO//\//-}-${pr}"
 pr_url="https://github.com/${REPO}/pull/${pr}"
 
 # Build the dispatch instruction. The unquoted heredoc expands ${...}; `read -d
