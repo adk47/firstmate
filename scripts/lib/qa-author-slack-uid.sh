@@ -28,8 +28,10 @@ login="$1"
 case "$login" in
   nsollazzo) echo "U0AL36NADEY" ;;  # Nick
   liflovs)   echo "U03TYGJF1N3" ;;  # Serhii
+  adk47)     echo "U7RP6HKUZ"   ;;  # Aaron (authors web-credits-next PRs; the bot
+                                    # can't self-approve, so those degrade to review-only)
   # Add more as repos/authors come into scope, e.g.:
-  #   <aaron-gh-login>) echo "U7RP6HKUZ" ;;   # Aaron
-  #   <fede-gh-login>)  echo "U07NF5A77E2" ;;  # Fede
+  #   azure-kirin) echo "<Mariia-uid>" ;;  # Mariia (octave-ui) — pending her Slack UID
+  #   <fede-gh-login>) echo "U07NF5A77E2" ;;  # Fede
   *) exit 1 ;;                        # unknown -> fail-closed (caller skips)
 esac

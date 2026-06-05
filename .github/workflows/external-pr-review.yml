@@ -1,26 +1,28 @@
 name: external-pr-review
 
-# QA auto-review of PRs in OTHER Muso-AI repos (currently Muso-AI/ads-manager),
-# reusing hydra's qa agent + muso-github-code-review skill.
+# QA auto-review of PRs in OTHER Muso-AI repos (see the allowlist below — currently
+# ads-manager, web-credits-next, octave-ui), reusing hydra's qa agent +
+# muso-github-code-review skill.
 #
-# Transport: the source repo (ads-manager) fires a repository_dispatch into hydra
-# (event_type "ads-manager-qa-review") carrying the PR coordinates in
-# client_payload. This box is the only place the openclaw CLI + gateway live, so
-# the dispatch must land here. See ads-manager/.github/workflows/qa-autoreview-trigger.yml
-# (the producer) and scripts/qa-dispatch-pr-review.sh (what we call).
+# Transport: a source repo fires a repository_dispatch into hydra carrying the PR
+# coordinates in client_payload. New repos use event_type "external-qa-review";
+# "ads-manager-qa-review" is the original ads-manager type, kept for back-compat.
+# This box is the only place the openclaw CLI + gateway live, so the dispatch must
+# land here. See each repo's .github/workflows/qa-autoreview-trigger.yml (the
+# producer) and scripts/qa-dispatch-pr-review.sh (what we call).
 #
 # Trust model: a repository_dispatch can only be sent by a caller holding a PAT
-# with write access to hydra (ads-manager's secrets.DEVOPS_DISPATCH_PAT), so the
-# payload is authenticated. We still FORMAT-validate every field below, and the
-# downstream skill re-fetches the PR as the gateway's gh account (adk47) — so a
-# bogus PR number or unreadable repo fails safe there, and an approval still
-# requires real CI-green + a GO verdict on the actual PR. We do NOT re-resolve the
-# PR from GitHub here because no hydra-scoped token can read the private
-# ads-manager repo; adk47's auth (used by the skill) is the ground truth.
+# with write access to hydra (each source repo's secrets.DEVOPS_DISPATCH_PAT), so
+# the payload is authenticated. We still FORMAT-validate every field below and
+# allowlist the repo, and the downstream skill re-fetches the PR as the gateway's
+# gh account (adk47) — so a bogus PR number or unreadable repo fails safe there,
+# and an approval still requires real CI-green + a GO verdict on the actual PR. We
+# do NOT re-resolve the PR from GitHub here because no hydra-scoped token can read
+# the private source repos; adk47's auth (used by the skill) is the ground truth.
 
 on:
   repository_dispatch:
-    types: [ads-manager-qa-review]
+    types: [ads-manager-qa-review, external-qa-review]
 
 permissions:
   contents: read
@@ -45,11 +47,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          # --- Repo allowlist: this event_type is ads-manager-only for now. ----
-          if [ "$REPO" != "Muso-AI/ads-manager" ]; then
-            echo "repo='$REPO' not in the external-review allowlist — refusing."
-            exit 1
-          fi
+          # --- Repo allowlist: only these Muso-AI repos may drive an external
+          #     review. Adding a repo = one line here + a Slack-UID mapping. ------
+          case "$REPO" in
+            Muso-AI/ads-manager|Muso-AI/web-credits-next|Muso-AI/octave-ui) ;;
+            *) echo "repo='$REPO' not in the external-review allowlist — refusing."; exit 1 ;;
+          esac
 
           # --- Format validation (defense-in-depth; the dispatcher re-checks). -
           if ! [[ "$PR" =~ ^[0-9]+$ ]]; then

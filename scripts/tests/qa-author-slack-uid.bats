@@ -20,6 +20,12 @@ SCRIPT="$HYDRA_REPO/scripts/lib/qa-author-slack-uid.sh"
   [ "$output" = "U03TYGJF1N3" ]
 }
 
+@test "known login: adk47 -> Aaron" {
+  run "$SCRIPT" adk47
+  [ "$status" -eq 0 ]
+  [ "$output" = "U7RP6HKUZ" ]
+}
+
 @test "unknown login -> exit 1, no output (fail-closed)" {
   run "$SCRIPT" some-random-dev
   [ "$status" -eq 1 ]
