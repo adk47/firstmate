@@ -89,6 +89,44 @@ EOF
   [[ "$output" == *"probe returned HTTP"* ]]
 }
 
+@test "reasoning-leak source = journalctl when the edge journal is readable" {
+  cat > "$TEST_TMPDIR/curl-fixture.json" <<EOF
+{"type":"admin.list","admins":[{"id":"caroline-admin-123"}]}
+EOF
+  run bash -c "cd '$TEST_TMPDIR' && source '$SCRIPTS_DIR/preflight.sh' && echo \"\$CAROLINE_REASONING_LEAK_SOURCE\""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"journalctl"* ]]
+}
+
+@test "reasoning-leak source falls back to syslog when journalctl is unreadable" {
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+  : > "$TEST_TMPDIR/fake-syslog"
+  cat > "$TEST_TMPDIR/curl-fixture.json" <<EOF
+{"type":"admin.list","admins":[{"id":"caroline-admin-123"}]}
+EOF
+  run bash -c "cd '$TEST_TMPDIR' && export CAROLINE_SYSLOG_PATH='$TEST_TMPDIR/fake-syslog' && source '$SCRIPTS_DIR/preflight.sh' && echo \"\$CAROLINE_REASONING_LEAK_SOURCE\""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"syslog"* ]]
+}
+
+@test "reasoning-leak source = none when neither journalctl nor syslog is readable (still exits 0)" {
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+  cat > "$TEST_TMPDIR/curl-fixture.json" <<EOF
+{"type":"admin.list","admins":[{"id":"caroline-admin-123"}]}
+EOF
+  run bash -c "cd '$TEST_TMPDIR' && export CAROLINE_SYSLOG_PATH='$TEST_TMPDIR/does-not-exist' && source '$SCRIPTS_DIR/preflight.sh' && echo \"\$CAROLINE_REASONING_LEAK_SOURCE\""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"none"* ]]
+}
+
 @test "fails when gh auth status fails" {
   # Override the gh stub to fail for auth status
   cat > "$TEST_TMPDIR/bin/gh" <<'STUB'

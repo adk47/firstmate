@@ -1,12 +1,14 @@
-# Caroline Weekly Review: Grading Rubric
+# Caroline Daily Review: Grading Rubric
 
-Every dimension scores 0–5. P0/P1/P2 severity per finding. P0 in any dimension forces the Slack headline.
+Every dimension scores 0-5. P0/P1/P2 severity per finding. P0 in any dimension forces the Slack headline.
+
+Daily pulse: dimensions A (voice + leak), B (tools), D (sentiment), E (reasoning-leak / guard health). KB-gap detection (the old Dimension C) and auto-PR are deferred to the separate weekly KB roll-up; do not cluster KB gaps or open PRs from the daily run.
 
 ## Severity ladder
 
-- **P0**: any `[intercom:tool-leak]` / `[intercom:email-leak]` audit line in window, OR any regression pattern from Dimension B (analytics→email/support loop).
-- **P1**: wrong escalation, wrong actionType/tier, missed required `profile_status` call on an analytics/streams conversation, refund 3-gate skipped.
-- **P2**: voice blacklist hit ("Great question", em-dash, "investigate", apologies-for-analytics), KB gap cluster, sentiment issue. Tone lint is not P0.
+- **P0**: any `[intercom:tool-leak]` / `[intercom:email-leak]` audit line in window, OR any regression pattern from Dimension B (analytics→email/support loop), OR a SHIPPED reasoning leak the guard missed (Dimension E, source 2: a reply that reached a customer).
+- **P1**: wrong escalation, wrong actionType/tier, missed required `profile_status` call on an analytics/streams conversation, refund 3-gate skipped, OR an ESCALATED reasoning-leak conv with no human reply yet (Dimension E: a customer is waiting on a human).
+- **P2**: voice blacklist hit ("Great question", em-dash, "investigate", apologies-for-analytics), sentiment issue. Tone lint is not P0.
 
 ## Dimension A: Voice + leak audit
 
@@ -30,15 +32,6 @@ Score: 5 if zero leaks AND zero blacklist hits; -1 per blacklist hit; floor 0.
 
 Score: 5 if all expected `profile_status` calls fired AND no escalation mismatches AND no regression pattern.
 
-## Dimension C: KB gaps / repeated questions
-
-- Cluster by topic (short noun phrase).
-- **N = unique `contact_id`** (primary), `customer_email` fallback only when `contact_id` missing.
-- For each cluster N≥3: did Caroline answer from `reference/*.md` or improvise/punt? If improvise/punt → KB-gap candidate (P2).
-- Output: `{topic, unique_customers, conversation_ids[], target_path, anchor, insertion, response_pattern}`.
-
-Score: 5 if zero gaps; -1 per gap; floor 0.
-
 ## Dimension D: Customer sentiment
 
 - Per-conversation: `resolved` | `escalated` | `frustrated` | `ghosted`.
@@ -47,43 +40,111 @@ Score: 5 if zero gaps; -1 per gap; floor 0.
 
 Score: 5 - frustration_count, floor 0.
 
+## Dimension E: Reasoning-leak / guard health
+
+Reports the health of the deterministic outbound reasoning-leak guard (PR #421) from TWO
+independent sources. **Never conflate them.** "0 guard-log lines" does NOT mean "0 leaks";
+it only means the guard caught nothing, which is reassuring ONLY when source 2 is also
+zero. Always state both numbers.
+
+**Source 1 (GUARD-CAUGHT)** -- `audit.jsonl` rows with `kind == "reasoning_leak"`
+(`fetch-audit.sh`, from the edge `[intercom:reasoning-leak]` log):
+- `action == "stripped"`: the guard cleaned the reply silently. Informational FYI, no severity.
+- `action == "escalated"`: the guard suppressed the reply, reassigned to a human, and
+  alerted. Cite each conv id + `reason`. Cross-reference `escalated-status.jsonl`: a conv
+  with `human_replied == false` is an OPEN action item (**P1**) -- surface its `url`
+  prominently. Escalated-and-answered is FYI.
+- Group both by `markers` to show which leak shapes recur.
+- **Evidence carve-out:** escalated conv ids come from the journal, NOT
+  `conversations.jsonl` (the reply was suppressed, so the conv is absent from the fetch).
+  Citing them is expected, not an evidence violation.
+
+**Source 2 (GUARD-MISSED)** -- `shipped-leaks.jsonl` rows (`scan-shipped-leaks.sh`, which
+scans SHIPPED Caroline replies for the guard's own INTERNAL+META_STRONG signatures). Each
+hit is a leak that reached a customer AND a guard gap = **P0**. Quote the conv + the
+matched `marker` so a new pattern can be added to `sanitize-reasoning-leak.ts`. **Do NOT
+suppress a source-2 hit just because the same conv also appears in source 1** -- a stripped
+conv whose cleaned reply still shipped a tell is a genuine "the strip was incomplete"
+signal. That is precisely why the two sources are never conflated.
+
+**Source caveat:** if `preflight` set `CAROLINE_REASONING_LEAK_SOURCE` to `syslog` or
+`none`, source 1 is degraded (syslog has no precise window; `none` means unreadable). Say
+so -- never present a zero caught-count from a degraded source as "healthy".
+
+Score: 5 if source 2 is empty AND no escalated conv is unanswered; otherwise floored by the
+P0/P1 findings above.
+
 ## "Good catches"
 
 2–3 conversations where Caroline did particularly well. Cite the conversation_id and quote a single line. Subject to final-output redaction.
 
-## Slack output template
+## Slack output template (glanceable daily digest)
 
-The agent assembles, then pipes through `redact-output.sh`:
+Assemble the digest, then pipe it through `redact-output.sh` and finally through
+`assert-digest-contract.sh` (the mechanical header guard) before emitting it as the
+final assistant message:
 
 ```
-<@U0AL36NADEY> Caroline weekly review (week of <YYYY-MM-DD>)
-
-*Headline:* <P0_count> P0 / <P1_count> P1 / <P2_count> P2
-Voice: <0-5> | Tools: <0-5 or "skipped: join-key prereq pending"> | KB: <0-5> | Sentiment: <0-5>
-Conversations reviewed: <n>
-
-*Voice + leak audit* (Voice <0-5>)
-• Leak audit lines: <n>
-• Em-dashes: <n>, blacklist hits: <n>
-• <findings>
-
-*Tool usage + escalation hygiene* (Tools <0-5> or skipped)
-• Missed profile_status calls: <n>
-• Wrong-tier tickets: <n>
-• Regression pattern hits: <n>
-• <findings>
-
-*KB gaps / repeated questions* (KB <0-5>)
-• <topic>: <N> unique contacts, IDs: <…>
-• ...
-
-*Customer sentiment* (Sentiment <0-5>)
-• <r> resolved / <e> escalated / <f> frustrated / <g> ghosted
-• Top frustration: <conv_id>: "<quote>"
-
-*Good catches*
-• <conv_id>: "<quote>"
-• ...
-
-*Auto-PR:* <link or "none this week, no KB gap met N>=3 unique-contact bar">
+<assemble review text> | scripts/redact-output.sh | scripts/assert-digest-contract.sh
 ```
+
+### Header contract (MUST be present every run, on every model)
+
+Hard, non-negotiable minimum. `assert-digest-contract.sh` fails the run if either
+line is missing, so emit both even on a clean, quiet day:
+
+- **Line 1** MUST contain, in order: a status emoji, the date, the window phrase
+  (mirror the fetch window: "last 30h"), the conversation count as `<N> convs`, and
+  the severity triplet `<p0> P0 / <p1> P1 / <p2> P2` with zeros included.
+- **Line 2** MUST contain the three scores: `Voice <0-5> | Tools <0-5 or skipped> | Sentiment <0-5>`.
+
+Rules:
+
+- **Status emoji**: 🔴 if any P0; 🟡 if any P1 and no P0; 🟢 otherwise.
+- **P0 ping**: prepend the literal `<@U0AL36NADEY>` to line 1 ONLY when P0 count > 0.
+  No mention on a no-P0 day (a daily digest must not ping every morning). This
+  template is the only in-skill source of that Slack id.
+- **Tools skipped**: when `preflight.sh` reports `CV_TOOL_CTX_CONVERSATION_ID=unavailable`,
+  render the token as `skipped` (e.g. `Tools skipped`); never a bare dash, never a
+  fabricated number. (`redact-output.sh` rewrites any em/en-dash to a hyphen, so a
+  dash placeholder is ambiguous next to a numeric score.)
+- **Collapse clean dimensions**: applies to DETAIL bullet lines only, never to the two
+  header lines. Print a detail bullet only when it has a real, non-zero finding; omit
+  zero-count metric bullets. A perfectly clean day is just the two header lines (plus,
+  optionally, a "Good catch" bullet).
+- **Conversation ids**: cite the real Intercom `conversation_id` (a 15-16 digit
+  number, which survives output redaction) so a reader can open the thread.
+- **Reasoning-leak guard block** (Dimension E): ALWAYS present (it is what makes
+  `assert-digest-contract.sh`'s `guard` check pass). When everything is zero, collapse it
+  to one line: `Reasoning-leak guard: healthy - 0 caught, 0 missed in shipped replies.`
+  When there are findings, lead with `Reasoning-leak guard (last 30h):` then bullets:
+  caught counts (`N stripped (silent), M escalated -> human` with `[shapes: ...]`); each
+  escalated-and-still-unanswered conv as an action item with its URL; and each SHIPPED leak
+  the guard missed as `conv <id> signature "<marker>"` (a guard gap). State both the caught
+  count AND the missed count even when one is zero. Append the source caveat when degraded.
+
+### Quiet day (the common case, no ping)
+
+```
+🟢 Caroline daily · Wed Jun 4 · last 30h · 23 convs · 0 P0 / 0 P1 / 1 P2
+Voice 5 | Tools 5 | Sentiment 4
+• Sentiment: 1 frustrated · conv 215474545718046 "are you actually checking?"
+• Good catch: conv 998877665544001 · clean refund-gate run
+Reasoning-leak guard: healthy - 0 caught, 0 missed in shipped replies.
+```
+
+### P0 day (rare, pings the reviewer)
+
+```
+<@U0AL36NADEY> 🔴 Caroline daily · Wed Jun 4 · last 30h · 31 convs · 1 P0 / 2 P1 / 2 P2
+Voice 4 | Tools 4 | Sentiment 4
+Reasoning-leak guard (last 30h): 3 stripped (silent), 1 escalated -> human. [shapes: looking-at-history, tone-calibration]
+  • Escalated & still unanswered: conv 215474520232724 (https://app.intercom.com/a/inboxes/all/conversations/215474520232724)  <- action item (P1)
+  • SHIPPED leak the guard missed: conv 998877665544001 signature "ready-to-output"  <- guard gap (P0)
+*Tools (4):* 1 missed profile_status · conv 445566778899001 (P1)
+*Voice (4):* 1 blacklist "Great question" (conv 220033445566778)
+*Sentiment (4):* 2 frustrated · top: conv 556677889900112 "this is useless"
+```
+
+(In the P0 example the headline P0 is the guard-missed shipped leak, and one P1 is the
+unanswered escalation -- Dimension E is driving the severity, not just reporting.)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fetch 7 days of Caroline-touched conversations from Intercom.
+# Fetch a rolling window (default 30h) of Caroline-touched conversations from Intercom.
 # Requires env from preflight.sh: WORKDIR, CAROLINE_BOT_ADMIN_ID.
 #
 # TWO-STEP retrieve (confirmed against the live API 2026-06-01):
@@ -24,82 +24,21 @@ API="https://api.intercom.io"
 CAP="${CAROLINE_FETCH_CAP:-200}"   # bounds per-id GET load + the grader's token budget
 
 NOW=$(date +%s)
-SEVEN_DAYS_AGO=$((NOW - 7 * 86400))
+# Rolling window for the daily pulse. The daily cron sets no per-job env, so the
+# 30h default governs; SP2's weekly KB job sets CAROLINE_WINDOW_HOURS=168 inline at
+# invocation (cron-jobs.json has no per-job env field). 30h at a 09:00 fire overlaps
+# the prior run by (prior local day length - 24h): 6h normally, 5h on the fall-back
+# 25h day, 7h on the spring-forward 23h day -- never negative, so a late/missed run
+# leaves no ungraded gap. Do not lower toward 24h. fetch-audit.sh reads the same knob
+# so the leak audit window rolls in lockstep (a timestamp-less leak must not re-fire
+# as a fresh P0 for days).
+WINDOW_HOURS="${CAROLINE_WINDOW_HOURS:-30}"
+WINDOW_START=$((NOW - WINDOW_HOURS * 3600))
 
-# Generic Intercom request with 429/Retry-After + exponential backoff (max 3).
-# Prints the response body to stdout. $1=method $2=url $3=body(optional).
-intercom_request() {
-  local method="$1" url="$2" body="${3:-}" attempt=0 max=3 rc
-  while [ "$attempt" -lt "$max" ]; do
-    local tmp_headers tmp_body
-    tmp_headers=$(mktemp)
-    tmp_body=$(mktemp)
-    set +e
-    if [ -n "$body" ]; then
-      curl -sS -D "$tmp_headers" -o "$tmp_body" -X "$method" \
-        -H "Authorization: Bearer $MUSOAI_INTERCOM_TOKEN" \
-        -H "Intercom-Version: 2.11" \
-        -H "Content-Type: application/json" \
-        -H "Accept: application/json" \
-        -d "$body" "$url"
-    else
-      curl -sS -D "$tmp_headers" -o "$tmp_body" -X "$method" \
-        -H "Authorization: Bearer $MUSOAI_INTERCOM_TOKEN" \
-        -H "Intercom-Version: 2.11" \
-        -H "Accept: application/json" "$url"
-    fi
-    rc=$?
-    set -e
-    local status
-    # `|| true` is REQUIRED: under `set -euo pipefail`, a curl connect failure
-    # (DNS/TLS/connect blip) writes no headers, so grep finds no match and exits
-    # 1; pipefail propagates that, the assignment returns non-zero, and set -e
-    # would abort the helper here — BEFORE the `rc != 0` retry branch below. That
-    # turned a retryable transient into a hard single-attempt failure.
-    status=$(grep -oiE '^HTTP/[0-9.]+ +[0-9]+' "$tmp_headers" 2>/dev/null | head -1 | awk '{print $NF}' || true)
-    if [ "$status" = "429" ]; then
-      local wait
-      # Same `|| true` reason: a 429 may omit Retry-After (it is optional), so
-      # grep can no-match and abort under set -e before the fallback below.
-      wait=$(grep -i "^Retry-After:" "$tmp_headers" | awk '{print $2}' | tr -d '\r' || true)
-      [ -z "$wait" ] && wait=$((1 << attempt))
-      sleep "$wait"
-      attempt=$((attempt + 1))
-      rm -f "$tmp_headers" "$tmp_body"
-      continue
-    fi
-    if [ "$rc" -ne 0 ]; then
-      rm -f "$tmp_headers" "$tmp_body"
-      attempt=$((attempt + 1))
-      sleep $((1 << attempt))
-      continue
-    fi
-    case "${status:-}" in
-      2*)
-        cat "$tmp_body"
-        rm -f "$tmp_headers" "$tmp_body"
-        return 0
-        ;;
-      5*)
-        # Transient server error — retry with backoff.
-        rm -f "$tmp_headers" "$tmp_body"
-        attempt=$((attempt + 1))
-        sleep $((1 << attempt))
-        continue
-        ;;
-      *)
-        # 4xx (auth/not-found/bad-request) or unparseable: fail loud so an error
-        # response can never become a silently-empty candidate set or a dropped
-        # conversation.
-        echo "intercom_request: $method $url returned HTTP ${status:-unknown}" >&2
-        rm -f "$tmp_headers" "$tmp_body"
-        return 1
-        ;;
-    esac
-  done
-  echo "intercom_request: exhausted retries for $method $url" >&2
-  return 1
-}
+# intercom_request (429/Retry-After + backoff) lives in a shared lib so
+# check-escalated.sh reuses the exact same retry logic.
+# shellcheck source=lib/intercom-request.sh disable=SC1091
+. "$(dirname "$0")/lib/intercom-request.sh"
 
 build_query() {
   local cursor="${1:-}"
@@ -109,7 +48,7 @@ build_query() {
   # would drop conversations Caroline handled that were later reassigned to a
   # human. Authorship is decided after the per-id GET (the list response carries
   # no conversation_parts).
-  jq -nc --argjson since "$SEVEN_DAYS_AGO" --argjson pagination "$pagination" '
+  jq -nc --argjson since "$WINDOW_START" --argjson pagination "$pagination" '
     {query: {field: "updated_at", operator: ">", value: $since}, pagination: $pagination}'
 }
 
@@ -134,8 +73,8 @@ if [ "$total_candidates" -gt "$CAP" ]; then
 fi
 
 # 3. GET each candidate by id (full transcript incl. parts + source). The search
-# window only scopes the CANDIDATE by .updated_at; a thread bumped this week by a
-# customer or human still carries Caroline's OLDER replies. So scope to the week
+# window only scopes the CANDIDATE by .updated_at; a thread bumped recently by a
+# customer or human still carries Caroline's OLDER replies. So scope to the window
 # HERE too, on the parts: keep a conversation only if Caroline authored a part
 # WITHIN the window, and emit only in-window parts — otherwise a stale Caroline
 # reply gets re-graded, inflates repeated-question clusters, and seeds the report
@@ -149,7 +88,7 @@ fi
 while IFS= read -r id; do
   [ -n "$id" ] || continue
   conv=$(intercom_request GET "$API/conversations/$id?display_as=plaintext")
-  echo "$conv" | jq -c --arg admin "$CAROLINE_BOT_ADMIN_ID" --argjson cutoff "$SEVEN_DAYS_AGO" '
+  echo "$conv" | jq -c --arg admin "$CAROLINE_BOT_ADMIN_ID" --argjson cutoff "$WINDOW_START" '
     select([.conversation_parts.conversation_parts[]? |
             select(.author.type == "admin" and (.author.id | tostring) == $admin
                    and ((.created_at // 0) >= $cutoff))] | length > 0) |

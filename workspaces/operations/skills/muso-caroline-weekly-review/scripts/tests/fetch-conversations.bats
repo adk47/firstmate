@@ -4,9 +4,10 @@ load helpers
 setup() {
   setup_skill_tmp
   install_router
-  # Per-part timestamps drive the weekly-window scope in step 3. NOW is safely
-  # inside the 7-day window; OLD is well outside it (a stale reply from a thread
-  # bumped this week). Set here so fixtures can interpolate them.
+  # Per-part timestamps drive the rolling-window scope in step 3. NOW is safely
+  # inside the window; OLD is far outside it (a stale reply from a recently-bumped
+  # thread) -- excluded under both the 30h default and a 168h override. Set here so
+  # fixtures can interpolate them.
   NOW=$(date +%s)
   OLD=$(( NOW - 30 * 86400 ))
 }
@@ -239,9 +240,9 @@ EOF
   [ "$(wc -l < "$WORKDIR/conversations.jsonl")" -eq 1 ]
 }
 
-@test "drops a conversation bumped this week whose only Caroline reply is pre-window" {
+@test "drops a conversation bumped recently whose only Caroline reply is pre-window" {
   # The thread is a search candidate (updated_at recent) because a customer
-  # bumped it this week, but Caroline's only reply predates the 7-day window.
+  # bumped it recently, but Caroline's only reply predates the window.
   # Grading it would re-grade a stale reply and inflate repeated-question
   # clusters with an old question — so it must be dropped, not graded.
   search_one c1 1000
@@ -259,8 +260,8 @@ EOF
 }
 
 @test "keeps an in-window Caroline reply but trims her pre-window parts from the same thread" {
-  # Caroline replied this week (kept) but also replied months ago in the same
-  # thread. The stale reply must not reach the grader as this-week voice
+  # Caroline replied in-window (kept) but also replied long ago in the same
+  # thread. The stale reply must not reach the grader as in-window voice
   # evidence; the customer's opener stays as the question-context anchor.
   search_one c1 1000
   cat > "$TEST_TMPDIR/conv-c1.json" <<EOF
@@ -305,4 +306,59 @@ EOF
   # the exact grader pattern that crashed in the proof-run now runs without error
   run jq -r 'select(any(.parts[]; (.body|test("—")))) | .id' "$WORKDIR/conversations.jsonl"
   [ "$status" -eq 0 ]
+}
+
+@test "default window is 30h: keeps a part at NOW-20h, drops one at NOW-40h" {
+  # The daily pulse default. NEW per-part offsets (not the shared $OLD=NOW-720h,
+  # which is excluded even at a 168h override and so cannot prove the boundary).
+  search_one c1 1000
+  cat > "$TEST_TMPDIR/conv-c1.json" <<EOF
+{"id":"c1","contact_id":"x1",
+ "source":{"author":{"type":"user","id":"x1"},"body":"how do I export?"},
+ "conversation_parts":{"conversation_parts":[
+   {"author":{"type":"admin","id":"caroline-admin-123"},"body":"INWINDOW","created_at":$(( NOW - 20 * 3600 ))},
+   {"author":{"type":"admin","id":"caroline-admin-123"},"body":"PREWINDOW","created_at":$(( NOW - 40 * 3600 ))}
+ ]}}
+EOF
+  run "$SCRIPTS_DIR/fetch-conversations.sh"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$WORKDIR/conversations.jsonl")" -eq 1 ]
+  line=$(cat "$WORKDIR/conversations.jsonl")
+  printf '%s' "$line" | grep -q '"body":"INWINDOW"'
+  ! printf '%s' "$line" | grep -q '"body":"PREWINDOW"'
+}
+
+@test "30h window boundary pins at 30h: NOW-29h kept, NOW-31h dropped (guards a 24h/7d regression)" {
+  search_one c1 1000
+  cat > "$TEST_TMPDIR/conv-c1.json" <<EOF
+{"id":"c1","contact_id":"x1",
+ "source":{"author":{"type":"user","id":"x1"},"body":"q"},
+ "conversation_parts":{"conversation_parts":[
+   {"author":{"type":"admin","id":"caroline-admin-123"},"body":"KEPT29","created_at":$(( NOW - 29 * 3600 ))},
+   {"author":{"type":"admin","id":"caroline-admin-123"},"body":"DROP31","created_at":$(( NOW - 31 * 3600 ))}
+ ]}}
+EOF
+  run "$SCRIPTS_DIR/fetch-conversations.sh"
+  [ "$status" -eq 0 ]
+  line=$(cat "$WORKDIR/conversations.jsonl")
+  printf '%s' "$line" | grep -q '"body":"KEPT29"'
+  ! printf '%s' "$line" | grep -q '"body":"DROP31"'
+}
+
+@test "CAROLINE_WINDOW_HOURS override widens the window (168h keeps a part at NOW-100h)" {
+  # SP2's weekly KB roll-up sets this inline. NOW-100h is excluded under the 30h
+  # default but included at 168h, proving the knob is honored.
+  export CAROLINE_WINDOW_HOURS=168
+  search_one c1 1000
+  cat > "$TEST_TMPDIR/conv-c1.json" <<EOF
+{"id":"c1","contact_id":"x1",
+ "source":{"author":{"type":"user","id":"x1"},"body":"q"},
+ "conversation_parts":{"conversation_parts":[
+   {"author":{"type":"admin","id":"caroline-admin-123"},"body":"WEEKOLD","created_at":$(( NOW - 100 * 3600 ))}
+ ]}}
+EOF
+  run "$SCRIPTS_DIR/fetch-conversations.sh"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$WORKDIR/conversations.jsonl")" -eq 1 ]
+  printf '%s' "$(cat "$WORKDIR/conversations.jsonl")" | grep -q '"body":"WEEKOLD"'
 }

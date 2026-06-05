@@ -99,3 +99,74 @@ EOF
   [ "$status" -eq 0 ]
   ! grep -q '"kind":"tool_call"' "$WORKDIR/audit.jsonl"
 }
+
+@test "journal window tracks CAROLINE_WINDOW_HOURS (default 30h, overridable to 168h)" {
+  # Leak markers carry no conversation_id and no timestamp, so the journal --since
+  # window MUST match the conversation fetch (same 30h default). A fixed 7d window
+  # would re-surface the same leak as a fresh P0 on every daily run for a week.
+  # Capture the --since arg verbatim (the shared stub's %q escapes the spaces in
+  # "30 hours ago", so grep on the raw arg would not match).
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${TEST_TMPDIR}/journalctl.args"
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+
+  run "$SCRIPTS_DIR/fetch-audit.sh"
+  [ "$status" -eq 0 ]
+  grep -q -- "--since 30 hours ago" "$TEST_TMPDIR/journalctl.args"
+
+  : > "$TEST_TMPDIR/journalctl.args"
+  export CAROLINE_WINDOW_HOURS=168
+  run "$SCRIPTS_DIR/fetch-audit.sh"
+  [ "$status" -eq 0 ]
+  grep -q -- "--since 168 hours ago" "$TEST_TMPDIR/journalctl.args"
+}
+
+@test "parses ESCALATED and stripped reasoning-leak lines into reasoning_leak records" {
+  cat > "$TEST_TMPDIR/journal-fixture.txt" <<'EOF'
+Jun 04 10:00:00 host openclaw[1]: [intercom:reasoning-leak] [intercom:default] ESCALATED conv=215474545718046 reason=internal-monologue markers=["skill-md","tone-calibration"] sample="Looking at the previous history"
+Jun 04 11:00:00 host openclaw[1]: [intercom:reasoning-leak] [intercom:default] conv=998877665544001 action=stripped markers=["looking-at-history"] sample="some monologue"
+EOF
+  run "$SCRIPTS_DIR/fetch-audit.sh"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '"kind":"reasoning_leak"' "$WORKDIR/audit.jsonl")" -eq 2 ]
+  esc=$(jq -c 'select(.action=="escalated")' "$WORKDIR/audit.jsonl")
+  [ "$(printf '%s' "$esc" | jq -r '.conv')" = "215474545718046" ]
+  [ "$(printf '%s' "$esc" | jq -r '.reason')" = "internal-monologue" ]
+  [ "$(printf '%s' "$esc" | jq -r '.markers | join(",")')" = "skill-md,tone-calibration" ]
+  st=$(jq -c 'select(.action=="stripped")' "$WORKDIR/audit.jsonl")
+  [ "$(printf '%s' "$st" | jq -r '.conv')" = "998877665544001" ]
+  [ "$(printf '%s' "$st" | jq -r '.reason')" = "" ]
+  [ "$(printf '%s' "$st" | jq -r '.markers[0]')" = "looking-at-history" ]
+}
+
+@test "scrubs PII from the reasoning-leak sample (no raw email reaches the audit)" {
+  cat > "$TEST_TMPDIR/journal-fixture.txt" <<'EOF'
+Jun 04 10:00:00 host openclaw[1]: [intercom:reasoning-leak] [intercom:default] ESCALATED conv=111 reason=no-separator markers=[] sample="email the customer at alice@example.com now"
+EOF
+  run "$SCRIPTS_DIR/fetch-audit.sh"
+  [ "$status" -eq 0 ]
+  ! grep -q "alice@example.com" "$WORKDIR/audit.jsonl"
+  grep -q "<email>" "$WORKDIR/audit.jsonl"
+}
+
+@test "reads reasoning-leak lines from syslog when source=syslog" {
+  cat > "$TEST_TMPDIR/fake-syslog" <<'EOF'
+Jun 04 09:00:00 host openclaw-gateway-edge[1]: [intercom:reasoning-leak] [intercom:default] conv=222 action=stripped markers=["forbidden-words"] sample="x"
+EOF
+  export CAROLINE_REASONING_LEAK_SOURCE=syslog
+  export CAROLINE_SYSLOG_PATH="$TEST_TMPDIR/fake-syslog"
+  run "$SCRIPTS_DIR/fetch-audit.sh"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '"kind":"reasoning_leak"' "$WORKDIR/audit.jsonl")" -eq 1 ]
+  grep -q '"action":"stripped"' "$WORKDIR/audit.jsonl"
+}
+
+@test "source=none yields an empty audit without error" {
+  export CAROLINE_REASONING_LEAK_SOURCE=none
+  run "$SCRIPTS_DIR/fetch-audit.sh"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$WORKDIR/audit.jsonl")" -eq 0 ]
+}

@@ -69,6 +69,22 @@ teardown() { teardown_skill_tmp; }
   [[ "$result" == *"<phone>"* ]]
 }
 
+@test "documents the redaction boundary: 10-13 digit bare runs scrub as <phone>, 14-16 survive" {
+  # The phone regex matches any bare 10-13 digit run regardless of context. Real
+  # Intercom conversation ids are 15-16 digits (preserved, asserted above), which
+  # is why the daily rubric cites ids as 15-16 digit numbers. This pins the
+  # boundary so a future regex edit cannot silently start eating real ids, and
+  # confirms a 12-digit bare run is still treated as a phone.
+  result=$(printf '%s' 'a bare twelve-digit run 123456789012 inline' | "$SCRIPTS_DIR/redact-output.sh")
+  [[ "$result" == *"<phone>"* ]]
+  [[ "$result" != *"123456789012"* ]]
+  # a real 15-digit id alongside a real phone: id survives, phone scrubbed
+  result=$(printf '%s' 'conv 215474545718046 call 555-123-4567' | "$SCRIPTS_DIR/redact-output.sh")
+  [[ "$result" == *"215474545718046"* ]]
+  [[ "$result" != *"555-123-4567"* ]]
+  [[ "$result" == *"<phone>"* ]]
+}
+
 @test "normalizes em/en dashes so the final review has no em-dashes (voice rule)" {
   text='Caroline weekly review — week of 2026-06-01; FLAC–export gap'
   result=$(printf '%s' "$text" | "$SCRIPTS_DIR/redact-output.sh")

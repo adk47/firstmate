@@ -824,10 +824,17 @@ jobs:
         # purpose: a blanket `find workspaces` would also drag in ~30 never-run
         # credit-verification suites and could block every PR. All four are
         # hermetic (closed-port MUSO_API_URL, no openclaw binary invocation).
+        #
+        # ALSO the muso-caroline-weekly-review (daily review) suite, added so the
+        # reasoning-leak mirror's drift sentinel actually gates (scan-shipped-leaks
+        # mirrors sanitize-reasoning-leak.ts patterns; the sentinel fails if they
+        # drift). Hermetic: helpers.bash PATH-shadows openclaw/gh/curl/journalctl.
+        # Same scoping rationale — one tests dir, not a blanket workspace find.
         run: |
           set -euo pipefail
           files=$(find scripts \
                        workspaces/operations/skills/muso-ops-admin/scripts/tests \
+                       workspaces/operations/skills/muso-caroline-weekly-review/scripts/tests \
                        -type f -name '*.bats' | sort)
           if [ -z "$files" ]; then
             echo "::warning::no *.bats files found — skipping"

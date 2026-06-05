@@ -4,6 +4,7 @@
 #   CAROLINE_BOT_ADMIN_ID  — Caroline's Intercom admin id
 #   WORKDIR                 — mktemp -d with chmod 700, cleanup trap installed
 #   CV_TOOL_CTX_CONVERSATION_ID — "available" | "unavailable" (Dimension B gate)
+#   CAROLINE_REASONING_LEAK_SOURCE — "journalctl" | "syslog" | "none" (guard-log read path)
 
 set -euo pipefail
 
@@ -73,6 +74,19 @@ else
   export CV_TOOL_CTX_CONVERSATION_ID="unavailable"
 fi
 
+# 8b. Reasoning-leak guard-log source. The guard's stripped/escalate audit lines
+# (PR #421) live only on the edge gateway journal. Probe read access and export
+# which source resolved; fetch-audit.sh reads from it and the output cites it.
+# Report-only: do NOT fail on "none" (a missing source must be surfaced loudly in
+# the digest, never silently skipped).
+if journalctl -u openclaw-gateway-edge.service -n 0 >/dev/null 2>&1; then
+  export CAROLINE_REASONING_LEAK_SOURCE="journalctl"
+elif [ -r "${CAROLINE_SYSLOG_PATH:-/var/log/syslog}" ]; then
+  export CAROLINE_REASONING_LEAK_SOURCE="syslog"
+else
+  export CAROLINE_REASONING_LEAK_SOURCE="none"
+fi
+
 # 9. WORKDIR — caller owns lifetime when sourced
 umask 077
 WORKDIR=$(mktemp -d -t "caroline-review-XXXXXX")
@@ -100,4 +114,4 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
   fi
 fi
 
-echo "preflight: ok (tool_ctx=$CV_TOOL_CTX_CONVERSATION_ID)"
+echo "preflight: ok (tool_ctx=$CV_TOOL_CTX_CONVERSATION_ID reasoning_leak_src=$CAROLINE_REASONING_LEAK_SOURCE)"
