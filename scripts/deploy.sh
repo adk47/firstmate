@@ -1929,7 +1929,11 @@ for j in live.get('jobs', []):
 # human label that may change (e.g. b2b-reply-scanner-15m -> -1h cadence
 # rename).
 live_states = {j['id']: j.get('state', {}) for j in live.get('jobs', [])}
-live_names = {j['id']: j.get('name', '') for j in live.get('jobs', [])}
+# Ephemeral one-shot jobs (deleteAfterRun + a one-time `at` schedule) are
+# created at runtime by agents and self-delete after firing — never a
+# committable/protected orphan. Used by the orphan filter below.
+live_ephemeral = {j['id'] for j in live.get('jobs', [])
+                  if j.get('deleteAfterRun') is True and j.get('schedule', {}).get('kind') == 'at'}
 repo_ids = {j['id'] for j in repo.get('jobs', [])}
 preserved = 0
 for j in repo.get('jobs', []):
@@ -1945,12 +1949,15 @@ for j in repo.get('jobs', []):
 # removal (set HYDRA_ALLOW_ORPHAN_CRON=1) or a refactor that changed
 # UUIDs (write a migration instead of bypassing the guard).
 orphaned = set(live_states) - repo_ids
-# Ephemeral qa-autoreview-pr-<N> crons (QA auto-review bot, PR #391) are
-# one-shot review jobs created at runtime per PR and never committed to the
-# repo. They are disposable — the bot recreates them as needed — so they are
-# not protected orphan state. Drop them from the live file on sync without
-# blocking the deploy (otherwise every deploy after a QA review would halt).
-orphaned = {i for i in orphaned if not str(live_names.get(i, '')).startswith('qa-autoreview-pr-')}
+# Ephemeral one-shot crons (deleteAfterRun + a one-time `at` schedule) are
+# created at runtime by agents and never committed to the repo: the QA
+# auto-review bot's qa-autoreview-pr-<N> review jobs (PR #391), the CMO
+# agent's b2b-*-send-report reminders, etc. They are disposable and
+# self-delete after firing — not protected orphan state. Drop them from the
+# live file on sync without blocking the deploy (otherwise any deploy that
+# races a pending one-shot would halt). Matched by PROPERTY, not name, so
+# every agent's one-shots are covered — not just the QA bot's.
+orphaned = {i for i in orphaned if i not in live_ephemeral}
 if orphaned:
     if os.environ.get('HYDRA_ALLOW_ORPHAN_CRON') == '1':
         print(f'  HYDRA_ALLOW_ORPHAN_CRON=1: dropping live state for {len(orphaned)} job ids no longer in repo: {sorted(orphaned)}', file=sys.stderr)

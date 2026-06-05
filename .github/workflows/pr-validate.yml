@@ -671,18 +671,21 @@ jobs:
             exit 0
           fi
 
-          # Extract job IDs from both. Skip ephemeral qa-autoreview-pr-<N>
-          # crons: the QA auto-review bot (PR #391) creates these one-shot
-          # review jobs at runtime to review each PR; they are never committed
-          # to cron-jobs.json by design, so they must not be flagged as orphans
-          # (otherwise this gate blocks every PR the bot has reviewed — including
-          # the bot's review cron for the PR currently under validation).
+          # Extract job IDs from both. Skip ephemeral one-shot crons: any job
+          # with deleteAfterRun + a one-time `at` schedule is created at runtime
+          # by an agent and is never committed to cron-jobs.json by design (e.g.
+          # the QA bot's qa-autoreview-pr-<N> review jobs from PR #391, or the
+          # CMO agent's b2b-*-send-report reminders). They self-delete after
+          # firing, so they are not protected orphan state. Matching by PROPERTY
+          # rather than the qa-autoreview-pr- name prefix exempts EVERY agent's
+          # one-shots — otherwise this gate blocks any PR opened while such a job
+          # is pending on the server.
           server_ids=$(python3 -c "
           import json, sys
           with open('$SERVER_CRON') as f:
               data = json.load(f)
           for job in data.get('jobs', []):
-              if str(job.get('name', '')).startswith('qa-autoreview-pr-'):
+              if job.get('deleteAfterRun') is True and job.get('schedule', {}).get('kind') == 'at':
                   continue
               print(job['id'])
           " | sort)
