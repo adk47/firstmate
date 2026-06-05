@@ -61,19 +61,24 @@ root_ts=""
 # (network/auth/missing PR) must never block the DM -> fall back to no title.
 # Strip <>| and newlines so the title can't break the Slack <url|label> link.
 pr_url="https://github.com/${repo}/pull/${pr}"
+# Repo short name (drop the Muso-AI/ owner) so the DM names its source repo now
+# that the bot reviews several — e.g. web-credits-next#24 vs hydra#123.
+repo_short="${repo#*/}"
 title="$("$GH" pr view "$pr" --repo "$repo" --json title --jq .title 2>/dev/null || true)"
 title="$(printf '%s' "$title" | tr -d '<>|\n\r')"
 if [ -n "$title" ]; then
-  link="<${pr_url}|#${pr}: ${title}>"
+  link="<${pr_url}|${repo_short}#${pr}: ${title}>"
 else
-  link="<${pr_url}|PR #${pr}>"
+  link="<${pr_url}|${repo_short}#${pr}>"
 fi
 
-# Opening note — reads as a follow-up once a thread root already exists.
+# Opening note — the repo#PR link already identifies the source, and the Slack
+# app is "QA", so we don't repeat the bot name (saves room for the repo). Reads
+# as a follow-up once a thread root already exists.
 if [ -n "$root_ts" ]; then
-  text="🔄 *Muso QA Bot* — re-reviewing ${link} after a new push. Updated review going to GitHub; I'll follow up here."
+  text="🔄 re-reviewing ${link} after a new push. Updated review going to GitHub; I'll follow up here."
 else
-  text="🔍 *Muso QA Bot* — reviewing ${link} now. Full review going to GitHub; I'll update this thread."
+  text="🔍 reviewing ${link} now. Full review going to GitHub; I'll update this thread."
 fi
 
 # Post via qa-slack-dm.sh. Echoes the message ts on success, empty on failure

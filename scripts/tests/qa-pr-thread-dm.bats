@@ -50,11 +50,13 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ "$output" = "1717171717.000100" ]
   # No thread_ts on the first send (top-level).
   [ "$(cat "$STUB_THREAD")" = "" ]
-  # First-review wording with the clickable titled link, not the re-review variant.
-  grep -q -- '#123: Guard reasoning leak' "$STUB_TEXT"
+  # First-review wording with the clickable titled link (repo-prefixed), not the
+  # re-review variant, and no longer carrying the redundant bot name.
+  grep -q -- 'hydra#123: Guard reasoning leak' "$STUB_TEXT"
   grep -q -- 'https://github.com/Muso-AI/hydra/pull/123' "$STUB_TEXT"
   grep -q -- "I'll update this thread" "$STUB_TEXT"
   ! grep -q -- 're-reviewing' "$STUB_TEXT"
+  ! grep -q -- 'Muso QA Bot' "$STUB_TEXT"
   # The thread root is persisted for next time.
   [ "$(cat "$STATE_FILE")" = "1717171717.000100" ]
 }
@@ -69,9 +71,9 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ "$output" = "1111111111.000001" ]
   # The send was threaded under the root.
   [ "$(cat "$STUB_THREAD")" = "1111111111.000001" ]
-  # Re-review wording with the clickable titled link.
+  # Re-review wording with the clickable titled link (repo-prefixed).
   grep -q -- 're-reviewing' "$STUB_TEXT"
-  grep -q -- '#123: Guard reasoning leak' "$STUB_TEXT"
+  grep -q -- 'hydra#123: Guard reasoning leak' "$STUB_TEXT"
   grep -q -- 'https://github.com/Muso-AI/hydra/pull/123' "$STUB_TEXT"
   # Root is unchanged (still the original).
   [ "$(cat "$STATE_FILE")" = "1111111111.000001" ]
@@ -88,8 +90,8 @@ STUB
   run "$SCRIPT" Muso-AI/hydra 123 U0AL36NADEY
   [ "$status" -eq 0 ]
   [ "$output" = "1717171717.000100" ]
-  # Falls back to the title-less link, not a broken/empty one.
-  grep -q -- '<https://github.com/Muso-AI/hydra/pull/123|PR #123>' "$STUB_TEXT"
+  # Falls back to the title-less link (repo-prefixed), not a broken/empty one.
+  grep -q -- '<https://github.com/Muso-AI/hydra/pull/123|hydra#123>' "$STUB_TEXT"
   ! grep -q -- 'Guard reasoning leak' "$STUB_TEXT"
   [ "$(cat "$STATE_FILE")" = "1717171717.000100" ]
 }

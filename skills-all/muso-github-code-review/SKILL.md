@@ -42,11 +42,13 @@ the gates below ARE the authorization. You keep the PR author updated in a Slack
 CI check, batched-review API, the `qa-pr-approve.sh` wrapper, logging — with these
 overrides. The dispatch message gives you the author's Slack UID.
 
-**Identity — brand everything "Muso QA Bot".** GitHub records the review/approval
+**Identity — make the automation legible.** GitHub records the review/approval
 under the host account (Aaron / adk47); there is no separate bot user. So lead the
 GitHub **review body** and the **approval body** with a clear `🤖 Muso QA Bot
 (automated review)` banner so it reads as automation, not a manual review by Aaron.
-The Slack DMs go out as the QA app — still self-identify as Muso QA Bot in the text.
+The Slack DMs go out as the QA app, so they don't repeat the bot name in the text —
+the opening note names the `repo#PR` link (which identifies the source) and the
+result leads with the ✅/⛔ state.
 
 1. **FIRST, DM the author an opening note and keep the returned thread ts.** This is
    how they know a review started. Use the per-PR thread helper (not `qa-slack-dm.sh`
