@@ -26,19 +26,40 @@
 #               (legacy DB names are sed-rewritten before execution).
 set -euo pipefail
 
-if [ $# -eq 0 ]; then
+# SQL is read from a single argument OR from stdin (when no args are given).
+# Stdin is the ROBUST path for SQL containing quotes/parens (e.g.
+# `lower(coalesce(plan,''))`): passing such SQL as a shell argument forces the
+# caller to escape parens/quotes, which an LLM-driven cron payload routinely
+# gets wrong (daily-churned-campaign-refresh failed exactly this way). A quoted
+# heredoc needs no escaping:
+#   trino-query.sh <<'SQL'
+#   SELECT ... WHERE lower(coalesce(plan,'')) LIKE '%pro%' ...
+#   SQL
+if [ "$#" -gt 0 ]; then
+  SQL="$*"
+elif [ ! -t 0 ]; then
+  SQL="$(cat)"
+else
   cat >&2 <<EOF
-Usage: $0 "<SQL>"
+Usage: $0 "<SQL>"        (single argument)
+   or: $0 <<'SQL' ...    (pipe SQL on stdin — preferred when SQL has parens/quotes)
 
 Examples:
   $0 "SHOW CATALOGS"
-  $0 "SELECT count(*) FROM hive.default.matvw_catalog_track WHERE is_deleted=false"
   $0 'SELECT * FROM "platform-industry-bi-prod".matvw_catalog_profile LIMIT 5'
+  $0 <<'SQL'
+  SELECT status, plan, count(*) FROM postgresql_core.public.subscriptions
+  WHERE lower(coalesce(plan,'')) LIKE '%pro%' GROUP BY 1,2
+  SQL
 EOF
   exit 1
 fi
 
-SQL="$*"
+# Empty SQL (e.g. no arg and empty stdin) is a usage error, never a cluster call.
+if [ -z "${SQL//[[:space:]]/}" ]; then
+  echo "ERROR: empty SQL (no argument and nothing on stdin)" >&2
+  exit 1
+fi
 
 # ── Step 1: rewrite legacy Athena DB names → Trino catalog.schema ──
 # IMPORTANT: OVH Hive Metastore preserved the original Athena schema

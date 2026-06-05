@@ -146,7 +146,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Daily Win-Back Campaign sheet update. Query Athena for new churned Pro users. Diff against existing emails in Google Sheet (1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs, account: a@muso.ai). ONLY APPEND new rows — never replace or overwrite tracking columns (AI-AN). Return a short summary of new additions as your final output — do NOT post to Slack directly; the cron runner will deliver it to #win-back-alerts.",
+        "message": "Daily Win-Back Campaign sheet update. Query Trino for new churned Pro users by running bash /opt/hydra/scripts/trino-query.sh. ALWAYS pipe the SQL on stdin using a quoted heredoc (bash /opt/hydra/scripts/trino-query.sh <<'SQL' ... SQL); NEVER pass SQL as a quoted argument, because parens and quotes in SQL such as coalesce(plan,'') break shell-arg escaping and have failed this cron before. Diff against existing emails in Google Sheet (1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs, account: a@muso.ai). ONLY APPEND new rows — never replace or overwrite tracking columns (AI-AN). Return a short summary of new additions as your final output — do NOT post to Slack directly; the cron runner will deliver it to #win-back-alerts.",
         "timeoutSeconds": 900,
         "model": "openai/gpt-5.5",
         "fallbacks": [
@@ -506,7 +506,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run the muso-outreach-discovery skill. Find 50 new companies matching Muso Ads target verticals. Dedupe against contacts_intelligence sheet, company_intelligence sheet, GHL B2B-Ads-Clio pipeline, and parent-companies.md (to skip subsidiaries of known parents). Score and select top 50. Return the batch as your final output — do NOT post to Slack directly; the cron runner will deliver it to #company-finder for Fede's review. Follow the SKILL.md workflow exactly. If no new companies match, your final assistant reply must be exactly the single token NO_REPLY and nothing else — no preamble, no explanation, no markdown, no punctuation. OpenClaw recognises this token and will silently complete the run without posting to Slack. Reference files are in skills/muso-outreach-engine/references/ — NEVER create files at workspace root.",
+        "message": "Run the muso-outreach-discovery skill. Find 50 new companies matching Muso Ads target verticals. Dedupe against contacts_intelligence sheet, company_intelligence sheet, GHL B2B-Ads-Clio pipeline, and parent-companies.md (to skip subsidiaries of known parents). Score and select top 50. Return the batch as your final output — do NOT post to Slack directly; the cron runner will deliver it to #company-finder for Fede's review. Follow the SKILL.md workflow exactly. If no new companies match, your final assistant reply must be exactly the single token NO_REPLY and nothing else — no preamble, no explanation, no markdown, no punctuation. OpenClaw recognises this token and will silently complete the run without posting to Slack. Reference files are in skills/muso-outreach-engine/references/ — NEVER create files at workspace root. Do all dedup and selection with native tools (gog sheets reads, GHL reads, read parent-companies.md directly) and in your own reasoning. Do NOT improvise multi-step shell pipelines: no mktemp or $TMP scratch dirs, and no jq piped into while/do/break loops, which have failed this cron before.",
         "timeoutSeconds": 600,
         "model": "openai/gpt-5.5",
         "fallbacks": [

@@ -635,7 +635,8 @@
         "enabled": true,
         "config": {
           "appServer": {
-            "mode": "yolo"
+            "mode": "yolo",
+            "turnCompletionIdleTimeoutMs": 180000
           }
         }
       },

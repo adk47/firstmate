@@ -134,3 +134,28 @@ rewrites() {
   # if the guard regressed, the kubectl stub would have emitted its refusal
   ! echo "$output" | grep -q "kubectl call refused"
 }
+
+# ── Stdin path (the daily-churned coalesce() arg-escaping fix) ───────────
+# SQL with parens/quotes broke when passed as a shell ARG (the agent's quoting
+# failed on `coalesce(plan,'')`). Stdin needs no escaping; these pin that the
+# stdin path reads, rewrites, and preserves the escaping-prone expression.
+
+@test "stdin: SQL piped with no args is read and rewritten" {
+  run bash -c "printf '%s' 'SELECT id FROM \"platform-core-backend-export-prod\".public_users' | bash '$TQ'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "SELECT id FROM postgresql_core.public.users" ]
+}
+
+@test "stdin: heredoc with parens/quotes survives untouched (coalesce escaping bug)" {
+  run bash "$TQ" <<'SQL'
+SELECT plan FROM "platform-core-backend-export-prod".public_subscriptions WHERE lower(coalesce(plan,'')) LIKE '%pro%'
+SQL
+  [ "$status" -eq 0 ]
+  [ "$output" = "SELECT plan FROM postgresql_core.public.subscriptions WHERE lower(coalesce(plan,'')) LIKE '%pro%'" ]
+}
+
+@test "no arg and empty stdin is a usage error (exit 1, no kubectl)" {
+  run bash -c "printf '' | bash '$TQ'"
+  [ "$status" -eq 1 ]
+  ! echo "$output" | grep -q "kubectl call refused"
+}
