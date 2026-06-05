@@ -138,6 +138,26 @@ if [ -z "$WRITERS" ]; then
       fi
     fi
   fi
+  # config-io self-persist suppression: when openclaw's own runtime ACCEPTS a
+  # config change (e.g. one made via the `openclaw` CLI on the box) it persists
+  # openclaw.json via atomic-rename and logs a graceful-accept line. Those are
+  # intended admin actions, not hostile edits, so silence them. Guard tightly:
+  # suppress only when the gateway ACCEPTED the change. A rejected/invalid write
+  # (the 2026-05-05 crash class) logs "config reload skipped (invalid config)"
+  # and MUST still alert; a plain external hand-edit openclaw never accepted has
+  # no accept line and also still alerts. Fail toward alerting. Window matches
+  # observed timing: the accept line lands ~1-2s after the write.
+  if [ -n "$profile" ]; then
+    recent_reload=$(journalctl -u "openclaw-gateway-${profile}.service" \
+      --since '30 sec ago' --no-pager 2>/dev/null || true)
+    if printf '%s' "$recent_reload" | grep -qE 'config reload skipped \(invalid config\)'; then
+      : # rejected change in window — do NOT suppress; fall through to alert
+    elif printf '%s' "$recent_reload" | grep -qE \
+        'config hot reload applied|config change requires gateway restart|received SIGUSR1'; then
+      log "[legit] openclaw config-io self-persist — gateway accepted reload/restart within 30s, no alert"
+      exit 0
+    fi
+  fi
   log "no current writer (atomic-rename or fast-close); falling back to journald correlation"
   source_evidence="rename-style write (no live writer); see SSH session log below"
 elif [ -z "$NON_GATEWAY_WRITERS" ]; then

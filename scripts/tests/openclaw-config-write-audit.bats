@@ -89,6 +89,26 @@ STUB
   export PATH
 }
 
+# PATH-shadow journalctl so the audit script's config-io self-persist check
+# (`journalctl -u openclaw-gateway-<profile>.service --since '30 sec ago' …`)
+# returns scripted output instead of querying the live gateway journal on
+# node-8 (which would make these tests flaky). Pass the desired stdout, or ""
+# for "no reload activity in window". Same stub also intercepts the SSH-
+# correlation journalctl call — benign: its output is grep-filtered for SSH
+# session lines, which scripted reload text never matches.
+stub_journalctl() {
+  local out="$1"
+  mkdir -p "$TEST_TMPDIR/bin"
+  cat > "$TEST_TMPDIR/bin/journalctl" <<STUB
+#!/bin/bash
+printf '%s\n' "$out"
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+  PATH="$TEST_TMPDIR/bin:$PATH"
+  export PATH
+}
+
 # Portable timestamp generator: returns an ISO string `<secs_ago>`
 # seconds before now, in the format systemd's ActiveEnterTimestamp
 # uses. Uses python3 because BSD `date` (macOS) and GNU `date`
@@ -209,6 +229,7 @@ require_linux() {
   setup_profile_watched edge
   ts=$(iso_seconds_ago 60)
   stub_systemctl "$ts"
+  stub_journalctl ""  # no reload activity → don't let the self-persist branch interfere
 
   run run_audit
   [ "$status" -eq 0 ]
@@ -220,6 +241,7 @@ require_linux() {
 @test "systemctl returns empty ActiveEnterTimestamp → alert fires (no spurious silencing)" {
   setup_profile_watched main
   stub_systemctl ""
+  stub_journalctl ""  # no reload activity → don't let the self-persist branch interfere
 
   run run_audit
   [ "$status" -eq 0 ]
@@ -234,6 +256,96 @@ require_linux() {
   # fresh systemctl stub.
   ts=$(iso_seconds_ago 5)
   stub_systemctl "$ts"
+
+  run run_audit
+  [ "$status" -eq 0 ]
+  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  [ -f "$TEST_TMPDIR/slack.calls" ]
+}
+
+# ─── config-io self-persist suppression (gateway accepted reload/restart) ───
+# After the startup-suppression window misses, the audit script asks the
+# gateway journal whether openclaw ACCEPTED a config change in the last 30s.
+# An accept line (hot-reload-applied / requires-restart / SIGUSR1) means the
+# write was openclaw's own config-io persist of a CLI/runtime change → silence.
+# A reject line ("config reload skipped (invalid config)") is the 2026-05-05
+# crash class → MUST still alert. No accept line → still alert. stub_systemctl
+# "" keeps the prior (startup) branch from firing so we exercise this one.
+
+@test "gateway logged 'config hot reload applied' in window → no alert, [legit] self-persist" {
+  setup_profile_watched main
+  stub_systemctl ""
+  stub_journalctl "2026-06-05T14:06:03.868+00:00 [reload] config hot reload applied (agents.list)"
+
+  run run_audit
+  [ "$status" -eq 0 ]
+  grep -q '\[legit\] openclaw config-io self-persist' "$OPENCLAW_AUDIT_LOG"
+  [ ! -f "$TEST_TMPDIR/slack.calls" ]
+}
+
+@test "gateway logged 'config change requires gateway restart' in window → no alert, [legit] self-persist" {
+  setup_profile_watched main
+  stub_systemctl ""
+  stub_journalctl "2026-06-05T14:06:03.967+00:00 [reload] config change requires gateway restart (plugins.installs)"
+
+  run run_audit
+  [ "$status" -eq 0 ]
+  grep -q '\[legit\] openclaw config-io self-persist' "$OPENCLAW_AUDIT_LOG"
+  [ ! -f "$TEST_TMPDIR/slack.calls" ]
+}
+
+@test "gateway logged 'received SIGUSR1; restarting' in window → no alert, [legit] self-persist" {
+  setup_profile_watched edge
+  stub_systemctl ""
+  stub_journalctl "2026-06-05T14:06:03.969+00:00 [gateway] received SIGUSR1; restarting"
+
+  run run_audit
+  [ "$status" -eq 0 ]
+  grep -q '\[legit\] openclaw config-io self-persist' "$OPENCLAW_AUDIT_LOG"
+  [ ! -f "$TEST_TMPDIR/slack.calls" ]
+}
+
+@test "gateway logged 'config reload skipped (invalid config)' in window → alert fires (crash class not masked)" {
+  setup_profile_watched main
+  stub_systemctl ""
+  stub_journalctl "2026-06-05T14:06:03.900+00:00 [reload] config reload skipped (invalid config): subagents: Unrecognized key"
+
+  run run_audit
+  [ "$status" -eq 0 ]
+  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  [ -f "$TEST_TMPDIR/slack.calls" ]
+  grep -q 'Out-of-band write' "$TEST_TMPDIR/slack.calls"
+}
+
+@test "both reject and accept lines in window → alert fires (fail toward alerting)" {
+  setup_profile_watched main
+  stub_systemctl ""
+  stub_journalctl "$(printf '%s\n%s\n' \
+    '[reload] config hot reload applied (agents.list)' \
+    '[reload] config reload skipped (invalid config): subagents: Unrecognized key')"
+
+  run run_audit
+  [ "$status" -eq 0 ]
+  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  [ -f "$TEST_TMPDIR/slack.calls" ]
+}
+
+@test "only 'config change detected' (no accept) in window → alert fires (external write not masked)" {
+  setup_profile_watched main
+  stub_systemctl ""
+  stub_journalctl "2026-06-05T14:06:03.868+00:00 [reload] config change detected (agents.list)"
+
+  run run_audit
+  [ "$status" -eq 0 ]
+  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  [ -f "$TEST_TMPDIR/slack.calls" ]
+  grep -q 'Out-of-band write' "$TEST_TMPDIR/slack.calls"
+}
+
+@test "empty gateway journal in window → alert fires (no spurious silencing)" {
+  setup_profile_watched main
+  stub_systemctl ""
+  stub_journalctl ""
 
   run run_audit
   [ "$status" -eq 0 ]
