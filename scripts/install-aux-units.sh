@@ -37,6 +37,12 @@
 #     detection lag was the dominant component of the outage's
 #     ops-silent window.
 #
+#   /etc/cron.d/cron-health-watchdog
+#     Schedules scripts/cron-health-watchdog.sh every 5 minutes to
+#     alert #clio_devops on any errored cron run (the missing
+#     failure-notification layer behind the 2026-06 silent
+#     b2b-reply-scanner breakage).
+#
 #   hydra-release.timer / .service
 #     Daily-release cron. Mon..Fri 08:00 Europe/Rome. Invokes
 #     scripts/release-cron.sh, which:
@@ -92,6 +98,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/openclaw-config-write-audit.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/openclaw-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/openclaw-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/cron-health-watchdog.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/cron-health-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 
@@ -312,6 +320,20 @@ cat > /etc/cron.d/openclaw-watchdog << CRONWATCHDOG
 */2 * * * * root $HYDRA_ROOT/scripts/openclaw-watchdog.sh >> /var/log/openclaw-watchdog.log 2>&1
 CRONWATCHDOG
 chmod 644 /etc/cron.d/openclaw-watchdog
+
+# ─── Cron-failure watchdog at 5-min cadence ───────────────────
+# Alerts #clio_devops the moment any openclaw cron run errors, so a
+# broken job can't rot silently in cron/runs/*.jsonl (the 2026-06
+# b2b-reply-scanner stacked 17 failures over ~3 days unnoticed).
+# 5 min is plenty: cron failures aren't latency-sensitive the way the
+# gateway-crash watchdog is, and the per-job watermark dedupe means a
+# persistent failure pages once, not every tick. Same ownership rule:
+# edit here + re-run install-aux-units.sh, never edit the file on node-8.
+cat > /etc/cron.d/cron-health-watchdog << CRONHEALTH
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+*/5 * * * * root $HYDRA_ROOT/scripts/cron-health-watchdog.sh >> /var/log/cron-health-watchdog.log 2>&1
+CRONHEALTH
+chmod 644 /etc/cron.d/cron-health-watchdog
 
 # Drop the legacy per-user crontab line if it's still installed.
 # Idempotent: removes the line if present, no-op otherwise.

@@ -289,22 +289,22 @@
     {
       "id": "0e39220e-d666-4f00-b871-29a479315037",
       "agentId": "cmo",
-      "name": "b2b-reply-scanner-4h",
-      "description": "Scan Gmail for B2B prospect replies every 4 hours",
+      "name": "b2b-reply-scanner-hourly",
+      "description": "Scan Gmail (a@/f@/ak@) for B2B Ads outreach replies every hour",
       "enabled": true,
       "createdAtMs": 1774313970262,
-      "updatedAtMs": 1777901208348,
+      "updatedAtMs": 1780669284000,
       "schedule": {
         "kind": "every",
-        "everyMs": 14400000,
-        "anchorMs": 1778750974528
+        "everyMs": 3600000,
+        "anchorMs": 1780665204552
       },
       "sessionTarget": "isolated",
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Scan Gmail (a@muso.ai) for new B2B Ads outreach replies in the last 245 minutes (4h plus 5min overlap). Use gog to check recent inbox. Filter for replies from B2B prospects we have emailed (cross-reference with the B2B outreach sheet). IGNORE all internal emails (from muso.ai domains), SaaS notifications, marketing emails, and anything that is not a direct reply from a B2B prospect.\n\nAlways emit a visible final assistant message. Never end the run with a thinking-only response. The visible message MUST be one of these two forms and nothing else:\n\n(A) If there are no new B2B prospect replies, your final visible message is exactly: NO_REPLY (uppercase, nothing else — no preamble, no explanation, no markdown, no punctuation, no quotes). OpenClaw recognises this token and will silently complete the run without posting to Slack.\n\n(B) If you find an actual B2B prospect reply, format the visible message as: sender name, company, reply summary, and suggested next action. Also sync GHL pipeline stage if applicable (move to Replied or Meeting Booked).",
-        "timeoutSeconds": 300,
+        "message": "Run the B2B Ads reply scanner.\n\nScan Gmail for new Muso Ads outreach replies in the last 70 minutes across these accounts: a@muso.ai, f@muso.ai, ak@muso.ai.\n\nUse gog Gmail search with body included. Do not rely only on label:\"B2B - Ads\" because inbound replies may not carry the label. Search broadly for inbox replies tied to Muso Ads outreach, including subjects/bodies around Muso Ads, Muso.AI, calendar.muso.ai, Private invite, 820K, ads to 820K, Reaching 820K, and Muso.AI x.\n\nFilter out internal muso.ai mail, SaaS notifications, DMARC reports, newsletters, spam, unrelated customer support, and unrelated inbox noise. Keep true prospect replies, meeting-booking language, referrals/new points of contact, questions, pricing asks, explicit pass/unsubscribe replies, OOO with useful referral info, and B2B delivery failures/bounces. Deduplicate by Gmail threadId and account.\n\nCurrent B2B outreach rules:\n- Gmail owns send/reply detection.\n- NocoDB is read-only and is the source of contact/company context. Look up contact/company when possible.\n- Do not write to NocoDB.\n- Do not use GHL.\n- Do not use Google Sheets.\n- Do not move stages.\n- Do not auto-reply.\n- Do not create Gmail drafts.\n- Do not mark messages read.\n\nFor every true item, classify it as Replied, Meeting Booked, Referral, Pricing, Question, Interested/send-info, Soft-no/later, Pass, Bounce, OOO, or Other.\n\nThen apply the muso-outreach-reply-responder logic:\n- Decide answer vs skip.\n- Match sender voice to the receiving account: a@/ak@ = Aaron, f@ = Fede.\n- Pull thread history before drafting if available.\n- If answering, provide ONE exact suggested reply whose only goal is a 15-20 minute call.\n- Keep warm-thread replies short and playbook-native.\n- No em dashes or en dashes.\n- Do not create the Gmail draft until Fede or Aaron approves in Slack.\n\nIf no actual new B2B prospect replies or B2B bounces are found, final visible message must be exactly: NO_REPLY\n\nIf one or more are found, final visible message must be concise Slack mrkdwn for #sales-alerts. For each item:\n*New B2B Reply*\nFrom: *<name>* (<company>, <title if known>)\nReceived on: <account>\nType: *<classification>*\nPreview: _<short preview>_\nVerdict: answer / skip\n\n*Suggested reply:*\n> <exact draft body, as Aaron or Fede would send>\n\nManual next step: Fede/Aaron approve before any Gmail draft is created. Fede/team updates NocoDB Status manually if needed.\n\nAlways emit a visible final assistant message. Never end with thinking-only output.",
+        "timeoutSeconds": 420,
         "thinking": "off",
         "model": "openai/gpt-5.5",
         "fallbacks": [
@@ -678,8 +678,8 @@
       "id": "03695380-8cee-4305-bedd-96dfbd3fbb18",
       "agentId": "operations",
       "name": "caroline-daily-review",
-      "description": "Daily Caroline pulse — ~30h Intercom grade across voice/leak/tools/sentiment, glanceable post to #cs_chats. KB-gap + auto-PR deferred to the weekly KB roll-up (SP2). Lands disabled — shadow-channel proof run required before flipping enabled.",
-      "enabled": false,
+      "description": "Daily Caroline pulse — ~30h Intercom grade across voice/leak/tools/sentiment, glanceable post to #cs_chats. KB-gap + auto-PR deferred to the weekly KB roll-up (SP2). Enabled 2026-06-05 per request.",
+      "enabled": true,
       "createdAtMs": 1778773317394,
       "updatedAtMs": 1778773317394,
       "schedule": {
