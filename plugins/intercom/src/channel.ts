@@ -19,6 +19,11 @@ import {
   buildEscalationSlackMessage,
   buildEscalationSlackMessageMinimal,
 } from "./slack.js";
+import {
+  detectSilentDispatch,
+  buildSilentDispatchSlackPayload,
+  type SilentDispatchReason,
+} from "./silent-dispatch.js";
 import { createOpenRouterJudge } from "./judge.js";
 import { createClickupTicket } from "./clickup.js";
 import {
@@ -422,6 +427,7 @@ export const intercomPlugin = createChatChannelPlugin({
                     // to the customer as the bot spamming them.
                     const bufferedChunks: string[] = [];
                     let droppedMidStream = false;
+                    let dispatchThrew: Error | null = null;
 
                     // If the customer attached images and/or PDFs, fetch them
                     // NOW (Intercom CDN URLs are signed with ~30 min TTL) and
@@ -523,6 +529,7 @@ export const intercomPlugin = createChatChannelPlugin({
                         ? `(Customer sent ${documentRefs.length > 0 ? "a document/attachment" : persisted.length === 1 ? "an image" : `${persisted.length} images`} with no caption.)`
                         : result.body;
 
+                    try {
                     await dispatchInboundDirectDmWithRuntime({
                       cfg,
                       runtime: { channel: runtime },
@@ -566,6 +573,14 @@ export const intercomPlugin = createChatChannelPlugin({
                       onDispatchError: (err, info) =>
                         log?.error?.(`[${tag}] dispatch error (${info.kind}): ${err}`),
                     });
+                    } catch (err) {
+                      // dispatchInbound itself threw — gateway WS blip, route
+                      // resolution failure, recordInboundSession crash, etc.
+                      // Captured here so the silent-dispatch alarm below can
+                      // distinguish a thrown-dispatch from a zero-chunk one,
+                      // and so the alarm runs even if dispatch never returned.
+                      dispatchThrew = err instanceof Error ? err : new Error(String(err));
+                    }
 
                     // Flush buffered chunks as a single Intercom reply.
                     // Re-check `canAgentReply` here to catch state flips that
@@ -640,6 +655,47 @@ export const intercomPlugin = createChatChannelPlugin({
                       log?.warn?.(
                         `[${tag}] deliver dropped after dispatch: ${state.handoffMode}/${state.lifecycleState} conv=${result.conversationId}`,
                       );
+                    }
+
+                    // Silent-dispatch alarm (hydra #280). Two cases:
+                    //   1. dispatchInbound threw — surface the throw, since the
+                    //      outer try/catch would otherwise log it as a generic
+                    //      "webhook processing error" with no [intercom:ALERT].
+                    //   2. dispatch returned but no chunks landed AND the conv
+                    //      is still in a state where the agent should have
+                    //      replied — the bug behind ~3 stranded convs/day.
+                    const silentReason: SilentDispatchReason | null = dispatchThrew
+                      ? "dispatch_threw"
+                      : (() => {
+                          const d = detectSilentDispatch({
+                            bufferedChunks,
+                            state,
+                            droppedMidStream,
+                          });
+                          return d.silent ? d.reason : null;
+                        })();
+                    if (silentReason) {
+                      const errSnippet = dispatchThrew?.message ?? null;
+                      log?.error?.(
+                        `[intercom:ALERT] [${tag}] silent_dispatch conv=${result.conversationId} reason=${silentReason}${errSnippet ? ` error=${errSnippet}` : ""}`,
+                      );
+                      if (account.fallbackSlackSupervisionChannel) {
+                        const slackPayload = buildSilentDispatchSlackPayload({
+                          conversationId: result.conversationId,
+                          reason: silentReason,
+                          errorMessage: errSnippet ?? undefined,
+                          account,
+                        });
+                        fetch(account.fallbackSlackSupervisionChannel, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify(slackPayload),
+                        }).catch((err) => {
+                          log?.error?.(
+                            `[${tag}] silent-dispatch Slack post failed: ${err}`,
+                          );
+                        });
+                      }
                     }
                   } else if (result.action === "escalate") {
                     const { executeEscalation } = await import("./escalation-action.js");
