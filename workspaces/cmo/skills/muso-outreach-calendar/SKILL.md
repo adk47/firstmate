@@ -1,129 +1,111 @@
 ---
 name: muso-outreach-calendar
 description: |
-  Scans Google Calendar on a@muso.ai for new B2B Ads meeting bookings. Detects
-  calendar invites from prospects, triggers GHL stage move to Meeting Booked,
-  logs to the logbook sheet, and posts notifications to #sales-alerts.
+  Scans the a@muso.ai Google Calendar for newly-booked B2B Ads meetings (events
+  created in roughly the last hour with an external prospect attendee) and posts
+  a notification to #sales-alerts. Read-only: NocoDB is read for context only;
+  no GHL, no Google Sheets, no stage moves, no calendar modifications.
 
-  Runs as a cron every 15 minutes. Silent unless a new meeting is detected.
+  Runs as a cron every hour. Silent unless a new meeting is detected.
 
   Use when: automated meeting detection, manual "check for meetings" request
 
   Triggers: "check meetings", "new meetings", "calendar scan", "meeting booked"
 depends-on:
   - muso-outreach-engine
-  - muso-outreach-ghl-sync
   - muso-slack-formatter
 metadata:
-  version: "1.0"
-  last-updated: "2026-04-09"
+  version: "2.0"
+  last-updated: "2026-06-05"
+  cron: "b2b-meeting-scanner-hourly"
 ---
 
 # Muso Outreach Calendar Scanner
 
-Detects new B2B Ads meeting bookings on the a@muso.ai Google Calendar.
+Detects newly-booked B2B Ads meetings on the `a@muso.ai` Google Calendar.
 
 ## Cadence
 
-**Every 15 minutes.** Silent unless a new meeting is detected.
+**Every hour** via cron `b2b-meeting-scanner-hourly` (job id
+`217113ad-34ad-4ad8-81a8-c8452a635afc`, agent `cmo`, isolated session).
 
-## Shared Config
+**Silent if nothing new.** When no qualifying new meetings are found, the run's
+final visible message must be exactly `NO_REPLY` — OpenClaw recognizes that token
+and silently completes the run without posting to Slack. (The gateway only
+suppresses the literal `NO_REPLY` token; do not invent a `NO_MEETING` token — it
+would be posted to Slack.)
 
-See `../muso-outreach-engine/references/config.md`.
+## Systems of record (read-only)
 
-## Calendars to Watch
-
-Primary account: `a@muso.ai`
-
-Calendars (configurable, ask Fede to confirm):
-- `Intro | Muso Ads`
-- `Business Pro Meetings`
-- `Muso Ads 2`
-
-Also watch the main calendar for events with these keywords in the title or description:
-- "Muso Ads"
-- "Muso.AI"
-- "demo"
+- **gog owns calendar read.** It is the source of truth for bookings.
+- **NocoDB is read-only** — contact/company context only. Look up the external
+  attendee's company when possible. **Do not write to NocoDB.**
+- **Do not use GHL. Do not use Google Sheets.** (The old GHL Meeting-Booked
+  stage-move + logbook Sheet workflow is retired; Fede/team update NocoDB
+  manually.)
+- Do not move pipeline stages. **Do not create, modify, or delete any calendar
+  event** (no auto-accept on Fede/Aaron's behalf).
 
 ## Workflow
 
-### Step 1: Fetch Recent Events
+### Step 1: Fetch events
+
+Run **exactly** this command — do not add other flags (especially not `--fields`,
+which the agent tends to malform):
 
 ```bash
-gog calendar events list --account a@muso.ai \
-  --time-min "$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)" \
-  --time-max "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --calendar "<calendar_id>"
+gog -a a@muso.ai calendar events --from=today --days=90 --max=250 --all-pages --json
 ```
 
-Query the last hour window for new events (overlap with previous run is fine,
-we dedupe by event ID).
+Each event carries `created`, `updated`, `start`, `summary`, and `attendees`.
 
-### Step 2: Deduplicate
+### Step 2: Keep only newly-booked prospect meetings
 
-Maintain a simple state file or memory key to track processed event IDs. Skip
-any event ID already processed.
+Keep an event only if it BOTH:
 
-### Step 3: Match to Outreach Contact
+1. has a `created` timestamp within the last ~70 minutes (compare `created` vs now
+   in UTC — this is the "newly booked" signal, regardless of when the meeting is
+   scheduled to occur), AND
+2. has at least one attendee whose email domain is **not** `muso.ai` (an external
+   prospect).
 
-For each new event:
-1. Extract attendees (not including Aaron/Fede)
-2. For each external attendee, lookup email in `contacts_intelligence`
-3. If a match is found, this is a B2B Ads meeting booking
-4. If no match, log it but do not process (might be a customer meeting, not outreach)
+Deduplicate by event `id`. Ignore internal-only events, personal events,
+all-hands, standups, OOO, and recurring internal meetings.
 
-### Step 4: Trigger GHL Stage Move
+### Step 3: Post to Slack
 
-Call `muso-outreach-ghl-sync` with:
-- Contact email
-- New stage: `Meeting Booked`
-- Meeting details (date, time, calendar link)
-
-### Step 5: Log to Sheet
-
-Append to `muso-b2b-outreach-reports`:
+Post to `#sales-alerts` (`C0ARQ021M40`) as concise mrkdwn, one block per meeting:
 
 ```
-N | YYYY-MM-DD | a@muso.ai | domain | Contact | Company | Title | email |
-Meeting Booked | Meeting Booked | (meeting subject) | (original template) |
-Meeting on YYYY-MM-DD HH:MM, link: <calendar_link>
+*New B2B Meeting Booked*
+With: *<name>* (<company>, <title if known>)
+When: <event start, with timezone>
+Account: a@muso.ai
+Attendees: <external attendees>
 ```
 
-### Step 6: Post to Slack
-
-Post to `#sales-alerts` (`C0ARQ021M40`):
-
-```
-🗓 *Meeting Booked, YYYY-MM-DD*
-
-Prospect: *{Contact Name}* ({Company}, {Title})
-Meeting: {Meeting Title}
-When: {Date} at {Time} {Timezone}
-Link: <{calendar_link}|Open in Calendar>
-
-Stage moved: {previous stage} → *Meeting Booked*
-```
-
-For high value prospects (C-level, Tier 1 companies), prepend the post with `@fede` mention.
-
-### Step 7: Do Not Double Process
-
-Mark the event as processed. On the next scan, skip.
+Manual next step: Fede/Aaron set the prospect's NocoDB Status to Meeting Booked.
 
 ## Never
 
-- Never post "no meetings found"
-- Never move a prospect to Meeting Booked without confirming attendee match
-- Never confuse a demo call with a customer meeting (check against contacts_intelligence)
-- Never auto accept a meeting on Fede or Aaron's behalf
+- Never post "no meetings found" (silent rule — emit `NO_REPLY` instead).
+- Never write to NocoDB, GHL, or Google Sheets.
+- Never create, modify, accept, or delete a calendar event.
+- Never process the same event twice (dedupe by event `id`).
+- Never treat an internal-only event as a prospect meeting (require an external
+  attendee).
 
 ## Error Handling
 
-- If calendar API fails: log error, retry next run
-- If attendee match is ambiguous: post to `#sales-alerts` with question, do not auto move GHL
-- If the meeting was cancelled: move GHL stage to `No-Show` or back to `Replied`
+- If the calendar read fails: the cron's `bestEffort` delivery lets the run
+  complete, and the cron-health watchdog surfaces a hard error to `#clio_devops`.
+- If attendee context is ambiguous: still post the meeting with what is known;
+  do not block on enrichment.
 
 ## Legacy Note
 
-This replaces the old calendar watcher that ran under Clio. Same logic, now posts
-to `#sales-alerts` instead of `#clio_x_fede`.
+Earlier drafts of this skill described a 15-minute cron that moved GHL stages to
+Meeting Booked and appended to the `muso-b2b-outreach-reports` Sheet — and, in
+fact, no cron was ever deployed for it. The current cron (`b2b-meeting-scanner-hourly`,
+added 2026-06-05) is hourly, read-only on systems of record, and notifies
+`#sales-alerts` only, leaving the CRM update to a human via NocoDB.
