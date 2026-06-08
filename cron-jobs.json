@@ -23,7 +23,7 @@
         "thinking": "low",
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -66,7 +66,7 @@
         "thinking": "low",
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -108,7 +108,7 @@
         "model": "openai/gpt-5.5",
         "thinking": "low",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -150,7 +150,7 @@
         "timeoutSeconds": 900,
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -193,7 +193,7 @@
         "model": "openai/gpt-5.5",
         "thinking": "high",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -229,7 +229,7 @@
         "timeoutSeconds": 600,
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -271,7 +271,7 @@
         "timeoutSeconds": 300,
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -308,7 +308,7 @@
         "thinking": "off",
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -348,7 +348,7 @@
         "kind": "agentTurn",
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ],
         "message": "Run the AMP Daily Report. Query core-backend tables public_ad_events and public_ads via Athena (workgroup: clio-agent, region: us-west-2). Build report: 1) Summary: all-time/7d/today views, clicks, CTR, unique viewers with deltas. 2) Top 5 ads by CTR. 3) Underperformers (CTR < 0.3% with >1K views). 4) AMP vs Feed breakdown. 5) Platform breakdown. 6) Daily trend 7 days. Format for Slack bullets, keep short.",
@@ -387,7 +387,7 @@
         "timeoutSeconds": 300,
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -430,7 +430,7 @@
         "thinking": "low",
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -474,7 +474,7 @@
         "thinking": "low",
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -510,7 +510,7 @@
         "timeoutSeconds": 600,
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -552,7 +552,7 @@
         "model": "openai/gpt-5.5",
         "thinking": "high",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ],
         "timeoutSeconds": 1800
@@ -587,7 +587,7 @@
         "thinking": "low",
         "timeoutSeconds": 600,
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -624,7 +624,7 @@
         "thinking": "low",
         "timeoutSeconds": 600,
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -660,7 +660,7 @@
         "timeoutSeconds": 600,
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },
@@ -694,7 +694,7 @@
         "message": "Run the muso-caroline-weekly-review skill (daily pulse). Window: use the script default (CAROLINE_WINDOW_HOURS, ~30h) — do NOT pass a window. Grade voice/leak/tools/sentiment only; no KB-gap clustering, no PRs. Return the final glanceable review text as your final assistant message — do NOT post to Slack directly; the cron runner will deliver it to #cs_chats.",
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ],
         "thinking": "high",
@@ -731,7 +731,7 @@
         "model": "openai/gpt-5.5",
         "thinking": "high",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ],
         "timeoutSeconds": 900
@@ -768,7 +768,7 @@
         "thinking": "off",
         "model": "openai/gpt-5.5",
         "fallbacks": [
-          "openrouter/google/gemini-3.5-flash",
+          "openrouter/openai/gpt-5.4-mini",
           "openrouter/anthropic/claude-4.6-sonnet-20260217"
         ]
       },

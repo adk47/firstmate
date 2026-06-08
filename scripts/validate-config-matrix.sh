@@ -58,7 +58,9 @@ ALLOWED_LEVELS='["off","minimal","low","medium","high","xhigh","adaptive"]'
 AGENT_THINKING_LEVELS='["minimal","low","medium","high","xhigh","adaptive"]'
 
 fail=0
-for cfg in "${PROFILES[@]}"; do
+# ${PROFILES[@]+...} guard: PROFILES may be empty (e.g. cron-jobs.json passed
+# alone) and bash 3.2 errors on "${empty[@]}" under `set -u`.
+for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
   if [[ ! -f "$cfg" ]]; then
     echo "validate-config-matrix: skip (not found): $cfg" >&2
     continue
@@ -114,6 +116,38 @@ for cfg in "${PROFILES[@]}"; do
     echo "$bad" >&2
     fail=1
   fi
+
+  # 6. Empty-completion fallback safety: in every agent model.fallbacks chain,
+  #    every entry EXCEPT the last must be a GPT-5-family model. openclaw only
+  #    treats an empty/0-token completion as a failure-that-cascades for GPT-5
+  #    models (isGpt5ModelId gate in result-fallback-classifier); a non-GPT-5
+  #    model in a non-final position that returns an empty completion is scored
+  #    candidate_succeeded and silently STOPS the chain instead of advancing to
+  #    the stronger model behind it (2026-06-08 @CMO incident, PR #450).
+  #    GPT-5 id pattern matches openclaw's: (^|[/:])gpt-5([.-]|$), so
+  #    openrouter/openai/gpt-5.4-mini and openai/gpt-5.5 qualify; gemini / haiku
+  #    / sonnet / opus do not. Scope: agent text `model` chains only — NOT
+  #    imageModel (separate path; gpt-5.4-mini is not an image model). A non-GPT-5
+  #    *primary* (e.g. cmo on opus-4.7 by choice) keeps an unavoidable
+  #    empty-swallow residual that the cron-health watchdog covers; this gate
+  #    enforces only the fallback positions.
+  bad=$(jq -r '
+    ( [ {id: "agents.defaults", fb: (.agents.defaults.model.fallbacks // [])} ]
+      + [ (.agents.list // [])[] | {id: .id, fb: (.model.fallbacks // [])} ] )
+    | .[]
+    | .id as $id | .fb as $fb | ($fb | length) as $n
+    | select($n > 1)
+    | range(0; $n - 1) as $i
+    | $fb[$i] as $m
+    | select(($m | test("(^|[/:])gpt-5([.-]|$)"; "i")) | not)
+    | $id + " fallback[" + ($i | tostring) + "]=" + $m
+  ' "$cfg")
+  if [[ -n "$bad" ]]; then
+    while IFS= read -r line; do
+      echo "ERROR: $cfg non-GPT-5 model in a non-final fallback position (empty completions will NOT cascade — openclaw isGpt5ModelId gate): $line" >&2
+    done <<< "$bad"
+    fail=1
+  fi
 done
 
 # 4. Cron payload thinking values must be in the allowed enum.
@@ -137,16 +171,22 @@ if [[ -n "$CRON" && -f "$CRON" ]]; then
     fi
 
     # 5. Every cron payload must run on codex (openai/gpt-5.5) with the full
-    #    intended fallback chain: gemini-3.5-flash first, then claude-sonnet as
-    #    the last-resort backstop. Pins the 2026-06 cutover that moved all crons
-    #    off Opus/Haiku onto codex+gemini→sonnet: a future cron with any other
-    #    primary silently re-introduces OpenRouter Opus spend, a non-gemini
-    #    first fallback drops the intended cheap fallback hop, and dropping the
-    #    sonnet second fallback removes the quality backstop the money-touching
-    #    crons (credit-verification, dispute-handler) rely on — all while still
-    #    passing CI if we only checked the primary + first fallback.
+    #    intended fallback chain: gpt-5.4-mini first (cheap hop), then
+    #    claude-sonnet as the last-resort backstop. Pins the 2026-06 cutover
+    #    that moved all crons off Opus/Haiku onto codex, plus the 2026-06-08 fix
+    #    that swapped the cheap first hop gemini-3.5-flash → gpt-5.4-mini.
+    #    Rationale for the swap: openclaw only treats an empty/0-token completion
+    #    as a failure-that-cascades for GPT-5-family models (isGpt5ModelId gate
+    #    in result-fallback-classifier). A non-GPT-5 first hop (gemini) that
+    #    returns an empty completion counts as candidate_succeeded and STOPS the
+    #    chain — never reaching the sonnet backstop (the 2026-06-08 @CMO incident,
+    #    PR #450). gpt-5.4-mini is the same cheap tier but its empties cascade.
+    #    A future cron with any other primary silently re-introduces OpenRouter
+    #    Opus spend, a non-gpt-5.4-mini first fallback drops the cheap hop OR
+    #    re-introduces the swallow bug, and dropping the sonnet second fallback
+    #    removes the quality backstop the money-touching crons rely on.
     REQUIRED_CRON_MODEL="openai/gpt-5.5"
-    REQUIRED_CRON_FALLBACK1="openrouter/google/gemini-3.5-flash"
+    REQUIRED_CRON_FALLBACK1="openrouter/openai/gpt-5.4-mini"
     REQUIRED_CRON_FALLBACK2="openrouter/anthropic/claude-4.6-sonnet-20260217"
     bad=$(jq -r --arg m "$REQUIRED_CRON_MODEL" --arg fb1 "$REQUIRED_CRON_FALLBACK1" --arg fb2 "$REQUIRED_CRON_FALLBACK2" '
       .jobs // []
@@ -159,7 +199,7 @@ if [[ -n "$CRON" && -f "$CRON" ]]; then
     ' "$CRON")
     if [[ -n "$bad" ]]; then
       while IFS= read -r line; do
-        echo "ERROR: $CRON cron job must be on $REQUIRED_CRON_MODEL with fallbacks [$REQUIRED_CRON_FALLBACK1, $REQUIRED_CRON_FALLBACK2] (gemini-flash first, sonnet backstop): $line" >&2
+        echo "ERROR: $CRON cron job must be on $REQUIRED_CRON_MODEL with fallbacks [$REQUIRED_CRON_FALLBACK1, $REQUIRED_CRON_FALLBACK2] (gpt-5.4-mini cheap hop first, sonnet backstop): $line" >&2
       done <<< "$bad"
       fail=1
     fi

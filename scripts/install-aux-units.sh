@@ -43,6 +43,13 @@
 #     failure-notification layer behind the 2026-06 silent
 #     b2b-reply-scanner breakage).
 #
+#   /etc/cron.d/fallback-swallow-watchdog
+#     Schedules scripts/fallback-swallow-watchdog.sh every 5 minutes
+#     to alert #clio_devops when an agent turn ends in an empty
+#     completion surfaced as an error — the residual of openclaw's
+#     empty-completion-swallows-fallback flaw (2026-06-08 @CMO
+#     incident, PR #450) that the chain-reshape CI gate can't reach.
+#
 #   hydra-release.timer / .service
 #     Daily-release cron. Mon..Fri 08:00 Europe/Rome. Invokes
 #     scripts/release-cron.sh, which:
@@ -100,6 +107,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/openclaw-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/cron-health-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/cron-health-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 
@@ -334,6 +343,19 @@ cat > /etc/cron.d/cron-health-watchdog << CRONHEALTH
 */5 * * * * root $HYDRA_ROOT/scripts/cron-health-watchdog.sh >> /var/log/cron-health-watchdog.log 2>&1
 CRONHEALTH
 chmod 644 /etc/cron.d/cron-health-watchdog
+
+# Fallback-swallow watchdog: alerts #clio_devops when an agent turn ends in an
+# empty completion surfaced as an error — the residual of openclaw's
+# empty-completion-swallows-fallback flaw (PR #450) that the chain-reshape CI
+# gate (validate-config-matrix.sh check #6) can't reach (non-GPT-5 primary that
+# empties, the last model emptying, or a chain that slips the gate). 5 min: not
+# latency-sensitive, and the per-runId watermark dedupe means each swallow pages
+# once. Same ownership rule: edit here + re-run install-aux-units.sh.
+cat > /etc/cron.d/fallback-swallow-watchdog << SWALLOWWD
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+*/5 * * * * root $HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh >> /var/log/fallback-swallow-watchdog.log 2>&1
+SWALLOWWD
+chmod 644 /etc/cron.d/fallback-swallow-watchdog
 
 # Drop the legacy per-user crontab line if it's still installed.
 # Idempotent: removes the line if present, no-op otherwise.
