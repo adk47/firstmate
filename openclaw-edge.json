@@ -282,7 +282,11 @@
             "messenger",
             "tiktok",
             "sms"
-          ]
+          ],
+          "personalization": {
+            "enabled": true,
+            "timeoutMs": 2500
+          }
         }
       },
       "enabled": true
