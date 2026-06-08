@@ -49,6 +49,12 @@ if [[ "$path" == *dead* ]]; then
   exit 0
 fi
 pid="$(printf '%s' "$path" | sed -E 's#.*/analytics/([^/]+)/fast-lane#\1#')"
+# A uuid starting "0b0b0b0b" gets a 200 body WITHOUT data.bootstrapped (the live
+# backend omits it on some responses).
+if [[ "$path" == *0b0b0b0b* ]]; then
+  printf '{"http_status":200,"body":{"result":"ok","code":200,"data":{"profileId":"%s"}}}\n' "$pid"
+  exit 0
+fi
 printf '{"http_status":200,"body":{"result":"ok","code":200,"data":{"profileId":"%s","bootstrapped":true}}}\n' "$pid"
 STUB
   chmod +x "$ADMIN_STUB"
@@ -86,6 +92,16 @@ teardown() { rm -rf "$TEST_ROOT"; }
   [[ "$output" == *"profile analytics bootstrap"* ]]
   [[ "$output" == *"enqueued"* ]]
   [[ "$output" == *"bootstrapped=true"* ]]
+  # The user-facing report must NOT carry the internal disambiguation noise.
+  [[ "$output" != *"not credit verification"* ]]
+}
+
+@test "omits bootstrapped from the report when the backend response lacks it (no '?')" {
+  run bash "$SCRIPT" "0b0b0b0b-0000-0000-0000-000000000000" "" "U038BM16T7W" real
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"enqueued (HTTP 200)"* ]]
+  [[ "$output" != *"bootstrapped="* ]]
+  [[ "$output" != *"bootstrapped=?"* ]]
 }
 
 @test "report includes stream/track readback from the lifetime table" {

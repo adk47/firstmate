@@ -106,7 +106,7 @@ read_lifetime() {
 }
 
 # --- header -----------------------------------------------------------------
-REPORT=":rocket: *Fastlane — profile analytics bootstrap* (not credit verification)
+REPORT=":rocket: *Fastlane — profile analytics bootstrap*
 Mode: \`${MODE}\` | Profiles: ${#PROFILE_IDS[@]} | Requester: \`${REQUESTER}\` | trigger: \`${TRIGGER_SOURCE}\`"
 [[ "$MODE" == "dry" ]] && REPORT+="
 _dry-run: no writes; the would-be POST is logged to the dry-run audit._"
@@ -144,8 +144,10 @@ for pid in "${PROFILE_IDS[@]}"; do
       REPORT+="
 • \`${pid}\` — :large_yellow_circle: dry-run (would enqueue fastlane; no write)"
     else
+      detail="HTTP ${http_status}"
+      [[ -n "$bootstrapped" ]] && detail="bootstrapped=${bootstrapped}, ${detail}"
       REPORT+="
-• \`${pid}\` — :white_check_mark: enqueued (bootstrapped=${bootstrapped:-?}, HTTP ${http_status})"
+• \`${pid}\` — :white_check_mark: enqueued (${detail})"
       life="$(read_lifetime "$pid")"
       if [[ -n "$life" ]]; then
         IFS='|' read -r cc twd streams sp yt synced <<<"$life"
