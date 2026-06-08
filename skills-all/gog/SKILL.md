@@ -43,6 +43,8 @@ Common commands
 
 - Gmail search: `gog gmail search 'newer_than:7d' --max 10`
 - Gmail messages search (per email, ignores threading): `gog gmail messages search "in:inbox from:ryanair.com" --max 20 --account you@example.com`
+  - To include message bodies in the results, add `--include-body --json` (the JSON body is full text). The flag is `--include-body`, **NOT** `--body` — `--body` is a `gmail send` flag and `messages search` rejects it with `unknown flag --body`.
+  - `newer_than:`/`older_than:` only accept day/month/year units (`d`/`m`/`y`); there is no minute unit, so e.g. `newer_than:70m` means 70 *months*, not minutes.
 - Gmail send (plain): `gog gmail send --to a@b.com --subject "Hi" --body "Hello"`
 - Gmail send (multi-line): `gog gmail send --to a@b.com --subject "Hi" --body-file ./message.txt`
 - Gmail send (stdin): `gog gmail send --to a@b.com --subject "Hi" --body-file -`

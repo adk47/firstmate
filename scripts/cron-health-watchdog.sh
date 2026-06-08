@@ -47,6 +47,14 @@ STATE_FILE="${CRON_HEALTH_STATE_FILE:-/var/lib/cron-health-watchdog/seen.json}"
 LOCKFILE="${CRON_HEALTH_LOCKFILE:-/var/run/cron-health-watchdog.lock}"
 SKIP_HOST_GUARD="${CRON_HEALTH_SKIP_HOST_GUARD:-0}"
 ERROR_PREVIEW_CHARS=300
+# Only page once a job has this many CONSECUTIVE error runs with no intervening
+# healthy run. A single error bracketed by ok runs is a recovered/transient blip
+# (the openclaw outcome resolver flags a whole run "error" on any recovered tool
+# error — e.g. a cron agent that guessed a bad flag, self-corrected, and finished
+# fine). The incident this watchdog exists for was a SUSTAINED failure (17 straight
+# runs over ~3 days), so a streak threshold catches real breakage while killing the
+# recovered-blip false alarms. Set to 1 to restore alert-on-every-error.
+MIN_STREAK="${CRON_HEALTH_MIN_STREAK:-2}"
 DRY_RUN=0
 
 # slack-notify.sh reads these (channel + which config holds the token).
@@ -84,7 +92,8 @@ command -v python3 >/dev/null 2>&1 || { log "ERROR: python3 required but not on 
 # ──────────────────────────────────────────────────────────────
 scan_failures() {
   RUNS_DIR="$1" JOBS_FILE="$2" STATE_FILE="$3" PAYLOAD_OUT="$4" PERSIST="$5" \
-  SLACK_CHANNEL="$SLACK_CHANNEL" PREVIEW="$ERROR_PREVIEW_CHARS" python3 - <<'PYEOF'
+  SLACK_CHANNEL="$SLACK_CHANNEL" PREVIEW="$ERROR_PREVIEW_CHARS" \
+  MIN_STREAK="$MIN_STREAK" python3 - <<'PYEOF'
 import json, os, glob
 from datetime import datetime, timezone
 
@@ -95,6 +104,18 @@ payload_out= os.environ["PAYLOAD_OUT"]
 persist    = os.environ.get("PERSIST", "1") == "1"
 channel    = os.environ["SLACK_CHANNEL"]
 preview    = int(os.environ.get("PREVIEW", "300"))
+min_streak = max(1, int(os.environ.get("MIN_STREAK", "2")))
+
+def is_failure(rec):
+    """A run is a hard failure only if it errored AND did not deliver its output.
+    A run that errored but still delivered (delivered:true / deliveryStatus
+    'delivered') shipped its result and is treated as healthy — it never alerts
+    and it breaks a consecutive-error streak."""
+    if rec.get("status") != "error":
+        return False
+    if rec.get("delivered") is True or rec.get("deliveryStatus") == "delivered":
+        return False
+    return True
 
 # job id -> (name, agent)
 names = {}
@@ -136,6 +157,7 @@ for path in sorted(glob.glob(os.path.join(runs_dir, "*.jsonl"))):
         continue
     if not finished:
         continue
+    finished.sort(key=lambda r: r["ts"])  # streak detection needs chronological order
     max_ts = max(r["ts"] for r in finished)
     prev = state.get(job_id)
     if prev is None:
@@ -144,13 +166,23 @@ for path in sorted(glob.glob(os.path.join(runs_dir, "*.jsonl"))):
         new_state[job_id] = max_ts
         continue
     name, agent = names.get(job_id, (job_id, "<unknown>"))
+    # Walk runs chronologically tracking the consecutive-failure streak. A healthy
+    # run (ok, or errored-but-delivered) resets it to 0. Only alert on a failure
+    # run that is BOTH newer than the watermark AND the Nth-or-later consecutive
+    # failure — this suppresses lone recovered blips but still pages every run of a
+    # sustained outage.
+    streak = 0
     for r in finished:
-        if r["ts"] > prev and r.get("status") == "error":
-            err = r.get("error") or r.get("summary") or "unknown error"
-            err = " ".join(str(err).split())  # collapse newlines/runs of space to one line
-            if len(err) > preview:
-                err = err[:preview] + "…"
-            alerts.append((name, agent, r["ts"], err))
+        if is_failure(r):
+            streak += 1
+            if r["ts"] > prev and streak >= min_streak:
+                err = r.get("error") or r.get("summary") or "unknown error"
+                err = " ".join(str(err).split())  # collapse newlines/runs of space to one line
+                if len(err) > preview:
+                    err = err[:preview] + "…"
+                alerts.append((name, agent, r["ts"], err))
+        else:
+            streak = 0
     new_state[job_id] = max(prev, max_ts)
 
 # Persist watermarks (best-effort, atomic).
@@ -197,19 +229,28 @@ _self_test() {
   td="$(mktemp -d)"
   trap 'rm -rf "$td"' RETURN
   mkdir -p "$td/runs"
-  # One job, pre-seeded watermark at ts=100, then an ok@150 and an error@200.
-  printf '%s\n' '{"status":"ok","ts":150}' '{"status":"error","ts":200,"error":"boom `q` \"x\""}' \
+  # One job, pre-seeded watermark at ts=100: ok@150, then a two-error streak
+  # (error@190, error@200). This fixture exercises BOTH new behaviours at the
+  # default streak threshold of 2: error@190 is a lone failure (preceded by the
+  # ok@150) so it must be SUPPRESSED, while error@200 completes a 2-run streak so
+  # it must FIRE. (Pre-streak-rule this file injected a single error and expected
+  # 1 bullet; a lone error now yields 0, so the fixture grew a second error.)
+  printf '%s\n' '{"status":"ok","ts":150}' '{"status":"error","ts":190,"error":"first"}' '{"status":"error","ts":200,"error":"boom `q` \"x\""}' \
     > "$td/runs/selftest-job.jsonl"
   printf '%s\n' '{"jobs":[{"id":"selftest-job","name":"selftest","agentId":"qa"}]}' > "$td/jobs.json"
   printf '%s\n' '{"selftest-job":100}' > "$td/state.json"
-  out="$(scan_failures "$td/runs" "$td/jobs.json" "$td/state.json" "$td/payload.json" 0 2>/dev/null || true)"
+  # Pin the threshold at 2 for the self-test so it is deterministic regardless of
+  # the operator's CRON_HEALTH_MIN_STREAK — the self-test verifies detector
+  # HEALTH (fires on a streak, suppresses a lone error), not the live threshold.
+  out="$(MIN_STREAK=2 scan_failures "$td/runs" "$td/jobs.json" "$td/state.json" "$td/payload.json" 0 2>/dev/null || true)"
   if ! printf '%s' "$out" | grep -q "selftest"; then
-    echo "$LOGPREFIX SELF-TEST FAIL: detector did not flag the injected error run" >&2
+    echo "$LOGPREFIX SELF-TEST FAIL: detector did not flag the injected error streak" >&2
     return 1
   fi
-  # Exactly ONE bullet must fire: the error@200. The ok@150 is also newer
-  # than the seeded watermark (100) but must be filtered out — a count of 2
-  # would mean ok runs are being mis-reported as failures.
+  # Exactly ONE bullet must fire: error@200 (the run completing the 2-error
+  # streak). The ok@150 (healthy) and error@190 (lone, streak length 1) must both
+  # be filtered out — a count of 2 would mean either ok runs are mis-reported or
+  # the streak gate is not suppressing recovered blips.
   local bullets
   bullets="$(printf '%s\n' "$out" | grep -c '^• ' || true)"
   if [ "$bullets" != "1" ]; then

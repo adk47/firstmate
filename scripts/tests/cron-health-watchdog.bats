@@ -44,6 +44,12 @@ STUB
   export CRON_HEALTH_STATE_FILE="$TEST_TMPDIR/state.json"
   export CRON_HEALTH_LOCKFILE="$TEST_TMPDIR/wd.lock"
   export CRON_HEALTH_SKIP_HOST_GUARD=1
+  # Most tests below exercise streak-INDEPENDENT mechanics (detection, dedup,
+  # backlog seeding, JSON escaping) and predate the consecutive-error streak
+  # gate, so they run at threshold 1 (alert on every error, the pre-gate
+  # behaviour). The streak gate and the delivered-despite-error rule have their
+  # own dedicated tests at the end that set the threshold explicitly.
+  export CRON_HEALTH_MIN_STREAK=1
 }
 
 teardown() { rm -rf "$TEST_TMPDIR"; }
@@ -122,6 +128,91 @@ EOF
 @test "unknown flag → exit 2" {
   run bash "$WD" --bogus
   [ "$status" -eq 2 ]
+}
+
+# ──────────────────────────────────────────────────────────────
+# Consecutive-error streak gate + delivered-despite-error rule.
+# These suppress the recovered-blip false alarms (openclaw flags a whole run
+# "error" on any recovered tool error) while still paging on sustained breakage.
+# ──────────────────────────────────────────────────────────────
+
+@test "streak gate (default 2): a single fresh error does NOT alert" {
+  unset CRON_HEALTH_MIN_STREAK   # exercise the production default (2)
+  runfile jobA <<'EOF'
+{"status":"ok","ts":1000}
+{"status":"error","ts":2000,"error":"transient blip"}
+EOF
+  printf '%s\n' '{"jobA":1500}' > "$CRON_HEALTH_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no new cron failures"* ]]
+}
+
+@test "streak gate: a lone error bracketed by ok runs → no alert (recovered blip)" {
+  export CRON_HEALTH_MIN_STREAK=2
+  runfile jobA <<'EOF'
+{"status":"ok","ts":1000}
+{"status":"error","ts":2000,"error":"guessed --body, recovered"}
+{"status":"ok","ts":3000}
+EOF
+  printf '%s\n' '{"jobA":1500}' > "$CRON_HEALTH_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no new cron failures"* ]]
+}
+
+@test "streak gate: two consecutive errors → alerts (sustained breakage)" {
+  export CRON_HEALTH_MIN_STREAK=2
+  runfile jobA <<'EOF'
+{"status":"ok","ts":1000}
+{"status":"error","ts":1900,"error":"first failure"}
+{"status":"error","ts":2000,"error":"second failure"}
+EOF
+  printf '%s\n' '{"jobA":1500}' > "$CRON_HEALTH_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Cron failure(s) detected"* ]]
+  [[ "$output" == *"daily-churned-campaign-refresh"* ]]
+}
+
+@test "streak gate: only the streak-completing run fires (lone earlier error suppressed)" {
+  export CRON_HEALTH_MIN_STREAK=2
+  runfile jobA <<'EOF'
+{"status":"ok","ts":1000}
+{"status":"error","ts":1900,"error":"first failure"}
+{"status":"error","ts":2000,"error":"second failure"}
+EOF
+  printf '%s\n' '{"jobA":1500}' > "$CRON_HEALTH_STATE_FILE"
+  run bash "$WD" --dry-run
+  bullets="$(printf '%s\n' "$output" | grep -c '^• ' || true)"
+  [ "$bullets" -eq 1 ]
+  [[ "$output" == *"second failure"* ]]
+  [[ "$output" != *"first failure"* ]]
+}
+
+@test "delivered-despite-error: an errored run that delivered its output → no alert" {
+  export CRON_HEALTH_MIN_STREAK=1   # isolate the delivered rule from the streak gate
+  runfile jobA <<'EOF'
+{"status":"error","ts":2000,"error":"trailing tool error","delivered":true}
+EOF
+  printf '%s\n' '{"jobA":1500}' > "$CRON_HEALTH_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no new cron failures"* ]]
+}
+
+@test "delivered-despite-error breaks the streak: ok, delivered-error, error → no alert" {
+  export CRON_HEALTH_MIN_STREAK=2
+  runfile jobA <<'EOF'
+{"status":"error","ts":1900,"error":"delivered anyway","deliveryStatus":"delivered"}
+{"status":"error","ts":2000,"error":"real failure"}
+EOF
+  printf '%s\n' '{"jobA":1500}' > "$CRON_HEALTH_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  # The delivered run at 1900 is healthy → streak resets → the real error at 2000
+  # is only streak length 1 → suppressed.
+  [[ "$output" == *"no new cron failures"* ]]
 }
 
 @test "error text with quotes/backticks → posts a VALID JSON payload (escaping guard)" {

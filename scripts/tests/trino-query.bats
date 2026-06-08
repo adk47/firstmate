@@ -159,3 +159,21 @@ SQL
   [ "$status" -eq 1 ]
   ! echo "$output" | grep -q "kubectl call refused"
 }
+
+# ── --help must print usage and exit 0 (NOT run "--help" as SQL) ─────────
+# Regression: `--help` is $#>0 so it became SQL="--help" and was executed
+# against Trino → failure. An agent probing usage tripped this and flagged the
+# whole daily-churned cron run "error" (2026-06-08).
+
+@test "--help prints usage and exits 0 without touching kubectl" {
+  run bash "$TQ" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Usage:"* ]]
+  ! echo "$output" | grep -q "kubectl call refused"
+}
+
+@test "-h is an alias for --help (exit 0, usage)" {
+  run bash "$TQ" -h
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Usage:"* ]]
+}

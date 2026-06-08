@@ -18,7 +18,7 @@ depends-on:
   - muso-slack-formatter
 metadata:
   version: "2.0"
-  last-updated: "2026-06-05"
+  last-updated: "2026-06-08"
   cron: "b2b-reply-scanner-hourly"
 ---
 
@@ -48,14 +48,27 @@ Never post "nothing found".
 
 ## Workflow
 
-### Step 1: Scan all 4 accounts (last ~70 minutes)
+### Step 1: Scan all 4 accounts
 
-Scan `a@muso.ai`, `f@muso.ai`, `ak@muso.ai`, `aaron.k@muso.ai`. Use a broad gog
-Gmail search with the body included — **do not rely only on `label:"B2B - Ads"`**,
-because inbound replies often do not carry the label. Search broadly for inbox
-replies tied to Muso Ads outreach, including subjects/bodies around: Muso Ads,
-Muso.AI, calendar.muso.ai, Private invite, 820K, "ads to 820K", "Reaching 820K",
-"Muso.AI x".
+Run **exactly** this command for each of `a@muso.ai`, `f@muso.ai`, `ak@muso.ai`,
+`aaron.k@muso.ai` (substitute `<ACCT>`). Do not add or change flags:
+
+```bash
+gog gmail messages search 'in:inbox newer_than:1d ("Muso Ads" OR "Muso.AI" OR "calendar.muso.ai" OR "Private invite" OR "820K" OR "ads to 820K" OR "Reaching 820K" OR "Muso.AI x")' --account <ACCT> --max 50 --include-body --json
+```
+
+- The flag that includes message bodies in search results is **`--include-body`**.
+  Do **NOT** use `--body` — that is a `gog gmail send` flag and `messages search`
+  rejects it with `unknown flag --body`.
+- **Read the JSON straight from stdout.** Do not write results to temp files and do
+  not pipe through `jq` — parse the returned JSON directly.
+- Gmail's `newer_than:` only supports day/month/year units, so `1d` (last 24h) is
+  the tightest valid bound near our window. From the results, **keep only messages
+  received in roughly the last 70 minutes** (the run cadence) by reading each
+  message's date; discard older matches.
+- **Do not rely only on `label:"B2B - Ads"`** — inbound replies often do not carry
+  the label, which is why the query searches subjects/bodies for the outreach
+  markers above.
 
 ### Step 2: Deduplicate
 

@@ -26,6 +26,29 @@
 #               (legacy DB names are sed-rewritten before execution).
 set -euo pipefail
 
+usage() {
+  cat <<EOF
+Usage: $0 "<SQL>"        (single argument)
+   or: $0 <<'SQL' ...    (pipe SQL on stdin — preferred when SQL has parens/quotes)
+
+Examples:
+  $0 "SHOW CATALOGS"
+  $0 'SELECT * FROM "platform-industry-bi-prod".matvw_catalog_profile LIMIT 5'
+  $0 <<'SQL'
+  SELECT status, plan, count(*) FROM postgresql_core.public.subscriptions
+  WHERE lower(coalesce(plan,'')) LIKE '%pro%' GROUP BY 1,2
+  SQL
+EOF
+}
+
+# Explicit help: print usage to stdout and exit 0. Without this, `-h`/`--help`
+# is treated as SQL ($#>0 → SQL="--help") and executed against Trino, which
+# fails — an agent probing the tool's usage tripped exactly this
+# (daily-churned-campaign-refresh cron, 2026-06-08).
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
 # SQL is read from a single argument OR from stdin (when no args are given).
 # Stdin is the ROBUST path for SQL containing quotes/parens (e.g.
 # `lower(coalesce(plan,''))`): passing such SQL as a shell argument forces the
@@ -40,18 +63,7 @@ if [ "$#" -gt 0 ]; then
 elif [ ! -t 0 ]; then
   SQL="$(cat)"
 else
-  cat >&2 <<EOF
-Usage: $0 "<SQL>"        (single argument)
-   or: $0 <<'SQL' ...    (pipe SQL on stdin — preferred when SQL has parens/quotes)
-
-Examples:
-  $0 "SHOW CATALOGS"
-  $0 'SELECT * FROM "platform-industry-bi-prod".matvw_catalog_profile LIMIT 5'
-  $0 <<'SQL'
-  SELECT status, plan, count(*) FROM postgresql_core.public.subscriptions
-  WHERE lower(coalesce(plan,'')) LIKE '%pro%' GROUP BY 1,2
-  SQL
-EOF
+  usage >&2
   exit 1
 fi
 
