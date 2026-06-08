@@ -66,3 +66,21 @@ GUARD='Reasoning-leak guard: healthy - 0 caught, 0 missed in shipped replies.'
   [ "$status" -ne 0 ]
   [[ "$output" == *"guard line"* ]]
 }
+
+@test "integration: a Light-polish digest survives redact -> linkify -> assert and conv ids become links" {
+  # The glanceable reformat (section emojis on line 2 + bold labels) must still satisfy
+  # the contract, AND linkify-convs.sh must turn every bare conv id into a Slack link
+  # while leaving the short header/score numbers alone. Exercises the real Phase-3 pipe.
+  digest=$'🟢 Caroline daily · Fri Jun 5 · last 30h · 111 convs · 0 P0 / 0 P1 / 10 P2\n🎙️ Voice 5 | 🛠️ Tools skipped | 😟 Sentiment 0\n😟 *Sentiment* - 9 frustrated · conv 215474457437629 "thats a lie"\n✅ *Good catch* - conv 215474588577095 routed the cancellation\n🛡️ *Guard* - healthy: 0 caught, 0 missed in shipped replies.'
+  run bash -c 'printf "%s" "$1" | "$2"/redact-output.sh | "$2"/linkify-convs.sh | "$2"/assert-digest-contract.sh' _ "$digest" "$SCRIPTS_DIR"
+  [ "$status" -eq 0 ]
+  # every conv id became a clickable Slack link
+  [[ "$output" == *"<https://app.intercom.com/a/inboxes/all/conversations/215474457437629|215474457437629>"* ]]
+  [[ "$output" == *"<https://app.intercom.com/a/inboxes/all/conversations/215474588577095|215474588577095>"* ]]
+  # header contract still satisfied (emoji-prefixed score labels still match)
+  [[ "$output" == *"111 convs"* ]]
+  [[ "$output" == *"Voice 5"* ]]
+  [[ "$output" == *"😟 Sentiment 0"* ]]
+  # section emoji + bold label survived the pipeline
+  [[ "$output" == *"🛡️ *Guard*"* ]]
+}

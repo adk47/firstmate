@@ -50,13 +50,13 @@ Read `references/grading-rubric.md`. Read `${WORKDIR}/conversations.redacted.jso
 ### Phase 3 — Output
 
 1. Assemble the glanceable digest following the template in `references/grading-rubric.md` (header contract + collapse-clean rules).
-2. Pipe it through `scripts/redact-output.sh` then `scripts/assert-digest-contract.sh`, and emit the result as the final assistant message:
+2. Pipe it through `scripts/redact-output.sh`, then `scripts/linkify-convs.sh`, then `scripts/assert-digest-contract.sh`, and emit the result as the final assistant message:
 
    ```bash
-   printf '%s' "$review_text" | scripts/redact-output.sh | scripts/assert-digest-contract.sh
+   printf '%s' "$review_text" | scripts/redact-output.sh | scripts/linkify-convs.sh | scripts/assert-digest-contract.sh
    ```
 
-   If `assert-digest-contract.sh` exits non-zero, the header contract was not met: fix the assembly and re-run. Never emit an unguarded digest.
+   Write conversation ids as BARE 15-16 digit numbers (optionally `conv <id>`); `linkify-convs.sh` turns every id into a clickable Slack link. Do NOT write the Intercom URL yourself — a hand-written URL would be double-wrapped. If `assert-digest-contract.sh` exits non-zero, the header contract was not met: fix the assembly and re-run. Never emit an unguarded digest.
 
 3. **A recovered hiccup must NOT abort the run (deliver what you have).** The grading inputs are precomputed by the Phase-1 scripts precisely so Phase 2/3 needs no fragile ad-hoc shell. If you nonetheless run any one-off command and it errors, recover and continue to assembly — never let a single non-zero sub-exit end the run with nothing delivered. OpenClaw marks the whole run failed on any trailing tool error and suppresses the `#cs_chats` post (this is how the 2026-06-08 pulse was lost: `finalLen=0`, `delivered=false`). If a required input is genuinely unavailable after one retry, still emit a digest that names the degraded source (the contract enforces header/scores/guard), so the reviewer gets a marked-degraded pulse rather than silence.
 

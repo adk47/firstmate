@@ -97,7 +97,7 @@ Assemble the digest, then pipe it through `redact-output.sh` and finally through
 final assistant message:
 
 ```
-<assemble review text> | scripts/redact-output.sh | scripts/assert-digest-contract.sh
+<assemble review text> | scripts/redact-output.sh | scripts/linkify-convs.sh | scripts/assert-digest-contract.sh
 ```
 
 ### Header contract (MUST be present every run, on every model)
@@ -123,15 +123,23 @@ Rules:
 - **Collapse clean dimensions**: applies to DETAIL bullet lines only, never to the two
   header lines. Print a detail bullet only when it has a real, non-zero finding; omit
   zero-count metric bullets. A perfectly clean day is just the two header lines (plus,
-  optionally, a "Good catch" bullet).
-- **Conversation ids**: cite the real Intercom `conversation_id` (a 15-16 digit
-  number, which survives output redaction) so a reader can open the thread.
+  optionally, a "Good catch" bullet) and the guard line.
+- **Section emoji + bold label**: lead each detail bullet with its section emoji and a
+  bold label so the digest scans at a glance: `🎙️ *Voice*`, `🛠️ *Tools*`,
+  `😟 *Sentiment*`, `✅ *Good catch*`, `🛡️ *Guard*`. Mirror the same emojis on the
+  line-2 scores (`🎙️ Voice 5 | 🛠️ Tools skipped | 😟 Sentiment 0`); the words
+  `Voice`/`Tools`/`Sentiment` must stay intact (the contract boundary-matches them).
+- **Conversation ids**: cite the real Intercom `conversation_id` as a BARE 15-16 digit
+  number (it survives output redaction). `linkify-convs.sh` turns every id into a
+  clickable Slack link to the thread, so do NOT write the Intercom URL yourself -- a
+  hand-written URL would be double-wrapped.
 - **Reasoning-leak guard block** (Dimension E): ALWAYS present (it is what makes
   `assert-digest-contract.sh`'s `guard` check pass). When everything is zero, collapse it
   to one line: `Reasoning-leak guard: healthy - 0 caught, 0 missed in shipped replies.`
   When there are findings, lead with `Reasoning-leak guard (last 30h):` then bullets:
   caught counts (`N stripped (silent), M escalated -> human` with `[shapes: ...]`); each
-  escalated-and-still-unanswered conv as an action item with its URL; and each SHIPPED leak
+  escalated-and-still-unanswered conv as an action item citing its bare `conv <id>` (the
+  pipeline linkifies it); and each SHIPPED leak
   the guard missed as `conv <id> signature "<marker>"` (a guard gap). State both the caught
   count AND the missed count even when one is zero. Append the source caveat when degraded.
 
@@ -139,23 +147,23 @@ Rules:
 
 ```
 🟢 Caroline daily · Wed Jun 4 · last 30h · 23 convs · 0 P0 / 0 P1 / 1 P2
-Voice 5 | Tools 5 | Sentiment 4
-• Sentiment: 1 frustrated · conv 215474545718046 "are you actually checking?"
-• Good catch: conv 998877665544001 · clean refund-gate run
-Reasoning-leak guard: healthy - 0 caught, 0 missed in shipped replies.
+🎙️ Voice 5 | 🛠️ Tools 5 | 😟 Sentiment 4
+😟 *Sentiment* - 1 frustrated · conv 215474545718046 "are you actually checking?"
+✅ *Good catch* - conv 998877665544001 · clean refund-gate run
+🛡️ *Guard* - healthy: 0 caught, 0 missed in shipped replies.
 ```
 
 ### P0 day (rare, pings the reviewer)
 
 ```
 <@U0AL36NADEY> 🔴 Caroline daily · Wed Jun 4 · last 30h · 31 convs · 1 P0 / 2 P1 / 2 P2
-Voice 4 | Tools 4 | Sentiment 4
-Reasoning-leak guard (last 30h): 3 stripped (silent), 1 escalated -> human. [shapes: looking-at-history, tone-calibration]
-  • Escalated & still unanswered: conv 215474520232724 (https://app.intercom.com/a/inboxes/all/conversations/215474520232724)  <- action item (P1)
+🎙️ Voice 4 | 🛠️ Tools 4 | 😟 Sentiment 4
+🛡️ *Guard* (last 30h): 3 stripped (silent), 1 escalated -> human. [shapes: looking-at-history, tone-calibration]
+  • Escalated & still unanswered: conv 215474520232724  <- action item (P1)
   • SHIPPED leak the guard missed: conv 998877665544001 signature "ready-to-output"  <- guard gap (P0)
-*Tools (4):* 1 missed profile_status · conv 445566778899001 (P1)
-*Voice (4):* 1 blacklist "Great question" (conv 220033445566778)
-*Sentiment (4):* 2 frustrated · top: conv 556677889900112 "this is useless"
+🛠️ *Tools* (4): 1 missed profile_status · conv 445566778899001 (P1)
+🎙️ *Voice* (4): 1 blacklist "Great question" (conv 220033445566778)
+😟 *Sentiment* (4): 2 frustrated · top: conv 556677889900112 "this is useless"
 ```
 
 (In the P0 example the headline P0 is the guard-missed shipped leak, and one P1 is the
