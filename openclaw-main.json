@@ -256,13 +256,13 @@
         "id": "cmo",
         "workspace": "/opt/hydra/workspaces/cmo",
         "model": {
-          "primary": "openai/gpt-5.5",
+          "primary": "openrouter/anthropic/claude-opus-4.7",
           "fallbacks": [
             "openrouter/google/gemini-3.5-flash",
             "openrouter/anthropic/claude-4.6-sonnet-20260217"
           ]
         },
-        "thinkingDefault": "high"
+        "thinkingDefault": "medium"
       },
       {
         "id": "cto",
