@@ -22,7 +22,13 @@ Invoked exclusively by the `caroline-daily-review` cron entry in `cron-jobs.json
 
 ### Phase 0 — Preflight
 
-**Source** `scripts/preflight.sh` (do not run as a subprocess — exports must survive into the rest of the pipeline). Run the entire pipeline (preflight -> fetch -> grade -> output) in a SINGLE shell session, so the exported `WORKDIR`, `CAROLINE_BOT_ADMIN_ID`, and `CV_TOOL_CTX_CONVERSATION_ID` are visible to all later scripts.
+**First, enter the skill directory** — every `scripts/…` path below is relative to it. Run this verbatim as the first line of the single shell session; do not improvise the path. This is a workspace-native skill (it is NOT mirrored into any openclaw managed-skills tier), so a guessed managed-skills location does not exist on disk, and a failed `cd` there is the single early tool error that makes openclaw mark the whole run failed and silently suppress the `#cs_chats` delivery — exactly how the 2026-06-08 07:00 pulse was lost.
+
+```bash
+cd /opt/hydra/workspaces/operations/skills/muso-caroline-weekly-review || { echo "preflight failed: skill dir not found"; exit 1; }
+```
+
+**Then, source** `scripts/preflight.sh` (do not run as a subprocess — exports must survive into the rest of the pipeline). Run the entire pipeline (preflight -> fetch -> grade -> output) in a SINGLE shell session, so the exported `WORKDIR`, `CAROLINE_BOT_ADMIN_ID`, and `CV_TOOL_CTX_CONVERSATION_ID` are visible to all later scripts.
 
 On preflight failure, return a "preflight failed: <reason>" message and stop. Do not attempt grading.
 
