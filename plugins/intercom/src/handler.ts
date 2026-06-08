@@ -10,6 +10,7 @@ import { RateLimitError } from "./outbound.js";
 import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply } from "./filters.js";
 import { checkEscalation, assessRisk, type AssessRiskDeps } from "./escalation.js";
 import { updateKnownFacts } from "./extractors.js";
+import { shouldEnrich, type VerifiedIdentity } from "./enrichment.js";
 import {
   handleAssignment,
   handleAdminReply,
@@ -43,6 +44,13 @@ export interface HandlerOptions {
   // the live-check and risk paths run. Used to disable Caroline on social
   // channels (instagram, facebook, x, etc.). See IntercomAccountConfig.
   blockedChannelTags?: string[];
+  // Personalization gate + hook. When `personalization.enabled` and the message
+  // is from a verified `type: "user"` author, `enrich` is invoked just before a
+  // dispatch (never on escalate/filter paths) to populate state.enrichment.
+  // `enrich` is injected so the handler stays free of live-API deps and unit-
+  // testable; it is fail-soft internally and the call site also `.catch()`es.
+  personalization?: { enabled: boolean };
+  enrich?: (state: IntercomSessionState, identity: VerifiedIdentity) => Promise<void>;
 }
 
 export async function handleWebhookEvent(
@@ -271,6 +279,24 @@ export async function handleWebhookEvent(
           },
           state,
         };
+      }
+
+      // Personalization enrichment — runs ONLY here, on the confirmed dispatch
+      // path (after escalation + suppression gates), so we never spend live API
+      // calls on messages that get escalated or filtered. Best-effort: gated by
+      // shouldEnrich, the injected fn is fail-soft, and we `.catch()` so a bug
+      // here can never block a customer reply.
+      if (
+        state &&
+        options?.enrich &&
+        shouldEnrich({ enabled: options?.personalization?.enabled === true, classified, state })
+      ) {
+        const identity: VerifiedIdentity = {
+          email: classified.verifiedEmail!,
+          name: classified.verifiedName,
+          contactId: classified.authorId || undefined,
+        };
+        await options.enrich(state, identity).catch(() => {});
       }
 
       return {

@@ -381,6 +381,37 @@ jobs:
           echo "CS reference files are clean"
           echo "::endgroup::"
 
+      - name: Caroline personalization — enrichment never touches openclaw memory
+        run: |
+          echo "::group::Asserting personalization enrichment is memory-free"
+          # Customer-isolation invariant (docs/superpowers/specs/2026-05-14-caroline-rag-design.md):
+          # Caroline's cross-conversation memory is deliberately pinned OFF. The
+          # personalization enrichment path must source data live from systems-of-
+          # record ONLY and live in per-conversation session state — NEVER in
+          # openclaw memory/recall/capture, which has open PII + cross-customer
+          # leak bugs (#63921, #65374). This guard fails if the enrichment source
+          # files ever reference a memory-persistence primitive.
+          FORBIDDEN='MEMORY\.md|autoCapture|autoRecall|memory-lancedb|active-memory|dreaming|memorySearch|memory_capture|memory_write'
+          FILES="plugins/intercom/src/enrichment.ts plugins/intercom/src/muso-snapshot-client.ts"
+          BAD=0
+          for f in $FILES; do
+            [ -f "$f" ] || continue
+            HITS=$(grep -nE "$FORBIDDEN" "$f" || true)
+            if [ -n "$HITS" ]; then
+              echo "::error::$f references an openclaw memory primitive — enrichment must never persist to memory:"
+              echo "$HITS"
+              BAD=1
+            else
+              echo "  CLEAN: $f"
+            fi
+          done
+          if [ "$BAD" -eq 1 ]; then
+            echo "::error::Personalization enrichment must not use openclaw memory. Keep data in per-conversation session state."
+            exit 1
+          fi
+          echo "Personalization enrichment is memory-free"
+          echo "::endgroup::"
+
       - name: AI code review
         id: ai-review
         env:

@@ -22,6 +22,112 @@ describe("classifyEvent", () => {
     expect(result.kind).toBe("customer_message");
   });
 
+  it("captures verified identity (type/email/name) from source.author on user.created", () => {
+    const withName = {
+      ...userCreated,
+      data: {
+        ...userCreated.data,
+        item: {
+          ...userCreated.data.item,
+          source: {
+            ...userCreated.data.item.source,
+            author: { type: "user", id: "user_abc", email: "User@Example.com", name: "Jane Doe" },
+          },
+        },
+      },
+    };
+    const result = classifyEvent(withName as IntercomWebhookPayload);
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.authorType).toBe("user");
+      expect(result.verifiedEmail).toBe("user@example.com"); // lowercased
+      expect(result.verifiedName).toBe("Jane Doe");
+    }
+  });
+
+  it("falls back to the conversation_part author when source.author is not a user (admin-initiated convo)", () => {
+    // Admin opened the conversation, the user replied. source.author is the
+    // admin, so verified identity must come from the replying part's user author.
+    const adminInitiated = {
+      ...userReplied,
+      data: {
+        ...userReplied.data,
+        item: {
+          ...userReplied.data.item,
+          source: {
+            ...userReplied.data.item.source,
+            author: { type: "admin", id: "admin_7", email: "agent@muso.ai", name: "Caroline" },
+          },
+          conversation_parts: {
+            conversation_parts: [
+              {
+                type: "conversation_part",
+                id: "part_9",
+                body: "any update?",
+                part_type: "comment",
+                created_at: 1711234999,
+                author: { type: "user", id: "user_abc", email: "  USER@Example.com ", name: "Jane Doe" },
+              },
+            ],
+          },
+        },
+      },
+    };
+    const result = classifyEvent(adminInitiated as IntercomWebhookPayload);
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.authorType).toBe("user");
+      expect(result.verifiedEmail).toBe("user@example.com"); // trimmed + lowercased, from the user part
+      expect(result.verifiedName).toBe("Jane Doe");
+    }
+  });
+
+  it("does NOT capture email/name when the author type is not user", () => {
+    const adminAuthored = {
+      ...userCreated,
+      data: {
+        ...userCreated.data,
+        item: {
+          ...userCreated.data.item,
+          source: {
+            ...userCreated.data.item.source,
+            author: { type: "admin", id: "admin_7", email: "agent@muso.ai", name: "Caroline" },
+          },
+        },
+      },
+    };
+    const result = classifyEvent(adminAuthored as IntercomWebhookPayload);
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.authorType).toBe("admin");
+      expect(result.verifiedEmail).toBeUndefined();
+      expect(result.verifiedName).toBeUndefined();
+    }
+  });
+
+  it("leaves verified identity undefined when the user author has no email/name", () => {
+    const noEmail = {
+      ...userCreated,
+      data: {
+        ...userCreated.data,
+        item: {
+          ...userCreated.data.item,
+          source: {
+            ...userCreated.data.item.source,
+            author: { type: "user", id: "user_abc" },
+          },
+        },
+      },
+    };
+    const result = classifyEvent(noEmail as IntercomWebhookPayload);
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.authorType).toBe("user");
+      expect(result.verifiedEmail).toBeUndefined();
+      expect(result.verifiedName).toBeUndefined();
+    }
+  });
+
   it("classifies conversation.admin.replied as admin_reply with type", () => {
     const result = classifyEvent(adminReplied as IntercomWebhookPayload);
     expect(result.kind).toBe("admin_reply");

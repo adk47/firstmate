@@ -65,6 +65,7 @@ export function resolveIntercomAccount(
       riskAssessment: undefined,
       clickup: undefined,
       blockedChannelTags: [],
+      personalization: undefined,
     };
   }
 
@@ -106,6 +107,14 @@ export function resolveIntercomAccount(
     blockedChannelTags: Array.isArray(account.blockedChannelTags)
       ? account.blockedChannelTags.filter((t): t is string => typeof t === "string" && t.length > 0)
       : [],
+    personalization: account.personalization
+      ? {
+          enabled: account.personalization.enabled === true,
+          ...(typeof account.personalization.timeoutMs === "number"
+            ? { timeoutMs: account.personalization.timeoutMs }
+            : {}),
+        }
+      : undefined,
   };
 }
 

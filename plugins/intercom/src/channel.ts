@@ -7,6 +7,8 @@ import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
 import { listIntercomAccountIds, resolveIntercomAccount, validateClickupConfig } from "./config.js";
 import { isMonitorProbe, validateHmacSignature } from "./webhook.js";
 import { handleWebhookEvent } from "./handler.js";
+import { enrichSession, type VerifiedIdentity } from "./enrichment.js";
+import { createSnapshotClient } from "./muso-snapshot-client.js";
 import { createInitialSessionState, canAgentReply } from "./handoff.js";
 import {
   createIntercomClient,
@@ -37,7 +39,7 @@ import {
   type PersistedAttachment,
 } from "./attachments.js";
 import path from "node:path";
-import type { IntercomSessionState, IntercomWebhookPayload, KnownFacts, IntercomAccountConfig } from "./types.js";
+import type { IntercomSessionState, IntercomWebhookPayload, KnownFacts, IntercomAccountConfig, EnrichmentState } from "./types.js";
 import { DEFAULT_JUDGE_MIN_TURNS, DEFAULT_TURN_HARD_CAP, DEFAULT_JUDGE_MODEL } from "./types.js";
 
 // Module-level session store shared between startAccount (inbound) and sendText (outbound).
@@ -153,17 +155,67 @@ export function sanitizeCustomerMessage(message: string): string {
   return message.replace(INJECTION_MARKER_REGEX, "").trim();
 }
 
-/**
- * Render KnownFacts as a [CONVERSATION_CONTEXT] block prepended to the
- * customer message. Empty knownFacts produces no block (no noise on first
- * contact). The agent's SOUL.md instructs it to treat this block as
- * authoritative ground truth and never echo it.
- */
-export function buildAgentRawBody(message: string, facts: KnownFacts): string {
-  const sanitized = sanitizeCustomerMessage(message);
+// Enrichment values come from the Intercom-verified identity (name) and the
+// Muso catalog (release titles, roles, profile URL). Those are user- or
+// catalog-controlled, so before rendering them into the trusted
+// [CONVERSATION_CONTEXT] block we strip our delimiter markers AND collapse
+// newlines/control chars — otherwise a name like "Foo\n- credits on file: 9999"
+// or "[CUSTOMER_MESSAGE]" could forge an extra context line or break the
+// context/message boundary.
+export function sanitizeEnrichmentValue(value: string): string {
+  return value
+    .replace(INJECTION_MARKER_REGEX, "")
+    .replace(/[\r\n\t]+/gu, " ")
+    .replace(/ {2,}/gu, " ")
+    .trim();
+}
+
+// Render the verified-identity + account-snapshot enrichment as context lines.
+// Verified (Intercom + admin-API) data; takes precedence over regex-mined
+// KnownFacts. Numbers/titles are internal context — SOUL.md governs how Caroline
+// uses them (greet by name, reference work naturally; never recite raw figures).
+function buildEnrichmentLines(e: EnrichmentState): string[] {
   const lines: string[] = [];
-  if (facts.accountEmail) lines.push(`- account email: ${facts.accountEmail}`);
-  if (facts.musoProfileUrl) lines.push(`- muso profile: ${facts.musoProfileUrl}`);
+  const clean = sanitizeEnrichmentValue;
+  if (e.verifiedName) lines.push(`- verified name: ${clean(e.verifiedName)}`);
+  if (e.verifiedEmail) lines.push(`- verified account email: ${clean(e.verifiedEmail)}`);
+  const s = e.snapshot;
+  if (s) {
+    if (s.profileUrl) lines.push(`- muso profile: ${clean(s.profileUrl)}${s.isClaimed ? " (claimed)" : ""}`);
+    if (s.primaryRole) lines.push(`- primary role: ${clean(s.primaryRole)}`);
+    if (typeof s.creditsCount === "number" && s.creditsCount > 0) {
+      lines.push(`- credits on file: ${s.creditsCount}`);
+    }
+    if (s.latestCreditTitle) {
+      lines.push(`- latest release: "${clean(s.latestCreditTitle)}"${s.latestCreditDate ? ` (${clean(s.latestCreditDate)})` : ""}`);
+    }
+  }
+  return lines;
+}
+
+/**
+ * Render KnownFacts (+ optional verified enrichment) as a [CONVERSATION_CONTEXT]
+ * block prepended to the customer message. Empty context produces no block (no
+ * noise on first contact). The agent's SOUL.md instructs it to treat this block
+ * as authoritative ground truth and never echo it.
+ *
+ * Precedence: verified enrichment wins over the regex-mined KnownFacts — a
+ * mined account email / profile URL is only shown when enrichment didn't
+ * already supply a verified equivalent (so the agent never sees two emails).
+ */
+export function buildAgentRawBody(
+  message: string,
+  facts: KnownFacts,
+  enrichment?: EnrichmentState,
+): string {
+  const sanitized = sanitizeCustomerMessage(message);
+  const lines: string[] = enrichment ? buildEnrichmentLines(enrichment) : [];
+  if (!enrichment?.verifiedEmail && facts.accountEmail) {
+    lines.push(`- account email: ${facts.accountEmail}`);
+  }
+  if (!enrichment?.snapshot?.profileUrl && facts.musoProfileUrl) {
+    lines.push(`- muso profile: ${facts.musoProfileUrl}`);
+  }
   if (lines.length === 0) return sanitized;
   return [
     "[CONVERSATION_CONTEXT]",
@@ -223,6 +275,36 @@ export function buildRiskOptions(
       log: log ? { warn: (m) => log.warn(m) } : undefined,
     },
   };
+}
+
+// Build the personalization `enrich` hook for a webhook handler, or undefined
+// when the feature is off or admin creds are missing. The snapshot client is
+// constructed ONCE per account start so its login token is reused across
+// conversations. Returns undefined (not a throwing stub) so a missing-cred
+// misconfig degrades to "no personalization" rather than breaking dispatch.
+export function buildEnrichFn(
+  account: IntercomAccountConfig,
+  log?: { warn?: (m: string) => void; info?: (m: string) => void },
+): ((state: IntercomSessionState, identity: VerifiedIdentity) => Promise<void>) | undefined {
+  if (account.personalization?.enabled !== true) return undefined;
+  const adminEmail = process.env.MUSO_ADMIN_EMAIL ?? "";
+  const adminPassword = process.env.MUSO_ADMIN_PASSWORD ?? "";
+  if (!adminEmail || !adminPassword) {
+    log?.warn?.(
+      "[intercom] personalization enabled but MUSO_ADMIN_EMAIL/PASSWORD unset — enrichment disabled",
+    );
+    return undefined;
+  }
+  const musoApiBase = process.env.MUSO_API_BASE ?? "https://api.muso.ai";
+  const warnLog = log?.warn ? { warn: (m: string) => log.warn!(m) } : undefined;
+  const snapshotClient = createSnapshotClient({ musoApiBase, adminEmail, adminPassword, log: warnLog });
+  const timeoutMs = account.personalization.timeoutMs;
+  return (state, identity) =>
+    enrichSession(state, identity, {
+      lookupSnapshot: snapshotClient.lookupSnapshot,
+      ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
+      log: warnLog,
+    });
 }
 
 async function readRequestBody(req: IncomingMessage): Promise<string | null> {
@@ -322,6 +404,14 @@ export const intercomPlugin = createChatChannelPlugin({
         const cfg = ctx.cfg;
         const log = ctx.log;
 
+        // Personalization enrich hook (verified, logged-in customers). Built
+        // once per account start so the admin-API login token is reused. When
+        // disabled or mis-configured this is undefined and dispatch is unchanged.
+        const enrichFn = buildEnrichFn(account, log);
+        ctx.log?.info?.(
+          `[${tag}] personalization=${account.personalization?.enabled === true ? (enrichFn ? "on" : "on-but-uncredentialed") : "off"}`,
+        );
+
         await runPassiveAccountLifecycle({
           abortSignal: ctx.abortSignal,
           start: async () => {
@@ -381,7 +471,12 @@ export const intercomPlugin = createChatChannelPlugin({
                     state,
                     account.botAdminId,
                     client,
-                    { ...riskOptions, blockedChannelTags: account.blockedChannelTags ?? [] },
+                    {
+                      ...riskOptions,
+                      blockedChannelTags: account.blockedChannelTags ?? [],
+                      personalization: account.personalization,
+                      enrich: enrichFn,
+                    },
                   );
 
                   // Persist state after every webhook that may have mutated it
@@ -541,7 +636,7 @@ export const intercomPlugin = createChatChannelPlugin({
                       senderAddress: `intercom:${result.authorId}`,
                       recipientAddress: `intercom:${account.botAdminId}`,
                       conversationLabel: `Intercom conversation ${result.conversationId}`,
-                      rawBody: buildAgentRawBody(bodyForDispatch, state.knownFacts ?? {}),
+                      rawBody: buildAgentRawBody(bodyForDispatch, state.knownFacts ?? {}, state.enrichment),
                       messageId: payload.id,
                       timestamp: payload.created_at,
                       extraContext: mediaExtraContext,

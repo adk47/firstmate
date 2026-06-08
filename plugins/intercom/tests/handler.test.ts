@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { handleWebhookEvent } from "../src/handler.js";
 import { createInitialSessionState } from "../src/handoff.js";
 import { MockIntercomClient } from "../src/outbound.js";
@@ -845,5 +845,92 @@ describe("handler — blockedChannelTags", () => {
       { riskAssessment: { enabled: false } },
     );
     expect(result.action).toBe("dispatch_to_agent");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// personalization enrichment — verified, logged-in customers only
+// ---------------------------------------------------------------------------
+
+function makeVerifiedUserPayload(body: string, opts: { email?: string; name?: string } = {}): IntercomWebhookPayload {
+  const p = makeUserPayload(body);
+  (p.data.item as any).source.author = {
+    type: "user",
+    id: "u1",
+    ...(opts.email ? { email: opts.email } : {}),
+    ...(opts.name ? { name: opts.name } : {}),
+  };
+  return p;
+}
+
+describe("handler — personalization enrichment", () => {
+  const enabled = { riskAssessment: { enabled: true }, personalization: { enabled: true } };
+
+  it("calls enrich once on dispatch for a verified user when enabled", async () => {
+    const state = makeState();
+    const enrich = vi.fn(async () => {});
+    const { result } = await handleWebhookEvent(
+      makeVerifiedUserPayload("hi", { email: "jane@example.com", name: "Jane" }),
+      state, "bot", undefined, { ...enabled, enrich },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+    expect(enrich).toHaveBeenCalledTimes(1);
+    expect(enrich).toHaveBeenCalledWith(state, { email: "jane@example.com", name: "Jane", contactId: "u1" });
+  });
+
+  it("does NOT call enrich when personalization is disabled", async () => {
+    const state = makeState();
+    const enrich = vi.fn(async () => {});
+    await handleWebhookEvent(
+      makeVerifiedUserPayload("hi", { email: "jane@example.com", name: "Jane" }),
+      state, "bot", undefined,
+      { riskAssessment: { enabled: true }, personalization: { enabled: false }, enrich },
+    );
+    expect(enrich).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call enrich when the author has no verified email", async () => {
+    const state = makeState();
+    const enrich = vi.fn(async () => {});
+    await handleWebhookEvent(
+      makeVerifiedUserPayload("hi", { name: "Jane" }), // no email
+      state, "bot", undefined, { ...enabled, enrich },
+    );
+    expect(enrich).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call enrich when the conversation was already enriched", async () => {
+    const state = makeState();
+    state.enrichment = { status: "done", enrichedAt: "2026-01-01T00:00:00Z" };
+    const enrich = vi.fn(async () => {});
+    await handleWebhookEvent(
+      makeVerifiedUserPayload("hi", { email: "jane@example.com", name: "Jane" }),
+      state, "bot", undefined, { ...enabled, enrich },
+    );
+    expect(enrich).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call enrich on the escalate path", async () => {
+    const state = makeState();
+    const enrich = vi.fn(async () => {});
+    const { result } = await handleWebhookEvent(
+      makeVerifiedUserPayload("i want a refund", { email: "jane@example.com", name: "Jane" }),
+      state, "bot", undefined, { ...enabled, enrich },
+    );
+    expect(result.action).toBe("escalate");
+    expect(enrich).not.toHaveBeenCalled();
+  });
+
+  it("still dispatches when enrich rejects (fail-soft)", async () => {
+    const state = makeState();
+    const enrich = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    const { result } = await handleWebhookEvent(
+      makeVerifiedUserPayload("hi", { email: "jane@example.com", name: "Jane" }),
+      state, "bot", undefined, { ...enabled, enrich },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+    expect(enrich).toHaveBeenCalledTimes(1);
   });
 });

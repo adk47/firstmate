@@ -147,6 +147,11 @@ export interface IntercomSessionState {
   knownFacts?: KnownFacts;
   escalationFiredAt?: string | null;
   userTurnCount?: number;
+  // Personalization context for a verified, logged-in customer. Populated at
+  // most once per conversation (gated behind account.personalization.enabled),
+  // fetched live from systems-of-record, and held ONLY here in session state —
+  // never written to openclaw memory and never indexed. See enrichment.ts.
+  enrichment?: EnrichmentState;
 }
 
 // --- Config ---
@@ -183,6 +188,14 @@ export interface IntercomAccountConfig {
   // source.type="conversation" and the only reliable channel signal in the
   // webhook payload is the workflow-applied tag. Default: no blocking.
   blockedChannelTags?: string[];
+  // Personalization for verified, logged-in customers (Caroline greets by
+  // name, references their work, etc.). Default OFF — when absent or
+  // `enabled: false`, enrichment never runs and behavior is unchanged.
+  // `timeoutMs` bounds each best-effort lookup call (default 2500ms).
+  personalization?: {
+    enabled: boolean;
+    timeoutMs?: number;
+  };
 }
 
 // --- Intercom Client ---
@@ -227,7 +240,23 @@ export interface IntercomClient {
 // --- Event classification ---
 
 export type ClassifiedEvent =
-  | { kind: "customer_message"; conversationId: string; body: string; authorId: string; attachments?: ImageAttachmentRef[]; documents?: DocumentAttachmentRef[] }
+  | {
+      kind: "customer_message";
+      conversationId: string;
+      body: string;
+      authorId: string;
+      // Identity of the message author, read straight from the Intercom
+      // author object (NOT mined from the message text). `authorType` is the
+      // raw type; `verifiedEmail`/`verifiedName` are populated ONLY for a
+      // `type: "user"` author (an Intercom identity-verified contact), so they
+      // are safe to trust for personalization. A self-typed email in the body
+      // never reaches these fields — see extractors.ts for that separate path.
+      authorType?: "user" | "admin" | "bot";
+      verifiedEmail?: string;
+      verifiedName?: string;
+      attachments?: ImageAttachmentRef[];
+      documents?: DocumentAttachmentRef[];
+    }
   | { kind: "admin_reply"; conversationId: string; adminId: string; adminType: AssigneeType; messageId: string }
   | { kind: "assigned"; conversationId: string; assigneeId: string; assigneeType: AssigneeType }
   | { kind: "lifecycle"; conversationId: string; state: LifecycleState }
@@ -249,6 +278,37 @@ export interface KnownFacts {
   musoProfileUrl?: string;
   musoProfileId?: string;
   factsLastUpdated?: string;
+}
+
+// --- Personalization enrichment (Caroline) ---
+
+// Read-only account snapshot assembled from the Muso admin API (profile +
+// credits). PII-stripped at the source (no email/phone/payment). Kept distinct
+// from the Intercom-verified identity (verifiedName/verifiedEmail) so a
+// profile-lookup miss or ambiguous match never blocks a by-name greeting.
+export interface AccountSnapshot {
+  profileId?: string;
+  name?: string;
+  profileUrl?: string;
+  isClaimed?: boolean;
+  primaryRole?: string;
+  creditsCount?: number;
+  latestCreditTitle?: string;
+  latestCreditDate?: string;
+}
+
+export type EnrichmentStatus = "done" | "failed";
+
+// Per-conversation personalization context: the Intercom-verified identity
+// plus the looked-up account snapshot. Fetched at most once per conversation,
+// best-effort. `status: "failed"` is retried on a later turn; `"done"` is not.
+export interface EnrichmentState {
+  status: EnrichmentStatus;
+  enrichedAt: string;
+  verifiedEmail?: string;
+  verifiedName?: string;
+  contactId?: string;
+  snapshot?: AccountSnapshot;
 }
 
 // --- Risk assessment (replaces narrow EscalationResult for the new path) ---

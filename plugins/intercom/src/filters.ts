@@ -170,10 +170,25 @@ export function classifyEvent(payload: IntercomWebhookPayload): ClassifiedEvent 
       if (!body && attachments.length === 0 && documents.length === 0) {
         return { kind: "unknown", topic: `${topic}:empty_body` };
       }
-      const authorId = lastPart?.author?.id ?? conversation.source?.author?.id ?? "";
+      const partAuthor = lastPart?.author;
+      const sourceAuthor = conversation.source?.author;
+      const msgAuthor = partAuthor ?? sourceAuthor;
+      const authorId = msgAuthor?.id ?? "";
+      // Verified contact identity for personalization: trust ONLY a
+      // `type: "user"` author (an Intercom identity-verified contact). Prefer
+      // the canonical conversation creator (`source.author`); fall back to the
+      // replying part's author. Never derive identity from the message body.
+      const userAuthor =
+        (sourceAuthor?.type === "user" ? sourceAuthor : undefined) ??
+        (partAuthor?.type === "user" ? partAuthor : undefined);
+      const verifiedEmail = userAuthor?.email?.trim().toLowerCase() || undefined;
+      const verifiedName = userAuthor?.name?.trim() || undefined;
       const base = { kind: "customer_message" as const, conversationId, body, authorId };
       return {
         ...base,
+        ...(msgAuthor?.type ? { authorType: msgAuthor.type } : {}),
+        ...(verifiedEmail ? { verifiedEmail } : {}),
+        ...(verifiedName ? { verifiedName } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
         ...(documents.length > 0 ? { documents } : {}),
       };
