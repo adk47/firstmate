@@ -75,7 +75,7 @@ EOF
 
 # ── codex_edge_auth_symlink_status ────────────────────────────
 
-@test "symlink_status: ok for symlink to a fresh-token auth file" {
+@test "symlink_status: ok for a symlink to an existing target (expiry irrelevant)" {
   local real="$TEST_TMPDIR/main-auth-profiles.json"
   local future_ms=$(( ($(date +%s) + 7*24*3600) * 1000 ))
   printf '{"version":1,"profiles":{"openai-codex:a@b":{"expires":%s}}}' "$future_ms" > "$real"
@@ -99,14 +99,19 @@ EOF
   [ "$output" = "dangling" ]
 }
 
-@test "symlink_status: stale when target token expires within the window" {
+# The codex access token is ~9h-lived + refresh-on-use, so a near/just-past
+# `expires` is the normal steady state, NOT a "needs human re-auth" signal. The
+# old 24h "stale" sub-check fired on essentially every cycle (false alarm). This
+# test pins the fix: a symlink to a soon-/already-expired token is still `ok`.
+# A genuinely dead token is detected by codex_count_auth_invalidated, not here.
+@test "symlink_status: ok even when the token is near/just expired (no stale signal)" {
   local real="$TEST_TMPDIR/main-auth-profiles.json"
   local past_ms=$(( ($(date +%s) - 3600) * 1000 ))
   printf '{"version":1,"profiles":{"openai-codex:a@b":{"expires":%s}}}' "$past_ms" > "$real"
   ln -s "$real" "$TEST_TMPDIR/edge-auth-profiles.json"
   run codex_edge_auth_symlink_status "$TEST_TMPDIR/edge-auth-profiles.json"
   [ "$status" -eq 0 ]
-  [ "$output" = "stale" ]
+  [ "$output" = "ok" ]
 }
 
 @test "symlink_status: missing when nothing is at the path" {

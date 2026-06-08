@@ -44,31 +44,32 @@ codex_count_vision_failures() {
   grep -c -i -e "All image models failed" || true
 }
 
-# codex_edge_auth_symlink_status <auth-profiles-path> [min_hours_valid]
+# codex_edge_auth_symlink_status <auth-profiles-path>
 # Filesystem health of edge/support's codex auth store. Echoes exactly
-# one of: ok | not-symlink | dangling | stale | missing
+# one of: ok | not-symlink | dangling | missing
 #   missing      — neither a file nor a symlink at the path
 #   not-symlink  — a regular file (a deploy/rsync clobbered the symlink,
 #                  or it was never provisioned by ensure-edge-codex-auth.sh)
 #   dangling     — a symlink whose target no longer exists
-#   stale        — symlink + target exists, but the freshest access-token
-#                  `expires` (epoch ms) is < now + min_hours (default 24h):
-#                  the shared main token is about to expire / has expired
-#   ok           — symlink, target present, token fresh
-# Reads the target THROUGH the symlink (jq follows it), so it is portable
-# across macOS (bats host) and Linux (node-8) without `readlink -f`.
+#   ok           — a symlink whose target exists
+# This checks STRUCTURE only — that edge's store is a live symlink to main's
+# canonical codex token (the durability invariant a deploy/rsync can silently
+# break, re-introducing #356). It deliberately does NOT inspect token
+# `expires`: the codex access token is short-lived (~9h) and refresh-on-use.
+# Verified live 2026-06-08 — the canonical auth-profiles.json had just rewritten
+# itself (mtime 08:43:29Z, auth-state usageStats.lastUsed 08:43:28Z) to an
+# `expires` only ~9h out, with 0 "authentication token has been invalidated"
+# lines on edge. So `expires` is ALWAYS far inside any multi-hour window and
+# carries no human-re-auth signal; the former 24h "stale" sub-check fired on
+# essentially every cycle — a false alarm that re-auth would NOT have silenced
+# (a fresh token is also <24h out). A genuinely dead/rotated-away token surfaces
+# in the journal and is caught by codex_count_auth_invalidated above.
+# Reads through the symlink, so it is portable across macOS (bats host) and
+# Linux (node-8) without `readlink -f`.
 codex_edge_auth_symlink_status() {
-  local path="$1" min_hours="${2:-24}"
+  local path="$1"
   if [ -L "$path" ]; then
     if [ ! -e "$path" ]; then echo dangling; return; fi
-    local max_exp
-    max_exp=$(jq -r '[.profiles[]?.expires // 0] | max // 0' "$path" 2>/dev/null || echo 0)
-    max_exp=${max_exp%.*}
-    [[ "$max_exp" =~ ^[0-9]+$ ]] || max_exp=0
-    local now_ms threshold_ms
-    now_ms=$(( $(date +%s) * 1000 ))
-    threshold_ms=$(( now_ms + min_hours * 3600 * 1000 ))
-    if [ "$max_exp" -lt "$threshold_ms" ]; then echo stale; return; fi
     echo ok; return
   fi
   if [ -e "$path" ]; then echo not-symlink; return; fi

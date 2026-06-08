@@ -173,13 +173,16 @@ if [ "${CODEX_VISIONFAIL:-0}" -gt 0 ] && _codex_cooldown_ok /tmp/openclaw-watchd
 fi
 
 # Symlink-integrity tripwire: edge auth durability rests on
-# auth-profiles.json being a symlink to a fresh main codex token. A deploy
-# clobbering it (regular file), a dangling link, or a main token near expiry
-# all silently re-introduce #356 — alert before it bites.
-CODEX_SYMLINK_STATUS=$(codex_edge_auth_symlink_status "$EDGE_AUTH_PROFILES" 24)
+# auth-profiles.json being a symlink to main's canonical codex token. A deploy
+# clobbering it (regular file), a dangling link, or a missing store all silently
+# re-introduce #356 — alert before it bites. (We do NOT alert on token expiry:
+# the codex access token is ~9h-lived + refresh-on-use, so its `expires` carries
+# no human-re-auth signal — a real auth death is caught by the
+# `authentication token has been invalidated` tripwire above. See codex-health.sh.)
+CODEX_SYMLINK_STATUS=$(codex_edge_auth_symlink_status "$EDGE_AUTH_PROFILES")
 if [ "$CODEX_SYMLINK_STATUS" != "ok" ] && _codex_cooldown_ok /tmp/openclaw-watchdog-codex-symlink-cooldown "$CODEX_COOLDOWN_MIN"; then
   log "EDGE CODEX AUTH SYMLINK status=${CODEX_SYMLINK_STATUS}"
-  slack_notify ":warning: *Edge Codex auth store* (Caroline/support) symlink status: \`${CODEX_SYMLINK_STATUS}\` (expected \`ok\`). not-symlink=a deploy clobbered it; dangling=main source moved; stale=shared token within 24h of expiry; missing=never provisioned. \`systemctl restart openclaw-gateway-edge\` re-runs ensure-codex-auth (ExecStartPre). If 'stale', re-auth codex on main."
+  slack_notify ":warning: *Edge Codex auth store* (Caroline/support) symlink status: \`${CODEX_SYMLINK_STATUS}\` (expected \`ok\`). not-symlink=a deploy clobbered it; dangling=main source moved; missing=never provisioned. \`systemctl restart openclaw-gateway-edge\` re-runs ensure-codex-auth (ExecStartPre) to re-point it at main's canonical codex token."
   date +%s > /tmp/openclaw-watchdog-codex-symlink-cooldown
 fi
 
