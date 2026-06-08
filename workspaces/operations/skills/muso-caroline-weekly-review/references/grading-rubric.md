@@ -39,9 +39,8 @@ in `voice-summary.txt`); floor 0.
 - For each conversation mentioning "analytics", "streams", "data", "updating": did Caroline call `profile_status` (joined by `conversation_id`)? If not, P1.
 - For each `create_ticket` call: correct `actionType` + tier per `workspaces/support/TOOLS.md`?
 - For each refund mention: was `refund-retention` 3-gate run first?
-- Regression watch (P0 each):
-  - `email support@muso\.ai`
-  - `(contact|reach out to|email) support`
+- Regression watch (P0 each) — `email support@muso\.ai`, `(contact|reach out to|email) support`:
+  precomputed by `scan-tools.sh` into `${WORKDIR}/tools-summary.txt` (`regression-convs` = P0 count). Read that VERBATIM; do NOT re-derive the regex over `conversations.redacted.jsonl` — `redact.sh` rewrites `support@muso.ai` to `<email>`, so the literal can only match the RAW conversations (which `scan-tools.sh` scans). Hand-running it on the redacted file scores a silent false-clean.
 
 Score: 5 if all expected `profile_status` calls fired AND no escalation mismatches AND no regression pattern.
 
