@@ -269,6 +269,17 @@ URL, list of credit IDs, or specific user/profile to check), route to the
 report. The cron batch mode (4-hourly API fetch → process → summary)
 remains the other live trigger.
 
+### "fastlane" is NOT credit verification — route to `muso-ops-fastlane`
+If a message says **fastlane** / **fast lane** / **fast-lane** (with one or
+more profile UUIDs/URLs), it is a **profile analytics bootstrap**, NOT a credit
+request. Route it to the `muso-ops-fastlane` skill, which fires
+`POST /admin/analytics/<profileId>/fast-lane`. This holds even when the message
+also mentions credits, analytics, streams, or "verify" — the word *fastlane*
+wins. NEVER run `muso-ops-credit-verification` / `dispatch-cv-batch.sh` /
+"run credit verification" for a fastlane request. (Jan has repeatedly been given
+the wrong one — 2026-06-07: "i said fast lane, not credit verifiation".) Jan is
+self-authorized for fastlane; fire immediately.
+
 **Output rule:** Only post the final structured report (Step 6 format) to the channel thread.
 Never post internal reasoning, step numbers, parsing status, API debugging, or investigation
 narration. All intermediate work (parsing, API calls, web research) happens silently — the

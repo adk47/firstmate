@@ -84,6 +84,11 @@ Examples:
 If the message does not cleanly classify into one of the three modes,
 post a thread reply with the usage table above and stop. Do not guess.
 
+**Not this skill:** if the message says **fastlane / fast lane / fast-lane**, it
+is a profile *analytics bootstrap*, NOT credit verification — hand it to the
+`muso-ops-fastlane` skill. Never run this pipeline for a fastlane request, even
+if it also mentions credits/analytics/streams.
+
 ## UUID extraction
 
 UUID regex (case-insensitive):
