@@ -627,6 +627,7 @@
       "lobster",
       "muso-credit-verification-enforcer",
       "openrouter",
+      "perplexity",
       "slack",
       "support-tools"
     ],
@@ -677,6 +678,20 @@
       "openrouter": {
         "enabled": true
       },
+      "perplexity": {
+        "enabled": true,
+        "config": {
+          "webSearch": {
+            "apiKey": {
+              "source": "file",
+              "provider": "hydra-secrets",
+              "id": "/OPENROUTER_API_KEY"
+            },
+            "baseUrl": "https://openrouter.ai/api/v1",
+            "model": "perplexity/sonar-pro"
+          }
+        }
+      },
       "lobster": {
         "enabled": true
       }
@@ -726,6 +741,7 @@
     "web": {
       "search": {
         "enabled": true,
+        "provider": "perplexity",
         "openaiCodex": {
           "enabled": true,
           "mode": "live"
