@@ -65,6 +65,10 @@ Calculate:
 | Signal | Risk Points |
 |--------|------------|
 | Non-creative role (Editorial, Album Cover, A&R, Marketing, Publisher, Management) on pop >= 70 | +3 |
+| Creative role (Producer/Writer/Composer/Lyricist/Manager) on pop >= 70 where profile name ≠ track's primary artist | +3 |
+| `status='approved'` but `verificationData.is_approved=false` (verifier was overridden by ops/admin) | +3 |
+| "Graduation": profile got ≥2 seed credits with an artist, after which many of that artist's tracks auto-approved (`approve_common_collaborator`) | +3 |
+| Sprayed across many unrelated primary artists (≥8 distinct) at high volume | +2 |
 | Same role claimed on 5+ tracks in 7 days | +2 |
 | Flagged on prior fraud scans | +3 |
 | New account (< 30 days) | +2 |
@@ -187,4 +191,5 @@ GROUP BY profileid
 - Profile URL format: `https://credits.muso.ai/profile/{UUID}` — always use `profileid` (UUID), never numeric `userid`
 - Non-creative roles to treat as inflation risk: Album Cover, Editorial, Photography, Art, Design, A&R, Marketing, Management, Publisher (when not legit label entity)
 - "Javon pattern": claiming Editorial/non-musical roles on many small tracks to accumulate streams; red flag is velocity + role consistency + no external verification
+- "KSJ Beats / fleet-fraud pattern" (the mirror of Javon): **creative** roles (Producer/Writer/Composer) injected onto **superstar** catalogs for **chart** rank, via a free account, exploiting the IDP "graduation" auto-approve rules. When investigating a profile, check the timeline for a small seed followed by a cascade, and check for `approved`-but-`is_approved=false` rows. For the user-level proactive scan, see `muso-query-writer/saved-queries/misc/credit_fleet_fraud_user_scan.sql` and the "Credit Fleet Fraud" section of `muso-ops-fraud`.
 - For escalation cases, reference the `muso-ops-fraud` skill for account-level actions

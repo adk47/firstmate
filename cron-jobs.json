@@ -711,6 +711,42 @@
       }
     },
     {
+      "id": "a86b94bf-08eb-40c1-980b-c8ff621ade4c",
+      "agentId": "operations",
+      "name": "credit-fleet-fraud-scan-weekly",
+      "description": "Weekly user-level \"credit fleet fraud\" scan. Runs credit_fleet_fraud_user_scan.sql (free-account, creative-roles, behavioral) and posts a ranked suspect list to #credit-verification for ANALYST REVIEW only — advisory, no write/revoke. See the \"Credit Fleet Fraud\" section of muso-ops-fraud. Enabled 2026-06-05 per Nick; first live fire is Mon 09:00 UTC after deploy.",
+      "enabled": true,
+      "createdAtMs": 1780568429000,
+      "updatedAtMs": 1780568429000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * 1",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the weekly credit fleet-fraud scan. ADVISORY and READ-ONLY: take NO approve/reject/revoke or any other write action. Execute the saved query skills-all/muso-query-writer/saved-queries/misc/credit_fleet_fraud_user_scan.sql via trino-query.sh (read-only). Follow the \"Credit Fleet Fraud\" section of the muso-ops-fraud skill. Post ONE ranked Slack report of the top ~15 suspects for HUMAN REVIEW: per user show userid, name, email with the local part masked (e.g. d***@gmail.com), n_requests, distinct primary artists, pop>=70 creative submissions, approved, and approved-but-verifier-false. Add a one-line caveat that this is high-recall — each row needs source-confirm + name-match before any action. If zero rows, post \"no new fleet-fraud suspects this week\".",
+        "model": "openai/gpt-5.5",
+        "thinking": "high",
+        "fallbacks": [
+          "openrouter/google/gemini-3.5-flash",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ],
+        "timeoutSeconds": 900
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0
+      }
+    },
+    {
       "id": "217113ad-34ad-4ad8-81a8-c8452a635afc",
       "agentId": "cmo",
       "name": "b2b-meeting-scanner-hourly",

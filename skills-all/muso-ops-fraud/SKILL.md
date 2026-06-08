@@ -175,6 +175,37 @@ ORDER BY credits_count DESC
 LIMIT 50
 ```
 
+### Credit Fleet Fraud (user-level, "graduation")
+
+The 2026-06 KSJ Beats / "T L A" incident (profile `9703c867`, userid 162720) exposed a class of
+abuse the per-credit scans miss: **one submitter sprays high-volume creative-credit claims across
+unrelated superstar catalogs to manufacture chart rank.** Score the *submitter as a running
+transaction*, not each credit alone.
+
+**The "graduation" mechanism (how seeded trust cascades — verified in IDP code):**
+The IDP verifier (`UserCreditValidator`) has auto-approve rules that **short-circuit the risk
+score** — once they fire, popularity/role penalties never apply:
+- `approve_common_collaborator` — **≥2 credits with an artist ⇒ every future track by that artist
+  auto-approves.** Seed 2 Olivia Rodrigo credits → all her tracks auto-approve.
+- `approve_credit_exists` — a credit that already exists (incl. a prior *user-added* one) auto-approves.
+- `approve_owning_track` — profile is/seems an artist on the track.
+So a fraudster (or a manual ops/Retool approval) only needs to land a *seed*; the rest cascades.
+**When investigating, check the claim/credit timeline for a small seed followed by a cascade.**
+
+**The strongest signatures (creative roles only — NOT mastering/mixing, which are legit-high-volume):**
+- High `credit_requests` volume + many distinct **primary artists** (spraying unrelated catalogs)
+- Many **approved Producer/Writer/Composer/Manager** credits on **pop ≥ 70** tracks
+- `status='approved'` while `verificationData.is_approved=false` (admin/ops override of the verifier)
+- **Free / $0-LTV / unclaimed** account (labels & real engineers pay; fraudsters don't)
+- Duplicate-profile / alias sprawl (the incident had 3+ "hannah baker" userids + an `offical.BVC.music`)
+- muso-only (not source-confirmed) credits — combine with `potential_fraud_accounts_muso_only_credits`
+
+**Proactive scan:** run the saved query
+`muso-query-writer/saved-queries/misc/credit_fleet_fraud_user_scan.sql` (user-level, free-account
+filtered, creative-roles only). It is **high-recall / advisory** — every row needs analyst review
+(source-confirm % + name-match) before any action. Do **not** auto-revoke. A free *indie/regional*
+producer with a coherent catalog can clear the gate; that's why a human confirms.
+
 ### Fraud Investigation Report
 
 When investigating a specific user/profile:
