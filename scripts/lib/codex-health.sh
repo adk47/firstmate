@@ -31,6 +31,29 @@ codex_count_auth_invalidated() {
   grep -c -i -e "authentication token has been invalidated" || true
 }
 
+# codex_count_refresh_reused — count Codex-OAuth REFRESH-RACE lines on stdin.
+# This is a DIFFERENT failure signature from codex_count_auth_invalidated above
+# and it is the one that went undetected for 3.5h on 2026-06-08: two gateway
+# processes (main + edge) sharing the one canonical codex token both hit the
+# 5-min pre-expiry refresh window at once, both POSTed a refresh, one rotated the
+# single-use token and the loser got an HTTP 401 it surfaces as:
+#   "OpenAI Codex token refresh failed (401): ... code=refresh_token_reused"
+# and the model-fallback layer then logs `reason=auth_permanent` while it drops
+# the whole codex fleet to openrouter/openai/gpt-5.4-mini. NONE of those strings
+# matches codex_count_auth_invalidated (which keys on the May-29 "token has been
+# invalidated" wording), so the old watchdog stayed silent. We key on the literal
+# substrings that actually appear for THIS class. Any nonzero count = a codex
+# refresh race / permanent-auth fallback is in progress on the scanned journal.
+# The durable PREVENTION is scripts/lib/ensure-codex-refresh-lock-shared.sh
+# (converge the two processes' refresh-lock dirs); this detector is the alarm.
+codex_count_refresh_reused() {
+  grep -c -i -E \
+    -e "refresh_token_reused" \
+    -e "OpenAI Codex token refresh failed" \
+    -e "reason=auth_permanent" \
+    -e "token refresh failed.*\(?401\)?" || true
+}
+
 # codex_count_vision_failures — count exhausted-vision lines on stdin.
 # Signature: "All image models failed" (the image tool AND the pdf tool
 # share this prefix). Caroline's image tool is agents.defaults.imageModel

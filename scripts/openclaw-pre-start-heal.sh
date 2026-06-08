@@ -82,6 +82,23 @@ if [ -x "$SCRIPT_DIR/lib/ensure-codex-auth.sh" ]; then
   "$SCRIPT_DIR/lib/ensure-codex-auth.sh" || log "WARN: ensure-codex-auth.sh returned non-zero (non-fatal)"
 fi
 
+# ── Healer: Codex OAuth refresh-lock convergence (cross-process) ──
+# Centralizing the auth STORE (above) shares the single-use refresh token across
+# the main+edge gateway processes, but does NOT coordinate the two writers:
+# openclaw's cross-process refresh lock lives under each process's own
+# <stateDir>/locks/oauth-refresh/, so main's and edge's locks never collide and
+# the two processes can refresh simultaneously → one rotates the single-use
+# token, the other POSTs the now-spent one → refresh_token_reused, fleet-wide
+# codex death (incident 2026-06-08). Converge every active codex gateway's
+# locks/oauth-refresh/ onto main's canonical dir via symlink so openclaw's own
+# O_EXCL lock excludes ACROSS processes. Idempotent, best-effort, ALWAYS exits 0;
+# runs in ExecStartPre of BOTH gateways while that process is down (no refresh in
+# flight for the restarting process). See CLAUDE.md "Codex / OAuth auth is
+# centralized" and scripts/lib/ensure-codex-refresh-lock-shared.sh.
+if [ -x "$SCRIPT_DIR/lib/ensure-codex-refresh-lock-shared.sh" ]; then
+  "$SCRIPT_DIR/lib/ensure-codex-refresh-lock-shared.sh" || log "WARN: ensure-codex-refresh-lock-shared.sh returned non-zero (non-fatal)"
+fi
+
 is_valid() {
   # Returns 0 if `openclaw --profile <p> config validate` reports clean.
   # The CLI prints "Config valid: <path>" on stdout when ok and a multi-

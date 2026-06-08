@@ -482,6 +482,61 @@ fleet-wide via PR #376. NEVER copy/seed a per-agent codex `auth-profiles.json`.
 
 ---
 
+### Codex Refresh-Token Race (`refresh_token_reused`) — cross-process
+
+**Symptoms**: the WHOLE codex fleet falls back to
+`openrouter/openai/gpt-5.4-mini` with `reason=auth_permanent`; logs show
+`OpenAI Codex token refresh failed (401)` with `code: refresh_token_reused`.
+Crucially, **`ensure-codex-auth.sh --check` is CLEAN** — this is NOT the
+fan-out incident above. Do not be misled into hunting for a stray store.
+
+**Background:** hydra runs TWO codex gateway processes — `--profile main`
+(state `/root/.openclaw-main`) and `--profile edge` (Caroline, state
+`/root/.openclaw-edge`) — that share the ONE canonical refresh token via
+symlink. openclaw serializes refresh with an O_EXCL lock under
+`<stateDir>/locks/oauth-refresh/`, but each process derives that path from its
+OWN state dir, so main's and edge's locks never collide. At the 5-min
+pre-expiry margin both processes refresh at once; one rotates the single-use
+token and wins the disk write, the loser POSTs the now-spent token → 401
+`refresh_token_reused`, and the only freshly-minted valid token is clobbered →
+fleet dead until interactive re-auth. (Upstream openclaw#3611 is this exact
+cross-state-dir case, Closed with no fix; #26322 fixed only the
+single-state-dir case.)
+
+**Diagnosis:**
+```bash
+ssh root@40.160.32.80
+journalctl -u openclaw-gateway-main -u openclaw-gateway-edge --since '-2h' \
+  | grep -iE 'refresh_token_reused|OpenAI Codex token refresh failed|reason=auth_permanent'
+/opt/hydra/scripts/lib/ensure-codex-auth.sh --check                 # EXPECT: clean (this is the tell)
+# Are the two processes' refresh-lock dirs converged onto one physical dir?
+/opt/hydra/scripts/lib/ensure-codex-refresh-lock-shared.sh --check  # exit 1 = NOT converged
+```
+
+**Remediation (recover now — re-auth is unavoidable, the token is spent):**
+```bash
+ssh root@40.160.32.80
+# 1. Re-auth BOTH accounts into the canonical main store (device-code = headless).
+openclaw --profile main models auth login --provider openai-codex --device-code  # aaron@muso.ai
+openclaw --profile main models auth login --provider openai-codex --device-code  # aaronkaufman@me.com
+# 2. Converge the lock dirs so it can't recur, then restart both gateways.
+/opt/hydra/scripts/lib/ensure-codex-refresh-lock-shared.sh
+systemctl restart openclaw-gateway-main.service openclaw-gateway-edge.service
+# 3. Verify: codex serving itself again, no fallback banner.
+journalctl -u openclaw-gateway-main -f | grep model-fallback
+#   want: candidate_succeeded ... candidate=openai/gpt-5.5  (NOT ...gpt-5.4-mini reason=auth_permanent)
+```
+
+**Prevention (mechanical):** `ensure-codex-refresh-lock-shared.sh` runs in the
+ExecStartPre of both gateways (via `openclaw-pre-start-heal.sh`) to converge the
+lock dirs; `openclaw-watchdog.sh` (every 2 min) pages #clio_devops on the
+`refresh_token_reused`/`auth_permanent` signature (scanning BOTH main and edge)
+and again if `--check` ever reports the convergence broke. **Re-verify the
+sidecar-lock realpath behavior on every openclaw bump** — the fix depends on
+openclaw realpath-resolving the lock dir at acquire time.
+
+---
+
 ### Node 8 Unreachable
 
 **Symptoms**: Cannot SSH to 40.160.32.80, agents are all offline.

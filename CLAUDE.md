@@ -105,6 +105,25 @@ codex-health watchdog) to the whole fleet. Prose alone is not enforcement —
 the script and watchdog are. See RUNBOOK §Troubleshooting → "Codex auth
 invalidated / silent Sonnet fallback" for the recovery sequence.
 
+**Sharing the store is necessary but NOT sufficient — also converge the refresh
+LOCK.** The single canonical store shares the token across the `main` and `edge`
+gateway PROCESSES, but does not coordinate the two writers. openclaw serializes
+codex refresh with an O_EXCL lock under `<stateDir>/locks/oauth-refresh/`, and
+each process derives that path from its own `--profile` state dir, so main's and
+edge's locks never collide — at the 5-min pre-expiry margin both processes can
+refresh at once, one rotates the single-use token and the loser POSTs the spent
+one → `refresh_token_reused`, killing the whole fleet (incident 2026-06-08;
+upstream openclaw#3611, Closed with no fix). Fix = converge both processes'
+`locks/oauth-refresh/` onto main's via symlink so openclaw's lock excludes
+ACROSS processes. **Detect**: `scripts/lib/ensure-codex-refresh-lock-shared.sh
+--check`. **Remediate**: same script with no args (also wired into ExecStartPre
+via `openclaw-pre-start-heal.sh`). The watchdog pages on the
+`refresh_token_reused`/`auth_permanent` signature (main+edge) and on lost
+convergence. This is a DIFFERENT failure from fan-out: when it fires,
+`ensure-codex-auth.sh --check` is **clean**. The fix depends on openclaw
+realpath-resolving the lock dir at acquire time — **re-verify on every openclaw
+bump**. See RUNBOOK §Troubleshooting → "Codex Refresh-Token Race".
+
 ## Picking the right extension mechanism
 
 Before writing new code in this repo, walk this decision tree top-down and stop at

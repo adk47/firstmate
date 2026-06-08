@@ -53,6 +53,46 @@ EOF
   [ "$output" -eq 0 ]
 }
 
+# ── codex_count_refresh_reused ────────────────────────────────
+# REAL lines from the 2026-06-08 openclaw-gateway-main journal (the outage that
+# went unalerted for 3.5h because the auth_invalidated detector keys on a
+# DIFFERENT string). These are the lines the alarm MUST match next time.
+
+@test "refresh_reused: counts the real refresh-race lines (401 + auth_permanent fallback)" {
+  run codex_count_refresh_reused <<'EOF'
+Jun 08 20:31:44 ovh-node-8 node[3073539]: error="FailoverError: OAuth token refresh failed for openai-codex: OpenAI Codex token refresh failed (401): {
+Jun 08 20:31:44 ovh-node-8 node[3073539]: [model-fallback/decision] model fallback decision: decision=candidate_failed requested=openai/gpt-5.5 candidate=openai/gpt-5.5 reason=auth_permanent next=openrouter/openai/gpt-5.4-mini detail=... "code": "refresh_token_reused" ...
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 2 ]
+}
+
+@test "refresh_reused: a bare refresh_token_reused code line is matched" {
+  run codex_count_refresh_reused <<'EOF'
+Jun 08 17:31:24 ovh-node-8 node[3073539]:     "code": "refresh_token_reused"
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
+@test "refresh_reused: the successful-fallback (reason=unknown) line is NOT counted" {
+  # The codex→openrouter serving line must not inflate the count, else the alert
+  # would never clear while the fleet is merely running on the fallback.
+  run codex_count_refresh_reused <<'EOF'
+Jun 08 20:32:13 ovh-node-8 node[3073539]: [model-fallback/decision] model fallback decision: decision=candidate_succeeded requested=openai/gpt-5.5 candidate=openrouter/openai/gpt-5.4-mini reason=unknown next=none
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+@test "refresh_reused: distinct from auth_invalidated (May-29 string is not this signature)" {
+  run codex_count_refresh_reused <<'EOF'
+May 27 18:04:07 ovh-node-8 node[399557]: openai-codex/gpt-5.5: Your authentication token has been invalidated. Please try signing in again.
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
 # ── codex_count_vision_failures ───────────────────────────────
 
 @test "vision_failures: counts image AND pdf 'All image models failed'" {

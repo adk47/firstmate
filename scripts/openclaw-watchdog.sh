@@ -186,6 +186,38 @@ if [ "$CODEX_SYMLINK_STATUS" != "ok" ] && _codex_cooldown_ok /tmp/openclaw-watch
   date +%s > /tmp/openclaw-watchdog-codex-symlink-cooldown
 fi
 
+# ── Cross-process Codex refresh-race watch (main + edge) ──────────────────────
+# 2026-06-08 outage: main AND edge both refresh the ONE shared codex token, but
+# openclaw's refresh lock is per-state-dir, so the two processes raced at the
+# 5-min pre-expiry margin → one rotated the single-use token, the loser POSTed
+# the spent one → `refresh_token_reused` → the WHOLE codex fleet fell back to
+# openrouter/openai/gpt-5.4-mini for 3.5h with NO alert (the auth tripwire above
+# keys on a different string AND reads only the edge journal; today's 401s were
+# on main, and a codex→openrouter fallback completes isError=false so the generic
+# counters below never trip). Scan BOTH gateway journals for the refresh-race
+# signature, and verify the lock-dir convergence that PREVENTS it is still live.
+MAIN_CODEX_LOGS=$(journalctl -u openclaw-gateway-main --since "${CHECK_WINDOW_MIN} min ago" --no-pager 2>/dev/null || true)
+CODEX_REFRESH_RACE=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_count_refresh_reused)
+
+if [ "${CODEX_REFRESH_RACE:-0}" -gt 0 ] && _codex_cooldown_ok /tmp/openclaw-watchdog-codex-refresh-cooldown "$CODEX_COOLDOWN_MIN"; then
+  log "CODEX REFRESH RACE: ${CODEX_REFRESH_RACE} refresh_token_reused/auth_permanent lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
+  slack_notify ":rotating_light: *Codex refresh-token race* — ${CODEX_REFRESH_RACE}x \`refresh_token_reused\`/\`auth_permanent\` across main+edge in last ${CHECK_WINDOW_MIN}min. The ENTIRE codex fleet (gpt-5.5) has degraded to \`openrouter/openai/gpt-5.4-mini\`. The single-use refresh token is spent → this needs *interactive re-auth*: \`openclaw --profile main models auth login --provider openai-codex --device-code\` for BOTH accounts (aaron@muso.ai, aaronkaufman@me.com), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. Prevention is the lock-dir convergence (ensure-codex-refresh-lock-shared.sh) — see the tripwire below."
+  date +%s > /tmp/openclaw-watchdog-codex-refresh-cooldown
+fi
+
+# Convergence tripwire: if the two processes' refresh-lock dirs are no longer ONE
+# shared physical dir, the race can recur on the next (~daily) refresh — alert
+# BEFORE it bites. --check is read-only: exit 1 = not converged (CONV_OUT names
+# the offenders). Guarded under `if !` so set -e never fires on the exit 1.
+if [ -x "$_WATCHDOG_DIR/lib/ensure-codex-refresh-lock-shared.sh" ]; then
+  if ! CONV_OUT=$("$_WATCHDOG_DIR/lib/ensure-codex-refresh-lock-shared.sh" --check 2>&1) \
+     && _codex_cooldown_ok /tmp/openclaw-watchdog-codex-lockconv-cooldown "$CODEX_COOLDOWN_MIN"; then
+    log "CODEX REFRESH-LOCK NOT CONVERGED: ${CONV_OUT}"
+    slack_notify ":warning: *Codex refresh-lock convergence broke* on node-8 — the main & edge gateways' \`locks/oauth-refresh/\` are no longer one shared dir, so a concurrent codex refresh can race again (the 2026-06-08 \`refresh_token_reused\` outage). \`systemctl restart openclaw-gateway-edge\` re-runs the ExecStartPre healer to reconverge, or run \`scripts/lib/ensure-codex-refresh-lock-shared.sh\` on node-8.\n\`\`\`${CONV_OUT}\`\`\`"
+    date +%s > /tmp/openclaw-watchdog-codex-lockconv-cooldown
+  fi
+fi
+
 # Crash loop detection: if systemd has restarted the gateway more than
 # 10 times in the last 10 minutes, something is wrong with the config.
 # Don't add more restarts — alert and stop.
