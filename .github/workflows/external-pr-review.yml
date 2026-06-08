@@ -1,7 +1,7 @@
 name: external-pr-review
 
 # QA auto-review of PRs in OTHER Muso-AI repos (see the allowlist below — currently
-# ads-manager, web-credits-next, octave-ui), reusing hydra's qa agent +
+# ads-manager, web-credits-next, octave-ui, core-backend), reusing hydra's qa agent +
 # muso-github-code-review skill.
 #
 # Transport: a source repo fires a repository_dispatch into hydra carrying the PR
@@ -50,7 +50,7 @@ jobs:
           # --- Repo allowlist: only these Muso-AI repos may drive an external
           #     review. Adding a repo = one line here + a Slack-UID mapping. ------
           case "$REPO" in
-            Muso-AI/ads-manager|Muso-AI/web-credits-next|Muso-AI/octave-ui) ;;
+            Muso-AI/ads-manager|Muso-AI/web-credits-next|Muso-AI/octave-ui|Muso-AI/core-backend) ;;
             *) echo "repo='$REPO' not in the external-review allowlist — refusing."; exit 1 ;;
           esac
 
@@ -62,9 +62,11 @@ jobs:
             echo "head_sha='$HEAD_SHA' not a 7-40 char hex sha — refusing."; exit 1
           fi
 
-          # --- Scope: PRs targeting develop or main, non-draft. ----------------
-          if [ "$BASE" != "develop" ] && [ "$BASE" != "main" ]; then
-            echo "PR #${PR} base='$BASE' (not develop/main) — skipping."; exit 0
+          # --- Scope: PRs targeting develop, main, or master, non-draft. -------
+          #     (core-backend's stable branch is master; no other onboarded repo
+          #     uses master, so accepting it here is purely additive.)
+          if [ "$BASE" != "develop" ] && [ "$BASE" != "main" ] && [ "$BASE" != "master" ]; then
+            echo "PR #${PR} base='$BASE' (not develop/main/master) — skipping."; exit 0
           fi
           if [ "$IS_DRAFT" = "true" ]; then
             echo "PR #${PR} is a draft — skipping."; exit 0
