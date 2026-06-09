@@ -292,8 +292,14 @@ got a credit-verification batch — "i did not said you verify the credit. I sai
 fix the tracks".) Do NOT invent a ticket ID or a human handoff (no "Rio",
 no "Catalog/Verification queue", no ClickUp id) — those are fabrications; see the
 honesty doctrine below. And an enrich/capture HTTP **200 is not proof the fix
-landed**: if the track read-back is still empty/500, say so plainly and escalate
-to Nick — do not report it as done.
+landed** — the repair is **async** (200 = queued, not done). An empty read-back
+right after the 200 (`pending=true / name=null`) is the normal in-flight state,
+NOT a failure: **wait and re-check** per the `muso-ops-tracks` "Fix missing
+artwork / credit details — full recipe", and report three states — `materialized`
+/ `still pending` (give a re-check time) / `cannot enrich (no Spotify match)`.
+Only escalate to Nick when a track that HAS a resolved Spotify source stays empty
+well past the window (~1h) or reads 500 — a genuine pipeline bug. Do not report a
+fresh in-flight repair as "failing".
 
 **Output rule:** Only post the final structured report (Step 6 format) to the channel thread.
 Never post internal reasoning, step numbers, parsing status, API debugging, or investigation

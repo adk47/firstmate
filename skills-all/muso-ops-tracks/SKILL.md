@@ -28,6 +28,10 @@ metadata:
 
 Track lifecycle: search → investigate → modify → verify.
 
+> This is a **canonical** skill (no workspace shadow). If you need to read its
+> own files, they live under `${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-tracks/`
+> — NOT under `workspaces/operations/skills/`, which does not exist for this skill.
+
 ## Access Control
 
 - Tier 1-2: All track operations including merge/unmerge
@@ -168,6 +172,56 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/track/enrichByUrl" '{"enrichmentUrl":"https://open.spotify.com/track/..."}'
 ```
+
+### Fix missing artwork / credit details — full recipe
+
+This is the procedure for "fix the tracks / artwork / credit details" requests
+(ops SOUL routes them here). Artwork, `label`, `p_line`, `c_line`,
+`spotifyLabel`, and `artists` are **mirrored from a Spotify source** — we do not
+author them (see "Credits from Spotify are wrong" below). So the recipe is:
+verify a source exists → trigger the repair → **wait** → read back → report.
+
+**1. Precondition — confirm a resolved Spotify source exists.** Enrich/capture
+populate those fields *from* a Spotify analytics source. A track with no Spotify
+source cannot be enriched, full stop.
+```bash
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/track/<track_id>/analytics-sources"
+```
+- No Spotify source at all → the track **cannot be enriched** here. Add one only
+  if you have a real, matching Spotify release URL (see "Add link" above); if no
+  match exists, report `cannot enrich — no Spotify match` and stop. Do NOT loop
+  capture/enrich against a track with no source.
+
+**2. Trigger the repair** — `capture/<track_id>` and/or `enrichByUrl` (above).
+
+**3. The repair is ASYNC — a `200` means QUEUED, not done.** `enrichByUrl` and
+`capture` hand off to an SQS → capture-worker → Industry-Processing → catalog
+pipeline owned by core-backend/Catalog; it is NOT synchronous. Immediately after
+a `200`, the analytics source will read `pending=true / name=null` and the catalog
+fields will still be empty — **this is the normal in-flight state, not a failure**
+(same `in_progress=true, name=null` state the bulk-delete gate protects, above).
+Reading the track back in the same breath as the `200` and calling it "failing"
+is wrong — that was the 2026-06-09 mis-report.
+
+**4. Verify by read-back, after a wait.** Re-read the track a few minutes later
+(start ~5–15 min) and check the actual fields:
+```bash
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/track/<track_id>"   # inspect: artwork, label, p_line, c_line, spotifyLabel, artists
+```
+
+**5. Report THREE states per track — never a premature binary fixed/failing:**
+- `✅ materialized` — fields are now populated.
+- `⏳ still pending` — repair queued, not yet materialized; say so and give a
+  re-check time. This is a normal, honest outcome, not a failure.
+- `❌ cannot enrich (no Spotify match)` — no source to mirror from (step 1).
+
+**6. Escalate to core-backend/Catalog ONLY for a genuine pipeline bug** — a track
+that HAS a resolved Spotify source but whose fields stay null well past the
+window (e.g. ~1h). That is distinct from "still pending" and "no match". Do not
+escalate (and do not invent a ticket/owner — see ops SOUL honesty doctrine) for
+the first two states.
 
 ## Common Issues (from Retool docs)
 
