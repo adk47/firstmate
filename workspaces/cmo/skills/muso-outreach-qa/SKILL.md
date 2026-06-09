@@ -57,21 +57,25 @@ Also runs on demand.
 - [ ] Confirm all 11 stages exist (Cold through Closed Lost)
 - [ ] If any stage ID changed or a new stage was added: alert Fede, update `pipeline-stages.md`
 
-### 3. Sheet Integrity
+### 3. Data Integrity
 
-For `contacts_intelligence`:
+Contact + company intelligence lives in NocoDB now (canonical) — audit it via the
+`muso-nocodb` skill (REST API, no MCP; see `../muso-outreach-engine/references/config.md`).
+Templates + logbook stay on the Sheet.
+
+For NocoDB Contacts Intelligence (`m9vsbijhrr9ddeu`):
 - [ ] All rows have a non empty `Row ID`
 - [ ] All rows have a `Domain` (join key)
 - [ ] No duplicate `Row ID` values
 - [ ] No duplicate `Valid Professional Email` values (same email = duplicate contact)
 
-For `company_intelligence`:
+For NocoDB Company Intelligence (`mvr6nmzcv7albxt`):
 - [ ] All rows have a `Domain` (unique key)
 - [ ] No duplicate domains
 - [ ] All rows have `ICPCategory Label` (required for name drop logic)
 - [ ] Flag rows missing `Why Muso Ads Matters` (critical for outreach)
 
-For `email_templates`:
+For `email_templates` (Sheet):
 - [ ] All rows have an `ID`, `Template Type`, `Subject Line`, `Email Body`
 - [ ] No em dash in any `Email Body` or `Subject Line`
 - [ ] Reply Rate (%) and Booking Rate (%) are computed correctly (Replies / Times Sent)
@@ -88,7 +92,7 @@ For `muso-b2b-outreach-reports`:
 - [ ] For each Sent row, a matching GHL opportunity exists at stage `Emailed` or later
 - [ ] For each Replied row, the GHL stage is `Replied`, `Meeting Booked`, `Proposal Sent`, `Closed Won`, or `Closed Lost`
 - [ ] No GHL opportunity is missing its `sheet_row_id` custom field
-- [ ] No GHL opportunity has a `sheet_row_id` that does not exist in `contacts_intelligence`
+- [ ] No GHL opportunity has a `sheet_row_id` that does not exist in NocoDB Contacts Intelligence (`m9vsbijhrr9ddeu`, `Row ID` column)
 
 Any drift → alert Fede with specific row IDs and GHL opportunity IDs.
 

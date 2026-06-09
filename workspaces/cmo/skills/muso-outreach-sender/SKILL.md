@@ -43,7 +43,8 @@ All IDs, accounts, sheets, channels, and rules are in
 Build the exclusion set from the 4 primary sources. NEVER skip this.
 
 1. **Sheet logbook** (`muso-b2b-outreach-reports`): every row = touched.
-2. **`contacts_intelligence`**: every row with a non empty `Status` = touched.
+2. **NocoDB Contacts Intelligence** (`m9vsbijhrr9ddeu`): every row with a
+   non empty `Status` = touched.
 3. **GHL pipeline** (paginate ALL pages with `page=N`, not POST search):
    extract every company + contact name across ALL stages (including Closed Lost).
 4. **Gmail B2B - Ads label** across all 4 accounts: extract recipients + last names.
@@ -58,10 +59,18 @@ Any candidate matching ANY of these is SKIPPED.
 
 ### Step 1: Pick Targets
 
-From `contacts_intelligence`, filter:
+From NocoDB Contacts Intelligence (`m9vsbijhrr9ddeu`), via the `muso-nocodb`
+skill (REST API, no MCP — see `config.md`), filter:
 - `Status` empty (untouched)
 - `Rank` / `Job Category` matching the ask
-- Company exists in `company_intelligence` with complete `Why Muso Ads Matters`
+- Company exists in NocoDB Company Intelligence (`mvr6nmzcv7albxt`) with complete
+  `Why Muso Ads Matters`
+
+```bash
+bash scripts/nocodb-api.sh records.ls m9vsbijhrr9ddeu \
+  --where "(Status,blank)" \
+  --fields "Id,Domain,Company Name,First Name,Last Name,Title,Job Category,Rank,Valid Professional Email"
+```
 
 Apply the exclusion set. Drop matches.
 
@@ -82,7 +91,7 @@ Exceptions allowed:
 ### Step 4: Research & Personalize
 
 For each finalist:
-- Pull `company_intelligence` row by Domain
+- Pull the NocoDB Company Intelligence (`mvr6nmzcv7albxt`) row by `Domain`
 - Pull `Why Muso Ads Matters` (if missing, ASK Fede or Aaron)
 - Deep research: website, LinkedIn, recent news (use `web_search` + `web_fetch`)
 - Select ICP name drops from `references/icp-name-drops.md`

@@ -65,7 +65,7 @@ events:
 ## Notes
 
 - Every new opportunity should include the `sheet_row_id` custom field so it can be
-  traced back to `contacts_intelligence`.
+  traced back to NocoDB Contacts Intelligence (`m9vsbijhrr9ddeu`, `Row ID` column).
 - Opportunity name format: `{Company Name} | {Contact Name}`
 - Tags: `B2B-Ads`, `Outreach`
 - Use GET with `page=N` for opportunity searches. POST search is broken (caps at

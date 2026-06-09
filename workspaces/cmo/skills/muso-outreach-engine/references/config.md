@@ -8,17 +8,36 @@ every subskill that references this file.
 
 ---
 
+## Contact & Company Intelligence — NocoDB (CANONICAL)
+
+Contact + company intelligence lives in **NocoDB** now — it is the source of
+truth and supersedes the legacy `contacts_intelligence`/`company_intelligence`
+Google Sheet tabs. Access via the **`muso-nocodb` skill**
+(`bash scripts/nocodb-api.sh <subcommand>`, REST API v2, `xc-token` /
+`NOCODB_API_TOKEN`). **There is NO NocoDB MCP server.**
+
+- **Base**: `p11hvpwapu4hv0x` (B2B-ADS-intelligence) · workspace `w8fofvl1`
+- Read: `records.ls <tableId> --where "(Domain,eq,…)" --fields "A,B"` ·
+  Count: `records.count <tableId> --where "…"` ·
+  Write: `records.update <tableId> '[{"Id":N,"Field":"…"}]'` / `records.create <tableId> '{…}'`
+- The subcommand is `records.ls` (NOT `records.list`). `--where` syntax is `(Field,op,value)`.
+
+| Table | tableId | Key columns | Purpose |
+|-------|---------|-------------|---------|
+| Contacts Intelligence | `m9vsbijhrr9ddeu` | Id, Row ID, Status, Source, Domain, Company Name, First Name, Last Name, Title, Job Category, Rank, Valid Professional Email, Snov.io LinkedIn, Enrow/Raw/RocketReach/Snov.io Email, STEP, Sender | Verified music-industry contacts. No bare `Email` col — match by `Domain` or `Valid Professional Email`. |
+| Company Intelligence | `mvr6nmzcv7albxt` | Id, Domain, Company Name, Industry, Linkedin Company, Company Description, Value Proposition, Value Statement, Target Customer, ICPCategory Label, Why Muso Ads Matters, STEP, Status | Company records keyed by Domain. |
+
 ## Google Sheets
 
-### Master Leads Sheet
+### Master Leads Sheet (templates + knowledge base only)
+Contact/company intelligence has **migrated to NocoDB** (above). This Sheet now
+serves only templates and the product knowledge base.
 - **ID**: `1OWzfmxtgX-xq-aGxgmsjAdzQoyKbb94hnU_j-jm5q6I`
 - **URL**: https://docs.google.com/spreadsheets/d/1OWzfmxtgX-xq-aGxgmsjAdzQoyKbb94hnU_j-jm5q6I/edit
 - **Account**: `a@muso.ai`
 
 | Tab | gid | Columns | Purpose |
 |-----|-----|---------|---------|
-| `contacts_intelligence` | 0 | Row ID, Status, Source, Domain, Company Name, First Name, Last Name, Title, Job Category, Rank, Valid Professional Email, LinkedIn Profile URL | Verified music industry contacts |
-| `company_intelligence` | 1050714378 | Domain, Company Name, Industry, LinkedIn Company URL, Company Description, Value Proposition, Value Statement, Target Customer, ICPCategory Label, Why Muso Ads Matters | Company records keyed by Domain |
 | `email_templates` | 1594786637 | ID, Template Type, Template Name, Subject Line, Email Body, When to Use, Times Sent, Replies, Meetings Booked, Reply Rate (%), Booking Rate (%), Last Used Date, Notes/Learnings | Source of truth for ALL templates (initial + follow up) |
 | `what_is_muso_ads` | 719587516 | free form | Product knowledge base |
 | `how_muso_ads_works` | 2060687836 | free form | Campaign mechanics, placements, targeting |
@@ -57,7 +76,7 @@ Allowed `Status` values: `Pending Approval`, `Approved`, `Sent`, `Replied`, `No 
 
 ### Opportunity Metadata (Required on every create)
 - **Name format**: `{Company Name} | {Contact Name}`
-- **Custom field `sheet_row_id`**: the `Row ID` from `contacts_intelligence` (enables reverse lookup from GHL to sheet)
+- **Custom field `sheet_row_id`**: the `Row ID` from NocoDB Contacts Intelligence (`m9vsbijhrr9ddeu`) (enables reverse lookup from GHL)
 - **Tags**: `B2B-Ads`, `Outreach`
 
 ### Pipeline Stages

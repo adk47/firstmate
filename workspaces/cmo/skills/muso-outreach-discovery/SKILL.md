@@ -186,7 +186,7 @@ cron runs silently. Never post "nothing new found" messages.
 - Always target parents, never subsidiaries
 - Always dedupe against all 4 sources
 - Always post to `#company-finder` (not `#sales-alerts`)
-- Never add companies to `contacts_intelligence` (that is for contacts only)
+- Never add companies to Contacts Intelligence (`m9vsbijhrr9ddeu`; that is for contacts only)
 - Never enrich contacts inside this skill (that is `muso-outreach-enrichment`)
 - Exploration vertical picks must be labeled as such
 

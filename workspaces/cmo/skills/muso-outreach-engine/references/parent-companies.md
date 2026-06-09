@@ -47,16 +47,17 @@ When outreach is done to a parent, treat all listed subsidiaries as covered.
 ## Rules
 
 1. Target only the parent domain. Never cold outreach a subsidiary if the parent
-   is already in the sheet or has been contacted.
+   is already in NocoDB or has been contacted.
 2. When the daily company finder surfaces a subsidiary of a known parent, collapse
    the result to the parent and skip.
-3. When the finder surfaces a new parent that owns subsidiaries already in our
-   sheet, flag it for rollup: add the parent here, update `contacts_intelligence`
-   to reflect the parent relationship, and remove or deactivate the subsidiary rows.
+3. When the finder surfaces a new parent that owns subsidiaries already in NocoDB,
+   flag it for rollup: add the parent here, update NocoDB Contacts Intelligence
+   (`m9vsbijhrr9ddeu`) to reflect the parent relationship, and remove or deactivate
+   the subsidiary rows.
 4. If a subsidiary has a meaningfully separate audience from the parent (very
    different product line, different buyer), flag it for Fede review before
    adding as a separate entry.
-5. Use the parent's primary domain as the canonical entry in `company_intelligence`.
+5. Use the parent's primary domain as the canonical entry in NocoDB Company Intelligence (`mvr6nmzcv7albxt`).
 
 ## How to Add a New Parent
 
@@ -65,8 +66,8 @@ research:
 
 1. Add the parent under a new `### {Parent Name} ({domain})` heading
 2. List known subsidiaries below as `- domain, short name`
-3. Update `company_intelligence` to mark the parent as `Parent Company = TRUE`
-4. Remove or deactivate duplicate subsidiary rows in `contacts_intelligence`
+3. Update NocoDB Company Intelligence (`mvr6nmzcv7albxt`) to mark the parent as `Parent Company = TRUE`
+4. Remove or deactivate duplicate subsidiary rows in NocoDB Contacts Intelligence (`m9vsbijhrr9ddeu`)
 5. Post a note to `#company-finder` describing the rollup so Fede can sanity check
 
 ## History

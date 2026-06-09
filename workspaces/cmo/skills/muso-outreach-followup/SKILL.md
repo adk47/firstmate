@@ -57,7 +57,9 @@ source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunitie
 ```
 
 For each opportunity in those stages:
-1. Read the `sheet_row_id` custom field → look up the contact in `contacts_intelligence`
+1. Read the `sheet_row_id` custom field → look up the contact in NocoDB Contacts
+   Intelligence (`m9vsbijhrr9ddeu`), matching its `Row ID` column via the
+   `muso-nocodb` skill: `bash scripts/nocodb-api.sh records.ls m9vsbijhrr9ddeu --where "(Row ID,eq,<sheet_row_id>)"`
 2. Check days since last touch (from logbook sheet)
 3. Count follow ups already sent (from logbook)
 4. Filter: past cadence window (7d, 14d, or 140d) AND less than 3 follow ups sent

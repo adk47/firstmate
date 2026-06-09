@@ -42,7 +42,7 @@ This engine is completely separate from `muso-outreach-*`.
 | | Win Back (THIS engine) | B2B Ads Outreach |
 |---|---|---|
 | Audience | Individual Pro users who cancelled | Companies that never had Muso |
-| Sheet | `1_gltz...` (high_value_churn + pro_churned_all) | `1OWzfm...` (contacts_intelligence + company_intelligence) |
+| Intelligence store | Sheet `1_gltz...` (high_value_churn + pro_churned_all) | NocoDB B2B-Ads Intelligence (Contacts `m9vsbijhrr9ddeu` + Company `mvr6nmzcv7albxt`) |
 | GHL Location | `fmK5Vl9sJv49WTYA0QyP` (Muso Win Back) | `S5w31kRRgsBjjiVATWlP` (B2B Ads) |
 | GHL API Key | `$GHL_WINBACK_API_KEY` | `$GHL_API_KEY` |
 | Pipeline | `Churn -> Win-back` (`AZa8jK5S7UyQ0fqfxzyB`) | `B2B-Ads-Clio` (`GeSt85TueSvJ0SNFZXfQ`) |

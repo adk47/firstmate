@@ -65,7 +65,9 @@ channels, or email addresses in a subskill. Update `config.md` in one place and
 every subskill picks up the change.
 
 Config includes:
-- Master leads sheet and all tabs (contacts_intelligence, company_intelligence, email_templates, what_is_muso_ads, how_muso_ads_works)
+- Contact & Company Intelligence — NocoDB (CANONICAL): tables Contacts
+  Intelligence (`m9vsbijhrr9ddeu`) + Company Intelligence (`mvr6nmzcv7albxt`)
+- Master leads sheet, templates + KB tabs only (email_templates, what_is_muso_ads, how_muso_ads_works)
 - Outreach log sheet (muso-b2b-outreach-reports)
 - GHL location + pipeline + stage info
 - 4 Muso email accounts and their voice mappings
@@ -120,7 +122,7 @@ Config includes:
 
 ## Data Flow
 
-1. **Discovery** finds new parent companies → adds to `contacts_intelligence` and `company_intelligence`
+1. **Discovery** finds new parent companies → adds to NocoDB Contacts Intelligence and Company Intelligence
 2. **Enrichment** (when active) fills missing contact data from Snov.io / Enrow / Datagma
 3. **Writer** drafts personalized emails using templates from `email_templates`
 4. **Sender** creates Gmail drafts, sends on approval, labels, logs to sheet, syncs to GHL
@@ -145,7 +147,7 @@ Config includes:
 - Never send without explicit Fede or Aaron approval
 - Never send on Saturday or Sunday
 - Never break voice (Aaron voice from f@ is wrong, Fede voice from a@/ak@/aaron.k@ is wrong)
-- Never skip the 4 source crosscheck (sheet logbook + contacts_intelligence + GHL + Gmail label)
+- Never skip the 4 source crosscheck (sheet logbook + NocoDB Contacts Intelligence + GHL + Gmail label)
 - Never report outreach numbers from one source only
 - Never post sales notifications to `#clio_x_fede` (use `#sales-alerts`)
 - Always apply `B2B - Ads` label after send

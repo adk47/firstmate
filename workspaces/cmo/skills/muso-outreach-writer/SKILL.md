@@ -136,8 +136,8 @@ already cares about Muso.
 Every email MUST include:
 
 1. **Company specific hook** (1 or 2 sentences). Shows you know their business.
-   Pulled from `Why Muso Ads Matters` in company_intelligence. This line should
-   NOT work for any other company.
+   Pulled from `Why Muso Ads Matters` in NocoDB Company Intelligence. This line
+   should NOT work for any other company.
 2. **The pitch** (1 or 2 sentences). What Muso Ads is and why it is different:
    - 500K+ verified music professionals
    - Hyper targeting by role, credits, genre, career stage
@@ -230,8 +230,8 @@ Before handing an email back to sender, verify:
 ## Inputs / Outputs
 
 **Inputs** (from `muso-outreach-sender` or `muso-outreach-followup`):
-- Contact row (from contacts_intelligence)
-- Company row (from company_intelligence, matched by Domain)
+- Contact row (from NocoDB Contacts Intelligence)
+- Company row (from NocoDB Company Intelligence, matched by Domain)
 - Template type (`Initial`, `Follow-Up`, `FU-01`, `FU-02`, `FU-03`, `FU-04`)
 - Sender account (a@, ak@, aaron.k@, f@)
 - Deep research hook (optional, from web_search results)

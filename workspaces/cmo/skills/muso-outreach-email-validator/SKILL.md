@@ -44,8 +44,8 @@ This skill is called in three contexts:
 2. **Single email check** (on demand): Anyone asks "is this email valid?" or
    "check this email for me."
 
-3. **Bulk database sweep** (on demand): Verify all emails in `contacts_intelligence`
-   and write results back to the sheet.
+3. **Bulk database sweep** (on demand): Verify all emails in NocoDB Contacts
+   Intelligence and write results back to NocoDB.
 
 ## Authentication
 
@@ -144,7 +144,10 @@ to avoid rate limiting. Wait 2 seconds between chunks.
 
 For every email that returns `not_valid`:
 
-1. Update `contacts_intelligence` sheet: set `Status` = `Email Invalid (Snov)`
+1. Update NocoDB Contacts Intelligence (`m9vsbijhrr9ddeu`): set `Status` =
+   `Email Invalid (Snov)` for that contact's row, via the `muso-nocodb` skill —
+   `bash scripts/nocodb-api.sh records.update m9vsbijhrr9ddeu '[{"Id":<id>,"Status":"Email Invalid (Snov)"}]'`
+   (look up `<id>` first with `records.ls … --where "(Valid Professional Email,eq,<email>)" --fields "Id"`).
 2. Log to `api-logs/snov/YYYY-MM-DD.jsonl`
 3. If the contact was in GHL, update the opportunity notes with "Email invalid per Snov.io verification {date}"
 4. Include the skip in the batch presentation so Fede sees what was dropped
@@ -165,16 +168,18 @@ Then list the skipped contacts with reasons.
 
 ## Bulk Database Sweep
 
-For verifying the entire `contacts_intelligence` sheet on demand.
+For verifying the entire NocoDB Contacts Intelligence table on demand.
 
 ### Step 1: Pull all emails
 
 ```bash
-gog sheets get 1OWzfmxtgX-xq-aGxgmsjAdzQoyKbb94hnU_j-jm5q6I \
-  "contacts_intelligence" --account a@muso.ai -p
+# Paginate with --offset for >1000 rows. Use the muso-nocodb skill (REST API, no MCP).
+bash scripts/nocodb-api.sh --raw records.ls m9vsbijhrr9ddeu \
+  --fields "Id,Domain,Company Name,First Name,Last Name,Valid Professional Email,Status" \
+  --limit 1000 --offset 0
 ```
 
-Extract column K (`Valid Professional Email`) for all rows.
+Use the `Valid Professional Email` field (and the row `Id`, needed for write-back) for all rows.
 
 ### Step 2: Batch verify in chunks
 
@@ -185,13 +190,18 @@ Split into chunks of 50 emails. For each chunk:
 4. If any still processing, retry up to 6 times (5s intervals)
 5. Wait 2 seconds before next chunk
 
-### Step 3: Write results back to sheet
+### Step 3: Write results back to NocoDB
 
-Add two columns to `contacts_intelligence` (if not already present):
-- `Snov Email Status`: the `smtpStatus` value (`valid`, `not_valid`, `unknown`)
-- `Snov Verified Date`: ISO date of verification (YYYY-MM-DD)
+Ensure two columns exist on Contacts Intelligence (`m9vsbijhrr9ddeu`), creating
+them once if missing (via the `muso-nocodb` skill, `columns.add`):
+- `Snov Email Status` (SingleLineText): the `smtpStatus` value (`valid`, `not_valid`, `unknown`)
+- `Snov Verified Date` (SingleLineText): ISO date of verification (YYYY-MM-DD)
 
-Update each row with the verification result.
+Then update each row by its `Id` with the verification result (bulk PATCH takes an array):
+```bash
+bash scripts/nocodb-api.sh records.update m9vsbijhrr9ddeu \
+  '[{"Id":<id>,"Snov Email Status":"valid","Snov Verified Date":"YYYY-MM-DD"}, …]'
+```
 
 ### Step 4: Summary report
 
@@ -237,5 +247,5 @@ Every verification call MUST be logged to `api-logs/snov/YYYY-MM-DD.jsonl`:
 - ALWAYS log every verification call
 - ALWAYS check credit balance before bulk sweeps
 - ALWAYS include the verification summary in batch presentations
-- If a previously valid email returns `not_valid` on re-check, update the sheet
+- If a previously valid email returns `not_valid` on re-check, update NocoDB
   immediately (email addresses decay over time)

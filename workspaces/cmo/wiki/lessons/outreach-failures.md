@@ -110,7 +110,7 @@ company specific line that could not work for any other company.
 **Root cause**: Lazy personalization. Template plus company name is not personalization.
 
 **Fix**: Every email must have a company specific hook in the first 1 to 2
-sentences pulled from `Why Muso Ads Matters` in `company_intelligence`. The hook
+sentences pulled from `Why Muso Ads Matters` in NocoDB Company Intelligence. The hook
 line should NOT work for any other company. See `muso-outreach-writer`
 personalization checklist.
 

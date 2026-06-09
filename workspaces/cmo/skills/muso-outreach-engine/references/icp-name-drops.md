@@ -3,7 +3,7 @@
 Used in cold email copy to establish credibility with genre relevant artists.
 
 **Always include Bad Bunny.** Then add 2 names relevant to the prospect's
-`ICPCategory Label` (from the `company_intelligence` sheet).
+`ICPCategory Label` (from NocoDB Company Intelligence, `mvr6nmzcv7albxt`).
 
 All names verified on Muso catalog with real credits as of 2026-03-06.
 

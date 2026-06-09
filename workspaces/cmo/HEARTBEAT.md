@@ -59,7 +59,7 @@ All outreach related crons post to `#sales-alerts` (`C0ARQ021M40`).
 **Scans**: Google Calendar on `a@muso.ai` for new B2B Ads meeting bookings
 **Calendars**: `Intro | Muso Ads`, `Business Pro Meetings`, `Muso Ads 2`
 **On booking detected**:
-1. Match attendee to contact in `contacts_intelligence`
+1. Match attendee to contact in NocoDB Contacts Intelligence (`m9vsbijhrr9ddeu`)
 2. Move GHL opportunity to `Meeting Booked` via `muso-outreach-ghl-sync`
 3. Log to `muso-b2b-outreach-reports`
 4. Post to `#sales-alerts` with meeting details

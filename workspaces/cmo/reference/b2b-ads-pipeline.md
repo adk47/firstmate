@@ -4,9 +4,9 @@ Architecture and ownership for the B2B-Ads-Clio lead pipeline.
 
 ## Architecture (corrected 2026-04-11)
 
-Discovery tools (web search, Datagma/Snov.io when wired) → *Google Sheet* (master leads — `contacts_intelligence` + `company_intelligence` tabs) → *GHL* (CRM pipeline: `B2B-Ads-Clio`) → Aaron closes.
+Discovery tools (web search, Datagma/Snov.io when wired) → *NocoDB* (B2B-Ads Intelligence — Contacts `m9vsbijhrr9ddeu` + Company `mvr6nmzcv7albxt`) → *GHL* (CRM pipeline: `B2B-Ads-Clio`) → Aaron closes.
 
-- *Google Sheet = source of truth for leads*
+- *NocoDB = source of truth for leads* (templates + KB stay on the Google Sheet)
 - *GHL = source of truth for pipeline stage / sales process*
 - Athena is NOT part of lead sourcing. Can help with stats/personalization data only.
 - Klaviyo is OFF-LIMITS for cold outreach. Warmed Gmail only.
@@ -25,4 +25,4 @@ Discovery tools (web search, Datagma/Snov.io when wired) → *Google Sheet* (mas
 
 ## Crosscheck Rules (4-point, per config.md)
 
-Sheet logbook + contacts_intelligence + GHL + Gmail label. Never report outreach numbers from one source only.
+Sheet logbook + NocoDB Contacts Intelligence + GHL + Gmail label. Never report outreach numbers from one source only.

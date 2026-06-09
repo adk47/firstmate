@@ -75,11 +75,12 @@ echo "docusign account: ${DOCUSIGN_ACCOUNT_ID:+set}"
 
 Test read access to each critical sheet:
 
-### Outreach Engine Sheets
+### Outreach Engine Data Stores
 
-- [ ] Master Leads Sheet (`1OWzfmxtgX-xq-aGxgmsjAdzQoyKbb94hnU_j-jm5q6I`)
-    - `gog sheets get 1OWzfmxtgX-xq-aGxgmsjAdzQoyKbb94hnU_j-jm5q6I --range "contacts_intelligence!A1:L2" --account a@muso.ai`
-    - Confirm columns match: `Row ID | Status | Source | Domain | Company Name | First Name | Last Name | Title | Job Category | Rank | Valid Professional Email | LinkedIn Profile URL`
+- [ ] Contact + Company Intelligence — NocoDB (CANONICAL; see `skills/muso-outreach-engine/references/config.md`)
+    - `bash scripts/nocodb-api.sh records.count m9vsbijhrr9ddeu` (Contacts Intelligence reachable)
+    - `bash scripts/nocodb-api.sh records.count mvr6nmzcv7albxt` (Company Intelligence reachable)
+- [ ] Master Leads Sheet (`1OWzfmxtgX-xq-aGxgmsjAdzQoyKbb94hnU_j-jm5q6I`) — templates + KB only
 - [ ] Outreach Log Sheet (`1o1aUpAhQ8tNuZtzWqUm9bOUFvyPaGrCHbImbB4mtmW0`)
     - `gog sheets get 1o1aUpAhQ8tNuZtzWqUm9bOUFvyPaGrCHbImbB4mtmW0 --range "muso-b2b-outreach-reports!A1:M1" --account a@muso.ai`
     - Confirm columns match: `# | Date | Muso Email | Domain | Contact | Company | Title | Email | Action | Status | Email Subject | Template | Hook / Notes`
@@ -186,8 +187,8 @@ For each, post a test message "CMO wire up test, please ignore" then delete.
 
 Run a dry run of the full outreach workflow on ONE contact without actually sending:
 
-- [ ] Pick 1 untouched contact from `contacts_intelligence`
-- [ ] Run the 4 source exclusion check (sheet logbook, contacts_intelligence Status, GHL, Gmail label)
+- [ ] Pick 1 untouched contact from NocoDB Contacts Intelligence (`m9vsbijhrr9ddeu`)
+- [ ] Run the 4 source exclusion check (sheet logbook, NocoDB Contacts Intelligence Status, GHL, Gmail label)
 - [ ] Generate a draft email via `muso-outreach-writer` with Aaron voice
 - [ ] Confirm the email has: no em dash, under 120 words, HTML, correct signature
 - [ ] Show the draft to Fede in `#marketing`

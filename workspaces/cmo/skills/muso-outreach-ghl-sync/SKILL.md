@@ -176,7 +176,7 @@ If `Drift fixed > 10`, flag for Fede review (something is wrong upstream).
 ## Custom Fields
 
 These must exist on the GHL Contact object:
-- `sheet_row_id`: the `Row ID` from `contacts_intelligence` (enables reverse lookup)
+- `sheet_row_id`: the `Row ID` from NocoDB Contacts Intelligence (`m9vsbijhrr9ddeu`) (enables reverse lookup)
 
 If the field does not exist, the startup checklist will fail and prompt Fede to
 create it in GHL.
