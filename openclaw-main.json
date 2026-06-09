@@ -319,7 +319,11 @@
           "muso-ops-audit",
           "muso-intercom",
           "muso-verify-profile",
-          "muso-audit-profile-credits"
+          "muso-audit-profile-credits",
+          "muso-refund-processor",
+          "muso-stripe",
+          "muso-refund-investigation",
+          "muso-amplitude"
         ],
         "tools": {
           "deny": [
