@@ -1,0 +1,10 @@
+{
+  "list": [
+    { "Id": 1, "Domain": "audioshake.ai", "Company Name": "AudioShake" },
+    { "Id": 2, "Domain": "landr.com", "Company Name": "LANDR" },
+    { "Id": 3, "Domain": "izotope.com", "Company Name": "iZotope" },
+    { "Id": 4, "Domain": "universalmusic.com", "Company Name": "Universal Music Group" },
+    { "Id": 5, "Domain": "apogeedigital.com (updated)", "Company Name": "Apogee Electronics" }
+  ],
+  "pageInfo": { "totalRows": 5, "page": 1, "pageSize": 1000, "isFirstPage": true, "isLastPage": true }
+}

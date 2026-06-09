@@ -16,9 +16,9 @@ depends-on:
   - muso-outreach-engine
   - muso-slack-formatter
 metadata:
-  version: "1.0"
-  last-updated: "2026-04-09"
-  status: "planned cron, not yet wired"
+  version: "1.1"
+  last-updated: "2026-06-09"
+  status: "cron wired; NocoDB dedupe via deterministic dedupe-candidates.sh"
 ---
 
 # Muso Outreach Discovery
@@ -75,27 +75,44 @@ Run discovery queries for each active + exploration vertical. Discovery sources
 
 Target: surface ~20 candidates per run, narrow to top 5 after dedupe.
 
-### Step 2: Dedupe (4 Sources)
+### Step 2: Dedupe
 
-Drop any candidate matching ANY of these. The **NocoDB B2B-Ads Intelligence base
-is the canonical store** (it supersedes the legacy `contacts_intelligence` /
-`company_intelligence` Google Sheet — do NOT dedupe against the Sheet):
+The **NocoDB B2B-Ads Intelligence base is the canonical store** and `Domain`
+is unique there (it supersedes the legacy `contacts_intelligence` /
+`company_intelligence` Google Sheet — do NOT dedupe against the Sheet).
 
-1. **NocoDB Company Intelligence** (`mvr6nmzcv7albxt`), by Domain OR Company Name (fuzzy match on first word)
-2. **NocoDB Contacts Intelligence** (`m9vsbijhrr9ddeu`), by Domain OR Company Name
-3. **GHL opportunities** in B2B-Ads-Clio pipeline (all stages)
-4. **`parent-companies.md`** known parent list + all their subsidiaries
+**2a. NocoDB dedupe is a single deterministic call — do NOT hand-roll it.**
+Collect ALL candidates from Step 1 as a JSON array `[{"name":…,"domain":…}, …]`
+(extra fields like industry/why are preserved) and pipe them through the
+dedup script. It snapshots both NocoDB tables once, normalizes domains and
+names on both sides, and returns only the genuinely-new companies. This
+replaces the old per-candidate `records.ls --where "(Domain,eq,…)"` loop,
+which leaked duplicates because exact matching is brittle to domain formatting
+(`https://www.AudioShake.ai/` ≠ stored `audioshake.ai`) and the loop got
+skipped under load.
 
 ```bash
-# Dedupe against NocoDB (canonical) via the muso-nocodb skill — REST API, no MCP.
-# Use its documented subcommands (single calls); do NOT hand-roll jq/while pipelines.
-bash scripts/nocodb-api.sh records.ls mvr6nmzcv7albxt \
-  --where "(Domain,eq,<domain>)" --fields "Domain,Company Name"   # Company Intelligence by Domain
-bash scripts/nocodb-api.sh records.count mvr6nmzcv7albxt \
-  --where "(Company Name,like,%<first-word>%)"                    # fuzzy Company Name check
-bash scripts/nocodb-api.sh records.ls m9vsbijhrr9ddeu \
-  --where "(Domain,eq,<domain>)" --fields "Domain,Company Name"   # Contacts Intelligence by Domain
+echo "$CANDIDATES_JSON" | bash /opt/hydra/scripts/company-finder/dedupe-candidates.sh
+# -> { "new":[…], "duplicates":[…], "name_flags":[…], "stats":{checked,new,dropped} }
+```
 
+- Carry forward **ONLY** the companies in `.new[]`. Drop everything in
+  `.duplicates[]` (matched in NocoDB Company `mvr6nmzcv7albxt` or Contacts
+  `m9vsbijhrr9ddeu` by normalized domain or full name).
+- `.name_flags[]` are NEW companies with a partial name overlap to an existing
+  record — keep them, but note the `possible_match` in the Step 5 output so
+  Fede can eyeball a possible rebrand. Never drop on a name flag alone.
+- **Fail-safe:** if the script exits non-zero or prints
+  `DEDUP_SOURCE_UNAVAILABLE: <table>`, NocoDB was unreachable. Do NOT ship a
+  normally-deduped batch — either reply `NO_REPLY` or clearly mark the batch
+  PARTIAL/UNSAFE naming the failed source, so dedup is never silently skipped.
+
+**2b. Then apply the remaining filters to whatever survived 2a:**
+
+1. **GHL opportunities** in B2B-Ads-Clio pipeline (all stages) — drop matches.
+2. **`parent-companies.md`** known parent list + all their subsidiaries.
+
+```bash
 # Read GHL
 source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
   -H "Authorization: Bearer $GHL_API_KEY" -H "Version: 2021-07-28" \

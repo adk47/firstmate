@@ -1,0 +1,6 @@
+{
+  "list": [
+    { "Id": 11, "Domain": "splice.com", "Company Name": "Splice" }
+  ],
+  "pageInfo": { "totalRows": 1, "page": 1, "pageSize": 1000, "isFirstPage": true, "isLastPage": true }
+}
