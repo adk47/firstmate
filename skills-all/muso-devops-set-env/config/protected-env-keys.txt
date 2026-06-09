@@ -1,0 +1,58 @@
+# protected-env-keys.txt — BLOCKLIST for devops-set-env.sh.
+#
+# A key matching ANY glob below is "secret-shaped" and is NEVER set
+# autonomously. The wrapper refuses it (exit 4) UNLESS an approver gives an
+# explicit green light: the agent must ask an approver
+# (config/blocklist-override-approvers.txt) and re-run with
+# --confirmed-by <approver> --approval-msg-id <slack_ts>. No green light → no set.
+#
+# SEMANTICS (deliberately the OPPOSITE of bulk-destructive-exclude.txt):
+#   - A MISSING file means EVERY key is treated as protected (refuse all).
+#     Fail closed — a missing blocklist must never widen autonomy.
+#   - `*` is a shell glob, matched case-insensitively with bash `[[ == ]]`.
+#   - Adding an entry NARROWS autonomy (safer). Removing one WIDENS it —
+#     treat any removal with the same scrutiny as widening prod write access.
+#
+# One glob per line. '#' comments and blank lines are ignored.
+
+# Secret-shaped substrings — catch the obvious credential classes.
+*SECRET*
+*PASSWORD*
+*PASSWD*
+*TOKEN*
+*APIKEY*
+*API_KEY*
+*ACCESS_KEY*
+*PRIVATE_KEY*
+*PRIVATEKEY*
+*CREDENTIAL*
+*CRED*
+*SALT*
+*CIPHER*
+*PASSPHRASE*
+*SIGNING*
+
+# A bare *KEY* would also blocklist innocuous names (e.g. SORT_KEY, KEYBOARD).
+# We intentionally do NOT glob *KEY* wholesale — the specific *_KEY forms above
+# cover the credential cases. Add a named entry below if a real secret slips
+# through with a non-obvious name.
+
+# URLs/URIs are conservatively human-routed by default: they embed credentials
+# (postgres://user:pass@host) AND repointing a service at an attacker endpoint
+# is an exfil/SSRF vector. This intentionally also catches benign endpoint
+# config (FRONTEND_URL); the safe default is "route a URL change to a human."
+# Curate genuinely-safe endpoint keys out of the blocklist later, deliberately.
+*_URL
+*_URI
+*_DSN
+*CONNECTION_STRING*
+DATABASE_*
+DB_*
+REDIS_*
+MONGO_*
+POSTGRES_*
+
+# Explicit named keys (add as discovered).
+JWT_SECRET
+SESSION_SECRET
+ENCRYPTION_KEY

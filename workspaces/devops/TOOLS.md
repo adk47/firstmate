@@ -12,6 +12,23 @@
 - Cluster context: OVH K3s (7-node, 3 server + 4 agent)
 - Key namespaces: default, data-processing, monitoring, vault, longhorn-system
 
+## Prod Env Vars (skill: muso-devops-set-env)
+- **The ONLY sanctioned path is `scripts/devops-set-env.sh`** — never set a prod env
+  var by calling `kubectl`/`vault` directly. The wrapper enforces, in bash below you:
+  a secret-shaped **blocklist** (`config/protected-env-keys.txt`), a **target allowlist**
+  (`config/target-allowlist.txt`), an authorized-requester gate
+  (`config/envset-requesters.txt`), a **window rate-cap**, and **fail-closed audit**
+  (captures the prior value for rollback).
+- **Autonomous within the blocklist**: non-secret config (LOG_LEVEL, feature flags,
+  timeouts, rate limits) on an allow-listed target, requested by an authorized human,
+  goes through without a second approval. **Secret-shaped keys are refused** and route
+  to a green-light approver (`config/blocklist-override-approvers.txt` — Nick/Aaron).
+- **Never bypass the wrapper.** The blocklist is only safe because it's enforced under
+  you; real containment is a scoped Vault/K8s credential (provisioned by Artem/Aaron).
+- **Status**: the real prod-write backend is fail-closed until Phase-0 pins the write
+  command and the scoped credential exists — runs in dry-run/stub until then. See the
+  skill's SKILL.md.
+
 ## SSH
 - SSH key: `~/.ssh/ovh_muso`
 - Access to all 7 OVH nodes (ovh-node-1 through ovh-node-7)

@@ -1,0 +1,20 @@
+# target-allowlist.txt — which prod services env may be set on.
+#
+# One target per line, matched as an EXACT string (no globs) against
+# --target. This is the deployment/service whose non-secret config the
+# DevOps agent may change autonomously.
+#
+# SEMANTICS:
+#   - A MISSING file refuses every set (fail closed).
+#   - Keep this narrow. Adding a target widens the prod write surface —
+#     treat it as a policy change, with a one-line justification per entry.
+#
+# PHASE-0: the exact target identifiers depend on the backend pinned in
+# verification (a K8s deployment name like `core-backend`, a Coolify app
+# slug, or a Vault path segment). Populate this with the REAL identifiers
+# confirmed on node-8 against H-DevOps — the entries below are placeholders
+# and MUST be replaced before the real-write backend is enabled.
+
+# (placeholders — replace in Phase-0)
+# core-backend
+# industry-data-processing

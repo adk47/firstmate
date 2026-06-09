@@ -1,0 +1,27 @@
+# blocklist-override-approvers.txt — who can GREEN-LIGHT a blocklisted (secret-
+# shaped) env-var set.
+#
+# A blocklisted key (config/protected-env-keys.txt) is NEVER autonomous. When a
+# human requests one, the DevOps agent must ASK an approver below for a green
+# light, then re-run with:
+#     --confirmed-by <handle> --approval-msg-id <slack_ts_of_the_green_light>
+# The wrapper refuses the set (exit 4) until that approval is supplied and the
+# --confirmed-by handle matches an entry here.
+#
+# Matched case-insensitively against --confirmed-by. Bare handles and emails
+# both work.
+#
+# SEMANTICS:
+#   - A MISSING file refuses every override (fail closed) — a secret-shaped set
+#     can NEVER proceed without a named, present approver.
+#   - Keep this list as narrow as possible: each entry can authorize writing a
+#     SECRET-class value to prod.
+#
+# Lines starting with '#' and blank lines are ignored.
+
+nick
+nick@muso.ai
+# Aaron is the repo-wide tier-1 override authority; included by convention.
+# Remove if green-lighting secrets should be Nick-only.
+aaron
+aaron@muso.ai

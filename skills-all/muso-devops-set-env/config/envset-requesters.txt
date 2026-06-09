@@ -1,0 +1,20 @@
+# envset-requesters.txt — humans authorized to drive prod env-var sets.
+#
+# Each entry is matched case-insensitively against the --requester (after
+# Slack-ID→email resolution). Bare handles and full emails both work.
+# This same list is reused as the rate-cap ack approver list (--confirmed-by).
+#
+# SEMANTICS:
+#   - A MISSING file refuses every set (fail closed).
+#   - Keep this narrow — every entry can change prod runtime config.
+#   - This is the "DevOps only" gate. Add a human only when they should be
+#     able to drive prod env changes through the agent.
+#
+# Lines starting with '#' and blank lines are ignored.
+
+aaron
+aaron@muso.ai
+nick
+nick@muso.ai
+# Artem D (DevOps) — add their resolved muso.ai email once confirmed.
+# artem@muso.ai

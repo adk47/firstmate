@@ -867,6 +867,7 @@ jobs:
                        workspaces/operations/skills/muso-ops-admin/scripts/tests \
                        workspaces/operations/skills/muso-caroline-weekly-review/scripts/tests \
                        workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
+                       skills-all/muso-devops-set-env/scripts/tests \
                        -type f -name '*.bats' | sort)
           if [ -z "$files" ]; then
             echo "::warning::no *.bats files found — skipping"
