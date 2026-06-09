@@ -21,6 +21,12 @@ allowed-tools:
 
 Stripe CLI is pre-configured with the MUSOAI_STRIPE_API_KEY. All `stripe` commands work automatically.
 
+> **Money-moving writes are gated.** Read operations (`list`, `retrieve`) call `stripe`
+> directly. Writes that move money — `refunds create`, and any cancel-and-refund flow — MUST
+> go through `bash /opt/hydra/scripts/muso-stripe-write.sh <args>`, which refuses the write
+> while the codex model is degraded onto a weak fallback (fail-closed). See the
+> `muso-refund-processor` skill for the refund flow.
+
 ## Quick Reference
 
 ### Refunds (Read-Only)

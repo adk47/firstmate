@@ -59,15 +59,23 @@ Calculate partial amounts based on:
 
 #### If APPROVED (full or partial):
 
+Execute refund writes through the **`muso-stripe-write.sh` gate**, NOT `stripe`
+directly. The gate refuses to move money while the codex model is degraded onto a
+weak fallback (you cannot perceive that state yourself), failing closed:
+
 ```bash
 # Full refund on a charge
-stripe refunds create -d "charge=ch_XXX" -d "reason=requested_by_customer" --confirm
+bash /opt/hydra/scripts/muso-stripe-write.sh refunds create -d "charge=ch_XXX" -d "reason=requested_by_customer" --confirm
 
 # Partial refund (amount in cents)
-stripe refunds create -d "charge=ch_XXX" -d "amount=AMOUNT_IN_CENTS" -d "reason=requested_by_customer" --confirm
+bash /opt/hydra/scripts/muso-stripe-write.sh refunds create -d "charge=ch_XXX" -d "amount=AMOUNT_IN_CENTS" -d "reason=requested_by_customer" --confirm
 ```
 
 ALWAYS use `--confirm` to skip the interactive prompt.
+
+If the gate exits non-zero with `REFUSED`, the refund did **not** happen: do not
+report it as done, do not invent an approval/ticket — say it couldn't complete and
+@-mention Nick (`U0AL36NADEY`), per the operations honesty rules.
 
 After execution, verify:
 ```bash
