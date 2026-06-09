@@ -2,7 +2,7 @@
 name: muso-outreach-discovery
 description: |
   Daily parent company discovery for Muso Ads B2B outreach. Finds 5 new parent
-  companies per day matching target verticals, dedupes against the sheet, GHL,
+  companies per day matching target verticals, dedupes against NocoDB, GHL,
   and known parent list, applies parent to subsidiary rollup logic, and posts
   the batch to #company-finder for Fede's review.
 
@@ -77,20 +77,24 @@ Target: surface ~20 candidates per run, narrow to top 5 after dedupe.
 
 ### Step 2: Dedupe (4 Sources)
 
-Drop any candidate matching ANY of these:
+Drop any candidate matching ANY of these. The **NocoDB B2B-Ads Intelligence base
+is the canonical store** (it supersedes the legacy `contacts_intelligence` /
+`company_intelligence` Google Sheet — do NOT dedupe against the Sheet):
 
-1. **`contacts_intelligence`** sheet, by Domain OR Company Name (fuzzy match on first word)
-2. **`company_intelligence`** sheet, by Domain OR Company Name
+1. **NocoDB Company Intelligence** (`mvr6nmzcv7albxt`), by Domain OR Company Name (fuzzy match on first word)
+2. **NocoDB Contacts Intelligence** (`m9vsbijhrr9ddeu`), by Domain OR Company Name
 3. **GHL opportunities** in B2B-Ads-Clio pipeline (all stages)
 4. **`parent-companies.md`** known parent list + all their subsidiaries
 
 ```bash
-# Read sheets
-gog sheets get 1OWzfmxtgX-xq-aGxgmsjAdzQoyKbb94hnU_j-jm5q6I \
-  --range "contacts_intelligence!E:E" --account a@muso.ai  # Company Name column
-
-gog sheets get 1OWzfmxtgX-xq-aGxgmsjAdzQoyKbb94hnU_j-jm5q6I \
-  --range "company_intelligence!A:B" --account a@muso.ai  # Domain + Company Name
+# Dedupe against NocoDB (canonical) via the muso-nocodb skill — REST API, no MCP.
+# Use its documented subcommands (single calls); do NOT hand-roll jq/while pipelines.
+bash scripts/nocodb-api.sh records.ls mvr6nmzcv7albxt \
+  --where "(Domain,eq,<domain>)" --fields "Domain,Company Name"   # Company Intelligence by Domain
+bash scripts/nocodb-api.sh records.count mvr6nmzcv7albxt \
+  --where "(Company Name,like,%<first-word>%)"                    # fuzzy Company Name check
+bash scripts/nocodb-api.sh records.ls m9vsbijhrr9ddeu \
+  --where "(Domain,eq,<domain>)" --fields "Domain,Company Name"   # Contacts Intelligence by Domain
 
 # Read GHL
 source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
@@ -108,12 +112,12 @@ For each candidate:
 1. If the candidate is a **known subsidiary** (listed under any parent in
    `parent-companies.md`), drop it. The parent is the target.
 
-2. If the candidate is a **new parent** that owns subsidiaries already in our
-   sheet, flag it for rollup:
+2. If the candidate is a **new parent** that owns subsidiaries already in
+   NocoDB, flag it for rollup:
    - Add the parent to `parent-companies.md`
    - Add subsidiaries under the parent
    - Note in output which subsidiaries were rolled up
-   - Do NOT remove the subsidiary rows from the sheet automatically. Flag for Fede.
+   - Do NOT remove the subsidiary rows from NocoDB automatically. Flag for Fede.
 
 3. If the candidate is a **standalone parent** (no subsidiaries in our list),
    include as is.
@@ -161,12 +165,15 @@ Wait for Fede to react with ✅ or 👍 to approve.
 
 ### Step 6: On Approval
 
-- Add approved companies to `company_intelligence` sheet (minimum: Domain,
-  Company Name, Industry, Value Proposition placeholder).
-- Mark status `Needs Enrichment` in the row (will be picked up by
+- Add approved companies to **NocoDB Company Intelligence** (`mvr6nmzcv7albxt`)
+  via the `muso-nocodb` skill — minimum: Domain, Company Name, Industry, Value
+  Proposition placeholder. Writing to NocoDB (not the old Sheet) is what keeps the
+  Step 2 dedupe accurate on the next run.
+  `bash scripts/nocodb-api.sh records.create mvr6nmzcv7albxt '{"Domain":"…","Company Name":"…","Industry":"…","Status":"Needs Enrichment"}'`
+- Mark status `Needs Enrichment` on the new row (picked up by
   `muso-outreach-enrichment` when that skill is wired).
 - Update `parent-companies.md` with any new parents/subsidiaries.
-- Log to `api-logs/sheets/YYYY-MM-DD.jsonl`.
+- Log to `api-logs/discovery/YYYY-MM-DD.jsonl`.
 
 ## Silent Rule
 

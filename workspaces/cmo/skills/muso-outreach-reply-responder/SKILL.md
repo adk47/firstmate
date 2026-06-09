@@ -82,8 +82,14 @@ Everything else, including:
 ### Step 2 — Identify who you're talking to
 
 ```bash
-# Lookup contact in NocoDB Contacts Intelligence by email
-# (use the MCP NocoDB connection; never write)
+# Lookup contact in NocoDB Contacts Intelligence via the muso-nocodb skill
+# (REST API, xc-token — there is NO MCP NocoDB connection). Read-only; never write.
+# There is no bare "Email" column; match on "Valid Professional Email", else fall back to Domain.
+bash scripts/nocodb-api.sh records.ls m9vsbijhrr9ddeu \
+  --where "(Valid Professional Email,eq,<email>)" \
+  --fields "First Name,Last Name,Title,Snov.io LinkedIn,Company Name,Domain"
+# If not found by email, retry with --where "(Domain,eq,<domain>)".
+# Then pull the linked Company Intelligence row (mvr6nmzcv7albxt) by Domain.
 ```
 
 Pull from NocoDB:

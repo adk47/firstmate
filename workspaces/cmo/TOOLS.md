@@ -67,12 +67,12 @@ _All tools the CMO agent has access to. See individual skill files for full API 
 - Bound channels: #marketing, #muso-ads, #campaigns, #clio_x_fede
 - Never post budgets/spend outside bound channels
 
-### NocoDB (Intelligence Base)
-- Airtable-like DB for intelligence / research data
-- Transport: MCP server named `NocoDB Base - B2B ADs intelligence` (registered via `openclaw mcp set` on profile `main`)
-- Endpoint: `https://app.nocodb.com/mcp/ncsqgdprqpbcnnvb` (native `transport: "streamable-http"`)
-- Auth: `xc-mcp-token` header (stored in openclaw MCP config, not env)
-- Available to every agent on profile `main`; check with `openclaw --profile main mcp list` if it's not appearing
+### NocoDB (B2B-Ads Intelligence base) — **canonical store**
+- Relational CRM for B2B Ads contact + company intelligence (the source of truth — supersedes the legacy `contacts_intelligence`/`company_intelligence` Google Sheet).
+- Access: via the **`muso-nocodb` skill** — `bash scripts/nocodb-api.sh <subcommand>` (NocoDB Cloud REST API v2, `xc-token` / `NOCODB_API_TOKEN`). **There is NO MCP server — do not rely on `openclaw mcp` for NocoDB.**
+- Base `p11hvpwapu4hv0x`; tables: **Contacts Intelligence** `m9vsbijhrr9ddeu` (match by `Domain` or `Valid Professional Email` — there is no bare `Email` column), **Company Intelligence** `mvr6nmzcv7albxt` (by `Domain` / `Company Name`).
+- **Dedupe before returning ANY company list.** Cross-check Company Intelligence by Domain/Company Name, e.g. `bash scripts/nocodb-api.sh records.ls mvr6nmzcv7albxt --where "(Domain,eq,<domain>)"` (or `records.count`). A company already present = `IN_NOCO`. Do **not** punt to `NEEDS_DEDUPE_CHECK` — the skill is always available and needs no MCP.
+- Full API reference + gotchas: `muso-nocodb` skill (`skills-all/muso-nocodb/SKILL.md`).
 
 ---
 
