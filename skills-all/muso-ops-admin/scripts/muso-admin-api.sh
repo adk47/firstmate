@@ -920,11 +920,77 @@ record_destructive_op() {
     return 0
 }
 
+# --- Codex model-health gate (incident 2026-06-08) ---
+# A silent codex auth-permanent / refresh-token-race degradation drops the WHOLE fleet
+# onto a weak fallback model (openrouter/openai/gpt-5.4-mini) that the agent CANNOT
+# perceive — openclaw's `Model Fallback:` banner is built on the delivery path and is
+# never injected into the prompt (memory reference_agent_cannot_see_own_fallback_state).
+# On 2026-06-08 that degraded model misrouted a track-metadata fix into the credit-
+# verification batch and fabricated a ticket + human handoff. SOUL doctrine alone can't
+# stop this (the agent can't read its own model state), so this is the mechanical guard:
+# refuse state-changing WRITES while codex is degraded, returning a hard error in the
+# tool RESULT — the one signal the agent CAN see — so it reports "couldn't complete,
+# deferring" instead of acting on bad judgment. READS (GET/HEAD) pass through untouched
+# so the agent can still investigate while degraded.
+#
+# Shares the exact probe the Stripe money-path uses (scripts/lib/codex-health.sh ->
+# codex_health_gate), so admin writes can never drift to a weaker check than refunds.
+# FAIL-CLOSED: an unreadable journal or a missing lib refuses the write. Self-skips in
+# dry-run (no prod mutation) only — there is deliberately NO caller-settable bypass
+# (matching the Stripe money-path gate), so the degraded model this guards against
+# cannot disable it by setting a per-command env var when it invokes the tool.
+CODEX_HEALTH_LIB="${CODEX_HEALTH_LIB:-/opt/hydra/scripts/lib/codex-health.sh}"
+CODEX_HEALTH_GATEWAY_UNIT="${OPENCLAW_GATEWAY_UNIT:-openclaw-gateway-main}"
+CODEX_HEALTH_WINDOW_MIN="${CODEX_HEALTH_WINDOW_MIN:-5}"
+
+enforce_codex_health_gate() {
+    local method="$1"
+    # Reads always allowed — only state-changing writes are gated.
+    local method_lc
+    method_lc="$(printf %s "$method" | tr '[:upper:]' '[:lower:]')"
+    case "$method_lc" in
+        get|head) return 0 ;;
+    esac
+    # Dry-run never touches prod; skip (consistent with every other gate here).
+    is_dry_run_mode && return 0
+
+    # Missing lib = packaging/rsync regression → fail closed rather than skip the check.
+    if [[ ! -r "$CODEX_HEALTH_LIB" ]]; then
+        echo "MUSO_CODEX_HEALTH_LIB_MISSING: cannot read codex-health lib at ${CODEX_HEALTH_LIB} — refusing the ${method} write (model health unverifiable). Restore scripts/lib/codex-health.sh on the host." >&2
+        return 1
+    fi
+    # shellcheck disable=SC1090
+    source "$CODEX_HEALTH_LIB"
+
+    local reason rc=0
+    reason="$(codex_health_gate "$CODEX_HEALTH_GATEWAY_UNIT" "$CODEX_HEALTH_WINDOW_MIN" 2>&1)" || rc=$?
+    if (( rc != 0 )); then
+        cat >&2 <<EOF
+MUSO_CODEX_DEGRADED: refusing ${method} write — ${reason}.
+The agent may be on a weak fallback model it cannot perceive (openclaw's
+\`Model Fallback:\` banner is delivery-only, never in the prompt). A degraded
+model must not issue admin writes. The write did NOT execute.
+Report plainly that it did not complete and defer to a human — @-mention Nick
+(<@U0AL36NADEY>). Reads are still available. Retry once codex health is
+confirmed (\`openclaw --profile main agents list\`).
+EOF
+        return 1
+    fi
+    return 0
+}
+
 cmd_call() {
     check_env
     local method="${1:?Usage: call <METHOD> <path> [json-body]}"
     local path="${2:?Usage: call <METHOD> <path> [json-body]}"
     local body="${3:-}"
+
+    # Codex model-health gate (incident 2026-06-08). Refuse WRITES while the fleet is
+    # silently degraded onto a weak fallback model the agent can't perceive; READS pass
+    # through. Runs first so a degraded model is stopped before any other gate logic.
+    if ! enforce_codex_health_gate "$method"; then
+        return 1
+    fi
 
     # Credit approve gate — deterministic, runs in bash below openclaw's hook layer.
     if ! enforce_credit_approve_gate "$method" "$path" "$body"; then
@@ -1012,6 +1078,12 @@ cmd_upload() {
     shift 2
 
     [[ -f "$file" ]] || die "File not found: $file"
+
+    # Codex model-health gate — uploads are always writes (POST). Refuse while the
+    # fleet is degraded; self-skips in dry-run.
+    if ! enforce_codex_health_gate "POST"; then
+        return 1
+    fi
 
     # Uploads are always writes — short-circuit unconditionally in dry-run.
     if is_dry_run_mode; then

@@ -98,3 +98,42 @@ codex_edge_auth_symlink_status() {
   if [ -e "$path" ]; then echo not-symlink; return; fi
   echo missing
 }
+
+# codex_health_gate [gateway_unit] [window_min]
+# Live model-health verdict shared by write-gating wrappers (scripts/muso-stripe-write.sh
+# and skills-all/muso-ops-admin/scripts/muso-admin-api.sh). It is the one place that
+# decides "is codex healthy enough to let a consequential WRITE proceed", so the rule
+# lives once and both call sites stay identical.
+#
+# Return contract:
+#   0 — healthy   (journal readable, no refresh-race / auth-invalidated lines)
+#   1 — DEGRADED  (>=1 codex-down signature in the window)
+#   2 — UNVERIFIABLE (journal could not be read) — callers MUST fail closed
+# On non-zero it prints a single-line human reason to stderr; the caller prepends its
+# own "REFUSED (<context>)" framing and the defer-to-a-human instruction. An empty-but-
+# readable window is healthy-quiet (return 0).
+#
+# WHY a verdict here and not just inline in each wrapper: the agent cannot perceive its
+# own fallback (the `Model Fallback:` banner is delivery-only, never in the prompt — see
+# memory reference_agent_cannot_see_own_fallback_state), so the only honest signal is a
+# tool RESULT the agent can read. Keying that on one shared probe means a wrapper can
+# never drift to a weaker check than the money path uses.
+#
+# `journalctl` is invoked by name (not an absolute path) so tests can stub it on PATH —
+# see the fake_journalctl helper in scripts/tests/*.bats. Reads only; no mutation.
+codex_health_gate() {
+  local unit="${1:-openclaw-gateway-main}" window="${2:-5}"
+  local journal
+  if ! journal="$(journalctl -u "$unit" --since "${window} min ago" --no-pager 2>/dev/null)"; then
+    echo "cannot read journald for ${unit} — codex model health unverifiable" >&2
+    return 2
+  fi
+  local reused invalidated
+  reused="$(printf '%s\n' "$journal" | codex_count_refresh_reused)"
+  invalidated="$(printf '%s\n' "$journal" | codex_count_auth_invalidated)"
+  if [ "${reused:-0}" -gt 0 ] || [ "${invalidated:-0}" -gt 0 ]; then
+    echo "codex is DEGRADED in the last ${window}min (refresh-race/auth_permanent=${reused}, auth-invalidated=${invalidated})" >&2
+    return 1
+  fi
+  return 0
+}

@@ -51,18 +51,13 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
-# Live model-health probe. Reading the journal requires the gateway-user privileges the
-# agent's exec context has (gateway runs as root). If the read FAILS we cannot confirm
-# health → fail closed. An empty-but-readable window is treated as healthy-quiet.
-if ! journal="$(journalctl -u "$GATEWAY_UNIT" --since "${WINDOW_MIN} min ago" --no-pager 2>/dev/null)"; then
-  refuse "cannot read journald for $GATEWAY_UNIT — codex model health unverifiable"
-fi
-
-reused="$(printf '%s\n' "$journal" | codex_count_refresh_reused)"
-invalidated="$(printf '%s\n' "$journal" | codex_count_auth_invalidated)"
-
-if [ "${reused:-0}" -gt 0 ] || [ "${invalidated:-0}" -gt 0 ]; then
-  refuse "codex is DEGRADED in the last ${WINDOW_MIN}min (refresh-race/auth_permanent=${reused}, auth-invalidated=${invalidated}). A weak fallback model must not move money."
+# Live model-health probe via the shared gate (lib/codex-health.sh). It is FAIL-CLOSED:
+# both "unverifiable" (journal unreadable) and "degraded" return non-zero and refuse;
+# an empty-but-readable window is healthy-quiet. A weak fallback model must never move
+# money, so the money path refuses on anything but a clean verdict. The gate's stderr
+# reason is captured and wrapped by refuse() with the defer-to-a-human instruction.
+if ! reason="$(codex_health_gate "$GATEWAY_UNIT" "$WINDOW_MIN" 2>&1)"; then
+  refuse "$reason"
 fi
 
 # Healthy → run the real Stripe write.

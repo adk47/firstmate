@@ -40,6 +40,11 @@ setup() {
     # write-short-circuit behavior itself is isolated. The gate-still-fires
     # test re-enables the gate explicitly.
     export CV_APPROVE_GATE_DISABLED=1
+    # The codex model-health gate runs first on real writes (e.g. the OPS_DRY_RUN-unset
+    # mismatch test); it's covered by scripts/tests/muso-admin-api-codex-health.bats.
+    # Point it at a healthy stub so these tests stay hermetic (prod has no bypass flag).
+    export CODEX_HEALTH_LIB="$TEST_ROOT/codex-health-stub.sh"
+    printf '%s\n' 'codex_health_gate() { return 0; }' > "$CODEX_HEALTH_LIB"
 }
 
 teardown() {

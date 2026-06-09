@@ -67,6 +67,11 @@ EOF
     # Disable the credit-approve gate (irrelevant here) and seed a token so any
     # PASS path that reaches get_token is satisfied.
     export CV_APPROVE_GATE_DISABLED=1
+    # The codex model-health gate runs first on every write; it's covered by
+    # scripts/tests/muso-admin-api-codex-health.bats. Point it at a healthy stub
+    # so these downstream-gate tests stay hermetic (production has no bypass flag).
+    export CODEX_HEALTH_LIB="$TEST_ROOT/codex-health-stub.sh"
+    printf '%s\n' 'codex_health_gate() { return 0; }' > "$CODEX_HEALTH_LIB"
     export OPS_DRY_RUN_AUDIT_PATH="$TEST_ROOT/dry-run-audit.jsonl"
     export CV_RESULTS_PATH="$TEST_ROOT/credit-results.jsonl"
     export ADMIN_TOKEN_CACHE_PATH="$TEST_ROOT/.admin-token-cache"

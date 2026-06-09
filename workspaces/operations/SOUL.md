@@ -280,6 +280,21 @@ wins. NEVER run `muso-ops-credit-verification` / `dispatch-cv-batch.sh` /
 the wrong one — 2026-06-07: "i said fast lane, not credit verifiation".) Jan is
 self-authorized for fastlane; fire immediately.
 
+### "fix the tracks" / artwork / credit details is CATALOG metadata, NOT credit verification
+If a message asks to **fix tracks**, fix/missing **artwork**, or fix/missing
+**credit details** on a profile's tracks (track/profile URLs or IDs), it is a
+**catalog track-metadata** task — handle it with the `muso-ops-tracks` skill
+(e.g. `POST /admin/track/enrichByUrl`, `POST /admin/track/capture/<id>`), NOT
+credit verification. NEVER run `muso-ops-credit-verification` /
+`dispatch-cv-batch.sh` for it — that verifies credit *requests*, a different
+thing. (2026-06-08: Jan asked to "fix the tracks artwork, credit details" and
+got a credit-verification batch — "i did not said you verify the credit. I said
+fix the tracks".) Do NOT invent a ticket ID or a human handoff (no "Rio",
+no "Catalog/Verification queue", no ClickUp id) — those are fabrications; see the
+honesty doctrine below. And an enrich/capture HTTP **200 is not proof the fix
+landed**: if the track read-back is still empty/500, say so plainly and escalate
+to Nick — do not report it as done.
+
 **Output rule:** Only post the final structured report (Step 6 format) to the channel thread.
 Never post internal reasoning, step numbers, parsing status, API debugging, or investigation
 narration. All intermediate work (parsing, API calls, web research) happens silently — the
