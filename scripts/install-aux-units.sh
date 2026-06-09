@@ -109,6 +109,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/cron-health-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/merge-landing-watchdog.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/merge-landing-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 
@@ -356,6 +358,24 @@ cat > /etc/cron.d/fallback-swallow-watchdog << SWALLOWWD
 */5 * * * * root $HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh >> /var/log/fallback-swallow-watchdog.log 2>&1
 SWALLOWWD
 chmod 644 /etc/cron.d/fallback-swallow-watchdog
+
+# ─── Merge-landing watchdog at 30-min cadence ─────────────────
+# Alerts #clio_devops when an admin profile-merge returned HTTP 200 (logged to
+# recent-merges.jsonl) but never LANDED in the catalog — the loser is still an
+# active, unmerged profile hours later. Root cause: mergeProfiles.js only
+# enqueues an async ingestion job, and industry-data-processing common/process.py
+# deletes the SQS message on ANY worker exception (no DLQ, no retry), so a merge
+# whose apply throws vanishes silently. This bit the 2026-06-08/09 Jan ↔ Ops
+# threads (two pairs 200'd 4× over days, never merged). 30 min (not 5): the async
+# fold legitimately takes minutes–hours and the script's MIN_AGE_HOURS already
+# filters the in-flight window, so a tighter cadence adds Trino load without
+# catching anything sooner. Per survivor:loser dedupe → a stuck merge pages once.
+# Same ownership rule: edit here + re-run install-aux-units.sh.
+cat > /etc/cron.d/merge-landing-watchdog << MERGELANDINGWD
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+*/30 * * * * root $HYDRA_ROOT/scripts/merge-landing-watchdog.sh >> /var/log/merge-landing-watchdog.log 2>&1
+MERGELANDINGWD
+chmod 644 /etc/cron.d/merge-landing-watchdog
 
 # Drop the legacy per-user crontab line if it's still installed.
 # Idempotent: removes the line if present, no-op otherwise.

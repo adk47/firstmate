@@ -54,21 +54,55 @@ slack_notify() {
     -d "{\"channel\":\"${SLACK_CHANNEL}\",\"text\":\"${msg}\"}" >/dev/null 2>&1 || true
 }
 
+# _slack_post_payload <path-to-json>  (internal)
+# POSTs the exact JSON payload at <path> via chat.postMessage and RETURNS the
+# real delivery status: 0 only when Slack confirms the message was posted;
+# non-zero when the payload is unreadable, the token is missing, curl/HTTP
+# fails, OR Slack replies HTTP 200 with `{"ok":false}`. That last case matters:
+# the Slack Web API returns 200 + ok:false for application-level failures
+# (invalid_auth, not_in_channel, missing scope...), so `curl -f` (which only
+# fails on HTTP >=400) is NOT sufficient proof of delivery — we must parse
+# `.ok`. Public wrappers below pick best-effort vs status-aware.
+_slack_post_payload() {
+  local payload_file="$1"
+  [ -r "$payload_file" ] || return 1
+  local token
+  token=$(_slack_read_token)
+  [ -z "$token" ] && return 1
+
+  local resp
+  resp=$(curl -sf -X POST "https://slack.com/api/chat.postMessage" \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json; charset=utf-8" \
+    --data-binary "@${payload_file}" 2>/dev/null) || return 1
+
+  # Confirm ok:true. A non-JSON / empty body or ok:false is a delivery failure.
+  printf '%s' "$resp" | python3 -c 'import json,sys
+try:
+    sys.exit(0 if json.load(sys.stdin).get("ok") is True else 1)
+except Exception:
+    sys.exit(1)'
+}
+
 # slack_notify_payload_file <path-to-json>
 # Posts the exact JSON payload at <path> via chat.postMessage. Caller is
 # responsible for the payload shape — typically {channel, text, blocks}.
 # Use this for Block Kit messages: build the JSON in Python (apostrophes
 # in commit subjects will break naive bash heredocs — see the 2026-05-07
 # api-evidence.sh apostrophe-in-heredoc burn).
+#
+# Best-effort: never fails the caller (preserves the historical contract that
+# failing to post an alert shouldn't abort a script that's already mid-recovery).
 slack_notify_payload_file() {
-  local payload_file="$1"
-  [ -r "$payload_file" ] || return 0
-  local token
-  token=$(_slack_read_token)
-  [ -z "$token" ] && return 0
+  _slack_post_payload "$1" || true
+  return 0
+}
 
-  curl -sf -X POST "https://slack.com/api/chat.postMessage" \
-    -H "Authorization: Bearer ${token}" \
-    -H "Content-Type: application/json; charset=utf-8" \
-    --data-binary "@${payload_file}" >/dev/null 2>&1 || true
+# slack_notify_payload_file_status <path-to-json>
+# Same POST, but RETURNS delivery status (0 only on a confirmed post). Use when
+# the caller must NOT advance dedupe / idempotency state for an alert that was
+# never actually delivered (e.g. a watchdog that would otherwise mark an
+# incident "already paged" and never retry it).
+slack_notify_payload_file_status() {
+  _slack_post_payload "$1"
 }

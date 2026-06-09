@@ -162,7 +162,37 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 
 GET both profiles and assert against the pre-state you captured in step 5:
 - **Loser:** if it was claimed pre-merge, the survivor's GET must now show its workspace under `workspaces[]`. The loser's GET should show `isClaimed: false` and `workspaces: []`. Loser's `playlist` should be `null` (or — if the survivor already had its own playlist — unchanged on loser, since the handler destroys the loser's in that case). **Do NOT check `merged` or `deleted` — those are async.**
-- **Loser had nothing claim-side?** Then the synchronous side is a no-op, both GETs will look identical to pre-state, and the only thing the call did is queue the async data-ingestion job. This is normal — it does *not* mean the call failed. Tell the requester explicitly: "Sync part: nothing to transfer; async credit/IPI/rawID merge queued, ETA minutes–hours, will not be visible in the admin GET."
+- **Loser had nothing claim-side?** Then the synchronous side is a no-op, both GETs will look identical to pre-state, and the only thing the call did is queue the async data-ingestion job. This is normal — it does *not* mean the call failed. Tell the requester explicitly: "Sync part: nothing to transfer; async credit/IPI/rawID merge queued, ETA minutes–hours."
+
+**Verifying the async merge actually landed (catalog — NOT the admin GET):**
+
+The admin GET reads core-backend and never reflects the async fold. But the **catalog**
+does, and you can read it directly via Trino. This is the only truthful "did it merge?"
+signal — do not tell the requester "it's done / it's expected" off the back of the 200 alone.
+
+```bash
+# Correct path is /opt/hydra/scripts/trino-query.sh (NOT workspaces/operations).
+bash /opt/hydra/scripts/trino-query.sh <<'SQL'
+SELECT _id, name, merged_to_id, is_deleted, credits_count
+FROM "platform-industry-bi-prod".matvw_catalog_profile
+WHERE _id IN ('<survivor_id>','<loser_id>'[,'<loser_id2>'])
+SQL
+```
+
+- **Landed:** each loser shows `merged_to_id = <survivor_id>` (and/or `is_deleted = true`),
+  and the survivor's `credits_count` has grown. Report this as the confirmation.
+- **Not landed yet:** loser still shows blank `merged_to_id` and `is_deleted = false`. The
+  matvw can lag minutes, so a blank reading **immediately** after the 200 is expected — re-check
+  after the stated ETA, don't declare failure on the first read.
+- **Not landed after hours (the failure mode):** if the loser is still blank/active hours
+  later, the async catalog fold was **silently dropped** (industry-data-processing
+  `common/process.py` deletes the SQS message on any worker exception — no DLQ, no retry; see
+  incident 2026-06-08/09, the repeated "@Ops it's not merging" Jens Jungkurth / Shelby Archer
+  threads). Say so plainly — "the merge was accepted but has NOT landed in the catalog" — and
+  **escalate to the catalog team (Aron / Oleg) for a manual catalog merge.** Do NOT re-issue the
+  same `/admin/profiles/merge` call hoping it lands (it already 200'd; re-issuing just re-enqueues
+  the same job that drops). The `merge-landing-watchdog` (cron) also pages #clio_devops for these,
+  so a stuck merge will surface even if no one re-checks.
 
 **STOP-RULE — read this before you do anything if verification looks off:**
 
