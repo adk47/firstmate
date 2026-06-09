@@ -215,6 +215,55 @@ EOF
   [[ "$output" == *"no new cron failures"* ]]
 }
 
+# ──────────────────────────────────────────────────────────────
+# Message-tool delivery rule. Under the codex runtime an agent that posts its
+# report to Slack via the `message` tool is NOT credited as the cron delivery
+# (record stays delivered:false / not-delivered), and a trailing non-fatal tool
+# error flips the run to status:error — so a healthy self-posting cron
+# (daily-dispute-handler) false-pages every day. A non-empty
+# delivery.messageToolSentTo is the source-backed proof the agent reached Slack
+# (openclaw only records a target there after a successful send).
+# ──────────────────────────────────────────────────────────────
+
+@test "message-tool delivery: an errored run that self-posted via the message tool → no alert" {
+  export CRON_HEALTH_MIN_STREAK=1   # isolate the message-tool rule from the streak gate
+  runfile jobA <<'EOF'
+{"status":"error","ts":2000,"error":"⚠️ 🛠️ `stripe subscriptions list ...` failed","delivered":false,"deliveryStatus":"not-delivered","delivery":{"messageToolSentTo":[{"channel":"message"}]}}
+EOF
+  printf '%s\n' '{"jobA":1500}' > "$CRON_HEALTH_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no new cron failures"* ]]
+}
+
+@test "message-tool rule is tight: errored run with EMPTY messageToolSentTo still alerts" {
+  export CRON_HEALTH_MIN_STREAK=1
+  # A genuine non-delivery: delivery present but no message-tool target was ever
+  # recorded → the agent never reached Slack → must still page.
+  runfile jobA <<'EOF'
+{"status":"error","ts":2000,"error":"genuine non-delivery","delivered":false,"deliveryStatus":"not-delivered","delivery":{"messageToolSentTo":[]}}
+EOF
+  printf '%s\n' '{"jobA":1500}' > "$CRON_HEALTH_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Cron failure(s) detected"* ]]
+  [[ "$output" == *"daily-churned-campaign-refresh"* ]]
+}
+
+@test "message-tool delivery breaks the streak: self-posted error then real error → no alert" {
+  export CRON_HEALTH_MIN_STREAK=2
+  runfile jobA <<'EOF'
+{"status":"error","ts":1900,"error":"posted anyway","delivery":{"messageToolSentTo":[{"channel":"message"}]}}
+{"status":"error","ts":2000,"error":"real failure"}
+EOF
+  printf '%s\n' '{"jobA":1500}' > "$CRON_HEALTH_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  # The self-posted run at 1900 is healthy → streak resets → the real error at
+  # 2000 is only streak length 1 → suppressed.
+  [[ "$output" == *"no new cron failures"* ]]
+}
+
 @test "error text with quotes/backticks → posts a VALID JSON payload (escaping guard)" {
   runfile jobA <<'EOF'
 {"status":"error","ts":2000,"error":"failed `trino-query.sh \"SELECT a,b FROM t\"` with \\backslash"}

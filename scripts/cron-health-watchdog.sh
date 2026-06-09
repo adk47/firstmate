@@ -107,13 +107,35 @@ preview    = int(os.environ.get("PREVIEW", "300"))
 min_streak = max(1, int(os.environ.get("MIN_STREAK", "2")))
 
 def is_failure(rec):
-    """A run is a hard failure only if it errored AND did not deliver its output.
-    A run that errored but still delivered (delivered:true / deliveryStatus
-    'delivered') shipped its result and is treated as healthy — it never alerts
-    and it breaks a consecutive-error streak."""
+    """A run is a hard failure only if it errored AND never reached its target.
+    A run that errored but still delivered is treated as healthy — it never
+    alerts and it breaks a consecutive-error streak. There are TWO delivery
+    paths, either of which means the agent got its output out:
+
+      1. openclaw's auto-delivery announced the turn output
+         (delivered:true / deliveryStatus 'delivered').
+      2. the agent posted to Slack itself via the `message` tool. openclaw
+         does NOT credit that as the cron delivery, so the record keeps
+         delivered:false / deliveryStatus:'not-delivered'; and under the codex
+         runtime a trailing-or-earlier non-fatal tool error (a failed
+         `stripe`/`git`/`jq` step) overwrites error/summary and flips the run
+         to status:error even though the report was already posted. The tell
+         is a non-empty delivery.messageToolSentTo — openclaw records a target
+         there ONLY after a successful message-tool send (collectToolTelemetry
+         bails on `if (params.isError) return` before populating it), so a
+         non-empty array proves a message reached the channel with a receipt.
+
+    Without path 2 every codex cron that self-posts its report
+    (e.g. daily-dispute-handler) false-pages: verified 2026-06-08 — the dispute
+    report reached #finance_muso (Slack ts 1780934615.350849) while the run
+    record read status:error / delivered:false (error string was the earlier
+    failed `stripe subscriptions list` step)."""
     if rec.get("status") != "error":
         return False
     if rec.get("delivered") is True or rec.get("deliveryStatus") == "delivered":
+        return False
+    sent = (rec.get("delivery") or {}).get("messageToolSentTo")
+    if isinstance(sent, list) and sent:
         return False
     return True
 
@@ -229,16 +251,28 @@ _self_test() {
   td="$(mktemp -d)"
   trap 'rm -rf "$td"' RETURN
   mkdir -p "$td/runs"
-  # One job, pre-seeded watermark at ts=100: ok@150, then a two-error streak
-  # (error@190, error@200). This fixture exercises BOTH new behaviours at the
-  # default streak threshold of 2: error@190 is a lone failure (preceded by the
-  # ok@150) so it must be SUPPRESSED, while error@200 completes a 2-run streak so
-  # it must FIRE. (Pre-streak-rule this file injected a single error and expected
-  # 1 bullet; a lone error now yields 0, so the fixture grew a second error.)
+  # Two jobs, both pre-seeded watermark at ts=100.
+  #
+  # selftest-job: ok@150, then a two-error streak (error@190, error@200).
+  # Exercises the streak threshold of 2: error@190 is a lone failure (preceded
+  # by the ok@150) so it must be SUPPRESSED, while error@200 completes a 2-run
+  # streak so it must FIRE.
+  #
+  # delivered-job: two errors (error@190, error@200), each carrying a non-empty
+  # delivery.messageToolSentTo — the agent posted to Slack via the message tool
+  # but the run still records status:error / delivered:false (the codex
+  # self-post false-fail). is_failure() must treat BOTH as healthy, so this job
+  # contributes 0 bullets and its name must NOT appear in the output. If the
+  # message-tool branch ever regresses these two stack a 2-streak and fire,
+  # tripping the bullet-count assertion below.
   printf '%s\n' '{"status":"ok","ts":150}' '{"status":"error","ts":190,"error":"first"}' '{"status":"error","ts":200,"error":"boom `q` \"x\""}' \
     > "$td/runs/selftest-job.jsonl"
-  printf '%s\n' '{"jobs":[{"id":"selftest-job","name":"selftest","agentId":"qa"}]}' > "$td/jobs.json"
-  printf '%s\n' '{"selftest-job":100}' > "$td/state.json"
+  printf '%s\n' \
+    '{"status":"error","ts":190,"error":"⚠️ 🛠️ `git status` failed","delivery":{"messageToolSentTo":[{"channel":"message"}]}}' \
+    '{"status":"error","ts":200,"error":"⚠️ 🛠️ `stripe ...` failed","delivery":{"messageToolSentTo":[{"channel":"message"}]}}' \
+    > "$td/runs/delivered-job.jsonl"
+  printf '%s\n' '{"jobs":[{"id":"selftest-job","name":"selftest","agentId":"qa"},{"id":"delivered-job","name":"deliveredpost","agentId":"qa"}]}' > "$td/jobs.json"
+  printf '%s\n' '{"selftest-job":100,"delivered-job":100}' > "$td/state.json"
   # Pin the threshold at 2 for the self-test so it is deterministic regardless of
   # the operator's CRON_HEALTH_MIN_STREAK — the self-test verifies detector
   # HEALTH (fires on a streak, suppresses a lone error), not the live threshold.
@@ -255,6 +289,12 @@ _self_test() {
   bullets="$(printf '%s\n' "$out" | grep -c '^• ' || true)"
   if [ "$bullets" != "1" ]; then
     echo "$LOGPREFIX SELF-TEST FAIL: expected 1 alert bullet, got $bullets" >&2
+    return 1
+  fi
+  # The message-tool-delivered job must be suppressed entirely — its name must
+  # never reach the alert block (guards the delivery.messageToolSentTo branch).
+  if printf '%s' "$out" | grep -q "deliveredpost"; then
+    echo "$LOGPREFIX SELF-TEST FAIL: message-tool-delivered run was flagged as a failure" >&2
     return 1
   fi
   return 0
