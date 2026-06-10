@@ -40,13 +40,15 @@ args:
 env:
   ADMIN_API_SH: /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh
   # Fraud detector (operations BATCH only — Caroline/customer-facing is OUT OF
-  # SCOPE). Default OFF: the fraud step is a byte-for-byte pass-through no-op
-  # until explicitly rolled forward to shadow, then enforce, mirroring the
-  # proven CV_EVIDENCE_MODE flag-off rollout. See docs/credit-verification/
-  # fraud-detection-spec.md. DO NOT set enforce in production until the
-  # verdict-engine signal_fraud→would_uvn mapping ships (Phase 2) — with the
-  # current engine a signal_fraud credit would be silently dropped.
-  CV_FRAUD_MODE: "off"
+  # SCOPE). SHADOW since 2026-06-10 (off→shadow→enforce rollout, mirroring the
+  # proven CV_EVIDENCE_MODE pattern — spec §2 in docs/credit-verification/
+  # fraud-detection-spec.md): every credit gains _fraud annotations and the
+  # Slack summary gains a 🚨 SHADOW section, but verdicts are byte-identical
+  # to an off run. Enforce is mechanically safe (the Phase-2 verdict-engine
+  # signal_fraud→would_uvn mapping shipped with the scorer in #477) but per
+  # spec §2 it waits on human review of real shadow batches in
+  # #credit-verification first.
+  CV_FRAUD_MODE: "shadow"
   # The fraud scorer needs the RAW fetched batch (credits[], metadata.*,
   # profile.*, verificationData.* — fields score-backend-signals.sh drops).
   # The pick step tees its stdout here so the fraud step can re-read it without
