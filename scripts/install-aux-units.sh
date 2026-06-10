@@ -121,6 +121,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/weekly-cleanup.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/weekly-cleanup.sh missing or not executable"
 
 log "installing into $HYDRA_ROOT"
 
@@ -566,5 +568,89 @@ systemctl enable "$atmr" >/dev/null 2>&1 || log "WARN: could not enable $atmr"
 systemctl start "$atmr" >/dev/null 2>&1 || log "WARN: could not start $atmr"
 astate=$(systemctl is-active "$atmr" 2>/dev/null || echo unknown)
 log "  $atmr: $astate (fires daily 08:00 UTC)"
+
+# ─── Weekly server cleanup (Mon 04:30 UTC) ────────────────────
+# Reclaims the junk systemd-tmpfiles misses: /tmp depth-1 entries
+# whose MTIME (not atime/ctime — scanners refresh those, which is
+# how 19GB of dead PR-review clones survived the daily
+# `D /tmp ... 30d` tmpfiles rule) is >14d; hot-patch *.bak*/*.orig
+# >30d under /opt/hydra + /root/hydra-hotpatch-backups; apt
+# autoremove/autoclean. Posts a Block Kit summary to #clio_devops
+# on every run. Exit 1 = structural refusal (surfaces as a failed
+# unit); per-file delete errors stay exit 0 and report via Slack.
+cat > /etc/systemd/system/hydra-weekly-cleanup.service << CLEANUPSVC
+[Unit]
+Description=HYDRA weekly server cleanup (/tmp mtime>14d, .bak/.orig>30d, apt)
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/weekly-cleanup.sh
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Disk-bound housekeeping: keep it polite to the gateways.
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=append:/var/log/hydra-weekly-cleanup.log
+StandardError=append:/var/log/hydra-weekly-cleanup.log
+CLEANUPSVC
+
+cat > /etc/systemd/system/hydra-weekly-cleanup.timer << CLEANUPTMR
+[Unit]
+Description=Run the HYDRA weekly cleanup Monday 04:30 UTC
+
+[Timer]
+OnCalendar=Mon *-*-* 04:30:00 UTC
+# If the box was down Monday morning, fire on next boot rather than
+# skip a week (same tradeoff as hydra-release.timer).
+Persistent=true
+# Spread away from anything else pinned to the same minute.
+RandomizedDelaySec=20min
+Unit=hydra-weekly-cleanup.service
+
+[Install]
+WantedBy=timers.target
+CLEANUPTMR
+
+systemctl daemon-reload
+
+ctmr=hydra-weekly-cleanup.timer
+systemctl enable "$ctmr" >/dev/null 2>&1 || log "WARN: could not enable $ctmr"
+systemctl start "$ctmr" >/dev/null 2>&1 || log "WARN: could not start $ctmr"
+cstate=$(systemctl is-active "$ctmr" 2>/dev/null || echo unknown)
+log "  $ctmr: $cstate (fires Mon 04:30 UTC)"
+
+# ─── journald cap + hydra log rotation (one-time config) ──────
+# journald had NO retention config and had grown to 3.9G (audit
+# 2026-06-10). Cap the persistent journal at 2G; vacuum only when
+# the drop-in is first installed or changes, so idempotent re-runs
+# are no-ops.
+JOURNALD_DROPIN=/etc/systemd/journald.conf.d/50-hydra-cap.conf
+mkdir -p /etc/systemd/journald.conf.d
+desired=$'[Journal]\nSystemMaxUse=2G'
+if [[ ! -f "$JOURNALD_DROPIN" ]] || [[ "$(cat "$JOURNALD_DROPIN")" != "$desired" ]]; then
+  printf '%s\n' "$desired" > "$JOURNALD_DROPIN"
+  systemctl restart systemd-journald >/dev/null 2>&1 || log "WARN: journald restart failed"
+  journalctl --vacuum-size=2G >/dev/null 2>&1 || log "WARN: journal vacuum failed"
+  log "  journald capped at SystemMaxUse=2G (drop-in installed + vacuumed)"
+fi
+
+# logrotate for the /etc/cron.d watchdog logs and the timer logs
+# above — none of these rotated before (openclaw-watchdog.log et al
+# grow unbounded). copytruncate: the writers are >>/append: redirects
+# reopened per tick/run, no postrotate signaling exists for them.
+cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+/var/log/*-watchdog.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+HYDRALOGROTATE
+chmod 644 /etc/logrotate.d/hydra
+log "  logrotate config installed at /etc/logrotate.d/hydra"
 
 log "post-2026-05-05 hardening: drop-ins, write-audit, and 2-min watchdog cron installed."
