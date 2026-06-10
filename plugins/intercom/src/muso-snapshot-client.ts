@@ -146,6 +146,18 @@ export function createSnapshotClient(deps: SnapshotClientDeps): { lookupSnapshot
     return ids.size === 1 ? [...ids][0] : undefined;
   }
 
+  // subscription.plan arrives as a raw billing id in the wild (live 2026-06-10:
+  // "muso_team_pro_graduated_monthly"), not the clean vip|business|pro|lite
+  // enum the admin filters use. Reduce it to the tier token so the internal
+  // billing id never reaches the agent context; unknown ids → undefined (omit
+  // the plan line entirely rather than leak the raw string). Tokenized on
+  // non-letters; tie-break by tier rank, highest first.
+  const PLAN_TIERS = ["vip", "business", "pro", "lite"] as const;
+  function normalizePlanTier(rawPlan: string): string | undefined {
+    const tokens = new Set(rawPlan.toLowerCase().split(/[^a-z]+/));
+    return PLAN_TIERS.find((tier) => tokens.has(tier));
+  }
+
   // /admin/team?email= → founding-member status + subscription plan for the
   // verified customer's workspace. email param is iLike, so exact-match gate;
   // exactly one exact match or we surface nothing.
@@ -170,14 +182,14 @@ export function createSnapshotClient(deps: SnapshotClientDeps): { lookupSnapshot
     // missing — Number(null) is 0, which would render "since 0". Require an
     // actual numeric year.
     const sinceYear = founder?.sinceYear;
-    const planName = String(sub?.plan ?? "");
+    const planTier = normalizePlanTier(String(sub?.plan ?? ""));
     const period = String(sub?.period ?? "");
     return {
       // Active founders only — a lapsed founder is rendered as a normal customer.
       ...(founder?.active === true && typeof sinceYear === "number" && Number.isFinite(sinceYear)
         ? { founderSince: sinceYear }
         : {}),
-      ...(planName ? { plan: period ? `${planName} (${period})` : planName } : {}),
+      ...(planTier ? { plan: period ? `${planTier} (${period})` : planTier } : {}),
     };
   }
 

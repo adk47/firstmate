@@ -212,6 +212,60 @@ describe("createSnapshotClient.lookupSnapshot — claiming + team chain", () => 
     expect(snap?.profileId).toBe("abc123de");
   });
 
+  it("normalizes a raw internal plan id to its tier token", async () => {
+    // Live 2026-06-10: subscription.plan arrived as the raw billing id
+    // "muso_team_pro_graduated_monthly", not the pro|business|lite|vip enum.
+    const { c } = client({
+      teamBody: {
+        data: {
+          items: [{
+            id: "t", email: "jane@example.com",
+            subscription: { plan: "muso_team_pro_graduated_monthly", period: "monthly" },
+          }],
+          total: 1,
+        },
+      },
+    });
+    const snap = await c.lookupSnapshot("jane@example.com", { timeoutMs: 2500 });
+    expect(snap?.plan).toBe("pro (monthly)");
+  });
+
+  it("omits the plan entirely when the raw id maps to no known tier (never leak internal ids)", async () => {
+    const { c } = client({
+      teamBody: {
+        data: {
+          items: [{
+            id: "t", email: "jane@example.com",
+            subscription: { plan: "muso_internal_grandfathered_x9", period: "monthly" },
+          }],
+          total: 1,
+        },
+      },
+    });
+    const snap = await c.lookupSnapshot("jane@example.com", { timeoutMs: 2500 });
+    expect(snap?.plan).toBeUndefined();
+    expect(JSON.stringify(snap)).not.toContain("grandfathered");
+  });
+
+  it("prefers the most specific tier when a raw id contains multiple tier words", async () => {
+    // "business" must not match inside a hypothetical "pro_business_legacy" as "pro".
+    const { c } = client({
+      teamBody: {
+        data: {
+          items: [{
+            id: "t", email: "jane@example.com",
+            subscription: { plan: "muso_team_business_pro_rated", period: null },
+          }],
+          total: 1,
+        },
+      },
+    });
+    const snap = await c.lookupSnapshot("jane@example.com", { timeoutMs: 2500 });
+    // tie-break: first tier token that appears as a whole word wins, in
+    // vip > business > pro > lite order
+    expect(snap?.plan).toBe("business");
+  });
+
   it("omits founderSince when the founder is lapsed (active=false) but keeps plan", async () => {
     const { c } = client({
       teamBody: {
