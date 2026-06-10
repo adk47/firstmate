@@ -200,6 +200,25 @@ export interface IntercomAccountConfig {
 
 // --- Intercom Client ---
 
+// Lean per-conversation summary lifted straight from a /conversations/search
+// result row. `snippet` is the HTML-stripped first-message excerpt (customer-
+// controlled text — sanitize before injecting into trusted context).
+export interface ConversationSummary {
+  id: string;
+  title: string | null;
+  state: "open" | "closed" | "snoozed";
+  updatedAt: string; // ISO 8601
+  snippet: string;
+}
+
+// One page of a contact's conversation search: the fetched window plus
+// Intercom's total_count for the whole match set — the window may be smaller
+// than the total, so counts must come from totalCount, never conversations.length.
+export interface ContactConversationsPage {
+  conversations: ConversationSummary[];
+  totalCount: number;
+}
+
 export interface IntercomClient {
   replyToConversation(params: {
     conversationId: string;
@@ -235,6 +254,22 @@ export interface IntercomClient {
     adminId: string;
     snoozedUntil: number;
   }): Promise<void>;
+
+  // List a contact's conversations (most recent first) via one
+  // POST /conversations/search round-trip — summaries come from the search
+  // result list itself, no per-conversation GETs. Used by personalization
+  // enrichment for prior-chat recall; correctly scoped per-contact by
+  // Intercom (the system of record), which is what keeps it customer-
+  // isolation-safe without touching openclaw memory.
+  // `excludeConversationId` filters the current conversation server-side so
+  // totalCount is the exact prior count even beyond the fetched page;
+  // `timeoutMs` bounds the call (enrichment passes its own budget).
+  listContactConversations(params: {
+    contactId: string;
+    excludeConversationId?: string;
+    limit?: number;
+    timeoutMs?: number;
+  }): Promise<ContactConversationsPage>;
 }
 
 // --- Event classification ---
@@ -317,6 +352,15 @@ export interface EnrichmentState {
   verifiedName?: string;
   contactId?: string;
   snapshot?: AccountSnapshot;
+  // Prior-support-chat pointer for THIS verified contact, summarized from
+  // Intercom's per-contact conversation search (system of record — correctly
+  // scoped per contact, which is what keeps cross-customer isolation intact).
+  // Count excludes the current conversation; absent when there are none.
+  priorChats?: {
+    count: number;
+    mostRecentTitle?: string;
+    mostRecentAt?: string;
+  };
 }
 
 // --- Risk assessment (replaces narrow EscalationResult for the new path) ---

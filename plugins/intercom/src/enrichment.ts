@@ -1,4 +1,4 @@
-import type { AccountSnapshot, ClassifiedEvent, EnrichmentState, IntercomSessionState } from "./types.js";
+import type { AccountSnapshot, ClassifiedEvent, ContactConversationsPage, EnrichmentState, IntercomSessionState } from "./types.js";
 
 export const DEFAULT_ENRICH_TIMEOUT_MS = 2500;
 
@@ -47,15 +47,48 @@ export type SnapshotLookup = (
 
 export interface EnrichDeps {
   lookupSnapshot: SnapshotLookup;
+  // Prior-chat recall: one page of this verified contact's conversations from
+  // Intercom (most recent first) plus the total match count. Optional — when
+  // absent, enrichment is snapshot-only (Phase 1 behavior). `timeoutMs` bounds
+  // the call to the same enrichment budget as the snapshot lookup.
+  listPriorConversations?: (
+    contactId: string,
+    opts: { timeoutMs: number },
+  ) => Promise<ContactConversationsPage>;
   timeoutMs?: number;
   log?: { warn?: (msg: string) => void };
 }
 
+// Reduce a contact's conversation page to the context-block pointer: count of
+// PRIOR conversations + a most-recent reference (title, falling back to the
+// message snippet). The count comes from totalCount — the fetched window may
+// be smaller than the contact's history. The client already excludes the
+// current conversation server-side; the filter here is belt-and-braces for
+// callers that don't (and adjusts the count when it catches one).
+// Pure for unit-testing.
+function summarizePriorChats(
+  page: ContactConversationsPage,
+  currentConversationId: string,
+): EnrichmentState["priorChats"] | undefined {
+  const prior = page.conversations.filter((c) => c.id !== currentConversationId);
+  const excluded = page.conversations.length - prior.length;
+  const count = Math.max(page.totalCount - excluded, prior.length);
+  if (count === 0) return undefined;
+  const mostRecent = prior[0]; // client returns most-recent-first
+  const ref = mostRecent?.title ?? mostRecent?.snippet;
+  return {
+    count,
+    ...(ref ? { mostRecentTitle: ref } : {}),
+    ...(mostRecent?.updatedAt ? { mostRecentAt: mostRecent.updatedAt } : {}),
+  };
+}
+
 // Populate `state.enrichment` for one conversation. Best-effort by contract:
 // it records the (free) Intercom-verified identity FIRST so a by-name greeting
-// works even when the profile lookup fails, then attempts the snapshot lookup.
-// Never throws — a failed lookup is recorded as `status: "failed"` so a later
-// turn retries it (see shouldEnrich).
+// works even when the lookups fail, then attempts the account snapshot and
+// prior-chat lookups in PARALLEL — the legs are independent, so one failing
+// never costs the other's facts. Never throws — any leg failure is recorded as
+// `status: "failed"` so a later turn retries the missing half (see shouldEnrich).
 export async function enrichSession(
   state: IntercomSessionState,
   identity: VerifiedIdentity,
@@ -63,7 +96,7 @@ export async function enrichSession(
 ): Promise<void> {
   const timeoutMs = deps.timeoutMs ?? DEFAULT_ENRICH_TIMEOUT_MS;
   // Record the verified identity FIRST — it's free (already in the webhook) and
-  // lets Caroline greet by name even if the snapshot lookup below fails.
+  // lets Caroline greet by name even if the lookups below fail.
   const base: EnrichmentState = {
     status: "done",
     enrichedAt: new Date().toISOString(),
@@ -71,13 +104,30 @@ export async function enrichSession(
     verifiedName: identity.name,
     contactId: identity.contactId,
   };
-  try {
-    const snapshot = await deps.lookupSnapshot(identity.email, { timeoutMs });
-    state.enrichment = { ...base, ...(snapshot ? { snapshot } : {}) };
-  } catch (err) {
-    // Best-effort: keep the identity (greeting works), mark failed so the next
-    // turn retries the lookup. Never propagate to the dispatch path.
+
+  const [snapRes, priorRes] = await Promise.allSettled([
+    deps.lookupSnapshot(identity.email, { timeoutMs }),
+    deps.listPriorConversations && identity.contactId
+      ? deps.listPriorConversations(identity.contactId, { timeoutMs })
+      : Promise.resolve(null),
+  ]);
+
+  const snapshot = snapRes.status === "fulfilled" ? snapRes.value : null;
+  const priorChats =
+    priorRes.status === "fulfilled" && priorRes.value
+      ? summarizePriorChats(priorRes.value, state.conversationId)
+      : undefined;
+
+  const anyFailed = snapRes.status === "rejected" || priorRes.status === "rejected";
+  if (anyFailed) {
+    const err = snapRes.status === "rejected" ? snapRes.reason : (priorRes as PromiseRejectedResult).reason;
     deps.log?.warn?.(`[intercom] enrichment lookup failed: ${err}`);
-    state.enrichment = { ...base, status: "failed" };
   }
+
+  state.enrichment = {
+    ...base,
+    ...(anyFailed ? { status: "failed" as const } : {}),
+    ...(snapshot ? { snapshot } : {}),
+    ...(priorChats ? { priorChats } : {}),
+  };
 }

@@ -412,3 +412,170 @@ describe("createIntercomClient", () => {
     expect(logged).toHaveLength(1);
   });
 });
+
+describe("listContactConversations (prior-chat recall)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const SEARCH_RESULT = {
+    type: "conversation.list",
+    total_count: 2,
+    conversations: [
+      {
+        type: "conversation",
+        id: "conv_old",
+        title: "Analytics question",
+        state: "closed",
+        updated_at: 1764576000, // 2025-12-01
+        source: { body: "<p>my analytics are not updating</p>", author: { type: "user", id: "u1" } },
+      },
+      {
+        type: "conversation",
+        id: "conv_new",
+        title: null,
+        state: "open",
+        updated_at: 1767168000, // 2025-12-31
+        source: { body: "<p>question about my latest release</p>", author: { type: "user", id: "u1" } },
+      },
+    ],
+  };
+
+  it("POSTs /conversations/search filtered by contact_ids with the Accept header (406 guard)", async () => {
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify(SEARCH_RESULT), { status: 200 }));
+    globalThis.fetch = fetchSpy as any;
+    const client = new RealIntercomClient("tok");
+    await client.listContactConversations({ contactId: "u1" });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0] as any[];
+    expect(url).toBe("https://api.intercom.io/conversations/search");
+    expect(init.method).toBe("POST");
+    // Without Accept: application/json the search endpoint returns 406.
+    expect(init.headers.Accept).toBe("application/json");
+    expect(init.headers["Intercom-Version"]).toBe("2.11");
+    const body = JSON.parse(init.body);
+    // ~ (contains), not = : contact_ids is a multi-valued String search field,
+    // and exact equality can miss conversations with multiple participants.
+    expect(body.query).toEqual({ field: "contact_ids", operator: "~", value: "u1" });
+    expect(body.pagination).toEqual({ per_page: 5 });
+  });
+
+  it("excludes the current conversation server-side via a compound query", async () => {
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify(SEARCH_RESULT), { status: 200 }));
+    globalThis.fetch = fetchSpy as any;
+    const client = new RealIntercomClient("tok");
+    await client.listContactConversations({ contactId: "u1", excludeConversationId: "conv_now" });
+
+    const body = JSON.parse((fetchSpy.mock.calls[0] as any[])[1].body);
+    expect(body.query).toEqual({
+      operator: "AND",
+      value: [
+        { field: "contact_ids", operator: "~", value: "u1" },
+        { field: "id", operator: "!=", value: "conv_now" },
+      ],
+    });
+  });
+
+  it("includes multi-contact / admin-initiated conversations the contact participated in", async () => {
+    // Regression: rows where someone else authored the source message (e.g.
+    // an outbound admin message or a second participant) must still count —
+    // the contact_ids ~ query matches participation, and the mapper must not
+    // re-filter by author.
+    const MULTI_CONTACT_RESULT = {
+      type: "conversation.list",
+      total_count: 1,
+      conversations: [
+        {
+          type: "conversation",
+          id: "conv_outbound",
+          title: "Checking in on your claim",
+          state: "closed",
+          updated_at: 1764576000,
+          source: { body: "<p>following up on your profile claim</p>", author: { type: "admin", id: "admin_9" } },
+        },
+      ],
+    };
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(MULTI_CONTACT_RESULT), { status: 200 })) as any;
+    const client = new RealIntercomClient("tok");
+    const out = await client.listContactConversations({ contactId: "u1" });
+    expect(out.totalCount).toBe(1);
+    expect(out.conversations).toHaveLength(1);
+    expect(out.conversations[0].id).toBe("conv_outbound");
+  });
+
+  it("uses the provided timeoutMs for the abort signal (defaults to 5000)", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(SEARCH_RESULT), { status: 200 })) as any;
+    const client = new RealIntercomClient("tok");
+    await client.listContactConversations({ contactId: "u1", timeoutMs: 800 });
+    expect(timeoutSpy).toHaveBeenLastCalledWith(800);
+    await client.listContactConversations({ contactId: "u1" });
+    expect(timeoutSpy).toHaveBeenLastCalledWith(5000);
+    timeoutSpy.mockRestore();
+  });
+
+  it("maps results to summaries sorted by updated_at desc, with HTML-stripped snippets — no per-conversation GETs", async () => {
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify(SEARCH_RESULT), { status: 200 }));
+    globalThis.fetch = fetchSpy as any;
+    const client = new RealIntercomClient("tok");
+    const { conversations: out, totalCount } = await client.listContactConversations({ contactId: "u1" });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1); // single round-trip
+    expect(totalCount).toBe(2);
+    expect(out).toHaveLength(2);
+    expect(out[0].id).toBe("conv_new"); // most recent first
+    expect(out[0].title).toBeNull();
+    expect(out[0].snippet).toBe("question about my latest release"); // tags stripped
+    expect(out[1].id).toBe("conv_old");
+    expect(out[1].title).toBe("Analytics question");
+    expect(out[1].state).toBe("closed");
+    expect(typeof out[0].updatedAt).toBe("string"); // ISO, not epoch
+    expect(out[0].updatedAt.startsWith("2025-12-31")).toBe(true);
+  });
+
+  it("carries total_count through even when it exceeds the fetched page", async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ ...SEARCH_RESULT, total_count: 12 }), { status: 200 }),
+    ) as any;
+    const client = new RealIntercomClient("tok");
+    const out = await client.listContactConversations({ contactId: "u1", limit: 2 });
+    expect(out.conversations).toHaveLength(2);
+    expect(out.totalCount).toBe(12);
+  });
+
+  it("returns an empty page on an empty result", async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ type: "conversation.list", total_count: 0, conversations: [] }), { status: 200 }),
+    ) as any;
+    const client = new RealIntercomClient("tok");
+    expect(await client.listContactConversations({ contactId: "u1" })).toEqual({ conversations: [], totalCount: 0 });
+  });
+
+  it("throws RateLimitError on 429", async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response("{}", { status: 429, headers: { "Retry-After": "7" } }),
+    ) as any;
+    const client = new RealIntercomClient("tok");
+    await expect(client.listContactConversations({ contactId: "u1" })).rejects.toMatchObject({
+      name: "RateLimitError",
+      retryAfterSeconds: 7,
+    });
+  });
+
+  it("MockIntercomClient records the call and returns an empty page", async () => {
+    const client = new MockIntercomClient();
+    const out = await client.listContactConversations({ contactId: "u1" });
+    expect(out).toEqual({ conversations: [], totalCount: 0 });
+    expect(client.calls.listContactConversations).toHaveLength(1);
+  });
+
+  it("SanitizingIntercomClient passes through (read-only path)", async () => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner);
+    await client.listContactConversations({ contactId: "u1" });
+    expect(inner.calls.listContactConversations).toHaveLength(1);
+  });
+});

@@ -134,3 +134,119 @@ describe("enrichSession", () => {
     expect(lookupSnapshot).toHaveBeenCalledWith("jane@example.com", { timeoutMs: 800 });
   });
 });
+
+describe("enrichSession — prior-chat recall", () => {
+  const CONVOS = [
+    { id: "conv_current", title: null, state: "open" as const, updatedAt: "2026-06-10T14:00:00.000Z", snippet: "current question" },
+    { id: "conv_b", title: "Analytics question", state: "closed" as const, updatedAt: "2026-06-01T10:00:00.000Z", snippet: "my analytics are stuck" },
+    { id: "conv_a", title: null, state: "closed" as const, updatedAt: "2026-05-01T10:00:00.000Z", snippet: "how do I claim my profile" },
+  ];
+
+  function stateWithConv(conversationId: string): IntercomSessionState {
+    return { conversationId } as IntercomSessionState;
+  }
+
+  it("records prior-chat count and most-recent pointer, excluding the CURRENT conversation", async () => {
+    const state = stateWithConv("conv_current");
+    await enrichSession(state, IDENTITY, {
+      lookupSnapshot: async () => null,
+      listPriorConversations: async () => ({ conversations: CONVOS, totalCount: 3 }),
+    });
+    expect(state.enrichment?.status).toBe("done");
+    expect(state.enrichment?.priorChats).toEqual({
+      count: 2,
+      mostRecentTitle: "Analytics question",
+      mostRecentAt: "2026-06-01T10:00:00.000Z",
+    });
+  });
+
+  it("uses totalCount for the count when the contact has more history than the fetched page", async () => {
+    const state = stateWithConv("conv_current");
+    await enrichSession(state, IDENTITY, {
+      lookupSnapshot: async () => null,
+      // Server-side exclusion already applied: page holds priors only.
+      listPriorConversations: async () => ({ conversations: [CONVOS[1], CONVOS[2]], totalCount: 12 }),
+    });
+    expect(state.enrichment?.priorChats?.count).toBe(12);
+    expect(state.enrichment?.priorChats?.mostRecentTitle).toBe("Analytics question");
+  });
+
+  it("falls back to the snippet when the most recent prior conversation has no title", async () => {
+    const state = stateWithConv("conv_current");
+    await enrichSession(state, IDENTITY, {
+      lookupSnapshot: async () => null,
+      listPriorConversations: async () => ({ conversations: [CONVOS[0], CONVOS[2]], totalCount: 2 }),
+    });
+    expect(state.enrichment?.priorChats?.count).toBe(1);
+    expect(state.enrichment?.priorChats?.mostRecentTitle).toBe("how do I claim my profile");
+  });
+
+  it("omits priorChats entirely when there are no prior conversations", async () => {
+    const state = stateWithConv("conv_current");
+    await enrichSession(state, IDENTITY, {
+      lookupSnapshot: async () => null,
+      // only the current one matched
+      listPriorConversations: async () => ({ conversations: [CONVOS[0]], totalCount: 1 }),
+    });
+    expect(state.enrichment?.priorChats).toBeUndefined();
+  });
+
+  it("does not attempt prior-chat lookup without a contactId", async () => {
+    const state = stateWithConv("conv_current");
+    const listPriorConversations = vi.fn(async () => ({ conversations: CONVOS, totalCount: 3 }));
+    await enrichSession(state, { email: "jane@example.com", name: "Jane" }, {
+      lookupSnapshot: async () => null,
+      listPriorConversations,
+    });
+    expect(listPriorConversations).not.toHaveBeenCalled();
+    expect(state.enrichment?.priorChats).toBeUndefined();
+  });
+
+  it("prior-chat lookup failure does not lose the snapshot (legs are independent)", async () => {
+    const state = stateWithConv("conv_current");
+    await enrichSession(state, IDENTITY, {
+      lookupSnapshot: async () => SNAPSHOT,
+      listPriorConversations: async () => {
+        throw new Error("intercom 500");
+      },
+    });
+    expect(state.enrichment?.snapshot).toEqual(SNAPSHOT);
+    expect(state.enrichment?.priorChats).toBeUndefined();
+    // marked failed so a later turn retries the missing half
+    expect(state.enrichment?.status).toBe("failed");
+  });
+
+  it("snapshot failure does not lose prior chats (legs are independent)", async () => {
+    const state = stateWithConv("conv_current");
+    await enrichSession(state, IDENTITY, {
+      lookupSnapshot: async () => {
+        throw new Error("admin 500");
+      },
+      listPriorConversations: async () => ({ conversations: CONVOS, totalCount: 3 }),
+    });
+    expect(state.enrichment?.priorChats?.count).toBe(2);
+    expect(state.enrichment?.snapshot).toBeUndefined();
+    expect(state.enrichment?.status).toBe("failed");
+  });
+
+  it("runs both legs in parallel and passes the contactId + enrichment timeout to the prior-chat lookup", async () => {
+    const state = stateWithConv("conv_current");
+    const listPriorConversations = vi.fn(async () => ({ conversations: [], totalCount: 0 }));
+    await enrichSession(state, IDENTITY, {
+      lookupSnapshot: async () => SNAPSHOT,
+      listPriorConversations,
+    });
+    expect(listPriorConversations).toHaveBeenCalledWith("user_abc", { timeoutMs: DEFAULT_ENRICH_TIMEOUT_MS });
+  });
+
+  it("passes a configured timeout to the prior-chat lookup (stays within the enrichment budget)", async () => {
+    const state = stateWithConv("conv_current");
+    const listPriorConversations = vi.fn(async () => ({ conversations: [], totalCount: 0 }));
+    await enrichSession(state, IDENTITY, {
+      lookupSnapshot: async () => SNAPSHOT,
+      listPriorConversations,
+      timeoutMs: 800,
+    });
+    expect(listPriorConversations).toHaveBeenCalledWith("user_abc", { timeoutMs: 800 });
+  });
+});

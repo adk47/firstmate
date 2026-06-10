@@ -1,4 +1,4 @@
-import type { IntercomClient, IntercomConversation } from "./types.js";
+import type { ContactConversationsPage, ConversationSummary, IntercomClient, IntercomConversation } from "./types.js";
 import { MAX_OUTBOUND_MESSAGE_IDS } from "./types.js";
 import { sanitizeOutboundBody } from "./sanitize-email.js";
 import { sanitizeToolLeak } from "./sanitize-tool-leak.js";
@@ -10,6 +10,7 @@ export class MockIntercomClient implements IntercomClient {
     getConversation: [] as Array<{ conversationId: string }>,
     closeConversation: [] as Array<{ conversationId: string; adminId: string; body?: string }>,
     snoozeConversation: [] as Array<{ conversationId: string; adminId: string; snoozedUntil: number }>,
+    listContactConversations: [] as Array<{ contactId: string; excludeConversationId?: string; limit?: number; timeoutMs?: number }>,
   };
 
   private messageCounter = 0;
@@ -67,6 +68,16 @@ export class MockIntercomClient implements IntercomClient {
     snoozedUntil: number;
   }): Promise<void> {
     this.calls.snoozeConversation.push(params);
+  }
+
+  async listContactConversations(params: {
+    contactId: string;
+    excludeConversationId?: string;
+    limit?: number;
+    timeoutMs?: number;
+  }): Promise<ContactConversationsPage> {
+    this.calls.listContactConversations.push(params);
+    return { conversations: [], totalCount: 0 };
   }
 }
 
@@ -266,6 +277,67 @@ export class RealIntercomClient implements IntercomClient {
       throw new Error(`Intercom snoozeConversation failed: ${response.status} ${response.statusText} - ${errorBody}`);
     }
   }
+
+  async listContactConversations(params: {
+    contactId: string;
+    excludeConversationId?: string;
+    limit?: number;
+    timeoutMs?: number;
+  }): Promise<ContactConversationsPage> {
+    // One round-trip: POST /conversations/search returns enough per row
+    // (id/title/state/updated_at/source.body) to summarize without follow-up
+    // GETs. NOTE: this endpoint 406s without Accept: application/json —
+    // headers() already sends it; the regression test pins the header.
+    // The search API has no documented sort param, so order client-side.
+    // Excluding the current conversation server-side keeps total_count an
+    // exact prior count even when the contact has more history than one page.
+    // contact_ids matches conversations the contact PARTICIPATES in (incl.
+    // admin-initiated outbound ones), not just those they authored. It's a
+    // multi-valued String search field, so use ~ (contains) rather than = —
+    // exact equality can miss multi-participant conversations. Containment of
+    // a full fixed-length contact id can't match a different contact.
+    const url = `${this.baseUrl}/conversations/search`;
+    const contactQuery = { field: "contact_ids", operator: "~", value: params.contactId };
+    const query = params.excludeConversationId
+      ? {
+          operator: "AND",
+          value: [contactQuery, { field: "id", operator: "!=", value: params.excludeConversationId }],
+        }
+      : contactQuery;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({
+        query,
+        pagination: { per_page: params.limit ?? 5 },
+      }),
+      signal: AbortSignal.timeout(params.timeoutMs ?? 5000),
+    });
+
+    this.checkRateLimit(response);
+
+    if (!response.ok) {
+      const errorBody = await this.readErrorBody(response);
+      throw new Error(`Intercom listContactConversations failed: ${response.status} ${response.statusText} - ${errorBody}`);
+    }
+
+    const data = await this.parseJson(response, "listContactConversations");
+    const rows: any[] = Array.isArray(data?.conversations) ? data.conversations : [];
+    const conversations = rows
+      .map((c): ConversationSummary => ({
+        id: String(c?.id ?? ""),
+        title: typeof c?.title === "string" && c.title ? c.title : null,
+        state: (c?.state === "closed" || c?.state === "snoozed" ? c.state : "open"),
+        updatedAt: new Date(Number(c?.updated_at ?? 0) * 1000).toISOString(),
+        snippet: String(c?.source?.body ?? "").replace(/<[^>]*>/g, "").trim().slice(0, 120),
+      }))
+      .filter((c) => c.id)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return {
+      conversations,
+      totalCount: typeof data?.total_count === "number" ? data.total_count : conversations.length,
+    };
+  }
 }
 
 /**
@@ -368,6 +440,18 @@ export class SanitizingIntercomClient implements IntercomClient {
     snoozedUntil: number;
   }): Promise<void> {
     return this.inner.snoozeConversation(params);
+  }
+
+  async listContactConversations(params: {
+    contactId: string;
+    excludeConversationId?: string;
+    limit?: number;
+    timeoutMs?: number;
+  }): Promise<ContactConversationsPage> {
+    // Read path — nothing outbound to a customer to sanitize. The summaries'
+    // customer-controlled text is sanitized at the point of context injection
+    // (sanitizeEnrichmentValue in channel.ts), not here.
+    return this.inner.listContactConversations(params);
   }
 }
 

@@ -194,6 +194,16 @@ function buildEnrichmentLines(e: EnrichmentState): string[] {
     }
     if (s.plan) lines.push(`- plan: ${clean(s.plan)}`);
   }
+  const p = e.priorChats;
+  if (p && p.count > 0) {
+    // Most-recent reference may be a conversation title OR a customer-typed
+    // snippet — always sanitized. Date trimmed to the day; the agent doesn't
+    // need timestamps.
+    const recent = p.mostRecentTitle
+      ? ` (most recent: "${clean(p.mostRecentTitle)}"${p.mostRecentAt ? `, ${p.mostRecentAt.slice(0, 10)}` : ""})`
+      : "";
+    lines.push(`- prior support chats: ${p.count}${recent}`);
+  }
   return lines;
 }
 
@@ -302,10 +312,24 @@ export function buildEnrichFn(
   const musoApiBase = process.env.MUSO_API_BASE ?? "https://api.muso.ai";
   const warnLog = log?.warn ? { warn: (m: string) => log.warn!(m) } : undefined;
   const snapshotClient = createSnapshotClient({ musoApiBase, adminEmail, adminPassword, log: warnLog });
+  // Prior-chat recall reads the contact's own conversation list from Intercom
+  // (system of record, correctly scoped per contact). Built once per account
+  // start via the sanctioned factory.
+  const intercomClient = createIntercomClient(account.token, log?.warn ? { error: (m) => log.warn!(m) } : undefined);
   const timeoutMs = account.personalization.timeoutMs;
   return (state, identity) =>
     enrichSession(state, identity, {
       lookupSnapshot: snapshotClient.lookupSnapshot,
+      // Exclude the current conversation server-side so the search's
+      // total_count is the exact prior count; the enrichment budget bounds
+      // the Intercom call the same as the snapshot leg.
+      listPriorConversations: (contactId, opts) =>
+        intercomClient.listContactConversations({
+          contactId,
+          excludeConversationId: state.conversationId,
+          limit: 5,
+          timeoutMs: opts.timeoutMs,
+        }),
       ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
       log: warnLog,
     });
