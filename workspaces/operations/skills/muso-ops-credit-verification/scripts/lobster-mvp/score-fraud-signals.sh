@@ -172,7 +172,11 @@ if [[ -n "$PROFILE_IDS" ]]; then
   LOOKUP_SH="$(cd "$(dirname "$0")" && pwd)/../lib/fraud-muso-only-lookup.sh"
   if [[ -x "$LOOKUP_SH" ]] || command -v "$LOOKUP_SH" >/dev/null 2>&1; then
     # Helper is itself fail-soft (always exits 0, always prints the wrapper).
-    MUSO_WRAP=$(printf '%s\n' "$PROFILE_IDS" | bash "$LOOKUP_SH" 2>>/dev/stderr || printf '{"available":false,"data":{}}')
+    # No stderr redirect: the helper's stderr inherits ours by default, and an
+    # explicit 2>>/dev/stderr fails with ENXIO under the gateway (stderr is a
+    # socketpair there, not openable as a file) — which silently degraded the
+    # muso_only factor on EVERY gateway run (2026-06-10 incident).
+    MUSO_WRAP=$(printf '%s\n' "$PROFILE_IDS" | bash "$LOOKUP_SH" || printf '{"available":false,"data":{}}')
     if ! printf '%s' "$MUSO_WRAP" | jq -e '.data' >/dev/null 2>&1; then
       echo "[score-fraud-signals] muso-only helper returned non-conforming output; treating as unavailable." >&2
       MUSO_WRAP='{"available":false,"data":{}}'
@@ -194,8 +198,12 @@ MUSO_AVAILABLE=$(printf '%s' "$MUSO_WRAP" | jq '.available')
 #  1. From RAW .items, compute per-profile factor indicators + weighted score.
 #  2. Build a {cr_id: _fraud} map keyed by credit id.
 #  3. Stamp _fraud onto each scored credit; apply mode semantics.
+# The raw batch goes in via --slurpfile, NOT --argjson: a 500-credit raw
+# batch is megabytes, and a single argv element over ~128KB dies with
+# "Argument list too long" (E2BIG, exit 126) on Linux — which killed the
+# first shadow cron batch (2026-06-10 16:01Z) before any credit was scored.
 printf '%s' "$INPUT" | jq -c \
-  --argjson raw "$RAW" \
+  --slurpfile rawf "$RAW_BATCH_FILE" \
   --argjson muso "$MUSO_MAP" \
   --argjson musoAvail "$MUSO_AVAILABLE" \
   --arg mode "$CV_FRAUD_MODE" \
@@ -223,7 +231,8 @@ printf '%s' "$INPUT" | jq -c \
     | ($r | ascii_downcase) as $rl
     | any($roles[]; . as $n | ($rl | test("\\b" + $n + "\\b")));
 
-  ($raw.items // []) as $items
+  ($rawf[0]) as $raw
+  | ($raw.items // []) as $items
 
   # ---- Per-profile aggregation -------------------------------------------
   | ($items | group_by(.profileId)) as $byprofile

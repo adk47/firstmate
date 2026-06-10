@@ -619,3 +619,42 @@ STUB
   out2=$(printf '%s' "$v2" | POST_PARENT_TO_CHANNEL=0 THREAD_TS= CV_FRAUD_MODE=off bash "$RENDER" 2>/dev/null)
   [[ "$out2" != *"UNAVAILABLE"* ]]
 }
+
+@test "batch-scale raw batch (>>128KB) scores without E2BIG (slurpfile regression)" {
+  # Regression for the 2026-06-10 16:01Z incident: the raw batch was passed to
+  # jq as --argjson (one argv element), and a real 500-credit batch blew the
+  # Linux per-arg limit ("/usr/bin/jq: Argument list too long", exit 126) —
+  # killing the first shadow cron run before any credit was scored. The raw
+  # batch must reach jq via --slurpfile (it is already a file on disk).
+  local raw="$TEST_TMPDIR/big-raw.json" scored="$TEST_TMPDIR/big-scored.json"
+  jq -nc '{queue_depth:1500, fetch_size:1500, items:[range(1500)|{
+      id:("cr-\(.)"),
+      profileId:("00000000-0000-4000-8000-\(100000000000 + . | tostring)"),
+      createdAt:"2026-06-01T00:00:00Z", status:"unverified",
+      credits:["Producer","Composer"],
+      metadata:{source:"spclient", label:"Some Label With A Longish Name", isrc:("USBIG\(.)") },
+      profile:{creditCount:5, popularity:3, name:("Profile \(.)")},
+      verificationData:{total_risk_percent:"50", rule_risk_percent:{
+        reject_artist_credit:"0", reject_high_velocity_profile:"0",
+        reject_high_risk_profile:"0", reject_deleted_catalog_track:"0",
+        reject_individual_org_credit:"0", reject_publisher_label_credit:"0"}}}]}' > "$raw"
+  # The fixture must actually exceed the ~128KB Linux per-argument limit,
+  # otherwise this test cannot catch an --argjson reintroduction.
+  [ "$(wc -c < "$raw")" -gt 200000 ]
+  jq -nc '{queue_depth:1500, fetch_size:1500,
+    counts:{total:1500, signal_approve:1500, signal_review:0, signal_uvn:0},
+    signal_approve:[range(1500)|{
+      cr_id:("cr-\(.)"),
+      profile_id:("00000000-0000-4000-8000-\(100000000000 + . | tostring)"),
+      isrc:("USBIG\(.)"), credited_name:("Profile \(.)"), role:"Producer",
+      _signal:{bucket:"signal_approve", reason:"approve_owning_track"}}],
+    signal_review:[], signal_uvn:[]}' > "$scored"
+  run --separate-stderr env CV_FRAUD_MODE=shadow CV_FRAUD_RAW_BATCH="$raw" \
+    TRINO_QUERY_SH="$TRINO_FAIL" bash -c "'$SCORER' < '$scored'"
+  [ "$status" -eq 0 ]
+  [[ "$stderr" != *"Argument list too long"* ]]
+  [ "$(printf '%s' "$output" | jq -r '.signal_approve|length')" = "1500" ]
+  # Annotation actually happened (not a fail-soft pass-through).
+  run jq -e '.signal_approve[0]._fraud.score' <<<"$output"
+  [ "$status" -eq 0 ]
+}
