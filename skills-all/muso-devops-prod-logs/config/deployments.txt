@@ -1,0 +1,18 @@
+# Deployments covered by deterministic prod-log access.
+# Format: "<namespace> <deployment>" — one per line. This file is the single
+# source of truth shared by the on-demand skill (fetch-prod-logs.sh) AND the
+# prod-log-alert-watchdog (scripts/prod-log-alert-watchdog.sh).
+#
+# Verified against `kubectl get deploy -A` on node-8, 2026-06-09. The huge
+# autoscaled worker fleets (analytics-worker-*, industry-proc-*-v2 — up to
+# 440 replicas) are deliberately NOT listed for v1: kubectl-sampling a handful
+# of pods out of hundreds is not a meaningful alert signal. They remain
+# fetchable on-demand via --any-deploy.
+muso-prod core-backend-api
+muso-prod core-backend-worker
+muso-prod core-backend-analytics
+muso-prod core-backend-posters
+muso-prod credit-submission-worker
+muso-prod playlist-updater
+muso-prod industry-api
+muso-prod industry-proc-catalog-admin

@@ -50,6 +50,12 @@
 #     empty-completion-swallows-fallback flaw (2026-06-08 @CMO
 #     incident, PR #450) that the chain-reshape CI gate can't reach.
 #
+#   /etc/cron.d/prod-log-alert-watchdog
+#     Schedules scripts/prod-log-alert-watchdog.sh every 5 minutes
+#     to post NEW prod error-log lines (kubectl read-only, redacted,
+#     fingerprint-deduped) to #prod-alerts C0BA8QMV3ME (Serhii's
+#     prod-log-visibility ask, 2026-06-09).
+#
 #   hydra-release.timer / .service
 #     Daily-release cron. Mon..Fri 08:00 Europe/Rome. Invokes
 #     scripts/release-cron.sh, which:
@@ -111,6 +117,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/merge-landing-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/merge-landing-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 
@@ -376,6 +384,19 @@ cat > /etc/cron.d/merge-landing-watchdog << MERGELANDINGWD
 */30 * * * * root $HYDRA_ROOT/scripts/merge-landing-watchdog.sh >> /var/log/merge-landing-watchdog.log 2>&1
 MERGELANDINGWD
 chmod 644 /etc/cron.d/merge-landing-watchdog
+
+# ─── Prod-log alert watchdog at 5-min cadence ─────────────────
+# Posts NEW prod error-log lines (kubectl, read-only, redacted) to
+# #prod-alerts (C0BA8QMV3ME) so engineers see prod errors without asking the
+# devops agent (Serhii's ask, 2026-06-09). 5 min with a 6-min log window:
+# the overlap means no gap between ticks, and the per-fingerprint cooldown
+# (6h) means a persistent error pages once, not every tick. Same ownership
+# rule: edit here + re-run install-aux-units.sh, never edit on node-8.
+cat > /etc/cron.d/prod-log-alert-watchdog << PRODLOGWD
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+*/5 * * * * root $HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh >> /var/log/prod-log-alert-watchdog.log 2>&1
+PRODLOGWD
+chmod 644 /etc/cron.d/prod-log-alert-watchdog
 
 # Drop the legacy per-user crontab line if it's still installed.
 # Idempotent: removes the line if present, no-op otherwise.

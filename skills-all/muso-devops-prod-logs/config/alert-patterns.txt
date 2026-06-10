@@ -1,0 +1,8 @@
+# Grep -Ei filter for the prod-log-alert-watchdog (one alternative per line,
+# OR-joined). STRICT by design — bare "error" is excluded because it is noisy
+# in app logs (Nick's call, 2026-06-09). Widen only with evidence it misses
+# real incidents.
+fatal
+uncaught
+unhandled
+exception

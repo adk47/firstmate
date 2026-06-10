@@ -12,6 +12,17 @@
 - Cluster context: OVH K3s (7-node, 3 server + 4 agent)
 - Key namespaces: default, data-processing, monitoring, vault, longhorn-system
 
+## Prod Logs (skill: muso-devops-prod-logs)
+- **Prod log fetches go through `scripts/fetch-prod-logs.sh`** (skill
+  `muso-devops-prod-logs`) — don't improvise `kubectl logs | grep` pipelines.
+  The wrapper guarantees read-only verbs, per-pod coverage of multi-replica
+  deployments (`kubectl logs deploy/X` samples ONE pod), secret redaction, and
+  bounded Slack-safe output. See the skill's SKILL.md for flags and the
+  ask→command mapping.
+- Automatic prod error alerts already flow to #prod-alerts (C0BA8QMV3ME) via
+  `scripts/prod-log-alert-watchdog.sh` (system cron, every 5 min) — if someone
+  reports a prod error, check that channel's recent posts before re-deriving.
+
 ## Prod Env Vars (skill: muso-devops-set-env)
 - **The ONLY sanctioned path is `scripts/devops-set-env.sh`** — never set a prod env
   var by calling `kubectl`/`vault` directly. The wrapper enforces, in bash below you:

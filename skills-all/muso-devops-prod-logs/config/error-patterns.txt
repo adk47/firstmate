@@ -1,0 +1,8 @@
+# Default grep -Ei filter for ON-DEMAND log fetches (one alternative per line,
+# OR-joined by fetch-prod-logs.sh). This is the full historical pattern the
+# devops agent used interactively — intentionally broad; narrow with --pattern.
+fatal
+uncaught
+unhandled
+exception
+error

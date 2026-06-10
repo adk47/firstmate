@@ -1,0 +1,10 @@
+# Exclusion filter for the prod-log-alert-watchdog ONLY (grep -Eiv, one
+# alternative per line, OR-joined). Lines matching ANY of these are dropped
+# BEFORE fingerprinting — use for known-benign noise that matches the alert
+# pattern. Missing/empty file = no exclusion (safe direction: more alerts).
+# On-demand fetches via the skill are NOT affected.
+#
+# debug-level Sequelize lines log raw SQL containing plpgsql EXCEPTION
+# blocks (found in the 2026-06-09 pre-rollout rehearsal on
+# core-backend-worker) — not an error, just echoed SQL.
+[[:space:]]debug:[[:space:]]
