@@ -3,14 +3,18 @@ import type { SnapshotLookup } from "./enrichment.js";
 
 // Minimal, GET-only Muso admin client for personalization enrichment.
 //
-// Deliberately a small copy of the security envelope in
-// plugins/support-tools/src/muso-admin-client.ts — the two plugins are
-// separate npm packages and cannot share runtime code without a shared
-// package. KEEP THE ALLOWLIST IN SYNC with that file. This client adds nothing
-// the support-tools one lacks; it only drops the HttpClient abstraction in
-// favor of native fetch + per-call AbortSignal timeouts.
+// Same security envelope style as plugins/support-tools/src/muso-admin-client.ts
+// (separate npm packages — runtime code can't be shared), but the allowlists
+// intentionally DIVERGE: this client resolves a verified customer's email via
+// /admin/claiming (email → claimed profileId) and /admin/team (founder + plan),
+// which the agent-invoked support-tools client must NOT gain. profile/search is
+// deliberately ABSENT here — it's a name/catalog text search, not email-indexed,
+// so searching it by email can only produce nothing or a wrong-person fuzzy hit
+// (the Phase-1 bug: every live enrichment returned a null snapshot).
+// CI pins this list: pr-validate.yml "snapshot client path allowlist pin".
 const ALLOWED_PATHS: RegExp[] = [
-  /^\/api\/v3\/admin\/profile\/search(\?|$)/,
+  /^\/api\/v3\/admin\/claiming(\?|$)/,
+  /^\/api\/v3\/admin\/team(\?|$)/,
   /^\/api\/v3\/admin\/profile\/[0-9a-fA-F-]+(\?|$)/,
   /^\/api\/v3\/admin\/profile\/[0-9a-fA-F-]+\/credits(\?|$)/,
 ];
@@ -54,13 +58,26 @@ export function createSnapshotClient(deps: SnapshotClientDeps): { lookupSnapshot
     return tok;
   }
 
+  // Share one in-flight login between concurrent callers — the claiming and
+  // team legs run in parallel, and without this each would dogpile its own
+  // login on a cold cache.
+  let loginInFlight: Promise<string> | null = null;
+
   async function getToken(timeoutMs: number): Promise<string> {
     const now = Date.now();
     if (cachedToken && now - cachedAt < TOKEN_TTL_MS) return cachedToken;
-    const fresh = await login(timeoutMs);
-    cachedToken = fresh;
-    cachedAt = now;
-    return fresh;
+    if (!loginInFlight) {
+      loginInFlight = login(timeoutMs)
+        .then((fresh) => {
+          cachedToken = fresh;
+          cachedAt = Date.now();
+          return fresh;
+        })
+        .finally(() => {
+          loginInFlight = null;
+        });
+    }
+    return loginInFlight;
   }
 
   function assertAllowed(path: string): void {
@@ -86,56 +103,151 @@ export function createSnapshotClient(deps: SnapshotClientDeps): { lookupSnapshot
     return { ok: false, status: resp.status };
   }
 
+  // Both list endpoints wrap their payload in an outer `data` on the wire
+  // ({ data: { items, total } }); tolerate an unwrapped { items } too so an
+  // envelope change degrades to "still works" rather than silent nulls.
+  function listItems(body: unknown): Record<string, unknown>[] {
+    const b = body as Record<string, any> | undefined;
+    const items = b?.data?.items ?? b?.items;
+    return Array.isArray(items) ? items : [];
+  }
+
+  // allSettled isolates the parallel legs but also swallows their throws —
+  // the outer catch in lookupSnapshot never sees them. Surface any rejection
+  // (login failure, network error, abort) so an auth/API outage stays visible
+  // instead of silently degrading to a null/partial snapshot.
+  function warnRejected(leg: string, res: PromiseSettledResult<unknown>): void {
+    if (res.status === "rejected") {
+      deps.log?.warn?.(`[intercom] snapshot ${leg} fetch failed: ${res.reason}`);
+    }
+  }
+
+  // /admin/claiming?keyword= → the verified customer's claimed profileId.
+  // keyword is an iLike fuzzy search (joined team.email), so we gate on EXACT
+  // team-email equality and status='processed'; >1 distinct profileId after
+  // that = ambiguous → never guess which artist.
+  async function resolveClaimedProfileId(email: string, timeoutMs: number): Promise<string | undefined> {
+    const resp = await get<unknown>(
+      `/api/v3/admin/claiming?keyword=${encodeURIComponent(email)}&limit=10`,
+      timeoutMs,
+    );
+    if (!resp.ok) return undefined;
+    const wanted = email.trim().toLowerCase();
+    const ids = new Set<string>();
+    for (const row of listItems(resp.data)) {
+      if (String(row.status ?? "") !== "processed") continue;
+      const teamEmail = String((row.team as Record<string, unknown> | undefined)?.email ?? "")
+        .trim()
+        .toLowerCase();
+      if (!teamEmail || teamEmail !== wanted) continue;
+      const pid = String(row.profileId ?? "");
+      if (pid) ids.add(pid);
+    }
+    return ids.size === 1 ? [...ids][0] : undefined;
+  }
+
+  // /admin/team?email= → founding-member status + subscription plan for the
+  // verified customer's workspace. email param is iLike, so exact-match gate;
+  // exactly one exact match or we surface nothing.
+  async function resolveTeamFacts(
+    email: string,
+    timeoutMs: number,
+  ): Promise<{ founderSince?: number; plan?: string }> {
+    const resp = await get<unknown>(
+      `/api/v3/admin/team?email=${encodeURIComponent(email)}&limit=10`,
+      timeoutMs,
+    );
+    if (!resp.ok) return {};
+    const wanted = email.trim().toLowerCase();
+    const exact = listItems(resp.data).filter(
+      (row) => String(row.email ?? "").trim().toLowerCase() === wanted,
+    );
+    if (exact.length !== 1) return {};
+    const team = exact[0];
+    const founder = team.founder as Record<string, unknown> | undefined;
+    const sub = team.subscription as Record<string, unknown> | undefined;
+    // The API may return { active: true, sinceYear: null } when since_year is
+    // missing — Number(null) is 0, which would render "since 0". Require an
+    // actual numeric year.
+    const sinceYear = founder?.sinceYear;
+    const planName = String(sub?.plan ?? "");
+    const period = String(sub?.period ?? "");
+    return {
+      // Active founders only — a lapsed founder is rendered as a normal customer.
+      ...(founder?.active === true && typeof sinceYear === "number" && Number.isFinite(sinceYear)
+        ? { founderSince: sinceYear }
+        : {}),
+      ...(planName ? { plan: period ? `${planName} (${period})` : planName } : {}),
+    };
+  }
+
+  // profileId → public work fields (name, claimed flag, credit count, latest
+  // release). Best-effort: a failed detail/credits fetch degrades to fewer
+  // fields, never an error.
+  async function fetchWorkFields(profileId: string, timeoutMs: number): Promise<Partial<AccountSnapshot>> {
+    const [profResp, credResp] = await Promise.allSettled([
+      get<{ data?: Record<string, unknown> }>(
+        `/api/v3/admin/profile/${encodeURIComponent(profileId)}`,
+        timeoutMs,
+      ),
+      get<{ data?: { items?: Record<string, unknown>[] } }>(
+        `/api/v3/admin/profile/${encodeURIComponent(profileId)}/credits?limit=20&offset=0`,
+        timeoutMs,
+      ),
+    ]);
+    warnRejected("profile", profResp);
+    warnRejected("credits", credResp);
+
+    const row: Record<string, unknown> =
+      profResp.status === "fulfilled" && profResp.value.ok ? (profResp.value.data?.data ?? {}) : {};
+    const items =
+      credResp.status === "fulfilled" && credResp.value.ok
+        ? (credResp.value.data?.data?.items ?? [])
+        : [];
+    const latest = items
+      .map((it) => ({ title: String(it.title ?? ""), date: String(it.releaseDate ?? "") }))
+      .filter((c) => c.date)
+      .sort((a, b) => b.date.localeCompare(a.date))[0];
+
+    const cc = row.commonCredits;
+    const primaryRole =
+      Array.isArray(cc) && cc.length > 0
+        ? String(cc[0])
+        : String(row.role ?? row.primaryRole ?? "") || undefined;
+    const creditsCount = Number(row.creditCount ?? row.creditsCount ?? 0);
+
+    // Assemble ONLY the fields we want — this is what strips PII: email/phone/
+    // payment on the profile row are never copied across.
+    return {
+      profileId,
+      name: String(row.name ?? "") || undefined,
+      profileUrl: `https://muso.ai/profile/${profileId}`,
+      ...(Object.keys(row).length > 0 ? { isClaimed: Boolean(row.isClaimed) } : {}),
+      ...(primaryRole ? { primaryRole } : {}),
+      ...(creditsCount > 0 ? { creditsCount } : {}),
+      ...(latest?.title ? { latestCreditTitle: latest.title } : {}),
+      ...(latest?.date ? { latestCreditDate: latest.date } : {}),
+    };
+  }
+
   async function lookupSnapshot(email: string, opts: { timeoutMs: number }): Promise<AccountSnapshot | null> {
     const { timeoutMs } = opts;
     try {
-      const searchResp = await get<{ data?: Record<string, unknown>[] }>(
-        `/api/v3/admin/profile/search?keyword=${encodeURIComponent(email)}&limit=5`,
-        timeoutMs,
-      );
-      if (!searchResp.ok) return null;
-      const results = searchResp.data?.data ?? [];
-      // 0 = no match, >1 = ambiguous — never guess which artist.
-      if (results.length !== 1) return null;
-      const row = results[0];
-      // /profile/search is a keyword search, so a lone result can still be a
-      // fuzzy (non-email) match. Require the row's email to exactly match the
-      // verified Intercom email before trusting it — otherwise we'd attach the
-      // wrong person's profile/credits. (The email itself is never copied into
-      // the snapshot below; it's only the match gate.)
-      const rowEmail = String(row.email ?? "").trim().toLowerCase();
-      if (!rowEmail || rowEmail !== email.trim().toLowerCase()) return null;
-      const profileId = String(row.id ?? "");
-      if (!profileId) return null;
+      // The two resolution legs are independent — a claiming failure must not
+      // cost the customer their founder/plan facts, and vice versa.
+      const [claimRes, teamRes] = await Promise.allSettled([
+        resolveClaimedProfileId(email, timeoutMs),
+        resolveTeamFacts(email, timeoutMs),
+      ]);
+      warnRejected("claiming", claimRes);
+      warnRejected("team", teamRes);
+      const profileId = claimRes.status === "fulfilled" ? claimRes.value : undefined;
+      const teamFacts = teamRes.status === "fulfilled" ? teamRes.value : {};
 
-      const credResp = await get<{ data?: { items?: Record<string, unknown>[] } }>(
-        `/api/v3/admin/profile/${encodeURIComponent(profileId)}/credits?limit=20&offset=0`,
-        timeoutMs,
-      );
-      const items = credResp.ok ? credResp.data?.data?.items ?? [] : [];
-      const latest = items
-        .map((it) => ({ title: String(it.title ?? ""), date: String(it.releaseDate ?? "") }))
-        .filter((c) => c.date)
-        .sort((a, b) => b.date.localeCompare(a.date))[0];
+      const workFields = profileId ? await fetchWorkFields(profileId, timeoutMs) : {};
 
-      const cc = row.commonCredits;
-      const primaryRole =
-        Array.isArray(cc) && cc.length > 0
-          ? String(cc[0])
-          : String(row.role ?? row.primaryRole ?? "") || undefined;
-
-      // Assemble ONLY the fields we want — this is what strips PII: email/phone/
-      // payment on the search row are never copied across.
-      return {
-        profileId,
-        name: String(row.name ?? "") || undefined,
-        profileUrl: `https://muso.ai/profile/${profileId}`,
-        isClaimed: Boolean(row.isClaimed),
-        ...(primaryRole ? { primaryRole } : {}),
-        creditsCount: Number(row.creditCount ?? row.creditsCount ?? 0),
-        ...(latest?.title ? { latestCreditTitle: latest.title } : {}),
-        ...(latest?.date ? { latestCreditDate: latest.date } : {}),
-      };
+      const snapshot: AccountSnapshot = { ...workFields, ...teamFacts };
+      return Object.keys(snapshot).length > 0 ? snapshot : null;
     } catch (err) {
       deps.log?.warn?.(`[intercom] snapshot lookup error: ${err}`);
       return null;

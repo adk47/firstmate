@@ -189,6 +189,10 @@ function buildEnrichmentLines(e: EnrichmentState): string[] {
     if (s.latestCreditTitle) {
       lines.push(`- latest release: "${clean(s.latestCreditTitle)}"${s.latestCreditDate ? ` (${clean(s.latestCreditDate)})` : ""}`);
     }
+    if (typeof s.founderSince === "number") {
+      lines.push(`- founding member: since ${s.founderSince}`);
+    }
+    if (s.plan) lines.push(`- plan: ${clean(s.plan)}`);
   }
   return lines;
 }

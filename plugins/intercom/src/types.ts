@@ -282,10 +282,13 @@ export interface KnownFacts {
 
 // --- Personalization enrichment (Caroline) ---
 
-// Read-only account snapshot assembled from the Muso admin API (profile +
-// credits). PII-stripped at the source (no email/phone/payment). Kept distinct
-// from the Intercom-verified identity (verifiedName/verifiedEmail) so a
-// profile-lookup miss or ambiguous match never blocks a by-name greeting.
+// Read-only account snapshot assembled from the Muso admin API (claiming →
+// profile + credits, plus team founder/plan). PII-stripped at the source (no
+// email/phone/payment). Kept distinct from the Intercom-verified identity
+// (verifiedName/verifiedEmail) so a profile-lookup miss or ambiguous match
+// never blocks a by-name greeting. Work fields (profileId..latestCreditDate)
+// and account fields (founderSince/plan) populate independently — either
+// half can be present without the other.
 export interface AccountSnapshot {
   profileId?: string;
   name?: string;
@@ -295,6 +298,11 @@ export interface AccountSnapshot {
   creditsCount?: number;
   latestCreditTitle?: string;
   latestCreditDate?: string;
+  // Founding-member year — set ONLY when the team's founder.active is true
+  // (lapsed founders are omitted entirely; never surface lapsed status).
+  founderSince?: number;
+  // Subscription plan, e.g. "pro (annual)" / "lite" — from the team record.
+  plan?: string;
 }
 
 export type EnrichmentStatus = "done" | "failed";

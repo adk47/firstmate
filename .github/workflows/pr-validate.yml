@@ -410,6 +410,38 @@ jobs:
             exit 1
           fi
           echo "Personalization enrichment is memory-free"
+
+          # Snapshot client path allowlist pin: the edge enrichment client may
+          # only reach the claiming/team/profile admin endpoints (GET-only).
+          # Any new "/api/v3/admin/..." literal outside that set (or any
+          # non-admin absolute API path) must show up as a diff of THIS line —
+          # the reach of the customer-facing agent's credential can only grow
+          # visibly. (Login path /admin/user/login is the auth call itself.)
+          SNAP=plugins/intercom/src/muso-snapshot-client.ts
+          if [ -f "$SNAP" ]; then
+            # Require at least one path segment after admin/ so the bare
+            # "/api/v3/admin/" prefix-guard string inside assertAllowed()
+            # doesn't false-positive. Extraction stops at "?" and "(" (not in
+            # the char class), so the template-literal profile routes extract
+            # as ".../profile/${encodeURIComponent" — the allowlist below is
+            # anchored ($) to those exact extracted forms, NOT prefixes, so a
+            # reintroduced /api/v3/admin/profile/search cannot sneak past.
+            ALLOWED=':/api/v3/admin/(claiming|team|user/login|profile/[$][{]encodeURIComponent)$'
+            # Self-test: the fuzzy-search endpoint this pin exists to keep out
+            # must always be flagged as stray by the allowlist.
+            if ! printf '%s\n' '0:/api/v3/admin/profile/search' | grep -qvE "$ALLOWED"; then
+              echo "::error::endpoint-pin self-test failed: profile/search would pass the allowlist"
+              exit 1
+            fi
+            STRAY=$(grep -noE '/api/v3/admin/[a-zA-Z0-9][a-zA-Z0-9/_${}.-]*' "$SNAP" \
+              | grep -vE "$ALLOWED" || true)
+            if [ -n "$STRAY" ]; then
+              echo "::error::$SNAP reaches an admin endpoint outside the pinned set (claiming|team|profile/\${id}[/credits]|user/login):"
+              echo "$STRAY"
+              exit 1
+            fi
+            echo "Snapshot client endpoint reach is pinned to claiming|team|profile/\${id}[/credits]"
+          fi
           echo "::endgroup::"
 
       - name: AI code review
