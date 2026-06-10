@@ -1,0 +1,110 @@
+{
+  "queue_depth": 4,
+  "fetch_size": 4,
+  "items": [
+    {
+      "id": "cr-ming",
+      "profileId": "11111111-1111-1111-1111-111111111111",
+      "createdAt": "2026-06-01T00:00:00Z",
+      "status": "unverified",
+      "credits": ["Producer", "Editorial", "Photography", "Art", "Design", "A&R", "Marketing", "Management", "Publisher", "Album Cover", "Mixer"],
+      "metadata": { "source": "spclient", "label": "Indie Co", "isrc": "USMING0001" },
+      "profile": { "creditCount": 34, "popularity": 72, "name": "Ming Vauz" },
+      "claimName": "Ming Vauz",
+      "spotifyPopularity": 72,
+      "spotifyTrackArtists": [ { "name": "Some Artist" } ],
+      "verificationData": {
+        "total_risk_percent": "10",
+        "rule_risk_percent": {
+          "approve_owning_track": "0",
+          "track_pending_capture": "0",
+          "reject_high_velocity_profile": "0",
+          "reject_high_risk_profile": "0",
+          "reject_artist_credit": "0",
+          "reject_deleted_catalog_track": "0",
+          "reject_individual_org_credit": "0",
+          "reject_publisher_label_credit": "0",
+          "approve_credit_exists": "1"
+        }
+      }
+    },
+    {
+      "id": "cr-roberto",
+      "profileId": "22222222-2222-2222-2222-222222222222",
+      "createdAt": "2026-06-01T00:00:00Z",
+      "status": "unverified",
+      "credits": ["Producer"],
+      "metadata": { "source": "spclient", "label": "Major Co", "isrc": "USROB00001" },
+      "profile": { "creditCount": 1365, "popularity": 80, "name": "Roberto Junior" },
+      "claimName": "Roberto Junior",
+      "spotifyPopularity": 80,
+      "spotifyTrackArtists": [ { "name": "Roberto Junior" } ],
+      "verificationData": {
+        "total_risk_percent": "5",
+        "rule_risk_percent": {
+          "approve_owning_track": "1",
+          "track_pending_capture": "0",
+          "reject_high_velocity_profile": "0",
+          "reject_high_risk_profile": "0",
+          "reject_artist_credit": "0",
+          "reject_deleted_catalog_track": "0",
+          "reject_individual_org_credit": "0",
+          "reject_publisher_label_credit": "0",
+          "approve_credit_exists": "1"
+        }
+      }
+    },
+    {
+      "id": "cr-legit",
+      "profileId": "33333333-3333-3333-3333-333333333333",
+      "createdAt": "2024-01-01T00:00:00Z",
+      "status": "unverified",
+      "credits": ["Producer", "Mixer"],
+      "metadata": { "source": "industry", "label": "Reputable Label", "isrc": "USLEGIT001" },
+      "profile": { "creditCount": 540, "popularity": 75, "name": "Legit Producer" },
+      "claimName": "Legit Producer",
+      "spotifyPopularity": 75,
+      "spotifyTrackArtists": [ { "name": "Legit Artist" } ],
+      "verificationData": {
+        "total_risk_percent": "2",
+        "rule_risk_percent": {
+          "approve_owning_track": "1",
+          "track_pending_capture": "0",
+          "reject_high_velocity_profile": "0",
+          "reject_high_risk_profile": "0",
+          "reject_artist_credit": "0",
+          "reject_deleted_catalog_track": "0",
+          "reject_individual_org_credit": "0",
+          "reject_publisher_label_credit": "0",
+          "approve_credit_exists": "1"
+        }
+      }
+    },
+    {
+      "id": "cr-javon",
+      "profileId": "44444444-4444-4444-4444-444444444444",
+      "createdAt": "2026-06-05T00:00:00Z",
+      "status": "unverified",
+      "credits": ["Editorial"],
+      "metadata": { "source": "industry", "label": "Small Co", "isrc": "USJAVON001" },
+      "profile": { "creditCount": 12, "popularity": 18, "name": "Javon" },
+      "claimName": "Javon",
+      "spotifyPopularity": 18,
+      "spotifyTrackArtists": [ { "name": "Various" } ],
+      "verificationData": {
+        "total_risk_percent": "40",
+        "rule_risk_percent": {
+          "approve_owning_track": "0",
+          "track_pending_capture": "0",
+          "reject_high_velocity_profile": "1",
+          "reject_high_risk_profile": "0",
+          "reject_artist_credit": "0",
+          "reject_deleted_catalog_track": "0",
+          "reject_individual_org_credit": "0",
+          "reject_publisher_label_credit": "0",
+          "approve_credit_exists": "0"
+        }
+      }
+    }
+  ]
+}

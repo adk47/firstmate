@@ -69,7 +69,14 @@ ADMIN_API_SH="${ADMIN_API_SH:-/opt/hydra/workspaces/operations/skills/muso-ops-a
 # Same enum as batch-verify-profile.sh; the dispatcher validates it before
 # calling here, but we accept + forward to .results.jsonl unchanged so the
 # truth-floor row carries the structured signal.
-FLAG_REASONS_REGEX="^(name_mismatch|popularity_anomaly|no_tier1_match|metadata_inconsistent)$"
+#
+# fraud_multifactor (added 2026-06-08) carries the multi-factor batch fraud
+# detector's verdict (score-fraud-signals.sh, CV_FRAUD_MODE=enforce). It is
+# STILL a closed-list value — the human-readable factor breakdown
+# (fraud:role_inflation+source_quality+...=0.80) rides in --reason, not here,
+# so this enum stays a small fixed set. See docs/credit-verification/
+# fraud-detection-spec.md §9 (the matching DB-enum extension is deferred).
+FLAG_REASONS_REGEX="^(name_mismatch|popularity_anomaly|no_tier1_match|metadata_inconsistent|fraud_multifactor)$"
 
 PROFILE_ID=""
 CREDITED_NAME=""
@@ -97,7 +104,7 @@ Required:
                  discipline so flagging is never reasonless.
   --flag-reason  Closed-list enum (categorical signal logged to .results.jsonl
                  as flag_reason). One of: name_mismatch, popularity_anomaly,
-                 no_tier1_match, metadata_inconsistent.
+                 no_tier1_match, metadata_inconsistent, fraud_multifactor.
   --ids          Comma-separated list of credit-request IDs to flag.
 
 Forbidden:
@@ -168,12 +175,12 @@ if [[ -z "$REASON" ]]; then
     exit 2
 fi
 if [[ -z "$FLAG_REASON" ]]; then
-    echo "ERROR: --flag-reason is required (closed-list enum: name_mismatch, popularity_anomaly, no_tier1_match, metadata_inconsistent)." >&2
+    echo "ERROR: --flag-reason is required (closed-list enum: name_mismatch, popularity_anomaly, no_tier1_match, metadata_inconsistent, fraud_multifactor)." >&2
     exit 2
 fi
 if ! [[ "$FLAG_REASON" =~ $FLAG_REASONS_REGEX ]]; then
     echo "ERROR: --flag-reason '$FLAG_REASON' is not a valid enum value." >&2
-    echo "       Valid: name_mismatch, popularity_anomaly, no_tier1_match, metadata_inconsistent" >&2
+    echo "       Valid: name_mismatch, popularity_anomaly, no_tier1_match, metadata_inconsistent, fraud_multifactor" >&2
     exit 2
 fi
 if [[ -z "$IDS_RAW" ]]; then

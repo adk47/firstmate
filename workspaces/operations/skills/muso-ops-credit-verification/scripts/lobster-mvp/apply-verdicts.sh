@@ -2,6 +2,10 @@
 # apply-verdicts.sh — Lobster step: apply both buckets.
 #   would_approve → PUT status=approved
 #   would_uvn     → PUT status=user_verification_needed
+#                   (the fraud subset is PUT with OPS_FLAG_REASON=fraud_multifactor
+#                    so the truth-floor results.jsonl records WHY the credit was
+#                    routed to UVN — the post-hoc summary/counter and the future
+#                    DB fraud-state both key on that flag_reason.)
 #
 # Stdin:  verdict-engine.sh output {queue_depth, fetch_size, counts,
 #                                    would_approve, would_uvn}
@@ -53,16 +57,19 @@ fi
 # ---- REAL APPLY -----------------------------------------------------------
 log_event "apply_started" "$(jq -nc --argjson na "$N_APPROVE" --argjson nu "$N_UVN" '{would_approve_count:$na, would_uvn_count:$nu}')"
 
-# Chunked PUT to /admin/credit-requests. Args: <items_array> <status> <bucket_label>
+# Chunked PUT to /admin/credit-requests. Args: <items_array> <status> <bucket_label> [<flag_reason>]
 # Echoes (on stdout) a JSON {landed_ids: [...], refused_ids: [...], last_http: "..."}
 # Each chunk PUTs requestIds + status. CV_APPROVE_GATE_DISABLED is set
 # only when status=approved (the gate exists for approve writes; UVN
 # doesn't go through that gate). OPS_DRY_RUN=0 is the intent-explicit
-# override applied to both.
+# override applied to both. <flag_reason> (optional, UVN only) is forwarded to
+# muso-admin-api.sh via OPS_FLAG_REASON so the truth floor records it; empty ⇒
+# null flag_reason (ordinary UVN).
 apply_chunked() {
   local items_json="$1"
   local status="$2"
   local bucket="$3"
+  local flag_reason="${4:-}"
 
   local ids_json
   ids_json=$(echo "$items_json" | jq -c 'map(.cr_id)')
@@ -102,7 +109,7 @@ apply_chunked() {
         bash "$ADMIN_API_SH" --evidence-excerpt "$evidence" \
         call PUT /admin/credit-requests "$chunk_body" 2>&1)
     else
-      chunk_resp=$(OPS_DRY_RUN=0 \
+      chunk_resp=$(OPS_DRY_RUN=0 OPS_FLAG_REASON="$flag_reason" \
         bash "$ADMIN_API_SH" \
         call PUT /admin/credit-requests "$chunk_body" 2>&1)
     fi
@@ -146,15 +153,35 @@ if (( N_APPROVE > 0 )); then
   APPROVE_LAST_HTTP=$(echo "$RES" | jq -r '.last_http')
 fi
 
-# UVN bucket
+# UVN bucket. Split into fraud (carries flag_reason=fraud_multifactor) vs
+# ordinary (null flag_reason) so the truth floor records why each credit landed
+# in UVN. Both PUT the SAME status=user_verification_needed (no fraud DB status
+# exists yet); only the recorded flag_reason differs. A fraud credit is one the
+# scorer RE-BUCKETED (._signal.bucket=="signal_fraud") — enforce-only by
+# construction. Do NOT key on ._fraud.over: shadow annotates over=true on every
+# bucket WITHOUT re-bucketing, so an already-UVN credit would get a durable
+# fraud_multifactor marker from a mode that is supposed to be observe-only.
 UVN_LANDED_IDS='[]'
 UVN_REFUSED_IDS='[]'
 UVN_LAST_HTTP=""
 if (( N_UVN > 0 )); then
-  RES=$(apply_chunked "$WOULD_UVN" "user_verification_needed" "uvn")
-  UVN_LANDED_IDS=$(echo "$RES" | jq -c '.landed_ids')
-  UVN_REFUSED_IDS=$(echo "$RES" | jq -c '.refused_ids')
-  UVN_LAST_HTTP=$(echo "$RES" | jq -r '.last_http')
+  FRAUD_UVN=$(echo "$WOULD_UVN" | jq -c '[.[] | select(._signal.bucket == "signal_fraud")]')
+  PLAIN_UVN=$(echo "$WOULD_UVN" | jq -c '[.[] | select(._signal.bucket != "signal_fraud")]')
+  N_FRAUD_UVN=$(echo "$FRAUD_UVN" | jq 'length')
+  N_PLAIN_UVN=$(echo "$PLAIN_UVN" | jq 'length')
+
+  if (( N_PLAIN_UVN > 0 )); then
+    RES=$(apply_chunked "$PLAIN_UVN" "user_verification_needed" "uvn" "")
+    UVN_LANDED_IDS=$(echo "$RES" | jq -c '.landed_ids')
+    UVN_REFUSED_IDS=$(echo "$RES" | jq -c '.refused_ids')
+    UVN_LAST_HTTP=$(echo "$RES" | jq -r '.last_http')
+  fi
+  if (( N_FRAUD_UVN > 0 )); then
+    RES=$(apply_chunked "$FRAUD_UVN" "user_verification_needed" "uvn_fraud" "fraud_multifactor")
+    UVN_LANDED_IDS=$(printf '%s\n%s\n' "$UVN_LANDED_IDS" "$(echo "$RES" | jq -c '.landed_ids')" | jq -sc 'add')
+    UVN_REFUSED_IDS=$(printf '%s\n%s\n' "$UVN_REFUSED_IDS" "$(echo "$RES" | jq -c '.refused_ids')" | jq -sc 'add')
+    [[ -z "$UVN_LAST_HTTP" ]] && UVN_LAST_HTTP=$(echo "$RES" | jq -r '.last_http')
+  fi
 fi
 
 APPROVE_LANDED_N=$(echo "$APPROVE_LANDED_IDS" | jq 'length')

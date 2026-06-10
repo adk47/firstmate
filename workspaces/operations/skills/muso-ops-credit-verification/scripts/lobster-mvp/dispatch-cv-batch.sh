@@ -109,6 +109,14 @@ fi
 
 # --- build payload --------------------------------------------------------
 
+# Per-run unique raw-batch handoff file for the pick→fraud steps. A static
+# path is a cross-run race: two overlapping batches (cron + manual @-mention)
+# would clobber each other's raw batch and the fraud scorer would silently
+# score one run's credits against the other run's profile data (unmatched
+# credits fall back to clean _fraud defaults). PID+epoch is unique enough —
+# the gateway runs one dispatcher process per invocation on one host.
+RAW_BATCH_FILE="/tmp/cv-fraud-raw-batch.$$.$(date +%s).json"
+
 # argsJson is a STRING containing JSON (Lobster forwards it into the
 # pipeline's args: block). The outer payload is JSON-with-nested-string.
 ARGS_JSON=$(jq -nc \
@@ -117,7 +125,8 @@ ARGS_JSON=$(jq -nc \
   --arg dry "$DRY_RUN_STR" \
   --arg skind "$SELECTOR_KIND" \
   --arg sid "$SELECTOR_ID" \
-  '{batch_size:$bs, thread_ts:$tts, dry_run:$dry, selector_kind:$skind, selector_id:$sid}')
+  --arg rbf "$RAW_BATCH_FILE" \
+  '{batch_size:$bs, thread_ts:$tts, dry_run:$dry, selector_kind:$skind, selector_id:$sid, raw_batch_file:$rbf}')
 
 PAYLOAD=$(jq -nc \
   --arg pipeline "$PIPELINE_PATH" \
@@ -126,6 +135,10 @@ PAYLOAD=$(jq -nc \
     args:{pipeline:$pipeline, argsJson:$argsJson, timeoutMs:700000}}')
 
 # --- invoke ----------------------------------------------------------------
+
+# The pipeline runs on this same host; once the (synchronous) invoke returns,
+# the per-run raw-batch file is dead weight — clean it up on every exit path.
+trap 'rm -f "$RAW_BATCH_FILE"' EXIT
 
 RESPONSE=$(curl -sS -X POST "http://127.0.0.1:${GATEWAY_PORT}/tools/invoke" \
   -H "Authorization: Bearer $TOK" \

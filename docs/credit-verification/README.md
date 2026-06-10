@@ -35,6 +35,7 @@ Tier-0 is the load-bearing piece that moved the needle from 3.4% to a measured 2
 | Tier-1 helpers | `scripts/musicbrainz-isrc-lookup.sh`, `scripts/spotify-track-lookup.sh`, `scripts/discogs-isrc-lookup.sh` (same dir) |
 | Skill prose (drives the LLM) | [`workspaces/operations/skills/muso-ops-credit-verification/SKILL.md`](../../workspaces/operations/skills/muso-ops-credit-verification/SKILL.md) — see §B1.6 |
 | Tests | `scripts/tests/*.bats` in each skill's scripts dir |
+| Batch fraud detector (spec) | [`fraud-detection-spec.md`](./fraud-detection-spec.md) — profile-level multi-factor detector that downgrades a backend approve to UVN (`CV_FRAUD_MODE` off/shadow/enforce; batch pipeline only) |
 | Live env | `/etc/openclaw/main.env` (sources `OPS_TIER0_ENABLED=1` etc.) |
 
 ## Quick smoke test

@@ -91,7 +91,10 @@ teardown() {
 }
 
 @test "missing --ids → exit 2" {
-    run bash "$WRAPPER" --profile-id p1 --reason high_velocity
+    # --flag-reason supplied: it is validated BEFORE --ids, so omitting both
+    # would trip the flag-reason error and never reach the assertion below
+    # (this test sat red, unnoticed, while the suite was outside CI).
+    run bash "$WRAPPER" --profile-id p1 --reason high_velocity --flag-reason name_mismatch
     [ "$status" -eq 2 ]
     [[ "$output" == *"--ids is required"* ]]
     [ ! -f "$ADMIN_LOG" ]

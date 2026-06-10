@@ -896,11 +896,19 @@ jobs:
         # mirrors sanitize-reasoning-leak.ts patterns; the sentinel fails if they
         # drift). Hermetic: helpers.bash PATH-shadows openclaw/gh/curl/journalctl.
         # Same scoping rationale — one tests dir, not a blanket workspace find.
+        #
+        # ALSO the credit-verification fraud-scorer suite (score-fraud-signals.bats,
+        # added with the 2026-06 CV_FRAUD_MODE detector). Pinned as a single FILE
+        # operand on purpose: its tests/ dir holds ~28 sibling suites that have
+        # never run in CI (the "blanket find workspaces" hazard above). Hermetic:
+        # helpers.bash PATH-shadows openclaw, Trino access goes through stubbed
+        # fraud-muso-only-lookup fixtures.
         run: |
           set -euo pipefail
           files=$(find scripts \
                        workspaces/operations/skills/muso-ops-admin/scripts/tests \
                        workspaces/operations/skills/muso-caroline-weekly-review/scripts/tests \
+                       workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-fraud-signals.bats \
                        workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
                        skills-all/muso-devops-set-env/scripts/tests \
                        -type f -name '*.bats' | sort)

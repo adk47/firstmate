@@ -36,6 +36,10 @@ THREAD_TS="${THREAD_TS:-}"
 POST_PARENT_TO_CHANNEL="${POST_PARENT_TO_CHANNEL:-0}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-${OPENCLAW_CLI_PATH:-openclaw}}"
 OPENCLAW_PROFILE="${OPENCLAW_PROFILE:-main}"
+# Fraud-detector mode (fraud-detection-spec.md). The pipeline `fraud` step
+# carries this env through; we read it ONLY to label the section: in shadow
+# mode verdicts are unchanged, so the header must say so. Default off.
+CV_FRAUD_MODE="${CV_FRAUD_MODE:-off}"
 
 QUEUE_DEPTH=$(echo "$INPUT" | jq -r '.queue_depth')
 FETCH_SIZE=$(echo "$INPUT" | jq -r '.fetch_size')
@@ -104,6 +108,71 @@ if [[ -n "$APPROVE_IDS" ]]; then
     [[ -z "$id" ]] && continue
     TEXT+=$'\n  • `'"$id"$'`'
   done <<< "$APPROVE_IDS"
+fi
+
+# --- Fraud line (multi-factor batch detector, fraud-detection-spec.md) -------
+# Source of fraud-flagged credits in the in-pipeline JSON, robust to whether
+# the Phase-2 verdict-engine still exposes a top-level signal_fraud array or
+# only folds the credits into would_uvn carrying their `_fraud` object:
+#   1. top-level .signal_fraud[] (score-fraud / shadow output, if it survives)
+#   2. else would_uvn[] entries with ._fraud.over == true (enforce, folded)
+# Each entry's reason rides on _signal.reason or _fraud.reason. We render a
+# COMPACT line (count + first few ids + factors), not the full list — the
+# authoritative per-credit list is the post-hoc render-slack-summary.sh.
+FRAUD_COUNT=$(echo "$INPUT" | jq -r '
+  ((.signal_fraud // []) +
+   ((.would_uvn // []) | map(select((._fraud.over // false) == true))))
+  | map(.cr_id) | unique | length
+')
+FRAUD_COUNT="${FRAUD_COUNT:-0}"
+
+if (( FRAUD_COUNT > 0 )); then
+  # Shadow mode does NOT change verdicts — make that explicit in the header so
+  # nobody reads a shadow run as if the credits were actually routed to UVN.
+  if [[ "$CV_FRAUD_MODE" == "shadow" ]]; then
+    FRAUD_HEADER=":rotating_light: *SUSPECTED FRAUD (SHADOW — not enforced): ${FRAUD_COUNT} credit(s) would be flagged*"
+  else
+    FRAUD_HEADER=":rotating_light: *SUSPECTED FRAUD: ${FRAUD_COUNT} credit(s) flagged → user_verification_needed*"
+  fi
+  TEXT+=$'\n\n'"$FRAUD_HEADER"
+
+  # Compact id + factor list, clamped to first 5 inside jq (avoid head SIGPIPE).
+  FRAUD_LINES=$(echo "$INPUT" | jq -r '
+    ((.signal_fraud // []) +
+     ((.would_uvn // []) | map(select((._fraud.over // false) == true))))
+    | unique_by(.cr_id) | .[0:5][]
+    | (._signal.reason // ._fraud.reason // "") as $r
+    | ($r | if startswith("fraud:") then (.[6:] | sub("=[^=]*$";"") | gsub("\\+";", ")) else . end) as $factors
+    | "\(.cr_id)\t\($factors)"
+  ')
+  while IFS=$'\t' read -r id factors; do
+    [[ -z "$id" ]] && continue
+    if [[ -n "$factors" ]]; then
+      TEXT+=$'\n  • `'"$id"$'` — '"$factors"
+    else
+      TEXT+=$'\n  • `'"$id"$'`'
+    fi
+  done <<< "$FRAUD_LINES"
+  if (( FRAUD_COUNT > 5 )); then
+    TEXT+=$'\n  … +'"$((FRAUD_COUNT - 5))"$' more'
+  fi
+
+fi
+
+# Loud one-line notice when the muso-only Trino factor was unavailable this
+# run (fail-soft path). Computed across ALL annotated credits — NOT just the
+# fraud-flagged ones — and appended even when nothing crossed the threshold:
+# a degraded run that flags zero credits must be distinguishable from a fully
+# scored clean batch (the fail-soft visibility contract in
+# fraud-detection-spec.md). In off mode no credit carries _fraud, so the
+# any() is vacuously false and the line never renders.
+MUSO_UNAVAIL=$(echo "$INPUT" | jq -r '
+  [ ((.would_approve // []) + (.would_uvn // []) + (.signal_fraud // []))[]
+    | ._fraud.muso_only_available ]
+  | any(. == false)
+')
+if [[ "$MUSO_UNAVAIL" == "true" ]]; then
+  TEXT+=$'\n\n:warning: muso-only Trino signal was UNAVAILABLE this run — fraud scores computed WITHOUT it (fail-soft, see runlog).'
 fi
 
 # Always echo the summary text to stdout so Lobster's step output captures it.

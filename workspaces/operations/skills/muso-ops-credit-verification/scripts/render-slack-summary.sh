@@ -59,6 +59,7 @@ fetched=$(jq -r '.fetched // 0' <<<"$finished")
 approved=$(jq -r '.approved // 0' <<<"$finished")
 verification_needed=$(jq -r '.verification_needed // 0' <<<"$finished")
 escalated=$(jq -r '.escalated // 0' <<<"$finished")
+fraud_flagged=$(jq -r '.fraud_flagged // 0' <<<"$finished")
 skipped_idempotent=$(jq -r '.skipped_idempotent // 0' <<<"$finished")
 skipped_cap=$(jq -r '.skipped_cap // 0' <<<"$finished")
 skipped=$((skipped_idempotent + skipped_cap))
@@ -115,8 +116,16 @@ if (( http_err_total > 0 )); then
     http_err_line=$'\n:warning: '"${http_err_total}"' admin-API call(s) errored (see results.jsonl).'
 fi
 
+# Fraud token on the one-line counter — only when the multi-factor detector
+# actually flagged something (CV_FRAUD_MODE=enforce landed UVN downgrades).
+# Omitted at 0 so off/shadow runs read identically to a no-fraud run.
+fraud_token=""
+if (( fraud_flagged > 0 )); then
+    fraud_token=" | :rotating_light: Fraud: ${fraud_flagged}"
+fi
+
 parent="${dry_prefix}Credit batch complete — ${ts_human}${banner}${http_err_line}
-Fetched: ${fetched} | Approved: ${approved} | → verification_needed: ${verification_needed} | Escalated: ${escalated} | Skipped: ${skipped}
+Fetched: ${fetched} | Approved: ${approved} | → verification_needed: ${verification_needed} | Escalated: ${escalated} | Skipped: ${skipped}${fraud_token}
 Run ID: ${RUN_ID}"
 
 # --- Thread reply (bullets grouped by outcome, credit-ID based only) ---
@@ -171,6 +180,62 @@ if [[ -f "$results_path" ]]; then
          | .request_ids[]?]
         | unique | .[]
     ' "$results_path" 2>/dev/null || true)
+
+    # Suspected-fraud UVN (multi-factor batch detector, fraud-detection-spec.md).
+    # A landed UVN write carrying flag_reason="fraud_multifactor" is a credit the
+    # backend would have approved but the fraud scorer downgraded to UVN
+    # (CV_FRAUD_MODE=enforce). Emit `id\treason` TAB-separated per line so the
+    # human factor string (`fraud:role_inflation+...=score`) rides along; the
+    # truth floor carries it on the row's `reason` field. dedupe by id.
+    fraud_uvn=$(jq -s -r '
+        [.[]
+         | select(.intended_status == "user_verification_needed"
+                  and .flag_reason == "fraud_multifactor"
+                  and (.outcome == "ok" or .outcome == "dry_run_intercept"))
+         | (.reason // "") as $r
+         | .request_ids[]? | {id: ., reason: $r}]
+        | unique_by(.id)
+        | .[] | [.id, .reason] | @tsv
+    ' "$results_path" 2>/dev/null || true)
+    fraud_uvn_count=$(printf '%s' "$fraud_uvn" | grep -c . 2>/dev/null || true)
+    fraud_uvn_count=${fraud_uvn_count:-0}
+
+    # --- SUSPECTED FRAUD section (most urgent — render first) ---------------
+    # Distinct from the generic UVN list: these credits would have been
+    # auto-approved by the backend but the multi-factor detector downgraded
+    # them. We surface the triggering factors (parsed from the row `reason`)
+    # so a reviewer sees WHY without opening the runlog. Note: these IDs are a
+    # subset of the verification_needed-landed set above — they're broken out,
+    # not double-counted, since the parent counter already includes them in
+    # verification_needed. Same first-25-then-overflow pattern.
+    if (( fraud_uvn_count > 0 )); then
+        thread+=":rotating_light: *🚨 SUSPECTED FRAUD — ${fraud_uvn_count} credit(s) flagged, routed to user_verification_needed:*"$'\n'
+        printed=0
+        while IFS=$'\t' read -r id reason; do
+            [[ -z "$id" ]] && continue
+            if (( printed >= 25 )); then
+                thread+="  … +$((fraud_uvn_count - 25)) more (see results.jsonl)"$'\n'
+                break
+            fi
+            # `reason` is the human factor string "fraud:f1+f2+...=score". Strip
+            # the "fraud:" prefix and trailing "=score" to show just the
+            # triggering factors; fall back to the raw reason if it doesn't
+            # match the expected shape.
+            factors="$reason"
+            if [[ "$reason" == fraud:* ]]; then
+                factors="${reason#fraud:}"
+                factors="${factors%=*}"
+                factors="${factors//+/, }"
+            fi
+            if [[ -n "$factors" ]]; then
+                thread+="  • \`${id}\` — ${factors}"$'\n'
+            else
+                thread+="  • \`${id}\`"$'\n'
+            fi
+            printed=$((printed + 1))
+        done <<< "$fraud_uvn"
+        thread+="  Detector: multi-factor batch fraud scorer (CV_FRAUD_MODE=enforce). See fraud-detection-spec.md + runlog for per-factor detail."$'\n'$'\n'
+    fi
 
     if (( uvn_landed_count > 0 )); then
         thread+=":red_circle: *→ verification_needed (${uvn_landed_count} credits):*"$'\n'
