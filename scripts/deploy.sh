@@ -755,6 +755,23 @@ RSYNC_EXCLUDES=(
   # (which historically included real Sentinel skills like clawsec,
   # audit-scanner, quarantine, trust-scorer that existed NOWHERE else)
   # before the cleanup happens.
+  #
+  # GOTCHA: the pattern below is UNANCHORED, so it swallows every config/
+  # dir at every depth — including skills-all/<skill>/config/, which is how
+  # the prod-log-alert watchdog shipped without its deployments.txt on
+  # 2026-06-10 (fail-closed every tick) and how muso-devops-set-env's gate
+  # configs never reached the server. The per-skill includes below take
+  # precedence (rsync: first matching pattern wins) and are deliberately
+  # per-skill rather than a blanket skills-all/*/config/: muso-ops-admin's
+  # CANONICAL config has known server-side divergence (drifted
+  # tier2-approvers.txt + a godmode allowlist the repo intentionally omits
+  # from canonical) that a blanket include would overwrite/delete. They are
+  # also deliberately unanchored so they match in BOTH the repo-root sync
+  # and the skills-all/ → per-profile skills sync (different transfer roots).
+  --include='muso-devops-prod-logs/config/'
+  --include='muso-devops-prod-logs/config/**'
+  --include='muso-devops-set-env/config/'
+  --include='muso-devops-set-env/config/**'
   --exclude='config/'
   # Plugin install artifacts (server runs pnpm install --frozen-lockfile in-place)
   --exclude='plugins/*/node_modules/'

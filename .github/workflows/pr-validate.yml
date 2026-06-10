@@ -591,12 +591,15 @@ jobs:
           # hardcoded "expected ≥15 (deploy.sh has 19)", which went stale as
           # the array grew past 60 entries and would no longer catch a 40-entry
           # truncation.
-          declared=$(sed -n '/^RSYNC_EXCLUDES=(/,/^)$/p' scripts/deploy.sh | grep -c -- "--exclude=")
+          # The array holds --exclude= lines plus targeted --include= overrides
+          # (e.g. skills-all/<skill>/config/ carve-outs from the unanchored
+          # config/ exclude) — count both.
+          declared=$(sed -n '/^RSYNC_EXCLUDES=(/,/^)$/p' scripts/deploy.sh | grep -cE -- "--(exclude|include)=")
           if [ "${#RSYNC_EXCLUDES[@]}" -ne "$declared" ] || [ "${#RSYNC_EXCLUDES[@]}" -lt 15 ]; then
-            echo "::error::RSYNC_EXCLUDES extraction problem: eval'd ${#RSYNC_EXCLUDES[@]} entries but the deploy.sh array block declares $declared --exclude= lines (expected equal, and ≥15). The sed range or array format likely changed."
+            echo "::error::RSYNC_EXCLUDES extraction problem: eval'd ${#RSYNC_EXCLUDES[@]} entries but the deploy.sh array block declares $declared --exclude=/--include= lines (expected equal, and ≥15). The sed range or array format likely changed."
             exit 1
           fi
-          echo "Sourced ${#RSYNC_EXCLUDES[@]} exclude patterns from deploy.sh"
+          echo "Sourced ${#RSYNC_EXCLUDES[@]} exclude/include patterns from deploy.sh"
           echo "---"
           # Run the rsync dry-run with both stdout and stderr redirected
           # to a tempfile, and check rsync's exit code EXPLICITLY before
