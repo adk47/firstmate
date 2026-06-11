@@ -230,7 +230,7 @@ For the `fraud-muso-only-lookup.sh` helper:
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `CV_FRAUD_MUSO_TRINO_TIMEOUT` | `25` | Seconds; wall-clock cap on the Trino call via `timeout`. Expiry → `{"available":false,"data":{}}` + exit 0. |
+| `CV_FRAUD_MUSO_TRINO_TIMEOUT` | `300` | Seconds; wall-clock cap on the Trino call via `timeout`. Expiry → `{"available":false,"data":{}}` + exit 0. (25→300 in the 2026-06-11 column fix: the live query measures 56–134s.) |
 | `CV_FRAUD_MUSO_MIN_TRACK_POP` | `50` | `total_track_popularity` floor (denominator-sanity guard, mirrors the saved query's `> 50`). |
 | `TRINO_QUERY_SH` | *(resolved)* | Override path to `scripts/trino-query.sh` (for tests). |
 

@@ -898,11 +898,14 @@ jobs:
         # Same scoping rationale — one tests dir, not a blanket workspace find.
         #
         # ALSO the credit-verification fraud-scorer suite (score-fraud-signals.bats,
-        # added with the 2026-06 CV_FRAUD_MODE detector). Pinned as a single FILE
-        # operand on purpose: its tests/ dir holds ~28 sibling suites that have
-        # never run in CI (the "blanket find workspaces" hazard above). Hermetic:
-        # helpers.bash PATH-shadows openclaw, Trino access goes through stubbed
-        # fraud-muso-only-lookup fixtures.
+        # added with the 2026-06 CV_FRAUD_MODE detector) and the
+        # fraud-muso-only-lookup suite (the generated-SQL regression anchor for
+        # the 2026-06-11 `_id` column incident — a suite that exists but isn't
+        # listed here is dead in CI, which is how that bug shipped). Pinned as
+        # single FILE operands on purpose: their tests/ dir holds ~28 sibling
+        # suites that have never run in CI (the "blanket find workspaces"
+        # hazard above). Hermetic: helpers.bash PATH-shadows openclaw, Trino
+        # access goes through stubbed fraud-muso-only-lookup fixtures.
         run: |
           set -euo pipefail
           # skills-all/ suites auto-enroll via the dir scan: pin-each-suite
@@ -920,6 +923,7 @@ jobs:
                        workspaces/operations/skills/muso-ops-admin/scripts/tests \
                        workspaces/operations/skills/muso-caroline-weekly-review/scripts/tests \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-fraud-signals.bats \
+                       workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/fraud-muso-only-lookup.bats \
                        workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
                        "${sa_dirs[@]}" \
                        -type f -name '*.bats' | sort)

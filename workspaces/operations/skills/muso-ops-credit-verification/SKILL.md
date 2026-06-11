@@ -267,7 +267,7 @@ is **never** blocked on Trino.
 | `CV_TIER0_MIN_CC` | `100` | establishment floor on creditCount (Tier-0 G1). |
 | `CV_TIER0_MIN_POP` | `50` | establishment floor on popularity (Tier-0 G2). |
 | `CV_TIER0_MIN_INDUSTRY` | `0.70` | min industry fraction; source_quality fires below (Tier-0 G3). |
-| `CV_FRAUD_MUSO_TRINO_TIMEOUT` | `25` | (helper) seconds wall-clock cap; expiry ⇒ `{"available":false,"data":{}}`+exit 0. |
+| `CV_FRAUD_MUSO_TRINO_TIMEOUT` | `300` | (helper) seconds wall-clock cap; expiry ⇒ `{"available":false,"data":{}}`+exit 0. Query measured 56–134s live (2026-06-11, load variance); fits the pipeline's 700s `timeoutMs`. |
 | `CV_FRAUD_MUSO_MIN_TRACK_POP` | `50` | (helper) `total_track_popularity` floor. |
 | `TRINO_QUERY_SH` | *(resolved)* | (helper) override path for tests. |
 

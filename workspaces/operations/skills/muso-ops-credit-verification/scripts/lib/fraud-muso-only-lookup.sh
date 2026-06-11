@@ -36,9 +36,17 @@
 #   treats absent as "looked up, this profile clean" (factor contributes 0).
 #
 # Env:
-#   CV_FRAUD_MUSO_TRINO_TIMEOUT   seconds, default 25. Wall-clock cap on the
+#   CV_FRAUD_MUSO_TRINO_TIMEOUT   seconds, default 300. Wall-clock cap on the
 #                                 trino-query.sh call (via `timeout`). On
 #                                 expiry → "{}" + stderr note + exit 0.
+#                                 The batched query full-scans
+#                                 matvw_raw_recording_credit; measured 56s and
+#                                 134s live on 2026-06-11 (same query, cluster
+#                                 load variance), so 300 ≈ 2× the observed
+#                                 worst case. Budget: the lobster pipeline cap
+#                                 is 700s timeoutMs total and batches measure
+#                                 ≤~160s end-to-end, so a full 300s stall
+#                                 still fail-softs without starving the run.
 #   TRINO_QUERY_SH                path to trino-query.sh. Default resolves
 #                                 relative to repo root, falling back to the
 #                                 deployed /opt/hydra path.
@@ -52,7 +60,7 @@
 
 set -uo pipefail
 
-CV_FRAUD_MUSO_TRINO_TIMEOUT="${CV_FRAUD_MUSO_TRINO_TIMEOUT:-25}"
+CV_FRAUD_MUSO_TRINO_TIMEOUT="${CV_FRAUD_MUSO_TRINO_TIMEOUT:-300}"
 CV_FRAUD_MUSO_MIN_TRACK_POP="${CV_FRAUD_MUSO_MIN_TRACK_POP:-50}"
 
 # Resolve trino-query.sh. Repo layout: scripts/trino-query.sh at repo root.
@@ -137,11 +145,11 @@ IN_LIST=$(printf '%s' "$IDS_JSON" | jq -r 'map("'\''" + . + "'\''") | join(",")'
 SQL=$(cat <<SQL_EOF
 with
 rp as (
-  select raw_profile_id, profile_id
+  select raw_profile_id, _id as profile_id
   from hive."platform-industry-bi-prod".matvw_catalog_profile
     cross join unnest(raw_profile_ids) as r(raw_profile_id)
   where not is_deleted
-    and profile_id in (${IN_LIST})
+    and _id in (${IN_LIST})
 ),
 rt as (
   select raw_recording_id, _id as track_id, max(popularity) as track_popularity
@@ -177,22 +185,35 @@ SQL_EOF
 if ! command -v "$TRINO_SH" >/dev/null 2>&1 && [[ ! -x "$TRINO_SH" ]]; then
   soft_fail "trino-query.sh not found/executable at $TRINO_SH"
 fi
+
+# Capture trino-query.sh stderr to a tempfile so a failure can NAME itself in
+# the soft_fail diagnostic. Discarding it (the pre-2026-06-11 behavior) hid a
+# "Column 'profile_id' cannot be resolved" error behind a bare "exited rc=1"
+# for every production run since shadow went live.
+TRINO_ERR="$(mktemp)" || soft_fail "could not create stderr tempfile"
+trap 'rm -f "$TRINO_ERR"' EXIT
+
+# Last few stderr lines, joined to one line, for embedding in soft_fail.
+err_tail() {
+  tail -n 3 "$TRINO_ERR" 2>/dev/null | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/ $//'
+}
+
 if ! command -v timeout >/dev/null 2>&1; then
   # No `timeout` binary (e.g. bare macOS without coreutils). Run without it —
   # trino-query.sh / kubectl have their own network timeouts — but note it.
   echo "[fraud-muso-only-lookup] WARN: 'timeout' not available; running trino-query.sh without a wall-clock cap." >&2
-  CSV=$(printf '%s\n' "$SQL" | bash "$TRINO_SH" 2>/dev/null)
+  CSV=$(printf '%s\n' "$SQL" | bash "$TRINO_SH" 2>"$TRINO_ERR")
   rc=$?
 else
-  CSV=$(printf '%s\n' "$SQL" | timeout "${CV_FRAUD_MUSO_TRINO_TIMEOUT}s" bash "$TRINO_SH" 2>/dev/null)
+  CSV=$(printf '%s\n' "$SQL" | timeout "${CV_FRAUD_MUSO_TRINO_TIMEOUT}s" bash "$TRINO_SH" 2>"$TRINO_ERR")
   rc=$?
 fi
 
 if (( rc == 124 )); then
-  soft_fail "trino query exceeded ${CV_FRAUD_MUSO_TRINO_TIMEOUT}s timeout"
+  soft_fail "trino query exceeded ${CV_FRAUD_MUSO_TRINO_TIMEOUT}s timeout; trino stderr: $(err_tail)"
 fi
 if (( rc != 0 )); then
-  soft_fail "trino-query.sh exited rc=$rc"
+  soft_fail "trino-query.sh exited rc=$rc; trino stderr: $(err_tail)"
 fi
 
 # --- Parse CSV → JSON map ---------------------------------------------------
