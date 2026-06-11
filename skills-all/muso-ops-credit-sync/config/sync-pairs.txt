@@ -1,0 +1,14 @@
+# Standing profile→org credit-sync pairs, one per line:
+# <person_profile_id> <org_profile_id> <role> <label>
+#
+# role = the single role every synced credit gets on the org (e.g. "Studio",
+# the Organizations>Studio child in the catalog taxonomy), or the keyword
+# `verbatim` to copy the person's roles unchanged. Verbatim is WRONG for org
+# profiles (Jan, 2026-06-10: professional/artist roles must never appear on
+# an org page) — org pairs should always name a role.
+# See skills-all/muso-ops-credit-sync/SKILL.md.
+#
+# Colin -> SING Mastering: role Studio per Jan 2026-06-10 ("all of his
+# tracks were made in the SING Mastering studio") — PENDING Colin's
+# confirmation before the first live run.
+0c11deb5-0213-41c5-813a-eb0122207f20 ea7accb5-415c-44b8-b0dd-529ab3382dbd Studio Colin Leonard -> SING Mastering

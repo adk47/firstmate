@@ -781,6 +781,42 @@
       "state": {
         "consecutiveErrors": 0
       }
+    },
+    {
+      "id": "64a92c48-410b-45a9-bbe1-9284bb5c2380",
+      "agentId": "operations",
+      "name": "profile-org-credit-sync-daily",
+      "description": "Daily additive profile→org credit sync over the standing pairs in muso-ops-credit-sync/config/sync-pairs.txt (first pair: Colin Leonard → Sing Mastering, per the 2026-06-09 EOD call). Interim until core-backend grows a native profile→org credit link (Serhii); retire this job when that ships. Additive-only: the script never DELETEs; org-only extras are reported for human review. Posts to #credit-verification only when something was added, failed, or org-only extras exist (NO_REPLY otherwise). SHIPPED enabled:false — flip after the live --dry-run + first manual run verify the credits-list response shape (script fail-louds on contract surprises).",
+      "enabled": false,
+      "createdAtMs": 1781106407915,
+      "updatedAtMs": 1781106407915,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 7 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the daily profile→org credit sync per the muso-ops-credit-sync skill. Run EXACTLY this command via exec and do not add other flags:\n\nADMIN_API_SCRIPT=/opt/hydra/skills-all/muso-ops-admin/scripts/muso-admin-api.sh bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-credit-sync/scripts/sync-profile-credits-to-org.sh --requester ops-cron@muso.ai --pairs-file ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-credit-sync/config/sync-pairs.txt\n\n(ADMIN_API_SCRIPT must stay pinned to the /opt/hydra/skills-all copy: the managed-skills copy of muso-ops-admin has no config/ dir — deliberate deploy exception — so its tier-2 gate fail-closes every call.)\n\nThe script prints one JSON summary per pair. NEVER issue any DELETE or other write yourself — the script is the only writer, and it is additive-only by design.\n\nIf every pair has added == 0 AND failed == 0 AND org_only_extras == 0, your final visible message must be exactly: NO_REPLY (uppercase, nothing else).\n\nOtherwise post concise Slack mrkdwn for #credit-verification, one block per pair that changed, failed, or has extras:\n*Profile→Org credit sync: <label>*\nAdded: <added> credit(s)\nFailed: <failed> (<failed_pairs>, only if failed > 0)\nOrg-only extras needing human review: <org_only_extras> (list org_only_extras_detail if 10 or fewer)\n\nIf the script exits non-zero with an ERROR (profile unreachable / merged / truncated credits list / unrecognized response shape / role not in allowlist), report that error verbatim instead — do not retry and do not work around it.",
+        "model": "openai/gpt-5.5",
+        "thinking": "low",
+        "fallbacks": [
+          "openrouter/openai/gpt-5.4-mini",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ],
+        "timeoutSeconds": 3600
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0
+      }
     }
   ]
 }

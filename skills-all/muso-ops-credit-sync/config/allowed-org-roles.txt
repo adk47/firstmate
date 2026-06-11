@@ -1,0 +1,8 @@
+# Roles that standing sync pairs (config/sync-pairs.txt) may assign on an
+# org profile. Fail-closed: a pairs-file role not listed here refuses to run.
+# This is the mechanical guard against a forgotten/typo'd role column —
+# without it, `read` silently takes the label's first word as the role and
+# the additive-only sync would POST undeletable bogus credits.
+# Add roles via PR only, after verifying them in the catalog taxonomy
+# (Trino: matvw_catalog_track profiles[].catalog_credits parent/child).
+Studio

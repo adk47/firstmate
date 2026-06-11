@@ -905,12 +905,23 @@ jobs:
         # fraud-muso-only-lookup fixtures.
         run: |
           set -euo pipefail
+          # skills-all/ suites auto-enroll via the dir scan: pin-each-suite
+          # leaked there (muso-devops-prod-logs' suite existed but never ran
+          # in CI). Collected via a loop, not a bare glob operand, so zero
+          # matches degrades to the soft-skip below instead of find exiting 1
+          # on an unexpanded glob literal. The workspaces/ operands stay
+          # pinned per the rationale above — a blanket find would drag in
+          # ~30 never-run CV suites.
+          sa_dirs=()
+          for d in skills-all/*/scripts/tests; do
+            [ -d "$d" ] && sa_dirs+=("$d")
+          done
           files=$(find scripts \
                        workspaces/operations/skills/muso-ops-admin/scripts/tests \
                        workspaces/operations/skills/muso-caroline-weekly-review/scripts/tests \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-fraud-signals.bats \
                        workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
-                       skills-all/muso-devops-set-env/scripts/tests \
+                       "${sa_dirs[@]}" \
                        -type f -name '*.bats' | sort)
           if [ -z "$files" ]; then
             echo "::warning::no *.bats files found — skipping"

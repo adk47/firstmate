@@ -772,6 +772,8 @@ RSYNC_EXCLUDES=(
   --include='muso-devops-prod-logs/config/**'
   --include='muso-devops-set-env/config/'
   --include='muso-devops-set-env/config/**'
+  --include='muso-ops-credit-sync/config/'
+  --include='muso-ops-credit-sync/config/**'
   --exclude='config/'
   # Plugin install artifacts (server runs pnpm install --frozen-lockfile in-place)
   --exclude='plugins/*/node_modules/'
@@ -900,6 +902,49 @@ RSYNC_EXCLUDES=(
   # workspaces/<agent>/skills/<skill-name>/ instead.
   --exclude='workspaces/*/scripts/'
 )
+
+# -------------------------------------------------------------------
+# Guard: every skills-all/<skill>/config/ needs an explicit include pair
+# -------------------------------------------------------------------
+# The unanchored --exclude='config/' above swallows skills-all/*/config/
+# unless a per-skill include pair precedes it. Forgetting the pair ships a
+# skill without its config — a SILENT runtime failure, already hit twice
+# (prod-log watchdog fail-closed every tick 2026-06-10; set-env gate
+# configs never reached the server). Fail the deploy loudly at the source
+# instead. muso-ops-admin is the named exception: its canonical config has
+# deliberate server-side divergence (drifted tier2-approvers.txt + godmode
+# allowlist) and must NOT be synced — see the rationale above the includes.
+# rsync filter rules are first-match-wins, so an include AFTER the
+# --exclude='config/' line is dead — check ordering, not mere presence.
+cfg_exclude_idx=-1
+cfg_idx=0
+for cfg_rule in "${RSYNC_EXCLUDES[@]}"; do
+  [[ "$cfg_rule" == "--exclude=config/" ]] && cfg_exclude_idx="$cfg_idx" && break
+  cfg_idx=$(( cfg_idx + 1 ))
+done
+[[ "$cfg_exclude_idx" -ge 0 ]] || fail "RSYNC_EXCLUDES no longer contains --exclude='config/' — the skills-all config guard needs updating"
+for cfg_dir in "$HYDRA_ROOT"/skills-all/*/config; do
+  [[ -d "$cfg_dir" ]] || continue
+  cfg_skill="$(basename "$(dirname "$cfg_dir")")"
+  [[ "$cfg_skill" == "muso-ops-admin" ]] && continue
+  cfg_include_idx=-1
+  cfg_idx=0
+  for cfg_rule in "${RSYNC_EXCLUDES[@]}"; do
+    [[ "$cfg_rule" == "--include=${cfg_skill}/config/" ]] && cfg_include_idx="$cfg_idx" && break
+    cfg_idx=$(( cfg_idx + 1 ))
+  done
+  if (( cfg_include_idx < 0 || cfg_include_idx > cfg_exclude_idx )); then
+    fail "skills-all/${cfg_skill}/config/ exists but RSYNC_EXCLUDES has no --include='${cfg_skill}/config/' pair BEFORE --exclude='config/' (rsync is first-match-wins) — the config would silently never reach the server (unanchored exclude gotcha, see PR #474). Add the include pair next to the existing ones."
+  fi
+done
+# The exception is one-directional on purpose: muso-ops-admin's canonical
+# config must never gain an include pair either (the server copy carries a
+# deliberately divergent tier2-approvers.txt + a godmode allowlist that
+# exists nowhere else; an include would let rsync --delete destroy it).
+if printf '%s\n' "${RSYNC_EXCLUDES[@]}" | grep -qFx -- "--include=muso-ops-admin/config/"; then
+  fail "RSYNC_EXCLUDES contains --include='muso-ops-admin/config/' — that config is deliberately server-divergent (godmode allowlist exists only on node-8) and must NOT be synced; remove the include pair"
+fi
+unset cfg_dir cfg_skill cfg_rule cfg_idx cfg_include_idx cfg_exclude_idx
 
 # -------------------------------------------------------------------
 # Step 0: Drift check (deploy-equivalent of `git pull` before `git push`)
