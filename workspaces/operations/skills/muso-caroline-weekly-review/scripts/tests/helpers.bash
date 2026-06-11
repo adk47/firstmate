@@ -97,4 +97,61 @@ teardown_skill_tmp() {
   rm -rf "$TEST_TMPDIR"
 }
 
+# Shared fixtures for the structured-digest pipeline suites
+# (validate-digest / redact-json / render-digest / build-blocks /
+# post-digest / publish-digest). Contacts: A appears in convs 1+4, so a
+# theme citing {1,4} recomputes to ONE unique customer; {1,2} to two;
+# {1,2,3} to three. Conv ...099 exists ONLY in audit.jsonl (escalated).
+setup_digest_fixtures() {
+  cat > "$WORKDIR/conversations.jsonl" <<'EOF'
+{"id":"215474000000001","contact_id":"contact-A","customer_email":"a@x.com"}
+{"id":"215474000000002","contact_id":"contact-B","customer_email":"b@x.com"}
+{"id":"215474000000003","contact_id":"contact-C","customer_email":null}
+{"id":"215474000000004","contact_id":"contact-A","customer_email":"a@x.com"}
+{"id":"215474000000005","contact_id":null,"customer_email":"d@x.com"}
+EOF
+
+  cat > "$WORKDIR/audit.jsonl" <<'EOF'
+{"kind":"reasoning_leak","action":"escalated","conv":"215474000000099","reason":"tone","markers":["looking-at-history"],"sample":""}
+EOF
+
+  cat > "$WORKDIR/digest-daily.json" <<'EOF'
+{
+  "kind": "daily", "date": "2026-06-11", "window_hours": 30, "conv_count": 23,
+  "severity": {"p0": 0, "p1": 0, "p2": 1},
+  "scores": {"voice": 5, "tools": "skipped", "sentiment": 4},
+  "guard": {"caught_stripped": 0, "caught_escalated": 0, "missed_shipped": 0, "source": "journalctl", "shapes": [], "items": []},
+  "findings": [
+    {"dimension": "sentiment", "severity": "P2", "text": "1 frustrated \"are you actually checking?\"", "conversation_ids": ["215474000000002"]},
+    {"dimension": "good_catch", "severity": "info", "text": "clean refund-gate run", "conversation_ids": ["215474000000003"]}
+  ],
+  "themes": [
+    {"category": "issue", "label": "Spotify sync stuck", "summary": "Releases not appearing after delivery.", "conversation_ids": ["215474000000001", "215474000000002"], "unique_customers": 2}
+  ],
+  "kb_gap_candidates": [],
+  "degraded": []
+}
+EOF
+
+  cat > "$WORKDIR/digest-weekly.json" <<'EOF'
+{
+  "kind": "weekly", "date": "2026-06-08", "window_hours": 168, "conv_count": 140,
+  "severity": {"p0": 0, "p1": 1, "p2": 3},
+  "scores": {"voice": 4, "tools": "skipped", "sentiment": 3},
+  "guard": {"caught_stripped": 2, "caught_escalated": 1, "missed_shipped": 0, "source": "journalctl", "shapes": ["looking-at-history"],
+    "items": [{"type": "unanswered_escalation", "conversation_id": "215474000000099", "note": "reason tone"}]},
+  "findings": [
+    {"dimension": "voice", "severity": "P2", "text": "1 blacklist \"Great question\"", "conversation_ids": ["215474000000005"]}
+  ],
+  "themes": [
+    {"category": "feature_request", "label": "CSV export of credits", "summary": "Asked for a bulk export.", "conversation_ids": ["215474000000002", "215474000000003"], "unique_customers": 2}
+  ],
+  "kb_gap_candidates": [
+    {"category": "question", "label": "How royalties accrue", "summary": "Same accrual question.", "conversation_ids": ["215474000000001", "215474000000002", "215474000000003"], "unique_customers": 3, "proposed_kb_note": "Royalties accrue when..."}
+  ],
+  "degraded": []
+}
+EOF
+}
+
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

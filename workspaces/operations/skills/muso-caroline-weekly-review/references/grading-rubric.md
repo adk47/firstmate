@@ -2,7 +2,7 @@
 
 Every dimension scores 0-5. P0/P1/P2 severity per finding. P0 in any dimension forces the Slack headline.
 
-Daily pulse: dimensions A (voice + leak), B (tools), D (sentiment), E (reasoning-leak / guard health). KB-gap detection (the old Dimension C) and auto-PR are deferred to the separate weekly KB roll-up; do not cluster KB gaps or open PRs from the daily run.
+Daily pulse: dimensions A (voice + leak), B (tools), D (sentiment), E (reasoning-leak / guard health), plus an informational Themes pass (>=2 unique customers). Weekly roll-up: the same dimensions over a 168h window, plus KB-gap candidates (the old Dimension C, >=3 unique customers, Slack-surface only — auto-PR stays manual in v1). Neither mode opens PRs.
 
 ## Severity ladder
 
@@ -90,81 +90,92 @@ P0/P1 findings above.
 
 2–3 conversations where Caroline did particularly well. Cite the conversation_id and quote a single line. Subject to final-output redaction.
 
-## Slack output template (glanceable daily digest)
+## Themes (cross-conversation recurrence)
 
-Assemble the digest, then pipe it through `redact-output.sh` and finally through
-`assert-digest-contract.sh` (the mechanical header guard) before emitting it as the
-final assistant message:
+The question the section answers for the reviewer: **did multiple customers say the
+same thing this window?** Cluster semantically over the CUSTOMER parts of
+`conversations.redacted.jsonl` (the transcripts are already fetched; do not re-fetch):
 
-```
-<assemble review text> | scripts/redact-output.sh | scripts/linkify-convs.sh | scripts/assert-digest-contract.sh
-```
-
-### Header contract (MUST be present every run, on every model)
-
-Hard, non-negotiable minimum. `assert-digest-contract.sh` fails the run if either
-line is missing, so emit both even on a clean, quiet day:
-
-- **Line 1** MUST contain, in order: a status emoji, the date, the window phrase
-  (mirror the fetch window: "last 30h"), the conversation count as `<N> convs`, and
-  the severity triplet `<p0> P0 / <p1> P1 / <p2> P2` with zeros included.
-- **Line 2** MUST contain the three scores: `Voice <0-5> | Tools <0-5 or skipped> | Sentiment <0-5>`.
+- `issue` — same bug / breakage / complaint ("credits not showing", "sync stuck").
+- `question` — same how-do-I, asked independently (KB-gap signal).
+- `feature_request` — same capability ask (product signal, not a support gap).
+- `escalation_pattern` — same reason conversations end up needing a human.
 
 Rules:
 
-- **Status emoji**: 🔴 if any P0; 🟡 if any P1 and no P0; 🟢 otherwise.
-- **P0 ping**: prepend the literal `<@U0AL36NADEY>` to line 1 ONLY when P0 count > 0.
-  No mention on a no-P0 day (a daily digest must not ping every morning). This
-  template is the only in-skill source of that Slack id.
-- **Tools skipped**: when `preflight.sh` reports `CV_TOOL_CTX_CONVERSATION_ID=unavailable`,
-  render the token as `skipped` (e.g. `Tools skipped`); never a bare dash, never a
-  fabricated number. (`redact-output.sh` rewrites any em/en-dash to a hyphen, so a
-  dash placeholder is ambiguous next to a numeric score.)
-- **Collapse clean dimensions**: applies to DETAIL bullet lines only, never to the two
-  header lines. Print a detail bullet only when it has a real, non-zero finding; omit
-  zero-count metric bullets. A perfectly clean day is just the two header lines (plus,
-  optionally, a "Good catch" bullet) and the guard line.
-- **Section emoji + bold label**: lead each detail bullet with its section emoji and a
-  bold label so the digest scans at a glance: `🎙️ *Voice*`, `🛠️ *Tools*`,
-  `😟 *Sentiment*`, `✅ *Good catch*`, `🛡️ *Guard*`. Mirror the same emojis on the
-  line-2 scores (`🎙️ Voice 5 | 🛠️ Tools skipped | 😟 Sentiment 0`); the words
-  `Voice`/`Tools`/`Sentiment` must stay intact (the contract boundary-matches them).
-- **Conversation ids**: cite the real Intercom `conversation_id` as a BARE 15-16 digit
-  number (it survives output redaction). `linkify-convs.sh` turns every id into a
-  clickable Slack link to the thread, so do NOT write the Intercom URL yourself -- a
-  hand-written URL would be double-wrapped.
-- **Reasoning-leak guard block** (Dimension E): ALWAYS present (it is what makes
-  `assert-digest-contract.sh`'s `guard` check pass). When everything is zero, collapse it
-  to one line: `Reasoning-leak guard: healthy - 0 caught, 0 missed in shipped replies.`
-  When there are findings, lead with `Reasoning-leak guard (last 30h):` then bullets:
-  caught counts (`N stripped (silent), M escalated -> human` with `[shapes: ...]`); each
-  escalated-and-still-unanswered conv as an action item citing its bare `conv <id>` (the
-  pipeline linkifies it); and each SHIPPED leak
-  the guard missed as `conv <id> signature "<marker>"` (a guard gap). State both the caught
-  count AND the missed count even when one is zero. Append the source caveat when degraded.
+- Every member `conversation_id` must be real (validation hard-fails hallucinated
+  ids). Do NOT pad a cluster with loosely-related convs to clear the threshold —
+  `validate-digest.sh` recomputes `unique_customers` by `contact_id` dedupe and
+  overwrites your count; a theme below 2 recomputed unique customers is dropped.
+- Two convs from the SAME customer are one customer, not a theme.
+- `label` is a short noun phrase; `summary` is one sentence of what customers are
+  saying, in plain prose (no quotes needed; if quoting, one short fragment max).
+- Weekly only: promote a theme to `kb_gap_candidates` when >=3 unique customers
+  asked something the KB does not answer, and write `proposed_kb_note` — the exact
+  text a human would paste into `workspaces/support/reference/*.md`. Validation
+  fails any candidate whose recomputed count is < 3, and fails a DAILY digest
+  carrying any candidates at all.
 
-### Quiet day (the common case, no ping)
+## Output: `${WORKDIR}/digest.json` (structured, machine-gated)
 
+Do NOT assemble Slack text, header lines, links, or Block Kit — that is all
+computed by `scripts/render-digest.py` from the validated digest. Write the
+structured digest per `references/digest-schema.json` and hand it to
+`scripts/publish-digest.sh` (see SKILL.md Phase 3).
+
+What the deterministic renderer guarantees (so you don't have to):
+
+- **Status emoji** 🔴/🟡/🟢 and the **P0 ping** (`<@U0AL36NADEY>` prepended ONLY
+  when `severity.p0 > 0`) — computed from `severity`. `render-digest.py` is the
+  single in-skill source of that Slack id.
+- **Line 1** (emoji · title · date · window · `<N> convs` · `<p0> P0 / <p1> P1 /
+  <p2> P2`) and **line 2** (`🎙️ Voice | 🛠️ Tools | 😟 Sentiment`) — the rendered
+  fallback text still passes `assert-digest-contract.sh` as belt-and-braces.
+- **Collapse-clean** — a dimension with no `findings` entries renders nothing;
+  emit only real, non-zero findings (a quiet day is just headers + guard line).
+- **Linkification** — cite BARE 15-16 digit conversation ids in every text field;
+  the renderers wrap them into clickable Intercom links. Never write URLs.
+- **Guard block always present** — from the `guard` object; state both sources
+  even when zero (the two-source no-conflation rule), with the degraded-source
+  caveat appended when `guard.source != "journalctl"`.
+
+What the grader still owes the digest:
+
+- `scores.tools` is `"skipped"` exactly when preflight said the join-key prereq is
+  unavailable; never a bare dash, never a fabricated number (enforced both ways).
+- Guard `items[]`: each escalated-and-still-unanswered conv (`unanswered_escalation`,
+  P1 — cross-reference `escalated-status.jsonl`) and each guard-missed shipped leak
+  (`shipped_leak`, P0) with the matched signature in `note`.
+- `degraded[]`: name every degraded source (syslog/none guard log, fetch cap hit)
+  — never present a zero count from a degraded source as healthy.
+- Severity counts in `severity` match what the findings/guard items imply (the P0
+  example below: the headline P0 is the guard-missed shipped leak — Dimension E
+  drives severity, not just reporting).
+
+### Worked example (P0 day, daily)
+
+```json
+{
+  "kind": "daily", "date": "2026-06-04", "window_hours": 30, "conv_count": 31,
+  "severity": {"p0": 1, "p1": 2, "p2": 2},
+  "scores": {"voice": 4, "tools": 4, "sentiment": 4},
+  "guard": {
+    "caught_stripped": 3, "caught_escalated": 1, "missed_shipped": 1,
+    "source": "journalctl", "shapes": ["looking-at-history", "tone-calibration"],
+    "items": [
+      {"type": "unanswered_escalation", "conversation_id": "215474520232724"},
+      {"type": "shipped_leak", "conversation_id": "998877665544001", "note": "signature \"ready-to-output\""}
+    ]
+  },
+  "findings": [
+    {"dimension": "tools", "severity": "P1", "text": "1 missed profile_status", "conversation_ids": ["445566778899001"]},
+    {"dimension": "voice", "severity": "P2", "text": "1 blacklist \"Great question\"", "conversation_ids": ["220033445566778"]},
+    {"dimension": "sentiment", "severity": "P2", "text": "2 frustrated · top: \"this is useless\"", "conversation_ids": ["556677889900112"]}
+  ],
+  "themes": [
+    {"category": "issue", "label": "Spotify-for-Artists sync stuck", "summary": "Releases not appearing after distributor confirms delivery.", "conversation_ids": ["445566778899001", "556677889900112", "220033445566778"], "unique_customers": 3}
+  ],
+  "kb_gap_candidates": [],
+  "degraded": []
+}
 ```
-🟢 Caroline daily · Wed Jun 4 · last 30h · 23 convs · 0 P0 / 0 P1 / 1 P2
-🎙️ Voice 5 | 🛠️ Tools 5 | 😟 Sentiment 4
-😟 *Sentiment* - 1 frustrated · conv 215474545718046 "are you actually checking?"
-✅ *Good catch* - conv 998877665544001 · clean refund-gate run
-🛡️ *Guard* - healthy: 0 caught, 0 missed in shipped replies.
-```
-
-### P0 day (rare, pings the reviewer)
-
-```
-<@U0AL36NADEY> 🔴 Caroline daily · Wed Jun 4 · last 30h · 31 convs · 1 P0 / 2 P1 / 2 P2
-🎙️ Voice 4 | 🛠️ Tools 4 | 😟 Sentiment 4
-🛡️ *Guard* (last 30h): 3 stripped (silent), 1 escalated -> human. [shapes: looking-at-history, tone-calibration]
-  • Escalated & still unanswered: conv 215474520232724  <- action item (P1)
-  • SHIPPED leak the guard missed: conv 998877665544001 signature "ready-to-output"  <- guard gap (P0)
-🛠️ *Tools* (4): 1 missed profile_status · conv 445566778899001 (P1)
-🎙️ *Voice* (4): 1 blacklist "Great question" (conv 220033445566778)
-😟 *Sentiment* (4): 2 frustrated · top: conv 556677889900112 "this is useless"
-```
-
-(In the P0 example the headline P0 is the guard-missed shipped leak, and one P1 is the
-unanswered escalation -- Dimension E is driving the severity, not just reporting.)

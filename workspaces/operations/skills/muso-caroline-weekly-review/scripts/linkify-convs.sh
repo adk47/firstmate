@@ -25,4 +25,10 @@
 # email/phone/stripe are already redacted upstream), so wrapping every match is safe.
 set -euo pipefail
 
-perl -pe 's{(?<![0-9/|])([0-9]{15,16})(?![0-9])}{<https://app.intercom.com/a/inboxes/all/conversations/$1|$1>}g'
+# LC_ALL=C: the regex is pure ASCII/digits, so byte semantics are exactly
+# right — and it stops perl spraying "Setting locale failed" warnings on
+# stderr when the caller's LANG names a locale the host never generated
+# (the node-8 actions-runner .env declares en_US.UTF-8, which isn't
+# locale-gen'd there; bats merges that stderr into $output and the CI
+# first-line assertions broke on it — PR #496).
+LC_ALL=C perl -pe 's{(?<![0-9/|])([0-9]{15,16})(?![0-9])}{<https://app.intercom.com/a/inboxes/all/conversations/$1|$1>}g'
