@@ -183,6 +183,52 @@ ssh root@40.160.32.80 'tail -5 /var/log/openclaw-watchdog.log'
 ssh root@40.160.32.80 'cd /opt/hydra && ./scripts/smoke-test.sh main'
 ```
 
+### muso CLI (main gateway)
+
+The `muso` binary (github.com/Muso-AI/muso-cli) is version-pinned by deploy.sh
+(`MUSO_CLI_VERSION`, Step 4d.6) and its policy config is rendered into
+`/root/.config/muso/` on every deploy. Its runtime env is NOT deployed — it
+lives in `/etc/openclaw/main.env` (manually provisioned, like MUSO_ADMIN_*).
+
+`/root/.config/muso/` is deploy-owned: every deploy overwrites
+`approvers.txt`, `bulk-exclude.txt`, and `config.json` from the **operations
+workspace** muso-ops-admin config on node-8
+(`/opt/hydra/workspaces/operations/skills/muso-ops-admin/config/` — the same
+files muso-admin-api.sh enforces; server-owned live policy, NOT synced from
+git). To change approvers, edit that source dir on node-8 — hand-edits to the
+rendered files are silently lost on the next deploy.
+
+One-time provisioning (deploy.sh warn-checks these and tells you if they're
+missing; the grep guard keeps a re-run from appending duplicates):
+
+```bash
+ssh root@40.160.32.80
+grep -q '^MUSO_ENV=' /etc/openclaw/main.env || cat >> /etc/openclaw/main.env <<'EOF'
+MUSO_ENV=prod
+MUSO_NONINTERACTIVE=1
+MUSO_STATE_DIR=/var/log/muso-ops
+EOF
+systemctl restart openclaw-gateway-main
+```
+
+Why each var matters:
+- `MUSO_ENV=prod` — muso defaults to the dev environment; without this every
+  agent call fails auth (only prod creds exist on node-8).
+- `MUSO_NONINTERACTIVE=1` — guarantees muso never blocks on a confirmation
+  prompt if an exec ever allocates a PTY.
+- `MUSO_STATE_DIR=/var/log/muso-ops` — shares the merge-guard and
+  DELETE-counter state with muso-admin-api.sh and merge-landing-watchdog.sh;
+  without it the incident guards split into two blind halves.
+
+Verify:
+
+```bash
+ssh root@40.160.32.80 'muso version --json | jq -r .version'   # == MUSO_CLI_VERSION pin
+ssh root@40.160.32.80 'muso health --env prod'                  # exit 0
+ssh root@40.160.32.80 'ls -l /root/.config/muso/'               # config.json, approvers.txt, bulk-exclude.txt
+ssh root@40.160.32.80 'bash /opt/hydra/scripts/muso-prewrite-hook.sh GET /x prod; echo rc=$?'  # rc=0 when codex healthy
+```
+
 ### Troubleshooting
 
 - **Deploy fails at Step 0 (drift check)** — the server has files the repo doesn't. See briefing in deploy log for the list. Use `scripts/sync-from-server.sh` to pull server-side edits into the repo first, commit, then retry the deploy.

@@ -42,6 +42,13 @@ OPENCLAW_SLACK_VERSION="${OPENCLAW_SLACK_VERSION:-${OPENCLAW_VERSION}}"
 # and ran on Sonnet. Keep in lockstep with OPENCLAW_VERSION.
 OPENCLAW_CODEX_VERSION="${OPENCLAW_CODEX_VERSION:-${OPENCLAW_VERSION}}"
 
+# Pinned muso CLI version (github.com/Muso-AI/muso-cli) — the admin-API /
+# policy CLI for main-gateway agents (soak phase: opt-in via the
+# skills-all/muso-cli skill). Independent release cadence from openclaw;
+# bump deliberately. Installed from the repo's GitHub Release with
+# checksum verification (install_muso below) — never a bare latest.
+MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.1.0}"
+
 # Detect if we're running on Node 8 (the HYDRA host)
 if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; then
   HYDRA_LOCAL=true
@@ -248,6 +255,75 @@ install_openclaw() {
   if (( npm_rc != 0 )); then
     log "    ✗ npm install -g openclaw@${OPENCLAW_VERSION} failed (rc=$npm_rc):"
     echo "$npm_out" | sed 's/^/        /'
+    return 1
+  fi
+  return 0
+}
+
+# install_muso — pins the muso CLI from the Muso-AI/muso-cli GitHub
+# release. Same contract as install_openclaw(): skip when the live binary
+# already reports the target version, otherwise install and FAIL LOUD.
+# Two hardenings carried over from the plugin path:
+#   - assets are sha256-verified against the release's checksums.txt
+#     before install (pin-everything doctrine, PR #217 incident);
+#   - the installed version is re-read after install — exit codes are
+#     not trusted (install_external_plugin precedent).
+# gh is already authenticated on node-8 (release tagging uses it).
+install_muso() {
+  local installed
+  installed=$(timeout 10 muso version --json 2>/dev/null | jq -r '.version // empty' || true)
+  if [[ -z "$installed" ]]; then
+    log "    install_muso: muso not found in PATH; installing ${MUSO_CLI_VERSION}"
+  elif [[ "$installed" == "$MUSO_CLI_VERSION" ]]; then
+    log "    muso already at ${MUSO_CLI_VERSION} — skipping install"
+    return 0
+  else
+    log "    Upgrading muso ${installed} → ${MUSO_CLI_VERSION}"
+  fi
+
+  local arch asset tmp dl_out
+  case "$(uname -m)" in
+    x86_64)  arch=amd64 ;;
+    aarch64) arch=arm64 ;;
+    *) log "    ✗ install_muso: unsupported arch $(uname -m)"; return 1 ;;
+  esac
+  asset="muso_linux_${arch}.tar.gz"
+  tmp=$(mktemp -d) || return 1
+
+  local dl_rc=0
+  dl_out=$(timeout 120 gh release download "v${MUSO_CLI_VERSION}" --repo Muso-AI/muso-cli \
+    --pattern "$asset" --pattern checksums.txt --dir "$tmp" 2>&1) || dl_rc=$?
+  if (( dl_rc != 0 )); then
+    log "    ✗ install_muso: gh release download v${MUSO_CLI_VERSION} failed (rc=$dl_rc):"
+    echo "$dl_out" | sed 's/^/        /'
+    rm -rf "$tmp"
+    return 1
+  fi
+  # Belt: assert checksums.txt actually lists the asset. On node-8
+  # (coreutils >= 8.25) `-c --ignore-missing` already exits 1 with "no
+  # file was verified" when nothing matches (verified live, coreutils
+  # 9.4), so this guards older/other hosts and makes the intent explicit.
+  if ! grep -q "[[:space:]]${asset}\$" "$tmp/checksums.txt"; then
+    log "    ✗ install_muso: checksums.txt has no entry for ${asset} — refusing unverified install"
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! (cd "$tmp" && sha256sum -c checksums.txt --ignore-missing >/dev/null 2>&1); then
+    log "    ✗ install_muso: checksum verification failed for ${asset}"
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! tar -xzf "${tmp}/${asset}" -C "$tmp" muso; then
+    log "    ✗ install_muso: ${asset} does not contain the muso binary"
+    rm -rf "$tmp"
+    return 1
+  fi
+  install -m 755 "${tmp}/muso" /usr/local/bin/muso
+  rm -rf "$tmp"
+
+  installed=$(timeout 10 muso version --json 2>/dev/null | jq -r '.version // empty' || true)
+  if [[ "$installed" != "$MUSO_CLI_VERSION" ]]; then
+    log "    ✗ muso is '${installed:-missing}' after install, expected '${MUSO_CLI_VERSION}'"
     return 1
   fi
   return 0
@@ -1556,6 +1632,11 @@ fi
 #
 # Fix: rsync to each profile's managed-skills dir. Runs unconditionally
 # when skills-all/ exists, regardless of --target.
+#
+# MAIN_ONLY_SKILLS: skills excluded from the edge/dev sync so a "main
+# gateway only" boundary in a SKILL.md is enforced mechanically, not as
+# prose (the muso CLI binary, env, and config exist only on main).
+MAIN_ONLY_SKILLS=(muso-cli)
 log "Step 4c/9: Syncing global skills to per-profile managed-skills dirs..."
 if [[ -d "$HYDRA_ROOT/skills-all" ]]; then
   skills_rc=0
@@ -1565,15 +1646,31 @@ if [[ -d "$HYDRA_ROOT/skills-all" ]]; then
     [[ -f "$profile_config" ]] || continue
     profile_skills_dir="/root/.openclaw-${profile}/skills"
     mkdir -p "$profile_skills_dir"
+    profile_skill_excludes=()
+    if [[ "$profile" != "main" ]]; then
+      for _mos in "${MAIN_ONLY_SKILLS[@]}"; do
+        profile_skill_excludes+=(--exclude="/${_mos}/")
+      done
+    fi
     # RSYNC_EXCLUDES is passed to satisfy .githooks/pre-commit Check 2,
     # which enforces that every rsync call references the shared array.
     # None of the workspace/audit/plugin patterns in RSYNC_EXCLUDES match
     # anything inside skills-all/, so they're no-ops here — same rationale
     # as the install_plugin rsync. See the comment there for more detail.
-    rsync -az --delete "${RSYNC_EXCLUDES[@]}" "$HYDRA_ROOT/skills-all/" "$profile_skills_dir/" || {
+    rsync -az --delete "${RSYNC_EXCLUDES[@]}" \
+      ${profile_skill_excludes[@]+"${profile_skill_excludes[@]}"} \
+      "$HYDRA_ROOT/skills-all/" "$profile_skills_dir/" || {
       skills_rc=$?
       fail "skills-all/ → $profile_skills_dir/ sync failed (rsync rc=$skills_rc)"
     }
+    # rsync --delete PROTECTS excluded paths from deletion, so the exclude
+    # alone never removes a copy that already landed (e.g. a skill later
+    # reclassified as main-only). Purge explicitly on non-main profiles.
+    if [[ "$profile" != "main" ]]; then
+      for _mos in "${MAIN_ONLY_SKILLS[@]}"; do
+        rm -rf "${profile_skills_dir:?}/${_mos}"
+      done
+    fi
     skill_count=$(find "$profile_skills_dir" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
     log "  ✓ profile=$profile: synced $skill_count skills to $profile_skills_dir/"
   done
@@ -1676,6 +1773,21 @@ for _profile in main edge; do
     fi
   done
 done
+
+# -------------------------------------------------------------------
+# Step 4d.6: Pin the muso CLI (main profile only)
+# -------------------------------------------------------------------
+# muso is the admin-API/policy CLI for main-gateway agents (soak phase —
+# opt-in via skills-all/muso-cli; the muso-admin-api.sh wrapper remains
+# the documented path until the soak PR flips the ops skills). The binary
+# is host-wide, but only main-profile agents consume it, so edge-only
+# deploys skip the pin.
+if needs_target "main"; then
+  log "Step 4d.6/9: Pinning muso CLI to ${MUSO_CLI_VERSION}..."
+  if ! install_muso; then
+    fail "muso CLI pin failed (target ${MUSO_CLI_VERSION})"
+  fi
+fi
 
 # NOTE: drift baseline (.deployed-sha) is updated AFTER Step 7 (smoke test
 # passes), not here. Writing it now would advance the baseline before we
@@ -1928,15 +2040,64 @@ if needs_target "main"; then
     missing_vars=()
     grep -qE "^MUSO_ADMIN_EMAIL=.+"    "$MAIN_ENV" || missing_vars+=(MUSO_ADMIN_EMAIL)
     grep -qE "^MUSO_ADMIN_PASSWORD=.+" "$MAIN_ENV" || missing_vars+=(MUSO_ADMIN_PASSWORD)
+    # muso CLI runtime env (soak phase) — why each var matters is in
+    # docs/RUNBOOK.md, "muso CLI (main gateway)".
+    grep -qE "^MUSO_ENV=prod$"          "$MAIN_ENV" || missing_vars+=("MUSO_ENV=prod")
+    grep -qE "^MUSO_NONINTERACTIVE=1$"  "$MAIN_ENV" || missing_vars+=("MUSO_NONINTERACTIVE=1")
+    grep -qE "^MUSO_STATE_DIR=/var/log/muso-ops$" "$MAIN_ENV" || missing_vars+=("MUSO_STATE_DIR=/var/log/muso-ops")
     if (( ${#missing_vars[@]} > 0 )); then
       log "WARN: $MAIN_ENV is missing: ${missing_vars[*]}"
-      log "WARN: ops agent admin API operations will fail until these are added."
+      log "WARN: ops agent admin API / muso CLI operations will fail until these are added (docs/RUNBOOK.md, 'muso CLI')."
       log "WARN: fix with:  sudo vim $MAIN_ENV  &&  systemctl restart openclaw-gateway-main"
     fi
   else
     log "WARN: $MAIN_ENV does not exist — ops agent will start with no admin credentials."
-    log "WARN: create it, add MUSO_ADMIN_EMAIL= (e.g. retool@muso.ai) and MUSO_ADMIN_PASSWORD=, then:"
+    log "WARN: create it, add MUSO_ADMIN_EMAIL= (e.g. retool@muso.ai) and MUSO_ADMIN_PASSWORD=,"
+    log "WARN: plus the muso CLI vars (MUSO_ENV=prod, MUSO_NONINTERACTIVE=1, MUSO_STATE_DIR=/var/log/muso-ops"
+    log "WARN: — see docs/RUNBOOK.md, 'muso CLI (main gateway)'), then:"
     log "WARN:   systemctl restart openclaw-gateway-main"
+  fi
+fi
+
+# muso CLI host config (main profile only; soak phase). Files are RENDERED
+# on every deploy from the OPERATIONS WORKSPACE muso-ops-admin config — the
+# same files muso-admin-api.sh resolves at runtime (TIER2_APPROVERS_PATH=
+# ${SCRIPT_DIR}/../config/, and ops runs the workspace script copy) — so
+# muso and the bash wrapper always enforce the IDENTICAL approver/bulk
+# policy. NOTE: that config dir is server-owned live policy, deliberately
+# NOT synced from git (see the muso-ops-admin exception in the config-
+# include guard above) — editing the repo copies does NOT change it.
+#   approvers.txt    <- workspaces/operations/skills/muso-ops-admin/config/tier2-approvers.txt
+#   bulk-exclude.txt <- workspaces/operations/skills/muso-ops-admin/config/bulk-destructive-exclude.txt
+#   config.json      <- prewrite_hook wiring: muso execs
+#                       scripts/muso-prewrite-hook.sh (the same
+#                       codex-health probe muso-admin-api.sh embeds)
+#                       before every write, fail-closed.
+# Runtime env (MUSO_ENV etc.) deliberately lives in main.env, NOT here:
+# the gateway loads env only from its systemd EnvironmentFile.
+if needs_target "main"; then
+  MUSO_CFG_DIR="/root/.config/muso"
+  MUSO_OPS_CFG="$DEPLOY_PATH/workspaces/operations/skills/muso-ops-admin/config"
+  if [ -r "$MUSO_OPS_CFG/tier2-approvers.txt" ] && [ -r "$MUSO_OPS_CFG/bulk-destructive-exclude.txt" ]; then
+    install -d -m 700 "$MUSO_CFG_DIR"
+    install -m 600 "$MUSO_OPS_CFG/tier2-approvers.txt" "$MUSO_CFG_DIR/approvers.txt"
+    install -m 600 "$MUSO_OPS_CFG/bulk-destructive-exclude.txt" "$MUSO_CFG_DIR/bulk-exclude.txt"
+    printf '{\n  "prewrite_hook": "%s/scripts/muso-prewrite-hook.sh"\n}\n' "$DEPLOY_PATH" > "$MUSO_CFG_DIR/config.json"
+    chmod 600 "$MUSO_CFG_DIR/config.json"
+    log "  muso config rendered into $MUSO_CFG_DIR (source: operations workspace muso-ops-admin config)"
+  else
+    log "WARN: $MUSO_OPS_CFG is missing tier2-approvers.txt and/or bulk-destructive-exclude.txt —"
+    log "WARN: muso approval/bulk gates fail closed until the config is rendered (render skipped, deploy continues)."
+  fi
+
+  # Smoke (warn-only: prod API health is not this deploy's fault; bounded so
+  # a hung admin API cannot stall the deploy).
+  if command -v muso >/dev/null 2>&1; then
+    if timeout 10 muso health --env prod >/dev/null 2>&1; then
+      log "  muso health (prod): OK"
+    else
+      log "WARN: 'muso health --env prod' failed — admin API unreachable or muso misconfigured"
+    fi
   fi
 fi
 
