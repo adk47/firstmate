@@ -5,6 +5,7 @@ import type {
   RiskAssessment,
 } from "./types.js";
 import { IntercomAssignmentConflictError } from "./outbound.js";
+import { intercomDeeplink } from "./ticket-format.js";
 
 export interface TicketResult {
   ok: boolean;
@@ -19,6 +20,8 @@ export interface CreateTicketParams {
   customerProfileId?: string;
   summary: string;
   conversationSummary: string;
+  conversationId: string;
+  workspaceId: string;
 }
 
 export interface ExecuteEscalationDeps {
@@ -65,7 +68,7 @@ function buildSlackPayload(args: {
   currentMessage: string;
 }): unknown {
   const { conversationId, assessment, ticket, email, workspaceId, currentMessage } = args;
-  const url = `https://app.intercom.com/a/inbox/${workspaceId}/inbox/conversation/${conversationId}`;
+  const url = intercomDeeplink(workspaceId, conversationId);
   const ticketField = ticket.ok
     ? `#${ticket.ticketId} (${ticket.sla})`
     : `creation failed: ${ticket.error}`;
@@ -143,6 +146,8 @@ export async function executeEscalation(deps: ExecuteEscalationDeps): Promise<vo
       customerProfileId: state.knownFacts?.musoProfileId,
       summary: assessment.reason ?? "support",
       conversationSummary: buildSummary(assessment, currentMessage),
+      conversationId,
+      workspaceId: account.workspaceId,
     });
     if (ticket.ok) {
       log.info(`[intercom:escalation] ticket created conv=${conversationId} id=${ticket.ticketId}`);

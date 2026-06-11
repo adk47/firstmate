@@ -43,12 +43,13 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 ### 4. create_ticket
 
 - **Wraps**: ClickUp task creation in list 901000600160
-- **Returns**: Structured JSON. On success: `{ submitted: true, ticket_id, sla, action_type, tier }`. On failure: `{ submitted: false, reason: "rate_limited" | "queue_busy" | "invalid_input" }`. Caroline composes the customer-facing reply from these fields; never says "ticket" / "ClickUp" verbatim.
+- **Returns**: Structured JSON. On success: `{ submitted: true, ticket_id, sla, action_type, tier }`, plus `updated_existing: true` when the request was appended as a comment to an existing ticket from this conversation instead of opening a duplicate. On failure: `{ submitted: false, reason: "rate_limited" | "queue_busy" | "invalid_input" }`. Caroline composes the customer-facing reply from these fields; never says "ticket" / "ClickUp" verbatim.
+- **Dedupe**: a repeat call with the same `actionType` in the same conversation (or matching an open ticket for the same customer email + action from the last 7 days) appends a follow-up comment to the existing ticket. Follow-ups have their own budget (5 per session) and do NOT consume the 2-per-session create allowance.
 - **Auth**: ClickUp API key (handled by plugin, never visible to agent)
-- **Rate limit**: 2 per session (60-minute window)
+- **Rate limit**: 2 ticket creations per session (60-minute window); 5 follow-up appends per session
 - **Required fields**: `actionType`, `customerEmail`, `summary`, `conversationSummary`
-- **Optional fields**: `customerProfileId`, `details` (action-specific key-value pairs)
-- **Auto-derived**: subject (`Action Request: {actionType}`), priority (from tier), tags (`hydra-action-request`, `tier-N`)
+- **Optional fields**: `titleGist` (≤60-char concrete gist for the title; falls back to `summary`), `customerProfileId`, `details` (action-specific key-value pairs)
+- **Auto-derived**: title (`[{action}] {gist} — {email}`), priority (from tier), due date (from tier SLA in business days), tags (`hydra-action-request`, `tier-N`, `action:{type}`, `team:growth|catalog`, `escalation:*` when `details.escalation_reason` is set)
 
 ### 5. profile_status
 

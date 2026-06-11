@@ -393,25 +393,6 @@ export const DEFAULT_JUDGE_MIN_TURNS = 4;
 export const DEFAULT_TURN_HARD_CAP = 6;
 export const DEFAULT_JUDGE_MODEL = "anthropic/claude-haiku-4-5-20251001";
 
-// SLA strings surfaced verbatim to the customer in the escalation farewell.
-// Source of truth: support team runbook. If support's published SLA changes,
-// update this map — there is no other authoritative source.
-export const TIER_SLA: Record<1 | 2 | 3, string> = {
-  1: "2 business days",
-  2: "5 business days",
-  3: "5-10 business days",
-};
-
-// ClickUp priority maps to support tier (lower number = more urgent).
-export const TIER_PRIORITY: Record<1 | 2 | 3, 1 | 2 | 3> = {
-  1: 3,
-  2: 2,
-  3: 1,
-};
-
-// Action-type → tier ladder. Action types that don't appear here default to tier 1.
-export const TIER_BY_ACTION: Record<RiskActionType, 1 | 2 | 3> = {
-  "subscription-refund": 3,
-  "dispute": 3,
-  "support-general": 1,
-};
+// Tier ladder, SLA strings and ClickUp priority live in ticket-format.ts
+// (vendored twin shared with plugins/support-tools) so both ticket creators
+// agree on them.

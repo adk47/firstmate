@@ -37,25 +37,21 @@ When a customer requests a write action (credit change, refund, profile update, 
 
 ## Ticket Format
 
-Every action request ticket MUST use this structure:
+The `create_ticket` tool derives the ClickUp task automatically — title, markdown body, machine-readable JSON block, priority, due date (from the tier SLA), tags (`hydra-action-request`, `tier-[1-3]`, `action:[action-type]`, `team:growth|catalog`, and `escalation:*` when `details.escalation_reason` is set), and custom fields. Tasks are created in ClickUp list 901000600160.
 
-**Subject**: `Action Request: [action-type]`
+Your job is to supply good inputs:
 
-**Tags**: `hydra-action-request`, `tier-[1-3]`
+**`titleGist`** (recommended on every call): a concrete, scannable gist of ≤60 chars for the title — ops triages the queue by it. Say what's wrong, not the category (the action type is already in the title). Good: `"Recurring charges since Jan, no account found"`. Bad: `"Customer support request"`. No PII beyond what's already in the ticket. When omitted, the `summary` is used (truncated).
 
-**Note**: Tasks are created in ClickUp list 901000600160. Tags are applied as ClickUp task tags.
+**`summary` / `conversationSummary` / `details`**: as below — they feed both the human-readable body and the machine JSON block:
 
-**Description** (includes machine-readable JSON block):
 ```
-Customer [name/email] requests: [plain English summary]
-
 ---ACTION-REQUEST---
 {
   "action_type": "[action-type]",
   "approval_tier": [1-3],
   "customer_email": "[email from session or provided]",
   "customer_profile_id": "[if known from profile_lookup]",
-  "customer_workspace_id": "[if known from session context]",
   "details": {
     "[action-specific fields]"
   },
@@ -64,6 +60,14 @@ Customer [name/email] requests: [plain English summary]
 }
 ---END-ACTION-REQUEST---
 ```
+
+## Follow-Ups Update the Existing Ticket (Do NOT Re-File)
+
+When the customer adds information to a request you already filed in this conversation (a new URL, an alternate email, a clarification), call `create_ticket` again with the **same `actionType`** and the new info in `summary`/`details`. The tool finds the existing ticket and appends your update as a comment instead of opening a duplicate — the response carries `updated_existing: true` and the SAME `ticket_id`. Follow-up appends do not consume the 2-per-session creation budget.
+
+The match is mechanical, and slightly wider than one conversation: the tool also matches an **open ticket from the last 7 days with the same customer email + action type** (this catches the customer coming back in a new conversation about the same request). Exception: `profile-merge` only dedupes within the conversation — a merge request in a new conversation always gets a fresh ticket. If `updated_existing: true` comes back for what the customer presents as a NEW request of the same type, that's fine — the full new request is in the ticket as a comment and ops sees both.
+
+Only a genuinely different request (different `actionType`) is guaranteed a new ticket.
 
 ## Action Types and Tiers
 
@@ -217,7 +221,8 @@ If the refund-retention skill was not activated (edge case), set `retention_cont
 | Unclear action type | Ask clarifying question before creating ticket |
 
 ## Rate Limits
-- 2 action request tickets per session (60-minute window)
+- 2 NEW action request tickets per session (60-minute window)
+- 5 follow-up appends to existing tickets per session (separate budget — updating a ticket never blocks you from filing a different request)
 
 ## Customer Communication Templates
 
@@ -232,6 +237,10 @@ Use `ticket_id` as the reference and `sla` verbatim from the response:
 **Tier 2:** "I've escalated your request to our operations team. This type of request requires manual review – you'll hear back within `<sla>`. Your reference is `<ticket_id>`."
 
 **Tier 3:** "I've passed your request to our senior team for review. You can expect a response within `<sla>`. Your reference is `<ticket_id>`."
+
+### Updated existing request (`submitted: true, updated_existing: true`)
+
+"I've added that to your existing request — same reference `<ticket_id>`, the team will see the update."
 
 ### Not submitted – rate limited (`submitted: false, reason: "rate_limited"`)
 "Looks like a request is already on the way to our team for you. You'll hear back soon."

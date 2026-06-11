@@ -1,6 +1,16 @@
 import type { CreateTicketParams, TicketResult } from "./escalation-action.js";
-import type { IntercomAccountConfig, RiskActionType } from "./types.js";
-import { TIER_BY_ACTION, TIER_PRIORITY, TIER_SLA } from "./types.js";
+import type { IntercomAccountConfig } from "./types.js";
+import { buildSessionKey } from "./session-key.js";
+import {
+  TIER_SLAS,
+  TIER_TO_PRIORITY,
+  getTierForAction,
+  buildTicketTitle,
+  buildTicketMarkdown,
+  buildTicketTags,
+  slaDueDateMs,
+  intercomDeeplink,
+} from "./ticket-format.js";
 
 type ClickupCfg = NonNullable<IntercomAccountConfig["clickup"]>;
 
@@ -10,10 +20,11 @@ interface CreateClickupTicketDeps {
   log?: { error: (msg: string) => void };
 }
 
-function tierFor(actionType: string): 1 | 2 | 3 {
-  return TIER_BY_ACTION[actionType as RiskActionType] ?? 1;
-}
-
+// NOTE: this path deliberately does NOT run the open-ticket dedupe that
+// create_ticket (support-tools) runs. Escalation fires at most once per
+// conversation (escalationFiredAt gate) and its ticket doubles as the
+// human-handoff record referenced by the Slack alert — it must always exist,
+// even if Caroline already filed a same-type request.
 export async function createClickupTicket(
   deps: CreateClickupTicketDeps,
   params: CreateTicketParams,
@@ -21,7 +32,8 @@ export async function createClickupTicket(
   const { cfg, log } = deps;
   const fetchImpl = deps.fetchImpl ?? fetch;
 
-  const tier = tierFor(params.actionType);
+  const tier = getTierForAction(params.actionType);
+  const sla = TIER_SLAS[tier];
   const customFields: { id: string; value: string }[] = [
     { id: cfg.userEmailFieldId, value: params.customerEmail },
   ];
@@ -29,7 +41,22 @@ export async function createClickupTicket(
     customFields.push({ id: cfg.profileIdFieldId, value: params.customerProfileId });
   }
 
+  const gist = `Escalation: ${params.summary}`;
+
   try {
+    // Inside the try: buildSessionKey throws on empty/oversized ids, and this
+    // function's contract is "never throws, always returns a TicketResult".
+    // Same session-key shape as Caroline's tickets so ops automation parses
+    // ONE cs_session_id format across the whole list.
+    const contentParams = {
+      summary: params.summary,
+      actionType: params.actionType,
+      tier,
+      customerEmail: params.customerEmail,
+      customerProfileId: params.customerProfileId,
+      conversationSummary: params.conversationSummary,
+      sessionId: buildSessionKey(params.workspaceId, params.conversationId),
+    };
     const res = await fetchImpl(`https://api.clickup.com/api/v2/list/${cfg.listId}/task`, {
       method: "POST",
       headers: {
@@ -37,11 +64,22 @@ export async function createClickupTicket(
         Authorization: cfg.apiKey,
       },
       body: JSON.stringify({
-        name: `Intercom escalation: ${params.actionType}`,
-        description: `${params.summary}\n\n${params.conversationSummary}`,
+        name: buildTicketTitle({
+          actionType: params.actionType,
+          gist,
+          customerEmail: params.customerEmail,
+        }),
+        markdown_description: buildTicketMarkdown({
+          ...contentParams,
+          gist,
+          sla,
+          intercomUrl: intercomDeeplink(params.workspaceId, params.conversationId),
+        }),
         status: "to do",
-        priority: TIER_PRIORITY[tier],
-        tags: ["hydra-action-request", `tier-${tier}`, "intercom-auto-handoff"],
+        priority: TIER_TO_PRIORITY[tier],
+        due_date: slaDueDateMs(tier, Date.now()),
+        due_date_time: false,
+        tags: [...buildTicketTags({ actionType: params.actionType, tier }), "intercom-auto-handoff"],
         custom_fields: customFields,
       }),
     });
@@ -53,7 +91,7 @@ export async function createClickupTicket(
       return { ok: false, error: `ClickUp ${res.status}` };
     }
     const data = (await res.json()) as { id: string };
-    return { ok: true, ticketId: data.id, sla: TIER_SLA[tier] };
+    return { ok: true, ticketId: data.id, sla };
   } catch (err) {
     log?.error(`[intercom:clickup] ticket POST threw err=${(err as Error)?.message ?? String(err)}`);
     return { ok: false, error: String(err) };

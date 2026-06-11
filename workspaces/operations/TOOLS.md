@@ -35,7 +35,7 @@ The CS agent creates Zendesk tickets tagged `hydra-action-request` when customer
 ### How to Process
 
 1. **Monitor**: Poll or receive webhooks for Zendesk tickets with tag `hydra-action-request`
-2. **Parse**: Extract the JSON block between `---ACTION-REQUEST---` and `---END-ACTION-REQUEST---` markers in the ticket description
+2. **Parse**: Extract the JSON block between `---ACTION-REQUEST---` and `---END-ACTION-REQUEST---` markers in the ticket description. Customer follow-ups in the same conversation arrive as task **comments** carrying a `---ACTION-REQUEST-UPDATE---`…`---END-ACTION-REQUEST-UPDATE---` block (same field shape) — read the comments before acting; the description alone may be stale.
 3. **Route by tier**:
    - `tier-1` (credit claims, general support): Review and process in normal ops workflow
    - `tier-2` (profile merges, bulk changes): Ops team must explicitly approve before execution

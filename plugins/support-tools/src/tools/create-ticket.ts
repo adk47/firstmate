@@ -2,13 +2,29 @@ import { Type, type Static } from "@sinclair/typebox";
 import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
 import type { HttpClient } from "../http.js";
 import type { RateLimiter } from "../rate-limiter.js";
+import type { SessionTicketRegistry } from "../session-ticket-registry.js";
+import {
+  GROWTH_ACTIONS,
+  TIER_SLAS,
+  TIER_TO_PRIORITY,
+  TIER_MAP,
+  getTierForAction,
+  buildTicketTitle,
+  buildTicketMarkdown,
+  buildFollowupComment,
+  buildTicketTags,
+  slaDueDateMs,
+  musoProfileUrl,
+  intercomDeeplink,
+} from "./ticket-format.js";
 
 const Parameters = Type.Object({
   actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, profile-claim, support-general, analytics-followup, profile-merge, unmerge-request, bulk-credit-change, profile-update, subscription-refund, data-deletion, dispute, data-export" }),
   customerEmail: Type.String({ description: "Customer's email address" }),
   summary: Type.String({ description: "Plain English description of what the customer is requesting" }),
+  titleGist: Type.Optional(Type.String({ description: "Short, concrete gist for the ticket title (max 60 chars), e.g. 'Recurring charges since Jan, no account found'. Falls back to the summary when omitted." })),
   customerProfileId: Type.Optional(Type.String({ description: "Customer's Muso profile ID, if known from profile_lookup" })),
-  details: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Additional action-specific details (e.g., track name, credit role)" })),
+  details: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Additional action-specific details (e.g., track name, credit role). Include customer_name when known — it is rendered next to the email in the ticket header." })),
   conversationSummary: Type.String({ description: "2-3 sentence summary of the conversation context" }),
 });
 
@@ -19,6 +35,7 @@ type Params = Static<typeof Parameters>;
 // to differentiate failure modes.
 export type CreateTicketResult =
   | { submitted: true; ticket_id: string; sla: string; action_type: string; tier: number }
+  | { submitted: true; updated_existing: true; ticket_id: string; sla: string; action_type: string; tier: number }
   | { submitted: false; reason: "rate_limited" }
   | { submitted: false; reason: "queue_busy" }
   | {
@@ -39,24 +56,6 @@ function ticketResult(r: CreateTicketResult): AgentToolResult<unknown> {
   return textResult(JSON.stringify(r));
 }
 
-const TIER_MAP: Record<string, number> = {
-  "credit-claim": 1, "credit-correction": 1, "profile-claim": 1, "support-general": 1, "analytics-followup": 1,
-  "profile-merge": 2, "unmerge-request": 2, "bulk-credit-change": 2, "profile-update": 2,
-  "subscription-refund": 3, "data-deletion": 3, "dispute": 3, "data-export": 3,
-};
-
-const TIER_TO_PRIORITY: Record<number, number> = { 1: 3, 2: 2, 3: 1 };
-
-export const TIER_SLAS: Record<number, string> = {
-  1: "2 business days",
-  2: "5 business days",
-  3: "5-10 business days",
-};
-
-export function getTierForAction(actionType: string): number {
-  return TIER_MAP[actionType] ?? 1;
-}
-
 // Tier-2 actions that MUTATE a specific profile and are genuinely unactionable
 // without knowing which profile. Gated below (require customerProfileId).
 // Deliberately does NOT include tier-1 types — an over-strict gate that blocks
@@ -69,13 +68,15 @@ const PROFILE_ANCHOR_REQUIRED = new Set(["profile-update", "bulk-credit-change",
 // tracks, analytics, merges).
 const TEAM_OPTION_CATALOG = "da684786-49eb-4306-87c2-30c093d6dc35";
 const TEAM_OPTION_GROWTH = "fab5b56c-953f-490f-8eb9-2d33f108114f";
-const GROWTH_ACTIONS = new Set([
-  "subscription-refund", "data-deletion", "data-export", "dispute", "support-general",
-]);
 
 export function teamOptionFor(actionType: string): string {
   return GROWTH_ACTIONS.has(actionType) ? TEAM_OPTION_GROWTH : TEAM_OPTION_CATALOG;
 }
+
+// How far back the ClickUp dedupe lookup considers an open ticket "the same
+// request". Beyond this, a same-type ask from the same customer is treated as
+// a new request.
+const DEDUPE_LOOKUP_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
 // Recover the Intercom workspace + conversation id from the support agent's
 // session key (`agent:support:intercom:<workspaceId>:conversation:<conversationId>`
@@ -90,43 +91,16 @@ export function parseIntercomSession(
   return { workspaceId: m[1], conversationId: m[2] };
 }
 
-export function intercomDeeplink(workspaceId: string, conversationId: string): string {
-  return `https://app.intercom.com/a/inbox/${workspaceId}/inbox/conversation/${conversationId}`;
-}
-
-export function musoProfileUrl(profileId: string): string {
-  return `https://credits.muso.ai/profile/${profileId}`;
-}
-
-export function buildTicketDescription(params: {
-  summary: string; actionType: string; tier: number; customerEmail: string;
-  customerProfileId?: string; details?: Record<string, unknown>;
-  conversationSummary: string; sessionId: string;
-}): string {
-  const actionRequest = {
-    action_type: params.actionType,
-    approval_tier: params.tier,
-    customer_email: params.customerEmail,
-    customer_profile_id: params.customerProfileId ?? null,
-    details: params.details ?? {},
-    conversation_summary: params.conversationSummary,
-    cs_session_id: params.sessionId,
-  };
-  return [
-    `Customer ${params.customerEmail} requests: ${params.summary}`,
-    "",
-    "---ACTION-REQUEST---",
-    JSON.stringify(actionRequest, null, 2),
-    "---END-ACTION-REQUEST---",
-  ].join("\n");
-}
-
 interface ToolDeps {
   http: HttpClient; rateLimiter: RateLimiter;
   clickupApiKey: string; clickupListId: string;
   clickupProfileIdFieldId: string; clickupUserEmailFieldId: string;
   sessionId: string;
   profileMergeAssigneeId?: number;
+  // Shared across sessions (instantiated once in index.ts, like rateLimiter)
+  // so repeat calls within a conversation find the earlier ticket. Required:
+  // a per-tool-instance registry would silently defeat the dedupe.
+  sessionTickets: SessionTicketRegistry;
   // Enrichment field ids — each is added to the ticket ONLY when its id is set
   // (wired with real defaults in index.ts). Optional so existing callers/tests
   // that don't pass them are unaffected.
@@ -135,14 +109,84 @@ interface ToolDeps {
   clickupTeamFieldId?: string;
 }
 
+interface ClickupTaskSummary {
+  id: string;
+  status?: { status?: string; type?: string };
+  date_created?: string;
+  tags?: { name?: string }[];
+}
+
+// "Open" = not done/closed by status TYPE ("to do" and "in progress" are both
+// open — a ticket a human picked up must still dedupe). Falls back to the
+// literal status string when the type field is absent (test fixtures, older
+// API shapes); unknown shapes count as open (fail toward appending, never
+// toward duplicating).
+function isOpenStatus(s?: { status?: string; type?: string }): boolean {
+  if (!s) return true;
+  if (s.type) return s.type !== "done" && s.type !== "closed";
+  return s.status === "to do" || s.status === "in progress" || s.status === undefined;
+}
+
 export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
   const { http, rateLimiter, clickupApiKey, clickupListId, clickupProfileIdFieldId, clickupUserEmailFieldId, sessionId, profileMergeAssigneeId } = deps;
-  const { clickupIntercomLinkFieldId, clickupMusoUrlFieldId, clickupTeamFieldId } = deps;
+  const { clickupIntercomLinkFieldId, clickupMusoUrlFieldId, clickupTeamFieldId, sessionTickets } = deps;
+
+  // Restart-proof fallback for the dedupe. Deliberately WIDER than the
+  // session registry: it matches any open <7d ticket for the same customer
+  // email + action tag, across conversations — a second same-type ask within
+  // a week is treated as the same request. Fail-soft — any error means "no
+  // existing ticket", never a blocked filing.
+  async function lookupOpenTicket(actionType: string, customerEmail: string): Promise<string | null> {
+    try {
+      const customFieldsFilter = JSON.stringify([
+        { field_id: clickupUserEmailFieldId, operator: "=", value: customerEmail },
+      ]);
+      const url =
+        `https://api.clickup.com/api/v2/list/${clickupListId}/task` +
+        `?include_closed=false` +
+        `&date_created_gt=${Date.now() - DEDUPE_LOOKUP_WINDOW_MS}` +
+        `&tags%5B%5D=${encodeURIComponent(`action:${actionType}`)}` +
+        `&custom_fields=${encodeURIComponent(customFieldsFilter)}`;
+      const res = await http.get<{ tasks?: ClickupTaskSummary[] }>(url, { headers: { Authorization: clickupApiKey } });
+      if (!res?.ok || !Array.isArray(res.data?.tasks)) return null;
+      // Re-filter client-side: the server-side date param is an optimization,
+      // not something we trust (live API ignored order_by). Escalation
+      // handoff tickets are excluded — appending a normal action request onto
+      // a human-takeover record would bury it.
+      const cutoff = Date.now() - DEDUPE_LOOKUP_WINDOW_MS;
+      const open = res.data.tasks
+        .filter((t) =>
+          isOpenStatus(t.status) &&
+          Number(t.date_created) >= cutoff &&
+          !t.tags?.some((tag) => tag.name === "intercom-auto-handoff"))
+        .sort((a, b) => Number(b.date_created) - Number(a.date_created));
+      return open[0]?.id ?? null;
+    } catch (err) {
+      console.warn(`[support-tools] create_ticket dedupe lookup failed (creating anyway): ${err}`);
+      return null;
+    }
+  }
+
+  // Registry entries can outlive the ticket they point at (ops closes it
+  // mid-conversation). Re-check before appending; fail-open on API errors so
+  // a transient 5xx doesn't spawn a duplicate.
+  async function isTicketStillOpen(ticketId: string): Promise<boolean> {
+    try {
+      const res = await http.get<ClickupTaskSummary>(
+        `https://api.clickup.com/api/v2/task/${ticketId}`,
+        { headers: { Authorization: clickupApiKey } },
+      );
+      if (!res?.ok) return true;
+      return isOpenStatus(res.data?.status);
+    } catch {
+      return true;
+    }
+  }
 
   return {
     name: "create_ticket",
     label: "Create Support Ticket",
-    description: "Create a support ticket in the team's task system for customer requests that require human action (credit claims, profile merges, analytics followups, refunds, data deletion, etc.).",
+    description: "Create a support ticket in the team's task system for customer requests that require human action (credit claims, profile merges, analytics followups, refunds, data deletion, etc.). When the same request already has a ticket in this conversation, the new information is appended to it instead of opening a duplicate.",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
       // Validate BEFORE the rate-limit check. A malformed profile-merge call
@@ -187,23 +231,61 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         }
       }
 
-      if (!rateLimiter.check(sessionId, "create_ticket", 60, 2).allowed) {
-        return ticketResult({ submitted: false, reason: "rate_limited" });
-      }
-
       if (!(params.actionType in TIER_MAP)) {
         console.warn(`[support-tools] Unknown actionType "${params.actionType}", defaulting to tier 1`);
       }
 
       const tier = getTierForAction(params.actionType);
-      const priority = TIER_TO_PRIORITY[tier] ?? 3;
-      const sla = TIER_SLAS[tier] ?? "2 business days";
-
-      const description = buildTicketDescription({
+      const priority = TIER_TO_PRIORITY[tier];
+      const sla = TIER_SLAS[tier];
+      const contentParams = {
         summary: params.summary, actionType: params.actionType, tier,
         customerEmail: params.customerEmail, customerProfileId: params.customerProfileId,
         details: params.details, conversationSummary: params.conversationSummary, sessionId,
-      });
+      };
+
+      // --- Dedupe: same conversation + same action type → append, don't re-file.
+      // (Live 2026-06-10 audit: customers adding one detail produced up to 5
+      // duplicate tickets per conversation — see jurakez1/jenarobinson10.)
+      let existingId = sessionTickets.get(sessionId, params.actionType, params.customerEmail);
+      if (existingId && !(await isTicketStillOpen(existingId))) {
+        sessionTickets.invalidate(sessionId, params.actionType, params.customerEmail);
+        existingId = null;
+      }
+      // Cross-conversation fallback. Skipped for profile-merge: the merged-
+      // ticket sweep auto-closes those keyed on the ORIGINAL description's
+      // profile ids, so appending a different merge request cross-conversation
+      // could be closed unexecuted. The lookup GET is metered in its own
+      // bucket so a retry-looping session can't hammer ClickUp search.
+      if (!existingId && params.actionType !== "profile-merge"
+          && rateLimiter.check(sessionId, "create_ticket_lookup", 60, 10).allowed) {
+        existingId = await lookupOpenTicket(params.actionType, params.customerEmail);
+      }
+      if (existingId) {
+        // Follow-ups get their own (more generous) budget — appending info is
+        // cheap and must not eat the 2-per-session create allowance.
+        if (!rateLimiter.check(sessionId, "create_ticket_followup", 60, 5).allowed) {
+          return ticketResult({ submitted: false, reason: "rate_limited" });
+        }
+        const comment = await http.post<{ id: string }>(
+          `https://api.clickup.com/api/v2/task/${existingId}/comment`,
+          {
+            headers: { Authorization: clickupApiKey },
+            body: { comment_text: buildFollowupComment(contentParams), notify_all: false },
+          },
+        );
+        if (comment?.ok) {
+          sessionTickets.record(sessionId, params.actionType, params.customerEmail, existingId);
+          return ticketResult({ submitted: true, updated_existing: true, ticket_id: existingId, sla, action_type: params.actionType, tier });
+        }
+        // Comment failed — fall through to creating a fresh ticket (today's
+        // status quo); losing the update entirely would be worse than a dup.
+        console.warn(`[support-tools] create_ticket follow-up comment failed for ${existingId}, creating a new ticket instead`);
+      }
+
+      if (!rateLimiter.check(sessionId, "create_ticket", 60, 2).allowed) {
+        return ticketResult({ submitted: false, reason: "rate_limited" });
+      }
 
       const customFields: { id: string; value: string }[] = [
         { id: clickupUserEmailFieldId, value: params.customerEmail },
@@ -217,11 +299,11 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       // to its conversation. Recovered deterministically from the session key;
       // best-effort — absent for non-Intercom sessions, never blocks creation.
       const intercomSession = parseIntercomSession(sessionId);
-      if (clickupIntercomLinkFieldId && intercomSession) {
-        customFields.push({
-          id: clickupIntercomLinkFieldId,
-          value: intercomDeeplink(intercomSession.workspaceId, intercomSession.conversationId),
-        });
+      const intercomUrl = intercomSession
+        ? intercomDeeplink(intercomSession.workspaceId, intercomSession.conversationId)
+        : undefined;
+      if (clickupIntercomLinkFieldId && intercomUrl) {
+        customFields.push({ id: clickupIntercomLinkFieldId, value: intercomUrl });
       }
       if (clickupMusoUrlFieldId && params.customerProfileId) {
         customFields.push({ id: clickupMusoUrlFieldId, value: musoProfileUrl(params.customerProfileId) });
@@ -230,22 +312,18 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         customFields.push({ id: clickupTeamFieldId, value: teamOptionFor(params.actionType) });
       }
 
-      const tags = ["hydra-action-request", `tier-${tier}`, `action:${params.actionType}`];
-      if (params.actionType === "analytics-followup") tags.push("analytics-followup");
-
-      // Title carries the customer (+ short profile id) so ops can scan/dedup
-      // the queue without opening each ticket — the legacy human tickets did
-      // this with artist names; Caroline's tickets were all identical before.
-      const titleParts = [`Action Request: ${params.actionType}`, params.customerEmail];
-      if (params.customerProfileId) titleParts.push(params.customerProfileId.slice(0, 8));
-      const name = titleParts.join(" | ");
+      const gist = params.titleGist?.trim() || params.summary;
+      const customerName =
+        typeof params.details?.customer_name === "string" ? params.details.customer_name : undefined;
 
       const body: Record<string, unknown> = {
-        name,
-        description,
+        name: buildTicketTitle({ actionType: params.actionType, gist, customerEmail: params.customerEmail }),
+        markdown_description: buildTicketMarkdown({ ...contentParams, gist, sla, customerName, intercomUrl }),
         status: "to do",
         priority,
-        tags,
+        due_date: slaDueDateMs(tier, Date.now()),
+        due_date_time: false,
+        tags: buildTicketTags({ actionType: params.actionType, tier, details: params.details }),
         custom_fields: customFields,
       };
       if (params.actionType === "profile-merge" && profileMergeAssigneeId) {
@@ -261,6 +339,7 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         return ticketResult({ submitted: false, reason: "queue_busy" });
       }
 
+      sessionTickets.record(sessionId, params.actionType, params.customerEmail, result.data.id);
       return ticketResult({ submitted: true, ticket_id: result.data.id, sla, action_type: params.actionType, tier });
     },
   };

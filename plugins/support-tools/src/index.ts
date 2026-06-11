@@ -2,6 +2,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { createHttpClient } from "./http.js";
 import { createMusoAdminClient } from "./muso-admin-client.js";
 import { RateLimiter } from "./rate-limiter.js";
+import { SessionTicketRegistry } from "./session-ticket-registry.js";
 import { createProfileLookupTool } from "./tools/profile-lookup.js";
 import { createCreditsSearchTool } from "./tools/credits-search.js";
 import { createCreateTicketTool } from "./tools/create-ticket.js";
@@ -79,6 +80,9 @@ export default definePluginEntry({
     const http = createHttpClient();
     const musoAdminClient = createMusoAdminClient({ http, musoApiBase, adminEmail, adminPassword });
     const rateLimiter = new RateLimiter();
+    // Shared across sessions (like rateLimiter) so repeat create_ticket calls
+    // in one conversation append to the earlier ticket instead of duplicating.
+    const sessionTickets = new SessionTicketRegistry();
 
     const profileLookupFactory = (ctx: any) => {
       return createProfileLookupTool({ adminClient: musoAdminClient, rateLimiter, sessionId: ctx.sessionId ?? "unknown" });
@@ -101,6 +105,7 @@ export default definePluginEntry({
       return createCreateTicketTool({
         http,
         rateLimiter,
+        sessionTickets,
         clickupApiKey,
         clickupListId,
         clickupProfileIdFieldId,
