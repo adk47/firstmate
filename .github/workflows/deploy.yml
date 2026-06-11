@@ -4,6 +4,16 @@ on:
   push:
     branches: [main]
 
+# Serialize deploys: without this, a queued run for an OLDER commit can start
+# after a newer commit's run finishes and rsync the stale tree over node-8
+# (happened 2026-06-11: run #310 (5beef45) deployed after #311 (604d862),
+# reverting PR #487 on the server). cancel-in-progress stays false so an
+# in-flight deploy is never killed mid-rsync; GitHub keeps only the newest
+# pending run in the group, which is exactly the ordering we want.
+concurrency:
+  group: deploy-hydra
+  cancel-in-progress: false
+
 env:
   KUBECONFIG: /root/.kube/config
   SLACK_WEBHOOK: ${{ secrets.HYDRA_SLACK_WEBHOOK }}
