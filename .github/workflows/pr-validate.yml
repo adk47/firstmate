@@ -924,6 +924,7 @@ jobs:
                        workspaces/operations/skills/muso-caroline-weekly-review/scripts/tests \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-fraud-signals.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/fraud-muso-only-lookup.bats \
+                       workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/render-dry-run-summary.bats \
                        workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
                        "${sa_dirs[@]}" \
                        -type f -name '*.bats' | sort)

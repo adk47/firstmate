@@ -130,3 +130,35 @@ calls() { grep -c '^CALL ' "$OPENCLAW_CALLS_FILE" 2>/dev/null || echo 0; }
   # Body still on stdout.
   [[ "$output" == *":rocket:"* ]]
 }
+
+# ── run-id propagation (2026-06-11: stale-OPS_RUN_ID / dead-runlog-pointer fix) ──
+# The lobster pipeline threads OPS_RUN_ID (minted by dispatch-cv-batch.sh)
+# into every step. The summary must surface it and point at the PER-RUN truth
+# floor (.results.jsonl), which muso-admin-api.sh names with the same id —
+# before this fix it fell back to the stale runlog latest.txt from 2026-05-16.
+
+@test "OPS_RUN_ID renders in header and real-apply tail names the per-run results file" {
+  run --separate-stderr env -u THREAD_TS POST_PARENT_TO_CHANNEL=0 OPS_RUN_ID=lobster-test-123 bash -c "'$RENDER' < '$FIXTURE'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"run_id: lobster-test-123"* ]]
+  # Same UTC-date derivation as muso-admin-api.sh write_credit_request_result.
+  [[ "$output" == *"/var/log/openclaw/credit-batch-runs/$(date -u +%Y-%m-%d)/lobster-test-123.results.jsonl"* ]]
+}
+
+@test "no OPS_RUN_ID → no run_id token; tail keeps the shared audit-log pointer" {
+  run --separate-stderr env -u THREAD_TS -u OPS_RUN_ID POST_PARENT_TO_CHANNEL=0 bash -c "'$RENDER' < '$FIXTURE'"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"run_id:"* ]]
+  [[ "$output" == *"/var/log/openclaw/lobster-apply.jsonl"* ]]
+}
+
+@test "fraud-unavailable warning points at scorer stderr, not a dead runlog" {
+  local fixture_fraud="$TEST_TMPDIR/fixture.fraud.json"
+  jq '.would_uvn = [{"cr_id":"cr-U","_fraud":{"muso_only_available":false}}]' "$FIXTURE" > "$fixture_fraud"
+  run --separate-stderr env -u THREAD_TS POST_PARENT_TO_CHANNEL=0 bash -c "'$RENDER' < '$fixture_fraud'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"muso-only Trino signal was UNAVAILABLE"* ]]
+  # "see runlog" pointed at a file the lobster path never writes.
+  [[ "$output" != *"see runlog"* ]]
+  [[ "$output" == *"scorer stderr"* ]]
+}

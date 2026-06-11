@@ -40,6 +40,12 @@ OPENCLAW_PROFILE="${OPENCLAW_PROFILE:-main}"
 # carries this env through; we read it ONLY to label the section: in shadow
 # mode verdicts are unchanged, so the header must say so. Default off.
 CV_FRAUD_MODE="${CV_FRAUD_MODE:-off}"
+# Per-run id minted by dispatch-cv-batch.sh and threaded through pipeline env.
+# muso-admin-api.sh names the truth-floor results file with the same id, so
+# the Slack summary can point at THIS run's artifacts (before 2026-06-11 the
+# results writer fell back to the stale runlog latest.txt from the retired
+# non-lobster path). Empty for direct/manual pipeline invocations.
+OPS_RUN_ID="${OPS_RUN_ID:-}"
 
 QUEUE_DEPTH=$(echo "$INPUT" | jq -r '.queue_depth')
 FETCH_SIZE=$(echo "$INPUT" | jq -r '.fetch_size')
@@ -64,6 +70,12 @@ if [[ "$DRY_APPLY" == "false" ]]; then
   UVN_LABEL="user_verification_needed"
   APPROVE_LIST_HEADER="approved cr_ids (first 10):"
   TAIL_LINE="_Apply outcomes: approved.landed=$APPLY_APPROVE_LANDED (refused=$APPLY_APPROVE_REFUSED), uvn.landed=$APPLY_UVN_LANDED (refused=$APPLY_UVN_REFUSED). Per-cr_id audit at \`/var/log/openclaw/lobster-apply.jsonl\`._"
+  if [[ -n "$OPS_RUN_ID" ]]; then
+    # Same UTC-date derivation as muso-admin-api.sh write_credit_request_result
+    # (a batch crossing UTC midnight between apply and summary can point at
+    # yesterday's dir — accepted, the run_id still finds the file via glob).
+    TAIL_LINE+=$'\n'"_Per-run truth floor: \`/var/log/openclaw/credit-batch-runs/$(date -u +%Y-%m-%d)/${OPS_RUN_ID}.results.jsonl\`._"
+  fi
 else
   MODE_LINE=":test_tube: *Lobster credit-verification DRY-RUN — would-have verdicts only*"
   APPROVE_LABEL="would_approve"
@@ -76,7 +88,7 @@ fi
 TEXT=$(cat <<EOF
 $MODE_LINE
 Queue depth (live): $QUEUE_DEPTH | Sampled: $TOTAL of $FETCH_SIZE
-Pipeline: lobster.verify-credit-batch (signal-first)
+Pipeline: lobster.verify-credit-batch (signal-first)${OPS_RUN_ID:+ | run_id: ${OPS_RUN_ID}}
 
 *Bucket counts:*
   :white_check_mark: $APPROVE_LABEL : $WOULD_APPROVE
@@ -172,7 +184,10 @@ MUSO_UNAVAIL=$(echo "$INPUT" | jq -r '
   | any(. == false)
 ')
 if [[ "$MUSO_UNAVAIL" == "true" ]]; then
-  TEXT+=$'\n\n:warning: muso-only Trino signal was UNAVAILABLE this run — fraud scores computed WITHOUT it (fail-soft, see runlog).'
+  # No "see runlog": the lobster path writes no runlog jsonl. The failure
+  # reason (incl. the captured Trino error, post-#485) is on the fraud
+  # scorer's stderr, which lands in this run's agent/cron transcript.
+  TEXT+=$'\n\n:warning: muso-only Trino signal was UNAVAILABLE this run — fraud scores computed WITHOUT it (fail-soft; failure reason on the fraud scorer stderr in this run'"'"'s transcript).'
 fi
 
 # Always echo the summary text to stdout so Lobster's step output captures it.

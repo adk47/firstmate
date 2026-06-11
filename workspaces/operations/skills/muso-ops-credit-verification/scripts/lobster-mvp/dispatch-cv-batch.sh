@@ -117,6 +117,15 @@ fi
 # the gateway runs one dispatcher process per invocation on one host.
 RAW_BATCH_FILE="/tmp/cv-fraud-raw-batch.$$.$(date +%s).json"
 
+# Per-run id, threaded to every step as OPS_RUN_ID via the pipeline's env
+# block. Same shape as apply-verdicts.sh's local fallback — but minted HERE
+# so apply's audit log (lobster-apply.jsonl), the truth-floor results file
+# (muso-admin-api.sh names it <run_id>.results.jsonl), and the Slack summary
+# all carry ONE id. Without it the results writer fell back to the stale
+# runlog latest.txt of the retired non-lobster path (2026-05-16) and
+# Slack→truth-floor cross-referencing was broken.
+RUN_ID="lobster-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+
 # argsJson is a STRING containing JSON (Lobster forwards it into the
 # pipeline's args: block). The outer payload is JSON-with-nested-string.
 ARGS_JSON=$(jq -nc \
@@ -126,7 +135,8 @@ ARGS_JSON=$(jq -nc \
   --arg skind "$SELECTOR_KIND" \
   --arg sid "$SELECTOR_ID" \
   --arg rbf "$RAW_BATCH_FILE" \
-  '{batch_size:$bs, thread_ts:$tts, dry_run:$dry, selector_kind:$skind, selector_id:$sid, raw_batch_file:$rbf}')
+  --arg rid "$RUN_ID" \
+  '{batch_size:$bs, thread_ts:$tts, dry_run:$dry, selector_kind:$skind, selector_id:$sid, raw_batch_file:$rbf, run_id:$rid}')
 
 PAYLOAD=$(jq -nc \
   --arg pipeline "$PIPELINE_PATH" \
@@ -139,6 +149,10 @@ PAYLOAD=$(jq -nc \
 # The pipeline runs on this same host; once the (synchronous) invoke returns,
 # the per-run raw-batch file is dead weight — clean it up on every exit path.
 trap 'rm -f "$RAW_BATCH_FILE"' EXIT
+
+# Trace the id before invoking so a run that dies mid-pipeline is still
+# findable in lobster-apply.jsonl / results.jsonl from the transcript.
+echo "[dispatch-cv-batch] run_id=$RUN_ID" >&2
 
 RESPONSE=$(curl -sS -X POST "http://127.0.0.1:${GATEWAY_PORT}/tools/invoke" \
   -H "Authorization: Bearer $TOK" \

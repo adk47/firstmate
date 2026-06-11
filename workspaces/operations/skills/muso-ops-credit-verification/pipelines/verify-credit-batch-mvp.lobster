@@ -36,9 +36,21 @@ args:
   # to direct/manual invocations, which are a debugging-only path.
   raw_batch_file:
     default: "/tmp/cv-fraud-raw-batch.json"
+  # Per-run id minted by dispatch-cv-batch.sh (lobster-<ts>-<pid>). Threaded
+  # to every step as OPS_RUN_ID (env block below) so apply-verdicts.sh's
+  # audit log, muso-admin-api.sh's <run_id>.results.jsonl truth floor, and
+  # the Slack summary all share ONE id. Empty default (direct/manual
+  # invocations): every consumer treats empty as unset via ${OPS_RUN_ID:-}
+  # and falls back to its own local id.
+  run_id:
+    default: ""
 
 env:
   ADMIN_API_SH: /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh
+  # Same arg-interpolation-into-env mechanism as CV_FRAUD_RAW_BATCH below
+  # (verified live on node-8, incl. step-env merge). Steps' child processes
+  # (muso-admin-api.sh under apply-verdicts.sh) inherit it from process env.
+  OPS_RUN_ID: ${run_id}
   # Fraud detector (operations BATCH only — Caroline/customer-facing is OUT OF
   # SCOPE). SHADOW since 2026-06-10 (off→shadow→enforce rollout, mirroring the
   # proven CV_EVIDENCE_MODE pattern — spec §2 in docs/credit-verification/
