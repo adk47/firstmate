@@ -714,8 +714,8 @@
       "id": "608cea44-79c8-4e0d-9c63-f43c250c6254",
       "agentId": "operations",
       "name": "caroline-weekly-rollup",
-      "description": "Weekly Caroline roll-up — 168h window, same grade as the daily plus the full cross-conversation theme roll-up (recurring issues / questions / feature asks / escalation patterns) and KB-gap candidates (>=3 unique customers, mechanically recomputed; Slack-surface only, auto-PR stays manual in v1). Posted to #cs_chats as Block Kit by the Ops bot via publish-digest.sh; announce delivery is the fail-loud fallback. Mon 10:00 Europe/Rome so it never races the daily 09:00 fetch. SHIPS DISABLED — flip enabled:true in a follow-up one-line PR after one manual shadow-channel fire.",
-      "enabled": false,
+      "description": "Weekly Caroline roll-up — 168h window, same grade as the daily plus the full cross-conversation theme roll-up (recurring issues / questions / feature asks / escalation patterns) and KB-gap candidates (>=3 unique customers, mechanically recomputed; Slack-surface only, auto-PR stays manual in v1). Posted to #cs_chats as Block Kit by the Ops bot via publish-digest.sh; announce delivery is the fail-loud fallback. Mon 10:00 Europe/Rome so it never races the daily 09:00 fetch. Enabled 2026-06-11 after a clean manual live fire (run 1781190760195).",
+      "enabled": true,
       "createdAtMs": 1781186448000,
       "updatedAtMs": 1781186448000,
       "schedule": {
