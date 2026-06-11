@@ -19,8 +19,11 @@ depends-on:
   - muso-slack-formatter
   - muso-query-writer
 compatibility: |
-  Requires: muso-ops-admin (API gateway), muso-verify-profile (authenticity scoring),
-  web_search (external verification), Athena (claim history).
+  Main gateway on node-8 only. Admin API + claim-history SQL go through the
+  `muso` CLI (see muso-cli SKILL.md). Slack-ID→email resolution still uses
+  muso-ops-admin's muso-admin-api.sh resolve-email. Also requires:
+  muso-verify-profile (authenticity scoring), web_search/web_fetch (external
+  verification), image tool (ID-document checks).
 metadata:
   version: "1.1"
   source-repo: "Muso-AI/muso-skills"
@@ -42,11 +45,12 @@ Check sender_id tier from `muso-ops-admin` SKILL.md before ANY operation.
 ### List Pending Claims
 
 ```bash
-# Via admin API
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/admin/claiming?status=pending&limit=20&offset=0"
+# Via the muso CLI (main gateway). Typed flags: --status, --limit,
+# --page (1-based), --keyword, --profile-id, --profile-type, --reason.
+muso claiming list --status pending --limit 20 --json
+# JSON shape: {items, count, total} — each item embeds .team and .profile.
 
-# Supplement with Athena for richer context
+# Supplement with Trino for richer context
 SELECT id, status, reason, profileid, profiletype, userid, teamid,
        verificationlinks, createdat, updatedat
 FROM postgresql_core.public.claiming
@@ -73,12 +77,16 @@ When ops says "review claim 12345" or "check claim 12345":
 
 **Step 1: Pull claim details**
 ```bash
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/admin/claiming/<id>"
+muso claiming get <id> --json
 ```
-Note: Claims list = `GET /admin/claiming`, single claim = `GET /admin/claiming/:id`
+Note: the typed command returns the claim object directly (e.g.
+`jq -r '.status'`); a missing claim exits 3 (not found). The generic
+`muso api GET '/admin/claiming/<id>' --json` is equivalent but wraps the
+body under `.data`.
 
-**Step 2: Pull profile data (Athena)**
+**Step 2: Pull profile data (Trino)**
+
+Run via `muso query "<SQL>"` (use `muso query - <<'SQL'` for multi-line SQL):
 ```sql
 SELECT _id, name, profile_type, credits_count, common_credits,
        collaborations_count, popularity, rank, ipis, country,
@@ -157,10 +165,15 @@ After investigation + confirmation:
 # Log BEFORE executing
 # ... (audit log entry)
 
-# Approve = verify
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/admin/claiming/<id>/verify"
+# Approve = verify. Write → needs --requester (the requesting human's EMAIL).
+# Resolve a Slack ID to an email via the wrapper's resolver (stays on the wrapper):
+#   bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh resolve-email <SLACK_ID>
+muso claiming verify <id> --requester <email> --json
 ```
+
+The write is audited and echoes `>> PROD <<` on stderr — that's the expected
+environment notice, not an error. Exit 0 = applied; exit 5 = policy refused
+(the stderr `error.hint` names the missing artifact).
 
 Post confirmation:
 ```
@@ -174,8 +187,7 @@ Logged to audit trail.
 ALWAYS require a reason:
 
 ```bash
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/admin/claiming/<id>/reject" '{"reason":"[reason]"}'
+muso claiming reject <id> --reason "[reason]" --requester <email> --json
 ```
 
 Standard rejection reasons:
@@ -191,9 +203,15 @@ When a previously approved claim needs to be undone:
 ⚠️ This is a significant action — always ask WHY and confirm.
 
 ```bash
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/admin/claiming/<id>/revert"
+muso claiming revert <id> --requester <email> --json
 ```
+
+Revert undoes an approved claim. It is a plain write-tier call (verified
+against `muso agent-docs`: the dangerous tier is DELETEs plus /merge,
+/reset-password, /revoke paths — revert is not among them), so
+`--requester` is all the policy needs. If the gate ever refuses with
+exit 5, the stderr hint names the missing artifact — supply that after
+human confirmation; never pre-emptively pass `--yes`.
 
 ### Batch Review
 

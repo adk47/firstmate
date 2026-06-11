@@ -49,9 +49,11 @@ name table, and the incident-grade warnings.
    NOT ported. `muso credit-requests set-status --status approved|rejected`
    demands second-human approval artifacts for every call — correct but not
    the autonomous-approval workflow. Keep using the wrapper per muso-ops-credits.
-2. **The muso-ops-* playbooks still document the wrapper.** Until the cutover
-   PR flips them, follow each playbook's own commands for its workflows; use
-   muso for ad-hoc admin calls, lookups, and new work.
+2. **Cutover is batched — follow each playbook's own commands.** Migrated to
+   muso (batch 1): muso-audit-profile-credits, muso-query-writer,
+   muso-ops-claiming. The remaining muso-ops-* playbooks still document the
+   wrapper until their batch lands; use muso for ad-hoc admin calls, lookups,
+   and new work.
 3. **Reads are unrestricted**; every write goes through the policy gates below.
 
 ## Quick reference

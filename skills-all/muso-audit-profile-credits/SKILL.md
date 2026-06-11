@@ -16,9 +16,12 @@ description: |
   this profile", "which credits are legit", "bulk credit audit",
   "per-track audit"
 compatibility: |
-  Requires: muso-ops-admin (admin API), muso-query-writer (Athena), browser
-  tool for external cross-reference. Slack formatter for output.
+  Requires: muso-cli (`muso` admin API on the main gateway), muso-query-writer
+  (Trino), browser tool for external cross-reference. Slack formatter for
+  output. Slack-ID→email resolution still uses the muso-ops-admin wrapper's
+  `resolve-email` (the one canonical map).
 depends-on:
+  - muso-cli
   - muso-ops-admin
   - muso-ops-audit
   - muso-query-writer
@@ -54,20 +57,24 @@ credits — it produces a recommendation list.
 ## Inputs
 
 - `profile_id` (UUID). Required.
-- `requester` email or Slack ID (passed to `muso-admin-api.sh --requester`
-  so the audit trail records who triggered the run).
+- `requester` email (passed to `muso --requester` so the audit trail records
+  who triggered the run). If you only have a Slack ID, resolve it to an email
+  first via the wrapper's resolver (the one canonical map):
+  `bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh resolve-email <SLACK_ID>`.
+  Note: these are read-only GETs, so `--requester` is attribution only and not
+  strictly required, but pass it when known so the run is attributable.
 
 ## Investigation Steps
 
 ### Step 1: Profile baseline (Admin API)
 
 ```bash
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  --requester "$REQUESTER" \
-  call GET "/admin/profile/$PROFILE_ID"
+muso api GET "/admin/profile/$PROFILE_ID" --requester "$REQUESTER" --json
 ```
 
-Extract: `name`, `creditCount`, `isClaimed`, `workspaces[].email`,
+The response is wrapped as `{"data": ...}` on stdout (status via exit code:
+0 ok, 3 not found, 4 auth, 5 policy refused — for a read, expect 0 or 3).
+Extract from `.data`: `name`, `creditCount`, `isClaimed`, `workspaces[].email`,
 `auditStats.criticalIssues.tracksCount`, `auditStats.partialIssues.tracksCount`.
 
 If the profile is not claimed (`isClaimed: false` and no workspaces), the
@@ -78,13 +85,13 @@ and stop. Do NOT continue to Step 2.
 ### Step 2: Full credit list (Admin API, paginated)
 
 ```bash
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  --requester "$REQUESTER" \
-  call GET "/admin/profile/$PROFILE_ID/credits?limit=500&offset=0"
+muso api GET "/admin/profile/$PROFILE_ID/credits?limit=500&offset=0" \
+  --requester "$REQUESTER" --json
 ```
 
-Paginate with `offset` in 500-item increments until the response returns fewer
-than `limit` items. **Hard scope cap: 2000 credits.** If the profile has more
+The credit array is under `.data` (e.g. `jq -r '.data.items'` / `.data` —
+formerly `.body` on the wrapper). Paginate with `offset` in 500-item
+increments until the response returns fewer than `limit` items. **Hard scope cap: 2000 credits.** If the profile has more
 than 2000 credits, audit the 2000 most-popular tracks and declare the cap
 explicitly in the Slack post (*"capped at 2000 most-popular credits; N
 remaining unaudited"*). Do NOT silently truncate — per the HARD RULE on

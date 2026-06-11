@@ -15,7 +15,7 @@ Write correct, efficient Trino SQL queries for Muso.AI's OVH data platform (Hive
 |----------|---------|------------|
 | `hive."platform-industry-bi-prod"` | Industry analytics (main) | catalog_track, catalog_profile, stats_track_daily |
 | `postgresql_core.public` | Users, teams, subscriptions | public_users, public_teams, public_subscriptions |
-| `bi` | Business intelligence | marketing_*, reporting_weekly_* |
+| `postgresql_analytics.public` (legacy bare `"bi".`) | Business intelligence | marketing_*, reporting_weekly_* |
 | `hive.audit` | Catalog audits | audit_profile, audit_track, audit_isrc |
 | `postgresql_stats.public` | Streaming/analytics stats (live PG; legacy `platform-stats-export-prod`) | track_daily, profile_track, album_track |
 
@@ -595,26 +595,19 @@ SELECT LPAD(CAST(ipi AS VARCHAR), 11, '0') AS padded_ipi
 ### Running Queries
 
 ```bash
-# Start a query
-# RETIRED 2026-04-25 — use bash /opt/hydra/scripts/trino-query.sh "<SQL>" instead
-# (legacy: aws athena start-query-execution) \
-    --query-string "SELECT * FROM \"platform-industry-bi-prod\".matvw_catalog_profile LIMIT 10" \
-    --work-group primary \
-     \
-    
+# Run a query (synchronous; CSV to stdout). Use modern catalog.schema names —
+# muso query does NO legacy Athena→modern rewrite (errors carry the modern-name
+# hint; muso agent-docs has the legacy→modern table). For SQL with quotes/parens,
+# use the stdin heredoc form. For saved queries still on bare legacy names, run
+# bash /opt/hydra/scripts/trino-query.sh "<SQL>" (it still rewrites).
+muso query "SELECT * FROM hive.\"platform-industry-bi-prod\".matvw_catalog_profile LIMIT 10"
 
-# Check query status
-aws athena get-query-execution \
-    --query-execution-id QUERY_ID \
-     \
-    
+muso query - <<'SQL'
+SELECT * FROM hive."platform-industry-bi-prod".matvw_catalog_profile LIMIT 10
+SQL
 
-# Get results
-# RETIRED 2026-04-25 — Trino returns synchronously, no separate get-query-results step
-# (legacy: aws athena get-query-results) \
-    --query-execution-id QUERY_ID \
-     \
-    
+# RETIRED 2026-04-25 — Trino returns synchronously; no separate status/get-results step
+# (legacy: aws athena start-query-execution / get-query-execution / get-query-results)
 ```
 
 ### Exploring Resources
@@ -629,12 +622,15 @@ aws athena get-query-execution \
 # (legacy: aws athena get-named-query) --named-query-id QUERY_ID 
 
 # List Glue databases (91 databases)
-# RETIRED 2026-04-25 — use bash /opt/hydra/scripts/trino-query.sh "SHOW SCHEMAS FROM hive"
-# (legacy: aws glue get-databases) 
+# RETIRED 2026-04-25 — use: muso query "SHOW SCHEMAS FROM hive"
+# (legacy: aws glue get-databases)
 
 # Get tables in a database
-# RETIRED 2026-04-25 — use bash /opt/hydra/scripts/trino-query.sh "SHOW TABLES FROM <catalog>.<schema>"
-# (legacy: aws glue get-tables) --database-name platform-industry-bi-prod 
+# RETIRED 2026-04-25 — use the heredoc form (quoted schema name):
+#   muso query - <<'SQL'
+#   SHOW TABLES FROM hive."platform-industry-bi-prod"
+#   SQL
+# (legacy: aws glue get-tables --database-name platform-industry-bi-prod)
 ```
 
 ## Reusable CTEs & Patterns

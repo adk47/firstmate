@@ -8,8 +8,11 @@ description: |
 
   Triggers: "trino", "query", "sql", "stats", "streaming", "analytics", "data lake"
 compatibility: |
-  Use `bash /opt/hydra/scripts/trino-query.sh "<SQL>"` from node-8 (HYDRA host).
+  Run queries with `muso query "<SQL>"` from node-8 (main gateway / HYDRA host).
   AWS Athena was retired 2026-04-25; this skill targets the new OVH Trino cluster only.
+  NOTE: `muso query` does NO legacy Athena→modern name rewrites. Use modern
+  catalog.schema names; for SQL that still carries bare legacy names (see "Legacy
+  names: muso does no rewrites" below), keep `bash /opt/hydra/scripts/trino-query.sh`.
 metadata:
   version: "2.0"
   source-repo: "Muso-AI/muso-skills"
@@ -21,28 +24,58 @@ Write efficient, cost-aware Trino queries against Muso.AI's OVH data platform.
 
 ## Quick Start
 
-**Engine:** Trino on OVH | **Cluster:** `trino.data-processing.svc.cluster.local:8080` | **Wrapper:** `bash /opt/hydra/scripts/trino-query.sh "<SQL>"`
+**Engine:** Trino on OVH | **Cluster:** `trino.data-processing.svc.cluster.local:8080` | **Runner:** `muso query "<SQL>"` (CSV output)
 
 ### Trino access (replaces Athena)
 
 ```bash
-# Run a query (wrapper auto-rewrites legacy Athena DB names → Trino catalog.schema)
-bash /opt/hydra/scripts/trino-query.sh "SELECT * FROM hive."platform-industry-bi-prod".matvw_catalog_profile LIMIT 10"
+# Run a query (modern catalog.schema names; CSV to stdout)
+muso query "SELECT * FROM hive.\"platform-industry-bi-prod\".matvw_catalog_profile LIMIT 10"
+
+# SQL with quotes/parens → stdin heredoc (no shell escaping):
+muso query - <<'SQL'
+SELECT * FROM hive."platform-industry-bi-prod".matvw_catalog_profile LIMIT 10
+SQL
 
 # Discovery
-bash /opt/hydra/scripts/trino-query.sh "SHOW CATALOGS"
-bash /opt/hydra/scripts/trino-query.sh "SHOW SCHEMAS FROM hive"
-bash /opt/hydra/scripts/trino-query.sh "SHOW TABLES FROM hive."platform-industry-bi-prod""
-bash /opt/hydra/scripts/trino-query.sh "DESCRIBE hive."platform-industry-bi-prod".matvw_catalog_profile"
+muso query "SHOW CATALOGS"
+muso query "SHOW SCHEMAS FROM hive"
+muso query - <<'SQL'
+SHOW TABLES FROM hive."platform-industry-bi-prod"
+SQL
+muso query - <<'SQL'
+DESCRIBE hive."platform-industry-bi-prod".matvw_catalog_profile
+SQL
+
+# JSON rows instead of CSV:
+muso query --format json "SHOW CATALOGS"
 
 # Saved queries are checked into the repo at:
 ls /opt/hydra/skills-all/muso-query-writer/saved-queries/
 ```
 
+### Legacy names: muso does no rewrites
+
+`muso query` sends SQL to Trino verbatim — it does NOT auto-rewrite the legacy
+Athena DB names that `trino-query.sh` rewrites (`"platform-stats-export-prod"` →
+`postgresql_stats.public`, `"platform-feed/catalog/...-export-prod"`, bare `"bi".`
+→ `postgresql_analytics.public`, `hive.mlc.` → `hive."platform-industry-mlc-bi-prod"`,
+`"audit-prod"` → `hive.audit`, and the Glue `public_` table-name prefix). A query
+using a bare legacy name will fail; muso's error carries the modern-name hint, and
+`muso agent-docs` has the full legacy→modern table.
+
+- **New work / discovery:** use modern names with `muso query` (the examples in
+  this skill already use `hive."platform-industry-bi-prod"` and `postgresql_*`).
+- **Saved queries still on bare legacy names** (most of `saved-queries/` — e.g.
+  anything referencing `"platform-stats-export-prod"`, `"bi".`, `hive.mlc.`,
+  `"audit-prod"`): either modernize the names first, or run them through
+  `bash /opt/hydra/scripts/trino-query.sh "<SQL>"`, which still performs the
+  rewrite. trino-query.sh remains available for exactly this case.
+
 ### What changed from Athena (2026-04-25 cutover)
 - ❌ AWS Athena workgroups (`primary`, `data-engineering`, `growth-dev`) → ✅ Single Trino cluster
 - ❌ AWS Glue databases (91 of them) → ✅ `hive.*` schemas + `postgresql_*` connectors
-- ❌ `aws athena start-query-execution` (async, poll for results) → ✅ Synchronous `trino-query.sh`
+- ❌ `aws athena start-query-execution` (async, poll for results) → ✅ Synchronous `muso query`
 - ❌ `--profile muso-flagship-readonly --region us-west-2` → ✅ No AWS auth needed
 
 ### Most Used Tables
@@ -86,7 +119,7 @@ If Notion search is not available (tool not configured/allowed), do **not** ask 
 
 ## Mutations (Updates/Deletes)
 
-**Athena is READ-ONLY (SELECT only).** When users ask to UPDATE or change data:
+**Trino is READ-ONLY (SELECT only).** When users ask to UPDATE or change data:
 
 1. Look up the entity in muso-clio’s `references/data-model/source-map.md`
 2. Guide them to the correct system with a source link:
@@ -125,7 +158,7 @@ Credits link profiles to tracks with roles (producer, songwriter, engineer).
 | MongoDB Access | https://www.notion.so/adb0059a507743bd8120be793a6648df |
 
 **Example response for update requests:**
-> "Athena can't UPDATE data - it's read-only. Profile metadata lives in MongoDB (`catalog_profile` collection).
+> "Trino can't UPDATE data - it's read-only. Profile metadata lives in MongoDB (`catalog_profile` collection).
 > To change this profile's `profile_type` to 'Producer Collective, Artist':
 > - **Admin UI**: https://admin-production.muso.ai/ (if you have access)
 > - **MongoDB**: `db.catalog_profile.updateOne({_id: 'UUID'}, {$set: {profile_type: 'Producer Collective, Artist'}})`
@@ -133,9 +166,11 @@ Credits link profiles to tracks with roles (producer, songwriter, engineer).
 
 ## All Data Sources
 
-> **AWS Athena was retired 2026-04-25 → OVH Trino.** Query via `bash /opt/hydra/scripts/trino-query.sh "<SQL>"`.
-> The legacy Athena DB names below are auto-rewritten to their Trino `catalog.schema` (see the "Trino
-> reference" column); you may also write the Trino name directly.
+> **AWS Athena was retired 2026-04-25 → OVH Trino.** Query via `muso query "<SQL>"` (CSV output).
+> Use the modern Trino `catalog.schema` name (the "Trino reference" column below). `muso query`
+> does NOT rewrite the legacy Athena DB names — only `bash /opt/hydra/scripts/trino-query.sh "<SQL>"`
+> still does (use it for saved queries that carry bare legacy names). See "Legacy names: muso does
+> no rewrites" above.
 
 Data freshness: daily dumps in 99% of cases.
 
@@ -181,7 +216,7 @@ Data freshness: daily dumps in 99% of cases.
 1. **Always use `LIMIT`** when developing queries
 2. **Always filter by date** on `matvw_stats_track_daily` (3.3B rows!)
 3. **Always filter `is_deleted = false`** on catalog tables
-4. **Athena costs ~$5/TB scanned** - be mindful of table sizes
+4. **Mind table sizes** - unbounded scans on the big hive tables are slow on the Trino cluster (the old per-TB Athena billing is gone, but the wall-clock cost isn't)
 5. **Filter-before-join** - Filter stats in CTE *before* joining to profiles
 6. **Never join on names** - Resolve to IDs first, then query by ID
 7. **Use `approx_distinct()`** instead of `COUNT(DISTINCT)` on huge tables
