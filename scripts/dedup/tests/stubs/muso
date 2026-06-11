@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Stub for the muso CLI, covering the two surfaces the dedup scripts use:
+#   muso api GET <path> --json        -> {"data": {...}} on stdout, exit 0;
+#                                        unknown path -> error JSON on stderr, exit 3
+#   muso query --format json <sql|->  -> NDJSON rows (values as strings);
+#                                        unknown SQL -> empty stdout, exit 0
+# Mirrors the real contract: data only on stdout (no {http_status, body}
+# envelope), status via exit code.
+set -euo pipefail
+
+cmd="${1:-}"
+case "$cmd" in
+  api)
+    # The dedup detector is read-only: any non-GET reaching the stub is a
+    # policy violation the suite must catch, same as the old stub enforced.
+    if [ "${2:-}" != "GET" ]; then
+      echo '{"error":{"code":"bad_stub_call","message":"stub: dedup scripts must not issue '"${2:-}"' writes"}}' >&2
+      exit 1
+    fi
+    path="${3:-}"
+    case "$path" in
+      /admin/profile/aaaa-aaaa)
+        cat <<'EOF'
+{"data":{"id":"aaaa-aaaa","name":"Ali Zain","legalName":"","knownAsNames":[],"rawProfiles":[{"source":"spotify","id":"abc"}],"ipis":[],"popularity":50,"creditCount":38,"country":"US","isClaimed":true,"claiming":{"userId":"12345","status":"processed"}}}
+EOF
+        ;;
+      /admin/profile/bbbb-bbbb)
+        cat <<'EOF'
+{"data":{"id":"bbbb-bbbb","name":"Ali Z.","legalName":"","knownAsNames":[],"rawProfiles":[{"source":"spotify","id":"abc"}],"ipis":[],"popularity":12,"creditCount":7,"country":"US","isClaimed":false,"claiming":null}}
+EOF
+        ;;
+      /admin/profile/eeee-eeee)
+        cat <<'EOF'
+{"data":{"id":"eeee-eeee","name":"No IDs","legalName":"","knownAsNames":[],"rawProfiles":[],"ipis":[],"popularity":0,"creditCount":0,"country":"US","isClaimed":false,"claiming":null}}
+EOF
+        ;;
+      *)
+        echo '{"error":{"code":"not_found","message":"stub: unknown path '"$path"'"}}' >&2
+        exit 3
+        ;;
+    esac
+    ;;
+  query)
+    # argv: query --format json <sql>  (or `-` with SQL on stdin)
+    q="${4:-}"
+    [ "$q" = "-" ] && q=$(cat)
+    if [[ "$q" == *"contains(raw_profile_ids, 'spotify:abc')"* ]]; then
+      printf '{"_id":"bbbb-bbbb"}\n'
+    elif [[ "$q" == *"FROM postgresql_core.public.users WHERE lower(email)"* ]]; then
+      printf '{"id":"12345"}\n'
+    elif [[ "$q" == *"FROM postgresql_core.public.claiming"* ]]; then
+      printf '{"profileid":"aaaa-aaaa"}\n'
+    elif [[ "$q" == *"matvw_catalog_profile"* && "$q" == *"UNION ALL"* ]]; then
+      printf '{"cluster_kind":"raw_id","cluster_key":"spotify:abc","profile_ids":"aaaa-aaaa bbbb-bbbb","cluster_size":"2"}\n'
+    elif [[ "$q" == *"matvw_catalog_track"* && "$q" == *"contains(transform"* ]]; then
+      # shared-track-count.sh probe — stubbed pair has zero shared tracks.
+      printf '{"n":"0"}\n'
+    elif [[ "$q" == *"lower(name) = 'ali zain'"* ]]; then
+      # find-name-matches.sh probe. Order matters: highest-credit anchor first.
+      printf '{"_id":"aaaa-aaaa","name":"Ali Zain","credits_count":"38"}\n'
+      printf '{"_id":"bbbb-bbbb","name":"Ali Z.","credits_count":"7"}\n'
+    fi
+    ;;
+  *)
+    echo '{"error":{"code":"bad_stub_call","message":"stub: unsupported command '"$cmd"'"}}' >&2
+    exit 1
+    ;;
+esac

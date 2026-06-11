@@ -5,7 +5,7 @@
 set -euo pipefail
 
 self_id="${1:?usage: find-siblings.sh <profile_uuid> < canonical.json}"
-trino="${TRINO_QUERY:-/opt/hydra/scripts/trino-query.sh}"
+muso_bin="${MUSO_BIN:-muso}"
 
 profile=$(cat)
 raw_ids=$(echo "$profile" | jq -r '.raw_ids[]?' | sort -u)
@@ -16,13 +16,13 @@ emit_for_raw() {
   local esc="${rid//\'/\'\'}"
   local err out
   err=$(mktemp)
-  if ! out=$("$trino" "SELECT _id FROM \"platform-industry-bi-prod\".matvw_catalog_profile WHERE contains(raw_profile_ids, '$esc') AND _id <> '$self_id' AND is_deleted = false" 2>"$err"); then
+  if ! out=$("$muso_bin" query --format json "SELECT _id FROM hive.\"platform-industry-bi-prod\".matvw_catalog_profile WHERE contains(raw_profile_ids, '$esc') AND _id <> '$self_id' AND is_deleted = false" 2>"$err"); then
     echo "find-siblings: trino failed on raw_id='$rid': $(head -2 "$err")" >&2
     rm -f "$err"
     return 4
   fi
   rm -f "$err"
-  echo "$out" | tr -d '"' | grep -v '^$' || true
+  echo "$out" | jq -r '._id // empty'
 }
 
 emit_for_ipi() {
@@ -38,13 +38,13 @@ emit_for_ipi() {
   fi
   local err out
   err=$(mktemp)
-  if ! out=$("$trino" "SELECT _id FROM \"platform-industry-bi-prod\".matvw_catalog_profile WHERE contains(ipis, BIGINT '$ipi') AND _id <> '$self_id' AND is_deleted = false" 2>"$err"); then
+  if ! out=$("$muso_bin" query --format json "SELECT _id FROM hive.\"platform-industry-bi-prod\".matvw_catalog_profile WHERE contains(ipis, BIGINT '$ipi') AND _id <> '$self_id' AND is_deleted = false" 2>"$err"); then
     echo "find-siblings: trino failed on ipi='$ipi': $(head -2 "$err")" >&2
     rm -f "$err"
     return 4
   fi
   rm -f "$err"
-  echo "$out" | tr -d '"' | grep -v '^$' || true
+  echo "$out" | jq -r '._id // empty'
 }
 
 # Drive each lookup; if any subcall returns 4 (trino failure), propagate

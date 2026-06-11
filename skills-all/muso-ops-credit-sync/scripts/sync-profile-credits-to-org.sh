@@ -31,7 +31,7 @@
 # lines skipped). The role column is required, same semantics as --as-role.
 #
 # Env:
-#   ADMIN_API_SCRIPT  override path to muso-admin-api.sh (tests)
+#   MUSO_BIN          override path to the muso CLI (tests)
 #   SYNC_PAGE_LIMIT   credits-list page size (default 500; tests shrink it)
 #   SYNC_SLEEP_SECS   pause between credit POSTs (default 0.2)
 #
@@ -42,7 +42,7 @@ set -euo pipefail
 
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 required but not found" >&2; exit 1; }
 
-ADMIN_API_SCRIPT="${ADMIN_API_SCRIPT:-${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh}"
+MUSO_BIN="${MUSO_BIN:-muso}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ALLOWED_ROLES_FILE="${ALLOWED_ROLES_FILE:-${SCRIPT_DIR}/../config/allowed-org-roles.txt}"
 SYNC_PAGE_LIMIT="${SYNC_PAGE_LIMIT:-500}"
@@ -73,7 +73,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -f "$ADMIN_API_SCRIPT" ]] || { echo "ERROR: muso-admin-api.sh not found at ${ADMIN_API_SCRIPT}" >&2; exit 1; }
+command -v "$MUSO_BIN" >/dev/null 2>&1 || { echo "ERROR: muso CLI not found (MUSO_BIN=${MUSO_BIN})" >&2; exit 1; }
 
 if [[ -n "$PAIRS_FILE" ]]; then
     [[ -z "$FROM_ID" && -z "$TO_ID" && -z "$AS_ROLE" ]] || { echo "ERROR: --pairs-file is mutually exclusive with --from/--to/--as-role" >&2; exit 1; }
@@ -85,43 +85,51 @@ else
     [[ -n "$AS_ROLE" ]] || { echo "ERROR: --as-role is required (a role like 'Studio', or the explicit keyword 'verbatim')" >&2; exit 1; }
 fi
 
+# muso's write gate refuses requester-less POSTs (exit 5). Catch it here,
+# not after the reads + diff have already run — on a Colin-scale pair that
+# would be ~10k guaranteed-refused POSTs before the exit-2 report.
+if [[ "$DRY_RUN" -eq 0 && -z "$REQUESTER" ]]; then
+    echo "ERROR: --requester is required for a live run (writes carry attribution)" >&2
+    exit 1
+fi
+
 api() {
     local method="$1" path="$2"
-    if [[ -n "$REQUESTER" ]]; then
-        bash "$ADMIN_API_SCRIPT" --requester "$REQUESTER" call "$method" "$path" "${3:-}"
-    else
-        bash "$ADMIN_API_SCRIPT" call "$method" "$path" "${3:-}"
-    fi
+    local args=("$MUSO_BIN" api "$method" "$path" --json)
+    [[ -n "${3:-}" ]] && args+=(--data "$3")
+    # Attribution parity with the old wrapper: requester rides on every
+    # call, reads included (muso accepts it on GET — verified live
+    # 2026-06-11), so ActionLog keeps naming the driving human.
+    [[ -n "$REQUESTER" ]] && args+=(--requester "$REQUESTER")
+    "${args[@]}"
 }
 
-# muso-admin-api.sh always exits 0 and wraps responses in
-# {"http_status": N, "body": <json>} (or {"http_status": N, "raw": "<text>"}
-# when the body isn't JSON). Unwrap: print the inner body on 2xx, fail
-# otherwise — exit codes alone are NOT evidence the call succeeded.
-unwrap_envelope() {
+# muso api prints the bare response ({"data": ...}) on stdout and signals
+# failure via exit code, with a one-line error JSON on stderr (which flows
+# straight to the operator log). Exit-code success alone is still NOT
+# evidence: require a parseable, non-empty JSON object on stdout before
+# treating the call as succeeded — the per-endpoint parsers downstream then
+# enforce their exact shapes.
+require_json_object() {
     python3 -c '
 import json, sys
 ctx = sys.argv[1]
+raw = sys.stdin.read()
+if not raw.strip():
+    print(f"ERROR: {ctx}: empty muso api response (call failed — see the "
+          f"muso error above)", file=sys.stderr)
+    sys.exit(1)
 try:
-    env = json.load(sys.stdin)
+    body = json.loads(raw)
 except Exception as e:
-    print(f"ERROR: {ctx}: admin API response is not JSON ({e})", file=sys.stderr)
+    print(f"ERROR: {ctx}: muso api response is not JSON ({e}): {raw[:200]}",
+          file=sys.stderr)
     sys.exit(1)
-if not isinstance(env, dict) or "http_status" not in env:
-    print(f"ERROR: {ctx}: expected the muso-admin-api.sh envelope "
-          f"{{http_status, body}}, got: {str(env)[:200]}", file=sys.stderr)
+if not isinstance(body, dict) or not body:
+    print(f"ERROR: {ctx}: expected a non-empty JSON object from muso api, "
+          f"got: {str(body)[:200]}", file=sys.stderr)
     sys.exit(1)
-status = env["http_status"]
-if not (isinstance(status, int) and 200 <= status < 300):
-    detail = env.get("body", env.get("raw"))
-    print(f"ERROR: {ctx}: HTTP {status} — {json.dumps(detail)[:300]}", file=sys.stderr)
-    sys.exit(1)
-if "body" not in env:
-    raw = str(env.get("raw"))[:200]
-    print(f"ERROR: {ctx}: HTTP {status} but the response body is not JSON "
-          f"(raw: {raw}) — refusing to treat as success", file=sys.stderr)
-    sys.exit(1)
-json.dump(env["body"], sys.stdout)
+json.dump(body, sys.stdout)
 ' "$1"
 }
 
@@ -129,14 +137,14 @@ json.dump(env["body"], sys.stdout)
 # non-2xx status, unexpected shape, or a merged-away profile.
 resolve_profile() {
     local id="$1" body
-    if ! body="$(api GET "/admin/profile/${id}" | unwrap_envelope "profile ${id}")"; then
+    if ! body="$(api GET "/admin/profile/${id}" | require_json_object "profile ${id}")"; then
         echo "ERROR: failed to resolve profile ${id} (see the error above for the actual cause)" >&2
         return 1
     fi
     printf '%s' "$body" | python3 -c '
 import json, sys
 pid = sys.argv[1]
-p = json.load(sys.stdin)  # always unwrap_envelope output, valid JSON
+p = json.load(sys.stdin)  # always require_json_object output, valid JSON
 if isinstance(p, dict) and isinstance(p.get("data"), dict):
     p = p["data"]
 if not isinstance(p, dict) or not p:
@@ -155,8 +163,8 @@ print(f"{name}\t{count}")
 }
 
 # Page through /admin/profile/<id>/credits and emit one "track_id<TAB>role"
-# line per credit. Live contract (verified 2026-06-10): the unwrapped body is
-# {result, code, data: {items: [...], limit, offset, total}}; each item has
+# line per credit. Live contract (verified 2026-06-11 via muso): stdout is
+# {data: {items: [...], limit, offset, total}}; each item has
 # id (= trackId) and credits = non-empty list of role STRINGS. The parser is
 # deliberately STRICT — exactly this shape, nothing else — so any backend
 # contract change hits the loud error path instead of being half-parsed and
@@ -171,14 +179,14 @@ fetch_credit_pairs() {
     local id="$1" page_no=1 collected=0 page out meta items_on_page total
     while :; do
         if ! page="$(api GET "/admin/profile/${id}/credits?limit=${SYNC_PAGE_LIMIT}&page=${page_no}" \
-            | unwrap_envelope "credits page for ${id} page=${page_no}")"; then
+            | require_json_object "credits page for ${id} page=${page_no}")"; then
             echo "ERROR: GET /admin/profile/${id}/credits page=${page_no} failed" >&2
             return 1
         fi
         out="$(printf '%s' "$page" | python3 -c '
 import json, sys
 pid, where = sys.argv[1], sys.argv[2]
-body = json.load(sys.stdin)  # always unwrap_envelope output, valid JSON
+body = json.load(sys.stdin)  # always require_json_object output, valid JSON
 def die(msg):
     print(f"ERROR: credits page for {pid} {where}: {msg}", file=sys.stderr)
     sys.exit(1)
@@ -280,7 +288,7 @@ sync_pair() {
                 memo_body="$(python3 -c 'import json,sys; print(json.dumps({"role": sys.argv[1]}))' "$role")"
             fi
             if api POST "/admin/track/${track_id}/profile/${to_id}/credits" "$memo_body" \
-                | unwrap_envelope "add credit track=${track_id}" >/dev/null; then
+                | require_json_object "add credit track=${track_id}" >/dev/null; then
                 added=$(( added + 1 ))
             else
                 failed=$(( failed + 1 ))

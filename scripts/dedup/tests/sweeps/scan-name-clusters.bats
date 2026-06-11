@@ -15,24 +15,24 @@ teardown() {
   rm -rf "$TMP"
 }
 
-make_trino_stub() {
+make_muso_stub() {
   # First call (the name-bucket query): emit a fixed set of clusters.
   # Stub does NOT receive sub-find-name-matches queries because those will be
   # routed through the stubbed find-dupes binary.
-  cat > "$TMP/trino-stub.sh" <<'EOF'
+  # Invoked as: muso query --format json <sql> — SQL is argv[4]; NDJSON rows.
+  cat > "$TMP/muso-stub" <<'EOF'
 #!/usr/bin/env bash
-sql="${1:-}"
+sql="${4:-}"
 if echo "$sql" | grep -q 'GROUP BY lower(name)'; then
-  # name, cluster_size
-  echo '"ali zain","8"'
-  echo '"empire","30"'
-  echo '"john smith","3"'
+  echo '{"bucket":"ali zain","sz":"8"}'
+  echo '{"bucket":"empire","sz":"30"}'
+  echo '{"bucket":"john smith","sz":"3"}'
   exit 0
 fi
 echo "stub: unexpected SQL: $sql" >&2
 exit 7
 EOF
-  chmod +x "$TMP/trino-stub.sh"
+  chmod +x "$TMP/muso-stub"
 }
 
 make_find_dupes_stub() {
@@ -47,10 +47,10 @@ EOF
 }
 
 @test "scan-name-clusters --dry-run emits one find-dupes call per safe-sized cluster" {
-  make_trino_stub
+  make_muso_stub
   make_find_dupes_stub
   export SCAN_STUB_LOG="$TMP/log"
-  TRINO_QUERY="$TMP/trino-stub.sh" run bash "$SWEEP" --max-cluster-size 20 --dry-run
+  MUSO_BIN="$TMP/muso-stub" run bash "$SWEEP" --max-cluster-size 20 --dry-run
   [ "$status" -eq 0 ]
   # Expect 2 invocations: ali zain (8) and john smith (3). empire (30) is over the cap.
   [ "$(grep -c '^--name' "$TMP/log")" -eq 2 ]
@@ -60,19 +60,19 @@ EOF
 }
 
 @test "scan-name-clusters reports skipped oversized clusters on stderr" {
-  make_trino_stub
+  make_muso_stub
   make_find_dupes_stub
   export SCAN_STUB_LOG="$TMP/log"
-  TRINO_QUERY="$TMP/trino-stub.sh" run bash -c "bash '$SWEEP' --max-cluster-size 20 --dry-run 2>&1 >/dev/null"
+  MUSO_BIN="$TMP/muso-stub" run bash -c "bash '$SWEEP' --max-cluster-size 20 --dry-run 2>&1 >/dev/null"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "skipping.*empire.*30"
 }
 
 @test "scan-name-clusters emits dupe JSONL on stdout from find-dupes invocations" {
-  make_trino_stub
+  make_muso_stub
   make_find_dupes_stub
   export SCAN_STUB_LOG="$TMP/log"
-  TRINO_QUERY="$TMP/trino-stub.sh" run bash "$SWEEP" --max-cluster-size 20 --dry-run
+  MUSO_BIN="$TMP/muso-stub" run bash "$SWEEP" --max-cluster-size 20 --dry-run
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"search_name":"ali zain"'
   echo "$output" | grep -q '"search_name":"john smith"'
@@ -82,23 +82,23 @@ EOF
   make_find_dupes_stub
   export SCAN_STUB_LOG="$TMP/log"
   # Custom stub that asserts on LIMIT.
-  cat > "$TMP/trino-stub.sh" <<'EOF'
+  cat > "$TMP/muso-stub" <<'EOF'
 #!/usr/bin/env bash
-sql="${1:-}"
+sql="${4:-}"
 if echo "$sql" | grep -q "LIMIT 7"; then
-  echo '"ali zain","2"'
+  echo '{"bucket":"ali zain","sz":"2"}'
 fi
 EOF
-  chmod +x "$TMP/trino-stub.sh"
-  TRINO_QUERY="$TMP/trino-stub.sh" run bash "$SWEEP" --top-n 7 --dry-run
+  chmod +x "$TMP/muso-stub"
+  MUSO_BIN="$TMP/muso-stub" run bash "$SWEEP" --top-n 7 --dry-run
   [ "$status" -eq 0 ]
   grep -q "^--name ali zain " "$TMP/log"
 }
 
 @test "scan-name-clusters rejects non-numeric --max-cluster-size" {
-  make_trino_stub
+  make_muso_stub
   make_find_dupes_stub
-  TRINO_QUERY="$TMP/trino-stub.sh" run bash "$SWEEP" --max-cluster-size abc
+  MUSO_BIN="$TMP/muso-stub" run bash "$SWEEP" --max-cluster-size abc
   [ "$status" -ne 0 ]
   echo "$output" | grep -qi "max-cluster-size.*integer\|max-cluster-size.*number"
 }

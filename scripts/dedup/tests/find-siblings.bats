@@ -15,28 +15,29 @@ teardown() {
   rm -rf "$TMP"
 }
 
-make_trino_stub() {
-  # Args: comma-separated tokens to fail on. Stub exits 4 on those and
-  # returns a fake sibling for any other query.
+make_muso_stub() {
+  # Args: comma-separated tokens to fail on. Stub exits 1 on those and
+  # returns a fake sibling NDJSON row for any other query.
+  # Invoked as: muso query --format json <sql> — SQL is argv[4].
   local fail_tokens="$1"
-  cat > "$TMP/trino-stub.sh" <<EOF
+  cat > "$TMP/muso-stub" <<EOF
 #!/usr/bin/env bash
-q="\${1:-}"
+q="\${4:-}"
 for tok in $fail_tokens; do
   if echo "\$q" | grep -qF "\$tok"; then
     echo "stub: forced trino failure on \$tok" >&2
-    exit 4
+    exit 1
   fi
 done
-echo '"sibling-fake-uuid"'
+echo '{"_id":"sibling-fake-uuid"}'
 EOF
-  chmod +x "$TMP/trino-stub.sh"
-  echo "$TMP/trino-stub.sh"
+  chmod +x "$TMP/muso-stub"
+  echo "$TMP/muso-stub"
 }
 
 @test "find-siblings exits 4 when Trino fails on a raw_id lookup" {
-  TRINO_QUERY=$(make_trino_stub "spotify:abc")
-  export TRINO_QUERY
+  MUSO_BIN=$(make_muso_stub "spotify:abc")
+  export MUSO_BIN
   profile='{"id":"self","raw_ids":["spotify:abc","tidal:xyz"],"ipis":[]}'
   run bash -c "echo '$profile' | bash '$SIB' self"
   [ "$status" -eq 4 ]
@@ -45,8 +46,8 @@ EOF
 }
 
 @test "find-siblings exits 0 when all Trino lookups succeed" {
-  TRINO_QUERY=$(make_trino_stub "NEVER_FAIL")
-  export TRINO_QUERY
+  MUSO_BIN=$(make_muso_stub "NEVER_FAIL")
+  export MUSO_BIN
   profile='{"id":"self","raw_ids":["spotify:abc"],"ipis":[]}'
   run bash -c "echo '$profile' | bash '$SIB' self"
   [ "$status" -eq 0 ]
@@ -54,8 +55,8 @@ EOF
 }
 
 @test "find-siblings exits 0 when profile has no external IDs (clean no-op)" {
-  TRINO_QUERY=$(make_trino_stub "NEVER_FAIL")
-  export TRINO_QUERY
+  MUSO_BIN=$(make_muso_stub "NEVER_FAIL")
+  export MUSO_BIN
   profile='{"id":"self","raw_ids":[],"ipis":[]}'
   run bash -c "echo '$profile' | bash '$SIB' self"
   [ "$status" -eq 0 ]
@@ -63,8 +64,8 @@ EOF
 }
 
 @test "find-siblings soft-skips non-numeric IPI without exiting 4" {
-  TRINO_QUERY=$(make_trino_stub "NEVER_FAIL")
-  export TRINO_QUERY
+  MUSO_BIN=$(make_muso_stub "NEVER_FAIL")
+  export MUSO_BIN
   profile='{"id":"self","raw_ids":["spotify:abc"],"ipis":["12345","not-a-number"]}'
   run bash -c "echo '$profile' | bash '$SIB' self"
   [ "$status" -eq 0 ]

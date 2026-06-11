@@ -3,9 +3,8 @@
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"
   STUBS="$REPO_ROOT/scripts/dedup/tests/stubs"
-  chmod +x "$STUBS"/*.sh
-  export MUSO_ADMIN_API="$STUBS/muso-admin-api.sh"
-  export TRINO_QUERY="$STUBS/trino-query.sh"
+  chmod +x "$STUBS"/*
+  export MUSO_BIN="$STUBS/muso"
   CLI="$REPO_ROOT/scripts/dedup/find-dupes.sh"
 }
 
@@ -60,4 +59,32 @@ setup() {
   run bash "$CLI" --name "Ali Zain" --anchor bbbb-bbbb
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.anchor_profile_id')" = "bbbb-bbbb" ]
+}
+
+@test "fetch-profile exits 4 when muso exits non-zero (auth/transport failure)" {
+  stub_dir=$(mktemp -d)
+  cat > "$stub_dir/muso" <<'STUB'
+#!/usr/bin/env bash
+echo '{"error":{"code":"auth_required","message":"not logged in"}}' >&2
+exit 4
+STUB
+  chmod +x "$stub_dir/muso"
+  MUSO_BIN="$stub_dir/muso" run bash "$REPO_ROOT/scripts/dedup/lib/fetch-profile.sh" aaaa-aaaa
+  rm -rf "$stub_dir"
+  [ "$status" -eq 4 ]
+  echo "$output" | grep -q "muso api call failed"
+}
+
+@test "fetch-profile exits 4 on exit-0 response without a .data object (phantom-sibling guard)" {
+  stub_dir=$(mktemp -d)
+  cat > "$stub_dir/muso" <<'STUB'
+#!/usr/bin/env bash
+echo '{"items":[],"count":0}'
+exit 0
+STUB
+  chmod +x "$stub_dir/muso"
+  MUSO_BIN="$stub_dir/muso" run bash "$REPO_ROOT/scripts/dedup/lib/fetch-profile.sh" aaaa-aaaa
+  rm -rf "$stub_dir"
+  [ "$status" -eq 4 ]
+  echo "$output" | grep -q "no .data object"
 }

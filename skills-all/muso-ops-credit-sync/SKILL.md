@@ -101,12 +101,13 @@ or typo'd role column can never POST a bogus role. Adding a pair or a role =
 a PR editing those files; never edit them live on the server without a
 hot-patch announce.
 
-GOTCHA — `ADMIN_API_SCRIPT` on node-8: the managed-skills copy of
-muso-ops-admin (under the profile state dir's `skills/` tree) has NO
-`config/` dir (deliberate deploy exception), so its tier-2 gate fail-closes
-every call. On node-8 always pin
-`ADMIN_API_SCRIPT=/opt/hydra/skills-all/muso-ops-admin/scripts/muso-admin-api.sh`
-(the cron payload already does).
+The script talks to the admin API through the `muso` CLI (`MUSO_BIN`
+overrides the path; tests use it). muso reads its prod auth from the
+gateway env — for ad-hoc SSH runs `source /etc/openclaw/main.env` first,
+otherwise muso targets api-dev unauthenticated and every call exits 4.
+Writes carry `--requester` and pass muso's write gate + codex-health
+prewrite hook; a policy refusal (exit 5) surfaces as a failed pair, never
+a silent skip.
 
 ### Report results
 

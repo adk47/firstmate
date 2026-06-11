@@ -48,7 +48,7 @@ SELECT
 FROM postgresql_core.public.subscriptions s
 JOIN postgresql_core.public.users u
   ON u.id = s.userid
-LEFT JOIN "platform-industry-bi-prod".matvw_catalog_profile p
+LEFT JOIN hive."platform-industry-bi-prod".matvw_catalog_profile p
   ON p._id = u.neptuneprofessionalid AND COALESCE(p.is_deleted,false) = false
 WHERE s.status = 'cancelled'
   AND s.updatedat > TIMESTAMP '__CUTOFF__'

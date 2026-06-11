@@ -15,7 +15,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$DIR/../../.." && pwd)"
 FIND_DUPES="${DEDUP_FIND_DUPES_BIN:-$REPO_ROOT/scripts/dedup/find-dupes.sh}"
-TRINO="${TRINO_QUERY:-/opt/hydra/scripts/trino-query.sh}"
+MUSO="${MUSO_BIN:-muso}"
 
 top_n="200"
 max_cluster_size="50"
@@ -48,7 +48,7 @@ Output: JSONL on stdout — one row per pair that find-dupes.sh classifies
 as hard_dupe or candidate_dupe.
 
 Env:
-  TRINO_QUERY            override trino-query.sh path
+  MUSO_BIN               override muso CLI path (used by tests)
   DEDUP_FIND_DUPES_BIN   override find-dupes.sh path (used by tests)
 EOF
 }
@@ -79,7 +79,7 @@ done
 # would skip anyway. Order by size DESC within the band so the biggest
 # scoreable clusters surface first.
 sql="SELECT lower(name) AS bucket, count(*) AS sz
-FROM \"platform-industry-bi-prod\".matvw_catalog_profile
+FROM hive.\"platform-industry-bi-prod\".matvw_catalog_profile
 WHERE is_deleted = false AND name IS NOT NULL AND name <> ''
 GROUP BY lower(name)
 HAVING count(*) BETWEEN $min_cluster_size AND $max_cluster_size
@@ -88,18 +88,18 @@ LIMIT $top_n"
 
 err=$(mktemp)
 trap 'rm -f "$err"' EXIT
-if ! buckets=$("$TRINO" "$sql" 2>"$err"); then
+if ! buckets=$("$MUSO" query --format json "$sql" 2>"$err"); then
   echo "scan-name-clusters: trino bucket query failed: $(head -3 "$err")" >&2
   exit 4
 fi
 
-# Parse CSV: "name","count". Single-quote-escape isn't needed here — the
-# name field flows back into find-dupes.sh as an argv element, not raw SQL,
-# and find-name-matches.sh does its own escaping.
+# Parse NDJSON rows: {bucket, sz}. Single-quote-escape isn't needed here —
+# the name field flows back into find-dupes.sh as an argv element, not raw
+# SQL, and find-name-matches.sh does its own escaping.
 while IFS= read -r line; do
   [ -z "$line" ] && continue
-  name=$(echo "$line" | awk -F'","' '{ gsub(/^"/, "", $1); print $1 }')
-  size=$(echo "$line" | awk -F'","' '{ gsub(/"$/, "", $2); print $2 }')
+  name=$(jq -r '.bucket // empty' <<<"$line" 2>/dev/null) || name=""
+  size=$(jq -r '.sz // empty' <<<"$line" 2>/dev/null) || size=""
   if ! [[ "$size" =~ ^[0-9]+$ ]]; then
     echo "scan-name-clusters: warn: unparseable cluster row '$line'" >&2
     continue

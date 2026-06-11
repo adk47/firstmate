@@ -1,6 +1,6 @@
 WITH unnested_raw AS (
   SELECT _id AS profile_id, raw_id
-  FROM "platform-industry-bi-prod".matvw_catalog_profile
+  FROM hive."platform-industry-bi-prod".matvw_catalog_profile
   CROSS JOIN UNNEST(raw_profile_ids) AS t(raw_id)
   WHERE is_deleted = false
     AND raw_profile_ids IS NOT NULL
@@ -8,7 +8,7 @@ WITH unnested_raw AS (
 ),
 unnested_ipi AS (
   SELECT _id AS profile_id, CAST(ipi AS VARCHAR) AS ipi
-  FROM "platform-industry-bi-prod".matvw_catalog_profile
+  FROM hive."platform-industry-bi-prod".matvw_catalog_profile
   CROSS JOIN UNNEST(ipis) AS t(ipi)
   WHERE is_deleted = false
     AND ipis IS NOT NULL

@@ -21,9 +21,10 @@ depends-on:
   - muso-ops-profiles
   - muso-ops-admin
 compatibility: |
-  Requires: muso-ops-admin (for the post-detect merge handoff), Trino access
-  via /opt/hydra/scripts/trino-query.sh, ClickUp + Intercom tokens in
-  gateway env (CLICKUP_API_KEY, MUSOAI_INTERCOM_TOKEN).
+  Requires: muso-ops-admin (for the post-detect merge handoff), the muso
+  CLI (admin API + Trino via `muso query`; prod env from the gateway),
+  ClickUp + Intercom tokens in gateway env (CLICKUP_API_KEY,
+  MUSOAI_INTERCOM_TOKEN).
 metadata:
   version: "0.1"
   source-repo: "Muso-AI/hydra"

@@ -13,17 +13,15 @@ Spec: `docs/superpowers/specs/2026-05-18-profile-dedup-detector-design.md`
 
 Output: JSONL on stdout, one detected pair per line.
 
-Requires `MUSO_ADMIN_EMAIL`+`MUSO_ADMIN_PASSWORD` (consumed by
-`skills-all/muso-ops-admin/scripts/muso-admin-api.sh`, which caches the JWT
-to a local file), `MUSO_API_URL`, and Trino access via
-`scripts/trino-query.sh`. On hydra these all come from the gateway service
-env.
+Requires the `muso` CLI with prod auth in the environment
+(`MUSO_ADMIN_EMAIL`, `MUSO_ADMIN_PASSWORD`, `MUSO_ENV=prod`). On hydra the
+gateway service env carries these; for ad-hoc SSH runs
+`source /etc/openclaw/main.env` first — without it muso targets api-dev
+unauthenticated and the admin calls exit 4.
 
-Override paths via env if non-default locations apply:
+Override the CLI path via env if a non-default location applies:
 
-    MUSO_ADMIN_API=/opt/hydra/skills-all/muso-ops-admin/scripts/muso-admin-api.sh
-    TRINO_QUERY=/opt/hydra/scripts/trino-query.sh
-    TIER2_ENDPOINTS_PATH=/opt/hydra/workspaces/operations/skills/muso-ops-admin/config/tier2-endpoints.txt
+    MUSO_BIN=/usr/local/bin/muso
 
 ## Validation runs
 

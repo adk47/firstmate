@@ -6,7 +6,7 @@ set -euo pipefail
 
 a="${1:?usage: shared-track-count.sh <profile_a> <profile_b>}"
 b="${2:?usage: shared-track-count.sh <profile_a> <profile_b>}"
-trino="${TRINO_QUERY:-/opt/hydra/scripts/trino-query.sh}"
+muso_bin="${MUSO_BIN:-muso}"
 
 esc_a="${a//\'/\'\'}"
 esc_b="${b//\'/\'\'}"
@@ -15,12 +15,12 @@ esc_b="${b//\'/\'\'}"
 # "Trino blew up". Caller must check exit code, not just stdout.
 err=$(mktemp)
 trap 'rm -f "$err"' EXIT
-raw=$("$trino" "
-  SELECT count(*) FROM \"platform-industry-bi-prod\".matvw_catalog_track t
+raw=$("$muso_bin" query --format json "
+  SELECT count(*) AS n FROM hive.\"platform-industry-bi-prod\".matvw_catalog_track t
   WHERE contains(transform(t.profiles, p -> p.profile_id), '$esc_a')
     AND contains(transform(t.profiles, p -> p.profile_id), '$esc_b')
     AND is_deleted = false
-" 2>"$err" | tr -d '"' | grep -v '^$' | head -1) || {
+" 2>"$err" | jq -r '.n // empty') || {
   echo "shared-track-count: trino failed for ($a, $b): $(head -3 "$err")" >&2
   exit 4
 }

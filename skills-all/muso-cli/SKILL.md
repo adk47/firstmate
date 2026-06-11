@@ -128,6 +128,13 @@ fix. Exit codes: 0 ok · 1 error · 2 cancelled · 3 not found · 4 auth require
 | output `{http_status, body}` , always exit 0 | `{"data": ...}` on stdout, status via exit code |
 | `jq -r '.body.items'` | `jq -r '.data.items'` |
 | `bash trino-query.sh "<SQL>"` | `muso query "<SQL>"` (no legacy Athena name rewrites — errors carry the modern-name hint; see agent-docs table) |
+| trino-query.sh CSV: headerless, quoted fields | `muso query` CSV: header row, unquoted — scripts should prefer `--format json` (NDJSON, one object per row, values as strings) over re-parsing CSV |
+
+ActionLog attribution: the wrapper stamps admin-API writes with `Service: clio`;
+muso stamps `Service: muso-cli`. Any `action_log` query that attributes writes
+to Clio must filter `service IN ('clio', 'muso-cli')`, never `'clio'` alone
+(verified 2026-06-11: no in-repo consumer filters on `'clio'` today — keep it
+that way or use the pair).
 
 ## Troubleshooting
 

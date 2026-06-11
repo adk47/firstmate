@@ -16,7 +16,7 @@
 # detector already uses everywhere else.
 set -euo pipefail
 
-trino="${TRINO_QUERY:-/opt/hydra/scripts/trino-query.sh}"
+muso_bin="${MUSO_BIN:-muso}"
 
 name=""
 limit="50"
@@ -58,7 +58,7 @@ lower=$(printf %s "$name" | tr '[:upper:]' '[:lower:]')
 esc=$(printf %s "$lower" | sed "s/'/''/g")
 
 sql="SELECT _id, name, credits_count
-FROM \"platform-industry-bi-prod\".matvw_catalog_profile
+FROM hive.\"platform-industry-bi-prod\".matvw_catalog_profile
 WHERE lower(name) = '$esc'
   AND is_deleted = false
 ORDER BY credits_count DESC
@@ -67,13 +67,10 @@ LIMIT $limit"
 err=$(mktemp)
 trap 'rm -f "$err"' EXIT
 
-if ! out=$("$trino" "$sql" 2>"$err"); then
+if ! out=$("$muso_bin" query --format json "$sql" 2>"$err"); then
   echo "find-name-matches: trino failed: $(head -3 "$err")" >&2
   exit 4
 fi
 
-# trino-query.sh emits CSV without a header. Extract the first column.
-# `grep -v` returns 1 when every line is filtered out (no matches); guard
-# with `|| true` so a clean empty result doesn't crash under pipefail.
-printf %s "$out" \
-  | awk -F, 'NF > 0 && $1 != "" { gsub(/"/, "", $1); print $1 }'
+# muso query --format json emits NDJSON, one object per row. Extract _id.
+printf '%s\n' "$out" | jq -r '._id // empty'

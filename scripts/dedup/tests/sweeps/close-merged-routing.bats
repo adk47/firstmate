@@ -49,15 +49,16 @@ exit 0
 CURLEOF
   chmod +x "$STAGE/bin/curl"
 
-  # Stub trino: emits one merge per ticket profile_id so all three match.
-  cat > "$STAGE/bin/trino-query.sh" <<'TRINOEOF'
+  # Stub muso: emits one merge per ticket profile_id so all three match.
+  # Real call shape: muso query --format json - (SQL on stdin) -> NDJSON.
+  cat > "$STAGE/bin/muso-stub" <<'MUSOEOF'
 #!/usr/bin/env bash
-# CSV format: mergeInto,profilesIds,at  (header omitted)
-echo 'P_REPLIED,[],"2026-05-15 12:00:00.000 UTC"'
-echo 'P_NOTOLD,[],"2026-05-15 12:00:00.000 UTC"'
-echo 'P_ERR,[],"2026-05-15 12:00:00.000 UTC"'
-TRINOEOF
-  chmod +x "$STAGE/bin/trino-query.sh"
+[ "${4:-}" = "-" ] && cat >/dev/null   # drain the stdin SQL
+echo '{"merge_into":"P_REPLIED","profiles_ids":"[]","at":"2026-05-15 12:00:00.000 UTC"}'
+echo '{"merge_into":"P_NOTOLD","profiles_ids":"[]","at":"2026-05-15 12:00:00.000 UTC"}'
+echo '{"merge_into":"P_ERR","profiles_ids":"[]","at":"2026-05-15 12:00:00.000 UTC"}'
+MUSOEOF
+  chmod +x "$STAGE/bin/muso-stub"
 
   # Stub audit binary: route by email.
   cat > "$STAGE/bin/audit-stub.py" <<'AUDITEOF'
@@ -81,7 +82,7 @@ teardown() {
   rm -f /tmp/.bats-curl-state-$$
   run env \
     PATH="$STAGE/bin:$PATH" \
-    TRINO_QUERY="$STAGE/bin/trino-query.sh" \
+    MUSO_BIN="$STAGE/bin/muso-stub" \
     CHECK_CUSTOMER_REPLIED_BIN="$STAGE/bin/audit-stub.py" \
     CLICKUP_API_KEY=fake \
     MUSOAI_INTERCOM_TOKEN=fake \
@@ -109,7 +110,7 @@ AUDITEOF
   chmod +x "$STAGE/bin/audit-stub.py"
   run env \
     PATH="$STAGE/bin:$PATH" \
-    TRINO_QUERY="$STAGE/bin/trino-query.sh" \
+    MUSO_BIN="$STAGE/bin/muso-stub" \
     CHECK_CUSTOMER_REPLIED_BIN="$STAGE/bin/audit-stub.py" \
     CLICKUP_API_KEY=fake \
     MUSOAI_INTERCOM_TOKEN=fake \
@@ -125,7 +126,7 @@ AUDITEOF
   rm -f /tmp/.bats-curl-state-$$
   run env \
     PATH="$STAGE/bin:$PATH" \
-    TRINO_QUERY="$STAGE/bin/trino-query.sh" \
+    MUSO_BIN="$STAGE/bin/muso-stub" \
     CHECK_CUSTOMER_REPLIED_BIN="$STAGE/bin/audit-stub.py" \
     CLICKUP_API_KEY=fake \
     CLOSE_ADD_ASSIGNEES="" \

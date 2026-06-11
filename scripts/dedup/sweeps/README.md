@@ -31,7 +31,7 @@ Find ClickUp `profile-merge` tickets whose merge already executed
 | `CLICKUP_API_KEY` | (required) | ClickUp personal token |
 | `CLICKUP_LIST_ID` | `901000600160` | hydra-action-request list |
 | `CLICKUP_API`     | `https://api.clickup.com/api/v2` | API base |
-| `TRINO_QUERY`     | `/opt/hydra/scripts/trino-query.sh` | Trino wrapper |
+| `MUSO_BIN`        | `muso` | muso CLI (Trino via `muso query`) |
 | `DAYS`            | `90` | action_log look-back |
 | `MUSOAI_INTERCOM_TOKEN` | (required unless `--skip-customer-reply-check`) | Intercom Bearer for the customer-reply audit |
 | `PAGINATION_CAP`  | `20` | max ClickUp pages walked (~100 tasks/page) |

@@ -878,7 +878,7 @@ jobs:
         # Discovers every *.bats file under scripts/ so a future
         # sibling suite (e.g., scripts/credit-verification/tests) is
         # picked up automatically without another CI edit. Current
-        # coverage: scripts/dedup/tests/ (80 tests, find-dupes modes,
+        # coverage: scripts/dedup/tests/ (84 tests, find-dupes modes,
         # score-pair matrix, sweeps, create-ticket capture contract)
         # and scripts/tests/openclaw-config-write-audit.bats (the
         # write-audit watcher gate).

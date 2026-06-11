@@ -29,9 +29,11 @@ Usage:
   find-dupes.sh --pair <uuid_a> <uuid_b>
   find-dupes.sh --name <name> [--anchor <uuid>] [--limit N]
 
-Outputs JSONL on stdout. Requires MUSO_ADMIN_EMAIL + MUSO_ADMIN_PASSWORD
-(consumed by skills-all/muso-ops-admin/scripts/muso-admin-api.sh, which
-caches the JWT locally) and Trino access via TRINO_QUERY.
+Outputs JSONL on stdout. Requires the muso CLI (override path with
+MUSO_BIN) with prod auth in the environment — MUSO_ADMIN_EMAIL,
+MUSO_ADMIN_PASSWORD, MUSO_ENV=prod; for ad-hoc runs on node-8 source
+/etc/openclaw/main.env first, otherwise muso targets api-dev and the
+admin calls exit 4.
 
 --name resolves a free-text artist name to candidate Muso profile UUIDs
 via matvw_catalog_profile, then pair-scores. If --anchor is given, each
@@ -191,7 +193,7 @@ run_name_mode() {
 
 run_catalog_mode() {
   local limit="${1:-}"
-  local trino="${TRINO_QUERY:-/opt/hydra/scripts/trino-query.sh}"
+  local muso_bin="${MUSO_BIN:-muso}"
   local sql="$DIR/sql/catalog-clusters.sql"
   local sqltxt; sqltxt=$(cat "$sql")
   if [ -n "$limit" ]; then
@@ -208,10 +210,11 @@ LIMIT $limit"
   local seen_pairs="$tmpdir/seen-pairs"
   : > "$seen_pairs"
 
-  "$trino" "$sqltxt" | while IFS=, read -r kind key ids _size; do
-    kind="${kind#\"}"; kind="${kind%\"}"
-    key="${key#\"}"; key="${key%\"}"
-    ids="${ids#\"}"; ids="${ids%\"}"
+  # NDJSON rows: {cluster_kind, cluster_key, profile_ids, cluster_size};
+  # only profile_ids (space-joined) feeds the pair expansion — one jq pass
+  # over the stream, not one spawn per row.
+  "$muso_bin" query --format json - <<<"$sqltxt" | jq -r '.profile_ids // empty' | while IFS= read -r ids; do
+    [ -n "$ids" ] || continue
     bash "$LIB/expand-cluster.sh" "$ids" | while read -r pa pb; do
       local pair_key="$pa|$pb"
       grep -qxF "$pair_key" "$seen_pairs" && continue

@@ -35,13 +35,16 @@ Exit codes:
   0  backtest ran (may have skipped rows — count in summary)
   1  trino failure or arg error
 """
-import argparse, csv, io, json, os, re, subprocess, sys, unicodedata
+import argparse, json, os, re, subprocess, sys, unicodedata
 
-TRINO = os.environ.get("TRINO_QUERY", "/opt/hydra/scripts/trino-query.sh")
+MUSO = os.environ.get("MUSO_BIN", "muso")
 
 
 def run_trino(sql):
-    proc = subprocess.run([TRINO, sql], capture_output=True, text=True, timeout=600)
+    # muso query --format json emits NDJSON (one object per row, values as
+    # strings); SQL goes via stdin to dodge shell-arg escaping.
+    proc = subprocess.run([MUSO, "query", "--format", "json", "-"],
+                          input=sql, capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:
         print(f"recall: trino failed: {proc.stderr[:800]}", file=sys.stderr)
         sys.exit(1)
@@ -134,8 +137,8 @@ SELECT
   coalesce(l.merged_to_id, '') AS l_merged_to_id
 FROM merges m
 CROSS JOIN UNNEST(m.loser_ids) AS t(loser_id)
-LEFT JOIN "platform-industry-bi-prod".matvw_catalog_profile s ON s._id = m.survivor_id
-LEFT JOIN "platform-industry-bi-prod".matvw_catalog_profile l ON l._id = t.loser_id
+LEFT JOIN hive."platform-industry-bi-prod".matvw_catalog_profile s ON s._id = m.survivor_id
+LEFT JOIN hive."platform-industry-bi-prod".matvw_catalog_profile l ON l._id = t.loser_id
 ORDER BY m.merge_at DESC
 LIMIT {limit}
 """
@@ -160,7 +163,7 @@ def main():
 
     sql = SQL.format(skip=args.skip_days, look_back=args.look_back_days, limit=args.limit)
     out = run_trino(sql)
-    rows = list(csv.reader(io.StringIO(out)))
+    rows = [json.loads(l) for l in out.splitlines() if l.strip()]
     if not rows:
         print("recall: no merges in window", file=sys.stderr)
         sys.exit(0)
@@ -168,10 +171,10 @@ def main():
     counts = {"hard_dupe": 0, "candidate_dupe": 0, "soft_partial": 0, "no_match": 0,
               "matvw_lag_skip": 0, "missing_row": 0, "chained_merge_skip": 0}
 
-    for r in rows:
-        if len(r) != len(COLS):
-            continue
-        row = dict(zip(COLS, r))
+    for raw_row in rows:
+        # NULL columns may arrive as JSON null (or be omitted entirely);
+        # the old CSV path rendered them as "" — keep that contract.
+        row = {c: (raw_row.get(c) or "") for c in COLS}
         if not row["l_name"] and not row["l_raw_ids"]:
             counts["missing_row"] += 1
             continue

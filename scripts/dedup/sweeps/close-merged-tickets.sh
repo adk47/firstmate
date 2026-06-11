@@ -4,7 +4,7 @@
 # pass --apply to actually post + close.
 #
 # Env:
-#   TRINO_QUERY        path to scripts/trino-query.sh wrapper
+#   MUSO_BIN           path to the muso CLI (default: muso)
 #   CLICKUP_API_KEY    ClickUp personal API token
 #   CLICKUP_LIST_ID    ClickUp list id of hydra-action-request board (default: 901000600160)
 #   DAYS               look-back window for action_log (default: 90)
@@ -58,7 +58,7 @@ if ! [[ "$days" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-trino="${TRINO_QUERY:-/opt/hydra/scripts/trino-query.sh}"
+muso_bin="${MUSO_BIN:-muso}"
 clickup_api="${CLICKUP_API:-https://api.clickup.com/api/v2}"
 list_id="${CLICKUP_LIST_ID:-901000600160}"
 api_key="${CLICKUP_API_KEY:-}"
@@ -99,31 +99,40 @@ clickup_curl() {
   rm -f "$body_file"
 }
 
-# 1. Recent merges from action_log → JSONL via Python csv (handles quoted arrays)
-"$trino" "
+# 1. Recent merges from action_log → NDJSON rows {merge_into, profiles_ids, at}
+#    (aliases lowercase on purpose: Trino lowercases unquoted identifiers, so
+#    a camelCase alias would come back folded anyway).
+merge_sql="
   SELECT
-    json_extract_scalar(requestdata, '\$.body.mergeInto') AS mergeInto,
-    json_format(json_extract(requestdata, '\$.body.profilesIds')) AS profilesIds,
+    json_extract_scalar(requestdata, '\$.body.mergeInto') AS merge_into,
+    json_format(json_extract(requestdata, '\$.body.profilesIds')) AS profiles_ids,
     CAST(createdat AS varchar) AS at
   FROM postgresql_core.public.action_log
   WHERE route = '/api/v3/admin/profiles/merge'
     AND requestmethod = 'POST'
     AND createdat > current_timestamp - interval '$days' day
-" 2>"$tmp/merges.err" > "$tmp/merges.csv" || {
+"
+"$muso_bin" query --format json - <<<"$merge_sql" 2>"$tmp/merges.err" > "$tmp/merges.raw.jsonl" || {
   echo "close-merged-tickets: trino action_log query failed: $(head -3 "$tmp/merges.err")" >&2
   exit 4
 }
 
-python3 - "$tmp/merges.csv" "$tmp/merges.jsonl" <<'PY'
-import csv, json, sys
+python3 - "$tmp/merges.raw.jsonl" "$tmp/merges.jsonl" <<'PY'
+import json, sys
 src, dst = sys.argv[1], sys.argv[2]
 parse_errors = 0
 with open(src) as f, open(dst, 'w') as out:
-    r = csv.reader(f)
-    for row in r:
-        if len(row) < 3:
+    for line in f:
+        line = line.strip()
+        if not line:
             continue
-        survivor, losers_raw, at = row[0], row[1], row[2]
+        try:
+            row = json.loads(line)
+            survivor, losers_raw, at = row["merge_into"], row["profiles_ids"], row["at"]
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            sys.stderr.write(f"close-merged-tickets: skipping malformed NDJSON row {line!r} ({e})\n")
+            parse_errors += 1
+            continue
         try:
             losers = json.loads(losers_raw) if losers_raw else []
         except json.JSONDecodeError as e:
