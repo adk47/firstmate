@@ -457,9 +457,10 @@ describe("listContactConversations (prior-chat recall)", () => {
     expect(init.headers.Accept).toBe("application/json");
     expect(init.headers["Intercom-Version"]).toBe("2.11");
     const body = JSON.parse(init.body);
-    // ~ (contains), not = : contact_ids is a multi-valued String search field,
-    // and exact equality can miss conversations with multiple participants.
-    expect(body.query).toEqual({ field: "contact_ids", operator: "~", value: "u1" });
+    // = (list-membership), NOT ~ (contains): ~ on contact_ids returns 0 for
+    // every contact on the live API (verified 2026-06-11) and silently killed
+    // prior-chat recall in prod.
+    expect(body.query).toEqual({ field: "contact_ids", operator: "=", value: "u1" });
     expect(body.pagination).toEqual({ per_page: 5 });
   });
 
@@ -473,7 +474,7 @@ describe("listContactConversations (prior-chat recall)", () => {
     expect(body.query).toEqual({
       operator: "AND",
       value: [
-        { field: "contact_ids", operator: "~", value: "u1" },
+        { field: "contact_ids", operator: "=", value: "u1" },
         { field: "id", operator: "!=", value: "conv_now" },
       ],
     });

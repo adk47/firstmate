@@ -292,12 +292,13 @@ export class RealIntercomClient implements IntercomClient {
     // Excluding the current conversation server-side keeps total_count an
     // exact prior count even when the contact has more history than one page.
     // contact_ids matches conversations the contact PARTICIPATES in (incl.
-    // admin-initiated outbound ones), not just those they authored. It's a
-    // multi-valued String search field, so use ~ (contains) rather than = —
-    // exact equality can miss multi-participant conversations. Containment of
-    // a full fixed-length contact id can't match a different contact.
+    // admin-initiated outbound ones), not just those they authored. MUST be
+    // queried with = (list-membership on this field), NOT ~ (contains):
+    // verified live 2026-06-11 — ~ returns total_count 0 for every contact
+    // despite the docs operator table listing it as valid for String, while
+    // = returns the contact's full conversation list.
     const url = `${this.baseUrl}/conversations/search`;
-    const contactQuery = { field: "contact_ids", operator: "~", value: params.contactId };
+    const contactQuery = { field: "contact_ids", operator: "=", value: params.contactId };
     const query = params.excludeConversationId
       ? {
           operator: "AND",
