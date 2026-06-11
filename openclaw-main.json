@@ -435,6 +435,7 @@
     "queue": {
       "mode": "followup"
     },
+    "suppressToolErrors": true,
     "ackReaction": "eyes",
     "ackReactionScope": "all",
     "removeAckAfterReply": true,
