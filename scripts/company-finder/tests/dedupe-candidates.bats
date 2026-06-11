@@ -14,6 +14,7 @@ setup() {
   # Keep table ids aligned with the stub's case labels (also the script defaults).
   export COMPANY_TABLE_ID="mvr6nmzcv7albxt"
   export CONTACTS_TABLE_ID="m9vsbijhrr9ddeu"
+  export LEDGER_TABLE_ID="ledgertable001"
 }
 
 run_dedupe() { run bash "$SUT" <<<"$1"; }
@@ -92,6 +93,84 @@ run_dedupe() { run bash "$SUT" <<<"$1"; }
   [ "$status" -eq 0 ]
   [ "$(jq -r '.stats.checked' <<<"$output")" = "0" ]
   [ "$(jq -r '.new | length' <<<"$output")" = "0" ]
+}
+
+@test "a previously-suggested/rejected company in the Seen Ledger is dropped" {
+  # The ledger is what stops rejected companies from resurfacing across days —
+  # 26/60 of the 2026-06-10 batch were exactly these.
+  run_dedupe '[{"name":"DeadCorp","domain":"https://www.deadcorp.example/"}]'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.stats.new' <<<"$output")" = "0" ]
+  [ "$(jq -r '.duplicates[0].reason' <<<"$output")" = "domain" ]
+  [ "$(jq -r '.duplicates[0].matched_against.table' <<<"$output")" = "Seen Ledger" ]
+}
+
+@test "the Seen Ledger is a REQUIRED source — unavailable means exit 2, not silent skip" {
+  export NOCODB_STUB_FAIL="$LEDGER_TABLE_ID"
+  run_dedupe '[{"name":"Soundtrap","domain":"soundtrap.com"}]'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"DEDUP_SOURCE_UNAVAILABLE: Seen Ledger"* ]]
+}
+
+@test "an unset LEDGER_TABLE_ID with no ledger table fails as required-source-unavailable (exit 2 + marker)" {
+  # Exit 2 with the DEDUP marker puts the table-missing case in the SAME
+  # fail-closed bucket the cron doctrine already instructs for — not an
+  # unexplained exit 1 the agent has no instruction for.
+  unset LEDGER_TABLE_ID
+  run_dedupe '[{"name":"Soundtrap","domain":"soundtrap.com"}]'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"DEDUP_SOURCE_UNAVAILABLE: Seen Ledger"* ]]
+  [[ "$output" == *"LEDGER_TABLE_ID"* ]]
+}
+
+@test "an unset LEDGER_TABLE_ID auto-discovers the ledger by title once the table exists" {
+  # Auto-discovery is what makes setup-ledger-table.sh the ONLY operator
+  # step post-merge — no pin commit, no redeploy.
+  mkdir -p "$BATS_TEST_TMPDIR/fixtures"
+  cp "$NOCODB_STUB_FIXTURES"/*.json "$BATS_TEST_TMPDIR/fixtures/"
+  cat >"$BATS_TEST_TMPDIR/fixtures/tables.json" <<'EOF'
+{ "list": [ { "id": "ledgertable001", "title": "Company Seen Ledger" } ] }
+EOF
+  export NOCODB_STUB_FIXTURES="$BATS_TEST_TMPDIR/fixtures"
+  unset LEDGER_TABLE_ID
+  run_dedupe '[{"name":"DeadCorp","domain":"deadcorp.example"}]'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.duplicates[0].matched_against.table' <<<"$output")" = "Seen Ledger" ]
+}
+
+@test "a domain with hostname-invalid characters is treated as no-domain, not matched dirty" {
+  # norm_domain maps anything outside [a-z0-9.-] to "" — those values would
+  # otherwise break NocoDB where-grammar and the verify xargs fan-out
+  # downstream. The candidate still passes through (by name) for human eyes.
+  run_dedupe '[{"name":"Multi Domain Co","domain":"landr.com, landr.io"}]'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.stats.new' <<<"$output")" = "1" ]
+}
+
+@test "within-batch domain duplicate: first occurrence wins, second is dropped as reason=batch" {
+  # Per-category subagents are blind to each other; the same company can
+  # arrive from two categories in one union batch.
+  run_dedupe '[
+    {"name":"Soundtrap","domain":"soundtrap.com"},
+    {"name":"Soundtrap AB","domain":"https://www.soundtrap.com/"}
+  ]'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.new | length' <<<"$output")" = "1" ]
+  [ "$(jq -r '.new[0].name' <<<"$output")" = "Soundtrap" ]
+  [ "$(jq -r '.duplicates[0].reason' <<<"$output")" = "batch" ]
+  [ "$(jq -r '.duplicates[0].matched_against.table' <<<"$output")" = "(this batch)" ]
+  [ "$(jq -r '.duplicates[0].matched_against.name' <<<"$output")" = "Soundtrap" ]
+}
+
+@test "within-batch name duplicate under a different domain is dropped as reason=batch" {
+  run_dedupe '[
+    {"name":"Soundtrap","domain":"soundtrap.com"},
+    {"name":"Soundtrap","domain":"soundtrap.io"}
+  ]'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.new | length' <<<"$output")" = "1" ]
+  [ "$(jq -r '.duplicates[0].reason' <<<"$output")" = "batch" ]
+  [ "$(jq -r '.stats.dropped' <<<"$output")" = "1" ]
 }
 
 @test "a required source unavailable after retry exits non-zero with a named marker" {

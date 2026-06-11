@@ -29,6 +29,16 @@
 #   name is already present. Partial/fuzzy name overlaps are FLAGGED, never
 #   dropped, to avoid suppressing genuinely-new companies.
 #
+# SOURCES: Company Intelligence + Contacts Intelligence + the Company Seen
+#   Ledger (every company ever suggested in a batch, any status — suggested /
+#   rejected / approved). All three are REQUIRED: a silently-missing ledger
+#   would re-suggest every previously rejected company.
+#
+# WITHIN-BATCH SELF-DEDUP: per-category discovery subagents are blind to each
+#   other, so the same company can arrive twice in one union batch. First
+#   occurrence wins; later batch-internal domain/name matches land in
+#   .duplicates with reason "batch" and matched_against.table "(this batch)".
+#
 # FAILURE SEMANTICS (mirrors the company-finder-daily cron doctrine):
 #   Each table fetch is retried once. A recovered transient exits 0. If a
 #   REQUIRED dedup source is still unreachable after the retry, this exits
@@ -40,102 +50,52 @@
 #   NOCODB_API_SH        path to nocodb-api.sh (auto-located if unset)
 #   COMPANY_TABLE_ID     default mvr6nmzcv7albxt (Company Intelligence)
 #   CONTACTS_TABLE_ID    default m9vsbijhrr9ddeu (Contacts Intelligence)
+#   LEDGER_TABLE_ID      Company Seen Ledger — auto-discovered by title at
+#                        runtime (lib/common.sh resolve_ledger_table_id);
+#                        set only to skip/override the lookup
 #
 # Exit codes: 0 success, 1 usage/input error, 2 dedup source unavailable.
 set -euo pipefail
 
-COMPANY_TABLE_ID="${COMPANY_TABLE_ID:-mvr6nmzcv7albxt}"
-CONTACTS_TABLE_ID="${CONTACTS_TABLE_ID:-m9vsbijhrr9ddeu}"
-PAGE_LIMIT=1000
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  sed -n '2,48p' "$0"
+  awk 'NR > 1 && /^set -euo pipefail/ {exit} NR > 1' "$0"
   exit 0
 fi
 
-# ── Locate the NocoDB API wrapper ───────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -z "${NOCODB_API_SH:-}" ]]; then
-  for cand in \
-    "$SCRIPT_DIR/../../skills-all/muso-nocodb/scripts/nocodb-api.sh" \
-    "/opt/hydra/skills-all/muso-nocodb/scripts/nocodb-api.sh"; do
-    if [[ -f "$cand" ]]; then NOCODB_API_SH="$cand"; break; fi
-  done
-fi
-if [[ -z "${NOCODB_API_SH:-}" || ! -f "$NOCODB_API_SH" ]]; then
-  echo "ERROR: could not locate nocodb-api.sh (set NOCODB_API_SH)." >&2
-  exit 1
-fi
-
-run_nocodb() { bash "$NOCODB_API_SH" --raw "$@"; }
-
-# fetch_table <tableId> <label> — paginate the full Domain+Company Name columns,
-# retry once on failure, emit a JSON array of {domain,name,table} rows.
-fetch_table() {
-  local tid="$1" label="$2"
-  local offset=0 combined="[]" resp chunk n islast
-  while :; do
-    if ! resp=$(run_nocodb records.ls "$tid" --fields "Domain,Company Name" \
-                  --limit "$PAGE_LIMIT" --offset "$offset" 2>/dev/null); then
-      # one retry before declaring the source unavailable
-      if ! resp=$(run_nocodb records.ls "$tid" --fields "Domain,Company Name" \
-                    --limit "$PAGE_LIMIT" --offset "$offset" 2>/dev/null); then
-        echo "DEDUP_SOURCE_UNAVAILABLE: $label ($tid)" >&2
-        return 2
-      fi
-    fi
-    if ! chunk=$(jq -ce '.list // empty' <<<"$resp" 2>/dev/null); then
-      echo "DEDUP_SOURCE_UNAVAILABLE: $label ($tid) — unexpected response shape" >&2
-      return 2
-    fi
-    combined=$(jq -c --argjson a "$combined" --argjson b "$chunk" '$a + $b' <<<'null')
-    n=$(jq 'length' <<<"$chunk")
-    islast=$(jq -r --argjson lim "$PAGE_LIMIT" \
-      '.pageInfo.isLastPage // ((.list | length) < $lim)' <<<"$resp")
-    if [[ "$islast" == "true" || "$n" -lt "$PAGE_LIMIT" ]]; then break; fi
-    offset=$((offset + PAGE_LIMIT))
-  done
-  jq -c --arg t "$label" \
-    'map({domain:(.Domain // ""), name:(."Company Name" // ""), table:$t})' <<<"$combined"
-}
+locate_nocodb_api
+resolve_ledger_table_id "DEDUP_SOURCE_UNAVAILABLE"
 
 # ── Read + validate candidates ──────────────────────────────────────────────
-CANDS="$(cat)"
-[[ -z "${CANDS//[[:space:]]/}" ]] && CANDS="[]"
-if ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$CANDS"; then
-  echo "ERROR: stdin must be a JSON array of {name,domain} candidates." >&2
-  exit 1
-fi
+CANDS="$(read_candidates_stdin)"
 
-# ── Snapshot both tables once (required sources) ────────────────────────────
-COMPANY_ROWS="$(fetch_table "$COMPANY_TABLE_ID" "Company Intelligence")"
-CONTACT_ROWS="$(fetch_table "$CONTACTS_TABLE_ID" "Contacts Intelligence")"
-EXISTING="$(jq -c -s 'add' <<<"$COMPANY_ROWS"$'\n'"$CONTACT_ROWS")"
+# ── Snapshot all three tables once (required sources) ───────────────────────
+# fetch_label <tableId> <label> — raw fetch + map to {domain,name,table}.
+fetch_label() {
+  local raw
+  raw="$(fetch_table "$1" "$2" "Domain,Company Name" "DEDUP_SOURCE_UNAVAILABLE")" || return 2
+  jq -c --arg t "$2" \
+    'map({domain:(.Domain // ""), name:(."Company Name" // ""), table:$t})' <<<"$raw"
+}
+
+COMPANY_ROWS="$(fetch_label "$COMPANY_TABLE_ID" "Company Intelligence")"
+CONTACT_ROWS="$(fetch_label "$CONTACTS_TABLE_ID" "Contacts Intelligence")"
+LEDGER_ROWS="$(fetch_label "$LEDGER_TABLE_ID" "Seen Ledger")"
+EXISTING="$(jq -c -s 'add' <<<"$COMPANY_ROWS"$'\n'"$CONTACT_ROWS"$'\n'"$LEDGER_ROWS")"
 
 # ── Classify (single jq; normalization applied identically to both sides) ────
-jq -n --argjson existing "$EXISTING" --argjson cands "$CANDS" '
-  def norm_domain:
-    (. // "") | ascii_downcase
-    | gsub("^\\s+|\\s+$"; "")
-    | gsub("^[a-z]+://"; "")     # scheme
-    | gsub("^www\\."; "")        # leading www.
-    | split(" ")[0]             # drop trailing annotations, e.g. "x.com (updated)"
-    | split("/")[0]             # path
-    | split("?")[0]             # query
-    | split(":")[0]             # port
-    | gsub("\\.$"; "");         # trailing dot
-  def norm_name:
-    (. // "") | ascii_downcase
-    | gsub("[^a-z0-9]+"; " ")    # punctuation -> space
-    | gsub("^\\s+|\\s+$"; "")
-    | gsub("\\s+"; " ");
+jqn -n --argjson existing "$EXISTING" --argjson cands "$CANDS" '
+  include "normalize";
 
   ($existing | map(. + {nd: (.domain | norm_domain), nn: (.name | norm_name)})) as $ex
   | ($ex | map(select(.nd != "")) | map({key: .nd, value: .}) | from_entries) as $bydom
   | ($ex | map(select(.nn != "")) | map({key: .nn, value: .}) | from_entries) as $byname
   | ($ex | map(select(.nn != "" and (.nn | length) >= 4))) as $exnames
   | reduce ($cands[] | . + {nd: (.domain | norm_domain), nn: (.name | norm_name)}) as $c
-      ({new: [], duplicates: [], name_flags: []};
+      ({new: [], duplicates: [], name_flags: [], bnd: {}, bnn: {}};
         ($bydom[$c.nd]) as $dm
         | ($byname[$c.nn]) as $nm
         | if ($c.nd != "" and $dm) then
@@ -144,6 +104,14 @@ jq -n --argjson existing "$EXISTING" --argjson cands "$CANDS" '
           elif ($c.nn != "" and $nm) then
             .duplicates += [{name: $c.name, domain: $c.domain, reason: "name",
                              matched_against: {domain: $nm.domain, name: $nm.name, table: $nm.table}}]
+          elif ($c.nd != "" and .bnd[$c.nd]) then
+            .bnd[$c.nd] as $bm
+            | .duplicates += [{name: $c.name, domain: $c.domain, reason: "batch",
+                               matched_against: {domain: $bm.domain, name: $bm.name, table: "(this batch)"}}]
+          elif ($c.nn != "" and .bnn[$c.nn]) then
+            .bnn[$c.nn] as $bm
+            | .duplicates += [{name: $c.name, domain: $c.domain, reason: "batch",
+                               matched_against: {domain: $bm.domain, name: $bm.name, table: "(this batch)"}}]
           else
             ( ($c.nn | length) >= 4 ) as $long
             | ( $c.nn | split(" ")[0] ) as $ctok
@@ -156,10 +124,13 @@ jq -n --argjson existing "$EXISTING" --argjson cands "$CANDS" '
                 else null end ) as $pf
             | ($c | del(.nd, .nn)) as $clean
             | .new += [$clean]
+            | (if $c.nd != "" then .bnd[$c.nd] = {domain: $c.domain, name: $c.name} else . end)
+            | (if $c.nn != "" then .bnn[$c.nn] = {domain: $c.domain, name: $c.name} else . end)
             | if $pf != null then
                 .name_flags += [{candidate: $clean,
                                  possible_match: {domain: $pf.domain, name: $pf.name, table: $pf.table}}]
               else . end
           end)
+  | del(.bnd, .bnn)
   | . + {stats: {checked: ($cands | length), new: (.new | length), dropped: (.duplicates | length)}}
 '

@@ -1,0 +1,7 @@
+{
+  "list": [
+    { "Id": 21, "Domain": "deadcorp.example", "Company Name": "DeadCorp", "Status": "rejected" },
+    { "Id": 22, "Domain": "pendingco.example", "Company Name": "PendingCo", "Status": "suggested" }
+  ],
+  "pageInfo": { "totalRows": 2, "page": 1, "pageSize": 1000, "isFirstPage": true, "isLastPage": true }
+}

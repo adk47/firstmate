@@ -70,8 +70,9 @@ _All tools the CMO agent has access to. See individual skill files for full API 
 ### NocoDB (B2B-Ads Intelligence base) — **canonical store**
 - Relational CRM for B2B Ads contact + company intelligence (the source of truth — supersedes the legacy `contacts_intelligence`/`company_intelligence` Google Sheet).
 - Access: via the **`muso-nocodb` skill** — `bash scripts/nocodb-api.sh <subcommand>` (NocoDB Cloud REST API v2, `xc-token` / `NOCODB_API_TOKEN`). **There is NO MCP server — do not rely on `openclaw mcp` for NocoDB.**
-- Base `p11hvpwapu4hv0x`; tables: **Contacts Intelligence** `m9vsbijhrr9ddeu` (match by `Domain` or `Valid Professional Email` — there is no bare `Email` column), **Company Intelligence** `mvr6nmzcv7albxt` (by `Domain` / `Company Name`).
-- **Dedupe before returning ANY company list.** Cross-check Company Intelligence by Domain/Company Name, e.g. `bash scripts/nocodb-api.sh records.ls mvr6nmzcv7albxt --where "(Domain,eq,<domain>)"` (or `records.count`). A company already present = `IN_NOCO`. Do **not** punt to `NEEDS_DEDUPE_CHECK` — the skill is always available and needs no MCP.
+- Base `p11hvpwapu4hv0x`; tables: **Contacts Intelligence** `m9vsbijhrr9ddeu` (match by `Domain` or `Valid Professional Email` — there is no bare `Email` column), **Company Intelligence** `mvr6nmzcv7albxt` (by `Domain` / `Company Name`), **Company Seen Ledger** (every company ever suggested by the Company Finder: suggested/rejected/approved — see `muso-outreach-discovery`).
+- **Dedupe before returning ANY company list — one deterministic call, never hand-rolled.** Pipe the FULL candidate array through `bash /opt/hydra/scripts/company-finder/dedupe-candidates.sh` (snapshots all three tables, normalizes domains/names, self-dedupes the batch). Per-domain `(Domain,eq,…)` lookups are forbidden — exact matching leaks on format variance and per-candidate loops get skipped under load.
+- **Company writes go through `bash /opt/hydra/scripts/company-finder/ledger.sh` only** (`suggest` / `approve` / `reject`). It normalizes the Domain and enforces uniqueness (NocoDB Cloud cannot). Never `records.create` into Company Intelligence or the Seen Ledger directly.
 - Full API reference + gotchas: `muso-nocodb` skill (`skills-all/muso-nocodb/SKILL.md`).
 
 ---

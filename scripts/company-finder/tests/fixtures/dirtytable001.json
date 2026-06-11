@@ -1,0 +1,11 @@
+{
+  "list": [
+    { "Id": 1, "Domain": "https://www.imbschool.eu", "Company Name": "IMB School" },
+    { "Id": 2, "Domain": "apogeedigital.com (updated)", "Company Name": "Apogee Electronics" },
+    { "Id": 3, "Domain": "landr.com", "Company Name": "LANDR" },
+    { "Id": 4, "Domain": "https://landr.com/", "Company Name": "Landr Audio" },
+    { "Id": 5, "Domain": "", "Company Name": "No Domain Co" },
+    { "Id": 6, "Domain": "clean.example", "Company Name": "Already Clean" }
+  ],
+  "pageInfo": { "totalRows": 6, "page": 1, "pageSize": 1000, "isFirstPage": true, "isLastPage": true }
+}
