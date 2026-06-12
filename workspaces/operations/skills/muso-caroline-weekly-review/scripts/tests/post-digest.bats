@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
-# post-digest.sh — chat.postMessage as the operations bot. curl is PATH-stubbed
-# (NEVER touches Slack; cf. the unstubbed-test 9-real-alerts incident) and the
-# token read is pointed at a fixture config. Pattern: scripts/tests/qa-slack-dm.bats.
+# post-digest.sh — chat.postMessage as the operations bot via `muso slack send`.
+# muso is PATH-stubbed (NEVER touches Slack; cf. the unstubbed-test
+# 9-real-alerts incident) and the token read is pointed at a fixture env file
+# so the real /etc/openclaw/main.env is never sourced.
 load helpers
 
 setup() {
@@ -9,69 +10,76 @@ setup() {
   export STUB_CALLS="$TEST_TMPDIR/slack-calls"
   : > "$STUB_CALLS"
 
-  export SLACK_NOTIFY_CONFIG="$TEST_TMPDIR/openclaw.json"
-  cat > "$SLACK_NOTIFY_CONFIG" <<'JSON'
-{"channels":{"slack":{"accounts":{"operations":{"botToken":"xoxb-test-ops"}}}}}
-JSON
+  # Fixture token env file — post-digest.sh must never read the real one.
+  unset MUSO_SLACK_BOT_TOKEN_OPERATIONS MUSO_SLACK_BOT_TOKEN_DEVOPS
+  export MUSO_SLACK_ENV_FILE="$TEST_TMPDIR/muso-slack.env"
+  echo 'MUSO_SLACK_BOT_TOKEN_OPERATIONS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
 
-  # Replace the generic helpers curl stub with a Slack-shaped one that records
-  # the URL and the --data-binary payload reference.
-  cat > "$TEST_TMPDIR/bin/curl" <<'STUB'
+  export STUBBIN="$TEST_TMPDIR/bin"
+  # muso stub — records argv, captures the --blocks-file content NOW
+  # (post-digest.sh deletes its temp blocks file on exit), succeeds with a
+  # {"channel","ts"} JSON body. touch $TEST_TMPDIR/muso-fail to simulate a
+  # delivery failure (the CLI's exit code IS the delivery status; it decodes
+  # Slack's HTTP-200 ok:false trap itself, so failure = plain exit 1).
+  cat > "$STUBBIN/muso" <<'STUB'
 #!/usr/bin/env bash
-url=""; data=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    https://*) url="$1" ;;
-    --data-binary) shift; data="$1" ;;
-  esac
-  shift
+printf '%s\n' "$*" >> "$STUB_CALLS"
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--blocks-file" ] && cp "$a" "$TEST_TMPDIR/last-blocks" 2>/dev/null
+  prev="$a"
 done
-echo "$url" >> "$STUB_CALLS"
-printf '%s\n' "$data" > "${TEST_TMPDIR}/last-data-arg"
-# Capture the posted body NOW — post-digest.sh deletes its thread_ts temp copy on exit.
-case "$data" in @*) cp "${data#@}" "${TEST_TMPDIR}/last-payload.json" ;; esac
-if [ -f "${TEST_TMPDIR}/slack-response.json" ]; then
-  cat "${TEST_TMPDIR}/slack-response.json"
-else
-  echo '{"ok":true,"ts":"1717171717.000200"}'
+if [ -f "$TEST_TMPDIR/muso-fail" ]; then
+  echo "slack send failed: not_in_channel" >&2
+  exit 1
 fi
+echo '{"channel":"C0TEST","ts":"1717171717.000100"}'
 STUB
-  chmod +x "$TEST_TMPDIR/bin/curl"
-  export CURL="curl"
+  chmod +x "$STUBBIN/muso"
 
   echo '{"channel":"C0ANM0PN9L5","text":"headline","blocks":[{"type":"divider"}]}' \
     > "$TEST_TMPDIR/payload.json"
 }
 teardown() { teardown_skill_tmp; }
 
-@test "happy path: posts payload, prints ts, exit 0" {
+@test "happy path: sends via muso slack send, prints ts, exit 0" {
   run "$SCRIPTS_DIR/post-digest.sh" "$TEST_TMPDIR/payload.json"
   [ "$status" -eq 0 ]
-  [ "$output" = "1717171717.000200" ]
-  grep -q 'chat.postMessage' "$STUB_CALLS"
+  [ "$output" = "1717171717.000100" ]
+  grep -q '^slack send ' "$STUB_CALLS"
 }
 
-@test "payload file is passed verbatim via --data-binary @file" {
+@test "payload maps onto --bot/--channel/--text/--json argv" {
   run "$SCRIPTS_DIR/post-digest.sh" "$TEST_TMPDIR/payload.json"
   [ "$status" -eq 0 ]
-  [ "$(cat "$TEST_TMPDIR/last-data-arg")" = "@$TEST_TMPDIR/payload.json" ]
+  call="$(cat "$STUB_CALLS")"
+  [[ "$call" == *"--bot operations"* ]]
+  [[ "$call" == *"--channel C0ANM0PN9L5"* ]]
+  [[ "$call" == *"--text headline"* ]]
+  [[ "$call" == *"--json"* ]]
 }
 
-@test "HTTP 200 with ok:false (not_in_channel) exits non-zero with the error" {
-  echo '{"ok":false,"error":"not_in_channel"}' > "$TEST_TMPDIR/slack-response.json"
+@test "blocks file passed to muso equals the payload's .blocks array" {
+  run "$SCRIPTS_DIR/post-digest.sh" "$TEST_TMPDIR/payload.json"
+  [ "$status" -eq 0 ]
+  jq -e --slurpfile sent "$TEST_TMPDIR/last-blocks" '.blocks == $sent[0]' \
+    "$TEST_TMPDIR/payload.json"
+}
+
+@test "muso failure (e.g. not_in_channel decoded by the CLI) exits 1" {
+  : > "$TEST_TMPDIR/muso-fail"
   run "$SCRIPTS_DIR/post-digest.sh" "$TEST_TMPDIR/payload.json"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"not_in_channel"* ]]
 }
 
-@test "missing token in config exits 1 with NO API call" {
-  echo '{"channels":{"slack":{"accounts":{}}}}' > "$SLACK_NOTIFY_CONFIG"
+@test "missing token (empty env file) exits 1 with NO muso call" {
+  : > "$MUSO_SLACK_ENV_FILE"
   run "$SCRIPTS_DIR/post-digest.sh" "$TEST_TMPDIR/payload.json"
   [ "$status" -eq 1 ]
   [ ! -s "$STUB_CALLS" ]
 }
 
-@test "payload without blocks is a usage error, NO API call" {
+@test "payload without blocks is a usage error, NO muso call" {
   echo '{"channel":"C0ANM0PN9L5","text":"plain"}' > "$TEST_TMPDIR/payload.json"
   run "$SCRIPTS_DIR/post-digest.sh" "$TEST_TMPDIR/payload.json"
   [ "$status" -eq 2 ]
@@ -83,26 +91,24 @@ teardown() { teardown_skill_tmp; }
   [ "$status" -eq 2 ]
 }
 
-@test "thread_ts arg is injected into the posted payload" {
+@test "thread_ts arg becomes --thread-ts on the muso call" {
   run "$SCRIPTS_DIR/post-digest.sh" "$TEST_TMPDIR/payload.json" "1717171717.000200"
   [ "$status" -eq 0 ]
-  jq -e '.thread_ts == "1717171717.000200"' "$TEST_TMPDIR/last-payload.json"
-  jq -e '.channel == "C0ANM0PN9L5"' "$TEST_TMPDIR/last-payload.json"
+  grep -q -- '--thread-ts 1717171717.000200' "$STUB_CALLS"
   # the original payload file is untouched
   run grep -c "thread_ts" "$TEST_TMPDIR/payload.json"
   [ "$output" = "0" ]
 }
 
-@test "without thread_ts the payload file is posted as-is" {
+@test "without thread_ts no --thread-ts flag is sent" {
   run "$SCRIPTS_DIR/post-digest.sh" "$TEST_TMPDIR/payload.json"
   [ "$status" -eq 0 ]
-  [ "$(cat "$TEST_TMPDIR/last-data-arg")" = "@$TEST_TMPDIR/payload.json" ]
+  ! grep -q -- '--thread-ts' "$STUB_CALLS"
 }
 
-@test "SLACK_ACCOUNT override reads a different account token" {
-  cat > "$SLACK_NOTIFY_CONFIG" <<'JSON'
-{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test-devops"}}}}}
-JSON
+@test "SLACK_ACCOUNT override selects a different bot and token var" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test-devops' > "$MUSO_SLACK_ENV_FILE"
   SLACK_ACCOUNT=devops run "$SCRIPTS_DIR/post-digest.sh" "$TEST_TMPDIR/payload.json"
   [ "$status" -eq 0 ]
+  grep -q -- '--bot devops' "$STUB_CALLS"
 }

@@ -23,6 +23,14 @@
 # exactly that reason.
 set -euo pipefail
 
+# Slack sends are the alerting path, not admin-API writes: the codex-health
+# gate below guards state-changing core/stripe writes, and blocking Slack
+# during a codex outage would suppress the very page about that outage
+# (muso sets MUSO_HOOK_PROVIDER so one hook can branch per backend).
+if [ "${MUSO_HOOK_PROVIDER:-}" = "slack" ]; then
+  exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODEX_HEALTH_LIB="$SCRIPT_DIR/lib/codex-health.sh"
 GATEWAY_UNIT="openclaw-gateway-main"

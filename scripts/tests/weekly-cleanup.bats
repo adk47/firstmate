@@ -2,7 +2,7 @@
 # Tests for scripts/weekly-cleanup.sh — the weekly node-8 junk sweeper
 # (stale /tmp entries by MTIME, hot-patch *.bak*/*.orig, apt autoremove).
 #
-# PATH-shadows curl + ssh + apt-get so a real Slack POST / remote call /
+# PATH-shadows muso + ssh + apt-get so a real Slack send / remote call /
 # package mutation during a test fails loudly instead of touching the
 # production box (this suite runs on node-8's self-hosted CI runner).
 # Every filesystem path the script touches is overridden into a mktemp
@@ -18,21 +18,27 @@ setup() {
   mkdir -p "$TEST_TMPDIR/bin" "$TEST_TMPDIR/tmproot" \
     "$TEST_TMPDIR/bakroot-a" "$TEST_TMPDIR/bakroot-b"
 
-  # Refuse real network / package ops: stub ssh, curl, apt-get.
+  # Refuse real network / package ops: stub ssh, muso, apt-get; never read
+  # the real main.env.
+  unset MUSO_SLACK_BOT_TOKEN_DEVOPS
+  export MUSO_SLACK_ENV_FILE="$TEST_TMPDIR/muso-slack.env"  # absent → no token
+  export STUB_CALLS="$TEST_TMPDIR/muso-calls"
+  : > "$STUB_CALLS"
   cat > "$TEST_TMPDIR/bin/ssh" <<'STUB'
 #!/bin/bash
 echo "test stub: ssh refused ($*)" >&2; exit 99
 STUB
-  # curl stub: capture the --data-binary @<file> payload for inspection.
-  cat > "$TEST_TMPDIR/bin/curl" <<'STUB'
-#!/bin/bash
+  # muso stub: record argv, capture --text / --blocks-file for inspection.
+  cat > "$TEST_TMPDIR/bin/muso" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_CALLS"
+prev=""
 for a in "$@"; do
-  case "$a" in
-    @*) cp "${a#@}" "${WEEKLY_CLEANUP_TEST_CAPTURE:-/dev/null}" 2>/dev/null ;;
-  esac
+  [ "$prev" = "--blocks-file" ] && cp "$a" "$TEST_TMPDIR/last-blocks" 2>/dev/null
+  [ "$prev" = "--text" ] && printf '%s' "$a" > "$TEST_TMPDIR/last-text"
+  prev="$a"
 done
-echo '{"ok":true}'
-exit 0
+echo '{"channel":"C0TEST","ts":"1717171717.000100"}'
 STUB
   # apt-get stub: record the invocation, mutate nothing.
   cat > "$TEST_TMPDIR/bin/apt-get" <<'STUB'
@@ -40,7 +46,14 @@ STUB
 echo "$*" >> "$TEST_TMPDIR/apt-calls.log"
 exit 0
 STUB
-  chmod +x "$TEST_TMPDIR/bin/ssh" "$TEST_TMPDIR/bin/curl" "$TEST_TMPDIR/bin/apt-get"
+  # flock shim: macOS has no flock(1); use the real one when present (Linux CI).
+  cat > "$TEST_TMPDIR/bin/flock" <<'STUB'
+#!/bin/bash
+[ -x /usr/bin/flock ] && exec /usr/bin/flock "$@"
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/ssh" "$TEST_TMPDIR/bin/muso" \
+    "$TEST_TMPDIR/bin/apt-get" "$TEST_TMPDIR/bin/flock"
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
 
   export WEEKLY_CLEANUP_TMP_ROOT="$TEST_TMPDIR/tmproot"
@@ -49,8 +62,8 @@ STUB
   export WEEKLY_CLEANUP_BAK_AGE_DAYS=30
   export WEEKLY_CLEANUP_LOCKFILE="$TEST_TMPDIR/wc.lock"
   export WEEKLY_CLEANUP_SKIP_HOST_GUARD=1
-  # Absent by default → no token → slack-notify silently skips the POST.
-  export WEEKLY_CLEANUP_SLACK_CONFIG="$TEST_TMPDIR/slack.json"
+  # MUSO_SLACK_ENV_FILE is absent by default → no token → slack-notify
+  # silently skips the send (no muso call).
 }
 
 # /bin/rm + hash -r: the rm-failure test installs an rm stub in PATH; once
@@ -60,11 +73,9 @@ teardown() { /bin/rm -rf "$TEST_TMPDIR"; hash -r; }
 # Helper: set mtime N days into the past (-h: follow nothing, works on links).
 old() { touch -h -d "$1 days ago" -- "$2"; }
 
-# Helper: give slack-notify a token and capture what curl would have posted.
+# Helper: give slack-notify a token so it calls the (stubbed) muso.
 slack_fixture() {
-  printf '%s\n' '{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test"}}}}}' \
-    > "$TEST_TMPDIR/slack.json"
-  export WEEKLY_CLEANUP_TEST_CAPTURE="$TEST_TMPDIR/captured-payload.json"
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -239,7 +250,7 @@ slack_fixture() {
 # --dry-run
 # ──────────────────────────────────────────────────────────────
 
-@test "--dry-run: deletes nothing, prints would-delete lines, no curl, no apt" {
+@test "--dry-run: deletes nothing, prints would-delete lines, no muso, no apt" {
   slack_fixture
   echo x > "$WEEKLY_CLEANUP_TMP_ROOT/stale"
   old 20 "$WEEKLY_CLEANUP_TMP_ROOT/stale"
@@ -250,7 +261,7 @@ slack_fixture() {
   [ -e "$WEEKLY_CLEANUP_TMP_ROOT/stale" ]
   [ -e "$TEST_TMPDIR/bakroot-a/dead.bak" ]
   [[ "$output" == *"DRY-RUN: would delete"* ]]
-  [ ! -f "$TEST_TMPDIR/captured-payload.json" ]
+  [ ! -s "$STUB_CALLS" ]
   [ ! -f "$TEST_TMPDIR/apt-calls.log" ]
 }
 
@@ -258,47 +269,37 @@ slack_fixture() {
 # Slack summary
 # ──────────────────────────────────────────────────────────────
 
-@test "real run posts a VALID JSON Block Kit payload with channel + counts" {
+@test "real run posts Block Kit blocks + counts to #clio_devops as devops bot" {
   slack_fixture
   echo x > "$WEEKLY_CLEANUP_TMP_ROOT/stale"
   old 20 "$WEEKLY_CLEANUP_TMP_ROOT/stale"
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ -f "$TEST_TMPDIR/captured-payload.json" ]
-  run python3 -m json.tool "$TEST_TMPDIR/captured-payload.json"
+  grep -q -- '--bot devops' "$STUB_CALLS"
+  grep -q -- '--channel C0ADV2W76G4' "$STUB_CALLS"
+  grep -q -- '--requester' "$STUB_CALLS"
+  # Block Kit blocks were sent and are valid JSON (python-built payload).
+  [ -f "$TEST_TMPDIR/last-blocks" ]
+  run python3 -m json.tool "$TEST_TMPDIR/last-blocks"
   [ "$status" -eq 0 ]
-  run python3 -c "
-import json
-d = json.load(open('$TEST_TMPDIR/captured-payload.json'))
-print(d['channel'])
-print('blocks' in d)
-print('deleted=1' in d['text'])
-"
-  [[ "$output" == *"C0ADV2W76G4"* ]]
-  [[ "$output" == *"True
-True"* ]]
+  grep -q 'deleted=1' "$TEST_TMPDIR/last-text"
 }
 
 @test "zero-work run still posts a summary (silence means broken)" {
   slack_fixture
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ -f "$TEST_TMPDIR/captured-payload.json" ]
-  run python3 -c "
-import json
-d = json.load(open('$TEST_TMPDIR/captured-payload.json'))
-print('deleted=0' in d['text'])
-"
-  [[ "$output" == *"True"* ]]
+  [ -f "$TEST_TMPDIR/last-text" ]
+  grep -q 'deleted=0' "$TEST_TMPDIR/last-text"
 }
 
-@test "Slack delivery is best-effort: curl failure → still exit 0" {
+@test "Slack delivery is best-effort: muso failure → still exit 0" {
   slack_fixture
-  cat > "$TEST_TMPDIR/bin/curl" <<'STUB'
+  cat > "$TEST_TMPDIR/bin/muso" <<'STUB'
 #!/bin/bash
 exit 7
 STUB
-  chmod +x "$TEST_TMPDIR/bin/curl"
+  chmod +x "$TEST_TMPDIR/bin/muso"
   run bash "$WC"
   [ "$status" -eq 0 ]
 }
@@ -349,12 +350,8 @@ STUB
   [ -e "$WEEKLY_CLEANUP_TMP_ROOT/stuck" ]
   [[ "$output" == *"errors=1"* ]]
   [[ "$output" == *"tmp: deleted=0"* ]]
-  run python3 -c "
-import json
-d = json.load(open('$TEST_TMPDIR/captured-payload.json'))
-print('errors=1' in d['text'])
-"
-  [[ "$output" == *"True"* ]]
+  [ -f "$TEST_TMPDIR/last-text" ]
+  grep -q 'errors=1' "$TEST_TMPDIR/last-text"
 }
 
 @test "idempotent: immediate second run deletes 0" {

@@ -2,11 +2,11 @@
 # Tests for scripts/cron-health-watchdog.sh — the cron-failure alerter
 # added after the 2026-06 b2b-reply-scanner stacked 17 silent failures.
 #
-# PATH-shadows curl + ssh so a real Slack POST / remote call during a test
+# PATH-shadows muso + ssh so a real Slack send / remote call during a test
 # fails loudly instead of paging #clio_devops for real
 # (see memory/feedback_bats_must_stub_openclaw.md). Behavioural assertions
 # use --dry-run (never touches the network); the payload-escaping test runs
-# the real post path against a stubbed curl that captures the JSON body.
+# the real post path against a stubbed muso that captures the argv + text.
 bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
@@ -17,22 +17,35 @@ setup() {
   export TEST_TMPDIR
   mkdir -p "$TEST_TMPDIR/runs" "$TEST_TMPDIR/bin"
 
-  # Refuse real network: stub curl + ssh.
+  # Refuse real network: stub muso + ssh; never read the real main.env.
+  unset MUSO_SLACK_BOT_TOKEN_DEVOPS
+  export MUSO_SLACK_ENV_FILE="$TEST_TMPDIR/muso-slack.env"  # absent → no token
+  export STUB_CALLS="$TEST_TMPDIR/muso-calls"
+  : > "$STUB_CALLS"
   cat > "$TEST_TMPDIR/bin/ssh" <<'STUB'
 #!/bin/bash
 echo "test stub: ssh refused ($*)" >&2; exit 99
 STUB
-  # curl stub: capture the --data-binary @<file> payload for inspection.
-  cat > "$TEST_TMPDIR/bin/curl" <<'STUB'
-#!/bin/bash
+  # muso stub: record argv, capture --text / --blocks-file for inspection.
+  cat > "$TEST_TMPDIR/bin/muso" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_CALLS"
+prev=""
 for a in "$@"; do
-  case "$a" in
-    @*) cp "${a#@}" "$CRON_HEALTH_TEST_CAPTURE" 2>/dev/null ;;
-  esac
+  [ "$prev" = "--blocks-file" ] && cp "$a" "$TEST_TMPDIR/last-blocks" 2>/dev/null
+  [ "$prev" = "--text" ] && printf '%s' "$a" > "$TEST_TMPDIR/last-text"
+  prev="$a"
 done
+echo '{"channel":"C0TEST","ts":"1717171717.000100"}'
+STUB
+  # flock shim: macOS has no flock(1); use the real one when present (Linux CI)
+  # so single-run locking still behaves, otherwise no-op so real-run tests work.
+  cat > "$TEST_TMPDIR/bin/flock" <<'STUB'
+#!/bin/bash
+[ -x /usr/bin/flock ] && exec /usr/bin/flock "$@"
 exit 0
 STUB
-  chmod +x "$TEST_TMPDIR/bin/ssh" "$TEST_TMPDIR/bin/curl"
+  chmod +x "$TEST_TMPDIR/bin/ssh" "$TEST_TMPDIR/bin/muso" "$TEST_TMPDIR/bin/flock"
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
 
   # jobs.json id->name/agent map shared by most tests.
@@ -264,24 +277,22 @@ EOF
   [[ "$output" == *"no new cron failures"* ]]
 }
 
-@test "error text with quotes/backticks → posts a VALID JSON payload (escaping guard)" {
+@test "error text with quotes/backticks → posted text survives intact (escaping guard)" {
   runfile jobA <<'EOF'
 {"status":"error","ts":2000,"error":"failed `trino-query.sh \"SELECT a,b FROM t\"` with \\backslash"}
 EOF
   printf '%s\n' '{"jobA":1500}' > "$CRON_HEALTH_STATE_FILE"
-  # fake config so slack-notify reads a token and calls (stubbed) curl
-  printf '%s\n' '{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test"}}}}}' \
-    > "$TEST_TMPDIR/slack.json"
-  export CRON_HEALTH_SLACK_CONFIG="$TEST_TMPDIR/slack.json"
-  export CRON_HEALTH_TEST_CAPTURE="$TEST_TMPDIR/captured-payload.json"
-  run bash "$WD"   # NOT dry-run → exercises slack_notify_payload_file → stubbed curl
+  # token fixture so slack-notify proceeds and calls the (stubbed) muso
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  run bash "$WD"   # NOT dry-run → exercises slack_notify_payload_file → stubbed muso
   [ "$status" -eq 0 ]
-  [ -f "$CRON_HEALTH_TEST_CAPTURE" ]
-  # The captured body must be valid JSON (python-built, not naive bash interp)
-  run python3 -m json.tool "$CRON_HEALTH_TEST_CAPTURE"
-  [ "$status" -eq 0 ]
-  # ...and must carry the channel + the failing job
-  run python3 -c "import json,sys; d=json.load(open('$CRON_HEALTH_TEST_CAPTURE')); print(d['channel']); print('daily-churned-campaign-refresh' in d['text'])"
-  [[ "$output" == *"C0ADV2W76G4"* ]]
-  [[ "$output" == *"True"* ]]
+  # The send must target the right channel as the devops bot, with attribution.
+  grep -q -- '--bot devops' "$STUB_CALLS"
+  grep -q -- '--channel C0ADV2W76G4' "$STUB_CALLS"
+  grep -q -- '--requester' "$STUB_CALLS"
+  # The python-built payload (not naive bash interp) must carry the failing job
+  # and the tricky characters verbatim in the posted text.
+  [ -f "$TEST_TMPDIR/last-text" ]
+  grep -q 'daily-churned-campaign-refresh' "$TEST_TMPDIR/last-text"
+  grep -qF 'trino-query.sh "SELECT a,b FROM t"' "$TEST_TMPDIR/last-text"
 }

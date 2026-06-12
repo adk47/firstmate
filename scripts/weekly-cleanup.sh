@@ -58,7 +58,6 @@
 #   WEEKLY_CLEANUP_BAK_AGE_DAYS      default 30
 #   WEEKLY_CLEANUP_SKIP_APT          1 = skip apt-get step
 #   WEEKLY_CLEANUP_SLACK_CHANNEL     default C0ADV2W76G4 (#clio_devops)
-#   WEEKLY_CLEANUP_SLACK_CONFIG      openclaw config holding the devops token
 #   WEEKLY_CLEANUP_LOCKFILE          single-run lock
 #   WEEKLY_CLEANUP_SKIP_HOST_GUARD   1 = skip the ovh-node-8 guard (tests)
 # ──────────────────────────────────────────────────────────────
@@ -74,10 +73,9 @@ LOCKFILE="${WEEKLY_CLEANUP_LOCKFILE:-/var/run/hydra-weekly-cleanup.lock}"
 SKIP_HOST_GUARD="${WEEKLY_CLEANUP_SKIP_HOST_GUARD:-0}"
 DRY_RUN=0
 
-# slack-notify.sh reads these (channel + which config holds the token).
-# Export before sourcing so its `:=` defaults don't override us.
+# slack-notify.sh reads this (target channel).
+# Export before sourcing so its `:=` default doesn't override us.
 export SLACK_CHANNEL="${WEEKLY_CLEANUP_SLACK_CHANNEL:-C0ADV2W76G4}"  # #clio_devops
-export SLACK_NOTIFY_CONFIG="${WEEKLY_CLEANUP_SLACK_CONFIG:-/root/.openclaw-main/openclaw.json}"
 
 log() { echo "$LOGPREFIX $1"; }
 

@@ -9,28 +9,30 @@ set -euo pipefail
 #   post-digest.sh <payload.json> [thread_ts]
 #     <payload.json> is a complete chat.postMessage body produced by
 #     render-digest.py --blocks-main / --blocks-thread (channel + text +
-#     blocks). Posted verbatim, except [thread_ts] (when given) is injected
-#     as the payload's thread_ts so the message lands as a thread reply —
-#     same threading contract as scripts/qa-slack-dm.sh.
+#     blocks). [thread_ts] (when given) makes the message land as a thread
+#     reply — same threading contract as scripts/qa-slack-dm.sh.
 #     On success prints the message ts on stdout.
 #
-# Token comes from the gateway config (channels.slack.accounts.<account>
-# .botToken), same pattern as scripts/qa-slack-dm.sh. Slack returns HTTP 200
-# with {"ok":false} for not_in_channel / invalid_auth / invalid_blocks, so the
-# ok flag is parsed — curl exit status alone is NOT delivery proof.
+# Sends via `muso slack send` (the gated CLI, issue #5 PR1): the payload's
+# channel/text/blocks map onto --channel/--text/--blocks-file, the bot token
+# comes from MUSO_SLACK_BOT_TOKEN_<BOT> in the environment, and the CLI
+# decodes Slack's HTTP-200 {"ok":false} trap (not_in_channel / invalid_auth /
+# invalid_blocks all exit non-zero) — its exit code IS delivery proof.
 #
 # NOT best-effort: a failed post exits non-zero so the caller
 # (publish-digest.sh) can fall back to the plain-text announce path loudly.
 #
 # Env overrides (mainly for tests):
-#   SLACK_ACCOUNT        bot account whose token to use (default: operations)
-#   SLACK_NOTIFY_CONFIG  gateway config path (default: /root/.openclaw-main/openclaw.json)
-#   CURL                 curl binary (default: curl)
+#   SLACK_ACCOUNT          bot identity to send as (default: operations)
+#   MUSO_BIN               muso binary (default: muso)
+#   MUSO_SLACK_ENV_FILE    env file with MUSO_SLACK_BOT_TOKEN_<BOT> vars
+#                          (default: /etc/openclaw/main.env)
+#   SLACK_NOTIFY_REQUESTER audit attribution (default: post-digest@hydra-ops)
 # Exit codes: 0 ok | 2 usage | 1 slack/api failure.
 
 SLACK_ACCOUNT="${SLACK_ACCOUNT:-operations}"
-SLACK_NOTIFY_CONFIG="${SLACK_NOTIFY_CONFIG:-/root/.openclaw-main/openclaw.json}"
-CURL="${CURL:-curl}"
+MUSO_BIN="${MUSO_BIN:-muso}"
+MUSO_SLACK_ENV_FILE="${MUSO_SLACK_ENV_FILE:-/etc/openclaw/main.env}"
 
 die() { echo "post-digest: $2" >&2; exit "$1"; }
 
@@ -41,28 +43,29 @@ jq -e '(.channel | type == "string") and (.blocks | type == "array" and length >
   "$PAYLOAD" >/dev/null 2>&1 \
   || die 2 "payload must be a chat.postMessage body with .channel and non-empty .blocks (from render-digest.py --blocks-main/--blocks-thread)"
 
-if [ -n "$THREAD_TS" ]; then
-  threaded="$(mktemp)"
-  trap 'rm -f "$threaded"' EXIT
-  jq --arg ts "$THREAD_TS" '. + {thread_ts: $ts}' "$PAYLOAD" > "$threaded" \
-    || die 2 "could not inject thread_ts into payload"
-  PAYLOAD="$threaded"
+bot_var="MUSO_SLACK_BOT_TOKEN_$(printf '%s' "$SLACK_ACCOUNT" | tr '[:lower:]' '[:upper:]')"
+if [ -z "${!bot_var:-}" ] && [ -r "$MUSO_SLACK_ENV_FILE" ]; then
+  eval "$(grep -E '^MUSO_SLACK_[A-Z_]+=' "$MUSO_SLACK_ENV_FILE" | sed 's/^/export /')" 2>/dev/null || true
 fi
+[ -n "${!bot_var:-}" ] || die 1 "no ${bot_var} in the environment or ${MUSO_SLACK_ENV_FILE}."
 
-token="$(python3 -c "
-import json,sys
-with open('${SLACK_NOTIFY_CONFIG}') as f:
-    c = json.load(f)
-print(c['channels']['slack']['accounts']['${SLACK_ACCOUNT}']['botToken'])
-" 2>/dev/null || true)"
-[ -n "$token" ] || die 1 "could not read ${SLACK_ACCOUNT} bot token from ${SLACK_NOTIFY_CONFIG}."
+channel="$(jq -r '.channel' "$PAYLOAD")"
+text="$(jq -r '.text // empty' "$PAYLOAD")"
 
-resp="$("$CURL" -sf -X POST "https://slack.com/api/chat.postMessage" \
-  -H "Authorization: Bearer ${token}" \
-  -H "Content-Type: application/json; charset=utf-8" \
-  --data-binary @"$PAYLOAD" 2>/dev/null || true)"
+blocks_file="$(mktemp)"
+trap 'rm -f "$blocks_file"' EXIT
+jq '.blocks' "$PAYLOAD" > "$blocks_file" || die 2 "could not extract .blocks from payload"
 
-ts="$(printf '%s' "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ts','') if d.get('ok') else '')" 2>/dev/null || true)"
-[ -n "$ts" ] || die 1 "chat.postMessage failed: $(printf '%s' "$resp" | head -c 200)"
+args=(slack send --bot "$SLACK_ACCOUNT" --channel "$channel" \
+  --blocks-file "$blocks_file" \
+  --requester "${SLACK_NOTIFY_REQUESTER:-post-digest@hydra-ops}" --json)
+[ -n "$text" ] && args+=(--text "$text")
+[ -n "$THREAD_TS" ] && args+=(--thread-ts "$THREAD_TS")
+
+# Fail-loud: keep muso's stderr (the decoded Slack error) visible to the
+# caller's logs; stdout carries {"channel","ts"} on success.
+resp="$("$MUSO_BIN" "${args[@]}")" || die 1 "muso slack send failed (see stderr above)"
+ts="$(printf '%s' "$resp" | jq -r '.ts // empty' 2>/dev/null || true)"
+[ -n "$ts" ] || die 1 "muso slack send returned no ts: $(printf '%s' "$resp" | head -c 200)"
 
 printf '%s\n' "$ts"

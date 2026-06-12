@@ -1,21 +1,27 @@
 #!/bin/bash
 # ──────────────────────────────────────────────────────────────
 # slack-notify.sh — sourced helper for posting Slack messages
-# from hydra ops scripts using the devops bot token stored
-# inside openclaw's main-profile config.
+# from hydra ops scripts via the gated muso CLI (devops bot).
 #
 # Usage:
 #   source /opt/hydra/scripts/lib/slack-notify.sh
 #   slack_notify "your message here"
 #
 # Env knobs:
-#   SLACK_CHANNEL          # Slack channel ID to post into.
-#                          # Defaults to C0ADV2W76G4 (#clio_devops).
-#   SLACK_NOTIFY_CONFIG    # Path to openclaw config that holds the
-#                          # devops bot token. Defaults to the main
-#                          # profile path because openclaw-watchdog
-#                          # historically read from there; callers
-#                          # in other profiles can override.
+#   SLACK_CHANNEL            # Slack channel ID to post into.
+#                            # Defaults to C0ADV2W76G4 (#clio_devops).
+#   MUSO_BIN                 # muso binary (default: muso) — tests stub this.
+#   MUSO_SLACK_ENV_FILE      # env file holding MUSO_SLACK_BOT_TOKEN_<BOT>
+#                            # vars (default: /etc/openclaw/main.env). Ops
+#                            # scripts run under units that do NOT load
+#                            # main.env, so the lib pulls the slack vars in
+#                            # itself when they're absent.
+#   SLACK_NOTIFY_REQUESTER   # audit attribution for the gated send
+#                            # (default: <calling script>@hydra-ops).
+#
+# Sends go through `muso slack send` (issue #5 PR1): per-bot tokens from the
+# environment, Slack's HTTP-200 ok:false trap decoded by the CLI (exit 0 is
+# confirmed delivery), every send audited with requester attribution.
 #
 # Why a sourced lib instead of a separate executable: callers want
 # slack_notify to be silent on transient failures (Slack is the alert
@@ -25,70 +31,98 @@
 # ──────────────────────────────────────────────────────────────
 
 : "${SLACK_CHANNEL:=C0ADV2W76G4}"
-: "${SLACK_NOTIFY_CONFIG:=/root/.openclaw-main/openclaw.json}"
+: "${MUSO_BIN:=muso}"
+: "${MUSO_SLACK_ENV_FILE:=/etc/openclaw/main.env}"
 
-_slack_read_token() {
-  python3 -c "
-import json
-with open('${SLACK_NOTIFY_CONFIG}') as f:
-    c = json.load(f)
-print(c['channels']['slack']['accounts']['devops']['botToken'])
-" 2>/dev/null || true
+# The cron.d watchdogs and root crontab run with cron's default PATH
+# (/usr/bin:/bin), which excludes /usr/local/bin where deploy.sh installs
+# muso — resolve the absolute path so cron-driven alerts don't 127.
+if [ "$MUSO_BIN" = "muso" ] && ! command -v muso >/dev/null 2>&1 && [ -x /usr/local/bin/muso ]; then
+  MUSO_BIN=/usr/local/bin/muso
+fi
+
+# slack_load_env [BOT]: make sure the muso slack token vars are exported and
+# the token for BOT (default devops) is present. The watchdog/cron units load
+# shared.env+edge.env, not main.env where the MUSO_SLACK_* vars live — so pull
+# in exactly those lines (nothing else) when they're missing. Best-effort:
+# pre-start-heal in particular may run when config files are broken; a missing
+# env file just means we can't notify, never that we fail the caller.
+slack_load_env() {
+  local bot_var
+  bot_var="MUSO_SLACK_BOT_TOKEN_$(printf '%s' "${1:-devops}" | tr '[:lower:]' '[:upper:]')"
+  if [ -z "${!bot_var:-}" ] && [ -r "$MUSO_SLACK_ENV_FILE" ]; then
+    # MUSO_STATE_DIR rides along so muso's fail-closed audit log lands in
+    # the shared /var/log/muso-ops trail (RUNBOOK) even under units/crons
+    # that carry neither main.env nor HOME.
+    eval "$(grep -E '^MUSO_(SLACK_[A-Z_]+|STATE_DIR)=' "$MUSO_SLACK_ENV_FILE" | sed 's/^/export /')" 2>/dev/null || true
+  fi
+  [ -n "${!bot_var:-}" ]
+}
+
+_slack_requester() {
+  printf '%s' "${SLACK_NOTIFY_REQUESTER:-$(basename "${0:-hydra-ops}")@hydra-ops}"
 }
 
 slack_notify() {
   local msg="$1"
-  local token
-  token=$(_slack_read_token)
-
-  if [ -z "$token" ]; then
-    # Best-effort: don't fail the caller. Pre-start-heal in particular
-    # may be running BECAUSE the config is malformed, in which case the
-    # token read above raises — which is fine, we just can't notify.
-    return 0
-  fi
-
-  curl -sf -X POST "https://slack.com/api/chat.postMessage" \
-    -H "Authorization: Bearer ${token}" \
-    -H "Content-Type: application/json" \
-    -d "{\"channel\":\"${SLACK_CHANNEL}\",\"text\":\"${msg}\"}" >/dev/null 2>&1 || true
+  # Callers historically embedded the 2-char sequence \n and relied on the
+  # JSON body decode to render newlines; muso's --text marshals it literally,
+  # so translate here to keep the old contract.
+  msg="${msg//\\n/$'\n'}"
+  slack_load_env devops || return 0
+  "$MUSO_BIN" slack send --bot devops \
+    --channel "$SLACK_CHANNEL" --text "$msg" \
+    --requester "$(_slack_requester)" >/dev/null 2>&1 || true
 }
 
 # _slack_post_payload <path-to-json>  (internal)
-# POSTs the exact JSON payload at <path> via chat.postMessage and RETURNS the
-# real delivery status: 0 only when Slack confirms the message was posted;
-# non-zero when the payload is unreadable, the token is missing, curl/HTTP
-# fails, OR Slack replies HTTP 200 with `{"ok":false}`. That last case matters:
-# the Slack Web API returns 200 + ok:false for application-level failures
-# (invalid_auth, not_in_channel, missing scope...), so `curl -f` (which only
-# fails on HTTP >=400) is NOT sufficient proof of delivery — we must parse
-# `.ok`. Public wrappers below pick best-effort vs status-aware.
+# Posts the chat.postMessage-shaped payload at <path> ({channel, text, blocks,
+# thread_ts} — same shape callers always built) via `muso slack send` and
+# RETURNS the real delivery status: 0 only when Slack confirmed the post.
+# The CLI decodes Slack's HTTP-200 {"ok":false} trap itself (invalid_auth,
+# not_in_channel, missing scope... all exit non-zero), so muso's exit code IS
+# the delivery status — no response parsing needed here anymore.
 _slack_post_payload() {
   local payload_file="$1"
   [ -r "$payload_file" ] || return 1
-  local token
-  token=$(_slack_read_token)
-  [ -z "$token" ] && return 1
+  slack_load_env devops || return 1
 
-  local resp
-  resp=$(curl -sf -X POST "https://slack.com/api/chat.postMessage" \
-    -H "Authorization: Bearer ${token}" \
-    -H "Content-Type: application/json; charset=utf-8" \
-    --data-binary "@${payload_file}" 2>/dev/null) || return 1
+  local channel text thread_ts
+  channel=$(jq -r '.channel // empty' "$payload_file" 2>/dev/null) || return 1
+  # No silent default: the old verbatim-POST path let Slack reject a
+  # channel-less payload, so the status-aware callers never advanced their
+  # dedupe state on a malformed payload. Keep that contract.
+  [ -n "$channel" ] || return 1
+  text=$(jq -r '.text // empty' "$payload_file" 2>/dev/null)
+  thread_ts=$(jq -r '.thread_ts // empty' "$payload_file" 2>/dev/null)
 
-  # Confirm ok:true. A non-JSON / empty body or ok:false is a delivery failure.
-  printf '%s' "$resp" | python3 -c 'import json,sys
-try:
-    sys.exit(0 if json.load(sys.stdin).get("ok") is True else 1)
-except Exception:
-    sys.exit(1)'
+  local args=(slack send --bot devops --channel "$channel"
+    --requester "$(_slack_requester)")
+  [ -n "$text" ] && args+=(--text "$text")
+  [ -n "$thread_ts" ] && args+=(--thread-ts "$thread_ts")
+  # release.sh (and any payload that sets unfurl_links:false) relied on the
+  # old verbatim POST honoring it — map onto the CLI's --no-unfurl.
+  if jq -e '.unfurl_links == false or .unfurl_media == false' "$payload_file" >/dev/null 2>&1; then
+    args+=(--no-unfurl)
+  fi
+
+  local blocks_file=""
+  if jq -e '.blocks | type == "array" and length > 0' "$payload_file" >/dev/null 2>&1; then
+    blocks_file=$(mktemp) || return 1
+    jq '.blocks' "$payload_file" > "$blocks_file" 2>/dev/null || { rm -f "$blocks_file"; return 1; }
+    args+=(--blocks-file "$blocks_file")
+  fi
+
+  local status=0
+  "$MUSO_BIN" "${args[@]}" >/dev/null 2>&1 || status=$?
+  [ -n "$blocks_file" ] && rm -f "$blocks_file"
+  return "$status"
 }
 
 # slack_notify_payload_file <path-to-json>
-# Posts the exact JSON payload at <path> via chat.postMessage. Caller is
-# responsible for the payload shape — typically {channel, text, blocks}.
-# Use this for Block Kit messages: build the JSON in Python (apostrophes
-# in commit subjects will break naive bash heredocs — see the 2026-05-07
+# Posts the payload at <path> ({channel, text, blocks, thread_ts}). Use this
+# for Block Kit messages: build the JSON in Python (apostrophes in commit
+# subjects will break naive bash heredocs — see the 2026-05-07
 # api-evidence.sh apostrophe-in-heredoc burn).
 #
 # Best-effort: never fails the caller (preserves the historical contract that
@@ -99,7 +133,7 @@ slack_notify_payload_file() {
 }
 
 # slack_notify_payload_file_status <path-to-json>
-# Same POST, but RETURNS delivery status (0 only on a confirmed post). Use when
+# Same post, but RETURNS delivery status (0 only on a confirmed post). Use when
 # the caller must NOT advance dedupe / idempotency state for an alert that was
 # never actually delivered (e.g. a watchdog that would otherwise mark an
 # incident "already paged" and never retry it).

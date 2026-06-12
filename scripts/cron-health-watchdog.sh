@@ -33,7 +33,6 @@
 #   CRON_HEALTH_RUNS_DIR        cron run JSONL dir
 #   CRON_HEALTH_JOBS_FILE       cron jobs.json (id -> name/agent map)
 #   CRON_HEALTH_STATE_FILE      per-job watermark store
-#   CRON_HEALTH_SLACK_CONFIG    openclaw config holding the devops token
 #   CRON_HEALTH_SLACK_CHANNEL   target channel (default #clio_devops)
 #   CRON_HEALTH_LOCKFILE        single-run lock
 #   CRON_HEALTH_SKIP_HOST_GUARD 1 = skip the ovh-node-8 guard (tests)
@@ -57,10 +56,9 @@ ERROR_PREVIEW_CHARS=300
 MIN_STREAK="${CRON_HEALTH_MIN_STREAK:-2}"
 DRY_RUN=0
 
-# slack-notify.sh reads these (channel + which config holds the token).
-# Export before sourcing so its `:=` defaults don't override us.
+# slack-notify.sh reads this (target channel).
+# Export before sourcing so its `:=` default doesn't override us.
 export SLACK_CHANNEL="${CRON_HEALTH_SLACK_CHANNEL:-C0ADV2W76G4}"  # #clio_devops
-export SLACK_NOTIFY_CONFIG="${CRON_HEALTH_SLACK_CONFIG:-/root/.openclaw-main/openclaw.json}"
 
 log() { echo "$LOGPREFIX $1"; }
 

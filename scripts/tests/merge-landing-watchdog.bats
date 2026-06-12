@@ -3,12 +3,12 @@
 # after the 2026-06-08/09 Jan ↔ Ops threads where two profile merges returned
 # HTTP 200 four times over days and never landed in the catalog.
 #
-# PATH-shadows curl + ssh so a real Slack POST / remote call during a test
+# PATH-shadows muso + ssh so a real Slack send / remote call during a test
 # fails loudly instead of paging #clio_devops for real
 # (see memory/feedback_bats_must_stub_openclaw.md). The catalog query is
 # redirected to a stub via MERGE_LANDING_TRINO_CMD — no real Trino/kubectl.
 # Behavioural assertions use --dry-run; the payload-escaping test runs the real
-# post path against a stubbed curl that captures the JSON body.
+# post path against a stubbed muso that captures the argv + text.
 bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
@@ -19,24 +19,34 @@ setup() {
   export TEST_TMPDIR
   mkdir -p "$TEST_TMPDIR/bin"
 
-  # Refuse real network: stub curl + ssh.
+  # Refuse real network: stub muso + ssh; never read the real main.env.
+  unset MUSO_SLACK_BOT_TOKEN_DEVOPS
+  export MUSO_SLACK_ENV_FILE="$TEST_TMPDIR/muso-slack.env"  # absent → no token
+  export STUB_CALLS="$TEST_TMPDIR/muso-calls"
+  : > "$STUB_CALLS"
   cat > "$TEST_TMPDIR/bin/ssh" <<'STUB'
 #!/bin/bash
 echo "test stub: ssh refused ($*)" >&2; exit 99
 STUB
-  # curl stub: capture the --data-binary @<file> payload for inspection and
-  # emit Slack's success body so _slack_post_payload's ok:true check passes.
-  cat > "$TEST_TMPDIR/bin/curl" <<'STUB'
-#!/bin/bash
+  # muso stub: record argv, capture --text for inspection; exit 0 == Slack
+  # confirmed delivery (the CLI decodes ok:false itself).
+  cat > "$TEST_TMPDIR/bin/muso" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_CALLS"
+prev=""
 for a in "$@"; do
-  case "$a" in
-    @*) cp "${a#@}" "$MERGE_LANDING_TEST_CAPTURE" 2>/dev/null ;;
-  esac
+  [ "$prev" = "--text" ] && printf '%s' "$a" > "$TEST_TMPDIR/last-text"
+  prev="$a"
 done
-echo '{"ok":true}'
+echo '{"channel":"C0TEST","ts":"1717171717.000100"}'
+STUB
+  # flock shim: macOS has no flock(1); use the real one when present (Linux CI).
+  cat > "$TEST_TMPDIR/bin/flock" <<'STUB'
+#!/bin/bash
+[ -x /usr/bin/flock ] && exec /usr/bin/flock "$@"
 exit 0
 STUB
-  chmod +x "$TEST_TMPDIR/bin/ssh" "$TEST_TMPDIR/bin/curl"
+  chmod +x "$TEST_TMPDIR/bin/ssh" "$TEST_TMPDIR/bin/muso" "$TEST_TMPDIR/bin/flock"
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
 
   # Catalog stub: pattern-matches the loser id in the IN-list SQL and emits the
@@ -143,69 +153,60 @@ mergeline() { # $1 epoch  $2 survivor  $3..$n losers
   printf '#!/usr/bin/env bash\nexit 7\n' > "$TEST_TMPDIR/bin/trino-fail.sh"
   chmod +x "$TEST_TMPDIR/bin/trino-fail.sh"
   export MERGE_LANDING_TRINO_CMD="$TEST_TMPDIR/bin/trino-fail.sh"
-  printf '%s\n' '{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test"}}}}}' \
-    > "$TEST_TMPDIR/slack.json"
-  export MERGE_LANDING_SLACK_CONFIG="$TEST_TMPDIR/slack.json"
-  export MERGE_LANDING_TEST_CAPTURE="$TEST_TMPDIR/blind-payload.json"
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
 
   run bash "$WD"
   [ "$status" -eq 1 ]
-  [ -f "$MERGE_LANDING_TEST_CAPTURE" ]            # it actually paged
-  run python3 -c "import json; print('BLIND' in json.load(open('$MERGE_LANDING_TEST_CAPTURE'))['text'])"
-  [[ "$output" == *"True"* ]]
+  [ -f "$TEST_TMPDIR/last-text" ]                 # it actually paged
+  grep -q 'BLIND' "$TEST_TMPDIR/last-text"
 
-  # Second tick inside the cooldown must NOT re-page (no new capture), still exit 1.
-  rm -f "$MERGE_LANDING_TEST_CAPTURE"
+  # Second tick inside the cooldown must NOT re-page (no new send), still exit 1.
+  rm -f "$TEST_TMPDIR/last-text"
   run bash "$WD"
   [ "$status" -eq 1 ]
   [[ "$output" == *"already paged within"* ]]
-  [ ! -f "$MERGE_LANDING_TEST_CAPTURE" ]
+  [ ! -f "$TEST_TMPDIR/last-text" ]
 }
 
 @test "failed Slack delivery does NOT dedupe → next tick re-pages the same stuck pair" {
   mergeline 1000 SURV L_STUCK
-  printf '%s\n' '{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test"}}}}}' \
-    > "$TEST_TMPDIR/slack.json"
-  export MERGE_LANDING_SLACK_CONFIG="$TEST_TMPDIR/slack.json"
-  export MERGE_LANDING_TEST_CAPTURE="$TEST_TMPDIR/cap.json"
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
 
-  # Tick 1: curl FAILS → delivery not confirmed → state must not advance.
-  printf '#!/bin/bash\nexit 1\n' > "$TEST_TMPDIR/bin/curl"
-  chmod +x "$TEST_TMPDIR/bin/curl"
+  # Tick 1: muso FAILS (Slack rejected / network) → delivery not confirmed →
+  # state must not advance.
+  printf '#!/bin/bash\nexit 1\n' > "$TEST_TMPDIR/bin/muso"
+  chmod +x "$TEST_TMPDIR/bin/muso"
   run bash "$WD"
   [ "$status" -eq 1 ]
   [[ "$output" == *"NOT advanced"* ]]
   [ ! -f "$MERGE_LANDING_STATE_FILE" ]            # nothing deduped
   [ ! -f "${MERGE_LANDING_STATE_FILE}.pending" ]  # staging cleaned up
 
-  # Tick 2: curl SUCCEEDS (ok:true) + captures → the same pair must alert again.
-  cat > "$TEST_TMPDIR/bin/curl" <<'STUB'
-#!/bin/bash
-for a in "$@"; do case "$a" in @*) cp "${a#@}" "$MERGE_LANDING_TEST_CAPTURE" 2>/dev/null ;; esac; done
-echo '{"ok":true}'
+  # Tick 2: muso SUCCEEDS + captures → the same pair must alert again.
+  cat > "$TEST_TMPDIR/bin/muso" <<'STUB'
+#!/usr/bin/env bash
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--text" ] && printf '%s' "$a" > "$TEST_TMPDIR/last-text"
+  prev="$a"
+done
 exit 0
 STUB
-  chmod +x "$TEST_TMPDIR/bin/curl"
+  chmod +x "$TEST_TMPDIR/bin/muso"
   run bash "$WD"
   [ "$status" -eq 0 ]
-  [ -f "$MERGE_LANDING_TEST_CAPTURE" ]
-  run python3 -c "import json; print('L_STUCK' in json.load(open('$MERGE_LANDING_TEST_CAPTURE'))['text'])"
-  [[ "$output" == *"True"* ]]
+  [ -f "$TEST_TMPDIR/last-text" ]
+  grep -q 'L_STUCK' "$TEST_TMPDIR/last-text"
 }
 
-@test "Slack 200 with ok:false → NOT confirmed → dedupe not advanced, exit 1" {
+@test "Slack ok:false (muso exits non-zero) → NOT confirmed → dedupe not advanced, exit 1" {
   mergeline 1000 SURV L_STUCK
-  printf '%s\n' '{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test"}}}}}' \
-    > "$TEST_TMPDIR/slack.json"
-  export MERGE_LANDING_SLACK_CONFIG="$TEST_TMPDIR/slack.json"
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
 
-  # HTTP 200 but application-level failure: curl -f stays 0, body says ok:false.
-  cat > "$TEST_TMPDIR/bin/curl" <<'STUB'
-#!/bin/bash
-echo '{"ok":false,"error":"not_in_channel"}'
-exit 0
-STUB
-  chmod +x "$TEST_TMPDIR/bin/curl"
+  # Slack's HTTP-200 {"ok":false} trap is decoded by the CLI itself: muso exits
+  # non-zero on e.g. not_in_channel, so the watchdog must treat it as undelivered.
+  printf '#!/bin/bash\nexit 1\n' > "$TEST_TMPDIR/bin/muso"
+  chmod +x "$TEST_TMPDIR/bin/muso"
   run bash "$WD"
   [ "$status" -eq 1 ]
   [[ "$output" == *"NOT advanced"* ]]
@@ -215,20 +216,17 @@ STUB
 
 @test "successful delivery advances dedupe → next real tick is quiet" {
   mergeline 1000 SURV L_STUCK
-  printf '%s\n' '{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test"}}}}}' \
-    > "$TEST_TMPDIR/slack.json"
-  export MERGE_LANDING_SLACK_CONFIG="$TEST_TMPDIR/slack.json"
-  export MERGE_LANDING_TEST_CAPTURE="$TEST_TMPDIR/cap.json"
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
 
-  run bash "$WD"                     # tick 1: alerts + delivers (stub curl exits 0)
+  run bash "$WD"                     # tick 1: alerts + delivers (stub muso exits 0)
   [ "$status" -eq 0 ]
-  [ -f "$MERGE_LANDING_TEST_CAPTURE" ]
+  [ -f "$TEST_TMPDIR/last-text" ]
 
-  rm -f "$MERGE_LANDING_TEST_CAPTURE"
+  rm -f "$TEST_TMPDIR/last-text"
   run bash "$WD"                     # tick 2: state remembers → quiet, no second post
   [ "$status" -eq 0 ]
   [[ "$output" == *"have landed"* ]]
-  [ ! -f "$MERGE_LANDING_TEST_CAPTURE" ]
+  [ ! -f "$TEST_TMPDIR/last-text" ]
 }
 
 @test "unknown flag → exit 2" {
@@ -270,12 +268,10 @@ STUB
 @test "✅ all-clear with FAILED Slack delivery → state unchanged, retried next tick" {
   mergeline 1000 SURV L_LANDED
   printf '%s\n' '["SURV:L_LANDED"]' > "$MERGE_LANDING_STATE_FILE"
-  printf '%s\n' '{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test"}}}}}' \
-    > "$TEST_TMPDIR/slack.json"
-  export MERGE_LANDING_SLACK_CONFIG="$TEST_TMPDIR/slack.json"
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
 
-  printf '#!/bin/bash\nexit 1\n' > "$TEST_TMPDIR/bin/curl"
-  chmod +x "$TEST_TMPDIR/bin/curl"
+  printf '#!/bin/bash\nexit 1\n' > "$TEST_TMPDIR/bin/muso"
+  chmod +x "$TEST_TMPDIR/bin/muso"
   run bash "$WD"
   [ "$status" -eq 1 ]
   [[ "$output" == *"NOT advanced"* ]]
@@ -287,22 +283,15 @@ STUB
 @test "mixed tick: one new stuck + one resolved → single message with both blocks" {
   mergeline 1000 SURV L_STUCK L_LANDED
   printf '%s\n' '["SURV:L_LANDED"]' > "$MERGE_LANDING_STATE_FILE"
-  printf '%s\n' '{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test"}}}}}' \
-    > "$TEST_TMPDIR/slack.json"
-  export MERGE_LANDING_SLACK_CONFIG="$TEST_TMPDIR/slack.json"
-  export MERGE_LANDING_TEST_CAPTURE="$TEST_TMPDIR/cap.json"
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
 
   run bash "$WD"
   [ "$status" -eq 0 ]
-  [ -f "$MERGE_LANDING_TEST_CAPTURE" ]
-  run python3 -c "
-import json
-t = json.load(open('$MERGE_LANDING_TEST_CAPTURE'))['text']
-print('NOT landed' in t and 'L_STUCK' in t)      # stuck block
-print('have now LANDED' in t and 'landed after' in t)  # all-clear block
-"
-  [[ "${lines[0]}" == "True" ]]
-  [[ "${lines[1]}" == "True" ]]
+  # The stubbed muso captures the delivered --text; both blocks must be in it.
+  [ -f "$TEST_TMPDIR/last-text" ]
+  t="$(cat "$TEST_TMPDIR/last-text")"
+  [[ "$t" == *"NOT landed"* && "$t" == *"L_STUCK"* ]]           # stuck block
+  [[ "$t" == *"have now LANDED"* && "$t" == *"landed after"* ]] # all-clear block
   # delivered → state now holds the stuck pair, not the resolved one
   run python3 -c "
 import json
@@ -337,18 +326,14 @@ print('SURV:L_LANDED' in s)
   [[ "$output" == *"True"* ]]
 }
 
-@test "stuck alert posts a VALID JSON payload (escaping guard)" {
+@test "stuck alert goes to #clio_devops as devops bot with the stuck pair in the text" {
   mergeline 1000 SURV L_STUCK
-  printf '%s\n' '{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test"}}}}}' \
-    > "$TEST_TMPDIR/slack.json"
-  export MERGE_LANDING_SLACK_CONFIG="$TEST_TMPDIR/slack.json"
-  export MERGE_LANDING_TEST_CAPTURE="$TEST_TMPDIR/captured-payload.json"
-  run bash "$WD"   # NOT dry-run → exercises slack_notify_payload_file → stubbed curl
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  run bash "$WD"   # NOT dry-run → exercises slack_notify_payload_file_status → stubbed muso
   [ "$status" -eq 0 ]
-  [ -f "$MERGE_LANDING_TEST_CAPTURE" ]
-  run python3 -m json.tool "$MERGE_LANDING_TEST_CAPTURE"
-  [ "$status" -eq 0 ]
-  run python3 -c "import json; d=json.load(open('$MERGE_LANDING_TEST_CAPTURE')); print(d['channel']); print('L_STUCK' in d['text'])"
-  [[ "$output" == *"C0ADV2W76G4"* ]]
-  [[ "$output" == *"True"* ]]
+  grep -q -- '--bot devops' "$STUB_CALLS"
+  grep -q -- '--channel C0ADV2W76G4' "$STUB_CALLS"
+  grep -q -- '--requester' "$STUB_CALLS"
+  [ -f "$TEST_TMPDIR/last-text" ]
+  grep -q 'L_STUCK' "$TEST_TMPDIR/last-text"
 }

@@ -39,7 +39,6 @@
 #   PROD_LOG_ALERT_STATE_FILE    fingerprint→last-alerted store
 #   PROD_LOG_ALERT_WINDOW        log window per tick (default 6m)
 #   PROD_LOG_ALERT_COOLDOWN      per-fingerprint re-alert suppression, seconds (default 21600)
-#   PROD_LOG_ALERT_SLACK_CONFIG  openclaw config holding the devops token
 #   PROD_LOG_ALERT_LOCKFILE      single-run lock
 #   PROD_LOG_ALERT_SKIP_HOST_GUARD 1 = skip the ovh-node-8 guard (tests)
 #   PROD_LOG_FETCH_BIN           fetch-prod-logs.sh override (tests)
@@ -62,10 +61,9 @@ MAX_PER_DEPLOY="${PROD_LOG_ALERT_MAX_PER_DEPLOY:-5}"
 MAX_TOTAL="${PROD_LOG_ALERT_MAX_TOTAL:-40}"
 DRY_RUN=0
 
-# slack-notify.sh reads these; export before sourcing so its `:=` defaults
-# don't override us.
+# slack-notify.sh reads this; export before sourcing so its `:=` default
+# doesn't override us.
 export SLACK_CHANNEL="${PROD_LOG_ALERT_CHANNEL:-C0BA8QMV3ME}"  # #prod-alerts
-export SLACK_NOTIFY_CONFIG="${PROD_LOG_ALERT_SLACK_CONFIG:-/root/.openclaw-main/openclaw.json}"
 
 log() { echo "$LOGPREFIX $1"; }
 

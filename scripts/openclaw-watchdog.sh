@@ -29,14 +29,12 @@ GATEWAY_SERVICE="openclaw-gateway-main"  # PR 43: multi-gateway split
 
 # Source the shared Slack helper. Both this watchdog and the new
 # openclaw-pre-start-heal.sh need to post to the same #clio_devops
-# channel using the devops bot token from the main-profile config.
+# channel via the gated muso CLI (devops bot, token pulled from
+# MUSO_SLACK_ENV_FILE by the lib).
 # Locating sibling lib via this script's own directory rather than
 # a hard /opt/hydra path keeps the script working when invoked from
 # a worktree (laptop test) or a deploy mirror.
 _WATCHDOG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck disable=SC2034  # consumed by lib/slack-notify.sh via :- default
-SLACK_NOTIFY_CONFIG="$OPENCLAW_CONFIG"
-export SLACK_NOTIFY_CONFIG
 # shellcheck source=lib/slack-notify.sh
 source "$_WATCHDOG_DIR/lib/slack-notify.sh"
 

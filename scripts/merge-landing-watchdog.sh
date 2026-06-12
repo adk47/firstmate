@@ -53,7 +53,6 @@
 #   MERGE_LANDING_CATALOG_TABLE  catalog table (default matvw_catalog_profile)
 #   MERGE_LANDING_NOW_EPOCH      override "now" for deterministic tests
 #   MERGE_LANDING_LOCKFILE       single-run lock
-#   MERGE_LANDING_SLACK_CONFIG   openclaw config holding the devops token
 #   MERGE_LANDING_SLACK_CHANNEL  target channel (default #clio_devops)
 #   MERGE_LANDING_SKIP_HOST_GUARD 1 = skip the ovh-node-8 guard (tests)
 # ──────────────────────────────────────────────────────────────
@@ -70,10 +69,9 @@ CATALOG_TABLE="${MERGE_LANDING_CATALOG_TABLE:-\"platform-industry-bi-prod\".matv
 SKIP_HOST_GUARD="${MERGE_LANDING_SKIP_HOST_GUARD:-0}"
 DRY_RUN=0
 
-# slack-notify.sh reads these (channel + which config holds the token).
-# Export before sourcing so its `:=` defaults don't override us.
+# slack-notify.sh reads this (target channel).
+# Export before sourcing so its `:=` default doesn't override us.
 export SLACK_CHANNEL="${MERGE_LANDING_SLACK_CHANNEL:-C0ADV2W76G4}"  # #clio_devops
-export SLACK_NOTIFY_CONFIG="${MERGE_LANDING_SLACK_CONFIG:-/root/.openclaw-main/openclaw.json}"
 
 log() { echo "$LOGPREFIX $1"; }
 

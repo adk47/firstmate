@@ -2,7 +2,7 @@
 # Tests for scripts/prod-log-alert-watchdog.sh — the deterministic prod-log
 # error alerter posting to #prod-alerts (C0BA8QMV3ME).
 #
-# PATH-shadows curl (a real Slack POST during a test must never page
+# PATH-shadows muso (a real Slack send during a test must never page
 # #prod-alerts) and replaces fetch-prod-logs.sh with a fixture-emitting stub
 # via PROD_LOG_FETCH_BIN — kubectl is never touched. Secret redaction is NOT
 # asserted here because it lives in fetch-prod-logs.sh (every real watchdog
@@ -17,22 +17,34 @@ setup() {
   export TEST_TMPDIR
   mkdir -p "$TEST_TMPDIR/bin" "$TEST_TMPDIR/config" "$TEST_TMPDIR/fixtures"
 
-  # curl stub: capture the --data-binary @<file> payload; reply ok:true unless
-  # WD_CURL_FAIL=1 (the _status delivery check parses .ok, so a stub must
-  # speak Slack's application-level protocol, not just exit 0).
-  cat > "$TEST_TMPDIR/bin/curl" <<'STUB'
-#!/bin/bash
+  # muso stub: record argv, capture --text; WD_MUSO_FAIL=1 makes it exit 1 —
+  # the CLI decodes Slack's HTTP-200 ok:false trap itself, so a non-zero exit
+  # IS the "not delivered" signal (scripts no longer parse a response body).
+  unset MUSO_SLACK_BOT_TOKEN_DEVOPS
+  export MUSO_SLACK_ENV_FILE="$TEST_TMPDIR/muso-slack.env"
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  export STUB_CALLS="$TEST_TMPDIR/muso-calls"
+  : > "$STUB_CALLS"
+  cat > "$TEST_TMPDIR/bin/muso" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_CALLS"
+[ "${WD_MUSO_FAIL:-0}" = "1" ] && exit 1
+prev=""
 for a in "$@"; do
-  case "$a" in
-    @*) cp "${a#@}" "$WD_TEST_CAPTURE" 2>/dev/null ;;
-  esac
+  [ "$prev" = "--text" ] && printf '%s' "$a" > "$WD_TEST_CAPTURE"
+  prev="$a"
 done
-if [ "${WD_CURL_FAIL:-0}" = "1" ]; then echo '{"ok":false,"error":"not_in_channel"}'; else echo '{"ok":true}'; fi
+echo '{"channel":"C0TEST","ts":"1717171717.000100"}'
+STUB
+  # flock shim: macOS has no flock(1); use the real one when present (Linux CI).
+  cat > "$TEST_TMPDIR/bin/flock" <<'STUB'
+#!/bin/bash
+[ -x /usr/bin/flock ] && exec /usr/bin/flock "$@"
 exit 0
 STUB
-  chmod +x "$TEST_TMPDIR/bin/curl"
+  chmod +x "$TEST_TMPDIR/bin/muso" "$TEST_TMPDIR/bin/flock"
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
-  export WD_TEST_CAPTURE="$TEST_TMPDIR/captured-payload.json"
+  export WD_TEST_CAPTURE="$TEST_TMPDIR/last-text"
 
   # fetch stub: watchdog invokes `fetch-prod-logs.sh -n NS -d DEP ...`;
   # emit the fixture file for that ns/dep if present.
@@ -54,14 +66,11 @@ STUB
     > "$TEST_TMPDIR/config/deployments.txt"
   printf '%s\n' fatal uncaught unhandled exception \
     > "$TEST_TMPDIR/config/alert-patterns.txt"
-  printf '%s\n' '{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test"}}}}}' \
-    > "$TEST_TMPDIR/slack.json"
 
   export PROD_LOG_FETCH_BIN="$TEST_TMPDIR/bin/fetch-stub.sh"
   export PROD_LOG_ALERT_CONFIG_DIR="$TEST_TMPDIR/config"
   export PROD_LOG_ALERT_STATE_FILE="$TEST_TMPDIR/state.json"
   export PROD_LOG_ALERT_LOCKFILE="$TEST_TMPDIR/wd.lock"
-  export PROD_LOG_ALERT_SLACK_CONFIG="$TEST_TMPDIR/slack.json"
   export PROD_LOG_ALERT_SKIP_HOST_GUARD=1
 }
 
@@ -77,18 +86,19 @@ fixture() { cat > "$FETCH_STUB_DIR/$1__$2"; }
   [ ! -f "$WD_TEST_CAPTURE" ]
 }
 
-@test "fresh error → one consolidated valid-JSON payload to C0BA8QMV3ME" {
+@test "fresh error → one consolidated post to C0BA8QMV3ME as devops bot" {
   fixture muso-prod core-backend-api <<'EOF'
 [cb-api-aaa] 2026-06-09T10:00:00Z Uncaught TypeError: boom at handler.js:42
 EOF
   run bash "$WD"
   [ "$status" -eq 0 ]
+  [ "$(grep -c 'slack send' "$STUB_CALLS")" -eq 1 ]
+  grep -q -- '--bot devops' "$STUB_CALLS"
+  grep -q -- '--channel C0BA8QMV3ME' "$STUB_CALLS"
+  grep -q -- '--requester' "$STUB_CALLS"
   [ -f "$WD_TEST_CAPTURE" ]
-  run python3 -m json.tool "$WD_TEST_CAPTURE"
-  [ "$status" -eq 0 ]
-  run python3 -c "import json; d=json.load(open('$WD_TEST_CAPTURE')); print(d['channel']); print('core-backend-api' in d['text']); print('Uncaught TypeError' in d['text'])"
-  [[ "$output" == *"C0BA8QMV3ME"* ]]
-  [[ "$output" == *"True"*"True"* ]]
+  grep -q 'core-backend-api' "$WD_TEST_CAPTURE"
+  grep -q 'Uncaught TypeError' "$WD_TEST_CAPTURE"
 }
 
 @test "dedupe: the same error does not re-post on the next tick" {
@@ -129,7 +139,7 @@ json.dump({k: v - 25200 for k, v in s.items()}, open(p, 'w'))
   fixture muso-prod core-backend-api <<'EOF'
 [cb-api-aaa] 2026-06-09T10:00:00Z fatal: db connection lost
 EOF
-  WD_CURL_FAIL=1 run bash "$WD"
+  WD_MUSO_FAIL=1 run bash "$WD"
   [ "$status" -eq 0 ]
   [[ "$output" == *"state not advanced"* ]]
   rm -f "$WD_TEST_CAPTURE"
@@ -139,7 +149,7 @@ EOF
   [ -f "$WD_TEST_CAPTURE" ]
 }
 
-@test "dry-run: prints the block, never curls, still advances state" {
+@test "dry-run: prints the block, never calls muso, still advances state" {
   fixture muso-prod core-backend-api <<'EOF'
 [cb-api-aaa] 2026-06-09T10:00:00Z unhandled promise rejection: x
 EOF
@@ -201,8 +211,7 @@ EOF
   [ "$status" -eq 0 ]
   [ -f "$WD_TEST_CAPTURE" ]
   run python3 -c "
-import json
-t = json.load(open('$WD_TEST_CAPTURE'))['text']
+t = open('$WD_TEST_CAPTURE').read()
 print('<!channel>' not in t and '<@U123>' not in t and '<https://evil.example' not in t)
 print('&lt;!channel&gt;' in t)
 "

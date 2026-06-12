@@ -50,20 +50,12 @@ LOGPREFIX="[openclaw-pre-start-heal:${PROFILE} $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
 
 log() { echo "$LOGPREFIX $1"; }
 
-# Source the shared Slack helper. Use the *target* profile's config
-# as the token source if it's readable, otherwise fall back to the
-# main profile (which holds the canonical devops bot account). This
-# matters because the very file we may be trying to repair could be
-# unparseable, in which case slack-notify.sh's token read raises and
-# returns silently — that's intentional, so this script keeps trying
-# the other recovery layers instead of dying on a notification path.
+# Source the shared Slack helper. It pulls the muso slack token from
+# MUSO_SLACK_ENV_FILE — never from the openclaw.json we may be trying
+# to repair — and degrades silently when the token is unavailable, so
+# this script keeps trying the other recovery layers instead of dying
+# on a notification path.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -r "$CONFIG" ]; then
-  SLACK_NOTIFY_CONFIG="$CONFIG"
-else
-  SLACK_NOTIFY_CONFIG="/root/.openclaw-main/openclaw.json"
-fi
-export SLACK_NOTIFY_CONFIG
 # shellcheck source=lib/slack-notify.sh
 source "$SCRIPT_DIR/lib/slack-notify.sh"
 

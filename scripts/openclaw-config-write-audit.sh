@@ -63,11 +63,9 @@ mkdir -p "$(dirname "$LOGFILE")"
 touch "$LOGFILE"
 chmod 600 "$LOGFILE"
 
-# Source slack helper. Not fatal if the config it reads from is
-# the very file just written — the helper degrades silently.
+# Source slack helper. Not fatal if the muso slack token is
+# unavailable — the helper degrades silently.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SLACK_NOTIFY_CONFIG="/root/.openclaw-main/openclaw.json"
-export SLACK_NOTIFY_CONFIG
 # shellcheck source=lib/slack-notify.sh
 source "$SCRIPT_DIR/lib/slack-notify.sh"
 

@@ -4,8 +4,10 @@
 # symptom of openclaw's empty-completion-swallows-fallback flaw (PR #450).
 #
 # Each case feeds a captured journal fixture via FALLBACK_SWALLOW_JOURNAL_FILE
-# and runs in --dry-run so nothing posts to Slack. SKIP_HOST_GUARD bypasses the
-# ovh-node-8 guard. Modeled on scripts/tests/cron-health-watchdog.bats.
+# and runs in --dry-run so nothing posts to Slack. Belt-and-braces: muso is
+# PATH-stubbed and MUSO_SLACK_ENV_FILE points at a fixture so the suite can
+# never read the real main.env or page #clio_devops. SKIP_HOST_GUARD bypasses
+# the ovh-node-8 guard. Modeled on scripts/tests/cron-health-watchdog.bats.
 bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
@@ -18,6 +20,20 @@ setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
   JNL="$TEST_TMPDIR/journal.txt"
   STATE="$TEST_TMPDIR/state.json"
+
+  # Never touch the real Slack token source or binary.
+  unset MUSO_SLACK_BOT_TOKEN_DEVOPS
+  export MUSO_SLACK_ENV_FILE="$TEST_TMPDIR/muso-slack.env"  # absent → no token
+  export STUB_CALLS="$TEST_TMPDIR/muso-calls"
+  : > "$STUB_CALLS"
+  mkdir -p "$TEST_TMPDIR/bin"
+  cat > "$TEST_TMPDIR/bin/muso" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_CALLS"
+echo '{"channel":"C0TEST","ts":"1717171717.000100"}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/muso"
+  PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
 }
 teardown() { rm -rf "$TEST_TMPDIR"; }
 

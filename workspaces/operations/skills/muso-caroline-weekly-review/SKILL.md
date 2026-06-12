@@ -87,7 +87,7 @@ CAROLINE_EXPECTED_KIND=daily scripts/publish-digest.sh "${WORKDIR}/digest.json" 
 - `CAROLINE_WINDOW_HOURS` — rolling window for BOTH fetch scripts. Default `30` (the daily pulse); leaving it unset is correct for the daily cron. The weekly roll-up sets it INLINE at invocation (`CAROLINE_WINDOW_HOURS=168 scripts/fetch-conversations.sh`), NOT via a gateway-wide env — `cron-jobs.json` has no per-job env field, and a gateway-wide value would force both Caroline jobs to the same window.
 - `CAROLINE_EXPECTED_KIND` — `daily` | `weekly`; set inline on the `publish-digest.sh` call so a digest graded in the wrong mode cannot ship.
 - `CAROLINE_DIGEST_CHANNEL` — Block Kit target channel override (default `C0ANM0PN9L5` #cs_chats). Shadow-rollout knob only; never set in the live crons.
-- `SLACK_ACCOUNT` / `SLACK_NOTIFY_CONFIG` — `post-digest.sh` token source (defaults: `operations` account, `/root/.openclaw-main/openclaw.json`). Test overrides only.
+- `SLACK_ACCOUNT` / `MUSO_BIN` / `MUSO_SLACK_ENV_FILE` — `post-digest.sh` send identity and muso CLI seam (defaults: `operations` bot, `muso`, `/etc/openclaw/main.env` for the `MUSO_SLACK_BOT_TOKEN_*` vars). Test overrides only.
 - `OPS_CAROLINE_REVIEW_PR_OPEN` — parked; no mode opens PRs and both ignore it.
 - `CAROLINE_REASONING_LEAK_SOURCE` — set by `preflight.sh` (`journalctl` | `syslog` | `none`); `fetch-audit.sh` reads the guard log from whichever resolved. Not set by hand.
 - `CAROLINE_SYSLOG_PATH` — syslog file for the `syslog` fallback (default `/var/log/syslog`); override only in tests.

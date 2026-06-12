@@ -23,6 +23,11 @@
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# slack_load_env (token sourcing from main.env) lives in the shared lib; the
+# local slack_notify below overrides the lib's silent best-effort variant.
+# shellcheck source=lib/slack-notify.sh
+source "$(dirname "$0")/lib/slack-notify.sh"
+
 LOGPREFIX="[memory-health-check $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
 # All three gateway profiles run on the same host. We check each.
 # Entries are "<profile>:/path/to/config.json". Edit only in unison.
@@ -115,33 +120,23 @@ resolve_cap() {
 }
 
 # ──────────────────────────────────────────────────────────────
-# slack_notify: post $msg to #clio_devops. Raises on Slack API-
-# level errors (ok:false) not just HTTP errors.
+# slack_notify: post $msg to #clio_devops via `muso slack send`
+# (gated CLI, devops bot). muso decodes Slack's HTTP-200 ok:false
+# trap itself, so its exit code is real delivery status — $msg
+# never touches a shell-built JSON body. Tokens come from
+# MUSO_SLACK_BOT_TOKEN_* (pulled from main.env when the unit env
+# lacks them).
 # ──────────────────────────────────────────────────────────────
 slack_notify() {
-  local msg="$1" token
-  token=$(jq -r '.channels.slack.accounts.devops.botToken // empty' "$AUTH_CONFIG" 2>/dev/null || true)
-  if [ -z "${token:-}" ]; then
-    log "ERROR: could not read devops bot token from $AUTH_CONFIG — skipping Slack notify"
+  local msg="$1"
+  if ! slack_load_env devops; then
+    log "ERROR: no MUSO_SLACK_BOT_TOKEN_DEVOPS in env or main.env — skipping Slack notify"
     return 1
   fi
-
-  # Env vars MUST precede the command; positional args after
-  # `python3 -c "…"` go to sys.argv, not os.environ. Pass
-  # everything via env so $msg (multi-line, backticks, quotes) is
-  # JSON-escaped by python, not by bash.
-  TOK="$token" CHAN="$SLACK_CHANNEL" MSG="$msg" python3 - <<'PY' 2>>/var/log/memory-health-check.log
-import json, os, sys, urllib.request
-req = urllib.request.Request(
-    'https://slack.com/api/chat.postMessage',
-    data=json.dumps({'channel': os.environ['CHAN'], 'text': os.environ['MSG']}).encode(),
-    headers={'Authorization': 'Bearer ' + os.environ['TOK'], 'Content-Type': 'application/json'},
-)
-body = json.loads(urllib.request.urlopen(req, timeout=10).read())
-if not body.get('ok'):
-    print(f"slack api error: {body.get('error')}", file=sys.stderr)
-    sys.exit(1)
-PY
+  "${MUSO_BIN:-muso}" slack send --bot devops \
+    --channel "$SLACK_CHANNEL" --text "$msg" \
+    --requester "memory-health-check@hydra-ops" \
+    >/dev/null 2>>/var/log/memory-health-check.log
 }
 
 # ──────────────────────────────────────────────────────────────

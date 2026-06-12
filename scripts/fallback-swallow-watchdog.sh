@@ -44,7 +44,6 @@
 #   FALLBACK_SWALLOW_LOOKBACK       journalctl --since window (default "15 min ago")
 #   FALLBACK_SWALLOW_STATE_FILE     alerted-runId store
 #   FALLBACK_SWALLOW_AGENT_ROOTS    space-sep agent dirs for sessionId→agent
-#   FALLBACK_SWALLOW_SLACK_CONFIG   openclaw config holding the devops token
 #   FALLBACK_SWALLOW_SLACK_CHANNEL  target channel (default #clio_devops)
 #   FALLBACK_SWALLOW_LOCKFILE       single-run lock
 #   FALLBACK_SWALLOW_SKIP_HOST_GUARD 1 = skip the ovh-node-8 guard (tests)
@@ -61,9 +60,8 @@ SKIP_HOST_GUARD="${FALLBACK_SWALLOW_SKIP_HOST_GUARD:-0}"
 GATEWAY_UNITS=(openclaw-gateway-main openclaw-gateway-edge)
 DRY_RUN=0
 
-# slack-notify.sh reads these (channel + which config holds the token).
+# slack-notify.sh reads this (target channel).
 export SLACK_CHANNEL="${FALLBACK_SWALLOW_SLACK_CHANNEL:-C0ADV2W76G4}"  # #clio_devops
-export SLACK_NOTIFY_CONFIG="${FALLBACK_SWALLOW_SLACK_CONFIG:-/root/.openclaw-main/openclaw.json}"
 
 log() { echo "$LOGPREFIX $1"; }
 
