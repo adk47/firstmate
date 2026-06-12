@@ -139,7 +139,21 @@ What the deterministic renderer guarantees (so you don't have to):
   even when zero (the two-source no-conflation rule), with the degraded-source
   caveat appended when `guard.source != "journalctl"`.
 
+Rendering is **two Slack messages**: a lean main glance (P0/P1 action bullets
+lead, under the ping; then header, compact scores, theme one-liners with
+evidence links capped at 3) and a detail THREAD reply (P2 details, good
+catches, full evidence lists, guard detail). The grader does not control the
+split — it follows from `severity` and `dimension`.
+
 What the grader still owes the digest:
+
+- **Terse prose.** `findings[].text` and `themes[].summary` are one clause of
+  ~12 words or fewer, rendered on a single bullet line. NO conversation ids
+  in prose — evidence belongs in `conversation_ids` (the renderer strips
+  stray ids from text mechanically, so an id written in prose simply
+  disappears). Write P0/P1 `text` as an actionable clause ("email leak
+  shipped to customer", not a narration) — it renders as a standalone action
+  bullet at the very top of the post.
 
 - `scores.tools` is `"skipped"` exactly when preflight said the join-key prereq is
   unavailable; never a bare dash, never a fabricated number (enforced both ways).

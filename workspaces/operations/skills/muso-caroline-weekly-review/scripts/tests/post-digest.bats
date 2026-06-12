@@ -28,6 +28,8 @@ while [ "$#" -gt 0 ]; do
 done
 echo "$url" >> "$STUB_CALLS"
 printf '%s\n' "$data" > "${TEST_TMPDIR}/last-data-arg"
+# Capture the posted body NOW — post-digest.sh deletes its thread_ts temp copy on exit.
+case "$data" in @*) cp "${data#@}" "${TEST_TMPDIR}/last-payload.json" ;; esac
 if [ -f "${TEST_TMPDIR}/slack-response.json" ]; then
   cat "${TEST_TMPDIR}/slack-response.json"
 else
@@ -79,6 +81,22 @@ teardown() { teardown_skill_tmp; }
 @test "missing payload file is a usage error" {
   run "$SCRIPTS_DIR/post-digest.sh" "$TEST_TMPDIR/nope.json"
   [ "$status" -eq 2 ]
+}
+
+@test "thread_ts arg is injected into the posted payload" {
+  run "$SCRIPTS_DIR/post-digest.sh" "$TEST_TMPDIR/payload.json" "1717171717.000200"
+  [ "$status" -eq 0 ]
+  jq -e '.thread_ts == "1717171717.000200"' "$TEST_TMPDIR/last-payload.json"
+  jq -e '.channel == "C0ANM0PN9L5"' "$TEST_TMPDIR/last-payload.json"
+  # the original payload file is untouched
+  run grep -c "thread_ts" "$TEST_TMPDIR/payload.json"
+  [ "$output" = "0" ]
+}
+
+@test "without thread_ts the payload file is posted as-is" {
+  run "$SCRIPTS_DIR/post-digest.sh" "$TEST_TMPDIR/payload.json"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_TMPDIR/last-data-arg")" = "@$TEST_TMPDIR/payload.json" ]
 }
 
 @test "SLACK_ACCOUNT override reads a different account token" {

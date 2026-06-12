@@ -6,9 +6,12 @@ set -euo pipefail
 # to #cs_chats — see scripts/close-resolved-conversations.py).
 # ===========================================================================
 # Usage:
-#   post-digest.sh <payload.json>
-#     <payload.json> is the complete chat.postMessage body produced by
-#     render-digest.py --blocks (channel + text + blocks). Posted VERBATIM.
+#   post-digest.sh <payload.json> [thread_ts]
+#     <payload.json> is a complete chat.postMessage body produced by
+#     render-digest.py --blocks-main / --blocks-thread (channel + text +
+#     blocks). Posted verbatim, except [thread_ts] (when given) is injected
+#     as the payload's thread_ts so the message lands as a thread reply —
+#     same threading contract as scripts/qa-slack-dm.sh.
 #     On success prints the message ts on stdout.
 #
 # Token comes from the gateway config (channels.slack.accounts.<account>
@@ -31,11 +34,20 @@ CURL="${CURL:-curl}"
 
 die() { echo "post-digest: $2" >&2; exit "$1"; }
 
-PAYLOAD="${1:?usage: post-digest.sh <payload.json>}"
+PAYLOAD="${1:?usage: post-digest.sh <payload.json> [thread_ts]}"
+THREAD_TS="${2:-}"
 [ -f "$PAYLOAD" ] || die 2 "payload file not found: $PAYLOAD"
 jq -e '(.channel | type == "string") and (.blocks | type == "array" and length > 0)' \
   "$PAYLOAD" >/dev/null 2>&1 \
-  || die 2 "payload must be a chat.postMessage body with .channel and non-empty .blocks (from render-digest.py --blocks)"
+  || die 2 "payload must be a chat.postMessage body with .channel and non-empty .blocks (from render-digest.py --blocks-main/--blocks-thread)"
+
+if [ -n "$THREAD_TS" ]; then
+  threaded="$(mktemp)"
+  trap 'rm -f "$threaded"' EXIT
+  jq --arg ts "$THREAD_TS" '. + {thread_ts: $ts}' "$PAYLOAD" > "$threaded" \
+    || die 2 "could not inject thread_ts into payload"
+  PAYLOAD="$threaded"
+fi
 
 token="$(python3 -c "
 import json,sys

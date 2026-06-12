@@ -3,53 +3,156 @@
   "title": "Caroline review digest (Phase-2 grader output)",
   "description": "The structured digest the Phase-2 grader writes to ${WORKDIR}/digest.json. Enforced mechanically by scripts/validate-digest.sh (which also RECOMPUTES every unique_customers via cluster-questions.sh and drops sub-threshold themes). Rendered deterministically by scripts/render-digest.py - the grader NEVER writes header lines, Slack links, or Block Kit JSON.",
   "type": "object",
-  "required": ["kind", "date", "window_hours", "conv_count", "severity", "scores", "guard", "findings", "themes"],
+  "required": [
+    "kind",
+    "date",
+    "window_hours",
+    "conv_count",
+    "severity",
+    "scores",
+    "guard",
+    "findings",
+    "themes"
+  ],
   "additionalProperties": false,
   "properties": {
-    "kind": { "enum": ["daily", "weekly"] },
-    "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
-    "window_hours": { "type": "number", "exclusiveMinimum": 0, "description": "Mirror CAROLINE_WINDOW_HOURS: 30 daily, 168 weekly." },
-    "conv_count": { "type": "integer", "minimum": 0, "description": "Line count of conversations.jsonl." },
+    "kind": {
+      "enum": [
+        "daily",
+        "weekly"
+      ]
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "window_hours": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Mirror CAROLINE_WINDOW_HOURS: 30 daily, 168 weekly."
+    },
+    "conv_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Line count of conversations.jsonl."
+    },
     "severity": {
       "type": "object",
-      "required": ["p0", "p1", "p2"],
+      "required": [
+        "p0",
+        "p1",
+        "p2"
+      ],
       "properties": {
-        "p0": { "type": "integer", "minimum": 0 },
-        "p1": { "type": "integer", "minimum": 0 },
-        "p2": { "type": "integer", "minimum": 0 }
+        "p0": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p1": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p2": {
+          "type": "integer",
+          "minimum": 0
+        }
       },
       "description": "Drives the status emoji and the P0 ping - computed by the renderer, never hand-written."
     },
     "scores": {
       "type": "object",
-      "required": ["voice", "tools", "sentiment"],
+      "required": [
+        "voice",
+        "tools",
+        "sentiment"
+      ],
       "properties": {
-        "voice": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "voice": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
         "tools": {
-          "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 5 }, { "const": "skipped" }],
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            {
+              "const": "skipped"
+            }
+          ],
           "description": "MUST be \"skipped\" iff preflight exported CV_TOOL_CTX_CONVERSATION_ID=unavailable (validate-digest.sh enforces both directions)."
         },
-        "sentiment": { "type": "integer", "minimum": 0, "maximum": 5 }
+        "sentiment": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        }
       }
     },
     "guard": {
       "type": "object",
-      "required": ["caught_stripped", "caught_escalated", "missed_shipped", "source"],
+      "required": [
+        "caught_stripped",
+        "caught_escalated",
+        "missed_shipped",
+        "source"
+      ],
       "properties": {
-        "caught_stripped": { "type": "integer", "minimum": 0 },
-        "caught_escalated": { "type": "integer", "minimum": 0 },
-        "missed_shipped": { "type": "integer", "minimum": 0, "description": "Source 2 (shipped-leaks.jsonl). Never conflate with source 1; each hit is a P0." },
-        "source": { "enum": ["journalctl", "syslog", "none"], "description": "CAROLINE_REASONING_LEAK_SOURCE from preflight. Non-journalctl renders a degraded caveat." },
-        "shapes": { "type": "array", "items": { "type": "string" }, "description": "Recurring leak marker names, grouped." },
+        "caught_stripped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "caught_escalated": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missed_shipped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Source 2 (shipped-leaks.jsonl). Never conflate with source 1; each hit is a P0."
+        },
+        "source": {
+          "enum": [
+            "journalctl",
+            "syslog",
+            "none"
+          ],
+          "description": "CAROLINE_REASONING_LEAK_SOURCE from preflight. Non-journalctl renders a degraded caveat."
+        },
+        "shapes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Recurring leak marker names, grouped."
+        },
         "items": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["type", "conversation_id"],
+            "required": [
+              "type",
+              "conversation_id"
+            ],
             "properties": {
-              "type": { "enum": ["unanswered_escalation", "shipped_leak"] },
-              "conversation_id": { "type": "string", "pattern": "^[0-9]{15,16}$", "description": "May come from audit.jsonl (escalated convs are absent from the fetch by design) - the ONLY place audit-sourced ids are legal." },
-              "note": { "type": "string", "description": "e.g. signature \"ready-to-output\" or the escalation reason." }
+              "type": {
+                "enum": [
+                  "unanswered_escalation",
+                  "shipped_leak"
+                ]
+              },
+              "conversation_id": {
+                "type": "string",
+                "pattern": "^[0-9]{15,16}$",
+                "description": "May come from audit.jsonl (escalated convs are absent from the fetch by design) - the ONLY place audit-sourced ids are legal."
+              },
+              "note": {
+                "type": "string",
+                "description": "e.g. signature \"ready-to-output\" or the escalation reason."
+              }
             }
           }
         }
@@ -59,12 +162,41 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["dimension", "severity", "text"],
+        "required": [
+          "dimension",
+          "severity",
+          "text"
+        ],
         "properties": {
-          "dimension": { "enum": ["voice", "tools", "sentiment", "good_catch"] },
-          "severity": { "enum": ["P0", "P1", "P2", "info"] },
-          "text": { "type": "string", "minLength": 1, "description": "One glanceable clause. Plain prose, BARE conversation ids only (the renderer linkifies); no URLs, no Slack mrkdwn links, no em-dashes." },
-          "conversation_ids": { "type": "array", "items": { "type": "string", "pattern": "^[0-9]{15,16}$" }, "description": "Every id MUST exist in conversations.jsonl - hallucinated evidence fails validation." }
+          "dimension": {
+            "enum": [
+              "voice",
+              "tools",
+              "sentiment",
+              "good_catch"
+            ]
+          },
+          "severity": {
+            "enum": [
+              "P0",
+              "P1",
+              "P2",
+              "info"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One terse clause, ~12 words max, plain prose. NO conversation ids in prose (the renderer strips them; evidence renders from conversation_ids as numbered links). P0/P1 text renders as a standalone action bullet at the top of the post - write it as an actionable clause. No URLs, no Slack mrkdwn links, no em-dashes."
+          },
+          "conversation_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9]{15,16}$"
+            },
+            "description": "Every id MUST exist in conversations.jsonl - hallucinated evidence fails validation."
+          }
         }
       },
       "description": "Detail bullets. Emit only real, non-zero findings (collapse-clean is preserved: a clean dimension has no entries). good_catch entries use severity \"info\"."
@@ -73,13 +205,44 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["category", "label", "summary", "conversation_ids", "unique_customers"],
+        "required": [
+          "category",
+          "label",
+          "summary",
+          "conversation_ids",
+          "unique_customers"
+        ],
         "properties": {
-          "category": { "enum": ["issue", "question", "feature_request", "escalation_pattern"] },
-          "label": { "type": "string", "minLength": 1, "description": "Short noun phrase, e.g. \"Spotify-for-Artists sync stuck\"." },
-          "summary": { "type": "string", "description": "One sentence on what customers are saying." },
-          "conversation_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^[0-9]{15,16}$" } },
-          "unique_customers": { "type": "integer", "minimum": 0, "description": "Advisory only - validate-digest.sh RECOMPUTES it by contact_id dedupe and overwrites; themes with a recomputed count < 2 are dropped (informational threshold)." }
+          "category": {
+            "enum": [
+              "issue",
+              "question",
+              "feature_request",
+              "escalation_pattern"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Short noun phrase, e.g. \"Spotify-for-Artists sync stuck\"."
+          },
+          "summary": {
+            "type": "string",
+            "description": "One terse clause, ~12 words max, of what customers are saying. NO conversation ids in prose."
+          },
+          "conversation_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9]{15,16}$"
+            }
+          },
+          "unique_customers": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Advisory only - validate-digest.sh RECOMPUTES it by contact_id dedupe and overwrites; themes with a recomputed count < 2 are dropped (informational threshold)."
+          }
         }
       },
       "description": "Cross-conversation recurrence: multiple customers saying the same thing. Cluster semantically over conversations.redacted.jsonl."
@@ -88,21 +251,56 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["category", "label", "summary", "conversation_ids", "unique_customers", "proposed_kb_note"],
+        "required": [
+          "category",
+          "label",
+          "summary",
+          "conversation_ids",
+          "unique_customers",
+          "proposed_kb_note"
+        ],
         "properties": {
-          "category": { "enum": ["issue", "question", "feature_request", "escalation_pattern"] },
-          "label": { "type": "string", "minLength": 1 },
-          "summary": { "type": "string" },
-          "conversation_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^[0-9]{15,16}$" } },
-          "unique_customers": { "type": "integer", "minimum": 0 },
-          "proposed_kb_note": { "type": "string", "minLength": 1, "description": "The KB edit text a human would paste - text only, no target path in v1 (auto-PR stays manual via open-kb-pr.sh)." }
+          "category": {
+            "enum": [
+              "issue",
+              "question",
+              "feature_request",
+              "escalation_pattern"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string"
+          },
+          "conversation_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9]{15,16}$"
+            }
+          },
+          "unique_customers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "proposed_kb_note": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The KB edit text a human would paste - text only, no target path in v1 (auto-PR stays manual via open-kb-pr.sh)."
+          }
         }
       },
       "description": "WEEKLY ONLY (validation fails a daily digest carrying any). Each needs a RECOMPUTED unique_customers >= 3 or the run fails."
     },
     "degraded": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Source caveats to surface verbatim in the context footer, e.g. \"conv fetch hit the 200 cap - window under-sampled\"."
     }
   }

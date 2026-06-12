@@ -11,8 +11,13 @@ set -euo pipefail
 #   2. redact-json.sh       PII re-scrub of every digest string
 #   3. render-digest.py --text | redact-output.sh | linkify-convs.sh |
 #      assert-digest-contract.sh        -> the plain-text fallback digest
-#   4. render-digest.py --blocks        -> the Block Kit payload
-#   5. post-digest.sh                   -> chat.postMessage as the Ops bot
+#   4. render-digest.py --blocks-main   -> the lean glance payload
+#      render-digest.py --blocks-thread -> the detail payload
+#   5. post-digest.sh main              -> chat.postMessage as the Ops bot
+#      post-digest.sh thread <main ts>  -> detail posted as a THREAD reply
+#      (skipped when the thread has no content beyond its lead line; a
+#      thread-post failure is appended LOUDLY to the heartbeat but does NOT
+#      trigger the plain-text fallback — the glance was delivered)
 #
 # stdout is ALWAYS the final assistant message for the cron announce delivery:
 #   - post succeeded -> a one-line confirmation (delivery heartbeat; announce
@@ -48,16 +53,27 @@ fallback="$("$SCRIPT_DIR/render-digest.py" --text < "$tmp/digest.redacted.json" 
   | "$SCRIPT_DIR/linkify-convs.sh" \
   | "$SCRIPT_DIR/assert-digest-contract.sh")"
 
-# 4. Block Kit payload (reads CAROLINE_DIGEST_CHANNEL, default #cs_chats).
-"$SCRIPT_DIR/render-digest.py" --blocks < "$tmp/digest.redacted.json" > "$tmp/payload.json"
+# 4. Block Kit payloads (read CAROLINE_DIGEST_CHANNEL, default #cs_chats).
+"$SCRIPT_DIR/render-digest.py" --blocks-main < "$tmp/digest.redacted.json" > "$tmp/main.json"
+"$SCRIPT_DIR/render-digest.py" --blocks-thread < "$tmp/digest.redacted.json" > "$tmp/thread.json"
 
 kind="$(jq -r '.kind' "$tmp/digest.valid.json")"
-channel="$(jq -r '.channel' "$tmp/payload.json")"
+channel="$(jq -r '.channel' "$tmp/main.json")"
 
-# 5. Post. The failure branch is INSIDE the if so a Slack error can never be
-# the run's trailing tool error — the fallback text still goes out via announce.
-if ts="$("$SCRIPT_DIR/post-digest.sh" "$tmp/payload.json" 2> "$tmp/post.err")"; then
-  printf '✅ Caroline %s digest posted to <#%s> as Block Kit (ts %s).\n' "$kind" "$channel" "$ts"
+# 5. Post main, then the detail thread under it. Failure branches are INSIDE
+# the ifs so a Slack error can never be the run's trailing tool error — the
+# fallback text still goes out via announce when the MAIN post fails.
+if ts="$("$SCRIPT_DIR/post-digest.sh" "$tmp/main.json" 2> "$tmp/post.err")"; then
+  msg="$(printf '✅ Caroline %s digest posted to <#%s> as Block Kit (ts %s).' "$kind" "$channel" "$ts")"
+  # Thread only when it carries content beyond its lead context line.
+  if jq -e '.blocks | length > 1' "$tmp/thread.json" >/dev/null; then
+    if "$SCRIPT_DIR/post-digest.sh" "$tmp/thread.json" "$ts" > /dev/null 2> "$tmp/thread.err"; then
+      msg="$msg Detail thread attached."
+    else
+      msg="$msg ⚠️ detail thread post FAILED ($(head -c 160 "$tmp/thread.err" | tr '\n' ' ')) - main glance delivered, details only in this fallback channel."
+    fi
+  fi
+  printf '%s\n' "$msg"
 else
   reason="$(head -c 200 "$tmp/post.err" | tr '\n' ' ')"
   printf '🔴 Block Kit post to <#%s> FAILED (%s). Plain-text fallback:\n\n%s\n' \
