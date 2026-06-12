@@ -243,6 +243,9 @@
         "group": "all",
         "channel": "all"
       },
+      "thread": {
+        "requireExplicitMention": true
+      },
       "channels": {},
       "accounts": {
         "support": {
