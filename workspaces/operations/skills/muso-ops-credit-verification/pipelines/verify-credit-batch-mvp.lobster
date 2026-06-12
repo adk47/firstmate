@@ -52,15 +52,14 @@ env:
   # (muso-admin-api.sh under apply-verdicts.sh) inherit it from process env.
   OPS_RUN_ID: ${run_id}
   # Fraud detector (operations BATCH only — Caroline/customer-facing is OUT OF
-  # SCOPE). SHADOW since 2026-06-10 (off→shadow→enforce rollout, mirroring the
-  # proven CV_EVIDENCE_MODE pattern — spec §2 in docs/credit-verification/
-  # fraud-detection-spec.md): every credit gains _fraud annotations and the
-  # Slack summary gains a 🚨 SHADOW section, but verdicts are byte-identical
-  # to an off run. Enforce is mechanically safe (the Phase-2 verdict-engine
-  # signal_fraud→would_uvn mapping shipped with the scorer in #477) but per
-  # spec §2 it waits on human review of real shadow batches in
-  # #credit-verification first.
-  CV_FRAUD_MODE: "shadow"
+  # SCOPE). ENFORCE since 2026-06-12 (off→shadow→enforce rollout, mirroring
+  # the proven CV_EVIDENCE_MODE pattern — spec §2 in docs/credit-verification/
+  # fraud-detection-spec.md; shadow ran 2026-06-10→12 and flagged 0 credits):
+  # over-threshold credits are re-bucketed signal_fraud → would_uvn and PUT
+  # as user_verification_needed with flag_reason=fraud_multifactor. Fraud
+  # overrides a backend approve, never auto-approves, never rejects.
+  # Rollback = set "shadow" (annotate-only, verdicts unchanged) and deploy.
+  CV_FRAUD_MODE: "enforce"
   # The fraud scorer needs the RAW fetched batch (credits[], metadata.*,
   # profile.*, verificationData.* — fields score-backend-signals.sh drops).
   # The pick step tees its stdout here so the fraud step can re-read it without

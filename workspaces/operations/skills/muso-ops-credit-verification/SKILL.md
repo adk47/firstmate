@@ -232,13 +232,16 @@ over a backend approve; it must never auto-approve a flagged credit.
 
 ### Modes (`CV_FRAUD_MODE`, default `off`)
 
-Mirrors the proven `CV_EVIDENCE_MODE` flag-off rollout pattern.
+Mirrors the proven `CV_EVIDENCE_MODE` flag-off rollout pattern. The batch
+pipeline (`verify-credit-batch-mvp.lobster`) runs **`enforce`** since
+2026-06-12 (shadow 2026-06-10→12, 0 credits flagged). Rollback = set the
+pipeline back to `"shadow"` and deploy.
 
 | Mode | Behavior |
 |---|---|
 | `off` *(default)* | Pure pass-through. No work, no Trino, stdin emitted unchanged. The step is a no-op. |
 | `shadow` | Compute fraud, stamp `_fraud` on every credit, surface would-flag credits in Slack. **Verdicts unchanged.** |
-| `enforce` | Move over-threshold credits to `signal_fraud` (overriding approve/review/uvn) → UVN. Unsafe until the Phase-2 verdict-engine + lobster wiring ship. |
+| `enforce` *(live in the batch pipeline)* | Move over-threshold credits to `signal_fraud` (overriding approve/review/uvn) → UVN, applied with `flag_reason=fraud_multifactor`. Verdict-engine + lobster wiring shipped in #477/#479. |
 
 ### Factors
 
