@@ -20,9 +20,13 @@ SELECT
   COALESCE(p.profile_type, '')                                            AS profile_type,
   COALESCE(array_join(p.roles, ', '), '')                                 AS roles,
   COALESCE(array_join(p.common_credits, ', '), '')                        AS common_credits,
-  COALESCE(p.primary_genre, '')                                           AS primary_genre,
+  -- matvw_catalog_profile dropped primary_genre and years_active on
+  -- 2026-06-12 (upstream schema change; broke the first wrapper run).
+  -- Empty literals keep the sheet's column layout stable; restore real
+  -- values if the matview regains them.
+  ''                                                                      AS primary_genre,
   COALESCE(p.country, '')                                                 AS country,
-  CAST(COALESCE(p.years_active, 0) AS varchar)                            AS years_active,
+  '0'                                                                     AS years_active,
   ''                                                                      AS follows_count,
   ''                                                                      AS logins_last_90d,
   ''                                                                      AS used_analytics,
