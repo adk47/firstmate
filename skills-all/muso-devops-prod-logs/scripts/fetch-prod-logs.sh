@@ -20,7 +20,8 @@
 #
 # Usage:
 #   fetch-prod-logs.sh -d DEPLOYMENT [-n NAMESPACE] [--since 10m] [--tail 50]
-#                      [--pattern REGEX | --no-filter] [--container NAME]
+#                      [--pattern REGEX | --no-filter] [--exclude-pattern REGEX]
+#                      [--container NAME]
 #                      [--previous] [--any-deploy] [--out FILE]
 #   fetch-prod-logs.sh --events [-n NAMESPACE]
 #   fetch-prod-logs.sh --pods   [-n NAMESPACE] [-d DEPLOYMENT]
@@ -56,6 +57,7 @@ DEPLOYMENT=""
 SINCE="10m"
 TAIL="50"
 PATTERN=""
+EXCLUDE_PATTERN=""
 NO_FILTER=0
 CONTAINER=""
 PREVIOUS=0
@@ -70,6 +72,7 @@ while [[ $# -gt 0 ]]; do
     --since) SINCE="$2"; shift 2 ;;
     --tail) TAIL="$2"; shift 2 ;;
     --pattern) PATTERN="$2"; shift 2 ;;
+    --exclude-pattern) EXCLUDE_PATTERN="$2"; shift 2 ;;
     --no-filter) NO_FILTER=1; shift ;;
     --container) CONTAINER="$2"; shift 2 ;;
     --previous) PREVIOUS=1; shift ;;
@@ -85,6 +88,17 @@ done
 
 DEPLOYMENTS_FILE="$CONFIG_DIR/deployments.txt"
 PATTERNS_FILE="$CONFIG_DIR/error-patterns.txt"
+
+# A malformed ERE makes grep -Eiv exit 2 with EMPTY output, which downstream
+# reads as "all lines excluded" — silent loss of every alert. Fail loud now.
+if [[ -n "$EXCLUDE_PATTERN" ]]; then
+  rc=0
+  printf '' | grep -Eiv -- "$EXCLUDE_PATTERN" >/dev/null 2>&1 || rc=$?
+  if (( rc > 1 )); then
+    echo "ERROR: invalid --exclude-pattern (not valid ERE): $EXCLUDE_PATTERN" >&2
+    exit 2
+  fi
+fi
 
 if [[ "$MODE" == "list" ]]; then
   [[ -r "$DEPLOYMENTS_FILE" ]] || { echo "ERROR: missing $DEPLOYMENTS_FILE" >&2; exit 6; }
@@ -188,12 +202,30 @@ print(",".join(f"{k}={v}" for k, v in sorted(ml.items())))
 
 pods="$("$KUBECTL_BIN" get pods -n "$NAMESPACE" -l "$selector" -o name 2>&1 | sed 's|^pod/||' | sort | head -n "$MAX_PODS")"
 if [[ -z "$pods" ]]; then
+  # Scaled-to-zero is healthy for autoscaled fleets (industry-proc-*-v2 etc.
+  # idle at 0 replicas between batches) — empty result, NOT a fetch failure.
+  # Pods missing while replicas are desired is real blindness: exit 5.
+  desired="$(printf '%s' "$deploy_json" | python3 -c '
+import json, sys
+print(json.load(sys.stdin)["spec"].get("replicas") or 0)
+')"
+  if [[ "$desired" == "0" ]]; then
+    exit 0
+  fi
   echo "ERROR: no pods found for deploy/$DEPLOYMENT in $NAMESPACE (selector: $selector)" >&2
   exit 5
 fi
 
+# Exclusion must run HERE, before deliver()'s byte cap: high-volume benign
+# lines that match the include pattern (e.g. ParsedCredit JSON dumps whose
+# data contains "fatal") would otherwise trip truncation and drown real
+# errors in mid-line fragments.
 filter() {
   if [[ "$NO_FILTER" -eq 1 ]]; then cat; else grep -Ei "$PATTERN" || true; fi
+}
+
+exclude() {
+  if [[ -n "$EXCLUDE_PATTERN" ]]; then grep -Eiv "$EXCLUDE_PATTERN" || true; else cat; fi
 }
 
 # Per-pod failures must NOT be swallowed: a kubectl error merged into the
@@ -214,7 +246,7 @@ for pod in $pods; do
     echo "ERROR: kubectl logs failed for pod $pod: $(printf '%s' "$pod_out" | head -1)" >> "$FAIL_FILE"
   fi
 done
-filter < "$RAW_FILE" | redact | deliver
+filter < "$RAW_FILE" | exclude | redact | deliver
 rm -f "$RAW_FILE"
 if [[ -s "$FAIL_FILE" ]]; then
   cat "$FAIL_FILE" >&2

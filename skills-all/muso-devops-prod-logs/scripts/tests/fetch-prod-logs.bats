@@ -25,7 +25,7 @@ case "$1" in
   get)
     case "$2" in
       deploy|deployment|deployments)
-        echo '{"spec":{"selector":{"matchLabels":{"app":"'"$3"'"}}}}'
+        echo '{"spec":{"replicas":'"${KUBECTL_STUB_REPLICAS:-1}"',"selector":{"matchLabels":{"app":"'"$3"'"}}}}'
         ;;
       pods)
         if [[ "$*" == *"-o name"* ]]; then
@@ -149,6 +149,45 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [[ "$output" == *"TRUNCATED"* ]]
   [[ "$output" == *"number 200"* ]]   # tail survives
   [[ "$output" != *"number 1 "* ]]    # head is gone
+}
+
+@test "--exclude-pattern drops matching lines BEFORE the byte cap" {
+  # Benign data lines that match the include pattern (a song named "fatal"
+  # inside an INFO-level payload dump) must be excluded pre-cap, or their
+  # bulk trips truncation and the real error drowns in mid-line fragments
+  # (live finding, industry-proc-raw-v2, 2026-06-12).
+  {
+    for i in $(seq 1 200); do
+      echo "2026-06-09T10:00:00Z INFO: Processed in 0.03 seconds, message: {\"entity_name\": \"Te Ves Fatal\", \"row\": $i}"
+    done
+    echo "2026-06-09T10:00:01Z FATAL: real crash"
+  } > "$KUBECTL_STUB_LOGFILE"
+  PROD_LOGS_MAX_BYTES=2000 run bash "$FETCH" -n muso-prod -d core-backend-api \
+    --pattern fatal --exclude-pattern '^\[[^]]+\][[:space:]]+[^[:space:]]+[[:space:]]+info:[[:space:]]'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"FATAL: real crash"* ]]
+  [[ "$output" != *"Te Ves Fatal"* ]]
+  [[ "$output" != *"TRUNCATED"* ]]
+}
+
+@test "invalid --exclude-pattern (bad ERE) → fail-closed exit 2, not silent empty" {
+  run bash "$FETCH" -n muso-prod -d core-backend-api --exclude-pattern '(unbalanced'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"invalid --exclude-pattern"* ]]
+}
+
+@test "scaled-to-zero deployment → empty stdout, exit 0 (not a fetch failure)" {
+  # Autoscaled IDP fleets sit at 0 replicas between batches; that is healthy,
+  # not "watchdog is blind" (which would page #prod-alerts every cooldown).
+  KUBECTL_STUB_REPLICAS=0 KUBECTL_STUB_PODS="" run bash "$FETCH" -n muso-prod -d core-backend-api
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "replicas desired but no pods found → still exit 5 (real blindness)" {
+  KUBECTL_STUB_REPLICAS=3 KUBECTL_STUB_PODS="" run bash "$FETCH" -n muso-prod -d core-backend-api
+  [ "$status" -eq 5 ]
+  [[ "$output" == *"no pods found"* ]]
 }
 
 @test "kubectl logs failure → exit 5, error on stderr (never silently empty)" {

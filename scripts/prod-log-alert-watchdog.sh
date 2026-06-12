@@ -107,11 +107,16 @@ max_per     = int(os.environ["MAX_PER_DEPLOY"])
 max_total   = int(os.environ["MAX_TOTAL"])
 now         = float(os.environ.get("NOW") or time.time())
 
+# Single source of truth for the ISO-timestamp shape — normalize() (bare, for
+# fingerprinting; do NOT change its substitution or live cooldown state rotates)
+# and DISPLAY_TS_RE (prefix-anchored, for Slack) both build on it.
+TS_PAT = r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?"
+
 def normalize(line):
     """Strip the volatile parts so the same logical error fingerprints
     identically across pods, requests, and ticks."""
     s = re.sub(r"^\[[^\]]+\]\s*", "", line)  # [pod-name] prefix
-    s = re.sub(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?", "<TS>", s)
+    s = re.sub(TS_PAT, "<TS>", s)
     s = re.sub(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "<UUID>", s)
     s = re.sub(r"0x[0-9a-fA-F]+", "<HEX>", s)
     s = re.sub(r"\b[0-9a-fA-F]{12,}\b", "<HEX>", s)
@@ -120,6 +125,23 @@ def normalize(line):
 
 def fp(label, norm):
     return hashlib.sha256(f"{label}|{norm}".encode()).hexdigest()
+
+# Anchored to the kubectl `[pod] <ts>` prefix so an ISO timestamp that is
+# log *data* (e.g. "retry scheduled for 2026-…") is never stripped.
+DISPLAY_TS_RE = re.compile(r"^(\[[^\]]+\]\s*)?" + TS_PAT + r"\s*")
+
+def display_line(line):
+    """Trim the leading per-line ISO timestamp for Slack display — the alert
+    header already states the window, so it's noise. Fingerprints use the raw
+    line via normalize(), so this is presentation-only."""
+    return DISPLAY_TS_RE.sub(lambda m: m.group(1) or "", line, count=1).strip()
+
+def header(label):
+    """`muso-prod/industry-worker-v2` doesn't say "IDP" to a skimmer; tag the
+    industry data-processing fleets. NOT bare `industry` — industry-api is the
+    public API service and mislabeling it IDP steers triage at the wrong on-call."""
+    dep = label.rsplit("/", 1)[-1]
+    return f"IDP · {label}" if dep.startswith(("industry-proc", "industry-worker")) else label
 
 def slack_escape(s):
     """Log lines are untrusted text headed for Slack mrkdwn: a logged
@@ -147,6 +169,11 @@ for path in sorted(glob.glob(os.path.join(collect, "*.log"))):
             line = line.rstrip("\n")
             if not line.strip():
                 continue
+            # fetch-prod-logs.sh's byte-cap notice is fetch metadata, not a
+            # log line — skip structurally so a rewording there can't turn
+            # it into a fake "error" (no config regex to keep in sync).
+            if line.startswith("[TRUNCATED"):
+                continue
             norm = normalize(line)
             if norm in seen_norms:
                 seen_norms[norm][1] += 1
@@ -157,6 +184,7 @@ for path in sorted(glob.glob(os.path.join(collect, "*.log"))):
         h = fp(label, norm)
         if now - state.get(h, float("-inf")) < cooldown:
             continue
+        display = display_line(display)
         if len(display) > 220:
             display = display[:220] + "…"
         fresh.append((slack_escape(display), count, h))
@@ -185,7 +213,7 @@ if not groups:
 lines = [f":rotating_light: *prod log errors — {len(groups)} deployment(s)* (last {window})"]
 total = 0
 for label, items in groups:
-    lines.append(f"*{label}*")
+    lines.append(f"*{header(label)}*")
     for display, count in items:
         if total >= max_total:
             suppressed_overflow += 1
@@ -300,6 +328,18 @@ if [ -r "$EXCLUDE_FILE" ]; then
   EXCLUDE_PATTERN="$(grep -Ev '^[[:space:]]*(#|$)' "$EXCLUDE_FILE" | paste -sd'|' -)"
 fi
 
+# A malformed ERE makes grep -Eiv exit 2 with EMPTY output — downstream that
+# reads as "all lines excluded" and the watchdog reports OK forever. Fail loud
+# instead, like the missing-patterns-file case above.
+if [ -n "$EXCLUDE_PATTERN" ]; then
+  _rc=0
+  printf '' | grep -Eiv -- "$EXCLUDE_PATTERN" >/dev/null 2>&1 || _rc=$?
+  if [ "$_rc" -gt 1 ]; then
+    log "ERROR: invalid exclude pattern in $EXCLUDE_FILE (not valid ERE, fail-closed): $EXCLUDE_PATTERN"
+    exit 2
+  fi
+fi
+
 # Single-run lock so overlapping ticks never double-post.
 if [ "$DRY_RUN" -eq 0 ]; then
   exec 9>"$LOCKFILE"
@@ -317,13 +357,21 @@ while read -r ns dep _; do
   case "$ns" in ''|\#*) continue ;; esac
   out_file="$COLLECT_DIR/${ns}__${dep}.log"
   err_file="$COLLECT_DIR/${ns}__${dep}.stderr"
+  # Exclusion is passed to the fetch so it applies BEFORE the byte cap —
+  # high-volume benign matches would otherwise truncate away real errors
+  # (live finding 2026-06-12, industry-proc-raw-v2). Empty pattern = no-op.
   if ! PROD_LOGS_CONFIG_DIR="$CONFIG_DIR" bash "$FETCH_BIN" \
       -n "$ns" -d "$dep" --since "$WINDOW" --tail "$TAIL_PER_POD" \
-      --pattern "$ALERT_PATTERN" > "$out_file" 2> "$err_file"; then
+      --pattern "$ALERT_PATTERN" --exclude-pattern "$EXCLUDE_PATTERN" \
+      > "$out_file" 2> "$err_file"; then
     head -1 "$err_file" > "$COLLECT_DIR/${ns}__${dep}.fetchfail"
     rm -f "$out_file"
     log "WARN: fetch failed for $ns/$dep: $(head -1 "$err_file")"
   else
+    # Belt-and-braces re-apply: covers fetch builds that predate
+    # --exclude-pattern (deploy skew between /opt/hydra and this script).
+    # The pattern was ERE-validated at startup, so `|| true` only ever
+    # swallows grep's no-match exit 1 here.
     if [ -n "$EXCLUDE_PATTERN" ] && [ -s "$out_file" ]; then
       grep -Eiv "$EXCLUDE_PATTERN" "$out_file" > "$out_file.tmp" || true
       mv "$out_file.tmp" "$out_file"

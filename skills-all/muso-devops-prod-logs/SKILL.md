@@ -41,6 +41,14 @@ bash "$SKILL_DIR/scripts/fetch-prod-logs.sh" -d core-backend-api
 bash "$SKILL_DIR/scripts/fetch-prod-logs.sh" -d core-backend-worker \
   --since 1h --pattern 'timeout|ECONNREFUSED' --tail 200
 
+# Drop known-benign noise BEFORE the byte cap (IDP workers dump INFO-level
+# payload JSON that can match error-ish patterns and trip truncation).
+# Anchor the level after the "[pod] <ts> " prefix so "info:" inside an
+# error message is never suppressed:
+bash "$SKILL_DIR/scripts/fetch-prod-logs.sh" -d industry-proc-raw-v2 --any-deploy \
+  --pattern 'fatal|exception' \
+  --exclude-pattern '^\[[^]]+\][[:space:]]+[^[:space:]]+[[:space:]]+info:[[:space:]]'
+
 # Unfiltered tail (small windows only — output is byte-capped):
 bash "$SKILL_DIR/scripts/fetch-prod-logs.sh" -d playlist-updater --since 5m --no-filter
 

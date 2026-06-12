@@ -3,11 +3,14 @@
 # source of truth shared by the on-demand skill (fetch-prod-logs.sh) AND the
 # prod-log-alert-watchdog (scripts/prod-log-alert-watchdog.sh).
 #
-# Verified against `kubectl get deploy -A` on node-8, 2026-06-09. The huge
-# autoscaled worker fleets (analytics-worker-*, industry-proc-*-v2 — up to
-# 440 replicas) are deliberately NOT listed for v1: kubectl-sampling a handful
-# of pods out of hundreds is not a meaningful alert signal. They remain
-# fetchable on-demand via --any-deploy.
+# Verified against `kubectl get deploy -A` on node-8, 2026-06-12. The big
+# autoscaled IDP fleets (industry-proc-*-v2, industry-worker-*-v2 — up to
+# 440 replicas) ARE listed, but the fetch wrapper samples at most
+# PROD_LOGS_MAX_PODS (5) pods per deployment: systemic errors that hit
+# every pod still surface; rare single-pod errors can be missed. The
+# analytics-worker-* fleets remain unlisted (on-demand via --any-deploy).
+# Listed fleets that have scaled to zero return an empty fetch (exit 0),
+# not a "watchdog is blind" alert — see fetch-prod-logs.sh's no-pods branch.
 muso-prod core-backend-api
 muso-prod core-backend-worker
 muso-prod core-backend-analytics
@@ -16,3 +19,15 @@ muso-prod credit-submission-worker
 muso-prod playlist-updater
 muso-prod industry-api
 muso-prod industry-proc-catalog-admin
+muso-prod industry-proc-catalog-v2
+muso-prod industry-proc-catalog-medium-v2
+muso-prod industry-proc-raw-v2
+muso-prod industry-proc-raw-medium-v2
+muso-prod industry-proc-fastlane-v2
+muso-prod industry-proc-fastlane-priority
+muso-prod industry-proc-fastlane-mega
+muso-prod industry-proc-fastlane-admin
+muso-prod industry-proc-express
+muso-prod industry-worker-v2
+muso-prod industry-worker-medium-v2
+muso-prod industry-worker-medium-v2-test

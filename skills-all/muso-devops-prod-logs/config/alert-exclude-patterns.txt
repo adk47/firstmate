@@ -8,3 +8,17 @@
 # blocks (found in the 2026-06-09 pre-rollout rehearsal on
 # core-backend-worker) — not an error, just echoed SQL.
 [[:space:]]debug:[[:space:]]
+#
+# IDP workers (industry-proc-raw-v2 etc.) log INFO-level payload dumps
+# ("INFO: Processed in N seconds, message: {…}") whose DATA matches the
+# alert pattern — e.g. a song titled "Te Ves Fatal" (found 2026-06-12 while
+# enabling IDP fleet alerting; the dumps carry 9+ payload classes, so this
+# excludes the log LEVEL, not class names — same shape as the debug: entry).
+# Real worker errors are FATAL:/ERROR:/WARNING: or unprefixed tracebacks,
+# all unaffected. Anchored to the level position right after the
+# "[pod] <timestamp> " prefix (lines are pod-prefixed before filtering in
+# fetch-prod-logs.sh) so an "info:" inside an error MESSAGE — e.g.
+# "FATAL: failed to load artist info: exception" — is never suppressed.
+# The watchdog passes these to the fetch pre-byte-cap AND re-applies them
+# post-fetch.
+^\[[^]]+\][[:space:]]+[^[:space:]]+[[:space:]]+info:[[:space:]]

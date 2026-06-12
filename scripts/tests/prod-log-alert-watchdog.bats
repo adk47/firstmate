@@ -50,6 +50,7 @@ STUB
   # emit the fixture file for that ns/dep if present.
   cat > "$TEST_TMPDIR/bin/fetch-stub.sh" <<'STUB'
 #!/bin/bash
+[ -n "${FETCH_STUB_RECORD_ARGS:-}" ] && echo "$*" >> "$FETCH_STUB_RECORD_ARGS"
 ns="$2"; dep="$4"
 if [ "${FETCH_STUB_EXIT:-0}" != "0" ]; then
   echo "ERROR: kubectl get deploy failed: connection refused" >&2
@@ -189,6 +190,39 @@ EOF
   [[ "$output" == *"muso-prod/core-backend-worker"* ]]
 }
 
+@test "IDP worker fleets get an IDP tag; industry-api and core-backend stay plain" {
+  printf '%s\n' "muso-prod industry-worker-v2" "muso-prod industry-api" \
+    >> "$TEST_TMPDIR/config/deployments.txt"
+  fixture muso-prod industry-worker-v2 <<'EOF'
+[iw-aaa] 2026-06-09T10:00:00Z exception: AnalyticsLink deleted
+EOF
+  fixture muso-prod industry-api <<'EOF'
+[ia-aaa] 2026-06-09T10:00:00Z fatal: api handler crashed
+EOF
+  fixture muso-prod core-backend-api <<'EOF'
+[cb-api-aaa] 2026-06-09T10:00:00Z fatal: boom
+EOF
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"*IDP · muso-prod/industry-worker-v2*"* ]]
+  # industry-api is the public API service, not a data-processing fleet —
+  # tagging it IDP would steer triage at the wrong on-call
+  [[ "$output" == *"*muso-prod/industry-api*"* ]]
+  [[ "$output" != *"IDP · muso-prod/industry-api"* ]]
+  [[ "$output" == *"*muso-prod/core-backend-api*"* ]]
+  [[ "$output" != *"IDP · muso-prod/core-backend-api"* ]]
+}
+
+@test "displayed bullets drop the ISO timestamp but keep the pod prefix" {
+  fixture muso-prod core-backend-api <<'EOF'
+[cb-api-aaa] 2026-06-09T10:00:00.123Z fatal: db connection lost
+EOF
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"• [cb-api-aaa] fatal: db connection lost"* ]]
+  [[ "$output" != *"2026-06-09T10:00:00"* ]]
+}
+
 @test "fetch failure → alerts that the watchdog is blind to that deployment" {
   FETCH_STUB_EXIT=5 run bash "$WD" --dry-run
   [ "$status" -eq 0 ]
@@ -228,6 +262,52 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"real breakage"* ]]
   [[ "$output" != *"Executing SQL"* ]]
+}
+
+@test "shipped exclude config drops INFO data dumps; TRUNCATED meta-line skipped structurally" {
+  # Guards the real alert-exclude-patterns.txt against the live noise class
+  # found 2026-06-12: IDP workers dump payload JSON at INFO level whose *data*
+  # matches the alert pattern (a song titled "Te Ves Fatal"). The fetch
+  # byte-cap's [TRUNCATED …] notice is skipped by build_alert itself.
+  cp "$HYDRA_REPO/skills-all/muso-devops-prod-logs/config/alert-exclude-patterns.txt" \
+     "$TEST_TMPDIR/config/alert-exclude-patterns.txt"
+  echo "muso-prod industry-proc-raw-v2" >> "$TEST_TMPDIR/config/deployments.txt"
+  fixture muso-prod industry-proc-raw-v2 <<'EOF'
+[TRUNCATED — output exceeded 65536 bytes; showing the most recent 65536]
+[ipr-aaa] 2026-06-12T10:00:00Z INFO: Processed in 0.03 seconds, message: {"entity_name": "Te Ves Fatal", "role": "Composer"}
+[ipr-aaa] 2026-06-12T10:00:01Z FATAL: worker crashed for real
+[ipr-aaa] 2026-06-12T10:00:02Z FATAL: failed to load artist info: exception while parsing
+EOF
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"FATAL: worker crashed for real"* ]]
+  # "info:" inside an error MESSAGE must not suppress the alert — the
+  # exclusion is anchored to the log-level position (QA finding, PR #507)
+  [[ "$output" == *"failed to load artist info: exception"* ]]
+  [[ "$output" != *"Te Ves Fatal"* ]]
+  [[ "$output" != *"TRUNCATED"* ]]
+}
+
+@test "invalid ERE in exclude config → fail-closed exit 2, never silent no-alerts" {
+  # grep -Eiv on a bad pattern exits 2 with empty output; without validation
+  # that reads as "everything excluded" and the watchdog reports OK forever.
+  printf '%s\n' '(unbalanced' > "$TEST_TMPDIR/config/alert-exclude-patterns.txt"
+  fixture muso-prod core-backend-api <<'EOF'
+[cb-api-aaa] 2026-06-09T10:00:00Z fatal: boom
+EOF
+  run bash "$WD" --dry-run
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"invalid exclude pattern"* ]]
+}
+
+@test "exclude pattern is passed through to the fetch script (pre-cap exclusion)" {
+  printf '%s\n' 'benign-noise' > "$TEST_TMPDIR/config/alert-exclude-patterns.txt"
+  fixture muso-prod core-backend-api <<'EOF'
+[cb-api-aaa] 2026-06-12T10:00:00Z fatal: boom
+EOF
+  FETCH_STUB_RECORD_ARGS="$TEST_TMPDIR/fetch-args.log" run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  grep -q -- '--exclude-pattern benign-noise' "$TEST_TMPDIR/fetch-args.log"
 }
 
 @test "missing exclude file → no exclusion, alerts still fire" {
