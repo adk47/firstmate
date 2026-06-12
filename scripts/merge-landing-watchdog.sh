@@ -25,7 +25,10 @@
 #
 # Detection runs against the catalog via /opt/hydra/scripts/trino-query.sh
 # (matvw_catalog_profile). Dedupe is per survivor:loser pair in a state file,
-# so a persistently-stuck merge pages once, not every tick.
+# so a persistently-stuck merge pages once, not every tick. If an alerted pair
+# later lands (the fold was just slow — e.g. Jan's six merges of 2026-06-10/11
+# landed >6h after request), a ✅ all-clear is posted and the pair is dropped
+# from the state, so the channel never points humans at an already-landed merge.
 #
 # Runs every ~30 min via /etc/cron.d/merge-landing-watchdog ON NODE-8
 # (installed idempotently by scripts/install-aux-units.sh). Must run as root —
@@ -163,9 +166,11 @@ PYEOF
 # catalog_csv is trino-query.sh output: rows of "_id","merged_to_id","is_deleted"
 # (data rows only, no header, fields double-quoted). A loser is STUCK iff it
 # appears with an empty merged_to_id AND is_deleted=false. Absent / merged /
-# deleted == landed. Alerts only on stuck pairs not already in the state set.
-# Writes a Slack payload to payload_out (only if new stuck pairs), advances the
-# alerted-set in state_file (persist=1), and prints the alert block to stdout.
+# deleted == landed. Alerts only on stuck pairs not already in the state set;
+# previously-alerted pairs that have since landed get a ✅ all-clear and leave
+# the set. Writes a Slack payload to payload_out (only if new stuck pairs or
+# resolutions), advances the alerted-set in state_file (persist=1), and prints
+# the alert/all-clear block to stdout.
 # ──────────────────────────────────────────────────────────────
 decide_and_alert() {
   CANDIDATES_JSON="$1" CATALOG_CSV="$2" STATE_FILE="$3" PAYLOAD_OUT="$4" PERSIST="$5" \
@@ -212,17 +217,35 @@ except Exception:
     alerted = set()
 
 new_alerts = []  # (survivor, loser, requester, age_hours)
+resolved   = []  # previously-alerted pairs whose loser has since landed
 new_alerted = set(alerted)
 for c in candidates:
-    if not is_stuck(c["loser"]):
-        continue
-    if c["key"] in alerted:
-        continue  # already paged for this stuck pair
+    stuck = is_stuck(c["loser"])
     age_h = (now - c["ts"]) / 3600 if now else 0
-    new_alerts.append((c["survivor"], c["loser"], c.get("requester", ""), age_h))
-    new_alerted.add(c["key"])
+    if stuck and c["key"] not in alerted:
+        new_alerts.append((c["survivor"], c["loser"], c.get("requester", ""), age_h))
+        new_alerted.add(c["key"])
+    elif not stuck and c["key"] in alerted:
+        # The async fold completed late — post a ✅ all-clear so #clio_devops
+        # isn't left telling humans to hand off a merge that already landed,
+        # and drop the pair from the alerted set.
+        resolved.append((c["survivor"], c["loser"], c.get("requester", ""), age_h))
+        new_alerted.discard(c["key"])
 
-if not new_alerts:
+# Resolution must be driven by the ALERTED set, not just the candidate scan:
+# an alerted pair whose audit-log line is gone (log rotated/pruned) would
+# otherwise sit in the state forever — never ✅'d, and permanently deduped if
+# it ever re-sticks. The bash caller queries these losers too, so "absent or
+# landed in the catalog" is a real observation, not a missing row. Request
+# age is unknown without the log line, so the bullet shows "?".
+candidate_keys = {c["key"] for c in candidates}
+for key in sorted(alerted - candidate_keys):
+    survivor, _, loser = key.partition(":")
+    if loser and not is_stuck(loser):
+        resolved.append((survivor, loser, "", None))
+        new_alerted.discard(key)
+
+if not new_alerts and not resolved:
     # Nothing new to page → leave the live alerted-set untouched (rewriting it
     # would be a no-op) and emit no payload.
     raise SystemExit(0)
@@ -241,15 +264,28 @@ with open(pending, "w") as f:
 if persist:
     os.replace(pending, state_file)
 
-new_alerts.sort(key=lambda a: (a[0], a[1]))
-lines = [f":rotating_light: *Profile merge(s) accepted but NOT landed — {len(new_alerts)}*",
-         "These merges returned HTTP 200 but the loser is still an active, unmerged "
-         "catalog profile (async catalog fold silently dropped — no DLQ/retry). "
-         "Hand to the catalog team for a manual merge."]
-for survivor, loser, requester, age_h in new_alerts:
-    age = f"{age_h:.0f}h" if age_h else "?"
-    who = f" req={requester}" if requester else ""
-    lines.append(f"• loser `{loser}` → survivor `{survivor}` — stuck ≥{age}{who}")
+def block(pairs, header, blurb, verb, qual):
+    pairs.sort(key=lambda a: (a[0], a[1]))
+    out = [header, blurb]
+    for survivor, loser, requester, age_h in pairs:
+        age = f"{qual}{age_h:.0f}h" if age_h else "?"
+        who = f" req={requester}" if requester else ""
+        out.append(f"• loser `{loser}` → survivor `{survivor}` — {verb} {age}{who}")
+    return out
+
+lines = []
+if new_alerts:
+    lines += block(new_alerts,
+                   f":rotating_light: *Profile merge(s) accepted but NOT landed — {len(new_alerts)}*",
+                   "These merges returned HTTP 200 but the loser is still an active, unmerged "
+                   "catalog profile (async catalog fold silently dropped — no DLQ/retry). "
+                   "Hand to the catalog team for a manual merge.",
+                   "stuck", "≥")
+if resolved:
+    lines += block(resolved,
+                   f":white_check_mark: *Profile merge(s) previously flagged have now LANDED — {len(resolved)}*",
+                   "No manual merge needed — the async catalog fold completed late.",
+                   "landed after", "~")
 text = "\n".join(lines)
 
 # Build the Slack payload in Python (ids are safe, but keep parity with the
@@ -325,14 +361,15 @@ PYEOF
 # Trino, real state, or Slack.
 # ──────────────────────────────────────────────────────────────
 _self_test() {
-  local td out bullets
+  local td out
   td="$(mktemp -d)"
   trap 'rm -rf "$td"' RETURN
-  # Two candidate pairs sharing survivor S: loser L1 is stuck, L2 has landed.
-  printf '%s' '[{"key":"S:L1","survivor":"S","loser":"L1","requester":"jan@muso.ai","ts":1000},{"key":"S:L2","survivor":"S","loser":"L2","requester":"jan@muso.ai","ts":1000}]' > "$td/cands.json"
-  # Catalog: L1 active+unmerged (STUCK), L2 merged into S (landed), survivor S active.
-  printf '%s\n' '"L1","","false"' '"L2","S","true"' '"S","","false"' > "$td/catalog.csv"
-  printf '%s\n' '[]' > "$td/state.json"
+  # Three candidate pairs sharing survivor S: loser L1 is stuck, L2 has landed
+  # (never alerted), L3 has landed AFTER being alerted (in the state set).
+  printf '%s' '[{"key":"S:L1","survivor":"S","loser":"L1","requester":"jan@muso.ai","ts":1000},{"key":"S:L2","survivor":"S","loser":"L2","requester":"jan@muso.ai","ts":1000},{"key":"S:L3","survivor":"S","loser":"L3","requester":"jan@muso.ai","ts":1000}]' > "$td/cands.json"
+  # Catalog: L1 active+unmerged (STUCK), L2/L3 merged into S (landed), survivor S active.
+  printf '%s\n' '"L1","","false"' '"L2","S","true"' '"L3","S","true"' '"S","","false"' > "$td/catalog.csv"
+  printf '%s\n' '["S:L3"]' > "$td/state.json"
   out="$(NOW_EPOCH_FOR_AGE=8200 decide_and_alert "$td/cands.json" "$td/catalog.csv" "$td/state.json" "$td/payload.json" 0 2>/dev/null || true)"
   if ! printf '%s' "$out" | grep -q "L1"; then
     echo "$LOGPREFIX SELF-TEST FAIL: detector did not flag the stuck loser L1" >&2
@@ -342,9 +379,15 @@ _self_test() {
     echo "$LOGPREFIX SELF-TEST FAIL: detector wrongly flagged the landed loser L2" >&2
     return 1
   fi
-  bullets="$(printf '%s\n' "$out" | grep -c '^• ' || true)"
-  if [ "$bullets" != "1" ]; then
-    echo "$LOGPREFIX SELF-TEST FAIL: expected exactly 1 stuck bullet, got $bullets" >&2
+  if ! printf '%s' "$out" | grep -q 'L3.*landed after'; then
+    echo "$LOGPREFIX SELF-TEST FAIL: detector did not all-clear the alerted-then-landed loser L3" >&2
+    return 1
+  fi
+  # Staged state (persist=0 → .pending) must add the stuck pair and drop the
+  # resolved one. Message-format details beyond this are bats' job, not the
+  # every-tick guard's.
+  if ! python3 -c "import json,sys; s=set(json.load(open('$td/state.json.pending'))); sys.exit(0 if ('S:L1' in s and 'S:L3' not in s) else 1)"; then
+    echo "$LOGPREFIX SELF-TEST FAIL: staged state did not add S:L1 / drop resolved S:L3" >&2
     return 1
   fi
   return 0
@@ -381,8 +424,24 @@ CATALOG_FILE="$(mktemp)"
 PAYLOAD_FILE="$(mktemp)"
 trap 'rm -f "$CANDIDATES_FILE" "$CATALOG_FILE" "$PAYLOAD_FILE"' EXIT
 
-# Phase 1: which losers are aged-enough to check?
+# Phase 1: which losers are aged-enough to check? Union in the losers of
+# already-alerted pairs so a pair whose audit-log line has been rotated away
+# can still be observed (and ✅-resolved) against the catalog.
 loser_ids="$(select_candidates "$MERGES_FILE" "$MIN_AGE_HOURS" "$NOW_EPOCH" "$CANDIDATES_FILE")"
+alerted_losers="$(STATE_FILE="$STATE_FILE" python3 - <<'PYEOF'
+import json, os
+try:
+    with open(os.environ["STATE_FILE"]) as f:
+        keys = json.load(f)
+except Exception:
+    keys = []
+for k in keys:
+    loser = str(k).partition(":")[2]
+    if loser:
+        print(loser)
+PYEOF
+)"
+loser_ids="$(printf '%s\n%s\n' "$loser_ids" "$alerted_losers" | grep -v '^$' | sort -u || true)"
 if [ -z "$loser_ids" ]; then
   log "OK: no merges older than ${MIN_AGE_HOURS}h to verify."
   exit 0
@@ -418,15 +477,15 @@ if [ "$DRY_RUN" -eq 1 ]; then
   exit 0
 fi
 
-log "Posting stuck-merge alert to ${SLACK_CHANNEL}."
+log "Posting stuck-merge/all-clear notice to ${SLACK_CHANNEL}."
 printf '%s\n' "$alert_block"
 if slack_notify_payload_file_status "$PAYLOAD_FILE"; then
   # Delivery confirmed → advance the dedupe state so this pair isn't re-paged.
   [ -f "${STATE_FILE}.pending" ] && mv -f "${STATE_FILE}.pending" "$STATE_FILE"
-  log "Stuck-merge alert delivered; dedupe state advanced."
+  log "Watchdog notice delivered; dedupe state advanced."
 else
   # Delivery failed → leave the live state untouched so the next tick re-pages.
   rm -f "${STATE_FILE}.pending"
-  log "ERROR: Slack delivery of stuck-merge alert FAILED — dedupe state NOT advanced; will retry next tick."
+  log "ERROR: Slack delivery of watchdog notice FAILED — dedupe state NOT advanced; will retry next tick."
   exit 1
 fi

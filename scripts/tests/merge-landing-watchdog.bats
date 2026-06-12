@@ -236,6 +236,107 @@ STUB
   [ "$status" -eq 2 ]
 }
 
+# ──────────────────────────────────────────────────────────────
+# All-clear (auto-resolve) behaviour: a previously-alerted pair whose loser
+# has since landed must post a ✅ notice and drop out of the alerted state,
+# so #clio_devops isn't left pointing humans at a merge that already landed
+# (2026-06-10/11: six of Jan's merges landed >6h after request — the 🚨 pages
+# were stale within a day and nothing said so).
+# ──────────────────────────────────────────────────────────────
+
+@test "previously-alerted pair that has landed → ✅ all-clear, key removed from state (dry-run persists)" {
+  mergeline 1000 SURV L_LANDED
+  printf '%s\n' '["SURV:L_LANDED"]' > "$MERGE_LANDING_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"have now LANDED"* ]]
+  [[ "$output" == *"landed after"* ]]
+  [[ "$output" == *"L_LANDED"* ]]
+  [[ "$output" != *"NOT landed"* ]]               # no stuck block in this tick
+  run python3 -c "import json; print('SURV:L_LANDED' in json.load(open('$MERGE_LANDING_STATE_FILE')))"
+  [[ "$output" == *"False"* ]]
+}
+
+@test "previously-alerted pair still stuck → quiet: no re-page, no ✅" {
+  mergeline 1000 SURV L_STUCK
+  printf '%s\n' '["SURV:L_STUCK"]' > "$MERGE_LANDING_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"have landed"* ]]              # the existing quiet-tick log line
+  [[ "$output" != *"have now LANDED"* ]]
+  [[ "$output" != *"NOT landed"* ]]
+}
+
+@test "✅ all-clear with FAILED Slack delivery → state unchanged, retried next tick" {
+  mergeline 1000 SURV L_LANDED
+  printf '%s\n' '["SURV:L_LANDED"]' > "$MERGE_LANDING_STATE_FILE"
+  printf '%s\n' '{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test"}}}}}' \
+    > "$TEST_TMPDIR/slack.json"
+  export MERGE_LANDING_SLACK_CONFIG="$TEST_TMPDIR/slack.json"
+
+  printf '#!/bin/bash\nexit 1\n' > "$TEST_TMPDIR/bin/curl"
+  chmod +x "$TEST_TMPDIR/bin/curl"
+  run bash "$WD"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NOT advanced"* ]]
+  run python3 -c "import json; print('SURV:L_LANDED' in json.load(open('$MERGE_LANDING_STATE_FILE')))"
+  [[ "$output" == *"True"* ]]                     # key kept → ✅ retries next tick
+  [ ! -f "${MERGE_LANDING_STATE_FILE}.pending" ]
+}
+
+@test "mixed tick: one new stuck + one resolved → single message with both blocks" {
+  mergeline 1000 SURV L_STUCK L_LANDED
+  printf '%s\n' '["SURV:L_LANDED"]' > "$MERGE_LANDING_STATE_FILE"
+  printf '%s\n' '{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test"}}}}}' \
+    > "$TEST_TMPDIR/slack.json"
+  export MERGE_LANDING_SLACK_CONFIG="$TEST_TMPDIR/slack.json"
+  export MERGE_LANDING_TEST_CAPTURE="$TEST_TMPDIR/cap.json"
+
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  [ -f "$MERGE_LANDING_TEST_CAPTURE" ]
+  run python3 -c "
+import json
+t = json.load(open('$MERGE_LANDING_TEST_CAPTURE'))['text']
+print('NOT landed' in t and 'L_STUCK' in t)      # stuck block
+print('have now LANDED' in t and 'landed after' in t)  # all-clear block
+"
+  [[ "${lines[0]}" == "True" ]]
+  [[ "${lines[1]}" == "True" ]]
+  # delivered → state now holds the stuck pair, not the resolved one
+  run python3 -c "
+import json
+s = set(json.load(open('$MERGE_LANDING_STATE_FILE')))
+print('SURV:L_STUCK' in s)
+print('SURV:L_LANDED' in s)
+"
+  [[ "${lines[0]}" == "True" ]]
+  [[ "${lines[1]}" == "False" ]]
+}
+
+@test "alerted pair whose audit-log line is GONE (log rotated) still ✅-resolves once landed" {
+  : > "$MERGE_LANDING_MERGES_FILE"                 # log rotated: no candidate lines at all
+  printf '%s\n' '["SURV:L_LANDED"]' > "$MERGE_LANDING_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"have now LANDED"* ]]
+  [[ "$output" == *"L_LANDED"* ]]
+  [[ "$output" == *"landed after ?"* ]]            # request ts unknown without the log line
+  run python3 -c "import json; print('SURV:L_LANDED' in json.load(open('$MERGE_LANDING_STATE_FILE')))"
+  [[ "$output" == *"False"* ]]
+}
+
+@test "alerted pair gone from audit log but loser STILL stuck → kept in state, no ✅, no re-page" {
+  : > "$MERGE_LANDING_MERGES_FILE"
+  printf '%s\n' '["SURV:L_STUCK"]' > "$MERGE_LANDING_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"have now LANDED"* ]]
+  [[ "$output" != *"NOT landed"* ]]
+  run python3 -c "import json; print('SURV:L_STUCK' in json.load(open('$MERGE_LANDING_STATE_FILE')))"
+  [[ "$output" == *"True"* ]]
+}
+
 @test "stuck alert posts a VALID JSON payload (escaping guard)" {
   mergeline 1000 SURV L_STUCK
   printf '%s\n' '{"channels":{"slack":{"accounts":{"devops":{"botToken":"xoxb-test"}}}}}' \
