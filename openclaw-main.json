@@ -274,7 +274,7 @@
             "openrouter/anthropic/claude-4.6-sonnet-20260217"
           ]
         },
-        "thinkingDefault": "high"
+        "thinkingDefault": "xhigh"
       },
       {
         "id": "qa",
