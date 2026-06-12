@@ -33,13 +33,27 @@ fi
 
 case "$cmd" in
   records.ls)
-    offset=0
+    offset=0 limit=25
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --offset) offset="${2:-0}"; shift 2 ;;
+        --limit) limit="${2:-25}"; shift 2 ;;
         *) shift ;;
       esac
     done
+    # Clamped multi-page mode: NOCODB_STUB_TOTAL_ROWS=<n> serves n synthetic
+    # rows ({"Id":1.."n"}) for ANY table, clamping the requested --limit to
+    # NOCODB_STUB_CLAMP (default 100) like NocoDB Cloud does — the behavior
+    # that broke fetch_table's short-page termination.
+    if [[ -n "${NOCODB_STUB_TOTAL_ROWS:-}" ]]; then
+      clamp="${NOCODB_STUB_CLAMP:-100}"
+      [[ "$limit" -gt "$clamp" ]] && limit="$clamp"
+      jq -nc --argjson off "$offset" --argjson lim "$limit" \
+             --argjson total "$NOCODB_STUB_TOTAL_ROWS" '
+        {list: [range($off; ([$off + $lim, $total] | min)) | {Id: (. + 1)}],
+         pageInfo: {isLastPage: ($off + $lim >= $total)}}'
+      exit 0
+    fi
     # Single-page fixtures: any offset > 0 is the empty tail page.
     if [[ "$offset" -gt 0 ]]; then
       echo '{"list":[],"pageInfo":{"isLastPage":true}}'

@@ -15,7 +15,10 @@ NOCODB_BASE_ID="${NOCODB_BASE_ID:-p11hvpwapu4hv0x}"
 # resolve_ledger_table_id) — set the env var only to skip the lookup
 # (tests do) or to override the discovered table.
 LEDGER_TABLE_TITLE="Company Seen Ledger"
-PAGE_LIMIT="${PAGE_LIMIT:-1000}"
+# NocoDB Cloud clamps --limit to 100 regardless of what we request, so ask
+# for what we'll actually get. fetch_table no longer trusts this value for
+# termination either way (see the isLastPage/empty-page loop).
+PAGE_LIMIT="${PAGE_LIMIT:-100}"
 
 CF_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -74,7 +77,7 @@ resolve_ledger_table_id() {
 # "<marker>: <label> (<tid>)" to stderr and returns 2.
 fetch_table() {
   local tid="$1" label="$2" fields="$3" marker="$4"
-  local offset=0 combined="[]" resp chunk islast
+  local offset=0 pages="" resp chunk islast pagelen
   while :; do
     if ! resp=$(run_nocodb records.ls "$tid" --fields "$fields" \
                   --limit "$PAGE_LIMIT" --offset "$offset" 2>/dev/null); then
@@ -88,16 +91,20 @@ fetch_table() {
       echo "$marker: $label ($tid) — unexpected response shape" >&2
       return 2
     fi
-    combined=$(jq -cs 'add' <<<"$combined"$'\n'"$chunk")
-    # Strictly boolean termination: a short page ALWAYS terminates, even if a
-    # NocoDB version/proxy serializes isLastPage as a string or 0/1 — a
-    # non-boolean truthy value must never leave us paginating forever.
-    islast=$(jq -r --argjson lim "$PAGE_LIMIT" \
-      '((.pageInfo.isLastPage == true) or ((.list | length) < $lim))' <<<"$resp")
-    [[ "$islast" == "true" ]] && break
-    offset=$((offset + PAGE_LIMIT))
+    pages+="$chunk"$'\n'
+    # Strictly boolean termination, clamp-proof: NocoDB Cloud silently caps
+    # --limit at 100, so a page shorter than PAGE_LIMIT does NOT mean last
+    # page (that assumption truncated dedupe snapshots to ~100 rows,
+    # 2026-06-12). Only an explicit boolean isLastPage or an EMPTY page
+    # terminates — even if a NocoDB version/proxy serializes isLastPage as a
+    # string or 0/1, the empty page bounds the loop. Advance by what the
+    # server actually returned, not by what we asked for.
+    pagelen=$(jq -r 'length' <<<"$chunk")
+    islast=$(jq -r '.pageInfo.isLastPage == true' <<<"$resp")
+    [[ "$islast" == "true" || "$pagelen" -eq 0 ]] && break
+    offset=$((offset + pagelen))
   done
-  printf '%s\n' "$combined"
+  jq -cs 'add // []' <<<"$pages"
 }
 
 # read_candidates_stdin — read stdin, default to [], reject non-arrays.
