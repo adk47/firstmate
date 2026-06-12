@@ -29,7 +29,7 @@ describe("integration: built plugin loads through a contracts-enforcing api stub
     expect(typeof pluginModule!.default.register).toBe("function");
   });
 
-  it("registers all 6 declared tools without producing contracts diagnostics", () => {
+  it("registers all 8 declared tools without producing contracts diagnostics", () => {
     const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
     const declared: string[] = manifest.contracts?.tools ?? [];
 
@@ -66,6 +66,7 @@ describe("integration: built plugin loads through a contracts-enforcing api stub
     expect(diagnostics).toEqual([]);
     expect(registered.sort()).toEqual([
       "create_ticket",
+      "credit_verification_check",
       "credits_search",
       "dedupe_check",
       "profile_lookup",

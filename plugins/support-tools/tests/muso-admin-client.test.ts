@@ -265,4 +265,26 @@ describe("createMusoAdminClient", () => {
     const result = await client.get("/api/v3/admin/profile/abc-123/credits?limit=20&offset=0");
     expect(result.ok).toBe(true);
   });
+
+  it("allows the credit-requests LIST path but blocks the per-item path (the approve/write surface)", async () => {
+    vi.mocked(http.post).mockResolvedValue(makeLoginResponse("tok"));
+    vi.mocked(http.get).mockResolvedValue({ ok: true, data: { data: { items: [] } } });
+
+    const client = createMusoAdminClient({
+      http,
+      musoApiBase: "https://api.muso.ai",
+      adminEmail: "admin@muso.ai",
+      adminPassword: "s3cret",
+    });
+
+    const list = await client.get("/api/v3/admin/credit-requests?profilesIds=abc-123&status=user_verification_needed&limit=10");
+    expect(list.ok).toBe(true);
+
+    // Tripwire: the regex must stay scoped to the list endpoint — never the
+    // /credit-requests/<id> item path that the gated approve PUT lives under.
+    const item = await client.get("/api/v3/admin/credit-requests/123");
+    expect(item).toEqual({ ok: false, status: 0, error: "path not allowlisted" });
+    const bare = await client.get("/api/v3/admin/credit-requestsX");
+    expect(bare).toEqual({ ok: false, status: 0, error: "path not allowlisted" });
+  });
 });

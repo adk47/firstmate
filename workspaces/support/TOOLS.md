@@ -1,15 +1,15 @@
 # TOOLS.md -- support
 
-## Allowed Tools (EXACTLY 9)
+## Allowed Tools (EXACTLY 10)
 
-This agent has the most restricted tool set in HYDRA. Only these 9 tools are permitted, split into two groups:
+This agent has the most restricted tool set in HYDRA. Only these 10 tools are permitted, split into two groups:
 
-- **Action tools (1-7)** -- write or read customer-facing state. Implemented as plugin-registered tools via the `support-tools` OpenClaw plugin. The agent calls them by name; the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
-- **Reference tools (8-9)** -- read-only semantic + BM25 retrieval against `workspaces/support/reference/*.md`, provided by openclaw's bundled memory-core via the per-agent `memorySearch` config (enabled on both edge and main profiles, indexing the read-only `reference/` subdirectory only). No writes; no customer-data persistence; no auto-recall.
+- **Action tools (1-8)** -- write or read customer-facing state. Implemented as plugin-registered tools via the `support-tools` OpenClaw plugin. The agent calls them by name; the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
+- **Reference tools (9-10)** -- read-only semantic + BM25 retrieval against `workspaces/support/reference/*.md`, provided by openclaw's bundled memory-core via the per-agent `memorySearch` config (enabled on both edge and main profiles, indexing the read-only `reference/` subdirectory only). No writes; no customer-data persistence; no auto-recall.
 
-## Authentication (CRITICAL -- shared across tools 1, 2, 5, 6, 7)
+## Authentication (CRITICAL -- shared across tools 1, 2, 5, 6, 7, 8)
 
-`profile_lookup`, `credits_search`, and `profile_status` all use `MusoAdminClient` to call `api.muso.ai/api/v3/admin/*` with a JWT bearer token obtained via admin login (`MUSO_ADMIN_EMAIL` + `MUSO_ADMIN_PASSWORD` env vars). The client is GET-only and regex-allowlisted to exactly three paths (`profile/search`, `profile/<id>`, `profile/<id>/credits`). The JWT is never returned to the agent and never logged.
+`profile_lookup`, `credits_search`, and `profile_status` all use `MusoAdminClient` to call `api.muso.ai/api/v3/admin/*` with a JWT bearer token obtained via admin login (`MUSO_ADMIN_EMAIL` + `MUSO_ADMIN_PASSWORD` env vars). The client is GET-only and regex-allowlisted to exactly four paths (`profile/search`, `profile/<id>`, `profile/<id>/credits`, and the `credit-requests` LIST endpoint -- never `credit-requests/<id>`, the item path the gated approve PUT lives under). The JWT is never returned to the agent and never logged.
 
 `remove_credits` (tool 6) also depends on the same Muso admin auth -- it inherits via the JWT cache maintained by `muso-admin-api.sh`. Rotating `MUSO_ADMIN_EMAIL` / `MUSO_ADMIN_PASSWORD` breaks the bash wrapper too; flush `~/.cache/muso-admin-token.json` (or whatever `$TOKEN_CACHE` points to) after a rotation.
 
@@ -84,7 +84,16 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 - **Rate limit**: 10 per session (60-minute window); caps duplicates at 5 per call.
 - **Used by**: the `customer-profile-dedupe` skill. The tool produces evidence ONLY -- Caroline files a `profile-merge` ticket via `create_ticket`; Operations executes the irreversible merge.
 
-### 8. memory_search
+### 8. credit_verification_check
+
+- **Wraps**: read-only lookup of a customer's `user_verification_needed` (UVN) credits. Anchors ownership to the contact's real `source.author.email` via a read-only Intercom `GET /conversations/{id}`, confirms ownership against `GET /api/v3/admin/profile/{id}` (search-by-email when no profile is named), then `GET /api/v3/admin/credit-requests?profilesIds=<id>&status=user_verification_needed`. No writes, no approve/reject, no tier-2 endpoint, no `exec`. The `MusoAdminClient` is GET-only, so it cannot reach the gated `PUT /admin/credit-requests` approve path that shares the prefix.
+- **Returns**: PII-safe structured verdict -- `{ verified_owner, owner_undetermined, impersonation_flag, profile_id, uvn_credits: [{ cr_id, role, track_title, artist, isrc }], count, notes: [] }`. Track/artist strings are injection-stripped and length-capped. When the feature flag is off: `{ disabled: true, note }` (fall back to a normal ticket). `impersonation_flag` is only meaningful when `requesterEmail` was passed -- when it wasn't, the verdict carries a "no impersonation cross-check performed" note so `false` is never read as "identity cross-check passed".
+- **conv-id**: derived in-plugin from `ctx.sessionId` (NOT an agent parameter), so the anti-spoof anchor can't be pointed at another conversation. A profile a customer names is ALWAYS re-verified for ownership before any pending credit is surfaced.
+- **Auth**: Muso admin JWT (`MusoAdminClient`, GET-only) + `MUSOAI_INTERCOM_TOKEN` (env). Token absent / conv-id underivable / no contact email / not-owner / typed-email mismatch (`impersonation_flag`) / shared profile (multiple claimed workspaces -- the sole-claimed-workspace ownership rule, same as `dedupe_check`) -> **fails closed** (`owner_undetermined`, empty list).
+- **Rate limit**: 10 per session (60-minute window).
+- **Used by**: the `customer-credit-verification` skill. The tool produces evidence ONLY -- Caroline asks the customer for proof and, when warranted, files a `credit-verify` recommend-approve ticket via `create_ticket`; a human executes the gated approval. Caroline never approves and never rejects (she asks for more proof instead).
+
+### 9. memory_search
 
 - **Wraps**: openclaw's bundled memory-core hybrid retrieval (vector + BM25) against the per-agent qmd index built from `workspaces/support/reference/*.md`.
 - **Returns**: Ranked chunks with file path, line range, and similarity score.
@@ -94,7 +103,7 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 - **PII filter**: not needed – the indexed corpus is read-only doctrine, no customer data.
 - **When to use**: "is there an active incident affecting this topic?", "what's the doctrine for X?", and anywhere the answer isn't already in loaded context (SOUL.md / TOOLS.md / common-issues row #N).
 
-### 9. memory_get
+### 10. memory_get
 
 - **Wraps**: openclaw's bundled memory-core point-lookup by note id.
 - **Returns**: The full text of a single indexed chunk by id (typically followed up from a `memory_search` hit).

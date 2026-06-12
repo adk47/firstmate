@@ -10,6 +10,7 @@ import { createSubscriptionStatusTool } from "./tools/subscription-status.js";
 import { createProfileStatusTool } from "./tools/profile-status.js";
 import { createRemoveCreditsTool, DEFAULT_REMOVE_CREDITS_SCRIPT } from "./tools/remove-credits.js";
 import { createDedupeCheckTool } from "./tools/dedupe-check.js";
+import { createCreditVerificationCheckTool } from "./tools/credit-verification-check.js";
 import { createIntercomReader } from "./intercom-client.js";
 export default definePluginEntry({
   id: "support-tools",
@@ -136,7 +137,7 @@ export default definePluginEntry({
     // CLOSED (owner_undetermined), it does not break the other tools.
     const intercomToken = pluginConfig.intercomToken ?? process.env.MUSOAI_INTERCOM_TOKEN ?? "";
     if (!intercomToken) {
-      console.warn("[support-tools] MUSOAI_INTERCOM_TOKEN not set; dedupe_check will fail closed (no ownership verification).");
+      console.warn("[support-tools] MUSOAI_INTERCOM_TOKEN not set; dedupe_check and credit_verification_check will fail closed (no ownership verification).");
     }
     const intercomReader = createIntercomReader(http);
     const dedupeCheckFactory = (ctx: any) => {
@@ -149,5 +150,38 @@ export default definePluginEntry({
       });
     };
     api.registerTool(dedupeCheckFactory, { name: "dedupe_check" });
+
+    // credit_verification_check — read-only lookup of a customer's
+    // user_verification_needed credits, anchored to the verified Intercom
+    // contact email (same anti-spoof as dedupe_check). Reads only; the
+    // recommend-approve handoff is a create_ticket call, and the gated
+    // PUT status=approved stays human/ops via muso-admin-api.sh. Reuses the
+    // same intercomToken (fails closed when absent).
+    // Phase-1 dark-ship flag (default OFF). Enable per-account only after live
+    // observation, mirroring the personalization rollout (PR #416). Read from
+    // the RAW entry/legacy config (not the string-filtered pluginConfig) so the
+    // natural JSON boolean `true` works as well as "true"/"1"/1; only
+    // boolean/string/number values count — any other shape (e.g. an unresolved
+    // secret-ref object) falls through to the CREDIT_VERIFICATION_ENABLED env
+    // instead of shadowing it. Anything unrecognized stays OFF.
+    // Entry-before-legacy mirrors the `{..._legacy, ..._entry}` spread
+    // precedence used for pluginConfig above.
+    const creditVerificationRaw =
+      [_entry.creditVerificationEnabled, _legacy.creditVerificationEnabled].find(
+        (v) => typeof v === "boolean" || typeof v === "string" || typeof v === "number",
+      ) ?? process.env.CREDIT_VERIFICATION_ENABLED;
+    const creditVerificationEnabled =
+      creditVerificationRaw === true || creditVerificationRaw === 1 || creditVerificationRaw === "true" || creditVerificationRaw === "1";
+    const creditVerificationCheckFactory = (ctx: any) => {
+      return createCreditVerificationCheckTool({
+        adminClient: musoAdminClient,
+        intercomReader,
+        rateLimiter,
+        sessionId: ctx.sessionId ?? "unknown",
+        intercomToken,
+        enabled: creditVerificationEnabled,
+      });
+    };
+    api.registerTool(creditVerificationCheckFactory, { name: "credit_verification_check" });
   },
 });

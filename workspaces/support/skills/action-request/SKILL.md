@@ -75,6 +75,7 @@ Only a genuinely different request (different `actionType`) is guaranteed a new 
 |-------------|------|-----|---------|
 | `credit-claim` | 1 | 2 business days | "I produced this track, add my credit" |
 | `credit-correction` | 1 | 2 business days | "My role is listed wrong" |
+| `credit-verify` | 1 | 2 business days | A pending ("user verification needed") credit case from the `customer-credit-verification` skill — recommend-approve or needs-human handoff with the proof evidence. File via that skill's Step 4, not ad hoc. |
 | `profile-claim` | 1 | 2 business days | "I want to claim this profile" |
 | `support-general` | 1 | 2 business days | General questions needing ops follow-up. **Also used for human-handoff bail-outs** – when the customer asks for a human, gets frustrated, or the conversation loops, file with `details.escalation_reason` (see "Human Handoff" section below). |
 | `profile-merge` | 2 | 5 business days | "I have two profiles, combine them" (require `main_profile_url` and `duplicate_profile_urls[]` in `details` – no self-service merge UI exists, so URLs are the only way ops can act) |

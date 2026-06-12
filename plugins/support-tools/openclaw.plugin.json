@@ -10,11 +10,17 @@
       "subscription_status",
       "create_ticket",
       "remove_credits",
-      "dedupe_check"
+      "dedupe_check",
+      "credit_verification_check"
     ]
   },
   "configSchema": {
     "type": "object",
-    "additionalProperties": true
+    "additionalProperties": true,
+    "properties": {
+      "creditVerificationEnabled": {
+        "description": "Phase-1 dark-ship flag for credit_verification_check. Accepts true / \"true\" / \"1\" / 1; anything else (including absent) keeps the tool disabled. Deliberately untyped: the runtime parse in index.ts is the fail-closed layer, so an unexpected value shape degrades to flag-off instead of failing config validation and breaking plugin load."
+      }
+    }
   }
 }

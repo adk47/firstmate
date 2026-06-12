@@ -11,6 +11,12 @@ const ALLOWED_PATHS: RegExp[] = [
   /^\/api\/v3\/admin\/profile\/search(\?|$)/,
   /^\/api\/v3\/admin\/profile\/[0-9a-fA-F-]+(\?|$)/,
   /^\/api\/v3\/admin\/profile\/[0-9a-fA-F-]+\/credits(\?|$)/,
+  // Read of a profile's credit-requests (used by credit_verification_check to
+  // list user_verification_needed credits). The client is structurally GET-only
+  // (only get() exists), so this grants READ and cannot reach the PUT/PATCH
+  // approve path that shares the same path prefix. Scoped to the list endpoint
+  // (`?`/end), NOT a broad `credit-requests*` that would also match `/<id>`.
+  /^\/api\/v3\/admin\/credit-requests(\?|$)/,
 ];
 
 const TOKEN_TTL_MS = 22 * 60 * 60 * 1000; // refresh 1h before the 23h bash cache expires

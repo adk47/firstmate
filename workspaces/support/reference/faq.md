@@ -78,7 +78,11 @@ Credits come from multiple industry sources. A missing credit usually means one 
 Try adding it manually via "Add Missing Credits." If you believe it should be automatically sourced and it's not appearing, create a support ticket with category "Missing Credit – Source Discrepancy."
 
 ### How long does credit verification take?
-Credit claims are typically reviewed within 48 hours by our operations team.
+Most credit claims are reviewed within 48 hours by our operations team. Claims
+flagged for additional verification ("user verification needed") wait on proof from
+the customer and have **no fixed timeline** — never promise one. For those, follow
+the `customer-credit-verification` flow: ask for proof (see common-issues row #5 for
+what to ask for) and file for the team when warranted.
 
 ### What credit roles are supported?
 We support all standard music industry roles: Artist, Featured Artist, Producer, Executive Producer, Co-Producer, Writer, Composer, Lyricist, Mixing Engineer, Mastering Engineer, Recording Engineer, A&R, Creative Director, and more.

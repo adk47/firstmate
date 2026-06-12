@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import pluginEntry from "../src/index.js";
 
 describe("support-tools plugin entry — tool registration", () => {
-  it("registers exactly 7 tools", () => {
+  it("registers exactly 8 tools", () => {
     const registered: string[] = [];
     const api = {
       pluginConfig: {
@@ -18,6 +18,7 @@ describe("support-tools plugin entry — tool registration", () => {
     (pluginEntry as any).register(api);
     expect(registered.sort()).toEqual([
       "create_ticket",
+      "credit_verification_check",
       "credits_search",
       "dedupe_check",
       "profile_lookup",
@@ -148,6 +149,69 @@ describe("support-tools config resolution", () => {
 
     expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("Missing config keys"));
     warnSpy.mockRestore();
+  });
+});
+
+// The dark-ship flag must be wired through register() — the operator writes the
+// natural JSON boolean `true` in openclaw-edge.json, which the string-only
+// pluginConfig filter would otherwise silently drop (flag stays OFF, rollout
+// burns with no warning).
+describe("support-tools creditVerificationEnabled flag wiring", () => {
+  const savedFlagEnv = process.env.CREDIT_VERIFICATION_ENABLED;
+  beforeEach(() => {
+    delete process.env.CREDIT_VERIFICATION_ENABLED;
+  });
+  afterEach(() => {
+    if (savedFlagEnv === undefined) delete process.env.CREDIT_VERIFICATION_ENABLED;
+    else process.env.CREDIT_VERIFICATION_ENABLED = savedFlagEnv;
+  });
+
+  function registerAndGetCvTool(pluginConfig: Record<string, unknown>) {
+    let factory: ((ctx: any) => any) | undefined;
+    const api = {
+      pluginConfig: {
+        adminEmail: "admin@muso.ai", adminPassword: "pw", clickupApiKey: "k", clickupListId: "list",
+        clickupProfileIdFieldId: "pf", clickupUserEmailFieldId: "ef",
+        ...pluginConfig,
+      },
+      registerTool: (f: any, opts: { name: string }) => {
+        if (opts.name === "credit_verification_check") factory = f;
+      },
+    };
+    (pluginEntry as any).register(api);
+    expect(factory).toBeDefined();
+    return factory!({ sessionId: "unknown" });
+  }
+
+  const execute = async (tool: any) => JSON.parse((await tool.execute("id", {})).content[0].text);
+
+  it("stays disabled by default (no flag anywhere)", async () => {
+    const out = await execute(registerAndGetCvTool({}));
+    expect(out.disabled).toBe(true);
+  });
+
+  it("enables on the natural JSON boolean true in entry config", async () => {
+    const out = await execute(registerAndGetCvTool({ creditVerificationEnabled: true }));
+    // Enabled tool proceeds past the flag gate and fails closed on the
+    // underivable conv-id — proof the flag took effect.
+    expect(out.disabled).toBeUndefined();
+    expect(out.owner_undetermined).toBe(true);
+  });
+
+  it('enables on the string "true" and the number 1; stays disabled on other values', async () => {
+    expect((await execute(registerAndGetCvTool({ creditVerificationEnabled: "true" }))).disabled).toBeUndefined();
+    expect((await execute(registerAndGetCvTool({ creditVerificationEnabled: 1 }))).disabled).toBeUndefined();
+    expect((await execute(registerAndGetCvTool({ creditVerificationEnabled: "yes" }))).disabled).toBe(true);
+    expect((await execute(registerAndGetCvTool({ creditVerificationEnabled: false }))).disabled).toBe(true);
+  });
+
+  it("a non-primitive config value (e.g. an unresolved secret-ref object) does NOT shadow the env fallback", async () => {
+    process.env.CREDIT_VERIFICATION_ENABLED = "true";
+    const out = await execute(
+      registerAndGetCvTool({ creditVerificationEnabled: { source: "env", provider: "hydra-env", id: "CREDIT_VERIFICATION_ENABLED" } }),
+    );
+    expect(out.disabled).toBeUndefined();
+    expect(out.owner_undetermined).toBe(true);
   });
 });
 
