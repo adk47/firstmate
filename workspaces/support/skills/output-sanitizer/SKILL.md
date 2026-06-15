@@ -87,7 +87,7 @@ Scan for and redact patterns that could be PII leakage:
 
 | Pattern | Regex | Action |
 |---------|-------|--------|
-| Email addresses | `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}` | Redact UNLESS it is `support@muso.ai` or `jan@muso.ai` (case-insensitive). See the Intercom plugin's `sanitize-email.ts` – that is the runtime enforcement; this row is the paired instruction-layer rule. |
+| Email addresses | `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}` | Redact UNLESS it is `support@muso.ai` (case-insensitive). See the Intercom plugin's `sanitize-email.ts` – that is the runtime enforcement; this row is the paired instruction-layer rule. (`jan@muso.ai` was removed from the runtime allowlist 2026-05-11, #270.) |
 | Phone numbers | `\+?[\d\s\-().]{10,}` | Redact |
 | Credit card numbers | `\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}` | Redact |
 | API keys | `sk-[a-zA-Z0-9]{20,}` | Redact + CRITICAL alert |

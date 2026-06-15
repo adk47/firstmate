@@ -6,9 +6,9 @@ Daily pulse: dimensions A (voice + leak), B (tools), D (sentiment), E (reasoning
 
 ## Severity ladder
 
-- **P0**: any `[intercom:tool-leak]` / `[intercom:email-leak]` audit line in window, OR any regression pattern from Dimension B (analytics→email/support loop), OR a SHIPPED reasoning leak the guard missed (Dimension E, source 2: a reply that reached a customer).
+- **P0**: any `[intercom:tool-leak]` audit line in window, OR an `[intercom:email-leak]` line whose `leak_class` is `internal` (a non-support `@muso.ai` employee address Caroline tried to hand out) or `unknown` (an email-leak line whose address could not be parsed — fail closed), OR any regression pattern from Dimension B (analytics→email/support loop), OR a SHIPPED reasoning leak the guard missed (Dimension E, source 2: a reply that reached a customer).
 - **P1**: wrong escalation, wrong actionType/tier, missed required `profile_status` call on an analytics/streams conversation, refund 3-gate skipped, OR an ESCALATED reasoning-leak conv with no human reply yet (Dimension E: a customer is waiting on a human).
-- **P2**: voice blacklist hit ("Great question", em-dash, "investigate", apologies-for-analytics), sentiment issue. Tone lint is not P0.
+- **P2**: voice blacklist hit ("Great question", em-dash, "investigate", apologies-for-analytics), sentiment issue, OR an `[intercom:email-leak]` line with `leak_class == "external"` (a customer/third-party address the deterministic sanitizer already redacted to `support@muso.ai` BEFORE the reply shipped — the customer never saw it; an echo-hygiene lint, not a leak). Tone lint is not P0.
 
 ## Dimension A: Voice + leak audit
 
@@ -27,7 +27,14 @@ exist so this can't happen):
   "I understand your frustration", "investigate", "sorry the analytics are delayed",
   "sorry for the latency"). Read it only to cite an example `conv` id; never aggregate
   it by hand.
-- Audit-line count from `audit.jsonl`. Any non-zero is the **top-line of the Slack post**.
+- Audit-line count from `audit.jsonl`. A `tool-leak`, or an `email-leak` whose
+  `leak_class` is `internal` or `unknown` (fail closed — an unparseable email-leak
+  line stays P0), is **P0** and the **top-line of the Slack post**. An
+  `email-leak` whose `leak_class == "external"` is a **P2** echo-hygiene lint (🟡,
+  no reviewer ping): the deterministic sanitizer already redacted the address to
+  `support@muso.ai` before the reply shipped, so it is the email analogue of a
+  reasoning-leak `action=stripped` (caught, not shipped) — never a customer-visible
+  leak. Read `leak_class` from `audit.jsonl`; never the raw address (it is not emitted).
 
 Score: 5 if zero leaks AND zero blacklist hits; -1 per blacklist hit (`blacklist-total`
 in `voice-summary.txt`); floor 0.
@@ -151,8 +158,8 @@ What the grader still owes the digest:
   ~12 words or fewer, rendered on a single bullet line. NO conversation ids
   in prose — evidence belongs in `conversation_ids` (the renderer strips
   stray ids from text mechanically, so an id written in prose simply
-  disappears). Write P0/P1 `text` as an actionable clause ("email leak
-  shipped to customer", not a narration) — it renders as a standalone action
+  disappears). Write P0/P1 `text` as an actionable clause ("internal email
+  echoed into reply", not a narration) — it renders as a standalone action
   bullet at the very top of the post.
 
 - `scores.tools` is `"skipped"` exactly when preflight said the join-key prereq is

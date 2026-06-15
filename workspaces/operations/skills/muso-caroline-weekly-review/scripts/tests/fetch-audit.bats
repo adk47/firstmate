@@ -27,6 +27,77 @@ EOF
   grep -q '"marker":"email-leak"' "$WORKDIR/audit.jsonl"
 }
 
+@test "classifies a customer/third-party email-leak as leak_class=external (downgraded, not P0)" {
+  # Real outbound.ts format: redacted=[...] carries the caught address. The
+  # sanitizer already replaced it with support@muso.ai before the reply shipped,
+  # so this is an echo-hygiene lint, graded P2 — see grading-rubric.md.
+  cat > "$TEST_TMPDIR/journal-fixture.txt" <<'EOF'
+Jun 13 07:42:06 host openclaw-gateway-edge[1]: [intercom:email-leak] conv=215474690525905 count=1 redacted=["fan@gmail.com"]
+EOF
+  run "$SCRIPTS_DIR/fetch-audit.sh"
+  [ "$status" -eq 0 ]
+  rec=$(jq -c 'select(.marker=="email-leak")' "$WORKDIR/audit.jsonl")
+  [ "$(printf '%s' "$rec" | jq -r '.leak_class')" = "external" ]
+  # the raw address is read transiently for classification only — never emitted
+  ! grep -q "fan@gmail.com" "$WORKDIR/audit.jsonl"
+  # conv id survives the scrub so the grader can still cite it as evidence
+  grep -q "215474690525905" "$WORKDIR/audit.jsonl"
+}
+
+@test "classifies a non-support @muso.ai employee email-leak as leak_class=internal (stays P0)" {
+  cat > "$TEST_TMPDIR/journal-fixture.txt" <<'EOF'
+Jun 13 08:00:00 host openclaw-gateway-edge[1]: [intercom:email-leak] conv=215474690525906 count=1 redacted=["nick@muso.ai"]
+EOF
+  run "$SCRIPTS_DIR/fetch-audit.sh"
+  [ "$status" -eq 0 ]
+  rec=$(jq -c 'select(.marker=="email-leak")' "$WORKDIR/audit.jsonl")
+  [ "$(printf '%s' "$rec" | jq -r '.leak_class')" = "internal" ]
+  ! grep -q "nick@muso.ai" "$WORKDIR/audit.jsonl"
+}
+
+@test "internal classification wins when an email-leak mixes an external and an @muso.ai address" {
+  cat > "$TEST_TMPDIR/journal-fixture.txt" <<'EOF'
+Jun 13 08:05:00 host openclaw-gateway-edge[1]: [intercom:email-leak] conv=215474690525907 count=2 redacted=["fan@gmail.com","aaron@muso.ai"]
+EOF
+  run "$SCRIPTS_DIR/fetch-audit.sh"
+  [ "$status" -eq 0 ]
+  rec=$(jq -c 'select(.marker=="email-leak")' "$WORKDIR/audit.jsonl")
+  [ "$(printf '%s' "$rec" | jq -r '.leak_class')" = "internal" ]
+}
+
+@test "tool-leak records carry no leak_class (classification is email-only)" {
+  cat > "$TEST_TMPDIR/journal-fixture.txt" <<'EOF'
+May 30 10:00:00 host openclaw[1]: [intercom:tool-leak] conv=215474690525908 count=1 redacted=["profile_status"]
+EOF
+  run "$SCRIPTS_DIR/fetch-audit.sh"
+  [ "$status" -eq 0 ]
+  rec=$(jq -c 'select(.marker=="tool-leak")' "$WORKDIR/audit.jsonl")
+  [ "$(printf '%s' "$rec" | jq -r 'has("leak_class")')" = "false" ]
+}
+
+@test "fails closed: an email-leak line with no parseable redacted=[...] is leak_class=unknown (P0)" {
+  # Log-format drift / malformed line: the marker fired but we cannot read the
+  # address. A leak-severity classifier must NOT silently downgrade this to P2.
+  cat > "$TEST_TMPDIR/journal-fixture.txt" <<'EOF'
+Jun 13 09:00:00 host openclaw-gateway-edge[1]: [intercom:email-leak] conv=215474690525909 count=1
+EOF
+  run "$SCRIPTS_DIR/fetch-audit.sh"
+  [ "$status" -eq 0 ]
+  rec=$(jq -c 'select(.marker=="email-leak")' "$WORKDIR/audit.jsonl")
+  [ "$(printf '%s' "$rec" | jq -r '.leak_class')" = "unknown" ]
+}
+
+@test "fails closed: an email-leak whose redacted=[...] holds only a non-address marker is leak_class=unknown" {
+  # e.g. the sanitizer's truncation/non-string markers — no email to classify.
+  cat > "$TEST_TMPDIR/journal-fixture.txt" <<'EOF'
+Jun 13 09:05:00 host openclaw-gateway-edge[1]: [intercom:email-leak] conv=215474690525910 count=1 redacted=["<truncated: 20000 -> 16000 bytes>"]
+EOF
+  run "$SCRIPTS_DIR/fetch-audit.sh"
+  [ "$status" -eq 0 ]
+  rec=$(jq -c 'select(.marker=="email-leak")' "$WORKDIR/audit.jsonl")
+  [ "$(printf '%s' "$rec" | jq -r '.leak_class')" = "unknown" ]
+}
+
 @test "allowlists tool-call args to safe categorical fields (drops all PII, not just emails)" {
   export CV_TOOL_CTX_CONVERSATION_ID="available"
   cat > "$TEST_TMPDIR/journal-fixture.txt" <<'EOF'

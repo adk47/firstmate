@@ -21,7 +21,8 @@ journal_tmp="$WORKDIR/journal.tmp"
 #
 # The window MUST match fetch-conversations.sh (same CAROLINE_WINDOW_HOURS knob,
 # same 30h default): leak markers carry no conversation_id and no timestamp (see
-# the {kind,marker,snippet} emit below), so a leak from N days ago has no field to
+# the {kind,marker,snippet,leak_class} emit below — leak_class is internal/external,
+# not a dedup key), so a leak from N days ago has no field to
 # dedup on. A fixed 7d journal window would therefore re-surface the same leak as a
 # fresh P0 on every daily run for up to a week. Windowing the journal in lockstep
 # with the conversation fetch is the only available fix.
@@ -62,13 +63,53 @@ grep_tolerant() {
 # raw line: an intercom:email-leak line contains the leaked address, and the LLM
 # reads audit.jsonl directly (the pre-LLM redaction only covers
 # conversations.jsonl). The grader needs the count + type, not the leaked value.
+#
+# For email-leak lines we ALSO emit leak_class=internal|external, derived from
+# the RAW redacted=[...] addresses before the scrub (the scrubbed snippet has
+# already had the address rewritten, so it must be read here). Only the class
+# label is emitted, never the address — the no-PII-to-grader contract holds.
+# WHY: the deterministic outbound sanitizer (plugins/intercom/sanitize-email.ts)
+# ALWAYS replaces a non-allowlisted address with support@muso.ai BEFORE the reply
+# ships, so an email-leak line is always a CAUGHT redaction, never a leak the
+# customer saw. A muso.ai-host address (support@muso.ai is allowlisted, so it
+# never appears in redacted=[...]) is a non-support EMPLOYEE address Caroline
+# tried to hand out — the dangerous case, graded P0. Any other domain is a
+# customer/third-party address that was redacted before send — an echo-hygiene
+# lint, graded P2.
+# FAIL CLOSED: an email-leak line we cannot parse (log-format drift, a malformed
+# line, or a non-address marker like <truncated:...>/<non-string body:...>)
+# becomes leak_class=unknown, also graded P0 — a downgrade to P2 must never be
+# the silent default for a leak-severity classifier. See
+# references/grading-rubric.md (severity ladder + Dim A) and SKILL.md Phase 2.
 SCRUB="$(dirname "$0")/redact-output.sh"
+# Mirror of sanitize-email.ts EMAIL_PATTERN; we only inspect the host, folded.
+EMAIL_RE='[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
 grep_tolerant -E 'intercom:tool-leak|intercom:email-leak' "$journal_tmp" \
   | while IFS= read -r line; do
       snippet=$(printf '%s' "$line" | "$SCRUB")
-      if printf '%s' "$line" | grep -qF 'email-leak'; then marker="email-leak"; else marker="tool-leak"; fi
-      jq -nc --arg snip "$snippet" --arg marker "$marker" \
-        '{kind: "leak", marker: $marker, snippet: $snip}'
+      if printf '%s' "$line" | grep -qF 'email-leak'; then
+        marker="email-leak"
+        # Parse the redacted=[...] addresses and classify, FAIL CLOSED (see the
+        # header note): no parseable address -> unknown (P0); any muso.ai host ->
+        # internal (P0); all addresses non-muso -> external (P2). `(@|\.)muso\.ai$`
+        # matches @muso.ai and any *.muso.ai subdomain. The `|| true` keeps
+        # set -euo pipefail from aborting on a grep no-match.
+        emails=$(printf '%s' "$line" | grep -oE 'redacted=\[[^]]*\]' | head -1 \
+                   | grep -oE "$EMAIL_RE" || true)
+        if [ -z "$emails" ]; then
+          leak_class="unknown"
+        elif printf '%s\n' "$emails" | grep -qiE '(@|\.)muso\.ai$'; then
+          leak_class="internal"
+        else
+          leak_class="external"
+        fi
+        jq -nc --arg snip "$snippet" --arg marker "$marker" --arg class "$leak_class" \
+          '{kind: "leak", marker: $marker, leak_class: $class, snippet: $snip}'
+      else
+        marker="tool-leak"
+        jq -nc --arg snip "$snippet" --arg marker "$marker" \
+          '{kind: "leak", marker: $marker, snippet: $snip}'
+      fi
     done >> "$OUTPUT"
 
 # 1b. Reasoning-leak guard audit lines (source 1, PR #421). Two shapes from
