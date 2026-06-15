@@ -1167,20 +1167,36 @@ is_tier2_endpoint() {
     local method="$1" path="$2"
     local method_uc
     method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    # Strip any query string before matching (mirror is_bulk_destructive_op).
+    path="${path%%\?*}"
     [[ -f "$TIER2_ENDPOINTS_PATH" ]] || return 1
+    # A ":param" segment matches EXACTLY ONE path segment, so
+    # "DELETE /admin/user/:id" gates "/admin/user/123" but NOT the sub-resource
+    # "/admin/user/123/image" — over-matching would wrongly gate the
+    # credit-removal endpoint and break remove_credits. Param-less entries stay
+    # EXACT string matches.
+    local restore_extglob=0
+    shopt -q extglob || { shopt -s extglob; restore_extglob=1; }
+    local rc=1
     while IFS= read -r line; do
         line="${line%%#*}"
         line="${line## }"
         line="${line%% }"
         [[ -z "$line" ]] && continue
-        local m p
+        local m p pattern
         m="$(printf %s "$line" | awk '{print $1}' | tr '[:lower:]' '[:upper:]')"
         p="$(printf %s "$line" | awk '{print $2}')"
-        if [[ "$m" == "$method_uc" && "$path" == "$p" ]]; then
-            return 0
+        [[ "$m" == "$method_uc" ]] || continue
+        # ":word" -> one non-slash segment; literal entries are left unchanged.
+        pattern="$(printf %s "$p" | sed -E 's#:[A-Za-z_][A-Za-z0-9_]*#+([!/])#g')"
+        # shellcheck disable=SC2053  # RHS unquoted so the extglob pattern is active.
+        if [[ "$path" == $pattern ]]; then
+            rc=0
+            break
         fi
     done < "$TIER2_ENDPOINTS_PATH"
-    return 1
+    (( restore_extglob )) && shopt -u extglob
+    return "$rc"
 }
 
 is_tier2_approver() {
@@ -1226,6 +1242,31 @@ is_tier2_godmode_requester() {
     return 1
 }
 
+# The highest-blast-radius admin writes: irreversible account/track deletion
+# and paid-subscription create. God-mode admins (aaron/jan/nick) retain access
+# to these, but — unlike every other tier-2 write — they may NOT self-approve
+# off a bare auto-stamped --requester: enforce_tier2_approval_gate requires an
+# explicit --approval-msg-id for these so the ops agent can't silently execute
+# one (policy 2026-06-15). Patterns mirror the tier2-endpoints.txt entries; a
+# ":param" segment is matched as exactly one path segment (extglob +([!/])).
+is_godmode_approval_required_endpoint() {
+    local method="$1" path="$2"
+    path="${path%%\?*}"
+    local method_uc; method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    local restore_extglob=0
+    shopt -q extglob || { shopt -s extglob; restore_extglob=1; }
+    local rc=1 entry em ep
+    for entry in "DELETE /admin/user/+([!/])" "DELETE /admin/track/+([!/])" "POST /admin/subscription"; do
+        em="${entry%% *}"; ep="${entry#* }"
+        # shellcheck disable=SC2053  # RHS unquoted so the extglob pattern is active.
+        if [[ "$method_uc" == "$em" && "$path" == $ep ]]; then
+            rc=0; break
+        fi
+    done
+    (( restore_extglob )) && shopt -u extglob
+    return "$rc"
+}
+
 enforce_tier2_approval_gate() {
     local method="$1" path="$2"
 
@@ -1243,24 +1284,38 @@ enforce_tier2_approval_gate() {
         return 0
     fi
 
-    # God-mode bypass: requester self-authorizes (no --confirmed-by /
-    # --approval-msg-id needed). Audit row still records who+when with
-    # bypass=god_mode_self_approve. Match against email or raw flag value
-    # so both `--requester jan@muso.ai` and `--requester U038BM16T7W`
-    # (resolved to email upstream) work.
+    # God-mode bypass: a requester on the god-mode allowlist self-authorizes
+    # (no --confirmed-by needed). Audit row still records who+when with
+    # bypass=god_mode_self_approve. Match against email or raw flag value so
+    # both `--requester jan@muso.ai` and `--requester U038BM16T7W` (resolved to
+    # email upstream) work.
+    #
+    # EXCEPTION (policy 2026-06-15): for the highest-blast-radius endpoints —
+    # account/track deletion and paid-subscription create — god-mode admins
+    # KEEP access but may NOT self-approve off a bare auto-stamped --requester:
+    # an explicit --approval-msg-id (a real in-thread human OK) is required, so
+    # the ops agent can never silently execute one just because a god-mode admin
+    # happens to be in-thread. See is_godmode_approval_required_endpoint.
     if is_tier2_godmode_requester "${REQUESTER_EMAIL:-}"; then
+        if is_godmode_approval_required_endpoint "$method" "$path" && [[ -z "$APPROVAL_MSG_ID" ]]; then
+            cat >&2 <<EOF
+MUSO_TIER2_GODMODE_APPROVAL_MSG_REQUIRED: ${method} ${path} is a high-blast-radius write (account/track deletion or subscription create). God-mode self-approve still applies for '${REQUESTER_EMAIL:-}', but you MUST pass --approval-msg-id <slack_msg_ts> proving an explicit in-thread decision — the ops agent must not execute one of these off an auto-stamped --requester alone.
+EOF
+            return 1
+        fi
         if ! mkdir -p "$(dirname "$TIER2_AUDIT_PATH")" 2>/dev/null; then
             echo "MUSO_TIER2_AUDIT_UNWRITABLE: cannot create $(dirname "$TIER2_AUDIT_PATH") — refusing tier-2 write to preserve audit trail." >&2
             return 1
         fi
-        local gm_ts gm_rc=0
+        local gm_ts gm_rc=0 gm_msgid="${APPROVAL_MSG_ID:-god-mode}"
         gm_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         jq -n -c \
             --arg ts "$gm_ts" \
             --arg method "$method" \
             --arg path "$path" \
             --arg requester "${REQUESTER_EMAIL:-}" \
-            '{ts:$ts, method:$method, path:$path, requester:$requester, confirmed_by:$requester, approval_msg_id:"god-mode", bypass:"god_mode_self_approve"}' \
+            --arg approval_msg_id "$gm_msgid" \
+            '{ts:$ts, method:$method, path:$path, requester:$requester, confirmed_by:$requester, approval_msg_id:$approval_msg_id, bypass:"god_mode_self_approve"}' \
             >> "$TIER2_AUDIT_PATH" || gm_rc=$?
         if (( gm_rc != 0 )); then
             echo "MUSO_TIER2_AUDIT_UNWRITABLE: append to $TIER2_AUDIT_PATH failed (rc=$gm_rc) — refusing tier-2 write to preserve audit trail." >&2

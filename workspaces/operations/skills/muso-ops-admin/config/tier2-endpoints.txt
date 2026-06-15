@@ -1,6 +1,8 @@
 # Tier-2 endpoint allowlist for muso-admin-api.sh.
-# One "METHOD /path" per line. Method is case-insensitive. Path is
-# matched as an EXACT string — no globs, no parameter substitution.
+# One "METHOD /path" per line. Method is case-insensitive.
+# Path matching: a param-less path matches as an EXACT string. A ":param"
+# segment (e.g. /admin/user/:id) matches EXACTLY ONE path segment, so it gates
+# "/admin/user/123" but NOT a sub-resource like "/admin/user/123/image".
 # Lines starting with '#' and blank lines are ignored.
 #
 # Every endpoint listed here requires --confirmed-by <handle> matching
@@ -14,3 +16,22 @@ POST /admin/profiles/merge
 POST /admin/profiles/unmerge
 POST /admin/tracks/merge
 POST /admin/tracks/unmerge
+
+# High-blast-radius account/catalog endpoints (irreversible account/track
+# deletion, paid-subscription create), previously enforced by DOCTRINE ONLY —
+# they passed muso-admin-api.sh with just --requester. Now mechanically tier-2
+# gated: non-god-mode callers require --confirmed-by <approver> + --approval-msg-id.
+# God-mode admins (this workspace copy) RETAIN access but, unlike other tier-2
+# writes, must pass an explicit --approval-msg-id for THESE three (enforced by
+# is_godmode_approval_required_endpoint) so the ops agent can't SILENTLY execute
+# one off an auto-stamped --requester. The "AARON ONLY" marker in SKILL.md is the
+# stricter ideal; the live policy is "trusted-admin god-mode + explicit approval".
+DELETE /admin/user/:id
+DELETE /admin/track/:trackId
+POST /admin/subscription
+
+# Deliberately NOT gated here: POST /admin/user/:id/impersonate is marked
+# "⚠️ ESCALATE" (not "AARON ONLY") in SKILL.md and is used routinely in support
+# debugging; a per-call second-human block would cripple that flow. If
+# impersonation needs a control it wants an audit/notify gate, not a tier-2
+# block — track that separately.

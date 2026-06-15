@@ -511,22 +511,38 @@ is_tier2_endpoint() {
     local method="$1" path="$2"
     local method_uc
     method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    # Strip any query string before matching (mirror is_bulk_destructive_op).
+    path="${path%%\?*}"
     [[ -f "$TIER2_ENDPOINTS_PATH" ]] || return 1
-    # Each line: "METHOD /path/pattern" with leading '#' for comments.
-    # Path comparison is exact prefix (no globs) — keep the allowlist explicit.
+    # Each line: "METHOD /path" with leading '#' for comments. A ":param"
+    # segment in an entry matches EXACTLY ONE path segment, so
+    # "DELETE /admin/user/:id" gates "/admin/user/123" but NOT the sub-resource
+    # "/admin/user/123/image" — over-matching there would wrongly gate e.g. the
+    # credit-removal endpoint /admin/track/:id/profile/:pid/credits and break
+    # remove_credits. Param-less entries (the merge endpoints) stay EXACT
+    # string matches.
+    local restore_extglob=0
+    shopt -q extglob || { shopt -s extglob; restore_extglob=1; }
+    local rc=1
     while IFS= read -r line; do
         line="${line%%#*}"  # strip comment
         line="${line## }"
         line="${line%% }"
         [[ -z "$line" ]] && continue
-        local m p
+        local m p pattern
         m="$(printf %s "$line" | awk '{print $1}' | tr '[:lower:]' '[:upper:]')"
         p="$(printf %s "$line" | awk '{print $2}')"
-        if [[ "$m" == "$method_uc" && "$path" == "$p" ]]; then
-            return 0
+        [[ "$m" == "$method_uc" ]] || continue
+        # ":word" -> one non-slash segment; literal entries are left unchanged.
+        pattern="$(printf %s "$p" | sed -E 's#:[A-Za-z_][A-Za-z0-9_]*#+([!/])#g')"
+        # shellcheck disable=SC2053  # RHS unquoted so the extglob pattern is active.
+        if [[ "$path" == $pattern ]]; then
+            rc=0
+            break
         fi
     done < "$TIER2_ENDPOINTS_PATH"
-    return 1
+    (( restore_extglob )) && shopt -u extglob
+    return "$rc"
 }
 
 is_tier2_approver() {
