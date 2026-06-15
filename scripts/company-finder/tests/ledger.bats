@@ -266,3 +266,41 @@ EOF
   run bash "$SUT" suggest <<<'{"not":"an array"}'
   [ "$status" -eq 1 ]
 }
+
+# ── large snapshot / argv overflow (the jq E2BIG class) ───────────────────────
+#
+# Rule 10 — WHY: every suggest/record-rejects prechecks the FULL Seen Ledger +
+# Company Intelligence + Contacts Intelligence snapshot. Those three are handed
+# to jq SEPARATELY (one arg per table); a single argv string is capped at
+# MAX_ARG_STRLEN (128KB). When one table (Contacts Intelligence, in prod) grew
+# past that cap the precheck died "jq: Argument list too long" (exit 126) and
+# EVERY ledger write failed closed — the outage that took the daily
+# company-finder cron down on 2026-06-13. Snapshots must go off argv
+# (slurpfile/stdin), never --argjson.
+#
+# This needs a higher row count than the dedupe twin: dedupe overflows on a
+# single COMBINED arg, ledger must push ONE table past 128KB on its own. The
+# stub serves NOCODB_STUB_TOTAL_ROWS synthetic rows per table; at ~50B/mapped
+# row, 4000 rows ≈ 200KB/arg — comfortably over the cap, and would NOT have
+# tripped at dedupe's 2000 (~100KB).
+
+@test "suggest survives a snapshot too large for argv (was: jq Argument list too long)" {
+  export NOCODB_STUB_TOTAL_ROWS=4000
+  export NOCODB_PAGE_SLEEP=0   # local stub — don't pace the 40 pages/table fetch
+  run bash "$SUT" suggest <<<'[{"name":"Bigsnap","domain":"bigsnap.example"}]'
+  [[ "$output" != *"Argument list too long"* ]]
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.stats.recorded' <<<"$output")" = "1" ]
+  [ "$(jq -r '.recorded[0].domain' <<<"$output")" = "bigsnap.example" ]
+  grep -q "records.create ledgertable001" "$NOCODB_STUB_LOG"
+}
+
+@test "record-rejects survives a snapshot too large for argv (was: jq Argument list too long)" {
+  export NOCODB_STUB_TOTAL_ROWS=4000
+  export NOCODB_PAGE_SLEEP=0   # local stub — don't pace the 40 pages/table fetch
+  run bash "$SUT" record-rejects <<<'[{"name":"Bigsnap","domain":"bigsnap.example","reason":"DEAD"}]'
+  [[ "$output" != *"Argument list too long"* ]]
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.stats.recorded' <<<"$output")" = "1" ]
+  [ "$(jq -r '.recorded[0].domain' <<<"$output")" = "bigsnap.example" ]
+}

@@ -114,11 +114,18 @@ case "$cmd" in
     LEDGER_ROWS="$(fetch_mapped "$LEDGER_TABLE_ID" "Seen Ledger")" || exit 2
     COMPANY_ROWS="$(fetch_mapped "$COMPANY_TABLE_ID" "Company Intelligence")" || exit 2
     CONTACT_ROWS="$(fetch_mapped "$CONTACTS_TABLE_ID" "Contacts Intelligence")" || exit 2
-    collisions=$(jq -rn --argjson cands "$NORMED" --argjson ledger "$LEDGER_ROWS" \
-        --argjson company "$COMPANY_ROWS" --argjson contacts "$CONTACT_ROWS" '
-      (($ledger   | map({key: .nd, value: "Seen Ledger"})) +
-       ($company  | map({key: .nd, value: "Company Intelligence"})) +
-       ($contacts | map({key: .nd, value: "Contacts Intelligence"}))
+    # Snapshots (and big candidate batches) exceed the 128KB per-argv cap —
+    # slurpfile process substitution, never --argjson (else: jq: Argument list
+    # too long, exit 126, once Contacts/Company Intelligence grow past ~2k rows).
+    collisions=$(jq -rn \
+           --slurpfile cands_s <(printf '%s' "$NORMED") \
+           --slurpfile l <(printf '%s' "$LEDGER_ROWS") \
+           --slurpfile c <(printf '%s' "$COMPANY_ROWS") \
+           --slurpfile k <(printf '%s' "$CONTACT_ROWS") '
+      ($cands_s[0]) as $cands
+      | (($l[0] | map({key: .nd, value: "Seen Ledger"})) +
+       ($c[0] | map({key: .nd, value: "Company Intelligence"})) +
+       ($k[0] | map({key: .nd, value: "Contacts Intelligence"}))
        | map(select(.key != "")) | from_entries) as $seen
       | $cands[] | select($seen[.nd]) | "LEDGER_COLLISION: \(.nd) (in \($seen[.nd]))"')
     if [[ -n "$collisions" ]]; then
@@ -138,8 +145,9 @@ case "$cmd" in
     fi
     ids=$(jq -c 'if type == "array" then map(.Id // .id) else [.Id // .id] end' \
       <<<"$created" 2>/dev/null || echo '[]')
-    jq -n --argjson cands "$NORMED" --argjson ids "$ids" '
-      {recorded: [$cands | to_entries[] |
+    jq -n --argjson ids "$ids" --slurpfile cands_s <(printf '%s' "$NORMED") '
+      ($cands_s[0]) as $cands
+      | {recorded: [$cands | to_entries[] |
                   {domain: .value.nd, name: .value.name, id: ($ids[.key] // null)}],
        stats: {recorded: ($cands | length)}}'
     ;;
@@ -164,9 +172,16 @@ case "$cmd" in
 
     # Partition: invalid domain → skipped_invalid; already known anywhere →
     # skipped_existing (idempotent re-run / already suppressed); rest → write.
-    PARTS=$(jq -cn --argjson cands "$NORMED" --argjson ledger "$LEDGER_ROWS" \
-        --argjson company "$COMPANY_ROWS" --argjson contacts "$CONTACT_ROWS" '
-      ([$ledger[], $company[], $contacts[] | .nd] | map(select(. != "")) | unique) as $seen
+    # Snapshots (and big candidate batches) exceed the 128KB per-argv cap —
+    # slurpfile process substitution, never --argjson (else: jq: Argument list
+    # too long, exit 126, once Contacts/Company Intelligence grow past ~2k rows).
+    PARTS=$(jq -cn \
+           --slurpfile cands_s <(printf '%s' "$NORMED") \
+           --slurpfile l <(printf '%s' "$LEDGER_ROWS") \
+           --slurpfile c <(printf '%s' "$COMPANY_ROWS") \
+           --slurpfile k <(printf '%s' "$CONTACT_ROWS") '
+      ($cands_s[0]) as $cands
+      | ([$l[0][], $c[0][], $k[0][] | .nd] | map(select(. != "")) | unique) as $seen
       | {invalid:  ($cands | map(select(.nd == ""))),
          existing: ($cands | map(select(.nd != "" and (.nd as $d | $seen | index($d))))),
          fresh:    ($cands | map(select(.nd != "" and ((.nd as $d | $seen | index($d)) | not))))}
@@ -182,8 +197,9 @@ case "$cmd" in
         exit 4
       fi
     fi
-    jq -n --argjson p "$PARTS" '
-      {recorded:         ($p.fresh    | map({domain: .nd, name: .name, reason: .reason})),
+    jq -n --slurpfile p_s <(printf '%s' "$PARTS") '
+      ($p_s[0]) as $p
+      | {recorded:         ($p.fresh    | map({domain: .nd, name: .name, reason: .reason})),
        skipped_existing: ($p.existing | map({domain: .nd, name: .name})),
        skipped_invalid:  ($p.invalid  | map({name: .name, domain: .domain})),
        stats: {recorded: ($p.fresh | length), skipped_existing: ($p.existing | length),

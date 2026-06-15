@@ -118,6 +118,21 @@ jobs:
             openclaw-main.json openclaw-edge.json
           echo "::endgroup::"
 
+      - name: company-finder argv-safety — no table snapshot through jq argv
+        # Prevents re-introducing the jq E2BIG bug class that took the daily
+        # company-finder cron down (2026-06-13, ledger.sh; #516 fixed the same
+        # class in dedupe-candidates.sh just before): a full NocoDB table
+        # snapshot passed to jq via --argjson/--arg lands on argv, capped at
+        # MAX_ARG_STRLEN (128KB) → "jq: Argument list too long" (exit 126) once
+        # Contacts/Company Intelligence grow past ~2k rows. The check is
+        # self-maintaining (snapshot vars are derived from fetch_mapped/
+        # fetch_table assignments). See scripts/company-finder/check-argv-safety.sh.
+        run: |
+          echo "::group::company-finder argv-safety"
+          chmod +x scripts/company-finder/check-argv-safety.sh
+          scripts/company-finder/check-argv-safety.sh
+          echo "::endgroup::"
+
       - name: Gateway policy invariants — main profile
         # Pins flags that enable correct cross-agent behavior on the
         # main gateway. Without these, failures look like working
