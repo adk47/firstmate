@@ -56,6 +56,13 @@
 #     fingerprint-deduped) to #prod-alerts C0BA8QMV3ME (Serhii's
 #     prod-log-visibility ask, 2026-06-09).
 #
+#   clickup-sla-digest.timer / .service
+#     Daily 08:00 America/New_York. Posts overdue / due-today /
+#     due-tomorrow open ClickUp support tickets (SLA due dates set
+#     at creation by the support-tools/intercom plugins) to
+#     #cs_chats via scripts/clickup-sla-digest.sh. Silent when all
+#     buckets are empty.
+#
 #   hydra-release.timer / .service
 #     Daily-release cron. Mon..Fri 08:00 Europe/Rome. Invokes
 #     scripts/release-cron.sh, which:
@@ -119,6 +126,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/merge-landing-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/clickup-sla-digest.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/clickup-sla-digest.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/weekly-cleanup.sh" ]] \
@@ -255,6 +264,46 @@ cr=close-resolved-conversations.timer
 systemctl enable "$cr" >/dev/null 2>&1 || log "WARN: could not enable $cr"
 systemctl start "$cr" >/dev/null 2>&1 || log "WARN: could not start $cr"
 log "  $cr: $(systemctl is-active "$cr" 2>/dev/null || echo unknown)"
+
+# ─── Daily ClickUp SLA digest (08:00 America/New_York) ────────
+# Posts overdue / due-today / due-tomorrow open support tickets to
+# #cs_chats. Deterministic bash (no LLM, fires even with the gateway
+# down). CLICKUP_API_KEY comes from the same env files the
+# close-resolved-conversations unit uses; the Slack token is pulled
+# from main.env by slack-notify.sh itself.
+cat > /etc/systemd/system/clickup-sla-digest.service << SLADIGESTSVC
+[Unit]
+Description=Daily SLA digest — overdue/today/tomorrow ClickUp tickets to #cs_chats
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=$HYDRA_ROOT/scripts/clickup-sla-digest.sh
+SLADIGESTSVC
+
+cat > /etc/systemd/system/clickup-sla-digest.timer << SLADIGESTTMR
+[Unit]
+Description=Daily ClickUp SLA digest at 08:00 America/New_York
+
+[Timer]
+# systemd interprets the timezone qualifier and DST shifts itself.
+OnCalendar=*-*-* 08:00:00 America/New_York
+# If node-8 was down at 08:00, fire on next boot rather than skip the day.
+Persistent=true
+RandomizedDelaySec=30s
+Unit=clickup-sla-digest.service
+
+[Install]
+WantedBy=timers.target
+SLADIGESTTMR
+
+systemctl daemon-reload
+sla=clickup-sla-digest.timer
+systemctl enable "$sla" >/dev/null 2>&1 || log "WARN: could not enable $sla"
+systemctl start "$sla" >/dev/null 2>&1 || log "WARN: could not start $sla"
+log "  $sla: $(systemctl is-active "$sla" 2>/dev/null || echo unknown)"
 
 # ─── Gateway pre-start self-heal drop-ins ─────────────────────
 # One drop-in per profile, hard-coded with the profile name (the
