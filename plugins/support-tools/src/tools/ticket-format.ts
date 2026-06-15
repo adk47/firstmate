@@ -184,7 +184,12 @@ export function buildTicketTags(params: {
 
 // Due date for ClickUp (`due_date` ms epoch, `due_date_time: false`):
 // now + the tier's SLA in business days, skipping Sat/Sun (no holiday
-// calendar — the SLA strings are approximate anyway).
+// calendar — the SLA strings are approximate anyway). The result is pinned
+// to noon UTC, which is the same calendar date across UTC-12..+11 — every
+// reader of this value (the America/New_York SLA digest and the US-based
+// ClickUp workspace); an un-pinned evening time-of-day would misbucket by a
+// day. (At UTC+12 and beyond noon UTC rolls to the next date, but no reader
+// here is in that range.)
 export function slaDueDateMs(tier: Tier, nowMs: number): number {
   let remaining = TIER_SLA_BUSINESS_DAYS[tier];
   const d = new Date(nowMs);
@@ -193,5 +198,6 @@ export function slaDueDateMs(tier: Tier, nowMs: number): number {
     const day = d.getUTCDay();
     if (day !== 0 && day !== 6) remaining--;
   }
+  d.setUTCHours(12, 0, 0, 0); // canonical noon UTC — same date across UTC-12..+11
   return d.getTime();
 }

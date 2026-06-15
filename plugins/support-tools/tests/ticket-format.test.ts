@@ -219,6 +219,17 @@ describe("slaDueDateMs", () => {
     const friday = Date.UTC(2026, 5, 12, 12, 0, 0);
     expect(day(slaDueDateMs(1, friday))).toBe("2026-06-16");
   });
+
+  it("normalizes due to noon UTC regardless of creation time-of-day", () => {
+    // Created Mon 23:30 UTC — un-pinned, this carried 23:30 and read as the
+    // prior NY day, the misbucket. tier 1 = +2 business days → 2026-06-10.
+    // Noon UTC makes the date-only due unambiguous in every reader timezone.
+    const lateMonday = Date.UTC(2026, 5, 8, 23, 30, 0);
+    const due = slaDueDateMs(1, lateMonday);
+    expect(day(due)).toBe("2026-06-10");
+    expect(new Date(due).getUTCHours()).toBe(12);
+    expect(new Date(due).getUTCMinutes()).toBe(0);
+  });
 });
 
 describe("tier helpers", () => {
