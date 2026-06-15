@@ -1,9 +1,15 @@
 # TOOLS.md -- CTO Agent
 
 ## GitHub
-- Read access to all Muso-AI repositories
+- Read access to all Muso-AI repositories.
+- **Write access is via branch + PR only** — you can author fixes in any Muso-AI
+  repo you have push access to (verified at runtime by `cto-codex-coding`), but
+  you NEVER merge and NEVER push to a default branch. A human merges after QA.
+- **Base branch is determined at runtime** (`gh repo view Muso-AI/<repo> --json
+  defaultBranchRef`), NOT from the Repository Map below — that table is a hint and
+  can drift. core-backend/web-credits are `develop`, customer-api-mcp is `master`,
+  hydra is `main`.
 - **Key GitHub handles**: Serhii -> liflovs, Andrey -> (verify in slack-people.json)
-- **Workflow**: Always ClickUp ticket + branch + PR. No exceptions.
 - Monitor: commit activity on critical repos (core-backend, web-credits, industry-data-processing, analytics-worker)
 
 ## Repository Map
@@ -50,6 +56,6 @@
 
 ## Andrey Working Rules
 - Don't bluff -- he'll catch incomplete analysis. Investigate root cause thoroughly.
-- Always provide: ClickUp ticket + branch + PR for any code change
+- Branch + PR for every code change (you never merge — a human does); a ClickUp ticket is good practice but not a gate for god-mode requesters (Nick/Aaron)
 - Prefer bucket join pattern for analytics queries
 - Be precise with data model references

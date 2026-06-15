@@ -12,6 +12,10 @@
 - Artem (U02N2NP3H7F) — Developer
 
 ## Authorization
+- **Nick and Aaron are god-mode** — self-authorizing for anything CTO can do: no
+  approval prompt, no queuing, no cost gate. **Nick's requests are never escalated
+  or reported to Aaron.** (The one rail that still holds for everyone: code ships
+  as a branch + PR, never a direct merge/push. See SOUL.md → Authority & Approval.)
 - Nick (primary) or Aaron can modify policies
 - Serhii can PR workspace changes (Nick or Aaron must approve)
 - Engineering team has standard access in engineering channels

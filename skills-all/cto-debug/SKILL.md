@@ -7,11 +7,13 @@ description: |
   something broken or asks why it's failing / to investigate / to track it down.
   Triggers: "debug", "why is this failing", "what's the root cause", "this is broken",
   "investigate this bug", "tests are failing", "track down", "flaky test". To actually
-  CHANGE hydra code after the diagnosis, hand off to cto-codex-coding (branch + PR).
+  CHANGE code after the diagnosis, hand off to cto-codex-coding (branch + PR in the
+  affected repo).
 compatibility: |
-  CTO agent on node-8. Read-only investigation across all Muso-AI repos; reproduces in
-  a working clone. Uses the host shell (`exec`) + git. Fixes land only in hydra via
-  cto-codex-coding; other repos get a diagnosis + ClickUp ticket.
+  CTO agent on node-8. Investigation is read-only across all Muso-AI repos; reproduces
+  in a working clone. Uses the host shell (`exec`) + git. Fixes land as a branch + PR in
+  the affected repo via cto-codex-coding (any repo you have push access to); repos you
+  can't push to get a diagnosis + ClickUp ticket.
 metadata:
   version: "1.0"
   source-repo: "Muso-AI/hydra"
@@ -32,17 +34,19 @@ is no special tool — just your shell (`exec`) and `git`.
 finished Phase 1 and can point at the evidence — a `file:line`, a command's output, a
 diff — that explains *why* the bug happens. "It's probably X" is not a root cause.
 
-## Scope — investigate anywhere, fix only in hydra
+## Scope — investigate anywhere, fix via PR where you can push
 
-- **Investigate anywhere.** You have read-only access to every Muso-AI repo (core-backend,
-  web-credits, the data/analytics pipelines, hydra...). Reproduce and diagnose in a
-  throwaway clone; never write to a repo you are only reading.
-- **Fix only in hydra.** The one repo you can change is hydra, and only as a branch + PR
-  via the `cto-codex-coding` skill — never a merge. For a bug in any *other* repo, stop at
-  a diagnosis: report the root cause with evidence, recommend the fix, and open a ClickUp
-  ticket + tag the owning team. Do not try to edit it.
+- **Investigate anywhere.** You read every Muso-AI repo (core-backend, web-credits, the
+  data/analytics pipelines, hydra...). Reproduce and diagnose in a throwaway clone; the
+  investigation phase never writes to a repo.
+- **Fix in any repo you have push access to**, and only as a branch + PR via the
+  `cto-codex-coding` skill — never a merge, never a push to a default branch. That skill
+  verifies push access and the repo's real default branch before writing anything. If you
+  can't push to the affected repo, stop at a diagnosis: report the root cause with
+  evidence, recommend the fix, and open a ClickUp ticket + tag the owning team.
 - **Cost.** If reproducing needs heavy compute (large test runs, big data pulls) that
-  could approach the $30 rule, confirm with Aaron first.
+  could approach the $30 rule, confirm with an approver first — UNLESS the requester is
+  god-mode (Nick/Aaron), who need no cost approval.
 
 ## Phase 1 — Reproduce and find the root cause
 
@@ -97,9 +101,9 @@ do you change code:
 3. **Consider hardening the layers** the bad data passed through, so the bug becomes
    structurally impossible rather than patched at one spot — see `defense-in-depth.md`.
    Use judgment; don't over-apply it.
-4. **Ship it the right way.** In **hydra**, hand off to the `cto-codex-coding` skill
-   (branch + PR, never merge, QA reviews). In any other repo, stop at the diagnosis +
-   ticket.
+4. **Ship it the right way.** Hand off to the `cto-codex-coding` skill (branch + PR in the
+   affected repo, never merge, QA reviews). If you lack push access to that repo, stop at
+   the diagnosis + ticket for the owning team.
 
 ## When 3 fixes have failed — question the architecture
 
