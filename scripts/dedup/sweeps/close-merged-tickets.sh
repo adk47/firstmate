@@ -63,9 +63,11 @@ clickup_api="${CLICKUP_API:-https://api.clickup.com/api/v2}"
 list_id="${CLICKUP_LIST_ID:-901000600160}"
 api_key="${CLICKUP_API_KEY:-}"
 [ -n "$api_key" ] || { echo "close-merged-tickets: CLICKUP_API_KEY not set" >&2; exit 2; }
-# Hard cap on pagination — backlog has been ~26 tickets historically; any spike
-# past PAGINATION_CAP * 100 means something unusual and we should stop, not
-# silently truncate. Override with PAGINATION_CAP env if you really need more.
+# Hard cap on pagination. The ClickUp fetch below is server-side filtered to
+# action:profile-merge-tagged tickets (a small set — historically ~26), so this
+# should complete in a page or two; hitting the cap means something unusual and
+# we should stop, not silently truncate (the board itself holds 4,500+ open
+# tasks across all action types). Override with PAGINATION_CAP if you must.
 pagination_cap="${PAGINATION_CAP:-20}"
 
 tmp=$(mktemp -d)
@@ -152,11 +154,17 @@ PY
 merge_count=$(wc -l < "$tmp/merges.jsonl" | tr -d ' ')
 echo "close-merged-tickets: pulled $merge_count merges from last $days days" >&2
 
-# 2. Open profile-merge tickets from ClickUp
+# 2. Open profile-merge tickets from ClickUp. Server-side filter to the
+#    action:profile-merge tag so ClickUp returns only merge tickets, not the
+#    whole board — the same filter create_ticket's dedupe lookup uses
+#    (plugins/support-tools/src/tools/create-ticket.ts). The tag is set
+#    unconditionally by buildTicketTags (ticket-format.ts) on the SAME create
+#    path that writes the ---ACTION-REQUEST--- block the client-side select
+#    below requires, so this is match-set-equivalent to the old full-board scan.
 : > "$tmp/tickets.jsonl"
 page=0
 while :; do
-  if ! resp=$(clickup_curl GET "/list/$list_id/task?archived=false&include_closed=false&page=$page&order_by=created"); then
+  if ! resp=$(clickup_curl GET "/list/$list_id/task?archived=false&include_closed=false&page=$page&order_by=created&tags%5B%5D=action%3Aprofile-merge"); then
     exit 5
   fi
   n=$(echo "$resp" | jq '.tasks | length')
