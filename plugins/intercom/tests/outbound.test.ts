@@ -1,5 +1,20 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { MockIntercomClient, RealIntercomClient, trackOutboundMessageId, SanitizingIntercomClient, createIntercomClient } from "../src/outbound.js";
+import {
+  MockIntercomClient,
+  RealIntercomClient,
+  trackOutboundMessageId,
+  SanitizingIntercomClient,
+  createIntercomClient,
+  sendReplyWithRetry,
+  computeReplyBackoffMs,
+  isRetryableReplyError,
+  RateLimitError,
+  IntercomServerError,
+  REPLY_MAX_RETRIES,
+  REPLY_MAX_BACKOFF_MS,
+  REPLY_BASE_BACKOFF_MS,
+  REPLY_MAX_TOTAL_WAIT_MS,
+} from "../src/outbound.js";
 import type { IntercomClient, IntercomConversation } from "../src/types.js";
 
 describe("MockIntercomClient", () => {
@@ -578,5 +593,220 @@ describe("listContactConversations (prior-chat recall)", () => {
     const client = new SanitizingIntercomClient(inner);
     await client.listContactConversations({ contactId: "u1" });
     expect(inner.calls.listContactConversations).toHaveLength(1);
+  });
+});
+
+describe("isRetryableReplyError", () => {
+  it("treats 429 (RateLimitError) and 5xx (IntercomServerError) as retryable", () => {
+    expect(isRetryableReplyError(new RateLimitError(3))).toBe(true);
+    expect(isRetryableReplyError(new IntercomServerError(503, "boom"))).toBe(true);
+  });
+
+  it("does NOT retry plain errors (4xx like 404 / permission)", () => {
+    expect(isRetryableReplyError(new Error("404 not found"))).toBe(false);
+    expect(isRetryableReplyError(new Error("403 forbidden"))).toBe(false);
+    expect(isRetryableReplyError("oops")).toBe(false);
+  });
+});
+
+describe("computeReplyBackoffMs", () => {
+  it("honors Retry-After as a FLOOR for 429: never sleeps less than the server-directed wait, jitter added on top", () => {
+    // Retry-After is a server directive, not a hint. Retrying before the
+    // window clears just earns another 429 and burns a retry, dropping the
+    // reply early — so the wait MUST be >= retryAfter*1000. The old code used
+    // Retry-After as the jitter CEILING (rand=0 → 0ms wait), which this test
+    // now forbids: that was the regression that defeated the whole retry path.
+    // rand=0 → exactly the floor, never below it.
+    expect(computeReplyBackoffMs(1, new RateLimitError(2), () => 0)).toBe(2000);
+    // rand→max → floor + full additive jitter (REPLY_BASE_BACKOFF_MS), still ≤ cap.
+    expect(computeReplyBackoffMs(1, new RateLimitError(2), () => 1)).toBe(2000 + REPLY_BASE_BACKOFF_MS);
+  });
+
+  it("uses capped exponential backoff for 5xx", () => {
+    const err = new IntercomServerError(500, "boom");
+    // base=500, attempt 1 → 500, attempt 2 → 1000, attempt 3 → 2000 (rand=1 = full)
+    expect(computeReplyBackoffMs(1, err, () => 1)).toBe(500);
+    expect(computeReplyBackoffMs(2, err, () => 1)).toBe(1000);
+    expect(computeReplyBackoffMs(3, err, () => 1)).toBe(2000);
+  });
+
+  it("caps 5xx exponential backoff at the per-attempt cap, but bounds 429 Retry-After by the TOTAL budget", () => {
+    // 5xx exponential backoff is OUR choice (not a server directive), so the
+    // tight per-attempt cap (8s) applies.
+    const err = new IntercomServerError(500, "boom");
+    expect(computeReplyBackoffMs(20, err, () => 1)).toBe(REPLY_MAX_BACKOFF_MS);
+    // 429: the 8s per-attempt cap must NOT clip a server-directed Retry-After
+    // that still fits inside the total budget. A Retry-After between the
+    // per-attempt cap (8s) and the total budget (30s) is honored IN FULL —
+    // clipping it to 8s is the residual bug that retried ~22s early and burned
+    // the budget before the server's window cleared.
+    expect(computeReplyBackoffMs(1, new RateLimitError(12), () => 0)).toBe(12_000);
+    // A Retry-After larger than the whole budget is clamped to the budget
+    // (sendReplyWithRetry then further clamps by the budget actually remaining).
+    expect(computeReplyBackoffMs(1, new RateLimitError(9999), () => 1)).toBe(REPLY_MAX_TOTAL_WAIT_MS);
+  });
+});
+
+describe("sendReplyWithRetry", () => {
+  const noSleep = async () => {};
+
+  it("returns immediately on first success (no retries, no alert)", async () => {
+    const attempt = vi.fn(async () => ({ messageId: "m1" }));
+    const onAlert = vi.fn();
+    const out = await sendReplyWithRetry(attempt, { conversationId: "c1" }, { sleepFn: noSleep, onAlert });
+    expect(out).toEqual({ messageId: "m1" });
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(onAlert).not.toHaveBeenCalled();
+  });
+
+  it("retries on 429 then succeeds", async () => {
+    let n = 0;
+    const attempt = vi.fn(async () => {
+      n++;
+      if (n < 3) throw new RateLimitError(1);
+      return { messageId: "ok" };
+    });
+    const onAlert = vi.fn();
+    const out = await sendReplyWithRetry(attempt, { conversationId: "c1" }, { sleepFn: noSleep, rand: () => 0.5, onAlert });
+    expect(out).toEqual({ messageId: "ok" });
+    expect(attempt).toHaveBeenCalledTimes(3);
+    expect(onAlert).not.toHaveBeenCalled();
+  });
+
+  it("retries on 5xx then succeeds", async () => {
+    let n = 0;
+    const attempt = vi.fn(async () => {
+      n++;
+      if (n < 2) throw new IntercomServerError(502, "bad gateway");
+      return { messageId: "ok" };
+    });
+    const out = await sendReplyWithRetry(attempt, { conversationId: "c1" }, { sleepFn: noSleep, rand: () => 0.5 });
+    expect(out).toEqual({ messageId: "ok" });
+    expect(attempt).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT retry a 4xx (plain Error) — fails on first attempt, no alert", async () => {
+    const attempt = vi.fn(async () => { throw new Error("404 not found"); });
+    const onAlert = vi.fn();
+    await expect(
+      sendReplyWithRetry(attempt, { conversationId: "c1" }, { sleepFn: noSleep, onAlert }),
+    ).rejects.toThrow("404 not found");
+    expect(attempt).toHaveBeenCalledTimes(1);
+    // Non-retryable failures are surfaced to the caller's own catch; the
+    // "dropped after retries" alert is reserved for exhausted retryable errors.
+    expect(onAlert).not.toHaveBeenCalled();
+  });
+
+  it("emits a grep-able alert and rethrows after exhausting retries on persistent 429", async () => {
+    const attempt = vi.fn(async () => { throw new RateLimitError(1); });
+    const onAlert = vi.fn();
+    await expect(
+      sendReplyWithRetry(attempt, { conversationId: "c1" }, { sleepFn: noSleep, rand: () => 0.5, onAlert }),
+    ).rejects.toBeInstanceOf(RateLimitError);
+    // First attempt + REPLY_MAX_RETRIES retries.
+    expect(attempt).toHaveBeenCalledTimes(REPLY_MAX_RETRIES + 1);
+    expect(onAlert).toHaveBeenCalledTimes(1);
+    expect(onAlert.mock.calls[0][0]).toContain("[intercom:ALERT] reply dropped after retries");
+    expect(onAlert.mock.calls[0][0]).toContain("conv=c1");
+  });
+
+  it("does NOT alert when a later attempt fails with a non-retryable error after a transient 429", async () => {
+    // Transient 429 (retryable) on attempt 1, then a deterministic 404 (plain
+    // Error, non-retryable) on attempt 2. attempts > 1, but the TERMINAL error
+    // is deterministic — firing "reply dropped after retries" here would
+    // mislabel a config bug as transient retry-exhaustion. The 404 still
+    // rethrows to the caller's own error handling.
+    let n = 0;
+    const attempt = vi.fn(async () => {
+      n++;
+      if (n === 1) throw new RateLimitError(1);
+      throw new Error("404 not found");
+    });
+    const onAlert = vi.fn();
+    await expect(
+      sendReplyWithRetry(attempt, { conversationId: "c1" }, { sleepFn: noSleep, rand: () => 0, onAlert }),
+    ).rejects.toThrow("404 not found");
+    expect(attempt).toHaveBeenCalledTimes(2);
+    expect(onAlert).not.toHaveBeenCalled();
+  });
+
+  it("stops retrying once the cumulative wait budget is exhausted", async () => {
+    const attempt = vi.fn(async () => { throw new IntercomServerError(500, "boom"); });
+    const sleepFn = vi.fn(noSleep);
+    await expect(
+      sendReplyWithRetry(attempt, { conversationId: "c1" }, {
+        sleepFn,
+        rand: () => 1, // full ceiling each time
+        maxTotalWaitMs: 600, // only enough for the first 500ms backoff
+        onAlert: () => {},
+      }),
+    ).rejects.toBeInstanceOf(IntercomServerError);
+    // attempt 1 fails → sleep 500ms (budget 600 ok); attempt 2 fails → next
+    // backoff 1000ms would exceed remaining 100ms budget → clamp to 100 then
+    // remaining budget 0 → stop. So 1 real sleep, then a clamped sleep, then halt.
+    expect(sleepFn.mock.calls.length).toBeLessThanOrEqual(REPLY_MAX_RETRIES);
+    // Did not run the full retry count because the budget cut it short.
+    expect(attempt.mock.calls.length).toBeLessThan(REPLY_MAX_RETRIES + 1);
+  });
+
+  it("honors a large 429 Retry-After up to the total budget — does NOT retry early at the 8s per-attempt cap", async () => {
+    // Server directs a 30s wait. The retry must sleep the full budget before
+    // trying again — NOT 8s (the per-attempt exponential cap), which would
+    // retry ~22s early, earn another 429, and drop the reply before the
+    // server's window ever cleared. This is the residual blocker QA caught
+    // after the first Retry-After fix.
+    const attempt = vi.fn(async () => { throw new RateLimitError(30); });
+    const sleeps: number[] = [];
+    const sleepFn = async (ms: number) => { sleeps.push(ms); };
+    await expect(
+      sendReplyWithRetry(attempt, { conversationId: "c1" }, { sleepFn, rand: () => 0, onAlert: () => {} }),
+    ).rejects.toBeInstanceOf(RateLimitError);
+    // Exactly one backoff, sized to the full 30s budget (not clipped to 8s).
+    expect(sleeps).toEqual([REPLY_MAX_TOTAL_WAIT_MS]);
+    // Initial attempt + one retry, then the budget is exhausted.
+    expect(attempt).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("RealIntercomClient.replyToConversation retry wiring", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    vi.useRealTimers();
+    globalThis.fetch = originalFetch;
+  });
+
+  const okBody = JSON.stringify({
+    type: "conversation",
+    id: "conv_1",
+    conversation_parts: { conversation_parts: [{ type: "conversation_part", id: "part_new" }] },
+  });
+
+  it("retries a 429 from the live reply endpoint and ultimately succeeds", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    globalThis.fetch = vi.fn(async () => {
+      calls++;
+      if (calls === 1) return new Response("rate limited", { status: 429, headers: { "Retry-After": "1" } });
+      return new Response(okBody, { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as unknown as typeof fetch;
+
+    const client = new RealIntercomClient("tok");
+    const p = client.replyToConversation({ conversationId: "conv_1", adminId: "a1", body: "hi" });
+    // Drive the in-process backoff sleep to completion.
+    await vi.runAllTimersAsync();
+    const result = await p;
+    expect(result.messageId).toBe("part_new");
+    expect(calls).toBe(2);
+  });
+
+  it("does NOT retry a 404 from the live reply endpoint (fails fast)", async () => {
+    const fetchSpy = vi.fn(async () => new Response("not found", { status: 404 }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const client = new RealIntercomClient("tok");
+    await expect(
+      client.replyToConversation({ conversationId: "conv_1", adminId: "a1", body: "hi" }),
+    ).rejects.toThrow(/replyToConversation failed: 404/);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });

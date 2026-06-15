@@ -328,8 +328,13 @@ describe("create_ticket body, due date and tags", () => {
     const body = (vi.mocked(deps.http.post).mock.calls[0][1] as any).body;
     expect(body.due_date_time).toBe(false);
     expect(typeof body.due_date).toBe("number");
-    // 2 business days out: at least 2 calendar days, at most 5 (weekend span).
-    expect(body.due_date).toBeGreaterThanOrEqual(before + 2 * 24 * 60 * 60_000 - 60_000);
+    // #515 pins SLA due dates to noon UTC (date-only ClickUp due). A "2 business
+    // day" SLA lands on noon of the target UTC day — up to ~12h earlier than the
+    // raw now+2bd, so as little as ~1.5 days out when filed late in the UTC day,
+    // and up to ~4.5 days across a weekend. (The old `>= now+2d-60s` lower bound
+    // broke every afternoon UTC once noon-pinning landed.)
+    expect(new Date(body.due_date).getUTCHours()).toBe(12); // noon-UTC pinned (#515)
+    expect(body.due_date).toBeGreaterThanOrEqual(before + 36 * 60 * 60_000 - 60_000);
     expect(body.due_date).toBeLessThanOrEqual(before + 5 * 24 * 60 * 60_000);
   });
 

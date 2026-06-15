@@ -3,6 +3,136 @@ import { MAX_OUTBOUND_MESSAGE_IDS } from "./types.js";
 import { sanitizeOutboundBody } from "./sanitize-email.js";
 import { sanitizeToolLeak } from "./sanitize-tool-leak.js";
 
+// --- Outbound reply retry (design §7 Rate Limiting) ---
+// "Intercom returns 429 with Retry-After. Retry with capped exponential
+// backoff + jitter (max 3 retries, max 30s total wait). v1 retry is in-memory."
+// Without this, a single 429 or transient 5xx on the customer-facing reply send
+// threw all the way up to the caller's catch, which only logged and dropped the
+// reply — the "silent dispatch" (customer message processed, reply never sent).
+export const REPLY_MAX_RETRIES = 3; // retries AFTER the first attempt (max 4 sends)
+export const REPLY_BASE_BACKOFF_MS = 500; // base for exponential backoff
+export const REPLY_MAX_BACKOFF_MS = 8_000; // per-attempt cap
+export const REPLY_MAX_TOTAL_WAIT_MS = 30_000; // cumulative wait budget across retries
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+/**
+ * Compute the delay before the next retry attempt.
+ * - For a 429, Intercom tells us how long to wait via Retry-After. That is a
+ *   server-directed MINIMUM, not a hint: retrying before the window clears
+ *   just earns another 429 and burns a retry, dropping the reply early — the
+ *   exact failure this retry path exists to prevent. So honor it as a floor
+ *   (RateLimitError.retryAfterSeconds * 1000) and add jitter ON TOP, rather
+ *   than jittering the wait down toward zero. Bounded by the TOTAL wait
+ *   budget (REPLY_MAX_TOTAL_WAIT_MS), NOT the per-attempt exponential cap:
+ *   the 8s per-attempt cap is right for our own 5xx backoff, but clipping a
+ *   server directive below its value (e.g. Retry-After 30 → 8s) just makes us
+ *   retry before the window clears and burn the budget early. A directive
+ *   that fits inside the budget is honored in full; sendReplyWithRetry then
+ *   clamps by the budget actually remaining.
+ * - For 5xx there is no server directive, so use capped exponential backoff
+ *   (base * 2^(attempt-1)) with full jitter in [0, ceiling] (AWS "full
+ *   jitter") to de-correlate retries when many conversations hit at once.
+ * `attempt` is 1-based (1 = delay before the 1st retry).
+ */
+export function computeReplyBackoffMs(
+  attempt: number,
+  err: unknown,
+  rand: () => number = Math.random,
+): number {
+  if (err instanceof RateLimitError) {
+    // Retry-After is a floor, not a ceiling: never sleep less than the
+    // server-directed wait. Jitter is additive (anti-thundering-herd). Bound
+    // by the TOTAL wait budget, not the per-attempt exponential cap — clipping
+    // a server directive that fits in the budget would retry before the window
+    // clears. The wrapper's cumulative-wait clamp further bounds by what's left.
+    const floorMs = err.retryAfterSeconds * 1000;
+    const jitterMs = Math.floor(rand() * REPLY_BASE_BACKOFF_MS);
+    return Math.min(floorMs + jitterMs, REPLY_MAX_TOTAL_WAIT_MS);
+  }
+  // 5xx: capped exponential backoff with full jitter in [0, ceiling].
+  const ceiling = Math.min(
+    REPLY_BASE_BACKOFF_MS * Math.pow(2, Math.max(0, attempt - 1)),
+    REPLY_MAX_BACKOFF_MS,
+  );
+  return Math.floor(rand() * ceiling);
+}
+
+/**
+ * True for errors worth retrying: 429 (RateLimitError) and 5xx
+ * (IntercomServerError). 4xx other than 429 (404 / permission / validation)
+ * are NOT retryable — retrying them just wastes the budget and delays the
+ * inevitable drop.
+ */
+export function isRetryableReplyError(err: unknown): boolean {
+  return err instanceof RateLimitError || err instanceof IntercomServerError;
+}
+
+/**
+ * Wrap a single-attempt reply send with capped exponential backoff + jitter.
+ * Retries only retryable errors (429 / 5xx) up to REPLY_MAX_RETRIES, bounded by
+ * REPLY_MAX_TOTAL_WAIT_MS of cumulative sleep. On exhaustion, emits a grep-able
+ * `[intercom:ALERT] reply dropped after retries` line so the silent drop becomes
+ * observable, then rethrows the last error for the caller's own handling.
+ */
+export async function sendReplyWithRetry<T>(
+  attempt: () => Promise<T>,
+  ctx: { conversationId: string },
+  opts: {
+    maxRetries?: number;
+    maxTotalWaitMs?: number;
+    sleepFn?: (ms: number) => Promise<void>;
+    rand?: () => number;
+    onAlert?: (msg: string) => void;
+  } = {},
+): Promise<T> {
+  const maxRetries = opts.maxRetries ?? REPLY_MAX_RETRIES;
+  const maxTotalWaitMs = opts.maxTotalWaitMs ?? REPLY_MAX_TOTAL_WAIT_MS;
+  const sleepFn = opts.sleepFn ?? sleep;
+  const onAlert = opts.onAlert ?? ((msg: string) => { try { console.error(msg); } catch { /* noop */ } });
+
+  let totalWaited = 0;
+  let attempts = 0;
+  let lastErr: unknown;
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      return await attempt();
+    } catch (err) {
+      attempts++;
+      lastErr = err;
+      const triesLeft = maxRetries - i;
+      if (!isRetryableReplyError(err) || triesLeft <= 0) break;
+      let delay = computeReplyBackoffMs(i + 1, err, opts.rand);
+      if (totalWaited + delay > maxTotalWaitMs) {
+        delay = maxTotalWaitMs - totalWaited;
+        if (delay <= 0) break; // budget exhausted — stop retrying
+      }
+      totalWaited += delay;
+      await sleepFn(delay);
+    }
+  }
+  // Only genuine retry EXHAUSTION on a still-retryable error is the "silent
+  // dispatch after retries" this alert makes observable. Two cases must NOT
+  // fire it, because their terminal failure is deterministic, not transient:
+  //   - a non-retryable 4xx (404 / permission) on the FIRST attempt
+  //     (attempts === 1), and
+  //   - a non-retryable 4xx that surfaces on a LATER attempt after a transient
+  //     429/5xx (attempts > 1 but lastErr is non-retryable).
+  // Gating on isRetryableReplyError(lastErr) covers both — labeling either as
+  // "dropped after retries" would mislabel a deterministic config bug as a
+  // transient-exhaustion event. Both still surface via the rethrow below to
+  // the caller's own error log.
+  if (attempts > 1 && isRetryableReplyError(lastErr)) {
+    onAlert(
+      `[intercom:ALERT] reply dropped after retries conv=${ctx.conversationId} ` +
+      `attempts=${attempts} maxRetries=${maxRetries} waitedMs=${totalWaited} error=${lastErr}`,
+    );
+  }
+  throw lastErr;
+}
+
 export class MockIntercomClient implements IntercomClient {
   calls = {
     replyToConversation: [] as Array<{ conversationId: string; adminId: string; body: string }>,
@@ -127,6 +257,21 @@ export class RealIntercomClient implements IntercomClient {
     adminId: string;
     body: string;
   }): Promise<{ messageId: string }> {
+    // Retry transient failures (429 / 5xx) with capped exponential backoff +
+    // jitter so a single rate-limit or server blip doesn't silently drop the
+    // customer-facing reply (design §7). 4xx (other than 429) still throws on
+    // the first attempt — see replyToConversationOnce.
+    return sendReplyWithRetry(
+      () => this.replyToConversationOnce(params),
+      { conversationId: params.conversationId },
+    );
+  }
+
+  private async replyToConversationOnce(params: {
+    conversationId: string;
+    adminId: string;
+    body: string;
+  }): Promise<{ messageId: string }> {
     const url = `${this.baseUrl}/conversations/${params.conversationId}/reply`;
     const response = await fetch(url, {
       method: "POST",
@@ -143,7 +288,13 @@ export class RealIntercomClient implements IntercomClient {
 
     if (!response.ok) {
       const errorBody = await this.readErrorBody(response);
-      throw new Error(`Intercom replyToConversation failed: ${response.status} ${response.statusText} - ${errorBody}`);
+      const message = `Intercom replyToConversation failed: ${response.status} ${response.statusText} - ${errorBody}`;
+      // 5xx is transient → typed so the retry wrapper can back off and retry.
+      // 4xx (404 / permission / validation) is a plain Error → not retried.
+      if (response.status >= 500) {
+        throw new IntercomServerError(response.status, message);
+      }
+      throw new Error(message);
     }
 
     const data = await this.parseJson(response, "replyToConversation");
@@ -476,6 +627,20 @@ export class RateLimitError extends Error {
     super(`Rate limited. Retry after ${retryAfterSeconds}s`);
     this.name = "RateLimitError";
     this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+/**
+ * Thrown for Intercom 5xx responses (transient server-side failures). Carries
+ * the status so the outbound reply retry can distinguish retryable 5xx from
+ * non-retryable 4xx (404 / permission / validation), which throw a plain Error.
+ */
+export class IntercomServerError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "IntercomServerError";
+    this.status = status;
   }
 }
 
