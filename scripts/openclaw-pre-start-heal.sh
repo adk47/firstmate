@@ -91,6 +91,21 @@ if [ -x "$SCRIPT_DIR/lib/ensure-codex-refresh-lock-shared.sh" ]; then
   "$SCRIPT_DIR/lib/ensure-codex-refresh-lock-shared.sh" || log "WARN: ensure-codex-refresh-lock-shared.sh returned non-zero (non-fatal)"
 fi
 
+# ── Healer: secret-file permissions (fail-closed secret loader) ──
+# openclaw resolves file-based secret providers at (re)start/reload and is
+# FAIL-CLOSED: a group/other-accessible secret file is rejected ("permissions
+# are too open") and the gateway REFUSES TO START — "required secrets are
+# unavailable". On 2026-06-15 a perm drift to 0644 on
+# /opt/hydra/secrets/llm-provider-keys.json (the hydra-secrets provider)
+# crash-looped BOTH main and edge into systemd `failed` for ~10 min (CTO + all
+# main agents + Caroline/CS dark). Re-tighten the secret files to 0600 here —
+# before ExecStart — so any such drift self-heals instead of taking the fleet
+# down. Idempotent, best-effort, ALWAYS exits 0; never blocks gateway start.
+# See scripts/lib/ensure-secret-perms.sh and CLAUDE.md.
+if [ -x "$SCRIPT_DIR/lib/ensure-secret-perms.sh" ]; then
+  "$SCRIPT_DIR/lib/ensure-secret-perms.sh" || log "WARN: ensure-secret-perms.sh returned non-zero (non-fatal)"
+fi
+
 is_valid() {
   # Returns 0 if `openclaw --profile <p> config validate` reports clean.
   # The CLI prints "Config valid: <path>" on stdout when ok and a multi-

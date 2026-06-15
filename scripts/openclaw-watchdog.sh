@@ -23,7 +23,11 @@ set -euo pipefail
 LOGPREFIX="[openclaw-watchdog $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
 OPENCLAW_CONFIG="/root/.openclaw-main/openclaw.json"
 CHECK_WINDOW_MIN=15
-COOLDOWN_FILE="/tmp/openclaw-watchdog-cooldown"
+# Cooldown stamp dir. Overridable so the bats suite (which CI runs ON the live
+# node-8 host) writes throwaway stamps instead of clobbering the production
+# watchdog's real /tmp cooldown clocks.
+WATCHDOG_STATE_DIR="${WATCHDOG_STATE_DIR:-/tmp}"
+COOLDOWN_FILE="$WATCHDOG_STATE_DIR/openclaw-watchdog-cooldown"
 COOLDOWN_MIN=30  # Don't restart more than once per 30 min
 GATEWAY_SERVICE="openclaw-gateway-main"  # PR 43: multi-gateway split
 
@@ -120,13 +124,101 @@ fi
 # Validate every cron tick instead. The crash-loop alert below has no
 # cooldown either, so we match that pattern: alert every 10 min while
 # broken (operator can ack/silence in Slack).
+# Record each profile's verdict so the gateway-liveness check below can reuse it
+# instead of re-running `openclaw config validate` (the heaviest per-tick call —
+# see the cadence note above) a second time for a down profile.
+declare -A GATEWAY_CONFIG_VALID=()
 for profile in main edge; do
   PROFILE_VALID=$(openclaw --profile "$profile" config validate 2>&1 || true)
-  if ! echo "$PROFILE_VALID" | grep -q "Config valid"; then
+  if echo "$PROFILE_VALID" | grep -q "Config valid"; then
+    GATEWAY_CONFIG_VALID[$profile]=1
+  else
+    GATEWAY_CONFIG_VALID[$profile]=0
     log "INVALID CONFIG on profile=${profile}: ${PROFILE_VALID}"
     slack_notify ":rotating_light: *${profile} profile config INVALID* on node-8 — gateway will not start (or will crash-loop). Run \`openclaw --profile ${profile} config validate\` and fix.\n\`\`\`${PROFILE_VALID}\`\`\`"
   fi
 done
+
+# ── Secret-file permission guard (proactive — prevents the 2026-06-15 outage) ─
+# openclaw's secret loader is FAIL-CLOSED: a file-based secret provider whose
+# file is group/other-accessible is rejected at (re)start/reload ("permissions
+# are too open") and the gateway refuses to start. On 2026-06-15 a perm drift to
+# 0644 on /opt/hydra/secrets/llm-provider-keys.json sat latent while the gateway
+# ran, then a routine deploy's config reload re-validated it and crash-looped
+# BOTH gateways into `failed` for ~10 min. The validate loop above does NOT
+# catch this (the config schema was valid; only the secret file's perms were
+# wrong). Detect drift every tick and re-tighten it BEFORE a reload trips it.
+# pre-start-heal applies the same fix on (re)start; this closes the
+# perms-drift-while-running gap. ensure-secret-perms.sh honors HYDRA_SECRETS_DIR.
+if [ -x "$_WATCHDOG_DIR/lib/ensure-secret-perms.sh" ]; then
+  if ! SECRET_PERM_OUT=$("$_WATCHDOG_DIR/lib/ensure-secret-perms.sh" --check 2>&1); then
+    log "SECRET PERMS TOO OPEN: ${SECRET_PERM_OUT}"
+    "$_WATCHDOG_DIR/lib/ensure-secret-perms.sh" >/dev/null 2>&1 || true  # re-tighten now
+    slack_notify ":lock: *Secret file perms drifted* on node-8 — a file-based secret store was group/other-readable, which crash-loops the gateway on the next config reload (the 2026-06-15 fleet outage). The watchdog re-tightened it to 0600. Investigate what relaxed it:\n\`\`\`${SECRET_PERM_OUT}\`\`\`"
+  fi
+fi
+
+# ── Gateway liveness (BOTH profiles) — checked BEFORE the activity logic ──────
+# A FAILED/inactive gateway emits ZERO agent runs, which the "No agent activity
+# — system idle, no action needed" branch further down silently swallows (it
+# exits 0). That is exactly the 2026-06-15 outage: both main+edge sat systemd
+# `failed` (fail-closed on a too-open secret file) for ~10 min while this
+# watchdog logged "system idle, no action needed" every tick and never paged.
+# The old edge-only liveness block lived AFTER that early exit, so when main had
+# no activity it never ran either — a double blind spot. Liveness is orthogonal
+# to agent activity, so check it FIRST, independently, for BOTH profiles.
+# Config-invalid is already alarmed by the validate loop above and a restart
+# won't fix it, so here we only auto-recover the valid-config-but-dead-process
+# case: reset-failed (clears a tripped StartLimitBurst — else `restart` no-ops
+# with "Start request repeated too quickly") then restart, whose ExecStartPre
+# (pre-start-heal) re-tightens secret perms + codex auth before it comes back.
+check_gateway_liveness() {
+  local profile="$1" svc="$2" config_valid="$3" status now
+  status=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
+  case "$status" in
+    active) return 0 ;;
+    activating|reloading|deactivating)
+      log "GATEWAY ${svc} transient state=${status} — skipping liveness action this tick"
+      return 0 ;;
+  esac
+
+  log "GATEWAY DOWN: ${svc} status=${status}"
+  # config_valid is the verdict the validate loop above already computed (1/0) —
+  # reuse it rather than re-running the heavy `openclaw config validate`.
+  if [ "$config_valid" != "1" ]; then
+    log "  ${svc}: config INVALID — not restarting (the validate loop already alarms this)"
+    return 0
+  fi
+
+  log "  ${svc}: config valid — reset-failed + restart"
+  systemctl reset-failed "$svc" 2>/dev/null || true
+  systemctl restart "$svc" || true
+  # Poll the start. These units are Type=simple, so `is-active` reports "active"
+  # the instant ExecStart forks — even for a process that crashes a second or two
+  # later (then enters the RestartSec backoff, reported as "activating"). So a
+  # single "active" read is NOT proof of recovery: require TWO consecutive
+  # "active" samples (~2s apart) so a brief pre-crash window can't be mistaken
+  # for durable recovery. Break early on "failed" (a definitive stop).
+  now="unknown"; prev=""
+  for _ in 1 2 3 4 5 6; do
+    sleep 2
+    now=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
+    [ "$now" = "failed" ] && break
+    [ "$now" = "active" ] && [ "$prev" = "active" ] && break
+    prev="$now"
+  done
+  if [ "$now" = "active" ] && [ "$prev" = "active" ]; then
+    log "  ${svc}: recovered (status now active)"
+    slack_notify ":white_check_mark: *${profile} gateway* was \`${status}\` on node-8 — watchdog ran \`reset-failed\` + restart and it is back online. ExecStartPre self-healed (secret perms / codex auth). Investigate the original cause: \`journalctl -u ${svc} -n 80 --no-pager\`."
+  else
+    log "  ${svc}: restart FAILED — status now ${now}"
+    slack_notify ":rotating_light: *${profile} gateway DOWN* on node-8 (\`${status}\` → restart → \`${now}\`). Config validates clean, so this is NOT a schema problem (suspect secrets / auth / runtime). Watchdog auto-restart FAILED — manual: \`ssh node-8; systemctl reset-failed ${svc}; systemctl restart ${svc}; journalctl -u ${svc} -n 120 --no-pager\`. @aaron"
+  fi
+  return 0
+}
+
+check_gateway_liveness main "$GATEWAY_SERVICE" "${GATEWAY_CONFIG_VALID[main]:-0}"
+check_gateway_liveness edge openclaw-gateway-edge "${GATEWAY_CONFIG_VALID[edge]:-0}"
 
 # Edge Codex (Caroline) silent-degradation watch. Runs on EVERY tick,
 # independent of the success/idle/restart logic below (Caroline can be busy
@@ -142,7 +234,9 @@ done
 # shellcheck source=lib/codex-health.sh
 source "$_WATCHDOG_DIR/lib/codex-health.sh"
 
-EDGE_AUTH_PROFILES="/root/.openclaw-edge/agents/support/agent/auth-profiles.json"
+# Overridable so the bats suite can point at a throwaway fixture instead of
+# reading the live edge agent's auth store on the node-8 CI host.
+EDGE_AUTH_PROFILES="${WATCHDOG_EDGE_AUTH_PROFILES:-/root/.openclaw-edge/agents/support/agent/auth-profiles.json}"
 CODEX_COOLDOWN_MIN=60  # token rotation is ~10-day; hourly re-alert is plenty
 
 # _codex_cooldown_ok <stampfile> <minutes> — true if last alert older than N min.
@@ -158,16 +252,16 @@ EDGE_LOGS=$(journalctl -u openclaw-gateway-edge --since "${CHECK_WINDOW_MIN} min
 CODEX_AUTHFAIL=$(printf '%s\n' "$EDGE_LOGS" | codex_count_auth_invalidated)
 CODEX_VISIONFAIL=$(printf '%s\n' "$EDGE_LOGS" | codex_count_vision_failures)
 
-if [ "${CODEX_AUTHFAIL:-0}" -gt 0 ] && _codex_cooldown_ok /tmp/openclaw-watchdog-codex-auth-cooldown "$CODEX_COOLDOWN_MIN"; then
+if [ "${CODEX_AUTHFAIL:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-auth-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "EDGE CODEX AUTH DEAD: ${CODEX_AUTHFAIL} 'token invalidated' lines in last ${CHECK_WINDOW_MIN}min"
   slack_notify ":rotating_light: *Edge Codex auth FAILING* (Caroline/support) — ${CODEX_AUTHFAIL}x 'authentication token has been invalidated' in last ${CHECK_WINDOW_MIN}min. She has silently degraded to the sonnet text fallback (replies still work; gpt-5.5 upgrade lost) — this is the #356 shape. The edge auth symlink self-heals on \`systemctl restart openclaw-gateway-edge\` (ExecStartPre re-points it at a fresh main codex token via ensure-codex-auth). If it keeps firing after a restart, the main codex token is itself stale → re-auth codex on main."
-  date +%s > /tmp/openclaw-watchdog-codex-auth-cooldown
+  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-auth-cooldown"
 fi
 
-if [ "${CODEX_VISIONFAIL:-0}" -gt 0 ] && _codex_cooldown_ok /tmp/openclaw-watchdog-codex-vision-cooldown "$CODEX_COOLDOWN_MIN"; then
+if [ "${CODEX_VISIONFAIL:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-vision-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "EDGE VISION DOWN: ${CODEX_VISIONFAIL} 'All image models failed' lines in last ${CHECK_WINDOW_MIN}min"
   slack_notify ":rotating_light: *Edge vision DOWN* (Caroline/support) — ${CODEX_VISIONFAIL}x 'All image models failed' in last ${CHECK_WINDOW_MIN}min. Customers sending screenshots/PDFs get no image understanding. imageModel is codex/gpt-5.5 → openrouter gemini → haiku, so this means codex AND both OpenRouter fallbacks failed — check OPENROUTER_API_KEY, codex auth, and \`openclaw --profile edge config validate\`."
-  date +%s > /tmp/openclaw-watchdog-codex-vision-cooldown
+  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-vision-cooldown"
 fi
 
 # Symlink-integrity tripwire: edge auth durability rests on
@@ -178,10 +272,10 @@ fi
 # no human-re-auth signal — a real auth death is caught by the
 # `authentication token has been invalidated` tripwire above. See codex-health.sh.)
 CODEX_SYMLINK_STATUS=$(codex_edge_auth_symlink_status "$EDGE_AUTH_PROFILES")
-if [ "$CODEX_SYMLINK_STATUS" != "ok" ] && _codex_cooldown_ok /tmp/openclaw-watchdog-codex-symlink-cooldown "$CODEX_COOLDOWN_MIN"; then
+if [ "$CODEX_SYMLINK_STATUS" != "ok" ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-symlink-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "EDGE CODEX AUTH SYMLINK status=${CODEX_SYMLINK_STATUS}"
   slack_notify ":warning: *Edge Codex auth store* (Caroline/support) symlink status: \`${CODEX_SYMLINK_STATUS}\` (expected \`ok\`). not-symlink=a deploy clobbered it; dangling=main source moved; missing=never provisioned. \`systemctl restart openclaw-gateway-edge\` re-runs ensure-codex-auth (ExecStartPre) to re-point it at main's canonical codex token."
-  date +%s > /tmp/openclaw-watchdog-codex-symlink-cooldown
+  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-symlink-cooldown"
 fi
 
 # ── Cross-process Codex refresh-race watch (main + edge) ──────────────────────
@@ -197,10 +291,10 @@ fi
 MAIN_CODEX_LOGS=$(journalctl -u openclaw-gateway-main --since "${CHECK_WINDOW_MIN} min ago" --no-pager 2>/dev/null || true)
 CODEX_REFRESH_RACE=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_count_refresh_reused)
 
-if [ "${CODEX_REFRESH_RACE:-0}" -gt 0 ] && _codex_cooldown_ok /tmp/openclaw-watchdog-codex-refresh-cooldown "$CODEX_COOLDOWN_MIN"; then
+if [ "${CODEX_REFRESH_RACE:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-refresh-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "CODEX REFRESH RACE: ${CODEX_REFRESH_RACE} refresh_token_reused/auth_permanent lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
   slack_notify ":rotating_light: *Codex refresh-token race* — ${CODEX_REFRESH_RACE}x \`refresh_token_reused\`/\`auth_permanent\` across main+edge in last ${CHECK_WINDOW_MIN}min. The ENTIRE codex fleet (gpt-5.5) has degraded to \`openrouter/openai/gpt-5.4-mini\`. The single-use refresh token is spent → this needs *interactive re-auth*: \`openclaw --profile main models auth login --provider openai-codex --device-code\` for BOTH accounts (aaron@muso.ai, aaronkaufman@me.com), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. Prevention is the lock-dir convergence (ensure-codex-refresh-lock-shared.sh) — see the tripwire below."
-  date +%s > /tmp/openclaw-watchdog-codex-refresh-cooldown
+  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-refresh-cooldown"
 fi
 
 # Convergence tripwire: if the two processes' refresh-lock dirs are no longer ONE
@@ -209,10 +303,10 @@ fi
 # the offenders). Guarded under `if !` so set -e never fires on the exit 1.
 if [ -x "$_WATCHDOG_DIR/lib/ensure-codex-refresh-lock-shared.sh" ]; then
   if ! CONV_OUT=$("$_WATCHDOG_DIR/lib/ensure-codex-refresh-lock-shared.sh" --check 2>&1) \
-     && _codex_cooldown_ok /tmp/openclaw-watchdog-codex-lockconv-cooldown "$CODEX_COOLDOWN_MIN"; then
+     && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-lockconv-cooldown" "$CODEX_COOLDOWN_MIN"; then
     log "CODEX REFRESH-LOCK NOT CONVERGED: ${CONV_OUT}"
     slack_notify ":warning: *Codex refresh-lock convergence broke* on node-8 — the main & edge gateways' \`locks/oauth-refresh/\` are no longer one shared dir, so a concurrent codex refresh can race again (the 2026-06-08 \`refresh_token_reused\` outage). \`systemctl restart openclaw-gateway-edge\` re-runs the ExecStartPre healer to reconverge, or run \`scripts/lib/ensure-codex-refresh-lock-shared.sh\` on node-8.\n\`\`\`${CONV_OUT}\`\`\`"
-    date +%s > /tmp/openclaw-watchdog-codex-lockconv-cooldown
+    date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-lockconv-cooldown"
   fi
 fi
 
@@ -348,26 +442,7 @@ if [ "$UNANSWERED_COUNT" -gt 0 ]; then
   fi
 fi
 
-# --- Edge gateway (support/intercom) health check ---
-EDGE_STATUS=$(systemctl is-active openclaw-gateway-edge 2>/dev/null || echo "unknown")
-if [ "$EDGE_STATUS" != "active" ]; then
-  log "EDGE GATEWAY DOWN: status=${EDGE_STATUS} — attempting restart"
-
-  # Check if it's a config issue (don't restart if config is invalid)
-  EDGE_VALID=$(openclaw --profile edge config validate 2>&1 || true)
-  if echo "$EDGE_VALID" | grep -q "Config valid"; then
-    systemctl restart openclaw-gateway-edge
-    sleep 15
-    EDGE_NEW=$(systemctl is-active openclaw-gateway-edge 2>/dev/null || echo "unknown")
-    if [ "$EDGE_NEW" = "active" ]; then
-      log "Edge gateway recovered"
-      slack_notify ":white_check_mark: *Edge Gateway* (support/intercom) recovered — auto-restarted by watchdog."
-    else
-      log "Edge gateway restart FAILED"
-      slack_notify ":rotating_light: *Edge Gateway* (support/intercom) DOWN — auto-restart failed. Config may be invalid. Check \`openclaw --profile edge doctor\`."
-    fi
-  else
-    log "Edge config INVALID — not restarting: ${EDGE_VALID}"
-    slack_notify ":rotating_light: *Edge Gateway* config invalid — cannot restart. Fix via PR.\n\`${EDGE_VALID}\`"
-  fi
-fi
+# Edge gateway liveness is now handled by check_gateway_liveness() near the top
+# of this script (before the activity-based early-exit), alongside main. The old
+# edge-only block lived here, AFTER the "system idle" exit, so it never ran when
+# main had no activity — the double blind spot behind the 2026-06-15 outage.
