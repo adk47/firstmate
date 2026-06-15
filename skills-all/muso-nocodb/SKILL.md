@@ -91,22 +91,52 @@ bash scripts/nocodb-api.sh hooks.create <tableId> '{
 
 ## Aggregations (client-side)
 
-NocoDB Cloud doesn't expose a public REST aggregation endpoint — `count` is the only server-side aggregate the PAT can reach. For sums/averages/group-by, fetch the rows and aggregate in `jq`:
+NocoDB Cloud doesn't expose a public REST aggregation endpoint — `count` is the only server-side aggregate the PAT can reach. For sums/averages/group-by, fetch the rows and aggregate in `jq`.
+
+> ⚠️ **NocoDB Cloud silently clamps `records.ls --limit` to 100.** A single
+> `records.ls` returns at most 100 rows no matter what `--limit` you pass, so
+> piping one call into a `jq` aggregate computes over ≤100 rows **silently** the
+> moment the (filtered) set exceeds 100. `--limit 1000` does **not** work — to
+> aggregate a whole table you MUST paginate until `pageInfo.isLastPage`.
 
 ```bash
-# Filtered count (server-side)
+# Filtered count (server-side — exact, no pagination needed)
 bash scripts/nocodb-api.sh records.count m9vsbijhrr9ddeu --where "(Status,eq,Follow Up 2)"
 
-# Group-by count: distribution of statuses
-bash scripts/nocodb-api.sh --raw records.ls m9vsbijhrr9ddeu --fields "Status" --limit 1000 \
-  | jq '[.list[].Status] | group_by(.) | map({status: .[0], n: length}) | sort_by(.n) | reverse'
+# Fetch ALL rows of a table for the given --fields, as one JSON array. Loops until
+# pageInfo.isLastPage (or an empty page) and advances --offset by the rows actually
+# returned, so the 100-row clamp is harmless. (Same logic as company-finder's
+# fetch_table — the merged #510 fix.) Pass extra `records.ls` flags (e.g.
+# `--where '(…)'`) as trailing args to aggregate a filtered subset — they are
+# forwarded to every page request.
+nocodb_fetch_all() {  # usage: nocodb_fetch_all <tableId> <fields> [extra records.ls flags…]
+  local tid="$1" fields="$2"; shift 2
+  local offset=0 resp chunk n pages=()
+  while :; do
+    resp=$(bash scripts/nocodb-api.sh --raw records.ls "$tid" \
+             --fields "$fields" --limit 100 --offset "$offset" "$@") || return 1
+    chunk=$(jq -c '.list' <<<"$resp"); n=$(jq 'length' <<<"$chunk")
+    pages+=("$chunk")
+    [[ "$(jq -r '.pageInfo.isLastPage == true' <<<"$resp")" == true || "$n" -eq 0 ]] && break
+    offset=$((offset + n))
+  done
+  printf '%s\n' "${pages[@]}" | jq -cs 'add // []'
+}
 
-# Sum a numeric column
-bash scripts/nocodb-api.sh --raw records.ls <tid> --fields "Amount" --limit 1000 \
-  | jq '[.list[].Amount // 0] | add'
+# Group-by count: distribution of statuses (over the FULL table)
+nocodb_fetch_all m9vsbijhrr9ddeu "Status" \
+  | jq '[.[].Status] | group_by(.) | map({status: .[0], n: length}) | sort_by(.n) | reverse'
+
+# Sum a numeric column (over the FULL table)
+nocodb_fetch_all <tid> "Amount" \
+  | jq '[.[].Amount // 0] | add'
+
+# Sum over a FILTERED subset — trailing flags are forwarded to records.ls
+nocodb_fetch_all <tid> "Amount" --where "(Status,eq,Follow Up 2)" \
+  | jq '[.[].Amount // 0] | add'
 ```
 
-Paginate with `--offset` for tables larger than ~1000 rows. For very large tables, prefer narrow `--where` filters or a Grid view's URL-shared CSV export (`bash scripts/nocodb-api.sh raw POST /export/<viewId>/csv`).
+For very large tables, prefer a narrow `--where` filter (so you paginate fewer rows) or a Grid view's URL-shared CSV export (`bash scripts/nocodb-api.sh raw POST /export/<viewId>/csv`).
 
 For the **full subcommand list**, run `bash scripts/nocodb-api.sh` with no args (the header comment block is the help text), or read [`references/api-reference.md`](references/api-reference.md).
 
@@ -133,6 +163,7 @@ If the base ever changes, update `NOCODB_BASE_ID` in `/etc/openclaw/main.env` an
 - **Where-clause syntax** is v2 by default: `(field,operator,value)` with `~and`/`~or`/`~not` connectives. Prefix the whole clause with `@` for v3 syntax inside v2.
 - **records.create accepts a single object OR an array** for bulk; bulk PATCH/DELETE always take an array of `{id, …}`.
 - **Bulk PATCH/DELETE return an ID array, not the {list,pageInfo} envelope.** Don't expect `.list[0]`.
+- **`records.ls --limit` is silently clamped to 100 by NocoDB Cloud.** A single page is ≤100 rows regardless of the `--limit` you pass. To read or aggregate a whole table, paginate until `pageInfo.isLastPage` (or an empty page), advancing `--offset` by the rows actually returned — never treat a short page as "all rows." See the Aggregations section for the loop. (This silent truncation broke company-finder dedupe on 2026-06-12; fixed in #510.)
 
 ## Authoritative full reference
 
