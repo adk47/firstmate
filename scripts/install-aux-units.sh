@@ -63,6 +63,13 @@
 #     #cs_chats via scripts/clickup-sla-digest.sh. Silent when all
 #     buckets are empty.
 #
+#   /etc/cron.d/stale-ticket-watchdog
+#     Schedules scripts/stale-ticket-watchdog.sh daily to post a
+#     digest of overdue hydra-action-request ClickUp tickets to
+#     #cs_chats C0ANM0PN9L5 (Sandy Vee incident, 2026-05/06: claim
+#     tickets sat unworked for weeks while the support agent kept
+#     re-promising the SLA).
+#
 #   hydra-release.timer / .service
 #     Daily-release cron. Mon..Fri 08:00 Europe/Rome. Invokes
 #     scripts/release-cron.sh, which:
@@ -128,6 +135,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/clickup-sla-digest.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/clickup-sla-digest.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/weekly-cleanup.sh" ]] \
@@ -448,6 +457,18 @@ cat > /etc/cron.d/prod-log-alert-watchdog << PRODLOGWD
 */5 * * * * root $HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh >> /var/log/prod-log-alert-watchdog.log 2>&1
 PRODLOGWD
 chmod 644 /etc/cron.d/prod-log-alert-watchdog
+
+# ─── Stale-ticket watchdog, daily ─────────────────────────────
+# Posts a digest of overdue hydra-action-request ClickUp tickets to
+# #cs_chats (C0ANM0PN9L5). Daily at 08:30 UTC — overdue tickets aren't
+# latency-sensitive and the digest is stateless (it re-lists whatever is
+# overdue NOW), so a workday-morning daily nag is the right cadence.
+# Same ownership rule: edit here + re-run install-aux-units.sh.
+cat > /etc/cron.d/stale-ticket-watchdog << STALETICKETWD
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+30 8 * * * root $HYDRA_ROOT/scripts/stale-ticket-watchdog.sh >> /var/log/stale-ticket-watchdog.log 2>&1
+STALETICKETWD
+chmod 644 /etc/cron.d/stale-ticket-watchdog
 
 # Drop the legacy per-user crontab line if it's still installed.
 # Idempotent: removes the line if present, no-op otherwise.

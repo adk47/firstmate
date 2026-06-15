@@ -53,7 +53,24 @@ const ACTION_LABELS: Record<string, string> = {
 // are NOT tagged — tags are a filtering surface, not a free-form channel.
 const ESCALATION_REASONS = new Set([
   "customer_requested_human", "frustration_detected", "loop_detected",
+  "intercom_email_mismatch",
+  "sla_breach_customer_followup", "on_behalf_claim_manual_review",
 ]);
+
+// Reasons that also bump the ticket to ClickUp Urgent (priority 1) when set
+// on a follow-up append: the customer is already past a promised SLA.
+export const URGENT_ESCALATION_REASONS = new Set(["sla_breach_customer_followup"]);
+
+// Resolve a details.escalation_reason value to its tag, or null when the
+// reason is unknown (unknown values are NOT tagged — tags are a filtering
+// surface, not a free-form channel).
+export function escalationTag(details?: Record<string, unknown>): string | null {
+  const reason = details?.escalation_reason;
+  if (typeof reason === "string" && ESCALATION_REASONS.has(reason)) {
+    return `escalation:${reason.replace(/_/g, "-")}`;
+  }
+  return null;
+}
 
 export function musoProfileUrl(profileId: string): string {
   return `https://credits.muso.ai/profile/${profileId}`;
@@ -159,10 +176,8 @@ export function buildTicketTags(params: {
     `action:${params.actionType}`,
     GROWTH_ACTIONS.has(params.actionType) ? "team:growth" : "team:catalog",
   ];
-  const reason = params.details?.escalation_reason;
-  if (typeof reason === "string" && ESCALATION_REASONS.has(reason)) {
-    tags.push(`escalation:${reason.replace(/_/g, "-")}`);
-  }
+  const escTag = escalationTag(params.details);
+  if (escTag) tags.push(escTag);
   if (params.actionType === "analytics-followup") tags.push("analytics-followup");
   return tags;
 }

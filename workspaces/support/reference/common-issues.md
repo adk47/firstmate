@@ -32,6 +32,25 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
    - **Escalate:** Create a ticket with category "Profile Claim – Pending Review". Include: account email, profile URL they tried to claim, date of submission. SLA: 2 business days.
 4. If claim was rejected and resubmission also rejected:
    - **Escalate:** Create a ticket with category "Profile Claim – Rejected". Include: account email, profile URL, documentation provided. SLA: 2 business days.
+5. If the customer says the profile belongs to someone else they represent (a client, an artist on their roster), STOP – this is not a self-claim. Switch to row 2b below.
+
+---
+
+## 2b. Claiming a profile on behalf of an artist (manager / publisher / label)
+
+**Customer says:** "I manage this artist and need to claim their profile" / "The artist has no social media so they can't claim it" / "We have a contract that gives us the right to administer their catalog."
+
+This is an **on-behalf claim**, NOT a self-claim. The standard claim flow (the artist's own ID scan or social-media login) does not apply, and there is no self-service path for it. It always requires a manual admin review.
+
+**Resolution path:**
+1. NEVER tell the customer the artist must claim the profile themselves. If they have already explained the artist cannot complete self-claim (no social media, deceased, unreachable, contractual delegation), repeating the self-claim instructions is the single worst response – it is exactly what frustrated customers quote back at us.
+2. Collect the on-behalf evidence (any they can provide; screenshots accepted):
+   - Publishing / rights-management / management contract naming the artist
+   - A letter of authorization (LOA) from the artist or rights holder
+   - The customer's own account email and the exact profile URL or name they need access to
+3. Create ONE ticket with `actionType: "profile-claim"` and put `"on_behalf": true`, the representative's relationship (manager / publisher / label), and the documentation summary in `details`. Set `details.escalation_reason: "on_behalf_claim_manual_review"` so the ticket is tagged for human review.
+4. Set the expectation honestly: this is a **manual review by our team with no fixed turnaround** – do NOT quote the standard profile-claim SLA. Say something like: "This kind of access needs a manual review on our side. I've sent the team everything you provided – they'll reach out if anything else is needed."
+5. On any follow-up about the same request, follow the SLA-breach rules (see SOUL.md "Repeat follow-ups") – do not file fresh tickets and do not re-promise turnarounds.
 
 ---
 

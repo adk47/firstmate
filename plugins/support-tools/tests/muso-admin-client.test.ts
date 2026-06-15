@@ -13,6 +13,7 @@ function makeHttp(overrides: Partial<HttpClient> = {}): HttpClient {
   return {
     get: vi.fn(async () => ({ ok: true, data: {} })) as HttpClient["get"],
     post: vi.fn(async () => makeLoginResponse("tok-default")) as HttpClient["post"],
+    put: vi.fn(async () => ({ ok: true, data: {} })) as HttpClient["put"],
     ...overrides,
   };
 }

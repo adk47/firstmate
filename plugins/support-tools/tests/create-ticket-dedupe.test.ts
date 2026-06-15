@@ -14,6 +14,7 @@ function makeHttp(overrides: Partial<HttpClient> = {}): HttpClient {
       COMMENT_URL_RE.test(url)
         ? ({ ok: true, data: { id: "comment_1" } as any })
         : ({ ok: true, data: { id: "task_1" } as any })),
+    put: vi.fn(async () => ({ ok: true, data: {} as any })),
     ...overrides,
   } as unknown as HttpClient;
 }
@@ -348,5 +349,70 @@ describe("create_ticket body, due date and tags", () => {
       "team:growth",
       "escalation:customer-requested-human",
     ]);
+  });
+});
+
+// SLA-breach escalation on follow-up appends (2026-05 Sandy Vee incident:
+// the customer's overdue follow-ups must visibly escalate the existing
+// ticket, not just bury a comment in it).
+describe("create_ticket escalation follow-up", () => {
+  const TAG_URL_RE = /\/api\/v2\/task\/([^/]+)\/tag\/(.+)$/;
+
+  async function fileThenFollowUp(deps: ReturnType<typeof makeDeps>, details?: Record<string, unknown>) {
+    const tool = createCreateTicketTool(deps);
+    await run(tool, CLAIM, "c1");
+    return run(tool, { ...CLAIM, summary: "it has been weeks", details }, "c2");
+  }
+
+  it("sla_breach_customer_followup append tags the ticket and bumps priority to urgent", async () => {
+    const deps = makeDeps();
+    const second = await fileThenFollowUp(deps, { escalation_reason: "sla_breach_customer_followup" });
+    expect(second).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "task_1" });
+
+    const tagCall = vi.mocked(deps.http.post).mock.calls.find(([url]) => TAG_URL_RE.test(url));
+    expect(tagCall).toBeDefined();
+    expect(decodeURIComponent(tagCall![0])).toContain("/task/task_1/tag/escalation:sla-breach-customer-followup");
+
+    const putCalls = vi.mocked(deps.http.put).mock.calls;
+    expect(putCalls).toHaveLength(1);
+    expect(putCalls[0][0]).toContain("/task/task_1");
+    expect((putCalls[0][1] as any).body).toEqual({ priority: 1 });
+  });
+
+  it("non-urgent escalation reason tags but does not bump priority", async () => {
+    const deps = makeDeps();
+    await fileThenFollowUp(deps, { escalation_reason: "on_behalf_claim_manual_review" });
+    const tagCall = vi.mocked(deps.http.post).mock.calls.find(([url]) => TAG_URL_RE.test(url));
+    expect(decodeURIComponent(tagCall![0])).toContain("escalation:on-behalf-claim-manual-review");
+    expect(vi.mocked(deps.http.put).mock.calls).toHaveLength(0);
+  });
+
+  it("plain follow-up (no escalation_reason) neither tags nor bumps", async () => {
+    const deps = makeDeps();
+    await fileThenFollowUp(deps);
+    expect(vi.mocked(deps.http.post).mock.calls.some(([url]) => TAG_URL_RE.test(url))).toBe(false);
+    expect(vi.mocked(deps.http.put).mock.calls).toHaveLength(0);
+  });
+
+  it("unknown escalation_reason is ignored (no tag, no bump)", async () => {
+    const deps = makeDeps();
+    await fileThenFollowUp(deps, { escalation_reason: "made_up_reason" });
+    expect(vi.mocked(deps.http.post).mock.calls.some(([url]) => TAG_URL_RE.test(url))).toBe(false);
+    expect(vi.mocked(deps.http.put).mock.calls).toHaveLength(0);
+  });
+
+  it("tag/priority failures still return updated_existing (comment already landed)", async () => {
+    const deps = makeDeps({
+      http: makeHttp({
+        post: vi.fn(async (url: string) => {
+          if (COMMENT_URL_RE.test(url)) return { ok: true, data: { id: "comment_1" } as any };
+          if (TAG_URL_RE.test(url)) return { ok: false, error: "API error", status: 500 } as any;
+          return { ok: true, data: { id: "task_1" } as any };
+        }),
+        put: vi.fn(async () => ({ ok: false, error: "API error", status: 500 } as any)),
+      }),
+    });
+    const second = await fileThenFollowUp(deps, { escalation_reason: "sla_breach_customer_followup" });
+    expect(second).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "task_1" });
   });
 });

@@ -15,6 +15,7 @@ function makeHttp(over: Partial<HttpClient> = {}): HttpClient {
   return {
     get: vi.fn(async () => ({ ok: true, data: {} })) as HttpClient["get"],
     post: vi.fn(async () => ({ ok: true, data: {} })) as HttpClient["post"],
+    put: vi.fn(async () => ({ ok: true, data: {} })) as HttpClient["put"],
     ...over,
   };
 }

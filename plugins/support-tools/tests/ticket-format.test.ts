@@ -177,6 +177,15 @@ describe("buildTicketTags", () => {
     expect(
       buildTicketTags({ actionType: "support-general", tier: 1, details: { escalation_reason: "loop_detected" } }),
     ).toContain("escalation:loop-detected");
+    expect(
+      buildTicketTags({ actionType: "support-general", tier: 1, details: { escalation_reason: "intercom_email_mismatch" } }),
+    ).toContain("escalation:intercom-email-mismatch");
+    expect(
+      buildTicketTags({ actionType: "profile-claim", tier: 1, details: { escalation_reason: "sla_breach_customer_followup" } }),
+    ).toContain("escalation:sla-breach-customer-followup");
+    expect(
+      buildTicketTags({ actionType: "profile-claim", tier: 1, details: { escalation_reason: "on_behalf_claim_manual_review" } }),
+    ).toContain("escalation:on-behalf-claim-manual-review");
   });
 
   it("ignores unknown escalation reasons (no free-form tag injection)", () => {

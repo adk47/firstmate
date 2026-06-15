@@ -13,6 +13,8 @@ import {
   buildTicketMarkdown,
   buildFollowupComment,
   buildTicketTags,
+  escalationTag,
+  URGENT_ESCALATION_REASONS,
   slaDueDateMs,
   musoProfileUrl,
   intercomDeeplink,
@@ -276,6 +278,27 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         );
         if (comment?.ok) {
           sessionTickets.record(sessionId, params.actionType, params.customerEmail, existingId);
+          // Escalation follow-up (e.g. customer already past the promised
+          // SLA): give it teeth — tag the ticket so the overdue sweep groups
+          // it, and bump urgent reasons to ClickUp priority 1. Both
+          // best-effort: the comment already landed, so a tag/priority hiccup
+          // must not regress the customer-facing result.
+          const escTag = escalationTag(params.details);
+          if (escTag) {
+            const tagged = await http.post(
+              `https://api.clickup.com/api/v2/task/${existingId}/tag/${encodeURIComponent(escTag)}`,
+              { headers: { Authorization: clickupApiKey }, body: {} },
+            );
+            if (!tagged?.ok) console.warn(`[support-tools] create_ticket escalation tag failed for ${existingId} (${escTag})`);
+            const reason = params.details?.escalation_reason;
+            if (typeof reason === "string" && URGENT_ESCALATION_REASONS.has(reason)) {
+              const bumped = await http.put(
+                `https://api.clickup.com/api/v2/task/${existingId}`,
+                { headers: { Authorization: clickupApiKey }, body: { priority: 1 } },
+              );
+              if (!bumped?.ok) console.warn(`[support-tools] create_ticket priority bump failed for ${existingId}`);
+            }
+          }
           return ticketResult({ submitted: true, updated_existing: true, ticket_id: existingId, sla, action_type: params.actionType, tier });
         }
         // Comment failed — fall through to creating a fresh ticket (today's

@@ -5,6 +5,7 @@ export type HttpResult<T = unknown> =
 export interface HttpClient {
   get<T = unknown>(url: string, opts: { headers?: Record<string, string> }): Promise<HttpResult<T>>;
   post<T = unknown>(url: string, opts: { headers?: Record<string, string>; body?: unknown }): Promise<HttpResult<T>>;
+  put<T = unknown>(url: string, opts: { headers?: Record<string, string>; body?: unknown }): Promise<HttpResult<T>>;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -45,6 +46,14 @@ export function createHttpClient(): HttpClient {
       const headers = { "Content-Type": "application/json", ...opts.headers };
       return request<T>(url, {
         method: "POST",
+        headers,
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+      });
+    },
+    put<T>(url: string, opts: { headers?: Record<string, string>; body?: unknown }) {
+      const headers = { "Content-Type": "application/json", ...opts.headers };
+      return request<T>(url, {
+        method: "PUT",
         headers,
         body: opts.body ? JSON.stringify(opts.body) : undefined,
       });

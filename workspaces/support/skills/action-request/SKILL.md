@@ -69,6 +69,8 @@ The match is mechanical, and slightly wider than one conversation: the tool also
 
 Only a genuinely different request (different `actionType`) is guaranteed a new ticket.
 
+**SLA-breach follow-ups:** if the customer is following up because the original promise has already passed (they cite the wait, or the prior chat is older than the quoted SLA), this is an escalation, not just an append. Make the same-`actionType` call but set `details.escalation_reason: "sla_breach_customer_followup"` — the ticket gets tagged `escalation:sla-breach-customer-followup` and surfaces in the team's overdue sweep. In the reply, do NOT quote the SLA again (it already failed once); use the SLA-breach template below. Full doctrine: SOUL.md "Repeat follow-ups on an unresolved request".
+
 ## Action Types and Tiers
 
 | Action Type | Tier | SLA | Examples |
@@ -242,6 +244,12 @@ Use `ticket_id` as the reference and `sla` verbatim from the response:
 ### Updated existing request (`submitted: true, updated_existing: true`)
 
 "I've added that to your existing request — same reference `<ticket_id>`, the team will see the update."
+
+Do NOT re-quote the `sla` on an `updated_existing` response — the clock started when the ticket was first filed, and repeating the timeframe on every follow-up reads as a fresh promise.
+
+### Overdue follow-up (`updated_existing: true` and the original SLA has passed)
+
+"You're right that this has taken longer than it should – that's on us. I've raised the priority on your existing request (`<ticket_id>`) so it's flagged for the team's overdue review. I won't quote you another timeframe I can't guarantee, but it is marked at the highest priority I can set."
 
 ### Not submitted – rate limited (`submitted: false, reason: "rate_limited"`)
 "Looks like a request is already on the way to our team for you. You'll hear back soon."
