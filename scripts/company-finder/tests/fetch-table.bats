@@ -17,7 +17,9 @@ setup() {
 # defaulting at source-time is exercised per-test.
 fetch() { # <totalRows> [env VAR=VAL ...]
   local total="$1"; shift
-  env NOCODB_STUB_TOTAL_ROWS="$total" "$@" bash -c '
+  # NOCODB_PAGE_SLEEP=0 keeps the suite instant; a later "$@" override wins, so
+  # the pacing test below can still pass a non-zero value.
+  env NOCODB_STUB_TOTAL_ROWS="$total" NOCODB_PAGE_SLEEP=0 "$@" bash -c '
     set -euo pipefail
     source "$0"
     fetch_table sometable "Some Table" "Id" SRC_UNAVAILABLE
@@ -48,6 +50,15 @@ fetch() { # <totalRows> [env VAR=VAL ...]
   run fetch 0
   [ "$status" -eq 0 ]
   [ "$(jq -c '.' <<<"$output")" = "[]" ]
+}
+
+@test "a non-zero NOCODB_PAGE_SLEEP paces pages without truncating the snapshot" {
+  # The 2026-06-13 throttle fix added an inter-page sleep; pin that pacing can
+  # never drop or duplicate a row across the 3 paged fetches of a 250-row table.
+  run fetch 250 PAGE_LIMIT=100 NOCODB_PAGE_SLEEP=0.01
+  [ "$status" -eq 0 ]
+  [ "$(jq 'length' <<<"$output")" = "250" ]
+  [ "$(jq 'map(.Id) | unique | length' <<<"$output")" = "250" ]
 }
 
 @test "unavailable source still exits 2 with the caller's marker" {

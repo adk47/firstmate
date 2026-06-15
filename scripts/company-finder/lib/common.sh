@@ -19,6 +19,11 @@ LEDGER_TABLE_TITLE="Company Seen Ledger"
 # for what we'll actually get. fetch_table no longer trusts this value for
 # termination either way (see the isLastPage/empty-page loop).
 PAGE_LIMIT="${PAGE_LIMIT:-100}"
+# Seconds slept between page fetches so a single sequential reader stays under
+# NocoDB Cloud's 5 req/s/user limit. The wrapper (nocodb-api.sh) backs off on a
+# 429; this keeps us from tripping it in the first place. Tests set 0.
+# ~22 pages * 0.25s ≈ 5.5s added per full Company Intelligence snapshot.
+NOCODB_PAGE_SLEEP="${NOCODB_PAGE_SLEEP:-0.25}"
 
 CF_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -73,7 +78,8 @@ resolve_ledger_table_id() {
 
 # fetch_table <tableId> <label> <fields> <marker> — paginate the table,
 # retry each page once, emit a JSON array of RAW rows (callers do their own
-# mapping). On a source still unavailable after the retry, prints
+# mapping). Sleeps NOCODB_PAGE_SLEEP between pages to stay under NocoDB Cloud's
+# 5 req/s/user limit. On a source still unavailable after the retry, prints
 # "<marker>: <label> (<tid>)" to stderr and returns 2.
 fetch_table() {
   local tid="$1" label="$2" fields="$3" marker="$4"
@@ -103,6 +109,7 @@ fetch_table() {
     islast=$(jq -r '.pageInfo.isLastPage == true' <<<"$resp")
     [[ "$islast" == "true" || "$pagelen" -eq 0 ]] && break
     offset=$((offset + pagelen))
+    sleep "$NOCODB_PAGE_SLEEP"   # pace under NocoDB Cloud's 5 req/s/user limit
   done
   jq -cs 'add // []' <<<"$pages"
 }

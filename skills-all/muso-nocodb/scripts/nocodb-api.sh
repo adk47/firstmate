@@ -6,6 +6,8 @@
 #   NOCODB_API_URL       default https://app.nocodb.com/api/v2
 #   NOCODB_BASE_ID       default p11hvpwapu4hv0x (B2B-ADS-intelligence). Override per call with --base.
 #   NOCODB_WORKSPACE_ID  default w8fofvl1 (marketing)
+#   NOCODB_MAX_RETRIES   default 3   — attempts on HTTP 429 before giving up
+#   NOCODB_RETRY_BASE    default 30  — fallback wait (s) on 429 with no Retry-After
 #
 # Flags (anywhere before the subcommand):
 #   --dry-run     print the curl command instead of executing
@@ -82,6 +84,9 @@
 #   raw <METHOD> <pathAfterApiV2> [jsonBody]      escape hatch — auth header added for you
 #
 # Exit codes: 0 success, 1 usage error, 2 missing env, 3 HTTP error
+#             On HTTP 429 (NocoDB Cloud's 5 req/s/user limiter, 30s block) the
+#             request is retried per NOCODB_MAX_RETRIES / NOCODB_RETRY_BASE
+#             before exit 3 — see _curl_with_backoff.
 # ──────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -89,6 +94,12 @@ set -euo pipefail
 : "${NOCODB_API_URL:=https://app.nocodb.com/api/v2}"
 : "${NOCODB_BASE_ID:=p11hvpwapu4hv0x}"
 : "${NOCODB_WORKSPACE_ID:=w8fofvl1}"
+# NocoDB Cloud rate-limits the Data API to 5 req/s/user and hard-blocks for a
+# fixed 30s on breach (HTTP 429 ThrottlerException). _curl_with_backoff retries
+# a 429 up to NOCODB_MAX_RETRIES times, waiting Retry-After if the response
+# carries one else NOCODB_RETRY_BASE seconds. Tests set RETRY_BASE=0 to stay fast.
+: "${NOCODB_MAX_RETRIES:=3}"
+: "${NOCODB_RETRY_BASE:=30}"
 
 if [[ -z "${NOCODB_API_TOKEN:-}" ]]; then
   echo "ERROR: NOCODB_API_TOKEN env var not set. Skill requires a NocoDB Personal Access Token (nc_pat_...)." >&2
@@ -140,6 +151,48 @@ emit_body() {
   fi
 }
 
+# _curl_with_backoff <label> <url> <curl_args...>
+# Runs curl, capturing response headers to a tempfile so a 429 can read its
+# (optional) Retry-After. On HTTP 429 — NocoDB Cloud's per-user limiter, which
+# blocks for a fixed 30s — wait Retry-After if present else NOCODB_RETRY_BASE,
+# up to NOCODB_MAX_RETRIES attempts, then fall through to emit_body's exit 3.
+# Any non-429 result passes straight to emit_body, so fast-fail is unchanged.
+# The body+code still arrive via the caller's -w '\n%{http_code}', so emit_body
+# is untouched; -D only feeds the Retry-After read.
+_curl_with_backoff() {
+  local label="$1" url="$2"; shift 2
+  local attempt=0 raw rc http_code hdrs ra
+  # One tempfile, reused across retries: curl's -D truncates it on each attempt,
+  # so every Retry-After read sees only that attempt's response headers.
+  hdrs=$(mktemp)
+  while : ; do
+    set +e
+    raw=$(curl "$@" -D "$hdrs" "$url")
+    rc=$?
+    set -e
+    if [[ "$rc" -ne 0 ]]; then
+      # Transport failure (DNS/TLS/connect) — not an HTTP status to back off on.
+      # Preserve the pre-change behavior: surface curl's exit, don't fake a 200.
+      rm -f "$hdrs"
+      return "$rc"
+    fi
+    http_code="${raw##*$'\n'}"
+    if [[ "$http_code" == "429" && "$attempt" -lt "$((NOCODB_MAX_RETRIES - 1))" ]]; then
+      # `|| true` is REQUIRED: a 429 may omit Retry-After (it is optional), so the
+      # grep can no-match and, under set -euo pipefail, abort the assignment before
+      # the NOCODB_RETRY_BASE fallback below (the intercom-request.sh defect class).
+      ra=$(grep -i '^Retry-After:' "$hdrs" 2>/dev/null | awk '{print $2}' | tr -d '\r' || true)
+      [[ -z "$ra" ]] && ra="$NOCODB_RETRY_BASE"
+      sleep "$ra"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    break
+  done
+  rm -f "$hdrs"
+  emit_body "$raw" "$http_code" "$label"
+}
+
 # do_curl <method> <path> [body]
 # Auth header added. Path is appended to NOCODB_API_URL.
 do_curl() {
@@ -153,9 +206,7 @@ do_curl() {
     printf 'DRY-RUN: curl %s "%s"\n' "${curl_args[*]/$PAT/<redacted>}" "$url" >&2
     return 0
   fi
-  local raw
-  raw=$(curl "${curl_args[@]}" "$url")
-  emit_body "$raw" "${raw##*$'\n'}" "$method $path"
+  _curl_with_backoff "$method $path" "$url" "${curl_args[@]}"
 }
 
 # do_multipart <localFile> [storagePath]
@@ -166,15 +217,16 @@ do_multipart() {
     printf 'DRY-RUN: curl -X POST -H "xc-token: <redacted>" -F "file=@%s" "%s"\n' "$file" "$url" >&2
     return 0
   fi
-  local raw
-  raw=$(curl -sS -w '\n%{http_code}' -X POST -H "xc-token: ${PAT}" -F "file=@${file}" "$url")
-  emit_body "$raw" "${raw##*$'\n'}" "POST /storage/upload"
+  _curl_with_backoff "POST /storage/upload" "$url" \
+    -sS -w '\n%{http_code}' -X POST -H "xc-token: ${PAT}" -F "file=@${file}"
 }
 
 case "$CMD" in
   # ── auth / workspaces / bases ─────────────────────────────────────────
   auth.me)
-    # /me lives in v1 only; bypass the v2 prefix for this one.
+    # /me lives in v1 only; bypass the v2 prefix for this one. A one-shot
+    # diagnostic, not in the throttled hot loop — intentionally not wrapped in
+    # _curl_with_backoff.
     if [[ "$DRY_RUN" == "1" ]]; then
       printf 'DRY-RUN: curl -H "xc-token: <redacted>" "https://app.nocodb.com/api/v1/auth/user/me"\n' >&2
       exit 0

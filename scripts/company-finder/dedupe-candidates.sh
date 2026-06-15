@@ -87,10 +87,15 @@ LEDGER_ROWS="$(fetch_label "$LEDGER_TABLE_ID" "Seen Ledger")"
 EXISTING="$(jq -c -s 'add' <<<"$COMPANY_ROWS"$'\n'"$CONTACT_ROWS"$'\n'"$LEDGER_ROWS")"
 
 # ── Classify (single jq; normalization applied identically to both sides) ────
-jqn -n --argjson existing "$EXISTING" --argjson cands "$CANDS" '
+# EXISTING (the full 3-table snapshot — thousands of rows) is fed on STDIN, not
+# via --argjson: a single argv string is capped at MAX_ARG_STRLEN (128KB), which
+# the ~300KB snapshot overflows once the read actually completes ("jq: Argument
+# list too long", 2026-06-13, exposed by the NocoDB throttling fix). CANDS is a
+# bounded discovery batch, so it stays on argv.
+jqn --argjson cands "$CANDS" '
   include "normalize";
 
-  ($existing | map(. + {nd: (.domain | norm_domain), nn: (.name | norm_name)})) as $ex
+  (map(. + {nd: (.domain | norm_domain), nn: (.name | norm_name)})) as $ex
   | ($ex | map(select(.nd != "")) | map({key: .nd, value: .}) | from_entries) as $bydom
   | ($ex | map(select(.nn != "")) | map({key: .nn, value: .}) | from_entries) as $byname
   | ($ex | map(select(.nn != "" and (.nn | length) >= 4))) as $exnames
@@ -133,4 +138,4 @@ jqn -n --argjson existing "$EXISTING" --argjson cands "$CANDS" '
           end)
   | del(.bnd, .bnn)
   | . + {stats: {checked: ($cands | length), new: (.new | length), dropped: (.duplicates | length)}}
-'
+' <<<"$EXISTING"

@@ -184,3 +184,17 @@ EOF
   run bash "$SUT" <<<'{"not":"an array"}'
   [ "$status" -eq 1 ]
 }
+
+@test "a large existing snapshot (~6k rows) classifies without an argv overflow" {
+  # The full 3-table snapshot is thousands of rows (~300KB live). A single argv
+  # string is capped at MAX_ARG_STRLEN (128KB), so passing EXISTING via
+  # --argjson dies "jq: Argument list too long" the moment the read completes —
+  # which is exactly what the NocoDB throttling fix made reachable (2026-06-13).
+  # The stub serves NOCODB_STUB_TOTAL_ROWS rows per table; 2000*3 = 6000 rows
+  # overflows the old argv path and must now go through stdin.
+  export NOCODB_STUB_TOTAL_ROWS=2000
+  run_dedupe '[{"name":"Soundtrap","domain":"soundtrap.com"}]'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.stats.checked' <<<"$output")" = "1" ]
+  [ "$(jq -r '.stats.new' <<<"$output")" = "1" ]
+}
