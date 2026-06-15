@@ -319,6 +319,7 @@
           "muso-ops-claiming",
           "muso-ops-audit",
           "muso-intercom",
+          "muso-abuse-block",
           "muso-verify-profile",
           "muso-audit-profile-credits",
           "muso-refund-processor",

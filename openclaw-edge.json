@@ -284,7 +284,8 @@
             "whatsapp",
             "messenger",
             "tiktok",
-            "sms"
+            "sms",
+            "abuse-block"
           ],
           "personalization": {
             "enabled": true,

@@ -1005,6 +1005,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_close_resolved_conversations
+      - name: Run abuse-block list tests
+        # skills-all/muso-abuse-block/scripts/abuse-block.py is CUSTOMER-FACING:
+        # tagging a contact silences Caroline for them. These lock the dry-run
+        # gate (no writes without --apply), refuse-on-no-contact, the
+        # block-POSTs/remove-DELETEs asymmetry, and the admin_id on the
+        # conversation-tag write — so a regression can't silently mis-block a
+        # customer. Same bare stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_abuse_block
 
   plugin-tests:
     name: Plugin tests (vitest)
