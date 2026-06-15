@@ -63,6 +63,16 @@
 #     #cs_chats via scripts/clickup-sla-digest.sh. Silent when all
 #     buckets are empty.
 #
+#   close-merged-tickets.timer / .service
+#     Daily 07:00 UTC. Runs scripts/dedup/sweeps/close-merged-tickets.sh
+#     --apply to close ClickUp profile-merge tickets whose merge already
+#     executed (per action_log over Trino). Caroline files these tickets
+#     but never merges — Ops executes the tier-2 merge later, and without
+#     a schedule the closed-out tickets piled up on the action-request
+#     board (Jan, 2026-06-15). The default customer-reply audit keeps it
+#     safe: only tickets where the customer was told post-merge are
+#     closed; the rest stay open for notify-merged-customers.py.
+#
 #   /etc/cron.d/stale-ticket-watchdog
 #     Schedules scripts/stale-ticket-watchdog.sh daily to post a
 #     digest of overdue hydra-action-request ClickUp tickets to
@@ -141,6 +151,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/weekly-cleanup.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/weekly-cleanup.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/dedup/sweeps/close-merged-tickets.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/dedup/sweeps/close-merged-tickets.sh missing or not executable"
 
 log "installing into $HYDRA_ROOT"
 
@@ -313,6 +325,55 @@ sla=clickup-sla-digest.timer
 systemctl enable "$sla" >/dev/null 2>&1 || log "WARN: could not enable $sla"
 systemctl start "$sla" >/dev/null 2>&1 || log "WARN: could not start $sla"
 log "  $sla: $(systemctl is-active "$sla" 2>/dev/null || echo unknown)"
+
+# ─── Close already-merged ClickUp profile-merge tickets, daily ─
+# Caroline files profile-merge tickets but NEVER merges; Operations executes
+# the tier-2 merge later, and the ticket only closes when someone runs
+# close-merged-tickets.sh by hand. With no schedule, executed merges left
+# their tickets open and the action-request board grew a stale merge backlog
+# (Jan, 2026-06-15). This timer runs the sweep daily so tickets whose merge
+# is already in action_log auto-close. Safe to automate: --apply keeps the
+# default customer-reply audit ON, so it only closes tickets where the
+# customer got an admin reply AFTER the merge; everything else is left open
+# under needs_human_reply for the notify-merged-customers.py workflow.
+# Tokens (CLICKUP_API_KEY, MUSOAI_INTERCOM_TOKEN) come from the same env files
+# the SLA-digest unit uses. MUSO_BIN is pinned because the sweep queries the
+# action_log over Trino via the muso CLI (the other scheduled Trino job uses
+# trino-query.sh, not muso). 07:00 UTC is before the 08:30 stale-ticket and
+# America/New_York SLA digests, so those reflect the freshly-closed state.
+cat > /etc/systemd/system/close-merged-tickets.service << CLOSEMERGEDSVC
+[Unit]
+Description=Close ClickUp profile-merge tickets whose merge already executed
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=MUSO_BIN=/usr/local/bin/muso
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=$HYDRA_ROOT/scripts/dedup/sweeps/close-merged-tickets.sh --apply
+CLOSEMERGEDSVC
+
+cat > /etc/systemd/system/close-merged-tickets.timer << CLOSEMERGEDTMR
+[Unit]
+Description=Daily sweep — close ClickUp tickets whose profile-merge already executed
+
+[Timer]
+OnCalendar=*-*-* 07:00:00 UTC
+# If node-8 was down at 07:00, fire on next boot rather than skip the day.
+Persistent=true
+RandomizedDelaySec=30s
+Unit=close-merged-tickets.service
+
+[Install]
+WantedBy=timers.target
+CLOSEMERGEDTMR
+
+systemctl daemon-reload
+cm=close-merged-tickets.timer
+systemctl enable "$cm" >/dev/null 2>&1 || log "WARN: could not enable $cm"
+systemctl start "$cm" >/dev/null 2>&1 || log "WARN: could not start $cm"
+log "  $cm: $(systemctl is-active "$cm" 2>/dev/null || echo unknown)"
 
 # ─── Gateway pre-start self-heal drop-ins ─────────────────────
 # One drop-in per profile, hard-coded with the profile name (the

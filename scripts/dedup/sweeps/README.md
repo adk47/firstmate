@@ -37,10 +37,19 @@ Find ClickUp `profile-merge` tickets whose merge already executed
 | `PAGINATION_CAP`  | `20` | max ClickUp pages walked (~100 tasks/page) |
 | `CLOSE_ADD_ASSIGNEES` | `99656609` (Nick) | comma-separated ClickUp user IDs added as assignees on each closed ticket. Empty string disables. |
 
-On hydra the gateway service env carries `CLICKUP_API_KEY`; for ad-hoc runs:
+Both tokens live in the gateway env files. For ad-hoc runs, source them the
+same way the systemd unit does (no need to scrape `/proc`):
 
-    pid=$(systemctl show openclaw-gateway-main.service -p MainPID --value)
-    eval $(cat /proc/$pid/environ | tr '\0' '\n' | grep '^CLICKUP_API_KEY=' | sed 's/^/export /')
+    set -a; . /etc/openclaw/shared.env; . /etc/openclaw/edge.env; set +a
+    bash scripts/dedup/sweeps/close-merged-tickets.sh        # dry-run
+
+### Schedule
+
+Runs daily at **07:00 UTC** via `close-merged-tickets.timer` (installed by
+`scripts/install-aux-units.sh`), invoking `--apply` with the customer-reply
+audit ON. Inspect with `systemctl list-timers close-merged-tickets.timer` and
+`journalctl -u close-merged-tickets.service`. Run by hand any time for an
+on-demand "clean the queue" pass.
 
 ### What it does
 
@@ -62,7 +71,9 @@ The 2026-05-19 dry-run found **15/27 open profile-merge tickets had
 already been merged** by Jan/Yann (via `muso-ops-profiles` skill +
 `/admin/profiles/merge`) but the ClickUp ticket was never closed —
 the muso-ops-profiles workflow doesn't auto-close. This sweep is the
-backstop until that's fixed at the source.
+backstop until that's fixed at the source — now run daily by
+`close-merged-tickets.timer` (see **Schedule** above) so executed merges
+stop accumulating open tickets on the board.
 
 ## notify-merged-customers.py
 

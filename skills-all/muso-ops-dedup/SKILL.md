@@ -158,6 +158,11 @@ Use when Jan says "check ClickUp for tickets that are already merged"
 or "clean up the merge-request queue". Finds open ClickUp profile-merge
 tickets whose merge already executed (per `action_log`) and closes them.
 
+> **Now runs automatically.** `close-merged-tickets.timer` fires this sweep
+> daily at 07:00 UTC with `--apply` (installed by `install-aux-units.sh`), so
+> already-merged tickets close on their own. The manual runs below are for an
+> on-demand pass or to inspect what the next timer fire will do.
+
 **Dry-run first** (always):
 ```bash
 bash /opt/hydra/scripts/dedup/sweeps/close-merged-tickets.sh
