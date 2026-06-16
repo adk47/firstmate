@@ -186,11 +186,30 @@ notify_slack() {
 # treats that as fatal — npm's default leaves the previous global binary
 # in place on a failed install, so aborting the deploy avoids continuing
 # on a half-updated runtime.
+
+# Resolve the installed version of an externalized @openclaw/* plugin from the
+# runtime's OWN ledger (`plugins list --json`, keyed by plugin id) rather than a
+# guessed filesystem path. openclaw 2026.6.x isolates externalized installs
+# under ~/.openclaw-<p>/npm/projects/openclaw-<pkg>-<hash>/node_modules/...
+# (upstream #88794) instead of ~/.openclaw-<p>/npm/node_modules/<pkg>/, so the
+# old fixed-path package.json read returned "missing" even after a SUCCESSFUL
+# install and FATAL'd Step 4d.5 on every 6.x deploy (Deploy HYDRA, 2026-06-16:
+# "@openclaw/slack on main is 'missing' after install" — slack@2026.6.1 was in
+# fact installed, loaded, and serving). Plugin id is the unscoped package name
+# (@openclaw/slack -> slack, @openclaw/codex -> codex). `plugins list` is a flat
+# JSON array in current builds; tolerate a {plugins:[...]} wrapper defensively.
+plugin_runtime_version() { # <profile> <pkg e.g. @openclaw/slack>
+  local profile="$1" id="${2##*/}"
+  openclaw --profile "$profile" plugins list --json 2>/dev/null \
+    | jq -r --arg id "$id" '(.plugins // .)[]? | select(.id == $id) | .version // empty' 2>/dev/null \
+    | head -1
+}
+
 install_external_plugin() {
   # Pins ONE externalized @openclaw/* plugin per-profile under
   # ~/.openclaw-<profile>/npm/. Args: <pkg> <version> (e.g.
-  # "@openclaw/slack" "2026.5.27"). Idempotent: skips when the live
-  # package.json already reports the target version.
+  # "@openclaw/slack" "2026.5.27"). Idempotent: skips when the runtime
+  # ledger (plugins list) already reports the target version.
   #
   # --force is REQUIRED for the upgrade path: `openclaw plugins install`
   # refuses to overwrite an already-installed plugin ("plugin already
@@ -204,15 +223,10 @@ install_external_plugin() {
   # spec as the exact resolved version so a stray `plugins update --all`
   # can never float it off the pinned build.
   local pkg="$1" version="$2"
-  local profile pkg_json installed
+  local profile installed
   for profile in main edge; do
     if ! needs_target "$profile"; then continue; fi
-    pkg_json="/root/.openclaw-${profile}/npm/node_modules/${pkg}/package.json"
-    if [[ -f "$pkg_json" ]]; then
-      installed=$(jq -r '.version // empty' "$pkg_json" 2>/dev/null || echo "")
-    else
-      installed=""
-    fi
+    installed=$(plugin_runtime_version "$profile" "$pkg")
     if [[ "$installed" == "$version" ]]; then
       log "    ${pkg} already $version on $profile — skipping"
       continue
@@ -225,10 +239,10 @@ install_external_plugin() {
       echo "$install_out" | sed 's/^/        /'
       return 1
     fi
-    # Trust the manifest, not the exit code: a 0 rc that left the old
-    # version on disk would silently ship a mismatched plugin.
-    # Re-read package.json and fail loud if the pin did not take.
-    installed=$(jq -r '.version // empty' "$pkg_json" 2>/dev/null || echo "")
+    # Trust the runtime ledger, not the exit code: a 0 rc that left the old
+    # version pinned would silently ship a mismatched plugin. Re-read the
+    # installed version (path-independent) and fail loud if the pin missed.
+    installed=$(plugin_runtime_version "$profile" "$pkg")
     if [[ "$installed" != "$version" ]]; then
       log "    ✗ ${pkg} on $profile is '${installed:-missing}' after install, expected '$version'"
       return 1
