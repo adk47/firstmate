@@ -14,7 +14,7 @@ import { deriveConvId } from "./dedupe-check.js";
 // `customer-credit-verification` skill to work from.
 //
 // It NEVER approves, never rejects, never writes, never reaches a credit-request
-// mutation endpoint (the MusoAdminClient is structurally GET-only). The only
+// mutation endpoint (this tool's MusoAdminClient is structurally GET-only). The only
 // state change Caroline ever makes is filing a recommend-approve ticket via
 // create_ticket; the irreversible PUT status=approved stays behind
 // enforce_credit_approve_gate in muso-admin-api.sh, executed by a human/ops.
@@ -74,46 +74,30 @@ export interface ProfileBody {
   workspaces?: Workspace[];
 }
 
-// Raw credit-request item shape. Field names are taken from the SAME endpoint
-// (`GET /admin/credit-requests?...`) that the ops pipeline reads, where the
-// authoritative shape is: cr_id=.id, isrc=.metadata.isrc, role=.credits[]
-// (string array), and the track ARTISTS are `.spotifyTrackArtists[].name`
-// (confirmed in muso-ops-credit-verification/scripts/profile-audit.sh, which
-// reads `.spotifyTrackArtists[].name` off the unverified-credit items). The
-// `.artist`/`.artists`/`.title` fields below are defensive fallbacks only and
-// are NOT known to exist on a live item.
+// Raw credit-request item shape, confirmed against the live
+// `GET /admin/credit-requests?profilesIds=<id>&status=user_verification_needed`
+// endpoint by the pre-enable smoke (2026-06-15, 200/200 live UVN items):
+// cr_id=.id, track TITLE=.spotifyTrackTitle, track ARTISTS=.spotifyTrackArtists[].name,
+// role=.credits[] (string array), isrc=.metadata.isrc.
 //
-// NB — VERIFY before flipping the dark-ship flag on (see index.ts
-// creditVerificationEnabled), against a real
-// `GET /admin/credit-requests?profilesIds=<id>&status=user_verification_needed&limit=1`:
-// 1. The track-TITLE field name is unconfirmed against a live response — no ops
-//    script reads one. We prefer the spotifyTrack* convention
-//    (`.spotifyTrackName`, parallel to `.spotifyTrackArtists`) and fall back to
-//    `.title`.
-// 2. The GET FILTER semantics are unconfirmed: ops scripts only GET
-//    `status=unverified` (UVN appears only as a PUT target), and no script has
-//    exercised `profilesIds` + `status=user_verification_needed` as a GET
-//    combination. This tool necessarily TRUSTS the upstream filter — items
-//    carry no per-item owner field to re-check — so the smoke test must confirm
-//    the API actually filters by BOTH params (a 200 returning a global or
-//    unfiltered list would surface other customers' pending credits).
-// 3. After the smoke test, DELETE whichever defensive fallback fields
-//    (`.artist`/`.artists`/`.title` and their extract branches) turn out not to
-//    exist on a live item — they are hedges, not permanent API surface.
-// 4. Confirm the server honors `limit=MAX_UVN_CREDITS+1` (101) un-clamped: a
-//    server-side clamp to ≤100 would silently defeat the truncation detection
-//    below (items.length never exceeds the cap → a 150-credit profile presents
-//    a capped page as the complete set).
-// 5. Confirm `profile/search?keyword=<email>` actually matches workspace
-//    emails — no repo code exercises search-by-email. If search is name-only,
-//    the no-URL path fails closed for every legitimate owner (safe but
-//    functionally dead; the skill would always need a profile URL).
+// The same smoke confirmed the three invariants the flag-gated flow relies on
+// (re-confirm the first before each flag flip — it is server-side, and the tool
+// keeps no per-item owner field to re-check it against):
+//  1. the GET honors BOTH `profilesIds` AND `status=user_verification_needed`
+//     server-side — a bogus profileId fails closed to an empty list rather than
+//     leaking the global pool — so trusting the upstream filter is sound.
+//  2. `limit=MAX_UVN_CREDITS+1` (101) is NOT clamped, so the truncation check
+//     below (items.length > MAX_UVN_CREDITS) fires for >100-credit profiles.
+//  3. `profile/search?keyword=<email>` does not surface workspace-claimed
+//     profiles, so the no-URL owner-resolution path is safe-but-dead (each
+//     candidate is re-ownership-checked regardless; the skill always asks for a
+//     profile URL).
+//
+// The earlier `.spotifyTrackName`/`.title`/`.artist`/`.artists` guesses were
+// absent on every live item and have been removed — hedges, not API surface.
 export interface CreditRequestItem {
   id?: string;
-  title?: string;
-  spotifyTrackName?: string;
-  artist?: string;
-  artists?: Array<string | { name?: string }>;
+  spotifyTrackTitle?: string;
   spotifyTrackArtists?: Array<string | { name?: string }>;
   credits?: Array<string | { child?: string }>;
   metadata?: { isrc?: string | null };
@@ -189,20 +173,16 @@ function namesFrom(arr: unknown): string[] {
 }
 
 function extractArtist(item: CreditRequestItem): string {
-  // Live shape: `.spotifyTrackArtists[].name` (confirmed in profile-audit.sh).
-  // `.artist`/`.artists` are defensive fallbacks that may not exist on a real item.
-  const primary = namesFrom(item.spotifyTrackArtists);
-  if (primary.length) return primary.join(", ");
-  if (typeof item.artist === "string" && item.artist.trim()) return item.artist;
-  return namesFrom(item.artists).join(", ");
+  // Live shape: `.spotifyTrackArtists[].name` (confirmed populated 200/200 in
+  // the pre-enable smoke).
+  return namesFrom(item.spotifyTrackArtists).join(", ");
 }
 
 function extractTrackTitle(item: CreditRequestItem): string {
-  // Track-title field name is unconfirmed against a live item (see
-  // CreditRequestItem comment). Prefer the spotifyTrack* convention, fall back
-  // to `.title`.
-  if (typeof item.spotifyTrackName === "string" && item.spotifyTrackName.trim()) return item.spotifyTrackName;
-  return String(item.title ?? "");
+  // Live field is `.spotifyTrackTitle` (confirmed populated 200/200 in the
+  // pre-enable smoke; the earlier `.spotifyTrackName`/`.title` guesses were
+  // absent on every live item).
+  return String(item.spotifyTrackTitle ?? "");
 }
 
 function extractRole(item: CreditRequestItem): string {
