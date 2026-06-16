@@ -23,7 +23,7 @@ DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"
 # Pinned openclaw runtime version. Updated together with this file so the
 # version change appears in git history alongside any deploy-script tweaks
 # the upgrade requires. Bump in lockstep with docs/REPO-MANAGEMENT.md.
-OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.5.27}"
+OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.6.1}"
 
 # Pinned @openclaw/slack version. 2026.5.12 externalized Slack into this
 # npm package; the bundled `channels.slack` plugin no longer ships. Kept
