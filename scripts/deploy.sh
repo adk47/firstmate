@@ -2118,11 +2118,24 @@ fi
 # Note: mention gate patch (patch-openclaw-mention-gate.sh) removed — no longer needed on OpenClaw 2026.4.2+
 
 # Sync cron jobs from repo to the main profile data dir (preserve live state).
-# Under `--profile main`, openclaw reads/writes cron state at
-# /root/.openclaw-main/cron/jobs.json — this is the authoritative storePath
-# (verified 2026-04-21 via `openclaw --profile main cron status --json`
-# once the legacy zombie service was masked; see the zombie guard in
-# smoke-test.sh for the full incident context).
+#
+# IMPORTANT (openclaw 2026.6.1+): cron persistence moved to SQLite. The
+# gateway loads crons ONLY from the `cron_jobs` table in the per-profile
+# store at /root/.openclaw-main/state/openclaw.sqlite — keyed by store_key
+# `/root/.openclaw-main/cron/jobs.json`. It does NOT read cron/jobs.json at
+# runtime on 6.x. The one-shot jobs.json -> SQLite import is `doctor --fix`-
+# gated, and hydra NEVER runs `doctor --fix` (it fans out into codex-auth/
+# voice/transcript migrations we forbid), so jobs.json is a DEAD runtime
+# path between deploys. Writing only jobs.json (the pre-6.x behavior) left
+# the gateway loading 0 of 22 crons after the Step 6 restart and FATAL'd
+# the smoke test (cron count mismatch, 2026-06-16 P0). We therefore treat
+# jobs.json as the human-editable SOURCE and explicitly import it into the
+# SQLite cron_jobs store via the openclaw SDK below (BEFORE the restart).
+#
+# `/root/.openclaw-main/cron/jobs.json` remains the canonical store_key
+# (the path resolveCronStorePath() returns and the gateway reports as
+# storePath); it just isn't a runtime-read FILE anymore — it's the SQLite
+# store identity.
 #
 # We ALSO mirror to /root/.openclaw/cron/jobs.json (the pre-migration
 # legacy path) as defense-in-depth. If the pre-multi-profile
@@ -2245,6 +2258,96 @@ PYEOF
     install -m 600 "$LIVE_CRON" "$LEGACY_CRON" || fail "failed to mirror cron-jobs.json to $LEGACY_CRON"
     log "  Mirrored cron-jobs.json to $LEGACY_CRON (defense-in-depth vs zombie legacy service)"
   fi
+fi
+
+# Import the synced jobs.json into the SQLite cron_jobs store (openclaw
+# 2026.6.1+). This is the step that actually makes the gateway load crons:
+# on 6.x jobs.json is no longer read at runtime (see the block comment
+# above), so without this import the Step 6 restart loads 0 crons and the
+# smoke test FATALs. We import via openclaw's own SDK (saveCronStore ->
+# replaceCronRows), which is the exact SQLite write `doctor --fix` performs
+# but scoped to cron ONLY — no codex-auth/voice/transcript fanout (the very
+# reason hydra forbids `doctor --fix`).
+#
+# Idempotent by construction: replaceCronRows deletes every row for this
+# store_key then re-inserts the repo set, so re-running converges to exactly
+# the 22 repo jobs with zero duplicates. Safe to run unconditionally on
+# every deploy; do NOT add a skip-if-already-imported guard.
+#
+# We import the UNFILTERED 22 jobs (11 enabled + 11 disabled). The SDK
+# round-trips `enabled` faithfully and the scheduler simply skips disabled
+# rows at arm time — identical to pre-6.x jobs.json semantics. Pre-filtering
+# to the 11 enabled would drop the disabled definitions and break the
+# smoke-test count (which compares against all 22).
+#
+# Only the `main` store matters at runtime: the gateway runs profile main
+# and reads store_key /root/.openclaw-main/cron/jobs.json. The legacy
+# /root/.openclaw mirror is runtime-dead and is NOT imported.
+if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
+  LIVE_CRON="/root/.openclaw-main/cron/jobs.json"
+
+  # Resolve the openclaw global dist the path-independent way (mirrors the
+  # PR #537 `plugins list --json` fix: never hardcode a runtime layout path).
+  # openclaw 2026.6.1 is installed GLOBALLY; Node's ESM resolver does NOT
+  # search the global npm root for a bare `openclaw/...` specifier and
+  # IGNORES NODE_PATH, so the import MUST use the ABSOLUTE dist path
+  # (verified live on node-8: a bare specifier -> ERR_MODULE_NOT_FOUND).
+  GLOBAL_NODE_MODULES=$(npm root -g 2>/dev/null) || fail "cron SQLite import: 'npm root -g' failed — cannot locate openclaw global install"
+  CRON_SDK="$GLOBAL_NODE_MODULES/openclaw/dist/plugin-sdk/cron-store-runtime.js"
+  if [ ! -f "$CRON_SDK" ]; then
+    fail "cron SQLite import: openclaw cron-store SDK not found at $CRON_SDK (global node_modules: ${GLOBAL_NODE_MODULES:-<empty>}) — openclaw layout changed; mirror PR #537's path-independent discovery"
+  fi
+
+  # OPENCLAW_STATE_DIR (NOT OPENCLAW_PROFILE — the SDK resolver ignores it)
+  # makes resolveCronStorePath() return /root/.openclaw-main/cron/jobs.json,
+  # which is the exact store_key the gateway uses. The node one-liner reads
+  # the jobs from the file we just wrote, writes the SQLite rows, then
+  # re-loads and prints the persisted count so we can verify the row count
+  # below. Fail-loud: the whole body runs inside an explicit try/catch that
+  # prints the error and process.exit(1) on any failure (mirrors the
+  # dist/index.js load-check at the top of this file); a non-zero node exit
+  # chains to `fail` (which fires notify_slack). The explicit exit(1) avoids
+  # relying on Node's unhandled-rejection exit semantics.
+  IMPORT_RC=0
+  IMPORT_OUT=$(OPENCLAW_STATE_DIR=/root/.openclaw-main CRON_SDK="$CRON_SDK" LIVE_CRON="$LIVE_CRON" \
+    node --input-type=module -e '
+      import { readFileSync } from "node:fs";
+      try {
+        const m = await import(process.env.CRON_SDK);
+        const store = JSON.parse(readFileSync(process.env.LIVE_CRON, "utf8"));
+        const target = m.resolveCronStorePath();
+        // saveCronStore/loadCronStore are ASYNC (the SDK wrappers return a
+        // promise even though the underlying SQLite transaction is sync) —
+        // they MUST be awaited, else process.exit(0) below fires before the
+        // write commits and the store is left empty (verified on node-8:
+        // un-awaited -> persisted:0; awaited -> persisted:22).
+        await m.saveCronStore(target, store);        // delete-by-store_key + re-insert
+        const back = await m.loadCronStore(target);  // read-back from SQLite to verify persistence
+        console.log(JSON.stringify({ target, persisted: (back.jobs || []).length }));
+        process.exit(0);
+      } catch (e) {
+        console.error(e);
+        process.exit(1);
+      }
+    ' 2>&1) || IMPORT_RC=$?
+  if (( IMPORT_RC != 0 )); then
+    # Surface the node error body indented, like install_external_plugin,
+    # then fail loud (fail -> notify_slack -> exit 1).
+    log "  ✗ cron SQLite import failed for /root/.openclaw-main (jobs.json -> cron_jobs, rc=$IMPORT_RC):"
+    echo "$IMPORT_OUT" | sed 's/^/        /'
+    fail "cron SQLite import failed for /root/.openclaw-main — gateway would load 0 crons after restart"
+  fi
+
+  # Trust the round-trip, not the exit code: verify the SQLite store now
+  # holds exactly the repo job set. A successful save that persisted a
+  # different count would otherwise silently ship a wrong cron table.
+  EXPECTED_JOBS=$(jq '.jobs | length' "$HYDRA_ROOT/cron-jobs.json") \
+    || fail "cron SQLite import: could not count repo jobs in $HYDRA_ROOT/cron-jobs.json"
+  PERSISTED_JOBS=$(echo "$IMPORT_OUT" | jq -r '.persisted' 2>/dev/null) || PERSISTED_JOBS=""
+  if [ "$PERSISTED_JOBS" != "$EXPECTED_JOBS" ]; then
+    fail "cron SQLite import: store persisted ${PERSISTED_JOBS:-<unparseable>} jobs, expected $EXPECTED_JOBS (import output: $IMPORT_OUT)"
+  fi
+  log "  Imported $PERSISTED_JOBS cron jobs into the SQLite cron_jobs store (store_key /root/.openclaw-main/cron/jobs.json)"
 fi
 POSTSYNC
 

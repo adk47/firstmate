@@ -286,11 +286,17 @@ if needs_target "main"; then
   #
   # Both sides explicitly resolved to a SCALAR COUNT to avoid the
   # "compare integer to JSON array" footgun. The repo file's `.jobs`
-  # is an array (so we use `.jobs | length`). The CLI's `.jobs` happens
-  # to be a number today (verified live: openclaw cron status --json
-  # returns {"jobs": 12, ...}), but to be future-proof against the CLI
-  # ever switching shape, we handle both with `if type == array then
-  # length else . end`.
+  # is an array (so we use `.jobs | length`). The CLI's `.jobs` is a
+  # NUMBER (verified live on openclaw 2026.6.1: cron status --json
+  # returns {"jobs": <N>, ...}, where N = state.store.jobs.length =
+  # ALL loaded rows for the store_key, INCLUDING disabled jobs — it is
+  # NOT a filtered enabled-only count; `cron list` is the call that
+  # excludes disabled, `cron status` does not). So this correctly
+  # compares against all 22 repo jobs (11 enabled + 11 disabled), which
+  # is exactly the set deploy.sh imports into the SQLite cron_jobs store.
+  # Do NOT "fix" this to compare against only the enabled count. We still
+  # handle the array shape with `if type == array then length else . end`
+  # to stay future-proof against the CLI ever switching shape.
   if [ ! -f /opt/hydra/cron-jobs.json ]; then
     fail_check "Main: /opt/hydra/cron-jobs.json missing — repo file did not deploy"
   else
