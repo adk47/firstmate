@@ -63,13 +63,29 @@ while :; do
   [ -z "$cursor" ] && break
 done
 
-# 2. Cap to the CAP most-recently-updated candidates to bound the GET load and
-# the grader's token budget. Log loudly if truncated — never silently.
+# 2. When the candidate set exceeds CAP, take an EVENLY-SPACED sample across the
+# whole window instead of the CAP most-recent. Recency-biased truncation made the
+# weekly (168h) digest systematically blind to the early part of the week: e.g.
+# the 2026-06-15 weekly had 602 candidates, so "200 most-recent" dropped the
+# oldest 402 (67%) and the digest never saw Mon–Wed. An even spread keeps the
+# sample representative of the whole window at the SAME per-id GET + grader-budget
+# cost (the cap is unchanged). Under cap, this is identity (take all). The spread
+# picks CAP indices floor(i*(n-1)/(cap-1)) over the updated_at-sorted set, so both
+# window endpoints are included; `unique` drops the index collisions that occur
+# when n is just over CAP (a collision would otherwise double-GET one id). Log
+# loudly when sampled — never silently.
 total_candidates=$(wc -l < "$CANDIDATES" | tr -d ' ')
 IDS="$WORKDIR/candidate-ids.txt"
-jq -rs --argjson cap "$CAP" 'sort_by(.updated_at) | reverse | .[0:$cap] | .[].id' "$CANDIDATES" > "$IDS"
+jq -rs --argjson cap "$CAP" '
+  (sort_by(.updated_at)) as $c
+  | ($c | length) as $n
+  | if $n <= $cap then $c[].id
+    elif $cap <= 1 then $c[-1].id
+    else [range(0; $cap) | (. * ($n - 1) / ($cap - 1)) | floor] | unique | map($c[.].id) | .[]
+    end
+' "$CANDIDATES" > "$IDS"
 if [ "$total_candidates" -gt "$CAP" ]; then
-  echo "fetch-conversations: WARN $total_candidates candidates in window; retrieving the $CAP most-recent (dropped $((total_candidates - CAP)))" >&2
+  echo "fetch-conversations: WARN $total_candidates candidates in window; sampled $CAP evenly across the window (dropped $((total_candidates - CAP)))" >&2
 fi
 
 # 3. GET each candidate by id (full transcript incl. parts + source). The search

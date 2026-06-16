@@ -171,7 +171,12 @@ EOF
   [ "$(wc -l < "$WORKDIR/conversations.jsonl")" -eq 2 ]
 }
 
-@test "caps candidate GETs to the CAP most-recently-updated and logs the truncation" {
+@test "samples CAP candidates evenly across the window (keeps both endpoints, drops the middle) and logs it" {
+  # Even-spread sampling, NOT recency truncation. With cap=2 over old/mid/new the
+  # spread picks indices 0 and n-1, so the OLDEST (old) is kept alongside the
+  # newest — the property that fixes the weekly digest's recency blindness
+  # (2026-06-15: 602 candidates, the old "200 most-recent" dropped the oldest 402,
+  # so Mon–Wed were invisible). The middle candidate is the one dropped.
   export CAROLINE_FETCH_CAP=2
   cat > "$TEST_TMPDIR/search.json" <<'EOF'
 {"type":"conversation.list","conversations":[
@@ -187,8 +192,32 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(wc -l < "$WORKDIR/conversations.jsonl")" -eq 2 ]
   [[ "$output" == *"WARN"* ]]
-  ! grep -q "/conversations/old" "$TEST_TMPDIR/curl.calls"
-  grep -q "/conversations/new" "$TEST_TMPDIR/curl.calls"
+  [[ "$output" == *"sampled 2 evenly"* ]]
+  grep -q "/conversations/old" "$TEST_TMPDIR/curl.calls"   # oldest endpoint kept (anti-recency-bias)
+  grep -q "/conversations/new" "$TEST_TMPDIR/curl.calls"   # newest endpoint kept
+  ! grep -q "/conversations/mid" "$TEST_TMPDIR/curl.calls" # middle dropped
+}
+
+@test "even-spread sampling spans the full window (5 candidates, cap 3 -> indices 0,2,4)" {
+  # Pins the floor(i*(n-1)/(cap-1)) spread: 5 sorted candidates at cap 3 keep the
+  # 1st, 3rd, and 5th (full-window coverage), dropping the 2nd and 4th.
+  export CAROLINE_FETCH_CAP=3
+  cat > "$TEST_TMPDIR/search.json" <<'EOF'
+{"type":"conversation.list","conversations":[
+  {"id":"t100","updated_at":100},{"id":"t200","updated_at":200},{"id":"t300","updated_at":300},
+  {"id":"t400","updated_at":400},{"id":"t500","updated_at":500}
+],"pages":{"next":null}}
+EOF
+  for id in t100 t200 t300 t400 t500; do
+    cat > "$TEST_TMPDIR/conv-$id.json" <<EOF
+{"id":"$id","conversation_parts":{"conversation_parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"hi","created_at":$NOW}]}}
+EOF
+  done
+  run "$SCRIPTS_DIR/fetch-conversations.sh"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$WORKDIR/conversations.jsonl")" -eq 3 ]
+  for keep in t100 t300 t500; do grep -q "/conversations/$keep" "$TEST_TMPDIR/curl.calls"; done
+  for drop in t200 t400; do ! grep -q "/conversations/$drop" "$TEST_TMPDIR/curl.calls"; done
 }
 
 @test "fails loud when search returns a non-2xx status (no silent empty week)" {

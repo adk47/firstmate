@@ -96,24 +96,30 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
 **Customer says:** "What do I need to send to verify my credit?"
 
 **Resolution path:**
-1. Accepted forms of proof (screenshots are accepted for all of these):
-   - A public link where the credit is listed — Tidal, Genius, Jaxsta, Discogs,
+1. **Where to send it and what to include:** Proof goes here in the in-app
+   support chat. There is nowhere else to upload it. Ask the customer to include
+   their Muso profile link, the track title, the artist name, their role on the
+   track, and a release link, along with the proof itself. For multiple tracks,
+   have them list each track with their role on it so the team can match each
+   piece of proof cleanly.
+2. Accepted forms of proof (screenshots are accepted for all of these):
+   - A public link where the credit is listed – Tidal, Genius, Jaxsta, Discogs,
      AllMusic, ASCAP, or BMI
-   - Documentation of the work — a project/session file, communication with the
+   - Documentation of the work – a project/session file, communication with the
      artist, a contract, session agreement, release form, or split sheet showing
      the role
    - A production receipt or invoice, or an official credit listing on a label or
      distributor portal
    - Confirmation from a credited collaborator, the artist, or the rights holder
      (forwarded by the customer)
-2. For songwriter/composer credits: PRO registration (ASCAP, BMI, SESAC, etc.) is strong supporting evidence.
-3. If the customer isn't sure which document applies:
+3. For songwriter/composer credits: PRO registration (ASCAP, BMI, SESAC, etc.) is strong supporting evidence.
+4. If the customer isn't sure which document applies:
    - Ask what role they're claiming (producer, writer, engineer, etc.) and guide them toward the most relevant doc type above.
-4. If they have no documentation at all:
+5. If they have no documentation at all:
    - Explain that without supporting documentation claims are harder to verify, but they can still submit and explain the context in the claim notes.
-5. If the credit is in "user verification needed", the `customer-credit-verification`
+6. If the credit is in "user verification needed", the `customer-credit-verification`
    skill governs the full flow (ownership check, proof intake, routing to the team).
-6. **Escalate:** If they've submitted documentation and the claim has been open more than 5 business days with no update, create a ticket with category "Credit Claim – Documentation Submitted". SLA: 2 business days.
+7. **Escalate:** If they've submitted documentation and the claim has been open more than 5 business days with no update, create a ticket with category "Credit Claim – Documentation Submitted". SLA: 2 business days.
 
 ---
 

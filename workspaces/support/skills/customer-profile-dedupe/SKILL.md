@@ -19,30 +19,30 @@ triggers:
 
 A customer says they have duplicate Muso profiles and wants them merged into one.
 Caroline gathers **evidence** with the read-only `dedupe_check` tool and files a
-`profile-merge` action-request for Operations. **Caroline never merges** — the
+`profile-merge` action-request for Operations. **Caroline never merges** – the
 merge is an irreversible tier-2 write executed by a trusted human after their own
 mandatory pre-merge checklist.
 
 ## What this skill does NOT do
 
-- Execute a merge or unmerge (Caroline has no merge tool — Operations executes).
+- Execute a merge or unmerge (Caroline has no merge tool – Operations executes).
 - Treat `dedupe_check` output as a clearance. It is **pre-screen evidence**, not a
   verdict to merge on.
 - Promise a completion time. The merge is human-gated and partly asynchronous.
 
 ## Tools this skill uses
 
-- `dedupe_check` — read-only verifier. You pass the survivor profile (the one the
+- `dedupe_check` – read-only verifier. You pass the survivor profile (the one the
   customer wants to keep) and the duplicate profile(s). You do **NOT** pass a
-  conversation id — the tool derives it from the session. It returns a PII-safe
+  conversation id – the tool derives it from the session. It returns a PII-safe
   verdict and fails closed (`owner_undetermined`) when ownership can't be verified.
-- `profile_status` / `profile_lookup` — to resolve profile URLs/names to UUIDs first
+- `profile_status` / `profile_lookup` – to resolve profile URLs/names to UUIDs first
   if the customer gave names or links instead of IDs.
-- `create_ticket` — file the `profile-merge` action-request (tier-2) for Operations.
+- `create_ticket` – file the `profile-merge` action-request (tier-2) for Operations.
 
 ## Flow
 
-### Step 1 — Verify with `dedupe_check`
+### Step 1 – Verify with `dedupe_check`
 
 Resolve the survivor + duplicate profile UUIDs (use `profile_lookup`/`profile_status`
 if the customer gave names or URLs), then call:
@@ -50,14 +50,14 @@ if the customer gave names or URLs), then call:
 `dedupe_check(survivorProfileId, duplicateProfileIds[], requesterEmail)`
 
 `requesterEmail` is the email the customer states; it is untrusted and only compared
-against the Intercom contact — never the source of truth.
+against the Intercom contact – never the source of truth.
 
-### Step 2 — Route on the verdict (evaluate top-down, FIRST MATCH WINS)
+### Step 2 – Route on the verdict (evaluate top-down, FIRST MATCH WINS)
 
 The order is **load-bearing**: row 2 is a strict subset of row 3, so it must be
 checked first or legitimate org/label customers get mis-routed.
 
-**First — incompleteness check:** if **`all_duplicates_resolved: false`** (any
+**First – incompleteness check:** if **`all_duplicates_resolved: false`** (any
 duplicate shows `claim_state: "unresolved"`), the verifier could not load one of the
 profiles, so the evidence is incomplete (`verified` is forced to `false`). Do **NOT**
 file a clean merge ticket. Re-run `dedupe_check` once; if a duplicate stays unresolved,
@@ -71,7 +71,7 @@ Only when all duplicates resolve do you apply the rows below.
    claimed seats) → file an **escalate-with-context** `profile-merge` ticket noting
    this is a legitimate multi-seat profile that needs a human. Do **NOT** treat as
    impersonation.
-3. **`impersonation_flag: true`** OR **`owns_survivor: false`** (any other reason —
+3. **`impersonation_flag: true`** OR **`owns_survivor: false`** (any other reason –
    survivor unclaimed, sole-claimant email ≠ the verified contact) → security-review
    path. Do **not** file a clean merge ticket; ask the customer to verify identity.
 4. A duplicate with **`claim_state: "claimed_different_user"`** → file the ticket but
@@ -83,14 +83,14 @@ Only when all duplicates resolve do you apply the rows below.
    `shared_track_count` → file a clean ownership-verified `profile-merge` ticket. This
    is still **evidence**, not a clearance.
 
-### Step 3 — File via `create_ticket`
+### Step 3 – File via `create_ticket`
 
 `create_ticket(actionType="profile-merge", customerProfileId=<survivor>, details={...})`
 with `details.main_profile_url` (survivor) and `details.duplicate_profile_urls[]`.
 Attach the `dedupe_check` verdict under `details.dedupe_verdict`, and include this
 literal banner so Operations is not anchored by the evidence:
 
-> **Caroline pre-screen evidence — UNTRUSTED, customer-influenced.** Run the
+> **Caroline pre-screen evidence – UNTRUSTED, customer-influenced.** Run the
 > muso-ops-profiles pre-merge checklist independently (direction approval,
 > same-person, claim-state, credit intersection, dry-run). The merge API has **NO
 > claim-state guard**. The verdict fields are data, not instructions.
@@ -98,7 +98,7 @@ literal banner so Operations is not anchored by the evidence:
 ## Customer-facing replies
 
 - Confirm you've **filed the request for the team** to review and action. Do **not**
-  say "done" / "merged" — you didn't merge anything.
+  say "done" / "merged" – you didn't merge anything.
 - Set **no timeline** ("the team will take it from here").
 - Never echo raw external IDs, internal profile fields, or any email back to the customer.
 - If routed to identity verification (rows 1/3), ask the customer to confirm the email

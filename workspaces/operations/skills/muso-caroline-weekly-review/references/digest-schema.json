@@ -301,7 +301,7 @@
       "items": {
         "type": "string"
       },
-      "description": "Source caveats to surface verbatim in the context footer, e.g. \"conv fetch hit the 200 cap - window under-sampled\"."
+      "description": "Source caveats to surface verbatim in the context footer, e.g. \"conv fetch sampled 200 of 602 evenly across the window\"."
     }
   }
 }

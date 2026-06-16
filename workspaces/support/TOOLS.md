@@ -49,7 +49,7 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 - **Rate limit**: 2 ticket creations per session (60-minute window); 5 follow-up appends per session
 - **Required fields**: `actionType`, `customerEmail`, `summary`, `conversationSummary`
 - **Optional fields**: `titleGist` (≤60-char concrete gist for the title; falls back to `summary`), `customerProfileId`, `details` (action-specific key-value pairs)
-- **Auto-derived**: title (`[{action}] {gist} — {email}`), priority (from tier), due date (from tier SLA in business days), tags (`hydra-action-request`, `tier-N`, `action:{type}`, `team:growth|catalog`, `escalation:*` when `details.escalation_reason` is set)
+- **Auto-derived**: title (`[{action}] {gist} – {email}`), priority (from tier), due date (from tier SLA in business days), tags (`hydra-action-request`, `tier-N`, `action:{type}`, `team:growth|catalog`, `escalation:*` when `details.escalation_reason` is set)
 
 ### 5. profile_status
 

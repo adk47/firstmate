@@ -80,7 +80,7 @@ Try adding it manually via "Add Missing Credits." If you believe it should be au
 ### How long does credit verification take?
 Most credit claims are reviewed within 48 hours by our operations team. Claims
 flagged for additional verification ("user verification needed") wait on proof from
-the customer and have **no fixed timeline** — never promise one. For those, follow
+the customer and have **no fixed timeline** – never promise one. For those, follow
 the `customer-credit-verification` flow: ask for proof (see common-issues row #5 for
 what to ask for) and file for the team when warranted.
 

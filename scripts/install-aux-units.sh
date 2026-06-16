@@ -147,6 +147,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/clickup-sla-digest.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh missing or not executable"
+[[ -f "$HYDRA_ROOT/scripts/overdue-verification-notifier.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/overdue-verification-notifier.py missing"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/weekly-cleanup.sh" ]] \
@@ -285,6 +287,51 @@ cr=close-resolved-conversations.timer
 systemctl enable "$cr" >/dev/null 2>&1 || log "WARN: could not enable $cr"
 systemctl start "$cr" >/dev/null 2>&1 || log "WARN: could not start $cr"
 log "  $cr: $(systemctl is-active "$cr" 2>/dev/null || echo unknown)"
+
+# ─── Proactive overdue-verification customer notifier (09:00 UTC) ──
+# Sends ONE in-app Intercom note to a customer when their verification
+# ticket has passed SLA but nobody has worked it — the #1 weekly-digest
+# escalation ("delayed verification follow-ups"). Safety-first: seeds
+# silently on the first run (sends nothing for the existing backlog),
+# per-run cap, fresh pre-send conversation re-check (email cross-match +
+# human-reply/handoff suppression), per-conversation dedupe, and a
+# wiped-state circuit breaker. SENDING IS OFF until `--apply` is added to
+# ExecStart below: deployed inert (seeds + dry-logs) so enabling is a
+# conscious flip after observing a dry run. State persists across runs in
+# /var/lib (idempotency + cold-start seed); the dir is provisioned here,
+# idempotently. See scripts/overdue-verification-notifier.py.
+install -d -m 755 /var/lib/overdue-verification-notifier
+cat > /etc/systemd/system/overdue-verification-notifier.service << OVNOTIFYSVC
+[Unit]
+Description=Proactively notify customers of overdue verification tickets
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/overdue-verification-notifier.py
+OVNOTIFYSVC
+
+cat > /etc/systemd/system/overdue-verification-notifier.timer << OVNOTIFYTMR
+[Unit]
+Description=Daily — proactively notify customers of overdue verification tickets
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=overdue-verification-notifier.service
+
+[Install]
+WantedBy=timers.target
+OVNOTIFYTMR
+
+systemctl daemon-reload
+ovn=overdue-verification-notifier.timer
+systemctl enable "$ovn" >/dev/null 2>&1 || log "WARN: could not enable $ovn"
+systemctl start "$ovn" >/dev/null 2>&1 || log "WARN: could not start $ovn"
+log "  $ovn: $(systemctl is-active "$ovn" 2>/dev/null || echo unknown)"
 
 # ─── Daily ClickUp SLA digest (08:00 America/New_York) ────────
 # Posts overdue / due-today / due-tomorrow open support tickets to

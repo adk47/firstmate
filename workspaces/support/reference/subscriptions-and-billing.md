@@ -105,6 +105,18 @@ Step-by-step instructions for the most common subscription actions.
 5. You keep access until the end of your current billing period
 6. Your credits and profile data are never deleted – those are free features
 
+### If you can't find the cancellation option
+If the Cancel control isn't where you expect, the team can cancel it for you, so
+the customer doesn't have to keep hunting for it. This usually comes up when:
+- Settings shows no Billing or Subscription section
+- The customer can't sign in to the account
+- The subscription was set up through a third party (for example, an app store)
+- The account email needs to be changed first
+
+In any of these cases, ask the customer to send their account email and their
+Muso profile link here in support, and the team will locate the subscription and
+handle the cancellation.
+
 ### How to update your payment method
 1. Log in at app.muso.ai
 2. Go to Settings > Billing
