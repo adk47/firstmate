@@ -57,6 +57,12 @@ STUB
   export CRON_HEALTH_STATE_FILE="$TEST_TMPDIR/state.json"
   export CRON_HEALTH_LOCKFILE="$TEST_TMPDIR/wd.lock"
   export CRON_HEALTH_SKIP_HOST_GUARD=1
+  # Force the legacy JSONL source for the detector tests below (they inject runs
+  # via runfile()). Without this the script defaults CRON_RUNS_DB to the live
+  # /root/.openclaw-main/state/openclaw.sqlite — which EXISTS on the node-8 CI
+  # runner — and would read real run logs instead of the fixtures. The 6.x
+  # SQLite source has its own dedicated tests at the end of this file.
+  export CRON_HEALTH_RUNS_DB=""
   # Most tests below exercise streak-INDEPENDENT mechanics (detection, dedup,
   # backlog seeding, JSON escaping) and predate the consecutive-error streak
   # gate, so they run at threshold 1 (alert on every error, the pre-gate
@@ -69,6 +75,32 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 
 # Helper: write a runs file from stdin lines.
 runfile() { cat > "$TEST_TMPDIR/runs/$1.jsonl"; }
+
+# Helper: build a 6.x cron_run_logs SQLite DB. Args: <db> <store_key>. Reads one
+# JSON record per stdin line; each record's "_jobId" field becomes the row's
+# job_id and the rest becomes entry_json (mirrors the real table shape).
+mkrunsdb() {
+  # Capture the piped records to a file FIRST — `python3 - <<'PY'` claims stdin
+  # for the script itself, so the records must reach python via argv, not stdin.
+  local recfile; recfile="$(mktemp)"
+  cat > "$recfile"
+  python3 - "$1" "$2" "$recfile" <<'PY'
+import sqlite3, json, sys
+con = sqlite3.connect(sys.argv[1]); sk = sys.argv[2]
+con.execute("CREATE TABLE cron_run_logs (store_key TEXT, job_id TEXT, seq INTEGER, entry_json TEXT)")
+seq = {}
+with open(sys.argv[3]) as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        rec = json.loads(line); jid = rec.pop("_jobId")
+        seq[jid] = seq.get(jid, 0) + 1
+        con.execute("INSERT INTO cron_run_logs VALUES (?,?,?,?)", (sk, jid, seq[jid], json.dumps(rec)))
+con.commit(); con.close()
+PY
+  rm -f "$recfile"
+}
 
 @test "no runs at all → reports OK, no alert, exits 0" {
   run bash "$WD" --dry-run
@@ -295,4 +327,73 @@ EOF
   [ -f "$TEST_TMPDIR/last-text" ]
   grep -q 'daily-churned-campaign-refresh' "$TEST_TMPDIR/last-text"
   grep -qF 'trino-query.sh "SELECT a,b FROM t"' "$TEST_TMPDIR/last-text"
+}
+
+# ── 6.x SQLite cron_run_logs source ──────────────────────────────────────────
+# openclaw 2026.6.x moved cron run logs into the SQLite cron_run_logs table.
+# These exercise the production reader (the cases above use the JSONL fallback).
+
+@test "SQLite source: a 2-error streak in cron_run_logs → alerts" {
+  local sk="$TEST_TMPDIR/sk-jobs.json"
+  mkrunsdb "$TEST_TMPDIR/runs.sqlite" "$sk" <<'EOF'
+{"_jobId":"jobA","status":"error","ts":2000,"error":"first boom"}
+{"_jobId":"jobA","status":"error","ts":3000,"error":"trino-query.sh failed"}
+EOF
+  export CRON_HEALTH_RUNS_DB="$TEST_TMPDIR/runs.sqlite"
+  export CRON_HEALTH_STORE_KEY="$sk"
+  export CRON_HEALTH_MIN_STREAK=2
+  printf '%s\n' '{"jobA":1500}' > "$CRON_HEALTH_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Cron failure(s) detected"* ]]
+  [[ "$output" == *"daily-churned-campaign-refresh"* ]]
+  [[ "$output" == *"trino-query.sh failed"* ]]
+}
+
+@test "SQLite source: ok-only runs newer than watermark → no alert" {
+  local sk="$TEST_TMPDIR/sk-jobs.json"
+  mkrunsdb "$TEST_TMPDIR/runs.sqlite" "$sk" <<'EOF'
+{"_jobId":"jobA","status":"ok","ts":2000}
+{"_jobId":"jobA","status":"ok","ts":3000}
+EOF
+  export CRON_HEALTH_RUNS_DB="$TEST_TMPDIR/runs.sqlite"
+  export CRON_HEALTH_STORE_KEY="$sk"
+  printf '%s\n' '{"jobA":1500}' > "$CRON_HEALTH_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no new cron failures"* ]]
+}
+
+@test "SQLite source: store_key scopes the query — rows under another key are ignored" {
+  local sk="$TEST_TMPDIR/sk-jobs.json"
+  # Rows written under a DIFFERENT store_key than we query → must see zero runs.
+  mkrunsdb "$TEST_TMPDIR/runs.sqlite" "/some/other/store.json" <<'EOF'
+{"_jobId":"jobA","status":"error","ts":2000,"error":"boom"}
+{"_jobId":"jobA","status":"error","ts":3000,"error":"boom2"}
+EOF
+  export CRON_HEALTH_RUNS_DB="$TEST_TMPDIR/runs.sqlite"
+  export CRON_HEALTH_STORE_KEY="$sk"   # queries this key, which has no rows
+  export CRON_HEALTH_MIN_STREAK=2
+  printf '%s\n' '{"jobA":1500}' > "$CRON_HEALTH_STATE_FILE"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no new cron failures"* ]]
+}
+
+@test "blind guard: DB present but cron_run_logs table missing → pages BLIND once, then dedupes" {
+  # A state DB that exists but has lost the cron_run_logs table (e.g. a future
+  # cron-store relocation). The watchdog must NOT silently report OK.
+  python3 - "$TEST_TMPDIR/runs.sqlite" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1]); con.execute("CREATE TABLE other (x)"); con.commit(); con.close()
+PY
+  export CRON_HEALTH_RUNS_DB="$TEST_TMPDIR/runs.sqlite"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"BLIND"* ]]
+  [[ "$output" == *"cron_run_logs table missing"* ]]
+  # Second run with the persisted sentinel must NOT re-page (avoid a page-storm).
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"BLIND"* ]]
 }

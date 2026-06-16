@@ -42,6 +42,15 @@ set -euo pipefail
 LOGPREFIX="[cron-health-watchdog $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
 CRON_RUNS_DIR="${CRON_HEALTH_RUNS_DIR:-/root/.openclaw-main/cron/runs}"
 CRON_JOBS_FILE="${CRON_HEALTH_JOBS_FILE:-/root/.openclaw-main/cron/jobs.json}"
+# openclaw 2026.6.x moved cron run logs OUT of cron/runs/<job>.jsonl and into the
+# SQLite `cron_run_logs` table (its `entry_json` column is the same per-run
+# record the JSONL lines held). The on-disk runs dir is FROZEN on 6.x, so
+# reading it = blind to every failure. Production reads the DB below; the legacy
+# JSONL dir stays as the test-injection + pre-6.x fallback, used only when no DB
+# is configured. NOTE: `-` (not `:-`) so tests can force the JSONL path with
+# CRON_HEALTH_RUNS_DB="" — an explicitly-empty value must win over this default.
+CRON_RUNS_DB="${CRON_HEALTH_RUNS_DB-/root/.openclaw-main/state/openclaw.sqlite}"
+CRON_STORE_KEY="${CRON_HEALTH_STORE_KEY:-/root/.openclaw-main/cron/jobs.json}"
 STATE_FILE="${CRON_HEALTH_STATE_FILE:-/var/lib/cron-health-watchdog/seen.json}"
 LOCKFILE="${CRON_HEALTH_LOCKFILE:-/var/run/cron-health-watchdog.lock}"
 SKIP_HOST_GUARD="${CRON_HEALTH_SKIP_HOST_GUARD:-0}"
@@ -90,9 +99,10 @@ command -v python3 >/dev/null 2>&1 || { log "ERROR: python3 required but not on 
 # ──────────────────────────────────────────────────────────────
 scan_failures() {
   RUNS_DIR="$1" JOBS_FILE="$2" STATE_FILE="$3" PAYLOAD_OUT="$4" PERSIST="$5" \
+  RUNS_DB="${RUNS_DB-$CRON_RUNS_DB}" STORE_KEY="${STORE_KEY-$CRON_STORE_KEY}" \
   SLACK_CHANNEL="$SLACK_CHANNEL" PREVIEW="$ERROR_PREVIEW_CHARS" \
   MIN_STREAK="$MIN_STREAK" python3 - <<'PYEOF'
-import json, os, glob
+import json, os, glob, sqlite3
 from datetime import datetime, timezone
 
 runs_dir   = os.environ["RUNS_DIR"]
@@ -103,6 +113,8 @@ persist    = os.environ.get("PERSIST", "1") == "1"
 channel    = os.environ["SLACK_CHANNEL"]
 preview    = int(os.environ.get("PREVIEW", "300"))
 min_streak = max(1, int(os.environ.get("MIN_STREAK", "2")))
+runs_db    = os.environ.get("RUNS_DB", "").strip()
+store_key  = os.environ.get("STORE_KEY", "").strip()
 
 def is_failure(rec):
     """A run is a hard failure only if it errored AND never reached its target.
@@ -137,6 +149,67 @@ def is_failure(rec):
         return False
     return True
 
+def load_runs():
+    """Return ({job_id: [record, ...]}, source_error_or_None).
+
+    openclaw 2026.6.x persists cron run logs in the SQLite `cron_run_logs`
+    table; its `entry_json` column is the SAME per-run record the legacy
+    cron/runs/<job>.jsonl lines held, so the detector below is unchanged.
+    Production reads the DB. The on-disk JSONL dir is the pre-6.x / unit-test
+    fallback, used only when no DB is configured (RUNS_DB empty) or the DB file
+    is absent. A DB that exists but has LOST the cron_run_logs table returns a
+    source_error so we page (blind) instead of silently reporting OK on a
+    frozen/relocated store — the exact silent-rot this watchdog guards against.
+    """
+    if runs_db and os.path.exists(runs_db):
+        try:
+            con = sqlite3.connect("file:%s?mode=ro" % runs_db, uri=True)
+            try:
+                cur = con.cursor()
+                if cur.execute("SELECT name FROM sqlite_master "
+                               "WHERE type='table' AND name='cron_run_logs'").fetchone() is None:
+                    return {}, ("cron_run_logs table missing in %s — openclaw cron-store "
+                                "schema changed; this watchdog can no longer read run logs" % runs_db)
+                if store_key:
+                    rows = cur.execute("SELECT job_id, entry_json FROM cron_run_logs "
+                                       "WHERE store_key = ?", (store_key,))
+                else:
+                    rows = cur.execute("SELECT job_id, entry_json FROM cron_run_logs")
+                by_job = {}
+                for job_id, entry in rows:
+                    if not entry:
+                        continue
+                    try:
+                        rec = json.loads(entry)
+                    except Exception:
+                        continue  # skip a garbled row, don't abort the scan
+                    by_job.setdefault(job_id, []).append(rec)
+                return by_job, None
+            finally:
+                con.close()
+        except Exception as e:
+            return {}, "cron_run_logs read failed (%s): %s" % (runs_db, e)
+    # Legacy / test fallback: per-job JSONL files.
+    by_job = {}
+    for path in sorted(glob.glob(os.path.join(runs_dir, "*.jsonl"))):
+        job_id = os.path.basename(path)[:-len(".jsonl")]
+        recs = []
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        recs.append(json.loads(line))
+                    except Exception:
+                        continue  # skip a half-written/garbled line
+        except Exception:
+            continue
+        if recs:
+            by_job[job_id] = recs
+    return by_job, None
+
 # job id -> (name, agent)
 names = {}
 try:
@@ -156,25 +229,49 @@ except Exception:
     state = {}
 
 new_state = dict(state)
-alerts = []  # (name, agent, ts_ms, err)
 
-for path in sorted(glob.glob(os.path.join(runs_dir, "*.jsonl"))):
-    job_id = os.path.basename(path)[:-len(".jsonl")]
-    finished = []
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    continue  # skip a half-written/garbled line, don't abort the job
-                if rec.get("status") in ("ok", "error") and isinstance(rec.get("ts"), (int, float)):
-                    finished.append(rec)
-    except Exception:
-        continue
+def _persist():
+    if not persist:
+        return
+    d = os.path.dirname(state_file)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = state_file + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(new_state, f, indent=2)
+    os.replace(tmp, state_file)
+
+def _emit(text):
+    # Build the exact Slack payload in Python — error strings contain quotes,
+    # backticks and backslashes (e.g. failed `trino-query.sh \"SELECT ...\"`)
+    # that would shatter a naive bash JSON interpolation. slack-notify.sh's
+    # slack_notify_payload_file posts this verbatim.
+    with open(payload_out, "w") as f:
+        json.dump({"channel": channel, "text": text}, f)
+    print(text)
+
+runs_by_job, source_error = load_runs()
+
+# Blind guard: the production run-log source (SQLite cron_run_logs) is
+# unreadable. A monitor that reports OK forever while blind is the precise
+# silent-rot this watchdog exists to prevent — so PAGE, once per episode
+# (sentinel in the state file), not every tick.
+if source_error:
+    already = state.get("__source_error__")
+    new_state["__source_error__"] = source_error
+    _persist()
+    if already != source_error:
+        _emit(":rotating_light: *cron-health-watchdog is BLIND* — it cannot read cron "
+              "run logs, so cron failures will go UNDETECTED until this is fixed.\n• " + source_error)
+    raise SystemExit(0)
+
+# Source healthy — clear any stale blind sentinel so a future episode re-pages.
+new_state.pop("__source_error__", None)
+
+alerts = []  # (name, agent, ts_ms, err)
+for job_id, recs in sorted(runs_by_job.items()):
+    finished = [r for r in recs
+                if r.get("status") in ("ok", "error") and isinstance(r.get("ts"), (int, float))]
     if not finished:
         continue
     finished.sort(key=lambda r: r["ts"])  # streak detection needs chronological order
@@ -205,15 +302,7 @@ for path in sorted(glob.glob(os.path.join(runs_dir, "*.jsonl"))):
             streak = 0
     new_state[job_id] = max(prev, max_ts)
 
-# Persist watermarks (best-effort, atomic).
-if persist:
-    d = os.path.dirname(state_file)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    tmp = state_file + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(new_state, f, indent=2)
-    os.replace(tmp, state_file)
+_persist()
 
 if not alerts:
     raise SystemExit(0)
@@ -223,16 +312,7 @@ lines = [f":rotating_light: *Cron failure(s) detected — {len(alerts)}*"]
 for name, agent, ts_ms, err in alerts:
     ts_iso = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     lines.append(f"• *{name}* ({agent}) at {ts_iso}: {err}")
-text = "\n".join(lines)
-
-# Build the exact Slack payload in Python — error strings contain quotes,
-# backticks and backslashes (e.g. failed `trino-query.sh \"SELECT ...\"`)
-# that would shatter a naive bash JSON interpolation. slack-notify.sh's
-# slack_notify_payload_file posts this verbatim.
-with open(payload_out, "w") as f:
-    json.dump({"channel": channel, "text": text}, f)
-
-print(text)
+_emit("\n".join(lines))
 PYEOF
 }
 
@@ -274,7 +354,7 @@ _self_test() {
   # Pin the threshold at 2 for the self-test so it is deterministic regardless of
   # the operator's CRON_HEALTH_MIN_STREAK — the self-test verifies detector
   # HEALTH (fires on a streak, suppresses a lone error), not the live threshold.
-  out="$(MIN_STREAK=2 scan_failures "$td/runs" "$td/jobs.json" "$td/state.json" "$td/payload.json" 0 2>/dev/null || true)"
+  out="$(RUNS_DB="" MIN_STREAK=2 scan_failures "$td/runs" "$td/jobs.json" "$td/state.json" "$td/payload.json" 0 2>/dev/null || true)"
   if ! printf '%s' "$out" | grep -q "selftest"; then
     echo "$LOGPREFIX SELF-TEST FAIL: detector did not flag the injected error streak" >&2
     return 1
@@ -295,6 +375,33 @@ _self_test() {
     echo "$LOGPREFIX SELF-TEST FAIL: message-tool-delivered run was flagged as a failure" >&2
     return 1
   fi
+
+  # ── 6.x SQLite source path ──────────────────────────────────────────────
+  # The cases above exercise the JSONL fallback (RUNS_DB=""). This one guards the
+  # PRODUCTION reader: build a throwaway cron_run_logs table and verify a 2-error
+  # streak surfaces THROUGH it. A future cron-store relocation that silently froze
+  # this watchdog would fail HERE instead of rotting unnoticed.
+  local db sout
+  db="$td/runs.sqlite"
+  python3 - "$db" <<'PYDB'
+import sqlite3, json, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("CREATE TABLE cron_run_logs (store_key TEXT, job_id TEXT, seq INTEGER, entry_json TEXT)")
+sk = "/selftest/jobs.json"
+for jid, seq, rec in [
+    ("selftest-job", 1, {"status": "error", "ts": 190, "error": "first"}),
+    ("selftest-job", 2, {"status": "error", "ts": 200, "error": "boom"}),
+]:
+    con.execute("INSERT INTO cron_run_logs (store_key, job_id, seq, entry_json) VALUES (?,?,?,?)",
+                (sk, jid, seq, json.dumps(rec)))
+con.commit(); con.close()
+PYDB
+  sout="$(RUNS_DB="$db" STORE_KEY="/selftest/jobs.json" MIN_STREAK=2 \
+    scan_failures "$td/runs" "$td/jobs.json" "$td/state.json" "$td/payload-sql.json" 0 2>/dev/null || true)"
+  if ! printf '%s' "$sout" | grep -q "selftest"; then
+    echo "$LOGPREFIX SELF-TEST FAIL: SQLite cron_run_logs reader did not surface the injected streak" >&2
+    return 1
+  fi
   return 0
 }
 
@@ -312,8 +419,18 @@ if [ "$SKIP_HOST_GUARD" != "1" ] && ! hostname | grep -q '^ovh-node-8$'; then
   exit 0
 fi
 
-if [ ! -d "$CRON_RUNS_DIR" ]; then
-  log "SKIP: cron runs dir not found: $CRON_RUNS_DIR"
+# Run-log source presence. On 6.x the source is the SQLite cron_run_logs table
+# (CRON_RUNS_DB); the legacy cron/runs/*.jsonl dir is the pre-6.x/test fallback.
+# Skip only when the ACTIVE source is entirely absent — a present-but-broken DB
+# (table relocated/missing) is handled as a loud BLIND alert in scan_failures,
+# NOT a silent skip.
+if [ -n "$CRON_RUNS_DB" ]; then
+  if [ ! -f "$CRON_RUNS_DB" ] && [ ! -d "$CRON_RUNS_DIR" ]; then
+    log "SKIP: no cron run-log source (DB $CRON_RUNS_DB and runs dir $CRON_RUNS_DIR both absent)"
+    exit 0
+  fi
+elif [ ! -d "$CRON_RUNS_DIR" ]; then
+  log "SKIP: cron runs dir not found: $CRON_RUNS_DIR (no DB configured)"
   exit 0
 fi
 
