@@ -88,9 +88,24 @@ command -v openclaw >/dev/null || die "openclaw CLI not on PATH"
 command -v npm >/dev/null      || die "npm not on PATH"
 
 cur_ver() { openclaw --version 2>/dev/null | awk 'NR==1 {print $2}'; }
-plugin_ver() { # <profile> <pkg>
-  local pj="/root/.openclaw-$1/npm/node_modules/$2/package.json"
-  [[ -f "$pj" ]] && jq -r '.version // "?"' "$pj" 2>/dev/null || echo "?"
+# Resolve the installed plugin version from the runtime's OWN ledger
+# (`plugins list --json`, keyed by unscoped plugin id) — NOT a guessed
+# filesystem path. openclaw 2026.6.x isolates externalized installs under
+# ~/.openclaw-<p>/npm/projects/openclaw-<pkg>-<hash>/node_modules/ (#88794),
+# so the old npm/node_modules/<pkg> read returned "" after a 6.x install. The
+# --json shape is identical on 5.27 and 6.x (verified v2026.5.27 tag), so this
+# one read is correct for ANY downgrade target. Mirrors deploy.sh's
+# plugin_runtime_version (PR #537).
+plugin_ver() { # <profile> <pkg e.g. @openclaw/slack>
+  local profile="$1" id="${2##*/}"
+  # `|| true` is load-bearing: a ledger lookup failure must yield empty, NOT
+  # abort. Under `set -euo pipefail` a non-zero pipeline (pipefail propagates an
+  # openclaw failure) would exit the script at the plain assignment
+  # `pv=$(plugin_ver ...)` BEFORE the contextual `die "<pkg> on <p> reports
+  # 'missing'"` below could run — turning a diagnostic into a silent abort.
+  openclaw --profile "$profile" plugins list --json 2>/dev/null \
+    | jq -r --arg id "$id" '(.plugins // .)[]? | select(.id == $id) | .version // empty' 2>/dev/null \
+    | head -1 || true
 }
 
 log "Downgrade plan:"
@@ -127,7 +142,7 @@ for p in $(profiles); do
     openclaw --profile "$p" plugins install "$pkg@$TO_VERSION" --force --pin \
       || die "plugins install $pkg@$TO_VERSION failed (profile=$p)"
     pv="$(plugin_ver "$p" "$pkg")"
-    [[ "$pv" == "$TO_VERSION" ]] || die "$pkg on $p reports '$pv' after install of $TO_VERSION"
+    [[ "$pv" == "$TO_VERSION" ]] || die "$pkg on $p reports '${pv:-missing}' after install of $TO_VERSION"
     log "  $pkg@$p now: $pv"
   done
 done
