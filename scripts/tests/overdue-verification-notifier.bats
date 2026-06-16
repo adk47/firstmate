@@ -509,6 +509,61 @@ PYEOF
   echo "$output" | grep -qx ok
 }
 
+@test "cold-start seed with 0 candidates writes a sentinel (state non-empty -> next run is steady-state)" {
+  run python3 - <<'PYEOF'
+import os, json
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+# No state file -> cold start; zero eligible tasks (the real live case: SEEDED 0).
+mod.fetch_all_tasks = lambda key, lid: []
+sent = []
+mod.post_intercom_reply = lambda *a, **k: sent.append(a)
+os.environ.update({"CLICKUP_API_KEY": "k", "MUSOAI_INTERCOM_TOKEN": "t"})
+import sys; sys.argv = ["n", "--apply"]
+rc = mod.main()
+assert rc == 0 and sent == [], (rc, sent)
+state = json.load(open(os.environ["OVERDUE_NOTIFY_STATE"]))
+# Must NOT be {} — the sentinel keeps it non-empty so `not state` is False next
+# run and a newly-overdue ticket is SENT, not re-seeded.
+assert state and mod.SEED_SENTINEL in state, ("0-candidate seed must write the sentinel, non-empty", state)
+assert [k for k in state if k != mod.SEED_SENTINEL] == [], ("only the sentinel, no phantom keys", state)
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
+}
+
+@test "seeded-empty state (sentinel, 0 prior candidates) SENDS the next newly-overdue ticket (not re-seed)" {
+  run python3 - <<'PYEOF'
+import os, json
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+now = int(os.environ['OVERDUE_NOTIFY_NOW'])
+# A prior clean seed found 0 candidates -> state is {SEED_SENTINEL: ts}, NOT {}.
+# Steady-state, so the first ticket that later goes overdue must be SENT — the
+# F4-fix regression seeded (suppressed) it because {} re-triggered cold-start.
+json.dump({mod.SEED_SENTINEL: now - 100}, open(os.environ["OVERDUE_NOTIFY_STATE"], "w"))
+task = {"id": "T1", "status": {"type": "open"},
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"}],
+        "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/C1"}],
+        "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---",
+        "due_date": str((now - 5*86400)*1000)}
+mod.fetch_all_tasks = lambda key, lid: [task]
+mod.get_conversation = lambda cid, tok: {"source": {"author": {"type": "user", "email": "a@b.com"}}, "state": "open", "conversation_parts": {"conversation_parts": [{"author": {"type": "admin", "id": mod.CAROLINE_ADMIN_ID}}]}}
+calls = []
+mod.post_intercom_reply = lambda *a, **k: calls.append(a) or {"id": "m"}
+os.environ.update({"CLICKUP_API_KEY": "k", "MUSOAI_INTERCOM_TOKEN": "t"})
+import sys; sys.argv = ["n", "--apply"]
+rc = mod.main()
+assert rc == 0 and len(calls) == 1, ("seeded-empty state must SEND the newly-overdue ticket", rc, calls)
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
+}
+
 @test "circuit breaker ignores --limit: a raised send cap does not disarm the wiped-state guard" {
   run python3 - <<'PYEOF'
 import os, json

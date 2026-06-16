@@ -392,9 +392,21 @@ def mark_seen(state, cand, now_epoch):
         state[k] = now_epoch
 
 
+# A clean seed that found zero eligible tickets would otherwise write an empty
+# {} state — indistinguishable from "never seeded" — so `not state` would
+# re-cold-start every run and SEED (suppress) the first ticket that later goes
+# overdue instead of sending it. The seed always writes this sentinel so a
+# genuinely-seeded state is never empty; a `{}` with no sentinel still means
+# never-seeded-or-wiped and correctly re-seeds (no blast).
+SEED_SENTINEL = "__seeded_at__"
+
+
 def prune_state(state, now_epoch, keep_days=90):
     cutoff = now_epoch - keep_days * 86400
-    return {k: v for k, v in state.items() if isinstance(v, (int, float)) and v >= cutoff}
+    # Keep the seed sentinel regardless of age — dropping it would let the state
+    # collapse back to {} and spuriously re-trigger cold-start.
+    return {k: v for k, v in state.items()
+            if k == SEED_SENTINEL or (isinstance(v, (int, float)) and v >= cutoff)}
 
 
 # --------------------------------------------------------------------------
@@ -557,13 +569,15 @@ def main():
 
     state = load_state(state_path)
 
-    # ---- Cold start: first run (or wiped/corrupt state) seeds, sends nothing.
-    # An empty dict counts as wiped state too: load_state returns {} for a
-    # `{}`-truncated file (valid JSON, so not the corrupt->None path), and
-    # treating it as "seen nothing -> every candidate is new" would blast the
-    # backlog. `not state` folds both None and {} into the safe seed path.
+    # ---- Cold start: first run, or wiped/corrupt/empty state, seeds and sends
+    # nothing. load_state returns {} for a `{}`-truncated file (valid JSON, not
+    # the corrupt->None path) and None for missing/corrupt; `not state` folds
+    # both into the safe seed path so a wipe never blasts the backlog. The seed
+    # ALWAYS writes SEED_SENTINEL (even with zero candidates) so a legitimately-
+    # seeded-but-empty state is never {} — otherwise the next newly-overdue
+    # ticket would be re-seeded (suppressed) here instead of sent below.
     if not state:
-        seed = {}
+        seed = {SEED_SENTINEL: now_epoch}
         for c in candidates:
             mark_seen(seed, c, now_epoch)
         write_state(state_path, seed)
