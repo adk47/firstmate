@@ -102,8 +102,22 @@ setup() {
   [ ! -s "$NOCODB_STUB_LOG" ]
 }
 
-@test "default (USE_MUSO_CLI unset) still routes through the nocodb-api.sh wrapper" {
+@test "default (USE_MUSO_CLI unset) routes through muso — the go-live default" {
+  # Post go-live, common.sh defaults USE_MUSO_CLI=1; company-finder (agent-exec,
+  # no systemd unit) flips here. Unset MUST now take the muso path.
   run env NOCODB_STUB_TOTAL_ROWS=2 bash -c '
+    set -euo pipefail; source "$0"
+    run_nocodb records.ls sometable --limit 100 --offset 0
+  ' "$COMMON"
+  [ "$status" -eq 0 ]
+  [ "$(jq '.list | length' <<<"$output")" = "2" ]
+  # muso WAS invoked (and the {data:…} envelope was peeled back to {list,…})
+  grep -q 'nocodb records list --table sometable' "$MUSO_STUB_LOG"
+  [ "$(jq 'has("data")' <<<"$output")" = "false" ]
+}
+
+@test "USE_MUSO_CLI=0 explicitly falls back to the nocodb-api.sh wrapper" {
+  run env USE_MUSO_CLI=0 NOCODB_STUB_TOTAL_ROWS=2 bash -c '
     set -euo pipefail; source "$0"
     run_nocodb records.ls sometable --limit 100 --offset 0
   ' "$COMMON"

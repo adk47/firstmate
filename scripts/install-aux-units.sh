@@ -346,6 +346,13 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+# muso-cli unification (PR #547): route the read-only ClickUp digest through the
+# gated muso clickup provider. MUSO_BIN is absolute because systemd's unit PATH
+# does not reliably include /usr/local/bin. Read-only — proven byte-identical to
+# the curl path on live data (node-8, 2026-06-17). Revert by removing these two
+# lines + re-running install-aux-units.sh.
+Environment=USE_MUSO_CLI=1
+Environment=MUSO_BIN=/usr/local/bin/muso
 EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/edge.env
 ExecStart=$HYDRA_ROOT/scripts/clickup-sla-digest.sh
@@ -396,6 +403,10 @@ After=network-online.target
 [Service]
 Type=oneshot
 Environment=MUSO_BIN=/usr/local/bin/muso
+# muso-cli unification (PR #547): route the ClickUp leg (status PUT + comment
+# POST) through the gated muso clickup provider. WRITE path — gained --requester
+# attribution + a fail-closed audit. Revert by dropping this line + re-running.
+Environment=USE_MUSO_CLI=1
 EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/edge.env
 ExecStart=$HYDRA_ROOT/scripts/dedup/sweeps/close-merged-tickets.sh --apply
@@ -574,7 +585,10 @@ chmod 644 /etc/cron.d/prod-log-alert-watchdog
 # Same ownership rule: edit here + re-run install-aux-units.sh.
 cat > /etc/cron.d/stale-ticket-watchdog << STALETICKETWD
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-30 8 * * * root $HYDRA_ROOT/scripts/stale-ticket-watchdog.sh >> /var/log/stale-ticket-watchdog.log 2>&1
+# muso-cli unification (PR #547): route the read-only watchdog through the gated
+# muso clickup provider. Env is inline (cron's PATH is minimal, so MUSO_BIN must
+# be absolute). Read-only. Revert by dropping the two VAR=val + re-running install.
+30 8 * * * root USE_MUSO_CLI=1 MUSO_BIN=/usr/local/bin/muso $HYDRA_ROOT/scripts/stale-ticket-watchdog.sh >> /var/log/stale-ticket-watchdog.log 2>&1
 STALETICKETWD
 chmod 644 /etc/cron.d/stale-ticket-watchdog
 

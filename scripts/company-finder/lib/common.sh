@@ -25,19 +25,22 @@ PAGE_LIMIT="${PAGE_LIMIT:-100}"
 # ~22 pages * 0.25s ≈ 5.5s added per full Company Intelligence snapshot.
 NOCODB_PAGE_SLEEP="${NOCODB_PAGE_SLEEP:-0.25}"
 
-# USE_MUSO_CLI — dark-launch cutover from the nc_pat_-token nocodb-api.sh
-# wrapper to the gated, audited `muso nocodb` provider. Default OFF: the bash
-# wrapper stays the path until the muso binary ships the nocodb command fleet-
-# wide (it is merged on muso-cli main but unreleased) AND a live-parity check
-# passes on node-8. When 1, every NocoDB write gains muso's --requester
-# attribution + audit + prewrite gate; read SHAPES are unchanged because
-# muso_nocodb peels muso's one-object {data:…} envelope back to the raw NocoDB
-# body, so fetch_table/resolve_ledger_table_id and the write callers need no
-# changes. Caller-side pagination (fetch_table) is preserved verbatim — muso's
-# --limit/--offset map 1:1, so the NocoDB-Cloud ≤100 clamp is defeated the same
-# way it is today (no dependency on a CLI --all flag).
-USE_MUSO_CLI="${USE_MUSO_CLI:-0}"
-MUSO_BIN="${MUSO_BIN:-muso}"
+# USE_MUSO_CLI — routes NocoDB through the gated, audited `muso nocodb` provider
+# instead of the nc_pat_-token nocodb-api.sh wrapper. **GO-LIVE: default is now
+# ON** (muso v0.3.0 deployed + live-parity verified on node-8 2026-06-17:
+# fetch_table 2158==2158 rows). company-finder is invoked by the main-gateway
+# agent (cron-jobs.json) with no per-job systemd unit to attach env to, so the
+# code default is the flip point. Set USE_MUSO_CLI=0 to fall back to the wrapper
+# (the bats wrapper-path suites pin it to 0). When 1, every NocoDB write gains
+# muso's --requester attribution + audit + prewrite gate; read SHAPES are
+# unchanged because muso_nocodb peels muso's one-object {data:…} envelope back
+# to the raw NocoDB body, and caller-side pagination (fetch_table) is preserved
+# verbatim — muso's --limit/--offset map 1:1, so the NocoDB-Cloud ≤100 clamp is
+# defeated the same way (no dependency on a CLI --all flag).
+USE_MUSO_CLI="${USE_MUSO_CLI:-1}"
+# Absolute default so agent-exec / cron contexts with a minimal PATH still find
+# the binary (deploy installs it at /usr/local/bin/muso); override for tests.
+MUSO_BIN="${MUSO_BIN:-/usr/local/bin/muso}"
 # Attribution for the cron's gated writes — passed explicitly per call. This is
 # deliberately NOT the MUSO_REQUESTER env var: a static MUSO_REQUESTER is
 # forbidden (it would freeze attribution); this names the deterministic cron's

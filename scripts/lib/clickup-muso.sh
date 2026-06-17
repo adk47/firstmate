@@ -16,7 +16,6 @@
 #   (muso re-encodes), so a pre-encoded query such as
 #   `tags%5B%5D=action%3Aprofile-merge` round-trips correctly.
 
-: "${MUSO_BIN:=muso}"
 # Attribution for the cron's gated writes — passed explicitly per call, never a
 # static MUSO_REQUESTER (which would freeze attribution).
 : "${CLICKUP_REQUESTER:=clickup-cron@hydra-ops}"
@@ -49,8 +48,11 @@ clickup_muso() {
   fi
   [[ "$method" != GET ]] && args+=(--requester "$CLICKUP_REQUESTER")
   [[ -n "$body" ]] && args+=(--data "$body")
+  # Default to the absolute path (cron/systemd PATH may omit /usr/local/bin) at
+  # the point of use — never assign MUSO_BIN globally, since a sourcing script
+  # (e.g. close-merged-tickets.sh) reads MUSO_BIN for its own Trino binary.
   local out
-  out=$("$MUSO_BIN" "${args[@]}" --json) || return $?
+  out=$("${MUSO_BIN:-/usr/local/bin/muso}" "${args[@]}" --json) || return $?
   # Peel the {data:…} envelope back to the raw ClickUp body the curl path
   # returned. No -e: a successful muso call returns 0 and we defer a degenerate
   # body to the caller's shape-check, exactly as the curl path does.

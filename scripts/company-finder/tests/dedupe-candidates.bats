@@ -9,6 +9,7 @@
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"
   SUT="$REPO_ROOT/scripts/company-finder/dedupe-candidates.sh"
+  export USE_MUSO_CLI=0   # pin the legacy wrapper path; the muso path is covered by nocodb-muso-seam.bats
   export NOCODB_API_SH="$BATS_TEST_DIRNAME/stubs/nocodb-api.sh"
   export NOCODB_STUB_FIXTURES="$BATS_TEST_DIRNAME/fixtures"
   # Keep table ids aligned with the stub's case labels (also the script defaults).
