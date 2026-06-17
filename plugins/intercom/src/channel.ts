@@ -26,6 +26,7 @@ import {
   buildSilentDispatchSlackPayload,
   type SilentDispatchReason,
 } from "./silent-dispatch.js";
+import { isIntentionalNoReply, stripNoReplySentinel } from "./no-reply.js";
 import { createOpenRouterJudge } from "./judge.js";
 import { createClickupTicket } from "./clickup.js";
 import {
@@ -709,8 +710,28 @@ export const intercomPlugin = createChatChannelPlugin({
                     // Re-check `canAgentReply` here to catch state flips that
                     // landed between the last `deliver` call and dispatch resolve
                     // (e.g., a human took over in the final ms of generation).
-                    if (bufferedChunks.length > 0 && canAgentReply(state)) {
-                      const joined = joinDeliveryChunks(bufferedChunks);
+                    const joinedForReply = joinDeliveryChunks(bufferedChunks);
+                    if (bufferedChunks.length > 0 && canAgentReply(state) && isIntentionalNoReply(joinedForReply)) {
+                      // Caroline deliberately chose to stay quiet (SOUL.md
+                      // "Reading the room") -- e.g. the customer just said
+                      // "ok"/"thanks" after she'd already helped. Post nothing;
+                      // the 👀 ack reaction remains on their message as the
+                      // read-receipt. NOT a silent_dispatch failure: a chunk (the
+                      // sentinel) WAS produced, so the alarm below stays quiet.
+                      log?.info?.(
+                        `[${tag}] intentional no-reply conv=${result.conversationId}`,
+                      );
+                    } else if (bufferedChunks.length > 0 && canAgentReply(state)) {
+                      const joined = stripNoReplySentinel(joinedForReply);
+                      if (joined.length > 0 && joined !== joinedForReply.trim()) {
+                        // The model emitted the no-reply sentinel alongside real
+                        // text instead of on its own (SOUL.md: the token must be
+                        // the ENTIRE reply). We post the remainder and drop the
+                        // token, but log it so a slipping doctrine is visible.
+                        log?.warn?.(
+                          `[${tag}] no-reply sentinel mixed with reply text (stripped, posting remainder) conv=${result.conversationId}`,
+                        );
+                      }
                       const stripped = stripConversationContext(joined, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId });
                       // Outbound reasoning-preamble guard. The reasoning model
                       // (gpt-5.5/codex) intermittently writes its internal plan into
