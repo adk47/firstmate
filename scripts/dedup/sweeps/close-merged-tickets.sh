@@ -12,6 +12,8 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../../lib/clickup-muso.sh
+. "$DIR/../../lib/clickup-muso.sh"   # USE_MUSO_CLI=1 routes ClickUp through `muso clickup`
 
 apply=0
 days="${DAYS:-90}"
@@ -76,6 +78,10 @@ trap 'rm -rf "$tmp"' EXIT
 # Curl wrapper that fails loud on non-2xx — refuses to keep going on 4xx/5xx.
 clickup_curl() {
   local method="$1" path="$2" data="${3:-}"
+  if [ "${USE_MUSO_CLI:-0}" = 1 ]; then
+    clickup_muso "$method" "$path" "$data"   # gated; writes carry --requester + audit
+    return
+  fi
   local body_file; body_file=$(mktemp)
   local code
   if [ -n "$data" ]; then

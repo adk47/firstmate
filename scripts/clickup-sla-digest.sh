@@ -36,6 +36,8 @@ set -euo pipefail
 _DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/slack-notify.sh
 . "$_DIR/lib/slack-notify.sh"
+# shellcheck source=lib/clickup-muso.sh
+. "$_DIR/lib/clickup-muso.sh"   # USE_MUSO_CLI=1 routes ClickUp reads through `muso clickup`
 
 dry_run=0
 while [ $# -gt 0 ]; do
@@ -78,6 +80,10 @@ start_after_ms=$(( $(TZ=$tz date -d "$today 00:00 2 days" +%s) * 1000 ))
 # Curl wrapper that fails loud on non-2xx — refuses to keep going on 4xx/5xx.
 clickup_curl() {
   local path="$1"
+  if [ "${USE_MUSO_CLI:-0}" = 1 ]; then
+    clickup_muso GET "$path"   # gated read; same body, fails non-zero on error
+    return
+  fi
   local body_file; body_file=$(mktemp)
   local code
   code=$(curl -sS --connect-timeout 10 --max-time 30 -H "Authorization: $api_key" \

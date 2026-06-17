@@ -89,6 +89,8 @@ fi
 
 # shellcheck source=lib/slack-notify.sh
 source "$_WD_DIR/lib/slack-notify.sh"
+# shellcheck source=lib/clickup-muso.sh
+source "$_WD_DIR/lib/clickup-muso.sh"   # USE_MUSO_CLI=1 routes the ClickUp fetch through `muso clickup`
 
 exec 9>"$LOCKFILE"
 if ! flock -n 9; then
@@ -104,11 +106,18 @@ trap 'rm -rf "$WORKDIR"' EXIT
 page=0
 while :; do
   page_file="$WORKDIR/page-$page.json"
-  curl -sS --max-time 30 \
-    -H "Authorization: $CLICKUP_API_KEY" \
-    -H "Content-Type: application/json" \
-    "$CLICKUP_API/list/$LIST_ID/task?archived=false&include_closed=false&order_by=due_date&page=$page" \
-    > "$page_file"
+  _ticket_path="/list/$LIST_ID/task?archived=false&include_closed=false&order_by=due_date&page=$page"
+  if [ "${USE_MUSO_CLI:-0}" = 1 ]; then
+    # On a muso error the body is empty → the jq shape-check below fails loud,
+    # matching the curl path (which also defers HTTP errors to that check).
+    clickup_muso GET "$_ticket_path" > "$page_file" || true
+  else
+    curl -sS --max-time 30 \
+      -H "Authorization: $CLICKUP_API_KEY" \
+      -H "Content-Type: application/json" \
+      "$CLICKUP_API$_ticket_path" \
+      > "$page_file"
+  fi
   if ! jq -e '.tasks | type == "array"' "$page_file" >/dev/null 2>&1; then
     err=$(jq -r '.err // "unparseable response"' "$page_file" 2>/dev/null || echo "unparseable response")
     echo "$LOGPREFIX ClickUp list fetch failed (page $page): $err" >&2

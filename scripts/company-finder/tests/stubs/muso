@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Hermetic stub of the `muso` host binary for the company-finder USE_MUSO_CLI
+# seam tests. Covers exactly the `muso nocodb …` surface common.sh's
+# muso_nocodb() translates to. It (1) logs its full argv to $MUSO_STUB_LOG so
+# tests can assert the translation — notably --requester on writes — and (2)
+# DELEGATES to the nocodb-api.sh stub in verb form, reusing the SAME
+# fixtures/clamp/total-rows logic, then wraps the body in muso's {data:…}
+# envelope. Wrapping here is the point: it proves the seam's .data peel restores
+# byte-parity with the wrapper's --raw path, so the clamp/pagination fixtures in
+# fetch-table.bats hold identically on the muso path.
+set -euo pipefail
+
+[[ -n "${MUSO_STUB_LOG:-}" ]] && printf '%s\n' "$*" >>"$MUSO_STUB_LOG"
+
+[[ "${1:-}" == "nocodb" ]] || {
+  echo '{"error":{"code":"bad_stub_call","message":"muso stub: only `nocodb` is mocked"}}' >&2
+  exit 1
+}
+shift
+group="${1:-}"; op="${2:-}"; shift 2 2>/dev/null || true
+
+table="" base="" data="" fields="" limit="" offset=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --table) table="$2"; shift 2 ;;
+    --base) base="$2"; shift 2 ;;
+    --data) data="$2"; shift 2 ;;
+    --fields) fields="$2"; shift 2 ;;
+    --limit) limit="$2"; shift 2 ;;
+    --offset) offset="$2"; shift 2 ;;
+    --requester) shift 2 ;;  # consumed; the top-of-file log already captured it
+    --json) shift ;;
+    *) shift ;;
+  esac
+done
+
+STUB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+delegate() { bash "$STUB_DIR/nocodb-api.sh" --raw "$@"; }
+
+case "$group/$op" in
+  records/list)
+    d=(records.ls "$table")
+    [[ -n "$fields" ]] && d+=(--fields "$fields")
+    [[ -n "$limit" ]]  && d+=(--limit "$limit")
+    [[ -n "$offset" ]] && d+=(--offset "$offset")
+    out=$(delegate "${d[@]}") ;;
+  records/create) out=$(delegate records.create "$table" "$data") ;;
+  records/update) out=$(delegate records.update "$table" "$data") ;;
+  tables/list)    out=$(delegate tables.ls "$base") ;;
+  tables/create)  out=$(delegate tables.create "$base" "$data") ;;
+  *)
+    echo '{"error":{"code":"bad_stub_call","message":"muso stub: unmapped nocodb '"$group/$op"'"}}' >&2
+    exit 1 ;;
+esac
+
+jq -c '{data: .}' <<<"$out"

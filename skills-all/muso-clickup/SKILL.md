@@ -1,20 +1,30 @@
 ---
 name: muso-clickup
 description: |
-  ClickUp task management - READ ONLY. Query tasks, get details, view status.
-  CRITICAL: This skill is READ-ONLY. Never create, update, or delete tasks.
+  ClickUp task management - READ ONLY. Query tasks, get details, view status,
+  through the gated `muso clickup` provider.
+  Reads (tasks list/get/comments) are ungated; the write commands exist but are
+  policy-gated + audited — this skill never uses them.
 
   Use when: listing tasks, getting task details, viewing status, searching tasks,
   checking assignments.
 
   Triggers: "clickup", "task", "user request", "ticket", "list tasks", "show tasks"
 compatibility: |
-  Requires `curl` + `jq` and a `CLICKUP_API_KEY` env var. Read-only (GET requests only).
+  Main gateway on node-8 only. Driven by the `muso` host binary —
+  `muso clickup …` (see muso-cli SKILL.md for the output/exit-code contract).
+  Requires the muso binary that ships the `clickup` command (v0.3.0+); until
+  that release is pinned by deploy.sh, fall back to the raw `curl` form (a
+  `muso clickup raw GET <path>` is the same call as
+  `curl -H "Authorization: $CLICKUP_API_KEY" https://api.clickup.com/api/v2<path>`).
+  The token rides `CLICKUP_API_KEY` (same var as before).
+depends-on:
+  - muso-cli
 metadata:
-  version: "1.0"
-  source-repo: "Muso-AI/muso-skills"
+  version: "1.1"
+  source-repo: "Muso-AI/hydra"
 allowed-tools:
-  - Bash
+  - exec
 ---
 
 # ClickUp Skill (READ-ONLY)
@@ -23,202 +33,121 @@ allowed-tools:
 
 **Primary task list:** https://app.clickup.com/2283334/v/b/6-901214992012-2?pr=90120415925
 
-This is the main stable list for development priorities. Sprint lists are created all the time and change frequently - use this for general understanding of priorities.
+The main stable list for development priorities. Sprint lists change frequently;
+use this for general understanding of priorities.
 
-**Team ID:** `2283334`
-**List ID:** `901214992012` (extracted from board view)
+**Team ID:** `2283334` · **List ID:** `901214992012`
 
-## ⚠️ CRITICAL: READ-ONLY ACCESS ⚠️
+Pass `--list 901214992012` explicitly (the `CLICKUP_LIST_ID` env default points
+at the support board, a different list).
 
-**THIS SKILL IS READ-ONLY. DO NOT CREATE, UPDATE, OR DELETE ANYTHING.**
+## ⚠️ READ-ONLY — now structurally enforced
 
-The API key has write permissions, but you MUST NEVER use them:
-- ❌ **DO NOT** create tasks
-- ❌ **DO NOT** update task status
-- ❌ **DO NOT** add comments
-- ❌ **DO NOT** assign/unassign tasks
-- ❌ **DO NOT** modify custom fields
-- ❌ **DO NOT** delete anything
+The token has write permissions, but this skill MUST NEVER use them. Under
+`muso clickup`, that split is no longer prose-only:
 
-**ONLY USE GET REQUESTS. NO POST, PUT, PATCH, OR DELETE.**
+- **Reads** — `tasks list`, `tasks get`, `tasks comments`, `whoami`, and
+  `raw GET …` — are **ungated**. Use these.
+- **Writes** — `tasks create/update/comment/tag` (and `delete`) — require
+  `--requester` and are **audited**; `delete` is dangerous-tier. **Do not call
+  them from this skill.** A stray write fails the gate loudly rather than
+  silently mutating the board.
 
-## Allowed Operations (Read-Only)
+So: only `muso clickup tasks list|get|comments`, `whoami`, and `raw GET`.
 
-> All curl commands use: `-H "Authorization: $CLICKUP_API_KEY"`
+> **Envelope:** every `muso … --json` result is one object `{data: …}`. The raw
+> ClickUp body (e.g. `{tasks:[…]}`) is under `.data` — peel it first in `jq`
+> (the examples do).
 
-### List Tasks
+## Allowed operations (read-only)
+
+### List tasks
 ```bash
-# List all tasks in a list
-curl -s "https://api.clickup.com/api/v2/list/LIST_ID/task" | jq
+# All tasks in a list
+muso clickup tasks list --list 901214992012 --json | jq '.data.tasks[]'
 
-# List tasks with status filter
-curl -s "https://api.clickup.com/api/v2/list/LIST_ID/task?statuses[]=to%20do&statuses[]=waiting" | jq
+# Status filter (ClickUp array params ride a repeatable --query)
+muso clickup tasks list --list 901214992012 \
+  --query 'statuses[]=to do' --query 'statuses[]=waiting' --json | jq '.data.tasks[]'
 
-# List tasks assigned to someone
-curl -s "https://api.clickup.com/api/v2/list/LIST_ID/task?assignees[]=ASSIGNEE_ID" | jq
+# Assigned to someone
+muso clickup tasks list --list 901214992012 --query 'assignees[]=ASSIGNEE_ID' --json | jq '.data.tasks[]'
 ```
 
-### Get Task Details
+### Get task details
 ```bash
-# Get full task details
-curl -s "https://api.clickup.com/api/v2/task/TASK_ID" | jq
+muso clickup tasks get --task TASK_ID --json | jq '.data | {
+  id, name, status: .status.status,
+  assignees: [.assignees[].username], description
+}'
 
-# Get specific fields
-curl -s "https://api.clickup.com/api/v2/task/TASK_ID" | \
-  jq '{
-    id,
-    name,
-    status: .status.status,
-    assignees: [.assignees[].username],
-    description
-  }'
-
-# Get task with custom fields (Profile ID, User Email)
-curl -s "https://api.clickup.com/api/v2/task/TASK_ID" | \
-  jq '{
-    name,
-    status: .status.status,
-    profile_id: (.custom_fields[] | select(.name=="Profile ID") | .value),
-    user_email: (.custom_fields[] | select(.name=="User Email") | .value)
-  }'
+# With custom fields (Profile ID, User Email)
+muso clickup tasks get --task TASK_ID --json | jq '.data | {
+  name, status: .status.status,
+  profile_id: (.custom_fields[] | select(.name=="Profile ID") | .value),
+  user_email: (.custom_fields[] | select(.name=="User Email") | .value)
+}'
 ```
 
-### Get Task Comments
+### Get task comments
 ```bash
-# Get comments on a task
-curl -s "https://api.clickup.com/api/v2/task/TASK_ID/comment" | jq
+muso clickup tasks comments --task TASK_ID --json | jq '.data'
 ```
 
-### Get Lists
+### Lists / hierarchy / search / identity (via raw GET)
+The long tail — folder/space lists, team task search, hierarchy — has no typed
+command; use `raw GET <path>` (relative to `/api/v2`):
 ```bash
-# Get all lists in a folder
-curl -s "https://api.clickup.com/api/v2/folder/FOLDER_ID/list" | jq
-
-# Get all lists in a space
-curl -s "https://api.clickup.com/api/v2/space/SPACE_ID/list" | jq
+muso clickup raw GET /folder/FOLDER_ID/list --json | jq '.data'
+muso clickup raw GET /space/SPACE_ID/list   --json | jq '.data'
+muso clickup raw GET /team/TEAM_ID/task --query 'search=profile deletion' --json | jq '.data.tasks[]'
+muso clickup raw GET /team --json | jq '.data'    # authorized teams
+muso clickup whoami --json | jq '.data'           # token's user (GET /user)
 ```
 
-### Get Team/Workspace Info
-```bash
-# Get authorized teams
-curl -s "https://api.clickup.com/api/v2/team" | jq
+## Common read-only queries
 
-# Get user info
-curl -s "https://api.clickup.com/api/v2/user" | jq
+```bash
+# Development priorities, shaped
+muso clickup tasks list --list 901214992012 --json | jq '.data.tasks[] | {
+  id, name, status: .status.status, priority: .priority,
+  assignees: [.assignees[].username]
+}'
+
+# High/urgent priority dev tasks
+muso clickup tasks list --list 901214992012 --json \
+  | jq '.data.tasks[] | select(.priority.priority == "high" or .priority.priority == "urgent")
+        | {id, name, priority: .priority.priority, assignees: [.assignees[].username]}'
+
+# Count tasks by status
+muso clickup tasks list --list 901214992012 --json \
+  | jq '[.data.tasks[].status.status] | group_by(.) | map({status: .[0], count: length}) | sort_by(.count) | reverse'
+
+# Waiting tasks
+muso clickup tasks list --list LIST_ID --query 'statuses[]=waiting' --json \
+  | jq '.data.tasks[] | {id, name, assignees: [.assignees[].username], waiting_since: .date_updated}'
 ```
 
-### Search Tasks
-```bash
-# Search tasks by text
-curl -s "https://api.clickup.com/api/v2/team/TEAM_ID/task?search=profile%20deletion" | jq
+> **Pagination:** `tasks list` returns ≤100 tasks per page with `last_page` in
+> the body. For a board larger than one page, loop `--query 'page=N'` from 0
+> until `.data.last_page == true`.
 
-# Search with filters
-curl -s "https://api.clickup.com/api/v2/team/TEAM_ID/task?search=spotify&statuses[]=waiting" | jq
-```
+## Status values reference
 
-## Common Read-Only Queries
-
-### Get Development Priorities (Default List)
-```bash
-# List all tasks in development priorities
-curl -s "https://api.clickup.com/api/v2/list/901214992012/task" | \
-  jq '.tasks[] | {
-    id,
-    name,
-    status: .status.status,
-    priority: .priority,
-    assignees: [.assignees[].username]
-  }'
-
-# Get high priority dev tasks
-curl -s "https://api.clickup.com/api/v2/list/901214992012/task" | \
-  jq '.tasks[] | select(.priority.priority == "high" or .priority.priority == "urgent") | {
-    id,
-    name,
-    priority: .priority.priority,
-    assignees: [.assignees[].username]
-  }'
-
-# Count tasks by status in dev priorities
-curl -s "https://api.clickup.com/api/v2/list/901214992012/task" | \
-  jq '[.tasks[] | .status.status] | group_by(.) |
-      map({status: .[0], count: length}) |
-      sort_by(.count) | reverse'
-```
-
-### List Today's To-Do Tasks
-```bash
-curl -s "https://api.clickup.com/api/v2/list/LIST_ID/task?statuses[]=to%20do" | \
-  jq '.tasks[] | {
-    id,
-    name,
-    assignees: [.assignees[].username],
-    created: .date_created
-  }'
-```
-
-### Get Task Details with Profile Info
-```bash
-curl -s "https://api.clickup.com/api/v2/task/TASK_ID" | \
-  jq '{
-    id,
-    name,
-    status: .status.status,
-    description,
-    assignees: [.assignees[].username],
-    custom_fields: [
-      .custom_fields[] | {
-        name,
-        value
-      }
-    ]
-  }'
-```
-
-### Count Tasks by Status
-```bash
-curl -s "https://api.clickup.com/api/v2/list/LIST_ID/task" | \
-  jq '[.tasks[] | .status.status] | group_by(.) |
-      map({status: .[0], count: length}) |
-      sort_by(.count) | reverse'
-```
-
-### Get Waiting Tasks
-```bash
-curl -s "https://api.clickup.com/api/v2/list/LIST_ID/task?statuses[]=waiting" | \
-  jq '.tasks[] | {
-    id,
-    name,
-    assignees: [.assignees[].username],
-    waiting_since: .date_updated
-  }'
-```
-
-## Authentication
-
-**The API key is pre-configured in the OpenClaw gateway environment.**
-
-All `curl` commands use `$CLICKUP_API_KEY` which is automatically available.
-
-## Status Values Reference
-
-User requests workflow statuses:
-- `to do` - Actionable, ready to process
-- `waiting` - Blocked, needs engineering fix
-- `impossible` - Cannot be resolved (Spotify issues, etc.)
-- `resolved` - Successfully completed
+User-requests workflow statuses:
+- `to do` — actionable, ready to process
+- `waiting` — blocked, needs engineering fix
+- `impossible` — cannot be resolved (Spotify issues, etc.)
+- `resolved` — successfully completed
 
 ## Tips
 
-- **READ-ONLY ONLY** - Never modify data
-- Task IDs are numeric or alphanumeric
-- List IDs are needed to list tasks - get from ClickUp URL
-- Use `| jq` to parse and filter JSON responses
-- Custom field names: "Profile ID", "User Email" (case-sensitive)
-- Rate limit: 100 requests per minute per API key
-- Always use `-s` (silent) flag with curl to suppress progress output
+- **READ-ONLY** — only `tasks list|get|comments`, `whoami`, `raw GET`.
+- Task IDs are numeric or alphanumeric; list IDs come from the ClickUp URL.
+- Custom field names: "Profile ID", "User Email" (case-sensitive).
+- Rate limit: 100 requests/min/key (the provider backs off on 429 automatically).
+- Peel `.data` before shaping with `jq`.
 
 ## Documentation
-
-- ClickUp API Docs: https://clickup.com/api
-- API Reference: https://clickup.com/api/clickupreference/operation/GetTasks/
+- ClickUp API: https://clickup.com/api · Reference:
+  https://developer.clickup.com/reference
