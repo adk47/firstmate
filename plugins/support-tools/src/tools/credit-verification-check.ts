@@ -224,7 +224,7 @@ export interface CreditVerificationCheckDeps {
   adminClient: MusoAdminClient;
   intercomReader: IntercomReader;
   rateLimiter: RateLimiter;
-  sessionId: string;
+  sessionKey: string;
   intercomToken: string;
   // Phase-1 dark-ship gate (default OFF). When false the tool is registered but
   // returns a disabled sentinel before doing ANY work — a real mechanical flag,
@@ -242,7 +242,7 @@ function resolveId(id: string | undefined, url: string | undefined): string | nu
 export function createCreditVerificationCheckTool(
   deps: CreditVerificationCheckDeps,
 ): AgentTool<typeof Parameters, unknown> {
-  const { adminClient, intercomReader, rateLimiter, sessionId, intercomToken, enabled } = deps;
+  const { adminClient, intercomReader, rateLimiter, sessionKey, intercomToken, enabled } = deps;
 
   async function fetchProfileBody(profileId: string): Promise<ProfileBody | null> {
     const resp = await adminClient.get<{ data?: ProfileBody }>(
@@ -327,14 +327,14 @@ export function createCreditVerificationCheckTool(
       if (!enabled) {
         return textResult(JSON.stringify({ disabled: true, note: "credit verification flow is not enabled" }));
       }
-      if (!rateLimiter.check(sessionId, "credit_verification_check", 60, 10).allowed) {
+      if (!rateLimiter.check(sessionKey, "credit_verification_check", 60, 10).allowed) {
         return textResult(JSON.stringify({ error: "rate_limited" }));
       }
 
       try {
         // Fail-closed gates, cheapest first — never touch the network until the
         // anti-spoof anchor is in hand.
-        const convId = deriveConvId(sessionId);
+        const convId = deriveConvId(sessionKey);
         if (!convId) return textResult(JSON.stringify(failClosedVerdict(["conversation id unavailable; cannot verify ownership"])));
         if (!intercomToken) return textResult(JSON.stringify(failClosedVerdict(["intercom token unavailable; cannot verify ownership"])));
 

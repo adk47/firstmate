@@ -58,14 +58,25 @@ describe("intercom-client getAuthorEmail", () => {
 // ---- Task 2: pure helpers ---------------------------------------------------
 
 describe("deriveConvId", () => {
-  it("extracts the conversation id from a valid support Intercom session key", () => {
+  it("extracts the conversation id from the live per-channel-peer session key", () => {
+    // Live runtime format (edge dmScope=per-channel-peer): direct + group peers,
+    // where {convId} is the Intercom conversation id. Encodes the REAL contract so
+    // a regression to the dead `:conversation:` regex — which fail-closed every
+    // live call (9/9 credit + 11/11 dedupe, 2026-06-17) — fails this test.
+    expect(deriveConvId("agent:support:intercom:direct:215474740188592")).toBe("215474740188592");
+    expect(deriveConvId("agent:support:intercom:group:99")).toBe("99");
+  });
+  it("still accepts the legacy intercom-plugin key shape (defensive fallback)", () => {
     expect(deriveConvId("agent:support:intercom:ws_42:conversation:abc-123")).toBe("abc-123");
   });
-  it("fails closed (null) on unknown / empty / wrong-shape session ids", () => {
+  it("fails closed (null) on the ephemeral session UUID, unknown, empty, and non-intercom keys", () => {
+    // The exact bug: ctx.sessionId is a UUID and must NEVER derive a convId.
+    expect(deriveConvId("1a2ec067-ec70-4ae9-8641-5272689029bd")).toBeNull();
     expect(deriveConvId("unknown")).toBeNull();
     expect(deriveConvId("")).toBeNull();
     expect(deriveConvId(undefined)).toBeNull();
     expect(deriveConvId(null)).toBeNull();
+    expect(deriveConvId("agent:support:main")).toBeNull();
     expect(deriveConvId("agent:operations:slack:ws:thread:1")).toBeNull();
   });
 });
@@ -291,7 +302,7 @@ function makeDeps(over: Record<string, unknown> = {}) {
     adminClient: makeAdminClient(),
     intercomReader: { getAuthorEmail: vi.fn(async () => "owner@example.com") },
     rateLimiter: new RateLimiter(),
-    sessionId: "agent:support:intercom:ws1:conversation:c1",
+    sessionKey: "agent:support:intercom:direct:c1",
     intercomToken: "tok",
     ...over,
   } as any;
@@ -312,8 +323,8 @@ describe("dedupe_check tool — fail-closed orchestration", () => {
     expect((adminClient.get as any).mock.calls.length).toBe(0);
   });
 
-  it("fails closed when convId is underivable from sessionId", async () => {
-    const tool = createDedupeCheckTool(makeDeps({ sessionId: "unknown" }));
+  it("fails closed when convId is underivable from sessionKey", async () => {
+    const tool = createDedupeCheckTool(makeDeps({ sessionKey: "unknown" }));
     const out = await run(tool, { survivorProfileId: "s", duplicateProfileIds: [], requesterEmail: "x@y.com" });
     expect(out.owner_undetermined).toBe(true);
     expect(out.verified).toBe(false);

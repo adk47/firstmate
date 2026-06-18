@@ -145,7 +145,9 @@ export default definePluginEntry({
         adminClient: musoAdminClient,
         intercomReader,
         rateLimiter,
-        sessionId: ctx.sessionId ?? "unknown",
+        // Anti-spoof anchor: the trusted gateway session KEY (carries the convId),
+        // NOT ctx.sessionId (an ephemeral UUID that never matches). See deriveConvId.
+        sessionKey: ctx.sessionKey ?? "unknown",
         intercomToken,
       });
     };
@@ -177,7 +179,9 @@ export default definePluginEntry({
         adminClient: musoAdminClient,
         intercomReader,
         rateLimiter,
-        sessionId: ctx.sessionId ?? "unknown",
+        // Anti-spoof anchor: the trusted gateway session KEY (carries the convId),
+        // NOT ctx.sessionId (an ephemeral UUID that never matches). See deriveConvId.
+        sessionKey: ctx.sessionKey ?? "unknown",
         intercomToken,
         enabled: creditVerificationEnabled,
       });

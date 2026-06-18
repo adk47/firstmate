@@ -137,7 +137,7 @@ function makeDeps(over: Record<string, unknown> = {}) {
     adminClient: makeAdminClient(),
     intercomReader: { getAuthorEmail: vi.fn(async () => "owner@example.com") },
     rateLimiter: new RateLimiter(),
-    sessionId: "agent:support:intercom:ws1:conversation:c1",
+    sessionKey: "agent:support:intercom:direct:c1",
     intercomToken: "tok",
     enabled: true,
     ...over,
@@ -183,8 +183,8 @@ describe("credit_verification_check — fail-closed orchestration", () => {
     expect((adminClient.get as any).mock.calls.length).toBe(0);
   });
 
-  it("fails closed when convId is underivable from sessionId", async () => {
-    const tool = createCreditVerificationCheckTool(makeDeps({ sessionId: "unknown" }));
+  it("fails closed when convId is underivable from sessionKey", async () => {
+    const tool = createCreditVerificationCheckTool(makeDeps({ sessionKey: "unknown" }));
     const out = await run(tool, { requesterEmail: "owner@example.com" });
     expect(out.owner_undetermined).toBe(true);
   });

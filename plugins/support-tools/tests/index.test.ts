@@ -180,7 +180,7 @@ describe("support-tools creditVerificationEnabled flag wiring", () => {
     };
     (pluginEntry as any).register(api);
     expect(factory).toBeDefined();
-    return factory!({ sessionId: "unknown" });
+    return factory!({ sessionKey: "unknown" });
   }
 
   const execute = async (tool: any) => JSON.parse((await tool.execute("id", {})).content[0].text);

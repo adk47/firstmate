@@ -17,14 +17,23 @@ const UUID_PATTERN = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 
 // ---- pure helpers -----------------------------------------------------------
 
-// conv-id is derived in-plugin from the session key, NEVER taken as an agent
-// parameter — otherwise a customer could point the anti-spoof at someone else's
-// conversation. Key format: agent:support:intercom:{wsId}:conversation:{convId}
-// (plugins/intercom/src/session-key.ts).
-const SESSION_KEY_RE = /^agent:support:intercom:[^:]+:conversation:(.+)$/;
-export function deriveConvId(sessionId: string | undefined | null): string | null {
-  if (!sessionId) return null;
-  const m = SESSION_KEY_RE.exec(sessionId);
+// conv-id is derived in-plugin from the trusted gateway SESSION KEY
+// (ctx.sessionKey), NEVER taken as an agent parameter — otherwise a customer
+// could point the anti-spoof at someone else's conversation. Live runtime key
+// format (edge `session.dmScope: "per-channel-peer"`, built by openclaw's
+// buildAgentPeerSessionKey):
+//   agent:support:intercom:direct:{convId}   (1:1 customer DM — ~all traffic)
+//   agent:support:intercom:group:{convId}    (group conversation)
+// where {convId} is the Intercom conversation id. The legacy
+// `…:{wsId}:conversation:{convId}` shape (plugins/intercom/src/session-key.ts) is
+// NOT what the runtime puts in ctx — kept only as a defensive fallback. The
+// ephemeral sessionId UUID and non-intercom keys (…:main, …:slack:…, …:cron:…)
+// match nothing → null → fail closed.
+const SESSION_KEY_RE = /^agent:support:intercom:(?:direct|group):(.+)$/;
+const SESSION_KEY_LEGACY_RE = /^agent:support:intercom:[^:]+:conversation:(.+)$/;
+export function deriveConvId(sessionKey: string | undefined | null): string | null {
+  if (!sessionKey) return null;
+  const m = SESSION_KEY_RE.exec(sessionKey) ?? SESSION_KEY_LEGACY_RE.exec(sessionKey);
   const convId = m?.[1]?.trim();
   return convId ? convId : null;
 }
@@ -240,7 +249,7 @@ export interface DedupeCheckDeps {
   adminClient: MusoAdminClient;
   intercomReader: IntercomReader;
   rateLimiter: RateLimiter;
-  sessionId: string;
+  sessionKey: string;
   intercomToken: string;
 }
 
@@ -251,7 +260,7 @@ function resolveId(id: string | undefined, url: string | undefined): string | nu
 }
 
 export function createDedupeCheckTool(deps: DedupeCheckDeps): AgentTool<typeof Parameters, unknown> {
-  const { adminClient, intercomReader, rateLimiter, sessionId, intercomToken } = deps;
+  const { adminClient, intercomReader, rateLimiter, sessionKey, intercomToken } = deps;
 
   async function fetchProfileBody(profileId: string): Promise<ProfileBody | null> {
     const resp = await adminClient.get<{ data?: ProfileBody }>(`/api/v3/admin/profile/${encodeURIComponent(profileId)}`);
@@ -277,14 +286,14 @@ export function createDedupeCheckTool(deps: DedupeCheckDeps): AgentTool<typeof P
       "Fails closed (owner_undetermined) when ownership cannot be verified. Rate limit: 10 calls / 60 min per session.",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
-      if (!rateLimiter.check(sessionId, "dedupe_check", 60, 10).allowed) {
+      if (!rateLimiter.check(sessionKey, "dedupe_check", 60, 10).allowed) {
         return textResult(JSON.stringify({ error: "rate_limited" }));
       }
 
       try {
         // Fail-closed gates, cheapest first — never touch the network until the
         // anti-spoof anchor is in hand.
-        const convId = deriveConvId(sessionId);
+        const convId = deriveConvId(sessionKey);
         if (!convId) return textResult(JSON.stringify(failClosedVerdict(["conversation id unavailable; cannot verify ownership"])));
         if (!intercomToken) return textResult(JSON.stringify(failClosedVerdict(["intercom token unavailable; cannot verify ownership"])));
 
