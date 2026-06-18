@@ -57,6 +57,10 @@ export default definePluginEntry({
       pluginConfig.clickupMusoUrlFieldId ?? process.env.CLICKUP_MUSO_URL_FIELD_ID ?? "fb08a61a-2870-4b2f-b6cd-c404dccfb97e";
     const clickupTeamFieldId =
       pluginConfig.clickupTeamFieldId ?? process.env.CLICKUP_TEAM_FIELD_ID ?? "552c2c28-dc56-48bc-a6a6-6b9a76344acc";
+    // Intercom app-id for ticket deeplinks — defaults to Muso's workspace id
+    // (the live session key no longer carries it); overridable via config/env.
+    const intercomWorkspaceId =
+      pluginConfig.intercomWorkspaceId ?? process.env.INTERCOM_WORKSPACE_ID ?? "dwjzhcge";
     const DEFAULT_PROFILE_MERGE_ASSIGNEE_ID = 66250052;
     const profileMergeAssigneeIdRaw = pluginConfig.profileMergeAssigneeId ?? process.env.PROFILE_MERGE_ASSIGNEE_ID ?? "";
     let profileMergeAssigneeId: number | undefined;
@@ -112,9 +116,11 @@ export default definePluginEntry({
         clickupProfileIdFieldId,
         clickupUserEmailFieldId,
         clickupIntercomLinkFieldId,
+        intercomWorkspaceId,
         clickupMusoUrlFieldId,
         clickupTeamFieldId,
         sessionId: ctx.sessionId ?? "unknown",
+        sessionKey: ctx.sessionKey ?? "unknown",
         profileMergeAssigneeId,
       });
     };

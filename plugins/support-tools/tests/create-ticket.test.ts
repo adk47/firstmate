@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createCreateTicketTool, parseIntercomSession, teamOptionFor } from "../src/tools/create-ticket.js";
+import { createCreateTicketTool, teamOptionFor } from "../src/tools/create-ticket.js";
 import { intercomDeeplink } from "../src/tools/ticket-format.js";
 import { SessionTicketRegistry } from "../src/session-ticket-registry.js";
 import type { HttpClient } from "../src/http.js";
@@ -200,6 +200,8 @@ function makeDeps(overrides: Partial<Parameters<typeof createCreateTicketTool>[0
     clickupProfileIdFieldId: "pf",
     clickupUserEmailFieldId: "ef",
     sessionId: "sess-1",
+    sessionKey: "agent:support:intercom:direct:conv-1",
+    intercomWorkspaceId: "dwjzhcge",
     ...overrides,
   };
 }
@@ -279,26 +281,23 @@ describe("createCreateTicketTool — structured returns", () => {
 });
 
 describe("create-ticket enrichment + tier-2 validation", () => {
-  const INTERCOM_SESSION = "agent:support:intercom:dwjzhcge:conversation:215473921553266";
+  // Live runtime session key (per-channel-peer): the segment is the peer-kind
+  // (direct/group), with NO workspaceId and NO ":conversation:". The app-id comes
+  // from config (makeDeps default "dwjzhcge"), not the key.
+  const INTERCOM_SESSION_KEY = "agent:support:intercom:direct:215473921553266";
+  const CONV_ID = "215473921553266";
 
-  it("parseIntercomSession parses the support session key and rejects other shapes", () => {
-    expect(parseIntercomSession(INTERCOM_SESSION)).toEqual({ workspaceId: "dwjzhcge", conversationId: "215473921553266" });
-    expect(parseIntercomSession("unknown")).toBeNull();
-    expect(parseIntercomSession("agent:cmo:slack:xyz")).toBeNull();
-    expect(parseIntercomSession("")).toBeNull();
-  });
-
-  it("sets the Intercom Link field from the session key when the field id is configured", async () => {
+  it("sets the Intercom Link field from the session key (convId) + the configured app-id", async () => {
     const post = vi.fn(async () => ({ ok: true, data: { id: "t1" } as any }));
-    const tool = createCreateTicketTool(makeDeps({ http: makeHttp({ post }), sessionId: INTERCOM_SESSION, clickupIntercomLinkFieldId: "il" }));
+    const tool = createCreateTicketTool(makeDeps({ http: makeHttp({ post }), sessionKey: INTERCOM_SESSION_KEY, intercomWorkspaceId: "dwjzhcge", clickupIntercomLinkFieldId: "il" }));
     await tool.execute("c", { actionType: "credit-claim", customerEmail: "u@example.com", summary: "s", conversationSummary: "c" } as any);
     const fields = (post.mock.calls[0][1] as any).body.custom_fields as { id: string; value: string }[];
-    expect(fields).toContainEqual({ id: "il", value: intercomDeeplink("dwjzhcge", "215473921553266") });
+    expect(fields).toContainEqual({ id: "il", value: intercomDeeplink("dwjzhcge", CONV_ID) });
   });
 
-  it("omits the Intercom Link for non-Intercom sessions and still files the ticket", async () => {
+  it("omits the Intercom Link for a non-Intercom / unparseable session key and still files the ticket", async () => {
     const post = vi.fn(async () => ({ ok: true, data: { id: "t1" } as any }));
-    const tool = createCreateTicketTool(makeDeps({ http: makeHttp({ post }), sessionId: "unknown", clickupIntercomLinkFieldId: "il" }));
+    const tool = createCreateTicketTool(makeDeps({ http: makeHttp({ post }), sessionKey: "unknown", clickupIntercomLinkFieldId: "il" }));
     const res = await tool.execute("c", { actionType: "credit-claim", customerEmail: "u@example.com", summary: "s", conversationSummary: "c" } as any);
     const fields = (post.mock.calls[0][1] as any).body.custom_fields as { id: string; value: string }[];
     expect(fields.find((f) => f.id === "il")).toBeUndefined();

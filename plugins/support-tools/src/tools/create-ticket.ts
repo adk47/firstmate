@@ -19,6 +19,7 @@ import {
   musoProfileUrl,
   intercomDeeplink,
 } from "./ticket-format.js";
+import { deriveConvId } from "./dedupe-check.js";
 
 const Parameters = Type.Object({
   actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, credit-verify, profile-claim, support-general, analytics-followup, profile-merge, unmerge-request, bulk-credit-change, profile-update, subscription-refund, data-deletion, dispute, data-export" }),
@@ -80,24 +81,15 @@ export function teamOptionFor(actionType: string): string {
 // a new request.
 const DEDUPE_LOOKUP_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
-// Recover the Intercom workspace + conversation id from the support agent's
-// session key (`agent:support:intercom:<workspaceId>:conversation:<conversationId>`
-// — see plugins/intercom/src/session-key.ts). Returns null for any other shape
-// ("unknown", non-Intercom channels) so enrichment is best-effort and NEVER
-// blocks ticket creation on a parse miss.
-export function parseIntercomSession(
-  sessionId: string,
-): { workspaceId: string; conversationId: string } | null {
-  const m = /^agent:support:intercom:([^:]+):conversation:(.+)$/.exec(sessionId ?? "");
-  if (!m) return null;
-  return { workspaceId: m[1], conversationId: m[2] };
-}
-
 interface ToolDeps {
   http: HttpClient; rateLimiter: RateLimiter;
   clickupApiKey: string; clickupListId: string;
   clickupProfileIdFieldId: string; clickupUserEmailFieldId: string;
   sessionId: string;
+  // Trusted gateway session KEY — carries the Intercom conversation id (via the
+  // shared deriveConvId), used only to build the Intercom deeplink. Optional so
+  // existing callers/tests that pass only sessionId still typecheck.
+  sessionKey?: string;
   profileMergeAssigneeId?: number;
   // Shared across sessions (instantiated once in index.ts, like rateLimiter)
   // so repeat calls within a conversation find the earlier ticket. Required:
@@ -107,6 +99,9 @@ interface ToolDeps {
   // (wired with real defaults in index.ts). Optional so existing callers/tests
   // that don't pass them are unaffected.
   clickupIntercomLinkFieldId?: string;
+  // Intercom app-id for the deeplink (https://app.intercom.com/a/inbox/<app-id>/…);
+  // defaulted in index.ts. The live session key no longer carries it.
+  intercomWorkspaceId?: string;
   clickupMusoUrlFieldId?: string;
   clickupTeamFieldId?: string;
 }
@@ -130,8 +125,8 @@ function isOpenStatus(s?: { status?: string; type?: string }): boolean {
 }
 
 export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
-  const { http, rateLimiter, clickupApiKey, clickupListId, clickupProfileIdFieldId, clickupUserEmailFieldId, sessionId, profileMergeAssigneeId } = deps;
-  const { clickupIntercomLinkFieldId, clickupMusoUrlFieldId, clickupTeamFieldId, sessionTickets } = deps;
+  const { http, rateLimiter, clickupApiKey, clickupListId, clickupProfileIdFieldId, clickupUserEmailFieldId, sessionId, sessionKey, profileMergeAssigneeId } = deps;
+  const { clickupIntercomLinkFieldId, intercomWorkspaceId, clickupMusoUrlFieldId, clickupTeamFieldId, sessionTickets } = deps;
 
   // Restart-proof fallback for the dedupe. Deliberately WIDER than the
   // session registry: it matches any open <7d ticket for the same customer
@@ -319,11 +314,13 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
 
       // --- Enrichment (each field added only when its id is configured) ---
       // Intercom Link: the keystone that lets a resolved ticket be mapped back
-      // to its conversation. Recovered deterministically from the session key;
-      // best-effort — absent for non-Intercom sessions, never blocks creation.
-      const intercomSession = parseIntercomSession(sessionId);
-      const intercomUrl = intercomSession
-        ? intercomDeeplink(intercomSession.workspaceId, intercomSession.conversationId)
+      // to its conversation. convId from the trusted gateway session key
+      // (deriveConvId, shared with dedupe_check); app-id from the configured
+      // default. Best-effort — absent for a non-Intercom / unparseable key, and
+      // never blocks creation.
+      const convId = deriveConvId(sessionKey);
+      const intercomUrl = convId && intercomWorkspaceId
+        ? intercomDeeplink(intercomWorkspaceId, convId)
         : undefined;
       if (clickupIntercomLinkFieldId && intercomUrl) {
         customFields.push({ id: clickupIntercomLinkFieldId, value: intercomUrl });
