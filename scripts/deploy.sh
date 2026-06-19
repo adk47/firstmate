@@ -878,6 +878,26 @@ RSYNC_EXCLUDES=(
   --include='muso-devops-set-env/config/**'
   --include='muso-ops-credit-sync/config/'
   --include='muso-ops-credit-sync/config/**'
+  # muso-ops-admin is a SELECTIVE exception (NOT a blanket include). Its config
+  # carries server-side divergence we must never clobber: tier2-godmode-allowlist.txt
+  # exists ONLY on node-8 (deliberately absent from canonical). So we sync the
+  # three version-controlled, repo-authoritative files explicitly, then exclude
+  # the rest of the dir. The trailing muso-ops-admin/config/** protects the
+  # SERVER-ONLY canonical tier2-godmode-allowlist.txt (absent from the repo) from
+  # rsync --delete — VERIFIED on node-8's GNU rsync 3.2.7, the deploy target
+  # (deploy uses plain --delete, not --delete-excluded). NB: the *workspace* copy
+  # of that file is tracked in the repo and syncs normally to its own path; and
+  # macOS openrsync handles this dir-include + ** + --delete corner differently,
+  # so verify rsync-filter changes on node-8, never locally. Before 2026-06 the
+  # whole dir was excluded, which silently froze tier2-endpoints.txt and shipped
+  # #519's tier-2 gate-gap fix dead on arrival (matcher deployed, allowlist did
+  # not). The guard below enforces that the ** protection stays and that the
+  # godmode file is never named in an include.
+  --include='muso-ops-admin/config/'
+  --include='muso-ops-admin/config/tier2-endpoints.txt'
+  --include='muso-ops-admin/config/tier2-approvers.txt'
+  --include='muso-ops-admin/config/bulk-destructive-exclude.txt'
+  --exclude='muso-ops-admin/config/**'
   --exclude='config/'
   # Plugin install artifacts (server runs pnpm install --frozen-lockfile in-place)
   --exclude='plugins/*/node_modules/'
@@ -1030,7 +1050,6 @@ done
 for cfg_dir in "$HYDRA_ROOT"/skills-all/*/config; do
   [[ -d "$cfg_dir" ]] || continue
   cfg_skill="$(basename "$(dirname "$cfg_dir")")"
-  [[ "$cfg_skill" == "muso-ops-admin" ]] && continue
   cfg_include_idx=-1
   cfg_idx=0
   for cfg_rule in "${RSYNC_EXCLUDES[@]}"; do
@@ -1041,14 +1060,29 @@ for cfg_dir in "$HYDRA_ROOT"/skills-all/*/config; do
     fail "skills-all/${cfg_skill}/config/ exists but RSYNC_EXCLUDES has no --include='${cfg_skill}/config/' pair BEFORE --exclude='config/' (rsync is first-match-wins) — the config would silently never reach the server (unanchored exclude gotcha, see PR #474). Add the include pair next to the existing ones."
   fi
 done
-# The exception is one-directional on purpose: muso-ops-admin's canonical
-# config must never gain an include pair either (the server copy carries a
-# deliberately divergent tier2-approvers.txt + a godmode allowlist that
-# exists nowhere else; an include would let rsync --delete destroy it).
+# muso-ops-admin/config/ is a SELECTIVE include (the 3 repo-authoritative files
+# above). The server-only tier2-godmode-allowlist.txt must stay protected from
+# BOTH transfer and rsync --delete. Enforce that here so a future edit can't
+# widen the include and ship/destroy the godmode allowlist:
+#   - if the dir is included, '--exclude=muso-ops-admin/config/**' MUST be present
+#     and ordered before '--exclude=config/' (rsync is first-match-wins), else the
+#     server-only godmode file leaks into the sync;
+#   - no rule may ever NAME tier2-godmode-allowlist.txt in an include.
 if printf '%s\n' "${RSYNC_EXCLUDES[@]}" | grep -qFx -- "--include=muso-ops-admin/config/"; then
-  fail "RSYNC_EXCLUDES contains --include='muso-ops-admin/config/' — that config is deliberately server-divergent (godmode allowlist exists only on node-8) and must NOT be synced; remove the include pair"
+  oa_protect_idx=-1
+  oa_idx=0
+  for cfg_rule in "${RSYNC_EXCLUDES[@]}"; do
+    [[ "$cfg_rule" == "--exclude=muso-ops-admin/config/**" ]] && oa_protect_idx="$oa_idx" && break
+    oa_idx=$(( oa_idx + 1 ))
+  done
+  if (( oa_protect_idx < 0 || oa_protect_idx > cfg_exclude_idx )); then
+    fail "RSYNC_EXCLUDES includes muso-ops-admin/config/ but '--exclude=muso-ops-admin/config/**' is missing or not ordered before '--exclude=config/' — the server-only tier2-godmode-allowlist.txt would be synced and rsync --delete could destroy it. Restore the protective exclude."
+  fi
+  if printf '%s\n' "${RSYNC_EXCLUDES[@]}" | grep -qF -- "tier2-godmode-allowlist.txt"; then
+    fail "RSYNC_EXCLUDES names tier2-godmode-allowlist.txt — it is server-only (absent from canonical) and must NEVER be synced. Remove it from the rsync rules."
+  fi
 fi
-unset cfg_dir cfg_skill cfg_rule cfg_idx cfg_include_idx cfg_exclude_idx
+unset cfg_dir cfg_skill cfg_rule cfg_idx cfg_include_idx cfg_exclude_idx oa_idx oa_protect_idx
 
 # -------------------------------------------------------------------
 # Step 0: Drift check (deploy-equivalent of `git pull` before `git push`)
