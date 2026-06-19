@@ -310,6 +310,43 @@ if [ -x "$_WATCHDOG_DIR/lib/ensure-codex-refresh-lock-shared.sh" ]; then
   fi
 fi
 
+# ── Codex plugin VERSION drift + #90925 api-key-route / OAuth-lapse watch ──────
+# 2026-06-19 outage: a manual `plugins install @openclaw/codex@2026.6.1 --force`
+# floated codex off the 2026.5.27 pin and reintroduced #90925 — gpt-5.5 mis-routes
+# to the OpenAI api-key endpoint → `invalid_api_key` → the WHOLE fleet (main AND
+# edge) ran on openrouter/gpt-5.4-mini for ~9h with ZERO alerts (the auth/refresh
+# detectors key on different strings AND the auth tripwire reads edge only). Scan
+# BOTH journals for the api-key-route signature and the OAuth token-lapse that
+# originally triggered it, and verify codex is still on the pin. See
+# scripts/lib/codex-version.sh + scripts/lib/ensure-codex-version-pinned.sh.
+CODEX_APIKEY_ROUTE=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_count_apikey_route)
+CODEX_TOKEN_EXPIRED=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_count_token_expired)
+
+if [ "${CODEX_APIKEY_ROUTE:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-apikey-cooldown" "$CODEX_COOLDOWN_MIN"; then
+  log "CODEX #90925 API-KEY ROUTE: ${CODEX_APIKEY_ROUTE} invalid_api_key/Incorrect-API-key lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
+  slack_notify ":rotating_light: *Codex floated off pin → #90925 api-key route* — ${CODEX_APIKEY_ROUTE}x \`invalid_api_key\`/\`Incorrect API key\` across main+edge in last ${CHECK_WINDOW_MIN}min. @openclaw/codex@2026.6.x routes gpt-5.5 to the OpenAI api-key endpoint instead of the Codex OAuth route, so the WHOLE fleet is on \`openrouter/openai/gpt-5.4-mini\`. Fix: re-pin codex + restart — \`scripts/lib/ensure-codex-version-pinned.sh\` on node-8 (re-pins to the canonical version), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. A plain restart also self-heals (ExecStartPre re-pins)."
+  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-apikey-cooldown"
+fi
+
+if [ "${CODEX_TOKEN_EXPIRED:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-expired-cooldown" "$CODEX_COOLDOWN_MIN"; then
+  log "CODEX OAUTH TOKEN EXPIRED: ${CODEX_TOKEN_EXPIRED} 'token is expired' lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
+  slack_notify ":rotating_light: *Codex OAuth token expired* — ${CODEX_TOKEN_EXPIRED}x \`authentication token is expired\` across main+edge in last ${CHECK_WINDOW_MIN}min. The codex access token lapsed and refresh isn't renewing it → fleet on \`openrouter/openai/gpt-5.4-mini\`. Device-code re-auth BOTH accounts then restart: \`openclaw --profile main models auth login --provider openai-codex --device-code\` (aaron@muso.ai + aaronkaufman@me.com), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`."
+  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-expired-cooldown"
+fi
+
+# Pin-drift tripwire: page if codex != the deploy pin even without a 401 yet (a
+# fresh float, or an ExecStartPre re-pin that failed). --check is read-only:
+# exit 1 = drift (PIN_OUT names the offenders). Guarded under `if !` so set -e
+# never fires on the exit 1.
+if [ -x "$_WATCHDOG_DIR/lib/ensure-codex-version-pinned.sh" ]; then
+  if ! PIN_OUT=$("$_WATCHDOG_DIR/lib/ensure-codex-version-pinned.sh" --check 2>&1) \
+     && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-pin-cooldown" "$CODEX_COOLDOWN_MIN"; then
+    log "CODEX VERSION DRIFT: ${PIN_OUT}"
+    slack_notify ":warning: *Codex version drifted off the pin* on node-8 — codex is not at the canonical pinned build (codex@2026.6.x reintroduces the #90925 api-key-route outage). \`systemctl restart\` the affected gateway to self-heal (ExecStartPre re-pins), or run \`scripts/lib/ensure-codex-version-pinned.sh\` on node-8.\n\`\`\`${PIN_OUT}\`\`\`"
+    date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-pin-cooldown"
+  fi
+fi
+
 # Crash loop detection: if systemd has restarted the gateway more than
 # 10 times in the last 10 minutes, something is wrong with the config.
 # Don't add more restarts — alert and stop.

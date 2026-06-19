@@ -31,30 +31,13 @@ OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.6.1}"
 # range tracks the core release.
 OPENCLAW_SLACK_VERSION="${OPENCLAW_SLACK_VERSION:-${OPENCLAW_VERSION}}"
 
-# Pinned @openclaw/codex version. The Codex agent harness ships as this
-# separate npm package. Its supports()/ABI tracks the core runtime, and we
-# NORMALLY keep it in lockstep with OPENCLAW_VERSION: openclaw 2026.5.20 made
-# the runtime validate a forced harness's supports() BEFORE pinning it, so a
-# Codex plugin older than the runtime can have its supports() rejected and
-# every Codex-pinned agent silently falls back to its secondary model.
-# Incident 2026-05-29: the runtime bumped 5.19 -> 5.27 but the 5.19 Codex
-# plugin stayed (deploy only pinned Slack), so ceo/cto/qa/operations/devops/
-# design rejected openai/gpt-5.5 and ran on Sonnet.
-#
-# DELIBERATE EXCEPTION (2026-06-16): codex is pinned to 2026.5.27 — BELOW the
-# 2026.6.1 runtime, NOT in lockstep. @openclaw/codex@2026.6.1's "OpenAI route
-# unification" regressed embedded/auxiliary calls (subagent-announce,
-# compaction) for openai/gpt-5.5 onto the OpenAI Responses API-KEY route
-# instead of the Codex app-server OAuth route — upstream #90925 / #90448,
-# both still OPEN as of openclaw 2026.6.6. hydra is OAuth-only (no real OpenAI
-# api key, only a placeholder), so those mis-routed calls 401 and fall back to
-# openrouter/gpt-5.4-mini. We VERIFIED on node-8 that codex@5.27 runs CLEAN on
-# the 6.1 core: it serves openai/gpt-5.5 with no supports() rejection (the
-# 5.27-on-6.1 ABI is compatible, unlike the 5.19-on-5.27 case above) and
-# produces ZERO of the #90925 401s. So 5.27 is the newest Codex build without
-# #90925 that still works on this core. Revert to "${OPENCLAW_VERSION}"
-# lockstep once #90925 ships fixed in a core release we run.
-OPENCLAW_CODEX_VERSION="${OPENCLAW_CODEX_VERSION:-2026.5.27}"
+# Pinned @openclaw/codex version. The value + full rationale (why codex is pinned
+# BELOW the runtime to dodge the #90925 api-key-route regression) live in the
+# SINGLE SOURCE OF TRUTH scripts/lib/codex-version.sh, also read by the
+# ExecStartPre pin healer (ensure-codex-version-pinned.sh) and the watchdog so the
+# three enforcers can never disagree. Honors an OPENCLAW_CODEX_VERSION env override.
+# shellcheck source=lib/codex-version.sh
+source "$SCRIPT_DIR/lib/codex-version.sh"
 
 # Pinned muso CLI version (github.com/Muso-AI/muso-cli) — the admin-API /
 # policy CLI for main-gateway agents (soak phase: opt-in via the

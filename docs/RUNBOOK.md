@@ -583,6 +583,70 @@ openclaw realpath-resolving the lock dir at acquire time.
 
 ---
 
+### Codex Plugin Floated Off Pin / api-key-route 401 (#90925)
+
+**Symptoms**: the WHOLE codex fleet (gpt-5.5) falls back to
+`openrouter/openai/gpt-5.4-mini`; logs show `401 Unauthorized: Incorrect API key
+provided: sk-...` / `invalid_api_key` on the **`api.openai.com/v1/responses`**
+URL with `reason=auth`. Crucially, **BOTH `ensure-codex-auth.sh --check` AND
+`ensure-codex-refresh-lock-shared.sh --check` are CLEAN** — this is neither the
+fan-out nor the refresh-race incident. The tell is the **failing URL**:
+`chatgpt.com/backend-api/codex/responses` = the OAuth route (good); 
+`api.openai.com/v1/responses` = the regressed api-key route.
+
+**Background:** codex is DELIBERATELY pinned BELOW the runtime to `2026.5.27`
+(`scripts/lib/codex-version.sh`). `@openclaw/codex@2026.6.x`'s "OpenAI route
+unification" (upstream #90925 / #90448, OPEN) routes `openai/gpt-5.5` to the
+OpenAI api-key endpoint instead of the Codex app-server OAuth route. hydra is
+OAuth-only (only a PLACEHOLDER `OPENAI_API_KEY`), so every call 401s. `deploy.sh`
+pins codex, but a manual `openclaw plugins install @openclaw/codex@2026.6.1
+--force` between deploys floats it off the pin and stays floated (incident
+2026-06-19). The token is NOT the problem here — re-auth does nothing.
+
+**Diagnosis:**
+```bash
+ssh root@40.160.32.80
+journalctl -u openclaw-gateway-main -u openclaw-gateway-edge --since '-15min' \
+  | grep -iE 'invalid_api_key|Incorrect API key|api.openai.com/v1/responses'
+# Is codex floated off the pin? (exit 1 + names the profile/version)
+/opt/hydra/scripts/lib/ensure-codex-version-pinned.sh --check
+/opt/hydra/scripts/lib/ensure-codex-auth.sh --check                 # EXPECT clean
+/opt/hydra/scripts/lib/ensure-codex-refresh-lock-shared.sh --check  # EXPECT clean
+```
+
+**Remediation (re-pin — NO re-auth, the token is valid):**
+```bash
+ssh root@40.160.32.80
+# Re-pin both profiles to the canonical version, then restart to load it.
+/opt/hydra/scripts/lib/ensure-codex-version-pinned.sh    # re-pins where drifted
+systemctl restart openclaw-gateway-main.service openclaw-gateway-edge.service
+# Verify: codex serves itself again on the OAuth route.
+journalctl -u openclaw-gateway-main -f | grep model-fallback
+#   want: candidate_succeeded ... candidate=openai/gpt-5.5  (NOT ...gpt-5.4-mini)
+openclaw agent --agent clio --model openai/gpt-5.5 -m "reply pong" --json   # provider=openai model=gpt-5.5
+```
+
+**Prevention (mechanical):** `ensure-codex-version-pinned.sh` runs in the
+ExecStartPre of both gateways (via `openclaw-pre-start-heal.sh`) — a float
+self-heals on the next restart; `openclaw-watchdog.sh` pages #clio_devops on the
+`invalid_api_key`/`Incorrect API key` signature (main+edge) and again if `--check`
+reports version drift. The pinned version lives ONCE in
+`scripts/lib/codex-version.sh` (deploy + heal + watchdog all read it). **NEVER
+`plugins install`/`update` codex off the pin**; bump `codex-version.sh` (revert to
+runtime lockstep) only once #90925 ships fixed in a core release we run.
+
+> **Related — Codex OAuth token lapse** (the original 2026-06-19 trigger, distinct
+> from the api-key-route bug above): logs show `401 ... authentication token is
+> expired. Please try signing in again.` on the **OAuth** URL
+> `chatgpt.com/backend-api/codex/responses`. This IS a token problem — the access
+> token lapsed and refresh stopped renewing it. Fix = device-code re-auth BOTH
+> accounts then restart: `openclaw --profile main models auth login --provider
+> openai-codex --device-code` (aaron@muso.ai + aaronkaufman@me.com),
+> `systemctl restart openclaw-gateway-main openclaw-gateway-edge`. The watchdog now
+> pages on this `authentication token is expired` signature too.
+
+---
+
 ### Node 8 Unreachable
 
 **Symptoms**: Cannot SSH to 40.160.32.80, agents are all offline.

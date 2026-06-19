@@ -124,6 +124,27 @@ convergence. This is a DIFFERENT failure from fan-out: when it fires,
 realpath-resolving the lock dir at acquire time — **re-verify on every openclaw
 bump**. See RUNBOOK §Troubleshooting → "Codex Refresh-Token Race".
 
+**The codex PLUGIN is pinned BELOW the runtime — never float it.** `@openclaw/codex`
+is pinned to `2026.5.27` (the value + rationale live ONCE in
+`scripts/lib/codex-version.sh`), deliberately behind the 2026.6.1 runtime, because
+`@openclaw/codex@2026.6.x`'s "OpenAI route unification" (upstream #90925/#90448,
+OPEN) routes `openai/gpt-5.5` to the OpenAI **api-key** endpoint instead of the
+Codex app-server **OAuth** route. hydra is OAuth-only (placeholder `OPENAI_API_KEY`),
+so on 6.x every codex call 401s `invalid_api_key` and the whole fleet drops to
+`openrouter/gpt-5.4-mini` (incident 2026-06-19, when a manual `plugins install
+@openclaw/codex@2026.6.1 --force` floated codex off the pin — the token was fine;
+re-auth did nothing). **NEVER `plugins install`/`update` codex off the pin**; to
+move it, bump `codex-version.sh`. **Detect**:
+`scripts/lib/ensure-codex-version-pinned.sh --check` (the failing-URL tell:
+`api.openai.com/v1/responses` = regressed vs `chatgpt.com/backend-api/codex` =
+OAuth-ok). **Remediate/self-heal**: same script no args (re-pins to canonical;
+wired into ExecStartPre via `openclaw-pre-start-heal.sh`, so a float self-heals on
+restart). The watchdog pages on the `invalid_api_key` signature (main+edge), on the
+`authentication token is expired` OAuth-lapse signature, and on version drift.
+**Re-verify codex still serves gpt-5.5 on EVERY openclaw bump** — revert to runtime
+lockstep only once #90925 ships fixed. See RUNBOOK §Troubleshooting → "Codex Plugin
+Floated Off Pin".
+
 ## Picking the right extension mechanism
 
 Before writing new code in this repo, walk this decision tree top-down and stop at

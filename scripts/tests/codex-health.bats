@@ -93,6 +93,65 @@ EOF
   [ "$output" -eq 0 ]
 }
 
+# ── codex_count_apikey_route ──────────────────────────────────
+# REAL lines from the 2026-06-19 outage AFTER codex was floated to 2026.6.1: the
+# #90925 mis-route to the OpenAI api-key endpoint. These went unalerted because no
+# detector keyed on them.
+
+@test "apikey_route: counts the #90925 api-key-route 401 + invalid_api_key" {
+  run codex_count_apikey_route <<'EOF'
+Jun 19 06:57:55 ovh-node-8 node[2229866]: [model-fallback/decision] model fallback decision: decision=candidate_failed requested=openai/gpt-5.5 candidate=openai/gpt-5.5 reason=auth next=openrouter/openai/gpt-5.4-mini detail=unexpected status 401 Unauthorized: Incorrect API key provided: sk-hydra******2026, url: https://api.openai.com/v1/responses
+Jun 19 06:57:55 ovh-node-8 node[2229866]: error="FailoverError: unexpected status 401 ... code: invalid_api_key ..."
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 2 ]
+}
+
+@test "apikey_route: the successful gpt-5.4-mini fallback line is NOT counted (alert clears when codex recovers)" {
+  run codex_count_apikey_route <<'EOF'
+Jun 19 06:58:00 ovh-node-8 node[2229866]: [model-fallback/decision] model fallback decision: decision=candidate_succeeded requested=openai/gpt-5.5 candidate=openrouter/openai/gpt-5.4-mini reason=unknown next=none
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+@test "apikey_route: distinct from the OAuth-route signatures (expired / invalidated not counted)" {
+  run codex_count_apikey_route <<'EOF'
+Jun 18 22:07:49 ovh-node-8 node[902795]: unexpected status 401 Unauthorized: Provided authentication token is expired. Please try signing in again.
+May 27 18:04:07 ovh-node-8 node[399557]: openai-codex/gpt-5.5: Your authentication token has been invalidated. Please try signing in again.
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+# ── codex_count_token_expired ─────────────────────────────────
+# REAL lines from the ORIGINAL 2026-06-19 trigger: the OAuth access token lapsed
+# (chatgpt.com/backend-api/codex route) ~21:48 UTC and refresh stopped renewing it.
+
+@test "token_expired: counts the OAuth access-token-lapsed 401" {
+  run codex_count_token_expired <<'EOF'
+Jun 18 22:07:49 ovh-node-8 node[902795]: unexpected status 401 Unauthorized: Provided authentication token is expired. Please try signing in again., url: https://chatgpt.com/backend-api/codex/responses
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
+@test "token_expired: does NOT double-count the 'has been invalidated' string (shares the sign-in-again tail)" {
+  run codex_count_token_expired <<'EOF'
+May 27 18:04:07 ovh-node-8 node[399557]: openai-codex/gpt-5.5: Your authentication token has been invalidated. Please try signing in again.
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+@test "token_expired: a clean log is 0 (no false positive)" {
+  run codex_count_token_expired <<'EOF'
+Jun 19 07:22:15 ovh-node-8 node[2410912]: run agent end isError=false
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
 # ── codex_count_vision_failures ───────────────────────────────
 
 @test "vision_failures: counts image AND pdf 'All image models failed'" {

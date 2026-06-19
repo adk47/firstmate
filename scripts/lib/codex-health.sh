@@ -54,6 +54,36 @@ codex_count_refresh_reused() {
     -e "token refresh failed.*\(?401\)?" || true
 }
 
+# codex_count_apikey_route — count Codex #90925 api-key-route 401s on stdin.
+# @openclaw/codex@2026.6.x ("OpenAI route unification") routes openai/gpt-5.5 to
+# the OpenAI Responses API-KEY endpoint (api.openai.com/v1/responses) instead of
+# the Codex app-server OAuth route. hydra is OAuth-only (placeholder OPENAI_API_KEY)
+# so it 401s `invalid_api_key` / "Incorrect API key provided: sk-..." and the whole
+# fleet falls back to openrouter/openai/gpt-5.4-mini (incident 2026-06-19, after a
+# manual `plugins install @openclaw/codex@2026.6.1 --force` floated codex off the
+# 2026.5.27 pin). NONE of the other codex detectors match this string. Remediate by
+# re-pinning codex (ensure-codex-version-pinned.sh) + restart; the SUCCESSFUL
+# gpt-5.4-mini fallback line carries neither string, so the alert clears once codex
+# is back on the OAuth route. Any nonzero count = the #90925 mis-route is live.
+codex_count_apikey_route() {
+  grep -c -i -E \
+    -e "invalid_api_key" \
+    -e "Incorrect API key provided" || true
+}
+
+# codex_count_token_expired — count Codex OAuth access-token-LAPSED 401s on stdin.
+# Signature: "authentication token is expired" (the chatgpt.com/backend-api/codex
+# OAuth route, NOT the api-key route above). This is the ordinary token lapse that
+# TRIGGERED the 2026-06-19 outage and went unalerted ~9h because no detector keyed
+# on it. DISTINCT from codex_count_auth_invalidated ("has been invalidated"): keyed
+# on "is expired" ONLY so it never double-counts the shared "Please try signing in
+# again" tail. Remediate with device-code re-auth (the TOKEN, not the plugin, is
+# stale). Any nonzero count = codex's OAuth access token expired and refresh isn't
+# renewing it.
+codex_count_token_expired() {
+  grep -c -i -e "authentication token is expired" || true
+}
+
 # codex_count_vision_failures — count exhausted-vision lines on stdin.
 # Signature: "All image models failed" (the image tool AND the pdf tool
 # share this prefix). Caroline's image tool is agents.defaults.imageModel
@@ -128,11 +158,14 @@ codex_health_gate() {
     echo "cannot read journald for ${unit} — codex model health unverifiable" >&2
     return 2
   fi
-  local reused invalidated
+  local reused invalidated apikey expired
   reused="$(printf '%s\n' "$journal" | codex_count_refresh_reused)"
   invalidated="$(printf '%s\n' "$journal" | codex_count_auth_invalidated)"
-  if [ "${reused:-0}" -gt 0 ] || [ "${invalidated:-0}" -gt 0 ]; then
-    echo "codex is DEGRADED in the last ${window}min (refresh-race/auth_permanent=${reused}, auth-invalidated=${invalidated})" >&2
+  apikey="$(printf '%s\n' "$journal" | codex_count_apikey_route)"
+  expired="$(printf '%s\n' "$journal" | codex_count_token_expired)"
+  if [ "${reused:-0}" -gt 0 ] || [ "${invalidated:-0}" -gt 0 ] \
+     || [ "${apikey:-0}" -gt 0 ] || [ "${expired:-0}" -gt 0 ]; then
+    echo "codex is DEGRADED in the last ${window}min (refresh-race/auth_permanent=${reused}, auth-invalidated=${invalidated}, apikey-route#90925=${apikey}, token-expired=${expired})" >&2
     return 1
   fi
   return 0

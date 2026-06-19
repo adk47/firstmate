@@ -91,6 +91,21 @@ if [ -x "$SCRIPT_DIR/lib/ensure-codex-refresh-lock-shared.sh" ]; then
   "$SCRIPT_DIR/lib/ensure-codex-refresh-lock-shared.sh" || log "WARN: ensure-codex-refresh-lock-shared.sh returned non-zero (non-fatal)"
 fi
 
+# ── Healer: Codex plugin VERSION pin (dodge the #90925 api-key-route regression) ──
+# codex is DELIBERATELY pinned BELOW the runtime to 2026.5.27 (scripts/lib/codex-
+# version.sh): @openclaw/codex@2026.6.x routes openai/gpt-5.5 to the OpenAI api-key
+# endpoint instead of the Codex app-server OAuth route, so on this OAuth-only host
+# every call 401s `invalid_api_key` and the whole fleet falls back to
+# openrouter/gpt-5.4-mini. deploy.sh pins it, but a manual `plugins install
+# @openclaw/codex@2026.6.1 --force` between deploys floats it off the pin and stays
+# floated (incident 2026-06-19). Re-assert the pin HERE — while this gateway is
+# down — so ExecStart loads the pinned build; CHECK-FIRST so the normal already-
+# pinned case is a fast no-op (no npm). Idempotent, best-effort, ALWAYS exits 0;
+# never blocks start. See scripts/lib/ensure-codex-version-pinned.sh + CLAUDE.md.
+if [ -x "$SCRIPT_DIR/lib/ensure-codex-version-pinned.sh" ]; then
+  "$SCRIPT_DIR/lib/ensure-codex-version-pinned.sh" "$PROFILE" || log "WARN: ensure-codex-version-pinned.sh returned non-zero (non-fatal)"
+fi
+
 # ── Healer: secret-file permissions (fail-closed secret loader) ──
 # openclaw resolves file-based secret providers at (re)start/reload and is
 # FAIL-CLOSED: a group/other-accessible secret file is rejected ("permissions
