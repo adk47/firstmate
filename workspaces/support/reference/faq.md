@@ -236,6 +236,19 @@ flow is available regardless of your plan.
 If your plaque shows numbers that don't match what you'd expect, open a
 ticket with the order ID and the team will sort it out.
 
+### I need to fix / change the shipping address on my order
+Share your order ID and the full corrected address — recipient name,
+address line 1 (and line 2 if needed), postcode, city, state/province if
+applicable, country, and a phone number. Keep each line fairly short (around
+40 characters). Caroline flags it for the fulfillment team to update on the
+order; if printing has already started it isn't guaranteed, but they'll try.
+(Doctrine + the Prodigi format rules: `orders-and-fulfillment.md`.)
+
+### Where is my plaque / can I get tracking?
+Plaques are printed to order and then shipped, so allow time for both. For the
+live status or a tracking link, share the order ID and Caroline flags it for
+the fulfillment team. See `orders-and-fulfillment.md`.
+
 ---
 
 ## Profile management

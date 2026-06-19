@@ -1,0 +1,165 @@
+import { Type, type Static } from "@sinclair/typebox";
+import { execFile } from "node:child_process";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
+import type { RateLimiter } from "../rate-limiter.js";
+import { validateProdigiAddress, toStripeAddress, type ProdigiAddressInput } from "../order-address.js";
+
+// Hand-rolled promisifier (mirrors remove-credits.ts) so a test mock can use the
+// plain (file, args, options, callback) shape.
+type ExecFileLike = (
+  file: string,
+  args: readonly string[],
+  options: { timeout?: number; maxBuffer?: number },
+  callback: (err: unknown, stdout: string, stderr: string) => void,
+) => unknown;
+
+function execFileToPromise(fn: ExecFileLike) {
+  return (file: string, args: readonly string[], options: { timeout?: number; maxBuffer?: number }) =>
+    new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      fn(file, args, options, (err, stdout, stderr) => {
+        if (err) {
+          const e = err as Error & { stdout?: string; stderr?: string };
+          e.stdout = stdout;
+          e.stderr = stderr;
+          reject(e);
+        } else {
+          resolve({ stdout, stderr });
+        }
+      });
+    });
+}
+
+const EMAIL_PATTERN = "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$";
+const LINE = "^[^\\n\\r]{0,300}$";
+
+const Recipient = Type.Object({
+  name: Type.String({ minLength: 1, pattern: LINE, description: "Recipient full name (NOT a street)" }),
+  phone: Type.String({ minLength: 1, pattern: LINE, description: "Phone number (Prodigi requires it)" }),
+  line1: Type.String({ minLength: 1, pattern: LINE, description: "Address line 1 (street & house number)" }),
+  line2: Type.Optional(Type.String({ pattern: LINE })),
+  city: Type.String({ minLength: 1, pattern: LINE }),
+  state: Type.Optional(Type.String({ pattern: LINE })),
+  postcode: Type.String({ minLength: 1, pattern: LINE }),
+  country: Type.String({ minLength: 1, pattern: LINE, description: "2-letter ISO country code (e.g. DO, US) — NOT the full country name" }),
+  email: Type.Optional(Type.String({ pattern: EMAIL_PATTERN })),
+});
+
+const Parameters = Type.Object({
+  order_ref: Type.String({ minLength: 1, pattern: "^[A-Za-z0-9_-]+$", description: "Order UUID, order number, or Prodigi order id" }),
+  customer_email: Type.String({ pattern: EMAIL_PATTERN, description: "The order owner's verified Intercom email. The wrapper re-verifies ownership against this." }),
+  recipient: Recipient,
+  apply: Type.Optional(Type.Boolean({ default: false, description: "false = dry-run preview (default), true = apply. Always dry-run first, show the customer, get explicit confirmation, then apply." })),
+  intercomConvId: Type.Optional(Type.String({ minLength: 1, description: "Intercom conversation id. REQUIRED when apply=true (re-verifies the email against Intercom's contact record)." })),
+});
+
+type Params = Static<typeof Parameters>;
+
+interface ToolDeps {
+  scriptPath: string;
+  rateLimiter: RateLimiter;
+  sessionId: string;
+  execFileImpl?: ExecFileLike;
+}
+
+export const DEFAULT_UPDATE_ORDER_ADDRESS_SCRIPT =
+  process.env.UPDATE_ORDER_ADDRESS_SCRIPT ??
+  "/opt/hydra/workspaces/support/skills/order-fulfillment/scripts/update-order-address.sh";
+
+export function createOrderAddressUpdateTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
+  const { scriptPath, rateLimiter, sessionId, execFileImpl } = deps;
+  const exec = execFileToPromise(execFileImpl ?? (execFile as ExecFileLike));
+
+  return {
+    name: "order_address_update",
+    label: "Update Order Shipping Recipient",
+    description:
+      "Correct a plaque/poster order's shipping recipient (name, phone, address) and push it to the print vendor. " +
+      "ONLY for the verified order owner — the wrapper refuses if the requester isn't the owner. " +
+      "Always call apply=false first to preview, get explicit customer confirmation, then call apply=true with intercomConvId. " +
+      "Rejects addresses with lines over 40 chars or missing required fields. Rate limit: 5 calls per 60 minutes per session.",
+    parameters: Parameters,
+    async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
+      // apply=true requires intercomConvId (the wrapper re-enforces independently).
+      if (params.apply === true && (!params.intercomConvId || !params.intercomConvId.trim())) {
+        return textResult(JSON.stringify({
+          ok: false,
+          error: "intercom_conv_id_required",
+          detail: "apply: true requires intercomConvId so the wrapper can verify the customer against Intercom's contact record",
+        }));
+      }
+
+      if (!rateLimiter.check(sessionId, "order_address_update", 60, 5).allowed) {
+        return textResult(JSON.stringify({ ok: false, error: "rate_limited" }));
+      }
+
+      // Authoritative address validation (single source of truth). Refuse before
+      // touching the wrapper so Caroline gets the specific fix-it feedback.
+      const input: ProdigiAddressInput = params.recipient;
+      const validation = validateProdigiAddress(input);
+      if (!validation.ok) {
+        return textResult(JSON.stringify({ ok: false, error: "address_invalid", validation }));
+      }
+
+      // Build the PUT body the backend expects: top-level name/phoneNumber/email,
+      // address in Stripe-shape (the backend re-derives the Prodigi shape).
+      const body = {
+        name: input.name?.trim(),
+        phoneNumber: input.phone?.trim(),
+        ...(params.recipient.email && params.recipient.email.trim() ? { email: params.recipient.email.trim() } : {}),
+        address: toStripeAddress(input),
+      };
+
+      let tmpDir: string | null = null;
+      try {
+        tmpDir = await mkdtemp(path.join(tmpdir(), "oua-tool-"));
+        const bodyFile = path.join(tmpDir, "body.json");
+        await writeFile(bodyFile, JSON.stringify(body), "utf8");
+
+        const argv = [
+          scriptPath,
+          "--order-ref", params.order_ref,
+          "--customer-email", params.customer_email,
+          "--body-file", bodyFile,
+        ];
+        if (params.apply === true) argv.push("--apply");
+        if (params.intercomConvId) argv.push("--intercom-conv-id", params.intercomConvId);
+
+        const { stdout, stderr } = await exec("bash", argv, {
+          timeout: 60 * 1000,
+          maxBuffer: 2 * 1024 * 1024,
+        });
+        if (stderr && stderr.trim()) {
+          console.warn(`[order_address_update] wrapper stderr: ${stderr.trim()}`);
+        }
+        const trimmed = stdout.trim();
+        if (!trimmed) {
+          return textResult(JSON.stringify({ ok: false, error: "wrapper_empty_output" }));
+        }
+        try {
+          JSON.parse(trimmed);
+        } catch {
+          return textResult(JSON.stringify({ ok: false, error: "wrapper_invalid_output", detail: trimmed.slice(0, 200) }));
+        }
+        return textResult(trimmed);
+      } catch (err) {
+        const e = err as NodeJS.ErrnoException & { stderr?: string };
+        const stderrSnippet = (e.stderr ?? "").trim().slice(0, 500);
+        if (stderrSnippet) console.warn(`[order_address_update] wrapper exec failed; stderr: ${stderrSnippet}`);
+        return textResult(JSON.stringify({
+          ok: false,
+          error: "wrapper_exec_failed",
+          detail: e.message || "unknown",
+          stderr: stderrSnippet || undefined,
+          code: e.code ?? null,
+        }));
+      } finally {
+        if (tmpDir) {
+          await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+      }
+    },
+  };
+}

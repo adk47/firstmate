@@ -1,15 +1,15 @@
 # TOOLS.md -- support
 
-## Allowed Tools (EXACTLY 10)
+## Allowed Tools (EXACTLY 12)
 
-This agent has the most restricted tool set in HYDRA. Only these 10 tools are permitted, split into two groups:
+This agent has the most restricted tool set in HYDRA. Only these 12 tools are permitted, split into two groups:
 
-- **Action tools (1-8)** -- write or read customer-facing state. Implemented as plugin-registered tools via the `support-tools` OpenClaw plugin. The agent calls them by name; the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
-- **Reference tools (9-10)** -- read-only semantic + BM25 retrieval against `workspaces/support/reference/*.md`, provided by openclaw's bundled memory-core via the per-agent `memorySearch` config (enabled on both edge and main profiles, indexing the read-only `reference/` subdirectory only). No writes; no customer-data persistence; no auto-recall.
+- **Action tools (1-10)** -- write or read customer-facing state. Implemented as plugin-registered tools via the `support-tools` OpenClaw plugin. The agent calls them by name; the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
+- **Reference tools (11-12)** -- read-only semantic + BM25 retrieval against `workspaces/support/reference/*.md`, provided by openclaw's bundled memory-core via the per-agent `memorySearch` config (enabled on both edge and main profiles, indexing the read-only `reference/` subdirectory only). No writes; no customer-data persistence; no auto-recall.
 
-## Authentication (CRITICAL -- shared across tools 1, 2, 5, 6, 7, 8)
+## Authentication (CRITICAL -- shared across tools 1, 2, 5, 6, 7, 8, 9)
 
-`profile_lookup`, `credits_search`, and `profile_status` all use `MusoAdminClient` to call `api.muso.ai/api/v3/admin/*` with a JWT bearer token obtained via admin login (`MUSO_ADMIN_EMAIL` + `MUSO_ADMIN_PASSWORD` env vars). The client is GET-only and regex-allowlisted to exactly four paths (`profile/search`, `profile/<id>`, `profile/<id>/credits`, and the `credit-requests` LIST endpoint -- never `credit-requests/<id>`, the item path the gated approve PUT lives under). The JWT is never returned to the agent and never logged.
+`profile_lookup`, `credits_search`, `profile_status`, and `order_lookup` all use `MusoAdminClient` to call `api.muso.ai/api/v3/admin/*` with a JWT bearer token obtained via admin login (`MUSO_ADMIN_EMAIL` + `MUSO_ADMIN_PASSWORD` env vars). The client is GET-only and regex-allowlisted to exactly five paths (`profile/search`, `profile/<id>`, `profile/<id>/credits`, the `credit-requests` LIST endpoint -- never `credit-requests/<id>`, the item path the gated approve PUT lives under -- and the single-order read `orders/<id>`, never the `orders/<id>/...` write sub-paths or the bare `orders` list). The JWT is never returned to the agent and never logged.
 
 `remove_credits` (tool 6) also depends on the same Muso admin auth -- it inherits via the JWT cache maintained by `muso-admin-api.sh`. Rotating `MUSO_ADMIN_EMAIL` / `MUSO_ADMIN_PASSWORD` breaks the bash wrapper too; flush `~/.cache/muso-admin-token.json` (or whatever `$TOKEN_CACHE` points to) after a rotation.
 
@@ -93,7 +93,26 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 - **Rate limit**: 10 per session (60-minute window).
 - **Used by**: the `customer-credit-verification` skill. The tool produces evidence ONLY -- Caroline asks the customer for proof and, when warranted, files a `credit-verify` recommend-approve ticket via `create_ticket`; a human executes the gated approval. Caroline never approves and never rejects (she asks for more proof instead).
 
-### 9. memory_search
+### 9. order_lookup
+
+- **Wraps**: `GET /api/v3/admin/orders/{ref}` via `MusoAdminClient` (GET-only, allowlisted). `ref` is any of: the internal order UUID (Prodigi merchantReference), the order number, or Prodigi's own order id — the backend resolves all three.
+- **Returns**: PII-scoped structured JSON. On success: `{ found: true, order: { id, orderNumber, prodigiOrderId, status, createdAt, items: [...], shipment: { address, phoneNumber, trackingNumber, trackingUrl } } }`. On failure: `{ found: false, reason: "missing_input" | "not_found" | "rate_limited" | "lookup_unavailable" }`.
+- **Scope**: surfaces the fulfilment-relevant fields ONLY. The shipping address + recipient phone ARE the working data (this tool exists to confirm/correct them for Prodigi). **Payment data is never returned.**
+- **Auth**: Muso admin JWT bearer (same client as the profile tools; GET-only, allowlisted to the single-order read path).
+- **Rate limit**: 10/min per session.
+- **Used by**: the `order-fulfillment` skill (vendor-lane Prodigi address requests + customer order/shipping questions). See `reference/orders-and-fulfillment.md`.
+
+### 10. order_address_update
+
+- **Wraps**: `PUT /api/v3/admin/orders/{id}` via the bash wrapper at `workspaces/support/skills/order-fulfillment/scripts/update-order-address.sh` (NOT `MusoAdminClient` — same wrapper-as-boundary model as `remove_credits`). The TS tool is a typed dispatcher; the wrapper is the ownership + audit boundary.
+- **Returns**: Structured JSON. Dry-run: `{ ok: true, mode: "dry-run", applied: false, order_id, order_status, current_address, proposed, editable }`. Apply: `{ ok: true, mode: "apply", applied: true, order_id, http_status: 200, applied_recipient }`. Refusal: `{ ok: false, error: <key> }` where `<key>` ∈ `address_invalid` | `intercom_conv_id_required` | `owner_mismatch` | `owner_undetermined` | `intercom_email_mismatch` | `order_lookup_failed` | `dry_run_required` | `cap_exceeded_per_day` | `apply_failed` | `rate_limited`.
+- **Auth**: the wrapper uses `muso-admin-api.sh`'s JWT cache (same Muso admin auth as `remove_credits`). The agent never sees the token.
+- **Safety model (in the wrapper, independent of the LLM)**: resolves the order, then requires the requester email to equal the order's owner email AND to match the Intercom contact's `source.author.email`; validates the address (≤40-char lines + required fields); dry-run-then-apply (apply needs a matching `would_update` audit row from the last 15 min); audit log at `/var/log/openclaw/order-fulfillment.jsonl`; per-customer-per-day cap. Fails closed and routes to a ticket on any gate failure.
+- **Required fields**: `order_ref` (UUID / order number / Prodigi id), `customer_email` (the verified owner), `recipient` ({ name, phone, line1, line2?, city, state?, postcode, country, email? }). `intercomConvId` required when `apply: true`.
+- **Rate limit**: 5 per session (60-minute window).
+- **Used by**: the `order-fulfillment` skill (customer lane only — never on a vendor's say-so). See `reference/orders-and-fulfillment.md`.
+
+### 11. memory_search
 
 - **Wraps**: openclaw's bundled memory-core hybrid retrieval (vector + BM25) against the per-agent qmd index built from `workspaces/support/reference/*.md`.
 - **Returns**: Ranked chunks with file path, line range, and similarity score.
@@ -103,7 +122,7 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 - **PII filter**: not needed – the indexed corpus is read-only doctrine, no customer data.
 - **When to use**: "is there an active incident affecting this topic?", "what's the doctrine for X?", and anywhere the answer isn't already in loaded context (SOUL.md / TOOLS.md / common-issues row #N).
 
-### 10. memory_get
+### 12. memory_get
 
 - **Wraps**: openclaw's bundled memory-core point-lookup by note id.
 - **Returns**: The full text of a single indexed chunk by id (typically followed up from a `memory_search` hit).
@@ -112,13 +131,32 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 
 ## Action Request Pattern
 
-For customer write actions (credit claims, refunds, profile updates, disputes), use `create_ticket` with structured formatting. See `skills/action-request/SKILL.md` for the full ticket format.
+For customer write actions (credit claims, refunds, profile updates, disputes, **plaque/poster order fulfillment**), use `create_ticket` with structured formatting. See `skills/action-request/SKILL.md` for the full ticket format.
 
 **Key points**:
 - Tasks are created in the designated ClickUp list (901000600160) with `hydra-action-request` tag and the approval tier (`tier-1`, `tier-2`, `tier-3`)
 - Include a machine-readable JSON block in the task description (between `---ACTION-REQUEST---` and `---END-ACTION-REQUEST---` markers)
 - This does NOT add a new tool -- it uses `create_ticket` with structured content
 - The Operations agent picks up tasks tagged `hydra-action-request` for review and execution
+
+### Order fulfillment (Prodigi plaques/posters)
+
+The `order-fulfillment` action type (Tier 1) is filed by the `order-fulfillment`
+skill for Prodigi address-confirmation requests and customer order/shipping
+questions. When `details.proposed_corrected_address` is present, `create_ticket`
+stamps a deterministic Prodigi-rules `address_validation` block (≤40-char lines +
+required fields) onto the ticket — non-blocking, ops-facing. No new tool; uses
+`create_ticket`. Doctrine: `reference/orders-and-fulfillment.md`.
+
+Caroline can look an order up herself with the **`order_lookup`** tool (#9 above) —
+by internal id, order number, or Prodigi id — to read its status + shipping address.
+For the **verified order owner**, she can also correct the shipping recipient with
+**`order_address_update`** (#10): always a dry-run preview first, explicit customer
+confirmation, then apply with `intercomConvId`. The wrapper refuses if the requester
+isn't the owner — on any refusal, fall back to filing an `order-fulfillment` request
+for the team. Never edit on a vendor's (Prodigi's) say-so — the corrected address must
+come from the customer. If `order_lookup` returns `lookup_unavailable`, file the
+request with whatever the message already contains.
 
 ## Denied Tools (EVERYTHING ELSE)
 

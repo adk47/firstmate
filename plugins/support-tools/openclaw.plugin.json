@@ -7,9 +7,11 @@
       "profile_lookup",
       "credits_search",
       "profile_status",
+      "order_lookup",
       "subscription_status",
       "create_ticket",
       "remove_credits",
+      "order_address_update",
       "dedupe_check",
       "credit_verification_check"
     ]

@@ -20,9 +20,10 @@ import {
   intercomDeeplink,
 } from "./ticket-format.js";
 import { deriveConvId } from "./dedupe-check.js";
+import { validateProdigiAddress } from "../order-address.js";
 
 const Parameters = Type.Object({
-  actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, credit-verify, profile-claim, support-general, analytics-followup, profile-merge, unmerge-request, bulk-credit-change, profile-update, subscription-refund, data-deletion, dispute, data-export" }),
+  actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, credit-verify, profile-claim, support-general, analytics-followup, order-fulfillment, profile-merge, unmerge-request, bulk-credit-change, profile-update, subscription-refund, data-deletion, dispute, data-export" }),
   customerEmail: Type.String({ description: "Customer's email address" }),
   summary: Type.String({ description: "Plain English description of what the customer is requesting" }),
   titleGist: Type.Optional(Type.String({ description: "Short, concrete gist for the ticket title (max 60 chars), e.g. 'Recurring charges since Jan, no account found'. Falls back to the summary when omitted." })),
@@ -235,10 +236,28 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       const tier = getTierForAction(params.actionType);
       const priority = TIER_TO_PRIORITY[tier];
       const sla = TIER_SLAS[tier];
+
+      // order-fulfillment tickets carry a proposed corrected shipping address.
+      // Stamp a deterministic Prodigi-rules validation (<=40 chars/line, required
+      // fields, "name looks like a street" tell) onto the ticket so ops can trust
+      // the address without re-counting. NON-BLOCKING — never gates filing
+      // (tier-1 must always be fileable; see PROFILE_ANCHOR_REQUIRED rationale).
+      let details = params.details;
+      if (
+        params.actionType === "order-fulfillment" &&
+        params.details?.proposed_corrected_address &&
+        typeof params.details.proposed_corrected_address === "object"
+      ) {
+        details = {
+          ...params.details,
+          address_validation: validateProdigiAddress(params.details.proposed_corrected_address),
+        };
+      }
+
       const contentParams = {
         summary: params.summary, actionType: params.actionType, tier,
         customerEmail: params.customerEmail, customerProfileId: params.customerProfileId,
-        details: params.details, conversationSummary: params.conversationSummary, sessionId,
+        details, conversationSummary: params.conversationSummary, sessionId,
       };
 
       // --- Dedupe: same conversation + same action type → append, don't re-file.

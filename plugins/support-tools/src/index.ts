@@ -8,7 +8,9 @@ import { createCreditsSearchTool } from "./tools/credits-search.js";
 import { createCreateTicketTool } from "./tools/create-ticket.js";
 import { createSubscriptionStatusTool } from "./tools/subscription-status.js";
 import { createProfileStatusTool } from "./tools/profile-status.js";
+import { createOrderLookupTool } from "./tools/order-lookup.js";
 import { createRemoveCreditsTool, DEFAULT_REMOVE_CREDITS_SCRIPT } from "./tools/remove-credits.js";
+import { createOrderAddressUpdateTool, DEFAULT_UPDATE_ORDER_ADDRESS_SCRIPT } from "./tools/order-address-update.js";
 import { createDedupeCheckTool } from "./tools/dedupe-check.js";
 import { createCreditVerificationCheckTool } from "./tools/credit-verification-check.js";
 import { createIntercomReader } from "./intercom-client.js";
@@ -104,6 +106,11 @@ export default definePluginEntry({
     };
     api.registerTool(profileStatusFactory, { name: "profile_status" });
 
+    const orderLookupFactory = (ctx: any) => {
+      return createOrderLookupTool({ adminClient: musoAdminClient, rateLimiter, sessionId: ctx.sessionId ?? "unknown" });
+    };
+    api.registerTool(orderLookupFactory, { name: "order_lookup" });
+
     api.registerTool(createSubscriptionStatusTool(), { name: "subscription_status" });
 
     const createTicketFactory = (ctx: any) => {
@@ -136,6 +143,20 @@ export default definePluginEntry({
       });
     };
     api.registerTool(removeCreditsFactory, { name: "remove_credits" });
+
+    // order_address_update — gated edit of an order's shipping recipient. Same
+    // wrapper-as-security-boundary pattern as remove_credits: the wrapper (not the
+    // GET-only MusoAdminClient) does the write, and is the ownership/audit boundary.
+    const updateOrderAddressScriptPath =
+      pluginConfig.updateOrderAddressScriptPath ?? DEFAULT_UPDATE_ORDER_ADDRESS_SCRIPT;
+    const orderAddressUpdateFactory = (ctx: any) => {
+      return createOrderAddressUpdateTool({
+        scriptPath: updateOrderAddressScriptPath,
+        rateLimiter,
+        sessionId: ctx.sessionId ?? "unknown",
+      });
+    };
+    api.registerTool(orderAddressUpdateFactory, { name: "order_address_update" });
 
     // dedupe_check — read-only profile-merge verifier. The Intercom token is
     // read from process.env (it lives in edge.env); it is NOT a hydra-env

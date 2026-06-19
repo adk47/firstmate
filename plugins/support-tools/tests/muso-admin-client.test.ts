@@ -288,4 +288,31 @@ describe("createMusoAdminClient", () => {
     const bare = await client.get("/api/v3/admin/credit-requestsX");
     expect(bare).toEqual({ ok: false, status: 0, error: "path not allowlisted" });
   });
+
+  it("allows a single-order read by id but blocks the write sub-paths and the bare list", async () => {
+    vi.mocked(http.post).mockResolvedValue(makeLoginResponse("tok"));
+    vi.mocked(http.get).mockResolvedValue({ ok: true, data: { data: { id: "abc" } } });
+
+    const client = createMusoAdminClient({
+      http,
+      musoApiBase: "https://api.muso.ai",
+      adminEmail: "admin@muso.ai",
+      adminPassword: "s3cret",
+    });
+
+    // by UUID, by Prodigi numeric id, and by order number all match the segment.
+    expect((await client.get("/api/v3/admin/orders/6a468d83-b71d-4720-bb12-79ae8dfa55f8")).ok).toBe(true);
+    expect((await client.get("/api/v3/admin/orders/66812882101295104")).ok).toBe(true);
+    expect((await client.get("/api/v3/admin/orders/k3n9Xa")).ok).toBe(true);
+
+    // Tripwire: the write sub-paths and the payment-embedding list must NOT pass.
+    for (const denied of [
+      "/api/v3/admin/orders",
+      "/api/v3/admin/orders/abc/tracking",
+      "/api/v3/admin/orders/abc/retry-prodigi-order-create",
+      "/api/v3/admin/orders/abc/complete-for-free",
+    ]) {
+      expect(await client.get(denied)).toEqual({ ok: false, status: 0, error: "path not allowlisted" });
+    }
+  });
 });

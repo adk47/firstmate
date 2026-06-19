@@ -17,6 +17,13 @@ const ALLOWED_PATHS: RegExp[] = [
   // approve path that shares the same path prefix. Scoped to the list endpoint
   // (`?`/end), NOT a broad `credit-requests*` that would also match `/<id>`.
   /^\/api\/v3\/admin\/credit-requests(\?|$)/,
+  // Single-order READ by id / order number / Prodigi id (order_lookup tool).
+  // Scoped to exactly one path segment after `orders/` (`[^/?]` excludes `/`),
+  // so it grants the GET-by-id read but NOT the write sub-paths that share the
+  // prefix (`/orders/<id>/tracking`, `/retry-prodigi-order-create`,
+  // `/complete-for-free`) and NOT the bare `/orders` list (which embeds every
+  // order's payment history).
+  /^\/api\/v3\/admin\/orders\/[^/?]+(\?|$)/,
 ];
 
 const TOKEN_TTL_MS = 22 * 60 * 60 * 1000; // refresh 1h before the 23h bash cache expires

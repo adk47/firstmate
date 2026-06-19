@@ -43,6 +43,45 @@ describe("createCreateTicketTool", () => {
     expect(body.tags).toEqual(["hydra-action-request", "tier-2", "action:profile-merge", "team:catalog"]);
   });
 
+  it("stamps a deterministic Prodigi address validation on order-fulfillment tickets", async () => {
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_order1" } });
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_order" });
+    // The garbled address from the Prodigi email: street in the name slot, no phone.
+    await tool.execute("call_1", {
+      actionType: "order-fulfillment",
+      customerEmail: "mary@prodigi.com",
+      summary: "Prodigi asked to confirm the shipping address for order 6a468d83",
+      details: {
+        order_id: "6a468d83-b71d-4720-bb12-79ae8dfa55f8",
+        prodigi_order_id: "66812882101295104",
+        whats_wrong: "address bounced by Prodigi",
+        proposed_corrected_address: {
+          name: "av enriqullo Nro 36, los cedrozgos",
+          line1: "apto 1101",
+          city: "santo domingo",
+          postcode: "11108",
+          country: "DOMINICAN REPUBLIC",
+        },
+      },
+      conversationSummary: "Vendor requested an address correction for a Dominican Republic order.",
+    });
+    const body = vi.mocked(mockClient.post).mock.calls[0][1].body as Record<string, unknown>;
+    expect(body.tags).toEqual(["hydra-action-request", "tier-1", "action:order-fulfillment", "team:growth"]);
+    const md = body.markdown_description as string;
+    const json = JSON.parse(/---ACTION-REQUEST---\s*(\{[\s\S]*?\})\s*---END-ACTION-REQUEST---/.exec(md)![1]);
+    expect(json.details.address_validation.ok).toBe(false);
+    expect(json.details.address_validation.missing).toContain("Phone number");
+    expect(json.details.address_validation.warnings).toContain("recipient_name_looks_like_a_street_address");
+  });
+
+  it("does not add address_validation to non-order tickets", async () => {
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_plain" } });
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_plain" });
+    await tool.execute("call_1", { actionType: "credit-claim", customerEmail: "user@example.com", summary: "x", conversationSummary: "y", details: { proposed_corrected_address: { name: "n" } } });
+    const body = vi.mocked(mockClient.post).mock.calls[0][1].body as Record<string, unknown>;
+    expect(body.markdown_description as string).not.toContain("address_validation");
+  });
+
   it("blocks when rate limited", async () => {
     const strictLimiter = new RateLimiter();
     for (let i = 0; i < 2; i++) { strictLimiter.check("session_abc", "create_ticket", 60, 2); }

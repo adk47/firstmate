@@ -35,6 +35,12 @@ describe("buildTicketTitle", () => {
     ).toBe("[support] Wants human follow-up after 1 week wait — jura@example.com");
   });
 
+  it("shortens order-fulfillment to order", () => {
+    expect(
+      buildTicketTitle({ actionType: "order-fulfillment", gist: "Prodigi address bounced, lines >40 chars", customerEmail: "mary@prodigi.com" }),
+    ).toBe("[order] Prodigi address bounced, lines >40 chars — mary@prodigi.com");
+  });
+
   it("truncates gists longer than 60 chars with an ellipsis", () => {
     const longGist = "A".repeat(80);
     const title = buildTicketTitle({ actionType: "credit-claim", gist: longGist, customerEmail: "u@example.com" });
@@ -196,6 +202,12 @@ describe("buildTicketTags", () => {
   it("keeps the legacy analytics-followup extra tag", () => {
     expect(buildTicketTags({ actionType: "analytics-followup", tier: 1 })).toContain("analytics-followup");
   });
+
+  it("routes order-fulfillment to the growth team at tier 1", () => {
+    expect(buildTicketTags({ actionType: "order-fulfillment", tier: 1 })).toEqual([
+      "hydra-action-request", "tier-1", "action:order-fulfillment", "team:growth",
+    ]);
+  });
 });
 
 describe("slaDueDateMs", () => {
@@ -235,6 +247,7 @@ describe("slaDueDateMs", () => {
 describe("tier helpers", () => {
   it("maps action types to tiers", () => {
     expect(getTierForAction("credit-claim")).toBe(1);
+    expect(getTierForAction("order-fulfillment")).toBe(1);
     expect(getTierForAction("profile-merge")).toBe(2);
     expect(getTierForAction("data-deletion")).toBe(3);
     expect(getTierForAction("unknown-action")).toBe(1);
