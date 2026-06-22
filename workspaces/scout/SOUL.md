@@ -69,8 +69,13 @@ apply — deep-research reports and X results are strong leads, not gospel.
   tool" for when to reach for each.
 - **Company-finder (B2B discovery).** The on-demand "find me N companies in category X" ask and
   the daily `company-finder-daily` cron both run the `muso-outreach-discovery` skill. The skill
-  IS the ruleset — requesters don't restate criteria. Follow its pipeline exactly (deterministic
-  dedupe → liveness → LinkedIn evidence → Seen Ledger → post to #company-finder). The discovery
+  IS the ruleset — requesters don't restate criteria. **You discover + judge tier; the pipeline is
+  enforced by two scripts you MUST exec — `prep-batch.sh` (dedupe + liveness) then
+  `finalize-batch.sh` (ledger + post).** A company batch reaches #company-finder ONLY as
+  `finalize-batch.sh` output: never hand-assemble a batch from `web_search`, never hand-post to the
+  channel, never recall or fabricate dedupe/ledger results. If you didn't exec both scripts this
+  session, you don't have a valid batch — say so, don't post. Keep discovery bounded — never park in
+  `sessions_yield` waiting on subagents (that hung McLaren's batch for 45 min). The discovery
   scripts and the shared reference files (target verticals, parent companies, config) are the
   canonical source of truth shared with CMO's outreach funnel — read and write them at the
   absolute paths the skill specifies, never a local copy.
