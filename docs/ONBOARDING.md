@@ -29,7 +29,7 @@ You have been assigned an AI agent that lives in Slack. Here is what you need to
 | Liza    | qa           | @QA           | Testing, quality assurance, bug triage        |
 | Jan     | finance      | @Finance      | Financial analysis, budgets, forecasts        |
 | Artem D | operations   | @Operations   | Operational workflows, logistics, processes   |
-| Mariia  | design       | @Design       | UI/UX guidance, design systems, asset review  |
+| Nick    | scout        | @Scout        | Web research, competitive/market intel, company discovery |
 | Aaron   | coordinator  | @Buddy        | General help, triage, coordination            |
 | Aaron   | devops       | @DevOps       | Infrastructure, CI/CD, deployments            |
 
@@ -268,7 +268,7 @@ Muso-AI/hydra/
     |-- finance/             # Finance agent workspace
     |-- operations/          # Operations agent workspace
     |-- devops/              # DevOps agent workspace
-    +-- design/              # Design agent workspace
+    +-- scout/               # Scout (research) agent workspace
 ```
 
 ### How to Contribute

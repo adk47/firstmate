@@ -82,9 +82,14 @@ All outreach related crons post to `#sales-alerts` (`C0ARQ021M40`).
 
 **Status**: NOT YET LIVE. Follow up automation is paused until GHL + sheet sync is fully working. Enable once first few batches have been tested manually.
 
-### Daily Company Finder
+### Daily Company Finder (moved to @Scout)
 
-**Cron**: `company-finder-daily`
+> **Owned by the Scout agent now, not CMO.** The `company-finder-daily` cron runs as `scout`
+> and the `muso-outreach-discovery` skill lives in Scout's workspace. CMO is not responsible for
+> this cron. Approved companies still flow back into this funnel as `Needs Enrichment` Company
+> Intelligence rows; "find new companies" requests should be routed to `@Scout`.
+
+**Cron**: `company-finder-daily` (agentId: scout)
 **Runs**: daily at 1 PM CEST (Fede's timezone)
 **Action**: `muso-outreach-discovery` finds 5 new parent companies matching target verticals, dedupes against sheet + GHL + parent-companies.md, applies rollup logic.
 **Posts**: batch of 5 new parent companies to `#company-finder` (`C0ARS7XMY93`)

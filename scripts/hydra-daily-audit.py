@@ -390,7 +390,7 @@ def audit_memory_sizes():
 def audit_unanswered(config):
     """Scan for unanswered @mentions in last 24h."""
     findings = []
-    accounts = ["clio", "ceo", "cmo", "cto", "qa", "finance", "operations", "devops", "design", "support"]
+    accounts = ["clio", "ceo", "cmo", "cto", "qa", "finance", "operations", "devops", "scout", "support"]
     oldest = str(int(time.time()) - 24 * 3600)
 
     bot_ids = set()
@@ -531,7 +531,7 @@ def audit_config(config, edge_config):
     """
     findings = []
     findings += _check_profile_config("main",
-        config, {"clio", "ceo", "cmo", "cto", "qa", "finance", "operations", "devops", "design"})
+        config, {"clio", "ceo", "cmo", "cto", "qa", "finance", "operations", "devops", "scout"})
     findings += _check_profile_config("edge", edge_config, {"support"})
     return findings
 

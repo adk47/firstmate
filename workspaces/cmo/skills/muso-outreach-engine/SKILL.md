@@ -15,7 +15,6 @@ depends-on:
   - muso-outreach-writer
   - muso-outreach-sender
   - muso-outreach-followup
-  - muso-outreach-discovery
   - muso-outreach-reply-scanner
   - muso-outreach-calendar
   - muso-outreach-ghl-sync
@@ -47,7 +46,7 @@ Aaron (U7RP6HKUZ) only. Everyone else is read only.
 | "Send outreach to N contacts" | `muso-outreach-sender` | Pulls targets, calls writer, presents batch, sends on approval |
 | "Draft an email to {contact}" | `muso-outreach-writer` | Copy craft, voice by sender, opening framework |
 | "Send follow ups" | `muso-outreach-followup` | Cadence check, template rotation, thread reply |
-| "Find new companies" | `muso-outreach-discovery` | Daily 5 parent company discovery, dedupe, post to #company-finder |
+| "Find new companies" | **@Scout** (not a CMO subskill) | Company discovery moved to the Scout agent. Route the request to `@Scout` via `sessions_send`; Scout runs `muso-outreach-discovery` and posts the batch to #company-finder. Approved companies still flow back into this funnel as `Needs Enrichment` Company Intelligence rows. |
 | "Enrich contacts" | `muso-outreach-enrichment` | Snov.io, Enrow, Datagma enrichment (NOT YET ACTIVE) |
 | "Check for replies" | `muso-outreach-reply-scanner` | Scans 4 accounts for new B2B - Ads replies |
 | "Check for meetings" | `muso-outreach-calendar` | Scans a@muso.ai calendar for new bookings |
@@ -160,5 +159,7 @@ These are documented but not yet active. Enable when ready:
 
 - `muso-outreach-enrichment` (Snov.io / Enrow / Datagma via n8n)
 - `muso-outreach-followup` automation (Monday cron, waiting on GHL + sheet sync to be fully green)
-- `muso-outreach-discovery` daily cron (1 PM CEST)
 - Multi email hive rotation (separate email engine, not built yet)
+
+(Company discovery — `muso-outreach-discovery` + the `company-finder-daily` 1 PM CEST cron — is
+owned by **@Scout** now, not this engine. Route "find new companies" to @Scout.)

@@ -23,7 +23,7 @@ _(initialized 2026-03-22)_
 | U02S7TJ7QHY | Oleg | Catalog/Platform | CTO agent |
 | — | Liza Basco | Finance | Finance agent |
 | — | Jeff | CRM/GHL | CMO agent |
-| — | Mariia | Design | Design agent |
+| — | Mariia | Design | (no design agent — Mariia is the design lead; answer directly) |
 | — | Kazy | Social Media | CMO agent |
 | — | Ihor (Kopaniev) | DevOps | DevOps agent |
 | — | Dima | Engineering | CTO agent |

@@ -283,7 +283,7 @@ jobs:
         run: |
           echo "::group::Checking SOUL.md in all workspaces"
           # Core workspaces that must always exist
-          EXPECTED_WORKSPACES="ceo cmo coordinator cto design devops finance operations qa support"
+          EXPECTED_WORKSPACES="ceo cmo coordinator cto scout devops finance operations qa support"
           MISSING=""
           for ws in $EXPECTED_WORKSPACES; do
             if [ ! -f "workspaces/${ws}/SOUL.md" ]; then

@@ -71,7 +71,7 @@ jobs:
             case "$file" in
               openclaw-edge.json|plugins/intercom/*|plugins/support-tools/*|workspaces/support/*)
                 NEEDS_EDGE=true ;;
-              openclaw-main.json|workspaces/ceo/*|workspaces/cmo/*|workspaces/cto/*|workspaces/coordinator/*|workspaces/qa/*|workspaces/finance/*|workspaces/operations/*|workspaces/devops/*|workspaces/design/*|workspaces/neutral/*)
+              openclaw-main.json|workspaces/ceo/*|workspaces/cmo/*|workspaces/cto/*|workspaces/coordinator/*|workspaces/qa/*|workspaces/finance/*|workspaces/operations/*|workspaces/devops/*|workspaces/scout/*|workspaces/neutral/*)
                 NEEDS_MAIN=true ;;
               scripts/*|policies/*|skills-all/*|.github/workflows/*)
                 NEEDS_MAIN=true; NEEDS_EDGE=true ;;

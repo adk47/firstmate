@@ -204,7 +204,7 @@ Each of the 9 agents is a separate Slack application with its own identity.
 | finance       | @Finance   | Intelligent  | Jan     | Financial analysis, budgeting         |
 | operations    | @Operations| Kimi K2.6    | Artem D | Operational workflows, logistics      |
 | devops        | @DevOps    | Sonnet 4.6   | Aaron   | Infrastructure, CI/CD, deployments    |
-| design        | @Design    | Intelligent  | Mariia  | UI/UX, design systems, assets         |
+| scout         | @Scout     | Haiku 4.5    | Nick    | Web research, competitive/market intel, company discovery |
 
 \* cmo is migrating to Opus 4.7 via PR #131 (dedicated `anthropic-cmo` provider for isolated API key).
 

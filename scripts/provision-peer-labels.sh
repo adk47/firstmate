@@ -46,7 +46,7 @@ case "$PROFILE" in
       [finance]="@Finance"
       [operations]="@Ops"
       [devops]="@DevOps"
-      [design]="@Design"
+      [scout]="@Scout"
       [support]="@CS"
     )
     ;;

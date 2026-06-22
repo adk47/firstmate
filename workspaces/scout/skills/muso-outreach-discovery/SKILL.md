@@ -16,7 +16,6 @@ description: |
   Triggers: "find companies", "find me companies", "discover companies",
   "new targets", "company batch", "company finder"
 depends-on:
-  - muso-outreach-engine
   - muso-slack-formatter
   - muso-nocodb
 metadata:
@@ -40,7 +39,14 @@ Read only for everyone else.
 
 ## Shared Config
 
-See `../muso-outreach-engine/references/config.md`.
+See `/opt/hydra/workspaces/cmo/skills/muso-outreach-engine/references/config.md`.
+
+> **Cross-workspace note (Scout-owned skill).** Company-finder lives with Scout, but its
+> reference files — `config.md`, `target-verticals.md`, and `parent-companies.md` — remain the
+> canonical source of truth inside CMO's outreach-engine and are shared with the rest of CMO's
+> funnel (sender, enrichment, qa). Always read AND write them at their absolute
+> `/opt/hydra/workspaces/cmo/skills/muso-outreach-engine/references/` paths. Never make a local
+> copy in Scout's workspace — a second copy silently diverges from the funnel.
 
 ## Cadence & Batch Cap
 
@@ -51,8 +57,8 @@ On-demand asks: **hard max 10 companies per run.** If someone asks for more
 
 ## Target Verticals
 
-See `../muso-outreach-engine/references/target-verticals.md` for the full
-list. A bare "find me N companies in category X" uses X as the vertical.
+See `/opt/hydra/workspaces/cmo/skills/muso-outreach-engine/references/target-verticals.md` for
+the full list. A bare "find me N companies in category X" uses X as the vertical.
 
 ## Hard Requirements (canonical criteria — apply to EVERY batch)
 
@@ -175,10 +181,12 @@ A LinkedIn URL produced from memory without a fetch is not evidence.
 
 Rollup (unchanged from v1):
 
-1. Candidate is a **known subsidiary** (listed in `parent-companies.md`) →
+1. Candidate is a **known subsidiary** (listed in the shared
+   `/opt/hydra/workspaces/cmo/skills/muso-outreach-engine/references/parent-companies.md`) →
    drop it; the parent is the target.
 2. Candidate is a **new parent** owning subsidiaries already in NocoDB →
-   flag for rollup: add parent + subsidiaries to `parent-companies.md`, note
+   flag for rollup: add parent + subsidiaries to the shared
+   `/opt/hydra/workspaces/cmo/skills/muso-outreach-engine/references/parent-companies.md`, note
    it in the output, do NOT remove subsidiary rows from NocoDB (flag for Fede).
 3. Standalone parent or simple small brand → include as is.
 
@@ -283,7 +291,9 @@ bash /opt/hydra/scripts/company-finder/ledger.sh reject <domain> "<reason>"
 Companies left undecided stay `suggested` — still deduped against, which is
 the correct failure mode when review feedback never arrives.
 
-Also update `parent-companies.md` with any new parents/subsidiaries and log
+Also update the shared
+`/opt/hydra/workspaces/cmo/skills/muso-outreach-engine/references/parent-companies.md` with any
+new parents/subsidiaries and log
 to `api-logs/discovery/YYYY-MM-DD.jsonl`.
 
 ## Silent Rule

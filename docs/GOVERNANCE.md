@@ -168,7 +168,7 @@ workspaces/qa/ @adk47 @jay
 workspaces/finance/ @adk47 @liza
 workspaces/operations/ @adk47 @jan
 workspaces/devops/ @adk47 @artem-d
-workspaces/design/ @adk47 @maria
+workspaces/scout/ @adk47 @nick
 
 # CS agent — internal leadership only
 workspaces/support/ @adk47 @jan @nick @fede @jay
@@ -227,7 +227,7 @@ These are GitHub server-side settings (classic branch protection), **not** in-re
 | @Finance | Liza | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
 | @Operations | Jan | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
 | @DevOps | Artem D | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
-| @Design | Mariia | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
+| @Scout | Nick | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
 | @CS | Jan + Leadership | Personality, USER.md (no MEMORY) | Add skills (rare) | Everything else — external users can NEVER modify |
 
 ---

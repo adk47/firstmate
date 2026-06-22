@@ -68,7 +68,7 @@ You've watched the Library of Alexandria burn. A flaky Spotify API doesn't keep 
 | Liza | U0A8CCTTAAG | Finance, Billing | @Finance agent or answer directly |
 | Jan | U038BM16T7W | Operations, Support | @Operations agent or answer directly |
 | Artem D | U0ACHTYUULT | DevOps, Infrastructure | @DevOps agent or answer directly |
-| Mariia | U03LP8YHLPK | Design, UX | @Design agent or answer directly |
+| Mariia | U03LP8YHLPK | Design, UX | answer directly (no design agent; Mariia is the design lead) |
 
 - Department heads get full access to their domain
 - Cross-domain questions: you can answer general context, but route to the specialist for specifics
@@ -99,7 +99,7 @@ Downstream model chains live in `openclaw.json` (`agents.list[<id>].model`); don
 | @Finance | Liza | Billing, disputes, payouts, invoices, tax, payroll | Stripe (full), ChartMogul, ProfitWell, Anrok, Deel |
 | @Operations | Jan | Customer ops, claiming, credits, fraud, profiles | All ops-* skills (14), Intercom, refund processor |
 | @DevOps | Artem D | Infrastructure, deployments, monitoring, self-healing | DevOps, Cloudflare, n8n, gateway-self-heal |
-| @Design | Mariia | UX feedback, design review, accessibility | Humanizer, Clio knowledge base |
+| @Scout | Nick | Web research, competitive & market intelligence, B2B company discovery (company-finder) | web_search (Sonar), muso-deep-research, muso-outreach-discovery |
 | @CS | Jan (Aaron security) | External customer support (4 tools only, isolated) | profile_lookup, credits_search, subscription_status, create_ticket |
 
 ## How You Route

@@ -6,6 +6,20 @@ _All tools the CMO agent has access to. See individual skill files for full API 
 
 ## Connected — Read & Write
 
+### Muso CLI (`muso`) — core-backend admin API + Trino
+- The `muso` host binary: authenticated, **policy-gated**, audited access to Muso's core-backend
+  admin API (prod) and Trino SQL — full **read AND write** (Scout, by contrast, is read-only).
+- Access: via the **`muso-cli` skill** (`skills-all/muso-cli/SKILL.md`); auth from the gateway's
+  `MUSO_ADMIN_*` env. Read `muso agent-docs` first for the command / route / SQL reference.
+- Reads (unrestricted): `muso profiles|tracks|users search`, `muso teams get`, `muso claiming list`,
+  `muso api GET <route>`, `muso query "SELECT …"` (Trino).
+- Writes go through the CLI's policy gates: `--requester <email>` (attribution) for any non-GET;
+  `+ --yes` for dangerous (DELETE / merge / reset / cancel); `+ --confirmed-by <approver>
+  --approval-ref <slack-ts>` for the approval tier (profile/track merge, credit-request status, VIP
+  subscription create). The gate runs below the agent — you cannot talk past it. Preview any write
+  with `--dry-run`; every write is audited.
+- **Credit-request approvals stay on `muso-admin-api.sh`** (the ops soak boundary), not muso-cli.
+
 ### Klaviyo
 - Email/SMS marketing platform
 - API base: `https://a.klaviyo.com/api/`

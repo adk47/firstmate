@@ -37,14 +37,14 @@ Notes:
 | **@Finance** | Financial | Stripe, invoices, payouts, ChartMogul, Deel, Anrok, disputes |
 | **@Ops** | Operations | Customer support, claiming, credits, fraud, Intercom, refunds |
 | **@DevOps** | Infrastructure | K8s, monitoring, deployments, Cloudflare, self-healing |
-| **@Design** | UX/Design | Design review, accessibility, design system, ClickUp tasks |
+| **@Scout** | Research/Intelligence | Web research, competitive & market intelligence, B2B company discovery (company-finder) |
 | **@CS** | Customer Support | External customer queries (isolated — cannot contact other agents) |
 
 ## Examples
 - Finance question while in CMO? Resolve `@Finance` → send on that key
 - Need code context for an ops issue? Ask `@CTO`
 - Customer billing issue in ops? Ask `@Finance` for Stripe data
-- Marketing needs design review? Ask `@Design`
+- Need the web researched or a company landscape mapped? Ask `@Scout`
 - Need to create or share a Google Sheet, upload to Drive, or send an email? Ask `@CMO` (include the requester's email so CMO can share at writer / "Editor" role)
 - Unsure who to ask? Ask `@Clio` — it routes to the right agent
 

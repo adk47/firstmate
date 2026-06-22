@@ -13,7 +13,7 @@ VAULT_SECRET_PATH="${VAULT_SECRET_PATH:-secret/muso-prod/hydra-slack-tokens}"
 SLACK_WEBHOOK="${HYDRA_SLACK_WEBHOOK:-}"
 
 # Agent IDs must match Slack app names
-AGENTS=(coordinator ceo cmo cto qa finance operations devops design)
+AGENTS=(coordinator ceo cmo cto qa finance operations devops scout)
 
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"; }
 fail() { log "FATAL: $*"; exit 1; }
