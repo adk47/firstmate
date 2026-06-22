@@ -137,6 +137,7 @@ export class MockIntercomClient implements IntercomClient {
   calls = {
     replyToConversation: [] as Array<{ conversationId: string; adminId: string; body: string }>,
     assignConversation: [] as Array<{ conversationId: string; adminId: string; assigneeId: string }>,
+    addTag: [] as Array<{ conversationId: string; name: string; adminId: string }>,
     getConversation: [] as Array<{ conversationId: string }>,
     closeConversation: [] as Array<{ conversationId: string; adminId: string; body?: string }>,
     snoozeConversation: [] as Array<{ conversationId: string; adminId: string; snoozedUntil: number }>,
@@ -161,6 +162,10 @@ export class MockIntercomClient implements IntercomClient {
     assigneeId: string;
   }): Promise<void> {
     this.calls.assignConversation.push(params);
+  }
+
+  async addTag(conversationId: string, name: string, adminId: string): Promise<void> {
+    this.calls.addTag.push({ conversationId, name, adminId });
   }
 
   async getConversation(params: {
@@ -352,6 +357,41 @@ export class RealIntercomClient implements IntercomClient {
         if (err instanceof IntercomAssignmentConflictError) throw err;
       }
       throw new Error(`Intercom assignConversation failed: ${response.status} ${response.statusText} - ${errorBody}`);
+    }
+  }
+
+  async addTag(conversationId: string, name: string, adminId: string): Promise<void> {
+    // Intercom tags a conversation by tag ID, not name. POST /tags with a name
+    // is idempotent "create or fetch" and returns the tag (with its id); we
+    // then attach that id to the conversation. Two round-trips, but tagging
+    // only fires once per flagged conversation, so no caching is warranted.
+    const tagUrl = `${this.baseUrl}/tags`;
+    const tagResponse = await fetch(tagUrl, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ name }),
+    });
+    this.checkRateLimit(tagResponse);
+    if (!tagResponse.ok) {
+      const errorBody = await this.readErrorBody(tagResponse);
+      throw new Error(`Intercom addTag (resolve "${name}") failed: ${tagResponse.status} ${tagResponse.statusText} - ${errorBody}`);
+    }
+    const tag = await this.parseJson(tagResponse, "addTag/resolve");
+    const tagId = tag?.id;
+    if (!tagId) {
+      throw new Error(`Intercom addTag: tag "${name}" resolved without an id`);
+    }
+
+    const attachUrl = `${this.baseUrl}/conversations/${conversationId}/tags`;
+    const attachResponse = await fetch(attachUrl, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ id: String(tagId), admin_id: adminId }),
+    });
+    this.checkRateLimit(attachResponse);
+    if (!attachResponse.ok) {
+      const errorBody = await this.readErrorBody(attachResponse);
+      throw new Error(`Intercom addTag (attach "${name}") failed: ${attachResponse.status} ${attachResponse.statusText} - ${errorBody}`);
     }
   }
 
@@ -562,6 +602,12 @@ export class SanitizingIntercomClient implements IntercomClient {
     assigneeId: string;
   }): Promise<void> {
     return this.inner.assignConversation(params);
+  }
+
+  async addTag(conversationId: string, name: string, adminId: string): Promise<void> {
+    // Tag name is an internal constant (ai:priority-paged), never customer-
+    // facing — nothing to sanitize. Pass through.
+    return this.inner.addTag(conversationId, name, adminId);
   }
 
   async getConversation(params: {

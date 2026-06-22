@@ -146,6 +146,12 @@ export interface IntercomSessionState {
   updatedAt: string;
   knownFacts?: KnownFacts;
   escalationFiredAt?: string | null;
+  // Dedup gate for the priority signal (Lane A). Set once per conversation the
+  // first time Caroline's `[[PRIORITY]]` token fires a page, so rapid follow-up
+  // messages don't re-page. Distinct from escalationFiredAt: the priority page
+  // is a lightweight internal heads-up that leaves Caroline active, whereas
+  // escalationFiredAt gates the heavyweight human-takeover handoff.
+  priorityFiredAt?: string | null;
   userTurnCount?: number;
   // Personalization context for a verified, logged-in customer. Populated at
   // most once per conversation (gated behind account.personalization.enabled),
@@ -164,6 +170,16 @@ export interface IntercomAccountConfig {
   botAdminId: string;
   defaultInboxId: string;
   fallbackSlackSupervisionChannel: string;
+  // Slack incoming-webhook URL for the fast priority page (Lane A). When a
+  // customer complains about a data issue and Caroline emits the
+  // `[[PRIORITY]]` token, the channel layer posts a page here tagging
+  // `priorityMentionUserIds`. Empty string = feature off (the token is still
+  // stripped from the reply; a one-line warning is logged so the gap is
+  // visible). Mirrors how fallbackSlackSupervisionChannel is stored.
+  priorityEscalationSlackWebhook?: string;
+  // Slack user IDs to @-mention in the priority page (e.g. ["U7RP6HKUZ"] for
+  // Aaron). Trusted config — rendered as real mentions, never escaped.
+  priorityMentionUserIds?: string[];
   fallbackAcknowledgement: string;
   requireMappedHumanAdmin: boolean;
   adminMapping: Record<string, string>;
@@ -231,6 +247,13 @@ export interface IntercomClient {
     adminId: string;
     assigneeId: string;
   }): Promise<void>;
+
+  // Attach a tag (by name) to a conversation. Used by the priority signal to
+  // mark a conversation `ai:priority-paged` after a page is delivered, so the
+  // Lane B backstop watchdog can skip it (cross-lane dedup). Resolves the tag
+  // by name to its id (creating it if absent) then attaches it. Best-effort at
+  // the call site — never let a tag failure affect the customer reply.
+  addTag(conversationId: string, name: string, adminId: string): Promise<void>;
 
   getConversation(params: {
     conversationId: string;

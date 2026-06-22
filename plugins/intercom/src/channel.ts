@@ -27,6 +27,8 @@ import {
   type SilentDispatchReason,
 } from "./silent-dispatch.js";
 import { isIntentionalNoReply, stripNoReplySentinel } from "./no-reply.js";
+import { detectPrioritySignal, stripPrioritySentinel, PRIORITY_PAGED_TAG } from "./priority-signal.js";
+import { buildPrioritySlackPayload } from "./priority-slack.js";
 import { createOpenRouterJudge } from "./judge.js";
 import { createClickupTicket } from "./clickup.js";
 import {
@@ -732,7 +734,82 @@ export const intercomPlugin = createChatChannelPlugin({
                           `[${tag}] no-reply sentinel mixed with reply text (stripped, posting remainder) conv=${result.conversationId}`,
                         );
                       }
-                      const stripped = stripConversationContext(joined, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId });
+                      // Priority signal: Caroline appends `[[PRIORITY: reason]]`
+                      // when a customer is complaining about a data issue. Detect
+                      // on the RAW reply, then strip the token so the customer
+                      // never sees it. Unlike NO_REPLY this does NOT suppress the
+                      // reply — we still post her (stripped) text and ALSO fire a
+                      // fast internal page below. Deduped once per conversation.
+                      const prioritySignal = detectPrioritySignal(joinedForReply);
+                      const customerText = stripPrioritySentinel(joined);
+                      if (prioritySignal.fired && !state.priorityFiredAt) {
+                        if (account.priorityEscalationSlackWebhook) {
+                          // Set the dedupe gate synchronously (race-safe: the check
+                          // above and this assignment run with no await between them,
+                          // so two messages can't both pass the gate). Capture the
+                          // prior value so the page-failure path can ROLL IT BACK —
+                          // mirrors executeEscalation (escalation-action.ts). Without
+                          // the rollback, a transient Slack blip would permanently
+                          // suppress Lane A retries on this conversation, and Lane B
+                          // can't be relied on to recover it (its finder only scans
+                          // recently-created conversations' opening message, so a
+                          // later-in-conversation or older-conversation complaint
+                          // would fall through both lanes).
+                          const prevPriorityFiredAt = state.priorityFiredAt ?? null;
+                          state.priorityFiredAt = new Date().toISOString();
+                          saveSessions(accountSessions).catch(() => {});
+                          const priorityPayload = buildPrioritySlackPayload({
+                            conversationId: result.conversationId,
+                            reason: prioritySignal.reason,
+                            customerEmail: state.knownFacts?.accountEmail ?? null,
+                            customerMessage: result.body,
+                            workspaceId: account.workspaceId,
+                            mentionUserIds: account.priorityMentionUserIds ?? [],
+                          });
+                          // Fire-and-forget: never block or fail the customer reply
+                          // on the page.
+                          fetch(account.priorityEscalationSlackWebhook, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(priorityPayload),
+                          })
+                            .then(async (res) => {
+                              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                              // Page delivered — the gate stays set. Tag the
+                              // conversation for Lane B's cross-lane dedup; a tag
+                              // failure here is benign (at worst Lane B double-pages
+                              // later) and must NOT roll back the gate — we don't
+                              // re-page a customer Aaron was already notified about.
+                              try {
+                                await client.addTag(result.conversationId, PRIORITY_PAGED_TAG, account.botAdminId);
+                              } catch (tagErr) {
+                                log?.warn?.(
+                                  `[intercom:priority] tag failed after successful page conv=${result.conversationId}: ${tagErr} — Lane B may re-page`,
+                                );
+                              }
+                            })
+                            .catch((err) => {
+                              // The PAGE itself failed (fetch rejected or non-2xx).
+                              // Reopen the dedupe gate so the next [[PRIORITY]] turn
+                              // retries instead of being silently suppressed.
+                              state.priorityFiredAt = prevPriorityFiredAt;
+                              saveSessions(accountSessions).catch(() => {});
+                              log?.error?.(
+                                `[intercom:priority] page failed conv=${result.conversationId}: ${err} — dedupe gate rolled back, will retry on next message`,
+                              );
+                            });
+                          log?.warn?.(
+                            `[intercom:priority] paging conv=${result.conversationId} reason=${JSON.stringify(prioritySignal.reason ?? "")}`,
+                          );
+                        } else {
+                          // Token fired but no webhook configured (feature off).
+                          // Strip already happened; surface the gap so it's visible.
+                          log?.warn?.(
+                            `[intercom:priority] signal fired but priorityEscalationSlackWebhook unset conv=${result.conversationId} — no page sent`,
+                          );
+                        }
+                      }
+                      const stripped = stripConversationContext(customerText, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId });
                       // Outbound reasoning-preamble guard. The reasoning model
                       // (gpt-5.5/codex) intermittently writes its internal plan into
                       // the reply content -- a preamble, a `---`, then the real reply
@@ -775,24 +852,37 @@ export const intercomPlugin = createChatChannelPlugin({
                             `[intercom:reasoning-leak] [${tag}] conv=${result.conversationId} action=stripped markers=${JSON.stringify(guard.matchedMarkers)} sample=${JSON.stringify(guard.droppedSample ?? "")}`,
                           );
                         }
-                        try {
-                          const { messageId } = await client.replyToConversation({
-                            conversationId: result.conversationId,
-                            adminId: account.botAdminId,
-                            body: guard.body,
-                          });
-                          trackOutboundMessageId(messageId, state.outboundMessageIds);
-                          state.updatedAt = new Date().toISOString();
-                          log?.info?.(
-                            `[${tag}] replied conv=${result.conversationId} partId=${messageId || "<none>"} chunks=${bufferedChunks.length}`,
+                        if (guard.body.trim().length === 0) {
+                          // Nothing left to post after stripping control tokens
+                          // (e.g. Caroline emitted only `[[PRIORITY]]` with no
+                          // reply text — a doctrine slip). Post nothing rather
+                          // than a blank reply or a false
+                          // `[intercom:ALERT] flush failed`. Only claim a page
+                          // when the priority signal actually fired this turn.
+                          log?.warn?.(
+                            `[${tag}] empty reply after token strip — posting nothing conv=${result.conversationId}` +
+                              (prioritySignal.fired ? " (priority signal already paged)" : ""),
                           );
-                        } catch (err) {
-                          // Customer-facing delivery failure: grep-able alert prefix
-                          // so ops can wire Slack/Sentry on `[intercom:ALERT]`.
-                          // TODO(follow-up): POST to account.fallbackSlackSupervisionChannel.
-                          log?.error?.(
-                            `[intercom:ALERT] [${tag}] flush failed conv=${result.conversationId} chunks=${bufferedChunks.length} error=${err}`,
-                          );
+                        } else {
+                          try {
+                            const { messageId } = await client.replyToConversation({
+                              conversationId: result.conversationId,
+                              adminId: account.botAdminId,
+                              body: guard.body,
+                            });
+                            trackOutboundMessageId(messageId, state.outboundMessageIds);
+                            state.updatedAt = new Date().toISOString();
+                            log?.info?.(
+                              `[${tag}] replied conv=${result.conversationId} partId=${messageId || "<none>"} chunks=${bufferedChunks.length}`,
+                            );
+                          } catch (err) {
+                            // Customer-facing delivery failure: grep-able alert prefix
+                            // so ops can wire Slack/Sentry on `[intercom:ALERT]`.
+                            // TODO(follow-up): POST to account.fallbackSlackSupervisionChannel.
+                            log?.error?.(
+                              `[intercom:ALERT] [${tag}] flush failed conv=${result.conversationId} chunks=${bufferedChunks.length} error=${err}`,
+                            );
+                          }
                         }
                       }
                     } else if (bufferedChunks.length > 0 && !droppedMidStream) {

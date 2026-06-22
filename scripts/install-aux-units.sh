@@ -247,6 +247,49 @@ systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
 
+# ─── Intercom data-complaint backstop watchdog (Lane B) ──
+# Pages the priority channel (C0BBTAVP44X, @-tagging Aaron) when a customer
+# DATA complaint was NOT caught by Caroline's inline [[PRIORITY]] signal —
+# Aaron's 2026-06-22 ask for data complaints to reach him fast. Lane A (the
+# edge gateway / intercom plugin) is the real-time path; this is the every-10m
+# safety net for the ones she under-flagged or that failed to page. Skips any
+# conversation already tagged ai:priority-paged (Lane A's cross-lane dedup) and
+# keeps a local cooldown ledger so it never re-pages the same chat. Read-only
+# against Intercom; posts Slack only on a fresh, unpaged data complaint. Token:
+# MUSOAI_INTERCOM_TOKEN from the env files; devops botToken resolved in the
+# script (the bot must be a member of the priority channel to post there). See
+# scripts/intercom-data-complaint-watchdog.py.
+cat > /etc/systemd/system/intercom-data-complaint-watchdog.service << DATACWDSVC
+[Unit]
+Description=Intercom data-complaint backstop watchdog (pages the priority channel)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/intercom-data-complaint-watchdog.py --alert
+DATACWDSVC
+
+cat > /etc/systemd/system/intercom-data-complaint-watchdog.timer << DATACWDTMR
+[Unit]
+Description=Run the Intercom data-complaint backstop watchdog every 10m
+
+[Timer]
+OnBootSec=8min
+OnUnitActiveSec=10min
+Unit=intercom-data-complaint-watchdog.service
+
+[Install]
+WantedBy=timers.target
+DATACWDTMR
+
+systemctl daemon-reload
+wd=intercom-data-complaint-watchdog.timer
+systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
+systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
+log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
 # ─── Close resolved-ticket conversations (steady-state sync) ──
 # Silently closes Intercom conversations whose ClickUp ticket(s) are all
 # resolved AND where we replied last — keeps "ticket resolved" and "chat
