@@ -31,11 +31,15 @@ Usage:
 
 Env:
   MUSOAI_INTERCOM_TOKEN    required — Intercom Bearer token.
-  SLACK_BOT_TOKEN          optional — Slack bot token for --alert. If unset, the
-                           devops bot token is read from the openclaw config
-                           (channels.slack.accounts.devops.botToken), same as
-                           intercom-intake-watchdog.py. NOTE: the bot must be a
-                           member of PRIORITY_SLACK_CHANNEL to post there.
+  MUSO_SLACK_BOT_TOKEN_OPERATIONS  the Ops bot token (preferred — unifies the
+                           page identity with Lane A). Supplied via the unit's
+                           EnvironmentFile (/etc/openclaw/main.env). Override the
+                           var name with PRIORITY_SLACK_BOT_TOKEN_VAR.
+  SLACK_BOT_TOKEN          optional fallback Slack bot token for --alert. If
+                           neither is set, the devops bot token is read from the
+                           openclaw config (channels.slack.accounts.devops.botToken),
+                           same as intercom-intake-watchdog.py. NOTE: whichever
+                           bot is used must be a member of PRIORITY_SLACK_CHANNEL.
   OPENCLAW_CONFIG          optional — path to openclaw.json for token lookup.
   PRIORITY_SLACK_CHANNEL   optional — channel id; default C0BBTAVP44X.
   PRIORITY_MENTION_IDS     optional — comma-separated Slack user ids to @-tag;
@@ -254,7 +258,11 @@ def prune_ledger(ledger, now, cooldown_seconds):
 
 # ── Slack ─────────────────────────────────────────────────────────────────
 def resolve_slack_token():
-    tok = os.environ.get("SLACK_BOT_TOKEN")
+    # Prefer the Ops bot token so Lane B posts as the same identity as Lane A's
+    # inline chat.postMessage (both "Ops"). The env var name is overridable; the
+    # token is supplied via the unit's EnvironmentFile (/etc/openclaw/main.env).
+    bot_var = os.environ.get("PRIORITY_SLACK_BOT_TOKEN_VAR", "MUSO_SLACK_BOT_TOKEN_OPERATIONS")
+    tok = os.environ.get(bot_var) or os.environ.get("SLACK_BOT_TOKEN")
     if tok:
         return tok
     candidates = [os.environ.get("OPENCLAW_CONFIG"),

@@ -789,7 +789,16 @@ export const intercomPlugin = createChatChannelPlugin({
                       const prioritySignal = detectPrioritySignal(joinedForReply);
                       const customerText = stripPrioritySentinel(joined);
                       if (prioritySignal.fired && !state.priorityFiredAt) {
-                        if (account.priorityEscalationSlackWebhook) {
+                        // Post the page as the Ops bot via Slack chat.postMessage.
+                        // The token is read from the gateway env var named by
+                        // PRIORITY_SLACK_BOT_TOKEN_VAR (default
+                        // MUSO_SLACK_BOT_TOKEN_OPERATIONS) — same override mechanism
+                        // as the Lane B watchdog, and NEVER from config so no secret
+                        // lands in openclaw-edge.json.
+                        const priorityTokenEnv = process.env.PRIORITY_SLACK_BOT_TOKEN_VAR || "MUSO_SLACK_BOT_TOKEN_OPERATIONS";
+                        const priorityBotToken = process.env[priorityTokenEnv]?.trim();
+                        const priorityChannel = account.prioritySlackChannelId?.trim();
+                        if (priorityChannel && priorityBotToken) {
                           // Set the dedupe gate synchronously (race-safe: the check
                           // above and this assignment run with no await between them,
                           // so two messages can't both pass the gate). Capture the
@@ -814,13 +823,28 @@ export const intercomPlugin = createChatChannelPlugin({
                           });
                           // Fire-and-forget: never block or fail the customer reply
                           // on the page.
-                          fetch(account.priorityEscalationSlackWebhook, {
+                          fetch("https://slack.com/api/chat.postMessage", {
                             method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify(priorityPayload),
+                            headers: {
+                              "Content-Type": "application/json",
+                              Authorization: `Bearer ${priorityBotToken}`,
+                            },
+                            body: JSON.stringify({
+                              channel: priorityChannel,
+                              text: priorityPayload.text,
+                              blocks: priorityPayload.blocks,
+                              unfurl_links: false,
+                              unfurl_media: false,
+                            }),
                           })
                             .then(async (res) => {
-                              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                              // chat.postMessage returns HTTP 200 with {ok:false,error}
+                              // on a logical failure (invalid_auth, not_in_channel, …),
+                              // so the JSON body must be checked, not just res.ok.
+                              const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+                              if (!res.ok || !data.ok) {
+                                throw new Error(data.error || `HTTP ${res.status}`);
+                              }
                               // Page delivered — the gate stays set. Tag the
                               // conversation for Lane B's cross-lane dedup; a tag
                               // failure here is benign (at worst Lane B double-pages
@@ -835,9 +859,9 @@ export const intercomPlugin = createChatChannelPlugin({
                               }
                             })
                             .catch((err) => {
-                              // The PAGE itself failed (fetch rejected or non-2xx).
-                              // Reopen the dedupe gate so the next [[PRIORITY]] turn
-                              // retries instead of being silently suppressed.
+                              // The PAGE itself failed (fetch rejected or Slack
+                              // returned ok:false). Reopen the dedupe gate so the next
+                              // [[PRIORITY]] turn retries instead of being suppressed.
                               state.priorityFiredAt = prevPriorityFiredAt;
                               saveSessions(accountSessions).catch(() => {});
                               log?.error?.(
@@ -845,13 +869,15 @@ export const intercomPlugin = createChatChannelPlugin({
                               );
                             });
                           log?.warn?.(
-                            `[intercom:priority] paging conv=${result.conversationId} reason=${JSON.stringify(prioritySignal.reason ?? "")}`,
+                            `[intercom:priority] paging conv=${result.conversationId} as ${priorityTokenEnv} reason=${JSON.stringify(prioritySignal.reason ?? "")}`,
                           );
                         } else {
-                          // Token fired but no webhook configured (feature off).
-                          // Strip already happened; surface the gap so it's visible.
+                          // Token fired but the page isn't fully configured: no channel
+                          // id, or the bot-token env var is absent from the gateway env.
+                          // The token was already stripped from the reply; surface the
+                          // gap (never log the token value — only presence + env name).
                           log?.warn?.(
-                            `[intercom:priority] signal fired but priorityEscalationSlackWebhook unset conv=${result.conversationId} — no page sent`,
+                            `[intercom:priority] signal fired but page not configured: channel=${priorityChannel ? "set" : "unset"}, bot-token env ${priorityTokenEnv}=${priorityBotToken ? "found" : "NOT_FOUND in gateway env"} conv=${result.conversationId} — no page sent`,
                           );
                         }
                       }

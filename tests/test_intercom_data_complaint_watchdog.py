@@ -110,6 +110,43 @@ class SlackEscape(unittest.TestCase):
         self.assertEqual(wd.slack_escape("<!channel>"), "&lt;!channel&gt;")
 
 
+class ResolveSlackToken(unittest.TestCase):
+    # MY_BOT is set by test_var_name_is_overridable — include it so setUp/tearDown
+    # save+restore it and it never leaks into the process env for later tests.
+    KEYS = ("MUSO_SLACK_BOT_TOKEN_OPERATIONS", "SLACK_BOT_TOKEN",
+            "PRIORITY_SLACK_BOT_TOKEN_VAR", "OPENCLAW_CONFIG", "MY_BOT")
+
+    def setUp(self):
+        import os
+        self._saved = {k: os.environ.pop(k, None) for k in self.KEYS}
+
+    def tearDown(self):
+        import os
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_prefers_ops_bot_token(self):
+        # Lane B unifies on the Ops bot identity with Lane A.
+        import os
+        os.environ["MUSO_SLACK_BOT_TOKEN_OPERATIONS"] = "xoxb-ops"
+        os.environ["SLACK_BOT_TOKEN"] = "xoxb-other"
+        self.assertEqual(wd.resolve_slack_token(), "xoxb-ops")
+
+    def test_falls_back_to_slack_bot_token(self):
+        import os
+        os.environ["SLACK_BOT_TOKEN"] = "xoxb-fallback"
+        self.assertEqual(wd.resolve_slack_token(), "xoxb-fallback")
+
+    def test_var_name_is_overridable(self):
+        import os
+        os.environ["PRIORITY_SLACK_BOT_TOKEN_VAR"] = "MY_BOT"
+        os.environ["MY_BOT"] = "xoxb-custom"
+        self.assertEqual(wd.resolve_slack_token(), "xoxb-custom")
+
+
 class BuildMessage(unittest.TestCase):
     def test_renders_trusted_mention_and_escapes_snippet(self):
         cands = [{"id": "9", "email": "u@x.com", "matched": "credits/wrong",

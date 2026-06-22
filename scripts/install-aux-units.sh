@@ -255,10 +255,11 @@ log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
 # safety net for the ones she under-flagged or that failed to page. Skips any
 # conversation already tagged ai:priority-paged (Lane A's cross-lane dedup) and
 # keeps a local cooldown ledger so it never re-pages the same chat. Read-only
-# against Intercom; posts Slack only on a fresh, unpaged data complaint. Token:
-# MUSOAI_INTERCOM_TOKEN from the env files; devops botToken resolved in the
-# script (the bot must be a member of the priority channel to post there). See
-# scripts/intercom-data-complaint-watchdog.py.
+# against Intercom; posts Slack only on a fresh, unpaged data complaint. Tokens:
+# MUSOAI_INTERCOM_TOKEN + the Ops bot token MUSO_SLACK_BOT_TOKEN_OPERATIONS come
+# from the env files (main.env carries the bot token — same identity as Lane A's
+# inline page). The Ops bot must be a member of the priority channel to post
+# there. See scripts/intercom-data-complaint-watchdog.py.
 cat > /etc/systemd/system/intercom-data-complaint-watchdog.service << DATACWDSVC
 [Unit]
 Description=Intercom data-complaint backstop watchdog (pages the priority channel)
@@ -268,6 +269,7 @@ After=network-online.target
 Type=oneshot
 EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/edge.env
+EnvironmentFile=-/etc/openclaw/main.env
 ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/intercom-data-complaint-watchdog.py --alert
 DATACWDSVC
 

@@ -59,7 +59,7 @@ export function resolveIntercomAccount(
       botAdminId: "",
       defaultInboxId: "",
       fallbackSlackSupervisionChannel: "",
-      priorityEscalationSlackWebhook: "",
+      prioritySlackChannelId: "",
       priorityMentionUserIds: [],
       fallbackAcknowledgement: DEFAULT_FALLBACK_ACK,
       requireMappedHumanAdmin: true,
@@ -101,7 +101,7 @@ export function resolveIntercomAccount(
     botAdminId: account.botAdminId,
     defaultInboxId: account.defaultInboxId ?? "",
     fallbackSlackSupervisionChannel: account.fallbackSlackSupervisionChannel ?? "",
-    priorityEscalationSlackWebhook: account.priorityEscalationSlackWebhook ?? "",
+    prioritySlackChannelId: account.prioritySlackChannelId ?? "",
     priorityMentionUserIds: Array.isArray(account.priorityMentionUserIds)
       ? account.priorityMentionUserIds.filter((id): id is string => typeof id === "string" && id.length > 0)
       : [],

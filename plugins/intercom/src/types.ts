@@ -170,13 +170,16 @@ export interface IntercomAccountConfig {
   botAdminId: string;
   defaultInboxId: string;
   fallbackSlackSupervisionChannel: string;
-  // Slack incoming-webhook URL for the fast priority page (Lane A). When a
-  // customer complains about a data issue and Caroline emits the
-  // `[[PRIORITY]]` token, the channel layer posts a page here tagging
-  // `priorityMentionUserIds`. Empty string = feature off (the token is still
-  // stripped from the reply; a one-line warning is logged so the gap is
-  // visible). Mirrors how fallbackSlackSupervisionChannel is stored.
-  priorityEscalationSlackWebhook?: string;
+  // Fast priority page (Lane A). When a customer complains about a data issue
+  // and Caroline emits the `[[PRIORITY]]` token, the channel layer posts a page
+  // to `prioritySlackChannelId` via Slack chat.postMessage as the "Ops" bot
+  // (token MUSO_SLACK_BOT_TOKEN_OPERATIONS, overridable via the
+  // PRIORITY_SLACK_BOT_TOKEN_VAR env var — symmetric with the Lane B watchdog).
+  // The bot token is read from the gateway's environment, NEVER stored in config,
+  // so no secret lands in openclaw-edge.json. Feature is OFF (token still stripped
+  // from the reply; a one-line warning logged) when the channel id is unset OR the
+  // bot-token env var is absent from the gateway env at runtime.
+  prioritySlackChannelId?: string;
   // Slack user IDs to @-mention in the priority page (e.g. ["U7RP6HKUZ"] for
   // Aaron). Trusted config — rendered as real mentions, never escaped.
   priorityMentionUserIds?: string[];
