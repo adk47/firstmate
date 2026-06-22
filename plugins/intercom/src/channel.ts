@@ -816,7 +816,13 @@ export const intercomPlugin = createChatChannelPlugin({
                           const priorityPayload = buildPrioritySlackPayload({
                             conversationId: result.conversationId,
                             reason: prioritySignal.reason,
-                            customerEmail: state.knownFacts?.accountEmail ?? null,
+                            // Prefer the verified identity (Intercom + admin-API
+                            // enrichment) over the regex-mined account email, so
+                            // the page names who complained instead of "unknown".
+                            customerEmail:
+                              state.enrichment?.verifiedEmail ?? state.knownFacts?.accountEmail ?? null,
+                            customerName:
+                              state.enrichment?.verifiedName ?? state.enrichment?.snapshot?.name ?? null,
                             customerMessage: result.body,
                             workspaceId: account.workspaceId,
                             mentionUserIds: account.priorityMentionUserIds ?? [],

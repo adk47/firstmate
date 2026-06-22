@@ -41,16 +41,29 @@ export interface PrioritySlackArgs {
   conversationId: string;
   reason: string | null;
   customerEmail: string | null;
+  // Verified customer name, when known (enrichment). Rendered alongside the
+  // email so the page names who complained without anyone opening the thread.
+  customerName?: string | null;
   customerMessage: string;
   workspaceId: string;
   mentionUserIds: string[];
-  // When true, label the page as a backstop catch (used only by the Lane B
-  // watchdog payload, not the inline path). Inline pages omit it.
-  viaBackstop?: boolean;
+}
+
+/**
+ * Render the customer identity line. Prefer `email (name)` when both are known,
+ * fall back to whichever is present, else a nudge to open the thread. Both
+ * fields are untrusted (a customer controls their Intercom name/email), so each
+ * is escaped at the Slack boundary.
+ */
+function buildCustomerIdentity(email: string | null, name: string | null | undefined): string {
+  const safeEmail = email ? escapeSlackMrkdwn(email) : "";
+  const safeName = name ? escapeSlackMrkdwn(name) : "";
+  if (safeEmail && safeName) return `${safeEmail} (${safeName})`;
+  return safeEmail || safeName || "_unknown — open the conversation_";
 }
 
 export function buildPrioritySlackPayload(args: PrioritySlackArgs): { text: string; blocks: unknown[] } {
-  const { conversationId, reason, customerEmail, customerMessage, workspaceId, mentionUserIds } = args;
+  const { conversationId, reason, customerEmail, customerName, customerMessage, workspaceId, mentionUserIds } = args;
   const url = intercomDeeplink(workspaceId, conversationId);
   const mention = buildMention(mentionUserIds);
 
@@ -58,7 +71,7 @@ export function buildPrioritySlackPayload(args: PrioritySlackArgs): { text: stri
   const trimmedMsg =
     customerMessage.length > SNIPPET_MAX ? `${customerMessage.slice(0, SNIPPET_MAX)}…` : customerMessage;
   const safeMsg = escapeSlackMrkdwn(trimmedMsg) || "_(no message text)_";
-  const safeEmail = customerEmail ? escapeSlackMrkdwn(customerEmail) : "unknown";
+  const identity = buildCustomerIdentity(customerEmail, customerName);
 
   const headerText = "🚨 Priority — customer data complaint";
   const lead = mention ? `${mention} ` : "";
@@ -76,17 +89,25 @@ export function buildPrioritySlackPayload(args: PrioritySlackArgs): { text: stri
         type: "section",
         text: {
           type: "mrkdwn",
+          // The deeplink is a MARKDOWN LINK, not a Block Kit action button:
+          // action buttons require app interactivity and Slack consumes them
+          // after one click ("selected by @user"), making the link single-use.
+          // A markdown link is pure navigation — every teammate can open it,
+          // every time. Mirrors the Lane B watchdog page.
           text:
-            `${lead}a customer is complaining about a data issue — flagging straight to you.\n` +
-            `*What:* ${safeReason}\n` +
-            `*Customer:* ${safeEmail}\n` +
-            `*Their message:* ${safeMsg}`,
+            `${lead}— flagging straight to you.\n` +
+            `*Issue:* ${safeReason}\n` +
+            `*Customer:* ${identity}\n` +
+            `*They said:* ${safeMsg}\n` +
+            `<${url}|Open in Intercom →>`,
         },
       },
       {
-        type: "actions",
+        // Lightweight claim convention (replaces the old button's accidental
+        // "selected by @user" signal): whoever picks it up reacts ✅.
+        type: "context",
         elements: [
-          { type: "button", text: { type: "plain_text", text: "Open conversation" }, url },
+          { type: "mrkdwn", text: "✅ react when you've got it" },
         ],
       },
     ],

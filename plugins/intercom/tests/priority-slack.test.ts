@@ -36,12 +36,29 @@ describe("buildPrioritySlackPayload", () => {
     expect(sectionText(p)).toContain("<@U7RP6HKUZ>");
   });
 
-  it("includes the conversation deeplink and a button", () => {
+  it("renders the deeplink as a perpetual markdown link, not a single-use button", () => {
     const p = buildPrioritySlackPayload(base);
     expect(p.text).toContain("ws_1");
     expect(p.text).toContain("123");
-    const actions = (p.blocks as any[]).find((b) => b.type === "actions");
-    expect(actions.elements[0].url).toContain("123");
+    // The link MUST be a markdown link in the section, never a Block Kit action
+    // button: Slack consumes action buttons after one click ("selected by
+    // @user"), so a button would make the conversation link single-use. A
+    // markdown link is pure navigation — every teammate can open it, every time.
+    const text = sectionText(p);
+    expect(text).toMatch(/<https:\/\/app\.intercom\.com\/[^|]*123[^|]*\|/);
+    expect((p.blocks as any[]).some((b) => b.type === "actions")).toBe(false);
+  });
+
+  it("names the customer as `email (name)` when both are known", () => {
+    const p = buildPrioritySlackPayload({ ...base, customerName: "Luis Marrero" });
+    expect(sectionText(p)).toContain("user@example.com (Luis Marrero)");
+  });
+
+  it("shows the email alone when no name is known", () => {
+    const p = buildPrioritySlackPayload({ ...base, customerName: null });
+    const text = sectionText(p);
+    expect(text).toContain("user@example.com");
+    expect(text).not.toContain("user@example.com (");
   });
 
   it("escapes an injection attempt in the customer message", () => {
@@ -62,6 +79,18 @@ describe("buildPrioritySlackPayload", () => {
     const text = sectionText(p);
     expect(text).toContain("&lt;@U0AL36NADEY&gt;");
     // The only real mention rendered is the trusted one from config.
+    expect((text.match(/<@U/g) ?? []).length).toBe(1);
+  });
+
+  it("escapes an injection attempt in the customer name", () => {
+    // The customer controls their Intercom display name — it's untrusted and
+    // must be escaped like the message/reason. (Easy to miss: the old code only
+    // escaped the email, so the name is new attack surface.)
+    const p = buildPrioritySlackPayload({ ...base, customerName: "<!channel> Ann" });
+    const text = sectionText(p);
+    expect(text).toContain("&lt;!channel&gt;");
+    expect(text).not.toContain("<!channel>");
+    // Still the single trusted config mention — the injected name adds no ping.
     expect((text.match(/<@U/g) ?? []).length).toBe(1);
   });
 
