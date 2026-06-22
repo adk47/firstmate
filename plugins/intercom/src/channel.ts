@@ -29,6 +29,7 @@ import {
 import { isIntentionalNoReply, stripNoReplySentinel } from "./no-reply.js";
 import { detectPrioritySignal, stripPrioritySentinel, PRIORITY_PAGED_TAG } from "./priority-signal.js";
 import { buildPrioritySlackPayload } from "./priority-slack.js";
+import { stripModelFallbackNotice, findModelFallbackNotices, isOnlyModelFallbackNotice } from "./sanitize-model-fallback.js";
 import { createOpenRouterJudge } from "./judge.js";
 import { createClickupTicket } from "./clickup.js";
 import {
@@ -673,6 +674,32 @@ export const intercomPlugin = createChatChannelPlugin({
                       extraContext: mediaExtraContext,
                       deliver: async (replyPayload: any) => {
                         const text = replyPayload?.text ?? replyPayload?.body ?? "";
+                        // OpenClaw emits its model-fallback notice ("↪️ Model
+                        // Fallback: …") as its own reply payload flagged
+                        // isFallbackNotice, prepended ahead of the real reply.
+                        // That is operational telemetry, not customer content —
+                        // never buffer it for a support customer (it leaked to
+                        // one on 2026-06-19). It stays visible in the main/Slack
+                        // gateway, which does not route through this plugin.
+                        //
+                        // Drop a standalone notice chunk whether or not the
+                        // runtime preserved the isFallbackNotice flag onto this
+                        // payload (the codex runtime may not): the content check
+                        // catches the flag-less case, the flag catches a notice
+                        // the regex might not. Either way the notice never enters
+                        // bufferedChunks, so the no-reply / silent-dispatch logic
+                        // below sees an honest customer-facing chunk count — a
+                        // notice-only turn reads as zero output (correctly pages),
+                        // not as a real reply, regardless of which signal fired.
+                        // A chunk that merely PREPENDS a notice to a real reply is
+                        // NOT dropped here (real text survives); the flush-time
+                        // backstop strips the notice from the joined body instead.
+                        if (replyPayload?.isFallbackNotice || isOnlyModelFallbackNotice(text)) {
+                          log?.error?.(
+                            `[intercom:model-fallback] [${tag}] dropped fallback notice chunk conv=${result.conversationId} via=${replyPayload?.isFallbackNotice ? "flag" : "content"} notice=${JSON.stringify(String(text).slice(0, 200))}`,
+                          );
+                          return;
+                        }
                         if (!text) {
                           log?.warn?.(`[${tag}] deliver called with empty reply for conv=${result.conversationId}`);
                           return;
@@ -712,7 +739,26 @@ export const intercomPlugin = createChatChannelPlugin({
                     // Re-check `canAgentReply` here to catch state flips that
                     // landed between the last `deliver` call and dispatch resolve
                     // (e.g., a human took over in the final ms of generation).
-                    const joinedForReply = joinDeliveryChunks(bufferedChunks);
+                    const rawJoinedForReply = joinDeliveryChunks(bufferedChunks);
+                    // Backstop strip of OpenClaw's model-fallback notice. The
+                    // deliver callback already drops a STANDALONE notice chunk
+                    // (by flag or by content), so by here the only notice that can
+                    // remain is one the gateway PREPENDED into the same chunk as a
+                    // real reply. Strip it from the joined body, BEFORE the
+                    // no-reply / reasoning-leak passes, so (a) the customer never
+                    // sees gateway internals and (b) a notice prepended to a
+                    // [[NO_REPLY]] turn isn't mistaken for a real reply. Log the
+                    // exact notice so the underlying model degradation stays
+                    // observable internally.
+                    const fallbackNotices = findModelFallbackNotices(rawJoinedForReply);
+                    if (fallbackNotices) {
+                      log?.error?.(
+                        `[intercom:model-fallback] [${tag}] stripped fallback notice from customer reply conv=${result.conversationId} notice=${JSON.stringify(fallbackNotices.join(" | "))}`,
+                      );
+                    }
+                    const joinedForReply = fallbackNotices
+                      ? stripModelFallbackNotice(rawJoinedForReply)
+                      : rawJoinedForReply;
                     if (bufferedChunks.length > 0 && canAgentReply(state) && isIntentionalNoReply(joinedForReply)) {
                       // Caroline deliberately chose to stay quiet (SOUL.md
                       // "Reading the room") -- e.g. the customer just said

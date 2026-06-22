@@ -8,6 +8,7 @@ import {
   stripConversationContext,
 } from "../src/channel.js";
 import { canAgentReply } from "../src/handoff.js";
+import { stripModelFallbackNotice } from "../src/sanitize-model-fallback.js";
 
 describe("parseConversationIdFromTarget", () => {
   it("extracts conversationId from full session key", () => {
@@ -146,6 +147,18 @@ describe("joinDeliveryChunks", () => {
     expect(joinDeliveryChunks(["Line 1\n  indented", "Line 2"])).toBe(
       "Line 1\n  indented\n\nLine 2",
     );
+  });
+
+  it("flush sequence strips a buffered model-fallback notice off the front", () => {
+    // Mirrors the channel.ts flush: if the isFallbackNotice flag did NOT reach
+    // the deliver callback, the gateway's fallback notice is buffered as its own
+    // chunk ahead of the real reply. join -> stripModelFallbackNotice (the exact
+    // backstop wiring) must yield the real reply only, never the gateway notice.
+    const notice =
+      "↪️ Model Fallback: openrouter/openai/gpt-5.4-mini (selected openai/gpt-5.5; auth)";
+    const reply = "Hi Nitin – I've flagged this for review.";
+    const joined = joinDeliveryChunks([notice, reply]);
+    expect(stripModelFallbackNotice(joined)).toBe(reply);
   });
 });
 
