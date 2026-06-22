@@ -40,7 +40,13 @@ from datetime import datetime
 
 PING_USER = "U0AL36NADEY"           # pinged on the action block ONLY when P0 > 0
 DEFAULT_CHANNEL = "C0ANM0PN9L5"     # cs_chats
-CONV_URL = "https://app.intercom.com/a/inboxes/all/conversations/"
+# Canonical Intercom conversation deep-link prefix. The id is appended directly.
+# Workspace-scoped (the inbox/<ws>/inbox/conversation/<id> form) — the legacy
+# inboxes/all/conversations/<id> form 404s. The default workspace + env-override
+# mirror scripts/intercom-data-complaint-watchdog.py, and MUST stay byte-for-byte
+# in sync with linkify-convs.sh (both run in the same text pipeline).
+WORKSPACE_ID = os.environ.get("INTERCOM_WORKSPACE_ID", "dwjzhcge")
+CONV_URL = f"https://app.intercom.com/a/inbox/{WORKSPACE_ID}/inbox/conversation/"
 # Mirrors linkify-convs.sh: lookbehind excludes 0-9 (longer digit runs),
 # / (already-inside-a-URL) and | (already a link label) so the pass is
 # idempotent; the only 15-16 digit tokens in the digest are conversation ids.

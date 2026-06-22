@@ -15,6 +15,11 @@ set -euo pipefail
 : "${CAROLINE_BOT_ADMIN_ID:?CAROLINE_BOT_ADMIN_ID required}"
 : "${WORKDIR:?WORKDIR required}"
 
+# Canonical workspace-scoped Intercom deep-link (the legacy
+# inboxes/all/conversations/<id> form 404s). Default + override mirror
+# render-digest.py / linkify-convs.sh and the data-complaint watchdog.
+WORKSPACE_ID="${INTERCOM_WORKSPACE_ID:-dwjzhcge}"
+
 # shellcheck source=lib/intercom-request.sh disable=SC1091
 . "$(dirname "$0")/lib/intercom-request.sh"
 
@@ -38,9 +43,9 @@ while IFS= read -r id; do
     # (customer assumed still waiting) so the digest still surfaces it, and keep
     # going rather than aborting the whole run on one bad conversation.
     echo "check-escalated: GET $id failed; emitting conservative open row" >&2
-    jq -nc --arg conv "$id" \
+    jq -nc --arg conv "$id" --arg ws "$WORKSPACE_ID" \
       '{conv: $conv, human_replied: false,
-        url: ("https://app.intercom.com/a/inboxes/all/conversations/" + $conv)}' >> "$OUTPUT"
+        url: ("https://app.intercom.com/a/inbox/" + $ws + "/inbox/conversation/" + $conv)}' >> "$OUTPUT"
     continue
   }
   # human_replied = a non-Caroline admin replied AFTER the customer's most recent
@@ -68,9 +73,9 @@ while IFS= read -r id; do
         end )
     | tostring' 2>/dev/null || true)
   [ "$human_replied" = "true" ] || human_replied=false
-  jq -nc --arg conv "$id" --argjson human "$human_replied" \
+  jq -nc --arg conv "$id" --argjson human "$human_replied" --arg ws "$WORKSPACE_ID" \
     '{conv: $conv, human_replied: $human,
-      url: ("https://app.intercom.com/a/inboxes/all/conversations/" + $conv)}' >> "$OUTPUT"
+      url: ("https://app.intercom.com/a/inbox/" + $ws + "/inbox/conversation/" + $conv)}' >> "$OUTPUT"
 done <<< "$ids"
 
 echo "check-escalated: wrote $(wc -l < "$OUTPUT") records"

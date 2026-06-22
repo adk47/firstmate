@@ -75,8 +75,8 @@ GUARD='Reasoning-leak guard: healthy - 0 caught, 0 missed in shipped replies.'
   run bash -c 'printf "%s" "$1" | "$2"/redact-output.sh | "$2"/linkify-convs.sh | "$2"/assert-digest-contract.sh' _ "$digest" "$SCRIPTS_DIR"
   [ "$status" -eq 0 ]
   # every conv id became a clickable Slack link
-  [[ "$output" == *"<https://app.intercom.com/a/inboxes/all/conversations/215474457437629|215474457437629>"* ]]
-  [[ "$output" == *"<https://app.intercom.com/a/inboxes/all/conversations/215474588577095|215474588577095>"* ]]
+  [[ "$output" == *"<https://app.intercom.com/a/inbox/dwjzhcge/inbox/conversation/215474457437629|215474457437629>"* ]]
+  [[ "$output" == *"<https://app.intercom.com/a/inbox/dwjzhcge/inbox/conversation/215474588577095|215474588577095>"* ]]
   # header contract still satisfied (emoji-prefixed score labels still match)
   [[ "$output" == *"111 convs"* ]]
   [[ "$output" == *"Voice 5"* ]]

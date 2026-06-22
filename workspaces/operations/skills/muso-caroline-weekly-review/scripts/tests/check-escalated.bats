@@ -34,7 +34,7 @@ EOF
   run "$SCRIPTS_DIR/check-escalated.sh"
   [ "$status" -eq 0 ]
   [ "$(jq -r '.human_replied' "$WORKDIR/escalated-status.jsonl")" = "false" ]
-  [ "$(jq -r '.url' "$WORKDIR/escalated-status.jsonl")" = "https://app.intercom.com/a/inboxes/all/conversations/AAA" ]
+  [ "$(jq -r '.url' "$WORKDIR/escalated-status.jsonl")" = "https://app.intercom.com/a/inbox/dwjzhcge/inbox/conversation/AAA" ]
 }
 
 @test "Caroline's own admin part does NOT count as a human reply" {
@@ -102,7 +102,7 @@ EOF
   [ "$(wc -l < "$WORKDIR/escalated-status.jsonl")" -eq 1 ]
   [ "$(jq -r '.conv' "$WORKDIR/escalated-status.jsonl")" = "FAIL" ]
   [ "$(jq -r '.human_replied' "$WORKDIR/escalated-status.jsonl")" = "false" ]
-  [ "$(jq -r '.url' "$WORKDIR/escalated-status.jsonl")" = "https://app.intercom.com/a/inboxes/all/conversations/FAIL" ]
+  [ "$(jq -r '.url' "$WORKDIR/escalated-status.jsonl")" = "https://app.intercom.com/a/inbox/dwjzhcge/inbox/conversation/FAIL" ]
 }
 
 @test "checks only escalated rows (ignores stripped + non-reasoning audit rows)" {

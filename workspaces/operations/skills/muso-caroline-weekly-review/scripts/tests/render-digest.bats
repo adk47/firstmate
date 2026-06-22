@@ -52,9 +52,15 @@ render_text() {  # $1 = digest file
   render_text "$WORKDIR/dup.json"
   [ "$status" -eq 0 ]
   # the id appears ONLY inside the link URL, never as standalone prose
-  [[ "$output" == *"<https://app.intercom.com/a/inboxes/all/conversations/215474000000002|1>"* ]]
+  [[ "$output" == *"<https://app.intercom.com/a/inbox/dwjzhcge/inbox/conversation/215474000000002|1>"* ]]
   [[ "$output" != *"conv 215474000000002"* ]]
   [[ "$output" != *"215474000000002 today"* ]]
+}
+
+@test "INTERCOM_WORKSPACE_ID overrides the workspace in the deep-link prefix" {
+  output="$(INTERCOM_WORKSPACE_ID=zzzz "$SCRIPTS_DIR/render-digest.py" --text < "$WORKDIR/digest-daily.json")"
+  [[ "$output" == *"https://app.intercom.com/a/inbox/zzzz/inbox/conversation/215474000000002"* ]]
+  [[ "$output" != *"/inbox/dwjzhcge/"* ]]
 }
 
 @test "evidence links are numbered and capped at 3 with a +N overflow" {
