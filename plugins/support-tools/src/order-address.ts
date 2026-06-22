@@ -146,3 +146,93 @@ export function toStripeAddress(input: ProdigiAddressInput): StripeAddress {
   if (val(input.country)) out.country = val(input.country).toUpperCase();
   return out;
 }
+
+// --- Recipient tax ID (Mexico RFC / CURP) -----------------------------------
+//
+// Since 1 Jan 2025 Mexican customs (SAT, art. 3.7.5) requires the *recipient's*
+// RFC or CURP on imports; without it the parcel is held at customs and returned.
+// Prodigi's recipient payload has no dedicated tax field, so the backend embeds
+// the value into the recipient address it sends Prodigi (see the order tax-id
+// backend spec). This helper normalizes + shape-checks what Caroline collects
+// before it rides along in the `PUT /admin/orders/:id` body as `taxId`/`taxIdType`.
+//
+//   RFC  — 12 (legal entities) or 13 (individuals) alphanumeric chars
+//   CURP — 18 alphanumeric chars
+//
+// We strip spaces/dots/dashes, upper-case, and require a valid RFC/CURP length:
+// an obviously-malformed id is rejected because applying a bad one is no better
+// than applying none (it still bounces at customs). Type is inferred from length
+// (RFC 12–13, CURP 18); an explicit tax_id_type may confirm but not override it —
+// a mismatch is rejected, matching the backend's length-per-type validation.
+export type TaxIdType = "rfc" | "curp";
+
+export interface TaxIdResult {
+  ok: boolean;
+  value: string; // normalized: upper-case, alphanumeric only
+  type: TaxIdType | null; // inferred/provided; null if indeterminate
+  reason?: string; // set when ok === false
+  warnings: string[];
+}
+
+// RFC/CURP are A–Z and 0–9, PLUS `Ñ` (appears in the name portion of an
+// individual RFC/CURP) and `&` (appears in a company RFC's name initials). Both
+// are legitimate id characters, so the charset must allow them or valid ids get
+// false-rejected. NB: core-backend currently strips non-`[A-Z0-9]` (mangling
+// Ñ/&) — flagged for the backend in the order tax-id spec.
+const TAXID_CHAR_RE = /^[A-Z0-9Ñ&]{10,18}$/;
+
+export function normalizeTaxId(rawValue: unknown, rawType?: unknown): TaxIdResult {
+  // val() does the string type-guard + trim (the trailing whitespace it trims is
+  // also removed by the replace below — kept for consistency with the other
+  // validators in this file); strip inner spaces/dots/dashes and upper-case.
+  const value = val(rawValue).replace(/[\s.\-]/g, "").toUpperCase();
+  const warnings: string[] = [];
+
+  if (!value) return { ok: false, value: "", type: null, reason: "empty", warnings };
+  if (!TAXID_CHAR_RE.test(value)) {
+    return {
+      ok: false,
+      value,
+      type: null,
+      reason: "must be 10–18 letters/digits (Mexico RFC is 12–13, CURP is 18)",
+      warnings,
+    };
+  }
+
+  // Type is determined by length: RFC is 12–13 chars, CURP is 18.
+  const type: TaxIdType | null =
+    value.length === 18 ? "curp" : value.length === 12 || value.length === 13 ? "rfc" : null;
+
+  // An explicit tax_id_type may CONFIRM the length-inferred type but never override
+  // it: a declared type that disagrees with the length is rejected, not forwarded.
+  // The backend applies the same length-per-type rule (it nulls a type that
+  // contradicts the value's shape), so overriding here would only produce a false
+  // "saved" before the backend drops the id.
+  const provided = typeof rawType === "string" ? rawType.trim().toLowerCase() : "";
+  if (provided && provided !== "rfc" && provided !== "curp") {
+    warnings.push(`unrecognized tax_id_type "${provided}" — expected rfc or curp; using the length-inferred type`);
+  } else if ((provided === "rfc" || provided === "curp") && provided !== type) {
+    return {
+      ok: false,
+      value,
+      type: null,
+      reason: `tax_id_type "${provided}" doesn't match the id's length (RFC is 12–13 chars, CURP is 18) — double-check the id and its type`,
+      warnings,
+    };
+  }
+
+  // No valid length (a 10–11 or 14–17 char value) is neither RFC nor CURP — reject
+  // it rather than forward a typeless id the backend can't classify and would
+  // silently drop (a false "saved" to the customer).
+  if (!type) {
+    return {
+      ok: false,
+      value,
+      type: null,
+      reason: "couldn't tell if this is an RFC (12–13 chars) or a CURP (18 chars) — please double-check the id",
+      warnings,
+    };
+  }
+
+  return { ok: true, value, type, warnings };
+}

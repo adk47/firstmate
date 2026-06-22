@@ -32,6 +32,15 @@ function unwrap(body: unknown): Record<string, unknown> {
   return inner && typeof inner === "object" ? inner : {};
 }
 
+// Surface only whether a customs tax id (Mexico RFC/CURP) is on file + its type —
+// never the value (no reason to echo a stored tax id to the support agent).
+function taxIdMeta(raw: unknown): { present: boolean; type?: string | null } {
+  const t = raw as Record<string, unknown> | null | undefined;
+  return t && typeof t === "object"
+    ? { present: t.present === true, type: (t.type as string) ?? null }
+    : { present: false };
+}
+
 export function createOrderLookupTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
   const { adminClient, rateLimiter, sessionId } = deps;
 
@@ -85,6 +94,9 @@ export function createOrderLookupTool(deps: ToolDeps): AgentTool<typeof Paramete
                   trackingUrl: shipment.trackingUrl ?? null,
                 }
               : null,
+            // Whether a customs tax id (Mexico RFC/CURP) is already on file, so
+            // Caroline can skip re-asking for it (see taxIdMeta — value never echoed).
+            taxId: taxIdMeta(order.taxId),
           },
         };
         return textResult(JSON.stringify(out));

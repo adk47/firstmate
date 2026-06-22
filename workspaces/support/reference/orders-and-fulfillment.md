@@ -64,6 +64,32 @@ Country:
 Phone number (mandatory):
 ```
 
+## Mexico & customs — recipient tax ID (RFC / CURP)
+
+**Mexico (`MX`) shipments need the recipient's tax ID or they get held at customs and
+sent back.** Since 1 January 2025 Mexican customs requires the *recipient's* **RFC**
+(12–13 chars) or **CURP** (18 chars) on imported parcels — this applies to **every**
+Mexican recipient, individuals and businesses alike, not just companies. Prodigi
+confirms the same: for Mexico the recipient's name plus RFC/CURP must travel with the
+order. Without it the courier can't clear customs, the parcel is held (often with
+"pending customs fees / duties" notices), and frequently **returned** to the vendor.
+
+What this means for support:
+
+- For a Mexico order, collect the recipient's **RFC or CURP** alongside the address.
+  `order_address_update` takes it via the `tax_id` field (pass `tax_id_type` `rfc` or
+  `curp` if you know it; it's otherwise inferred from the length). It's normalized and
+  shape-checked (10–18 letters/digits) before it's applied.
+- **Customs duties/fees are paid by the recipient**, set by Mexican customs — not by
+  Muso and not something Caroline can waive. If a customer is asked to pay a customs
+  charge to release their parcel, that's the local customs office, not a Muso charge.
+- A parcel held or returned at customs is **not** reflected in the order status (it
+  stays `SHIPPED`). So "it never arrived" on a Mexico order is often a customs return —
+  look the order up, and if it's still editable add the RFC/CURP; if it already shipped
+  or came back, flag it for the team to arrange a re-send.
+- Other countries can require a recipient tax ID too; the same `tax_id` field carries
+  whatever the destination needs. Mexico is just the most common case today.
+
 ## Address field mapping
 
 The same address shows up in three shapes — keep them straight:
@@ -107,11 +133,12 @@ back to Prodigi — say so in the request you file.
 - **Can — read**: look an order up with `order_lookup` (by internal id, order number,
   or Prodigi id) to read its status + shipping address.
 - **Can — edit (gated, owner only)**: correct an order's shipping recipient with
-  `order_address_update`. The wrapper verifies the requester is the order owner
-  (Intercom contact email == the order's owner email, re-checked server-side) and
-  validates the address (≤40-char lines + required Name/Line1/Postcode/City/Country/
-  Phone). Always dry-run → show the customer → explicit "yes" → apply. On any refusal
-  it falls back to a ticket.
+  `order_address_update` — name, phone, address, and (for Mexico/customs) the
+  recipient **tax id** (RFC/CURP) via `tax_id`. The wrapper verifies the requester is
+  the order owner (Intercom contact email == the order's owner email, re-checked
+  server-side) and validates the address (≤40-char lines + required Name/Line1/
+  Postcode/City/Country/Phone). Always dry-run → show the customer → explicit "yes" →
+  apply. On any refusal it falls back to a request for the team.
 - **Can — escalate**: file a structured `order-fulfillment` request (Tier 1, 2 business
   days) for anything she can't apply (vendor-lane requests, non-owner requesters,
   already-shipped orders, apply failures). The request carries a deterministic
@@ -129,3 +156,9 @@ back to Prodigi — say so in the request you file.
 - *Can you change my delivery address?* Get the order id and the full corrected address
   (short lines, ~40 chars max, with a phone number) and flag it for the team — the
   print order may already be in production, so it's not guaranteed but they'll try.
+- *Shipping to Mexico* — also get the recipient's **RFC or CURP** tax id; Mexican
+  customs needs it or the parcel is held and sent back. Add it with the address.
+- *I was asked to pay a customs charge / my Mexico parcel is stuck* — those duties are
+  set by the local customs office and paid by the recipient, not a Muso charge. If it's
+  held for a missing tax id, get their RFC/CURP and we can add it; if it's already been
+  returned, flag it for the team to arrange a re-send.

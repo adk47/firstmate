@@ -26,7 +26,12 @@
 # Required argv:
 #   --order-ref <ref>              Order UUID, order number, or Prodigi order id
 #   --customer-email <email>       Verified Intercom contact email (the order owner)
-#   --body-file <path>             JSON: { name, phoneNumber, email?, address:{stripe-shape} }
+#   --body-file <path>             JSON: { name, phoneNumber, email?, address:{stripe-shape},
+#                                          taxId?, taxIdType? }
+#                                  taxId/taxIdType (Mexico RFC/CURP) ride along
+#                                  verbatim in the PUT body; the backend stores +
+#                                  forwards them to Prodigi. No validation here —
+#                                  the TS dispatcher (normalizeTaxId) is authoritative.
 #
 # Optional argv:
 #   --intercom-conv-id <id>        REQUIRED with --apply (cross-checks the email
@@ -174,7 +179,7 @@ update-order-address.sh – Caroline gated order recipient/address edit
 Required:
   --order-ref <ref>           Order UUID, order number, or Prodigi order id
   --customer-email <email>    Verified Intercom contact email (the order owner)
-  --body-file <path>          JSON { name, phoneNumber, email?, address:{stripe-shape} }
+  --body-file <path>          JSON { name, phoneNumber, email?, address:{stripe-shape}, taxId?, taxIdType? }
 
 Optional:
   --apply                     Real apply. Default is dry-run (no PUT).

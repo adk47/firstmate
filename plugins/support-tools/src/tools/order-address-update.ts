@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
 import type { RateLimiter } from "../rate-limiter.js";
-import { validateProdigiAddress, toStripeAddress, type ProdigiAddressInput } from "../order-address.js";
+import { validateProdigiAddress, toStripeAddress, normalizeTaxId, type ProdigiAddressInput } from "../order-address.js";
 
 // Hand-rolled promisifier (mirrors remove-credits.ts) so a test mock can use the
 // plain (file, args, options, callback) shape.
@@ -45,6 +45,8 @@ const Recipient = Type.Object({
   postcode: Type.String({ minLength: 1, pattern: LINE }),
   country: Type.String({ minLength: 1, pattern: LINE, description: "2-letter ISO country code (e.g. DO, US) — NOT the full country name" }),
   email: Type.Optional(Type.String({ pattern: EMAIL_PATTERN })),
+  tax_id: Type.Optional(Type.String({ pattern: LINE, description: "Recipient tax ID. For Mexico (country MX) this is the RFC (12–13 chars) or CURP (18 chars), which customs has required since 2025 — without it the parcel is held and returned. Omit for countries that don't require one." })),
+  tax_id_type: Type.Optional(Type.String({ pattern: LINE, description: "Optional: 'rfc' or 'curp'. Inferred from the value's length if omitted." })),
 });
 
 const Parameters = Type.Object({
@@ -76,8 +78,9 @@ export function createOrderAddressUpdateTool(deps: ToolDeps): AgentTool<typeof P
     name: "order_address_update",
     label: "Update Order Shipping Recipient",
     description:
-      "Correct a plaque/poster order's shipping recipient (name, phone, address) and push it to the print vendor. " +
+      "Correct a plaque/poster order's shipping recipient (name, phone, address, and tax id) and push it to the print vendor. " +
       "ONLY for the verified order owner — the wrapper refuses if the requester isn't the owner. " +
+      "For Mexico (country MX), also collect the recipient's RFC or CURP tax id via tax_id — customs holds and returns the parcel without it. " +
       "Always call apply=false first to preview, get explicit customer confirmation, then call apply=true with intercomConvId. " +
       "Rejects addresses with lines over 40 chars or missing required fields. Rate limit: 5 calls per 60 minutes per session.",
     parameters: Parameters,
@@ -103,13 +106,28 @@ export function createOrderAddressUpdateTool(deps: ToolDeps): AgentTool<typeof P
         return textResult(JSON.stringify({ ok: false, error: "address_invalid", validation }));
       }
 
-      // Build the PUT body the backend expects: top-level name/phoneNumber/email,
-      // address in Stripe-shape (the backend re-derives the Prodigi shape).
+      // Optional recipient tax id (Mexico RFC/CURP). Shape-check before exec so a
+      // malformed id gets specific fix-it feedback, mirroring the address gate. A
+      // bad id is no better than none — it still bounces at customs.
+      let taxId: { taxId: string; taxIdType?: string } | null = null;
+      if (params.recipient.tax_id && params.recipient.tax_id.trim()) {
+        const t = normalizeTaxId(params.recipient.tax_id, params.recipient.tax_id_type);
+        if (!t.ok) {
+          return textResult(JSON.stringify({ ok: false, error: "tax_id_invalid", detail: t.reason }));
+        }
+        taxId = { taxId: t.value, ...(t.type ? { taxIdType: t.type } : {}) };
+      }
+
+      // Build the PUT body the backend expects: top-level name/phoneNumber/email
+      // (+ taxId/taxIdType for tax-id-required destinations), address in
+      // Stripe-shape (the backend re-derives the Prodigi shape). taxId is omitted
+      // entirely when not supplied, so address-only corrections are unchanged.
       const body = {
         name: input.name?.trim(),
         phoneNumber: input.phone?.trim(),
         ...(params.recipient.email && params.recipient.email.trim() ? { email: params.recipient.email.trim() } : {}),
         address: toStripeAddress(input),
+        ...(taxId ?? {}),
       };
 
       let tmpDir: string | null = null;

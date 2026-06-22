@@ -41,8 +41,9 @@ formats, the address field-mapping table, and the 40-character rule.
   Prodigi id. Returns status, the shipping address (Prodigi format), tracking, and an
   item summary (no payment data). Already allowlisted.
 - `order_address_update` — gated WRITE: correct an order's shipping recipient (name,
-  phone, address) for the **verified order owner**. Always dry-run → confirm → apply.
-  The wrapper refuses if the requester isn't the owner. Already allowlisted.
+  phone, address, and — for Mexico/customs — the recipient `tax_id` RFC/CURP) for the
+  **verified order owner**. Always dry-run → confirm → apply. The wrapper refuses if the
+  requester isn't the owner. Already allowlisted.
 - `create_ticket` — file the structured `order-fulfillment` request for the team
   (the fallback whenever a write is refused or can't be owner-verified).
 
@@ -121,6 +122,15 @@ confirmed address back to Prodigi.
   id and call `order_lookup` — you can read them the status and tracking link
   directly. File an `order-fulfillment` request only if something looks wrong or the
   lookup is unavailable.
+- **Customs hold / "stuck at customs" / "asked to pay a fee" / Mexico "never arrived"**
+  — for Mexico especially, a parcel held or returned at customs still shows as
+  `SHIPPED` (the status doesn't track returns). If it's a missing tax id, get the
+  recipient's **RFC/CURP** and, if the order is still editable, add it via
+  `order_address_update` (`tax_id`); if it already shipped or was returned, file an
+  `order-fulfillment` request for the team to arrange a re-send. Customs duties are set
+  by the local customs office and paid by the recipient — not a Muso charge and not
+  something Caroline can waive. See `reference/orders-and-fulfillment.md`
+  "Mexico & customs".
 - **"Change my delivery address" / "fix my order details"** — Caroline can apply this
   herself for the verified owner:
   1. Ask for the order id and the **full** corrected recipient: name, address line 1,
@@ -129,6 +139,11 @@ confirmed address back to Prodigi.
      chars)**. Pass `country` as its **2-letter ISO code** (e.g. Dominican Republic →
      `DO`, United States → `US`) — convert it yourself; the tool rejects full country
      names (Prodigi needs the code).
+     - **Mexico (`MX`): also ask for the recipient's RFC or CURP** and pass it as
+       `tax_id`. Mexican customs requires it (since 2025) for every recipient or the
+       parcel is held and returned — see `reference/orders-and-fulfillment.md`
+       "Mexico & customs". If they don't have it to hand, ask them to get it before
+       the order ships.
   2. `order_lookup` the order to confirm it exists and read what's on file.
   3. Call `order_address_update` with `apply: false` (dry-run). The wrapper verifies
      the requester owns the order; if it refuses (`owner_mismatch` /

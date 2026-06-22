@@ -61,6 +61,26 @@ describe("createOrderLookupTool", () => {
     // Payment must never be surfaced to the support agent.
     expect(JSON.stringify(out)).not.toContain("payment");
     expect(JSON.stringify(out)).not.toContain("totalAmount");
+    // No tax id on this order → present:false.
+    expect(out.order.taxId).toEqual({ present: false });
+  });
+
+  it("surfaces taxId present/type but NEVER the value", async () => {
+    const withTax = { data: { ...ORDER_BODY.data, taxId: { present: true, type: "rfc", value: "GODE561231GR8" } } };
+    const get = vi.fn(async () => ({ ok: true, status: 200, data: withTax }));
+    const tool = createOrderLookupTool({ adminClient: makeClient(get as any), rateLimiter, sessionId: "s" });
+    const out = parse(await tool.execute("c", { order_ref: UUID }));
+    expect(out.order.taxId).toEqual({ present: true, type: "rfc" });
+    // The stored RFC value must not leak to the agent.
+    expect(JSON.stringify(out)).not.toContain("GODE561231GR8");
+  });
+
+  it("treats a malformed (non-object) taxId from the DTO as not-present", async () => {
+    const weird = { data: { ...ORDER_BODY.data, taxId: "unexpected-string" } };
+    const get = vi.fn(async () => ({ ok: true, status: 200, data: weird }));
+    const tool = createOrderLookupTool({ adminClient: makeClient(get as any), rateLimiter, sessionId: "s" });
+    const out = parse(await tool.execute("c", { order_ref: UUID }));
+    expect(out.order.taxId).toEqual({ present: false });
   });
 
   it("url-encodes the ref", async () => {

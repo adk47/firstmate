@@ -95,6 +95,33 @@ describe("createOrderAddressUpdateTool", () => {
     });
   });
 
+  it("forwards a normalized taxId/taxIdType in the body when tax_id is supplied", async () => {
+    const { tool, calls } = makeTool({ stdout: '{"ok":true,"mode":"dry-run","applied":false}' });
+    const mx = { ...VALID_RECIPIENT, country: "MX", tax_id: " gode-561231.gr8 " };
+    await tool.execute("c", { order_ref: "ZGOP1", customer_email: "owner@x.com", recipient: mx });
+    const { body } = calls[0];
+    // taxId is normalized (upper, stripped) and type inferred; address/name preserved.
+    expect(body!.taxId).toBe("GODE561231GR8");
+    expect(body!.taxIdType).toBe("rfc");
+    expect(body!.name).toBe("Maria Perez");
+    expect((body!.address as Record<string, unknown>).country).toBe("MX");
+  });
+
+  it("omits taxId from the body entirely when tax_id is not supplied", async () => {
+    const { tool, calls } = makeTool({ stdout: '{"ok":true}' });
+    await tool.execute("c", { order_ref: "ZGOP1", customer_email: "owner@x.com", recipient: VALID_RECIPIENT });
+    expect(calls[0].body).not.toHaveProperty("taxId");
+    expect(calls[0].body).not.toHaveProperty("taxIdType");
+  });
+
+  it("refuses a malformed tax_id before exec", async () => {
+    const { tool, calls } = makeTool({ stdout: '{"ok":true}' });
+    const bad = { ...VALID_RECIPIENT, country: "MX", tax_id: "123" };
+    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: bad }));
+    expect(out.error).toBe("tax_id_invalid");
+    expect(calls).toHaveLength(0);
+  });
+
   it("apply: passes --apply and --intercom-conv-id through", async () => {
     const { tool, calls } = makeTool({ stdout: '{"ok":true,"mode":"apply","applied":true}' });
     const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "owner@x.com", recipient: VALID_RECIPIENT, apply: true, intercomConvId: "conv123" }));
