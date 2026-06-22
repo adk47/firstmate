@@ -57,7 +57,7 @@ Two places work:
 
 ### What the output answers
 
-See `docs/credit-claim-proof-audit-2026-05-19.md` for the full
+See `docs/credit-verification/credit-claim-proof-audit-2026-05-19.md` for the full
 methodology + decision tree that the summary stats feed into.
 
 Short version:

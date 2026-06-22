@@ -8,7 +8,7 @@ export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
 # gog needs the keyring passphrase in non-interactive contexts. File is
 # mode-600, root-owned, not tracked in git. Provisioned manually on the
-# server; see docs/RUNBOOK-outreach-sender-worker.md.
+# server; see docs/runbooks/RUNBOOK-outreach-sender-worker.md.
 GOG_PW_FILE="/root/.gog-keyring-password"
 if [[ -r "$GOG_PW_FILE" ]]; then
   GOG_KEYRING_PASSWORD="$(cat "$GOG_PW_FILE")"

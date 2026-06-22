@@ -22,7 +22,7 @@ DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"
 
 # Pinned openclaw runtime version. Updated together with this file so the
 # version change appears in git history alongside any deploy-script tweaks
-# the upgrade requires. Bump in lockstep with docs/REPO-MANAGEMENT.md.
+# the upgrade requires. Bump in lockstep with docs/guides/REPO-MANAGEMENT.md.
 OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.6.1}"
 
 # Pinned @openclaw/slack version. 2026.5.12 externalized Slack into this
@@ -730,7 +730,7 @@ RSYNC_EXCLUDES=(
   --exclude='workspaces/*/memory/'
   --exclude='workspaces/*/api-logs/'
   # Agent long-term memory (written by agents at runtime, should survive
-  # deploys — see docs/WORKSPACE-FILE-OWNERSHIP.md). MEMORY.md IS tracked
+  # deploys — see docs/guides/WORKSPACE-FILE-OWNERSHIP.md). MEMORY.md IS tracked
   # in git as a seed, but agents modify it post-deploy and we must not
   # overwrite those modifications with the seed on subsequent deploys.
   --exclude='workspaces/*/MEMORY.md'
@@ -2091,20 +2091,20 @@ if needs_target "main"; then
     grep -qE "^MUSO_ADMIN_EMAIL=.+"    "$MAIN_ENV" || missing_vars+=(MUSO_ADMIN_EMAIL)
     grep -qE "^MUSO_ADMIN_PASSWORD=.+" "$MAIN_ENV" || missing_vars+=(MUSO_ADMIN_PASSWORD)
     # muso CLI runtime env (soak phase) — why each var matters is in
-    # docs/RUNBOOK.md, "muso CLI (main gateway)".
+    # docs/runbooks/RUNBOOK.md, "muso CLI (main gateway)".
     grep -qE "^MUSO_ENV=prod$"          "$MAIN_ENV" || missing_vars+=("MUSO_ENV=prod")
     grep -qE "^MUSO_NONINTERACTIVE=1$"  "$MAIN_ENV" || missing_vars+=("MUSO_NONINTERACTIVE=1")
     grep -qE "^MUSO_STATE_DIR=/var/log/muso-ops$" "$MAIN_ENV" || missing_vars+=("MUSO_STATE_DIR=/var/log/muso-ops")
     if (( ${#missing_vars[@]} > 0 )); then
       log "WARN: $MAIN_ENV is missing: ${missing_vars[*]}"
-      log "WARN: ops agent admin API / muso CLI operations will fail until these are added (docs/RUNBOOK.md, 'muso CLI')."
+      log "WARN: ops agent admin API / muso CLI operations will fail until these are added (docs/runbooks/RUNBOOK.md, 'muso CLI')."
       log "WARN: fix with:  sudo vim $MAIN_ENV  &&  systemctl restart openclaw-gateway-main"
     fi
   else
     log "WARN: $MAIN_ENV does not exist — ops agent will start with no admin credentials."
     log "WARN: create it, add MUSO_ADMIN_EMAIL= (e.g. retool@muso.ai) and MUSO_ADMIN_PASSWORD=,"
     log "WARN: plus the muso CLI vars (MUSO_ENV=prod, MUSO_NONINTERACTIVE=1, MUSO_STATE_DIR=/var/log/muso-ops"
-    log "WARN: — see docs/RUNBOOK.md, 'muso CLI (main gateway)'), then:"
+    log "WARN: — see docs/runbooks/RUNBOOK.md, 'muso CLI (main gateway)'), then:"
     log "WARN:   systemctl restart openclaw-gateway-main"
   fi
 fi

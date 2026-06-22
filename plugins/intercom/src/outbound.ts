@@ -511,7 +511,7 @@ export type SanitizerLogger = { error?: (msg: string) => void };
  * is one of three defense layers (wrapper, factory, pre-commit lint); no
  * single layer alone is the guarantee.
  *
- * See docs/2026-04-17-cs-agent-email-guardrail-design.md.
+ * See docs/designs/2026-04-17-cs-agent-email-guardrail-design.md.
  */
 export class SanitizingIntercomClient implements IntercomClient {
   constructor(

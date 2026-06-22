@@ -3,7 +3,7 @@
 Date: 2026-06-11. Decision record for the upgrade of the Caroline daily pulse
 (and the new weekly roll-up) requested by Nick: better visuals + a
 cross-conversation "did multiple customers say the same thing" themes section.
-Builds on `docs/2026-06-04-caroline-daily-review-design.md` (SP1); this lands
+Builds on `docs/designs/2026-06-04-caroline-daily-review-design.md` (SP1); this lands
 the deferred SP2 weekly as Slack-surface-only.
 
 ## What changed

@@ -10,7 +10,7 @@ Usage:
 The worker reads drafts, validates recipient against original thread
 (for follow-ups) or against the contacts sheet (for new outreach),
 verifies no contact/human-teammate reply has landed, then sends and
-logs atomically. See docs/RUNBOOK-outreach-sender-worker.md.
+logs atomically. See docs/runbooks/RUNBOOK-outreach-sender-worker.md.
 """
 from __future__ import annotations
 

@@ -20,7 +20,7 @@
 - `scripts/tests/qa-pr-approve.bats` — **modify.** Extend the `gh` stub to answer the two new queries; add tests for exit 8, exit 9, and the still-passing happy path; add a `#287-replay` test.
 - `skills-all/muso-github-code-review/SKILL.md` — **modify.** New "Carry forward prior findings" subsection (A1); a `qa-review` commit-status step (A2); honest Auto-mode DM + Step 7 exit-code docs (A4). **Canonical only** — no `workspaces/qa/` shadow exists; do not create one (`feedback_skill_dual_tree`, drift gate).
 - `scripts/qa-dispatch-pr-review.sh` — **modify.** One bullet in the dispatch message pointing at the carry-forward precondition.
-- `docs/GOVERNANCE.md` — **modify.** Document the `qa-review` status + the wrapper's mechanical gate, and record that `qa-review` is deliberately **not** a required status check (it would block every non-`nsollazzo` PR; see Task 6 / Review findings).
+- `docs/reference/GOVERNANCE.md` — **modify.** Document the `qa-review` status + the wrapper's mechanical gate, and record that `qa-review` is deliberately **not** a required status check (it would block every non-`nsollazzo` PR; see Task 6 / Review findings).
 
 ---
 
@@ -466,16 +466,16 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ### Task 6: Governance — document the `qa-review` status gate (and why it is NOT a required check)
 
 **Files:**
-- Modify: `docs/GOVERNANCE.md`
+- Modify: `docs/reference/GOVERNANCE.md`
 
 - [ ] **Step 1: Read the current branch-protection section**
 
-Run: `grep -n "required status checks\|qa-review\|dismiss_stale_reviews\|Branch Protection" docs/GOVERNANCE.md`
+Run: `grep -n "required status checks\|qa-review\|dismiss_stale_reviews\|Branch Protection" docs/reference/GOVERNANCE.md`
 Expected: locate the branch-protection block (PR #392 recorded "No required status checks — 'PR Validation' CI is informational… the QA auto-review is what gates approval on green.").
 
 - [ ] **Step 2: Update the branch-protection block (document the gate; do NOT request a required check)**
 
-Edit the branch-protection block in `docs/GOVERNANCE.md` (keep the surrounding lines intact; match the file's existing prose). Leave line 199's "No required status checks" as-is and append the new mechanism + the explicit reason `qa-review` is **not** made required:
+Edit the branch-protection block in `docs/reference/GOVERNANCE.md` (keep the surrounding lines intact; match the file's existing prose). Leave line 199's "No required status checks" as-is and append the new mechanism + the explicit reason `qa-review` is **not** made required:
 
 ```markdown
 - **QA verdict gate (PR #391+ hardening):** the QA bot publishes a `qa-review` commit
@@ -497,7 +497,7 @@ Edit the branch-protection block in `docs/GOVERNANCE.md` (keep the surrounding l
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/GOVERNANCE.md
+git add docs/reference/GOVERNANCE.md
 git commit -m "docs(governance): record qa-review status gate; explain why it is NOT a required check
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
@@ -553,7 +553,7 @@ Surfaced by reviewing this plan against the code (Rule 13 — fail loud, not hid
 
 5. **Line numbers in Tasks 3-5 are hints, not anchors.** Sequential edits to `SKILL.md` shift line numbers, and Task 4 renumbers the Auto-mode list (items 4/5 → 5/6). Each step quotes exact old text — match on the **quoted text**, not the line number. Use the skill's existing head-SHA reference convention (`<headRefOid>` / the dispatched `${sha}`) when filling `$HEAD_SHA` in Step 6b.
 
-6. **Spec amended to match.** `docs/2026-06-02-qa-autofix-loop-design.md` §3/§5 originally listed "Aaron makes `qa-review` required" as the human step; corrected there too (deferred, same reason as #1).
+6. **Spec amended to match.** `docs/designs/2026-06-02-qa-autofix-loop-design.md` §3/§5 originally listed "Aaron makes `qa-review` required" as the human step; corrected there too (deferred, same reason as #1).
 
 7. **Self-resolution trust boundary (named, not closed in Part A).** Guard 7 trusts GitHub's `isResolved` thread state, and the skill lets QA resolve its own threads once it judges the fix is in place. So the wrapper closes "agent says GO while a blocker is open" but NOT "agent wrongly resolves a thread, then says GO" — that still rides on agent honesty. This is acceptable for Part A (strictly better than the status quo); mechanical fix-verification is Part B's CTO-fixes-then-QA-re-reviews loop. The Guard 7 comment and the skill's carry-forward section now state this explicitly rather than implying more safety than exists.
 

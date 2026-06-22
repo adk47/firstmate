@@ -6,7 +6,7 @@
  * so the caller can log it. This is the deterministic enforcement layer —
  * the SOUL.md rule is paired instruction-layer defense, not the guarantee.
  *
- * See docs/2026-04-17-cs-agent-email-guardrail-design.md.
+ * See docs/designs/2026-04-17-cs-agent-email-guardrail-design.md.
  */
 
 export const ALLOWED_OUTBOUND_EMAILS: ReadonlySet<string> = new Set([

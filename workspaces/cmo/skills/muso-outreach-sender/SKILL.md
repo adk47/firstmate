@@ -151,7 +151,7 @@ GHL `Emailed` stage set + Slack notification as one atomic step.
 Blocked drafts appear in `#sales-alerts` with a machine-readable
 reason code. Fix and re-approve; do NOT bypass.
 
-See `docs/RUNBOOK-outreach-sender-worker.md` for ops details.
+See `docs/runbooks/RUNBOOK-outreach-sender-worker.md` for ops details.
 
 ## Constraints
 

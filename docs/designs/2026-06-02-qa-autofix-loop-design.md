@@ -31,7 +31,7 @@ On 2026-06-01 the "Muso QA Bot" posted **"Approved — CI green, no blocking fin
 
 2. **No mechanical enforcement of the verdict.** `scripts/qa-pr-approve.sh` enforces only identity/format guards (owner, requester allowlist, no self-approval, log-before-write — qa-pr-approve.sh:62-87). It never inspects CI status *or* finding severity. The GO decision is purely the LLM's word; the only CI/reviewDecision read is a *post-approval* report (qa-pr-approve.sh:94-97) that cannot block.
 
-3. **QA findings can't turn CI red.** Per `docs/GOVERNANCE.md:193`, `main` has **no required status checks**; merge is gated solely by 1 code-owner approval (`* @adk47`), which the QA bot's own `@adk47` approval satisfies. So a QA NO-GO produces only a withheld approval + a COMMENT review — never a red check.
+3. **QA findings can't turn CI red.** Per `docs/reference/GOVERNANCE.md:193`, `main` has **no required status checks**; merge is gated solely by 1 code-owner approval (`* @adk47`), which the QA bot's own `@adk47` approval satisfies. So a QA NO-GO produces only a withheld approval + a COMMENT review — never a red check.
 
 This generalizes a pattern already in our memory (`feedback_llm_instruction_insufficient`): **skill prose is not enforcement.** The verdict must be re-derived in a mechanical layer.
 
@@ -73,7 +73,7 @@ The wrapper deliberately does **not** gate on the `qa-review` status itself: tha
 
 **NOT a required status check (intentional).** A naive "make `qa-review` required" would block every non-`nsollazzo` PR, because required checks are repo-wide but QA only runs on Nick's PRs and `CODEOWNERS` is `* @adk47` — so other contributors' PRs would hang on a never-reported check. The real merge block is the **wrapper refusing the required code-owner approval** (A3) when CI isn't green or a blocker is open; the red `qa-review` status is the visible ❌ + defense-in-depth. Revisit making it required only if QA is widened to review all PRs (scope expansion, deferred).
 
-**Part A files:** `skills-all/muso-github-code-review/SKILL.md` (A1, A2, A4), `scripts/qa-pr-approve.sh` + `scripts/tests/qa-pr-approve.bats` (A3), `scripts/qa-dispatch-pr-review.sh` (dispatch message reflects carry-forward), `docs/GOVERNANCE.md` (document the gate; `qa-review` is deliberately not made required).
+**Part A files:** `skills-all/muso-github-code-review/SKILL.md` (A1, A2, A4), `scripts/qa-pr-approve.sh` + `scripts/tests/qa-pr-approve.bats` (A3), `scripts/qa-dispatch-pr-review.sh` (dispatch message reflects carry-forward), `docs/reference/GOVERNANCE.md` (document the gate; `qa-review` is deliberately not made required).
 
 ### Part B — Autofix loop (PR #2, depends on #397 merging)
 

@@ -141,7 +141,7 @@ Fix the draft (re-create from this skill if the data changed) and
 re-approve. Do NOT attempt to bypass the gate by calling `drafts send`
 directly — the gateway allow-list denies it.
 
-See `docs/RUNBOOK-outreach-sender-worker.md` for failure-mode details.
+See `docs/runbooks/RUNBOOK-outreach-sender-worker.md` for failure-mode details.
 
 ## Auto Flagging (Monday Cron, Planned)
 

@@ -559,7 +559,7 @@ if (( ${#bypass_hits[@]} > 0 )); then
     which is the only thing stopping Caroline from leaking arbitrary
     @muso.ai email addresses into customer-facing Intercom replies.
     Bypassing the wrapper is a prod incident class — see
-    docs/2026-04-17-cs-agent-email-guardrail-design.md for history.
+    docs/designs/2026-04-17-cs-agent-email-guardrail-design.md for history.
 
   HOW TO FIX (do this — do NOT --no-verify):
     Replace:
