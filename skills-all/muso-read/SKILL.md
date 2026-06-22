@@ -3,22 +3,28 @@ name: muso-read
 description: |
   READ-ONLY access to Muso's own data through the `muso` CLI — for research and
   lookups, never writes. Look up profiles, tracks, albums, users, teams, and the
-  claiming queue, hit any admin-API GET route, and run SELECT-only Trino queries
-  over the data lake (catalog, streaming stats, growth DB).
+  claiming queue, hit any admin-API GET route, run SELECT-only Trino queries over
+  the data lake (catalog, streaming stats, growth DB), and read the marketing
+  B2B-ADS-intelligence NocoDB base (companies/contacts).
 
   Use when: "look up this profile/track/artist in Muso", "how many ... in our
   data", "what does Muso know about ...", "query the data lake", "Muso analytics",
-  "check this user/team", "pull stats for ...".
+  "check this user/team", "pull stats for ...", "look up this company/contact in
+  the B2B ads intelligence base".
   Triggers: "muso data", "look up profile", "muso analytics", "data lake",
-  "trino", "how many profiles/tracks/streams", "what's in our database".
+  "trino", "how many profiles/tracks/streams", "what's in our database",
+  "nocodb", "B2B ads intelligence", "marketing CRM base".
 compatibility: |
   Main gateway on node-8 only (NOT edge/Caroline). Uses the host shell (`exec`)
   to call scripts/muso-read.sh, an allowlist wrapper around the deployed `muso`
   binary (/usr/local/bin/muso). Auth is the gateway's existing MUSO_ADMIN_* env —
-  no new credential. The wrapper is reject-by-default: only read commands reach
-  `muso`; every write/merge/non-GET/non-SELECT is refused before `muso` runs.
+  no new credential. NocoDB reads ride NOCODB_API_TOKEN/NOCODB_BASE_ID (also
+  already in /etc/openclaw/main.env, from company-finder; needs `muso` v0.3.0+,
+  which is the pinned binary). The wrapper is reject-by-default: only read commands
+  reach `muso`; every write/merge/non-GET/non-SELECT/nocodb-write is refused before
+  `muso` runs.
 metadata:
-  version: "0.1"
+  version: "0.2"
   source-repo: "Muso-AI/hydra"
 allowed-tools:
   - exec
@@ -60,9 +66,21 @@ WHERE artist_name ILIKE '%example%'
 LIMIT 25
 SQL
 
+# NocoDB reads — the marketing B2B-ADS-intelligence base (companies/contacts):
+$R nocodb whoami                              # identity + scope sanity
+$R nocodb tables list --json                  # tables in the default base
+$R nocodb tables get --table <m…>             # full column list for a table
+$R nocodb records list --table <m…> --where '(Status,eq,Follow Up 2)' --json
+$R nocodb records count --table <m…> --where '(…)'   # exact, server-side
+$R nocodb raw GET /api/v2/meta/bases/p11hvpwapu4hv0x  # base detail (GET-only)
+
 # Self-describing manual for command/flag/route details:
 $R agent-docs
 ```
+
+> ⚠️ NocoDB Cloud silently clamps a single `records list` to 100 rows. To read or
+> aggregate a whole table, paginate (`--limit 100 --offset <n>`) until
+> `pageInfo.isLastPage` — see the **muso-nocodb** skill's `nocodb_fetch_all`.
 
 ## What you can read
 
@@ -75,14 +93,21 @@ $R agent-docs
   `matvw_stats_track_daily` (~3.3B streaming rows), `postgresql_core.public.users`
   / `subscriptions` / `claiming`. See the **muso-query-writer** skill for table
   schemas, the modern catalog.schema names, and cost-aware query patterns.
+- **NocoDB (B2B-ADS-intelligence base):** `nocodb whoami`, `nocodb tables
+  list|get`, `nocodb records list|get|count`, and `nocodb raw GET <path>`
+  (GET-only). The marketing companies/contacts CRM base — reads only. For schema
+  detail, table IDs, where-clause syntax, and the long tail, see the
+  **muso-nocodb** skill (which also carries the write path, for @CMO/@Ops).
 
-## What is refused (route to @Ops)
+## What is refused (route to @Ops; NocoDB writes to @CMO)
 
 `api` with POST/PUT/PATCH/DELETE · `profiles/tracks merge|unmerge|update|delete` ·
 credit-request status changes · subscription/VIP writes · any `query` that is not
 a single SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/VALUES statement (DELETE/INSERT/UPDATE/
-DROP/etc. and multi-statement queries are blocked). On a refusal the wrapper exits
-3 with a one-line reason and `muso` is never called.
+DROP/etc. and multi-statement queries are blocked) · `nocodb records
+create|update|delete` · `nocodb tables create|delete` · non-GET `nocodb raw`
+(NocoDB writes route to @CMO/@Ops). On a refusal the wrapper exits 3 with a
+one-line reason and `muso` is never called.
 
 ## After it returns
 

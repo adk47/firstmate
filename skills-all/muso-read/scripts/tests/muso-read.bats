@@ -106,6 +106,37 @@ not_called() { [[ "$output" != *"MUSO_CALLED"* ]]; }
   [ "$status" -eq 0 ]; called
 }
 
+# ---- ALLOW: nocodb reads (B2B-ADS-intelligence base) ----------------------
+@test "nocodb whoami is allowed" {
+  run bash "$SCRIPT" nocodb whoami
+  [ "$status" -eq 0 ]; called
+  [[ "$output" == *"nocodb whoami"* ]]
+}
+
+@test "nocodb tables list/get are allowed" {
+  run bash "$SCRIPT" nocodb tables list; [ "$status" -eq 0 ]; called
+  run bash "$SCRIPT" nocodb tables get --table m9vsbijhrr9ddeu; [ "$status" -eq 0 ]; called
+}
+
+@test "nocodb records list/get/count are allowed" {
+  run bash "$SCRIPT" nocodb records list --table m9vsbijhrr9ddeu --where '(Status,eq,open)' --json
+  [ "$status" -eq 0 ]; called
+  run bash "$SCRIPT" nocodb records get --table m9vsbijhrr9ddeu --id 42; [ "$status" -eq 0 ]; called
+  run bash "$SCRIPT" nocodb records count --table m9vsbijhrr9ddeu; [ "$status" -eq 0 ]; called
+}
+
+@test "nocodb raw GET is allowed" {
+  run bash "$SCRIPT" nocodb raw GET /api/v2/meta/bases/p11hvpwapu4hv0x
+  [ "$status" -eq 0 ]; called
+}
+
+@test "nocodb read with a --where value containing 'delete' is NOT falsely rejected" {
+  # The nocodb branch gates on the verb position only — it must not keyword-scan
+  # filter values the way the SQL `query` path scans statements.
+  run bash "$SCRIPT" nocodb records list --table m9vsbijhrr9ddeu --where '(Note,like,%delete%)'
+  [ "$status" -eq 0 ]; called
+}
+
 # ---- REJECT: writes & non-read commands -----------------------------------
 @test "api POST/PUT/PATCH/DELETE are refused (muso never called)" {
   run bash "$SCRIPT" api POST /admin/x --data '{}'; [ "$status" -eq 3 ]; not_called
@@ -137,4 +168,26 @@ not_called() { [[ "$output" != *"MUSO_CALLED"* ]]; }
 @test "unknown / write subcommands are refused" {
   run bash "$SCRIPT" credit-requests set-status --status approved; [ "$status" -eq 3 ]; not_called
   run bash "$SCRIPT" frobnicate; [ "$status" -eq 3 ]; not_called
+}
+
+@test "nocodb record writes are refused (muso never called)" {
+  run bash "$SCRIPT" nocodb records create --table m9 --data '{}'; [ "$status" -eq 3 ]; not_called
+  run bash "$SCRIPT" nocodb records update --table m9 --data '[]'; [ "$status" -eq 3 ]; not_called
+  run bash "$SCRIPT" nocodb records delete --table m9 --data '[]' --yes; [ "$status" -eq 3 ]; not_called
+}
+
+@test "nocodb table create/delete are refused" {
+  run bash "$SCRIPT" nocodb tables create --base p11hvpwapu4hv0x --data '{}'; [ "$status" -eq 3 ]; not_called
+  run bash "$SCRIPT" nocodb tables delete --table m9; [ "$status" -eq 3 ]; not_called
+}
+
+@test "nocodb raw with a non-GET method is refused" {
+  run bash "$SCRIPT" nocodb raw POST /api/v2/meta/tables/m9/columns --data '{}'; [ "$status" -eq 3 ]; not_called
+  run bash "$SCRIPT" nocodb raw PUT /api/v2/x;    [ "$status" -eq 3 ]; not_called
+  run bash "$SCRIPT" nocodb raw PATCH /api/v2/x;  [ "$status" -eq 3 ]; not_called
+  run bash "$SCRIPT" nocodb raw DELETE /api/v2/x; [ "$status" -eq 3 ]; not_called
+}
+
+@test "unknown nocodb subcommand is refused" {
+  run bash "$SCRIPT" nocodb frobnicate; [ "$status" -eq 3 ]; not_called
 }

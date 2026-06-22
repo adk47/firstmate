@@ -22,9 +22,13 @@
 #   teams get · claiming list|get
 #   api GET <route> [flags]           # GET-only; POST/PUT/PATCH/DELETE are refused
 #   query <SELECT-only SQL> | query - # SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/VALUES only
+#   nocodb whoami · nocodb tables list|get · nocodb records list|get|count
+#   nocodb raw GET <path>             # GET-only; non-GET raw is refused
+#                                     # (B2B-ADS-intelligence base; reads only)
 #
 # Anything else (writes, merges, status changes, deletes, non-GET api, non-SELECT
-# query) is refused — route Muso writes to @Ops.
+# query, nocodb record/table writes or non-GET raw) is refused — route Muso writes
+# to @Ops and NocoDB writes to @CMO/@Ops.
 #
 # Env:
 #   MUSO_BIN   the muso binary to call (default: muso on PATH). Auth comes from the
@@ -114,6 +118,32 @@ case "$cmd" in
       --list-routes) : ;;
       GET|get) : ;;
       *) die "read-only — 'muso api' is GET-only (got '${sub:-empty}'). Route writes to @Ops." ;;
+    esac ;;
+  nocodb)
+    # READ-ONLY NocoDB (B2B-ADS-intelligence base) via `muso nocodb`. Permit only
+    # the read tier — whoami, tables list|get, records list|get|count — plus a
+    # GET-only `raw` escape hatch (mirroring `api` above); refuse every record/
+    # schema write and non-GET raw. Gate on the verb POSITION only — unlike the
+    # SQL `query` path, do NOT keyword-scan flag values (a `--where (Note,like,
+    # %delete%)` filter is a read, not a write).
+    case "$sub" in
+      whoami) : ;;
+      tables)
+        case "${3:-}" in
+          list|get) : ;;
+          *) die "read-only — only 'nocodb tables list|get' is permitted. Route NocoDB writes to @CMO/@Ops." ;;
+        esac ;;
+      records)
+        case "${3:-}" in
+          list|get|count) : ;;
+          *) die "read-only — only 'nocodb records list|get|count' is permitted. Route NocoDB writes to @CMO/@Ops." ;;
+        esac ;;
+      raw)
+        case "${3:-}" in
+          GET|get) : ;;
+          *) die "read-only — 'nocodb raw' is GET-only (got '${3:-empty}'). Route NocoDB writes to @CMO/@Ops." ;;
+        esac ;;
+      *) die "read-only — 'nocodb ${sub:-empty}' not permitted (reads: whoami, tables list|get, records list|get|count, raw GET)." ;;
     esac ;;
   query)
     # Parse query's args explicitly: exactly ONE SQL source (a string or '-'),

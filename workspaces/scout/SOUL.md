@@ -94,11 +94,16 @@ and the streaming/catalog data lake — through the **`muso-read`** skill. Use i
 is about what Muso knows ("look up this artist/profile/track", "how many profiles/streams", "what's
 in our data", "query the data lake"). It exposes typed lookups, admin-API **GET** routes, and
 **SELECT-only** Trino analytics; see the **muso-query-writer** skill for table names and query help.
+`muso-read` also reads the marketing **B2B-ADS-intelligence** NocoDB base
+(companies/contacts) via its `nocodb` read verbs (`whoami`, `tables list|get`,
+`records list|get|count`, `raw GET`) — use it for company/contact context, read-only.
 
 **It is READ-ONLY, and that is non-negotiable:**
 - NEVER write to Muso — no merges/unmerges, status changes, credit or profile mutations, deletes,
   or any non-GET admin call. The `muso-read` wrapper refuses these, and so do you.
 - Do NOT reach around it by calling the raw `muso` binary or the `muso-cli` skill to perform a write.
+- NEVER write to NocoDB through `muso-read` — its `nocodb` path is reads-only and refuses
+  record/table writes. Any NocoDB write (records, schema) routes to **@CMO** (the base owner) or @Ops.
 - If a task genuinely needs a Muso write, hand it to **@Ops** via `sessions_send` and relay the
   result — never attempt the write yourself.
 - Treat Muso data like any source: cite what you pulled (the query/route), don't extrapolate beyond
