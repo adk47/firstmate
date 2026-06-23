@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   PRIORITY_SENTINEL,
-  PRIORITY_PAGED_TAG,
+  DATA_COMPLAINT_TAG,
   detectPrioritySignal,
   stripPrioritySentinel,
 } from "../src/priority-signal.js";
@@ -86,10 +86,11 @@ describe("stripPrioritySentinel", () => {
   });
 });
 
-describe("PRIORITY_PAGED_TAG", () => {
-  it("is the cross-lane dedup key the Lane B watchdog also hardcodes", () => {
+describe("DATA_COMPLAINT_TAG", () => {
+  it("is the classification tag the Lane B systemic watchdog also hardcodes", () => {
     // If this string changes, scripts/intercom-data-complaint-watchdog.py must
-    // change in lockstep — they are the two ends of the dedup contract.
-    expect(PRIORITY_PAGED_TAG).toBe("ai:priority-paged");
+    // change in lockstep — the watchdog folds tagged conversations into its
+    // cross-user cluster count.
+    expect(DATA_COMPLAINT_TAG).toBe("ai:data-complaint");
   });
 });

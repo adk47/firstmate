@@ -5,33 +5,37 @@
  * is complaining about a DATA problem (wrong/missing credits, wrong profile
  * data, account/data corruption, OR analytics/stream-counts being wrong). The
  * flush path in channel.ts detects it, STRIPS it so the customer never sees it,
- * still posts her (cleaned) reply as normal, and fires a fast internal Slack
- * page to the priority channel tagging the boss — so a data complaint reaches
- * the top of the team in seconds instead of sitting in a queue for days.
+ * still posts her (cleaned) reply as normal, and TAGS the conversation
+ * `ai:data-complaint` so the Lane B watchdog can fold it into its count.
+ *
+ * It does NOT page anyone on its own. Leadership is paged only when the watchdog
+ * sees the same data category cross MANY users (a systemic cluster), not on each
+ * individual complaint (Aaron 2026-06-23 — he wants systemic issues, not noise).
  *
  * This is deliberately distinct from the `[[NO_REPLY]]` sentinel (no-reply.ts)
  * and from the heavyweight human-takeover escalation (escalation-action.ts):
  *   - NO_REPLY *suppresses* the post. PRIORITY *keeps* the (stripped) post and
- *     *adds* the page side-effect. The token may co-exist with real reply text.
+ *     *adds* the classify-and-tag side-effect. The token may co-exist with real
+ *     reply text.
  *   - The handoff escalation pulls Caroline OUT (reassigns to a human, posts a
  *     "pulling in a teammate" farewell). The priority signal leaves her IN — it
- *     is purely an internal heads-up; she keeps helping the customer.
+ *     is purely an internal classification; she keeps helping the customer.
  *
- * Optional payload: `[[PRIORITY: <short reason>]]` carries a one-line gist that
- * is surfaced in the Slack page. The reason is model-generated and may echo
- * customer text, so it is UNTRUSTED — escape it at the Slack boundary
- * (priority-slack.ts) before rendering.
+ * Optional payload: `[[PRIORITY: <reason>]]` carries Caroline's read of the
+ * complaint (model-generated, UNTRUSTED). It's retained for context; the
+ * watchdog groups by the deterministic data CATEGORY it derives, not this text.
  */
 
 export const PRIORITY_SENTINEL = "[[PRIORITY]]";
 
 /**
- * Conversation tag applied by Lane A (this plugin) once a priority page has
- * been delivered. The Lane B backstop watchdog
- * (scripts/intercom-data-complaint-watchdog.py) skips any conversation
- * carrying this tag — it is the cross-lane dedup key. Keep the two in sync.
+ * Conversation tag applied by Lane A when Caroline classifies a customer message
+ * as a data complaint. The Lane B systemic watchdog
+ * (scripts/intercom-data-complaint-watchdog.py) FOLDS tagged conversations into
+ * its cross-user cluster count (alongside its own keyword detection). Keep the
+ * value in sync with DATA_COMPLAINT_TAG there.
  */
-export const PRIORITY_PAGED_TAG = "ai:priority-paged";
+export const DATA_COMPLAINT_TAG = "ai:data-complaint";
 
 // Match `[[PRIORITY]]` or `[[PRIORITY: some reason]]` anywhere, case-insensitive,
 // tolerant of inner whitespace. The reason group stops at the closing `]` so it

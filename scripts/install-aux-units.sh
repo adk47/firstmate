@@ -252,17 +252,20 @@ log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
 # DATA complaint was NOT caught by Caroline's inline [[PRIORITY]] signal —
 # Aaron's 2026-06-22 ask for data complaints to reach him fast. Lane A (the
 # edge gateway / intercom plugin) is the real-time path; this is the every-10m
-# safety net for the ones she under-flagged or that failed to page. Skips any
-# conversation already tagged ai:priority-paged (Lane A's cross-lane dedup) and
-# keeps a local cooldown ledger so it never re-pages the same chat. Read-only
-# against Intercom; posts Slack only on a fresh, unpaged data complaint. Tokens:
-# MUSOAI_INTERCOM_TOKEN + the Ops bot token MUSO_SLACK_BOT_TOKEN_OPERATIONS come
-# from the env files (main.env carries the bot token — same identity as Lane A's
-# inline page). The Ops bot must be a member of the priority channel to post
-# there. See scripts/intercom-data-complaint-watchdog.py.
+# SYSTEMIC cluster detector (Aaron 2026-06-23): pages the priority channel only
+# when the same data category crosses >= WATCHDOG_SYSTEMIC_THRESHOLD distinct
+# users within the last WATCHDOG_WINDOW_HOURS (counted by email), with a
+# per-category cooldown. Folds in conversations Caroline tagged ai:data-complaint
+# (her [[PRIORITY]] no longer pages — it just classifies). Read-only against
+# Intercom; posts Slack only when a category is over the threshold and not in
+# cooldown. Tokens: MUSOAI_INTERCOM_TOKEN + the Ops bot token
+# MUSO_SLACK_BOT_TOKEN_OPERATIONS come from the env files (main.env carries the
+# bot token). The Ops bot must be a member of the priority channel to post there.
+# Persists a tiny per-category cooldown ledger under /var/lib. See
+# scripts/intercom-data-complaint-watchdog.py.
 cat > /etc/systemd/system/intercom-data-complaint-watchdog.service << DATACWDSVC
 [Unit]
-Description=Intercom data-complaint backstop watchdog (pages the priority channel)
+Description=Intercom systemic data-complaint watchdog (pages on cross-user clusters)
 After=network-online.target
 
 [Service]
@@ -270,12 +273,16 @@ Type=oneshot
 EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/edge.env
 EnvironmentFile=-/etc/openclaw/main.env
+# Systemic threshold + count window (defaults baked into the script; set here so
+# they're visible and tunable without a redeploy).
+Environment=WATCHDOG_SYSTEMIC_THRESHOLD=3
+Environment=WATCHDOG_WINDOW_HOURS=24
 ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/intercom-data-complaint-watchdog.py --alert
 DATACWDSVC
 
 cat > /etc/systemd/system/intercom-data-complaint-watchdog.timer << DATACWDTMR
 [Unit]
-Description=Run the Intercom data-complaint backstop watchdog every 10m
+Description=Run the Intercom systemic data-complaint watchdog every 10m
 
 [Timer]
 OnBootSec=8min

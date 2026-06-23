@@ -605,7 +605,7 @@ export class SanitizingIntercomClient implements IntercomClient {
   }
 
   async addTag(conversationId: string, name: string, adminId: string): Promise<void> {
-    // Tag name is an internal constant (ai:priority-paged), never customer-
+    // Tag name is an internal constant (ai:data-complaint), never customer-
     // facing — nothing to sanitize. Pass through.
     return this.inner.addTag(conversationId, name, adminId);
   }

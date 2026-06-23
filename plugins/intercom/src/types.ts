@@ -147,10 +147,11 @@ export interface IntercomSessionState {
   knownFacts?: KnownFacts;
   escalationFiredAt?: string | null;
   // Dedup gate for the priority signal (Lane A). Set once per conversation the
-  // first time Caroline's `[[PRIORITY]]` token fires a page, so rapid follow-up
-  // messages don't re-page. Distinct from escalationFiredAt: the priority page
-  // is a lightweight internal heads-up that leaves Caroline active, whereas
-  // escalationFiredAt gates the heavyweight human-takeover handoff.
+  // first time Caroline's `[[PRIORITY]]` token fires, so we tag the conversation
+  // `ai:data-complaint` (for the systemic watchdog's count) only once. Distinct
+  // from escalationFiredAt: the priority signal is a lightweight classification
+  // that leaves Caroline active, whereas escalationFiredAt gates the heavyweight
+  // human-takeover handoff.
   priorityFiredAt?: string | null;
   userTurnCount?: number;
   // Personalization context for a verified, logged-in customer. Populated at
@@ -170,19 +171,11 @@ export interface IntercomAccountConfig {
   botAdminId: string;
   defaultInboxId: string;
   fallbackSlackSupervisionChannel: string;
-  // Fast priority page (Lane A). When a customer complains about a data issue
-  // and Caroline emits the `[[PRIORITY]]` token, the channel layer posts a page
-  // to `prioritySlackChannelId` via Slack chat.postMessage as the "Ops" bot
-  // (token MUSO_SLACK_BOT_TOKEN_OPERATIONS, overridable via the
-  // PRIORITY_SLACK_BOT_TOKEN_VAR env var — symmetric with the Lane B watchdog).
-  // The bot token is read from the gateway's environment, NEVER stored in config,
-  // so no secret lands in openclaw-edge.json. Feature is OFF (token still stripped
-  // from the reply; a one-line warning logged) when the channel id is unset OR the
-  // bot-token env var is absent from the gateway env at runtime.
-  prioritySlackChannelId?: string;
-  // Slack user IDs to @-mention in the priority page (e.g. ["U7RP6HKUZ"] for
-  // Aaron). Trusted config — rendered as real mentions, never escaped.
-  priorityMentionUserIds?: string[];
+  // NB: the priority signal no longer pages from this lane. On `[[PRIORITY]]`,
+  // Caroline's conversation is just TAGGED `ai:data-complaint` (priority-signal.ts);
+  // the Lane B watchdog (scripts/intercom-data-complaint-watchdog.py) pages
+  // leadership only when a data category crosses many users (systemic). So there
+  // is no per-account Slack channel / mention config here anymore.
   fallbackAcknowledgement: string;
   requireMappedHumanAdmin: boolean;
   adminMapping: Record<string, string>;
@@ -252,10 +245,10 @@ export interface IntercomClient {
   }): Promise<void>;
 
   // Attach a tag (by name) to a conversation. Used by the priority signal to
-  // mark a conversation `ai:priority-paged` after a page is delivered, so the
-  // Lane B backstop watchdog can skip it (cross-lane dedup). Resolves the tag
-  // by name to its id (creating it if absent) then attaches it. Best-effort at
-  // the call site — never let a tag failure affect the customer reply.
+  // mark a conversation `ai:data-complaint` so the Lane B systemic watchdog can
+  // fold it into its cross-user cluster count. Resolves the tag by name to its
+  // id (creating it if absent) then attaches it. Best-effort at the call site —
+  // never let a tag failure affect the customer reply.
   addTag(conversationId: string, name: string, adminId: string): Promise<void>;
 
   getConversation(params: {

@@ -1,26 +1,23 @@
 """Behavioral tests for scripts/intercom-data-complaint-watchdog.py.
 
-This is Lane B — the backstop that catches DATA complaints Caroline's inline
-`[[PRIORITY]]` signal under-flagged or failed to page (Aaron's 2026-06-22 ask).
-CI's py_compile proves the script parses; these tests prove the *decisions*
-that make it a useful backstop without spamming Aaron:
+This watchdog is the SYSTEMIC cluster detector (Aaron 2026-06-23): it pages the
+priority channel only when the same data category crosses MANY distinct users,
+not per individual complaint. CI's py_compile proves the script parses; these
+tests prove the *decisions* that make it a useful systemic detector:
 
-  - complaint_match fires only when a data noun co-occurs with a complaint
-    signal — a calm "how do I add credits?" must NOT page, "my credits are all
-    wrong" must;
-  - already_paged honours the ai:priority-paged cross-lane dedup tag that Lane A
-    sets (this string must stay in sync with PRIORITY_PAGED_TAG in
-    priority-signal.ts);
-  - the cooldown ledger suppresses re-paging the same conversation within the
-    window;
-  - slack_escape neutralizes <!channel>/<@U> injection in untrusted customer
-    text, while the trusted config mention still renders.
+  - detect_complaint fires on a keyword match (data noun + complaint signal) OR
+    Caroline's `ai:data-complaint` tag, and maps the match to a coarse category;
+  - find_clusters counts DISTINCT users per category and only surfaces a
+    category at/above the threshold (a single loud user is NOT systemic);
+  - DATA_COMPLAINT_TAG stays in sync with the plugin's tag;
+  - the cooldown ledger is per-CATEGORY;
+  - slack_escape / the copy-block fence neutralize injection in untrusted text.
 
-Stdlib unittest + stubs only — no pytest, no network — so it runs under the
-same bare `python3` the py_compile CI job already uses.
+Stdlib unittest + stubs only — no pytest, no network.
 """
 import importlib.util
 import pathlib
+import re
 import unittest
 
 _SCRIPT = (
@@ -35,79 +32,162 @@ _spec.loader.exec_module(wd)
 AT = 1_000_000
 
 
-def make_conv(body="", created_at=AT - 1000, tags=(), email="user@example.com"):
+def make_conv(body="", created_at=AT - 1000, tags=(), email="user@example.com", cid="c1"):
     return {
-        "id": "c1",
+        "id": cid,
         "created_at": created_at,
         "tags": {"tags": [{"name": n} for n in tags]},
         "source": {"body": body, "author": {"email": email}},
     }
 
 
-class ComplaintMatch(unittest.TestCase):
-    def test_data_noun_plus_complaint_signal_fires(self):
-        self.assertIsNotNone(wd.complaint_match("all my credits are wrong!"))
-        self.assertIsNotNone(wd.complaint_match("my stream counts have been wrong for weeks"))
-        self.assertIsNotNone(wd.complaint_match("my profile data is missing"))
+class Categorize(unittest.TestCase):
+    def test_coarse_buckets(self):
+        self.assertEqual(wd.categorize("credit"), "credits")
+        self.assertEqual(wd.categorize("credits"), "credits")
+        self.assertEqual(wd.categorize("streams"), "analytics")
+        self.assertEqual(wd.categorize("plays"), "analytics")
+        self.assertEqual(wd.categorize("analytics"), "analytics")
+        self.assertEqual(wd.categorize("profile"), "profile")
+        self.assertEqual(wd.categorize("metadata"), "profile")
+        self.assertEqual(wd.categorize("anything-else"), "data")
+
+
+class DetectComplaint(unittest.TestCase):
+    def test_keyword_complaint_fires_with_category(self):
+        ev = wd.detect_complaint(make_conv(body="all my credits are wrong", email="a@x.com"))
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["category"], "credits")
+        self.assertEqual(ev["email"], "a@x.com")
+        self.assertEqual(ev["user"], "a@x.com")
+
+    def test_tag_only_fires_as_data(self):
+        # Keywords miss it, but Caroline tagged it — still counted (generic bucket).
+        ev = wd.detect_complaint(make_conv(body="something is off here", tags=("ai:data-complaint",)))
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["category"], "data")
 
     def test_calm_question_does_not_fire(self):
-        # Data noun but no complaint signal — must not page Aaron.
-        self.assertIsNone(wd.complaint_match("how do I add credits to my profile?"))
-        self.assertIsNone(wd.complaint_match("where can I see my streams?"))
+        self.assertIsNone(wd.detect_complaint(make_conv(body="how do I add credits?")))
 
-    def test_complaint_without_data_noun_does_not_fire(self):
-        # Frustration but not about data — out of scope for this lane.
-        self.assertIsNone(wd.complaint_match("this is broken and I am angry about billing"))
-
-    def test_analytics_in_scope(self):
-        # Scope per Nick: analytics/stream-counts ARE in scope for the page.
-        self.assertIsNotNone(wd.complaint_match("the analytics are outdated and wrong"))
+    def test_anonymous_user_keyed_by_conversation(self):
+        ev = wd.detect_complaint(make_conv(body="my streams are wrong", email="", cid="cZ"))
+        self.assertEqual(ev["user"], "anon:cZ")
 
 
-class AlreadyPaged(unittest.TestCase):
-    def test_skips_conversation_lane_a_already_paged(self):
-        self.assertTrue(wd.already_paged(make_conv(tags=("ai:priority-paged",))))
-
-    def test_does_not_skip_untagged(self):
-        self.assertFalse(wd.already_paged(make_conv(tags=("ai:credits",))))
-
-    def test_tag_constant_matches_plugin(self):
-        # The cross-lane dedup contract: must equal PRIORITY_PAGED_TAG in
-        # plugins/intercom/src/priority-signal.ts.
-        self.assertEqual(wd.PRIORITY_PAGED_TAG, "ai:priority-paged")
-
-
-class FindCandidates(unittest.TestCase):
-    def _patch_fetch(self, convs):
-        wd.fetch_created_between = lambda *a, **k: convs
-
-    def test_picks_complaints_and_skips_paged_and_calm(self):
+class FindClusters(unittest.TestCase):
+    def test_three_distinct_users_form_a_cluster(self):
         convs = [
-            make_conv(body="my credits are all wrong", email="a@x.com"),
-            make_conv(body="how do I claim a profile?", email="b@x.com"),  # calm
-            make_conv(body="data is missing", tags=("ai:priority-paged",), email="c@x.com"),  # paged
+            make_conv(body="my credits are wrong", email="a@x.com", cid="1"),
+            make_conv(body="credits missing", email="b@x.com", cid="2"),
+            make_conv(body="credits incorrect", email="c@x.com", cid="3"),
         ]
-        self._patch_fetch(convs)
-        out = wd.find_candidates("tok", AT, 60, 3)
-        emails = [c["email"] for c in out["candidates"]]
-        self.assertEqual(emails, ["a@x.com"])
+        clusters, groups = wd.find_clusters(convs, threshold=3)
+        self.assertIn("credits", clusters)
+        self.assertEqual(len(clusters["credits"]), 3)
+
+    def test_two_users_is_not_systemic(self):
+        convs = [
+            make_conv(body="my credits are wrong", email="a@x.com", cid="1"),
+            make_conv(body="credits missing", email="b@x.com", cid="2"),
+        ]
+        clusters, _ = wd.find_clusters(convs, threshold=3)
+        self.assertNotIn("credits", clusters)
+
+    def test_same_user_counts_once(self):
+        # One loud user reporting three times is not three users.
+        convs = [
+            make_conv(body="my credits are wrong", email="a@x.com", cid="1"),
+            make_conv(body="credits still missing", email="a@x.com", cid="2"),
+            make_conv(body="credits incorrect again", email="a@x.com", cid="3"),
+        ]
+        clusters, groups = wd.find_clusters(convs, threshold=3)
+        self.assertEqual(len(groups["credits"]), 1)
+        self.assertNotIn("credits", clusters)
+
+    def test_tag_only_hits_bucket_as_data_not_the_keyword_category(self):
+        convs = [
+            make_conv(body="my credits are wrong", email="a@x.com", cid="1"),
+            make_conv(body="credits missing", email="b@x.com", cid="2"),
+            # keyword miss, tagged — counts under "data", not "credits"
+            make_conv(body="subtle complaint keywords miss", tags=("ai:data-complaint",), email="c@x.com", cid="3"),
+        ]
+        clusters, groups = wd.find_clusters(convs, threshold=3)
+        self.assertEqual(len(groups["credits"]), 2)
+        self.assertEqual(len(groups["data"]), 1)
+        self.assertNotIn("credits", clusters)
+
+    def test_email_casing_counts_as_one_user(self):
+        # Case-insensitive email: "A@x"/"a@x" is one human, not two — must NOT
+        # let a single user falsely cross the threshold.
+        convs = [
+            make_conv(body="my credits are wrong", email="Alice@X.com", cid="1"),
+            make_conv(body="credits still missing", email="alice@x.com", cid="2"),
+            make_conv(body="credits incorrect", email="ALICE@x.COM", cid="3"),
+        ]
+        clusters, groups = wd.find_clusters(convs, threshold=3)
+        self.assertEqual(len(groups["credits"]), 1)
+        self.assertNotIn("credits", clusters)
+
+    def test_analytics_nouns_cluster_together(self):
+        convs = [
+            make_conv(body="my streams are wrong", email="a@x.com", cid="1"),
+            make_conv(body="plays not updating", email="b@x.com", cid="2"),
+            make_conv(body="analytics outdated", email="c@x.com", cid="3"),
+        ]
+        clusters, _ = wd.find_clusters(convs, threshold=3)
+        self.assertIn("analytics", clusters)
+        self.assertEqual(len(clusters["analytics"]), 3)
 
 
 class Cooldown(unittest.TestCase):
-    def test_prune_keeps_recent_drops_old(self):
+    def test_prune_is_per_category(self):
         cooldown = 24 * 3600
-        led = {"recent": AT - 100, "old": AT - 10 * 24 * 3600}
+        led = {"credits": AT - 100, "analytics": AT - 10 * 24 * 3600}
         pruned = wd.prune_ledger(led, AT, cooldown)
-        self.assertIn("recent", pruned)
-        self.assertNotIn("old", pruned)
+        self.assertIn("credits", pruned)
+        self.assertNotIn("analytics", pruned)
 
 
-class SlackEscape(unittest.TestCase):
-    def test_escapes_ampersand_first(self):
+class Escaping(unittest.TestCase):
+    def test_slack_escape_ampersand_first(self):
         self.assertEqual(wd.slack_escape("a & b < c > d"), "a &amp; b &lt; c &gt; d")
 
-    def test_neutralizes_channel_ping(self):
+    def test_slack_escape_neutralizes_channel_ping(self):
         self.assertEqual(wd.slack_escape("<!channel>"), "&lt;!channel&gt;")
+
+
+class SystemicMessage(unittest.TestCase):
+    def _cluster(self, snippet="credits gone", email="luis@x.com"):
+        ev = {"category": "credits", "user": email, "email": email,
+              "conv_id": "9", "snippet": snippet, "ts": AT, "matched": "credits/wrong"}
+        return {"credits": {email: ev}}
+
+    def test_renders_mention_count_and_deeplink(self):
+        msg = wd.build_systemic_message(self._cluster(), ["U7RP6HKUZ"], "ws_1", 24, 8)
+        self.assertIn("<@U7RP6HKUZ>", msg)
+        self.assertIn("1 users reporting credits problems", msg)
+        self.assertIn("ws_1", msg)
+        self.assertIn("/9", msg)
+
+    def test_escapes_injection_in_snippet(self):
+        msg = wd.build_systemic_message(self._cluster(snippet="fix it <!channel>"), ["U7RP6HKUZ"], "ws_1", 24, 8)
+        # The mrkdwn body escapes it; only the trusted mention renders a ping.
+        self.assertIn("&lt;!channel&gt;", msg)
+        self.assertEqual(len(re.findall(r"<@U", msg)), 1)
+
+    def test_copy_block_neutralizes_fence_breakout(self):
+        ev = {"category": "credits", "user": "a@x.com", "email": "a@x.com",
+              "conv_id": "9", "snippet": "see ``` <@U999>", "ts": AT, "matched": "credits/wrong"}
+        block = wd.build_copy_block({"credits": {"a@x.com": ev}}, "ws_1", 24, 8)
+        # Exactly the two wrapping fences — the customer's ``` was stripped.
+        self.assertEqual(block.count("```"), 2)
+
+
+class DataComplaintTag(unittest.TestCase):
+    def test_tag_matches_plugin(self):
+        # Must equal DATA_COMPLAINT_TAG in plugins/intercom/src/priority-signal.ts.
+        self.assertEqual(wd.DATA_COMPLAINT_TAG, "ai:data-complaint")
 
 
 class ResolveSlackToken(unittest.TestCase):
@@ -129,7 +209,6 @@ class ResolveSlackToken(unittest.TestCase):
                 os.environ[k] = v
 
     def test_prefers_ops_bot_token(self):
-        # Lane B unifies on the Ops bot identity with Lane A.
         import os
         os.environ["MUSO_SLACK_BOT_TOKEN_OPERATIONS"] = "xoxb-ops"
         os.environ["SLACK_BOT_TOKEN"] = "xoxb-other"
@@ -145,23 +224,6 @@ class ResolveSlackToken(unittest.TestCase):
         os.environ["PRIORITY_SLACK_BOT_TOKEN_VAR"] = "MY_BOT"
         os.environ["MY_BOT"] = "xoxb-custom"
         self.assertEqual(wd.resolve_slack_token(), "xoxb-custom")
-
-
-class BuildMessage(unittest.TestCase):
-    def test_renders_trusted_mention_and_escapes_snippet(self):
-        cands = [{"id": "9", "email": "u@x.com", "matched": "credits/wrong",
-                  "snippet": "fix it <!channel>"}]
-        msg = wd.build_message(cands, ["U7RP6HKUZ"], "ws_1")
-        self.assertIn("<@U7RP6HKUZ>", msg)        # trusted mention renders
-        self.assertIn("&lt;!channel&gt;", msg)    # untrusted snippet escaped
-        self.assertNotIn("<!channel>", msg)
-        self.assertIn("ws_1", msg)                 # deeplink present
-        self.assertIn("/9", msg)
-
-    def test_ignores_malformed_mention_id(self):
-        msg = wd.build_message([{"id": "9", "email": "", "matched": "x/y", "snippet": "s"}],
-                               ["not a real id <!channel>"], "ws_1")
-        self.assertNotIn("<!channel>", msg)
 
 
 if __name__ == "__main__":

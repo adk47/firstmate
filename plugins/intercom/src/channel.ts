@@ -27,8 +27,7 @@ import {
   type SilentDispatchReason,
 } from "./silent-dispatch.js";
 import { isIntentionalNoReply, stripNoReplySentinel } from "./no-reply.js";
-import { detectPrioritySignal, stripPrioritySentinel, PRIORITY_PAGED_TAG } from "./priority-signal.js";
-import { buildPrioritySlackPayload } from "./priority-slack.js";
+import { detectPrioritySignal, stripPrioritySentinel, DATA_COMPLAINT_TAG } from "./priority-signal.js";
 import { stripModelFallbackNotice, findModelFallbackNotices, isOnlyModelFallbackNotice } from "./sanitize-model-fallback.js";
 import { createOpenRouterJudge } from "./judge.js";
 import { createClickupTicket } from "./clickup.js";
@@ -784,108 +783,41 @@ export const intercomPlugin = createChatChannelPlugin({
                       // when a customer is complaining about a data issue. Detect
                       // on the RAW reply, then strip the token so the customer
                       // never sees it. Unlike NO_REPLY this does NOT suppress the
-                      // reply — we still post her (stripped) text and ALSO fire a
-                      // fast internal page below. Deduped once per conversation.
+                      // reply — we still post her (stripped) text. This lane does
+                      // NOT page anyone: it just CLASSIFIES the conversation as a
+                      // data complaint (tag `ai:data-complaint`) so the Lane B
+                      // watchdog can fold it into its systemic cluster count.
+                      // Leadership is paged only when the same data category
+                      // crosses MANY users (Aaron 2026-06-23: systemic, not noise).
+                      // Once per conversation.
                       const prioritySignal = detectPrioritySignal(joinedForReply);
                       const customerText = stripPrioritySentinel(joined);
                       if (prioritySignal.fired && !state.priorityFiredAt) {
-                        // Post the page as the Ops bot via Slack chat.postMessage.
-                        // The token is read from the gateway env var named by
-                        // PRIORITY_SLACK_BOT_TOKEN_VAR (default
-                        // MUSO_SLACK_BOT_TOKEN_OPERATIONS) — same override mechanism
-                        // as the Lane B watchdog, and NEVER from config so no secret
-                        // lands in openclaw-edge.json.
-                        const priorityTokenEnv = process.env.PRIORITY_SLACK_BOT_TOKEN_VAR || "MUSO_SLACK_BOT_TOKEN_OPERATIONS";
-                        const priorityBotToken = process.env[priorityTokenEnv]?.trim();
-                        const priorityChannel = account.prioritySlackChannelId?.trim();
-                        if (priorityChannel && priorityBotToken) {
-                          // Set the dedupe gate synchronously (race-safe: the check
-                          // above and this assignment run with no await between them,
-                          // so two messages can't both pass the gate). Capture the
-                          // prior value so the page-failure path can ROLL IT BACK —
-                          // mirrors executeEscalation (escalation-action.ts). Without
-                          // the rollback, a transient Slack blip would permanently
-                          // suppress Lane A retries on this conversation, and Lane B
-                          // can't be relied on to recover it (its finder only scans
-                          // recently-created conversations' opening message, so a
-                          // later-in-conversation or older-conversation complaint
-                          // would fall through both lanes).
-                          const prevPriorityFiredAt = state.priorityFiredAt ?? null;
-                          state.priorityFiredAt = new Date().toISOString();
-                          saveSessions(accountSessions).catch(() => {});
-                          const priorityPayload = buildPrioritySlackPayload({
-                            conversationId: result.conversationId,
-                            reason: prioritySignal.reason,
-                            // Prefer the verified identity (Intercom + admin-API
-                            // enrichment) over the regex-mined account email, so
-                            // the page names who complained instead of "unknown".
-                            customerEmail:
-                              state.enrichment?.verifiedEmail ?? state.knownFacts?.accountEmail ?? null,
-                            customerName:
-                              state.enrichment?.verifiedName ?? state.enrichment?.snapshot?.name ?? null,
-                            customerMessage: result.body,
-                            workspaceId: account.workspaceId,
-                            mentionUserIds: account.priorityMentionUserIds ?? [],
+                        // Capture the prior gate value so a tag FAILURE can roll it
+                        // back. Otherwise a transient Intercom error would set the
+                        // once-per-conversation gate but never land the tag, and the
+                        // next [[PRIORITY]] would be suppressed. For a later-message or
+                        // keyword-miss complaint the tag is the ONLY signal the
+                        // systemic watchdog gets, so it must be able to retry (mirrors
+                        // the rollback in executeEscalation / the old priority page).
+                        const prevPriorityFiredAt = state.priorityFiredAt ?? null;
+                        state.priorityFiredAt = new Date().toISOString();
+                        saveSessions(accountSessions).catch(() => {});
+                        log?.info?.(
+                          `[intercom:priority] data complaint classified conv=${result.conversationId} reason=${JSON.stringify(prioritySignal.reason ?? "")} — tagging ${DATA_COMPLAINT_TAG} (systemic-only; no per-individual page)`,
+                        );
+                        // Best-effort tag, fire-and-forget — never block or fail the
+                        // customer reply on it.
+                        client
+                          .addTag(result.conversationId, DATA_COMPLAINT_TAG, account.botAdminId)
+                          .catch((tagErr) => {
+                            // Reopen the gate so the next message retries the tag.
+                            state.priorityFiredAt = prevPriorityFiredAt;
+                            saveSessions(accountSessions).catch(() => {});
+                            log?.warn?.(
+                              `[intercom:priority] tag ${DATA_COMPLAINT_TAG} failed conv=${result.conversationId}: ${tagErr} — gate rolled back, will retry on next message`,
+                            );
                           });
-                          // Fire-and-forget: never block or fail the customer reply
-                          // on the page.
-                          fetch("https://slack.com/api/chat.postMessage", {
-                            method: "POST",
-                            headers: {
-                              "Content-Type": "application/json",
-                              Authorization: `Bearer ${priorityBotToken}`,
-                            },
-                            body: JSON.stringify({
-                              channel: priorityChannel,
-                              text: priorityPayload.text,
-                              blocks: priorityPayload.blocks,
-                              unfurl_links: false,
-                              unfurl_media: false,
-                            }),
-                          })
-                            .then(async (res) => {
-                              // chat.postMessage returns HTTP 200 with {ok:false,error}
-                              // on a logical failure (invalid_auth, not_in_channel, …),
-                              // so the JSON body must be checked, not just res.ok.
-                              const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-                              if (!res.ok || !data.ok) {
-                                throw new Error(data.error || `HTTP ${res.status}`);
-                              }
-                              // Page delivered — the gate stays set. Tag the
-                              // conversation for Lane B's cross-lane dedup; a tag
-                              // failure here is benign (at worst Lane B double-pages
-                              // later) and must NOT roll back the gate — we don't
-                              // re-page a customer Aaron was already notified about.
-                              try {
-                                await client.addTag(result.conversationId, PRIORITY_PAGED_TAG, account.botAdminId);
-                              } catch (tagErr) {
-                                log?.warn?.(
-                                  `[intercom:priority] tag failed after successful page conv=${result.conversationId}: ${tagErr} — Lane B may re-page`,
-                                );
-                              }
-                            })
-                            .catch((err) => {
-                              // The PAGE itself failed (fetch rejected or Slack
-                              // returned ok:false). Reopen the dedupe gate so the next
-                              // [[PRIORITY]] turn retries instead of being suppressed.
-                              state.priorityFiredAt = prevPriorityFiredAt;
-                              saveSessions(accountSessions).catch(() => {});
-                              log?.error?.(
-                                `[intercom:priority] page failed conv=${result.conversationId}: ${err} — dedupe gate rolled back, will retry on next message`,
-                              );
-                            });
-                          log?.warn?.(
-                            `[intercom:priority] paging conv=${result.conversationId} as ${priorityTokenEnv} reason=${JSON.stringify(prioritySignal.reason ?? "")}`,
-                          );
-                        } else {
-                          // Token fired but the page isn't fully configured: no channel
-                          // id, or the bot-token env var is absent from the gateway env.
-                          // The token was already stripped from the reply; surface the
-                          // gap (never log the token value — only presence + env name).
-                          log?.warn?.(
-                            `[intercom:priority] signal fired but page not configured: channel=${priorityChannel ? "set" : "unset"}, bot-token env ${priorityTokenEnv}=${priorityBotToken ? "found" : "NOT_FOUND in gateway env"} conv=${result.conversationId} — no page sent`,
-                          );
-                        }
                       }
                       const stripped = stripConversationContext(customerText, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId });
                       // Outbound reasoning-preamble guard. The reasoning model
