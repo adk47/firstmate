@@ -22,6 +22,17 @@
 # An earlier iteration sent unsigned bodies and accepted 401 as healthy, which
 # was structurally blind to HMAC drift AND self-noised the edge gateway log
 # with hundreds of invalid-HMAC lines per day. Signing closes both gaps.
+#
+# Service coverage: probes /health on the Muso backends reachable from THIS
+# (OVH) cluster — core-backend (public api.muso.ai) plus feed-service and
+# industry-api, hit via in-cluster Service DNS in the muso-prod namespace
+# (http://<svc>.muso-prod:8000/health, verified 200). Expected "200" on purpose
+# so a degraded service (e.g. feed on a bad DB pool) pages. NOT covered, and why:
+#   - muso-chat / ai-chat-api: runs on AWS, not resolvable from this cluster —
+#     needs a public health URL or an AWS-side probe.
+#   - analytics-worker: background SQS consumer, no HTTP — needs an SQS
+#     queue-age / heartbeat signal instead.
+#   - customer-api-mcp (mcp.muso.ai) and core-ai: no /health endpoint yet.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -40,7 +51,9 @@ data:
       {"label": "prodigi-webhook",          "url": "https://api.muso.ai/api/w/v2/payment/prodigi-webhook",    "method": "POST", "expected": "200,400,401,500"},
       {"label": "klaviyo-event-webhook",    "url": "https://api.muso.ai/api/wh/klaviyo/event",                "method": "POST", "expected": "200,401"},
       {"label": "integration-auth",         "url": "https://api.muso.ai/api/i/auth/find-or-create-user",      "method": "POST", "expected": "200,401"},
-      {"label": "api-muso-health",          "url": "https://api.muso.ai/health",                              "method": "GET",  "expected": "200"}
+      {"label": "api-muso-health",          "url": "https://api.muso.ai/health",                              "method": "GET",  "expected": "200"},
+      {"label": "feed-service-health",      "url": "http://feed-service.muso-prod:8000/health",               "method": "GET",  "expected": "200"},
+      {"label": "industry-api-health",      "url": "http://industry-api.muso-prod:8000/health",               "method": "GET",  "expected": "200"}
     ]
   probe.py: |
     #!/usr/bin/env python3
