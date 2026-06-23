@@ -30,8 +30,8 @@ case "$login" in
   liflovs)   echo "U03TYGJF1N3" ;;  # Serhii
   adk47)     echo "U7RP6HKUZ"   ;;  # Aaron (authors web-credits-next PRs; the bot
                                     # can't self-approve, so those degrade to review-only)
+  azure-kirin) echo "U03LP8YHLPK" ;;  # Mariia (octave-ui; authors web-credits-next PRs)
   # Add more as repos/authors come into scope, e.g.:
-  #   azure-kirin) echo "<Mariia-uid>" ;;  # Mariia (octave-ui) — pending her Slack UID
   #   <fede-gh-login>) echo "U07NF5A77E2" ;;  # Fede
   *) exit 1 ;;                        # unknown -> fail-closed (caller skips)
 esac

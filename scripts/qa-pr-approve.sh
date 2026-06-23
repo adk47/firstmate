@@ -41,8 +41,8 @@ LOG_DIR="${QA_PR_APPROVE_LOG_DIR:-api-logs/github}"
 # action, not a manual review by Aaron.
 
 # Approval allowlist — Slack UIDs of the only people who may trigger an approval.
-# Aaron U7RP6HKUZ, Fede U07NF5A77E2, Serhii U03TYGJF1N3, Nick U0AL36NADEY.
-ALLOWED_UIDS=("U7RP6HKUZ" "U07NF5A77E2" "U03TYGJF1N3" "U0AL36NADEY")
+# Aaron U7RP6HKUZ, Fede U07NF5A77E2, Serhii U03TYGJF1N3, Nick U0AL36NADEY, Mariia U03LP8YHLPK.
+ALLOWED_UIDS=("U7RP6HKUZ" "U07NF5A77E2" "U03TYGJF1N3" "U0AL36NADEY" "U03LP8YHLPK")
 
 die() { echo "qa-pr-approve: $2" >&2; exit "$1"; }
 
