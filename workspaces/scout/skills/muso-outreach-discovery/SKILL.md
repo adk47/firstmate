@@ -186,8 +186,13 @@ LinkedIn URL recalled without a fetch is not evidence.
   `/opt/hydra/workspaces/cmo/skills/muso-outreach-engine/references/parent-companies.md`)
   → drop, target the parent; a new parent owning NocoDB subsidiaries → flag for
   rollup, add to that shared file (do not delete subsidiary rows; flag for Fede);
-  standalone → keep. Also drop GHL-pipeline matches → terminal reject `IN_GHL`
-  (the GHL search is in the Appendix).
+  standalone → keep. **GHL match = best-effort filter, NOT a required gate:** if
+  the GHL pipeline is reachable, drop GHL-pipeline matches → terminal reject
+  `IN_GHL` (the GHL search is in the Appendix); if the GHL read fails (e.g. 403 /
+  network), SKIP the `IN_GHL` filter, still ship the batch, and add a batch flag
+  `⚠ GHL pipeline filter unavailable — N candidates not checked` so Fede knows.
+  Never fail the batch on a GHL failure — its durable home is CMO at enrollment,
+  which owns the GHL pipeline.
 - **Tier** (see the **Tier Rubric** above): classify each survivor against the
   rubric using its spend-signal evidence and label it. **If the requester named a
   tier filter ("Tier 1/2 only"), DROP everything outside it** — never surface a
@@ -259,9 +264,12 @@ Also update the shared
 new parents/subsidiaries and log
 to `api-logs/discovery/YYYY-MM-DD.jsonl`.
 
-## Appendix — GHL pipeline check (Step 4, `IN_GHL`)
+## Appendix — GHL pipeline check (Step 4, `IN_GHL`) — best-effort
 
-Drop any candidate already in the GHL B2B-Ads-Clio pipeline (all stages):
+Drop any candidate already in the GHL B2B-Ads-Clio pipeline (all stages). This is
+a **best-effort** filter: `$GHL_API_KEY` is a CMO-owned credential that may be
+absent or scoped-out for Scout, so a `403`/auth failure here is expected and
+**must not fail the batch** — skip `IN_GHL` and flag the batch per Step 4.
 
 ```bash
 source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
@@ -269,6 +277,7 @@ source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunitie
   -d "location_id=S5w31kRRgsBjjiVATWlP" -d "pipeline_id=GeSt85TueSvJ0SNFZXfQ" \
   -d "limit=100" -d "page=1"
 # Paginate all pages. A match → terminal reject IN_GHL (feed it into finalize's rejects).
+# On 403 / non-200 / empty $GHL_API_KEY: SKIP IN_GHL, ship the batch, flag it — never fail-closed on GHL.
 ```
 
 ## Silent Rule
