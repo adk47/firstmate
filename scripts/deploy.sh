@@ -44,7 +44,7 @@ source "$SCRIPT_DIR/lib/codex-version.sh"
 # skills-all/muso-cli skill). Independent release cadence from openclaw;
 # bump deliberately. Installed from the repo's GitHub Release with
 # checksum verification (install_muso below) — never a bare latest.
-MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.3.0}"
+MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.5.0}"
 
 # Detect if we're running on Node 8 (the HYDRA host)
 if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; then
@@ -1825,14 +1825,18 @@ for _profile in main edge; do
 done
 
 # -------------------------------------------------------------------
-# Step 4d.6: Pin the muso CLI (main profile only)
+# Step 4d.6: Pin the muso CLI (main + edge)
 # -------------------------------------------------------------------
-# muso is the admin-API/policy CLI for main-gateway agents (soak phase —
-# opt-in via skills-all/muso-cli; the muso-admin-api.sh wrapper remains
-# the documented path until the soak PR flips the ops skills). The binary
-# is host-wide, but only main-profile agents consume it, so edge-only
-# deploys skip the pin.
-if needs_target "main"; then
+# muso is the admin-API/policy CLI. main-gateway agents use it (soak phase),
+# and as of the Caroline self-serve work the EDGE gateway consumes it too: the
+# support-tools gated-write tools (profiles_claim_self, credits_verify,
+# profiles_consolidate) shell `muso <verb> --actor-identity` so muso-cli's
+# capability gate (ownership re-verify + per-actor caps + audit) is load-bearing
+# for Caroline. The binary is host-wide (/usr/local/bin/muso); pin it whenever
+# main OR edge is targeted so an edge-only deploy still upgrades it. The edge
+# process additionally needs MUSO_STATE_DIR + a muso login (see the edge env
+# block) — without them the gated writes fail closed.
+if needs_target "main" || needs_target "edge"; then
   log "Step 4d.6/9: Pinning muso CLI to ${MUSO_CLI_VERSION}..."
   if ! install_muso; then
     fail "muso CLI pin failed (target ${MUSO_CLI_VERSION})"
@@ -2106,6 +2110,37 @@ if needs_target "main"; then
     log "WARN: plus the muso CLI vars (MUSO_ENV=prod, MUSO_NONINTERACTIVE=1, MUSO_STATE_DIR=/var/log/muso-ops"
     log "WARN: — see docs/runbooks/RUNBOOK.md, 'muso CLI (main gateway)'), then:"
     log "WARN:   systemctl restart openclaw-gateway-main"
+  fi
+fi
+
+# Edge gateway muso CLI env (Caroline self-serve). The edge support-tools
+# gated-write tools (profiles_claim_self / credits_verify / profiles_consolidate)
+# shell `muso <verb> --actor-identity`, so the edge process needs the same muso
+# runtime env as main. The binary is host-wide; when edge runs as the same OS
+# user as main, the muso login/config (/root/.config/muso) and the audit+caps
+# state (/var/log/muso-ops) are SHARED — MUSO_STATE_DIR must point at that same
+# dir so PR1's per-actor flock + day caps enforce ACROSS the main and edge
+# processes (the flock is cross-process). Warn-only, like the main block: creds
+# are manually provisioned, and failing would block deploys on fresh hosts.
+if needs_target "edge"; then
+  EDGE_ENV="/etc/openclaw/edge.env"
+  if [ -f "$EDGE_ENV" ]; then
+    edge_missing=()
+    grep -qE "^MUSO_ADMIN_EMAIL=.+"    "$EDGE_ENV" || edge_missing+=(MUSO_ADMIN_EMAIL)
+    grep -qE "^MUSO_ADMIN_PASSWORD=.+" "$EDGE_ENV" || edge_missing+=(MUSO_ADMIN_PASSWORD)
+    grep -qE "^MUSO_ENV=prod$"          "$EDGE_ENV" || edge_missing+=("MUSO_ENV=prod")
+    grep -qE "^MUSO_NONINTERACTIVE=1$"  "$EDGE_ENV" || edge_missing+=("MUSO_NONINTERACTIVE=1")
+    grep -qE "^MUSO_STATE_DIR=/var/log/muso-ops$" "$EDGE_ENV" || edge_missing+=("MUSO_STATE_DIR=/var/log/muso-ops")
+    grep -qE "^MUSO_REQUESTER=.+"       "$EDGE_ENV" || edge_missing+=("MUSO_REQUESTER (e.g. caroline@muso.ai)")
+    grep -qE "^MUSO_CAPABILITY_APPROVER=.+" "$EDGE_ENV" || edge_missing+=("MUSO_CAPABILITY_APPROVER (required by profiles_consolidate)")
+    if (( ${#edge_missing[@]} > 0 )); then
+      log "WARN: $EDGE_ENV is missing: ${edge_missing[*]}"
+      log "WARN: Caroline's gated muso writes fail closed until these are added (the tools are dark-shipped OFF regardless)."
+      log "WARN: also confirm the edge gateway user shares the muso login (/root/.config/muso) and can write /var/log/muso-ops."
+      log "WARN: fix with:  sudo vim $EDGE_ENV  &&  systemctl restart openclaw-gateway-edge"
+    fi
+  else
+    log "WARN: $EDGE_ENV does not exist — Caroline's gated muso writes will fail closed."
   fi
 fi
 

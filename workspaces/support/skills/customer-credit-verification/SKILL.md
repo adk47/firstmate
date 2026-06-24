@@ -24,11 +24,16 @@ proof. Caroline confirms the customer owns the profile, shows them what's pendin
 asks them for proof, and routes the outcome. The only outcomes are **approve** (a
 human executes it) or **ask the customer for more proof**.
 
-**Caroline NEVER approves and NEVER rejects credits.** The approve is an
-irreversible write gated inside `muso-admin-api.sh` (`enforce_credit_approve_gate`)
-and executed by a trusted human/ops. There is **no reject** – when proof is
-insufficient, Caroline asks for more (the case stays open). A hard reject is a human
-decision / the 14-day-no-response policy, never Caroline's.
+**Caroline approves ONLY the catalog-corroborated case, and NEVER rejects.** The
+single approve path is the gated `credits_verify` tool (Step 3 case 2), which
+re-verifies ownership AND the catalog corroboration server-side in muso-cli and
+refuses (`route_to_human`) anything it cannot confirm — so a contradicted or
+private/uncorroborated claim can NEVER be auto-approved; it stays a human decision
+via a recommend-approve / needs-human ticket. While `credits_verify` is dark-shipped
+off (`{disabled:true}`), even the corroborated case files a recommend-approve ticket
+for a human, exactly as before. There is **no reject** – when proof is insufficient,
+Caroline asks for more (the case stays open); a hard reject is a human decision /
+the 14-day-no-response policy, never Caroline's.
 
 This skill is **inbound-only**: act only inside a conversation the customer started.
 Do not proactively reach out about pending credits.
@@ -68,6 +73,13 @@ Do not proactively reach out about pending credits.
   `credits_search` on it. Expect catalog corroboration or contradiction to be
   **rare**; needs-human is the normal outcome. **Never narrate or imply a check you
   did not actually run.**
+- `credits_verify` – gated WRITE (dark-shipped; returns `{disabled:true}` until
+  enabled). Approves the customer's OWN pending credit request, but **only when
+  muso's catalog corroborates it server-side** — it re-verifies ownership AND the
+  same catalog match, and refuses (`route_to_human`) anything it can't confirm. It
+  is reachable in **exactly one** branch below (Step 3 case 2, catalog
+  corroboration); never on a contradiction or on private/uncorroborated proof.
+  Preview (`apply:false`) → confirm → `apply:true`.
 - `create_ticket` – file a `credit-verify` recommend-approve / needs-human ticket.
 
 ## Flow
@@ -128,10 +140,16 @@ skill.
    contradicting-credit case. Never approve over a contradicting credit.
 2. **Catalog corroboration.** Muso's **own catalog** (`credits_search` /
    `profile_status`) confirms **their** name in the **exact** claimed role on the
-   track → file a **recommend-approve** `credit-verify` ticket carrying the catalog
-   corroboration (and any links) as evidence. A human executes the gated approve.
-   This is the **only** path to recommend-approve: it must rest on a check **you
-   actually ran**, never on the customer's description of a source.
+   track. This is the **only** approvable path, and it must rest on a check **you
+   actually ran**, never on the customer's description of a source. Then:
+   - If `credits_verify` is **enabled**: you may approve directly. Preview
+     (`apply:false`), confirm with the customer, then `apply:true`. muso
+     RE-VERIFIES ownership + the catalog corroboration server-side and refuses
+     (`route_to_human`) if it can't confirm — if it refuses or returns
+     `{disabled:true}`, fall back to the recommend-approve ticket below.
+   - Otherwise (disabled, or muso refused): file a **recommend-approve**
+     `credit-verify` ticket carrying the catalog corroboration (and any links) as
+     evidence; a human executes the gated approve.
 3. **Public link you cannot verify, or private proof.** You cannot open URLs – a
    pasted Tidal/Genius/Jaxsta link is a *claim*, not evidence you verified. You **CAN
    view screenshots, images, and PDFs** the customer attaches (SOUL Attachments

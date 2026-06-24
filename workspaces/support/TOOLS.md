@@ -1,11 +1,12 @@
 # TOOLS.md -- support
 
-## Allowed Tools (EXACTLY 12)
+## Allowed Tools (EXACTLY 15)
 
-This agent has the most restricted tool set in HYDRA. Only these 12 tools are permitted, split into two groups:
+This agent has the most restricted tool set in HYDRA. Only these 15 tools are permitted, split into three groups:
 
 - **Action tools (1-10)** -- write or read customer-facing state. Implemented as plugin-registered tools via the `support-tools` OpenClaw plugin. The agent calls them by name; the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
 - **Reference tools (11-12)** -- read-only semantic + BM25 retrieval against `workspaces/support/reference/*.md`, provided by openclaw's bundled memory-core via the per-agent `memorySearch` config (enabled on both edge and main profiles, indexing the read-only `reference/` subdirectory only). No writes; no customer-data persistence; no auto-recall.
+- **Gated self-serve write tools (13-15)** -- `profiles_claim_self`, `credits_verify`, `profiles_consolidate`. Each shells `muso <verb> --actor-identity <verified-email>` through a thin bash wrapper; muso-cli's capability gate is the ownership/caps/audit boundary. Dark-shipped OFF by default (per-account rollout).
 
 ## Authentication (CRITICAL -- shared across tools 1, 2, 5, 6, 7, 8, 9)
 
@@ -128,6 +129,27 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 - **Returns**: The full text of a single indexed chunk by id (typically followed up from a `memory_search` hit).
 - **Auth**: same as `memory_search`.
 - **When to use**: when a `memory_search` result snippet is truncated and you need the full chunk before responding.
+
+### 13. profiles_claim_self
+
+- **Wraps**: `muso profiles claim-self --actor-identity <verified-email>` via the bash wrapper at `workspaces/support/skills/customer-profile-claim/scripts/claim-self.sh` (the muso capability gate is the ownership/caps/audit boundary; the wrapper is thin). Gated WRITE counterpart of the read-only checks.
+- **Returns**: `{ok, mode, claim_id, profile_id, status}` (status applied|dry_run|noop) or `{ok:false, error}` (`route_to_human` on a non-owner claim, `disabled` until enabled).
+- **Auth**: muso uses the host login (`MUSO_ADMIN_*`, `MUSO_STATE_DIR`); the `--actor-identity` is the ctx-derived verified Intercom author email (`deriveConvId`+`getAuthorEmail`), NEVER a model arg. Per-actor caps + ownership re-verify are server-side in muso-cli.
+- **When to use**: via the `customer-profile-claim` skill, to verify a customer's OWN pending profile claim. Preview (`apply:false`) then apply.
+
+### 14. credits_verify
+
+- **Wraps**: `muso credits verify --actor-identity <verified-email>` (APPROVAL-tier PUT: also `--yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>`) via `workspaces/support/skills/customer-credit-verification/scripts/verify-credit.sh`. The WRITE counterpart of `credit_verification_check` (#8).
+- **Returns**: `{ok, mode, request_id, profile_id, status}` or `{ok:false, error}` (`route_to_human` when corroboration/ownership fails, `no_approver` if the approver env is unset, `disabled`).
+- **Auth**: same muso host auth + ctx-derived `--actor-identity` as #13; `--intercom-conv-id` is REQUIRED (it is the approval-ref). muso re-verifies ownership + deterministic catalog corroboration server-side and refuses without it; per-actor/day approval cap.
+- **When to use**: via the `customer-credit-verification` skill, AFTER the read-only check + the customer's proof, to approve their OWN corroborated pending credit. Preview then apply.
+
+### 15. profiles_consolidate
+
+- **Wraps**: `muso profiles consolidate --actor-identity <verified-email>` (APPROVAL-tier: `--yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>`) via `workspaces/support/skills/customer-profile-consolidate/scripts/consolidate.sh`. The WRITE counterpart of `dedupe_check` (#7).
+- **Returns**: `{ok, mode, survivor, dup_ids, status}` or `{ok:false, error}` (`route_to_human` on a cross-owner/claimed-dup merge, `no_approver` if the approver env is unset, `disabled`).
+- **Auth**: same muso host auth + ctx-derived `--actor-identity` as #13; `--intercom-conv-id` is REQUIRED (it is the approval-ref). muso re-verifies the survivor is the customer's and every duplicate is unclaimed + same-name; per-actor/day merge cap + per-call dups bound.
+- **When to use**: via the `customer-profile-consolidate` skill, to merge a customer's OWN unclaimed same-name duplicates into their profile. Preview then apply.
 
 ## Action Request Pattern
 

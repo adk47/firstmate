@@ -13,7 +13,10 @@
       "remove_credits",
       "order_address_update",
       "dedupe_check",
-      "credit_verification_check"
+      "credit_verification_check",
+      "profiles_claim_self",
+      "credits_verify",
+      "profiles_consolidate"
     ]
   },
   "configSchema": {
@@ -22,6 +25,15 @@
     "properties": {
       "creditVerificationEnabled": {
         "description": "Phase-1 dark-ship flag for credit_verification_check. Accepts true / \"true\" / \"1\" / 1; anything else (including absent) keeps the tool disabled. Deliberately untyped: the runtime parse in index.ts is the fail-closed layer, so an unexpected value shape degrades to flag-off instead of failing config validation and breaking plugin load."
+      },
+      "profilesClaimSelfEnabled": {
+        "description": "Phase-1 dark-ship flag for profiles_claim_self (gated WRITE: verify the customer's own pending profile claim via muso-cli). Accepts true / \"true\" / \"1\" / 1; anything else (including absent) keeps the tool disabled and returning a no-op sentinel. Same fail-closed runtime parse as creditVerificationEnabled."
+      },
+      "creditsVerifyEnabled": {
+        "description": "Phase-1 dark-ship flag for credits_verify (gated WRITE: verify/approve the customer's own pending credit request via muso-cli). Accepts true / \"true\" / \"1\" / 1; anything else (including absent) keeps the tool disabled and returning a no-op sentinel. Same fail-closed runtime parse as creditVerificationEnabled."
+      },
+      "profilesConsolidateEnabled": {
+        "description": "Phase-1 dark-ship flag for profiles_consolidate (gated APPROVAL-tier WRITE: merge the customer's own unclaimed same-name duplicates into their profile via muso-cli). Accepts true / \"true\" / \"1\" / 1; anything else (including absent) keeps the tool disabled and returning a no-op sentinel. Same fail-closed runtime parse as creditVerificationEnabled."
       }
     }
   }

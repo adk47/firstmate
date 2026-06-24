@@ -13,6 +13,9 @@ import { createRemoveCreditsTool, DEFAULT_REMOVE_CREDITS_SCRIPT } from "./tools/
 import { createOrderAddressUpdateTool, DEFAULT_UPDATE_ORDER_ADDRESS_SCRIPT } from "./tools/order-address-update.js";
 import { createDedupeCheckTool } from "./tools/dedupe-check.js";
 import { createCreditVerificationCheckTool } from "./tools/credit-verification-check.js";
+import { createProfilesClaimSelfTool, DEFAULT_PROFILES_CLAIM_SELF_SCRIPT } from "./tools/profiles-claim-self.js";
+import { createCreditsVerifyTool, DEFAULT_CREDITS_VERIFY_SCRIPT } from "./tools/credits-verify.js";
+import { createProfilesConsolidateTool, DEFAULT_PROFILES_CONSOLIDATE_SCRIPT } from "./tools/profiles-consolidate.js";
 import { createIntercomReader } from "./intercom-client.js";
 export default definePluginEntry({
   id: "support-tools",
@@ -214,5 +217,89 @@ export default definePluginEntry({
       });
     };
     api.registerTool(creditVerificationCheckFactory, { name: "credit_verification_check" });
+
+    // profiles_claim_self — gated WRITE counterpart of dedupe/verification checks:
+    // verify the customer's OWN pending profile claim by shelling
+    // `muso profiles claim-self --actor-identity <verified-email>` (muso-cli's
+    // capability gate does ownership + audit; the binary must be on edge). The
+    // actor email is the ctx-derived verified Intercom author (deriveConvId →
+    // getAuthorEmail), never a model arg. Dark-ship flag default OFF, same
+    // boolean/string/number coercion as credit_verification_check above.
+    const profilesClaimSelfRaw =
+      [_entry.profilesClaimSelfEnabled, _legacy.profilesClaimSelfEnabled].find(
+        (v) => typeof v === "boolean" || typeof v === "string" || typeof v === "number",
+      ) ?? process.env.PROFILES_CLAIM_SELF_ENABLED;
+    const profilesClaimSelfEnabled =
+      profilesClaimSelfRaw === true || profilesClaimSelfRaw === 1 || profilesClaimSelfRaw === "true" || profilesClaimSelfRaw === "1";
+    const profilesClaimSelfScriptPath =
+      pluginConfig.profilesClaimSelfScriptPath ?? DEFAULT_PROFILES_CLAIM_SELF_SCRIPT;
+    const profilesClaimSelfFactory = (ctx: any) => {
+      return createProfilesClaimSelfTool({
+        scriptPath: profilesClaimSelfScriptPath,
+        rateLimiter,
+        // Anti-spoof anchor: the trusted gateway session KEY (carries the convId).
+        sessionKey: ctx.sessionKey ?? "unknown",
+        intercomReader,
+        intercomToken,
+        enabled: profilesClaimSelfEnabled,
+      });
+    };
+    api.registerTool(profilesClaimSelfFactory, { name: "profiles_claim_self" });
+
+    // credits_verify — gated WRITE counterpart of credit_verification_check:
+    // verify (approve) the customer's OWN pending, catalog-corroborated credit
+    // request by shelling `muso credits verify --actor-identity <verified-email>`
+    // (muso-cli's capability gate does ownership + audit; the binary must be on
+    // edge). The actor email is the ctx-derived verified Intercom author
+    // (deriveConvId → getAuthorEmail), never a model arg. Dark-ship flag default
+    // OFF, same boolean/string/number coercion as profiles_claim_self above.
+    const creditsVerifyRaw =
+      [_entry.creditsVerifyEnabled, _legacy.creditsVerifyEnabled].find(
+        (v) => typeof v === "boolean" || typeof v === "string" || typeof v === "number",
+      ) ?? process.env.CREDITS_VERIFY_ENABLED;
+    const creditsVerifyEnabled =
+      creditsVerifyRaw === true || creditsVerifyRaw === 1 || creditsVerifyRaw === "true" || creditsVerifyRaw === "1";
+    const creditsVerifyScriptPath =
+      pluginConfig.creditsVerifyScriptPath ?? DEFAULT_CREDITS_VERIFY_SCRIPT;
+    const creditsVerifyFactory = (ctx: any) => {
+      return createCreditsVerifyTool({
+        scriptPath: creditsVerifyScriptPath,
+        rateLimiter,
+        // Anti-spoof anchor: the trusted gateway session KEY (carries the convId).
+        sessionKey: ctx.sessionKey ?? "unknown",
+        intercomReader,
+        intercomToken,
+        enabled: creditsVerifyEnabled,
+      });
+    };
+    api.registerTool(creditsVerifyFactory, { name: "credits_verify" });
+
+    // profiles_consolidate — gated WRITE counterpart of dedupe_check
+    // (APPROVAL-tier): fold the customer's OWN unclaimed same-name duplicates
+    // into the profile they own by shelling
+    // `muso profiles consolidate --actor-identity <verified-email>` (muso-cli's
+    // capability gate does ownership + audit; the binary must be on edge). The
+    // actor email is the ctx-derived verified Intercom author, never a model
+    // arg. Dark-ship flag default OFF, same coercion as the verbs above.
+    const profilesConsolidateRaw =
+      [_entry.profilesConsolidateEnabled, _legacy.profilesConsolidateEnabled].find(
+        (v) => typeof v === "boolean" || typeof v === "string" || typeof v === "number",
+      ) ?? process.env.PROFILES_CONSOLIDATE_ENABLED;
+    const profilesConsolidateEnabled =
+      profilesConsolidateRaw === true || profilesConsolidateRaw === 1 || profilesConsolidateRaw === "true" || profilesConsolidateRaw === "1";
+    const profilesConsolidateScriptPath =
+      pluginConfig.profilesConsolidateScriptPath ?? DEFAULT_PROFILES_CONSOLIDATE_SCRIPT;
+    const profilesConsolidateFactory = (ctx: any) => {
+      return createProfilesConsolidateTool({
+        scriptPath: profilesConsolidateScriptPath,
+        rateLimiter,
+        // Anti-spoof anchor: the trusted gateway session KEY (carries the convId).
+        sessionKey: ctx.sessionKey ?? "unknown",
+        intercomReader,
+        intercomToken,
+        enabled: profilesConsolidateEnabled,
+      });
+    };
+    api.registerTool(profilesConsolidateFactory, { name: "profiles_consolidate" });
   },
 });
