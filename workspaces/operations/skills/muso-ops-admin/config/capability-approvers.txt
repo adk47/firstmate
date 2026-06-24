@@ -1,0 +1,21 @@
+# Capability-approver allowlist (muso-cli v0.6.1+).
+#
+# SCOPED, separate from the global tier2-approvers.txt: muso-cli validates
+# --confirmed-by against THIS file ONLY for the capability-gated self-serve
+# verbs (credits verify, profiles consolidate, profiles claim-self). Entries
+# here can NOT authorize the global human tier-2 writes (profile/track merge,
+# deletes, bulk-destructive) — those still read tier2-approvers.txt.
+#
+# Matched case-insensitively against --confirmed-by; '#' comments and blank
+# lines ignored. A missing or empty file fails closed (every capability
+# approval-tier write is refused).
+#
+# caroline-autonomous is the synthetic, non-human service approver for
+# Caroline's autonomous approval-tier writes (set as MUSO_CAPABILITY_APPROVER
+# on the edge gateway). It is deliberately NOT a real person so the tier2-audit
+# trail distinguishes "Caroline auto-approved under standing policy" from a
+# human approval. The real authorization for these writes is muso-cli's
+# server-side ownership re-verify + per-actor day caps + (for credits)
+# deterministic catalog corroboration — not this handle.
+
+caroline-autonomous

@@ -362,6 +362,8 @@
         "config": {
           "creditVerificationEnabled": true,
           "profilesClaimSelfEnabled": true,
+          "creditsVerifyEnabled":     true,
+          "profilesConsolidateEnabled": true,
           "musoApiBase":             "https://api.muso.ai",
           "adminEmail":              { "source": "env", "provider": "hydra-env", "id": "MUSO_ADMIN_EMAIL" },
           "adminPassword":           { "source": "env", "provider": "hydra-env", "id": "MUSO_ADMIN_PASSWORD" },

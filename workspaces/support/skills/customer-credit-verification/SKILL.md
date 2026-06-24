@@ -1,6 +1,6 @@
 ---
 name: customer-credit-verification
-description: When a customer asks about credits they submitted that are stuck in "user verification needed", confirm ownership with the read-only credit_verification_check tool, ask the customer for proof, and either file a recommend-approve ticket for a human or keep asking for more proof. Caroline NEVER approves, NEVER rejects.
+description: When a customer asks about credits they submitted that are stuck in "user verification needed", confirm ownership with the read-only credit_verification_check tool, ask the customer for proof, and route the outcome. Caroline approves ONLY the catalog-corroborated case via the gated credits_verify tool; otherwise she files a recommend-approve ticket for a human or keeps asking for more proof. She NEVER rejects.
 triggers:
   - "verify my credits"
   - "my credits are pending"
@@ -21,17 +21,18 @@ triggers:
 A customer is asking about credits they submitted that are stuck in
 **`user_verification_needed`** (UVN) – the backend flagged the claim as needing
 proof. Caroline confirms the customer owns the profile, shows them what's pending,
-asks them for proof, and routes the outcome. The only outcomes are **approve** (a
-human executes it) or **ask the customer for more proof**.
+asks them for proof, and routes the outcome. The outcomes are **approve** (Caroline
+executes it via the gated `credits_verify` tool, but ONLY for the catalog-corroborated
+case — everything else is a human decision) or **ask the customer for more proof**.
 
 **Caroline approves ONLY the catalog-corroborated case, and NEVER rejects.** The
 single approve path is the gated `credits_verify` tool (Step 3 case 2), which
 re-verifies ownership AND the catalog corroboration server-side in muso-cli and
 refuses (`route_to_human`) anything it cannot confirm — so a contradicted or
 private/uncorroborated claim can NEVER be auto-approved; it stays a human decision
-via a recommend-approve / needs-human ticket. While `credits_verify` is dark-shipped
-off (`{disabled:true}`), even the corroborated case files a recommend-approve ticket
-for a human, exactly as before. There is **no reject** – when proof is insufficient,
+via a recommend-approve / needs-human ticket. If `credits_verify` returns
+`{disabled:true}` (the flag is off for this account), even the corroborated case
+files a recommend-approve ticket for a human instead. There is **no reject** – when proof is insufficient,
 Caroline asks for more (the case stays open); a hard reject is a human decision /
 the 14-day-no-response policy, never Caroline's.
 
@@ -40,8 +41,10 @@ Do not proactively reach out about pending credits.
 
 ## What this skill does NOT do
 
-- Approve or reject any credit (Caroline has no approve tool – a human executes the
-  gated approve; there is no autonomous reject at all).
+- Approve anything beyond the catalog-corroborated case, or reject any credit. Caroline's
+  only approve path is the gated `credits_verify` for the server-corroborated case (Step 3
+  case 2); every uncorroborated, contradicted, or private-proof claim stays a human
+  decision, and there is no autonomous reject at all.
 - Treat `credit_verification_check` output as a clearance. It is the customer's
   **pending list + ownership anchor**, not a verdict to approve on.
 - Decide a credit is valid based on **private proof alone** (DM/Snapchat screenshots,
@@ -185,9 +188,13 @@ Include this literal banner so the human reviewer is not anchored by the evidenc
 
 ## Customer-facing replies
 
-- Never say "approved", "verified", "added", or "done" – you didn't approve anything.
-  Also never say "I've recommended approval" – that sets an expectation a human may
-  not honor. Say you've **passed it to the team for review**.
+- **Only after a successful `credits_verify` (`apply:true`) on the catalog-corroborated
+  case may you tell the customer their credit was approved/verified** — that is the one
+  path where saying so is true (a clean, owner-scoped completion). For EVERY other
+  outcome you did **not** approve anything: never say "approved", "verified", "added", or
+  "done", and never say "I've recommended approval" (it sets an expectation a human may
+  not honor) – say you've **passed it to the team for review**. A `route_to_human`,
+  `{disabled:true}`, or any non-success from `credits_verify` is NOT an approval – route it.
 - Never tell a customer their credit is **rejected** – you don't reject. Say you need
   more proof, or that you've **filed it for the team** to review. (If a human already
   rejected it, see Step 1 – acknowledge, don't deny.)

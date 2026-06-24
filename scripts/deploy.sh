@@ -44,7 +44,7 @@ source "$SCRIPT_DIR/lib/codex-version.sh"
 # skills-all/muso-cli skill). Independent release cadence from openclaw;
 # bump deliberately. Installed from the repo's GitHub Release with
 # checksum verification (install_muso below) — never a bare latest.
-MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.5.0}"
+MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.6.1}"
 
 # Detect if we're running on Node 8 (the HYDRA host)
 if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; then
@@ -879,6 +879,7 @@ RSYNC_EXCLUDES=(
   --include='muso-ops-admin/config/'
   --include='muso-ops-admin/config/tier2-endpoints.txt'
   --include='muso-ops-admin/config/tier2-approvers.txt'
+  --include='muso-ops-admin/config/capability-approvers.txt'
   --include='muso-ops-admin/config/bulk-destructive-exclude.txt'
   --exclude='muso-ops-admin/config/**'
   --exclude='config/'
@@ -2167,6 +2168,17 @@ if needs_target "main"; then
     install -d -m 700 "$MUSO_CFG_DIR"
     install -m 600 "$MUSO_OPS_CFG/tier2-approvers.txt" "$MUSO_CFG_DIR/approvers.txt"
     install -m 600 "$MUSO_OPS_CFG/bulk-destructive-exclude.txt" "$MUSO_CFG_DIR/bulk-exclude.txt"
+    # Scoped capability-approver allowlist (muso-cli v0.6.1+): the autonomous
+    # service approver (caroline-autonomous) is valid ONLY for the capability
+    # verbs (credits verify / profiles consolidate / claim-self), never the
+    # global tier-2 approvers.txt above. Rendered separately so it can be absent
+    # without skipping the human approver render; if missing, those capability
+    # writes fail closed in muso-cli.
+    if [ -r "$MUSO_OPS_CFG/capability-approvers.txt" ]; then
+      install -m 600 "$MUSO_OPS_CFG/capability-approvers.txt" "$MUSO_CFG_DIR/capability-approvers.txt"
+    else
+      log "WARN: $MUSO_OPS_CFG/capability-approvers.txt missing — Caroline's approval-tier capability writes (credits_verify, profiles_consolidate) fail closed until it is rendered."
+    fi
     printf '{\n  "prewrite_hook": "%s/scripts/muso-prewrite-hook.sh"\n}\n' "$DEPLOY_PATH" > "$MUSO_CFG_DIR/config.json"
     chmod 600 "$MUSO_CFG_DIR/config.json"
     log "  muso config rendered into $MUSO_CFG_DIR (source: operations workspace muso-ops-admin config)"
