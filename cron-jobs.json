@@ -566,6 +566,39 @@
       }
     },
     {
+      "id": "b7e4d2a1-9f63-4c08-a5e7-1d2c8f0a6b34",
+      "agentId": "operations",
+      "name": "systemic-data-issue-report-6h",
+      "description": "Every 6h, the operations agent runs the report-systemic-data-issues skill: --gather reads recent Intercom conversations, the agent semantically clusters them by SAME underlying data issue (>=2 distinct users = systemic), and --report renders an Aaron-ready report (report-to-aaron doctrine) and posts it to the priority channel C0BBTAVP44X mentioning Aaron via the Ops bot, with a per-issue 24h cooldown. The 24h gather window deliberately overlaps the 6h cadence (a slow-forming cluster isn't truncated); re-pages of the same issue_slug are gated by the cooldown. Replaces the keyword intercom-data-complaint-watchdog systemd timer (coarse buckets → false 'systemic' pages). delivery.mode is \"none\" because --report self-posts the rendered message. Added 2026-06-25.",
+      "enabled": true,
+      "createdAtMs": 1782345600000,
+      "updatedAtMs": 1782345600000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 */6 * * *",
+        "tz": "Europe/Rome"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the report-systemic-data-issues skill. Follow its workflow exactly: (1) --gather the recent Intercom conversations, (2) cluster them by the SAME underlying data issue — only groups with >=2 DISTINCT users are systemic; symptom not diagnosis, precise nouns, cite the track IDs / credits.muso.ai URLs / numbers the customer states, carry conv_id per user, and put genuinely non-systemic conversations in excluded[] with a reason — and write clusters.json, (3) run --report. Do NOT post to Slack any other way; --report posts. Emit the --report final stdout line verbatim as your final message and nothing else.",
+        "model": "openai/gpt-5.5",
+        "thinking": "high",
+        "fallbacks": [
+          "openrouter/openai/gpt-5.4-mini",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ],
+        "timeoutSeconds": 1200
+      },
+      "delivery": {
+        "mode": "none"
+      },
+      "state": {
+        "consecutiveErrors": 0
+      }
+    },
+    {
       "id": "9096a243-af2b-40a1-a900-2cc84b757928",
       "agentId": "operations",
       "name": "codex-usage-report-aaron-twice-daily",

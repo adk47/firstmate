@@ -1016,6 +1016,18 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_abuse_block
+      - name: Run systemic data-issue watchdog tests
+        # scripts/intercom-data-complaint-watchdog.py PAGES AARON and posts
+        # CUSTOMER text to Slack. --gather feeds an AI clusterer; --report renders
+        # + posts. These lock the safety layer the LLM is NOT trusted with:
+        # clusters.json schema validation FAILS LOUD (no silent skip), the >=2
+        # distinct-user threshold + per-issue cooldown gate the page, the link is
+        # rebuilt from conv_id (no agent-URL injection), and slack_escape / the
+        # copy-block fence neutralize injection in untrusted agent/customer text.
+        # Same bare stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_intercom_data_complaint_watchdog
 
   plugin-tests:
     name: Plugin tests (vitest)

@@ -1,17 +1,19 @@
 """Behavioral tests for scripts/intercom-data-complaint-watchdog.py.
 
-This watchdog is the SYSTEMIC cluster detector (Aaron 2026-06-23): it pages the
-priority channel only when the same data category crosses MANY distinct users,
-not per individual complaint. CI's py_compile proves the script parses; these
-tests prove the *decisions* that make it a useful systemic detector:
+This watchdog is the SYSTEMIC, AI-clustered data-issue detector (Aaron): an
+operations-agent turn does the semantic "same issue" clustering; this script is
+the deterministic edge — it GATHERS candidate conversations for the AI to read,
+and RENDERS + pages from the agent's clusters.json. CI's py_compile proves the
+script parses; these tests prove the *decisions* that keep it safe and useful:
 
-  - detect_complaint fires on a keyword match (data noun + complaint signal) OR
-    Caroline's `ai:data-complaint` tag, and maps the match to a coarse category;
-  - find_clusters counts DISTINCT users per category and only surfaces a
-    category at/above the threshold (a single loud user is NOT systemic);
-  - DATA_COMPLAINT_TAG stays in sync with the plugin's tag;
-  - the cooldown ledger is per-CATEGORY;
-  - slack_escape / the copy-block fence neutralize injection in untrusted text.
+  - --gather shapes each conversation as an AI candidate (opening message,
+    who/age/state/tags/deeplink), skips conversations with nothing to classify,
+    surfaces Caroline's `ai:data-complaint` tag, and caps with a LOUD drop;
+  - --report validation FAILS LOUD on malformed clusters.json (never a silent
+    skip), drops sub-threshold clusters, dedupes distinct users, and the
+    per-issue cooldown suppresses a re-page;
+  - slack_escape / the copy-block fence neutralize injection in untrusted text;
+  - DATA_COMPLAINT_TAG stays in sync with the plugin.
 
 Stdlib unittest + stubs only — no pytest, no network.
 """
@@ -29,159 +31,329 @@ _spec = importlib.util.spec_from_file_location("intercom_data_complaint_watchdog
 wd = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(wd)
 
-AT = 1_000_000
+NOW = 1_000_000
 
 
-def make_conv(body="", created_at=AT - 1000, tags=(), email="user@example.com", cid="c1"):
+def make_conv(body="", created_at=NOW - 3600, tags=(), email="user@example.com",
+              cid="c1", state="open"):
     return {
         "id": cid,
         "created_at": created_at,
+        "updated_at": created_at,
+        "state": state,
         "tags": {"tags": [{"name": n} for n in tags]},
         "source": {"body": body, "author": {"email": email}},
     }
 
 
-class Categorize(unittest.TestCase):
-    def test_coarse_buckets(self):
-        self.assertEqual(wd.categorize("credit"), "credits")
-        self.assertEqual(wd.categorize("credits"), "credits")
-        self.assertEqual(wd.categorize("streams"), "analytics")
-        self.assertEqual(wd.categorize("plays"), "analytics")
-        self.assertEqual(wd.categorize("analytics"), "analytics")
-        self.assertEqual(wd.categorize("profile"), "profile")
-        self.assertEqual(wd.categorize("metadata"), "profile")
-        self.assertEqual(wd.categorize("anything-else"), "data")
+def cluster(slug="iss-1", title="Credits misattribution",
+            symptom="Artists say muso credits them on tracks they didn't make.",
+            users=None):
+    return {
+        "issue_slug": slug,
+        "title": title,
+        "symptom": symptom,
+        "users": users if users is not None else [
+            {"who": "a@x.com", "conv_id": "1", "email": "a@x.com", "detail": "x", "cites": []},
+            {"who": "b@x.com", "conv_id": "2", "email": "b@x.com", "detail": "y", "cites": []},
+        ],
+    }
 
 
-class DetectComplaint(unittest.TestCase):
-    def test_keyword_complaint_fires_with_category(self):
-        ev = wd.detect_complaint(make_conv(body="all my credits are wrong", email="a@x.com"))
-        self.assertIsNotNone(ev)
-        self.assertEqual(ev["category"], "credits")
-        self.assertEqual(ev["email"], "a@x.com")
-        self.assertEqual(ev["user"], "a@x.com")
+# ── --gather ─────────────────────────────────────────────────────────────────
+class Candidate(unittest.TestCase):
+    def test_shapes_an_ai_candidate(self):
+        c = wd.candidate(make_conv(body="<p>my credits are wrong</p>", email="A@X.com",
+                                   cid="42", created_at=NOW - 7200), NOW)
+        self.assertEqual(c["conv_id"], "42")
+        self.assertEqual(c["who"], "a@x.com")          # normalized lower-case
+        self.assertEqual(c["opening_message"], "my credits are wrong")  # HTML stripped
+        self.assertEqual(c["age_hours"], 2.0)
+        self.assertEqual(c["state"], "open")
+        self.assertIn("/42", c["deeplink"])
 
-    def test_tag_only_fires_as_data(self):
-        # Keywords miss it, but Caroline tagged it — still counted (generic bucket).
-        ev = wd.detect_complaint(make_conv(body="something is off here", tags=("ai:data-complaint",)))
-        self.assertIsNotNone(ev)
-        self.assertEqual(ev["category"], "data")
+    def test_anonymous_when_no_email(self):
+        c = wd.candidate(make_conv(body="streams gone", email="", cid="z"), NOW)
+        self.assertEqual(c["who"], "anonymous")
+        self.assertEqual(c["email"], "")               # the distinct-user key carries empty
 
-    def test_calm_question_does_not_fire(self):
-        self.assertIsNone(wd.detect_complaint(make_conv(body="how do I add credits?")))
+    def test_email_emitted_for_distinct_user_keying(self):
+        c = wd.candidate(make_conv(body="x", email="A@X.com", cid="9"), NOW)
+        self.assertEqual(c["email"], "a@x.com")        # normalized; keys distinct users
 
-    def test_anonymous_user_keyed_by_conversation(self):
-        ev = wd.detect_complaint(make_conv(body="my streams are wrong", email="", cid="cZ"))
-        self.assertEqual(ev["user"], "anon:cZ")
+    def test_surfaces_caroline_tag(self):
+        c = wd.candidate(make_conv(body="x", tags=("ai:data-complaint",)), NOW)
+        self.assertIn("ai:data-complaint", c["tags"])
+
+    def test_skips_conversation_with_nothing_to_classify(self):
+        # No customer text and not tagged → nothing for the AI to read.
+        self.assertIsNone(wd.candidate(make_conv(body="", tags=()), NOW))
+
+    def test_tagged_but_empty_is_still_a_candidate(self):
+        self.assertIsNotNone(wd.candidate(make_conv(body="", tags=("ai:data-complaint",)), NOW))
+
+    def test_snippet_is_capped(self):
+        c = wd.candidate(make_conv(body="x" * 5000), NOW)
+        self.assertEqual(len(c["opening_message"]), wd.SNIPPET_CAP)
 
 
-class FindClusters(unittest.TestCase):
-    def test_three_distinct_users_form_a_cluster(self):
-        convs = [
-            make_conv(body="my credits are wrong", email="a@x.com", cid="1"),
-            make_conv(body="credits missing", email="b@x.com", cid="2"),
-            make_conv(body="credits incorrect", email="c@x.com", cid="3"),
-        ]
-        clusters, groups = wd.find_clusters(convs, threshold=3)
-        self.assertIn("credits", clusters)
-        self.assertEqual(len(clusters["credits"]), 3)
+class Gather(unittest.TestCase):
+    def test_newest_first_and_loud_cap(self):
+        convs = [make_conv(body="b", cid=str(i), created_at=NOW - i * 3600) for i in range(1, 6)]
+        cands, dropped = wd.gather_candidates(convs, NOW, max_n=3)
+        self.assertEqual(len(cands), 3)
+        self.assertEqual(dropped, 2)                     # 5 → 3, 2 dropped, surfaced by caller
+        self.assertEqual([c["conv_id"] for c in cands], ["1", "2", "3"])  # newest (smallest age)
 
-    def test_two_users_is_not_systemic(self):
-        convs = [
-            make_conv(body="my credits are wrong", email="a@x.com", cid="1"),
-            make_conv(body="credits missing", email="b@x.com", cid="2"),
-        ]
-        clusters, _ = wd.find_clusters(convs, threshold=3)
-        self.assertNotIn("credits", clusters)
+    def test_no_drop_when_under_cap(self):
+        convs = [make_conv(body="b", cid=str(i)) for i in range(3)]
+        _, dropped = wd.gather_candidates(convs, NOW, max_n=300)
+        self.assertEqual(dropped, 0)
 
-    def test_same_user_counts_once(self):
-        # One loud user reporting three times is not three users.
-        convs = [
-            make_conv(body="my credits are wrong", email="a@x.com", cid="1"),
-            make_conv(body="credits still missing", email="a@x.com", cid="2"),
-            make_conv(body="credits incorrect again", email="a@x.com", cid="3"),
-        ]
-        clusters, groups = wd.find_clusters(convs, threshold=3)
-        self.assertEqual(len(groups["credits"]), 1)
-        self.assertNotIn("credits", clusters)
 
-    def test_tag_only_hits_bucket_as_data_not_the_keyword_category(self):
-        convs = [
-            make_conv(body="my credits are wrong", email="a@x.com", cid="1"),
-            make_conv(body="credits missing", email="b@x.com", cid="2"),
-            # keyword miss, tagged — counts under "data", not "credits"
-            make_conv(body="subtle complaint keywords miss", tags=("ai:data-complaint",), email="c@x.com", cid="3"),
-        ]
-        clusters, groups = wd.find_clusters(convs, threshold=3)
-        self.assertEqual(len(groups["credits"]), 2)
-        self.assertEqual(len(groups["data"]), 1)
-        self.assertNotIn("credits", clusters)
+# ── --report: validation fails loud ──────────────────────────────────────────
+class Validate(unittest.TestCase):
+    def test_happy_path(self):
+        clusters, excluded, win = wd.validate_clusters(
+            {"window_hours": 24, "clusters": [cluster()],
+             "excluded": [{"who": "e@x.com", "reason": "onboarding"}]})
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(excluded[0]["who"], "e@x.com")
+        self.assertEqual(win, 24)
 
-    def test_email_casing_counts_as_one_user(self):
-        # Case-insensitive email: "A@x"/"a@x" is one human, not two — must NOT
-        # let a single user falsely cross the threshold.
-        convs = [
-            make_conv(body="my credits are wrong", email="Alice@X.com", cid="1"),
-            make_conv(body="credits still missing", email="alice@x.com", cid="2"),
-            make_conv(body="credits incorrect", email="ALICE@x.COM", cid="3"),
-        ]
-        clusters, groups = wd.find_clusters(convs, threshold=3)
-        self.assertEqual(len(groups["credits"]), 1)
-        self.assertNotIn("credits", clusters)
+    def test_top_level_must_be_object(self):
+        with self.assertRaises(wd.ClustersError):
+            wd.validate_clusters([cluster()])
 
-    def test_analytics_nouns_cluster_together(self):
-        convs = [
-            make_conv(body="my streams are wrong", email="a@x.com", cid="1"),
-            make_conv(body="plays not updating", email="b@x.com", cid="2"),
-            make_conv(body="analytics outdated", email="c@x.com", cid="3"),
-        ]
-        clusters, _ = wd.find_clusters(convs, threshold=3)
-        self.assertIn("analytics", clusters)
-        self.assertEqual(len(clusters["analytics"]), 3)
+    def test_clusters_must_be_list(self):
+        with self.assertRaises(wd.ClustersError):
+            wd.validate_clusters({"clusters": "nope"})
+
+    def test_missing_symptom_fails_loud(self):
+        bad = cluster()
+        del bad["symptom"]
+        with self.assertRaises(wd.ClustersError):
+            wd.validate_clusters({"clusters": [bad]})
+
+    def test_user_without_conv_id_fails_loud(self):
+        bad = cluster(users=[{"who": "a@x.com", "detail": "x", "cites": []}])
+        with self.assertRaises(wd.ClustersError):
+            wd.validate_clusters({"clusters": [bad]})
+
+    def test_empty_users_fails_loud(self):
+        with self.assertRaises(wd.ClustersError):
+            wd.validate_clusters({"clusters": [cluster(users=[])]})
+
+    def test_cites_must_be_string_list(self):
+        bad = cluster(users=[{"who": "a@x.com", "conv_id": "1", "cites": [{"u": "x"}]}])
+        with self.assertRaises(wd.ClustersError):
+            wd.validate_clusters({"clusters": [bad]})
+
+    def test_conv_id_must_be_numeric_blocks_link_injection(self):
+        # SECURITY: a non-numeric conv_id could break out of the trusted
+        # <…/{conv_id}|conversation> Slack link and inject a live <!channel>/<@U…>
+        # ping. Intercom ids are digit strings — anything else must fail loud.
+        for evil in ("1|x> <!channel> <@U7RP6HKUZ", "1 2", "abc", "1<b>", ""):
+            with self.assertRaises(wd.ClustersError):
+                wd.validate_clusters({"clusters": [cluster(
+                    users=[{"who": "a@x.com", "conv_id": evil, "cites": []}])]})
+        # a real numeric id validates fine
+        ok, _, _ = wd.validate_clusters({"clusters": [cluster(
+            users=[{"who": "a@x.com", "conv_id": "215474812001295", "cites": []}])]})
+        self.assertEqual(ok[0]["users"][0]["conv_id"], "215474812001295")
+
+    def test_excluded_malformed_fails_loud(self):
+        with self.assertRaises(wd.ClustersError):   # missing reason
+            wd.validate_clusters({"clusters": [cluster()], "excluded": [{"who": "a@x.com"}]})
+        with self.assertRaises(wd.ClustersError):   # not an object
+            wd.validate_clusters({"clusters": [cluster()], "excluded": ["nope"]})
+
+
+# ── --report: threshold + cooldown ───────────────────────────────────────────
+class DistinctUsers(unittest.TestCase):
+    def test_same_email_across_conversations_counts_once(self):
+        # One customer who opened two conversations is ONE user (keyed by email,
+        # case-insensitive) — must not falsely cross the threshold on their own.
+        c = cluster(users=[
+            {"who": "Alice", "conv_id": "1", "email": "A@x.com", "cites": []},
+            {"who": "Alice again", "conv_id": "2", "email": "a@x.com", "cites": []},
+        ])
+        self.assertEqual(wd.distinct_users(c), 1)
+
+    def test_two_anonymous_conversations_count_as_two(self):
+        # REGRESSION (QA #584): two DIFFERENT anonymous customers reporting the
+        # same issue are two users — keyed by conv_id, not collapsed by the shared
+        # "anonymous" who label. Without this they'd fall below >=2 and never page.
+        c = cluster(users=[
+            {"who": "anonymous", "conv_id": "111", "email": "", "cites": []},
+            {"who": "anonymous", "conv_id": "222", "email": "", "cites": []},
+        ])
+        self.assertEqual(wd.distinct_users(c), 2)
+
+    def test_two_distinct_emails(self):
+        self.assertEqual(wd.distinct_users(cluster()), 2)
 
 
 class Cooldown(unittest.TestCase):
-    def test_prune_is_per_category(self):
-        cooldown = 24 * 3600
-        led = {"credits": AT - 100, "analytics": AT - 10 * 24 * 3600}
-        pruned = wd.prune_ledger(led, AT, cooldown)
-        self.assertIn("credits", pruned)
-        self.assertNotIn("analytics", pruned)
+    def test_prune_is_per_issue(self):
+        cd = 24 * 3600
+        led = {"iss-fresh": NOW - 100, "iss-stale": NOW - 10 * 24 * 3600}
+        pruned = wd.prune_ledger(led, NOW, cd)
+        self.assertIn("iss-fresh", pruned)
+        self.assertNotIn("iss-stale", pruned)
 
 
-class Escaping(unittest.TestCase):
-    def test_slack_escape_ampersand_first(self):
-        self.assertEqual(wd.slack_escape("a & b < c > d"), "a &amp; b &lt; c &gt; d")
+class ReportDecision(unittest.TestCase):
+    """run_report's threshold + per-issue cooldown decision, end to end, via
+    --check (no Slack, no network). Proves the things the report exists to do."""
+    import os as _os
 
-    def test_slack_escape_neutralizes_channel_ping(self):
-        self.assertEqual(wd.slack_escape("<!channel>"), "&lt;!channel&gt;")
+    def _args(self, clusters_path, **over):
+        import types
+        base = dict(report=True, gather=False, clusters=clusters_path, check=True,
+                    threshold=2, cooldown_hours=24, window_hours=24.0,
+                    grace_minutes=2, max=300, at=None)
+        base.update(over)
+        return types.SimpleNamespace(**base)
+
+    def _write(self, obj):
+        import json
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with self._os.fdopen(fd, "w") as f:
+            json.dump(obj, f)
+        self.addCleanup(lambda: self._os.path.exists(path) and self._os.remove(path))
+        return path
+
+    def setUp(self):
+        import tempfile
+        self._led = tempfile.mktemp(suffix=".json")
+        self._saved = self._os.environ.get("LEDGER_PATH")
+        self._os.environ["LEDGER_PATH"] = self._led
+
+    def tearDown(self):
+        if self._saved is None:
+            self._os.environ.pop("LEDGER_PATH", None)
+        else:
+            self._os.environ["LEDGER_PATH"] = self._saved
+        if self._os.path.exists(self._led):
+            self._os.remove(self._led)
+
+    def _run(self, args):
+        import contextlib
+        import io
+        err, out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            rc = wd.run_report(args)
+        return rc, err.getvalue(), out.getvalue()
+
+    def _decision(self, out):
+        # The decision record is the one stdout line that parses as a dict.
+        import json
+        for ln in out.splitlines():
+            try:
+                d = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(d, dict) and "to_page" in d:
+                return d
+        self.fail("no decision JSON on stdout")
+
+    def test_fresh_cluster_would_page(self):
+        path = self._write({"clusters": [cluster(slug="iss-fresh")]})
+        rc, err, out = self._run(self._args(path))
+        self.assertEqual(rc, 0)
+        self.assertIn("would page", err)
+        self.assertEqual(self._decision(out)["to_page"], ["iss-fresh"])
+
+    def test_cooldown_suppresses_repage(self):
+        import json
+        path = self._write({"clusters": [cluster(slug="iss-hot")]})
+        with open(self._led, "w") as f:                  # paged "just now"
+            json.dump({"iss-hot": wd._epoch(None)}, f)
+        rc, err, out = self._run(self._args(path))
+        self.assertEqual(rc, 0)
+        self.assertIn("nothing fresh to page", err)
+        self.assertNotIn("would page", err)
+        d = self._decision(out)
+        self.assertEqual(d["in_cooldown"], ["iss-hot"])
+        self.assertEqual(d["to_page"], [])
+
+    def test_below_threshold_does_not_page(self):
+        one_user = cluster(slug="iss-lonely",
+                           users=[{"who": "solo@x.com", "conv_id": "1", "cites": []}])
+        path = self._write({"clusters": [one_user]})
+        rc, err, out = self._run(self._args(path))
+        self.assertEqual(rc, 0)
+        # Tie the test to the threshold DECISION, not just the terminal string.
+        d = self._decision(out)
+        self.assertEqual(d["below_threshold"], ["iss-lonely"])
+        self.assertNotIn("iss-lonely", d["systemic"])
+        self.assertEqual(d["to_page"], [])
+
+    def test_bad_window_hours_falls_back_to_default(self):
+        # The agent controls window_hours (a display label); a wrong-typed value
+        # must render the run default, never "last [99]h".
+        path = self._write({"window_hours": [99], "clusters": [cluster(slug="iss-w")]})
+        rc, err, out = self._run(self._args(path, check=True))
+        self.assertEqual(rc, 0)
+        self.assertIn("last 24h", err)
+        self.assertNotIn("[99]", err)
 
 
-class SystemicMessage(unittest.TestCase):
-    def _cluster(self, snippet="credits gone", email="luis@x.com"):
-        ev = {"category": "credits", "user": email, "email": email,
-              "conv_id": "9", "snippet": snippet, "ts": AT, "matched": "credits/wrong"}
-        return {"credits": {email: ev}}
-
-    def test_renders_mention_count_and_deeplink(self):
-        msg = wd.build_systemic_message(self._cluster(), ["U7RP6HKUZ"], "ws_1", 24, 8)
+# ── render + escaping ────────────────────────────────────────────────────────
+class Render(unittest.TestCase):
+    def test_report_has_mention_symptom_and_link(self):
+        msg = wd.build_report_message([cluster()], [], ["U7RP6HKUZ"], "ws_1", 24)
         self.assertIn("<@U7RP6HKUZ>", msg)
-        self.assertIn("1 users reporting credits problems", msg)
+        self.assertIn("Symptom:", msg)
+        self.assertIn("Credits misattribution", msg)
         self.assertIn("ws_1", msg)
-        self.assertIn("/9", msg)
+        self.assertIn("/1", msg)                          # deeplink from conv_id
 
-    def test_escapes_injection_in_snippet(self):
-        msg = wd.build_systemic_message(self._cluster(snippet="fix it <!channel>"), ["U7RP6HKUZ"], "ws_1", 24, 8)
-        # The mrkdwn body escapes it; only the trusted mention renders a ping.
-        self.assertIn("&lt;!channel&gt;", msg)
-        self.assertEqual(len(re.findall(r"<@U", msg)), 1)
+    def test_link_is_rebuilt_from_conv_id_not_agent_url(self):
+        # An agent-supplied 'deeplink' URL must be ignored — we reconstruct from
+        # conv_id so a malicious/garbled URL can't reach Slack as a trusted link.
+        c = cluster(users=[{"who": "a@x.com", "conv_id": "777",
+                            "deeplink": "https://evil.example/x", "cites": []}])
+        msg = wd.build_report_message([c], [], ["U7RP6HKUZ"], "ws_1", 24)
+        self.assertIn("/777|conversation>", msg)
+        self.assertNotIn("evil.example", msg)
+
+    def test_excluded_footnote_renders(self):
+        msg = wd.build_report_message(
+            [cluster()], [{"who": "e@x.com", "reason": "profile-creation request"}],
+            ["U7RP6HKUZ"], "ws_1", 24)
+        self.assertIn("Judged non-systemic", msg)
+        self.assertIn("profile-creation request", msg)
+
+    def test_escapes_injection_in_agent_text(self):
+        c = cluster(symptom="fix it <!channel>",
+                    users=[{"who": "<@U999>", "conv_id": "1", "detail": "& <bad>", "cites": []}])
+        msg = wd.build_report_message([c], [], ["U7RP6HKUZ"], "ws_1", 24)
+        # The rendered BODY (everything before the inert copy-block fence) escapes
+        # all agent/customer angle brackets & ampersands; a customer <@U999> can't
+        # ping. (Inside the ``` copy block mrkdwn is inert — covered separately.)
+        body = msg.split("```")[0]
+        self.assertIn("&lt;!channel&gt;", body)
+        self.assertIn("&amp; &lt;bad&gt;", body)
+        self.assertIn("&lt;@U999&gt;", body)
+        # Only the trusted mention renders a real ping in the body.
+        self.assertEqual(len(re.findall(r"<@U", body)), 1)
 
     def test_copy_block_neutralizes_fence_breakout(self):
-        ev = {"category": "credits", "user": "a@x.com", "email": "a@x.com",
-              "conv_id": "9", "snippet": "see ``` <@U999>", "ts": AT, "matched": "credits/wrong"}
-        block = wd.build_copy_block({"credits": {"a@x.com": ev}}, "ws_1", 24, 8)
-        # Exactly the two wrapping fences — the customer's ``` was stripped.
-        self.assertEqual(block.count("```"), 2)
+        c = cluster(symptom="see ``` <@U999>",
+                    users=[{"who": "a@x.com", "conv_id": "1", "detail": "x ```", "cites": ["``` y"]}])
+        block = wd.build_copy_block([c], 24)
+        self.assertEqual(block.count("```"), 2)            # only the two wrapping fences
+
+
+class SlackEscape(unittest.TestCase):
+    def test_ampersand_first(self):
+        self.assertEqual(wd.slack_escape("a & b < c > d"), "a &amp; b &lt; c &gt; d")
+
+    def test_neutralizes_channel_ping(self):
+        self.assertEqual(wd.slack_escape("<!channel>"), "&lt;!channel&gt;")
 
 
 class DataComplaintTag(unittest.TestCase):
@@ -191,8 +363,6 @@ class DataComplaintTag(unittest.TestCase):
 
 
 class ResolveSlackToken(unittest.TestCase):
-    # MY_BOT is set by test_var_name_is_overridable — include it so setUp/tearDown
-    # save+restore it and it never leaks into the process env for later tests.
     KEYS = ("MUSO_SLACK_BOT_TOKEN_OPERATIONS", "SLACK_BOT_TOKEN",
             "PRIORITY_SLACK_BOT_TOKEN_VAR", "OPENCLAW_CONFIG", "MY_BOT")
 

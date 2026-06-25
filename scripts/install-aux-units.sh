@@ -251,57 +251,20 @@ systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
 
-# ─── Intercom data-complaint backstop watchdog (Lane B) ──
-# Pages the priority channel (C0BBTAVP44X, @-tagging Aaron) when a customer
-# DATA complaint was NOT caught by Caroline's inline [[PRIORITY]] signal —
-# Aaron's 2026-06-22 ask for data complaints to reach him fast. Lane A (the
-# edge gateway / intercom plugin) is the real-time path; this is the every-10m
-# SYSTEMIC cluster detector (Aaron 2026-06-23): pages the priority channel only
-# when the same data category crosses >= WATCHDOG_SYSTEMIC_THRESHOLD distinct
-# users within the last WATCHDOG_WINDOW_HOURS (counted by email), with a
-# per-category cooldown. Folds in conversations Caroline tagged ai:data-complaint
-# (her [[PRIORITY]] no longer pages — it just classifies). Read-only against
-# Intercom; posts Slack only when a category is over the threshold and not in
-# cooldown. Tokens: MUSOAI_INTERCOM_TOKEN + the Ops bot token
-# MUSO_SLACK_BOT_TOKEN_OPERATIONS come from the env files (main.env carries the
-# bot token). The Ops bot must be a member of the priority channel to post there.
-# Persists a tiny per-category cooldown ledger under /var/lib. See
-# scripts/intercom-data-complaint-watchdog.py.
-cat > /etc/systemd/system/intercom-data-complaint-watchdog.service << DATACWDSVC
-[Unit]
-Description=Intercom systemic data-complaint watchdog (pages on cross-user clusters)
-After=network-online.target
-
-[Service]
-Type=oneshot
-EnvironmentFile=-/etc/openclaw/shared.env
-EnvironmentFile=-/etc/openclaw/edge.env
-EnvironmentFile=-/etc/openclaw/main.env
-# Systemic threshold + count window (defaults baked into the script; set here so
-# they're visible and tunable without a redeploy).
-Environment=WATCHDOG_SYSTEMIC_THRESHOLD=3
-Environment=WATCHDOG_WINDOW_HOURS=24
-ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/intercom-data-complaint-watchdog.py --alert
-DATACWDSVC
-
-cat > /etc/systemd/system/intercom-data-complaint-watchdog.timer << DATACWDTMR
-[Unit]
-Description=Run the Intercom systemic data-complaint watchdog every 10m
-
-[Timer]
-OnBootSec=8min
-OnUnitActiveSec=10min
-Unit=intercom-data-complaint-watchdog.service
-
-[Install]
-WantedBy=timers.target
-DATACWDTMR
-
+# ─── Retire the keyword Intercom data-complaint watchdog (replaced 2026-06-25) ──
+# The every-10m KEYWORD watchdog (coarse data-noun + complaint-signal buckets)
+# produced false "systemic" pages — three unrelated credit gripes grouped as one
+# cluster. It is superseded by the AI-clustered `systemic-data-issue-report-6h`
+# cron (cron-jobs.json → operations agent → report-systemic-data-issues skill →
+# scripts/intercom-data-complaint-watchdog.py --gather / --report), which groups
+# by the actual underlying issue. Stop, disable, and remove the old systemd units
+# so the two paths can't double-page Aaron. Idempotent: a no-op once removed.
+for u in intercom-data-complaint-watchdog.timer intercom-data-complaint-watchdog.service; do
+    systemctl disable --now "$u" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/$u"
+done
 systemctl daemon-reload
-wd=intercom-data-complaint-watchdog.timer
-systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
-systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
-log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+log "  intercom-data-complaint-watchdog: retired (replaced by systemic-data-issue-report-6h cron)"
 
 # ─── Close resolved-ticket conversations (steady-state sync) ──
 # Silently closes Intercom conversations whose ClickUp ticket(s) are all
