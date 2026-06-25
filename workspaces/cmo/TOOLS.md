@@ -24,7 +24,7 @@ _All tools the CMO agent has access to. See individual skill files for full API 
 - Email/SMS marketing platform
 - API base: `https://a.klaviyo.com/api/`
 - Auth: `Klaviyo-API-Key $MUSOAI_KLAVIYO_TOKEN` + `revision: 2025-01-15`
-- Access: **Read/Write** (Fede + Aaron only)
+- Access: **Read/Write** (Nick + Aaron only)
 - **OFF-LIMITS for cold outreach** — existing subscribers/customers ONLY
 - Use for: campaigns, flows, lists, segments, profiles, templates, analytics
 - Skill: `muso-klaviyo`
@@ -56,7 +56,7 @@ _All tools the CMO agent has access to. See individual skill files for full API 
 - eSignature / contracts
 - Auth: JWT Grant (`$DOCUSIGN_INTEGRATION_KEY`, `$DOCUSIGN_RSA_KEY_FILE`, etc.)
 - Base URI: `https://na3.docusign.net`
-- Access: **Read/Write** (Fede + Aaron only)
+- Access: **Read/Write** (Nick + Aaron only)
 - Skill: `muso-docusign`
 
 ### Google Workspace (`gog` CLI)

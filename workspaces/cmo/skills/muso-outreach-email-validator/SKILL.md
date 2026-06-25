@@ -137,8 +137,8 @@ to avoid rate limiting. Wait 2 seconds between chunks.
 | `not_valid` | any | SKIP | :x: SKIPPED: {Name}, {Company} - email invalid (Snov.io SMTP: not_valid) |
 | `unknown` | `true` | PROCEED | :warning: RISKY (catch-all): {Name}, {Company} - domain accepts all addresses, won't bounce but can't confirm delivery |
 | `unknown` | `false` | PROCEED | :warning: UNVERIFIABLE: {Name}, {Company} - Snov.io could not confirm |
-| `not_verified` (timeout) | any | STOP | :octagonal_sign: TIMEOUT: Snov.io did not complete verification in 30s. Do NOT send. Retry or notify Fede. |
-| API error | any | STOP | :octagonal_sign: API ERROR: Snov.io unreachable. Do NOT send. Notify Fede. |
+| `not_verified` (timeout) | any | STOP | :octagonal_sign: TIMEOUT: Snov.io did not complete verification in 30s. Do NOT send. Retry or notify Nick. |
+| API error | any | STOP | :octagonal_sign: API ERROR: Snov.io unreachable. Do NOT send. Notify Nick. |
 
 ### Step 5: Handle skipped contacts
 
@@ -150,7 +150,7 @@ For every email that returns `not_valid`:
    (look up `<id>` first with `records.ls … --where "(Valid Professional Email,eq,<email>)" --fields "Id"`).
 2. Log to `api-logs/snov/YYYY-MM-DD.jsonl`
 3. If the contact was in GHL, update the opportunity notes with "Email invalid per Snov.io verification {date}"
-4. Include the skip in the batch presentation so Fede sees what was dropped
+4. Include the skip in the batch presentation so Nick sees what was dropped
 
 ### Step 6: Present results
 
@@ -228,7 +228,7 @@ Invalid emails (need replacement):
 - Check balance: `GET https://api.snov.io/v1/get-balance?access_token=$TOKEN`
 - Current plan resets every 3 days
 - Before running a bulk sweep, check balance first. If credits < emails to verify,
-  warn Fede and ask if they want a partial sweep or to wait for reset.
+  warn Nick and ask if they want a partial sweep or to wait for reset.
 
 ## Logging
 
@@ -241,7 +241,7 @@ Every verification call MUST be logged to `api-logs/snov/YYYY-MM-DD.jsonl`:
 ## Constraints (HARD RULES)
 
 - NEVER let an unverified email through to a batch presentation
-- NEVER send if Snov.io is down or unreachable. STOP and notify Fede.
+- NEVER send if Snov.io is down or unreachable. STOP and notify Nick.
 - NEVER skip this step, even for "just one quick email"
 - NEVER store Snov.io credentials in files, memory, or logs (env vars only)
 - ALWAYS log every verification call

@@ -28,13 +28,13 @@ Handles the follow up cadence for B2B Ads outreach.
 
 ## Access Control
 
-Write access: Fede (U07NF5A77E2) and Aaron (U7RP6HKUZ) only.
+Write access: Nick (U0AL36NADEY) and Aaron (U7RP6HKUZ) only.
 
 ## Shared Config
 
 See `../muso-outreach-engine/references/config.md`.
 
-## Cadence (Fede's Rule)
+## Cadence (Nick's Rule)
 
 - **Touch 1 (FU-01)**: 7 days after initial send
 - **Touch 2 (FU-02)**: 14 days after initial send
@@ -93,7 +93,7 @@ or specific `FU-01` / `FU-02` / `FU-03` / `FU-04` naming).
 
 Call `muso-outreach-writer` with:
 - Template type = Follow-Up (specific FU number)
-- Sender account (same as original, unless Fede says switch)
+- Sender account (same as original, unless Nick says switch)
 - Reference the original thread topic
 
 Create the draft as a thread reply, using `--reply-to-message-id` pointing to
@@ -130,7 +130,7 @@ Wait for explicit approval.
 
 Do NOT call `gog gmail drafts send`. Sending is the worker's job.
 
-When the batch is approved (Fede reacts ✅ on the Slack approval post),
+When the batch is approved (Nick reacts ✅ on the Slack approval post),
 the sender worker runs, reads every draft under label
 `B2B - Ads/auto-fu-approved`, applies the precondition gate, and sends
 only the valid drafts. The worker owns Gmail send + logbook append +
@@ -152,7 +152,7 @@ Every Monday:
 2. Crosscheck Gmail for replies
 3. Crosscheck GHL stage (skip if already Replied or beyond)
 4. Draft follow up batch for eligible contacts
-5. Post to `#sales-alerts` for Fede's approval
+5. Post to `#sales-alerts` for Nick's approval
 
 Before enabling, verify:
 - [ ] Follow up templates exist in `email_templates` sheet
@@ -165,7 +165,7 @@ Before enabling, verify:
 - Never send on Saturday or Sunday
 - Never send more than 3 follow ups per contact
 - Never send if an inbound reply exists
-- Never send without Fede/Aaron approval
+- Never send without Nick/Aaron approval
 - Never use em dash in any draft
 - Always vary 1 to 2 words per send
 - Always reply as a thread (not new subject)

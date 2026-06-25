@@ -7,12 +7,12 @@ description: |
   single personalized draft whose ONLY goal is to book a call.
 
   Output is a SUGGESTION posted in Slack first. Never auto-send. Never auto-create
-  a Gmail draft. The Gmail draft is created only after Fede or Aaron explicitly
+  a Gmail draft. The Gmail draft is created only after Nick or Aaron explicitly
   approves the suggestion (👍 / reply / explicit "draft it"). Posts the suggestion to
   #sales-alerts (C0ARQ021M40), inside the scanner's existing reply-detection thread
   for that prospect.
 
-  Use when: a new B2B reply is detected, or Fede manually asks "draft a reply to <thread>".
+  Use when: a new B2B reply is detected, or Nick manually asks "draft a reply to <thread>".
 
   Triggers: "draft reply", "respond to this thread", "what should I send back",
   invoked by `muso-outreach-reply-scanner` on every new reply event.
@@ -64,7 +64,7 @@ Run the inbound through these gates IN ORDER. First match wins.
 **SKIP (no draft, post `verdict: skip` to Slack with reason):**
 1. **Pure OOO / auto-reply** — body matches `out of office`, `vacation`, `auto-reply`, `currently away`, `je suis absent`, no question, no actionable text. *Exception:* if it names a colleague to reach (`please contact X@`), that's a `referral`, NOT a skip — go to Step 2 with the new contact.
 2. **Bounce / NDR** — `mailer-daemon`, `mail delivery failed`, `address not found`, `does not exist`.
-3. **Hard no, no opening** — `not interested, please remove`, `unsubscribe`, `do not contact`, no follow-up question. Mark the NocoDB row for manual `Status = Closed-Lost` (READ-ONLY, so just flag in Slack for Fede to update).
+3. **Hard no, no opening** — `not interested, please remove`, `unsubscribe`, `do not contact`, no follow-up question. Mark the NocoDB row for manual `Status = Closed-Lost` (READ-ONLY, so just flag in Slack for Nick to update).
 4. **Pure ack with no question** — `thanks`, `got it`, `noted`, end of an already-closed loop. Skip unless it follows a meeting that needs confirmation.
 5. **Already-booked confirmation** — `looking forward to <date>`, `see you <day>`, calendar invite accepted. Skip — call is on the books. (Exception: if outbound calendar slot was vague, draft a micro-confirm.)
 
@@ -103,7 +103,7 @@ Pull from NocoDB:
 
 **If contact not in NocoDB:**
 - Try matching by company domain only.
-- If still nothing: flag in Slack notification (`⚠️ not in NocoDB`), degrade to a generic-playbook draft (no company-specific angle), and let Fede decide whether to send.
+- If still nothing: flag in Slack notification (`⚠️ not in NocoDB`), degrade to a generic-playbook draft (no company-specific angle), and let Nick decide whether to send.
 
 **If company is an existing customer (NocoDB Status = Customer, or in known-customer list — MWTM, Slate Digital, IK Multimedia, MWTM, Kali Audio):**
 - DO NOT pitch. Generate a service / retention reply, not a cold-recovery. Flag with `🟡 EXISTING CUSTOMER` in Slack.
@@ -182,20 +182,20 @@ NocoDB: ✅ enriched / ⚠️ not found / 🟡 existing customer
 *Rationale:* <1-2 lines on which playbook pattern this maps to + NocoDB angle pulled>
 ```
 
-If `answer`: STOP HERE. Do NOT create the Gmail draft yet. Wait for Fede or Aaron
+If `answer`: STOP HERE. Do NOT create the Gmail draft yet. Wait for Nick or Aaron
 to approve the suggestion in Slack.
 
-**Approval is authorized ONLY from Fede (`U07NF5A77E2`) or Aaron (`U7RP6HKUZ`).**
+**Approval is authorized ONLY from Nick (`U0AL36NADEY`) or Aaron (`U7RP6HKUZ`).**
 `#sales-alerts` is a shared channel — before treating ANY signal below as approval,
 verify the Slack user ID of whoever sent it (the reaction author, or the message
-sender's `user` id) is `U07NF5A77E2` or `U7RP6HKUZ`. A 👍 or `approved` from anyone
+sender's `user` id) is `U0AL36NADEY` or `U7RP6HKUZ`. A 👍 or `approved` from anyone
 else is **not** approval: ignore it, keep waiting, and post once
-`⚠️ Only Fede or Aaron can approve drafts — ignoring approval from <@user>.`
+`⚠️ Only Nick or Aaron can approve drafts — ignoring approval from <@user>.`
 
-**Approval signals — any one *from Fede or Aaron* triggers draft creation:**
+**Approval signals — any one *from Nick or Aaron* triggers draft creation:**
 - 👍 reaction on the responder's Slack message
 - Reply in thread: `draft it`, `send to drafts`, `looks good`, `approved`, `go`, or any clearly affirmative one-liner
-- Explicit edit: Fede / Aaron rewrites the draft in thread — use the rewritten version, then create the draft
+- Explicit edit: Nick / Aaron rewrites the draft in thread — use the rewritten version, then create the draft
 
 **Rejection signals (don't create, ask for direction):**
 - 👎 or ❌ reaction
@@ -216,7 +216,7 @@ After creating, post a confirmation in the same Slack thread: `✅ Gmail draft c
 
 ### Step 6 — Never auto-send
 
-- Drafts only. Fede or Aaron sends after eyeballing.
+- Drafts only. Nick or Aaron sends after eyeballing.
 - Single draft per reply, no A/B options. Pick the right move and commit.
 - If unsure between two paths (e.g. ultra-short ack vs longer educational), default to the SHORTER one (matches Aaron's voice baseline; longer is the exception).
 
@@ -226,7 +226,7 @@ After creating, post a confirmation in the same Slack thread: `✅ Gmail draft c
 |---|---|
 | Inbound is on a thread where we already replied <24h ago and they came back fast | Treat as scheduling/yes, ultra-short, push to call. |
 | Inbound has a clear scheduling question AND a pricing question | Answer pricing FIRST (1-2 lines, concrete anchor), then propose 2 slots. |
-| Inbound is from a known competitor domain | Skip + flag for Fede. Don't auto-draft. |
+| Inbound is from a known competitor domain | Skip + flag for Nick. Don't auto-draft. |
 | Inbound is a thread hijack (different person, same domain, different topic) | Treat as a NEW reply, look up the new contact in NocoDB, draft from scratch. |
 | Inbound asks to talk to a specific human (`can I talk to your CEO`) | Reply from the requested account (e.g. switch to a@). If already on a@, just say `That's me, here's a slot: …`. |
 | Inbound is from a contact who already booked + attended a call | Skip the scanner classification, this is post-meeting follow-up territory (separate flow, not this skill). |
@@ -272,7 +272,7 @@ After creating, post a confirmation in the same Slack thread: `✅ Gmail draft c
 - Never invent CTAs or closes. Pull from the canonical set in `references/reply-playbook.md`.
 - Never use em-dashes or en-dashes. Restructure if needed.
 - Never include the anchor line or proof block in active threads (scheduling, pricing, question, interested). They belong to recovery drafts.
-- Never write to NocoDB. Read-only. Fede / team manages Status manually.
+- Never write to NocoDB. Read-only. Nick / team manages Status manually.
 - Never bypass the customer check — if the company is already a customer, this is a retention/ops issue, not a sales reply.
 - Never generate multiple draft options. Pick one move.
 - Never include `access.muso.ai/demo` or `access.muso.ai/pricing` as a SUBSTITUTE for booking a call. Links only as supporting context; the call is the goal.
@@ -303,10 +303,10 @@ Every responder run logs to `api-logs/cmo/reply-responder/YYYY-MM-DD.jsonl`:
 
 The reply scanner (`muso-outreach-reply-scanner`) should call this responder on every new reply detected (after its own classification + NocoDB context pull). Scanner posts the detection to Slack; responder posts the verdict + draft in the SAME thread.
 
-Scanner is still silent if nothing's detected. Responder is silent if verdict is `skip` AND the inbound was a pure OOO/bounce — for soft-skip reasons (hard no with no opening, etc.), still post a one-line Slack note so Fede sees we caught it.
+Scanner is still silent if nothing's detected. Responder is silent if verdict is `skip` AND the inbound was a pure OOO/bounce — for soft-skip reasons (hard no with no opening, etc.), still post a one-line Slack note so Nick sees we caught it.
 
 ## Future (not in v1.0)
 
-- Multi-language detection — Spanish, French, Italian inbound replies. v1.0 generates English drafts only; flag non-English inbound for Fede.
+- Multi-language detection — Spanish, French, Italian inbound replies. v1.0 generates English drafts only; flag non-English inbound for Nick.
 - Sentiment delta tracking — measure prospect sentiment shift from first reply to booked-call across types.
 - (Explicitly NOT in roadmap: any form of auto-send. Drafts only, suggestion-gated, forever.)

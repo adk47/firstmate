@@ -581,7 +581,7 @@ fi
 
 # ---------------------------------------------------------------
 # Check 7: no em-dashes (U+2014) in Caroline's customer-facing surface
-# Fede's analytics-tone rule (SOUL.md, common-issues.md §7) requires
+# The analytics-tone rule (SOUL.md, common-issues.md §7) requires
 # en-dashes only across workspaces/support/, skills-all/muso-intercom/,
 # and every workspaces/<agent>/skills/muso-intercom/ mirror. The lint
 # script does dynamic mirror discovery so a new agent copy can't slip
@@ -605,7 +605,7 @@ else
 
   ── BRIEFING ──────────────────────────────────────────────────────
   WHY THIS CHECK EXISTS:
-    Fede's analytics-tone rule (SOUL.md, common-issues.md §7) requires
+    The analytics-tone rule (SOUL.md, common-issues.md §7) requires
     en-dashes (U+2013, `–`) only in Caroline's customer-facing surface.
     Em-dashes (U+2014, `—`) are a forbidden character class — Caroline
     learns voice from these files and would otherwise mirror them in

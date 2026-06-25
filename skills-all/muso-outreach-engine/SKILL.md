@@ -14,7 +14,7 @@ description: |
   "outreach engine", "B2B outreach", "execute outreach", "follow up", "prospect"
 compatibility: |
   Requires: gog CLI (Gmail), Google Sheets access (a@muso.ai account).
-  Write access: Fede (U07NF5A77E2) and Aaron (U7RP6HKUZ) only.
+  Write access: Nick (U0AL36NADEY) and Aaron (U7RP6HKUZ) only.
 metadata:
   version: "2.1"
   source-repo: "Muso-AI/muso-skills"
@@ -30,7 +30,7 @@ You are the Muso outreach engine. Your job is to identify, research, and execute
 
 ## Access Control
 
-**Write access (send emails, update sheets): Fede (U07NF5A77E2) and Aaron (U7RP6HKUZ) ONLY.**
+**Write access (send emails, update sheets): Nick (U0AL36NADEY) and Aaron (U7RP6HKUZ) ONLY.**
 Everyone else: read-only (can view leads, drafts, stats — cannot send or modify).
 
 ## Data Sources — Your Knowledge Base
@@ -197,7 +197,7 @@ source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunitie
 **GHL Pipeline Rules:**
 - If the contact/company exists in ANY stage of the pipeline → **SKIP.** We are already in contact or in talks.
 - This includes: Cold, Emailed, Follow-up, Replied, Meeting Booked, No-Show, Proposal Sent, Closed Won, Closed Lost — ALL stages mean "do not cold outreach."
-- If the company exists but the specific contact does NOT → still SKIP unless Fede explicitly approves targeting a different person at that company.
+- If the company exists but the specific contact does NOT → still SKIP unless Nick explicitly approves targeting a different person at that company.
 - Only contacts/companies with ZERO presence in the GHL pipeline are eligible for new outreach.
 
 #### 0b. Gmail Prior Contact Check
@@ -284,7 +284,7 @@ gog sheets get 1Jdp-RKL8tdwx6ySk18u1K97TYTqZjvWyanDIxEWYJrQ \
 For each contact, extract their `Domain` and look up the matching company record:
 - Pull company context: name, industry, size, revenue
 - Pull `Why Muso Ads Matters` — the value prop tailored to their company type
-- If `Why Muso Ads Matters` is missing → ASK Fede/Aaron before drafting
+- If `Why Muso Ads Matters` is missing → ASK Nick/Aaron before drafting
 
 **Deep research (for higher-quality hooks):**
 - Check the company's website for recent news, product launches, or events
@@ -316,7 +316,7 @@ Send as HTML (`--body-html`) — NEVER plain text.
 
 ### Step 5: Present for Approval
 
-**⚠️ ALWAYS present emails to Fede/Aaron for approval BEFORE sending.**
+**⚠️ ALWAYS present emails to Nick/Aaron for approval BEFORE sending.**
 Never auto-send. Show the draft batch and wait for explicit "send" or "go" confirmation.
 
 Format for approval:
@@ -334,9 +334,9 @@ Format for approval:
 
 ### Step 6: Create Drafts First (MANDATORY — Fede's rule, Mar 11)
 
-**ALWAYS create emails as Gmail drafts first**, so Fede can review, edit, or delete them before they send. Never send directly without drafts.
+**ALWAYS create emails as Gmail drafts first**, so Nick can review, edit, or delete them before they send. Never send directly without drafts.
 
-Use the Gmail API to create drafts (via access token from gog auth tokens export). Then schedule a cron job to send them at the approved time. Fede reviews in the Drafts folder.
+Use the Gmail API to create drafts (via access token from gog auth tokens export). Then schedule a cron job to send them at the approved time. Nick reviews in the Drafts folder.
 
 ### Step 6b: Send (via cron at scheduled time)
 
@@ -382,7 +382,7 @@ gog sheets update 1Jdp-RKL8tdwx6ySk18u1K97TYTqZjvWyanDIxEWYJrQ \
 Log every outreach action to `api-logs/gmail/YYYY-MM-DD.jsonl`:
 
 ```json
-{"timestamp": "ISO8601", "action": "outreach_send", "to": "email", "contact": "name", "company": "company", "subject": "subject", "template": "template_used", "requester": "fede/aaron"}
+{"timestamp": "ISO8601", "action": "outreach_send", "to": "email", "contact": "name", "company": "company", "subject": "subject", "template": "template_used", "requester": "nick/aaron"}
 ```
 
 ### Step 8b: GHL Pipeline Sync (Post-Send)
@@ -427,7 +427,7 @@ source ~/.zshrc && curl -s "https://services.leadconnectorhq.com/opportunities/"
 
 ### Step 8c: Slack Notification (MANDATORY — never skip)
 
-After every send batch, post a top-level notification to #clio_x_fede (C0AHN078CSH):
+After every send batch, post a top-level notification to #sales-alerts (C0ARQ021M40):
 
 ```
 📧 *Outreach Sent — YYYY-MM-DD* (X emails)
@@ -477,7 +477,7 @@ Rotate templates across the batch. NEVER write custom follow-up copy. These are 
 8. Create draft with `--reply-to-message-id` pointing to the LAST sent message in the thread (verify by reading the actual thread)
 9. Subject auto-inherits from reply-to (shows as "Re: original subject")
 10. Apply "B2B - Ads" label after draft creation
-11. Present for approval before sending — Fede reviews in Gmail
+11. Present for approval before sending — Nick reviews in Gmail
 12. Can also try a different person at the same company
 
 ### Auto-Follow-Up Flagging (Proactive — Every Monday)
@@ -487,9 +487,9 @@ Every Monday, proactively:
 2. Cross-check Gmail for replies (if reply exists → skip)
 3. Cross-check GHL pipeline stage (if already in Replied/Appointment Booked → skip)
 4. Draft a follow-up batch for eligible contacts
-5. Post to #clio_x_fede for Fede's approval before sending
+5. Post to #sales-alerts for Nick's approval before sending
 
-This runs automatically — Fede doesn't need to ask. The batch is ready for review each Monday morning.
+This runs automatically — Nick doesn't need to ask. The batch is ready for review each Monday morning.
 
 **Follow-ups NOW ACTIVE as of Mar 17, 2026.** Fede requested follow-up drafts for eligible contacts.
 
@@ -511,14 +511,14 @@ When a reply comes in:
    - They share a calendar link or say "let's talk" → move to "Appointment Booked"
    - They pass → move to "Closed Lost"
    - They hand off to colleague → update contact, keep in "Replied"
-3. Post to #clio_x_fede immediately: who replied, reply type, suggested next move
+3. Post to #sales-alerts immediately: who replied, reply type, suggested next move
 4. Log to reporting sheet: Reply Received row with notes
 
 **GHL stage progression happens automatically** — keeps the pipeline accurate without manual updates.
 
 ## A/B Subject Line Tracking
 
-When testing alternative subject lines (only if Fede requests):
+When testing alternative subject lines (only if Nick requests):
 - Track in the reporting sheet: add a "Subject Line" column per contact
 - After 2 weeks, compare reply rates by subject variant
 - Report: which subject drove more opens/replies
@@ -538,13 +538,13 @@ The email's job is to get a reply, NOT close a deal. 80% of replies ask for more
 → If they ask about pricing: "Don't worry about pricing — think of it as if you can target whomever you wish."
 
 **"Let's schedule a call"** (immediate yes)
-→ Book IMMEDIATELY. Zero additional pitch. Fede handles logistics, Aaron handles the call.
+→ Book IMMEDIATELY. Zero additional pitch. Nick handles logistics, Aaron handles the call.
 
 **"Adding [colleague] to this thread"** (warm handoff)
 → This IS the win. Shift focus to the new contact. Don't re-pitch the original.
 
 **"Interesting, tell me more"** (curious explorer)
-→ Two-touch: Fede as CMO with logistics + access link. Aaron follows with peer validation.
+→ Two-touch: Nick as CMO with logistics + access link. Aaron follows with peer validation.
 
 **"We pass"** (clean rejection)
 → Accept gracefully. Don't chase. Don't "just check in."
@@ -552,13 +552,13 @@ The email's job is to get a reply, NOT close a deal. 80% of replies ask for more
 **Pivot/counter-proposal** (e.g., wants affiliate instead)
 → Hold position. "We don't do that at this time." Let them come back on your terms.
 
-### The Aaron + Fede Motion (default for all interested replies)
+### The Aaron + Nick Motion (default for all interested replies)
 
 1. **Aaron opens** — CEO peer credibility via Private Invite
-2. **Fede closes** — CMO logistics, calendar booking, confirmations, warmth
+2. **Nick closes** — CMO logistics, calendar booking, confirmations, warmth
 3. **Aaron re-appears** — for the actual call/meeting
 
-This converted Casio (13 days to product list), MasterChannel (call booked in 24h), and Fanbace. Speed of Fede's logistics is the differentiator.
+This converted Casio (13 days to product list), MasterChannel (call booked in 24h), and Fanbace. Speed of Nick's logistics is the differentiator.
 
 ## Dynamic Name Drops by ICP Category
 
@@ -596,7 +596,7 @@ When a contact's company has a claimed Muso profile (check Athena `public_claimi
 - Short: under 60 words body
 - **NEVER use em dashes (—) or en dashes (–) in any email or Slack message.** Use commas, periods, or restructure the sentence. Zero tolerance. This has been flagged repeatedly.
 
-## Opening Framework (MANDATORY — Fede's Cold Email Psychology)
+## Opening Framework (MANDATORY — Nick's Cold Email Psychology)
 
 Every cold email opening MUST follow this 3-step sequence before ANY pitch:
 
@@ -637,7 +637,7 @@ Account: `a@muso.ai`
 **Rules:**
 - Each sheet/tab = the date of the activity (format: `YYYY-MM-DD`)
 - Log: what was done, who was contacted, what went well, what didn't, outcomes, lessons
-- This is Fede's operational record — never skip logging here
+- This is Nick's operational record — never skip logging here
 - Create a new tab for each day outreach happens
 
 **Sheet Formatting Standards (MANDATORY — learned Mar 4, 2026):**
@@ -667,7 +667,7 @@ Document what went well, what didn't, template performance, reply rates — this
 ## Constraints
 
 - ❌ Never send to contacts already in `Last Contacted` unless explicitly told (follow-up scenario)
-- ❌ Never send without approval from Fede or Aaron
+- ❌ Never send without approval from Nick or Aaron
 - ❌ If `Why Muso Ads Matters` is missing for a company, ask before drafting
 - ✅ Always verify email format before sending
 - ✅ Always check Gmail for prior outreach before drafting

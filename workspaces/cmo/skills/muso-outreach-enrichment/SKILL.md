@@ -30,7 +30,7 @@ and n8n workflows are ready.
 ## Status
 
 **NOT ACTIVE.** This skill documents the intended workflow but cannot be used
-yet. Do not attempt to run enrichment operations until Fede confirms the setup
+yet. Do not attempt to run enrichment operations until Nick confirms the setup
 is complete.
 
 ## Shared Config
@@ -90,7 +90,7 @@ Write back to NocoDB Company Intelligence (`mvr6nmzcv7albxt`) by row `Id`, via
 - ICPCategory Label
 - Why Muso Ads Matters
 
-If `Why Muso Ads Matters` cannot be auto generated, flag for Fede review.
+If `Why Muso Ads Matters` cannot be auto generated, flag for Nick review.
 This field must be manually validated before any outreach.
 
 ### Step 3: Contact Discovery
@@ -128,7 +128,7 @@ Append enrichment actions to `api-logs/enrichment/YYYY-MM-DD.jsonl`:
 {"timestamp":"ISO8601","source":"snov|enrow|datagma","target":"company|contact","domain":"...","result":"success|fail","notes":"..."}
 ```
 
-### Step 6: Notify Fede
+### Step 6: Notify Nick
 
 After batch completion, post to `#company-finder`:
 
@@ -139,7 +139,7 @@ New enriched companies:
   • Company Name (domain.com) → {K} contacts added
   • ...
 
-Needs Fede review (Why Muso Ads Matters missing):
+Needs Nick review (Why Muso Ads Matters missing):
   • Company Name (domain.com)
 ```
 
@@ -154,20 +154,20 @@ Before enabling this skill:
 - [ ] Credentials added to `$SNOVIO_API_KEY`, `$ENROW_API_KEY`, `$DATAGMA_API_KEY` in HYDRA env
 - [ ] Test enrichment on 1 company against a throwaway NocoDB record (or `--dry-run`)
 - [ ] Confirm ICP Category Label mapping logic works
-- [ ] Fede verifies first 5 enriched companies manually
+- [ ] Nick verifies first 5 enriched companies manually
 - [ ] Then enable batch enrichment
 
 ## Why This Skill Exists Now
 
 Even though the wiring is not complete, the skill file exists so:
-1. The orchestrator can route enrichment requests and reply "not yet wired, ask Fede"
+1. The orchestrator can route enrichment requests and reply "not yet wired, ask Nick"
 2. When wiring is ready, the workflow is already documented
 3. The QA skill knows this is expected but inactive, not missing
 
 ## Constraints (When Active)
 
 - Never enrich without matching parent company rollup logic
-- Never mark `Why Muso Ads Matters` as auto generated without Fede review
+- Never mark `Why Muso Ads Matters` as auto generated without Nick review
 - Always validate professional emails (never write unverified emails to NocoDB)
 - Always log every external API call
 - Always respect rate limits on Snov.io / Enrow / Datagma

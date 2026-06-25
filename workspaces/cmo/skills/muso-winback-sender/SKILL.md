@@ -28,7 +28,7 @@ Sends initial win back batches end to end.
 
 ## Access Control
 
-Aaron (U7RP6HKUZ) and Fede (U07NF5A77E2) only.
+Aaron (U7RP6HKUZ) and Nick (U0AL36NADEY) only.
 
 ## Shared Config
 
@@ -141,7 +141,7 @@ Format:
 
 2. ...
 
-⚠️ Coupon codes: TBD (Fede to provide before send)
+⚠️ Coupon codes: TBD (Nick to provide before send)
 ```
 
 Wait for explicit approval (`send`, `go`, `approved`). Never auto send.
@@ -233,4 +233,4 @@ Sheet: {N} rows updated
 - Always apply `Win-Back` label
 - Always update sheet AND GHL after every send
 - Never use em dash in any draft
-- Never include a coupon code until Fede provides current ones
+- Never include a coupon code until Nick provides current ones

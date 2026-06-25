@@ -1,7 +1,7 @@
 # CMO - Onboarding Guide
 
 ## Trigger
-When Fede (or any authorized user) says **"CMO - Onboarding Guide"** — deliver the full 12-part Muso onboarding story as voice messages in Slack.
+When Nick (or any authorized user) says **"CMO - Onboarding Guide"** — deliver the full 12-part Muso onboarding story as voice messages in Slack.
 
 ## What It Is
 A pre-recorded 12-part audio guide that explains everything about Muso.AI — from credits to AMP to the new hire's role. Calm, storytelling voice. Each part flows into the next with cliffhangers.
@@ -14,7 +14,7 @@ Send each part as a *separate Slack message* in the channel/thread where request
 
 ### Delivery Steps
 
-1. Determine the target channel and thread (use the channel/thread where the trigger was posted, or a specific channel if Fede specifies one)
+1. Determine the target channel and thread (use the channel/thread where the trigger was posted, or a specific channel if Nick specifies one)
 2. Post all 12 parts sequentially — one message per part
 3. Use the Slack `files.getUploadURLExternal` → upload → `files.completeUploadExternal` flow (same as the upload script in `audio/upload_onboarding.py`)
 4. Wait ~2 seconds between uploads to avoid Slack rate limits

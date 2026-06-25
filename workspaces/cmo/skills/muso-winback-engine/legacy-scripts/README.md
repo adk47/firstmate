@@ -49,7 +49,7 @@ Either:
 - **B**: Rewrite the cron implementations from scratch using the SKILL.md specs
 - **C**: Delete this directory entirely if you decide they are not worth keeping
 
-Fede to decide once campaigns are ready to launch.
+Nick to decide once campaigns are ready to launch.
 
 ## History
 

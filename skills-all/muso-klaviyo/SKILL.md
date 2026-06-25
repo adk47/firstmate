@@ -2,7 +2,7 @@
 name: muso-klaviyo
 description: |
   Klaviyo email/SMS marketing analytics and management. Query metrics, profiles, campaigns, flows, lists, segments.
-  WRITE ACCESS: Aaron (U7RP6HKUZ) and Fede (U07NF5A77E2) only. All other users are READ-ONLY.
+  WRITE ACCESS: Aaron (U7RP6HKUZ) and Nick (U0AL36NADEY) only. All other users are READ-ONLY.
 
   Use when: checking email campaign performance, SMS metrics, subscriber profiles, list/segment sizes,
   flow performance, event history, marketing analytics, or managing campaigns/flows/lists.
@@ -25,7 +25,7 @@ Query and manage Muso.AI email/SMS marketing data from Klaviyo.
 ## Access Control
 
 - **Aaron (U7RP6HKUZ):** Full read/write access
-- **Fede (U07NF5A77E2):** Full read/write access
+- **Nick (U0AL36NADEY):** Full read/write access
 - **All other users:** READ-ONLY. Only GET requests (and POST for search/aggregate endpoints). Never create, update, or delete data.
 
 Always check `sender_id` before executing any write operation.
@@ -233,7 +233,7 @@ curl -s -X POST \
 
 ## Tips
 
-- **Write access:** Aaron (U7RP6HKUZ) and Fede (U07NF5A77E2) only. All others read-only.
+- **Write access:** Aaron (U7RP6HKUZ) and Nick (U0AL36NADEY) only. All others read-only.
 - Always include the `revision: 2025-01-15` header (API versioning is mandatory)
 - Response format follows JSON:API spec: `{"data": [...], "links": {...}}`
 - Use `| jq` to parse and filter JSON responses

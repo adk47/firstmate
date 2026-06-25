@@ -48,7 +48,7 @@ Two sheets:
 
 If prior outreach exists, adapt tone (reference previous touch, don't re-introduce).
 If actively in conversation → **EXCLUDE from batch entirely.**
-If in ANY GHL pipeline stage → **SKIP** unless Fede explicitly approves.
+If in ANY GHL pipeline stage → **SKIP** unless Nick explicitly approves.
 
 ## Copy Framework
 

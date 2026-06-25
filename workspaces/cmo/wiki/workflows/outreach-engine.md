@@ -75,7 +75,7 @@ Never `#clio_x_fede` (deprecated for sales).
 
 - No em dash in any email or output (see [[decisions/2026-04-em-dash-prohibited]])
 - Never send on Saturday or Sunday
-- Never send without Fede or Aaron approval
+- Never send without Nick or Aaron approval
 - Never email a 2nd person at the same company unless rule exceptions met
 - Always apply `B2B - Ads` Gmail label after send
 - Always log every action to the logbook sheet

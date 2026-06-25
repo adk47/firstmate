@@ -40,7 +40,7 @@ HYDRA agent workspaces contain two categories of files:
 
 Standard OpenClaw documentation classifies these as config files loaded at boot. However, in HYDRA's multi-agent setup:
 
-- **HEARTBEAT.md** — Agents actively modify this via Slack conversations. CMO's HEARTBEAT.md contains 5.3KB of B2B automation configs that Fede updates through the CMO agent. Overwriting it on deploy would destroy those configurations.
+- **HEARTBEAT.md** — Agents actively modify this via Slack conversations. CMO's HEARTBEAT.md contains 5.3KB of B2B automation configs that Nick updates through the CMO agent. Overwriting it on deploy would destroy those configurations.
 - **IDENTITY.md** — Generated during the bootstrap ritual and updated by agents during conversations. Contains agent-specific metadata that shouldn't be reset.
 
 If you need to push a HEARTBEAT.md or IDENTITY.md change from the repo, use a targeted rsync without the exclude flag, or SSH and copy the specific file.
@@ -110,7 +110,7 @@ OpenClaw silently truncates every bootstrap file at `agents.defaults.bootstrapMa
 
 > ⚠️ **`reference/*.md` is deploy-authoritative.** The deploy pipeline syncs from repo → `/opt/hydra/workspaces/*/reference/`, so it falls in the same "Repo-Authoritative" bucket as `SOUL.md`. If you want to add or update a reference file, open a PR. Agents must not write to this directory — any edits are silently reverted on the next deploy. (See the [File Ownership Matrix](#file-ownership-matrix) for the fuller picture.)
 
-**How this scales**: `MEMORY.md` stops being a monolithic log and becomes a pointer-index whose size grows with *distinct topics*, not total memory volume. Topic files live under `reference/`, git-versioned and human-owned. When a topic's content in `MEMORY.md` crystallizes, the agent proposes a promotion to Fede/Nick (in Slack or a task), and a human opens the PR that moves the content into the matching `reference/<topic>.md` file.
+**How this scales**: `MEMORY.md` stops being a monolithic log and becomes a pointer-index whose size grows with *distinct topics*, not total memory volume. Topic files live under `reference/`, git-versioned and human-owned. When a topic's content in `MEMORY.md` crystallizes, the agent proposes a promotion to Nick (in Slack or a task), and a human opens the PR that moves the content into the matching `reference/<topic>.md` file.
 
 **SOUL.md must teach the agent to use this pattern.** See `workspaces/cmo/SOUL.md` §"Memory (CRITICAL)" for the reference implementation. The key rules: (a) on any indexed topic, read the `reference/<topic>.md` file before answering — the index is only a pointer; (b) if a referenced file is missing or unreadable, stop and escalate, don't hallucinate from the index alone.
 

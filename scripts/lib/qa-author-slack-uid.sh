@@ -32,6 +32,6 @@ case "$login" in
                                     # can't self-approve, so those degrade to review-only)
   azure-kirin) echo "U03LP8YHLPK" ;;  # Mariia (octave-ui; authors web-credits-next PRs)
   # Add more as repos/authors come into scope, e.g.:
-  #   <fede-gh-login>) echo "U07NF5A77E2" ;;  # Fede
+  #   <gh-login>) echo "<slack-uid>" ;;  # map a new GH author to their Slack UID
   *) exit 1 ;;                        # unknown -> fail-closed (caller skips)
 esac

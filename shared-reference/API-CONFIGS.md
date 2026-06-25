@@ -18,7 +18,7 @@ _Load this file when working with any of these systems. Core configs (Stripe, GH
 
 - Key: `WEBFLOW_API_TOKEN` | Base: `https://api.webflow.com/v2`
 - Site: `69b0ade1e3ef1b969b405265` | Collections: Artists `69b0ade1e3ef1b969b405279`, Companies `69b0ade1e3ef1b969b405296`, Testimonials `69b0ade1e3ef1b969b4052b1`
-- Write: Aaron + Fede. Everyone else read-only.
+- Write: Aaron + Nick. Everyone else read-only.
 
 ## Cloudflare (READ-ONLY)
 
@@ -29,7 +29,7 @@ _Load this file when working with any of these systems. Core configs (Stripe, GH
 
 - Auth: JWT Grant | Keys in `~/.zshrc`: `DOCUSIGN_USER_ID`, `DOCUSIGN_ACCOUNT_ID`, `DOCUSIGN_BASE_URI`, `DOCUSIGN_INTEGRATION_KEY`
 - RSA keypair: `~/.docusign/` | Currently SANDBOX
-- Access: Aaron + Fede only.
+- Access: Aaron + Nick only.
 
 ## Deel (HR/Payroll) — Contains PII
 
@@ -58,7 +58,7 @@ _Load this file when working with any of these systems. Core configs (Stripe, GH
 
 - Key: `N8N_API_KEY` | Base: `https://musoai.app.n8n.cloud/api/v1` | Auth: `X-N8N-API-KEY`
 - Key expires: 2026-03-31. MCP registered as `n8n`.
-- Write: Aaron + Fede.
+- Write: Aaron + Nick.
 
 ## Orshot (Dynamic Images)
 

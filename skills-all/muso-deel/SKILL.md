@@ -122,7 +122,7 @@ Most list endpoints support:
 - Payment scales: hourly, biweekly, semimonthly, monthly, custom
 - All amounts in USD
 - Teams: Development, Marketing/Sales, Customer Service, Catalog/Verification
-- Key people with active contracts include engineering (Andrey, Serhii, Ihor S, Artem M, Jay), ops (Jan, Dave, McLaren, ops team in PH), marketing (Federico C as CMO), devops (Artem D)
+- Key people with active contracts include engineering (Andrey, Serhii, Ihor S, Artem M, Jay), ops (Jan, Dave, McLaren, ops team in PH), marketing (Nick as CMO), devops (Artem D)
 
 ## PII Warning
 

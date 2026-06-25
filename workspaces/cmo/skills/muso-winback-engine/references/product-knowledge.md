@@ -65,7 +65,7 @@ this. Other features come second.
   (verify before claiming any "unlimited" feature)
 - Pro does NOT include team workspace (that is Business plan)
 
-If you are unsure about whether a feature is Pro or Business, ASK Fede or Aaron
+If you are unsure about whether a feature is Pro or Business, ASK Nick or Aaron
 before drafting.
 
 ## Plan Disambiguation
@@ -81,7 +81,7 @@ before drafting.
 ## Coupon Codes
 
 **TBD.** New coupon codes need to be set up before launch. Old codes (`LITE10`,
-`LITE20A`) may be deprecated. Do not include coupon codes in drafts until Fede
+`LITE20A`) may be deprecated. Do not include coupon codes in drafts until Nick
 provides the current ones.
 
 ## Upgrade Link

@@ -1,14 +1,20 @@
 ---
 title: Nicholas Sollazzo
-description: Likely incoming CTO of Muso.AI
+description: Owner of the CMO agent at Muso.AI
 type: person
 status: active
 source: USER.md, conversation 2026-04-09
 last-verified: 2026-04-09
-related: [[people/serhii]], [[people/aaron]]
+related: [[people/fede]], [[people/serhii]], [[people/aaron]]
 ---
 
 # Nicholas Sollazzo (Nick)
+
+> **Current owner of the CMO agent.** The CMO agent now reports to Nick.
+> Nick is the authority on marketing decisions and the approver for outreach
+> and win-back drafts (succeeding [[people/fede]], who has departed). The
+> sections below about an "incoming CTO" transition are retained as earlier
+> context and do not change his ownership of the CMO agent.
 
 ## Identity
 

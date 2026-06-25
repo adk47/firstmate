@@ -25,7 +25,7 @@ Tracking real requests that inform what tools/automation to build.
 
 ## Data Extraction & Analytics
 
-### Business Analyst Queries (Marketing/Fede)
+### Business Analyst Queries (Marketing/Nick)
 - [~] Ad-hoc data queries for marketing insights → **clio_sql_query**
 - [~] Profile growth metrics → **clio_saved_queries**
 - [~] Engagement analytics → **clio_saved_queries**

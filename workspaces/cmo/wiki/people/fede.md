@@ -1,14 +1,21 @@
 ---
 title: Federico Cappuccilli
-description: Owner of the CMO agent, Chief Marketing Officer at Muso.AI
+description: Former CMO of Muso.AI and former owner of the CMO agent (departed)
 type: person
-status: active
+status: departed
 source: USER.md, direct conversation
 last-verified: 2026-04-09
-related: [[people/aaron]], [[channels/email-accounts]]
+related: [[people/aaron]], [[people/nick]], [[channels/email-accounts]]
 ---
 
 # Federico Cappuccilli (Fede)
+
+> **Departed.** Fede is no longer the CMO and no longer owns the CMO agent.
+> Marketing authority and ownership of the CMO agent now sit with
+> [[people/nick]] (Nick), to whom the CMO agent reports. The rest of this page
+> is retained as a historical record of Fede's role, working style, and the
+> decisions he made while CMO — do not treat its present-tense statements as
+> current authority.
 
 ## Identity
 

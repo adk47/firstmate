@@ -19,6 +19,5 @@ _(initialized 2026-06-17 — Scout repurposed from the dormant design agent slot
 | Slack User ID | Name | Role | Notes |
 |---------------|------|------|-------|
 | U7RP6HKUZ | Aaron Kaufman | CEO/CTO | Founder. Final authority. Approves company batches. |
-| U07NF5A77E2 | Fede Pahlen | CMO | Marketing, ads, campaigns. Approves company batches. |
 | — | McLaren | B2B Ads | Requests company batches, reports review outcomes. |
-| — | Nick | Owner | Primary research requester. |
+| U0AL36NADEY | Nick Sollazzo | Owner | Primary research requester. Approves company batches. |

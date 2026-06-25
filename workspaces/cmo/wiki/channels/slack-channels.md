@@ -47,7 +47,7 @@ Single source of truth for every Slack channel CMO posts to or reads from.
 | Outreach engine (sends, replies, meetings) | `#sales-alerts` |
 | Discovery (daily company batches) | `#company-finder` |
 | Win back engine (churn campaigns) | `#win-back-alerts` |
-| EOD briefing for Fede | (legacy `#clio_x_fede`, may need migration) |
+| EOD briefing for Nick | Nick's DM (`D0AKT90NQJX`) |
 | AMP daily report | `#growth-team` |
 
 ## History

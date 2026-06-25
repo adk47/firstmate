@@ -30,8 +30,8 @@ If Steps 1-3 did not produce verified information:
 - **DO NOT ANSWER**
 - **DO NOT GUESS**
 - **DO NOT FABRICATE**
-- Say: "I'm not sure about this. Let me check with Fede."
-- Ping Fede (U07NF5A77E2) with the question
+- Say: "I'm not sure about this. Let me check with Nick."
+- Ping Nick (U0AL36NADEY) with the question
 
 ---
 

@@ -44,7 +44,7 @@ Personalized email campaign to win back churned Muso Pro subscribers.
 ## Access Control
 
 - **Aaron (U7RP6HKUZ):** Full access
-- **Fede (U07NF5A77E2):** Full access (co-owns the campaign)
+- **Nick (U0AL36NADEY):** Full access (co-owns the campaign)
 - **All others:** Read-only (can view reports, not trigger sends)
 
 ## GHL Configuration
@@ -160,12 +160,12 @@ Via `gog gmail send --to <email> --subject <subject> --body-html <html> --accoun
 
 ### Step 7: Reply Scan (3x daily)
 - Check Gmail for replies to win-back emails
-- Post new replies to #clio_x_fede (C0AHN078CSH)
+- Post new replies to #win-back-alerts (C0ARTH6U0S2)
 - Move GHL opportunity to "Replied"
 - If resubscription detected, move to "Re-subscribed"
 
 ### Step 8: End of Day Report
-Post to #clio_x_fede:
+Post to #win-back-alerts:
 - Emails sent today
 - Replies received
 - Resubscriptions
@@ -173,7 +173,7 @@ Post to #clio_x_fede:
 
 ## Reporting Channel
 
-All win-back reports and reply alerts go to **#clio_x_fede (C0AHN078CSH)**.
+All win-back reports and reply alerts go to **#win-back-alerts (C0ARTH6U0S2)**.
 
 ## Follow-Up Cadence
 
@@ -181,7 +181,7 @@ All win-back reports and reply alerts go to **#clio_x_fede (C0AHN078CSH)**.
 - Day 14: Second follow-up (if no reply)
 - Day 21: Mark as "Lost / No Answer" (no more touches)
 
-Follow-up templates: TBD (Fede to approve)
+Follow-up templates: TBD (Nick to approve)
 
 ## Tagging Convention
 
@@ -241,10 +241,10 @@ python3 scripts/sanity_check.py
 | 3:00 PM | Reply scan #2 + sheet/GHL update |
 | 5:00 PM | APAC batch if needed (~20 emails from "Next Up: APAC") |
 | 7:00 PM | Reply scan #3 + sheet/GHL update |
-| 8:00 PM | Daily report to #clio_x_fede |
+| 8:00 PM | Daily report to #win-back-alerts |
 | 8:30 PM | Sanity check (sheet vs GHL vs Gmail cross-ref) |
 
-## Daily Report Format (posted to #clio_x_fede)
+## Daily Report Format (posted to #win-back-alerts)
 
 ```
 Win-Back Daily Report - [DATE]

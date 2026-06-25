@@ -41,10 +41,10 @@ would be posted to Slack.)
 - **NocoDB is read-only** — contact/company context only. Look up the external
   attendee's company when possible. **Do not write to NocoDB.**
 - **Do not use GHL. Do not use Google Sheets.** (The old GHL Meeting-Booked
-  stage-move + logbook Sheet workflow is retired; Fede/team update NocoDB
+  stage-move + logbook Sheet workflow is retired; Nick/team update NocoDB
   manually.)
 - Do not move pipeline stages. **Do not create, modify, or delete any calendar
-  event** (no auto-accept on Fede/Aaron's behalf).
+  event** (no auto-accept on Nick/Aaron's behalf).
 
 ## Workflow
 
@@ -84,7 +84,7 @@ Account: a@muso.ai
 Attendees: <external attendees>
 ```
 
-Manual next step: Fede/Aaron set the prospect's NocoDB Status to Meeting Booked.
+Manual next step: Nick/Aaron set the prospect's NocoDB Status to Meeting Booked.
 
 ## Never
 

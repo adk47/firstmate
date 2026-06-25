@@ -55,7 +55,7 @@ When outreach is done to a parent, treat all listed subsidiaries as covered.
    (`m9vsbijhrr9ddeu`) to reflect the parent relationship, and remove or deactivate
    the subsidiary rows.
 4. If a subsidiary has a meaningfully separate audience from the parent (very
-   different product line, different buyer), flag it for Fede review before
+   different product line, different buyer), flag it for Nick review before
    adding as a separate entry.
 5. Use the parent's primary domain as the canonical entry in NocoDB Company Intelligence (`mvr6nmzcv7albxt`).
 
@@ -68,7 +68,7 @@ research:
 2. List known subsidiaries below as `- domain, short name`
 3. Update NocoDB Company Intelligence (`mvr6nmzcv7albxt`) to mark the parent as `Parent Company = TRUE`
 4. Remove or deactivate duplicate subsidiary rows in NocoDB Contacts Intelligence (`m9vsbijhrr9ddeu`)
-5. Post a note to `#company-finder` describing the rollup so Fede can sanity check
+5. Post a note to `#company-finder` describing the rollup so Nick can sanity check
 
 ## History
 

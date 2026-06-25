@@ -26,7 +26,7 @@ subskill calls this one when state needs to be reflected in GHL.
 
 ## Access Control
 
-Write access: Fede (U07NF5A77E2) and Aaron (U7RP6HKUZ) only. Cron operations
+Write access: Nick (U0AL36NADEY) and Aaron (U7RP6HKUZ) only. Cron operations
 run under the system identity (approved for automated stage moves).
 
 ## Shared Config
@@ -171,21 +171,21 @@ New GHL contacts created from sheet: {X}
 New logbook rows from GHL: {Y}
 ```
 
-If `Drift fixed > 10`, flag for Fede review (something is wrong upstream).
+If `Drift fixed > 10`, flag for Nick review (something is wrong upstream).
 
 ## Custom Fields
 
 These must exist on the GHL Contact object:
 - `sheet_row_id`: the `Row ID` from NocoDB Contacts Intelligence (`m9vsbijhrr9ddeu`) (enables reverse lookup)
 
-If the field does not exist, the startup checklist will fail and prompt Fede to
+If the field does not exist, the startup checklist will fail and prompt Nick to
 create it in GHL.
 
 ## Error Handling
 
 - If create contact returns 409 (already exists): search, return existing contact ID
 - If create opportunity returns 409: search, return existing opp ID
-- If stage move returns 404: opportunity was deleted, log error and alert Fede
+- If stage move returns 404: opportunity was deleted, log error and alert Nick
 - If API returns 401: `$GHL_API_KEY` may have expired, escalate to Aaron
 
 ## Constraints

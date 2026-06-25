@@ -15,7 +15,7 @@ Discovery tools (web search, Datagma/Snov.io when wired) → *NocoDB* (B2B-Ads I
 
 ## Execution Ownership
 
-- Fede owns ALL outreach execution (GHL, LinkedIn, pipeline). HYDRA provides data intelligence + drafting.
+- Nick owns ALL outreach execution (GHL, LinkedIn, pipeline). HYDRA provides data intelligence + drafting.
 - 1:1 emails from a@muso.ai are CEO-level outreach (AI-drafted), NOT Klaviyo blasts.
 
 ## Templates

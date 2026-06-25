@@ -444,7 +444,7 @@ keep this ledger honest.
 Approve **only** when BOTH hold:
 - your verdict is **GO** — no 🔴 Critical and no 🟡 Important findings, including any
   carried-forward unresolved thread (see "Carry forward prior findings"); and
-- the requester's Slack UID is one of: **Aaron, Fede, Serhii, Nick**.
+- the requester's Slack UID is one of: **Aaron, Serhii, Nick**.
 
 Approve through the gated wrapper — **never** call `gh pr review --approve` directly.
 The wrapper enforces Muso-AI-only, self-approval refusal, the requester allowlist, and

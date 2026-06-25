@@ -1,12 +1,12 @@
 ---
 name: cmo-eod
-description: Daily End-of-Day briefing skill for Federico Cappuccilli (CMO) at Muso.AI. Triggers every day at 10PM CET. Posts a top-level summary message in #clio_x_fede, then threads all updates beneath it. Use this skill whenever generating or formatting a CMO daily briefing, EOD report, or daily standup summary for Fede. Must be readable by non-technical people.
+description: Daily End-of-Day briefing skill for Nick (CMO) at Muso.AI. Triggers every day at 10PM CET. Posts a top-level summary message to Nick's Slack DM, then threads all updates beneath it. Use this skill whenever generating or formatting a CMO daily briefing, EOD report, or daily standup summary for Nick. Must be readable by non-technical people.
 ---
 
 # CMO EOD Briefing
 
 ## Purpose
-Deliver a concise, scannable daily briefing to Fede (CMO) every night at 10PM CET in the Slack channel **#clio_x_fede**.
+Deliver a concise, scannable daily briefing to Nick (CMO) every night at 10PM CET via **Slack DM to Nick**.
 
 ---
 
@@ -30,12 +30,12 @@ Use bullet points. Each bullet = 1-2 lines max. Group by section. Add a Slack or
 - Any major code changes or fixes
 - Active blockers or dependencies involving other teams
 
-**Fede / Mentions**
-- Any thread, task, or message where Fede is tagged or mentioned
-- Anything waiting on Fede's input or approval
+**Nick / Mentions**
+- Any thread, task, or message where Nick is tagged or mentioned
+- Anything waiting on Nick's input or approval
 
-**Replies to Fede**
-- Any reply to a message Fede sent, across all Slack channels
+**Replies to Nick**
+- Any reply to a message Nick sent, across all Slack channels
 - Include: channel name, who replied, link to thread
 - Group multiple replies from the same thread into one bullet
 
@@ -64,9 +64,9 @@ Use bullet points. Each bullet = 1-2 lines max. Group by section. Add a Slack or
 - **Never report partial data as complete.** If pagination fails or a source is unreachable, say so.
 - Skip section if no activity across all 3 sources
 
-**Fede + Clio Initiatives**
+**Nick + Clio Initiatives**
 - Summarize active projects and threads from #clio_x_fede (C0AHN078CSH) in last 24h
-- This gives Aaron visibility into what Fede and Clio are working on
+- This gives Aaron visibility into what Nick and Clio are working on
 - Include: what was started, what progressed, what's blocked or waiting on someone
 
 **ClickUp**
@@ -83,7 +83,7 @@ Use bullet points. Each bullet = 1-2 lines max. Group by section. Add a Slack or
 ## Rules
 
 1. **Plain English.** No jargon. A non-technical person must understand every bullet.
-2. **BRUTALLY SHORT.** Each bullet = ONE line. Max 15 words per bullet. If Fede wants more detail, he'll ask. You are NOT writing a report — you're writing a scannable list.
+2. **BRUTALLY SHORT.** Each bullet = ONE line. Max 15 words per bullet. If Nick wants more detail, he'll ask. You are NOT writing a report — you're writing a scannable list.
 3. **Specific.** Name the person, task, or channel. Don't be vague.
 4. **Referenced.** Link to the Slack thread or ClickUp task where possible. **Always use Slack channel references in `<#CHANNEL_ID>` format so they are clickable** (e.g. `<#C0AFADBE5PH>` not `#social-media`).
 5. **No filler.** Skip "everything is fine" updates. Only include what's worth knowing.
@@ -107,11 +107,11 @@ Tech
 - Serhii deployed new search filter to staging. Going live tomorrow pending QA. [link]
 - Ihor fixed the broken export button on profiles. Merged this afternoon.
 
-Fede / Mentions
+Nick / Mentions
 - Aaron tagged you in #product re: AMP launch copy - needs review by Friday [link]
 - Jan flagged a ClickUp task: "Casio contract - final review" assigned to you [link]
 
-Replies to Fede
+Replies to Nick
 - #ads-outreach: IK Multimedia replied to your follow-up email thread [link]
 - #general: Rob Mackie replied to your video brief message [link]
 

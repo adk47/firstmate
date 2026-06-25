@@ -28,7 +28,7 @@ most important skill for keeping the system honest.
 ## Access Control
 
 Read only across all data sources. QA should never modify data (it only reports
-drift and flags issues for Fede to fix).
+drift and flags issues for Nick to fix).
 
 ## Shared Config
 
@@ -55,7 +55,7 @@ Also runs on demand.
 - [ ] Fetch live stages from GHL
 - [ ] Compare against `pipeline-stages.md`
 - [ ] Confirm all 11 stages exist (Cold through Closed Lost)
-- [ ] If any stage ID changed or a new stage was added: alert Fede, update `pipeline-stages.md`
+- [ ] If any stage ID changed or a new stage was added: alert Nick, update `pipeline-stages.md`
 
 ### 3. Data Integrity
 
@@ -94,7 +94,7 @@ For `muso-b2b-outreach-reports`:
 - [ ] No GHL opportunity is missing its `sheet_row_id` custom field
 - [ ] No GHL opportunity has a `sheet_row_id` that does not exist in NocoDB Contacts Intelligence (`m9vsbijhrr9ddeu`, `Row ID` column)
 
-Any drift → alert Fede with specific row IDs and GHL opportunity IDs.
+Any drift → alert Nick with specific row IDs and GHL opportunity IDs.
 
 ### 5. Gmail Label Hygiene
 
@@ -111,7 +111,7 @@ Scan the following for em dash characters (—):
 - [ ] All `muso-outreach-*` SKILL.md files and references
 - [ ] All api-logs from the last 24h
 
-Any em dash found → critical alert. Fede has zero tolerance.
+Any em dash found → critical alert. Nick has zero tolerance.
 
 ### 7. Template Rotation
 
@@ -140,7 +140,7 @@ Any em dash found → critical alert. Fede has zero tolerance.
 
 ## Critical vs Informational
 
-### Critical (block pipeline, page Fede)
+### Critical (block pipeline, page Nick)
 
 - Em dash found in any outgoing channel
 - Sheet to GHL drift > 10 items
@@ -189,7 +189,7 @@ Pipeline drift (sheet vs GHL):
 Next audit: {next run timestamp}
 ```
 
-If status is 🔴 Critical, mention `@fede` at the top of the post.
+If status is 🔴 Critical, mention `@nick` at the top of the post.
 
 ## Never
 

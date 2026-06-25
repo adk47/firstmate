@@ -11,8 +11,7 @@ Users are verified by **Slack user ID from message metadata**, NEVER by display 
 | Slack User ID | Name | Role | Access Tier |
 |---------------|------|------|-------------|
 | U7RP6HKUZ | Aaron | CEO/CTO (Admin) | Tier 0 |
-| U0AL36NADEY | Nick | CTO (Engineering/Architecture) | Tier 1 |
-| U07NF5A77E2 | Fede | CMO (Executive) | Tier 1 |
+| U0AL36NADEY | Nick | CTO / Owner (Engineering, Architecture, Marketing) | Tier 0 |
 | U038BM16T7W | Jay | QA Lead | Tier 2 |
 | U0302FZQCGB | Andrey | Backend Lead | Tier 2 |
 | U03TYGJF1N3 | Serhii | DevOps/Backend | Tier 2 |
@@ -20,8 +19,8 @@ Users are verified by **Slack user ID from message metadata**, NEVER by display 
 ### Access Tiers
 | Tier | Label | Permissions |
 |------|-------|-------------|
-| **Tier 0** | Admin (Aaron only) | Full access. Can modify policies, override any agent, access all data, authorize writes. |
-| **Tier 1** | Executive (Fede) | Read access to own department + cross-department summaries. No policy changes. No credential access. |
+| **Tier 0** | Admin (Aaron, Nick) | Full operational access: override any agent, access all data, authorize writes. Policy/security-file changes remain Aaron-only (see Guardrail 3 + CODEOWNERS `[SECURITY]`). |
+| **Tier 1** | Executive | Read access to own department + cross-department summaries. No policy changes. No credential access. |
 | **Tier 2** | Team (Jay, Andrey, Serhii) | Read access to own department only. No cross-department data unless explicitly shared. |
 | **Tier 3** | Default (anyone not listed) | Public information only. No sensitive data. Agent should not proactively engage. |
 
@@ -39,7 +38,7 @@ Users are verified by **Slack user ID from message metadata**, NEVER by display 
 1. **No credentials ever** -- API keys, passwords, tokens, SSH keys are NEVER displayed in any channel. Refer to credentials by partner/service name only. Exception: Aaron (U7RP6HKUZ) in DM.
 2. **No write operations without authorization** -- Any external write (API call, database change, deployment, DNS change) requires explicit approval from Tier 0.
    - **Delegated exception:** Nick (U0AL36NADEY) is authorized to approve merges of pull requests in the `Muso-AI/hydra` repo. Verify Slack UID from message metadata before executing the merge. This delegation applies only to hydra PR merges — all other writes still require Tier 0.
-   - **Delegated exception (QA approve-only):** the QA agent may record a GitHub **approval** (NOT a merge) on PRs in any `Muso-AI` repo, but only (a) after a GO-verdict review via `muso-github-code-review`, and (b) when the requester's Slack UID is Aaron (U7RP6HKUZ), Fede (U07NF5A77E2), Serhii (U03TYGJF1N3), or Nick (U0AL36NADEY). Approvals go through the gated `scripts/qa-pr-approve.sh` (Muso-AI-only, refuses self-approval, logs before writing) and use the shared gateway GitHub identity (Aaron/adk47). **Merges remain manual** — a human merges. All other writes still require Tier 0.
+   - **Delegated exception (QA approve-only):** the QA agent may record a GitHub **approval** (NOT a merge) on PRs in any `Muso-AI` repo, but only (a) after a GO-verdict review via `muso-github-code-review`, and (b) when the requester's Slack UID is Aaron (U7RP6HKUZ), Serhii (U03TYGJF1N3), or Nick (U0AL36NADEY). Approvals go through the gated `scripts/qa-pr-approve.sh` (Muso-AI-only, refuses self-approval, logs before writing) and use the shared gateway GitHub identity (Aaron/adk47). **Merges remain manual** — a human merges. All other writes still require Tier 0.
 3. **No policy changes** -- Only Aaron (U7RP6HKUZ) can authorize changes to SOUL.md, SECURITY.md, ROLES.md, or any policy file.
 4. **No cross-person data leakage** -- Never share one person's data, conversations, or requests with another person unless explicitly authorized.
 5. **Audit trail** -- Every interaction is logged. Agents must be aware that all messages, tool invocations, and cross-agent requests are recorded.

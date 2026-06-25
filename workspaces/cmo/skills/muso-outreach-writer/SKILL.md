@@ -32,7 +32,7 @@ All IDs, accounts, sheets, and rules come from
 `../muso-outreach-engine/references/config.md`. Never hardcode.
 
 ## Pick filter (NocoDB only)
-NocoDB `Contacts Intelligence` joined with `Company Intelligence` is the only source of truth for picking outreach contacts. Read `Status` to identify untouched contacts. Do NOT crosscheck against Gmail labels, GHL pipelines, or Google Sheets. NocoDB is READ-ONLY for this skill — Fede/team manages `Status` manually.
+NocoDB `Contacts Intelligence` joined with `Company Intelligence` is the only source of truth for picking outreach contacts. Read `Status` to identify untouched contacts. Do NOT crosscheck against Gmail labels, GHL pipelines, or Google Sheets. NocoDB is READ-ONLY for this skill — Nick/team manages `Status` manually.
 
 Minimum requirements for any picked row:
 - `Status` is empty (untouched) AND not in the hardcoded known-clients list below.
@@ -49,16 +49,16 @@ Seed list (2026-05-27):
 - Jamstik
 - Kali Audio
 
-Match is case-insensitive and ignores common suffixes (Inc, LLC, Ltd, GmbH, S.r.l., Co., AS). When in doubt, drop and ask Fede.
+Match is case-insensitive and ignores common suffixes (Inc, LLC, Ltd, GmbH, S.r.l., Co., AS). When in doubt, drop and ask Nick.
 
-Maintenance: this list is human-curated. When Fede or Aaron names a new client/partner/integration, add them here AND remove any in-flight drafts to those companies. Do not auto-detect from Stripe / GHL / anywhere — that's drift-prone. Hardcode is the source.
+Maintenance: this list is human-curated. When Nick or Aaron names a new client/partner/integration, add them here AND remove any in-flight drafts to those companies. Do not auto-detect from Stripe / GHL / anywhere — that's drift-prone. Hardcode is the source.
 
 ## Enrichment load (per picked contact)
 For every picked contact, load the full linked Company Intelligence row: `Company Description`, `Value Proposition`, `Target Customer`, `Why Muso Ads Matters`, `ICPCategory Label`. These map directly into the email body (see Required Elements below).
 
 ## What this skill does NOT do
 - Does not write to NocoDB (read-only).
-- Does not send emails (drafts only). Sending requires explicit Fede approval.
+- Does not send emails (drafts only). Sending requires explicit Nick approval.
 - Does not touch GHL pipelines, Google Sheets logbooks, or any non-NocoDB source.
 - Does not email known clients / partners. See the hardcoded exclusion list above.
 

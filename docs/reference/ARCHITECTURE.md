@@ -197,7 +197,7 @@ Each of the 9 agents is a separate Slack application with its own identity.
 | Agent ID      | Slack Name | Model        | Owner   | Primary Role                          |
 |---------------|------------|--------------|---------|---------------------------------------|
 | coordinator   | @Buddy     | Opus 4.7     | Aaron   | Triage, coordination, general help    |
-| ceo           | @CEO       | Opus 4.7     | Fede    | Strategy, business decisions          |
+| ceo           | @CEO       | Opus 4.7     | Aaron   | Strategy, business decisions          |
 | cmo           | @CMO       | Opus 4.6 *   | Nick    | Marketing, growth, communications     |
 | cto           | @CTO       | Opus 4.7     | Jay     | Technical leadership, architecture    |
 | qa            | @QA        | Sonnet 4.6   | Liza    | Testing, quality assurance            |

@@ -129,7 +129,7 @@ window to close without reaching out one more time.
 - Credit-recency targeting (last 90 days = actively working)
 - Not available on any other ad platform — completely unique inventory
 
-## What to Fix (Fede's Direction)
+## What to Fix (Nick's Direction)
 1. **Shorter** — original was 5 paragraphs. Cut to 3 max.
 2. **More confident** — no "exploring partnerships" or "we're looking to." State what you have.
 3. **Intriguing** — don't explain everything. Make them want to ask.

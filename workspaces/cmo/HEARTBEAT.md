@@ -78,7 +78,7 @@ All outreach related crons post to `#sales-alerts` (`C0ARQ021M40`).
 **Cron**: `b2b-followup-monday`
 **Runs**: Mondays at 9 AM CST
 **Action**: `muso-outreach-followup` pulls contacts due for follow up (7d, 14d, 140d), crosschecks Gmail for replies, drafts follow up batch for approval.
-**Posts**: draft batch to `#sales-alerts` for Fede to review and approve.
+**Posts**: draft batch to `#sales-alerts` for Nick to review and approve.
 
 **Status**: NOT YET LIVE. Follow up automation is paused until GHL + sheet sync is fully working. Enable once first few batches have been tested manually.
 
@@ -90,7 +90,7 @@ All outreach related crons post to `#sales-alerts` (`C0ARQ021M40`).
 > Intelligence rows; "find new companies" requests should be routed to `@Scout`.
 
 **Cron**: `company-finder-daily` (agentId: scout)
-**Runs**: daily at 1 PM CEST (Fede's timezone)
+**Runs**: daily at 1 PM CEST (Nick's timezone)
 **Action**: `muso-outreach-discovery` finds 5 new parent companies matching target verticals, dedupes against sheet + GHL + parent-companies.md, applies rollup logic.
 **Posts**: batch of 5 new parent companies to `#company-finder` (`C0ARS7XMY93`)
 
@@ -101,7 +101,7 @@ All outreach related crons post to `#sales-alerts` (`C0ARQ021M40`).
 **Cron**: `muso-outreach-qa-daily`
 **Runs**: daily at 8 AM CST
 **Action**: `muso-outreach-qa` audits every outreach subskill for drift, em dash violations, stage ID correctness, sheet to GHL consistency.
-**Posts**: audit results to `#sales-alerts` (critical issues mention `@fede`)
+**Posts**: audit results to `#sales-alerts` (critical issues mention `@nick`)
 
 ---
 
@@ -146,7 +146,7 @@ All winback related crons post to `#win-back-alerts` (`C0ARTH6U0S2`).
 **Cron**: `winback-qa-daily`
 **Runs**: daily at 8 AM CST
 **Action**: `muso-winback-qa` audits every winback subskill for drift, em dash violations, Pre Send Stripe Check compliance, BCC detection, wrong API key usage, DNS deliverability.
-**Posts**: audit results to `#win-back-alerts` (critical issues mention `@aaron` and `@fede`)
+**Posts**: audit results to `#win-back-alerts` (critical issues mention `@aaron` and `@nick`)
 
 ### Daily Win Back Report
 
@@ -157,24 +157,24 @@ All winback related crons post to `#win-back-alerts` (`C0ARTH6U0S2`).
 
 ---
 
-## Fede Personal Briefings
+## Nick Personal Briefings
 
 ### EOD Briefing
 
 **Cron**: `cmo-eod-briefing`
-**Runs**: daily at 22:00 CET (Fede's local evening)
-**Action**: `cmo-eod` skill generates a top-level header message with threaded updates covering: tech, Fede mentions, replies to Fede, channels, marketing systems, email, outreach and pipeline, ClickUp, other.
-**Posts**: to `#clio_x_fede` (`C0AHN078CSH`)
+**Runs**: daily at 22:00 CET (Nick's local evening)
+**Action**: `cmo-eod` skill generates a top-level header message with threaded updates covering: tech, Nick mentions, replies to Nick, channels, marketing systems, email, outreach and pipeline, ClickUp, other.
+**Posts**: to Nick's Slack DM (`D0AKT90NQJX`)
 
-**Note**: `#clio_x_fede` is deprecated for sales and winback notifications but is
-still the personal briefing channel for Fede. If Fede wants EOD moved too, the
-channel can be swapped in one place.
+**Note**: delivered to Nick's DM (reassigned from `#clio_x_fede`, Fede's old
+channel, during the Fede→Nick handover). The destination is set in one place —
+`cron-jobs.json` (`cmo-eod-briefing` → `delivery.to`).
 
 **Rules**:
 - ONCE per day only. Never re-send. Track state to prevent duplicate sends.
 - Max 40 bullet points total. Brevity is the default.
 - Required 3-point crosscheck for any data (Gmail + GHL + sheet).
-- If there is nothing meaningful to report, post a single-line "quiet day" acknowledgment. Do NOT skip the briefing entirely (Fede wants to see it went out).
+- If there is nothing meaningful to report, post a single-line "quiet day" acknowledgment. Do NOT skip the briefing entirely (Nick wants to see it went out).
 
 ---
 
@@ -197,7 +197,7 @@ channel can be swapped in one place.
 | `#sales-alerts` (`C0ARQ021M40`) | b2b-calendar-scanner-15m, b2b-ghl-reconciliation-daily, b2b-followup-monday, muso-outreach-qa-daily |
 | `#company-finder` (`C0ARS7XMY93`) | company-finder-daily |
 | `#win-back-alerts` (`C0ARTH6U0S2`) | winback-reply-scanner-3x, winback-followup-daily, winback-ghl-reconciliation-daily, winback-qa-daily, winback-report-daily |
-| `#clio_x_fede` | cmo-eod-briefing (legacy channel, kept for EOD only) |
+| Nick DM (`D0AKT90NQJX`) | cmo-eod-briefing |
 | `#growth-team` (`C031DKAGQSH`) | amp-daily-report |
 | `#hydra-heartbeat` | 6-hour health check |
 
@@ -214,7 +214,7 @@ channel can be swapped in one place.
 | Cron | Status | Blocker |
 |------|--------|---------|
 | HYDRA heartbeat | ACTIVE | none |
-| b2b-reply-scanner-1h | ACTIVE | posts to `#clio_x_fede` (Fede's channel); scans `a@muso.ai` only |
+| b2b-reply-scanner-1h | ACTIVE | posts to `#sales-alerts` (`C0ARQ021M40`); scans `a@muso.ai` only |
 | b2b-calendar-scanner-15m | ACTIVE | same |
 | b2b-ghl-reconciliation-daily | ACTIVE | same |
 | b2b-followup-monday | NOT YET LIVE | first manual batches pending |

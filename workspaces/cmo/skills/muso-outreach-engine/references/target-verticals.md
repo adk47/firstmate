@@ -56,11 +56,11 @@ Printful, Bandzoogle, Shopify music vertical. Tools for monetizing fanbases.
 The daily company finder cron uses this list to guide discovery. When scoring
 candidate companies, an active vertical match weights higher than an exploration
 match, but exploration matches should still be surfaced and included in the
-`#company-finder` batch for Fede's review.
+`#company-finder` batch for Nick's review.
 
 ## Keeping This Current
 
-When Fede identifies a new vertical or retires one, update this file in place.
+When Nick identifies a new vertical or retires one, update this file in place.
 Add a `History` section at the bottom if the change is significant.
 
 ## History

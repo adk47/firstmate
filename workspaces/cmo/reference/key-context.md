@@ -27,7 +27,7 @@ Operational reference — things I use during normal sessions that are too detai
 - `smtpStatus: not_valid` = SKIP the contact, mark as `Email Invalid (Snov)` in sheet
 - `smtpStatus: valid` = proceed normally
 - `smtpStatus: unknown` + catchall = proceed with warning flag
-- API down / timeout = STOP, notify Fede, do NOT send unverified
+- API down / timeout = STOP, notify Nick, do NOT send unverified
 - Tested 2026-04-11: victoria.chan@yousician.com correctly returned `not_valid` (yesterday's bounce)
 - Logs: `api-logs/snov/YYYY-MM-DD.jsonl`
 - Config: `muso-outreach-engine/references/config.md` (Snov.io section)

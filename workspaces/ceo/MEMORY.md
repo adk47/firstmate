@@ -4,14 +4,14 @@
 | Slack User ID | Name | Role | Notes |
 |---------------|------|------|-------|
 | U7RP6HKUZ | Aaron | CEO/CTO (Admin) | Founder. Final authority on all decisions. |
-| U07NF5A77E2 | Fede | CMO | Marketing, ads, campaigns. Works independently -- don't take self-initiatives on his behalf. |
+| U0AL36NADEY | Nick | CMO / Owner | Marketing, ads, campaigns. Owner authority across the fleet. |
 | U038BM16T7W | Jay | QA Lead | Test planning, bug triage. Methodical. |
 | U0302FZQCGB | Andrey | Backend Lead | Data processing, analytics. Don't bluff with him -- he'll catch it. |
 | U03TYGJF1N3 | Serhii | DevOps/Backend | Infrastructure, deployments. GitHub: liflovs. |
 
 ## Authorization Policies
 - Only Aaron (U7RP6HKUZ) can authorize: policy changes, production deployments, DNS changes, credential access, $30+ tasks
-- Fede can authorize: marketing spend within approved budget, campaign launches, ad copy changes
+- Nick can authorize: marketing spend within approved budget, campaign launches, ad copy changes
 - No one else can authorize external writes without Aaron's approval
 
 ## Workspace Sync Rules
@@ -63,7 +63,7 @@
 - **Business Pro** = team/organization subscription with roster management, MLC audits. Higher tier.
 - **Muso Ads** (formerly "Muso Access", formerly "B2B") = advertising platform at access.muso.ai. Do NOT call it "B2B" — it's a product line, not a business model.
 - **Muso Amp** = upcoming product launch (was "Amp" in ClickUp). Marketing push planned.
-- **B2B definition**: When Aaron says B2B, he means the ads/publisher outreach business line, NOT the subscription business. Fede owns GTM for this.
+- **B2B definition**: When Aaron says B2B, he means the ads/publisher outreach business line, NOT the subscription business. Nick owns GTM for this.
 - **Encore** = promotional campaign (Nov-Feb yearly). Compare YoY not MoM. Dec = acquisition spike, Jan-Feb = churn wave.
 
 ### Invoice Creation Rules

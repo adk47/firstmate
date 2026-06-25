@@ -30,9 +30,9 @@ frontmatter and add a note explaining what replaced them.
 ## Index
 
 ### People
-- [[people/fede]], owner, CMO of Muso.AI
+- [[people/nick]], owner of the CMO agent
 - [[people/aaron]], CEO and outreach voice
-- [[people/nick]], likely incoming CTO
+- [[people/fede]], former CMO (departed; see page for historical context)
 - [[people/serhii]], current CTO
 - [[people/jan]], Head of Operations
 
@@ -108,9 +108,9 @@ related: [[other-page]], [[another-page]]
 Every claim in the wiki should be traceable. If you write a fact, include:
 - **Where it came from** (slack thread URL, decision doc, observation)
 - **When it was verified**
-- **Who verified it** (Fede, Aaron, or the agent itself)
+- **Who verified it** (Nick, Aaron, or the agent itself)
 
-If you cannot trace a claim, mark it `unverified` and flag for Fede review.
+If you cannot trace a claim, mark it `unverified` and flag for Nick review.
 
 ## Migration Path
 

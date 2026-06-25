@@ -8,7 +8,7 @@ description: |
   scripts are mandatory: a batch reaches #company-finder ONLY as finalize-batch.sh
   output — never hand-assembled or hand-posted.
 
-  Runs as a cron at 1 PM CEST daily, and on demand when McLaren/Fede asks
+  Runs as a cron at 1 PM CEST daily, and on demand when McLaren/Nick asks
   "find me N companies in category X" — the full criteria below apply to the
   bare ask; nobody has to paste a rules prompt.
 
@@ -39,7 +39,7 @@ batch — see **THE INVARIANT** below.
 
 ## Access Control
 
-Fede (U07NF5A77E2) and Aaron (U7RP6HKUZ) can approve new companies.
+Nick (U0AL36NADEY) and Aaron (U7RP6HKUZ) can approve new companies.
 McLaren can request batches and report review outcomes.
 Read only for everyone else.
 
@@ -100,7 +100,7 @@ one-word reason: `DEAD`, `TOO_BIG`, `NOT_NICHE`, `NO_LINKEDIN`, `IN_NOCO`,
 
 ## Tier Rubric
 
-Requesters (McLaren/Fede) often ask for a specific tier. Tier is driven primarily
+Requesters (McLaren/Nick) often ask for a specific tier. Tier is driven primarily
 by **visible marketing spend** (revenue is usually unknown), with company size as
 a secondary cue. Classify every selected company (Step 4) and show its tier in the post.
 
@@ -115,7 +115,7 @@ a secondary cue. Classify every selected company (Step 4) and show its tier in t
 - **Honor an explicit filter**: "Tier 1/2 only" ⇒ drop Tier 3 and Tier 4 — do not
   pad the count with a lower tier (returning fewer is correct, per Hard Requirements).
 - The Tier 3/4 bands are McLaren's; the Tier 1/2 split is directional — if
-  McLaren/Fede sharpen the bands (e.g. revenue thresholds), update this table.
+  McLaren/Nick sharpen the bands (e.g. revenue thresholds), update this table.
 
 ## Pipeline (normative — steps in this order, no skipping)
 
@@ -132,6 +132,12 @@ discover (bounded)  →  prep-batch.sh  →  [you: LinkedIn evidence + rollup +
 > nothing. (Batches assembled from `web_search` and hand-posted, skipping these,
 > are exactly the 2026-06 leak: duplicates shipped, nothing ledgered, dups
 > compounding every run.)
+
+> **This skill is in your context, so it is available — run it, don't go hunting for it.** If you
+> can read this, `prep-batch.sh` and `finalize-batch.sh` are available to you. Never `read` a
+> `SKILL.md` from a filesystem path to "verify" the skill exists, never treat a failed file read as
+> proof a tool is missing, and never escalate a "tool availability blocker" or say the skill "isn't
+> in your toolset." The only correct response to a company-finder request is to run the pipeline.
 
 ### Step 1: Discover (bounded — never hang)
 
@@ -185,12 +191,12 @@ LinkedIn URL recalled without a fetch is not evidence.
 - **Rollup** (unchanged): a known subsidiary (in the shared
   `/opt/hydra/workspaces/cmo/skills/muso-outreach-engine/references/parent-companies.md`)
   → drop, target the parent; a new parent owning NocoDB subsidiaries → flag for
-  rollup, add to that shared file (do not delete subsidiary rows; flag for Fede);
+  rollup, add to that shared file (do not delete subsidiary rows; flag for Nick);
   standalone → keep. **GHL match = best-effort filter, NOT a required gate:** if
   the GHL pipeline is reachable, drop GHL-pipeline matches → terminal reject
   `IN_GHL` (the GHL search is in the Appendix); if the GHL read fails (e.g. 403 /
   network), SKIP the `IN_GHL` filter, still ship the batch, and add a batch flag
-  `⚠ GHL pipeline filter unavailable — N candidates not checked` so Fede knows.
+  `⚠ GHL pipeline filter unavailable — N candidates not checked` so Nick knows.
   Never fail the batch on a GHL failure — its durable home is CMO at enrollment,
   which owns the GHL pipeline.
 - **Tier** (see the **Tier Rubric** above): classify each survivor against the
@@ -234,7 +240,7 @@ demand.
     NOT hand-post as a fallback (that reintroduces the exact bug this gate closes).
 - Review flips (`approve`/`reject`) stay on `ledger.sh` directly — see Step 6.
 
-Then wait for Fede/McLaren to react ✅ / 👍 (approve) or report rejects.
+Then wait for Nick/McLaren to react ✅ / 👍 (approve) or report rejects.
 
 ### Step 6: Review flips (when the human review comes back)
 

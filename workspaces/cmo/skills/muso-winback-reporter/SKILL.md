@@ -19,7 +19,7 @@ metadata:
 
 # Muso Win Back Reporter
 
-Reads win back logs and generates summaries for Aaron and Fede.
+Reads win back logs and generates summaries for Aaron and Nick.
 
 ## Shared Config
 

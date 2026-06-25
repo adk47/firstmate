@@ -31,7 +31,7 @@ GHL_STAGES = {
 GMAIL_ACCOUNT = "a@muso.ai"
 GMAIL_LABEL = "Win-Back Pro"
 GMAIL_CC = "support@muso.ai"
-SLACK_CHANNEL = "C0AHN078CSH"  # #clio_x_fede
+SLACK_CHANNEL = "C0ARTH6U0S2"  # #win-back-alerts
 LOG_DIR = Path.home() / ".openclaw/workspace/api-logs/gmail"
 WORKSPACE = Path.home() / ".openclaw/workspace"
 

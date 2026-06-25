@@ -264,15 +264,15 @@ Stop after Follow up 2 with zero replies. Mark `Lost / No Answer` at Day 90.
 
 ## Coupon Codes
 
-**TBD.** Fede has indicated new coupon codes need to be set up before launch.
+**TBD.** Nick has indicated new coupon codes need to be set up before launch.
 
 Old codes (from prior config, may be deprecated):
 - `LITE10`, 10% off monthly Pro
 - `LITE20A`, 20% off annual Pro
 
-**Action item**: Fede will provide current coupon codes before campaign launch.
+**Action item**: Nick will provide current coupon codes before campaign launch.
 Until then, do NOT include any coupon code in drafts. Flag the gap in batch
-preview for Fede review.
+preview for Nick review.
 
 Upgrade link: `https://app.muso.ai/pricing?plan=pro`
 

@@ -75,7 +75,7 @@ Generic short pitch. Low effort, low expectation.
 
 ## Pre Assigned Templates Override
 
-The `high_value_churn` sheet has an `email_template` column where Fede may
+The `high_value_churn` sheet has an `email_template` column where Nick may
 pre assign a specific template per row. **If `email_template` is set in the
 row, use it directly and skip the auto detection above.**
 

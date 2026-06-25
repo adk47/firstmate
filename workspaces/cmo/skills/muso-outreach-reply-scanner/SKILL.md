@@ -42,7 +42,7 @@ Never post "nothing found".
 - **NocoDB is read-only** — the source of contact/company context. Look up the
   contact/company when possible. **Do not write to NocoDB.**
 - **Do not use GHL. Do not use Google Sheets.** (The old GHL stage-move + logbook
-  Sheet workflow is retired; Fede/team update the NocoDB Status manually.)
+  Sheet workflow is retired; Nick/team update the NocoDB Status manually.)
 - Do not move pipeline stages. Do not auto-reply. Do not create Gmail drafts. Do
   not mark messages read.
 
@@ -99,7 +99,7 @@ For each real item, apply `muso-outreach-reply-responder`:
 - If answering, provide ONE exact suggested reply whose only goal is a 15–20
   minute call. Keep warm-thread replies short and playbook-native. No em dashes
   or en dashes.
-- **Do not create the Gmail draft until Fede or Aaron approves in Slack.**
+- **Do not create the Gmail draft until Nick or Aaron approves in Slack.**
 
 ### Step 6: Post to Slack
 
@@ -117,7 +117,7 @@ Verdict: answer / skip
 > <exact draft body, as Aaron or Fede would send>
 ```
 
-Manual next step: Fede/Aaron approve before any Gmail draft is created. Fede/team
+Manual next step: Nick/Aaron approve before any Gmail draft is created. Nick/team
 updates the NocoDB Status manually if needed.
 
 ## Never

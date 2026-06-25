@@ -29,7 +29,7 @@ Sends initial B2B Ads outreach batches end to end.
 
 ## Access Control
 
-Write access: Fede (U07NF5A77E2) and Aaron (U7RP6HKUZ) only.
+Write access: Nick (U0AL36NADEY) and Aaron (U7RP6HKUZ) only.
 
 ## Shared Config
 
@@ -92,7 +92,7 @@ Exceptions allowed:
 
 For each finalist:
 - Pull the NocoDB Company Intelligence (`mvr6nmzcv7albxt`) row by `Domain`
-- Pull `Why Muso Ads Matters` (if missing, ASK Fede or Aaron)
+- Pull `Why Muso Ads Matters` (if missing, ASK Nick or Aaron)
 - Deep research: website, LinkedIn, recent news (use `web_search` + `web_fetch`)
 - Select ICP name drops from `references/icp-name-drops.md`
 
@@ -136,13 +136,13 @@ gog gmail drafts create \
   --label "B2B - Ads"
 ```
 
-Fede reviews drafts in Gmail before final go.
+Nick reviews drafts in Gmail before final go.
 
 ### Step 8: Hand off to Sender Worker
 
 Do NOT call `gog gmail drafts send`. Sending is the worker's job.
 
-Once Fede / Aaron approves the batch, the sender worker (running via
+Once Nick / Aaron approves the batch, the sender worker (running via
 Slack event handler) reads every draft under label `B2B - Ads` with
 `muso-meta/kind-new` applied, runs the precondition gate, and sends
 only the valid drafts. The worker owns Gmail send + logbook append +
@@ -150,6 +150,7 @@ GHL `Emailed` stage set + Slack notification as one atomic step.
 
 Blocked drafts appear in `#sales-alerts` with a machine-readable
 reason code. Fix and re-approve; do NOT bypass.
+
 
 See `docs/runbooks/RUNBOOK-outreach-sender-worker.md` for ops details.
 

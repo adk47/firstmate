@@ -35,7 +35,7 @@ fail or write to the wrong pipeline. The QA skill catches this drift.
 
 ## Access Control
 
-Read by all subskills. Writes are triggered only by Aaron or Fede via approval flow.
+Read by all subskills. Writes are triggered only by Aaron or Nick via approval flow.
 
 ## Shared Config
 
@@ -197,7 +197,7 @@ Stage breakdown:
   Lost / No Answer: {g}
 ```
 
-If drift fixed > 10, flag for Fede review (something is wrong upstream).
+If drift fixed > 10, flag for Nick review (something is wrong upstream).
 
 ## Custom Fields
 
@@ -205,7 +205,7 @@ Required on every Win Back contact:
 - `sheet_row_id`: row index in `high_value_churn` (enables reverse lookup)
 
 If the field does not exist in the GHL location, the STARTUP.md checklist will
-fail and prompt Fede to create it.
+fail and prompt Nick to create it.
 
 ## Error Handling
 

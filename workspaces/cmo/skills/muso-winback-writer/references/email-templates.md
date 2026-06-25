@@ -5,7 +5,7 @@ No marketing speak.
 
 **No em dashes anywhere.** Use commas, periods, parentheses.
 
-Coupon codes are TBD. Until Fede provides current codes, leave the coupon line
+Coupon codes are TBD. Until Nick provides current codes, leave the coupon line
 out and flag it in the draft for manual fill before send.
 
 Upgrade link: `https://app.muso.ai/pricing?plan=pro`
@@ -113,7 +113,7 @@ directly. Skip auto detection.
 <p>Aaron</p>
 ```
 
-**Note**: Coupon code is TBD. Once Fede provides current codes, add the discount line back here.
+**Note**: Coupon code is TBD. Once Nick provides current codes, add the discount line back here.
 
 ---
 

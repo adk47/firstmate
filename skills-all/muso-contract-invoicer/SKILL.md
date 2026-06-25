@@ -101,7 +101,7 @@ curl -s https://api.stripe.com/v1/invoices/<invoice_id>/send \
   -u "${MUSOAI_STRIPE_API_KEY}:" -X POST
 ```
 
-For CC recipients: Stripe doesn't natively CC. Offer to email the invoice link to CC recipients via gog (if Aaron/Fede authorized).
+For CC recipients: Stripe doesn't natively CC. Offer to email the invoice link to CC recipients via gog (if Aaron/Nick authorized).
 
 ### Step 6: Save Contract to Memory
 After creating the invoice, save all contract details to `memory/muso-ads-clients.md`:

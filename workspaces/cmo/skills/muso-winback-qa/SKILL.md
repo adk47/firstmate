@@ -56,7 +56,7 @@ Also runs on demand.
 - [ ] Fetch live stages from GHL win back location
 - [ ] Compare against `pipeline-stages.md`
 - [ ] Confirm all 7 stages exist (Churned through Lost / No Answer)
-- [ ] If any stage ID changed, alert Fede and update `pipeline-stages.md`
+- [ ] If any stage ID changed, alert Nick and update `pipeline-stages.md`
 
 ### 3. Sheet Integrity
 
@@ -127,7 +127,7 @@ Any em dash found → critical alert. Zero tolerance.
 
 ### 11. Coupon Code Status
 
-- [ ] If templates contain a coupon code, confirm Fede has approved the current codes
+- [ ] If templates contain a coupon code, confirm Nick has approved the current codes
 - [ ] If templates have placeholder coupon (TBD), confirm sender skill is NOT including coupons in drafts
 
 ### 12. DNS Deliverability
@@ -155,7 +155,7 @@ Once per week (or before any new campaign):
 
 ## Critical vs Informational
 
-### Critical (block pipeline, page Fede or Aaron)
+### Critical (block pipeline, page Nick or Aaron)
 
 - Em dash found in any sent email or template
 - Send went out without Pre Send Stripe Check
@@ -207,12 +207,12 @@ Informational:
 Pipeline drift (sheet vs GHL):
   • {N} sheet rows, {M} GHL ops, {K} reconciled
 
-Coupon status: TBD (Fede to provide current codes)
+Coupon status: TBD (Nick to provide current codes)
 
 Next audit: {next run timestamp}
 ```
 
-If status is 🔴 Critical, prepend with `@aaron @fede` mention.
+If status is 🔴 Critical, prepend with `@aaron @nick` mention.
 
 ## Never
 

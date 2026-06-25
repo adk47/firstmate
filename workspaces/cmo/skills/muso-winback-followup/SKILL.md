@@ -27,7 +27,7 @@ Handles the follow up cadence for churned Pro win back.
 
 ## Access Control
 
-Aaron (U7RP6HKUZ) and Fede (U07NF5A77E2) only.
+Aaron (U7RP6HKUZ) and Nick (U0AL36NADEY) only.
 
 ## Shared Config
 
@@ -186,7 +186,7 @@ GHL: {N+Z} stage moves
 - Never send if Stripe shows active subscription (mark `converted`)
 - Never send if Gmail shows inbound reply (mark `replied`)
 - Never send if original bounced (mark Lost)
-- Never send without Aaron or Fede approval
+- Never send without Aaron or Nick approval
 - Always reply as a thread (use `--reply-to-message-id`)
 - Always CC `support@muso.ai`
 - Never BCC

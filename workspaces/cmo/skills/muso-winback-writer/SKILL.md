@@ -130,7 +130,7 @@ Spanish, Portuguese, German.
 
 ### Step 6: Apply Coupon Code
 
-**TBD.** Coupon codes are not finalized. Until Fede provides current codes,
+**TBD.** Coupon codes are not finalized. Until Nick provides current codes,
 do NOT include any coupon code in drafts. Flag the gap in the draft preview.
 
 When ready, the upgrade link is `https://app.muso.ai/pricing?plan=pro`.

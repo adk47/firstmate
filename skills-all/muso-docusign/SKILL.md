@@ -4,7 +4,7 @@ description: |
   DocuSign eSignature — send documents for signature, manage envelopes, download signed docs, list templates.
   Uses DocuSign eSignature REST API v2.1 with JWT Grant authentication.
 
-  WRITE ACCESS: Aaron (U7RP6HKUZ) and Fede (U07NF5A77E2) ONLY. All other users are blocked entirely.
+  WRITE ACCESS: Aaron (U7RP6HKUZ) and Nick (U0AL36NADEY) ONLY. All other users are blocked entirely.
 
   Use when: sending contracts/agreements for signature, checking envelope status, downloading signed documents,
   listing or using templates, managing DocuSign recipients, or any e-signature workflow.
@@ -17,7 +17,7 @@ description: |
 
 ## Access Control (MANDATORY)
 
-**Only Aaron (U7RP6HKUZ) and Fede (U07NF5A77E2) can use this skill.**
+**Only Aaron (U7RP6HKUZ) and Nick (U0AL36NADEY) can use this skill.**
 Check `sender_id` from inbound metadata. If anyone else asks, decline and tell them to ask Aaron.
 
 ## Authentication

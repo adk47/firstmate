@@ -5,7 +5,7 @@ description: >
   Guided conversational workflow for ad management — targeting, placements, scheduling,
   creative uploads, and performance monitoring.
   
-  WRITE ACCESS: Aaron (U7RP6HKUZ), Serhii (U03TYGJF1N3), and Fede (U07NF5A77E2) ONLY.
+  WRITE ACCESS: Aaron (U7RP6HKUZ), Serhii (U03TYGJF1N3), and Nick (U0AL36NADEY) ONLY.
   All other users are blocked entirely.
   
   CHANNEL RESTRICTION: Only responds to ad management requests in #clio_analyst (C0ADREBPNQ2).
@@ -27,7 +27,7 @@ Conversational ad management for Muso AMP, Feed, and Personalized For You placem
 Verify `sender_id` from inbound metadata before ANY operation:
 - `U7RP6HKUZ` (Aaron) → full access → email: `aaron@muso.ai`
 - `U03TYGJF1N3` (Serhii) → full access → email: `serhii@muso.ai`
-- `U07NF5A77E2` (Fede) → full access → email: `fede@muso.ai`
+- `U0AL36NADEY` (Nick) → full access
 - Anyone else → politely decline: "Ad management is restricted. Ask Aaron for access."
 
 Channel restriction: only process ad management requests from `C0ADREBPNQ2` (#clio_analyst).

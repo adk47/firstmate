@@ -14,7 +14,7 @@ set -euo pipefail
 #   3. Never self-approve: GitHub 422s if the PR author == the authenticated
 #      gh account (the gateway token is Aaron/adk47), so refuse early with a
 #      clear message instead of a confusing API error.
-#   4. Requester must be in the approval allowlist (Aaron/Fede/Serhii/Nick).
+#   4. Requester must be in the approval allowlist (Aaron/Serhii/Nick).
 #      NOTE: the agent supplies the UID, so this is defense-in-depth, not a
 #      cryptographic gate. The real identity signal is the Slack UID the gateway
 #      put in the message metadata; the agent is trusted to pass it faithfully.
@@ -41,8 +41,12 @@ LOG_DIR="${QA_PR_APPROVE_LOG_DIR:-api-logs/github}"
 # action, not a manual review by Aaron.
 
 # Approval allowlist — Slack UIDs of the only people who may trigger an approval.
-# Aaron U7RP6HKUZ, Fede U07NF5A77E2, Serhii U03TYGJF1N3, Nick U0AL36NADEY, Mariia U03LP8YHLPK.
-ALLOWED_UIDS=("U7RP6HKUZ" "U07NF5A77E2" "U03TYGJF1N3" "U0AL36NADEY" "U03LP8YHLPK")
+# Aaron U7RP6HKUZ, Serhii U03TYGJF1N3, Nick U0AL36NADEY.
+# DELIBERATELY excludes Mariia (azure-kirin, U03LP8YHLPK): her PRs ARE auto-REVIEWED
+# (see scripts/lib/qa-author-slack-uid.sh) but a human signs off the approval — a
+# UI/newbie author's own PRs must not auto-approve. Do not re-add without a human
+# also updating SECURITY.md + workspaces/qa/SOUL.md + the muso-github-code-review skill.
+ALLOWED_UIDS=("U7RP6HKUZ" "U03TYGJF1N3" "U0AL36NADEY")
 
 die() { echo "qa-pr-approve: $2" >&2; exit "$1"; }
 
@@ -66,7 +70,7 @@ fi
 # --- Guard 4: requester in allowlist (fail fast, no network) ----------------
 allowed=0
 for uid in "${ALLOWED_UIDS[@]}"; do [ "$uid" = "$requester" ] && allowed=1 && break; done
-[ "$allowed" = 1 ] || die 5 "requester '$requester' is not authorized to approve PRs (allowlist: Aaron/Fede/Serhii/Nick)."
+[ "$allowed" = 1 ] || die 5 "requester '$requester' is not authorized to approve PRs (allowlist: Aaron/Serhii/Nick)."
 
 # --- Guard 3: never self-approve -------------------------------------------
 me="$("$GH" api user --jq .login 2>/dev/null || true)"

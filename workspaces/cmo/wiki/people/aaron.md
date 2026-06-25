@@ -19,9 +19,9 @@ related: [[people/fede]], [[workflows/outreach-engine]], [[channels/email-accoun
 
 ## Authority
 
-- CEO. Can authorize policy changes (along with Fede).
+- CEO. Authorizes policy/security-file changes (Aaron-only fleet-wide).
 - **Spending approval**: any task estimated at $30+ in compute or API costs needs Aaron's explicit OK.
-- Approves outreach batches alongside Fede.
+- Approves outreach batches alongside Nick.
 - Owns the relationship with high value B2B prospects (proposal sent and beyond).
 
 ## Voice as Sender
@@ -60,8 +60,8 @@ failure modes when this motion is broken.
 ## Cross Agent Authority
 
 - Can direct any HYDRA agent (CMO, CTO, Finance, etc).
-- If Aaron and Fede disagree on a marketing call, **Fede's decision stands** for marketing specifically.
-- Final escalation point above Fede on cross department issues.
+- If Aaron and Nick disagree on a marketing call, **Nick's decision stands** for marketing specifically.
+- Final escalation point above Nick on cross department issues.
 
 ## Other Skills That Reference Aaron
 

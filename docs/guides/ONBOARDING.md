@@ -9,7 +9,7 @@
 
 ## Table of Contents
 
-1. [For Agent Owners](#for-agent-owners) (Fede, Nick, Jay, Liza, Jan, Artem D, Mariia)
+1. [For Agent Owners](#for-agent-owners) (Nick, Jay, Liza, Jan, Artem D, Mariia)
 2. [For Aaron (Admin)](#for-aaron-admin)
 3. [For Developers (CTO Team)](#for-developers-cto-team)
 
@@ -23,7 +23,7 @@ You have been assigned an AI agent that lives in Slack. Here is what you need to
 
 | Owner   | Agent        | Slack Name    | What It Does                                  |
 |---------|--------------|---------------|-----------------------------------------------|
-| Fede    | ceo          | @CEO          | Strategy, business decisions, planning        |
+| Aaron   | ceo          | @CEO          | Strategy, business decisions, planning        |
 | Nick    | cmo          | @CMO          | Marketing, growth, comms, campaigns           |
 | Jay     | cto          | @CTO          | Technical leadership, architecture decisions  |
 | Liza    | qa           | @QA           | Testing, quality assurance, bug triage        |

@@ -36,7 +36,7 @@ itself. It routes requests to the right subskill and holds the shared config
 
 ## Access Control
 
-Write access (send emails, update sheets, modify GHL): Fede (U07NF5A77E2) and
+Write access (send emails, update sheets, modify GHL): Nick (U0AL36NADEY) and
 Aaron (U7RP6HKUZ) only. Everyone else is read only.
 
 ## Subskill Map
@@ -143,7 +143,7 @@ Config includes:
 ## Constraints (HARD RULES, apply to every subskill)
 
 - Never use em dash (—) in any email, slack message, or sheet entry
-- Never send without explicit Fede or Aaron approval
+- Never send without explicit Nick or Aaron approval
 - Never send on Saturday or Sunday
 - Never break voice (Aaron voice from f@ is wrong, Fede voice from a@/ak@/aaron.k@ is wrong)
 - Never skip the 4 source crosscheck (sheet logbook + NocoDB Contacts Intelligence + GHL + Gmail label)

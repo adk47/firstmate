@@ -57,7 +57,7 @@ wrong audience, wrong notification channel. The QA skill catches drift.
 ## Access Control
 
 Write access (send emails, update sheets, modify GHL): **Aaron (U7RP6HKUZ)** and
-**Fede (U07NF5A77E2)** only. Everyone else is read only.
+**Nick (U0AL36NADEY)** only. Everyone else is read only.
 
 ## Subskill Map
 
@@ -132,7 +132,7 @@ Config covers:
 
 1. **High value churned users imported to GHL** (~1080 contacts at `Churned` stage)
 2. **Sheet `high_value_churn` is the source of truth** for who is in scope
-3. **Sender** picks a tier batch, calls **Writer** for copy, presents to Fede/Aaron
+3. **Sender** picks a tier batch, calls **Writer** for copy, presents to Nick/Aaron
 4. **On approval, Sender** runs the Pre Send Stripe Check, then sends, applies label, updates sheet, calls **GHL Sync** to move stage
 5. **Reply Scanner** runs 3x daily, detects inbound, calls **GHL Sync** to move stage
 6. **Followup** runs on cadence (Day 7, Day 45), uses **Writer** + **Sender** for the send
@@ -144,7 +144,7 @@ Config covers:
 
 - **Pre Send Stripe Check is MANDATORY** before every email (initial, follow up, reply). Skip if user has active subscription.
 - Never use em dash (—) in any email or output
-- Never send without explicit Aaron or Fede approval
+- Never send without explicit Aaron or Nick approval
 - Never send on Saturday or Sunday
 - Never send outside 8 AM to 6 PM CST window
 - Never send more than 3 emails to one person (initial + 2 follow ups)
@@ -170,8 +170,8 @@ Config covers:
 
 ## Outstanding Items (TBD before launch)
 
-- [ ] **Coupon codes**: Fede to provide current codes (old `LITE10`, `LITE20A` may be deprecated)
-- [ ] **Hive strategy**: Fede will explain how to route across the 4 Muso email accounts (a@, ak@, aaron.k@, f@)
+- [ ] **Coupon codes**: Nick to provide current codes (old `LITE10`, `LITE20A` may be deprecated)
+- [ ] **Hive strategy**: Nick will explain how to route across the 4 Muso email accounts (a@, ak@, aaron.k@, f@)
 - [ ] **Email account warming**: ak@, aaron.k@, f@ need to be warmed before full volume
 - [ ] **DNS verification**: confirm DKIM, SPF, DMARC are valid
 - [ ] **Stage ID verification**: re fetch GHL stage IDs to confirm they have not changed

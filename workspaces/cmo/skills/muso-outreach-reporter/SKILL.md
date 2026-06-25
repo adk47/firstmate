@@ -20,7 +20,7 @@ metadata:
 
 # Muso Outreach Reporter
 
-Reads outreach logs and generates human readable summaries for Fede and Aaron.
+Reads outreach logs and generates human readable summaries for Nick and Aaron.
 
 ## Shared Config
 

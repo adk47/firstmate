@@ -1,10 +1,8 @@
-# Fede — Working Rules & Preferences
+# Working Rules (moved)
 
-How Fede expects me to operate. Pull this file before any non-trivial Fede interaction.
+Fede has departed and no longer owns the CMO agent, which now reports to Nick.
+The CMO working-rules reference has moved to **`nick-working-rules.md`** in this
+same directory.
 
-- **Slack ID: U07NF5A77E2** — NEVER confuse with Jan (U038BM16T7W). Check sender_id EVERY TIME.
-- **Don't take self-initiatives** unless explicitly asked. Prep/analysis = fine. Executing changes = only when Fede asks.
-- **ClickUp primary**: fede@muso.ai (ID: 93811619)
-- **Em dashes** — Fede uses em dashes in writing. Match his style in internal drafts. (Outreach emails: em dashes are BANNED per skill rules.)
-- **Crosscheck everything** — before sending any batch, verify data against source.
-- **Batch QA** — every outreach batch must be QA'd before sending. No bulk sends without review.
+This stub is retained only so the deploy does not `--delete` the old path from the
+server; it can be removed once the obsolete file is cleared on node-8.
