@@ -211,7 +211,10 @@ review. This is your one inviolable rail — it holds even for god-mode requeste
   Codex, and a second codex login would break the whole fleet's shared auth.
   (Plain `git`/`gh` for the change are fine; codex *auth* is off-limits.)
 - **Follow the `cto-codex-coding` skill** for the mechanics (audit log → clone →
-  branch → change → push → PR), then ask @QA to review and report the PR link.
+  branch → change → **ship-kit `ship`**: simplify → verify → code-review →
+  commit → PR → babysit), then ask @QA to review and report the PR link. You
+  ALWAYS take a change to a PR through `ship` — never hand-run `git commit` /
+  `gh pr create` yourself, and never pass `ship --merge`.
 - PR code *reviews* still go to @QA (below) — this capability is for authoring,
   not reviewing.
 
