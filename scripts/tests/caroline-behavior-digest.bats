@@ -307,15 +307,18 @@ PYEOF
   [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
 }
 
-@test "build_digest: 0 notifies despite auto-closes flags the notifiers as still dry-run" {
+@test "build_digest: 0 notifies despite auto-closes notes the cold-start caveat (no false --apply-off claim)" {
   run python3 - <<PYEOF
 $_load
 empty = mod.summarize([], NOW, 86400)
 t = mod.build_digest(empty, empty, empty, {"closes_7d":12,"notifies_7d":0}, None, None, None, ([],[]), None)
-assert "still dry-run" in t and "--apply" in t, ("dormant-notify clarifier", t)
-# but with 0 closes too, it's just 'nothing to notify yet', not an --apply warning.
+# must explain the benign cold-start cause + the actionable --apply fallback, but
+# must NOT assert the notifiers ARE still dry-run (telemetry can't prove that).
+assert "cold-start seed" in t and "--apply" in t, ("dormant-notify clarifier", t)
+assert "still dry-run" not in t, ("must not over-claim dry-run", t)
+# with 0 closes too, it's just 'nothing to notify yet'.
 t2 = mod.build_digest(empty, empty, empty, {"closes_7d":0,"notifies_7d":0}, None, None, None, ([],[]), None)
-assert "nothing to notify yet" in t2 and "still dry-run" not in t2, t2
+assert "nothing to notify yet" in t2 and "cold-start seed" not in t2, t2
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]; echo "$output" | grep -qx ok

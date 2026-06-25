@@ -54,8 +54,10 @@ Surfaces:
     nothing and would deflate the rate.
   * OPS-RELIEF headline (dominant action first): conversations auto-closed,
     self-serve writes applied (real customers, week-over-week delta), proactive
-    notifies sent -- with a clarifier when 0 notifies despite auto-closes flags
-    the resolve/overdue notifiers as still dry-run (--apply off).
+    notifies sent -- with a clarifier when 0 notifies despite auto-closes, framed
+    as the expected post-cold-start / no-new-resolutions state (and to verify
+    --apply only if 0 persists), since the telemetry can't prove the notifiers are
+    dry-run vs simply quiet.
   * A SAFETY-ANOMALY line. CRITICAL (also paged to #clio_devops with an
     @-mention): the OPS_DRY_RUN kill switch (read directly from env),
     wrapper-side misconfig (approver/requester/muso missing), an
@@ -607,15 +609,19 @@ def build_digest(s24, s7, s_all, ops, reopen_selfserve, reopen_done, reopen_clos
     if nreal or len(s7["test_actors"]):
         lines.append(f"_{nreal} distinct real customer(s) served autonomously in 7d "
                      f"({len(s7['test_actors'])} test/synthetic excluded)._")
-    # Disambiguate a 0-notify headline: 0 despite auto-closes means the resolve/
-    # overdue notifiers are almost certainly still dry-run (--apply not enabled),
-    # NOT that there was nothing to tell customers.
+    # Clarify a 0-notify headline WITHOUT over-claiming the cause. The digest can't
+    # tell from telemetry whether the notifiers are dry-run or simply post-cold-start
+    # with no NEW resolutions yet -- resolve-notify.py seeds its state on the first
+    # run in BOTH modes (the cold-start write is ungated), so neither the send-log
+    # nor the state file proves --apply is off. State the benign explanation + the
+    # actionable fallback; don't assert dry-run.
     if ops["notifies_7d"] == 0:
         if ops["closes_7d"] > 0:
             lines.append(
                 f"_Note: 0 proactive notifies despite {ops['closes_7d']} auto-closes "
-                "— the resolve/overdue notifiers are likely still dry-run (`--apply` "
-                "off), so customers aren't getting a 'your request is done' note._")
+                "— expected just after the notifiers' cold-start seed (they message "
+                "only on NEW resolutions). If 0 persists for days, verify "
+                "resolve-notify/overdue run with `--apply`._")
         else:
             lines.append("_Note: 0 proactive notifies — nothing to notify yet._")
 
@@ -767,8 +773,8 @@ def _self_test(now):
     assert (checked, reopened, errors) == (2, 1, 0), (checked, reopened, errors)
 
     # build_digest with the new signature: dominant-action-first headline, the UVN
-    # approve/route line, the reopen-after-auto-close line, and the dry-run notify
-    # clarifier (0 notifies despite closes).
+    # approve/route line, the reopen-after-auto-close line, and the 0-notify
+    # clarifier (0 notifies despite closes) -- which must NOT assert "--apply off".
     txt = build_digest(s, s, s, {"closes_7d": 5, "notifies_7d": 0},
                        None, None, {"checked": 5, "reopened": 1, "errors": 0},
                        ([], []), {"success": 0})
@@ -776,7 +782,7 @@ def _self_test(now):
     assert "UVN credit verification" in txt and "1 approved" in txt, ("UVN line", txt)
     assert "0 routed to a human" in txt, ("UVN route count", txt)
     assert "Reopen-after-auto-close" in txt and "1/5" in txt, ("close-reopen line", txt)
-    assert "still dry-run" in txt, ("notify-dormant clarifier", txt)
+    assert "cold-start seed" in txt and "still dry-run" not in txt, ("0-notify clarifier", txt)
     return True
 
 
