@@ -149,6 +149,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh missing or not executable"
 [[ -f "$HYDRA_ROOT/scripts/overdue-verification-notifier.py" ]] \
   || fail "$HYDRA_ROOT/scripts/overdue-verification-notifier.py missing"
+[[ -f "$HYDRA_ROOT/scripts/resolve-notify.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/resolve-notify.py missing"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/weekly-cleanup.sh" ]] \
@@ -327,7 +329,10 @@ Description=Daily sync — close resolved-ticket conversations
 
 [Timer]
 OnBootSec=20min
-OnUnitActiveSec=24h
+# Every 6h (was 24h): so close follows the resolve-notify "your request is done"
+# message within a window instead of up to a day later. The close is unchanged
+# (conservative: only we-spoke-last + resolved; shadow-logged; reversible).
+OnUnitActiveSec=6h
 Unit=close-resolved-conversations.service
 
 [Install]
@@ -384,6 +389,53 @@ ovn=overdue-verification-notifier.timer
 systemctl enable "$ovn" >/dev/null 2>&1 || log "WARN: could not enable $ovn"
 systemctl start "$ovn" >/dev/null 2>&1 || log "WARN: could not start $ovn"
 log "  $ovn: $(systemctl is-active "$ovn" 2>/dev/null || echo unknown)"
+
+# ─── Proactive resolution notifier (every 6h) ─────────────────
+# The close-the-loop counterpart of the overdue notifier: sends ONE in-app
+# Intercom "your request is sorted" note to a customer when their verification
+# ticket flips RESOLVED — today close-resolved-conversations.py closes the chat
+# SILENTLY, so a finished request just goes quiet. The notify makes us
+# "we spoke last", which is exactly close-resolved's gate, so the close batch
+# (above) then closes the conversation. Same safety-first design as the overdue
+# notifier: cold-start seeds silently (no backlog blast), per-conversation
+# dedupe, fresh pre-send conversation re-check (email cross-match + human-reply/
+# closed/handoff suppression; a customer who spoke last is NOT suppressed here),
+# per-run cap, and a wiped-state circuit breaker. SENDING IS OFF until `--apply`
+# is added to ExecStart below: deployed inert (seeds + dry-logs) so enabling is a
+# conscious flip after observing a dry run — identical posture to the overdue
+# notifier. See scripts/resolve-notify.py.
+install -d -m 755 /var/lib/resolve-notify
+cat > /etc/systemd/system/resolve-notify.service << RESNOTIFYSVC
+[Unit]
+Description=Proactively notify customers when their request is resolved
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/resolve-notify.py
+RESNOTIFYSVC
+
+cat > /etc/systemd/system/resolve-notify.timer << RESNOTIFYTMR
+[Unit]
+Description=Every 6h — notify customers their request is resolved
+
+[Timer]
+OnCalendar=*-*-* 02,08,14,20:00:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=resolve-notify.service
+
+[Install]
+WantedBy=timers.target
+RESNOTIFYTMR
+
+systemctl daemon-reload
+rn=resolve-notify.timer
+systemctl enable "$rn" >/dev/null 2>&1 || log "WARN: could not enable $rn"
+systemctl start "$rn" >/dev/null 2>&1 || log "WARN: could not start $rn"
+log "  $rn: $(systemctl is-active "$rn" 2>/dev/null || echo unknown)"
 
 # ─── Daily ClickUp SLA digest (08:00 America/New_York) ────────
 # Posts overdue / due-today / due-tomorrow open support tickets to
