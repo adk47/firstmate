@@ -154,6 +154,47 @@ PYEOF
   echo "$output" | grep -qx ok
 }
 
+@test "extract_candidate: a whitespace-only customer_email fails closed (no-email)" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+now = int(os.environ['OVERDUE_NOTIFY_NOW'])
+# "   " is truthy raw but normalizes to "". The old `(ar or {}).get(...)` +
+# `if not email` accepted it, then stored email="", which made the
+# conversation_suppressed email-match guard a no-op (fail-open). Must drop here.
+task = {"id": "T1", "status": {"type": "open"},
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"}],
+        "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/C1"}],
+        "description": "---ACTION-REQUEST---\n{\"customer_email\": \"   \"}\n---END-ACTION-REQUEST---",
+        "due_date": str((now - 5*86400)*1000)}
+c, r = mod.extract_candidate(task, now, 14)
+assert c is None and r == "no-email", (c, r)
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
+}
+
+@test "conversation_suppressed: an empty ticket_email fails closed (no no-op guard)" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+# Defense-in-depth: even if a blank email slips past extract_candidate, the
+# suppressor must fail closed. The old `if ticket_email and ...` was a no-op when
+# ticket_email was falsey -> outbound with no positive email match.
+conv = {"source": {"author": {"type": "user", "email": "a@b.com"}}, "state": "open",
+        "conversation_parts": {"conversation_parts": []}}
+assert mod.conversation_suppressed(conv, "", mod.CAROLINE_ADMIN_ID) == "email-mismatch"
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
+}
+
 @test "conversation_suppressed: each guard fires; clean conv passes" {
   run python3 - <<'PYEOF'
 import os

@@ -151,6 +151,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/overdue-verification-notifier.py missing"
 [[ -f "$HYDRA_ROOT/scripts/resolve-notify.py" ]] \
   || fail "$HYDRA_ROOT/scripts/resolve-notify.py missing"
+[[ -f "$HYDRA_ROOT/scripts/caroline-behavior-digest.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/caroline-behavior-digest.py missing"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/weekly-cleanup.sh" ]] \
@@ -352,9 +354,10 @@ log "  $cr: $(systemctl is-active "$cr" 2>/dev/null || echo unknown)"
 # silently on the first run (sends nothing for the existing backlog),
 # per-run cap, fresh pre-send conversation re-check (email cross-match +
 # human-reply/handoff suppression), per-conversation dedupe, and a
-# wiped-state circuit breaker. SENDING IS OFF until `--apply` is added to
-# ExecStart below: deployed inert (seeds + dry-logs) so enabling is a
-# conscious flip after observing a dry run. State persists across runs in
+# wiped-state circuit breaker. SENDING IS LIVE (`--apply` on ExecStart
+# below): enabled after 9 days of inert dry-runs showed candidates=0 every
+# cycle (steady-state, sentinel-only state), with the #581 blank-email
+# fail-closed fix as its prerequisite. State persists across runs in
 # /var/lib (idempotency + cold-start seed); the dir is provisioned here,
 # idempotently. See scripts/overdue-verification-notifier.py.
 install -d -m 755 /var/lib/overdue-verification-notifier
@@ -367,7 +370,7 @@ After=network-online.target
 Type=oneshot
 EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/edge.env
-ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/overdue-verification-notifier.py
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/overdue-verification-notifier.py --apply
 OVNOTIFYSVC
 
 cat > /etc/systemd/system/overdue-verification-notifier.timer << OVNOTIFYTMR
@@ -400,10 +403,13 @@ log "  $ovn: $(systemctl is-active "$ovn" 2>/dev/null || echo unknown)"
 # notifier: cold-start seeds silently (no backlog blast), per-conversation
 # dedupe, fresh pre-send conversation re-check (email cross-match + human-reply/
 # closed/handoff suppression; a customer who spoke last is NOT suppressed here),
-# per-run cap, and a wiped-state circuit breaker. SENDING IS OFF until `--apply`
-# is added to ExecStart below: deployed inert (seeds + dry-logs) so enabling is a
-# conscious flip after observing a dry run — identical posture to the overdue
-# notifier. See scripts/resolve-notify.py.
+# per-run cap, and a wiped-state circuit breaker. SENDING IS LIVE (`--apply`
+# on ExecStart below). It seeds silently on its first run -- sending 0 --
+# whether that first run is the last inert fire or the first --apply fire (the
+# cold-start seed write is not --apply-gated); every later run is bounded by the
+# wiped-state breaker (<=MAX, else abort+page) + per-message email/dedupe/
+# suppression gates, and surfaced by caroline-behavior-digest.py. See
+# scripts/resolve-notify.py.
 install -d -m 755 /var/lib/resolve-notify
 cat > /etc/systemd/system/resolve-notify.service << RESNOTIFYSVC
 [Unit]
@@ -414,7 +420,7 @@ After=network-online.target
 Type=oneshot
 EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/edge.env
-ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/resolve-notify.py
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/resolve-notify.py --apply
 RESNOTIFYSVC
 
 cat > /etc/systemd/system/resolve-notify.timer << RESNOTIFYTMR
@@ -436,6 +442,52 @@ rn=resolve-notify.timer
 systemctl enable "$rn" >/dev/null 2>&1 || log "WARN: could not enable $rn"
 systemctl start "$rn" >/dev/null 2>&1 || log "WARN: could not start $rn"
 log "  $rn: $(systemctl is-active "$rn" 2>/dev/null || echo unknown)"
+
+# ─── Caroline autonomous-behavior digest (daily 16:00 UTC) ────
+# Read-only daily digest of Caroline's autonomous self-serve activity so we can
+# SEE how she behaves with users and iterate: per-verb outcomes (success vs
+# route_to_human vs backend-refused) from the muso-cli capability audit
+# (/var/log/muso-ops/tier2-audit.jsonl), the top refusal reasons, reopen-after-
+# "done" rate (re-queries Intercom for a customer reply after the resolve-notify
+# note), and an ops-relief headline (auto-closes + notifies, week-over-week).
+# A CRITICAL safety anomaly (authorized-without-terminal, apply-rate ceiling,
+# muso-cli decision-vocab drift) ALSO pages #clio_devops with an @-mention. It
+# only READS telemetry + GETs Intercom and WRITES only its own trend state, so
+# it is LIVE from day one (no --apply gating like the notifiers). 16:00 UTC is
+# off the 08:00 digest cluster so a full EU+US business day is captured.
+# See scripts/caroline-behavior-digest.py.
+install -d -m 755 /var/lib/caroline-behavior-digest
+cat > /etc/systemd/system/caroline-behavior-digest.service << CARODIGESTSVC
+[Unit]
+Description=Caroline autonomous-behavior daily digest (#cs_chats; pages #clio_devops on a critical anomaly)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/caroline-behavior-digest.py --post
+CARODIGESTSVC
+
+cat > /etc/systemd/system/caroline-behavior-digest.timer << CARODIGESTTMR
+[Unit]
+Description=Daily — Caroline autonomous-behavior digest at 16:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 16:00:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=caroline-behavior-digest.service
+
+[Install]
+WantedBy=timers.target
+CARODIGESTTMR
+
+systemctl daemon-reload
+cbd=caroline-behavior-digest.timer
+systemctl enable "$cbd" >/dev/null 2>&1 || log "WARN: could not enable $cbd"
+systemctl start "$cbd" >/dev/null 2>&1 || log "WARN: could not start $cbd"
+log "  $cbd: $(systemctl is-active "$cbd" 2>/dev/null || echo unknown)"
 
 # ─── Daily ClickUp SLA digest (08:00 America/New_York) ────────
 # Posts overdue / due-today / due-tomorrow open support tickets to

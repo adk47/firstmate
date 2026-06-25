@@ -306,13 +306,17 @@ def extract_candidate(task, now_epoch, max_age_days):
     if not conv_id:
         return None, "no-conv"
     ar = parse_action_request(task.get("description") or task.get("text_content") or "")
-    email = (ar or {}).get("customer_email")
+    # Strip BEFORE the emptiness check: a whitespace-only customer_email ("   ")
+    # is truthy raw but normalizes to "", which would then make the
+    # conversation_suppressed email-match guard a no-op (ticket_email falsey) and
+    # let outbound go without a positive email match. Fail closed here.
+    email = str((ar or {}).get("customer_email") or "").strip().lower()
     if not email:
         return None, "no-email"
     return {
         "ticket_id": task.get("id"),
         "conv_id": conv_id,
-        "email": str(email).strip().lower(),
+        "email": email,
         "action_type": atype,
         "due_epoch": due_epoch,
     }, None
@@ -329,7 +333,10 @@ def conversation_suppressed(conv, ticket_email, bot_admin_id):
     # authored conversation sailed past the wrong-customer check with an empty
     # conv_email — fail-open on the #1 safety property.)
     conv_email = (au.get("email") or "").strip().lower()
-    if ticket_email and conv_email != ticket_email:
+    # Fail CLOSED: a falsey ticket_email (extract_candidate already drops empty
+    # emails — this is defense-in-depth) or any mismatch suppresses, so outbound
+    # never goes without a positive, equal email match.
+    if not ticket_email or conv_email != ticket_email:
         return "email-mismatch"
     # Fail closed on a missing state too: an Intercom conversation GET always
     # carries `state`; its absence is an anomaly, not an invitation to message.
@@ -427,6 +434,12 @@ def _self_test(now_epoch):
     c, r = extract_candidate(clean, now_epoch, 14)
     assert c and r is None and c["conv_id"] == "C1" and c["email"] == "a@b.com", ("clean", c, r)
 
+    # A whitespace-only customer_email must fail CLOSED (no-email), not pass as "".
+    ws = dict(base, status={"type": "open", "status": "in progress"},
+              description="---ACTION-REQUEST---\n{\"customer_email\": \"   \"}\n---END-ACTION-REQUEST---")
+    c, r = extract_candidate(ws, now_epoch, 14)
+    assert c is None and r == "no-email", ("whitespace-email-not-dropped", c, r)
+
     resolved = dict(base, status={"type": "open", "status": "resolved"})
     c, r = extract_candidate(resolved, now_epoch, 14)
     assert c is None and r == "resolved", ("resolved-not-dropped", c, r)
@@ -457,6 +470,10 @@ def _self_test(now_epoch):
     conv3 = {"source": {"author": {"type": "user", "email": "a@b.com"}}, "state": "open",
              "conversation_parts": {"conversation_parts": [{"author": {"type": "admin", "id": CAROLINE_ADMIN_ID}}]}}
     assert conversation_suppressed(conv3, "a@b.com", CAROLINE_ADMIN_ID) is None, "clean-conv"
+    # Defense-in-depth: an empty ticket_email must fail closed (never a no-op guard).
+    conv_ok = {"source": {"author": {"type": "user", "email": "a@b.com"}}, "state": "open",
+               "conversation_parts": {"conversation_parts": []}}
+    assert conversation_suppressed(conv_ok, "", CAROLINE_ADMIN_ID) == "email-mismatch", "empty-ticket-email-failclosed"
     return True
 
 
