@@ -92,12 +92,14 @@ audit() {
 
 ts_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-# Read current analytics for a profile from the lifetime materialized table.
-# Echoes "creditcount|trackswithdata|streams|spotifystreams|youtubestreams|lastsynced"
+# Read current analytics for a profile from the live OLAP cube (replaces the frozen
+# postgresql_core.public.profile_v3_lifetime, dead 2026-06-06). ce_streams @ period='all'
+# is the muso.ai profile-page lifetime headline, recomputed continuously from track_daily.
+# Echoes "creditcount|trackswithdata|streams|spotifystreams|youtubestreams"
 # or empty string on any failure (readback is best-effort, never blocks the fire).
 read_lifetime() {
   local pid="$1" csv line
-  csv="$(printf 'SELECT creditcount, trackswithdata, streams, spotifystreams, youtubestreams, lastsynced FROM postgresql_core.public.profile_v3_lifetime WHERE profileid = %s%s%s' "'" "$pid" "'" \
+  csv="$(printf "SELECT profile_credits_count, tracks_count, ce_streams, ce_spotify_streams, ce_youtube_streams FROM postgresql_olap.public.cube_analytics_profile_view WHERE period='all' AND profile_id='%s'" "$pid" \
     | "$TRINO" 2>/dev/null)" || return 0
   # Trino CSV quotes every field and emits no header; take the first data row.
   line="$(printf '%s\n' "$csv" | grep -m1 . || true)"
@@ -150,9 +152,9 @@ for pid in "${PROFILE_IDS[@]}"; do
 • \`${pid}\` — :white_check_mark: enqueued (${detail})"
       life="$(read_lifetime "$pid")"
       if [[ -n "$life" ]]; then
-        IFS='|' read -r cc twd streams sp yt synced <<<"$life"
+        IFS='|' read -r cc twd streams sp yt <<<"$life"
         REPORT+="
-   streams=${streams:-?} · spotify=${sp:-?} · youtube=${yt:-?} · credits=${cc:-?} · tracks-with-data=${twd:-?} · last-synced=${synced:-?}"
+   streams=${streams:-?} · spotify=${sp:-?} · youtube=${yt:-?} · credits=${cc:-?} · tracks=${twd:-?}"
       fi
     fi
   else

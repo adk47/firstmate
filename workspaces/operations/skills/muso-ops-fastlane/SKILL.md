@@ -136,9 +136,10 @@ For each distinct profile UUID, `fastlane.sh`:
    `muso-admin-api.sh --requester <REQUESTER>` with body
    `{"triggerSource":"<trigger>"}`. (No credit-approve gate applies to analytics
    paths; `dry` mode sets `OPS_DRY_RUN=1` so the write is logged, not sent.)
-2. Reads current stream/track counts from
-   `postgresql_core.public.profile_v3_lifetime` (best-effort) so the report
-   answers "what's the stream count after the fastlane?".
+2. Reads current stream/track counts from the live OLAP cube
+   `postgresql_olap.public.cube_analytics_profile_view` (`ce_streams` @ `period='all'`,
+   best-effort) so the report answers "what's the stream count after the fastlane?".
+   (Replaces the dead `profile_v3_lifetime`, frozen 2026-06-06.)
 3. Appends a JSONL audit line to `/var/log/openclaw/fastlane-apply.jsonl`.
 
 It prints one Slack-ready report. **Post that stdout verbatim** into the thread —

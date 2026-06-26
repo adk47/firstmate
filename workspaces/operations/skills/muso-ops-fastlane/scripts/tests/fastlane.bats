@@ -60,10 +60,11 @@ STUB
   chmod +x "$ADMIN_STUB"
 
   # --- trino stub: one quoted CSV row (no header), matching Trino CSV output --
+  # 5 fields: profile_credits_count, tracks_count, ce_streams, ce_spotify_streams, ce_youtube_streams
   TRINO_STUB="$TEST_ROOT/trino-stub.sh"; export FASTLANE_TRINO="$TRINO_STUB"
   cat >"$TRINO_STUB" <<'STUB'
 #!/usr/bin/env bash
-echo '"45","42","1234567","1000000","234567","2026-06-08 14:00:00.000"'
+echo '"45","42","1234567","1000000","234567"'
 STUB
   chmod +x "$TRINO_STUB"
 }
@@ -104,12 +105,11 @@ teardown() { rm -rf "$TEST_ROOT"; }
   [[ "$output" != *"bootstrapped=?"* ]]
 }
 
-@test "report includes stream/track readback from the lifetime table" {
+@test "report includes stream/track readback from the live cube" {
   run bash "$SCRIPT" "11111111-2222-3333-4444-555555555555" "" "U038BM16T7W" real
   [ "$status" -eq 0 ]
   [[ "$output" == *"streams=1234567"* ]]
-  [[ "$output" == *"tracks-with-data=42"* ]]
-  [[ "$output" == *"last-synced=2026-06-08 14:00:00.000"* ]]
+  [[ "$output" == *"tracks=42"* ]]
 }
 
 @test "dry mode exports OPS_DRY_RUN=1 and reports a no-write run" {
