@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # streams-milestones.sh — detect & announce artists who newly crossed 1B / 10B streams.
 #
-# Metric: postgresql_core.public.profile_v3_lifetime.streams — the canonical
-# lifetime total shown on the muso.ai profile.
+# Metric: postgresql_olap.public.cube_analytics_profile_view.ce_streams (period='all')
+# — the per-artist lifetime total the muso.ai profile page "Streams" headline shows
+# (== the page's stream_stats[-1]; verified Drake/Taylor match within recompute jitter).
+# This is the LIVE source: every row is recomputed from fresh track_daily continuously
+# (max last_computed_at = now), unlike the dead/frozen profile_v3_lifetime it replaces.
+# It is a native bigint (no JSON parse) over the ~50k actively-tracked profiles, and the
+# _view is suffix-stable across the cube's blue/green rebuilds.
 #
-# Why an "already-announced" set (not a track_daily history diff): profile_v3_lifetime
-# has no history, and the stats DB that holds daily history (track_daily) is a hot
-# standby that cancels any multi-minute query (verified: full and candidate-scoped
-# track_daily crossing queries were both killed at 7–15 min by transaction /
-# recovery-conflict timeouts). Reading the canonical club is ~1s. So this skill:
-#   1. reads the current ≥1B club (one fast filtered read; ~3.9k rows, 10B ⊂ 1B),
+# Why an "already-announced" set (not a track_daily history diff): the cube exposes only
+# the current cumulative total (no per-crossing history), and the stats DB that holds
+# daily history (track_daily) is a hot standby that cancels any multi-minute query
+# (verified: full and candidate-scoped track_daily crossing queries were both killed at
+# 7–15 min by transaction / recovery-conflict timeouts). Reading the club is ~1s. So this skill:
+#   1. reads the current ≥1B club (one fast filtered read; ~5.07k rows, 10B ⊂ 1B),
 #   2. announces each profile that is ≥1B / ≥10B and is NOT already in the persisted
 #      per-tier "announced" set, by POSTING to Slack itself, then
 #   3. records the announced ids ONLY after Slack confirms ok:true (atomically).
@@ -21,9 +26,9 @@
 # announced-set (not a prev-vs-now diff) means a profile is congratulated at most once
 # per tier — immune to threshold flap and to a missed/extra run.
 #
-# Read-only against Muso (SELECT-only Trino; names via a batched IN-list lookup on
-# profile_track — no admin API). Writes: the skill's own state files + the Slack post.
-# Trino is reachable only on the main gateway host (node-8).
+# Read-only against Muso (SELECT-only Trino; the profile name is read from the same cube
+# row — no admin API, no separate lookup). Writes: the skill's own state files + the Slack
+# post. Trino is reachable only on the main gateway host (node-8).
 set -euo pipefail
 
 MUSO_BIN="${MUSO_BIN:-$(command -v muso || echo /usr/local/bin/muso)}"
@@ -36,7 +41,7 @@ T_10B=10000000000
 
 FORMAT="slack"      # slack | tsv
 DRY_RUN=0           # compute + print, never post, never update the announced set
-NO_ENRICH=0         # skip the name lookup (entrants show their id)
+NO_ENRICH=0         # don't show profile names (entrants show their id)
 MAX_ANNOUNCE="${BILLION_STREAMS_MAX_ANNOUNCE:-50}"   # safety cap; above this we refuse
 
 usage() {
@@ -57,7 +62,8 @@ Usage:
   --format tsv      New entrants as TSV "tier<TAB>profileid<TAB>streams<TAB>name"
                     (debug; never posts, never updates the announced set).
   --dry-run         Compute + print but never post and never update the set (repeatable).
-  --no-enrich       Skip the batched Trino name lookup (entrants show their id).
+  --no-enrich       Display profile ids instead of names (suppress the cube's
+                    profile_name column).
   --state-dir DIR   State directory (default
                     ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/billion-streams-club-state).
   --max-announce N  Refuse (NO_REPLY + loud stderr, no post, no state change) if more
@@ -120,17 +126,22 @@ post_slack() {
   return 1
 }
 
-# --- read the current >=1B club (fast: one filtered read of the canonical table) ---
+# --- read the current >=1B ARTIST club (fast: one filtered read of the live cube; native
+#     bigint, no JSON parse → no hot-standby recovery-conflict kill). period='all' gives
+#     exactly one row per profile_id; profile_type='artist' drops label/publisher
+#     "organization" profiles (Kobalt, Sony, …) — engineers/producers remain, as in v3;
+#     profile_name is read from the SAME row (no separate replica lookup). The _view
+#     tracks the active blue/green suffix. ---
 read -r -d '' CLUB_SQL <<SQL || true
-SELECT profileid, streams
-FROM postgresql_core.public.profile_v3_lifetime
-WHERE streams >= ${T_1B}
-ORDER BY streams DESC
+SELECT profile_id, ce_streams AS streams, profile_name
+FROM postgresql_olap.public.cube_analytics_profile_view
+WHERE period='all' AND lower(profile_type) = 'artist' AND ce_streams >= ${T_1B}
+ORDER BY ce_streams DESC
 SQL
 
 "$MUSO_BIN" query "$CLUB_SQL" --format json \
-  | jq -r 'select(.profileid != null) | [.profileid, (.streams|tostring)] | @tsv' \
-  > "$CURRENT_FILE" || die "failed to read current club from profile_v3_lifetime"
+  | jq -r 'select(.profile_id != null) | [.profile_id, (.streams|tostring), (.profile_name // "")] | @tsv' \
+  > "$CURRENT_FILE" || die "failed to read current club from cube_analytics_profile_view"
 
 [[ -s "$CURRENT_FILE" ]] || die "current club query returned no rows — refusing to touch state"
 
@@ -160,12 +171,12 @@ fmt_b() { awk -v n="$1" 'BEGIN { printf "%.2fB", n / 1000000000 }'; }
 # into the channel message. The profile URL below is our own intentional link.
 slack_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 
+declare -A name=()  # pid -> profile_name from the club read ("" when --no-enrich)
 entrants=""        # tier<TAB>pid<TAB>streams, one per line (club order = streams desc)
 new1b=()           # ids to add to announced-1b
 new10b=()          # ids to add to announced-10b
-ids_sql=""         # 'id1','id2',... for one batched name lookup
 n_entrants=0
-while IFS=$'\t' read -r pid streams; do
+while IFS=$'\t' read -r pid streams nm; do
   [[ -n "$pid" && "$streams" =~ ^[0-9]+$ ]] || continue
 
   tier=""
@@ -178,7 +189,7 @@ while IFS=$'\t' read -r pid streams; do
   [[ -n "$tier" ]] || continue
 
   entrants+="${tier}"$'\t'"${pid}"$'\t'"${streams}"$'\n'
-  ids_sql+="${ids_sql:+,}'${pid}'"
+  [[ "$NO_ENRICH" -eq 0 ]] && name["$pid"]="$nm"
   n_entrants=$((n_entrants + 1))
 done < "$CURRENT_FILE"
 
@@ -199,14 +210,9 @@ commit_state() {
   fi
 }
 
-# --- one fast IN-list lookup resolves all entrants' names (index pushdown, seconds) ---
-declare -A name=()
-if [[ -n "$ids_sql" && "$NO_ENRICH" -eq 0 ]]; then
-  while IFS=$'\t' read -r pid nm; do
-    [[ -n "$pid" ]] && name["$pid"]="$nm"
-  done < <("$MUSO_BIN" query "SELECT profile_id, MAX(profile_name) AS name FROM postgresql_stats.public.profile_track WHERE profile_id IN (${ids_sql}) GROUP BY profile_id" --format json 2>/dev/null \
-    | jq -r 'select(.profile_id != null) | [.profile_id, (.name // "")] | @tsv')
-fi
+# Names come from the club read above — profile_name is on the cube row, so there is no
+# separate lookup (avoids the postgresql_stats hot-standby that cancels such joins).
+# --no-enrich simply leaves name[] empty, and entrants then display their profile id.
 
 # --- tsv (debug): dump entrants, never post, never commit ---
 if [[ "$FORMAT" == "tsv" ]]; then

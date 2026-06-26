@@ -20,7 +20,7 @@ compatibility: |
   MUSO_SLACK_BOT_TOKEN_CMO (present in the main-gateway env), posting as @cmo. No new
   credential. CMO already has `muso` access.
 metadata:
-  version: "0.2"
+  version: "0.3"
   source-repo: "Muso-AI/hydra"
 allowed-tools:
   - exec
@@ -32,13 +32,20 @@ Posts the artists who **just crossed** a 1B or 10B lifetime-streams milestone.
 
 ## The metric and how a crossing is detected
 
-- **Milestone number** = `postgresql_core.public.profile_v3_lifetime.streams` — the
-  canonical lifetime total shown on the muso.ai profile (~3.9k profiles ≥1B,
-  ~900 ≥10B at time of writing).
-- That table has **no history**, and the daily-history table that exists
-  (`track_daily`) lives on a hot-standby replica that **cancels any multi-minute
-  query** (a full or candidate-scoped crossing diff was killed at 7–15 minutes by
-  transaction / recovery-conflict timeouts). Reading the canonical club is ~1 second.
+- **Milestone number** = `postgresql_olap.public.cube_analytics_profile_view.ce_streams`
+  (`period='all'`, `profile_type='artist'`) — the per-artist lifetime total the muso.ai
+  profile page **Streams** headline shows (verified equal to the page's `stream_stats[-1]`;
+  ~5.07k artists ≥1B, ~1.2k ≥10B at time of writing). It is the **live** source: every row
+  is recomputed from fresh `track_daily` continuously (`max(last_computed_at)` = now),
+  replacing the dead/frozen `profile_v3_lifetime`. A native `bigint` (no JSON parse) over
+  the ~50k actively-tracked profiles; the `_view` is suffix-stable across the cube's
+  blue/green rebuilds. The `profile_type='artist'` filter drops label/publisher
+  **organization** profiles (Kobalt, Sony Music Publishing, …); engineers/producers remain
+  in scope, exactly as they did under v3.
+- The cube exposes **only the current cumulative total** (no per-crossing history), and the
+  daily-history table that exists (`track_daily`) lives on a hot-standby replica that
+  **cancels any multi-minute query** (a full or candidate-scoped crossing diff was killed at
+  7–15 minutes by transaction / recovery-conflict timeouts). Reading the club is ~1 second.
 - So the skill keeps a persistent **per-tier "already-announced" set** and, each run:
   1. reads the current ≥1B club (one fast filtered read; 10B is a subset of 1B),
   2. for every profile that is ≥1B / ≥10B and **not yet in that tier's announced
@@ -52,8 +59,8 @@ Posts the artists who **just crossed** a 1B or 10B lifetime-streams milestone.
   missed/extra run.
 
 > Why not `muso db`? v0.7.0's `muso db` only reaches the **core** and **industry**
-> Postgres — and the canonical read this skill uses is on `core`, reached fine
-> through the existing `muso query` Trino path.
+> Postgres; this cube lives in the **OLAP** store, reached through the existing
+> `muso query` Trino path (catalog `postgresql_olap`).
 
 ## How to call it
 
@@ -105,11 +112,10 @@ seeding the wrong place.
 
 - **Most days are empty.** Crossing a billion in a day is rare, so `NO_REPLY` is the
   common, healthy result.
-- **New-membership artifact.** A profile that *first appears* in
-  `profile_v3_lifetime` already above a tier (a fresh claim, a data backfill, or a
-  profile **merge** that consolidates totals) is posted once, because the state can't
-  tell "grew into the club" from "appeared already in the club." It is then remembered
-  and never repeats.
+- **New-membership artifact.** A profile that *first appears* in the club already above a
+  tier (a fresh claim, a data backfill, or a profile **merge** that consolidates totals) is
+  posted once, because the state can't tell "grew into the club" from "appeared already in
+  the club." It is then remembered and never repeats.
 - **Safety cap.** If more than `--max-announce` (default 50) profiles would post in one
   run — the tell-tale of a lost/corrupt state file — the skill refuses, posts nothing,
   leaves state unchanged, and logs loudly to stderr to investigate.
