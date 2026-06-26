@@ -279,6 +279,34 @@ describe("buildAgentRawBody", () => {
     expect(out).not.toContain("- plan:");
   });
 
+  it("renders a real workspace name, but not when it just echoes the greeting name", () => {
+    const org = buildAgentRawBody("hi", {}, {
+      status: "done",
+      enrichedAt: "t",
+      verifiedName: "Jane Doe",
+      snapshot: { founderSince: 2023, accountName: "Atlantic Records" },
+    });
+    expect(org).toContain("- workspace: Atlantic Records");
+
+    const echo = buildAgentRawBody("hi", {}, {
+      status: "done",
+      enrichedAt: "t",
+      verifiedName: "Atlantic Records",
+      snapshot: { founderSince: 2023, accountName: "atlantic records" },
+    });
+    expect(echo).not.toContain("- workspace:");
+  });
+
+  it("omits the workspace line when absent", () => {
+    const out = buildAgentRawBody("hi", {}, {
+      status: "done",
+      enrichedAt: "t",
+      verifiedName: "Jane Doe",
+      snapshot: { founderSince: 2023 },
+    });
+    expect(out).not.toContain("- workspace:");
+  });
+
   it("sanitizes the plan string (catalog/API-sourced) like other enrichment values", () => {
     const out = buildAgentRawBody("hi", {}, {
       status: "done",

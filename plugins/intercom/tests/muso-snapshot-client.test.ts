@@ -7,7 +7,11 @@ function jsonResp(status: number, body: unknown) {
 
 // Real envelopes (core-backend wraps handler output in an outer `data`):
 //   /admin/claiming  → { data: { items: [{ profileId, userId, status, team: { email } }], total } }
-//   /admin/team      → { data: { items: [{ id, email, founder: {active, sinceYear, lapsedAt}, subscription: {plan, period} }], total } }
+//   /admin/team      → { data: { items: [{ id, email, name, createdAt, isDefault, isClaimed,
+//                          logoUrl, coupons, stripeCustomerId,
+//                          founder: {active, sinceYear, lapsedAt},
+//                          subscription: {period, starDate, status, plan?} }], total } }
+//                      (verified live 2026-06-26 — name + createdAt confirmed present)
 //   /admin/profile/X → { data: { id, name, isClaimed, creditCount, commonCredits, email, phone } }
 //   /admin/profile/X/credits → { data: { items: [{ title, releaseDate, credits }] } }
 
@@ -26,6 +30,10 @@ const TEAM = {
       {
         id: "team-1",
         email: "jane@example.com",
+        // Auto-generated default personal workspace name — must be SUPPRESSED
+        // (not surfaced as accountName), so the full-snapshot below has no
+        // workspace field.
+        name: "Jane Doe's Workspace",
         isClaimed: true,
         stripeCustomerId: "cus_SECRET", // PII-ish — must NOT appear in the snapshot
         founder: { active: true, sinceYear: 2023, lapsedAt: null },
@@ -300,6 +308,54 @@ describe("createSnapshotClient.lookupSnapshot — claiming + team chain", () => 
     const snap = await c.lookupSnapshot("jane@example.com", { timeoutMs: 2500 });
     expect(snap?.founderSince).toBeUndefined();
     expect(snap?.plan).toBe("pro (annual)");
+  });
+
+  // --- Founder-only recognition field: workspace name -------------------------
+  // So an active Founding Member who is a label/org feels seen (greet the team by
+  // name). Founder-gated at the source so non-founders are never affected, and
+  // the auto-generated "<Person>'s Workspace" default is suppressed (it reads
+  // robotically; individuals fall back to the first-name greeting).
+
+  function founderTeam(extra: Record<string, unknown>) {
+    return {
+      teamBody: {
+        data: {
+          items: [{
+            id: "t", email: "jane@example.com",
+            founder: { active: true, sinceYear: 2023, lapsedAt: null },
+            subscription: { plan: "pro", period: "annual" },
+            ...extra,
+          }],
+          total: 1,
+        },
+      },
+    };
+  }
+
+  it("surfaces a real org/label workspace name for an active founder", async () => {
+    const { c } = client(founderTeam({ name: "Atlantic Records" }));
+    const snap = await c.lookupSnapshot("jane@example.com", { timeoutMs: 2500 });
+    expect(snap?.accountName).toBe("Atlantic Records");
+  });
+
+  it("suppresses the auto-generated '<Person>'s Workspace' default name", async () => {
+    const straight = client(founderTeam({ name: "Jane Doe's Workspace" }));
+    expect((await straight.c.lookupSnapshot("jane@example.com", { timeoutMs: 2500 }))?.accountName).toBeUndefined();
+    // curly apostrophe variant (what some UIs emit) is suppressed too
+    const curly = client(founderTeam({ name: "Jane Doe’s Workspace" }));
+    expect((await curly.c.lookupSnapshot("jane@example.com", { timeoutMs: 2500 }))?.accountName).toBeUndefined();
+  });
+
+  it("never surfaces a workspace name for a non-founder (founder-gated)", async () => {
+    const { c } = client({
+      teamBody: { data: { items: [{
+        id: "t", email: "jane@example.com", name: "Atlantic Records",
+        founder: { active: false, sinceYear: 2023, lapsedAt: null },
+        subscription: { plan: "business", period: null },
+      }], total: 1 } },
+    });
+    const snap = await c.lookupSnapshot("jane@example.com", { timeoutMs: 2500 });
+    expect(snap?.accountName).toBeUndefined();
   });
 
   it("omits team fields when no team email exactly matches", async () => {

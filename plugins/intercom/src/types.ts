@@ -355,6 +355,12 @@ export interface AccountSnapshot {
   // Founding-member year — set ONLY when the team's founder.active is true
   // (lapsed founders are omitted entirely; never surface lapsed status).
   founderSince?: number;
+  // Workspace/account display name (team.name) — set ONLY for active founders,
+  // and only when it's a real label/org name. Auto-generated personal-workspace
+  // defaults ("<Person>'s Workspace") are suppressed at the source, so this is a
+  // safe recognition hook for org/label founders; individuals fall back to the
+  // first-name greeting. Founder-gated so non-founder behaviour is unchanged.
+  accountName?: string;
   // Subscription plan, e.g. "pro (annual)" / "lite" — from the team record.
   plan?: string;
 }

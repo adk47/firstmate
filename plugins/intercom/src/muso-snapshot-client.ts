@@ -158,13 +158,21 @@ export function createSnapshotClient(deps: SnapshotClientDeps): { lookupSnapshot
     return PLAN_TIERS.find((tier) => tokens.has(tier));
   }
 
-  // /admin/team?email= → founding-member status + subscription plan for the
-  // verified customer's workspace. email param is iLike, so exact-match gate;
-  // exactly one exact match or we surface nothing.
+  // /admin/team?email= → founding-member status, workspace name, and
+  // subscription plan for the verified customer's workspace. email param is
+  // iLike, so exact-match gate; exactly one exact match or we surface nothing.
+  // Live /admin/team row (verified 2026-06-26) carries:
+  //   { id, email, name, createdAt, isDefault, isClaimed, logoUrl, coupons,
+  //     stripeCustomerId, founder: {active, sinceYear, lapsedAt},
+  //     subscription: {period, starDate, status, plan?} }
+  // We assemble ONLY name (filtered) + founder + plan — which is what keeps
+  // email/stripeCustomerId/logoUrl out of the snapshot. (createdAt year is NOT
+  // surfaced: across the live founder cohort it equals founder.sinceYear, so the
+  // existing "founding member: since <year>" already conveys true tenure.)
   async function resolveTeamFacts(
     email: string,
     timeoutMs: number,
-  ): Promise<{ founderSince?: number; plan?: string }> {
+  ): Promise<{ founderSince?: number; accountName?: string; plan?: string }> {
     const resp = await get<unknown>(
       `/api/v3/admin/team?email=${encodeURIComponent(email)}&limit=10`,
       timeoutMs,
@@ -184,11 +192,21 @@ export function createSnapshotClient(deps: SnapshotClientDeps): { lookupSnapshot
     const sinceYear = founder?.sinceYear;
     const planTier = normalizePlanTier(String(sub?.plan ?? ""));
     const period = String(sub?.period ?? "");
+    // Workspace recognition is a founder-only touch — gated here at the source so
+    // non-founder behaviour is unchanged regardless of doctrine.
+    const isActiveFounder = founder?.active === true;
+    // team.name is auto-generated as "<Person>'s Workspace" for the default
+    // personal workspace (verified live). That reads robotically as a greeting,
+    // so suppress it — only a renamed/org/label workspace name is a useful
+    // recognition hook; individuals fall back to the first-name greeting.
+    const rawName = String(team.name ?? "").trim();
+    const isAutoWorkspaceName = /['’]s workspace$/i.test(rawName);
     return {
       // Active founders only — a lapsed founder is rendered as a normal customer.
-      ...(founder?.active === true && typeof sinceYear === "number" && Number.isFinite(sinceYear)
+      ...(isActiveFounder && typeof sinceYear === "number" && Number.isFinite(sinceYear)
         ? { founderSince: sinceYear }
         : {}),
+      ...(isActiveFounder && rawName && !isAutoWorkspaceName ? { accountName: rawName } : {}),
       ...(planTier ? { plan: period ? `${planTier} (${period})` : planTier } : {}),
     };
   }

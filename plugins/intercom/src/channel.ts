@@ -195,6 +195,11 @@ function buildEnrichmentLines(e: EnrichmentState): string[] {
     if (typeof s.founderSince === "number") {
       lines.push(`- founding member: since ${s.founderSince}`);
     }
+    // Workspace/org name (founder-only, already filtered to real label names at
+    // the source). Skip when it just echoes the greeting name.
+    if (s.accountName && s.accountName.trim().toLowerCase() !== (e.verifiedName ?? "").trim().toLowerCase()) {
+      lines.push(`- workspace: ${clean(s.accountName)}`);
+    }
     if (s.plan) lines.push(`- plan: ${clean(s.plan)}`);
   }
   const p = e.priorChats;
