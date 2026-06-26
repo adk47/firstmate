@@ -268,7 +268,7 @@
         "default": {
           "enabled": true,
           "workspaceId": "dwjzhcge",
-          "token": "dG9rOjM5YzM2ODg2X2ZhZjBfNGI4NF9hMzA1XzczNzYyMjg4M2M3OToxOjA=",
+          "token": { "source": "env", "provider": "hydra-env", "id": "MUSOAI_INTERCOM_TOKEN" },
           "webhookSecret": "43c744d5-5043-4f3f-b7fb-36440af1e8d7",
           "botAdminId": "5763097",
           "defaultInboxId": "5465657",
@@ -411,7 +411,8 @@
         "allowlist": [
           "CLICKUP_API_KEY",
           "MUSO_ADMIN_EMAIL",
-          "MUSO_ADMIN_PASSWORD"
+          "MUSO_ADMIN_PASSWORD",
+          "MUSOAI_INTERCOM_TOKEN"
         ]
       }
     }
