@@ -892,7 +892,7 @@
       "agentId": "cmo",
       "name": "billion-streams-club-daily",
       "description": "Daily 06:00 UTC scan for artists who newly crossed a 1B or 10B lifetime-streams milestone, via the billion-streams-club skill. Reads the canonical postgresql_core.profile_v3_lifetime.streams club (~1s) and announces each profile at most once per tier using a persisted 'already-announced' set under the gateway state dir; track_daily history is unusable here (the stats replica cancels multi-minute queries). The skill POSTS new crossings directly to Slack C0A5LLS93V3 (#hero-team) and records them as announced only after Slack confirms the post, so a failed delivery is retried next run (at-least-once). delivery.mode=none — the script is the poster, not the cron relay. The first run seeds the set and posts nothing; NO_REPLY on the common no-crossing day. SHIPPED enabled:false — flip to true to go live (the cron self-seeds on its first run).",
-      "enabled": false,
+      "enabled": true,
       "createdAtMs": 1782405988000,
       "updatedAtMs": 1782405988000,
       "schedule": {
