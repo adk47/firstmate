@@ -886,6 +886,39 @@
       "state": {
         "consecutiveErrors": 0
       }
+    },
+    {
+      "id": "086ed644-cbc4-4643-be81-e678d2eeaa54",
+      "agentId": "cmo",
+      "name": "billion-streams-club-daily",
+      "description": "Daily 06:00 UTC scan for artists who newly crossed a 1B or 10B lifetime-streams milestone, via the billion-streams-club skill. Reads the canonical postgresql_core.profile_v3_lifetime.streams club (~1s) and announces each profile at most once per tier using a persisted 'already-announced' set under the gateway state dir; track_daily history is unusable here (the stats replica cancels multi-minute queries). The skill POSTS new crossings directly to Slack C0A5LLS93V3 (#hero-team) and records them as announced only after Slack confirms the post, so a failed delivery is retried next run (at-least-once). delivery.mode=none — the script is the poster, not the cron relay. The first run seeds the set and posts nothing; NO_REPLY on the common no-crossing day. SHIPPED enabled:false — flip to true to go live (the cron self-seeds on its first run).",
+      "enabled": false,
+      "createdAtMs": 1782405988000,
+      "updatedAtMs": 1782405988000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 6 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the billion-streams-club skill to find AND post artists who newly crossed a 1B or 10B lifetime-streams milestone. Run EXACTLY this command via exec and add no other flags:\n\nbash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/billion-streams-club/scripts/streams-milestones.sh --channel C0A5LLS93V3 --format slack\n\nThe script reads the canonical streams club, and for any NEW crossings it POSTS the milestone message to the channel itself, recording the profiles as announced only after Slack confirms the post (a failed post is retried on the next run). It prints a short status to stdout — 'posted N new crossing(s)...', or exactly NO_REPLY when nobody new crossed (and on the very first run, which only seeds the set).\n\nReport the script's stdout as your final message. Do NOT post anything to Slack yourself — the script already posted. If the script exits non-zero, report its error output verbatim; do not retry or work around it.\n\nYou run in /opt/hydra/workspaces/cmo, an rsync-deployed directory with NO git repository — do not run any git command.",
+        "timeoutSeconds": 3600,
+        "model": "openai/gpt-5.5",
+        "thinking": "low",
+        "fallbacks": [
+          "openrouter/openai/gpt-5.4-mini",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ]
+      },
+      "delivery": {
+        "mode": "none"
+      },
+      "state": {
+        "consecutiveErrors": 0
+      }
     }
   ]
 }
