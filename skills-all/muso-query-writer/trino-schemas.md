@@ -18,12 +18,29 @@ Write correct, efficient Trino SQL queries for Muso.AI's OVH data platform (Hive
 | `postgresql_analytics.public` (legacy bare `"bi".`) | Business intelligence | marketing_*, reporting_weekly_* |
 | `hive.audit` | Catalog audits | audit_profile, audit_track, audit_isrc |
 | `postgresql_stats.public` | Streaming/analytics stats (live PG; legacy `platform-stats-export-prod`) | track_daily, profile_track, album_track |
+| `postgresql_olap.public` | OLAP analytics cubes (per-profile/track, lifetime + windowed) | cube_analytics_profile_view (ce_streams = lifetime streams @ period='all') |
 
 ### Table Naming Convention
 
 - Tables in `hive."platform-industry-bi-prod"` use prefix `matvw_` (materialized view)
 - Tables in `postgresql_core.public` use prefix `public_`
 - Always use double quotes for database names with hyphens
+
+## Deprecated / Dead Tables (do NOT read)
+
+**Rule: anything matching `*v3*` is suspect — do NOT read it.** These tables were frozen
+2026-06-06 and return stale data. Resolve to the live cube instead.
+
+| Dead table | Status | Live replacement |
+|---|---|---|
+| `postgresql_core.public.profile_v3_lifetime` | FROZEN 2026-06-06 | `postgresql_olap.public.cube_analytics_profile_view` (`period='all'`) |
+| `postgresql_core.public.profile_v3_tracks` | FROZEN 2026-06-06 | `postgresql_olap.public.cube_analytics_profile_view` (`period='all'`) |
+
+Column crosswalk: `streams`→`ce_streams`, `spotifystreams`→`ce_spotify_streams`,
+`youtubestreams`→`ce_youtube_streams`, `creditcount`→`profile_credits_count`,
+`trackswithdata`→`tracks_count`. `ce_streams` at `period='all'` is the per-artist lifetime
+total the muso.ai profile page shows (native bigint, recomputed continuously). **For
+per-artist lifetime totals, prefer the `muso-streams-lookup` skill over hand-written SQL.**
 
 ## Core Tables Schema
 
