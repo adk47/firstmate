@@ -295,10 +295,6 @@ def slack_escape(text):
     return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _strip_backticks(text):
-    return (text or "").replace("`", "'")
-
-
 def deeplink(workspace_id, conv_id):
     return f"https://app.intercom.com/a/inbox/{workspace_id}/inbox/conversation/{conv_id}"
 
@@ -346,7 +342,7 @@ def validate_clusters(obj):
                 raise ClustersError(f"{uw}: missing/empty string field 'conv_id'")
             conv_id = conv_id.strip()
             # SECURITY: conv_id is interpolated raw into the trusted
-            # `<https://…/{conv_id}|conversation>` Slack link in render_user, so a
+            # `<https://…/{conv_id}|conversation>` Slack link in render_user_line, so a
             # value containing `|`/`<`/`>` would break out and inject a live
             # <!channel> / <@U…> ping or a phishing link. Intercom conversation
             # ids are digit strings — whitelist that and reject anything else.
@@ -413,77 +409,183 @@ def _age_state(u):
     return " · ".join(bits)
 
 
-def render_user(u, workspace_id):
-    """One user bullet: who — detail; then a context sub-line with the entities
-    the customer cited, age/state, and the canonical Intercom deeplink
-    (reconstructed from conv_id, never an agent-supplied URL → no link injection)."""
+# ── Block Kit rendering ───────────────────────────────────────────────────────
+# Slack limits (docs.slack.dev): ≤50 blocks/message, section mrkdwn text ≤3000
+# chars, header is plain_text only (a mention there does NOT ping — the live ping
+# must be in an mrkdwn section). The caps below keep one daily report well inside
+# those limits AND keep it scannable for Aaron; every cap drops LOUDLY ("+N more").
+MAX_USERS_PER_CLUSTER = 5      # 5 over-establishes "systemic" (threshold is 2)
+MAX_CLUSTERS = 20             # worst case 47 blocks ≤ the hard 50
+SECTION_CHAR_BUDGET = 2800    # stop adding user lines before the 3000 hard limit
+SECTION_HARD_LIMIT = 3000     # Slack's section mrkdwn ceiling
+CONTEXT_CHAR_BUDGET = 1800    # the single trailing "judged non-systemic" line
+MAX_DETAIL = 240             # cap one user's free-text detail so a line stays bounded
+
+# Cite URLs are turned into compact <url|label> links ONLY for these hosts. An
+# allow-listed, syntactically-clean URL is the only LLM/customer string we place
+# inside a live Slack link; everything else is escaped to inert text.
+_CITE_URL_RE = re.compile(r"^https?://[^\s<>|]+$")
+_CITE_LINK_HOSTS = ("muso.ai", "open.spotify.com")
+
+
+def _truncate(text, n):
+    text = text or ""
+    return text if len(text) <= n else text[: max(0, n - 1)].rstrip() + "…"
+
+
+def _host_allowed(url):
+    m = re.match(r"^https?://([^/\s<>|]+)", url)
+    host = m.group(1).lower() if m else ""
+    return any(host == h or host.endswith("." + h) for h in _CITE_LINK_HOSTS)
+
+
+def _cite_label(url):
+    """A short human label for a cite URL: the last one/two path segments, with a
+    uuid-ish / long segment shortened to its first 8 chars
+    (…/track/78d7dcd3-3b1c → "track 78d7dcd3")."""
+    m = re.match(r"^https?://([^/\s<>|]+)(/[^\s<>|]*)?$", url)
+    if not m:
+        return url[:40]
+    host, path = m.group(1).lower(), (m.group(2) or "")
+    segs = [s for s in path.split("/") if s]
+    if not segs:
+        return host
+    parts = [(s[:8] if len(s) > 10 or re.search(r"[0-9a-f]{8}", s) else s) for s in segs[-2:]]
+    return " ".join(parts)[:40]
+
+
+def compact_cite(cite):
+    """Render one cite for an mrkdwn section. An allow-listed, clean URL becomes a
+    compact <url|label> link; anything else (non-URL, or a URL carrying
+    `|`/`<`/`>`/whitespace, or a non-allow-listed host) is escaped to inert text so
+    it can neither disguise a phishing link nor break out into a <!channel>/<@U…>
+    ping."""
+    c = (cite or "").strip()
+    if _CITE_URL_RE.fullmatch(c) and _host_allowed(c):
+        return f"<{c}|{slack_escape(_cite_label(c))}>"
+    return slack_escape(c)
+
+
+def render_user_line(u, workspace_id):
+    """One compact mrkdwn bullet for a user: who — detail · cites · age/state ·
+    conversation link. The link is rebuilt from the numeric conv_id (never an
+    agent-supplied URL → no link injection)."""
     who = slack_escape(u.get("who", ""))
-    detail = slack_escape(u.get("detail", ""))
-    head = f"• {who}" + (f" — {detail}" if detail else "")
-    sub = []
-    for cite in (u.get("cites") or []):
-        sub.append(slack_escape(cite))
+    detail = slack_escape(_truncate(u.get("detail", ""), MAX_DETAIL))
+    head = f"• *{who}*" + (f" — {detail}" if detail else "")
+    sub = [compact_cite(c) for c in (u.get("cites") or [])]
     meta = _age_state(u)
     if meta:
         sub.append(meta)
     sub.append(f"<{deeplink(workspace_id, u['conv_id'])}|conversation>")
-    return head + "\n    " + " · ".join(sub)
+    return head + "  ·  " + "  ·  ".join(sub)
 
 
-def build_copy_block(clusters, window_hours):
-    """Fenced, paste-into-Claude plain-text summary of the cluster(s)."""
-    out = ["Systemic data-issue clusters — Muso priority watchdog (AI-clustered)",
-           f"(distinct users reporting the SAME issue in the last {window_hours}h)", ""]
-    for c in clusters:
-        out.append(f"{_strip_backticks(c['title'])} — {distinct_users(c)} distinct users")
-        out.append(f"  symptom: {_strip_backticks(c['symptom'])}")
-        for u in c["users"]:
-            cites = ("; ".join(_strip_backticks(x) for x in (u.get("cites") or [])))
-            cites = f" [{cites}]" if cites else ""
-            out.append(f"  - {_strip_backticks(u.get('who', ''))}: "
-                       f"{_strip_backticks(u.get('detail', ''))}{cites}")
-        out.append("")
-    return "```\n" + "\n".join(out).strip() + "\n```"
+def build_cluster_section_text(index, cluster, workspace_id):
+    """The mrkdwn for one cluster's section: a bold numbered title with the
+    distinct-user count, the one-line symptom, then up to MAX_USERS_PER_CLUSTER
+    user lines (bounded by SECTION_CHAR_BUDGET). Any users beyond the cap are
+    surfaced LOUDLY as a trailing "+N more" line — never silently dropped."""
+    nu = distinct_users(cluster)
+    head = f"*{index}. {slack_escape(cluster['title'])}*  ·  *{nu} users*"
+    sym = f"_{slack_escape(cluster['symptom'])}_"
+    lines = [head, sym]
+    running = len(head) + len(sym) + 2
+    shown = 0
+    users = cluster["users"]
+    for u in users:
+        if shown >= MAX_USERS_PER_CLUSTER:
+            break
+        line = render_user_line(u, workspace_id)
+        # Always show the first user; after that, respect the char budget.
+        if shown > 0 and running + len(line) + 1 > SECTION_CHAR_BUDGET:
+            break
+        lines.append(line)
+        running += len(line) + 1
+        shown += 1
+    remaining = len(users) - shown
+    if remaining > 0:
+        lines.append(f"_+{remaining} more conversation(s) — see Intercom_")
+    text = "\n".join(lines)
+    # Last-resort clamp so a pathological line can never exceed Slack's hard limit.
+    return text if len(text) <= SECTION_HARD_LIMIT else text[: SECTION_HARD_LIMIT - 1] + "…"
 
 
-def build_report_message(clusters, excluded, mention_ids, workspace_id, window_hours):
-    """The Aaron-ready report. Applies the report-to-aaron doctrine: an
-    attribution line, one-line SYMPTOM per cluster (no diagnosis/fix), precise
-    nouns, all context up front. Honest that this is not a live source-vs-Muso
-    comparison."""
+def build_excluded_text(excluded):
+    prefix = "Judged non-systemic: "
+    parts, used, shown = [], 0, 0
+    for e in excluded:
+        # Bound each piece (who + reason) so one adversarial entry can't blow the
+        # context element past Slack's text limit and make the whole post fail.
+        piece = f"{slack_escape(_truncate(e['who'], 120))} ({slack_escape(_truncate(e['reason'], MAX_DETAIL))})"
+        if shown > 0 and used + len(piece) + 2 > CONTEXT_CHAR_BUDGET:
+            break
+        parts.append(piece)
+        used += len(piece) + 2
+        shown += 1
+    text = prefix + "; ".join(parts)
+    rem = len(excluded) - shown
+    text += f"; +{rem} more" if rem > 0 else ""
+    # Last-resort clamp (matches build_cluster_section_text) — never emit a context
+    # element over the hard limit, even if the first piece alone is pathological.
+    return text if len(text) <= SECTION_HARD_LIMIT else text[: SECTION_HARD_LIMIT - 1] + "…"
+
+
+def build_report_blocks(clusters, excluded, mention_ids, workspace_id, window_label):
+    """The Aaron-ready report as (fallback_text, blocks). Applies the
+    report-to-aaron doctrine: a scannable header, the @-mention + count up front,
+    an honest attribution line, then one section per cluster (symptom not
+    diagnosis, precise nouns, the entities the customer cited, conversation link).
+    The mention lives in an mrkdwn section so it actually pings; the header is
+    plain_text and therefore mention-free by design."""
     mention = " ".join(f"<@{m}>" for m in mention_ids if re.fullmatch(r"[A-Za-z0-9]+", m))
     n = len(clusters)
-    lines = [
-        f"{mention + '  ' if mention else ''}:rotating_light: "
-        f"*Systemic data issue* — Ops watchdog (automated, last {window_hours}h)",
-        "From: systemic-issue watchdog (via Ops). Symptoms are what customers "
-        "report — not a live source-vs-Muso comparison; click through to verify "
-        "the numbers.",
-        "",
-        f"*{n} cluster{'' if n == 1 else 's'}* where multiple users independently "
-        f"reported the same issue:",
+    plural = "" if n == 1 else "s"
+    shown_clusters = clusters[:MAX_CLUSTERS]
+    extra_clusters = n - len(shown_clusters)
+
+    blocks = [
+        {"type": "header", "text": {
+            "type": "plain_text",
+            "text": _truncate(f"🚨 {n} systemic data issue{plural} · {window_label}", 150),
+            "emoji": True}},
+        {"type": "section", "text": {
+            "type": "mrkdwn",
+            "text": (f"{mention + '  ' if mention else ''}*{n}* cluster{plural} where "
+                     "multiple users independently reported the same issue.")}},
+        {"type": "context", "elements": [{
+            "type": "mrkdwn",
+            "text": ("Automated Ops watchdog. Symptoms are what customers report — "
+                     "not a live source-vs-Muso check. Click through to verify the numbers.")}]},
+        {"type": "divider"},
     ]
-    for i, c in enumerate(clusters, 1):
-        nu = distinct_users(c)
-        lines.append("")
-        lines.append(f"*{i}. {slack_escape(c['title'])}* — {nu} users")
-        lines.append(f"   _Symptom:_ {slack_escape(c['symptom'])}")
-        for u in c["users"]:
-            lines.append("   " + render_user(u, workspace_id))
+    for i, c in enumerate(shown_clusters, 1):
+        if i > 1:
+            blocks.append({"type": "divider"})
+        blocks.append({"type": "section", "text": {
+            "type": "mrkdwn", "text": build_cluster_section_text(i, c, workspace_id)}})
+    if extra_clusters > 0:
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "section", "text": {
+            "type": "mrkdwn",
+            "text": f"_+{extra_clusters} more cluster(s) not shown — see Intercom_"}})
     if excluded:
-        lines.append("")
-        lines.append("_Judged non-systemic (not shown above):_")
-        for e in excluded:
-            lines.append(f"• {slack_escape(e['who'])} — {slack_escape(e['reason'])}")
-    lines.append("")
-    lines.append(build_copy_block(clusters, window_hours))
-    return "\n".join(lines)
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "context", "elements": [
+            {"type": "mrkdwn", "text": build_excluded_text(excluded)}]})
+
+    titles = ", ".join(slack_escape(c["title"]) for c in shown_clusters[:3])
+    text = f"🚨 {n} systemic data issue{plural} ({window_label})" + (f": {titles}" if titles else "")
+    return text, blocks
 
 
-def slack_post(token, channel, text):
+def slack_post(token, channel, text, blocks=None):
+    payload = {"channel": channel, "text": text, "unfurl_links": False}
+    if blocks is not None:
+        payload["blocks"] = blocks
     req = urllib.request.Request(
         "https://slack.com/api/chat.postMessage",
-        data=json.dumps({"channel": channel, "text": text, "unfurl_links": False}).encode(),
+        data=json.dumps(payload).encode(),
         headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
         method="POST",
     )
@@ -541,19 +643,16 @@ def run_report(args):
         print(f"ERROR: --clusters {args.clusters!r} is not valid JSON: {e}", file=sys.stderr)
         return 1
     try:
-        clusters, excluded, window_from_file = validate_clusters(obj)
+        clusters, excluded, _window_from_file = validate_clusters(obj)
     except ClustersError as e:
         print(f"ERROR: malformed clusters.json: {e}", file=sys.stderr)
         return 1
 
-    default_win = int(args.window_hours) if float(args.window_hours).is_integer() else args.window_hours
-    # window_hours from the agent is a display label only ("last Nh"); tolerate a
-    # bad/missing/wrong-typed value by falling back to the run default rather than
-    # rendering nonsense like "last [99]h" (bool excluded — it's an int subclass).
-    window_hours = (window_from_file
-                    if isinstance(window_from_file, (int, float))
-                    and not isinstance(window_from_file, bool) and window_from_file > 0
-                    else default_win)
+    # The "last Nh" label is derived from THIS run's --window-hours (the
+    # deterministic edge the cron controls), never from the agent's clusters.json.
+    # An agent-transcribed window value can't make the header lie ("last [99]h").
+    win = int(args.window_hours) if float(args.window_hours).is_integer() else args.window_hours
+    window_label = f"last {win}h"
 
     # Keep only clusters that clear the distinct-user threshold.
     systemic = [c for c in clusters if distinct_users(c) >= args.threshold]
@@ -592,11 +691,12 @@ def run_report(args):
                    os.environ.get("PRIORITY_MENTION_IDS", DEFAULT_MENTION_IDS).split(",") if s.strip()]
     workspace_id = os.environ.get("INTERCOM_WORKSPACE_ID", DEFAULT_WORKSPACE_ID)
     channel = os.environ.get("PRIORITY_SLACK_CHANNEL", DEFAULT_SLACK_CHANNEL)
-    msg = build_report_message(to_page, excluded, mention_ids, workspace_id, window_hours)
+    text, blocks = build_report_blocks(to_page, excluded, mention_ids, workspace_id, window_label)
 
     if args.check:
         print("--- would page (--check mode, no Slack) ---", file=sys.stderr)
-        print(msg, file=sys.stderr)
+        print(json.dumps(blocks, indent=2, ensure_ascii=False), file=sys.stderr)
+        print(f"(fallback text: {text})", file=sys.stderr)
         print(f"systemic-data-issue report: --check, would page {len(to_page)} cluster(s) (no Slack post)")
         return 0
 
@@ -607,7 +707,7 @@ def run_report(args):
               file=sys.stderr)
         return 1
     try:
-        slack_post(slack_token, channel, msg)
+        slack_post(slack_token, channel, text, blocks)
         print(f"PAGED {len(to_page)} cluster(s) to {channel}", file=sys.stderr)
     except (urllib.error.URLError, RuntimeError, ValueError) as e:
         print(f"ERROR: Slack post failed: {e}", file=sys.stderr)

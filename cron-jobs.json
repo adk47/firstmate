@@ -568,14 +568,14 @@
     {
       "id": "b7e4d2a1-9f63-4c08-a5e7-1d2c8f0a6b34",
       "agentId": "operations",
-      "name": "systemic-data-issue-report-6h",
-      "description": "Every 6h, the operations agent runs the report-systemic-data-issues skill: --gather reads recent Intercom conversations, the agent semantically clusters them by SAME underlying data issue (>=2 distinct users = systemic), and --report renders an Aaron-ready report (report-to-aaron doctrine) and posts it to the priority channel C0BBTAVP44X mentioning Aaron via the Ops bot, with a per-issue 24h cooldown. The 24h gather window deliberately overlaps the 6h cadence (a slow-forming cluster isn't truncated); re-pages of the same issue_slug are gated by the cooldown. Replaces the keyword intercom-data-complaint-watchdog systemd timer (coarse buckets → false 'systemic' pages). delivery.mode is \"none\" because --report self-posts the rendered message. Added 2026-06-25.",
+      "name": "systemic-data-issue-report-daily",
+      "description": "Daily at 06:00 Europe/Rome, the operations agent runs the report-systemic-data-issues skill: --gather reads the last 24h of Intercom conversations, the agent semantically clusters them by SAME underlying data issue (>=2 distinct users = systemic), and --report renders an Aaron-ready Block Kit report (report-to-aaron doctrine) and posts it to the priority channel C0BBTAVP44X mentioning Aaron via the Ops bot. The daily cadence matches the 24h gather window so consecutive runs don't overlap (no near-duplicate pages, the noise that motivated 6h→daily); the per-issue_slug 24h cooldown stays only as a safety net. Replaces the keyword intercom-data-complaint-watchdog systemd timer (coarse buckets → false 'systemic' pages). delivery.mode is \"none\" because --report self-posts the rendered message. Added 2026-06-25; switched 6h→daily + Block Kit formatting 2026-06-26.",
       "enabled": true,
       "createdAtMs": 1782345600000,
       "updatedAtMs": 1782345600000,
       "schedule": {
         "kind": "cron",
-        "expr": "0 */6 * * *",
+        "expr": "0 6 * * *",
         "tz": "Europe/Rome"
       },
       "sessionTarget": "isolated",

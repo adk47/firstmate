@@ -12,7 +12,10 @@ script parses; these tests prove the *decisions* that keep it safe and useful:
   - --report validation FAILS LOUD on malformed clusters.json (never a silent
     skip), drops sub-threshold clusters, dedupes distinct users, and the
     per-issue cooldown suppresses a re-page;
-  - slack_escape / the copy-block fence neutralize injection in untrusted text;
+  - slack_escape + Block Kit rendering keep untrusted text inert: customer/agent
+    angle-brackets are escaped, the only live ping is the trusted Aaron mention,
+    cite URLs are compacted only for allow-listed hosts, and the volume caps drop
+    LOUDLY (never a silent "+N more");
   - DATA_COMPLAINT_TAG stays in sync with the plugin.
 
 Stdlib unittest + stubs only — no pytest, no network.
@@ -58,6 +61,27 @@ def cluster(slug="iss-1", title="Credits misattribution",
             {"who": "b@x.com", "conv_id": "2", "email": "b@x.com", "detail": "y", "cites": []},
         ],
     }
+
+
+def block_texts(blocks):
+    """Every mrkdwn/plain_text string carried by a Block Kit block, in order
+    (section .text, context/elements, section .fields)."""
+    out = []
+    for b in blocks:
+        t = b.get("text")
+        if isinstance(t, dict) and isinstance(t.get("text"), str):
+            out.append(t["text"])
+        for el in b.get("elements", []) or []:
+            if isinstance(el, dict) and isinstance(el.get("text"), str):
+                out.append(el["text"])
+        for fld in b.get("fields", []) or []:
+            if isinstance(fld, dict) and isinstance(fld.get("text"), str):
+                out.append(fld["text"])
+    return out
+
+
+def all_text(blocks):
+    return "\n".join(block_texts(blocks))
 
 
 # ── --gather ─────────────────────────────────────────────────────────────────
@@ -291,9 +315,11 @@ class ReportDecision(unittest.TestCase):
         self.assertNotIn("iss-lonely", d["systemic"])
         self.assertEqual(d["to_page"], [])
 
-    def test_bad_window_hours_falls_back_to_default(self):
-        # The agent controls window_hours (a display label); a wrong-typed value
-        # must render the run default, never "last [99]h".
+    def test_window_label_comes_from_run_arg_not_the_file(self):
+        # The "last Nh" label is derived from the run's --window-hours (the
+        # deterministic edge), NOT from the agent's clusters.json — so a wrong /
+        # adversarial file value can never make the header lie ("last [99]h").
+        # --check dumps the rendered blocks to stderr.
         path = self._write({"window_hours": [99], "clusters": [cluster(slug="iss-w")]})
         rc, err, out = self._run(self._args(path, check=True))
         self.assertEqual(rc, 0)
@@ -301,51 +327,142 @@ class ReportDecision(unittest.TestCase):
         self.assertNotIn("[99]", err)
 
 
-# ── render + escaping ────────────────────────────────────────────────────────
+# ── render: Block Kit + escaping ──────────────────────────────────────────────
 class Render(unittest.TestCase):
-    def test_report_has_mention_symptom_and_link(self):
-        msg = wd.build_report_message([cluster()], [], ["U7RP6HKUZ"], "ws_1", 24)
-        self.assertIn("<@U7RP6HKUZ>", msg)
-        self.assertIn("Symptom:", msg)
-        self.assertIn("Credits misattribution", msg)
-        self.assertIn("ws_1", msg)
-        self.assertIn("/1", msg)                          # deeplink from conv_id
+    """build_report_blocks returns (fallback_text, blocks). The blocks are the
+    Aaron-facing report; these tests pin the structure, the single trusted ping,
+    the injection-escaping, the compact-link allow-list, and the LOUD volume caps."""
+
+    def _blocks(self, clusters, excluded=None, mentions=None, ws="ws_1", label="last 24h"):
+        return wd.build_report_blocks(clusters, excluded or [], mentions or ["U7RP6HKUZ"], ws, label)
+
+    def _cluster_section_text(self, blocks):
+        # the first section AFTER the mention section (index 1) is the first cluster
+        sections = [b for b in blocks if b["type"] == "section"]
+        return sections[1]["text"]["text"]
+
+    def test_returns_text_and_blocks_with_header_first(self):
+        text, blocks = self._blocks([cluster()])
+        self.assertIsInstance(text, str)
+        self.assertTrue(text)
+        self.assertEqual(blocks[0]["type"], "header")
+        self.assertEqual(blocks[0]["text"]["type"], "plain_text")
+
+    def test_block_sequence_and_excluded_is_trailing_context(self):
+        text, blocks = self._blocks(
+            [cluster()], excluded=[{"who": "e@x.com", "reason": "profile-creation request"}])
+        self.assertEqual([b["type"] for b in blocks[:5]],
+                         ["header", "section", "context", "divider", "section"])
+        self.assertEqual(blocks[-1]["type"], "context")
+        excl = blocks[-1]["elements"][0]["text"]
+        self.assertIn("Judged non-systemic", excl)
+        self.assertIn("profile-creation request", excl)
+
+    def test_mention_only_in_a_section_never_header_or_context(self):
+        # A mention in a plain_text header does NOT ping; the ping must live in an
+        # mrkdwn section. Pin: header has no mention, block 1 section does, no
+        # context block does.
+        text, blocks = self._blocks(
+            [cluster()], excluded=[{"who": "e@x.com", "reason": "x"}])
+        self.assertNotIn("<@", blocks[0]["text"]["text"])
+        self.assertEqual(blocks[1]["type"], "section")
+        self.assertIn("<@U7RP6HKUZ>", blocks[1]["text"]["text"])
+        for b in blocks:
+            if b["type"] == "context":
+                for el in b["elements"]:
+                    self.assertNotIn("<@", el["text"])
+
+    def test_symptom_title_and_link_render(self):
+        text, blocks = self._blocks([cluster()])
+        txt = all_text(blocks)
+        self.assertIn("Credits misattribution", txt)
+        self.assertIn("tracks they didn't make", txt)     # the symptom line
+        self.assertIn("ws_1", txt)
+        self.assertIn("/1|conversation>", txt)             # deeplink from conv_id
 
     def test_link_is_rebuilt_from_conv_id_not_agent_url(self):
-        # An agent-supplied 'deeplink' URL must be ignored — we reconstruct from
-        # conv_id so a malicious/garbled URL can't reach Slack as a trusted link.
+        # An agent-supplied 'deeplink' URL must be ignored — the conversation link
+        # is reconstructed from the numeric conv_id, never from agent text.
         c = cluster(users=[{"who": "a@x.com", "conv_id": "777",
                             "deeplink": "https://evil.example/x", "cites": []}])
-        msg = wd.build_report_message([c], [], ["U7RP6HKUZ"], "ws_1", 24)
-        self.assertIn("/777|conversation>", msg)
-        self.assertNotIn("evil.example", msg)
-
-    def test_excluded_footnote_renders(self):
-        msg = wd.build_report_message(
-            [cluster()], [{"who": "e@x.com", "reason": "profile-creation request"}],
-            ["U7RP6HKUZ"], "ws_1", 24)
-        self.assertIn("Judged non-systemic", msg)
-        self.assertIn("profile-creation request", msg)
+        txt = all_text(self._blocks([c])[1])
+        self.assertIn("/777|conversation>", txt)
+        self.assertNotIn("evil.example", txt)
 
     def test_escapes_injection_in_agent_text(self):
         c = cluster(symptom="fix it <!channel>",
-                    users=[{"who": "<@U999>", "conv_id": "1", "detail": "& <bad>", "cites": []}])
-        msg = wd.build_report_message([c], [], ["U7RP6HKUZ"], "ws_1", 24)
-        # The rendered BODY (everything before the inert copy-block fence) escapes
-        # all agent/customer angle brackets & ampersands; a customer <@U999> can't
-        # ping. (Inside the ``` copy block mrkdwn is inert — covered separately.)
-        body = msg.split("```")[0]
-        self.assertIn("&lt;!channel&gt;", body)
-        self.assertIn("&amp; &lt;bad&gt;", body)
-        self.assertIn("&lt;@U999&gt;", body)
-        # Only the trusted mention renders a real ping in the body.
-        self.assertEqual(len(re.findall(r"<@U", body)), 1)
+                    users=[{"who": "<@U999>", "conv_id": "1", "detail": "& <bad>", "cites": []},
+                           {"who": "b@x.com", "conv_id": "2", "email": "b@x.com", "cites": []}])
+        txt = all_text(self._blocks([c])[1])
+        self.assertIn("&lt;!channel&gt;", txt)
+        self.assertIn("&amp; &lt;bad&gt;", txt)
+        self.assertIn("&lt;@U999&gt;", txt)
+        # exactly ONE real ping across the whole message — the trusted Aaron mention
+        self.assertEqual(len(re.findall(r"<@U", txt)), 1)
 
-    def test_copy_block_neutralizes_fence_breakout(self):
-        c = cluster(symptom="see ``` <@U999>",
-                    users=[{"who": "a@x.com", "conv_id": "1", "detail": "x ```", "cites": ["``` y"]}])
-        block = wd.build_copy_block([c], 24)
-        self.assertEqual(block.count("```"), 2)            # only the two wrapping fences
+    def test_user_cap_is_fail_loud(self):
+        users = [{"who": f"u{i}@x.com", "conv_id": str(i), "email": f"u{i}@x.com", "cites": []}
+                 for i in range(9)]
+        sect = self._cluster_section_text(self._blocks([cluster(users=users)])[1])
+        self.assertIn("u0@x.com", sect)
+        self.assertIn("u4@x.com", sect)                    # 5 shown (0..4)
+        self.assertNotIn("u5@x.com", sect)
+        self.assertIn("+4 more", sect)                     # the rest are LOUD, not silent
+
+    def test_every_section_within_3000_chars(self):
+        users = [{"who": f"u{i}@x.com", "conv_id": str(i), "email": f"u{i}@x.com",
+                  "detail": "d" * 800, "cites": ["c" * 300]} for i in range(9)]
+        text, blocks = self._blocks([cluster(users=users)])
+        for b in blocks:
+            if b["type"] == "section":
+                self.assertLessEqual(len(b["text"]["text"]), 3000)
+
+    def test_cluster_cap_keeps_message_under_50_blocks(self):
+        many = [cluster(slug=f"s{i}", title=f"T{i}") for i in range(30)]
+        text, blocks = self._blocks(many)
+        self.assertLessEqual(len(blocks), 50)
+        self.assertIn("more cluster(s) not shown", all_text(blocks))
+
+    def test_url_cite_to_allowed_host_becomes_compact_link(self):
+        c = cluster(users=[{"who": "a@x.com", "conv_id": "1", "email": "a@x.com",
+                            "cites": ["https://credits.muso.ai/track/78d7dcd3-3b1c"]}])
+        txt = all_text(self._blocks([c])[1])
+        self.assertIn("<https://credits.muso.ai/track/78d7dcd3-3b1c|track 78d7dcd3>", txt)
+
+    def test_non_url_cite_is_plain_escaped_text(self):
+        c = cluster(users=[{"who": "a@x.com", "conv_id": "1", "email": "a@x.com",
+                            "cites": ["track 78d7dcd3"]}])
+        txt = all_text(self._blocks([c])[1])
+        self.assertIn("track 78d7dcd3", txt)
+        self.assertNotIn("<track", txt)                    # not wrapped as a link
+
+    def test_hostile_cite_urls_are_not_live_links_or_pings(self):
+        # A cite URL is LLM/customer-supplied — the one new injection surface when
+        # placed in <url|label>. A `|`/`<`/`>`/space breaks the link; a well-formed
+        # but non-allow-listed host must not be a disguised link either.
+        hostile = ["https://x/a|<!channel>", "https://evil/<@U999>",
+                   "https://has space.com/x", "https://evil.example/legit"]
+        c = cluster(users=[{"who": "a@x.com", "conv_id": "1", "email": "a@x.com",
+                            "cites": hostile}])
+        txt = all_text(self._blocks([c])[1])
+        self.assertEqual(len(re.findall(r"<@U", txt)), 1)  # only the trusted mention
+        self.assertIn("&lt;@U999&gt;", txt)                # angle brackets escaped
+        self.assertNotIn("evil.example/legit|", txt)       # not a disguised <url|label>
+
+    def test_excluded_context_is_bounded_under_3000(self):
+        # A single pathological excluded reason must NOT blow the context element
+        # past Slack's text limit (which would make chat.postMessage reject the
+        # whole report — a garbled footnote suppressing the entire page).
+        excluded = [{"who": "z@x.com", "reason": "r" * 9000}]
+        text, blocks = self._blocks([cluster()], excluded=excluded)
+        ctx = [b for b in blocks if b["type"] == "context"][-1]
+        self.assertLessEqual(len(ctx["elements"][0]["text"]), 3000)
+
+    def test_fallback_text_is_nonempty_and_escaped(self):
+        text, _ = self._blocks([cluster(title="<bad> & title")])
+        self.assertTrue(text)
+        self.assertIn("&lt;bad&gt; &amp; title", text)
+        self.assertNotIn("<bad>", text)
 
 
 class SlackEscape(unittest.TestCase):

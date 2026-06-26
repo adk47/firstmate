@@ -1,15 +1,15 @@
 ---
 name: report-systemic-data-issues
 description: |
-  Every 6h, read recent Intercom conversations, find where MULTIPLE distinct
-  users independently report the SAME or a very similar data problem, and post
-  one verbose, Aaron-ready report to the priority channel. The semantic
-  clustering is yours (the agent's); a deterministic script gathers the
-  conversations and renders + posts the report. Follows Aaron's report-to-aaron
+  Daily, read the last 24h of Intercom conversations, find where MULTIPLE
+  distinct users independently report the SAME or a very similar data problem,
+  and post one scannable, Aaron-ready Block Kit report to the priority channel.
+  The semantic clustering is yours (the agent's); a deterministic script gathers
+  the conversations and renders + posts the report. Follows Aaron's report-to-aaron
   doctrine: state the SYMPTOM (not a diagnosis or fix), use precise nouns, put
   all context up front.
 
-  Use when: invoked by the `systemic-data-issue-report-6h` cron, or asked to
+  Use when: invoked by the `systemic-data-issue-report-daily` cron, or asked to
   "check for systemic data issues", "cluster the recent data complaints", or
   "report systemic data issues to Aaron".
 
@@ -124,12 +124,18 @@ exactly:
 ```
 
 Field rules:
-- `issue_slug` — a STABLE kebab-case key for the issue (the cooldown is keyed on
-  it; reuse the same slug for the same issue across runs so a known cluster isn't
-  re-paged every 6h).
+- `issue_slug` — a STABLE kebab-case key for the issue. The 24h re-page cooldown
+  keys on it; under the daily cadence the cooldown is mostly a safety net, but
+  still reuse the same slug for the same issue across runs.
+- `window_hours` — optional and IGNORED. The "last Nh" label is derived from the
+  report script's own `--window-hours`, so a value here can never make the header
+  lie. Safe to omit.
 - `title` — short headline. `symptom` — one line, symptom only. `noun` — the
   precise noun. `users[]` — one entry per member conversation; `who`, `conv_id`
   required; `detail`, `cites`, `age_hours`, `state` carry the per-user context.
+  The report shows up to the first 5 users per cluster (the rest as a LOUD
+  "+N more"), and renders `cites` URLs on muso.ai / open.spotify.com as compact
+  links — so keep `detail` tight and list the most telling `cites` first.
 - `email` — **copy the candidate's `email` verbatim** (empty string `""` for an
   anonymous conversation). This is the distinct-user KEY, not the display `who`:
   the same customer's email across several conversations counts as ONE user, and

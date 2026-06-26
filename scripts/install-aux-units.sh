@@ -254,7 +254,7 @@ log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
 # ─── Retire the keyword Intercom data-complaint watchdog (replaced 2026-06-25) ──
 # The every-10m KEYWORD watchdog (coarse data-noun + complaint-signal buckets)
 # produced false "systemic" pages — three unrelated credit gripes grouped as one
-# cluster. It is superseded by the AI-clustered `systemic-data-issue-report-6h`
+# cluster. It is superseded by the AI-clustered `systemic-data-issue-report-daily`
 # cron (cron-jobs.json → operations agent → report-systemic-data-issues skill →
 # scripts/intercom-data-complaint-watchdog.py --gather / --report), which groups
 # by the actual underlying issue. Stop, disable, and remove the old systemd units
@@ -264,7 +264,7 @@ for u in intercom-data-complaint-watchdog.timer intercom-data-complaint-watchdog
     rm -f "/etc/systemd/system/$u"
 done
 systemctl daemon-reload
-log "  intercom-data-complaint-watchdog: retired (replaced by systemic-data-issue-report-6h cron)"
+log "  intercom-data-complaint-watchdog: retired (replaced by systemic-data-issue-report-daily cron)"
 
 # ─── Close resolved-ticket conversations (steady-state sync) ──
 # Silently closes Intercom conversations whose ClickUp ticket(s) are all
