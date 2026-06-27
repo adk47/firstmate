@@ -67,6 +67,25 @@ function ticketResult(r: CreateTicketResult): AgentToolResult<unknown> {
 // fixing. profile-merge has its own richer gate above.
 const PROFILE_ANCHOR_REQUIRED = new Set(["profile-update", "bulk-credit-change", "unmerge-request"]);
 
+// A profile merge's "main" profile (this ticket's required field) and its
+// "survivor" (the name dedupe_check and the profiles_consolidate tool use) are
+// the SAME kept profile. Caroline sometimes captures only `survivor_profile_url`;
+// treat it as satisfying `main_profile_url` so an otherwise-complete capture
+// isn't bounced as incomplete over which synonym was used (the original
+// first-call failure on conv 215474855199857, 2026-06-26). Returns details
+// unchanged when main is already set or when neither URL is present (a genuine
+// gap the validation gate should report).
+function resolveMergeMainUrl(
+  details: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!details) return details;
+  const main = typeof details.main_profile_url === "string" ? details.main_profile_url.trim() : "";
+  if (main) return details;
+  const survivor = typeof details.survivor_profile_url === "string" ? details.survivor_profile_url.trim() : "";
+  if (!survivor) return details;
+  return { ...details, main_profile_url: survivor };
+}
+
 // ClickUp "Team" dropdown option ids (list 901000600160). Growth owns
 // account/billing/support; Catalog owns the catalog data (credits, profiles,
 // tracks, analytics, merges).
@@ -187,20 +206,25 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
     description: "Create a support ticket in the team's task system for customer requests that require human action (credit claims, profile merges, analytics followups, refunds, data deletion, etc.). When the same request already has a ticket in this conversation, the new information is appended to it instead of opening a duplicate.",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
+      // Action-specific detail enrichment, normalized ONCE up front so the
+      // validation gate below and the rendered ticket read the same object.
+      let details = params.details;
+
       // Validate BEFORE the rate-limit check. A malformed profile-merge call
       // shouldn't consume the 2-per-60s budget — the agent will retry once it
       // gets the missing fields from the customer, and that retry should be
       // unaffected by previous validation failures.
       if (params.actionType === "profile-merge") {
+        details = resolveMergeMainUrl(details);
+        const d = details ?? {};
         const missing: string[] = [];
         if (!params.customerProfileId || !params.customerProfileId.trim()) {
           missing.push("customerProfileId");
         }
-        const details = params.details ?? {};
-        const mainUrl = typeof details.main_profile_url === "string" ? details.main_profile_url.trim() : "";
+        const mainUrl = typeof d.main_profile_url === "string" ? d.main_profile_url.trim() : "";
         if (!mainUrl) missing.push("details.main_profile_url");
-        const dupUrls = Array.isArray(details.duplicate_profile_urls)
-          ? details.duplicate_profile_urls.filter((u): u is string => typeof u === "string" && u.trim().length > 0)
+        const dupUrls = Array.isArray(d.duplicate_profile_urls)
+          ? d.duplicate_profile_urls.filter((u): u is string => typeof u === "string" && u.trim().length > 0)
           : [];
         if (dupUrls.length === 0) missing.push("details.duplicate_profile_urls");
         if (missing.length > 0) {
@@ -242,15 +266,14 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       // fields, "name looks like a street" tell) onto the ticket so ops can trust
       // the address without re-counting. NON-BLOCKING — never gates filing
       // (tier-1 must always be fileable; see PROFILE_ANCHOR_REQUIRED rationale).
-      let details = params.details;
       if (
         params.actionType === "order-fulfillment" &&
-        params.details?.proposed_corrected_address &&
-        typeof params.details.proposed_corrected_address === "object"
+        details?.proposed_corrected_address &&
+        typeof details.proposed_corrected_address === "object"
       ) {
         details = {
-          ...params.details,
-          address_validation: validateProdigiAddress(params.details.proposed_corrected_address),
+          ...details,
+          address_validation: validateProdigiAddress(details.proposed_corrected_address),
         };
       }
 

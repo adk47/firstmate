@@ -164,6 +164,28 @@ describe("createCreateTicketTool", () => {
     expect(mockClient.post).not.toHaveBeenCalled();
   });
 
+  it("accepts survivor_profile_url as a synonym for details.main_profile_url", async () => {
+    // The kept profile is the "survivor" (the name dedupe_check / the
+    // consolidate tool use) AND the "main" profile (this ticket's required
+    // field) — the same profile. A capture that supplies only survivor_profile_url
+    // is complete and must submit on the FIRST attempt, not bounce as
+    // capture-incomplete (the original first-call failure on conv
+    // 215474855199857, 2026-06-26).
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_synonym" } });
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_syn" });
+    const result = await tool.execute("call_1", {
+      actionType: "profile-merge", customerEmail: "user@example.com", customerProfileId: "prof_main",
+      summary: "Merge two profiles",
+      details: { survivor_profile_url: "https://credits.muso.ai/profile/aaa", duplicate_profile_urls: ["https://credits.muso.ai/profile/bbb"] },
+      conversationSummary: "Customer has duplicate profiles.",
+    });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+    expect(parsed.submitted).toBe(true);
+    // The rendered ticket carries the main profile URL, resolved from the survivor.
+    const body = vi.mocked(mockClient.post).mock.calls[0][1].body as Record<string, unknown>;
+    expect(body.markdown_description).toContain("https://credits.muso.ai/profile/aaa");
+  });
+
   it("validation rejection does NOT consume rate-limit budget", async () => {
     // Per silent-failure review: a malformed profile-merge call must not eat
     // one of the 2-per-60s slots, otherwise the agent's retry-with-fixed-fields
