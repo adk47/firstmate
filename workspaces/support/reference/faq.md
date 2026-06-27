@@ -237,7 +237,7 @@ If your plaque shows numbers that don't match what you'd expect, open a
 ticket with the order ID and the team will sort it out.
 
 ### I need to fix / change the shipping address on my order
-Share your order ID and the full corrected address — recipient name,
+Share your order ID and the full corrected address – recipient name,
 address line 1 (and line 2 if needed), postcode, city, state/province if
 applicable, country, and a phone number. Keep each line fairly short (around
 40 characters). Caroline flags it for the fulfillment team to update on the

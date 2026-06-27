@@ -555,6 +555,26 @@ jobs:
           scripts/check-skill-drift.sh
           echo "::endgroup::"
 
+      - name: Em-dash lint — no em-dashes in Caroline's surface
+        # The outbound sanitizer (sanitize-typography.ts) guarantees no em-dash
+        # reaches a customer at runtime; this gate keeps the SOURCE clean so the
+        # model never sees an em-dash in its own SOUL / KB / skills and learns to
+        # mimic it. Prose != enforcement, so this is the mechanical backstop for
+        # the knowledge base, paired with the runtime sanitizer for replies.
+        run: |
+          echo "::group::Em-dash lint"
+          bash scripts/lint-no-em-dash.sh
+          echo "::endgroup::"
+
+      - name: SOUL bootstrap-size check — Caroline SOUL.md must fit the cap
+        # SOUL.md over bootstrapMaxChars gets its TAIL truncated in the injected
+        # context on every turn (verified live on edge), silently dropping the
+        # Honesty / SLA-breach doctrine. This gate keeps it under the cap.
+        run: |
+          echo "::group::SOUL bootstrap-size check"
+          bash scripts/check-soul-bootstrap-size.sh
+          echo "::endgroup::"
+
       - name: Egress allowlist check — no unauthorized additions
         run: |
           echo "::group::Checking egress allowlist changes"

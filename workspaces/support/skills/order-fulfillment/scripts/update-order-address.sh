@@ -5,10 +5,10 @@
 # Architecture mirrors remove-credits.sh: the plugin's MusoAdminClient stays
 # GET-only; this script is the single audit + ownership-enforcement surface for
 # the destructive write. Invoked by the order_address_update tool via
-# `execFile bash <this> ...` — fixed argv, no free-form params.
+# `execFile bash <this> ...` – fixed argv, no free-form params.
 #
 # The SECURITY boundary lives here:
-#   1. Resolve the order server-side (GET) — the PUT findByPk needs the UUID,
+#   1. Resolve the order server-side (GET) – the PUT findByPk needs the UUID,
 #      so we resolve any ref (uuid / orderNumber / Prodigi id) to the canonical id.
 #   2. Ownership: the requester's Intercom contact email (re-fetched server-side)
 #      must equal BOTH the --customer-email passed AND the order's owner email.
@@ -30,7 +30,7 @@
 #                                          taxId?, taxIdType? }
 #                                  taxId/taxIdType (Mexico RFC/CURP) ride along
 #                                  verbatim in the PUT body; the backend stores +
-#                                  forwards them to Prodigi. No validation here —
+#                                  forwards them to Prodigi. No validation here –
 #                                  the TS dispatcher (normalizeTaxId) is authoritative.
 #
 # Optional argv:
@@ -51,7 +51,7 @@ DRY_RUN_RECENCY_SECS="${OUA_DRY_RUN_RECENCY_SECS:-900}"
 INTERCOM_API_BASE="${OUA_INTERCOM_API_BASE:-https://api.intercom.io}"
 # Canonical source of the Prodigi address rules (40-char limit + required fields)
 # is plugins/support-tools/src/order-address.ts (validateProdigiAddress), which the
-# TS dispatcher enforces authoritatively. This bash check is defense-in-depth — keep
+# TS dispatcher enforces authoritatively. This bash check is defense-in-depth – keep
 # the two in sync if Prodigi's limit ever changes.
 PRODIGI_MAX_LINE=40
 
@@ -203,7 +203,7 @@ mode="dry-run"; (( apply == 1 )) && mode="apply"
 [[ -n "$body_file"      ]] || { _emit_error "missing_arg" "--body-file";      exit 0; }
 [[ -f "$body_file"      ]] || { _emit_error "body_file_missing" "$body_file"; exit 0; }
 
-# order_ref is interpolated into the admin API path — restrict to a URL-safe set.
+# order_ref is interpolated into the admin API path – restrict to a URL-safe set.
 if ! [[ "$order_ref" =~ ^[A-Za-z0-9_-]+$ ]]; then
   _emit_error "invalid_order_ref" "redacted"; exit 0
 fi
@@ -222,7 +222,7 @@ body_hash="$(jq -S -c . "$body_file" | _sha256)"
 
 # Defense-in-depth: OPS_DRY_RUN=1 would short-circuit the PUT into a synthetic 200.
 if [[ "${OPS_DRY_RUN:-0}" == "1" ]]; then
-  _emit_error "ops_dry_run_set" "OPS_DRY_RUN=1 is set in env; refusing — would short-circuit the PUT into a synthetic 200"
+  _emit_error "ops_dry_run_set" "OPS_DRY_RUN=1 is set in env; refusing – would short-circuit the PUT into a synthetic 200"
   exit 0
 fi
 
@@ -252,7 +252,7 @@ for pair in "name:$b_name" "phone:$b_phone" "line1:$b_line1" "city:$b_city" "pos
   fi
 done
 # country must be a 2-letter ISO code (backend maps it straight to Prodigi
-# countryCode). Defense-in-depth — the TS validator is authoritative.
+# countryCode). Defense-in-depth – the TS validator is authoritative.
 if ! [[ "$b_country" =~ ^[A-Za-z][A-Za-z]$ ]]; then
   _emit_error "invalid_country" "country must be a 2-letter ISO code (got: $b_country)"; exit 0
 fi
@@ -263,7 +263,7 @@ while IFS= read -r _v; do
   fi
 done < <(jq -r '[.name, .phoneNumber, .address.line1, (.address.line2 // ""), .address.city, (.address.state // ""), .address.postal_code, .address.country] | .[]' "$body_file")
 
-# --- Resolve the order (GET) — gives us the canonical UUID + owner email + status ---
+# --- Resolve the order (GET) – gives us the canonical UUID + owner email + status ---
 if [[ -z "$MUSO_ADMIN_API" || ! -f "$MUSO_ADMIN_API" ]]; then
   _emit_error "missing_admin_api_script" "muso-admin-api.sh not found"; exit 0
 fi
@@ -296,7 +296,7 @@ if [[ "$owner_email_lc" != "$customer_email_lc" ]]; then
   _emit_error "owner_mismatch" "the requester is not the owner of this order"; exit 0
 fi
 # (b) re-verify the requester email against Intercom's contact record (when a
-# conv-id is present — always on apply). Closes the typed-email injection vector.
+# conv-id is present – always on apply). Closes the typed-email injection vector.
 if [[ -n "$intercom_conv_id" ]]; then
   if ! _verify_intercom_email "$intercom_conv_id" "$customer_email_lc"; then
     _audit "refused_intercom_email_mismatch" "intercom_contact_mismatch"

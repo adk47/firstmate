@@ -134,7 +134,7 @@ set -e
 
 if [[ $rc -eq 0 ]]; then
   # Dry-run (apply=false): muso's gate short-circuits and emits the dryRunResult
-  # envelope ({dryRun,method,url,body,note}), NOT a result struct — surface the
+  # envelope ({dryRun,method,url,body,note}), NOT a result struct – surface the
   # human note + resolved body as the preview, never a bogus status:"unknown".
   if [[ "$(printf %s "$muso_out" | jq -r 'if .dryRun==true then "y" else "n" end' 2>/dev/null || echo n)" == "y" ]]; then
     note="$(printf %s "$muso_out" | jq -r '.note // empty' 2>/dev/null || true)"

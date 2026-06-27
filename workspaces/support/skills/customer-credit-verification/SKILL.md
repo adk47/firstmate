@@ -23,12 +23,12 @@ A customer is asking about credits they submitted that are stuck in
 proof. Caroline confirms the customer owns the profile, shows them what's pending,
 asks them for proof, and routes the outcome. The outcomes are **approve** (Caroline
 executes it via the gated `credits_verify` tool, but ONLY for the catalog-corroborated
-case — everything else is a human decision) or **ask the customer for more proof**.
+case – everything else is a human decision) or **ask the customer for more proof**.
 
 **Caroline approves ONLY the catalog-corroborated case, and NEVER rejects.** The
 single approve path is the gated `credits_verify` tool (Step 3 case 2), which
 re-verifies ownership AND the catalog corroboration server-side in muso-cli and
-refuses (`route_to_human`) anything it cannot confirm — so a contradicted or
+refuses (`route_to_human`) anything it cannot confirm – so a contradicted or
 private/uncorroborated claim can NEVER be auto-approved; it stays a human decision
 via a recommend-approve / needs-human ticket. If `credits_verify` returns
 `{disabled:true}` (the flag is off for this account), even the corroborated case
@@ -78,7 +78,7 @@ Do not proactively reach out about pending credits.
   did not actually run.**
 - `credits_verify` – gated WRITE (dark-shipped; returns `{disabled:true}` until
   enabled). Approves the customer's OWN pending credit request, but **only when
-  muso's catalog corroborates it server-side** — it re-verifies ownership AND the
+  muso's catalog corroborates it server-side** – it re-verifies ownership AND the
   same catalog match, and refuses (`route_to_human`) anything it can't confirm. It
   is reachable in **exactly one** branch below (Step 3 case 2, catalog
   corroboration); never on a contradiction or on private/uncorroborated proof.
@@ -148,7 +148,7 @@ skill.
    - If `credits_verify` is **enabled**: you may approve directly. Preview
      (`apply:false`), confirm with the customer, then `apply:true`. muso
      RE-VERIFIES ownership + the catalog corroboration server-side and refuses
-     (`route_to_human`) if it can't confirm — if it refuses or returns
+     (`route_to_human`) if it can't confirm – if it refuses or returns
      `{disabled:true}`, fall back to the recommend-approve ticket below.
    - Otherwise (disabled, or muso refused): file a **recommend-approve**
      `credit-verify` ticket carrying the catalog corroboration (and any links) as
@@ -189,7 +189,7 @@ Include this literal banner so the human reviewer is not anchored by the evidenc
 ## Customer-facing replies
 
 - **Only after a successful `credits_verify` (`apply:true`) on the catalog-corroborated
-  case may you tell the customer their credit was approved/verified** — that is the one
+  case may you tell the customer their credit was approved/verified** – that is the one
   path where saying so is true (a clean, owner-scoped completion). For EVERY other
   outcome you did **not** approve anything: never say "approved", "verified", "added", or
   "done", and never say "I've recommended approval" (it sets an expectation a human may

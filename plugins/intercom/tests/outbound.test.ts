@@ -231,6 +231,23 @@ describe("SanitizingIntercomClient", () => {
     expect(logged).toEqual([]);
   });
 
+  it("normalizes em-dashes to en-dashes on the universal reply chokepoint", async () => {
+    const inner = new MockIntercomClient();
+    const logged: string[] = [];
+    const client = new SanitizingIntercomClient(inner, {
+      error: (msg) => logged.push(msg),
+    });
+    await client.replyToConversation({
+      conversationId: "conv_em",
+      adminId: "admin_1",
+      body: "Happy to help — your plan renews on the 1st.",
+    });
+    // Proves the typography pass fires at the one seam every reply path goes through.
+    expect(inner.calls.replyToConversation[0].body).toBe("Happy to help – your plan renews on the 1st.");
+    expect(inner.calls.replyToConversation[0].body).not.toContain("—");
+    expect(logged.some((m) => m.includes("[intercom:typography]") && m.includes("conv=conv_em"))).toBe(true);
+  });
+
   it("sanitizes a body containing a disallowed email before delegating", async () => {
     const inner = new MockIntercomClient();
     const logged: string[] = [];

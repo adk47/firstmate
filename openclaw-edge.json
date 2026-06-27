@@ -290,6 +290,13 @@
           "personalization": {
             "enabled": true,
             "timeoutMs": 2500
+          },
+          "kbRetrieval": {
+            "enabled": true,
+            "timeoutMs": 1500,
+            "maxResults": 5,
+            "minScore": 0,
+            "agentId": "support"
           }
         }
       },

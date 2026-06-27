@@ -159,6 +159,20 @@ export interface IntercomSessionState {
   // fetched live from systems-of-record, and held ONLY here in session state —
   // never written to openclaw memory and never indexed. See enrichment.ts.
   enrichment?: EnrichmentState;
+  // Top KB snippets retrieved (mandatory pre-retrieval RAG) for THIS turn, gated
+  // behind account.kbRetrieval.enabled. Injected into the agent's context as a
+  // [KNOWLEDGE_BASE] block by buildAgentRawBody. Held only in this per-conversation
+  // session state (so it lands in the session store with the rest of the state) and
+  // overwritten every dispatch turn; never indexed into openclaw vector memory. See
+  // kb-retrieval.ts.
+  kbSnippets?: KbSnippet[];
+}
+
+/** A single retrieved knowledge-base chunk (snippet text + provenance for logs). */
+export interface KbSnippet {
+  snippet: string;
+  path?: string;
+  score?: number;
 }
 
 // --- Config ---
@@ -207,6 +221,18 @@ export interface IntercomAccountConfig {
   personalization?: {
     enabled: boolean;
     timeoutMs?: number;
+  };
+  // Mandatory pre-retrieval RAG: search the reference KB on every answer-bearing
+  // inbound and inject the top hits before the model generates. Default OFF (when
+  // absent or enabled:false, no retrieval runs and behavior is unchanged).
+  // `minScore` defaults to 0 deliberately (see kb-retrieval.ts). `timeoutMs`
+  // bounds the search on the hot reply path (default 1500ms).
+  kbRetrieval?: {
+    enabled: boolean;
+    timeoutMs?: number;
+    maxResults?: number;
+    minScore?: number;
+    agentId?: string;
   };
 }
 

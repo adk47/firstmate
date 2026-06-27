@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for claim-self.sh — the thin bash boundary in front of
+# Tests for claim-self.sh – the thin bash boundary in front of
 # `muso profiles claim-self`. muso is PATH-stubbed to emit canned stdout/stderr
 # and a canned exit code, so no real binary or network is touched.
 
@@ -82,7 +82,7 @@ jget() { printf '%s' "$output" | jq -r "$1"; }
 
 @test "dry-run surfaces muso's dryRunResult envelope (note + body preview)" {
   # muso --dry-run --json emits the gate's dryRunResult envelope, NOT a result
-  # struct — the wrapper must report status:dry_run + the note/body preview.
+  # struct – the wrapper must report status:dry_run + the note/body preview.
   MUSO_STUB_STDOUT='{"dryRun":true,"method":"POST","url":"https://x/admin/claiming/clm_abc123/verify","body":{},"note":"claim clm_abc123 will be verified"}' \
     run bash "$SCRIPT" --claim-id "$CLAIM_ID" --actor-identity "$ACTOR" --intercom-conv-id "$CONV"
   [ "$status" -eq 0 ]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for consolidate.sh — the thin bash boundary in front of the APPROVAL-tier
+# Tests for consolidate.sh – the thin bash boundary in front of the APPROVAL-tier
 # `muso profiles consolidate`. muso is PATH-stubbed to record argv and emit
 # canned stdout/stderr + exit code, so no real binary or network is touched.
 
@@ -114,7 +114,7 @@ jget() { printf '%s' "$output" | jq -r "$1"; }
 
 @test "dry-run surfaces muso's dryRunResult envelope (note + body preview) and passes --dry-run" {
   # muso --dry-run --json emits the gate's dryRunResult envelope, NOT a result
-  # struct — the wrapper reports status:dry_run + the note and body preview.
+  # struct – the wrapper reports status:dry_run + the note and body preview.
   MUSO_STUB_STDOUT='{"dryRun":true,"method":"POST","url":"https://x/admin/profiles/merge","body":{"mergeInto":"11111111-1111-1111-1111-111111111111","profilesIds":["22222222-2222-2222-2222-222222222222"]},"note":"22222222-2222-2222-2222-222222222222 will be folded INTO 11111111-1111-1111-1111-111111111111"}' \
     run bash "$SCRIPT" --into "$SURVIVOR" --from "$DUP1" --actor-identity "$ACTOR" --intercom-conv-id "$CONV"
   [ "$status" -eq 0 ]

@@ -1,6 +1,6 @@
 ---
 name: customer-profile-claim
-description: Verify (approve) a customer's OWN pending profile claim so they become the verified owner — gated self-service via the muso capability gate. Use when a verified customer asks to claim/verify their profile and a pending claim exists on it.
+description: Verify (approve) a customer's OWN pending profile claim so they become the verified owner – gated self-service via the muso capability gate. Use when a verified customer asks to claim/verify their profile and a pending claim exists on it.
 triggers:
   - "claim my profile"
   - "verify my profile"
@@ -17,37 +17,37 @@ triggers:
 When a customer asks to claim/verify a profile that is theirs and a **pending
 claim** already exists on it, you can approve that claim yourself instead of
 handing off. Ownership is anchored to the verified contact and re-checked
-server-side, so the worst case is verifying the customer's OWN claim — which is
+server-side, so the worst case is verifying the customer's OWN claim – which is
 exactly what they asked for. Verifying a claim is idempotent (re-running an
 already-verified claim does nothing).
 
 ## Tools
 
-- `profiles_claim_self` — gated WRITE. Approves the customer's own pending claim
+- `profiles_claim_self` – gated WRITE. Approves the customer's own pending claim
   by `claimId`. The verified contact email is the anchor (derived from the
   conversation, never from what the customer types); the gate refuses a claim
   that belongs to a different account. Always preview first (`apply:false`), tell
   the customer what will happen, then `apply:true`.
 - Reads you already have (`profile_status`, `credit_verification_check`,
   `dedupe_check`) to find the profile/claim first.
-- `create_ticket` — fall back to this for anything you cannot resolve here.
+- `create_ticket` – fall back to this for anything you cannot resolve here.
 
 ## Flow
 
 1. **Bail out** if the customer is asking for a human, is frustrated, or this is
-   going in circles — hand off with `create_ticket`.
+   going in circles – hand off with `create_ticket`.
 2. **Identify the pending claim.** From the customer's profile context, get the
    `claimId` of the pending claim on the profile they want to own. If you cannot
-   find a single clear pending claim, do not guess — ask, or file for a human.
-3. **Preview** — call `profiles_claim_self` with `apply:false`. Tell the customer
+   find a single clear pending claim, do not guess – ask, or file for a human.
+3. **Preview** – call `profiles_claim_self` with `apply:false`. Tell the customer
    plainly what you're about to verify (e.g. "I can confirm your profile claim
    now"). Get a clear yes.
-4. **Apply** — call `profiles_claim_self` with `apply:true`.
+4. **Apply** – call `profiles_claim_self` with `apply:true`.
 5. **Report back** from the result:
    - `status:"applied"` → tell them it's done and they're now the verified owner.
    - `status:"noop"` → it was already verified; reassure them it's set.
    - `ok:false, error:"route_to_human"` → the claim isn't confirmable as theirs;
-     do NOT argue ownership — file a `create_ticket` for the team to check.
+     do NOT argue ownership – file a `create_ticket` for the team to check.
    - `ok:false, disabled:true` → self-service isn't on for this case; file a
      `create_ticket` as usual.
    - any other `ok:false` → file a `create_ticket` and tell them the team will

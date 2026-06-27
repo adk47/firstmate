@@ -51,6 +51,12 @@ export interface HandlerOptions {
   // testable; it is fail-soft internally and the call site also `.catch()`es.
   personalization?: { enabled: boolean };
   enrich?: (state: IntercomSessionState, identity: VerifiedIdentity) => Promise<void>;
+  // Mandatory pre-retrieval RAG. When `kbRetrieval.enabled`, `retrieveKb` runs
+  // CONCURRENTLY with `enrich` just before dispatch (never on escalate/filter) to
+  // populate state.kbSnippets. Injected for testability; fail-soft internally and
+  // `.catch()`ed at the call site. Self-skips bare closers / empty turns.
+  kbRetrieval?: { enabled: boolean };
+  retrieveKb?: (state: IntercomSessionState, message: string) => Promise<void>;
 }
 
 export async function handleWebhookEvent(
@@ -281,22 +287,31 @@ export async function handleWebhookEvent(
         };
       }
 
-      // Personalization enrichment — runs ONLY here, on the confirmed dispatch
-      // path (after escalation + suppression gates), so we never spend live API
-      // calls on messages that get escalated or filtered. Best-effort: gated by
-      // shouldEnrich, the injected fn is fail-soft, and we `.catch()` so a bug
-      // here can never block a customer reply.
-      if (
-        state &&
-        options?.enrich &&
-        shouldEnrich({ enabled: options?.personalization?.enabled === true, classified, state })
-      ) {
-        const identity: VerifiedIdentity = {
-          email: classified.verifiedEmail!,
-          name: classified.verifiedName,
-          contactId: classified.authorId || undefined,
-        };
-        await options.enrich(state, identity).catch(() => {});
+      // Pre-dispatch context legs — run ONLY here, on the confirmed dispatch path
+      // (after escalation + suppression gates), so we never spend live API calls on
+      // messages that get escalated or filtered. Personalization enrichment and KB
+      // retrieval run CONCURRENTLY via Promise.all: the hot reply path waits at most
+      // max(enrich, kb), never the sum. Both are best-effort and `.catch()`ed so a
+      // bug in either can never block a customer reply.
+      if (state) {
+        const legs: Promise<unknown>[] = [];
+        if (
+          options?.enrich &&
+          shouldEnrich({ enabled: options?.personalization?.enabled === true, classified, state })
+        ) {
+          const identity: VerifiedIdentity = {
+            email: classified.verifiedEmail!,
+            name: classified.verifiedName,
+            contactId: classified.authorId || undefined,
+          };
+          legs.push(options.enrich(state, identity).catch(() => {}));
+        }
+        // KB retrieval needs no verified identity (it searches the reference corpus,
+        // not account data); it self-skips bare closers / empty turns.
+        if (options?.retrieveKb && options?.kbRetrieval?.enabled === true) {
+          legs.push(options.retrieveKb(state, classified.body).catch(() => {}));
+        }
+        if (legs.length > 0) await Promise.all(legs);
       }
 
       return {

@@ -2,6 +2,7 @@ import type { ContactConversationsPage, ConversationSummary, IntercomClient, Int
 import { MAX_OUTBOUND_MESSAGE_IDS } from "./types.js";
 import { sanitizeOutboundBody } from "./sanitize-email.js";
 import { sanitizeToolLeak } from "./sanitize-tool-leak.js";
+import { sanitizeTypography } from "./sanitize-typography.js";
 
 // --- Outbound reply retry (design §7 Rate Limiting) ---
 // "Intercom returns 429 with Retry-After. Retry with capped exponential
@@ -593,7 +594,17 @@ export class SanitizingIntercomClient implements IntercomClient {
         try { console.error(msg); } catch { /* noop */ }
       }
     }
-    return this.inner.replyToConversation({ ...params, body: toolPass.body });
+    const typoPass = sanitizeTypography(toolPass.body);
+    if (typoPass.redactions.length > 0) {
+      const msg = `[intercom:typography] conv=${params.conversationId} count=${typoPass.redactions.length}`;
+      // Logging must never block delivery (same contract as the passes above).
+      try {
+        this.log?.error?.(msg);
+      } catch {
+        try { console.error(msg); } catch { /* noop */ }
+      }
+    }
+    return this.inner.replyToConversation({ ...params, body: typoPass.body });
   }
 
   async assignConversation(params: {
@@ -627,7 +638,8 @@ export class SanitizingIntercomClient implements IntercomClient {
     if (params.body) {
       const emailPass = sanitizeOutboundBody(params.body);
       const toolPass = sanitizeToolLeak(emailPass.body);
-      return this.inner.closeConversation({ ...params, body: toolPass.body });
+      const typoPass = sanitizeTypography(toolPass.body);
+      return this.inner.closeConversation({ ...params, body: typoPass.body });
     }
     return this.inner.closeConversation(params);
   }

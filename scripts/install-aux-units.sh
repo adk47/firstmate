@@ -56,6 +56,15 @@
 #     fingerprint-deduped) to #prod-alerts C0BA8QMV3ME (Serhii's
 #     prod-log-visibility ask, 2026-06-09).
 #
+#   /etc/cron.d/caroline-rag-index-watchdog
+#     Schedules scripts/caroline-rag-index-watchdog.sh every 10 minutes
+#     to self-heal + alert #clio_devops when Caroline's memory_search
+#     (RAG) vector index is paused / missing / not ready. openclaw
+#     pauses the index on every runtime version bump (memory-index-
+#     pause-after-upgrade); a paused index returns nothing and the
+#     mandatory pre-retrieval RAG hook then answers ungrounded. Forces
+#     a rebuild on detection (6h re-page cooldown).
+#
 #   clickup-sla-digest.timer / .service
 #     Daily 08:00 America/New_York. Posts overdue / due-today /
 #     due-tomorrow open ClickUp support tickets (SLA due dates set
@@ -147,6 +156,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/clickup-sla-digest.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh missing or not executable"
 [[ -f "$HYDRA_ROOT/scripts/overdue-verification-notifier.py" ]] \
   || fail "$HYDRA_ROOT/scripts/overdue-verification-notifier.py missing"
 [[ -f "$HYDRA_ROOT/scripts/resolve-notify.py" ]] \
@@ -710,6 +721,28 @@ cat > /etc/cron.d/stale-ticket-watchdog << STALETICKETWD
 30 8 * * * root USE_MUSO_CLI=1 MUSO_BIN=/usr/local/bin/muso $HYDRA_ROOT/scripts/stale-ticket-watchdog.sh >> /var/log/stale-ticket-watchdog.log 2>&1
 STALETICKETWD
 chmod 644 /etc/cron.d/stale-ticket-watchdog
+
+# ─── Caroline RAG index watchdog at 10-min cadence ────────────
+# Self-heals + alerts when Caroline's memory_search (RAG) vector index is
+# paused / its identity is missing / the vector store is not ready. openclaw
+# pauses the index on every runtime version bump (memory-index-pause-after-
+# upgrade), and a paused index returns NOTHING from retrieval, so the mandatory
+# pre-retrieval RAG hook (plugins/intercom) answers ungrounded -- a silent,
+# customer-facing failure. deploy.sh force-rebuilds the index on every deploy;
+# this watchdog catches the BETWEEN-deploy pauses (out-of-band openclaw auto-
+# update, manual gateway restart). 10 min bounds that silent window while the
+# steady-state cost is one cheap status read per tick (the expensive reindex
+# fires only when actually broken). The 6h cooldown means a persistent failure
+# pages once per window, not every tick. Same ownership rule: edit here +
+# re-run install-aux-units.sh, never edit the file on node-8.
+cat > /etc/cron.d/caroline-rag-index-watchdog << CAROLINERAGWD
+# MANAGED BY scripts/install-aux-units.sh -- DO NOT EDIT BY HAND.
+# PATH so cron finds jq/flock/mktemp/timeout (cron's default is a bare
+# /usr/bin:/bin; muso lives in /usr/local/bin). See muso-cli-contract-gotchas.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/10 * * * * root $HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh >> /var/log/caroline-rag-index-watchdog.log 2>&1
+CAROLINERAGWD
+chmod 644 /etc/cron.d/caroline-rag-index-watchdog
 
 # Drop the legacy per-user crontab line if it's still installed.
 # Idempotent: removes the line if present, no-op otherwise.

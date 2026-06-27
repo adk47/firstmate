@@ -42,8 +42,9 @@ import {
   type PersistedAttachment,
 } from "./attachments.js";
 import path from "node:path";
-import type { IntercomSessionState, IntercomWebhookPayload, KnownFacts, IntercomAccountConfig, EnrichmentState } from "./types.js";
+import type { IntercomSessionState, IntercomWebhookPayload, KnownFacts, IntercomAccountConfig, EnrichmentState, KbSnippet } from "./types.js";
 import { DEFAULT_JUDGE_MIN_TURNS, DEFAULT_TURN_HARD_CAP, DEFAULT_JUDGE_MODEL } from "./types.js";
+import { buildKbRetrieveFn, renderKnowledgeBaseBlock, stripKnowledgeBase } from "./kb-retrieval.js";
 
 // Module-level session store shared between startAccount (inbound) and sendText (outbound).
 // Keyed by accountId → conversationId → session state.
@@ -149,9 +150,10 @@ export function joinDeliveryChunks(chunks: string[]): string {
 
 // Strip our own delimiter markers from inbound customer text before injecting
 // it into the agent prompt — defense against a customer pasting a forged
-// [CONVERSATION_CONTEXT] block that the agent would otherwise treat as
-// authoritative ground truth.
-const INJECTION_MARKER_REGEX = /\[\/?(?:CONVERSATION_CONTEXT|CUSTOMER_MESSAGE)\]/gi;
+// [CONVERSATION_CONTEXT] / [KNOWLEDGE_BASE] block that the agent would otherwise
+// treat as authoritative ground truth (SOUL tells it to ground in [KNOWLEDGE_BASE],
+// so a forged one is especially dangerous when real retrieval returns nothing).
+const INJECTION_MARKER_REGEX = /\[\/?(?:CONVERSATION_CONTEXT|CUSTOMER_MESSAGE|KNOWLEDGE_BASE)\]/gi;
 
 export function sanitizeCustomerMessage(message: string): string {
   if (!INJECTION_MARKER_REGEX.test(message)) return message;
@@ -229,8 +231,10 @@ export function buildAgentRawBody(
   message: string,
   facts: KnownFacts,
   enrichment?: EnrichmentState,
+  kbSnippets?: KbSnippet[],
 ): string {
   const sanitized = sanitizeCustomerMessage(message);
+  const kbBlock = renderKnowledgeBaseBlock(kbSnippets ?? []);
   const lines: string[] = enrichment ? buildEnrichmentLines(enrichment) : [];
   if (!enrichment?.verifiedEmail && facts.accountEmail) {
     lines.push(`- account email: ${facts.accountEmail}`);
@@ -238,12 +242,15 @@ export function buildAgentRawBody(
   if (!enrichment?.snapshot?.profileUrl && facts.musoProfileUrl) {
     lines.push(`- muso profile: ${facts.musoProfileUrl}`);
   }
-  if (lines.length === 0) return sanitized;
+  const contextBlock =
+    lines.length > 0
+      ? ["[CONVERSATION_CONTEXT]", "Known about this user (do not re-ask):", ...lines, "[/CONVERSATION_CONTEXT]"].join("\n")
+      : "";
+  // KB grounding goes ABOVE the per-user context, both above the message itself.
+  if (!kbBlock && !contextBlock) return sanitized;
   return [
-    "[CONVERSATION_CONTEXT]",
-    "Known about this user (do not re-ask):",
-    ...lines,
-    "[/CONVERSATION_CONTEXT]",
+    ...(kbBlock ? [kbBlock] : []),
+    ...(contextBlock ? [contextBlock] : []),
     "[CUSTOMER_MESSAGE]",
     sanitized,
   ].join("\n");
@@ -444,6 +451,7 @@ export const intercomPlugin = createChatChannelPlugin({
         // once per account start so the admin-API login token is reused. When
         // disabled or mis-configured this is undefined and dispatch is unchanged.
         const enrichFn = buildEnrichFn(account, log);
+        const kbRetrieveFn = buildKbRetrieveFn(account, log);
         ctx.log?.info?.(
           `[${tag}] personalization=${account.personalization?.enabled === true ? (enrichFn ? "on" : "on-but-uncredentialed") : "off"}`,
         );
@@ -512,6 +520,8 @@ export const intercomPlugin = createChatChannelPlugin({
                       blockedChannelTags: account.blockedChannelTags ?? [],
                       personalization: account.personalization,
                       enrich: enrichFn,
+                      kbRetrieval: account.kbRetrieval,
+                      retrieveKb: kbRetrieveFn,
                     },
                   );
 
@@ -672,7 +682,7 @@ export const intercomPlugin = createChatChannelPlugin({
                       senderAddress: `intercom:${result.authorId}`,
                       recipientAddress: `intercom:${account.botAdminId}`,
                       conversationLabel: `Intercom conversation ${result.conversationId}`,
-                      rawBody: buildAgentRawBody(bodyForDispatch, state.knownFacts ?? {}, state.enrichment),
+                      rawBody: buildAgentRawBody(bodyForDispatch, state.knownFacts ?? {}, state.enrichment, state.kbSnippets),
                       messageId: payload.id,
                       timestamp: payload.created_at,
                       extraContext: mediaExtraContext,
@@ -824,7 +834,8 @@ export const intercomPlugin = createChatChannelPlugin({
                             );
                           });
                       }
-                      const stripped = stripConversationContext(customerText, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId });
+                      const ctxStripped = stripConversationContext(customerText, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId });
+                      const stripped = stripKnowledgeBase(ctxStripped, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId });
                       // Outbound reasoning-preamble guard. The reasoning model
                       // (gpt-5.5/codex) intermittently writes its internal plan into
                       // the reply content -- a preamble, a `---`, then the real reply
@@ -1088,7 +1099,7 @@ export const intercomPlugin = createChatChannelPlugin({
         const { messageId } = await client.replyToConversation({
           conversationId,
           adminId: account.botAdminId,
-          body: stripConversationContext(text),
+          body: stripKnowledgeBase(stripConversationContext(text)),
         });
 
         // Track outbound message ID for self-reply filtering

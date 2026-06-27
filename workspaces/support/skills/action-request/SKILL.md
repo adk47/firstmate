@@ -80,7 +80,7 @@ Only a genuinely different request (different `actionType`) is guaranteed a new 
 | `credit-verify` | 1 | 2 business days | A pending ("user verification needed") credit case from the `customer-credit-verification` skill – recommend-approve or needs-human handoff with the proof evidence. File via that skill's Step 4, not ad hoc. |
 | `profile-claim` | 1 | 2 business days | "I want to claim this profile" |
 | `support-general` | 1 | 2 business days | General questions needing ops follow-up. **Also used for human-handoff bail-outs** – when the customer asks for a human, gets frustrated, or the conversation loops, file with `details.escalation_reason` (see "Human Handoff" section below). |
-| `order-fulfillment` | 1 | 2 business days | Plaque/poster order support: a Prodigi address-confirmation request, or a customer order/shipping/address-change question. Filed by the `order-fulfillment` skill — see its required `details` shape under "Order Fulfillment" below. |
+| `order-fulfillment` | 1 | 2 business days | Plaque/poster order support: a Prodigi address-confirmation request, or a customer order/shipping/address-change question. Filed by the `order-fulfillment` skill – see its required `details` shape under "Order Fulfillment" below. |
 | `profile-merge` | 2 | 5 business days | "I have two profiles, combine them" (require `main_profile_url` and `duplicate_profile_urls[]` in `details` – no self-service merge UI exists, so URLs are the only way ops can act) |
 | `unmerge-request` | 2 | 5 business days | Caroline-flagged: customer asked to remove tracks, but most listed tracks share an artist not on the profile – likely a wrong merge. See "Unmerge Request" section below for required `details` shape. |
 | `bulk-credit-change` | 2 | 5 business days | "Update credits on multiple tracks" |
@@ -198,9 +198,9 @@ print-on-demand vendor (Prodigi). No profile id required. Recommended `details`:
 
 When `actionType` is `order-fulfillment` and `details.proposed_corrected_address` is an
 object, `create_ticket` automatically stamps an `address_validation` block onto the
-ticket — a deterministic check of each line against Prodigi's ≤40-character rule plus
+ticket – a deterministic check of each line against Prodigi's ≤40-character rule plus
 the required fields (Name, Line 1, Postcode, City, Country, Phone) and a "name looks
-like a street" warning. This is **non-blocking** — it never prevents filing; it just
+like a street" warning. This is **non-blocking** – it never prevents filing; it just
 gives ops a trustworthy, pre-counted verdict. Full doctrine: `reference/orders-and-fulfillment.md`.
 
 ### Retention Context (subscription-refund only)

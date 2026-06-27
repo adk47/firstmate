@@ -114,8 +114,6 @@ export default definePluginEntry({
     };
     api.registerTool(orderLookupFactory, { name: "order_lookup" });
 
-    api.registerTool(createSubscriptionStatusTool(), { name: "subscription_status" });
-
     const createTicketFactory = (ctx: any) => {
       return createCreateTicketTool({
         http,
@@ -182,6 +180,26 @@ export default definePluginEntry({
       });
     };
     api.registerTool(dedupeCheckFactory, { name: "dedupe_check" });
+
+    // subscription_status — read-only view of the customer's workspace
+    // subscription (plan, status, period, seat limit). Anchored to the verified
+    // Intercom contact email (same anti-spoof as dedupe_check), so it is wired
+    // with intercomReader + intercomToken + sessionKey rather than an email arg.
+    // Reads via `muso teams list --email <verified-email> --json`; fails closed
+    // (owner_undetermined / not_found / lookup_unavailable) on any unverifiable
+    // or empty path. Registered here (after the intercom deps exist) rather than
+    // with the other read tools above.
+    const subscriptionStatusFactory = (ctx: any) => {
+      return createSubscriptionStatusTool({
+        rateLimiter,
+        // Anti-spoof anchor: the trusted gateway session KEY (carries the convId),
+        // NOT ctx.sessionId (an ephemeral UUID that never matches). See deriveConvId.
+        sessionKey: ctx.sessionKey ?? "unknown",
+        intercomReader,
+        intercomToken,
+      });
+    };
+    api.registerTool(subscriptionStatusFactory, { name: "subscription_status" });
 
     // credit_verification_check — read-only lookup of a customer's
     // user_verification_needed credits, anchored to the verified Intercom

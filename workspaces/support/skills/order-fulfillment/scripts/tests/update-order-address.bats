@@ -1,12 +1,12 @@
 #!/usr/bin/env bats
 
-# Tests for update-order-address.sh — the destructive bash mutation surface +
+# Tests for update-order-address.sh – the destructive bash mutation surface +
 # ownership/audit security boundary for Caroline's order shipping-address edits.
 #
 # Stubs (via PATH-shadow + env), NEVER hits real APIs (mirrors remove-credits.bats):
-#   - muso-admin-api.sh — emits canned envelopes from $MUSO_API_RESPONSE_FILE,
+#   - muso-admin-api.sh – emits canned envelopes from $MUSO_API_RESPONSE_FILE,
 #                         one per call, in order (GET order, then PUT), via a cursor.
-#   - curl              — emits $CURL_STUB_RESPONSE (Intercom contact verify).
+#   - curl              – emits $CURL_STUB_RESPONSE (Intercom contact verify).
 
 setup() {
   TEST_TMP="$(mktemp -d -t oua-bats.XXXXXX)"

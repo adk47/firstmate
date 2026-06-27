@@ -1,6 +1,6 @@
 ---
 name: customer-profile-consolidate
-description: Merge a customer's OWN unclaimed same-name duplicate profiles into the profile they own — the SAFE self-service merge case, gated by the muso capability gate. Use after dedupe_check confirms the customer owns the survivor and the duplicates are unclaimed same-name. Anything cross-owner stays human.
+description: Merge a customer's OWN unclaimed same-name duplicate profiles into the profile they own – the SAFE self-service merge case, gated by the muso capability gate. Use after dedupe_check confirms the customer owns the survivor and the duplicates are unclaimed same-name. Anything cross-owner stays human.
 triggers:
   - "merge my profiles"
   - "i have duplicate profiles"
@@ -14,22 +14,22 @@ triggers:
 
 ## Purpose
 
-When a customer has duplicate profiles — their real (claimed) profile plus one or
-more **unclaimed, same-name** duplicates that fragment their credits — you can fold
+When a customer has duplicate profiles – their real (claimed) profile plus one or
+more **unclaimed, same-name** duplicates that fragment their credits – you can fold
 the duplicates into the profile they own. This is the SAME safe sub-case
 `dedupe_check` already verifies; `profiles_consolidate` is its WRITE counterpart.
 The muso capability gate re-verifies, server-side, that the survivor is the
 customer's and every duplicate is unclaimed + same-name, and refuses any
-cross-owner merge — so the worst case is consolidating the customer's own dupes.
+cross-owner merge – so the worst case is consolidating the customer's own dupes.
 
 ## Tools
 
-- `dedupe_check` — read-only. Run this FIRST to get the verdict (owns_survivor,
+- `dedupe_check` – read-only. Run this FIRST to get the verdict (owns_survivor,
   per-duplicate claim_state, shared-id signal). It is the gate on whether to merge.
-- `profiles_consolidate` — gated WRITE (approval-tier). Folds the `dupIds` into
+- `profiles_consolidate` – gated WRITE (approval-tier). Folds the `dupIds` into
   `survivorId`. Anchored to the verified Intercom contact (never typed input);
   re-verifies ownership + unclaimed-same-name server-side. Preview then apply.
-- `create_ticket` — fall back for anything not cleanly self-serviceable.
+- `create_ticket` – fall back for anything not cleanly self-serviceable.
 
 ## Flow
 
@@ -39,15 +39,15 @@ cross-owner merge — so the worst case is consolidating the customer's own dupe
    is no sign another claimed/credit-bearing same-name profile exists. ANY
    ambiguity, a claimed duplicate, a different owner, or `owner_undetermined` →
    do NOT merge; file a profile-merge `create_ticket` for Operations.
-3. **Preview** — `profiles_consolidate` with `apply:false`, the verified survivor as
+3. **Preview** – `profiles_consolidate` with `apply:false`, the verified survivor as
    `survivorId` and the confirmed duplicates as `dupIds`. Show the customer exactly
    which profiles fold into which, and confirm.
-4. **Apply** — `profiles_consolidate` with `apply:true`.
+4. **Apply** – `profiles_consolidate` with `apply:true`.
 5. **Report**:
    - `status:"applied"` → tell them the duplicates were merged into their profile
      and credits will consolidate.
    - `ok:false, error:"route_to_human"` → the gate wouldn't confirm it's all theirs;
-     do NOT argue — file a `create_ticket`.
+     do NOT argue – file a `create_ticket`.
    - `ok:false, error:"no_approver"` / other `ok:false` / `disabled:true` → file a
      `create_ticket` and tell them the team will handle it.
 
@@ -63,7 +63,7 @@ cross-owner merge — so the worst case is consolidating the customer's own dupe
 
 Plain language only; never expose internals or the sanitizer-banned words ("tool",
 "system", "error", "ticket", etc.). "I've merged your duplicate profiles into your
-main one" — not the mechanism. "I'll flag this for our team" — not a queue name.
+main one" – not the mechanism. "I'll flag this for our team" – not a queue name.
 
 ## Operational notes
 

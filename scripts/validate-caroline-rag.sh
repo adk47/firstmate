@@ -52,16 +52,54 @@ else
   fail "memory status reports issues"
 fi
 
-# 3. Semantic retrieval must return at least one match for known doctrine
-search_out=$(openclaw --profile "$PROFILE" memory search "analytics streams stuck not updating" --agent "$AGENT" --max-results 3 2>&1 || true)
+# 3. Semantic retrieval must return a HIT per key reference file. A
+#    partial or paused index silently returns nothing, so one hit per
+#    file turns that silent failure into a post-flight FAILURE.
+#
+#    --min-score 0 is REQUIRED: a non-zero floor drops valid
+#    natural-language matches (verified live -- "what happens to my
+#    founding member status if my payment fails" scores ~0.33 against
+#    the correct chunk and returns "No matches" at the default floor).
+#
+#    Each pair is a representative customer question and the reference
+#    file (workspaces/support/reference/<file>) it must retrieve. The
+#    file basename appears in the search output's source label.
+assert_retrieval() {
+  local query="$1" want="$2" out
+  out=$(openclaw --profile "$PROFILE" memory search "$query" \
+    --agent "$AGENT" --max-results 5 --min-score 0 2>&1 || true)
+  if echo "$out" | grep -qF "$want"; then
+    pass "retrieval hit $want"
+  elif echo "$out" | grep -q "No matches"; then
+    fail "retrieval No matches for '$query' (want $want; index empty/paused? run: openclaw memory index --force --agent $AGENT --profile $PROFILE)"
+  else
+    fail "retrieval missed $want for '$query' (first 200 chars): ${out:0:200}"
+  fi
+}
 
-if echo "$search_out" | grep -qE "common-issues\.md|active-incidents\.md"; then
-  pass "retrieval returns analytics doctrine"
-elif echo "$search_out" | grep -q "No matches"; then
-  fail "retrieval returns No matches (index may be empty; run: openclaw memory index --force --agent $AGENT --profile $PROFILE)"
-else
-  fail "retrieval output unexpected (first 200 chars): ${search_out:0:200}"
-fi
+# Soft variant for files whose CONTENT is intentionally transient: confirm the
+# index can reach the file when its content matches, but never FAIL the deploy on
+# a miss (the file may legitimately be empty). Index-health is still enforced by
+# the hard assertions on the stable files below.
+assert_retrieval_soft() {
+  local query="$1" want="$2" out
+  out=$(openclaw --profile "$PROFILE" memory search "$query" \
+    --agent "$AGENT" --max-results 5 --min-score 0 2>&1 || true)
+  if echo "$out" | grep -qF "$want"; then
+    pass "retrieval hit $want"
+  else
+    echo "  ~ (soft) no current hit for $want via '$query' -- expected when no matching incident is live."
+  fi
+}
+
+# Hard assertions: stable doctrine files. A miss = a partial/paused index = deploy FAIL.
+assert_retrieval "what happens to my founding member status if my payment fails" "founding-member.md"
+assert_retrieval "how do music credits work for my recordings and tracks" "credits-and-profiles.md"
+assert_retrieval "what is the difference between the Pro and Business subscription plans" "subscriptions-and-billing.md"
+assert_retrieval "I tried to claim my profile but nothing is happening" "common-issues.md"
+# active-incidents.md is TRANSIENT by design (sections deleted when an incident
+# ends), so its probe is SOFT -- a miss here must not false-fail every deploy.
+assert_retrieval_soft "why are my stream counts frozen and not updating" "active-incidents.md"
 
 if [ "$FAILURES" -eq 0 ]; then
   echo "All Caroline RAG checks passed."

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for verify-credit.sh — the thin bash boundary in front of
+# Tests for verify-credit.sh – the thin bash boundary in front of
 # `muso credits verify` (an APPROVAL-tier PUT). muso is PATH-stubbed to emit
 # canned stdout/stderr and a canned exit code, so no real binary or network is
 # touched.

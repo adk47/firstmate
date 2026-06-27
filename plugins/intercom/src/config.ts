@@ -115,6 +115,15 @@ export function resolveIntercomAccount(
             : {}),
         }
       : undefined,
+    kbRetrieval: account.kbRetrieval
+      ? {
+          enabled: account.kbRetrieval.enabled === true,
+          ...(typeof account.kbRetrieval.timeoutMs === "number" ? { timeoutMs: account.kbRetrieval.timeoutMs } : {}),
+          ...(typeof account.kbRetrieval.maxResults === "number" ? { maxResults: account.kbRetrieval.maxResults } : {}),
+          ...(typeof account.kbRetrieval.minScore === "number" ? { minScore: account.kbRetrieval.minScore } : {}),
+          ...(typeof account.kbRetrieval.agentId === "string" ? { agentId: account.kbRetrieval.agentId } : {}),
+        }
+      : undefined,
   };
 }
 
