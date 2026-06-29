@@ -234,7 +234,7 @@ section_1b=""
 while IFS=$'\t' read -r tier pid streams; do
   [[ -n "$tier" ]] || continue
   disp="$(slack_escape "${name[$pid]:-$pid}")"
-  line="• *${disp}* — *$(fmt_b "$streams")* lifetime streams  <https://muso.ai/profile/${pid}|view>"
+  line="• *${disp}* — *$(fmt_b "$streams")* lifetime streams  <https://credits.muso.ai/profile/${pid}|view>"
   if [[ "$tier" == "10B" ]]; then
     section_10b+="${line}"$'\n'
   else

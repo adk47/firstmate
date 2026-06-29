@@ -252,7 +252,7 @@ describe("buildAgentRawBody", () => {
       verifiedEmail: "jane@example.com",
       verifiedName: "Jane Doe",
       snapshot: {
-        profileUrl: "https://muso.ai/profile/abc123de",
+        profileUrl: "https://credits.muso.ai/profile/abc123de",
         isClaimed: true,
         primaryRole: "Producer",
         creditsCount: 42,
@@ -262,7 +262,7 @@ describe("buildAgentRawBody", () => {
     });
     expect(out).toContain("[CONVERSATION_CONTEXT]");
     expect(out).toContain("verified name: Jane Doe");
-    expect(out).toContain("muso profile: https://muso.ai/profile/abc123de (claimed)");
+    expect(out).toContain("muso profile: https://credits.muso.ai/profile/abc123de (claimed)");
     expect(out).toContain("primary role: Producer");
     expect(out).toContain("credits on file: 42");
     expect(out).toContain('latest release: "Midnight" (2026-05-01)');

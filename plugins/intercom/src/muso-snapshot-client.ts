@@ -251,7 +251,7 @@ export function createSnapshotClient(deps: SnapshotClientDeps): { lookupSnapshot
     return {
       profileId,
       name: String(row.name ?? "") || undefined,
-      profileUrl: `https://muso.ai/profile/${profileId}`,
+      profileUrl: `https://credits.muso.ai/profile/${profileId}`,
       ...(Object.keys(row).length > 0 ? { isClaimed: Boolean(row.isClaimed) } : {}),
       ...(primaryRole ? { primaryRole } : {}),
       ...(creditsCount > 0 ? { creditsCount } : {}),

@@ -367,7 +367,7 @@ When you receive a customer message, you may see a `[CONVERSATION_CONTEXT]` bloc
 [CONVERSATION_CONTEXT]
 Known about this user (do not re-ask):
 - verified name: Jane Doe
-- muso profile: https://muso.ai/profile/abc12345 (claimed)
+- muso profile: https://credits.muso.ai/profile/abc12345 (claimed)
 - primary role: Producer
 - credits on file: 42
 - founding member: since 2023

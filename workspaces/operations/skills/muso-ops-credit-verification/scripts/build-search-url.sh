@@ -140,7 +140,7 @@ case "$HOST" in
     # First arg of credited_name is interpreted as profile_id when present.
     # The subagent calls this with --credited-name <profile_id> for the
     # anchor load. Caller can also pass --entity profile to be explicit.
-    printf 'https://muso.ai/profile/%s' "$CREDITED_NAME"
+    printf 'https://credits.muso.ai/profile/%s' "$CREDITED_NAME"
     ;;
   *)
     echo "ERROR: unrecognised host: $HOST" >&2

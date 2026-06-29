@@ -89,7 +89,7 @@ $S --state-dir /tmp/bsc-test
 
 The skill **posts the milestone message to `--channel` itself** (Slack `mrkdwn`: a
 `:tada:` header, a `10 BILLION` section and a `1 BILLION` section, each
-`• *Name* — *X.YYB* lifetime streams` with a `https://muso.ai/profile/<id>` link).
+`• *Name* — *X.YYB* lifetime streams` with a `https://credits.muso.ai/profile/<id>` link).
 Its stdout is a short status (`posted N new crossing(s)…`) or exactly **`NO_REPLY`**
 when nothing new crossed. The cron runs with `delivery.mode: none` — the script is the
 poster, not the cron relay, so delivery success is observable before state changes.

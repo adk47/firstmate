@@ -202,7 +202,7 @@ while IFS=$'\t' read -r id name type streams sp yt; do
   disp="$(slack_escape "${name:-$id}")"
   extra=""
   [[ "$PLATFORMS" -eq 1 ]] && extra="  _(Spotify $(fmt_b "$sp") · YouTube $(fmt_b "$yt"))_"
-  printf '• *%s* — *%s* lifetime streams%s  <https://muso.ai/profile/%s|view>\n' \
+  printf '• *%s* — *%s* lifetime streams%s  <https://credits.muso.ai/profile/%s|view>\n' \
     "$disp" "$(fmt_b "$streams")" "$extra" "$id"
 done <<<"$rows"
 

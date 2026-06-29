@@ -76,7 +76,7 @@ $S --top 50 --format json                 # raw cube rows (NDJSON)
 ## Output & behavior
 
 - Default `--format slack` (mrkdwn): a `:bar_chart:` header then
-  `• *Name* — *X.YYB* lifetime streams  <https://muso.ai/profile/<id>|view>` (T/B/M
+  `• *Name* — *X.YYB* lifetime streams  <https://credits.muso.ai/profile/<id>|view>` (T/B/M
   formatted). `--format tsv` and `--format json` for machine use.
 - **Prints to stdout — does not post to Slack.** The calling agent relays the result in
   its own reply (so report it in plain words; don't emit a bare NO_REPLY).
