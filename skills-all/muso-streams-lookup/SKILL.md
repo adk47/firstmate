@@ -1,10 +1,11 @@
 ---
 name: muso-streams-lookup
 description: |
-  Look up per-artist LIFETIME stream totals from Muso's own data and answer
-  "find streams" questions: how many streams an artist has, the top artists by
-  streams, or who has crossed 1B / 10B. Reads the LIVE source the muso.ai profile
-  page uses — NOT the dead profile_v3 tables — so the numbers match the site.
+  USE THIS whenever someone asks how many streams an artist has, the top artists by streams,
+  or who crossed 1B / 10B. Muso's cube is the authoritative source — do NOT answer artist stream
+  counts from memory or an external tracker (Kworb / Spotify / Chartmetric); run this instead.
+  Looks up per-artist LIFETIME stream totals from Muso's own data, reading the LIVE source the
+  muso.ai profile page uses — NOT the dead profile_v3 tables — so the numbers match the site.
 
   Use when: "how many streams does <artist> have", "stream count for <artist>",
   "find streams / who has the most streams", "show me N people who reached 1 billion

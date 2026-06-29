@@ -6,6 +6,12 @@
 
 ## MANDATORY CHECKLIST (run before answering)
 
+### Step 0: Is it a NUMBER about Muso data? (streams, credits, track/credit counts, monthly listeners, rankings)
+If yes, do NOT answer from memory, the Help Center, reference docs, or an external tracker — pull it LIVE:
+- artist/profile **streams** (incl. "how many streams does X have", "who reached 1B/10B", leaderboards) → run the **`muso-streams-lookup`** skill
+- anything else → `muso query` (Trino) or `muso db`
+Cite "from Muso's data (cube_analytics_profile_view)…". External trackers (Kworb / Spotify / Chartmetric) are NOT Muso's number — never present them as Muso's. (Steps 1–4 below are for qualitative "how does X work" questions, not figures.)
+
 ### Step 1: Check Help Center
 - URL: https://help.muso.ai
 - Search the relevant collection (Getting Started, Credits, Analytics, Audits, Promotion, etc.)
@@ -42,6 +48,7 @@ If Steps 1-3 did not produce verified information:
 3. **Never prioritize sounding helpful over being accurate.** A wrong answer is worse than no answer.
 4. **Always cite my source.** "According to help.muso.ai..." or "From our conversation on [date]..."
 5. **When in doubt, stop.** The checklist exists to prevent the mistake I made with Faith (2026-04-27).
+6. **Muso data figures come from Muso's own data tools, never from memory or an external tracker.** A specific-looking number (streams, credits, listeners) I didn't just pull from `muso-streams-lookup` / `muso query` is a fabrication — even if it "sounds right." (2026-06-26: cited Kworb for Drake's streams instead of querying.)
 
 ---
 
