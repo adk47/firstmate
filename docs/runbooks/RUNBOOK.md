@@ -528,6 +528,62 @@ fleet-wide via PR #376. NEVER copy/seed a per-agent codex `auth-profiles.json`.
 
 ---
 
+### Codex Token Lapse (`token_expired`) — pure OAuth expiry, re-auth only
+
+**Symptoms**: fleet on `openrouter/openai/gpt-5.4-mini`; logs show
+`authentication token is expired` (`auth error code: token_expired`) on the
+`chatgpt.com/backend-api/codex` route. Crucially **all three guards are CLEAN**
+(`ensure-codex-{auth,refresh-lock-shared,version-pinned}.sh --check` exit 0) and
+`refresh_token_reused`/`invalid_api_key` are 0 — this is NOT fan-out, NOT the
+refresh race, NOT #90925. It is the OAuth credential itself lapsing (single-use
+rotating refresh token; upstream openclaw#57399, wontfix), ~every 10 days.
+
+**Root cause of why it lapses AND why the old re-auth command is broken:** hydra
+keeps the bundled `openai` plugin DISABLED to dodge #90925 — but that plugin owns
+BOTH the refresh-on-use machinery AND the device-code login flow. So nothing
+auto-refreshes codex, and `openclaw models auth login --provider openai-codex
+--device-code` fails with **"No provider plugins found"** (the `codex` plugin
+serves the model but never owned the OAuth flow; `openai-codex` is a retired id;
+`--agent main` is invalid). There is no `openclaw models auth refresh` command.
+
+**Recovery (primary — browser-free, what actually works):** refresh the token
+ourselves via the out-of-band grant, then restart so the gateways load it:
+```bash
+ssh root@40.160.32.80
+/opt/hydra/scripts/lib/codex-oauth-refresh.sh        # backs up + POSTs grant_type=refresh_token
+                                                     # for both accounts; --dry-run to preview
+systemctl restart openclaw-gateway-main openclaw-gateway-edge
+# verify: a real codex turn returns gpt-5.5 (NOT a fallback):
+openclaw --profile main agent --agent ceo --message "Reply with one word: pong"
+```
+
+**Recovery (fallback — only if `codex-oauth-refresh.sh` reports `invalid_grant`,
+i.e. the refresh-token chain is dead):** device-code login, which needs the
+`openai` plugin transiently enabled (it owns the login). DANGER: enabling `openai`
+reroutes gpt-5.5 to the api-key endpoint (#90925), so it MUST be disabled before
+any gateway restart, and pause `openclaw-watchdog` first so it can't restart
+mid-window:
+```bash
+openclaw --profile main plugins enable openai
+openclaw --profile main models auth login --provider openai-codex --device-code  # both accounts; menu: models auth add
+openclaw --profile main plugins disable openai      # CRITICAL: before any restart
+systemctl restart openclaw-gateway-main openclaw-gateway-edge
+```
+
+**Prevention (the durable fix):** the twice-weekly `codex-token-refresh.timer`
+(Sun+Wed 04:00 UTC → `scripts/codex-token-refresh.sh` → `codex-oauth-refresh.sh` +
+gateway restart) keeps the ~10-day token always fresh (steady-state trough ~6.5d,
+surviving a single missed run) with one brief quiet-hour restart each.
+`scripts/codex-keepalive.sh` (cron every 15m) is the SAFETY NET — it reads expiry
+from `models status --json` and pages #clio_devops BEFORE the cliff
+(`:hourglass_flowing_sand: Codex OAuth token expiring`) if the scheduled refresh
+keeps failing. (The watchdog's `token_expired` page is REACTIVE, after the 401s.) NOTE:
+`models status --check` always exits 1 here — it flags the disabled `openai`
+provider as "missing"; it is NOT a codex-health signal. Both wired via
+`install-aux-units.sh`.
+
+---
+
 ### Codex Refresh-Token Race (`refresh_token_reused`) — cross-process
 
 **Symptoms**: the WHOLE codex fleet falls back to

@@ -144,6 +144,12 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/openclaw-config-write-audit.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/openclaw-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/openclaw-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/codex-keepalive.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/codex-keepalive.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/codex-token-refresh.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/codex-token-refresh.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/lib/codex-oauth-refresh.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/lib/codex-oauth-refresh.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/cron-health-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/cron-health-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh" ]] \
@@ -649,6 +655,23 @@ cat > /etc/cron.d/openclaw-watchdog << CRONWATCHDOG
 CRONWATCHDOG
 chmod 644 /etc/cron.d/openclaw-watchdog
 
+# ─── Codex OAuth keepalive at 15-min cadence ──────────────────
+# PROACTIVE complement to the watchdog: openclaw-watchdog.sh pages REACTIVELY
+# (journal 401 signature, after the fleet is already on the mini fallback);
+# codex-keepalive.sh reads the token's own expiry via `openclaw models status`
+# and pages BEFORE the cliff (it is the safety net for the twice-weekly
+# codex-token-refresh timer). 15 min is plenty — the lapse cadence is ~days, and
+# the periodic check is a cheap local `models status` read (no network). Sets an
+# explicit PATH (cron's default is /usr/bin:/bin) so `openclaw`/`jq`/`timeout`
+# resolve even if they live in /usr/local/bin — the keepalive fails Slack-silently
+# if they don't. Same ownership rule: edit here + re-run install-aux-units.sh.
+cat > /etc/cron.d/codex-keepalive << CODEXKEEPALIVE
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/15 * * * * root $HYDRA_ROOT/scripts/codex-keepalive.sh >> /var/log/codex-keepalive.log 2>&1
+CODEXKEEPALIVE
+chmod 644 /etc/cron.d/codex-keepalive
+
 # ─── Cron-failure watchdog at 5-min cadence ───────────────────
 # Alerts #clio_devops the moment any openclaw cron run errors, so a
 # broken job can't rot silently in cron/runs/*.jsonl (the 2026-06
@@ -963,6 +986,57 @@ systemctl start "$ctmr" >/dev/null 2>&1 || log "WARN: could not start $ctmr"
 cstate=$(systemctl is-active "$ctmr" 2>/dev/null || echo unknown)
 log "  $ctmr: $cstate (fires Mon 04:30 UTC)"
 
+# ─── Twice-weekly codex OAuth token refresh (Sun+Wed 04:00 UTC) ──
+# The DURABLE fix for the recurring ~10-day codex token lapse. hydra keeps the
+# bundled `openai` plugin DISABLED to dodge #90925, but that plugin owns the
+# refresh-on-use machinery — so nothing auto-refreshes codex and it lapses every
+# ~10 days (openclaw#57399, wontfix). This job refreshes the token out-of-band
+# (codex-oauth-refresh.sh) and restarts the gateways to load it (they only read
+# the token at startup). Token life is ~10d; TWICE weekly (Sun+Wed, ~every 3.5d)
+# keeps the steady-state trough at ~6.5d and survives a single missed run (a
+# weekly cadence would let one missed Sunday lapse the token by Wednesday).
+# codex-keepalive.sh (every 15m) is the safety net if refreshes keep failing.
+# Same ownership rule: edit here + re-run install.
+cat > /etc/systemd/system/codex-token-refresh.service << CODEXREFRESHSVC
+[Unit]
+Description=HYDRA codex OAuth token refresh (+ gateway reload)
+
+[Service]
+Type=oneshot
+# Generous start timeout: the script blocks on `systemctl restart` of both
+# gateways; gateway starts are quick, but don't let a slow one kill the oneshot.
+TimeoutStartSec=300
+ExecStart=$HYDRA_ROOT/scripts/codex-token-refresh.sh
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=append:/var/log/codex-token-refresh.log
+StandardError=append:/var/log/codex-token-refresh.log
+CODEXREFRESHSVC
+
+cat > /etc/systemd/system/codex-token-refresh.timer << CODEXREFRESHTMR
+[Unit]
+Description=Run the HYDRA codex OAuth token refresh twice weekly (Sun+Wed 04:00 UTC)
+
+[Timer]
+OnCalendar=Sun,Wed *-*-* 04:00:00 UTC
+# If the box was down at the scheduled time, fire on next boot rather than skip
+# and risk a lapse (same tradeoff as hydra-release.timer).
+Persistent=true
+RandomizedDelaySec=10min
+Unit=codex-token-refresh.service
+
+[Install]
+WantedBy=timers.target
+CODEXREFRESHTMR
+
+systemctl daemon-reload
+
+rtmr=codex-token-refresh.timer
+systemctl enable "$rtmr" >/dev/null 2>&1 || log "WARN: could not enable $rtmr"
+systemctl start "$rtmr" >/dev/null 2>&1 || log "WARN: could not start $rtmr"
+rstate=$(systemctl is-active "$rtmr" 2>/dev/null || echo unknown)
+log "  $rtmr: $rstate (fires Sun+Wed 04:00 UTC)"
+
 # ─── journald cap + hydra log rotation (one-time config) ──────
 # journald had NO retention config and had grown to 3.9G (audit
 # 2026-06-10). Cap the persistent journal at 2G; vacuum only when
@@ -984,7 +1058,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-token-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log {
     weekly
     rotate 4
     compress

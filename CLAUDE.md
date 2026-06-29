@@ -145,6 +145,30 @@ restart). The watchdog pages on the `invalid_api_key` signature (main+edge), on 
 lockstep only once #90925 ships fixed. See RUNBOOK §Troubleshooting → "Codex Plugin
 Floated Off Pin".
 
+**The token LAPSE is a FOURTH, distinct failure — and its root cause is our own #90925
+mitigation.** `authentication token is expired` (`auth error code: token_expired`, on the
+`chatgpt.com/backend-api/codex` route, all three guards CLEAN, `refresh_token_reused`
+/`invalid_api_key` = 0) is a pure OAuth credential lapse. We keep the bundled `openai` plugin
+DISABLED to dodge #90925, but that plugin owns BOTH the refresh-on-use machinery AND the
+device-code login — so nothing auto-refreshes codex (it lapses ~every 10 days; upstream
+openclaw#57399 wontfix) AND `openclaw models auth login --provider openai-codex --device-code`
+fails "No provider plugins found" (there is also NO `openclaw models auth refresh` command).
+**Recovery = `scripts/lib/codex-oauth-refresh.sh`** — we do the `grant_type=refresh_token` POST
+to `auth.openai.com/oauth/token` ourselves and write the rotated token into canonical, then
+restart (the gateway only loads the token at startup). **Prevention = the twice-weekly
+`codex-token-refresh.timer`** (Sun+Wed 04:00 UTC, refresh + restart) keeps it always fresh;
+`scripts/codex-keepalive.sh` (15m) is the safety-net pager. (`models status --check` always
+exits 1 here — it flags the disabled `openai` provider as "missing", NOT a codex signal.) See
+[[reference_codex_token_expired_third_signature]].
+
+**Deferred-upgrade tripwire (decided 2026-06-29).** We deliberately HOLD openclaw at
+2026.6.1 + codex 2026.5.27 rather than jumping to latest stable (2026.6.10), because the two
+things that would let us "drop the hacks and go lockstep" are BOTH still OPEN: #90925 (codex
+OAuth-route regression — can't un-pin codex) AND #90575 (no native cross-process
+shared-credential store — the 6.5 auth→SQLite migration kills the symlink fabric with nothing
+to replace it). Revisit the 6.10 jump only when BOTH close. The 6.5 auth→SQLite migration is
+ALSO one-way (cold SQLite state-archive required for rollback, not the JSON).
+
 ## Picking the right extension mechanism
 
 Before writing new code in this repo, walk this decision tree top-down and stop at
