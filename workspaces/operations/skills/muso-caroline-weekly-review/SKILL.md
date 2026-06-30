@@ -81,6 +81,30 @@ CAROLINE_EXPECTED_KIND=daily scripts/publish-digest.sh "${WORKDIR}/digest.json" 
 
 **A recovered hiccup must NOT abort the run (deliver what you have).** The grading inputs are precomputed by the Phase-1 scripts precisely so Phase 2/3 needs no fragile ad-hoc shell. If you nonetheless run any one-off command and it errors, recover and continue — never let a single non-zero sub-exit end the run with nothing delivered. OpenClaw marks the whole run failed on any trailing tool error and suppresses delivery (this is how the 2026-06-08 pulse was lost: `finalLen=0`, `delivered=false`). If a required input is genuinely unavailable after one retry, still build a digest that names the degraded source in `degraded[]` — the reviewer gets a marked-degraded pulse rather than silence.
 
+### Phase 3.5 — Persist the REDACTED digest (WEEKLY only, after a successful publish, BEFORE the scrub)
+
+The `caroline-autonomy-improver` skill (CTO agent) reads this digest the same
+morning to open a Caroline-improvement PR. Hand it off by persisting the
+**PII-scrubbed** digest. IMPORTANT: `${WORKDIR}/digest.json` is the RAW grader
+output — `publish-digest.sh` writes its redacted copy only to a temp file
+(`redact-json.sh` → `$tmp/digest.redacted.json`, deleted on exit) and never scrubs
+`digest.json` in place, while `validate-digest.sh` only checks structure/anti-
+hallucination (NOT PII). So persist the output of `redact-json.sh`, never a raw
+`cp` (the LLM can reintroduce PII into summaries; `redact-json.sh` is the scrub
+layer). Do this only on the weekly run, only after `publish-digest.sh` exited 0,
+and **before** the end-of-pipeline `rm -rf "$WORKDIR"`.
+
+```bash
+mkdir -p /opt/hydra/workspaces/operations/reports/caroline-weekly
+scripts/redact-json.sh "${WORKDIR}/digest.json" > "/opt/hydra/workspaces/operations/reports/caroline-weekly/digest-$(date -u +%G-W%V).json"
+```
+
+The persisted artifact is the scrubbed digest (bare conversation ids, prose-only
+fields, emails/phones/stripe-ids replaced) — safe to keep; `conversations*.jsonl`
+are NOT persisted. `workspaces/*/reports/` is rsync-excluded at deploy, so the file
+stays on the host across deploys and never trips the deploy deletion gate. The
+daily run does NOT persist anything.
+
 ## Environment
 
 - `MUSOAI_INTERCOM_TOKEN` — required.
