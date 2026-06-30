@@ -177,6 +177,9 @@ When a false positive is confirmed:
 
 **Critical constraint**: Sentinel drafts PRs but cannot merge. Aaron approves all changes to CS agent config.
 
+### Memory size discipline
+Keep `MEMORY.md` a compact INDEX (target **≤8 000 chars**) — it's injected every turn, and over the 40 000-char bootstrap cap OpenClaw silently deletes its middle. Log learning events tersely (one dated line + a pointer); put detail in `memory/YYYY-MM-DD.md` (agent-writable, `memory_search`-indexed, NOT injected), not in MEMORY.md.
+
 ## Coordinator Communication
 
 Sentinel is allowed read-only `sessions_send` to the coordinator (Clio) ONLY. This enables context checks before quarantine:

@@ -86,13 +86,17 @@ can't answer, say you couldn't verify — do NOT guess or fill the gap from memo
 
 ## Memory (CRITICAL)
 
-Memory is tiered. MEMORY.md is an INDEX — the actual durable knowledge lives in `reference/<topic>.md` files that you read on demand.
+Memory is tiered. **MEMORY.md is a compact INDEX, not a log.** Durable knowledge lives in `reference/<topic>.md` (read on demand, and searchable via `memory_search`); your day-to-day detail lives in dated `memory/` notes. Keeping MEMORY.md small is a hard requirement, not a nicety — see **Size discipline**.
 
 ### Architecture
 
-- **MEMORY.md** (always injected, agent-writable) = index + last ~30 days of durable facts you've logged. Start every task here.
-- **reference/\*.md** (NOT injected, read on demand, **humans-only writable**) = the full content — lessons-learned, Nick's rules, the B2B pipeline, metrics, data sources, win-back engine, hard lessons, key context (Drive IDs, Freepik rule, Snov.io gate), product naming. Deployed from the repo on every deploy, so anything you write here gets **silently overwritten**.
-- **memory/YYYY-MM-DD.md** (agent-writable) = optional daily working notes.
+- **MEMORY.md** (always injected, agent-writable) = a topic INDEX + only the last ~30 days of durable *decisions*. **Target ≤8 000 chars.** Start every task here. Every char is injected on every turn, so it taxes every task.
+- **reference/\*.md** (NOT injected; read on demand AND searchable via `memory_search`; **humans-only writable**) = the full content — lessons-learned, Nick's rules, the B2B pipeline, metrics, data sources, win-back engine, hard lessons, key context (Drive IDs, Freepik rule, Snov.io gate), product naming. Deployed from the repo on every deploy, so anything you write here gets **silently overwritten**.
+- **memory/YYYY-MM-DD.md** (agent-writable, indexed for `memory_search`, NOT injected) = your working layer. **All detail, raw context, and day-to-day notes go here — not in MEMORY.md.** It's fully searchable, so moving detail out of the index loses nothing.
+
+### Size discipline (why this matters)
+
+If MEMORY.md exceeds the 40 000-char bootstrap cap, OpenClaw **silently deletes its middle** (keeps only the first ~75% + last ~25%) — you lose durable facts with no error, so an overgrown MEMORY.md quietly *forgets*. Keep it lean: when the "Recent durable facts" block passes ~30 days or MEMORY.md nears ~8 000 chars, **move cold entries out** into a dated `memory/*.md` note (you may write there freely) and/or propose a `reference/<topic>.md` promotion via PR. Never let it just grow.
 
 ### Rules
 

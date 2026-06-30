@@ -99,16 +99,18 @@ All rsync and exclude logic lives in `deploy.sh`.
 
 ## Tiered Memory Layout (added 2026-04-24, hydra issue #165)
 
-OpenClaw silently truncates every bootstrap file at `agents.defaults.bootstrapMaxChars` (default 12 000) and the aggregate at `bootstrapTotalMaxChars` (default 60 000). We now set those to 40 000 / 120 000 in `openclaw-{main,edge,dev}.json`, but the file-cap still exists and will bite again as agents accumulate context. To keep bootstrap files small and scalable, structure each workspace as four tiers:
+OpenClaw silently truncates every bootstrap file at `agents.defaults.bootstrapMaxChars` (default 12 000) and the aggregate at `bootstrapTotalMaxChars` (default 60 000). We now set those to 40 000 / 120 000 in `openclaw-{main,edge,dev}.json`, but the file-cap still exists and will bite again as agents accumulate context. **Truncation at v2026.6.1 is a *middle-drop*** — OpenClaw keeps the first ~75% and last ~25% of the per-file budget and deletes the middle (inserting a `[...truncated...]` marker; see `bootstrap.ts`). So an over-cap file silently loses its *middle*, and putting critical rules only at the top **or** only at the bottom is not a fix — the only fix is keeping the file under cap. To keep bootstrap files small and scalable, structure each workspace as four tiers:
 
 | Tier | File / dir | Injected at bootstrap? | Writer | Purpose |
 |-----|------------|------------------------|--------|---------|
 | 0 | `SOUL.md` | ✅ always | Humans (PR) | Identity, rules, security boundaries. Target <8 000 chars; trim aggressively. |
-| 1 | `MEMORY.md` | ✅ always | Agent (runtime) | **Index** + last ~30 days of durable facts. Target ≤3 500 chars. One line per reference topic. |
+| 1 | `MEMORY.md` | ✅ always | Agent (runtime) | **Index** + last ~30 days of durable facts. Target ~3 500 chars (ideal, a pure pointer-index); **≤8 000 hard working target** enforced by the `muso-memory-compact` skill. One line per reference topic. |
 | 2 | `reference/*.md` | ❌ read on demand | Humans (PR) **only** | Curated topic knowledge (metrics, lessons, workflows, process rules). Deployed via rsync — **any agent-authored change here is silently overwritten on the next deploy**. Agents surface proposed promotions to humans via Slack. Filenames follow `kebab-case.md`. |
 | 3 | `memory/YYYY-MM-DD.md` | ❌ read on demand | Agent (runtime) | Optional daily working notes. Excluded from rsync. |
 
 > ⚠️ **`reference/*.md` is deploy-authoritative.** The deploy pipeline syncs from repo → `/opt/hydra/workspaces/*/reference/`, so it falls in the same "Repo-Authoritative" bucket as `SOUL.md`. If you want to add or update a reference file, open a PR. Agents must not write to this directory — any edits are silently reverted on the next deploy. (See the [File Ownership Matrix](#file-ownership-matrix) for the fuller picture.)
+
+> 🔎 **`reference/*.md` is now vector-indexed for `memory_search`.** Wiring `agents.defaults.memorySearch.extraPaths: ["reference"]` (main profile, plus the `support` agent override on edge) makes reference topics retrievable by semantic search — not just by the agent guessing the filename from the `MEMORY.md` index. `extraPaths` indexes the directory **without** bootstrapping it, so it never counts against the bootstrap cap; `memory/**` is auto-indexed and must NOT be listed. After any `extraPaths` change, force a reindex (`openclaw --profile <p> memory index --force --agent <id>`) and confirm `openclaw memory status` does not report the index `paused` (a gateway version bump pauses it until rebuilt).
 
 **How this scales**: `MEMORY.md` stops being a monolithic log and becomes a pointer-index whose size grows with *distinct topics*, not total memory volume. Topic files live under `reference/`, git-versioned and human-owned. When a topic's content in `MEMORY.md` crystallizes, the agent proposes a promotion to Nick (in Slack or a task), and a human opens the PR that moves the content into the matching `reference/<topic>.md` file.
 

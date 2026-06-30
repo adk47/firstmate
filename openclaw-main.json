@@ -222,6 +222,7 @@
             "id": "/OPENROUTER_API_KEY"
           }
         },
+        "extraPaths": ["reference"],
         "store": {
           "vector": {
             "enabled": true
