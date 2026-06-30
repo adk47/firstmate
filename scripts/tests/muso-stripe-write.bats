@@ -1,15 +1,39 @@
 #!/usr/bin/env bats
-# Tests for muso-stripe-write.sh — the codex-health gate on Stripe writes.
+# Tests for muso-stripe-write.sh — the codex-health gate on Stripe writes, plus the
+# refund one-time-policy override gate.
 
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   WRAPPER="$REPO_ROOT/scripts/muso-stripe-write.sh"
   BIN="$BATS_TEST_TMPDIR/bin"
   mkdir -p "$BIN"
-  # Record what `stripe` was called with, so we can assert pass-through.
+  # Smart `stripe` stub:
+  #  - `charges retrieve <ch>` → JSON with a customer (or empty when STUB_BROKEN=1)
+  #  - `charges list ...`      → list whose data has a refunded charge iff STUB_PRIOR_REFUNDS>0
+  #  - anything else (e.g. `refunds create`) → echo STRIPE_CALLED so we can assert pass-through
   cat >"$BIN/stripe" <<'SH'
 #!/usr/bin/env bash
-echo "STRIPE_CALLED $*"
+case "$1 $2" in
+  "charges retrieve")
+    if [ "${STUB_BROKEN:-0}" -gt 0 ]; then echo ""; else echo '{"customer":"cus_TEST"}'; fi
+    ;;
+  "charges list")
+    if [ "${STUB_PRIOR_REFUNDS:-0}" -gt 0 ]; then
+      echo '{"object":"list","data":[{"id":"ch_old","amount_refunded":875}]}'
+    elif [ "${STUB_FULL_PAGE:-0}" -gt 0 ]; then
+      # A full page (100) of charges, none refunded → the gate must treat this as
+      # "cannot rule out an older prior refund" and fail closed.
+      printf '{"object":"list","data":['
+      for i in $(seq 1 100); do [ "$i" -gt 1 ] && printf ','; printf '{"id":"ch_%d","amount_refunded":0}' "$i"; done
+      printf ']}\n'
+    else
+      echo '{"object":"list","data":[{"id":"ch_X","amount_refunded":0}]}'
+    fi
+    ;;
+  *)
+    echo "STRIPE_CALLED $*"
+    ;;
+esac
 SH
   chmod +x "$BIN/stripe"
   export STRIPE_BIN="$BIN/stripe"
@@ -28,8 +52,10 @@ SH
   export PATH="$BIN:$PATH"
 }
 
-@test "healthy journal -> executes the stripe write (pass-through)" {
-  fake_journalctl "Jun 09 10:00:00 node-8 openclaw[1]: message processed: outcome=ok" 0
+healthy() { fake_journalctl "Jun 09 10:00:00 node-8 openclaw[1]: message processed: outcome=ok" 0; }
+
+@test "healthy journal + first refund -> executes the stripe write (pass-through)" {
+  healthy
   run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
   [ "$status" -eq 0 ]
   [[ "$output" == *"STRIPE_CALLED refunds create -d charge=ch_X --confirm"* ]]
@@ -41,7 +67,7 @@ SH
   [ "$status" -eq 3 ]
   [[ "$output" == *"REFUSED"* ]]
   [[ "$output" == *"DEGRADED"* ]]
-  [[ "$output" != *"STRIPE_CALLED"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
 }
 
 @test "degraded journal (reason=auth_permanent) -> REFUSES" {
@@ -49,7 +75,7 @@ SH
   run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
   [ "$status" -eq 3 ]
   [[ "$output" == *"REFUSED"* ]]
-  [[ "$output" != *"STRIPE_CALLED"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
 }
 
 @test "degraded journal (auth token invalidated) -> REFUSES" {
@@ -64,26 +90,121 @@ SH
   run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
   [ "$status" -eq 3 ]
   [[ "$output" == *"unverifiable"* ]]
-  [[ "$output" != *"STRIPE_CALLED"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
 }
 
-@test "empty-but-readable window -> treated as healthy-quiet, executes" {
+@test "empty-but-readable window + first refund -> healthy-quiet, executes" {
   fake_journalctl "" 0
   run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
   [ "$status" -eq 0 ]
-  [[ "$output" == *"STRIPE_CALLED"* ]]
+  [[ "$output" == *"STRIPE_CALLED refunds create"* ]]
 }
 
 @test "no args -> usage error (exit 2), nothing executed" {
-  fake_journalctl "ok" 0
+  healthy
   run "$WRAPPER"
   [ "$status" -eq 2 ]
   [[ "$output" == *"usage:"* ]]
 }
 
 @test "missing codex-health lib -> refuse" {
-  fake_journalctl "ok" 0
+  healthy
   CODEX_HEALTH_LIB="/nonexistent/codex-health.sh" run "$WRAPPER" refunds create -d "charge=ch_X"
   [ "$status" -eq 3 ]
   [[ "$output" == *"codex-health lib"* ]]
+}
+
+# --- Refund one-time-policy override gate ------------------------------------
+
+@test "repeat refund WITHOUT override token -> REFUSED, stripe refunds create not called" {
+  healthy
+  STUB_PRIOR_REFUNDS=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"prior refund"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "repeat refund WITH valid allowlisted token -> executes, override flags stripped" {
+  healthy
+  STUB_PRIOR_REFUNDS=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm \
+    --override-confirmed-by U038BM16T7W --approval-msg-id 1777474838.796239
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STRIPE_CALLED refunds create -d charge=ch_X --confirm"* ]]
+  # The override flags must NOT be forwarded to stripe.
+  [[ "$output" != *"--override-confirmed-by"* ]]
+  [[ "$output" != *"--approval-msg-id"* ]]
+}
+
+@test "repeat refund WITH non-allowlisted approver -> REFUSED" {
+  healthy
+  STUB_PRIOR_REFUNDS=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm \
+    --override-confirmed-by U_RANDOM --approval-msg-id 1777474838.796239
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"not on the god-mode allowlist"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "repeat refund WITH token but missing approval-msg-id -> REFUSED" {
+  healthy
+  STUB_PRIOR_REFUNDS=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm \
+    --override-confirmed-by U038BM16T7W
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"prior refund"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "refund history unverifiable (Stripe read fails) -> FAIL-CLOSED refuse" {
+  healthy
+  STUB_BROKEN=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"couldn't verify refund history"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "non-refund stripe write is unaffected by the refund gate" {
+  healthy
+  run "$WRAPPER" customers retrieve cus_TEST
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STRIPE_CALLED customers retrieve cus_TEST"* ]]
+}
+
+# --- Hardening: value-less flag, non-canonical refund forms, page-fullness ---
+
+@test "value-less trailing --override-confirmed-by -> usage error (exit 2), not silent" {
+  healthy
+  run "$WRAPPER" refunds create -d "charge=ch_X" --confirm --override-confirmed-by
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"needs a value"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "raw API refund form (post /v1/refunds) on a repeat refund is still gated -> REFUSED" {
+  healthy
+  STUB_PRIOR_REFUNDS=1 run "$WRAPPER" post /v1/refunds -d "charge=ch_X"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"prior refund"* ]]
+  [[ "$output" != *"STRIPE_CALLED post"* ]]
+}
+
+@test "global flag before subcommand (--color off refunds create) repeat is still gated -> REFUSED" {
+  healthy
+  STUB_PRIOR_REFUNDS=1 run "$WRAPPER" --color off refunds create -d "charge=ch_X" --confirm
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"prior refund"* ]]
+}
+
+@test "full charge page with no visible refund -> FAIL-CLOSED (cannot rule out prior), REFUSED" {
+  healthy
+  STUB_FULL_PAGE=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"prior refund"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "full charge page WITH valid allowlisted override token -> executes" {
+  healthy
+  STUB_FULL_PAGE=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm \
+    --override-confirmed-by U0AL36NADEY --approval-msg-id 1777474838.796239
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STRIPE_CALLED refunds create -d charge=ch_X --confirm"* ]]
 }

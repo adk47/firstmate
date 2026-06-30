@@ -575,6 +575,16 @@ jobs:
           bash scripts/check-soul-bootstrap-size.sh
           echo "::endgroup::"
 
+      - name: Refund-denial honesty doctrine check — @Ops must not invent an Aaron-override
+        # The operations agent once fabricated "holding for Aaron approval" when
+        # pushed to refund a customer with prior refunds. The doctrine now scripts a
+        # no-override pushback response and a verifiable definition of "escalated".
+        # Prose != enforcement, so this gate fails if those anchors are removed.
+        run: |
+          echo "::group::Refund-denial honesty doctrine check"
+          bash scripts/check-refund-doctrine.sh
+          echo "::endgroup::"
+
       - name: Egress allowlist check — no unauthorized additions
         run: |
           echo "::group::Checking egress allowlist changes"
