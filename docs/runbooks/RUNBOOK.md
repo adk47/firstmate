@@ -703,6 +703,43 @@ runtime lockstep) only once #90925 ships fixed in a core release we run.
 
 ---
 
+### Agent Can't See a Recently-Shipped Skill (stale skill catalog)
+
+**Symptom:** an agent ignores a skill it was told to use, or "can't find" a skill that IS
+deployed — e.g. CMO won't invoke `muso-streams-lookup`, or the ship-kit
+(`ship`/`babysit`/`reflect`) isn't invocable. The skill is present in
+`/root/.openclaw-<profile>/skills/` and `openclaw --profile <profile> skills list` shows it
+"ready", yet it's absent from the agent's injected `<available_skills>`.
+
+**Cause:** the gateway daemon resolves the model-invocable managed-skills tier with the
+profile-**blind** `resolveStateDir(process.env)`. If `OPENCLAW_STATE_DIR` is unset in the
+daemon's env, it falls back to the legacy `/root/.openclaw/skills` (frozen ~2026-05-26,
+pre-#336) and injects that stale catalog into EVERY agent. The `skills list` CLI masks it
+because the CLI gets `--profile`; the long-running daemon does not. (Root-caused 2026-06-29.)
+
+**Diagnose:**
+```bash
+# Is the pin in the daemon's actual process env? (env-file vars show here; OPENCLAW_PROFILE does NOT)
+pid=$(systemctl show -p MainPID --value openclaw-gateway-main)
+tr '\0' '\n' < /proc/$pid/environ | grep OPENCLAW_STATE_DIR   # expect /root/.openclaw-main
+# Compare a FRESH session's catalog count vs the live skills dir
+ls /root/.openclaw-main/skills | wc -l                        # live count
+```
+
+**Fix:** pin per-profile (NOT `shared.env`), then restart:
+```bash
+grep -q '^OPENCLAW_STATE_DIR=' /etc/openclaw/main.env || echo 'OPENCLAW_STATE_DIR=/root/.openclaw-main' >> /etc/openclaw/main.env
+grep -q '^OPENCLAW_STATE_DIR=' /etc/openclaw/edge.env || echo 'OPENCLAW_STATE_DIR=/root/.openclaw-edge' >> /etc/openclaw/edge.env
+systemctl restart openclaw-gateway-main   # wait healthy, then:
+systemctl restart openclaw-gateway-edge
+```
+A fresh agent session then loads the live catalog. **Never `rm /root/.openclaw`** (a missing
+`~/.openclaw` makes `resolveStateDir` fall to an empty dir → agents lose ALL managed skills).
+`scripts/deploy.sh` now fails loud if the pin is missing and re-asserts it post-restart via
+`/proc`. See CLAUDE.md "Each gateway MUST pin `OPENCLAW_STATE_DIR`".
+
+---
+
 ### Node 8 Unreachable
 
 **Symptoms**: Cannot SSH to 40.160.32.80, agents are all offline.

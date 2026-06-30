@@ -2145,6 +2145,43 @@ if needs_target "edge"; then
   fi
 fi
 
+# Guard: each gateway MUST pin OPENCLAW_STATE_DIR to its OWN profile state dir.
+# The openclaw daemon resolves the model-invocable "managed" skills tier via a
+# profile-BLIND resolveStateDir(process.env): with the var unset it defaults to
+# the legacy /root/.openclaw and injects that frozen skill catalog into EVERY
+# agent — so every skill added since #336 silently vanishes from agents' invokable
+# set (the `openclaw --profile X skills list` CLI hides it, because the CLI —
+# unlike the long-running daemon — actually gets --profile). Root-caused
+# 2026-06-29: CMO could not invoke muso-streams-lookup / the ship-kit because its
+# catalog was the stale May-26 set. FAIL-LOUD (unlike the manual-cred blocks
+# above) — the value is deterministic and non-secret and a missing one breaks the
+# whole fleet's skills; file-absent => warn only (fresh-host bootstrap).
+#
+# Per-profile env ONLY — never shared.env, which BOTH gateways load (a value there
+# would force them onto a single state dir).
+if grep -qE '^OPENCLAW_STATE_DIR=' /etc/openclaw/shared.env 2>/dev/null; then
+  fail "OPENCLAW_STATE_DIR is set in /etc/openclaw/shared.env — both gateways load it, forcing them onto one state dir. Remove it there and pin per-profile: main.env=/root/.openclaw-main, edge.env=/root/.openclaw-edge."
+fi
+check_statedir_pin() {
+  local profile="$1"
+  local envf="/etc/openclaw/${profile}.env"
+  local want="OPENCLAW_STATE_DIR=/root/.openclaw-${profile}"
+  if [ ! -f "$envf" ]; then
+    log "WARN: $envf does not exist — cannot verify OPENCLAW_STATE_DIR (fresh host?)."
+    return 0
+  fi
+  if ! grep -Fxq "$want" "$envf"; then
+    log "✗ $envf does not pin '$want'."
+    log "  Without it the $profile gateway injects the STALE /root/.openclaw/skills catalog"
+    log "  into every agent — recently-added skills and the ship-kit go missing."
+    log "  fix:  echo '$want' >> $envf  &&  systemctl restart openclaw-gateway-$profile"
+    fail "OPENCLAW_STATE_DIR not pinned in $envf (expected $want) — refusing to ship a stale-skill-catalog gateway."
+  fi
+  log "  ✓ $envf pins $want"
+}
+if needs_target "main"; then check_statedir_pin main; fi
+if needs_target "edge"; then check_statedir_pin edge; fi
+
 # muso CLI host config (main profile only; soak phase). Files are RENDERED
 # on every deploy from the OPERATIONS WORKSPACE muso-ops-admin config — the
 # same files muso-admin-api.sh resolves at runtime (TIER2_APPROVERS_PATH=
@@ -2525,6 +2562,21 @@ restart_gateway() {
     sleep 2
     if systemctl is-active --quiet "$service" 2>/dev/null; then
       log "  $service restarted successfully (${i}x2s)."
+      # Verify the daemon actually picked up its profile state dir. env-file vars
+      # appear in /proc/<pid>/environ (unlike the runtime-set OPENCLAW_PROFILE), so
+      # this gates the exact regression that hid for a month: a gateway whose
+      # profile-blind resolveStateDir() falls back to the stale /root/.openclaw
+      # skills catalog. Profile (main/edge) is the last dash-segment of the unit.
+      local profile="${service##*-}"
+      local want="OPENCLAW_STATE_DIR=/root/.openclaw-${profile}"
+      local vcmd="pid=\$(systemctl show -p MainPID --value $service); tr '\\0' '\\n' < /proc/\$pid/environ | grep -Fxq '$want'"
+      local failmsg="$service is active but its process env lacks '$want' — its daemon would inject the STALE /root/.openclaw/skills catalog into EVERY agent. Pin it in /etc/openclaw/${profile}.env (NOT shared.env) and restart."
+      if $HYDRA_LOCAL; then
+        bash -c "$vcmd" || fail "$failmsg"
+      else
+        ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" "$vcmd" || fail "$failmsg"
+      fi
+      log "  ✓ $service process env pins $want"
       return 0
     fi
   done

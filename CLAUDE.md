@@ -169,6 +169,40 @@ shared-credential store — the 6.5 auth→SQLite migration kills the symlink fa
 to replace it). Revisit the 6.10 jump only when BOTH close. The 6.5 auth→SQLite migration is
 ALSO one-way (cold SQLite state-archive required for rollback, not the JSON).
 
+## Each gateway MUST pin `OPENCLAW_STATE_DIR` to its own profile
+
+Every gateway's systemd env file pins its profile state dir — `/etc/openclaw/main.env`
+carries `OPENCLAW_STATE_DIR=/root/.openclaw-main`, `edge.env` carries
+`=/root/.openclaw-edge`. **Never put it in `shared.env`** (both gateways load shared →
+one value would force them onto the same state dir). Without the pin, the daemon's
+model-invocable **managed-skills** tier silently goes stale, fleet-wide.
+
+Why (root-caused 2026-06-29): openclaw has TWO state-dir resolvers. `resolveGatewayStateDir`
+is profile-aware (config/agents/cron/sessions → `-main`), but the **managed-skills** tier
+(plus the OAuth dir and the codex refresh-lock) uses the profile-**blind**
+`resolveStateDir(process.env)` — which checks `OPENCLAW_STATE_DIR`, else falls back to the
+existing legacy `/root/.openclaw`. `--profile main` sets `OPENCLAW_PROFILE` only at *runtime*
+(a JS setenv), so it never reaches the daemon's `process.env` for the skill loader. Result:
+with the var unset, the daemon injects the **frozen `/root/.openclaw/skills` catalog**
+(last written pre-#336, ~2026-05-26) into **every** agent — so any skill added since then
+(`muso-streams-lookup`, `billion-streams-club`, the entire **ship-kit**, `muso-cli`,
+`muso-read`, `muso-deep-research`, …) is **absent from agents' invokable catalog**, even
+though it's deployed to `-main/skills` and shows "ready" in `openclaw --profile main skills
+list` (the CLI gets `--profile`; the long-running daemon does not — that mismatch hid the
+bug for a month, and is why the `muso-streams-lookup` skill (#592) + CMO anti-confab doctrine
+(#597) changed nothing: CMO never had the skill to invoke).
+
+- **Detect / enforce:** `scripts/deploy.sh` fails loud if a per-profile env file is missing
+  the pin (or if `shared.env` has it), and after each restart asserts the running daemon's
+  `/proc/<pid>/environ` actually carries it (env-file vars show in `/proc/<pid>/environ`;
+  the runtime-set `OPENCLAW_PROFILE` does NOT — so `/proc` is the reliable post-restart gate).
+- **DO NOT** `rm /root/.openclaw` — a nonexistent `~/.openclaw` makes `resolveStateDir` fall
+  to an empty dir = the pre-#336 outage (agents lose ALL managed skills). The legacy dir is
+  runtime-dead but must keep existing; the pin (not deletion) is the fix.
+- This is a hydra workaround for an upstream openclaw defect (daemon managed-skill loader /
+  refresh-lock use the profile-blind resolver under `--profile`). Re-verify on every openclaw
+  bump. The repo already used this lever for cron (`deploy.sh` cron-store import).
+
 ## Picking the right extension mechanism
 
 Before writing new code in this repo, walk this decision tree top-down and stop at
