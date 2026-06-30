@@ -1001,6 +1001,25 @@ cmd_call() {
     local path="${2:?Usage: call <METHOD> <path> [json-body]}"
     local body="${3:-}"
 
+    # Misplaced-flag guard (incident 2026-06-30). Global flags (--requester /
+    # --confirmed-by / --approval-msg-id / --profile-audit-id) MUST precede the
+    # `call` subcommand. If one is left AFTER the path it lands here as the
+    # positional JSON body; the API then 400s on a body-parse failure that
+    # core-backend masks behind a generic "Unavailable service" message — which
+    # reads as a phantom service outage (a one-char typo cost hours of false
+    # alarm). A real JSON body never starts with "--", so this is unambiguous.
+    # Fail loud instead of POSTing a malformed body. (See dispatcher-arg-validation.)
+    case "$body" in
+        --*)
+            cat >&2 <<EOF
+muso-admin-api: refusing — request body looks like a misplaced flag: '${body}'
+  Global flags go BEFORE the command. Did you mean:
+    bash $0 ${body} <value> call ${method} ${path}
+EOF
+            return 2
+            ;;
+    esac
+
     # Codex model-health gate (incident 2026-06-08). Refuse WRITES while the fleet is
     # silently degraded onto a weak fallback model the agent can't perceive; READS pass
     # through. Runs first so a degraded model is stopped before any other gate logic.
