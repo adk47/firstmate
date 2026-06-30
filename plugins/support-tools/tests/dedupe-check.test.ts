@@ -256,6 +256,143 @@ describe("buildVerdict — PII safety + weak labels", () => {
     expect(v.duplicates[0].shared_external_id).toBe("none");
   });
 
+  it("names the matched external-id PLATFORMS but NEVER leaks the raw id or ipi number", () => {
+    const v = buildVerdict({
+      trustedAuthorEmail: "owner@example.com",
+      requesterEmail: "owner@example.com",
+      survivor: survivorOwnedBy("owner@example.com", { rawProfiles: [{ source: "tidal", id: "xyz789" }], ipis: [443322] }),
+      survivorCreditTitles: [],
+      duplicates: [
+        {
+          profileId: "d1",
+          body: { isClaimed: false, workspaces: [], creditCount: 4, rawProfiles: [{ source: "tidal", id: "xyz789" }], ipis: [443322] },
+          creditTitles: [],
+        },
+      ],
+    });
+    // platforms surfaced, sorted; raw id + ipi value never present
+    expect(v.duplicates[0].matched_external_id_sources).toEqual(["ipi", "tidal"]);
+    expect(v.duplicates[0].shared_external_id).toBe("weak");
+    const json = JSON.stringify(v);
+    expect(json).not.toContain("xyz789"); // raw streaming id never emitted
+    expect(json).not.toContain("443322"); // raw ipi number never emitted
+  });
+
+  it("no external-id overlap → empty sources + none", () => {
+    const v = buildVerdict({
+      trustedAuthorEmail: "owner@example.com",
+      requesterEmail: "owner@example.com",
+      survivor: survivorOwnedBy("owner@example.com", { rawProfiles: [{ source: "tidal", id: "aaa" }] }),
+      survivorCreditTitles: [],
+      duplicates: [
+        { profileId: "d1", body: { isClaimed: false, workspaces: [], creditCount: 1, rawProfiles: [{ source: "tidal", id: "bbb" }], ipis: [] }, creditTitles: [] },
+      ],
+    });
+    expect(v.duplicates[0].matched_external_id_sources).toEqual([]);
+    expect(v.duplicates[0].shared_external_id).toBe("none");
+  });
+
+  it("a source-less rawProfile that overlaps normalizes to 'unknown' (still no raw id)", () => {
+    const v = buildVerdict({
+      trustedAuthorEmail: "owner@example.com",
+      requesterEmail: "owner@example.com",
+      survivor: survivorOwnedBy("owner@example.com", { rawProfiles: [{ id: "shared-id" }] }),
+      survivorCreditTitles: [],
+      duplicates: [
+        { profileId: "d1", body: { isClaimed: false, workspaces: [], creditCount: 1, rawProfiles: [{ id: "shared-id" }], ipis: [] }, creditTitles: [] },
+      ],
+    });
+    expect(v.duplicates[0].matched_external_id_sources).toEqual(["unknown"]);
+    expect(JSON.stringify(v)).not.toContain("shared-id");
+  });
+
+  it("shared_track_ratio = shared / min(compared); full overlap of the smaller catalog → 1", () => {
+    const v = buildVerdict({
+      trustedAuthorEmail: "owner@example.com",
+      requesterEmail: "owner@example.com",
+      survivor: survivorOwnedBy("owner@example.com"),
+      survivorCreditTitles: ["Song A", "Song B", "Song C"],
+      duplicates: [
+        { profileId: "d1", body: { isClaimed: false, workspaces: [], creditCount: 2, rawProfiles: [], ipis: [] }, creditTitles: ["song a", "song c"] },
+      ],
+    });
+    expect(v.duplicates[0].shared_track_count).toBe(2);
+    expect(v.duplicates[0].compared_track_count).toBe(2);
+    expect(v.duplicates[0].shared_track_ratio).toBe(1);
+  });
+
+  it("shared_track_ratio rounds to 2dp (6 of 8 compared → 0.75)", () => {
+    const v = buildVerdict({
+      trustedAuthorEmail: "owner@example.com",
+      requesterEmail: "owner@example.com",
+      survivor: survivorOwnedBy("owner@example.com"),
+      survivorCreditTitles: ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"],
+      duplicates: [
+        { profileId: "d1", body: { isClaimed: false, workspaces: [], creditCount: 8, rawProfiles: [], ipis: [] }, creditTitles: ["t1", "t2", "t3", "t4", "t5", "t6", "x7", "x8"] },
+      ],
+    });
+    expect(v.duplicates[0].shared_track_count).toBe(6);
+    expect(v.duplicates[0].compared_track_count).toBe(8);
+    expect(v.duplicates[0].shared_track_ratio).toBe(0.75);
+  });
+
+  it("strong corroboration is never a merge license: high ratio does NOT mask a claimed_different_user conflict or add a merge-approved stamp", () => {
+    const v = buildVerdict({
+      trustedAuthorEmail: "owner@example.com",
+      requesterEmail: "owner@example.com",
+      survivor: survivorOwnedBy("owner@example.com", { rawProfiles: [{ source: "spotify", id: "same" }] }),
+      survivorCreditTitles: ["s1", "s2", "s3"],
+      duplicates: [
+        {
+          profileId: "d1",
+          body: { isClaimed: true, workspaces: [{ email: "other@example.com", isClaimed: true }], creditCount: 3, rawProfiles: [{ source: "spotify", id: "same" }], ipis: [] },
+          creditTitles: ["s1", "s2", "s3"],
+        },
+      ],
+    });
+    // Perfect corroboration (shared spotify id + ratio 1.0) must NOT soften the
+    // theft signal: the claim conflict is preserved for routing row 4, and the
+    // verdict never carries a "safe to merge" stamp (verified == owner-recheck
+    // passed, NOT safe-to-merge — design §5.1).
+    expect(v.duplicates[0].claim_state).toBe("claimed_different_user");
+    expect(v.duplicates[0].shared_track_ratio).toBe(1);
+    expect(JSON.stringify(v)).not.toMatch(/merge.?approved|safe.?to.?merge|high.?confidence/i);
+  });
+
+  it("unresolved duplicate carries the new fields uniformly (empty/zero)", () => {
+    const v = buildVerdict({
+      trustedAuthorEmail: "owner@example.com",
+      requesterEmail: "owner@example.com",
+      survivor: survivorOwnedBy("owner@example.com"),
+      survivorCreditTitles: [],
+      duplicates: [{ profileId: "d1", body: null, creditTitles: [] }],
+    });
+    expect(v.duplicates[0].matched_external_id_sources).toEqual([]);
+    expect(v.duplicates[0].compared_track_count).toBe(0);
+    expect(v.duplicates[0].shared_track_ratio).toBe(0);
+  });
+
+  it("verified_at: omitted by the pure builder unless provided; passed through verbatim and carries no PII", () => {
+    const without = buildVerdict({
+      trustedAuthorEmail: "owner@example.com",
+      requesterEmail: "owner@example.com",
+      survivor: survivorOwnedBy("owner@example.com"),
+      survivorCreditTitles: [],
+      duplicates: [],
+    });
+    expect("verified_at" in without).toBe(false); // deterministic for unit tests
+    const withTs = buildVerdict({
+      trustedAuthorEmail: "owner@example.com",
+      requesterEmail: "owner@example.com",
+      survivor: survivorOwnedBy("owner@example.com"),
+      survivorCreditTitles: [],
+      duplicates: [],
+      verified_at: "2026-06-27T10:00:00.000Z",
+    });
+    expect(withTs.verified_at).toBe("2026-06-27T10:00:00.000Z");
+    expect(JSON.stringify(withTs)).not.toContain("@"); // timestamp is not an email
+  });
+
   it("strips injection markers from notes", () => {
     const v = buildVerdict({
       trustedAuthorEmail: "owner@example.com",
@@ -351,6 +488,28 @@ describe("dedupe_check tool — fail-closed orchestration", () => {
     expect(out.verified).toBe(true);
     expect(out.duplicates[0].claim_state).toBe("unclaimed");
     expect(JSON.stringify(out)).not.toMatch(/merge.?approved|safe.?to.?merge|high.?confidence/i);
+  });
+
+  it("end-to-end: new granularity (matched platforms + ratio) and verified_at survive execute(), raw id stays out", async () => {
+    const adminClient = makeAdminClient({
+      get: vi.fn(async (path: string) => {
+        if (path.includes("/profile/d/credits")) return { ok: true, status: 200, data: { data: { items: [{ title: "Shared One" }, { title: "Shared Two" }] } } } as AdminClientResult<unknown>;
+        if (path.includes("/credits")) return { ok: true, status: 200, data: { data: { items: [{ title: "Shared One" }, { title: "Shared Two" }, { title: "Survivor Only" }] } } } as AdminClientResult<unknown>;
+        if (path.endsWith("/profile/d")) {
+          return { ok: true, status: 200, data: { data: { isClaimed: false, workspaces: [], creditCount: 2, rawProfiles: [{ source: "spotify", id: "RAWID999" }], ipis: [] } } } as AdminClientResult<unknown>;
+        }
+        return { ok: true, status: 200, data: { data: { isClaimed: true, workspaces: [{ email: "owner@example.com", isClaimed: true }], creditCount: 3, rawProfiles: [{ source: "spotify", id: "RAWID999" }], ipis: [] } } } as AdminClientResult<unknown>;
+      }) as MusoAdminClient["get"],
+    });
+    const tool = createDedupeCheckTool(makeDeps({ adminClient }));
+    const out = await run(tool, { survivorProfileId: "s", duplicateProfileIds: ["d"], requesterEmail: "owner@example.com" });
+    expect(out.duplicates[0].matched_external_id_sources).toEqual(["spotify"]);
+    expect(out.duplicates[0].shared_track_count).toBe(2);
+    expect(out.duplicates[0].compared_track_count).toBe(2);
+    expect(out.duplicates[0].shared_track_ratio).toBe(1);
+    expect(typeof out.verified_at).toBe("string");
+    expect(Number.isNaN(Date.parse(out.verified_at))).toBe(false); // parseable ISO
+    expect(JSON.stringify(out)).not.toContain("RAWID999"); // raw id never leaves the tool
   });
 
   it("surfaces a duplicate whose admin GET fails as unresolved (never silently dropped) and blocks verified", async () => {

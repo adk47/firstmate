@@ -76,6 +76,9 @@ export interface BuildVerdictInput {
   // surfaced as an "unresolved" entry, NEVER dropped.
   duplicates: Array<{ profileId: string; body: ProfileBody | null; creditTitles?: string[] }>;
   notes?: string[];
+  // Optional provenance stamp; passed straight through. Omitted in pure unit
+  // tests (→ undefined → dropped by JSON.stringify), set by the tool at runtime.
+  verified_at?: string;
 }
 
 export interface DuplicateVerdict {
@@ -83,7 +86,18 @@ export interface DuplicateVerdict {
   claim_state: "unclaimed" | "claimed_same_owner" | "claimed_different_user" | "unresolved";
   credit_count: number;
   shared_external_id: "none" | "weak";
+  // The distinct PLATFORMS whose external id overlapped survivor↔duplicate
+  // (e.g. ["ipi","tidal"]), sorted. PLATFORM NAMES ONLY — the raw id after the
+  // colon is never emitted (PII/leak rule). [] when there is no overlap.
+  matched_external_id_sources: string[];
   shared_track_count: number;
+  // Honest denominator for the ratio: how many titles we actually compared
+  // (titles are capped/degrade to [], so dividing by full creditCount would lie).
+  compared_track_count: number;
+  // shared_track_count / compared_track_count, 0..1, 2dp; 0 when nothing compared.
+  // Lets a ticket read "5/6 shared" instead of a bare count. Corroboration only —
+  // shared tracks can be a collaboration, never on its own same-person proof.
+  shared_track_ratio: number;
 }
 
 export interface Verdict {
@@ -100,6 +114,11 @@ export interface Verdict {
   cluster_size_check: "not_performed";
   duplicates: DuplicateVerdict[];
   notes: string[];
+  // ISO timestamp of when these facts were gathered (stamped by the tool, not
+  // by buildVerdict — so the pure builder stays deterministic and omits it in
+  // unit tests). Anchors the ops "facts true as of …" freshness caveat; the
+  // mandatory pre-merge GET re-confirms claim-state at execution time.
+  verified_at?: string;
 }
 
 function lc(s: string | null | undefined): string {
@@ -168,7 +187,10 @@ export function buildVerdict(input: BuildVerdictInput): Verdict {
         claim_state: "unresolved" as const,
         credit_count: 0,
         shared_external_id: "none" as const,
+        matched_external_id_sources: [],
         shared_track_count: 0,
+        compared_track_count: 0,
+        shared_track_ratio: 0,
       };
     }
     const dupClaimed = claimedWorkspaces(d.body);
@@ -182,24 +204,36 @@ export function buildVerdict(input: BuildVerdictInput): Verdict {
     }
 
     const dupKeys = externalKeys(d.body);
-    let shared_external_id: DuplicateVerdict["shared_external_id"] = "none";
+    const matchedSources = new Set<string>();
     for (const k of dupKeys) {
       if (survKeys.has(k)) {
-        shared_external_id = "weak"; // shared external IDs are the Maui false-positive source — never "strong"
-        break;
+        // Keep only the PLATFORM prefix (substring before the first ":"); the
+        // raw id after it is never collected, so it can never reach the ticket.
+        const src = k.slice(0, k.indexOf(":")) || "unknown";
+        matchedSources.add(src);
       }
     }
+    const matched_external_id_sources = [...matchedSources].sort();
+    // Still NEVER "strong" — shared external IDs are the Maui/Empire false-positive source.
+    const shared_external_id: DuplicateVerdict["shared_external_id"] =
+      matched_external_id_sources.length > 0 ? "weak" : "none";
 
     const dupTitles = titleSet(d.creditTitles);
     let shared_track_count = 0;
     for (const t of dupTitles) if (survTitles.has(t)) shared_track_count++;
+    const compared_track_count = Math.min(survTitles.size, dupTitles.size);
+    const shared_track_ratio =
+      compared_track_count > 0 ? Math.round((shared_track_count / compared_track_count) * 100) / 100 : 0;
 
     return {
       profile_id: d.profileId,
       claim_state,
       credit_count: Number(d.body.creditCount ?? 0),
       shared_external_id,
+      matched_external_id_sources,
       shared_track_count,
+      compared_track_count,
+      shared_track_ratio,
     };
   });
 
@@ -220,6 +254,7 @@ export function buildVerdict(input: BuildVerdictInput): Verdict {
     cluster_size_check: "not_performed",
     duplicates,
     notes: (input.notes ?? []).map(sanitizeNote).filter(Boolean),
+    ...(input.verified_at ? { verified_at: input.verified_at } : {}),
   };
 }
 
@@ -281,7 +316,7 @@ export function createDedupeCheckTool(deps: DedupeCheckDeps): AgentTool<typeof P
     name: "dedupe_check",
     label: "Verify a customer profile-merge request (read-only)",
     description:
-      "Read-only verifier for a customer's duplicate-profile merge request. Anchors ownership to the Intercom contact's real email (anti-spoof), inspects the survivor + duplicate profiles, and returns a PII-safe structured verdict (owns_survivor, per-duplicate claim_state, weak/none shared-id signal, shared track count, impersonation/owner_undetermined flags). " +
+      "Read-only verifier for a customer's duplicate-profile merge request. Anchors ownership to the Intercom contact's real email (anti-spoof), inspects the survivor + duplicate profiles, and returns a PII-safe structured verdict (owns_survivor, per-duplicate claim_state, weak/none shared-id signal with the matched external-id PLATFORMS, shared track count + ratio, impersonation/owner_undetermined flags). " +
       "It NEVER merges and NEVER writes — after calling it, file a profile-merge ticket via create_ticket for Operations to execute. " +
       "Fails closed (owner_undetermined) when ownership cannot be verified. Rate limit: 10 calls / 60 min per session.",
     parameters: Parameters,
@@ -345,6 +380,7 @@ export function createDedupeCheckTool(deps: DedupeCheckDeps): AgentTool<typeof P
           survivor: survivorBody,
           survivorCreditTitles,
           duplicates,
+          verified_at: new Date().toISOString(),
         });
         return textResult(JSON.stringify(verdict));
       } catch {
