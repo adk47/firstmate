@@ -95,6 +95,11 @@ DEFAULT_SLACK_CHANNEL = "C0BBTAVP44X"
 DEFAULT_MENTION_IDS = "U7RP6HKUZ"  # Aaron
 DEFAULT_WORKSPACE_ID = "dwjzhcge"
 DEFAULT_LEDGER = "/var/lib/intercom-data-complaint-watchdog/systemic-clusters-seen.json"
+# Append-only feed of clusters we PAGED, consumed by scripts/resolution-matcher.py
+# to close the loop: it backtests each member's cited entity against action_log and,
+# when a fix landed, tells the customer + closes the conversation/ticket. We only
+# DETECT here; persisting the paged clusters is what lets resolution run later.
+DEFAULT_RESOLUTION_FEED = "/var/lib/resolution-matcher/cluster-feed.jsonl"
 
 # Opening-message text handed to the AI is capped — enough to classify the
 # complaint without ballooning the gather payload.
@@ -256,6 +261,35 @@ def save_ledger(path, ledger):
 def prune_ledger(ledger, now, cooldown_seconds):
     horizon = now - 2 * cooldown_seconds
     return {k: v for k, v in ledger.items() if isinstance(v, (int, float)) and v >= horizon}
+
+
+def append_resolution_feed(path, clusters, paged_at):
+    """Append the just-paged clusters to the resolution feed (one JSON line per
+    cluster) so resolution-matcher.py can later close the loop. Best-effort: a
+    feed write must NEVER fail the report (the page already went out). Each line
+    carries only what the matcher needs — issue identity + per-member conv_id,
+    email, cites, age_hours — never the full transcript."""
+    try:
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(path, "a") as f:
+            for c in clusters:
+                f.write(json.dumps({
+                    "paged_at": int(paged_at),
+                    "issue_slug": c["issue_slug"],
+                    "title": c.get("title", c["issue_slug"]),
+                    "symptom": c.get("symptom", ""),
+                    "members": [{
+                        "conv_id": u["conv_id"],
+                        "email": u.get("email", ""),
+                        "cites": u.get("cites", []),
+                        "age_hours": u.get("age_hours"),
+                    } for u in c["users"]],
+                }) + "\n")
+            f.flush()  # shrink the torn-line window for the matcher's reader
+    except OSError as e:
+        print(f"WARN: could not append resolution feed {path}: {e}", file=sys.stderr)
 
 
 # ── Slack ────────────────────────────────────────────────────────────────────
@@ -720,6 +754,9 @@ def run_report(args):
         save_ledger(ledger_path, ledger)
     except OSError as e:
         print(f"WARN: could not write ledger {ledger_path}: {e}", file=sys.stderr)
+    # Persist the paged clusters for resolution-matcher.py to close the loop later.
+    append_resolution_feed(
+        os.environ.get("RESOLUTION_FEED_PATH", DEFAULT_RESOLUTION_FEED), to_page, at_ts)
     print(f"systemic-data-issue report: paged {len(to_page)} cluster(s) to {channel}")
     return 0
 

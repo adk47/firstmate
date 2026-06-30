@@ -1058,6 +1058,18 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_data_complaint_watchdog
+      - name: Run resolution-matcher tests
+        # scripts/resolution-matcher.py runs UNATTENDED daily (--apply) and both
+        # MESSAGES customers and CLOSES their conversations/tickets on the strength
+        # of an action_log "your fix shipped" backtest. These lock the guards that
+        # make autonomous customer-facing closure safe: the cite-specific +
+        # after-report backtest, SQL-injection-safe query building, cold-start
+        # silent seed, wiped-state circuit breaker, per-conversation dedup,
+        # wrong-customer/closed/human-handled suppression, and query-error
+        # fail-closed. Same bare stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_resolution_matcher
 
   plugin-tests:
     name: Plugin tests (vitest)

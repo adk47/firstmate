@@ -168,6 +168,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/overdue-verification-notifier.py missing"
 [[ -f "$HYDRA_ROOT/scripts/resolve-notify.py" ]] \
   || fail "$HYDRA_ROOT/scripts/resolve-notify.py missing"
+[[ -f "$HYDRA_ROOT/scripts/resolution-matcher.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/resolution-matcher.py missing"
 [[ -f "$HYDRA_ROOT/scripts/caroline-behavior-digest.py" ]] \
   || fail "$HYDRA_ROOT/scripts/caroline-behavior-digest.py missing"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
@@ -422,6 +424,63 @@ rn=resolve-notify.timer
 systemctl enable "$rn" >/dev/null 2>&1 || log "WARN: could not enable $rn"
 systemctl start "$rn" >/dev/null 2>&1 || log "WARN: could not start $rn"
 log "  $rn: $(systemctl is-active "$rn" 2>/dev/null || echo unknown)"
+
+# ─── Resolution matcher (daily 12:00 UTC) ─────────────────────
+# The RESOLUTION counterpart to the systemic-data-issue REPORT: that report pages
+# Aaron daily with the symptom ("N users hit the same data problem") but nothing
+# then watches for the fix or tells those users it landed. This closes that loop.
+# It reads the clusters the report paged (the append-only feed
+# intercom-data-complaint-watchdog.py writes on --report), and for each member
+# BACKTESTS their cited entity against action_log: did an admin DATA-FIX route
+# touch that exact id AFTER they reported? If so it tells the customer (Caroline
+# voice, soft "please verify" note), closes the conversation, flips any linked
+# ClickUp ticket, and rolls up to Aaron what his fixes closed (route + who
+# shipped it + when). Generalizes close-merged-tickets.sh from the single merge
+# route to the set of data-fix routes. SENDING IS LIVE (`--apply` below) per
+# Aaron's "go live immediately"; the SAME safety rails as the notifiers keep that
+# safe: COLD START — the first --apply fire seeds every open member and sends 0
+# (a one-run anti-blast seed; the seed write IS --apply-gated, so a manual dry-run
+# previews to stdout but writes no state and never seeds), then a wiped-state
+# circuit breaker (<=MAX else abort+page), per-conversation dedupe, a fresh
+# pre-send conversation re-check (email cross-match + closed/snoozed/human-
+# assignee/human-reply/social-tag suppression), a per-run cap, and a reversible
+# shadow log. Runs at 12:00 UTC, after the 06:00 Europe/Rome report has refreshed
+# the feed. MUSO_BIN is absolute because systemd's unit PATH does not reliably
+# include /usr/local/bin (the backtest queries action_log over Trino via the muso
+# CLI). See scripts/resolution-matcher.py.
+install -d -m 755 /var/lib/resolution-matcher
+cat > /etc/systemd/system/resolution-matcher.service << RESMATCHSVC
+[Unit]
+Description=Match shipped fixes to systemic-issue tickets, notify customers, close
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=MUSO_BIN=/usr/local/bin/muso
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/resolution-matcher.py --apply
+RESMATCHSVC
+
+cat > /etc/systemd/system/resolution-matcher.timer << RESMATCHTMR
+[Unit]
+Description=Daily — close the loop on systemic data issues once their fix ships
+
+[Timer]
+OnCalendar=*-*-* 12:00:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=resolution-matcher.service
+
+[Install]
+WantedBy=timers.target
+RESMATCHTMR
+
+systemctl daemon-reload
+rm_t=resolution-matcher.timer
+systemctl enable "$rm_t" >/dev/null 2>&1 || log "WARN: could not enable $rm_t"
+systemctl start "$rm_t" >/dev/null 2>&1 || log "WARN: could not start $rm_t"
+log "  $rm_t: $(systemctl is-active "$rm_t" 2>/dev/null || echo unknown)"
 
 # ─── Caroline autonomous-behavior digest (daily 16:00 UTC) ────
 # Read-only daily digest of Caroline's autonomous self-serve activity so we can

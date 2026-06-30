@@ -513,5 +513,131 @@ class ResolveSlackToken(unittest.TestCase):
         self.assertEqual(wd.resolve_slack_token(), "xoxb-custom")
 
 
+class ResolutionFeed(unittest.TestCase):
+    """The append-only feed that hands paged clusters to resolution-matcher.py.
+    This is the only durable record of WHO reported a systemic issue; if --report
+    stops appending it, the resolution loop silently starves and no fix ever
+    gets matched back to a customer. Lock both the writer and that --report calls
+    it on the page path (never in --check / cooldown / below-threshold)."""
+    import os as _os
+
+    def test_append_writes_member_fields(self):
+        import json
+        import tempfile
+        path = tempfile.mktemp(suffix=".jsonl")
+        self.addCleanup(lambda: self._os.path.exists(path) and self._os.remove(path))
+        clusters = [{
+            "issue_slug": "credits-misattribution", "title": "Credits",
+            "symptom": "wrong name", "noun": "credits",
+            "users": [
+                {"who": "a", "conv_id": "111", "email": "a@b.com",
+                 "cites": ["https://credits.muso.ai/track/78d7dcd3-3b1c-4aaa-bbbb-0123456789ab"],
+                 "age_hours": 5},
+                {"who": "anon", "conv_id": "222", "email": "", "cites": [], "age_hours": 2},
+            ]}]
+        wd.append_resolution_feed(path, clusters, 1700000000)
+        with open(path) as f:
+            rows = [json.loads(ln) for ln in f if ln.strip()]
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r["paged_at"], 1700000000)
+        self.assertEqual(r["issue_slug"], "credits-misattribution")
+        self.assertEqual([m["conv_id"] for m in r["members"]], ["111", "222"])
+        self.assertEqual(r["members"][0]["cites"][0].rsplit("/", 1)[-1],
+                         "78d7dcd3-3b1c-4aaa-bbbb-0123456789ab")
+        # email + age_hours are load-bearing downstream (email gates the matcher's
+        # anon-drop + wrong-customer cross-check; age_hours drives the after-report
+        # floor). Lock their round-trip, incl. the anon member's empty email.
+        self.assertEqual(r["members"][0]["email"], "a@b.com")
+        self.assertEqual(r["members"][0]["age_hours"], 5)
+        self.assertEqual(r["members"][1]["email"], "")
+        self.assertEqual(r["members"][1]["age_hours"], 2)
+
+    def test_report_appends_feed_only_on_page(self):
+        import json
+        import tempfile
+        feed = tempfile.mktemp(suffix=".jsonl")
+        led = tempfile.mktemp(suffix=".json")
+        self.addCleanup(lambda: self._os.path.exists(feed) and self._os.remove(feed))
+        self.addCleanup(lambda: self._os.path.exists(led) and self._os.remove(led))
+        saved_feed = self._os.environ.get("RESOLUTION_FEED_PATH")
+        saved_led = self._os.environ.get("LEDGER_PATH")
+        self._os.environ["RESOLUTION_FEED_PATH"] = feed
+        self._os.environ["LEDGER_PATH"] = led
+
+        def restore():
+            for k, v in (("RESOLUTION_FEED_PATH", saved_feed), ("LEDGER_PATH", saved_led)):
+                if v is None:
+                    self._os.environ.pop(k, None)
+                else:
+                    self._os.environ[k] = v
+        self.addCleanup(restore)
+
+        # Stub the network: a token + a no-op post so run_report takes the real
+        # (non --check) page path that appends the feed.
+        orig_tok, orig_post = wd.resolve_slack_token, wd.slack_post
+        wd.resolve_slack_token = lambda: "xoxb-test"
+        wd.slack_post = lambda *a, **k: True
+        self.addCleanup(lambda: setattr(wd, "resolve_slack_token", orig_tok))
+        self.addCleanup(lambda: setattr(wd, "slack_post", orig_post))
+
+        fd, cpath = tempfile.mkstemp(suffix=".json")
+        with self._os.fdopen(fd, "w") as f:
+            json.dump({"clusters": [cluster(slug="iss-page")]}, f)
+        self.addCleanup(lambda: self._os.path.exists(cpath) and self._os.remove(cpath))
+
+        import types
+        args = types.SimpleNamespace(report=True, gather=False, clusters=cpath,
+                                     check=False, threshold=2, cooldown_hours=24,
+                                     window_hours=24.0, grace_minutes=2, max=300, at=None)
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            rc = wd.run_report(args)
+        self.assertEqual(rc, 0)
+        with open(feed) as f:
+            rows = [json.loads(ln) for ln in f if ln.strip()]
+        self.assertEqual([r["issue_slug"] for r in rows], ["iss-page"])
+
+    def test_check_run_does_not_append_feed(self):
+        # The negative half of the contract: a --check run renders but must NOT
+        # append the feed (else the matcher would later auto-message/close a
+        # customer whose issue was only previewed, never actually paged to Aaron).
+        import json
+        import tempfile
+        feed = tempfile.mktemp(suffix=".jsonl")
+        led = tempfile.mktemp(suffix=".json")
+        self.addCleanup(lambda: self._os.path.exists(feed) and self._os.remove(feed))
+        self.addCleanup(lambda: self._os.path.exists(led) and self._os.remove(led))
+        saved_feed = self._os.environ.get("RESOLUTION_FEED_PATH")
+        saved_led = self._os.environ.get("LEDGER_PATH")
+        self._os.environ["RESOLUTION_FEED_PATH"] = feed
+        self._os.environ["LEDGER_PATH"] = led
+
+        def restore():
+            for k, v in (("RESOLUTION_FEED_PATH", saved_feed), ("LEDGER_PATH", saved_led)):
+                if v is None:
+                    self._os.environ.pop(k, None)
+                else:
+                    self._os.environ[k] = v
+        self.addCleanup(restore)
+
+        fd, cpath = tempfile.mkstemp(suffix=".json")
+        with self._os.fdopen(fd, "w") as f:
+            json.dump({"clusters": [cluster(slug="iss-check")]}, f)
+        self.addCleanup(lambda: self._os.path.exists(cpath) and self._os.remove(cpath))
+
+        import types
+        args = types.SimpleNamespace(report=True, gather=False, clusters=cpath,
+                                     check=True, threshold=2, cooldown_hours=24,
+                                     window_hours=24.0, grace_minutes=2, max=300, at=None)
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            rc = wd.run_report(args)
+        self.assertEqual(rc, 0)
+        self.assertFalse(self._os.path.exists(feed))  # --check must not write the feed
+
+
 if __name__ == "__main__":
     unittest.main()
