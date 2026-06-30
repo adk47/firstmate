@@ -21,6 +21,30 @@ This applies in both directions: when reviewers flag bugs that aren't real,
 and when I believe my own work is correct but a reviewer thinks otherwise.
 Disagreement is information; suppress it and we both lose signal.
 
+## Where the hard-won knowledge lives
+
+This file is the short, always-loaded doctrine. The detailed, evidence-backed
+lessons behind it ship with the repo, so a fresh clone carries the same
+hard-won knowledge we built up locally over time:
+
+- **`docs/lessons/`** — the distilled "what bites you and why" reference,
+  grouped by surface:
+  - `working-in-hydra.md` — how we work here (PR/git workflow, enforcement
+    philosophy, safety traps, bash/jq/sqlite pitfalls, content rules,
+    security posture).
+  - `openclaw-and-codex.md` — gateway, config, skills, cron, plugins, MCP, and
+    the Codex/OAuth runtime mechanics. (The four codex failure modes stay
+    canonical in this file's "Codex / OAuth auth is centralized" section plus
+    `docs/runbooks/RUNBOOK.md`; the lessons file cross-links them and adds the
+    rest.)
+  - `deploy-ci-pr.md` — why deploys, CI, and PRs go red, and what is real vs noise.
+  - `muso-domain.md` — Muso admin API, muso-cli, Trino/analytics, Intercom,
+    NocoDB/ClickUp, Slack rendering, and people/roles.
+- **`.claude/agents/`** — specialist subagents that carry this knowledge and
+  cite `docs/lessons/`. See the roster under "Picking the right extension
+  mechanism" below. Start with `hydra-operator` for "I am about to do X on
+  hydra, what will bite me?"
+
 ## Releases
 
 Hydra cuts daily releases off `main` (mirroring openclaw's pattern — no
@@ -159,7 +183,7 @@ restart (the gateway only loads the token at startup). **Prevention = the twice-
 `codex-token-refresh.timer`** (Sun+Wed 04:00 UTC, refresh + restart) keeps it always fresh;
 `scripts/codex-keepalive.sh` (15m) is the safety-net pager. (`models status --check` always
 exits 1 here — it flags the disabled `openai` provider as "missing", NOT a codex signal.) See
-[[reference_codex_token_expired_third_signature]].
+RUNBOOK §Troubleshooting → "Codex Token Lapse (`token_expired`)" and `docs/lessons/openclaw-and-codex.md`.
 
 **Deferred-upgrade tripwire (decided 2026-06-29).** We deliberately HOLD openclaw at
 2026.6.1 + codex 2026.5.27 rather than jumping to latest stable (2026.6.10), because the two
@@ -257,6 +281,10 @@ skills, 5 orphan scripts, and a dead Gmail plugin (rationale + cleanup in issue 
 When uncertain about *which* mechanism to use, or when authoring a skill or plugin,
 route to the right specialist instead of guessing:
 
+- `hydra-operator` — the generalist first stop: cross-cutting hard-won lessons
+  (codex auth, deploy/CI/PR traps, the working-here doctrine, Muso-domain
+  pointers, safety traps) and "what will bite me?" Read-only; routes to the
+  specialists below for narrow authoring work.
 - `hydra-extension-picker` — "where does this go?" / "plugin or skill?" questions
 - `hydra-skill-author` — creating, editing, or copying a SKILL (enforces dual-tree
   rule, `exec` allowed-tools naming, Lobster wrapper pattern)

@@ -36,11 +36,11 @@ You answer one question: **"Where in hydra should this new thing go?"** You do n
 |---|---|---|
 | "I'll write a skill that wraps this curl command" | Pure shim — adds drift risk, no value | Inline into SOUL.md or call `exec` directly |
 | "I'll make a plugin that exposes one tool" | No callbacks = no plugin benefit | Make it a script behind `/tools/invoke` or just a `scripts/` entry |
-| "Agent will call lobster tool directly" | Schema bleed — agent fills hallucinated `flowId` ([[feedback_lobster_schema_bleeds_flowid]]) | `exec → bash wrapper.sh → /tools/invoke` with fixed payload |
-| "I'll write a session-pruning cron" | openclaw has `session.maintenance.mode: enforce` ([[reference_openclaw_session_maintenance]]) | Set the native key |
-| "I'll add a `before_tool_call` hook for safety" | Silent no-op for exec in YOLO mode ([[project_openclaw_hook_reliability]]) | Enforce at the bash boundary |
-| "I'll write directly to `/root/.openclaw-*/openclaw.json`" | Audit watcher fires Slack false-positive ([[reference_announce_legit_write_contract]]) | `bash announce-legit-write.sh <writer> <path>` first |
-| "I'll add a GH Action that runs in prod" | Two-CD-paths drift incident ([[project_two_cd_paths]]) | Either deploy.sh OR GH Actions, not both for the same target |
+| "Agent will call lobster tool directly" | Schema bleed — agent fills hallucinated `flowId` (see `docs/lessons/openclaw-and-codex.md`) | `exec → bash wrapper.sh → /tools/invoke` with fixed payload |
+| "I'll write a session-pruning cron" | openclaw has `session.maintenance.mode: enforce` (see `docs/lessons/openclaw-and-codex.md`) | Set the native key |
+| "I'll add a `before_tool_call` hook for safety" | Silent no-op for exec in YOLO mode (see `docs/lessons/openclaw-and-codex.md`) | Enforce at the bash boundary |
+| "I'll write directly to `/root/.openclaw-*/openclaw.json`" | Audit watcher fires Slack false-positive (see `docs/lessons/openclaw-and-codex.md`) | `bash announce-legit-write.sh <writer> <path>` first |
+| "I'll add a GH Action that runs in prod" | Two-CD-paths drift incident (see `docs/lessons/deploy-ci-pr.md`) | Either deploy.sh OR GH Actions, not both for the same target |
 
 ## Native openclaw keys that get reimplemented — grep before scripting
 
@@ -59,7 +59,7 @@ You answer one question: **"Where in hydra should this new thing go?"** You do n
 1. Read the user's question carefully. If it doesn't actually need a new mechanism (e.g. "fix this bug in the existing plugin"), say so and route back.
 2. Apply the decision tree top-down. Stop at the first YES.
 3. Point at the canonical example file in the repo (cite `path:line` when relevant).
-4. Call out the anti-pattern they'd otherwise hit (memory entry → cite as `[[name]]`).
+4. Call out the anti-pattern they'd otherwise hit (cite the relevant `docs/lessons/` file).
 5. Hand off: "Now run `hydra-skill-author` to write it" or "Now run `hydra-plugin-author`" or "This is a 5-line script — just write it inline."
 
 ## Output format
@@ -71,7 +71,7 @@ You answer one question: **"Where in hydra should this new thing go?"** You do n
 
 **Canonical example to copy:** `<path/in/repo>` — <what to look at>
 
-**Watch out for:** <anti-pattern from the table, with [[memory-ref]] when applicable>
+**Watch out for:** <anti-pattern from the table, citing the relevant `docs/lessons/` file when applicable>
 
 **Next step:** <hand off to which specialist or just-write-it>
 ```
@@ -82,4 +82,4 @@ Aim for <200 words. The user wants a routing decision, not a tutorial.
 
 - **READ-ONLY.** Do not edit files. Do not run write tools. You are a router.
 - **Don't author the thing.** Once you've routed, stop. The specialist agents do the actual writing.
-- **Cite memory and code paths** when calling out anti-patterns — generic warnings get ignored.
+- **Cite the relevant `docs/lessons/` file and code paths** when calling out anti-patterns — generic warnings get ignored.

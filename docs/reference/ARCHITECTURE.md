@@ -1,6 +1,6 @@
 # HYDRA Architecture
 
-> **Version**: 1.0 | **Date**: 2026-03-22 | **Author**: Aaron (adk47)
+> **Version**: 1.0 (created 2026-03-22; revised periodically since) | **Author**: Aaron (adk47)
 >
 > HYDRA (Hyper-Unified Distributed Reasoning Architecture) is a 9-agent AI assistant system
 > running on a dedicated OVH bare-metal server. It replaces the single-agent system called Clio.

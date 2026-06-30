@@ -1,6 +1,6 @@
 # HYDRA Operational Runbook
 
-> **Version**: 1.0 | **Date**: 2026-03-22
+> **Version**: 1.0 (created 2026-03-22; revised periodically since)
 >
 > Step-by-step procedures for operating, troubleshooting, and recovering the HYDRA system.
 > Intended audience: Aaron and anyone with SSH access to Node 8.

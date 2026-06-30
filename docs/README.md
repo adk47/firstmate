@@ -4,10 +4,28 @@ Documentation for **HYDRA** — the OpenClaw agent fleet on OVH node-8 (see the
 [root README](../README.md) for the project overview, and [`CLAUDE.md`](../CLAUDE.md)
 for the operating doctrine that agents follow).
 
-Docs are grouped by purpose. Operational truth lives in **Runbooks**; durable
-how-to in **Guides**; system shape in **Reference**; point-in-time records in
-**Designs**, **Superpowers**, and **Archive**. A `⚠` marks a doc whose *content*
-is known to be partly stale (kept for history; not yet refreshed).
+Docs are grouped by purpose. Distilled hard-won knowledge lives in **Lessons**;
+operational truth in **Runbooks**; durable how-to in **Guides**; system shape in
+**Reference**; point-in-time records in **Designs**, **Superpowers**, and **Archive**.
+The specialist Claude Code subagents that carry this knowledge are listed under
+**Subagents**. A `⚠` marks a doc whose *content* is known to be partly stale (kept
+for history; not yet refreshed).
+
+## Lessons — distilled gotchas & hard-won knowledge
+Curated from operating the fleet; these ship with the repo so a fresh clone carries the
+same lessons. Start at the cluster index: [lessons/README.md](lessons/README.md).
+- [working-in-hydra.md](lessons/working-in-hydra.md) — how we work here (PR/git, enforcement philosophy, safety, bash/jq/SQLite traps, content rules, security)
+- [openclaw-and-codex.md](lessons/openclaw-and-codex.md) — gateway/config/skills/cron/plugins/MCP and the Codex/OAuth runtime
+- [deploy-ci-pr.md](lessons/deploy-ci-pr.md) — why deploys/CI/PRs go red, and what is real vs noise
+- [muso-domain.md](lessons/muso-domain.md) — admin API, muso-cli, Trino, Intercom, NocoDB/ClickUp, Slack, Caroline, people
+
+## Subagents — specialist Claude Code agents (`.claude/agents/`)
+Routed personas that carry the knowledge above and cite it. Read each file for full scope.
+- `hydra-operator` — generalist first stop: cross-cutting "what will bite me?" (read-only; routes to the rest)
+- `openclaw-expert` — deep OpenClaw infrastructure (gateway config, plugins, cron, /tools/invoke, model fallback)
+- `hydra-extension-picker` — "where should this go?" (plugin / skill / cron / script)
+- `hydra-skill-author` — creating, editing, or auditing a SKILL
+- `hydra-plugin-author` — creating or editing an in-tree plugin under `plugins/`
 
 ## Guides — durable how-to
 - [ONBOARDING.md](guides/ONBOARDING.md) ⚠ — getting started as an agent owner / admin / developer (v1.0, Mar 2026)
@@ -41,6 +59,7 @@ Dated snapshots of a feature's design at the time it was built (not kept current
 - [2026-06-04 — Caroline daily review](designs/2026-06-04-caroline-daily-review-design.md)
 - [2026-06-11 — Caroline Block Kit weekly](designs/2026-06-11-caroline-blockkit-weekly-design.md)
 - [2026-06-16 — muso CLI unification migration plan](designs/2026-06-16-muso-cli-unification-migration-plan.md)
+- [2026-06-22 — order tax-id Mexico customs (core-backend spec; hydra/Caroline side shipped)](2026-06-22-order-tax-id-mexico-customs-backend-spec.md)
 
 ## Superpowers — plan/spec pairs from the superpowers workflow
 Each feature has a **spec** (the contract) and a **plan** (the build steps). Referenced by CI and scripts — do not relocate.

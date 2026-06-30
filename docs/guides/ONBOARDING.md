@@ -1,6 +1,6 @@
 # HYDRA Onboarding Guide
 
-> **Version**: 1.0 | **Date**: 2026-03-22
+> **Version**: 1.0 (created 2026-03-22; revised periodically since)
 >
 > This guide covers everything you need to know to work with HYDRA, whether you are an
 > agent owner, an administrator, or a developer contributing to the platform.

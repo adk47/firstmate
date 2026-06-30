@@ -48,7 +48,7 @@ That shadowing is exactly why #336 had to delete 125 workspace dirs that were ei
 
 ### Rule 2: `exec` not `Bash` in allowed-tools
 
-In openclaw 2026.5.5+, the shell tool is named `exec`, not `Bash`. See [[reference_openclaw_exec_tool_name]].
+In openclaw 2026.5.5+, the shell tool is named `exec`, not `Bash`. See `docs/lessons/openclaw-and-codex.md`.
 
 **Wrong:**
 ```markdown
@@ -68,7 +68,7 @@ When in doubt, grep `skills-all/` for recently-edited skills (post-2026-05-15) a
 
 ### Rule 3: Lobster — wrap in bash, never call direct
 
-If the skill needs to invoke a Lobster pipeline, the agent must NOT call the `lobster` tool directly. The gateway schema advertises `flowId` and `flowExpectedRevision` (for `resume`) which schema-driven agents unprompted-ly fill in for `run`, breaking the pipeline. See [[feedback_lobster_schema_bleeds_flowid]].
+If the skill needs to invoke a Lobster pipeline, the agent must NOT call the `lobster` tool directly. The gateway schema advertises `flowId` and `flowExpectedRevision` (for `resume`) which schema-driven agents unprompted-ly fill in for `run`, breaking the pipeline. See `docs/lessons/openclaw-and-codex.md`.
 
 **Wrong (in SKILL.md):**
 ```markdown
@@ -85,7 +85,7 @@ The wrapper script curls `/tools/invoke` with a fixed payload like:
 {"tool":"lobster","action":"run","args":{"pipeline":"...","argsJson":"...","timeoutMs":300000}}
 ```
 
-Reference live-validated wrapper pattern: 2026-05-15 Phase 0; see [[reference_lobster_on_openclaw]] for the canonical payload shape.
+Reference live-validated wrapper pattern: 2026-05-15 Phase 0; see `docs/lessons/openclaw-and-codex.md` for the canonical payload shape.
 
 ### Rule 4: Template fidelity
 
@@ -117,7 +117,7 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 
 `$OPENCLAW_STATE_DIR` is injected by the gateway into the exec child env and points at the running agent's profile state dir — `/root/.openclaw-main` for main, `/root/.openclaw-edge` for Caroline, `/root/.openclaw-<new>` for any future gateway. `deploy.sh` Step 4c lands managed skills at `$OPENCLAW_STATE_DIR/skills/<name>/` for each profile, so this one string is correct everywhere. This is openclaw's own idiom — its first-party `gh-issues` and `session-logs` skills use `${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/...`.
 
-Background: the doubled `skills/skills/` was the pre-#339 layout (#339 switched to single per-profile dirs, leaving legacy `/root/.openclaw/skills/` frozen); a hardcoded `-main` works today only because main is always populated, but it's a cross-profile smell. `scripts/check-skill-drift.sh` Pass 3 fails CI on any SKILL.md/doctrine `.openclaw…/skills/` reference that doesn't use `OPENCLAW_STATE_DIR`. See [[reference_openclaw_managed_skills_path]].
+Background: the doubled `skills/skills/` was the pre-#339 layout (#339 switched to single per-profile dirs, leaving legacy `/root/.openclaw/skills/` frozen); a hardcoded `-main` works today only because main is always populated, but it's a cross-profile smell. `scripts/check-skill-drift.sh` Pass 3 fails CI on any SKILL.md/doctrine `.openclaw…/skills/` reference that doesn't use `OPENCLAW_STATE_DIR`. See `docs/lessons/openclaw-and-codex.md`.
 ### Rule 6: Keep descriptions tight
 
 A skill's `description` is **always loaded** into every bound agent's context — it's how the agent decides when to invoke the skill — and it competes for a limited per-agent skills/prompt budget. Overlong descriptions waste that budget and can get flattened or truncated, blunting the trigger.
@@ -182,14 +182,14 @@ Run through these BEFORE you start editing:
 - [ ] Is this actually a skill, or should it be `exec`, a script, or a plugin? (If unsure, hand off to `hydra-extension-picker`.)
 - [ ] Find all existing copies: `find . -type d -name "<skill>" -not -path '*/node_modules/*'`
 - [ ] Pick the canonical template (thin-wrapper / pipeline / reference)
-- [ ] Check `MEMORY.md` for any relevant `[[reference_*]]` or `[[feedback_*]]` entries about this skill's domain
+- [ ] Check `docs/lessons/` (especially `openclaw-and-codex.md` and `working-in-hydra.md`) for relevant lessons about this skill's domain
 
 ## After-edit checklist
 
 - [ ] All workspace copies updated (verify with `git status`)
 - [ ] `allowed-tools` uses `exec`, not `Bash`
 - [ ] If the skill invokes Lobster: goes via `exec → bash wrapper`, not agent → lobster direct
-- [ ] If the skill writes to `/root/.openclaw-*/openclaw.json`: instructs the agent to call `announce-legit-write.sh` first ([[reference_announce_legit_write_contract]])
+- [ ] If the skill writes to `/root/.openclaw-*/openclaw.json`: instructs the agent to call `announce-legit-write.sh` first (see `docs/lessons/openclaw-and-codex.md`)
 - [ ] Bundled-script invocations use `${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/<name>/scripts/...`, never a hardcoded profile (`-main`) or the doubled `skills/skills/`
 - [ ] If `scripts/check-skill-drift.sh` exists, it passes
 - [ ] `description` is one tight line with trigger nouns preserved (Rule 6)
@@ -214,4 +214,4 @@ When done, summarize in <100 words: which copies were edited, what changed, and 
 
 - **Never silently update one copy.** If you can't find all copies, ask the user before proceeding.
 - **Don't add to the drift allowlist.** Fix drift; don't paper over it.
-- **Cite memory** when applying a non-obvious rule — generic guidance gets ignored.
+- **Cite the relevant `docs/lessons/` file** when applying a non-obvious rule — generic guidance gets ignored.

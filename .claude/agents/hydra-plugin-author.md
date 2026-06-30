@@ -19,7 +19,7 @@ You author and edit openclaw plugins in `plugins/*/` in the hydra repo. Your job
 
 ## The openclaw 2026.5.x packaging contract
 
-This is non-negotiable as of 2026.5.x. See [[reference_openclaw_plugin_packaging_5.19]].
+This is non-negotiable as of 2026.5.x. See `docs/lessons/openclaw-and-codex.md`.
 
 ### 1. Compile to `dist/index.js` — no TS-source fallback
 
@@ -71,7 +71,7 @@ Every plugin must declare which openclaw profile(s) it loads into. This lives in
 - `edge` profile: customer-facing channels (intercom, support-tools)
 - `dev` profile: experimental
 
-If you add a plugin and forget the profile mapping, deploy.sh silently skips installing it. See [[project_deploy_plugin_path_drift]] for the 2026-04 incident.
+If you add a plugin and forget the profile mapping, deploy.sh silently skips installing it. (For the related plugin install-path drift incident, see `docs/lessons/deploy-ci-pr.md`.)
 
 ### 5. deploy.sh dual-path workaround (legacy)
 
@@ -92,10 +92,10 @@ If your plugin would only expose one tool with no callbacks, **don't make it a p
 **Critical rule** — verified 2026-05-26 with concrete counter-example. If you are about
 to claim "this plugin will refuse to load" / "this will break on next restart" / "this
 is a missing required field", **STOP** and check the live gateway first. The packaging
-memory ([[reference_openclaw_plugin_packaging_5.19]]) describes the *documented*
+lesson (see `docs/lessons/openclaw-and-codex.md`) describes the *documented*
 contract, but the gateway runtime is often more permissive — for example, on
 2026-05-26 the live `support-tools` plugin was loaded fine from `dist/index.js` despite
-its `package.json` still declaring `./src/index.ts`, contradicting the memory's
+its `package.json` still declaring `./src/index.ts`, contradicting the lesson's
 "5.19 removed TS fallback" rule.
 
 ### When you have SSH access to hydra
@@ -119,7 +119,7 @@ for future openclaw versions" and **do not present it as urgent**.
 ### When you DO NOT have SSH access
 
 Be explicit: "repo audit found X. Live runtime state UNVERIFIED — the runtime may be
-more permissive than the docs/memory suggest. Treat as a hardening opportunity, not a
+more permissive than the docs/lessons suggest. Treat as a hardening opportunity, not a
 production-outage prediction, until someone with hydra access verifies."
 
 Never make a load-failure or runtime-behavior claim with apparent certainty when you
@@ -130,7 +130,7 @@ haven't checked the live gateway.
 - [ ] Is this actually a plugin? (See "when to use a channel/tool plugin" — if no callbacks, no channel, probably a script.)
 - [ ] If new plugin: pick the closest canonical example to copy (intercom for channels, support-tools for tools, credit-verification-enforcer for middleware)
 - [ ] Check the profile mapping plan: which of main/edge/dev needs to load this?
-- [ ] Check [[reference_openclaw_plugin_packaging_5.19]] and [[feedback_openclaw_plugin_gotchas]] in memory
+- [ ] Check `docs/lessons/openclaw-and-codex.md` (packaging contract + plugin gotchas)
 
 ## After-edit checklist
 
@@ -139,8 +139,8 @@ haven't checked the live gateway.
 - [ ] `pnpm install` ran, `pnpm-lock.yaml` regenerated (commit the diff)
 - [ ] `pnpm build` runs clean locally
 - [ ] `scripts/lib/plugin-env.sh` `plugin_profile()` knows about the plugin
-- [ ] If the plugin writes openclaw config: uses `announce-legit-write.sh` ([[reference_announce_legit_write_contract]])
-- [ ] If the plugin has callbacks: handles `cfg = undefined` case (callbacks lose their config — see [[feedback_openclaw_plugin_gotchas]])
+- [ ] If the plugin writes openclaw config: uses `announce-legit-write.sh` (see `docs/lessons/openclaw-and-codex.md`)
+- [ ] If the plugin has callbacks: handles `cfg = undefined` case (callbacks lose their config — see `docs/lessons/openclaw-and-codex.md`)
 
 ## Common gotchas (preload these before answering)
 
@@ -153,7 +153,7 @@ haven't checked the live gateway.
 | Audit watcher fires Slack alert on config write | Atomic-rename to openclaw.json without announce | `bash announce-legit-write.sh <plugin-name> <path>` |
 | Slack plugin breaks after openclaw upgrade | Slack externalized to `@openclaw/slack` since 2026.5.12 | Bump `@openclaw/slack` pin in deploy.sh |
 | Plugin fails to load post-5.27 with a missing-export error | 5.27 (#85072) trimmed the public SDK — channel-turn runtime aliases removed, Vitest test helpers no longer exported | Import only stable `openclaw/plugin-sdk/*` subpaths and pull vitest from `vitest/config`; our 3 plugins already comply (audited + built clean against 5.27 on 2026-05-28) |
-| Repo manifest declares `./src/index.ts` instead of `./dist/index.js` | Documented contract violation per memory | **Verify load status on live gateway first** — runtime may pick up `dist/` regardless. If loaded, downgrade to "hardening opportunity, not urgent" |
+| Repo manifest declares `./src/index.ts` instead of `./dist/index.js` | Documented contract violation per `docs/lessons/openclaw-and-codex.md` | **Verify load status on live gateway first** — runtime may pick up `dist/` regardless. If loaded, downgrade to "hardening opportunity, not urgent" |
 
 ## Output style
 
@@ -163,5 +163,5 @@ When done, summarize in <150 words: what the plugin does, which profile(s) it lo
 
 - **Never commit without `pnpm install`.** Lock file drift silently breaks deploys.
 - **Never declare `./src/*.ts` as the extension entry point** in 2026.5.x.
-- **Cite memory** for non-obvious rules — generic plugin guidance is ignored.
+- **Cite the relevant `docs/lessons/` file** for non-obvious rules — generic plugin guidance is ignored.
 - **If the plugin would have just one tool and no callbacks, refuse and route back to `hydra-extension-picker`.**
