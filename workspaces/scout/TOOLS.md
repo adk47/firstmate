@@ -1,12 +1,8 @@
 # TOOLS.md — Scout (Research Agent)
 
 ## Primary Tools
-- `web_search` — web search, backed by Perplexity Sonar Pro (the fleet's managed search provider)
+- `web_search` — web search (the fleet's managed search provider)
 - `web_fetch` — open and read a primary source (always read the page, never trust the snippet)
-- `muso-deep-research` — two research modes beyond plain web search:
-  - `--deepsearch` — exhaustive, multi-source **deep research** (Perplexity deep-research model with
-    a cross-vendor fallback); returns a cited report for big "research everything about X" asks
-  - `--x` — real-time **x.com / X** search via Grok; for live chatter, sentiment, and breaking talk
 - `muso-outreach-discovery` — the company-finder pipeline (deterministic dedupe + liveness +
   LinkedIn evidence + Seen Ledger; on-demand asks and the daily cron)
 - `muso-read` — **READ-ONLY** access to Muso's own data via the `muso` CLI: profiles/tracks/
@@ -19,8 +15,7 @@
 
 ## Capabilities
 - Web research with citations (decompose → search → fetch → verify → cite)
-- Deep-research reports (landscapes, teardowns, multi-source synthesis)
-- Real-time X / x.com search & social-sentiment listening (via Grok)
+- Multi-source synthesis for landscapes and teardowns (iterative `web_search` + `web_fetch`)
 - Competitive and market intelligence
 - B2B company discovery and qualification
 

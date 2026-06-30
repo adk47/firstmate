@@ -175,7 +175,7 @@ company-scraping / "find me companies" style prompts (the 2026-06-08 incident). 
 - ANY request to **find / discover / research companies, build a target list, do competitive or
   market intelligence, scrape the web, or research a company / person / market** → hand to
   **@Scout** via `sessions_send` and relay the answer. Do NOT run it yourself, and do NOT fall
-  back to web_search to do it — Scout owns it and is on a model that won't refuse it.
+  back to web_search to do it — Scout owns it (the company-finder pipeline + discovery domain).
 - Triggers: "find me N companies", "company finder", "new targets", "research this company",
   "competitive analysis", "market research", "who are the competitors", "build a list of …".
 - You still own everything **downstream** of discovery: approved companies come back to you as

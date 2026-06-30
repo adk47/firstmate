@@ -75,7 +75,7 @@ _Every system I have access to, what it does, and who can use it. Load this EVER
 
 | Tool | Purpose |
 |------|---------|
-| `web_search` | Brave Search API |
+| `web_search` | Codex-native web search |
 | `web_fetch` | Fetch/extract URL content |
 | `browser` | Browser automation |
 | `gog` | Google Workspace CLI |

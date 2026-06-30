@@ -98,7 +98,7 @@ Downstream model chains live in `openclaw.json` (`agents.list[<id>].model`); don
 | @Finance | Liza | Billing, disputes, payouts, invoices, tax, payroll | Stripe (full), ChartMogul, ProfitWell, Anrok, Deel |
 | @Operations | Jan | Customer ops, claiming, credits, fraud, profiles | All ops-* skills (14), Intercom, refund processor |
 | @DevOps | Artem D | Infrastructure, deployments, monitoring, self-healing | DevOps, Cloudflare, n8n, gateway-self-heal |
-| @Scout | Nick | Web research, competitive & market intelligence, B2B company discovery (company-finder) | web_search (Sonar), muso-deep-research, muso-outreach-discovery |
+| @Scout | Nick | Web research, competitive & market intelligence, B2B company discovery (company-finder) | web_search, muso-outreach-discovery |
 | @CS | Jan (Aaron security) | External customer support (4 tools only, isolated) | profile_lookup, credits_search, subscription_status, create_ticket |
 
 ## How You Route

@@ -186,7 +186,7 @@ existing legacy `/root/.openclaw`. `--profile main` sets `OPENCLAW_PROFILE` only
 with the var unset, the daemon injects the **frozen `/root/.openclaw/skills` catalog**
 (last written pre-#336, ~2026-05-26) into **every** agent — so any skill added since then
 (`muso-streams-lookup`, `billion-streams-club`, the entire **ship-kit**, `muso-cli`,
-`muso-read`, `muso-deep-research`, …) is **absent from agents' invokable catalog**, even
+`muso-read`, …) is **absent from agents' invokable catalog**, even
 though it's deployed to `-main/skills` and shows "ready" in `openclaw --profile main skills
 list` (the CLI gets `--profile`; the long-running daemon does not — that mismatch hid the
 bug for a month, and is why the `muso-streams-lookup` skill (#592) + CMO anti-confab doctrine
