@@ -14,7 +14,8 @@ It joins TWO complementary, verified audit layers:
      decision log ({ts, env, actor_identity, tool, params, decision, result};
      decision vocab from muso-cli internal/policy/capability/audit.go v0.6.1:
      authorized -> applied | gate_refused; refused (route_to_human); noop
-     (idempotent); dry_run (preview)). This is the AUTHORITATIVE per-verb OUTCOME
+     (idempotent); dry_run (preview); shadow_would_merge/shadow_would_refuse
+     (rename-merge shadow lane, informational)). This is the AUTHORITATIVE per-verb OUTCOME
      for calls that reached muso. It does NOT carry an Intercom conv-id, and it
      never sees a wrapper-side fail-close (the call never reached muso).
   2. /var/log/openclaw/customer-{credit-verify,profile-claim,profile-consolidate}.jsonl
@@ -129,6 +130,11 @@ ROUTED = {"refused"}                # route_to_human: capability check bounced p
 BACKEND_REFUSED = {"gate_refused"}  # checks passed, the backend itself rejected
 PREVIEW = {"dry_run"}               # --dry-run suppressed: excluded from outcome rates
 INTERMEDIATE = {"authorized"}       # cap-counting line; terminal is applied/gate_refused
+# rename-merge SHADOW lane (audit.go): what the corroboration rule WOULD have done
+# for a name-mismatched consolidation. No mutation, routes to a human regardless ->
+# informational, excluded from outcome rates (like preview). Registered here so the
+# new decision values are recognized and do NOT trip the schema-drift pager.
+SHADOW = {"shadow_would_merge", "shadow_would_refuse"}
 
 # Hydra verb-WRAPPER status vocabulary (verify-credit.sh / claim-self.sh /
 # consolidate.sh _audit). These are emitted BEFORE the call reaches muso (or on
@@ -235,6 +241,8 @@ def classify(decision):
         return "preview"
     if d in INTERMEDIATE:
         return "authorized"
+    if d in SHADOW:
+        return "shadow"
     return "unclassified"
 
 
@@ -299,12 +307,12 @@ def summarize(cap_records, now, window):
     trailing `window` seconds ending at `now`, from the muso capability audit."""
     lo = now - window
     per = {v: {"success": 0, "route_to_human": 0, "backend_refused": 0,
-               "preview": 0, "authorized": 0, "unclassified": 0} for v in VERBS}
+               "preview": 0, "authorized": 0, "unclassified": 0, "shadow": 0} for v in VERBS}
     # Same shape, counting ONLY real-customer actors -- the smoke/test actors
     # (go-live probes: smoketest@, not-the-owner@) inflate the verb counts but are
     # not customer service; the DISPLAY uses per_verb_real, anomalies use per_verb.
     per_real = {v: {"success": 0, "route_to_human": 0, "backend_refused": 0,
-                    "preview": 0, "authorized": 0, "unclassified": 0} for v in VERBS}
+                    "preview": 0, "authorized": 0, "unclassified": 0, "shadow": 0} for v in VERBS}
     reasons = {}
     reasons_real = {}  # route/refuse reasons for REAL customers only (display)
     real_actors = set()
@@ -339,9 +347,9 @@ def summarize(cap_records, now, window):
             (test_actors if is_test_actor(actor) else real_actors).add(str(actor))
 
     totals = {"success": 0, "route_to_human": 0, "backend_refused": 0,
-              "preview": 0, "authorized": 0, "unclassified": 0}
+              "preview": 0, "authorized": 0, "unclassified": 0, "shadow": 0}
     totals_real = {"success": 0, "route_to_human": 0, "backend_refused": 0,
-                   "preview": 0, "authorized": 0, "unclassified": 0}
+                   "preview": 0, "authorized": 0, "unclassified": 0, "shadow": 0}
     for v in VERBS:
         for k, n in per[v].items():
             totals[k] += n
@@ -672,6 +680,8 @@ def _self_test(now):
     assert classify("gate_refused") == "backend_refused"
     assert classify("dry_run") == "preview" and classify("authorized") == "authorized"
     assert classify("totally_new_value") == "unclassified", "vocab drift must surface"
+    assert classify("shadow_would_merge") == "shadow" and classify("shadow_would_refuse") == "shadow", \
+        "rename-merge shadow decisions must classify as shadow, not trip schema drift"
 
     recs = [
         {"tool": "credits_verify", "decision": "authorized", "ts": _iso(now - 1000),
