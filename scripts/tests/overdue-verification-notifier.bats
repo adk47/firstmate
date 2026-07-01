@@ -105,25 +105,26 @@ PYEOF
   echo "$output" | grep -qx ok
 }
 
-@test "extract_candidate: analytics-followup is NOT eligible (analytics carve-out)" {
+@test "extract_candidate: analytics-followup is eligible (carve-out retired 2026-06-30)" {
   run python3 - <<'PYEOF'
 import os
 from importlib import util
 spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 now = 1781784000
-# analytics-followup is tiered as Tier 1 by ticket-format, but the analytics
-# carve-out (SOUL.md / active-incidents.md / common-issues.md) forbids ANY
-# per-account follow-up promise for analytics. A proactive "we've flagged it"
-# message would re-make that forbidden promise, so it must be dropped.
+# The 2026-04 analytics migration is complete and the analytics carve-out was
+# retired (SOUL.md "Analytics handling" / common-issues.md row #7). analytics-
+# followup is now a normal Tier-1 follow-up, handled per-account like credit-
+# verify, so a clean overdue analytics ticket DOES warrant proactive outreach.
 task = {"id": "T", "status": {"type": "open"},
         "tags": [{"name": "hydra-action-request"}, {"name": "action:analytics-followup"}],
-        "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": ".../conversation/C1"}],
+        "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD,
+                           "value": "https://app.intercom.com/a/inbox/w/inbox/conversation/C1"}],
         "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---",
         "due_date": str((now - 5*86400)*1000)}
-assert "analytics-followup" not in mod.ALLOWLIST, "analytics-followup must not be allowlisted"
+assert "analytics-followup" in mod.ALLOWLIST, "analytics-followup must be allowlisted"
 c, r = mod.extract_candidate(task, now, 14)
-assert c is None and r == "action-type", (c, r)
+assert r is None and c["conv_id"] == "C1" and c["email"] == "a@b.com", (c, r)
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]

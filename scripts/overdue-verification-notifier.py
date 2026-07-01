@@ -95,15 +95,13 @@ _CONV_ID_RE = re.compile(r"/conversation/([^/?#\s\"']+)")
 
 # Only proactively reach out about verification-class work the customer was
 # promised a review on. NEVER refunds / disputes / deletions / exports (Tier 3).
-# analytics-followup is EXCLUDED on purpose even though ticket-format tiers it as
-# Tier 1: per the analytics carve-out (workspaces/support/SOUL.md:53-54,
-# reference/active-incidents.md:15, reference/common-issues.md:181-208) analytics
-# is a platform-wide migration with NO per-account fix and NO follow-up promise —
-# proactively telling a customer "we've flagged it for a priority look" is the
-# exact lie that doctrine forbids.
+# analytics-followup is included now that the 2026-04 analytics migration is
+# complete and analytics is handled per-account like any other Tier-1 follow-up
+# (carve-out retired 2026-06-30; see workspaces/support/SOUL.md "Analytics
+# handling", reference/common-issues.md row #7, docs/lessons/muso-domain.md).
 ALLOWLIST = {
     "credit-verify", "credit-claim", "credit-correction",
-    "profile-claim",
+    "profile-claim", "analytics-followup",
 }
 SKIP_TICKET_TAGS = {"escalation:sla-breach-customer-followup"}
 # Conversation tags that mean "do not auto-message here".

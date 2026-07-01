@@ -99,9 +99,9 @@ Analytics cover 7 platforms: Spotify, YouTube, YouTube Music, Shazam,
 TikTok, SoundCloud, and Instagram.
 
 ### How often is analytics data updated?
-The analytics pipeline is being upgraded right now and refresh cadence is
-changing as part of that rollout. If your data looks stale, see "Why are my
-analytics not showing?" below.
+Analytics run on our upgraded platform. Refresh cadence varies by platform and
+data source. If your data looks stale, see "Why are my analytics not showing?"
+below.
 
 ### Why are my analytics not showing?
 Analytics require an active Pro or Business subscription with an available seat assigned to your profile.
@@ -111,12 +111,9 @@ Analytics require an active Pro or Business subscription with an available seat 
 2. Does your profile have a seat assigned? Check under your subscription settings
 
 If subscription and seat are both fine and data still isn't showing,
-we're in the middle of an analytics platform migration and server move,
-so refresh has been lagging across many accounts right now. Your data is
-being tracked normally in the background. There is no per-account fix
-or per-account timeline available, and no ticket-based escalation that
-would result in human follow-up – check back in a couple of weeks if it
-still looks stuck.
+reach out to support and we'll take a closer look at your specific profile.
+Your data is being tracked in the background, and we can flag your profile
+for our team to investigate.
 
 ### What are Milestones?
 Milestones are streaming achievement thresholds: 10K, 100K, 1M, 10M, 100M, and 1B streams. They help you track career progress.
@@ -129,13 +126,11 @@ Apple Music isn't available in Muso analytics today. It's a known request,
 but there's no committed date.
 
 ### My Spotify numbers don't match Muso's numbers – why?
-Streaming numbers come from each platform on its own schedule, and we're
-in the middle of an analytics platform migration and server move. Some
+Streaming numbers come from each platform on its own schedule, so some
 difference between Muso and what you see on Spotify can persist because
-each platform's attribution and reporting works differently, and the
-migration is changing how data gets pulled and refreshed. This is
-platform-wide and there is no per-account fix to apply – check back in
-a couple of weeks if the gap still looks off.
+each platform's attribution and reporting works differently. If the gap
+still looks wrong, reach out and we'll check what your profile is showing
+and flag it for our team if something's off.
 
 ---
 
@@ -194,12 +189,11 @@ Try clearing your browser cache and cookies, then reload. If the issue persists,
 If none of the above works, create a support ticket with category "Login – Account Access."
 
 ### My streaming data seems incorrect
-Streaming data comes directly from platform APIs, and we're in the
-middle of an analytics platform migration and server move – differences
-between platforms and Muso can persist as that ships. This is
-platform-wide and not something we can fix on a per-account basis right
-now. If it still looks off in a couple of weeks, message us back and
-we'll re-check what your profile is showing then.
+Streaming data comes directly from each platform, and differences
+between platforms and Muso can persist because each one reports and
+attributes on its own schedule. If it still looks off, message us back
+and we'll re-check what your profile is showing and flag it for our
+team if needed.
 
 ### The mobile app is not working
 Make sure you have the latest version from the App Store or Google Play. Try force-closing and reopening the app. If issues persist, create a support ticket.

@@ -56,6 +56,28 @@ PYEOF
   [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
 }
 
+@test "extract_candidate: a resolved analytics-followup ticket passes (carve-out retired 2026-06-30)" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+# Carve-out retired: analytics-followup is now a normal Tier-1 follow-up (SOUL.md
+# "Analytics handling" / common-issues.md row #7), so a resolved analytics ticket
+# gets the same "it's sorted" resolve note as credit-verify et al.
+task = {"id": "T1", "status": {"type": "done", "status": "complete"},
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:analytics-followup"}],
+        "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/CONV9"}],
+        "description": "---ACTION-REQUEST---\n{\"customer_email\": \"A@B.com\"}\n---END-ACTION-REQUEST---"}
+assert "analytics-followup" in mod.ALLOWLIST, "analytics-followup must be allowlisted"
+c, r = mod.extract_candidate(task, int(os.environ['RESOLVE_NOTIFY_NOW']))
+assert c and r is None, (c, r)
+assert c["conv_id"] == "CONV9" and c["email"] == "a@b.com", c
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
 @test "extract_candidate: an UNresolved ticket is dropped (not-resolved)" {
   run python3 - <<'PYEOF'
 import os

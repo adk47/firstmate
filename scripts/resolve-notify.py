@@ -17,8 +17,6 @@ file must not blast the whole resolved backlog.
 Eligibility (every gate must pass; any fail -> skip + count the reason):
   1. ClickUp list 901000600160, tag `hydra-action-request`, exactly one
      `action:<type>` and it is in the Tier-1 verification allowlist (ALLOWLIST).
-     Analytics is excluded (the analytics carve-out: no per-account resolution
-     to announce).
   2. RESOLVED — `_ticket_resolved()` (done/closed type, or resolved/impossible
      status). The ClickUp fetch uses include_closed=true so true closed-type
      resolutions are visible too (not just done-type), matching close-resolved.
@@ -94,12 +92,13 @@ _CONV_ID_RE = re.compile(r"/conversation/([^/?#\s\"']+)")
 
 # Only proactively reach out about verification-class work the customer was
 # promised a review on — the SAME set the overdue notifier uses. analytics-
-# followup is EXCLUDED on purpose (the analytics carve-out, SOUL.md:65-79):
-# analytics is a platform-wide migration with NO per-account resolution, so a
-# "your request is sorted" note would be the exact lie that doctrine forbids.
+# followup is included now that the 2026-04 analytics migration is complete and
+# analytics is handled per-account like any other Tier-1 follow-up (carve-out
+# retired 2026-06-30; see workspaces/support/SOUL.md "Analytics handling" and
+# docs/lessons/muso-domain.md).
 ALLOWLIST = {
     "credit-verify", "credit-claim", "credit-correction",
-    "profile-claim",
+    "profile-claim", "analytics-followup",
 }
 # Conversation tags that mean "do not auto-message here".
 BLOCKED_CONV_TAGS = {

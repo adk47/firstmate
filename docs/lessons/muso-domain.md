@@ -325,12 +325,17 @@ goes stale. Two forms: bold markdown (visible doctrine Caroline reads in context
 comment (customer-facing FAQ, kept out of her reply but greppable). Whenever you add date- or
 window-specific support copy, add a marker with a one-line note; sweep with `grep -rn "EXPIRES <date>"`.
 
-**`analytics-followup` is a hard carve-out despite being tiered Tier-1.** The action-type taxonomy
-tiers `analytics-followup` as Tier 1 (alongside credit-verify and friends), but support doctrine
-forbids analytics tickets entirely: a platform-wide migration with NO per-account fix and NO
-SLA/follow-up promise. Any "Tier-1 = safe for proactive outreach" allowlist must EXCLUDE
-`analytics-followup` explicitly and pin the exclusion with a test, or it re-makes the forbidden
-promise.
+**`analytics-followup` carve-out — RETIRED 2026-06-30 (analytics migration complete).** History:
+during the 2026-04 analytics platform migration, support doctrine forbade analytics tickets entirely
+— the migration was platform-wide with NO per-account fix, so a ticket / SLA / follow-up promise
+would have been a lie — even though the action-type taxonomy tiers `analytics-followup` as Tier 1.
+The two proactive notifiers (`resolve-notify.py`, `overdue-verification-notifier.py`) excluded it
+from their ALLOWLIST and a bats test pinned the exclusion. The migration is now done: analytics runs
+on the upgraded platform and is handled per-account like any other Tier-1 follow-up (file the ticket,
+quote a 2-business-day SLA, normal escalation language). The exclusion was removed and the test
+flipped to assert eligibility. Do NOT re-add the exclusion unless analytics regresses to a
+platform-wide, no-per-account-fix state. See `workspaces/support/SOUL.md` "Analytics handling" and
+`reference/common-issues.md` row #7.
 
 **RAG is search-tools-only, tightly scoped, with CI-pinned invariants.** Caroline's memory search
 indexes only the read-only `reference/` directory (`extraPaths:["reference"]`, never sessions,
