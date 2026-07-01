@@ -90,6 +90,8 @@ Trusted by: Napster, SoundExchange, AAM, Rimas Publishing, Netflix, Neon16
 
 Documentation: https://developer.muso.ai
 
+**Two access levels:** workspace-level API access (your own workspace's data) is included free on Pro and Business and is self-service from Settings; full-catalog access (data across the whole Muso catalog) is a separate, pricier enterprise tier, with a self-service option coming at platform.muso.ai. See `api-access.md` for the full breakdown and how to handle these requests.
+
 ---
 
 ## Pricing
