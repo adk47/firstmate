@@ -2746,19 +2746,23 @@ fi
 # either -- the RAG smoke test that follows is the backstop that fails
 # the post-flight if the index is still broken.
 if needs_target "edge"; then
-  log "Post-flight: forcing Caroline RAG index rebuild (edge/support)..."
-  reindex_rc=0
-  # Time-box the re-embed (the single most stall-prone openclaw call: it
-  # round-trips the embedding provider for the whole KB). A hang surfaces as
-  # rc=124 -> the existing WARNING+Slack path, never an indefinite deploy stall.
-  timeout 300 openclaw --profile edge memory index --force --agent support || reindex_rc=$?
-  if [ "$reindex_rc" -eq 0 ]; then
-    log "  Caroline RAG index rebuilt."
+  # shellcheck source=lib/reindex-edge-verify-retry.sh
+  source "$SCRIPT_DIR/lib/reindex-edge-verify-retry.sh"
+  log "Post-flight: rebuilding + verifying Caroline RAG index (edge/support)..."
+  # Force a rebuild, then VERIFY the index didn't lose the busy-gateway race and
+  # re-pause, retrying once if it did. A bare --force here re-paused the index in
+  # PR #618's live verify (2026-07-01), leaving retrieval ungrounded until the
+  # 10-min watchdog. reindex_edge_verify_retry time-boxes each --force (rc=124 on
+  # a hang, never an indefinite stall) and returns non-zero only if the index is
+  # STILL paused after the retry. Non-fatal but LOUD: the RAG smoke test below is
+  # the authoritative backstop.
+  if reindex_edge_verify_retry edge support; then
+    log "  Caroline RAG index rebuilt and grounded."
   else
-    log "  WARNING: Caroline RAG index rebuild FAILED (rc=$reindex_rc). Continuing deploy; the RAG smoke test below will catch a still-broken index."
+    log "  WARNING: Caroline RAG index still paused after rebuild + retry. Continuing deploy; the 10-min watchdog will heal it and the RAG smoke test below will catch a still-broken index."
     if [ -n "${SLACK_WEBHOOK:-}" ]; then
       curl -s -X POST -H "Content-type: application/json" \
-        --data "{\"text\":\":warning: Caroline RAG index rebuild failed (rc=$reindex_rc) during deploy. Run: ssh hydra openclaw --profile edge memory index --force --agent support\"}" \
+        --data "{\"text\":\":warning: Caroline RAG index still paused after post-deploy rebuild + retry. Run: ssh hydra openclaw --profile edge memory index --force --agent support ; then openclaw --profile edge memory status --agent support --deep\"}" \
         "$SLACK_WEBHOOK" >/dev/null || true
     fi
   fi
