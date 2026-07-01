@@ -164,6 +164,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/openclaw-edge-reindex-on-start.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/openclaw-edge-reindex-on-start.sh missing or not executable"
 [[ -f "$HYDRA_ROOT/scripts/overdue-verification-notifier.py" ]] \
   || fail "$HYDRA_ROOT/scripts/overdue-verification-notifier.py missing"
 [[ -f "$HYDRA_ROOT/scripts/resolve-notify.py" ]] \
@@ -641,18 +643,58 @@ log "  $cm: $(systemctl is-active "$cm" 2>/dev/null || echo unknown)"
 for profile in main edge; do
   drop_dir="/etc/systemd/system/openclaw-gateway-${profile}.service.d"
   mkdir -p "$drop_dir"
+  # EDGE ONLY: after every start, fire the (non-blocking) on-start reindex so a
+  # restart-paused memory_search index is rebuilt within seconds instead of
+  # waiting up to 10 min for the cron watchdog (root cause: every edge restart
+  # pauses the index; see openclaw-edge-reindex-on-start.sh header). Fired here,
+  # not via Wants=, because ExecStartPost runs on EVERY start including
+  # Restart=always crash/OOM auto-restarts, whereas a Wants= companion is not
+  # re-pulled on an internal auto-restart. --no-block keeps the gateway's path
+  # to `active` instant (deploy.sh restart_gateway polls is-active for 30s and
+  # must not be delayed by a 30-300s re-embed); leading `-` makes a
+  # missing/failed trigger non-fatal to gateway start. main has no memory_search
+  # consumer, so it gets no hook.
+  reindex_hook=""
+  if [ "$profile" = "edge" ]; then
+    reindex_hook="ExecStartPost=-/usr/bin/systemctl start --no-block openclaw-edge-reindex.service"
+  fi
   cat > "$drop_dir/override.conf" << GATEWAYDROP
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
 # Reference template: scripts/aux-units/openclaw-gateway.override.conf
 [Service]
 ExecStartPre=$HYDRA_ROOT/scripts/openclaw-pre-start-heal.sh ${profile}
-
+${reindex_hook}
 [Unit]
 StartLimitBurst=5
 StartLimitIntervalSec=120
 GATEWAYDROP
   log "  installed drop-in for openclaw-gateway-${profile}.service"
 done
+
+# ─── On-start reindex oneshot (edge/support only) ─────────────
+# Triggered by the edge gateway drop-in's ExecStartPost (above) on every edge
+# start. Type=oneshot; NOT enabled/[Install]ed — it is started imperatively by
+# the gateway, never on its own. After= (not Requires=/BindsTo=) so it is a
+# best-effort healer: if the gateway is down the readiness poll times out and it
+# exits harmlessly. TimeoutStartSec (900s) budgets the worst case: readiness
+# poll (~75s: 60s deadline + one 15s timeout-bounded probe) + up to three
+# time-boxed `memory status` captures (<=60s each) + a force-reindex and one
+# race retry (<=300s each). StartLimit bounds a crash-restart storm from
+# re-embedding unboundedly. Picked up by the `systemctl daemon-reload` later in
+# this script (before Step 6's edge restart in the same deploy).
+cat > /etc/systemd/system/openclaw-edge-reindex.service << REINDEXUNIT
+[Unit]
+Description=Reindex Caroline RAG vector index after every edge gateway start
+After=openclaw-gateway-edge.service
+StartLimitBurst=6
+StartLimitIntervalSec=600
+
+[Service]
+Type=oneshot
+TimeoutStartSec=900
+ExecStart=$HYDRA_ROOT/scripts/openclaw-edge-reindex-on-start.sh
+REINDEXUNIT
+log "  installed openclaw-edge-reindex.service (edge on-start reindex)"
 
 # ─── Out-of-band write audit (@.path + @.service per profile) ─
 # One .path + .service instance per profile, so each instance

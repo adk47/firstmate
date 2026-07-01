@@ -16,8 +16,17 @@
 # metadata is missing / the vector store is not ready / it reports
 # issues, the watchdog SELF-HEALS by running
 # `openclaw --profile edge memory index --force --agent support`
-# (the exact fix applied by hand this session), re-checks, and ALERTS
-# #clio_devops with what it found and whether the rebuild restored it.
+# (the exact fix applied by hand this session) and re-checks.
+#
+# Alerting is PROBLEM-ONLY -- it NEVER posts an "all good" / "self-healed"
+# ping (those flooded #clio_devops ~8x/day; the green was the symptom, not
+# news). It posts to #clio_devops in exactly two cases:
+#   - HEAL FAILED: the rebuild did NOT restore the index (red page).
+#   - FLAPPING: the index self-heals >= CAROLINE_RAG_FLAP_THRESHOLD times
+#     within CAROLINE_RAG_FLAP_WINDOW_SECS. A one-off post-bump pause that
+#     heals is expected and stays silent; a RECURRING pause means retrieval
+#     is ungrounded between heals and the root cause is unaddressed -- that
+#     pages ONCE per CAROLINE_RAG_FLAP_COOLDOWN_SECS (red).
 # This mirrors the codex-auth self-heal-and-alert pattern (the ensure-*
 # scripts heal, a watchdog alerts) -- prose alone is not enforcement.
 #
@@ -42,6 +51,15 @@
 #   CAROLINE_RAG_COOLDOWN_SECS  re-page suppression window (default 21600 = 6h)
 #   CAROLINE_RAG_STATE_FILE     cooldown watermark (default
 #                               /var/lib/caroline-rag-index-watchdog/last-alert)
+#   CAROLINE_RAG_FLAP_THRESHOLD     successful heals within the window that
+#                                   count as flapping (default 3)
+#   CAROLINE_RAG_FLAP_WINDOW_SECS   flapping look-back window (default 86400 = 24h)
+#   CAROLINE_RAG_FLAP_COOLDOWN_SECS re-page suppression for the flapping alert
+#                                   (default 86400 = 24h -> at most one/day)
+#   CAROLINE_RAG_HEAL_LOG           successful-heal timestamp log (default
+#                                   /var/lib/caroline-rag-index-watchdog/heal-history)
+#   CAROLINE_RAG_FLAP_STATE         flapping-alert watermark (default
+#                                   /var/lib/caroline-rag-index-watchdog/last-flap-alert)
 #   CAROLINE_RAG_LOCKFILE       single-run lock
 #   CAROLINE_RAG_SLACK_CHANNEL  target channel (default #clio_devops)
 #   CAROLINE_RAG_SKIP_HOST_GUARD 1 = skip the ovh-node-8 guard (tests)
@@ -57,6 +75,11 @@ STATUS_FILE="${CAROLINE_RAG_STATUS_FILE:-}"
 NO_HEAL="${CAROLINE_RAG_NO_HEAL:-0}"
 COOLDOWN_SECS="${CAROLINE_RAG_COOLDOWN_SECS:-21600}"
 STATE_FILE="${CAROLINE_RAG_STATE_FILE:-/var/lib/caroline-rag-index-watchdog/last-alert}"
+FLAP_THRESHOLD="${CAROLINE_RAG_FLAP_THRESHOLD:-3}"
+FLAP_WINDOW_SECS="${CAROLINE_RAG_FLAP_WINDOW_SECS:-86400}"
+FLAP_COOLDOWN_SECS="${CAROLINE_RAG_FLAP_COOLDOWN_SECS:-86400}"
+HEAL_LOG="${CAROLINE_RAG_HEAL_LOG:-/var/lib/caroline-rag-index-watchdog/heal-history}"
+FLAP_STATE="${CAROLINE_RAG_FLAP_STATE:-/var/lib/caroline-rag-index-watchdog/last-flap-alert}"
 LOCKFILE="${CAROLINE_RAG_LOCKFILE:-/var/run/caroline-rag-index-watchdog.lock}"
 SKIP_HOST_GUARD="${CAROLINE_RAG_SKIP_HOST_GUARD:-0}"
 DRY_RUN=0
@@ -132,6 +155,35 @@ capture_status() {
   else
     "$OPENCLAW_BIN" --profile "$PROFILE" memory status --agent "$AGENT" --deep 2>&1 || true
   fi
+}
+
+# post_alert TEXT -> 0 ONLY on a CONFIRMED Slack delivery, non-zero otherwise.
+# Self-contained (its own temp payload + cleanup) so the two call sites
+# (failed-heal page, flapping page) never clash on a shared EXIT trap.
+post_alert() {
+  local text="$1" pf rc=0
+  pf="$(mktemp)"
+  jq -n --arg channel "$SLACK_CHANNEL" --arg text "$text" \
+    '{channel: $channel, text: $text}' > "$pf"
+  slack_notify_payload_file_status "$pf" || rc=$?
+  rm -f "$pf"
+  return "$rc"
+}
+
+# record_heal_and_count NOW -> append NOW to the heal log, prune entries older
+# than FLAP_WINDOW_SECS, and echo how many heals remain in the window. This is
+# the flapping signal: a healthy index never calls this; a flapping one bumps
+# the count on every silent heal. Kept separate from the 6h cooldown watermark
+# (which a healthy tick clears) so flapping survives the recover-then-rebreak
+# cycle that the green spam came from.
+record_heal_and_count() {
+  local now="$1" cutoff
+  cutoff=$(( now - FLAP_WINDOW_SECS ))
+  mkdir -p "$(dirname "$HEAL_LOG")"
+  touch "$HEAL_LOG"
+  printf '%s\n' "$now" >> "$HEAL_LOG"
+  awk -v c="$cutoff" '$1+0 >= c' "$HEAL_LOG" > "$HEAL_LOG.tmp" && mv "$HEAL_LOG.tmp" "$HEAL_LOG"
+  awk 'END{print NR+0}' "$HEAL_LOG"
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -211,7 +263,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   if [ "$NO_HEAL" = "1" ]; then
     log "DRY-RUN: would alert ${SLACK_CHANNEL} (auto-heal disabled; would NOT reindex)."
   else
-    log "DRY-RUN: would run 'openclaw --profile $PROFILE memory index --force --agent $AGENT', re-check, then alert ${SLACK_CHANNEL}."
+    log "DRY-RUN: would run 'openclaw --profile $PROFILE memory index --force --agent $AGENT' and re-check. Alerts ${SLACK_CHANNEL} ONLY if the heal fails or the index is flapping; a successful heal is silent."
   fi
   exit 0
 fi
@@ -255,29 +307,42 @@ else
   post_verdict="$(capture_status | classify_memory_status)"
 fi
 
-# ── Build the alert ────────────────────────────────────────────
+# ── Outcome ────────────────────────────────────────────────────
+# A SUCCESSFUL self-heal is SILENT (no "all good" ping). It only pages when the
+# index is FLAPPING -- healing repeatedly means retrieval is ungrounded between
+# heals and a full re-embed runs every time, i.e. the root cause is unaddressed.
 if [ "$post_verdict" = "ok" ]; then
-  emoji=":white_check_mark:"
-  headline="Caroline RAG index self-healed"
-  body="Was: ${pre_verdict}. ${heal_line} Vector store is now ready; retrieval is grounded again."
-else
-  emoji=":rotating_light:"
-  headline="Caroline RAG index STILL unhealthy after self-heal"
-  body="Detected: ${post_verdict}. ${heal_line} Retrieval is returning nothing, so the pre-retrieval RAG hook will answer ungrounded. Run: ssh hydra openclaw --profile ${PROFILE} memory index --force --agent ${AGENT} ; then openclaw --profile ${PROFILE} memory status --agent ${AGENT} --deep"
-fi
-alert_text="${emoji} *${headline}* (${PROFILE}/${AGENT})
-${body}"
+  flap_count="$(record_heal_and_count "$now")"
+  log "heal succeeded; staying silent (problem-only alerting). ${flap_count} heal(s) in the last $((FLAP_WINDOW_SECS/3600))h. ${heal_line}"
 
-log "$headline -- pre=[$pre_verdict] post=[$post_verdict]"
+  last_flap=0
+  if [ -f "$FLAP_STATE" ]; then
+    last_flap="$(tr -dc '0-9' < "$FLAP_STATE" 2>/dev/null || echo 0)"
+    [ -n "$last_flap" ] || last_flap=0
+  fi
+  if [ "$flap_count" -ge "$FLAP_THRESHOLD" ] && [ "$((now - last_flap))" -ge "$FLAP_COOLDOWN_SECS" ]; then
+    flap_text=":rotating_light: *Caroline RAG index is flapping* (${PROFILE}/${AGENT})
+The vector index has paused and been force-rebuilt ${flap_count} times in the last $((FLAP_WINDOW_SECS/3600))h (latest: ${pre_verdict}). It self-heals each time, but retrieval is ungrounded between each pause and the next ~10-min heal, and a full re-embed runs every time -- the root cause is unaddressed. Find what keeps pausing the index (out-of-band openclaw auto-update / edge restart churn): ssh hydra journalctl -u openclaw-gateway-edge.service --since '24 hours ago' | grep -iE 'restart|upgrad|version|pause|index'"
+    if post_alert "$flap_text"; then
+      mkdir -p "$(dirname "$FLAP_STATE")"
+      printf '%s\n' "$now" > "$FLAP_STATE.tmp" && mv "$FLAP_STATE.tmp" "$FLAP_STATE"
+      log "posted FLAPPING alert to ${SLACK_CHANNEL} (count=${flap_count})."
+    else
+      log "WARN: flapping-alert Slack post failed -- leaving flap watermark unset so the next tick retries."
+    fi
+  fi
+  exit 0
+fi
+
+# ── FAILURE: the heal did NOT restore the index -> page (red). ──
+alert_text=":rotating_light: *Caroline RAG index STILL unhealthy after self-heal* (${PROFILE}/${AGENT})
+Detected: ${post_verdict}. ${heal_line} Retrieval is returning nothing, so the pre-retrieval RAG hook will answer ungrounded. Run: ssh hydra openclaw --profile ${PROFILE} memory index --force --agent ${AGENT} ; then openclaw --profile ${PROFILE} memory status --agent ${AGENT} --deep"
+
+log "STILL unhealthy after self-heal -- pre=[$pre_verdict] post=[$post_verdict]"
 
 # Cooldown was already enforced before the heal; advance the watermark only on
-# a CONFIRMED Slack delivery (below) so a failed post retries on the next tick.
-payload_file="$(mktemp)"
-trap 'rm -f "$payload_file"' EXIT
-jq -n --arg channel "$SLACK_CHANNEL" --arg text "$alert_text" \
-  '{channel: $channel, text: $text}' > "$payload_file"
-
-if slack_notify_payload_file_status "$payload_file"; then
+# a CONFIRMED Slack delivery so a failed post retries on the next tick.
+if post_alert "$alert_text"; then
   mkdir -p "$(dirname "$STATE_FILE")"
   printf '%s\n' "$now" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
   log "posted alert to ${SLACK_CHANNEL}."

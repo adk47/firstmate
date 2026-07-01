@@ -1068,6 +1068,16 @@ if printf '%s\n' "${RSYNC_EXCLUDES[@]}" | grep -qFx -- "--include=muso-ops-admin
 fi
 unset cfg_dir cfg_skill cfg_rule cfg_idx cfg_include_idx cfg_exclude_idx oa_idx oa_protect_idx
 
+# Changed-file set since the server's last-deployed SHA, captured by Step 0's
+# drift check for reuse by the Step 6 edge-restart gate. DEPLOY_DIFF_COMPUTED
+# stays 0 when Step 0 is skipped (HYDRA_FORCE / HYDRA_SKIP_DRIFT_CHECK / first
+# deploy / not-a-checkout), so the gate fails OPEN (restarts) rather than risk a
+# stale gateway.
+# shellcheck disable=SC2034  # consumed by sourced lib/edge-restart-gate.sh
+DEPLOY_CHANGED_FILES=""
+# shellcheck disable=SC2034  # consumed by sourced lib/edge-restart-gate.sh
+DEPLOY_DIFF_COMPUTED=0
+
 # -------------------------------------------------------------------
 # Step 0: Drift check (deploy-equivalent of `git pull` before `git push`)
 # -------------------------------------------------------------------
@@ -1172,6 +1182,25 @@ drift_check_against_baseline() {
   # propagate to the server is "intended", not drift.
   local intended
   intended=$(git -C "$HYDRA_ROOT" diff --name-only "$last_sha" | sort -u | sed '/^$/d')
+
+  # Hand the intended-change set to the Step 6 edge-restart gate (below). Only
+  # set here — i.e. only when a valid baseline diff was actually computed — so an
+  # early-returned/skipped drift check leaves the gate failing OPEN. Consumed by
+  # edge_restart_needed() in the (not-followed-without-`-x`) sourced lib, hence
+  # the SC2034 suppressions.
+  #
+  # Fold in UNTRACKED-but-not-ignored files too: `git diff` lists only tracked
+  # changes, but the deploy rsyncs the whole working tree, so a new untracked
+  # gateway file (e.g. a not-yet-committed skills-all/ or workspaces/support/
+  # file) would otherwise be pushed WITHOUT the gate seeing it → a wrongly
+  # skipped edge restart → stale gateway. Including them keeps the gate
+  # fail-open. (In CI the tree is a clean checkout, so this adds nothing there.)
+  local untracked
+  untracked=$(git -C "$HYDRA_ROOT" ls-files --others --exclude-standard 2>/dev/null || true)
+  # shellcheck disable=SC2034
+  DEPLOY_CHANGED_FILES=$(printf '%s\n%s\n' "$intended" "$untracked" | sed '/^$/d' | sort -u)
+  # shellcheck disable=SC2034
+  DEPLOY_DIFF_COMPUTED=1
 
   # 3. Files rsync would push (content differs between repo and server).
   # Capture rsync exit code separately — `|| true` would let an SSH
@@ -2583,8 +2612,22 @@ restart_gateway() {
   fail "Failed to restart $service (timed out after 30s)"
 }
 
+# edge_restart_needed(): skip the edge restart when a deploy provably changed
+# nothing the edge gateway loads (openclaw pauses the memory_search index on
+# every edge restart, so a needless restart is churn). Strictly fail-open — see
+# the lib header. Reads DEPLOY_DIFF_COMPUTED / DEPLOY_CHANGED_FILES (set by
+# Step 0's drift check) + HYDRA_FORCE / HYDRA_FORCE_RESTART.
+# shellcheck source=lib/edge-restart-gate.sh
+source "$SCRIPT_DIR/lib/edge-restart-gate.sh"
+
 if needs_target "main"; then restart_gateway "openclaw-gateway-main"; fi
-if needs_target "edge"; then restart_gateway "openclaw-gateway-edge"; fi
+if needs_target "edge"; then
+  if edge_restart_needed; then
+    restart_gateway "openclaw-gateway-edge"
+  else
+    log "  Skipping edge gateway restart: only gateway-inert files (docs/CI/tests/templates) changed since last deploy — nothing the edge gateway loads. Override: HYDRA_FORCE_RESTART=1."
+  fi
+fi
 
 # -------------------------------------------------------------------
 # WARMUP: wait for agents to bind before smoke test

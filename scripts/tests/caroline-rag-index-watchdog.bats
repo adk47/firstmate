@@ -105,12 +105,11 @@ run_wd() {
   ! grep -q "index" "$OC_CALLS"
 }
 
-@test "self-heal: a paused index is rebuilt, the alert fires, watermark is set" {
-  command -v flock >/dev/null 2>&1 || skip "flock not available on this host"
-  # A flipping openclaw stub: status is paused until `memory index` runs (which
-  # touches a marker), then healthy. Drives the full detect -> heal -> re-check
-  # -> post path. STATUS_FILE is unset so capture_status calls this stub.
-  local marker="$TEST_TMPDIR/healed"
+# A flipping openclaw stub: status is paused until `memory index` runs (which
+# touches $marker), then healthy. Drives the full detect -> heal -> re-check
+# path. STATUS_FILE is unset so capture_status calls this stub.
+write_flip_stub() {
+  local marker="$1"
   cat > "$TEST_TMPDIR/bin/openclaw" <<STUB
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$OC_CALLS"
@@ -123,21 +122,115 @@ fi
 exit 0
 STUB
   chmod +x "$TEST_TMPDIR/bin/openclaw"
+}
+
+@test "self-heal: a paused index is rebuilt SILENTLY -- no green Slack post, heal recorded" {
+  command -v flock >/dev/null 2>&1 || skip "flock not available on this host"
+  write_flip_stub "$TEST_TMPDIR/healed"
 
   run env \
     CAROLINE_RAG_SKIP_HOST_GUARD=1 \
     CAROLINE_RAG_STATE_FILE="$STATE" \
     CAROLINE_RAG_LOCKFILE="$LOCK" \
+    CAROLINE_RAG_HEAL_LOG="$TEST_TMPDIR/heal-history" \
+    CAROLINE_RAG_FLAP_STATE="$TEST_TMPDIR/last-flap" \
     OPENCLAW_BIN="$TEST_TMPDIR/bin/openclaw" \
     MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-stub" \
     "$SCRIPT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"self-healed"* ]]
-  # A reindex was actually attempted, the alert was posted via the muso stub,
-  # and the cooldown watermark was written.
+  # The index WAS rebuilt...
   grep -q "index" "$OC_CALLS"
+  # ...but a successful heal stays SILENT: nothing posted, no green checkmark.
+  ! grep -q "slack send" "$STUB_CALLS"
+  [[ "$output" != *"white_check_mark"* ]]
+  # The 6h cooldown watermark is NOT set on a silent success.
+  [ ! -f "$STATE" ]
+  # The heal IS recorded for flapping detection (one entry, below threshold).
+  [ -f "$TEST_TMPDIR/heal-history" ]
+  [ "$(awk 'END{print NR}' "$TEST_TMPDIR/heal-history")" -eq 1 ]
+  [ ! -f "$TEST_TMPDIR/last-flap" ]
+}
+
+@test "failed heal: index stays unhealthy after reindex -> red page, watermark set" {
+  command -v flock >/dev/null 2>&1 || skip "flock not available on this host"
+  # Reindex 'runs' (rc 0) but never heals: status is always paused.
+  cat > "$TEST_TMPDIR/bin/openclaw" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$OC_CALLS"
+if printf '%s\n' "\$@" | grep -q index; then echo rebuilt; exit 0; fi
+if printf '%s\n' "\$@" | grep -q status; then
+  printf 'Embeddings: ready\nVector search: paused until memory is rebuilt\nIndex identity: index metadata is missing\nIssues:\n'
+  exit 0
+fi
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+
+  run env \
+    CAROLINE_RAG_SKIP_HOST_GUARD=1 \
+    CAROLINE_RAG_STATE_FILE="$STATE" \
+    CAROLINE_RAG_LOCKFILE="$LOCK" \
+    CAROLINE_RAG_HEAL_LOG="$TEST_TMPDIR/heal-history" \
+    CAROLINE_RAG_FLAP_STATE="$TEST_TMPDIR/last-flap" \
+    OPENCLAW_BIN="$TEST_TMPDIR/bin/openclaw" \
+    MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-stub" \
+    "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STILL unhealthy"* ]]
   grep -q "slack send" "$STUB_CALLS"
   [ -f "$STATE" ]
+  # A failed heal is NOT counted toward flapping.
+  [ ! -f "$TEST_TMPDIR/heal-history" ]
+}
+
+@test "flapping: a heal that reaches the threshold pages once (red flap alert)" {
+  command -v flock >/dev/null 2>&1 || skip "flock not available on this host"
+  write_flip_stub "$TEST_TMPDIR/healed"
+  # Two recent prior heals already on record -> this run is the 3rd (threshold).
+  local now; now="$(date +%s)"
+  printf '%s\n%s\n' "$((now-300))" "$((now-200))" > "$TEST_TMPDIR/heal-history"
+
+  run env \
+    CAROLINE_RAG_SKIP_HOST_GUARD=1 \
+    CAROLINE_RAG_STATE_FILE="$STATE" \
+    CAROLINE_RAG_LOCKFILE="$LOCK" \
+    CAROLINE_RAG_HEAL_LOG="$TEST_TMPDIR/heal-history" \
+    CAROLINE_RAG_FLAP_STATE="$TEST_TMPDIR/last-flap" \
+    CAROLINE_RAG_FLAP_THRESHOLD=3 \
+    OPENCLAW_BIN="$TEST_TMPDIR/bin/openclaw" \
+    MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-stub" \
+    "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # The log records the page; the posted Slack text names the condition.
+  [[ "$output" == *"FLAPPING alert"* ]]
+  grep -q "slack send" "$STUB_CALLS"
+  grep -qi "flapping" "$STUB_CALLS"
+  [ -f "$TEST_TMPDIR/last-flap" ]
+}
+
+@test "flapping: alert is suppressed within the flap cooldown window" {
+  command -v flock >/dev/null 2>&1 || skip "flock not available on this host"
+  write_flip_stub "$TEST_TMPDIR/healed"
+  local now; now="$(date +%s)"
+  # At threshold already, but a flap alert was posted 1h ago; cooldown 24h.
+  printf '%s\n%s\n' "$((now-300))" "$((now-200))" > "$TEST_TMPDIR/heal-history"
+  printf '%s\n' "$((now-3600))" > "$TEST_TMPDIR/last-flap"
+
+  run env \
+    CAROLINE_RAG_SKIP_HOST_GUARD=1 \
+    CAROLINE_RAG_STATE_FILE="$STATE" \
+    CAROLINE_RAG_LOCKFILE="$LOCK" \
+    CAROLINE_RAG_HEAL_LOG="$TEST_TMPDIR/heal-history" \
+    CAROLINE_RAG_FLAP_STATE="$TEST_TMPDIR/last-flap" \
+    CAROLINE_RAG_FLAP_THRESHOLD=3 \
+    CAROLINE_RAG_FLAP_COOLDOWN_SECS=86400 \
+    OPENCLAW_BIN="$TEST_TMPDIR/bin/openclaw" \
+    MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-stub" \
+    "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # Healed (silently), but the flap alert is within its cooldown -> no post.
+  grep -q "index" "$OC_CALLS"
+  ! grep -q "slack send" "$STUB_CALLS"
 }
 
 @test "a healthy index clears any stale cooldown watermark" {
