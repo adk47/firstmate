@@ -995,8 +995,8 @@
       "id": "62f2c090-39a7-469e-bcdf-90f28d0178aa",
       "agentId": "operations",
       "name": "support-email-triage-hourly",
-      "description": "Hourly triage of the support@muso.ai inbox - classifies new threads Caroline-can-handle vs needs-a-human via the muso-support-email-triage skill, glanceable post to #cs_chats. Read-only, no customer sends (triage v1). Lands disabled - gated on `gog auth add support@muso.ai` plus a shadow proof run before flipping enabled.",
-      "enabled": false,
+      "description": "Hourly triage of the support@muso.ai inbox - classifies new threads Caroline-can-handle vs needs-a-human via the muso-support-email-triage skill, glanceable post to #cs_chats. Read-only, no customer sends (triage v1). Enabled 2026-07-01 after support@ was authed in gog and a shadow proof run verified read-only behavior (zero writes) plus a correct digest to #cs_chats.",
+      "enabled": true,
       "createdAtMs": 1780666588000,
       "updatedAtMs": 1780666588000,
       "schedule": {
