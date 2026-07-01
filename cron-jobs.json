@@ -469,7 +469,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run a Google OAuth token health check. For each account (a@muso.ai, ak@muso.ai, aaron.k@muso.ai, f@muso.ai), use gog to list 1 Gmail message. This keeps the refresh tokens active and prevents 6-month expiry. Report results: which accounts succeeded, which failed. Always post results.",
+        "message": "Run a Google OAuth token health check. For each account (a@muso.ai, ak@muso.ai, aaron.k@muso.ai, f@muso.ai, support@muso.ai), use gog to list 1 Gmail message. This keeps the refresh tokens active and prevents 6-month expiry. Report results: which accounts succeeded, which failed. Always post results.",
         "timeoutSeconds": 60,
         "thinking": "low",
         "model": "openai/gpt-5.5",
@@ -986,6 +986,42 @@
       },
       "delivery": {
         "mode": "none"
+      },
+      "state": {
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "62f2c090-39a7-469e-bcdf-90f28d0178aa",
+      "agentId": "operations",
+      "name": "support-email-triage-hourly",
+      "description": "Hourly triage of the support@muso.ai inbox - classifies new threads Caroline-can-handle vs needs-a-human via the muso-support-email-triage skill, glanceable post to #cs_chats. Read-only, no customer sends (triage v1). Lands disabled - gated on `gog auth add support@muso.ai` plus a shadow proof run before flipping enabled.",
+      "enabled": false,
+      "createdAtMs": 1780666588000,
+      "updatedAtMs": 1780666588000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 * * * *",
+        "tz": "Europe/Rome"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the muso-support-email-triage skill. It reads the support@muso.ai inbox for the last ~65 minutes, classifies each new thread as Caroline-can-handle vs needs-a-human using Caroline's support reference docs and escalation ladder, and returns a glanceable triage digest as your final assistant message. Do NOT post to Slack directly - the cron runner delivers it to #cs_chats. TRIAGE ONLY: never send an email, draft, modify labels, or create a ticket. If preflight fails (e.g. support@muso.ai is not yet authenticated in gog), emit the exact 'preflight failed: ...' line as your final message and stop. If there is no new mail, the format step prints exactly NO_REPLY - emit that and nothing else so the run completes silently.",
+        "model": "openai/gpt-5.5",
+        "fallbacks": [
+          "openrouter/openai/gpt-5.4-mini",
+          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+        ],
+        "thinking": "low",
+        "timeoutSeconds": 600
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0ANM0PN9L5",
+        "bestEffort": true
       },
       "state": {
         "consecutiveErrors": 0
