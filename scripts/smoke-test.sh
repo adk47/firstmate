@@ -284,19 +284,19 @@ if needs_target "main"; then
   # again, this check fails the deploy instead of silently shipping
   # zero crons.
   #
-  # Both sides explicitly resolved to a SCALAR COUNT to avoid the
-  # "compare integer to JSON array" footgun. The repo file's `.jobs`
-  # is an array (so we use `.jobs | length`). The CLI's `.jobs` is a
-  # NUMBER (verified live on openclaw 2026.6.1: cron status --json
-  # returns {"jobs": <N>, ...}, where N = state.store.jobs.length =
-  # ALL loaded rows for the store_key, INCLUDING disabled jobs — it is
-  # NOT a filtered enabled-only count; `cron list` is the call that
-  # excludes disabled, `cron status` does not). So this correctly
-  # compares against all 22 repo jobs (11 enabled + 11 disabled), which
-  # is exactly the set deploy.sh imports into the SQLite cron_jobs store.
-  # Do NOT "fix" this to compare against only the enabled count. We still
-  # handle the array shape with `if type == array then length else . end`
-  # to stay future-proof against the CLI ever switching shape.
+  # LOADED uses `cron list --all --json` (per-job detail, `--all` INCLUDES
+  # disabled) and counts only PERSISTENT crons — it EXCLUDES ephemeral
+  # one-shot jobs (schedule.kind=="at" && deleteAfterRun). Agent-dispatched
+  # reviews (e.g. qa-autoreview-pr-*) create those; they linger DISABLED in
+  # the in-memory store after running (deleteAfterRun GC is lazy) and are NOT
+  # part of the repo definition, so counting them false-failed EVERY deploy
+  # that overlapped a recent dispatch (2026-06-30: repo=26 vs loaded=28 from
+  # two stale qa-autoreview one-shots — this whole check's reason for being).
+  # We still count disabled PERSISTENT crons (via --all), matching the full
+  # repo set (enabled + disabled) that deploy.sh imports — do NOT narrow this
+  # to enabled-only. `.total` is the scalar all-rows count (== the previous
+  # `cron status --json .jobs`); if the store ever paginates (hasMore) we fall
+  # back to it so we never UNDER-count and mask a genuinely-missing repo cron.
   if [ ! -f /opt/hydra/cron-jobs.json ]; then
     fail_check "Main: /opt/hydra/cron-jobs.json missing — repo file did not deploy"
   else
@@ -309,11 +309,14 @@ if needs_target "main"; then
     # is missing channelConfigs metadata (separate tech debt to fix at
     # the plugin source), but the smoke test should not block deploys
     # on stderr-only warnings.
-    LOADED_RAW=$(openclaw --profile main cron status --json 2>/dev/null) || LOADED_RAW=""
+    LOADED_RAW=$(openclaw --profile main cron list --all --json 2>/dev/null) || LOADED_RAW=""
     if [ -z "$LOADED_RAW" ]; then
-      fail_check "Main: openclaw cron status --json returned nothing (gateway not running?)"
+      fail_check "Main: openclaw cron list --all --json returned nothing (gateway not running?)"
     else
-      LOADED_CRONS=$(echo "$LOADED_RAW" | jq 'if (.jobs | type) == "array" then (.jobs | length) else .jobs end' 2>/dev/null || echo "?")
+      LOADED_CRONS=$(echo "$LOADED_RAW" | jq '
+        if (.hasMore == true) then .total
+        else [ .jobs[] | select(((.schedule.kind == "at") and (.deleteAfterRun == true)) | not) ] | length
+        end' 2>/dev/null || echo "?")
       if [[ "$EXPECTED_CRONS" == "?" || "$LOADED_CRONS" == "?" ]]; then
         fail_check "Main: cron count check failed (expected=$EXPECTED_CRONS loaded=$LOADED_CRONS) — could not parse JSON. Raw output: $LOADED_RAW"
       elif [[ "$LOADED_CRONS" == "$EXPECTED_CRONS" ]]; then
