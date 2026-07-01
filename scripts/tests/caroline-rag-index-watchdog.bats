@@ -59,6 +59,7 @@ run_wd() {
     CAROLINE_RAG_STATUS_FILE="$STATUS" \
     CAROLINE_RAG_STATE_FILE="$STATE" \
     CAROLINE_RAG_LOCKFILE="$LOCK" \
+    CAROLINE_RAG_ALERT_TS_FILE="$TEST_TMPDIR/last-alert-ts" \
     OPENCLAW_BIN="$OPENCLAW_STUB" \
     "$SCRIPT" "$@"
 }
@@ -166,12 +167,18 @@ exit 0
 STUB
   chmod +x "$TEST_TMPDIR/bin/openclaw"
 
+  # RESTART_EPOCH=1 (1970) disables the post-restart grace so the red page fires
+  # deterministically; without it the script would probe real systemctl on the
+  # CI host. ALERT_TS_FILE stays in TEST_TMPDIR so the resolve path never touches
+  # /var/lib state.
   run env \
     CAROLINE_RAG_SKIP_HOST_GUARD=1 \
     CAROLINE_RAG_STATE_FILE="$STATE" \
     CAROLINE_RAG_LOCKFILE="$LOCK" \
     CAROLINE_RAG_HEAL_LOG="$TEST_TMPDIR/heal-history" \
     CAROLINE_RAG_FLAP_STATE="$TEST_TMPDIR/last-flap" \
+    CAROLINE_RAG_ALERT_TS_FILE="$TEST_TMPDIR/last-alert-ts" \
+    CAROLINE_RAG_RESTART_EPOCH=1 \
     OPENCLAW_BIN="$TEST_TMPDIR/bin/openclaw" \
     MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-stub" \
     "$SCRIPT"
@@ -241,4 +248,211 @@ STUB
   [ "$status" -eq 0 ]
   [[ "$output" == *"healthy"* ]]
   [ ! -f "$STATE" ]
+}
+
+# An openclaw stub whose index is ALWAYS paused (the heal 'runs' rc 0 but never
+# grounds), driving the red-page path. `grep -q index` catches BOTH heal forms
+# ('index --force' and 'status --index'); 'status --deep' (detection) does not.
+write_paused_stub() {
+  cat > "$TEST_TMPDIR/bin/openclaw" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$OC_CALLS"
+if printf '%s\n' "\$@" | grep -q index; then echo rebuilt; exit 0; fi
+if printf '%s\n' "\$@" | grep -q status; then
+  printf 'Embeddings: ready\nVector search: paused until memory is rebuilt\nIndex identity: index metadata is missing\nIssues:\n'
+  exit 0
+fi
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+}
+
+@test "grace: red page is DEFERRED within the post-restart grace window" {
+  command -v flock >/dev/null 2>&1 || skip "flock not available on this host"
+  write_paused_stub
+  local now; now="$(date +%s)"
+  run env \
+    CAROLINE_RAG_SKIP_HOST_GUARD=1 \
+    CAROLINE_RAG_STATE_FILE="$STATE" \
+    CAROLINE_RAG_LOCKFILE="$LOCK" \
+    CAROLINE_RAG_HEAL_LOG="$TEST_TMPDIR/heal-history" \
+    CAROLINE_RAG_FLAP_STATE="$TEST_TMPDIR/last-flap" \
+    CAROLINE_RAG_ALERT_TS_FILE="$TEST_TMPDIR/last-alert-ts" \
+    CAROLINE_RAG_GRACE_SECS=300 \
+    CAROLINE_RAG_RESTART_EPOCH="$((now - 30))" \
+    OPENCLAW_BIN="$TEST_TMPDIR/bin/openclaw" \
+    MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-stub" \
+    "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"within post-restart grace"* ]]
+  # The heal STILL ran (repair is never skipped) ...
+  grep -q "index" "$OC_CALLS"
+  # ... but the noisy mid-restart page is suppressed: no post, no watermark, no ts.
+  ! grep -q "slack send" "$STUB_CALLS"
+  [ ! -f "$STATE" ]
+  [ ! -f "$TEST_TMPDIR/last-alert-ts" ]
+}
+
+@test "grace: red page FIRES when the last restart is older than the window" {
+  command -v flock >/dev/null 2>&1 || skip "flock not available on this host"
+  write_paused_stub
+  local now; now="$(date +%s)"
+  run env \
+    CAROLINE_RAG_SKIP_HOST_GUARD=1 \
+    CAROLINE_RAG_STATE_FILE="$STATE" \
+    CAROLINE_RAG_LOCKFILE="$LOCK" \
+    CAROLINE_RAG_HEAL_LOG="$TEST_TMPDIR/heal-history" \
+    CAROLINE_RAG_FLAP_STATE="$TEST_TMPDIR/last-flap" \
+    CAROLINE_RAG_ALERT_TS_FILE="$TEST_TMPDIR/last-alert-ts" \
+    CAROLINE_RAG_GRACE_SECS=300 \
+    CAROLINE_RAG_RESTART_EPOCH="$((now - 100000))" \
+    OPENCLAW_BIN="$TEST_TMPDIR/bin/openclaw" \
+    MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-stub" \
+    "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STILL unhealthy"* ]]
+  grep -q "slack send" "$STUB_CALLS"
+  [ -f "$STATE" ]
+}
+
+@test "resolve-in-thread: a red page persists its ts; the next healthy tick replies in-thread and clears it" {
+  command -v flock >/dev/null 2>&1 || skip "flock not available on this host"
+  # muso stub echoes a ts on --json so the red page can capture + persist it.
+  cat > "$TEST_TMPDIR/bin/muso" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_CALLS"
+if printf '%s\n' "$@" | grep -q -- --json; then
+  echo '{"channel":"C0ADV2W76G4","ts":"1717171717.123456"}'
+fi
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/muso"
+  local ts_file="$TEST_TMPDIR/last-alert-ts"
+
+  # Tick 1: paused, past the grace window -> red page; ts captured + persisted.
+  write_paused_stub
+  run env \
+    CAROLINE_RAG_SKIP_HOST_GUARD=1 \
+    CAROLINE_RAG_STATE_FILE="$STATE" \
+    CAROLINE_RAG_LOCKFILE="$LOCK" \
+    CAROLINE_RAG_HEAL_LOG="$TEST_TMPDIR/heal-history" \
+    CAROLINE_RAG_FLAP_STATE="$TEST_TMPDIR/last-flap" \
+    CAROLINE_RAG_ALERT_TS_FILE="$ts_file" \
+    CAROLINE_RAG_RESTART_EPOCH=1 \
+    OPENCLAW_BIN="$TEST_TMPDIR/bin/openclaw" \
+    MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-stub" \
+    "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STILL unhealthy"* ]]
+  grep -q -- "--json" "$STUB_CALLS"
+  [ -f "$ts_file" ]
+  grep -q "1717171717.123456" "$ts_file"
+
+  # Tick 2: healthy -> threaded resolve reply on the captured ts; ts file cleared.
+  : > "$STUB_CALLS"
+  printf '%s' "$HEALTHY" > "$STATUS"
+  run env \
+    CAROLINE_RAG_SKIP_HOST_GUARD=1 \
+    CAROLINE_RAG_STATUS_FILE="$STATUS" \
+    CAROLINE_RAG_STATE_FILE="$STATE" \
+    CAROLINE_RAG_LOCKFILE="$LOCK" \
+    CAROLINE_RAG_ALERT_TS_FILE="$ts_file" \
+    OPENCLAW_BIN="$OPENCLAW_STUB" \
+    MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-stub" \
+    "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q "thread-ts 1717171717.123456" "$STUB_CALLS"
+  grep -qi "recovered" "$STUB_CALLS"
+  [ ! -f "$ts_file" ]
+}
+
+@test "main profile heals via 'memory status --index', not 'index --force'" {
+  command -v flock >/dev/null 2>&1 || skip "flock not available on this host"
+  write_flip_stub "$TEST_TMPDIR/healed"
+  run env \
+    CAROLINE_RAG_SKIP_HOST_GUARD=1 \
+    CAROLINE_RAG_PROFILE=main \
+    CAROLINE_RAG_AGENT=cmo \
+    CAROLINE_RAG_STATE_FILE="$STATE" \
+    CAROLINE_RAG_LOCKFILE="$LOCK" \
+    CAROLINE_RAG_HEAL_LOG="$TEST_TMPDIR/heal-history" \
+    CAROLINE_RAG_FLAP_STATE="$TEST_TMPDIR/last-flap" \
+    CAROLINE_RAG_ALERT_TS_FILE="$TEST_TMPDIR/last-alert-ts" \
+    CAROLINE_RAG_RESTART_EPOCH=1 \
+    OPENCLAW_BIN="$TEST_TMPDIR/bin/openclaw" \
+    MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-stub" \
+    "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # main heals with 'status --index' (clears the identity-metadata pause) ...
+  grep -q "memory status --index" "$OC_CALLS"
+  # ... and NEVER with 'index --force'.
+  ! grep -q "index --force" "$OC_CALLS"
+  # A successful heal is silent.
+  ! grep -q "slack send" "$STUB_CALLS"
+}
+
+@test "main: a non-canary agent whose heal FAILS still pages (not silenced by a healthy canary)" {
+  command -v flock >/dev/null 2>&1 || skip "flock not available on this host"
+  # Heal for cmo grounds it (touch marker); heal for cto FAILS (rc 3). Status is
+  # paused until the cmo marker exists, then healthy -- so the canary re-check
+  # reports ok while cto's heal has failed. Without the QA #620 fix this would
+  # take the silent-success path.
+  cat > "$TEST_TMPDIR/bin/openclaw" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$OC_CALLS"
+args="\$*"
+if [[ "\$args" == *"status --index"* || "\$args" == *"index --force"* ]]; then
+  [[ "\$args" == *"--agent cto"* ]] && exit 3            # cto heal fails
+  touch "$TEST_TMPDIR/healed"; echo rebuilt; exit 0       # cmo (and others) heal
+fi
+if [[ "\$args" == *"memory status"* ]]; then
+  if [ -f "$TEST_TMPDIR/healed" ]; then printf 'Embeddings: ready\nVector store: ready\nVector search: ready\nDreaming: off\nIssues:\n'
+  else printf 'Embeddings: ready\nVector search: paused until memory is rebuilt\nIndex identity: index metadata is missing\nIssues:\n'; fi
+  exit 0
+fi
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+
+  run env \
+    CAROLINE_RAG_SKIP_HOST_GUARD=1 \
+    CAROLINE_RAG_PROFILE=main CAROLINE_RAG_AGENT=cmo \
+    CAROLINE_RAG_HEAL_AGENTS='cmo cto' \
+    CAROLINE_RAG_STATE_FILE="$STATE" CAROLINE_RAG_LOCKFILE="$LOCK" \
+    CAROLINE_RAG_HEAL_LOG="$TEST_TMPDIR/heal-history" \
+    CAROLINE_RAG_FLAP_STATE="$TEST_TMPDIR/last-flap" \
+    CAROLINE_RAG_ALERT_TS_FILE="$TEST_TMPDIR/last-alert-ts" \
+    CAROLINE_RAG_RESTART_EPOCH=1 \
+    OPENCLAW_BIN="$TEST_TMPDIR/bin/openclaw" \
+    MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-stub" \
+    "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # cmo (canary) healed, but the failed cto heal must PAGE, not go silent.
+  [[ "$output" == *"STILL unhealthy"* ]]
+  grep -q "slack send" "$STUB_CALLS"
+  grep -q "cto" "$STUB_CALLS"       # the page names the failed agent
+  [ -f "$STATE" ]                    # cooldown watermark advanced (real page)
+}
+
+@test "main heal loops every agent in HEAL_AGENTS" {
+  command -v flock >/dev/null 2>&1 || skip "flock not available on this host"
+  write_flip_stub "$TEST_TMPDIR/healed"
+  run env \
+    CAROLINE_RAG_SKIP_HOST_GUARD=1 \
+    CAROLINE_RAG_PROFILE=main \
+    CAROLINE_RAG_AGENT=cmo \
+    CAROLINE_RAG_HEAL_AGENTS='cmo cto finance' \
+    CAROLINE_RAG_STATE_FILE="$STATE" \
+    CAROLINE_RAG_LOCKFILE="$LOCK" \
+    CAROLINE_RAG_HEAL_LOG="$TEST_TMPDIR/heal-history" \
+    CAROLINE_RAG_FLAP_STATE="$TEST_TMPDIR/last-flap" \
+    CAROLINE_RAG_ALERT_TS_FILE="$TEST_TMPDIR/last-alert-ts" \
+    CAROLINE_RAG_RESTART_EPOCH=1 \
+    OPENCLAW_BIN="$TEST_TMPDIR/bin/openclaw" \
+    MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-stub" \
+    "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q "status --index --agent cmo" "$OC_CALLS"
+  grep -q "status --index --agent cto" "$OC_CALLS"
+  grep -q "status --index --agent finance" "$OC_CALLS"
 }

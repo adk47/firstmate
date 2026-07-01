@@ -2791,6 +2791,68 @@ if needs_target "edge" && [ -x "$SCRIPT_DIR/validate-caroline-rag.sh" ]; then
 fi
 
 # -------------------------------------------------------------------
+# Post-flight: reset Caroline RAG index metadata (main / reference agents)
+# -------------------------------------------------------------------
+# The main gateway's memorySearch agents (cmo/cto/finance/ceo/operations) carry
+# reference/ RAG corpora that ALSO pause on the deploy restart -- but nothing
+# reindexed them before this. Unlike edge, main's pause is an IDENTITY-METADATA
+# pause that `index --force` "completes" but does NOT clear; `memory status
+# --index` resets the metadata and actually clears it (operator-confirmed
+# 2026-07-01). devops has no reference/ dir, so its reset is a harmless no-op
+# (kept to match the operator's validated stopgap loop). Non-fatal but LOUD: the
+# main RAG smoke test below is the backstop. (Follow-up: once PR #619 lands its
+# reindex-*-verify-retry helper, fold this loop onto the generalized helper so
+# main gets the same in-deploy verify+retry as edge.)
+if needs_target "main"; then
+  main_reindex_failed=""
+  # Reference-bearing main agents. KEEP IN LOCKSTEP with the watchdog's
+  # CAROLINE_RAG_HEAL_AGENTS list in scripts/install-aux-units.sh -- a new
+  # main agent with a reference/ corpus must be added to BOTH or the
+  # deploy-time reset and the between-deploy watchdog diverge.
+  for main_agent in cmo cto finance ceo operations devops; do
+    log "Post-flight: resetting Caroline RAG index metadata (main/$main_agent)..."
+    main_reindex_rc=0
+    # Time-box each reset (rc=124 on hang -> the WARNING path, never an
+    # indefinite deploy stall). status --index is lighter than a full --force
+    # re-embed, but bound it the same way for safety.
+    timeout 300 openclaw --profile main memory status --index --agent "$main_agent" || main_reindex_rc=$?
+    if [ "$main_reindex_rc" -eq 0 ]; then
+      log "  main/$main_agent index metadata reset."
+    else
+      log "  WARNING: main/$main_agent reset FAILED (rc=$main_reindex_rc)."
+      main_reindex_failed="$main_reindex_failed $main_agent"
+    fi
+  done
+  if [ -n "$main_reindex_failed" ] && [ -n "${SLACK_WEBHOOK:-}" ]; then
+    curl -s -X POST -H "Content-type: application/json" \
+      --data "{\"text\":\":warning: Caroline RAG main index reset failed for:${main_reindex_failed}. Run: ssh hydra 'for a in${main_reindex_failed}; do openclaw --profile main memory status --index --agent \$a; done'\"}" \
+      "$SLACK_WEBHOOK" >/dev/null || true
+  fi
+fi
+
+# -------------------------------------------------------------------
+# Post-flight: Caroline RAG smoke test (main / cmo canary, non-fatal)
+# -------------------------------------------------------------------
+# Verifies the main reset above actually cleared the pause. cmo is the canary --
+# a restart pauses all main agents' indexes together, so one grounded agent
+# confirms the profile. A still-paused main index -> Slack, not a blocked deploy.
+if needs_target "main" && [ -x "$SCRIPT_DIR/validate-caroline-rag.sh" ]; then
+  log "Post-flight: Caroline RAG check (main/cmo canary)..."
+  main_rag_rc=0
+  PROFILE=main AGENT=cmo "$SCRIPT_DIR/validate-caroline-rag.sh" || main_rag_rc=$?
+  if [ "$main_rag_rc" -eq 0 ]; then
+    log "  Caroline RAG main check passed."
+  else
+    log "  Caroline RAG main check FAILED (rc=$main_rag_rc). Continuing deploy."
+    if [ -n "${SLACK_WEBHOOK:-}" ]; then
+      curl -s -X POST -H "Content-type: application/json" \
+        --data "{\"text\":\":warning: Caroline RAG main post-deploy check failed (rc=$main_rag_rc). Run: ssh hydra PROFILE=main AGENT=cmo ${DEPLOY_PATH}/scripts/validate-caroline-rag.sh\"}" \
+        "$SLACK_WEBHOOK" >/dev/null || true
+    fi
+  fi
+fi
+
+# -------------------------------------------------------------------
 # Step 9: Post deploy status
 # -------------------------------------------------------------------
 COMMIT_SHA=$(git -C "$HYDRA_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")

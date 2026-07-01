@@ -19,6 +19,10 @@ PROFILE="${PROFILE:-edge}"
 AGENT="${AGENT:-support}"
 FAILURES=0
 
+# Remediation hint for a paused/empty index is per-profile: main's identity-
+# metadata pause is cleared by `status --index`, NOT `index --force`.
+if [ "$PROFILE" = "main" ]; then HEAL_HINT="memory status --index"; else HEAL_HINT="memory index --force"; fi
+
 pass() { echo "OK: $*"; }
 fail() { echo "FAIL: $*"; FAILURES=$((FAILURES + 1)); }
 
@@ -39,10 +43,17 @@ else
   fail "vector store not ready (sqlite-vec extension missing?)"
 fi
 
-if echo "$status_output" | grep -q "Dreaming: off"; then
-  pass "dreaming confirmed off"
-else
-  fail "dreaming not reporting off (check memory-core.dreaming.enabled)"
+# Dreaming is a memory-core CONFIG toggle, not a pause signal (the watchdog's
+# health classifier deliberately doesn't check it). edge/support disables it for
+# the customer-RAG use case; other profiles' dreaming state is out of scope for a
+# RAG-pause smoke test, so only hard-assert it there -- the retrieval check below
+# is the definitive pause detector for every profile.
+if [ "$PROFILE/$AGENT" = "edge/support" ]; then
+  if echo "$status_output" | grep -q "Dreaming: off"; then
+    pass "dreaming confirmed off"
+  else
+    fail "dreaming not reporting off (check memory-core.dreaming.enabled)"
+  fi
 fi
 
 # 2. Issues block must be empty
@@ -71,7 +82,7 @@ assert_retrieval() {
   if echo "$out" | grep -qF "$want"; then
     pass "retrieval hit $want"
   elif echo "$out" | grep -q "No matches"; then
-    fail "retrieval No matches for '$query' (want $want; index empty/paused? run: openclaw memory index --force --agent $AGENT --profile $PROFILE)"
+    fail "retrieval No matches for '$query' (want $want; index empty/paused? run: openclaw $HEAL_HINT --agent $AGENT --profile $PROFILE)"
   else
     fail "retrieval missed $want for '$query' (first 200 chars): ${out:0:200}"
   fi
@@ -93,13 +104,25 @@ assert_retrieval_soft() {
 }
 
 # Hard assertions: stable doctrine files. A miss = a partial/paused index = deploy FAIL.
-assert_retrieval "what happens to my founding member status if my payment fails" "founding-member.md"
-assert_retrieval "how do music credits work for my recordings and tracks" "credits-and-profiles.md"
-assert_retrieval "what is the difference between the Pro and Business subscription plans" "subscriptions-and-billing.md"
-assert_retrieval "I tried to claim my profile but nothing is happening" "common-issues.md"
-# active-incidents.md is TRANSIENT by design (sections deleted when an incident
-# ends), so its probe is SOFT -- a miss here must not false-fail every deploy.
-assert_retrieval_soft "why are my stream counts frozen and not updating" "active-incidents.md"
+# The query->file pairs are per (profile, agent): edge/support probes the customer
+# KB; main/<agent> probes that agent's workspaces/<agent>/reference/ corpus.
+case "$PROFILE/$AGENT" in
+  main/cmo)
+    # cmo canary for the main gateway. workspaces/cmo/reference/b2b-ads-pipeline.md
+    # ("# B2B Muso Ads Pipeline") is stable doctrine -- "NocoDB = source of truth
+    # for leads", "the B2B-Ads-Clio lead pipeline".
+    assert_retrieval "how does the B2B ads lead pipeline work and what is the source of truth for leads" "b2b-ads-pipeline.md"
+    ;;
+  *)  # edge/support (default): the customer-facing knowledge base.
+    assert_retrieval "what happens to my founding member status if my payment fails" "founding-member.md"
+    assert_retrieval "how do music credits work for my recordings and tracks" "credits-and-profiles.md"
+    assert_retrieval "what is the difference between the Pro and Business subscription plans" "subscriptions-and-billing.md"
+    assert_retrieval "I tried to claim my profile but nothing is happening" "common-issues.md"
+    # active-incidents.md is TRANSIENT by design (sections deleted when an incident
+    # ends), so its probe is SOFT -- a miss here must not false-fail every deploy.
+    assert_retrieval_soft "why are my stream counts frozen and not updating" "active-incidents.md"
+    ;;
+esac
 
 if [ "$FAILURES" -eq 0 ]; then
   echo "All Caroline RAG checks passed."

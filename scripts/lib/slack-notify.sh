@@ -140,3 +140,40 @@ slack_notify_payload_file() {
 slack_notify_payload_file_status() {
   _slack_post_payload "$1"
 }
+
+# slack_notify_payload_file_ts <path-to-json>
+# Like slack_notify_payload_file_status (0 only on a confirmed post) but ALSO
+# echoes the delivered message ts on stdout (empty on failure) so the caller can
+# thread a later reply onto it. Plain-text only (channel + text [+ thread_ts]
+# [+ no-unfurl]); NO Block Kit -- keep this narrow so it stays additive and does
+# not disturb _slack_post_payload, which release.sh depends on. Mirrors the
+# ts-capture idiom in clickup-sla-digest.sh (muso slack send --json | jq .ts).
+slack_notify_payload_file_ts() {
+  local payload_file="$1"
+  [ -r "$payload_file" ] || return 1
+  slack_load_env devops || return 1
+
+  local channel text thread_ts
+  channel=$(jq -r '.channel // empty' "$payload_file" 2>/dev/null) || return 1
+  [ -n "$channel" ] || return 1
+  text=$(jq -r '.text // empty' "$payload_file" 2>/dev/null)
+  thread_ts=$(jq -r '.thread_ts // empty' "$payload_file" 2>/dev/null)
+
+  local args=(slack send --bot devops --channel "$channel"
+    --requester "$(_slack_requester)" --json)
+  [ -n "$text" ] && args+=(--text "$text")
+  [ -n "$thread_ts" ] && args+=(--thread-ts "$thread_ts")
+  if jq -e '.unfurl_links == false or .unfurl_media == false' "$payload_file" >/dev/null 2>&1; then
+    args+=(--no-unfurl)
+  fi
+
+  # Capture stdout (only stderr -> /dev/null) so the {channel, ts} JSON is
+  # parseable. muso exit code IS the delivery status (it decodes Slack's
+  # HTTP-200 {ok:false} trap), so only emit a ts on a confirmed post.
+  local resp status=0
+  resp="$("$MUSO_BIN" "${args[@]}" 2>/dev/null)" || status=$?
+  if [ "$status" -eq 0 ]; then
+    printf '%s' "$resp" | jq -r '.ts // empty' 2>/dev/null || true
+  fi
+  return "$status"
+}

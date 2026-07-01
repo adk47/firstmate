@@ -864,7 +864,15 @@ cat > /etc/cron.d/caroline-rag-index-watchdog << CAROLINERAGWD
 # PATH so cron finds jq/flock/mktemp/timeout (cron's default is a bare
 # /usr/bin:/bin; muso lives in /usr/local/bin). See muso-cli-contract-gotchas.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# edge/support: heals via 'index --force'.
 */10 * * * * root $HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh >> /var/log/caroline-rag-index-watchdog.log 2>&1
+# main: same watchdog, staggered 5 min so the two heavy heals don't collide on
+# the embedding provider, with DISTINCT lock/state/heal/flap/ts files so the two
+# instances never clobber each other's watermark or serialize on one flock.
+# Detects on the cmo canary, heals the whole reference-bearing set; HEAL_CMD
+# auto-derives to 'status --index' from PROFILE=main. CAROLINE_RAG_HEAL_AGENTS
+# below must stay IN LOCKSTEP with the deploy-time reset loop in scripts/deploy.sh.
+5-59/10 * * * * root CAROLINE_RAG_PROFILE=main CAROLINE_RAG_AGENT=cmo CAROLINE_RAG_HEAL_AGENTS='cmo cto finance ceo operations devops' CAROLINE_RAG_LOCKFILE=/var/run/caroline-rag-index-watchdog-main.lock CAROLINE_RAG_STATE_FILE=/var/lib/caroline-rag-index-watchdog/last-alert-main CAROLINE_RAG_HEAL_LOG=/var/lib/caroline-rag-index-watchdog/heal-history-main CAROLINE_RAG_FLAP_STATE=/var/lib/caroline-rag-index-watchdog/last-flap-alert-main CAROLINE_RAG_ALERT_TS_FILE=/var/lib/caroline-rag-index-watchdog/last-alert-ts-main $HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh >> /var/log/caroline-rag-index-watchdog-main.log 2>&1
 CAROLINERAGWD
 chmod 644 /etc/cron.d/caroline-rag-index-watchdog
 
