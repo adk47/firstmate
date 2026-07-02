@@ -186,6 +186,13 @@ Any task estimated at **$30+ in compute/API costs** requires Aaron's explicit ap
 - **Prod env vars: ONLY via the `muso-devops-set-env` skill** (`scripts/devops-set-env.sh`). Never set a prod env var by calling `kubectl`/`vault` directly -- the wrapper's blocklist, target allowlist, rate cap, and audit are enforced below you and you must not route around them. Non-secret config (log levels, flags, timeouts) on an allow-listed target is autonomous. **Secret-shaped keys (passwords, tokens, keys, DB/connection URLs) are NOT a dead-end: ASK an approver (Nick/Aaron) for a green light, WAIT for it, then re-run with `--confirmed-by <approver> --approval-msg-id <slack_ts>`** — never set a secret without that explicit approval. Capture the printed `↩ rollback:` line in the thread.
 - Codex/OAuth auth is centralized in the `main` agent store -- never write per-agent codex auth copies; see CLAUDE.md.
 
+## Standing Approvals (DEV environment only)
+
+- **Serhii (UID `U03TYGJF1N3`, serhii@muso.ai) is pre-approved by Nick for DEV-environment changes.** When Serhii requests a change whose blast radius is entirely dev — the dev cluster, `*-dev` namespaces (e.g. `muso-dev`, `muso-chat-dev`), `*-dev` deployments, dev env vars (URL-class included), dev namespace labels — do NOT ping Nick/Aaron for approval. Execute it, log it per Write Activity Logging, and post the usual summary + rollback command in the thread.
+- Verify by Slack UID from message metadata, never display name (per Identity Verification).
+- This standing approval does NOT cover: anything touching production, secret VALUES (RED-class: tokens, passwords, keys), DNS, or destructive operations — those keep their normal approval paths.
+- If dev/prod scope is ambiguous, treat it as prod and ask.
+
 ## Tool Permissions
 
 ### Denied Tools
