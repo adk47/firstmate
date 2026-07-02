@@ -2746,17 +2746,18 @@ fi
 # either -- the RAG smoke test that follows is the backstop that fails
 # the post-flight if the index is still broken.
 if needs_target "edge"; then
-  # shellcheck source=lib/reindex-edge-verify-retry.sh
-  source "$SCRIPT_DIR/lib/reindex-edge-verify-retry.sh"
+  # shellcheck source=lib/reindex-verify-retry.sh
+  source "$SCRIPT_DIR/lib/reindex-verify-retry.sh"
   log "Post-flight: rebuilding + verifying Caroline RAG index (edge/support)..."
   # Force a rebuild, then VERIFY the index didn't lose the busy-gateway race and
   # re-pause, retrying once if it did. A bare --force here re-paused the index in
   # PR #618's live verify (2026-07-01), leaving retrieval ungrounded until the
-  # 10-min watchdog. reindex_edge_verify_retry time-boxes each --force (rc=124 on
-  # a hang, never an indefinite stall) and returns non-zero only if the index is
-  # STILL paused after the retry. Non-fatal but LOUD: the RAG smoke test below is
-  # the authoritative backstop.
-  if reindex_edge_verify_retry edge support; then
+  # 10-min watchdog. reindex_verify_retry time-boxes each heal (rc=124 on a hang,
+  # never an indefinite stall) and returns non-zero only if the index is STILL
+  # paused after the retry (edge heals via `index --force`; HEAL_CMD derives from
+  # the profile). Non-fatal but LOUD: the RAG smoke test below is the
+  # authoritative backstop.
+  if reindex_verify_retry edge support; then
     log "  Caroline RAG index rebuilt and grounded."
   else
     log "  WARNING: Caroline RAG index still paused after rebuild + retry. Continuing deploy; the 10-min watchdog will heal it and the RAG smoke test below will catch a still-broken index."
@@ -2791,41 +2792,40 @@ if needs_target "edge" && [ -x "$SCRIPT_DIR/validate-caroline-rag.sh" ]; then
 fi
 
 # -------------------------------------------------------------------
-# Post-flight: reset Caroline RAG index metadata (main / reference agents)
+# Post-flight: rebuild + verify Caroline RAG index (main / reference agents)
 # -------------------------------------------------------------------
 # The main gateway's memorySearch agents (cmo/cto/finance/ceo/operations) carry
-# reference/ RAG corpora that ALSO pause on the deploy restart -- but nothing
-# reindexed them before this. Unlike edge, main's pause is an IDENTITY-METADATA
-# pause that `index --force` "completes" but does NOT clear; `memory status
-# --index` resets the metadata and actually clears it (operator-confirmed
-# 2026-07-01). devops has no reference/ dir, so its reset is a harmless no-op
-# (kept to match the operator's validated stopgap loop). Non-fatal but LOUD: the
-# main RAG smoke test below is the backstop. (Follow-up: once PR #619 lands its
-# reindex-*-verify-retry helper, fold this loop onto the generalized helper so
-# main gets the same in-deploy verify+retry as edge.)
+# reference/ RAG corpora that ALSO pause on the deploy restart. Uses the SAME
+# shared verify+retry helper as edge, but main heals via `status --index` (its
+# pause is an IDENTITY-METADATA pause that `index --force` "completes" but does
+# NOT clear; `status --index` resets the metadata and actually clears it --
+# operator-confirmed 2026-07-01; HEAL_CMD derives from PROFILE=main). devops has
+# no reference/ dir, so its heal is a harmless no-op (kept to match the operator's
+# validated stopgap loop). Non-fatal but LOUD: the main RAG smoke test below is
+# the backstop.
 if needs_target "main"; then
+  # shellcheck source=lib/reindex-verify-retry.sh
+  source "$SCRIPT_DIR/lib/reindex-verify-retry.sh"
   main_reindex_failed=""
   # Reference-bearing main agents. KEEP IN LOCKSTEP with the watchdog's
   # CAROLINE_RAG_HEAL_AGENTS list in scripts/install-aux-units.sh -- a new
   # main agent with a reference/ corpus must be added to BOTH or the
-  # deploy-time reset and the between-deploy watchdog diverge.
+  # deploy-time reindex and the between-deploy watchdog diverge.
   for main_agent in cmo cto finance ceo operations devops; do
-    log "Post-flight: resetting Caroline RAG index metadata (main/$main_agent)..."
-    main_reindex_rc=0
-    # Time-box each reset (rc=124 on hang -> the WARNING path, never an
-    # indefinite deploy stall). status --index is lighter than a full --force
-    # re-embed, but bound it the same way for safety.
-    timeout 300 openclaw --profile main memory status --index --agent "$main_agent" || main_reindex_rc=$?
-    if [ "$main_reindex_rc" -eq 0 ]; then
-      log "  main/$main_agent index metadata reset."
+    log "Post-flight: rebuilding + verifying Caroline RAG index (main/$main_agent)..."
+    # reindex_verify_retry time-boxes each heal (rc=124 on hang -> WARNING path),
+    # verifies the index is grounded, and retries once. Returns non-zero only if
+    # STILL paused after the retry.
+    if reindex_verify_retry main "$main_agent"; then
+      log "  main/$main_agent index rebuilt and grounded."
     else
-      log "  WARNING: main/$main_agent reset FAILED (rc=$main_reindex_rc)."
+      log "  WARNING: main/$main_agent still paused after rebuild + retry."
       main_reindex_failed="$main_reindex_failed $main_agent"
     fi
   done
   if [ -n "$main_reindex_failed" ] && [ -n "${SLACK_WEBHOOK:-}" ]; then
     curl -s -X POST -H "Content-type: application/json" \
-      --data "{\"text\":\":warning: Caroline RAG main index reset failed for:${main_reindex_failed}. Run: ssh hydra 'for a in${main_reindex_failed}; do openclaw --profile main memory status --index --agent \$a; done'\"}" \
+      --data "{\"text\":\":warning: Caroline RAG main index still paused after post-deploy rebuild + retry for:${main_reindex_failed}. Run: ssh hydra 'for a in${main_reindex_failed}; do openclaw --profile main memory status --index --agent \$a; done'\"}" \
       "$SLACK_WEBHOOK" >/dev/null || true
   fi
 fi
@@ -2833,7 +2833,7 @@ fi
 # -------------------------------------------------------------------
 # Post-flight: Caroline RAG smoke test (main / cmo canary, non-fatal)
 # -------------------------------------------------------------------
-# Verifies the main reset above actually cleared the pause. cmo is the canary --
+# Verifies the main rebuild above actually cleared the pause. cmo is the canary --
 # a restart pauses all main agents' indexes together, so one grounded agent
 # confirms the profile. A still-paused main index -> Slack, not a blocked deploy.
 if needs_target "main" && [ -x "$SCRIPT_DIR/validate-caroline-rag.sh" ]; then
