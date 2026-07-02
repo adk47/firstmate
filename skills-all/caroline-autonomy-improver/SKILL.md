@@ -57,8 +57,11 @@ quiet week with nothing grounded is a SUCCESS — it opens no PR and says so.
   the stated threshold (§Phase 2). The relevant statistic is a *false-positive /
   refused-but-should-have-applied* rate — NOT a raw route rate (a high route rate
   with reason "no corroboration" is the gate working correctly, not a reason to
-  loosen). No qualifying stat ⇒ the idea goes in the PR body as a proposal, it does
-  NOT get coded.
+  loosen). For `credits_verify`, that statistic is the digest's **routed-then-later-
+  approved count** (`route_reconcile.approved` in the digest JSON; rendered "*Of the
+  credits routed to a human (7d): N later approved by a human…*"); it is the
+  false-refusal signal, and a raw route count is not. No qualifying stat ⇒ the idea
+  goes in the PR body as a proposal, it does NOT get coded.
 - **Material-findings gate.** The default outcome is **no PR.** Open one only when
   there is at least one qualifying edit (§Phase 3). Say so plainly on a quiet week.
 - **File-scope allowlist, enforced fail-closed before the commit** (§Phase 4). The
@@ -140,7 +143,7 @@ the behavior-stat number), the concrete edit, and a class.
   | Lever | Edit target | Reviewer | Required grounding |
   |---|---|---|---|
   | Raise action-request budget (2/session) | `workspaces/support/SOUL.md:265,280` (+ `skills/action-request`) | **Nick** | <5% of sessions legitimately hit the 2-cap, ~0 spam — AND a low self-serve reopen rate (a high reopen rate argues AGAINST) |
-  | Broaden `credits_verify` beyond catalog-corroboration | server-side muso capability gate (likely `Muso-AI/muso-cli`, not hydra) | **Aaron** | a false-REFUSAL audit showing corroborated credits being routed — NOT a raw route rate whose reason is "no corroboration" |
+  | Broaden `credits_verify` corroboration **sources** (never drop corroboration) | server-side muso capability gate (likely `Muso-AI/muso-cli`, not hydra) | **Aaron** | the digest's **routed-then-later-approved count** (`route_reconcile.approved`) sustained above ~0 — a real false-REFUSAL signal, NOT a raw route rate whose reason is "no corroboration" |
   | Relax `profiles_consolidate` name guard (e.g. normalize trailing punctuation/whitespace/case before the equality check) | server-side muso capability gate (likely `Muso-AI/muso-cli`) | **Aaron** | documented false-positive refusals (e.g. "Name ." vs "Name"); conservative normalization only, never fuzzy/nickname matching |
   | Raise `remove_credits` caps | server-side gate (+ `TOOLS.md` flag-only) | **Aaron** | legitimate customers hitting the cap, ~0 abuse |
   | Enable the riskAssessment judge (LLM judge + configurable turn cap + broadened RISK_RULES) | `openclaw-edge.json` (`channels.intercom.accounts.default.riskAssessment` block) | **Aaron** | a real over/under-escalation signal — decide on policy, not on a quiet week |

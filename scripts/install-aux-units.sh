@@ -507,6 +507,17 @@ After=network-online.target
 Type=oneshot
 EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/edge.env
+# Route reconciliation looks up each routed credit's CURRENT status through the
+# sanctioned READ-ONLY muso-read wrapper (no new credential; MUSO_ADMIN_EMAIL/
+# PASSWORD come from edge.env above). Pin the rsync-target repo copy — NOT a
+# per-profile managed-skills path, which deploy.sh can rm -rf if the skill's
+# profile classification changes. MUSO_BIN is pinned like every other
+# muso-invoking unit here: systemd's unit PATH does not reliably include
+# /usr/local/bin. If either pin is wrong the digest shows routed credits as
+# "unresolved" (visible + safe), never crashes. Confirm on node-8:
+#   bash /opt/hydra/skills-all/muso-read/scripts/muso-read.sh api GET '/admin/credit-requests?profilesIds=<uuid>&status=approved&limit=1' --json
+Environment=MUSO_BIN=/usr/local/bin/muso
+Environment="CAROLINE_DIGEST_MUSO_READ=bash $HYDRA_ROOT/skills-all/muso-read/scripts/muso-read.sh"
 ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/caroline-behavior-digest.py --post
 CARODIGESTSVC
 

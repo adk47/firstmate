@@ -40,6 +40,14 @@ Surfaces:
     AUTONOMOUSLY APPROVED vs routed to a human, 7d + all-time, real customers.
     (routed = the verb refused and handed off; it is NOT the same as 'asked the
     customer for more proof', a conversational step with no counter.)
+  * ROUTE RECONCILIATION (7d, --post only): of the credits Caroline ROUTED to a
+    human, how many a human LATER approved (recoverable IF catalog corroboration
+    were broadened -- NOT proof she was wrong), how many are still pending, how many
+    were withdrawn/reverted. This is the false-refusal audit the autonomy-improver
+    requires before broadening the gate: it says whether the route rate is losing
+    autonomy or protecting integrity. Looks up each routed request's CURRENT status
+    through the read-only muso-read admin GET (no new credential); bounded, per-
+    profile fail-soft. Skipped (rendered "not checked") in --check mode.
   * WHY she routed/refused: the top distinct `result` reasons.
   * REOPEN-AFTER-AUTO-CLOSE (7d): of conversations the auto-close loop silently
     closed, how many the customer replied to afterwards -- the quality signal on
@@ -92,6 +100,11 @@ Env:
   SLACK_NOTIFY_CONFIG            optional, default /root/.openclaw-main/openclaw.json
   CAROLINE_DIGEST_APPLY_CEILING  optional, default 40 (applies/24h before anomaly)
   CAROLINE_DIGEST_REOPEN_MAX     optional, default 300 (max Intercom GETs/run/source)
+  CAROLINE_DIGEST_MUSO_READ      optional, default "muso-read.sh" -- command prefix
+                                 (shlex-split) for the read-only muso-read admin GET
+                                 used by route reconciliation; the systemd unit pins
+                                 the deployed path
+  CAROLINE_DIGEST_RECONCILE_MAX  optional, default 60 (max profiles reconciled/run)
   CAROLINE_DIGEST_NOW            optional, epoch override (tests)
   CAROLINE_DIGEST_SKIP_HOST_GUARD optional, "1" to run off ovh-node-8 (tests)
 
@@ -108,10 +121,13 @@ import argparse
 import calendar
 import json
 import os
+import shlex
 import socket
+import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 INTERCOM_API = "https://api.intercom.io"
@@ -425,6 +441,134 @@ def misconfig_counts(wrapper_recs):
     return out
 
 
+def routed_credit_requests(wrapper_recs):
+    """Real-customer credits_verify records the muso gate ROUTED to a human
+    (wrapper status refused_route_to_human), each carrying the request_id +
+    profile_id that verify-credit.sh _audit stamps. Returns [(request_id,
+    profile_id)] deduped by request_id (latest attempt wins). Excluded:
+    test/synthetic actors (go-live probes, not customer service) and any request
+    with a LATER apply-mode success record -- a route Caroline subsequently retried
+    and applied herself ended in autonomy, not a human hand-off, and counting its
+    (now-approved) status as 'a human later approved it' would inflate exactly the
+    recoverable/false-refusal stat the autonomy-improver gates loosening on."""
+    latest = {}
+    resolved = {}  # rid -> latest ts of an apply-mode success (ended in autonomy)
+    for r in wrapper_recs:
+        if r.get("tool") != "credits_verify":
+            continue
+        rid = str(r.get("request_id") or "")
+        if not rid:
+            continue
+        status = str(r.get("status") or "")
+        ts = r.get("_ts") or 0
+        if r.get("mode") == "apply" and status and status not in WRAPPER_NONSUCCESS:
+            resolved[rid] = max(ts, resolved.get(rid, 0))
+            continue
+        if status not in WRAPPER_REFUSED:
+            continue
+        if is_test_actor(r.get("actor_identity")):
+            continue
+        pid = str(r.get("profile_id") or "")
+        if not pid:
+            continue
+        if rid not in latest or ts >= latest[rid][1]:
+            latest[rid] = (pid, ts)
+    return [(rid, pid) for rid, (pid, ts) in latest.items()
+            if resolved.get(rid, -1) < ts]
+
+
+# Reconciliation network seam (module-level so tests monkeypatch it, never a real
+# subprocess). The reconciler reads a credit-request's CURRENT status through the
+# SANCTIONED read-only muso-read wrapper (`muso-read.sh api GET <route> --json`) --
+# reject-by-default, centrally authed via the deployed muso binary, so the digest
+# gains NO new credential (it already only holds an Intercom read token).
+def muso_read_api_get(route, wrapper):
+    """Run the read-only muso-read wrapper for one admin-API GET route; return
+    parsed JSON. `wrapper` is a command prefix (shlex-split); `route` is passed as
+    a single argv element (list argv -> no shell, no injection). Raises on a
+    non-zero exit or unparseable body -- the caller buckets that as an error."""
+    argv = shlex.split(wrapper) + ["api", "GET", route, "--json"]
+    out = subprocess.run(argv, capture_output=True, text=True, timeout=20)
+    if out.returncode != 0:
+        raise RuntimeError(
+            f"muso-read exited {out.returncode}: {(out.stderr or '')[:200].strip()}")
+    return json.loads(out.stdout or "null")
+
+
+CR_PAGE_LIMIT = 1000  # one page per (profile,status); a FULL page = possible truncation
+
+
+def credit_request_ids(profile_id, status, wrapper):
+    """Set of credit-request ids for one profile filtered by `status`, via the
+    read-only muso-read admin GET (the same
+    /admin/credit-requests?profilesIds=&status= read credit_verification_check
+    uses; `.data.items[].id` is the cr_id). Monkeypatched in tests. Returns a set
+    of str. A full page raises (mirrors credit-verification-check's fetch-MAX+1
+    truncation guard): silently missing a routed id off the page end would
+    misbucket it as withdrawn/reverted -- better the profile lands in `errors`
+    (visible as unresolved) than a corrupted false-refusal stat."""
+    route = ("/admin/credit-requests?profilesIds="
+             + urllib.parse.quote(str(profile_id), safe="")
+             + "&status=" + urllib.parse.quote(str(status), safe="")
+             + f"&limit={CR_PAGE_LIMIT}")
+    body = muso_read_api_get(route, wrapper)
+    # A 200 whose body lacks the expected .data.items ARRAY is schema drift, NOT
+    # an empty result (mirrors credit-verification-check.ts): falling back to []
+    # would misbucket every routed id on this profile as withdrawn/reverted.
+    # Raise -> the profile lands in `errors` (visible as unresolved) instead.
+    items = ((body or {}).get("data") or {}).get("items") if isinstance(body, dict) else None
+    if not isinstance(items, list):
+        raise RuntimeError(
+            f"credit-requests response missing data.items for status={status}; "
+            "schema drift -- refusing to bucket")
+    if len(items) >= CR_PAGE_LIMIT:
+        raise RuntimeError(
+            f"credit-requests page full ({len(items)} >= {CR_PAGE_LIMIT}) for "
+            f"status={status}; refusing a possibly-truncated bucket")
+    return {str(it.get("id")) for it in items
+            if isinstance(it, dict) and it.get("id")}
+
+
+def reconcile_routes(routed, wrapper, cap):
+    """Look up the CURRENT disposition of each routed credit and bucket it -- the
+    'was the route recoverable?' signal (the false-refusal audit the improver skill
+    requires before broadening the gate). For each routed (request_id, profile_id):
+      approved -> a human LATER approved it. Recoverable IF catalog corroboration
+                  were broadened; NOT proof Caroline was wrong -- the human may have
+                  used external-catalog evidence she structurally cannot (and should
+                  not) act on.
+      pending  -> still user_verification_needed (no human decision yet).
+      other    -> neither (reverted to unverified / withdrawn / not found).
+    Grouped by profile (one approved + one UVN GET per profile), bounded to `cap`
+    profiles; the overflow AND any per-profile lookup failure land in `errors` so
+    truncation is VISIBLE, never a silent undercount. Returns
+    {checked, approved, pending, other, errors}."""
+    by_profile = {}
+    for rid, pid in routed:
+        by_profile.setdefault(pid, []).append(rid)
+    res = {"checked": 0, "approved": 0, "pending": 0, "other": 0, "errors": 0}
+    profiles = list(by_profile)
+    for pid in profiles[:cap]:
+        rids = by_profile[pid]
+        try:
+            approved_set = credit_request_ids(pid, "approved", wrapper)
+            uvn_set = credit_request_ids(pid, "user_verification_needed", wrapper)
+        except Exception:  # noqa: BLE001 -- one bad profile must not fail the digest
+            res["errors"] += len(rids)
+            continue
+        for rid in rids:
+            res["checked"] += 1
+            if rid in approved_set:
+                res["approved"] += 1
+            elif rid in uvn_set:
+                res["pending"] += 1
+            else:
+                res["other"] += 1
+    for pid in profiles[cap:]:  # profiles beyond the cap -> visible as unresolved
+        res["errors"] += len(by_profile[pid])
+    return res
+
+
 def reopen_rate(events, token, now, window, cap):
     """Of (conv_id, anchor_ts) events within `window`, how many had a customer
     (non-admin) message strictly AFTER anchor_ts. Returns (checked, reopened,
@@ -598,9 +742,37 @@ def _uvn_line(cv7, cva):
             f"everything else is a human decision.")
 
 
+def _reconcile_line(reconcile, routed_count):
+    """Render the disposition of the credits Caroline ROUTED to a human -- the
+    honest 'was the route recoverable?' number. Turns an ambiguous 'N routed' into
+    'A a human later approved (recoverable) / P still pending / O withdrawn'.
+    A COMPUTED reconciliation always renders, even if the capability audit's route
+    count disagrees (the sources are different files; a rotated/lagging
+    tier2-audit must not suppress a reconcile that was actually run -- the [n=...]
+    tail carries the reconciled N). With none computed: routes -> an explicit
+    'not checked' (never silently dropped); no routes -> no line."""
+    if reconcile and (reconcile["checked"] or reconcile["errors"]):
+        tail = f" [n={reconcile['checked']} checked"
+        if reconcile["errors"]:
+            tail += f", {reconcile['errors']} unresolved"
+        tail += "]"
+        return ("*Of the credits routed to a human (7d):* "
+                f"{reconcile['approved']} later approved by a human "
+                "(recoverable if catalog corroboration is broadened), "
+                f"{reconcile['pending']} still pending review, "
+                f"{reconcile['other']} withdrawn/reverted." + tail)
+    if routed_count == 0:
+        return None
+    return ("*Of the credits routed to a human (7d):* disposition not checked "
+            "(--check mode, reconciler unconfigured, or no matching wrapper "
+            "records).")
+
+
 def build_digest(s24, s7, s_all, ops, reopen_selfserve, reopen_done, reopen_close,
-                 anomalies, prev7):
-    """Compose the #cs_chats digest text. Pure (no I/O)."""
+                 anomalies, prev7, reconcile=None):
+    """Compose the #cs_chats digest text. Pure (no I/O). `reconcile` (optional,
+    trailing so the historical positional callers keep working) is the routed-credit
+    disposition dict from reconcile_routes, or None -> the line renders 'not checked'."""
     crit, warn = anomalies
     lines = [":robot_face: *Caroline autonomy — daily behavior digest*"]
 
@@ -617,6 +789,12 @@ def build_digest(s24, s7, s_all, ops, reopen_selfserve, reopen_done, reopen_clos
     if nreal or len(s7["test_actors"]):
         lines.append(f"_{nreal} distinct real customer(s) served autonomously in 7d "
                      f"({len(s7['test_actors'])} test/synthetic excluded)._")
+    # Reframe so the low self-serve-write count is not misread as idleness: the
+    # auto-close loop + proactive notifies are the bulk of the autonomy, and the
+    # credit routes below are integrity-holds (a human decides), not failed writes.
+    lines.append("_Autonomy is mostly the auto-close loop + proactive notifies; "
+                 "self-serve writes are the narrow \"act on the account\" slice, and "
+                 "credit routes are integrity-holds (a human decides), not misses._")
     # Clarify a 0-notify headline WITHOUT over-claiming the cause. The digest can't
     # tell from telemetry whether the notifiers are dry-run or simply post-cold-start
     # with no NEW resolutions yet -- resolve-notify.py seeds its state on the first
@@ -639,6 +817,13 @@ def build_digest(s24, s7, s_all, ops, reopen_selfserve, reopen_done, reopen_clos
 
     lines.append(_uvn_line(s7["per_verb_real"]["credits_verify"],
                            s_all["per_verb_real"]["credits_verify"]))
+    # Reconcile the routed credits against the human's EVENTUAL decision -- the
+    # number that tells whether the route rate is losing autonomy (a human later
+    # approved what Caroline held) or protecting integrity (nobody could approve it).
+    rline = _reconcile_line(reconcile,
+                            s7["per_verb_real"]["credits_verify"]["route_to_human"])
+    if rline:
+        lines.append(rline)
 
     if s24["reasons_real"]:
         top = sorted(s24["reasons_real"].items(), key=lambda kv: kv[1], reverse=True)[:3]
@@ -782,6 +967,93 @@ def _self_test(now):
         globals()["get_conversation"] = saved
     assert (checked, reopened, errors) == (2, 1, 0), (checked, reopened, errors)
 
+    # routed_credit_requests: real routed credit records -> (request_id, profile_id),
+    # deduped by request_id; excluded: test actors, non-routed/non-credit records,
+    # and a route Caroline later RETRIED to an apply-success (ended in autonomy --
+    # its approved status must not inflate the 'human later approved' stat).
+    wrouted = [
+        {"tool": "credits_verify", "status": "refused_route_to_human",
+         "request_id": "R1", "profile_id": "P1", "actor_identity": "a@b.com", "_ts": now - 100},
+        {"tool": "credits_verify", "status": "refused_route_to_human",
+         "request_id": "R2", "profile_id": "P1", "actor_identity": "a@b.com", "_ts": now - 90},
+        {"tool": "credits_verify", "status": "refused_route_to_human",  # test actor -> excluded
+         "request_id": "R3", "profile_id": "P2", "actor_identity": "x@example.com", "_ts": now - 80},
+        {"tool": "credits_verify", "status": "verified",  # not routed -> excluded
+         "request_id": "R4", "profile_id": "P3", "actor_identity": "c@d.com", "_ts": now - 70},
+        {"tool": "credits_verify", "status": "refused_route_to_human",  # routed...
+         "request_id": "R5", "profile_id": "P4", "actor_identity": "e@f.com", "_ts": now - 60},
+        {"tool": "credits_verify", "mode": "apply", "status": "verified",  # ...then retried OK
+         "request_id": "R5", "profile_id": "P4", "actor_identity": "e@f.com", "_ts": now - 50},
+    ]
+    assert sorted(routed_credit_requests(wrouted)) == [("R1", "P1"), ("R2", "P1")], \
+        routed_credit_requests(wrouted)
+    # ...but an apply-success BEFORE the route (stale/idempotent noop, then a fresh
+    # route) does NOT clear the route -- only a LATER success ends it in autonomy.
+    wroute_after = [
+        {"tool": "credits_verify", "mode": "apply", "status": "noop",
+         "request_id": "R6", "profile_id": "P5", "actor_identity": "g@h.com", "_ts": now - 100},
+        {"tool": "credits_verify", "status": "refused_route_to_human",
+         "request_id": "R6", "profile_id": "P5", "actor_identity": "g@h.com", "_ts": now - 40},
+    ]
+    assert routed_credit_requests(wroute_after) == [("R6", "P5")], \
+        routed_credit_requests(wroute_after)
+
+    # reconcile_routes: monkeypatch the credit_request_ids seam (never a subprocess).
+    # P1 has R1 approved + R2 still UVN; a profile whose lookup raises lands in errors;
+    # profiles beyond the cap are surfaced as errors, never silently dropped.
+    def fake_cr_ids(pid, status, wrapper):
+        if pid == "P1" and status == "approved":
+            return {"R1"}
+        if pid == "P1" and status == "user_verification_needed":
+            return {"R2"}
+        raise RuntimeError("boom")
+    saved_cr = globals()["credit_request_ids"]
+    globals()["credit_request_ids"] = fake_cr_ids
+    try:
+        rec = reconcile_routes([("R1", "P1"), ("R2", "P1")], "x", 60)
+        assert rec == {"checked": 2, "approved": 1, "pending": 1, "other": 0, "errors": 0}, rec
+        rec_err = reconcile_routes([("RX", "PBAD")], "x", 60)  # lookup raises -> error, no crash
+        assert rec_err["errors"] == 1 and rec_err["checked"] == 0, rec_err
+        rec_cap = reconcile_routes([("R1", "P1"), ("RY", "PY")], "x", 1)  # cap -> overflow=error
+        assert rec_cap["checked"] == 1 and rec_cap["errors"] >= 1, rec_cap
+    finally:
+        globals()["credit_request_ids"] = saved_cr
+
+    # credit_request_ids: a 200 without a data.items ARRAY is schema drift and must
+    # raise (-> profile lands in errors), never read as an empty/complete bucket;
+    # a genuine empty list and a populated list parse normally.
+    saved_get = globals()["muso_read_api_get"]
+    responses = {}
+    globals()["muso_read_api_get"] = lambda route, wrapper: responses["body"]
+    try:
+        for bad in (None, {}, {"data": {}}, {"data": {"items": "nope"}}, []):
+            responses["body"] = bad
+            try:
+                credit_request_ids("P", "approved", "x")
+                raise AssertionError(f"schema drift must raise, got body={bad!r}")
+            except RuntimeError:
+                pass
+        responses["body"] = {"data": {"items": []}}
+        assert credit_request_ids("P", "approved", "x") == set()
+        responses["body"] = {"data": {"items": [{"id": "CR1"}, {"noid": 1}]}}
+        assert credit_request_ids("P", "approved", "x") == {"CR1"}
+    finally:
+        globals()["muso_read_api_get"] = saved_get
+
+    # _reconcile_line render: recoverable framing + counts; None/nothing-checked ->
+    # explicit "not checked" (never silently dropped); 0 routed -> no line at all.
+    assert _reconcile_line(None, 0) is None
+    assert "not checked" in _reconcile_line(None, 3)
+    rl = _reconcile_line({"checked": 2, "approved": 1, "pending": 1, "other": 0, "errors": 0}, 2)
+    assert "1 later approved by a human" in rl and "recoverable" in rl, rl
+    # A COMPUTED reconciliation renders even when the capability audit's route
+    # count is 0 (different files can lag/rotate independently)...
+    assert "later approved" in _reconcile_line(
+        {"checked": 1, "approved": 1, "pending": 0, "other": 0, "errors": 0}, 0)
+    # ...but an all-zero reconcile dict is 'nothing computed', not a disposition.
+    assert _reconcile_line(
+        {"checked": 0, "approved": 0, "pending": 0, "other": 0, "errors": 0}, 0) is None
+
     # build_digest with the new signature: dominant-action-first headline, the UVN
     # approve/route line, the reopen-after-auto-close line, and the 0-notify
     # clarifier (0 notifies despite closes) -- which must NOT assert "--apply off".
@@ -793,6 +1065,24 @@ def _self_test(now):
     assert "0 routed to a human" in txt, ("UVN route count", txt)
     assert "Reopen-after-auto-close" in txt and "1/5" in txt, ("close-reopen line", txt)
     assert "cold-start seed" in txt and "still dry-run" not in txt, ("0-notify clarifier", txt)
+    assert "integrity-holds" in txt, ("autonomy reframe line present", txt)
+
+    # build_digest with routes present: the reconcile line renders the recoverable
+    # framing when a reconcile dict is supplied, and an explicit "not checked" when
+    # None (routes present but disposition not looked up -- never silently dropped).
+    routed_caps = capability_records([
+        {"tool": "credits_verify", "decision": "refused", "ts": _iso(now - 30),
+         "actor_identity": "real@cust.com", "result": "no corroboration"}])
+    s_routed = summarize(routed_caps, now, DAY)
+    assert s_routed["per_verb_real"]["credits_verify"]["route_to_human"] == 1, s_routed
+    txt2 = build_digest(s_routed, s_routed, s_routed, {"closes_7d": 1, "notifies_7d": 1},
+                        None, None, None, ([], []), {"success": 0},
+                        reconcile={"checked": 1, "approved": 1, "pending": 0,
+                                   "other": 0, "errors": 0})
+    assert "1 later approved by a human" in txt2 and "recoverable" in txt2, ("reconcile line", txt2)
+    txt3 = build_digest(s_routed, s_routed, s_routed, {"closes_7d": 1, "notifies_7d": 1},
+                        None, None, None, ([], []), {"success": 0})
+    assert "disposition not checked" in txt3, ("routes present + None reconcile -> not checked", txt3)
     return True
 
 
@@ -837,6 +1127,12 @@ def main():
                                   "/var/lib/caroline-behavior-digest/state.json")
     apply_ceiling = int(os.environ.get("CAROLINE_DIGEST_APPLY_CEILING", "40"))
     reopen_cap = int(os.environ.get("CAROLINE_DIGEST_REOPEN_MAX", "300"))
+    # Route reconciliation (--post only): the read-only muso-read wrapper command
+    # prefix + a per-run profile cap. Default assumes muso-read.sh is on PATH;
+    # the systemd unit pins the deployed path. Empty -> reconciliation is skipped
+    # (rendered as "not checked"), never a crash.
+    muso_read_bin = os.environ.get("CAROLINE_DIGEST_MUSO_READ", "muso-read.sh")
+    reconcile_cap = int(os.environ.get("CAROLINE_DIGEST_RECONCILE_MAX", "60"))
 
     audit, malformed = read_jsonl(audit_path)
     caps = capability_records(audit)
@@ -850,6 +1146,7 @@ def main():
     misconfig24 = misconfig_counts(wrap24)
     wrap7 = read_wrapper_audits(wrapper_logs, now, 7 * DAY)
     selfserve_events = selfserve_reopen_events(wrap7)
+    routed7 = routed_credit_requests(wrap7)  # credits the muso gate routed to a human
 
     shadow, _ = read_jsonl(shadow_path)
     # close-resolved-conversations.py shadow-logs {id, closed_at(epoch), email,
@@ -886,8 +1183,21 @@ def main():
     prev7 = load_state(digest_state).get("snapshot7_real")
 
     reopen_selfserve = reopen_done = reopen_close = None
+    reconcile = None
     rc = 0
     if args.post:
+        # Reconcile routed credits against the human's eventual decision. Bounded,
+        # read-only, per-profile try/except inside reconcile_routes; a total failure
+        # here degrades to "not checked", never sinks the digest. The strip() guard
+        # makes an EMPTY CAROLINE_DIGEST_MUSO_READ actually skip (reconcile stays
+        # None -> "not checked"), instead of shlex-splitting to [] and exec'ing a
+        # bare "api" off PATH with every route then shown as "unresolved".
+        if routed7 and muso_read_bin.strip():
+            try:
+                reconcile = reconcile_routes(routed7, muso_read_bin, reconcile_cap)
+            except Exception as ex:  # noqa: BLE001
+                print(f"WARN: route reconciliation failed: {type(ex).__name__}: {ex}",
+                      file=sys.stderr)
         token = os.environ.get("MUSOAI_INTERCOM_TOKEN")
         if token:
             try:
@@ -909,11 +1219,12 @@ def main():
                 "checked": 0, "reopened": 0, "errors": 0}
 
     text = build_digest(s24, s7, s_all, ops, reopen_selfserve, reopen_done,
-                        reopen_close, anomalies, prev7)
+                        reopen_close, anomalies, prev7, reconcile=reconcile)
     summary = {"now": now, "s24_totals": s24["totals"], "s7_totals": s7["totals"],
                "s7_totals_real": s7["totals_real"], "ops": ops,
                "uvn_7d": s7["per_verb_real"]["credits_verify"],
                "uvn_all": s_all["per_verb_real"]["credits_verify"],
+               "routed7_count": len(routed7), "route_reconcile": reconcile,
                "misconfig24": misconfig24, "kill_switch": kill_switch,
                "reopen_selfserve": reopen_selfserve, "reopen_done": reopen_done,
                "reopen_close": reopen_close,

@@ -262,7 +262,7 @@ PYEOF
   run python3 - <<PYEOF
 $_load
 empty = mod.summarize([], NOW, 86400)
-# signature: (s24, s7, s_all, ops, reopen_selfserve, reopen_done, reopen_close, anomalies, prev7)
+# signature: (s24, s7, s_all, ops, reopen_selfserve, reopen_done, reopen_close, anomalies, prev7, reconcile=None)
 t = mod.build_digest(empty, empty, empty, {"closes_7d":0,"notifies_7d":0}, None, None, None, ([],[]), None)
 assert "Caroline autonomy" in t and "no real attempts" in t, t
 assert "UVN credit verification" in t and "0 approved" in t, t
@@ -332,6 +332,60 @@ s = mod.summarize(mod.capability_records([
 t = mod.build_digest(s, s, s, {"closes_7d":0,"notifies_7d":0}, None, None, None, ([],[]), None)
 assert "&lt;@U999&gt;" in t and "&amp;" in t, t
 assert "<@U999>" not in t and "<!channel>" not in t, t
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "routed_credit_requests + reconcile_routes: buckets routed credits, fail-soft" {
+  run python3 - <<PYEOF
+$_load
+# routed_credit_requests: only REAL-customer credits_verify routes, deduped by
+# request_id, carrying (request_id, profile_id); test actors + non-routed excluded.
+w = [
+  {"tool":"credits_verify","status":"refused_route_to_human","request_id":"R1","profile_id":"P1","actor_identity":"a@b.com","_ts":NOW-100},
+  {"tool":"credits_verify","status":"refused_route_to_human","request_id":"R2","profile_id":"P1","actor_identity":"a@b.com","_ts":NOW-90},
+  {"tool":"credits_verify","status":"refused_route_to_human","request_id":"R3","profile_id":"P2","actor_identity":"not-the-owner@x.com","_ts":NOW-80},  # test actor
+  {"tool":"credits_verify","status":"verified","request_id":"R4","profile_id":"P3","actor_identity":"c@d.com","_ts":NOW-70},                            # not routed
+  {"tool":"credits_verify","status":"refused_route_to_human","request_id":"R5","profile_id":"P4","actor_identity":"e@f.com","_ts":NOW-60},              # routed...
+  {"tool":"credits_verify","mode":"apply","status":"verified","request_id":"R5","profile_id":"P4","actor_identity":"e@f.com","_ts":NOW-50},             # ...retried OK -> autonomy, not a hand-off
+]
+assert sorted(mod.routed_credit_requests(w))==[("R1","P1"),("R2","P1")], mod.routed_credit_requests(w)
+# reconcile_routes: monkeypatch the read seam (NEVER a subprocess). R1 approved,
+# R2 still UVN; a raising lookup -> error (no crash); over-cap profiles -> errors.
+def fake(pid, status, wrapper):
+    if pid=="P1" and status=="approved": return {"R1"}
+    if pid=="P1" and status=="user_verification_needed": return {"R2"}
+    raise RuntimeError("boom")
+mod.credit_request_ids = fake
+assert mod.reconcile_routes([("R1","P1"),("R2","P1")], "x", 60)=={"checked":2,"approved":1,"pending":1,"other":0,"errors":0}
+assert mod.reconcile_routes([("RX","PBAD")], "x", 60)["errors"]==1, "raising lookup -> error, not crash"
+cap = mod.reconcile_routes([("R1","P1"),("RY","PY")], "x", 1)
+assert cap["checked"]==1 and cap["errors"]>=1, ("over-cap profiles surface as errors", cap)
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "build_digest: route-reconciliation line renders recoverable framing; None -> not checked" {
+  run python3 - <<PYEOF
+$_load
+s = mod.summarize(mod.capability_records([
+  {"tool":"credits_verify","decision":"refused","ts":iso(NOW-30),"actor_identity":"real@cust.com","result":"no corroboration"}]), NOW, 86400)
+assert s["per_verb_real"]["credits_verify"]["route_to_human"]==1, s
+# with a reconcile dict: the recoverable / pending / withdrawn disposition renders.
+t = mod.build_digest(s, s, s, {"closes_7d":1,"notifies_7d":1}, None, None, None, ([],[]), None,
+                     reconcile={"checked":3,"approved":1,"pending":1,"other":1,"errors":0})
+assert "1 later approved by a human" in t and "recoverable" in t, t
+assert "1 still pending review" in t and "1 withdrawn/reverted" in t, t
+# routes present but reconcile None -> explicit 'not checked', never silently dropped.
+t2 = mod.build_digest(s, s, s, {"closes_7d":1,"notifies_7d":1}, None, None, None, ([],[]), None)
+assert "disposition not checked" in t2, t2
+# no routes at all -> no reconciliation line rendered.
+empty = mod.summarize([], NOW, 86400)
+t3 = mod.build_digest(empty, empty, empty, {"closes_7d":0,"notifies_7d":0}, None, None, None, ([],[]), None,
+                      reconcile={"checked":0,"approved":0,"pending":0,"other":0,"errors":0})
+assert "Of the credits routed to a human" not in t3, t3
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
