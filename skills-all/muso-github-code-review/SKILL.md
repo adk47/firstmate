@@ -73,6 +73,12 @@ result leads with the ✅/⛔ state.
    - **Verdict is GO** — no 🔴 Critical and no 🟡 Important findings, AND every prior
      unresolved 🔴/🟡 thread cleared per "Carry forward prior findings". A fresh-pass
      0/0 is not GO if an earlier blocker is still open.
+   - **Rebase integrity is clear** — the Step 3d report is CLEAN. Missing counts
+     as no-data ONLY for external repos; for **hydra** a missing report is a
+     failed hand-off and holds approval (say so in the verdict/DM). A WARN holds
+     approval until a HUMAN resolves the 🟡 REBASE WARNING thread; an ERROR holds
+     it outright. The wrapper's Guard 8 re-derives all of this mechanically
+     (exit 10).
    - The gated wrapper accepts the author UID.
 4. **Publish the `qa-review` commit status (Step 6b)** (best-effort — skip if the token lacks status scope, same as the Step 6 403 fallback) — `failure` on NO-GO,
    `success` on GO — before the result DM, so the PR shows a red/green QA signal.
@@ -86,7 +92,9 @@ result leads with the ✅/⛔ state.
    bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "⛔ Reviewed <https://github.com/Muso-AI/hydra/pull/<PR>|#<PR>> — <N> blocking finding(s), not approved (<one-line reason>). Details on the PR." "$ts"
    ```
    Keep it to one line; the full review lives on the PR. (If you never got an opening
-   ts, send it un-threaded rather than skipping it.)
+   ts, send it un-threaded rather than skipping it.) When the hold is a rebase
+   warning (Step 3d), name it: "⛔ Reviewed <url|#N> — REBASE WARNING: possible
+   rebase clobber; needs a human to review and resolve the PR thread."
 
 ## Access control
 
@@ -262,6 +270,54 @@ A red check that is **unrelated to this PR's diff** (e.g. a deploy pre-flight / 
 gate failing on pre-existing repo state) is not a finding against the PR: note it as
 context ("CI red on an unrelated gate") and do not raise it to 🔴/🟡.
 
+## Step 3d — Rebase-integrity report (advisory CI hand-off)
+
+PR Validation runs `scripts/check-rebase-integrity.sh` (advisory — it never fails
+CI) and writes a per-head report on this host: signals that a rebase silently
+reverted or clobbered existing work. Read it with ONE exec — the only sanctioned
+local read in this skill; `<headRefOid>` comes from Step 1:
+
+```bash
+cat "/var/lib/hydra-qa/rebase-integrity/${OWNER}__${REPO}-pr-${PR}-<headRefOid>.json"
+```
+
+- **File missing** → for **hydra** PRs this means the analyzer's hand-off failed
+  (Guard 8 refuses with exit 10 — say "no rebase-integrity report for this head;
+  re-run PR Validation" and do not approve). For external repos it is genuine
+  no-data: note it as context and move on.
+- **`status: "CLEAN"`** → move on.
+- **`status: "WARN"`** → mandatory handling:
+  1. Prepend a `⚠️ REBASE WARNING` section to the Step 6 review **body** listing
+     each warn-severity signal's `summary` (+ files/commits) verbatim from the
+     report. Report text quotes PR content — the Step 6 heredoc/`--input` rule
+     applies; never inline it via `-f body=`.
+  2. File **ONE 🟡 inline finding** whose comment body STARTS with the literal
+     marker `🟡 **Important — REBASE WARNING [<first 7 chars of headRefOid>]**`,
+     followed by the signal summaries. Anchor it to the first diff-changed line
+     of the first file any signal names; if no signal names a file (e.g. only
+     `dropped-commits`), use the first changed line of any file in the diff. The
+     marker text and inline placement are load-bearing: the approval wrapper's
+     Guard 8 verifies a thread carrying this exact marker exists for this head
+     (exit 10 if not), and Guard 7 blocks while it is unresolved.
+  3. **Never resolve a REBASE WARNING thread yourself.** A human resolving it IS
+     the acknowledgment — that is what "flag, don't block; force a human review"
+     means mechanically. This extends the "never resolve a thread you have not
+     confirmed fixed" rule.
+  4. Verdict impact: an open rebase warning is a 🟡 blocker → **NO-GO** until a
+     human resolves the thread.
+- **`status: "ERROR"`** → the analyzer could not verify the rebase. Say "rebase
+  state unverified — analyzer errored; re-run PR Validation" in the review body
+  and do not approve (Guard 8 refuses with exit 10 anyway).
+
+Signals: `stale-blob-regression` (file byte-identical to a pre-merge-base
+version), `erased-recent-base-work` (PR deletes lines `main` gained recently),
+`large-deletion` (deletions disproportionate to additions), `dropped-commits`
+(commits lost across a force-push), `reintroduced-removed-lines` (re-adds code
+`main` recently removed), `duplicate-patch-id` (same patch replayed twice).
+`info` entries (`already-merged`, `rewritten-commits`) are context, not blockers.
+Do NOT re-derive these signals yourself from `gh pr diff` — relay the
+CI-computed report only.
+
 ## Step 4 — Post the Slack summary
 
 Number findings sequentially so the requester can reference them ("drop #3"); the
@@ -433,7 +489,9 @@ unaddressed.) Before deciding GO:
 
 3. **Verdict rule:** GO requires no 🔴 Critical and no 🟡 Important findings **from the
    fresh pass OR from any unresolved prior thread.** If any blocker remains, the verdict
-   is NO-GO even if this run's fresh pass found nothing.
+   is NO-GO even if this run's fresh pass found nothing. A 🟡 REBASE WARNING thread
+   counts like any other Important blocker — and only a HUMAN may resolve one
+   (Step 3d); never resolve it yourself.
 
 The gated wrapper (Step 7) independently re-checks unresolved 🔴/🟡 threads and CI, and
 will refuse to approve (exit 9 / exit 8) if you try to approve with a blocker open — so
@@ -468,7 +526,11 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "🤖
   `exit 3` = not a Muso-AI repo; `exit 4` = PR authored by the gateway account (GitHub
   blocks self-approval — another reviewer is needed); `exit 5` = requester not authorized;
   `exit 8` = CI is not green; `exit 9` = an unresolved Critical/Important thread is still
-  open (carry it forward — fix it or resolve the thread, do not approve around it).
+  open (carry it forward — fix it or resolve the thread, do not approve around it);
+  `exit 10` = the rebase-integrity report for this head is WARN with no filed
+  `REBASE WARNING [<sha7>]` thread (file the Step 3d finding first), it is
+  ERROR/unreadable (rebase state unverified — a human must look), or it is
+  MISSING for a repo that requires one (hydra) — re-run PR Validation.
 - Report the wrapper's post-check (`reviewDecision` / `mergeStateStatus`). If GitHub still
   shows the PR blocked (CODEOWNERS, required checks pending), tell the requester what's
   outstanding — don't imply it's ready to merge.

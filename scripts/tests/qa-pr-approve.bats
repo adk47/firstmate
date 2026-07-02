@@ -13,6 +13,10 @@ NICK="U0AL36NADEY"   # allowlisted requester
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
   export QA_PR_APPROVE_LOG_DIR="$TEST_TMPDIR/api-logs/github"
+  # Guard 8 state dir: left nonexistent by default = "no rebase-integrity
+  # report" (external repo / pre-feature head), which must keep passing — every
+  # pre-Guard-8 test in this file exercises exactly that path.
+  export QA_REBASE_STATE_DIR="$TEST_TMPDIR/ri"
   export STUB_CALLS="$TEST_TMPDIR/gh-calls"
   : > "$STUB_CALLS"
 
@@ -58,6 +62,8 @@ case "$sub" in
           else
             echo "${STUB_BAD_CHECKS:-0}"               # count of non-passing checks
           fi
+        elif printf '%s ' "$@" | grep -q 'headRefOid'; then
+          echo "${STUB_HEAD_OID:-0123456789abcdef0123456789abcdef01234567}"  # Guard 8 report key
         elif printf '%s ' "$@" | grep -q 'author'; then
           echo "${STUB_AUTHOR:-nsollazzo}"            # PR author login
         else
@@ -285,4 +291,135 @@ logfile() { echo "$QA_PR_APPROVE_LOG_DIR/$(date -u +%F).jsonl"; }
     run "$SCRIPT" core-backend 123 "$NICK"
   [ "$status" -eq 9 ]
   ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# ---------------------------------------------------------------------------
+# Guard 8 — rebase-integrity report (scripts/check-rebase-integrity.sh hand-off)
+# ---------------------------------------------------------------------------
+
+HEAD_OID="0123456789abcdef0123456789abcdef01234567"   # stub default; sha7 = 0123456
+MARKER="REBASE WARNING [0123456]"
+
+ri_report() {  # <status> — write a well-formed per-head report Guard 8 keys on
+  mkdir -p "$QA_REBASE_STATE_DIR"
+  printf '{"repo":"Muso-AI/core-backend","pr":123,"head_sha":"%s","status":"%s"}' \
+    "$HEAD_OID" "$1" > "$QA_REBASE_STATE_DIR/Muso-AI__core-backend-pr-123-${HEAD_OID}.json"
+}
+
+ri_report_raw() {  # <content> — write raw bytes (malformed-JSON cases)
+  mkdir -p "$QA_REBASE_STATE_DIR"
+  printf '%s' "$1" > "$QA_REBASE_STATE_DIR/Muso-AI__core-backend-pr-123-${HEAD_OID}.json"
+}
+
+NO_THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}'
+
+@test "guard8: WARN report but no REBASE WARNING thread filed → exit 10, no approve" {
+  ri_report WARN
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$NO_THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  echo "$output" | grep -q 'REBASE WARNING'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: WARN + QA-filed marker thread RESOLVED by a human → approves (resolution is the ack)" {
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** PR deletes recent main work","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: marker thread filed by someone OTHER than the gateway account → exit 10 (forged ack)" {
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** looks fine to me","author":{"login":"nsollazzo"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8/guard7 division of labor: WARN + marker thread UNRESOLVED → exit 9 (Guard 7 blocks first)" {
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":false,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** PR deletes recent main work","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 9 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: marker for a DIFFERENT head sha does not satisfy the WARN gate → exit 10" {
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — REBASE WARNING [fffffff]** stale finding from an older push","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: report status ERROR → exit 10 (rebase state unverified, fail closed)" {
+  ri_report ERROR
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: malformed report JSON → exit 10 (fail closed)" {
+  ri_report_raw 'this is not json'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: report interior fields mismatching the filename key → exit 10 (fail closed)" {
+  ri_report_raw '{"repo":"Muso-AI/core-backend","pr":999,"head_sha":"0000000000000000000000000000000000000000","status":"CLEAN"}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: CLEAN report → approves" {
+  ri_report CLEAN
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: missing report file for an EXTERNAL repo (no analyzer in its CI) → approves" {
+  # QA_REBASE_STATE_DIR exists but holds no report for this head
+  mkdir -p "$QA_REBASE_STATE_DIR"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: missing report file for a REQUIRED repo (hydra) → exit 10 (failed hand-off is not clean)" {
+  mkdir -p "$QA_REBASE_STATE_DIR"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" hydra 625 "$NICK"
+  [ "$status" -eq 10 ]
+  echo "$output" | grep -q 'no rebase-integrity report'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: QA_REBASE_REQUIRED_REPOS is tunable — hydra not listed → missing report approves" {
+  mkdir -p "$QA_REBASE_STATE_DIR"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_REBASE_REQUIRED_REPOS="other-repo" \
+    run "$SCRIPT" hydra 625 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
 }

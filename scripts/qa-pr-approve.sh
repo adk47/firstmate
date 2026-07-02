@@ -28,8 +28,12 @@ set -euo pipefail
 # Exit codes: 0 ok | 2 usage | 3 repo-not-muso | 4 self-approval-blocked
 #             5 requester-not-allowed | 6 log-failed | 7 gh-approve-failed
 #             8 ci-not-green | 9 open-blocking-findings
+#             10 rebase-warning-unfiled-or-unverified
 #
-# Env (mainly for tests): GH=gh override; QA_PR_APPROVE_LOG_DIR override log dir.
+# Env (mainly for tests): GH=gh override; QA_PR_APPROVE_LOG_DIR override log dir;
+# QA_REBASE_STATE_DIR override the rebase-integrity report dir (Guard 8);
+# QA_REBASE_REQUIRED_REPOS space-separated short names whose CI must have
+# written a report (default "hydra") — missing report there refuses (Guard 8).
 
 GH="${GH:-gh}"
 LOG_DIR="${QA_PR_APPROVE_LOG_DIR:-api-logs/github}"
@@ -110,7 +114,7 @@ query($owner:String!,$repo:String!,$pr:Int!){
     pullRequest(number:$pr){
       reviewThreads(first:100){
         pageInfo{ hasNextPage }
-        nodes{ isResolved comments(first:1){ nodes{ body } } }
+        nodes{ isResolved comments(first:1){ nodes{ body author{ login } } } }
       }
     }
   }
@@ -127,6 +131,79 @@ open_blockers="$("$GH" api graphql -f query="$gql" -f owner="$owner" -f repo="$r
            end' \
   2>/dev/null || echo "ERR")"
 [ "$open_blockers" = "0" ] || die 9 "$owner/$repo#$pr has unresolved Critical/Important review thread(s), or >100 threads to verify ($open_blockers) — refusing until they are addressed/resolved (or a human reviews)."
+
+# --- Guard 8: rebase-integrity warnings must be surfaced ---------------------
+# The advisory CI analyzer (scripts/check-rebase-integrity.sh, pr-validate.yml)
+# writes a per-head report under /var/lib/hydra-qa/rebase-integrity. The chain
+# "CI writes WARN → skill files a 🟡 REBASE WARNING thread → Guard 7 blocks
+# while it is unresolved" has exactly one prose link: the skill remembering to
+# file the finding. This guard closes it mechanically:
+#   missing report  → for repos whose CI writes reports (QA_REBASE_REQUIRED_REPOS,
+#                     default: hydra) this is a FAILED HAND-OFF → refuse; for
+#                     external repos it is genuine no-data → pass
+#   CLEAN           → pass
+#   WARN            → a review thread whose first comment carries the literal
+#                     "REBASE WARNING [<head sha7>]" marker must EXIST (resolved
+#                     or not — Guard 7 already blocks while it is unresolved; a
+#                     human resolving it is the acknowledgment)
+#   ERROR/unreadable→ rebase state unverified → refuse (fail closed)
+# The sha7 in the marker forces re-filing per push; a new push lands with the
+# new head's checks pending, so Guard 6 covers the report-not-yet-written race.
+# Known limits (documented, accepted): the head can move between Guard 6's
+# rollup read and this guard's headRefOid read — the same push-mid-approval race
+# every guard in this file has; and the state dir lives on the CI host where
+# pr-validate executes PR-controlled code, so a hostile insider PR could forge
+# reports — same trust model as the self-hosted runner itself. The interior
+# field cross-check below catches accidental key mixups, not that adversary.
+RI_DIR="${QA_REBASE_STATE_DIR:-/var/lib/hydra-qa/rebase-integrity}"
+head_oid="$("$GH" pr view "$pr" --repo "$owner/$repo" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
+# 40-hex only: this value is spliced into a filesystem path and a jq program —
+# anything else (gh error text, multiline) must refuse, not degrade to
+# missing-file=pass.
+[[ "$head_oid" =~ ^[0-9a-f]{40}$ ]] || die 10 "could not read a valid headRefOid for $owner/$repo#$pr (got '$head_oid') — cannot verify rebase-integrity state; refusing (fail closed)."
+ri_file="$RI_DIR/${owner}__${repo}-pr-${pr}-${head_oid}.json"
+if [ ! -f "$ri_file" ]; then
+  # A missing report must not read as clean where the analyzer is EXPECTED to
+  # have run: if the state hand-off failed (dir unwritable, analyzer died before
+  # its ERROR sentinel), the only trace is this absence — pass here and the
+  # fail-closed guarantee silently evaporates. Repos in the required list get
+  # refused; external repos (no analyzer in their CI) legitimately have no file.
+  for ri_required in ${QA_REBASE_REQUIRED_REPOS:-hydra}; do
+    [ "$repo" = "$ri_required" ] && die 10 "no rebase-integrity report for $owner/$repo#$pr head ${head_oid:0:7} — the PR Validation analyzer should have written one (failed hand-off?); re-run CI or investigate $RI_DIR (fail closed)."
+  done
+else
+  # Interior fields must match the filename-derived key (catches key-format
+  # drift between analyzer and guard, and stale/mis-filed reports).
+  ri_key_ok="$(jq -r --arg repo "$owner/$repo" --arg pr "$pr" --arg head "$head_oid" \
+    'if (.repo == $repo) and ((.pr | tostring) == $pr) and (.head_sha == $head)
+     then "OK" else "MISMATCH" end' "$ri_file" 2>/dev/null || echo ERR)"
+  [ "$ri_key_ok" = "OK" ] || die 10 "rebase-integrity report $ri_file interior fields do not match its key ($ri_key_ok) — refusing (fail closed)."
+  ri_status="$(jq -r '.status // "ERROR"' "$ri_file" 2>/dev/null || echo ERROR)"
+  case "$ri_status" in
+    CLEAN) : ;;
+    WARN)
+      ri_marker="REBASE WARNING [${head_oid:0:7}]"
+      # Same reviewThreads query as Guard 7, counting threads that carry the
+      # marker AND were filed by the gateway account ($me) — a marker comment
+      # posted by anyone else (e.g. the PR author pre-empting the finding) must
+      # not satisfy this gate. Fail closed on unreadable threads or a second page.
+      ri_filed="$("$GH" api graphql -f query="$gql" -f owner="$owner" -f repo="$repo" -F pr="$pr" \
+        --jq '.data.repository.pullRequest.reviewThreads
+               | if .pageInfo.hasNextPage then "MORE"
+                 else ([.nodes[]? | (.comments.nodes[0] // {})
+                        | select(((.body // "") | contains("'"$ri_marker"'"))
+                                 and ((.author.login // "") == "'"$me"'"))] | length | tostring)
+                 end' \
+        2>/dev/null || echo "ERR")"
+      if [ "$ri_filed" = "0" ]; then
+        die 10 "rebase-integrity report for ${head_oid:0:7} is WARN but no '$ri_marker' review thread exists — file the finding (muso-github-code-review Step 3d) before approving."
+      elif ! [[ "$ri_filed" =~ ^[0-9]+$ ]]; then
+        die 10 "cannot verify the REBASE WARNING thread for $owner/$repo#$pr (threads unreadable or >100: $ri_filed) — refusing (fail closed)."
+      fi
+      ;;
+    *) die 10 "rebase-integrity report for ${head_oid:0:7} is '$ri_status' — rebase state unverified; refusing to approve (fail closed)." ;;
+  esac
+fi
 
 # --- Guard 5: log BEFORE the write ------------------------------------------
 ts="$(date -u +%FT%TZ)"
