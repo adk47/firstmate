@@ -354,6 +354,32 @@ greet by first name. Founder `sinceYear` is the true tenure; a separate `created
 "customer since" field is inert (every sampled active founder had `sinceYear == createdYear == 2023`).
 Inspect the live API before plumbing any new account field, since the fixtures under-spec it.
 
+**`/admin/founding/*` -- founder buy-back and comp reinstate (shipped 2026-07).** Two admin
+endpoints recover founder status; both take `teamId` = the Muso **workspace id** (not a user
+id/email). Resolve email -> workspace via `muso teams list --email <e>` or the support
+`subscription_status` tool (returns `workspace_id` even for a cancelled/lapsed sub).
+- **Paid buy-back:** `POST /admin/founding/buyback/checkout {teamId}` -> a Stripe Checkout
+  URL (`{url, session_id, arrears_months, arrears_cents, since_year, seats}`) bundling a
+  Pro-annual subscription + a one-off arrears charge; link lives ~24h. On payment, status
+  reinstates automatically via the Stripe webhook (`founding_buyback_sub` branch) -- no
+  further action. Serves both lapsed reinstatement AND never-founder late buy-in (arrears
+  computed back to the 2026-06-30 anchor; the never-founder path is inferred from spec §2 +
+  the error set -- verify against the live endpoint before relying on it). Errors (all 400):
+  already an active founder (not
+  lapsed, nothing to do) / not found / no owner (bad teamId or workspace has no owner).
+- **Comp reinstate (free goodwill):** `POST /admin/founding/reinstate {teamId, reason}` ->
+  clears the lapse latch and restores status immediately, no Stripe. `reason` is mandatory
+  (non-empty) and written to the founding audit log. Only works on a **lapsed** workspace
+  ("Team is not in a lapsed state" otherwise). Treat like a refund override (money-adjacent
+  goodwill): team discretion, not customer-advertised.
+- `since_year` is preserved from the original founding record (drives the "Founder since 'YY"
+  badge). No hydra wrapper exists yet -- Caroline explains the path and files a
+  `hydra-action-request`; Operations executes. The old `buybackQuote` + `buybackPaymentLink`
+  two-step flow is **retired** -- don't build against it. Underlying policy: founder status is
+  a derived property (continuous paid coverage since the anchor; 7-day grace on a failed
+  payment; voluntary cancel drops at period end); customer-facing version lives in
+  `workspaces/support/reference/founding-member.md`.
+
 ## People & roles
 
 This is the most churn-prone data in this doc. Treat the tables below as a starting point and

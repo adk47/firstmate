@@ -115,6 +115,7 @@ case "$PROFILE/$AGENT" in
     ;;
   *)  # edge/support (default): the customer-facing knowledge base.
     assert_retrieval "what happens to my founding member status if my payment fails" "founding-member.md"
+    assert_retrieval "can I get my founding member status back after it lapsed" "founding-member.md"
     assert_retrieval "how do music credits work for my recordings and tracks" "credits-and-profiles.md"
     assert_retrieval "what is the difference between the Pro and Business subscription plans" "subscriptions-and-billing.md"
     assert_retrieval "I tried to claim my profile but nothing is happening" "common-issues.md"

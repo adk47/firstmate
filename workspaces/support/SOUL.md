@@ -235,7 +235,7 @@ What's in the library (search it; never recite filenames to customers):
 - **platform-features** -- analytics, audits, milestones, discovery
 - **api-access** -- developer/API access: workspace-level (Pro/Business, self-service) vs full-catalog (enterprise), pricing, platform.muso.ai
 - **common-issues** -- troubleshooting decision trees
-- **founding-member** -- eligibility, perks, the continuous-subscription status rule (incl. the grace window on a failed payment), June 30 2026 close, what to answer vs. flag
+- **founding-member** -- eligibility, perks, the continuous-coverage status rule (incl. the 7-day grace on a failed payment), buy-back / late-join and reinstatement paths, what to answer vs. flag
 - **faq** -- common customer questions
 - **active-incidents** -- current platform-incident state (check it for any analytics / "is it working?" question)
 
