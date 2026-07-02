@@ -31,6 +31,10 @@
 # ──────────────────────────────────────────────────────────────
 
 : "${SLACK_CHANNEL:=C0ADV2W76G4}"
+# Which muso slack bot sends. devops is the historical default; callers whose
+# target channel only has another bot as a member (e.g. #cs_priority → the
+# operations bot) export SLACK_NOTIFY_BOT before sourcing.
+: "${SLACK_NOTIFY_BOT:=devops}"
 : "${MUSO_BIN:=muso}"
 : "${MUSO_SLACK_ENV_FILE:=/etc/openclaw/main.env}"
 
@@ -69,8 +73,8 @@ slack_notify() {
   # JSON body decode to render newlines; muso's --text marshals it literally,
   # so translate here to keep the old contract.
   msg="${msg//\\n/$'\n'}"
-  slack_load_env devops || return 0
-  "$MUSO_BIN" slack send --bot devops \
+  slack_load_env "$SLACK_NOTIFY_BOT" || return 0
+  "$MUSO_BIN" slack send --bot "$SLACK_NOTIFY_BOT" \
     --channel "$SLACK_CHANNEL" --text "$msg" \
     --requester "$(_slack_requester)" >/dev/null 2>&1 || true
 }
@@ -85,7 +89,7 @@ slack_notify() {
 _slack_post_payload() {
   local payload_file="$1"
   [ -r "$payload_file" ] || return 1
-  slack_load_env devops || return 1
+  slack_load_env "$SLACK_NOTIFY_BOT" || return 1
 
   local channel text thread_ts
   channel=$(jq -r '.channel // empty' "$payload_file" 2>/dev/null) || return 1
@@ -96,7 +100,7 @@ _slack_post_payload() {
   text=$(jq -r '.text // empty' "$payload_file" 2>/dev/null)
   thread_ts=$(jq -r '.thread_ts // empty' "$payload_file" 2>/dev/null)
 
-  local args=(slack send --bot devops --channel "$channel"
+  local args=(slack send --bot "$SLACK_NOTIFY_BOT" --channel "$channel"
     --requester "$(_slack_requester)")
   [ -n "$text" ] && args+=(--text "$text")
   [ -n "$thread_ts" ] && args+=(--thread-ts "$thread_ts")
@@ -151,7 +155,7 @@ slack_notify_payload_file_status() {
 slack_notify_payload_file_ts() {
   local payload_file="$1"
   [ -r "$payload_file" ] || return 1
-  slack_load_env devops || return 1
+  slack_load_env "$SLACK_NOTIFY_BOT" || return 1
 
   local channel text thread_ts
   channel=$(jq -r '.channel // empty' "$payload_file" 2>/dev/null) || return 1
@@ -159,7 +163,7 @@ slack_notify_payload_file_ts() {
   text=$(jq -r '.text // empty' "$payload_file" 2>/dev/null)
   thread_ts=$(jq -r '.thread_ts // empty' "$payload_file" 2>/dev/null)
 
-  local args=(slack send --bot devops --channel "$channel"
+  local args=(slack send --bot "$SLACK_NOTIFY_BOT" --channel "$channel"
     --requester "$(_slack_requester)" --json)
   [ -n "$text" ] && args+=(--text "$text")
   [ -n "$thread_ts" ] && args+=(--thread-ts "$thread_ts")

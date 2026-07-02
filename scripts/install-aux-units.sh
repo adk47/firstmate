@@ -89,6 +89,13 @@
 #     tickets sat unworked for weeks while the support agent kept
 #     re-promising the SLA).
 #
+#   /etc/cron.d/ads-inquiry-watchdog
+#     Schedules scripts/ads-inquiry-watchdog.sh every 15 min to ping
+#     Aaron in #cs_priority (C0BBTAVP44X) when a support ticket is an
+#     ads-buying lead (Odeholm Audio miss, 2026-07: an in-app-ads
+#     sales lead was closed-as-answered and forwarded to Nick by
+#     email; Aaron, who owns ads, never saw it).
+#
 #   hydra-release.timer / .service
 #     Daily-release cron. Mon..Fri 08:00 Europe/Rome. Invokes
 #     scripts/release-cron.sh, which:
@@ -162,6 +169,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/clickup-sla-digest.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/openclaw-edge-reindex-on-start.sh" ]] \
@@ -856,6 +865,21 @@ cat > /etc/cron.d/stale-ticket-watchdog << STALETICKETWD
 30 8 * * * root USE_MUSO_CLI=1 MUSO_BIN=/usr/local/bin/muso $HYDRA_ROOT/scripts/stale-ticket-watchdog.sh >> /var/log/stale-ticket-watchdog.log 2>&1
 STALETICKETWD
 chmod 644 /etc/cron.d/stale-ticket-watchdog
+
+# ─── Ads-inquiry watchdog every 15 min ────────────────────────
+# Pings Aaron in #cs_priority (C0BBTAVP44X) when a hydra-action-request
+# ticket is an ads-BUYING lead (customer wants to advertise with Muso).
+# 15-min cadence: sales leads are latency-sensitive in a way overdue
+# digests aren't; the `ads-lead-pinged` ClickUp tag dedupes across ticks.
+# Same ownership rule: edit here + re-run install-aux-units.sh.
+cat > /etc/cron.d/ads-inquiry-watchdog << ADSINQUIRYWD
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+# Routed through the gated muso clickup provider like the sibling ClickUp
+# watchdogs (cron PATH is minimal, so MUSO_BIN must be absolute). The dedupe
+# tag write carries --requester attribution via clickup-muso.sh.
+*/15 * * * * root USE_MUSO_CLI=1 MUSO_BIN=/usr/local/bin/muso $HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh >> /var/log/ads-inquiry-watchdog.log 2>&1
+ADSINQUIRYWD
+chmod 644 /etc/cron.d/ads-inquiry-watchdog
 
 # ─── Caroline RAG index watchdog at 10-min cadence ────────────
 # Self-heals + alerts when Caroline's memory_search (RAG) vector index is
