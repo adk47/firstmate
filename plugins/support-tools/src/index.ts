@@ -17,6 +17,7 @@ import { createProfilesClaimSelfTool, DEFAULT_PROFILES_CLAIM_SELF_SCRIPT } from 
 import { createCreditsVerifyTool, DEFAULT_CREDITS_VERIFY_SCRIPT } from "./tools/credits-verify.js";
 import { createProfilesConsolidateTool, DEFAULT_PROFILES_CONSOLIDATE_SCRIPT } from "./tools/profiles-consolidate.js";
 import { createIntercomReader } from "./intercom-client.js";
+import { createFoundingStatusTool, createFoundingBuybackTool } from "./tools/founding-buyback.js";
 export default definePluginEntry({
   id: "support-tools",
   name: "Support Agent Tools",
@@ -200,6 +201,33 @@ export default definePluginEntry({
       });
     };
     api.registerTool(subscriptionStatusFactory, { name: "subscription_status" });
+
+    // founding_status / founding_buyback_link — the founding-member pair
+    // (read the founder envelope; mint the paid buy-back Stripe Checkout
+    // link). Same anti-spoof anchor as subscription_status (verified Intercom
+    // author email via the trusted session key), same execFile-the-muso-CLI
+    // transport; the CLI re-anchors server-side (exact workspace-email match,
+    // active-founder refuse, per-actor/day mint cap) and audits the write.
+    // Comp/free reinstate is deliberately NOT registered here — ops-only.
+    // The MINT carries a dark-ship flag (default OFF, same coercion as the
+    // other gated verbs below); the read is ungated like subscription_status.
+    const foundingBuybackRaw =
+      [_entry.foundingBuybackEnabled, _legacy.foundingBuybackEnabled].find(
+        (v) => typeof v === "boolean" || typeof v === "string" || typeof v === "number",
+      ) ?? process.env.FOUNDING_BUYBACK_ENABLED;
+    const foundingBuybackEnabled =
+      foundingBuybackRaw === true || foundingBuybackRaw === 1 || foundingBuybackRaw === "true" || foundingBuybackRaw === "1";
+    const foundingDeps = (ctx: any) => ({
+      rateLimiter,
+      // Anti-spoof anchor: the trusted gateway session KEY (carries the convId),
+      // NOT ctx.sessionId (an ephemeral UUID that never matches). See deriveConvId.
+      sessionKey: ctx.sessionKey ?? "unknown",
+      intercomReader,
+      intercomToken,
+      buybackEnabled: foundingBuybackEnabled,
+    });
+    api.registerTool((ctx: any) => createFoundingStatusTool(foundingDeps(ctx)), { name: "founding_status" });
+    api.registerTool((ctx: any) => createFoundingBuybackTool(foundingDeps(ctx)), { name: "founding_buyback_link" });
 
     // credit_verification_check — read-only lookup of a customer's
     // user_verification_needed credits, anchored to the verified Intercom

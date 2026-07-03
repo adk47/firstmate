@@ -16,7 +16,9 @@
       "credit_verification_check",
       "profiles_claim_self",
       "credits_verify",
-      "profiles_consolidate"
+      "profiles_consolidate",
+      "founding_status",
+      "founding_buyback_link"
     ]
   },
   "configSchema": {
@@ -34,6 +36,9 @@
       },
       "profilesConsolidateEnabled": {
         "description": "Phase-1 dark-ship flag for profiles_consolidate (gated APPROVAL-tier WRITE: merge the customer's own unclaimed same-name duplicates into their profile via muso-cli). Accepts true / \"true\" / \"1\" / 1; anything else (including absent) keeps the tool disabled and returning a no-op sentinel. Same fail-closed runtime parse as creditVerificationEnabled."
+      },
+      "foundingBuybackEnabled": {
+        "description": "Dark-ship flag for founding_buyback_link (mints the founding buy-back Stripe Checkout link via muso-cli; founding_status stays ungated read-only). Accepts true / \"true\" / \"1\" / 1; anything else (including absent) keeps the mint disabled and returning a no-op sentinel. Same fail-closed runtime parse as creditVerificationEnabled."
       }
     }
   }

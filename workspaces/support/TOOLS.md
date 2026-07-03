@@ -1,10 +1,10 @@
 # TOOLS.md -- support
 
-## Allowed Tools (EXACTLY 15)
+## Allowed Tools (EXACTLY 17)
 
-This agent has the most restricted tool set in HYDRA. Only these 15 tools are permitted, split into three groups:
+This agent has the most restricted tool set in HYDRA. Only these 17 tools are permitted, split into three groups:
 
-- **Action tools (1-10)** -- write or read customer-facing state. Implemented as plugin-registered tools via the `support-tools` OpenClaw plugin. The agent calls them by name; the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
+- **Action tools (1-10, 16-17)** -- write or read customer-facing state. Implemented as plugin-registered tools via the `support-tools` OpenClaw plugin. The agent calls them by name; the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
 - **Reference tools (11-12)** -- read-only semantic + BM25 retrieval against `workspaces/support/reference/*.md`, provided by openclaw's bundled memory-core via the per-agent `memorySearch` config (enabled on both edge and main profiles, indexing the read-only `reference/` subdirectory only). No writes; no customer-data persistence; no auto-recall.
 - **Gated self-serve write tools (13-15)** -- `profiles_claim_self`, `credits_verify`, `profiles_consolidate`. Each shells `muso <verb> --actor-identity <verified-email>` through a thin bash wrapper; muso-cli's capability gate is the ownership/caps/audit boundary. Live on edge (the `*Enabled` flags in openclaw-edge.json are true); if a call returns `{disabled:true}`, fall back to a ticket.
 
@@ -152,6 +152,22 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 - **Returns**: `{ok, mode, survivor, dup_ids, status}` or `{ok:false, error}` (`route_to_human` on a cross-owner/claimed-dup merge, `no_approver` if the approver env is unset, `disabled`).
 - **Auth**: same muso host auth + ctx-derived `--actor-identity` as #13; `--intercom-conv-id` is REQUIRED (it is the approval-ref). muso re-verifies the survivor is the customer's and every duplicate is unclaimed + same-name; per-actor/day merge cap + per-call dups bound.
 - **When to use**: via the `customer-profile-consolidate` skill, to merge a customer's OWN unclaimed same-name duplicates into their profile. Preview then apply.
+
+### 16. founding_status
+
+- **Wraps**: `muso founding status --email <verified-email> --env prod --json` (GET /admin/team; the founder envelope lives on the list items). Same plugin/execFile transport and anti-spoof anchor as `subscription_status` (#3).
+- **Returns**: `{ ok: true, founder_active, ever_founder, since_year, lapsed_at, workspace_id, plan, sub_status }` or `{ ok: false, reason }`. `ever_founder: true` + `founder_active: false` = a LAPSED founder (buy-back candidate); `ever_founder: false` = never in the program.
+- **Identity (anti-spoof)**: verified Intercom contact email only (`deriveConvId` -> `getAuthorEmail`); the CLI exact-matches the workspace email server-side and refuses ambiguity. Read-only.
+- **Rate limit**: 10 calls / 60 min per session.
+- **When to use**: BEFORE discussing founding perks, lapse, or buy-back. Doctrine: `reference/founding-member.md`.
+
+### 17. founding_buyback_link
+
+- **Wraps**: `muso founding buyback-checkout --email <verified-email> --requester <verified-email> --env prod --json` (POST /admin/founding/buyback/checkout). Mints ONE ~24h Stripe Checkout URL bundling a Pro-annual subscription + the one-off arrears back to the 2026-06-30 program anchor; payment reinstates (or late-buys-in) automatically via the Stripe webhook.
+- **Returns**: `{ ok: true, url, workspace_id, arrears_months, arrears_cents, since_year, seats, expires_note }` or `{ ok: false, reason: "not_confirmed" | "already_founder" | "not_found" | "ambiguous_workspace" | "no_owner" | "rate_limited" | "owner_undetermined" | "lookup_unavailable" }`, or the `{ ok: false, disabled: true }` sentinel while the `foundingBuybackEnabled` dark-ship flag is off (fall back to flagging for the team). The returned URL is pinned to the `https://checkout.stripe.com/` origin in-plugin. Quote ONLY the returned figures.
+- **Identity (anti-spoof)**: verified Intercom contact email only -- there is no target parameter, so the link can never be minted for another account. Requires the explicit `confirm: true` parameter (only after the customer asks to join/rejoin). The CLI's policy gate audits the write and enforces a per-actor/day mint cap; the mint itself changes no account state.
+- **Rate limit**: 3 calls / 60 min per session.
+- **When to use**: via the founding-member buy-back path in `reference/founding-member.md`. Free/comp reinstates are NOT this tool -- those stay a flag for the team (ops runs the approval-tier `muso founding reinstate`).
 
 ## Action Request Pattern
 

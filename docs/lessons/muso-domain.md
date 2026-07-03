@@ -373,8 +373,11 @@ id/email). Resolve email -> workspace via `muso teams list --email <e>` or the s
   ("Team is not in a lapsed state" otherwise). Treat like a refund override (money-adjacent
   goodwill): team discretion, not customer-advertised.
 - `since_year` is preserved from the original founding record (drives the "Founder since 'YY"
-  badge). No hydra wrapper exists yet -- Caroline explains the path and files a
-  `hydra-action-request`; Operations executes. The old `buybackQuote` + `buybackPaymentLink`
+  badge). Hydra wrappers: the typed `muso founding status|buyback-checkout|reinstate` verbs
+  (ops via `skills-all/muso-founding-member`, main gateway) and Caroline's
+  `founding_status`/`founding_buyback_link` plugin tools (edge, verified-email-anchored) --
+  she mints the paid buy-back link herself; only comp (free) reinstate stays an ops-executed
+  action-request. The old `buybackQuote` + `buybackPaymentLink`
   two-step flow is **retired** -- don't build against it. Underlying policy: founder status is
   a derived property (continuous paid coverage since the anchor; 7-day grace on a failed
   payment; voluntary cancel drops at period end); customer-facing version lives in
