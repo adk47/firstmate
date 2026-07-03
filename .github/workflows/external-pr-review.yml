@@ -1,8 +1,8 @@
 name: external-pr-review
 
 # QA auto-review of PRs in OTHER Muso-AI repos (see the allowlist below — currently
-# ads-manager, web-credits, web-credits-next, industry-data-processing, octave-ui,
-# core-backend, muso-cli), reusing hydra's qa agent + muso-github-code-review skill.
+# ads-manager, auth, web-credits, web-credits-next, industry-data-processing,
+# octave-ui, core-backend, muso-cli), reusing hydra's qa agent + muso-github-code-review skill.
 #
 # Transport: a source repo fires a repository_dispatch into hydra carrying the PR
 # coordinates in client_payload. New repos use event_type "external-qa-review";
@@ -50,7 +50,7 @@ jobs:
           # --- Repo allowlist: only these Muso-AI repos may drive an external
           #     review. Adding a repo = one line here + a Slack-UID mapping. ------
           case "$REPO" in
-            Muso-AI/ads-manager|Muso-AI/web-credits|Muso-AI/web-credits-next|Muso-AI/industry-data-processing|Muso-AI/octave-ui|Muso-AI/core-backend|Muso-AI/muso-cli) ;;
+            Muso-AI/ads-manager|Muso-AI/auth|Muso-AI/web-credits|Muso-AI/web-credits-next|Muso-AI/industry-data-processing|Muso-AI/octave-ui|Muso-AI/core-backend|Muso-AI/muso-cli) ;;
             *) echo "repo='$REPO' not in the external-review allowlist — refusing."; exit 1 ;;
           esac
 
