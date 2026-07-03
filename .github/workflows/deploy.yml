@@ -15,9 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  KUBECONFIG: /root/.kube/config
   SLACK_WEBHOOK: ${{ secrets.HYDRA_SLACK_WEBHOOK }}
-  HYDRA_NAMESPACE: hydra
 
 jobs:
   deploy:
@@ -140,9 +138,6 @@ jobs:
           if [ -f scripts/rollback.sh ]; then
             chmod +x scripts/rollback.sh
             ./scripts/rollback.sh || echo "Rollback script failed"
-          fi
-          if [ -f /tmp/hydra-rollback-deployments.yaml ]; then
-            /usr/local/bin/kubectl apply -f /tmp/hydra-rollback-deployments.yaml --namespace=${HYDRA_NAMESPACE} || true
           fi
           curl -sS -X POST "$SLACK_WEBHOOK" \
             -H 'Content-Type: application/json' \

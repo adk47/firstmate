@@ -27,8 +27,6 @@ if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; th
 else
   HYDRA_LOCAL=false
 fi
-NAMESPACE="${NAMESPACE:-hydra}"
-KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 # See deploy.sh for the env var precedence rationale.
 SLACK_WEBHOOK="${SLACK_WEBHOOK:-${HYDRA_SLACK_WEBHOOK:-}}"
 
@@ -117,29 +115,40 @@ if $HYDRA_LOCAL; then
   set +e
   for profile in main edge; do
     src="/opt/hydra/openclaw-${profile}.json"
-    dst="/root/.openclaw/${profile}/openclaw.json"
+    dst="/root/.openclaw-${profile}/openclaw.json"
     if [ -f "$src" ]; then
-      mkdir -p "/root/.openclaw/${profile}"
+      mkdir -p "/root/.openclaw-${profile}"
+      ANNOUNCE_SHA="$(sha256sum "$src" | awk '{print $1}')" \
+        "$HYDRA_ROOT/scripts/lib/announce-legit-write.sh" rollback "$dst" || true
       cp "$src" "$dst" && echo "  Synced ${profile} profile config" || echo "  WARNING: Failed to sync ${profile} profile config"
+      cmp -s "$src" "$dst" || SYNC_FAILED=1
     else
       echo "  WARNING: $src not found — skipping ${profile}"
     fi
   done
   set -e
+  [ "${SYNC_FAILED:-0}" = 0 ] || fail "Reverted config did not land in a live profile dir (/root/.openclaw-<profile>/)"
 else
-  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" << 'SYNC'
+  if ! ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" << 'SYNC'
 set -euo pipefail
 for profile in main edge; do
   src="/opt/hydra/openclaw-${profile}.json"
-  dst="/root/.openclaw/${profile}/openclaw.json"
+  dst="/root/.openclaw-${profile}/openclaw.json"
   if [ -f "$src" ]; then
-    mkdir -p "/root/.openclaw/${profile}"
+    mkdir -p "/root/.openclaw-${profile}"
+    ANNOUNCE_SHA="$(sha256sum "$src" | awk '{print $1}')" \
+      /opt/hydra/scripts/lib/announce-legit-write.sh rollback "$dst" || true
     cp "$src" "$dst" && echo "  Synced ${profile} profile config" || echo "  WARNING: Failed to sync ${profile} profile config"
+    cmp -s "$src" "$dst" || SYNC_FAILED=1
   else
     echo "  WARNING: $src not found — skipping ${profile}"
   fi
 done
+exit "${SYNC_FAILED:-0}"
 SYNC
+  then
+    fail "Reverted config did not land in a live profile dir (/root/.openclaw-<profile>/)"
+  fi
 fi
 log "  Config synced."
 
