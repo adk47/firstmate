@@ -135,6 +135,27 @@ means `POST /admin/analytics/{profileId}/fast-lane` (a profile analytics bootstr
 fire-and-forget, idempotent, no credit-approve gate). It is repeatedly misrouted to the
 credit-verification pipeline. Never treat a fast-lane call as a credit-edit fix signal.
 
+**Collaborators are pipeline-owned; the classic refresh verbs don't touch them.** The profile
+"Collaborators" list is served from `postgresql_catalog.public.catalog_profile_collaboration`
+(hash-partitioned `_0.._29`, bucket = sum(profile_id bytes) % 30, no timestamps) +
+`catalog_profile_aggregations`, rebuilt only by data-platform machinery — the offline
+`platform-data-processing` Spark job ("Catalog Profile Collaboration" formula) and the
+industry-api rebuild path below. The classic remediation verbs are the wrong tool here:
+cache clear / `analytics recalculate` / fast-lane refresh the analytics cube, not this table —
+re-running them changes nothing — and hydra's DB paths are read-only, so don't attempt Trino
+writes either. The ONE admin-API write path for collaborators is the dedicated rebuild verb:
+When collaborators are stale, use `POST /admin/profile/:profileId/collaborators/rebuild`
+(added 2026-07-02 in core-backend + industry-api; verify it's deployed — 404 means not yet):
+it rewrites the profile's collaboration rows from current tracks, deletes stale rows, re-syncs
+`collaborations_count`, and clears the profile cache. Run it only AFTER verifying the credit
+edit has landed (the credits list reflects it) — the rebuild reads current catalog state, and
+it's idempotent, so re-run if in doubt. If the route 404s or fails, escalate to the
+data-platform owners with the profile id; the offline recompute can silently skip a profile
+for months (Drizzy c512e5d5, 2026-07-02: a 2026-02 credit never ingested and removed-track
+collaborators from 2025-08 still showing, a week after credits were corrected — root cause:
+the online collaboration writer is gated behind `FASTLANE_OWNS_STATS`, default off, and the
+offline Spark rebuild is manual-trigger-only since 2026-05-19).
+
 **Prod core writes go through the app, not the DB.** hydra's own core access is READ-ONLY
 (`hydra_ro` via the DSN and the Trino `postgresql_core` catalog). The only read-write channel
 is `kubectl exec` into a `core-backend-api` pod in `muso-prod` and running the app's own

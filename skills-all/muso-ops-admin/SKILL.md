@@ -270,6 +270,7 @@ Full route map: `references/admin-api-routes.md`
 - `POST /admin/profile/:profileId/unlink` — unlink profile
 - `DELETE /admin/profile/:profileId/cache` — clear profile cache
 - `GET /admin/profile/:profileId/collaborators` — list collaborators
+- `POST /admin/profile/:profileId/collaborators/rebuild` — force-rebuild collaborators from current tracks (cache clear / recalculate / fast-lane do NOT touch collaborators — this verb is the ONLY refresh path; run it AFTER verifying the credit edit landed; idempotent; on 404 the verb isn't deployed yet — escalate to data-platform instead; see `docs/lessons/muso-domain.md` "Collaborators are pipeline-owned")
 - `GET /admin/profile/:profileId/member` — get members
 - `POST /admin/profile/:profileId/member` — add member
 - `PUT /admin/profile/:profileId/member` — update member
