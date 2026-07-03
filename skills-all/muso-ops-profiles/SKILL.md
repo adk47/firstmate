@@ -204,17 +204,32 @@ SQL
 
 - **Landed:** each loser shows `merged_to_id = <survivor_id>` (and/or `is_deleted = true`),
   and the survivor's `credits_count` has grown. Report this as the confirmation.
-- **Not landed yet:** loser still shows blank `merged_to_id` and `is_deleted = false`. The
-  matvw can lag minutes, so a blank reading **immediately** after the 200 is expected — re-check
-  after the stated ETA, don't declare failure on the first read.
-- **Not landed after hours (the failure mode):** if the loser is still blank/active hours
-  later, the async catalog fold was **silently dropped** (industry-data-processing
-  `common/process.py` deletes the SQS message on any worker exception — no DLQ, no retry; see
-  incident 2026-06-08/09, the repeated "@Ops it's not merging" Jens Jungkurth / Shelby Archer
-  threads). Say so plainly — "the merge was accepted but has NOT landed in the catalog" — and
-  **escalate to the catalog team (Aron / Oleg) for a manual catalog merge.** Do NOT re-issue the
+  **Check BOTH directions:** the backend sometimes canonicalises the *other* profile as the
+  survivor, so a landed merge can show up reversed — the nominal loser stays active while the
+  nominal survivor has `merged_to_id = <loser_id>` / `is_deleted = true`. Either direction means
+  the pair collapsed = landed. (Verified live 2026-07-03: `0c242160→99813f55` landed reversed.)
+- **Not landed yet vs the matview just being stale — READ THIS.** `matvw_catalog_profile` is a
+  BI materialized view rebuilt on a **~DAILY** cadence (NOT minutes), so `merged_to_id` /
+  `is_deleted` lag the real MongoDB catalog by **up to ~a day**. A blank reading is therefore
+  **expected and meaningless until the matview has rebuilt past the merge.** Measured 2026-07-03:
+  every merge ≥~24h old showed as landed, but a batch from the night before still read blank
+  purely because the matview's data watermark hadn't advanced past it yet. So do **not** call a
+  sub-day-old blank reading a drop. To know if the matview is even caught up, compare its
+  watermark to the merge time:
+  `SELECT max(updated_timestamp) FROM "platform-industry-bi-prod".matvw_catalog_profile` (epoch
+  **millis**) — a merge is only judgeable once that exceeds the merge time (+ a margin for a slow
+  fold).
+- **Genuinely dropped (the real failure mode):** loser still blank/active **after the matview
+  watermark has passed the merge** (in practice ≳1–2 days). Then the async catalog fold was
+  **silently dropped** (industry-data-processing `common/process.py` deletes the SQS message on
+  any worker exception — no DLQ, no retry; see incident 2026-06-08/09, the repeated "@Ops it's
+  not merging" Jens Jungkurth / Shelby Archer threads). Say so plainly — "the merge was accepted
+  but has NOT landed in the catalog" — and **escalate to the catalog team (Aron / Oleg) to verify
+  + re-fire** (never a blind re-merge — re-firing against partially-folded state can damage the
+  survivor; verify the pair's current state first). Do NOT re-issue the
   same `/admin/profiles/merge` call hoping it lands (it already 200'd; re-issuing just re-enqueues
-  the same job that drops). The `merge-landing-watchdog` (cron) also pages #clio_devops for these,
+  the same job that drops). The `merge-landing-watchdog` (cron) — which now gates on that same
+  matview watermark, so it only pages genuine drops — also posts to #clio_devops for these,
   so a stuck merge will surface even if no one re-checks.
 
 **STOP-RULE — read this before you do anything if verification looks off:**
