@@ -5,6 +5,18 @@ HYDRA is Muso's multi-agent AI assistant fleet — a set of department-owned age
 on a dedicated OVH server (**node-8**, `40.160.32.80`). It replaces the earlier
 single-agent system, "Clio".
 
+## North star
+
+HYDRA exists to run Muso's day-to-day operations autonomously: department agents do
+the work humans used to do in Retool, dashboards, and inboxes, with Clio as the human
+entry point in Slack and Caroline as the only customer-facing agent. Agents get
+**maximal autonomy** — routing directly to each other and self-healing before paging —
+bounded by **deterministic gates below the LLM** (bash wrappers, config deny-lists,
+CI checks), never by prose alone. Escalations split by domain: technical/infra
+failures go to Nick, money/customer/policy calls go to Aaron. Anything in this repo
+that is not wired into runtime enforcement or agent context is dead weight — delete
+it rather than let it drift.
+
 Two gateway processes run the fleet:
 - **main** (`openclaw-gateway-main`) — the internal agents, reached over Slack.
 - **edge** (`openclaw-gateway-edge`) — **Caroline**, the customer-support agent, reached over Intercom.
