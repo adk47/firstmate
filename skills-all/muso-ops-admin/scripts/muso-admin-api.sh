@@ -205,10 +205,8 @@ resolve_slack_to_email() {
     # Resolve Slack ID to email
     case "$input" in
         U7RP6HKUZ)  echo "aaron@muso.ai" ;;
-        U07NF5A77E2) echo "fede@muso.ai" ;;
         U03TYGJF1N3) echo "serhii@muso.ai" ;;
         U038BM16T7W) echo "jan@muso.ai" ;;
-        U0302FZQGCB) echo "andrey@muso.ai" ;;
         U02S7TJ7QHY) echo "oleg@muso.ai" ;;
         U0AL36NADEY) echo "nick@muso.ai" ;;
         U0A8CCTTAAG) echo "liza@muso.ai" ;;

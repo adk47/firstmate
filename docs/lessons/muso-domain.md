@@ -417,7 +417,6 @@ the same change.
 | Name | Slack ID | Email | Role |
 |---|---|---|---|
 | Aaron Kaufman | `U7RP6HKUZ` | `aaron@muso.ai` | CEO / founder / override authority |
-| Federico Cappuccilli (Fede) | `U07NF5A77E2` | `fede@muso.ai` | CMO |
 | Jan Roland Delmo | `U038BM16T7W` | `jan@muso.ai` | Head of Operations |
 | Liza Basco | `U0A8CCTTAAG` | `liza@muso.ai` | Accountant |
 | Mariia Bubley | `U03LP8YHLPK` | `mariia@muso.ai` | UI/UX designer + junior front-end dev |

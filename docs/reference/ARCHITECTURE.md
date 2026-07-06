@@ -199,11 +199,11 @@ Each of the 9 agents is a separate Slack application with its own identity.
 | coordinator   | @Buddy     | Opus 4.7     | Aaron   | Triage, coordination, general help    |
 | ceo           | @CEO       | Opus 4.7     | Aaron   | Strategy, business decisions          |
 | cmo           | @CMO       | Opus 4.6 *   | Nick    | Marketing, growth, communications     |
-| cto           | @CTO       | Opus 4.7     | Jay     | Technical leadership, architecture    |
-| qa            | @QA        | Sonnet 4.6   | Liza    | Testing, quality assurance            |
-| finance       | @Finance   | Intelligent  | Jan     | Financial analysis, budgeting         |
-| operations    | @Operations| Kimi K2.6    | Artem D | Operational workflows, logistics      |
-| devops        | @DevOps    | Sonnet 4.6   | Aaron   | Infrastructure, CI/CD, deployments    |
+| cto           | @CTO       | Opus 4.7     | Nick+Serhii | Technical leadership, architecture |
+| qa            | @QA        | Sonnet 4.6   | Nick+Serhii | Testing, quality assurance            |
+| finance       | @Finance   | Intelligent  | Liza    | Financial analysis, budgeting         |
+| operations    | @Operations| Kimi K2.6    | Jan     | Operational workflows, logistics      |
+| devops        | @DevOps    | Sonnet 4.6   | Artem D | Infrastructure, CI/CD, deployments    |
 | scout         | @Scout     | GPT-5.5 (Codex) | Nick    | Web research, competitive/market intel, company discovery |
 
 \* cmo is migrating to Opus 4.7 via PR #131 (dedicated `anthropic-cmo` provider for isolated API key).

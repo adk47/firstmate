@@ -40,7 +40,7 @@ Owners CAN add new tools, skills, and integrations to their agent — but the re
    ```
    🔔 Approval Request
    Agent: @CMO
-   Owner: Fede
+   Owner: Nick
    Change: Add muso-google-ads skill
    Risk: LOW — read-only Google Ads API, no internal data access
    PR: github.com/Muso-AI/hydra/pull/15
@@ -74,15 +74,15 @@ These can NEVER be modified by anyone except Aaron, regardless of the request:
 
 ## How It Works in Practice
 
-### Fede (CMO) wants to change his agent's personality:
-1. Fede opens a PR to `workspaces/cmo/SOUL.md`
+### Nick (CMO) wants to change his agent's personality:
+1. Nick opens a PR to `workspaces/cmo/SOUL.md`
 2. He changes the personality section: "Be more creative and use emoji"
-3. CODEOWNERS auto-approves (Fede owns `workspaces/cmo/SOUL.md` personality)
+3. CODEOWNERS auto-approves (Nick owns `workspaces/cmo/SOUL.md` personality)
 4. CI validates: security sections unchanged, deny list not modified
 5. CD deploys to Node 8
 
-### Fede tries to remove "kubectl" from his deny list:
-1. Fede opens a PR to `policies/tool-deny-lists.yaml`
+### Nick tries to remove "kubectl" from his deny list:
+1. Nick opens a PR to `policies/tool-deny-lists.yaml`
 2. CODEOWNERS blocks: only `@adk47` can approve changes to `policies/`
 3. CI validation also blocks: "deny list can only grow, not shrink"
 4. PR rejected automatically
@@ -221,9 +221,9 @@ These are GitHub server-side settings (classic branch protection), **not** in-re
 |-------|-------|-----------------------|-------------------------------|-----------------|
 | @Buddy | Aaron | Everything | — | — |
 | @CEO | Aaron | Everything | — | — |
-| @CMO | Fede | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
+| @CMO | Nick | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
 | @CTO | Nick (+ Serhii) | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
-| @QA | Jay | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
+| @QA | Nick (+ Serhii) | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
 | @Finance | Liza | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
 | @Operations | Jan | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
 | @DevOps | Artem D | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |

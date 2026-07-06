@@ -387,7 +387,6 @@ resolve_slack_to_email() {
     # Resolve Slack ID to email
     case "$input" in
         U7RP6HKUZ)   echo "aaron@muso.ai" ;;   # Aaron Kaufman (CEO)
-        U07NF5A77E2) echo "fede@muso.ai" ;;    # Federico Cappuccilli (CMO)
         U03TYGJF1N3) echo "serhii@muso.ai" ;;  # Serhii Ostapchuk (CTO)
         U038BM16T7W) echo "jan@muso.ai" ;;     # Jan Delmo (Head of Operations) — NOT jay@
         U0AL36NADEY) echo "nick@muso.ai" ;;    # Nicholas Sollazzo (Chief Agent Officer)

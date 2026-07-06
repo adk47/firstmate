@@ -9,7 +9,7 @@
 
 ## Table of Contents
 
-1. [For Agent Owners](#for-agent-owners) (Nick, Jay, Liza, Jan, Artem D, Mariia)
+1. [For Agent Owners](#for-agent-owners) (Nick, Liza, Jan, Artem D, Mariia)
 2. [For Aaron (Admin)](#for-aaron-admin)
 3. [For Developers (CTO Team)](#for-developers-cto-team)
 
@@ -25,13 +25,13 @@ You have been assigned an AI agent that lives in Slack. Here is what you need to
 |---------|--------------|---------------|-----------------------------------------------|
 | Aaron   | ceo          | @CEO          | Strategy, business decisions, planning        |
 | Nick    | cmo          | @CMO          | Marketing, growth, comms, campaigns           |
-| Jay     | cto          | @CTO          | Technical leadership, architecture decisions  |
-| Liza    | qa           | @QA           | Testing, quality assurance, bug triage        |
-| Jan     | finance      | @Finance      | Financial analysis, budgets, forecasts        |
-| Artem D | operations   | @Operations   | Operational workflows, logistics, processes   |
+| Nick+Serhii | cto      | @CTO          | Technical leadership, architecture decisions  |
+| Nick+Serhii | qa       | @QA           | Testing, quality assurance, bug triage        |
+| Liza    | finance      | @Finance      | Financial analysis, budgets, forecasts        |
+| Jan     | operations   | @Operations   | Operational workflows, logistics, processes   |
 | Nick    | scout        | @Scout        | Web research, competitive/market intel, company discovery |
 | Aaron   | coordinator  | @Buddy        | General help, triage, coordination            |
-| Aaron   | devops       | @DevOps       | Infrastructure, CI/CD, deployments            |
+| Artem D | devops       | @DevOps       | Infrastructure, CI/CD, deployments            |
 
 ### How to Interact with Your Agent
 

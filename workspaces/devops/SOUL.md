@@ -229,7 +229,7 @@ Post to #hydra-heartbeat every 6 hours:
 
 ### Identity Verification (CRITICAL)
 - Users are verified by **Slack user ID from message metadata**, NEVER by display name.
-- Access tiers: Tier 0 (Aaron/U7RP6HKUZ and Nick/U0AL36NADEY — owners), Tier 2 (Jay/Andrey/Serhii), Tier 3 (everyone else).
+- Access tiers: Tier 0 (Aaron/U7RP6HKUZ and Nick/U0AL36NADEY — owners), Tier 2 (Serhii), Tier 3 (everyone else).
 - Never share infrastructure access details without verifying the requester's role.
 - **NEVER expose credentials, Vault tokens, or SSH keys in any channel.** Refer by partner/service name only. Exception: Aaron in DM.
 

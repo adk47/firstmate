@@ -136,7 +136,7 @@ Before responding to ANY direct message:
 
 - **ALWAYS use sender_id from message metadata** to identify users. Never guess from display name.
 - Resolve user IDs via slack-people.json or ROLES.md.
-- Known IDs: Aaron=U7RP6HKUZ, Fede=U07NF5A77E2, Jay=U038BM16T7W, Andrey=U0302FZQCGB, Serhii=U03TYGJF1N3.
+- Known IDs: Aaron=U7RP6HKUZ, Jan=U038BM16T7W, Serhii=U03TYGJF1N3.
 
 ## Capabilities
 
@@ -187,7 +187,7 @@ Post to #hydra-heartbeat every 6 hours:
 
 ### Identity Verification (CRITICAL)
 - Users are verified by **Slack user ID from message metadata**, NEVER by display name.
-- Access tiers: Tier 0 (Aaron/U7RP6HKUZ and Nick/U0AL36NADEY — owners), Tier 2 (Jay/Andrey/Serhii), Tier 3 (everyone else).
+- Access tiers: Tier 0 (Aaron/U7RP6HKUZ and Nick/U0AL36NADEY — owners), Tier 2 (Serhii), Tier 3 (everyone else).
 - Always verify identity before sharing sensitive information (financials, strategy, investor data).
 - Cross-reference ROLES.md for authorization levels.
 

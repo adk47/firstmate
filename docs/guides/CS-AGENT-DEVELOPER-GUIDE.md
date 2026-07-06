@@ -546,7 +546,7 @@ Two sanitizer skills run as pre/post processors:
 7. Monitor audit logs for first 48 hours
 ```
 
-**Branch protection**: PRs to main require Aaron's approval. Jay and Nick have write access to create branches and PRs, but cannot merge without approval.
+**Branch protection**: PRs to main require Aaron's approval. Nick and Serhii have write access to create branches and PRs, but cannot merge without approval.
 
 ---
 
