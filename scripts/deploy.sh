@@ -39,6 +39,13 @@ OPENCLAW_SLACK_VERSION="${OPENCLAW_SLACK_VERSION:-${OPENCLAW_VERSION}}"
 # shellcheck source=lib/codex-version.sh
 source "$SCRIPT_DIR/lib/codex-version.sh"
 
+# Per-host deploy lock + stale-PID recovery (unit-tested in
+# scripts/tests/deploy-lock.bats). Extracted from an inline block whose
+# `mkdir_err=$(mkdir …)` tripped `set -e` before recovery, wedging every deploy
+# behind one orphaned lock (incident 2026-07-01).
+# shellcheck source=lib/deploy-lock.sh
+source "$SCRIPT_DIR/lib/deploy-lock.sh"
+
 # Pinned muso CLI version (github.com/Muso-AI/muso-cli) — the admin-API /
 # policy CLI for main-gateway agents (soak phase: opt-in via the
 # skills-all/muso-cli skill). Independent release cadence from openclaw;
@@ -636,40 +643,15 @@ log "Deploy target: $TARGET"
 # empty $LOCK_DIR with no pid file — that case is handled below as
 # "PID: unknown" and reported clearly so the operator knows to clean up.
 LOCK_DIR="${TMPDIR:-/tmp}/hydra-deploy.lock.d"
-mkdir_err=$(mkdir "$LOCK_DIR" 2>&1)
-mkdir_rc=$?
-if (( mkdir_rc != 0 )); then
-  # Distinguish "lock dir already exists" (EEXIST → check for stale)
-  # from other failures (permission denied, ENOSPC, EROFS, etc.).
-  # Without this distinction, all of those fall into the "another
-  # deploy running" branch with a misleading error.
-  if [[ ! -d "$LOCK_DIR" ]]; then
-    fail "could not create deploy lock dir at $LOCK_DIR: $mkdir_err"
-  fi
-  # Lock dir exists. Try stale-PID recovery.
-  if [[ -f "$LOCK_DIR/pid" ]]; then
-    holder_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
-    # Validate the pid is a positive integer before passing to kill -0,
-    # so a corrupted/empty pid file doesn't get misinterpreted.
-    if [[ "$holder_pid" =~ ^[0-9]+$ ]] && kill -0 "$holder_pid" 2>/dev/null; then
-      fail "another deploy is already running (lock: $LOCK_DIR, holder PID: $holder_pid)"
-    fi
-    log "  stale deploy lock found (holder PID '$holder_pid' is dead or invalid) — clearing"
-    rm -rf "$LOCK_DIR"
-    mkdir "$LOCK_DIR" || fail "failed to re-acquire deploy lock after clearing stale: $LOCK_DIR"
-  else
-    # Lock dir exists but pid file does not. Either another deploy is
-    # mid-acquisition (microsecond race window between mkdir and
-    # echo $$ > pid) or a previous deploy was SIGKILL'd in that window.
-    # Refuse rather than guess — manual `rm -rf $LOCK_DIR` is the fix.
-    fail "deploy lock at $LOCK_DIR exists but has no pid file (another deploy mid-acquisition, or a prior deploy was killed before writing pid). If you're sure no deploy is running, remove it manually: rm -rf $LOCK_DIR"
-  fi
-fi
-echo $$ > "$LOCK_DIR/pid"
+# acquire_deploy_lock recovers a stale (dead-holder) lock and refuses only when a
+# LIVE deploy holds it (or the lock is in an unrecoverable/ambiguous state); it
+# writes our PID to $LOCK_DIR/pid on success. See lib/deploy-lock.sh for the
+# per-return-code semantics and the incident that motivated the extraction.
+acquire_deploy_lock "$LOCK_DIR" || fail "could not acquire deploy lock at $LOCK_DIR (see the deploy-lock message above)"
 # Arm the cleanup trap ONLY after we successfully claim the lock.
-# If we'd armed it earlier and then fail()'d during the EEXIST check,
-# the trap would wipe the OTHER deploy's lock dir on our exit.
-trap 'rm -rf "$LOCK_DIR"' EXIT
+# If we'd armed it earlier and then fail()'d during acquisition, the trap
+# would wipe the OTHER deploy's lock dir on our exit.
+trap 'release_deploy_lock "$LOCK_DIR"' EXIT
 
 # -------------------------------------------------------------------
 # Ensure git hooks are activated for this checkout.
