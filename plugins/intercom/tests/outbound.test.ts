@@ -278,6 +278,40 @@ describe("SanitizingIntercomClient", () => {
     expect(inner.calls.replyToConversation[0].body).toBe("Contact support@muso.ai please.");
   });
 
+  it("rewrites a false handoff claim to the honest fallback when no ticket was filed", async () => {
+    const SIGNAL_KEY = "__musoSupportTicketSignal";
+    delete (globalThis as unknown as Record<string, unknown>)[SIGNAL_KEY];
+    const inner = new MockIntercomClient();
+    const logged: string[] = [];
+    const client = new SanitizingIntercomClient(inner, { error: (msg) => logged.push(msg) });
+    await client.replyToConversation({
+      conversationId: "conv_hc1",
+      adminId: "admin_1",
+      body: "I've flagged this for our team.",
+    });
+    expect(inner.calls.replyToConversation[0].body).toBe("I'll make sure this gets to the team.");
+    expect(logged.some((m) => m.includes("[intercom:false-handoff-claim]") && m.includes("conv=conv_hc1") && m.includes("count=1"))).toBe(true);
+  });
+
+  it("passes the same handoff claim through when a ticket WAS filed this conversation", async () => {
+    const SIGNAL_KEY = "__musoSupportTicketSignal";
+    const g = globalThis as unknown as Record<string, unknown>;
+    const store = new Map<string, number>();
+    store.set("conv_hc2", Date.now()); // simulate a fresh support-tools create_ticket success
+    g[SIGNAL_KEY] = store;
+    const inner = new MockIntercomClient();
+    const logged: string[] = [];
+    const client = new SanitizingIntercomClient(inner, { error: (msg) => logged.push(msg) });
+    await client.replyToConversation({
+      conversationId: "conv_hc2",
+      adminId: "admin_1",
+      body: "I've flagged this for our team.",
+    });
+    expect(inner.calls.replyToConversation[0].body).toBe("I've flagged this for our team.");
+    expect(logged.some((m) => m.includes("[intercom:false-handoff-claim]"))).toBe(false);
+    delete g[SIGNAL_KEY];
+  });
+
   it("does not log when logger has no error method", async () => {
     const inner = new MockIntercomClient();
     const client = new SanitizingIntercomClient(inner, {});

@@ -231,6 +231,20 @@ describe("create_ticket dedupe", () => {
     expect(vi.mocked(get).mock.calls).toHaveLength(0);
   });
 
+  it("skips the cross-conversation lookup for track-merge (sweep auto-close hazard)", async () => {
+    const get = vi.fn(async () => ({ ok: true, data: { tasks: [] } as any }));
+    const deps = makeDeps({ http: makeHttp({ get }) });
+    const tool = createCreateTicketTool(deps);
+    const result = await run(tool, {
+      actionType: "track-merge", customerEmail: "u@example.com",
+      summary: "merge tracks",
+      details: { track_merge_pairs: [{ master: "A", duplicates: ["A-dup"] }] },
+      conversationSummary: "dup tracks",
+    });
+    expect(result.submitted).toBe(true);
+    expect(vi.mocked(get).mock.calls).toHaveLength(0);
+  });
+
   it("meters the lookup GET in its own bucket (10/60min)", async () => {
     // A retry-looping session must not hammer ClickUp search unbounded —
     // after the lookup budget is gone, calls proceed straight to the create

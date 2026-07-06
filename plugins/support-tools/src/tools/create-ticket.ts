@@ -20,10 +20,11 @@ import {
   intercomDeeplink,
 } from "./ticket-format.js";
 import { deriveConvId } from "./dedupe-check.js";
+import { markTicketFiled } from "../ticket-success-signal.js";
 import { validateProdigiAddress } from "../order-address.js";
 
 const Parameters = Type.Object({
-  actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, credit-verify, profile-claim, support-general, analytics-followup, order-fulfillment, profile-merge, unmerge-request, bulk-credit-change, profile-update, subscription-refund, data-deletion, dispute, data-export" }),
+  actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, credit-verify, profile-claim, support-general, analytics-followup, order-fulfillment, profile-merge, track-merge, unmerge-request, bulk-credit-change, profile-update, subscription-refund, data-deletion, dispute, data-export" }),
   customerEmail: Type.String({ description: "Customer's email address" }),
   summary: Type.String({ description: "Plain English description of what the customer is requesting" }),
   titleGist: Type.Optional(Type.String({ description: "Short, concrete gist for the ticket title (max 60 chars), e.g. 'Recurring charges since Jan, no account found'. Falls back to the summary when omitted." })),
@@ -237,6 +238,48 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         }
       }
 
+      // Track-merge capture gate. Ops's POST /admin/tracks/merge needs to know
+      // which track to KEEP and which duplicate(s) to fold into it — a ticket
+      // without that is silently un-actionable (the same null-fields failure that
+      // motivated the profile-merge gate). Accept either the multi-merge shape
+      // (details.track_merge_pairs[{master, duplicates[]}], for the 7-pair case)
+      // or the single-merge flat shape (details.master_track + duplicate_tracks[]).
+      // NOT customerProfileId-anchored: track merges are catalog data keyed on
+      // track ids, not a profile. Runs before the rate-limit check so a retry
+      // after the customer supplies the tracks isn't penalised.
+      if (params.actionType === "track-merge") {
+        const d = details ?? {};
+        // A pair is actionable only if it names a non-empty string master AND at least
+        // one non-empty string duplicate. A non-empty array of malformed pairs
+        // (`[{}]`, `{master:"A", duplicates:[]}`, non-string entries) must NOT pass —
+        // that would file the same un-actionable ticket this gate exists to prevent.
+        const pairIsValid = (p: unknown): boolean => {
+          if (typeof p !== "object" || p === null) return false;
+          const pair = p as Record<string, unknown>;
+          const master = typeof pair.master === "string" ? pair.master.trim() : "";
+          const dups = Array.isArray(pair.duplicates)
+            ? pair.duplicates.filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+            : [];
+          return master.length > 0 && dups.length > 0;
+        };
+        const rawPairs = Array.isArray(d.track_merge_pairs) ? d.track_merge_pairs : [];
+        const havePairs = rawPairs.length > 0 && rawPairs.every(pairIsValid);
+        const master = typeof d.master_track === "string" ? d.master_track.trim() : "";
+        const dupTracks = Array.isArray(d.duplicate_tracks)
+          ? d.duplicate_tracks.filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+          : [];
+        const haveFlat = master.length > 0 && dupTracks.length > 0;
+        if (!havePairs && !haveFlat) {
+          return ticketResult({
+            submitted: false,
+            reason: "capture_incomplete",
+            action_type: "track-merge",
+            missing: ["details.track_merge_pairs[] (or details.master_track + details.duplicate_tracks[])"],
+            hint: "Track-merge tickets need which track to KEEP and which duplicate track(s) to fold into it. Capture the customer's stated track URLs/ids — as details.track_merge_pairs[{master, duplicates[]}] for multiple merges, or details.master_track + details.duplicate_tracks[] for a single one — before retrying.",
+          });
+        }
+      }
+
       // Profile-mutating tier-2 actions can't be actioned without knowing WHICH
       // profile. Require customerProfileId for them (light gate — tier-1 stays
       // ungated so Caroline can always file). Runs before the rate-limit check
@@ -291,12 +334,13 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         sessionTickets.invalidate(sessionId, params.actionType, params.customerEmail);
         existingId = null;
       }
-      // Cross-conversation fallback. Skipped for profile-merge: the merged-
-      // ticket sweep auto-closes those keyed on the ORIGINAL description's
-      // profile ids, so appending a different merge request cross-conversation
-      // could be closed unexecuted. The lookup GET is metered in its own
-      // bucket so a retry-looping session can't hammer ClickUp search.
-      if (!existingId && params.actionType !== "profile-merge"
+      // Cross-conversation fallback. Skipped for profile-merge AND track-merge:
+      // the merged-ticket sweep auto-closes those keyed on the ORIGINAL
+      // description's ids, so appending a DIFFERENT merge request (a distinct
+      // track/profile set) cross-conversation could be closed unexecuted. The
+      // lookup GET is metered in its own bucket so a retry-looping session can't
+      // hammer ClickUp search.
+      if (!existingId && params.actionType !== "profile-merge" && params.actionType !== "track-merge"
           && rateLimiter.check(sessionId, "create_ticket_lookup", 60, 10).allowed) {
         existingId = await lookupOpenTicket(params.actionType, params.customerEmail);
       }
@@ -315,6 +359,10 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         );
         if (comment?.ok) {
           sessionTickets.record(sessionId, params.actionType, params.customerEmail, existingId);
+          // Signal the intercom false-handoff-claim guard that a ticket really landed
+          // for this conversation, so an "I've flagged this for the team" reply is
+          // allowed through instead of being rewritten to the honest fallback.
+          markTicketFiled(deriveConvId(sessionKey));
           // Escalation follow-up (e.g. customer already past the promised
           // SLA): give it teeth — tag the ticket so the overdue sweep groups
           // it, and bump urgent reasons to ClickUp priority 1. Both
@@ -402,6 +450,9 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       }
 
       sessionTickets.record(sessionId, params.actionType, params.customerEmail, result.data.id);
+      // Signal the intercom false-handoff-claim guard that a ticket really landed for
+      // this conversation (mirrors the follow-up-append path above).
+      markTicketFiled(deriveConvId(sessionKey));
       return ticketResult({ submitted: true, ticket_id: result.data.id, sla, action_type: params.actionType, tier });
     },
   };

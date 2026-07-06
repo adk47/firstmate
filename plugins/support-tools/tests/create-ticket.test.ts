@@ -43,6 +43,28 @@ describe("createCreateTicketTool", () => {
     expect(body.tags).toEqual(["hydra-action-request", "tier-2", "action:profile-merge", "team:catalog"]);
   });
 
+  it("marks the ticket-success signal (for the intercom handoff-claim guard) on a fresh successful file", async () => {
+    const SIGNAL_KEY = "__musoSupportTicketSignal";
+    delete (globalThis as unknown as Record<string, unknown>)[SIGNAL_KEY];
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_sig1" } });
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_sig", sessionKey: "agent:support:intercom:direct:conv_sig1" });
+    await tool.execute("call_1", { actionType: "credit-claim", customerEmail: "user@example.com", summary: "Missing credit", conversationSummary: "ctx" });
+    const store = (globalThis as unknown as Record<string, unknown>)[SIGNAL_KEY] as Map<string, number> | undefined;
+    expect(store?.has("conv_sig1")).toBe(true);
+  });
+
+  it("does NOT mark the ticket-success signal when the file fails (queue_busy)", async () => {
+    const SIGNAL_KEY = "__musoSupportTicketSignal";
+    delete (globalThis as unknown as Record<string, unknown>)[SIGNAL_KEY];
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: false });
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_sig", sessionKey: "agent:support:intercom:direct:conv_sig2" });
+    const result = await tool.execute("call_1", { actionType: "credit-claim", customerEmail: "user@example.com", summary: "Missing credit", conversationSummary: "ctx" });
+    const parsed = JSON.parse((result.content[0] as { type: "text"; text: string }).text);
+    expect(parsed).toEqual({ submitted: false, reason: "queue_busy" });
+    const store = (globalThis as unknown as Record<string, unknown>)[SIGNAL_KEY] as Map<string, number> | undefined;
+    expect(store?.has("conv_sig2") ?? false).toBe(false);
+  });
+
   it("stamps a deterministic Prodigi address validation on order-fulfillment tickets", async () => {
     vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_order1" } });
     const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_order" });
@@ -117,6 +139,79 @@ describe("createCreateTicketTool", () => {
     });
     const body = vi.mocked(mockClient.post).mock.calls[0][1].body as Record<string, unknown>;
     expect(body.assignees).toBeUndefined();
+  });
+
+  it("files a track-merge ticket at tier-2, team:catalog, and does not auto-assign", async () => {
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_tm1" } });
+    // profileMergeAssigneeId is set to prove track-merge does NOT borrow the profile-merge assignee.
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_tm", profileMergeAssigneeId: 12345678 });
+    const result = await tool.execute("call_1", {
+      actionType: "track-merge", customerEmail: "user@example.com",
+      summary: "Merge 7 duplicate track pairs",
+      details: { track_merge_pairs: [{ master: "Track A (master)", duplicates: ["Track A (dup)"] }] },
+      conversationSummary: "Customer lists duplicate tracks.",
+    });
+    const body = vi.mocked(mockClient.post).mock.calls[0][1].body as Record<string, unknown>;
+    expect(body.priority).toBe(2);
+    expect(body.tags).toEqual(["hydra-action-request", "tier-2", "action:track-merge", "team:catalog"]);
+    expect(body.assignees).toBeUndefined();
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+    expect(parsed).toEqual({ submitted: true, ticket_id: "task_tm1", sla: "5 business days", action_type: "track-merge", tier: 2 });
+  });
+
+  it("accepts the flat track-merge shape (master_track + duplicate_tracks[])", async () => {
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_tm2" } });
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_tm" });
+    const result = await tool.execute("call_1", {
+      actionType: "track-merge", customerEmail: "user@example.com",
+      summary: "Merge one duplicate track",
+      details: { master_track: "Song (keep)", duplicate_tracks: ["Song (dup)"] },
+      conversationSummary: "Customer lists a duplicate track.",
+    });
+    expect(mockClient.post).toHaveBeenCalledTimes(1);
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+    expect(parsed.submitted).toBe(true);
+  });
+
+  it("rejects track-merge with no pairs/tracks (capture_incomplete) without filing", async () => {
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_tm" });
+    const result = await tool.execute("call_1", {
+      actionType: "track-merge", customerEmail: "user@example.com",
+      summary: "Merge my duplicate tracks",
+      conversationSummary: "Customer wants tracks merged but named none.",
+    });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+    expect(parsed.submitted).toBe(false);
+    expect(parsed.reason).toBe("capture_incomplete");
+    expect(parsed.action_type).toBe("track-merge");
+    expect(mockClient.post).not.toHaveBeenCalled();
+  });
+
+  it("rejects track-merge whose pairs are non-empty but malformed (no actionable keep/fold-in)", async () => {
+    // A non-empty array of junk pairs must NOT slip past the gate — that would file
+    // the un-actionable ticket the gate exists to prevent.
+    const badPairs = [
+      [{}],
+      [{ master: "A", duplicates: [] }],
+      [{ master: "", duplicates: ["B"] }],
+      [{ master: "A", duplicates: ["  "] }],
+      [{ master: 5, duplicates: ["B"] }],
+      [{ master: "A", duplicates: ["B"] }, { master: "C", duplicates: [] }], // one good, one bad → still reject
+    ];
+    for (const pairs of badPairs) {
+      vi.mocked(mockClient.post).mockClear();
+      const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_tm" });
+      const result = await tool.execute("call_1", {
+        actionType: "track-merge", customerEmail: "user@example.com",
+        summary: "Merge my duplicate tracks",
+        details: { track_merge_pairs: pairs as unknown[] },
+        conversationSummary: "Customer named tracks but the capture is malformed.",
+      });
+      const parsed = JSON.parse((result.content[0] as { text: string }).text);
+      expect(parsed.submitted).toBe(false);
+      expect(parsed.reason).toBe("capture_incomplete");
+      expect(mockClient.post).not.toHaveBeenCalled();
+    }
   });
 
   it("rejects profile-merge missing customerProfileId", async () => {

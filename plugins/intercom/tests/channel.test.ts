@@ -6,9 +6,27 @@ import {
   joinDeliveryChunks,
   buildAgentRawBody,
   stripConversationContext,
+  buildRiskOptions,
 } from "../src/channel.js";
 import { canAgentReply } from "../src/handoff.js";
 import { stripModelFallbackNotice } from "../src/sanitize-model-fallback.js";
+
+describe("buildRiskOptions", () => {
+  it("returns disabled when riskAssessment is absent", () => {
+    const r = buildRiskOptions({} as never, undefined);
+    expect(r.riskAssessment.enabled).toBe(false);
+    expect(r.riskDeps).toBeUndefined();
+  });
+
+  it("enables rules + turn cap but leaves the LLM judge OFF when no openrouterApiKey (the defanged edge config)", () => {
+    const account = { riskAssessment: { enabled: true, turnCountHardCap: 14, judgeMinTurnCount: 4 } } as never;
+    const r = buildRiskOptions(account, undefined);
+    expect(r.riskAssessment.enabled).toBe(true);
+    expect(r.riskDeps?.judge).toBeUndefined();
+    expect(r.riskDeps?.turnCountHardCap).toBe(14);
+    expect(r.riskDeps?.judgeMinTurnCount).toBe(4);
+  });
+});
 
 describe("parseConversationIdFromTarget", () => {
   it("extracts conversationId from full session key", () => {

@@ -121,6 +121,22 @@ describe("assessRisk Layer 0 (magic keyword)", () => {
   });
 });
 
+// Regression: "merge my duplicate tracks" is deliberately NOT a risk rule. The backstop
+// is the wrong layer for an unactionable request (un-actionability isn't a message-text
+// signal); it's handled by the first-class track-merge create_ticket lane. This test
+// prevents a future "fix" that adds a bad regex here.
+describe("assessRisk — track-merge requests are handled by the ticket lane, not a risk rule", () => {
+  it("does NOT fire on 'merge my duplicate tracks'", async () => {
+    const r = await assessRisk("can you merge my duplicate tracks?", [], baseState, noJudge);
+    expect(r.triggered).toBe(false);
+  });
+
+  it("does NOT fire on 'these two tracks are the same, please combine them'", async () => {
+    const r = await assessRisk("these two tracks are the same, please combine them", [], baseState, noJudge);
+    expect(r.triggered).toBe(false);
+  });
+});
+
 describe("assessRisk Layer 1 (rules)", () => {
   it("fires on 'refund' → suggestedActionType subscription-refund", async () => {
     const r = await assessRisk("i want a refund", [], baseState, noJudge);

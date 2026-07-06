@@ -3,6 +3,8 @@ import { MAX_OUTBOUND_MESSAGE_IDS } from "./types.js";
 import { sanitizeOutboundBody } from "./sanitize-email.js";
 import { sanitizeToolLeak } from "./sanitize-tool-leak.js";
 import { sanitizeTypography } from "./sanitize-typography.js";
+import { sanitizeHandoffClaim } from "./sanitize-handoff-claim.js";
+import { wasTicketFiledRecently } from "./ticket-success-signal.js";
 
 // --- Outbound reply retry (design §7 Rate Limiting) ---
 // "Intercom returns 429 with Retry-After. Retry with capped exponential
@@ -604,7 +606,25 @@ export class SanitizingIntercomClient implements IntercomClient {
         try { console.error(msg); } catch { /* noop */ }
       }
     }
-    return this.inner.replyToConversation({ ...params, body: typoPass.body });
+    // False-handoff-claim pass (honesty enforcement). A completed-action claim like
+    // "I've flagged this for our team" is only honest if create_ticket actually
+    // succeeded for this conversation; the cross-plugin signal (set by support-tools on
+    // a successful file) tells us. When it did not, rewrite the claim down to the
+    // sanctioned "I'll make sure this gets to the team." fallback. Runs last so it sees
+    // the fully-sanitized body; a lost/absent signal errs toward the honest fallback.
+    const ticketConfirmed = wasTicketFiledRecently(params.conversationId);
+    const handoffPass = sanitizeHandoffClaim(typoPass.body, { ticketConfirmed });
+    if (handoffPass.redactions.length > 0) {
+      const unique = Array.from(new Set(handoffPass.redactions));
+      const msg = `[intercom:false-handoff-claim] conv=${params.conversationId} count=${unique.length} rewritten=${JSON.stringify(unique)}`;
+      // Logging must never block delivery (same contract as the passes above).
+      try {
+        this.log?.error?.(msg);
+      } catch {
+        try { console.error(msg); } catch { /* noop */ }
+      }
+    }
+    return this.inner.replyToConversation({ ...params, body: handoffPass.body });
   }
 
   async assignConversation(params: {

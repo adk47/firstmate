@@ -171,6 +171,10 @@ describe("buildTicketTags", () => {
     expect(buildTicketTags({ actionType: "subscription-refund", tier: 3 })).toEqual([
       "hydra-action-request", "tier-3", "action:subscription-refund", "team:growth",
     ]);
+    // track-merge is Catalog data (not in GROWTH_ACTIONS) → routes to team:catalog.
+    expect(buildTicketTags({ actionType: "track-merge", tier: 2 })).toEqual([
+      "hydra-action-request", "tier-2", "action:track-merge", "team:catalog",
+    ]);
   });
 
   it("adds an escalation tag for known escalation reasons", () => {
@@ -249,6 +253,7 @@ describe("tier helpers", () => {
     expect(getTierForAction("credit-claim")).toBe(1);
     expect(getTierForAction("order-fulfillment")).toBe(1);
     expect(getTierForAction("profile-merge")).toBe(2);
+    expect(getTierForAction("track-merge")).toBe(2);
     expect(getTierForAction("data-deletion")).toBe(3);
     expect(getTierForAction("unknown-action")).toBe(1);
   });

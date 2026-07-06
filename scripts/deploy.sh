@@ -875,6 +875,18 @@ RSYNC_EXCLUDES=(
   # Tripped pre-flight 2026-05-11 after PR #270 (support-tools/Caroline)
   # deployed and left plugins/support-tools/dist/ on /opt/hydra/.
   --exclude='plugins/*/dist/'
+  # CTO clone push-audit guard, installed out-of-band at deploy time by
+  # scripts/lib/setup-cto-clone-hooks.sh (PR #582). The generator IS tracked
+  # (scripts/lib/cto-push-audit-guard.sh), but its rendered outputs are not:
+  # the shared hooks dir scripts/lib/cto-git-hooks/ (holding a pre-push copy of
+  # the guard) and the .cto-clone-hooks.gitconfig includeIf at the repo root.
+  # Both are server-generated, reference absolute /opt/hydra/ paths, and are
+  # never seeded from the repo — same "generator tracked, output server-owned"
+  # pattern as plugins/*/dist/. #582 shipped the generator without these
+  # excludes, so the pre-flight rsync --delete dry-run flagged them for
+  # deletion on every PR after its deploy ran (tripped 2026-07-06 on PR #617).
+  --exclude='scripts/lib/cto-git-hooks/'
+  --exclude='.cto-clone-hooks.gitconfig'
   # CTO scratch / draft HTML authored directly on node-8 (workspaces/cto/),
   # not tracked in repo and not intended to be. Excluded so rsync --delete
   # doesn't wipe Aaron's working copy. Tripped pre-flight 2026-05-08 on

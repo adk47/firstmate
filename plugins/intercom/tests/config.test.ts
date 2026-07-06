@@ -67,6 +67,21 @@ describe("resolveIntercomAccount", () => {
     expect(account.enabled).toBe(false);
   });
 
+  it("round-trips riskAssessment and clickup blocks (the defanged edge backstop config)", () => {
+    const cfg = {
+      channels: { intercom: { accounts: { default: {
+        ...validConfig.channels.intercom.accounts.default,
+        riskAssessment: { enabled: true, turnCountHardCap: 14, judgeMinTurnCount: 4 },
+        clickup: { apiKey: "pk_test", listId: "901000600160", userEmailFieldId: "f_email", profileIdFieldId: "f_prof" },
+      } } } },
+    };
+    const account = resolveIntercomAccount(cfg);
+    expect(account.riskAssessment).toEqual({ enabled: true, turnCountHardCap: 14, judgeMinTurnCount: 4 });
+    // openrouterApiKey deliberately absent → LLM judge stays off downstream (buildRiskOptions).
+    expect(account.riskAssessment?.openrouterApiKey).toBeUndefined();
+    expect(account.clickup).toEqual({ apiKey: "pk_test", listId: "901000600160", userEmailFieldId: "f_email", profileIdFieldId: "f_prof" });
+  });
+
   it("throws on missing account", () => {
     expect(() => resolveIntercomAccount(validConfig, "nonexistent")).toThrow('account "nonexistent" not found');
   });
