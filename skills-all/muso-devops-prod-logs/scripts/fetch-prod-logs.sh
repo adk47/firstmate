@@ -37,6 +37,11 @@
 #   PROD_LOGS_MAX_BYTES    stdout cap, truncates head-side keeping the most
 #                          recent bytes (default 65536)
 #   PROD_LOGS_MAX_PODS     max pods sampled per deployment (default 5)
+#   PROD_LOGS_STARTUP_RETRIES
+#                          retries for pods whose container is still starting
+#                          (default 3)
+#   PROD_LOGS_STARTUP_RETRY_SLEEP
+#                          seconds between startup retries (default 1)
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -45,11 +50,20 @@ CONFIG_DIR="${PROD_LOGS_CONFIG_DIR:-$SCRIPT_DIR/../config}"
 KUBECTL_BIN="${KUBECTL_BIN:-/usr/local/bin/kubectl}"
 MAX_BYTES="${PROD_LOGS_MAX_BYTES:-65536}"
 MAX_PODS="${PROD_LOGS_MAX_PODS:-5}"
+STARTUP_RETRIES="${PROD_LOGS_STARTUP_RETRIES:-3}"
+STARTUP_RETRY_SLEEP="${PROD_LOGS_STARTUP_RETRY_SLEEP:-1}"
 
 ALLOWED_NAMESPACES="muso-prod muso-dev queuing data-processing monitoring"
 
 usage() {
   sed -n '/^# Usage:/,/^# Exit codes/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+is_startup_wait_error() {
+  case "$1" in
+    *"waiting to start: ContainerCreating"*|*"waiting to start: PodInitializing"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 NAMESPACE="muso-prod"
@@ -173,6 +187,10 @@ if [[ -z "$DEPLOYMENT" ]]; then
   usage >&2
   exit 2
 fi
+if ! [[ "$STARTUP_RETRIES" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: PROD_LOGS_STARTUP_RETRIES must be a non-negative integer" >&2
+  exit 2
+fi
 
 if [[ "$ANY_DEPLOY" -ne 1 ]]; then
   [[ -r "$DEPLOYMENTS_FILE" ]] || { echo "ERROR: missing $DEPLOYMENTS_FILE (fail-closed)" >&2; exit 6; }
@@ -240,7 +258,21 @@ for pod in $pods; do
   args=(logs -n "$NAMESPACE" "$pod" "--since=$SINCE" "--tail=$TAIL" --timestamps)
   if [[ -n "$CONTAINER" ]]; then args+=(-c "$CONTAINER"); else args+=(--all-containers=true); fi
   [[ "$PREVIOUS" -eq 1 ]] && args+=(--previous)
-  if pod_out="$("$KUBECTL_BIN" "${args[@]}" 2>&1)"; then
+  attempt=0
+  pod_ok=0
+  while true; do
+    if pod_out="$("$KUBECTL_BIN" "${args[@]}" 2>&1)"; then
+      pod_ok=1
+      break
+    fi
+    if (( attempt >= STARTUP_RETRIES )) || ! is_startup_wait_error "$pod_out"; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep "$STARTUP_RETRY_SLEEP"
+  done
+
+  if [[ "$pod_ok" -eq 1 ]]; then
     [[ -n "$pod_out" ]] && printf '%s\n' "$pod_out" | sed "s|^|[${pod}] |" >> "$RAW_FILE"
   else
     echo "ERROR: kubectl logs failed for pod $pod: $(printf '%s' "$pod_out" | head -1)" >> "$FAIL_FILE"

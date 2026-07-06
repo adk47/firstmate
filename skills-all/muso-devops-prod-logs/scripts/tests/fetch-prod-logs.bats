@@ -43,6 +43,19 @@ case "$1" in
     ;;
   logs)
     # $4 is the pod name (logs -n NS POD ...)
+    if [[ " ${KUBECTL_STUB_LOGS_WAITING_ONCE_PODS:-} " == *" $4 "* ]]; then
+      count_file="$TEST_TMPDIR/waiting-$4.count"
+      count="$(cat "$count_file" 2>/dev/null || echo 0)"
+      if [ "$count" -lt 1 ]; then
+        echo "$((count + 1))" > "$count_file"
+        echo "Error from server (BadRequest): container \"worker\" in pod \"$4\" is waiting to start: ContainerCreating" >&2
+        exit 1
+      fi
+    fi
+    if [[ " ${KUBECTL_STUB_LOGS_WAITING_ALWAYS_PODS:-} " == *" $4 "* ]]; then
+      echo "Error from server (BadRequest): container \"worker\" in pod \"$4\" is waiting to start: ContainerCreating" >&2
+      exit 1
+    fi
     if [[ " ${KUBECTL_STUB_LOGS_FAIL_PODS:-} " == *" $4 "* ]]; then
       echo "Error from server (Forbidden): pods \"$4\" is forbidden" >&2
       exit 1
@@ -197,6 +210,23 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [[ "$output" == *"kubectl logs failed for pod fixture-pod-1"* ]]
 }
 
+@test "ContainerCreating log failure is retried before reporting blindness" {
+  export KUBECTL_STUB_LOGS_WAITING_ONCE_PODS="fixture-pod-1"
+  PROD_LOGS_STARTUP_RETRY_SLEEP=0 run bash "$FETCH" -n muso-prod -d core-backend-api
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ERROR something broke"* ]]
+  [[ "$output" != *"kubectl logs failed"* ]]
+  [ "$(grep -c '^logs ' "$KUBECTL_STUB_CALLS")" -eq 2 ]
+}
+
+@test "ContainerCreating after retry budget → exit 5, still fail-loud" {
+  export KUBECTL_STUB_LOGS_WAITING_ALWAYS_PODS="fixture-pod-1"
+  PROD_LOGS_STARTUP_RETRIES=1 PROD_LOGS_STARTUP_RETRY_SLEEP=0 run bash "$FETCH" -n muso-prod -d core-backend-api
+  [ "$status" -eq 5 ]
+  [[ "$output" == *"waiting to start: ContainerCreating"* ]]
+  [ "$(grep -c '^logs ' "$KUBECTL_STUB_CALLS")" -eq 2 ]
+}
+
 @test "partial pod failure → good pod's lines still delivered, then exit 5" {
   export KUBECTL_STUB_PODS="cb-api-aaa cb-api-bbb"
   export KUBECTL_STUB_LOGS_FAIL_PODS="cb-api-bbb"
@@ -218,6 +248,14 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   run bash "$FETCH" --list
   [ "$status" -eq 0 ]
   [[ "$output" == *"muso-prod core-backend-api"* ]]
+}
+
+@test "invalid startup retry count fails logs mode only" {
+  PROD_LOGS_STARTUP_RETRIES=bogus run bash "$FETCH" --list
+  [ "$status" -eq 0 ]
+  PROD_LOGS_STARTUP_RETRIES=bogus run bash "$FETCH" -n muso-prod -d core-backend-api
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"PROD_LOGS_STARTUP_RETRIES"* ]]
 }
 
 @test "missing patterns config → fail-closed exit 6" {
