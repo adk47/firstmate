@@ -9,7 +9,7 @@ description: |
   bundled reviewer — if your harness ships a richer native code-review skill, prefer that one.
 license: MIT
 metadata:
-  version: "2.1.0"
+  version: "2.2.0"
 argument-hint: "[--fix] [--comment]"
 ---
 

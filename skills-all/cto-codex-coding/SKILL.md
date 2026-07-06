@@ -14,7 +14,7 @@ compatibility: |
   Muso-AI repo you have push access to; the procedure verifies that access and
   the repo's real default branch at runtime, and fails loud if you can't push.
 metadata:
-  version: "4.0"
+  version: "4.1"
   source-repo: "Muso-AI/hydra"
 allowed-tools:
   - exec
@@ -48,6 +48,26 @@ yourself.
 - **Branch + PR only. NEVER merge, NEVER push to a default branch
   (`main`/`master`/`develop`), never force-push.** A human merges after QA
   review. This rail holds for everyone, god-mode requesters included.
+- **This skill is your ONLY coding ENTRY POINT → `ship`.** ship-kit's `fix` and
+  `triage` skills ARE vendored and visible to you (`fix` triggers on "fix this
+  bug" / "debug and fix" — the same requests you answer), and so is `ship` — but
+  you must **never start a code change by invoking `fix`, `ship`, or `triage`
+  directly**. Entered on its own, `fix` cuts a `fix/…` branch and ships
+  **without** your audit row, push-access check, `cto/<slug>-<ts>` branch rail, or
+  QA handoff. Always enter through *this* skill, which writes the audit row and
+  verifies push access FIRST, then hands the change to `ship`. The audit row is an
+  **agent-level** rule (SOUL "Write Activity Logging") that binds no matter which
+  skill you are in: if you ever find yourself mid-`fix`/`ship` without having
+  written it, STOP — write it and re-verify push access before any `git push` or
+  PR. **This is mechanically enforced:** a directory-scoped pre-push hook
+  (`scripts/lib/cto-push-audit-guard.sh`, armed out-of-band at deploy time by
+  `setup-cto-clone-hooks.sh` for every clone under `/opt/hydra/workspaces/repos/`)
+  *refuses* any push that lacks a recent audit row for the repo **or** targets a
+  non-`cto/` branch (or a default branch) — so a stray `fix`/`ship` entry (no audit
+  row, or a `fix/…` branch) is blocked at the git boundary, not merely discouraged
+  here.
+  The only ship-kit flag you pass is `--yolo` (below); `triage`'s read-only
+  diagnosis is fine as an aid, but your primary debugger is `cto-debug`.
 - **Right repo, right base.** Determine the base branch at runtime from the repo
   itself (`gh repo view ... defaultBranchRef`) — never assume `main`. Muso repos
   differ: core-backend / web-credits use `develop`, customer-api-mcp uses
@@ -130,6 +150,11 @@ yourself.
    git -C "$clone" reset --hard "origin/$base"
    git -C "$clone" clean -fd
    ```
+   This clone is **already armed** with the push-audit `pre-push` guard — no
+   per-clone install is needed (and none would help; see the rail-guard note).
+   The deploy-time `scripts/lib/setup-cto-clone-hooks.sh` sets a directory-scoped
+   `core.hooksPath` for everything under `/opt/hydra/workspaces/repos/`, so every
+   clone here carries the guard no matter which skill created it.
 
 5. **Branch** off the base — use a unique name so a repeat task or retry can't
    collide with an existing branch on `switch -c`, push, or PR create. Generate
@@ -170,10 +195,14 @@ yourself.
    these hydra overrides (`ship`'s "project conventions override the recipe"
    clause authorizes them — they are how the wrapper's rails survive the hand-off):
 
-   - **Authorization / checkpoint (ship Stage 6):** your steps 2–3 (push-access
-     check + audit row) ARE the authorization. Proceed through `ship`'s push + PR
-     checkpoint WITHOUT re-asking and WITHOUT stopping at "staged and waiting" —
-     this is the autonomous PR the requester asked for.
+   - **Authorization / checkpoint (ship Stage 6) — invoke `ship --yolo`:** your
+     steps 2–3 (push-access check + audit row) ARE the authorization, so pass
+     ship-kit's `--yolo` flag. It auto-confirms ship's Stage-6 push + PR checkpoint
+     (and auto-resumes Stage 0, and lets Stage 10 `reflect` surface without
+     blocking) instead of stopping at "staged and waiting" — this is the autonomous
+     PR the requester asked for. `--yolo` does **not** authorize merge (see the next
+     bullet): it stops at green. So the invocation is `ship --yolo`, never
+     `ship --yolo --merge`.
    - **NEVER merge:** do **not** pass `ship --merge`, and never merge yourself.
      `--merge` is `ship`'s standing authorization to squash-merge — it would break
      your one inviolable rail. Stop at *PR open + green*; a human merges.
@@ -197,8 +226,11 @@ yourself.
      8) only reaches green once a *fresh non-self approval* exists. So the instant
      `ship` finishes Stage 7 (PR open) and BEFORE it begins Stage 8, pause the
      pipeline and do the **step 8** QA handoff — otherwise babysit waits forever on
-     a review nobody requested (deadlock). Only then let `ship`'s babysit loop run,
-     driving the PR to fresh APPROVED + CI green + mergeable against QA's findings.
+     a review nobody requested (deadlock). `--yolo` does **not** waive this pause:
+     it auto-confirms ship's *own* checkpoints, but this QA handoff is your
+     orchestration between stages, not a ship checkpoint. Only then let `ship`'s
+     babysit loop run, driving the PR to fresh APPROVED + CI green + mergeable
+     against QA's findings.
    - **Reflect (ship Stage 10):** safe to let run — it self-gates and never writes
      unattended.
 

@@ -8,7 +8,7 @@ description: |
   the verify stage of a ship pipeline. Reports concrete evidence (commands + output).
 license: MIT
 metadata:
-  version: "2.1.0"
+  version: "2.2.0"
 ---
 
 # Verify — prove the change works by running it

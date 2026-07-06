@@ -1216,3 +1216,25 @@ chmod 644 /etc/logrotate.d/hydra
 log "  logrotate config installed at /etc/logrotate.d/hydra"
 
 log "post-2026-05-05 hardening: drop-ins, write-audit, and 2-min watchdog cron installed."
+
+# -------------------------------------------------------------------
+# CTO push-audit guard (PR #582 / QA finding)
+# -------------------------------------------------------------------
+# Arm a directory-scoped pre-push hook so every clone under
+# /opt/hydra/workspaces/repos/ refuses a push that lacks a recent CTO audit
+# row — independent of which skill (cto-codex-coding / fix / ship) created the
+# clone or runs the push. Installing it HERE (out-of-band, at deploy time, as
+# root with HOME=/root) is what makes it airtight: a per-clone install inside
+# cto-codex-coding can't cover a clone the bypassed standalone fix/ship path
+# never armed. Idempotent; runs every deploy. Fails open (push just stays
+# unguarded) if misconfigured — never blocks a deploy.
+if [[ -x "$HYDRA_ROOT/scripts/lib/setup-cto-clone-hooks.sh" ]]; then
+  if CTO_GUARD_SRC="$HYDRA_ROOT/scripts/lib/cto-push-audit-guard.sh" \
+     CTO_HOOKS_DIR="$HYDRA_ROOT/scripts/lib/cto-git-hooks" \
+     CTO_HOOKS_GITCONFIG="$HYDRA_ROOT/.cto-clone-hooks.gitconfig" \
+     "$HYDRA_ROOT/scripts/lib/setup-cto-clone-hooks.sh" >/dev/null; then
+    log "  CTO clone push-audit guard armed (directory-scoped pre-push hooksPath)"
+  else
+    log "  WARN: setup-cto-clone-hooks.sh failed — CTO push-audit guard may not be active"
+  fi
+fi

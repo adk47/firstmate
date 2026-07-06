@@ -8,8 +8,8 @@ description: |
   + CI green + mergeable; does NOT merge unless --merge.
 license: MIT
 metadata:
-  version: "2.1.0"
-argument-hint: "[--fast] [--merge] [--no-verify]"
+  version: "2.2.0"
+argument-hint: "[--fast] [--merge] [--no-verify] [--yolo]"
 ---
 
 # Ship — working tree to green PR, one command
@@ -43,6 +43,7 @@ those skills are pre-installed.
 | `--fast` | Skip Stage 1 (simplify) and Stage 3 (code-review) — for tiny changes |
 | `--merge` | Squash-merge once green (default: stop at green, human merges) |
 | `--no-verify` | Skip Stage 2b (runtime verify) — docs/config-only changes. The Stage 2a rebase check still runs |
+| `--yolo` | Hands-off: auto-confirm the Stage 6 checkpoint and resolve any mid-pipeline ambiguity autonomously (operates under the bundled `yolo` skill's rules) instead of pausing. Stops at green — does **not** merge; merge stays `--merge` |
 
 ## Cross-cutting rules
 
@@ -68,7 +69,8 @@ those skills are pre-installed.
 
 ## Stage 0 — Preflight
 
-1. Parse flags. Read state file → offer resume if it matches the current branch.
+1. Parse flags. Read state file → offer resume if it matches the current branch (under
+   `--yolo`, resume automatically — don't ask).
 2. `git status` + check for unshipped commits + `gh pr view --json url,state 2>/dev/null`.
    Detect unshipped commits robustly: `git log @{u}.. 2>/dev/null` works only when an upstream
    is set — a branch that has never been pushed has no `@{u}`, so that command errors and a bare
@@ -196,12 +198,17 @@ answer; don't assume one.) This is the only outward-facing gate. Authorization r
 - `--merge` on the invocation **is** standing authorization for all outward-facing steps
   (push, PR, merge) — do not re-ask at the checkpoint. The user opted into hands-off
   end-to-end by passing it.
+- `--yolo` auto-confirms this checkpoint (hands-off through push + PR + babysit-to-green) —
+  don't re-ask. It does **not** authorize merge: that stays `--merge`. So `--yolo` alone
+  stops at green; `--yolo --merge` runs fully hands-off including the squash-merge. (The one
+  thing `--yolo` does not silence is Stage 10 `reflect`, which never auto-writes — on a
+  hands-off run it *surfaces* its suggestions without blocking; see Stage 10.)
 - With a PR already open: the checkpoint gates pushing new fix commits to it (a push
   re-triggers CI + QA review). If the quality stages produced nothing, there's nothing to
   gate — record the checkpoint as N/A.
-- Without `--merge` and with new work to push: the checkpoint question is mandatory. If
-  running non-interactively (headless, or under an unattended loop), stop here and report
-  "staged and waiting" rather than guessing.
+- Without `--merge` or `--yolo`, and with new work to push: the checkpoint question is
+  mandatory. If running non-interactively (headless, or under an unattended loop), stop here
+  and report "staged and waiting" rather than guessing.
 
 ## Stage 7 — Push + PR
 
@@ -241,6 +248,8 @@ the knowledge base.
 
 Reflect is safe to run on every ship: it **self-gates** (scans the session and early-exits
 with "No new knowledge" when the work was routine) and **never auto-applies** — it proposes,
-then waits for a plain reply (`ok`/`ko`) before writing anything. Under `--merge` or
-unattended runs it will still only *surface* suggestions and wait; it never mutates
-knowledge files without approval, so there's nothing to gate.
+then waits for a plain reply (`ok`/`ko`) before writing anything. Under `--merge`, `--yolo`,
+or any unattended/headless run there is no one to reply, so it only *surfaces* its suggestions
+in the final report and does **not** block — it skips the save rather than waiting (it never
+auto-writes, so nothing is lost but the optional capture). An interactive run still gets the
+`ok`/`ko` prompt. Either way the pipeline completes — `reflect` never holds a hands-off run open.

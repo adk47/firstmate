@@ -8,7 +8,7 @@ description: |
   pipeline. Operates on recently changed code unless told otherwise.
 license: MIT
 metadata:
-  version: "2.1.0"
+  version: "2.2.0"
 ---
 
 # Simplify — make the change cleaner without changing what it does
