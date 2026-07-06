@@ -77,8 +77,8 @@ for v in verdicts:
     if tid not in email_by_tid:
         die("verdicts.json references threadId %r not in emails.json (no fabricated rows)" % tid)
     vd = v.get("verdict")
-    if vd not in ("caroline", "human"):
-        die("verdicts.json threadId %r has invalid verdict %r (want caroline|human)" % (tid, vd))
+    if vd not in ("caroline", "human", "spam"):
+        die("verdicts.json threadId %r has invalid verdict %r (want caroline|human|spam)" % (tid, vd))
     verdict_by_tid[tid] = v
 
 # Every email thread must have exactly one verdict.
@@ -98,10 +98,15 @@ def no_emdash(s):
 
 n = len(emails)
 n_caroline = sum(1 for v in verdict_by_tid.values() if v["verdict"] == "caroline")
-n_human = n - n_caroline
+n_spam = sum(1 for v in verdict_by_tid.values() if v["verdict"] == "spam")
+n_human = n - n_caroline - n_spam
 
+# Spam/no-action never counts as a Caroline win; only show its segment when
+# there is spam so quiet hours stay glanceable.
 header = (":envelope: *support@ triage* · last 1h · %d new · "
           "%d Caroline-can-handle · %d need a human") % (n, n_caroline, n_human)
+if n_spam:
+    header += " · %d spam/no-action" % n_spam
 lines = [no_emdash(header)]
 
 # Preserve emails.json order (fetch order = newest-first).
@@ -115,6 +120,8 @@ for tid in ordered_tids[:MAX_LINES]:
     reason = no_emdash(slack_escape(v.get("reason") or ""))
     if v["verdict"] == "caroline":
         tag = ":white_check_mark: Caroline-can-handle"
+    elif v["verdict"] == "spam":
+        tag = ":wastebasket: spam/no-action"
     else:
         tag = ":raising_hand: needs a human"
     link = "<%s|%s>" % (url, subject) if url else subject

@@ -2,9 +2,11 @@
 name: muso-support-email-triage
 description: |
   Hourly TRIAGE of the support@muso.ai Gmail inbox (last ~65 min). Classifies each
-  new thread as Caroline-can-handle vs needs-a-human using Caroline's support
-  doctrine, and returns a glanceable digest as the final assistant message for the
-  cron to deliver to #cs_chats. Read-only — NEVER sends, drafts, labels, or tickets.
+  new thread as Caroline-can-handle vs needs-a-human vs spam/no-action using Caroline's
+  support skills + doctrine (Caroline-can-handle = she owns first contact, including
+  filing the ticket her skill is designed to file), and returns a glanceable digest as
+  the final assistant message for the cron to deliver to #cs_chats. Read-only — NEVER
+  sends, drafts, labels, or tickets.
 allowed-tools: Read, exec
 ---
 
@@ -12,8 +14,13 @@ allowed-tools: Read, exec
 
 Once per hour the operations agent reads new mail in the **support@muso.ai** Gmail
 inbox (last ~65 min), classifies each thread as *Caroline-can-handle* vs
-*needs-a-human* using Caroline's existing support doctrine, and returns a glanceable
-digest as its FINAL assistant message. A cron entry delivers that text to `#cs_chats`.
+*needs-a-human* vs *spam/no-action* using Caroline's existing support skills and
+doctrine, and returns a glanceable digest as its FINAL assistant message. A cron entry
+delivers that text to `#cs_chats`. The classifier scores who owns **first contact**:
+filing a ticket or running a gated self-service write is Caroline handling the thread,
+not a human handoff — so almost every genuine customer request is *Caroline-can-handle*,
+and only threads she structurally cannot start (legal, security, sales, vendor/B2B) are
+*needs-a-human*.
 
 **v1 is TRIAGE ONLY. Nothing is ever sent to a customer.**
 
@@ -99,29 +106,72 @@ NOT build the Gmail URL or the body excerpt yourself — the script does, determ
 1. Read `${WORKDIR}/emails.json`.
 2. Read Caroline's support doctrine to ground each verdict (absolute paths — you are
    `cd`'d into the skill dir, so repo-relative paths will not resolve):
+   - the **skills Caroline actually runs** — list `/opt/hydra/workspaces/support/skills/`
+     and read each `SKILL.md` frontmatter (`description` + `triggers`). This is the
+     authoritative map of what Caroline handles at first contact: credit verification,
+     credit removal, profile claim/consolidate/dedupe, track dedupe, order/plaque
+     fulfillment, refund retention, and the generic `action-request` ticket filer. Do not
+     rely on memory — new skills land here.
    - every `*.md` under `/opt/hydra/workspaces/support/reference/` — list the directory
      and read them all (do not rely on a hardcoded set; new KB files such as
      `api-access.md`, `founding-member.md`, and `orders-and-fulfillment.md` land here), and
-   - the **Escalation Ladder** in `/opt/hydra/workspaces/support/SOUL.md` (the four-step ladder:
-     answer from reference docs -> self-service guidance -> troubleshooting walkthrough ->
-     flag for a human).
-3. For each thread decide `verdict ∈ {caroline, human}`:
-   - `caroline` — answerable from the reference docs, self-service guidance, or a
-     troubleshooting walkthrough (ladder steps 1-3). Analytics/streams are **no longer a
-     special carve-out** (the migration storyline was retired): Caroline handles the
-     plan/seat basics herself, but genuinely-off data is a data-integrity
-     `analytics-followup` ticket — classify those as `human` below.
-   - `human` — ladder step 4 only: a human action is genuinely required (refund
-     processing, data correction, account recovery, bug investigation, or anything that
-     needs a write or a ticket).
+   - the **Escalation Ladder** and **Resolution lifecycle** in
+     `/opt/hydra/workspaces/support/SOUL.md`.
+3. For each thread decide `verdict ∈ {caroline, human, spam}`. The question is **who owns
+   FIRST CONTACT**, not whether a human ever touches the request downstream. Filing a
+   ticket and running a gated self-service write are Caroline's DESIGNED terminal actions
+   (SOUL Escalation Ladder step 4 and the Resolution lifecycle) — they are Caroline
+   handling the thread, NOT a human handoff.
+   - `caroline` — any thread whose first contact is a Caroline skill: a KB answer (ladder
+     steps 1-3), a gated self-service write (`credits_verify`, `remove_credits`,
+     `profiles_claim_self`, `profiles_consolidate`, `order_address_update`,
+     `founding_buyback_link`), OR filing the recommend-approve / needs-human / intake
+     ticket her skill is designed to file. This is the **default for any genuine customer
+     request**. It explicitly includes: **credit verification** (proof intake +
+     recommend-approve ticket — she never rejects), credit removal, profile
+     claim/consolidate/dedupe, track dedupe, refund/cancellation (the `refund-retention`
+     3-gate flow), **analytics/streams genuinely off** (she files the `analytics-followup`
+     data-integrity ticket herself and emits `[[PRIORITY]]` — that IS her handling; it is
+     no longer a human carve-out), profile data correction, order/plaque fulfillment,
+     founding-member Q&A + paid buy-back, account-email-change and account-deletion intake,
+     and general how-to/FAQ. When she files a **needs-human** ticket (e.g. a credit-theft
+     contradiction she discovered, or a cross-owner merge), she still OWNED first contact —
+     that is `caroline`, because a human never had to read the raw email first.
+   - `human` — ONLY threads Caroline structurally cannot even START, where a human must
+     read the raw email first: legal / rights / IP demands (DMCA, subpoena,
+     cease-and-desist, licensing or chain-of-title disputes, official legal/visa
+     documentation); security / account-compromise / fraud / law-enforcement (including a
+     security event on the support mailbox itself); pure sales or commercial negotiation
+     (enterprise / full-catalog-API deals, Business-tier quotes — NOT a founding-member
+     self-serve question); vendor / B2B business development (partnership, data-licensing,
+     press, recruiting, AP invoices — NOT the Prodigi fulfillment lane, which is
+     `caroline`); an irreversible account/profile deletion or Google de-indexing; and a
+     disputed cross-account claim reversal (removing SOMEONE ELSE'S claim). **"Needs a
+     write or a ticket" is NOT a human trigger.**
+   - `spam` — not a support request at all, and no human action either: cold marketing /
+     promotions (a fuel-card promo), SEO/link-building pitches, unsolicited app / TestFlight
+     invites, newsletters; and system-noise (mailer-daemon / delivery-failure bounces,
+     auto-replies, out-of-office, read receipts, list confirmations, automated
+     request-received receipts, internal test mail, Intercom/tooling setup notices). Spam
+     is excluded from BOTH work queues and NEVER counts as a Caroline win.
+
+   Worked examples (the two that were being classified wrong):
+   - "Fwd: verification of my songs..." / any "Additional Information Required for Credit
+     Submission" reply → `caroline` (`customer-credit-verification`): she verifies
+     ownership, reviews the proof, and approves the corroborated case or files a
+     recommend-approve ticket. NOT `human`.
+   - "Save up to 10p per litre on fuel with POWK" → `spam` (cold promo). NOT `caroline`,
+     NOT `human`.
 4. For each thread produce:
    - `description` — one line: what the sender wants.
-   - `reason` — one line. For `caroline`, cite the KB area, e.g. `KB: subscriptions-and-billing`.
-     For `human`, cite the action type, e.g. `refund processing`.
+   - `reason` — one line. For `caroline`, cite the skill or KB area, e.g.
+     `customer-credit-verification` or `KB: subscriptions-and-billing`. For `human`, cite
+     the residue type, e.g. `legal / rights` or `vendor / B2B`. For `spam`, cite the noise
+     type, e.g. `cold marketing` or `delivery-failure bounce`.
 5. Write `${WORKDIR}/verdicts.json` as
-   `[{threadId, verdict, description, reason}]`. Every `threadId` MUST exactly match an
-   entry in `emails.json`. Do not invent rows, and include one row per thread in
-   `emails.json` (no more, no fewer).
+   `[{threadId, verdict, description, reason}]` with `verdict ∈ {caroline, human, spam}`.
+   Every `threadId` MUST exactly match an entry in `emails.json`. Do not invent rows, and
+   include one row per thread in `emails.json` (no more, no fewer).
 
 ### Phase 3 — Format + emit (deterministic)
 
@@ -139,10 +189,13 @@ message.** Two outcomes:
   with a "...and N more" overflow line), e.g.:
 
   ```
-  :envelope: *support@ triage* · last 1h · 3 new · 2 Caroline-can-handle · 1 need a human
-  • <https://mail.google.com/mail/u/?authuser=support@muso.ai#all/THREAD|Subject> - they want X · :white_check_mark: Caroline-can-handle (KB: subscriptions-and-billing)
-  • <https://mail.google.com/mail/u/?authuser=support@muso.ai#all/THREAD|Subject> - they want Y · :raising_hand: needs a human (refund processing)
+  :envelope: *support@ triage* · last 1h · 3 new · 1 Caroline-can-handle · 1 need a human · 1 spam/no-action
+  • <https://mail.google.com/mail/u/?authuser=support@muso.ai#all/THREAD|Subject> - they want X · :white_check_mark: Caroline-can-handle (customer-credit-verification)
+  • <https://mail.google.com/mail/u/?authuser=support@muso.ai#all/THREAD|Subject> - they want Y · :raising_hand: needs a human (legal / rights)
+  • <https://mail.google.com/mail/u/?authuser=support@muso.ai#all/THREAD|Subject> - they want Z · :wastebasket: spam/no-action (cold marketing)
   ```
+
+  The `· %d spam/no-action` header segment appears only when at least one thread is spam.
 
 The script **fails loud** (exits non-zero with a clear message) if `verdicts.json` is
 missing or malformed, or if its `threadId`s do not reconcile with `emails.json`. If it

@@ -993,6 +993,7 @@ jobs:
           files=$(find scripts \
                        workspaces/operations/skills/muso-ops-admin/scripts/tests \
                        workspaces/operations/skills/muso-caroline-weekly-review/scripts/tests \
+                       workspaces/operations/skills/muso-support-email-triage/scripts/tests \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-fraud-signals.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/fraud-muso-only-lookup.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/render-dry-run-summary.bats \
