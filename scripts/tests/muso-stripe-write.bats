@@ -8,14 +8,44 @@ setup() {
   BIN="$BATS_TEST_TMPDIR/bin"
   mkdir -p "$BIN"
   # Smart `stripe` stub:
-  #  - `charges retrieve <ch>` → JSON with a customer (or empty when STUB_BROKEN=1)
-  #  - `charges list ...`      → list whose data has a refunded charge iff STUB_PRIOR_REFUNDS>0
+  #  - `charges retrieve <ch>`   → JSON with a customer + invoice (empty when STUB_BROKEN=1,
+  #                                invoice:null when STUB_NO_INVOICE=1)
+  #  - `charges list ...`        → list whose data has a refunded charge iff STUB_PRIOR_REFUNDS>0
+  #  - `invoices retrieve <in>`  → JSON with a subscription (null when STUB_ONEOFF_INVOICE=1,
+  #                                empty when STUB_INVOICE_BROKEN=1)
+  #  - `subscriptions list ...`  → canceled-only by default; active-like iff STUB_ACTIVE_SUBS=1;
+  #                                full page of canceled iff STUB_SUBS_FULL_PAGE=1;
+  #                                empty when STUB_SUBS_BROKEN=1
   #  - anything else (e.g. `refunds create`) → echo STRIPE_CALLED so we can assert pass-through
   cat >"$BIN/stripe" <<'SH'
 #!/usr/bin/env bash
 case "$1 $2" in
   "charges retrieve")
-    if [ "${STUB_BROKEN:-0}" -gt 0 ]; then echo ""; else echo '{"customer":"cus_TEST"}'; fi
+    if [ "${STUB_BROKEN:-0}" -gt 0 ]; then echo ""
+    elif [ "${STUB_CHARGE_NO_INVOICE_KEY:-0}" -gt 0 ]; then echo '{"customer":"cus_TEST"}'
+    elif [ "${STUB_NO_INVOICE:-0}" -gt 0 ]; then echo '{"customer":"cus_TEST","invoice":null}'
+    else echo '{"customer":"cus_TEST","invoice":"in_TEST"}'; fi
+    ;;
+  "invoices retrieve")
+    if [ "${STUB_INVOICE_BROKEN:-0}" -gt 0 ]; then echo ""
+    elif [ "${STUB_INVOICE_NO_SUB_KEY:-0}" -gt 0 ]; then echo '{"id":"in_TEST"}'
+    elif [ "${STUB_ONEOFF_INVOICE:-0}" -gt 0 ]; then echo '{"subscription":null}'
+    else echo '{"subscription":"sub_TEST"}'; fi
+    ;;
+  "subscriptions list")
+    if [ "${STUB_SUBS_BROKEN:-0}" -gt 0 ]; then
+      echo ""
+    elif [ "${STUB_ACTIVE_SUBS:-0}" -gt 0 ]; then
+      # One hard-canceled sub plus one active-but-cancel_at_period_end sub: the
+      # latter still grants paid access, so the gate must treat it as exposure.
+      echo '{"object":"list","data":[{"id":"sub_OLD","status":"canceled","cancel_at_period_end":false},{"id":"sub_LIVE","status":"active","cancel_at_period_end":true}]}'
+    elif [ "${STUB_SUBS_FULL_PAGE:-0}" -gt 0 ]; then
+      printf '{"object":"list","data":['
+      for i in $(seq 1 100); do [ "$i" -gt 1 ] && printf ','; printf '{"id":"sub_%d","status":"canceled"}' "$i"; done
+      printf ']}\n'
+    else
+      echo '{"object":"list","data":[{"id":"sub_OLD","status":"canceled"}]}'
+    fi
     ;;
   "charges list")
     if [ "${STUB_PRIOR_REFUNDS:-0}" -gt 0 ]; then
@@ -207,4 +237,126 @@ healthy() { fake_journalctl "Jun 09 10:00:00 node-8 openclaw[1]: message process
     --override-confirmed-by U0AL36NADEY --approval-msg-id 1777474838.796239
   [ "$status" -eq 0 ]
   [[ "$output" == *"STRIPE_CALLED refunds create -d charge=ch_X --confirm"* ]]
+}
+
+# --- No-paid-access-after-refund gate -----------------------------------------
+# A refund of a subscription charge must not leave the customer with an
+# active-like subscription (active/trialing/past_due/unpaid — including
+# cancel_at_period_end=true, which still grants access until period end).
+
+@test "sub charge + active-like sub remains, no keep token -> REFUSED with cancel-first instruction" {
+  healthy
+  STUB_ACTIVE_SUBS=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"sub_LIVE"* ]]
+  [[ "$output" == *"subscriptions cancel"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "sub charge + active sub + valid allowlisted keep token -> executes, keep flags stripped" {
+  healthy
+  STUB_ACTIVE_SUBS=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm \
+    --keep-subscription-confirmed-by U038BM16T7W --approval-msg-id 1777474838.796239
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"AUTHORIZED-KEEP"* ]]
+  [[ "$output" == *"STRIPE_CALLED refunds create -d charge=ch_X --confirm"* ]]
+  [[ "$output" != *"--keep-subscription-confirmed-by"* ]]
+}
+
+@test "sub charge + active sub + NON-allowlisted keep approver -> REFUSED" {
+  healthy
+  STUB_ACTIVE_SUBS=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm \
+    --keep-subscription-confirmed-by U_RANDOM --approval-msg-id 1777474838.796239
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"not on the god-mode allowlist"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "sub charge + active sub + keep token but missing approval-msg-id -> REFUSED" {
+  healthy
+  STUB_ACTIVE_SUBS=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm \
+    --keep-subscription-confirmed-by U038BM16T7W
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "non-subscription charge (no invoice) is exempt even with active subs -> executes" {
+  healthy
+  STUB_NO_INVOICE=1 STUB_ACTIVE_SUBS=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STRIPE_CALLED refunds create -d charge=ch_X --confirm"* ]]
+}
+
+@test "one-off invoice charge (no subscription on invoice) is exempt -> executes" {
+  healthy
+  STUB_ONEOFF_INVOICE=1 STUB_ACTIVE_SUBS=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STRIPE_CALLED refunds create -d charge=ch_X --confirm"* ]]
+}
+
+@test "charge object MISSING the invoice key (API drift / error shape) -> FAIL-CLOSED refuse, not EXEMPT" {
+  healthy
+  STUB_CHARGE_NO_INVOICE_KEY=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"subscription state"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "invoice object MISSING the subscription key (API drift) -> FAIL-CLOSED refuse, not EXEMPT" {
+  healthy
+  STUB_INVOICE_NO_SUB_KEY=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"subscription state"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "invoice read broken (empty) -> FAIL-CLOSED refuse, not silently exempt" {
+  healthy
+  STUB_INVOICE_BROKEN=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"subscription state"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "subscriptions list broken (empty) -> FAIL-CLOSED refuse" {
+  healthy
+  STUB_SUBS_BROKEN=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"subscription state"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "full subscriptions page with none active-like -> FAIL-CLOSED refuse (cannot rule out)" {
+  healthy
+  STUB_SUBS_FULL_PAGE=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "value-less trailing --keep-subscription-confirmed-by -> usage error (exit 2)" {
+  healthy
+  run "$WRAPPER" refunds create -d "charge=ch_X" --confirm --keep-subscription-confirmed-by
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"needs a value"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
+}
+
+@test "repeat refund + active sub with BOTH override and keep tokens -> executes" {
+  healthy
+  STUB_PRIOR_REFUNDS=1 STUB_ACTIVE_SUBS=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm \
+    --override-confirmed-by U038BM16T7W --keep-subscription-confirmed-by U038BM16T7W \
+    --approval-msg-id 1777474838.796239
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"AUTHORIZED-OVERRIDE"* ]]
+  [[ "$output" == *"AUTHORIZED-KEEP"* ]]
+  [[ "$output" == *"STRIPE_CALLED refunds create -d charge=ch_X --confirm"* ]]
+}
+
+@test "keep token alone does NOT waive the one-time policy on a repeat refund -> REFUSED" {
+  healthy
+  STUB_PRIOR_REFUNDS=1 STUB_ACTIVE_SUBS=1 run "$WRAPPER" refunds create -d "charge=ch_X" --confirm \
+    --keep-subscription-confirmed-by U038BM16T7W --approval-msg-id 1777474838.796239
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"prior refund"* ]]
+  [[ "$output" != *"STRIPE_CALLED refunds create"* ]]
 }

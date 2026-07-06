@@ -59,7 +59,42 @@ Calculate partial amounts based on:
 2. **Days used** — prorate: `refund = charge × (remaining_days / total_days)`
 3. **Never refund more than the original charge minus any value already received**
 
+Partial/proration refunds usually mean the customer KEEPS their subscription — that
+requires the Step 3 keep waiver from an allowlisted requester, or canceling anyway.
+
 ### Step 3: Execute
+
+#### Subscription disposition — BEFORE any refund of a subscription charge
+
+A completed refund must leave no paid access (Aaron, #operations 2026-07-02). Before
+refunding a charge that paid for a subscription:
+
+1. List the customer's subscriptions, all states:
+   ```bash
+   stripe subscriptions list -d "customer=cus_XXX" -d "status=all" --limit 100
+   ```
+2. If any is active-like (`active`, `trialing`, `past_due`, `unpaid` — including
+   `cancel_at_period_end=true`, which still grants access until period end), cancel it
+   through the gate and verify:
+   ```bash
+   bash /opt/hydra/scripts/muso-stripe-write.sh subscriptions cancel sub_XXX --confirm
+   stripe subscriptions retrieve sub_XXX   # must show status=canceled
+   ```
+3. **Keep exception** — the requester explicitly wants the user to keep the
+   subscription (goodwill month-refund, partial/proration correction): only an
+   allowlisted requester (Aaron/Jan/Nick) can waive, captured from their in-thread ask,
+   by passing `--keep-subscription-confirmed-by <slack_id> --approval-msg-id <ts>` on
+   the refund command. Never assume "keep" silently. A non-allowlisted requester cannot
+   waive it — they may ask an allowlisted requester to, or the subscription gets
+   canceled. The keep waiver does NOT waive the one-time refund policy (a repeat refund
+   still needs its own `--override-confirmed-by`); when both waivers apply,
+   `--approval-msg-id` is shared, so point it at a message covering both approvals.
+
+The money gate enforces this below you: `refunds create` on a subscription charge
+REFUSES while an active-like subscription remains, unless the keep waiver is passed.
+One-off charges (plaques, merch) are exempt — do not cancel a subscription over a
+non-subscription refund. If a subscription cannot be canceled or verified, the refund
+workflow is NOT complete: say so plainly and @-mention Nick (`U0AL36NADEY`).
 
 #### If APPROVED (full or partial):
 
@@ -78,8 +113,10 @@ bash /opt/hydra/scripts/muso-stripe-write.sh refunds create -d "charge=ch_XXX" -
 ALWAYS use `--confirm` to skip the interactive prompt.
 
 If the gate exits non-zero with `REFUSED`, the refund did **not** happen: do not
-report it as done, do not invent an approval/ticket — say it couldn't complete and
-@-mention Nick (`U0AL36NADEY`), per the operations honesty rules.
+report it as done, do not invent an approval/ticket. If the refusal is the
+active-subscription wall, that's self-recoverable — cancel the subscription (or get
+the keep waiver), verify, and retry. For any other refusal, say it couldn't complete
+and @-mention Nick (`U0AL36NADEY`), per the operations honesty rules.
 
 After execution, verify:
 ```bash
@@ -153,6 +190,7 @@ Post the full investigation report to the channel, then append the action taken:
 > • Type: Full / Partial
 > • Charge: `ch_XXX`
 > • Customer: `cus_XXX` (email)
+> • Subscription: canceled `sub_XXX` / kept (waived by <who>, msg <ts>) / n/a (one-off charge)
 > • Reason: [brief explanation]
 
 **If denied:**
@@ -169,11 +207,15 @@ After every refund decision (approved or denied), append a record to the refund 
 # Create log dir if needed
 mkdir -p memory/refund-log
 
-# Append to monthly log
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] | DECISION | email | cus_XXX | ch_XXX | $AMOUNT | REASON" >> memory/refund-log/$(date +%Y-%m).log
+# Append to monthly log — always include the subscription disposition
+# (subscription_canceled=sub_XXX, or subscription_kept=sub_XXX waived by <who>, or subscription=n/a one-off charge):
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] | DECISION | email | cus_XXX | ch_XXX | $AMOUNT | REASON | subscription_canceled=sub_XXX" >> memory/refund-log/$(date +%Y-%m).log
 
 # For an authorized override, record WHO waived the policy and the approval message ts:
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] | OVERRIDE | email | cus_XXX | ch_XXX | $AMOUNT | one-time policy waived by <approver> (msg <approval_msg_id>)" >> memory/refund-log/$(date +%Y-%m).log
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] | OVERRIDE | email | cus_XXX | ch_XXX | $AMOUNT | one-time policy waived by <approver> (msg <approval_msg_id>) | subscription_canceled=sub_XXX" >> memory/refund-log/$(date +%Y-%m).log
+
+# For an authorized KEEP (subscription intentionally left active):
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] | DECISION | email | cus_XXX | ch_XXX | $AMOUNT | REASON | subscription_kept=sub_XXX waived by <approver> (msg <approval_msg_id>)" >> memory/refund-log/$(date +%Y-%m).log
 ```
 
 ## Safety Rails
@@ -183,7 +225,13 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] | OVERRIDE | email | cus_XXX | ch_XXX | $
 3. **One-time refund policy.** A prior refund (this account or a linked account) blocks an automatic repeat. A non-allowlisted requester cannot waive it (DENY). An allowlisted requester (Aaron / Jan / Nick) may waive it **only** through the explicit interactive confirm + override token in Step 3 — never silently, never on a fabricated confirmation. The money gate (`muso-stripe-write.sh`) enforces this independently.
 4. **Always show your work.** Never refund without posting the full investigation report first.
 5. **Partial over full.** When in doubt between full and partial, prefer partial — it's fairer to both sides.
-6. **Log everything.** Every decision gets logged, approved or denied.
+6. **No paid access after refund.** A refunded subscription charge must leave no
+   active-like Pro/Business/team subscription on the customer — cancel and verify BEFORE
+   the refund (see Step 3 "Subscription disposition"). An intentional keep needs the
+   attributable allowlisted waiver. The money gate (`muso-stripe-write.sh`) enforces this
+   independently.
+7. **Log everything.** Every decision gets logged, approved or denied, including the
+   subscription disposition (`subscription_canceled=sub_XXX`, or kept-by-waiver, or n/a).
 
 ## Escalation
 

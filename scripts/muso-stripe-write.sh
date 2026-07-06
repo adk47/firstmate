@@ -17,7 +17,9 @@
 #
 # Usage:
 #   muso-stripe-write.sh refunds create -d "charge=ch_XXX" -d "reason=requested_by_customer" --confirm
-# i.e. exactly the args you would pass to `stripe`, minus the leading `stripe`.
+# i.e. exactly the args you would pass to `stripe`, minus the leading `stripe` —
+# except the wrapper-only waiver flags, which are consumed here and never forwarded:
+#   --override-confirmed-by, --keep-subscription-confirmed-by, --approval-msg-id
 #
 # Env overrides (mainly for tests):
 #   OPENCLAW_GATEWAY_UNIT   systemd unit to scan (default: openclaw-gateway-main)
@@ -101,10 +103,70 @@ enforce_refund_one_time_gate() {
   echo "AUTHORIZED-OVERRIDE (muso-stripe-write): repeat refund on $charge waived by $confirmed_by (approval msg $approval_msg_id)" >&2
 }
 
+# --- No-paid-access-after-refund gate ------------------------------------------
+# A refund of a SUBSCRIPTION charge must not leave the customer with paid access
+# (Aaron, #operations 2026-07-02). Enforced here in bash, below the agent, because
+# skill prose alone is not enforcement. Scope: only charges whose invoice belongs
+# to a subscription — one-off charges (plaques, merch) are exempt, so unrelated
+# active subscriptions never block those refunds. "Active-like" = active/trialing/
+# past_due/unpaid; cancel_at_period_end=true still grants access, so it does NOT
+# exempt. Intentional goodwill/proration refunds that keep the subscription need
+# an attributable allowlisted waiver (--keep-subscription-confirmed-by), same
+# shape as the one-time-policy override.
+
+# Echo the charge's subscription exposure: "EXEMPT" (not a subscription charge),
+# "" (subscription charge, no active-like subs remain), or the space-joined ids of
+# active-like subscriptions. Non-zero EXIT = could not verify (caller fails
+# closed). A FULL page (>= limit) with no visible active sub is unverifiable.
+# EXEMPT requires the key to be PRESENT and explicitly null: an object missing
+# `invoice`/`subscription` entirely is treated as unverifiable, not one-off —
+# error-shaped payloads and Stripe API-version drift (2025-03-31.basil moves
+# invoice.subscription under .parent) must fail CLOSED, never silently disarm
+# the gate. Field paths + `-d` list filters verified live on node-8 2026-07-02
+# (current API emits `"invoice": null` / `"subscription": null` explicitly);
+# re-verify on a stripe-CLI or account API-version bump. The bats pin the LOGIC.
+charge_subscription_exposure() {
+  local charge="$1" cjson invoice cust ijson sub subs
+  cjson="$("$STRIPE_BIN" charges retrieve "$charge" 2>/dev/null)" || return 1
+  printf '%s' "$cjson" | jq -e 'type == "object" and has("invoice")' >/dev/null 2>&1 || return 1
+  invoice="$(printf '%s' "$cjson" | jq -r '.invoice // empty')"
+  [ -n "$invoice" ] || { echo "EXEMPT"; return 0; }
+  ijson="$("$STRIPE_BIN" invoices retrieve "$invoice" 2>/dev/null)" || return 1
+  printf '%s' "$ijson" | jq -e 'type == "object" and has("subscription")' >/dev/null 2>&1 || return 1
+  sub="$(printf '%s' "$ijson" | jq -r '.subscription // empty')"
+  [ -n "$sub" ] || { echo "EXEMPT"; return 0; }
+  cust="$(printf '%s' "$cjson" | jq -r '.customer // empty')"
+  [ -n "$cust" ] || return 1
+  subs="$("$STRIPE_BIN" subscriptions list -d "customer=$cust" -d "status=all" --limit 100 2>/dev/null)" || return 1
+  printf '%s' "$subs" | jq -e 'type == "object" and (.data | type == "array")' >/dev/null 2>&1 || return 1
+  printf '%s' "$subs" | jq -r '
+    [.data[] | select(.status == "active" or .status == "trialing"
+                      or .status == "past_due" or .status == "unpaid") | .id] as $live
+    | if ($live | length) > 0 then ($live | join(" "))
+      elif (.data | length) >= 100 then error("full page")
+      else "" end' 2>/dev/null || return 1
+}
+
+enforce_no_paid_access_gate() {
+  local charge="$1" keep_by="$2" approval_msg_id="$3" exposure
+  if ! exposure="$(charge_subscription_exposure "$charge")"; then
+    refuse "couldn't verify subscription state for $charge's customer (Stripe read failed). Not moving money — a refund must not leave paid access in place."
+  fi
+  [ "$exposure" = "EXEMPT" ] && return 0
+  [ -n "$exposure" ] || return 0
+  if [ -z "$keep_by" ] || [ -z "$approval_msg_id" ]; then
+    refuse "customer still has active-like paid subscription(s): $exposure — a completed refund must leave no paid access. Cancel first (bash /opt/hydra/scripts/muso-stripe-write.sh subscriptions cancel <sub_id> --confirm), verify, then retry the refund. To intentionally KEEP the subscription (goodwill/proration refund), an allowlisted requester (Aaron/Jan/Nick) must confirm in-thread, then pass --keep-subscription-confirmed-by <slack_id> --approval-msg-id <ts>."
+  fi
+  if ! is_allowlisted_approver "$keep_by"; then
+    refuse "--keep-subscription-confirmed-by '$keep_by' is not on the god-mode allowlist (Aaron/Jan/Nick); refusing to leave paid access after a refund."
+  fi
+  echo "AUTHORIZED-KEEP (muso-stripe-write): refund on $charge leaves subscription(s) $exposure active, waived by $keep_by (approval msg $approval_msg_id)" >&2
+}
+
 # Recognize a refund-CREATE invocation in any valid Stripe-CLI form, so the gate can't be
 # slipped past with a non-canonical shape (`post /v1/refunds`, or a global flag before the
 # subcommand like `--color off refunds create`). Fail CLOSED: a refund-shaped write goes
-# through the one-time gate regardless of arg order.
+# through the refund gates regardless of arg order.
 is_refund_create() {
   local joined=" ${STRIPE_ARGS[*]} " a
   case "$joined" in
@@ -123,12 +185,16 @@ is_refund_create() {
 # Split override flags out of the stripe args (stripe must never see them).
 STRIPE_ARGS=()
 OVERRIDE_CONFIRMED_BY=""
+KEEP_SUB_CONFIRMED_BY=""
 APPROVAL_MSG_ID=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --override-confirmed-by)
       [ "$#" -ge 2 ] || { echo "usage: --override-confirmed-by needs a value" >&2; exit 2; }
       OVERRIDE_CONFIRMED_BY="$2"; shift 2 ;;
+    --keep-subscription-confirmed-by)
+      [ "$#" -ge 2 ] || { echo "usage: --keep-subscription-confirmed-by needs a value" >&2; exit 2; }
+      KEEP_SUB_CONFIRMED_BY="$2"; shift 2 ;;
     --approval-msg-id)
       [ "$#" -ge 2 ] || { echo "usage: --approval-msg-id needs a value" >&2; exit 2; }
       APPROVAL_MSG_ID="$2"; shift 2 ;;
@@ -149,13 +215,15 @@ if ! reason="$(codex_health_gate "$GATEWAY_UNIT" "$WINDOW_MIN" 2>&1)"; then
   refuse "$reason"
 fi
 
-# Refund-create writes (any form) additionally pass the one-time-policy override gate.
+# Refund-create writes (any form) additionally pass the one-time-policy override
+# gate and the no-paid-access-after-refund gate.
 if is_refund_create; then
   charge=""
   for a in "${STRIPE_ARGS[@]}"; do
     case "$a" in charge=*) charge="${a#charge=}" ;; esac
   done
   enforce_refund_one_time_gate "$charge" "$OVERRIDE_CONFIRMED_BY" "$APPROVAL_MSG_ID"
+  enforce_no_paid_access_gate "$charge" "$KEEP_SUB_CONFIRMED_BY" "$APPROVAL_MSG_ID"
 fi
 
 # Healthy + authorized → run the real Stripe write (override flags stripped).
