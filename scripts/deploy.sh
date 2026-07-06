@@ -708,6 +708,15 @@ RSYNC_EXCLUDES=(
   # remove from node-8 manually anytime.
   --exclude='cliproxyapi.conf'
   --exclude='cliproxyapi.yaml'
+  # CTO clone-hook guard files, GENERATED on the server by
+  # scripts/lib/setup-cto-clone-hooks.sh (run at deploy time from
+  # install-aux-units.sh). They live inside the rsync-managed tree but are
+  # never tracked in the repo, so without these excludes every rsync --delete
+  # would wipe them (they'd then regenerate) and — worse — the deploy
+  # pre-flight gate flags them as deletions and fails every PR. Server-owned,
+  # regenerated each deploy; exclude so --delete leaves them alone.
+  --exclude='.cto-clone-hooks.gitconfig'
+  --exclude='scripts/lib/cto-git-hooks/'
   # Workspace runtime data (real, accumulating data)
   --exclude='workspaces/*/memory/'
   --exclude='workspaces/*/api-logs/'
