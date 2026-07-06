@@ -522,6 +522,13 @@
           "botToken": "xoxb-264358207284-10767021749249-Q20ITV3VWq4Q7gXVPOXCUf5R",
           "appToken": "xapp-1-A0AP0B4CP08-10754128687330-50099a03f851e7bed0edf0f0261db6d0070c1c05e0563425f15a448a05c346fa",
           "userTokenReadOnly": true,
+          "channels": {
+            "C0BA8QMV3ME": {
+              "enabled": true,
+              "requireMention": true,
+              "allowBots": true
+            }
+          },
           "streaming": {
             "mode": "partial",
             "nativeTransport": true

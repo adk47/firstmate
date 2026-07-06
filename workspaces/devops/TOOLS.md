@@ -22,6 +22,11 @@
 - Automatic prod error alerts already flow to #prod-alerts (C0BA8QMV3ME) via
   `scripts/prod-log-alert-watchdog.sh` (system cron, every 5 min) — if someone
   reports a prod error, check that channel's recent posts before re-deriving.
+- **After each alert posts, the watchdog wakes you to triage it** (message
+  starts `PROD-ALERT TRIAGE`). Run the `muso-devops-alert-triage` skill: it
+  classifies severity (P0/P1/P2+), posts ONE threaded reply explaining the
+  error, tags Nick + Aaron and summons the CTO on P0/P1. Rubric + reply format
+  live in that skill's SKILL.md.
 
 ## Prod Env Vars (skill: muso-devops-set-env)
 - **The ONLY sanctioned path is `scripts/devops-set-env.sh`** — never set a prod env

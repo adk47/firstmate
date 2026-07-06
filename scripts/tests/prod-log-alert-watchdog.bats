@@ -42,7 +42,24 @@ STUB
 [ -x /usr/bin/flock ] && exec /usr/bin/flock "$@"
 exit 0
 STUB
-  chmod +x "$TEST_TMPDIR/bin/muso" "$TEST_TMPDIR/bin/flock"
+  # openclaw stub: the post-delivery triage dispatch shells out to
+  # `openclaw --profile main cron add/list/rm`. PATH-shadow it so a real
+  # gateway is never touched (CI runs on a live-ish host where a real
+  # /usr/local/bin/openclaw may exist). Records argv; WD_OPENCLAW_FAIL=1 makes
+  # every call exit 1 to simulate a down gateway (fail-open path).
+  export OPENCLAW_STUB_CALLS="$TEST_TMPDIR/openclaw-calls"
+  : > "$OPENCLAW_STUB_CALLS"
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$OPENCLAW_STUB_CALLS"
+[ "${WD_OPENCLAW_FAIL:-0}" = "1" ] && exit 1
+case "$*" in
+  *"cron list"*) echo '{"jobs":[]}' ;;
+  *) echo '{"id":"job_test"}' ;;
+esac
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/muso" "$TEST_TMPDIR/bin/flock" "$TEST_TMPDIR/bin/openclaw"
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
   export WD_TEST_CAPTURE="$TEST_TMPDIR/last-text"
 
@@ -329,4 +346,87 @@ EOF
 @test "unknown flag → exit 2" {
   run bash "$WD" --bogus
   [ "$status" -eq 2 ]
+}
+
+# ── AI triage dispatch (post-delivery, fail-open) ─────────────────────────────
+
+@test "confirmed delivery → one triage dispatch to the devops agent" {
+  fixture muso-prod core-backend-api <<'EOF'
+[cb-api-aaa] 2026-06-09T10:00:00Z fatal: db connection lost
+EOF
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  # exactly one cron add (the sweep uses cron list/rm, which must not count)
+  [ "$(grep -c 'cron add' "$OPENCLAW_STUB_CALLS")" -eq 1 ]
+  grep -q -- '--agent devops' "$OPENCLAW_STUB_CALLS"
+  grep -q -- '--session isolated' "$OPENCLAW_STUB_CALLS"
+  grep -q -- '--no-deliver' "$OPENCLAW_STUB_CALLS"
+  grep -q -- '--delete-after-run' "$OPENCLAW_STUB_CALLS"
+  # the dispatch message carries the channel, the delivered ts, and the alert text
+  grep -q 'C0BA8QMV3ME' "$OPENCLAW_STUB_CALLS"
+  grep -q '1717171717.000100' "$OPENCLAW_STUB_CALLS"
+  grep -q 'db connection lost' "$OPENCLAW_STUB_CALLS"
+  grep -q 'muso-devops-alert-triage' "$OPENCLAW_STUB_CALLS"
+}
+
+@test "failed Slack delivery → NO triage dispatch (nothing to thread onto)" {
+  fixture muso-prod core-backend-api <<'EOF'
+[cb-api-aaa] 2026-06-09T10:00:00Z fatal: db connection lost
+EOF
+  WD_MUSO_FAIL=1 run bash "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"state not advanced"* ]]
+  [ ! -s "$OPENCLAW_STUB_CALLS" ]
+}
+
+@test "gateway down for triage → fail-open: exit 0, state advanced, WARN logged" {
+  fixture muso-prod core-backend-api <<'EOF'
+[cb-api-aaa] 2026-06-09T10:00:00Z fatal: db connection lost
+EOF
+  WD_OPENCLAW_FAIL=1 run bash "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"triage dispatch"*"failed"* ]]
+  # state DID advance — the alert was delivered, so it must not re-post next tick
+  rm -f "$WD_TEST_CAPTURE"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no new prod log errors"* ]]
+  [ ! -f "$WD_TEST_CAPTURE" ]
+}
+
+@test "PROD_LOG_ALERT_TRIAGE_DISPATCH=0 → alert posts, no triage dispatch" {
+  fixture muso-prod core-backend-api <<'EOF'
+[cb-api-aaa] 2026-06-09T10:00:00Z fatal: db connection lost
+EOF
+  PROD_LOG_ALERT_TRIAGE_DISPATCH=0 run bash "$WD"
+  [ "$status" -eq 0 ]
+  [ -f "$WD_TEST_CAPTURE" ]         # alert still delivered
+  [ ! -s "$OPENCLAW_STUB_CALLS" ]   # but no dispatch
+}
+
+@test "dry-run → no muso send, no openclaw call, prints would-dispatch" {
+  fixture muso-prod core-backend-api <<'EOF'
+[cb-api-aaa] 2026-06-09T10:00:00Z fatal: db connection lost
+EOF
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"would dispatch AI triage"* ]]
+  [ ! -f "$WD_TEST_CAPTURE" ]
+  [ ! -s "$OPENCLAW_STUB_CALLS" ]
+}
+
+@test "no openclaw binary resolvable → WARN, exit 0, state advanced" {
+  # Remove the stub and force the binary override at a nonexistent path so the
+  # resolver finds nothing (hermetic: never reaches a real /usr/local/bin/openclaw).
+  rm -f "$TEST_TMPDIR/bin/openclaw"
+  fixture muso-prod core-backend-api <<'EOF'
+[cb-api-aaa] 2026-06-09T10:00:00Z fatal: db connection lost
+EOF
+  OPENCLAW_BIN="$TEST_TMPDIR/bin/nonexistent-openclaw" run bash "$WD"
+  [ "$status" -eq 0 ]
+  [ -f "$WD_TEST_CAPTURE" ]   # alert delivered
+  # state advanced despite the missing binary
+  rm -f "$WD_TEST_CAPTURE"
+  OPENCLAW_BIN="$TEST_TMPDIR/bin/nonexistent-openclaw" run bash "$WD"
+  [[ "$output" == *"no new prod log errors"* ]]
 }

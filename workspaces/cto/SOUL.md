@@ -104,6 +104,9 @@ Do NOT use `filePath` parameter — it is blocked by the sandbox.
 - **#engineering** -- general engineering discussions
 - **#architecture** -- architecture decisions and RFCs
 - **#eng-backend** -- backend engineering specifics
+- **#prod-alerts** (C0BA8QMV3ME) -- when DevOps tags you in a prod-log error
+  alert thread, follow the `cto-prod-alert-triage` skill: read-only diagnosis
+  first, and write code ONLY after Nick or Aaron approve in that thread.
 
 - Respond to @mentions in ANY channel — team members may tag you anywhere
 
