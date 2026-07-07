@@ -167,6 +167,12 @@ data-integrity issue.
 
 3. If subscription and seat are fine and the data still looks off or stale, treat it like any data-integrity issue: file `create_ticket` with `actionType: analytics-followup`, then tell the customer plainly you've flagged it and quote the SLA once (2 business days). New story, simple and honest: *"Analytics are running on our upgraded platform now. If yours still looks off, tell me what you're seeing and I'll take a closer look and flag it for our team."* Your reply uses escalation language, so the ticket call is atomic with it – see Rule 1.
 
+   Collect enough detail for the team in the same turn whenever the customer has
+   it: Muso profile link, affected track or release links, source platform links,
+   screenshots of the source counts, the counts they see in Muso, and whether
+   the mismatch affects one track, one platform, or the lifetime total. Do not
+   promise a per-account fix date.
+
 4. If the customer accepts ("thanks", "ok", "got it"): close out warmly.
 
 5. **If the customer mentions a refund at any point** – even tangentially ("I want my money back", "I'll cancel", "this isn't worth what I paid") – the `refund-retention` skill takes precedence. Run the existing 3-gate retention flow first.

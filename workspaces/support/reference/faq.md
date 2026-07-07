@@ -26,7 +26,7 @@ Yes – our team handles profile merges directly. To get started, share the link
 **What to expect:**
 - Credits from all profiles are combined into one
 - The profile you mark as "main" is kept; duplicates are merged into it
-- Merges typically complete within 5 business days
+- Claimed profiles, company or label profiles, subscription questions, and large catalogs need manual review before anything changes
 - You'll receive a confirmation once the merge is done
 
 ### How do I become an Album Admin?
@@ -46,11 +46,12 @@ Account and profile deletion requests are handled by our support team. Create a 
 1. Log in to your account
 2. Navigate to the track or album where the credit is missing
 3. Use the "Add Missing Credits" feature and specify your role (producer, songwriter, engineer, etc.)
-4. Submit the claim – our team reviews it, usually within 48 hours
+4. Submit the claim with proof that connects you to that role
 
 **Before submitting, check:**
 - Is this a Muso-sourced credit or does it come from an external platform?
 - If external (e.g. a Spotify or distributor feed), you need to fix it at the source first (see below)
+- Useful proof includes official credits, distributor metadata, PRO registrations, split sheets, session screenshots, invoices, contracts, or collaborator confirmation
 
 ### My credit is incorrect. How do I fix it?
 

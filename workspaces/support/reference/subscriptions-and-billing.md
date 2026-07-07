@@ -117,6 +117,14 @@ In any of these cases, ask the customer to send their account email and their
 Muso profile link here in support, and the team will locate the subscription and
 handle the cancellation.
 
+### If a customer was charged after trying to cancel
+First guide them to check Settings > Billing for the current subscription status.
+If Apple or Google does not show the subscription, the cancel button is missing,
+or the customer says they were charged after cancellation, collect the Muso
+profile link, account email, charge date, amount, receipt screenshot, and whether
+they purchased through web, Apple, or Google. Refund requests need team review
+before any outcome is promised.
+
 ### How to update your payment method
 1. Log in at app.muso.ai
 2. Go to Settings > Billing

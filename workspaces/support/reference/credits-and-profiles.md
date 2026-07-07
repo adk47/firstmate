@@ -70,10 +70,28 @@ This flow assumes the claimant IS the artist. When a manager, publisher, or labe
 - **Artist Verification**: Social media account login proving access to artist page
 - **Album Admin**: Verified artists control credits shown for their albums/tracks
 
+### Pending Credit Verification Proof
+When a credit is waiting on extra proof, ask the customer to upload it directly
+in chat. Helpful proof includes official streaming-platform or label credits,
+distributor metadata, PRO registrations, split sheets, session screenshots,
+invoices, contracts, or a clear collaborator confirmation. Ask for the Muso
+profile, track title, artist, requested role, release link when available, and
+proof that connects the person to that role.
+
+WhatsApp, email, or social messages can help if they clearly show the track and
+role, but official metadata is stronger. Do not promise approval or a fixed
+approval date.
+
 ### Profile Merging
 Combining duplicate profiles when the same person appears in different sources:
 - Consolidates credits and stats
 - Maintains source tracking
+
+For duplicate profile merge requests, collect every Muso profile link, which
+profile should remain as the main profile, and any naming context such as artist
+name versus legal name. Merges involving claimed profiles, company or label
+profiles, subscription questions, or large catalogs need manual review before
+credits and analytics are consolidated.
 
 ---
 
@@ -95,6 +113,14 @@ US organization that collects mechanical royalties for streaming. Muso.AI integr
 Muso acts as a mirror of what exists in the music industry. If incorrect credits come from an external platform like Spotify:
 - The correction must be made on that platform first
 - Once fixed there, Muso will reflect the change automatically
+
+### Adding a Missing Credit
+To add a missing credit, ask the customer to search for the track or release in
+the Muso app, open the track, choose Add Missing Credits when available, select
+the role, and submit supporting proof. If the button is missing, the profile
+cannot be edited, the track cannot be found, or the customer is trying to edit an
+already claimed profile, collect the profile link, track or release link,
+requested role, and screenshots so the team can review manually.
 
 ---
 
