@@ -322,9 +322,34 @@ fi
 CODEX_APIKEY_ROUTE=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_count_apikey_route)
 CODEX_TOKEN_EXPIRED=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_count_token_expired)
 
+# Resolve the ACTUAL pin state ONCE (read-only; 0 clean / 1 drift / 2 read-err) and
+# reuse it for BOTH the api-key-route verdict below and the pin-drift tripwire further
+# down — an api-key 401 is only a "floated off pin" if the pin genuinely drifted. The
+# `if !`/`|| PIN_CHECK_EXIT=$?` capture keeps set -e from firing on the nonzero exits.
+PIN_CHECK_OUT=""
+PIN_CHECK_EXIT=0
+if [ -x "$_WATCHDOG_DIR/lib/ensure-codex-version-pinned.sh" ]; then
+  PIN_CHECK_OUT=$("$_WATCHDOG_DIR/lib/ensure-codex-version-pinned.sh" --check 2>&1) || PIN_CHECK_EXIT=$?
+else
+  PIN_CHECK_EXIT=2  # can't verify the pin → treat api-key 401s as unverifiable
+fi
+
 if [ "${CODEX_APIKEY_ROUTE:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-apikey-cooldown" "$CODEX_COOLDOWN_MIN"; then
-  log "CODEX #90925 API-KEY ROUTE: ${CODEX_APIKEY_ROUTE} invalid_api_key/Incorrect-API-key lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
-  slack_notify ":rotating_light: *Codex floated off pin → #90925 api-key route* — ${CODEX_APIKEY_ROUTE}x \`invalid_api_key\`/\`Incorrect API key\` across main+edge in last ${CHECK_WINDOW_MIN}min. @openclaw/codex@2026.6.x routes gpt-5.5 to the OpenAI api-key endpoint instead of the Codex OAuth route, so the WHOLE fleet is on \`openrouter/openai/gpt-5.4-mini\`. Fix: re-pin codex + restart — \`scripts/lib/ensure-codex-version-pinned.sh\` on node-8 (re-pins to the canonical version), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. A plain restart also self-heals (ExecStartPre re-pins)."
+  CODEX_APIKEY_VERDICT=$(codex_apikey_route_verdict "$CODEX_APIKEY_ROUTE" "$PIN_CHECK_EXIT")
+  case "$CODEX_APIKEY_VERDICT" in
+    float)
+      log "CODEX #90925 API-KEY ROUTE: ${CODEX_APIKEY_ROUTE} invalid_api_key/Incorrect-API-key lines (main+edge) in last ${CHECK_WINDOW_MIN}min; pin DRIFTED"
+      slack_notify ":rotating_light: *Codex floated off pin → #90925 api-key route* — ${CODEX_APIKEY_ROUTE}x \`invalid_api_key\`/\`Incorrect API key\` across main+edge in last ${CHECK_WINDOW_MIN}min AND codex is off the 2026.5.27 pin. @openclaw/codex@2026.6.x routes gpt-5.5 to the OpenAI api-key endpoint instead of the Codex OAuth route, so the WHOLE fleet is on \`openrouter/openai/gpt-5.4-mini\`. Fix: re-pin codex + restart — \`scripts/lib/ensure-codex-version-pinned.sh\` on node-8 (re-pins to the canonical version), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. A plain restart also self-heals (ExecStartPre re-pins)."
+      ;;
+    compaction)
+      log "CODEX API-KEY 401 WITH PIN INTACT: ${CODEX_APIKEY_ROUTE} invalid_api_key/Incorrect-API-key lines (main+edge) in last ${CHECK_WINDOW_MIN}min; codex ON pin (compaction path, NOT a float)"
+      slack_notify ":warning: *Codex api-key 401s with the pin INTACT* — ${CODEX_APIKEY_ROUTE}x \`invalid_api_key\`/\`Incorrect API key\` across main+edge in last ${CHECK_WINDOW_MIN}min, but codex is ON the 2026.5.27 pin — this is *NOT* a float. Signature is the embedded compaction/summarization path (\`[compaction-diag]\` / \`trigger=cli_budget\`) resolving a separate summarizer that bypasses the Codex OAuth route and hits the placeholder OpenAI key; it self-recovers via fallback to \`openrouter/openai/gpt-5.4-mini\`. *A re-pin/restart is a NO-OP here* — it self-recovers, no action needed. Do NOT set \`agents.defaults.compaction.model\` (openclaw ignores it on Codex-backed agents and the fallback already lands on the same model). See RUNBOOK → \"Codex Plugin Floated Off Pin / api-key-route 401\"."
+      ;;
+    unverifiable)
+      log "CODEX API-KEY 401, PIN UNVERIFIABLE: ${CODEX_APIKEY_ROUTE} lines (main+edge) in last ${CHECK_WINDOW_MIN}min; --check exit ${PIN_CHECK_EXIT}"
+      slack_notify ":warning: *Codex api-key 401s, pin state UNVERIFIABLE* — ${CODEX_APIKEY_ROUTE}x \`invalid_api_key\`/\`Incorrect API key\` across main+edge in last ${CHECK_WINDOW_MIN}min, but \`ensure-codex-version-pinned.sh --check\` could not read the pin (exit ${PIN_CHECK_EXIT}). Check the pin manually on node-8 before assuming a float.\n\`\`\`${PIN_CHECK_OUT}\`\`\`"
+      ;;
+  esac
   date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-apikey-cooldown"
 fi
 
@@ -335,16 +360,13 @@ if [ "${CODEX_TOKEN_EXPIRED:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_
 fi
 
 # Pin-drift tripwire: page if codex != the deploy pin even without a 401 yet (a
-# fresh float, or an ExecStartPre re-pin that failed). --check is read-only:
-# exit 1 = drift (PIN_OUT names the offenders). Guarded under `if !` so set -e
-# never fires on the exit 1.
-if [ -x "$_WATCHDOG_DIR/lib/ensure-codex-version-pinned.sh" ]; then
-  if ! PIN_OUT=$("$_WATCHDOG_DIR/lib/ensure-codex-version-pinned.sh" --check 2>&1) \
-     && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-pin-cooldown" "$CODEX_COOLDOWN_MIN"; then
-    log "CODEX VERSION DRIFT: ${PIN_OUT}"
-    slack_notify ":warning: *Codex version drifted off the pin* on node-8 — codex is not at the canonical pinned build (codex@2026.6.x reintroduces the #90925 api-key-route outage). \`systemctl restart\` the affected gateway to self-heal (ExecStartPre re-pins), or run \`scripts/lib/ensure-codex-version-pinned.sh\` on node-8.\n\`\`\`${PIN_OUT}\`\`\`"
-    date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-pin-cooldown"
-  fi
+# fresh float, or an ExecStartPre re-pin that failed). Reuses the single --check run
+# above (PIN_CHECK_EXIT: 1 = drift, PIN_CHECK_OUT names the offenders).
+if [ "$PIN_CHECK_EXIT" -eq 1 ] \
+   && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-pin-cooldown" "$CODEX_COOLDOWN_MIN"; then
+  log "CODEX VERSION DRIFT: ${PIN_CHECK_OUT}"
+  slack_notify ":warning: *Codex version drifted off the pin* on node-8 — codex is not at the canonical pinned build (codex@2026.6.x reintroduces the #90925 api-key-route outage). \`systemctl restart\` the affected gateway to self-heal (ExecStartPre re-pins), or run \`scripts/lib/ensure-codex-version-pinned.sh\` on node-8.\n\`\`\`${PIN_CHECK_OUT}\`\`\`"
+  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-pin-cooldown"
 fi
 
 # Crash loop detection: if systemd has restarted the gateway more than

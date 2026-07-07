@@ -114,6 +114,49 @@ codex_count_apikey_route() {
   ' || true
 }
 
+# codex_apikey_route_verdict — classify a nonzero api-key-route 401 count by the
+# ACTUAL codex pin state, so the alert stops blaming EVERY such 401 on a version
+# float. Args: <apikey_count> <pin_check_exit>, where pin_check_exit is the exit
+# code of `ensure-codex-version-pinned.sh --check` (0 clean / 1 drift / 2 read-err).
+# Echoes one of:
+#   none         — no 401s, nothing to alert
+#   float        — 401s AND the pin drifted: the genuine #90925 6.x mis-route;
+#                  re-pin + restart is the correct fix.
+#   compaction   — 401s but the pin is CLEAN: NOT a float. This is the embedded
+#                  compaction/summarization path, which resolves a separate
+#                  summarizer target that bypasses the codex OAuth runtime and drops
+#                  openai/gpt-5.5 to the raw api-key transport → placeholder key →
+#                  401 → self-recovers to openrouter/openai/gpt-5.4-mini. A re-pin
+#                  is a NO-OP here; it self-heals and needs no action. Do NOT set
+#                  agents.defaults.compaction.model — openclaw ignores that override
+#                  on Codex-backed agents (emits an "override ignored" warning) and
+#                  the fallback already lands on the exact model. (Root-caused
+#                  2026-07-06: a stuck QA lane retried cli_budget [compaction-diag]
+#                  compaction ~24x, all api-key 401s, pin clean, paged as a float.)
+#   unverifiable — 401s but the pin check itself errored (exit 2): can't tell float
+#                  from compaction; alert and ask for a manual pin check.
+# Pure function (no journalctl/ssh), same testable pattern as the counters above.
+codex_apikey_route_verdict() {
+  local count="${1:-0}" pin_exit="${2:-2}"
+  [ "$count" -gt 0 ] 2>/dev/null || { echo none; return; }
+  case "$pin_exit" in
+    1) echo float ;;
+    0) echo compaction ;;
+    *) echo unverifiable ;;
+  esac
+}
+
+# codex_pin_check_exit — exit code of ensure-codex-version-pinned.sh --check
+#   0 = clean (codex on the canonical pin), 1 = drift, 2 = unverifiable (read error
+#   or the pin script is missing/not executable). Isolated behind one resolver so the
+#   watchdog and the write-gate share it and bats can stub the pin verdict via
+#   CODEX_PIN_CHECK_BIN without a real openclaw on PATH. Reads only; no mutation.
+codex_pin_check_exit() {
+  local bin="${CODEX_PIN_CHECK_BIN:-$(dirname "${BASH_SOURCE[0]}")/ensure-codex-version-pinned.sh}"
+  [ -x "$bin" ] || return 2
+  "$bin" --check >/dev/null 2>&1
+}
+
 # codex_count_token_expired — count Codex OAuth access-token-LAPSED 401s on stdin.
 # Signature: "authentication token is expired" (the chatgpt.com/backend-api/codex
 # OAuth route, NOT the api-key route above). This is the ordinary token lapse that
@@ -206,10 +249,35 @@ codex_health_gate() {
   invalidated="$(printf '%s\n' "$journal" | codex_count_auth_invalidated)"
   apikey="$(printf '%s\n' "$journal" | codex_count_apikey_route)"
   expired="$(printf '%s\n' "$journal" | codex_count_token_expired)"
+
+  # The api-key-route 401 is the ONE degradation signature that is ambiguous: a real
+  # #90925 float (codex off-pin) mis-routes EVERY gpt-5.5 turn to the api-key endpoint
+  # and truly degrades the fleet, but the SAME `invalid_api_key` signature also appears
+  # when only the embedded compaction summarizer bypasses the OAuth route while codex
+  # stays healthy for real turns (pin CLEAN — root-caused 2026-07-06: a stuck QA lane
+  # retried cli_budget compaction ~24x, all api-key 401s, fleet otherwise serving on
+  # OAuth). Refusing consequential WRITES on that benign case is a false-positive
+  # fail-CLOSED. So gate the api-key contribution on the ACTUAL pin: float or
+  # unverifiable → degraded (fail closed on a write gate); compaction (pin clean) → the
+  # fleet is healthy for the write, do not count it. The OTHER three signatures are
+  # genuine OAuth-route failures that DO break real turns, so they degrade unconditionally.
+  local apikey_degraded=0 apikey_verdict=clean
+  if [ "${apikey:-0}" -gt 0 ]; then
+    local pin_exit=0
+    codex_pin_check_exit || pin_exit=$?
+    apikey_verdict="$(codex_apikey_route_verdict "$apikey" "$pin_exit")"
+    [ "$apikey_verdict" = "compaction" ] || apikey_degraded=1
+  fi
+
   if [ "${reused:-0}" -gt 0 ] || [ "${invalidated:-0}" -gt 0 ] \
-     || [ "${apikey:-0}" -gt 0 ] || [ "${expired:-0}" -gt 0 ]; then
-    echo "codex is DEGRADED in the last ${window}min (refresh-race/auth_permanent=${reused}, auth-invalidated=${invalidated}, apikey-route#90925=${apikey}, token-expired=${expired})" >&2
+     || [ "$apikey_degraded" -gt 0 ] || [ "${expired:-0}" -gt 0 ]; then
+    echo "codex is DEGRADED in the last ${window}min (refresh-race/auth_permanent=${reused}, auth-invalidated=${invalidated}, apikey-route#90925=${apikey}/${apikey_verdict}, token-expired=${expired})" >&2
     return 1
+  fi
+  if [ "${apikey:-0}" -gt 0 ]; then
+    # Healthy-but-noteworthy: api-key 401s present yet pin clean → benign compaction
+    # path, write allowed. Surface it (stderr) so the allow is not silent.
+    echo "codex api-key 401s in the last ${window}min are compaction-only (pin clean) — write allowed; not a fleet degradation" >&2
   fi
   return 0
 }

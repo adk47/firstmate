@@ -186,6 +186,100 @@ EOF
   [ "$output" -eq 1 ]
 }
 
+# ── codex_apikey_route_verdict ────────────────────────────────
+# Classifies a nonzero api-key-route 401 count by the ACTUAL pin state so the
+# watchdog stops blaming EVERY such 401 on a version float. pin_exit mirrors
+# ensure-codex-version-pinned.sh --check: 0 clean / 1 drift / 2 read-err.
+
+@test "verdict: no 401s → none (regardless of pin state)" {
+  run codex_apikey_route_verdict 0 0
+  [ "$status" -eq 0 ]
+  [ "$output" = "none" ]
+  run codex_apikey_route_verdict 0 1
+  [ "$output" = "none" ]
+}
+
+@test "verdict: 401s AND pin drifted (exit 1) → float (genuine #90925)" {
+  run codex_apikey_route_verdict 5 1
+  [ "$status" -eq 0 ]
+  [ "$output" = "float" ]
+}
+
+@test "verdict: 401s but pin CLEAN (exit 0) → compaction (NOT a float)" {
+  # The 2026-07-06 case: 2 invalid_api_key 401s, both agent:qa:main compaction,
+  # pin clean. Must NOT be classified as a float (re-pin would be a no-op).
+  run codex_apikey_route_verdict 2 0
+  [ "$status" -eq 0 ]
+  [ "$output" = "compaction" ]
+}
+
+@test "verdict: 401s but pin UNVERIFIABLE (exit 2) → unverifiable" {
+  run codex_apikey_route_verdict 3 2
+  [ "$status" -eq 0 ]
+  [ "$output" = "unverifiable" ]
+}
+
+@test "verdict: defaults are safe (missing args → none / unverifiable, never float)" {
+  run codex_apikey_route_verdict
+  [ "$output" = "none" ]           # count defaults to 0
+  run codex_apikey_route_verdict 1 # pin_exit defaults to 2 (unverifiable), not float
+  [ "$output" = "unverifiable" ]
+}
+
+# ── codex_health_gate: api-key-401 pin discrimination ─────────
+# The admin/Stripe write gate must NOT refuse a write on a compaction-only api-key 401
+# (pin clean → fleet healthy for real turns, 2026-07-06 QA-lane case), but must stay
+# fail-CLOSED on a genuine float or an unverifiable pin. journalctl and the pin --check
+# are both stubbed (PATH + CODEX_PIN_CHECK_BIN), so no real openclaw is touched.
+
+# Stub journalctl to emit ONE genuine api-key route-failure record (what #644 counts).
+_gate_journal_apikey() {
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "Jul 06 19:42:48 ovh-node-8 node[1211532]: [model-fallback/decision] model fallback decision: decision=candidate_failed requested=openai/gpt-5.5 candidate=openai/gpt-5.5 reason=auth next=openrouter/openai/gpt-5.4-mini detail=Summarization failed: 401 Incorrect API key provided: sk-hydra******2026."
+SH
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+}
+
+# Write a fake ensure-codex-version-pinned.sh that exits $1 on --check; echo its path.
+_fake_pin() {
+  local code="$1"
+  cat > "$TEST_TMPDIR/bin/pin-$code.sh" <<SH
+#!/usr/bin/env bash
+[ "\$1" = "--check" ] && exit $code
+exit 0
+SH
+  chmod +x "$TEST_TMPDIR/bin/pin-$code.sh"
+  echo "$TEST_TMPDIR/bin/pin-$code.sh"
+}
+
+@test "gate: api-key 401 with pin CLEAN → healthy (compaction, write ALLOWED)" {
+  _gate_journal_apikey
+  CODEX_PIN_CHECK_BIN="$(_fake_pin 0)" run codex_health_gate test-unit 5
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"compaction-only"* ]]
+}
+
+@test "gate: api-key 401 with pin DRIFTED → DEGRADED (real float, write REFUSED)" {
+  _gate_journal_apikey
+  CODEX_PIN_CHECK_BIN="$(_fake_pin 1)" run codex_health_gate test-unit 5
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DEGRADED"* ]]
+  [[ "$output" == *"float"* ]]
+}
+
+@test "gate: api-key 401 with pin UNVERIFIABLE → DEGRADED (fail-closed on a write gate)" {
+  _gate_journal_apikey
+  CODEX_PIN_CHECK_BIN="$(_fake_pin 2)" run codex_health_gate test-unit 5
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DEGRADED"* ]]
+}
+
+@test "pin_check_exit: missing / non-executable bin → 2 (unverifiable)" {
+  CODEX_PIN_CHECK_BIN="/nonexistent/pin.sh" run codex_pin_check_exit
+  [ "$status" -eq 2 ]
+}
+
 # ── codex_count_token_expired ─────────────────────────────────
 # REAL lines from the ORIGINAL 2026-06-19 trigger: the OAuth access token lapsed
 # (chatgpt.com/backend-api/codex route) ~21:48 UTC and refresh stopped renewing it.

@@ -406,6 +406,25 @@ chains work fleet-wide. Swapping an OpenRouter OpenAI agent to a flat-fee Codex
 subscription is a config edit + an OAuth bootstrap on the live node + egress for
 `chatgpt.com:443` / `api.openai.com:443`.
 
+**Session compaction has its own model path that bypasses the codex OAuth runtime — so
+`invalid_api_key` 401s with the pin CLEAN are compaction, not a #90925 float.** A
+non-manual (`cli_budget`) compaction logs `[agent/embedded] skipping codex app-server
+compaction for non-manual trigger` and resolves a *separate* embedded summarizer target
+(`resolveEmbeddedCompactionTarget`) that routes `openai/gpt-5.5` through the raw
+`[openai-transport] api=openai-responses` (api-key) path — hitting hydra's placeholder
+`OPENAI_API_KEY` → 401 → fallback to `openrouter/openai/gpt-5.4-mini` **for that one
+compaction**, while normal agent turns keep serving on OAuth. This is a STRUCTURAL path
+present even at the pinned codex `2026.5.27`, distinct from #90925 (which mis-routes
+*every* turn only when floated to 6.x). Distinguish the two by the pin
+(`ensure-codex-version-pinned.sh --check`): drifted = real float (whole fleet on mini);
+clean = compaction-only (fleet healthy). Both the watchdog float alert and the
+admin/Stripe write-health gate (`codex_health_gate`) pin-gate the api-key signal so a
+compaction loop no longer false-pages or false-blocks writes
+(`codex_apikey_route_verdict` / `codex_pin_check_exit` in `scripts/lib/codex-health.sh`;
+root-caused 2026-07-06). Do NOT "fix" it with `agents.defaults.compaction.model` —
+openclaw docs say don't set it on Codex-backed agents (it emits an "override ignored"
+warning), and the fallback already lands on the exact model you'd pick.
+
 ### Auth: one canonical store, shared by symlink (never fan out)
 
 **Share ONE Codex credential across all agents; never give an agent its own copy.** The

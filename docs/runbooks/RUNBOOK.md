@@ -691,6 +691,33 @@ reports version drift. The pinned version lives ONCE in
 `plugins install`/`update` codex off the pin**; bump `codex-version.sh` (revert to
 runtime lockstep) only once #90925 ships fixed in a core release we run.
 
+**Pin-clean api-key 401s = COMPACTION, not a float (do NOT re-pin — it's a no-op).**
+If you see `invalid_api_key` / `Incorrect API key: sk-hydra…` but
+`ensure-codex-version-pinned.sh --check` is **CLEAN**, this is NOT #90925. Tell them
+apart by the record's context: a float 401s on **every** gpt-5.5 turn fleet-wide; the
+compaction case is scoped to `[agent/embedded] skipping codex app-server compaction for
+non-manual trigger` → `[openai-transport] api=openai-responses` 401 →
+`[compaction-diag] … trigger=cli_budget` and falls back to gpt-5.4-mini **for that one
+compaction**, while normal turns keep serving on OAuth. Root cause: openclaw's embedded
+compaction summarizer (`resolveEmbeddedCompactionTarget`) bypasses the codex OAuth
+runtime and hits the placeholder key even at the pinned version — a structural path,
+not a version drift (root-caused 2026-07-06: a stuck QA lane retried `cli_budget`
+compaction ~24× → 55 raw `invalid_api_key`, pin clean, fleet healthy; the watchdog
+paged it as a float). A re-pin/restart does nothing. It self-recovers; the only real
+harm is noisy logs + a false page — both fixed below.
+
+- **Watchdog**: the `:rotating_light: floated off pin` alert now runs the pin `--check`
+  and only cries "float" when the pin actually **drifted**; a pin-clean 401 gets an
+  accurate `:warning:` ("compaction path, re-pin is a no-op"), and an unverifiable pin
+  says so. (`codex_apikey_route_verdict` in `scripts/lib/codex-health.sh`.)
+- **Write-gate**: `codex_health_gate` (admin/Stripe write-health) likewise pin-gates the
+  api-key signal — a **float or unverifiable** pin still refuses writes (fail-closed), but
+  a **compaction-only** (pin-clean) 401 no longer over-blocks writes on a healthy fleet.
+- **`compaction.model` is NOT the fix**: openclaw docs say *do not set
+  `agents.defaults.compaction.model` on Codex-backed agents* (it emits an "override
+  ignored" warning), and the fallback already lands on `openrouter/openai/gpt-5.4-mini`
+  — the exact model you'd set. Zero gain for fighting the framework; leave it unset.
+
 > **Related — Codex OAuth token lapse** (the original 2026-06-19 trigger, distinct
 > from the api-key-route bug above): logs show `401 ... authentication token is
 > expired. Please try signing in again.` on the **OAuth** URL
