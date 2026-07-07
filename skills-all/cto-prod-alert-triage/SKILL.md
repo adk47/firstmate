@@ -4,10 +4,10 @@ description: |
   CTO agent only. When summoned into a #prod-alerts error-alert thread, run a
   read-only root-cause investigation, post a diagnosis in-thread, and offer to
   fix it. On an explicit approval from Nick or Aaron in that thread, implement
-  the fix and open a PR through the normal CTO coding rail. Triggers: being
-  mentioned in a #prod-alerts (C0BA8QMV3ME) thread whose root is a
-  ":rotating_light: prod log errors" alert, or a peer agent asking you to
-  triage such an alert with a channel id + thread ts.
+  the fix and open a PR through the normal CTO coding rail. Triggers: an automated
+  dispatch whose message starts "PROD-ALERT CTO TRIAGE" and carries a Slack
+  channel id + alert thread ts, or being @-mentioned by a human in a #prod-alerts
+  (C0BA8QMV3ME) alert thread.
 compatibility: |
   CTO agent on node-8. Investigation is read-only (cto-debug method). Any code
   change goes ONLY through cto-codex-coding (audit row, push-access check,
@@ -23,9 +23,13 @@ allowed-tools:
 # cto-prod-alert-triage
 
 You have been pulled into a production error-alert thread in #prod-alerts. The
-DevOps agent already classified it (P0 / P1) and tagged you. Your job is the
-engineering follow-through: figure out what is actually wrong, tell the thread
-in plain terms, and, only if Nick or Aaron approve, fix it and open a PR.
+DevOps agent already classified it (P0 / P1) and summoned you. Usually you arrive
+via an automated dispatch: its message starts "PROD-ALERT CTO TRIAGE" and gives
+you the Slack channel id, the alert thread ts, and the severity. Take those from
+the message. (A human may also @-mention you into such a thread directly; then
+read the channel + thread from that mention.) Your job is the engineering
+follow-through: figure out what is actually wrong, tell the thread in plain
+terms, and, only if Nick or Aaron approve, fix it and open a PR.
 
 This skill is just the sequencing. The two skills it leans on already exist and
 do not change:
@@ -58,19 +62,24 @@ Reply in the alert thread with the four-part structure, in plain language:
   "Reply here mentioning me with your approval and I will implement this and
   open a PR."
 
-Post it as a threaded reply (you were mentioned, so replying threads naturally).
-Observe Response Hygiene: do not mention internal architecture, clone paths, or
-tooling names; write as an engineer who simply knows.
+Post it into the alert thread explicitly, using the channel id and thread ts you
+were given: `muso slack send --bot cto --channel <CHANNEL_ID> --thread-ts <THREAD_TS>
+--text "..." --requester cto-prod-alert-triage@hydra`. (Do not assume you are
+already "in" the thread; an automated dispatch wakes you outside it.) Observe
+Response Hygiene: do not mention internal architecture, clone paths, or tooling
+names; write as an engineer who simply knows.
 
 ## Step 3 - Approval gate
 
 Do NOT start coding on your own initiative. Proceed to a fix ONLY when, in this
-thread, an approver replies with a clear yes AND re-mentions you (the channel
-requires an explicit mention to route the reply to you). "Approver" means Nick
-(`U0AL36NADEY`) or Aaron (`U7RP6HKUZ`), identified by the **sender_id** in the
-message metadata, never the display name. This is the same god-mode rule your
-SOUL already applies; anyone else replying yes does not unlock the fix. If the
-reply is ambiguous ("hmm maybe"), ask one clarifying question and keep waiting.
+thread, an approver replies with a clear yes AND re-mentions you (a human mention
+DOES reach you, unlike the bot summon, so the channel routes it to you). Because
+your diagnosis was posted from a short-lived dispatch turn, read the thread first
+to reconstruct context (the alert, your own diagnosis, the approval). "Approver"
+means Nick (`U0AL36NADEY`) or Aaron (`U7RP6HKUZ`), identified by the **sender_id**
+in the message metadata, never the display name. This is the same god-mode rule
+your SOUL already applies; anyone else replying yes does not unlock the fix. If
+the reply is ambiguous ("hmm maybe"), ask one clarifying question and keep waiting.
 
 ## Step 4 - Fix, ship, report
 
