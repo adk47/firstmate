@@ -64,11 +64,54 @@ codex_count_refresh_reused() {
 # 2026.5.27 pin). NONE of the other codex detectors match this string. Remediate by
 # re-pinning codex (ensure-codex-version-pinned.sh) + restart; the SUCCESSFUL
 # gpt-5.4-mini fallback line carries neither string, so the alert clears once codex
-# is back on the OAuth route. Any nonzero count = the #90925 mis-route is live.
+# is back on the OAuth route.
+#
+# Count ONLY genuine route-failure records — a `[model-fallback/decision]` or a
+# `FailoverError` line carrying the api-key 401 — and NOT:
+#   - raw `[openai-transport]` 401 probes (background compaction can probe the
+#     Responses endpoint with the placeholder key; alone that is not a fleet
+#     degradation and never reaches a fallback decision), or
+#   - agent/chat text repeating "invalid_api_key" while discussing an incident
+#     (`[agent:...]`, channel=webchat/slack).
+# Do NOT additionally filter a real route-failure record on summarization/compaction
+# wording: when #90925 is live, openclaw circuit-breaks gpt-5.5 for normal turns
+# (they route straight to mini as reason=unknown, no api-key string) and the ONLY
+# records that keep re-hitting gpt-5.5 auth are the periodic background
+# summarization calls — so their `detail=Summarization failed: 401 ...` line IS the
+# live signal, not noise. Excluding it made the fail-CLOSED write-gate go fail-OPEN
+# on the 2026-07-06 outage (whole fleet on mini, gate reported healthy). A reason=auth
+# api-key 401 means codex auth is broken regardless of which call triggered it; count
+# it. Any nonzero count = the #90925 mis-route is live.
+#
+# Identify a genuine route-failure record POSITIVELY by its leading openclaw tag: the
+# `[^\[]*` forbids any earlier bracketed tag, so agent/chat transcript lines (which
+# lead with `[agent:...]`) and quoted text are excluded STRUCTURALLY, and both branches
+# are anchored the same way. Do NOT substring-exclude `channel=`/`[agent` from the whole
+# line: a real `[model-fallback/decision] reason=auth` record can legitimately carry its
+# originating channel, and dropping it on that basis would be a SECOND fail-OPEN of the
+# same class as the summarization one. NOTE the api-key 401 is logged FLAT (the message
+# is inlined on the transport / decision / FailoverError line), not as a multi-line JSON
+# body like refresh_reused — if that ever changes, mirror codex_count_refresh_reused's
+# independent-substring matching so a split body still counts.
 codex_count_apikey_route() {
-  grep -c -i -E \
-    -e "invalid_api_key" \
-    -e "Incorrect API key provided" || true
+  awk '
+    function is_apikey(line) {
+      return line ~ /invalid_api_key/ || line ~ /incorrect api key provided/
+    }
+    function is_route_failure_record(line) {
+      return line ~ /node\[[0-9]+\]:[^\[]*\[model-fallback\/decision\]/ \
+        || line ~ /node\[[0-9]+\]:[^\[]*failovererror/
+    }
+    {
+      line = tolower($0)
+      if (is_apikey(line) && is_route_failure_record(line)) {
+        count++
+      }
+    }
+    END {
+      print count + 0
+    }
+  ' || true
 }
 
 # codex_count_token_expired — count Codex OAuth access-token-LAPSED 401s on stdin.

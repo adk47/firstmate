@@ -124,6 +124,68 @@ EOF
   [ "$output" -eq 0 ]
 }
 
+# ── codex_count_apikey_route: 2026-07-06 fail-OPEN regression ──
+# On 2026-07-06 the whole fleet mis-routed to the api-key endpoint (#90925) while the
+# write-health gate reported HEALTHY. openclaw circuit-broke gpt-5.5 for normal turns
+# (they routed straight to mini, no api-key string), so the ONLY api-key records left
+# were the periodic background-summarization retries — whose `detail=Summarization
+# failed` an over-broad compaction filter then excluded, taking the fail-CLOSED write
+# gate fail-OPEN. A genuine route-failure record MUST count regardless of the
+# summarization/compaction wording in its detail; only raw transport probes and
+# agent/chat text are excluded.
+
+@test "apikey_route: a real route failure counts even when detail says 'Summarization failed' (2026-07-06 fail-open regression)" {
+  run codex_count_apikey_route <<'EOF'
+Jul 06 19:42:48 ovh-node-8 node[1211532]: [model-fallback/decision] model fallback decision: decision=candidate_failed requested=openai/gpt-5.5 candidate=openai/gpt-5.5 reason=auth next=openrouter/openai/gpt-5.4-mini detail=Summarization failed: 401 Incorrect API key provided: sk-hydra******2026. You can find your API key at https://platform.openai.com/account/api-keys.
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
+@test "apikey_route: a bare [openai-transport] compaction probe (no fallback decision) stays 0" {
+  # Background compaction probing the Responses endpoint with the placeholder key
+  # logs a raw transport 401 but never reaches a fallback decision — genuinely benign,
+  # must not trip the gate on its own. This is #643's legitimate de-noising, kept.
+  run codex_count_apikey_route <<'EOF'
+Jul 06 19:13:34 ovh-node-8 node[1211532]: [agent/embedded] skipping codex app-server compaction for non-manual trigger
+Jul 06 19:13:35 ovh-node-8 node[1211532]: [openai-transport] [responses] error provider=openai api=openai-responses model=gpt-5.5 name=Error status=401 code=invalid_api_key type=invalid_request_error message=401 Incorrect API key provided: sk-hydra******2026.
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+@test "apikey_route: agent/chat text repeating 'invalid_api_key' is not counted" {
+  # A QA/agent session discussing the incident must not be read as degradation.
+  run codex_count_apikey_route <<'EOF'
+Jul 06 19:27:43 ovh-node-8 node[1211532]: [agent:nested] session=agent:qa:main channel=webchat a real #90925 invalid_api_key hit followed by a compaction marker must still count.
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+@test "apikey_route: real summarization route failure counts amid benign probe + compaction noise" {
+  # The full 2026-07-06 shape: raw probe (ignored) + compaction-diag (ignored) + the
+  # real reason=auth fallback record (counted). The gate must see the degradation.
+  run codex_count_apikey_route <<'EOF'
+Jul 06 19:13:35 ovh-node-8 node[1211532]: [openai-transport] [responses] error provider=openai api=openai-responses model=gpt-5.5 status=401 code=invalid_api_key message=401 Incorrect API key provided: sk-hydra******2026.
+Jul 06 19:13:35 ovh-node-8 node[1211532]: [agent/embedded] [compaction-diag] end runId=99999d25 sessionKey=agent:qa:main trigger=cli_budget provider=openai/gpt-5.5 outcome=failed reason=provider_error_4xx
+Jul 06 19:13:35 ovh-node-8 node[1211532]: [model-fallback/decision] model fallback decision: decision=candidate_failed requested=openai/gpt-5.5 candidate=openai/gpt-5.5 reason=auth next=openrouter/openai/gpt-5.4-mini detail=Summarization failed: 401 Incorrect API key provided: sk-hydra******2026.
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
+@test "apikey_route: a real route failure carrying channel= session context still counts (no whole-line agent-text exclusion)" {
+  # The record is identified by its LEADING [model-fallback/decision] tag; a channel=
+  # field further down the line must NOT drop it. Excluding on that substring would be a
+  # second fail-open of the same class as the summarization one — this pins against it.
+  run codex_count_apikey_route <<'EOF'
+Jul 06 19:42:48 ovh-node-8 node[1211532]: [model-fallback/decision] model fallback decision: decision=candidate_failed requested=openai/gpt-5.5 candidate=openai/gpt-5.5 reason=auth channel=slack next=openrouter/openai/gpt-5.4-mini detail=401 Incorrect API key provided: sk-hydra******2026.
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
 # ── codex_count_token_expired ─────────────────────────────────
 # REAL lines from the ORIGINAL 2026-06-19 trigger: the OAuth access token lapsed
 # (chatgpt.com/backend-api/codex route) ~21:48 UTC and refresh stopped renewing it.
