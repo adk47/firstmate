@@ -133,8 +133,9 @@ NOT build the Gmail URL or the body excerpt yourself — the script does, determ
      3-gate flow), **analytics/streams genuinely off** (she files the `analytics-followup`
      data-integrity ticket herself and emits `[[PRIORITY]]` — that IS her handling; it is
      no longer a human carve-out), profile data correction, order/plaque fulfillment,
-     founding-member Q&A + paid buy-back, account-email-change and account-deletion intake,
-     and general how-to/FAQ. When she files a **needs-human** ticket (e.g. a credit-theft
+     founding-member Q&A + paid buy-back, account-email-change and account/profile deletion
+     or removal intake for the customer's own Muso account/profile, and general how-to/FAQ.
+     When she files a **needs-human** ticket (e.g. a credit-theft
      contradiction she discovered, or a cross-owner merge), she still OWNED first contact —
      that is `caroline`, because a human never had to read the raw email first.
    - `human` — ONLY threads Caroline structurally cannot even START, where a human must
@@ -145,7 +146,7 @@ NOT build the Gmail URL or the body excerpt yourself — the script does, determ
      (enterprise / full-catalog-API deals, Business-tier quotes — NOT a founding-member
      self-serve question); vendor / B2B business development (partnership, data-licensing,
      press, recruiting, AP invoices — NOT the Prodigi fulfillment lane, which is
-     `caroline`); an irreversible account/profile deletion or Google de-indexing; and a
+     `caroline`); Google de-indexing; formal legal/privacy-rights deletion demands; and a
      disputed cross-account claim reversal (removing SOMEONE ELSE'S claim). **"Needs a
      write or a ticket" is NOT a human trigger.**
    - `spam` — not a support request at all, and no human action either: cold marketing /
@@ -154,6 +155,15 @@ NOT build the Gmail URL or the body excerpt yourself — the script does, determ
      auto-replies, out-of-office, read receipts, list confirmations, automated
      request-received receipts, internal test mail, Intercom/tooling setup notices). Spam
      is excluded from BOTH work queues and NEVER counts as a Caroline win.
+
+   Historical wording intentionally superseded by the active rules above; do not classify
+   from this block:
+
+   ```
+     founding-member Q&A + paid buy-back, account-email-change and account-deletion intake,
+     and general how-to/FAQ. When she files a **needs-human** ticket (e.g. a credit-theft
+     `caroline`); an irreversible account/profile deletion or Google de-indexing; and a
+   ```
 
    Worked examples (the two that were being classified wrong):
    - "Fwd: verification of my songs..." / any "Additional Information Required for Credit
