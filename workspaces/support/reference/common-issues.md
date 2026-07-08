@@ -13,6 +13,7 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
    - If upgrading: direct to Settings > subscription > select new plan. Takes effect immediately.
    - If cancelling: direct to Settings > subscription > cancel. Access continues until billing period ends. Credits and profile data are never deleted.
    - If downgrading (Pro to Lite): same as cancel – access to paid features ends at period end.
+   - **If they also mention wanting a refund** ("cancel and refund it", "cancel and get my money back"): stop – the `refund-retention` skill takes precedence. Handle via Row #9, not here.
 2. If they can't find the setting in the app:
    - Walk them through Settings > Billing or Subscription section
 3. **Escalate:** If they're unable to make the change after following the steps, create a ticket with category "Billing – Self-Service Failure". SLA: 1 business day.
@@ -229,16 +230,19 @@ If the tool call did not succeed, do not say you escalated. Either retry the too
 
 ## 9. Refund request
 
-**Customer says:** "I want a refund."
+**Customer says:** "I want a refund." (or any refund signal – "money back", "cancel and refund it", "this isn't worth what I paid")
+
+The `refund-retention` skill governs this ENTIRE flow – run it FIRST (SOUL.md wires it in as mandatory). Do NOT just ask "why?" once and escalate: that skips the retention gates and, most importantly, the free-plan save. A refund ticket is the LAST step, not the first.
 
 **Resolution path:**
-1. Ask why they're requesting the refund – this helps route the ticket correctly:
-   - Charged in error (duplicate charge, charged after cancel)
-   - Didn't use the subscription / not what they expected
-   - Technical issue prevented them from using the product
-2. There is no self-service refund path – all refund requests go to the support team.
-3. Let the customer know refund requests are reviewed by the team and they'll receive a response by email.
-4. **Escalate:** Create a ticket with category "Billing – Refund Request". Include: account email, reason for refund, amount and charge date, any relevant context. SLA: 2 business days.
+1. Run the `refund-retention` 3-gate flow (`skills/refund-retention/SKILL.md`), keeping a visible exit to the refund in every message:
+   - **Diagnose** – ask what's not working and categorize the reason.
+   - **Help (reason-matched)** – the primary save is the **free Lite plan**: "you'd keep everything you've built – credits, profile, the works – you'd just lose the analytics and audit tools." Offer it as soon as the reason is clear; don't hold it for the last gate.
+   - **Last alternative** – offer the free-plan downgrade once more before escalating.
+2. Only if the customer still wants out after the gates: hand off to the `action-request` skill with `subscription-refund` (Tier 3), including the `retention_context` block. Quote the SLA the ticket response returns (per the skill's handoff) – do NOT promise a fixed turnaround here.
+3. There is no self-service refund path, and Caroline never processes the refund herself – Operations reviews and executes it.
+
+**Billing-issue exception:** charged twice / wrong amount / charged after cancel is NOT a retention case – it follows the `billing-issue` path inside the skill (Gate 2 files a Tier-2 billing ticket), not the refund gates.
 
 ---
 
