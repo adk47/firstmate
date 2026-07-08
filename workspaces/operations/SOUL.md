@@ -307,6 +307,28 @@ Only escalate to Nick when a track that HAS a resolved Spotify source stays empt
 well past the window (~1h) or reads 500 — a genuine pipeline bug. Do not report a
 fresh in-flight repair as "failing".
 
+### Ghost/source-less catalog rows are TRACK MERGE cleanup, NOT credit removal
+If a request says a profile credit is attached to a placeholder, ghost,
+duplicate, source-less, no-Spotify, no-ISRC, or no-artist track row, handle it
+with `muso-ops-tracks` as a **track merge investigation**. Do NOT delete the
+track, do NOT remove/re-add the profile credit as the primary fix, and do NOT run
+credit verification. The normal fix is to merge the source-less catalog loser
+into the proven source-backed survivor so the existing profile credit moves with
+the catalog row.
+
+Required guardrails:
+- Pre-read the ghost row and candidate survivor row before any write.
+- Treat `mergeInto` as the survivor that must be kept, and `tracksIds` as the
+  source-less loser list.
+- Only merge when title plus source metadata prove the match: artists, Spotify
+  ID, ISRC, album/release date, or equivalent source evidence.
+- If many same-title catalog rows exist, hold the merge until the survivor is
+  proven; never pick a survivor from title alone.
+- After the merge, read back both the old ghost ID and the survivor ID, then read
+  the profile credits. A clean result means the old ID resolves to the survivor,
+  the survivor has source metadata, and the profile credit appears on the
+  survivor while the ghost ID no longer appears as a profile credit row.
+
 **Output rule:** Only post the final structured report (Step 6 format) to the channel thread.
 Never post internal reasoning, step numbers, parsing status, API debugging, or investigation
 narration. All intermediate work (parsing, API calls, web research) happens silently — the

@@ -121,6 +121,71 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
   '{"mergeInto":"<primary_id>","tracksIds":["<duplicate_id>"]}'
 ```
 
+### Ghost/source-less track cleanup
+
+Use this when a profile has a real credit on a placeholder catalog row with no
+source metadata, while a separate source-backed row already exists for the same
+recording. The goal is to keep the profile credit intact by merging the
+source-less loser into the source-backed survivor.
+
+Do **not** delete the ghost row, remove analytics links, or remove/re-add the
+profile credit as the primary fix. Track merge is the catalog-preserving repair.
+
+**1. Read both candidate rows.**
+```bash
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/track/<ghost_track_id>"
+
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/track/<survivor_track_id>"
+
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/track/<survivor_track_id>/analytics-sources"
+```
+
+Before merging, confirm:
+- the loser is source-less or effectively a placeholder: no artists, no Spotify
+  IDs, no ISRCs, no label/publisher, and low/no popularity;
+- the survivor is source-backed with resolved artists and at least one durable
+  source identifier (Spotify ID, ISRC, or equivalent analytics source);
+- the title and source evidence point to the same recording.
+
+If there are many same-title catalog rows, hold until the survivor is proven by
+source metadata. Never choose a survivor from title alone.
+
+**2. Merge in the safe direction.**
+```bash
+# mergeInto = source-backed SURVIVOR (kept)
+# tracksIds = source-less LOSER rows (soft-deleted, redirected to survivor)
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call POST "/admin/tracks/merge" \
+  '{"mergeInto":"<survivor_track_id>","tracksIds":["<ghost_track_id>"]}'
+```
+
+**3. Verify by read-back.**
+```bash
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/track/<ghost_track_id>"
+
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/track/<survivor_track_id>"
+
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  call GET "/admin/profile/<profile_id>/credits?limit=200&offset=0"
+```
+
+A clean read-back shows:
+- the old ghost ID resolves to the survivor or is marked merged/deleted;
+- the survivor still has the source-backed metadata;
+- the profile credit appears on the survivor track ID;
+- the ghost track ID no longer appears as a separate row on the profile.
+
+Report the final state as:
+```text
+<ghost_track_id> -> <survivor_track_id> - <title>, <artists>, source <id>,
+ISRC <isrc>, <profile_name> <role> present.
+```
+
 ### Unmerge Tracks
 
 ⚠️ Tier 2+ only.
