@@ -1186,10 +1186,10 @@ drift_check_against_baseline() {
   local intended
   intended=$(git -C "$HYDRA_ROOT" diff --name-only "$last_sha" | sort -u | sed '/^$/d')
 
-  # Hand the intended-change set to the Step 6 edge-restart gate (below). Only
+  # Hand the intended-change set to the Step 6 restart gate (below). Only
   # set here — i.e. only when a valid baseline diff was actually computed — so an
   # early-returned/skipped drift check leaves the gate failing OPEN. Consumed by
-  # edge_restart_needed() in the (not-followed-without-`-x`) sourced lib, hence
+  # gateway_restart_needed() in the (not-followed-without-`-x`) sourced lib, hence
   # the SC2034 suppressions.
   #
   # Fold in UNTRACKED-but-not-ignored files too: `git diff` lists only tracked
@@ -2615,22 +2615,27 @@ restart_gateway() {
   fail "Failed to restart $service (timed out after 30s)"
 }
 
-# edge_restart_needed(): skip the edge restart when a deploy provably changed
-# nothing the edge gateway loads (openclaw pauses the memory_search index on
-# every edge restart, so a needless restart is churn). Strictly fail-open — see
-# the lib header. Reads DEPLOY_DIFF_COMPUTED / DEPLOY_CHANGED_FILES (set by
-# Step 0's drift check) + HYDRA_FORCE / HYDRA_FORCE_RESTART.
+# gateway_restart_needed(): skip a gateway restart when a deploy provably changed
+# nothing that gateway loads (every restart costs ~12-30s of agent rebind, and on
+# edge it also pauses the memory_search index — so a needless restart is churn).
+# Applies to BOTH main and edge. Strictly fail-open — see the lib header. Reads
+# DEPLOY_DIFF_COMPUTED / DEPLOY_CHANGED_FILES (set by Step 0's drift check) +
+# HYDRA_FORCE / HYDRA_FORCE_RESTART.
 # shellcheck source=lib/edge-restart-gate.sh
 source "$SCRIPT_DIR/lib/edge-restart-gate.sh"
 
-if needs_target "main"; then restart_gateway "openclaw-gateway-main"; fi
-if needs_target "edge"; then
-  if edge_restart_needed; then
-    restart_gateway "openclaw-gateway-edge"
+# Restart $service unless the gate proves nothing it loads changed this deploy.
+restart_gateway_if_needed() {
+  local service="$1"
+  if gateway_restart_needed; then
+    restart_gateway "$service"
   else
-    log "  Skipping edge gateway restart: only gateway-inert files (docs/CI/tests/templates) changed since last deploy — nothing the edge gateway loads. Override: HYDRA_FORCE_RESTART=1."
+    log "  Skipping ${service#openclaw-gateway-} gateway restart: only gateway-inert files (docs/CI/personas/tests/templates/root-docs) changed since last deploy — nothing it loads. Override: HYDRA_FORCE_RESTART=1."
   fi
-fi
+}
+
+if needs_target "main"; then restart_gateway_if_needed "openclaw-gateway-main"; fi
+if needs_target "edge"; then restart_gateway_if_needed "openclaw-gateway-edge"; fi
 
 # -------------------------------------------------------------------
 # WARMUP: wait for agents to bind before smoke test
