@@ -1,12 +1,13 @@
 # TOOLS.md -- support
 
-## Allowed Tools (EXACTLY 17)
+## Allowed Tools (EXACTLY 18)
 
-This agent has the most restricted tool set in HYDRA. Only these 17 tools are permitted, split into three groups:
+This agent has the most restricted tool set in HYDRA. Only these 18 tools are permitted, split into four groups:
 
 - **Action tools (1-10, 16-17)** -- write or read customer-facing state. Implemented as plugin-registered tools via the `support-tools` OpenClaw plugin. The agent calls them by name; the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
 - **Reference tools (11-12)** -- read-only semantic + BM25 retrieval against `workspaces/support/reference/*.md`, provided by openclaw's bundled memory-core via the per-agent `memorySearch` config (enabled on both edge and main profiles, indexing the read-only `reference/` subdirectory only). No writes; no customer-data persistence; no auto-recall.
 - **Gated self-serve write tools (13-15)** -- `profiles_claim_self`, `credits_verify`, `profiles_consolidate`. Each shells `muso <verb> --actor-identity <verified-email>` through a thin bash wrapper; muso-cli's capability gate is the ownership/caps/audit boundary. Live on edge (the `*Enabled` flags in openclaw-edge.json are true); if a call returns `{disabled:true}`, fall back to a ticket.
+- **Routing tool (18)** -- `support_action_router`, a read-only in-plugin registry that maps support intent + state to the router-suggested next step: close, ask for exact missing info, preview/apply a safe tool, or create a structured handoff.
 
 ## Authentication (CRITICAL -- shared across tools 1, 2, 5, 6, 7, 8, 9)
 
@@ -168,6 +169,14 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 - **Identity (anti-spoof)**: verified Intercom contact email only -- there is no target parameter, so the link can never be minted for another account. Requires the explicit `confirm: true` parameter (only after the customer asks to join/rejoin). The CLI's policy gate audits the write and enforces a per-actor/day mint cap; the mint itself changes no account state.
 - **Rate limit**: 3 calls / 60 min per session.
 - **When to use**: via the founding-member buy-back path in `reference/founding-member.md`. Free/comp reinstates are NOT this tool -- those stay a flag for the team (ops runs the approval-tier `muso founding reinstate`).
+
+### 18. support_action_router
+
+- **Wraps**: a deterministic read-only registry inside `support-tools`. No upstream API call, no shell, no customer-data lookup, and no write.
+- **Parameters**: `intent` plus optional `state`. Supported intents: `analytics_data_complaint`, `credit_verification`, `profile_claim`, `profile_duplicates`, `remove_wrong_credits`, `order_fulfillment`, `founding_member`, `billing_cancel_refund`, `catalog_metadata_repair`, `login_email_verification`, `account_profile_change`. Supported states: `new_request`, `read_ok`, `missing_info`, `preview_ok`, `customer_confirmed`, `applied_ok`, `tool_refused`, `tool_disabled`, `loop_detected`.
+- **Returns**: `{ ok, intent, state, availability, next, live_tools, planned_tools, human_gated_writes, denied_tools, sequence, close_when, handoff_when, missing_info, tags, guardrails }`.
+- **When to use**: before choosing a lane for multi-step support requests, especially when the customer asks for an action (credits, profile, billing, orders, founding, metadata, login). Use the returned `next` to decide whether to call a read tool, run a skill, ask for precise missing info, preview/apply a safe write, close, or file a structured handoff.
+- **Safety model**: this tool does NOT authorize anything by itself. The actual read/write tool remains the security boundary. A clean successful write resolves the case; do not also file a ticket. Any `disabled`, refusal, cross-owner, ambiguity, or `route_to_human` result becomes a structured handoff.
 
 ## Action Request Pattern
 

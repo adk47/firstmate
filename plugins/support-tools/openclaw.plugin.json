@@ -1,9 +1,10 @@
 {
   "id": "support-tools",
   "name": "Support Agent Tools",
-  "description": "Profile lookup, credits search, ticket creation, profile status, subscription status, and self-service credit-removal tools for the support agent.",
+  "description": "Action routing, profile lookup, credits search, ticket creation, profile status, subscription status, and self-service credit-removal tools for the support agent.",
   "contracts": {
     "tools": [
+      "support_action_router",
       "profile_lookup",
       "credits_search",
       "profile_status",

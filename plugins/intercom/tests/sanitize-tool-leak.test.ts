@@ -8,12 +8,55 @@ describe("sanitizeToolLeak", () => {
     expect(out.redactions).toContain("profile_status");
   });
 
-  it("redacts create_ticket, profile_lookup, credits_search, subscription_status", () => {
-    const out = sanitizeToolLeak("Tools: create_ticket profile_lookup credits_search subscription_status.");
-    for (const tok of ["create_ticket", "profile_lookup", "credits_search", "subscription_status"]) {
+  it("redacts support tool names", () => {
+    const tokens = [
+      "create_ticket",
+      "profile_lookup",
+      "credits_search",
+      "subscription_status",
+      "profile_status",
+      "remove_credits",
+      "dedupe_check",
+      "credit_verification_check",
+      "profiles_claim_self",
+      "credits_verify",
+      "profiles_consolidate",
+      "order_lookup",
+      "order_address_update",
+      "founding_status",
+      "founding_buyback_link",
+      "support_action_router",
+      "memory_search",
+      "memory_get",
+      "profile_analytics_status",
+      "track_analytics_status",
+      "analytics_refresh_request",
+      "analytics_recheck",
+      "subscription_cancel",
+      "refund_policy_check",
+      "refund_create",
+      "catalog_status",
+      "track_lookup",
+      "metadata_capture_request",
+      "artwork_refresh_request",
+      "catalog_recheck",
+      "user_status",
+      "resend_verification",
+      "email_delivery_status",
+      "login_recovery_packet",
+      "profile_change_packet",
+      "profile_merge_check",
+      "account_merge_preflight",
+      "email_change_preflight",
+      "profile_removal_preflight",
+    ];
+    const out = sanitizeToolLeak(`Tools: ${tokens.join(" ")}.`);
+    for (const tok of tokens) {
       expect(out.redactions).toContain(tok);
     }
-    expect(out.body).not.toMatch(/profile_lookup|credits_search|subscription_status|create_ticket/);
+    for (const tok of tokens) {
+      expect(out.body).not.toContain(tok);
+    }
   });
 
   it("redacts internal phrases (case-insensitive)", () => {

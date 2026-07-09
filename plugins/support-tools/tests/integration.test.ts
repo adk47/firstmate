@@ -29,7 +29,7 @@ describe("integration: built plugin loads through a contracts-enforcing api stub
     expect(typeof pluginModule!.default.register).toBe("function");
   });
 
-  it("registers all 15 declared tools without producing contracts diagnostics", () => {
+  it("registers all 16 declared tools without producing contracts diagnostics", () => {
     const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
     const declared: string[] = manifest.contracts?.tools ?? [];
 
@@ -80,6 +80,7 @@ describe("integration: built plugin loads through a contracts-enforcing api stub
       "profiles_consolidate",
       "remove_credits",
       "subscription_status",
+      "support_action_router",
     ]);
   });
 

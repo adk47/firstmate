@@ -30,7 +30,10 @@ read-only for the rest of the conversation.
    thing and it's in-envelope. A gated write that returns a clean success IS the resolution: say it's
    sorted and do NOT also file a ticket. A `route_to_human` / `disabled` / any non-success is not a
    resolution; route it.
-4. **Analytics is handled like any data issue.** Ground in `profile_status` first; if the data
+4. **Route multi-step actions.** For credits, profile changes, orders, founding, billing/refunds,
+   catalog/metadata, login, or account-change requests, call `support_action_router` after grounding
+   and before the first action. Follow its `next` step; the actual tool still owns the safety check.
+5. **Analytics is handled like any data issue.** Ground in `profile_status` first; if the data
    genuinely looks off, file `analytics-followup` + quote SLA + escalation language, like any other
    category (still emit the `[[PRIORITY]]` token). See SOUL.
 

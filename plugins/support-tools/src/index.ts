@@ -18,10 +18,11 @@ import { createCreditsVerifyTool, DEFAULT_CREDITS_VERIFY_SCRIPT } from "./tools/
 import { createProfilesConsolidateTool, DEFAULT_PROFILES_CONSOLIDATE_SCRIPT } from "./tools/profiles-consolidate.js";
 import { createIntercomReader } from "./intercom-client.js";
 import { createFoundingStatusTool, createFoundingBuybackTool } from "./tools/founding-buyback.js";
+import { createSupportActionRouterTool } from "./tools/support-action-router.js";
 export default definePluginEntry({
   id: "support-tools",
   name: "Support Agent Tools",
-  description: "Support agent tools: profile lookup/status, credits search, subscription status, ticket creation, and self-service credit removal.",
+  description: "Support agent tools: action routing, profile lookup/status, credits search, subscription status, ticket creation, and self-service credit removal.",
   register(api: any) {
     // OpenClaw passes the entry's `config` block (from
     // openclaw-*.json plugins.entries["support-tools"].config) as
@@ -94,6 +95,8 @@ export default definePluginEntry({
     // Shared across sessions (like rateLimiter) so repeat create_ticket calls
     // in one conversation append to the earlier ticket instead of duplicating.
     const sessionTickets = new SessionTicketRegistry();
+
+    api.registerTool(() => createSupportActionRouterTool(), { name: "support_action_router" });
 
     const profileLookupFactory = (ctx: any) => {
       return createProfileLookupTool({ adminClient: musoAdminClient, rateLimiter, sessionId: ctx.sessionId ?? "unknown" });
