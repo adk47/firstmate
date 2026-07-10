@@ -55,9 +55,16 @@ jobs:
           DRAFT="$(jq -r '.draft' <<<"$prjson")"
           BASE="$(jq -r '.base.ref' <<<"$prjson")"
 
-          # Scope (for now): Nick's non-draft PRs targeting main, in hydra.
-          if [ "$AUTHOR" != "nsollazzo" ]; then
-            echo "PR #${PR} author=${AUTHOR} (not nsollazzo) — skipping auto-review."
+          # Scope: non-draft PRs targeting main by any author with a Slack-UID
+          # mapping (scripts/lib/qa-author-slack-uid.sh — the same fail-closed
+          # gate the external-repo path uses). Previously hardcoded to Nick,
+          # which left every other author's hydra PRs (e.g. adk47's) merging
+          # with no automated review — the 2026-07-10 "everything through the
+          # QA bot" directive closes that class. The resolved UID rides to the
+          # dispatcher as the requester (approve-gate + DM target), replacing
+          # the dispatcher's built-in Nick default for non-Nick authors.
+          if ! REQUESTER_UID="$(bash scripts/lib/qa-author-slack-uid.sh "$AUTHOR")"; then
+            echo "PR #${PR} author=${AUTHOR} has no Slack-UID mapping — skipping auto-review."
             exit 0
           fi
           if [ "$DRAFT" = "true" ]; then
@@ -69,5 +76,5 @@ jobs:
             exit 0
           fi
 
-          echo "Dispatching QA auto-review of PR #${PR} @ ${HEAD_SHA}"
-          bash scripts/qa-dispatch-pr-review.sh "$PR" "$HEAD_SHA"
+          echo "Dispatching QA auto-review of PR #${PR} @ ${HEAD_SHA} (author=${AUTHOR} -> ${REQUESTER_UID})"
+          bash scripts/qa-dispatch-pr-review.sh "$PR" "$HEAD_SHA" "$REPO" "$REQUESTER_UID"

@@ -50,7 +50,7 @@ jobs:
           # --- Repo allowlist: only these Muso-AI repos may drive an external
           #     review. Adding a repo = one line here + a Slack-UID mapping. ------
           case "$REPO" in
-            Muso-AI/ads-manager|Muso-AI/auth|Muso-AI/web-credits|Muso-AI/web-credits-next|Muso-AI/industry-data-processing|Muso-AI/octave-ui|Muso-AI/core-backend|Muso-AI/muso-cli) ;;
+            Muso-AI/ads-manager|Muso-AI/auth|Muso-AI/web-credits|Muso-AI/web-credits-next|Muso-AI/industry-data-processing|Muso-AI/octave-ui|Muso-AI/core-backend|Muso-AI/muso-cli|Muso-AI/H-DevOps) ;;
             *) echo "repo='$REPO' not in the external-review allowlist — refusing."; exit 1 ;;
           esac
 
