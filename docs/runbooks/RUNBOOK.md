@@ -707,9 +707,11 @@ paged it as a float). A re-pin/restart does nothing. It self-recovers; the only 
 harm is noisy logs + a false page — both fixed below.
 
 - **Watchdog**: the `:rotating_light: floated off pin` alert now runs the pin `--check`
-  and only cries "float" when the pin actually **drifted**; a pin-clean 401 gets an
-  accurate `:warning:` ("compaction path, re-pin is a no-op"), and an unverifiable pin
-  says so. (`codex_apikey_route_verdict` in `scripts/lib/codex-health.sh`.)
+  and only cries "float" when the pin actually **drifted**. A pin-clean 401 (the
+  compaction path) is **log-only — it does NOT page** (benign, self-recovering, no
+  action needed; it also never consumes the api-key cooldown, so a genuine float still
+  pages). Only `float` and `unverifiable` page. (`codex_apikey_route_verdict` in
+  `scripts/lib/codex-health.sh`; dispatch in `scripts/openclaw-watchdog.sh`.)
 - **Write-gate**: `codex_health_gate` (admin/Stripe write-health) likewise pin-gates the
   api-key signal — a **float or unverifiable** pin still refuses writes (fail-closed), but
   a **compaction-only** (pin-clean) 401 no longer over-blocks writes on a healthy fleet.

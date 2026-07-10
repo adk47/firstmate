@@ -334,23 +334,35 @@ else
   PIN_CHECK_EXIT=2  # can't verify the pin → treat api-key 401s as unverifiable
 fi
 
-if [ "${CODEX_APIKEY_ROUTE:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-apikey-cooldown" "$CODEX_COOLDOWN_MIN"; then
+# api-key-route 401s: page ONLY for the verdicts that need a human (float, unverifiable).
+# The `compaction` verdict is a benign, self-recovering, no-action condition (the embedded
+# summarizer bypassing the OAuth route while codex is healthy for real turns) — it must
+# NOT page DevOps, and must NOT consume the shared api-key cooldown (else a benign
+# compaction blip would mask a genuine float for the whole cooldown window). So the
+# cooldown check + stamp live INSIDE the paging arms, not around the whole block.
+if [ "${CODEX_APIKEY_ROUTE:-0}" -gt 0 ]; then
   CODEX_APIKEY_VERDICT=$(codex_apikey_route_verdict "$CODEX_APIKEY_ROUTE" "$PIN_CHECK_EXIT")
+  _APIKEY_COOLDOWN="$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-apikey-cooldown"
   case "$CODEX_APIKEY_VERDICT" in
-    float)
-      log "CODEX #90925 API-KEY ROUTE: ${CODEX_APIKEY_ROUTE} invalid_api_key/Incorrect-API-key lines (main+edge) in last ${CHECK_WINDOW_MIN}min; pin DRIFTED"
-      slack_notify ":rotating_light: *Codex floated off pin → #90925 api-key route* — ${CODEX_APIKEY_ROUTE}x \`invalid_api_key\`/\`Incorrect API key\` across main+edge in last ${CHECK_WINDOW_MIN}min AND codex is off the 2026.5.27 pin. @openclaw/codex@2026.6.x routes gpt-5.5 to the OpenAI api-key endpoint instead of the Codex OAuth route, so the WHOLE fleet is on \`openrouter/openai/gpt-5.4-mini\`. Fix: re-pin codex + restart — \`scripts/lib/ensure-codex-version-pinned.sh\` on node-8 (re-pins to the canonical version), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. A plain restart also self-heals (ExecStartPre re-pins)."
-      ;;
     compaction)
-      log "CODEX API-KEY 401 WITH PIN INTACT: ${CODEX_APIKEY_ROUTE} invalid_api_key/Incorrect-API-key lines (main+edge) in last ${CHECK_WINDOW_MIN}min; codex ON pin (compaction path, NOT a float)"
-      slack_notify ":warning: *Codex api-key 401s with the pin INTACT* — ${CODEX_APIKEY_ROUTE}x \`invalid_api_key\`/\`Incorrect API key\` across main+edge in last ${CHECK_WINDOW_MIN}min, but codex is ON the 2026.5.27 pin — this is *NOT* a float. Signature is the embedded compaction/summarization path (\`[compaction-diag]\` / \`trigger=cli_budget\`) resolving a separate summarizer that bypasses the Codex OAuth route and hits the placeholder OpenAI key; it self-recovers via fallback to \`openrouter/openai/gpt-5.4-mini\`. *A re-pin/restart is a NO-OP here* — it self-recovers, no action needed. Do NOT set \`agents.defaults.compaction.model\` (openclaw ignores it on Codex-backed agents and the fallback already lands on the same model). See RUNBOOK → \"Codex Plugin Floated Off Pin / api-key-route 401\"."
+      # Log-only (forensics in the watchdog log); never pages, never touches the cooldown.
+      log "CODEX API-KEY 401 WITH PIN INTACT: ${CODEX_APIKEY_ROUTE} invalid_api_key/Incorrect-API-key lines (main+edge) in last ${CHECK_WINDOW_MIN}min; codex ON pin — benign compaction path (trigger=cli_budget), self-recovers, NO page"
+      ;;
+    float)
+      if _codex_cooldown_ok "$_APIKEY_COOLDOWN" "$CODEX_COOLDOWN_MIN"; then
+        log "CODEX #90925 API-KEY ROUTE: ${CODEX_APIKEY_ROUTE} invalid_api_key/Incorrect-API-key lines (main+edge) in last ${CHECK_WINDOW_MIN}min; pin DRIFTED"
+        slack_notify ":rotating_light: *Codex floated off pin → #90925 api-key route* — ${CODEX_APIKEY_ROUTE}x \`invalid_api_key\`/\`Incorrect API key\` across main+edge in last ${CHECK_WINDOW_MIN}min AND codex is off the 2026.5.27 pin. @openclaw/codex@2026.6.x routes gpt-5.5 to the OpenAI api-key endpoint instead of the Codex OAuth route, so the WHOLE fleet is on \`openrouter/openai/gpt-5.4-mini\`. Fix: re-pin codex + restart — \`scripts/lib/ensure-codex-version-pinned.sh\` on node-8 (re-pins to the canonical version), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. A plain restart also self-heals (ExecStartPre re-pins)."
+        date +%s > "$_APIKEY_COOLDOWN"
+      fi
       ;;
     unverifiable)
-      log "CODEX API-KEY 401, PIN UNVERIFIABLE: ${CODEX_APIKEY_ROUTE} lines (main+edge) in last ${CHECK_WINDOW_MIN}min; --check exit ${PIN_CHECK_EXIT}"
-      slack_notify ":warning: *Codex api-key 401s, pin state UNVERIFIABLE* — ${CODEX_APIKEY_ROUTE}x \`invalid_api_key\`/\`Incorrect API key\` across main+edge in last ${CHECK_WINDOW_MIN}min, but \`ensure-codex-version-pinned.sh --check\` could not read the pin (exit ${PIN_CHECK_EXIT}). Check the pin manually on node-8 before assuming a float.\n\`\`\`${PIN_CHECK_OUT}\`\`\`"
+      if _codex_cooldown_ok "$_APIKEY_COOLDOWN" "$CODEX_COOLDOWN_MIN"; then
+        log "CODEX API-KEY 401, PIN UNVERIFIABLE: ${CODEX_APIKEY_ROUTE} lines (main+edge) in last ${CHECK_WINDOW_MIN}min; --check exit ${PIN_CHECK_EXIT}"
+        slack_notify ":warning: *Codex api-key 401s, pin state UNVERIFIABLE* — ${CODEX_APIKEY_ROUTE}x \`invalid_api_key\`/\`Incorrect API key\` across main+edge in last ${CHECK_WINDOW_MIN}min, but \`ensure-codex-version-pinned.sh --check\` could not read the pin (exit ${PIN_CHECK_EXIT}). Check the pin manually on node-8 before assuming a float.\n\`\`\`${PIN_CHECK_OUT}\`\`\`"
+        date +%s > "$_APIKEY_COOLDOWN"
+      fi
       ;;
   esac
-  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-apikey-cooldown"
 fi
 
 if [ "${CODEX_TOKEN_EXPIRED:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-expired-cooldown" "$CODEX_COOLDOWN_MIN"; then
