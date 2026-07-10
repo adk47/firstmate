@@ -1012,6 +1012,14 @@ RSYNC_EXCLUDES=(
   # something worth keeping, promote it to a proper skill under
   # workspaces/<agent>/skills/<skill-name>/ instead.
   --exclude='workspaces/*/scripts/'
+  # Repos the agents clone for cross-repo work (muso-repos skill): core-backend,
+  # H-DevOps, web-credits, plus per-branch worktrees — hundreds of thousands of
+  # files, never tracked in hydra. `repos` sits directly under workspaces/ (not
+  # per-agent), so this is workspaces/repos/, not workspaces/*/repos/. Left
+  # unexcluded, the deploy would try to wipe them and the pre-flight gate's
+  # deletion classifier chokes on the volume (~386K entries) and hangs the
+  # single self-hosted CI runner for hours (2026-07-10).
+  --exclude='workspaces/repos/'
 )
 
 # -------------------------------------------------------------------
