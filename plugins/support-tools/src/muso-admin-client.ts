@@ -10,6 +10,7 @@ interface AdminClientDeps {
 const ALLOWED_PATHS: RegExp[] = [
   /^\/api\/v3\/admin\/profile\/search(\?|$)/,
   /^\/api\/v3\/admin\/profile\/[0-9a-fA-F-]+(\?|$)/,
+  /^\/api\/v3\/admin\/profile\/[0-9a-fA-F-]+\/analytics-status(\?|$)/,
   /^\/api\/v3\/admin\/profile\/[0-9a-fA-F-]+\/credits(\?|$)/,
   // Read of a profile's credit-requests (used by credit_verification_check to
   // list user_verification_needed credits). The client is structurally GET-only

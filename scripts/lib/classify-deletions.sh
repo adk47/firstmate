@@ -76,54 +76,73 @@ classify_workspace_deletions() {
 
     # Compute the ever-tracked set at HEAD. tr -d '\r' normalizes filenames
     # on Windows-origin clones where core.autocrlf may introduce CR on list
-    # output — without this, grep -qxF matches fail and legitimately-tracked
+    # output — without this, exact-key matches fail and legitimately-tracked
     # paths get mis-classified as never-tracked.
-    local ever_tracked
-    ever_tracked=$(git -C "$hydra_root" ls-files -- 'workspaces/*' \
+    local ever_tracked_file
+    ever_tracked_file=$(mktemp) || return 4
+    git -C "$hydra_root" ls-files -- 'workspaces/*' \
         | tr -d '\r' \
         | awk -F/ '$1 == "workspaces" && NF >= 3 { print $1"/"$2"/"$3 }' \
-        | sort -u)
+        | sort -u > "$ever_tracked_file"
 
     # Sanity check: if the caller's repo has workspaces/ on disk with
     # tracked content but `ever_tracked` came back empty, something is very
     # wrong (shallow clone missing main branch, ls-files crashed silently,
     # etc). Refuse to classify rather than auto-exclude everything.
-    if [[ -z "$ever_tracked" ]] \
+    if [[ ! -s "$ever_tracked_file" ]] \
        && [[ -d "$hydra_root/workspaces" ]] \
        && [[ -n "$(ls -A "$hydra_root/workspaces" 2>/dev/null || true)" ]]; then
         echo "classify_workspace_deletions: ever_tracked is empty but workspaces/ has content — git state suspect, refusing to classify" >&2
+        rm -f "$ever_tracked_file"
         return 5
     fi
 
     # Classify each deletion line.
-    local -a auto_excluded=()
-    local line path ws subdir key s
-    while IFS= read -r line; do
-        [[ -n "$line" ]] || continue
-        # Strip the `*deleting` prefix + padding. read -r with a single
-        # variable captures the full remainder (IFS word-splitting only
-        # applies with 2+ variable names), preserving embedded whitespace.
-        read -r path <<< "${line#\*deleting}"
-        # Regex REQUIRES a trailing `/` after the subdir component. This
-        # means a never-tracked top-level workspace FILE
-        # (workspaces/<ws>/runtime.log) does NOT match and stays in REMAIN.
-        if [[ "$path" =~ ^workspaces/([^/]+)/([^/]+)/ ]]; then
-            ws="${BASH_REMATCH[1]}"
-            subdir="${BASH_REMATCH[2]}"
-            key="workspaces/${ws}/${subdir}"
-            if ! grep -qxF -- "$key" <<< "$ever_tracked"; then
-                auto_excluded+=("${key}/")
-                continue
-            fi
-        fi
-        printf 'REMAIN: %s\n' "$line"
-    done <<< "$deletions"
+    local auto_file remain_file rc
+    auto_file=$(mktemp) || { rm -f "$ever_tracked_file"; return 4; }
+    remain_file=$(mktemp) || { rm -f "$ever_tracked_file" "$auto_file"; return 4; }
 
-    # Emit unique AUTO patterns. sort -u over the accumulated list keeps
-    # this bash-3 compatible (no associative arrays).
-    if (( ${#auto_excluded[@]} > 0 )); then
-        while IFS= read -r s; do
-            printf 'AUTO: %s\n' "$s"
-        done < <(printf '%s\n' "${auto_excluded[@]}" | sort -u)
+    # Keep this as one awk pass over deletions. The old implementation ran
+    # `grep` against the tracked set for every deletion line; live workspaces can
+    # easily produce hundreds of thousands of deletion candidates.
+    awk -v auto_file="$auto_file" -v remain_file="$remain_file" '
+        FNR == NR {
+            ever[$0] = 1
+            next
+        }
+        $0 == "" {
+            next
+        }
+        {
+            line = $0
+            path = line
+            sub(/^\*deleting[[:space:]]*/, "", path)
+
+            # Requires a slash after the subdir component. A top-level
+            # workspace file like workspaces/ops/runtime.log has only three
+            # path parts and remains suspicious.
+            n = split(path, parts, "/")
+            if (n >= 4 && parts[1] == "workspaces" && parts[2] != "" && parts[3] != "") {
+                key = parts[1] "/" parts[2] "/" parts[3]
+                if (!(key in ever)) {
+                    print key "/" >> auto_file
+                    next
+                }
+            }
+
+            print "REMAIN: " line >> remain_file
+        }
+    ' "$ever_tracked_file" <(printf '%s\n' "$deletions") || rc=$?
+
+    rc=${rc:-0}
+    if (( rc != 0 )); then
+        rm -f "$ever_tracked_file" "$auto_file" "$remain_file"
+        return "$rc"
     fi
+
+    cat "$remain_file"
+    if [[ -s "$auto_file" ]]; then
+        sort -u "$auto_file" | sed 's/^/AUTO: /'
+    fi
+    rm -f "$ever_tracked_file" "$auto_file" "$remain_file"
 }

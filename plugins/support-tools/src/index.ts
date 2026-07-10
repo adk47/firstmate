@@ -8,6 +8,7 @@ import { createCreditsSearchTool } from "./tools/credits-search.js";
 import { createCreateTicketTool } from "./tools/create-ticket.js";
 import { createSubscriptionStatusTool } from "./tools/subscription-status.js";
 import { createProfileStatusTool } from "./tools/profile-status.js";
+import { createProfileAnalyticsStatusTool } from "./tools/profile-analytics-status.js";
 import { createOrderLookupTool } from "./tools/order-lookup.js";
 import { createRemoveCreditsTool, DEFAULT_REMOVE_CREDITS_SCRIPT } from "./tools/remove-credits.js";
 import { createOrderAddressUpdateTool, DEFAULT_UPDATE_ORDER_ADDRESS_SCRIPT } from "./tools/order-address-update.js";
@@ -112,6 +113,11 @@ export default definePluginEntry({
       return createProfileStatusTool({ adminClient: musoAdminClient, rateLimiter, sessionId: ctx.sessionId ?? "unknown" });
     };
     api.registerTool(profileStatusFactory, { name: "profile_status" });
+
+    const profileAnalyticsStatusFactory = (ctx: any) => {
+      return createProfileAnalyticsStatusTool({ adminClient: musoAdminClient, rateLimiter, sessionId: ctx.sessionId ?? "unknown" });
+    };
+    api.registerTool(profileAnalyticsStatusFactory, { name: "profile_analytics_status" });
 
     const orderLookupFactory = (ctx: any) => {
       return createOrderLookupTool({ adminClient: musoAdminClient, rateLimiter, sessionId: ctx.sessionId ?? "unknown" });

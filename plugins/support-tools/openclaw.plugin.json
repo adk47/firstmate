@@ -8,6 +8,7 @@
       "profile_lookup",
       "credits_search",
       "profile_status",
+      "profile_analytics_status",
       "order_lookup",
       "subscription_status",
       "create_ticket",

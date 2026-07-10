@@ -267,6 +267,22 @@ describe("createMusoAdminClient", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("allows profile analytics-status read but blocks broader analytics profile sub-paths", async () => {
+    vi.mocked(http.post).mockResolvedValue(makeLoginResponse("tok"));
+    vi.mocked(http.get).mockResolvedValue({ ok: true, data: { data: { status: "fresh" } } });
+
+    const client = createMusoAdminClient({
+      http,
+      musoApiBase: "https://api.muso.ai",
+      adminEmail: "admin@muso.ai",
+      adminPassword: "s3cret",
+    });
+
+    expect((await client.get("/api/v3/admin/profile/abc-123/analytics-status")).ok).toBe(true);
+    expect(await client.get("/api/v3/admin/profile/abc-123/analytics-status/recheck")).toEqual({ ok: false, status: 0, error: "path not allowlisted" });
+    expect(await client.get("/api/v3/admin/profile/abc-123/analytics")).toEqual({ ok: false, status: 0, error: "path not allowlisted" });
+  });
+
   it("allows the credit-requests LIST path but blocks the per-item path (the approve/write surface)", async () => {
     vi.mocked(http.post).mockResolvedValue(makeLoginResponse("tok"));
     vi.mocked(http.get).mockResolvedValue({ ok: true, data: { data: { items: [] } } });

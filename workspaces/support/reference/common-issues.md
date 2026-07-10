@@ -166,7 +166,12 @@ data-integrity issue.
 
 2. Check the basics: analytics need an active Pro or Business plan with a seat assigned to the profile (see `faq.md`). If a subscription or seat is the issue, guide them to fix it in Settings.
 
-3. If subscription and seat are fine and the data still looks off or stale, treat it like any data-integrity issue: file `create_ticket` with `actionType: analytics-followup`, then tell the customer plainly you've flagged it and quote the SLA once (2 business days). New story, simple and honest: *"Analytics are running on our upgraded platform now. If yours still looks off, tell me what you're seeing and I'll take a closer look and flag it for our team."* Your reply uses escalation language, so the ticket call is atomic with it – see Rule 1.
+3. Call `profile_analytics_status` for the resolved profile. Use its structured status to decide the next move:
+   - `fresh`: answer from the profile/subscription/status evidence and ask for the exact track/platform/count if the customer's complaint is more specific than the profile-level status.
+   - `delayed` or `initializing`: explain that data is still processing. Do not quote exact refresh timing.
+   - `missing`, `stale`, or `inconsistent`: file `create_ticket` with `actionType: analytics-followup`.
+
+4. If subscription and seat are fine and the data still looks off or stale, treat it like any data-integrity issue: file `create_ticket` with `actionType: analytics-followup`, then tell the customer plainly you've flagged it and quote the SLA once (2 business days). New story, simple and honest: *"Analytics are running on our upgraded platform now. If yours still looks off, tell me what you're seeing and I'll take a closer look and flag it for our team."* Your reply uses escalation language, so the ticket call is atomic with it – see Rule 1.
 
    Collect enough detail for the team in the same turn whenever the customer has
    it: Muso profile link, affected track or release links, source platform links,

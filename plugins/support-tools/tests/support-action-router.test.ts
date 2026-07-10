@@ -62,6 +62,25 @@ describe("support_action_router", () => {
     });
   });
 
+  it("routes analytics complaints through the live analytics status resolver", async () => {
+    const start = await call({ intent: "analytics_data_complaint" });
+    expect(start.ok).toBe(true);
+    expect(start.availability).toBe("live");
+    expect(start.live_tools.read).toEqual(["profile_status", "subscription_status", "profile_analytics_status"]);
+    expect(start.planned_tools).toEqual(["track_analytics_status", "analytics_refresh_request", "analytics_recheck"]);
+    expect(start.next).toMatchObject({
+      outcome: "call_tool",
+      tool: "profile_status",
+    });
+
+    const readOk = await call({ intent: "analytics_data_complaint", state: "read_ok" });
+    expect(readOk.next).toMatchObject({
+      outcome: "call_tool",
+      tool: "profile_analytics_status",
+    });
+    expect(readOk.handoff_when).toContain("profile_analytics_status reports missing, stale, or inconsistent analytics");
+  });
+
   it("turns refused self-service duplicate merges into profile-merge handoff packets", async () => {
     const out = await call({ intent: "profile_duplicates", state: "tool_refused" });
     expect(out.next).toMatchObject({
