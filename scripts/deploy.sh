@@ -51,7 +51,7 @@ source "$SCRIPT_DIR/lib/deploy-lock.sh"
 # skills-all/muso-cli skill). Independent release cadence from openclaw;
 # bump deliberately. Installed from the repo's GitHub Release with
 # checksum verification (install_muso below) — never a bare latest.
-MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.8.0}"
+MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.9.0}"
 
 # Detect if we're running on Node 8 (the HYDRA host)
 if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; then
