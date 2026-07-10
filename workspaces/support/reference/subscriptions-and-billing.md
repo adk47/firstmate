@@ -106,15 +106,18 @@ Step-by-step instructions for the most common subscription actions.
 6. Your credits and profile data are never deleted – those are free features
 
 ### If you can't find the cancellation option
-If the Cancel control isn't where you expect, the team can cancel it for you, so
-the customer doesn't have to keep hunting for it. This usually comes up when:
-- Settings shows no Billing or Subscription section
-- The customer can't sign in to the account
+If the Cancel control isn't where you expect, Caroline can cancel it directly in
+the conversation (the `refund-retention` flow ends with `cancel_subscription`: a
+period-end cancel of the account's own workspace, anchored to the verified
+contact email), so the customer doesn't have to keep hunting for it. Cases where
+the direct cancel does NOT work and the team handles it instead:
 - The subscription was set up through a third party (for example, an app store)
-- The account email needs to be changed first
+- The workspace can't be resolved from the contact email (wrong or changed
+  email, or several workspaces on the same email)
+- The tool answers `disabled` or routes to a human
 
-In any of these cases, ask the customer to send their account email and their
-Muso profile link here in support, and the team will locate the subscription and
+In those cases, ask the customer to send their account email and their Muso
+profile link here in support, and the team will locate the subscription and
 handle the cancellation.
 
 ### If a customer was charged after trying to cancel

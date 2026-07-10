@@ -20,7 +20,10 @@
       "credits_verify",
       "profiles_consolidate",
       "founding_status",
-      "founding_buyback_link"
+      "founding_buyback_link",
+      "retention_offer_check",
+      "retention_offer_apply",
+      "cancel_subscription"
     ]
   },
   "configSchema": {
@@ -41,6 +44,12 @@
       },
       "foundingBuybackEnabled": {
         "description": "Dark-ship flag for founding_buyback_link (mints the founding buy-back Stripe Checkout link via muso-cli; founding_status stays ungated read-only). Accepts true / \"true\" / \"1\" / 1; anything else (including absent) keeps the mint disabled and returning a no-op sentinel. Same fail-closed runtime parse as creditVerificationEnabled."
+      },
+      "retentionOfferEnabled": {
+        "description": "Dark-ship flag for retention_offer_apply (gated WRITE: apply the product's own cancel-flow retention discount to the customer's OWN subscription via muso-cli; retention_offer_check stays ungated read-only). Accepts true / \"true\" / \"1\" / 1; anything else (including absent) keeps the apply disabled and returning a no-op sentinel. Same fail-closed runtime parse as creditVerificationEnabled."
+      },
+      "cancelSubscriptionEnabled": {
+        "description": "Dark-ship flag for cancel_subscription (gated dangerous-tier WRITE: period-end cancel of the customer's OWN subscription via muso-cli; no money moves — refunds stay on the Operations path). Accepts true / \"true\" / \"1\" / 1; anything else (including absent) keeps the cancel disabled and returning a no-op sentinel. Same fail-closed runtime parse as creditVerificationEnabled."
       }
     }
   }

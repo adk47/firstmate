@@ -19,6 +19,11 @@ import { createCreditsVerifyTool, DEFAULT_CREDITS_VERIFY_SCRIPT } from "./tools/
 import { createProfilesConsolidateTool, DEFAULT_PROFILES_CONSOLIDATE_SCRIPT } from "./tools/profiles-consolidate.js";
 import { createIntercomReader } from "./intercom-client.js";
 import { createFoundingStatusTool, createFoundingBuybackTool } from "./tools/founding-buyback.js";
+import {
+  createRetentionOfferCheckTool,
+  createRetentionOfferApplyTool,
+  createCancelSubscriptionTool,
+} from "./tools/subscription-retention.js";
 import { createSupportActionRouterTool } from "./tools/support-action-router.js";
 export default definePluginEntry({
   id: "support-tools",
@@ -237,6 +242,41 @@ export default definePluginEntry({
     });
     api.registerTool((ctx: any) => createFoundingStatusTool(foundingDeps(ctx)), { name: "founding_status" });
     api.registerTool((ctx: any) => createFoundingBuybackTool(foundingDeps(ctx)), { name: "founding_buyback_link" });
+
+    // retention_offer_check / retention_offer_apply / cancel_subscription —
+    // the refund-retention trio (the product's own 50% cancel-flow save +
+    // the app's period-end cancel), same anti-spoof anchor and
+    // execFile-the-muso-CLI transport as the founding pair. The CLI
+    // re-anchors server-side (exact workspace-email match) and its policy
+    // gate audits both writes; the coupon is resolved server-side so neither
+    // the model nor this plugin can choose one. Refunds are deliberately NOT
+    // here — money out stays on the gated Operations path. Both WRITES carry
+    // dark-ship flags (default OFF); the check is read-only and ungated.
+    const retentionOfferRaw =
+      [_entry.retentionOfferEnabled, _legacy.retentionOfferEnabled].find(
+        (v) => typeof v === "boolean" || typeof v === "string" || typeof v === "number",
+      ) ?? process.env.RETENTION_OFFER_ENABLED;
+    const retentionOfferEnabled =
+      retentionOfferRaw === true || retentionOfferRaw === 1 || retentionOfferRaw === "true" || retentionOfferRaw === "1";
+    const cancelSubscriptionRaw =
+      [_entry.cancelSubscriptionEnabled, _legacy.cancelSubscriptionEnabled].find(
+        (v) => typeof v === "boolean" || typeof v === "string" || typeof v === "number",
+      ) ?? process.env.CANCEL_SUBSCRIPTION_ENABLED;
+    const cancelSubscriptionEnabled =
+      cancelSubscriptionRaw === true || cancelSubscriptionRaw === 1 || cancelSubscriptionRaw === "true" || cancelSubscriptionRaw === "1";
+    const subscriptionRetentionDeps = (ctx: any) => ({
+      rateLimiter,
+      // Anti-spoof anchor: the trusted gateway session KEY (carries the convId),
+      // NOT ctx.sessionId (an ephemeral UUID that never matches). See deriveConvId.
+      sessionKey: ctx.sessionKey ?? "unknown",
+      intercomReader,
+      intercomToken,
+      retentionOfferEnabled,
+      cancelSubscriptionEnabled,
+    });
+    api.registerTool((ctx: any) => createRetentionOfferCheckTool(subscriptionRetentionDeps(ctx)), { name: "retention_offer_check" });
+    api.registerTool((ctx: any) => createRetentionOfferApplyTool(subscriptionRetentionDeps(ctx)), { name: "retention_offer_apply" });
+    api.registerTool((ctx: any) => createCancelSubscriptionTool(subscriptionRetentionDeps(ctx)), { name: "cancel_subscription" });
 
     // credit_verification_check — read-only lookup of a customer's
     // user_verification_needed credits, anchored to the verified Intercom

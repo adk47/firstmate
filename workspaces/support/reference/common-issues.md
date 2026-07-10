@@ -11,12 +11,13 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
 **Resolution path:**
 1. Confirm the action they want
    - If upgrading: direct to Settings > subscription > select new plan. Takes effect immediately.
-   - If cancelling: direct to Settings > subscription > cancel. Access continues until billing period ends. Credits and profile data are never deleted.
+   - **If cancelling (they want out, not just asking how)**: the `refund-retention` skill takes precedence – run its retention flow (50% save, free-plan fallback), and if they still want out Caroline cancels in-chat via `cancel_subscription` (period end; access continues until the billing period ends; credits and profile data are never deleted). Handle via Row #9's flow.
+   - If asking how to cancel (informational): direct to Settings > subscription > cancel. Access continues until billing period ends.
    - If downgrading (Pro to Lite): same as cancel – access to paid features ends at period end.
-   - **If they also mention wanting a refund** ("cancel and refund it", "cancel and get my money back"): stop – the `refund-retention` skill takes precedence. Handle via Row #9, not here.
+   - **If they also mention wanting a refund** ("cancel and refund it", "cancel and get my money back"): the `refund-retention` skill takes precedence. Handle via Row #9, not here.
 2. If they can't find the setting in the app:
-   - Walk them through Settings > Billing or Subscription section
-3. **Escalate:** If they're unable to make the change after following the steps, create a ticket with category "Billing – Self-Service Failure". SLA: 1 business day.
+   - Walk them through Settings > Billing or Subscription section, or – if they've clearly asked to cancel – run the Row #9 flow and cancel for them.
+3. **Escalate:** If they're unable to make the change after following the steps (and it isn't a cancel Caroline can do herself), create a ticket with category "Billing – Self-Service Failure". SLA: 1 business day.
 
 ---
 
@@ -233,18 +234,20 @@ If the tool call did not succeed, do not say you escalated. Either retry the too
 
 ---
 
-## 9. Refund request
+## 9. Refund or cancellation request
 
-**Customer says:** "I want a refund." (or any refund signal – "money back", "cancel and refund it", "this isn't worth what I paid")
+**Customer says:** "I want a refund." / "Cancel my subscription." (or any exit signal – "money back", "cancel and refund it", "this isn't worth what I paid")
 
-The `refund-retention` skill governs this ENTIRE flow – run it FIRST (SOUL.md wires it in as mandatory). Do NOT just ask "why?" once and escalate: that skips the retention gates and, most importantly, the free-plan save. A refund ticket is the LAST step, not the first.
+The `refund-retention` skill governs this ENTIRE flow – run it FIRST (SOUL.md wires it in as mandatory). Do NOT just ask "why?" once and escalate: that skips the retention gates and the saves. A refund ticket or a cancel is the LAST step, not the first.
 
 **Resolution path:**
-1. Run the `refund-retention` 3-gate flow (`skills/refund-retention/SKILL.md`), keeping a visible exit to the refund in every message:
+1. Run the `refund-retention` 3-gate flow (`skills/refund-retention/SKILL.md`), keeping a visible exit in every message:
    - **Diagnose** – ask what's not working and categorize the reason.
-   - **Help (reason-matched)** – the primary save is the **free Lite plan**: "you'd keep everything you've built – credits, profile, the works – you'd just lose the analytics and audit tools." Offer it as soon as the reason is clear; don't hold it for the last gate.
-   - **Last alternative** – offer the free-plan downgrade once more before escalating.
-2. Only if the customer still wants out after the gates: hand off to the `action-request` skill with `subscription-refund` (Tier 3), including the `retention_context` block. Quote the SLA the ticket response returns (per the skill's handoff) – do NOT promise a fixed turnaround here.
+   - **Help (reason-matched)** – the primary save is the **50% retention offer** (the same one the in-app cancel flow gives): run `retention_offer_check` and, if eligible, offer it with the returned wording; apply on acceptance via `retention_offer_apply`. The fallback is the **free Lite plan**: "you'd keep everything you've built – credits, profile, the works – you'd just lose the analytics and audit tools." Offer a save as soon as the reason is clear; don't hold it for the last gate.
+   - **Last alternative** – one final save (whichever hasn't been offered) before the exit.
+2. If the customer still wants out, ASK which exit they want:
+   - **Cancel only** – Caroline cancels in-chat via `cancel_subscription` (period end: access runs to the end of the paid period, no money moves). Quote the returned `access_until` date. No ticket.
+   - **Refund** – hand off to the `action-request` skill with `subscription-refund` (Tier 3), including the `retention_context` block. Quote the SLA the ticket response returns (per the skill's handoff) – do NOT promise a fixed turnaround here. Operations reviews, and handles the cancel together with the refund.
 3. There is no self-service refund path, and Caroline never processes the refund herself – Operations reviews and executes it.
 
 **Billing-issue exception:** charged twice / wrong amount / charged after cancel is NOT a retention case – it follows the `billing-issue` path inside the skill (Gate 2 files a Tier-2 billing ticket), not the refund gates.

@@ -1,6 +1,6 @@
 ---
 name: refund-retention
-description: 3-gate retention flow before escalating refund requests to Operations
+description: 3-gate retention flow (50% save, free-plan fallback) before cancelling or escalating a refund
 triggers:
   - "refund"
   - "money back"
@@ -10,31 +10,33 @@ triggers:
   - "cancel and get money"
   - "I want a refund"
   - "how do I get a refund"
-prerequisite_for: action-request (subscription-refund type only)
+  - "cancel my subscription"
+  - "want to cancel"
+prerequisite_for: action-request (subscription-refund type only) and cancel_subscription
 ---
 
 # Refund Retention
 
 ## Purpose
 
-When a customer requests a refund, Caroline runs this 3-gate retention flow BEFORE creating a `subscription-refund` action-request ticket. The goal is to understand the real problem and try to help – many refund requests come from users who don't know how to use the platform, not from users who genuinely want out.
+When a customer wants out – a refund request OR a cancellation request – Caroline runs this 3-gate retention flow BEFORE cancelling anything or creating a `subscription-refund` action-request ticket. The goal is to understand the real problem and try to help – many exit requests come from users who don't know how to use the platform, not from users who genuinely want out. The primary save is the SAME 50% retention discount the in-app cancel flow offers; the free Lite plan is the fallback.
 
-**This skill does NOT add any new tools.** It uses the existing 5 tools (profile_lookup, credits_search, subscription_status, create_ticket, profile_status) and the reference knowledge base.
+**Tools this flow uses:** profile_lookup, credits_search, subscription_status, profile_status, create_ticket, plus the retention trio – `retention_offer_check` (read: is the 50% save available, and with what wording), `retention_offer_apply` (apply it once the customer accepts), and `cancel_subscription` (period-end cancel once retention is exhausted and the customer confirms).
 
 ## When to Activate
 
-Activate when the customer's message matches any refund-related intent: requesting a refund, asking how to get their money back, complaining about being charged, or asking about refund policy in a way that signals they want one.
+Activate when the customer's message matches any exit intent: requesting a refund, asking to cancel their subscription (with or without refund), asking how to get their money back, or complaining about being charged in a way that signals they want out.
 
 Do NOT activate for:
-- General questions about refund policy ("what's your refund policy?") – answer from reference files
-- Cancellation without refund mention ("how do I cancel?") – answer from reference files
-- Billing questions without refund intent ("why was I charged $X?") – handle normally
+- General questions about refund/cancellation policy ("what's your refund policy?", "how do I cancel?" asked informationally) – answer from reference files; self-service in Settings remains the standard answer
+- Billing questions without exit intent ("why was I charged $X?") – handle normally
 
 ## Core Rules
 
 - **Max 3 gates** – if the customer says "just give me the refund", "I don't want help", "skip this", or any clear signal they want to proceed, skip ALL remaining gates and go straight to the action-request skill
-- **Exit always visible** – every gate message must include a path to proceed with the refund
-- **Always offer the free-plan save before escalating** – never hand off to the `subscription-refund` action-request without having offered the free Lite-plan downgrade at least once. The free plan is Caroline's primary retention lever – surface it as soon as the reason is clear, not only at the last gate. Two exceptions: `billing-issue` (which routes to a Tier-2 billing ticket, not a refund), and a customer who invokes the skip path above ("just give me the refund" / declines help) – honor that immediately; never withhold the exit to force the offer.
+- **Exit always visible** – every gate message must include a path to proceed with the cancellation or refund
+- **Always offer a save before cancelling or escalating** – never cancel and never hand off to the `subscription-refund` action-request without having offered at least one save. The save hierarchy: (1) the **50% retention discount** – run `retention_offer_check` as soon as exit intent is clear and, if eligible, offer it using the returned wording; (2) the **free Lite plan** – the fallback when the offer is ineligible or declined. Surface the save as soon as the reason is clear, not only at the last gate. Two exceptions: `billing-issue` (which routes to a Tier-2 billing ticket, not a refund), and a customer who invokes the skip path above ("just give me the refund" / declines help) – honor that immediately; never withhold the exit to force an offer.
+- **One offer, once** – offer the 50% save at most once per conversation. If the customer declines it, do not re-pitch it at a later gate; move to the free-plan fallback or the exit.
 - **Never** guilt-trip, pressure, argue, block, or make the customer feel trapped
 - **Tone** stays chill and helpful – this is a conversation, not a script
 - **Max 5 back-and-forth pairs** for the entire flow (1 pair = 1 Caroline message + 1 customer response)
@@ -87,13 +89,16 @@ This is the highest-value retention path. The customer likely doesn't understand
 ### If `too-expensive`:
 
 1. Acknowledge the concern
-2. Mention that Muso has a free Lite plan that keeps:
+2. Run `retention_offer_check`. If `eligible` is true, lead with the 50% save, quoting the RETURNED `offer.description` verbatim (never a figure you computed):
+   > "Before you go – I can apply a one-time offer to your subscription: [offer.description]. Same plan, same everything, just cheaper. Want me to apply it?"
+3. If the customer accepts: call `retention_offer_apply` with `confirm: true`, then confirm using the returned description: *"Done – [offer.description] is applied to your subscription. It'll show on your next invoice."* Conversation saved – no cancel, no ticket.
+4. If ineligible (`offer` null), or the customer declines: fall back to the free Lite plan, which keeps:
    - All credits and profile data
    - Profile page management
    - Company page access
    - Notifications
-3. What Lite loses: Analytics, Catalog Audits, Discography Playlists, Milestones & Charts
-4. Ask: "Would switching to the free plan work for you? You'd keep everything you've built – credits, profile, the works – you'd just lose the analytics and audit tools."
+   What Lite loses: Analytics, Catalog Audits, Discography Playlists, Milestones & Charts.
+   Ask: "Would switching to the free plan work for you? You'd keep everything you've built – credits, profile, the works – you'd just lose the analytics and audit tools."
 5. Reference `products-and-pricing.md` and `subscriptions-and-billing.md` for accurate plan details
 
 ### If `missing-feature`:
@@ -123,19 +128,31 @@ This is the highest-value retention path. The customer likely doesn't understand
 
 ## Gate 3: Last Alternative
 
-**Goal:** Offer one final alternative before creating the refund ticket.
+**Goal:** Offer one final alternative before the exit.
 
 Only reach this gate if:
 - Gate 2 did not resolve the issue
-- The customer still wants a refund
+- The customer still wants out
 - The reason was NOT `billing-issue` (those go through billing-issue tickets)
 
-Say something like:
-> "Totally understand. Just so you know, you can switch to the free Lite plan anytime – you'd keep all your credits and profile, just lose the analytics and audit tools. If you'd rather go with the refund, I'll get that over to the team right now."
+If the 50% save has NOT been offered yet this conversation (e.g. the reason was `not-using-it` or `other`), run `retention_offer_check` and, if eligible, offer it now (quote the returned `offer.description`). Otherwise say something like:
+> "Totally understand. Just so you know, you can switch to the free Lite plan anytime – you'd keep all your credits and profile, just lose the analytics and audit tools. If you'd rather go ahead, I can sort that out for you right now."
 
 If the customer:
+- **Accepts the 50% offer**: `retention_offer_apply` with `confirm: true` – conversation saved.
 - **Wants Lite downgrade**: Help them understand how (account settings). Conversation resolved – no ticket needed.
-- **Wants the refund**: Proceed to action-request skill with retention context (see below).
+- **Still wants out**: Proceed to the exit step below.
+
+---
+
+## Exit: Cancel or Refund (ask which)
+
+Retention is exhausted. Ask the customer plainly what they want – never assume:
+> "No problem at all. Do you want me to cancel the subscription (you keep access until the end of what you've paid for), or are you asking for a refund as well?"
+
+- **Cancel only**: call `cancel_subscription` with `confirm: true` – but ONLY after the customer has explicitly said in this conversation that they want to cancel. It cancels at period end: quote the returned `access_until` date – *"Done – your subscription is cancelled. You keep full access until [access_until], and you won't be charged again. Your credits and profile stay, always."* No ticket needed. If the tool answers `disabled` or `route_to_human`, fall back to guiding them to Settings > Billing and flag for the team if they cannot self-serve.
+- **Refund (with its cancel)**: proceed to the `action-request` skill with action type `subscription-refund` (Tier 3) and the retention context below. Do NOT call `cancel_subscription` yourself on this branch – Operations handles cancel-and-refund together so the money and the access end at the same time.
+- **Unclear answer**: ask once more; if still unclear, treat it as refund intent (the safer read – it escalates to a human instead of mutating anything).
 
 ---
 
@@ -160,6 +177,7 @@ Never use the words "ticket", "ClickUp", "task", or `support@muso.ai` in the cus
   "reason_detail": "[1-2 sentence summary of what the customer said]",
   "gates_completed": [1-3],
   "exchange_count": [number of back-and-forth pairs in the retention flow],
+  "offer_extended": [true if the 50% retention offer was offered this conversation, false if ineligible or never reached],
   "outcome": "refund_requested"
 }
 ```
@@ -173,6 +191,7 @@ If the customer skipped gates (said "just give me the refund" early):
   "reason_detail": "Customer declined retention flow",
   "gates_completed": [number completed before skip],
   "exchange_count": [number of back-and-forth pairs],
+  "offer_extended": [true if the 50% retention offer was offered before the skip, else false],
   "outcome": "refund_requested_skipped_gates"
 }
 ```
@@ -183,9 +202,9 @@ This context helps Operations/Jan understand why the customer wants out and whet
 
 ## What This Skill Does NOT Do
 
-- Does not process refunds (that's Operations)
-- Does not modify subscriptions (Caroline has no write tools)
-- Does not offer discounts or credits (not available)
+- Does not process refunds (that's Operations – Caroline files the Tier-3 ticket)
+- Does not choose or invent discounts – the ONLY discount is the server-resolved retention offer (`retention_offer_apply`); never promise a percentage or amount the tools did not return
+- Does not cancel immediately or mid-period – `cancel_subscription` is period-end only; immediate termination and cancel-with-refund are Operations
 - Does not pause subscriptions (not available)
-- Does not block or delay refund requests – the exit is always visible
+- Does not block or delay cancellations or refund requests – the exit is always visible
 - Does not change any behavior for non-refund action requests

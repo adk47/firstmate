@@ -49,14 +49,14 @@ const BuybackParameters = Type.Object({
 });
 type BuybackParams = Static<typeof BuybackParameters>;
 
-type ExecFileLike = (
+export type ExecFileLike = (
   file: string,
   args: readonly string[],
   options: { timeout?: number; maxBuffer?: number },
   callback: (err: unknown, stdout: string, stderr: string) => void,
 ) => unknown;
 
-function execFileToPromise(fn: ExecFileLike) {
+export function execFileToPromise(fn: ExecFileLike) {
   return (file: string, args: readonly string[], options: { timeout?: number; maxBuffer?: number }) =>
     new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
       fn(file, args, options, (err, stdout, stderr) => {
@@ -119,8 +119,9 @@ export function mapFoundingCliError(stderr: string): { reason: string; route_to_
 }
 
 // verifiedAuthorEmail derives the trusted contact email from the conversation
-// (fail-closed on every unverifiable path), shared by both tools.
-async function verifiedAuthorEmail(
+// (fail-closed on every unverifiable path), shared by both tools (and the
+// subscription-retention tools, which anchor identically).
+export async function verifiedAuthorEmail(
   deps: Pick<FoundingDeps, "sessionKey" | "intercomReader" | "intercomToken">,
 ): Promise<{ email: string } | { fail: AgentToolResult<unknown> }> {
   const convId = deriveConvId(deps.sessionKey);

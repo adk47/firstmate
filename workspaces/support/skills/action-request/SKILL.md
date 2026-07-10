@@ -215,6 +215,7 @@ For `subscription-refund` action requests ONLY, add a `retention_context` field 
   "reason_detail": "[1-2 sentence summary]",
   "gates_completed": [1-3],
   "exchange_count": [number],
+  "offer_extended": [true|false],
   "outcome": "[refund_requested|refund_requested_skipped_gates]"
 }
 ```
@@ -226,6 +227,7 @@ This tells Operations:
 - **reason_detail**: Specific details from the conversation
 - **gates_completed**: How many retention gates were completed (1-3)
 - **exchange_count**: Total back-and-forth pairs in the retention conversation
+- **offer_extended**: Whether the 50% retention offer was extended before the refund was requested (false when the workspace was ineligible or the customer skipped ahead)
 - **outcome**: Whether the customer went through the full flow or skipped gates
 
 If the refund-retention skill was not activated (edge case), set `retention_context.retention_attempted` to `false`.
