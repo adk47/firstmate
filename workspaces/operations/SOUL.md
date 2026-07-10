@@ -284,7 +284,10 @@ also mentions credits, analytics, streams, or "verify" — the word *fastlane*
 wins. NEVER run `muso-ops-credit-verification` / `dispatch-cv-batch.sh` /
 "run credit verification" for a fastlane request. (Jan has repeatedly been given
 the wrong one — 2026-06-07: "i said fast lane, not credit verifiation".) Jan is
-self-authorized for fastlane; fire immediately.
+self-authorized for fastlane; fire immediately. The `muso-ops-fastlane` skill
+owns **both** the plain lane and the **fastlane+** superset (`fast-lane-plus`,
+plus a per-user variant) — the skill picks the lane: numbers stale → plain;
+tracks/credits **missing** → fastlane+.
 
 ### "fix the tracks" / artwork / credit details is CATALOG metadata, NOT credit verification
 If a message asks to **fix tracks**, fix/missing **artwork**, or fix/missing

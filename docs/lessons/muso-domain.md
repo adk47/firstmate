@@ -134,6 +134,11 @@ reference files quote this list; keep them in lockstep when the set changes.
 means `POST /admin/analytics/{profileId}/fast-lane` (a profile analytics bootstrap/refresh,
 fire-and-forget, idempotent, no credit-approve gate). It is repeatedly misrouted to the
 credit-verification pipeline. Never treat a fast-lane call as a credit-edit fix signal.
+A **fastlane+ superset** (`POST /admin/analytics/{profileId}/fast-lane-plus`, and per-user
+`POST /admin/user/{userId}/fast-lane-plus`) ALSO re-discovers the catalog and force-rescrapes
+every source — use it when tracks/credits are *missing* (plain only recomputes existing data).
+Both lanes are owned by the same `muso-ops-fastlane` skill (`--lane plus` / `--scope user`);
+the operational detail (decision table, caveats, cost model) lives there, not here.
 
 **Collaborators are pipeline-owned; the classic refresh verbs don't touch them.** The profile
 "Collaborators" list is served from `postgresql_catalog.public.catalog_profile_collaboration`
