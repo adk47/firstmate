@@ -192,6 +192,12 @@ OAuth-route regression — can't un-pin codex) AND #90575 (no native cross-proce
 shared-credential store — the 6.5 auth→SQLite migration kills the symlink fabric with nothing
 to replace it). Revisit the 6.10 jump only when BOTH close. The 6.5 auth→SQLite migration is
 ALSO one-way (cold SQLite state-archive required for rollback, not the JSON).
+**Third gate (added 2026-07-13):** before ANY bump, also verify the edge lane-wedge fix landed
+upstream — #97538/#92270 (`abort_embedded_run … released=0` leaks the lane owner lock and
+discards Caroline's generated reply; fix PR #90308 unmerged as of 2026-07-01). Our mitigations
+(dispatch timeout + stuck-lane watchdog, PR #616; per-conv dispatch coalescing, PR #668) paper
+over it but the bug is upstream — a bump that doesn't include the fix buys nothing here, and
+one that does lets us consider retiring the coalescing layer.
 
 ## Each gateway MUST pin `OPENCLAW_STATE_DIR` to its own profile
 
