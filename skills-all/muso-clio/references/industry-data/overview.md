@@ -32,7 +32,7 @@ FastAPI /api/v1
 #### Stores, Models, and Patterns
 - MongoDB Atlas (raw, catalog, dict collections) via MongoEngine
 - Aurora/PostgreSQL (stats, catalog, olap schemas) via SQLAlchemy
-- Soft deletes (`deleted_timestamp`), merge tracking (`merged_to_id`), and source priority resolution
+- Soft deletes (`deleted.is_deleted` / `deleted.deleted_timestamp` embedded subdoc), merge tracking (`merged_to_id`), and source priority resolution
 
 #### API (FastAPI)
 - Core endpoints: `/api/v1/profile/{id}`, `/api/v1/track/{id}`, `/api/v1/album/{id}`, `/api/v1/search`, `/api/v1/stats`, `/health`

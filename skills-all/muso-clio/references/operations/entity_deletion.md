@@ -11,24 +11,62 @@ Source: KT 2026-01-20 (Oleg Mamchich)
 
 ## Deletion Fields
 
+**⚠️ Field path: deletion state lives under the `deleted` EMBEDDED SUBDOC —
+never at the top level of the document.** Every collection (raw_* and
+catalog_*) inherits `deleted = EmbeddedDocumentField(Deleted)` from
+`industry-data-processing/db/collections/base.py`; the `Deleted` / `ActionBy`
+embedded documents are `db/collections/common/deleted.py` and
+`db/collections/common/action_by.py`.
+
+Reading top-level `is_deleted` / `deleted_timestamp` / `deleted_by` on a
+`catalog_profile` doc returns null/missing for EVERY profile — deleted or not.
+That exact mistake made an ops-deleted profile read as "not deleted" and
+produced a false "profile resurrection" claim in the 2026-07 systemic-data-issue
+report (task #200 RCA). Always read/query `deleted.is_deleted`,
+`deleted.deleted_timestamp`, `deleted.deleted_by.*`.
+
 When an entity is deleted, these fields are set:
 
 ```javascript
 {
-  "is_deleted": true,
-  "deleted_timestamp": ISODate("2026-01-20T..."),
-  "deleted_by": {
-    "type": "operations",    // or "system", "user"
-    "subtype": "task_id_here"
+  "deleted": {
+    "is_deleted": true,
+    "deleted_timestamp": ISODate("2026-01-20T..."),
+    "deleted_by": {
+      "id": "jan@muso.ai",       // actor: ops email, admin/user id, or raw source
+      "type": "operations",      // enum: "operations" | "user" | "raw"
+      "sub_type": "clio"         // e.g. "retool", "clio", "backend", "clickup", a task id
+    }
   }
 }
 ```
 
-| Type | Meaning |
+Query examples:
+
+```javascript
+// mongosh / pymongo — is this profile deleted?
+db.catalog_profile.findOne({ _id: "UUID" }, { deleted: 1, name: 1 })
+// deleted iff doc.deleted && doc.deleted.is_deleted === true
+
+// all ops-deleted, non-merged profiles
+db.catalog_profile.find({
+  "deleted.is_deleted": true,
+  "deleted.deleted_by.type": "operations",
+  "merged": { "$exists": false }
+})
+```
+
+```python
+# mongoengine
+CatalogProfile.objects(deleted__is_deleted=True,
+                       deleted__deleted_by__type="operations")
+```
+
+| `deleted_by.type` | Meaning |
 |------|---------|
-| `operations` | Admin action (via Retool or script) |
-| `system` | Automated process (pipeline rule) |
+| `operations` | Admin action (via Retool, Clio, or backend script) |
 | `user` | User-initiated action |
+| `raw` | Raw-source-driven (pipeline cascade) |
 
 ---
 
@@ -64,13 +102,19 @@ def delete_profile(profile_id, task_id):
         "id": f"muso:profile:{profile_id}"
     })
 
-    # 2. Mark Muso profile as deleted
+    # 2. Mark Muso profile as deleted. The actor payload key is `action_by`
+    #    (NOT `deleted_by`) with fields id / type / sub_type — the IDP raw
+    #    parser reads data["action_by"] and maps them onto the ActionBy
+    #    embedded doc (parsers/muso_parser.py `parse_action_by`). A legacy
+    #    `deleted_by`/`subtype` payload is silently ignored and the
+    #    tombstone loses actor + task attribution.
     send_message({
         "action": "delete",
         "raw_id": f"muso:profile:{profile_id}",
-        "deleted_by": {
+        "action_by": {
+            "id": "ops-user@muso.ai",   # who performed the deletion
             "type": "operations",
-            "subtype": task_id
+            "sub_type": task_id          # e.g. clickup task id / "retool" / "clio"
         }
     })
 ```
@@ -128,12 +172,12 @@ This may automatically undelete if the sync logic determines entity should exist
 ### Step 2: Manual Database Fix (if sync fails)
 
 ```javascript
-// 1. Fix raw collection
+// 1. Fix raw collection (deleted.* subdoc paths — NOT top-level)
 db.raw_profile.updateOne(
   { _id: "muso:profile:UUID" },
   {
-    $set: { is_deleted: false },
-    $unset: { deleted_timestamp: "", deleted_by: "" }
+    $set: { "deleted.is_deleted": false },
+    $unset: { "deleted.deleted_timestamp": "", "deleted.deleted_by": "" }
   }
 )
 
@@ -147,11 +191,15 @@ db.raw_profile.updateOne(
 db.catalog_profile.updateOne(
   { _id: "UUID" },
   {
-    $set: { is_deleted: false },
-    $unset: { deleted_timestamp: "", deleted_by: "" }
+    $set: { "deleted.is_deleted": false },
+    $unset: { "deleted.deleted_timestamp": "", "deleted.deleted_by": "" }
   }
 )
 ```
+
+**Never** `$set` top-level `is_deleted` / `deleted_timestamp` / `deleted_by` —
+that creates phantom top-level fields the pipeline ignores, while the real
+`deleted.*` subdoc keeps its previous state.
 
 ---
 
@@ -167,7 +215,7 @@ db.catalog_profile.updateOne(
 
 When a credit (profile-track relationship) is deleted:
 
-1. Raw: `raw_recording_credit` marked `is_deleted: true`
+1. Raw: `raw_recording_credit` marked `deleted.is_deleted: true`
 2. Catalog: Profile hard-removed from track's `profiles` array
 3. Restoration: Undelete raw → sync → profile re-added to track
 
@@ -181,4 +229,6 @@ When a credit (profile-track relationship) is deleted:
 
 ---
 
-Last updated: 2026-01-31 (from KT 2026-01-20)
+Last updated: 2026-07-12 (deletion field paths corrected to the `deleted.*`
+embedded subdoc after the task #200 false-resurrection RCA; originally from
+KT 2026-01-20)

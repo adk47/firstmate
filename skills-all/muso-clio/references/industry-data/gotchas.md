@@ -59,17 +59,24 @@ def process_message(message, sqs, queue_url):
 
 ## Soft Delete Queries
 
-Always filter out soft-deleted documents:
+Always filter out soft-deleted documents. Deletion state lives under the
+`deleted` EMBEDDED SUBDOC (`db/collections/base.py` →
+`deleted = EmbeddedDocumentField(Deleted)`), **not** at the top level —
+top-level `is_deleted` / `deleted_timestamp` / `deleted_by` are always
+null/missing (that read produced the task #200 false "resurrection" alarm):
 
 ```python
 # WRONG - includes deleted profiles
 profiles = CatalogProfile.objects.all()
 
-# CORRECT - exclude deleted
+# WRONG - top-level field does not exist; matches EVERY doc
 profiles = CatalogProfile.objects(deleted_timestamp=None)
 
-# Or use the helper
-profiles = CatalogProfile.active()
+# CORRECT - exclude deleted via the deleted.* subdoc
+profiles = CatalogProfile.objects(deleted__is_deleted__ne=True)
+
+# CORRECT - raw pymongo predicate
+db.catalog_profile.find({"deleted.is_deleted": {"$ne": True}})
 ```
 
 ## Merge Tracking

@@ -195,7 +195,7 @@ Combining duplicate profiles:
 
 ### Soft Delete
 Marking records as deleted without removing:
-- `deleted_timestamp` field
+- `deleted` embedded subdoc: `deleted.is_deleted`, `deleted.deleted_timestamp`, `deleted.deleted_by` (never top-level fields)
 - Preserves data integrity
 - Enables recovery
 

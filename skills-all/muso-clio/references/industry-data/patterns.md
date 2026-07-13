@@ -89,22 +89,42 @@ class CatalogProcessor:
 
 ## Soft Delete Pattern
 
+**Source**: `industry-data-processing/db/collections/base.py` +
+`db/collections/common/deleted.py` / `action_by.py`
+
+All documents (raw_* and catalog_*) carry deletion state in the `deleted`
+**embedded subdoc** — never as top-level fields:
+
 ```python
-# All catalog documents support soft delete
-class CatalogProfile(Document):
-    # ... fields ...
+class ActionBy(EmbeddedDocument):
+    id = StringField()        # ops email / admin user id / raw source
+    type = EnumField(Type)    # "operations" | "user" | "raw"
+    sub_type = StringField()  # e.g. "retool", "clio", "backend"
+
+class Deleted(EmbeddedDocument):
+    is_deleted = BooleanField(default=False)
     deleted_timestamp = DateTimeField(default=None)
-    
-    @classmethod
-    def active(cls):
-        """Query only non-deleted documents."""
-        return cls.objects(deleted_timestamp=None)
-    
-    def soft_delete(self):
-        """Soft delete instead of hard delete."""
-        self.deleted_timestamp = datetime.utcnow()
-        self.save()
+    deleted_by = EmbeddedDocumentField(ActionBy)
+
+class BaseCollection(Document):
+    # ... fields ...
+    deleted = EmbeddedDocumentField(Deleted, default=Deleted)
 ```
+
+Query via the subdoc paths (`deleted.is_deleted`, `deleted.deleted_timestamp`,
+`deleted.deleted_by.*`):
+
+```python
+# non-deleted documents
+CatalogProfile.objects(deleted__is_deleted__ne=True)
+
+# raw pymongo
+db.catalog_profile.find({"deleted.is_deleted": {"$ne": True}})
+```
+
+Top-level `is_deleted` / `deleted_timestamp` / `deleted_by` reads return
+null for every doc and mis-classify deleted profiles as active
+(task #200 false-resurrection RCA, 2026-07).
 
 ## Source Priority Resolution
 
@@ -248,7 +268,7 @@ Source: KT meeting 2026-01-28
 
 ### Composite Index Pattern
 For sorted queries (e.g., credits by release date), indices must include:
-1. Filter fields (profile_id, deleted_timestamp)
+1. Filter fields (profile_id, deleted.is_deleted)
 2. Sort field (release_date)
 3. **ID as final field** (ensures consistent ordering)
 
@@ -256,7 +276,7 @@ For sorted queries (e.g., credits by release date), indices must include:
 meta = {
     'indexes': [
         # CORRECT - ID at end for consistent ordering
-        [('profile_id', 1), ('deleted_timestamp', 1), ('release_date', -1), ('_id', 1)],
+        [('profile_id', 1), ('deleted.is_deleted', 1), ('release_date', -1), ('_id', 1)],
     ]
 }
 ```
