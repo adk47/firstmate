@@ -43,7 +43,7 @@ import {
 } from "./attachments.js";
 import path from "node:path";
 import type { IntercomSessionState, IntercomWebhookPayload, KnownFacts, IntercomAccountConfig, EnrichmentState, KbSnippet } from "./types.js";
-import { DEFAULT_JUDGE_MIN_TURNS, DEFAULT_TURN_HARD_CAP, DEFAULT_JUDGE_MODEL } from "./types.js";
+import { DEFAULT_JUDGE_MIN_TURNS, DEFAULT_TURN_HARD_CAP, DEFAULT_JUDGE_MODEL, DEFAULT_DISPATCH_TIMEOUT_MS } from "./types.js";
 import { buildKbRetrieveFn, renderKnowledgeBaseBlock, stripKnowledgeBase } from "./kb-retrieval.js";
 
 // Module-level session store shared between startAccount (inbound) and sendText (outbound).
@@ -146,6 +146,73 @@ export function joinDeliveryChunks(chunks: string[]): string {
   if (filtered.length === 0) return "";
   if (filtered.length === 1) return filtered[0];
   return filtered.join("\n\n");
+}
+
+export interface DispatchRaceOutcome {
+  /** The dispatch did not settle within timeoutMs — the lane is likely wedged. */
+  timedOut: boolean;
+  /** The dispatch rejected (before the timeout) with this error, else null. */
+  threw: Error | null;
+}
+
+/**
+ * Await `dispatchPromise`, giving up after `timeoutMs`. Reports which failure (if
+ * any) occurred so the caller can page + skip the reply flush.
+ *
+ * WHY: the dispatch await in the webhook handler sits BEFORE the reply flush and
+ * the silent_dispatch alarm. When the runtime session lane wedges (upstream
+ * openclaw #97538 / #92270: overlapping embedded_run dispatches leak the lane
+ * owner lock; stuck-session recovery aborts with released=0 and discards the
+ * generated reply) that await NEVER settles, so without this bound the customer
+ * waits forever and nothing alarms. On timeout we surface `timedOut` → the caller
+ * pages #cs-escalations with reason `dispatch_timed_out` and posts nothing.
+ *
+ * A late-settling wedged dispatch is swallowed here (`.catch`), so it can neither
+ * raise an unhandled rejection nor double-deliver (the caller is already past its
+ * flush; a late `deliver` only pushes into an array that's never read again).
+ */
+export async function raceDispatchWithTimeout(
+  dispatchPromise: Promise<unknown>,
+  timeoutMs: number,
+): Promise<DispatchRaceOutcome> {
+  dispatchPromise.catch(() => {});
+  let timedOut = false;
+  let handle: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      dispatchPromise,
+      new Promise<never>((_resolve, reject) => {
+        handle = setTimeout(() => {
+          timedOut = true;
+          reject(new Error(`dispatch did not return within ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+    return { timedOut: false, threw: null };
+  } catch (err) {
+    if (timedOut) return { timedOut: true, threw: null };
+    return { timedOut: false, threw: err instanceof Error ? err : new Error(String(err)) };
+  } finally {
+    if (handle) clearTimeout(handle);
+  }
+}
+
+/**
+ * Enforce the timeout contract on the reply buffer: a wedge can strike
+ * MID-generation, so chunks may have landed before the dispatch stopped
+ * settling. The contract is "post NOTHING and page" — anything buffered is
+ * partial output and must never reach the customer. Clears the buffer in
+ * place (the flush below sees zero chunks and skips) and returns how many
+ * chunks were discarded so the caller can log it.
+ */
+export function discardBufferedChunksOnTimeout(
+  bufferedChunks: string[],
+  timedOut: boolean,
+): number {
+  if (!timedOut || bufferedChunks.length === 0) return 0;
+  const discarded = bufferedChunks.length;
+  bufferedChunks.length = 0;
+  return discarded;
 }
 
 // Strip our own delimiter markers from inbound customer text before injecting
@@ -569,6 +636,7 @@ export const intercomPlugin = createChatChannelPlugin({
                     const bufferedChunks: string[] = [];
                     let droppedMidStream = false;
                     let dispatchThrew: Error | null = null;
+                    let dispatchTimedOut = false;
 
                     // If the customer attached images and/or PDFs, fetch them
                     // NOW (Intercom CDN URLs are signed with ~30 min TTL) and
@@ -670,8 +738,18 @@ export const intercomPlugin = createChatChannelPlugin({
                         ? `(Customer sent ${documentRefs.length > 0 ? "a document/attachment" : persisted.length === 1 ? "an image" : `${persisted.length} images`} with no caption.)`
                         : result.body;
 
-                    try {
-                    await dispatchInboundDirectDmWithRuntime({
+                    // Race the dispatch against a bounded timeout. When the
+                    // session lane wedges (upstream openclaw #97538: rapid-fire
+                    // inbound spawns overlapping embedded_run dispatches, one leaks
+                    // the lane owner lock, later dispatches wedge and stuck-session
+                    // recovery aborts them with released=0 while DISCARDING the
+                    // generated reply), this await would otherwise NEVER settle —
+                    // and both the reply flush and the silent_dispatch alarm below
+                    // sit after it, so the customer would wait forever with zero
+                    // alerting. On timeout we set dispatchTimedOut, fall through,
+                    // post nothing, and page #cs-escalations below.
+                    const dispatchTimeoutMs = account.dispatchTimeoutMs ?? DEFAULT_DISPATCH_TIMEOUT_MS;
+                    const dispatchPromise = dispatchInboundDirectDmWithRuntime({
                       cfg,
                       runtime: { channel: runtime },
                       channel: "intercom",
@@ -740,13 +818,24 @@ export const intercomPlugin = createChatChannelPlugin({
                       onDispatchError: (err, info) =>
                         log?.error?.(`[${tag}] dispatch error (${info.kind}): ${err}`),
                     });
-                    } catch (err) {
-                      // dispatchInbound itself threw — gateway WS blip, route
-                      // resolution failure, recordInboundSession crash, etc.
-                      // Captured here so the silent-dispatch alarm below can
-                      // distinguish a thrown-dispatch from a zero-chunk one,
-                      // and so the alarm runs even if dispatch never returned.
-                      dispatchThrew = err instanceof Error ? err : new Error(String(err));
+                    // Bound the wedge: on timeout we page below and post nothing;
+                    // on a real throw we record it for the silent alarm. Either way
+                    // the flush + alarm below run even though dispatch never
+                    // delivered. (Without this the await could never settle.)
+                    const dispatchOutcome = await raceDispatchWithTimeout(dispatchPromise, dispatchTimeoutMs);
+                    dispatchTimedOut = dispatchOutcome.timedOut;
+                    dispatchThrew = dispatchOutcome.threw;
+
+                    // Timeout contract: post NOTHING. The wedge can strike
+                    // mid-generation, leaving partial chunks in the buffer —
+                    // drop them so the flush below is a no-op and the customer
+                    // never sees a truncated reply (the dispatch_timed_out
+                    // page below still fires).
+                    const discardedOnTimeout = discardBufferedChunksOnTimeout(bufferedChunks, dispatchTimedOut);
+                    if (discardedOnTimeout > 0) {
+                      log?.warn?.(
+                        `[${tag}] dispatch timeout: discarded ${discardedOnTimeout} partial buffered chunk(s) conv=${result.conversationId}`,
+                      );
                     }
 
                     // Flush buffered chunks as a single Intercom reply.
@@ -924,7 +1013,9 @@ export const intercomPlugin = createChatChannelPlugin({
                     //   2. dispatch returned but no chunks landed AND the conv
                     //      is still in a state where the agent should have
                     //      replied — the bug behind ~3 stranded convs/day.
-                    const silentReason: SilentDispatchReason | null = dispatchThrew
+                    const silentReason: SilentDispatchReason | null = dispatchTimedOut
+                      ? "dispatch_timed_out"
+                      : dispatchThrew
                       ? "dispatch_threw"
                       : (() => {
                           const d = detectSilentDispatch({

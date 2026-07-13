@@ -7,6 +7,8 @@ import {
   buildAgentRawBody,
   stripConversationContext,
   buildRiskOptions,
+  raceDispatchWithTimeout,
+  discardBufferedChunksOnTimeout,
 } from "../src/channel.js";
 import { canAgentReply } from "../src/handoff.js";
 import { stripModelFallbackNotice } from "../src/sanitize-model-fallback.js";
@@ -447,6 +449,68 @@ describe("buildAgentRawBody", () => {
     expect(stripped).not.toContain("[CONVERSATION_CONTEXT]");
     expect(stripped).not.toContain("verified name: Jane Doe");
     expect(stripped).not.toContain("credits on file");
+  });
+});
+
+describe("discardBufferedChunksOnTimeout", () => {
+  it("clears partial chunks on timeout so the flush posts nothing (QA finding: partial-before-timeout)", () => {
+    // The wedge can strike MID-generation: chunks land, then the lane locks
+    // and the dispatch never settles. The timeout contract is "post nothing
+    // and page" — partial output must never reach the customer.
+    const buffered = ["Hello, I looked into your", "account and"];
+    const discarded = discardBufferedChunksOnTimeout(buffered, true);
+    expect(discarded).toBe(2);
+    expect(buffered).toHaveLength(0);
+  });
+
+  it("leaves the buffer untouched when the dispatch did not time out", () => {
+    const buffered = ["full reply"];
+    const discarded = discardBufferedChunksOnTimeout(buffered, false);
+    expect(discarded).toBe(0);
+    expect(buffered).toEqual(["full reply"]);
+  });
+
+  it("is a no-op on an empty buffer", () => {
+    const buffered: string[] = [];
+    expect(discardBufferedChunksOnTimeout(buffered, true)).toBe(0);
+    expect(buffered).toHaveLength(0);
+  });
+});
+
+describe("raceDispatchWithTimeout", () => {
+  it("resolves clean when the dispatch settles before the timeout", async () => {
+    const outcome = await raceDispatchWithTimeout(Promise.resolve("ok"), 1000);
+    expect(outcome).toEqual({ timedOut: false, threw: null });
+  });
+
+  it("reports timedOut when the dispatch never settles (the lane-wedge case)", async () => {
+    // Models the wedged lane: the dispatch await never resolves nor rejects.
+    // Without the bound, the customer waits forever and nothing alarms.
+    const never = new Promise<never>(() => {});
+    const outcome = await raceDispatchWithTimeout(never, 20);
+    expect(outcome.timedOut).toBe(true);
+    expect(outcome.threw).toBeNull();
+  });
+
+  it("captures a real throw that happens before the timeout", async () => {
+    const boom = Promise.reject(new Error("ECONNRESET on gateway WS"));
+    const outcome = await raceDispatchWithTimeout(boom, 1000);
+    expect(outcome.timedOut).toBe(false);
+    expect(outcome.threw?.message).toContain("ECONNRESET");
+  });
+
+  it("swallows a late rejection after a timeout (no unhandled rejection, no double-handling)", async () => {
+    let rejectLate!: (e: Error) => void;
+    const late = new Promise<never>((_r, rej) => {
+      rejectLate = rej;
+    });
+    const outcome = await raceDispatchWithTimeout(late, 10);
+    expect(outcome.timedOut).toBe(true);
+    // The wedged dispatch settles AFTER we've given up — this must be swallowed,
+    // never surface as an unhandled rejection, and never re-mutate the outcome.
+    rejectLate(new Error("late wedge rejection"));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(outcome).toEqual({ timedOut: true, threw: null });
   });
 });
 

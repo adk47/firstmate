@@ -106,4 +106,21 @@ describe("buildSilentDispatchSlackPayload", () => {
     expect(JSON.stringify(payload)).toContain("dispatch_threw");
     expect(JSON.stringify(payload)).toContain("ECONNRESET");
   });
+
+  it("includes the timed-out reason variant with actionable wedge context", () => {
+    const payload = buildSilentDispatchSlackPayload({
+      conversationId: "215474906522805",
+      reason: "dispatch_timed_out",
+      account,
+    });
+    const s = JSON.stringify(payload);
+    expect(s).toContain("dispatch_timed_out");
+    // Context must name the upstream wedge and tell the human to take over,
+    // since no reply was (or will be) posted for this conversation.
+    expect(s).toContain("#97538");
+    expect(s).toContain("pick this conversation up");
+    expect(s).toContain(
+      "https://app.intercom.com/a/inbox/wkspc/inbox/conversation/215474906522805",
+    );
+  });
 });

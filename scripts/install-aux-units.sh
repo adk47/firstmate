@@ -50,6 +50,14 @@
 #     empty-completion-swallows-fallback flaw (2026-06-08 @CMO
 #     incident, PR #450) that the chain-reshape CI gate can't reach.
 #
+#   /etc/cron.d/stuck-lane-watchdog
+#     Schedules scripts/stuck-lane-watchdog.sh every 2 minutes to alert
+#     #clio_devops when the EDGE gateway force-aborts a wedged agent run
+#     without releasing the lane (action=abort_embedded_run … released=0)
+#     — the moment Caroline's generated reply is discarded (upstream
+#     openclaw #97538). Ops backstop to the in-plugin dispatch-timeout
+#     page; fires from journald even if the plugin path is down.
+#
 #   /etc/cron.d/prod-log-alert-watchdog
 #     Schedules scripts/prod-log-alert-watchdog.sh every 5 minutes
 #     to post NEW prod error-log lines (kubectl read-only, redacted,
@@ -175,6 +183,8 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/openclaw-edge-reindex-on-start.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/openclaw-edge-reindex-on-start.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/stuck-lane-watchdog.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/stuck-lane-watchdog.sh missing or not executable"
 [[ -f "$HYDRA_ROOT/scripts/overdue-verification-notifier.py" ]] \
   || fail "$HYDRA_ROOT/scripts/overdue-verification-notifier.py missing"
 [[ -f "$HYDRA_ROOT/scripts/resolve-notify.py" ]] \
@@ -819,6 +829,21 @@ cat > /etc/cron.d/fallback-swallow-watchdog << SWALLOWWD
 */5 * * * * root $HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh >> /var/log/fallback-swallow-watchdog.log 2>&1
 SWALLOWWD
 chmod 644 /etc/cron.d/fallback-swallow-watchdog
+
+# Stuck-lane watchdog: alerts #clio_devops when the EDGE gateway force-aborts a
+# wedged agent run WITHOUT releasing the lane (action=abort_embedded_run …
+# released=0) — the moment Caroline's generated reply is silently discarded
+# (upstream openclaw #97538, no released fix). This is the OUT-OF-PROCESS ops
+# backstop to the in-plugin dispatch-timeout page (which handles CUSTOMER pickup
+# to #cs-escalations); it fires from journald even if the plugin path is broken
+# or mid-deploy. 2 min: matches openclaw-watchdog's edge scan cadence; per-conv
+# 6h-cooldown dedupe means one wedge pages once. Same ownership rule: edit here +
+# re-run install-aux-units.sh.
+cat > /etc/cron.d/stuck-lane-watchdog << STUCKLANEWD
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+*/2 * * * * root $HYDRA_ROOT/scripts/stuck-lane-watchdog.sh >> /var/log/stuck-lane-watchdog.log 2>&1
+STUCKLANEWD
+chmod 644 /etc/cron.d/stuck-lane-watchdog
 
 # ─── Merge-landing watchdog at 30-min cadence ─────────────────
 # Alerts #clio_devops when an admin profile-merge returned HTTP 200 (logged to

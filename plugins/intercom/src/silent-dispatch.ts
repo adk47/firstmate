@@ -7,7 +7,16 @@ import type { SlackMessagePayload } from "./slack.js";
 
 export type SilentDispatchReason =
   | "zero_chunks_after_dispatch"
-  | "dispatch_threw";
+  | "dispatch_threw"
+  // The dispatch await never settled within the plugin's timeout. This is the
+  // upstream lane-wedge (openclaw #97538 / #92270): rapid-fire inbound spawns
+  // overlapping embedded_run dispatches on one lane; one leaks the lane owner
+  // lock; later dispatches wedge at embedded_run:started; stuck-session recovery
+  // aborts them but logs released=0 (never frees the lane) and DISCARDS the
+  // generated reply. Because the await never returns, neither the reply flush
+  // nor the zero_chunks silent-dispatch check below is ever reached — so without
+  // this bounded timeout the customer waits forever and NOTHING alarms.
+  | "dispatch_timed_out";
 
 export interface SilentDispatchDetectionInput {
   bufferedChunks: string[];
@@ -46,6 +55,26 @@ export interface SilentDispatchSlackInput {
 
 function intercomUrl(workspaceId: string, conversationId: string): string {
   return `https://app.intercom.com/a/inbox/${workspaceId}/inbox/conversation/${conversationId}`;
+}
+
+// Reason-specific "what happened" line for the Slack context block. The generic
+// header/reason code is the same across reasons; this explains the failure and
+// what the human should do so #cs-escalations gets an actionable page.
+function reasonContext(reason: SilentDispatchReason, workspaceId: string): string {
+  const ws = `workspace: \`${workspaceId}\``;
+  switch (reason) {
+    case "dispatch_timed_out":
+      return (
+        `Agent dispatch did not return within the timeout — the session lane is likely ` +
+        `wedged (upstream openclaw #97538). No reply was posted and none will be; ` +
+        `please pick this conversation up. ${ws}`
+      );
+    case "dispatch_threw":
+      return `Agent dispatch threw before producing a reply. ${ws}`;
+    case "zero_chunks_after_dispatch":
+    default:
+      return `Customer wrote, agent invoked, no chunks landed. ${ws}`;
+  }
 }
 
 export function buildSilentDispatchSlackPayload(
@@ -93,9 +122,7 @@ export function buildSilentDispatchSlackPayload(
         elements: [
           {
             type: "mrkdwn",
-            text:
-              `Customer wrote, agent invoked, no chunks landed. ` +
-              `workspace: \`${input.account.workspaceId}\``,
+            text: reasonContext(input.reason, input.account.workspaceId),
           },
         ],
       },

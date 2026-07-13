@@ -234,6 +234,14 @@ export interface IntercomAccountConfig {
     minScore?: number;
     agentId?: string;
   };
+  // Upper bound (ms) on how long we wait for a single agent dispatch to return
+  // before treating the conversation lane as wedged. The dispatch await
+  // (channel.ts) is raced against this timeout; on timeout we page
+  // #cs-escalations with reason `dispatch_timed_out` (see silent-dispatch.ts)
+  // and post NOTHING to the customer. Must sit well above real p99 dispatch
+  // latency (~10-15s observed) and below openclaw's ~360s runtime stuck-session
+  // abort. Default DEFAULT_DISPATCH_TIMEOUT_MS (90s) when absent.
+  dispatchTimeoutMs?: number;
 }
 
 // --- Intercom Client ---
@@ -437,6 +445,12 @@ export interface RiskAssessment {
 export const MAX_PROCESSED_EVENT_IDS = 1000;
 export const MAX_OUTBOUND_MESSAGE_IDS = 500;
 export const DEFAULT_FALLBACK_ACK = "We're looking into this and will get back to you shortly.";
+
+// Default dispatch-await timeout (ms). See IntercomAccountConfig.dispatchTimeoutMs.
+// 90s: >> real p99 dispatch (~10-15s) so healthy slow replies never false-page,
+// and << openclaw's ~360s runtime stuck-session abort so we page BEFORE the
+// runtime silently discards the wedged reply.
+export const DEFAULT_DISPATCH_TIMEOUT_MS = 90_000;
 
 // Risk-assessment defaults — single source of truth, referenced by escalation.ts
 // and channel.ts so the two stay in sync.
