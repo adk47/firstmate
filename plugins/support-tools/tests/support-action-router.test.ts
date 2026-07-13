@@ -48,14 +48,25 @@ describe("support_action_router", () => {
     });
   });
 
-  it("does not expose autonomous refund writes before scoped billing tools ship", async () => {
+  it("exposes the live retention/cancel trio but keeps refunds handoff-only", async () => {
     const out = await call({ intent: "billing_cancel_refund", state: "read_ok" });
     expect(out.ok).toBe(true);
     expect(out.availability).toBe("partial");
-    expect(out.live_tools.read).toEqual(["subscription_status"]);
-    expect(out.live_tools.write).toEqual([]);
-    expect(out.planned_tools).toEqual(["subscription_cancel", "refund_policy_check", "refund_create"]);
+    expect(out.live_tools.read).toEqual(["subscription_status", "retention_offer_check"]);
+    expect(out.live_tools.write).toEqual(["retention_offer_apply", "cancel_subscription"]);
+    // Refund writes stay planned — money out is the human/Operations path.
+    expect(out.planned_tools).toEqual(["refund_policy_check", "refund_create"]);
     expect(out.next).toMatchObject({
+      outcome: "call_tool",
+      tool: "retention_offer_check",
+    });
+
+    const confirmed = await call({ intent: "billing_cancel_refund", state: "customer_confirmed" });
+    expect(confirmed.next).toMatchObject({ outcome: "apply_tool", tool: "cancel_subscription" });
+    expect(confirmed.next.instruction).toContain("Never call cancel on the refund branch");
+
+    const refused = await call({ intent: "billing_cancel_refund", state: "tool_refused" });
+    expect(refused.next).toMatchObject({
       outcome: "handoff",
       tool: "create_ticket",
       action_type: "subscription-refund",
@@ -89,6 +100,17 @@ describe("support_action_router", () => {
       action_type: "profile-merge",
     });
     expect(out.human_gated_writes).toContain("cross-owner merge");
+  });
+
+  it("exposes profile_credits_status as a live read on the credit/profile routes", async () => {
+    for (const intent of ["credit_verification", "profile_claim", "profile_duplicates", "remove_wrong_credits", "catalog_metadata_repair"]) {
+      const out = await call({ intent });
+      expect(out.live_tools.read).toContain("profile_credits_status");
+    }
+
+    // catalog read_ok now diagnoses a referenced credit before filing.
+    const catalogReadOk = await call({ intent: "catalog_metadata_repair", state: "read_ok" });
+    expect(catalogReadOk.next).toMatchObject({ outcome: "call_tool", tool: "profile_credits_status" });
   });
 
   it("keeps raw execution and broad admin surfaces denied in every route", async () => {

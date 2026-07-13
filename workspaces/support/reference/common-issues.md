@@ -73,7 +73,7 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
 **Notes:**
 - Never share an internal team member's email or assign a specific reviewer by name – the operations team triages from the ticket queue.
 - Never reference internal tools or URLs (e.g., admin dashboards, retool). Customer-facing URLs only.
-- If the customer can't provide URLs and only knows profile names, run `profile_lookup` to confirm matches before opening the ticket – include the resolved profile IDs in `details` instead of (or alongside) URLs.
+- If the customer can't provide URLs and only knows profile names, run `profile_lookup` to confirm matches before opening the ticket – include the resolved profile IDs in `details` instead of (or alongside) URLs. `profile_credits_status` also surfaces same-name duplicate CANDIDATES (claim state + credit counts) when the customer can't name the duplicates yet – candidates only, never confirmed duplicates.
 
 ---
 
@@ -82,6 +82,7 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
 **Customer says:** "My credit isn't showing" / "The credit is wrong."
 
 **Resolution path:**
+0. **Ground first**: call `profile_credits_status` with the profile and the track/role in question, then branch on its diagnosis: `on_this_profile` → the credit is already visible, show them where; `pending_verification` → it's in review, not missing (Row #5 flow); `on_other_profile` → wrong-profile correction, file the handoff packet it returns; `not_found` → continue below.
 1. Is the credit missing or incorrect?
    - If **missing**: ask if they've tried "Add Missing Credits" in the app. If not, walk them through it (log in > navigate to track/album > Add Missing Credits > specify role > submit). Reviews within 48 hours.
    - If **incorrect**: continue to step 2.
@@ -121,6 +122,9 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
    - Explain that without supporting documentation claims are harder to verify, but they can still submit and explain the context in the claim notes.
 6. If the credit is in "user verification needed", the `customer-credit-verification`
    skill governs the full flow (ownership check, proof intake, routing to the team).
+   When it's unclear whether the credit is pending at all, `profile_credits_status`
+   reads the pending queue (`credit.pending`, `pending_verification` state) before
+   you enter the proof flow.
 7. **Escalate:** If they've submitted documentation and the claim has been open more than 5 business days with no update, create a ticket with category "Credit Claim – Documentation Submitted". SLA: 2 business days.
 
 ---

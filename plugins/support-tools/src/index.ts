@@ -13,6 +13,7 @@ import { createOrderLookupTool } from "./tools/order-lookup.js";
 import { createRemoveCreditsTool, DEFAULT_REMOVE_CREDITS_SCRIPT } from "./tools/remove-credits.js";
 import { createOrderAddressUpdateTool, DEFAULT_UPDATE_ORDER_ADDRESS_SCRIPT } from "./tools/order-address-update.js";
 import { createDedupeCheckTool } from "./tools/dedupe-check.js";
+import { createProfileCreditsStatusTool } from "./tools/profile-credits-status.js";
 import { createCreditVerificationCheckTool } from "./tools/credit-verification-check.js";
 import { createProfilesClaimSelfTool, DEFAULT_PROFILES_CLAIM_SELF_SCRIPT } from "./tools/profiles-claim-self.js";
 import { createCreditsVerifyTool, DEFAULT_CREDITS_VERIFY_SCRIPT } from "./tools/credits-verify.js";
@@ -195,6 +196,25 @@ export default definePluginEntry({
       });
     };
     api.registerTool(dedupeCheckFactory, { name: "dedupe_check" });
+
+    // profile_credits_status — read-only credits/profile diagnosis (missing
+    // credit, wrong profile, duplicate candidates, pending-verification sync
+    // state). Same GET-only admin client as the other read tools; the Intercom
+    // anchor is best-effort — when unverifiable the tool DEGRADES to
+    // owner_undetermined (public catalog facts only) instead of failing
+    // closed, and never suggests ownership-dependent self-serve routing.
+    const profileCreditsStatusFactory = (ctx: any) => {
+      return createProfileCreditsStatusTool({
+        adminClient: musoAdminClient,
+        intercomReader,
+        rateLimiter,
+        // Anti-spoof anchor: the trusted gateway session KEY (carries the convId),
+        // NOT ctx.sessionId (an ephemeral UUID that never matches). See deriveConvId.
+        sessionKey: ctx.sessionKey ?? "unknown",
+        intercomToken,
+      });
+    };
+    api.registerTool(profileCreditsStatusFactory, { name: "profile_credits_status" });
 
     // subscription_status — read-only view of the customer's workspace
     // subscription (plan, status, period, seat limit). Anchored to the verified

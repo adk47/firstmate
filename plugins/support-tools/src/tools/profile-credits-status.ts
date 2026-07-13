@@ -1,0 +1,517 @@
+import { Type, type Static } from "@sinclair/typebox";
+import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
+import type { RateLimiter } from "../rate-limiter.js";
+import type { MusoAdminClient } from "../muso-admin-client.js";
+import type { IntercomReader } from "../intercom-client.js";
+import { extractProfileIdFromUrl } from "./profile-lookup.js";
+import { filterCreditsResults } from "./credits-search.js";
+import { deriveConvId } from "./dedupe-check.js";
+import { sanitizeStr, classifyOwnership, type ProfileBody } from "./credit-verification-check.js";
+
+// profile_credits_status — READ-ONLY diagnosis of a customer's credit/profile
+// state for "my credit is missing / on the wrong profile / is there a
+// duplicate / did my credit sync" tickets. It resolves the profile, scans for
+// same-name duplicate CANDIDATES, checks whether a referenced credit exists on
+// the resolved profile (and, when absent, on the candidates / a stated target
+// profile), and reads the pending user-verification queue — then returns a
+// structured diagnosis + the support action the router doctrine expects.
+//
+// It NEVER writes: this tool's MusoAdminClient is structurally GET-only. The
+// self-serve WRITE paths it may point at (profiles_claim_self,
+// profiles_consolidate) and the credit-correction/profile-merge handoffs stay
+// behind their own gates.
+//
+// Ownership is anchored to the Intercom contact's REAL email (deriveConvId →
+// getAuthorEmail, same anti-spoof as dedupe_check) but — unlike
+// credit_verification_check, which lists private pending data — an
+// unverifiable anchor DEGRADES this tool instead of failing it closed:
+// claim/duplicate/credit-existence facts are exactly what public
+// credits.muso.ai shows, so they are returned with the ownership-derived
+// fields marked owner_undetermined. Ownership-dependent self-serve routing is
+// only ever suggested when the anchor verified.
+
+const MAX_DUPLICATE_CANDIDATES = 5;
+const MAX_MATCHED_TRACKS = 3;
+const MAX_UVN_CREDITS = 100;
+
+const Parameters = Type.Object({
+  profile_id: Type.Optional(Type.String({ description: "Bare Muso profile UUID" })),
+  profile_url: Type.Optional(Type.String({ description: "Full https://credits.muso.ai/profile/<uuid> URL" })),
+  email: Type.Optional(Type.String({ description: "Customer account email — used for lookup, never echoed back" })),
+  name: Type.Optional(Type.String({ description: "Profile display name to resolve via search" })),
+  target_profile_url: Type.Optional(
+    Type.String({ description: "Profile URL the customer says the credit SHOULD be on (or wrongly is on), when different from their own" }),
+  ),
+  track_title: Type.Optional(Type.String({ description: "Track title of the credit in question" })),
+  release_title: Type.Optional(Type.String({ description: "Release/album title named by the customer; echoed only as support context" })),
+  credit_role: Type.Optional(Type.String({ description: "Credit role in question, e.g. Producer, Songwriter" })),
+  requesterEmail: Type.Optional(
+    Type.String({ description: "Customer's email as stated in the conversation. UNTRUSTED — only compared against the Intercom contact email; never the source of truth." }),
+  ),
+});
+
+type Params = Static<typeof Parameters>;
+
+export interface ProfileCreditsStatusDeps {
+  adminClient: MusoAdminClient;
+  intercomReader: IntercomReader;
+  rateLimiter: RateLimiter;
+  sessionKey: string;
+  intercomToken: string;
+}
+
+type ProfileState =
+  | "claimed_by_customer"
+  | "claimed_by_other"
+  | "unclaimed"
+  | "owner_undetermined";
+type CreditState =
+  | "on_this_profile"
+  | "on_other_profile"
+  | "pending_verification"
+  | "not_found"
+  | "not_checked";
+type ClaimState = "unclaimed" | "claimed_same_owner" | "claimed_different_user" | "unresolved";
+type AskClassification =
+  | "credit_add"
+  | "credit_move"
+  | "duplicate_cleanup"
+  | "profile_claim"
+  | "credit_verification"
+  | "unclear";
+type SupportAction =
+  | "answer_from_status"
+  | "ask_missing_info"
+  | "route_selfserve_claim"
+  | "route_selfserve_consolidate"
+  | "create_handoff_ticket"
+  | "human_review";
+
+interface MatchedTrack {
+  title: string;
+  roles: string[];
+  release_date: string;
+}
+
+interface DuplicateCandidate {
+  profile_id: string;
+  name: string;
+  is_claimed: boolean;
+  claim_state: ClaimState;
+  credit_count: number;
+  credit_found: boolean | null; // null = not checked (no track query, or credit already found on the resolved profile)
+}
+
+function structuredFailure(reason: string, extra: Record<string, unknown> = {}): AgentToolResult<unknown> {
+  return textResult(JSON.stringify({ found: false, reason, ...extra }));
+}
+
+function lc(s: string | null | undefined): string {
+  return (s ?? "").toLowerCase();
+}
+
+interface ProfileRow extends ProfileBody {
+  name?: string;
+  creditCount?: number;
+}
+
+// claim_state relative to the verified contact email — same vocabulary as
+// dedupe_check's per-duplicate verdict so tickets read consistently.
+export function claimStateFor(body: ProfileRow | null, trustedEmail: string | null): ClaimState {
+  if (!body) return "unresolved";
+  if (body.isClaimed !== true) return "unclaimed";
+  if (!trustedEmail) return "unresolved";
+  const claimedEmails = (Array.isArray(body.workspaces) ? body.workspaces : [])
+    .filter((w) => w?.isClaimed === true)
+    .map((w) => lc(w.email));
+  return claimedEmails.includes(lc(trustedEmail)) ? "claimed_same_owner" : "claimed_different_user";
+}
+
+export interface DiagnosisInput {
+  profile_state: ProfileState;
+  credit_state: CreditState;
+  credit_queried: boolean;
+  duplicate_candidates: DuplicateCandidate[];
+  target_profile_present: boolean;
+  impersonation_flag: boolean;
+  // Sole-claimed-workspace ownership (credit_verification_check's rule): only
+  // a sole owner may be routed to self-serve consolidation — a co-claimer on a
+  // shared band/manager profile must not fold profiles on their own.
+  sole_owner: boolean;
+  // The Intercom identity anchor resolved to a verified contact email. ALL
+  // self-serve routing (claim included) requires it — an owner-undetermined
+  // session gets a handoff, never a self-serve suggestion.
+  anchor_verified: boolean;
+}
+
+// Evidence → what the customer is actually asking for. Priority order matters:
+// a pending credit explains "missing" better than a blind add request, and a
+// concrete wrong-profile finding beats a generic duplicate observation.
+export function classifyAsk(input: DiagnosisInput): AskClassification {
+  if (input.credit_state === "pending_verification") return "credit_verification";
+  if (input.credit_state === "on_other_profile") return "credit_move";
+  if (input.credit_queried && input.credit_state === "not_found") return "credit_add";
+  if (input.duplicate_candidates.length > 0) return "duplicate_cleanup";
+  if (input.profile_state === "unclaimed") return "profile_claim";
+  return "unclear";
+}
+
+export function supportActionFor(input: DiagnosisInput, ask: AskClassification): SupportAction {
+  // A typed-vs-verified email mismatch taints every ownership-derived routing
+  // decision — a human checks identity before anything self-serve or filed.
+  if (input.impersonation_flag) return "human_review";
+  switch (ask) {
+    case "credit_verification":
+      return "answer_from_status";
+    case "credit_move":
+    case "credit_add":
+      return "create_handoff_ticket";
+    case "duplicate_cleanup": {
+      // Self-serve consolidation is only for a VERIFIED owner folding
+      // unclaimed candidates into the profile they own; anything claimed or
+      // owner-undetermined goes to the human-gated merge packet.
+      const allUnclaimed = input.duplicate_candidates.every((d) => d.claim_state === "unclaimed");
+      return input.sole_owner && input.profile_state === "claimed_by_customer" && allUnclaimed
+        ? "route_selfserve_consolidate"
+        : "create_handoff_ticket";
+    }
+    case "profile_claim":
+      // profiles_claim_self re-anchors downstream, but the router contract is
+      // that an owner-undetermined session is never POINTED at self-serve.
+      return input.anchor_verified ? "route_selfserve_claim" : "create_handoff_ticket";
+    default:
+      return "answer_from_status";
+  }
+}
+
+export function diagnosisFor(input: DiagnosisInput, ask: AskClassification): string {
+  const dupNote =
+    input.duplicate_candidates.length > 0
+      ? ` ${input.duplicate_candidates.length} same-name profile(s) exist — duplicate CANDIDATES only, never confirmed duplicates (same-name distinct artists are common).`
+      : "";
+  switch (input.credit_state) {
+    case "pending_verification":
+      return `The referenced credit is in the pending verification queue, not missing — it is waiting on review/proof, so route the credit-verification flow.${dupNote}`;
+    case "on_other_profile":
+      return `The referenced credit exists but is attached to a different profile than the customer's — a credit move needs a human-executed correction.${dupNote}`;
+    case "on_this_profile":
+      return `The referenced credit is already visible on the resolved profile.${dupNote}`;
+    case "not_found":
+      return `The referenced credit was not found on the resolved profile${input.duplicate_candidates.length > 0 ? " or the same-name candidates checked" : ""} — likely a credit-add request for a human to review.${dupNote}`;
+    default:
+      break;
+  }
+  if (ask === "duplicate_cleanup") return `No specific credit was queried.${dupNote}`;
+  if (ask === "profile_claim") return "The resolved profile is unclaimed — the customer can claim it via the self-serve claim flow.";
+  return `Profile resolved; no specific credit was queried.${dupNote}`;
+}
+
+export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): AgentTool<typeof Parameters, unknown> {
+  const { adminClient, intercomReader, rateLimiter, sessionKey, intercomToken } = deps;
+
+  async function fetchProfile(profileId: string): Promise<ProfileRow | null> {
+    const resp = await adminClient.get<{ data?: ProfileRow }>(`/api/v3/admin/profile/${encodeURIComponent(profileId)}`);
+    if (!resp.ok) return null;
+    return ((resp.data as any)?.data ?? resp.data ?? {}) as ProfileRow;
+  }
+
+  // Credit presence on ONE profile. null = the lookup itself failed (degrade,
+  // never conflate with "not found").
+  async function findCredit(profileId: string, trackTitle: string, creditRole?: string): Promise<MatchedTrack[] | null> {
+    const qp = new URLSearchParams();
+    qp.set("keyword", trackTitle);
+    if (creditRole) qp.append("filter[]", creditRole);
+    qp.set("limit", "100");
+    qp.set("offset", "0");
+    const resp = await adminClient.get<{ data?: Record<string, unknown> }>(
+      `/api/v3/admin/profile/${encodeURIComponent(profileId)}/credits?${qp}`,
+    );
+    if (!resp.ok) return null;
+    const filtered = filterCreditsResults(((resp.data as any)?.data ?? resp.data ?? {}) as Record<string, unknown>);
+    return filtered.credits.map((c) => ({
+      title: sanitizeStr(c.trackTitle),
+      roles: c.creditRoles.map((r) => sanitizeStr(r)),
+      release_date: sanitizeStr(c.releaseDate),
+    }));
+  }
+
+  return {
+    name: "profile_credits_status",
+    label: "Profile Credits Status",
+    description:
+      "Read-only diagnosis for missing-credit, wrong-profile, duplicate-profile, and did-my-credit-sync questions. Resolves the profile, scans same-name duplicate candidates, checks whether a referenced credit exists (here, on a candidate, or on a stated target profile), and — for the verified sole owner ONLY — reads the pending-verification queue (private data; suppressed for anyone else). " +
+      "Returns a structured diagnosis with the suggested support action (answer, ask for one missing fact, route self-serve claim/consolidate, or a ticket-ready handoff packet). " +
+      "It NEVER writes — credit corrections and merges stay on their gated paths. Rate limit: 10 calls / 60 min per session.",
+    parameters: Parameters,
+    async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
+      try {
+        if (!rateLimiter.check(sessionKey, "profile_credits_status", 60, 10).allowed) {
+          return structuredFailure("rate_limited");
+        }
+
+        // Best-effort ownership anchor — degrades to owner_undetermined
+        // instead of failing closed (public catalog facts only).
+        const notes: string[] = [];
+        let trustedEmail: string | null = null;
+        const convId = deriveConvId(sessionKey);
+        if (convId && intercomToken) {
+          trustedEmail = await intercomReader.getAuthorEmail(convId, intercomToken);
+        }
+        if (!trustedEmail) notes.push("ownership could not be verified; claim ownership fields are undetermined");
+
+        const requester = params.requesterEmail?.trim() ? lc(params.requesterEmail.trim()) : null;
+        const impersonation_flag = !!trustedEmail && !!requester && requester !== lc(trustedEmail);
+        if (impersonation_flag) {
+          // Identity is tainted: keep the catalog facts but never ownership
+          // claims or self-serve routing on a flagged identity.
+          trustedEmail = null;
+          notes.push("the stated email does not match the verified contact email; routed for identity verification");
+        }
+
+        // ---- resolve the profile ------------------------------------------
+        let profileId: string | null = null;
+        if (params.profile_id) profileId = params.profile_id.trim();
+        else if (params.profile_url) profileId = extractProfileIdFromUrl(params.profile_url);
+
+        if (!profileId && !params.email && !params.name) {
+          return structuredFailure("missing_input", {
+            support_action: "ask_missing_info",
+            missing_fields: ["profile URL"],
+          });
+        }
+
+        let profile: ProfileRow | null = null;
+        if (profileId) {
+          profile = await fetchProfile(profileId);
+          if (!profile) return structuredFailure("lookup_unavailable");
+        } else {
+          const query = params.email ?? params.name ?? "";
+          const searchResp = await adminClient.get<{ data?: ProfileRow[] }>(
+            `/api/v3/admin/profile/search?keyword=${encodeURIComponent(query)}&limit=${MAX_DUPLICATE_CANDIDATES}`,
+          );
+          if (!searchResp.ok) return structuredFailure("lookup_unavailable");
+          const results = ((searchResp.data as any)?.data ?? []) as ProfileRow[];
+          if (results.length === 0) return structuredFailure("no_match");
+          if (results.length > 1) {
+            // Ambiguity is a first-class outcome here: one missing public
+            // identifier (the profile URL) unblocks the whole diagnosis.
+            return structuredFailure("multiple_matches", {
+              matches: results.slice(0, 3).map((r) => sanitizeStr(r.name)),
+              support_action: "ask_missing_info",
+              missing_fields: ["profile URL"],
+            });
+          }
+          profileId = String(results[0].id ?? "");
+          if (!profileId) return structuredFailure("no_match");
+          profile = await fetchProfile(profileId);
+          if (!profile) return structuredFailure("lookup_unavailable");
+        }
+
+        const profileName = sanitizeStr(profile.name);
+        const ownership = classifyOwnership(profile, trustedEmail);
+        let profile_state: ProfileState;
+        if (profile.isClaimed !== true) profile_state = "unclaimed";
+        else if (!trustedEmail) profile_state = "owner_undetermined";
+        else profile_state = ownership === "not_owned" ? "claimed_by_other" : "claimed_by_customer";
+
+        // ---- duplicate candidate scan -------------------------------------
+        const duplicate_candidates: DuplicateCandidate[] = [];
+        if (profileName) {
+          const dupResp = await adminClient.get<{ data?: ProfileRow[] }>(
+            `/api/v3/admin/profile/search?keyword=${encodeURIComponent(profileName)}&limit=${MAX_DUPLICATE_CANDIDATES}`,
+          );
+          if (dupResp.ok) {
+            const seen = new Set<string>([profileId]);
+            for (const row of (((dupResp.data as any)?.data ?? []) as ProfileRow[])) {
+              const cid = String(row.id ?? "").trim();
+              if (!cid || seen.has(cid)) continue;
+              seen.add(cid);
+              // Candidates only when the display name actually matches — the
+              // search is a keyword match and can return unrelated profiles.
+              if (lc(String(row.name ?? "")).trim() !== lc(profileName).trim()) continue;
+              const body = await fetchProfile(cid);
+              duplicate_candidates.push({
+                profile_id: cid,
+                name: sanitizeStr(row.name),
+                is_claimed: body?.isClaimed === true,
+                claim_state: claimStateFor(body, trustedEmail),
+                credit_count: Number(body?.creditCount ?? 0),
+                credit_found: null,
+              });
+              if (duplicate_candidates.length >= MAX_DUPLICATE_CANDIDATES) break;
+            }
+          } else {
+            notes.push("duplicate-candidate scan unavailable; duplicates were not assessed");
+          }
+        }
+
+        // ---- credit existence ---------------------------------------------
+        const trackTitle = params.track_title?.trim() ?? "";
+        const credit_queried = trackTitle.length > 0;
+        let credit_state: CreditState = "not_checked";
+        let matched_tracks: MatchedTrack[] = [];
+        let credit_located_on: string | null = null;
+
+        // Target profile the customer pointed at (where the credit should be,
+        // or wrongly is) — resolved independently of the duplicate scan.
+        const targetId = params.target_profile_url ? extractProfileIdFromUrl(params.target_profile_url) : null;
+        let target_profile: { profile_id: string; is_claimed: boolean; claim_state: ClaimState; credit_found: boolean | null } | null = null;
+        if (targetId && targetId !== profileId) {
+          const targetBody = await fetchProfile(targetId);
+          target_profile = {
+            profile_id: targetId,
+            is_claimed: targetBody?.isClaimed === true,
+            claim_state: claimStateFor(targetBody, trustedEmail),
+            credit_found: null,
+          };
+          if (!targetBody) notes.push("the stated target profile could not be loaded");
+        }
+
+        if (credit_queried) {
+          const onPrimary = await findCredit(profileId, trackTitle, params.credit_role);
+          if (onPrimary === null) {
+            credit_state = "not_checked";
+            notes.push("credit lookup unavailable on the resolved profile; credit presence was not assessed");
+          } else if (onPrimary.length > 0) {
+            credit_state = "on_this_profile";
+            matched_tracks = onPrimary.slice(0, MAX_MATCHED_TRACKS);
+          } else {
+            credit_state = "not_found";
+            // Not on the customer's profile — check the stated target, then
+            // the same-name candidates, to catch the wrong-profile case.
+            if (target_profile) {
+              const onTarget = await findCredit(targetId!, trackTitle, params.credit_role);
+              target_profile.credit_found = onTarget === null ? null : onTarget.length > 0;
+              if (onTarget && onTarget.length > 0) {
+                credit_state = "on_other_profile";
+                credit_located_on = targetId;
+                matched_tracks = onTarget.slice(0, MAX_MATCHED_TRACKS);
+              }
+            }
+            if (credit_state === "not_found") {
+              for (const cand of duplicate_candidates) {
+                const onCand = await findCredit(cand.profile_id, trackTitle, params.credit_role);
+                cand.credit_found = onCand === null ? null : onCand.length > 0;
+                if (onCand && onCand.length > 0 && credit_state === "not_found") {
+                  credit_state = "on_other_profile";
+                  credit_located_on = cand.profile_id;
+                  matched_tracks = onCand.slice(0, MAX_MATCHED_TRACKS);
+                }
+              }
+            }
+          }
+        }
+
+        // ---- pending verification queue ------------------------------------
+        // UVN queue state is PRIVATE (credit_verification_check fails closed
+        // before exposing it), so it is read ONLY for the verified sole owner
+        // of the resolved profile — unlike the public catalog facts above,
+        // which degrade. A non-owner must not learn whether/what is pending.
+        let pending: { count: number; truncated: boolean; referenced_track_pending: boolean } | null = null;
+        if (ownership === "owned") {
+          // Fetch one more than surfaced so >MAX profiles are detectable
+          // (same truncation guard as credit_verification_check).
+          const uvnResp = await adminClient.get<{ data?: { items?: Array<{ spotifyTrackTitle?: string }> } }>(
+            `/api/v3/admin/credit-requests?profilesIds=${encodeURIComponent(profileId)}&status=user_verification_needed&limit=${MAX_UVN_CREDITS + 1}`,
+          );
+          if (uvnResp.ok) {
+            const items = (uvnResp.data as any)?.data?.items;
+            if (Array.isArray(items)) {
+              const truncated = items.length > MAX_UVN_CREDITS;
+              const surfaced = items.slice(0, MAX_UVN_CREDITS) as Array<{ spotifyTrackTitle?: string }>;
+              const referenced_track_pending =
+                credit_queried && surfaced.some((it) => lc(String(it.spotifyTrackTitle ?? "")).includes(lc(trackTitle)));
+              pending = { count: surfaced.length, truncated, referenced_track_pending };
+              if (credit_state === "not_found" && referenced_track_pending) {
+                credit_state = "pending_verification";
+              }
+            }
+          }
+          if (!pending) notes.push("pending-verification queue unavailable; sync state was not assessed");
+        } else {
+          notes.push("pending-verification state requires verified profile ownership; not assessed");
+        }
+
+        // ---- diagnosis ------------------------------------------------------
+        const diagInput: DiagnosisInput = {
+          profile_state,
+          credit_state,
+          credit_queried,
+          duplicate_candidates,
+          target_profile_present: !!target_profile,
+          impersonation_flag,
+          sole_owner: ownership === "owned",
+          anchor_verified: !!trustedEmail,
+        };
+        const ask_classification = classifyAsk(diagInput);
+        const support_action = supportActionFor(diagInput, ask_classification);
+        const diagnosis = diagnosisFor(diagInput, ask_classification);
+
+        const handoff_packet =
+          support_action === "create_handoff_ticket"
+            ? {
+                action_type:
+                  ask_classification === "duplicate_cleanup"
+                    ? "profile-merge"
+                    : ask_classification === "profile_claim"
+                      ? "profile-claim"
+                      : "credit-correction",
+                customer_profile_id: profileId,
+                credit_located_on,
+                target_profile_id: target_profile?.profile_id ?? null,
+                duplicate_profile_ids: duplicate_candidates.map((d) => d.profile_id),
+                credit: credit_queried
+                  ? {
+                      track_title: sanitizeStr(trackTitle),
+                      credit_role: sanitizeStr(params.credit_role ?? ""),
+                      release_title: sanitizeStr(params.release_title ?? ""),
+                    }
+                  : null,
+                evidence: {
+                  profile_state,
+                  credit_state,
+                  pending_verification_count: pending?.count ?? null,
+                },
+              }
+            : null;
+
+        const output = {
+          found: true,
+          owner_undetermined: !trustedEmail,
+          impersonation_flag,
+          profile: {
+            id: profileId,
+            name: profileName,
+            is_claimed: profile.isClaimed === true,
+            state: profile_state,
+            credit_count: Number(profile.creditCount ?? 0),
+          },
+          credit: {
+            state: credit_state,
+            queried: credit_queried,
+            matched_tracks,
+            located_on_profile_id: credit_located_on,
+            pending,
+          },
+          target_profile,
+          duplicate_candidates,
+          diagnosis,
+          ask_classification,
+          support_action,
+          notes,
+          customer_provided_context: {
+            track_title: sanitizeStr(params.track_title ?? ""),
+            release_title: sanitizeStr(params.release_title ?? ""),
+            credit_role: sanitizeStr(params.credit_role ?? ""),
+          },
+          ...(handoff_packet ? { handoff_packet } : {}),
+        };
+        return textResult(JSON.stringify(output));
+      } catch {
+        // Any unexpected failure must degrade to a structured failure — never
+        // throw and never fabricate a diagnosis.
+        return structuredFailure("lookup_unavailable");
+      }
+    },
+  };
+}

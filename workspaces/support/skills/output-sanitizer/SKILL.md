@@ -69,6 +69,10 @@ Scan every outgoing response for the following patterns. If ANY match is found, 
 **Tool Names and Tool-Failure Phrasing** (case-insensitive):
 - `profile_status`
 - `profile_analytics_status`
+- `profile_credits_status`
+- `retention_offer_check`
+- `retention_offer_apply`
+- `cancel_subscription`
 - `profile_lookup`
 - `credits_search`
 - `subscription_status`

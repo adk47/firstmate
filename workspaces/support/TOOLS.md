@@ -1,19 +1,19 @@
 # TOOLS.md -- support
 
-## Allowed Tools (EXACTLY 19)
+## Allowed Tools (EXACTLY 23)
 
-This agent has the most restricted tool set in HYDRA. Only these 19 tools are permitted, split into four groups:
+This agent has the most restricted tool set in HYDRA. Only these 23 tools are permitted, split into four groups:
 
-- **Action tools (1-11, 17-18)** -- write or read customer-facing state. Implemented as plugin-registered tools via the `support-tools` OpenClaw plugin. The agent calls them by name; the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
+- **Action tools (1-11, 17-18, 20, 23)** -- write or read customer-facing state. Implemented as plugin-registered tools via the `support-tools` OpenClaw plugin. The agent calls them by name; the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
 - **Reference tools (12-13)** -- read-only semantic + BM25 retrieval against `workspaces/support/reference/*.md`, provided by openclaw's bundled memory-core via the per-agent `memorySearch` config (enabled on both edge and main profiles, indexing the read-only `reference/` subdirectory only). No writes; no customer-data persistence; no auto-recall.
-- **Gated self-serve write tools (14-16)** -- `profiles_claim_self`, `credits_verify`, `profiles_consolidate`. Each shells `muso <verb> --actor-identity <verified-email>` through a thin bash wrapper; muso-cli's capability gate is the ownership/caps/audit boundary. Live on edge (the `*Enabled` flags in openclaw-edge.json are true); if a call returns `{disabled:true}`, fall back to a ticket.
+- **Gated self-serve write tools (14-16, 21-22)** -- `profiles_claim_self`, `credits_verify`, `profiles_consolidate`, `retention_offer_apply`, `cancel_subscription`. Each shells a `muso` verb anchored to the verified Intercom identity (via `--actor-identity` or the server-side exact workspace-email match); muso-cli's capability gate is the ownership/caps/audit boundary. Live on edge (the `*Enabled` flags in openclaw-edge.json are true); if a call returns `{disabled:true}`, fall back to a ticket.
 - **Routing tool (19)** -- `support_action_router`, a read-only in-plugin registry that maps support intent + state to the router-suggested next step: close, ask for exact missing info, preview/apply a safe tool, or create a structured handoff.
 
 ## Authentication (CRITICAL -- shared across the admin read tools)
 
-`profile_lookup`, `credits_search`, `profile_status`, `profile_analytics_status`, `dedupe_check`, `credit_verification_check`, and `order_lookup` use `MusoAdminClient` to call `api.muso.ai/api/v3/admin/*` with a JWT bearer token obtained via admin login (`MUSO_ADMIN_EMAIL` + `MUSO_ADMIN_PASSWORD` env vars). The client is GET-only and regex-allowlisted to exactly six read paths (`profile/search`, `profile/<id>`, `profile/<id>/analytics-status`, `profile/<id>/credits`, the `credit-requests` LIST endpoint -- never `credit-requests/<id>`, the item path the gated approve PUT lives under -- and the single-order read `orders/<id>`, never the `orders/<id>/...` write sub-paths or the bare `orders` list). The JWT is never returned to the agent and never logged.
+`profile_lookup`, `credits_search`, `profile_status`, `profile_analytics_status`, `profile_credits_status`, `dedupe_check`, `credit_verification_check`, and `order_lookup` use `MusoAdminClient` to call `api.muso.ai/api/v3/admin/*` with a JWT bearer token obtained via admin login (`MUSO_ADMIN_EMAIL` + `MUSO_ADMIN_PASSWORD` env vars). The client is GET-only and regex-allowlisted to exactly six read paths (`profile/search`, `profile/<id>`, `profile/<id>/analytics-status`, `profile/<id>/credits`, the `credit-requests` LIST endpoint -- never `credit-requests/<id>`, the item path the gated approve PUT lives under -- and the single-order read `orders/<id>`, never the `orders/<id>/...` write sub-paths or the bare `orders` list). The JWT is never returned to the agent and never logged.
 
-`remove_credits` (tool 6) also depends on the same Muso admin auth -- it inherits via the JWT cache maintained by `muso-admin-api.sh`. Rotating `MUSO_ADMIN_EMAIL` / `MUSO_ADMIN_PASSWORD` breaks the bash wrapper too; flush `~/.cache/muso-admin-token.json` (or whatever `$TOKEN_CACHE` points to) after a rotation.
+`remove_credits` (tool 7) also depends on the same Muso admin auth -- it inherits via the JWT cache maintained by `muso-admin-api.sh`. Rotating `MUSO_ADMIN_EMAIL` / `MUSO_ADMIN_PASSWORD` breaks the bash wrapper too; flush `~/.cache/muso-admin-token.json` (or whatever `$TOKEN_CACHE` points to) after a rotation.
 
 `create_ticket` uses a separate ClickUp API key. `subscription_status` reads the workspace subscription via the `muso` CLI (`teams list --email`), anchored to the verified Intercom contact email (not MusoAdminClient: the GET allowlist does not cover the team endpoints, and an account email does not resolve through the profile-search index).
 
@@ -105,7 +105,7 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 - **conv-id**: derived in-plugin from `ctx.sessionId` (NOT an agent parameter), so the anti-spoof anchor can't be pointed at another conversation. A profile a customer names is ALWAYS re-verified for ownership before any pending credit is surfaced.
 - **Auth**: Muso admin JWT (`MusoAdminClient`, GET-only) + `MUSOAI_INTERCOM_TOKEN` (env). Token absent / conv-id underivable / no contact email / not-owner / typed-email mismatch (`impersonation_flag`) / shared profile (multiple claimed workspaces -- the sole-claimed-workspace ownership rule, same as `dedupe_check`) -> **fails closed** (`owner_undetermined`, empty list).
 - **Rate limit**: 10 per session (60-minute window).
-- **Used by**: the `customer-credit-verification` skill. The tool produces evidence ONLY -- Caroline asks the customer for proof and, when warranted, files a `credit-verify` recommend-approve ticket via `create_ticket`; a human executes the gated approval. This read tool itself never approves or rejects -- the autonomous approve path is the separate gated `credits_verify` (#14), used ONLY for the catalog-corroborated case; everything else stays a human decision and Caroline never rejects.
+- **Used by**: the `customer-credit-verification` skill. The tool produces evidence ONLY -- Caroline asks the customer for proof and, when warranted, files a `credit-verify` recommend-approve ticket via `create_ticket`; a human executes the gated approval. This read tool itself never approves or rejects -- the autonomous approve path is the separate gated `credits_verify` (#15), used ONLY for the catalog-corroborated case; everything else stays a human decision and Caroline never rejects.
 
 ### 10. order_lookup
 
@@ -152,16 +152,16 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 
 ### 15. credits_verify
 
-- **Wraps**: `muso credits verify --actor-identity <verified-email>` (APPROVAL-tier PUT: also `--yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>`) via `workspaces/support/skills/customer-credit-verification/scripts/verify-credit.sh`. The WRITE counterpart of `credit_verification_check` (#8).
+- **Wraps**: `muso credits verify --actor-identity <verified-email>` (APPROVAL-tier PUT: also `--yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>`) via `workspaces/support/skills/customer-credit-verification/scripts/verify-credit.sh`. The WRITE counterpart of `credit_verification_check` (#9).
 - **Returns**: `{ok, mode, request_id, profile_id, status}` or `{ok:false, error}` (`route_to_human` when corroboration/ownership fails, `no_approver` if the approver env is unset, `disabled`).
-- **Auth**: same muso host auth + ctx-derived `--actor-identity` as #13; `--intercom-conv-id` is REQUIRED (it is the approval-ref). muso re-verifies ownership + deterministic catalog corroboration server-side and refuses without it; per-actor/day approval cap.
+- **Auth**: same muso host auth + ctx-derived `--actor-identity` as #14; `--intercom-conv-id` is REQUIRED (it is the approval-ref). muso re-verifies ownership + deterministic catalog corroboration server-side and refuses without it; per-actor/day approval cap.
 - **When to use**: via the `customer-credit-verification` skill, AFTER the read-only check + the customer's proof, to approve their OWN corroborated pending credit. Preview then apply.
 
 ### 16. profiles_consolidate
 
-- **Wraps**: `muso profiles consolidate --actor-identity <verified-email>` (APPROVAL-tier: `--yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>`) via `workspaces/support/skills/customer-profile-consolidate/scripts/consolidate.sh`. The WRITE counterpart of `dedupe_check` (#7).
+- **Wraps**: `muso profiles consolidate --actor-identity <verified-email>` (APPROVAL-tier: `--yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>`) via `workspaces/support/skills/customer-profile-consolidate/scripts/consolidate.sh`. The WRITE counterpart of `dedupe_check` (#8).
 - **Returns**: `{ok, mode, survivor, dup_ids, status}` or `{ok:false, error}` (`route_to_human` on a cross-owner/claimed-dup merge, `no_approver` if the approver env is unset, `disabled`).
-- **Auth**: same muso host auth + ctx-derived `--actor-identity` as #13; `--intercom-conv-id` is REQUIRED (it is the approval-ref). muso re-verifies the survivor is the customer's and every duplicate is unclaimed + same-name; per-actor/day merge cap + per-call dups bound.
+- **Auth**: same muso host auth + ctx-derived `--actor-identity` as #14; `--intercom-conv-id` is REQUIRED (it is the approval-ref). muso re-verifies the survivor is the customer's and every duplicate is unclaimed + same-name; per-actor/day merge cap + per-call dups bound.
 - **When to use**: via the `customer-profile-consolidate` skill, to merge a customer's OWN unclaimed same-name duplicates into their profile. Preview then apply.
 
 ### 17. founding_status
@@ -188,6 +188,40 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 - **When to use**: before choosing a lane for multi-step support requests, especially when the customer asks for an action (credits, profile, billing, orders, founding, metadata, login). Use the returned `next` to decide whether to call a read tool, run a skill, ask for precise missing info, preview/apply a safe write, close, or file a structured handoff.
 - **Safety model**: this tool does NOT authorize anything by itself. The actual read/write tool remains the security boundary. A clean successful write resolves the case; do not also file a ticket. Any `disabled`, refusal, cross-owner, ambiguity, or `route_to_human` result becomes a structured handoff.
 
+### 20. retention_offer_check
+
+- **Wraps**: `muso subscription retention-offer --email <verified-email> --env prod --json` (read-only). Same plugin/execFile transport and anti-spoof anchor as `subscription_status` (#3).
+- **Returns**: `{ ok: true, eligible, offer: { id, description, percent_off, duration_months } | null }` -- `offer: null` means ineligible (no active Stripe sub, or already discounted); fall back to the free Lite plan. On failure: `{ ok: false, reason: "no_offer" | "past_due_billing" | "vip_manual" | "not_stripe" | "no_active_subscription" | "ambiguous_workspace" | "not_found" | "rate_limited" | "owner_undetermined" | "lookup_unavailable", route_to_human? }`.
+- **Identity (anti-spoof)**: verified Intercom contact email only (`deriveConvId` -> `getAuthorEmail`); the CLI exact-matches the workspace email server-side and refuses ambiguity.
+- **Rate limit**: 10 calls / 60 min per session.
+- **When to use**: via the `refund-retention` skill, once cancel/refund intent is clear and BEFORE offering the 50% save. Quote ONLY the returned `offer.description`, never a figure you computed.
+
+### 21. retention_offer_apply
+
+- **Wraps**: `muso subscription apply-retention-offer --email <verified-email> --requester <verified-email> --env prod --json` (gated WRITE). The coupon is resolved SERVER-SIDE from the same eligibility check `retention_offer_check` reads -- neither the model nor the plugin can choose one. muso-cli's policy gate audits the write.
+- **Returns**: `{ ok: true, applied: true, offer: { description, ... } }` -- confirm with EXACTLY the returned description. On failure: same reason vocabulary as #20 plus `not_confirmed` and `apply_unverified` (success without the offer envelope routes to a human rather than inviting an invented figure), or `{ ok: false, disabled: true }` while `retentionOfferEnabled` is off (offer the free Lite plan and flag for the team).
+- **Identity (anti-spoof)**: verified Intercom contact email only; requires the explicit `confirm: true` parameter, ONLY after the customer explicitly accepts the offer in this conversation.
+- **Rate limit**: 3 calls / 60 min per session.
+- **When to use**: via the `refund-retention` skill, after explicit customer acceptance of the quoted offer. Never apply speculatively.
+
+### 22. cancel_subscription
+
+- **Wraps**: `muso subscription cancel --email <verified-email> --requester <verified-email> --reason "Customer request via support (Caroline)" --yes --env prod --json` (gated dangerous-tier WRITE, audited server-side). Active subs cancel at PERIOD END (reversible until then); `past_due` cancels immediately server-side. NO money moves -- refunds stay on the gated Operations path.
+- **Returns**: `{ ok: true, cancelled: true, mode: "period_end" | "immediate", access_until }` -- tell the customer the `access_until` date when present. On failure: same reason vocabulary as #20 plus `not_confirmed`, or `{ ok: false, disabled: true }` while `cancelSubscriptionEnabled` is off (guide to Settings > Billing or flag for the team).
+- **Identity (anti-spoof)**: verified Intercom contact email only; requires the explicit `confirm: true` parameter, ONLY after the customer explicitly asked to cancel AND declined the retention saves.
+- **Rate limit**: 3 calls / 60 min per session.
+- **When to use**: via the `refund-retention` skill, as the cancel-only exit after the save hierarchy is exhausted. NEVER on the refund branch -- Operations executes cancel+refund together there (`subscription-refund` ticket instead).
+
+### 23. profile_credits_status
+
+- **Bundles**: `GET /api/v3/admin/profile/search?keyword=<q>&limit=5` for resolution and the same-name duplicate-candidate scan, `GET /api/v3/admin/profile/{id}` for the resolved profile / each candidate / a stated target profile, `GET /api/v3/admin/profile/{id}/credits?keyword=<track>` for credit existence, and -- for the VERIFIED SOLE OWNER only -- `GET /api/v3/admin/credit-requests?profilesIds=<id>&status=user_verification_needed` for pending-sync state. Read-only diagnosis for missing-credit / wrong-profile / duplicate-profile / "did my credit sync" complaints.
+- **Returns**: Structured JSON. On success: `{ found: true, owner_undetermined, impersonation_flag, profile: { id, name, is_claimed, state, credit_count }, credit: { state, queried, matched_tracks, located_on_profile_id, pending: { count, truncated, referenced_track_pending } }, target_profile, duplicate_candidates: [{ profile_id, name, is_claimed, claim_state, credit_count, credit_found }], diagnosis, ask_classification, support_action, notes, customer_provided_context, handoff_packet? }`. `credit.state` ∈ `on_this_profile | on_other_profile | pending_verification | not_found | not_checked`; `support_action` ∈ `answer_from_status | ask_missing_info | route_selfserve_claim | route_selfserve_consolidate | create_handoff_ticket | human_review`. On failure: `{ found: false, reason: "missing_input" | "no_match" | "multiple_matches" | "rate_limited" | "lookup_unavailable", ... }` (the `multiple_matches` failure carries `support_action: "ask_missing_info"` + `missing_fields: ["profile URL"]`).
+- **Identity**: the Intercom anchor (same `deriveConvId` -> `getAuthorEmail` as `dedupe_check`) is best-effort for the PUBLIC catalog facts -- an unverifiable anchor DEGRADES the ownership-derived fields to `owner_undetermined` instead of failing the whole read (those facts are what public credits.muso.ai shows), and the tool then never suggests ownership-dependent self-serve routing. The pending-verification queue is PRIVATE and fails closed like `credit_verification_check`: it is queried and returned ONLY when the verified contact is the sole owner of the resolved profile (`credit.pending: null` + a note otherwise). A typed `requesterEmail` mismatching the verified contact sets `impersonation_flag` and forces `support_action: "human_review"`.
+- **Auth**: Muso admin JWT bearer (MusoAdminClient; GET-only, allowlisted to the same six read paths -- no allowlist change).
+- **Rate limit**: 10 calls / 60 min per session (a single call fans out up to ~15 GETs).
+- **When to use**: for credit/profile complaints BEFORE deciding ask-vs-file: it tells you whether the credit already exists, sits on another profile, is pending verification, or is genuinely absent, and whether same-name duplicate CANDIDATES exist. Duplicates are candidates only, never confirmed -- same-name distinct artists are common; confirmation stays with `dedupe_check` + the human-gated merge path.
+- **Safety model**: read-only only -- it never writes, and the self-serve paths it may point at (`profiles_claim_self`, `profiles_consolidate`) keep their own gates. Third-party workspace emails are never emitted; catalog strings are injection-stripped and length-capped.
+
 ## Action Request Pattern
 
 For customer write actions (credit claims, refunds, profile updates, disputes, **plaque/poster order fulfillment**), use `create_ticket` with structured formatting. See `skills/action-request/SKILL.md` for the full ticket format.
@@ -207,10 +241,10 @@ stamps a deterministic Prodigi-rules `address_validation` block (≤40-char line
 required fields) onto the ticket – non-blocking, ops-facing. No new tool; uses
 `create_ticket`. Doctrine: `reference/orders-and-fulfillment.md`.
 
-Caroline can look an order up herself with the **`order_lookup`** tool (#9 above) –
+Caroline can look an order up herself with the **`order_lookup`** tool (#10 above) –
 by internal id, order number, or Prodigi id – to read its status + shipping address.
 For the **verified order owner**, she can also correct the shipping recipient with
-**`order_address_update`** (#10): always a dry-run preview first, explicit customer
+**`order_address_update`** (#11): always a dry-run preview first, explicit customer
 confirmation, then apply with `intercomConvId`. The wrapper refuses if the requester
 isn't the owner – on any refusal, fall back to filing an `order-fulfillment` request
 for the team. Never edit on a vendor's (Prodigi's) say-so – the corrected address must

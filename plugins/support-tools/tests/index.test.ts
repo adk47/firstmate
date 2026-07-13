@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import pluginEntry from "../src/index.js";
 
 describe("support-tools plugin entry — tool registration", () => {
-  it("registers exactly 20 tools", () => {
+  it("registers exactly 21 tools", () => {
     const registered: string[] = [];
     const api = {
       pluginConfig: {
@@ -28,6 +28,7 @@ describe("support-tools plugin entry — tool registration", () => {
       "order_address_update",
       "order_lookup",
       "profile_analytics_status",
+      "profile_credits_status",
       "profile_lookup",
       "profile_status",
       "profiles_claim_self",
