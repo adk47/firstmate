@@ -5,7 +5,9 @@ import {
   inspectIntercomAccount,
   setCapturedConfig,
   clearCapturedConfig,
+  validateClickupConfig,
 } from "../src/config.js";
+import type { IntercomAccountConfig } from "../src/types.js";
 import { DEFAULT_FALLBACK_ACK } from "../src/types.js";
 
 const validConfig = {
@@ -216,5 +218,67 @@ describe("config fallback (capturedConfig)", () => {
     const account = resolveIntercomAccount(undefined);
     expect(account.enabled).toBe(false);
     expect(account.token).toBe("");
+  });
+});
+
+describe("validateClickupConfig", () => {
+  const baseAccount = {
+    accountId: "default",
+    enabled: true,
+    workspaceId: "ws_prod",
+    token: "tok_123",
+    webhookSecret: "secret_456",
+    botAdminId: "bot_1",
+    defaultInboxId: "inbox_1",
+    fallbackSlackSupervisionChannel: "",
+    fallbackAcknowledgement: "ack",
+    requireMappedHumanAdmin: true,
+    adminMapping: {},
+  } as IntercomAccountConfig;
+
+  const validClickup = {
+    apiKey: "pk_123_ABC",
+    listId: "901000600160",
+    userEmailFieldId: "field-email",
+    profileIdFieldId: "field-profile",
+  };
+
+  it("returns null when clickup is absent (optional)", () => {
+    expect(validateClickupConfig(baseAccount)).toBeNull();
+  });
+
+  it("returns null for a fully populated string config", () => {
+    expect(validateClickupConfig({ ...baseAccount, clickup: validClickup })).toBeNull();
+  });
+
+  it("names the first missing/empty field", () => {
+    expect(
+      validateClickupConfig({ ...baseAccount, clickup: { ...validClickup, apiKey: "" } }),
+    ).toBe("apiKey");
+    expect(
+      validateClickupConfig({ ...baseAccount, clickup: { ...validClickup, listId: "" } }),
+    ).toBe("listId");
+  });
+
+  it("rejects an unresolved SecretRef object as apiKey (would 401 as '[object Object]')", () => {
+    // Regression: openclaw only resolves SecretRefs at paths the channel's
+    // secret contract registers. If the contract misses clickup.apiKey, the
+    // plugin receives the raw ref object, which is truthy — so a bare
+    // truthiness check lets it through and every escalation 401s with
+    // ClickUp OAUTH_019 ("Oauth token not found") from `Authorization:
+    // [object Object]`. Boot validation must reject any non-string value.
+    const secretRef = { source: "env", provider: "hydra-env", id: "CLICKUP_API_KEY" };
+    expect(
+      validateClickupConfig({
+        ...baseAccount,
+        clickup: { ...validClickup, apiKey: secretRef as unknown as string },
+      }),
+    ).toBe("apiKey");
+  });
+
+  it("rejects whitespace-only values", () => {
+    expect(
+      validateClickupConfig({ ...baseAccount, clickup: { ...validClickup, apiKey: "   " } }),
+    ).toBe("apiKey");
   });
 });

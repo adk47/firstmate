@@ -253,6 +253,28 @@ entry; the next start hard-fails config validation, and with systemd
 only the channel reference is fatal). Remove the `channels.<name>` block first and
 restart once to confirm a clean validate before walking away.
 
+**SecretRefs resolve ONLY at registered target paths; an unregistered ref reaches
+the plugin RAW.** openclaw walks a secret-target registry, not the whole config
+tree: plugin-config refs (`plugins.entries.<id>.config.*`) come from the plugin's
+declared `secretInputs`, and channel refs (`channels.<id>...`) come from the
+channel's `secret-contract-api` module. A `{source, provider, id}` ref at any
+OTHER path is handed through as the raw object — stringified into an HTTP header
+it becomes `Authorization: [object Object]`, which ClickUp answers with 401
+OAUTH_019 "Oauth token not found" even though the token is VALID (incident
+2026-07-06→12: #617 added `channels.intercom.accounts.*.clickup.apiKey` as a ref
+without extending `plugins/intercom/src/secret-contract-api.ts`, which only
+registered `accounts.*.token`; every escalation ticket 401'd for 6 days while the
+same env token worked fine from cron shell scripts, which read `process.env` and
+need no contract). Diagnose by probing the env token directly (200 = token fine)
+and replaying `Authorization: [object Object]` (reproduces the error
+byte-for-byte). Two rules: (1) any NEW SecretRef under a custom channel's config
+needs a registry entry + collector in that channel's secret contract — for nested
+per-account fields use the SDK's `collectNestedChannelFieldAssignments`
+(`collectSimpleChannelFieldAssignments` is flat-only and silently skips them);
+(2) boot validation must TYPE-check secret values (`typeof === "string"`,
+non-empty) — an unresolved ref object is truthy, so a bare truthiness check waves
+it through and the failure stays silent until the first real call.
+
 ### MCP
 
 **Remote MCP must use `transport: "streamable-http"`, never `npx mcp-remote`.**

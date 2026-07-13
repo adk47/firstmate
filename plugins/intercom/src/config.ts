@@ -127,10 +127,13 @@ export function resolveIntercomAccount(
   };
 }
 
-// Validate that account.clickup, when present, has all required fields populated.
-// Returns null if config is fully valid; otherwise returns the name of the first
-// missing/empty field. Use at boot to fail loudly rather than getting silent
-// 401s from ClickUp on every escalation.
+// Validate that account.clickup, when present, has all required fields populated
+// with non-empty STRINGS. Returns null if config is fully valid; otherwise returns
+// the name of the first missing/invalid field. Use at boot to fail loudly rather
+// than getting silent 401s from ClickUp on every escalation. The typeof check is
+// load-bearing: an unresolved SecretRef ({source, provider, id} — handed through
+// raw when the secret contract misses the path) is truthy, and stringifies into
+// `Authorization: [object Object]` → ClickUp OAUTH_019 on every ticket POST.
 export function validateClickupConfig(account: IntercomAccountConfig): string | null {
   if (!account.clickup) return null; // ClickUp is optional
   const required: (keyof NonNullable<IntercomAccountConfig["clickup"]>)[] = [
@@ -140,7 +143,8 @@ export function validateClickupConfig(account: IntercomAccountConfig): string | 
     "profileIdFieldId",
   ];
   for (const key of required) {
-    if (!account.clickup[key]) return key;
+    const value = account.clickup[key];
+    if (typeof value !== "string" || value.trim() === "") return key;
   }
   return null;
 }

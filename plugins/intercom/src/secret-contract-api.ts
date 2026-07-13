@@ -29,6 +29,7 @@
 import {
   getChannelSurface,
   collectSimpleChannelFieldAssignments,
+  collectNestedChannelFieldAssignments,
   type SecretTargetRegistryEntry,
   type ResolverContext,
   type SecretDefaults,
@@ -57,6 +58,23 @@ export const secretTargetRegistryEntries: SecretTargetRegistryEntry[] = [
     includeInConfigure: true,
     includeInAudit: true,
   },
+  // The ClickUp escalation-ticket key lives NESTED under each account
+  // (`accounts.*.clickup.apiKey`); there is deliberately no top-level variant.
+  // This entry existing is what makes openclaw resolve the SecretRef in
+  // openclaw-edge.json — without it the plugin receives the raw ref object and
+  // every escalation ticket POST 401s (ClickUp OAUTH_019, `Authorization:
+  // [object Object]`), which is how it shipped broken from 2026-07-06 to -07-12.
+  {
+    id: "channels.intercom.accounts.*.clickup.apiKey",
+    targetType: "channels.intercom.accounts.*.clickup.apiKey",
+    configFile: "openclaw.json",
+    pathPattern: "channels.intercom.accounts.*.clickup.apiKey",
+    secretShape: "secret_input",
+    expectedResolvedValue: "string",
+    includeInPlan: true,
+    includeInConfigure: true,
+    includeInAudit: true,
+  },
 ];
 
 export function collectRuntimeConfigAssignments(params: {
@@ -75,6 +93,19 @@ export function collectRuntimeConfigAssignments(params: {
     defaults: params.defaults,
     context: params.context,
     topInactiveReason: "no enabled account inherits this top-level Intercom token.",
+    accountInactiveReason: "Intercom account is disabled.",
+  });
+  collectNestedChannelFieldAssignments({
+    channelKey: "intercom",
+    nestedKey: "clickup",
+    field: "apiKey",
+    channel: intercom,
+    surface,
+    defaults: params.defaults,
+    context: params.context,
+    topLevelActive: false,
+    topInactiveReason: "ClickUp escalation config is per-account only.",
+    accountActive: (entry) => entry.enabled,
     accountInactiveReason: "Intercom account is disabled.",
   });
 }
