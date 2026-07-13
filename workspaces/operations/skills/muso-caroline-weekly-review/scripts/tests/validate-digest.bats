@@ -59,6 +59,30 @@ mutate() {  # $1 = source fixture, $2 = jq program -> $WORKDIR/digest.json
   [[ "$output" == *"hallucinated"* ]]
 }
 
+@test "finding id present only in email-leak audit.jsonl passes" {
+  mutate "$WORKDIR/digest-daily.json" \
+    '.findings += [{"dimension":"voice","severity":"P0","text":"1 internal email echo caught","conversation_ids":["215474000000077"]}] | .severity.p0 = 1'
+  printf '%s\n' '{"kind":"leak","marker":"email-leak","leak_class":"internal","snippet":"Jul 10 21:24:00 host openclaw[1]: [intercom:email-leak] conv=215474000000077 count=1 redacted=[\"<email>\"]"}' >> "$WORKDIR/audit.jsonl"
+  run_validate "$WORKDIR/digest.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "theme id present only in audit.jsonl still fails (no audit carve-out for themes)" {
+  mutate "$WORKDIR/digest-daily.json" \
+    '.themes[0].conversation_ids = ["215474000000099"]'
+  run_validate "$WORKDIR/digest.json"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"215474000000099"* ]]
+  [[ "$output" == *"themes/kb"* ]]
+}
+
+@test "malformed audit.jsonl line fails closed with a loud error" {
+  printf '%s\n' 'NOT VALID JSON' >> "$WORKDIR/audit.jsonl"
+  run_validate "$WORKDIR/digest-daily.json"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"failing closed"* ]]
+}
+
 @test "guard item id present only in audit.jsonl passes (escalation carve-out)" {
   mutate "$WORKDIR/digest-daily.json" \
     '.guard.items = [{"type":"unanswered_escalation","conversation_id":"215474000000099"}] | .guard.caught_escalated = 1 | .severity.p1 = 1'

@@ -65,6 +65,18 @@ A credit links a profile to a track or album:
 
 This flow assumes the claimant IS the artist. When a manager, publisher, or label needs access on an artist's behalf (e.g. the artist has no social media), this self-claim flow does NOT apply – see `common-issues.md` row 2b (on-behalf claims, manual admin review).
 
+### Company and Label Profile Claims
+Company, label, studio, publisher, and management profiles are reviewed
+manually. Do not send the customer through the artist self-claim flow unless
+they are trying to claim their own artist profile.
+
+Collect the exact company or label profile link, the customer's Muso account
+email, their relationship to the company, and proof of authority such as a
+company website, company email domain, business registration, contract, letter
+of authorization, or roster/admin screenshot. If they are claiming access to
+artist profiles through that company, collect the artist profile links and the
+roster or authorization proof in the same ticket.
+
 ### Verification Types
 - **Profile Verification**: Legal identity verification via ID card scan (third-party, privacy-preserving)
 - **Artist Verification**: Social media account login proving access to artist page

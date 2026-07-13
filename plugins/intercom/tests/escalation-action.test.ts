@@ -34,6 +34,8 @@ const account = {
   adminMapping: {},
 } as IntercomAccountConfig;
 
+const ANY_EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+
 const assessment: RiskAssessment = {
   triggered: true,
   source: "rule",
@@ -92,7 +94,8 @@ describe("executeEscalation", () => {
     });
     expect(farewellBody).toContain("5-10 business days");
     expect(farewellBody).toContain("T1");
-    expect(farewellBody).toContain("support-customer@example.com");
+    expect(farewellBody).toContain("follow up here");
+    expect(farewellBody).not.toMatch(ANY_EMAIL);
   });
 
   it("uses the degraded farewell when ticket fails", async () => {
@@ -115,7 +118,33 @@ describe("executeEscalation", () => {
       log: { info: () => {}, warn: () => {}, error: () => {} },
     });
     expect(farewellBody).not.toContain("Reference");
-    expect(farewellBody).toContain("shortly");
+    expect(farewellBody).toContain("follow up here shortly");
+    expect(farewellBody).not.toMatch(ANY_EMAIL);
+  });
+
+  it("does not echo internal emails in the degraded farewell", async () => {
+    const state = makeState();
+    state.knownFacts = { accountEmail: "operations@muso.ai" };
+    let farewellBody = "";
+    await executeEscalation({
+      state,
+      conversationId: "conv1",
+      assessment,
+      currentMessage: "i want a refund please",
+      account,
+      client: {
+        replyToConversation: async (p) => { farewellBody = p.body; return { messageId: "m1" }; },
+        assignConversation: async () => {},
+        getConversation: async () => ({} as any),
+      },
+      saveState: async () => {},
+      createTicket: async () => ({ ok: false, error: "ClickUp 503" }),
+      postSlack: async () => {},
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    });
+    expect(farewellBody).toContain("follow up here shortly");
+    expect(farewellBody).not.toContain("operations@muso.ai");
+    expect(farewellBody).not.toMatch(ANY_EMAIL);
   });
 
   it("prepends 'Got it — ' for magic-keyword path", async () => {

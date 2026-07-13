@@ -232,9 +232,13 @@ If the tool call did not succeed, do not say you escalated. Either retry the too
    - If no: check if they have any old emails from Muso.AI to find the correct address.
 2. Direct them to use "Forgot Password" on the login page.
 3. If they signed up via social login (Google, Apple, etc.): try that login method instead of email/password.
-4. If they reset the password and still can't log in:
+4. If they did not receive a password reset or verification email:
+   - Ask them to check spam/promotions and confirm the email address they tried.
+   - If they used Apple or Google login, have them try that login method instead of waiting for an email link.
+   - Do not tell them to email support or move channels. If the email still is not arriving, file the login ticket below.
+5. If they reset the password and still can't log in:
    - Check if they're using the right email – common issue is having multiple email addresses.
-5. If still unable to log in after all steps:
+6. If still unable to log in after all steps:
    - **Escalate:** Create a ticket with category "Login – Account Access". Include: account email (or emails they've tried), login method (email/social), error message if any. SLA: 1 business day.
 
 ---

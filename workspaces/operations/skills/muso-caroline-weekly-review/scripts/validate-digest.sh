@@ -22,10 +22,11 @@
 #   - scores.tools "skipped" iff the join-key prereq is unavailable
 #     (CV_TOOL_CTX_CONVERSATION_ID, exported by preflight.sh — a numeric score
 #     without the join key is fabricated; "skipped" with it available is lazy)
-#   - ANTI-HALLUCINATION: every cited conversation_id must exist in
-#     conversations.jsonl. Carve-out (mirrors the SKILL.md hard rule): guard
-#     items may cite ids from audit.jsonl instead — an ESCALATED conv had its
-#     reply suppressed and is absent from the fetch by design.
+#   - ANTI-HALLUCINATION: every cited conversation_id must exist in evidence.
+#     Findings and guard items may cite ids from audit.jsonl because caught
+#     guardrail/leak events can be absent from the sampled conversation fetch.
+#     Themes and KB candidates still require conversations.jsonl so customer
+#     counts can be recomputed mechanically.
 #   - kb_gap_candidates: weekly only, and each must have a RECOMPUTED
 #     unique_customers >= 3 (they feed KB-edit automation; daily must be empty).
 # Optional env: CAROLINE_EXPECTED_KIND (daily|weekly) — set by the SKILL
@@ -144,15 +145,30 @@ audit_ids_file=$(mktemp)
 trap 'rm -f "$conv_ids_file" "$audit_ids_file"' EXIT
 jq -r '.id // empty' "$CONVS" 2>/dev/null | sort -u > "$conv_ids_file"
 if [ -n "$AUDIT" ] && [ -f "$AUDIT" ]; then
-  jq -r 'select(.kind == "reasoning_leak") | .conv // empty' "$AUDIT" 2>/dev/null | sort -u > "$audit_ids_file"
+  # fail CLOSED and LOUD on malformed audit lines: a silently-partial id list
+  # would mislabel valid audit-sourced ids as hallucinated
+  if ! jq -r '
+    def conv_from_snippet: (.snippet // "" | tostring | scan("conv[= ]([0-9]{15,16})") | .[0]);
+    select(.kind == "reasoning_leak" or .kind == "leak")
+    | (.conv // conv_from_snippet // empty)
+  ' "$AUDIT" 2>/dev/null | sort -u > "$audit_ids_file"; then
+    echo "validate-digest: audit.jsonl unreadable or malformed - failing closed" >&2
+    exit 1
+  fi
 fi
 
 while IFS= read -r id; do
   [ -n "$id" ] || continue
+  if ! grep -qx "$id" "$conv_ids_file" && ! grep -qx "$id" "$audit_ids_file"; then
+    fail "conversation_id $id (finding) not present in conversations.jsonl OR audit.jsonl - hallucinated evidence is a hard stop"
+  fi
+done < <(jq -r '[((.findings // [])[] | (.conversation_ids // [])[])] | unique | .[]' "$DIGEST")
+
+while IFS= read -r id; do
+  [ -n "$id" ] || continue
   grep -qx "$id" "$conv_ids_file" \
-    || fail "conversation_id $id (findings/themes/kb) not present in conversations.jsonl - hallucinated evidence is a hard stop"
+    || fail "conversation_id $id (themes/kb) not present in conversations.jsonl - hallucinated evidence is a hard stop"
 done < <(jq -r '[
-    ((.findings // [])[] | (.conversation_ids // [])[]),
     ((.themes // [])[] | (.conversation_ids // [])[]),
     ((.kb_gap_candidates // [])[] | (.conversation_ids // [])[])
   ] | unique | .[]' "$DIGEST")

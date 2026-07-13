@@ -37,13 +37,13 @@ export interface ExecuteEscalationDeps {
   log: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
 }
 
-function buildFarewell(assessment: RiskAssessment, ticket: TicketResult, email: string): string {
+function buildFarewell(assessment: RiskAssessment, ticket: TicketResult): string {
   const isMagic = assessment.source === "user_request";
   const prefix = isMagic ? "Got it — " : "";
   if (ticket.ok && ticket.ticketId && ticket.sla) {
-    return `${prefix}I'm pulling in a teammate to take this from here. They'll follow up at ${email} within ${ticket.sla}. Reference: ${ticket.ticketId}.`;
+    return `${prefix}I'm pulling in a teammate to take this from here. They'll follow up here within ${ticket.sla}. Reference: ${ticket.ticketId}.`;
   }
-  return `${prefix}I'm pulling in a teammate to take this from here. They'll follow up at ${email} shortly.`;
+  return `${prefix}I'm pulling in a teammate to take this from here. We'll follow up here shortly.`;
 }
 
 const SUMMARY_PREFIX_BY_SOURCE: Record<NonNullable<RiskAssessment["source"]>, (reason: string) => string> = {
@@ -135,7 +135,7 @@ export async function executeEscalation(deps: ExecuteEscalationDeps): Promise<vo
     throw err;
   }
 
-  const email = state.knownFacts?.accountEmail ?? "your account email on file";
+  const email = state.knownFacts?.accountEmail ?? "unknown (no accountEmail on file)";
 
   // Step 2 — file ClickUp ticket.
   let ticket: TicketResult = { ok: false, error: "ticket creation skipped" };
@@ -161,7 +161,7 @@ export async function executeEscalation(deps: ExecuteEscalationDeps): Promise<vo
 
   // Step 3 — post farewell.
   let farewellOk = false;
-  const body = buildFarewell(assessment, ticket, email);
+  const body = buildFarewell(assessment, ticket);
   try {
     await client.replyToConversation({
       conversationId,
