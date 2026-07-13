@@ -26,6 +26,7 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
 **Customer says:** "I tried to claim my profile but nothing is happening" / "My claim was rejected."
 
 **Resolution path:**
+0. **Ground first**: call `profile_claim_status` with the profile URL, then branch on `own_claim_state`: `pending` with `route_selfserve_claim` → the `customer-profile-claim` skill can verify it now (take the returned `claim_id`); `rejected` → explain the returned reason and the resubmission path below; `processed` → the claim is already approved, this is an access question; `reverted` / `multiple` / any conflict or suspicion flag → file the `profile-claim` packet the tool suggests, never argue ownership. If it fails closed (identity unverified) continue below without asserting claim state.
 1. Ask: did they receive any email about the claim status?
    - If rejected: check the rejection reason in the email. Common reasons: name mismatch, unrecognised social account, insufficient documentation. Ask them to resubmit with a government-issued ID.
    - If no email at all: ask how long ago they submitted.
@@ -42,7 +43,7 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
 
 **Customer says:** "I manage this artist and need to claim their profile" / "The artist has no social media so they can't claim it" / "We have a contract that gives us the right to administer their catalog."
 
-This is an **on-behalf claim**, NOT a self-claim. The standard claim flow (the artist's own ID scan or social-media login) does not apply, and there is no self-service path for it. It always requires a manual admin review.
+This is an **on-behalf claim**, NOT a self-claim. The standard claim flow (the artist's own ID scan or social-media login) does not apply, and there is no self-service path for it. It always requires a manual admin review. `profile_claim_status` can still supply the facts for the packet (existing claims on the profile, conflicts), but on-behalf routing itself stays manual regardless of what it returns.
 
 **Resolution path:**
 1. NEVER tell the customer the artist must claim the profile themselves. If they have already explained the artist cannot complete self-claim (no social media, deceased, unreachable, contractual delegation), repeating the self-claim instructions is the single worst response – it is exactly what frustrated customers quote back at us.

@@ -28,17 +28,25 @@ already-verified claim does nothing).
   conversation, never from what the customer types); the gate refuses a claim
   that belongs to a different account. Always preview first (`apply:false`), tell
   the customer what will happen, then `apply:true`.
-- Reads you already have (`profile_status`, `credit_verification_check`,
-  `dedupe_check`) to find the profile/claim first.
+- `profile_claim_status` – read-only claim diagnosis. Run it FIRST: it resolves
+  the profile, returns the customer's own claim(s) with the `claim_id`, flags
+  competing claims and suspicion signals, and tells you whether self-serve is
+  appropriate (`support_action: route_selfserve_claim`) or a human packet is
+  (`create_handoff_ticket`). It fails closed when identity can't be verified.
+- Other reads (`profile_status`, `credit_verification_check`, `dedupe_check`)
+  for surrounding profile context.
 - `create_ticket` – fall back to this for anything you cannot resolve here.
 
 ## Flow
 
 1. **Bail out** if the customer is asking for a human, is frustrated, or this is
    going in circles – hand off with `create_ticket`.
-2. **Identify the pending claim.** From the customer's profile context, get the
-   `claimId` of the pending claim on the profile they want to own. If you cannot
-   find a single clear pending claim, do not guess – ask, or file for a human.
+2. **Identify the pending claim.** Call `profile_claim_status` with the profile
+   URL/id: take the `claim_id` from `own_claims` when it returns
+   `route_selfserve_claim`. If it returns anything else (conflict, suspicion
+   flags, rejected/reverted/multiple, fail-closed), do not guess and do not
+   proceed here – follow its `support_action` (answer from status, or file the
+   `profile-claim` packet it suggests).
 3. **Preview** – call `profiles_claim_self` with `apply:false`. Tell the customer
    plainly what you're about to verify (e.g. "I can confirm your profile claim
    now"). Get a clear yes.

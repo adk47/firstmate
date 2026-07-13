@@ -305,6 +305,28 @@ describe("createMusoAdminClient", () => {
     expect(bare).toEqual({ ok: false, status: 0, error: "path not allowlisted" });
   });
 
+  it("allows the claiming list + get-by-id reads but blocks the verify/reject/revert write sub-paths", async () => {
+    vi.mocked(http.post).mockResolvedValue(makeLoginResponse("tok"));
+    vi.mocked(http.get).mockResolvedValue({ ok: true, data: { data: { items: [] } } });
+
+    const client = createMusoAdminClient({
+      http,
+      musoApiBase: "https://api.muso.ai",
+      adminEmail: "admin@muso.ai",
+      adminPassword: "s3cret",
+    });
+
+    expect((await client.get("/api/v3/admin/claiming?profilesIds=abc-123&limit=21")).ok).toBe(true);
+    expect((await client.get("/api/v3/admin/claiming/456")).ok).toBe(true);
+
+    // Tripwire: the get-by-id regex must never match the POST action sub-paths
+    // that share the prefix (the claim verify/reject/revert write surface).
+    expect(await client.get("/api/v3/admin/claiming/456/verify")).toEqual({ ok: false, status: 0, error: "path not allowlisted" });
+    expect(await client.get("/api/v3/admin/claiming/456/reject")).toEqual({ ok: false, status: 0, error: "path not allowlisted" });
+    expect(await client.get("/api/v3/admin/claiming/456/revert")).toEqual({ ok: false, status: 0, error: "path not allowlisted" });
+    expect(await client.get("/api/v3/admin/claimingX")).toEqual({ ok: false, status: 0, error: "path not allowlisted" });
+  });
+
   it("allows a single-order read by id but blocks the write sub-paths and the bare list", async () => {
     vi.mocked(http.post).mockResolvedValue(makeLoginResponse("tok"));
     vi.mocked(http.get).mockResolvedValue({ ok: true, data: { data: { id: "abc" } } });

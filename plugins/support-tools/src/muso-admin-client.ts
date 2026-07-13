@@ -25,6 +25,14 @@ const ALLOWED_PATHS: RegExp[] = [
   // `/complete-for-free`) and NOT the bare `/orders` list (which embeds every
   // order's payment history).
   /^\/api\/v3\/admin\/orders\/[^/?]+(\?|$)/,
+  // Claim-request READS (profile_claim_status tool). Two entries, same scoping
+  // discipline as orders: the list is `?`/end-anchored, and the get-by-id's
+  // `[^/?]+` id segment cannot contain `/`, so neither regex can ever match the
+  // POST sub-paths that share the prefix (`/claiming/<id>/verify`, `/reject`,
+  // `/revert`). The client is structurally GET-only regardless (only get()
+  // exists), so this grants READ of claim rows and nothing else.
+  /^\/api\/v3\/admin\/claiming(\?|$)/,
+  /^\/api\/v3\/admin\/claiming\/[^/?]+(\?|$)/,
 ];
 
 const TOKEN_TTL_MS = 22 * 60 * 60 * 1000; // refresh 1h before the 23h bash cache expires

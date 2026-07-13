@@ -16,6 +16,7 @@
       "order_address_update",
       "dedupe_check",
       "profile_credits_status",
+      "profile_claim_status",
       "credit_verification_check",
       "profiles_claim_self",
       "credits_verify",

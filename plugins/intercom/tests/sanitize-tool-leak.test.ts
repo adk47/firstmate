@@ -30,6 +30,7 @@ describe("sanitizeToolLeak", () => {
       "memory_get",
       "profile_analytics_status",
       "profile_credits_status",
+      "profile_claim_status",
       "retention_offer_check",
       "retention_offer_apply",
       "cancel_subscription",

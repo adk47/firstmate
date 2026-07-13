@@ -48,6 +48,25 @@ describe("support_action_router", () => {
     });
   });
 
+  it("routes profile claims through the read-only claim-status resolver first", async () => {
+    const start = await call({ intent: "profile_claim" });
+    expect(start.ok).toBe(true);
+    expect(start.live_tools.read).toContain("profile_claim_status");
+    expect(start.next).toMatchObject({
+      outcome: "run_skill",
+      skill: "customer-profile-claim",
+      tool: "profile_claim_status",
+    });
+    // The resolver discovers the claim id now — it is no longer missing info.
+    expect(start.missing_info).toEqual(["Profile URL"]);
+
+    const readOk = await call({ intent: "profile_claim", state: "read_ok" });
+    expect(readOk.next).toMatchObject({ outcome: "call_tool", tool: "profiles_claim_self" });
+
+    const accountChange = await call({ intent: "account_profile_change" });
+    expect(accountChange.live_tools.read).toContain("profile_claim_status");
+  });
+
   it("exposes the live retention/cancel trio but keeps refunds handoff-only", async () => {
     const out = await call({ intent: "billing_cancel_refund", state: "read_ok" });
     expect(out.ok).toBe(true);
