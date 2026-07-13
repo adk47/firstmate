@@ -34,9 +34,15 @@ export async function createClickupTicket(
 
   const tier = getTierForAction(params.actionType);
   const sla = TIER_SLAS[tier];
-  const customFields: { id: string; value: string }[] = [
-    { id: cfg.userEmailFieldId, value: params.customerEmail },
-  ];
+  // ClickUp VALIDATES email-typed custom fields and 400s the whole task on a
+  // non-address value — including the "unknown@unknown" placeholder the
+  // escalation path substitutes when no accountEmail is on file (proven live
+  // 2026-07-13: 3 of the 58 OAUTH_019 backfill tickets failed exactly this
+  // way). Omit the field instead; the markdown body still carries the value.
+  const customFields: { id: string; value: string }[] = [];
+  if (params.customerEmail && params.customerEmail !== "unknown@unknown") {
+    customFields.push({ id: cfg.userEmailFieldId, value: params.customerEmail });
+  }
   if (params.customerProfileId) {
     customFields.push({ id: cfg.profileIdFieldId, value: params.customerProfileId });
   }

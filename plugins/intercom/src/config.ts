@@ -104,6 +104,11 @@ export function resolveIntercomAccount(
     adminMapping: account.adminMapping ?? {},
     riskAssessment: account.riskAssessment,
     clickup: account.clickup,
+    // Passthroughs for the dispatch lane-wedge mitigations. dispatchTimeoutMs
+    // shipped in #616 but was missing here, so the per-account override was
+    // silently dead (the default still applied downstream).
+    ...(typeof account.dispatchTimeoutMs === "number" ? { dispatchTimeoutMs: account.dispatchTimeoutMs } : {}),
+    ...(typeof account.coalesceDispatch === "boolean" ? { coalesceDispatch: account.coalesceDispatch } : {}),
     blockedChannelTags: Array.isArray(account.blockedChannelTags)
       ? account.blockedChannelTags.filter((t): t is string => typeof t === "string" && t.length > 0)
       : [],

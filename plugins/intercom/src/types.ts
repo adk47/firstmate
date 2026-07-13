@@ -242,6 +242,13 @@ export interface IntercomAccountConfig {
   // latency (~10-15s observed) and below openclaw's ~360s runtime stuck-session
   // abort. Default DEFAULT_DISPATCH_TIMEOUT_MS (90s) when absent.
   dispatchTimeoutMs?: number;
+  // Coalesce rapid-fire inbound messages per conversation: while one agent
+  // dispatch is in flight, later dispatch_to_agent events queue and are
+  // combined into the NEXT single dispatch (removes the overlapping-
+  // embedded_run trigger for upstream openclaw lane wedges, #97538).
+  // Webhook handling / escalation / state updates are NOT coalesced.
+  // Default ON; set false to restore one-dispatch-per-message behavior.
+  coalesceDispatch?: boolean;
 }
 
 // --- Intercom Client ---

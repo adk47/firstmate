@@ -88,6 +88,27 @@ describe("createClickupTicket (escalation path, shared ticket format)", () => {
   });
 });
 
+describe("no-email escalations (backfill 2026-07-13 finding)", () => {
+  it("omits the email custom field when the customer email is the unknown placeholder", async () => {
+    // ClickUp validates email-typed custom fields and 400s on "unknown@unknown"
+    // (proven live: 3 of the 58 OAUTH_019 backfill tickets failed exactly this
+    // way). An escalation with no accountEmail on file must still get a ticket.
+    const fetchImpl = makeFetch();
+    await createClickupTicket({ cfg: CFG, fetchImpl }, { ...PARAMS, customerEmail: "unknown@unknown" });
+    const body = JSON.parse((fetchImpl.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.custom_fields).toEqual([{ id: "pf", value: "prof_1" }]);
+    // The human-readable ticket body still says who to look for.
+    expect(body.markdown_description).toContain("unknown@unknown");
+  });
+
+  it("omits the email custom field when the email is empty", async () => {
+    const fetchImpl = makeFetch();
+    await createClickupTicket({ cfg: CFG, fetchImpl }, { ...PARAMS, customerEmail: "", customerProfileId: undefined });
+    const body = JSON.parse((fetchImpl.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.custom_fields).toEqual([]);
+  });
+});
+
 describe("vendored twin parity", () => {
   it("is byte-identical to plugins/support-tools/src/tools/ticket-format.ts", () => {
     const ours = readFileSync(new URL("../src/ticket-format.ts", import.meta.url), "utf8");

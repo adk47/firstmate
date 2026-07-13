@@ -42,9 +42,10 @@ import {
   type PersistedAttachment,
 } from "./attachments.js";
 import path from "node:path";
-import type { IntercomSessionState, IntercomWebhookPayload, KnownFacts, IntercomAccountConfig, EnrichmentState, KbSnippet } from "./types.js";
+import type { IntercomSessionState, IntercomWebhookPayload, KnownFacts, IntercomAccountConfig, EnrichmentState, KbSnippet, ImageAttachmentRef, DocumentAttachmentRef } from "./types.js";
 import { DEFAULT_JUDGE_MIN_TURNS, DEFAULT_TURN_HARD_CAP, DEFAULT_JUDGE_MODEL, DEFAULT_DISPATCH_TIMEOUT_MS } from "./types.js";
 import { buildKbRetrieveFn, renderKnowledgeBaseBlock, stripKnowledgeBase } from "./kb-retrieval.js";
+import { DispatchQueue } from "./dispatch-queue.js";
 
 // Module-level session store shared between startAccount (inbound) and sendText (outbound).
 // Keyed by accountId → conversationId → session state.
@@ -76,6 +77,85 @@ function resolveMediaRoot(stateDir: string): string {
   const workspaceDir = process.env.INTERCOM_MEDIA_WORKSPACE_DIR?.trim();
   if (workspaceDir) return workspaceDir;
   return path.join(stateDir, STATEDIR_MEDIA_FALLBACK);
+}
+
+// Download + persist a message's image/PDF attachments. Intercom CDN URLs are
+// signed with a ~30 min TTL, so this is invoked at webhook ARRIVAL (not at
+// dispatch drain time) and its promise is carried on the QueuedInboundMessage
+// so the message can be admitted to the dispatch queue BEFORE the download
+// resolves. NEVER rejects — resolves to the persisted entries (possibly []),
+// so an unawaited caller can't raise an unhandled rejection and the runner's
+// Promise.all over a batch never trips on one bad download.
+async function downloadMediaForMessage(params: {
+  imageRefs: ImageAttachmentRef[];
+  documentRefs: DocumentAttachmentRef[];
+  conversationId: string;
+  messageId: string;
+  tag: string;
+  log: any;
+}): Promise<PersistedAttachment[]> {
+  const { imageRefs, documentRefs, conversationId, messageId, tag, log } = params;
+  if (imageRefs.length === 0 && documentRefs.length === 0) return [];
+  // The try wraps EVERYTHING from here (incl. resolveStateDir/resolveMediaRoot)
+  // so this function can NEVER reject — the runner awaits it in a batch-wide
+  // Promise.all and an unawaited copy rides a "dropped" message, so a rejection
+  // would fail the whole batch (no silent-dispatch alarm) or raise an unhandled
+  // rejection. Any failure resolves to [] (dispatch text-only).
+  try {
+    const stateDir = resolveStateDir();
+    if (!stateDir) {
+      log?.warn?.(
+        `[${tag}] stateDir unavailable — cannot persist ${imageRefs.length} image + ${documentRefs.length} doc attachment(s) conv=${conversationId}, dispatching text-only`,
+      );
+      return [];
+    }
+    const mediaRoot = resolveMediaRoot(stateDir);
+    const dlDeps = { log: log ? { warn: (m: string) => log.warn?.(m), info: (m: string) => log.info?.(m) } : undefined };
+    // Reserve the slots images will take (capped) and give the document
+    // pipeline only the remainder as its budget, so PDFs aren't
+    // downloaded/rasterized just to be discarded by the post-hoc cap. Images
+    // are cheap (no rasterization) and always <= MAX_IMAGE_ATTACHMENTS_PER_TURN.
+    const imagesPlanned = Math.min(imageRefs.length, MAX_IMAGE_ATTACHMENTS_PER_TURN);
+    const docBudget = Math.max(0, MAX_MEDIA_ENTRIES_PER_TURN - imagesPlanned);
+    // Order matters: image entries first, then document entries (rasterized
+    // PNG pages then original PDF per doc). normalizeAttachments pairs
+    // path/url/type by index, so this order is what the agent receives.
+    const [images, documents] = await Promise.all([
+      imageRefs.length > 0
+        ? downloadImageAttachments({ refs: imageRefs, conversationId, mediaRoot, messageId, deps: dlDeps })
+        : Promise.resolve([] as PersistedAttachment[]),
+      documentRefs.length > 0 && docBudget > 0
+        ? downloadDocumentAttachments({ refs: documentRefs, conversationId, mediaRoot, messageId, budget: docBudget, deps: dlDeps })
+        : Promise.resolve([] as PersistedAttachment[]),
+    ]);
+    // Defensive final cap on the COMBINED media list. The document pipeline is
+    // already budgeted upstream (docBudget), so this normally won't truncate;
+    // it's a backstop in case image downloads plus a full doc budget ever
+    // exceed the cap.
+    const capped = capMediaEntries(images, documents);
+    if (capped.truncated) {
+      log?.warn?.(
+        `[${tag}] truncated media entries count=${capped.total} cap=${MAX_MEDIA_ENTRIES_PER_TURN} conv=${conversationId}`,
+      );
+    }
+    if (capped.entries.length > 0) {
+      log?.info?.(
+        `[${tag}] persisted ${capped.entries.length} media entr(ies) (img_refs=${imageRefs.length} doc_refs=${documentRefs.length}) conv=${conversationId} root=${mediaRoot} bytes=${capped.entries.reduce((s, p) => s + p.size, 0)}`,
+      );
+    } else {
+      log?.warn?.(
+        `[${tag}] all attachments failed to persist (img_refs=${imageRefs.length} doc_refs=${documentRefs.length}) conv=${conversationId} — dispatching text-only`,
+      );
+    }
+    return capped.entries;
+  } catch (err) {
+    // The download fns swallow per-attachment errors internally, so this catch
+    // covers the state-dir resolution + directory-creation paths — none of
+    // which should normally fail. Resolving [] keeps the "never rejects"
+    // contract the runner and the dropped-message path depend on.
+    log?.error?.(`[${tag}] attachment pipeline failed conv=${conversationId}: ${err}`);
+    return [];
+  }
 }
 
 function hydrateFromMap(loaded: Map<string, Map<string, IntercomSessionState>>): void {
@@ -213,6 +293,90 @@ export function discardBufferedChunksOnTimeout(
   const discarded = bufferedChunks.length;
   bufferedChunks.length = 0;
   return discarded;
+}
+
+/**
+ * One inbound customer message, admitted to the dispatch queue. Its media
+ * download STARTS at webhook arrival (Intercom CDN URLs expire in ~30 min) but
+ * is carried as a PENDING promise so the message can be admitted to the queue
+ * BEFORE the download resolves — a slow image download must not let a later
+ * text-only message start a dispatch ahead of this earlier one. The runner
+ * awaits `mediaReady` at drain time (downloads across a burst still run
+ * concurrently; only the dispatch is serialized).
+ */
+export interface QueuedInboundMessage {
+  body: string;
+  authorId: string;
+  messageId: string;
+  timestamp: number;
+  mediaReady: Promise<PersistedAttachment[]>;
+  imageRefCount: number;
+  documentRefCount: number;
+}
+
+/** A QueuedInboundMessage after its media download has resolved — the shape
+ * the batch-assembly helpers consume. */
+export interface ResolvedInboundMessage {
+  body: string;
+  authorId: string;
+  messageId: string;
+  timestamp: number;
+  media: PersistedAttachment[];
+  imageRefCount: number;
+  documentRefCount: number;
+}
+
+// Synthetic prompt for a message that is only media (drag-drop with no
+// caption) so the agent receives a non-empty turn alongside the content
+// block(s). Shape predates coalescing — kept byte-identical.
+function syntheticMediaCaption(msg: ResolvedInboundMessage): string {
+  return `(Customer sent ${
+    msg.documentRefCount > 0
+      ? "a document/attachment"
+      : msg.media.length === 1
+      ? "an image"
+      : `${msg.media.length} images`
+  } with no caption.)`;
+}
+
+/**
+ * Order a batch by customer send time (Intercom part `created_at`), STABLY —
+ * same-timestamp messages keep enqueue order. Enqueue order alone is not
+ * guaranteed to be send order (each webhook awaits variable-latency
+ * enrichment/KB before enqueueing), so this is the batch-level guarantee that
+ * a coalesced burst reads in the order the customer typed it. Generic over the
+ * queued/resolved message shape — both carry `timestamp`.
+ */
+export function orderBatch<T extends { timestamp: number }>(messages: T[]): T[] {
+  return [...messages].sort((a, b) => a.timestamp - b.timestamp);
+}
+
+/**
+ * Join a coalesced batch into the single text the agent reads. Each message
+ * contributes its own body (or the synthetic media caption when it was a
+ * caption-less upload); consecutive messages read as consecutive paragraphs —
+ * exactly what the customer typed. A single-message batch (the dominant,
+ * non-burst case) passes through byte-identical to pre-coalescing behavior.
+ */
+export function combineBatchBodies(messages: ResolvedInboundMessage[]): string {
+  return messages
+    .map((m) => (m.body.length === 0 && m.media.length > 0 ? syntheticMediaCaption(m) : m.body))
+    .filter((body) => body.length > 0)
+    .join("\n\n");
+}
+
+/**
+ * Merge a batch's per-message media (already persisted at arrival) in message
+ * order, re-applying the per-turn cap as a batch-level backstop — each
+ * message was individually capped, but a burst of uploads can exceed the
+ * turn budget when combined.
+ */
+export function mergeBatchMedia(messages: ResolvedInboundMessage[]): {
+  entries: PersistedAttachment[];
+  total: number;
+  truncated: boolean;
+} {
+  return capMediaEntries(messages.flatMap((m) => m.media), []);
 }
 
 // Strip our own delimiter markers from inbound customer text before injecting
@@ -523,6 +687,395 @@ export const intercomPlugin = createChatChannelPlugin({
           `[${tag}] personalization=${account.personalization?.enabled === true ? (enrichFn ? "on" : "on-but-uncredentialed") : "off"}`,
         );
 
+        // ── Coalesced dispatch: at most ONE agent run in flight per conversation ──
+        // Rapid-fire inbound used to spawn OVERLAPPING embedded_run dispatches on
+        // one session lane — the trigger for the upstream openclaw lane wedge
+        // (#97538, ~30 aborted runs/day; PR #616 added the timeout/page safety
+        // net, this removes the overlap itself). Messages arriving while a
+        // dispatch is in flight queue up and ride the NEXT single dispatch as
+        // consecutive paragraphs. Media download STARTED at arrival (CDN URLs
+        // expire ~30 min); the message was admitted to the queue BEFORE it
+        // resolved, so we await each message's `mediaReady` here — the queue is
+        // held for this conversation during the await, so a later message can't
+        // dispatch ahead of these.
+        const runDispatchBatch = async (conversationId: string, unordered: QueuedInboundMessage[]) => {
+          const ordered = orderBatch(unordered);
+          // `latest` anchors messageId/timestamp/authorId so the flush log and
+          // silent_dispatch page reference the NEWEST customer part. Identity
+          // fields are media-independent, so read them from the ordered
+          // (unresolved) batch — no need to wait for media first.
+          const latest = ordered[ordered.length - 1];
+          // Capture the session reference and client SYNCHRONOUSLY here — BEFORE
+          // the media `await` below. runDispatchBatch runs up to its first await
+          // in the same synchronous turn as the enqueue that started this drain,
+          // so a concurrent account stop() (which clear()s the queue then deletes
+          // accountSessions) cannot interleave before this line. If we deferred
+          // getOrCreateSession past the 1-3s media await, a stop() during that
+          // window would delete the map first and this would fabricate a blank
+          // agent_active session — replying into a possibly human_takeover
+          // conversation and clobbering the persisted store. getOrCreateSession
+          // returns the shared, mutable session object, so fields read at
+          // dispatch time still reflect every webhook that queued behind this one.
+          const state = getOrCreateSession(account.accountId, conversationId, account.workspaceId);
+          const client = createIntercomClient(account.token, log);
+          // Alias: keeps the moved dispatch/flush/alarm code below textually
+          // identical to its pre-coalescing single-message form.
+          const result = { conversationId, authorId: latest.authorId };
+
+          // Now await media resolution (download STARTED at arrival; usually
+          // already done). The queue holds this conversation during the await,
+          // so a later message can't dispatch ahead of these.
+          const batch: ResolvedInboundMessage[] = await Promise.all(
+            ordered.map(async ({ mediaReady, ...rest }) => ({ ...rest, media: await mediaReady })),
+          );
+
+          const merged = mergeBatchMedia(batch);
+          if (merged.truncated) {
+            log?.warn?.(
+              `[${tag}] truncated coalesced media entries count=${merged.total} cap=${MAX_MEDIA_ENTRIES_PER_TURN} conv=${conversationId}`,
+            );
+          }
+          const mediaExtraContext = buildMediaExtraContext(merged.entries);
+          const bodyForDispatch = combineBatchBodies(batch);
+          if (batch.length > 1) {
+            log?.info?.(
+              `[${tag}] coalesced ${batch.length} messages into one dispatch conv=${conversationId}`,
+            );
+          }
+
+          // Buffer chunked deliveries from the SDK's EmbeddedBlockChunker
+          // and flush as a single Intercom reply after dispatch returns.
+          // Without this, each paragraph/sentence chunk becomes a separate
+          // Intercom message — conv=215473826733450 on 2026-04-08 produced
+          // 5 replies in 5 seconds for one customer message, which reads
+          // to the customer as the bot spamming them.
+          const bufferedChunks: string[] = [];
+          let droppedMidStream = false;
+          let dispatchThrew: Error | null = null;
+          let dispatchTimedOut = false;
+
+          // Race the dispatch against a bounded timeout. When the
+          // session lane wedges (upstream openclaw #97538: rapid-fire
+          // inbound spawns overlapping embedded_run dispatches, one leaks
+          // the lane owner lock, later dispatches wedge and stuck-session
+          // recovery aborts them with released=0 while DISCARDING the
+          // generated reply), this await would otherwise NEVER settle —
+          // and both the reply flush and the silent_dispatch alarm below
+          // sit after it, so the customer would wait forever with zero
+          // alerting. On timeout we set dispatchTimedOut, fall through,
+          // post nothing, and page #cs-escalations below.
+          const dispatchTimeoutMs = account.dispatchTimeoutMs ?? DEFAULT_DISPATCH_TIMEOUT_MS;
+          const dispatchPromise = dispatchInboundDirectDmWithRuntime({
+            cfg,
+            runtime: { channel: runtime },
+            channel: "intercom",
+            channelLabel: "Intercom",
+            accountId: account.accountId,
+            peer: { kind: "direct", id: result.conversationId },
+            senderId: result.authorId,
+            senderAddress: `intercom:${result.authorId}`,
+            recipientAddress: `intercom:${account.botAdminId}`,
+            conversationLabel: `Intercom conversation ${result.conversationId}`,
+            rawBody: buildAgentRawBody(bodyForDispatch, state.knownFacts ?? {}, state.enrichment, state.kbSnippets),
+            messageId: latest.messageId,
+            timestamp: latest.timestamp,
+            extraContext: mediaExtraContext,
+            deliver: async (replyPayload: any) => {
+              const text = replyPayload?.text ?? replyPayload?.body ?? "";
+              // OpenClaw emits its model-fallback notice ("↪️ Model
+              // Fallback: …") as its own reply payload flagged
+              // isFallbackNotice, prepended ahead of the real reply.
+              // That is operational telemetry, not customer content —
+              // never buffer it for a support customer (it leaked to
+              // one on 2026-06-19). It stays visible in the main/Slack
+              // gateway, which does not route through this plugin.
+              //
+              // Drop a standalone notice chunk whether or not the
+              // runtime preserved the isFallbackNotice flag onto this
+              // payload (the codex runtime may not): the content check
+              // catches the flag-less case, the flag catches a notice
+              // the regex might not. Either way the notice never enters
+              // bufferedChunks, so the no-reply / silent-dispatch logic
+              // below sees an honest customer-facing chunk count — a
+              // notice-only turn reads as zero output (correctly pages),
+              // not as a real reply, regardless of which signal fired.
+              // A chunk that merely PREPENDS a notice to a real reply is
+              // NOT dropped here (real text survives); the flush-time
+              // backstop strips the notice from the joined body instead.
+              if (replyPayload?.isFallbackNotice || isOnlyModelFallbackNotice(text)) {
+                log?.error?.(
+                  `[intercom:model-fallback] [${tag}] dropped fallback notice chunk conv=${result.conversationId} via=${replyPayload?.isFallbackNotice ? "flag" : "content"} notice=${JSON.stringify(String(text).slice(0, 200))}`,
+                );
+                return;
+              }
+              if (!text) {
+                log?.warn?.(`[${tag}] deliver called with empty reply for conv=${result.conversationId}`);
+                return;
+              }
+
+              // If the customer took over (or closed/snoozed) while the
+              // agent was still generating, drop any further chunks.
+              // `state` is always non-null here (captured from the
+              // getOrCreateSession call above) — no `state &&` guard needed.
+              if (!canAgentReply(state)) {
+                if (!droppedMidStream) {
+                  log?.warn?.(
+                    `[${tag}] deliver dropped mid-stream: ${state.handoffMode}/${state.lifecycleState} conv=${result.conversationId}`,
+                  );
+                  droppedMidStream = true;
+                }
+                return;
+              }
+
+              bufferedChunks.push(text);
+            },
+            onRecordError: (err) =>
+              log?.error?.(`[${tag}] session record error: ${err}`),
+            onDispatchError: (err, info) =>
+              log?.error?.(`[${tag}] dispatch error (${info.kind}): ${err}`),
+          });
+          // Bound the wedge: on timeout we page below and post nothing;
+          // on a real throw we record it for the silent alarm. Either way
+          // the flush + alarm below run even though dispatch never
+          // delivered. (Without this the await could never settle.)
+          const dispatchOutcome = await raceDispatchWithTimeout(dispatchPromise, dispatchTimeoutMs);
+          dispatchTimedOut = dispatchOutcome.timedOut;
+          dispatchThrew = dispatchOutcome.threw;
+
+          // Timeout contract: post NOTHING. The wedge can strike
+          // mid-generation, leaving partial chunks in the buffer —
+          // drop them so the flush below is a no-op and the customer
+          // never sees a truncated reply (the dispatch_timed_out
+          // page below still fires).
+          const discardedOnTimeout = discardBufferedChunksOnTimeout(bufferedChunks, dispatchTimedOut);
+          if (discardedOnTimeout > 0) {
+            log?.warn?.(
+              `[${tag}] dispatch timeout: discarded ${discardedOnTimeout} partial buffered chunk(s) conv=${result.conversationId}`,
+            );
+          }
+
+          // Flush buffered chunks as a single Intercom reply.
+          // Re-check `canAgentReply` here to catch state flips that
+          // landed between the last `deliver` call and dispatch resolve
+          // (e.g., a human took over in the final ms of generation).
+          const rawJoinedForReply = joinDeliveryChunks(bufferedChunks);
+          // Backstop strip of OpenClaw's model-fallback notice. The
+          // deliver callback already drops a STANDALONE notice chunk
+          // (by flag or by content), so by here the only notice that can
+          // remain is one the gateway PREPENDED into the same chunk as a
+          // real reply. Strip it from the joined body, BEFORE the
+          // no-reply / reasoning-leak passes, so (a) the customer never
+          // sees gateway internals and (b) a notice prepended to a
+          // [[NO_REPLY]] turn isn't mistaken for a real reply. Log the
+          // exact notice so the underlying model degradation stays
+          // observable internally.
+          const fallbackNotices = findModelFallbackNotices(rawJoinedForReply);
+          if (fallbackNotices) {
+            log?.error?.(
+              `[intercom:model-fallback] [${tag}] stripped fallback notice from customer reply conv=${result.conversationId} notice=${JSON.stringify(fallbackNotices.join(" | "))}`,
+            );
+          }
+          const joinedForReply = fallbackNotices
+            ? stripModelFallbackNotice(rawJoinedForReply)
+            : rawJoinedForReply;
+          if (bufferedChunks.length > 0 && canAgentReply(state) && isIntentionalNoReply(joinedForReply)) {
+            // Caroline deliberately chose to stay quiet (SOUL.md
+            // "Reading the room") -- e.g. the customer just said
+            // "ok"/"thanks" after she'd already helped. Post nothing;
+            // the 👀 ack reaction remains on their message as the
+            // read-receipt. NOT a silent_dispatch failure: a chunk (the
+            // sentinel) WAS produced, so the alarm below stays quiet.
+            log?.info?.(
+              `[${tag}] intentional no-reply conv=${result.conversationId}`,
+            );
+          } else if (bufferedChunks.length > 0 && canAgentReply(state)) {
+            const joined = stripNoReplySentinel(joinedForReply);
+            if (joined.length > 0 && joined !== joinedForReply.trim()) {
+              // The model emitted the no-reply sentinel alongside real
+              // text instead of on its own (SOUL.md: the token must be
+              // the ENTIRE reply). We post the remainder and drop the
+              // token, but log it so a slipping doctrine is visible.
+              log?.warn?.(
+                `[${tag}] no-reply sentinel mixed with reply text (stripped, posting remainder) conv=${result.conversationId}`,
+              );
+            }
+            // Priority signal: Caroline appends `[[PRIORITY: reason]]`
+            // when a customer is complaining about a data issue. Detect
+            // on the RAW reply, then strip the token so the customer
+            // never sees it. Unlike NO_REPLY this does NOT suppress the
+            // reply — we still post her (stripped) text. This lane does
+            // NOT page anyone: it just CLASSIFIES the conversation as a
+            // data complaint (tag `ai:data-complaint`) so the Lane B
+            // watchdog can fold it into its systemic cluster count.
+            // Leadership is paged only when the same data category
+            // crosses MANY users (Aaron 2026-06-23: systemic, not noise).
+            // Once per conversation.
+            const prioritySignal = detectPrioritySignal(joinedForReply);
+            const customerText = stripPrioritySentinel(joined);
+            if (prioritySignal.fired && !state.priorityFiredAt) {
+              // Capture the prior gate value so a tag FAILURE can roll it
+              // back. Otherwise a transient Intercom error would set the
+              // once-per-conversation gate but never land the tag, and the
+              // next [[PRIORITY]] would be suppressed. For a later-message or
+              // keyword-miss complaint the tag is the ONLY signal the
+              // systemic watchdog gets, so it must be able to retry (mirrors
+              // the rollback in executeEscalation / the old priority page).
+              const prevPriorityFiredAt = state.priorityFiredAt ?? null;
+              state.priorityFiredAt = new Date().toISOString();
+              saveSessions(accountSessions).catch(() => {});
+              log?.info?.(
+                `[intercom:priority] data complaint classified conv=${result.conversationId} reason=${JSON.stringify(prioritySignal.reason ?? "")} — tagging ${DATA_COMPLAINT_TAG} (systemic-only; no per-individual page)`,
+              );
+              // Best-effort tag, fire-and-forget — never block or fail the
+              // customer reply on it.
+              client
+                .addTag(result.conversationId, DATA_COMPLAINT_TAG, account.botAdminId)
+                .catch((tagErr) => {
+                  // Reopen the gate so the next message retries the tag.
+                  state.priorityFiredAt = prevPriorityFiredAt;
+                  saveSessions(accountSessions).catch(() => {});
+                  log?.warn?.(
+                    `[intercom:priority] tag ${DATA_COMPLAINT_TAG} failed conv=${result.conversationId}: ${tagErr} — gate rolled back, will retry on next message`,
+                  );
+                });
+            }
+            const ctxStripped = stripConversationContext(customerText, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId });
+            const stripped = stripKnowledgeBase(ctxStripped, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId });
+            // Outbound reasoning-preamble guard. The reasoning model
+            // (gpt-5.5/codex) intermittently writes its internal plan into
+            // the reply content -- a preamble, a `---`, then the real reply
+            // (incident 2026-05-29). Strip a recoverable preamble; when we
+            // cannot safely recover a clean reply, hand the conversation to
+            // a human rather than ship leaked reasoning. Runs before the
+            // email/tool passes inside replyToConversation so it sees the
+            // original structure.
+            const guard = sanitizeReasoningLeak(stripped);
+            if (guard.action === "escalate") {
+              log?.error?.(
+                `[intercom:reasoning-leak] [${tag}] ESCALATED conv=${result.conversationId} reason=${guard.reason} markers=${JSON.stringify(guard.matchedMarkers)} sample=${JSON.stringify(guard.droppedSample ?? "")}`,
+              );
+              try {
+                await client.assignConversation({
+                  conversationId: result.conversationId,
+                  adminId: account.botAdminId,
+                  assigneeId: account.defaultInboxId || "0",
+                });
+                log?.info?.(`[${tag}] reassigned conv=${result.conversationId} to ${account.defaultInboxId || "Unassigned"} (reasoning-leak)`);
+              } catch (err) {
+                log?.error?.(`[${tag}] reasoning-leak reassignment failed conv=${result.conversationId}: ${err}`);
+              }
+              if (account.fallbackSlackSupervisionChannel) {
+                try {
+                  await fetch(account.fallbackSlackSupervisionChannel, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      text: `:warning: Caroline suppressed a reply that leaked internal reasoning (conv ${result.conversationId}, reason=${guard.reason}). The conversation was handed to a human — please follow up.`,
+                    }),
+                  });
+                } catch (err) {
+                  log?.error?.(`[${tag}] reasoning-leak Slack notify failed conv=${result.conversationId}: ${err}`);
+                }
+              }
+            } else {
+              if (guard.action === "stripped") {
+                log?.error?.(
+                  `[intercom:reasoning-leak] [${tag}] conv=${result.conversationId} action=stripped markers=${JSON.stringify(guard.matchedMarkers)} sample=${JSON.stringify(guard.droppedSample ?? "")}`,
+                );
+              }
+              if (guard.body.trim().length === 0) {
+                // Nothing left to post after stripping control tokens
+                // (e.g. Caroline emitted only `[[PRIORITY]]` with no
+                // reply text — a doctrine slip). Post nothing rather
+                // than a blank reply or a false
+                // `[intercom:ALERT] flush failed`. Only claim a page
+                // when the priority signal actually fired this turn.
+                log?.warn?.(
+                  `[${tag}] empty reply after token strip — posting nothing conv=${result.conversationId}` +
+                    (prioritySignal.fired ? " (priority signal already paged)" : ""),
+                );
+              } else {
+                try {
+                  const { messageId } = await client.replyToConversation({
+                    conversationId: result.conversationId,
+                    adminId: account.botAdminId,
+                    body: guard.body,
+                  });
+                  trackOutboundMessageId(messageId, state.outboundMessageIds);
+                  state.updatedAt = new Date().toISOString();
+                  log?.info?.(
+                    `[${tag}] replied conv=${result.conversationId} partId=${messageId || "<none>"} chunks=${bufferedChunks.length}`,
+                  );
+                } catch (err) {
+                  // Customer-facing delivery failure: grep-able alert prefix
+                  // so ops can wire Slack/Sentry on `[intercom:ALERT]`.
+                  // TODO(follow-up): POST to account.fallbackSlackSupervisionChannel.
+                  log?.error?.(
+                    `[intercom:ALERT] [${tag}] flush failed conv=${result.conversationId} chunks=${bufferedChunks.length} error=${err}`,
+                  );
+                }
+              }
+            }
+          } else if (bufferedChunks.length > 0 && !droppedMidStream) {
+            log?.warn?.(
+              `[${tag}] deliver dropped after dispatch: ${state.handoffMode}/${state.lifecycleState} conv=${result.conversationId}`,
+            );
+          }
+
+          // Silent-dispatch alarm (hydra #280). Two cases:
+          //   1. dispatchInbound threw — surface the throw, since the
+          //      outer try/catch would otherwise log it as a generic
+          //      "webhook processing error" with no [intercom:ALERT].
+          //   2. dispatch returned but no chunks landed AND the conv
+          //      is still in a state where the agent should have
+          //      replied — the bug behind ~3 stranded convs/day.
+          const silentReason: SilentDispatchReason | null = dispatchTimedOut
+            ? "dispatch_timed_out"
+            : dispatchThrew
+            ? "dispatch_threw"
+            : (() => {
+                const d = detectSilentDispatch({
+                  bufferedChunks,
+                  state,
+                  droppedMidStream,
+                });
+                return d.silent ? d.reason : null;
+              })();
+          if (silentReason) {
+            const errSnippet = dispatchThrew?.message ?? null;
+            log?.error?.(
+              `[intercom:ALERT] [${tag}] silent_dispatch conv=${result.conversationId} reason=${silentReason}${errSnippet ? ` error=${errSnippet}` : ""}`,
+            );
+            if (account.fallbackSlackSupervisionChannel) {
+              const slackPayload = buildSilentDispatchSlackPayload({
+                conversationId: result.conversationId,
+                reason: silentReason,
+                errorMessage: errSnippet ?? undefined,
+                account,
+              });
+              fetch(account.fallbackSlackSupervisionChannel, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(slackPayload),
+              }).catch((err) => {
+                log?.error?.(
+                  `[${tag}] silent-dispatch Slack post failed: ${err}`,
+                );
+              });
+            }
+          }
+        };
+
+        const coalesceOn = account.coalesceDispatch !== false;
+        const dispatchQueue = new DispatchQueue<QueuedInboundMessage>({
+          runBatch: runDispatchBatch,
+          onError: (conversationId, err) =>
+            log?.error?.(
+              `[intercom:ALERT] [${tag}] coalesced dispatch batch failed conv=${conversationId}: ${err}`,
+            ),
+        });
+        ctx.log?.info?.(`[${tag}] dispatch coalescing=${coalesceOn ? "on" : "off"}`);
+
         await runPassiveAccountLifecycle({
           abortSignal: ctx.abortSignal,
           start: async () => {
@@ -627,426 +1180,58 @@ export const intercomPlugin = createChatChannelPlugin({
                       });
                     }
 
-                    // Buffer chunked deliveries from the SDK's EmbeddedBlockChunker
-                    // and flush as a single Intercom reply after dispatch returns.
-                    // Without this, each paragraph/sentence chunk becomes a separate
-                    // Intercom message — conv=215473826733450 on 2026-04-08 produced
-                    // 5 replies in 5 seconds for one customer message, which reads
-                    // to the customer as the bot spamming them.
-                    const bufferedChunks: string[] = [];
-                    let droppedMidStream = false;
-                    let dispatchThrew: Error | null = null;
-                    let dispatchTimedOut = false;
-
-                    // If the customer attached images and/or PDFs, fetch them
-                    // NOW (Intercom CDN URLs are signed with ~30 min TTL) and
-                    // persist under <mediaRoot>/intercom/<conv>/<msg>/. We then
-                    // pass the persisted paths to the agent runtime through
-                    // `extraContext.MediaPaths` — openclaw's MsgContext shape
-                    // (`channels/inbound-event/media`) the gateway turns into
-                    // base64 image content blocks for vision-capable models, and
-                    // (for application/pdf entries) feeds to the document-extract
-                    // plugin for text. PDFs are page-rasterized to PNG so vision
-                    // can also "see" them. Empty attachments+documents → no
-                    // extraContext, no behavior change for text-only messages.
+                    // If the customer attached images and/or PDFs, START fetching
+                    // them NOW (Intercom CDN URLs are signed with ~30 min TTL) so
+                    // the download runs promptly, but do NOT await it here — carry
+                    // the pending download on the queued message so admission to
+                    // the dispatch queue isn't skewed by media-download latency.
+                    // A slow image download must not let a later text-only message
+                    // reach an idle queue and dispatch ahead of this earlier part;
+                    // the runner awaits `mediaReady` at drain time (downloads
+                    // across a burst still run concurrently — only the dispatch is
+                    // serialized). (Admission order still tracks each webhook's own
+                    // enrichment/KB latency; orderBatch re-sorts within a batch.)
+                    // Persisted paths reach the agent via `extraContext.MediaPaths`
+                    // (openclaw MsgContext → base64 image blocks / document-extract
+                    // for PDFs). Empty attachments+documents → resolves to [].
                     const imageRefs = result.attachments ?? [];
                     const documentRefs = result.documents ?? [];
-                    let persisted: PersistedAttachment[] = [];
-                    if (imageRefs.length > 0 || documentRefs.length > 0) {
-                      const stateDir = resolveStateDir();
-                      if (stateDir) {
-                        const mediaRoot = resolveMediaRoot(stateDir);
-                        const dlDeps = { log: log ? { warn: (m: string) => log.warn?.(m), info: (m: string) => log.info?.(m) } : undefined };
-                        try {
-                          // Reserve the slots images will take (capped) and give
-                          // the document pipeline only the remainder as its budget,
-                          // so PDFs aren't downloaded/rasterized just to be discarded
-                          // by the post-hoc cap. Images are cheap (no rasterization)
-                          // and always <= MAX_IMAGE_ATTACHMENTS_PER_TURN.
-                          const imagesPlanned = Math.min(imageRefs.length, MAX_IMAGE_ATTACHMENTS_PER_TURN);
-                          const docBudget = Math.max(0, MAX_MEDIA_ENTRIES_PER_TURN - imagesPlanned);
-                          // Order matters: image entries first, then document
-                          // entries (rasterized PNG pages then original PDF per
-                          // doc). normalizeAttachments pairs path/url/type by
-                          // index, so this order is what the agent receives.
-                          const [images, documents] = await Promise.all([
-                            imageRefs.length > 0
-                              ? downloadImageAttachments({
-                                  refs: imageRefs,
-                                  conversationId: result.conversationId,
-                                  mediaRoot,
-                                  messageId: payload.id,
-                                  deps: dlDeps,
-                                })
-                              : Promise.resolve([] as PersistedAttachment[]),
-                            documentRefs.length > 0 && docBudget > 0
-                              ? downloadDocumentAttachments({
-                                  refs: documentRefs,
-                                  conversationId: result.conversationId,
-                                  mediaRoot,
-                                  messageId: payload.id,
-                                  budget: docBudget,
-                                  deps: dlDeps,
-                                })
-                              : Promise.resolve([] as PersistedAttachment[]),
-                          ]);
-                          // Defensive final cap on the COMBINED media list. The
-                          // document pipeline is already budgeted upstream (docBudget),
-                          // so this normally won't truncate; it's a backstop in case
-                          // image downloads plus a full doc budget ever exceed the cap.
-                          const capped = capMediaEntries(images, documents);
-                          if (capped.truncated) {
-                            log?.warn?.(
-                              `[${tag}] truncated media entries count=${capped.total} cap=${MAX_MEDIA_ENTRIES_PER_TURN} conv=${result.conversationId}`,
-                            );
-                          }
-                          persisted = capped.entries;
-                          if (persisted.length > 0) {
-                            log?.info?.(
-                              `[${tag}] persisted ${persisted.length} media entr(ies) (img_refs=${imageRefs.length} doc_refs=${documentRefs.length}) conv=${result.conversationId} root=${mediaRoot} bytes=${persisted.reduce((s, p) => s + p.size, 0)}`,
-                            );
-                          } else {
-                            log?.warn?.(
-                              `[${tag}] all attachments failed to persist (img_refs=${imageRefs.length} doc_refs=${documentRefs.length}) conv=${result.conversationId} — dispatching text-only`,
-                            );
-                          }
-                        } catch (err) {
-                          // The download fns swallow per-attachment errors
-                          // internally — this catch covers only the directory-
-                          // creation path, which shouldn't normally fail.
-                          log?.error?.(
-                            `[${tag}] attachment pipeline failed conv=${result.conversationId}: ${err}`,
-                          );
-                        }
-                      } else {
-                        log?.warn?.(
-                          `[${tag}] stateDir unavailable — cannot persist ${imageRefs.length} image + ${documentRefs.length} doc attachment(s) conv=${result.conversationId}, dispatching text-only`,
-                        );
-                      }
-                    }
+                    const mediaReady = downloadMediaForMessage({
+                      imageRefs,
+                      documentRefs,
+                      conversationId: result.conversationId,
+                      messageId: payload.id,
+                      tag,
+                      log,
+                    });
 
-                    const mediaExtraContext = buildMediaExtraContext(persisted);
-
-                    // Customer can drag-drop an image/PDF with no caption — the
-                    // text body is then empty. Substitute a synthetic prompt
-                    // so the agent receives a non-empty turn alongside the
-                    // media content block(s). Only applies when we actually
-                    // have media to show; pure empty-body+no-media events
-                    // are filtered upstream in classifyEvent.
-                    const bodyForDispatch =
-                      result.body.length === 0 && persisted.length > 0
-                        ? `(Customer sent ${documentRefs.length > 0 ? "a document/attachment" : persisted.length === 1 ? "an image" : `${persisted.length} images`} with no caption.)`
-                        : result.body;
-
-                    // Race the dispatch against a bounded timeout. When the
-                    // session lane wedges (upstream openclaw #97538: rapid-fire
-                    // inbound spawns overlapping embedded_run dispatches, one leaks
-                    // the lane owner lock, later dispatches wedge and stuck-session
-                    // recovery aborts them with released=0 while DISCARDING the
-                    // generated reply), this await would otherwise NEVER settle —
-                    // and both the reply flush and the silent_dispatch alarm below
-                    // sit after it, so the customer would wait forever with zero
-                    // alerting. On timeout we set dispatchTimedOut, fall through,
-                    // post nothing, and page #cs-escalations below.
-                    const dispatchTimeoutMs = account.dispatchTimeoutMs ?? DEFAULT_DISPATCH_TIMEOUT_MS;
-                    const dispatchPromise = dispatchInboundDirectDmWithRuntime({
-                      cfg,
-                      runtime: { channel: runtime },
-                      channel: "intercom",
-                      channelLabel: "Intercom",
-                      accountId: account.accountId,
-                      peer: { kind: "direct", id: result.conversationId },
-                      senderId: result.authorId,
-                      senderAddress: `intercom:${result.authorId}`,
-                      recipientAddress: `intercom:${account.botAdminId}`,
-                      conversationLabel: `Intercom conversation ${result.conversationId}`,
-                      rawBody: buildAgentRawBody(bodyForDispatch, state.knownFacts ?? {}, state.enrichment, state.kbSnippets),
+                    const queuedMessage: QueuedInboundMessage = {
+                      body: result.body,
+                      authorId: result.authorId,
                       messageId: payload.id,
                       timestamp: payload.created_at,
-                      extraContext: mediaExtraContext,
-                      deliver: async (replyPayload: any) => {
-                        const text = replyPayload?.text ?? replyPayload?.body ?? "";
-                        // OpenClaw emits its model-fallback notice ("↪️ Model
-                        // Fallback: …") as its own reply payload flagged
-                        // isFallbackNotice, prepended ahead of the real reply.
-                        // That is operational telemetry, not customer content —
-                        // never buffer it for a support customer (it leaked to
-                        // one on 2026-06-19). It stays visible in the main/Slack
-                        // gateway, which does not route through this plugin.
-                        //
-                        // Drop a standalone notice chunk whether or not the
-                        // runtime preserved the isFallbackNotice flag onto this
-                        // payload (the codex runtime may not): the content check
-                        // catches the flag-less case, the flag catches a notice
-                        // the regex might not. Either way the notice never enters
-                        // bufferedChunks, so the no-reply / silent-dispatch logic
-                        // below sees an honest customer-facing chunk count — a
-                        // notice-only turn reads as zero output (correctly pages),
-                        // not as a real reply, regardless of which signal fired.
-                        // A chunk that merely PREPENDS a notice to a real reply is
-                        // NOT dropped here (real text survives); the flush-time
-                        // backstop strips the notice from the joined body instead.
-                        if (replyPayload?.isFallbackNotice || isOnlyModelFallbackNotice(text)) {
-                          log?.error?.(
-                            `[intercom:model-fallback] [${tag}] dropped fallback notice chunk conv=${result.conversationId} via=${replyPayload?.isFallbackNotice ? "flag" : "content"} notice=${JSON.stringify(String(text).slice(0, 200))}`,
-                          );
-                          return;
-                        }
-                        if (!text) {
-                          log?.warn?.(`[${tag}] deliver called with empty reply for conv=${result.conversationId}`);
-                          return;
-                        }
-
-                        // If the customer took over (or closed/snoozed) while the
-                        // agent was still generating, drop any further chunks.
-                        // `state` is always non-null here (captured from the
-                        // getOrCreateSession call above) — no `state &&` guard needed.
-                        if (!canAgentReply(state)) {
-                          if (!droppedMidStream) {
-                            log?.warn?.(
-                              `[${tag}] deliver dropped mid-stream: ${state.handoffMode}/${state.lifecycleState} conv=${result.conversationId}`,
-                            );
-                            droppedMidStream = true;
-                          }
-                          return;
-                        }
-
-                        bufferedChunks.push(text);
-                      },
-                      onRecordError: (err) =>
-                        log?.error?.(`[${tag}] session record error: ${err}`),
-                      onDispatchError: (err, info) =>
-                        log?.error?.(`[${tag}] dispatch error (${info.kind}): ${err}`),
-                    });
-                    // Bound the wedge: on timeout we page below and post nothing;
-                    // on a real throw we record it for the silent alarm. Either way
-                    // the flush + alarm below run even though dispatch never
-                    // delivered. (Without this the await could never settle.)
-                    const dispatchOutcome = await raceDispatchWithTimeout(dispatchPromise, dispatchTimeoutMs);
-                    dispatchTimedOut = dispatchOutcome.timedOut;
-                    dispatchThrew = dispatchOutcome.threw;
-
-                    // Timeout contract: post NOTHING. The wedge can strike
-                    // mid-generation, leaving partial chunks in the buffer —
-                    // drop them so the flush below is a no-op and the customer
-                    // never sees a truncated reply (the dispatch_timed_out
-                    // page below still fires).
-                    const discardedOnTimeout = discardBufferedChunksOnTimeout(bufferedChunks, dispatchTimedOut);
-                    if (discardedOnTimeout > 0) {
-                      log?.warn?.(
-                        `[${tag}] dispatch timeout: discarded ${discardedOnTimeout} partial buffered chunk(s) conv=${result.conversationId}`,
-                      );
-                    }
-
-                    // Flush buffered chunks as a single Intercom reply.
-                    // Re-check `canAgentReply` here to catch state flips that
-                    // landed between the last `deliver` call and dispatch resolve
-                    // (e.g., a human took over in the final ms of generation).
-                    const rawJoinedForReply = joinDeliveryChunks(bufferedChunks);
-                    // Backstop strip of OpenClaw's model-fallback notice. The
-                    // deliver callback already drops a STANDALONE notice chunk
-                    // (by flag or by content), so by here the only notice that can
-                    // remain is one the gateway PREPENDED into the same chunk as a
-                    // real reply. Strip it from the joined body, BEFORE the
-                    // no-reply / reasoning-leak passes, so (a) the customer never
-                    // sees gateway internals and (b) a notice prepended to a
-                    // [[NO_REPLY]] turn isn't mistaken for a real reply. Log the
-                    // exact notice so the underlying model degradation stays
-                    // observable internally.
-                    const fallbackNotices = findModelFallbackNotices(rawJoinedForReply);
-                    if (fallbackNotices) {
-                      log?.error?.(
-                        `[intercom:model-fallback] [${tag}] stripped fallback notice from customer reply conv=${result.conversationId} notice=${JSON.stringify(fallbackNotices.join(" | "))}`,
-                      );
-                    }
-                    const joinedForReply = fallbackNotices
-                      ? stripModelFallbackNotice(rawJoinedForReply)
-                      : rawJoinedForReply;
-                    if (bufferedChunks.length > 0 && canAgentReply(state) && isIntentionalNoReply(joinedForReply)) {
-                      // Caroline deliberately chose to stay quiet (SOUL.md
-                      // "Reading the room") -- e.g. the customer just said
-                      // "ok"/"thanks" after she'd already helped. Post nothing;
-                      // the 👀 ack reaction remains on their message as the
-                      // read-receipt. NOT a silent_dispatch failure: a chunk (the
-                      // sentinel) WAS produced, so the alarm below stays quiet.
-                      log?.info?.(
-                        `[${tag}] intentional no-reply conv=${result.conversationId}`,
-                      );
-                    } else if (bufferedChunks.length > 0 && canAgentReply(state)) {
-                      const joined = stripNoReplySentinel(joinedForReply);
-                      if (joined.length > 0 && joined !== joinedForReply.trim()) {
-                        // The model emitted the no-reply sentinel alongside real
-                        // text instead of on its own (SOUL.md: the token must be
-                        // the ENTIRE reply). We post the remainder and drop the
-                        // token, but log it so a slipping doctrine is visible.
-                        log?.warn?.(
-                          `[${tag}] no-reply sentinel mixed with reply text (stripped, posting remainder) conv=${result.conversationId}`,
-                        );
-                      }
-                      // Priority signal: Caroline appends `[[PRIORITY: reason]]`
-                      // when a customer is complaining about a data issue. Detect
-                      // on the RAW reply, then strip the token so the customer
-                      // never sees it. Unlike NO_REPLY this does NOT suppress the
-                      // reply — we still post her (stripped) text. This lane does
-                      // NOT page anyone: it just CLASSIFIES the conversation as a
-                      // data complaint (tag `ai:data-complaint`) so the Lane B
-                      // watchdog can fold it into its systemic cluster count.
-                      // Leadership is paged only when the same data category
-                      // crosses MANY users (Aaron 2026-06-23: systemic, not noise).
-                      // Once per conversation.
-                      const prioritySignal = detectPrioritySignal(joinedForReply);
-                      const customerText = stripPrioritySentinel(joined);
-                      if (prioritySignal.fired && !state.priorityFiredAt) {
-                        // Capture the prior gate value so a tag FAILURE can roll it
-                        // back. Otherwise a transient Intercom error would set the
-                        // once-per-conversation gate but never land the tag, and the
-                        // next [[PRIORITY]] would be suppressed. For a later-message or
-                        // keyword-miss complaint the tag is the ONLY signal the
-                        // systemic watchdog gets, so it must be able to retry (mirrors
-                        // the rollback in executeEscalation / the old priority page).
-                        const prevPriorityFiredAt = state.priorityFiredAt ?? null;
-                        state.priorityFiredAt = new Date().toISOString();
-                        saveSessions(accountSessions).catch(() => {});
+                      mediaReady,
+                      imageRefCount: imageRefs.length,
+                      documentRefCount: documentRefs.length,
+                    };
+                    if (coalesceOn) {
+                      const enqueueOutcome = dispatchQueue.enqueue(result.conversationId, queuedMessage);
+                      if (enqueueOutcome === "queued") {
                         log?.info?.(
-                          `[intercom:priority] data complaint classified conv=${result.conversationId} reason=${JSON.stringify(prioritySignal.reason ?? "")} — tagging ${DATA_COMPLAINT_TAG} (systemic-only; no per-individual page)`,
+                          `[${tag}] coalesce conv=${result.conversationId} queued pending=${dispatchQueue.pendingCount(result.conversationId)}`,
                         );
-                        // Best-effort tag, fire-and-forget — never block or fail the
-                        // customer reply on it.
-                        client
-                          .addTag(result.conversationId, DATA_COMPLAINT_TAG, account.botAdminId)
-                          .catch((tagErr) => {
-                            // Reopen the gate so the next message retries the tag.
-                            state.priorityFiredAt = prevPriorityFiredAt;
-                            saveSessions(accountSessions).catch(() => {});
-                            log?.warn?.(
-                              `[intercom:priority] tag ${DATA_COMPLAINT_TAG} failed conv=${result.conversationId}: ${tagErr} — gate rolled back, will retry on next message`,
-                            );
-                          });
-                      }
-                      const ctxStripped = stripConversationContext(customerText, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId });
-                      const stripped = stripKnowledgeBase(ctxStripped, log ? { warn: (m) => log.warn(m) } : undefined, { conversationId: result.conversationId });
-                      // Outbound reasoning-preamble guard. The reasoning model
-                      // (gpt-5.5/codex) intermittently writes its internal plan into
-                      // the reply content -- a preamble, a `---`, then the real reply
-                      // (incident 2026-05-29). Strip a recoverable preamble; when we
-                      // cannot safely recover a clean reply, hand the conversation to
-                      // a human rather than ship leaked reasoning. Runs before the
-                      // email/tool passes inside replyToConversation so it sees the
-                      // original structure.
-                      const guard = sanitizeReasoningLeak(stripped);
-                      if (guard.action === "escalate") {
-                        log?.error?.(
-                          `[intercom:reasoning-leak] [${tag}] ESCALATED conv=${result.conversationId} reason=${guard.reason} markers=${JSON.stringify(guard.matchedMarkers)} sample=${JSON.stringify(guard.droppedSample ?? "")}`,
+                      } else if (enqueueOutcome === "dropped") {
+                        // This webhook was already in flight when the account
+                        // stopped (clear() closed the queue). Dispatching now
+                        // would fabricate a blank session — drop loudly; the
+                        // customer's next message re-triggers on the restarted
+                        // account.
+                        log?.warn?.(
+                          `[${tag}] account stopped mid-webhook: dropped message for conv=${result.conversationId} — next customer message re-triggers`,
                         );
-                        try {
-                          await client.assignConversation({
-                            conversationId: result.conversationId,
-                            adminId: account.botAdminId,
-                            assigneeId: account.defaultInboxId || "0",
-                          });
-                          log?.info?.(`[${tag}] reassigned conv=${result.conversationId} to ${account.defaultInboxId || "Unassigned"} (reasoning-leak)`);
-                        } catch (err) {
-                          log?.error?.(`[${tag}] reasoning-leak reassignment failed conv=${result.conversationId}: ${err}`);
-                        }
-                        if (account.fallbackSlackSupervisionChannel) {
-                          try {
-                            await fetch(account.fallbackSlackSupervisionChannel, {
-                              method: "POST",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({
-                                text: `:warning: Caroline suppressed a reply that leaked internal reasoning (conv ${result.conversationId}, reason=${guard.reason}). The conversation was handed to a human — please follow up.`,
-                              }),
-                            });
-                          } catch (err) {
-                            log?.error?.(`[${tag}] reasoning-leak Slack notify failed conv=${result.conversationId}: ${err}`);
-                          }
-                        }
-                      } else {
-                        if (guard.action === "stripped") {
-                          log?.error?.(
-                            `[intercom:reasoning-leak] [${tag}] conv=${result.conversationId} action=stripped markers=${JSON.stringify(guard.matchedMarkers)} sample=${JSON.stringify(guard.droppedSample ?? "")}`,
-                          );
-                        }
-                        if (guard.body.trim().length === 0) {
-                          // Nothing left to post after stripping control tokens
-                          // (e.g. Caroline emitted only `[[PRIORITY]]` with no
-                          // reply text — a doctrine slip). Post nothing rather
-                          // than a blank reply or a false
-                          // `[intercom:ALERT] flush failed`. Only claim a page
-                          // when the priority signal actually fired this turn.
-                          log?.warn?.(
-                            `[${tag}] empty reply after token strip — posting nothing conv=${result.conversationId}` +
-                              (prioritySignal.fired ? " (priority signal already paged)" : ""),
-                          );
-                        } else {
-                          try {
-                            const { messageId } = await client.replyToConversation({
-                              conversationId: result.conversationId,
-                              adminId: account.botAdminId,
-                              body: guard.body,
-                            });
-                            trackOutboundMessageId(messageId, state.outboundMessageIds);
-                            state.updatedAt = new Date().toISOString();
-                            log?.info?.(
-                              `[${tag}] replied conv=${result.conversationId} partId=${messageId || "<none>"} chunks=${bufferedChunks.length}`,
-                            );
-                          } catch (err) {
-                            // Customer-facing delivery failure: grep-able alert prefix
-                            // so ops can wire Slack/Sentry on `[intercom:ALERT]`.
-                            // TODO(follow-up): POST to account.fallbackSlackSupervisionChannel.
-                            log?.error?.(
-                              `[intercom:ALERT] [${tag}] flush failed conv=${result.conversationId} chunks=${bufferedChunks.length} error=${err}`,
-                            );
-                          }
-                        }
                       }
-                    } else if (bufferedChunks.length > 0 && !droppedMidStream) {
-                      log?.warn?.(
-                        `[${tag}] deliver dropped after dispatch: ${state.handoffMode}/${state.lifecycleState} conv=${result.conversationId}`,
-                      );
-                    }
-
-                    // Silent-dispatch alarm (hydra #280). Two cases:
-                    //   1. dispatchInbound threw — surface the throw, since the
-                    //      outer try/catch would otherwise log it as a generic
-                    //      "webhook processing error" with no [intercom:ALERT].
-                    //   2. dispatch returned but no chunks landed AND the conv
-                    //      is still in a state where the agent should have
-                    //      replied — the bug behind ~3 stranded convs/day.
-                    const silentReason: SilentDispatchReason | null = dispatchTimedOut
-                      ? "dispatch_timed_out"
-                      : dispatchThrew
-                      ? "dispatch_threw"
-                      : (() => {
-                          const d = detectSilentDispatch({
-                            bufferedChunks,
-                            state,
-                            droppedMidStream,
-                          });
-                          return d.silent ? d.reason : null;
-                        })();
-                    if (silentReason) {
-                      const errSnippet = dispatchThrew?.message ?? null;
-                      log?.error?.(
-                        `[intercom:ALERT] [${tag}] silent_dispatch conv=${result.conversationId} reason=${silentReason}${errSnippet ? ` error=${errSnippet}` : ""}`,
-                      );
-                      if (account.fallbackSlackSupervisionChannel) {
-                        const slackPayload = buildSilentDispatchSlackPayload({
-                          conversationId: result.conversationId,
-                          reason: silentReason,
-                          errorMessage: errSnippet ?? undefined,
-                          account,
-                        });
-                        fetch(account.fallbackSlackSupervisionChannel, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify(slackPayload),
-                        }).catch((err) => {
-                          log?.error?.(
-                            `[${tag}] silent-dispatch Slack post failed: ${err}`,
-                          );
-                        });
-                      }
+                    } else {
+                      await runDispatchBatch(result.conversationId, [queuedMessage]);
                     }
                   } else if (result.action === "escalate") {
                     const { executeEscalation } = await import("./escalation-action.js");
@@ -1142,6 +1327,17 @@ export const intercomPlugin = createChatChannelPlugin({
           },
           stop: async (unregister) => {
             unregister?.();
+            // Drop queued-not-yet-dispatched messages BEFORE deleting the
+            // session map: a batch starting after the delete would fabricate
+            // a blank session (agent_active) and could reply into a
+            // conversation whose real state said human_takeover — and its
+            // saveSessions would clobber the account's persisted sessions.
+            const dropped = dispatchQueue.clear();
+            if (dropped > 0) {
+              log?.warn?.(
+                `[${tag}] account stop: dropped ${dropped} queued message(s) awaiting dispatch — customers re-trigger via their next message`,
+              );
+            }
             accountSessions.delete(account.accountId);
             log?.info?.(`[${tag}] webhook route unregistered`);
           },

@@ -282,3 +282,26 @@ describe("validateClickupConfig", () => {
     ).toBe("apiKey");
   });
 });
+
+describe("dispatch coalescing / timeout config passthrough", () => {
+  const base = {
+    enabled: true,
+    workspaceId: "w",
+    token: "t",
+    webhookSecret: "s",
+    botAdminId: "b",
+  };
+
+  it("passes dispatchTimeoutMs through (regression: #616 shipped the field but not this mapping, so per-account overrides were silently dead)", () => {
+    const cfg = { channels: { intercom: { accounts: { default: { ...base, dispatchTimeoutMs: 120000 } } } } };
+    expect(resolveIntercomAccount(cfg).dispatchTimeoutMs).toBe(120000);
+  });
+
+  it("passes coalesceDispatch=false through and leaves both undefined when absent", () => {
+    const cfg = { channels: { intercom: { accounts: { default: { ...base, coalesceDispatch: false } } } } };
+    expect(resolveIntercomAccount(cfg).coalesceDispatch).toBe(false);
+    const bare = { channels: { intercom: { accounts: { default: { ...base } } } } };
+    expect(resolveIntercomAccount(bare).coalesceDispatch).toBeUndefined();
+    expect(resolveIntercomAccount(bare).dispatchTimeoutMs).toBeUndefined();
+  });
+});

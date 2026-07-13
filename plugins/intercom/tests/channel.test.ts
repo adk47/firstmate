@@ -9,6 +9,9 @@ import {
   buildRiskOptions,
   raceDispatchWithTimeout,
   discardBufferedChunksOnTimeout,
+  combineBatchBodies,
+  orderBatch,
+  mergeBatchMedia,
 } from "../src/channel.js";
 import { canAgentReply } from "../src/handoff.js";
 import { stripModelFallbackNotice } from "../src/sanitize-model-fallback.js";
@@ -541,5 +544,86 @@ describe("stripConversationContext", () => {
     const warned: string[] = [];
     stripConversationContext("clean reply", { warn: (m) => warned.push(m) });
     expect(warned.length).toBe(0);
+  });
+});
+
+describe("combineBatchBodies / mergeBatchMedia (dispatch coalescing)", () => {
+  const msg = (over: Partial<import("../src/channel.js").ResolvedInboundMessage> = {}) => ({
+    body: "hello",
+    authorId: "user-1",
+    messageId: "part-1",
+    timestamp: 1000,
+    media: [],
+    imageRefCount: 0,
+    documentRefCount: 0,
+    ...over,
+  });
+  const att = (path: string) => ({ path, url: "https://cdn/x", contentType: "image/png", size: 10 }) as any;
+
+  it("a single message passes through byte-identical (the dominant non-burst case)", () => {
+    expect(combineBatchBodies([msg({ body: "just one" })])).toBe("just one");
+  });
+
+  it("joins multiple bodies with a blank line, in arrival order", () => {
+    const out = combineBatchBodies([msg({ body: "first" }), msg({ body: "second" }), msg({ body: "third" })]);
+    expect(out).toBe("first\n\nsecond\n\nthird");
+  });
+
+  it("substitutes the synthetic caption per empty-body message with media", () => {
+    const out = combineBatchBodies([
+      msg({ body: "look at this" }),
+      msg({ body: "", media: [att("/m/1.png")], imageRefCount: 1 }),
+      msg({ body: "", media: [att("/m/2.pdf")], documentRefCount: 1 }),
+      msg({ body: "", media: [att("/m/3.png"), att("/m/4.png")], imageRefCount: 2 }),
+    ]);
+    expect(out).toBe(
+      "look at this\n\n(Customer sent an image with no caption.)\n\n(Customer sent a document/attachment with no caption.)\n\n(Customer sent 2 images with no caption.)",
+    );
+  });
+
+  it("drops a message that has neither body nor media from the joined text", () => {
+    expect(combineBatchBodies([msg({ body: "real" }), msg({ body: "" })])).toBe("real");
+  });
+
+  it("mergeBatchMedia preserves message order and does not truncate under the cap", () => {
+    const merged = mergeBatchMedia([
+      msg({ media: [att("/a.png"), att("/b.png")] }),
+      msg({ media: [att("/c.png")] }),
+    ]);
+    expect(merged.entries.map((e: any) => e.path)).toEqual(["/a.png", "/b.png", "/c.png"]);
+    expect(merged.truncated).toBe(false);
+    expect(merged.total).toBe(3);
+  });
+
+  it("mergeBatchMedia re-caps the combined batch at MAX_MEDIA_ENTRIES_PER_TURN", () => {
+    const many = Array.from({ length: 9 }, (_, i) => att(`/x${i}.png`));
+    const merged = mergeBatchMedia([msg({ media: many }), msg({ media: many })]);
+    expect(merged.total).toBe(18);
+    expect(merged.truncated).toBe(true);
+    expect(merged.entries).toHaveLength(12);
+    expect(merged.entries[0].path).toBe("/x0.png");
+  });
+});
+
+describe("orderBatch", () => {
+  const qm = (id: string, ts: number) => ({
+    body: id, authorId: "u", messageId: id, timestamp: ts,
+    media: [], imageRefCount: 0, documentRefCount: 0,
+  });
+
+  it("re-orders a batch whose enqueue order diverged from send order (within-batch guarantee)", () => {
+    const out = orderBatch([qm("late-text", 30), qm("early-image-msg", 10), qm("mid", 20)]);
+    expect(out.map((m) => m.messageId)).toEqual(["early-image-msg", "mid", "late-text"]);
+  });
+
+  it("is stable: same-timestamp messages keep enqueue order", () => {
+    const out = orderBatch([qm("a", 10), qm("b", 10), qm("c", 10)]);
+    expect(out.map((m) => m.messageId)).toEqual(["a", "b", "c"]);
+  });
+
+  it("does not mutate its input", () => {
+    const input = [qm("b", 2), qm("a", 1)];
+    orderBatch(input);
+    expect(input.map((m) => m.messageId)).toEqual(["b", "a"]);
   });
 });
