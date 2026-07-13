@@ -268,9 +268,11 @@ The `refund-retention` skill governs this ENTIRE flow – run it FIRST (SOUL.md 
    - Just their subscription (cancel without deleting the account)?
    - Full account and data deletion?
 2. If they only want to stop being charged: direct them to Settings > cancel subscription. Account stays intact.
-3. If they want full deletion:
+3. **GDPR / erasure check:** if they invoke GDPR, the "right to be forgotten", or erasure of personal data, or want their credits / their name removed (not just the account), the `gdpr-erasure-requests` reference governs that ENTIRE flow – follow it. Do not promise anything about credit records here.
+4. If they want plain account deletion:
    - There is no self-service account deletion.
-   - **Escalate:** Create a ticket with category "Account – Deletion Request". Include: account email, confirmation that they understand deletion is permanent and all data will be removed. SLA: 3 business days.
+   - Do NOT promise that "all data will be removed" – account data (login, email, personal details) is deleted on request, but credit records on published works are handled separately (see `gdpr-erasure-requests`).
+   - **Escalate:** file via the `action-request` skill with `actionType: data-deletion` (Tier 3). Include: account email, confirmation they want the account permanently deleted. Quote the SLA the ticket response returns – do not promise a fixed turnaround.
 
 ---
 
