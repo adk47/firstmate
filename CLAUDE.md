@@ -101,33 +101,52 @@ and `scripts/lib/acknowledge-hot-patch-drift.sh`.
 
 Codex (`openai/gpt-5.5` via the codex agentRuntime, ChatGPT OAuth)
 credentials live in ONE canonical store: the `main` agent at
-`/root/.openclaw-main/agents/main/agent/auth-profiles.json` (openclaw's
-`DEFAULT_AGENT_ID="main"` is the inheritance base). Every OTHER agent's
-`auth-profiles.json` + `auth-state.json` is a **symlink** to it — openclaw
-resolves the symlink to its target before its atomic rename, so the links
-survive token refresh.
+`/root/.openclaw-main/agents/main/agent/auth-profiles.json`. That file is OUR
+source of truth (written by `codex-oauth-refresh.sh`, the sole refresher).
+How the RUNTIME consumes it depends on the openclaw version:
 
-- **NEVER copy, seed, or fan-out codex `auth-profiles.json` into per-agent
-  stores.** OpenAI codex uses single-use rotating refresh tokens under a
-  per-profile lock (upstream #26322); independent per-agent refreshes
+- **openclaw >= 2026.7 (current)**: the runtime never reads
+  `auth-profiles.json`. It reads (a) the hardcoded inheritance base
+  `agents/main/agent/openclaw-agent.sqlite` (`auth_profile_store` row
+  `'primary'`, profiles keyed `openai:*`) and (b) each agent's
+  `codex-home/auth.json` — the native codex app-server store that actually
+  authenticates model calls (`auth_mode:"chatgpt"` + tokens = OAuth via
+  `wss://api.openai.com/v1/responses`; `auth_mode:"apikey"` = fleet-wide
+  `invalid_api_key`). **`scripts/lib/codex-auth-sync.sh`** fans the canonical
+  ACCESS token out to both surfaces and deletes per-agent auth rows; the real
+  refresh token exists NOWHERE but canonical (single-refresher invariant).
+  `ensure-codex-auth.sh` delegates both modes to it on a 7.x runtime.
+- **openclaw <= 2026.6 (history)**: every agent's `auth-profiles.json` +
+  `auth-state.json` was a **symlink** to canonical (openclaw resolved the
+  symlink before its atomic rename, so links survived refresh).
+  `ensure-codex-auth.sh` still implements this when it detects a 6.x runtime.
+
+- **NEVER copy, seed, or fan-out codex credentials (JSON or SQLite rows) into
+  per-agent stores.** OpenAI codex uses single-use rotating refresh tokens
+  under a per-profile lock (upstream #26322); independent per-agent refreshes
   mutually invalidate the token and kill ALL codex agents at once
   (incident 2026-05-29: 6 agents degraded to Sonnet fallback for hours).
+  **On 7.x, `openclaw doctor --fix` DOES exactly this fan-out** (it migrates
+  every agent's JSON into that agent's own DB) — never use it for auth
+  migration; use `codex-auth-sync.sh`.
 - **Detect**: `scripts/lib/ensure-codex-auth.sh --check` (exit 1 + names the
   offending stores). **Remediate**: `scripts/lib/ensure-codex-auth.sh`
-  (re-symlinks every agent store back to canonical). The codex-health
+  (converges every derived store back to canonical). The codex-health
   watchdog independently alerts on `authentication token has been
   invalidated`.
 - **Re-auth GOTCHA**: `openclaw models auth login --provider openai-codex`
   with no `--agent` writes to the CONFIGURED-default agent (`clio`), NOT
   `main`. Re-auth MUST land in the canonical `main` store — pass
-  `--agent main`, or rely on `clio` already being symlinked to canonical
-  (the write follows the symlink). Both accounts (`aaron@muso.ai`,
+  `--agent main`. On 7.x, follow ANY re-auth with `codex-auth-sync.sh` (the
+  login wrote a store the runtime reads, but canonical + the other derived
+  stores must be reconverged). Both accounts (`aaron@muso.ai`,
   `aaronkaufman@me.com`) must be logged in.
 
 This generalizes PR #376 (edge/Caroline symlink self-heal + fail-loud
 codex-health watchdog) to the whole fleet. Prose alone is not enforcement —
 the script and watchdog are. See RUNBOOK §Troubleshooting → "Codex auth
-invalidated / silent Sonnet fallback" for the recovery sequence.
+invalidated / silent Sonnet fallback" for the recovery sequence, and
+docs/runbooks/UPGRADE-2026.7.1.md for the 7.1 auth architecture.
 
 **Sharing the store is necessary but NOT sufficient — also converge the refresh
 LOCK.** The single canonical store shares the token across the `main` and `edge`
@@ -148,56 +167,72 @@ convergence. This is a DIFFERENT failure from fan-out: when it fires,
 realpath-resolving the lock dir at acquire time — **re-verify on every openclaw
 bump**. See RUNBOOK §Troubleshooting → "Codex Refresh-Token Race".
 
-**The codex PLUGIN is pinned BELOW the runtime — never float it.** `@openclaw/codex`
-is pinned to `2026.5.27` (the value + rationale live ONCE in
-`scripts/lib/codex-version.sh`), deliberately behind the 2026.6.1 runtime, because
-`@openclaw/codex@2026.6.x`'s "OpenAI route unification" (upstream #90925/#90448,
-OPEN) routes `openai/gpt-5.5` to the OpenAI **api-key** endpoint instead of the
-Codex app-server **OAuth** route. hydra is OAuth-only (placeholder `OPENAI_API_KEY`),
-so on 6.x every codex call 401s `invalid_api_key` and the whole fleet drops to
-`openrouter/gpt-5.4-mini` (incident 2026-06-19, when a manual `plugins install
-@openclaw/codex@2026.6.1 --force` floated codex off the pin — the token was fine;
-re-auth did nothing). **NEVER `plugins install`/`update` codex off the pin**; to
-move it, bump `codex-version.sh`. **Detect**:
-`scripts/lib/ensure-codex-version-pinned.sh --check` (the failing-URL tell:
-`api.openai.com/v1/responses` = regressed vs `chatgpt.com/backend-api/codex` =
-OAuth-ok). **Remediate/self-heal**: same script no args (re-pins to canonical;
-wired into ExecStartPre via `openclaw-pre-start-heal.sh`, so a float self-heals on
-restart). The watchdog pages on the `invalid_api_key` signature (main+edge), on the
+**The codex PLUGIN is pinned in LOCKSTEP with the runtime — never float it.**
+`@openclaw/codex` is pinned to `2026.7.1` (the value + rationale live ONCE in
+`scripts/lib/codex-version.sh`). History: 2026-06-16 → 2026-07-14 it was
+deliberately held BELOW the runtime at 2026.5.27 because codex@2026.6.x's
+"OpenAI route unification" (#90925/#90448) regressed `openai/gpt-5.5` onto the
+api-key route; hydra is OAuth-only, so the fleet 401'd `invalid_api_key` and
+dropped to `openrouter/gpt-5.4-mini` (incident 2026-06-19, a manual `plugins
+install --force` float). RESOLVED on 2026.7.1 (staging-validated 2026-07-14):
+codex@7.1 serves gpt-5.5 via OAuth — PROVIDED each agent's
+`codex-home/auth.json` is chatgpt-mode (enforced by `codex-auth-sync.sh`; an
+apikey-mode file reproduces the 401s exactly). **The URL tell CHANGED in 7.x**:
+both auth modes hit `api.openai.com/v1/responses` — OAuth uses the WebSocket
+(`wss://`) transport, api-key uses HTTP; `chatgpt.com/backend-api/…` is gone.
+**NEVER `plugins install`/`update` codex off the pin**; to move it, bump
+`codex-version.sh` (note: the 7.x first-boot doctor auto-floats a stale codex
+to the runtime version — with a lockstep pin that is convergent, but it means
+an off-lockstep pin would fight the doctor). **Detect**:
+`scripts/lib/ensure-codex-version-pinned.sh --check`. **Remediate/self-heal**:
+same script no args (wired into ExecStartPre via `openclaw-pre-start-heal.sh`).
+The watchdog pages on the `invalid_api_key` signature (main+edge), on the
 `authentication token is expired` OAuth-lapse signature, and on version drift.
-**Re-verify codex still serves gpt-5.5 on EVERY openclaw bump** — revert to runtime
-lockstep only once #90925 ships fixed. See RUNBOOK §Troubleshooting → "Codex Plugin
-Floated Off Pin".
+**Re-verify codex still serves gpt-5.5 on EVERY openclaw bump.** See RUNBOOK
+§Troubleshooting → "Codex Plugin Floated Off Pin".
 
-**The token LAPSE is a FOURTH, distinct failure — and its root cause is our own #90925
-mitigation.** `authentication token is expired` (`auth error code: token_expired`, on the
-`chatgpt.com/backend-api/codex` route, all three guards CLEAN, `refresh_token_reused`
-/`invalid_api_key` = 0) is a pure OAuth credential lapse. We keep the bundled `openai` plugin
-DISABLED to dodge #90925, but that plugin owns BOTH the refresh-on-use machinery AND the
-device-code login — so nothing auto-refreshes codex (it lapses ~every 10 days; upstream
-openclaw#57399 wontfix) AND `openclaw models auth login --provider openai-codex --device-code`
-fails "No provider plugins found" (there is also NO `openclaw models auth refresh` command).
+**The token LAPSE is a FOURTH, distinct failure — a consequence of keeping the bundled
+`openai` plugin DISABLED.** `authentication token is expired` (`auth error code:
+token_expired`, all three guards CLEAN, `refresh_token_reused`/`invalid_api_key` = 0) is a
+pure OAuth credential lapse. The `openai` plugin stays disabled (on 6.x to dodge #90925; on
+7.x because it loads DESPITE `plugins.allow` and hijacks provider `openai` onto the api-key
+route — hence the explicit `plugins.entries.openai={enabled:false}` in both repo configs).
+That plugin owns BOTH the refresh-on-use machinery AND the device-code login — so nothing
+in-process auto-refreshes codex (it lapses ~every 10 days; upstream openclaw#57399 wontfix)
+AND `openclaw models auth login --provider openai-codex --device-code` fails "No provider
+plugins found" (there is also NO `openclaw models auth refresh` command).
 **Recovery = `scripts/lib/codex-oauth-refresh.sh`** — we do the `grant_type=refresh_token` POST
-to `auth.openai.com/oauth/token` ourselves and write the rotated token into canonical, then
-restart (the gateway only loads the token at startup). **Prevention = the twice-weekly
-`codex-token-refresh.timer`** (Sun+Wed 04:00 UTC, refresh + restart) keeps it always fresh;
-`scripts/codex-keepalive.sh` (15m) is the safety-net pager. (`models status --check` always
+to `auth.openai.com/oauth/token` ourselves, write the rotated token into canonical, fan the
+new access token out via `codex-auth-sync.sh` (7.x), then restart (the gateway only loads the
+token at startup). **Prevention = the twice-weekly `codex-token-refresh.timer`** (Sun+Wed
+04:00 UTC, refresh + sync + restart) keeps it always fresh — and on 7.x it is also what makes
+the single-refresher invariant safe: derived stores carry a sentinel refresh token, so only
+this script can ever rotate the chain. `scripts/codex-keepalive.sh` (15m) is the safety-net pager. (`models status --check` always
 exits 1 here — it flags the disabled `openai` provider as "missing", NOT a codex signal.) See
 RUNBOOK §Troubleshooting → "Codex Token Lapse (`token_expired`)" and `docs/lessons/openclaw-and-codex.md`.
 
-**Deferred-upgrade tripwire (decided 2026-06-29).** We deliberately HOLD openclaw at
-2026.6.1 + codex 2026.5.27 rather than jumping to latest stable (2026.6.10), because the two
-things that would let us "drop the hacks and go lockstep" are BOTH still OPEN: #90925 (codex
-OAuth-route regression — can't un-pin codex) AND #90575 (no native cross-process
-shared-credential store — the 6.5 auth→SQLite migration kills the symlink fabric with nothing
-to replace it). Revisit the 6.10 jump only when BOTH close. The 6.5 auth→SQLite migration is
-ALSO one-way (cold SQLite state-archive required for rollback, not the JSON).
-**Third gate (added 2026-07-13):** before ANY bump, also verify the edge lane-wedge fix landed
-upstream — #97538/#92270 (`abort_embedded_run … released=0` leaks the lane owner lock and
-discards Caroline's generated reply; fix PR #90308 unmerged as of 2026-07-01). Our mitigations
-(dispatch timeout + stuck-lane watchdog, PR #616; per-conv dispatch coalescing, PR #668) paper
-over it but the bug is upstream — a bump that doesn't include the fix buys nothing here, and
-one that does lets us consider retiring the coalescing layer.
+**Upgrade doctrine (rewritten 2026-07-14 for the 2026.7.1 bump; supersedes the 2026-06-29
+deferred-upgrade tripwire).** The old hold at 6.1+5.27 ended when staging validation
+(docs/runbooks/UPGRADE-2026.7.1.md) resolved its gates: #90925's fix ships in 7.1 (Gate 1,
+verified end-to-end — but only with chatgpt-mode `codex-home/auth.json`); the auth→SQLite
+migration's threat to credential sharing (Gate 2, #90575 still OPEN upstream) is answered by
+our own `codex-auth-sync.sh` architecture instead of a native store. Standing rules for EVERY
+future bump:
+- **Validate on an isolated staging copy first** — install to a private prefix + state-dir
+  copy, never `npm install -g` for a trial. Follow the staging-copy neutering checklist (a
+  staging gateway reaches prod via symlinks, absolute paths in the state SQLite, host secrets
+  files, and session restart-recovery — all observed 2026-07-14).
+- **Re-verify per bump**: codex serves gpt-5.5 via OAuth; the profile-blind `resolveStateDir`
+  workarounds (state-dir env pin, refresh-lock convergence); `codex-auth-sync.sh --check`
+  clean; `dist/plugin-sdk/cron-store-runtime.js` still exists; plugin lockfiles rebuilt
+  against the new SDK.
+- **State migrations are one-way** — cold state archive (gateways stopped) before any bump;
+  the JSON is not a rollback path since 6.x.
+- **Lane-wedge gate still stands (#97538/#92270)**: fix PR #90308 remained unmerged as of
+  2026-07-14, so 7.1 does NOT fix the edge lane wedge — our mitigations (dispatch timeout +
+  stuck-lane watchdog, PR #616; per-conv dispatch coalescing, PR #668) stay load-bearing.
+  Re-check #90308 on every bump; a release containing it lets us consider retiring the
+  coalescing layer.
 
 ## Each gateway MUST pin `OPENCLAW_STATE_DIR` to its own profile
 

@@ -113,3 +113,23 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ "$status" -eq 0 ]
   [ ! -f "$old" ]
 }
+
+@test "sync hook: failing codex-auth-sync after a successful refresh → exit 1 (timer must go red)" {
+  cat > "$TEST_TMPDIR/bin/fake-sync" <<'SYNC'
+#!/bin/bash
+echo "fake sync: refusing" >&2; exit 1
+SYNC
+  chmod +x "$TEST_TMPDIR/bin/fake-sync"
+  CODEX_AUTH_SYNC_BIN="$TEST_TMPDIR/bin/fake-sync" run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  # The refresh itself still landed (canonical rotated)…
+  [ "$(jq -r '.profiles["openai-codex:a@x.com"].access' "$CODEX_AUTH_STORE")" = "NEW_ACCESS" ]
+  # …and the failure is loud, not the plain success path.
+  [[ "$output" == *"sync FAILED"* ]]
+}
+
+@test "sync hook: MISSING codex-auth-sync after a successful refresh → exit 1" {
+  CODEX_AUTH_SYNC_BIN="$TEST_TMPDIR/does-not-exist" run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"missing/not executable"* ]]
+}

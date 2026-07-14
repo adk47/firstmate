@@ -598,3 +598,59 @@ missing." Count exec/web_search records in the session jsonl: 0 = confabulation,
 not infra. Doctrine only weakly constrains a small brain; durable fixes are a brain
 upgrade or a post-boundary guard. Do not accept "forbidden workspace shadow" as the
 root cause for a skill that merged green (CI's drift check would have blocked it).
+
+## The 2026.7.1 upgrade (staging-validated 2026-07-14)
+
+Full procedure in `docs/runbooks/UPGRADE-2026.7.1.md`. If you rehearse a future
+bump the same way (staging gateway against a COPY of prod state on the same
+box), neuter every live vector first — the 2026-07-14 rehearsal found the copy
+reaches prod through: symlinks still targeting prod paths, absolute prod paths
+INSIDE the state SQLite (`installed_plugin_index`), `plugins.load.paths` in the
+copied config, the host secrets file behind `secrets.providers` (staging made
+REAL openrouter calls), per-agent `codex-home/auth.json`, channel tokens, cron
++ pending delivery queues, and session restart-recovery resuming prod sessions
+at boot. Sandbox `HOME`, pin `OPENCLAW_STATE_DIR`, and never test real-token
+behavior with a refresh token present. The durable lessons:
+
+**7.x auth is SQLite-first and the JSON symlink fabric is INERT.** The runtime
+reads codex auth from the hardcoded inheritance base
+`agents/main/agent/openclaw-agent.sqlite` (`auth_profile_store` row `'primary'`;
+"main" comes from `resolveDefaultAgentDir({})` with an EMPTY config, so the
+configured default agent — clio — is NOT the base) and from each agent's
+`codex-home/auth.json`, the native codex app-server store that actually
+authenticates the model call. `auth-profiles.json` is never read at runtime; a
+boot "rewrite" of it is a normalizer touch, not a migration. Nothing at boot
+imports JSON→SQLite; only `doctor --fix` does, and `doctor --fix` FANS OUT the
+profile into EVERY agent's DB — the exact single-use-refresh-token topology that
+killed the fleet on 2026-05-29. Use `scripts/lib/codex-auth-sync.sh` instead:
+canonical JSON stays the source of truth, derived stores get the ACCESS token
+plus a sentinel refresh token (single-refresher invariant), per-agent rows are
+deleted.
+
+**`codex-home/auth.json` decides the route.** `auth_mode:"apikey"` (hydra's 6.1
+shape, placeholder `OPENAI_API_KEY`) forces the api-key route → fleet-wide
+`invalid_api_key`. `auth_mode:"chatgpt"` + tokens = working OAuth. The 7.x URL
+tell: BOTH modes target `api.openai.com/v1/responses` — OAuth is the WebSocket
+(`wss://`) transport, api-key is HTTP. `chatgpt.com/backend-api/…` is gone;
+retire the old tell when diagnosing.
+
+**7.1 ignores `plugins.allow`.** Bundled plugins load despite the allowlist
+(`openai`, `elevenlabs` observed); the `openai` plugin then owns provider
+`openai` and 401s every codex call. Disable requires explicit
+`plugins.entries.<id> = {enabled:false}` — now present in both repo configs.
+
+**First-boot doctor floats a stale codex plugin to the runtime version** (pulls
+from npm, no prompt). With the lockstep pin this is convergent; an off-lockstep
+pin would fight it every boot.
+
+**Other 7.1 bump facts:** Node floor >= 22.22.3 (deploy.sh gates);
+`dist/plugin-sdk/cron-store-runtime.js` survived (deploy cron import OK); the
+`OPENCLAW_STATE_DIR` pin still drives the managed-skills catalog; the
+refresh-lock path is still the profile-blind `resolveStateDir()/locks/oauth-refresh/`
+(keep `ensure-codex-refresh-lock-shared.sh`); memory indexes migrate INTO the
+per-agent DB; a state dir with thousands of legacy sessions makes 7.1's
+session-store cap delete NEW sessions ("capped session entry count" →
+"Session ... was deleted while starting work") — prune before the bump; plugin
+lockfiles must be regenerated against the 7.1 SDK (support-tools needed an
+explicit entry-type annotation, TS2742). The lane wedge (#97538, fix PR #90308)
+is NOT fixed in 7.1 — the #616/#668 mitigations stay load-bearing.

@@ -31,6 +31,21 @@ setup() {
 {"profiles":{"openai-codex:default":{"type":"oauth","refresh_token":"rt-canonical"}}}
 JSON
   printf '%s' '{"active":"openai-codex:default"}' > "$CANON_DIR/auth-state.json"
+
+  # PATH-shadow openclaw (per memory/feedback_bats_must_stub_openclaw.md):
+  # the script version-gates its 7.x delegation to codex-auth-sync.sh via
+  # `openclaw --version`. Default the stub to a 6.x runtime so these legacy
+  # symlink-fabric tests keep exercising the legacy path even on a host whose
+  # real openclaw is >= 2026.7.
+  mkdir -p "$TEST_TMPDIR/bin"
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
+#!/bin/bash
+if [ "$1" = "--version" ]; then echo "OpenClaw ${FAKE_OPENCLAW_VERSION:-2026.6.1} (test)"; exit 0; fi
+echo "test stub: unexpected openclaw call ($*)" >&2
+exit 99
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+  PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
 }
 
 teardown() { rm -rf "$TEST_TMPDIR"; }
@@ -184,4 +199,22 @@ link_to_canonical_profiles() {
   canon_baks=("$CANON_DIR"/auth-profiles.json.bak-*)
   shopt -u nullglob
   [ "${#canon_baks[@]}" -eq 0 ]
+}
+
+@test "runtime >= 2026.7 delegates ensure mode to codex-auth-sync.sh" {
+  # On 7.x the JSON symlink fabric is inert; the script must hand off to the
+  # sqlite/codex-home successor instead of relinking JSON. The sandbox
+  # canonical lacks `access` fields, so the sync script exits 2 — proving the
+  # handoff happened (legacy ensure mode would exit 0).
+  export FAKE_OPENCLAW_VERSION=2026.7.1
+  ensure
+  [ "$status" -eq 2 ]
+  echo "$output" | grep -q 'delegating to codex-auth-sync.sh'
+}
+
+@test "runtime >= 2026.7 delegates --check mode to codex-auth-sync.sh" {
+  export FAKE_OPENCLAW_VERSION=2026.7.1
+  check
+  [ "$status" -eq 2 ]
+  echo "$output" | grep -q 'delegating to codex-auth-sync.sh'
 }

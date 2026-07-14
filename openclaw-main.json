@@ -653,6 +653,12 @@
       "support-tools"
     ],
     "entries": {
+      "openai": {
+        "enabled": false
+      },
+      "elevenlabs": {
+        "enabled": false
+      },
       "codex": {
         "enabled": true,
         "config": {

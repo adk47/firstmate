@@ -27,7 +27,9 @@ import {
   createCancelSubscriptionTool,
 } from "./tools/subscription-retention.js";
 import { createSupportActionRouterTool } from "./tools/support-action-router.js";
-export default definePluginEntry({
+// Explicit annotation: against the 2026.7.1 SDK, tsc can no longer name the
+// inferred entry type without reaching into openclaw/dist internals (TS2742).
+const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
   id: "support-tools",
   name: "Support Agent Tools",
   description: "Support agent tools: action routing, profile lookup/status, credits search, subscription status, ticket creation, and self-service credit removal.",
@@ -438,3 +440,5 @@ export default definePluginEntry({
     api.registerTool(profilesConsolidateFactory, { name: "profiles_consolidate" });
   },
 });
+
+export default plugin;

@@ -52,6 +52,7 @@ KEEP_GLOBS=(
   'MEMORY.md' 'IDENTITY.md' 'HEARTBEAT.md' 'TOOLS.md'
   'TOOLS.md.bak-*' '*.md.bak-*'
   'write-activity.log'
+  'openclaw-workspace-state.json'
   '*.jpeg' '*.jpg' '*.webp' '*.gif' '*.png' '*.pdf' '*.csv' '*.txt' '*.py'
   '.env'
 )

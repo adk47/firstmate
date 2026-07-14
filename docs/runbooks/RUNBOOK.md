@@ -502,17 +502,25 @@ ssh root@40.160.32.80
 # 1. Stop the gateway so no agent refreshes mid-repair.
 systemctl stop openclaw-gateway-main.service
 
-# 2. Re-symlink every agent store back to the canonical main store.
+# 2. Converge every agent store back onto canonical. (On runtime <= 2026.6
+#    this re-symlinks the JSON stores; on >= 2026.7 it delegates to
+#    codex-auth-sync.sh, which reseeds the main-agent sqlite row + every
+#    agent's chatgpt-mode codex-home/auth.json and deletes per-agent rows.)
 /opt/hydra/scripts/lib/ensure-codex-auth.sh
 
 # 3. Re-auth into the CANONICAL main store. Without --agent this writes to
-#    the configured-default agent (clio), NOT main — pass --agent main
-#    (or rely on clio being symlinked to canonical so the write follows it).
+#    the configured-default agent (clio), NOT main — pass --agent main.
 #    Both accounts must be logged in.
 openclaw models auth login --provider openai-codex --agent main  # aaron@muso.ai
 openclaw models auth login --provider openai-codex --agent main  # aaronkaufman@me.com
 
-# 4. Verify links are clean, then restart.
+# 3b. Runtime >= 2026.7 ONLY: the login wrote a runtime store, but canonical
+#     (agents/main/agent/auth-profiles.json) + the derived stores must be
+#     reconverged after ANY re-auth. If the login landed somewhere other than
+#     the canonical JSON, copy the fresh profile into it first, then:
+/opt/hydra/scripts/lib/codex-auth-sync.sh
+
+# 4. Verify stores are clean, then restart.
 /opt/hydra/scripts/lib/ensure-codex-auth.sh --check
 systemctl restart openclaw-gateway-main.service
 ```
@@ -532,7 +540,8 @@ fleet-wide via PR #376. NEVER copy/seed a per-agent codex `auth-profiles.json`.
 
 **Symptoms**: fleet on `openrouter/openai/gpt-5.4-mini`; logs show
 `authentication token is expired` (`auth error code: token_expired`) on the
-`chatgpt.com/backend-api/codex` route. Crucially **all three guards are CLEAN**
+codex OAuth route (`chatgpt.com/backend-api/codex` on runtime <= 2026.6;
+`wss://api.openai.com/v1/responses` on >= 2026.7). Crucially **all three guards are CLEAN**
 (`ensure-codex-{auth,refresh-lock-shared,version-pinned}.sh --check` exit 0) and
 `refresh_token_reused`/`invalid_api_key` are 0 — this is NOT fan-out, NOT the
 refresh race, NOT #90925. It is the OAuth credential itself lapsing (single-use
@@ -646,18 +655,27 @@ openclaw realpath-resolving the lock dir at acquire time.
 provided: sk-...` / `invalid_api_key` on the **`api.openai.com/v1/responses`**
 URL with `reason=auth`. Crucially, **BOTH `ensure-codex-auth.sh --check` AND
 `ensure-codex-refresh-lock-shared.sh --check` are CLEAN** — this is neither the
-fan-out nor the refresh-race incident. The tell is the **failing URL**:
-`chatgpt.com/backend-api/codex/responses` = the OAuth route (good); 
-`api.openai.com/v1/responses` = the regressed api-key route.
+fan-out nor the refresh-race incident. The URL tell is VERSION-DEPENDENT:
+- **runtime <= 2026.6 (codex 2026.5.27)**: `chatgpt.com/backend-api/codex/responses`
+  = the OAuth route (good); `api.openai.com/v1/responses` = the regressed
+  api-key route (#90925).
+- **runtime >= 2026.7**: BOTH modes target `api.openai.com/v1/responses` — the
+  transport is the tell: WebSocket (`wss://…`, in codex app-server stderr) =
+  OAuth; a plain HTTP 401 `invalid_api_key` with the placeholder `sk-hydra…`
+  key = the api-key path, which on 7.x means an agent's `codex-home/auth.json`
+  regressed to `auth_mode:"apikey"` — run `scripts/lib/codex-auth-sync.sh`
+  (then `--check`) and restart, and only then suspect a plugin float.
 
-**Background:** codex is DELIBERATELY pinned BELOW the runtime to `2026.5.27`
-(`scripts/lib/codex-version.sh`). `@openclaw/codex@2026.6.x`'s "OpenAI route
-unification" (upstream #90925 / #90448, OPEN) routes `openai/gpt-5.5` to the
-OpenAI api-key endpoint instead of the Codex app-server OAuth route. hydra is
-OAuth-only (only a PLACEHOLDER `OPENAI_API_KEY`), so every call 401s. `deploy.sh`
-pins codex, but a manual `openclaw plugins install @openclaw/codex@2026.6.1
---force` between deploys floats it off the pin and stays floated (incident
-2026-06-19). The token is NOT the problem here — re-auth does nothing.
+**Background:** codex is pinned in LOCKSTEP to the runtime
+(`scripts/lib/codex-version.sh`; from 2026-06-16 to 2026-07-14 it was held
+BELOW the runtime at `2026.5.27` because `@openclaw/codex@2026.6.x`'s "OpenAI
+route unification" (upstream #90925 / #90448) routed `openai/gpt-5.5` to the
+api-key endpoint — fixed in 2026.7.1, staging-verified). hydra is OAuth-only
+(only a PLACEHOLDER `OPENAI_API_KEY`), so any api-key-routed call 401s.
+`deploy.sh` pins codex, but a manual `openclaw plugins install
+@openclaw/codex@<v> --force` between deploys floats it off the pin and stays
+floated (incident 2026-06-19). The token is NOT the problem here — re-auth
+does nothing.
 
 **Diagnosis:**
 ```bash
@@ -722,8 +740,9 @@ harm is noisy logs + a false page — both fixed below.
 
 > **Related — Codex OAuth token lapse** (the original 2026-06-19 trigger, distinct
 > from the api-key-route bug above): logs show `401 ... authentication token is
-> expired. Please try signing in again.` on the **OAuth** URL
-> `chatgpt.com/backend-api/codex/responses`. This IS a token problem — the access
+> expired. Please try signing in again.` on the **OAuth** route
+> (`chatgpt.com/backend-api/codex/responses` on <= 2026.6;
+> `wss://api.openai.com/v1/responses` on >= 2026.7). This IS a token problem — the access
 > token lapsed and refresh stopped renewing it. Fix = device-code re-auth BOTH
 > accounts then restart: `openclaw --profile main models auth login --provider
 > openai-codex --device-code` (aaron@muso.ai + aaronkaufman@me.com),

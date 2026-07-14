@@ -147,8 +147,41 @@ for key in "${_keys[@]}"; do
 done
 
 log "done: $ok refreshed, $failed failed"
+
+# openclaw >= 2026.7: the runtime reads codex auth from the main-agent sqlite
+# row + each agent's codex-home/auth.json, NOT from the canonical JSON we just
+# rotated — fan the new ACCESS token out (the refresh token stays ONLY here;
+# codex-auth-sync.sh enforces that invariant and no-ops on pre-2026.7
+# runtimes). A failed/missing sync means the fleet keeps running on the OLD
+# access token until it expires — page AND exit non-zero, same severity as a
+# failed refresh (a 0 exit here would show the timer/systemd unit green while
+# the derived stores ride a stale token).
+SYNC_BIN="${CODEX_AUTH_SYNC_BIN:-$_REFRESH_DIR/codex-auth-sync.sh}"
+sync_failed=0
+if [ "$ok" -gt 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+  if [ -x "$SYNC_BIN" ]; then
+    # CANON_DIR follows the store we just rotated, so a CODEX_AUTH_STORE
+    # override (sandbox/manual recovery) fans out ITS tokens, not /root's.
+    if ! CODEX_AUTH_ROOT="${CODEX_AUTH_ROOT:-/root}" \
+         CANON_DIR="$(cd "$(dirname "$STORE")" && pwd)" \
+         "$SYNC_BIN"; then
+      log "WARNING: codex-auth-sync.sh failed after refresh — derived stores are STALE"
+      _page ":rotating_light: *Codex auth sync FAILED* on node-8 after a successful token refresh — the rotated access token did NOT reach the runtime stores (sqlite row / codex-home). Run \`scripts/lib/codex-auth-sync.sh\` manually, then restart gateways."
+      sync_failed=1
+    fi
+  else
+    log "WARNING: codex-auth-sync.sh missing/not executable — derived stores NOT synced"
+    _page ":rotating_light: *Codex auth sync MISSING* on node-8 — the token refreshed but scripts/lib/codex-auth-sync.sh is absent/not executable, so the runtime stores were NOT updated. Restore the script and run it, then restart gateways."
+    sync_failed=1
+  fi
+fi
+
 if [ "$failed" -gt 0 ]; then
   _page ":rotating_light: *Codex OAuth refresh FAILED* on node-8 — $failed/$(( ok + failed )) profile(s) did not refresh (likely a dead refresh token → needs device-code re-auth, see RUNBOOK §\"Codex Token Lapse\"). $ok succeeded."
+  exit 1
+fi
+if [ "$sync_failed" -gt 0 ]; then
+  log "refresh OK but derived-store sync FAILED — run scripts/lib/codex-auth-sync.sh, then restart gateways"
   exit 1
 fi
 log "restart gateways to load the new token: systemctl restart openclaw-gateway-main openclaw-gateway-edge"

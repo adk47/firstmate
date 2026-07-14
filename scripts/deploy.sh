@@ -23,7 +23,14 @@ DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"
 # Pinned openclaw runtime version. Updated together with this file so the
 # version change appears in git history alongside any deploy-script tweaks
 # the upgrade requires. Bump in lockstep with docs/guides/REPO-MANAGEMENT.md.
-OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.6.1}"
+OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.7.1}"
+
+# Minimum Node.js for the pinned runtime (openclaw 2026.7.1 raised the floor
+# to >=22.22.3 — its bin refuses to start below it, so a deploy on an old Node
+# would install a runtime that can never boot). Checked fail-loud in
+# install_openclaw(); upgrading Node is a manual pre-step, see
+# docs/runbooks/UPGRADE-2026.7.1.md.
+OPENCLAW_NODE_FLOOR="${OPENCLAW_NODE_FLOOR:-22.22.3}"
 
 # Pinned @openclaw/slack version. 2026.5.12 externalized Slack into this
 # npm package; the bundled `channels.slack` plugin no longer ships. Kept
@@ -36,6 +43,9 @@ OPENCLAW_SLACK_VERSION="${OPENCLAW_SLACK_VERSION:-${OPENCLAW_VERSION}}"
 # SINGLE SOURCE OF TRUTH scripts/lib/codex-version.sh, also read by the
 # ExecStartPre pin healer (ensure-codex-version-pinned.sh) and the watchdog so the
 # three enforcers can never disagree. Honors an OPENCLAW_CODEX_VERSION env override.
+# shellcheck source=lib/version-compare.sh
+source "$SCRIPT_DIR/lib/version-compare.sh"
+
 # shellcheck source=lib/codex-version.sh
 source "$SCRIPT_DIR/lib/codex-version.sh"
 
@@ -256,6 +266,21 @@ install_external_plugin() {
 }
 
 install_openclaw() {
+  # Node floor gate: openclaw 2026.7.1+ refuses to start on Node below its
+  # engine range. Fail BEFORE npm install so we never replace a working
+  # runtime with one the host's Node cannot boot.
+  local node_ver
+  node_ver=$(node --version 2>/dev/null | sed 's/^v//' || true)
+  if [[ -z "$node_ver" ]]; then
+    log "    ✗ install_openclaw: node not found in PATH (need >= ${OPENCLAW_NODE_FLOOR})"
+    return 1
+  fi
+  if ! version_at_least "$OPENCLAW_NODE_FLOOR" "$node_ver"; then
+    log "    ✗ install_openclaw: Node $node_ver < required ${OPENCLAW_NODE_FLOOR} for openclaw ${OPENCLAW_VERSION}."
+    log "      Upgrade Node first (manual pre-step): see docs/runbooks/UPGRADE-2026.7.1.md §Node."
+    return 1
+  fi
+
   local installed
   installed=$(openclaw --version 2>/dev/null | awk 'NR==1 {print $2}' || true)
   if [[ -z "$installed" ]]; then
@@ -720,6 +745,12 @@ RSYNC_EXCLUDES=(
   # Workspace runtime data (real, accumulating data)
   --exclude='workspaces/*/memory/'
   --exclude='workspaces/*/api-logs/'
+  # openclaw >= 2026.7 writes a workspace-setup marker into each agent
+  # workspace at first boot (workspace_setup_state). Server-owned runtime
+  # state — never tracked in the repo; without this exclude every rsync
+  # --delete after the 7.1 upgrade would wipe the markers and the deploy
+  # pre-flight gate would flag them on every PR.
+  --exclude='workspaces/*/openclaw-workspace-state.json'
   # Agent long-term memory (written by agents at runtime, should survive
   # deploys — see docs/guides/WORKSPACE-FILE-OWNERSHIP.md). MEMORY.md IS tracked
   # in git as a seed, but agents modify it post-deploy and we must not

@@ -43,6 +43,11 @@
 #     canonical even if canonical does not exist yet (ln -sfn; a dangling link
 #     is acceptable and resolves the moment re-auth populates canonical) — but
 #     we log a warning when canonical is missing.
+#     ⚠ On an openclaw >= 2026.7 runtime BOTH modes delegate to
+#     codex-auth-sync.sh (the runtime no longer reads the JSON this script
+#     symlinks) and exit with ITS code — so ensure mode can then exit 1
+#     (surfaces failed to converge) or 2 (structural error) instead of the
+#     legacy always-0. Both ExecStartPre callers tolerate non-zero.
 #
 #   --check (read-only detector, for CI / guards): exit 1 if ANY non-canonical
 #     store is a REGULAR FILE that contains an `openai-codex:*` profile (= the
@@ -216,13 +221,40 @@ run_check() {
 
 # ── dispatch ─────────────────────────────────────────────────────────────────
 
+# openclaw >= 2026.7: the runtime no longer reads auth-profiles.json — the
+# symlink fabric this script maintains is INERT there. The 7.x-aware successor
+# (codex-auth-sync.sh: main-agent sqlite row + per-agent codex-home/auth.json,
+# access-token-only fan-out) takes over BOTH modes so every existing caller
+# (ExecStartPre heal, watchdog --check, CI) keeps its single entry point.
+# When the runtime is absent or pre-2026.7, legacy symlink behavior runs
+# unchanged (and the sync script itself no-ops below 2026.7, so double
+# invocation is safe).
+maybe_delegate_to_sync() {
+  local lib_dir sync_script runtime_ver
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  sync_script="$lib_dir/codex-auth-sync.sh"
+  [ -x "$sync_script" ] || return 1
+  # shellcheck source=version-compare.sh
+  source "$lib_dir/version-compare.sh"
+  runtime_ver="$(openclaw_runtime_version)"
+  [ -n "$runtime_ver" ] || return 1
+  if version_at_least "2026.7" "$runtime_ver"; then
+    log "runtime $runtime_ver >= 2026.7 — delegating to codex-auth-sync.sh"
+    "$sync_script" "$@"
+    exit $?
+  fi
+  return 1
+}
+
 main() {
   case "${1:-}" in
     --check)
+      maybe_delegate_to_sync --check || true
       run_check
       exit $?
       ;;
     ""|--ensure)
+      maybe_delegate_to_sync || true
       run_ensure
       # Ensure mode is best-effort and must never block start.
       exit 0
