@@ -34,6 +34,13 @@
 #   --intercom-conv-id <id>        the approval-ref (REQUIRED for this verb)
 # Optional argv:
 #   --apply                        real apply; default is dry-run
+#   --attested-msg <part_id>       Intercom part id of the CUSTOMER's own
+#                                  confirmation message in this conversation;
+#                                  muso verifies its provenance (author =
+#                                  contact = actor, recent) and may then merge
+#                                  an unclaimed, small duplicate whose name it
+#                                  could not corroborate. Never model-invented:
+#                                  the plugin resolves it from the conversation.
 #
 # Audit log: /var/log/openclaw/customer-profile-consolidate.jsonl
 # Output: a single JSON object on stdout (always); exit 0.
@@ -65,17 +72,18 @@ _audit() {
   local status="$1" detail="${2:-}" rc="${3:-}"
   jq -n -c \
     --arg ts "$(_now_iso)" --arg survivor "$survivor_id" --arg dups "${dup_ids[*]}" \
-    --arg actor "$actor_email_lc" --arg conv "$intercom_conv_id" \
+    --arg actor "$actor_email_lc" --arg conv "$intercom_conv_id" --arg attested "$attested_msg" \
     --arg mode "$mode" --arg status "$status" --arg detail "$detail" --arg rc "$rc" \
     '{ts:$ts, tool:"profiles_consolidate", survivor_id:$survivor, dup_ids:($dups|split(" ")|map(select(length>0))),
-      actor_identity:$actor, intercom_conv_id:(if $conv=="" then null else $conv end), mode:$mode, status:$status,
+      actor_identity:$actor, intercom_conv_id:(if $conv=="" then null else $conv end),
+      attested_msg:(if $attested=="" then null else $attested end), mode:$mode, status:$status,
       detail:(if $detail=="" then null else $detail end),
       muso_exit:(if $rc=="" then null else ($rc|tonumber? // $rc) end)}' \
     >> "$AUDIT_LOG" 2>/dev/null || echo "WARN: could not append to $AUDIT_LOG; audit line LOST" >&2
 }
 
 # --- argv ---
-survivor_id=""; actor_email=""; intercom_conv_id=""; apply=0
+survivor_id=""; actor_email=""; intercom_conv_id=""; apply=0; attested_msg=""
 dup_ids=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -83,9 +91,10 @@ while [[ $# -gt 0 ]]; do
     --from)            dup_ids+=("${2:-}"); shift 2 ;;
     --actor-identity)  actor_email="${2:-}"; shift 2 ;;
     --intercom-conv-id) intercom_conv_id="${2:-}"; shift 2 ;;
+    --attested-msg)    attested_msg="${2:-}"; shift 2 ;;
     --apply)           apply=1; shift ;;
     --dry-run)         apply=0; shift ;;
-    -h|--help) echo "consolidate.sh --into <uuid> --from <uuid> [--from <uuid>...] --actor-identity <email> --intercom-conv-id <id> [--apply]"; exit 0 ;;
+    -h|--help) echo "consolidate.sh --into <uuid> --from <uuid> [--from <uuid>...] --actor-identity <email> --intercom-conv-id <id> [--attested-msg <part_id>] [--apply]"; exit 0 ;;
     *) _emit_error "unknown_arg" "$1"; exit 0 ;;
   esac
 done
@@ -102,6 +111,7 @@ for _d in "${dup_ids[@]}"; do
 done
 [[ "$actor_email" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || { _emit_error "invalid_actor_identity" "redacted"; exit 0; }
 [[ "$intercom_conv_id" =~ ^[A-Za-z0-9_-]+$ ]] || { _emit_error "invalid_intercom_conv_id" "redacted"; exit 0; }
+[[ -z "$attested_msg" || "$attested_msg" =~ ^[A-Za-z0-9_-]+$ ]] || { _emit_error "invalid_attested_msg" "redacted"; exit 0; }
 actor_email_lc="$(printf %s "$actor_email" | tr '[:upper:]' '[:lower:]')"
 
 # Defense-in-depth kill switch.
@@ -120,6 +130,9 @@ command -v "$MUSO_BIN" >/dev/null 2>&1 || { _audit "refused_no_muso"; _emit_erro
 muso_args=(profiles consolidate --json --actor-identity "$actor_email_lc" --requester "$requester" --into "$survivor_id")
 for _d in "${dup_ids[@]}"; do muso_args+=(--from "$_d"); done
 muso_args+=(--yes --confirmed-by "$approver" --approval-ref "$intercom_conv_id")
+# The attestation part id rides the SAME conversation as the approval-ref; the
+# muso gate independently re-verifies its provenance (author, binding, age).
+[[ -n "$attested_msg" ]] && muso_args+=(--attested-msg "$attested_msg")
 (( apply == 0 )) && muso_args+=(--dry-run)
 
 # Run muso EXACTLY ONCE (a second run would double-apply): stdout → var,

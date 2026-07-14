@@ -84,9 +84,12 @@ Only when all duplicates resolve do you apply the rows below.
    `customer-profile-consolidate` skill (`profiles_consolidate` preview → apply).
    The gate corroborates identity server-side (same/near-same name, the customer's
    own claim, empty duplicate, shared tracks) and refuses anything weaker without
-   mutating – a name difference is NOT a reason to skip the attempt. Only when it
-   refuses (`route_to_human`) file the clean ownership-verified `profile-merge`
-   ticket. The verdict is still **evidence**, not a clearance.
+   mutating – a name difference is NOT a reason to skip the attempt. If it refuses
+   ONLY because the unclaimed duplicate's name doesn't match, ask the customer to
+   confirm it is them and retry with `customerConfirmedSameArtist:true` (see that
+   skill's ask-then-attest step). Only when it still refuses (`route_to_human`)
+   file the clean ownership-verified `profile-merge` ticket. The verdict is still
+   **evidence**, not a clearance.
 
 ### Step 3 – File via `create_ticket`
 

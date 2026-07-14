@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createRemoveCreditsTool } from "../src/tools/remove-credits.js";
 import { RateLimiter } from "../src/rate-limiter.js";
-import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 
 // Test-level mock for execFile that records calls and returns a programmable
 // stdout/stderr/error. Matches Node's execFile callback signature so the
@@ -26,17 +26,19 @@ function makeMockExecFile(opts: {
     callback: (err: unknown, stdout: string, stderr: string) => void,
   ) => {
     const call: ExecCall = { file, args, options };
-    // Capture tracks-file contents synchronously where possible, async-read
-    // it asynchronously so the test can assert on it.
+    // Capture tracks-file contents SYNCHRONOUSLY, before the callback can
+    // resolve the tool's promise: the tool unlinks its tmpfile right after
+    // exec settles, so an async read races the cleanup and intermittently
+    // records undefined (observed on a slow CI runner 2026-07-14).
     const tracksFileIdx = args.indexOf("--tracks-file");
     if (tracksFileIdx >= 0 && args[tracksFileIdx + 1]) {
-      readFile(args[tracksFileIdx + 1], "utf8").then((contents) => {
-        call.tracksFileContents = contents;
-      }).catch(() => undefined);
+      try {
+        call.tracksFileContents = readFileSync(args[tracksFileIdx + 1], "utf8");
+      } catch {
+        // leave undefined — the assertion will fail loudly with context
+      }
     }
     calls.push(call);
-    // Defer callback to next tick so the tmpfile is observably present at
-    // the point of the read above.
     setImmediate(() => {
       if (opts.error) {
         callback(opts.error, opts.stdout ?? "", opts.stderr ?? "");
