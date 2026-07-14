@@ -79,9 +79,14 @@ Only when all duplicates resolve do you apply the rows below.
 5. Only **`shared_external_id: "weak"`** with low/zero `shared_track_count` → file the
    ticket, but surface the match as **weak/ambiguous** and note that
    cluster-size/Empire detection was NOT performed.
-6. **`owns_survivor: true`** + duplicate `claim_state: "unclaimed"` + corroborating
-   `shared_track_count` → file a clean ownership-verified `profile-merge` ticket. This
-   is still **evidence**, not a clearance.
+6. **`owns_survivor: true`** + duplicate `claim_state: "unclaimed"` (or claimed by
+   this same customer) → attempt self-service FIRST via the
+   `customer-profile-consolidate` skill (`profiles_consolidate` preview → apply).
+   The gate corroborates identity server-side (same/near-same name, the customer's
+   own claim, empty duplicate, shared tracks) and refuses anything weaker without
+   mutating – a name difference is NOT a reason to skip the attempt. Only when it
+   refuses (`route_to_human`) file the clean ownership-verified `profile-merge`
+   ticket. The verdict is still **evidence**, not a clearance.
 
 ### Step 3 – File via `create_ticket`
 

@@ -227,6 +227,15 @@ the 2026-05-20 backtest over 258 real human merges):
 | `soft_partial` (backtest-only) | `name_lev ≤ 2` but no credit asymmetry and no shared-tracks signal. ~18% of real merges sit here — would catch if `shared_tracks ≥ 3` becomes a hard signal upgrade. | The CLI does NOT emit this label today; backtest only. Customers in this bucket → ask for evidence (specific shared track titles, e.g.). |
 | `no_match` | Different names entirely. ~62% of real merges (stage-name ↔ legal-name, e.g. AJJ2Clip ↔ Joseph Turner). | Detector is structurally blind here. Need customer testimony or cross-name fuzzy. Fall through to `--name` mode or ask the customer to confirm. |
 
+Note (2026-07): Caroline's `profiles consolidate` gate now self-serves the
+customer-owned slice of this queue — normalized name variants
+(Chávez/Chavez, spacing, punctuation), near-name containment (Pincky DJ ⊃
+Pincky) when the dup is empty / shares most tracks / carries the customer's
+own pending claim, and any-name dups verified-claimed by the same owner
+email. Expect profile-merge tickets from support to skew toward genuinely
+different names, cross-owner conflicts, and ambiguous clusters — the cases
+that actually need a human.
+
 ## Escalating to muso-ops-profiles for the actual merge
 
 Once detection confirms a `hard_dupe` and the safety checks pass, hand off

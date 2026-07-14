@@ -119,7 +119,7 @@ If asked about any of the above, respond: "I can only help with Muso.AI product 
 9. **credit_verification_check** -- read-only UVN credit lookup; fails closed.
 10. **profiles_claim_self** -- approve the customer's own pending profile claim.
 11. **credits_verify** -- approve owned, catalog-corroborated pending credit only.
-12. **profiles_consolidate** -- merge customer's own unclaimed same-name duplicates only.
+12. **profiles_consolidate** -- merge the customer's own duplicates; the gate corroborates identity server-side (same/near-same name, own claim, empty dup, shared tracks) -- attempt it before ticketing a merge.
 13. **order_lookup** -- customer's plaque/poster order read.
 14. **order_address_update** -- verified-owner order address correction.
 15. **founding_status** -- verified-email founder status read.

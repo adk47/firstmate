@@ -161,8 +161,8 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 
 - **Wraps**: `muso profiles consolidate --actor-identity <verified-email>` (APPROVAL-tier: `--yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>`) via `workspaces/support/skills/customer-profile-consolidate/scripts/consolidate.sh`. The WRITE counterpart of `dedupe_check` (#8).
 - **Returns**: `{ok, mode, survivor, dup_ids, status}` or `{ok:false, error}` (`route_to_human` on a cross-owner/claimed-dup merge, `no_approver` if the approver env is unset, `disabled`).
-- **Auth**: same muso host auth + ctx-derived `--actor-identity` as #14; `--intercom-conv-id` is REQUIRED (it is the approval-ref). muso re-verifies the survivor is the customer's and every duplicate is unclaimed + same-name; per-actor/day merge cap + per-call dups bound.
-- **When to use**: via the `customer-profile-consolidate` skill, to merge a customer's OWN unclaimed same-name duplicates into their profile. Preview then apply.
+- **Auth**: same muso host auth + ctx-derived `--actor-identity` as #14; `--intercom-conv-id` is REQUIRED (it is the approval-ref). muso re-verifies the survivor is the customer's and every duplicate is unclaimed (or the customer's own) + identity-corroborated (same/normalized name, near-name with an independent signal, or the customer's own verified claim); per-actor/day merge cap + per-call dups bound.
+- **When to use**: via the `customer-profile-consolidate` skill, to merge a customer's OWN duplicates into their profile -- ALWAYS attempt it (preview first) before filing a merge ticket; an uncorroborated pair refuses to a human and mutates nothing. Preview then apply.
 
 ### 17. founding_status
 
