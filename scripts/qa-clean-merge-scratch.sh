@@ -50,6 +50,7 @@ KEEP_GLOBS=(
   '.admin-token-cache' '.ads-token-cache'
   # workspaces/*/<file> excludes mirrored from deploy.sh RSYNC_EXCLUDES
   'MEMORY.md' 'IDENTITY.md' 'HEARTBEAT.md' 'TOOLS.md'
+  'openclaw-workspace-state.json'
   'TOOLS.md.bak-*' '*.md.bak-*'
   'write-activity.log'
   'openclaw-workspace-state.json'
