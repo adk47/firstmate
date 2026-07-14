@@ -2586,41 +2586,64 @@ else
 fi
 
 # -------------------------------------------------------------------
-# Step 6: Restart targeted gateway(s)
+# Step 6: Restart targeted gateway(s) — drain-aware
 # -------------------------------------------------------------------
+# The gateway restart is DRAIN-AWARE: we ask the running gateway to finish its
+# active work (in-flight LLM turns, pending reply deliveries, queued turns)
+# via `openclaw gateway restart --safe` and await the self-restart, so a
+# deploy no longer hard-kills Caroline mid-answer or an agent mid-task. Any
+# safe-path failure falls back LOUDLY (Slack) to the old `systemctl restart`.
+# Mechanics + live-probe evidence: scripts/lib/gateway-restart.sh.
+# Escape hatches: HYDRA_HARD_RESTART=1 skips the drain (immediate hard
+# restart, the pre-drain behavior); HYDRA_FORCE_RESTART=1 overrides the
+# restart-skip gate below (they compose).
 log "Step 6/9: Restarting OpenClaw Gateway ($TARGET)..."
-restart_gateway() {
+# shellcheck source=lib/gateway-restart.sh
+source "$SCRIPT_DIR/lib/gateway-restart.sh"
+export GATEWAY_EXEC_FN=run_on_node8   # every probe honors $HYDRA_LOCAL (ssh mode too)
+
+# Verify the daemon actually picked up its profile state dir. env-file vars
+# appear in /proc/<pid>/environ (unlike the runtime-set OPENCLAW_PROFILE), so
+# this gates the exact regression that hid for a month: a gateway whose
+# profile-blind resolveStateDir() falls back to the stale /root/.openclaw
+# skills catalog. Profile (main/edge) is the last dash-segment of the unit.
+verify_gateway_env_pin() {
   local service="$1"
-  local cmd="systemctl restart $service"
-  if $HYDRA_LOCAL; then
-    eval "$cmd"
-  else
-    ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" "$cmd"
-  fi
-  # Gateway takes ~12s to start (loads all agents + plugins). Poll up to 30s.
-  for i in $(seq 1 15); do
-    sleep 2
-    if systemctl is-active --quiet "$service" 2>/dev/null; then
-      log "  $service restarted successfully (${i}x2s)."
-      # Verify the daemon actually picked up its profile state dir. env-file vars
-      # appear in /proc/<pid>/environ (unlike the runtime-set OPENCLAW_PROFILE), so
-      # this gates the exact regression that hid for a month: a gateway whose
-      # profile-blind resolveStateDir() falls back to the stale /root/.openclaw
-      # skills catalog. Profile (main/edge) is the last dash-segment of the unit.
-      local profile="${service##*-}"
-      local want="OPENCLAW_STATE_DIR=/root/.openclaw-${profile}"
-      local vcmd="pid=\$(systemctl show -p MainPID --value $service); tr '\\0' '\\n' < /proc/\$pid/environ | grep -Fxq '$want'"
-      local failmsg="$service is active but its process env lacks '$want' — its daemon would inject the STALE /root/.openclaw/skills catalog into EVERY agent. Pin it in /etc/openclaw/${profile}.env (NOT shared.env) and restart."
-      if $HYDRA_LOCAL; then
-        bash -c "$vcmd" || fail "$failmsg"
-      else
-        ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" "$vcmd" || fail "$failmsg"
+  local profile="${service##*-}"
+  local want="OPENCLAW_STATE_DIR=/root/.openclaw-${profile}"
+  local vcmd="pid=\$(systemctl show -p MainPID --value $service); tr '\\0' '\\n' < /proc/\$pid/environ | grep -Fxq '$want'"
+  run_on_node8 "$vcmd" || fail "$service is active but its process env lacks '$want' — its daemon would inject the STALE /root/.openclaw/skills catalog into EVERY agent. Pin it in /etc/openclaw/${profile}.env (NOT shared.env) and restart."
+  log "  ✓ $service process env pins $want"
+}
+
+# Phase B of the drain: await the requested self-restart; fall back to a hard
+# restart on any failure (deploys must always converge — the drain is an
+# optimization, never a gate). Fallbacks Slack-notify so a permanently broken
+# safe path can't silently degrade to hard-kill-on-every-deploy.
+finish_gateway_restart() {
+  local service="$1" old_pid="$2" req_rc="$3"
+  case "$req_rc" in
+    0)
+      if await_gateway_restart "$service" "$old_pid"; then
+        verify_gateway_env_pin "$service"
+        return 0
       fi
-      log "  ✓ $service process env pins $want"
-      return 0
-    fi
-  done
-  fail "Failed to restart $service (timed out after 30s)"
+      log "  WARN: drain did not complete for $service — falling back to hard restart"
+      notify_slack ":warning: HYDRA deploy: drain-aware restart fell back to HARD restart for $service (active work didn't drain within ${GATEWAY_DRAIN_DEADLINE_SECS:-390}s — in-flight turns may be cut)"
+      ;;
+    2)
+      log "  HYDRA_HARD_RESTART=1 — skipping drain for $service" ;;
+    3)
+      log "  WARN: no verified pre-request MainPID for $service — a drain result would be unverifiable; hard restart"
+      notify_slack ":warning: HYDRA deploy: could not capture a pre-request MainPID for $service — hard restart without drain (in-flight turns may be cut)."
+      ;;
+    *)
+      log "  WARN: safe-restart request failed for $service (rc=$req_rc) — falling back to hard restart"
+      notify_slack ":warning: HYDRA deploy: safe-restart request FAILED for $service (rc=$req_rc) — hard restart fallback. If this repeats every deploy, the drain path is broken (see scripts/lib/gateway-restart.sh)."
+      ;;
+  esac
+  hard_restart_gateway "$service" || fail "Failed to restart $service (hard fallback)"
+  verify_gateway_env_pin "$service"
 }
 
 # gateway_restart_needed(): skip a gateway restart when a deploy provably changed
@@ -2632,18 +2655,36 @@ restart_gateway() {
 # shellcheck source=lib/edge-restart-gate.sh
 source "$SCRIPT_DIR/lib/edge-restart-gate.sh"
 
-# Restart $service unless the gate proves nothing it loads changed this deploy.
-restart_gateway_if_needed() {
-  local service="$1"
-  if gateway_restart_needed; then
-    restart_gateway "$service"
-  else
-    log "  Skipping ${service#openclaw-gateway-} gateway restart: only gateway-inert files (docs/CI/personas/tests/templates/root-docs) changed since last deploy — nothing it loads. Override: HYDRA_FORCE_RESTART=1."
+if gateway_restart_needed; then
+  # Phase A: request the safe restarts up front (each request returns in ~3s;
+  # the gateways then drain CONCURRENTLY, so worst-case wall time is one drain
+  # budget, not one per gateway). Phase B verifies serially.
+  main_old_pid="" main_req="" edge_old_pid="" edge_req=""
+  if needs_target "main"; then
+    main_old_pid=$(gateway_main_pid "openclaw-gateway-main") || main_old_pid=""
+    if [ -z "$main_old_pid" ] || [ "$main_old_pid" = "0" ]; then
+      main_req=3   # no verified baseline PID -> drain unverifiable, fail closed
+    else
+      main_req=0; request_safe_restart "openclaw-gateway-main" "main" || main_req=$?
+    fi
   fi
-}
-
-if needs_target "main"; then restart_gateway_if_needed "openclaw-gateway-main"; fi
-if needs_target "edge"; then restart_gateway_if_needed "openclaw-gateway-edge"; fi
+  if needs_target "edge"; then
+    edge_old_pid=$(gateway_main_pid "openclaw-gateway-edge") || edge_old_pid=""
+    if [ -z "$edge_old_pid" ] || [ "$edge_old_pid" = "0" ]; then
+      edge_req=3   # no verified baseline PID -> drain unverifiable, fail closed
+    else
+      edge_req=0; request_safe_restart "openclaw-gateway-edge" "edge" || edge_req=$?
+    fi
+  fi
+  if needs_target "main"; then finish_gateway_restart "openclaw-gateway-main" "$main_old_pid" "$main_req"; fi
+  if needs_target "edge"; then finish_gateway_restart "openclaw-gateway-edge" "$edge_old_pid" "$edge_req"; fi
+else
+  for svc_profile in main edge; do
+    if needs_target "$svc_profile"; then
+      log "  Skipping $svc_profile gateway restart: only gateway-inert files (docs/CI/personas/tests/templates/root-docs) changed since last deploy — nothing it loads. Override: HYDRA_FORCE_RESTART=1."
+    fi
+  done
+fi
 
 # -------------------------------------------------------------------
 # WARMUP: wait for agents to bind before smoke test
