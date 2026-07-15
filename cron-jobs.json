@@ -608,7 +608,7 @@
       "updatedAtMs": 1780282900238,
       "schedule": {
         "kind": "cron",
-        "expr": "0 9,22 * * *",
+        "expr": "1 9,22 * * *",
         "tz": "America/Chicago"
       },
       "sessionTarget": "isolated",
@@ -645,7 +645,7 @@
       "updatedAtMs": 1780308728000,
       "schedule": {
         "kind": "cron",
-        "expr": "0 9,22 * * *",
+        "expr": "2 9,22 * * *",
         "tz": "America/Chicago"
       },
       "sessionTarget": "isolated",

@@ -63,6 +63,17 @@ ERROR_PREVIEW_CHARS=300
 # runs over ~3 days), so a streak threshold catches real breakage while killing the
 # recovered-blip false alarms. Set to 1 to restore alert-on-every-error.
 MIN_STREAK="${CRON_HEALTH_MIN_STREAK:-2}"
+# Restart-interrupt and the openclaw-7.1 cron-session claim race are RETRYABLE
+# infra churn (openclaw re-dispatches the run), not job-logic failures — see
+# is_transient() below. They are excluded from the MIN_STREAK hard-failure
+# streak so a deploy storm stops false-paging. This is the fail-loud backstop:
+# a job stuck in transient limbo for this many CONSECUTIVE fires with no
+# recovery is a genuine wedge and pages a distinct "stuck" bullet. Default 8 is
+# well above a normal heavy-deploy day (the 2026-07-15 storm peaked at ~5), so
+# routine churn stays quiet while a permanently wedged session still surfaces.
+# NOTE: this is a run COUNT, not wall-clock, so its lead time scales with each
+# job's cadence — a deliberately conservative backstop, not a precise SLA.
+TRANSIENT_STUCK_STREAK="${CRON_HEALTH_TRANSIENT_STUCK_STREAK:-8}"
 DRY_RUN=0
 
 # slack-notify.sh reads this (target channel).
@@ -101,7 +112,8 @@ scan_failures() {
   RUNS_DIR="$1" JOBS_FILE="$2" STATE_FILE="$3" PAYLOAD_OUT="$4" PERSIST="$5" \
   RUNS_DB="${RUNS_DB-$CRON_RUNS_DB}" STORE_KEY="${STORE_KEY-$CRON_STORE_KEY}" \
   SLACK_CHANNEL="$SLACK_CHANNEL" PREVIEW="$ERROR_PREVIEW_CHARS" \
-  MIN_STREAK="$MIN_STREAK" python3 - <<'PYEOF'
+  MIN_STREAK="$MIN_STREAK" TRANSIENT_STUCK_STREAK="$TRANSIENT_STUCK_STREAK" \
+  python3 - <<'PYEOF'
 import json, os, glob, sqlite3
 from datetime import datetime, timezone
 
@@ -113,6 +125,7 @@ persist    = os.environ.get("PERSIST", "1") == "1"
 channel    = os.environ["SLACK_CHANNEL"]
 preview    = int(os.environ.get("PREVIEW", "300"))
 min_streak = max(1, int(os.environ.get("MIN_STREAK", "2")))
+transient_stuck_streak = max(1, int(os.environ.get("TRANSIENT_STUCK_STREAK", "8")))
 runs_db    = os.environ.get("RUNS_DB", "").strip()
 store_key  = os.environ.get("STORE_KEY", "").strip()
 
@@ -148,6 +161,38 @@ def is_failure(rec):
     if isinstance(sent, list) and sent:
         return False
     return True
+
+def is_transient(rec):
+    """A RETRYABLE infra condition openclaw itself re-dispatches — NOT a
+    job-logic failure. Two signatures, both openclaw-self-labeled retryable:
+
+      1. 'cron: job interrupted by gateway restart' — a deploy/restart
+         hard-killed an in-flight run. openclaw re-runs it (wakeMode:now on
+         restart, or the next schedule). Old and benign (seen since April).
+      2. 'CronSessionLifecycleClaimError: Session "…" changed while starting
+         work. Retry.' — openclaw 2026.7.1's optimistic-concurrency guard on
+         isolated cron session state (run-session-state.ts): a run could not
+         claim the session's lifecycle revision because a concurrent writer
+         (a gateway restart rehydrating sessions, or an overlapping same-agent
+         cron) bumped it. The 'Retry.' is the runtime's own verdict; the run
+         drops and recovers on the next fire.
+
+    These are excluded from the MIN_STREAK hard-failure streak so deploy-restart
+    churn stops false-paging. They are NOT treated as healthy (that would reset
+    a real streak and let an infra blip mask a genuine fault) — they're skipped,
+    and a job STUCK in this limbo across TRANSIENT_STUCK_STREAK consecutive
+    fires still pages a distinct 'stuck' bullet (the fail-loud backstop)."""
+    if rec.get("status") != "error":
+        return False
+    # Match the ERROR field ONLY — both signatures are runtime-emitted there,
+    # never into an agent-authored `summary` (often LLM prose that could
+    # coincidentally contain these words → a real job-logic failure would then
+    # be silently suppressed). The class name is the robust tell; the full
+    # '…Retry.' verdict is a fallback if a future runtime drops the prefix.
+    text = str(rec.get("error") or "")
+    return ("interrupted by gateway restart" in text
+            or "CronSessionLifecycleClaimError" in text
+            or "changed while starting work. Retry." in text)
 
 def load_runs():
     """Return ({job_id: [record, ...]}, source_error_or_None).
@@ -269,6 +314,14 @@ if source_error:
 new_state.pop("__source_error__", None)
 
 alerts = []  # (name, agent, ts_ms, err)
+
+def _fmt_err(r):
+    err = r.get("error") or r.get("summary") or "unknown error"
+    err = " ".join(str(err).split())  # collapse newlines/runs of space to one line
+    if len(err) > preview:
+        err = err[:preview] + "…"
+    return err
+
 for job_id, recs in sorted(runs_by_job.items()):
     finished = [r for r in recs
                 if r.get("status") in ("ok", "error") and isinstance(r.get("ts"), (int, float))]
@@ -283,23 +336,36 @@ for job_id, recs in sorted(runs_by_job.items()):
         new_state[job_id] = max_ts
         continue
     name, agent = names.get(job_id, (job_id, "<unknown>"))
-    # Walk runs chronologically tracking the consecutive-failure streak. A healthy
-    # run (ok, or errored-but-delivered) resets it to 0. Only alert on a failure
-    # run that is BOTH newer than the watermark AND the Nth-or-later consecutive
-    # failure — this suppresses lone recovered blips but still pages every run of a
-    # sustained outage.
+    # Walk runs chronologically tracking TWO streaks. A healthy run (ok, or
+    # errored-but-delivered) resets both to 0. Classification is three-way:
+    #   • hard failure (is_failure, not transient) → build `streak`; alert once
+    #     it is BOTH newer than the watermark AND the Nth-or-later consecutive
+    #     failure (suppresses lone recovered blips, pages a sustained outage).
+    #   • transient (is_transient: restart-interrupt / 7.1 claim race) → build
+    #     `transient_streak` ONLY. It does NOT grow the hard streak (deploy churn
+    #     must not page) and does NOT reset it (a real→transient→real sequence
+    #     must still page — an infra blip can't mask a genuine fault). Fail-loud
+    #     backstop: a job stuck in transient limbo for `transient_stuck_streak`
+    #     consecutive fires with no recovery pages a distinct 'stuck' bullet.
+    #   • real failure resets `transient_streak` (the job ran and failed for a
+    #     real reason — no longer stuck in claim/restart limbo).
     streak = 0
+    transient_streak = 0
     for r in finished:
-        if is_failure(r):
-            streak += 1
-            if r["ts"] > prev and streak >= min_streak:
-                err = r.get("error") or r.get("summary") or "unknown error"
-                err = " ".join(str(err).split())  # collapse newlines/runs of space to one line
-                if len(err) > preview:
-                    err = err[:preview] + "…"
-                alerts.append((name, agent, r["ts"], err))
-        else:
+        if not is_failure(r):
             streak = 0
+            transient_streak = 0
+        elif is_transient(r):
+            transient_streak += 1
+            if r["ts"] > prev and transient_streak >= transient_stuck_streak:
+                alerts.append((name, agent, r["ts"],
+                               "stuck: %d consecutive restart/claim failures, not recovering — %s"
+                               % (transient_streak, _fmt_err(r))))
+        else:
+            streak += 1
+            transient_streak = 0
+            if r["ts"] > prev and streak >= min_streak:
+                alerts.append((name, agent, r["ts"], _fmt_err(r)))
     new_state[job_id] = max(prev, max_ts)
 
 _persist()
@@ -329,7 +395,8 @@ _self_test() {
   td="$(mktemp -d)"
   trap 'rm -rf "$td"' RETURN
   mkdir -p "$td/runs"
-  # Two jobs, both pre-seeded watermark at ts=100.
+  # Seven jobs, all pre-seeded watermark at ts=100 (transient cases documented
+  # inline in their own block below).
   #
   # selftest-job: ok@150, then a two-error streak (error@190, error@200).
   # Exercises the streak threshold of 2: error@190 is a lone failure (preceded
@@ -349,24 +416,71 @@ _self_test() {
     '{"status":"error","ts":190,"error":"⚠️ 🛠️ `git status` failed","delivery":{"messageToolSentTo":[{"channel":"message"}]}}' \
     '{"status":"error","ts":200,"error":"⚠️ 🛠️ `stripe ...` failed","delivery":{"messageToolSentTo":[{"channel":"message"}]}}' \
     > "$td/runs/delivered-job.jsonl"
-  printf '%s\n' '{"jobs":[{"id":"selftest-job","name":"selftest","agentId":"qa"},{"id":"delivered-job","name":"deliveredpost","agentId":"qa"}]}' > "$td/jobs.json"
-  printf '%s\n' '{"selftest-job":100,"delivered-job":100}' > "$td/state.json"
-  # Pin the threshold at 2 for the self-test so it is deterministic regardless of
-  # the operator's CRON_HEALTH_MIN_STREAK — the self-test verifies detector
-  # HEALTH (fires on a streak, suppresses a lone error), not the live threshold.
-  out="$(RUNS_DB="" MIN_STREAK=2 scan_failures "$td/runs" "$td/jobs.json" "$td/state.json" "$td/payload.json" 0 2>/dev/null || true)"
+  # ── Transient-signature cases (restart-interrupt + 7.1 claim race) ──────
+  # RETRYABLE infra churn openclaw re-dispatches (is_transient): EXCLUDED from
+  # the hard-failure streak so a deploy storm stops false-paging, but NOT
+  # treated as healthy (an infra blip must not reset a real streak).
+  # TRANSIENT_STUCK_STREAK is pinned to 3 in the scan call below.
+  #
+  # restart-job: two back-to-back 'interrupted by gateway restart' errors —
+  #   transient_streak peaks at 2 (< stuck threshold 3) → 0 bullets.
+  # claim-job: a lone 7.1 CronSessionLifecycleClaimError blip → 0 bullets.
+  # mixed-job: real@190, restart@195, real@200 — the transient run must NOT
+  #   reset the hard streak, so real@200 still completes a 2-streak → 1 bullet.
+  # stuck-job: three consecutive transient errors — hits the stuck threshold at
+  #   the 3rd → exactly 1 distinct 'stuck' bullet (the fail-loud backstop).
+  # nonconsec-job: transient×2, real, transient×2, ok, transient — the real AND
+  #   the ok each RESET transient_streak, so it never reaches 3-in-a-row → 0
+  #   bullets. Guards BOTH resets: dropping either lets the count climb across
+  #   the interruption and fire a FALSE 'stuck' page (mutation-tested — without
+  #   a reset the total flips to 4 and the count assertion below trips).
+  printf '%s\n' \
+    '{"status":"error","ts":190,"error":"cron: job interrupted by gateway restart"}' \
+    '{"status":"error","ts":200,"error":"cron: job interrupted by gateway restart"}' \
+    > "$td/runs/restart-job.jsonl"
+  printf '%s\n' \
+    '{"status":"error","ts":200,"error":"CronSessionLifecycleClaimError: Session changed while starting work. Retry."}' \
+    > "$td/runs/claim-job.jsonl"
+  printf '%s\n' \
+    '{"status":"error","ts":190,"error":"real boom"}' \
+    '{"status":"error","ts":195,"error":"cron: job interrupted by gateway restart"}' \
+    '{"status":"error","ts":200,"error":"real crash"}' \
+    > "$td/runs/mixed-job.jsonl"
+  printf '%s\n' \
+    '{"status":"error","ts":190,"error":"cron: job interrupted by gateway restart"}' \
+    '{"status":"error","ts":195,"error":"CronSessionLifecycleClaimError: Session changed while starting work. Retry."}' \
+    '{"status":"error","ts":200,"error":"cron: job interrupted by gateway restart"}' \
+    > "$td/runs/stuck-job.jsonl"
+  printf '%s\n' \
+    '{"status":"error","ts":190,"error":"cron: job interrupted by gateway restart"}' \
+    '{"status":"error","ts":192,"error":"cron: job interrupted by gateway restart"}' \
+    '{"status":"error","ts":194,"error":"real boom"}' \
+    '{"status":"error","ts":196,"error":"cron: job interrupted by gateway restart"}' \
+    '{"status":"error","ts":198,"error":"cron: job interrupted by gateway restart"}' \
+    '{"status":"ok","ts":200}' \
+    '{"status":"error","ts":202,"error":"cron: job interrupted by gateway restart"}' \
+    > "$td/runs/nonconsec-job.jsonl"
+  printf '%s\n' '{"jobs":[{"id":"selftest-job","name":"selftest","agentId":"qa"},{"id":"delivered-job","name":"deliveredpost","agentId":"qa"},{"id":"restart-job","name":"restartblip","agentId":"qa"},{"id":"claim-job","name":"claimblip","agentId":"qa"},{"id":"mixed-job","name":"mixedreal","agentId":"qa"},{"id":"stuck-job","name":"stuckjob","agentId":"qa"},{"id":"nonconsec-job","name":"nonconsec","agentId":"qa"}]}' > "$td/jobs.json"
+  printf '%s\n' '{"selftest-job":100,"delivered-job":100,"restart-job":100,"claim-job":100,"mixed-job":100,"stuck-job":100,"nonconsec-job":100}' > "$td/state.json"
+  # Pin MIN_STREAK=2 and TRANSIENT_STUCK_STREAK=3 so the self-test is
+  # deterministic regardless of the operator's CRON_HEALTH_* overrides — it
+  # verifies detector HEALTH (fires on a real streak, suppresses a lone error,
+  # skips transient churn, still catches a real streak interleaved with a
+  # transient, and pages a genuinely stuck job), not the live thresholds.
+  out="$(RUNS_DB="" MIN_STREAK=2 TRANSIENT_STUCK_STREAK=3 scan_failures "$td/runs" "$td/jobs.json" "$td/state.json" "$td/payload.json" 0 2>/dev/null || true)"
   if ! printf '%s' "$out" | grep -q "selftest"; then
     echo "$LOGPREFIX SELF-TEST FAIL: detector did not flag the injected error streak" >&2
     return 1
   fi
-  # Exactly ONE bullet must fire: error@200 (the run completing the 2-error
-  # streak). The ok@150 (healthy) and error@190 (lone, streak length 1) must both
-  # be filtered out — a count of 2 would mean either ok runs are mis-reported or
-  # the streak gate is not suppressing recovered blips.
+  # Exactly THREE bullets must fire: selftest error@200 (real 2-streak),
+  # mixedreal error@200 (real streak survives an interleaved transient), and
+  # stuckjob error@200 (transient_stuck backstop at the 3rd transient). The
+  # ok/lone-error blips, the delivered-job, and the pure restart/claim
+  # transients (restartblip, claimblip) must ALL be filtered out.
   local bullets
   bullets="$(printf '%s\n' "$out" | grep -c '^• ' || true)"
-  if [ "$bullets" != "1" ]; then
-    echo "$LOGPREFIX SELF-TEST FAIL: expected 1 alert bullet, got $bullets" >&2
+  if [ "$bullets" != "3" ]; then
+    echo "$LOGPREFIX SELF-TEST FAIL: expected 3 alert bullets, got $bullets" >&2
     return 1
   fi
   # The message-tool-delivered job must be suppressed entirely — its name must
@@ -375,12 +489,38 @@ _self_test() {
     echo "$LOGPREFIX SELF-TEST FAIL: message-tool-delivered run was flagged as a failure" >&2
     return 1
   fi
+  # Transient infra churn below the stuck threshold must NOT page — the whole
+  # point of is_transient() (deploy-restart interrupts / 7.1 cron claim race).
+  if printf '%s' "$out" | grep -qE "restartblip|claimblip"; then
+    echo "$LOGPREFIX SELF-TEST FAIL: a transient restart/claim blip was paged as a hard failure" >&2
+    return 1
+  fi
+  # A transient run BROKEN by a real/healthy run must not accumulate toward the
+  # stuck backstop — nonconsec resets transient_streak twice and must stay
+  # silent (guards BOTH resets; a dropped reset also trips the count!=3 above).
+  if printf '%s' "$out" | grep -q "nonconsec"; then
+    echo "$LOGPREFIX SELF-TEST FAIL: a non-consecutive transient sequence fired the stuck backstop" >&2
+    return 1
+  fi
+  # A real failure interleaved with a transient must STILL page — a transient
+  # run must not reset the hard-failure streak.
+  if ! printf '%s' "$out" | grep -q "mixedreal"; then
+    echo "$LOGPREFIX SELF-TEST FAIL: a transient run masked a real failure streak" >&2
+    return 1
+  fi
+  # A job STUCK in transient limbo past the threshold must page a distinct
+  # 'stuck' bullet (fail-loud backstop) — never silently swallowed.
+  if ! printf '%s' "$out" | grep -q "stuck: 3 consecutive"; then
+    echo "$LOGPREFIX SELF-TEST FAIL: a job wedged in transient-error limbo did not fire the stuck backstop" >&2
+    return 1
+  fi
 
   # ── 6.x SQLite source path ──────────────────────────────────────────────
   # The cases above exercise the JSONL fallback (RUNS_DB=""). This one guards the
   # PRODUCTION reader: build a throwaway cron_run_logs table and verify a 2-error
-  # streak surfaces THROUGH it. A future cron-store relocation that silently froze
-  # this watchdog would fail HERE instead of rotting unnoticed.
+  # streak surfaces THROUGH it, AND that a transient restart run is excluded
+  # there too. A future cron-store relocation that silently froze this watchdog
+  # would fail HERE instead of rotting unnoticed.
   local db sout
   db="$td/runs.sqlite"
   python3 - "$db" <<'PYDB'
@@ -391,15 +531,21 @@ sk = "/selftest/jobs.json"
 for jid, seq, rec in [
     ("selftest-job", 1, {"status": "error", "ts": 190, "error": "first"}),
     ("selftest-job", 2, {"status": "error", "ts": 200, "error": "boom"}),
+    ("restart-job", 1, {"status": "error", "ts": 190, "error": "cron: job interrupted by gateway restart"}),
+    ("restart-job", 2, {"status": "error", "ts": 200, "error": "cron: job interrupted by gateway restart"}),
 ]:
     con.execute("INSERT INTO cron_run_logs (store_key, job_id, seq, entry_json) VALUES (?,?,?,?)",
                 (sk, jid, seq, json.dumps(rec)))
 con.commit(); con.close()
 PYDB
-  sout="$(RUNS_DB="$db" STORE_KEY="/selftest/jobs.json" MIN_STREAK=2 \
+  sout="$(RUNS_DB="$db" STORE_KEY="/selftest/jobs.json" MIN_STREAK=2 TRANSIENT_STUCK_STREAK=3 \
     scan_failures "$td/runs" "$td/jobs.json" "$td/state.json" "$td/payload-sql.json" 0 2>/dev/null || true)"
   if ! printf '%s' "$sout" | grep -q "selftest"; then
     echo "$LOGPREFIX SELF-TEST FAIL: SQLite cron_run_logs reader did not surface the injected streak" >&2
+    return 1
+  fi
+  if printf '%s' "$sout" | grep -q "restartblip"; then
+    echo "$LOGPREFIX SELF-TEST FAIL: SQLite reader paged a transient restart blip as a hard failure" >&2
     return 1
   fi
   return 0
