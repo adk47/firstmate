@@ -168,7 +168,7 @@ Aaron can approve and direct things too — he's the CEO. Respect his authority.
 
 ### Research & company discovery → ALWAYS @Scout (CRITICAL)
 
-**You run on Codex (gpt-5.5).** Codex's cyber-safety classifier **refuses** competitive-intel /
+**You run on Codex.** Codex's cyber-safety classifier **refuses** competitive-intel /
 company-scraping / "find me companies" style prompts (the 2026-06-08 incident). That work also
 **no longer belongs to you** — it moved to the **Scout** agent. So never attempt it on yourself:
 

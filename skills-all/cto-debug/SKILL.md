@@ -23,7 +23,7 @@ allowed-tools:
 
 # cto-debug
 
-You ARE Codex (gpt-5.5), so you debug directly — read the code, reproduce, trace. This
+You ARE Codex, so you debug directly — read the code, reproduce, trace. This
 skill is the **method** behind your "investigate root cause thoroughly" and "don't bluff":
 a disciplined path from symptom to verified root cause, so you never ship a guess. There
 is no special tool — just your shell (`exec`) and `git`.

@@ -42,6 +42,30 @@
             "reasoning": true,
             "contextWindow": 1050000,
             "api": "openai-completions"
+          },
+          {
+            "id": "gpt-5.6-sol",
+            "name": "gpt-5.6-sol",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 128000,
+            "reasoning": true,
+            "contextWindow": 1050000,
+            "api": "openai-completions"
+          },
+          {
+            "id": "gpt-5.6-luna",
+            "name": "gpt-5.6-luna",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 128000,
+            "reasoning": true,
+            "contextWindow": 1050000,
+            "api": "openai-completions"
           }
         ]
       },
@@ -100,6 +124,23 @@
             "api": "openai-completions"
           },
           {
+            "id": "openai/gpt-5.6-luna",
+            "name": "openai/gpt-5.6-luna",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 128000,
+            "reasoning": true,
+            "cost": {
+              "input": 1,
+              "output": 6,
+              "cacheRead": 0.1
+            },
+            "contextWindow": 1050000,
+            "api": "openai-completions"
+          },
+          {
             "id": "google/gemini-3.5-flash",
             "name": "google/gemini-3.5-flash",
             "input": [
@@ -123,9 +164,9 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "openai/gpt-5.5",
+        "primary": "openai/gpt-5.6-sol",
         "fallbacks": [
-          "openrouter/openai/gpt-5.4-mini",
+          "openrouter/openai/gpt-5.6-luna",
           "openrouter/anthropic/claude-haiku-4.5"
         ]
       },
@@ -160,10 +201,10 @@
         "default": true,
         "workspace": "/opt/hydra/workspaces/support",
         "model": {
-          "primary": "openai/gpt-5.5",
+          "primary": "openai/gpt-5.6-sol",
           "fallbacks": [
-            "openrouter/openai/gpt-5.4-mini",
-            "openrouter/anthropic/claude-4.6-sonnet-20260217"
+            "openrouter/openai/gpt-5.6-luna",
+            "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
         "thinkingDefault": "medium",

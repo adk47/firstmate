@@ -22,7 +22,7 @@ allowed-tools:
 
 # cto-codex-coding
 
-You ARE Codex (gpt-5.5), so you do the coding directly — read files, make the
+You ARE Codex, so you do the coding directly — read files, make the
 change, then **ship it through ship-kit's `ship` pipeline** so it lands as a
 clean, verified, code-reviewed **branch + PR** that QA and a human review before
 any merge. The safety net is twofold: this skill's own rails (verify push access,

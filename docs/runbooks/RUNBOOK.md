@@ -469,10 +469,11 @@ ssh root@40.160.32.80 "docker restart hydra-sandbox"
 
 ---
 
-### Codex Auth Invalidated / Silent Sonnet Fallback
+### Codex Auth Invalidated / Silent Fallback
 
-**Symptoms**: codex agents (`openai/gpt-5.5` via the codex agentRuntime,
-ChatGPT OAuth) silently degrade to their Sonnet fallback; logs show
+**Symptoms**: codex agents (`openai/gpt-5.6-sol`/`-luna` via the codex
+agentRuntime, ChatGPT OAuth) silently degrade to their OpenRouter fallback
+(gpt-5.6-luna, then haiku); logs show
 `auth refresh request timed out after 10s` or `authentication token has
 been invalidated`; agents appear to be "running twice" as concurrent
 refreshes race. Usually hits multiple/all codex agents at once.
@@ -538,7 +539,7 @@ fleet-wide via PR #376. NEVER copy/seed a per-agent codex `auth-profiles.json`.
 
 ### Codex Token Lapse (`token_expired`) — pure OAuth expiry, re-auth only
 
-**Symptoms**: fleet on `openrouter/openai/gpt-5.4-mini`; logs show
+**Symptoms**: fleet on `openrouter/openai/gpt-5.6-luna`; logs show
 `authentication token is expired` (`auth error code: token_expired`) on the
 codex OAuth route (`chatgpt.com/backend-api/codex` on runtime <= 2026.6;
 `wss://api.openai.com/v1/responses` on >= 2026.7). Crucially **all three guards are CLEAN**
@@ -562,7 +563,7 @@ ssh root@40.160.32.80
 /opt/hydra/scripts/lib/codex-oauth-refresh.sh        # backs up + POSTs grant_type=refresh_token
                                                      # for both accounts; --dry-run to preview
 systemctl restart openclaw-gateway-main openclaw-gateway-edge
-# verify: a real codex turn returns gpt-5.5 (NOT a fallback):
+# verify: a real codex turn returns gpt-5.6-sol (NOT a fallback):
 openclaw --profile main agent --agent ceo --message "Reply with one word: pong"
 ```
 
@@ -596,7 +597,7 @@ provider as "missing"; it is NOT a codex-health signal. Both wired via
 ### Codex Refresh-Token Race (`refresh_token_reused`) — cross-process
 
 **Symptoms**: the WHOLE codex fleet falls back to
-`openrouter/openai/gpt-5.4-mini` with `reason=auth_permanent`; logs show
+`openrouter/openai/gpt-5.6-luna` with `reason=auth_permanent`; logs show
 `OpenAI Codex token refresh failed (401)` with `code: refresh_token_reused`.
 Crucially, **`ensure-codex-auth.sh --check` is CLEAN** — this is NOT the
 fan-out incident above. Do not be misled into hunting for a stray store.
@@ -635,7 +636,7 @@ openclaw --profile main models auth login --provider openai-codex --device-code 
 systemctl restart openclaw-gateway-main.service openclaw-gateway-edge.service
 # 3. Verify: codex serving itself again, no fallback banner.
 journalctl -u openclaw-gateway-main -f | grep model-fallback
-#   want: candidate_succeeded ... candidate=openai/gpt-5.5  (NOT ...gpt-5.4-mini reason=auth_permanent)
+#   want: candidate_succeeded ... candidate=openai/gpt-5.6-sol  (NOT ...gpt-5.6-luna reason=auth_permanent)
 ```
 
 **Prevention (mechanical):** `ensure-codex-refresh-lock-shared.sh` runs in the
@@ -650,8 +651,8 @@ openclaw realpath-resolving the lock dir at acquire time.
 
 ### Codex Plugin Floated Off Pin / api-key-route 401 (#90925)
 
-**Symptoms**: the WHOLE codex fleet (gpt-5.5) falls back to
-`openrouter/openai/gpt-5.4-mini`; logs show `401 Unauthorized: Incorrect API key
+**Symptoms**: the WHOLE codex fleet (gpt-5.6) falls back to
+`openrouter/openai/gpt-5.6-luna`; logs show `401 Unauthorized: Incorrect API key
 provided: sk-...` / `invalid_api_key` on the **`api.openai.com/v1/responses`**
 URL with `reason=auth`. Crucially, **BOTH `ensure-codex-auth.sh --check` AND
 `ensure-codex-refresh-lock-shared.sh --check` are CLEAN** — this is neither the
@@ -696,8 +697,8 @@ ssh root@40.160.32.80
 systemctl restart openclaw-gateway-main.service openclaw-gateway-edge.service
 # Verify: codex serves itself again on the OAuth route.
 journalctl -u openclaw-gateway-main -f | grep model-fallback
-#   want: candidate_succeeded ... candidate=openai/gpt-5.5  (NOT ...gpt-5.4-mini)
-openclaw agent --agent clio --model openai/gpt-5.5 -m "reply pong" --json   # provider=openai model=gpt-5.5
+#   want: candidate_succeeded ... candidate=openai/gpt-5.6-sol  (NOT ...gpt-5.6-luna)
+openclaw agent --agent clio --model openai/gpt-5.6-sol -m "reply pong" --json   # provider=openai model=gpt-5.6-sol
 ```
 
 **Prevention (mechanical):** `ensure-codex-version-pinned.sh` runs in the
@@ -712,10 +713,10 @@ runtime lockstep) only once #90925 ships fixed in a core release we run.
 **Pin-clean api-key 401s = COMPACTION, not a float (do NOT re-pin — it's a no-op).**
 If you see `invalid_api_key` / `Incorrect API key: sk-hydra…` but
 `ensure-codex-version-pinned.sh --check` is **CLEAN**, this is NOT #90925. Tell them
-apart by the record's context: a float 401s on **every** gpt-5.5 turn fleet-wide; the
+apart by the record's context: a float 401s on **every** codex turn fleet-wide; the
 compaction case is scoped to `[agent/embedded] skipping codex app-server compaction for
 non-manual trigger` → `[openai-transport] api=openai-responses` 401 →
-`[compaction-diag] … trigger=cli_budget` and falls back to gpt-5.4-mini **for that one
+`[compaction-diag] … trigger=cli_budget` and falls back to gpt-5.6-luna **for that one
 compaction**, while normal turns keep serving on OAuth. Root cause: openclaw's embedded
 compaction summarizer (`resolveEmbeddedCompactionTarget`) bypasses the codex OAuth
 runtime and hits the placeholder key even at the pinned version — a structural path,
@@ -735,7 +736,7 @@ harm is noisy logs + a false page — both fixed below.
   a **compaction-only** (pin-clean) 401 no longer over-blocks writes on a healthy fleet.
 - **`compaction.model` is NOT the fix**: openclaw docs say *do not set
   `agents.defaults.compaction.model` on Codex-backed agents* (it emits an "override
-  ignored" warning), and the fallback already lands on `openrouter/openai/gpt-5.4-mini`
+  ignored" warning), and the fallback already lands on `openrouter/openai/gpt-5.6-luna`
   — the exact model you'd set. Zero gain for fighting the framework; leave it unset.
 
 > **Related — Codex OAuth token lapse** (the original 2026-06-19 trigger, distinct

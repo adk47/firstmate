@@ -52,10 +52,11 @@ JSON
 
 write_cron() {
   local fb="$1"
+  local model="${2:-openai/gpt-5.6-sol}"
   cat > "$CRON" <<JSON
 { "version": 1, "jobs": [
   { "id": "a", "name": "test-job", "payload": { "kind": "agentTurn",
-    "thinking": "low", "model": "openai/gpt-5.5", "fallbacks": $fb } } ] }
+    "thinking": "low", "model": "$model", "fallbacks": $fb } } ] }
 JSON
 }
 
@@ -102,15 +103,23 @@ JSON
   [ "$status" -eq 0 ]
 }
 
-@test "check5: cron with gpt-5.4-mini first fallback passes" {
-  write_cron '["openrouter/openai/gpt-5.4-mini","openrouter/anthropic/claude-4.6-sonnet-20260217"]'
+@test "check5: cron with gpt-5.6-luna first fallback passes" {
+  write_cron '["openrouter/openai/gpt-5.6-luna","openrouter/anthropic/claude-haiku-4.5"]'
   run "$SCRIPT" "$CRON"
   [ "$status" -eq 0 ]
 }
 
 @test "check5: cron with old gemini first fallback now FAILS" {
-  write_cron '["openrouter/google/gemini-3.5-flash","openrouter/anthropic/claude-4.6-sonnet-20260217"]'
+  write_cron '["openrouter/google/gemini-3.5-flash","openrouter/anthropic/claude-haiku-4.5"]'
   run "$SCRIPT" "$CRON"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"gpt-5.4-mini"* ]]
+  [[ "$output" == *"gpt-5.6-luna"* ]]
+}
+
+@test "check5: cron still on old gpt-5.5/mini/sonnet chain now FAILS" {
+  write_cron '["openrouter/openai/gpt-5.4-mini","openrouter/anthropic/claude-4.6-sonnet-20260217"]' \
+    "openai/gpt-5.5"
+  run "$SCRIPT" "$CRON"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"must be on openai/gpt-5.6-sol"* ]]
 }

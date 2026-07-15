@@ -68,7 +68,7 @@ _page() { declare -F slack_notify >/dev/null && slack_notify "$1" || true; }
 
 # Structural preconditions fail loud AND page — a broken refresher would
 # otherwise surface only as a failed systemd unit with no alert.
-command -v jq >/dev/null 2>&1 || { log "FATAL: jq not found"; _page ":rotating_light: *Codex OAuth refresh BROKEN* on node-8 — jq not found, cannot refresh the codex token. The fleet will lapse to gpt-5.4-mini at the next expiry."; exit 2; }
+command -v jq >/dev/null 2>&1 || { log "FATAL: jq not found"; _page ":rotating_light: *Codex OAuth refresh BROKEN* on node-8 — jq not found, cannot refresh the codex token. The fleet will lapse to gpt-5.6-luna at the next expiry."; exit 2; }
 command -v "$CURL_BIN" >/dev/null 2>&1 || { log "FATAL: curl not found"; _page ":rotating_light: *Codex OAuth refresh BROKEN* on node-8 — curl not found, cannot refresh the codex token."; exit 2; }
 [ -r "$STORE" ] || { log "FATAL: auth store not readable: $STORE"; _page ":rotating_light: *Codex OAuth refresh BROKEN* on node-8 — auth store not readable: \`$STORE\`."; exit 2; }
 

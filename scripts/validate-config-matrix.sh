@@ -170,24 +170,26 @@ if [[ -n "$CRON" && -f "$CRON" ]]; then
       fail=1
     fi
 
-    # 5. Every cron payload must run on codex (openai/gpt-5.5) with the full
-    #    intended fallback chain: gpt-5.4-mini first (cheap hop), then
-    #    claude-sonnet as the last-resort backstop. Pins the 2026-06 cutover
-    #    that moved all crons off Opus/Haiku onto codex, plus the 2026-06-08 fix
-    #    that swapped the cheap first hop gemini-3.5-flash → gpt-5.4-mini.
+    # 5. Every cron payload must run on codex (openai/gpt-5.6-sol) with the full
+    #    intended fallback chain: gpt-5.6-luna first (GPT-5-family hop — same
+    #    brain via the OpenRouter api-key route when codex OAuth is down), then
+    #    claude-haiku as the last-resort non-OpenAI backstop. Pins the 2026-06
+    #    cutover that moved all crons off Opus/Haiku onto codex, plus the
+    #    2026-06-08 fix that swapped the cheap first hop gemini-3.5-flash →
+    #    gpt-5-family (then mini, now luna).
     #    Rationale for the swap: openclaw only treats an empty/0-token completion
     #    as a failure-that-cascades for GPT-5-family models (isGpt5ModelId gate
     #    in result-fallback-classifier). A non-GPT-5 first hop (gemini) that
     #    returns an empty completion counts as candidate_succeeded and STOPS the
     #    chain — never reaching the sonnet backstop (the 2026-06-08 @CMO incident,
-    #    PR #450). gpt-5.4-mini is the same cheap tier but its empties cascade.
+    #    PR #450). gpt-5.6-luna is GPT-5-family so its empties cascade.
     #    A future cron with any other primary silently re-introduces OpenRouter
-    #    Opus spend, a non-gpt-5.4-mini first fallback drops the cheap hop OR
-    #    re-introduces the swallow bug, and dropping the sonnet second fallback
-    #    removes the quality backstop the money-touching crons rely on.
-    REQUIRED_CRON_MODEL="openai/gpt-5.5"
-    REQUIRED_CRON_FALLBACK1="openrouter/openai/gpt-5.4-mini"
-    REQUIRED_CRON_FALLBACK2="openrouter/anthropic/claude-4.6-sonnet-20260217"
+    #    Opus spend, a non-GPT-5 first fallback re-introduces the swallow bug,
+    #    and dropping the haiku second fallback removes the non-OpenAI backstop
+    #    the money-touching crons rely on when OpenAI is down entirely.
+    REQUIRED_CRON_MODEL="openai/gpt-5.6-sol"
+    REQUIRED_CRON_FALLBACK1="openrouter/openai/gpt-5.6-luna"
+    REQUIRED_CRON_FALLBACK2="openrouter/anthropic/claude-haiku-4.5"
     bad=$(jq -r --arg m "$REQUIRED_CRON_MODEL" --arg fb1 "$REQUIRED_CRON_FALLBACK1" --arg fb2 "$REQUIRED_CRON_FALLBACK2" '
       .jobs // []
       | .[]
@@ -199,7 +201,7 @@ if [[ -n "$CRON" && -f "$CRON" ]]; then
     ' "$CRON")
     if [[ -n "$bad" ]]; then
       while IFS= read -r line; do
-        echo "ERROR: $CRON cron job must be on $REQUIRED_CRON_MODEL with fallbacks [$REQUIRED_CRON_FALLBACK1, $REQUIRED_CRON_FALLBACK2] (gpt-5.4-mini cheap hop first, sonnet backstop): $line" >&2
+        echo "ERROR: $CRON cron job must be on $REQUIRED_CRON_MODEL with fallbacks [$REQUIRED_CRON_FALLBACK1, $REQUIRED_CRON_FALLBACK2] (gpt-5.6-luna GPT-5 hop first, haiku backstop): $line" >&2
       done <<< "$bad"
       fail=1
     fi

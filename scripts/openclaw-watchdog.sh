@@ -223,11 +223,12 @@ check_gateway_liveness edge openclaw-gateway-edge "${GATEWAY_CONFIG_VALID[edge]:
 # Edge Codex (Caroline) silent-degradation watch. Runs on EVERY tick,
 # independent of the success/idle/restart logic below (Caroline can be busy
 # and failing while main is idle). Caroline = the support agent on edge,
-# primary openai/gpt-5.5 via the Codex agentRuntime, with an
-# openrouter/sonnet text fallback AND an agents.defaults.imageModel vision
-# pin. Those fallbacks mean a Codex auth failure does NOT take her down —
-# she SILENTLY degrades (text -> sonnet, the gpt-5.5 upgrade lost) and, on
-# vision exhaustion, loses image understanding. None of that surfaces in the
+# primary openai/gpt-5.6-sol via the Codex agentRuntime, with an
+# openrouter gpt-5.6-luna → haiku text fallback AND an
+# agents.defaults.imageModel vision pin. Those fallbacks mean a Codex auth
+# failure does NOT take her down — she SILENTLY degrades (text -> openrouter
+# luna, the sol quality lost) and, on vision exhaustion, loses image
+# understanding. None of that surfaces in the
 # config-validate counters above. Codex auth on edge does NOT log
 # reason=auth; it logs the literal OAuth string and the image/pdf
 # "All image models failed" summary — see scripts/lib/codex-health.sh.
@@ -254,7 +255,7 @@ CODEX_VISIONFAIL=$(printf '%s\n' "$EDGE_LOGS" | codex_count_vision_failures)
 
 if [ "${CODEX_AUTHFAIL:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-auth-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "EDGE CODEX AUTH DEAD: ${CODEX_AUTHFAIL} 'token invalidated' lines in last ${CHECK_WINDOW_MIN}min"
-  slack_notify ":rotating_light: *Edge Codex auth FAILING* (Caroline/support) — ${CODEX_AUTHFAIL}x 'authentication token has been invalidated' in last ${CHECK_WINDOW_MIN}min. She has silently degraded to the sonnet text fallback (replies still work; gpt-5.5 upgrade lost) — this is the #356 shape. The edge auth symlink self-heals on \`systemctl restart openclaw-gateway-edge\` (ExecStartPre re-points it at a fresh main codex token via ensure-codex-auth). If it keeps firing after a restart, the main codex token is itself stale → re-auth codex on main."
+  slack_notify ":rotating_light: *Edge Codex auth FAILING* (Caroline/support) — ${CODEX_AUTHFAIL}x 'authentication token has been invalidated' in last ${CHECK_WINDOW_MIN}min. She has silently degraded to the openrouter gpt-5.6-luna text fallback (replies still work; gpt-5.6-sol quality lost) — this is the #356 shape. The edge auth symlink self-heals on \`systemctl restart openclaw-gateway-edge\` (ExecStartPre re-points it at a fresh main codex token via ensure-codex-auth). If it keeps firing after a restart, the main codex token is itself stale → re-auth codex on main."
   date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-auth-cooldown"
 fi
 
@@ -293,7 +294,7 @@ CODEX_REFRESH_RACE=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_c
 
 if [ "${CODEX_REFRESH_RACE:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-refresh-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "CODEX REFRESH RACE: ${CODEX_REFRESH_RACE} refresh_token_reused/auth_permanent lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
-  slack_notify ":rotating_light: *Codex refresh-token race* — ${CODEX_REFRESH_RACE}x \`refresh_token_reused\`/\`auth_permanent\` across main+edge in last ${CHECK_WINDOW_MIN}min. The ENTIRE codex fleet (gpt-5.5) has degraded to \`openrouter/openai/gpt-5.4-mini\`. The single-use refresh token is spent → this needs *interactive re-auth*: \`openclaw --profile main models auth login --provider openai-codex --device-code\` for BOTH accounts (aaron@muso.ai, aaronkaufman@me.com), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. Prevention is the lock-dir convergence (ensure-codex-refresh-lock-shared.sh) — see the tripwire below."
+  slack_notify ":rotating_light: *Codex refresh-token race* — ${CODEX_REFRESH_RACE}x \`refresh_token_reused\`/\`auth_permanent\` across main+edge in last ${CHECK_WINDOW_MIN}min. The ENTIRE codex fleet (gpt-5.6) has degraded to \`openrouter/openai/gpt-5.6-luna\`. The single-use refresh token is spent → this needs *interactive re-auth*: \`openclaw --profile main models auth login --provider openai-codex --device-code\` for BOTH accounts (aaron@muso.ai, aaronkaufman@me.com), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. Prevention is the lock-dir convergence (ensure-codex-refresh-lock-shared.sh) — see the tripwire below."
   date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-refresh-cooldown"
 fi
 
@@ -351,7 +352,7 @@ if [ "${CODEX_APIKEY_ROUTE:-0}" -gt 0 ]; then
     float)
       if _codex_cooldown_ok "$_APIKEY_COOLDOWN" "$CODEX_COOLDOWN_MIN"; then
         log "CODEX #90925 API-KEY ROUTE: ${CODEX_APIKEY_ROUTE} invalid_api_key/Incorrect-API-key lines (main+edge) in last ${CHECK_WINDOW_MIN}min; pin DRIFTED"
-        slack_notify ":rotating_light: *Codex floated off pin → #90925 api-key route* — ${CODEX_APIKEY_ROUTE}x \`invalid_api_key\`/\`Incorrect API key\` across main+edge in last ${CHECK_WINDOW_MIN}min AND codex is off the 2026.5.27 pin. @openclaw/codex@2026.6.x routes gpt-5.5 to the OpenAI api-key endpoint instead of the Codex OAuth route, so the WHOLE fleet is on \`openrouter/openai/gpt-5.4-mini\`. Fix: re-pin codex + restart — \`scripts/lib/ensure-codex-version-pinned.sh\` on node-8 (re-pins to the canonical version), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. A plain restart also self-heals (ExecStartPre re-pins)."
+        slack_notify ":rotating_light: *Codex floated off pin → #90925 api-key route* — ${CODEX_APIKEY_ROUTE}x \`invalid_api_key\`/\`Incorrect API key\` across main+edge in last ${CHECK_WINDOW_MIN}min AND codex is off the canonical pin (scripts/lib/codex-version.sh). An off-pin codex can route the fleet primary to the OpenAI api-key endpoint instead of the Codex OAuth route (the 6.x #90925 shape), so the WHOLE fleet is on \`openrouter/openai/gpt-5.6-luna\`. Fix: re-pin codex + restart — \`scripts/lib/ensure-codex-version-pinned.sh\` on node-8 (re-pins to the canonical version), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. A plain restart also self-heals (ExecStartPre re-pins)."
         date +%s > "$_APIKEY_COOLDOWN"
       fi
       ;;
@@ -367,7 +368,7 @@ fi
 
 if [ "${CODEX_TOKEN_EXPIRED:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-expired-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "CODEX OAUTH TOKEN EXPIRED: ${CODEX_TOKEN_EXPIRED} 'token is expired' lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
-  slack_notify ":rotating_light: *Codex OAuth token expired* — ${CODEX_TOKEN_EXPIRED}x \`authentication token is expired\` across main+edge in last ${CHECK_WINDOW_MIN}min. The codex access token lapsed and refresh isn't renewing it → fleet on \`openrouter/openai/gpt-5.4-mini\`. Device-code re-auth BOTH accounts then restart: \`openclaw --profile main models auth login --provider openai-codex --device-code\` (aaron@muso.ai + aaronkaufman@me.com), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`."
+  slack_notify ":rotating_light: *Codex OAuth token expired* — ${CODEX_TOKEN_EXPIRED}x \`authentication token is expired\` across main+edge in last ${CHECK_WINDOW_MIN}min. The codex access token lapsed and refresh isn't renewing it → fleet on \`openrouter/openai/gpt-5.6-luna\`. Device-code re-auth BOTH accounts then restart: \`openclaw --profile main models auth login --provider openai-codex --device-code\` (aaron@muso.ai + aaronkaufman@me.com), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`."
   date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-expired-cooldown"
 fi
 

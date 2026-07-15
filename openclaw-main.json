@@ -42,6 +42,30 @@
             "reasoning": true,
             "contextWindow": 1050000,
             "api": "openai-completions"
+          },
+          {
+            "id": "gpt-5.6-sol",
+            "name": "gpt-5.6-sol",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 128000,
+            "reasoning": true,
+            "contextWindow": 1050000,
+            "api": "openai-completions"
+          },
+          {
+            "id": "gpt-5.6-luna",
+            "name": "gpt-5.6-luna",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 128000,
+            "reasoning": true,
+            "contextWindow": 1050000,
+            "api": "openai-completions"
           }
         ]
       },
@@ -130,6 +154,23 @@
             "api": "openai-completions"
           },
           {
+            "id": "openai/gpt-5.6-luna",
+            "name": "openai/gpt-5.6-luna",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 128000,
+            "reasoning": true,
+            "cost": {
+              "input": 1,
+              "output": 6,
+              "cacheRead": 0.1
+            },
+            "contextWindow": 1050000,
+            "api": "openai-completions"
+          },
+          {
             "id": "google/gemini-3.5-flash",
             "name": "google/gemini-3.5-flash",
             "input": [
@@ -153,10 +194,10 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "openai/gpt-5.5",
+        "primary": "openai/gpt-5.6-sol",
         "fallbacks": [
-          "openrouter/openai/gpt-5.4-mini",
-          "openrouter/anthropic/claude-4.6-sonnet-20260217"
+          "openrouter/openai/gpt-5.6-luna",
+          "openrouter/anthropic/claude-haiku-4.5"
         ]
       },
       "thinkingDefault": "medium",
@@ -169,6 +210,15 @@
       "models": {
         "openai/gpt-5.5": {
           "alias": "gpt-5p5-codex"
+        },
+        "openai/gpt-5.6-sol": {
+          "alias": "gpt-5p6-sol-codex"
+        },
+        "openai/gpt-5.6-luna": {
+          "alias": "gpt-5p6-luna-codex"
+        },
+        "openrouter/openai/gpt-5.6-luna": {
+          "alias": "gpt-5p6-luna"
         },
         "openrouter/anthropic/claude-opus-4.7": {
           "alias": "opus-4-7"
@@ -233,10 +283,10 @@
         "default": true,
         "workspace": "/opt/hydra/workspaces/coordinator",
         "model": {
-          "primary": "openai/gpt-5.5",
+          "primary": "openai/gpt-5.6-sol",
           "fallbacks": [
-            "openrouter/openai/gpt-5.4-mini",
-            "openrouter/anthropic/claude-4.6-sonnet-20260217"
+            "openrouter/openai/gpt-5.6-luna",
+            "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
         "thinkingDefault": "high"
@@ -245,34 +295,34 @@
         "id": "ceo",
         "workspace": "/opt/hydra/workspaces/ceo",
         "model": {
-          "primary": "openai/gpt-5.5",
+          "primary": "openai/gpt-5.6-luna",
           "fallbacks": [
-            "openrouter/openai/gpt-5.4-mini",
-            "openrouter/anthropic/claude-4.6-sonnet-20260217"
+            "openrouter/openai/gpt-5.6-luna",
+            "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
-        "thinkingDefault": "medium"
+        "thinkingDefault": "xhigh"
       },
       {
         "id": "cmo",
         "workspace": "/opt/hydra/workspaces/cmo",
         "model": {
-          "primary": "openai/gpt-5.5",
+          "primary": "openai/gpt-5.6-luna",
           "fallbacks": [
-            "openrouter/openai/gpt-5.4-mini",
-            "openrouter/anthropic/claude-4.6-sonnet-20260217"
+            "openrouter/openai/gpt-5.6-luna",
+            "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
-        "thinkingDefault": "medium"
+        "thinkingDefault": "xhigh"
       },
       {
         "id": "cto",
         "workspace": "/opt/hydra/workspaces/cto",
         "model": {
-          "primary": "openai/gpt-5.5",
+          "primary": "openai/gpt-5.6-sol",
           "fallbacks": [
-            "openrouter/openai/gpt-5.4-mini",
-            "openrouter/anthropic/claude-4.6-sonnet-20260217"
+            "openrouter/openai/gpt-5.6-luna",
+            "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
         "thinkingDefault": "xhigh"
@@ -281,10 +331,10 @@
         "id": "qa",
         "workspace": "/opt/hydra/workspaces/qa",
         "model": {
-          "primary": "openai/gpt-5.5",
+          "primary": "openai/gpt-5.6-sol",
           "fallbacks": [
-            "openrouter/openai/gpt-5.4-mini",
-            "openrouter/anthropic/claude-4.6-sonnet-20260217"
+            "openrouter/openai/gpt-5.6-luna",
+            "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
         "thinkingDefault": "high"
@@ -293,22 +343,22 @@
         "id": "finance",
         "workspace": "/opt/hydra/workspaces/finance",
         "model": {
-          "primary": "openai/gpt-5.5",
+          "primary": "openai/gpt-5.6-sol",
           "fallbacks": [
-            "openrouter/openai/gpt-5.4-mini",
-            "openrouter/anthropic/claude-4.6-sonnet-20260217"
+            "openrouter/openai/gpt-5.6-luna",
+            "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
-        "thinkingDefault": "high"
+        "thinkingDefault": "medium"
       },
       {
         "id": "operations",
         "workspace": "/opt/hydra/workspaces/operations",
         "model": {
-          "primary": "openai/gpt-5.5",
+          "primary": "openai/gpt-5.6-sol",
           "fallbacks": [
-            "openrouter/openai/gpt-5.4-mini",
-            "openrouter/anthropic/claude-4.6-sonnet-20260217"
+            "openrouter/openai/gpt-5.6-luna",
+            "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
         "thinkingDefault": "high",
@@ -343,10 +393,10 @@
         "id": "devops",
         "workspace": "/opt/hydra/workspaces/devops",
         "model": {
-          "primary": "openai/gpt-5.5",
+          "primary": "openai/gpt-5.6-sol",
           "fallbacks": [
-            "openrouter/openai/gpt-5.4-mini",
-            "openrouter/anthropic/claude-4.6-sonnet-20260217"
+            "openrouter/openai/gpt-5.6-luna",
+            "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
         "thinkingDefault": "high"
@@ -355,13 +405,13 @@
         "id": "scout",
         "workspace": "/opt/hydra/workspaces/scout",
         "model": {
-          "primary": "openai/gpt-5.5",
+          "primary": "openai/gpt-5.6-luna",
           "fallbacks": [
-            "openrouter/openai/gpt-5.4-mini",
+            "openrouter/openai/gpt-5.6-luna",
             "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
-        "thinkingDefault": "high"
+        "thinkingDefault": "xhigh"
       }
     ]
   },

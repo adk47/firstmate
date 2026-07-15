@@ -99,7 +99,7 @@ and `scripts/lib/acknowledge-hot-patch-drift.sh`.
 
 ## Codex / OAuth auth is centralized
 
-Codex (`openai/gpt-5.5` via the codex agentRuntime, ChatGPT OAuth)
+Codex (`openai/gpt-5.6-sol`/`-luna` via the codex agentRuntime, ChatGPT OAuth)
 credentials live in ONE canonical store: the `main` agent at
 `/root/.openclaw-main/agents/main/agent/auth-profiles.json`. That file is OUR
 source of truth (written by `codex-oauth-refresh.sh`, the sole refresher).
@@ -145,7 +145,7 @@ How the RUNTIME consumes it depends on the openclaw version:
 This generalizes PR #376 (edge/Caroline symlink self-heal + fail-loud
 codex-health watchdog) to the whole fleet. Prose alone is not enforcement —
 the script and watchdog are. See RUNBOOK §Troubleshooting → "Codex auth
-invalidated / silent Sonnet fallback" for the recovery sequence, and
+invalidated / silent fallback" for the recovery sequence, and
 docs/runbooks/UPGRADE-2026.7.1.md for the 7.1 auth architecture.
 
 **Sharing the store is necessary but NOT sufficient — also converge the refresh
@@ -188,7 +188,7 @@ an off-lockstep pin would fight the doctor). **Detect**:
 same script no args (wired into ExecStartPre via `openclaw-pre-start-heal.sh`).
 The watchdog pages on the `invalid_api_key` signature (main+edge), on the
 `authentication token is expired` OAuth-lapse signature, and on version drift.
-**Re-verify codex still serves gpt-5.5 on EVERY openclaw bump.** See RUNBOOK
+**Re-verify codex still serves gpt-5.6 on EVERY openclaw bump.** See RUNBOOK
 §Troubleshooting → "Codex Plugin Floated Off Pin".
 
 **The token LAPSE is a FOURTH, distinct failure — a consequence of keeping the bundled
@@ -222,7 +222,7 @@ future bump:
   copy, never `npm install -g` for a trial. Follow the staging-copy neutering checklist (a
   staging gateway reaches prod via symlinks, absolute paths in the state SQLite, host secrets
   files, and session restart-recovery — all observed 2026-07-14).
-- **Re-verify per bump**: codex serves gpt-5.5 via OAuth; the profile-blind `resolveStateDir`
+- **Re-verify per bump**: codex serves the fleet primary (gpt-5.6 sol/luna) via OAuth; the profile-blind `resolveStateDir`
   workarounds (state-dir env pin, refresh-lock convergence); `codex-auth-sync.sh --check`
   clean; `dist/plugin-sdk/cron-store-runtime.js` still exists; plugin lockfiles rebuilt
   against the new SDK.
