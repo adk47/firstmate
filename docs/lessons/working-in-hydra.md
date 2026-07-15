@@ -267,6 +267,43 @@ with `LC_ALL=C grep -nP '[^\x00-\x7f]'` plus `go vet`.
 
 ---
 
+**`timeout(1)` does NOT unblock a pipe-based capture — orphaned grandchildren hold
+the write end.** `out=$({ timeout 60 helper; } | head -c 8K)` still deadlocks when
+`helper` spawns its own child (a sleep, a curl): timeout kills the direct child, the
+orphan inherits the pipe's write fd, and the reader never sees EOF until the orphan
+exits. Found in the DR healer's diagnostics capture (a hanging `--check`'s grandchild
+outlived the timeout and held the flock). Fix: capture to a temp FILE
+(`timeout 60 helper >"$f" 2>&1 || rc=$?`) — the redirect has no EOF dependency, the
+call returns the instant timeout fires, and byte/line caps apply reading the file back.
+
+**Intentional truncation can abort the whole script under `set -euo pipefail`.**
+When `... | head -c N` (or `head -40`) closes early, the upstream stage exits on
+SIGPIPE (141), the pipeline status goes nonzero, and `set -e`/an ERR trap fires —
+mid-decision, exactly when you cut something off on purpose. Nuance: with output
+under the ~64KB pipe buffer the upstream stage finishes before `head` exits and no
+SIGPIPE occurs, so the bug hides in testing and detonates on oversized payloads.
+Append `|| true` to truncation pipelines (preserve the command's own status via a
+temp file if you need it), and regression-test with a >64KB fixture.
+
+**`jq --arg` with a large value trips ARG_MAX (`E2BIG`) — use `--rawfile`.** A
+128KB `--arg` worked on a dev Mac and failed `Argument list too long` on node-8
+(fatter environment eats into the exec arg budget). Any test fixture or script
+passing big blobs into jq should write them to a file and use `--rawfile`/`--slurpfile`.
+
+**Secrets must never ride argv: `/proc/<pid>/cmdline` is world-readable.** A
+`curl -H "Authorization: Bearer $KEY"` exposes the key to every local user for the
+call's duration. Deliver sensitive headers via `curl --config <(printf 'header = …')`
+(argv then shows only `--config /dev/fd/N`) or stdin. Same class as the audit rule
+for `muso` flags: assume argv is public on the box.
+
+**Predictable root-written paths under /tmp are a symlink-attack surface.** A cron
+job running as root that writes `/tmp/<fixed-name>` (locks, cooldowns, logs) lets any
+local user pre-create that name as a symlink and make root truncate an arbitrary
+file. Keep daemon/watchdog state in a dedicated root-owned 0700 dir under `/var/lib/`
+(provision it in `install-aux-units.sh`), and validate before every write: real
+directory, `! -L`, owned by the invoking uid (`-O`). Fail closed but keep detection
+and paging alive when the dir is unsafe.
+
 ## Content and domain rules
 
 **Spotify and Discogs are out for credit verification, as a class.** Not as live

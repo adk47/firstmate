@@ -52,6 +52,9 @@ All of this ships with the repo. Read the relevant lesson before answering; cite
     Codex/OAuth runtime mechanics.
   - `deploy-ci-pr.md` — deploy, CI gates, the self-hosted runner, PRs/QA bot,
     gh/git/worktree tooling, and the "red but not your fault" catalog.
+  - `disaster-recovery.md` — the two-layer heal stack: watchdog escalation,
+    the "AI-decides, code-executes" healer (`dr-ai-healer.sh`), why each
+    guardrail exists, and the critical-page mention doctrine.
   - `muso-domain.md` — admin API, muso-cli, Trino/analytics, Intercom, NocoDB/ClickUp,
     Slack rendering, the Caroline support agent, people/roles.
 - `docs/reference/ARCHITECTURE.md`, `docs/reference/GOVERNANCE.md` — fleet shape,

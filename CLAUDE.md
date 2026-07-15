@@ -221,7 +221,8 @@ dependency on the openclaw install. The model only *selects* from a closed allow
 unknown/low-confidence/unparseable answers collapse to a page-only `no_action`. Kill
 switch: `/etc/hydra/dr-ai-healer.disabled`. All outcomes page #clio_devops with real
 `<@UID>` mentions (`slack_notify_critical` in `lib/slack-notify.sh` — a literal
-`@name` pings nobody). See RUNBOOK §Troubleshooting → "AI Healer (DR Layer 2)".
+`@name` pings nobody). See RUNBOOK §Troubleshooting → "AI Healer (DR Layer 2)" for
+operations and `docs/lessons/disaster-recovery.md` for the design rationale.
 
 **Upgrade doctrine (rewritten 2026-07-14 for the 2026.7.1 bump; supersedes the 2026-06-29
 deferred-upgrade tripwire).** The old hold at 6.1+5.27 ended when staging validation

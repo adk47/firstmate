@@ -81,6 +81,37 @@ These are the known false-red signatures. Diagnose read-only, confirm it is not 
 
 **Approval-survives-push is INCONSISTENT here; verify `reviewDecision` live after any push.** The working model: any push that changes tree content vs the approved commit dismisses the approval (observed for merges, conflict-resolving rebases, and plain additive commits), while a conflict-free rebase that only re-parents identical content kept it once. Branch protection does NOT reliably enforce stale-review dismissal, so don't assume either way. Either way the cost is the same: after green the bot re-approves on its own (budget a full CI+QA cycle). Takeaway: only push to clear a thread when the user asks or for a blocking finding, never for an unprompted green.
 
+**A REBASE WARNING thread is per-HEAD, and a human resolving it IS the ack — expect
+one per rebase.** When PR Validation's rebase-integrity report is `WARN` (e.g.
+`erased-recent-base-work`: the PR deletes lines main gained recently), each QA pass
+files one head-tagged `🟡 REBASE WARNING [<sha7>]` thread and NO-GOes while it is
+unresolved. The bot never resolves it itself — the author/human replying with
+evidence ("these 3 deleted lines are #676's `:-/root` default; deleting it IS the
+fix") and resolving the thread is the acknowledgment mechanism, not queue-clearing.
+Every new head (rebase, merge-from-main) legitimately spawns a fresh thread for the
+same signal; re-ack it. This is not the bot looping — check the `[sha7]` tag before
+diagnosing a deadlock.
+
+**QA verdicts race your replies/resolutions — judge by dispatch order, not arrival
+order.** The auto-review is dispatched when PR Validation completes and reads thread
+state minutes later; a NO-GO that lands after you resolved a thread often evaluated a
+snapshot from before. Before reacting (or concluding the bot is stuck), compare the
+review's `submittedAt` and covered head against your fix push / resolution time. The
+recovery is always the same: threads resolved + fixes pushed → rerun PR Validation
+(or push) → the next pass verifies, resolves confirmed-fixed threads itself, and
+carries forward the rest.
+
+**Budget for an adversarial multi-round QA gauntlet on privileged/infra code — and
+answer findings with fixes, not arguments.** The DR-healer PR (#684, 2026-07-15) took
+8 NO-GO rounds; every single finding was real (fail-open confidence typing, silent
+degradation declared "healed", symlink attacks, SIGPIPE aborts, injection steering,
+hung-lock absorption). The loop that converges: verify the claim against the code
+(some findings overstate the mechanism — say so in the reply while still fixing the
+reachable case), fix with a regression test that fails without the fix, reply
+in-thread with the commit sha and test evidence, and let the bot's next pass resolve
+its own threads. Each round is a full CI+QA cycle (~15–25 min); pipeline fixes for
+the round, not one-at-a-time.
+
 **A gateway restart (e.g. a deploy) silently kills an in-flight qa-review one-shot.** openclaw's own config-reload defers politely, but an external `systemctl restart` does not wait, leaving no run jsonl, no GitHub review, no Slack DM, and nothing re-dispatches it. If a review "went silent" (dispatch green but no adk47 review ~5 min later), check `journalctl -u openclaw-gateway-main` for a restart; recover with `gh run rerun <trigger-run-id> -R <repo>` on the source repo's trigger run.
 
 ---

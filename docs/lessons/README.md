@@ -30,6 +30,11 @@ stale against the live system before acting on it.
 - **[deploy-ci-pr.md](deploy-ci-pr.md)**: shipping. Why deploys, CI, and PRs go
   red, and what is real versus noise (including a "red but not your fault" catalog
   of known false signals).
+- **[disaster-recovery.md](disaster-recovery.md)**: the two-layer heal stack.
+  Code-first detection/heal, the "AI-decides, code-executes" escalator
+  (`dr-ai-healer.sh`), why every guardrail exists (trigger→action authorization,
+  live-state preconditions, silent-degradation-proof "healed", fresh-window
+  strikes, blast-radius rails), and the critical-page mention doctrine.
 - **[muso-domain.md](muso-domain.md)**: the business. Muso admin API and muso-cli;
   Trino and analytics; Intercom; NocoDB and ClickUp; Slack rendering; the Caroline
   support agent; people and roles.
