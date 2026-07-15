@@ -22,6 +22,11 @@ setup() {
 }}
 JSON
   export CODEX_AUTH_BACKUP_DIR="$TEST_TMPDIR/backups"
+  # Sandbox the post-refresh codex-auth-sync fan-out: its derived-store targets
+  # come from CODEX_AUTH_ROOT (default /root). Without this, a successful
+  # refresh here fans the fixture NEW_ACCESS token into the LIVE stores when
+  # the suite runs on node-8 (incident 2026-07-14: fleet 401 → openrouter).
+  export CODEX_AUTH_ROOT="$TEST_TMPDIR"
 
   # curl stub: emits whatever is in $RESP_FILE (default = a valid rotated grant).
   export RESP_FILE="$TEST_TMPDIR/curl_response.json"
@@ -132,4 +137,72 @@ SYNC
   CODEX_AUTH_SYNC_BIN="$TEST_TMPDIR/does-not-exist" run "$SCRIPT"
   [ "$status" -eq 1 ]
   [[ "$output" == *"missing/not executable"* ]]
+}
+
+@test "sync hook: fan-out targets CODEX_AUTH_ROOT, not /root (2026-07-14 clobber regression)" {
+  # openclaw stub reporting a 7.x runtime so the real codex-auth-sync.sh runs
+  # its live semantics (on a box without openclaw its version gate would no-op
+  # and this test would prove nothing).
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
+#!/bin/bash
+[ "$1" = "--version" ] && { echo "openclaw 2026.7.1"; exit 0; }
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+  # A derived store inside the sandbox root, in the broken apikey mode.
+  decoy="$TEST_TMPDIR/.openclaw-main/agents/decoy/agent"
+  mkdir -p "$decoy/codex-home"
+  printf %s '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-hydra-placeholder"}' \
+    > "$decoy/codex-home/auth.json"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # The sandboxed derived store converged to the rotated fixture token…
+  [ "$(jq -r '.auth_mode' "$decoy/codex-home/auth.json")" = "chatgpt" ]
+  [ "$(jq -r '.tokens.access_token' "$decoy/codex-home/auth.json")" = "NEW_ACCESS" ]
+}
+
+@test "sync hook: standard store + CODEX_AUTH_ROOT unset → root DERIVED from store, fan-out sandboxed (not /root)" {
+  # The REAL node-8 path (test 11 sets CODEX_AUTH_ROOT explicitly, so it only
+  # covers the operator-override branch). Here STORE is the canonical
+  # <root>/.openclaw-main/agents/main/agent/auth-profiles.json and CODEX_AUTH_ROOT
+  # is UNSET, so codex-oauth-refresh must DERIVE _sync_root from the store's own
+  # layout — neither refuse nor guess /root. The sandbox IS that derived root, so
+  # a correct derivation fans out under TEST_TMPDIR and converges the decoy.
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
+#!/bin/bash
+[ "$1" = "--version" ] && { echo "openclaw 2026.7.1"; exit 0; }
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+  # Canonical-shaped store under the sandbox root (copy the fixture profiles).
+  store="$TEST_TMPDIR/.openclaw-main/agents/main/agent/auth-profiles.json"
+  mkdir -p "$(dirname "$store")"
+  cp "$CODEX_AUTH_STORE" "$store"
+  # Derived decoy under the SAME root, in the broken apikey mode.
+  decoy="$TEST_TMPDIR/.openclaw-main/agents/decoy/agent"
+  mkdir -p "$decoy/codex-home"
+  printf %s '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-hydra-placeholder"}' \
+    > "$decoy/codex-home/auth.json"
+  CODEX_AUTH_STORE="$store" CODEX_AUTH_ROOT= run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # Derivation worked → the fan-out reached the sandbox decoy (root = TEST_TMPDIR,
+  # derived from the store path, NOT refused and NOT /root).
+  [ "$(jq -r '.auth_mode' "$decoy/codex-home/auth.json")" = "chatgpt" ]
+  [ "$(jq -r '.tokens.access_token' "$decoy/codex-home/auth.json")" = "NEW_ACCESS" ]
+}
+
+@test "sync hook: nonstandard store + no CODEX_AUTH_ROOT → sync REFUSED (never guesses /root), exit 1" {
+  # The exact 2026-07-14 incident shape: throwaway CODEX_AUTH_STORE, no
+  # sandbox root. The script must skip the fan-out loudly instead of
+  # defaulting the targets to the live /root fleet.
+  cat > "$TEST_TMPDIR/bin/fake-sync" <<SYNC
+#!/bin/bash
+touch "$TEST_TMPDIR/sync-ran"
+exit 0
+SYNC
+  chmod +x "$TEST_TMPDIR/bin/fake-sync"
+  CODEX_AUTH_ROOT= CODEX_AUTH_SYNC_BIN="$TEST_TMPDIR/bin/fake-sync" run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"sync SKIPPED"* ]]
+  [ ! -e "$TEST_TMPDIR/sync-ran" ]
 }

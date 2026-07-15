@@ -585,12 +585,15 @@ systemctl restart openclaw-gateway-main openclaw-gateway-edge
 gateway restart) keeps the ~10-day token always fresh (steady-state trough ~6.5d,
 surviving a single missed run) with one brief quiet-hour restart each.
 `scripts/codex-keepalive.sh` (cron every 15m) is the SAFETY NET — it reads expiry
-from `models status --json` and pages #clio_devops BEFORE the cliff
-(`:hourglass_flowing_sand: Codex OAuth token expiring`) if the scheduled refresh
-keeps failing. (The watchdog's `token_expired` page is REACTIVE, after the 401s.) NOTE:
-`models status --check` always exits 1 here — it flags the disabled `openai`
-provider as "missing"; it is NOT a codex-health signal. Both wired via
-`install-aux-units.sh`.
+straight from the canonical auth store (`auth-profiles.json` `.expires`; NOT the
+CLI — 2026.7.x `models status --json` carries no expiry data at all, which
+silently blinded the pre-7.1 parse during the 2026-07-14 401 storm) and pages
+#clio_devops BEFORE the cliff (`:hourglass_flowing_sand: Codex OAuth token
+expiring`) if the scheduled refresh keeps failing. If it cannot read an expiry
+at all it pages `Codex keepalive BLIND` instead of skipping. (The watchdog's
+`token_expired` page is REACTIVE, after the 401s.) NOTE: `models status --check`
+always exits 1 here — it flags the disabled `openai` provider as "missing"; it
+is NOT a codex-health signal. Both wired via `install-aux-units.sh`.
 
 ---
 

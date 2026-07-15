@@ -789,13 +789,14 @@ chmod 644 /etc/cron.d/openclaw-watchdog
 # ─── Codex OAuth keepalive at 15-min cadence ──────────────────
 # PROACTIVE complement to the watchdog: openclaw-watchdog.sh pages REACTIVELY
 # (journal 401 signature, after the fleet is already on the mini fallback);
-# codex-keepalive.sh reads the token's own expiry via `openclaw models status`
-# and pages BEFORE the cliff (it is the safety net for the twice-weekly
+# codex-keepalive.sh reads the token's own expiry from the canonical auth store
+# (auth-profiles.json — NOT the CLI; 7.x `models status --json` has no expiry
+# data) and pages BEFORE the cliff (it is the safety net for the twice-weekly
 # codex-token-refresh timer). 15 min is plenty — the lapse cadence is ~days, and
-# the periodic check is a cheap local `models status` read (no network). Sets an
-# explicit PATH (cron's default is /usr/bin:/bin) so `openclaw`/`jq`/`timeout`
-# resolve even if they live in /usr/local/bin — the keepalive fails Slack-silently
-# if they don't. Same ownership rule: edit here + re-run install-aux-units.sh.
+# the periodic check is a cheap local file read (no network). Sets an
+# explicit PATH (cron's default is /usr/bin:/bin) so `jq` resolves even if it
+# lives in /usr/local/bin — the keepalive fails Slack-silently
+# if it doesn't. Same ownership rule: edit here + re-run install-aux-units.sh.
 cat > /etc/cron.d/codex-keepalive << CODEXKEEPALIVE
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

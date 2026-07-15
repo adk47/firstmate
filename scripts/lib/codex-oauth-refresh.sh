@@ -157,12 +157,30 @@ log "done: $ok refreshed, $failed failed"
 # failed refresh (a 0 exit here would show the timer/systemd unit green while
 # the derived stores ride a stale token).
 SYNC_BIN="${CODEX_AUTH_SYNC_BIN:-$_REFRESH_DIR/codex-auth-sync.sh}"
+# The sync's derived-store TARGETS come from CODEX_AUTH_ROOT — never default it
+# to /root when the store was overridden to a nonstandard path: a sandboxed
+# store would rotate throwaway tokens and then fan them into the LIVE fleet
+# (incident 2026-07-14: the bats suite ran on node-8 and 401'd every agent onto
+# openrouter). Derive the root from the store's own canonical layout; if it
+# doesn't match and no explicit root was given, refuse to guess.
+_sync_root="${CODEX_AUTH_ROOT:-}"
+if [ -z "$_sync_root" ]; then
+  case "$STORE" in
+    */.openclaw-main/agents/main/agent/auth-profiles.json)
+      _sync_root="${STORE%/.openclaw-main/agents/main/agent/auth-profiles.json}" ;;
+  esac
+fi
 sync_failed=0
 if [ "$ok" -gt 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-  if [ -x "$SYNC_BIN" ]; then
+  if [ -z "$_sync_root" ]; then
+    log "WARNING: sync SKIPPED — CODEX_AUTH_STORE is nonstandard ($STORE) and CODEX_AUTH_ROOT is unset; refusing to fan out to the live /root stores (set CODEX_AUTH_ROOT explicitly)"
+    _page ":rotating_light: *Codex auth sync SKIPPED* on node-8 — a token refresh succeeded against a nonstandard store (\`$STORE\`) with no \`CODEX_AUTH_ROOT\`, so the runtime stores were NOT updated. If this was a real refresh, run \`scripts/lib/codex-auth-sync.sh\` manually, then restart gateways."
+    sync_failed=1
+  elif [ -x "$SYNC_BIN" ]; then
     # CANON_DIR follows the store we just rotated, so a CODEX_AUTH_STORE
-    # override (sandbox/manual recovery) fans out ITS tokens, not /root's.
-    if ! CODEX_AUTH_ROOT="${CODEX_AUTH_ROOT:-/root}" \
+    # override (sandbox/manual recovery) fans out ITS tokens — and only into
+    # the matching _sync_root, never a different fleet.
+    if ! CODEX_AUTH_ROOT="$_sync_root" \
          CANON_DIR="$(cd "$(dirname "$STORE")" && pwd)" \
          "$SYNC_BIN"; then
       log "WARNING: codex-auth-sync.sh failed after refresh — derived stores are STALE"
