@@ -77,6 +77,18 @@ f="$STUB_OPENCLAW_DIR/$prof.validate"
 exit 0
 STUB
 
+  # DR escalation: point the watchdog at a recorder stub — the real
+  # dr-ai-healer.sh must NEVER spawn from a test run (CI runs on node-8; an
+  # unstubbed escalation would fire a real OpenRouter call + real restarts).
+  export DR_CALLS="$TEST_TMPDIR/dr-calls"; : > "$DR_CALLS"
+  export DR_STATE_DIR="$TEST_TMPDIR/dr-state"
+  export DR_HEALER="$TEST_TMPDIR/bin/dr-healer-stub"
+  cat > "$DR_HEALER" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DR_CALLS"
+exit 0
+STUB
+
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMPDIR/bin/journalctl"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMPDIR/bin/python3"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMPDIR/bin/sleep"
@@ -175,6 +187,121 @@ STUB
   grep -q '<@U0AL36NADEY>' "$MUSO_TEXTS"
   grep -q '<@U7RP6HKUZ>' "$MUSO_TEXTS"
   ! grep -q '@aaron' "$MUSO_TEXTS"
+}
+
+@test "restart-FAILED escalates to the DR AI healer immediately (no strike accumulation)" {
+  set_status openclaw-gateway-main failed
+  set_status openclaw-gateway-edge active
+  export STUB_RESTART_RECOVERS=0
+  run "$WD"
+  [ "$status" -eq 0 ]
+  grep -q -- '--trigger gateway_restart_failed_main' "$DR_CALLS"
+}
+
+@test "recovered restart does NOT escalate to the DR AI healer" {
+  set_status openclaw-gateway-main failed
+  set_status openclaw-gateway-edge active
+  run "$WD"   # STUB_RESTART_RECOVERS=1 default: restart brings it back
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"recovered (status now active)"* ]]
+  [ ! -s "$DR_CALLS" ]
+}
+
+@test "persistent codex token-expired signature escalates only after 3 consecutive strikes" {
+  set_status openclaw-gateway-main active
+  set_status openclaw-gateway-edge active
+  # journalctl now emits the token-expired signature for every unit queried.
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+echo 'openclaw[1]: auth error: authentication token is expired'
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+  run "$WD"; [ "$status" -eq 0 ]
+  run "$WD"; [ "$status" -eq 0 ]
+  [ ! -s "$DR_CALLS" ]                       # 2 strikes: not yet
+  run "$WD"; [ "$status" -eq 0 ]
+  grep -q -- '--trigger codex_token_expired' "$DR_CALLS"   # 3rd strike: escalate
+  # Strike file was reset on escalation — the next tick starts from zero.
+  [ ! -f "$DR_STATE_DIR/dr-strikes-codex_token_expired" ]
+}
+
+@test "a single historical error riding the 15-min window does NOT escalate (fresh-window strikes)" {
+  set_status openclaw-gateway-main active
+  set_status openclaw-gateway-edge active
+  # journalctl branches on --since: the 15-min alert window still sees the old
+  # error line, but the short strike window is quiet — the failure is over.
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *" 3 min ago"*) : ;;   # fresh window: quiet (no new failures)
+  *) echo 'openclaw[1]: auth error: authentication token is expired' ;;
+esac
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+  run "$WD"; [ "$status" -eq 0 ]
+  run "$WD"; [ "$status" -eq 0 ]
+  run "$WD"; [ "$status" -eq 0 ]
+  run "$WD"; [ "$status" -eq 0 ]
+  [ ! -s "$DR_CALLS" ]   # 4 ticks of a stale line: never escalated
+  [ ! -f "$DR_STATE_DIR/dr-strikes-codex_token_expired" ]
+}
+
+@test "MAIN-only invalidated-auth failures also strike and escalate (not edge-scoped)" {
+  set_status openclaw-gateway-main active
+  set_status openclaw-gateway-edge active
+  # journalctl emits the invalidated-auth signature ONLY for the main unit.
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *openclaw-gateway-main*) echo 'openclaw[1]: authentication token has been invalidated' ;;
+esac
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+  run "$WD"; [ "$status" -eq 0 ]
+  run "$WD"; [ "$status" -eq 0 ]
+  [ ! -s "$DR_CALLS" ]
+  run "$WD"; [ "$status" -eq 0 ]
+  grep -q -- '--trigger codex_auth_invalidated' "$DR_CALLS"
+}
+
+@test "a clean tick clears codex strike counters (no escalation across interrupted streaks)" {
+  set_status openclaw-gateway-main active
+  set_status openclaw-gateway-edge active
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+echo 'openclaw[1]: auth error: authentication token is expired'
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+  run "$WD"; run "$WD"                        # 2 strikes
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMPDIR/bin/journalctl"  # clean tick
+  run "$WD"
+  [ ! -f "$DR_STATE_DIR/dr-strikes-codex_token_expired" ]
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+echo 'openclaw[1]: auth error: authentication token is expired'
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+  run "$WD"; run "$WD"                        # streak restarts at 1, 2
+  [ ! -s "$DR_CALLS" ]                        # never escalated
+}
+
+@test "symlinked DR state dir → watchdog skips strikes AND escalation (symlink-attack guard)" {
+  set_status openclaw-gateway-main failed
+  set_status openclaw-gateway-edge active
+  export STUB_RESTART_RECOVERS=0   # would normally escalate immediately
+  mkdir -p "$TEST_TMPDIR/attacker-target"
+  ln -s "$TEST_TMPDIR/attacker-target" "$DR_STATE_DIR"
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"restart FAILED"* ]]           # detection/paging unaffected
+  [[ "$output" == *"NOT escalating"* ]]
+  [ ! -s "$DR_CALLS" ]                             # healer never invoked
+  [ -z "$(ls -A "$TEST_TMPDIR/attacker-target")" ] # nothing written through the link
 }
 
 @test "drifted (0644) secret file is detected and re-tightened by the watchdog" {

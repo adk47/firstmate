@@ -211,6 +211,18 @@ this script can ever rotate the chain. `scripts/codex-keepalive.sh` (15m) is the
 exits 1 here — it flags the disabled `openai` provider as "missing", NOT a codex signal.) See
 RUNBOOK §Troubleshooting → "Codex Token Lapse (`token_expired`)" and `docs/lessons/openclaw-and-codex.md`.
 
+**DR layer 2 — when the code-level healers themselves fail, an AI healer escalates.**
+`scripts/dr-ai-healer.sh` ("AI-decides, code-executes"): the watchdog fires it when a
+CRITICAL signature persists 3 ticks (or immediately on restart-FAILED / crash-loop).
+It calls OpenRouter **directly via curl** (default `openai/gpt-5.6-luna`) — the api-key
+route is the one model path that survives codex OAuth death, and a raw curl has zero
+dependency on the openclaw install. The model only *selects* from a closed allowlist
+(the ensure-*/refresh healers + gateway restart); its output is never executed, and
+unknown/low-confidence/unparseable answers collapse to a page-only `no_action`. Kill
+switch: `/etc/hydra/dr-ai-healer.disabled`. All outcomes page #clio_devops with real
+`<@UID>` mentions (`slack_notify_critical` in `lib/slack-notify.sh` — a literal
+`@name` pings nobody). See RUNBOOK §Troubleshooting → "AI Healer (DR Layer 2)".
+
 **Upgrade doctrine (rewritten 2026-07-14 for the 2026.7.1 bump; supersedes the 2026-06-29
 deferred-upgrade tripwire).** The old hold at 6.1+5.27 ended when staging validation
 (docs/runbooks/UPGRADE-2026.7.1.md) resolved its gates: #90925's fix ships in 7.1 (Gate 1,

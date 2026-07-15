@@ -755,6 +755,58 @@ harm is noisy logs + a false page — both fixed below.
 
 ---
 
+### AI Healer (DR Layer 2) — `scripts/dr-ai-healer.sh`
+
+**What it is:** the escalation layer above the code-level healers. When a CRITICAL
+codex/gateway signature persists across 3 consecutive watchdog ticks (~6 min — the
+ExecStartPre healers and the watchdog auto-restart have already had their chance), or
+immediately on a definitive code-heal failure (gateway restart FAILED, crash loop),
+`openclaw-watchdog.sh` fires `dr-ai-healer.sh --trigger <signature>` in the background.
+
+**How it works — "AI-decides, code-executes":** the healer gathers a bounded,
+secret-scrubbed diagnostics bundle (guard `--check` outputs, `systemctl status`,
+filtered journal tails), makes one direct OpenRouter call per round — at most
+`DR_MAX_ROUNDS` (default 2) calls per session — (default model
+`openai/gpt-5.6-luna` — the api-key route survives codex OAuth death and needs no
+openclaw machinery), and asks it to pick ONE action from a **closed allowlist**. The
+model's output is data; a bash `case` executes it. Unknown action, malformed JSON,
+confidence < 0.6, curl failure, or a missing key all collapse to `no_action` (page-only).
+
+| action | maps to | runs |
+|---|---|---|
+| `heal_auth_fanout` | Codex Auth Invalidated (above) | `ensure-codex-auth.sh` + restart |
+| `oauth_refresh` | Codex Token Lapse (above) | `codex-oauth-refresh.sh` + restart |
+| `converge_refresh_lock` | lock-convergence drift (manual trigger only — a `codex_refresh_race` escalation is page-only, since the spent token is unhealable) | `ensure-codex-refresh-lock-shared.sh` + restart |
+| `repin_codex` | Floated Off Pin (#90925, above) | `ensure-codex-version-pinned.sh` + restart |
+| `auth_sync_7x` | 7.x derived stores stale/apikey-mode | `codex-auth-sync.sh` + restart |
+| `restart_gateways` | gateway down, no codex signature | `reset-failed` + restart main+edge |
+| `tighten_secret_perms` | secret perms drift | `ensure-secret-perms.sh` + restart |
+| `no_action` | anything else / unhealable | page-only |
+
+A spent refresh token (`refresh_token_reused` / `invalid_grant`) is **unhealable by
+design** — the prompt says so and the correct outcome is a `no_action` page telling you
+to device-code re-auth (see the Refresh-Token Race section above).
+
+**Guardrails:** kill switch `/etc/hydra/dr-ai-healer.disabled` (touch to disable),
+single-flight lock, 60-min cooldown between sessions, max 3 sessions/24h (then it
+pages "budget exhausted" instead of acting), max 2 decide→execute rounds per session.
+Every outcome (recovered / no_action / did-not-recover / abort) pages #clio_devops
+with real `<@UID>` mentions for Nick + Aaron and the AI's rationale.
+
+**Manual / testing:**
+```bash
+# Dry-run: consults the AI, prints the chosen action, executes NOTHING,
+# stamps no cooldown:
+/opt/hydra/scripts/dr-ai-healer.sh --trigger manual --dry-run
+# Disable / re-enable the whole layer:
+touch /etc/hydra/dr-ai-healer.disabled
+rm /etc/hydra/dr-ai-healer.disabled
+# Watchdog-side escalation log:
+cat /var/lib/hydra-dr/dr-ai-healer.log
+```
+
+---
+
 ### Agent Can't See a Recently-Shipped Skill (stale skill catalog)
 
 **Symptom:** an agent ignores a skill it was told to use, or "can't find" a skill that IS

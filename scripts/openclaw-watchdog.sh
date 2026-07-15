@@ -115,6 +115,54 @@ if ! _watchdog_self_test; then
   exit 1
 fi
 
+# ── DR layer-2 escalation (AI healer) ─────────────────────────────────────
+# When a CRITICAL codex signature persists across DR_STRIKE_THRESHOLD
+# consecutive ticks (~6 min at the 2-min cadence — the ExecStartPre healers
+# and the auto-restart below have had their chance), hand off to
+# dr-ai-healer.sh: the "AI-decides, code-executes" escalator (direct
+# OpenRouter call — the one model path that works while the gateway/codex
+# stack is down). Definitive code-heal failures (restart FAILED, crash loop)
+# escalate immediately. The healer carries its own single-flight lock,
+# cooldown, session budget and kill switch, so firing it here is cheap and
+# idempotent; it runs in the background so a slow AI round can never stall
+# the 2-min watchdog tick. DR_HEALER is overridable so the bats suite points
+# it at a recorder stub instead of the real escalator.
+DR_HEALER="${DR_HEALER:-$_WATCHDOG_DIR/dr-ai-healer.sh}"
+DR_STRIKE_THRESHOLD="${DR_STRIKE_THRESHOLD:-3}"
+# DR strike/log writes live in a dedicated root-owned 0700 dir, NOT the
+# world-writable /tmp default of WATCHDOG_STATE_DIR: the watchdog runs as
+# root and these paths are predictable, so under /tmp any local user could
+# pre-create them as symlinks and make root truncate an arbitrary file.
+# Fail closed: if the dir is a symlink or not ours, skip DR writes entirely.
+DR_STATE_DIR="${DR_STATE_DIR:-/var/lib/hydra-dr}"
+_dr_state_ok() {
+  mkdir -p "$DR_STATE_DIR" 2>/dev/null || true
+  [ ! -L "$DR_STATE_DIR" ] && [ -d "$DR_STATE_DIR" ] && [ -O "$DR_STATE_DIR" ] \
+    && chmod 700 "$DR_STATE_DIR" 2>/dev/null
+}
+_dr_escalate() {
+  [ -x "$DR_HEALER" ] || return 0
+  _dr_state_ok || { log "DR state dir $DR_STATE_DIR unsafe (symlink/not ours) — NOT escalating"; return 0; }
+  log "DR ESCALATION: signature '$1' — invoking dr-ai-healer.sh (background)"
+  nohup "$DR_HEALER" --trigger "$1" >> "$DR_STATE_DIR/dr-ai-healer.log" 2>&1 &
+}
+_dr_strike() {
+  _dr_state_ok || { log "DR state dir $DR_STATE_DIR unsafe (symlink/not ours) — NOT tracking strikes"; return 0; }
+  local f="$DR_STATE_DIR/dr-strikes-$1" n
+  n=$(cat "$f" 2>/dev/null || echo 0)
+  case "$n" in *[!0-9]*|"") n=0 ;; esac
+  n=$((n + 1))
+  if [ "$n" -ge "$DR_STRIKE_THRESHOLD" ]; then
+    rm -f "$f"   # reset so a still-broken state re-strikes from zero (healer cooldown paces re-fires)
+    _dr_escalate "$1"
+  else
+    echo "$n" > "$f"
+  fi
+}
+_dr_clear() { [ -L "$DR_STATE_DIR" ] || rm -f "$DR_STATE_DIR/dr-strikes-$1"; }
+# _dr_track <sig> <count>: strike while the detector fires, clear on a clean tick.
+_dr_track() { if [ "${2:-0}" -gt 0 ]; then _dr_strike "$1"; else _dr_clear "$1"; fi; }
+
 # Schema validity check (all profiles). Today's outage (2026-05-05) was a
 # crash-loop on main caused by an out-of-band write that added schema-
 # invalid keys (`subagents`, `agents.llm.idleTimeoutSeconds`, etc.). The
@@ -213,6 +261,9 @@ check_gateway_liveness() {
   else
     log "  ${svc}: restart FAILED — status now ${now}"
     slack_notify_critical ":rotating_light: *${profile} gateway DOWN* on node-8 (\`${status}\` → restart → \`${now}\`). Config validates clean, so this is NOT a schema problem (suspect secrets / auth / runtime). Watchdog auto-restart FAILED — manual: \`ssh node-8; systemctl reset-failed ${svc}; systemctl restart ${svc}; journalctl -u ${svc} -n 120 --no-pager\`."
+    # Code-level healing definitively failed (ExecStartPre ran, restart didn't
+    # stick) → escalate to the AI healer immediately, no strike accumulation.
+    _dr_escalate "gateway_restart_failed_${profile}"
   fi
   return 0
 }
@@ -250,8 +301,20 @@ _codex_cooldown_ok() {
 }
 
 EDGE_LOGS=$(journalctl -u openclaw-gateway-edge --since "${CHECK_WINDOW_MIN} min ago" --no-pager 2>/dev/null || true)
+# DR strikes need FRESH failures, not the 15-min alert window: a single
+# historical error line rides that window for ~7 ticks and would 3-strike a
+# fleet that already recovered. Strike counts come from a short window
+# (default 3 min > the 2-min cadence, so an ONGOING failure is seen every
+# tick while a one-off ages out after at most 2 ticks — below the threshold).
+DR_STRIKE_WINDOW_MIN="${DR_STRIKE_WINDOW_MIN:-3}"
+EDGE_LOGS_FRESH=$(journalctl -u openclaw-gateway-edge --since "${DR_STRIKE_WINDOW_MIN} min ago" --no-pager 2>/dev/null || true)
+MAIN_LOGS_FRESH=$(journalctl -u openclaw-gateway-main --since "${DR_STRIKE_WINDOW_MIN} min ago" --no-pager 2>/dev/null || true)
 CODEX_AUTHFAIL=$(printf '%s\n' "$EDGE_LOGS" | codex_count_auth_invalidated)
 CODEX_VISIONFAIL=$(printf '%s\n' "$EDGE_LOGS" | codex_count_vision_failures)
+# Strike on BOTH gateways' fresh logs: the 15-min ALERT above is edge-scoped
+# (the #356 Caroline shape), but a persistent invalidated-auth failure on
+# main alone must still reach layer 2 — like every other codex detector.
+_dr_track codex_auth_invalidated "$(printf '%s\n%s\n' "$MAIN_LOGS_FRESH" "$EDGE_LOGS_FRESH" | codex_count_auth_invalidated)"
 
 if [ "${CODEX_AUTHFAIL:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-auth-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "EDGE CODEX AUTH DEAD: ${CODEX_AUTHFAIL} 'token invalidated' lines in last ${CHECK_WINDOW_MIN}min"
@@ -291,6 +354,10 @@ fi
 # signature, and verify the lock-dir convergence that PREVENTS it is still live.
 MAIN_CODEX_LOGS=$(journalctl -u openclaw-gateway-main --since "${CHECK_WINDOW_MIN} min ago" --no-pager 2>/dev/null || true)
 CODEX_REFRESH_RACE=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_count_refresh_reused)
+MAIN_CODEX_LOGS_FRESH="$MAIN_LOGS_FRESH"
+# Escalating the race still helps: the healer re-checks lock convergence and
+# otherwise pages no_action (a spent single-use token is unhealable by design).
+_dr_track codex_refresh_race "$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS_FRESH" "$EDGE_LOGS_FRESH" | codex_count_refresh_reused)"
 
 if [ "${CODEX_REFRESH_RACE:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-refresh-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "CODEX REFRESH RACE: ${CODEX_REFRESH_RACE} refresh_token_reused/auth_permanent lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
@@ -322,6 +389,7 @@ fi
 # scripts/lib/codex-version.sh + scripts/lib/ensure-codex-version-pinned.sh.
 CODEX_APIKEY_ROUTE=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_count_apikey_route)
 CODEX_TOKEN_EXPIRED=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_count_token_expired)
+_dr_track codex_token_expired "$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS_FRESH" "$EDGE_LOGS_FRESH" | codex_count_token_expired)"
 
 # Resolve the ACTUAL pin state ONCE (read-only; 0 clean / 1 drift / 2 read-err) and
 # reuse it for BOTH the api-key-route verdict below and the pin-drift tripwire further
@@ -348,8 +416,14 @@ if [ "${CODEX_APIKEY_ROUTE:-0}" -gt 0 ]; then
     compaction)
       # Log-only (forensics in the watchdog log); never pages, never touches the cooldown.
       log "CODEX API-KEY 401 WITH PIN INTACT: ${CODEX_APIKEY_ROUTE} invalid_api_key/Incorrect-API-key lines (main+edge) in last ${CHECK_WINDOW_MIN}min; codex ON pin — benign compaction path (trigger=cli_budget), self-recovers, NO page"
+      _dr_clear codex_apikey_float
       ;;
     float)
+      # Strike only on a GENUINE float with FRESH 401s (benign compaction must
+      # never burn the AI healer's budget, and a historical 401 riding the
+      # 15-min window must not re-strike after recovery); cooldown below gates
+      # only the page.
+      _dr_track codex_apikey_float "$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS_FRESH" "$EDGE_LOGS_FRESH" | codex_count_apikey_route)"
       if _codex_cooldown_ok "$_APIKEY_COOLDOWN" "$CODEX_COOLDOWN_MIN"; then
         log "CODEX #90925 API-KEY ROUTE: ${CODEX_APIKEY_ROUTE} invalid_api_key/Incorrect-API-key lines (main+edge) in last ${CHECK_WINDOW_MIN}min; pin DRIFTED"
         slack_notify ":rotating_light: *Codex floated off pin → #90925 api-key route* — ${CODEX_APIKEY_ROUTE}x \`invalid_api_key\`/\`Incorrect API key\` across main+edge in last ${CHECK_WINDOW_MIN}min AND codex is off the canonical pin (scripts/lib/codex-version.sh). An off-pin codex can route the fleet primary to the OpenAI api-key endpoint instead of the Codex OAuth route (the 6.x #90925 shape), so the WHOLE fleet is on \`openrouter/openai/gpt-5.6-luna\`. Fix: re-pin codex + restart — \`scripts/lib/ensure-codex-version-pinned.sh\` on node-8 (re-pins to the canonical version), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. A plain restart also self-heals (ExecStartPre re-pins)."
@@ -364,6 +438,8 @@ if [ "${CODEX_APIKEY_ROUTE:-0}" -gt 0 ]; then
       fi
       ;;
   esac
+else
+  _dr_clear codex_apikey_float
 fi
 
 if [ "${CODEX_TOKEN_EXPIRED:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-expired-cooldown" "$CODEX_COOLDOWN_MIN"; then
@@ -390,6 +466,9 @@ RESTART_COUNT=$(journalctl -u "$GATEWAY_SERVICE" --since "10 min ago" --no-pager
 if [ "${RESTART_COUNT:-0}" -gt 10 ]; then
   log "CRASH LOOP DETECTED: ${RESTART_COUNT} restarts in 10 min — NOT restarting. Check openclaw.json for invalid config."
   slack_notify_critical ":rotating_light: *CRASH LOOP DETECTED* — Gateway restarted ${RESTART_COUNT} times in 10 min. Likely invalid config. NOT restarting. Run \`openclaw doctor --fix\` on node-8."
+  # Definitive code-heal failure → immediate AI-healer escalation (its own
+  # cooldown/budget prevent a storm while the loop persists).
+  _dr_escalate crash_loop
   exit 0
 fi
 
@@ -482,6 +561,7 @@ if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -gt 0 ]; then
   else
     log "CRITICAL: Restart failed — gateway status: ${STATUS}"
     slack_notify_critical ":rotating_light: *OpenClaw Watchdog* — CRITICAL: Auto-restart FAILED. Gateway status: ${STATUS}. Manual intervention required."
+    _dr_escalate gateway_restart_failed_activity
   fi
 else
   log "Healthy: ${SUCCESS_COUNT}/${MSG_COUNT} agent runs succeeded"

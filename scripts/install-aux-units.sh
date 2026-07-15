@@ -159,6 +159,12 @@ fail() { log "FATAL: $*"; exit 1; }
   || fail "$HYDRA_ROOT/scripts/openclaw-config-write-audit.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/openclaw-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/openclaw-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/dr-ai-healer.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/dr-ai-healer.sh missing or not executable (watchdog DR escalation would silently no-op)"
+# DR state dir (strike files, healer lock/cooldown/log): root-owned 0700 so
+# the predictable paths inside can't be pre-created as symlinks by a local
+# user (the healer + watchdog also verify this before every write).
+install -d -m 700 /var/lib/hydra-dr
 [[ -x "$HYDRA_ROOT/scripts/codex-keepalive.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/codex-keepalive.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/codex-token-refresh.sh" ]] \
