@@ -172,8 +172,16 @@ That's full-catalog access – a separate, enterprise-level plan rather than the
 - **Pro** ($10-12.50/mo): Everything in Lite + Analytics, Catalog Audits, Discography Playlists, Milestones
 - **Business** ($24-30/mo+): Everything in Pro + Company Analytics, List Analytics, Multi-User Workspace, Discovery Tools
 
-### Can I try Pro for free?
-Check app.muso.ai for current trial offers. The Lite plan gives you full access to credit management features at no cost.
+### Can I try Pro for free? / Is there a free trial?
+There's no free trial – Muso doesn't offer one. The way to use Muso at no cost is
+the Lite plan, which is free forever: full credit management (claim your profile,
+add and correct credits, company page, notifications), no card required.
+Analytics, Catalog Audits, and the rest of the Pro features aren't available on a
+trial basis – you'd upgrade to a paid Pro or Business plan for those. Never point a
+customer to "current trial offers" or suggest a trial might exist; if someone is
+deciding whether Muso is worth it, say plainly there's no free trial, steer them to
+the free Lite plan, and offer to walk through the features or help them judge
+whether it fits their needs.
 
 ### How do I upgrade my plan?
 Go to Settings in your account and select the plan you want. Upgrades take effect immediately.

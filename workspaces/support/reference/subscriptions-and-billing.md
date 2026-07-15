@@ -60,6 +60,13 @@
 
 ## Common Billing Questions
 
+### Is there a free trial?
+No – Muso doesn't offer a free trial. The free option is the Lite plan (free
+forever, no card required); the paid features live on Pro and Business. Don't imply
+a trial exists or point customers to "trial offers" – if someone wants to try Muso
+at no cost, that's the Lite plan, and offer to help them judge whether Pro or
+Business is a good fit.
+
 ### How do I upgrade from Lite to Pro?
 Log in at app.muso.ai, go to your account settings, and select the Pro plan. You can start with a monthly subscription.
 
