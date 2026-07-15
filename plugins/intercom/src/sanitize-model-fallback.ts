@@ -48,14 +48,32 @@
 export const MODEL_FALLBACK_NOTICE_RE =
   /(?:↪️?\s*)?Model Fallback(?: cleared)?:[^(]*\((?:selected|was)[^)]*\)/gi;
 
+// openclaw 2026.7.x added a SECOND runtime notice with different wording
+// (`buildSilentFallbackFailurePayload` in agent-runner.runtime):
+//
+//   ⚠️ I couldn't reach the configured model backend openai/gpt-5.5.
+//   Fallback used openrouter/openai/gpt-5.4-mini, but it produced no visible reply.
+//
+// It is flagged `isError` (NOT `isFallbackNotice`) and marked
+// deliver-despite-suppression, so BOTH 6.x strip layers missed it and it
+// reached a customer (incident 2026-07-15, ~02:37Z, edge conv during the
+// codex 401 window). Same structural-match philosophy: header phrase + the
+// two model-ref slots, tolerant of a stripped ⚠️ and straight/curly
+// apostrophes; never anchored on the open-ended model names.
+// Model refs contain dots (openai/gpt-5.5), so the slots use non-greedy `.*?`
+// anchored on the fixed phrases; `.` does not cross newlines, so the match can
+// never spill into a real reply on a following line.
+export const FALLBACK_FAILURE_NOTICE_RE =
+  /(?:⚠️?\s*)?I couldn['’]?t reach the configured model backend.*?\.\s*Fallback used.*?, but it produced no visible reply\.?/gi;
+
 /**
- * Remove any model-fallback notice(s) from reply text and trim. Returns the
- * input unchanged when no notice is present (apart from the trim). Defensive on
- * non-string input.
+ * Remove any model-fallback notice(s) — either format — from reply text and
+ * trim. Returns the input unchanged when no notice is present (apart from the
+ * trim). Defensive on non-string input.
  */
 export function stripModelFallbackNotice(text: string): string {
   if (typeof text !== "string") return text;
-  return text.replace(MODEL_FALLBACK_NOTICE_RE, "").trim();
+  return text.replace(MODEL_FALLBACK_NOTICE_RE, "").replace(FALLBACK_FAILURE_NOTICE_RE, "").trim();
 }
 
 /**
@@ -65,7 +83,11 @@ export function stripModelFallbackNotice(text: string): string {
  */
 export function findModelFallbackNotices(text: string): string[] | null {
   if (typeof text !== "string") return null;
-  return text.match(MODEL_FALLBACK_NOTICE_RE);
+  const found = [
+    ...(text.match(MODEL_FALLBACK_NOTICE_RE) ?? []),
+    ...(text.match(FALLBACK_FAILURE_NOTICE_RE) ?? []),
+  ];
+  return found.length > 0 ? found : null;
 }
 
 /**
@@ -83,7 +105,7 @@ export function findModelFallbackNotices(text: string): string[] | null {
 export function isOnlyModelFallbackNotice(text: string): boolean {
   if (typeof text !== "string") return false;
   if (text.trim().length === 0) return false;
-  // Cheap substring gate so normal reply chunks never pay for the regex.
-  if (!text.includes("Model Fallback")) return false;
+  // Cheap substring gate so normal reply chunks never pay for the regexes.
+  if (!text.includes("Model Fallback") && !text.includes("reach the configured model backend")) return false;
   return stripModelFallbackNotice(text).length === 0;
 }

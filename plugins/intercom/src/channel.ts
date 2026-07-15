@@ -228,6 +228,37 @@ export function joinDeliveryChunks(chunks: string[]): string {
   return filtered.join("\n\n");
 }
 
+/**
+ * Decide whether a delivered reply payload is RUNTIME telemetry that must
+ * never reach a support customer, and if so which signal identified it (for
+ * the audit log). Returns null for genuine customer-facing content.
+ *
+ * Three signals, most-specific first:
+ *   - "flag":       the 6.x model-fallback notice payload (isFallbackNotice).
+ *   - "error-flag": ANY runtime error payload (isError === true) — openclaw
+ *     2026.7.x emits e.g. buildSilentFallbackFailurePayload ("⚠️ I couldn't
+ *     reach the configured model backend …") with this flag and WITHOUT
+ *     isFallbackNotice, marked deliver-despite-suppression; one reached a
+ *     customer on 2026-07-15. Runtime-generated error text is operational
+ *     telemetry by definition, never Caroline's reply — the match is
+ *     deliberately wording-independent so the NEXT new notice is also caught.
+ *   - "content":    a flag-less chunk that is notice-only by structure (the
+ *     codex runtime has dropped flags before; see sanitize-model-fallback).
+ *
+ * The deliver callback in registerIntercomChannel routes every chunk through
+ * this decision; keeping it exported keeps the incident-critical branch
+ * unit-testable instead of an untestable closure detail.
+ */
+export function classifyRuntimeNoticePayload(
+  replyPayload: { isFallbackNotice?: boolean; isError?: boolean } | null | undefined,
+  text: string,
+): "flag" | "error-flag" | "content" | null {
+  if (replyPayload?.isFallbackNotice) return "flag";
+  if (replyPayload?.isError === true) return "error-flag";
+  if (isOnlyModelFallbackNotice(text)) return "content";
+  return null;
+}
+
 export interface DispatchRaceOutcome {
   /** The dispatch did not settle within timeoutMs — the lane is likely wedged. */
   timedOut: boolean;
@@ -802,9 +833,19 @@ export const intercomPlugin = createChatChannelPlugin({
               // A chunk that merely PREPENDS a notice to a real reply is
               // NOT dropped here (real text survives); the flush-time
               // backstop strips the notice from the joined body instead.
-              if (replyPayload?.isFallbackNotice || isOnlyModelFallbackNotice(text)) {
+              //
+              // openclaw 2026.7.x adds runtime ERROR payloads (isError,
+              // e.g. buildSilentFallbackFailurePayload's "⚠️ I couldn't
+              // reach the configured model backend …"), which carry
+              // deliver-despite-suppression and are NOT flagged
+              // isFallbackNotice — one reached a customer on 2026-07-15.
+              // The decision lives in classifyRuntimeNoticePayload (exported,
+              // unit-tested) so the incident-critical branch is never an
+              // untestable closure detail.
+              const dropVia = classifyRuntimeNoticePayload(replyPayload, text);
+              if (dropVia) {
                 log?.error?.(
-                  `[intercom:model-fallback] [${tag}] dropped fallback notice chunk conv=${result.conversationId} via=${replyPayload?.isFallbackNotice ? "flag" : "content"} notice=${JSON.stringify(String(text).slice(0, 200))}`,
+                  `[intercom:model-fallback] [${tag}] dropped runtime notice chunk conv=${result.conversationId} via=${dropVia} notice=${JSON.stringify(String(text).slice(0, 200))}`,
                 );
                 return;
               }

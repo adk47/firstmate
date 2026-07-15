@@ -12,6 +12,7 @@ import {
   combineBatchBodies,
   orderBatch,
   mergeBatchMedia,
+  classifyRuntimeNoticePayload,
 } from "../src/channel.js";
 import { canAgentReply } from "../src/handoff.js";
 import { stripModelFallbackNotice } from "../src/sanitize-model-fallback.js";
@@ -182,6 +183,42 @@ describe("joinDeliveryChunks", () => {
     const reply = "Hi Nitin – I've flagged this for review.";
     const joined = joinDeliveryChunks([notice, reply]);
     expect(stripModelFallbackNotice(joined)).toBe(reply);
+  });
+});
+
+describe("classifyRuntimeNoticePayload (deliver-callback drop decision)", () => {
+  const LEAKED_71 =
+    "\u26a0\ufe0f I couldn't reach the configured model backend openai/gpt-5.5. Fallback used openrouter/openai/gpt-5.4-mini, but it produced no visible reply.";
+
+  it("drops the exact 7.1 incident payload via the isError flag, wording-independent", () => {
+    // The incident-critical branch (2026-07-15 leak): the 7.1 payload carries
+    // isError, NOT isFallbackNotice. The flag alone must be sufficient.
+    expect(classifyRuntimeNoticePayload({ isError: true }, LEAKED_71)).toBe("error-flag");
+    // Wording-independent: a FUTURE runtime error with unknown text is
+    // equally telemetry — this is what makes the defense forward-proof.
+    expect(
+      classifyRuntimeNoticePayload({ isError: true }, "some brand-new runtime failure wording"),
+    ).toBe("error-flag");
+  });
+
+  it("drops the 6.x notice via its own flag", () => {
+    expect(classifyRuntimeNoticePayload({ isFallbackNotice: true }, "anything")).toBe("flag");
+  });
+
+  it("drops a flag-less notice-only chunk via content (either notice format)", () => {
+    expect(
+      classifyRuntimeNoticePayload(
+        {},
+        "\u21aa\ufe0f Model Fallback: openrouter/openai/gpt-5.4-mini (selected openai/gpt-5.5; auth)",
+      ),
+    ).toBe("content");
+    expect(classifyRuntimeNoticePayload(undefined, LEAKED_71)).toBe("content");
+  });
+
+  it("keeps genuine customer-facing replies, including isError:false payloads", () => {
+    expect(classifyRuntimeNoticePayload({}, "Hi! Your credits are on the way.")).toBeNull();
+    expect(classifyRuntimeNoticePayload({ isError: false }, "All sorted now.")).toBeNull();
+    expect(classifyRuntimeNoticePayload(null, "I couldn't reach the support team yesterday.")).toBeNull();
   });
 });
 

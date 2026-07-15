@@ -178,3 +178,49 @@ describe("MODEL_FALLBACK_NOTICE_RE", () => {
     expect(MODEL_FALLBACK_NOTICE_RE.flags).toContain("g");
   });
 });
+
+// ── openclaw 2026.7.x "fallback produced no visible reply" notice ────────────
+// The exact isError payload text that leaked to a customer (incident
+// 2026-07-15 ~02:37Z, during the codex 401 window). It carries isError, NOT
+// isFallbackNotice, and different wording — both 6.x layers missed it.
+const LEAKED_71_NOTICE =
+  "⚠️ I couldn't reach the configured model backend openai/gpt-5.5. Fallback used openrouter/openai/gpt-5.4-mini, but it produced no visible reply.";
+
+describe("2026.7.x fallback-failure notice", () => {
+  it("strips the exact leaked 7.1 notice", () => {
+    expect(stripModelFallbackNotice(LEAKED_71_NOTICE)).toBe("");
+  });
+
+  it("strips it when prepended to a real reply, keeping the reply", () => {
+    expect(stripModelFallbackNotice(`${LEAKED_71_NOTICE}\n\n${REAL_REPLY}`)).toBe(REAL_REPLY);
+  });
+
+  it("survives a stripped emoji and a curly apostrophe (typography passes)", () => {
+    const wobbled =
+      "I couldn’t reach the configured model backend openai/gpt-5.5. Fallback used openrouter/openai/gpt-5.4-mini, but it produced no visible reply.";
+    expect(stripModelFallbackNotice(wobbled)).toBe("");
+  });
+
+  it("is notice-only, so a standalone chunk is dropped and the turn pages as silent", () => {
+    expect(isOnlyModelFallbackNotice(LEAKED_71_NOTICE)).toBe(true);
+    expect(
+      detectSilentDispatch({
+        bufferedChunks: [],
+        state: makeActiveState(),
+        droppedMidStream: false,
+      }),
+    ).toEqual({ silent: true, reason: "zero_chunks_after_dispatch" });
+  });
+
+  it("is reported by findModelFallbackNotices for the audit log", () => {
+    const found = findModelFallbackNotices(`${LEAKED_71_NOTICE}\n\n${REAL_REPLY}`);
+    expect(found).toHaveLength(1);
+    expect(found?.[0]).toContain("couldn't reach the configured model backend");
+  });
+
+  it("never matches an innocent customer sentence about reachability", () => {
+    const innocent = "I couldn't reach the support team yesterday, can you help?";
+    expect(stripModelFallbackNotice(innocent)).toBe(innocent);
+    expect(isOnlyModelFallbackNotice(innocent)).toBe(false);
+  });
+});
