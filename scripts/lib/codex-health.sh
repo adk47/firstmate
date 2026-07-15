@@ -173,7 +173,7 @@ codex_count_token_expired() {
 # codex_count_vision_failures — count exhausted-vision lines on stdin.
 # Signature: "All image models failed" (the image tool AND the pdf tool
 # share this prefix). Caroline's image tool is agents.defaults.imageModel
-# = codex/gpt-5.5 → openrouter gemini-3.5-flash → haiku-4.5, so this line
+# = codex/gpt-5.6-sol → openrouter gemini-3.5-flash → haiku-4.5, so this line
 # only fires when ALL of codex AND both OpenRouter fallbacks failed — a
 # real, customer-visible vision outage, not a transient codex-auth blip
 # (a codex-only failure degrades to gemini and does NOT log this). NOTE:

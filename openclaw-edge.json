@@ -171,7 +171,7 @@
         ]
       },
       "imageModel": {
-        "primary": "codex/gpt-5.5",
+        "primary": "codex/gpt-5.6-sol",
         "fallbacks": [
           "openrouter/google/gemini-3.5-flash",
           "openrouter/anthropic/claude-haiku-4.5"

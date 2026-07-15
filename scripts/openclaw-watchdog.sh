@@ -324,7 +324,7 @@ fi
 
 if [ "${CODEX_VISIONFAIL:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-vision-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "EDGE VISION DOWN: ${CODEX_VISIONFAIL} 'All image models failed' lines in last ${CHECK_WINDOW_MIN}min"
-  slack_notify ":rotating_light: *Edge vision DOWN* (Caroline/support) — ${CODEX_VISIONFAIL}x 'All image models failed' in last ${CHECK_WINDOW_MIN}min. Customers sending screenshots/PDFs get no image understanding. imageModel is codex/gpt-5.5 → openrouter gemini → haiku, so this means codex AND both OpenRouter fallbacks failed — check OPENROUTER_API_KEY, codex auth, and \`openclaw --profile edge config validate\`."
+  slack_notify ":rotating_light: *Edge vision DOWN* (Caroline/support) — ${CODEX_VISIONFAIL}x 'All image models failed' in last ${CHECK_WINDOW_MIN}min. Customers sending screenshots/PDFs get no image understanding. imageModel is codex/gpt-5.6-sol → openrouter gemini → haiku, so this means codex AND both OpenRouter fallbacks failed — check OPENROUTER_API_KEY, codex auth, and \`openclaw --profile edge config validate\`."
   date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-vision-cooldown"
 fi
 
