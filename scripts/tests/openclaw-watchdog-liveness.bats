@@ -149,6 +149,34 @@ mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
   [[ "$output" != *"recovered (status now active)"* ]]
 }
 
+@test "restart-FAILED page carries real user-ID mentions, not the dead literal @aaron" {
+  set_status openclaw-gateway-main failed
+  set_status openclaw-gateway-edge active
+  export STUB_RESTART_RECOVERS=0
+  # Make the page text observable: give slack_notify a token and swap the
+  # silent no-op muso stub for one that records --text.
+  printf 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test\n' > "$MUSO_SLACK_ENV_FILE"
+  export MUSO_TEXTS="$TEST_TMPDIR/muso-texts"; : > "$MUSO_TEXTS"
+  cat > "$TEST_TMPDIR/bin/muso" <<'STUB'
+#!/usr/bin/env bash
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--text" ] && printf '%s\n' "$a" >> "$MUSO_TEXTS"
+  prev="$a"
+done
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/muso"
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"restart FAILED"* ]]
+  # The CRITICAL page really pings both owners (a literal "@aaron" renders as
+  # plain text and pings nobody):
+  grep -q '<@U0AL36NADEY>' "$MUSO_TEXTS"
+  grep -q '<@U7RP6HKUZ>' "$MUSO_TEXTS"
+  ! grep -q '@aaron' "$MUSO_TEXTS"
+}
+
 @test "drifted (0644) secret file is detected and re-tightened by the watchdog" {
   set_status openclaw-gateway-main active
   set_status openclaw-gateway-edge active

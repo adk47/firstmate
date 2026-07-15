@@ -67,6 +67,19 @@ _slack_requester() {
   printf '%s' "${SLACK_NOTIFY_REQUESTER:-$(basename "${0:-hydra-ops}")@hydra-ops}"
 }
 
+# Real Slack user IDs for CRITICAL pages. A literal "@name" in a bot message
+# renders as plain text and pings NOBODY — only <@UID> mentions ping. These are
+# the single code-side source (the same IDs live in prose in
+# skills-all/muso-devops-alert-triage/SKILL.md).
+SLACK_UID_NICK="U0AL36NADEY"
+SLACK_UID_AARON="U7RP6HKUZ"
+
+# slack_notify_critical <msg>: slack_notify with both on-call owners actually
+# pinged. Same best-effort contract as slack_notify (never fails the caller).
+slack_notify_critical() {
+  slack_notify "<@${SLACK_UID_NICK}> <@${SLACK_UID_AARON}> $1"
+}
+
 slack_notify() {
   local msg="$1"
   # Callers historically embedded the 2-char sequence \n and relied on the

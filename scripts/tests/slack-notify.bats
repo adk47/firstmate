@@ -100,6 +100,29 @@ with_lib() { bash -c "source '$LIB'; $1"; }
   grep -q '"type": *"divider"' "$TEST_TMPDIR/last-blocks"
 }
 
+@test "slack_notify_critical prepends real Nick + Aaron user-ID mentions" {
+  # A literal "@name" in a bot message renders as plain text and pings nobody
+  # (the watchdog's old '@aaron' suffix) — only <@UID> actually pings.
+  run with_lib 'slack_notify_critical "gateway down"'
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_TMPDIR/last-text")" = "<@U0AL36NADEY> <@U7RP6HKUZ> gateway down" ]
+}
+
+@test "slack_notify_critical keeps slack_notify's literal-\\n translation contract" {
+  run with_lib 'slack_notify_critical "line1\nline2"'
+  [ "$status" -eq 0 ]
+  expected=$'<@U0AL36NADEY> <@U7RP6HKUZ> line1\nline2'
+  [ "$(cat "$TEST_TMPDIR/last-text")" = "$expected" ]
+}
+
+@test "slack_notify_critical stays best-effort when muso fails" {
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$STUBBIN/muso"
+  chmod +x "$STUBBIN/muso"
+  run with_lib 'slack_notify_critical "x" && echo survived'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *survived* ]]
+}
+
 @test "slack prewrite hook provider branch: MUSO_HOOK_PROVIDER=slack exits 0 without probing" {
   # The hook must not run the codex-health gate for slack sends — a codex
   # outage must not suppress the alert about itself. No journalctl stub on

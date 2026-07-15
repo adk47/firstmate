@@ -212,7 +212,7 @@ check_gateway_liveness() {
     slack_notify ":white_check_mark: *${profile} gateway* was \`${status}\` on node-8 — watchdog ran \`reset-failed\` + restart and it is back online. ExecStartPre self-healed (secret perms / codex auth). Investigate the original cause: \`journalctl -u ${svc} -n 80 --no-pager\`."
   else
     log "  ${svc}: restart FAILED — status now ${now}"
-    slack_notify ":rotating_light: *${profile} gateway DOWN* on node-8 (\`${status}\` → restart → \`${now}\`). Config validates clean, so this is NOT a schema problem (suspect secrets / auth / runtime). Watchdog auto-restart FAILED — manual: \`ssh node-8; systemctl reset-failed ${svc}; systemctl restart ${svc}; journalctl -u ${svc} -n 120 --no-pager\`. @aaron"
+    slack_notify_critical ":rotating_light: *${profile} gateway DOWN* on node-8 (\`${status}\` → restart → \`${now}\`). Config validates clean, so this is NOT a schema problem (suspect secrets / auth / runtime). Watchdog auto-restart FAILED — manual: \`ssh node-8; systemctl reset-failed ${svc}; systemctl restart ${svc}; journalctl -u ${svc} -n 120 --no-pager\`."
   fi
   return 0
 }
@@ -294,7 +294,7 @@ CODEX_REFRESH_RACE=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_c
 
 if [ "${CODEX_REFRESH_RACE:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-refresh-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "CODEX REFRESH RACE: ${CODEX_REFRESH_RACE} refresh_token_reused/auth_permanent lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
-  slack_notify ":rotating_light: *Codex refresh-token race* — ${CODEX_REFRESH_RACE}x \`refresh_token_reused\`/\`auth_permanent\` across main+edge in last ${CHECK_WINDOW_MIN}min. The ENTIRE codex fleet (gpt-5.6) has degraded to \`openrouter/openai/gpt-5.6-luna\`. The single-use refresh token is spent → this needs *interactive re-auth*: \`openclaw --profile main models auth login --provider openai-codex --device-code\` for BOTH accounts (aaron@muso.ai, aaronkaufman@me.com), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. Prevention is the lock-dir convergence (ensure-codex-refresh-lock-shared.sh) — see the tripwire below."
+  slack_notify_critical ":rotating_light: *Codex refresh-token race* — ${CODEX_REFRESH_RACE}x \`refresh_token_reused\`/\`auth_permanent\` across main+edge in last ${CHECK_WINDOW_MIN}min. The ENTIRE codex fleet (gpt-5.6) has degraded to \`openrouter/openai/gpt-5.6-luna\`. The single-use refresh token is spent → this needs *interactive re-auth*: \`openclaw --profile main models auth login --provider openai-codex --device-code\` for BOTH accounts (aaron@muso.ai, aaronkaufman@me.com), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. Prevention is the lock-dir convergence (ensure-codex-refresh-lock-shared.sh) — see the tripwire below."
   date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-refresh-cooldown"
 fi
 
@@ -368,7 +368,7 @@ fi
 
 if [ "${CODEX_TOKEN_EXPIRED:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-expired-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "CODEX OAUTH TOKEN EXPIRED: ${CODEX_TOKEN_EXPIRED} 'token is expired' lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
-  slack_notify ":rotating_light: *Codex OAuth token expired* — ${CODEX_TOKEN_EXPIRED}x \`authentication token is expired\` across main+edge in last ${CHECK_WINDOW_MIN}min. The codex access token lapsed and refresh isn't renewing it → fleet on \`openrouter/openai/gpt-5.6-luna\`. Device-code re-auth BOTH accounts then restart: \`openclaw --profile main models auth login --provider openai-codex --device-code\` (aaron@muso.ai + aaronkaufman@me.com), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`."
+  slack_notify_critical ":rotating_light: *Codex OAuth token expired* — ${CODEX_TOKEN_EXPIRED}x \`authentication token is expired\` across main+edge in last ${CHECK_WINDOW_MIN}min. The codex access token lapsed and refresh isn't renewing it → fleet on \`openrouter/openai/gpt-5.6-luna\`. Device-code re-auth BOTH accounts then restart: \`openclaw --profile main models auth login --provider openai-codex --device-code\` (aaron@muso.ai + aaronkaufman@me.com), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`."
   date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-expired-cooldown"
 fi
 
@@ -389,7 +389,7 @@ RESTART_COUNT=$(journalctl -u "$GATEWAY_SERVICE" --since "10 min ago" --no-pager
   | grep -cE "$RESTART_LOG_REGEX" || true)
 if [ "${RESTART_COUNT:-0}" -gt 10 ]; then
   log "CRASH LOOP DETECTED: ${RESTART_COUNT} restarts in 10 min — NOT restarting. Check openclaw.json for invalid config."
-  slack_notify ":rotating_light: *CRASH LOOP DETECTED* — Gateway restarted ${RESTART_COUNT} times in 10 min. Likely invalid config. NOT restarting. Run \`openclaw doctor --fix\` on node-8."
+  slack_notify_critical ":rotating_light: *CRASH LOOP DETECTED* — Gateway restarted ${RESTART_COUNT} times in 10 min. Likely invalid config. NOT restarting. Run \`openclaw doctor --fix\` on node-8."
   exit 0
 fi
 
@@ -481,7 +481,7 @@ if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -gt 0 ]; then
     python3 /opt/hydra/scripts/retrigger-unanswered.py "$LAST_ERROR" 2>/dev/null || true
   else
     log "CRITICAL: Restart failed — gateway status: ${STATUS}"
-    slack_notify ":rotating_light: *OpenClaw Watchdog* — CRITICAL: Auto-restart FAILED. Gateway status: ${STATUS}. Manual intervention required. @aaron"
+    slack_notify_critical ":rotating_light: *OpenClaw Watchdog* — CRITICAL: Auto-restart FAILED. Gateway status: ${STATUS}. Manual intervention required."
   fi
 else
   log "Healthy: ${SUCCESS_COUNT}/${MSG_COUNT} agent runs succeeded"

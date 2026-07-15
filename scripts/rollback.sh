@@ -31,7 +31,10 @@ fi
 SLACK_WEBHOOK="${SLACK_WEBHOOK:-${HYDRA_SLACK_WEBHOOK:-}}"
 
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"; }
-fail() { log "FATAL: $*"; notify_slack ":rotating_light: HYDRA ROLLBACK FAILED: $*. @aaron manual intervention required."; exit 1; }
+# Real <@UID> mentions (Nick, Aaron) — a literal "@name" renders as plain
+# text and pings nobody. IDs match SLACK_UID_* in lib/slack-notify.sh
+# (not sourced here: rollback posts via a raw webhook, not the muso CLI).
+fail() { log "FATAL: $*"; notify_slack ":rotating_light: HYDRA ROLLBACK FAILED: $*. <@U0AL36NADEY> <@U7RP6HKUZ> manual intervention required."; exit 1; }
 
 notify_slack() {
   if [[ -n "$SLACK_WEBHOOK" ]]; then
