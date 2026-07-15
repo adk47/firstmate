@@ -290,6 +290,7 @@ Every refusal returned by `remove_credits` is a JSON object `{ok: false, error: 
 | `missing_arg` / `invalid_*` / `tracks_file_missing` / `unknown_arg` | Internal bug – don't tell the customer about it; retry with corrected args | Log to session for review |
 | `empty_tracks_file` | "Could you list the tracks you want removed? One per line works best." | Wait for customer |
 | `cap_exceeded_per_request` | "That's more than I can do in a single round – let me handle the first 50 now and we can do the rest after. Want me to start with the first 50?" | Split into batches with confirmation each time |
+| `apply_batch_too_large` | "Let me apply these in a couple of smaller batches so nothing times out – I'll do the first 15 now, then carry on with the rest. Sound good?" | The dry-run already previewed them all; re-call `remove_credits` with `apply: true` on ≤ `max_apply_tracks` tracks at a time, confirming each batch. Not a customer error – purely an internal batching limit. |
 | `cap_exceeded_per_day` | "I've helped you remove quite a few today already – to be safe, let me flag the rest for our team to handle." | File `action-request` tier 1 with the leftover tracks |
 | `profile_lookup_failed` | "Hmm, having trouble loading that profile – could you share the URL again so I can double-check it?" | If repeats, file `action-request` tier 2 |
 | `profile_unclaimed` | "I can't make changes to an unclaimed profile from here – I've flagged this for our team." | File `action-request` tier 2, action_type `credit-correction` |

@@ -254,6 +254,52 @@ describe("createRemoveCreditsTool", () => {
     expect(calls).toHaveLength(10);
   });
 
+  it("refuses apply when batch exceeds APPLY_MAX_TRACKS (bulk-apply batch guard)", async () => {
+    const { tool, calls } = makeTool({ stdout: okStdout });
+    const tracks = Array.from({ length: 16 }, (_, i) => `Artist - Title ${i}`);
+    const r = await tool.execute("tc-batch", {
+      profileId: "aa9f3eb3-77ba-46f3-b6cd-db0898e5caf8",
+      requesterEmail: "owner@example.com",
+      tracks,
+      apply: true,
+      intercomConvId: "conv-123",
+    });
+    const parsed = parseResult(r);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toBe("apply_batch_too_large");
+    expect(parsed.max_apply_tracks).toBe(15);
+    // Must short-circuit before spawning the wrapper.
+    expect(calls).toHaveLength(0);
+  });
+
+  it("allows dry-run with more than APPLY_MAX_TRACKS tracks", async () => {
+    const { tool, calls } = makeTool({ stdout: okStdout });
+    const tracks = Array.from({ length: 30 }, (_, i) => `Artist - Title ${i}`);
+    const r = await tool.execute("tc-batch-dry", {
+      profileId: "aa9f3eb3-77ba-46f3-b6cd-db0898e5caf8",
+      requesterEmail: "owner@example.com",
+      tracks,
+      apply: false,
+    });
+    expect(parseResult(r).ok).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("allows apply at exactly APPLY_MAX_TRACKS (boundary)", async () => {
+    const { tool, calls } = makeTool({ stdout: okStdout });
+    const tracks = Array.from({ length: 15 }, (_, i) => `Artist - Title ${i}`);
+    const r = await tool.execute("tc-batch-boundary", {
+      profileId: "aa9f3eb3-77ba-46f3-b6cd-db0898e5caf8",
+      requesterEmail: "owner@example.com",
+      tracks,
+      apply: true,
+      intercomConvId: "conv-123",
+    });
+    expect(parseResult(r).ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toContain("--apply");
+  });
+
   it("does NOT mention the script path or wrapper internals in the tool description", () => {
     const { tool } = makeTool({ stdout: okStdout });
     // The description is what the agent sees and reasons about. It should

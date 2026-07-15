@@ -41,6 +41,15 @@ function execFileToPromise(
 const UUID_PATTERN = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
 const EMAIL_PATTERN = "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$";
 
+// remove_credits is destructive and the wrapper runs DELETEs serially
+// (~1s each). Cap a single APPLY so each batch stays small, quick, and
+// individually confirmable — bounding the blast radius and worst-case run
+// time of one destructive call and keeping the dry-run → confirm → apply
+// loop reviewable a batch at a time. Dry-run (read-only) is unaffected and
+// still previews the full 50; the wrapper is idempotent and the 15-min
+// dry-run audit gate makes batched apply safe.
+const APPLY_MAX_TRACKS = 15;
+
 const Parameters = Type.Object({
   profileId: Type.String({
     pattern: UUID_PATTERN,
@@ -112,6 +121,18 @@ export function createRemoveCreditsTool(deps: ToolDeps): AgentTool<typeof Parame
           ok: false,
           error: "intercom_conv_id_required",
           detail: "apply: true requires intercomConvId so the wrapper can verify the customer's email against Intercom's contact record",
+        }));
+      }
+
+      // Bound a single destructive apply to a small, individually-confirmable
+      // batch. Dry-run is read-only and unaffected — preview all tracks, then
+      // apply in batches.
+      if (params.apply === true && Array.isArray(params.tracks) && params.tracks.length > APPLY_MAX_TRACKS) {
+        return textResult(JSON.stringify({
+          ok: false,
+          error: "apply_batch_too_large",
+          detail: `Apply is limited to ${APPLY_MAX_TRACKS} tracks per call so each destructive batch stays small and individually confirmable. Run the dry-run to preview them all, then apply in batches of ${APPLY_MAX_TRACKS} or fewer.`,
+          max_apply_tracks: APPLY_MAX_TRACKS,
         }));
       }
 
