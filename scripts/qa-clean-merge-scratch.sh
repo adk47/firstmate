@@ -51,6 +51,7 @@ KEEP_GLOBS=(
   # workspaces/*/<file> excludes mirrored from deploy.sh RSYNC_EXCLUDES
   'MEMORY.md' 'IDENTITY.md' 'HEARTBEAT.md' 'TOOLS.md'
   'openclaw-workspace-state.json'
+  '.tmp-*'
   'TOOLS.md.bak-*' '*.md.bak-*'
   'write-activity.log'
   '*.jpeg' '*.jpg' '*.webp' '*.gif' '*.png' '*.pdf' '*.csv' '*.txt' '*.py'

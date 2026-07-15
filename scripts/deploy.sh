@@ -751,6 +751,14 @@ RSYNC_EXCLUDES=(
   # --delete after the 7.1 upgrade would wipe the markers and the deploy
   # pre-flight gate would flag them on every PR.
   --exclude='workspaces/*/openclaw-workspace-state.json'
+  # Agent kubectl/scratch temp files: agents (esp. devops) write .tmp-* scratch
+  # scripts into their workspace during runtime ops and sometimes ORPHAN them
+  # (e.g. .tmp-kubectl-catalog-*.sh, unheld by any process). Server-owned
+  # transient scratch, never in the repo; without this exclude a single orphan
+  # trips the rsync --delete pre-flight and blocks EVERY PR + merge-deploy until
+  # node-8 is manually cleaned (observed 2026-07-15; drift guard requires the
+  # mirrored '.tmp-*' KEEP glob in scripts/qa-clean-merge-scratch.sh).
+  --exclude='workspaces/*/.tmp-*'
   # Agent long-term memory (written by agents at runtime, should survive
   # deploys — see docs/guides/WORKSPACE-FILE-OWNERSHIP.md). MEMORY.md IS tracked
   # in git as a seed, but agents modify it post-deploy and we must not
