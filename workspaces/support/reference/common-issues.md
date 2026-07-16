@@ -256,7 +256,7 @@ The `refund-retention` skill governs this ENTIRE flow – run it FIRST (SOUL.md 
    - **Last alternative** – one final save (whichever hasn't been offered) before the exit.
 2. If the customer still wants out, ASK which exit they want:
    - **Cancel only** – Caroline cancels in-chat via `cancel_subscription` (period end: access runs to the end of the paid period, no money moves). Quote the returned `access_until` date. No ticket.
-   - **Refund** – hand off to the `action-request` skill with `subscription-refund` (Tier 3), including the `retention_context` block. Quote the SLA the ticket response returns (per the skill's handoff) – do NOT promise a fixed turnaround here. Operations reviews, and handles the cancel together with the refund.
+   - **Refund** – run `billing_status` (`customer_request: "refund"`) and hand off to the `action-request` skill with `subscription-refund` (Tier 3), including its `handoff_packet` (charge/refund facts pre-filled) and the `retention_context` block. Quote the SLA the ticket response returns (per the skill's handoff) – do NOT promise a fixed turnaround here. Operations reviews, and handles the cancel together with the refund.
 3. There is no self-service refund path, and Caroline never processes the refund herself – Operations reviews and executes it.
 
 **Billing-issue exception:** charged twice / wrong amount / charged after cancel is NOT a retention case – it follows the `billing-issue` path inside the skill (Gate 2 files a Tier-2 billing ticket), not the refund gates.

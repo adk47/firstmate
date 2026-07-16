@@ -34,6 +34,7 @@ describe("sanitizeToolLeak", () => {
       "retention_offer_check",
       "retention_offer_apply",
       "cancel_subscription",
+      "billing_status",
       "track_analytics_status",
       "analytics_refresh_request",
       "analytics_recheck",

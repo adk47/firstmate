@@ -71,10 +71,11 @@ describe("support_action_router", () => {
     const out = await call({ intent: "billing_cancel_refund", state: "read_ok" });
     expect(out.ok).toBe(true);
     expect(out.availability).toBe("partial");
-    expect(out.live_tools.read).toEqual(["subscription_status", "retention_offer_check"]);
+    expect(out.live_tools.read).toEqual(["subscription_status", "retention_offer_check", "billing_status"]);
     expect(out.live_tools.write).toEqual(["retention_offer_apply", "cancel_subscription"]);
-    // Refund writes stay planned — money out is the human/Operations path.
-    expect(out.planned_tools).toEqual(["refund_policy_check", "refund_create"]);
+    // The refund WRITE stays planned — money out is the human/Operations path.
+    // (refund_policy_check was retired: billing_status now delivers that read.)
+    expect(out.planned_tools).toEqual(["refund_create"]);
     expect(out.next).toMatchObject({
       outcome: "call_tool",
       tool: "retention_offer_check",
@@ -85,11 +86,25 @@ describe("support_action_router", () => {
     expect(confirmed.next.instruction).toContain("Never call cancel on the refund branch");
 
     const refused = await call({ intent: "billing_cancel_refund", state: "tool_refused" });
-    expect(refused.next).toMatchObject({
-      outcome: "handoff",
-      tool: "create_ticket",
-      action_type: "subscription-refund",
-    });
+    expect(refused.next).toMatchObject({ outcome: "handoff", tool: "create_ticket" });
+    // Failure states no longer force the Tier-3 refund queue: a charge complaint
+    // whose billing_status fails must be able to file the Tier-2 billing-issue
+    // ticket, so no single action_type is hardcoded — the agent picks by request.
+    expect(refused.next.action_type).toBeUndefined();
+    expect(refused.next.instruction).toContain("billing-issue");
+    expect(refused.next.instruction).toContain("subscription-refund");
+  });
+
+  it("billing failure states do not misroute charge complaints into the Tier-3 refund queue", async () => {
+    for (const state of ["tool_refused", "tool_disabled", "loop_detected"]) {
+      const out = await call({ intent: "billing_cancel_refund", state });
+      expect(out.next.outcome).toBe("handoff");
+      expect(out.next.tool).toBe("create_ticket");
+      // request-appropriate action_type, not a hardcoded subscription-refund
+      expect(out.next.action_type).toBeUndefined();
+      expect(out.next.instruction).toMatch(/billing-issue \(Tier 2\)/);
+      expect(out.next.instruction).toMatch(/subscription-refund \(Tier 3\)/);
+    }
   });
 
   it("routes analytics complaints through the live analytics status resolver", async () => {

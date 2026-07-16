@@ -19,7 +19,7 @@ export type Tier = 1 | 2 | 3;
 
 export const TIER_MAP: Record<string, Tier> = {
   "credit-claim": 1, "credit-correction": 1, "credit-verify": 1, "profile-claim": 1, "support-general": 1, "analytics-followup": 1, "order-fulfillment": 1,
-  "profile-merge": 2, "unmerge-request": 2, "bulk-credit-change": 2, "profile-update": 2, "track-merge": 2,
+  "profile-merge": 2, "unmerge-request": 2, "bulk-credit-change": 2, "profile-update": 2, "track-merge": 2, "billing-issue": 2,
   "subscription-refund": 3, "data-deletion": 3, "dispute": 3, "data-export": 3,
 };
 
@@ -40,7 +40,7 @@ export function getTierForAction(actionType: string): Tier {
 // Growth owns account/billing/support; Catalog owns the catalog data
 // (credits, profiles, tracks, analytics, merges).
 export const GROWTH_ACTIONS = new Set([
-  "subscription-refund", "data-deletion", "data-export", "dispute", "support-general", "order-fulfillment",
+  "subscription-refund", "billing-issue", "data-deletion", "data-export", "dispute", "support-general", "order-fulfillment",
 ]);
 
 // Short labels for the title; anything not listed renders verbatim.

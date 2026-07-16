@@ -25,7 +25,8 @@
       "founding_buyback_link",
       "retention_offer_check",
       "retention_offer_apply",
-      "cancel_subscription"
+      "cancel_subscription",
+      "billing_status"
     ]
   },
   "configSchema": {

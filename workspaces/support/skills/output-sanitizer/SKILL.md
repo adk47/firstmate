@@ -74,6 +74,7 @@ Scan every outgoing response for the following patterns. If ANY match is found, 
 - `retention_offer_check`
 - `retention_offer_apply`
 - `cancel_subscription`
+- `billing_status`
 - `profile_lookup`
 - `credits_search`
 - `subscription_status`

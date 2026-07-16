@@ -42,6 +42,7 @@ const PATTERNS: RegExp[] = [
   /\bretention_offer_check\b/g,
   /\bretention_offer_apply\b/g,
   /\bcancel_subscription\b/g,
+  /\bbilling_status\b/g,
   /\btrack_analytics_status\b/g,
   /\banalytics_refresh_request\b/g,
   /\banalytics_recheck\b/g,

@@ -254,6 +254,7 @@ describe("tier helpers", () => {
     expect(getTierForAction("order-fulfillment")).toBe(1);
     expect(getTierForAction("profile-merge")).toBe(2);
     expect(getTierForAction("track-merge")).toBe(2);
+    expect(getTierForAction("billing-issue")).toBe(2);
     expect(getTierForAction("data-deletion")).toBe(3);
     expect(getTierForAction("unknown-action")).toBe(1);
   });

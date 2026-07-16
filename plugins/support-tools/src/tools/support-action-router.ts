@@ -75,6 +75,20 @@ const closeStep = (instruction = "Reply with the result and close the loop. Do n
   instruction,
 });
 
+// Billing-route failure handoff: intentionally NO action_type. The route
+// serves both refund and charge/billing-issue complaints and cannot see
+// customer_request, so the agent must file with the request-appropriate type —
+// billing-issue (Tier 2) for a charge/duplicate-charge complaint or any
+// non-refund billing problem, subscription-refund (Tier 3) only for an explicit
+// refund request — matching billing_status's own handoff_packet.action_type.
+const billingFailureHandoff = (extra = ""): NextStep => ({
+  outcome: "handoff",
+  tool: "create_ticket",
+  instruction:
+    "File create_ticket with the request-appropriate action_type: billing-issue (Tier 2) for a charge/duplicate-charge complaint or any non-refund billing problem, subscription-refund (Tier 3) only for an explicit refund request. Include whatever billing_status facts you obtained." +
+    (extra ? " " + extra : ""),
+});
+
 export const SUPPORT_ACTION_ROUTES: Record<string, RouteDefinition> = {
   analytics_data_complaint: {
     label: "Analytics or data freshness complaint",
@@ -275,33 +289,40 @@ export const SUPPORT_ACTION_ROUTES: Record<string, RouteDefinition> = {
     label: "Subscription cancel or refund",
     availability: "partial",
     goal: "Read subscription state, run the retention save hierarchy (50% offer, then free plan), cancel at period end when the customer insists; refunds stay a handoff packet.",
-    live_read_tools: ["subscription_status", "retention_offer_check"],
+    live_read_tools: ["subscription_status", "retention_offer_check", "billing_status"],
     live_write_tools: ["retention_offer_apply", "cancel_subscription"],
     live_handoff_tools: ["create_ticket"],
-    planned_tools: ["refund_policy_check", "refund_create"],
+    planned_tools: ["refund_create"],
     human_gated_writes: ["refunds today", "manual discounts", "B2B invoice changes", "chargeback/legal threats"],
     sequence: [
       "Run the refund-retention skill for every cancel/refund request.",
       "Run subscription_status before quoting plan or renewal state.",
+      "Run billing_status before filing any refund packet or diagnosing a charge/duplicate-charge/past-due complaint. Pass customer_request: charge_issue for a duplicate/unexpected charge; it returns a create_handoff_ticket packet whose action_type is billing-issue (a Tier-2 billing ticket, NOT the refund queue). Always file create_ticket with the packet's OWN action_type (subscription-refund for a refund request, billing-issue for a charge complaint).",
       "Read retention_offer_check before offering the 50% save; quote the returned offer wording verbatim.",
       "Apply retention_offer_apply only after the customer explicitly accepts; offer the free-plan save as the fallback.",
       "Cancel via cancel_subscription (period end) only after the customer declines the saves and explicitly confirms.",
-      "Any refund request becomes a subscription-refund handoff packet — never cancel on the refund branch; Operations handles cancel+refund together.",
+      "Any refund request becomes a subscription-refund handoff packet carrying the billing_status packet — never cancel on the refund branch; Operations handles cancel+refund together.",
     ],
     close_when: ["Customer only needed current subscription state or self-service billing guidance", "retention_offer_apply returns ok for an accepted save", "cancel_subscription confirm:true returns ok (quote the returned access_until)"],
-    handoff_when: ["Any refund request today", "retention_offer_check/apply or cancel_subscription refuses or routes to human (past_due billing, VIP, non-Stripe, ambiguous workspace)", "Duplicate charge, B2B/manual invoice, chargeback/legal threat, or discount request"],
-    missing_info: ["Account email if the verified conversation has no owner", "Charge date/amount when filing a refund handoff"],
+    handoff_when: ["Any refund request today", "billing_status reports past_due, a prior refund, or fails with vip_manual / not_stripe / ambiguous_workspace / not_found", "retention_offer_check/apply or cancel_subscription refuses or routes to human (past_due billing, VIP, non-Stripe, ambiguous workspace)", "Duplicate charge, B2B/manual invoice, chargeback/legal threat, or discount request"],
+    missing_info: ["Account email if the verified conversation has no owner", "Charge date/amount when filing a refund handoff and billing_status could not resolve them"],
     tags: ["intent:billing", "bundle:billing", "outcome:self-serve-or-handoff"],
     steps: {
       new_request: { outcome: "run_skill", skill: "refund-retention", tool: "subscription_status", instruction: "Run the refund-retention skill and read subscription_status before deciding." },
-      read_ok: { outcome: "call_tool", tool: "retention_offer_check", instruction: "Read the live retention offer before offering the 50% save. Refund requests skip retention writes and become a subscription-refund packet." },
-      missing_info: { outcome: "ask_missing_info", instruction: "Ask only for missing charge/account facts needed for the billing packet." },
+      read_ok: { outcome: "call_tool", tool: "retention_offer_check", instruction: "Read the live retention offer before offering the 50% save. Refund requests run billing_status (customer_request: refund) and file the subscription-refund packet; charge/duplicate-charge complaints run it (customer_request: charge_issue) and file the billing-issue packet it returns. File create_ticket with the handoff_packet's own action_type." },
+      missing_info: { outcome: "ask_missing_info", instruction: "Ask only for missing charge/account facts billing_status could not resolve." },
       preview_ok: { outcome: "ask_confirmation", tool: "cancel_subscription", instruction: "For an accepted 50% save confirm retention_offer_apply instead. For cancellation, confirm explicit cancel intent and declined saves before confirm:true (period-end cancel)." },
       customer_confirmed: { outcome: "apply_tool", tool: "cancel_subscription", instruction: "Apply the confirmed action: retention_offer_apply for an accepted save, cancel_subscription for a declined-saves cancel. Never call cancel on the refund branch." },
       applied_ok: closeStep("Quote the applied offer or access_until verbatim from the tool result. Do not create a ticket after a clean successful action."),
-      tool_refused: handoffStep("subscription-refund"),
-      tool_disabled: handoffStep("subscription-refund"),
-      loop_detected: handoffStep("subscription-refund"),
+      // Failure states carry NO fixed action_type: this route serves both a
+      // refund sub-flow and a charge/billing-issue sub-flow and cannot see
+      // customer_request, so hardcoding subscription-refund would send a
+      // charge/duplicate-charge complaint to the Tier-3 refund queue. The agent
+      // files with the request-appropriate type, matching billing_status's own
+      // handoff_packet.action_type.
+      tool_refused: billingFailureHandoff(),
+      tool_disabled: billingFailureHandoff("If billing_status is disabled for this account, still file the packet for the billing team."),
+      loop_detected: billingFailureHandoff("Stop retrying; file with the exact charge/account facts gathered so far."),
     },
   },
   catalog_metadata_repair: {

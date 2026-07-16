@@ -24,7 +24,7 @@ import { markTicketFiled } from "../ticket-success-signal.js";
 import { validateProdigiAddress } from "../order-address.js";
 
 const Parameters = Type.Object({
-  actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, credit-verify, profile-claim, support-general, analytics-followup, order-fulfillment, profile-merge, track-merge, unmerge-request, bulk-credit-change, profile-update, subscription-refund, data-deletion, dispute, data-export" }),
+  actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, credit-verify, profile-claim, support-general, analytics-followup, order-fulfillment, profile-merge, track-merge, unmerge-request, bulk-credit-change, profile-update, billing-issue, subscription-refund, data-deletion, dispute, data-export" }),
   customerEmail: Type.String({ description: "Customer's email address" }),
   summary: Type.String({ description: "Plain English description of what the customer is requesting" }),
   titleGist: Type.Optional(Type.String({ description: "Short, concrete gist for the ticket title (max 60 chars), e.g. 'Recurring charges since Jan, no account found'. Falls back to the summary when omitted." })),

@@ -89,7 +89,11 @@ In your account settings under your subscription, you can add additional Pro sea
 We accept major credit cards through our payment processor.
 
 ### I was charged but my subscription shows inactive
-This can happen if there was a payment processing delay. Please create a support ticket with your payment confirmation and our team will resolve it.
+This can happen if there was a payment processing delay. Caroline can read the
+charge/subscription state first via `billing_status` (`customer_request:
+"charge_issue"`, which returns a Tier-2 `billing-issue` handoff packet, not a
+refund). Please create a support ticket with your payment confirmation and our
+team will resolve it.
 
 ---
 
@@ -130,10 +134,16 @@ handle the cancellation.
 ### If a customer was charged after trying to cancel
 First guide them to check Settings > Billing for the current subscription status.
 If Apple or Google does not show the subscription, the cancel button is missing,
-or the customer says they were charged after cancellation, collect the Muso
-profile link, account email, charge date, amount, receipt screenshot, and whether
-they purchased through web, Apple, or Google. Refund requests need team review
-before any outcome is promised.
+or the customer says they were charged after cancellation, run `billing_status`
+(`customer_request: "charge_issue"`) first -- it reads whether the cancellation
+actually happened (cancel-at-period-end vs canceled) and whether a recent
+charge/refund exists, so only ask for what it could not resolve, and it returns
+a Tier-2 `billing-issue` handoff packet (charged-after-cancel is a billing
+issue, not a refund). Then collect the Muso profile link, account email, receipt
+screenshot, and whether they purchased through web, Apple, or Google (charge
+date/amount only if `billing_status` did not return them). Only if the customer
+explicitly asks for their money back does it become a refund request, which
+needs team review before any outcome is promised.
 
 ### How to update your payment method
 1. Log in at app.muso.ai

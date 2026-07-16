@@ -26,6 +26,7 @@ import {
   createRetentionOfferApplyTool,
   createCancelSubscriptionTool,
 } from "./tools/subscription-retention.js";
+import { createBillingStatusTool } from "./tools/billing-status.js";
 import { createSupportActionRouterTool } from "./tools/support-action-router.js";
 // Explicit annotation: against the 2026.7.1 SDK, tsc can no longer name the
 // inferred entry type without reaching into openclaw/dist internals (TS2742).
@@ -319,6 +320,27 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
     api.registerTool((ctx: any) => createRetentionOfferCheckTool(subscriptionRetentionDeps(ctx)), { name: "retention_offer_check" });
     api.registerTool((ctx: any) => createRetentionOfferApplyTool(subscriptionRetentionDeps(ctx)), { name: "retention_offer_apply" });
     api.registerTool((ctx: any) => createCancelSubscriptionTool(subscriptionRetentionDeps(ctx)), { name: "cancel_subscription" });
+
+    // billing_status — READ-ONLY billing investigation packet (sub state incl.
+    // cancellation-already-happened, recent-charge existence, refund existence,
+    // past-due signals) assembled BEFORE any refund/cancel decision. Same
+    // anti-spoof anchor and execFile-the-muso-CLI transport as the retention
+    // trio (`muso subscription billing-summary`, muso-cli >=0.10.0; on older
+    // CLIs the unknown verb degrades to lookup_unavailable -> human). Billing
+    // data is private, so an unverifiable anchor FAILS CLOSED. Refund
+    // EXECUTION stays the gated Operations path — every refund request ends
+    // in a subscription-refund handoff packet. Ungated like the other reads.
+    const billingStatusFactory = (ctx: any) => {
+      return createBillingStatusTool({
+        rateLimiter,
+        // Anti-spoof anchor: the trusted gateway session KEY (carries the convId),
+        // NOT ctx.sessionId (an ephemeral UUID that never matches). See deriveConvId.
+        sessionKey: ctx.sessionKey ?? "unknown",
+        intercomReader,
+        intercomToken,
+      });
+    };
+    api.registerTool(billingStatusFactory, { name: "billing_status" });
 
     // credit_verification_check — read-only lookup of a customer's
     // user_verification_needed credits, anchored to the verified Intercom

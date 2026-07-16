@@ -21,7 +21,7 @@ prerequisite_for: action-request (subscription-refund type only) and cancel_subs
 
 When a customer wants out – a refund request OR a cancellation request – Caroline runs this 3-gate retention flow BEFORE cancelling anything or creating a `subscription-refund` action-request ticket. The goal is to understand the real problem and try to help – many exit requests come from users who don't know how to use the platform, not from users who genuinely want out. The primary save is the SAME 50% retention discount the in-app cancel flow offers; the free Lite plan is the fallback.
 
-**Tools this flow uses:** profile_lookup, credits_search, subscription_status, profile_status, create_ticket, plus the retention trio – `retention_offer_check` (read: is the 50% save available, and with what wording), `retention_offer_apply` (apply it once the customer accepts), and `cancel_subscription` (period-end cancel once retention is exhausted and the customer confirms).
+**Tools this flow uses:** profile_lookup, credits_search, subscription_status, billing_status (read-only billing packet: sub state, cancellation-already-done, recent charge, prior refund -- run it before any refund packet or charge complaint), profile_status, create_ticket, plus the retention trio – `retention_offer_check` (read: is the 50% save available, and with what wording), `retention_offer_apply` (apply it once the customer accepts), and `cancel_subscription` (period-end cancel once retention is exhausted and the customer confirms).
 
 ## When to Activate
 
@@ -110,11 +110,11 @@ This is the highest-value retention path. The customer likely doesn't understand
 
 ### If `billing-issue`:
 
-1. Use `subscription_status` to check their current subscription state
+1. Use `subscription_status` and `billing_status` (`customer_request: "charge_issue"`) to check their current subscription and charge/refund state. Passing `charge_issue` always returns a `create_handoff_ticket` packet whose `action_type` is `billing-issue`
 2. If Caroline can identify the problem (wrong charge, double charge, inactive sub showing as active):
    - Explain what she found
    - **Caroline cannot fix billing issues** – she has no write access to billing systems
-   - Create a `billing-issue` action-request ticket (Tier 2, not a refund ticket): "I can see what happened here. Let me get this to the billing team – they can sort it out faster than a refund request."
+   - Create a `billing-issue` action-request ticket (Tier 2, not a refund ticket), attaching the tool's `handoff_packet`: "I can see what happened here. Let me get this to the billing team – they can sort it out faster than a refund request."
 3. Do NOT proceed to Gate 3 – billing issues follow the billing-issue path, not the refund path
 
 ### If `other`:
@@ -151,14 +151,14 @@ Retention is exhausted. Ask the customer plainly what they want – never assume
 > "No problem at all. Do you want me to cancel the subscription (you keep access until the end of what you've paid for), or are you asking for a refund as well?"
 
 - **Cancel only**: call `cancel_subscription` with `confirm: true` – but ONLY after the customer has explicitly said in this conversation that they want to cancel. It cancels at period end: quote the returned `access_until` date – *"Done – your subscription is cancelled. You keep full access until [access_until], and you won't be charged again. Your credits and profile stay, always."* No ticket needed. If the tool answers `disabled` or `route_to_human`, fall back to guiding them to Settings > Billing and flag for the team if they cannot self-serve.
-- **Refund (with its cancel)**: proceed to the `action-request` skill with action type `subscription-refund` (Tier 3) and the retention context below. Do NOT call `cancel_subscription` yourself on this branch – Operations handles cancel-and-refund together so the money and the access end at the same time.
+- **Refund (with its cancel)**: run `billing_status` with `customer_request: "refund"` and proceed to the `action-request` skill with action type `subscription-refund` (Tier 3), attaching its `handoff_packet` alongside the retention context below. Do NOT call `cancel_subscription` yourself on this branch – Operations handles cancel-and-refund together so the money and the access end at the same time.
 - **Unclear answer**: ask once more; if still unclear, treat it as refund intent (the safer read – it escalates to a human instead of mutating anything).
 
 ---
 
 ## Handoff to action-request
 
-When all gates are exhausted and the customer confirms they want a refund, proceed to the `action-request` skill with action type `subscription-refund` (Tier 3).
+When all gates are exhausted and the customer confirms they want a refund, run `billing_status` (`customer_request: "refund"`) and proceed to the `action-request` skill with action type `subscription-refund` (Tier 3), including the tool's `handoff_packet` (charge/refund facts) so Operations does not have to re-ask for them.
 
 After calling `create_ticket`, read the structured JSON response and reply:
 
