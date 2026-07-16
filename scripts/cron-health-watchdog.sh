@@ -164,11 +164,13 @@ def is_failure(rec):
 
 def is_transient(rec):
     """A RETRYABLE infra condition openclaw itself re-dispatches — NOT a
-    job-logic failure. Two signatures, both openclaw-self-labeled retryable:
+    job-logic failure. Three signatures, all retryable interruptions openclaw
+    re-dispatches (mostly gateway-restart collateral; (2) can also be an
+    overlapping same-agent cron with no restart, see below):
 
       1. 'cron: job interrupted by gateway restart' — a deploy/restart
-         hard-killed an in-flight run. openclaw re-runs it (wakeMode:now on
-         restart, or the next schedule). Old and benign (seen since April).
+         hard-killed a run caught BETWEEN turns. openclaw re-runs it
+         (wakeMode:now on restart, or the next schedule). Benign (seen since April).
       2. 'CronSessionLifecycleClaimError: Session "…" changed while starting
          work. Retry.' — openclaw 2026.7.1's optimistic-concurrency guard on
          isolated cron session state (run-session-state.ts): a run could not
@@ -176,6 +178,11 @@ def is_transient(rec):
          (a gateway restart rehydrating sessions, or an overlapping same-agent
          cron) bumped it. The 'Retry.' is the runtime's own verdict; the run
          drops and recovers on the next fire.
+      3. 'AbortError: agent run aborted' — the SAME restart interruption as (1),
+         but for a LONG cron caught MID-agent-turn: the gateway drain aborts the
+         in-flight run instead of skipping a between-turns one. Observed only
+         ~15s before a restart's 'Started' (2026-07-15, scout's web_search job);
+         distinct from a genuine 'job execution timed out', which stays visible.
 
     These are excluded from the MIN_STREAK hard-failure streak so deploy-restart
     churn stops false-paging. They are NOT treated as healthy (that would reset
@@ -184,7 +191,7 @@ def is_transient(rec):
     fires still pages a distinct 'stuck' bullet (the fail-loud backstop)."""
     if rec.get("status") != "error":
         return False
-    # Match the ERROR field ONLY — both signatures are runtime-emitted there,
+    # Match the ERROR field ONLY — all signatures are runtime-emitted there,
     # never into an agent-authored `summary` (often LLM prose that could
     # coincidentally contain these words → a real job-logic failure would then
     # be silently suppressed). The class name is the robust tell; the full
@@ -192,7 +199,8 @@ def is_transient(rec):
     text = str(rec.get("error") or "")
     return ("interrupted by gateway restart" in text
             or "CronSessionLifecycleClaimError" in text
-            or "changed while starting work. Retry." in text)
+            or "changed while starting work. Retry." in text
+            or "agent run aborted" in text)
 
 def load_runs():
     """Return ({job_id: [record, ...]}, source_error_or_None).
@@ -395,7 +403,7 @@ _self_test() {
   td="$(mktemp -d)"
   trap 'rm -rf "$td"' RETURN
   mkdir -p "$td/runs"
-  # Seven jobs, all pre-seeded watermark at ts=100 (transient cases documented
+  # Eight jobs, all pre-seeded watermark at ts=100 (transient cases documented
   # inline in their own block below).
   #
   # selftest-job: ok@150, then a two-error streak (error@190, error@200).
@@ -434,6 +442,8 @@ _self_test() {
   #   bullets. Guards BOTH resets: dropping either lets the count climb across
   #   the interruption and fire a FALSE 'stuck' page (mutation-tested — without
   #   a reset the total flips to 4 and the count assertion below trips).
+  # abort-job: two 'AbortError: agent run aborted' errors — the restart signature
+  #   a LONG cron emits when drained mid-agent-turn → transient → 0 bullets.
   printf '%s\n' \
     '{"status":"error","ts":190,"error":"cron: job interrupted by gateway restart"}' \
     '{"status":"error","ts":200,"error":"cron: job interrupted by gateway restart"}' \
@@ -460,8 +470,12 @@ _self_test() {
     '{"status":"ok","ts":200}' \
     '{"status":"error","ts":202,"error":"cron: job interrupted by gateway restart"}' \
     > "$td/runs/nonconsec-job.jsonl"
-  printf '%s\n' '{"jobs":[{"id":"selftest-job","name":"selftest","agentId":"qa"},{"id":"delivered-job","name":"deliveredpost","agentId":"qa"},{"id":"restart-job","name":"restartblip","agentId":"qa"},{"id":"claim-job","name":"claimblip","agentId":"qa"},{"id":"mixed-job","name":"mixedreal","agentId":"qa"},{"id":"stuck-job","name":"stuckjob","agentId":"qa"},{"id":"nonconsec-job","name":"nonconsec","agentId":"qa"}]}' > "$td/jobs.json"
-  printf '%s\n' '{"selftest-job":100,"delivered-job":100,"restart-job":100,"claim-job":100,"mixed-job":100,"stuck-job":100,"nonconsec-job":100}' > "$td/state.json"
+  printf '%s\n' \
+    '{"status":"error","ts":190,"error":"AbortError: agent run aborted"}' \
+    '{"status":"error","ts":200,"error":"AbortError: agent run aborted"}' \
+    > "$td/runs/abort-job.jsonl"
+  printf '%s\n' '{"jobs":[{"id":"selftest-job","name":"selftest","agentId":"qa"},{"id":"delivered-job","name":"deliveredpost","agentId":"qa"},{"id":"restart-job","name":"restartblip","agentId":"qa"},{"id":"claim-job","name":"claimblip","agentId":"qa"},{"id":"mixed-job","name":"mixedreal","agentId":"qa"},{"id":"stuck-job","name":"stuckjob","agentId":"qa"},{"id":"nonconsec-job","name":"nonconsec","agentId":"qa"},{"id":"abort-job","name":"abortblip","agentId":"qa"}]}' > "$td/jobs.json"
+  printf '%s\n' '{"selftest-job":100,"delivered-job":100,"restart-job":100,"claim-job":100,"mixed-job":100,"stuck-job":100,"nonconsec-job":100,"abort-job":100}' > "$td/state.json"
   # Pin MIN_STREAK=2 and TRANSIENT_STUCK_STREAK=3 so the self-test is
   # deterministic regardless of the operator's CRON_HEALTH_* overrides — it
   # verifies detector HEALTH (fires on a real streak, suppresses a lone error,
@@ -490,9 +504,9 @@ _self_test() {
     return 1
   fi
   # Transient infra churn below the stuck threshold must NOT page — the whole
-  # point of is_transient() (deploy-restart interrupts / 7.1 cron claim race).
-  if printf '%s' "$out" | grep -qE "restartblip|claimblip"; then
-    echo "$LOGPREFIX SELF-TEST FAIL: a transient restart/claim blip was paged as a hard failure" >&2
+  # point of is_transient() (restart interrupt / mid-turn abort / 7.1 claim race).
+  if printf '%s' "$out" | grep -qE "restartblip|claimblip|abortblip"; then
+    echo "$LOGPREFIX SELF-TEST FAIL: a transient restart/abort/claim blip was paged as a hard failure" >&2
     return 1
   fi
   # A transient run BROKEN by a real/healthy run must not accumulate toward the
