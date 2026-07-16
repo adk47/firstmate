@@ -263,7 +263,9 @@
       "mode": "enforce",
       "pruneAfter": "14d",
       "maxEntries": 100,
-      "resetArchiveRetention": "7d"
+      "resetArchiveRetention": "7d",
+      "maxDiskBytes": "512mb",
+      "highWaterBytes": "384mb"
     }
   },
   "web": {
