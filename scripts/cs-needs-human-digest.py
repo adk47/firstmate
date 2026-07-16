@@ -1,0 +1,799 @@
+#!/usr/bin/env python3
+"""Daily READ-ONLY "needs-human" ranked digest of open Intercom conversations.
+
+Phase 0.3 of docs/plans/autonomous-cs-machine.md. Every live sweeper
+(close-resolved-conversations, resolve-notify, resolution-matcher,
+overdue-verification-notifier, close-merged-tickets) only acts on
+conversations it can already tie to a resolved ticket or a shipped fix. The
+residue — open conversations nothing has touched — piles up with no single
+ranked view for Jan, who otherwise has to pull ClickUp by hand. This script
+lists OPEN Intercom conversations, EXCLUDES anything a sibling sweeper's
+state already owns (the de-confliction invariant — double-surfacing wastes
+Jan's time), buckets what's left, ranks the actionable residue by age, and
+posts ONE Block Kit digest to #cs_chats.
+
+THIS SCRIPT IS READ-ONLY ON INTERCOM. It never closes, snoozes, tags,
+replies to, or otherwise writes to a conversation. Its only side effect is
+one Slack post, gated behind --post (default: dry-run, prints to stdout).
+
+A conversation's `contacts` field is a Contact Reference list
+(`{type, id, external_id}` — no email; per the Intercom 2.11 OpenAPI spec's
+`contact_reference` schema), so resolving the real customer contact's email
+requires a follow-up GET /contacts/{id} (also read-only), cached at module
+level by contact id to avoid an N+1 GET per conversation.
+
+Buckets (deterministic, no LLM judgment):
+  - needs-human:          customer spoke last (last_contact_reply_at >
+                           last_admin_reply_at, or never replied to) — we
+                           owe them a reply. Ranked oldest-waiting-first.
+  - needs-customer-input: we (admin) spoke last — waiting on the customer.
+  - dup-candidate:        the same contact email has >=2 open conversations
+                           (checked independent of the two buckets above).
+
+De-confliction is by CONVERSATION ID, never by contact email (read
+defensively — a missing/empty/corrupt state file means "no ownership",
+NEVER a crash). Every sibling source below records the conversation id, so
+id-matching is sufficient; matching email against these append-only,
+never-pruned logs would permanently exclude a RETURNING customer's
+brand-new, unrelated conversation (their email lingers in
+close-resolved-shadow.jsonl forever after any single past close, which
+would silently hide their next real issue from Jan). Contact email is used
+ONLY for dup-candidate detection among currently-open conversations (a
+live, self-bounded signal), never as a historical-ownership key. See
+docs/plans/cs-ops-drain-spec.md (commit 2c04734b) for the corrected design
+this mirrors.
+  - CLOSE_SHADOW_LOG            /var/log/close-resolved-shadow.jsonl
+                                 (jsonl; each line has "id")
+  - RESOLVE_NOTIFY_STATE        /var/lib/resolve-notify/notified.json
+                                 (json; keys include "conv:<id>")
+  - RESOLUTION_STATE_PATH       /var/lib/resolution-matcher/state.json
+                                 (json; keys include "conv:<id>")
+  - RESOLUTION_SHADOW_LOG       /var/log/resolution-matcher-shadow.jsonl
+                                 (jsonl; each line has "conv_id")
+  - OVERDUE_NOTIFY_STATE        /var/lib/overdue-verification-notifier/notified.json
+                                 (json; keys include "conv:<id>")
+  - DEDUP_SHADOW_LOG            /var/log/dedup-shadow.jsonl (best-effort: the
+                                 close-merged-tickets / dedup path today keys
+                                 on ClickUp task + Muso profile ids, not
+                                 Intercom conversation id, so this read
+                                 is a defensive no-op until that changes —
+                                 see the script docstring / PR notes for the
+                                 known gap)
+
+Env:
+  MUSOAI_INTERCOM_TOKEN       required
+  DIGEST_SKIP_HOST_GUARD      optional, "1" to run off ovh-node-8 (tests)
+  DIGEST_HOSTNAME_OVERRIDE    optional, override the perceived hostname the
+                              host guard checks (tests only — lets CI, which
+                              itself runs ON ovh-node-8, exercise BOTH guard
+                              branches deterministically instead of depending
+                              on the runner's real hostname)
+  DIGEST_SUMMARY_CHANNEL      optional, default C0ANM0PN9L5 (#cs_chats)
+  DIGEST_SLACK_ACCOUNT        optional, default operations
+  SLACK_NOTIFY_CONFIG         optional, default /root/.openclaw-main/openclaw.json
+  INTERCOM_WORKSPACE_ID       optional, default dwjzhcge (deeplink workspace —
+                              see plugins/support-tools/src/tools/ticket-format.ts
+                              intercomDeeplink / scripts/intercom-data-complaint-
+                              watchdog.py deeplink())
+  DIGEST_NOW                  optional, epoch override (tests)
+  DIGEST_TOP_N                optional, default 15 (ranked needs-human rows shown)
+
+Flags:
+  --post        actually post the digest to Slack (default: dry-run —
+                 print the digest to stdout, post nothing)
+  --limit N     cap the number of open conversations scanned this run
+  --self-test   run the inline detector self-test and exit
+
+Exit codes: 0 ok; 1 usage/env error; 3 systematic contact-lookup failure
+            (401/403, or 429/5xx persisting through retries — see
+            ContactLookupFailed).
+"""
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+INTERCOM_API = "https://api.intercom.io"
+INTERCOM_VERSION = "2.11"
+SLACK_API = "https://slack.com/api/chat.postMessage"
+DEFAULT_SUMMARY_CHANNEL = "C0ANM0PN9L5"  # #cs_chats
+DEFAULT_TOP_N = 15
+# Deeplink workspace id — same default + env override as
+# scripts/intercom-data-complaint-watchdog.py's deeplink() and
+# plugins/support-tools/src/tools/ticket-format.ts's intercomDeeplink().
+DEFAULT_WORKSPACE_ID = "dwjzhcge"
+
+
+# --------------------------------------------------------------------------
+# Network seam (module-level so tests monkeypatch these, never real HTTP).
+# --------------------------------------------------------------------------
+def _retry_json(req, attempts=4):
+    for a in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.load(resp)
+        except urllib.error.URLError:
+            if a == attempts - 1:
+                raise
+            time.sleep(2 * (a + 1))
+
+
+def intercom_search(token, body):
+    req = urllib.request.Request(
+        f"{INTERCOM_API}/conversations/search",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
+                 "Content-Type": "application/json", "Intercom-Version": INTERCOM_VERSION},
+        method="POST")
+    return _retry_json(req)
+
+
+
+# Contact-email lookup cache (module-level, process-lifetime). Many open
+# conversations share the same contact, so caching by contact id avoids an
+# N+1 GET /contacts/{id} per conversation on every run.
+_contact_email_cache = {}
+
+
+class ContactLookupFailed(Exception):
+    """A SYSTEMATIC contact-lookup failure — auth/permissions (401/403) or a
+    rate-limit/outage (429/5xx) that persisted through retries. Distinct
+    from a benign 404 (a genuinely missing/deleted contact), which is fine
+    to treat as "no email" and let the run continue. This must propagate
+    all the way to main() and fail the whole run loudly — silently
+    swallowing it into an empty/cached email would silently disable
+    email-based dup-candidate detection for however many conversations
+    share the affected token/contact population, with no signal that it
+    happened (same fail-loud principle as the --post delivery check)."""
+
+
+def get_contact(contact_id, token, attempts=4):
+    """GET /contacts/{contact_id} (read-only).
+
+    - 404 (contact missing/deleted) -> None. Benign, expected, per-contact;
+      the caller falls back to the validated source.author signal (or "")
+      and the run continues normally.
+    - 429 / transient 5xx -> retried with backoff; if still failing after
+      `attempts`, raises ContactLookupFailed (a persistent capacity/outage
+      condition, not a per-contact miss).
+    - 401/403 -> raises ContactLookupFailed immediately (a token/permissions
+      problem that will not resolve on retry and taints every subsequent
+      lookup this run).
+    - Any other unexpected HTTP status, or a network failure that persists
+      through retries -> also raises ContactLookupFailed rather than
+      silently returning None, per the same "don't swallow the systemic
+      case" principle.
+    """
+    req = urllib.request.Request(
+        f"{INTERCOM_API}/contacts/{contact_id}",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
+                 "Intercom-Version": INTERCOM_VERSION},
+        method="GET")
+    for a in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            if e.code in (401, 403):
+                raise ContactLookupFailed(
+                    f"GET /contacts/{contact_id} -> {e.code} "
+                    "(auth/permissions — not retryable)") from e
+            if e.code == 429 or 500 <= e.code < 600:
+                if a == attempts - 1:
+                    raise ContactLookupFailed(
+                        f"GET /contacts/{contact_id} -> {e.code} persisted "
+                        f"through {attempts} attempts") from e
+                time.sleep(2 * (a + 1))
+                continue
+            raise ContactLookupFailed(
+                f"GET /contacts/{contact_id} -> {e.code} (unexpected status)") from e
+        except (urllib.error.URLError, ValueError, OSError) as e:
+            if a == attempts - 1:
+                raise ContactLookupFailed(
+                    f"GET /contacts/{contact_id} failed after {attempts} "
+                    f"attempts: {type(e).__name__}: {e}") from e
+            time.sleep(2 * (a + 1))
+    return None  # unreachable — the loop always returns or raises
+
+
+def contact_email_of(c, token):
+    """The real customer contact's email.
+
+    Fast path (the OVERWHELMING common case — one contact per conversation):
+    when `source.author.type == "user"` (an Intercom identity-verified
+    contact — the same validated gate plugins/intercom/src/filters.ts uses
+    for `verifiedEmail`), that author IS the customer contact, so
+    `source.author.email` IS the real email — use it directly, no GET. Doing
+    a GET /contacts/{id} here anyway would be an N+1 scan across the entire
+    open backlog (the cache only helps when conversations share a contact,
+    which is rare) that can take minutes and hit Intercom rate limits,
+    risking the whole daily digest failing (see get_contact's
+    ContactLookupFailed).
+
+    Only when the author is NOT a user (an admin/bot/campaign-started
+    conversation — Muso staff or a bot, not the customer) does resolving the
+    real customer email require the follow-up GET /contacts/{id} lookup: the
+    conversation's `contacts` field is a Contact Reference list
+    (`{type, id, external_id}` — verified against the Intercom 2.11 OpenAPI
+    spec's `contact_reference` schema: it carries NO email), cached at
+    module level (`_contact_email_cache` / `get_contact`).
+    """
+    src = c.get("source") or {}
+    au = src.get("author") or {}
+    if au.get("type") == "user":
+        return (au.get("email") or "").strip().lower()
+
+    contacts = ((c.get("contacts") or {}).get("contacts") or [])
+    for ref in contacts:
+        cid = ref.get("id")
+        if not cid:
+            continue
+        if cid in _contact_email_cache:
+            email = _contact_email_cache[cid]
+        else:
+            contact = get_contact(cid, token)
+            email = ((contact or {}).get("email") or "").strip().lower()
+            _contact_email_cache[cid] = email
+        if email:
+            return email
+    return ""
+
+
+def intercom_link(conv_id):
+    """Stable Intercom ADMIN inbox deeplink built from the trusted conversation
+    id — NOT `source.url` (that's where the conversation started, e.g. a
+    customer-facing page, and is often blank for non-Messenger sources; never
+    an inbox deep link). Same workspace-id deeplink shape as
+    scripts/intercom-data-complaint-watchdog.py's deeplink() and
+    plugins/support-tools/src/tools/ticket-format.ts's intercomDeeplink()."""
+    workspace_id = os.environ.get("INTERCOM_WORKSPACE_ID", DEFAULT_WORKSPACE_ID)
+    return f"https://app.intercom.com/a/inbox/{workspace_id}/inbox/conversation/{conv_id}"
+
+
+CUSTOMER_AUTHOR_TYPES = {"user", "lead", "contact"}
+
+
+def is_inbound_conv(c):
+    """Whether a conversation was CUSTOMER-initiated (inbound) vs
+    admin/bot/campaign-initiated (outbound) — needed to disambiguate the
+    lar==0/lcr==0 tie in bucket_conversations (see its comment).
+
+    Primary signal: `source.delivered_as` (verified against the Intercom
+    2.11 OpenAPI spec's `conversation_source` schema — a REQUIRED field
+    whose documented values are `customer_initiated`, `campaigns_initiated`,
+    `operator_initiated`, `automated`, and `admin_initiated`; only the first
+    is inbound).
+
+    Fallback (only when `delivered_as` is missing/absent, e.g. older data):
+    `source.author.type` being a customer role. Author type is NOT only
+    "user" — the 2.11 spec's `create_conversation_request`/`create_message_
+    request` schemas show a customer-initiated conversation's author can be
+    "user" OR "lead" (a Contact's `role` is user or lead; "contact" is also
+    accepted as a `from.type` value), so checking only "user" would
+    misclassify a lead/contact's unanswered first message as outbound and
+    hide it from needs-human — the same failure class fixed for the 0/0 tie
+    itself. Admin/bot/campaign authors remain outbound."""
+    src = c.get("source") or {}
+    delivered_as = src.get("delivered_as")
+    if delivered_as:
+        return delivered_as == "customer_initiated"
+    au = src.get("author") or {}
+    return au.get("type") in CUSTOMER_AUTHOR_TYPES
+
+
+def fetch_open_convs(token, limit=0):
+    """List OPEN Intercom conversations (read-only). Mirrors
+    close-resolved-conversations.fetch_open_convs; stops early once `limit`
+    (0 = no cap) conversations have been collected."""
+    convs = []
+    after = None
+    while True:
+        body = {"query": {"field": "state", "operator": "=", "value": "open"},
+                "pagination": {"per_page": 150}}
+        if after:
+            body["pagination"]["starting_after"] = after
+        data = intercom_search(token, body)
+        for c in data.get("conversations", []):
+            stats = c.get("statistics") or {}
+            convs.append({
+                "id": c.get("id"),
+                "email": contact_email_of(c, token),
+                "lar": stats.get("last_admin_reply_at") or 0,
+                "lcr": stats.get("last_contact_reply_at") or 0,
+                "created_at": c.get("created_at") or 0,
+                "is_inbound": is_inbound_conv(c),
+            })
+            if limit and len(convs) >= limit:
+                return convs
+        nxt = (data.get("pages") or {}).get("next")
+        after = nxt.get("starting_after") if isinstance(nxt, dict) else None
+        if not nxt or not after:
+            break
+    return convs
+
+
+# --------------------------------------------------------------------------
+# De-confliction: read every sibling sweeper's state defensively. A missing,
+# empty, or corrupt file means "no ownership" — this must NEVER crash the
+# digest, and it must NEVER be treated as "everything is owned" either.
+# --------------------------------------------------------------------------
+def _read_json_file(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _read_jsonl_file(path):
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue  # a malformed line must not abort the whole read
+    return out
+
+
+def owned_ids(paths):
+    """Return set[conv_id] already owned by any sibling sweeper.
+
+    `paths` is a dict of source name -> (path, kind) where kind is "json" (a
+    state-dict keyed like {"conv:<id>": ts, ...}) or "jsonl" (a shadow log,
+    one JSON object per line carrying "id"/"conv_id").
+
+    De-conflicts by CONVERSATION ID ONLY, never contact email — every sibling
+    source below records the conversation id, so id-matching is sufficient
+    and correct. Matching email against these append-only, never-pruned logs
+    would permanently exclude a RETURNING customer's brand-new, unrelated
+    conversation (their email lingers in close-resolved-shadow.jsonl forever
+    after any single past close), which would silently hide their next real
+    issue from Jan. See docs/plans/cs-ops-drain-spec.md (commit 2c04734b).
+    """
+    ids = set()
+    for _name, (path, kind) in paths.items():
+        if kind == "json":
+            state = _read_json_file(path) or {}
+            if not isinstance(state, dict):
+                continue
+            for key in state:
+                if isinstance(key, str) and key.startswith("conv:"):
+                    ids.add(key[len("conv:"):])
+        elif kind == "jsonl":
+            for rec in _read_jsonl_file(path):
+                if not isinstance(rec, dict):
+                    continue
+                cid = rec.get("id") or rec.get("conv_id")
+                if cid:
+                    ids.add(str(cid))
+    return ids
+
+
+def default_state_paths():
+    return {
+        "close-resolved": (
+            os.environ.get("CLOSE_SHADOW_LOG", "/var/log/close-resolved-shadow.jsonl"),
+            "jsonl"),
+        "resolve-notify": (
+            os.environ.get("RESOLVE_NOTIFY_STATE", "/var/lib/resolve-notify/notified.json"),
+            "json"),
+        "resolution-matcher-state": (
+            os.environ.get("RESOLUTION_STATE_PATH", "/var/lib/resolution-matcher/state.json"),
+            "json"),
+        "resolution-matcher-shadow": (
+            os.environ.get("RESOLUTION_SHADOW_LOG", "/var/log/resolution-matcher-shadow.jsonl"),
+            "jsonl"),
+        "overdue-verification-notifier": (
+            os.environ.get("OVERDUE_NOTIFY_STATE",
+                          "/var/lib/overdue-verification-notifier/notified.json"),
+            "json"),
+        # Best-effort / known gap — see module docstring: dedup-shadow.jsonl
+        # today carries profile ids, not conversation id/email, so this is a
+        # forward-compatible no-op read, not an active exclusion source yet.
+        "dedup-shadow": (
+            os.environ.get("DEDUP_SHADOW_LOG", "/var/log/dedup-shadow.jsonl"),
+            "jsonl"),
+    }
+
+
+# --------------------------------------------------------------------------
+# Pure bucketing logic (no network — directly unit-testable).
+# --------------------------------------------------------------------------
+def is_owned(conv, owned_ids):
+    """De-conflict by CONVERSATION ID ONLY — never contact email. See
+    owned_ids() docstring for why email-matching against sibling logs is
+    wrong (permanent exclusion of returning customers)."""
+    return conv["id"] in owned_ids
+
+
+def waiting_since(c):
+    """The real moment we started owing this customer a reply: their last
+    reply time, or — for a conversation they've never replied to at all
+    (last_contact_reply_at == 0, e.g. their unanswered FIRST message, which
+    Intercom's statistics do not count as a "reply") — the conversation's
+    created_at. NEVER bare last_contact_reply_at (0) for that case: treating
+    a brand-new conversation as "waiting since the Unix epoch" corrupts the
+    oldest-waiting-first ranking (ties every such row together in API order)
+    and the elapsed-time/48h-SLA-flag signal (always flags it, regardless of
+    real age)."""
+    return c["lcr"] or c.get("created_at") or 0
+
+
+def bucket_conversations(convs, owned_ids):
+    """Return {needs_human, needs_customer_input, dup_candidate}, each a list
+    of surviving (not sibling-owned) conversations. A conversation with >=2
+    open convs on the same email is ALSO flagged dup-candidate, independent
+    of which reply-order bucket it falls into (the two classifications are
+    not mutually exclusive: a customer can be waiting on us on their newest
+    duplicate thread). Dup-candidate detection uses contact email as a LIVE
+    signal among currently-open conversations only — a separate, correct use
+    of email distinct from (and never conflated with) de-confliction, which
+    is id-only."""
+    survivors = [c for c in convs if not is_owned(c, owned_ids)]
+
+    email_counts = {}
+    for c in survivors:
+        if c["email"]:
+            email_counts[c["email"]] = email_counts.get(c["email"], 0) + 1
+
+    needs_human, needs_customer_input, dup_candidate = [], [], []
+    for c in survivors:
+        # we-owe-them-a-reply: customer spoke last, or never replied to at all
+        # (lar==0 means we never engaged — that customer is definitely not
+        # "waiting on nothing", so it belongs in needs-human too) — EXCEPT
+        # when there are no reply parts on EITHER side (lar==0 and lcr==0):
+        # that tie is ambiguous on its own, since this digest now also covers
+        # outbound (admin/bot/campaign-initiated) conversations. Disambiguate
+        # by the conversation's initiator: inbound (customer started it, e.g.
+        # their unanswered first message) -> needs-human; outbound (we/a bot
+        # reached out and the customer hasn't replied yet) -> we're waiting
+        # on THEM, not the other way around -> needs-customer-input. Default
+        # to inbound (True) when the flag is absent (fetch_open_convs always
+        # sets it; only test fixtures omit it, and inbound is the historical
+        # behavior they assume).
+        if c["lar"] == 0 and c["lcr"] == 0:
+            if c.get("is_inbound", True):
+                needs_human.append(c)
+            else:
+                needs_customer_input.append(c)
+        elif c["lar"] <= c["lcr"]:
+            needs_human.append(c)
+        else:
+            needs_customer_input.append(c)
+        if c["email"] and email_counts[c["email"]] >= 2:
+            dup_candidate.append(c)
+
+    # Oldest-waiting-first: rank by waiting_since (see its docstring) — the
+    # customer's last reply time, or created_at for a never-replied
+    # conversation — oldest first. NEVER bare lcr, which is 0 (the Unix
+    # epoch) for a never-replied conversation regardless of its real age.
+    needs_human.sort(key=waiting_since)
+    return {
+        "needs_human": needs_human,
+        "needs_customer_input": needs_customer_input,
+        "dup_candidate": dup_candidate,
+    }
+
+
+def mask_email(email):
+    """`a***@***` masking — never leak a full customer email into a digest."""
+    if not email:
+        return "no email"
+    local = email.split("@", 1)[0]
+    return f"{local[0]}***@***" if local else "***@***"
+
+
+def age_str(epoch_seconds, now_epoch):
+    """Human age string ('past-SLA' surfaced by the caller, not invented here
+    — this never promises an SLA, only reports elapsed time). Callers MUST
+    pass a real timestamp (waiting_since(c)), never a bare last_contact_reply_at
+    that may be 0/falsy for a never-replied conversation — that would render
+    as "0h" / always-stale regardless of the conversation's actual age."""
+    delta = max(0, now_epoch - epoch_seconds) if epoch_seconds else 0
+    hours = delta / 3600
+    if hours < 48:
+        return f"{hours:.0f}h"
+    return f"{hours / 24:.0f}d"
+
+
+# --------------------------------------------------------------------------
+# Slack Block Kit rendering.
+# --------------------------------------------------------------------------
+def _slack_escape(s):
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+SLA_HOURS_FLAG = 48  # surfaced as "past a reasonable SLA", never a promise
+
+
+def build_digest_blocks(buckets, now_epoch, top_n=DEFAULT_TOP_N):
+    nh, nci, dup = buckets["needs_human"], buckets["needs_customer_input"], buckets["dup_candidate"]
+    blocks = [
+        # plain_text header (no mrkdwn/mention parsing -> never pings anyone,
+        # matching the repo convention: reference_slack_blockkit_header_mention_no_ping).
+        {"type": "header", "text": {"type": "plain_text", "text": "CS needs-human daily digest"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": (
+            f"*needs-human:* {len(nh)}  ·  *needs-customer-input:* {len(nci)}  ·  "
+            f"*dup-candidate:* {len(dup)}")}},
+    ]
+    if not nh:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                       "text": ":white_check_mark: nothing waiting on us right now."}})
+        return blocks
+
+    lines = []
+    for c in nh[:top_n]:
+        since = waiting_since(c)
+        flag = " :rotating_light: past 48h" if now_epoch - since > SLA_HOURS_FLAG * 3600 else ""
+        never_replied = "never replied, " if not c["lcr"] else ""
+        lines.append(
+            f"• <{intercom_link(c['id'])}|conversation {c['id']}> — "
+            f"{_slack_escape(mask_email(c['email']))} — waiting {never_replied}{age_str(since, now_epoch)}{flag}")
+    if len(nh) > top_n:
+        lines.append(f"…and {len(nh) - top_n} more")
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+    return blocks
+
+
+def render_text_digest(buckets, now_epoch, top_n=DEFAULT_TOP_N):
+    """Plain-text rendering for --post's fallback `text` field and dry-run stdout."""
+    nh, nci, dup = buckets["needs_human"], buckets["needs_customer_input"], buckets["dup_candidate"]
+    lines = [
+        "CS needs-human daily digest",
+        f"needs-human: {len(nh)}  needs-customer-input: {len(nci)}  dup-candidate: {len(dup)}",
+    ]
+    for c in nh[:top_n]:
+        since = waiting_since(c)
+        never_replied = "never replied, " if not c["lcr"] else ""
+        lines.append(f"  {intercom_link(c['id'])}  {mask_email(c['email'])}  "
+                      f"waiting {never_replied}{age_str(since, now_epoch)}")
+    if len(nh) > top_n:
+        lines.append(f"  ...and {len(nh) - top_n} more")
+    return "\n".join(lines)
+
+
+def _read_slack_token(config_path, account):
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+        return cfg["channels"]["slack"]["accounts"][account]["botToken"]
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+
+
+def post_slack_digest(blocks, text, channel, config_path, account):
+    """Best-effort post. NEVER raises — the digest is informational only, so a
+    Slack failure must not turn into a script failure. Returns bool."""
+    token = _read_slack_token(config_path, account)
+    if not token:
+        print(f"WARN: no Slack token for account '{account}' in {config_path}; post skipped",
+              file=sys.stderr)
+        return False
+    try:
+        req = urllib.request.Request(
+            SLACK_API,
+            data=json.dumps({"channel": channel, "text": text, "blocks": blocks,
+                             "unfurl_links": False, "unfurl_media": False}).encode(),
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json; charset=utf-8"},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = json.load(resp)
+        if not body.get("ok"):
+            print(f"WARN: Slack post failed: {body.get('error')}", file=sys.stderr)
+            return False
+        return True
+    except Exception as e:  # noqa: BLE001 — best-effort by contract, mirrors
+        # close-resolved-conversations.post_slack_summary.
+        print(f"WARN: Slack post error: {type(e).__name__}: {str(e)[:140]}", file=sys.stderr)
+        return False
+
+
+# --------------------------------------------------------------------------
+# Inline self-test: fail the run if the bucketing detector is broken, so a
+# silently-misfiring digest pages via cron-health rather than rotting.
+# --------------------------------------------------------------------------
+def _self_test():
+    now = 1781784000  # fixed "now" for age math
+
+    def conv(cid, email, lar, lcr, created_at=0, is_inbound=True):
+        return {"id": cid, "email": email, "lar": lar, "lcr": lcr,
+                "created_at": created_at, "is_inbound": is_inbound, "url": ""}
+
+    # customer-last -> needs-human.
+    c1 = conv("C1", "a@b.com", 100, 200)
+    # admin-last -> needs-customer-input.
+    c2 = conv("C2", "c@d.com", 300, 100)
+    # never replied (lar==0) -> needs-human.
+    c3 = conv("C3", "e@f.com", 0, 50)
+    buckets = bucket_conversations([c1, c2, c3], set())
+    assert [c["id"] for c in buckets["needs_human"]] == ["C3", "C1"], buckets["needs_human"]
+    assert [c["id"] for c in buckets["needs_customer_input"]] == ["C2"], buckets["needs_customer_input"]
+    assert buckets["dup_candidate"] == [], buckets["dup_candidate"]
+
+    # de-confliction: an owned conv id must not surface at all.
+    ids_owned = {"C1"}
+    buckets2 = bucket_conversations([c1, c2, c3], ids_owned)
+    assert "C1" not in [c["id"] for c in buckets2["needs_human"]], buckets2
+
+    # KEY regression (QA #691 finding, cs-ops-drain-spec.md commit 2c04734b):
+    # a conversation whose EMAIL matches something in a sibling's (append-
+    # only, never-pruned) log, but whose ID is NOT owned, MUST still be
+    # surfaced — de-confliction is by conversation id only. Email-matching
+    # here would permanently hide a returning customer's brand-new,
+    # unrelated conversation just because that email appeared in some past
+    # closed conversation.
+    buckets3 = bucket_conversations([c1, c2, c3], set())
+    assert "C1" in [c["id"] for c in buckets3["needs_human"]], buckets3
+
+    # dup detection: same email, two open convs — this is a LIVE signal
+    # among currently-open conversations, computed independent of owned_ids
+    # (never sourced from a sibling's historical log).
+    d1 = conv("D1", "dup@x.com", 100, 200)
+    d2 = conv("D2", "dup@x.com", 100, 200)
+    buckets4 = bucket_conversations([d1, d2], set())
+    assert {c["id"] for c in buckets4["dup_candidate"]} == {"D1", "D2"}, buckets4
+
+    # KEY regression (waiting-timestamp finding): two never-replied
+    # conversations (lcr==0) must rank by created_at, NOT tie at the Unix
+    # epoch. n1 is older (created earlier) than n2, so n1 must sort first.
+    n1 = conv("N1", "n1@x.com", 0, 0, created_at=now - (72 * 3600))  # 72h old
+    n2 = conv("N2", "n2@x.com", 0, 0, created_at=now - (10 * 3600))  # 10h old
+    buckets5 = bucket_conversations([n1, n2], set())
+    assert [c["id"] for c in buckets5["needs_human"]] == ["N1", "N2"], buckets5["needs_human"]
+    assert waiting_since(n1) != 0 and waiting_since(n2) != 0, (n1, n2)
+
+    # KEY regression (inbound-vs-outbound 0/0 finding): the lar==0/lcr==0 tie
+    # is ambiguous on its own now that this digest also covers outbound
+    # (admin/bot/campaign-initiated) conversations. An outbound one with no
+    # reply parts means WE are waiting on the customer -> needs-customer-
+    # input, never needs-human. An inbound one (the customer's unanswered
+    # first message) stays needs-human.
+    outbound = conv("OUT", "out@x.com", 0, 0, is_inbound=False)
+    inbound = conv("IN", "in@x.com", 0, 0, is_inbound=True)
+    buckets6 = bucket_conversations([outbound, inbound], set())
+    assert [c["id"] for c in buckets6["needs_human"]] == ["IN"], buckets6["needs_human"]
+    assert [c["id"] for c in buckets6["needs_customer_input"]] == ["OUT"], \
+        buckets6["needs_customer_input"]
+
+    # PII masking.
+    assert mask_email("joe@example.com") == "j***@***", mask_email("joe@example.com")
+    assert mask_email("") == "no email"
+
+    # contact_email_of: the conversation `contacts` field is a Contact
+    # Reference ({type, id, external_id} — NO email; verified against the
+    # Intercom 2.11 OpenAPI contact_reference schema), so a bot/admin-
+    # initiated conversation must still resolve the real customer's email
+    # via the cached GET /contacts/{id} lookup, not by reading an (absent)
+    # email straight off the reference. Seed the cache directly to exercise
+    # the cache-hit path here without a real network call.
+    _contact_email_cache["contact-abc"] = "real.customer@example.com"
+    bot_initiated = {"source": {"author": {"type": "bot", "email": "bot@intercom.io"}},
+                      "contacts": {"contacts": [{"type": "contact", "id": "contact-abc",
+                                                  "external_id": "70"}]}}
+    assert contact_email_of(bot_initiated, "tok") == "real.customer@example.com", \
+        contact_email_of(bot_initiated, "tok")
+    # a verified user-type source.author is still a valid fallback when there
+    # is no contact reference at all (or it resolves to no email).
+    user_initiated = {"source": {"author": {"type": "user", "email": "u@x.com"}},
+                       "contacts": {"contacts": []}}
+    assert contact_email_of(user_initiated, "tok") == "u@x.com", contact_email_of(user_initiated, "tok")
+    # admin-initiated with no contacts entries and no user-type author -> ""
+    # (no crash, no false identity), same fail-open-to-empty as before.
+    admin_only = {"source": {"author": {"type": "admin", "email": "staff@muso.ai"}},
+                  "contacts": {"contacts": []}}
+    assert contact_email_of(admin_only, "tok") == "", contact_email_of(admin_only, "tok")
+
+    # intercom_link: stable admin deeplink built from conv id, workspace-id
+    # env-overridable, independent of any source.url.
+    assert intercom_link("999") == \
+        "https://app.intercom.com/a/inbox/dwjzhcge/inbox/conversation/999", intercom_link("999")
+
+    # is_inbound_conv: delivered_as is the authoritative signal; author.type
+    # being "user" is NOT the only customer-initiated case (a lead/contact's
+    # unanswered first message must also count as inbound, per the 2.11 spec).
+    assert is_inbound_conv({"source": {"delivered_as": "customer_initiated",
+                                        "author": {"type": "lead"}}}) is True
+    assert is_inbound_conv({"source": {"delivered_as": "admin_initiated",
+                                        "author": {"type": "admin"}}}) is False
+    assert is_inbound_conv({"source": {"delivered_as": "campaigns_initiated",
+                                        "author": {"type": "bot"}}}) is False
+    # delivered_as absent -> fall back to author.type customer-role check.
+    assert is_inbound_conv({"source": {"author": {"type": "lead"}}}) is True
+    assert is_inbound_conv({"source": {"author": {"type": "contact"}}}) is True
+    assert is_inbound_conv({"source": {"author": {"type": "admin"}}}) is False
+
+    return True
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--post", action="store_true",
+                    help="actually post the digest to Slack (default: dry-run)")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="cap the number of open conversations scanned")
+    ap.add_argument("--self-test", action="store_true",
+                    help="run the inline detector self-test and exit")
+    args = ap.parse_args()
+
+    try:
+        _self_test()
+    except AssertionError as e:
+        print(f"cs-needs-human-digest: SELF-TEST FAILED: {e}", file=sys.stderr)
+        return 2
+    if args.self_test:
+        print("self-test ok")
+        return 0
+
+    hostname = os.environ.get("DIGEST_HOSTNAME_OVERRIDE") or socket.gethostname()
+    if os.environ.get("DIGEST_SKIP_HOST_GUARD") != "1" \
+            and hostname != "ovh-node-8":
+        print("cs-needs-human-digest: not on ovh-node-8 — refusing "
+              "(set DIGEST_SKIP_HOST_GUARD=1 to override)", file=sys.stderr)
+        return 0
+
+    token = os.environ.get("MUSOAI_INTERCOM_TOKEN")
+    if not token:
+        print("cs-needs-human-digest: MUSOAI_INTERCOM_TOKEN is required", file=sys.stderr)
+        return 1
+
+    now_epoch = int(os.environ.get("DIGEST_NOW") or time.time())
+    top_n = int(os.environ.get("DIGEST_TOP_N", str(DEFAULT_TOP_N)))
+
+    try:
+        convs = fetch_open_convs(token, args.limit)
+    except ContactLookupFailed as e:
+        # Systematic (401/403, or 429/5xx persisting through retries) — do
+        # NOT silently treat this run as healthy; a silent empty-email
+        # fallback here would silently disable email-based dup-candidate
+        # detection with no signal it happened.
+        print(f"cs-needs-human-digest: contact lookup failed systematically: {e}",
+              file=sys.stderr)
+        return 3
+    ids = owned_ids(default_state_paths())
+    buckets = bucket_conversations(convs, ids)
+
+    print(f"open conversations scanned: {len(convs)}")
+    print(f"already owned by a sibling sweeper: {len(convs) - len(buckets['needs_human']) - len(buckets['needs_customer_input'])}")
+    print(f"needs-human: {len(buckets['needs_human'])}  "
+          f"needs-customer-input: {len(buckets['needs_customer_input'])}  "
+          f"dup-candidate: {len(buckets['dup_candidate'])}")
+
+    text = render_text_digest(buckets, now_epoch, top_n)
+    print(text)
+
+    if not args.post:
+        print("DRY-RUN — nothing posted. Re-run with --post to post to Slack.")
+        return 0
+
+    blocks = build_digest_blocks(buckets, now_epoch, top_n)
+    channel = os.environ.get("DIGEST_SUMMARY_CHANNEL", DEFAULT_SUMMARY_CHANNEL)
+    cfg = os.environ.get("SLACK_NOTIFY_CONFIG", "/root/.openclaw-main/openclaw.json")
+    account = os.environ.get("DIGEST_SLACK_ACCOUNT", "operations")
+    posted = post_slack_digest(blocks, text, channel, cfg, account)
+    print(f"slack post: {'posted' if posted else 'skipped/failed'} -> {channel}")
+    # --post's whole job is delivering Jan's daily view; an undelivered digest
+    # must fail loud (non-zero) so the systemd timer + cron-health watchdog
+    # surface it, instead of silently marking a no-delivery run "healthy" (a
+    # bad/expired Slack token would otherwise suppress the digest forever with
+    # no alarm). Dry-run never posts, so it is unaffected and stays exit 0.
+    return 0 if posted else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

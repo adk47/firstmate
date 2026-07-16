@@ -199,6 +199,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/resolution-matcher.py missing"
 [[ -f "$HYDRA_ROOT/scripts/caroline-behavior-digest.py" ]] \
   || fail "$HYDRA_ROOT/scripts/caroline-behavior-digest.py missing"
+[[ -f "$HYDRA_ROOT/scripts/cs-needs-human-digest.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/cs-needs-human-digest.py missing"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/weekly-cleanup.sh" ]] \
@@ -508,6 +510,51 @@ rm_t=resolution-matcher.timer
 systemctl enable "$rm_t" >/dev/null 2>&1 || log "WARN: could not enable $rm_t"
 systemctl start "$rm_t" >/dev/null 2>&1 || log "WARN: could not start $rm_t"
 log "  $rm_t: $(systemctl is-active "$rm_t" 2>/dev/null || echo unknown)"
+
+# ─── CS needs-human ranked digest (daily 13:30 UTC) ───────────
+# Phase 0.3 of docs/plans/autonomous-cs-machine.md: a READ-ONLY daily digest
+# for Jan of open Intercom conversations NOT already owned by any of the
+# sweepers above (close-resolved-conversations / resolve-notify /
+# resolution-matcher / overdue-verification-notifier), bucketed into
+# needs-human / needs-customer-input / dup-candidate and ranked
+# oldest-waiting-first, posted once to #cs_chats. It NEVER closes, snoozes,
+# tags, or replies to a conversation — its only side effect is that one
+# Slack post (`--post`; a bare run without it is a dry-run that prints to
+# stdout and posts nothing). Runs at 13:30 UTC, after resolution-matcher's
+# 12:00 UTC run has had a chance to claim its conversations first, so the
+# de-confliction read sees resolution-matcher's same-day state. See
+# scripts/cs-needs-human-digest.py.
+cat > /etc/systemd/system/cs-needs-human-digest.service << CSDIGESTSVC
+[Unit]
+Description=CS needs-human ranked digest (#cs_chats; read-only on Intercom)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/cs-needs-human-digest.py --post
+CSDIGESTSVC
+
+cat > /etc/systemd/system/cs-needs-human-digest.timer << CSDIGESTTMR
+[Unit]
+Description=Daily — CS needs-human ranked digest at 13:30 UTC
+
+[Timer]
+OnCalendar=*-*-* 13:30:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=cs-needs-human-digest.service
+
+[Install]
+WantedBy=timers.target
+CSDIGESTTMR
+
+systemctl daemon-reload
+cnhd=cs-needs-human-digest.timer
+systemctl enable "$cnhd" >/dev/null 2>&1 || log "WARN: could not enable $cnhd"
+systemctl start "$cnhd" >/dev/null 2>&1 || log "WARN: could not start $cnhd"
+log "  $cnhd: $(systemctl is-active "$cnhd" 2>/dev/null || echo unknown)"
 
 # ─── Caroline autonomous-behavior digest (daily 16:00 UTC) ────
 # Read-only daily digest of Caroline's autonomous self-serve activity so we can

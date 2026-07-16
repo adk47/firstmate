@@ -1097,6 +1097,18 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_resolution_matcher
+      - name: Run cs-needs-human-digest tests
+        # scripts/cs-needs-human-digest.py runs UNATTENDED daily and is
+        # READ-ONLY on Intercom — its only effect is one Block Kit post to
+        # #cs_chats. These lock the de-confliction reader (a missing/corrupt
+        # sibling state file means "no ownership", never a crash, never
+        # "everything is owned"), the deterministic reply-order bucketing,
+        # oldest-waiting-first ranking, dup-candidate detection, and that no
+        # un-masked customer email ever reaches the rendered digest. Same
+        # bare stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_cs_needs_human_digest
 
   plugin-tests:
     name: Plugin tests (vitest)
