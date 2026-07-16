@@ -262,7 +262,7 @@
     "maintenance": {
       "mode": "enforce",
       "pruneAfter": "14d",
-      "maxEntries": 100,
+      "maxEntries": 1000,
       "resetArchiveRetention": "7d",
       "maxDiskBytes": "512mb",
       "highWaterBytes": "384mb"
