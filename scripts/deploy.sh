@@ -56,6 +56,11 @@ source "$SCRIPT_DIR/lib/codex-version.sh"
 # shellcheck source=lib/deploy-lock.sh
 source "$SCRIPT_DIR/lib/deploy-lock.sh"
 
+# Effective systemd EnvironmentFile validation for the muso CLI credentials
+# used by the main gateway (unit-tested in scripts/tests/muso-env-preflight.bats).
+# shellcheck source=lib/muso-env-preflight.sh
+source "$SCRIPT_DIR/lib/muso-env-preflight.sh"
+
 # Pinned muso CLI version (github.com/Muso-AI/muso-cli) — the admin-API /
 # policy CLI for main-gateway agents (soak phase: opt-in via the
 # skills-all/muso-cli skill). Independent release cadence from openclaw;
@@ -764,6 +769,9 @@ RSYNC_EXCLUDES=(
   # recreated during CI, and must not make an unrelated deploy try to delete
   # an in-flight batch (observed 2026-07-17 on PR #698).
   --exclude='workspaces/scout/tmp_ai_music_candidates*.json'
+  # The same Scout run composes its candidate batches into one root-level
+  # final scratch artifact before promoting any durable report.
+  --exclude='workspaces/scout/tmp_ai_music_final.json'
   # Agent long-term memory (written by agents at runtime, should survive
   # deploys — see docs/guides/WORKSPACE-FILE-OWNERSHIP.md). MEMORY.md IS tracked
   # in git as a seed, but agents modify it post-deploy and we must not
@@ -2184,25 +2192,7 @@ if needs_target "main"; then
     # Ask systemd to parse EnvironmentFile with the same quoting,
     # duplicate-key (last assignment wins), and empty-value semantics the
     # gateway uses. Never `source` a systemd env file as shell code.
-    if effective_missing="$(systemd-run --quiet --wait --collect --pipe \
-      --property="EnvironmentFile=$MAIN_ENV" \
-      /usr/bin/python3 -c '
-import os
-required = (
-    "MUSO_ADMIN_EMAIL", "MUSO_ADMIN_PASSWORD",
-    "MUSO_PROD_ADMIN_EMAIL", "MUSO_PROD_ADMIN_PASSWORD",
-    "MUSO_DEV_ADMIN_EMAIL", "MUSO_DEV_ADMIN_PASSWORD",
-)
-for key in required:
-    if not os.environ.get(key):
-        print(key)
-if os.environ.get("MUSO_ENV") != "prod":
-    print("MUSO_ENV=prod")
-if os.environ.get("MUSO_NONINTERACTIVE") != "1":
-    print("MUSO_NONINTERACTIVE=1")
-if os.environ.get("MUSO_STATE_DIR") != "/var/log/muso-ops":
-    print("MUSO_STATE_DIR=/var/log/muso-ops")
-' 2>/dev/null)"; then
+    if effective_missing="$(muso_main_env_missing "$MAIN_ENV" 2>/dev/null)"; then
       while IFS= read -r var; do
         [[ -n "$var" ]] && missing_vars+=("$var")
       done <<< "$effective_missing"
