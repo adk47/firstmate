@@ -75,7 +75,7 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 ```bash
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/track/<track_id>/analytics-sources" \
-  '{"url":"https://open.spotify.com/track/..."}'
+  '{"link":"https://open.spotify.com/track/..."}'
 ```
 
 **Remove link:**
