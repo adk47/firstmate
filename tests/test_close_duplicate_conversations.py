@@ -394,6 +394,9 @@ class TestPointerPostedDedupe(unittest.TestCase):
              mock.patch.object(m, "load_pointer_state", return_value={"O": "posted"}), \
              mock.patch.object(m, "save_pointer_state") as m_save, \
              mock.patch.object(m, "post_pointer_comment") as m_pointer, \
+             mock.patch.object(m, "get_conversation",
+                                return_value={"id": "O", "state": "open", "lcr": 0, "lar": 0,
+                                              "confirm_email": "x@y.com"}), \
              mock.patch.object(m, "close_conversation",
                                 return_value={"state": "closed"}) as m_close, \
              mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
@@ -425,6 +428,9 @@ class TestPointerPostedDedupe(unittest.TestCase):
                                 side_effect=lambda *a: order.append("save") or True), \
              mock.patch.object(m, "post_pointer_comment",
                                 side_effect=lambda *a, **k: order.append("pointer")), \
+             mock.patch.object(m, "get_conversation",
+                                return_value={"id": "O", "state": "open", "lcr": 0, "lar": 0,
+                                              "confirm_email": "x@y.com"}), \
              mock.patch.object(m, "close_conversation",
                                 side_effect=lambda *a, **k: order.append("close") or {"state": "closed"}), \
              mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
@@ -510,6 +516,9 @@ class TestPointerPostedDedupe(unittest.TestCase):
              mock.patch.object(m, "load_pointer_state", return_value={}), \
              mock.patch.object(m, "save_pointer_state", side_effect=fake_save), \
              mock.patch.object(m, "post_pointer_comment") as m_pointer, \
+             mock.patch.object(m, "get_conversation",
+                                return_value={"id": "O", "state": "open", "lcr": 0, "lar": 0,
+                                              "confirm_email": "x@y.com"}), \
              mock.patch.object(m, "close_conversation", side_effect=ValueError("500")), \
              mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
              mock.patch.object(m, "post_slack_summary", return_value=True), \
@@ -527,6 +536,9 @@ class TestPointerPostedDedupe(unittest.TestCase):
              mock.patch.object(m, "load_pointer_state", return_value=dict(saved_state)), \
              mock.patch.object(m, "save_pointer_state") as m_save2, \
              mock.patch.object(m, "post_pointer_comment") as m_pointer2, \
+             mock.patch.object(m, "get_conversation",
+                                return_value={"id": "O", "state": "open", "lcr": 0, "lar": 0,
+                                              "confirm_email": "x@y.com"}), \
              mock.patch.object(m, "close_conversation",
                                 return_value={"state": "closed"}) as m_close2, \
              mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
@@ -558,6 +570,9 @@ class TestPointerPostedDedupe(unittest.TestCase):
              mock.patch.object(m, "load_pointer_state", return_value={}), \
              mock.patch.object(m, "save_pointer_state", side_effect=fake_save), \
              mock.patch.object(m, "post_pointer_comment") as m_pointer, \
+             mock.patch.object(m, "get_conversation",
+                                return_value={"id": "O", "state": "open", "lcr": 0, "lar": 0,
+                                              "confirm_email": "x@y.com"}), \
              mock.patch.object(m, "close_conversation",
                                 return_value={"state": "closed"}) as m_close, \
              mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
@@ -619,6 +634,66 @@ class TestPointerPostedDedupe(unittest.TestCase):
              mock.patch.object(m, "load_pointer_state", return_value={"O": True}), \
              mock.patch.object(m, "save_pointer_state") as m_save, \
              mock.patch.object(m, "post_pointer_comment") as m_pointer, \
+             mock.patch.object(m, "close_conversation") as m_close, \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc = m.main()
+        self.assertNotEqual(rc, 0)
+        m_pointer.assert_not_called()
+        m_save.assert_not_called()
+        m_close.assert_not_called()
+
+    def test_customer_reply_during_pointer_window_holds_the_close(self):
+        """FIX: a customer can reply to the pointer comment between the
+        "posted" marker and the close below. The pointer POST is itself an
+        admin reply (advances last_admin_reply_at trivially), so this must
+        be detected via a fresh last_contact_reply_at strictly greater than
+        the value captured at grouping/first-verify (older["lcr"]) — not a
+        generic "we spoke last" check."""
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=0, lcr=0, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=50, lcr=10, created_at=1000 + 86400)
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "load_pointer_state", return_value={}), \
+             mock.patch.object(m, "save_pointer_state", return_value=True), \
+             mock.patch.object(m, "post_pointer_comment") as m_pointer, \
+             mock.patch.object(m, "get_conversation",
+                                return_value={"id": "O", "state": "open",
+                                               # customer replied after the pointer POST:
+                                               # fresh lcr (99) > older["lcr"] (0)
+                                               "lcr": 99, "lar": 50,
+                                               "confirm_email": "x@y.com"}), \
+             mock.patch.object(m, "close_conversation") as m_close, \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc = m.main()
+        self.assertNotEqual(rc, 0)
+        m_pointer.assert_called_once()  # the pointer WAS posted (as designed)
+        m_close.assert_not_called()     # but the close is HELD
+
+    def test_target_no_longer_open_after_pointer_window_holds_the_close(self):
+        """A fresh re-fetch returning a non-open state (e.g. the customer
+        closed it themselves) must also hold, not close."""
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=0, lcr=0, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=50, lcr=10, created_at=1000 + 86400)
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "load_pointer_state", return_value={"O": "posted"}), \
+             mock.patch.object(m, "save_pointer_state") as m_save, \
+             mock.patch.object(m, "post_pointer_comment") as m_pointer, \
+             mock.patch.object(m, "get_conversation",
+                                return_value={"id": "O", "state": "closed", "lcr": 0,
+                                               "lar": 0, "confirm_email": "x@y.com"}), \
              mock.patch.object(m, "close_conversation") as m_close, \
              mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
              mock.patch.object(m, "post_slack_summary", return_value=True), \

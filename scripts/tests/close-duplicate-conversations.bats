@@ -246,6 +246,8 @@ saved = []
 mod.save_pointer_state = lambda state: saved.append(state)
 posted = []
 mod.post_pointer_comment = lambda *a, **k: posted.append(1)
+mod.get_conversation = lambda *a, **k: {"id": "O", "state": "open", "lcr": 0, "lar": 0,
+                                         "confirm_email": "x@y.com"}
 mod.close_conversation = lambda *a, **k: {"state": "closed"}
 
 class FakeShadow:

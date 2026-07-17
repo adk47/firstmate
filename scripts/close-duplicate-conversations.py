@@ -840,6 +840,22 @@ def main():
                     fail.append((older["id"], f"pointer status unconfirmed ({status!r}) — held, no re-post, no close"))
                     continue
 
+            # Post-pointer race guard (Tier B only): a customer can reply
+            # to the pointer comment during the window between the "posted"
+            # marker and the close below. reverify_still_valid() already
+            # ran BEFORE this pointer workflow, not after, so it can't see
+            # that reply. A generic "we spoke last" check is USELESS here —
+            # the pointer POST is itself an admin reply, so last_admin_reply
+            # already advances trivially past any customer reply. Detect a
+            # CUSTOMER reply specifically: compare the fresh
+            # last_contact_reply_at against the value captured at
+            # grouping/first-verify (older["lcr"]).
+            fresh = get_conversation(token, older["id"])
+            if not fresh or fresh["state"] != "open" or fresh["lcr"] > older["lcr"]:
+                fail.append((older["id"], "post-pointer re-check: target no longer open or "
+                                           "customer replied during the pointer window — held"))
+                continue
+
         try:
             res = close_conversation(token, admin_id, older["id"])
             rec = {"id": older["id"], "closed_at": int(time.time()), "email": email,
