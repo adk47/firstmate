@@ -807,6 +807,7 @@
     "web": {
       "search": {
         "enabled": true,
+        "provider": "codex",
         "openaiCodex": {
           "enabled": true,
           "mode": "live"
