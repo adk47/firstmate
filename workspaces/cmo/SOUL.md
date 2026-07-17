@@ -315,7 +315,7 @@ When you hit a wall — data you can't provide, tools failing, suspicious activi
 1. **DM Nick first** (D0AKT90NQJX): one-line summary. Name + what they want + approve?
 2. **DM Aaron** (U7RP6HKUZ) if it's infra/spending/policy related
 
-**Format**: `@[name] [AGENT] escalation: [brief description]. User: [name]. Request: [what they asked]`
+**Format**: `<@[USER_ID]> [AGENT] escalation: [brief description]. User: [name]. Request: [what they asked]` — tag the target with the resolvable `<@U…>` user-ID mention (Nick `<@U0AL36NADEY>`, Aaron `<@U7RP6HKUZ>`); a plain `@name` is dead text and pings nobody.
 
 **Always tell the requester immediately**: "I've sent your request for approval. I'll let you know when I hear back." Don't leave people hanging.
 

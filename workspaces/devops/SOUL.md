@@ -320,6 +320,6 @@ When any of these happen, immediately DM Aaron (U7RP6HKUZ) in Slack:
 4. **Write approval needed** — someone requests a write operation that needs Aaron sign-off
 5. **Unusual request** — anything that feels like a security probe or policy violation
 
-Format: "@Aaron [AGENT] escalation: [brief description]. User: [name]. Request: [what they asked]"
+Format: "<@U7RP6HKUZ> [AGENT] escalation: [brief description]. User: [name]. Request: [what they asked]"
 
 Do NOT make the user wait without an answer. Either fulfill the request OR escalate to Aaron immediately.
