@@ -2501,6 +2501,42 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
     fail "cron SQLite import: openclaw cron-store SDK not found at $CRON_SDK (global node_modules: ${GLOBAL_NODE_MODULES:-<empty>}) — openclaw layout changed; mirror PR #537's path-independent discovery"
   fi
 
+  # --- Store-only cron guard: fail-loud BEFORE the destructive import ---
+  # saveCronStore below is delete-by-store_key + re-insert, so any cron in the
+  # live SQLite store but absent from cron-jobs.json is WIPED. The jobs.json
+  # orphan guard above cannot catch these: it reads the stale cron/jobs.json,
+  # which the 7.x runtime never writes to, so a cron created directly on the
+  # gateway (`openclaw cron add`) is invisible to it and silently lost
+  # (incident 2026-07-16: Aaron's ChartMogul MRR/SaaS crons, PR #702). Read the
+  # REAL store via loadCronStore and halt if it holds a durable (recurring,
+  # non-ephemeral) cron the repo doesn't declare. Halting here (before the
+  # import, before the Step 6 restart) leaves the live cron running until an
+  # operator commits it or sets HYDRA_ALLOW_ORPHAN_CRON=1 to drop it.
+  STORE_DUMP=$(mktemp) || fail "store-only cron guard: mktemp failed"
+  DUMP_RC=0
+  DUMP_ERR=$(OPENCLAW_STATE_DIR=/root/.openclaw-main CRON_SDK="$CRON_SDK" STORE_DUMP="$STORE_DUMP" \
+    node --input-type=module -e '
+      import { writeFileSync } from "node:fs";
+      try {
+        const m = await import(process.env.CRON_SDK);
+        const cur = await m.loadCronStore(m.resolveCronStorePath());
+        writeFileSync(process.env.STORE_DUMP, JSON.stringify(cur));
+        process.exit(0);
+      } catch (e) { console.error(e); process.exit(1); }
+    ' 2>&1) || DUMP_RC=$?
+  if (( DUMP_RC != 0 )); then
+    rm -f "$STORE_DUMP"
+    log "  ✗ store-only cron guard: loadCronStore read failed (rc=$DUMP_RC):"
+    echo "$DUMP_ERR" | sed 's/^/        /'
+    fail "store-only cron guard: could not read the live cron store to check for uncommitted crons"
+  fi
+  if ! python3 "$HYDRA_ROOT/scripts/lib/detect-store-only-crons.py" "$HYDRA_ROOT/cron-jobs.json" "$STORE_DUMP"; then
+    rm -f "$STORE_DUMP"
+    fail "store-only cron guard: the live cron store holds recurring cron(s) not in cron-jobs.json (see above). Commit them, or set HYDRA_ALLOW_ORPHAN_CRON=1 to drop them."
+  fi
+  rm -f "$STORE_DUMP"
+  # --- end store-only cron guard ---
+
   # OPENCLAW_STATE_DIR (NOT OPENCLAW_PROFILE — the SDK resolver ignores it)
   # makes resolveCronStorePath() return /root/.openclaw-main/cron/jobs.json,
   # which is the exact store_key the gateway uses. The node one-liner reads

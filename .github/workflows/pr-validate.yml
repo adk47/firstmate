@@ -1064,6 +1064,17 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_intake_watchdog
+      - name: Run store-only cron guard tests
+        # scripts/lib/detect-store-only-crons.py is the deploy gate that HALTS if
+        # the live SQLite cron store holds a recurring cron absent from
+        # cron-jobs.json — preventing the silent deletion of a live-created cron
+        # (incident 2026-07-16: Aaron's ChartMogul crons, PR #702). Locks the
+        # durable-orphan detection, the ephemeral (deleteAfterRun+at) exemption,
+        # and the HYDRA_ALLOW_ORPHAN_CRON downgrade. Same bare stdlib unittest,
+        # targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_detect_store_only_crons
       - name: Run close-resolved-conversations predicate tests
         # The unattended daily close job (scripts/close-resolved-conversations.py)
         # silently closes customer conversations; these lock its is_eligible
