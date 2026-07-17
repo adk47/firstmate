@@ -308,6 +308,58 @@ EOF
   [ "$output" -eq 0 ]
 }
 
+# ── codex_count_websearch_reconnect ───────────────────────────
+# 2026-07 incident: PR #695 set tools.web.search.provider:"codex" on main,
+# which disabled native codex search on openclaw 7.1 and left the managed
+# worker unable to authenticate — every web_search call spun Reconnecting
+# before failing. Silent for ~15min post-restart; #701 reverted the config.
+
+@test "websearch_reconnect: counts the Reconnecting signature" {
+  run codex_count_websearch_reconnect <<'EOF'
+Jul 15 09:12:03 ovh-node-8 node[123456]: [tools] web_search failed: Reconnecting... 2/5
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
+@test "websearch_reconnect: counts the provider reconnection failed signature" {
+  run codex_count_websearch_reconnect <<'EOF'
+Jul 15 09:12:04 ovh-node-8 node[123456]: [tools] web_search failed: provider reconnection failed
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
+@test "websearch_reconnect: sums both signatures across lines" {
+  run codex_count_websearch_reconnect <<'EOF'
+Jul 15 09:12:03 ovh-node-8 node[123456]: [tools] web_search failed: Reconnecting... 2/5
+Jul 15 09:12:05 ovh-node-8 node[123456]: [tools] web_search failed: Reconnecting... 3/5
+Jul 15 09:12:08 ovh-node-8 node[123456]: [tools] web_search failed: provider reconnection failed
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 3 ]
+}
+
+@test "websearch_reconnect: a clean log is 0 (no false positive)" {
+  run codex_count_websearch_reconnect <<'EOF'
+Jul 15 09:12:03 ovh-node-8 node[123456]: [tools] web_search ok: found 5 results
+Jul 15 09:12:04 ovh-node-8 node[123456]: run agent end isError=false
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+@test "websearch_reconnect: an UNRELATED 'provider reconnection failed' does NOT match" {
+  # A managed-provider/tool reconnect with no web_search context must not
+  # false-page as web_search BROKEN (would send operators to the wrong fix).
+  run codex_count_websearch_reconnect <<'EOF'
+Jul 15 09:12:03 ovh-node-8 node[123456]: [tools] some_other_tool failed: provider reconnection failed
+Jul 15 09:12:04 ovh-node-8 node[123456]: provider reconnection failed
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
 # ── codex_count_vision_failures ───────────────────────────────
 
 @test "vision_failures: counts image AND pdf 'All image models failed'" {

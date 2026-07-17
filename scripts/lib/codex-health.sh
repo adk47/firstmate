@@ -183,6 +183,40 @@ codex_count_vision_failures() {
   grep -c -i -e "All image models failed" || true
 }
 
+# codex_count_websearch_reconnect — count web_search MANAGED-PROVIDER
+# reconnect-break lines on stdin. Signature: `[tools] web_search failed:
+# Reconnecting` and `provider reconnection failed`. DISTINCT from every
+# other counter above: those key on the codex AUTH runtime (OAuth/api-key);
+# this one is the codex-backed managed `web_search` TOOL going unreachable,
+# which fires when `tools.web.search.provider` is set to a managed provider
+# (e.g. "codex") that the managed worker can't authenticate against on hydra.
+# Root cause: PR #695 set `tools.web.search.provider:"codex"` on main, which
+# on openclaw 7.1 is mutually exclusive with native codex search (setting a
+# provider DISABLES native) — the managed worker then can't authenticate and
+# every web_search call spins `Reconnecting... N/5` before failing. This was
+# SILENT for ~15min post-deploy because only internal agents (scout) call
+# web_search and nothing probed it after the restart; reverted in #701, and
+# #701 also added a CI config gate (validate-config-matrix check 7) to block
+# the provider+native combination from ever landing again. This counter is
+# the RUNTIME safety net for the case a bad config still slips through: any
+# nonzero count means web_search is broken fleet-wide for whichever profile
+# has `tools.web.search.enabled` (main today). Page-only, no auto-heal — the
+# fix is a config revert (or "unset provider"), not something a script
+# should apply unattended.
+codex_count_websearch_reconnect() {
+  # BOTH signatures are anchored to the web_search TOOL: the gateway tool-error
+  # line (`[tools] web_search failed: Reconnecting`) and the same break narrated
+  # as a provider-reconnection failure — matched as `web_search.*provider
+  # reconnection failed` so it catches both the gateway form (`[tools] web_search
+  # failed: provider reconnection failed`) and the agent form (`web_search
+  # provider reconnection failed`). The watchdog feeds the ENTIRE main journal
+  # into this counter, so the second pattern MUST require web_search context — a
+  # bare "provider reconnection failed" would also match unrelated
+  # managed-provider/tool reconnects and false-page as "web_search BROKEN",
+  # sending operators toward the wrong fix.
+  grep -c -i -e "\[tools\] web_search failed: Reconnecting" -e "web_search.*provider reconnection failed" || true
+}
+
 # codex_edge_auth_symlink_status <auth-profiles-path>
 # Filesystem health of edge/support's codex auth store. Echoes exactly
 # one of: ok | not-symlink | dangling | missing

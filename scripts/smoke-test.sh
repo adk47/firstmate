@@ -25,6 +25,14 @@ fail_check() { log "FAIL: $*"; FAILURES=$((FAILURES + 1)); }
 pass_check() { log "PASS: $*"; }
 warn_check() { log "WARN: $*"; WARNINGS=$((WARNINGS + 1)); }
 
+# websearch_probe_attempt + its helpers (real-call evidence via the scout
+# rollout, not model text) are pure/injectable and live in a separate lib so
+# bats can unit-test them without a live gateway — see check_web_search
+# below and scripts/lib/websearch-probe.sh for the full rationale.
+_SMOKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/websearch-probe.sh
+source "$_SMOKE_DIR/lib/websearch-probe.sh"
+
 # expected_agent_count <profile> — print the count of enabled agents
 # in /opt/hydra/openclaw-<profile>.json. Returns "?" on any failure
 # (file missing, JSON parse error, etc) — the caller is expected to
@@ -130,6 +138,87 @@ ping_agent() {
   fi
 }
 needs_target() { [[ "$TARGET" == "all" || ",$TARGET," == *",$1,"* ]]; }
+
+# check_web_search <profile> <label> — post-restart probe that a REAL
+# web_search tool call round-trips, added after the #695/#701 incident: PR
+# #695 set tools.web.search.provider:"codex" on main, which on openclaw 7.1
+# is mutually exclusive with native codex search (setting a provider
+# DISABLES native) — the managed codex worker then couldn't authenticate and
+# every web_search call spun `Reconnecting... N/5` before failing. This broke
+# web_search FLEET-WIDE and was SILENT for ~15min because only internal
+# agents use it and nothing probed it after the restart. #701 reverted the
+# config and added a CI config gate (validate-config-matrix check 7) to
+# reject the provider+native combination pre-merge; this check is the
+# RUNTIME safety net for a bad config that still slips through, or a
+# provider-side outage CI can't see.
+#
+# Guard: only runs for a profile with .tools.web.search.enabled == true in
+# /opt/hydra/openclaw-<profile>.json (main today; edge does not have
+# web_search enabled and is skipped cleanly — pass/skip, not fail, same
+# idiom as expected_agent_count's python/jq probe above).
+#
+# The actual probe + verdict logic (websearch_probe_attempt) lives in
+# scripts/lib/websearch-probe.sh — PR #704 QA review found two bugs in an
+# earlier version of this check that lived inline here: (1) a naive
+# `response=$(...) || response="TIMEOUT"` clobbered the real output on ANY
+# nonzero exit, so a Reconnecting break that also made the agent process
+# exit non-zero never matched the break regex and wrongly degraded to a
+# warn; (2) a PASS was granted on model text alone ("SEARCH_STATUS: ok"),
+# which the model can produce from training data without ever calling
+# web_search (verified live: `openclaw agent --json` carries no tool-call
+# transcript, and the gateway journal logs failures only, never successes —
+# the one authoritative signal is a `web_search_end` event in the scout
+# agent's codex-home rollout). Both are fixed in the lib: the break regex is
+# checked against the captured response text regardless of exit code, and a
+# PASS requires the scout rollout to have gained a web_search_end event
+# during the attempt.
+#
+# Verdict is deliberately asymmetric: fail loud on a REAL break, but never
+# flake the deploy on ordinary LLM non-determinism (the agent choosing not
+# to call the tool, or a slow round-trip). A BROKEN signature in the
+# transcript is unambiguous and always a hard fail; confirmed rollout
+# evidence is a pass; anything else (timeout, tool not invoked, no rollout
+# evidence, garbled output) gets ONE retry and only then degrades to a
+# warn — never a fail — because an inconclusive probe is not evidence
+# web_search is actually down.
+check_web_search() {
+  local profile="$1" label="$2"
+  local enabled
+  enabled=$(python3 - "$profile" <<'PYEOF' 2>/dev/null || echo "false"
+import json, sys
+profile = sys.argv[1]
+with open(f'/opt/hydra/openclaw-{profile}.json') as f:
+    c = json.load(f)
+print('true' if c.get('tools', {}).get('web', {}).get('search', {}).get('enabled') is True else 'false')
+PYEOF
+  )
+  if [[ "$enabled" != "true" ]]; then
+    pass_check "$label: web_search not enabled for this profile — skipping probe"
+    return
+  fi
+
+  local prompt="Use web_search to find the official homepage URL of MusicBrainz. You MUST call the web_search tool. Reply with exactly: SEARCH_STATUS: <ok|error and the error text>"
+  local attempt result verdict detail
+  for attempt in 1 2; do
+    result="$(websearch_probe_attempt "$profile" "$prompt")"
+    verdict="$(echo "$result" | sed -n 's/^VERDICT=//p')"
+    detail="$(echo "$result" | sed -n 's/^DETAIL=//p')"
+    case "$verdict" in
+      fail)
+        fail_check "$label: web_search BROKEN (${detail}) — managed-provider misconfig or codex hosted-search failure (cf. #695/#701)"
+        return
+        ;;
+      pass)
+        pass_check "$label: web_search ok (${detail})"
+        return
+        ;;
+    esac
+    if [[ "$attempt" -eq 1 ]]; then
+      log "  $label: web_search probe inconclusive on attempt 1 (${detail}), retrying once..."
+    fi
+  done
+  warn_check "$label: web_search probe inconclusive (${detail}) — not treating as a break"
+}
 
 # -------------------------------------------------------------------
 # Host-wide checks (not per-profile)
@@ -275,6 +364,10 @@ if needs_target "main"; then
   ping_agent main operations "Main"
 
   check_channel_health main "Main"
+
+  # web_search post-restart probe — see check_web_search's comment above
+  # for the #695/#701 incident this guards against.
+  check_web_search main "Main"
 
   # Cron loading gate — guards against the silent path-drift outage class
   # that took down all the cron jobs for 19 hours on 2026-04-07. The

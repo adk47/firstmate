@@ -448,6 +448,25 @@ if [ "${CODEX_TOKEN_EXPIRED:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_
   date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-expired-cooldown"
 fi
 
+# ── web_search managed-provider reconnect watch (main) ─────────────────────
+# 2026-07 incident: PR #695 set `tools.web.search.provider:"codex"` on main,
+# which on openclaw 7.1 disables NATIVE codex search (the two are mutually
+# exclusive) — the managed worker then couldn't authenticate and every
+# web_search call spun `Reconnecting... N/5` before failing. This was SILENT
+# for ~15min because only internal agents (scout) call web_search and nothing
+# probed it post-restart. #701 reverted the config and added a CI config gate
+# (validate-config-matrix check 7) to block provider+native from landing
+# again; this is the RUNTIME safety net for a bad config that still slips
+# through. Main-only scan (MAIN_CODEX_LOGS is main's 15-min window, defined
+# above) — web_search is not enabled on edge today. Page-only; the fix is a
+# config change (revert/unset provider), never something to auto-heal.
+CODEX_WEBSEARCH_RECONNECT=$(printf '%s\n' "$MAIN_CODEX_LOGS" | codex_count_websearch_reconnect)
+if [ "${CODEX_WEBSEARCH_RECONNECT:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-websearch-cooldown" "$CODEX_COOLDOWN_MIN"; then
+  log "MAIN WEB_SEARCH BROKEN: ${CODEX_WEBSEARCH_RECONNECT} 'Reconnecting'/'provider reconnection failed' lines in last ${CHECK_WINDOW_MIN}min"
+  slack_notify ":rotating_light: *web_search BROKEN on main* — ${CODEX_WEBSEARCH_RECONNECT}x \`Reconnecting\`/\`provider reconnection failed\` in last ${CHECK_WINDOW_MIN}min. Managed-provider misconfig or codex hosted-search auth failure (cf. #695/#701) — check \`tools.web.search\` in openclaw-main.json (provider + native are mutually exclusive on 7.1) and revert/unset \`tools.web.search.provider\` if set, then restart openclaw-gateway-main."
+  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-websearch-cooldown"
+fi
+
 # Pin-drift tripwire: page if codex != the deploy pin even without a 401 yet (a
 # fresh float, or an ExecStartPre re-pin that failed). Reuses the single --check run
 # above (PIN_CHECK_EXIT: 1 = drift, PIN_CHECK_OUT names the offenders).
