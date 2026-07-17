@@ -235,9 +235,16 @@ if [[ -n "$CRON" && -f "$CRON" ]]; then
     REQUIRED_CRON_MODEL="openai/gpt-5.6-sol"
     REQUIRED_CRON_FALLBACK1="openrouter/openai/gpt-5.6-luna"
     REQUIRED_CRON_FALLBACK2="openrouter/anthropic/claude-haiku-4.5"
+    #    Applies ONLY to agentTurn crons (the ones that invoke a model). A
+    #    deterministic `command`/`script` cron runs an argv with no model call
+    #    (payload.model is absent by design), so the fallback-chain rule is N/A;
+    #    exempt anything whose payload.kind is not agentTurn. Missing kind is
+    #    treated as agentTurn so a real model cron that forgets its model is
+    #    still caught.
     bad=$(jq -r --arg m "$REQUIRED_CRON_MODEL" --arg fb1 "$REQUIRED_CRON_FALLBACK1" --arg fb2 "$REQUIRED_CRON_FALLBACK2" '
       .jobs // []
       | .[]
+      | select((.payload.kind // "agentTurn") == "agentTurn")
       | (.payload.model // "MISSING") as $model
       | (.payload.fallbacks[0] // "MISSING") as $f1
       | (.payload.fallbacks[1] // "MISSING") as $f2

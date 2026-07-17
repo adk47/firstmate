@@ -1026,6 +1026,76 @@
       "state": {
         "consecutiveErrors": 0
       }
+    },
+    {
+      "id": "d7786e96-d24d-4858-9cdf-9387c91a4b13",
+      "agentId": "finance",
+      "name": "Realtime MRR Movement",
+      "description": "Every 5 min: Stripe SaaS realtime MRR-movement feed (ChartMogul replacement). Posts to Slack C070XCHH06S as the finance bot unless the script prints NO_REPLY. Deterministic command cron (no model). Restored to VCS after a deploy cron-reconcile dropped the live-only original that was never committed.",
+      "enabled": true,
+      "createdAtMs": 1784134649000,
+      "updatedAtMs": 1784134649000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/5 * * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/workspaces/finance/scripts/stripe-saas-realtime-report.py"
+        ],
+        "cwd": "/opt/hydra/workspaces/finance",
+        "timeoutSeconds": 120
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C070XCHH06S",
+        "accountId": "finance",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "22ddb697-5d65-45de-90dc-c8dae9b84567",
+      "agentId": "finance",
+      "name": "Daily SaaS Recap",
+      "description": "Daily 06:00 America/Chicago: Stripe SaaS daily recap covering MRR, ARR, churn and ARPA (ChartMogul replacement). Posts to Slack C07112YT8TF as the finance bot unless the script prints NO_REPLY. Deterministic command cron (no model). Restored to VCS after a deploy cron-reconcile dropped the live-only original that was never committed.",
+      "enabled": true,
+      "createdAtMs": 1784134649000,
+      "updatedAtMs": 1784134649000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 6 * * *",
+        "tz": "America/Chicago"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/workspaces/finance/scripts/stripe-saas-daily-report.py"
+        ],
+        "cwd": "/opt/hydra/workspaces/finance",
+        "timeoutSeconds": 600
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C07112YT8TF",
+        "accountId": "finance",
+        "bestEffort": true
+      },
+      "state": {
+        "consecutiveErrors": 0
+      }
     }
   ]
 }
