@@ -759,6 +759,11 @@ RSYNC_EXCLUDES=(
   # node-8 is manually cleaned (observed 2026-07-15; drift guard requires the
   # mirrored '.tmp-*' KEEP glob in scripts/qa-clean-merge-scratch.sh).
   --exclude='workspaces/*/.tmp-*'
+  # Scout writes numbered AI-music candidate batches at its workspace root
+  # while a research run is active. They are transient runtime inputs, can be
+  # recreated during CI, and must not make an unrelated deploy try to delete
+  # an in-flight batch (observed 2026-07-17 on PR #698).
+  --exclude='workspaces/scout/tmp_ai_music_candidates*.json'
   # Agent long-term memory (written by agents at runtime, should survive
   # deploys — see docs/guides/WORKSPACE-FILE-OWNERSHIP.md). MEMORY.md IS tracked
   # in git as a seed, but agents modify it post-deploy and we must not
