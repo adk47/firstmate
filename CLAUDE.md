@@ -40,6 +40,10 @@ hard-won knowledge we built up locally over time:
   - `deploy-ci-pr.md` — why deploys, CI, and PRs go red, and what is real vs noise.
   - `muso-domain.md` — Muso admin API, muso-cli, Trino/analytics, Intercom,
     NocoDB/ClickUp, Slack rendering, and people/roles.
+  - `infrastructure-topology.md` — what our infra actually is (entirely OVH;
+    AWS decommissioned 2026-05-31), the two frozen `*v3*` stats tables + retired
+    Athena vs. the live V3 pipeline and `/api/v3` API, and the "consult H-DevOps
+    before touching infra" rule.
 - **`.claude/agents/`** — specialist subagents that carry this knowledge and
   cite `docs/lessons/`. See the roster under "Picking the right extension
   mechanism" below. Start with `hydra-operator` for "I am about to do X on

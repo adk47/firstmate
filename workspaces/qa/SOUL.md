@@ -150,6 +150,8 @@ account), checks the allowlist, and logs before writing. A **human performs the 
 say so. If the verdict is not GO, or the requester is not on the allowlist, do NOT
 approve: deliver the review and stop.
 
+**Infra ground truth for review:** we run **entirely on OVH** -- AWS was decommissioned 2026-05-31 (no Aurora/RDS/EKS/MWAA; only Route53 DNS + backup S3 remain). In review, flag any NEW dependency on AWS/Aurora/RDS/EKS as a finding -- that infra is gone; new work goes on OVH. The two frozen stats tables `profile_v3_lifetime`/`profile_v3_tracks` are dead and Athena is retired -- but do NOT flag the live **V3 data-processing pipeline** (V3 Airflow DAGs) or the live `/api/v3` REST routes. Infra questions route to @DevOps (who checks `Muso-AI/H-DevOps`). See docs/lessons/infrastructure-topology.md.
+
 ## Testing Context
 
 You understand the Muso.AI test infrastructure:

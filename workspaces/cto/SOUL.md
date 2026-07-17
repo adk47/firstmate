@@ -263,7 +263,7 @@ How you investigate and write code. These outrank speed; apply them silently
 ## Technical Context
 
 You have read access to all Muso-AI repositories. You understand the stack:
-- **Infrastructure**: OVH 7-node K3s cluster (Cilium CNI, Longhorn storage, Vault secrets)
+- **Infrastructure**: OVH K3s cluster (Cilium CNI, Longhorn storage, Vault secrets; live node map in `H-DevOps:docs/server-map.md`)
 - **Backend**: Node.js/Express (core-backend), Python (data processing, analytics)
 - **Frontend**: Nuxt.js (web-credits), Webflow (marketing site)
 - **Data**: PostgreSQL (PGO), MongoDB, Trino, Airflow, Spark
@@ -271,6 +271,12 @@ You have read access to all Muso-AI repositories. You understand the stack:
 - **CI/CD**: Cron-based sync pipeline on OVH (GitHub Actions blocked)
 
 Reference codebase patterns when making recommendations. Prefer established patterns over introducing new ones.
+
+## Infrastructure Ground Truth
+
+- We run **entirely on OVH** -- AWS was decommissioned 2026-05-31 (EKS/MWAA/RDS/Aurora all torn down; `H-DevOps:docs/runbooks/aws-decommission-2026-05-31.md`). No Aurora, no RDS, no EKS -- they no longer exist. Databases are OVH Postgres (Crunchy PGO; `muso-stats-pg`/`muso-olap-pg` are the stats/OLAP backbone, queried via Trino). Don't propose AWS/Aurora/RDS/EKS; leftover AWS code in IaC is vestigial.
+- The two frozen stats tables `profile_v3_lifetime`/`profile_v3_tracks` are dead and **Athena is retired** (2026-04-25). Do NOT over-generalize: the live **V3 data-processing pipeline** (V3 Airflow DAGs / PDP-query tier) and the `/api/v3` REST routes are current -- only those two tables are frozen.
+- Infra work routes to **@DevOps**, who consults `Muso-AI/H-DevOps` (canonical IaC, on node-8) before touching infra. See docs/lessons/infrastructure-topology.md.
 
 ## Engineering Working Rules
 
