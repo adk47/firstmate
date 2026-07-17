@@ -402,6 +402,9 @@ def default_state_paths():
             os.environ.get("OVERDUE_NOTIFY_STATE",
                           "/var/lib/overdue-verification-notifier/notified.json"),
             "json"),
+        "close-duplicate": (
+            os.environ.get("CLOSE_DUP_SHADOW_LOG", "/var/log/close-duplicate-shadow.jsonl"),
+            "jsonl"),
         # Best-effort / known gap — see module docstring: dedup-shadow.jsonl
         # today carries profile ids, not conversation id/email, so this is a
         # forward-compatible no-op read, not an active exclusion source yet.
