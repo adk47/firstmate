@@ -515,39 +515,40 @@ ONLY into the openai-completions HTTP path, so it is a SILENT NO-OP on codex
 runtime turns - for a codex-primary agent enable codex-native search instead
 (`tools.web.search.enabled=true` + `tools.web.search.openaiCodex.enabled=true`,
 uses ChatGPT OAuth, no new key). Confirm it fired in the codex rollout jsonl, not
-the cron summary. Moving a codex agent OFF codex breaks codex-native search; route
-its `web_search` through a managed provider (on 7.x prefer the key-free `codex`
-managed provider — see next — over a paid `perplexity`/Sonar key).
+the cron summary. Moving a codex agent OFF codex breaks codex-native search — and on 7.1
+there is NO working managed fallback in hydra (the key-free `codex` managed provider can't
+authenticate; setting `provider` also disables native — see the 7.1 note below), so a
+non-codex turn simply has no search.
 
-**openclaw 7.1 — `web_search` runs on codex OAuth, no search vendor.** 7.1 registers a
-first-class KEY-FREE `codex` managed provider (`requiresCredential:false`, "uses Codex
-sign-in"; plugin manifest `webSearchProviders:["codex"]`), so the gateway `web_search`
-tool can resolve on the ChatGPT subscription we already pay for instead of a paid vendor.
-Two paths, both on our OAuth: NATIVE (`tools.web.search.openaiCodex.enabled=true`) folds
-live results into the codex model's own turn (cheaper) and SUPPRESSES the managed tool when
-active, but only fires on codex-eligible models; MANAGED (`tools.web.search.provider="codex"`)
-spends a bounded codex turn and RETURNS a structured `{content,searches}` result — the path
-for a non-codex turn, or any consumer that needs the tool's output rather than folded-in
-reasoning. **The trap that caused #607:** the key-free provider NEVER wins auto-detection
-(`hasImplicitProviderSelectionSignal` is false for any `requiresCredential:false` provider),
-so it must be named EXPLICITLY. Enabling `openaiCodex` WITHOUT setting
-`tools.web.search.provider` (main's state after #607 dropped Perplexity) = native works on
-codex turns, but the managed tool resolves zero candidates and hard-fails "web_search is
-disabled or no provider is available" on every NON-codex turn, fleet-wide — surfacing only
-in the session transcript, not journald, which is why it went unseen for 6 days. **Recipe
-(set BOTH keys):** `tools.web.search = {enabled:true, provider:"codex", openaiCodex:{enabled:true,
-mode:"live"}}`, with `codex` in `plugins.allow` — NO `plugins.entries` block and NO apiKey
-(that's the difference from a keyed provider like perplexity/Sonar, which still needs an
-entry + credential, and which the codex provider now SUPERSEDES). **Trade-off** vs a keyed
-vendor: codex search now SHARES FATE with codex OAuth — a token lapse takes search down with
-the fleet; that's the resilience cost of not paying for an independent provider (Aaron's
-call: no search spend). Guarded by `validate-config-matrix.sh` check #7, which fails the
-build if `web.search.enabled` without a valid provider — so #607 can't silently recur.
-Enabled on MAIN 2026-07-16; EDGE/Caroline deliberately left WITHOUT search pending support
-sign-off (a customer-facing agent browsing the web mid-conversation is a capability call for
-Aaron/Jan). Sources: `dist/web-search-provider.shared-*.js` (`createCodexWebSearchProviderBase`),
-`dist/runtime-*.js` (`resolveWebSearchProviderId`, `hasImplicitProviderSelectionSignal`),
-`dist/codex-native-web-search-core-*.js` (activation + suppression), docs.openclaw.ai/tools/web.
+**openclaw 7.1 — use NATIVE codex search; `provider:"codex"` is a TRAP on a native fleet
+(it DISABLES native and breaks web_search fleet-wide).** 7.1 runs native codex search via
+`tools.web.search.openaiCodex.enabled` (the codex model calling OpenAI's own search
+in-thread, key-free on the ChatGPT OAuth we already run). It ALSO registers a key-free
+`codex` *managed* provider — but native and managed are **MUTUALLY EXCLUSIVE, not additive**:
+`resolveCodexWebSearchPlan` (`@openclaw/codex .../thread-lifecycle-*.js`) picks native-hosted
+search ONLY IF `tools.web.search.provider` is UNSET (`hasManagedSearchProvider` false).
+Setting ANY provider flips every codex thread OFF native onto a bounded managed worker that
+openclaw spawns with an EMPTY `CODEX_HOME`/no auth. In hydra that worker CANNOT authenticate
+(per-agent auth rows are deliberately deleted for the single-refresher invariant, and the
+gateway env's `OPENAI_API_KEY` is a placeholder), so its websocket fails → `Reconnecting...
+2/5` → `web_search failed` for EVERY agent. **This is exactly what PR #695 did (2026-07-17):
+`provider:"codex"` disabled the native search that had worked all morning (company-finder ran
+74 searches at 11:04) and broke web_search fleet-wide at the deploy's restart** — native AND
+managed both dead, because there is no native path once a provider is set. Reverted same day
+(remove the line from live config + `systemctl restart openclaw-gateway-main`). **Rule: on a
+native-search fleet set ONLY `tools.web.search={enabled:true, openaiCodex:{enabled:true,
+mode:"live"}}` — NEVER a `provider`.** `validate-config-matrix.sh` check #7 enforces it (fails
+the build if a provider is set while `openaiCodex.enabled`, and if search is enabled with no
+backend). **#607 stays open by choice:** native only fires on codex-eligible models, so a
+non-codex fallback turn still has no search — accepted status quo since 2026-06-30 until
+upstream fixes the managed bounded-turn auth (the only route to search-during-fallback;
+re-check per openclaw bump). Do NOT "fix" #607 by adding `provider:"codex"` — that
+reintroduces the #695 outage. Sources: `@openclaw/codex .../thread-lifecycle-*.js`
+(`resolveCodexWebSearchPlan`, `hasManagedSearchProvider`), `web-search-provider.runtime-*.js`
+(`executeCodexWebSearchProviderTool` → bounded private app-server),
+`media-understanding-provider-*.js` (empty `CODEX_HOME`), `shared-client-*.js`
+(`applyCodexAppServerAuthProfile` → api-key fallback); the "Reconnecting..." string lives in
+the codex-rs binary (`responses_retry`).
 
 **Codex refuses competitive-intel / scraping prompts (cyber-safety classifier).**
 `codex/gpt-5.5` returns a refusal flagged for "possible cybersecurity risk" on
@@ -664,10 +665,13 @@ tell: BOTH modes target `api.openai.com/v1/responses` — OAuth is the WebSocket
 (`wss://`) transport, api-key is HTTP. `chatgpt.com/backend-api/…` is gone;
 retire the old tell when diagnosing.
 
-**7.1 also gives `web_search` a key-free codex provider.** `tools.web.search.provider:"codex"`
-restores the gateway `web_search` tool on the ChatGPT subscription — see "Web search,
-refusals, fallback" above — so #607's dropped Perplexity never needs re-adding. It must be
-named explicitly (key-free providers never auto-detect), and it shares fate with codex OAuth.
+**7.1's key-free `codex` web-search provider does NOT work in hydra — do not set it.**
+`tools.web.search.provider:"codex"` looks like it would restore the `web_search` tool on the
+ChatGPT subscription, but on 7.1 it DISABLES native search (mutually exclusive) and routes to
+a managed worker that can't authenticate in our file-auth fleet → `Reconnecting...` → search
+dies fleet-wide (the #695 outage, 2026-07-17). Use native only
+(`tools.web.search.openaiCodex.enabled`, no provider); see "Web search, refusals, fallback"
+above for the full mechanism and the check-#7 guard.
 
 **7.1 ignores `plugins.allow`.** Bundled plugins load despite the allowlist
 (`openai`, `elevenlabs` observed); the `openai` plugin then owns provider

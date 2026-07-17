@@ -149,36 +149,37 @@ for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
     fail=1
   fi
 
-  # 7. web_search provider present when search is enabled. openclaw's gateway
-  #    web_search tool resolves a MANAGED provider; codex-NATIVE search (the model
-  #    calling OpenAI's own search inside its turn) folds into reasoning and does
-  #    NOT feed the web_search tool. The key-free "codex" managed provider never
-  #    wins auto-detection, so it must be named EXPLICITLY — enabling openaiCodex
-  #    without setting a provider is exactly the 2026-06-30 #607 regression:
-  #    native works on codex turns, but the managed tool resolves zero candidates
-  #    and hard-fails ("web_search is disabled or no provider is available") on any
-  #    non-codex turn, fleet-wide, surfacing only in session transcripts (not
-  #    journald) — which is why #607 went unseen for 6 days. Provider "codex" is
-  #    key-free (requiresCredential:false) and needs only to be allowlisted; a
-  #    keyed provider (perplexity, etc.) additionally needs a plugins.entries block
-  #    and an apiKey. For ANY provider, an explicitly disabled entry
-  #    (plugins.entries[$p].enabled=false — the same lever that keeps the openai
-  #    plugin off) means the plugin never registers and the tool stays unavailable,
-  #    so reject that before the codex/keyed split. Finally, $p must be a provider
-  #    openclaw actually resolves: a static check can't read the live plugin
-  #    registry, so we gate against a repo-maintained allowlist of the web-search
-  #    provider IDs this repo supports ($KNOWN below) — a typo like "codxe" with a
-  #    matching allow+entry+apiKey would otherwise pass yet resolve zero candidates
-  #    at runtime, reproducing the #607 silent failure. Extend $KNOWN when adopting
-  #    a new provider.
+  # 7. web_search must have a well-formed backend that does not self-disable. On
+  #    openclaw 7.1, native codex search (tools.web.search.openaiCodex.enabled — the
+  #    codex model calling OpenAI's own search in-thread, key-free via the ChatGPT
+  #    OAuth the fleet already runs) and a MANAGED provider (tools.web.search.provider)
+  #    are MUTUALLY EXCLUSIVE: setting a provider flips every codex thread OFF native
+  #    onto a bounded managed worker. In hydra that worker has no auth (empty
+  #    CODEX_HOME, placeholder OPENAI_API_KEY) so it fails "Reconnecting..." — setting
+  #    provider:"codex" on this native-search fleet DISABLED web_search fleet-wide
+  #    (incident 2026-07-17, PR #695). So the invariants are:
+  #      - reject BOTH openaiCodex.enabled and provider set at once (self-disabling);
+  #      - reject enabled-with-no-backend (neither native nor a provider);
+  #      - native-only (openaiCodex.enabled, NO provider) is the SUPPORTED shape → ok;
+  #      - a managed provider (native off) must be a recognized id ($KNOWN, since a
+  #        static check can't read the live plugin registry — catches typos like
+  #        "codxe" that resolve zero candidates), allowlisted, not entry-disabled,
+  #        and — unless it is the key-free "codex" — carry a plugins.entries block +
+  #        apiKey.
+  #    Extend $KNOWN when adopting a new provider. NOTE: this deliberately leaves the
+  #    #607 gap open — a non-codex fallback turn has no search — which is the accepted
+  #    status quo until upstream fixes the managed bounded-turn auth path.
   ws_err=$(jq -r '
     if (.tools.web.search.enabled // false) != true then empty
     else
       (.tools.web.search.provider // "") as $p
+      | ((.tools.web.search.openaiCodex.enabled // false) == true) as $native
       | (.plugins.allow // []) as $allow
       | (.plugins.entries // {}) as $entries
       | (["codex","perplexity"]) as $known
-      | if   $p == ""                     then "tools.web.search.enabled but provider unset (set provider:\"codex\" for OAuth-backed key-free search — native codex search does NOT feed the web_search tool)"
+      | if   $native and $p != ""         then "tools.web.search sets BOTH openaiCodex.enabled and provider:\"" + $p + "\" — mutually exclusive on openclaw 7.1: a managed provider DISABLES native in-thread codex search (incident 2026-07-17, #695). Use native (drop provider) OR managed (drop openaiCodex.enabled), not both."
+        elif (($native | not) and $p == "") then "tools.web.search.enabled but has no backend — set openaiCodex.enabled:true (native, key-free codex OAuth) or a managed provider"
+        elif $p == ""                     then empty
         elif ($known | index($p)) == null then "provider \"" + $p + "\" is not a recognized web-search provider id (known: " + ($known | join(", ")) + ") — a typo or invented id resolves zero candidates at runtime"
         elif ($allow | index($p)) == null then "provider \"" + $p + "\" is not in plugins.allow (closed allowlist)"
         elif $entries[$p].enabled == false then "provider \"" + $p + "\" entry is disabled (plugins.entries[\"" + $p + "\"].enabled=false — the plugin will not register)"

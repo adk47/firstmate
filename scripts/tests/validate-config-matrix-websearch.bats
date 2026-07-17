@@ -1,17 +1,16 @@
 #!/usr/bin/env bats
-# Tests for the web_search-provider invariant in
-# scripts/validate-config-matrix.sh (check #7), added in
-# feat/websearch-codex-provider-main.
+# Tests for the web_search backend invariant in
+# scripts/validate-config-matrix.sh (check #7).
 #
-# Background: openclaw's gateway web_search tool resolves a MANAGED provider.
-# codex-NATIVE search folds into the model's turn and does NOT feed that tool.
-# The key-free "codex" managed provider never wins auto-detection, so it must be
-# named explicitly — enabling openaiCodex without a provider is exactly the
-# 2026-06-30 #607 regression (native works on codex turns, managed tool
-# hard-fails on non-codex turns, fleet-wide). check #7 enforces: if
-# tools.web.search.enabled, a provider must be set and allowlisted; "codex" is
-# key-free (allowlist is sufficient); a keyed provider additionally needs a
-# plugins.entries block + apiKey.
+# Background: on openclaw 7.1, native codex search (tools.web.search.openaiCodex.
+# enabled) and a managed provider (tools.web.search.provider) are MUTUALLY
+# EXCLUSIVE — setting a provider disables native, and in hydra the managed codex
+# worker can't authenticate, so it fails "Reconnecting..." (this is what broke
+# web_search fleet-wide in #695, 2026-07-17). check #7 enforces: reject both set
+# at once; reject enabled-with-no-backend; native-only (openaiCodex.enabled, NO
+# provider) is the supported shape and passes; a managed provider (native off)
+# must be a recognized id, allowlisted, not entry-disabled, and — unless key-free
+# "codex" — carry a plugins.entries block + apiKey.
 #
 # Each case writes a throwaway fixture under mktemp -d and runs the real script
 # against it via args, so no real config is touched. Modeled on
@@ -62,22 +61,31 @@ write_ws_profile() {
 JSON
 }
 
-@test "check7: key-free codex provider, allowlisted, no entry/apiKey PASSES" {
-  # The exact shipped shape — regression test for our own fix. The held Perplexity
-  # branch's check would have wrongly failed this (it required an apiKey).
-  write_ws_profile '{"enabled":true,"provider":"codex","openaiCodex":{"enabled":true,"mode":"live"}}' \
+@test "check7: native-only (openaiCodex.enabled, NO provider) PASSES" {
+  # The supported/shipped shape after #695 was reverted. Native key-free codex
+  # search on the ChatGPT OAuth; no managed provider.
+  write_ws_profile '{"enabled":true,"openaiCodex":{"enabled":true,"mode":"live"}}' \
     '{"allow":["codex","slack"]}'
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 0 ]
   [[ "$output" == *"all checks passed"* ]]
 }
 
-@test "check7: search enabled but provider UNSET fails (the #607 shape)" {
-  write_ws_profile '{"enabled":true,"openaiCodex":{"enabled":true,"mode":"live"}}' \
-    '{"allow":["codex"]}'
+@test "check7: openaiCodex.enabled AND provider set FAILS (mutual exclusion — the #695 shape)" {
+  # Setting a provider disables native on 7.1; the #695 config that broke
+  # web_search fleet-wide. Must be rejected.
+  write_ws_profile '{"enabled":true,"provider":"codex","openaiCodex":{"enabled":true,"mode":"live"}}' \
+    '{"allow":["codex","slack"]}'
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"provider unset"* ]]
+  [[ "$output" == *"mutually exclusive"* ]]
+}
+
+@test "check7: enabled with NO backend (no native, no provider) FAILS" {
+  write_ws_profile '{"enabled":true}' '{"allow":["codex"]}'
+  run "$SCRIPT" "$PROFILE"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no backend"* ]]
 }
 
 @test "check7: codex provider NOT in plugins.allow fails" {
