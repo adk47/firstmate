@@ -611,6 +611,16 @@ jobs:
           bash scripts/check-refund-doctrine.sh
           echo "::endgroup::"
 
+      - name: Data-sourcing doctrine check — Caroline must answer "via data partnerships"
+        # Aaron's directive (2026-07-17): asked how Muso gets its data, Caroline
+        # answers strictly "via data partnerships" — never naming a source or how
+        # it's collected. The rule lives in support/SOUL.md; prose != enforcement,
+        # so this gate fails if its load-bearing anchors are silently removed.
+        run: |
+          echo "::group::Data-sourcing doctrine check"
+          bash scripts/check-data-sourcing-doctrine.sh
+          echo "::endgroup::"
+
       - name: Egress allowlist check — no unauthorized additions
         run: |
           echo "::group::Checking egress allowlist changes"
