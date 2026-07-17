@@ -384,13 +384,14 @@ class TestPointerPostedDedupe(unittest.TestCase):
     even if the earlier close failed."""
 
     def test_pointer_not_reposted_when_already_recorded_but_close_retried(self):
+        """status == 'posted' (confirmed) -> skip re-post, retry the close."""
         import sys as _sys
         older = conv("O", email="x@y.com", lar=0, lcr=0, created_at=1000)
         kept = conv("K", email="x@y.com", lar=50, lcr=10, created_at=1000 + 86400)
         with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
              mock.patch.object(m, "owned_ids", return_value=set()), \
              mock.patch.object(m, "reverify_still_valid", return_value=True), \
-             mock.patch.object(m, "load_pointer_state", return_value={"O": True}), \
+             mock.patch.object(m, "load_pointer_state", return_value={"O": "posted"}), \
              mock.patch.object(m, "save_pointer_state") as m_save, \
              mock.patch.object(m, "post_pointer_comment") as m_pointer, \
              mock.patch.object(m, "close_conversation",
@@ -407,9 +408,11 @@ class TestPointerPostedDedupe(unittest.TestCase):
         m_close.assert_called_once()
 
     def test_pointer_posted_before_close_is_attempted_for_a_fresh_tier_b_target(self):
-        # Order is load-bearing: the durable marker MUST be persisted
-        # before the customer-facing pointer is posted (Fix 2) — a
-        # persist failure must be able to prevent the post entirely.
+        # Order is load-bearing: the durable "pending" marker MUST be
+        # persisted before the customer-facing pointer is posted, and the
+        # "posted" marker MUST be persisted before the close is attempted —
+        # a persist failure at either step must be able to prevent the next
+        # step (POST or close) entirely.
         import sys as _sys
         older = conv("O", email="x@y.com", lar=0, lcr=0, created_at=1000)
         kept = conv("K", email="x@y.com", lar=50, lcr=10, created_at=1000 + 86400)
@@ -431,7 +434,202 @@ class TestPointerPostedDedupe(unittest.TestCase):
              mock.patch.object(_sys, "argv", ["m", "--apply"]):
             rc = m.main()
         self.assertEqual(rc, 0)
-        self.assertEqual(order, ["save", "pointer", "close"])
+        self.assertEqual(order, ["save", "pointer", "save", "close"])
+
+    def test_pointer_post_fails_then_next_run_holds_without_reposting(self):
+        """The retry test the finding asks for: run1's POST fails -> marker
+        left at 'pending', conv NOT closed. run2 sees 'pending' -> conv
+        still NOT closed AND the pointer is NOT re-posted (held)."""
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=0, lcr=0, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=50, lcr=10, created_at=1000 + 86400)
+        env = {"MUSOAI_INTERCOM_TOKEN": "t", "INTERCOM_ADMIN_ID": "5763097"}
+
+        # --- run 1: POST fails ---
+        saved_state = {}
+
+        def fake_save(state):
+            saved_state.clear()
+            saved_state.update(state)
+            return True
+
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "load_pointer_state", return_value={}), \
+             mock.patch.object(m, "save_pointer_state", side_effect=fake_save), \
+             mock.patch.object(m, "post_pointer_comment",
+                                side_effect=ValueError("500")), \
+             mock.patch.object(m, "close_conversation") as m_close, \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", env, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc1 = m.main()
+        self.assertNotEqual(rc1, 0)
+        m_close.assert_not_called()
+        self.assertEqual(saved_state, {"O": "pending"})
+
+        # --- run 2: sees "pending" from run 1 -> held, no re-post, no close ---
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "load_pointer_state", return_value=dict(saved_state)), \
+             mock.patch.object(m, "save_pointer_state") as m_save2, \
+             mock.patch.object(m, "post_pointer_comment") as m_pointer2, \
+             mock.patch.object(m, "close_conversation") as m_close2, \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", env, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc2 = m.main()
+        self.assertNotEqual(rc2, 0)
+        m_pointer2.assert_not_called()
+        m_save2.assert_not_called()
+        m_close2.assert_not_called()
+
+    def test_pointer_posted_close_fails_then_next_run_retries_close_only(self):
+        """POST succeeds -> marker 'posted' -> close fails this run. Next
+        run sees 'posted' and skips re-post, retrying only the close (no
+        double-post)."""
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=0, lcr=0, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=50, lcr=10, created_at=1000 + 86400)
+        env = {"MUSOAI_INTERCOM_TOKEN": "t", "INTERCOM_ADMIN_ID": "5763097"}
+        saved_state = {}
+
+        def fake_save(state):
+            saved_state.clear()
+            saved_state.update(state)
+            return True
+
+        # --- run 1: POST succeeds, close fails ---
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "load_pointer_state", return_value={}), \
+             mock.patch.object(m, "save_pointer_state", side_effect=fake_save), \
+             mock.patch.object(m, "post_pointer_comment") as m_pointer, \
+             mock.patch.object(m, "close_conversation", side_effect=ValueError("500")), \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", env, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc1 = m.main()
+        self.assertNotEqual(rc1, 0)
+        m_pointer.assert_called_once()
+        self.assertEqual(saved_state, {"O": "posted"})
+
+        # --- run 2: sees "posted" -> skip re-post, retry close ---
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "load_pointer_state", return_value=dict(saved_state)), \
+             mock.patch.object(m, "save_pointer_state") as m_save2, \
+             mock.patch.object(m, "post_pointer_comment") as m_pointer2, \
+             mock.patch.object(m, "close_conversation",
+                                return_value={"state": "closed"}) as m_close2, \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", env, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc2 = m.main()
+        self.assertEqual(rc2, 0)
+        m_pointer2.assert_not_called()
+        m_save2.assert_not_called()
+        m_close2.assert_called_once()
+
+    def test_pointer_post_and_close_both_succeed_posts_pointer_exactly_once(self):
+        """Happy path: pointer posted exactly once, conv closed exactly
+        once, final marker is 'posted'."""
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=0, lcr=0, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=50, lcr=10, created_at=1000 + 86400)
+        saved_state = {}
+
+        def fake_save(state):
+            saved_state.clear()
+            saved_state.update(state)
+            return True
+
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "load_pointer_state", return_value={}), \
+             mock.patch.object(m, "save_pointer_state", side_effect=fake_save), \
+             mock.patch.object(m, "post_pointer_comment") as m_pointer, \
+             mock.patch.object(m, "close_conversation",
+                                return_value={"state": "closed"}) as m_close, \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc = m.main()
+        self.assertEqual(rc, 0)
+        m_pointer.assert_called_once()
+        m_close.assert_called_once()
+        self.assertEqual(saved_state, {"O": "posted"})
+
+    def test_posted_marker_persist_failure_after_successful_post_holds_no_close(self):
+        """POST succeeds but the follow-up 'posted' persist fails -> hold
+        (no close, no double-post — the marker stays whatever it was
+        before, so a future run treats this as unconfirmed too)."""
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=0, lcr=0, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=50, lcr=10, created_at=1000 + 86400)
+        save_calls = []
+
+        def fake_save(state):
+            save_calls.append(dict(state))
+            # First call (persisting "pending") succeeds; second call
+            # (persisting "posted" after the POST) fails.
+            return len(save_calls) == 1
+
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "load_pointer_state", return_value={}), \
+             mock.patch.object(m, "save_pointer_state", side_effect=fake_save), \
+             mock.patch.object(m, "post_pointer_comment") as m_pointer, \
+             mock.patch.object(m, "close_conversation") as m_close, \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc = m.main()
+        self.assertNotEqual(rc, 0)
+        m_pointer.assert_called_once()
+        m_close.assert_not_called()
+        self.assertEqual(len(save_calls), 2)
+        self.assertEqual(save_calls[0], {"O": "pending"})
+        self.assertEqual(save_calls[1], {"O": "posted"})
+
+    def test_legacy_boolean_marker_is_treated_as_unconfirmed_and_held(self):
+        """A pre-fix state file with a bare boolean True marker (the old,
+        ambiguous format) must be treated as unconfirmed -> held, never
+        re-posted, never closed."""
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=0, lcr=0, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=50, lcr=10, created_at=1000 + 86400)
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "load_pointer_state", return_value={"O": True}), \
+             mock.patch.object(m, "save_pointer_state") as m_save, \
+             mock.patch.object(m, "post_pointer_comment") as m_pointer, \
+             mock.patch.object(m, "close_conversation") as m_close, \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc = m.main()
+        self.assertNotEqual(rc, 0)
+        m_pointer.assert_not_called()
+        m_save.assert_not_called()
+        m_close.assert_not_called()
 
     def test_pointer_marker_persist_failure_skips_post_and_close_entirely(self):
         """Fix 2: if the durable marker write fails, the conversation is

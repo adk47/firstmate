@@ -762,23 +762,51 @@ def main():
             print(f"  SKIP conv={older['id']}: pre-close re-verify failed (state/tier/email changed)")
             continue
 
-        if tier == "B" and str(older["id"]) not in pointer_state:
-            # Order is load-bearing: persist the marker FIRST. If it can't
-            # be durably persisted, skip this conversation entirely — no
-            # pointer post, no close — rather than risk a later run
-            # re-posting the customer-facing pointer (double-message, the
-            # #1 harm this ordering exists to prevent).
-            pending_state = dict(pointer_state)
-            pending_state[str(older["id"])] = True
-            if not save_pointer_state(pending_state):
-                fail.append((older["id"], "pointer marker persist failed — skipped (no post, no close)"))
-                continue
-            pointer_state = pending_state
-            try:
-                post_pointer_comment(token, admin_id, older["id"], POINTER_TEXT)
-            except (urllib.error.URLError, ValueError) as e:
-                fail.append((older["id"], f"pointer post failed: {str(e)[:140]}"))
-                continue
+        if tier == "B":
+            # Two-state marker ("pending" -> "posted"), keyed on the older
+            # conv id — a bare boolean can't distinguish "we attempted the
+            # post" from "the post is CONFIRMED delivered", which is exactly
+            # what let a failed POST silently skip straight to closing on
+            # the NEXT run (the pointer never sent, the customer never told
+            # their duplicate was merged). ANY value other than the exact
+            # string "posted" — including "pending" and a legacy boolean
+            # True from an older state file — is treated as unconfirmed and
+            # HOLDS: no close, no re-post (a re-post risks double-messaging
+            # a customer whose original POST may have actually landed).
+            status = pointer_state.get(str(older["id"]))
+            if status != "posted":
+                if status is None:
+                    # First attempt this conversation has ever seen: record
+                    # "pending" BEFORE the POST. Persist failure -> skip
+                    # entirely (no post, no close), same as before.
+                    pending_state = dict(pointer_state)
+                    pending_state[str(older["id"])] = "pending"
+                    if not save_pointer_state(pending_state):
+                        fail.append((older["id"], "pointer marker persist failed — skipped (no post, no close)"))
+                        continue
+                    pointer_state = pending_state
+                    try:
+                        post_pointer_comment(token, admin_id, older["id"], POINTER_TEXT)
+                    except (urllib.error.URLError, ValueError) as e:
+                        fail.append((older["id"], f"pointer post failed: {str(e)[:140]}"))
+                        continue
+                    posted_state = dict(pointer_state)
+                    posted_state[str(older["id"])] = "posted"
+                    if not save_pointer_state(posted_state):
+                        # POST succeeded but we can't durably record that —
+                        # HOLD (don't close) rather than risk a future run
+                        # re-posting on a marker still stuck at "pending".
+                        fail.append((older["id"], "pointer posted but 'posted' marker persist failed — held"))
+                        continue
+                    pointer_state = posted_state
+                else:
+                    # status == "pending" (a prior POST attempt failed or
+                    # never confirmed) or any other unrecognized/legacy
+                    # value (e.g. an old boolean True) — hold this run.
+                    # Never re-post (may have already sent); never close
+                    # (the customer may not have been told).
+                    fail.append((older["id"], f"pointer status unconfirmed ({status!r}) — held, no re-post, no close"))
+                    continue
 
         try:
             res = close_conversation(token, admin_id, older["id"])
