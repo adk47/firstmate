@@ -91,6 +91,16 @@ traffic), then a post-hoc audit/redaction hook, then a `before_tool_call` hook O
 for tools you have confirmed it actually fires on (it is a silent no-op for autonomous
 `exec`). The bash gate cannot be confabulated past.
 
+**Guard an invariant that spans an open-ended SET of files with a drift test, not
+vigilance.** When a property must hold across every member of a growing set — "every
+restart-capable watchdog must honor the maintenance flag," "every workspace SKILL must
+be canonical" — a reviewer eventually misses a new member. Enumerate the set
+mechanically and assert the property on each, with an explicit exempt-list for the
+conscious exceptions, so adding a member without the property fails CI. (Example:
+`scripts/tests/maintenance-guard-drift.bats` globs `scripts/*-watchdog.{sh,py}`,
+subtracts `scripts/tests/fixtures/maintenance-guard-exempt.txt`, and fails on any
+unguarded remainder — so a future watchdog cannot silently fight a maintenance window.)
+
 **When you cut skill prose to forbid a behavior, grep for every template that
 demonstrates it.** Agents pattern-match on concrete examples regardless of surrounding
 "do not" prose. (Real incident: a PR marked a feature offline in the top-level prose

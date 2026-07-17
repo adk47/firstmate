@@ -56,6 +56,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import subprocess
 import sys
 import urllib.request
 import urllib.error
@@ -210,6 +211,29 @@ def slack_post(token, channel, text):
     return True
 
 
+def _maintenance_active():
+    """True iff a planned maintenance window is active. Delegates to the sibling
+    scripts/hydra-maintenance.sh (which sources lib/maintenance-flag.sh) so the
+    fail-safe expiry/malformed logic lives in ONE place instead of being
+    re-implemented here. This watchdog pages on Intercom intake stalling, which is
+    guaranteed whenever the edge gateway is stopped for a window — so it must
+    honor the flag. Any failure to resolve or run the helper returns False: a
+    broken guard must NEVER suppress the watchdog.
+    """
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "hydra-maintenance.sh")
+    try:
+        # Invoke via `bash <script>` (not the exec bit) so a lost +x on the helper
+        # can't silently stop this watchdog honoring the window.
+        return subprocess.run(
+            ["bash", helper, "is-active"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode == 0
+    except Exception:  # noqa: BLE001 — fail-safe: any error => not in maintenance
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description="Intercom intake-outage watchdog")
     mode = ap.add_mutually_exclusive_group()
@@ -228,6 +252,12 @@ def main():
     ap.add_argument("--min-processed", type=float,
                     default=float(os.environ.get("WATCHDOG_MIN_PROCESSED", "0.4")))
     args = ap.parse_args()
+
+    # Stand down during a planned maintenance window: a stopped edge gateway
+    # zeroes intake and would false-page this alarm for the whole window.
+    if _maintenance_active():
+        print("maintenance window active - skipping intake watchdog", file=sys.stderr)
+        return 0
 
     token = os.environ.get("MUSOAI_INTERCOM_TOKEN")
     if not token:

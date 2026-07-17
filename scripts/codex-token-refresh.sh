@@ -29,6 +29,19 @@ _DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REFRESH_BIN="${CODEX_REFRESH_BIN:-$_DIR/lib/codex-oauth-refresh.sh}"
 GATEWAY_SERVICES="${CODEX_GATEWAY_SERVICES:-openclaw-gateway-main.service openclaw-gateway-edge.service}"
 
+# Stand down during a planned maintenance window (scripts/hydra-maintenance.sh):
+# this timer restarts BOTH gateways to load a fresh token — exactly the restart a
+# window must suppress. Skipping a scheduled refresh is safe (the token lasts
+# ~10d and this runs twice weekly, so it survives a missed fire; the next run
+# refreshes). Fail-safe: an absent/expired/malformed flag reads as "not in
+# maintenance". See lib/maintenance-flag.sh.
+# shellcheck source=lib/maintenance-flag.sh
+source "$_DIR/lib/maintenance-flag.sh"
+if maintenance_active; then
+  echo "$LOGPREFIX maintenance: $(maintenance_reason) - skipping"
+  exit 0
+fi
+
 # Drain-aware restart: even at 04:00 UTC an agent can be mid-turn (crons,
 # late-night Intercom); drain first, hard-restart fallback guarantees the
 # fresh token still gets loaded (the gateway only reads it at startup).

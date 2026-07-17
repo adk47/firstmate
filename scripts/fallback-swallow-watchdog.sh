@@ -76,6 +76,16 @@ _WATCHDOG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/slack-notify.sh
 source "$_WATCHDOG_DIR/lib/slack-notify.sh"
 
+# Stand down during a planned maintenance window (scripts/hydra-maintenance.sh):
+# gateway restarts during a window churn fallbacks that would page this alarm.
+# Fail-safe: an absent/expired/malformed flag reads as "not in maintenance".
+# shellcheck source=lib/maintenance-flag.sh
+source "$_WATCHDOG_DIR/lib/maintenance-flag.sh"
+if maintenance_active; then
+  echo "$LOGPREFIX maintenance: $(maintenance_reason) - skipping"
+  exit 0
+fi
+
 command -v python3 >/dev/null 2>&1 || { log "ERROR: python3 required but not on PATH"; exit 2; }
 
 # ──────────────────────────────────────────────────────────────

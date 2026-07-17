@@ -15,6 +15,10 @@ WD="$HYDRA_REPO/scripts/cron-health-watchdog.sh"
 setup() {
   TEST_TMPDIR="$(mktemp -d)"
   export TEST_TMPDIR
+  # Hermeticity: a real maintenance window (/run/hydra-maintenance) must not
+  # disarm this watchdog during CI (it runs on the live node-8 host). Pin the
+  # flag at an absent throwaway path so maintenance_active() reads inactive.
+  export HYDRA_MAINTENANCE_FLAG="$TEST_TMPDIR/no-maintenance-window"
   mkdir -p "$TEST_TMPDIR/runs" "$TEST_TMPDIR/bin"
 
   # Refuse real network: stub muso + ssh; never read the real main.env.

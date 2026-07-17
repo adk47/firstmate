@@ -10,6 +10,10 @@ SCRIPT="$HYDRA_REPO/scripts/codex-token-refresh.sh"
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
+  # Hermeticity: a real maintenance window (/run/hydra-maintenance) must not
+  # disarm this timer during CI (it runs on the live node-8 host). Pin the flag
+  # at an absent throwaway path so maintenance_active() reads inactive.
+  export HYDRA_MAINTENANCE_FLAG="$TEST_TMPDIR/no-maintenance-window"
   mkdir -p "$TEST_TMPDIR/bin"
   export RESTART_LOG="$TEST_TMPDIR/restart.log"
 

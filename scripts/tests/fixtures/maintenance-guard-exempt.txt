@@ -1,0 +1,17 @@
+# Watchdogs deliberately NOT guarded by the maintenance flag (scripts/hydra-maintenance.sh).
+#
+# Scope decision (fleet-health only): a planned *fleet* maintenance window silences
+# only the watchdogs that act/page BECAUSE the agent-fleet gateways/codex are stopped
+# or churning. The scripts below alert on BUSINESS/PROD conditions unrelated to the
+# gateways being down, so a fleet window must NOT silence them — a real Muso prod
+# incident or a sales lead during the window still needs to page.
+#
+# Format: one script basename per line; text after '#' is the justification.
+# Enforced by scripts/tests/maintenance-guard-drift.bats — a *-watchdog.{sh,py}
+# that is neither guarded nor listed here fails CI, so exempting a new watchdog is
+# always a conscious, reviewed decision.
+prod-log-alert-watchdog.sh           # Muso prod error lines -> #prod-alerts; unrelated to gateway health
+ads-inquiry-watchdog.sh              # ads-buying sales leads -> Aaron; must never be silenced
+merge-landing-watchdog.sh            # async catalog-merge landing (Muso backend/Trino), not gateway state
+stale-ticket-watchdog.sh             # daily overdue-ClickUp digest; business, harmless during a window
+intercom-data-complaint-watchdog.py  # agent-invoked systemic-data-issue pipeline (compliance); not schedule-fired fleet-health

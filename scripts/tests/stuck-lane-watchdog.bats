@@ -23,6 +23,10 @@ STALL_LINE='2026-06-30T18:27:00.000+00:00 ovh-node-8 node[1]: [diagnostic] stall
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
+  # Hermeticity: a real maintenance window (/run/hydra-maintenance) must not
+  # disarm this watchdog during CI (it runs on the live node-8 host). Pin the
+  # flag at an absent throwaway path so maintenance_active() reads inactive.
+  export HYDRA_MAINTENANCE_FLAG="$TEST_TMPDIR/no-maintenance-window"
   JNL="$TEST_TMPDIR/journal.txt"
   STATE="$TEST_TMPDIR/state.json"
 

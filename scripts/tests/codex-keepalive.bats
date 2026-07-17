@@ -14,6 +14,10 @@ SCRIPT="$HYDRA_REPO/scripts/codex-keepalive.sh"
 setup() {
   TEST_TMPDIR="$(mktemp -d)"
   export TEST_TMPDIR
+  # Hermeticity: a real maintenance window (/run/hydra-maintenance) must not
+  # disarm this pager during CI (it runs on the live node-8 host). Pin the flag
+  # at an absent throwaway path so maintenance_active() reads inactive.
+  export HYDRA_MAINTENANCE_FLAG="$TEST_TMPDIR/no-maintenance-window"
   mkdir -p "$TEST_TMPDIR/bin" "$TEST_TMPDIR/state"
   export PAGE_LOG="$TEST_TMPDIR/pages.log"
 

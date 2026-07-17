@@ -63,6 +63,18 @@ esac
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] provision-peer-labels[$PROFILE]: $*"; }
 
+# Stand down during a planned maintenance window (scripts/hydra-maintenance.sh):
+# the 5-min timer would otherwise hammer a deliberately-stopped gateway with
+# health/sessions RPCs (and can leave the openclaw CLI holding a gateway open).
+# Fail-safe: an absent/expired/malformed flag reads as "not in maintenance".
+_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/maintenance-flag.sh
+source "$_DIR/lib/maintenance-flag.sh"
+if maintenance_active; then
+  log "maintenance: $(maintenance_reason) - skipping"
+  exit 0
+fi
+
 if [[ ! -f "$OPENCLAW_JSON" ]]; then
   log "ERROR: $OPENCLAW_JSON not found — gateway not provisioned?"
   exit 1

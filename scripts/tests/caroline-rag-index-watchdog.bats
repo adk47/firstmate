@@ -21,6 +21,10 @@ ISSUES=$'Embeddings: ready\nVector store: ready\nVector search: ready\nDreaming:
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
+  # Hermeticity: a real maintenance window (/run/hydra-maintenance) must not
+  # disarm this watchdog during CI (it runs on the live node-8 host). Pin the
+  # flag at an absent throwaway path so maintenance_active() reads inactive.
+  export HYDRA_MAINTENANCE_FLAG="$TEST_TMPDIR/no-maintenance-window"
   STATUS="$TEST_TMPDIR/status.txt"
   STATE="$TEST_TMPDIR/last-alert"
   LOCK="$TEST_TMPDIR/lock"

@@ -150,6 +150,17 @@ _WATCHDOG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/slack-notify.sh
 source "$_WATCHDOG_DIR/lib/slack-notify.sh"
 
+# Stand down during a planned maintenance window (scripts/hydra-maintenance.sh):
+# a window restarts the edge gateway (pausing the index) on purpose, so this
+# self-heal/page would fight the operator. Fail-safe: an absent/expired/malformed
+# flag reads as "not in maintenance".
+# shellcheck source=lib/maintenance-flag.sh
+source "$_WATCHDOG_DIR/lib/maintenance-flag.sh"
+if maintenance_active; then
+  echo "$LOGPREFIX maintenance: $(maintenance_reason) - skipping"
+  exit 0
+fi
+
 # Resolve openclaw for cron's minimal PATH (/usr/bin:/bin). provision-peer-labels.sh
 # documents /usr/bin/openclaw as the node-8 install location; fall back to
 # /usr/local/bin too. Tests override OPENCLAW_BIN to a stub.

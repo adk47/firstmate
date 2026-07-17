@@ -73,6 +73,18 @@ _KEEPALIVE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/slack-notify.sh
 source "$_KEEPALIVE_DIR/lib/slack-notify.sh"
 
+# Stand down during a planned maintenance window (scripts/hydra-maintenance.sh):
+# a window is exactly when a human is deliberately touching codex/gateways, so
+# this proactive pager is noise. The token life is days and the twice-weekly
+# refresh timer resumes after; a bounded blind window is acceptable here. Fail-
+# safe: an absent/expired/malformed flag reads as "not in maintenance".
+# shellcheck source=lib/maintenance-flag.sh
+source "$_KEEPALIVE_DIR/lib/maintenance-flag.sh"
+if maintenance_active; then
+  echo "$LOGPREFIX maintenance: $(maintenance_reason) - skipping"
+  exit 0
+fi
+
 log() { echo "$LOGPREFIX $1"; }
 
 # _cooldown_ok <stampfile> <minutes> — true if last alert older than N min.

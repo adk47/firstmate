@@ -11,8 +11,9 @@
 
 1. [Common Operations](#common-operations)
 2. [Deploy](#deploy)
-3. [Troubleshooting](#troubleshooting)
-4. [Emergency Procedures](#emergency-procedures)
+3. [Maintenance Windows](#maintenance-windows)
+4. [Troubleshooting](#troubleshooting)
+5. [Emergency Procedures](#emergency-procedures)
 
 ---
 
@@ -238,6 +239,62 @@ ssh root@40.160.32.80 'bash /opt/hydra/scripts/muso-prewrite-hook.sh GET /x prod
 - **Deploy fails at Step 5b (k8s apply)** — rollback yaml is at `/tmp/hydra-rollback-deployments.yaml` on node-8. To revert: `kubectl apply -f /tmp/hydra-rollback-deployments.yaml -n hydra`
 - **Deploy fails at Step 7 (smoke test)** — check the smoke test output in the deploy log. Entries prefixed `FAIL:` are hard-gate failures and block the deploy; entries prefixed `WARN:` are soft-gate warnings and are informational only. The smoke test exits 0 unless `FAILURES > 0`.
 - **Slack alerts not firing** — the `HYDRA_SLACK_WEBHOOK` secret is missing or empty. The presence check in `deploy.yml` surfaces this as a `::warning::` annotation on every workflow run (non-blocking — deploys still proceed). To fix: get the `#hydra-heartbeat` webhook URL from the Slack app settings and run `gh secret set HYDRA_SLACK_WEBHOOK --repo Muso-AI/hydra`. If you want the presence check to be a hard gate instead of a warning, change `::warning::` → `::error::` and add `exit 1` in the "Check SLACK_WEBHOOK presence" step.
+
+---
+
+## Maintenance Windows
+
+Any planned work that stops or churns the gateways — openclaw bumps, state surgery,
+a Node upgrade — fights the fleet's autonomic self-healing. `openclaw-watchdog`
+(2-min cron) restarts a stopped gateway; `codex-token-refresh` restarts both to load
+a token; `hydra-peer-labels` RPCs a down gateway; and the alert-only watchdogs page
+for a fleet that is down on purpose. Before the maintenance flag this meant hand-
+moving ~10 `/etc/cron.d` files and stopping timers per window (easy to get wrong — a
+missed watchdog restarted a gateway mid-archive on the 2026-07 7.1 window and
+corrupted the first state archive).
+
+**One command opens/closes a window.** `scripts/hydra-maintenance.sh` drops a single
+flag file (`/run/hydra-maintenance`) that every fleet-health watchdog checks and
+stands down for:
+
+```bash
+# Deployed at /opt/hydra/scripts/hydra-maintenance.sh (not on PATH — use the full path).
+/opt/hydra/scripts/hydra-maintenance.sh start "openclaw 7.1 upgrade" --ttl 2h   # watchdogs stand down; posts #clio_devops
+/opt/hydra/scripts/hydra-maintenance.sh status                                  # ACTIVE/EXPIRED/none + reason + remaining
+# ... do the work (stop gateways, archive, deploy) ...
+/opt/hydra/scripts/hydra-maintenance.sh stop                                    # watchdogs re-arm; posts #clio_devops
+```
+
+**Fail-safe by construction — you cannot leave the fleet permanently unguarded.**
+The TTL is enforced by the *readers*, not a background job: an expired flag is
+ignored, so a forgotten `stop` re-arms every watchdog automatically once the TTL
+passes. `/run` is tmpfs, so a reboot also clears it. A malformed or unreadable flag
+reads as "not in maintenance" — a broken flag never disarms the fleet. The worst
+case is a bounded blind window you explicitly asked for.
+
+**What it does and does not do.** It only suppresses the autonomic watchdogs'
+restart/page actions. It never stops a service itself (you still stop gateways
+explicitly) and never touches systemd `Restart=always` (crash-recovery is still
+wanted mid-window). Deploys and `rollback.sh` are intentional, operator/CI-driven,
+and deliberately NOT gated — a deploy must converge and an auto-rollback must fire.
+
+**Which watchdogs honor it** (fleet-health): `openclaw-watchdog`,
+`codex-token-refresh`, `codex-keepalive`, `stuck-lane-watchdog`,
+`cron-health-watchdog`, `fallback-swallow-watchdog`, `caroline-rag-index-watchdog`,
+`provision-peer-labels`, and `intercom-intake-watchdog` (the last shells out to
+`hydra-maintenance is-active`).
+
+**Which do NOT** (business/prod — a fleet window must not blind you to a real Muso
+prod incident or a sales lead): `prod-log-alert-watchdog`, `ads-inquiry-watchdog`,
+`merge-landing-watchdog`, `stale-ticket-watchdog`, and the systemic
+`intercom-data-complaint-watchdog`. This split is enforced: any new
+`*-watchdog.{sh,py}` that is neither guarded nor listed in
+`scripts/tests/fixtures/maintenance-guard-exempt.txt` fails CI
+(`scripts/tests/maintenance-guard-drift.bats`), so exempting one is always a
+conscious decision.
+
+Canonical use is `docs/runbooks/UPGRADE-2026.7.1.md` (Phase 1 opens the window
+before stopping the gateways; Phase 4 closes it).
 
 ---
 

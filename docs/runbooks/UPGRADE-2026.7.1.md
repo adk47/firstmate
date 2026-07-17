@@ -69,10 +69,23 @@ respect the `--safe` drain semantics from PR #674).
 
 ## Phase 1 — cold rollback archive (the ONLY rollback path)
 
-The 6.x→7.x state migrations are one-way. With BOTH gateways stopped:
+The 6.x→7.x state migrations are one-way. Open a maintenance window FIRST — before
+stopping anything — so the autonomic watchdogs stand down; otherwise the 2-min
+`openclaw-watchdog` restarts the gateways mid-archive (it corrupted the first
+archive on this very upgrade) and the fleet's alarms page for a fleet that is down
+on purpose. Then stop BOTH gateways:
 
 ```bash
+/opt/hydra/scripts/hydra-maintenance.sh start "openclaw 7.1 upgrade" --ttl 2h   # fleet-health watchdogs stand down; flag self-expires on TTL
 systemctl stop openclaw-gateway-main openclaw-gateway-edge
+# The archive races drains AND healers: #674 --safe drain has no deadline, so a
+# mid-model-call session can keep a gateway alive minutes after `systemctl stop`
+# returns, and a lingering process still writing state corrupts the tar
+# ("file changed as we read it" = tar exit 1). Archive ONLY once NO gateway process
+# survives. The [o]penclaw bracket stops the pattern matching the grep/ssh shell's
+# OWN cmdline — a plain pgrep/pkill -f self-matches, and pkill would kill your SSH
+# session (ssh exit 255):
+while pgrep -f "[o]penclaw/dist/index.js" >/dev/null; do echo "waiting for gateway processes to exit..."; sleep 2; done
 ts=$(date -u +%Y%m%dT%H%M%SZ)
 tar -C /root -czf /root/openclaw-state-pre71-${ts}.tar.gz \
   .openclaw-main .openclaw-edge
@@ -81,10 +94,39 @@ ls -lh /root/openclaw-state-pre71-${ts}.tar.gz   # sanity: non-trivial size
 
 Keep gateways stopped through Phase 2–3 (the window continues).
 
+The `hydra-maintenance start` above is what keeps the healers off your back for the
+whole window — it supersedes the old per-window cron-file shuffle. Manual fallback
+only if the helper is ever unavailable — move aside ONLY the FLEET-HEALTH watchdogs
+(the same set the flag guards), and LEAVE the business/prod ones running:
+
+- `/etc/cron.d` to move aside: `openclaw-watchdog`, `codex-keepalive`,
+  `cron-health-watchdog`, `fallback-swallow-watchdog`, `stuck-lane-watchdog`,
+  `caroline-rag-index-watchdog`.
+- timers to stop: `codex-token-refresh.timer` (**restarts BOTH gateways** — the exact
+  mid-archive corruption this guards against; do NOT forget it), `hydra-peer-labels.timer`,
+  `intercom-intake-watchdog.timer`.
+- LEAVE RUNNING (business/prod — a fleet window must not blind you to a real prod
+  incident or sales lead): `ads-inquiry-watchdog`, `merge-landing-watchdog`,
+  `prod-log-alert-watchdog`, `stale-ticket-watchdog`, `intercom-data-complaint-watchdog.timer`.
+
+Restore the moved/stopped units after. With the flag you should never need this — and
+note `hydra-peer-labels` runs the openclaw CLI, which can leave an orphan gateway
+running OUTSIDE systemd (unit reads inactive while the process runs).
+
 ## Phase 2 — deploy the runtime + config
 
+> **Trap (observed 2026-07-14):** do NOT run `cd /opt/hydra && ./scripts/deploy.sh`.
+> `/opt/hydra` is the rsync TARGET and has no `.git`, so deploy.sh's Step 4a drift
+> classifier exits rc=4. Deploy via the **GitHub Actions run** (the self-hosted
+> runner checks out a real repo) or from the dedicated checkout at
+> `/var/lib/hydra-release/repo`. The post-deploy smoke can also race main's first
+> 7.1 boot (migrations) — a smoke FAIL on `cron list` right after restart may just
+> be a slow boot, so re-run the smoke before believing it.
+
 ```bash
-cd /opt/hydra && ./scripts/deploy.sh --target all
+# From a REAL git checkout (never /opt/hydra) — e.g. the release checkout:
+cd /var/lib/hydra-release/repo && git fetch && git reset --hard origin/main
+./scripts/deploy.sh --target all
 ```
 
 deploy.sh handles: Node floor gate, `npm install -g openclaw@2026.7.1`,
@@ -103,6 +145,15 @@ systemctl restart openclaw-gateway-main openclaw-gateway-edge
 This seeds each profile's main-agent SQLite row from the canonical JSON
 (profiles renamed to `openai:*`), deletes any per-agent auth rows, and writes
 chatgpt-mode `codex-home/auth.json` (access token only) for every agent.
+
+> **Trap (observed 2026-07-14):** if a gateway crash-loops on start with
+> `startup migrations did not complete cleanly`, a stale foreign-harness codex
+> sidecar is blocking the 7.1 startup migration — a
+> `<session>.jsonl.codex-app-server.json` "owned by agent harness pi" (seen on the
+> finance agent). Fix: `mv` the offending sidecar file(s) aside (they are preserved
+> in the Phase 1 archive) and restart. Do NOT run `openclaw doctor --fix` — its
+> auth fan-out is the 2026-05-29 single-use-refresh-token storm (see "What changes
+> in 7.1").
 
 ## Phase 4 — verify (per profile, main first, then edge)
 
@@ -126,6 +177,15 @@ openclaw --profile main agent --agent clio -m "Reply with the single word: pong"
 # 5. Edge: Caroline answers in Intercom; RAG reindex completed
 journalctl -u openclaw-gateway-edge --since -10m | grep -i "memory\|index" | tail -5
 ```
+
+Once verify passes, close the maintenance window so the watchdogs re-arm:
+
+```bash
+/opt/hydra/scripts/hydra-maintenance.sh stop
+```
+
+(If you forget, the flag self-expires after its TTL and every watchdog re-arms on
+its own — fail-safe by design; `/run` is tmpfs so a reboot also clears it.)
 
 Keep the rollback archive until the watchdogs have been quiet for 48h;
 delete nothing before then.

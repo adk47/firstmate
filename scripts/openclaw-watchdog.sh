@@ -42,6 +42,19 @@ _WATCHDOG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/slack-notify.sh
 source "$_WATCHDOG_DIR/lib/slack-notify.sh"
 
+# Stand down during a planned maintenance window (scripts/hydra-maintenance.sh).
+# The gateways are stopped ON PURPOSE for a window; without this the 2-min
+# watchdog restarts them mid-archive (it corrupted the 2026-07 7.1 state archive)
+# and pages a fleet that is down by design. Fail-safe: an absent/expired/malformed
+# flag reads as "not in maintenance", so normal protection is the default and a
+# forgotten window self-clears on TTL. See lib/maintenance-flag.sh.
+# shellcheck source=lib/maintenance-flag.sh
+source "$_WATCHDOG_DIR/lib/maintenance-flag.sh"
+if maintenance_active; then
+  echo "$LOGPREFIX maintenance: $(maintenance_reason) - skipping"
+  exit 0
+fi
+
 # Expected systemd log line that indicates a (re)start.
 # systemd logs PAST TENSE ("Started ..."), NOT "Starting ...".
 # If you change this regex, the inline self-test below fails loudly.

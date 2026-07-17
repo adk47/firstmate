@@ -351,6 +351,20 @@ restart to recover).
 
 ### Misc runtime mechanics
 
+**Planned maintenance needs a flag the healers honor — the self-healing fights you
+otherwise.** Stopping the gateways for a window (bump, state surgery, Node upgrade)
+trips `openclaw-watchdog` (restarts them mid-work), `codex-token-refresh` (restarts to
+load a token), `hydra-peer-labels` (RPCs a down gateway, and its openclaw CLI can leave
+an orphan gateway outside systemd), and the alert-only watchdogs (page a fleet that is
+down on purpose). `scripts/hydra-maintenance.sh` drops `/run/hydra-maintenance`
+(reason/operator/TTL as JSON) that every fleet-health watchdog checks via
+`lib/maintenance-flag.sh` and stands down for. Fail-safe: the TTL is enforced by the
+READERS (an absent/expired/malformed flag reads inactive), so a forgotten `stop`
+re-arms every watchdog automatically and `/run` tmpfs clears on reboot — the fleet is
+never permanently unguarded. Business/prod watchdogs (prod-log-alert, ads-inquiry,
+merge-landing, stale-ticket, data-complaint) deliberately do NOT honor it, so a fleet
+window can't blind you to a real prod incident. See RUNBOOK §Maintenance Windows.
+
 **`/hooks/agent`: `channel` is the channel TYPE, not the id.** The native webhook
 (`POST /hooks/agent`, port 18789, enabled per-profile via `.hooks`) spawns an
 isolated agent turn. `channel` is `last|slack|intercom`; the actual Slack channel

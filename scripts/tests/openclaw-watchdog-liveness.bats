@@ -19,6 +19,10 @@ WD="$HYDRA_REPO/scripts/openclaw-watchdog.sh"
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
+  # Hermeticity: a real maintenance window (/run/hydra-maintenance) must not
+  # disarm the watchdog during CI (this runs on the live node-8 host). Pin the
+  # flag at an absent throwaway path so maintenance_active() reads inactive.
+  export HYDRA_MAINTENANCE_FLAG="$TEST_TMPDIR/no-maintenance-window"
   mkdir -p "$TEST_TMPDIR/bin" "$TEST_TMPDIR/sysctl" "$TEST_TMPDIR/oc" "$TEST_TMPDIR/secrets"
   export STUB_SYSCTL_DIR="$TEST_TMPDIR/sysctl"   # <svc>.status files
   export STUB_OPENCLAW_DIR="$TEST_TMPDIR/oc"     # <profile>.validate fixtures
@@ -312,4 +316,35 @@ STUB
   [ "$status" -eq 0 ]
   [[ "$output" == *"SECRET PERMS TOO OPEN"* ]]
   [ "$(mode_of "$HYDRA_SECRETS_DIR/llm-provider-keys.json")" = "600" ]
+}
+
+@test "an ACTIVE maintenance window makes the watchdog stand down (no restart, no page)" {
+  # A window is open: the operator stopped the gateways on purpose. Even with main
+  # DOWN, the watchdog must skip — NOT reset-failed/restart (that restart corrupted
+  # the 2026-07 7.1 state archive) and NOT page.
+  set_status openclaw-gateway-main failed
+  set_status openclaw-gateway-edge active
+  printf '{"reason":"openclaw upgrade","expires_epoch":%s}' "$(( $(date -u +%s) + 3600 ))" \
+    > "$HYDRA_MAINTENANCE_FLAG"
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"maintenance: openclaw upgrade - skipping"* ]]
+  # It did NOT touch the down gateway (negate a simple grep, not a pipeline):
+  ! grep -q "restart openclaw-gateway" "$SYSCTL_CALLS"
+  ! grep -q "reset-failed openclaw-gateway" "$SYSCTL_CALLS"
+  [[ "$output" != *"GATEWAY DOWN"* ]]
+}
+
+@test "an EXPIRED maintenance flag does NOT disarm the watchdog (fail-safe)" {
+  # A forgotten 'stop' leaves a stale flag; the reader ignores it, so protection
+  # re-arms automatically. Main is down -> the watchdog must still recover it.
+  set_status openclaw-gateway-main failed
+  set_status openclaw-gateway-edge active
+  printf '{"reason":"stale","expires_epoch":%s}' "$(( $(date -u +%s) - 60 ))" \
+    > "$HYDRA_MAINTENANCE_FLAG"
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"maintenance:"* ]]
+  [[ "$output" == *"GATEWAY DOWN: openclaw-gateway-main"* ]]
+  grep -q "restart openclaw-gateway-main" "$SYSCTL_CALLS"
 }
