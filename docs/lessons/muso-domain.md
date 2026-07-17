@@ -63,8 +63,12 @@ never the local tree.
 **`muso` CLI output and behavior gotchas.** `muso query` sets no Trino session catalog,
 so two-part `"db".table` fails "Catalog must be specified" (qualify `hive."db".table`).
 `--format json` yields NDJSON with values as STRINGS and empty result as empty stdout +
-exit 0. With no env, `muso` targets api-dev unauthenticated (prod creds come from the
-gateway env file; ad-hoc SSH must source it). Trino lowercases unquoted SQL aliases (use
+exit 0. With no env, `muso` targets api-dev. Starting in v0.11, credentials are
+environment-scoped: `MUSO_DEV_ADMIN_*` for dev and `MUSO_PROD_ADMIN_*` for prod;
+the legacy generic `MUSO_ADMIN_*` pair becomes a production-only fallback. Do not
+run dev auth with v0.10, which still reads the generic pair. For ad-hoc SSH, load
+`/etc/openclaw/main.env` through `systemd-run --setenv=HOME=/root -p EnvironmentFile=...`;
+never source a systemd EnvironmentFile as shell code. Trino lowercases unquoted SQL aliases (use
 snake_case). Cron PATH (`/usr/bin:/bin`) misses `/usr/local/bin`, so bare `muso` exits 127
 under cron (use an absolute path; systemd units DO include it). The prewrite hook fires for
 EVERY provider write including `slack send` (branch on `MUSO_HOOK_PROVIDER`). `--text`
