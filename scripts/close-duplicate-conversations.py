@@ -114,6 +114,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -449,10 +450,18 @@ def flatten_candidates(groups):
 # --------------------------------------------------------------------------
 def get_conversation(token, conv_id):
     """GET /conversations/{id} (read-only) — used for the pre-close
-    re-verify. Returns a summary dict (id/state/lar/lcr/created_at/email —
-    email via the slow-path contact_email_of confirm, bounded to this one
-    conversation) or None on any failure (the caller treats None as
-    "cannot re-verify -> skip this close", never as "still valid")."""
+    re-verify. Returns a summary dict (id/state/lar/lcr/created_at/
+    confirm_email) or None on any failure (the caller treats None as
+    "cannot re-verify -> skip this close", never as "still valid").
+
+    confirm_email is resolved via the INDEPENDENT slow path — GET
+    /contacts/{id} on this conversation's own contact reference — NEVER via
+    contact_email_of's fast path (source.author.email), which is the SAME
+    value already used to form the group and so confirms nothing. A missing
+    contact id, a 404, or a ContactLookupFailed all yield confirm_email=""
+    (empty), which the caller (reverify_still_valid) treats as fail-closed.
+    Bounded to exactly one GET /contacts/{id} per conversation per close
+    (cached process-lifetime via _contact_email_cache), so no N+1."""
     req = urllib.request.Request(
         f"{INTERCOM_API}/conversations/{conv_id}",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
@@ -463,10 +472,19 @@ def get_conversation(token, conv_id):
     except (urllib.error.URLError, ValueError):
         return None
     stats = data.get("statistics") or {}
-    try:
-        confirm_email = contact_email_of(data, token)
-    except ContactLookupFailed:
-        confirm_email = None
+    confirm_email = ""
+    contacts = ((data.get("contacts") or {}).get("contacts") or [])
+    cid = contacts[0].get("id") if contacts and contacts[0].get("id") else None
+    if cid:
+        try:
+            if cid in _contact_email_cache:
+                confirm_email = _contact_email_cache[cid]
+            else:
+                contact = get_contact(cid, token)
+                confirm_email = ((contact or {}).get("email") or "").strip().lower()
+                _contact_email_cache[cid] = confirm_email
+        except ContactLookupFailed:
+            confirm_email = ""
     return {
         "id": data.get("id"),
         "state": data.get("state"),
@@ -482,9 +500,14 @@ def reverify_still_valid(token, older, kept, tier, window_days=DEFAULT_TIER_B_WI
     close-resolved, required for a one-way-door action): fresh GETs of
     BOTH conversations re-assert the target is still open, its tier gate
     still holds against FRESH statistics, the kept thread is still open,
-    AND the slow-path contact lookup confirms the fast-path grouping email
-    for both — closing both the fetch->close race and a stale/incorrect
-    grouping. Any lookup failure or state mismatch fails closed (skip)."""
+    AND an INDEPENDENT slow-path contact lookup (get_conversation's
+    confirm_email — GET /contacts/{id}, never the fast-path author email
+    already used to form the group) confirms the grouping email for both.
+
+    FAIL CLOSED: an empty/missing confirm_email is NEVER treated as "no
+    objection" — it always skips the close, same as an explicit mismatch.
+    Only a non-empty confirm_email that equals the grouped email (both
+    already lowercased/trimmed) allows the close to proceed."""
     fresh_older = get_conversation(token, older["id"])
     fresh_kept = get_conversation(token, kept["id"])
     if not fresh_older or not fresh_kept:
@@ -493,9 +516,9 @@ def reverify_still_valid(token, older, kept, tier, window_days=DEFAULT_TIER_B_WI
         return False
     if tier_for(fresh_older, fresh_kept, window_days) != tier:
         return False
-    if fresh_older["confirm_email"] and fresh_older["confirm_email"] != older["email"]:
+    if not fresh_older["confirm_email"] or fresh_older["confirm_email"] != older["email"]:
         return False
-    if fresh_kept["confirm_email"] and fresh_kept["confirm_email"] != kept["email"]:
+    if not fresh_kept["confirm_email"] or fresh_kept["confirm_email"] != kept["email"]:
         return False
     return True
 
@@ -548,13 +571,33 @@ def load_pointer_state():
 
 
 def save_pointer_state(state):
+    """Atomically persist the pointer_posted marker state (temp file +
+    os.replace, so a crash mid-write never leaves a truncated/corrupt file).
+    Returns True on success, False on ANY OSError — the caller MUST treat
+    False as a hard stop for that conversation (no pointer post, no close):
+    a lost marker is how the #1 harm (double-messaging a customer) happens,
+    so persistence failure is never swallowed into "proceed anyway"."""
     path = _pointer_state_path()
     try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(state, f)
+        d = os.path.dirname(path) or "."
+        os.makedirs(d, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=".pointer-posted-", dir=d)
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(state, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except OSError:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        return True
     except OSError as e:
-        print(f"WARN: could not persist pointer state to {path}: {e}", file=sys.stderr)
+        print(f"ERROR: could not durably persist pointer state to {path}: {e}", file=sys.stderr)
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -699,6 +742,18 @@ def main():
 
     targets = candidates[:args.limit] if args.limit > 0 else candidates
     shadow, shadow_path = open_shadow_log()
+    if shadow is None:
+        # A one-way-door action cannot silently lose its audit trail — this
+        # is intentionally STRICTER than close-resolved-conversations.py,
+        # justified by the destructive (customer-facing close) nature of
+        # this sweeper: close nothing, exit non-zero, notify.
+        print("ERROR: cannot open shadow log (primary and /tmp fallback both "
+              "failed) — closing nothing", file=sys.stderr)
+        post_slack_summary(
+            ":rotating_light: *Duplicate-close audit log unopenable* — "
+            f"{when}\nClosing NOTHING this run (no audit trail = no close).",
+            channel, cfg, account)
+        return 3
     pointer_state = load_pointer_state()
     closed, fail = [], []
     for cand in targets:
@@ -708,29 +763,38 @@ def main():
             continue
 
         if tier == "B" and str(older["id"]) not in pointer_state:
+            # Order is load-bearing: persist the marker FIRST. If it can't
+            # be durably persisted, skip this conversation entirely — no
+            # pointer post, no close — rather than risk a later run
+            # re-posting the customer-facing pointer (double-message, the
+            # #1 harm this ordering exists to prevent).
+            pending_state = dict(pointer_state)
+            pending_state[str(older["id"])] = True
+            if not save_pointer_state(pending_state):
+                fail.append((older["id"], "pointer marker persist failed — skipped (no post, no close)"))
+                continue
+            pointer_state = pending_state
             try:
                 post_pointer_comment(token, admin_id, older["id"], POINTER_TEXT)
             except (urllib.error.URLError, ValueError) as e:
                 fail.append((older["id"], f"pointer post failed: {str(e)[:140]}"))
                 continue
-            # Write BEFORE the close attempt — a later run must never
-            # re-post the pointer, even if the close itself then fails.
-            pointer_state[str(older["id"])] = True
-            save_pointer_state(pointer_state)
 
         try:
             res = close_conversation(token, admin_id, older["id"])
             rec = {"id": older["id"], "closed_at": int(time.time()), "email": email,
                    "kept_id": kept["id"], "tier": tier, "new_state": res.get("state")}
-            if shadow:
+            try:
                 shadow.write(json.dumps(rec) + "\n")
                 shadow.flush()
+            except OSError as e:
+                fail.append((older["id"], f"CLOSED but shadow-log write failed (audit gap!): {str(e)[:140]}"))
+                continue
             closed.append(rec)
         except (urllib.error.URLError, ValueError) as e:
             fail.append((older["id"], str(e)[:140]))
         time.sleep(0.3)
-    if shadow:
-        shadow.close()
+    shadow.close()
 
     ok = len(closed)
     print(f"closed_ok={ok} failed={len(fail)} (shadow log: {shadow_path})")

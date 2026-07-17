@@ -25,6 +25,26 @@ def conv(cid, email="a@b.com", lar=0, lcr=0, created_at=0, is_inbound=True):
             "created_at": created_at, "is_inbound": is_inbound}
 
 
+class FakeShadow:
+    """A minimal file-like stand-in for open_shadow_log()'s returned handle,
+    used everywhere a test needs main()'s apply path to reach the close
+    loop — open_shadow_log() returning (None, None) is now treated as a
+    hard pre-write failure (Fix 3), so tests exercising a successful apply
+    path must supply a real (fake) handle, not (None, None)."""
+
+    def __init__(self):
+        self.writes = []
+
+    def write(self, s):
+        self.writes.append(s)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
+
 class TestTierFor(unittest.TestCase):
     def test_tier_a_we_spoke_last(self):
         older = conv("O", lar=200, lcr=100)
@@ -206,7 +226,8 @@ class TestSanityCeiling(unittest.TestCase):
              mock.patch.object(m, "close_conversation",
                                 side_effect=lambda *a, **k: close_calls.append(1)), \
              mock.patch.object(m, "post_slack_summary", return_value=True), \
-             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t"}), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
              mock.patch.object(_sys, "argv", ["m", "--apply"]):
             rc = m.main()
         self.assertNotEqual(rc, 0)
@@ -223,7 +244,8 @@ class TestNotifyCandidates(unittest.TestCase):
              mock.patch.object(m, "owned_ids", return_value=set()), \
              mock.patch.object(m, "post_slack_summary",
                                 side_effect=lambda text, *a, **k: posted.append(text) or True), \
-             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t"}), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
              mock.patch.object(_sys, "argv", ["m", "--notify-candidates"]):
             rc = m.main()
         self.assertEqual(rc, 0)
@@ -238,7 +260,8 @@ class TestNotifyCandidates(unittest.TestCase):
         with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
              mock.patch.object(m, "owned_ids", return_value=set()), \
              mock.patch.object(m, "post_slack_summary") as m_post, \
-             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t"}), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
              mock.patch.object(_sys, "argv", ["m"]):
             rc = m.main()
         self.assertEqual(rc, 0)
@@ -253,7 +276,8 @@ class TestApplyGating(unittest.TestCase):
         with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
              mock.patch.object(m, "owned_ids", return_value=set()), \
              mock.patch.object(m, "close_conversation") as m_close, \
-             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t"}), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
              mock.patch.object(_sys, "argv", ["m"]):
             rc = m.main()
         self.assertEqual(rc, 0)
@@ -268,13 +292,90 @@ class TestApplyGating(unittest.TestCase):
              mock.patch.object(m, "reverify_still_valid", return_value=True), \
              mock.patch.object(m, "close_conversation",
                                 return_value={"state": "closed"}) as m_close, \
-             mock.patch.object(m, "open_shadow_log", return_value=(None, None)), \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
              mock.patch.object(m, "post_slack_summary", return_value=True), \
-             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t"}), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
              mock.patch.object(_sys, "argv", ["m", "--apply"]):
             rc = m.main()
         self.assertEqual(rc, 0)
         m_close.assert_called_once_with("t", "5763097", "O")
+
+    def test_admin_id_read_from_env_not_hardcoded(self):
+        """Fix 4: hermeticity check — override INTERCOM_ADMIN_ID to a value
+        that could never be the module's hardcoded default, and confirm
+        main() actually uses it (proves the suite isn't accidentally
+        passing only because the host runner happens to have the default
+        set — see test_close_duplicate_conversations.py:273 QA finding)."""
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=200, lcr=100, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "close_conversation",
+                                return_value={"state": "closed"}) as m_close, \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "99999"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc = m.main()
+        self.assertEqual(rc, 0)
+        m_close.assert_called_once_with("t", "99999", "O")
+
+
+class TestApplyShadowLogPreWriteFailure(unittest.TestCase):
+    """Fix 3: a one-way-door action cannot silently lose its audit trail —
+    if open_shadow_log() can't open a handle (primary AND /tmp fallback
+    both failed), --apply must close NOTHING and exit non-zero."""
+
+    def test_shadow_log_unopenable_closes_nothing_and_exits_nonzero(self):
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=200, lcr=100, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "close_conversation") as m_close, \
+             mock.patch.object(m, "open_shadow_log", return_value=(None, None)), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc = m.main()
+        self.assertNotEqual(rc, 0)
+        m_close.assert_not_called()
+
+    def test_shadow_write_error_after_close_is_surfaced_not_swallowed(self):
+        """A shadow-log write/flush error AFTER a successful close must be
+        caught and surfaced as a failure (audit gap), never silently
+        dropped."""
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=200, lcr=100, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
+
+        class BrokenShadow:
+            def write(self, s):
+                raise OSError("disk full")
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "close_conversation", return_value={"state": "closed"}), \
+             mock.patch.object(m, "open_shadow_log", return_value=(BrokenShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc = m.main()
+        self.assertNotEqual(rc, 0)
 
 
 class TestPointerPostedDedupe(unittest.TestCase):
@@ -294,9 +395,10 @@ class TestPointerPostedDedupe(unittest.TestCase):
              mock.patch.object(m, "post_pointer_comment") as m_pointer, \
              mock.patch.object(m, "close_conversation",
                                 return_value={"state": "closed"}) as m_close, \
-             mock.patch.object(m, "open_shadow_log", return_value=(None, None)), \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
              mock.patch.object(m, "post_slack_summary", return_value=True), \
-             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t"}), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
              mock.patch.object(_sys, "argv", ["m", "--apply"]):
             rc = m.main()
         self.assertEqual(rc, 0)
@@ -305,6 +407,9 @@ class TestPointerPostedDedupe(unittest.TestCase):
         m_close.assert_called_once()
 
     def test_pointer_posted_before_close_is_attempted_for_a_fresh_tier_b_target(self):
+        # Order is load-bearing: the durable marker MUST be persisted
+        # before the customer-facing pointer is posted (Fix 2) — a
+        # persist failure must be able to prevent the post entirely.
         import sys as _sys
         older = conv("O", email="x@y.com", lar=0, lcr=0, created_at=1000)
         kept = conv("K", email="x@y.com", lar=50, lcr=10, created_at=1000 + 86400)
@@ -314,18 +419,43 @@ class TestPointerPostedDedupe(unittest.TestCase):
              mock.patch.object(m, "reverify_still_valid", return_value=True), \
              mock.patch.object(m, "load_pointer_state", return_value={}), \
              mock.patch.object(m, "save_pointer_state",
-                                side_effect=lambda *a: order.append("save")), \
+                                side_effect=lambda *a: order.append("save") or True), \
              mock.patch.object(m, "post_pointer_comment",
                                 side_effect=lambda *a, **k: order.append("pointer")), \
              mock.patch.object(m, "close_conversation",
                                 side_effect=lambda *a, **k: order.append("close") or {"state": "closed"}), \
-             mock.patch.object(m, "open_shadow_log", return_value=(None, None)), \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
              mock.patch.object(m, "post_slack_summary", return_value=True), \
-             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t"}), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
              mock.patch.object(_sys, "argv", ["m", "--apply"]):
             rc = m.main()
         self.assertEqual(rc, 0)
-        self.assertEqual(order, ["pointer", "save", "close"])
+        self.assertEqual(order, ["save", "pointer", "close"])
+
+    def test_pointer_marker_persist_failure_skips_post_and_close_entirely(self):
+        """Fix 2: if the durable marker write fails, the conversation is
+        skipped whole — no pointer post, no close — rather than risking a
+        later run re-posting the customer-facing pointer text."""
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=0, lcr=0, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=50, lcr=10, created_at=1000 + 86400)
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "load_pointer_state", return_value={}), \
+             mock.patch.object(m, "save_pointer_state", return_value=False), \
+             mock.patch.object(m, "post_pointer_comment") as m_pointer, \
+             mock.patch.object(m, "close_conversation") as m_close, \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc = m.main()
+        self.assertNotEqual(rc, 0)
+        m_pointer.assert_not_called()
+        m_close.assert_not_called()
 
 
 class TestReverifyStillValid(unittest.TestCase):
@@ -376,6 +506,93 @@ class TestReverifyStillValid(unittest.TestCase):
         with mock.patch.object(m, "get_conversation", return_value=None):
             self.assertFalse(m.reverify_still_valid("t", older, kept, "A"))
 
+    def test_empty_confirm_email_on_target_fails_closed(self):
+        """Fix 1(a): the old guard used `if confirm_email and confirm_email
+        != email` which PASSED (no-op) when confirm_email was empty — an
+        empty/unconfirmed identity must never be treated as "no
+        objection"."""
+        older = conv("O", email="x@y.com", lar=200, lcr=100, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
+        with mock.patch.object(m, "get_conversation", side_effect=[
+                {"id": "O", "state": "open", "lar": 200, "lcr": 100,
+                 "created_at": 1000, "confirm_email": ""},
+                {"id": "K", "state": "open", "lar": 300, "lcr": 100,
+                 "created_at": 5000, "confirm_email": "x@y.com"}]):
+            self.assertFalse(m.reverify_still_valid("t", older, kept, "A"))
+
+    def test_empty_confirm_email_on_kept_fails_closed(self):
+        older = conv("O", email="x@y.com", lar=200, lcr=100, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
+        with mock.patch.object(m, "get_conversation", side_effect=[
+                {"id": "O", "state": "open", "lar": 200, "lcr": 100,
+                 "created_at": 1000, "confirm_email": "x@y.com"},
+                {"id": "K", "state": "open", "lar": 300, "lcr": 100,
+                 "created_at": 5000, "confirm_email": ""}]):
+            self.assertFalse(m.reverify_still_valid("t", older, kept, "A"))
+
+
+class TestGetConversationIndependentConfirm(unittest.TestCase):
+    """Fix 1(b): confirm_email must come from an INDEPENDENT slow-path GET
+    /contacts/{id}, never from the fast-path source.author.email already
+    used to form the group (which would confirm nothing — same value in,
+    same value out)."""
+
+    def setUp(self):
+        m._contact_email_cache.clear()
+
+    def test_confirm_email_comes_from_contact_get_not_fast_path_author_email(self):
+        # The fast-path author email and the "true" contact-GET email
+        # deliberately DIFFER in this fixture — if get_conversation ever
+        # regresses to contact_email_of's fast path, this test asserts on
+        # the WRONG (author) value and fails.
+        conv_body = {
+            "id": "O",
+            "state": "open",
+            "created_at": 1000,
+            "statistics": {"last_admin_reply_at": 200, "last_contact_reply_at": 100},
+            "source": {"author": {"type": "user", "email": "fast-path-stale@x.com"}},
+            "contacts": {"contacts": [{"id": "C1"}]},
+        }
+        with mock.patch.object(m, "_retry_json", return_value=conv_body), \
+             mock.patch.object(m, "get_contact",
+                                return_value={"email": "true-contact-email@x.com"}) as m_get_contact:
+            result = m.get_conversation("t", "O")
+        m_get_contact.assert_called_once_with("C1", "t")
+        self.assertEqual(result["confirm_email"], "true-contact-email@x.com")
+        self.assertNotEqual(result["confirm_email"], "fast-path-stale@x.com")
+
+    def test_missing_contact_id_yields_empty_confirm_email(self):
+        conv_body = {
+            "id": "O", "state": "open", "created_at": 1000,
+            "statistics": {}, "source": {"author": {"type": "user", "email": "x@y.com"}},
+            "contacts": {"contacts": []},
+        }
+        with mock.patch.object(m, "_retry_json", return_value=conv_body):
+            result = m.get_conversation("t", "O")
+        self.assertEqual(result["confirm_email"], "")
+
+    def test_contact_lookup_failed_yields_empty_confirm_email_not_an_exception(self):
+        conv_body = {
+            "id": "O", "state": "open", "created_at": 1000,
+            "statistics": {}, "source": {"author": {"type": "user", "email": "x@y.com"}},
+            "contacts": {"contacts": [{"id": "C1"}]},
+        }
+        with mock.patch.object(m, "_retry_json", return_value=conv_body), \
+             mock.patch.object(m, "get_contact", side_effect=m.ContactLookupFailed("boom")):
+            result = m.get_conversation("t", "O")
+        self.assertEqual(result["confirm_email"], "")
+
+    def test_404_contact_yields_empty_confirm_email(self):
+        conv_body = {
+            "id": "O", "state": "open", "created_at": 1000,
+            "statistics": {}, "source": {"author": {"type": "user", "email": "x@y.com"}},
+            "contacts": {"contacts": [{"id": "C1"}]},
+        }
+        with mock.patch.object(m, "_retry_json", return_value=conv_body), \
+             mock.patch.object(m, "get_contact", return_value=None):
+            result = m.get_conversation("t", "O")
+        self.assertEqual(result["confirm_email"], "")
+
 
 class TestShadowLogFields(unittest.TestCase):
     """The shadow log record written on close must carry the surviving
@@ -403,7 +620,8 @@ class TestShadowLogFields(unittest.TestCase):
              mock.patch.object(m, "close_conversation", return_value={"state": "closed"}), \
              mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
              mock.patch.object(m, "post_slack_summary", return_value=True), \
-             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t"}), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
              mock.patch.object(_sys, "argv", ["m", "--apply"]):
             rc = m.main()
         self.assertEqual(rc, 0)
@@ -413,6 +631,37 @@ class TestShadowLogFields(unittest.TestCase):
         self.assertEqual(rec["id"], "O")
         self.assertEqual(rec["kept_id"], "K")
         self.assertNotIn("conv_id", rec)
+
+
+class TestSavePointerStateAtomic(unittest.TestCase):
+    """Fix 2: save_pointer_state must be atomic (temp file + os.replace)
+    and must return False (not silently swallow) on OSError."""
+
+    def test_successful_write_returns_true_and_round_trips(self):
+        import json as _json
+        import tempfile as _tempfile
+        with _tempfile.TemporaryDirectory() as d:
+            path = f"{d}/pointer-posted.json"
+            with mock.patch.object(m, "_pointer_state_path", return_value=path):
+                ok = m.save_pointer_state({"O": True})
+            self.assertTrue(ok)
+            with open(path) as f:
+                self.assertEqual(_json.load(f), {"O": True})
+
+    def test_write_failure_returns_false_not_raise(self):
+        # Point at a path whose parent directory cannot be created (a file
+        # masquerading as a directory) to force an OSError inside the
+        # atomic-write path, and confirm it's reported via return value,
+        # not swallowed and not raised.
+        import tempfile as _tempfile
+        with _tempfile.TemporaryDirectory() as d:
+            blocker = f"{d}/not-a-dir"
+            with open(blocker, "w") as f:
+                f.write("x")
+            bad_path = f"{blocker}/pointer-posted.json"
+            with mock.patch.object(m, "_pointer_state_path", return_value=bad_path):
+                ok = m.save_pointer_state({"O": True})
+            self.assertFalse(ok)
 
 
 if __name__ == "__main__":

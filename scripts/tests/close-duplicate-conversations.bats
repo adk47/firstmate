@@ -247,7 +247,13 @@ mod.save_pointer_state = lambda state: saved.append(state)
 posted = []
 mod.post_pointer_comment = lambda *a, **k: posted.append(1)
 mod.close_conversation = lambda *a, **k: {"state": "closed"}
-mod.open_shadow_log = lambda: (None, None)
+
+class FakeShadow:
+    def write(self, s): pass
+    def flush(self): pass
+    def close(self): pass
+
+mod.open_shadow_log = lambda: (FakeShadow(), "/fake/path")
 mod.post_slack_summary = lambda *a, **k: True
 os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
 sys.argv = ["m", "--apply"]
@@ -321,6 +327,121 @@ a = {"id": "A", "email": "one@x.com", "lar": 200, "lcr": 100, "created_at": 1000
 b = {"id": "B", "email": "two@x.com", "lar": 0, "lcr": 0, "created_at": 5000, "is_inbound": True}
 groups = mod.group_duplicates([a, b], set())
 assert groups == [], groups
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
+}
+
+@test "reverify_still_valid: empty confirm_email fails closed (does not pass as no-op)" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('m', os.environ['CLOSEDUP'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+older = {"id": "O", "email": "x@y.com", "lar": 200, "lcr": 100, "created_at": 1000}
+kept = {"id": "K", "email": "x@y.com", "lar": 300, "lcr": 100, "created_at": 5000}
+fresh_older = {"id": "O", "state": "open", "lar": 200, "lcr": 100, "created_at": 1000, "confirm_email": ""}
+fresh_kept = {"id": "K", "state": "open", "lar": 300, "lcr": 100, "created_at": 5000, "confirm_email": "x@y.com"}
+mod.get_conversation = lambda token, cid: fresh_older if cid == "O" else fresh_kept
+assert mod.reverify_still_valid("t", older, kept, "A") is False
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
+}
+
+@test "get_conversation: confirm_email comes from independent GET /contacts, not fast-path author email" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('m', os.environ['CLOSEDUP'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+conv_body = {
+    "id": "O", "state": "open", "created_at": 1000,
+    "statistics": {"last_admin_reply_at": 200, "last_contact_reply_at": 100},
+    "source": {"author": {"type": "user", "email": "fast-path-stale@x.com"}},
+    "contacts": {"contacts": [{"id": "C1"}]},
+}
+mod._retry_json = lambda req: conv_body
+calls = []
+def fake_get_contact(cid, token):
+    calls.append(cid)
+    return {"email": "true-contact-email@x.com"}
+mod.get_contact = fake_get_contact
+result = mod.get_conversation("t", "O")
+assert calls == ["C1"], calls
+assert result["confirm_email"] == "true-contact-email@x.com", result
+assert result["confirm_email"] != "fast-path-stale@x.com"
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
+}
+
+@test "apply mode: shadow log unopenable closes nothing and exits non-zero" {
+  run python3 - <<'PYEOF'
+import os, sys
+from importlib import util
+spec = util.spec_from_file_location('m', os.environ['CLOSEDUP'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+older = {"id": "O", "email": "x@y.com", "lar": 200, "lcr": 100, "created_at": 1000, "is_inbound": True}
+kept = {"id": "K", "email": "x@y.com", "lar": 300, "lcr": 100, "created_at": 5000, "is_inbound": True}
+mod.fetch_open_convs = lambda token: [older, kept]
+mod.owned_ids = lambda paths: set()
+mod.reverify_still_valid = lambda *a, **k: True
+closed = []
+mod.close_conversation = lambda *a, **k: closed.append(1)
+mod.open_shadow_log = lambda: (None, None)
+mod.post_slack_summary = lambda *a, **k: True
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+os.environ["INTERCOM_ADMIN_ID"] = "5763097"
+sys.argv = ["m", "--apply"]
+rc = mod.main()
+assert rc != 0, rc
+assert closed == [], closed
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
+}
+
+@test "pointer marker persist failure skips post and close entirely" {
+  run python3 - <<'PYEOF'
+import os, sys
+from importlib import util
+spec = util.spec_from_file_location('m', os.environ['CLOSEDUP'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+older = {"id": "O", "email": "x@y.com", "lar": 0, "lcr": 0, "created_at": 1000, "is_inbound": True}
+kept = {"id": "K", "email": "x@y.com", "lar": 50, "lcr": 10, "created_at": 1000 + 86400, "is_inbound": True}
+mod.fetch_open_convs = lambda token: [older, kept]
+mod.owned_ids = lambda paths: set()
+mod.reverify_still_valid = lambda *a, **k: True
+mod.load_pointer_state = lambda: {}
+mod.save_pointer_state = lambda state: False
+posted = []
+mod.post_pointer_comment = lambda *a, **k: posted.append(1)
+closed = []
+mod.close_conversation = lambda *a, **k: closed.append(1)
+
+class FakeShadow:
+    def write(self, s): pass
+    def flush(self): pass
+    def close(self): pass
+
+mod.open_shadow_log = lambda: (FakeShadow(), "/fake/path")
+mod.post_slack_summary = lambda *a, **k: True
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+os.environ["INTERCOM_ADMIN_ID"] = "5763097"
+sys.argv = ["m", "--apply"]
+rc = mod.main()
+assert rc != 0, rc
+assert posted == [], posted
+assert closed == [], closed
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]
