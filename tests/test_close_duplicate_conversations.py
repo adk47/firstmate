@@ -862,5 +862,85 @@ class TestSavePointerStateAtomic(unittest.TestCase):
             self.assertFalse(ok)
 
 
+class TestLoadPointerStateFailClosed(unittest.TestCase):
+    """A corrupt/unreadable pointer-state file must never collapse to the
+    same {} as a legitimate first run — that would make every conversation
+    look unseen and re-post an already-confirmed pointer. File-absent (a
+    clean first run) must still return {}."""
+
+    def test_file_absent_returns_empty_dict_clean_first_run(self):
+        import tempfile as _tempfile
+        with _tempfile.TemporaryDirectory() as d:
+            path = f"{d}/does-not-exist.json"
+            with mock.patch.object(m, "_pointer_state_path", return_value=path):
+                self.assertEqual(m.load_pointer_state(), {})
+
+    def test_corrupt_json_raises_pointer_state_unreadable(self):
+        import tempfile as _tempfile
+        with _tempfile.TemporaryDirectory() as d:
+            path = f"{d}/pointer-posted.json"
+            with open(path, "w") as f:
+                f.write('{"O": "posted"')  # truncated/invalid JSON
+            with mock.patch.object(m, "_pointer_state_path", return_value=path):
+                with self.assertRaises(m.PointerStateUnreadable):
+                    m.load_pointer_state()
+
+    def test_unreadable_file_raises_pointer_state_unreadable(self):
+        import os as _os
+        import tempfile as _tempfile
+        with _tempfile.TemporaryDirectory() as d:
+            path = f"{d}/pointer-posted.json"
+            with open(path, "w") as f:
+                f.write('{"O": "posted"}')
+            _os.chmod(path, 0o000)
+            try:
+                with mock.patch.object(m, "_pointer_state_path", return_value=path):
+                    with self.assertRaises(m.PointerStateUnreadable):
+                        m.load_pointer_state()
+            finally:
+                _os.chmod(path, 0o644)  # allow TemporaryDirectory cleanup
+
+
+class TestApplyAbortsOnUnreadablePointerState(unittest.TestCase):
+    """Both required scenarios for the FIX 1 finding: a corrupt (invalid
+    JSON) and an unreadable pointer-state file that ALREADY contains a
+    "posted" marker must make --apply abort BEFORE any Tier-B post/close —
+    exactly-once must hold even when the state file can't be trusted."""
+
+    def _run_apply_with_unreadable_state(self):
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=0, lcr=0, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=50, lcr=10, created_at=1000 + 86400)
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "load_pointer_state",
+                                side_effect=m.PointerStateUnreadable("/fake/pointer-posted.json")), \
+             mock.patch.object(m, "save_pointer_state") as m_save, \
+             mock.patch.object(m, "post_pointer_comment") as m_pointer, \
+             mock.patch.object(m, "close_conversation") as m_close, \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True) as m_slack, \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc = m.main()
+        self.assertNotEqual(rc, 0)
+        m_pointer.assert_not_called()
+        m_close.assert_not_called()
+        m_save.assert_not_called()
+        m_slack.assert_called_once()
+
+    def test_corrupt_pointer_state_with_existing_posted_marker_aborts_apply(self):
+        # PointerStateUnreadable is raised regardless of what the corrupt
+        # file's previous (unparseable) content was — this exercises the
+        # exact failure mode: a file that already recorded "O": "posted"
+        # but is now corrupt must abort, never be silently treated as {}.
+        self._run_apply_with_unreadable_state()
+
+    def test_unreadable_pointer_state_with_existing_posted_marker_aborts_apply(self):
+        self._run_apply_with_unreadable_state()
+
+
 if __name__ == "__main__":
     unittest.main()

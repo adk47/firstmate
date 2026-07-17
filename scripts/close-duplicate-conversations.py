@@ -566,8 +566,25 @@ def _pointer_state_path():
     return os.environ.get("CLOSE_DUP_POINTER_STATE", "/var/lib/close-duplicate/pointer-posted.json")
 
 
+class PointerStateUnreadable(Exception):
+    """Raised by load_pointer_state() when the state file EXISTS but cannot
+    be read/parsed (as opposed to a legitimate first run, where the file
+    simply does not exist yet). _read_json_file() collapses both cases to
+    None, and `None or {}` would make a corrupt/unreadable file look
+    identical to a clean first run — after confirmed posts, every
+    conversation would look unseen and the loop would re-persist "pending"
+    and RE-POST the customer pointer (breaks exactly-once). The caller MUST
+    treat this as untrusted state, not as an empty state."""
+
+
 def load_pointer_state():
-    return _read_json_file(_pointer_state_path()) or {}
+    path = _pointer_state_path()
+    if not os.path.exists(path):
+        return {}
+    state = _read_json_file(path)
+    if state is None:
+        raise PointerStateUnreadable(path)
+    return state
 
 
 def save_pointer_state(state):
@@ -754,7 +771,22 @@ def main():
             f"{when}\nClosing NOTHING this run (no audit trail = no close).",
             channel, cfg, account)
         return 3
-    pointer_state = load_pointer_state()
+    try:
+        pointer_state = load_pointer_state()
+    except PointerStateUnreadable as e:
+        # Fail closed: untrusted pointer state in --apply mode must never be
+        # treated as "no conversations seen yet" — that's exactly how a
+        # confirmed "posted" marker would get silently forgotten and the
+        # customer pointer re-sent. Abort before any Tier-B post/close.
+        print(f"ERROR: pointer state file exists but is unreadable/corrupt "
+              f"({e}) — refusing to proceed with untrusted state "
+              "(closing nothing)", file=sys.stderr)
+        post_slack_summary(
+            ":rotating_light: *Duplicate-close pointer state unreadable/corrupt* — "
+            f"{when}\nClosing NOTHING this run (untrusted state could double-post "
+            "the customer pointer).",
+            channel, cfg, account)
+        return 3
     closed, fail = [], []
     for cand in targets:
         older, kept, tier, email = cand["older"], cand["kept"], cand["tier"], cand["email"]
