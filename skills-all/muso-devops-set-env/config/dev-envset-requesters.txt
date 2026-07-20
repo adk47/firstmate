@@ -1,0 +1,36 @@
+# dev-envset-requesters.txt — humans authorized to drive DEV env-var sets
+# (--env dev) through the DevOps agent.
+#
+# DEV is intentionally broad (Nick's directive, 2026-07-17): the people below
+# may set ANY dev env var — secret-shaped included — with NO per-change human
+# approval. This is the whole point: stop hand-holding dev changes. Blast radius
+# is contained to the muso-dev scope by the backend, and every set is still
+# audited (secret VALUES redacted) and rollback-hinted.
+#
+# Matched case-insensitively against --requester (after Slack-ID→email
+# resolution). Bare Slack UIDs, handles, and full emails all work. This same
+# list is reused as the DEV rate-cap self-ack list (--confirmed-by).
+#
+# SEMANTICS:
+#   - A MISSING file refuses every dev set (fail closed).
+#   - This is the DEV authority gate. Add a human only when they should be able
+#     to change dev runtime config (secrets included) through the agent.
+#   - Prod authority is a SEPARATE, narrower list (envset-requesters.txt).
+#
+# Lines starting with '#' and blank lines are ignored.
+
+# Owners (also authorized for prod via envset-requesters.txt)
+nick
+nick@muso.ai
+aaron
+aaron@muso.ai
+
+# Serhii — "dev king" (U03TYGJF1N3)
+serhii
+serhii@muso.ai
+U03TYGJF1N3
+
+# Artem D (Dolobanko) — DevOps Lead (U0ACHTYUULT).
+# Matched by Slack UID today. Add his confirmed muso.ai email here once known —
+# do NOT use artem@muso.ai, that is Artem M (Mobile), a different person.
+U0ACHTYUULT

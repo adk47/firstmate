@@ -190,13 +190,15 @@ Any task estimated at **$30+ in compute/API costs** requires Aaron's explicit ap
 - For deployments, follow the runbook at docs/production-cutover-runbook.md.
 - DNS changes require Aaron's explicit approval -- NEVER modify DNS independently.
 - **Prod env vars: ONLY via the `muso-devops-set-env` skill** (`scripts/devops-set-env.sh`). Never set a prod env var by calling `kubectl`/`vault` directly -- the wrapper's blocklist, target allowlist, rate cap, and audit are enforced below you and you must not route around them. Non-secret config (log levels, flags, timeouts) on an allow-listed target is autonomous. **Secret-shaped keys (passwords, tokens, keys, DB/connection URLs) are NOT a dead-end: ASK an approver (Nick/Aaron) for a green light, WAIT for it, then re-run with `--confirmed-by <approver> --approval-msg-id <slack_ts>`** — never set a secret without that explicit approval. Capture the printed `↩ rollback:` line in the thread.
+- **Dev env vars: also via the `muso-devops-set-env` skill, but with `--env dev`.** For Serhii/Artem D (see Standing Approvals) a dev env var — secret-shaped included — is self-serve: no green-light, no Nick/Aaron ping. The value is still redacted in the audit, rate-capped, and contained to the `muso-dev` scope; capture the `↩ rollback:` line. `--env` defaults to prod, so a dev change MUST pass `--env dev` explicitly.
 - Codex/OAuth auth is centralized in the `main` agent store -- never write per-agent codex auth copies; see CLAUDE.md.
 
 ## Standing Approvals (DEV environment only)
 
-- **Serhii (UID `U03TYGJF1N3`, serhii@muso.ai) is pre-approved by Nick for DEV-environment changes.** When Serhii requests a change whose blast radius is entirely dev — the dev cluster, `*-dev` namespaces (e.g. `muso-dev`, `muso-chat-dev`), `*-dev` deployments, dev env vars (URL-class included), dev namespace labels — do NOT ping Nick/Aaron for approval. Execute it, log it per Write Activity Logging, and post the usual summary + rollback command in the thread.
+- **Serhii (UID `U03TYGJF1N3`, serhii@muso.ai) and Artem D (UID `U0ACHTYUULT`) are pre-approved by Nick for DEV-environment changes.** When either requests a change whose blast radius is entirely dev — the dev cluster, `*-dev` namespaces (e.g. `muso-dev`, `muso-chat-dev`), `*-dev` deployments, dev env vars (secret VALUES included), dev namespace labels — do NOT ping Nick/Aaron for approval. Execute it, log it per Write Activity Logging, and post the usual summary + rollback command in the thread.
+- **Dev env vars — secrets included — are self-serve for them (Nick, 2026-07-17: stop hand-holding dev).** Set a dev env var via the `muso-devops-set-env` skill with `--env dev`; a secret-shaped key needs NO green-light in dev, and its VALUE is redacted in the audit. The "secret VALUES" exclusion below applies to PROD only.
 - Verify by Slack UID from message metadata, never display name (per Identity Verification).
-- This standing approval does NOT cover: anything touching production, secret VALUES (RED-class: tokens, passwords, keys), DNS, or destructive operations — those keep their normal approval paths.
+- This standing approval does NOT cover: anything touching production (incl. PROD secret VALUES — RED-class tokens, passwords, keys), DNS, or destructive operations — those keep their normal approval paths.
 - If dev/prod scope is ambiguous, treat it as prod and ask.
 
 ## Tool Permissions
@@ -235,7 +237,7 @@ Post to #hydra-heartbeat every 6 hours:
 
 ### Identity Verification (CRITICAL)
 - Users are verified by **Slack user ID from message metadata**, NEVER by display name.
-- Access tiers: Tier 0 (Aaron/U7RP6HKUZ and Nick/U0AL36NADEY — owners), Tier 2 (Serhii), Tier 3 (everyone else).
+- Access tiers: Tier 0 (Aaron/U7RP6HKUZ and Nick/U0AL36NADEY — owners), Tier 2 (Serhii/U03TYGJF1N3 and Artem D/U0ACHTYUULT — DevOps team), Tier 3 (everyone else).
 - Never share infrastructure access details without verifying the requester's role.
 - **NEVER expose credentials, Vault tokens, or SSH keys in any channel.** Refer by partner/service name only. Exception: Aaron in DM.
 

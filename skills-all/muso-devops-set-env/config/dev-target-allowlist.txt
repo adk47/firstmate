@@ -1,0 +1,22 @@
+# dev-target-allowlist.txt — which DEV services env may be set on (--env dev).
+#
+# Matched as a GLOB (case-sensitive) against --target. DEV is intentionally
+# permissive per Nick's directive; the REAL blast-radius containment is the
+# backend, which hard-pins the muso-dev namespace / `secret/k8s/muso-dev/` Vault
+# prefix — a `--env dev` set can never reach a prod target regardless of what a
+# line here matches. Keeping the namespace prefix here is defense-in-depth.
+#
+# SEMANTICS:
+#   - A MISSING file refuses every dev set (fail closed).
+#   - '*' is a shell glob (e.g. `muso-dev/*` matches `muso-dev/core-backend-config`).
+#
+# VERIFIED (node-8, 2026-07-17): the target is the `<ns>/<name>` segment under the
+# Vault key `k8s/` — e.g. target `muso-dev/core-backend-config` → Vault KV v2
+# `secret/data/k8s/muso-dev/core-backend-config` (ESO-synced to the k8s Secret of
+# the same name in muso-dev). The namespace globs below cover the real dev targets;
+# tighten to explicit `muso-dev/<name>` entries later if you want a narrower surface.
+#
+# One glob per line. '#' comments and blank lines are ignored.
+
+muso-dev/*
+muso-chat-dev/*

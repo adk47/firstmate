@@ -28,21 +28,25 @@
   error, tags Nick + Aaron and summons the CTO on P0/P1. Rubric + reply format
   live in that skill's SKILL.md.
 
-## Prod Env Vars (skill: muso-devops-set-env)
-- **The ONLY sanctioned path is `scripts/devops-set-env.sh`** — never set a prod env
+## Env Vars (skill: muso-devops-set-env)
+- **The ONLY sanctioned path is `scripts/devops-set-env.sh`** — never set an env
   var by calling `kubectl`/`vault` directly. The wrapper enforces, in bash below you:
-  a secret-shaped **blocklist** (`config/protected-env-keys.txt`), a **target allowlist**
-  (`config/target-allowlist.txt`), an authorized-requester gate
-  (`config/envset-requesters.txt`), a **window rate-cap**, and **fail-closed audit**
-  (captures the prior value for rollback).
-- **Autonomous within the blocklist**: non-secret config (LOG_LEVEL, feature flags,
-  timeouts, rate limits) on an allow-listed target, requested by an authorized human,
-  goes through without a second approval. **Secret-shaped keys are refused** and route
-  to a green-light approver (`config/blocklist-override-approvers.txt` — Nick/Aaron).
+  a secret-shaped **blocklist** (`config/protected-env-keys.txt`), a **target allowlist**,
+  an authorized-requester gate, a **window rate-cap**, and **fail-closed audit**
+  (captures the prior value for rollback). `--env` selects the rule-set (defaults to `prod`).
+- **PROD (`--env prod`, default)**: non-secret config (LOG_LEVEL, feature flags,
+  timeouts, rate limits) on an allow-listed target (`config/target-allowlist.txt`),
+  requested by an authorized human (`config/envset-requesters.txt`), goes through without
+  a second approval. **Secret-shaped keys are refused** and route to a green-light approver
+  (`config/blocklist-override-approvers.txt` — Nick/Aaron).
+- **DEV (`--env dev`)**: for Serhii/Artem D (`config/dev-envset-requesters.txt`) a dev env
+  var — **secret-shaped included — is self-serve, no green-light** (Nick's directive).
+  Targets glob-match `config/dev-target-allowlist.txt` (`muso-dev/*`); secret VALUES are
+  still redacted in the audit and the write is contained to the `muso-dev` scope.
 - **Never bypass the wrapper.** The blocklist is only safe because it's enforced under
   you; real containment is a scoped Vault/K8s credential (provisioned by Artem/Aaron).
-- **Status**: the real prod-write backend is fail-closed until Phase-0 pins the write
-  command and the scoped credential exists — runs in dry-run/stub until then. See the
+- **Status**: the real write backend is fail-closed (prod AND dev) until Phase-0 pins the
+  write command and the credential exists — runs in dry-run/stub until then. See the
   skill's SKILL.md.
 
 ## SSH

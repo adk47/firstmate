@@ -1,16 +1,20 @@
 ---
 name: muso-devops-set-env
 description: |
-  DevOps agent only. Set a NON-SECRET production environment variable through a
-  guarded, audited, rollback-able wrapper. Autonomous within a blocklist:
-  secret-shaped keys (passwords, tokens, keys, DB/connection URLs) are refused
-  and routed to a human; only allow-listed targets and authorized requesters
-  are accepted; a window rate-cap bounds bursts.
-  Use when an authorized human asks to change a prod runtime config value
+  DevOps agent only. Set an environment variable through a guarded, audited,
+  rollback-able wrapper. PROD (`--env prod`, the default) is autonomous within a
+  blocklist: secret-shaped keys (passwords, tokens, keys, DB/connection URLs) are
+  refused and routed to a human for a green-light; only allow-listed targets and
+  authorized requesters are accepted; a window rate-cap bounds bursts.
+  DEV (`--env dev`) is intentionally broad: an authorized dev requester (Serhii,
+  Artem D) may set ANY dev env var — secret-shaped included — with NO green-light;
+  the secret VALUE is still redacted in the audit and the set is logged +
+  rollback-hinted, contained to the muso-dev scope.
+  Use when an authorized human asks to change a runtime config value
   (e.g. "set LOG_LEVEL=debug on core-backend", "bump a feature flag",
-  "raise a timeout").
-  Triggers: "set env var", "environment variable on prod", "change config on",
-  "set LOG_LEVEL", "feature flag on prod", "update env".
+  "set TUWUNEL_REGISTRATION_TOKEN on dev core-backend").
+  Triggers: "set env var", "environment variable on prod", "set env on dev",
+  "dev env var", "change config on", "set LOG_LEVEL", "feature flag", "update env".
 compatibility: |
   DevOps agent on node-8 (main gateway). Uses the host shell (`exec`) to call
   scripts/devops-set-env.sh. The REAL prod-write backend (kubectl/vault) is
@@ -41,7 +45,23 @@ allow-listed non-secret keys — which the wrapper authenticates as. That creden
 is provisioned by Artem/Aaron, not by this repo. Until it exists and the backend
 is Phase-0-pinned, the real write path is fail-closed (`stub`/dry-run only).
 
-## What is autonomous vs. human-routed
+## PROD vs DEV (`--env`)
+
+`--env` selects the whole rule-set and defaults to **`prod`** (fail-safe — an
+omitted flag never applies dev's looser rules to a prod target).
+
+- **`--env prod`** (default): the gates below. Secret-shaped keys need a human
+  green-light; requesters = `config/envset-requesters.txt` (narrow); targets =
+  `config/target-allowlist.txt` (exact match).
+- **`--env dev`**: intentionally broad per Nick's directive (2026-07-17). A dev
+  requester (`config/dev-envset-requesters.txt` — Serhii, Artem D, Nick, Aaron)
+  may set ANY dev env var — **secret-shaped included, with NO green-light**.
+  Targets = `config/dev-target-allowlist.txt` (glob, `muso-dev/*`). The secret
+  VALUE is still redacted in the audit (`dev_self_serve:true`), the rate-cap still
+  bounds bursts (a dev requester can self-ack), and the write is contained to the
+  `muso-dev` scope by the backend. **Prod is unaffected — it stays fully gated.**
+
+## What is autonomous vs. human-routed (PROD)
 
 - **Autonomous (no second approval):** a non-secret config key, on an allow-listed
   target, requested by an authorized human — e.g. `LOG_LEVEL`, `FEATURE_X_ENABLED`,
@@ -64,10 +84,15 @@ is Phase-0-pinned, the real write path is fail-closed (`stub`/dry-run only).
 ```bash
 SKILL_DIR="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-devops-set-env"
 
-# Set a non-secret config value (autonomous if allowed)
+# Set a non-secret PROD config value (autonomous if allowed)
 bash "$SKILL_DIR/scripts/devops-set-env.sh" --requester <slack_id|email> \
   set --target core-backend --key LOG_LEVEL --value debug \
   --reason "investigating elevated 5xx in #infra-alerts"
+
+# Set a DEV env var (secret-shaped is self-serve for a dev requester — no green-light):
+bash "$SKILL_DIR/scripts/devops-set-env.sh" --requester U03TYGJF1N3 --env dev \
+  set --target muso-dev/core-backend-config --key TUWUNEL_REGISTRATION_TOKEN \
+  --value "$(openssl rand -hex 24)" --reason "dev tuwunel registration token"
 
 # Dry-run first (runs every gate + audit, performs NO write):
 OPS_DRY_RUN=1 bash "$SKILL_DIR/scripts/devops-set-env.sh" --requester <id> \
@@ -115,20 +140,50 @@ thread so any change is one command to revert.
 
 ## Config (all fail-closed if missing)
 
+PROD:
 - `config/protected-env-keys.txt` — the secret-shaped blocklist (glob, case-insensitive).
-- `config/target-allowlist.txt` — allowed targets (exact match). **Placeholder until
+  Shared by both envs for *classification* (drives redaction); it only *blocks* in prod.
+- `config/target-allowlist.txt` — allowed prod targets (exact match). **Placeholder until
   Phase-0 pins the real deployment/app/path identifiers.**
-- `config/envset-requesters.txt` — authorized humans (also the rate-cap approver list).
+- `config/envset-requesters.txt` — authorized prod humans (also the rate-cap approver list).
+- `config/blocklist-override-approvers.txt` — who can green-light a prod secret.
+
+DEV (`--env dev`):
+- `config/dev-envset-requesters.txt` — authorized dev humans (Serhii, Artem D, Nick, Aaron);
+  also the dev rate-cap self-ack list.
+- `config/dev-target-allowlist.txt` — allowed dev targets (glob, e.g. `muso-dev/*`).
+- Dev Vault backend env (set at deploy, NOT in repo): `DEVOPS_ENVSET_BACKEND=vault`,
+  `DEVOPS_DEV_VAULT_ADDR`, `DEVOPS_DEV_VAULT_TOKEN` (see Status → DEV go-live).
 
 Widening any of these (removing a blocklist entry, adding a target or requester) is a
-**policy change** — same scrutiny as widening prod write access.
+**policy change** — for prod, the same scrutiny as widening prod write access; for dev,
+it grants broad dev authority (still audited + muso-dev-scoped).
 
 ## Status / what's left (do not skip)
 
-- **Backend is NOT wired to prod.** `DEVOPS_ENVSET_BACKEND` defaults to refuse;
-  `kubectl`/`vault` are fail-closed pending Phase-0. `stub` is for tests/demos.
-- **Go-live needs:** (a) Phase-0 confirms where prod *non-secret* env actually lives
-  (K8s ConfigMap vs `kubectl set env` vs Coolify vs Vault) and pins the write command;
-  (b) Artem/Aaron provision the scoped credential; (c) `target-allowlist.txt` gets the
-  real identifiers. Only then flip the backend on, and first prove it on a low-stakes
-  var (`LOG_LEVEL`) with rollback.
+- **DEV backend is WIRED (fail-closed without creds); PROD is still Phase-0.**
+  `DEVOPS_ENVSET_BACKEND` defaults to refuse; `stub` is for tests. `vault` + `--env dev`
+  runs the real KV v2 merge-patch (below); `vault` + prod and `kubectl` stay NOT_PINNED.
+- **DEV mechanism (verified on node-8, 2026-07-17):** dev env lives in Vault KV v2 at
+  `secret/data/k8s/<ns>/<name>` (e.g. `.../k8s/muso-dev/core-backend-config`), ESO-synced
+  (30s, `ClusterSecretStore vault-backend`) to the k8s Secret, with `stakater/reloader`
+  auto-restarting the consuming pods. A `kubectl patch secret` is NON-durable (ESO
+  reverts it). So the wrapper does a Vault merge-patch (`backend=vault`, `--env dev`),
+  hard-scoped to `secret/data/k8s/muso-dev/*` — a change propagates to the pods on its own.
+- **DEV go-live — one infra step remains (Artem/Aaron, via H-DevOps):** node-8's host has
+  NO `vault` CLI, NO `VAULT_*` creds, and Vault's in-cluster address
+  (`vault.vault.svc.cluster.local:8200`) is NOT host-reachable. Provision, in the DevOps
+  agent's env: `DEVOPS_DEV_VAULT_ADDR` (a node-8-reachable Vault endpoint) +
+  `DEVOPS_DEV_VAULT_TOKEN` (a token/AppRole with `read`+`patch` — the wrapper now reads the
+  prior value before writing so the audit/rollback prev-value is trustworthy, so `read` is
+  required, not optional — on **both** dev namespaces the allowlist permits:
+  `secret/data/k8s/muso-dev/*` AND `secret/data/k8s/muso-chat-dev/*`; a broad dev scope is
+  fine per Nick's directive), and set `DEVOPS_ENVSET_BACKEND=vault`. Vault policy sketch —
+  grant BOTH prefixes, or `muso-chat-dev/*` targets 403 even though the wrapper advertises
+  them (`config/dev-target-allowlist.txt` + the backend scope guard both allow chat-dev):
+  `path "secret/data/k8s/muso-dev/*"      { capabilities = ["read","patch","create","update"] }`
+  `path "secret/data/k8s/muso-chat-dev/*" { capabilities = ["read","patch","create","update"] }`.
+  Then prove on a throwaway dev key with rollback before Serhii's real token.
+- **Artem D's muso.ai email** is not yet confirmed; he is authorized by Slack UID
+  (`U0ACHTYUULT`) today. Add his email to `dev-envset-requesters.txt` +
+  `resolve_slack_to_email()` once known (NOT `artem@muso.ai` — that is Artem M, Mobile).
