@@ -39,7 +39,7 @@ guarded_candidates() {
   for f in "$SCRIPTS"/*-watchdog.sh "$SCRIPTS"/*-watchdog.py; do
     [ -e "$f" ] && basename "$f"
   done
-  printf '%s\n' codex-keepalive.sh codex-token-refresh.sh provision-peer-labels.sh
+  printf '%s\n' codex-keepalive.sh codex-token-refresh.sh provision-peer-labels.sh cto-nightly-driver.sh
 }
 
 exempt_set() {

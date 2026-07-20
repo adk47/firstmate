@@ -104,6 +104,18 @@
 #     sales lead was closed-as-answered and forwarded to Nick by
 #     email; Aaron, who owns ads, never saw it).
 #
+#   cto-nightly-driver.timer / .service
+#     Every 30 min. Runs scripts/cto-nightly-driver.sh, the deterministic
+#     overnight supervisor for the nightly CTO issue-fixer's currently-open
+#     PR (tracked in /var/lib/hydra-cto-nightly/current.json). Pure gh/jq/
+#     bash: posts a threaded "ready for merge" note when CI + review + merge
+#     state all settle green, dispatches a single bounded cto FIX-PASS turn
+#     when there's an actual, mechanically detected delta (unresolved
+#     finding, QA no-go, redded CI, or a dead QA dispatch it recovers by
+#     rerunning PR Validation), and pauses the loop after
+#     CTO_NIGHTLY_MAX_FIX_TURNS rounds. Never dispatches the agent without a
+#     delta.
+#
 #   hydra-release.timer / .service
 #     Daily-release cron. Mon..Fri 08:00 Europe/Rome. Invokes
 #     scripts/release-cron.sh, which:
@@ -209,6 +221,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/weekly-cleanup.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/dedup/sweeps/close-merged-tickets.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/dedup/sweeps/close-merged-tickets.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/cto-nightly-driver.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/cto-nightly-driver.sh missing or not executable"
 
 log "installing into $HYDRA_ROOT"
 
@@ -763,6 +777,50 @@ cm=close-merged-tickets.timer
 systemctl enable "$cm" >/dev/null 2>&1 || log "WARN: could not enable $cm"
 systemctl start "$cm" >/dev/null 2>&1 || log "WARN: could not start $cm"
 log "  $cm: $(systemctl is-active "$cm" 2>/dev/null || echo unknown)"
+
+# ─── Nightly CTO issue-fixer overnight driver, every 30 min ───
+# Deterministic gh/jq/bash supervisor for the ONE open "nightly PR" the cto
+# agent's overnight OPEN turn is tracking (state at
+# /var/lib/hydra-cto-nightly/current.json). Ticks every 30 min: clears state
+# on PR close/merge, posts a final "ready for merge" note once CI + review +
+# mergeable state all settle green, and dispatches a single bounded cto
+# FIX-PASS one-shot only when there's an actual delta to act on (never a bare
+# LLM poll). See scripts/cto-nightly-driver.sh for the full tick logic.
+install -d -m 755 /var/lib/hydra-cto-nightly
+cat > /etc/systemd/system/cto-nightly-driver.service << CTONIGHTLYSVC
+[Unit]
+Description=Nightly CTO issue-fixer overnight driver (supervises the open nightly PR)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# main.env, NOT edge.env: this driver dispatches to the MAIN gateway's cto
+# agent (openclaw --profile main cron add) — carrying edge's
+# OPENCLAW_STATE_DIR would aim any profile-blind resolver path at the wrong
+# profile (see the state-dir pin doctrine in CLAUDE.md).
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=$HYDRA_ROOT/scripts/cto-nightly-driver.sh
+CTONIGHTLYSVC
+
+cat > /etc/systemd/system/cto-nightly-driver.timer << CTONIGHTLYTMR
+[Unit]
+Description=Every 30 min — supervise the nightly CTO issue-fixer's open PR
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Unit=cto-nightly-driver.service
+
+[Install]
+WantedBy=timers.target
+CTONIGHTLYTMR
+
+systemctl daemon-reload
+ctn=cto-nightly-driver.timer
+systemctl enable "$ctn" >/dev/null 2>&1 || log "WARN: could not enable $ctn"
+systemctl start "$ctn" >/dev/null 2>&1 || log "WARN: could not start $ctn"
+log "  $ctn: $(systemctl is-active "$ctn" 2>/dev/null || echo unknown)"
 
 # ─── Gateway pre-start self-heal drop-ins ─────────────────────
 # One drop-in per profile, hard-coded with the profile name (the
