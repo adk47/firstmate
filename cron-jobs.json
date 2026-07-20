@@ -32,17 +32,6 @@
         "channel": "slack",
         "to": "C0ADV2W76G4",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 1,
-        "nextRunAtMs": 1774411200000,
-        "lastRunAtMs": 1774324845410,
-        "lastRunStatus": "error",
-        "lastStatus": "error",
-        "lastDurationMs": 250675,
-        "lastError": "⚠️ ✉️ Message failed",
-        "lastDelivered": true,
-        "lastDeliveryStatus": "delivered"
       }
     },
     {
@@ -75,16 +64,6 @@
         "channel": "slack",
         "to": "C0ADV2W76G4",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774425600000,
-        "lastRunAtMs": 1774339235776,
-        "lastRunStatus": "ok",
-        "lastStatus": "ok",
-        "lastDurationMs": 172539,
-        "lastDelivered": true,
-        "lastDeliveryStatus": "delivered"
       }
     },
     {
@@ -117,17 +96,6 @@
         "channel": "slack",
         "to": "C0ADREBPNQ2",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 1,
-        "nextRunAtMs": 1774429200000,
-        "lastRunAtMs": 1774342868749,
-        "lastRunStatus": "error",
-        "lastStatus": "error",
-        "lastDurationMs": 300008,
-        "lastError": "cron: job execution timed out",
-        "lastErrorReason": "timeout",
-        "lastDeliveryStatus": "unknown"
       }
     },
     {
@@ -159,16 +127,6 @@
         "channel": "slack",
         "to": "C0ARTH6U0S2",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774432800000,
-        "lastRunAtMs": 1774346492347,
-        "lastRunStatus": "error",
-        "lastStatus": "error",
-        "lastDurationMs": 300005,
-        "lastErrorReason": "timeout",
-        "lastDeliveryStatus": "unknown"
       }
     },
     {
@@ -202,10 +160,6 @@
         "channel": "slack",
         "to": "C08GZPWAKBJ",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774454400000
       }
     },
     {
@@ -238,16 +192,6 @@
         "channel": "slack",
         "to": "C0ADV2W76G4",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774447200000,
-        "lastRunAtMs": 1774360800004,
-        "lastRunStatus": "ok",
-        "lastStatus": "ok",
-        "lastDurationMs": 221003,
-        "lastDelivered": true,
-        "lastDeliveryStatus": "delivered"
       }
     },
     {
@@ -280,10 +224,6 @@
         "channel": "slack",
         "to": "D0AKT90NQJX",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774386000000
       }
     },
     {
@@ -317,16 +257,6 @@
         "channel": "slack",
         "to": "C0ARQ021M40",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774385970290,
-        "lastRunAtMs": 1774385070290,
-        "lastRunStatus": "ok",
-        "lastStatus": "ok",
-        "lastDurationMs": 36211,
-        "lastDeliveryStatus": "delivered",
-        "lastDelivered": true
       }
     },
     {
@@ -360,10 +290,6 @@
         "channel": "slack",
         "to": "C031DKAGQSH",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774454400000
       }
     },
     {
@@ -396,16 +322,6 @@
         "channel": "slack",
         "to": "C031DKAGQSH",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774422000000,
-        "lastRunAtMs": 1774335655594,
-        "lastRunStatus": "ok",
-        "lastStatus": "ok",
-        "lastDurationMs": 270360,
-        "lastDelivered": true,
-        "lastDeliveryStatus": "delivered"
       }
     },
     {
@@ -439,17 +355,6 @@
         "channel": "slack",
         "to": "C0ADV2W76G4",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 1,
-        "nextRunAtMs": 1774422000000,
-        "lastRunAtMs": 1774335925954,
-        "lastRunStatus": "error",
-        "lastStatus": "error",
-        "lastDurationMs": 155538,
-        "lastError": "⚠️ ✉️ Message failed",
-        "lastDelivered": true,
-        "lastDeliveryStatus": "delivered"
       }
     },
     {
@@ -483,10 +388,6 @@
         "channel": "slack",
         "to": "C0ADV2W76G4",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1774753200000
       }
     },
     {
@@ -519,16 +420,6 @@
         "channel": "slack",
         "to": "C0ARS7XMY93",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1776078000000,
-        "lastRunAtMs": 1775991600008,
-        "lastRunStatus": "ok",
-        "lastStatus": "ok",
-        "lastDurationMs": 135770,
-        "lastDelivered": true,
-        "lastDeliveryStatus": "delivered"
       }
     },
     {
@@ -559,10 +450,6 @@
       },
       "delivery": {
         "mode": "none"
-      },
-      "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1776369600000
       }
     },
     {
@@ -593,9 +480,6 @@
       },
       "delivery": {
         "mode": "none"
-      },
-      "state": {
-        "consecutiveErrors": 0
       }
     },
     {
@@ -629,10 +513,6 @@
         "channel": "slack",
         "to": "user:U7RP6HKUZ",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1780322400000
       }
     },
     {
@@ -666,10 +546,6 @@
         "channel": "slack",
         "to": "user:U0AL36NADEY",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0,
-        "nextRunAtMs": 1780322400000
       }
     },
     {
@@ -702,9 +578,6 @@
         "channel": "slack",
         "to": "C0ADV2W76G4",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0
       }
     },
     {
@@ -737,9 +610,6 @@
         "channel": "slack",
         "to": "C0ADV2W76G4",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0
       }
     },
     {
@@ -773,9 +643,6 @@
         "channel": "slack",
         "to": "C0ANM0PN9L5",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0
       }
     },
     {
@@ -809,9 +676,6 @@
         "channel": "slack",
         "to": "C0ANM0PN9L5",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0
       }
     },
     {
@@ -845,9 +709,6 @@
         "channel": "slack",
         "to": "C0ANM0PN9L5",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0
       }
     },
     {
@@ -881,9 +742,6 @@
         "channel": "slack",
         "to": "C0APB2CMM7C",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0
       }
     },
     {
@@ -917,9 +775,6 @@
         "channel": "slack",
         "to": "C0ARQ021M40",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0
       }
     },
     {
@@ -953,9 +808,6 @@
         "channel": "slack",
         "to": "C0APB2CMM7C",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0
       }
     },
     {
@@ -986,9 +838,6 @@
       },
       "delivery": {
         "mode": "none"
-      },
-      "state": {
-        "consecutiveErrors": 0
       }
     },
     {
@@ -1022,9 +871,6 @@
         "channel": "slack",
         "to": "C0ANM0PN9L5",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0
       }
     },
     {
@@ -1057,9 +903,6 @@
         "to": "C070XCHH06S",
         "accountId": "finance",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0
       }
     },
     {
@@ -1092,9 +935,6 @@
         "to": "C07112YT8TF",
         "accountId": "finance",
         "bestEffort": true
-      },
-      "state": {
-        "consecutiveErrors": 0
       }
     }
   ]
