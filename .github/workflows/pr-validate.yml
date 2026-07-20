@@ -1139,6 +1139,20 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_cs_needs_human_digest
+      - name: Run close-duplicate-conversations tests
+        # scripts/close-duplicate-conversations.py is a ONE-WAY-DOOR sweeper
+        # (Phase 1, ships SHADOW-MODE ONLY — no --apply on the systemd
+        # timer). These lock the deterministic Tier A/B gates, the
+        # fail-closed pre-close re-verify (independent GET /contacts/{id}
+        # confirmation, never the fast-path author email already used to
+        # form the group), the durable pointer_posted marker ordering
+        # (persist -> post -> close, never re-posting the customer-facing
+        # pointer), the shadow-log-unopenable hard stop, and that the
+        # kept thread is always recorded as kept_id, never id/conv_id. Same
+        # bare stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_close_duplicate_conversations
 
   plugin-tests:
     name: Plugin tests (vitest)

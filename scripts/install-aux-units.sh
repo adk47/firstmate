@@ -201,6 +201,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/caroline-behavior-digest.py missing"
 [[ -f "$HYDRA_ROOT/scripts/cs-needs-human-digest.py" ]] \
   || fail "$HYDRA_ROOT/scripts/cs-needs-human-digest.py missing"
+[[ -f "$HYDRA_ROOT/scripts/close-duplicate-conversations.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/close-duplicate-conversations.py missing"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/weekly-cleanup.sh" ]] \
@@ -555,6 +557,49 @@ cnhd=cs-needs-human-digest.timer
 systemctl enable "$cnhd" >/dev/null 2>&1 || log "WARN: could not enable $cnhd"
 systemctl start "$cnhd" >/dev/null 2>&1 || log "WARN: could not start $cnhd"
 log "  $cnhd: $(systemctl is-active "$cnhd" 2>/dev/null || echo unknown)"
+
+# ─── Close duplicate conversations (SHADOW MODE — daily 10:00 UTC) ────
+# Phase 1 of docs/plans/autonomous-cs-machine.md: a deterministic sweeper
+# that identifies strictly-safe DUPLICATE Intercom conversations (same
+# customer, >=2 open inbound threads, resolved via the fast-path author
+# email only) and would auto-close the older member of each safe pair,
+# keeping the newest. THIS UNIT SHIPS SHADOW-MODE ONLY: ExecStart does NOT
+# pass --apply, so no conversation is ever closed by this timer — it only
+# posts "would close X -> kept Y (tier A/B)" candidate pairs to #cs_chats
+# via --notify-candidates for Jan to review. The --apply --limit flip is a
+# separate, later, explicitly-gated PR (Jan + Nick + Aaron sign-off on the
+# Tier-B pointer text). See scripts/close-duplicate-conversations.py.
+cat > /etc/systemd/system/close-duplicate-conversations.service << CLOSEDUPSVC
+[Unit]
+Description=Shadow-mode duplicate-conversation close sweeper (dry-run only)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/close-duplicate-conversations.py --notify-candidates
+CLOSEDUPSVC
+
+cat > /etc/systemd/system/close-duplicate-conversations.timer << CLOSEDUPTMR
+[Unit]
+Description=Daily — duplicate-conversation close sweeper (shadow mode) at 10:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 10:00:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=close-duplicate-conversations.service
+
+[Install]
+WantedBy=timers.target
+CLOSEDUPTMR
+
+systemctl daemon-reload
+cdup=close-duplicate-conversations.timer
+systemctl enable "$cdup" >/dev/null 2>&1 || log "WARN: could not enable $cdup"
+systemctl start "$cdup" >/dev/null 2>&1 || log "WARN: could not start $cdup"
+log "  $cdup: $(systemctl is-active "$cdup" 2>/dev/null || echo unknown)"
 
 # ─── Caroline autonomous-behavior digest (daily 16:00 UTC) ────
 # Read-only daily digest of Caroline's autonomous self-serve activity so we can
