@@ -56,9 +56,15 @@ STUB
   chmod +x "$TEST_TMPDIR/bin/muso"
   export MUSO_BIN="$TEST_TMPDIR/bin/muso"
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
-  # The node-8 runner can inherit the real bot token. Strip it explicitly so
-  # alert-path tests cannot reach Slack even when the parent is credentialed.
-  unset MUSO_SLACK_BOT_TOKEN_DEVOPS
+  # The node-8 runner can inherit a bot selection plus real tokens for several
+  # bots. Strip the selection and every token so no parent credential can
+  # activate an alert path.
+  unset SLACK_NOTIFY_BOT
+  while IFS='=' read -r name _; do
+    case "$name" in
+      MUSO_SLACK_BOT_TOKEN_*) unset "$name" ;;
+    esac
+  done < <(env)
   export MUSO_SLACK_ENV_FILE=/dev/null
 }
 teardown() {
