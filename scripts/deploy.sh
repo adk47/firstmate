@@ -56,6 +56,11 @@ source "$SCRIPT_DIR/lib/codex-version.sh"
 # shellcheck source=lib/deploy-lock.sh
 source "$SCRIPT_DIR/lib/deploy-lock.sh"
 
+# Effective systemd EnvironmentFile validation for the muso CLI credentials
+# used by the main gateway (unit-tested in scripts/tests/muso-env-preflight.bats).
+# shellcheck source=lib/muso-env-preflight.sh
+source "$SCRIPT_DIR/lib/muso-env-preflight.sh"
+
 # Pinned muso CLI version (github.com/Muso-AI/muso-cli) — the admin-API /
 # policy CLI for main-gateway agents (soak phase: opt-in via the
 # skills-all/muso-cli skill). Independent release cadence from openclaw;
@@ -759,6 +764,14 @@ RSYNC_EXCLUDES=(
   # node-8 is manually cleaned (observed 2026-07-15; drift guard requires the
   # mirrored '.tmp-*' KEEP glob in scripts/qa-clean-merge-scratch.sh).
   --exclude='workspaces/*/.tmp-*'
+  # Scout writes numbered AI-music candidate batches at its workspace root
+  # while a research run is active. They are transient runtime inputs, can be
+  # recreated during CI, and must not make an unrelated deploy try to delete
+  # an in-flight batch (observed 2026-07-17 on PR #698).
+  --exclude='workspaces/scout/tmp_ai_music_candidates*.json'
+  # The same Scout run composes its candidate batches into one root-level
+  # final scratch artifact before promoting any durable report.
+  --exclude='workspaces/scout/tmp_ai_music_final.json'
   # Agent long-term memory (written by agents at runtime, should survive
   # deploys — see docs/guides/WORKSPACE-FILE-OWNERSHIP.md). MEMORY.md IS tracked
   # in git as a seed, but agents modify it post-deploy and we must not
@@ -2160,12 +2173,12 @@ if ! grep -q "GOG_KEYRING_PASSWORD" /root/.bashrc 2>/dev/null; then
   fi
 fi
 
-# Guard: ensure muso-ops-admin credentials are present in the main profile
-# env file. The ops agent (on the main profile) needs MUSO_ADMIN_EMAIL and
-# MUSO_ADMIN_PASSWORD to auth against the Muso admin API; without them all
-# admin API operations fail — the ops agent surfaces this as "admin API
-# credentials are not configured" (first observed on credit-verification
-# requests). These vars live in /etc/openclaw/main.env (loaded as systemd
+# Guard: ensure both production and dev admin credentials are present in the
+# main profile env file. MUSO_ADMIN_EMAIL/PASSWORD remain required by legacy
+# wrappers; muso-cli v0.11+ uses MUSO_PROD_ADMIN_* for prod and requires
+# MUSO_DEV_ADMIN_* for dev. Without the dev pair, `muso --env dev` fails closed
+# instead of sending prod credentials to dev. These vars live in
+# /etc/openclaw/main.env (loaded as systemd
 # EnvironmentFile by openclaw-gateway-main.service) and are NOT in ~/.zshrc
 # — the daemon does not source an interactive shell. Warn loudly on drift so
 # a future main.env regeneration can't silently break the ops agent again.
@@ -2176,13 +2189,16 @@ if needs_target "main"; then
   MAIN_ENV="/etc/openclaw/main.env"
   if [ -f "$MAIN_ENV" ]; then
     missing_vars=()
-    grep -qE "^MUSO_ADMIN_EMAIL=.+"    "$MAIN_ENV" || missing_vars+=(MUSO_ADMIN_EMAIL)
-    grep -qE "^MUSO_ADMIN_PASSWORD=.+" "$MAIN_ENV" || missing_vars+=(MUSO_ADMIN_PASSWORD)
-    # muso CLI runtime env (soak phase) — why each var matters is in
-    # docs/runbooks/RUNBOOK.md, "muso CLI (main gateway)".
-    grep -qE "^MUSO_ENV=prod$"          "$MAIN_ENV" || missing_vars+=("MUSO_ENV=prod")
-    grep -qE "^MUSO_NONINTERACTIVE=1$"  "$MAIN_ENV" || missing_vars+=("MUSO_NONINTERACTIVE=1")
-    grep -qE "^MUSO_STATE_DIR=/var/log/muso-ops$" "$MAIN_ENV" || missing_vars+=("MUSO_STATE_DIR=/var/log/muso-ops")
+    # Ask systemd to parse EnvironmentFile with the same quoting,
+    # duplicate-key (last assignment wins), and empty-value semantics the
+    # gateway uses. Never `source` a systemd env file as shell code.
+    if effective_missing="$(muso_main_env_missing "$MAIN_ENV" 2>/dev/null)"; then
+      while IFS= read -r var; do
+        [[ -n "$var" ]] && missing_vars+=("$var")
+      done <<< "$effective_missing"
+    else
+      missing_vars+=("effective main.env validation (systemd-run failed)")
+    fi
     if (( ${#missing_vars[@]} > 0 )); then
       log "WARN: $MAIN_ENV is missing: ${missing_vars[*]}"
       log "WARN: ops agent admin API / muso CLI operations will fail until these are added (docs/runbooks/RUNBOOK.md, 'muso CLI')."
@@ -2190,7 +2206,8 @@ if needs_target "main"; then
     fi
   else
     log "WARN: $MAIN_ENV does not exist — ops agent will start with no admin credentials."
-    log "WARN: create it, add MUSO_ADMIN_EMAIL= (e.g. retool@muso.ai) and MUSO_ADMIN_PASSWORD=,"
+    log "WARN: create it, add legacy MUSO_ADMIN_EMAIL/PASSWORD plus scoped MUSO_PROD_ADMIN_EMAIL/PASSWORD,"
+    log "WARN: and a separate dev MUSO_DEV_ADMIN_EMAIL/PASSWORD pair (never reuse the prod password),"
     log "WARN: plus the muso CLI vars (MUSO_ENV=prod, MUSO_NONINTERACTIVE=1, MUSO_STATE_DIR=/var/log/muso-ops"
     log "WARN: — see docs/runbooks/RUNBOOK.md, 'muso CLI (main gateway)'), then:"
     log "WARN:   systemctl restart openclaw-gateway-main"

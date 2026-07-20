@@ -189,7 +189,7 @@ ssh root@40.160.32.80 'cd /opt/hydra && ./scripts/smoke-test.sh main'
 The `muso` binary (github.com/Muso-AI/muso-cli) is version-pinned by deploy.sh
 (`MUSO_CLI_VERSION`, Step 4d.6) and its policy config is rendered into
 `/root/.config/muso/` on every deploy. Its runtime env is NOT deployed — it
-lives in `/etc/openclaw/main.env` (manually provisioned, like MUSO_ADMIN_*).
+lives in `/etc/openclaw/main.env` and is manually provisioned.
 
 `/root/.config/muso/` is deploy-owned: every deploy overwrites
 `approvers.txt`, `bulk-exclude.txt`, and `config.json` from the **operations
@@ -200,21 +200,38 @@ git). To change approvers, edit that source dir on node-8 — hand-edits to the
 rendered files are silently lost on the next deploy.
 
 One-time provisioning (deploy.sh warn-checks these and tells you if they're
-missing; the grep guard keeps a re-run from appending duplicates):
+missing):
 
 ```bash
 ssh root@40.160.32.80
-grep -q '^MUSO_ENV=' /etc/openclaw/main.env || cat >> /etc/openclaw/main.env <<'EOF'
-MUSO_ENV=prod
-MUSO_NONINTERACTIVE=1
-MUSO_STATE_DIR=/var/log/muso-ops
-EOF
+# Edit this file without printing secret values. admin_u@muso.ai must exist in
+# the DEV users table with the admin role; its password must be dev-specific.
+sudoedit /etc/openclaw/main.env
+
+# Required keys:
+# MUSO_ADMIN_EMAIL=...          # legacy wrappers; production only
+# MUSO_ADMIN_PASSWORD=...
+# MUSO_PROD_ADMIN_EMAIL=...     # muso-cli scoped production credential
+# MUSO_PROD_ADMIN_PASSWORD=...
+# MUSO_DEV_ADMIN_EMAIL=admin_u@muso.ai
+# MUSO_DEV_ADMIN_PASSWORD=...   # new dev-only password; never reuse prod
+# MUSO_ENV=prod
+# MUSO_NONINTERACTIVE=1
+# MUSO_STATE_DIR=/var/log/muso-ops
 systemctl restart openclaw-gateway-main
 ```
 
 Why each var matters:
 - `MUSO_ENV=prod` — muso defaults to the dev environment; without this every
-  agent call fails auth (only prod creds exist on node-8).
+  unqualified agent call would target dev. Explicit `--env dev` still wins.
+- `MUSO_ADMIN_EMAIL/PASSWORD` — legacy production-only credentials for
+  integrations that have not migrated to `MUSO_PROD_ADMIN_*` yet.
+- `MUSO_PROD_ADMIN_EMAIL/PASSWORD` — the explicitly scoped production pair
+  used after muso-cli v0.11+ is released and pinned. The legacy pair then
+  remains a prod-only CLI fallback.
+- `MUSO_DEV_ADMIN_EMAIL/PASSWORD` — the dev-only admin identity used after
+  muso-cli v0.11+ is pinned. Until that release is installed, do not run a dev
+  auth check from this host: v0.10 still reads the generic production pair.
 - `MUSO_NONINTERACTIVE=1` — guarantees muso never blocks on a confirmation
   prompt if an exec ever allocates a PTY.
 - `MUSO_STATE_DIR=/var/log/muso-ops` — shares the merge-guard and
@@ -226,9 +243,30 @@ Verify:
 ```bash
 ssh root@40.160.32.80 'muso version --json | jq -r .version'   # == MUSO_CLI_VERSION pin
 ssh root@40.160.32.80 'muso health --env prod'                  # exit 0
+ssh root@40.160.32.80 'systemd-run --quiet --wait --collect --pipe --setenv=HOME=/root -p EnvironmentFile=/etc/openclaw/main.env /usr/local/bin/muso api GET /admin/credit-requests/counts --env prod --json >/dev/null'
 ssh root@40.160.32.80 'ls -l /root/.config/muso/'               # config.json, approvers.txt, bulk-exclude.txt
 ssh root@40.160.32.80 'bash /opt/hydra/scripts/muso-prewrite-hook.sh GET /x prod; echo rc=$?'  # rc=0 when codex healthy
 ```
+
+After muso-cli v0.11+ is released and pinned here, dev/QA connection quota
+reset is idempotent and keeps Connection rows intact:
+
+```bash
+sender_user_id='12345'
+requester_email='developer@example.com'
+ssh root@40.160.32.80 systemd-run --quiet --wait --collect --pipe \
+  --setenv=HOME=/root -p EnvironmentFile=/etc/openclaw/main.env \
+  /usr/local/bin/muso api GET /admin/credit-requests/counts --env dev --json >/dev/null
+ssh root@40.160.32.80 systemd-run --quiet --wait --collect --pipe \
+  --setenv=HOME=/root -p EnvironmentFile=/etc/openclaw/main.env \
+  /usr/local/bin/muso connections quota reset --env dev \
+  --user "$sender_user_id" --requester "$requester_email"
+```
+
+The CLI gate and backend handler both refuse this operation outside dev. If
+dev login returns `User Not Found!`, provision/fix the dev application user
+and role; the database `db-muso-core-admin` ExternalSecret is unrelated to
+application login.
 
 ### Troubleshooting
 
