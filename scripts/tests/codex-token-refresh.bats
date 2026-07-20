@@ -7,6 +7,7 @@ bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 SCRIPT="$HYDRA_REPO/scripts/codex-token-refresh.sh"
+INSTALLER="$HYDRA_REPO/scripts/install-aux-units.sh"
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
@@ -113,4 +114,17 @@ STUB
   run "$SCRIPT"
   [ "$status" -eq 1 ]
   [[ "$output" == *"gateway restart FAILED"* ]]
+}
+
+@test "systemd timeout covers two serial drain-aware gateway restarts" {
+  timeout=$(sed -n \
+    '/codex-token-refresh.service << CODEXREFRESHSVC/,/^CODEXREFRESHSVC$/ s/^TimeoutStartSec=//p' \
+    "$INSTALLER")
+  [[ "$timeout" =~ ^[0-9]+$ ]]
+
+  # Per gateway: safe-request timeout/kill grace + drain deadline + systemd's
+  # default stop/start budgets + hard-restart poll.
+  # Add five minutes for the OAuth refresh/sync and systemd scheduling margin.
+  minimum=$((2 * (30 + 5 + 390 + 90 + 90 + 15 * 2) + 300))
+  [ "$timeout" -ge "$minimum" ]
 }

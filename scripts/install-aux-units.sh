@@ -1271,9 +1271,10 @@ Description=HYDRA codex OAuth token refresh (+ gateway reload)
 
 [Service]
 Type=oneshot
-# Generous start timeout: the script blocks on `systemctl restart` of both
-# gateways; gateway starts are quick, but don't let a slow one kill the oneshot.
-TimeoutStartSec=300
+# The gateways restart serially. Each can spend 35s timing out a safe request,
+# 390s draining, 180s in systemd's stop/start budgets, then 30s confirming the
+# hard fallback. Thirty minutes leaves margin for OAuth refresh/sync as well.
+TimeoutStartSec=1800
 ExecStart=$HYDRA_ROOT/scripts/codex-token-refresh.sh
 Environment=HOME=/root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
