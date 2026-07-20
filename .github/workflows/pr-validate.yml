@@ -989,6 +989,15 @@ jobs:
         # access goes through stubbed fraud-muso-only-lookup fixtures.
         run: |
           set -euo pipefail
+          # The self-hosted runner may carry production bot credentials. Bats
+          # suites must opt into fake credentials after launch; none may inherit
+          # a real token and accidentally activate an alert path.
+          while IFS='=' read -r name _; do
+            case "$name" in
+              MUSO_SLACK_BOT_TOKEN_*) unset "$name" ;;
+            esac
+          done < <(env)
+          export MUSO_SLACK_ENV_FILE=/dev/null
           # skills-all/ suites auto-enroll via the dir scan: pin-each-suite
           # leaked there (muso-devops-prod-logs' suite existed but never ran
           # in CI). Collected via a loop, not a bare glob operand, so zero
@@ -1064,6 +1073,17 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_intake_watchdog
+      - name: Run store-only cron guard tests
+        # scripts/lib/detect-store-only-crons.py is the deploy gate that HALTS if
+        # the live SQLite cron store holds a recurring cron absent from
+        # cron-jobs.json — preventing the silent deletion of a live-created cron
+        # (incident 2026-07-16: Aaron's ChartMogul crons, PR #702). Locks the
+        # durable-orphan detection, the ephemeral (deleteAfterRun+at) exemption,
+        # and the HYDRA_ALLOW_ORPHAN_CRON downgrade. Same bare stdlib unittest,
+        # targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_detect_store_only_crons
       - name: Run close-resolved-conversations predicate tests
         # The unattended daily close job (scripts/close-resolved-conversations.py)
         # silently closes customer conversations; these lock its is_eligible
@@ -1119,6 +1139,20 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_cs_needs_human_digest
+      - name: Run close-duplicate-conversations tests
+        # scripts/close-duplicate-conversations.py is a ONE-WAY-DOOR sweeper
+        # (Phase 1, ships SHADOW-MODE ONLY — no --apply on the systemd
+        # timer). These lock the deterministic Tier A/B gates, the
+        # fail-closed pre-close re-verify (independent GET /contacts/{id}
+        # confirmation, never the fast-path author email already used to
+        # form the group), the durable pointer_posted marker ordering
+        # (persist -> post -> close, never re-posting the customer-facing
+        # pointer), the shadow-log-unopenable hard stop, and that the
+        # kept thread is always recorded as kept_id, never id/conv_id. Same
+        # bare stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_close_duplicate_conversations
 
   plugin-tests:
     name: Plugin tests (vitest)
