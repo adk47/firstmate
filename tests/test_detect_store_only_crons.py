@@ -96,6 +96,19 @@ class DetectStoreOnlyCrons(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 2, r.stderr)
 
+    def test_malformed_store_shape_fails_closed_exit_2(self):
+        # Valid JSON, WRONG shape: a store dump that is a dict without a `jobs`
+        # array, or whose `jobs` is not a list, or a bare scalar. Each must
+        # exit 2 (fail-closed) — NOT be silently read as an empty store, which
+        # would let saveCronStore delete every durable store-only cron (the
+        # 2026-07-16 ChartMogul wipe this guard prevents).
+        good = self._write("repo.json", {"jobs": []})
+        for shape in ({"crons": [DURABLE]}, {"jobs": "not-a-list"}, {}, 42):
+            store = self._write("store.json", shape)
+            r = subprocess.run([sys.executable, str(HELPER), good, store],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2, f"shape={shape!r} stderr={r.stderr}")
+
 
 if __name__ == "__main__":
     unittest.main()

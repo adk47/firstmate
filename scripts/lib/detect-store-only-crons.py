@@ -33,12 +33,27 @@ import sys
 def load_jobs(path):
     with open(path) as handle:
         data = json.load(handle)
-    if isinstance(data, dict):
-        jobs = data.get("jobs")
-        return jobs if isinstance(jobs, list) else []
     if isinstance(data, list):
         return data
-    return []
+    if isinstance(data, dict):
+        jobs = data.get("jobs")
+        if isinstance(jobs, list):
+            return jobs
+        # A dict without a `jobs` array is not an empty cron set — it is a
+        # store/repo dump whose shape we do not recognize (loadCronStore
+        # always emits {"jobs": [...]}). Returning [] here would fail OPEN:
+        # the live store would look empty, no orphans would be detected, and
+        # saveCronStore would go on to DELETE every durable store-only cron —
+        # the exact wipe this guard exists to prevent. Fail closed so main()
+        # exits 2 (per the "malformed input" contract) and halts the deploy.
+        raise ValueError(
+            f"{path}: object has no 'jobs' array "
+            f"(got jobs={type(jobs).__name__}); refusing to treat as empty"
+        )
+    raise ValueError(
+        f"{path}: expected a JSON list or an object with a 'jobs' array, "
+        f"got {type(data).__name__}"
+    )
 
 
 def is_ephemeral(job):
