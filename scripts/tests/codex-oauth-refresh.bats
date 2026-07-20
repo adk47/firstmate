@@ -44,11 +44,32 @@ STUB
 echo "test stub: ssh refused ($*)" >&2; exit 99
 STUB
   chmod +x "$TEST_TMPDIR/bin/ssh"
+  # Record every attempted `muso` invocation. This suite never intentionally
+  # sends Slack notifications, so teardown fails if a credential inherited
+  # from the parent environment activates the notifier.
+  export MUSO_CALL_LOG="$TEST_TMPDIR/muso-calls.log"
+  cat > "$TEST_TMPDIR/bin/muso" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$MUSO_CALL_LOG"
+exit 99
+STUB
+  chmod +x "$TEST_TMPDIR/bin/muso"
+  export MUSO_BIN="$TEST_TMPDIR/bin/muso"
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
-  # No slack token → _page no-ops (lib may be absent anyway).
+  # The node-8 runner can inherit the real bot token. Strip it explicitly so
+  # alert-path tests cannot reach Slack even when the parent is credentialed.
+  unset MUSO_SLACK_BOT_TOKEN_DEVOPS
   export MUSO_SLACK_ENV_FILE=/dev/null
 }
-teardown() { rm -rf "$TEST_TMPDIR"; }
+teardown() {
+  local status=0
+  if [ -s "$MUSO_CALL_LOG" ]; then
+    echo "unexpected muso invocation during hermetic test" >&2
+    status=1
+  fi
+  rm -rf "$TEST_TMPDIR"
+  return "$status"
+}
 
 @test "success: both profiles get rotated tokens + future expiry, exit 0" {
   run "$SCRIPT"
