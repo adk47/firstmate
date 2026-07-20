@@ -961,19 +961,29 @@ class TestLoadPointerStateFailClosed(unittest.TestCase):
                     m.load_pointer_state()
 
     def test_unreadable_file_raises_pointer_state_unreadable(self):
-        import os as _os
         import tempfile as _tempfile
         with _tempfile.TemporaryDirectory() as d:
             path = f"{d}/pointer-posted.json"
             with open(path, "w") as f:
                 f.write('{"O": "posted"}')
-            _os.chmod(path, 0o000)
-            try:
-                with mock.patch.object(m, "_pointer_state_path", return_value=path):
-                    with self.assertRaises(m.PointerStateUnreadable):
-                        m.load_pointer_state()
-            finally:
-                _os.chmod(path, 0o644)  # allow TemporaryDirectory cleanup
+            # The file EXISTS but cannot be read. Do NOT simulate this with
+            # os.chmod(0o000): the hydra CI runner is root, and root bypasses
+            # DAC permission bits, so open() would succeed and nothing would
+            # raise (the reason this test was red). Force the OSError at the
+            # open() boundary instead — this exercises the real chain
+            # (_read_json_file() maps OSError->None, load_pointer_state() maps
+            # None->PointerStateUnreadable) deterministically on any uid.
+            _real_open = open
+
+            def _boom(p, *a, **k):
+                if p == path:
+                    raise PermissionError(13, "Permission denied", path)
+                return _real_open(p, *a, **k)
+
+            with mock.patch.object(m, "_pointer_state_path", return_value=path), \
+                 mock.patch("builtins.open", _boom):
+                with self.assertRaises(m.PointerStateUnreadable):
+                    m.load_pointer_state()
 
 
 class TestApplyAbortsOnUnreadablePointerState(unittest.TestCase):
