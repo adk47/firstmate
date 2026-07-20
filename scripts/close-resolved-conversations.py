@@ -260,6 +260,11 @@ def is_eligible(conv, email_states, conv_states, backfill=False,
         return all(conv_states[cid]["resolved"])
     if not backfill:  # steady-state: precise links only, never loose email
         return False
+    # Backfill is an explicit human-run compatibility path and cannot map its
+    # loose email rows back to held ticket ids. Pause it conservatively while
+    # any resolve-notify batch is held.
+    if held_ticket_ids:
+        return False
     em = conv["email"]
     return bool(em) and em in email_states and all(email_states[em])
 

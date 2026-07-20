@@ -105,6 +105,12 @@ class TestIsEligible(unittest.TestCase):
         self.assertFalse(cr.is_eligible(
             conv, {}, states, backfill=False, held_ticket_ids={"T1"}))
 
+    def test_any_held_ticket_pauses_loose_email_backfill(self):
+        conv = make_conv(cid="c-legacy", email="alice@example.com")
+        self.assertFalse(cr.is_eligible(
+            conv, {"alice@example.com": {True}}, {}, backfill=True,
+            held_ticket_ids={"T-held"}))
+
     # ---- unrelated same-email conversations: the core of finding #1 ----
 
     def test_unrelated_same_email_not_eligible_by_default(self):

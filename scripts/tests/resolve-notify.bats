@@ -493,6 +493,18 @@ PYEOF
   [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
 }
 
+@test "systemd closer is ordered after resolve-notify" {
+  run python3 - "$SCRIPTS_DIR/install-aux-units.sh" <<'PYEOF'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+unit = text.split("<< CLOSERESVC\n", 1)[1].split("\nCLOSERESVC", 1)[0]
+assert "Requires=resolve-notify.service" in unit
+assert "After=network-online.target resolve-notify.service" in unit
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
 @test "state integrity: a checksum-bearing state fails closed after tampering" {
   run python3 - <<'PYEOF'
 import json, os

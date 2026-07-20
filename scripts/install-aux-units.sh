@@ -327,7 +327,10 @@ log "  intercom-data-complaint-watchdog: retired (replaced by systemic-data-issu
 cat > /etc/systemd/system/close-resolved-conversations.service << CLOSERESVC
 [Unit]
 Description=Close Intercom conversations whose ClickUp ticket is resolved
-After=network-online.target
+# Starting the closer also runs resolve-notify first. This guarantees a newly-
+# resolved bulk is persisted before the closer reads its held-ticket snapshot.
+Requires=resolve-notify.service
+After=network-online.target resolve-notify.service
 
 [Service]
 Type=oneshot
