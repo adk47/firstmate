@@ -989,6 +989,15 @@ jobs:
         # access goes through stubbed fraud-muso-only-lookup fixtures.
         run: |
           set -euo pipefail
+          # The self-hosted runner may carry production bot credentials. Bats
+          # suites must opt into fake credentials after launch; none may inherit
+          # a real token and accidentally activate an alert path.
+          while IFS='=' read -r name _; do
+            case "$name" in
+              MUSO_SLACK_BOT_TOKEN_*) unset "$name" ;;
+            esac
+          done < <(env)
+          export MUSO_SLACK_ENV_FILE=/dev/null
           # skills-all/ suites auto-enroll via the dir scan: pin-each-suite
           # leaked there (muso-devops-prod-logs' suite existed but never ran
           # in CI). Collected via a loop, not a bare glob operand, so zero
