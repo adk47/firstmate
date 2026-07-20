@@ -329,7 +329,10 @@ log "  intercom-data-complaint-watchdog: retired (replaced by systemic-data-issu
 cat > /etc/systemd/system/close-resolved-conversations.service << CLOSERESVC
 [Unit]
 Description=Close Intercom conversations whose ClickUp ticket is resolved
-After=network-online.target
+# Starting the closer also runs resolve-notify first. This guarantees a newly-
+# resolved bulk is persisted before the closer reads its held-ticket snapshot.
+Requires=resolve-notify.service
+After=network-online.target resolve-notify.service
 
 [Service]
 Type=oneshot
@@ -416,12 +419,12 @@ log "  $ovn: $(systemctl is-active "$ovn" 2>/dev/null || echo unknown)"
 # notifier: cold-start seeds silently (no backlog blast), per-conversation
 # dedupe, fresh pre-send conversation re-check (email cross-match + human-reply/
 # closed/handoff suppression; a customer who spoke last is NOT suppressed here),
-# per-run cap, and a wiped-state circuit breaker. SENDING IS LIVE (`--apply`
+# per-run cap, and an integrity-checked bulk guard. SENDING IS LIVE (`--apply`
 # on ExecStart below). It seeds silently on its first run -- sending 0 --
 # whether that first run is the last inert fire or the first --apply fire (the
 # cold-start seed write is not --apply-gated); every later run is bounded by the
-# wiped-state breaker (<=MAX, else abort+page) + per-message email/dedupe/
-# suppression gates, and surfaced by caroline-behavior-digest.py. See
+# held bulk snapshot (<=MAX per drain) + per-message email/dedupe/suppression
+# gates, and surfaced by caroline-behavior-digest.py. See
 # scripts/resolve-notify.py.
 install -d -m 755 /var/lib/resolve-notify
 cat > /etc/systemd/system/resolve-notify.service << RESNOTIFYSVC
@@ -433,6 +436,9 @@ After=network-online.target
 Type=oneshot
 EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/edge.env
+# Runs with the same state-path environment as ExecStart. It never calls an API;
+# after the one legacy upgrade it only verifies v2 state and exits cleanly.
+ExecStartPre=/usr/bin/python3 $HYDRA_ROOT/scripts/resolve-notify.py --migrate-legacy-state
 ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/resolve-notify.py --apply
 RESNOTIFYSVC
 

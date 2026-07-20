@@ -38,9 +38,11 @@ Eligibility (every gate must pass; any fail -> skip + count the reason):
 Cold-start: on the FIRST run (no, or empty, state file), seed ALL currently-
 resolved tickets+conversations as already-seen and send NOTHING. Thereafter
 only tickets that go newly resolved are candidates. Per-run cap (MAX) bounds any
-blast; sending is gated behind `--apply` (default dry-run). A would-send count
-above MAX on a freshly-written state file aborts and pages instead of sending
-(the breaker keys on the default MAX, so `--limit` cannot disarm it).
+blast; sending is gated behind `--apply` (default dry-run). A newly-observed
+batch above MAX is persisted and held for one run; later runs drain that exact
+snapshot at MAX only after one warning is confirmed delivered. State writes
+carry a versioned checksum, so actual state damage fails closed into the cold-
+start seed path instead of being guessed from the file's mtime.
 
 Env:
   CLICKUP_API_KEY                 required
@@ -63,11 +65,16 @@ Flags:
   --apply       actually send (default: dry-run — list what it would send)
   --limit N     override the per-run cap for this run
   --self-test   run the inline detector self-test and exit
+  --migrate-legacy-state
+                atomically upgrade the pre-checksum state and exit; no API calls
 
-Exit codes: 0 ok; 1 usage/env error; 2 self-test failed / circuit-breaker
-tripped; 3 at least one ticket failed mid-run.
+Exit codes: 0 ok; 1 usage/env error; 2 self-test failed; 3 at least one ticket
+failed mid-run.
 """
 import argparse
+import fcntl
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -330,24 +337,57 @@ def conversation_suppressed(conv, ticket_email, bot_admin_id):
 def load_state(path):
     try:
         with open(path) as f:
-            return json.load(f)
+            state = json.load(f)
     except FileNotFoundError:
         return None
     except (OSError, ValueError):
         # A corrupt/truncated state file is NOT treated as "seeded" — return
         # None so the caller re-seeds (sends nothing) rather than mass-sending.
         return None
+    if not isinstance(state, dict):
+        return None
+
+    # Normal operation is strict. The one pre-v2 production state is upgraded
+    # explicitly by --migrate-legacy-state during unit installation; retaining
+    # an implicit legacy path here would let removal of BOTH metadata fields
+    # masquerade as a valid old state forever.
+    version = state.get(STATE_VERSION_KEY)
+    expected = state.get(STATE_CHECKSUM_KEY)
+    if version != STATE_VERSION or not isinstance(expected, str) \
+            or not hmac.compare_digest(expected, _state_checksum(state)):
+        return None
+
+    backlog = state.get(BULK_BACKLOG_KEY)
+    if backlog is not None:
+        ids = backlog.get("ticket_ids") if isinstance(backlog, dict) else None
+        first_seen = backlog.get("first_seen_at") if isinstance(backlog, dict) else None
+        alerted = backlog.get("alerted") if isinstance(backlog, dict) else None
+        if not isinstance(ids, list) or any(not isinstance(tid, str) for tid in ids) \
+                or not isinstance(first_seen, (int, float)) \
+                or not isinstance(alerted, bool):
+            return None
+    return state
+
+
+def _state_checksum(state):
+    payload = {k: v for k, v in state.items() if k != STATE_CHECKSUM_KEY}
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"),
+                     sort_keys=True).encode()
+    return hashlib.sha256(raw).hexdigest()
 
 
 def write_state(path, state):
     """Atomic rewrite (tmp + os.replace) so a crash never leaves a partial file."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    state[STATE_VERSION_KEY] = STATE_VERSION
+    state[STATE_CHECKSUM_KEY] = _state_checksum(state)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w") as f:
         json.dump(state, f)
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+    _mark_state_v2(path)
 
 
 def state_keys(cand):
@@ -366,12 +406,82 @@ def mark_seen(state, cand, now_epoch):
 # The seed always writes this sentinel so a genuinely-seeded-but-empty state is
 # never {} (which would look "never seeded" and re-cold-start every run).
 SEED_SENTINEL = "__seeded_at__"
+STATE_VERSION = 2
+STATE_VERSION_KEY = "__state_version__"
+STATE_CHECKSUM_KEY = "__state_checksum__"
+BULK_BACKLOG_KEY = "__bulk_backlog__"
+STATE_MIGRATION_MARKER_SUFFIX = ".v2-migrated"
+
+
+def _mark_state_v2(path):
+    marker = f"{path}{STATE_MIGRATION_MARKER_SUFFIX}"
+    if os.path.exists(marker):
+        return
+    tmp = f"{marker}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(f"{STATE_VERSION}\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, marker)
+
+
+def _acquire_state_lock(path):
+    """Hold a nonblocking process lock for the complete read/send/write cycle."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    lock_file = open(f"{path}.lock", "a+")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        return None
+    return lock_file
+
+
+def migrate_legacy_state(path):
+    """One-shot, offline upgrade of the known flat pre-v2 state schema."""
+    lock_file = _acquire_state_lock(path)
+    if lock_file is None:
+        print("resolve-notify: state migration skipped; another run holds the lock",
+              file=sys.stderr)
+        return 1
+    try:
+        with open(path) as f:
+            legacy = json.load(f)
+    except FileNotFoundError:
+        print("resolve-notify: no legacy state to migrate")
+        return 0
+    except (OSError, ValueError) as e:
+        print(f"resolve-notify: legacy state migration refused: {type(e).__name__}",
+              file=sys.stderr)
+        return 1
+
+    if load_state(path) is not None:
+        _mark_state_v2(path)
+        print("resolve-notify: state already uses checksum format")
+        return 0
+    if os.path.exists(f"{path}{STATE_MIGRATION_MARKER_SUFFIX}"):
+        print("resolve-notify: legacy state migration refused: v2 was already established",
+              file=sys.stderr)
+        return 1
+    reserved = {STATE_VERSION_KEY, STATE_CHECKSUM_KEY, BULK_BACKLOG_KEY}
+    valid = (isinstance(legacy, dict)
+             and isinstance(legacy.get(SEED_SENTINEL), (int, float))
+             and not (reserved & set(legacy))
+             and all(isinstance(value, (int, float)) for value in legacy.values()))
+    if not valid:
+        print("resolve-notify: legacy state migration refused: unexpected schema",
+              file=sys.stderr)
+        return 1
+    write_state(path, legacy)
+    print(f"resolve-notify: migrated legacy state ({len(legacy) - 1} seen keys)")
+    return 0
 
 
 def prune_state(state, now_epoch, keep_days=90):
     cutoff = now_epoch - keep_days * 86400
+    reserved = {SEED_SENTINEL, STATE_VERSION_KEY, BULK_BACKLOG_KEY}
     return {k: v for k, v in state.items()
-            if k == SEED_SENTINEL or (isinstance(v, (int, float)) and v >= cutoff)}
+            if k in reserved or (isinstance(v, (int, float)) and v >= cutoff)}
 
 
 # --------------------------------------------------------------------------
@@ -485,6 +595,8 @@ def main():
                     help="override the per-run send cap")
     ap.add_argument("--self-test", action="store_true",
                     help="run the inline detector self-test and exit")
+    ap.add_argument("--migrate-legacy-state", action="store_true",
+                    help="upgrade the pre-checksum state and exit")
     args = ap.parse_args()
 
     now_epoch = int(os.environ.get("RESOLVE_NOTIFY_NOW") or time.time())
@@ -498,6 +610,11 @@ def main():
     if args.self_test:
         print("self-test ok")
         return 0
+
+    state_path = os.environ.get(
+        "RESOLVE_NOTIFY_STATE", "/var/lib/resolve-notify/notified.json")
+    if args.migrate_legacy_state:
+        return migrate_legacy_state(state_path)
 
     if os.environ.get("RESOLVE_NOTIFY_SKIP_HOST_GUARD") != "1" \
             and socket.gethostname() != "ovh-node-8":
@@ -513,14 +630,21 @@ def main():
         return 1
     admin_id = os.environ.get("INTERCOM_ADMIN_ID") or CAROLINE_ADMIN_ID
     list_id = os.environ.get("CLICKUP_LIST_ID", DEFAULT_LIST_ID)
-    state_path = os.environ.get(
-        "RESOLVE_NOTIFY_STATE", "/var/lib/resolve-notify/notified.json")
     default_max = int(os.environ.get("RESOLVE_NOTIFY_MAX", "25"))
-    # `--limit` may raise the per-run SEND cap, but it must NOT raise the
-    # circuit-breaker trip point — otherwise the flag an operator reaches for to
-    # clear a backlog also disarms the wiped-state guard. The breaker trips on
-    # the default MAX.
+    # `--limit` may raise the normal per-run cap, but it cannot raise either the
+    # bulk threshold or a held backlog's drain cap.
     cap = args.limit if args.limit > 0 else default_max
+    bulk_cap = min(cap, default_max)
+
+    # systemd serializes its own timer starts, but a manual invocation can race
+    # it. Hold this descriptor for the full function so two apply runs can never
+    # select and message the same pending prefix.
+    _lock_file = None
+    if args.apply:
+        _lock_file = _acquire_state_lock(state_path)
+        if _lock_file is None:
+            print("resolve-notify: another run holds the state lock; skipping")
+            return 0
 
     tasks = fetch_all_tasks(key, list_id)
     suppressed = {}
@@ -553,29 +677,54 @@ def main():
         return 0
 
     new = [c for c in candidates if not already_seen(state, c)]
+    new_by_id = {str(c["ticket_id"]): c for c in new}
 
-    # ---- Circuit breaker: a large new-resolved set on a freshly-written state
-    # file signals a wipe/corruption/tagging bug, not normal flow. Page, don't
-    # send.
-    try:
-        state_age = now_epoch - int(os.path.getmtime(state_path))
-    except OSError:
-        state_age = 10 ** 9
-    if len(new) > default_max and state_age < 12 * 3600:
-        text = (f":rotating_light: resolve-notify ABORTED: {len(new)} newly-"
-                f"resolved tickets on a state file written {state_age // 60}min "
-                f"ago — looks like wiped/mangled state. Sent nothing. "
-                f"Investigate before re-enabling.")
+    # ---- Bulk guard: a legitimate batch resolution and a tagging mistake look
+    # identical on first observation. Freeze the exact batch, hold it for one
+    # run, and confirm ONE accurate warning before it becomes drainable. Tickets
+    # discovered later stay outside this snapshot; after it clears they receive
+    # their own normal/bulk classification. Integrity comes from the checksum,
+    # never mtime.
+    bulk = state.get(BULK_BACKLOG_KEY)
+    dirty = False
+    if bulk:
+        pending_ids = [tid for tid in bulk["ticket_ids"] if tid in new_by_id]
+        if not pending_ids:
+            state.pop(BULK_BACKLOG_KEY, None)
+            bulk = None
+            dirty = True
+
+    if bulk:
+        if not bulk["alerted"]:
+            text = _bulk_warning(len(pending_ids), default_max)
+            print(text, file=sys.stderr)
+            if args.apply and _post_anomaly(text):
+                bulk["alerted"] = True
+                write_state(state_path, state)
+            return 0
+        to_send = [new_by_id[tid] for tid in pending_ids[:bulk_cap]]
+    elif len(new) > default_max:
+        if args.apply:
+            state[BULK_BACKLOG_KEY] = {
+                "first_seen_at": now_epoch,
+                "ticket_ids": list(new_by_id),
+                "alerted": False,
+            }
+            write_state(state_path, state)
+        text = _bulk_warning(len(new), default_max, preview=not args.apply)
         print(text, file=sys.stderr)
-        _post_anomaly(text)
-        return 2
+        if args.apply and _post_anomaly(text):
+            state[BULK_BACKLOG_KEY]["alerted"] = True
+            write_state(state_path, state)
+        return 0
+    else:
+        to_send = new[:cap]
 
     # A dry-run is a PURE preview: it never mutates the persistent state. All
     # state writes below are gated on args.apply.
     seen_convs = set()
-    to_send = new[:cap]
+    completed_ids = set()
     sent, failed = 0, 0
-    dirty = False
     for c in to_send:
         try:
             if c["conv_id"] in seen_convs or f"conv:{c['conv_id']}" in state:
@@ -583,6 +732,7 @@ def main():
                 if args.apply:
                     mark_seen(state, c, now_epoch)
                     dirty = True
+                completed_ids.add(str(c["ticket_id"]))
                 continue
             conv = get_conversation(c["conv_id"], token)
             reason = conversation_suppressed(conv, c["email"], admin_id)
@@ -594,6 +744,7 @@ def main():
                     # this conv may still deserve a message once it reopens.
                     state[c["ticket_id"]] = now_epoch
                     dirty = True
+                completed_ids.add(str(c["ticket_id"]))
                 continue
             print(json.dumps({"ticket_id": c["ticket_id"], "conv_id": c["conv_id"],
                               "action_type": c["action_type"],
@@ -609,6 +760,7 @@ def main():
                 _log_send(c)
             else:
                 seen_convs.add(c["conv_id"])
+            completed_ids.add(str(c["ticket_id"]))
             sent += 1
         except urllib.error.HTTPError as e:
             try:
@@ -621,17 +773,35 @@ def main():
             print(f"[{c['ticket_id']}] ERROR {type(e).__name__}: {e}", file=sys.stderr)
             failed += 1
 
+    bulk_remaining = 0
+    if bulk:
+        unattempted_ids, attempted_ids = [], []
+        attempted = {str(c["ticket_id"]) for c in to_send}
+        for tid in bulk["ticket_ids"]:
+            cand = new_by_id.get(tid)
+            if cand and not already_seen(state, cand) and tid not in completed_ids:
+                (attempted_ids if tid in attempted else unattempted_ids).append(tid)
+        remaining_ids = unattempted_ids + attempted_ids
+        bulk_remaining = len(remaining_ids)
+        if args.apply:
+            if remaining_ids:
+                bulk["ticket_ids"] = remaining_ids
+            else:
+                state.pop(BULK_BACKLOG_KEY, None)
+            dirty = True
+
     if args.apply and dirty:
         write_state(state_path, prune_state(state, now_epoch))
 
-    backlog = len(new) > cap
+    backlog = bulk_remaining > 0 or (not bulk and len(new) > cap)
     print(f"resolve-notify: scanned={len(tasks)} candidates={len(candidates)} "
           f"new={len(new)} {'sent' if args.apply else 'would-send'}={sent} "
-          f"failed={failed} capped={backlog} "
+          f"failed={failed} capped={backlog} bulk_remaining={bulk_remaining} "
           f"suppressed={json.dumps(suppressed, sort_keys=True)}")
     _summary(args, sent=sent, scanned=len(tasks), candidates=len(candidates),
-             suppressed=suppressed, note="capped" if backlog else "",
-             anomaly=backlog or suppressed.get("email-mismatch", 0) > 0)
+             suppressed=suppressed,
+             note="bulk-drain" if bulk else ("capped" if backlog else ""),
+             anomaly=suppressed.get("email-mismatch", 0) > 0)
     return 3 if failed else 0
 
 
@@ -654,7 +824,19 @@ def _post_anomaly(text):
     channel = os.environ.get("RESOLVE_NOTIFY_SUMMARY_CHANNEL", DEFAULT_SUMMARY_CHANNEL)
     cfg = os.environ.get("SLACK_NOTIFY_CONFIG", "/root/.openclaw-main/openclaw.json")
     account = os.environ.get("RESOLVE_NOTIFY_SLACK_ACCOUNT", "operations")
-    post_slack(text, channel, cfg, account)
+    return post_slack(text, channel, cfg, account)
+
+
+def _bulk_warning(count, default_max, preview=False):
+    if preview:
+        return (f"resolve-notify would hold {count} newly-resolved tickets in "
+                f"apply mode because this exceeds the {default_max}-ticket "
+                f"automatic threshold. Dry-run sent nothing and changed no state.")
+    return (f":warning: resolve-notify held {count} newly-resolved tickets for "
+            f"one run; this exceeds the {default_max}-ticket automatic "
+            f"threshold. Sent nothing. State is readable, the timer remains "
+            f"enabled, and later runs will drain at up to {default_max} per run after this "
+            f"warning is delivered.")
 
 
 def _summary(args, sent, scanned, candidates, suppressed, note, anomaly):

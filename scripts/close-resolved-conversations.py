@@ -37,6 +37,8 @@ Env:
   CLICKUP_INTERCOM_LINK_FIELD_ID optional, default c32dbf6e-... (#417 link field)
   CLOSE_SHADOW_LOG              optional, default /var/log/close-resolved-shadow.jsonl
                                 (falls back to /tmp if that path is not writable)
+  RESOLVE_NOTIFY_STATE          optional, default
+                                /var/lib/resolve-notify/notified.json
   CLOSE_NOTIFY                  optional, "1" = post a #cs_chats summary (== --notify)
   CLOSE_SUMMARY_CHANNEL        optional, default C0ANM0PN9L5 (#cs_chats)
   CLOSE_SUMMARY_SLACK_ACCOUNT  optional, default operations (which Slack bot posts)
@@ -56,6 +58,8 @@ Flags:
 Exit codes: 0 ok; 1 usage/env error; 3 at least one close failed.
 """
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -75,12 +79,83 @@ USER_EMAIL_FIELD = "e8618c74-d065-4b75-9a5a-86d658392409"  # "User Email" custom
 # we recover the conversation id for precise (non-email) matching.
 INTERCOM_LINK_FIELD = os.environ.get(
     "CLICKUP_INTERCOM_LINK_FIELD_ID", "c32dbf6e-f680-4ff1-a532-192bb96245c3")
-_CONV_ID_RE = re.compile(r"/conversation/([^/?#\s]+)")
+# Must match resolve-notify.py's _CONV_ID_RE exactly (excludes quotes too), so a
+# description-deeplink conv id extracted here is byte-identical to the one the
+# notifier targets — otherwise the defer set (notify_owed) would key on a
+# different id than the open conversation and silently fail to defer.
+_CONV_ID_RE = re.compile(r"/conversation/([^/?#\s\"']+)")
 DEFAULT_LIST_ID = "901000600160"
 CLICKUP_TASK_URL = "https://app.clickup.com/t/{}"
 SLACK_API = "https://slack.com/api/chat.postMessage"
 DEFAULT_SUMMARY_CHANNEL = "C0ANM0PN9L5"  # #cs_chats
 SUMMARY_MAX_LINES = 25
+RESOLVE_STATE_VERSION = 2
+RESOLVE_STATE_VERSION_KEY = "__state_version__"
+RESOLVE_STATE_CHECKSUM_KEY = "__state_checksum__"
+RESOLVE_BULK_BACKLOG_KEY = "__bulk_backlog__"
+
+
+def _resolve_state_checksum(state):
+    payload = {k: v for k, v in state.items() if k != RESOLVE_STATE_CHECKSUM_KEY}
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"),
+                     sort_keys=True).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _verified_resolve_state(path):
+    """Load + integrity-check resolve-notify's state file.
+
+    Returns the validated dict; {} if the file is absent (clean first run — the
+    notifier has processed nothing yet); or None if it is present but
+    unreadable / corrupt / checksum-mismatched, in which case the caller MUST
+    fail closed (refuse silent closes) rather than trust a damaged state."""
+    try:
+        with open(path) as f:
+            state = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    expected = state.get(RESOLVE_STATE_CHECKSUM_KEY)
+    if state.get(RESOLVE_STATE_VERSION_KEY) != RESOLVE_STATE_VERSION \
+            or not isinstance(expected, str) \
+            or not hmac.compare_digest(expected, _resolve_state_checksum(state)):
+        return None
+    return state
+
+
+def load_held_ticket_ids(path):
+    """Return the verified resolve-notify backlog, or None on unreadable state."""
+    state = _verified_resolve_state(path)
+    if state is None:
+        return None
+    backlog = state.get(RESOLVE_BULK_BACKLOG_KEY)
+    if backlog is None:
+        return set()
+    ids = backlog.get("ticket_ids") if isinstance(backlog, dict) else None
+    if not isinstance(ids, list) or any(not isinstance(tid, str) for tid in ids):
+        return None
+    return set(ids)
+
+
+def load_seen_ticket_ids(path):
+    """Return the set of ClickUp ticket ids resolve-notify has already PROCESSED
+    (notified, suppressed, deduped, or first-run-seeded), or None on unreadable
+    state.
+
+    resolve-notify records each processed ticket as a top-level `<ticket_id>`
+    key and each notified conversation as `conv:<id>`; its metadata keys are
+    `__…__`. A resolved hydra-action-request ticket that is NOT in this set has
+    not been processed yet — it resolved after the notifier's last scan (or the
+    notifier errored on it) — and the closer must not close its conversation out
+    from under the pending "your request is resolved" note. See is_eligible."""
+    state = _verified_resolve_state(path)
+    if state is None:
+        return None
+    return {k for k in state
+            if not k.startswith("__") and not k.startswith("conv:")}
 
 
 def _retry_json(req, attempts=4):
@@ -114,6 +189,53 @@ def _ticket_resolved(t):
     return (st.get("type") in ("closed", "done")) or (st.get("status") in ("resolved", "impossible"))
 
 
+def _notifier_owned(t):
+    """True if resolve-notify OWNS this ticket — i.e. it carries the
+    `hydra-action-request` trigger tag, the notifier's first candidate gate
+    (resolve-notify.py extract_candidate). The closer must never silently close
+    a conversation whose resolved notifier-owned ticket the notifier has not yet
+    processed; for every other ticket the notifier sends nothing, so the closer
+    may close freely.
+
+    Deliberately ONLY the tag gate (not the notifier's allowlist / email /
+    single-action gates) so a newly-added action type can never make us
+    UNDER-defer and drop a customer note. The cost is a bounded OVER-defer: a
+    resolved hydra-action-request ticket the notifier permanently DROPS
+    (no customer_email, or multiple/non-allowlisted action tags — none of which
+    it ever marks "seen") stays unseen forever, so its conversation is never
+    auto-closed. That is a safe leak (an open conversation, never a lost or
+    mis-sent message), and such malformed action-request tickets are rare; the
+    alternative — duplicating the notifier's email/allowlist gates here — risks
+    the unsafe direction (drift → under-defer → lost note)."""
+    return "hydra-action-request" in {
+        str(tag.get("name", "")).lower() for tag in (t.get("tags") or [])}
+
+
+def _notifier_conv_id(t):
+    """The Intercom conversation resolve-notify would message for this ticket.
+
+    MUST mirror resolve-notify.py `conv_id_of`: the #417 "Intercom Link" custom
+    field first, then a `/inbox/conversation/<id>` (or `**Conversation:**`)
+    deeplink in the ticket description. The closer's own #417-only ticket index
+    (build_ticket_index) misses the description-deeplink path, so relying on it
+    alone would let a description-linked notifier-owned ticket resolve after the
+    notifier's scan, get closed by a SIBLING #417 ticket on the same
+    conversation, and lose the note. This recovers the same conversation the
+    notifier will target, so the defer set covers both linkage styles."""
+    for cf in t.get("custom_fields") or []:
+        if cf.get("id") == INTERCOM_LINK_FIELD and cf.get("value"):
+            cid = _conv_id_from_link(cf["value"])
+            if cid:
+                return cid
+    desc = t.get("description") or t.get("text_content") or ""
+    for line in desc.splitlines():
+        if "**Conversation:**" in line or "/inbox/conversation/" in line:
+            cid = _conv_id_from_link(line)
+            if cid:
+                return cid
+    return None
+
+
 def _conv_id_from_link(value):
     """Recover the Intercom conversation id from an "Intercom Link" field value."""
     m = _CONV_ID_RE.search(str(value))
@@ -121,7 +243,7 @@ def _conv_id_from_link(value):
 
 
 def build_ticket_index(key, list_id):
-    """Scan the ClickUp list once and return (email_states, conv_states).
+    """Scan the ClickUp list once and return (email_states, conv_states, notify_owed).
 
     email_states: email(lower) -> set[bool]  — loose, by "User Email" field.
                   Used only by --backfill for the pre-#417 backlog.
@@ -133,11 +255,23 @@ def build_ticket_index(key, list_id):
                   — precise, by the #417 "Intercom Link" field. The default
                   matching path. Eligibility reads only ["resolved"]; "tickets"
                   and "intercom_url" exist purely to build the #cs_chats summary.
+    notify_owed:  intercom_conv_id -> set[task_id]  — hydra-action-request tickets
+                  (OPEN or resolved) resolve-notify may still owe a "your request
+                  is resolved" note for, keyed by the conversation the NOTIFIER
+                  targets (conv_id_of: #417 field OR description deeplink). This is
+                  a SEPARATE, wider index than conv_states — it uses the notifier's
+                  own linkage so the closer never closes a conversation out from
+                  under a pending note (an open ticket that will resolve later
+                  included). Used ONLY to DEFER a close, never to make one eligible.
     """
-    email_states, conv_states = {}, {}
+    email_states, conv_states, notify_owed = {}, {}, {}
     page = 0
     while page < 200:
-        q = urllib.parse.urlencode({"include_closed": "true", "subtasks": "false", "page": str(page)})
+        # Params mirror resolve-notify.py clickup_list_page so both scans see the
+        # same task set + description field (the deeplink fallback in
+        # _notifier_conv_id needs the description).
+        q = urllib.parse.urlencode({"archived": "false", "include_closed": "true",
+                                    "subtasks": "false", "order_by": "updated", "page": str(page)})
         data = clickup_get(f"{CLICKUP_API}/list/{list_id}/task?{q}", key)
         tasks = data.get("tasks", [])
         if not tasks:
@@ -146,6 +280,19 @@ def build_ticket_index(key, list_id):
             done = _ticket_resolved(t)
             tid = t.get("id")
             tname = t.get("name") or tid
+            # A ticket resolve-notify owes a note for — record it against the
+            # conversation the NOTIFIER targets so is_eligible can defer the close
+            # until the notifier has processed it (seen-set). Track it whether
+            # OPEN or resolved: an OPEN owned ticket is never in the seen-set, so
+            # this holds the conversation open until the ticket resolves AND the
+            # notifier sends its note. Gating on resolved would let a resolved
+            # #417 sibling close the conversation while this ticket is still open;
+            # when it later resolves, the notifier would suppress ("not-open")
+            # and mark it seen — a permanent, longer-window note loss.
+            if tid and _notifier_owned(t):
+                owed_cid = _notifier_conv_id(t)
+                if owed_cid:
+                    notify_owed.setdefault(owed_cid, set()).add(tid)
             for cf in t.get("custom_fields", []):
                 cid, val = cf.get("id"), cf.get("value")
                 if not val:
@@ -164,7 +311,7 @@ def build_ticket_index(key, list_id):
         page += 1
         if data.get("last_page"):
             break
-    return email_states, conv_states
+    return email_states, conv_states, notify_owed
 
 
 def fetch_open_convs(token):
@@ -193,14 +340,30 @@ def fetch_open_convs(token):
     return convs
 
 
-def is_eligible(conv, email_states, conv_states, backfill=False):
+def is_eligible(conv, email_states, conv_states, backfill=False,
+                held_ticket_ids=None, defer_convs=None):
     """Eligible to close iff we spoke last AND it is tied to a resolved ticket.
 
     We-spoke-last is required first (excludes never_replied + customer_last).
+
+    Then the notify→close RACE GUARD (applies to BOTH matching paths below): if
+    resolve-notify still owes an unsent "your request is resolved" note for this
+    conversation — a hydra-action-request ticket (open OR resolved) it has NOT
+    processed (`defer_convs`, computed in main from notify_owed minus the
+    seen-set) — never close. A ticket can go resolved AFTER the notifier's scan
+    but before this closer's; it is absent from `held`, so without this the closer would
+    silently close the conversation and the notifier's next run would suppress
+    the note because the conversation is already closed (permanent notification
+    loss). Deferring makes the notifier's classification authoritative; the
+    conversation closes a cycle later, once the note is out. The defer set uses
+    the NOTIFIER's own conversation linkage (conv_id_of: #417 field OR
+    description deeplink), so it also covers tickets the closer's #417-only
+    index below would miss.
+
     The tie to a resolved ticket is then established, most-precise-first:
       1. PRECISE (#417 link): if this conversation id is linked to any ticket,
          that linkage is authoritative — close iff EVERY linked ticket is
-         resolved. An open linked ticket blocks the close even under backfill.
+         resolved and NONE is in resolve-notify's active batch (held).
       2. EMAIL fallback (--backfill only): for conversations with no link, the
          pre-#417 path — close iff the customer's email matches >=1 ticket and
          EVERY email-matched ticket is resolved.
@@ -212,9 +375,20 @@ def is_eligible(conv, email_states, conv_states, backfill=False):
     if not (lar > 0 and lar > lcr):
         return False
     cid = conv["id"]
+    # Race guard, BEFORE either match path: resolve-notify owes an unsent note.
+    if cid in (defer_convs or set()):
+        return False
     if cid in conv_states:  # precise linkage is authoritative
+        linked_ids = set((conv_states[cid].get("tickets") or {}).keys())
+        if linked_ids & (held_ticket_ids or set()):
+            return False
         return all(conv_states[cid]["resolved"])
     if not backfill:  # steady-state: precise links only, never loose email
+        return False
+    # Backfill is an explicit human-run compatibility path and cannot map its
+    # loose email rows back to held ticket ids. Pause it conservatively while
+    # any resolve-notify batch is held.
+    if held_ticket_ids:
         return False
     em = conv["email"]
     return bool(em) and em in email_states and all(email_states[em])
@@ -339,14 +513,32 @@ def main():
         return 1
     admin_id = os.environ.get("INTERCOM_ADMIN_ID", "5763097")
     list_id = os.environ.get("CLICKUP_LIST_ID", DEFAULT_LIST_ID)
+    resolve_state = os.environ.get(
+        "RESOLVE_NOTIFY_STATE", "/var/lib/resolve-notify/notified.json")
+    held_ticket_ids = load_held_ticket_ids(resolve_state)
+    seen_ticket_ids = load_seen_ticket_ids(resolve_state)
+    if held_ticket_ids is None or seen_ticket_ids is None:
+        print("ERROR: resolve-notify state is unreadable; refusing silent closes",
+              file=sys.stderr)
+        return 1
 
-    email_states, conv_states = build_ticket_index(key, list_id)
+    email_states, conv_states, notify_owed = build_ticket_index(key, list_id)
+    # Conversations resolve-notify still owes an unsent note for: it has a
+    # resolved hydra-action-request ticket the notifier has NOT processed yet
+    # (owed minus seen). Closing any of these would drop the customer note, so
+    # is_eligible defers them on both the precise and backfill paths.
+    defer_convs = {cid for cid, owed in notify_owed.items()
+                   if owed - seen_ticket_ids}
     convs = fetch_open_convs(token)
-    eligible = [c for c in convs if is_eligible(c, email_states, conv_states, args.backfill)]
+    eligible = [c for c in convs if is_eligible(
+        c, email_states, conv_states, args.backfill, held_ticket_ids, defer_convs)]
 
     mode = "precise #417 link + email backfill" if args.backfill else "precise #417 link only"
     print(f"matching mode: {mode}")
     print(f"resolved-ticket conversation links: {len(conv_states)}")
+    print(f"held resolve-notify tickets excluded: {len(held_ticket_ids)}")
+    print(f"resolve-notify processed (seen) tickets: {len(seen_ticket_ids)}")
+    print(f"deferred (resolve-notify owes an unsent note): {len(defer_convs)}")
     print(f"open conversations scanned: {len(convs)}")
     print(f"eligible (linked ticket resolved AND we replied last): {len(eligible)}")
 
