@@ -37,6 +37,8 @@ Env:
   CLICKUP_INTERCOM_LINK_FIELD_ID optional, default c32dbf6e-... (#417 link field)
   CLOSE_SHADOW_LOG              optional, default /var/log/close-resolved-shadow.jsonl
                                 (falls back to /tmp if that path is not writable)
+  RESOLVE_NOTIFY_STATE          optional, default
+                                /var/lib/resolve-notify/notified.json
   CLOSE_NOTIFY                  optional, "1" = post a #cs_chats summary (== --notify)
   CLOSE_SUMMARY_CHANNEL        optional, default C0ANM0PN9L5 (#cs_chats)
   CLOSE_SUMMARY_SLACK_ACCOUNT  optional, default operations (which Slack bot posts)
@@ -56,6 +58,8 @@ Flags:
 Exit codes: 0 ok; 1 usage/env error; 3 at least one close failed.
 """
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -81,6 +85,42 @@ CLICKUP_TASK_URL = "https://app.clickup.com/t/{}"
 SLACK_API = "https://slack.com/api/chat.postMessage"
 DEFAULT_SUMMARY_CHANNEL = "C0ANM0PN9L5"  # #cs_chats
 SUMMARY_MAX_LINES = 25
+RESOLVE_STATE_VERSION = 2
+RESOLVE_STATE_VERSION_KEY = "__state_version__"
+RESOLVE_STATE_CHECKSUM_KEY = "__state_checksum__"
+RESOLVE_BULK_BACKLOG_KEY = "__bulk_backlog__"
+
+
+def _resolve_state_checksum(state):
+    payload = {k: v for k, v in state.items() if k != RESOLVE_STATE_CHECKSUM_KEY}
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"),
+                     sort_keys=True).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def load_held_ticket_ids(path):
+    """Return the verified resolve-notify backlog, or None on unreadable state."""
+    try:
+        with open(path) as f:
+            state = json.load(f)
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    expected = state.get(RESOLVE_STATE_CHECKSUM_KEY)
+    if state.get(RESOLVE_STATE_VERSION_KEY) != RESOLVE_STATE_VERSION \
+            or not isinstance(expected, str) \
+            or not hmac.compare_digest(expected, _resolve_state_checksum(state)):
+        return None
+    backlog = state.get(RESOLVE_BULK_BACKLOG_KEY)
+    if backlog is None:
+        return set()
+    ids = backlog.get("ticket_ids") if isinstance(backlog, dict) else None
+    if not isinstance(ids, list) or any(not isinstance(tid, str) for tid in ids):
+        return None
+    return set(ids)
 
 
 def _retry_json(req, attempts=4):
@@ -193,7 +233,8 @@ def fetch_open_convs(token):
     return convs
 
 
-def is_eligible(conv, email_states, conv_states, backfill=False):
+def is_eligible(conv, email_states, conv_states, backfill=False,
+                held_ticket_ids=None):
     """Eligible to close iff we spoke last AND it is tied to a resolved ticket.
 
     We-spoke-last is required first (excludes never_replied + customer_last).
@@ -213,6 +254,9 @@ def is_eligible(conv, email_states, conv_states, backfill=False):
         return False
     cid = conv["id"]
     if cid in conv_states:  # precise linkage is authoritative
+        linked_ids = set((conv_states[cid].get("tickets") or {}).keys())
+        if linked_ids & (held_ticket_ids or set()):
+            return False
         return all(conv_states[cid]["resolved"])
     if not backfill:  # steady-state: precise links only, never loose email
         return False
@@ -339,14 +383,23 @@ def main():
         return 1
     admin_id = os.environ.get("INTERCOM_ADMIN_ID", "5763097")
     list_id = os.environ.get("CLICKUP_LIST_ID", DEFAULT_LIST_ID)
+    resolve_state = os.environ.get(
+        "RESOLVE_NOTIFY_STATE", "/var/lib/resolve-notify/notified.json")
+    held_ticket_ids = load_held_ticket_ids(resolve_state)
+    if held_ticket_ids is None:
+        print("ERROR: resolve-notify state is unreadable; refusing silent closes",
+              file=sys.stderr)
+        return 1
 
     email_states, conv_states = build_ticket_index(key, list_id)
     convs = fetch_open_convs(token)
-    eligible = [c for c in convs if is_eligible(c, email_states, conv_states, args.backfill)]
+    eligible = [c for c in convs if is_eligible(
+        c, email_states, conv_states, args.backfill, held_ticket_ids)]
 
     mode = "precise #417 link + email backfill" if args.backfill else "precise #417 link only"
     print(f"matching mode: {mode}")
     print(f"resolved-ticket conversation links: {len(conv_states)}")
+    print(f"held resolve-notify tickets excluded: {len(held_ticket_ids)}")
     print(f"open conversations scanned: {len(convs)}")
     print(f"eligible (linked ticket resolved AND we replied last): {len(eligible)}")
 

@@ -19,7 +19,9 @@ Stdlib unittest + stubs only — no pytest dependency, no network — so it runs
 under the same bare `python3 -m unittest` the py-tests CI job already uses.
 """
 import importlib.util
+import json
 import pathlib
+import tempfile
 import unittest
 from unittest import mock
 
@@ -96,6 +98,12 @@ class TestIsEligible(unittest.TestCase):
         conv = make_conv(cid="c1", email="alice@example.com")
         email_states = {"alice@example.com": {True}}  # email says "all resolved"
         self.assertFalse(cr.is_eligible(conv, email_states, {"c1": cs(False)}, backfill=True))
+
+    def test_held_resolve_notify_ticket_blocks_close(self):
+        conv = make_conv(cid="c1")
+        states = {"c1": cs(True, tickets={"T1": {"name": "held", "url": "u"}})}
+        self.assertFalse(cr.is_eligible(
+            conv, {}, states, backfill=False, held_ticket_ids={"T1"}))
 
     # ---- unrelated same-email conversations: the core of finding #1 ----
 
@@ -199,6 +207,23 @@ class TestBuildTicketIndex(unittest.TestCase):
             [self._task("closed", "done", email="a@x.com", link_val="https://example.com/no-conv-here")]
         )
         self.assertEqual(conv_states, {})
+
+
+class TestResolveNotifyBacklog(unittest.TestCase):
+    def test_valid_state_returns_held_ticket_ids_and_tampering_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "notified.json"
+            state = {
+                cr.RESOLVE_STATE_VERSION_KEY: cr.RESOLVE_STATE_VERSION,
+                cr.RESOLVE_BULK_BACKLOG_KEY: {
+                    "first_seen_at": 1, "ticket_ids": ["T1", "T2"], "alerted": True},
+            }
+            state[cr.RESOLVE_STATE_CHECKSUM_KEY] = cr._resolve_state_checksum(state)
+            path.write_text(json.dumps(state))
+            self.assertEqual(cr.load_held_ticket_ids(path), {"T1", "T2"})
+            state[cr.RESOLVE_BULK_BACKLOG_KEY]["ticket_ids"].append("T3")
+            path.write_text(json.dumps(state))
+            self.assertIsNone(cr.load_held_ticket_ids(path))
 
 
 class TestFormatSlackSummary(unittest.TestCase):
