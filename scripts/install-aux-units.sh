@@ -215,6 +215,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/cs-needs-human-digest.py missing"
 [[ -f "$HYDRA_ROOT/scripts/close-duplicate-conversations.py" ]] \
   || fail "$HYDRA_ROOT/scripts/close-duplicate-conversations.py missing"
+[[ -f "$HYDRA_ROOT/scripts/cs-selfserve-backlog.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/cs-selfserve-backlog.py missing"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/weekly-cleanup.sh" ]] \
@@ -577,6 +579,75 @@ cnhd=cs-needs-human-digest.timer
 systemctl enable "$cnhd" >/dev/null 2>&1 || log "WARN: could not enable $cnhd"
 systemctl start "$cnhd" >/dev/null 2>&1 || log "WARN: could not start $cnhd"
 log "  $cnhd: $(systemctl is-active "$cnhd" 2>/dev/null || echo unknown)"
+
+# ─── CS self-serve backlog ranker (daily 02:30 UTC collect, monthly 09:00 UTC post) ───
+# Phase 3 of docs/plans/autonomous-cs-machine.md: a READ-ONLY monthly report
+# ranking which MISSING customer self-serve feature would remove the most
+# human-touch support tickets, swept from the edge session trajectory JSONL
+# (reaper keeps only ~5 days on disk, so a DAILY collect accumulates history
+# into a durable rollup at /var/lib/cs-selfserve-backlog/monthly.json; a
+# MONTHLY post renders the previous UTC month and posts once to #cs_chats).
+# It never writes to Intercom/ClickUp/muso - its only side effects are its
+# own rollup state and that one Slack post. See scripts/cs-selfserve-backlog.py.
+install -d -m 755 /var/lib/cs-selfserve-backlog
+cat > /etc/systemd/system/cs-selfserve-backlog-collect.service << CSBACKLOGCOLLECTSVC
+[Unit]
+Description=CS self-serve backlog - daily trajectory sweep into the durable rollup
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/cs-selfserve-backlog.py --collect
+CSBACKLOGCOLLECTSVC
+
+cat > /etc/systemd/system/cs-selfserve-backlog-collect.timer << CSBACKLOGCOLLECTTMR
+[Unit]
+Description=Daily - CS self-serve backlog trajectory sweep at 02:30 UTC
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=cs-selfserve-backlog-collect.service
+
+[Install]
+WantedBy=timers.target
+CSBACKLOGCOLLECTTMR
+
+cat > /etc/systemd/system/cs-selfserve-backlog.service << CSBACKLOGPOSTSVC
+[Unit]
+Description=CS self-serve backlog - monthly ranked report to #cs_chats
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/cs-selfserve-backlog.py --post
+CSBACKLOGPOSTSVC
+
+cat > /etc/systemd/system/cs-selfserve-backlog.timer << CSBACKLOGPOSTTMR
+[Unit]
+Description=Monthly - CS self-serve backlog ranked report, 1st at 09:00 UTC
+
+[Timer]
+OnCalendar=*-*-01 09:00:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=cs-selfserve-backlog.service
+
+[Install]
+WantedBy=timers.target
+CSBACKLOGPOSTTMR
+
+systemctl daemon-reload
+for csbt in cs-selfserve-backlog-collect.timer cs-selfserve-backlog.timer; do
+  systemctl enable "$csbt" >/dev/null 2>&1 || log "WARN: could not enable $csbt"
+  systemctl start "$csbt" >/dev/null 2>&1 || log "WARN: could not start $csbt"
+  log "  $csbt: $(systemctl is-active "$csbt" 2>/dev/null || echo unknown)"
+done
 
 # ─── Close duplicate conversations (SHADOW MODE — daily 10:00 UTC) ────
 # Phase 1 of docs/plans/autonomous-cs-machine.md: a deterministic sweeper

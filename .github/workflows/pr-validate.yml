@@ -1153,6 +1153,24 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_close_duplicate_conversations
+      - name: Run cs-selfserve-backlog tests
+        # scripts/cs-selfserve-backlog.py is a READ-ONLY monthly signal report
+        # (Phase 3): it sweeps the edge support trajectory JSONL, counts
+        # create_ticket calls by actionType, and ranks which MISSING self-serve
+        # feature would remove the most human-touch tickets. Its only effects
+        # are its own durable rollup state and one Slack post behind --post.
+        # These lock the event-extraction contract (only
+        # type in tool.call/tool.result with data.name == create_ticket count,
+        # NOT the context.compiled decoy that lists create_ticket in prose), the
+        # unique-new-ticket metric (submitted and not updated_existing, keyed by
+        # toolCallId so re-sweeps are idempotent), the fail-closed exits (corrupt
+        # rollup or zero-event sweep exit non-zero, state never reset), and the
+        # bidirectional TIER_MAP<->FEATURE_MAP parity check (a new repo-side
+        # actionType fails CI until classified). Same bare stdlib unittest,
+        # targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_cs_selfserve_backlog
 
   plugin-tests:
     name: Plugin tests (vitest)
