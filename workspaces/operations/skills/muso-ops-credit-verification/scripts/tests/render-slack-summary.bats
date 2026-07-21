@@ -200,10 +200,11 @@ seed_run_finished() {
     seed_results user_verification_needed transport_error '["cr_dns_uvn_1","cr_dns_uvn_2"]'
     run "$SCRIPTS_DIR/render-slack-summary.sh" "$RUN_ID"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"3 admin-API write(s) have unconfirmed delivery after the safe retry policy"* ]]
+    [[ "$output" == *"3 admin-API write(s): no backend refusal was observed; delivery remains unconfirmed after the safe retry policy"* ]]
     [[ "$output" == *"Transport failures — delivery unconfirmed for 3 credit(s)"* ]]
     [[ "$output" == *"Reconcile current credit state before retrying"* ]]
     [[ "$output" != *"did NOT land"* ]]
+    [[ "$output" != *"backend did not refuse"* ]]
     [[ "$output" == *"cr_dns_approve"* ]]
     [[ "$output" == *"cr_dns_uvn_1"* ]]
     [[ "$output" != *"UVN flag HTTP errors"* ]]

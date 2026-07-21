@@ -108,7 +108,7 @@ if [[ "$DRY_APPLY" == "false" ]]; then
   APPROVE_LIST_HEADER="approved cr_ids (first 10):"
   TAIL_LINE="_Apply outcomes: approved.landed=$APPLY_APPROVE_LANDED (refused=$APPLY_APPROVE_REFUSED, transport_failed=$APPLY_APPROVE_TRANSPORT_FAILED), uvn.landed=$APPLY_UVN_LANDED (refused=$APPLY_UVN_REFUSED, transport_failed=$APPLY_UVN_TRANSPORT_FAILED). Per-cr_id audit at \`/var/log/openclaw/lobster-apply.jsonl\`._"
   if (( APPLY_TRANSPORT_FAILED > 0 )); then
-    TAIL_LINE+=$'\n'":rotating_light: ${APPLY_TRANSPORT_FAILED} credit write(s) have unconfirmed delivery after the safe retry policy; these were not backend refusals. Reconcile current credit state before retrying."
+    TAIL_LINE+=$'\n'":rotating_light: ${APPLY_TRANSPORT_FAILED} credit write(s): no backend refusal was observed; delivery remains unconfirmed after the safe retry policy. Reconcile current credit state before retrying."
   fi
   if [[ -n "$OPS_RUN_ID" ]]; then
     # Same UTC-date derivation as muso-admin-api.sh write_credit_request_result

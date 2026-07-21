@@ -99,6 +99,14 @@ call_credit_update() {
     ' "$CV_RESULTS_PATH" >/dev/null
 }
 
+@test "retry policy rejects values above one before curl runs" {
+    call_credit_update transient_dns 2
+    [ "$status" -eq 2 ]
+    [[ "$stderr" == *"MUSO_ADMIN_PRECONNECT_RETRIES must be 0 or 1"* ]]
+    [ ! -e "$CURL_CALLS" ]
+    [ ! -e "$CV_RESULTS_PATH" ]
+}
+
 @test "persistent DNS failure is structured and recorded as transport_error" {
     call_credit_update persistent_dns 1
     [ "$status" -eq 6 ]

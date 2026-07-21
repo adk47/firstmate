@@ -160,9 +160,10 @@ calls() { grep -c '^CALL ' "$OPENCLAW_CALLS_FILE" 2>/dev/null || echo 0; }
   [ "$status" -eq 0 ]
   [[ "$output" == *"approved.landed=169 (refused=0, transport_failed=1)"* ]]
   [[ "$output" == *"uvn.landed=331 (refused=0, transport_failed=2)"* ]]
-  [[ "$output" == *"3 credit write(s) have unconfirmed delivery after the safe retry policy"* ]]
+  [[ "$output" == *"3 credit write(s): no backend refusal was observed; delivery remains unconfirmed after the safe retry policy"* ]]
   [[ "$output" == *"Reconcile current credit state before retrying"* ]]
   [[ "$output" != *"did not land"* ]]
+  [[ "$output" != *"not backend refusals"* ]]
 }
 
 @test "fraud-unavailable warning points at scorer stderr, not a dead runlog" {

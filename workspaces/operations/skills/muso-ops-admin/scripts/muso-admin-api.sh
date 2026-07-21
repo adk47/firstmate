@@ -539,8 +539,8 @@ run_curl_with_preconnect_retry() {
     CURL_RETRY_ATTEMPTS=0
     CURL_RETRY_EXITS='[]'
 
-    if ! [[ "$max_preconnect_retries" =~ ^[0-9]+$ ]]; then
-        echo "muso-admin-api: MUSO_ADMIN_PRECONNECT_RETRIES must be a non-negative integer" >&2
+    if ! [[ "$max_preconnect_retries" =~ ^[01]$ ]]; then
+        echo "muso-admin-api: MUSO_ADMIN_PRECONNECT_RETRIES must be 0 or 1" >&2
         CURL_RETRY_RC=2
         return 2
     fi

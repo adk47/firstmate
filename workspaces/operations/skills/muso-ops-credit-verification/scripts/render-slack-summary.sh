@@ -121,7 +121,7 @@ fi
 transport_err_total=$((transport_error_uvn + transport_error_approved))
 transport_err_line=""
 if (( transport_err_total > 0 )); then
-    transport_err_line=$'\n:rotating_light: '"${transport_err_total}"' admin-API write(s) have unconfirmed delivery after the safe retry policy; the backend did not refuse them. Reconcile current credit state before retrying.'
+    transport_err_line=$'\n:rotating_light: '"${transport_err_total}"' admin-API write(s): no backend refusal was observed; delivery remains unconfirmed after the safe retry policy. Reconcile current credit state before retrying.'
 fi
 
 # Fraud token on the one-line counter — only when the multi-factor detector
