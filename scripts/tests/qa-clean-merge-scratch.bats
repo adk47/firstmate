@@ -42,21 +42,27 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   echo x > "$TARGET/write-activity.log"
   echo x > "$TARGET/TOOLS.md.bak-20260101T000000Z"
   echo x > "$TARGET/.env"
+  # Tmp-marked scratch — excluded by deploy.sh's workspaces/*/*tmp* glob, so this
+  # cleanup must KEEP it (lockstep with RSYNC_EXCLUDES). All three shapes the one
+  # '*tmp*' KEEP glob subsumes must survive: .tmp- prefix (#690), tmp_ prefix (QA),
+  # .tmp suffix (devops atomic-write).
+  echo x > "$TARGET/.tmp-kubectl-catalog.sh"
+  echo x > "$TARGET/tmp_pr704-review.md"
+  echo x > "$TARGET/scratch.tmp"
   # Subdir runtime state — never the depth-1-file problem, must be untouched.
   mkdir -p "$TARGET/api-logs"; echo x > "$TARGET/api-logs/run.jsonl"
-  # The actual scratch: never tracked, never excluded.
+  # The actual (non-tmp) scratch: never tracked, never excluded → the only deletable class.
   echo x > "$TARGET/seven_days_ago"
-  echo x > "$TARGET/scratch.tmp"
 
   run "$SCRIPT" "$TARGET"
   [ "$status" -eq 0 ]
 
-  # Scratch gone.
+  # Only the non-tmp stray scratch is gone.
   [ ! -e "$TARGET/seven_days_ago" ]
-  [ ! -e "$TARGET/scratch.tmp" ]
-  # Everything legit survives.
+  # Everything legit survives — tracked seeds, excluded runtime, AND tmp-marked scratch.
   for f in AGENTS.md MEMORY.md SOUL.md TOOLS.md USER.md IDENTITY.md HEARTBEAT.md \
-           write-activity.log TOOLS.md.bak-20260101T000000Z .env; do
+           write-activity.log TOOLS.md.bak-20260101T000000Z .env \
+           .tmp-kubectl-catalog.sh tmp_pr704-review.md scratch.tmp; do
     [ -e "$TARGET/$f" ] || { echo "WRONGLY DELETED: $f"; false; }
   done
   # Subdir + its file untouched.

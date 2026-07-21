@@ -756,22 +756,23 @@ RSYNC_EXCLUDES=(
   # --delete after the 7.1 upgrade would wipe the markers and the deploy
   # pre-flight gate would flag them on every PR.
   --exclude='workspaces/*/openclaw-workspace-state.json'
-  # Agent kubectl/scratch temp files: agents (esp. devops) write .tmp-* scratch
-  # scripts into their workspace during runtime ops and sometimes ORPHAN them
-  # (e.g. .tmp-kubectl-catalog-*.sh, unheld by any process). Server-owned
-  # transient scratch, never in the repo; without this exclude a single orphan
-  # trips the rsync --delete pre-flight and blocks EVERY PR + merge-deploy until
-  # node-8 is manually cleaned (observed 2026-07-15; drift guard requires the
-  # mirrored '.tmp-*' KEEP glob in scripts/qa-clean-merge-scratch.sh).
-  --exclude='workspaces/*/.tmp-*'
-  # Scout writes numbered AI-music candidate batches at its workspace root
-  # while a research run is active. They are transient runtime inputs, can be
-  # recreated during CI, and must not make an unrelated deploy try to delete
-  # an in-flight batch (observed 2026-07-17 on PR #698).
-  --exclude='workspaces/scout/tmp_ai_music_candidates*.json'
-  # The same Scout run composes its candidate batches into one root-level
-  # final scratch artifact before promoting any durable report.
-  --exclude='workspaces/scout/tmp_ai_music_final.json'
+  # Agent scratch temp files: agents write transient scratch into their
+  # workspace during runtime ops and sometimes ORPHAN it (unheld by any
+  # process). Many naming shapes have all tripped the rsync --delete pre-flight
+  # and blocked EVERY PR + merge-deploy until node-8 was manually cleaned:
+  # devops kubectl scratch '.tmp-kubectl-catalog-*.sh' (2026-07-15, #690);
+  # Scout's numbered AI-music candidate + final batches 'tmp_ai_music_*.json'
+  # written at its workspace root during a research run (2026-07-17, #698);
+  # QA/scout review scratch 'tmp_*'; and devops atomic-write leftovers '*.tmp'
+  # (2026-07-17). Server-owned transient scratch, recreatable at runtime, never
+  # in the repo. The single '*tmp*' glob subsumes every one of these shapes
+  # (and any future variant) — it REPLACES the former per-shape excludes
+  # ('.tmp-*' and the two 'workspaces/scout/tmp_ai_music_*'). Depth-1
+  # workspace-scoped (rsync '*' never crosses '/'). Drift guard requires the
+  # mirrored '*tmp*' KEEP glob in scripts/qa-clean-merge-scratch.sh.
+  # Convention: agents name workspace scratch with a 'tmp' marker so it lands
+  # here — see docs/lessons/deploy-ci-pr.md.
+  --exclude='workspaces/*/*tmp*'
   # Agent long-term memory (written by agents at runtime, should survive
   # deploys — see docs/guides/WORKSPACE-FILE-OWNERSHIP.md). MEMORY.md IS tracked
   # in git as a seed, but agents modify it post-deploy and we must not
