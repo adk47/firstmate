@@ -441,7 +441,7 @@ dev_vault_write() {
         return 1
     fi
     # KV v2 merge-patch: preserves the other keys in the secret (like `vault kv patch`).
-    local body; body="$(jq -n --arg k "$KEY" --arg v "$VALUE" '{data:{($k):$v}}')" \
+    local body; body="$(jq -nc --arg k "$KEY" --arg v "$VALUE" '{data:{($k):$v}}')" \
         || { echo "DEVOPS_ENVSET_DEV_VAULT_WRITE_FAILED: could not build request body." >&2; return 1; }
     # Token AND secret payload both via `curl --config -` (config on stdin) —
     # never argv, never a temp file.

@@ -233,6 +233,19 @@ CURL
     ! grep -q 'abc' "$AUDIT_PATH"
 }
 
+@test "dev vault: PATCH curl config carries one compact KV v2 JSON body" {
+    use_fake_curl
+    export DEVOPS_ENVSET_BACKEND=vault FAKE_HTTP=200
+    export DEVOPS_DEV_VAULT_ADDR="http://vault.example:8200" DEVOPS_DEV_VAULT_TOKEN="s.faketoken"
+    run dev_set U03TYGJF1N3 --target "$DEV_TARGET" --key "$SECRET_KEY" --value abc
+    [ "$status" -eq 0 ]
+
+    # curl config is line-oriented. A pretty-printed JSON body would turn its
+    # continuation lines into separate directives and send only "{" to Vault.
+    [ "$(grep -c '^data-binary = ' "$CURL_STDIN")" -eq 1 ]
+    grep -Fqx 'data-binary = "{\"data\":{\"TUWUNEL_REGISTRATION_TOKEN\":\"abc\"}}"' "$CURL_STDIN"
+}
+
 @test "dev vault: the token and secret payload NEVER appear in curl argv (exit 0)" {
     use_fake_curl
     export TMPDIR="$TEST_ROOT/tmp"; mkdir -p "$TMPDIR"
