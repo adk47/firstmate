@@ -26,10 +26,17 @@
 #                           lastGood = the currently-active account.
 #   • codex-home rollout  — .../agent/codex-home/sessions/YYYY/MM/DD/rollout-*.jsonl
 #                           carries the ONLY real usage signal: event_msg lines with
-#                           a `rate_limits` object — primary=5h window (window_minutes
-#                           300), secondary=weekly (10080) — each with used_percent +
-#                           resets_at (epoch seconds) + plan_type. `openclaw status
-#                           --usage` does NOT surface this for codex.
+#                           a `rate_limits` object holding up to two windows
+#                           (primary/secondary), each with window_minutes +
+#                           used_percent + resets_at (epoch s) + plan_type, plus a
+#                           top-level rate_limit_reached_type. The window SET is not
+#                           stable: through early Jul 2026 primary=5h (300) and
+#                           secondary=weekly (10080); on ~Jul 12 OpenAI removed the
+#                           5h window ("temporarily" — undocumented, may return) and
+#                           primary BECAME the weekly window with secondary null
+#                           (observed live 2026-07-21). Parse by window_minutes,
+#                           NEVER by position. `openclaw status --usage` does NOT
+#                           surface any of this for codex.
 #
 # ATTRIBUTION (deliberately simple): the whole fleet shares ONE codex
 # auth store, so the freshest rate_limits snapshot anywhere reflects
@@ -69,7 +76,13 @@ cu_active_account() {
 
 # cu_latest_rate_limits <rollout-file>...
 # Echo the single freshest rate_limits snapshot across the given rollout files
-# as one TSV row: <ts_epoch>\t<pct5h>\t<reset5h>\t<pctWeek>\t<resetWeek>.
+# as one WINDOW-KEYED TSV row:
+#   <ts_epoch> \t <reached_type|-> \t <w1_min> \t <w1_pct> \t <w1_reset> \t <w2_min> \t <w2_pct> \t <w2_reset>
+# with "-" for an absent window/field. Windows are read GENERICALLY from
+# primary/secondary via their own `window_minutes` — NEVER positionally: the
+# 7.x app-server was observed live (2026-07-21) emitting primary as the WEEKLY
+# window (window_minutes 10080) with secondary null, so "primary = 5h" is a
+# false assumption. `rate_limit_reached_type` is the direct in-data cap signal.
 # Reads only the LAST rate_limits line per file (the most recent snapshot in
 # that session), parses each with jq, then keeps the global max-ts row. ISO ts
 # is converted to epoch INSIDE jq (fromdateiso8601) so this is portable across
@@ -86,11 +99,10 @@ cu_latest_rate_limits() {
       | (.ts // .timestamp // "") as $tss
       | ( if $tss == "" then 0
           else ($tss | sub("\\.[0-9]+Z$"; "Z") | try fromdateiso8601 catch 0) end ) as $ts
-      | [ $ts,
-          ($rl.primary.used_percent   // 0),
-          ($rl.primary.resets_at      // 0),
-          ($rl.secondary.used_percent // 0),
-          ($rl.secondary.resets_at    // 0) ]
+      | def win($w): if ($w // null) == null then ["-","-","-"]
+          else [ ($w.window_minutes // "-"), ($w.used_percent // 0), ($w.resets_at // 0) ] end;
+      [ $ts, ($rl.rate_limit_reached_type // "-") ]
+        + win($rl.primary) + win($rl.secondary)
       | @tsv
     ' 2>/dev/null)" || continue
     [ -n "$row" ] || continue
@@ -99,6 +111,86 @@ cu_latest_rate_limits() {
   [ -n "$rows" ] || return 0
   # Greatest ts (column 1) wins.
   printf '%s' "$rows" | sort -t$'\t' -k1,1n | tail -1
+}
+
+# cu_window_label <window_minutes>
+# Human label for a quota window: 300→"5h", 10080→"weekly", other numerics
+# scaled, anything else → "window".
+cu_window_label() {
+  local m="${1:-}"
+  case "$m" in
+    300)   echo "5h window" ;;
+    10080) echo "weekly" ;;
+    *)
+      if ! [[ "$m" =~ ^[0-9]+$ ]] || [ "$m" -eq 0 ]; then echo "window"
+      elif [ "$m" -lt 60 ];    then echo "${m}m"
+      elif [ "$m" -lt 1440 ];  then echo "$(( m / 60 ))h"
+      else                          echo "$(( m / 1440 ))d"
+      fi ;;
+  esac
+}
+
+# cu_collect_rollouts <root> [lookback_hours]
+# Echo rollout files (one per line) modified within the lookback window across
+# the whole fleet under <root>. Shared by the report, the rotate actuator's
+# snapshot archive, and the keepalive's proactive check. No matches → nothing.
+cu_collect_rollouts() {
+  local root="$1" hours="${2:-48}"
+  find "$root"/.openclaw-*/agents/*/agent/codex-home/sessions \
+       -type f -name 'rollout-*.jsonl' -mmin "-$(( hours * 60 ))" 2>/dev/null
+}
+
+# ── per-account snapshot archive ─────────────────────────────────────────────
+# Rollouts carry NO account identity on 7.x (the codex-app-server.json
+# threadId→authProfileId join documented above is dead — verified 2026-07-21),
+# so per-account quota knowledge is built by ARCHIVING the outgoing account's
+# freshest snapshot at rotation time. `resets_at` is an absolute epoch, so an
+# archived snapshot stays meaningful after the account goes standby: it says
+# exactly when that account's cap lapses.
+
+# cu_archive_path <dir> <profile-key>
+cu_archive_path() {
+  printf '%s/%s.snapshot.tsv' "$1" "$(printf '%s' "$2" | tr '/:@' '___')"
+}
+
+# cu_archive_write <dir> <profile-key> <tsv-row>
+# Persist a cu_latest_rate_limits row for an account (atomic, 0600).
+cu_archive_write() {
+  local dir="$1" key="$2" row="$3" path tmp
+  [ -n "$row" ] || return 1
+  mkdir -p "$dir"
+  path="$(cu_archive_path "$dir" "$key")"
+  tmp="$path.tmp.$$"
+  printf '%s\n' "$row" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$path"
+}
+
+# cu_archive_read <dir> <profile-key>
+# Echo the archived TSV row for an account, or nothing (rc 1) if absent.
+cu_archive_read() {
+  local path
+  path="$(cu_archive_path "$1" "$2")"
+  [ -r "$path" ] || return 1
+  head -n1 "$path"
+}
+
+# cu_row_capped_until <tsv-row> <max_pct> [now_epoch_s]
+# Given a snapshot row, echo the LATEST resets_at among windows whose
+# used_percent >= max_pct and whose reset is still in the future — i.e. "this
+# account is capped until <epoch>". Echoes nothing (rc 1) if no window blocks.
+cu_row_capped_until() {
+  local row="$1" max="$2" now="${3:-$(date +%s)}"
+  local blocked="" w wp wr f3 f4 f5 f6 f7 f8
+  IFS=$'\t' read -r _ _ f3 f4 f5 f6 f7 f8 <<<"$row"
+  for w in "$f3:$f4:$f5" "$f6:$f7:$f8"; do
+    IFS=: read -r _ wp wr <<<"$w"
+    [[ "$wr" =~ ^[0-9]+$ ]] || continue
+    # awk handles the fractional used_percent values a snapshot can carry
+    if awk -v p="$wp" -v m="$max" 'BEGIN{exit !(p+0 >= m+0)}' && [ "$wr" -gt "$now" ]; then
+      if [ -z "$blocked" ] || [ "$wr" -gt "$blocked" ]; then blocked="$wr"; fi
+    fi
+  done
+  [ -n "$blocked" ] || return 1
+  printf '%s' "$blocked"
 }
 
 # cu_is_fresh <ts_epoch_s> [freshness_hours]
@@ -132,25 +224,49 @@ cu_fmt_pct() {
   awk -v p="${1:-0}" 'BEGIN{ if (p=="") p=0; if (p==int(p)) printf "%d", p; else printf "%.1f", p }'
 }
 
-# cu_format_account_block <email> <active|standby> <fresh|stale|none> \
-#                         [pct5h reset5h pctWeek resetWeek plan]
-# Emit the Slack-mrkdwn block for one account (bullets, no tables). Only the
-# active account with a fresh snapshot shows numbers; everything else degrades
-# to a plain, honest line (fail-loud-in-content).
+# cu_format_window_lines <tsv-row>
+# Emit one "  • <label>: X% used · resets …" bullet per window present in the
+# row, plus a rate-limit-reached bullet when the snapshot flags one.
+cu_format_window_lines() {
+  local row="$1" now reached f3 f4 f5 f6 f7 f8 w wm wp wr
+  now="$(date +%s)"
+  IFS=$'\t' read -r _ reached f3 f4 f5 f6 f7 f8 <<<"$row"
+  for w in "$f3|$f4|$f5" "$f6|$f7|$f8"; do
+    IFS='|' read -r wm wp wr <<<"$w"
+    [[ "$wm" =~ ^[0-9]+$ ]] || continue
+    printf '  • %s: %s%% used · resets %s\n' \
+      "$(cu_window_label "$wm")" "$(cu_fmt_pct "$wp")" "$(cu_human_resets_in "$wr" "$now")"
+  done
+  if [ -n "${reached:-}" ] && [ "$reached" != "-" ]; then
+    printf '  • :no_entry: rate limit reached (%s)\n' "$reached"
+  fi
+}
+
+# cu_format_account_block <email> <active|standby> <fresh|stale|none> <plan> \
+#                         [tsv-row] [archived_age_seconds]
+# Emit the Slack-mrkdwn block for one account (bullets, no tables). The active
+# account with a fresh snapshot shows its window numbers; a standby with an
+# ARCHIVED snapshot (written at rotation time) shows its last-known numbers +
+# age — `resets_at` is absolute, so those stay meaningful; everything else
+# degrades to a plain, honest line (fail-loud-in-content).
 cu_format_account_block() {
-  local email="$1" role="$2" fresh="$3"
-  local pct5="${4:-}" r5="${5:-}" pctw="${6:-}" rw="${7:-}" plan="${8:-}"
-  local now plan_sfx; now="$(date +%s)"
-  plan_sfx="${plan:+ (plan: $plan)}"
-  if [ "$role" = "active" ] && [ "$fresh" = "fresh" ]; then
+  local email="$1" role="$2" fresh="$3" plan="${4:-}" row="${5:-}" age="${6:-}"
+  local plan_sfx="${plan:+ (plan: $plan)}"
+  if [ "$role" = "active" ] && [ "$fresh" = "fresh" ] && [ -n "$row" ]; then
     printf '*%s* — active%s\n' "$email" "$plan_sfx"
-    printf '  • 5h window: %s%% used · resets %s\n' "$(cu_fmt_pct "$pct5")" "$(cu_human_resets_in "$r5" "$now")"
-    printf '  • weekly: %s%% used · resets %s\n'    "$(cu_fmt_pct "$pctw")" "$(cu_human_resets_in "$rw" "$now")"
+    cu_format_window_lines "$row"
   elif [ "$role" = "active" ]; then
     printf '*%s* — active%s\n' "$email" "$plan_sfx"
-    printf '  • fresh quota snapshot unavailable — could not read current 5h/weekly usage\n'
+    printf '  • fresh quota snapshot unavailable — could not read current usage\n'
   else
     printf '*%s* — idle standby%s\n' "$email" "$plan_sfx"
-    printf '  • no fresh quota snapshot (account has not run recently)\n'
+    if [ -n "$row" ]; then
+      local age_h="?"
+      [[ "$age" =~ ^[0-9]+$ ]] && age_h="$(( age / 3600 ))h"
+      printf '  • last known (%s ago):\n' "$age_h"
+      cu_format_window_lines "$row"
+    else
+      printf '  • no fresh quota snapshot (account has not run recently)\n'
+    fi
   fi
 }

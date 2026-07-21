@@ -51,6 +51,14 @@ JSON
   printf '%s' '{"version":1,"lastGood":{"openai-codex":"openai-codex:aaron@muso.ai"},"usageStats":{}}' \
     > "$CANON/auth-state.json"
 
+  # Hermeticity: the report now prefers the rotate actuator's active-account
+  # state file over lastGood; pin it at an absent path so a real
+  # /var/lib/hydra/codex-active-account on the CI host can't leak in. Same for
+  # the per-account snapshot archive dir.
+  export CODEX_ACTIVE_ACCOUNT_FILE="$TEST_TMPDIR/absent-active-account"
+  export CODEX_USAGE_ARCHIVE_DIR="$TEST_TMPDIR/archive"
+  export CODEX_ROTATE_STAMP="$TEST_TMPDIR/absent-rotate-stamp"
+
   # shellcheck disable=SC1090
   source "$LIB"
 }
@@ -177,6 +185,26 @@ run_report() { run env CODEX_USAGE_ROOT="$ROOT" "$SCRIPT" "$@"; }
   ! echo "$output" | grep -qi 'anthropic'
 }
 
+@test "active-account state file overrides stale lastGood (2026-07-21 mislabel fix)" {
+  # After an account rotation, auth-state.json's lastGood still names the OLD
+  # account (the 7.x runtime no longer maintains it) — the freshest quota
+  # snapshot was being attributed to the wrong subscription. The rotate
+  # actuator's state file is authoritative when present and valid.
+  echo "openai-codex:aaronkaufman@me.com" > "$TEST_TMPDIR/active-account"
+  run env CODEX_USAGE_ROOT="$ROOT" CODEX_ACTIVE_ACCOUNT_FILE="$TEST_TMPDIR/active-account" "$SCRIPT" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.active_account == "openai-codex:aaronkaufman@me.com"' >/dev/null
+  echo "$output" | jq -e '.accounts[] | select(.email=="aaronkaufman@me.com") | .role=="active"' >/dev/null
+  echo "$output" | jq -e '.accounts[] | select(.email=="aaron@muso.ai") | .role=="standby"' >/dev/null
+}
+
+@test "state file naming an unknown profile → falls back to lastGood" {
+  echo "openai-codex:ghost@nowhere.com" > "$TEST_TMPDIR/active-account"
+  run env CODEX_USAGE_ROOT="$ROOT" CODEX_ACTIVE_ACCOUNT_FILE="$TEST_TMPDIR/active-account" "$SCRIPT" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.active_account == "openai-codex:aaron@muso.ai"' >/dev/null
+}
+
 @test "unit: cu_active_account returns lastGood codex profile id" {
   run cu_active_account "$CANON/auth-state.json"
   [ "$status" -eq 0 ]
@@ -207,12 +235,103 @@ run_report() { run env CODEX_USAGE_ROOT="$ROOT" "$SCRIPT" "$@"; }
   run cu_fmt_pct "";   [ "$output" = "0" ]
 }
 
-@test "unit: cu_latest_rate_limits returns the max-ts row as TSV" {
+@test "unit: cu_latest_rate_limits returns the max-ts row as window-keyed TSV" {
   write_rollout "$OPS_SESS/r1.jsonl" "$(( 4 * 3600 ))" 50 50
   write_rollout "$OPS_SESS/r2.jsonl" 600 2 9
   run cu_latest_rate_limits "$OPS_SESS/r1.jsonl" "$OPS_SESS/r2.jsonl"
   [ "$status" -eq 0 ]
-  # column 2 = pct5h of the newer (600s old) snapshot
-  [ "$(printf '%s' "$output" | cut -f2)" = "2" ]
-  [ "$(printf '%s' "$output" | cut -f4)" = "9" ]
+  # row: ts, reached, w1_min, w1_pct, w1_reset, w2_min, w2_pct, w2_reset —
+  # the newer (600s old) snapshot wins.
+  [ "$(printf '%s' "$output" | cut -f2)" = "-" ]     # no rate_limit_reached_type
+  [ "$(printf '%s' "$output" | cut -f3)" = "300" ]   # 5h window keyed by minutes
+  [ "$(printf '%s' "$output" | cut -f4)" = "2" ]
+  [ "$(printf '%s' "$output" | cut -f6)" = "10080" ] # weekly keyed by minutes
+  [ "$(printf '%s' "$output" | cut -f7)" = "9" ]
+}
+
+@test "window-keyed regression (2026-07-21): primary=weekly + secondary null renders 'weekly', never '5h window'" {
+  # The live 7.x shape observed during the cap incident: primary IS the weekly
+  # window (window_minutes 10080) and secondary is null. The old positional
+  # parse labeled this '5h window: 98%'.
+  local now iso r
+  now="$(date +%s)"; iso="$(epoch_to_iso "$(( now - 600 ))")"; r="$(( now + 200000 ))"
+  cat > "$OPS_SESS/rollout-r-weekly.jsonl" <<JSON
+{"type":"event_msg","ts":"$iso","rate_limits":{"limit_id":"codex","primary":{"used_percent":98.0,"window_minutes":10080,"resets_at":$r},"secondary":null,"plan_type":"pro","rate_limit_reached_type":null}}
+JSON
+  run_report
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'weekly: 98% used'
+  ! echo "$output" | grep -q '5h window'
+}
+
+@test "rate_limit_reached_type in the snapshot is surfaced in the text report" {
+  local now iso r
+  now="$(date +%s)"; iso="$(epoch_to_iso "$(( now - 600 ))")"; r="$(( now + 200000 ))"
+  cat > "$OPS_SESS/rollout-r-capped.jsonl" <<JSON
+{"type":"event_msg","ts":"$iso","rate_limits":{"limit_id":"codex","primary":{"used_percent":100,"window_minutes":10080,"resets_at":$r},"secondary":null,"rate_limit_reached_type":"secondary_window"}}
+JSON
+  run_report
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'rate limit reached (secondary_window)'
+}
+
+@test "standby with an ARCHIVED snapshot shows last-known quota instead of 'no fresh'" {
+  local now r; now="$(date +%s)"; r="$(( now + 90000 ))"
+  mkdir -p "$CODEX_USAGE_ARCHIVE_DIR"
+  printf '%s\t-\t10080\t97\t%s\t-\t-\t-\n' "$(( now - 7200 ))" "$r" \
+    > "$CODEX_USAGE_ARCHIVE_DIR/openai-codex_aaronkaufman_me.com.snapshot.tsv"
+  run_report
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'last known (2h ago):'
+  echo "$output" | grep -q 'weekly: 97% used'
+  run_report --json
+  echo "$output" | jq -e '.accounts[] | select(.email=="aaronkaufman@me.com") | .freshness=="archived" and .used_percent_weekly==97' >/dev/null
+}
+
+@test "rotation-boundary: a snapshot predating the last rotation is NOT attributed to the new active account" {
+  # QA finding (#719, round 4): right after a rotation the freshest rollout
+  # entry can predate the switch — it belongs to the OUTGOING account. Showing
+  # it under the new active account would display the old capped quota twice
+  # (as 'active' and in the outgoing archive).
+  write_rollout "$OPS_SESS/rollout-pre-switch.jsonl" 3600 0 98   # 1h old
+  echo "openai-codex:aaronkaufman@me.com" > "$TEST_TMPDIR/active-account"
+  date +%s > "$TEST_TMPDIR/rotate-stamp"                          # rotated NOW
+  run env CODEX_USAGE_ROOT="$ROOT" \
+      CODEX_ACTIVE_ACCOUNT_FILE="$TEST_TMPDIR/active-account" \
+      CODEX_ROTATE_STAMP="$TEST_TMPDIR/rotate-stamp" "$SCRIPT"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'aaronkaufman@me.com* — active'
+  echo "$output" | grep -q 'fresh quota snapshot unavailable'
+  ! echo "$output" | grep -q '98% used'
+}
+
+@test "rotation-boundary: a snapshot NEWER than the rotation is attributed normally" {
+  write_rollout "$OPS_SESS/rollout-post-switch.jsonl" 600 1 42    # 10min old
+  echo "openai-codex:aaronkaufman@me.com" > "$TEST_TMPDIR/active-account"
+  printf '%s\n' "$(( $(date +%s) - 3600 ))" > "$TEST_TMPDIR/rotate-stamp"  # rotated 1h ago
+  run env CODEX_USAGE_ROOT="$ROOT" \
+      CODEX_ACTIVE_ACCOUNT_FILE="$TEST_TMPDIR/active-account" \
+      CODEX_ROTATE_STAMP="$TEST_TMPDIR/rotate-stamp" "$SCRIPT"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'weekly: 42% used'
+}
+
+@test "unit: cu_window_label maps known and unknown windows" {
+  run cu_window_label 300;   [ "$output" = "5h window" ]
+  run cu_window_label 10080; [ "$output" = "weekly" ]
+  run cu_window_label 720;   [ "$output" = "12h" ]
+  run cu_window_label 2880;  [ "$output" = "2d" ]
+  run cu_window_label "-";   [ "$output" = "window" ]
+}
+
+@test "unit: cu_row_capped_until finds the blocking window's reset" {
+  local now; now="$(date +%s)"
+  local future=$(( now + 90000 )) past=$(( now - 100 ))
+  # weekly at 98% resetting in the future → blocked until that reset
+  run cu_row_capped_until "$(printf '1\t-\t10080\t98\t%s\t-\t-\t-' "$future")" 95 "$now"
+  [ "$status" -eq 0 ]; [ "$output" = "$future" ]
+  # same but the reset already passed → not blocked
+  run -1 cu_row_capped_until "$(printf '1\t-\t10080\t98\t%s\t-\t-\t-' "$past")" 95 "$now"
+  # below threshold → not blocked
+  run -1 cu_row_capped_until "$(printf '1\t-\t10080\t50\t%s\t-\t-\t-' "$future")" 95 "$now"
 }

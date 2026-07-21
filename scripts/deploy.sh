@@ -773,6 +773,12 @@ RSYNC_EXCLUDES=(
   # Convention: agents name workspace scratch with a 'tmp' marker so it lands
   # here — see docs/lessons/deploy-ci-pr.md.
   --exclude='workspaces/*/*tmp*'
+  # Scout's company-finder run scratch: the AGENT invents these names at
+  # runtime ('final-prep-input.json', 'final-batch.json' — 2026-07-21, blocked
+  # #719) and ignored the tmp-marker convention, so '*tmp*' misses them.
+  # Server-owned per-run scratch, recreatable, never in the repo. Mirrored
+  # KEEP glob in scripts/qa-clean-merge-scratch.sh (lockstep rule).
+  --exclude='workspaces/*/final-*.json'
   # Agent long-term memory (written by agents at runtime, should survive
   # deploys — see docs/guides/WORKSPACE-FILE-OWNERSHIP.md). MEMORY.md IS tracked
   # in git as a seed, but agents modify it post-deploy and we must not

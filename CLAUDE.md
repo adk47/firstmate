@@ -215,6 +215,20 @@ this script can ever rotate the chain. `scripts/codex-keepalive.sh` (15m) is the
 exits 1 here — it flags the disabled `openai` provider as "missing", NOT a codex signal.) See
 RUNBOOK §Troubleshooting → "Codex Token Lapse (`token_expired`)" and `docs/lessons/openclaw-and-codex.md`.
 
+**The usage CAP is a FIFTH failure mode — quota, not auth, and the fix is switching
+ACCOUNTS, not tokens.** `You've reached your Codex subscription usage limit` fallback
+notices with all guards CLEAN and zero 401s = the active subscription's quota is spent.
+sol/luna are model variants on ONE subscription, so the model fallback chain cannot
+express "try the other account" (2026-07-21: fleet rode paid OpenRouter for hours while
+the fresh standby idled). WHICH account is active is the deploy-proof state file
+`/var/lib/hydra/codex-active-account` (resolver `scripts/lib/codex-active-account.sh`;
+precedence env `CODEX_AUTH_PRIMARY` > state file > baked aaron@muso.ai — `codex-auth-sync.sh`
+re-resolves it on every heal, so a switch survives deploys/heals). **Actuator**:
+`scripts/lib/codex-account-rotate.sh --auto|--to <email>` (state → sync → drain-restart →
+page; 120-min cooldown bounds cap-flap). Auto-trigger: `codex-keepalive.sh` on the cap
+journal signature; both-accounts-capped degrades honestly to the OpenRouter rung. See
+RUNBOOK §Troubleshooting → "Codex Usage Cap / Account Rotation".
+
 **DR layer 2 — when the code-level healers themselves fail, an AI healer escalates.**
 `scripts/dr-ai-healer.sh` ("AI-decides, code-executes"): the watchdog fires it when a
 CRITICAL signature persists 3 ticks (or immediately on restart-FAILED / crash-loop).

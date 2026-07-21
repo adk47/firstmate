@@ -52,6 +52,7 @@ KEEP_GLOBS=(
   'MEMORY.md' 'IDENTITY.md' 'HEARTBEAT.md' 'TOOLS.md'
   'openclaw-workspace-state.json'
   '*tmp*'                              # any 'tmp'-marked scratch: .tmp-*, tmp_*, *.tmp
+  'final-*.json'                       # scout company-finder run scratch (2026-07-21, #719)
   'TOOLS.md.bak-*' '*.md.bak-*'
   'write-activity.log'
   '*.jpeg' '*.jpg' '*.webp' '*.gif' '*.png' '*.pdf' '*.csv' '*.txt' '*.py'

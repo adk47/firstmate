@@ -11,6 +11,10 @@ SCRIPT="$HYDRA_REPO/scripts/lib/codex-oauth-refresh.sh"
 setup() {
   TEST_TMPDIR="$(mktemp -d)"
   export TEST_TMPDIR
+  # Hermeticity: codex-auth-sync now resolves its primary from the account-
+  # rotation state file (/var/lib/hydra/codex-active-account); pin it at an
+  # absent sandbox path so live state on the node-8 CI runner can't leak in.
+  export CODEX_ACTIVE_ACCOUNT_FILE="$TEST_TMPDIR/absent-active-account"
   mkdir -p "$TEST_TMPDIR/bin"
 
   # Throwaway auth store mirroring the real shape.

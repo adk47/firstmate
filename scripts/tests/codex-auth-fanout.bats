@@ -16,6 +16,10 @@ SCRIPT="$HYDRA_REPO/scripts/lib/ensure-codex-auth.sh"
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
+  # Hermeticity: codex-auth-sync now resolves its primary from the account-
+  # rotation state file (/var/lib/hydra/codex-active-account); pin it at an
+  # absent sandbox path so live state on the node-8 CI runner can't leak in.
+  export CODEX_ACTIVE_ACCOUNT_FILE="$TEST_TMPDIR/absent-active-account"
   ROOT="$TEST_TMPDIR/root"; export ROOT
 
   # Fake fleet: main profile owns canonical (main/) plus a second agent (clio/);

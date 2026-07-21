@@ -692,6 +692,55 @@ is NOT a codex-health signal. Both wired via `install-aux-units.sh`.
 
 ---
 
+### Codex Usage Cap / Account Rotation (`usage limit`) — subscription capped, switch accounts
+
+**Symptoms**: fleet on `openrouter/openai/gpt-5.6-luna`; fallback notices carry
+`You've reached your Codex subscription usage limit. Next reset in N days`. All
+guards CLEAN, zero 401s — auth is fine, the ACTIVE subscription's quota is
+exhausted. sol/luna are model variants on ONE subscription, so the model-level
+fallback chain can never "try the other account" (2026-07-21 incident: aaron@
+capped at 100% while the paid standby idled fresh).
+
+**Auto-recovery (default)**: `codex-keepalive.sh` (15-min cron) has TWO
+triggers for `scripts/lib/codex-account-rotate.sh --auto`:
+- **Proactive** (preferred): a fresh rate_limits snapshot showing any quota
+  window ≥95% used (`CODEX_KEEPALIVE_ROTATE_AT`) with its reset >60 min away —
+  rotates BEFORE the cap error ever fires, skipping the degraded window.
+- **Reactive** (backstop): the cap signature in the journal.
+
+The rotation writes the active-account state file
+(`/var/lib/hydra/codex-active-account`, deploy-proof: outside the rsync tree,
+re-resolved by `codex-auth-sync.sh` on every heal), **archives the outgoing
+account's freshest quota snapshot** to `/var/lib/hydra/codex-usage/` (rollouts
+are account-blind on 7.x — the archive is the only per-account quota
+knowledge; `resets_at` is absolute so it stays meaningful), re-syncs all
+runtime stores, drain-restarts both gateways, pages #clio_devops.
+
+Guards: 120-min cooldown (rc 3); target-viability — `--auto` refuses (rc 7) a
+standby whose ARCHIVED snapshot is still capped, and skips candidates whose
+token is missing/expired (rc 4). On rc 3/7 with the signature live, BOTH
+subscriptions are spent: the keepalive pages that honestly (with the earliest
+known reset ETA) and the fleet rides the OpenRouter rung (the model chain's
+job) until a window resets.
+
+**Quota windows are NOT a fixed set**: OpenAI removed the 5h window ~Jul 12
+2026 ("temporarily", undocumented — may return); since then the weekly window
+arrives as `primary` with `secondary:null`. All parsing keys on
+`window_minutes`, never on primary/secondary position — re-verify the snapshot
+shape on codex behavior changes.
+
+**Manual**:
+```bash
+/opt/hydra/scripts/codex-usage-report.sh                          # who is active, quotas
+/opt/hydra/scripts/lib/codex-account-rotate.sh --to <email> [--force]  # switch now
+cat /var/lib/hydra/codex-active-account                           # current choice
+```
+Precedence everywhere: `CODEX_AUTH_PRIMARY` env > state file > baked default
+(aaron@muso.ai). The standby's tokens stay fresh because
+`codex-oauth-refresh.sh` refreshes ALL `openai-codex:*` profiles.
+
+---
+
 ### Codex Refresh-Token Race (`refresh_token_reused`) — cross-process
 
 **Symptoms**: the WHOLE codex fleet falls back to

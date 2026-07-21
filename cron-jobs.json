@@ -499,7 +499,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run this exact command via the shell (exec) tool and post its entire stdout to me verbatim, with no edits, no extra commentary, and no tables: `bash /opt/hydra/scripts/codex-usage-report.sh`. The script emits a complete Slack-ready report (America/Chicago timestamp, per-account 5h and weekly Codex usage, which account is active, and a plain note for any account whose fresh quota cannot be read). Do NOT hand-roll jq against auth-profiles.json or any auth/state file; it holds only token expiry, never usage, and indexing it directly is the exact bug this cron previously hit. If the command fails to run at all, send one short line saying the codex usage report script failed, including its stderr.",
+        "message": "Run this exact command via the shell (exec) tool and post its entire stdout to me verbatim, with no edits, no extra commentary, and no tables: `bash /opt/hydra/scripts/codex-usage-report.sh`. The script emits a complete Slack-ready report (America/Chicago timestamp, per-account Codex usage for whatever quota windows the snapshot carries — weekly-only since OpenAI dropped the 5h window in Jul 2026, which account is active, last-known archived quota for the standby, and a plain note for any account whose fresh quota cannot be read). Do NOT hand-roll jq against auth-profiles.json or any auth/state file; it holds only token expiry, never usage, and indexing it directly is the exact bug this cron previously hit. If the command fails to run at all, send one short line saying the codex usage report script failed, including its stderr.",
         "model": "openai/gpt-5.6-sol",
         "thinking": "low",
         "timeoutSeconds": 600,
@@ -532,7 +532,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run this exact command via the shell (exec) tool and post its entire stdout to me verbatim, with no edits, no extra commentary, and no tables: `bash /opt/hydra/scripts/codex-usage-report.sh`. The script emits a complete Slack-ready report (America/Chicago timestamp, per-account 5h and weekly Codex usage, which account is active, and a plain note for any account whose fresh quota cannot be read). Do NOT hand-roll jq against auth-profiles.json or any auth/state file; it holds only token expiry, never usage, and indexing it directly is the exact bug this cron previously hit. If the command fails to run at all, send one short line saying the codex usage report script failed, including its stderr.",
+        "message": "Run this exact command via the shell (exec) tool and post its entire stdout to me verbatim, with no edits, no extra commentary, and no tables: `bash /opt/hydra/scripts/codex-usage-report.sh`. The script emits a complete Slack-ready report (America/Chicago timestamp, per-account Codex usage for whatever quota windows the snapshot carries — weekly-only since OpenAI dropped the 5h window in Jul 2026, which account is active, last-known archived quota for the standby, and a plain note for any account whose fresh quota cannot be read). Do NOT hand-roll jq against auth-profiles.json or any auth/state file; it holds only token expiry, never usage, and indexing it directly is the exact bug this cron previously hit. If the command fails to run at all, send one short line saying the codex usage report script failed, including its stderr.",
         "model": "openai/gpt-5.6-sol",
         "thinking": "low",
         "timeoutSeconds": 600,

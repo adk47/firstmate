@@ -77,7 +77,12 @@ CODEX_AUTH_ROOT="${CODEX_AUTH_ROOT:-/root}"
 CODEX_AUTH_PROFILES="${CODEX_AUTH_PROFILES:-main edge}"
 CANON_DIR="${CANON_DIR:-${CODEX_AUTH_ROOT}/.openclaw-main/agents/main/agent}"
 CANON_PROFILES="$CANON_DIR/auth-profiles.json"
-CODEX_AUTH_PRIMARY="${CODEX_AUTH_PRIMARY:-openai-codex:aaron@muso.ai}"
+# CODEX_AUTH_PRIMARY: env wins; else the account-rotation state file
+# (/var/lib/hydra/codex-active-account — written by codex-account-rotate.sh,
+# survives deploys); else the baked default. Resolved AFTER the canonical
+# checks below, because the state-file key is validated against canonical.
+# shellcheck source=codex-active-account.sh
+source "$SCRIPT_DIR/codex-active-account.sh"
 NODE_BIN="${NODE_BIN:-node}"
 SENTINEL_REFRESH="SYNC-MANAGED-NO-REFRESH-TOKEN"
 RUNTIME_FLOOR="2026.7"
@@ -116,6 +121,8 @@ fi
 [ -r "$CANON_PROFILES" ] || { log "ERROR: canonical store not readable: $CANON_PROFILES"; exit 2; }
 jq -e '.profiles | length > 0' "$CANON_PROFILES" >/dev/null 2>&1 \
   || { log "ERROR: canonical store has no profiles: $CANON_PROFILES"; exit 2; }
+
+CODEX_AUTH_PRIMARY="${CODEX_AUTH_PRIMARY:-$(caa_active_key "$CANON_PROFILES")}"
 
 # ── derived payloads from canonical ──────────────────────────────────────────
 

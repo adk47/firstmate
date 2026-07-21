@@ -419,15 +419,29 @@ Until a native `kind: lobster` cron payload lands, the systemd-timer ->
 
 ## Codex / OAuth runtime
 
-The FOUR canonical Codex failure modes are documented as the source of truth
+The FIVE canonical Codex failure modes are documented as the source of truth
 elsewhere in this repo and are NOT repeated here: see the "Codex / OAuth auth is
 centralized" section of the top-level `CLAUDE.md`, and the matching entries under
 Troubleshooting in `docs/runbooks/RUNBOOK.md` ("Codex Auth Invalidated / Silent
 Sonnet Fallback" = auth fan-out, "Codex Token Lapse (`token_expired`)" = OAuth
 credential lapse, "Codex Refresh-Token Race (`refresh_token_reused`)" =
 cross-process refresh collision, "Codex Plugin Floated Off Pin / api-key-route
-401 (#90925)" = plugin version drift). Everything below is the ADDITIONAL Codex
-mechanics those two files don't cover.
+401 (#90925)" = plugin version drift, "Codex Usage Cap / Account Rotation" =
+subscription quota spent → switch the ACTIVE account via
+`codex-account-rotate.sh`, auto-triggered by the keepalive — proactively off a
+≥95% quota snapshot, reactively off the journal cap signature). Everything below
+is the ADDITIONAL Codex mechanics those two files don't cover.
+
+One usage-data trap worth its own line: the rollout `rate_limits` window set is
+NOT stable — OpenAI removed the 5h window ~2026-07-12 ("temporarily",
+undocumented), after which the WEEKLY window arrives as `primary` with
+`secondary:null` (observed live 2026-07-21; the old positional parse labeled a
+98%-used weekly quota as "5h window"). Parse windows by their `window_minutes`,
+never by primary/secondary position, and re-verify the shape when codex
+behavior shifts. Rollouts also carry NO account identity on 7.x (the
+`codex-app-server.json` threadId→authProfileId join is dead) — per-account
+quota knowledge exists only via the rotation-time archives in
+`/var/lib/hydra/codex-usage/`.
 
 ### Harness and runtime basics
 
