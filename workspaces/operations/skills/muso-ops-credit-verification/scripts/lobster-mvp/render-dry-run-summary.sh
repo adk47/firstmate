@@ -59,8 +59,11 @@ WOULD_UVN=$(echo "$INPUT" | jq -r '.counts.would_uvn')
 DRY_APPLY=$(echo "$INPUT" | jq -r '.apply.dry_run | tostring')
 APPLY_APPROVE_LANDED=$(echo "$INPUT"  | jq -r '.apply.approve.landed  // 0')
 APPLY_APPROVE_REFUSED=$(echo "$INPUT" | jq -r '.apply.approve.refused // 0')
+APPLY_APPROVE_TRANSPORT_FAILED=$(echo "$INPUT" | jq -r '.apply.approve.transport_failed // 0')
 APPLY_UVN_LANDED=$(echo "$INPUT"      | jq -r '.apply.uvn.landed      // 0')
 APPLY_UVN_REFUSED=$(echo "$INPUT"     | jq -r '.apply.uvn.refused     // 0')
+APPLY_UVN_TRANSPORT_FAILED=$(echo "$INPUT" | jq -r '.apply.uvn.transport_failed // 0')
+APPLY_TRANSPORT_FAILED=$(( APPLY_APPROVE_TRANSPORT_FAILED + APPLY_UVN_TRANSPORT_FAILED ))
 
 # Selector-level note from the fetch step (e.g. fetch-by-credit.sh's
 # "status_is_approved_not_unverified"). Extracted once here, rendered by
@@ -103,7 +106,10 @@ if [[ "$DRY_APPLY" == "false" ]]; then
   APPROVE_LABEL="approved"
   UVN_LABEL="user_verification_needed"
   APPROVE_LIST_HEADER="approved cr_ids (first 10):"
-  TAIL_LINE="_Apply outcomes: approved.landed=$APPLY_APPROVE_LANDED (refused=$APPLY_APPROVE_REFUSED), uvn.landed=$APPLY_UVN_LANDED (refused=$APPLY_UVN_REFUSED). Per-cr_id audit at \`/var/log/openclaw/lobster-apply.jsonl\`._"
+  TAIL_LINE="_Apply outcomes: approved.landed=$APPLY_APPROVE_LANDED (refused=$APPLY_APPROVE_REFUSED, transport_failed=$APPLY_APPROVE_TRANSPORT_FAILED), uvn.landed=$APPLY_UVN_LANDED (refused=$APPLY_UVN_REFUSED, transport_failed=$APPLY_UVN_TRANSPORT_FAILED). Per-cr_id audit at \`/var/log/openclaw/lobster-apply.jsonl\`._"
+  if (( APPLY_TRANSPORT_FAILED > 0 )); then
+    TAIL_LINE+=$'\n'":rotating_light: ${APPLY_TRANSPORT_FAILED} credit write(s) have unconfirmed delivery after the safe retry policy; these were not backend refusals. Reconcile current credit state before retrying."
+  fi
   if [[ -n "$OPS_RUN_ID" ]]; then
     # Same UTC-date derivation as muso-admin-api.sh write_credit_request_result
     # (a batch crossing UTC midnight between apply and summary can point at

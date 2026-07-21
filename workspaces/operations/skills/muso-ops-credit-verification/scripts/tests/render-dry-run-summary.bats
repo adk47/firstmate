@@ -152,6 +152,19 @@ calls() { grep -c '^CALL ' "$OPENCLAW_CALLS_FILE" 2>/dev/null || echo 0; }
   [[ "$output" == *"/var/log/openclaw/lobster-apply.jsonl"* ]]
 }
 
+@test "real apply reports transport failures separately from refusals" {
+  local fixture_transport="$TEST_TMPDIR/fixture.transport.json"
+  jq '.apply.approve += {transport_failed: 1}
+      | .apply.uvn += {transport_failed: 2}' "$FIXTURE" > "$fixture_transport"
+  run --separate-stderr env -u THREAD_TS POST_PARENT_TO_CHANNEL=0 bash -c "'$RENDER' < '$fixture_transport'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"approved.landed=169 (refused=0, transport_failed=1)"* ]]
+  [[ "$output" == *"uvn.landed=331 (refused=0, transport_failed=2)"* ]]
+  [[ "$output" == *"3 credit write(s) have unconfirmed delivery after the safe retry policy"* ]]
+  [[ "$output" == *"Reconcile current credit state before retrying"* ]]
+  [[ "$output" != *"did not land"* ]]
+}
+
 @test "fraud-unavailable warning points at scorer stderr, not a dead runlog" {
   local fixture_fraud="$TEST_TMPDIR/fixture.fraud.json"
   jq '.would_uvn = [{"cr_id":"cr-U","_fraud":{"muso_only_available":false}}]' "$FIXTURE" > "$fixture_fraud"

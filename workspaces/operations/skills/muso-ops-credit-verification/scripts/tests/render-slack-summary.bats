@@ -32,13 +32,16 @@ seed_results() {
 }
 
 seed_run_finished() {
-    # args: dryRun silent_failure approved verification_needed rejected_by_gate [http_err_uvn] [rejected_pre_flight]
+    # args: dryRun silent_failure approved verification_needed rejected_by_gate
+    #       [http_err_uvn] [rejected_pre_flight] [transport_err_approved] [transport_err_uvn]
     local dry="$1" silent="$2" appr="$3" vn="$4" rbg="$5"
     local http_err_uvn="${6:-0}" rpf="${7:-0}"
+    local transport_err_approved="${8:-0}" transport_err_uvn="${9:-0}"
     jq -n -c --arg rid "$RUN_ID" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --argjson dry "$dry" --argjson silent "$silent" \
         --argjson appr "$appr" --argjson vn "$vn" --argjson rbg "$rbg" \
         --argjson eu "$http_err_uvn" --argjson rpf "$rpf" \
+        --argjson eta "$transport_err_approved" --argjson etu "$transport_err_uvn" \
     '{event:"run_finished", run_id:$rid, ts:$ts,
       fetched:500, approved:$appr, verification_needed:$vn, escalated:0,
       skipped_idempotent:0, skipped_cap:0, errors:0,
@@ -49,8 +52,10 @@ seed_run_finished() {
                       approved_rejected_by_gate:$rbg,
                       approved_rejected_pre_flight:$rpf,
                       approved_http_error:0,
+                      approved_transport_error:$eta,
                       verification_needed_attempted:($vn + $eu), verification_needed_landed:$vn,
-                      verification_needed_http_error:$eu}}' >> "$RUNLOG_FILE"
+                      verification_needed_http_error:$eu,
+                      verification_needed_transport_error:$etu}}' >> "$RUNLOG_FILE"
 }
 
 # --- Error / missing input ---
@@ -187,6 +192,21 @@ seed_run_finished() {
     [[ "$output" == *"cr_err1"* ]]
     # Parent also warns about http_error count.
     [[ "$output" == *"2 admin-API call(s) errored"* ]]
+}
+
+@test "thread: transport failures are separate from backend HTTP errors" {
+    seed_run_finished false true 0 0 0 0 0 1 2
+    seed_results approved transport_error '["cr_dns_approve"]'
+    seed_results user_verification_needed transport_error '["cr_dns_uvn_1","cr_dns_uvn_2"]'
+    run "$SCRIPTS_DIR/render-slack-summary.sh" "$RUN_ID"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"3 admin-API write(s) have unconfirmed delivery after the safe retry policy"* ]]
+    [[ "$output" == *"Transport failures — delivery unconfirmed for 3 credit(s)"* ]]
+    [[ "$output" == *"Reconcile current credit state before retrying"* ]]
+    [[ "$output" != *"did NOT land"* ]]
+    [[ "$output" == *"cr_dns_approve"* ]]
+    [[ "$output" == *"cr_dns_uvn_1"* ]]
+    [[ "$output" != *"UVN flag HTTP errors"* ]]
 }
 
 @test "thread: empty results.jsonl → placeholder line, never empty body" {

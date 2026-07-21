@@ -645,6 +645,24 @@ setup_cv_results() {
   echo "$output" | jq -e '.reconciliation.verification_needed_http_error == 3'
 }
 
+@test "reconciliation: transport errors are distinct from HTTP errors" {
+  setup_cv_results
+  seed_browser_ok "c0" "$PROBE_URL"
+  seed_results approved transport_error '["approve_dns"]'
+  seed_results user_verification_needed transport_error '["uvn_dns_1","uvn_dns_2"]'
+  run "$SCRIPTS_DIR/compute-run-summary.sh" "$RUN_ID" "$PARENT_MSG_TS"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .reconciliation.approved_transport_error == 1
+    and .reconciliation.verification_needed_transport_error == 2
+    and .reconciliation.approved_http_error == 0
+    and .reconciliation.verification_needed_http_error == 0
+    and .silent_failure_detected == true
+    and .hollow == false
+  '
+  ! jq -e 'select(.event == "run_finished_hollow")' "$RUNLOG_FILE" >/dev/null
+}
+
 @test "silent_failure_detected: false when ANY approves land (partial success still counts as alive)" {
   # 2 of 3 approved, 1 rejected → not silent failure. Truth in the numbers
   # is enough; partial failures are surfaced via reconciliation.approved_*
