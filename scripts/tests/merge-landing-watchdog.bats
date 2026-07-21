@@ -5,8 +5,8 @@
 #
 # PATH-shadows muso + ssh so a real Slack send / remote call during a test
 # fails loudly instead of paging #clio_devops for real
-# (see memory/feedback_bats_must_stub_openclaw.md). The catalog query is
-# redirected to a stub via MERGE_LANDING_TRINO_CMD — no real Trino/kubectl.
+# (see memory/feedback_bats_must_stub_openclaw.md). The live catalog API read is
+# redirected to a stub via MERGE_LANDING_CATALOG_CMD — no real network call.
 # Behavioural assertions use --dry-run; the payload-escaping test runs the real
 # post path against a stubbed muso that captures the argv + text.
 bats_require_minimum_version 1.5.0
@@ -49,42 +49,31 @@ STUB
   chmod +x "$TEST_TMPDIR/bin/ssh" "$TEST_TMPDIR/bin/muso" "$TEST_TMPDIR/bin/flock"
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
 
-  # Catalog stub: pattern-matches the loser id in the IN-list SQL and emits the
-  # quoted "_id","merged_to_id","is_deleted" rows trino-query.sh would return
-  # (data rows only, no header). STUCK = "<id>","","false". By default L_STUCK
-  # is stuck, L_LANDED is merged, SURV is the active survivor. It ALSO answers
-  # the freshness-watermark query (max(updated_timestamp)) with STUB_WATERMARK_MS
-  # (epoch MILLIS) — default is far past the ts=1000 test merges (caught up), so
-  # existing tests classify; a test can set it BEFORE the merge to exercise the
-  # PENDING hold.
-  export STUB_WATERMARK_MS="${STUB_WATERMARK_MS:-1001000000}"  # 1001000s == pinned NOW
-  cat > "$TEST_TMPDIR/bin/trino-stub.sh" <<'STUB'
-#!/usr/bin/env bash
-set -euo pipefail
-q="${1:-}"
-if [[ "$q" == *"max(updated_timestamp)"* ]]; then
-  printf '"%s"\n' "${STUB_WATERMARK_MS}"
-  exit 0
-fi
-[[ "$q" == *"'L_STUCK'"*  ]] && printf '"L_STUCK","","false"\n'
-[[ "$q" == *"'L_LANDED'"* ]] && printf '"L_LANDED","SURV","true"\n'
-[[ "$q" == *"'SURV'"*     ]] && printf '"SURV","","false"\n'
-exit 0
+  # Catalog stub: emits the real admin profile-list response shape. Unknown ids
+  # default to active/unmerged; L_LANDED is folded into SURV.
+  cat > "$TEST_TMPDIR/bin/catalog-stub" <<'STUB'
+#!/usr/bin/env python3
+import json, sys
+ids = [arg.split("=", 1)[1] for arg in sys.argv[1:] if arg.startswith("ids=")]
+items = []
+for profile_id in ids:
+    if profile_id == "L_LANDED":
+        items.append({"id": profile_id, "merged": {"mergedToId": "SURV"}, "deleted": {"date": "2026-01-01"}})
+    else:
+        items.append({"id": profile_id, "merged": None, "deleted": None})
+print(json.dumps({"data": {"totalCount": len(items), "limit": len(items), "offset": 0, "items": items}}))
 STUB
-  chmod +x "$TEST_TMPDIR/bin/trino-stub.sh"
+  chmod +x "$TEST_TMPDIR/bin/catalog-stub"
 
   export MERGE_LANDING_MERGES_FILE="$TEST_TMPDIR/recent-merges.jsonl"
   export MERGE_LANDING_STATE_FILE="$TEST_TMPDIR/state.json"
   export MERGE_LANDING_LOCKFILE="$TEST_TMPDIR/wd.lock"
-  export MERGE_LANDING_TRINO_CMD="$TEST_TMPDIR/bin/trino-stub.sh"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-stub"
+  export MERGE_LANDING_CATALOG_BATCH_SIZE=40
   export MERGE_LANDING_SKIP_HOST_GUARD=1
   export MERGE_LANDING_MIN_AGE_HOURS=6
   # Pin "now" so age math is deterministic. ts=1000 below is ~277h before this.
   export MERGE_LANDING_NOW_EPOCH=1001000
-  # Disable the watermark-staleness guard by default: the pinned NOW sits ~277h
-  # after the ts=1000 fixtures, so a watermark near the merge (the PENDING tests)
-  # would look wall-clock-stale. The dedicated staleness test re-enables it.
-  export MERGE_LANDING_WATERMARK_STALE_HOURS=100000000
 }
 
 teardown() { rm -rf "$TEST_TMPDIR"; }
@@ -115,11 +104,59 @@ mergeline() { # $1 epoch  $2 survivor  $3..$n losers
   [[ "$output" == *"SURV"* ]]
 }
 
+@test "catalog state comes from the live admin profile API, never Trino" {
+  mergeline 1000 SURV L_STUCK
+  cat > "$TEST_TMPDIR/bin/live-catalog-stub" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_CALLS"
+cat <<'JSON'
+{"data":{"totalCount":2,"limit":2,"offset":0,"items":[{"id":"SURV","merged":null,"deleted":null},{"id":"L_STUCK","merged":null,"deleted":null}]}}
+JSON
+STUB
+  chmod +x "$TEST_TMPDIR/bin/live-catalog-stub"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/live-catalog-stub"
+  # Prove the obsolete path cannot be used accidentally.
+  export MERGE_LANDING_TRINO_CMD="$TEST_TMPDIR/bin/does-not-exist"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  grep -q -- '--env prod --json api GET /admin/profile' "$STUB_CALLS"
+  ! grep -q 'matvw_catalog_profile' "$STUB_CALLS"
+}
+
+@test "watchdog source contains no V3 table, materialized-view, or watermark fallback" {
+  run grep -Ei 'profile_v3|_v3|matvw_catalog_profile|query_watermark|MERGE_LANDING_CATALOG_TABLE' "$WD"
+  [ "$status" -eq 1 ]
+}
+
+@test "production catalog command uses an absolute cron-safe path" {
+  grep -Fq 'CATALOG_CMD="${MERGE_LANDING_CATALOG_CMD:-/usr/local/bin/muso}"' "$WD"
+}
+
+@test "large id sets are split into bounded live-catalog requests" {
+  mergeline 1000 SURV L_STUCK L_LANDED
+  cat > "$TEST_TMPDIR/bin/catalog-recording" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_CALLS"
+exec "$TEST_TMPDIR/bin/catalog-stub" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-recording"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-recording"
+  export MERGE_LANDING_CATALOG_BATCH_SIZE=2
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [ "$(grep -c -- '--env prod --json api GET /admin/profile' "$STUB_CALLS")" -eq 2 ]
+  [[ "$output" == *"L_STUCK"* ]]
+  [[ "$output" != *"loser \`L_LANDED\`"* ]]
+}
+
 @test "aged merge that DID land (loser merged_to_id set) → no alert" {
   mergeline 1000 SURV L_LANDED
   run bash "$WD" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"no caught-up merge is stuck"* ]]
+  [[ "$output" == *"no aged merge is unresolved"* ]]
 }
 
 @test "fresh merge (younger than MIN_AGE_HOURS) → not yet checked, no alert" {
@@ -131,50 +168,11 @@ mergeline() { # $1 epoch  $2 survivor  $3..$n losers
 }
 
 # ──────────────────────────────────────────────────────────────
-# Freshness-watermark gate: an aged merge that reads "stuck" in the matview must
-# NOT alert while the matview's data watermark is still BEHIND the merge — that's
-# just refresh lag, not a drop. This is the exact 2026-07-03 false-positive class
-# (survivor 4ffd5e1c: 5 merges paged as "NOT landed" hours before the daily
-# matview rebuilt past them). Only once the watermark advances past the merge
-# (+ margin) is a persistent "stuck" reading a real drop.
 # ──────────────────────────────────────────────────────────────
-
-@test "aged + stuck but matview watermark BEHIND the merge → PENDING, no alert" {
-  mergeline 1000 SURV L_STUCK
-  # Watermark = 500s (in ms) → BEFORE the merge ts=1000 → not caught up.
-  export STUB_WATERMARK_MS=500000
-  run bash "$WD" --dry-run
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"no caught-up merge is stuck"* ]]   # reached the quiet path (not BLIND, not alert)
-  [[ "$output" != *"NOT landed"* ]]     # held, not escalated
-  [[ "$output" != *"L_STUCK"* ]]
-}
-
-@test "aged + stuck, watermark ahead of merge but within margin → still PENDING" {
-  mergeline 1000 SURV L_STUCK
-  # Default margin is 12h (43200s). Watermark 40000s > ts(1000) but < ts+margin
-  # (44200) → not yet trustworthy → PENDING.
-  export STUB_WATERMARK_MS=40000000
-  run bash "$WD" --dry-run
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"no caught-up merge is stuck"* ]]   # reached the quiet path (not escalated)
-  [[ "$output" != *"NOT landed"* ]]
-}
-
-@test "aged + stuck, watermark caught up PAST merge+margin → real drop, alerts" {
-  mergeline 1000 SURV L_STUCK
-  # Watermark 500000s ≫ ts(1000)+margin(43200) → caught up → a persistent stuck
-  # reading is a genuine drop.
-  export STUB_WATERMARK_MS=500000000
-  run bash "$WD" --dry-run
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"accepted but NOT landed"* ]]
-  [[ "$output" == *"L_STUCK"* ]]
-}
 
 @test "stuck alert wording is verify + re-fire, never 'manual merge'" {
   mergeline 1000 SURV L_STUCK
-  run bash "$WD" --dry-run           # default watermark is caught up
+  run bash "$WD" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"verify + re-fire"* ]]
   [[ "$output" == *"do NOT blind re-merge"* ]]
@@ -186,94 +184,117 @@ mergeline() { # $1 epoch  $2 survivor  $3..$n losers
   # canonicalised the other way: FLOSER stays active, FSURV merged into FLOSER.
   # The pair collapsed → landed → must NOT flag the nominal loser.
   mergeline 1000 FSURV FLOSER
-  cat > "$TEST_TMPDIR/bin/trino-flip.sh" <<'STUB'
+  cat > "$TEST_TMPDIR/bin/catalog-flip" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-q="${1:-}"
-if [[ "$q" == *"max(updated_timestamp)"* ]]; then printf '"1001000000"\n'; exit 0; fi
-[[ "$q" == *"'FLOSER'"* ]] && printf '"FLOSER","","false"\n'   # nominal loser: active
-[[ "$q" == *"'FSURV'"*  ]] && printf '"FSURV","FLOSER","true"\n' # nominal survivor merged INTO loser
-exit 0
+printf '%s\n' '{"data":{"items":[{"id":"FLOSER","merged":null,"deleted":null},{"id":"FSURV","merged":{"mergedToId":"FLOSER"},"deleted":{"date":"2026-01-01"}}]}}'
 STUB
-  chmod +x "$TEST_TMPDIR/bin/trino-flip.sh"
-  export MERGE_LANDING_TRINO_CMD="$TEST_TMPDIR/bin/trino-flip.sh"
+  chmod +x "$TEST_TMPDIR/bin/catalog-flip"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-flip"
   run bash "$WD" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" != *"NOT landed"* ]]
   [[ "$output" != *"FLOSER"* ]]
-  [[ "$output" == *"no caught-up merge is stuck"* ]]
+  [[ "$output" == *"no aged merge is unresolved"* ]]
+}
+
+@test "loser merged to a different profile remains unresolved" {
+  mergeline 1000 SURV L_WRONG
+  cat > "$TEST_TMPDIR/bin/catalog-wrong-target" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[{"id":"SURV","merged":null,"deleted":null},{"id":"L_WRONG","merged":{"mergedToId":"OTHER"},"deleted":{"date":"2026-01-01"}}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-wrong-target"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-wrong-target"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" == *"L_WRONG"* ]]
+}
+
+@test "missing loser is unresolved, never silently treated as landed" {
+  mergeline 1000 SURV L_MISSING
+  cat > "$TEST_TMPDIR/bin/catalog-missing-loser" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[{"id":"SURV","merged":null,"deleted":null}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-missing-loser"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-missing-loser"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" == *"L_MISSING"* ]]
+}
+
+@test "valid empty catalog result leaves both missing profiles unresolved" {
+  mergeline 1000 SURV L_MISSING
+  cat > "$TEST_TMPDIR/bin/catalog-empty-list" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-empty-list"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-empty-list"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" == *"L_MISSING"* ]]
 }
 
 @test "catalog query returns EMPTY rows (silent failure) → BLIND, exit 1" {
   mergeline 1000 SURV L_STUCK
   # Stub exits 0 but emits nothing for the id query → must be treated as BLIND,
   # never as "everything landed" (which would hide real drops).
-  cat > "$TEST_TMPDIR/bin/trino-empty.sh" <<'STUB'
+  cat > "$TEST_TMPDIR/bin/catalog-empty" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 exit 0
 STUB
-  chmod +x "$TEST_TMPDIR/bin/trino-empty.sh"
-  export MERGE_LANDING_TRINO_CMD="$TEST_TMPDIR/bin/trino-empty.sh"
+  chmod +x "$TEST_TMPDIR/bin/catalog-empty"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-empty"
   run bash "$WD" --dry-run
   [ "$status" -eq 1 ]
-  [[ "$output" == *"no rows"* ]]
+  [[ "$output" == *"live catalog API query failed"* ]]
   [[ "$output" == *"BLIND"* ]]
-  [[ "$output" != *"no caught-up merge is stuck"* ]]
+  [[ "$output" != *"no aged merge is unresolved"* ]]
 }
 
-@test "matview watermark abnormally stale (rebuild stalled) → BLIND, exit 1" {
-  mergeline 1000 SURV L_STUCK
-  # Watermark 500s is ~277h behind the pinned NOW (1001000s); with the guard set
-  # to 48h that's a stalled rebuild → must page BLIND, not silently under-detect.
-  export MERGE_LANDING_WATERMARK_STALE_HOURS=48
-  export STUB_WATERMARK_MS=500000
+@test "unexpected live-catalog shape fails loud instead of reporting healthy" {
+  mergeline 1000 SURV L_BAD
+  cat > "$TEST_TMPDIR/bin/catalog-bad-shape" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[{"id":"SURV","merged":null,"deleted":null},{"id":"L_BAD","merged":"not-an-object","deleted":null}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-bad-shape"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-bad-shape"
+
   run bash "$WD" --dry-run
   [ "$status" -eq 1 ]
-  [[ "$output" == *"stale"* ]]
+  [[ "$output" == *"detector classification failed"* ]]
   [[ "$output" == *"BLIND"* ]]
-  [[ "$output" != *"NOT landed"* ]]
+  [[ "$output" != *"no aged merge is unresolved"* ]]
 }
 
-@test "sustained matview stall pages ONCE, then deduped within cooldown (real run)" {
-  # Guards the cooldown: the catalog id-query succeeds every tick during a stall,
-  # so clearing the BLIND marker on catalog-success would re-page every tick.
-  mergeline 1000 SURV L_STUCK
+@test "classification failure BLIND page is deduped across real ticks" {
+  mergeline 1000 SURV L_BAD
+  cat > "$TEST_TMPDIR/bin/catalog-bad-shape" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[{"id":"SURV","merged":null,"deleted":null},{"id":"L_BAD","merged":"not-an-object","deleted":null}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-bad-shape"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-bad-shape"
   echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
-  export MERGE_LANDING_WATERMARK_STALE_HOURS=48
-  export STUB_WATERMARK_MS=500000        # ~277h stale vs pinned NOW
 
-  run bash "$WD"                          # tick 1: stale → pages BLIND
+  run bash "$WD"
   [ "$status" -eq 1 ]
-  [ -f "$TEST_TMPDIR/last-text" ]
-  grep -q 'stale' "$TEST_TMPDIR/last-text"
+  [ "$(grep -c -- 'slack send' "$STUB_CALLS")" -eq 1 ]
 
-  rm -f "$TEST_TMPDIR/last-text"
-  run bash "$WD"                          # tick 2: still stale, inside cooldown → no re-page
+  run bash "$WD"
   [ "$status" -eq 1 ]
   [[ "$output" == *"already paged within"* ]]
-  [ ! -f "$TEST_TMPDIR/last-text" ]
-}
-
-@test "watermark query failure (catalog OK) → BLIND, fail loud exit 1" {
-  mergeline 1000 SURV L_STUCK
-  # Stub returns catalog rows normally but FAILS the watermark query.
-  cat > "$TEST_TMPDIR/bin/trino-wmfail.sh" <<'STUB'
-#!/usr/bin/env bash
-set -euo pipefail
-q="${1:-}"
-if [[ "$q" == *"max(updated_timestamp)"* ]]; then exit 7; fi
-[[ "$q" == *"'L_STUCK'"* ]] && printf '"L_STUCK","","false"\n'
-[[ "$q" == *"'SURV'"*    ]] && printf '"SURV","","false"\n'
-exit 0
-STUB
-  chmod +x "$TEST_TMPDIR/bin/trino-wmfail.sh"
-  export MERGE_LANDING_TRINO_CMD="$TEST_TMPDIR/bin/trino-wmfail.sh"
-  run bash "$WD" --dry-run
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"watermark query failed"* ]]
-  [[ "$output" == *"BLIND"* ]]
-  [[ "$output" != *"no caught-up merge is stuck"* ]]
+  [ "$(grep -c -- 'slack send' "$STUB_CALLS")" -eq 1 ]
 }
 
 @test "dedupe: a stuck pair alerts once, not again on the next tick" {
@@ -281,7 +302,7 @@ STUB
   run bash "$WD" --dry-run
   [[ "$output" == *"L_STUCK"* ]]            # first tick alerts
   run bash "$WD" --dry-run
-  [[ "$output" == *"no caught-up merge is stuck"* ]]        # second tick is quiet (state remembers)
+  [[ "$output" == *"no aged merge is unresolved"* ]]        # second tick is quiet (state remembers)
 }
 
 @test "mixed batch: only the stuck loser is flagged, the landed one is not" {
@@ -295,23 +316,23 @@ STUB
 
 @test "catalog query failure (dry-run) → fail loud (BLIND), exit non-zero" {
   mergeline 1000 SURV L_STUCK
-  # Trino stub that fails.
-  printf '#!/usr/bin/env bash\nexit 7\n' > "$TEST_TMPDIR/bin/trino-fail.sh"
-  chmod +x "$TEST_TMPDIR/bin/trino-fail.sh"
-  export MERGE_LANDING_TRINO_CMD="$TEST_TMPDIR/bin/trino-fail.sh"
+  # Live catalog API stub that fails.
+  printf '#!/usr/bin/env bash\nexit 7\n' > "$TEST_TMPDIR/bin/catalog-fail"
+  chmod +x "$TEST_TMPDIR/bin/catalog-fail"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-fail"
   run bash "$WD" --dry-run
   # A blind tick must NOT masquerade as a healthy "landed" run.
   [ "$status" -eq 1 ]
-  [[ "$output" == *"catalog query failed"* ]]
+  [[ "$output" == *"live catalog API query failed"* ]]
   [[ "$output" == *"BLIND"* ]]
-  [[ "$output" != *"no caught-up merge is stuck"* ]]
+  [[ "$output" != *"no aged merge is unresolved"* ]]
 }
 
 @test "catalog query failure (real run) → pages #clio_devops BLIND, exit 1, deduped" {
   mergeline 1000 SURV L_STUCK
-  printf '#!/usr/bin/env bash\nexit 7\n' > "$TEST_TMPDIR/bin/trino-fail.sh"
-  chmod +x "$TEST_TMPDIR/bin/trino-fail.sh"
-  export MERGE_LANDING_TRINO_CMD="$TEST_TMPDIR/bin/trino-fail.sh"
+  printf '#!/usr/bin/env bash\nexit 7\n' > "$TEST_TMPDIR/bin/catalog-fail"
+  chmod +x "$TEST_TMPDIR/bin/catalog-fail"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-fail"
   echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
 
   run bash "$WD"
@@ -384,7 +405,7 @@ STUB
   rm -f "$TEST_TMPDIR/last-text"
   run bash "$WD"                     # tick 2: state remembers → quiet, no second post
   [ "$status" -eq 0 ]
-  [[ "$output" == *"no caught-up merge is stuck"* ]]
+  [[ "$output" == *"no aged merge is unresolved"* ]]
   [ ! -f "$TEST_TMPDIR/last-text" ]
 }
 
@@ -419,7 +440,7 @@ STUB
   printf '%s\n' '["SURV:L_STUCK"]' > "$MERGE_LANDING_STATE_FILE"
   run bash "$WD" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"no caught-up merge is stuck"* ]]              # the existing quiet-tick log line
+  [[ "$output" == *"no aged merge is unresolved"* ]]              # the existing quiet-tick log line
   [[ "$output" != *"have now LANDED"* ]]
   [[ "$output" != *"NOT landed"* ]]
 }

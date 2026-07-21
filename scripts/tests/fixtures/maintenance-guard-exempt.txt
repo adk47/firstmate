@@ -12,6 +12,6 @@
 # always a conscious, reviewed decision.
 prod-log-alert-watchdog.sh           # Muso prod error lines -> #prod-alerts; unrelated to gateway health
 ads-inquiry-watchdog.sh              # ads-buying sales leads -> Aaron; must never be silenced
-merge-landing-watchdog.sh            # async catalog-merge landing (Muso backend/Trino), not gateway state
+merge-landing-watchdog.sh            # async catalog-merge landing (live Muso admin API), not gateway state
 stale-ticket-watchdog.sh             # daily overdue-ClickUp digest; business, harmless during a window
 intercom-data-complaint-watchdog.py  # agent-invoked systemic-data-issue pipeline (compliance); not schedule-fired fleet-health

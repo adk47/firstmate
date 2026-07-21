@@ -46,10 +46,12 @@ case (curl transport failure yields invalid JSON) with a `// 0` fallback.
 
 **Profile merge 200 means enqueued, not merged.** `POST /admin/profiles/merge` returns
 200 but only enqueues an async catalog job; it does not set `merged_to_id`. Verify landing
-via Trino `matvw_catalog_profile` (loser `merged_to_id`=survivor, or `is_deleted`=true),
-NEVER the admin GET (which never reflects the async fold). Do not re-issue a 200'd merge to
-"fix" it (re-enqueue only). A 2026-06 queue-routing gap silently dropped many merges; when
-that recurs the stuck pairs need a backfill (they do not auto-replay).
+through the batched admin profile-list read with `includeDeleted=true`; it proxies the
+current Mongo catalog and exposes `merged.mergedToId` plus `deleted`. A requested-direction
+landing requires both `loser.merged.mergedToId == survivor` and a loser deletion record;
+the exact inverse covers a direction flip. Do not use a BI materialized view for this
+operational check, and do not re-issue a 200'd merge blindly. Check the pair's current state
+and worker retry/dead-letter evidence first.
 
 **`api.muso.ai` (prod) serves core-backend `master`, not `develop`.** `develop` is the
 repo DEFAULT branch (new PRs base off it), but only `master` deploys to prod. Any

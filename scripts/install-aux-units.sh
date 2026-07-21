@@ -1012,12 +1012,11 @@ chmod 644 /etc/cron.d/stuck-lane-watchdog
 # Alerts #clio_devops when an admin profile-merge returned HTTP 200 (logged to
 # recent-merges.jsonl) but never LANDED in the catalog — the loser is still an
 # active, unmerged profile hours later. Root cause: mergeProfiles.js only
-# enqueues an async ingestion job, and industry-data-processing common/process.py
-# deletes the SQS message on ANY worker exception (no DLQ, no retry), so a merge
-# whose apply throws vanishes silently. This bit the 2026-06-08/09 Jan ↔ Ops
+# enqueues an async ingestion job; the worker can exhaust retries before the
+# catalog mutation lands. This bit the 2026-06-08/09 Jan ↔ Ops
 # threads (two pairs 200'd 4× over days, never merged). 30 min (not 5): the async
 # fold legitimately takes minutes–hours and the script's MIN_AGE_HOURS already
-# filters the in-flight window, so a tighter cadence adds Trino load without
+# filters the in-flight window, so a tighter cadence adds admin API load without
 # catching anything sooner. Per survivor:loser dedupe → a stuck merge pages once.
 # Same ownership rule: edit here + re-run install-aux-units.sh.
 cat > /etc/cron.d/merge-landing-watchdog << MERGELANDINGWD
