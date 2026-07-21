@@ -103,7 +103,7 @@
       "agentId": "cmo",
       "name": "daily-churned-campaign-refresh",
       "description": "Daily win-back campaign sheet update — append new churns",
-      "enabled": true,
+      "enabled": false,
       "createdAtMs": 1774313970262,
       "updatedAtMs": 1774399200000,
       "schedule": {
@@ -231,7 +231,7 @@
       "agentId": "cmo",
       "name": "b2b-reply-scanner-hourly",
       "description": "Scan Gmail (a@/f@/ak@) for B2B Ads outreach replies every hour",
-      "enabled": true,
+      "enabled": false,
       "createdAtMs": 1774313970262,
       "updatedAtMs": 1780669284000,
       "schedule": {
@@ -395,7 +395,7 @@
       "agentId": "scout",
       "name": "company-finder-daily",
       "description": "Daily parent company discovery for B2B outreach - finds 5 new companies (matches the skill's per-day design), dedupes, posts to #company-finder for approval",
-      "enabled": true,
+      "enabled": false,
       "createdAtMs": 1775766544763,
       "updatedAtMs": 1777540784441,
       "schedule": {
@@ -749,7 +749,7 @@
       "agentId": "cmo",
       "name": "b2b-meeting-scanner-hourly",
       "description": "Scan a@ Google Calendar for new B2B Ads meeting bookings every hour",
-      "enabled": true,
+      "enabled": false,
       "createdAtMs": 1780672931064,
       "updatedAtMs": 1780672931064,
       "schedule": {
@@ -815,7 +815,7 @@
       "agentId": "cmo",
       "name": "billion-streams-club-daily",
       "description": "Daily 06:00 UTC scan for artists who newly crossed a 1B or 10B lifetime-streams milestone, via the billion-streams-club skill. Reads the live cube_analytics_profile_view artist club (ce_streams where period='all' and profile_type='artist' — the muso.ai profile-page streams headline number, replacing the dead profile_v3; ~1s) and announces each profile at most once per tier using a persisted 'already-announced' set under the gateway state dir; track_daily history is unusable here (the stats replica cancels multi-minute queries). The skill POSTS new crossings directly to Slack C0A5LLS93V3 (#hero-team) and records them as announced only after Slack confirms the post, so a failed delivery is retried next run (at-least-once). delivery.mode=none — the script is the poster, not the cron relay. The first run seeds the set and posts nothing; NO_REPLY on the common no-crossing day. Live (enabled:true); on a source repoint the announced-set must be re-seeded from the new club on cutover.",
-      "enabled": true,
+      "enabled": false,
       "createdAtMs": 1782405988000,
       "updatedAtMs": 1782405988000,
       "schedule": {
@@ -942,7 +942,7 @@
       "agentId": "cto",
       "name": "cto-nightly-issue-fixer",
       "description": "Nightly autonomous issue fixer — the cto agent picks the top-priority open bug/chore issue (scripts/pick-nightly-issue.sh: P0>P1>P2>P3 then oldest; excludes cto-working/cto-blocked/wontfix and issues with an open linked PR), posts the journey root to #cto-nightly (C0BJ5JBH4P3), and opens ONE Nick-mergeable PR via the inline CTO rails (audit row, push-access check, cto/ branch, never-merge) — the caroline-autonomy-improver headless posture, NOT ship/babysit. The overnight fix loop is owned by the DECOUPLED cto-nightly-driver.timer (30-min systemd tick: dispatches bounded FIX-PASS turns on actionable QA/CI deltas, max 3/night, posts the final ready-to-merge thread reply). Stop-state is CI green incl. qa-review status + no unresolved findings + MERGEABLE — NOT reviewDecision APPROVED (adk47 cannot self-approve; Nick approves+merges in the morning). isolated agentTurn (retains exec on 2026.5.27+). 02:00 Europe/Rome clears the Sun/Wed 04:00 UTC gateway-restart window and finishes before the 08:00 release timer. Standing authorization: Nick U0AL36NADEY.",
-      "enabled": true,
+      "enabled": false,
       "createdAtMs": 1784542901000,
       "updatedAtMs": 1784542901000,
       "schedule": {
