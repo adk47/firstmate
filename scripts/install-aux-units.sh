@@ -889,9 +889,22 @@ CTONIGHTLYTMR
 
 systemctl daemon-reload
 ctn=cto-nightly-driver.timer
-systemctl enable "$ctn" >/dev/null 2>&1 || log "WARN: could not enable $ctn"
-systemctl start "$ctn" >/dev/null 2>&1 || log "WARN: could not start $ctn"
-log "  $ctn: $(systemctl is-active "$ctn" 2>/dev/null || echo unknown)"
+# RETIRED 2026-07-21 (token-cost cut, Nick): the nightly CTO issue-fixer is
+# permanently disabled — its seeder cron (cto-nightly-issue-fixer) is off in
+# cron-jobs.json and stays off across the 2026-07-24 #720 revert. This driver
+# only supervises a seeded PR (no seed ⇒ scripts/cto-nightly-driver.sh exits 0),
+# so leaving the timer running is harmless, but we DISABLE it here rather than
+# enable so a re-run of this installer does not re-arm the 30-min tick. The unit
+# files are still written above, so reviving it later is a one-liner:
+#   systemctl enable --now cto-nightly-driver.timer
+if systemctl disable --now "$ctn" >/dev/null 2>&1; then
+  log "  $ctn: disabled (nightly CTO issue-fixer retired)"
+else
+  # Non-fatal (never abort the installer on this), but NEVER silently claim
+  # success: a masked failure would leave the 30-min token-burning timer armed
+  # while the deploy reports it retired. Report the real state so it's caught.
+  log "  WARN: could not disable $ctn — timer may still be armed; verify with 'systemctl is-enabled $ctn' and disable manually"
+fi
 
 # ─── Gateway pre-start self-heal drop-ins ─────────────────────
 # One drop-in per profile, hard-coded with the profile name (the

@@ -779,6 +779,11 @@ RSYNC_EXCLUDES=(
   # Server-owned per-run scratch, recreatable, never in the repo. Mirrored
   # KEEP glob in scripts/qa-clean-merge-scratch.sh (lockstep rule).
   --exclude='workspaces/*/final-*.json'
+  # QA credit-verification todo inventory — dated per-run working state the QA
+  # agent writes on node-8 (e.g. credit-verification-todo-inventory-2026-07-21.json),
+  # never in the repo. Server-owned scratch; mirrored KEEP glob in
+  # scripts/qa-clean-merge-scratch.sh (lockstep rule).
+  --exclude='workspaces/*/credit-verification-todo-inventory-*.json'
   # Agent long-term memory (written by agents at runtime, should survive
   # deploys — see docs/guides/WORKSPACE-FILE-OWNERSHIP.md). MEMORY.md IS tracked
   # in git as a seed, but agents modify it post-deploy and we must not

@@ -3,7 +3,7 @@ name: muso-devops-alert-triage
 description: |
   DevOps agent only. Classify a #prod-alerts prod-log error alert by severity
   (P0/P1/P2+) and post ONE threaded reply that explains it in plain English,
-  tagging Nick + Aaron and summoning the CTO on P0/P1. Use when woken by the
+  tagging Nick + Aaron on P0/P1. Use when woken by the
   prod-log-alert-watchdog dispatch (message begins "PROD-ALERT TRIAGE") or when
   a human says "triage this prod alert" / "classify this alert" in #prod-alerts.
 compatibility: |
@@ -87,10 +87,10 @@ send a second reply if you are unsure, and never post outside the alert thread.
 its likely blast radius, in a human's words, not a log paraphrase>
 ```
 
-- P2+ : that is the whole message. No human tags, no CTO tag. (If it is noise,
+- P2+ : that is the whole message. No tags. (If it is noise,
   add your exclude-pattern suggestion on the next line.)
-- P0 / P1 : append a second line that tags the two owners and summons the CTO:
-  `<@U0AL36NADEY> <@U7RP6HKUZ> - <@U0ANK0MN17B> please triage this thread and propose a fix.`
+- P0 / P1 : append a second line that tags the two owners:
+  `<@U0AL36NADEY> <@U7RP6HKUZ> please triage this thread.`
 
 **Escaping.** If you quote any raw fragment of the log line in your sentence,
 first neutralize Slack's three control characters on that fragment ONLY:
@@ -108,37 +108,7 @@ muso slack send --bot devops \
   --requester devops-alert-triage@hydra
 ```
 
-## Waking the CTO on P0/P1
-
-The `<@U0ANK0MN17B>` token in your reply visibly tags the CTO (that is the CTO
-bot's Slack user id) so humans see it is on the case. Do NOT rely on that mention
-to WAKE the CTO agent: your reply is bot-authored, and the CTO app does not
-receive bot-authored messages, so a bot mention never triggers it (only human
-mentions do). The tag is for people; the wake is a separate step below.
-
-After you post the reply, and ONLY for P0/P1, summon the CTO by dispatching a
-one-shot turn to it via `exec`, the same reliable mechanism the watchdog used to
-wake you. It runs as root on this host and needs no Slack event delivery:
-
-```
-openclaw --profile main cron add \
-  --name "cto-alert-triage-$(date -u +%s)" \
-  --at "+5s" \
-  --agent cto \
-  --session isolated \
-  --message "PROD-ALERT CTO TRIAGE (automated). Run the cto-prod-alert-triage skill. Slack channel: <CHANNEL_ID>. Alert thread ts: <THREAD_TS>. Severity: P<n>. Investigate read-only and post your diagnosis in that thread." \
-  --timeout-seconds 900 \
-  --no-deliver \
-  --delete-after-run \
-  --json
-```
-
-Substitute the real channel id, thread ts, and severity. If the dispatch command
-fails (non-zero exit), post one short follow-up line in the thread saying the CTO
-summon did not go through, rather than silently dropping it. P2+ never dispatch
-the CTO.
-
 ## Boundaries
 
-You classify and explain. You never write code, open PRs, or merge; that is the
-CTO's job once summoned. You never post anywhere but the one alert thread.
+You classify and explain. You never write code, open PRs, or merge — a fix is a
+human's job from here. You never post anywhere but the one alert thread.

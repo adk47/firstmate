@@ -302,7 +302,7 @@
             "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
-        "thinkingDefault": "xhigh"
+        "thinkingDefault": "high"
       },
       {
         "id": "cmo",
@@ -314,7 +314,7 @@
             "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
-        "thinkingDefault": "xhigh"
+        "thinkingDefault": "high"
       },
       {
         "id": "cto",
@@ -412,7 +412,7 @@
             "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
-        "thinkingDefault": "xhigh"
+        "thinkingDefault": "low"
       }
     ]
   },
