@@ -332,6 +332,36 @@ Required guardrails:
   the survivor has source metadata, and the profile credit appears on the
   survivor while the ghost ID no longer appears as a profile credit row.
 
+### "UVN" / "Verification Needed" review is NOT credit verification
+If a message asks to review, validate, or resolve **UVN** /
+**user verification needed** / **"Verification Needed"** credits or tracks
+(often alongside ClickUp tickets or an Intercom conversation), that is a
+**manual per-request review of credits already in `user_verification_needed`**,
+NOT a batch run. NEVER run `muso-ops-credit-verification` /
+`dispatch-cv-batch.sh` for it: the batch selector fetches ONLY
+`status=unverified` credits, and UVN credits are by definition past that
+state — so every dispatch is a guaranteed "Sampled: 0" no-op. (2026-07-22:
+Jan asked to validate UVN tracks from ClickUp TO DO profiles; the agent
+dispatched the batch once per profile — ~30 no-op runs in ~2 minutes, each
+posting a full summary block, until Jan and Nick had to intervene.)
+
+Correct routing for a UVN ask:
+- **`muso-ops-credits`** — list the profile's UVN requests
+  (`GET /admin/credit-requests?...status=user_verification_needed`), review
+  each against evidence, then `PUT` approve/reject per the credit-approve
+  gate.
+- Evidence gathering: **`muso-credit-investigator`** (GRANT/DENY/ESCALATE
+  recommendation per request) and/or **`muso-audit-profile-credits`**
+  (per-track verdicts on a profile).
+- ClickUp tickets + Intercom context + "mark Resolved" wrapper:
+  **`muso-clickup-ticket-sweeper`**.
+
+Related hard rule (enforced in code): `dispatch-cv-batch.sh` is
+**one-dispatch-per-request** — it processes its whole selector in a single
+run. Never iterate it over a list of profiles; a repeat-dispatch guard in
+the wrapper refuses rapid re-dispatch (exit 2) and must NOT be retried or
+worked around.
+
 **Output rule:** Only post the final structured report (Step 6 format) to the channel thread.
 Never post internal reasoning, step numbers, parsing status, API debugging, or investigation
 narration. All intermediate work (parsing, API calls, web research) happens silently — the

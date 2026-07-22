@@ -85,6 +85,103 @@ case "$SELECTOR_KIND" in
     ;;
 esac
 
+# --- repeat-dispatch guard -------------------------------------------------
+# 2026-07-22: a UVN-review ask was mis-routed onto this pipeline and the
+# agent dispatched it once per profile — ~30 invocations in ~2 minutes,
+# each a guaranteed "Sampled: 0" no-op posting a full Slack block. The
+# pipeline is one-dispatch-per-request by contract; this sliding-window
+# guard makes a loop impossible instead of merely documented. It sits
+# BEFORE the config/pipeline checks so a looping agent is stopped on any
+# host. The 4-hourly cron can never trip a 2-per-10-min window.
+# State rot fails OPEN (warn + reset + proceed): this is an anti-spam
+# guard, not a money gate — blocking the legit cron on a corrupt state
+# file is the worse failure.
+
+HISTORY_FILE="${CV_DISPATCH_HISTORY_FILE:-/var/lib/hydra/cv-dispatch-history}"
+GUARD_WINDOW="${CV_DISPATCH_GUARD_WINDOW_SECS:-600}"
+GUARD_MAX="${CV_DISPATCH_GUARD_MAX:-2}"
+
+# Bash `(( ))` evaluates variable CONTENTS as expressions, so a non-numeric
+# override would either abort the dispatch (`abc` → unbound-variable under
+# set -u — the opposite of this guard's fail-open contract) or trip the
+# guard spuriously (empty GUARD_MAX makes any count pass >=). Validate and
+# fall back to defaults instead of trusting the env.
+[[ "$GUARD_WINDOW" =~ ^[1-9][0-9]*$ ]] || { echo "WARN: bad CV_DISPATCH_GUARD_WINDOW_SECS='$GUARD_WINDOW' — using 600" >&2; GUARD_WINDOW=600; }
+[[ "$GUARD_MAX" =~ ^[1-9][0-9]*$ ]] || { echo "WARN: bad CV_DISPATCH_GUARD_MAX='$GUARD_MAX' — using 2" >&2; GUARD_MAX=2; }
+
+if [[ "${CV_DISPATCH_GUARD_DISABLE:-0}" != "1" ]]; then
+  # Serialize the read/check/write below against concurrent dispatches
+  # (cron + manual can overlap): without a lock, N racers can all read the
+  # same prior state, all pass the count, and clobber each other's stamps —
+  # letting more than GUARD_MAX pipelines launch. flock on an adjacent lock
+  # file; any lock failure (unwritable dir, contention timeout) degrades to
+  # the unlocked check with a WARN — fail-open per the guard contract. The
+  # fd is closed right after the history write so the lock never spans the
+  # (minutes-long) pipeline run itself.
+  GUARD_LOCK_FD_OPEN=0
+  if mkdir -p "$(dirname "$HISTORY_FILE")" 2>/dev/null \
+     && { exec 9>"$HISTORY_FILE.lock"; } 2>/dev/null; then
+    GUARD_LOCK_FD_OPEN=1
+  fi
+  if ! { (( GUARD_LOCK_FD_OPEN )) \
+         && flock -w "${CV_DISPATCH_GUARD_LOCK_WAIT_SECS:-5}" 9 2>/dev/null; }; then
+    echo "WARN: repeat-dispatch guard lock unavailable at $HISTORY_FILE.lock — unlocked check this run" >&2
+  fi
+
+  NOW=$(date +%s)
+  RECENT=()
+  if [[ -e "$HISTORY_FILE" ]]; then
+    if ! GUARD_LINES=$(cat "$HISTORY_FILE" 2>/dev/null); then
+      echo "WARN: repeat-dispatch guard state unreadable at $HISTORY_FILE — resetting" >&2
+      GUARD_LINES=""
+    fi
+    CORRUPT=0
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      # Reject leading zeros too: `08` would pass a bare [0-9]+ check and
+      # then throw "value too great for base" (octal) inside the window
+      # arithmetic — route it into the CORRUPT path instead.
+      if [[ "$line" =~ ^(0|[1-9][0-9]*)$ ]]; then
+        # A future-dated stamp (clock correction, numeric corruption) makes
+        # NOW - line negative — "recent" forever, tripping the guard on
+        # every run until that future date. Treat anything beyond a small
+        # skew tolerance as state rot → the CORRUPT reset path.
+        if (( line > NOW + 60 )); then
+          CORRUPT=1
+        elif (( NOW - line < GUARD_WINDOW )); then
+          RECENT+=("$line")
+        fi
+      else
+        CORRUPT=1
+      fi
+    done <<< "$GUARD_LINES"
+    if (( CORRUPT )); then
+      echo "WARN: repeat-dispatch guard state corrupt at $HISTORY_FILE — resetting" >&2
+      RECENT=()
+    fi
+  fi
+
+  if (( ${#RECENT[@]} >= GUARD_MAX )); then
+    echo "ERROR: repeat-dispatch guard tripped — ${#RECENT[@]} dispatch(es) in the last ${GUARD_WINDOW}s (max ${GUARD_MAX})." >&2
+    echo "This looks like a loop. The batch pipeline is one-dispatch-per-request: it processes its whole selector in ONE run. Do NOT retry and do NOT iterate it over profiles." >&2
+    echo "If you were asked about UVN / 'Verification Needed' credits, that is NOT this skill — the batch only fetches status=unverified. Route per SOUL.md ('UVN is NOT credit verification'): muso-ops-credits + muso-credit-investigator / muso-clickup-ticket-sweeper." >&2
+    exit 2
+  fi
+
+  # Record this dispatch (prune stale entries while we're here). The
+  # ${RECENT[@]+…} guard expands to zero words when the array is empty, so
+  # printf writes exactly the surviving stamps + $NOW. Any write failure is
+  # warn-and-proceed — see fail-open note above.
+  if ! { mkdir -p "$(dirname "$HISTORY_FILE")" \
+         && printf '%s\n' "${RECENT[@]+"${RECENT[@]}"}" "$NOW" > "$HISTORY_FILE"; } 2>/dev/null; then
+    echo "WARN: repeat-dispatch guard state not writable at $HISTORY_FILE — guard inactive this run" >&2
+  fi
+
+  # Release the guard lock now — the pipeline run below can take minutes
+  # and must not serialize behind it.
+  if (( GUARD_LOCK_FD_OPEN )); then exec 9>&-; fi
+fi
+
 # --- gateway auth ----------------------------------------------------------
 
 CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-/root/.openclaw-main/openclaw.json}"
