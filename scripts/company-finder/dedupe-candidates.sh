@@ -66,25 +66,26 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
-locate_nocodb_api
-resolve_ledger_table_id "DEDUP_SOURCE_UNAVAILABLE"
-
 # ── Read + validate candidates ──────────────────────────────────────────────
 CANDS="$(read_candidates_stdin)"
 
-# ── Snapshot all three tables once (required sources) ───────────────────────
-# fetch_label <tableId> <label> — raw fetch + map to {domain,name,table}.
-fetch_label() {
-  local raw
-  raw="$(fetch_table "$1" "$2" "Domain,Company Name" "DEDUP_SOURCE_UNAVAILABLE")" || return 2
-  jq -c --arg t "$2" \
-    'map({domain:(.Domain // ""), name:(."Company Name" // ""), table:$t})' <<<"$raw"
-}
-
-COMPANY_ROWS="$(fetch_label "$COMPANY_TABLE_ID" "Company Intelligence")"
-CONTACT_ROWS="$(fetch_label "$CONTACTS_TABLE_ID" "Contacts Intelligence")"
-LEDGER_ROWS="$(fetch_label "$LEDGER_TABLE_ID" "Seen Ledger")"
-EXISTING="$(jq -c -s 'add' <<<"$COMPANY_ROWS"$'\n'"$CONTACT_ROWS"$'\n'"$LEDGER_ROWS")"
+# ── Build the EXISTING 3-source snapshot: cache fast-path, live fallback ─────
+# The out-of-band cache (refresh-dedupe-cache.sh, a systemd timer) lets this
+# return in <1s. The ~50s live 3-table snapshot under the codex 10s cell yield
+# is what stalled Scout (2026-07-22 McLaren batch), so the cache is the normal
+# path and the live snapshot is the fallback when the cache is missing/stale.
+# The live reads stay SEQUENTIAL on purpose — concurrent readers were tried and
+# were SLOWER (3-way concurrency trips NocoDB's 5 req/s limit and muso silently
+# backs off on the 429s: >120s parallel vs ~50s serial). Correctness is
+# unaffected either way: ledger.sh suggest (finalize-batch) re-checks all three
+# sources LIVE, so a stale cache can only cause a LEDGER_COLLISION re-run.
+if EXISTING="$(read_dedupe_cache)"; then
+  : # fast path — fresh out-of-band cache (see lib/common.sh read_dedupe_cache)
+else
+  locate_nocodb_api
+  resolve_ledger_table_id "DEDUP_SOURCE_UNAVAILABLE"
+  EXISTING="$(build_existing_snapshot)"   # returns 2 → set -e fails closed
+fi
 
 # ── Classify (single jq; normalization applied identically to both sides) ────
 # EXISTING (the full 3-table snapshot — thousands of rows) is fed on STDIN, not

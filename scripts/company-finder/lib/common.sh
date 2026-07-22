@@ -197,3 +197,59 @@ read_candidates_stdin() {
   fi
   printf '%s\n' "$cands"
 }
+
+# fetch_dedupe_rows <tableId> <label> — full snapshot mapped to the dedup shape
+# {domain,name,table}. Returns 2 fail-closed (DEDUP_SOURCE_UNAVAILABLE) if the
+# source is unreachable. Shared by dedupe-candidates.sh and
+# refresh-dedupe-cache.sh so both build byte-identical rows.
+fetch_dedupe_rows() {
+  local raw
+  raw="$(fetch_table "$1" "$2" "Domain,Company Name" "DEDUP_SOURCE_UNAVAILABLE")" || return 2
+  jq -c --arg t "$2" \
+    'map({domain:(.Domain // ""), name:(."Company Name" // ""), table:$t})' <<<"$raw"
+}
+
+# build_existing_snapshot — the live 3-source snapshot (Company Intelligence +
+# Contacts Intelligence + Seen Ledger) mapped + concatenated into the EXISTING
+# array that dedupe classifies against. Requires locate_nocodb_api and
+# resolve_ledger_table_id to have run. Returns 2 fail-closed if any REQUIRED
+# source is unavailable (a silently-missing source would leak duplicates).
+# Shared by dedupe-candidates.sh (live fallback) and refresh-dedupe-cache.sh
+# (cache producer) so the cached and live EXISTING are byte-identical.
+build_existing_snapshot() {
+  local company contact ledger
+  company="$(fetch_dedupe_rows "$COMPANY_TABLE_ID"  "Company Intelligence")"  || return 2
+  contact="$(fetch_dedupe_rows "$CONTACTS_TABLE_ID" "Contacts Intelligence")" || return 2
+  ledger="$(fetch_dedupe_rows  "$LEDGER_TABLE_ID"   "Seen Ledger")"           || return 2
+  jq -c -s 'add' <<<"$company"$'\n'"$contact"$'\n'"$ledger"
+}
+
+# ── Dedupe snapshot cache ────────────────────────────────────────────────────
+# refresh-dedupe-cache.sh (a systemd timer) snapshots the three sources
+# out-of-band and writes EXISTING here, so dedupe-candidates.sh (prep-batch)
+# reads it in <1s instead of a ~50s live 3-table fetch. The 50s live fetch under
+# the codex 10s cell-yield was what stalled Scout (2026-07-22). The AUTHORITATIVE
+# dedup check stays LIVE in ledger.sh suggest (finalize-batch), so a stale cache
+# can NEVER post a duplicate — the worst case is a LEDGER_COLLISION re-run.
+DEDUPE_CACHE_FILE="${DEDUPE_CACHE_FILE:-/var/lib/hydra-company-finder/dedupe-cache.json}"
+DEDUPE_CACHE_TTL_SECONDS="${DEDUPE_CACHE_TTL_SECONDS:-1800}"   # 30 min
+
+# read_dedupe_cache — echo the cached EXISTING array iff the cache file exists,
+# is valid, and is fresh (age < TTL). Returns 1 (silent) otherwise so the caller
+# falls back to a live snapshot. Never fails the pipeline: a bad cache is a
+# cache-miss, not an error.
+read_dedupe_cache() {
+  local gen now age existing
+  [[ -f "$DEDUPE_CACHE_FILE" ]] || return 1
+  gen="$(jq -r '.generated_at_epoch // empty' "$DEDUPE_CACHE_FILE" 2>/dev/null)" || return 1
+  [[ "$gen" =~ ^[0-9]+$ ]] || return 1
+  now="$(date +%s)"
+  age=$(( now - 10#$gen ))
+  (( age >= 0 && age < DEDUPE_CACHE_TTL_SECONDS )) || return 1
+  # .existing MUST be an array OF OBJECTS. `jq -ce '.existing'` alone accepts any
+  # non-null value, and an array of non-objects (e.g. [1]) still aborts dedupe's
+  # `map(. + {…})` — either way losing the documented live fallback. Full-shape
+  # gate so any malformed cache is a cache-miss, not a crash.
+  existing="$(jq -ce 'select((.existing | type) == "array" and (.existing | all(.[]; type == "object"))) | .existing' "$DEDUPE_CACHE_FILE" 2>/dev/null)" || return 1
+  printf '%s' "$existing"
+}

@@ -181,6 +181,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/codex-keepalive.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/codex-token-refresh.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/codex-token-refresh.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/company-finder/refresh-dedupe-cache.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/company-finder/refresh-dedupe-cache.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/lib/codex-oauth-refresh.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/lib/codex-oauth-refresh.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/cron-health-watchdog.sh" ]] \
@@ -1453,6 +1455,54 @@ systemctl start "$rtmr" >/dev/null 2>&1 || log "WARN: could not start $rtmr"
 rstate=$(systemctl is-active "$rtmr" 2>/dev/null || echo unknown)
 log "  $rtmr: $rstate (fires Sun+Wed 04:00 UTC)"
 
+# ─── company-finder dedupe-cache refresh (timer) ──────────────
+# Precompute the ~50s NocoDB dedup snapshot out-of-band so prep-batch.sh
+# (dedupe-candidates.sh) reads it in <1s and finishes inside Scout's codex 10s
+# exec cell. Correctness is unchanged — ledger.sh suggest (finalize-batch)
+# re-checks all three sources LIVE, so a stale cache can only trigger a
+# LEDGER_COLLISION re-run, never a duplicate post.
+install -d -m 755 /var/lib/hydra-company-finder
+
+cat > /etc/systemd/system/hydra-company-finder-cache-refresh.service << CFCACHESVC
+[Unit]
+Description=HYDRA company-finder dedupe-cache refresh (NocoDB 3-source snapshot)
+
+[Service]
+Type=oneshot
+TimeoutStartSec=300
+# muso NocoDB auth lives in the gateway env files (the canonical env source).
+ExecStart=/usr/bin/bash -lc 'set -a; . /etc/openclaw/shared.env; . /etc/openclaw/main.env; set +a; exec $HYDRA_ROOT/scripts/company-finder/refresh-dedupe-cache.sh'
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=append:/var/log/company-finder-cache-refresh.log
+StandardError=append:/var/log/company-finder-cache-refresh.log
+CFCACHESVC
+
+cat > /etc/systemd/system/hydra-company-finder-cache-refresh.timer << CFCACHETMR
+[Unit]
+Description=Refresh the HYDRA company-finder dedupe cache every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=90
+Unit=hydra-company-finder-cache-refresh.service
+
+[Install]
+WantedBy=timers.target
+CFCACHETMR
+
+systemctl daemon-reload
+
+cftmr=hydra-company-finder-cache-refresh.timer
+systemctl enable "$cftmr" >/dev/null 2>&1 || log "WARN: could not enable $cftmr"
+systemctl start "$cftmr" >/dev/null 2>&1 || log "WARN: could not start $cftmr"
+cfstate=$(systemctl is-active "$cftmr" 2>/dev/null || echo unknown)
+log "  $cftmr: $cfstate (fires every 15 min)"
+# Warm the cache now (non-blocking) so the first prep-batch after a deploy is fast.
+systemctl start --no-block hydra-company-finder-cache-refresh.service >/dev/null 2>&1 \
+  || log "WARN: could not warm company-finder dedupe cache"
+
 # ─── journald cap + hydra log rotation (one-time config) ──────
 # journald had NO retention config and had grown to 3.9G (audit
 # 2026-06-10). Cap the persistent journal at 2G; vacuum only when
@@ -1474,7 +1524,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-token-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log {
     weekly
     rotate 4
     compress

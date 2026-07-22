@@ -168,6 +168,31 @@ Runs the deterministic dedupe (Company Intelligence + Contacts + Seen Ledger,
 normalized set-match) then the website-liveness check, and returns the alive-new
 **survivors** plus categorized rejects. Carry forward **ONLY** `.survivors`.
 
+- **Runtime + how to exec it (READ THIS — it is why McLaren's batch failed on
+  2026-07-22).** The dedup snapshot is served from an out-of-band cache, so this
+  call normally returns in **a second or two**. When the cache is cold/stale it
+  falls back to a **~50s** live 3-table snapshot — LONGER than a code-mode cell's
+  default 10s yield, in which case you get back `Script running with cell ID N …
+  Wall time 10.0s` with EMPTY output. That empty "still running" is the cell
+  YIELDING, **not** a failure and **not** a result. Handle it like this:
+  1. **Run prep-batch EXACTLY ONCE per union**, in a cell whose FIRST line is a
+     long-yield pragma:
+     `// @exec: {"yield_time_ms": 90000, "max_output_tokens": 16000}`
+     (raise `max_output_tokens` above the 1000 default or the survivors JSON gets
+     truncated).
+  2. If it returns `Script running with cell ID N`, **poll the SAME cell** with
+     `wait({cell_id: N, yield_time_ms: 90000, max_tokens: 16000})` repeatedly until
+     it reports an exit code + JSON. **Pass `max_tokens: 16000` on EVERY `wait` too**
+     — `wait` defaults to 10000 and will otherwise truncate the survivors JSON of a
+     yielded run, producing a false missing-JSON / PARTIAL. Do NOT stop after one or
+     two polls, and NEVER report a "still running" yield as PARTIAL/UNSAFE.
+  3. **NEVER launch a second prep-batch cell while one is still running.** Concurrent
+     prep-batch runs pound NocoDB, trip its rate limit, and each gets *slower* (429
+     backoff) — the opposite of what you want. One cell, then `wait`.
+  The gate has only FAILED on a non-zero **exit code** or genuinely missing JSON
+  (see fail-closed below). The same exec discipline applies to `finalize-batch.sh`
+  (Step 5): its ledger collision check is a LIVE ~50s read + a Slack post, so give
+  it the same pragma + single patient `wait`.
 - A survivor with `verification == "blocked"` is bot-walled — KEEP it, but add a
   `flags` entry `"site bot-walled, eyeball it"` in Step 4 so the post shows ⚠.
 - `.rejects.name_flags[]` = NEW companies with a partial name overlap — keep, note
