@@ -2,39 +2,6 @@
   "version": 1,
   "jobs": [
     {
-      "id": "0f0ced35-1502-4657-9bcf-c42673b2ba03",
-      "agentId": "devops",
-      "name": "daily-aws-change-report",
-      "description": "Daily AWS change report — CloudTrail write events across both accounts",
-      "enabled": false,
-      "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774325096085,
-      "schedule": {
-        "kind": "cron",
-        "expr": "0 0 * * *",
-        "tz": "America/New_York"
-      },
-      "sessionTarget": "isolated",
-      "wakeMode": "now",
-      "payload": {
-        "kind": "agentTurn",
-        "message": "Run the daily AWS change report. Cover the previous 24h. Query CloudTrail write events across Flagship (068358774785) us-west-2 and Plaque (686505752817) us-east-1/us-west-2. Categorize: Human Changes, Deploys, Anomaly Flags, Scaling, Data, Security, DNS & Networking, Automated Ops. Format for Slack (bold not markdown, bullets not dashes). Post as top-level message.",
-        "timeoutSeconds": 600,
-        "thinking": "low",
-        "model": "openai/gpt-5.6-sol",
-        "fallbacks": [
-          "openrouter/openai/gpt-5.6-luna",
-          "openrouter/anthropic/claude-haiku-4.5"
-        ]
-      },
-      "delivery": {
-        "mode": "announce",
-        "channel": "slack",
-        "to": "C0ADV2W76G4",
-        "bestEffort": true
-      }
-    },
-    {
       "id": "786f8a98-0e9c-47a7-92e6-a1ef9329842f",
       "agentId": "devops",
       "name": "api-change-watch",
@@ -63,38 +30,6 @@
         "mode": "announce",
         "channel": "slack",
         "to": "C0ADV2W76G4",
-        "bestEffort": true
-      }
-    },
-    {
-      "id": "6f95f102-0d4e-4d7a-b308-5f3ca5629d41",
-      "agentId": "clio",
-      "name": "daily-profile-movement",
-      "description": "Daily report of top profiles joining/leaving Muso.AI",
-      "enabled": false,
-      "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774399200000,
-      "schedule": {
-        "kind": "cron",
-        "expr": "0 9 * * *"
-      },
-      "sessionTarget": "isolated",
-      "wakeMode": "now",
-      "payload": {
-        "kind": "agentTurn",
-        "message": "Run the daily profile movement report. Query Athena (workgroup: clio-agent, region: us-west-2) for: 1) PAID CHURNS in last 24h — separate B2B (muso_team_business_*) and B2P (muso_team_pro_* + muso_individual_*), include emails. 2) PAID JOINS in last 24h ranked by popularity. 3) POPULAR LITE USERS — claimed profiles with popularity 90+ and no paid subscription. Format for Slack with bullets. Flag biggest red flags.",
-        "timeoutSeconds": 600,
-        "model": "openai/gpt-5.6-sol",
-        "thinking": "low",
-        "fallbacks": [
-          "openrouter/openai/gpt-5.6-luna",
-          "openrouter/anthropic/claude-haiku-4.5"
-        ]
-      },
-      "delivery": {
-        "mode": "announce",
-        "channel": "slack",
-        "to": "C0ADREBPNQ2",
         "bestEffort": true
       }
     },
@@ -256,39 +191,6 @@
         "mode": "announce",
         "channel": "slack",
         "to": "C0ARQ021M40",
-        "bestEffort": true
-      }
-    },
-    {
-      "id": "c7501a46-e461-42f6-a354-37d328a08ed6",
-      "agentId": "cmo",
-      "name": "amp-daily-report",
-      "description": "Daily AMP ads performance report",
-      "enabled": false,
-      "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774399200000,
-      "schedule": {
-        "kind": "cron",
-        "expr": "0 11 * * *",
-        "tz": "America/Chicago"
-      },
-      "sessionTarget": "isolated",
-      "wakeMode": "now",
-      "payload": {
-        "kind": "agentTurn",
-        "model": "openai/gpt-5.6-sol",
-        "fallbacks": [
-          "openrouter/openai/gpt-5.6-luna",
-          "openrouter/anthropic/claude-haiku-4.5"
-        ],
-        "message": "Run the AMP Daily Report. Query core-backend tables public_ad_events and public_ads via Athena (workgroup: clio-agent, region: us-west-2). Build report: 1) Summary: all-time/7d/today views, clicks, CTR, unique viewers with deltas. 2) Top 5 ads by CTR. 3) Underperformers (CTR < 0.3% with >1K views). 4) AMP vs Feed breakdown. 5) Platform breakdown. 6) Daily trend 7 days. Format for Slack bullets, keep short.",
-        "timeoutSeconds": 600,
-        "thinking": "low"
-      },
-      "delivery": {
-        "mode": "announce",
-        "channel": "slack",
-        "to": "C031DKAGQSH",
         "bestEffort": true
       }
     },

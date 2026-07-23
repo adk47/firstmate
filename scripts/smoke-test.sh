@@ -347,13 +347,24 @@ if needs_target "main"; then
   # Timeout bumped from 30s to 60s because a Clio→CTO LLM round-trip
   # via sessions_send can genuinely take 30-50s (Clio thinks, picks the
   # tool, CTO thinks, Clio synthesizes the reply).
+  #
+  # Bounded retry (up to 3 attempts, same idiom as check_web_search's
+  # attempt loop above) to cut false warn_check noise from LLM latency —
+  # any single attempt matching the grep pattern is a pass; only if all
+  # 3 attempts fail to match do we degrade to a warn.
   log "  Testing cross-agent mesh behaviorally (Clio -> CTO via LLM)..."
-  MESH_RESPONSE=$(timeout 60 openclaw --profile main agent send clio "ping cto via sessions_send and report back" 2>&1) || MESH_RESPONSE="TIMEOUT"
-  if echo "$MESH_RESPONSE" | grep -qi 'cto\|responded\|pong\|acknowledged'; then
-    pass_check "Main: Cross-agent mesh behavioral test passed (Clio -> CTO round-trip)"
-  else
-    warn_check "Main: Cross-agent mesh behavioral test did not confirm within 60s. Response was: $(echo "$MESH_RESPONSE" | head -c 200)"
-  fi
+  for attempt in 1 2 3; do
+    MESH_RESPONSE=$(timeout 60 openclaw --profile main agent send clio "ping cto via sessions_send and report back" 2>&1) || MESH_RESPONSE="TIMEOUT"
+    if echo "$MESH_RESPONSE" | grep -qi 'cto\|responded\|pong\|acknowledged'; then
+      pass_check "Main: Cross-agent mesh behavioral test passed (Clio -> CTO round-trip)"
+      break
+    fi
+    if [[ "$attempt" -lt 3 ]]; then
+      log "  Main: Cross-agent mesh behavioral test inconclusive on attempt $attempt, retrying..."
+    else
+      warn_check "Main: Cross-agent mesh behavioral test did not confirm within 60s after 3 attempts. Response was: $(echo "$MESH_RESPONSE" | head -c 200)"
+    fi
+  done
 
   # Targeted pings for critical main-profile agents (user-specified).
   # Soft gate: these exercise a real LLM round-trip per agent and will

@@ -1179,7 +1179,7 @@ DEPLOY_DIFF_COMPUTED=0
 #   HYDRA_FORCE=1            skip both this check AND Step 4a pre-flight
 #   HYDRA_SKIP_DRIFT_CHECK=1 skip only Step 0; Step 4a pre-flight still runs
 #                            (use when SSH baseline read is genuinely broken)
-log "Step 0/9: Drift check (server vs last-deployed SHA)..."
+log "Step 0/8: Drift check (server vs last-deployed SHA)..."
 drift_check_against_baseline() {
   if [[ "${HYDRA_FORCE:-0}" == "1" ]]; then
     log "  Skipped (HYDRA_FORCE=1 set)"
@@ -1401,7 +1401,7 @@ drift_check_against_baseline
 # -------------------------------------------------------------------
 # Step 1: Validate config files
 # -------------------------------------------------------------------
-log "Step 1/9: Validating config files..."
+log "Step 1/8: Validating config files..."
 
 if needs_target "main"; then
   python3 -m json.tool "$HYDRA_ROOT/openclaw-main.json" >/dev/null 2>&1 || fail "openclaw-main.json is not valid JSON"
@@ -1446,7 +1446,7 @@ fi
 # -------------------------------------------------------------------
 # Step 2: Validate SOUL.md files
 # -------------------------------------------------------------------
-log "Step 2/9: Validating SOUL.md files..."
+log "Step 2/8: Validating SOUL.md files..."
 validate_souls() {
   local config="$1"
   local label="$2"
@@ -1481,7 +1481,7 @@ log "  All SOUL.md files present."
 # -------------------------------------------------------------------
 # Step 3: Validate tool-deny-lists.yaml
 # -------------------------------------------------------------------
-log "Step 3/9: Validating tool-deny-lists.yaml (deny lists can only grow)..."
+log "Step 3/8: Validating tool-deny-lists.yaml (deny lists can only grow)..."
 DENY_LIST="$HYDRA_ROOT/policies/tool-deny-lists.yaml"
 
 if [[ ! -f "$DENY_LIST" ]]; then
@@ -1512,7 +1512,7 @@ log "  Deny lists validated (only growth detected)."
 # would silently wipe their work. Also surface any suspicious deletions
 # inside workspaces/ or skills-all/.
 # Bypass: HYDRA_FORCE=1 ./deploy.sh ...
-log "Step 4a/9: Pre-flight drift check..."
+log "Step 4a/8: Pre-flight drift check..."
 preflight_drift_check() {
   # Same -rcn rationale as Step 0: pure content comparison, no metadata
   # false positives. --delete is still needed here to detect server-only
@@ -1747,14 +1747,14 @@ preflight_drift_check
 # Step 4b: rsync repo to Node 8
 # -------------------------------------------------------------------
 if $HYDRA_LOCAL; then
-  log "Step 4b/9: Local sync (running on Node 8)..."
+  log "Step 4b/8: Local sync (running on Node 8)..."
   rsync -a --delete \
     "${RSYNC_EXCLUDES[@]}" \
     "$HYDRA_ROOT/" \
     "$DEPLOY_PATH/"
   log "  Config synced locally to $DEPLOY_PATH/"
 else
-  log "Step 4b/9: Remote sync to Node 8 ($NODE8_IP)..."
+  log "Step 4b/8: Remote sync to Node 8 ($NODE8_IP)..."
   rsync -azP --delete \
     -e "ssh -i $SSH_KEY $SSH_OPTS_STR" \
     "${RSYNC_EXCLUDES[@]}" \
@@ -1791,7 +1791,7 @@ fi
 # gateway only" boundary in a SKILL.md is enforced mechanically, not as
 # prose (the muso CLI binary, env, and config exist only on main).
 MAIN_ONLY_SKILLS=(muso-cli)
-log "Step 4c/9: Syncing global skills to per-profile managed-skills dirs..."
+log "Step 4c/8: Syncing global skills to per-profile managed-skills dirs..."
 if [[ -d "$HYDRA_ROOT/skills-all" ]]; then
   skills_rc=0
   for profile in main edge dev; do
@@ -1840,7 +1840,7 @@ fi
 # install hooks see the pinned version. Idempotent — same-version
 # deploys skip the npm install. See OPENCLAW_VERSION near the top of
 # the file and install_openclaw() up by install_plugin().
-log "Step 4c.5/9: Pinning openclaw runtime to ${OPENCLAW_VERSION}..."
+log "Step 4c.5/8: Pinning openclaw runtime to ${OPENCLAW_VERSION}..."
 if ! install_openclaw; then
   fail "openclaw runtime pin failed (target ${OPENCLAW_VERSION})"
 fi
@@ -1857,7 +1857,7 @@ fi
 #     (default; retry is idempotent, partial state is recoverable)
 #   HYDRA_CONTINUE_ON_PLUGIN_FAIL="1": collect all failures and report
 #     at the end; useful for seeing full breakage picture at once
-log "Step 4d/9: Installing plugins..."
+log "Step 4d/8: Installing plugins..."
 if [[ -d "$HYDRA_ROOT/plugins" ]]; then
   plugin_failures=()
   for plugin_dir in "$HYDRA_ROOT"/plugins/*/; do
@@ -1904,7 +1904,7 @@ log "  Script permissions fixed"
 #     route regression in @openclaw/codex@2026.6.x; verified it does
 #     NOT reject models on the 6.1 core. See the OPENCLAW_CODEX_VERSION
 #     block near the top of this file for the full rationale.
-log "Step 4d.5/9: Pinning externalized plugins (slack=${OPENCLAW_SLACK_VERSION}, codex=${OPENCLAW_CODEX_VERSION})..."
+log "Step 4d.5/8: Pinning externalized plugins (slack=${OPENCLAW_SLACK_VERSION}, codex=${OPENCLAW_CODEX_VERSION})..."
 if ! install_external_plugin "@openclaw/slack" "$OPENCLAW_SLACK_VERSION"; then
   fail "@openclaw/slack pin failed (target ${OPENCLAW_SLACK_VERSION})"
 fi
@@ -1946,7 +1946,7 @@ done
 # process additionally needs MUSO_STATE_DIR + a muso login (see the edge env
 # block) — without them the gated writes fail closed.
 if needs_target "main" || needs_target "edge"; then
-  log "Step 4d.6/9: Pinning muso CLI to ${MUSO_CLI_VERSION}..."
+  log "Step 4d.6/8: Pinning muso CLI to ${MUSO_CLI_VERSION}..."
   if ! install_muso; then
     fail "muso CLI pin failed (target ${MUSO_CLI_VERSION})"
   fi
@@ -2117,7 +2117,7 @@ fi
 # Renamed from Step 5 → Step 5a on 2026-04-08 to make room for
 # Step 5b (k8s manifest apply). If you're grepping deploy logs for
 # "Step 5:" you'll need to update filters to "Step 5[ab]:".
-log "Step 5a/9: Running post-sync setup..."
+log "Step 5a/8: Running post-sync setup..."
 
 run_on_node8() {
   if $HYDRA_LOCAL; then
@@ -2142,39 +2142,15 @@ run_on_node8() {
 # silently bypassed notify_slack(). Caught by silent-failure-hunter
 # during the second-round PR review.
 export HYDRA_ROOT TARGET DEPLOY_PATH HYDRA_LOCAL
-export -f fail log notify_slack needs_target
+# muso_main_env_report + its dependency muso_main_env_missing are sourced into
+# the PARENT shell (top of file) but used inside this heredoc's child bash — so
+# they MUST be exported too, or the call command-not-founds in the child and the
+# main.env validation silently no-ops (this was the true root of the spurious
+# "main.env is missing: systemd-run failed" WARN — the function never ran).
+export -f fail log notify_slack needs_target muso_main_env_report muso_main_env_missing
 
 bash << 'POSTSYNC'
 set -euo pipefail
-
-# AWS credentials (from K8s secret or pre-configured)
-if [ ! -f ~/.aws/credentials ]; then
-  echo "  Setting up AWS credentials..."
-  mkdir -p ~/.aws
-  AWS_KEY=$(kubectl get secret -n hydra aws-hydra-readonly -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' 2>/dev/null | base64 -d)
-  AWS_SECRET=$(kubectl get secret -n hydra aws-hydra-readonly -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}' 2>/dev/null | base64 -d)
-  AWS_ROLE=$(kubectl get secret -n hydra aws-hydra-readonly -o jsonpath='{.data.AWS_ROLE_ARN}' 2>/dev/null | base64 -d)
-  if [ -n "$AWS_KEY" ]; then
-    cat > ~/.aws/credentials << CEOF
-[plaque]
-aws_access_key_id = ${AWS_KEY}
-aws_secret_access_key = ${AWS_SECRET}
-CEOF
-    cat > ~/.aws/config << CEOF
-[default]
-region = us-west-2
-role_arn = ${AWS_ROLE}
-source_profile = plaque
-
-[profile plaque]
-region = us-west-2
-CEOF
-    chmod 600 ~/.aws/credentials
-    echo "  AWS credentials configured."
-  else
-    echo "  WARNING: aws-hydra-readonly secret not found — skipping AWS setup."
-  fi
-fi
 
 # Ensure GOG_KEYRING_PASSWORD is set for gog CLI
 if ! grep -q "GOG_KEYRING_PASSWORD" /root/.bashrc 2>/dev/null; then
@@ -2200,22 +2176,12 @@ fi
 if needs_target "main"; then
   MAIN_ENV="/etc/openclaw/main.env"
   if [ -f "$MAIN_ENV" ]; then
-    missing_vars=()
     # Ask systemd to parse EnvironmentFile with the same quoting,
     # duplicate-key (last assignment wins), and empty-value semantics the
     # gateway uses. Never `source` a systemd env file as shell code.
-    if effective_missing="$(muso_main_env_missing "$MAIN_ENV" 2>/dev/null)"; then
-      while IFS= read -r var; do
-        [[ -n "$var" ]] && missing_vars+=("$var")
-      done <<< "$effective_missing"
-    else
-      missing_vars+=("effective main.env validation (systemd-run failed)")
-    fi
-    if (( ${#missing_vars[@]} > 0 )); then
-      log "WARN: $MAIN_ENV is missing: ${missing_vars[*]}"
-      log "WARN: ops agent admin API / muso CLI operations will fail until these are added (docs/runbooks/RUNBOOK.md, 'muso CLI')."
-      log "WARN: fix with:  sudo vim $MAIN_ENV  &&  systemctl restart openclaw-gateway-main"
-    fi
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && log "$line"
+    done < <(muso_main_env_report "$MAIN_ENV")
   else
     log "WARN: $MAIN_ENV does not exist — ops agent will start with no admin credentials."
     log "WARN: create it, add legacy MUSO_ADMIN_EMAIL/PASSWORD plus scoped MUSO_PROD_ADMIN_EMAIL/PASSWORD,"
@@ -2668,7 +2634,7 @@ log "  Post-sync setup complete."
 # the k8s/prod/hydra/ subdir, not other namespaces' manifests, because
 # kubectl 1.34+ rejects --namespace mismatches when the yaml declares one.
 # Skips silently if no k8s/prod/<ns>/ dirs exist.
-log "Step 5b/9: Applying k8s manifests..."
+log "Step 5b/8: Applying k8s manifests..."
 shopt -s nullglob
 k8s_ns_dirs=("$HYDRA_ROOT"/k8s/prod/*/)
 shopt -u nullglob
@@ -2715,7 +2681,7 @@ fi
 # BEFORE Step 6's gateway restart so the next start picks up the
 # drop-in's ExecStartPre.
 if $HYDRA_LOCAL; then
-  log "Step 5c/9: Installing/refreshing aux systemd units..."
+  log "Step 5c/8: Installing/refreshing aux systemd units..."
   if [ -x "$DEPLOY_PATH/scripts/install-aux-units.sh" ]; then
     "$DEPLOY_PATH/scripts/install-aux-units.sh" "$DEPLOY_PATH" \
       || fail "install-aux-units.sh failed — see preceding output"
@@ -2724,7 +2690,7 @@ if $HYDRA_LOCAL; then
     log "  install-aux-units.sh missing or not executable — skipping (laptop deploy?)"
   fi
 else
-  log "Step 5c/9: skipping aux-units install (not running on node-8)"
+  log "Step 5c/8: skipping aux-units install (not running on node-8)"
 fi
 
 # -------------------------------------------------------------------
@@ -2739,7 +2705,7 @@ fi
 # Escape hatches: HYDRA_HARD_RESTART=1 skips the drain (immediate hard
 # restart, the pre-drain behavior); HYDRA_FORCE_RESTART=1 overrides the
 # restart-skip gate below (they compose).
-log "Step 6/9: Restarting OpenClaw Gateway ($TARGET)..."
+log "Step 6/8: Restarting OpenClaw Gateway ($TARGET)..."
 # shellcheck source=lib/gateway-restart.sh
 source "$SCRIPT_DIR/lib/gateway-restart.sh"
 export GATEWAY_EXEC_FN=run_on_node8   # every probe honors $HYDRA_LOCAL (ssh mode too)
@@ -2850,7 +2816,7 @@ fi
 # -------------------------------------------------------------------
 # Step 7: Run smoke test
 # -------------------------------------------------------------------
-log "Step 7/9: Running smoke test..."
+log "Step 7/8: Running smoke test..."
 if ! "$SCRIPT_DIR/smoke-test.sh" "$TARGET"; then
   fail "Smoke test failed after deploy"
 fi
@@ -2897,37 +2863,6 @@ if command -v git >/dev/null 2>&1 \
     fi
   fi
   log "  Drift baseline updated: .deployed-sha → $DEPLOYED_SHA"
-fi
-
-# -------------------------------------------------------------------
-# Step 8: Verify AWS access (main only)
-# -------------------------------------------------------------------
-# NOTE: Hydra is hosted on OVH (node-8), not AWS. This step verifies
-# the *data plane* — Muso has two AWS accounts (Flagship 068358774785
-# and Plaque 686505752817) holding the data lake (S3, Athena, Glue)
-# and audit trail (CloudTrail). Several agents query them at runtime:
-#   - devops: daily-aws-change-report cron (CloudTrail scan)
-#   - data-expert / query-writer: Athena queries
-#   - clio: data-platform queries
-# Step 5a wrote ~/.aws/credentials on node-8 from the k3s secret
-# `aws-hydra-readonly` (role: plaque, region: us-west-2). This step
-# runs `aws sts get-caller-identity` to confirm the credentials
-# propagated and the role is assumable. Non-fatal — a failure here
-# only affects AWS-reading agents on the next cron run.
-if needs_target "main"; then
-  log "Step 8/9: Verifying AWS data-plane access (Athena/S3/CloudTrail)..."
-  if $HYDRA_LOCAL; then
-    aws sts get-caller-identity --region us-west-2 2>/dev/null | head -1 \
-      && log "  AWS access verified." \
-      || log "  WARNING: AWS access check failed (non-fatal)."
-  else
-    ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" \
-      "aws sts get-caller-identity --region us-west-2 2>/dev/null | head -1" \
-      && log "  AWS access verified." \
-      || log "  WARNING: AWS access check failed (non-fatal)."
-  fi
-else
-  log "Step 8/9: Skipping AWS check (not targeting main)."
 fi
 
 # -------------------------------------------------------------------
@@ -3052,13 +2987,13 @@ if needs_target "main" && [ -x "$SCRIPT_DIR/validate-caroline-rag.sh" ]; then
 fi
 
 # -------------------------------------------------------------------
-# Step 9: Post deploy status
+# Step 8: Post deploy status
 # -------------------------------------------------------------------
 COMMIT_SHA=$(git -C "$HYDRA_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 # `git describe` prints either the current tag (`v2026.5.26`) or the most
 # recent tag plus distance + sha (`v2026.5.26-3-gabc1234`). Bare commit-sha
 # fallback for the pre-first-release window where no tags exist yet.
 RELEASE_REF=$(git -C "$HYDRA_ROOT" describe --tags --always 2>/dev/null || echo "$COMMIT_SHA")
-log "Step 9/9: Posting deploy status..."
+log "Step 8/8: Posting deploy status..."
 notify_slack ":white_check_mark: HYDRA deployed successfully (target: $TARGET). Release: $RELEASE_REF (sha: $COMMIT_SHA)"
 log "Deploy complete. Target: $TARGET. Commit: $COMMIT_SHA"
