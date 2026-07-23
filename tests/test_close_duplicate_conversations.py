@@ -170,9 +170,9 @@ class TestGroupDuplicates(unittest.TestCase):
 
 class TestFlattenCandidates(unittest.TestCase):
     def test_limit_counts_individual_closes_across_groups(self):
-        g1 = {"email": "a@x.com", "kept": conv("K1"), "closable": [
+        g1 = {"email": "a@x.com", "kept": conv("K1"), "group_size": 2, "closable": [
             {"older": conv("O1"), "kept": conv("K1"), "tier": "A", "email": "a@x.com"}]}
-        g2 = {"email": "b@x.com", "kept": conv("K2"), "closable": [
+        g2 = {"email": "b@x.com", "kept": conv("K2"), "group_size": 3, "closable": [
             {"older": conv("O2"), "kept": conv("K2"), "tier": "A", "email": "b@x.com"},
             {"older": conv("O3"), "kept": conv("K2"), "tier": "B", "email": "b@x.com"}]}
         flat = m.flatten_candidates([g1, g2])
@@ -347,6 +347,149 @@ class TestCeilingGatesOnlyApply(unittest.TestCase):
         m_post.assert_not_called()  # --notify-candidates not passed
 
 
+class TestCeilingFlag(unittest.TestCase):
+    """--ceiling N overrides DUP_CEILING for --apply's hard-stop only."""
+
+    def test_ceiling_flag_raises_effective_ceiling_so_apply_proceeds(self):
+        """30 candidates > DUP_CEILING(20) would normally block --apply, but
+        --ceiling 50 raises the effective ceiling so the run proceeds and
+        closes (stub the close path)."""
+        import sys as _sys
+        many_convs = _many_dup_convs(30)
+        close_calls = []
+        with mock.patch.object(m, "fetch_open_convs", return_value=many_convs), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "close_conversation",
+                                side_effect=lambda *a, **k: close_calls.append(1) or {"state": "closed"}), \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True) as m_post, \
+             mock.patch.object(m.time, "sleep"), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply", "--ceiling", "50"]):
+            rc = m.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(close_calls), 30)
+        # No ceiling alert -- the override let --apply proceed.
+        for call in m_post.call_args_list:
+            self.assertNotIn("sanity ceiling", call[0][0].lower())
+
+    def test_ceiling_zero_rejected_exit_two_before_any_network_call(self):
+        import sys as _sys
+        with mock.patch.object(m, "fetch_open_convs") as m_fetch, \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--ceiling", "0"]):
+            rc = m.main()
+        self.assertEqual(rc, 2)
+        m_fetch.assert_not_called()
+
+    def test_ceiling_negative_rejected_exit_two_before_any_network_call(self):
+        import sys as _sys
+        with mock.patch.object(m, "fetch_open_convs") as m_fetch, \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--ceiling", "-5"]):
+            rc = m.main()
+        self.assertEqual(rc, 2)
+        m_fetch.assert_not_called()
+
+    def test_over_effective_ceiling_apply_still_blocks(self):
+        """--ceiling 25 still blocks a 30-candidate --apply run (the
+        override didn't just disable the check)."""
+        import sys as _sys
+        many_convs = _many_dup_convs(30)
+        close_calls = []
+        with mock.patch.object(m, "fetch_open_convs", return_value=many_convs), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "close_conversation",
+                                side_effect=lambda *a, **k: close_calls.append(1)), \
+             mock.patch.object(m, "post_slack_summary", return_value=True) as m_post, \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply", "--ceiling", "25"]):
+            rc = m.main()
+        self.assertEqual(rc, 2)
+        self.assertEqual(close_calls, [])
+        posted_text = m_post.call_args[0][0]
+        self.assertIn("30 candidate closes identified (> 25)", posted_text)
+
+
+class TestReviewExportGroupSize(unittest.TestCase):
+    """write_review_export's _review_export_candidate now carries
+    group_size (threaded from flatten_candidates) so a reviewer can filter
+    the masked-email export by group size -- e.g. pull every candidate from
+    a >=3-thread group for stratified review. group_size is the TRUE
+    duplicate-thread count (len(members) in group_duplicates), NOT the
+    closable count."""
+
+    def test_group_duplicates_group_size_is_true_thread_count(self):
+        """group_size counts every inbound thread sharing the email,
+        INCLUDING the kept thread -- not just the closable members. 2 older
+        + 1 kept = 3 threads -> group_size 3, with 2 closable."""
+        older1 = conv("O1", email="x@y.com", lar=200, lcr=100, created_at=1000)
+        older2 = conv("O2", email="x@y.com", lar=200, lcr=100, created_at=2000)
+        kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
+        groups = m.group_duplicates([older1, older2, kept], owned_id_set=set())
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["group_size"], 3)
+        self.assertEqual(len(groups[0]["closable"]), 2)
+
+    def test_review_export_candidate_passes_through_group_size(self):
+        """A group's group_size rides through flatten_candidates to the
+        export record unchanged (2-thread group: 1 older + 1 kept)."""
+        older = conv("O", email="x@y.com", lar=200, lcr=100, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
+        groups = [{"email": "x@y.com", "kept": kept, "group_size": 2,
+                   "closable": [{"older": older, "kept": kept, "tier": "A", "email": "x@y.com"}]}]
+        candidates = m.flatten_candidates(groups)
+        rec = m._review_export_candidate(candidates[0])
+        self.assertEqual(rec["group_size"], 2)
+
+    def test_group_size_is_thread_count_not_closable_count(self):
+        """Every candidate carries the group's thread count, not its own
+        closable count: a group of 5 threads with only 3 closable exports
+        group_size 5 on all 3 candidates."""
+        kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
+        closable = [
+            {"older": conv(f"O{i}", email="x@y.com", lar=200, lcr=100, created_at=1000),
+             "kept": kept, "tier": "A", "email": "x@y.com"}
+            for i in range(3)
+        ]
+        groups = [{"email": "x@y.com", "kept": kept, "closable": closable, "group_size": 5}]
+        candidates = m.flatten_candidates(groups)
+        self.assertEqual(len(candidates), 3)
+        for cand in candidates:
+            rec = m._review_export_candidate(cand)
+            self.assertEqual(rec["group_size"], 5)
+
+    def test_write_review_export_end_to_end_carries_group_size(self):
+        """End-to-end via main(): 3 older + 1 kept sharing one email = 4
+        threads, 3 of them closable. Every export candidate's group_size is
+        4 (the true thread count), not 3 (the closable count)."""
+        import json as _json
+        import sys as _sys
+        import tempfile as _tempfile
+        kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
+        olders = [conv(f"O{i}", email="x@y.com", lar=200, lcr=100, created_at=1000) for i in range(3)]
+        convs = olders + [kept]
+        with _tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(m, "fetch_open_convs", return_value=convs), \
+                 mock.patch.object(m, "owned_ids", return_value=set()), \
+                 mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                                  "INTERCOM_ADMIN_ID": "5763097",
+                                                  "CLOSE_DUP_REVIEW_DIR": d}, clear=False), \
+                 mock.patch.object(_sys, "argv", ["m"]):
+                rc = m.main()
+            self.assertEqual(rc, 0)
+            files = os.listdir(d)
+            self.assertEqual(len(files), 1)
+            with open(os.path.join(d, files[0])) as f:
+                doc = _json.load(f)
+            self.assertEqual(len(doc["tier_a"]), 3)  # 3 closable candidates
+            for rec in doc["tier_a"]:
+                self.assertEqual(rec["group_size"], 4)  # 4 total threads
+
+
 class TestWriteReviewExportUnwritableDir(unittest.TestCase):
     """Mirrors open_shadow_log's fallback pattern: an unwritable primary
     review dir falls back to a private FALLBACK_REVIEW_DIR with a loud
@@ -373,7 +516,7 @@ class TestWriteReviewExportUnwritableDir(unittest.TestCase):
             candidates = [
                 {"older": conv("O", email="x@y.com", lar=200, lcr=100, created_at=1000),
                  "kept": conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000),
-                 "tier": "A", "email": "x@y.com"},
+                 "tier": "A", "email": "x@y.com", "group_size": 1},
             ]
             expected_path = os.path.join(fallback_dir, "candidates-2026-07-20.json")
             stderr_buf = io.StringIO()
