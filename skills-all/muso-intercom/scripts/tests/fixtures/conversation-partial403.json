@@ -1,0 +1,11 @@
+{
+  "id": "partial403",
+  "source": {
+    "body": "",
+    "attachments": [
+      {"url": "https://downloads.intercomcdn.com/forbidden.jpg", "content_type": "image/jpeg", "name": "forbidden.jpg"},
+      {"url": "https://musoai.intercom-attachments-3.com/ok2.jpg", "content_type": "image/jpeg", "name": "ok2.jpg"}
+    ]
+  },
+  "conversation_parts": { "conversation_parts": [] }
+}

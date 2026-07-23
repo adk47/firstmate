@@ -1,0 +1,19 @@
+{
+  "id": "multi",
+  "source": {
+    "body": "<p>here is a screenshot</p>",
+    "attachments": [
+      {"url": "https://musoai.intercom-attachments-3.com/a.png", "content_type": "image/png", "name": "a.png"}
+    ]
+  },
+  "conversation_parts": {
+    "conversation_parts": [
+      {
+        "body": "<p>and another one</p><img src=\"https://downloads.intercomcdn.com/b.jpg\" alt=\"\">",
+        "attachments": [
+          {"url": "https://musoai.intercom-attachments-3.com/c.gif", "content_type": "image/gif", "name": "c.gif"}
+        ]
+      }
+    ]
+  }
+}

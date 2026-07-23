@@ -80,6 +80,33 @@ curl -s \
   "https://api.intercom.io/conversations/CONVERSATION_ID?display_as=plaintext" | jq
 ```
 
+### Attachments (screenshots, PDFs)
+
+Attachment URLs in conversation payloads are **signed CDN links with a ~30
+minute TTL** -- URLs copied from an earlier fetch (or handed to a delegated
+subagent) expire and then return 403. To inspect attachments, always use the
+bundled helper, which re-fetches the conversation fresh (fresh signed URLs),
+downloads every attachment locally, and detects the file type itself (no
+dependency on the `file` binary -- node-8 does not have it):
+
+```bash
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-intercom/scripts/fetch-conversation-attachments.sh \
+  CONVERSATION_ID [--out-dir DIR]
+```
+
+Prints one JSON line per downloaded attachment:
+`{"path":"...","source_url":"...","detected_type":"png|jpeg|gif|webp|pdf|unknown","bytes":N}`.
+Read the downloaded files with vision to inspect them. Rules:
+
+- **Inspect attachments centrally** (the agent handling the request). Do NOT
+  hand attachment URLs to delegated subagents for inspection -- by the time
+  they run, the signed URLs are typically expired and subagents cannot read
+  the parent's local files. Subagents should return the conversation ID and
+  let the parent download + inspect.
+- Do NOT improvise `curl` + `file` pipelines; the helper handles auth, URL
+  freshness, the CDN host allowlist, size caps, and type detection.
+- Downloading is a read operation and needs no write approval.
+
 ### Search Conversations (POST - Read-Only)
 ```bash
 # Search conversations by keyword
