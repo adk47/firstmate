@@ -395,7 +395,7 @@
       "agentId": "scout",
       "name": "company-finder-daily",
       "description": "Daily parent company discovery for B2B outreach - finds 5 new companies (matches the skill's per-day design), dedupes, posts to #company-finder for approval",
-      "enabled": false,
+      "enabled": true,
       "createdAtMs": 1775766544763,
       "updatedAtMs": 1777540784441,
       "schedule": {
