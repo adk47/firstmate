@@ -2566,6 +2566,19 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
   rm -f "$STORE_DUMP"
   # --- end store-only cron guard ---
 
+  # Re-install jobs.json if the RUNNING gateway migrated it out from under us
+  # since the cron-sync block above wrote it. openclaw 7.x performs a one-shot
+  # jobs.json -> SQLite migration of its own on any read/write of the profile
+  # cron dir, and renames the file to jobs.json.migrated.N as it goes
+  # (incident 2026-07-22, deploy run 29935762439: FATAL "cron SQLite import
+  # failed ... ENOENT ... jobs.json", with a .migrated.37 file timestamped at
+  # the exact deploy minute). Most deploys win this race; this loses cleanly
+  # by just re-writing the file we already have in hand.
+  if [ ! -f "$LIVE_CRON" ]; then
+    log "  gateway migrated jobs.json out from under the sync (7.x jobs.json->SQLite migration); re-installing from repo"
+    install -m 600 "$HYDRA_ROOT/cron-jobs.json" "$LIVE_CRON" || fail "failed to re-install cron-jobs.json to $LIVE_CRON after migration race"
+  fi
+
   # OPENCLAW_STATE_DIR (NOT OPENCLAW_PROFILE — the SDK resolver ignores it)
   # makes resolveCronStorePath() return /root/.openclaw-main/cron/jobs.json,
   # which is the exact store_key the gateway uses. The node one-liner reads
@@ -2576,28 +2589,49 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
   # dist/index.js load-check at the top of this file); a non-zero node exit
   # chains to `fail` (which fires notify_slack). The explicit exit(1) avoids
   # relying on Node's unhandled-rejection exit semantics.
-  IMPORT_RC=0
-  IMPORT_OUT=$(OPENCLAW_STATE_DIR=/root/.openclaw-main CRON_SDK="$CRON_SDK" LIVE_CRON="$LIVE_CRON" \
-    node --input-type=module -e '
-      import { readFileSync } from "node:fs";
-      try {
-        const m = await import(process.env.CRON_SDK);
-        const store = JSON.parse(readFileSync(process.env.LIVE_CRON, "utf8"));
-        const target = m.resolveCronStorePath();
-        // saveCronStore/loadCronStore are ASYNC (the SDK wrappers return a
-        // promise even though the underlying SQLite transaction is sync) —
-        // they MUST be awaited, else process.exit(0) below fires before the
-        // write commits and the store is left empty (verified on node-8:
-        // un-awaited -> persisted:0; awaited -> persisted:22).
-        await m.saveCronStore(target, store);        // delete-by-store_key + re-insert
-        const back = await m.loadCronStore(target);  // read-back from SQLite to verify persistence
-        console.log(JSON.stringify({ target, persisted: (back.jobs || []).length }));
-        process.exit(0);
-      } catch (e) {
-        console.error(e);
-        process.exit(1);
-      }
-    ' 2>&1) || IMPORT_RC=$?
+  #
+  # Bounded retry: the migration race above can also land BETWEEN the
+  # pre-check just above and this import actually opening the file (same
+  # incident — the window is short but real). If the import fails with
+  # ENOENT for $LIVE_CRON, re-install once and retry; a second failure falls
+  # through to the existing FATAL path unchanged. Safe because the import is
+  # idempotent by construction (replaceCronRows delete+re-insert — see
+  # comment above).
+  IMPORT_ATTEMPT=1
+  while :; do
+    IMPORT_RC=0
+    IMPORT_OUT=$(OPENCLAW_STATE_DIR=/root/.openclaw-main CRON_SDK="$CRON_SDK" LIVE_CRON="$LIVE_CRON" \
+      node --input-type=module -e '
+        import { readFileSync } from "node:fs";
+        try {
+          const m = await import(process.env.CRON_SDK);
+          const store = JSON.parse(readFileSync(process.env.LIVE_CRON, "utf8"));
+          const target = m.resolveCronStorePath();
+          // saveCronStore/loadCronStore are ASYNC (the SDK wrappers return a
+          // promise even though the underlying SQLite transaction is sync) —
+          // they MUST be awaited, else process.exit(0) below fires before the
+          // write commits and the store is left empty (verified on node-8:
+          // un-awaited -> persisted:0; awaited -> persisted:22).
+          await m.saveCronStore(target, store);        // delete-by-store_key + re-insert
+          const back = await m.loadCronStore(target);  // read-back from SQLite to verify persistence
+          console.log(JSON.stringify({ target, persisted: (back.jobs || []).length }));
+          process.exit(0);
+        } catch (e) {
+          console.error(e);
+          process.exit(1);
+        }
+      ' 2>&1) || IMPORT_RC=$?
+    if (( IMPORT_RC == 0 )); then
+      break
+    fi
+    if (( IMPORT_ATTEMPT == 1 )) && echo "$IMPORT_OUT" | grep -qF "ENOENT" && echo "$IMPORT_OUT" | grep -qF "$LIVE_CRON"; then
+      log "  cron SQLite import hit ENOENT for $LIVE_CRON (gateway migration race) — re-installing from repo and retrying once"
+      install -m 600 "$HYDRA_ROOT/cron-jobs.json" "$LIVE_CRON" || fail "failed to re-install cron-jobs.json to $LIVE_CRON for retry"
+      IMPORT_ATTEMPT=2
+      continue
+    fi
+    break
+  done
   if (( IMPORT_RC != 0 )); then
     # Surface the node error body indented, like install_external_plugin,
     # then fail loud (fail -> notify_slack -> exit 1).
