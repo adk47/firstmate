@@ -682,10 +682,15 @@ class TestMainFailsLoudOnUndeliveredPost(unittest.TestCase):
 
     def test_post_mode_zero_exit_when_post_succeeds(self):
         import sys as _sys
+        # save_delta_state mocked so the exit code reflects DELIVERY only, not
+        # the writability of the real default checkpoint path (a failed
+        # checkpoint is separately exit 5 — see
+        # TestMainDeltaFlow.test_delta_checkpoint_persist_failure_exits_nonzero).
         with mock.patch.object(
             d, "fetch_open_convs",
             return_value=[{"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 200}],
         ), mock.patch.object(d, "post_slack_digest", return_value=True), \
+                mock.patch.object(d, "save_delta_state"), \
                 mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
                                                 "DIGEST_SKIP_HOST_GUARD": "1"}), \
                 mock.patch.object(_sys, "argv", ["d", "--post"]):
@@ -723,6 +728,623 @@ class TestMainFailsLoudOnSystematicContactLookupFailure(unittest.TestCase):
                 mock.patch.object(_sys, "argv", ["d"]):
             rc = d.main()
         self.assertEqual(rc, 3)
+
+
+# --------------------------------------------------------------------------
+# WS2: --delta flag + aging escalation.
+# --------------------------------------------------------------------------
+class TestDeltaStateLoadSave(unittest.TestCase):
+    """Missing state = empty (first run). Corrupt state = FAIL LOUD, never a
+    silent reset (repo doctrine: a reset would re-ping Jan with hundreds of
+    items)."""
+
+    def test_missing_file_is_empty_state(self):
+        self.assertEqual(d.load_delta_state("/nonexistent/surfaced.json"), {})
+
+    def test_valid_state_round_trips(self):
+        m = mock.mock_open(read_data='{"c1": {"first_surfaced": 100, "aged_flagged": false}}')
+        with mock.patch("builtins.open", m), mock.patch("os.path.exists", return_value=True):
+            state = d.load_delta_state("/fake/surfaced.json")
+        self.assertEqual(state, {"c1": {"first_surfaced": 100, "aged_flagged": False}})
+
+    def test_corrupt_json_raises_loudly(self):
+        m = mock.mock_open(read_data="not json{{{")
+        with mock.patch("builtins.open", m), mock.patch("os.path.exists", return_value=True):
+            with self.assertRaises(d.CorruptDigestState):
+                d.load_delta_state("/fake/surfaced.json")
+
+    def test_non_dict_json_raises_loudly(self):
+        m = mock.mock_open(read_data="[1, 2, 3]")
+        with mock.patch("builtins.open", m), mock.patch("os.path.exists", return_value=True):
+            with self.assertRaises(d.CorruptDigestState):
+                d.load_delta_state("/fake/surfaced.json")
+
+    def test_non_object_entry_raises_loudly(self):
+        # An entry value like [] would crash compute_delta_and_next_state's
+        # entry.get() calls — validate every entry, not just the top level.
+        m = mock.mock_open(read_data='{"c1": []}')
+        with mock.patch("builtins.open", m), mock.patch("os.path.exists", return_value=True):
+            with self.assertRaises(d.CorruptDigestState):
+                d.load_delta_state("/fake/surfaced.json")
+
+    def test_non_bool_aged_flagged_raises_loudly(self):
+        # The string "false" is TRUTHY — bool("false") is True — so a corrupt
+        # aged_flagged would silently suppress the one-time aging escalation.
+        # Must fail loud instead of being read as "already flagged".
+        m = mock.mock_open(read_data='{"c1": {"first_surfaced": 100, "aged_flagged": "false"}}')
+        with mock.patch("builtins.open", m), mock.patch("os.path.exists", return_value=True):
+            with self.assertRaises(d.CorruptDigestState):
+                d.load_delta_state("/fake/surfaced.json")
+
+    def test_non_numeric_first_surfaced_raises_loudly(self):
+        m = mock.mock_open(read_data='{"c1": {"first_surfaced": "soon", "aged_flagged": false}}')
+        with mock.patch("builtins.open", m), mock.patch("os.path.exists", return_value=True):
+            with self.assertRaises(d.CorruptDigestState):
+                d.load_delta_state("/fake/surfaced.json")
+
+    def test_save_writes_json_atomically_and_round_trips(self):
+        import tempfile
+        import pathlib
+        with tempfile.TemporaryDirectory() as td:
+            path = str(pathlib.Path(td) / "surfaced.json")
+            d.save_delta_state(path, {"c1": {"first_surfaced": 1, "aged_flagged": True}})
+            # written content round-trips through the loader, and no temp file
+            # is left behind (os.replace consumed it).
+            self.assertEqual(d.load_delta_state(path),
+                             {"c1": {"first_surfaced": 1, "aged_flagged": True}})
+            leftovers = [p for p in pathlib.Path(td).iterdir() if p.name != "surfaced.json"]
+            self.assertEqual(leftovers, [])
+
+    def test_save_preserves_previous_state_when_replace_fails(self):
+        # A failed atomic replace (disk full / permission) must RAISE and leave
+        # the previous valid checkpoint intact — never a truncated/corrupt file.
+        import tempfile
+        import pathlib
+        with tempfile.TemporaryDirectory() as td:
+            path = pathlib.Path(td) / "surfaced.json"
+            path.write_text('{"old": {"first_surfaced": 9, "aged_flagged": false}}')
+            with mock.patch.object(d.os, "replace", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    d.save_delta_state(str(path), {"new": {"first_surfaced": 1}})
+            # previous valid state untouched; no orphaned temp file left behind.
+            self.assertEqual(d.load_delta_state(str(path)),
+                             {"old": {"first_surfaced": 9, "aged_flagged": False}})
+            leftovers = [p for p in pathlib.Path(td).iterdir() if p.name != "surfaced.json"]
+            self.assertEqual(leftovers, [])
+
+
+class TestComputeDeltaAndNextState(unittest.TestCase):
+    def test_never_surfaced_item_is_new(self):
+        c1 = conv(cid="C1", lar=0, lcr=100)
+        new_items, aging_items, next_state = d.compute_delta_and_next_state(
+            {}, [c1], now_epoch=1000, aging_hours=20)
+        self.assertEqual([c["id"] for c in new_items], ["C1"])
+        self.assertEqual(aging_items, [])
+        self.assertIn("C1", next_state)
+        self.assertEqual(next_state["C1"]["first_surfaced"], 1000)
+
+    def test_new_item_that_is_already_aging_is_both_new_and_aging(self):
+        now = 1_000_000
+        c1 = conv(cid="C1", lar=0, lcr=now - (21 * 3600))  # 21h old, threshold 20h
+        new_items, aging_items, next_state = d.compute_delta_and_next_state(
+            {}, [c1], now_epoch=now, aging_hours=20)
+        self.assertEqual([c["id"] for c in new_items], ["C1"])
+        self.assertEqual([c["id"] for c in aging_items], ["C1"])
+        self.assertTrue(next_state["C1"]["aged_flagged"])
+
+    def test_previously_surfaced_item_not_yet_aging_is_neither(self):
+        now = 1_000_000
+        c1 = conv(cid="C1", lar=0, lcr=now - (5 * 3600))  # 5h waiting
+        state = {"C1": {"first_surfaced": now - 100000, "aged_flagged": False}}
+        new_items, aging_items, next_state = d.compute_delta_and_next_state(
+            state, [c1], now_epoch=now, aging_hours=20)
+        self.assertEqual(new_items, [])
+        self.assertEqual(aging_items, [])
+        self.assertFalse(next_state["C1"]["aged_flagged"])
+
+    def test_previously_surfaced_item_crossing_aging_threshold_is_aging_not_new(self):
+        now = 1_000_000
+        c1 = conv(cid="C1", lar=0, lcr=now - (25 * 3600))  # now 25h old
+        state = {"C1": {"first_surfaced": now - 100000, "aged_flagged": False}}
+        new_items, aging_items, next_state = d.compute_delta_and_next_state(
+            state, [c1], now_epoch=now, aging_hours=20)
+        self.assertEqual(new_items, [])
+        self.assertEqual([c["id"] for c in aging_items], ["C1"])
+        self.assertTrue(next_state["C1"]["aged_flagged"])
+
+    def test_already_aged_flagged_item_is_not_re_surfaced_as_aging(self):
+        # Aging is a ONE-TIME crossing ping, not a re-ping every run.
+        now = 1_000_000
+        c1 = conv(cid="C1", lar=0, lcr=now - (30 * 3600))
+        state = {"C1": {"first_surfaced": now - 200000, "aged_flagged": True}}
+        new_items, aging_items, next_state = d.compute_delta_and_next_state(
+            state, [c1], now_epoch=now, aging_hours=20)
+        self.assertEqual(new_items, [])
+        self.assertEqual(aging_items, [])
+        self.assertTrue(next_state["C1"]["aged_flagged"])
+
+    def test_aged_flag_clears_when_wait_genuinely_resets_below_threshold(self):
+        # KEY regression: aged_flagged must NOT be sticky forever — when the
+        # item's wait genuinely resets below the threshold (waiting_since
+        # moves forward, e.g. the customer replied again after an admin
+        # reply and then went quiet again), the flag must drop so a LATER
+        # re-crossing can ping once more instead of being silently
+        # suppressed forever by a stale True.
+        now = 1_000_000
+        c1 = conv(cid="C1", lar=0, lcr=now - (5 * 3600))  # only 5h waiting now
+        state = {"C1": {"first_surfaced": now - 200000, "aged_flagged": True}}
+        new_items, aging_items, next_state = d.compute_delta_and_next_state(
+            state, [c1], now_epoch=now, aging_hours=20)
+        self.assertEqual(aging_items, [])
+        self.assertFalse(next_state["C1"]["aged_flagged"])
+
+    def test_aging_pings_again_after_a_reset_and_recross(self):
+        # Full cycle: aged -> resets below threshold (flag clears) -> crosses
+        # again -> must land in aging_items a SECOND time.
+        now = 1_000_000
+        state = {"C1": {"first_surfaced": now - 300000, "aged_flagged": False}}
+        c1 = conv(cid="C1", lar=0, lcr=now - (25 * 3600))  # aging again
+        new_items, aging_items, next_state = d.compute_delta_and_next_state(
+            state, [c1], now_epoch=now, aging_hours=20)
+        self.assertEqual([c["id"] for c in aging_items], ["C1"])
+        self.assertTrue(next_state["C1"]["aged_flagged"])
+
+
+class TestIsAging(unittest.TestCase):
+    def test_under_threshold_not_aging(self):
+        c = conv(cid="C1", lar=0, lcr=900)
+        self.assertFalse(d.is_aging(c, now_epoch=1000, aging_hours=20))
+
+    def test_over_threshold_is_aging(self):
+        now = 1_000_000
+        c = conv(cid="C1", lar=0, lcr=now - (21 * 3600))
+        self.assertTrue(d.is_aging(c, now_epoch=now, aging_hours=20))
+
+
+class TestAgingRenderingAndMention(unittest.TestCase):
+    def test_aging_line_appears_in_text_digest(self):
+        now = 1_000_000
+        c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
+        buckets = d.bucket_conversations([c], set())
+        text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20)
+        self.assertIn("aging", text)
+
+    def test_aging_line_appears_in_blocks(self):
+        now = 1_000_000
+        c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
+        buckets = d.bucket_conversations([c], set())
+        blocks = d.build_digest_blocks(buckets, now_epoch=now, aging_hours=20)
+        self.assertIn("aging", str(blocks))
+
+    def test_no_aging_line_when_under_threshold(self):
+        now = 1_000_000
+        c = conv(cid="NEW", lar=0, lcr=now - (5 * 3600))
+        buckets = d.bucket_conversations([c], set())
+        text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20)
+        self.assertNotIn("aging", text)
+
+    def test_mention_rendered_when_env_set_and_aging_present(self):
+        now = 1_000_000
+        c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
+        buckets = d.bucket_conversations([c], set())
+        text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20,
+                                     mention_uid="U038BM16T7W")
+        self.assertIn("<@U038BM16T7W>", text)
+
+    def test_no_mention_when_no_aging_even_if_env_set(self):
+        now = 1_000_000
+        c = conv(cid="NEW", lar=0, lcr=now - (5 * 3600))
+        buckets = d.bucket_conversations([c], set())
+        text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20,
+                                     mention_uid="U038BM16T7W")
+        self.assertNotIn("<@", text)
+
+    def test_no_mention_when_aging_present_but_env_unset(self):
+        import io
+        from contextlib import redirect_stderr
+        now = 1_000_000
+        c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
+        buckets = d.bucket_conversations([c], set())
+        with redirect_stderr(io.StringIO()) as err:
+            text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20,
+                                         mention_uid=None)
+        self.assertNotIn("<@", text)
+        self.assertIn("CS_DIGEST_AGING_MENTION_UID", err.getvalue())
+
+
+class TestMentionComputedOnceAndNoHeaderDuplication(unittest.TestCase):
+    """finding: _mention_prefix was being computed twice per posted run (once
+    for the printed text, once for the Slack blocks), duplicating the
+    stderr WARN when the mention UID is unset. main() now computes it once
+    and passes the result down via the `mention` kwarg."""
+
+    def test_full_post_prints_the_missing_uid_warning_exactly_once(self):
+        import sys as _sys
+        import io
+        from contextlib import redirect_stderr
+        now = 1_000_000
+        c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
+        err = io.StringIO()
+        with mock.patch.object(d, "fetch_open_convs", return_value=[c]), \
+             mock.patch.object(d, "load_delta_state", return_value={}), \
+             mock.patch.object(d, "post_slack_digest", return_value=True), \
+             mock.patch.object(d, "save_delta_state"), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                             "DIGEST_SKIP_HOST_GUARD": "1",
+                                             "DIGEST_NOW": str(now)}), \
+             mock.patch.object(_sys, "argv", ["d", "--post"]), \
+             redirect_stderr(err):
+            d.main()
+        self.assertEqual(err.getvalue().count("CS_DIGEST_AGING_MENTION_UID"), 1)
+
+    def test_delta_digest_blocks_do_not_duplicate_the_header_line(self):
+        now = 1_000_000
+        c = conv(cid="C1", lar=0, lcr=now - 100)
+        blocks = d.build_delta_digest_blocks([c], [], now_epoch=now, top_n=15)
+        title_occurrences = sum(
+            1 for b in blocks
+            if b["type"] == "header" and b["text"]["text"] == "CS needs-human delta digest"
+        )
+        self.assertEqual(title_occurrences, 1)
+        section_texts = [b["text"]["text"] for b in blocks if b["type"] == "section"]
+        self.assertFalse(
+            any("CS needs-human delta digest" in t for t in section_texts))
+
+
+class TestMainDeltaFlow(unittest.TestCase):
+    def _env(self, **extra):
+        base = {"MUSOAI_INTERCOM_TOKEN": "t", "DIGEST_SKIP_HOST_GUARD": "1"}
+        base.update(extra)
+        return base
+
+    def test_no_delta_prints_and_posts_nothing(self):
+        import sys as _sys
+        import io
+        from contextlib import redirect_stdout
+        c = conv(cid="C1", lar=0, lcr=100)  # already surfaced, not aging
+        state = {"C1": {"first_surfaced": 1, "aged_flagged": False}}
+        buf = io.StringIO()
+        with mock.patch.object(d, "fetch_open_convs", return_value=[c]), \
+             mock.patch.object(d, "load_delta_state", return_value=state), \
+             mock.patch.object(d, "post_slack_digest") as m_post, \
+             mock.patch.object(d, "save_delta_state") as m_save, \
+             mock.patch.dict("os.environ", self._env(DIGEST_NOW="10000")), \
+             mock.patch.object(_sys, "argv", ["d", "--delta", "--post"]), \
+             redirect_stdout(buf):
+            rc = d.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("NO_DELTA", buf.getvalue())
+        m_post.assert_not_called()
+        m_save.assert_not_called()
+
+    def test_dry_run_delta_never_writes_state(self):
+        import sys as _sys
+        c = conv(cid="C1", lar=0, lcr=100)
+        with mock.patch.object(d, "fetch_open_convs", return_value=[c]), \
+             mock.patch.object(d, "load_delta_state", return_value={}), \
+             mock.patch.object(d, "save_delta_state") as m_save, \
+             mock.patch.dict("os.environ", self._env()), \
+             mock.patch.object(_sys, "argv", ["d", "--delta"]):
+            rc = d.main()
+        self.assertEqual(rc, 0)
+        m_save.assert_not_called()
+
+    def test_successful_post_delta_writes_state(self):
+        import sys as _sys
+        c = conv(cid="C1", lar=0, lcr=100)
+        with mock.patch.object(d, "fetch_open_convs", return_value=[c]), \
+             mock.patch.object(d, "load_delta_state", return_value={}), \
+             mock.patch.object(d, "post_slack_digest", return_value=True), \
+             mock.patch.object(d, "save_delta_state") as m_save, \
+             mock.patch.dict("os.environ", self._env()), \
+             mock.patch.object(_sys, "argv", ["d", "--delta", "--post"]):
+            rc = d.main()
+        self.assertEqual(rc, 0)
+        m_save.assert_called_once()
+
+    def test_delta_checkpoint_persist_failure_exits_nonzero(self):
+        # Digest delivered (post ok) but the atomic checkpoint write failed —
+        # the run must fail loud (exit 5) so the cron-health watchdog repairs
+        # the disk, not stay green while re-paging Jan next delta run.
+        import sys as _sys
+        import io
+        from contextlib import redirect_stderr
+        c = conv(cid="C1", lar=0, lcr=100)
+        err = io.StringIO()
+        with mock.patch.object(d, "fetch_open_convs", return_value=[c]), \
+             mock.patch.object(d, "load_delta_state", return_value={}), \
+             mock.patch.object(d, "post_slack_digest", return_value=True), \
+             mock.patch.object(d, "save_delta_state", side_effect=OSError("disk full")), \
+             mock.patch.dict("os.environ", self._env(DIGEST_NOW="10000")), \
+             mock.patch.object(_sys, "argv", ["d", "--delta", "--post"]), \
+             redirect_stderr(err):
+            rc = d.main()
+        self.assertEqual(rc, 5)
+        self.assertIn("could not persist", err.getvalue())
+
+    def test_corrupt_state_fails_loud_in_main(self):
+        # KEY: exit code 4 EXACTLY, not just any nonzero code — 4 is the
+        # documented, distinct signal for "corrupt --delta state", and other
+        # exit codes (1/2/3) mean something else. A test that only checks
+        # != 0 can't catch a regression that changes this to e.g. 1.
+        import sys as _sys
+        with mock.patch.object(d, "fetch_open_convs", return_value=[]), \
+             mock.patch.object(d, "load_delta_state",
+                                side_effect=d.CorruptDigestState("bad json")), \
+             mock.patch.dict("os.environ", self._env()), \
+             mock.patch.object(_sys, "argv", ["d", "--delta"]):
+            rc = d.main()
+        self.assertEqual(rc, 4)
+
+    def test_corrupt_state_also_fails_loud_under_delta_post(self):
+        import sys as _sys
+        with mock.patch.object(d, "fetch_open_convs", return_value=[]), \
+             mock.patch.object(d, "load_delta_state",
+                                side_effect=d.CorruptDigestState("bad json")), \
+             mock.patch.object(d, "post_slack_digest") as m_post, \
+             mock.patch.dict("os.environ", self._env()), \
+             mock.patch.object(_sys, "argv", ["d", "--delta", "--post"]):
+            rc = d.main()
+        self.assertEqual(rc, 4)
+        m_post.assert_not_called()
+
+    def test_corrupt_state_does_not_block_full_digest_dry_run(self):
+        # The pre-existing 13:30 full digest (and its dry-runs) must NOT be
+        # taken down by a corrupt --delta state file — that file is owned by
+        # a DIFFERENT, newer feature (--delta). Full mode degrades instead.
+        import sys as _sys
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        c = conv(cid="C1", lar=0, lcr=100)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(d, "fetch_open_convs", return_value=[c]), \
+             mock.patch.object(d, "load_delta_state",
+                                side_effect=d.CorruptDigestState("bad json")), \
+             mock.patch.dict("os.environ", self._env()), \
+             mock.patch.object(_sys, "argv", ["d"]), \
+             redirect_stdout(out), redirect_stderr(err):
+            rc = d.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("CS needs-human daily digest", out.getvalue())
+        self.assertIn("corrupt", err.getvalue())
+
+    def test_corrupt_state_full_post_renders_and_posts_but_skips_persistence(self):
+        import sys as _sys
+        import io
+        from contextlib import redirect_stderr
+        c = conv(cid="C1", lar=0, lcr=100)
+        err = io.StringIO()
+        with mock.patch.object(d, "fetch_open_convs", return_value=[c]), \
+             mock.patch.object(d, "load_delta_state",
+                                side_effect=d.CorruptDigestState("bad json")), \
+             mock.patch.object(d, "post_slack_digest", return_value=True), \
+             mock.patch.object(d, "save_delta_state") as m_save, \
+             mock.patch.dict("os.environ", self._env()), \
+             mock.patch.object(_sys, "argv", ["d", "--post"]), \
+             redirect_stderr(err):
+            rc = d.main()
+        self.assertEqual(rc, 0)
+        m_save.assert_not_called()
+        self.assertIn("skipping --delta state persistence", err.getvalue())
+
+    def test_full_run_refreshes_state_on_successful_post(self):
+        import sys as _sys
+        c = conv(cid="C1", lar=0, lcr=100)
+        with mock.patch.object(d, "fetch_open_convs", return_value=[c]), \
+             mock.patch.object(d, "load_delta_state", return_value={}), \
+             mock.patch.object(d, "post_slack_digest", return_value=True), \
+             mock.patch.object(d, "save_delta_state") as m_save, \
+             mock.patch.dict("os.environ", self._env()), \
+             mock.patch.object(_sys, "argv", ["d", "--post"]):
+            rc = d.main()
+        self.assertEqual(rc, 0)
+        m_save.assert_called_once()
+
+    def test_full_run_dry_run_never_writes_state(self):
+        import sys as _sys
+        c = conv(cid="C1", lar=0, lcr=100)
+        with mock.patch.object(d, "fetch_open_convs", return_value=[c]), \
+             mock.patch.object(d, "load_delta_state", return_value={}), \
+             mock.patch.object(d, "save_delta_state") as m_save, \
+             mock.patch.dict("os.environ", self._env()), \
+             mock.patch.object(_sys, "argv", ["d"]):
+            rc = d.main()
+        self.assertEqual(rc, 0)
+        m_save.assert_not_called()
+
+    def test_no_delta_with_post_prunes_a_departed_conv(self):
+        # A conv (C2) that left needs_human entirely (closed by a sibling
+        # sweeper) must have its state entry dropped even on a NO_DELTA run —
+        # otherwise a closed-then-reopened C2 would keep a stale entry
+        # (possibly aged_flagged:true) and become invisible to future delta
+        # digests the moment it reopens.
+        import sys as _sys
+        import io
+        from contextlib import redirect_stdout
+        c1 = conv(cid="C1", lar=0, lcr=100)  # still present, already surfaced, not aging
+        state = {
+            "C1": {"first_surfaced": 1, "aged_flagged": False},
+            "C2": {"first_surfaced": 1, "aged_flagged": True},  # no longer in needs_human
+        }
+        captured = {}
+
+        def fake_save(path, next_state):
+            captured["next_state"] = next_state
+
+        with mock.patch.object(d, "fetch_open_convs", return_value=[c1]), \
+             mock.patch.object(d, "load_delta_state", return_value=state), \
+             mock.patch.object(d, "save_delta_state", fake_save), \
+             mock.patch.dict("os.environ", self._env(DIGEST_NOW="10000")), \
+             mock.patch.object(_sys, "argv", ["d", "--delta", "--post"]), \
+             redirect_stdout(io.StringIO()):
+            rc = d.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("next_state", captured)  # a write DID happen (pruning)
+        self.assertNotIn("C2", captured["next_state"])  # departed entry dropped
+        # C1 stayed present and wasn't re-rendered this run — its entry must
+        # be carried over UNCHANGED (pure pruning creates/flips nothing).
+        self.assertEqual(captured["next_state"]["C1"],
+                          {"first_surfaced": 1, "aged_flagged": False})
+
+    def test_no_delta_with_post_and_nothing_to_prune_never_writes(self):
+        # Locks in the existing no-op-write behavior (test_no_delta_prints_
+        # and_posts_nothing above) even after the finding-2 pruning fix: when
+        # there's genuinely nothing to prune, no write happens at all.
+        import sys as _sys
+        import io
+        from contextlib import redirect_stdout
+        c1 = conv(cid="C1", lar=0, lcr=100)
+        state = {"C1": {"first_surfaced": 1, "aged_flagged": False}}
+        with mock.patch.object(d, "fetch_open_convs", return_value=[c1]), \
+             mock.patch.object(d, "load_delta_state", return_value=state), \
+             mock.patch.object(d, "save_delta_state") as m_save, \
+             mock.patch.dict("os.environ", self._env(DIGEST_NOW="10000")), \
+             mock.patch.object(_sys, "argv", ["d", "--delta", "--post"]), \
+             redirect_stdout(io.StringIO()):
+            rc = d.main()
+        self.assertEqual(rc, 0)
+        m_save.assert_not_called()
+
+    def test_full_post_does_not_mark_rank_beyond_top_n_as_surfaced(self):
+        # KEY regression: a full --post run renders only nh[:top_n], but
+        # previously persisted next_state over ALL needs_human items — a
+        # rank-16+ item would get first_surfaced (and possibly aged_flagged)
+        # sight-unseen and then never appear in any future delta digest.
+        import sys as _sys
+        import io
+        from contextlib import redirect_stdout
+        convs = [conv(cid=f"C{i}", lar=0, lcr=100 + i) for i in range(20)]  # 20 items, top_n default 15
+        captured = {}
+
+        def fake_save(path, next_state):
+            captured["next_state"] = next_state
+
+        with mock.patch.object(d, "fetch_open_convs", return_value=convs), \
+             mock.patch.object(d, "load_delta_state", return_value={}), \
+             mock.patch.object(d, "post_slack_digest", return_value=True), \
+             mock.patch.object(d, "save_delta_state", fake_save), \
+             mock.patch.dict("os.environ", self._env(DIGEST_NOW="10000")), \
+             mock.patch.object(_sys, "argv", ["d", "--post"]), \
+             redirect_stdout(io.StringIO()):
+            rc = d.main()
+        self.assertEqual(rc, 0)
+        # needs_human is ranked oldest-waiting-first — the 5 NEWEST (highest
+        # lcr, i.e. C15..C19) rank beyond top_n=15 and must be absent.
+        for i in range(15, 20):
+            self.assertNotIn(f"C{i}", captured["next_state"])
+        for i in range(0, 15):
+            self.assertIn(f"C{i}", captured["next_state"])
+
+    def test_full_post_failure_does_not_persist_state_and_exits_1(self):
+        import sys as _sys
+        c = conv(cid="C1", lar=0, lcr=100)
+        with mock.patch.object(d, "fetch_open_convs", return_value=[c]), \
+             mock.patch.object(d, "load_delta_state", return_value={}), \
+             mock.patch.object(d, "post_slack_digest", return_value=False), \
+             mock.patch.object(d, "save_delta_state") as m_save, \
+             mock.patch.dict("os.environ", self._env()), \
+             mock.patch.object(_sys, "argv", ["d", "--post"]):
+            rc = d.main()
+        self.assertEqual(rc, 1)
+        m_save.assert_not_called()
+
+    def test_delta_post_failure_does_not_persist_state_and_exits_1(self):
+        import sys as _sys
+        c = conv(cid="C1", lar=0, lcr=100)
+        with mock.patch.object(d, "fetch_open_convs", return_value=[c]), \
+             mock.patch.object(d, "load_delta_state", return_value={}), \
+             mock.patch.object(d, "post_slack_digest", return_value=False), \
+             mock.patch.object(d, "save_delta_state") as m_save, \
+             mock.patch.dict("os.environ", self._env()), \
+             mock.patch.object(_sys, "argv", ["d", "--delta", "--post"]):
+            rc = d.main()
+        self.assertEqual(rc, 1)
+        m_save.assert_not_called()
+
+
+class TestDeltaDigestLargeBacklogCap(unittest.TestCase):
+    """KEY regression (production constraint: ~436 real needs-human items).
+    Rendering EVERY surfaced item into one Slack section blows past Slack's
+    3000-char section text cap -> invalid_blocks -> post fails -> state
+    never persists -> both delta timers wedge forever. Rows must be capped
+    at the same top_n convention the full digest uses."""
+
+    def test_render_delta_digest_caps_rows_at_top_n(self):
+        now = 1_000_000
+        items = [conv(cid=f"N{i}", lar=0, lcr=now - i) for i in range(100)]
+        text = d.render_delta_digest(items, [], now_epoch=now, top_n=15)
+        rows = [line for line in text.splitlines() if "conversation/" in line]
+        self.assertEqual(len(rows), 15)
+        self.assertIn("85 more", text)
+        self.assertIn("13:30 full digest", text)
+
+    def test_build_delta_digest_blocks_section_text_under_slack_cap(self):
+        now = 1_000_000
+        items = [conv(cid=f"N{i}", lar=0, lcr=now - i) for i in range(100)]
+        blocks = d.build_delta_digest_blocks(items, [], now_epoch=now, top_n=15)
+        section = [b for b in blocks if b["type"] == "section"][-1]
+        self.assertLess(len(section["text"]["text"]), 3000)
+
+    def test_state_records_only_the_rendered_subset_not_all_100(self):
+        # Consistency with the rank-beyond-top_n fix: --delta state must only
+        # mark the rows ACTUALLY rendered (capped), never the full backlog.
+        now = 1_000_000
+        items = [conv(cid=f"N{i}", lar=0, lcr=now - i) for i in range(100)]
+        rendered, overflow = d._cap_delta_items(items, [], top_n=15)
+        self.assertEqual(len(rendered), 15)
+        self.assertEqual(overflow, 85)
+        next_state = d.build_next_state({}, items, rendered, now, aging_hours=20)
+        self.assertEqual(len(next_state), 15)
+
+
+class TestBuildNextStateAgingRefresh(unittest.TestCase):
+    """build_next_state is what actually PERSISTS; it must refresh the aging
+    status of present entries even when the row was not rendered, or a stale
+    aged_flagged:true suppresses the next re-cross escalation forever."""
+
+    def _c(self, hours_waiting, now=1_000_000):
+        return conv(cid="C1", lar=0, lcr=now - int(hours_waiting * 3600))
+
+    def test_stale_aged_flag_resets_for_unrendered_present_entry(self):
+        # aged (persisted true) -> wait resets below threshold on an UNRENDERED
+        # run (NO_DELTA, rendered_items=[]) -> flag must drop to false so a
+        # later re-cross can escalate again. first_surfaced preserved.
+        now = 1_000_000
+        state = {"C1": {"first_surfaced": now - 200000, "aged_flagged": True}}
+        ns = d.build_next_state(state, [self._c(5)], [], now, aging_hours=20)
+        self.assertFalse(ns["C1"]["aged_flagged"])
+        self.assertEqual(ns["C1"]["first_surfaced"], now - 200000)
+
+    def test_aging_but_unrendered_keeps_existing_flag_not_flipped_true(self):
+        # aging + NOT rendered must KEEP the existing flag (never flip true
+        # sight-unseen, which would suppress the escalation when finally shown).
+        now = 1_000_000
+        unflagged = {"C1": {"first_surfaced": now - 200000, "aged_flagged": False}}
+        ns = d.build_next_state(unflagged, [self._c(30)], [], now, aging_hours=20)
+        self.assertFalse(ns["C1"]["aged_flagged"])   # still false -> will ping when shown
+        flagged = {"C1": {"first_surfaced": now - 200000, "aged_flagged": True}}
+        ns2 = d.build_next_state(flagged, [self._c(30)], [], now, aging_hours=20)
+        self.assertTrue(ns2["C1"]["aged_flagged"])    # already pinged -> stays true
+
+    def test_aging_and_rendered_sets_flag_true(self):
+        now = 1_000_000
+        c = self._c(30)
+        state = {"C1": {"first_surfaced": now - 200000, "aged_flagged": False}}
+        ns = d.build_next_state(state, [c], [c], now, aging_hours=20)
+        self.assertTrue(ns["C1"]["aged_flagged"])
+
+    def test_full_cycle_aged_reset_recross_survives_persisted_handoff(self):
+        # The finding's end-to-end regression across persisted runs:
+        # aged+rendered (persist true) -> reset below threshold, unrendered
+        # (persist false) -> re-cross must escalate again off the persisted state.
+        now, ah = 1_000_000, 20
+        s1 = d.build_next_state({}, [self._c(25)], [self._c(25)], now, ah)
+        self.assertTrue(s1["C1"]["aged_flagged"])
+        s2 = d.build_next_state(s1, [self._c(5)], [], now, ah)   # reset, NO_DELTA
+        self.assertFalse(s2["C1"]["aged_flagged"])
+        new_items, aging_items, _ = d.compute_delta_and_next_state(
+            s2, [self._c(25)], now, ah)                          # re-cross
+        self.assertEqual([c["id"] for c in aging_items], ["C1"])
 
 
 if __name__ == "__main__":

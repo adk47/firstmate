@@ -90,6 +90,9 @@ Env:
   CLOSE_DUP_SUMMARY_CHANNEL   optional, default C0ANM0PN9L5 (#cs_chats)
   CLOSE_DUP_SLACK_ACCOUNT     optional, default operations
   SLACK_NOTIFY_CONFIG         optional, default /root/.openclaw-main/openclaw.json
+  CLOSE_DUP_REVIEW_DIR        optional, default /var/lib/close-duplicate-conversations/
+                              (dry-run candidate review export — see
+                              write_review_export)
   # De-confliction inputs (reused verbatim from cs-needs-human-digest.py's
   # default_state_paths() env vars — see that module for detail):
   CLOSE_SHADOW_LOG, RESOLVE_NOTIFY_STATE, RESOLUTION_STATE_PATH,
@@ -107,12 +110,15 @@ Flags:
                          apply && ok>0, which is insufficient here since
                          this PR never applies).
 
-Exit codes: 0 ok; 1 usage/env error; 2 sanity ceiling exceeded (nothing
-            closed); 3 at least one close failed.
+Exit codes: 0 ok; 1 usage/env error; 2 --apply sanity ceiling exceeded
+            (nothing closed — dry-run over the ceiling does NOT exit 2, it
+            proceeds with the normal dry-run path and exits 0, see
+            write_review_export); 3 at least one close failed.
 """
 import argparse
 import json
 import os
+import stat
 import sys
 import tempfile
 import time
@@ -127,6 +133,11 @@ DEFAULT_SUMMARY_CHANNEL = "C0ANM0PN9L5"  # #cs_chats
 DEFAULT_TIER_B_WINDOW_DAYS = 14
 DUP_CEILING = 20
 SUMMARY_MAX_LINES = 25
+DEFAULT_REVIEW_DIR = "/var/lib/close-duplicate-conversations/"
+# Fallback dir when DEFAULT_REVIEW_DIR is unwritable — a private (0700)
+# subdir, never the bare world-readable /tmp root, since the export
+# contains customer email addresses. See _safe_fallback_dir().
+FALLBACK_REVIEW_DIR = "/tmp/close-duplicate-review"
 
 # Zero-interpolation, fixed-constant Tier B pointer text — customer-facing.
 # PENDING AARON SIGN-OFF before --apply flip (see module docstring / PR).
@@ -562,6 +573,109 @@ def open_shadow_log():
             return None, None
 
 
+def mask_email(email):
+    """Mask a customer email for the review export -- "a***@***" style,
+    hiding the domain too, not just the local part: a full domain can
+    single out a customer on a personal-name domain. Same masking as the
+    sibling digest's mask_email (scripts/cs-needs-human-digest.py:525-530),
+    adopted here for consistency -- never used for grouping/tiering,
+    display only."""
+    if not email:
+        return ""
+    local = email.split("@", 1)[0]
+    if not local:
+        return "***@***"
+    return f"{local[0]}***@***"
+
+
+def _review_export_candidate(c):
+    older, kept, tier, email = c["older"], c["kept"], c["tier"], c["email"]
+    return {
+        "older_id": older["id"],
+        "newer_id": kept["id"],
+        "email": mask_email(email),
+        "tier": tier,
+        "older_created_at": older["created_at"],
+        "older_last_admin_reply_at": older["lar"],
+        "older_last_contact_reply_at": older["lcr"],
+        "kept_created_at": kept["created_at"],
+    }
+
+
+def _safe_fallback_dir():
+    """Prepare FALLBACK_REVIEW_DIR as a private (0700, owned-by-us,
+    non-symlink) directory and return its path, or print a loud stderr and
+    return None if it can't be made/verified safe. The export contains
+    customer email addresses, so the fallback must never be a predictable
+    world-readable path (unlike open_shadow_log's bare /tmp fallback)."""
+    path = FALLBACK_REVIEW_DIR
+    try:
+        if os.path.islink(path):
+            print(f"ERROR: fallback review dir {path} is a symlink -- "
+                  "refusing to write", file=sys.stderr)
+            return None
+        if os.path.exists(path):
+            st = os.lstat(path)
+            if not stat.S_ISDIR(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o700 \
+                    or st.st_uid != os.getuid():
+                print(f"ERROR: fallback review dir {path} exists with unsafe "
+                      "ownership/mode -- refusing to write", file=sys.stderr)
+                return None
+        else:
+            os.makedirs(path, mode=0o700, exist_ok=True)
+        return path
+    except OSError as e:
+        print(f"ERROR: cannot prepare fallback review dir {path}: {e}", file=sys.stderr)
+        return None
+
+
+def write_review_export(candidates, when_date):
+    """Write the full dry-run candidate list (every run, not just over-
+    ceiling ones -- see module docstring's ceiling-gates-only---apply
+    change) to CLOSE_DUP_REVIEW_DIR/candidates-<when_date>.json, one JSON
+    doc {generated_at, total, tier_a, tier_b}. Mirrors open_shadow_log's
+    primary-dir-then-/tmp-fallback pattern with a loud stderr on failure of
+    either -- this is the supervised-drain review surface (Jan/Nick), so a
+    silently-lost export would be as bad as a silently-lost shadow log. The
+    fallback lands in a private FALLBACK_REVIEW_DIR (see _safe_fallback_dir),
+    not the bare /tmp root, and both the primary and fallback files are
+    chmod 0600 after write -- the export carries customer email addresses.
+    Returns the path actually written, or None if both attempts failed."""
+    tier_a = [_review_export_candidate(c) for c in candidates if c["tier"] == "A"]
+    tier_b = [_review_export_candidate(c) for c in candidates if c["tier"] == "B"]
+    doc = {
+        "generated_at": int(time.time()),
+        "total": len(tier_a) + len(tier_b),
+        "tier_a": tier_a,
+        "tier_b": tier_b,
+    }
+    filename = f"candidates-{when_date}.json"
+    primary_dir = os.environ.get("CLOSE_DUP_REVIEW_DIR", DEFAULT_REVIEW_DIR)
+    primary_path = os.path.join(primary_dir, filename)
+    try:
+        os.makedirs(primary_dir, exist_ok=True)
+        with open(primary_path, "w") as f:
+            json.dump(doc, f)
+        os.chmod(primary_path, 0o600)
+        return primary_path
+    except OSError as e:
+        print(f"WARN: cannot write review export to {primary_path}: {e} "
+              f"-- falling back to {FALLBACK_REVIEW_DIR}", file=sys.stderr)
+        fallback_dir = _safe_fallback_dir()
+        if fallback_dir is None:
+            return None
+        fallback_path = os.path.join(fallback_dir, filename)
+        try:
+            with open(fallback_path, "w") as f:
+                json.dump(doc, f)
+            os.chmod(fallback_path, 0o600)
+            return fallback_path
+        except OSError as e2:
+            print(f"ERROR: cannot write review export to fallback "
+                  f"{fallback_path} either: {e2}", file=sys.stderr)
+            return None
+
+
 def _pointer_state_path():
     return os.environ.get("CLOSE_DUP_POINTER_STATE", "/var/lib/close-duplicate/pointer-posted.json")
 
@@ -658,10 +772,18 @@ def post_slack_summary(text, channel, config_path, account):
         return False
 
 
-def format_candidates_summary(candidates, when, max_lines=SUMMARY_MAX_LINES):
+def format_candidates_summary(candidates, when, max_lines=SUMMARY_MAX_LINES,
+                               review_path=None, tier_a_n=None, tier_b_n=None):
     """Render the "would close X -> kept Y (tier A/B)" pairs for
     --notify-candidates. Posted EVEN ON DRY-RUN — close-resolved's notify
-    gates on apply && ok>0, which is insufficient for shadow-phase review."""
+    gates on apply && ok>0, which is insufficient for shadow-phase review.
+
+    review_path/tier_a_n/tier_b_n are all optional; tier_a_n/tier_b_n are
+    required together and add a trailing line pointing Jan/Nick at the full
+    review export written by write_review_export -- the Slack summary
+    itself is capped at max_lines, the export is not. If tier_a_n/tier_b_n
+    are set but review_path is None, write_review_export failed both
+    attempts -- say so explicitly rather than silently dropping the line."""
     n = len(candidates)
     plural = "" if n == 1 else "s"
     lines = [f":mag: *{n} duplicate-close candidate{plural}* — {when}"]
@@ -672,6 +794,14 @@ def format_candidates_summary(candidates, when, max_lines=SUMMARY_MAX_LINES):
             f"(tier {tier}, {_slack_escape(c.get('email') or 'no email')})")
     if n > max_lines:
         lines.append(f"…and {n - max_lines} more")
+    if review_path is not None:
+        lines.append(
+            f"_Full review export (Tier A {tier_a_n} / Tier B {tier_b_n}): "
+            f"{review_path}_")
+    elif tier_a_n is not None or tier_b_n is not None:
+        # write_review_export returned None -- both primary and fallback
+        # writes failed. Don't let the notify text silently omit that.
+        lines.append("_review export FAILED — see stderr_")
     return "\n".join(lines)
 
 
@@ -736,16 +866,37 @@ def main():
     print(f"candidate closes (individual): {len(candidates)}")
 
     when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
+    # HHMMSS included so same-day reruns don't truncate-overwrite an
+    # earlier run's export -- see write_review_export.
+    when_date = time.strftime("%Y-%m-%dT%H%M%SZ", time.gmtime())
     channel, cfg, account = _slack_env()
+    over_ceiling = len(candidates) > DUP_CEILING
 
-    if len(candidates) > DUP_CEILING:
-        print(f"ERROR: sanity ceiling exceeded ({len(candidates)} > {DUP_CEILING}) — "
-              "closing nothing", file=sys.stderr)
-        post_slack_summary(format_ceiling_alert(len(candidates), when), channel, cfg, account)
-        return 2
+    # Ceiling gates ONLY --apply. Exceeding it in dry-run/shadow mode must
+    # NOT exit 2 or post the red format_ceiling_alert — a backlogged fire
+    # is exactly the reviewable-candidate-list case the shadow export below
+    # exists for. With --apply, keep today's behavior byte-for-byte: post
+    # the alert and exit 2 BEFORE any close.
+    if over_ceiling:
+        if args.apply:
+            print(f"ERROR: sanity ceiling exceeded ({len(candidates)} > {DUP_CEILING}) — "
+                  "closing nothing", file=sys.stderr)
+            post_slack_summary(format_ceiling_alert(len(candidates), when), channel, cfg, account)
+            return 2
+        print(f"WARNING: ceiling would block --apply: {len(candidates)} > {DUP_CEILING}")
+
+    review_path = None
+    tier_a_n = tier_b_n = None
+    if not args.apply:
+        tier_a_n = sum(1 for c in candidates if c["tier"] == "A")
+        tier_b_n = sum(1 for c in candidates if c["tier"] == "B")
+        review_path = write_review_export(candidates, when_date)
+        print(f"review export: {review_path or 'FAILED (see stderr)'} "
+              f"(Tier A {tier_a_n} / Tier B {tier_b_n})")
 
     if args.notify_candidates:
-        text = format_candidates_summary(candidates, when)
+        text = format_candidates_summary(candidates, when, review_path=review_path,
+                                          tier_a_n=tier_a_n, tier_b_n=tier_b_n)
         posted = post_slack_summary(text, channel, cfg, account)
         print(f"candidate notify: {'posted' if posted else 'skipped/failed'} -> {channel}")
 

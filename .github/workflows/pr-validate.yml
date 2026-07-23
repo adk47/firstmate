@@ -1171,6 +1171,29 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_cs_selfserve_backlog
+      - name: Run cs-sla-report tests
+        # scripts/cs-sla-report.py is the weekly SLA denominator (READ-ONLY on
+        # Intercom, one Block Kit post to #cs_chats). These lock the
+        # first-response median/p90 math with an explicit unknown-statistics
+        # count (never silently dropped), the >24h residue snapshot's
+        # waiting_since semantics, the reopen-rate denominator (conversations
+        # with >=1 admin reply), and the fail-loud queue-depth subprocess
+        # handling. Same bare stdlib unittest, targeted by name (no
+        # pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_cs_sla_report
+      - name: Run cs-ops-drain-candidates tests
+        # scripts/cs-ops-drain-candidates.py is the DETERMINISTIC lister for
+        # the Phase 2.1 ops-drain (ships DRY-RUN ONLY, cron enabled:false).
+        # These lock the load-bearing de-confliction invariant (exclude by
+        # conversation id across ALL sibling sweeper states — a missed
+        # exclusion double-messages a customer), the 3-verb allowlist on
+        # --append-record, host-guarded shadow-log appends, and PII masking.
+        # Same bare stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_cs_ops_drain_candidates
 
   plugin-tests:
     name: Plugin tests (vitest)

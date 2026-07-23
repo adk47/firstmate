@@ -147,6 +147,47 @@ human-facing digest is a fixed daily rhythm. Jan cannot consume six digests a da
   ship. Writing it any other way invites gaming the metric by closing harder instead of resolving
   better.
 
+### SLA workstream (added 2026-07-21, Nick-approved)
+
+**Target:** first action on any inbound conversation < 1h (Caroline's event-driven webhook reply
+already delivers minutes — now we MEASURE it), and every conversation the machine cannot resolve
+gets a first human-or-ops action < 24h. Honest denominator, no gaming: reopen-rate rides along.
+
+**Where SLA time is actually lost** (recon 2026-07-21): not in reply latency (Caroline is
+event-driven), but in the residue — the needs-human queue (was: one daily digest), resolvable-now
+conversations nobody works (Phase 2.1 unbuilt), the duplicate backlog (436 items, timer disabled
+2026-07-20), and escalated tickets (1-3 day quoted SLAs).
+
+**Heartbeat verdict (research-backed, closes the "are we under-using heartbeats?" question):**
+heartbeats are the WRONG lever for CS here. OpenClaw doctrine: cron for precise timing, heartbeat
+for approximate timing with full session context; cron lanes always defer heartbeats — and our
+operations agent is cron-saturated, so its heartbeats would mostly defer. The famous fast-SLA
+deployment (Gumroad's gumclaw) is itself cron-driven (78 jobs, 2-min watchdogs → weekly), not
+heartbeat-driven — and runs on Hermes Agent, not OpenClaw. Caroline gets NO heartbeat (proactive
+sweep on the customer-facing edge agent violates checklist #3 + risks the lane wedge;
+`workspaces/support/HEARTBEAT.md` is intentionally empty and says so). Support's SLA machinery
+stays deterministic on main: systemd timers + openclaw crons.
+
+**Credit-verification cadence decision:** stays 4h/500 (Nick, 2026-07-21). Hourly@100 would CUT
+daily capacity (2400 < 3000); "all credits" in one run would brush the 1800s timeout (~5000
+credits ≈ 30 min). Revisit criterion: when the weekly SLA report's queue-depth telemetry shows
+arrival rate or queue wait making 4h the binding constraint, move to hourly KEEPING the 500 cap.
+
+**Deliverables (built 2026-07-21, branch feat/openclaw-support-sla-plan):**
+1. `scripts/cs-sla-report.py` + weekly timer (Mon 08:30 UTC): first-response distribution,
+   >24h residue snapshot, reopen rate, credit queue depth. Ships §5's **reopen-rate honesty
+   check** plus the SLA-denominator telemetry; the §5 headline ratio **AI-resolved / total
+   inbound is NOT yet computed** (needs per-conversation resolver attribution — see checklist
+   item 5, still OUTSTANDING).
+2. Needs-human digest 3x/day: 13:30 UTC full digest unchanged; 07:30/19:30 UTC `--delta` fires
+   post ONLY new + newly-aged items (silent when empty — Jan's digest budget is respected);
+   items aging past 20h get a distinct line + resolvable mention.
+3. Phase 2.1 ops-drain: shipped DRY-RUN ONLY (`skills-all/cs-ops-drain/`,
+   `scripts/cs-ops-drain-candidates.py`, cron `cs-ops-drain-4h` enabled:false). `--apply` stays
+   behind the §4 sign-offs.
+4. Dup-backlog unstick: ceiling now hard-blocks only `--apply`; shadow runs always export the
+   full tiered candidate list for the Jan/Nick supervised-drain review.
+
 ### Phase 4 - PARKED (not scheduled): refund autonomy
 Refund execution stays ops / approval-tier. The refund-reconcile history (live dry-run killed
 auto-cancel because goodwill was indistinguishable from exit) is direct evidence that auto-refund
@@ -173,7 +214,10 @@ customers. This metric is the denominator the Phase 0.1 baseline establishes.
 2. Every close path: deterministic gate + dry-run default + shadow log + `--limit` + host guard.
 3. Caroline's tool surface unchanged (no close, no refunds, no proactive sweep).
 4. All seven one-way doors have a recorded human sign-off before their `--apply` / enable.
-5. Weekly metric exists: AI-resolved / total inbound, with reopen-rate.
+5. Weekly metric: reopen-rate + first-response/residue/queue telemetry SHIP (cs-sla-report.py);
+   the **AI-resolved / total inbound** ratio is **OUTSTANDING** — not yet computed (needs
+   per-conversation resolver attribution, which Intercom's weekly-cadence stats don't expose;
+   same limitation documented in cs-sla-report.py's per-admin-split note).
 6. Product-signal report ships as a `skills-all/` skill + ops cron; zero automated writes to
    `web-credits-next`.
 
@@ -185,6 +229,9 @@ customers. This metric is the denominator the Phase 0.1 baseline establishes.
       reviewer nsollazzo, never-merges. (one-way door #1: cleared)
 - [x] **First build:** Phase 2.1 ops-drain DESIGN SPEC -> `docs/plans/cs-ops-drain-spec.md`.
       (2026-07-15)
+- [x] **SLA workstream approved** (Nick, 2026-07-21): target first-action <1h / residue <24h;
+      heartbeats rejected as the CS lever (cron/timers stay canonical); credit-verification cadence
+      stays 4h/500 pending queue-depth telemetry from the weekly SLA report.
 - [ ] Risk appetite on duplicate-close: conservative same-customer-only (recommended) - confirm at
       Phase 1.
 - [ ] Confirm product-signal loop feeds `web-credits-next` as a ranked report, humans convert to

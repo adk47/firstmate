@@ -453,6 +453,36 @@
       }
     },
     {
+      "id": "fa4bb786-08fb-4437-a8b4-06654eff077e",
+      "agentId": "operations",
+      "name": "cs-ops-drain-4h",
+      "description": "Phase 2.1 CS ops-drain (docs/plans/cs-ops-drain-spec.md). DISABLED at ship — DRY-RUN ONLY, no writes until Nick's sign-off (spec §Rollout). Fires 30min offset from credit-verification-batch-4h to avoid operations-lane contention. Invokes the cs-ops-drain skill: list de-conflicted OPEN Intercom candidates via /opt/hydra/scripts/cs-ops-drain-candidates.py, classify into the three server-verified buckets (credits verify / profiles claim-self / no-attestation consolidate), re-verify with muso-cli READ verbs, and shadow-log the intended verb per survivor WITHOUT writing. delivery.mode is \"none\" because the skill self-posts its summary to #credit-verification. Model block copied from credit-verification-batch-4h (allowlisted or the run silently fails).",
+      "enabled": false,
+      "createdAtMs": 1784646065788,
+      "updatedAtMs": 1784646065788,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 */4 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the cs-ops-drain skill in DRY-RUN (the only supported mode). List de-conflicted candidates via `python3 /opt/hydra/scripts/cs-ops-drain-candidates.py --limit 25`, classify each into exactly one of the three server-verified buckets (catalog-corroborated pending credit / own now-processable profile claim / no-attestation own-duplicate consolidation), EXCLUDE everything else, re-verify each survivor with muso-cli READ verbs, then shadow-log the intended verb per survivor via `--append-record`. Take NO write action, call NO muso-cli WRITE verb, and do NOT pass --apply. Post one concise summary to #credit-verification. If zero candidates, post nothing. Your final reply must be exactly NO_REPLY.",
+        "model": "openai/gpt-5.6-sol",
+        "thinking": "high",
+        "fallbacks": [
+          "openrouter/openai/gpt-5.6-luna",
+          "openrouter/anthropic/claude-haiku-4.5"
+        ],
+        "timeoutSeconds": 1800
+      },
+      "delivery": {
+        "mode": "none"
+      }
+    },
+    {
       "id": "b7e4d2a1-9f63-4c08-a5e7-1d2c8f0a6b34",
       "agentId": "operations",
       "name": "systemic-data-issue-report-daily",

@@ -6,7 +6,9 @@ with no network. Stdlib unittest + stubs only, matching
 tests/test_cs_needs_human_digest.py's convention.
 """
 import importlib.util
+import os
 import pathlib
+import stat
 import unittest
 from unittest import mock
 
@@ -234,6 +236,235 @@ class TestSanityCeiling(unittest.TestCase):
         self.assertEqual(close_calls, [])
 
 
+def _many_dup_convs(n=30):
+    """n duplicate pairs, all Tier A (older.lar > older.lcr), to exceed
+    DUP_CEILING (20)."""
+    convs = []
+    for i in range(n):
+        older = conv(f"O{i}", email=f"e{i}@x.com", lar=200, lcr=100, created_at=1000)
+        kept = conv(f"K{i}", email=f"e{i}@x.com", lar=300, lcr=100, created_at=5000)
+        convs.extend([older, kept])
+    return convs
+
+
+class TestCeilingGatesOnlyApply(unittest.TestCase):
+    """Ceiling gates ONLY --apply (issue: 2026-07-20 backlog fire). In
+    dry-run/shadow mode, exceeding DUP_CEILING must proceed with the normal
+    dry-run path (candidate ID + --notify-candidates summary + review
+    export) and exit 0 — NEVER format_ceiling_alert / exit 2. With --apply,
+    keep today's behavior byte-for-byte."""
+
+    def test_over_ceiling_dry_run_exits_zero_no_alert_writes_export(self):
+        import sys as _sys
+        many_convs = _many_dup_convs(30)
+        posted = []
+        export_calls = []
+        with mock.patch.object(m, "fetch_open_convs", return_value=many_convs), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(
+                 m, "write_review_export",
+                 side_effect=lambda candidates, when_date: (
+                     export_calls.append(candidates) or "/fake/export.json")), \
+             mock.patch.object(m, "post_slack_summary",
+                                side_effect=lambda text, *a, **k: posted.append(text) or True), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--notify-candidates"]):
+            rc = m.main()
+        self.assertEqual(rc, 0)
+        # No ceiling alert posted — the only post is the candidate summary.
+        self.assertEqual(len(posted), 1)
+        self.assertNotIn("sanity ceiling", posted[0])
+        self.assertNotIn(m.format_ceiling_alert(30, "x"), posted[0])
+        # Review export was written with the full (over-ceiling) candidate set.
+        self.assertEqual(len(export_calls), 1)
+        self.assertEqual(len(export_calls[0]), 30)
+        # Notify summary mentions the export path + tier counts.
+        self.assertIn("/fake/export.json", posted[0])
+        self.assertIn("Tier A 30", posted[0])
+        self.assertIn("Tier B 0", posted[0])
+
+    def test_over_ceiling_dry_run_prints_prominent_warning(self):
+        import io
+        import contextlib
+        import sys as _sys
+        many_convs = _many_dup_convs(30)
+        buf = io.StringIO()
+        with mock.patch.object(m, "fetch_open_convs", return_value=many_convs), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "write_review_export", return_value="/fake/export.json"), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m"]), \
+             contextlib.redirect_stdout(buf):
+            rc = m.main()
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("ceiling would block --apply: 30 > 20", out)
+
+    def test_over_ceiling_apply_exits_two_posts_alert_zero_closes_no_shadow_writes(self):
+        import sys as _sys
+        many_convs = _many_dup_convs(30)
+        close_calls = []
+        with mock.patch.object(m, "fetch_open_convs", return_value=many_convs), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "close_conversation",
+                                side_effect=lambda *a, **k: close_calls.append(1)), \
+             mock.patch.object(m, "open_shadow_log") as m_open_shadow, \
+             mock.patch.object(m, "write_review_export") as m_export, \
+             mock.patch.object(m, "post_slack_summary", return_value=True) as m_post, \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            rc = m.main()
+        self.assertEqual(rc, 2)
+        self.assertEqual(close_calls, [])
+        m_open_shadow.assert_not_called()  # never reached -> no shadow-log writes
+        m_export.assert_not_called()  # export is a dry-run-only artifact
+        m_post.assert_called_once()
+        posted_text = m_post.call_args[0][0]
+        self.assertIn("sanity ceiling", posted_text.lower())
+
+    def test_under_ceiling_dry_run_export_still_written_behavior_unchanged(self):
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=200, lcr=100, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
+        export_calls = []
+        with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(
+                 m, "write_review_export",
+                 side_effect=lambda candidates, when_date: (
+                     export_calls.append(candidates) or "/fake/export.json")), \
+             mock.patch.object(m, "post_slack_summary") as m_post, \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m"]):
+            rc = m.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(export_calls), 1)
+        self.assertEqual(len(export_calls[0]), 1)
+        m_post.assert_not_called()  # --notify-candidates not passed
+
+
+class TestWriteReviewExportUnwritableDir(unittest.TestCase):
+    """Mirrors open_shadow_log's fallback pattern: an unwritable primary
+    review dir falls back to a private FALLBACK_REVIEW_DIR with a loud
+    stderr, and --apply is never reached by this path (write_review_export
+    is dry-run-only), so this exercises the function directly, same
+    convention as TestSavePointerStateAtomic. The fallback dir is
+    monkeypatched to an isolated TemporaryDirectory per test — never the
+    real /tmp — so there's nothing to glob-cleanup and no risk of touching
+    files this test didn't create."""
+
+    def test_unwritable_primary_dir_falls_back_to_private_dir_with_loud_stderr(self):
+        import contextlib
+        import io
+        import json as _json
+        import tempfile as _tempfile
+        with _tempfile.TemporaryDirectory() as d, _tempfile.TemporaryDirectory() as fallback_root:
+            # A FILE masquerading as the primary dir's parent forces os.makedirs
+            # to raise OSError, same trick as TestSavePointerStateAtomic.
+            blocker = f"{d}/not-a-dir"
+            with open(blocker, "w") as f:
+                f.write("x")
+            bad_dir = f"{blocker}/close-duplicate-conversations/"
+            fallback_dir = os.path.join(fallback_root, "close-duplicate-review")
+            candidates = [
+                {"older": conv("O", email="x@y.com", lar=200, lcr=100, created_at=1000),
+                 "kept": conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000),
+                 "tier": "A", "email": "x@y.com"},
+            ]
+            expected_path = os.path.join(fallback_dir, "candidates-2026-07-20.json")
+            stderr_buf = io.StringIO()
+            with mock.patch.dict("os.environ", {"CLOSE_DUP_REVIEW_DIR": bad_dir}, clear=False), \
+                 mock.patch.object(m, "FALLBACK_REVIEW_DIR", fallback_dir), \
+                 contextlib.redirect_stderr(stderr_buf):
+                path = m.write_review_export(candidates, "2026-07-20")
+            self.assertEqual(path, expected_path)
+            stderr_text = stderr_buf.getvalue()
+            self.assertIn("cannot write review export", stderr_text)
+            self.assertIn("falling back to", stderr_text)
+            # The fallback dir must be private, not the world-readable /tmp root.
+            self.assertEqual(stat.S_IMODE(os.stat(fallback_dir).st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(os.stat(expected_path).st_mode), 0o600)
+            with open(expected_path) as f:
+                doc = _json.load(f)
+            self.assertEqual(doc["total"], 1)
+            self.assertEqual(len(doc["tier_a"]), 1)
+            self.assertEqual(len(doc["tier_b"]), 0)
+            # Fix 5: the masking must actually be applied to the written
+            # export -- pins that deleting mask_email from
+            # _review_export_candidate fails this suite.
+            self.assertEqual(doc["tier_a"][0]["email"], m.mask_email("x@y.com"))
+
+    def test_over_ceiling_dry_run_with_unwritable_dir_still_exits_zero(self):
+        """End-to-end via main(): an unwritable review dir must not turn a
+        dry-run (even over-ceiling) into a failure — exit 0 with a loud
+        stderr, never a raise."""
+        import contextlib
+        import io
+        import sys as _sys
+        import tempfile as _tempfile
+        with _tempfile.TemporaryDirectory() as d, _tempfile.TemporaryDirectory() as fallback_root:
+            blocker = f"{d}/not-a-dir"
+            with open(blocker, "w") as f:
+                f.write("x")
+            bad_dir = f"{blocker}/review/"
+            fallback_dir = os.path.join(fallback_root, "close-duplicate-review")
+            many_convs = _many_dup_convs(30)
+            stderr_buf = io.StringIO()
+            with mock.patch.object(m, "fetch_open_convs", return_value=many_convs), \
+                 mock.patch.object(m, "owned_ids", return_value=set()), \
+                 mock.patch.object(m, "FALLBACK_REVIEW_DIR", fallback_dir), \
+                 mock.patch.dict("os.environ",
+                                  {"MUSOAI_INTERCOM_TOKEN": "t", "INTERCOM_ADMIN_ID": "5763097",
+                                   "CLOSE_DUP_REVIEW_DIR": bad_dir}, clear=False), \
+                 mock.patch.object(_sys, "argv", ["m"]), \
+                 contextlib.redirect_stderr(stderr_buf):
+                rc = m.main()
+            self.assertEqual(rc, 0)
+            self.assertIn("cannot write review export", stderr_buf.getvalue())
+
+
+class TestMaskEmail(unittest.TestCase):
+    def test_masks_local_part_hides_domain(self):
+        self.assertEqual(m.mask_email("alice@example.com"), "a***@***")
+
+    def test_empty_email_masks_to_empty(self):
+        self.assertEqual(m.mask_email(""), "")
+
+    def test_no_at_sign_masks_first_char_of_value(self):
+        self.assertEqual(m.mask_email("not-an-email"), "n***@***")
+
+    def test_empty_local_part_masks_to_asterisks(self):
+        self.assertEqual(m.mask_email("@example.com"), "***@***")
+
+
+class TestFormatCandidatesSummaryExportFailed(unittest.TestCase):
+    """Fix 4: a total export write failure (review_path=None) must not
+    silently drop the export line from the notify text — the reader has no
+    other signal something went wrong (the process still exits 0)."""
+
+    def test_export_failed_line_present_when_review_path_none(self):
+        older = conv("O", email="x@y.com", lar=200, lcr=100, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
+        candidates = [{"older": older, "kept": kept, "tier": "A", "email": "x@y.com"}]
+        text = m.format_candidates_summary(
+            candidates, "2026-07-20 00:00 UTC", review_path=None, tier_a_n=1, tier_b_n=0)
+        self.assertIn("review export FAILED", text)
+
+    def test_no_export_line_when_tier_counts_absent(self):
+        """--apply's format_candidates_summary call never passes
+        tier_a_n/tier_b_n -- no export line of either kind should appear."""
+        older = conv("O", email="x@y.com", lar=200, lcr=100, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
+        candidates = [{"older": older, "kept": kept, "tier": "A", "email": "x@y.com"}]
+        text = m.format_candidates_summary(candidates, "2026-07-20 00:00 UTC")
+        self.assertNotIn("review export FAILED", text)
+        self.assertNotIn("Full review export", text)
+
+
 class TestNotifyCandidates(unittest.TestCase):
     def test_notify_candidates_posts_even_on_dry_run(self):
         import sys as _sys
@@ -242,6 +473,7 @@ class TestNotifyCandidates(unittest.TestCase):
         posted = []
         with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
              mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "write_review_export", return_value="/fake/export.json"), \
              mock.patch.object(m, "post_slack_summary",
                                 side_effect=lambda text, *a, **k: posted.append(text) or True), \
              mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
@@ -259,6 +491,7 @@ class TestNotifyCandidates(unittest.TestCase):
         kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
         with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
              mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "write_review_export", return_value="/fake/export.json"), \
              mock.patch.object(m, "post_slack_summary") as m_post, \
              mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
                                               "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
@@ -275,6 +508,7 @@ class TestApplyGating(unittest.TestCase):
         kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
         with mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
              mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "write_review_export", return_value="/fake/export.json"), \
              mock.patch.object(m, "close_conversation") as m_close, \
              mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
                                               "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
@@ -294,12 +528,17 @@ class TestApplyGating(unittest.TestCase):
                                 return_value={"state": "closed"}) as m_close, \
              mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
              mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.object(m, "write_review_export") as m_export, \
              mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
                                               "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
              mock.patch.object(_sys, "argv", ["m", "--apply"]):
             rc = m.main()
         self.assertEqual(rc, 0)
         m_close.assert_called_once_with("t", "5763097", "O")
+        # Export is dry-run-only — pin that on the under-ceiling --apply
+        # path too (companion to TestCeilingGatesOnlyApply's over-ceiling
+        # --apply assertion).
+        m_export.assert_not_called()
 
     def test_admin_id_read_from_env_not_hardcoded(self):
         """Fix 4: hermeticity check — override INTERCOM_ADMIN_ID to a value
