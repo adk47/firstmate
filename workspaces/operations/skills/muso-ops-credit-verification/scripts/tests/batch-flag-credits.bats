@@ -68,6 +68,41 @@ esac
 STUB
     chmod +x "$ADMIN_API_SH"
     export ADMIN_API_SH
+
+    # Fake verify script. Logs invocation args so tests can assert on
+    # whether/how it was called; STUB_VERIFY_MODE selects its exit behavior.
+    # Defaults to a clean match (exit 0) so every test that doesn't care
+    # about the readback still gets a passing default rather than hitting
+    # the real /opt/hydra path (nonexistent on test hosts).
+    VERIFY_LOG="$TEST_ROOT/verify-invocations.log"
+    export VERIFY_LOG
+
+    VERIFY_STATUS_SH="$TEST_ROOT/fake-verify-credit-request-status.sh"
+    cat > "$VERIFY_STATUS_SH" <<'STUB'
+#!/usr/bin/env bash
+printf 'ARGS: %s\n' "$*" >> "${VERIFY_LOG:-/dev/null}"
+
+case "${STUB_VERIFY_MODE:-matched}" in
+    matched)
+        printf '%s\n' '{"expected":"user_verification_needed","matched":9,"mismatched":[]}'
+        exit 0
+        ;;
+    mismatched)
+        printf '%s\n' '{"expected":"user_verification_needed","matched":1,"mismatched":[{"id":"cr_2","actual":"unverified"}]}'
+        exit 1
+        ;;
+    unverifiable)
+        echo "[verify-credit-request-status] UNVERIFIABLE: trino down" >&2
+        exit 3
+        ;;
+    *)
+        echo "stub: unknown STUB_VERIFY_MODE=${STUB_VERIFY_MODE}" >&2
+        exit 99
+        ;;
+esac
+STUB
+    chmod +x "$VERIFY_STATUS_SH"
+    export VERIFY_STATUS_SH
 }
 
 teardown() {
@@ -238,4 +273,59 @@ STUB
         run bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1" --flag-reason name_mismatch
     [ "$status" -eq 2 ]
     [[ "$output" == *"muso-admin-api.sh not found"* ]]
+}
+
+# --- Automatic Trino readback (verify-credit-request-status.sh hook) ---
+
+@test "readback: invoked with the same ids after a stubbed 2xx PUT" {
+    STUB_MODE=success_200 STUB_VERIFY_MODE=matched \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1,cr_2" --flag-reason name_mismatch
+    [ "$status" -eq 0 ]
+    [ -f "$VERIFY_LOG" ]
+    grep -qF -- '--expected user_verification_needed' "$VERIFY_LOG"
+    grep -qF -- '--ids cr_1,cr_2' "$VERIFY_LOG"
+}
+
+@test "readback: NOT invoked on dry-run intercept" {
+    STUB_MODE=success_dryrun \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1,cr_2" --flag-reason name_mismatch
+    [ "$status" -eq 0 ]
+    [ ! -f "$VERIFY_LOG" ]
+    echo "$output" | jq -e '.readback == "skipped"' >/dev/null
+}
+
+@test "readback: NOT invoked with --no-verify" {
+    STUB_MODE=success_200 \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1,cr_2" --flag-reason name_mismatch --no-verify
+    [ "$status" -eq 0 ]
+    [ ! -f "$VERIFY_LOG" ]
+    echo "$output" | jq -e '.readback == "skipped"' >/dev/null
+}
+
+@test "readback: NOT invoked on http_error outcome (nothing to read back)" {
+    STUB_MODE=http_500 \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1,cr_2" --flag-reason name_mismatch
+    [ "$status" -eq 1 ]
+    [ ! -f "$VERIFY_LOG" ]
+}
+
+@test "readback mismatch (verify exit 1) → wrapper exit 3" {
+    STUB_MODE=success_200 STUB_VERIFY_MODE=mismatched \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1,cr_2" --flag-reason name_mismatch
+    [ "$status" -eq 3 ]
+    echo "$output" | jq -e '.readback.mismatched == [{id:"cr_2", actual:"unverified"}]' >/dev/null
+}
+
+@test "readback unverifiable (verify exit 3) → wrapper exit 4" {
+    STUB_MODE=success_200 STUB_VERIFY_MODE=unverifiable \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1,cr_2" --flag-reason name_mismatch
+    [ "$status" -eq 4 ]
+    echo "$output" | jq -e '.readback == "unverifiable"' >/dev/null
+}
+
+@test "readback: stdout summary contains the readback field on success" {
+    STUB_MODE=success_200 STUB_VERIFY_MODE=matched \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1,cr_2" --flag-reason name_mismatch
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.readback.matched == 9 and .readback.expected == "user_verification_needed"' >/dev/null
 }

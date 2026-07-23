@@ -21,14 +21,19 @@
 # in a loop and got HTTP 404 ("Cannot PATCH …") for every id — the
 # 2026-04-27 15:42 UTC real run is the post-mortem (25/25 errored).
 #
-# !! Failure-semantics caveat (was: per-id loop, now: single PUT) !!
+# !! Failure-semantics caveat (was: per-id loop, now: single PUT + readback) !!
 # updateStatus.js processes the requestIds array via Promise.mapSeries
 # with no visible transaction wrapper. Partial in-loop failures inside
 # the API DO NOT surface in the HTTP response — a 200 OK does not prove
-# every id transitioned. Reconciliation MUST come from compute-run-
-# summary.sh reading .results.jsonl against a fresh queue fetch, NOT
-# from this wrapper's exit code. Treat exit 0 here as "request was
-# accepted by the API", not as "all ids are now UVN".
+# every id transitioned. This wrapper now performs an automatic Trino
+# readback (verify-credit-request-status.sh) after every accepted PUT to
+# close that gap: it re-reads the actual `status` column for the exact ids
+# just PUT and fails loud (exit 3/4 below) if any id didn't land on
+# user_verification_needed. Skip with --no-verify only for callers that do
+# their own reconciliation. Reconciliation should still cross-check both
+# the readback row in .results.jsonl AND compute-run-summary.sh reading
+# .results.jsonl against a fresh queue fetch — the readback is a per-call
+# guard, not a substitute for the batch-level summary.
 #
 # Usage:
 #   batch-flag-credits.sh \
@@ -53,15 +58,24 @@
 #     consume a reason field. The reason is forwarded to stderr so it
 #     lands in the agent transcript / audit capture.
 #   * --requester is REFUSED. Consistent with batch-approve-credits.sh.
-#   * Exit 0 on HTTP 2xx or dry-run intercept.
+#   * Exit 0 on HTTP 2xx or dry-run intercept, AND (unless --no-verify) the
+#     automatic Trino readback confirms every id landed on
+#     user_verification_needed.
 #   * Exit 1 on API failure (HTTP error, network error).
 #   * Exit 2 on arg validation failures. No API call is attempted.
-#   * Stdout: a single compact JSON summary line. Per-call truth lives in
-#     .results.jsonl (PR #158 truth-floor) — this stdout is a convenience.
+#   * Exit 3 on readback mismatch — the PUT was accepted but the readback
+#     found at least one id NOT at user_verification_needed.
+#   * Exit 4 on readback UNVERIFIABLE — the Trino readback itself failed
+#     (never treat this as "verified"; see verify-credit-request-status.sh).
+#   * Stdout: a single compact JSON summary line, including a "readback"
+#     field with the verify script's JSON (or "skipped" for dry-run /
+#     --no-verify). Per-call truth lives in .results.jsonl (PR #158
+#     truth-floor, plus the READBACK row) — this stdout is a convenience.
 
 set -euo pipefail
 
 ADMIN_API_SH="${ADMIN_API_SH:-/opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh}"
+VERIFY_STATUS_SH="${VERIFY_STATUS_SH:-/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/verify-credit-request-status.sh}"
 
 # Closed-list flag reasons (added 2026-04-30, tightened same day after the
 # evidence_quorum_failed/human_review_requested bypass loophole leaked 460
@@ -85,6 +99,7 @@ ROLE=""
 REASON=""
 FLAG_REASON=""
 IDS_RAW=""
+NO_VERIFY=0
 
 usage() {
     cat >&2 <<EOF
@@ -93,7 +108,8 @@ Usage:
       --profile-id <profile_id> \\
       --reason "<short reason>" \\
       --flag-reason <enum> \\
-      --ids "<id1>,<id2>,..."
+      --ids "<id1>,<id2>,..." \\
+      [--no-verify]
 
 Required:
   --profile-id   The profile UUID whose credits are being flagged. Used only
@@ -107,15 +123,25 @@ Required:
                  no_tier1_match, metadata_inconsistent, fraud_multifactor.
   --ids          Comma-separated list of credit-request IDs to flag.
 
+Optional:
+  --no-verify   Skip the automatic Trino readback after an accepted PUT.
+                Only for callers that perform their own reconciliation.
+
 Forbidden:
   --requester   Not allowed. This wrapper is for autonomous batches only.
 
 Exit codes:
-  0    success (HTTP 2xx or dry-run intercept)
+  0    success (HTTP 2xx or dry-run intercept, and readback confirmed unless
+       --no-verify)
   1    API failure (HTTP error, network error)
   2    argument validation failure (no API call attempted)
+  3    readback mismatch — PUT accepted, but the Trino readback found at
+       least one id NOT at user_verification_needed
+  4    readback UNVERIFIABLE — the Trino readback itself failed; treat as
+       NOT verified, do not assume success
 
-Stdout: one compact JSON line summarising the batch outcome.
+Stdout: one compact JSON line summarising the batch outcome, including a
+        "readback" field (or "skipped" for dry-run / --no-verify).
 Stderr: muso-admin-api.sh's stderr forwarded verbatim.
 EOF
 }
@@ -149,6 +175,10 @@ while [[ $# -gt 0 ]]; do
         --ids)
             IDS_RAW="${2:-}"
             shift 2
+            ;;
+        --no-verify)
+            NO_VERIFY=1
+            shift
             ;;
         --requester)
             echo "ERROR: --requester is forbidden in batch-flag-credits.sh." >&2
@@ -268,6 +298,32 @@ else
     rc=1
 fi
 
+# --- Automatic Trino readback ------------------------------------------------
+# Only when the PUT was actually accepted (outcome=="ok" — NOT
+# dry_run_intercept, since there's nothing real to read back, and NOT
+# http_error, since the request was already rejected). Skippable via
+# --no-verify for callers that do their own reconciliation.
+readback_json="\"skipped\""
+if [[ "$outcome" == "ok" && "$NO_VERIFY" -eq 0 ]]; then
+    # Same trimmed ids the PUT body used, comma-joined for verify's --ids.
+    verify_ids=$(printf '%s\n' "${ID_ARR[@]}" | paste -sd ',' -)
+    verify_out=""
+    verify_rc=0
+    verify_out=$("$VERIFY_STATUS_SH" --expected user_verification_needed --ids "$verify_ids") || verify_rc=$?
+    if [[ $verify_rc -eq 0 ]]; then
+        readback_json="$verify_out"
+    elif [[ $verify_rc -eq 1 ]]; then
+        readback_json="$verify_out"
+        rc=3
+    else
+        # verify_rc 2 (usage) should be impossible here since we built the
+        # args ourselves, but 3 (unverifiable) and any other non-zero both
+        # collapse to "readback could not run" — never treat as verified.
+        readback_json='"unverifiable"'
+        rc=4
+    fi
+fi
+
 # Emit the summary line. Authoritative per-call truth is in .results.jsonl —
 # this stdout is just a compact convenience for the caller.
 jq -n -c \
@@ -275,11 +331,13 @@ jq -n -c \
     --argjson requested "$requested" \
     --arg outcome "$outcome" \
     --arg http_status "$http_status" \
+    --argjson readback "$readback_json" \
     '{
         profile_id: $profile_id,
         requested: $requested,
         outcome: $outcome,
-        http_status: (if $http_status == "" then null else ($http_status | tonumber? // $http_status) end)
+        http_status: (if $http_status == "" then null else ($http_status | tonumber? // $http_status) end),
+        readback: $readback
      }'
 
 exit $rc

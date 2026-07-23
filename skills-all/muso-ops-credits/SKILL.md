@@ -123,6 +123,43 @@ not listed here **silently no-ops and still returns 200**):
 | `unverified`               | `approved` ONLY                                           |
 | `processing`               | `unverified`, `processing`, `user_verification_needed`    |
 
+#### ⚠️ Transition matrix + the hollow-200 trap
+
+The backend only transitions a row when its CURRENT status is on the
+per-target allowlist. **Rows with a disallowed current status are silently
+skipped — the API still returns HTTP 200** (2026-07-23: a 28-row
+rejected→UVN restore reported success while zero rows moved). Allowed
+transitions (updateStatus.js):
+
+| Target status                | Allowed current statuses                              |
+|------------------------------|-------------------------------------------------------|
+| `approved`                   | unverified, user_verification_needed, rejected, processing |
+| `rejected`                   | unverified, user_verification_needed, approved, processing |
+| `user_verification_needed`   | unverified, rejected¹                                 |
+| `unverified`                 | approved                                              |
+| `processing`                 | unverified, processing, user_verification_needed      |
+| `pending`                    | none — accepted by validation, transitions nothing    |
+
+¹ `rejected → user_verification_needed` requires the 2026-07-23 core-backend
+fix; that fix also makes the response carry
+`{updated, updatedIds, skippedIds}`. Until it is deployed the response body is
+empty and rejected rows silently no-op.
+
+**Therefore: NEVER trust a 200 from this endpoint. Always read back.**
+After every status PUT, verify with the tested readback script (do not
+compose ad-hoc jq):
+
+```bash
+bash /opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/verify-credit-request-status.sh \
+  --expected <target_status> --ids "<id1>,<id2>,..."
+```
+
+Exit 0 = all ids verified at the target status; exit 1 = at least one row did
+not transition (stdout lists `{id, actual}`); exit 3 = readback could not run
+(treat the write as UNVERIFIED — say so, never claim success). For
+UVN flagging specifically, prefer `batch-flag-credits.sh`, which now runs
+this readback automatically.
+
 **Approve:**
 ```bash
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
