@@ -621,6 +621,17 @@ jobs:
           bash scripts/check-data-sourcing-doctrine.sh
           echo "::endgroup::"
 
+      - name: Admin-API doc contract check — analytics-sources payload must document {"link"}
+        # Incident 2026-07-15: @Ops sent 16x {"url": ...} to
+        # POST /admin/track/<id>/analytics-sources and got 16x HTTP 400, because
+        # the skill documented the stale field. PR #696 corrected it to
+        # {"link": ...}; prose != enforcement, so this gate fails if the dead
+        # field reappears in any skill doc or the corrected example is removed.
+        run: |
+          echo "::group::Admin-API doc contract check"
+          bash scripts/check-admin-api-doc-contract.sh
+          echo "::endgroup::"
+
       - name: Egress allowlist check — no unauthorized additions
         run: |
           echo "::group::Checking egress allowlist changes"
