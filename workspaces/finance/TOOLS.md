@@ -7,16 +7,15 @@
 - **Always verify amounts** -- Stripe amounts are in CENTS. Divide by 100 for display.
 - Common queries: `stripe charges list`, `stripe disputes list`, `stripe refunds list`, `stripe customers retrieve`
 
-## ChartMogul
-- Subscription analytics platform
-- Use for: MRR tracking, churn analysis, cohort analysis, LTV calculations
-- **ChartMogul != ProfitWell** -- they calculate metrics differently. Never conflate data from the two.
-- ChartMogul is the PRIMARY source for subscription metrics.
+## Stripe Subscription Analytics
+- Stripe is the source for current MRR, ARR, churn, LTV, delinquency, and recurring-revenue analysis.
+- Load `muso-stripe-subscription-analytics` and follow its reporting contract, including explicit snapshot/date range, status, currency, basis, and scope-gap disclosures.
+- ChartMogul is retired. Do not call its API or use it for current metrics; historical exports are dated reference artifacts only.
 
 ## ProfitWell
-- Secondary subscription analytics (different methodology from ChartMogul)
+- Secondary subscription analytics with a different methodology from Stripe
 - Use for: cross-reference validation only
-- **Do NOT treat ProfitWell numbers as authoritative** -- always prefer ChartMogul
+- **Do NOT treat ProfitWell numbers as authoritative** -- always prefer the reproducible Stripe definition for current metrics
 
 ## Rewardful
 - Affiliate tracking and commission management

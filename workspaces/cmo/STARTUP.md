@@ -40,7 +40,6 @@ Verify each env var is set in `~/.zshrc` or the HYDRA environment.
 echo "klaviyo: ${MUSOAI_KLAVIYO_TOKEN:+set}"
 echo "amplitude token: ${MUSOAI_AMPLITUDE_TOKEN:+set}"
 echo "amplitude secret: ${MUSOAI_AMPLITUDE_SECRET_KEY:+set}"
-echo "chartmogul: ${MUSOAI_CHARTMOGUL_TOKEN:+set}"
 echo "profitwell: ${MUSOAI_PROFITWELL_TOKEN:+set}"
 echo "rewardful: ${REWARDFUL_API_SECRET:+set}"
 echo "stripe: ${MUSOAI_STRIPE_API_KEY:+set}"
@@ -159,7 +158,8 @@ For each, post a test message "CMO wire up test, please ignore" then delete.
 - [ ] List every skill directory under `skills/` and read its SKILL.md
 - [ ] For each outreach subskill, confirm it references `muso-outreach-engine/references/config.md`
 - [ ] For each winback subskill, confirm it references `muso-winback-engine/references/config.md`
-- [ ] For each analytics skill (Stripe, ChartMogul, ProfitWell, Amplitude, Rewardful), run one test query
+- [ ] For each directly available analytics skill (ProfitWell, Amplitude, Rewardful), run one test query
+- [ ] Send Finance one read-only current-subscription test request and confirm its live Stripe response follows `muso-stripe-subscription-analytics` reporting rules
 - [ ] Confirm `muso-slack-formatter` is loaded (mandatory output filter)
 - [ ] Confirm `muso-outreach-engine` + `muso-outreach-writer` load together
 - [ ] Confirm `muso-winback-engine` + `muso-winback-writer` load together

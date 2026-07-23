@@ -93,21 +93,18 @@ _All tools the CMO agent has access to. See individual skill files for full API 
 
 ## Connected — Read Only
 
-### ChartMogul
-- Subscription analytics (source of truth for SaaS metrics)
-- Auth: Basic `$MUSOAI_CHARTMOGUL_TOKEN:`
-- API base: `https://api.chartmogul.com/v1`
-- Use for: MRR, ARR, churn, LTV, ARPA, customer count
-- Values in **cents** — divide by 100
-- Skill: `muso-chartmogul`
+### Current subscription analytics (via Finance)
+- Route MRR, ARR, churn, LTV, ARPA, customer-count, and recurring-revenue requests to Finance.
+- Finance uses live Stripe through `muso-stripe-subscription-analytics` and reports the metric definition, snapshot/date range, currencies, and scope gaps.
+- ChartMogul is retired. Do not call its API, inspect its token, or use historical ChartMogul artifacts for current metrics.
 
 ### ProfitWell (Paddle Retain)
-- Cash/payment metrics
+- Secondary cash/payment metrics
 - Auth: `Authorization: $MUSOAI_PROFITWELL_TOKEN` (no Bearer prefix)
 - API base: `https://api.profitwell.com/v2/`
 - **Trailing slashes required** on all URLs
 - Values in **dollars** (not cents)
-- If ProfitWell disagrees with ChartMogul → ChartMogul wins
+- If ProfitWell disagrees with the reproducible Stripe result → Stripe wins for current metrics; disclose the definition difference
 - Skill: `muso-profitwell`
 
 ### Amplitude

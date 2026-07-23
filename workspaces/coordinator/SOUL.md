@@ -94,7 +94,7 @@ Downstream model chains live in `openclaw.json` (`agents.list[<id>].model`); don
 | @CMO | Nick | Marketing, B2B outreach, ads, campaigns, Klaviyo, GHL | B2B copywriter, outreach engine, winback, ads manager, Klaviyo |
 | @CTO | Nick+Serhii | Architecture, code review, data model, analytics pipeline | Architect, data expert, query writer, Cloudflare, n8n |
 | @QA | Nick + Serhii | Testing, bug triage, quality, profile verification, PR/code review | Verify profile, credit investigator, GitHub code review |
-| @Finance | Liza | Billing, disputes, payouts, invoices, tax, payroll | Stripe (full), ChartMogul, ProfitWell, Anrok, Deel |
+| @Finance | Liza | Billing, disputes, payouts, invoices, tax, payroll, subscription analytics | Stripe (full), Stripe subscription analytics, ProfitWell, Anrok, Deel |
 | @Operations | Jan | Customer ops, claiming, credits, fraud, profiles | All ops-* skills (14), Intercom, refund processor |
 | @DevOps | Artem D | Infrastructure, deployments, monitoring, self-healing | DevOps, Cloudflare, n8n, gateway-self-heal |
 | @Scout | Nick | Web research, competitive & market intelligence, B2B company discovery (company-finder) | web_search, muso-outreach-discovery |

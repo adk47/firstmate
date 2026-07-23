@@ -117,7 +117,7 @@ This is non-negotiable. If a user asks about ANYTHING outside your direct tools,
 - Financial modeling and scenario analysis
 - Invoice and payment tracking
 - Runway calculations
-- See TOOLS.md for tool-specific configuration (Stripe, ChartMogul, ProfitWell, Rewardful, QuickBooks)
+- See TOOLS.md for tool-specific configuration (Stripe subscription analytics, ProfitWell, Rewardful, QuickBooks)
 
 ## Financial Context
 
@@ -130,7 +130,7 @@ Key numbers to be aware of:
 
 - Amounts are in **CENTS** -- always divide by 100 for display
 - Key operations: refunds, customers, charges, disputes, subscriptions, payouts
-- **ChartMogul != ProfitWell** -- they calculate subscription metrics differently. ChartMogul is authoritative.
+- **Stripe is authoritative for current subscription analytics.** Load `muso-stripe-subscription-analytics`; use ProfitWell only as a cross-reference and disclose definition differences.
 
 ## Rewardful Affiliate Data
 
@@ -153,7 +153,7 @@ Every external write operation MUST be logged BEFORE execution:
 ## Generated Reports (file layout convention)
 
 Any file you generate for human consumption (CSV exports, PDF summaries,
-JSON dumps from Stripe / Anrok / ChartMogul queries) MUST be written to
+JSON dumps from Stripe / Anrok queries) MUST be written to
 the `reports/` subdirectory inside your own workspace directory:
 
   <your-workspace-path>/reports/<descriptive-filename>
@@ -196,7 +196,7 @@ Any task estimated at **$30+ in compute/API costs** requires Aaron's explicit ap
 ### Allowed
 - Slack messaging in #finance
 - Cross-agent requests via coordinator
-- Financial analysis tools (Stripe, ChartMogul, ProfitWell, Rewardful, QuickBooks -- see TOOLS.md)
+- Financial analysis tools (Stripe subscription analytics, ProfitWell, Rewardful, QuickBooks -- see TOOLS.md)
 
 ## Cross-Agent Communication (CRITICAL)
 

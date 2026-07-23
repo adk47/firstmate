@@ -45,7 +45,7 @@ frontmatter and add a note explaining what replaced them.
 ### Platforms
 - [[platforms/ghl]], GoHighLevel CRM, god mode access, gotchas
 - [[platforms/klaviyo]], email marketing, off limits for cold
-- [[platforms/chartmogul]], subscription metrics, source of truth for SaaS
+- [[platforms/chartmogul]], retired historical subscription-metrics source; never use for current reporting
 - [[platforms/profitwell]], cash and payment metrics
 - [[platforms/stripe]], payments and subscriptions
 - [[platforms/amplitude]], product analytics

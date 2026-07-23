@@ -4,7 +4,7 @@
 
 | Service | Purpose |
 |---------|---------|
-| **Stripe** | Primary payment processor, subscriptions, checkout |
+| **Stripe** | Primary payment processor, subscriptions, checkout, and current subscription analytics |
 | **PayPal** | Alternative subscription payments |
 | **Apple IAP** | iOS in-app purchases, subscriptions |
 | **Google Play** | Android in-app purchases |
@@ -55,9 +55,9 @@
 | **TikTok Pixel** | Conversion tracking |
 | **Branch.io** | Deep linking, attribution |
 | **Intercom** | Customer support chat |
-| **ProfitWell** | Subscription analytics |
+| **ProfitWell** | Secondary subscription/cash analytics cross-reference |
 | **Rewardful** | Referral program |
-| **ChartMogul** | Revenue data |
+| **ChartMogul (retired)** | Historical revenue artifacts only; never use for current metrics |
 | **Microsoft Clarity** | Session recording (mobile) |
 
 ## Notifications

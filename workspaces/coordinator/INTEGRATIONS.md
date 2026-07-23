@@ -7,13 +7,13 @@ _Every system I have access to, what it does, and who can use it. Load this EVER
 | System | Purpose | Access Level | Write Auth | Skill/Config |
 |--------|---------|-------------|------------|--------------|
 | **AWS (Athena/S3/CloudWatch/CloudTrail/EKS)** | Data lake queries, infra monitoring | Read-only | — | TOOLS.md (workgroup: `clio-agent`, region: `us-west-2`) |
-| **Stripe** | Billing, subscriptions, disputes, refunds | Read + Write | Aaron=full, others=payment links only | `stripe` CLI, TOOLS.md |
+| **Stripe** | Billing, subscriptions, MRR/ARR/churn/LTV, disputes, refunds | Read + Write | Aaron=full, others=payment links only | `stripe` CLI, `muso-stripe-subscription-analytics`, TOOLS.md |
 | **Google Workspace (gog)** | Gmail, Calendar, Drive, Sheets, Docs | Read + Write | Aaron+Nick=email write, others=read | `gog` CLI, TOOLS.md |
 | **Slack** | Messaging, channels | Read + Write | All (via message tool) | Built-in |
 | **GitHub** | Code repos, PRs, issues | Read-only default | Aaron authorizes writes | `gh` CLI, github skill |
 | **ClickUp** | Task management | Read-only | — | `muso-clickup` skill |
 | **Amplitude** | Product analytics | Read-only | — | `muso-amplitude` skill |
-| **ChartMogul** | Subscription analytics (MRR, churn, LTV) | Read-only | — | `muso-chartmogul` skill |
+| **ChartMogul (retired)** | Historical reference only; never use for current metrics | No active access | — | `muso-chartmogul` redirect |
 | **ProfitWell** | Subscription metrics | Read-only | — | `muso-profitwell` skill |
 | **Klaviyo** | Email/SMS marketing | Read + Write | Aaron+Nick=write, others=read | `muso-klaviyo` skill |
 | **Intercom** | Customer support/messaging | Read + Write | Aaron=write, others=read | `muso-intercom` skill |

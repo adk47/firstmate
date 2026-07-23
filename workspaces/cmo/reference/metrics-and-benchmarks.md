@@ -2,8 +2,8 @@
 
 Canonical source-of-truth mappings and numbers to cite confidently. Always re-pull live from the listed system before quoting; these are approximations/rules for when to trust which source.
 
-- **ChartMogul is authoritative** for subscription metrics. If ProfitWell disagrees, ChartMogul wins.
-- **ChartMogul MRR ≠ ProfitWell Cash** — Annual = full cash upfront, MRR = monthly spread. Never mix.
+- **Live Stripe via Finance is authoritative** for current subscription metrics. Use `muso-stripe-subscription-analytics`; if ProfitWell disagrees, disclose the definition difference and prefer the reproducible Stripe result.
+- **Stripe gross/list MRR ≠ ProfitWell cash** — annual plans can collect cash upfront while recurring run rate is normalized across the billing interval. Never mix the bases.
 - **Encore campaign**: Nov-Feb yearly, core Dec. Dec = acquisition spike, Jan-Feb = churn wave (~35% of cancels). Compare YoY not MoM.
 - **Cancel save rate**: Pull from Amplitude (21%), NOT raw Stripe counts.
 - **Email open rates**: 60-70% (industry ~30%).

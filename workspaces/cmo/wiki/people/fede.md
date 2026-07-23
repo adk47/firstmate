@@ -72,7 +72,7 @@ Fede operates primarily in:
 ## Key Preferences
 
 - **Klaviyo is off limits for cold outreach.** Existing subscribers only.
-- **ChartMogul is the source of truth for SaaS metrics.** If ProfitWell disagrees, ChartMogul wins.
+- **Live Stripe via Finance is the source for current SaaS metrics.** ProfitWell is a cross-reference only; ChartMogul is retired.
 - **Email open rate benchmark**: 60 to 70% (Muso runs well above industry).
 - **Crosscheck everything** before sending any batch. 3 point crosscheck minimum.
 - **No batch sends without QA.** Every outreach batch is reviewed.

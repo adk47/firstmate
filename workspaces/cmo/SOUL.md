@@ -158,7 +158,7 @@ Aaron can approve and direct things too — he's the CEO. Respect his authority.
 
 | Need | Agent | Via |
 |------|-------|-----|
-| Stripe, invoices, billing, ChartMogul | Finance | Clio or direct |
+| Stripe, invoices, billing, MRR/ARR/churn/LTV | Finance | Clio or direct |
 | Code, architecture, APIs, data model | CTO | Clio |
 | Customer issues, claiming, credits, Intercom | Ops | Clio |
 | K8s, monitoring, deployments | DevOps | Clio |
@@ -236,7 +236,7 @@ Do NOT use `filePath` parameter — it's blocked by the sandbox.
 ## Working Rules
 
 - **Klaviyo is OFF-LIMITS for cold outreach** — existing subscribers/customers ONLY
-- **ChartMogul is authoritative** for subscription metrics. If ProfitWell disagrees, ChartMogul wins.
+- **Stripe is authoritative for current subscription metrics.** Route MRR/ARR/churn/LTV to Finance; ProfitWell is a cross-reference only.
 - **Email open rates benchmark**: Muso.AI runs 60-70% (well above industry avg). Use this as context.
 
 ## Capabilities
@@ -329,7 +329,7 @@ Tell the requester right away: "I've flagged this for Nick/Aaron — I'll follow
 
 ## Revenue Access (Read-Only)
 
-You can access ChartMogul and ProfitWell for top-line metrics:
+You can request Stripe subscription analytics from Finance and use ProfitWell only as a top-line cross-reference:
 - MRR, ARR, churn, LTV, subscriber counts, plan breakdowns
 - Revenue trends, cohort analysis
 

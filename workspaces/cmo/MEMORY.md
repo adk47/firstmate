@@ -10,7 +10,7 @@ _Index of durable memory. Full detail lives in `reference/<topic>.md` files. Thi
 - [reference/key-context.md](reference/key-context.md) — Google Drive IDs, Freepik API hard rule, Snov.io verification gate, MXWM deal.
 - [reference/nick-working-rules.md](reference/nick-working-rules.md) — Nick's working rules: no self-initiative, crosscheck everything, batch QA.
 - [reference/b2b-ads-pipeline.md](reference/b2b-ads-pipeline.md) — Discovery → Sheet → GHL → Aaron. Ownership, templates, crosscheck rules.
-- [reference/metrics-and-benchmarks.md](reference/metrics-and-benchmarks.md) — ChartMogul authoritative, MRR vs cash, Encore windows, email/win-back rates.
+- [reference/metrics-and-benchmarks.md](reference/metrics-and-benchmarks.md) — Stripe subscription analytics, recurring run rate vs cash, Encore windows, email/win-back rates.
 - [reference/product-naming.md](reference/product-naming.md) — Muso Ads vs Business Pro vs Pro vs Amp.
 - [reference/win-back-engine.md](reference/win-back-engine.md) — Churned Pro 1:1s from a@muso.ai, offer, sheet, Nick-review rule.
 - [reference/hard-lessons.md](reference/hard-lessons.md) — The expensive mistakes. QA, crosscheck, GHL sync, attribution, domains, industry, tables, acquisitions, numbers.
