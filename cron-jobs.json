@@ -870,6 +870,38 @@
       }
     },
     {
+      "id": "c6bac0ee-6e51-485b-b87a-390268341937",
+      "agentId": "finance",
+      "name": "Weekly SaaS Recap",
+      "description": "Mondays 05:30 America/Chicago: Stripe SaaS weekly recap covering MRR movement, ARR, churn and ARPA for the prior Mon-Sun week (ChartMogul replacement). Posts to Slack C081ZCY0UTB as the finance bot. Deterministic command cron (no model). MUST fire Monday BEFORE 06:00 local: the script only reports the full prior week when weekday==0 and hour<6, otherwise it emits a week-to-date stub. Script was written with the 2026-07-15 realtime/daily restore but never scheduled — this closes that gap (the weekly channel had been silent since the ChartMogul cutover).",
+      "enabled": true,
+      "createdAtMs": 1784827000000,
+      "updatedAtMs": 1784827000000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 5 * * 1",
+        "tz": "America/Chicago"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/workspaces/finance/scripts/stripe-saas-weekly-report.py"
+        ],
+        "cwd": "/opt/hydra/workspaces/finance",
+        "timeoutSeconds": 600
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C081ZCY0UTB",
+        "accountId": "finance",
+        "bestEffort": true
+      }
+    },
+    {
       "id": "9a237f2b-8566-422f-8a8e-159ee0104c3d",
       "agentId": "cto",
       "name": "cto-nightly-issue-fixer",
