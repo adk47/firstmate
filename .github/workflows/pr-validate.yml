@@ -1171,6 +1171,20 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_cs_selfserve_backlog
+      - name: Run payout-workbook reconciliation tests
+        # skills-all/muso-stripe-payout-report/scripts/payout_workbook.py builds the
+        # Excel payout workbook Liza reads and delivers autonomously. Its true-ledger
+        # gate (sum(Net)==payout) is a near-identity; the number Liza actually sees
+        # (cell M12) is derived separately, so a payout can balance on sum(Net) yet
+        # still DISPLAY a non-zero difference (uncategorized adjustment/reversal, Kali
+        # charge fee, Ads/Kali net-shows-gross). These lock the independent displayed-
+        # reconciliation gate (refuse delivery unless the shown difference is $0.00),
+        # the Ads/Kali unsupported-activity refusal, money() fail-loud, and category_net's
+        # =J-K+L+M mirror — so a manual happy-path workbook can't mask a regression.
+        # Same bare stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_payout_workbook
       - name: Run cs-sla-report tests
         # scripts/cs-sla-report.py is the weekly SLA denominator (READ-ONLY on
         # Intercom, one Block Kit post to #cs_chats). These lock the
