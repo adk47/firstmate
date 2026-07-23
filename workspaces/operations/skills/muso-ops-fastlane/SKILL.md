@@ -235,6 +235,11 @@ It prints one Slack-ready report. **Post that stdout verbatim** into the thread 
 it is the entire response. For fastlane+ the report surfaces `discovered` /
 `refreshed`; either being `false` = a queue send failed → re-fire (idempotent).
 
+When posting, use the channel ID and `thread_ts` **verbatim from the triggering
+message's metadata** — Slack IDs are case-sensitive, and a retyped/lowercased
+channel ID (e.g. `c0apb2cmm7c` for `C0APB2CMM7C`) makes the post fail
+(2026-07-23 incident). Never reconstruct an ID from memory.
+
 ## Notes / limits (already handled by the backend)
 
 - Profiles over ~25K credits (catalog orgs — publishers/labels) are silently
