@@ -176,9 +176,13 @@ arrival rate or queue wait making 4h the binding constraint, move to hourly KEEP
 **Deliverables (built 2026-07-21, branch feat/openclaw-support-sla-plan):**
 1. `scripts/cs-sla-report.py` + weekly timer (Mon 08:30 UTC): first-response distribution,
    >24h residue snapshot, reopen rate, credit queue depth. Ships §5's **reopen-rate honesty
-   check** plus the SLA-denominator telemetry; the §5 headline ratio **AI-resolved / total
-   inbound is NOT yet computed** (needs per-conversation resolver attribution — see checklist
-   item 5, still OUTSTANDING).
+   check**, the SLA-denominator telemetry, AND the §5 headline **AI-resolved / total inbound**
+   ratio (#735). The ratio attributes a close as machine vs human via Intercom's
+   `last_closed_by_id` (Caroline's dedicated closer id) over a **lagged arrival cohort**
+   (inbound created 7-14 days ago), and credits a close only once it is itself >=1 observation
+   window old with zero reopens — so a just-closed conversation cannot inflate it. Remaining
+   limitation is per-SWEEP attribution (which sweep closed a given conversation), not the ratio
+   itself — see checklist item 5.
 2. Needs-human digest 3x/day: 13:30 UTC full digest unchanged; 07:30/19:30 UTC `--delta` fires
    post ONLY new + newly-aged items (silent when empty — Jan's digest budget is respected);
    items aging past 20h get a distinct line + resolvable mention.
@@ -214,10 +218,12 @@ customers. This metric is the denominator the Phase 0.1 baseline establishes.
 2. Every close path: deterministic gate + dry-run default + shadow log + `--limit` + host guard.
 3. Caroline's tool surface unchanged (no close, no refunds, no proactive sweep).
 4. All seven one-way doors have a recorded human sign-off before their `--apply` / enable.
-5. Weekly metric: reopen-rate + first-response/residue/queue telemetry SHIP (cs-sla-report.py);
-   the **AI-resolved / total inbound** ratio is **OUTSTANDING** — not yet computed (needs
-   per-conversation resolver attribution, which Intercom's weekly-cadence stats don't expose;
-   same limitation documented in cs-sla-report.py's per-admin-split note).
+5. Weekly metric: reopen-rate + first-response/residue/queue telemetry SHIP, and the
+   **AI-resolved / total inbound** ratio now SHIPS too (cs-sla-report.py, #735) — machine-vs-human
+   attribution via `last_closed_by_id` over a lagged arrival cohort, close-aged by one observation
+   window, reopen-adjusted numerator-only. What remains unavailable is per-SWEEP attribution
+   (Intercom's weekly-cadence stats expose the closer identity but not WHICH sweep closed a
+   conversation; same limitation documented in cs-sla-report.py's per-admin-split note).
 6. Product-signal report ships as a `skills-all/` skill + ops cron; zero automated writes to
    `web-credits-next`.
 

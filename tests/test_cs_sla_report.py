@@ -24,13 +24,14 @@ _spec.loader.exec_module(s)
 
 def conv(cid="c1", created_at=0, lar=0, lcr=0,
          first_admin_reply_at=None, count_reopens=0, has_statistics=True,
-         is_inbound=True):
+         is_inbound=True, last_closed_by_id=None, last_close_at=0):
     """Conversation shaped like fetch_window_convs/fetch_open_convs output."""
     return {
         "id": cid, "created_at": created_at, "lar": lar, "lcr": lcr,
         "first_admin_reply_at": first_admin_reply_at,
         "count_reopens": count_reopens, "has_statistics": has_statistics,
-        "is_inbound": is_inbound,
+        "is_inbound": is_inbound, "last_closed_by_id": last_closed_by_id,
+        "last_close_at": last_close_at,
     }
 
 
@@ -158,6 +159,202 @@ class TestInboundFilter(unittest.TestCase):
         rr = s.reopen_rate(population)
         self.assertEqual(rr["replied_conversations"], 1)
         self.assertAlmostEqual(rr["rate"], 1.0)       # 1 reopen / 1 inbound
+
+
+class TestResolvedCounts(unittest.TestCase):
+    """docs/plans/autonomous-cs-machine.md Sec.5's headline honesty metric:
+    AI-resolved / total-inbound, with reopen-rate as the honesty check.
+    "Closed" is not "resolved" - a reopened close counts toward neither
+    bucket. A close is credited only once it is at least one observation
+    window old (close_cutoff); the AGED_CLOSE fixtures below are closed well
+    before CLOSE_CUTOFF so these tests isolate closer-classification -
+    close-recency is exercised in test_recently_closed_* and
+    TestCohortPartition."""
+
+    CAROLINE_ID = "5763097"
+    CLOSE_CUTOFF = 1000
+    AGED_CLOSE = 100    # <= CLOSE_CUTOFF: closed long enough ago to be credited
+
+    def test_machine_close_no_reopens_counts_as_ai_resolved(self):
+        c = conv(cid="c1", last_closed_by_id=self.CAROLINE_ID, count_reopens=0,
+                 last_close_at=self.AGED_CLOSE)
+        result = s.resolved_counts([c], self.CLOSE_CUTOFF)
+        self.assertEqual(result["ai_resolved"], 1)
+        self.assertEqual(result["human_resolved"], 0)
+
+    def test_human_close_counts_as_human_resolved(self):
+        c = conv(cid="c1", last_closed_by_id="1234567", count_reopens=0,
+                 last_close_at=self.AGED_CLOSE)
+        result = s.resolved_counts([c], self.CLOSE_CUTOFF)
+        self.assertEqual(result["ai_resolved"], 0)
+        self.assertEqual(result["human_resolved"], 1)
+
+    def test_machine_close_with_reopens_excluded_from_ai_resolved(self):
+        # A close that reopened did not actually resolve the customer (Sec.5:
+        # "closed is not resolved") - it must not inflate ai_resolved, and it
+        # must not fall into human_resolved either (it was never human-closed).
+        c = conv(cid="c1", last_closed_by_id=self.CAROLINE_ID, count_reopens=1,
+                 last_close_at=self.AGED_CLOSE)
+        result = s.resolved_counts([c], self.CLOSE_CUTOFF)
+        self.assertEqual(result["ai_resolved"], 0)
+        self.assertEqual(result["human_resolved"], 0)
+
+    def test_human_close_with_reopens_excluded_from_human_resolved(self):
+        c = conv(cid="c1", last_closed_by_id="1234567", count_reopens=2,
+                 last_close_at=self.AGED_CLOSE)
+        result = s.resolved_counts([c], self.CLOSE_CUTOFF)
+        self.assertEqual(result["ai_resolved"], 0)
+        self.assertEqual(result["human_resolved"], 0)
+
+    def test_never_closed_conversation_counts_toward_neither_bucket(self):
+        c = conv(cid="c1", last_closed_by_id=None, count_reopens=0)
+        result = s.resolved_counts([c], self.CLOSE_CUTOFF)
+        self.assertEqual(result["ai_resolved"], 0)
+        self.assertEqual(result["human_resolved"], 0)
+
+    def test_recently_closed_machine_close_excluded_from_numerator(self):
+        # Machine-closed, zero reopens, but closed MORE recently than one
+        # observation window (last_close_at > close_cutoff): it has had no
+        # chance to reopen yet, so crediting it would inflate the metric. It
+        # must count toward neither bucket - while still (per the caller)
+        # remaining in the total_inbound denominator.
+        c = conv(cid="c1", last_closed_by_id=self.CAROLINE_ID, count_reopens=0,
+                 last_close_at=self.CLOSE_CUTOFF + 1)
+        result = s.resolved_counts([c], self.CLOSE_CUTOFF)
+        self.assertEqual(result["ai_resolved"], 0)
+        self.assertEqual(result["human_resolved"], 0)
+        # denominator is the caller's len(cohort) = 1; numerator excluded -> 0%.
+        self.assertEqual(s.ai_resolved_ratio(result, total_inbound=1), 0.0)
+
+    def test_missing_close_timestamp_excluded_from_numerator(self):
+        # Defensive: a closer id present but no last_close_at (0) can't be
+        # aged, so it is not credited (conservative - can only under-count).
+        c = conv(cid="c1", last_closed_by_id=self.CAROLINE_ID, count_reopens=0,
+                 last_close_at=0)
+        result = s.resolved_counts([c], self.CLOSE_CUTOFF)
+        self.assertEqual(result["ai_resolved"], 0)
+        self.assertEqual(result["human_resolved"], 0)
+
+    def test_custom_admin_id_respected(self):
+        c = conv(cid="c1", last_closed_by_id="42", count_reopens=0,
+                 last_close_at=self.AGED_CLOSE)
+        result = s.resolved_counts([c], self.CLOSE_CUTOFF, caroline_admin_id="42")
+        self.assertEqual(result["ai_resolved"], 1)
+        self.assertEqual(result["human_resolved"], 0)
+
+    def test_ratio_math(self):
+        convs = [
+            conv(cid="ai1", last_closed_by_id=self.CAROLINE_ID, count_reopens=0,
+                 last_close_at=self.AGED_CLOSE),
+            conv(cid="ai2", last_closed_by_id=self.CAROLINE_ID, count_reopens=0,
+                 last_close_at=self.AGED_CLOSE),
+            conv(cid="hum1", last_closed_by_id="1234567", count_reopens=0,
+                 last_close_at=self.AGED_CLOSE),
+            conv(cid="open1", last_closed_by_id=None),
+        ]
+        # total_inbound is the cohort's inbound-created denominator (see
+        # TestCohortPartition), not just len(convs) with a resolution - the
+        # caller supplies it separately.
+        resolved = s.resolved_counts(convs, self.CLOSE_CUTOFF)
+        ratio = s.ai_resolved_ratio(resolved, total_inbound=4)
+        self.assertEqual(resolved["ai_resolved"], 2)
+        self.assertEqual(resolved["human_resolved"], 1)
+        self.assertAlmostEqual(ratio, 0.5)
+
+    def test_ratio_none_when_no_inbound_traffic(self):
+        self.assertIsNone(
+            s.ai_resolved_ratio({"ai_resolved": 0, "human_resolved": 0}, total_inbound=0))
+
+
+class TestCohortPartition(unittest.TestCase):
+    """The AI-resolved/total-inbound ratio judges a LAGGED ARRIVAL COHORT
+    (inbound created 7-14 days ago), not this week's arrivals - judging
+    same-week arrivals against same-week closes double-biases: it undercounts
+    still-in-progress conversations AND inflates the youngest machine-closes,
+    which had no time to reopen (oracle-mandated fix, docs/plans/
+    autonomous-cs-machine.md Sec.5)."""
+
+    NOW = 20 * 86400
+    CUTOFF_7D = NOW - 7 * 86400
+    CUTOFF_14D = NOW - 14 * 86400
+    CAROLINE_ID = "5763097"
+
+    def test_too_recent_conversation_excluded_from_cohort_entirely(self):
+        # Created 3 days ago: inside trailing_7d (the existing #721
+        # population), but too recent for the cohort - it must not enter
+        # either the numerator or the denominator of the AI-resolved ratio,
+        # even though it's already machine-closed.
+        recent = conv(cid="recent", created_at=self.NOW - 3 * 86400,
+                      last_closed_by_id=self.CAROLINE_ID, count_reopens=0)
+        trailing, cohort = s.cohort_partition([recent], self.CUTOFF_14D, self.CUTOFF_7D)
+        self.assertEqual([c["id"] for c in trailing], ["recent"])
+        self.assertEqual(cohort, [])
+        resolved = s.resolved_counts(cohort, self.CUTOFF_7D)
+        self.assertEqual(s.ai_resolved_ratio(resolved, total_inbound=len(cohort)), None)
+
+    def test_cohort_conv_with_reopens_counts_denominator_only(self):
+        # 10 days old (inside the 7-14d cohort window), machine-closed 8 days
+        # ago (aged past the observation window) but reopened: it must count
+        # toward total_inbound (the denominator) but NOT ai_resolved
+        # (reopen-adjustment stays numerator-only per the oracle directive -
+        # adjusting the denominator would inflate the ratio, the Sec.5 gaming
+        # mode). Close age is aged here so the ONLY reason for exclusion is
+        # the reopen.
+        reopened = conv(cid="reopened", created_at=self.NOW - 10 * 86400,
+                        last_closed_by_id=self.CAROLINE_ID, count_reopens=1,
+                        last_close_at=self.NOW - 8 * 86400)
+        trailing, cohort = s.cohort_partition([reopened], self.CUTOFF_14D, self.CUTOFF_7D)
+        self.assertEqual(trailing, [])
+        self.assertEqual([c["id"] for c in cohort], ["reopened"])
+        resolved = s.resolved_counts(cohort, self.CUTOFF_7D)
+        total_inbound = len(cohort)
+        self.assertEqual(resolved["ai_resolved"], 0)
+        self.assertEqual(total_inbound, 1)
+        self.assertEqual(s.ai_resolved_ratio(resolved, total_inbound), 0.0)
+
+    def test_cohort_conv_no_reopens_counts_both_numerator_and_denominator(self):
+        # 10 days old, machine-closed 8 days ago (aged past the observation
+        # window), never reopened: counts toward BOTH ai_resolved and
+        # total_inbound.
+        clean = conv(cid="clean", created_at=self.NOW - 10 * 86400,
+                     last_closed_by_id=self.CAROLINE_ID, count_reopens=0,
+                     last_close_at=self.NOW - 8 * 86400)
+        trailing, cohort = s.cohort_partition([clean], self.CUTOFF_14D, self.CUTOFF_7D)
+        self.assertEqual(trailing, [])
+        self.assertEqual([c["id"] for c in cohort], ["clean"])
+        resolved = s.resolved_counts(cohort, self.CUTOFF_7D)
+        total_inbound = len(cohort)
+        self.assertEqual(resolved["ai_resolved"], 1)
+        self.assertEqual(total_inbound, 1)
+        self.assertEqual(s.ai_resolved_ratio(resolved, total_inbound), 1.0)
+
+    def test_cohort_member_closed_within_window_counts_denominator_only(self):
+        # 10 days old (inside the cohort), machine-closed only 1 day ago:
+        # arrival-lag put it in the cohort, but the close is younger than one
+        # observation window (last_close_at > cutoff_7d) so it had no chance to
+        # reopen. It must count toward total_inbound but NOT ai_resolved -
+        # otherwise a just-closed conversation would inflate the headline
+        # ratio, the exact bias the lagged cohort exists to remove.
+        just_closed = conv(cid="just_closed", created_at=self.NOW - 10 * 86400,
+                           last_closed_by_id=self.CAROLINE_ID, count_reopens=0,
+                           last_close_at=self.NOW - 1 * 86400)
+        trailing, cohort = s.cohort_partition([just_closed], self.CUTOFF_14D, self.CUTOFF_7D)
+        self.assertEqual(trailing, [])
+        self.assertEqual([c["id"] for c in cohort], ["just_closed"])
+        resolved = s.resolved_counts(cohort, self.CUTOFF_7D)
+        total_inbound = len(cohort)
+        self.assertEqual(resolved["ai_resolved"], 0)
+        self.assertEqual(total_inbound, 1)
+        self.assertEqual(s.ai_resolved_ratio(resolved, total_inbound), 0.0)
+
+    def test_boundary_conv_at_exactly_cutoff_7d_is_in_cohort_not_trailing(self):
+        # created_at == cutoff_7d is NOT > cutoff_7d, so it's excluded from
+        # trailing_7d; the cohort's upper bound is inclusive (<=), so it
+        # lands in the cohort - the two populations partition, never overlap.
+        boundary = conv(cid="boundary", created_at=self.CUTOFF_7D)
+        trailing, cohort = s.cohort_partition([boundary], self.CUTOFF_14D, self.CUTOFF_7D)
+        self.assertEqual(trailing, [])
+        self.assertEqual([c["id"] for c in cohort], ["boundary"])
 
 
 class TestWaitingSince(unittest.TestCase):

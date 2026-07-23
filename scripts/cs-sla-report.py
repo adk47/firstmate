@@ -14,7 +14,11 @@ Intercom conversations this computes:
   3. Reopen rate: fraction of window conversations with >=1 admin reply that
      reopened at least once (NOT the average reopen count — a conversation
      reopened N times is one unresolved close). See reopen_rate().
-  4. Unverified-credit queue depth: read-only via `<muso> api GET
+  4. AI-resolved / total-inbound ratio (docs/plans/autonomous-cs-machine.md
+     Sec.5's headline honesty metric): of the week's inbound conversations,
+     what fraction were auto-closed by a sweep AND never reopened, versus
+     closed by a human. See resolved_counts() and the caveats below.
+  5. Unverified-credit queue depth: read-only via `<muso> api GET
      /admin/credit-requests/counts --json`, where <muso> is resolved
      deterministically (MUSO_CLI_BIN, else `muso` on PATH, else
      /usr/local/bin/muso; reported "unavailable" only if none exist). See
@@ -35,6 +39,39 @@ conversation's parts (an N+1 scan Intercom guards against for a
 weekly-cadence report), so this report emits a single combined
 first-response row and documents the gap here rather than guessing.
 
+AI-resolved / total-inbound caveats (read before trusting the number):
+  1. "AI-resolved" here means "last closed by an automated sweep" (Intercom
+     statistics' last_closed_by_id), NOT a per-problem fix-credit. A
+     conversation Caroline fixed via muso-cli but a human later closed in
+     Intercom is counted human-resolved, not AI-resolved. This is
+     conservative - it can only under-count automation's share, never
+     inflate it.
+  2. This assumes no human admin ever acts as admin id 5763097 (Caroline's
+     dedicated closer identity) - true architecturally today (Caroline has
+     no close tool; see plan Sec.1), but not enforced by this script.
+  3. Intercom's weekly-cadence conversation_statistics cannot attribute
+     WHICH sweep closed a given conversation - only machine-vs-human. Per-
+     sweep attribution is out of scope (see plan checklist item 5).
+  4. The sweeps themselves (close-duplicate-conversations.py,
+     close-resolved-conversations.py, resolution-matcher.py) read
+     INTERCOM_ADMIN_ID; this report reads the separate CAROLINE_ADMIN_ID.
+     Both default to "5763097", but if someone overrides INTERCOM_ADMIN_ID
+     in shared.env/edge.env without also overriding CAROLINE_ADMIN_ID here,
+     attribution silently diverges (sweeps close as one id, this report
+     checks against another) rather than failing loud.
+  5. The ratio's population is a LAGGED ARRIVAL COHORT (inbound conversations
+     created 7-14 days ago, judged as of report time), NOT "this week's
+     arrivals". Judging same-week arrivals against same-week closes
+     double-biases: it undercounts still-in-progress conversations AND
+     inflates the youngest machine-closes, which had no time to reopen. See
+     cohort_partition().
+  6. Arrival-lag alone is not enough: a cohort member (created 7-14 days ago)
+     can still be machine-closed the instant before the report runs, with
+     zero reopen-observation time. So the numerator ALSO requires the last
+     close to be at least one window old (last_close_at <= cutoff_7d); a
+     more-recently-closed member stays in total_inbound but is not yet
+     credited. See resolved_counts().
+
 Env:
   MUSOAI_INTERCOM_TOKEN       required
   SLA_SKIP_HOST_GUARD         optional, "1" to run off ovh-node-8 (tests)
@@ -45,10 +82,13 @@ Env:
   INTERCOM_WORKSPACE_ID       optional, default dwjzhcge
   SLA_NOW                     optional, epoch override (tests)
   CS_SLA_STATE_DIR            optional, default /var/lib/cs-sla-report/
-  CAROLINE_ADMIN_ID           optional, default 5763097 (unused today — see
-                               module docstring on why the split is unavailable;
-                               kept so a future statistics field can wire it in
-                               without a flag-day)
+  CAROLINE_ADMIN_ID           optional, default 5763097 - the automated-sweep
+                               closer identity used by the AI-resolved /
+                               total-inbound ratio (last_closed_by_id ==
+                               this id means machine-closed). NOT used for
+                               the first-response admin/bot split - see the
+                               module docstring on why that split stays
+                               unavailable.
   MUSO_CLI_BIN                optional; overrides the muso CLI path for the
                                unverified-credit queue-depth read. When unset
                                the binary is resolved from PATH, else
@@ -124,6 +164,8 @@ def _conv_record(c):
         "count_reopens": stats.get("count_reopens") or 0,
         "has_statistics": bool(c.get("statistics")),
         "is_inbound": is_inbound_conv(c),
+        "last_closed_by_id": stats.get("last_closed_by_id"),
+        "last_close_at": stats.get("last_close_at") or 0,
     }
 
 
@@ -280,6 +322,81 @@ def reopen_rate(convs):
     }
 
 
+def cohort_partition(convs, cutoff_14d, cutoff_7d):
+    """Split an ALREADY-widened fetch (any created_at > cutoff_14d) into the
+    two independent populations the SLA report needs:
+      - trailing_7d: created_at > cutoff_7d - the EXISTING first-response /
+        reopen-rate population (#721), UNCHANGED by the lagged-cohort fix.
+      - cohort: cutoff_14d < created_at <= cutoff_7d - a full 7-day arrival
+        cohort that is now itself at least 7 days old, used ONLY for the
+        AI-resolved / total-inbound ratio (docs/plans/autonomous-cs-machine.md
+        Sec.5). Judging "this week's arrivals" against "this week's closes"
+        double-biases the ratio: it undercounts still-in-progress arrivals
+        AND inflates the youngest machine-closes, which had zero
+        reopen-observation window. Lagging the cohort by one full window
+        gives every member >=7 days to be worked. (The matching >=7-day
+        reopen-observation guarantee is enforced separately, on the CLOSE
+        timestamp, by resolved_counts - arrival-lag alone does not bound how
+        recently a cohort member was closed.)"""
+    trailing_7d = [c for c in convs if c["created_at"] > cutoff_7d]
+    cohort = [c for c in convs if cutoff_14d < c["created_at"] <= cutoff_7d]
+    return trailing_7d, cohort
+
+
+def resolved_counts(convs, close_cutoff, caroline_admin_id=DEFAULT_CAROLINE_ADMIN_ID):
+    """AI-resolved / human-resolved split over `convs` - callers pass the
+    lagged ARRIVAL COHORT (see cohort_partition), not the trailing-7d
+    population (docs/plans/autonomous-cs-machine.md Sec.5's headline honesty
+    metric). A conversation is counted toward a bucket only when ALL hold:
+      - it has been CLOSED at least once (last_closed_by_id present) -
+        never-closed conversations contribute to neither bucket;
+      - count_reopens == 0 - a close that reopened did not actually resolve
+        the customer (Sec.5: "closed is not resolved");
+      - its last close is at least one observation window old
+        (0 < last_close_at <= close_cutoff). Lagging the ARRIVAL by one window
+        (cohort_partition) is NOT sufficient on its own: a cohort member can
+        still be machine-closed the instant before the report runs, with zero
+        chance to reopen, and crediting it would inflate the metric exactly as
+        a same-week cohort would. The reopen-observation window is therefore
+        enforced on the CLOSE timestamp, not just on arrival.
+    A conversation failing any of these (never-closed, reopened, or closed too
+    recently / with no close timestamp) is excluded from BOTH ai_resolved and
+    human_resolved but STAYS in the caller's total_inbound denominator
+    (recency/reopen-adjusting the denominator would inflate the ratio, the
+    exact gaming mode Sec.5 warns against). See the module docstring's caveats
+    (last_closed_by_id identifies the closer, not a per-problem fix credit;
+    assumes no human ever acts as the Caroline admin id; no per-sweep
+    attribution)."""
+    ai_resolved = 0
+    human_resolved = 0
+    for c in convs:
+        closer = c.get("last_closed_by_id")
+        if closer is None:
+            continue
+        if (c.get("count_reopens") or 0) > 0:
+            continue
+        last_close_at = c.get("last_close_at") or 0
+        # Not observably aged - missing close timestamp, or closed more
+        # recently than one full window: keep in the denominator, credit
+        # neither closer (conservative, can only under-count automation).
+        if not 0 < last_close_at <= close_cutoff:
+            continue
+        if str(closer) == str(caroline_admin_id):
+            ai_resolved += 1
+        else:
+            human_resolved += 1
+    return {"ai_resolved": ai_resolved, "human_resolved": human_resolved}
+
+
+def ai_resolved_ratio(resolved, total_inbound):
+    """ai_resolved / total_inbound, or None if there was no inbound traffic
+    this week (avoids a ZeroDivisionError and a meaningless 0% / n/a
+    ambiguity)."""
+    if not total_inbound:
+        return None
+    return resolved["ai_resolved"] / total_inbound
+
+
 def residue_over_24h(convs, now_epoch):
     """Count + 3 oldest of currently-open conversations where the customer
     spoke last (same needs-human tie-break as cs-needs-human-digest.py's
@@ -377,6 +494,13 @@ def persist_rollup(rollup, state_dir, now_epoch):
 # --------------------------------------------------------------------------
 # Slack rendering + delivery (copied pattern from cs-needs-human-digest.py).
 # --------------------------------------------------------------------------
+def _iso_date(epoch):
+    """UTC calendar date of an epoch - used only to label the AI-resolved
+    cohort window (so the report reads "cohort: created X..Y, judged Z"
+    rather than an unlabeled ratio a reader could mistake for "this week")."""
+    return time.strftime("%Y-%m-%d", time.gmtime(epoch))
+
+
 def _fmt_seconds(seconds):
     if seconds is None:
         return "n/a"
@@ -392,6 +516,7 @@ def render_text_report(rollup):
     residue = rollup["residue"]
     reopen = rollup["reopen_rate"]
     credit = rollup["credit_queue"]
+    ai_metric = rollup["ai_resolved_metric"]
     lines = [
         f"CS weekly SLA report (trailing {rollup['window_days']}d)",
         f"first response: median {_fmt_seconds(fr['median_seconds'])}, "
@@ -405,6 +530,16 @@ def render_text_report(rollup):
     for c in residue["oldest"]:
         age = _fmt_seconds(now_epoch - waiting_since(c))
         lines.append(f"  {c['id']}  waiting {age}")
+    cohort_label = (f"cohort: inbound created {ai_metric['cohort_start_date']}.."
+                     f"{ai_metric['cohort_end_date']}, judged {ai_metric['judged_date']}")
+    if ai_metric["ratio"] is None:
+        lines.append(f"AI-resolved ({cohort_label}; reopen-adjusted): unavailable "
+                      "(no inbound conversations in the cohort window)")
+    else:
+        lines.append(
+            f"AI-resolved ({cohort_label}; reopen-adjusted): {ai_metric['ai_resolved']} "
+            f"({ai_metric['ratio']:.1%}) of {ai_metric['total_inbound']}")
+    lines.append(f"human-closed: {ai_metric['human_resolved']}")
     if reopen["rate"] is None:
         lines.append("reopen rate: unavailable (no window conversations with an admin reply)")
     else:
@@ -412,6 +547,12 @@ def render_text_report(rollup):
             f"reopen rate: {reopen['rate']:.1%} "
             f"({reopen['reopened_conversations']} of {reopen['replied_conversations']} "
             f"replied conversations reopened; {reopen['total_reopens']} total reopen events)")
+    lines.append(
+        "  # AI-resolved = last closed by an automated sweep (last_closed_by_id) "
+        "with zero reopens - not a per-problem fix credit; see script docstring caveats.")
+    lines.append(
+        "  # cohort is lagged one window (arrivals 7-14d old, not this week's) AND only "
+        "closes >=1 window old count, so every credited member had >=7d of reopen observation.")
     if credit["count"] is None:
         lines.append(f"unverified-credit queue depth: {credit['note']}")
     else:
@@ -498,6 +639,37 @@ def _self_test():
     residue = residue_over_24h([stale, fresh], now)
     assert residue["count"] == 1 and residue["oldest"][0]["id"] == "STALE", residue
 
+    # resolved_counts: machine-close (Caroline id) aged >=1 window with no
+    # reopens -> ai_resolved; human-close -> human_resolved; a machine-close
+    # that reopened -> neither ("closed" is not "resolved" per plan Sec.5); a
+    # machine-close more recent than close_cutoff -> neither (no reopen
+    # observation yet), but it still counts in the denominator.
+    cc = 1000
+    ai_c = conv_fixture("ai1", last_closed_by_id="5763097", count_reopens=0, last_close_at=100)
+    human_c = conv_fixture("hum1", last_closed_by_id="9999999", count_reopens=0, last_close_at=100)
+    reopened_ai_c = conv_fixture("ai2", last_closed_by_id="5763097", count_reopens=1, last_close_at=100)
+    recent_ai_c = conv_fixture("ai3", last_closed_by_id="5763097", count_reopens=0, last_close_at=cc + 1)
+    never_closed = conv_fixture("open1", last_closed_by_id=None)
+    convs = [ai_c, human_c, reopened_ai_c, recent_ai_c, never_closed]
+    resolved = resolved_counts(convs, close_cutoff=cc)
+    assert resolved == {"ai_resolved": 1, "human_resolved": 1}, resolved
+    # recent_ai_c is excluded from the numerator but stays in total_inbound.
+    assert ai_resolved_ratio(resolved, total_inbound=len(convs)) == 0.2
+    assert ai_resolved_ratio(resolved, total_inbound=0) is None
+
+    # cohort_partition: a conv created 3d ago (too recent) lands in trailing_7d
+    # only, never the cohort; a conv created 10d ago (7-14d old) lands in the
+    # cohort only, never trailing_7d.
+    cohort_now = 20 * 86400
+    cohort_cutoff_7d = cohort_now - 7 * 86400
+    cohort_cutoff_14d = cohort_now - 14 * 86400
+    too_recent = conv_fixture("recent", created_at=cohort_now - 3 * 86400)
+    in_cohort = conv_fixture("cohort1", created_at=cohort_now - 10 * 86400)
+    trailing, cohort = cohort_partition(
+        [too_recent, in_cohort], cohort_cutoff_14d, cohort_cutoff_7d)
+    assert [c["id"] for c in trailing] == ["recent"], trailing
+    assert [c["id"] for c in cohort] == ["cohort1"], cohort
+
     assert mask_email("joe@example.com") == "j***@***"
 
     # inbound_only: outbound/campaign threads are dropped from the SLA
@@ -510,11 +682,13 @@ def _self_test():
 
 
 def conv_fixture(cid, created_at=0, lar=0, lcr=0, first_admin_reply_at=None,
-                  count_reopens=0, has_statistics=True, is_inbound=True):
+                  count_reopens=0, has_statistics=True, is_inbound=True,
+                  last_closed_by_id=None, last_close_at=0):
     return {"id": cid, "created_at": created_at, "lar": lar, "lcr": lcr,
             "first_admin_reply_at": first_admin_reply_at,
             "count_reopens": count_reopens, "has_statistics": has_statistics,
-            "is_inbound": is_inbound}
+            "is_inbound": is_inbound, "last_closed_by_id": last_closed_by_id,
+            "last_close_at": last_close_at}
 
 
 def main():
@@ -548,19 +722,46 @@ def main():
         return 1
 
     now_epoch = int(os.environ.get("SLA_NOW") or time.time())
-    cutoff = now_epoch - args.window_days * 86400
+    cutoff_7d = now_epoch - args.window_days * 86400
+    # Widened fetch: the AI-resolved ratio needs a LAGGED arrival cohort (see
+    # cohort_partition docstring) one full window further back than the
+    # existing trailing population - one Intercom fetch covers both, sliced
+    # locally, rather than a second search call.
+    cutoff_14d = now_epoch - 2 * args.window_days * 86400
 
-    window_convs = fetch_window_convs(token, cutoff)
-    # First-response + reopen are INBOUND-only metrics (see inbound_only);
+    window_convs = fetch_window_convs(token, cutoff_14d)
+    trailing_7d, cohort = cohort_partition(window_convs, cutoff_14d, cutoff_7d)
+    # First-response + reopen are INBOUND-only metrics (see inbound_only) over
+    # the EXISTING trailing-7d population (#721, unchanged by this fix);
     # outbound/campaign threads must not enter their denominators.
-    inbound_window = inbound_only(window_convs)
+    inbound_window = inbound_only(trailing_7d)
+    # The AI-resolved ratio uses the separate, lagged cohort population -
+    # also inbound-only for the same reason.
+    inbound_cohort = inbound_only(cohort)
     open_convs = fetch_open_convs(token)
+
+    caroline_admin_id = os.environ.get("CAROLINE_ADMIN_ID", DEFAULT_CAROLINE_ADMIN_ID)
+    total_inbound = len(inbound_cohort)
+    # close_cutoff == cutoff_7d: only closes that are themselves at least one
+    # window old count toward the numerator (see resolved_counts) - a cohort
+    # member closed within the last window stays in total_inbound but is not
+    # yet credited, so a just-closed conversation cannot inflate the ratio.
+    resolved = resolved_counts(inbound_cohort, cutoff_7d, caroline_admin_id)
 
     rollup = {
         "window_days": args.window_days,
         "now_epoch": now_epoch,
         "first_response": first_response_distribution(inbound_window),
         "reopen_rate": reopen_rate(inbound_window),
+        "ai_resolved_metric": {
+            "total_inbound": total_inbound,
+            "ai_resolved": resolved["ai_resolved"],
+            "human_resolved": resolved["human_resolved"],
+            "ratio": ai_resolved_ratio(resolved, total_inbound),
+            "cohort_start_date": _iso_date(cutoff_14d),
+            "cohort_end_date": _iso_date(cutoff_7d - 1),
+            "judged_date": _iso_date(now_epoch),
+        },
         "residue": residue_over_24h(open_convs, now_epoch),
         "credit_queue": unverified_credit_queue_depth(),
     }
