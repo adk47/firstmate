@@ -157,6 +157,16 @@ it **bounded**.
 Union everything into one JSON array:
 `[{"name":"…","domain":"…","vertical":"…","why":"1 line"}, …]`.
 
+- **Saturated categories — search the long tail.** When a category has
+  repeatedly returned mostly IN_NOCO (already known), spend the bounded
+  budget OFF the head of the distribution instead of re-querying the same
+  leaders: "alternatives to `<known leader>`", "boutique/independent
+  `<category>`", recent funding/launch news, trade-show exhibitor lists
+  (NAMM/AES/ISE), UK/EU regional qualifiers. Expect 0-2 net-new companies per
+  run in a mined-out category, not 5 — that is the category, not a discovery
+  failure.
+
+
 ### Step 2: `prep-batch.sh` — dedupe + liveness in ONE call
 
 ```bash
@@ -203,6 +213,15 @@ normalized set-match) then the website-liveness check, and returns the alive-new
 - **Fail-closed:** non-zero exit (2 = a dedupe source was unavailable, 3 =
   liveness/egress suspect) → do NOT ship. Reply `NO_REPLY` or mark the batch
   PARTIAL/UNSAFE, naming the gate. Never hand-roll a per-candidate lookup around it.
+- **Saturation signal.** If `.stats` shows duplicates ≥ ~80% of checked (dupes ≫
+  new), the category is likely mined out. Say so explicitly in the reply, with
+  the numbers: "category looks mined out: N of M candidates already in our
+  base/ledger" — never silently report a thin batch as if discovery came up
+  short. Suggest trying adjacent/fresh categories, and mention that
+  `bash /opt/hydra/scripts/company-finder/category-saturation.sh` gives the
+  operator the full per-category table. **Zero qualifying companies after the
+  honest gates is a CORRECT outcome, not a failure** — never pad the list to
+  make a thin category look healthier than it is.
 
 ### Step 3: LinkedIn evidence (fetched, not recalled)
 
