@@ -49,6 +49,46 @@ CF_REQUESTER="${CF_REQUESTER:-company-finder@hydra-ops}"
 
 CF_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# fail_json <exit_code> <marker> <detail> — the machine-readable error
+# envelope every finalize-batch.sh/prep-batch.sh failure exit emits. Prints
+# ONE line of JSON to STDOUT ({"error":<marker>,"exit":<code>,"detail":<detail>})
+# and exits with <exit_code>. Callers print their own human-readable message to
+# stderr immediately BEFORE calling this (unchanged, so existing stderr
+# assertions keep matching) — this only ADDS a stdout line the caller can
+# parse. WHY (2026-07-22): on a non-zero exit these scripts previously printed
+# their failure marker ONLY to stderr, which the codex exec cell that invokes
+# them does not capture — the agent could not tell WHICH failure mode fired.
+fail_json() {
+  local code="${1:?fail_json needs an exit code}" marker="${2:?fail_json needs a marker}" detail="${3:-}"
+  jq -cn --arg e "$marker" --argjson x "$code" --arg d "$detail" '{error: $e, exit: $x, detail: $d}'
+  exit "$code"
+}
+
+# acquire_singleflight_lock <script-name> — flock -n on an FD held open for
+# the life of the process, so the lock releases automatically on exit (no
+# trap needed). On contention, emits the ALREADY_RUNNING envelope (via
+# fail_json, exit 5) and never returns. CF_LOCK_DIR is env-overridable so
+# tests never touch /var/lib. WHY (2026-07-22 storm): Scout's codex exec cell
+# yields at 90s; an un-shared-snapshot finalize-batch.sh run measured 97s and
+# returned no JSON in time, so Scout retried — stacking ~13 concurrent
+# finalize processes against NocoDB, whose 429 backoff made each one slower
+# still. Single-flighting prep-batch.sh/finalize-batch.sh turns a retry into
+# an instant, cheap no-op instead of another 97s process joining the pile-up.
+acquire_singleflight_lock() {
+  local script="${1:?acquire_singleflight_lock needs a script name}"
+  local lock_dir="${CF_LOCK_DIR:-/var/lib/hydra-company-finder}"
+  mkdir -p "$lock_dir" 2>/dev/null || true
+  local lock_file="$lock_dir/$script.lock"
+  # FD 200: high enough to avoid colliding with any FD a caller/subprocess
+  # already has open. Held open (not closed) so the kernel releases the lock
+  # the moment this process exits, by any path (success, fail_json, crash).
+  exec 200>"$lock_file"
+  if ! flock -n 200; then
+    echo "$script: single-flight lock held at $lock_file — another $script is already running, not stacking a retry." >&2
+    fail_json 5 ALREADY_RUNNING "$script already running"
+  fi
+}
+
 # locate_nocodb_api — resolve NOCODB_API_SH (env override wins) or fail. On the
 # muso path the wrapper is never invoked, so locating it is unnecessary — skip
 # (keeps the seam from depending on the wrapper file once it is retired).

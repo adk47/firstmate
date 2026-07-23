@@ -191,7 +191,8 @@ normalized set-match) then the website-liveness check, and returns the alive-new
      backoff) — the opposite of what you want. One cell, then `wait`.
   The gate has only FAILED on a non-zero **exit code** or genuinely missing JSON
   (see fail-closed below). The same exec discipline applies to `finalize-batch.sh`
-  (Step 5): its ledger collision check is a LIVE ~50s read + a Slack post, so give
+  (Step 5): its ledger collision check is a LIVE ~50s read (a single shared
+  table snapshot reused across both ledger writes) + a Slack post, so give
   it the same pragma + single patient `wait`.
 - A survivor with `verification == "blocked"` is bot-walled — KEEP it, but add a
   `flags` entry `"site bot-walled, eyeball it"` in Step 4 so the post shows ⚠.
@@ -256,13 +257,23 @@ It records the terminal rejects, writes the batch to the Seen Ledger
 **only on a clean ledger write formats and posts the batch to #company-finder
 itself.** You do not post; the script does, after the ledger. Use
 `BATCH_SOURCE="cron:company-finder-daily"` for the cron, `manual` (default) on
-demand.
+demand. It runs single-flight now (~50s, one shared table snapshot behind
+both ledger writes) — a second call while one is in flight gets turned away
+rather than piling onto NocoDB.
 
+- Every non-zero exit also prints ONE line of JSON on stdout —
+  `{"error":"<MARKER>","exit":<code>,"detail":"<short>"}` — so you can tell
+  failure modes apart even if stderr got clipped.
 - **Fail-closed:** non-zero exit → the batch is NOT in the channel, by design.
-  - exit 3 `LEDGER_COLLISION` = a company slipped past dedupe (prep-batch skipped
-    or raced) → re-run from Step 2 on the union; never retry blindly.
-  - exit 2 / 4 = a ledger source/write or the post itself failed → report it; do
-    NOT hand-post as a fallback (that reintroduces the exact bug this gate closes).
+  - `{"error":"ALREADY_RUNNING"}` (exit 5) = another finalize-batch.sh is
+    already running → **wait and poll the existing cell, never relaunch.**
+  - `{"error":"LEDGER_COLLISION"}` (exit 3) = a company slipped past dedupe
+    (prep-batch skipped or raced) → re-run from Step 2 on the union; never
+    retry blindly.
+  - any other marker (`LEDGER_SOURCE_UNAVAILABLE`, `LEDGER_WRITE_OR_POST_FAILED`,
+    `USAGE`, `EMPTY_BATCH`, …) → report PARTIAL/UNSAFE naming the marker
+    verbatim; do NOT hand-post as a fallback (that reintroduces the exact bug
+    this gate closes).
 - Review flips (`approve`/`reject`) stay on `ledger.sh` directly — see Step 6.
 
 Then wait for Nick/McLaren to react ✅ / 👍 (approve) or report rejects.
