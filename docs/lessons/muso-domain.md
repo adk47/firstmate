@@ -24,6 +24,20 @@ especially the People section (the most churn-prone data here).
 surface per-id partial failures; anomalies surface only on re-fetch of the queue. Never
 treat 200 as proof an individual credit changed.
 
+**Credit-request status transitions are a hard matrix — anything off it silently
+no-ops with a 200.** `core-backend/src/apis/_admin/credit-requests/updateStatus.js`
+gates each transition per-branch (`transitionCreditRequest(id, target, allowedFrom)`):
+`approved` ← unverified/UVN/rejected/processing; `rejected` ← unverified/UVN/approved/processing;
+`user_verification_needed` ← **unverified ONLY**; `unverified` ← approved ONLY;
+`processing` ← unverified/processing/UVN. Two consequences that bit on 2026-07-22:
+(a) **rejection is a one-way door** — there is no `rejected → user_verification_needed`
+path, so 28 wrongly-rejected UVN requests could not be moved back (readback showed 28/28
+still rejected after a 200); this is why the credit reject gate in `muso-admin-api.sh`
+makes `status:"rejected"` human-only (`--confirmed-by` + `--approval-msg-id`).
+(b) The `profileId` selector variant of the bulk PUT matches **`unverified` rows only** —
+UVN/rejected/processing rows are silently skipped; use explicit `requestIds` for anything
+past `unverified`. Always read the queue back after any status write.
+
 **Profile and credit field shapes.** `GET /admin/profile/{uuid}` wraps under
 `body.data`: `isClaimed`, `workspaces[]{email,isClaimed}`, `knownAsNames[]`,
 `rawProfiles[]`. Ownership rule: `isClaimed==true` AND exactly one `workspaces[]` entry
