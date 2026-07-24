@@ -1,0 +1,39 @@
+# .dead-infra-allowlist.txt — exemptions for scripts/check-dead-infra-refs.sh.
+#
+# Format: <path-or-dir-prefix/> -- <comma-separated pattern keys> -- <reason>
+#
+# Semantics enforced by the check script:
+#   1. A hit (file, key) passes only if an entry's path matches the file
+#      (exact, or directory-prefix when the entry ends in '/') AND the entry
+#      lists that key. Keys: assumerole boto3 awscli awsenv awsprofile
+#      uswest2 workgroup athena aws v3.
+#   2. An entry whose path no longer exists, or that no longer matches any
+#      hit for any of its keys, fails CI — the list can only shrink.
+#
+# Only historical records, migration mappings, decommission notices, and
+# "NEVER use X" warnings belong here. A live instruction pointing an agent at
+# Athena/AWS/frozen-v3 must be fixed (Trino via `muso query`), not
+# allowlisted. Background: Finance escalation 2026-07-24 (see the check
+# script's header).
+skills-all/muso-clio/references/ -- athena,aws,awscli,awsenv,awsprofile,uswest2,workgroup,assumerole,boto3 -- AWS-era KT transcripts + architecture reference library; migration mapping lives in references/trino/; athena/ doc is a tombstone
+skills-all/muso-clio/SKILL.md -- athena,aws,awscli -- Athena→Trino migration table (mapping, not instruction)
+skills-all/muso-cli/SKILL.md -- athena -- migration note (muso query does NOT rewrite legacy Athena names)
+skills-all/muso-architect/reference.md -- athena,aws -- KT-derived architecture history; retirement noted inline
+skills-all/muso-data-expert/reference.md -- athena,aws -- historical architecture notes (Athena retired 2026-04-25)
+skills-all/billion-streams-club/ -- v3 -- "NEVER profile_v3_*" warning is the doctrine itself
+skills-all/muso-streams-lookup/ -- v3 -- same NEVER-warning
+workspaces/operations/skills/muso-ops-fastlane/ -- v3 -- documents replacement of dead profile_v3_lifetime
+skills-all/muso-devops-prod-logs/ -- aws,awsenv -- redaction spec names AWS credential keys as scrub targets
+workspaces/support/skills/output-sanitizer/ -- aws,awsenv -- sanitizer denylist must name the forbidden strings
+workspaces/finance/SOUL.md -- aws -- historical spend comparison (Previous AWS spend)
+workspaces/devops/SOUL.md -- aws,athena,v3 -- decommission record + frozen-v3-vs-live-V3 doctrine
+workspaces/devops/TOOLS.md -- aws -- decommission tombstone (no AWS account to operate)
+workspaces/devops/HEARTBEAT.md -- aws -- retired AWS-monitoring heartbeat section (tombstone)
+workspaces/cto/SOUL.md -- aws,athena,v3 -- decommission record + frozen-v3-vs-live-V3 doctrine
+workspaces/qa/SOUL.md -- aws,athena,v3 -- infra ground-truth review doctrine (flag NEW AWS deps; frozen-v3 vs live-V3 distinction)
+skills-all/muso-devops/SKILL.md -- aws,uswest2 -- decommission banner names the retired AWS surfaces
+skills-all/muso-devops/reference.md -- aws,awscli,uswest2 -- AWS-era KT archive; banner at top marks it historical
+skills-all/muso-query-writer/SKILL.md -- athena,aws,awscli,uswest2 -- Athena→Trino migration doctrine + legacy-command mapping
+skills-all/muso-query-writer/reference.md -- athena,aws -- historical data-platform architecture notes
+skills-all/muso-query-writer/trino-schemas.md -- awscli,uswest2 -- legacy aws-cli command comments in the runner-mapping section
+skills-all/muso-query-writer/saved-queries/misc/add_alb_log_partiton.sql -- uswest2 -- archived Athena-era ALB-log partition query (provenance)
