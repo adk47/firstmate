@@ -39,9 +39,23 @@ digest — a conversation the customer REOPENS after our silent close must
 surface there (see the digest's default_state_paths note).
 
 The close is SILENT (no customer-facing message part), so it generates no new
-inbound. Every close is appended to a shadow log (id, timestamp, email) so it
-can be reversed; on --apply an unopenable shadow log is a HARD STOP before
-any close (close-duplicate precedent — an unrecordable close is untraceable).
+inbound. Immediately before EACH close the conversation is re-fetched and the
+whole gate re-checked LIVE (still_eligible_live) — the scan snapshot may be
+minutes old by the time a ramped drain reaches a target, and a customer reply
+in that window must veto the close (it would never reopen an already-closed
+conversation).
+
+Shadow log contract (one JSON object per line, key "id"): an fsync'd
+{"kind":"attempt"} row is written BEFORE the mutation — "can't record" means
+"don't close", and an ambiguous outcome always leaves a trace — then a
+{"kind":"closed"} (id, timestamp, email — reversible) or {"kind":"close_failed"}
+outcome row after. Our own idempotency reader honors only "closed" rows
+(attempts/failures re-surface and are safe to retry thanks to the live
+re-verify); sibling consumers read the log as plain jsonl and own every row —
+over-exclusion, their safe direction. On --apply an unopenable shadow log is a
+HARD STOP before any close (close-duplicate precedent — an unrecordable close
+is untraceable); the handle itself is opened O_NOFOLLOW/0600 with an
+owned-regular-file check (raw-PII surface).
 
 Sanity ceiling: on --apply, MORE than the ceiling (STALE_CEILING 200, or
 --ceiling N) of eligible candidates closes NOTHING and exits 2 — a backlog
@@ -255,6 +269,22 @@ def _ids_from_source(path, kind):
             cid = rec.get("id") or rec.get("conv_id") or rec.get("conversation_id")
             if cid:
                 ids.add(str(cid))
+    elif kind == "jsonl-closed-only":
+        # Our OWN shadow log: only a "closed" outcome row owns the
+        # conversation (a missing kind reads as closed for backward/robust
+        # parsing). "attempt"/"close_failed" rows stay retryable — the
+        # pre-close live re-verify makes a retry of an ambiguous close safe
+        # (an already-closed conversation is skipped, never re-mutated).
+        # Sibling consumers read this log as plain "jsonl" and so own even
+        # attempt rows — over-exclusion, their safe direction.
+        for rec in _read_jsonl_file(path):
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("kind", "closed") != "closed":
+                continue
+            cid = rec.get("id") or rec.get("conv_id") or rec.get("conversation_id")
+            if cid:
+                ids.add(str(cid))
     else:
         # Fail CLOSED on an unknown kind: silently returning an empty set
         # would zero that source's ownership (e.g. a future copy-paste of
@@ -314,10 +344,11 @@ def default_state_paths():
         "ops-drain-shadow": (
             os.environ.get("OPS_DRAIN_SHADOW_LOG", "/var/log/cs-ops-drain-shadow.jsonl"),
             "jsonl"),
-        # Our OWN shadow log — idempotency across re-runs.
+        # Our OWN shadow log — idempotency across re-runs ("closed" rows
+        # only; attempts/failures re-surface for a safe retry).
         "close-stale": (
             os.environ.get("CLOSE_STALE_SHADOW_LOG", "/var/log/close-stale-shadow.jsonl"),
-            "jsonl"),
+            "jsonl-closed-only"),
     }
 
 
@@ -439,6 +470,34 @@ def write_review_export(candidates, when_date, stale_days, now_epoch):
 # --------------------------------------------------------------------------
 # The close itself + shadow log.
 # --------------------------------------------------------------------------
+def get_conversation(token, conv_id):
+    """Fresh GET of one conversation — the pre-close TOCTOU guard's source."""
+    req = urllib.request.Request(
+        f"{INTERCOM_API}/conversations/{conv_id}",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
+                 "Intercom-Version": INTERCOM_VERSION})
+    return _retry_json(req)
+
+
+def still_eligible_live(fresh, owned_id_set, now_epoch, stale_secs):
+    """Pre-close re-verify on a FRESH GET /conversations/{id} payload. The
+    scan snapshot can be minutes old by the time a ramped drain reaches a
+    target; a customer reply in that window (before the close) would never
+    reopen the conversation, so closing on the stale snapshot would bury a
+    now-waiting customer. Re-checks open + the full is_eligible gate on
+    live statistics; any doubt = skip (the next run re-evaluates)."""
+    if fresh.get("state") != "open":
+        return False
+    stats = fresh.get("statistics") or {}
+    return is_eligible({
+        "id": fresh.get("id"),
+        "lar": stats.get("last_admin_reply_at") or 0,
+        "lcr": stats.get("last_contact_reply_at") or 0,
+        "created_at": fresh.get("created_at") or 0,
+        "is_inbound": is_inbound_conv(fresh),
+    }, owned_id_set, now_epoch, stale_secs)
+
+
 def close_conversation(token, admin_id, conv_id):
     req = urllib.request.Request(
         f"{INTERCOM_API}/conversations/{conv_id}/parts",
@@ -452,16 +511,39 @@ def close_conversation(token, admin_id, conv_id):
 
 
 def open_shadow_log():
-    """NO /tmp fallback, unlike close-resolved's: the shadow log carries RAW
-    customer emails and runs as root, so appending through a predictable
-    world-writable /tmp path is a symlink-follow + PII-exposure hazard
-    (close-duplicate already flags that fallback as a known weakness). This
-    closer is HUMAN-RUN and hard-stops on (None, None) before any close —
-    the supervisor fixes /var/log perms and re-runs."""
+    """Hardened append handle for the raw-PII shadow log; (None, None) on any
+    doubt — main() hard-stops before any close.
+
+    NO /tmp fallback, unlike close-resolved's: the log carries RAW customer
+    emails and runs as root, so appending through a predictable world-writable
+    /tmp path is a symlink-follow + PII-exposure hazard (close-duplicate
+    already flags that fallback as a known weakness). This closer is HUMAN-RUN
+    — the supervisor fixes /var/log perms and re-runs.
+
+    A bare open(path, "a") would create the file umask-permissive (0644 as
+    root), leave an existing permissive file permissive, and follow a
+    pre-planted symlink — so: O_NOFOLLOW + 0600 create mode, then fstat
+    re-verify (regular file, owned by us) and fchmod any pre-existing
+    permissive file down to 0600."""
     path = os.environ.get("CLOSE_STALE_SHADOW_LOG", "/var/log/close-stale-shadow.jsonl")
     try:
-        return open(path, "a"), path
+        fd = os.open(path,
+                     os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                     | getattr(os, "O_NOFOLLOW", 0), 0o600)
     except OSError:
+        return None, None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            os.close(fd)
+            print(f"ERROR: shadow log {path} is not a regular file owned by "
+                  "us — refusing", file=sys.stderr)
+            return None, None
+        if stat.S_IMODE(st.st_mode) != 0o600:
+            os.fchmod(fd, 0o600)
+        return os.fdopen(fd, "a"), path
+    except OSError:
+        os.close(fd)
         return None, None
 
 
@@ -617,26 +699,57 @@ def main(argv=None):
         print("ERROR: cannot open the shadow log anywhere — refusing to close "
               "(a close without a shadow record is untraceable)", file=sys.stderr)
         return 1
+    # Transport catch below: urllib wraps h.request() errors in URLError but
+    # lets getresponse()/body-read failures (RemoteDisconnected ⊂
+    # ConnectionResetError ⊂ OSError, socket timeouts, IncompleteRead ⊂
+    # http.client.HTTPException) escape raw — one mid-drain blip must land in
+    # `fail`, not crash the run (URLError ⊂ OSError).
+    transport_errors = (OSError, ValueError, http.client.HTTPException)
     closed, fail = [], []
+    skipped_recheck = 0
     for c in targets:
         silent_days = customer_silent_days(c, now)
-        # The catch wraps ONLY the close call: urllib wraps h.request()
-        # errors in URLError but lets getresponse()/body-read failures
-        # (RemoteDisconnected ⊂ ConnectionResetError ⊂ OSError, socket
-        # timeouts, IncompleteRead ⊂ http.client.HTTPException) escape raw —
-        # one mid-drain blip must land in `fail`, not crash the run
-        # (URLError ⊂ OSError). The shadow write stays OUTSIDE the catch: a
-        # shadow-write failure after a successful close must hard-crash, not
-        # be misfiled as a close failure — the close happened and losing its
-        # record silently is worse than aborting loudly.
+        # TOCTOU guard: re-fetch and re-verify LIVE immediately before the
+        # mutation — the scan snapshot may be minutes old and a customer
+        # reply in that window must veto the close (see still_eligible_live).
+        try:
+            fresh = get_conversation(token, c["id"])
+        except transport_errors as e:
+            fail.append((c["id"], f"recheck: {type(e).__name__}: {str(e)[:140]}"))
+            time.sleep(0.3)
+            continue
+        if not still_eligible_live(fresh, owned, now, stale_secs):
+            skipped_recheck += 1
+            time.sleep(0.3)
+            continue
+        # Intent record BEFORE the mutation, fsync'd: "can't record" must
+        # mean "don't close" (a write failure here crashes with zero closes
+        # outstanding), and an ambiguous close outcome (applied remotely but
+        # the response read failed) always leaves at least the attempt row.
+        shadow.write(json.dumps({
+            "id": c["id"], "kind": "attempt",
+            "attempted_at": int(time.time())}) + "\n")
+        shadow.flush()
+        os.fsync(shadow.fileno())
         try:
             res = close_conversation(token, admin_id, c["id"])
-        except (OSError, ValueError, http.client.HTTPException) as e:
+        except transport_errors as e:
             fail.append((c["id"], f"{type(e).__name__}: {str(e)[:140]}"))
+            # Outcome row for the failure too; if THIS write fails the run
+            # crashes loudly — the attempt row above already preserves the
+            # audit trail. Non-"closed" rows are retryable by our own
+            # idempotency reader (the live re-verify makes retrying an
+            # ambiguous close safe: an already-closed conversation is
+            # skipped, never re-mutated).
+            shadow.write(json.dumps({
+                "id": c["id"], "kind": "close_failed",
+                "failed_at": int(time.time()),
+                "error": f"{type(e).__name__}: {str(e)[:140]}"}) + "\n")
+            shadow.flush()
             time.sleep(0.3)
             continue
         shadow.write(json.dumps({
-            "id": c["id"], "closed_at": int(time.time()),
+            "id": c["id"], "kind": "closed", "closed_at": int(time.time()),
             "email": c["email"],
             "silent_days": silent_days,
             "new_state": res.get("state")}) + "\n")
@@ -645,7 +758,8 @@ def main(argv=None):
         time.sleep(0.3)
     shadow.close()
     ok = len(closed)
-    print(f"closed_ok={ok} failed={len(fail)} (shadow log: {shadow_path})")
+    print(f"closed_ok={ok} failed={len(fail)} "
+          f"skipped_live_recheck={skipped_recheck} (shadow log: {shadow_path})")
     for f in fail[:15]:
         print(f"  FAIL {f}", file=sys.stderr)
 

@@ -160,11 +160,28 @@ def _env(extra):
         yield
 
 
-def _run_main(argv, convs, tmp, close_mock=None, extra_env=None):
+def fresh_payload(c):
+    """GET /conversations/{id} payload mirroring a scan-time conv dict —
+    what the pre-close live re-verify sees when nothing changed."""
+    return {
+        "id": c["id"], "state": "open", "created_at": c["created_at"],
+        "statistics": {"last_admin_reply_at": c["lar"],
+                       "last_contact_reply_at": c["lcr"]},
+        "source": {"delivered_as": "customer_initiated"
+                   if c.get("is_inbound", True) else "automated",
+                   "author": {"type": "user", "email": c["email"]}},
+    }
+
+
+def _run_main(argv, convs, tmp, close_mock=None, extra_env=None, get_mock=None):
     """Run d.main(argv) with the network stubbed out and every state path
-    pointed into tmp. Returns (exit_code, close_mock, stdout)."""
+    pointed into tmp. Returns (exit_code, close_mock, stdout). By default
+    the live re-verify GET reflects the scan snapshot unchanged."""
     close_mock = close_mock if close_mock is not None else mock.Mock(
         return_value={"state": "closed"})
+    by_id = {c["id"]: c for c in convs}
+    get_mock = get_mock if get_mock is not None else (
+        lambda token, cid: fresh_payload(by_id[cid]))
     env = {
         "MUSOAI_INTERCOM_TOKEN": "tok",
         "CLOSE_STALE_SHADOW_LOG": os.path.join(tmp, "close-stale-shadow.jsonl"),
@@ -184,11 +201,21 @@ def _run_main(argv, convs, tmp, close_mock=None, extra_env=None):
     out = io.StringIO()
     with _env(env), \
             mock.patch.object(d, "fetch_open_convs", return_value=convs), \
+            mock.patch.object(d, "get_conversation", get_mock), \
             mock.patch.object(d, "close_conversation", close_mock), \
             mock.patch.object(d, "post_slack_summary", mock.Mock(return_value=True)), \
             contextlib.redirect_stdout(out):
         code = d.main(argv)
     return code, close_mock, out.getvalue()
+
+
+def _shadow_rows(tmp, kind=None):
+    path = os.path.join(tmp, "close-stale-shadow.jsonl")
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        recs = [json.loads(line) for line in f]
+    return [r for r in recs if kind is None or r.get("kind") == kind]
 
 
 class DryRun(unittest.TestCase):
@@ -238,14 +265,20 @@ class Apply(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(close_mock.call_count, 1)
             self.assertEqual(close_mock.call_args[0][2], "C1")
-            with open(os.path.join(tmp, "close-stale-shadow.jsonl")) as f:
-                recs = [json.loads(line) for line in f]
-            self.assertEqual(len(recs), 1)
-            # "id" key on purpose: sibling readers de-conflict on id/conv_id.
-            self.assertEqual(recs[0]["id"], "C1")
-            self.assertEqual(recs[0]["email"], "alice@example.com")
-            self.assertIn("closed_at", recs[0])
-            self.assertIn("new_state", recs[0])
+            rows = _shadow_rows(tmp)
+            # Intent-first contract: fsync'd attempt row BEFORE the close,
+            # outcome row after. "id" key on purpose: sibling readers
+            # de-conflict on id/conv_id.
+            self.assertEqual([r.get("kind") for r in rows],
+                             ["attempt", "closed"])
+            self.assertEqual(rows[0]["id"], "C1")
+            self.assertEqual(rows[1]["id"], "C1")
+            self.assertEqual(rows[1]["email"], "alice@example.com")
+            self.assertIn("closed_at", rows[1])
+            self.assertIn("new_state", rows[1])
+            # Raw-PII surface: created 0600.
+            mode = os.stat(os.path.join(tmp, "close-stale-shadow.jsonl")).st_mode
+            self.assertEqual(mode & 0o777, 0o600)
 
     def test_apply_respects_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -297,9 +330,11 @@ class Apply(unittest.TestCase):
                 ["--apply"], convs, tmp, close_mock=flaky)
             self.assertEqual(code, 3)
             self.assertEqual(calls["n"], 2)
-            with open(os.path.join(tmp, "close-stale-shadow.jsonl")) as f:
-                recs = [json.loads(line) for line in f]
-            self.assertEqual([r["id"] for r in recs], ["C2"])
+            self.assertEqual([r["id"] for r in _shadow_rows(tmp, "closed")],
+                             ["C2"])
+            # The failed close leaves its audit trail: attempt + close_failed.
+            self.assertEqual([r["id"] for r in _shadow_rows(tmp, "close_failed")],
+                             ["C1"])
 
     def test_apply_hard_stops_when_shadow_log_unopenable(self):
         # open_shadow_log has a /tmp fallback, so force BOTH paths to fail by
@@ -344,9 +379,8 @@ class Apply(unittest.TestCase):
             convs = [old_eligible("C1"), old_eligible("C2")]
             code, _, _ = _run_main(["--apply"], convs, tmp, close_mock=reset)
             self.assertEqual(code, 3)
-            with open(os.path.join(tmp, "close-stale-shadow.jsonl")) as f:
-                recs = [json.loads(line) for line in f]
-            self.assertEqual([r["id"] for r in recs], ["C2"])
+            self.assertEqual([r["id"] for r in _shadow_rows(tmp, "closed")],
+                             ["C2"])
 
     def test_negative_limit_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -369,6 +403,83 @@ class Apply(unittest.TestCase):
             convs = [old_eligible("C1")]
             with mock.patch.object(d, "write_review_export", return_value=None):
                 code, close_mock, _ = _run_main([], convs, tmp)
+            self.assertEqual(code, 1)
+            close_mock.assert_not_called()
+
+    def test_customer_reply_between_scan_and_close_vetoes(self):
+        # THE critical race: eligible at scan time, but the customer replies
+        # before the drain reaches this target. The pre-close live re-verify
+        # must veto the close — a reply BEFORE the close would never reopen
+        # the conversation, so closing here buries a waiting customer.
+        with tempfile.TemporaryDirectory() as tmp:
+            c1, c2 = old_eligible("C1"), old_eligible("C2")
+
+            def get_live(token, cid):
+                p = fresh_payload(c1 if cid == "C1" else c2)
+                if cid == "C1":
+                    p["statistics"]["last_contact_reply_at"] = NOW - 60
+                return p
+
+            code, close_mock, stdout = _run_main(
+                ["--apply"], [c1, c2], tmp, get_mock=get_live)
+            self.assertEqual(code, 0)
+            self.assertEqual(close_mock.call_count, 1)
+            self.assertEqual(close_mock.call_args[0][2], "C2")
+            self.assertIn("skipped_live_recheck=1", stdout)
+            # Vetoed BEFORE the intent row: C1 must leave no shadow trace.
+            self.assertEqual([r["id"] for r in _shadow_rows(tmp)], ["C2", "C2"])
+
+    def test_already_closed_conversation_skipped_live(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            c1 = old_eligible("C1")
+
+            def get_live(token, cid):
+                p = fresh_payload(c1)
+                p["state"] = "closed"
+                return p
+
+            code, close_mock, _ = _run_main(
+                ["--apply"], [c1], tmp, get_mock=get_live)
+            self.assertEqual(code, 0)
+            close_mock.assert_not_called()
+
+    def test_recheck_fetch_failure_lands_in_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def get_boom(token, cid):
+                raise ConnectionResetError("reset during recheck")
+
+            code, close_mock, _ = _run_main(
+                ["--apply"], [old_eligible("C1")], tmp, get_mock=get_boom)
+            self.assertEqual(code, 3)
+            close_mock.assert_not_called()
+
+    def test_failed_attempt_rows_do_not_block_retry(self):
+        # attempt/close_failed rows in OUR OWN log must re-surface (safe to
+        # retry thanks to the live re-verify); only a "closed" row owns.
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "close-stale-shadow.jsonl"), "w") as f:
+                f.write(json.dumps({"id": "C1", "kind": "attempt",
+                                    "attempted_at": NOW - 100}) + "\n")
+                f.write(json.dumps({"id": "C1", "kind": "close_failed",
+                                    "failed_at": NOW - 99,
+                                    "error": "x"}) + "\n")
+            convs = [old_eligible("C1")]
+            code, close_mock, _ = _run_main(["--apply"], convs, tmp)
+            self.assertEqual(code, 0)
+            self.assertEqual(close_mock.call_count, 1)
+            self.assertEqual(close_mock.call_args[0][2], "C1")
+
+    def test_shadow_log_symlink_refused(self):
+        # O_NOFOLLOW: a pre-planted symlink at the shadow path must hard-stop
+        # the run (raw-PII append-through-symlink as root).
+        with tempfile.TemporaryDirectory() as tmp:
+            real = os.path.join(tmp, "real.jsonl")
+            with open(real, "w"):
+                pass
+            link = os.path.join(tmp, "close-stale-shadow.jsonl")
+            os.symlink(real, link)
+            convs = [old_eligible("C1")]
+            code, close_mock, _ = _run_main(["--apply"], convs, tmp)
             self.assertEqual(code, 1)
             close_mock.assert_not_called()
 
