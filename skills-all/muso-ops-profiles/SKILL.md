@@ -96,6 +96,14 @@ WHERE rs.profileid = '<profile_id>'
 
 **Known bug (do not rely on as a guard):** the handler's safety check is `if (claimedProfiles?.length > 1) throw ...` — it only blocks when *more than one* loser is claimed. A merge where exactly one of `mergeInto`/`profilesIds[]` is claimed will proceed and silently transfer the claim. This is what enabled 2026-04-29's reverse-direction call to destroy production state. Treat the API as if it has no safety on claimed profiles.
 
+**Merge rejected with `One or couple profiles are claimed. Try to revert claimings first`?** That is the flip side of the guard above: **two or more losers** have a PROCESSED claiming. It is a long-standing check (the `> 1` threshold dates to core-backend PR #7017, 2023) — do not dead-end at "merge blocked"; there is a safe unblock:
+
+1. **Same-workspace check (the safety gate).** One `muso --env prod claiming list --json --profile-id <loser> --profile-id <loser2> --profile-id <survivor>` — `--json` is required (the table view shows only display names; the `teamId` you must compare exists only in the JSON `items[]`), the profile flag is repeatable, so batch every loser AND the survivor into a single call, and leave `--status` OFF so pending claims surface too, with `--limit 100` — the server default page is 10, and a truncated list can hide a foreign claim, so the reply must show `count == total` (paginate with `--page` until you hold every row) before you compare anything — then compare the returned `teamId`s and statuses. Proceed **only if the survivor has a PROCESSED claim and every loser claim, any status, belongs to that same workspace**: reverting the loser claims then loses the customer nothing, because the workspace keeps its claim via the survivor. **Any claim owned by a different workspace — even a merely pending one — is the theft/contest signal: escalate, never revert someone else's claim.** If the survivor has NO processed claim, stop and escalate too — there is no safe unblock for that shape; in particular do NOT revert all-but-one loser claim to "transfer" the last one through (that reproduces the silent-transfer bug above, and the pipeline destroys rather than transfers the claim whenever the survivor carries any claiming row, live or historical — `handleProfileIdChange.js` matches the survivor's claimings with no status filter). Same-workspace pendings on losers should be adjudicated before merging: the merge silently destroys every loser claiming row regardless of status.
+2. **Revert ALL loser claimings** — not just enough to get under the guard's `> 1` threshold, which reproduces the known bug above (the one leftover claim silently transfers mid-merge). Command and confirm-first rules: muso-ops-claiming § Revert Claim.
+3. **Confirm each revert landed** with `claiming get <id>` → `status: reverted` (the revert call itself answers only a synthetic `requested`), then re-run the merge through the full pre-merge checklist below. The checklist's step-5 pre-state GETs double as your `isClaimed: false` check on the losers, and in the existing pre/post comparison the survivor's `workspaces[]` must come through unchanged — still claimed by the workspace.
+
+**Worked example (2026-07-23, Israel Anyanele):** dups `19250f2e…`/`76465024…` + survivor `e3d33a4d…` all claimed by the same workspace → reverted claimings 1592872/1592871 → merge accepted, survivor retained the claim via its own claiming 1592870.
+
 **Caroline dedupe tickets carry TWO clearly-separated blocks — trust them differently.**
 
 **`details.dedupe_verdict` — SERVER-VERIFIED FACTS. You MAY rely on these.** Every field
@@ -317,7 +325,23 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 Pre-flight checks:
 1. List the profile's raw links first (admin GET on the profile, or Trino
    `hive."platform-industry-bi-prod".matvw_catalog_profile.raw_ids`) so the operator has a known starting set.
-2. Confirm in Slack which raw IDs to drop, then echo them back before submit.
+2. ⚠️ **Check the raw isn't MIXED before unlinking.** A single source artist page
+   can aggregate several real-world people, so one raw ID may assert both wrong
+   AND correct credits (2026-07 Matt Wright case: one tidal raw asserted 16 wrong
+   tracks and 26 correct ones — unlinking it would have stripped half the
+   legitimate profile). Map first, over the profile's FULL credit inventory — not
+   just the tracks in the removal request: page through
+   `GET /admin/profile/<profile_id>/credits` to `total`, deduping items by track
+   id. The list's offset ordering is unstable, so one pass can silently DROP
+   rows as well as duplicate them — repeat the full pagination until two
+   consecutive deduped snapshots reconcile (identical track-id sets, count
+   matching `total`). Then `GET /admin/track/<track_id>/raw-credits` for each
+   track and bucket every track the candidate raw asserts into remove-vs-keep.
+   A raw counts as cleanly wrong only when that reconciled sweep shows zero
+   keep-tracks. If the snapshots won't reconcile or the inventory can't be
+   completed, do NOT unlink — remove the bad credits per-track instead
+   (`muso-ops-tracks` → Removal Requests).
+3. Confirm in Slack which raw IDs to drop, then echo them back before submit.
 
 Post-unlink: only release-date fields update in real time; the catalog pipeline
 takes up to 24h to reflect the unlink across credits and analytics.

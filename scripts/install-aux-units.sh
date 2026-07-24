@@ -181,6 +181,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/codex-keepalive.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/codex-token-refresh.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/codex-token-refresh.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/company-finder/refresh-dedupe-cache.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/company-finder/refresh-dedupe-cache.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/lib/codex-oauth-refresh.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/lib/codex-oauth-refresh.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/cron-health-watchdog.sh" ]] \
@@ -213,10 +215,14 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/caroline-behavior-digest.py missing"
 [[ -f "$HYDRA_ROOT/scripts/cs-needs-human-digest.py" ]] \
   || fail "$HYDRA_ROOT/scripts/cs-needs-human-digest.py missing"
+[[ -f "$HYDRA_ROOT/scripts/cs-sla-report.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/cs-sla-report.py missing"
 [[ -f "$HYDRA_ROOT/scripts/close-duplicate-conversations.py" ]] \
   || fail "$HYDRA_ROOT/scripts/close-duplicate-conversations.py missing"
 [[ -f "$HYDRA_ROOT/scripts/cs-selfserve-backlog.py" ]] \
   || fail "$HYDRA_ROOT/scripts/cs-selfserve-backlog.py missing"
+[[ -f "$HYDRA_ROOT/scripts/cs-ops-drain-candidates.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/cs-ops-drain-candidates.py missing"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/weekly-cleanup.sh" ]] \
@@ -557,6 +563,9 @@ After=network-online.target
 Type=oneshot
 EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/edge.env
+Environment=CS_DIGEST_AGING_HOURS=20
+# Jan Roland Delmo (Head of Operations) — docs/lessons/muso-domain.md:431.
+Environment=CS_DIGEST_AGING_MENTION_UID=U038BM16T7W
 ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/cs-needs-human-digest.py --post
 CSDIGESTSVC
 
@@ -648,6 +657,92 @@ for csbt in cs-selfserve-backlog-collect.timer cs-selfserve-backlog.timer; do
   systemctl start "$csbt" >/dev/null 2>&1 || log "WARN: could not start $csbt"
   log "  $csbt: $(systemctl is-active "$csbt" 2>/dev/null || echo unknown)"
 done
+
+# ─── CS needs-human digest — delta runs (07:30 + 19:30 UTC) ───────────
+# WS2 (docs/plans autonomous-cs-machine follow-on): the same digest script,
+# invoked with --delta so only needs-human items never surfaced before, or
+# items newly crossing the CS_DIGEST_AGING_HOURS threshold, get posted — the
+# 13:30 UTC run above stays the full daily view. See scripts/
+# cs-needs-human-digest.py's --delta flag and CS_DIGEST_STATE.
+cat > /etc/systemd/system/cs-needs-human-digest-delta.service << CSDIGESTDELTASVC
+[Unit]
+Description=CS needs-human digest — delta run (#cs_chats; read-only on Intercom)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+Environment=CS_DIGEST_AGING_HOURS=20
+# Jan Roland Delmo (Head of Operations) — docs/lessons/muso-domain.md:431.
+Environment=CS_DIGEST_AGING_MENTION_UID=U038BM16T7W
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/cs-needs-human-digest.py --post --delta
+CSDIGESTDELTASVC
+
+cat > /etc/systemd/system/cs-needs-human-digest-delta.timer << CSDIGESTDELTATMR
+[Unit]
+Description=Twice daily — CS needs-human digest delta run at 07:30 + 19:30 UTC
+
+[Timer]
+OnCalendar=*-*-* 07:30:00 UTC
+OnCalendar=*-*-* 19:30:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=cs-needs-human-digest-delta.service
+
+[Install]
+WantedBy=timers.target
+CSDIGESTDELTATMR
+
+systemctl daemon-reload
+cnhdd=cs-needs-human-digest-delta.timer
+systemctl enable "$cnhdd" >/dev/null 2>&1 || log "WARN: could not enable $cnhdd"
+systemctl start "$cnhdd" >/dev/null 2>&1 || log "WARN: could not start $cnhdd"
+log "  $cnhdd: $(systemctl is-active "$cnhdd" 2>/dev/null || echo unknown)"
+
+# ─── CS weekly SLA report (Mon 08:30 UTC) ───────────
+# WS1 (docs/plans autonomous-cs-machine follow-on): the SLA denominator — a
+# READ-ONLY weekly report of first-response time distribution, the >24h
+# residue snapshot, reopen rate, and unverified-credit queue depth, posted
+# once to #cs_chats. See scripts/cs-sla-report.py.
+cat > /etc/systemd/system/cs-sla-report.service << CSSLASVC
+[Unit]
+Description=CS weekly SLA report (#cs_chats; read-only on Intercom)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+# The unverified-credit queue-depth metric needs the muso CLI; neither sourced
+# env file exports it, so pin the deployed path explicitly (cs-sla-report.py
+# also resolves it deterministically from PATH/-/usr/local/bin/muso, but pinning
+# keeps the telemetry intent visible in the unit). This Environment= follows the
+# EnvironmentFile= lines, so it takes precedence; if the path ever moves, change
+# it here.
+Environment=MUSO_CLI_BIN=/usr/local/bin/muso
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/cs-sla-report.py --post
+CSSLASVC
+
+cat > /etc/systemd/system/cs-sla-report.timer << CSSLATMR
+[Unit]
+Description=Weekly — CS SLA report Mon 08:30 UTC
+
+[Timer]
+OnCalendar=Mon *-*-* 08:30:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=cs-sla-report.service
+
+[Install]
+WantedBy=timers.target
+CSSLATMR
+
+systemctl daemon-reload
+cslar=cs-sla-report.timer
+systemctl enable "$cslar" >/dev/null 2>&1 || log "WARN: could not enable $cslar"
+systemctl start "$cslar" >/dev/null 2>&1 || log "WARN: could not start $cslar"
+log "  $cslar: $(systemctl is-active "$cslar" 2>/dev/null || echo unknown)"
 
 # ─── Close duplicate conversations (SHADOW MODE — daily 10:00 UTC) ────
 # Phase 1 of docs/plans/autonomous-cs-machine.md: a deterministic sweeper
@@ -1453,6 +1548,54 @@ systemctl start "$rtmr" >/dev/null 2>&1 || log "WARN: could not start $rtmr"
 rstate=$(systemctl is-active "$rtmr" 2>/dev/null || echo unknown)
 log "  $rtmr: $rstate (fires Sun+Wed 04:00 UTC)"
 
+# ─── company-finder dedupe-cache refresh (timer) ──────────────
+# Precompute the ~50s NocoDB dedup snapshot out-of-band so prep-batch.sh
+# (dedupe-candidates.sh) reads it in <1s and finishes inside Scout's codex 10s
+# exec cell. Correctness is unchanged — ledger.sh suggest (finalize-batch)
+# re-checks all three sources LIVE, so a stale cache can only trigger a
+# LEDGER_COLLISION re-run, never a duplicate post.
+install -d -m 755 /var/lib/hydra-company-finder
+
+cat > /etc/systemd/system/hydra-company-finder-cache-refresh.service << CFCACHESVC
+[Unit]
+Description=HYDRA company-finder dedupe-cache refresh (NocoDB 3-source snapshot)
+
+[Service]
+Type=oneshot
+TimeoutStartSec=300
+# muso NocoDB auth lives in the gateway env files (the canonical env source).
+ExecStart=/usr/bin/bash -lc 'set -a; . /etc/openclaw/shared.env; . /etc/openclaw/main.env; set +a; exec $HYDRA_ROOT/scripts/company-finder/refresh-dedupe-cache.sh'
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=append:/var/log/company-finder-cache-refresh.log
+StandardError=append:/var/log/company-finder-cache-refresh.log
+CFCACHESVC
+
+cat > /etc/systemd/system/hydra-company-finder-cache-refresh.timer << CFCACHETMR
+[Unit]
+Description=Refresh the HYDRA company-finder dedupe cache every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=90
+Unit=hydra-company-finder-cache-refresh.service
+
+[Install]
+WantedBy=timers.target
+CFCACHETMR
+
+systemctl daemon-reload
+
+cftmr=hydra-company-finder-cache-refresh.timer
+systemctl enable "$cftmr" >/dev/null 2>&1 || log "WARN: could not enable $cftmr"
+systemctl start "$cftmr" >/dev/null 2>&1 || log "WARN: could not start $cftmr"
+cfstate=$(systemctl is-active "$cftmr" 2>/dev/null || echo unknown)
+log "  $cftmr: $cfstate (fires every 15 min)"
+# Warm the cache now (non-blocking) so the first prep-batch after a deploy is fast.
+systemctl start --no-block hydra-company-finder-cache-refresh.service >/dev/null 2>&1 \
+  || log "WARN: could not warm company-finder dedupe cache"
+
 # ─── journald cap + hydra log rotation (one-time config) ──────
 # journald had NO retention config and had grown to 3.9G (audit
 # 2026-06-10). Cap the persistent journal at 2G; vacuum only when
@@ -1474,7 +1617,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-token-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log {
     weekly
     rotate 4
     compress

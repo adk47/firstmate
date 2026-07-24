@@ -162,3 +162,78 @@ calls() { grep -c '^CALL ' "$OPENCLAW_CALLS_FILE" 2>/dev/null || echo 0; }
   [[ "$output" != *"see runlog"* ]]
   [[ "$output" == *"scorer stderr"* ]]
 }
+
+# ── no-op compaction (2026-07-22: 30× "Sampled: 0 of 500" full-block spam) ──
+# When a run samples nothing and lands/refuses nothing, the full :rocket:
+# block (bucket counts, policy line, audit-tail) is pure noise. Render a
+# compact one-liner instead. The full block must still render whenever
+# anything was sampled, landed, refused, or fraud-flagged — a compacted
+# summary that hides real writes would be a truth-floor regression.
+
+noop_fixture() {
+  # apply ran (real mode) but the selector matched nothing.
+  cat > "$1" <<'EOF'
+{
+  "queue_depth": 0,
+  "fetch_size": 500,
+  "counts": { "total": 0, "would_approve": 0, "would_uvn": 0 },
+  "apply": {
+    "dry_run": false,
+    "approve": { "landed": 0, "refused": 0 },
+    "uvn":     { "landed": 0, "refused": 0 }
+  },
+  "would_approve": [],
+  "would_uvn": []
+}
+EOF
+}
+
+@test "no-op real run renders compact one-liner, not the full block" {
+  local f="$TEST_TMPDIR/fixture.noop.json"
+  noop_fixture "$f"
+  run --separate-stderr env -u THREAD_TS POST_PARENT_TO_CHANNEL=0 OPS_RUN_ID=lobster-noop-1 bash -c "'$RENDER' < '$f'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no-op"* ]]
+  [[ "$output" == *"0 unverified credits matched"* ]]
+  [[ "$output" == *"run_id: lobster-noop-1"* ]]
+  # Full-block furniture must be gone.
+  [[ "$output" != *":rocket:"* ]]
+  [[ "$output" != *"Bucket counts"* ]]
+  [[ "$output" != *"Backend-signal policy"* ]]
+  [[ "$output" != *"Apply outcomes"* ]]
+}
+
+@test "no-op dry run renders compact one-liner with dry marker" {
+  local f="$TEST_TMPDIR/fixture.noop.dry.json"
+  noop_fixture "$f"
+  jq '.apply = {dry_run: true}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  run --separate-stderr env -u THREAD_TS POST_PARENT_TO_CHANNEL=0 bash -c "'$RENDER' < '$f'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no-op"* ]]
+  [[ "$output" == *"DRY-RUN"* ]]
+  [[ "$output" != *":rocket:"* ]]
+  [[ "$output" != *"Bucket counts"* ]]
+}
+
+@test "no-op compact line still carries selector.note and still posts in thread mode" {
+  local f="$TEST_TMPDIR/fixture.noop.note.json"
+  noop_fixture "$f"
+  jq '. + {selector: {note: "status_is_approved_not_unverified"}}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  run --separate-stderr env THREAD_TS='1777890000.222222' TARGET_CHANNEL=C_TEST bash -c "'$RENDER' < '$f'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status_is_approved_not_unverified"* ]]
+  # Posting behavior unchanged: thread mode still posts (a human asked).
+  [ "$(calls)" -eq 1 ]
+  LC_ALL=C grep -q -- '--reply-to' "$OPENCLAW_CALLS_FILE"
+}
+
+@test "refused-only run (0 landed, >0 refused) still renders the FULL block" {
+  local f="$TEST_TMPDIR/fixture.refused.json"
+  noop_fixture "$f"
+  jq '.counts.total = 3 | .counts.would_approve = 3 | .apply.approve.refused = 3' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  run --separate-stderr env -u THREAD_TS POST_PARENT_TO_CHANNEL=0 bash -c "'$RENDER' < '$f'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *":rocket:"* ]]
+  [[ "$output" == *"Apply outcomes"* ]]
+  [[ "$output" != *"no-op —"* ]]
+}

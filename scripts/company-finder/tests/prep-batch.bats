@@ -37,6 +37,8 @@ EOF
   chmod +x "$STUB/dedupe.sh" "$STUB/verify.sh"
   export DEDUPE_SH="$STUB/dedupe.sh"
   export VERIFY_SH="$STUB/verify.sh"
+  # Single-flight lock dir — never touch /var/lib in tests.
+  export CF_LOCK_DIR="$BATS_TEST_TMPDIR/locks"
 }
 
 @test "--help exits 0" {
@@ -74,4 +76,28 @@ EOF
 @test "verify network-suspect (its exit 2) remaps to exit 3" {
   VERIFY_RC=2 run bash "$SUT" <<<'[{"name":"A","domain":"a.com"}]'
   [ "$status" -eq 3 ]
+}
+
+# ── single-flight lock (2026-07-22 storm) ───────────────────────────────────
+
+@test "single-flight lock: a concurrent invocation exits 5, ALREADY_RUNNING" {
+  mkdir -p "$CF_LOCK_DIR"
+  exec 9>"$CF_LOCK_DIR/prep-batch.sh.lock"
+  flock -n 9
+
+  run bash "$SUT" <<<'[{"name":"A","domain":"a.com"}]'
+  [ "$status" -eq 5 ]
+  [[ "$output" == *'"error":"ALREADY_RUNNING"'* ]]
+
+  flock -u 9
+  exec 9>&-
+}
+
+# ── machine-readable error envelope ─────────────────────────────────────────
+
+@test "error envelope: dedupe source unavailable emits DEDUP_SOURCE_UNAVAILABLE, exit 2 unchanged" {
+  DEDUPE_RC=2 run bash "$SUT" <<<'[{"name":"A","domain":"a.com"}]'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'"error":"DEDUP_SOURCE_UNAVAILABLE"'* ]]
+  [[ "$output" == *'"exit":2'* ]]
 }

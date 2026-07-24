@@ -89,6 +89,25 @@ is a profile *analytics bootstrap*, NOT credit verification — hand it to the
 `muso-ops-fastlane` skill. Never run this pipeline for a fastlane request, even
 if it also mentions credits/analytics/streams.
 
+**Not this skill (UVN):** if the message asks to review/validate/resolve
+**UVN** / **user verification needed** / **"Verification Needed"** credits
+or tracks — or frames the work around **ClickUp tickets** / an **Intercom
+conversation** — it is a *manual per-request review of credits already in
+`user_verification_needed`*, NOT this batch. The batch selector fetches
+ONLY `status=unverified`, so a UVN ask is a guaranteed "Sampled: 0" no-op
+(2026-07-22: ~30 such no-op dispatches spammed the channel). Profile
+mode's loose "word `profile` + UUID" match does NOT apply when those
+keywords are present. Route per SOUL.md ("UVN is NOT credit
+verification"): `muso-ops-credits` + `muso-credit-investigator` /
+`muso-audit-profile-credits`, with `muso-clickup-ticket-sweeper` for the
+ClickUp/Intercom/Resolved wrapper.
+
+**One dispatch per request.** The pipeline processes its entire selector in
+a single run — never invoke `dispatch-cv-batch.sh` in a loop (e.g. once per
+profile). A repeat-dispatch guard in the wrapper refuses rapid re-dispatch
+(exit 2 with `repeat-dispatch guard tripped`); if you hit it, STOP — do not
+retry, do not work around it, re-read the routing above.
+
 ## UUID extraction
 
 UUID regex (case-insensitive):

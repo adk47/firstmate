@@ -2,39 +2,6 @@
   "version": 1,
   "jobs": [
     {
-      "id": "0f0ced35-1502-4657-9bcf-c42673b2ba03",
-      "agentId": "devops",
-      "name": "daily-aws-change-report",
-      "description": "Daily AWS change report — CloudTrail write events across both accounts",
-      "enabled": false,
-      "createdAtMs": 1774313970262,
-      "updatedAtMs": 1774325096085,
-      "schedule": {
-        "kind": "cron",
-        "expr": "0 0 * * *",
-        "tz": "America/New_York"
-      },
-      "sessionTarget": "isolated",
-      "wakeMode": "now",
-      "payload": {
-        "kind": "agentTurn",
-        "message": "Run the daily AWS change report. Cover the previous 24h. Query CloudTrail write events across Flagship (068358774785) us-west-2 and Plaque (686505752817) us-east-1/us-west-2. Categorize: Human Changes, Deploys, Anomaly Flags, Scaling, Data, Security, DNS & Networking, Automated Ops. Format for Slack (bold not markdown, bullets not dashes). Post as top-level message.",
-        "timeoutSeconds": 600,
-        "thinking": "low",
-        "model": "openai/gpt-5.6-sol",
-        "fallbacks": [
-          "openrouter/openai/gpt-5.6-luna",
-          "openrouter/anthropic/claude-haiku-4.5"
-        ]
-      },
-      "delivery": {
-        "mode": "announce",
-        "channel": "slack",
-        "to": "C0ADV2W76G4",
-        "bestEffort": true
-      }
-    },
-    {
       "id": "786f8a98-0e9c-47a7-92e6-a1ef9329842f",
       "agentId": "devops",
       "name": "api-change-watch",
@@ -395,7 +362,7 @@
       "agentId": "scout",
       "name": "company-finder-daily",
       "description": "Daily parent company discovery for B2B outreach - finds 5 new companies (matches the skill's per-day design), dedupes, posts to #company-finder for approval",
-      "enabled": false,
+      "enabled": true,
       "createdAtMs": 1775766544763,
       "updatedAtMs": 1777540784441,
       "schedule": {
@@ -440,6 +407,36 @@
       "payload": {
         "kind": "agentTurn",
         "message": "run credit verification",
+        "model": "openai/gpt-5.6-sol",
+        "thinking": "high",
+        "fallbacks": [
+          "openrouter/openai/gpt-5.6-luna",
+          "openrouter/anthropic/claude-haiku-4.5"
+        ],
+        "timeoutSeconds": 1800
+      },
+      "delivery": {
+        "mode": "none"
+      }
+    },
+    {
+      "id": "fa4bb786-08fb-4437-a8b4-06654eff077e",
+      "agentId": "operations",
+      "name": "cs-ops-drain-4h",
+      "description": "Phase 2.1 CS ops-drain (docs/plans/cs-ops-drain-spec.md). DISABLED at ship — DRY-RUN ONLY, no writes until Nick's sign-off (spec §Rollout). Fires 30min offset from credit-verification-batch-4h to avoid operations-lane contention. Invokes the cs-ops-drain skill: list de-conflicted OPEN Intercom candidates via /opt/hydra/scripts/cs-ops-drain-candidates.py, classify into the three server-verified buckets (credits verify / profiles claim-self / no-attestation consolidate), re-verify with muso-cli READ verbs, and shadow-log the intended verb per survivor WITHOUT writing. delivery.mode is \"none\" because the skill self-posts its summary to #credit-verification. Model block copied from credit-verification-batch-4h (allowlisted or the run silently fails).",
+      "enabled": false,
+      "createdAtMs": 1784646065788,
+      "updatedAtMs": 1784646065788,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 */4 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the cs-ops-drain skill in DRY-RUN (the only supported mode). List de-conflicted candidates via `python3 /opt/hydra/scripts/cs-ops-drain-candidates.py --limit 25`, classify each into exactly one of the three server-verified buckets (catalog-corroborated pending credit / own now-processable profile claim / no-attestation own-duplicate consolidation), EXCLUDE everything else, re-verify each survivor with muso-cli READ verbs, then shadow-log the intended verb per survivor via `--append-record`. Take NO write action, call NO muso-cli WRITE verb, and do NOT pass --apply. Post one concise summary to #credit-verification. If zero candidates, post nothing. Your final reply must be exactly NO_REPLY.",
         "model": "openai/gpt-5.6-sol",
         "thinking": "high",
         "fallbacks": [
@@ -933,6 +930,38 @@
         "mode": "announce",
         "channel": "slack",
         "to": "C07112YT8TF",
+        "accountId": "finance",
+        "bestEffort": true
+      }
+    },
+    {
+      "id": "c6bac0ee-6e51-485b-b87a-390268341937",
+      "agentId": "finance",
+      "name": "Weekly SaaS Recap",
+      "description": "Mondays 05:30 America/Chicago: Stripe SaaS weekly recap covering MRR movement, ARR, churn and ARPA for the prior Mon-Sun week (ChartMogul replacement). Posts to Slack C081ZCY0UTB as the finance bot. Deterministic command cron (no model). MUST fire Monday BEFORE 06:00 local: the script only reports the full prior week when weekday==0 and hour<6, otherwise it emits a week-to-date stub. Script was written with the 2026-07-15 realtime/daily restore but never scheduled — this closes that gap (the weekly channel had been silent since the ChartMogul cutover).",
+      "enabled": true,
+      "createdAtMs": 1784827000000,
+      "updatedAtMs": 1784827000000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 5 * * 1",
+        "tz": "America/Chicago"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/workspaces/finance/scripts/stripe-saas-weekly-report.py"
+        ],
+        "cwd": "/opt/hydra/workspaces/finance",
+        "timeoutSeconds": 600
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C081ZCY0UTB",
         "accountId": "finance",
         "bestEffort": true
       }

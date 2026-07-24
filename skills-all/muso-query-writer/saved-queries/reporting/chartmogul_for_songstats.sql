@@ -5,11 +5,14 @@ athena_id: 37af6ee1-df72-45d3-af6d-5bc02d1071db
 primary_tag: reporting
 tags: [reporting]
 athena_database: chartmogul
-description: No description provided
-status: experimental
+description: Legacy ChartMogul artifact. Do not run for current analytics; use muso-stripe-subscription-analytics.
+status: deprecated
 pii: unknown
 last_exported: 2025-01-31
 */
+
+-- LEGACY ONLY: ChartMogul and Athena are retired. For current subscription
+-- analytics, use muso-stripe-subscription-analytics against live Stripe.
 
 
 select 

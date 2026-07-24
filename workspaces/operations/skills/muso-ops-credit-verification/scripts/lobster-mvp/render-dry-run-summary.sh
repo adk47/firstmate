@@ -62,6 +62,40 @@ APPLY_APPROVE_REFUSED=$(echo "$INPUT" | jq -r '.apply.approve.refused // 0')
 APPLY_UVN_LANDED=$(echo "$INPUT"      | jq -r '.apply.uvn.landed      // 0')
 APPLY_UVN_REFUSED=$(echo "$INPUT"     | jq -r '.apply.uvn.refused     // 0')
 
+# Selector-level note from the fetch step (e.g. fetch-by-credit.sh's
+# "status_is_approved_not_unverified"). Extracted once here, rendered by
+# BOTH the compact no-op branch and the full-block branch below — without
+# it the user just sees "Sampled: 0" with no explanation.
+SELECTOR_NOTE=$(echo "$INPUT" | jq -r '.selector.note // empty')
+
+# --- no-op compaction ------------------------------------------------------
+# 2026-07-22: a mis-routed UVN ask dispatched the batch ~30 times, every
+# run "Sampled: 0 of 500" — and every run posted the FULL block (bucket
+# counts, policy line, audit tail) to Slack. When nothing was sampled and
+# nothing landed or was refused, all that furniture is noise: render a
+# compact one-liner instead. Posting behavior (thread/parent/stdout) is
+# unchanged — a human who asked still gets a reply, just a short one.
+# Anything sampled, landed, refused, or fraud-flagged keeps the full
+# block (a compacted summary that hides real writes would be a
+# truth-floor regression; with total=0 the would_* arrays are empty, so
+# the fraud and muso-unavailable sections are vacuously absent anyway).
+if [[ "$TOTAL" == "0" \
+      && "$APPLY_APPROVE_LANDED" == "0" && "$APPLY_APPROVE_REFUSED" == "0" \
+      && "$APPLY_UVN_LANDED" == "0" && "$APPLY_UVN_REFUSED" == "0" ]]; then
+  if [[ "$DRY_APPLY" == "false" ]]; then
+    NOOP_PREFIX=":white_check_mark: Credit-verification no-op"
+  else
+    NOOP_PREFIX=":test_tube: Credit-verification DRY-RUN no-op"
+  fi
+  TEXT="$NOOP_PREFIX — 0 unverified credits matched the selector (queue depth: $QUEUE_DEPTH)${OPS_RUN_ID:+ | run_id: ${OPS_RUN_ID}}"
+
+  # The selector note is the one thing a 0-sample summary MUST keep — it
+  # explains the zero.
+  if [[ -n "$SELECTOR_NOTE" ]]; then
+    TEXT+=$'\n_Note: '"$SELECTOR_NOTE"'_'
+  fi
+else
+
 # Mode-dependent labels. Internal JSON field names (would_*) stay
 # constant; only Slack-visible text changes.
 if [[ "$DRY_APPLY" == "false" ]]; then
@@ -99,11 +133,7 @@ $TAIL_LINE
 EOF
 )
 
-# Surface any selector-level note from the fetch step. fetch-by-credit.sh
-# emits one when the credit isn't `status=unverified` anymore (e.g.
-# "status_is_approved_not_unverified"); without this rendering the user
-# just sees "Sampled: 0" with no explanation.
-SELECTOR_NOTE=$(echo "$INPUT" | jq -r '.selector.note // empty')
+# Surface the selector-level note (extracted once, top of file).
 if [[ -n "$SELECTOR_NOTE" ]]; then
   TEXT+=$'\n\n_Note: '"$SELECTOR_NOTE"'_'
 fi
@@ -189,6 +219,8 @@ if [[ "$MUSO_UNAVAIL" == "true" ]]; then
   # scorer's stderr, which lands in this run's agent/cron transcript.
   TEXT+=$'\n\n:warning: muso-only Trino signal was UNAVAILABLE this run — fraud scores computed WITHOUT it (fail-soft; failure reason on the fraud scorer stderr in this run'"'"'s transcript).'
 fi
+
+fi # end no-op-compaction else (full-block path)
 
 # Always echo the summary text to stdout so Lobster's step output captures it.
 printf '%s\n' "$TEXT"

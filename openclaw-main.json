@@ -530,6 +530,9 @@
       "highWaterBytes": "384mb"
     }
   },
+  "cron": {
+    "maxConcurrentRuns": 12
+  },
   "web": {
     "enabled": false
   },

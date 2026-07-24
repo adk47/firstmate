@@ -75,9 +75,22 @@ norm_domain() { jqn -rn --arg d "$1" 'include "normalize"; $d | norm_domain'; }
 # dirty (Company Intelligence pre-migration, hand-edited ledger rows), and
 # only the normalized comparison finds those — including the duplicate pairs
 # the LEDGER_AMBIGUOUS guard exists to surface.
+#
+# LEDGER_SNAPSHOT_DIR (env, optional): if set and
+# "$LEDGER_SNAPSHOT_DIR/<tableId>.json" exists, reuse that file's RAW rows
+# (the same shape fetch_table returns) instead of live-fetching. Set by
+# finalize-batch.sh, which prefetches the three tables ONCE and shares that
+# snapshot across BOTH its ledger.sh calls (record-rejects + suggest) — 6
+# sequential ~16s live snapshots collapsed to 3 (97s -> ~50s, 2026-07-22
+# storm). approve/reject run standalone with no LEDGER_SNAPSHOT_DIR set, so
+# they always live-fetch, unchanged.
 fetch_mapped() {
   local raw
-  raw="$(fetch_table "$1" "$2" "Id,Domain,Company Name,Status" "LEDGER_SOURCE_UNAVAILABLE")" || return 2
+  if [[ -n "${LEDGER_SNAPSHOT_DIR:-}" && -f "$LEDGER_SNAPSHOT_DIR/$1.json" ]]; then
+    raw="$(cat "$LEDGER_SNAPSHOT_DIR/$1.json")"
+  else
+    raw="$(fetch_table "$1" "$2" "Id,Domain,Company Name,Status" "LEDGER_SOURCE_UNAVAILABLE")" || return 2
+  fi
   jqn -c 'include "normalize";
      map({id: .Id, domain: (.Domain // ""), name: (."Company Name" // ""),
           status: (.Status // ""), nd: (.Domain | norm_domain)})' <<<"$raw"

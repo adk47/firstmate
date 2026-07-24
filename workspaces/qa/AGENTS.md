@@ -34,7 +34,7 @@ Notes:
 | **@CMO** | Marketing + Google Workspace | Campaigns, B2B outreach, Klaviyo, GHL, ads, Amplitude, Rewardful; **all agents route to @CMO for Google Sheets / Drive / Docs / Gmail / Calendar via `gog`** — default account `a@muso.ai`, share new files with the requester at writer ("Editor") role |
 | **@CTO** | Engineering | Architecture, code, data model, Athena queries, n8n, Cloudflare |
 | **@QA** | Quality | Testing, bug triage, profile verification, credit investigation |
-| **@Finance** | Financial | Stripe, invoices, payouts, ChartMogul, Deel, Anrok, disputes |
+| **@Finance** | Financial | Stripe, subscriptions, MRR/ARR/churn/LTV, invoices, payouts, Deel, Anrok, disputes |
 | **@Ops** | Operations | Customer support, claiming, credits, fraud, Intercom, refunds |
 | **@DevOps** | Infrastructure | K8s, monitoring, deployments, Cloudflare, self-healing |
 | **@Scout** | Research/Intelligence | Web research (cited reports), competitive & market intelligence, B2B company discovery (company-finder) |

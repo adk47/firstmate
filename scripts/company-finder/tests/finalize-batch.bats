@@ -45,6 +45,21 @@ EOF
   export MUSO_CALLED_MARKER="$BATS_TEST_TMPDIR/muso_called"
   export POST_OUT="$BATS_TEST_TMPDIR/post.txt"
 
+  # Single-flight lock dir — never touch /var/lib in tests.
+  export CF_LOCK_DIR="$BATS_TEST_TMPDIR/locks"
+
+  # finalize-batch.sh itself now prefetches the three dedupe-source tables
+  # (Step 0) before delegating to the (stubbed) ledger.sh — pin the legacy
+  # nocodb-api.sh wrapper path at the fixtures shared with ledger.bats. None
+  # of the fixture domains collide with alpha.com/dead.com below.
+  export USE_MUSO_CLI=0
+  export NOCODB_API_SH="$REPO_ROOT/scripts/company-finder/tests/stubs/nocodb-api.sh"
+  export NOCODB_STUB_FIXTURES="$REPO_ROOT/scripts/company-finder/tests/fixtures"
+  export COMPANY_TABLE_ID="mvr6nmzcv7albxt"
+  export CONTACTS_TABLE_ID="m9vsbijhrr9ddeu"
+  export LEDGER_TABLE_ID="ledgertable001"
+  export NOCODB_PAGE_SLEEP=0
+
   BATCH='{"batch":[{"name":"Alpha","domain":"alpha.com","vertical":"Plugins","tier":"2","why":"fits","spend_signal":"NAMM"}],"rejects":[{"name":"Dead","domain":"dead.com","reason":"DEAD"}],"date":"2026-06-22"}'
 }
 
@@ -111,5 +126,67 @@ EOF
 @test "malformed .batch (non-array) is a clean usage exit 1, posts nothing" {
   run bash "$SUT" <<<'{"batch":"oops"}'
   [ "$status" -eq 1 ]
+  [ ! -f "$MUSO_CALLED_MARKER" ]
+}
+
+# ── single-flight lock (2026-07-22 storm: concurrent finalize retries
+# stacked ~13 processes against NocoDB) ─────────────────────────────────────
+
+@test "single-flight lock: a concurrent invocation exits 5, ALREADY_RUNNING, posts nothing" {
+  mkdir -p "$CF_LOCK_DIR"
+  exec 9>"$CF_LOCK_DIR/finalize-batch.sh.lock"
+  flock -n 9
+
+  run bash "$SUT" <<<"$BATCH"
+  [ "$status" -eq 5 ]
+  [[ "$output" == *'"error":"ALREADY_RUNNING"'* ]]
+  [ ! -f "$MUSO_CALLED_MARKER" ]
+
+  flock -u 9
+  exec 9>&-
+}
+
+# ── machine-readable error envelope (a stderr-only marker is invisible to
+# the codex exec cell that invokes this script) ─────────────────────────────
+
+@test "error envelope: empty batch emits EMPTY_BATCH on stdout, exit 1 unchanged" {
+  run bash "$SUT" <<<'{"batch":[]}'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'"error":"EMPTY_BATCH"'* ]]
+  [[ "$output" == *'"exit":1'* ]]
+}
+
+@test "error envelope: LEDGER_COLLISION emits marker on stdout, exit 3 unchanged" {
+  SUGGEST_RC=3 run bash "$SUT" <<<"$BATCH"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *'"error":"LEDGER_COLLISION"'* ]]
+  [[ "$output" == *'"exit":3'* ]]
+}
+
+# ── shared snapshot (97s -> ~50s: 6 sequential live table snapshots
+# collapsed to 3, reused across record-rejects + suggest) ───────────────────
+# These use the REAL ledger.sh (not the ledger.sh stub above) against the
+# nocodb-api.sh stub, so the snapshot-sharing plumbing between
+# finalize-batch.sh and ledger.sh is exercised end-to-end.
+
+@test "snapshot sharing: a full run (batch + rejects) fetches each table exactly once" {
+  export LEDGER_SH="$REPO_ROOT/scripts/company-finder/ledger.sh"
+  export NOCODB_STUB_READ_LOG="$BATS_TEST_TMPDIR/reads.log"
+  run bash "$SUT" <<<"$BATCH"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "^records.ls $LEDGER_TABLE_ID " "$NOCODB_STUB_READ_LOG")" -eq 1 ]
+  [ "$(grep -c "^records.ls $COMPANY_TABLE_ID " "$NOCODB_STUB_READ_LOG")" -eq 1 ]
+  [ "$(grep -c "^records.ls $CONTACTS_TABLE_ID " "$NOCODB_STUB_READ_LOG")" -eq 1 ]
+}
+
+@test "snapshot sharing: a domain in both .batch and .rejects still fails closed (LEDGER_COLLISION)" {
+  export LEDGER_SH="$REPO_ROOT/scripts/company-finder/ledger.sh"
+  DUPE='{"batch":[{"name":"DupeCo","domain":"dupe.example","vertical":"Plugins","why":"w"}],
+         "rejects":[{"name":"DupeCo","domain":"dupe.example","reason":"DEAD"}],
+         "date":"2026-06-22"}'
+  run bash "$SUT" <<<"$DUPE"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"LEDGER_COLLISION"* ]]
+  [[ "$output" == *'"error":"LEDGER_COLLISION"'* ]]
   [ ! -f "$MUSO_CALLED_MARKER" ]
 }

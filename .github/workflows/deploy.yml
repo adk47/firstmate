@@ -48,11 +48,39 @@ jobs:
         with:
           # Full history: Step 4a's baseline-aware skill-drift check resolves
           # `git show <.deployed-sha>:<path>`, and that baseline can lag main by
-          # more than one commit. (HEAD~1 target detection still works.)
+          # more than one commit (HEAD~1 target detection still works). Also
+          # required by "Refuse stale deploys" below, whose merge-base check
+          # needs full ancestry — reusing this existing full clone is the
+          # least invasive option (no second fetch step needed).
           fetch-depth: 0
+
+      - name: Refuse stale deploys
+        # Incident 2026-07-23 (run 29992449557): a push-event run for OLDER
+        # commit 23dd1cd9 was created at 08:48, 3 minutes AFTER newer commit
+        # cf5859fc4's run (created 08:45) had already deployed — delayed
+        # push-event delivery let the older run start after the newer one
+        # finished, and it rsynced the stale tree over /opt/hydra
+        # (workflow-green, silently wrong content). The `concurrency` group
+        # above serializes runs but does not reorder or drop them, so it
+        # did not catch this. This step compares the checked-out commit
+        # (github.sha) against the current tip of origin/main and refuses to
+        # deploy a commit main has already moved past. The decision logic
+        # (including the diverged-history case QA flagged on PR #731) lives
+        # in scripts/lib/deploy-stale-guard.sh so it's unit-testable — see
+        # scripts/tests/deploy-stale-guard.bats.
+        id: stale_check
+        env:
+          HYDRA_ALLOW_STALE_DEPLOY: ${{ vars.HYDRA_ALLOW_STALE_DEPLOY }}
+        run: |
+          git fetch origin main --quiet
+          TIP=$(git rev-parse origin/main)
+          CUR=$(git rev-parse HEAD)
+          chmod +x scripts/lib/deploy-stale-guard.sh
+          ./scripts/lib/deploy-stale-guard.sh "$CUR" "$TIP" >> "$GITHUB_OUTPUT"
 
       - name: Detect deploy target
         id: detect
+        if: steps.stale_check.outputs.proceed == 'true'
         run: |
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
 
@@ -97,6 +125,7 @@ jobs:
 
       - name: Deploy with target
         id: deploy
+        if: steps.stale_check.outputs.proceed == 'true'
         run: |
           echo "::group::Running deploy script"
           TARGET="${{ steps.detect.outputs.target }}"
@@ -109,7 +138,7 @@ jobs:
       # continue-on-error silencing issue.
 
       - name: Post to Slack — success
-        if: success()
+        if: success() && steps.stale_check.outputs.proceed == 'true'
         run: |
           COMMIT_SHA="${{ github.sha }}"
           COMMIT_MSG=$(git log -1 --pretty=format:'%s')
@@ -132,7 +161,7 @@ jobs:
             }" || echo "Slack notification failed (non-fatal)"
 
       - name: Rollback on failure
-        if: failure()
+        if: failure() && steps.stale_check.outputs.proceed == 'true'
         run: |
           echo "::error::Deployment failed — initiating rollback"
           if [ -f scripts/rollback.sh ]; then

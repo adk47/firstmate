@@ -49,6 +49,46 @@ CF_REQUESTER="${CF_REQUESTER:-company-finder@hydra-ops}"
 
 CF_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# fail_json <exit_code> <marker> <detail> — the machine-readable error
+# envelope every finalize-batch.sh/prep-batch.sh failure exit emits. Prints
+# ONE line of JSON to STDOUT ({"error":<marker>,"exit":<code>,"detail":<detail>})
+# and exits with <exit_code>. Callers print their own human-readable message to
+# stderr immediately BEFORE calling this (unchanged, so existing stderr
+# assertions keep matching) — this only ADDS a stdout line the caller can
+# parse. WHY (2026-07-22): on a non-zero exit these scripts previously printed
+# their failure marker ONLY to stderr, which the codex exec cell that invokes
+# them does not capture — the agent could not tell WHICH failure mode fired.
+fail_json() {
+  local code="${1:?fail_json needs an exit code}" marker="${2:?fail_json needs a marker}" detail="${3:-}"
+  jq -cn --arg e "$marker" --argjson x "$code" --arg d "$detail" '{error: $e, exit: $x, detail: $d}'
+  exit "$code"
+}
+
+# acquire_singleflight_lock <script-name> — flock -n on an FD held open for
+# the life of the process, so the lock releases automatically on exit (no
+# trap needed). On contention, emits the ALREADY_RUNNING envelope (via
+# fail_json, exit 5) and never returns. CF_LOCK_DIR is env-overridable so
+# tests never touch /var/lib. WHY (2026-07-22 storm): Scout's codex exec cell
+# yields at 90s; an un-shared-snapshot finalize-batch.sh run measured 97s and
+# returned no JSON in time, so Scout retried — stacking ~13 concurrent
+# finalize processes against NocoDB, whose 429 backoff made each one slower
+# still. Single-flighting prep-batch.sh/finalize-batch.sh turns a retry into
+# an instant, cheap no-op instead of another 97s process joining the pile-up.
+acquire_singleflight_lock() {
+  local script="${1:?acquire_singleflight_lock needs a script name}"
+  local lock_dir="${CF_LOCK_DIR:-/var/lib/hydra-company-finder}"
+  mkdir -p "$lock_dir" 2>/dev/null || true
+  local lock_file="$lock_dir/$script.lock"
+  # FD 200: high enough to avoid colliding with any FD a caller/subprocess
+  # already has open. Held open (not closed) so the kernel releases the lock
+  # the moment this process exits, by any path (success, fail_json, crash).
+  exec 200>"$lock_file"
+  if ! flock -n 200; then
+    echo "$script: single-flight lock held at $lock_file — another $script is already running, not stacking a retry." >&2
+    fail_json 5 ALREADY_RUNNING "$script already running"
+  fi
+}
+
 # locate_nocodb_api — resolve NOCODB_API_SH (env override wins) or fail. On the
 # muso path the wrapper is never invoked, so locating it is unnecessary — skip
 # (keeps the seam from depending on the wrapper file once it is retired).
@@ -196,4 +236,60 @@ read_candidates_stdin() {
     return 1
   fi
   printf '%s\n' "$cands"
+}
+
+# fetch_dedupe_rows <tableId> <label> — full snapshot mapped to the dedup shape
+# {domain,name,table}. Returns 2 fail-closed (DEDUP_SOURCE_UNAVAILABLE) if the
+# source is unreachable. Shared by dedupe-candidates.sh and
+# refresh-dedupe-cache.sh so both build byte-identical rows.
+fetch_dedupe_rows() {
+  local raw
+  raw="$(fetch_table "$1" "$2" "Domain,Company Name" "DEDUP_SOURCE_UNAVAILABLE")" || return 2
+  jq -c --arg t "$2" \
+    'map({domain:(.Domain // ""), name:(."Company Name" // ""), table:$t})' <<<"$raw"
+}
+
+# build_existing_snapshot — the live 3-source snapshot (Company Intelligence +
+# Contacts Intelligence + Seen Ledger) mapped + concatenated into the EXISTING
+# array that dedupe classifies against. Requires locate_nocodb_api and
+# resolve_ledger_table_id to have run. Returns 2 fail-closed if any REQUIRED
+# source is unavailable (a silently-missing source would leak duplicates).
+# Shared by dedupe-candidates.sh (live fallback) and refresh-dedupe-cache.sh
+# (cache producer) so the cached and live EXISTING are byte-identical.
+build_existing_snapshot() {
+  local company contact ledger
+  company="$(fetch_dedupe_rows "$COMPANY_TABLE_ID"  "Company Intelligence")"  || return 2
+  contact="$(fetch_dedupe_rows "$CONTACTS_TABLE_ID" "Contacts Intelligence")" || return 2
+  ledger="$(fetch_dedupe_rows  "$LEDGER_TABLE_ID"   "Seen Ledger")"           || return 2
+  jq -c -s 'add' <<<"$company"$'\n'"$contact"$'\n'"$ledger"
+}
+
+# ── Dedupe snapshot cache ────────────────────────────────────────────────────
+# refresh-dedupe-cache.sh (a systemd timer) snapshots the three sources
+# out-of-band and writes EXISTING here, so dedupe-candidates.sh (prep-batch)
+# reads it in <1s instead of a ~50s live 3-table fetch. The 50s live fetch under
+# the codex 10s cell-yield was what stalled Scout (2026-07-22). The AUTHORITATIVE
+# dedup check stays LIVE in ledger.sh suggest (finalize-batch), so a stale cache
+# can NEVER post a duplicate — the worst case is a LEDGER_COLLISION re-run.
+DEDUPE_CACHE_FILE="${DEDUPE_CACHE_FILE:-/var/lib/hydra-company-finder/dedupe-cache.json}"
+DEDUPE_CACHE_TTL_SECONDS="${DEDUPE_CACHE_TTL_SECONDS:-1800}"   # 30 min
+
+# read_dedupe_cache — echo the cached EXISTING array iff the cache file exists,
+# is valid, and is fresh (age < TTL). Returns 1 (silent) otherwise so the caller
+# falls back to a live snapshot. Never fails the pipeline: a bad cache is a
+# cache-miss, not an error.
+read_dedupe_cache() {
+  local gen now age existing
+  [[ -f "$DEDUPE_CACHE_FILE" ]] || return 1
+  gen="$(jq -r '.generated_at_epoch // empty' "$DEDUPE_CACHE_FILE" 2>/dev/null)" || return 1
+  [[ "$gen" =~ ^[0-9]+$ ]] || return 1
+  now="$(date +%s)"
+  age=$(( now - 10#$gen ))
+  (( age >= 0 && age < DEDUPE_CACHE_TTL_SECONDS )) || return 1
+  # .existing MUST be an array OF OBJECTS. `jq -ce '.existing'` alone accepts any
+  # non-null value, and an array of non-objects (e.g. [1]) still aborts dedupe's
+  # `map(. + {…})` — either way losing the documented live fallback. Full-shape
+  # gate so any malformed cache is a cache-miss, not a crash.
+  existing="$(jq -ce 'select((.existing | type) == "array" and (.existing | all(.[]; type == "object"))) | .existing' "$DEDUPE_CACHE_FILE" 2>/dev/null)" || return 1
+  printf '%s' "$existing"
 }

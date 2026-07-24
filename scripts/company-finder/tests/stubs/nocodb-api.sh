@@ -41,6 +41,11 @@ case "$cmd" in
         *) shift ;;
       esac
     done
+    # Optional read logging, guarded by NOCODB_STUB_READ_LOG so it's opt-in
+    # and existing tests (which don't set it) are unaffected. One line per
+    # records.ls call — snapshot-sharing tests count these to prove a
+    # once-per-table fetch, not once-per-caller.
+    [[ -n "${NOCODB_STUB_READ_LOG:-}" ]] && printf 'records.ls %s offset=%s\n' "$tid" "$offset" >>"$NOCODB_STUB_READ_LOG"
     # Clamped multi-page mode: NOCODB_STUB_TOTAL_ROWS=<n> serves n synthetic
     # rows ({"Id":1.."n"}) for ANY table, clamping the requested --limit to
     # NOCODB_STUB_CLAMP (default 100) like NocoDB Cloud does — the behavior

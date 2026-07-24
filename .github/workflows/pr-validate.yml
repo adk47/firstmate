@@ -621,6 +621,17 @@ jobs:
           bash scripts/check-data-sourcing-doctrine.sh
           echo "::endgroup::"
 
+      - name: Admin-API doc contract check — analytics-sources payload must document {"link"}
+        # Incident 2026-07-15: @Ops sent 16x {"url": ...} to
+        # POST /admin/track/<id>/analytics-sources and got 16x HTTP 400, because
+        # the skill documented the stale field. PR #696 corrected it to
+        # {"link": ...}; prose != enforcement, so this gate fails if the dead
+        # field reappears in any skill doc or the corrected example is removed.
+        run: |
+          echo "::group::Admin-API doc contract check"
+          bash scripts/check-admin-api-doc-contract.sh
+          echo "::endgroup::"
+
       - name: Egress allowlist check — no unauthorized additions
         run: |
           echo "::group::Checking egress allowlist changes"
@@ -1171,6 +1182,43 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_cs_selfserve_backlog
+      - name: Run payout-workbook reconciliation tests
+        # skills-all/muso-stripe-payout-report/scripts/payout_workbook.py builds the
+        # Excel payout workbook Liza reads and delivers autonomously. Its true-ledger
+        # gate (sum(Net)==payout) is a near-identity; the number Liza actually sees
+        # (cell M12) is derived separately, so a payout can balance on sum(Net) yet
+        # still DISPLAY a non-zero difference (uncategorized adjustment/reversal, Kali
+        # charge fee, Ads/Kali net-shows-gross). These lock the independent displayed-
+        # reconciliation gate (refuse delivery unless the shown difference is $0.00),
+        # the Ads/Kali unsupported-activity refusal, money() fail-loud, and category_net's
+        # =J-K+L+M mirror — so a manual happy-path workbook can't mask a regression.
+        # Same bare stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_payout_workbook
+      - name: Run cs-sla-report tests
+        # scripts/cs-sla-report.py is the weekly SLA denominator (READ-ONLY on
+        # Intercom, one Block Kit post to #cs_chats). These lock the
+        # first-response median/p90 math with an explicit unknown-statistics
+        # count (never silently dropped), the >24h residue snapshot's
+        # waiting_since semantics, the reopen-rate denominator (conversations
+        # with >=1 admin reply), and the fail-loud queue-depth subprocess
+        # handling. Same bare stdlib unittest, targeted by name (no
+        # pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_cs_sla_report
+      - name: Run cs-ops-drain-candidates tests
+        # scripts/cs-ops-drain-candidates.py is the DETERMINISTIC lister for
+        # the Phase 2.1 ops-drain (ships DRY-RUN ONLY, cron enabled:false).
+        # These lock the load-bearing de-confliction invariant (exclude by
+        # conversation id across ALL sibling sweeper states — a missed
+        # exclusion double-messages a customer), the 3-verb allowlist on
+        # --append-record, host-guarded shadow-log appends, and PII masking.
+        # Same bare stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_cs_ops_drain_candidates
 
   plugin-tests:
     name: Plugin tests (vitest)

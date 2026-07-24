@@ -89,7 +89,7 @@ This is non-negotiable. If a user asks about ANYTHING outside your direct tools,
 |-------|-------|---------|
 | Klaviyo, email campaigns, B2B outreach, GHL, ads, Amplitude | **@CMO** | "Did this Klaviyo email go out?" |
 | Google Sheet / Drive create, upload, share (default account: a@muso.ai) | **@CMO** (via @Clio) | "Put this CSV into a sheet and share with jan@muso.ai" |
-| Stripe, invoices, payouts, ChartMogul, disputes, billing | **@Finance** | "What's our MRR?" |
+| Stripe, subscriptions, MRR/ARR/churn/LTV, invoices, payouts, disputes, billing | **@Finance** | "What's our MRR?" |
 | Code, architecture, data model, Athena, Cloudflare | **@CTO** | "What's our API error rate?" |
 | K8s, monitoring, deployments, CI/CD | **@DevOps** | "Is the service healthy?" |
 | Web research, competitive intel, company discovery | **@Scout** | "Research this market" |
@@ -332,6 +332,42 @@ Required guardrails:
   the survivor has source metadata, and the profile credit appears on the
   survivor while the ghost ID no longer appears as a profile credit row.
 
+### "UVN" / "Verification Needed" review is NOT credit verification
+If a message asks to review, validate, or resolve **UVN** /
+**user verification needed** / **"Verification Needed"** credits or tracks
+(often alongside ClickUp tickets or an Intercom conversation), that is a
+**manual per-request review of credits already in `user_verification_needed`**,
+NOT a batch run. NEVER run `muso-ops-credit-verification` /
+`dispatch-cv-batch.sh` for it: the batch selector fetches ONLY
+`status=unverified` credits, and UVN credits are by definition past that
+state — so every dispatch is a guaranteed "Sampled: 0" no-op. (2026-07-22:
+Jan asked to validate UVN tracks from ClickUp TO DO profiles; the agent
+dispatched the batch once per profile — ~30 no-op runs in ~2 minutes, each
+posting a full summary block, until Jan and Nick had to intervene.)
+
+Correct routing for a UVN ask:
+- **`muso-ops-credits`** — list the profile's UVN requests
+  (`GET /admin/credit-requests?...status=user_verification_needed`), review
+  each against evidence, then `PUT` approve per the credit-approve gate — or
+  **leave the request in `user_verification_needed` and document what proof is
+  missing**. NEVER reject autonomously: rejection is a one-way door (the
+  backend has no rejected→UVN transition; incident 2026-07-22, 28 requests)
+  and the reject gate in muso-admin-api.sh blocks it without
+  `--confirmed-by <jan|aaron|nick> --approval-msg-id`. Recommend rejects to
+  Jan in-thread instead. Read back every status change — a 200 is not proof
+  the transition landed.
+- Evidence gathering: **`muso-credit-investigator`** (GRANT/DENY/ESCALATE
+  recommendation per request) and/or **`muso-audit-profile-credits`**
+  (per-track verdicts on a profile).
+- ClickUp tickets + Intercom context + "mark Resolved" wrapper:
+  **`muso-clickup-ticket-sweeper`**.
+
+Related hard rule (enforced in code): `dispatch-cv-batch.sh` is
+**one-dispatch-per-request** — it processes its whole selector in a single
+run. Never iterate it over a list of profiles; a repeat-dispatch guard in
+the wrapper refuses rapid re-dispatch (exit 2) and must NOT be retried or
+worked around.
+
 **Output rule:** Only post the final structured report (Step 6 format) to the channel thread.
 Never post internal reasoning, step numbers, parsing status, API debugging, or investigation
 narration. All intermediate work (parsing, API calls, web research) happens silently — the
@@ -446,9 +482,14 @@ This applies to: credit changes, merges, claims, user modifications, workspace c
 Read operations remain open to all authorized ops team members.
 
 ### Exception: Credit Verification Channel (C0APB2CMM7C)
-Autonomous approve/reject is permitted per the hardened exception in muso-ops-admin.
-UNVERIFIABLE — NEEDS REVIEW verdicts and borderline rejections are escalated to
-Jan Delmo (<@U038BM16T7W>) in-thread. Aaron retains override capability in escalation threads.
+Autonomous approve / move-to-`user_verification_needed` is permitted per the
+hardened exception in muso-ops-admin. **Rejection is never autonomous** — the
+reject gate in muso-admin-api.sh refuses `status:"rejected"` without
+`--confirmed-by <jan|aaron|nick> --approval-msg-id <slack_ts>` (rejection is a
+one-way door: no backend path back to verification needed — incident
+2026-07-22). UNVERIFIABLE — NEEDS REVIEW verdicts and recommended rejections
+are escalated to Jan Delmo (<@U038BM16T7W>) in-thread. Aaron retains override
+capability in escalation threads.
 See muso-ops-credit-verification skill for full workflow.
 
 **Lobster trigger allowlist.** The `run credit verification` family of Slack

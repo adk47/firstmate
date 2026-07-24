@@ -24,6 +24,20 @@ especially the People section (the most churn-prone data here).
 surface per-id partial failures; anomalies surface only on re-fetch of the queue. Never
 treat 200 as proof an individual credit changed.
 
+**Credit-request status transitions are a hard matrix — anything off it silently
+no-ops with a 200.** `core-backend/src/apis/_admin/credit-requests/updateStatus.js`
+gates each transition per-branch (`transitionCreditRequest(id, target, allowedFrom)`):
+`approved` ← unverified/UVN/rejected/processing; `rejected` ← unverified/UVN/approved/processing;
+`user_verification_needed` ← **unverified ONLY**; `unverified` ← approved ONLY;
+`processing` ← unverified/processing/UVN. Two consequences that bit on 2026-07-22:
+(a) **rejection is a one-way door** — there is no `rejected → user_verification_needed`
+path, so 28 wrongly-rejected UVN requests could not be moved back (readback showed 28/28
+still rejected after a 200); this is why the credit reject gate in `muso-admin-api.sh`
+makes `status:"rejected"` human-only (`--confirmed-by` + `--approval-msg-id`).
+(b) The `profileId` selector variant of the bulk PUT matches **`unverified` rows only** —
+UVN/rejected/processing rows are silently skipped; use explicit `requestIds` for anything
+past `unverified`. Always read the queue back after any status write.
+
 **Profile and credit field shapes.** `GET /admin/profile/{uuid}` wraps under
 `body.data`: `isClaimed`, `workspaces[]{email,isClaimed}`, `knownAsNames[]`,
 `rawProfiles[]`. Ownership rule: `isClaimed==true` AND exactly one `workspaces[]` entry
@@ -36,6 +50,24 @@ matching a customer-supplied title.
 **Credit delete is one (track, profile) pair per call.** `DELETE /admin/track/:trackId/profile/:profileId/credits`,
 empty body, no batch variant. `POST /admin/profiles/unmerge` body `{unmergeFrom, profilesIds:[]}`
 (approval-gated).
+
+**Displayed profile credits are materialized — the bulk removal endpoint cannot remove
+them.** `DELETE /admin/profile/:id/credits` 200s but only deletes Muso-origin raw role
+rows via the raw-ingestion queue; the materialized credits users see survive, even when
+zero raw assertions remain (2026-07 La Mano 1.9 / Matt Wright: two 200'd bulk batches,
+no visible change after 24h, and an agent triage wrongly concluded per-track deletes
+would be equally futile). The per-track DELETE above IS effective: it edits the
+materialized rows directly and overrides still-active external raw credits
+(tidal/mlc/jaxsta) — canonical ops procedure per the 2026-02-04 KT ("manually remove
+incorrect credits (overrides raw source)"). Verify via the credits LIST (materializes
+~20s), never via the profile's `creditCount` (lagging cached stat). Whole-raw
+`POST /admin/profile/:id/unlink` is only safe for cleanly-wrong raws — sweep the
+profile's FULL credit list through `GET /admin/track/:id/raw-credits` first (checking only
+the requested tracks misses keep-assertions); raws are often mixed (one tidal raw asserted
+16 wrong + 26 correct tracks). More than 10 destructive DELETEs in 15 min trips the tier-2 gate:
+escalate for second-human approval (`--confirmed-by`/`--approval-msg-id` on the admin
+wrapper; muso-cli: `--approval-ref`), don't pace under it. Full playbook:
+`skills-all/muso-ops-tracks/SKILL.md` → Removal Requests.
 
 **`OPS_DRY_RUN=1` silently fakes success.** With it set in env, the admin-api wrapper
 short-circuits EVERY non-GET with a synthetic `{"http_status":200,"dryRun":true,"wouldHaveExecuted":true}`.

@@ -149,6 +149,31 @@ was added (`cron-health-watchdog.sh`).
 defaults to `NO_REPLY` with no per-cron override wired; a cron emitting any other
 token (e.g. `NO_MEETING`) posts it to Slack every run.
 
+**Cron concurrency is ONE GLOBAL lane, not per-agent — and `maxConcurrent` does
+not apply to it.** Every cron agentTurn (all agents, isolated or not) is enqueued
+in a single process-global `"cron"` lane whose width is `cron.maxConcurrentRuns`
+(upstream default 8; hydra pins 12 in `openclaw-main.json` so ~5 concurrent QA
+auto-reviews keep headroom next to credit-verification/company-finder/sweeper
+crons — main profile only, deliberately: edge has no cron jobs and stays on the
+default). `agents.defaults.maxConcurrent` governs the `main` lane (interactive
+turns) and `agents.defaults.subagents.maxConcurrent` the `subagent` lane —
+neither touches cron, and there is no per-agent cron limit or reservation.
+Applied at gateway startup, so a change needs a restart. Source (2026.7.1 dist;
+grep these function names, the chunk filenames rot per build):
+`enqueueCommandInLane("cron",…)`, `resolveCronMaxConcurrentRuns`,
+`applyGatewayLaneConcurrency`. Verified live 2026-07-22: 4–5 `agent:qa:cron:*`
+sessions progressing in the same second — same-agent isolated cron turns
+genuinely parallelize (one codex app-server per codex-home multiplexes them; no
+codex-side concurrency knob exists). Two traps when "cron looks serial": (a) the
+journal diagnostic `queued_behind_active_work` with `queueDepth=1` means "this
+session's own model call is long-running", NOT queued behind another session
+(the active turn itself counts as queueDepth 1); (b) a codex usage-cap window
+(fifth failure mode, see CLAUDE.md) kills cron turns in seconds and reads as
+"nothing runs in parallel". Watch item after widening the lane: the 7.1 cron
+session-claim race (transient ClaimError; real fix was session `maxEntries`)
+gets marginally more exposure — re-check ClaimError frequency if it seems
+chattier.
+
 ### Memory and bootstrap
 
 **Over-cap bootstrap files are MIDDLE-dropped, not tail-dropped.** `bootstrapMaxChars`

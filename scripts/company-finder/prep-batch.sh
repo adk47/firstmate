@@ -31,7 +31,13 @@
 # In both cases the caller marks the batch PARTIAL/UNSAFE instead of posting.
 #
 # Exit codes: 0 ok, 1 usage/input error, 2 dedupe source unavailable,
-#             3 verify network suspect.
+#             3 verify network suspect, 5 ALREADY_RUNNING (single-flight lock
+#             held — see acquire_singleflight_lock in lib/common.sh).
+#
+# On every non-zero exit, in addition to the stderr message, ONE line of JSON
+# is printed to stdout: {"error":<MARKER>,"exit":<code>,"detail":<short>} (via
+# lib/common.sh's fail_json) — a stderr-only marker is invisible to the codex
+# exec cell that invokes this script (2026-07-22 finding).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,9 +53,11 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
+acquire_singleflight_lock "prep-batch.sh"
+
 # Same stdin contract as the sibling scripts: empty/whitespace → [] (a valid
 # "discovery found nothing" path), non-array → loud exit 1.
-UNION="$(read_candidates_stdin)"
+UNION="$(read_candidates_stdin)" || fail_json 1 USAGE "stdin must be a JSON array of candidates"
 
 # ── Step 1: deterministic dedupe (exit 2 = DEDUP_SOURCE_UNAVAILABLE) ─────────
 # NB: capture the real exit code with `|| rc=$?`, NOT `if ! cmd; then rc=$?`
@@ -57,7 +65,11 @@ UNION="$(read_candidates_stdin)"
 rc=0; DEDUPED="$(printf '%s' "$UNION" | bash "$DEDUPE")" || rc=$?
 if [[ "$rc" -ne 0 ]]; then
   echo "prep-batch: dedupe-candidates.sh failed (rc=$rc) — batch PARTIAL/UNSAFE, do not post." >&2
-  exit "$rc"
+  case "$rc" in
+    1) fail_json 1 USAGE "dedupe-candidates.sh: usage error" ;;
+    2) fail_json 2 DEDUP_SOURCE_UNAVAILABLE "dedupe-candidates.sh: source unavailable" ;;
+    *) fail_json "$rc" DEDUP_SOURCE_UNAVAILABLE "dedupe-candidates.sh: unexpected rc=$rc" ;;
+  esac
 fi
 NEW="$(jq -c '.new // []' <<<"$DEDUPED")"
 
@@ -67,8 +79,11 @@ if [[ "$rc" -ne 0 ]]; then
   echo "prep-batch: verify-candidates.sh failed (rc=$rc) — batch PARTIAL/UNSAFE, do not post." >&2
   # remap the verify network-suspect code (its 2) to 3 so the caller can tell
   # a dedupe-source outage apart from an egress problem.
-  [[ "$rc" -eq 2 ]] && exit 3
-  exit "$rc"
+  case "$rc" in
+    1) fail_json 1 USAGE "verify-candidates.sh: input error" ;;
+    2) fail_json 3 VERIFY_NETWORK_SUSPECT "verify-candidates.sh: our egress looked dead" ;;
+    *) fail_json "$rc" VERIFY_NETWORK_SUSPECT "verify-candidates.sh: unexpected rc=$rc" ;;
+  esac
 fi
 
 # ── Compose: survivors (alive ++ blocked) + categorized rejects ─────────────

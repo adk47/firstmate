@@ -16,6 +16,16 @@ setup() {
   export COMPANY_TABLE_ID="mvr6nmzcv7albxt"
   export CONTACTS_TABLE_ID="m9vsbijhrr9ddeu"
   export LEDGER_TABLE_ID="ledgertable001"
+  # Point the dedupe cache at a per-test path that does not exist, so every test
+  # deterministically takes the LIVE (stubbed) path unless it writes a cache.
+  export DEDUPE_CACHE_FILE="$BATS_TEST_TMPDIR/dedupe-cache-absent.json"
+}
+
+# write_cache <age_seconds> <existing_json> — stamp a cache file aged N seconds.
+write_cache() {
+  local now; now="$(date +%s)"
+  jq -n --argjson t "$(( now - $1 ))" --argjson ex "$2" \
+    '{generated_at_epoch: $t, count: ($ex | length), existing: $ex}' > "$DEDUPE_CACHE_FILE"
 }
 
 run_dedupe() { run bash "$SUT" <<<"$1"; }
@@ -198,4 +208,62 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(jq -r '.stats.checked' <<<"$output")" = "1" ]
   [ "$(jq -r '.stats.new' <<<"$output")" = "1" ]
+}
+
+# ── Dedupe cache (out-of-band snapshot) ─────────────────────────────────────
+# WHY (Rule 10): the cache is a FAST PRE-FILTER that lets prep-batch skip the
+# ~50s live 3-table fetch. A fresh cache MUST be used verbatim; a stale/malformed
+# one MUST fall back to a live snapshot. Correctness is unaffected either way
+# because ledger.sh suggest (finalize) re-checks all sources live — but if the
+# cache were trusted when stale, or ignored when fresh, prep-batch would either
+# leak a known dup into the batch or pay the ~50s cost it exists to avoid.
+
+@test "a FRESH cache is used and the live sources are never touched" {
+  # Cache holds a company absent from the fixtures; live is rigged to FAIL. Using
+  # the cache drops the candidate and succeeds with no live fetch; a fallback to
+  # live would exit 2.
+  write_cache 60 '[{"domain":"cachedco.com","name":"CachedCo","table":"Company Intelligence"}]'
+  export NOCODB_STUB_FAIL="mvr6nmzcv7albxt"
+  run_dedupe '[{"name":"CachedCo","domain":"https://www.CachedCo.com/"},{"name":"BrandNew","domain":"brandnew.example"}]'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.duplicates[0].reason' <<<"$output")" = "domain" ]
+  [ "$(jq -r '.duplicates[0].matched_against.table' <<<"$output")" = "Company Intelligence" ]
+  [ "$(jq -r '.stats.new' <<<"$output")" = "1" ]
+}
+
+@test "a STALE cache is ignored — falls back to the live snapshot" {
+  export DEDUPE_CACHE_TTL_SECONDS=1800
+  write_cache 4000 '[{"domain":"staleco.com","name":"StaleCo","table":"Company Intelligence"}]'
+  run_dedupe '[{"name":"StaleCo","domain":"staleco.com"},{"name":"Landr","domain":"landr.com"}]'
+  [ "$status" -eq 0 ]
+  # landr.com is in the LIVE fixtures → dropped (proves the live snapshot was read)
+  [ "$(jq -r '[.duplicates[].domain] | index("landr.com") != null' <<<"$output")" = "true" ]
+  # staleco.com is ONLY in the stale cache → survives (proves the cache was ignored)
+  [ "$(jq -r '[.new[].domain] | index("staleco.com") != null' <<<"$output")" = "true" ]
+}
+
+@test "a MALFORMED cache falls back to the live snapshot" {
+  printf 'not json at all' > "$DEDUPE_CACHE_FILE"
+  run_dedupe '[{"name":"Landr","domain":"landr.com"}]'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.duplicates[0].reason' <<<"$output")" = "domain" ]
+}
+
+@test "a FRESH but wrong-TYPE cache (.existing not an array) falls back to live" {
+  # Valid JSON, in-TTL, but .existing is an object — must NOT be trusted (a
+  # non-array .existing would abort dedupe's map() instead of falling back).
+  jq -n --argjson t "$(date +%s)" '{generated_at_epoch: $t, existing: {}}' > "$DEDUPE_CACHE_FILE"
+  run_dedupe '[{"name":"Landr","domain":"landr.com"}]'
+  [ "$status" -eq 0 ]
+  # landr.com is in the LIVE fixtures → dropped, proving the live snapshot was used
+  [ "$(jq -r '.duplicates[0].reason' <<<"$output")" = "domain" ]
+}
+
+@test "a FRESH array cache with non-object rows falls back to live" {
+  # .existing is an array but its elements aren't objects ([1]) — dedupe's
+  # map(. + {…}) would abort; must be treated as a cache-miss instead.
+  jq -n --argjson t "$(date +%s)" '{generated_at_epoch: $t, existing: [1]}' > "$DEDUPE_CACHE_FILE"
+  run_dedupe '[{"name":"Landr","domain":"landr.com"}]'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.duplicates[0].reason' <<<"$output")" = "domain" ]
 }
