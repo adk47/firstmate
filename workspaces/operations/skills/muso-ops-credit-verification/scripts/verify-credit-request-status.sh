@@ -162,6 +162,21 @@ for i in "${!ID_ARR[@]}"; do
     ID_ARR[i]="$id_trimmed"
 done
 
+# Deduplicate, preserving first-seen order. The readback answers a SET
+# question — "did THESE ids reach the expected status" — so a repeated id must
+# not inflate `matched` or double-list a mismatch in the .results.jsonl audit
+# row. Callers do not dedupe for us: batch-flag-credits.sh forwards its PUT ids
+# verbatim, and an agent composing --ids by hand can repeat one.
+declare -A _cv_seen=()
+_cv_deduped=()
+for id in "${ID_ARR[@]}"; do
+    if [[ -z "${_cv_seen[$id]:-}" ]]; then
+        _cv_seen["$id"]=1
+        _cv_deduped+=("$id")
+    fi
+done
+ID_ARR=("${_cv_deduped[@]}")
+
 # --- Resolve trino-query.sh -------------------------------------------------
 # Mirrors fraud-muso-only-lookup.sh's resolution chain exactly (lines ~71-75
 # of that file): env override -> relative repo-root path -> deployed

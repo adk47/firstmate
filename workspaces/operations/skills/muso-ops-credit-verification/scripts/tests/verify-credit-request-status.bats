@@ -116,6 +116,19 @@ teardown() { teardown_tmp_env; }
     echo "$output" | jq -e --arg id "$ID2" '.mismatched == [{id:$id, actual:"missing"}]' >/dev/null
 }
 
+@test "duplicate ids do not inflate matched count (set semantics)" {
+    # ID1 repeated: the readback is a SET question, so matched must be 2
+    # (unique ID1 + ID2), never 3, and the audit row must record the deduped
+    # id set — otherwise a duplicate would lie in .results.jsonl.
+    run --separate-stderr env TRINO_QUERY_SH="$TRINO_ALL_MATCHED" \
+        bash "$WRAPPER" --expected user_verification_needed --ids "$ID1,$ID1,$ID2"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.matched == 2 and .mismatched == []' >/dev/null
+    row=$(tail -n1 "$CV_RESULTS_PATH")
+    echo "$row" | jq -e --arg a "$ID1" --arg b "$ID2" \
+        '.matched == 2 and (.request_ids | sort) == ([$a, $b] | sort)' >/dev/null
+}
+
 # --- Unverifiable paths ---
 
 @test "trino exits non-zero -> exit 3 + banner on stderr" {
