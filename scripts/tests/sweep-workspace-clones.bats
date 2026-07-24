@@ -282,6 +282,44 @@ mkclone() {
   [[ "$output" == *"local-tag"* ]]
 }
 
+@test "same-name branch at a different sha than the remote ref is held" {
+  mkclone "$TEST_TMPDIR/repos/moved-branch"
+  ( cd "$TEST_TMPDIR/repos/moved-branch" \
+      && git branch release \
+      && echo more > g.txt && git add g.txt && git commit -qm second \
+      && git push -q origin main && git push -q origin main:release )
+  # local release stays at the first commit (reachable via origin/main),
+  # while origin/release now points at the second — pointer would be lost.
+  age_tree 20 "$TEST_TMPDIR/repos/moved-branch"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/moved-branch" ]
+  [[ "$output" == *"local-branch"* ]]
+}
+
+@test "tag name matching is exact: local v1 is not satisfied by remote v10" {
+  mkclone "$TEST_TMPDIR/repos/tagname"
+  ( cd "$TEST_TMPDIR/repos/tagname" && git tag v10 && git push -q origin v10 && git tag v1 )
+  age_tree 20 "$TEST_TMPDIR/repos/tagname"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/tagname" ]
+  [[ "$output" == *"local-tag"* ]]
+  [[ "$output" == *"'v1'"* ]]
+}
+
+@test "same-name tag at a different object on origin is held" {
+  mkclone "$TEST_TMPDIR/repos/tagobj"
+  ( cd "$TEST_TMPDIR/repos/tagobj" && git tag -a v1 -m "local annotated" )
+  # origin gets a LIGHTWEIGHT v1 at the same commit: same name, different object.
+  git -C "$(ls -d "$TEST_TMPDIR"/origins/*tagobj.git)" tag v1 main
+  age_tree 20 "$TEST_TMPDIR/repos/tagobj"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/tagobj" ]
+  [[ "$output" == *"local-tag"* ]]
+}
+
 @test "tags that exist on origin do not hold the clone" {
   mkclone "$TEST_TMPDIR/repos/pushed-tag"
   ( cd "$TEST_TMPDIR/repos/pushed-tag" && git tag v1 && git push -q origin v1 )
