@@ -221,6 +221,16 @@ fi
 # Parse + trim IDs. Reject empty entries from "a,,b" or leading/trailing
 # commas so we never send `"requestIds":[""]` to the API, which the
 # backend would silently ignore.
+#
+# Enforce the SAME strict-UUID contract as verify-credit-request-status.sh
+# BEFORE any write. credit_requests.id is a uuid (docs/credit-verification/
+# fraud-issue-db-state.md). Without this, a malformed id would be sent in the
+# PUT and only caught by the post-write readback (verify exit 2), which this
+# wrapper would then mis-collapse into exit 4 "unverifiable" — putting a bad id
+# on the money API AND obscuring a caller argument error as an infra failure.
+# Normalize to lowercase so the PUT body and the readback lookup share the
+# canonical form Postgres/Trino serialize.
+UUID_REGEX='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 IFS=',' read -r -a ID_ARR <<< "$IDS_RAW"
 for i in "${!ID_ARR[@]}"; do
     id_trimmed="${ID_ARR[$i]#"${ID_ARR[$i]%%[![:space:]]*}"}"
@@ -229,7 +239,11 @@ for i in "${!ID_ARR[@]}"; do
         echo "ERROR: --ids contains an empty entry. Use a comma-separated list with no empty values." >&2
         exit 2
     fi
-    ID_ARR[i]="$id_trimmed"
+    if ! [[ "$id_trimmed" =~ $UUID_REGEX ]]; then
+        echo "ERROR: --ids contains a non-UUID entry: '$id_trimmed'. No API call attempted." >&2
+        exit 2
+    fi
+    ID_ARR[i]="${id_trimmed,,}"
 done
 
 if [[ ! -f "$ADMIN_API_SH" ]]; then
