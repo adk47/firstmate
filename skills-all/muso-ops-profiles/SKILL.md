@@ -140,7 +140,7 @@ approval to merge (`verified` means "owner re-check passed + all dups loaded", N
 2. **Confirm same person** — names, aliases, IPIs, credits, genres. *Stays your judgment.* The verified block's `matched_external_id_sources` + `shared_track_count`/`shared_track_ratio` corroborate but do **not** prove (collaboration/Empire/Maui confounds).
 3. **Check credit intersection** — shared tracks. *You MAY read `shared_track_count` / `compared_track_count` / `shared_track_ratio` off the verified block instead of recomputing — this is the time-saver.*
 4. **Identify primary** — usually higher popularity/credits/claim status. *Stays your judgment — the customer's `asserted_direction` is an untrusted claim.*
-5. **Capture pre-state for verification** — GET both profiles now and record `isClaimed`, `workspaces[]`, `playlist.id`, `rawProfiles[].id` for each. *MANDATORY and unchanged — this fresh GET re-confirms claim-state at merge time and supersedes any staleness in the verified block.* You will compare against post-state.
+5. **Capture pre-state for verification** — GET both profiles now and record `isClaimed`, `workspaces[]`, `playlist.id`, `rawProfiles[].id`, and the credit count for each. *MANDATORY and unchanged — this fresh GET re-confirms claim-state at merge time and supersedes any staleness in the verified block.* You will compare against post-state (the credit count is also what the async-landing re-fire rule below means by "survivor credits unchanged").
 6. **Dry-run first.** Run the call once with `OPS_DRY_RUN=1` and confirm the wrapper's intercept summary lists the exact `mergeInto` and `profilesIds[]` you intend. If anything mismatches, stop.
 7. **Show side-by-side comparison** to the requester before the real call.
 
@@ -198,14 +198,14 @@ GET both profiles and assert against the pre-state you captured in step 5:
 **Verifying the async merge actually landed (live catalog — NOT the plain admin GET, NOT Trino):**
 
 The plain admin GET never reflects the async fold, and the BI matview
-(`matvw_catalog_profile`) is a ~daily-rebuilt analytics copy that must NOT be used for this
-operational check (per the 2026-07-21 rewrite, PR #717 — its watermark can lag days). The
-truthful "did it merge?" signal is the **batched admin profile-list read with
-`includeDeleted=true`**, which proxies the current Mongo catalog:
+(`matvw_catalog_profile`) is an analytics copy whose watermark can lag days — banned for
+this operational check since PR #717 (2026-07-21). The truthful "did it merge?" signal is
+the **batched admin profile-list read with `includeDeleted=true`**, which proxies the
+current Mongo catalog:
 
 ```bash
 muso --env prod --json api GET /admin/profile \
-  --query includeDeleted=true --query limit=3 \
+  --query includeDeleted=true --query limit=<number of ids listed> \
   --query ids=<survivor_id> --query ids=<loser_id> [--query ids=<loser_id2>]
 ```
 
@@ -218,18 +218,28 @@ muso --env prod --json api GET /admin/profile \
   back up behind bulk sync traffic (observed 2026-07-24: merges queued for hours+ behind a
   credit-sync flood), so give it the watchdog's grace period (6h) before calling it stuck.
 - **Genuinely dropped/stuck (the real failure mode):** losers still `merged: null` after the
-  grace period. industry-data-processing's `common/process.py` deletes the SQS message on any
-  worker exception — no DLQ, no retry (incidents 2026-06-08/09, 2026-07-23). Say so plainly —
-  "the merge was accepted but has NOT landed in the catalog." **Verify the pair's current
-  state first**: a re-fire is safe ONLY when the pair shows NO partial fold (losers fully
-  active, no merged/deleted on either side, survivor credits unchanged) — then one re-fire
-  with live observation is acceptable. Re-firing against a PARTIALLY-folded pair can damage
-  the survivor — that case goes to the catalog team (Aron / Oleg). Never loop blind re-merges:
-  if one verified re-fire does not land either, stop and escalate with the evidence.
+  grace period. Historically the worker deleted the SQS message on any exception — no DLQ, no
+  retry (incidents 2026-06-08/09) — but since idp #1076 (2026-04) it retries with
+  visibility-timeout backoff, and since idp #1355 (2026-06) exhausted messages are captured to
+  Mongo `catalog_dead_letter` (inspectable/replayable by the catalog team). So first say it
+  plainly — "the merge was accepted but has NOT landed in the catalog" — and ask the catalog
+  team (Aron / Oleg) whether the loser id sits in `catalog_dead_letter`: a dead-letter row
+  means a deterministic worker error that a re-fire will hit again — replay/escalate, don't
+  re-fire. Only if there is no dead-letter row (message likely still queued or lost pre-#1355
+  style): **verify the pair's current state** — a re-fire is safe ONLY when the pair shows NO
+  partial fold: losers fully active, no merged/deleted on either side, survivor credits
+  unchanged vs the step-5 pre-state (no pre-state captured, e.g. you arrived from a watchdog
+  page → treat as unverifiable and escalate instead). Then ONE re-fire is acceptable — and it
+  must be observed: re-run this same admin list read afterwards until it lands or the grace
+  period passes again. The re-fire is itself a Tier-2 merge call: cite a fresh in-thread
+  approval (`--approval-msg-id`), not the original one. Re-firing against a PARTIALLY-folded
+  pair can damage the survivor — that case goes to the catalog team. Never loop blind
+  re-merges: if the one verified re-fire does not land either, stop and escalate with the
+  evidence.
   The `merge-landing-watchdog` (cron, live-catalog-based since PR #717) also pages
   #clio_devops for these, so a stuck merge will surface even if no one re-checks.
 
-**STOP-RULE — read this before you do anything if verification looks off:**
+**STOP-RULE — read this before you do anything if verification looks off** *(applies to the synchronous post-merge verification; a dropped ASYNC landing follows the verified-single-re-fire rule above instead of the wait-for-Aaron default)*:
 
 > If post-merge verification doesn't match expectations, you do **NOT**:
 > - Retry with mutated body shapes (`sourceId/targetId`, `profileId`, etc.). The backend rejects those with 400 — you don't gain information, you just spam the audit log.

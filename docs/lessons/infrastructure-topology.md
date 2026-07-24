@@ -28,7 +28,7 @@ decommission runbook and the live OVH service manifests. Full spec:
 
 ## 2. "v3" triage: frozen tables are DEAD, the V3 pipeline is SUNSETTING, `/api/v3` is the keeper
 
-Three different things share the "v3" name -- treat them differently:
+Three different things share the "v3" name:
 
 - **Dead now**: the two frozen legacy stats tables `profile_v3_lifetime` and
   `profile_v3_tracks` ("v3 lifetime stats", frozen 2026-06-06). Do not read or build
@@ -40,7 +40,7 @@ Three different things share the "v3" name -- treat them differently:
   `matvw_*` in `platform-industry-bi-prod`, the V3 PDP tier). It still SERVES
   production today -- many query-writer saved queries, dedup sweeps, and fraud
   lookups read `matvw_*`, so it is not switch-off-able yet and real breakage in it
-  still matters -- but the direction is migration OFF it: ops merge verification
+  still matters -- but everything is migrating OFF it: ops merge verification
   already moved to the live-catalog admin read (PR #717), and core-backend readers
   are cutting over to the `cube_analytics_*` views (the #9204/#9208 sweep). New
   operational checks must use live sources (admin API / cube views), never the BI

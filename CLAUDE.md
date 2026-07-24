@@ -42,7 +42,7 @@ hard-won knowledge we built up locally over time:
     NocoDB/ClickUp, Slack rendering, and people/roles.
   - `infrastructure-topology.md` — what our infra actually is (entirely OVH;
     AWS decommissioned 2026-05-31), the two frozen `*v3*` stats tables + retired
-    Athena vs. the live V3 pipeline and `/api/v3` API, and the "consult H-DevOps
+    Athena vs. the sunsetting V3 pipeline and the live `/api/v3` API, and the "consult H-DevOps
     before touching infra" rule.
 - **`.claude/agents/`** — specialist subagents that carry this knowledge and
   cite `docs/lessons/`. See the roster under "Picking the right extension
