@@ -62,6 +62,9 @@ STUB
   export WEEKLY_CLEANUP_BAK_AGE_DAYS=30
   export WEEKLY_CLEANUP_LOCKFILE="$TEST_TMPDIR/wc.lock"
   export WEEKLY_CLEANUP_SKIP_HOST_GUARD=1
+  # CRITICAL: the CI runner IS node-8 — without this, a test run would
+  # invoke the clone sweeper against the real workspace roots.
+  export WEEKLY_CLEANUP_SKIP_SWEEP=1
   # MUSO_SLACK_ENV_FILE is absent by default → no token → slack-notify
   # silently skips the send (no muso call).
 }
@@ -368,4 +371,25 @@ STUB
 @test "unknown flag → exit 2" {
   run bash "$WC" --bogus
   [ "$status" -eq 2 ]
+}
+
+@test "clone sweeper is wired in and dry-run propagates (hermetic roots)" {
+  # Point the sweeper at sandbox roots so enabling it is safe, then verify
+  # the weekly wrapper invokes it and forwards --dry-run.
+  mkdir -p "$TEST_TMPDIR/sweeproot/repos" "$TEST_TMPDIR/sweeproot/ws"
+  export WEEKLY_CLEANUP_SKIP_SWEEP=0
+  export SWEEP_REPOS_ROOT="$TEST_TMPDIR/sweeproot/repos"
+  export SWEEP_WS_ROOT="$TEST_TMPDIR/sweeproot/ws"
+  export SWEEP_SKIP_HOST_GUARD=1
+  export SWEEP_LOCKFILE="$TEST_TMPDIR/sweep.lock"
+  run bash "$WC" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clone-sweep: ok"* ]]
+  [[ "$output" == *"[sweep-clones"* ]]
+}
+
+@test "clone sweeper skip knob is honored" {
+  run bash "$WC" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clone-sweep: skipped"* ]]
 }

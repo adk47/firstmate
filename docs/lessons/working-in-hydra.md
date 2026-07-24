@@ -208,6 +208,16 @@ run died mid-apply when a deploy stopped the gateway; hundreds of writes landed 
 unknown state with no failure notification.) Before deploying, check the apply log for
 an `apply_started` with no matching `apply_finished`; if unmatched, wait or coordinate.
 
+**Agent repo clones under `workspaces/repos/` and `workspaces/*/tmp/` are TTL-swept.**
+Both paths are rsync-excluded, so deploys never clean them; by 2026-07 they had
+accumulated 90 clones / 26GB of stale pre-fix revisions. `scripts/sweep-workspace-clones.sh`
+(wired into the weekly cleanup timer) deletes clones idle past the TTL (repos/ 14d,
+tmp/ 7d) ONLY when git-clean, fully pushed, stash-free, and off the keep-list of
+canonical long-lived clones; anything dirty/unpushed/odd is held and reported to
+#clio_devops, never deleted. Corollary: work you want to survive in a clone must be
+pushed — an unpushed branch keeps the clone held forever but is one `rm` away from
+gone, and a pushed branch is the only durable copy.
+
 **Cap parallel subagent fan-out; do not spawn one per work item.** For a large batch,
 the orchestrator should round-robin tasks through a bounded pool (cap around 10,
 configurable), reusing a slot as one returns, rather than fan out hundreds of agents.
