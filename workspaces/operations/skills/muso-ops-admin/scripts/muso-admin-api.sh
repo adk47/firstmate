@@ -39,6 +39,7 @@ APPROVAL_MSG_ID=""   # Set via --approval-msg-id flag (Slack message ID/ts of th
 MUSO_OPS_STATE_DIR="${MUSO_OPS_STATE_DIR:-/var/log/muso-ops}"
 RECENT_MERGES_PATH="${RECENT_MERGES_PATH:-${MUSO_OPS_STATE_DIR}/recent-merges.jsonl}"
 TIER2_AUDIT_PATH="${TIER2_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/tier2-audit.jsonl}"
+CREDIT_REJECT_AUDIT_PATH="${CREDIT_REJECT_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/credit-reject-audit.jsonl}"
 TIER2_APPROVERS_PATH="${TIER2_APPROVERS_PATH:-${SCRIPT_DIR}/../config/tier2-approvers.txt}"
 TIER2_ENDPOINTS_PATH="${TIER2_ENDPOINTS_PATH:-${SCRIPT_DIR}/../config/tier2-endpoints.txt}"
 TIER2_GODMODE_PATH="${TIER2_GODMODE_PATH:-${SCRIPT_DIR}/../config/tier2-godmode-allowlist.txt}"
@@ -1157,6 +1158,101 @@ EOF
     return 0
 }
 
+# --- Credit reject gate (incident 2026-07-22) ---
+# Rejection of a credit request is NEVER autonomous. core-backend's
+# updateStatus.js transition matrix has no rejected->user_verification_needed
+# path (the only exit from `rejected` is `approved`), so an agent mistake is
+# irreversible for the customer's verification flow: on 2026-07-22 the Ops
+# agent rejected 28 UVN requests during Jan's ClickUp sweep and Jan's "move
+# them back to verification needed" correction silently no-oped (hollow 200).
+# Doctrine now matches the customer-facing rule (Caroline never rejects):
+# approve, or keep in user_verification_needed and ask for more proof. A hard
+# reject requires an explicit per-batch human decision, evidenced the same way
+# as bulk-destructive DELETEs: --confirmed-by <tier-2 approver> +
+# --approval-msg-id. Deliberately NO env off-switch and NO dry-run skip — the
+# actor this gate restrains controls its own env, and a dry-run preview of an
+# unauthorized reject should fail loudly too.
+enforce_credit_reject_gate() {
+    local method="$1" path="$2" body="$3"
+
+    # Same verb/path detection style as enforce_credit_approve_gate: both PUT
+    # (bulk, collection endpoint) and PATCH (single credit) are gated.
+    local method_uc
+    method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    case "$method_uc" in
+        PUT|PATCH) ;;
+        *) return 0 ;;
+    esac
+    [[ "$path" == /admin/credit-requests* ]] || return 0
+    # Detect the reject STRUCTURALLY, the way core-backend's JSON.parse does —
+    # not by literal bytes. A body that parses to status:"rejected" via a \uXXXX
+    # escape or an inter-token newline slips a line-oriented literal grep, yet
+    # the backend still honors it (and reject is a ONE-WAY DOOR). jq normalizes
+    # both; the literal grep is kept as a belt-and-suspenders backstop for any
+    # jq/JSON.parse divergence. Gate if EITHER sees a reject — never less than
+    # the old grep-only behavior.
+    local status_val
+    status_val="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)"
+    if [[ "$status_val" != "rejected" ]] \
+        && ! echo "$body" | grep -q '"status"[[:space:]]*:[[:space:]]*"rejected"'; then
+        return 0
+    fi
+
+    # Requester identity is auto-stamped from whoever is in-thread — it is not
+    # evidence a human decided to reject, so it does NOT bypass this gate.
+    if [[ -z "$CONFIRMED_BY" ]]; then
+        cat >&2 <<EOF
+MUSO_CREDIT_REJECT_APPROVAL_REQUIRED: ${method} ${path} would set credit-request status=rejected.
+Rejection is a one-way door: the backend has no rejected->user_verification_needed
+transition (only rejected->approved), so a wrong reject cannot be undone.
+Do NOT reject autonomously. Instead:
+  * leave the request in user_verification_needed and ask for more proof, or
+  * escalate to Jan (<@U038BM16T7W>) in-thread with your evidence and rationale.
+A hard reject requires an explicit human decision:
+  bash $0 --requester <slack_id> --confirmed-by <jan|aaron|nick> --approval-msg-id <slack_ts> \\
+    call ${method} "${path}" '<body>'
+EOF
+        return 1
+    fi
+
+    if ! is_tier2_approver "$CONFIRMED_BY"; then
+        cat >&2 <<EOF
+MUSO_CREDIT_REJECT_APPROVAL_INVALID: --confirmed-by '${CONFIRMED_BY}' is not in the approver allowlist.
+Allowed approvers (from $TIER2_APPROVERS_PATH):
+$(cat "$TIER2_APPROVERS_PATH" 2>/dev/null | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | sed 's/^/  - /' || echo "  (file missing)")
+EOF
+        return 1
+    fi
+
+    if [[ -z "$APPROVAL_MSG_ID" ]]; then
+        echo "MUSO_CREDIT_REJECT_APPROVAL_REQUIRED: --approval-msg-id <slack_msg_ts> is required alongside --confirmed-by for credit-request rejections (audit trail)." >&2
+        return 1
+    fi
+
+    # Audit BEFORE allowing — fail-closed, same rationale as the tier-2 gate:
+    # "rejected, no record of who decided it" is worse than a retryable error.
+    if ! mkdir -p "$(dirname "$CREDIT_REJECT_AUDIT_PATH")" 2>/dev/null; then
+        echo "MUSO_CREDIT_REJECT_AUDIT_UNWRITABLE: cannot create $(dirname "$CREDIT_REJECT_AUDIT_PATH") — refusing the reject to preserve the audit trail." >&2
+        return 1
+    fi
+    local ts audit_rc=0
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq -n -c \
+        --arg ts "$ts" \
+        --arg method "$method" \
+        --arg path "$path" \
+        --arg requester "${REQUESTER_EMAIL:-}" \
+        --arg confirmed_by "$CONFIRMED_BY" \
+        --arg approval_msg_id "$APPROVAL_MSG_ID" \
+        '{ts:$ts, gate:"credit_reject", method:$method, path:$path, requester:$requester, confirmed_by:$confirmed_by, approval_msg_id:$approval_msg_id}' \
+        >> "$CREDIT_REJECT_AUDIT_PATH" || audit_rc=$?
+    if (( audit_rc != 0 )); then
+        echo "MUSO_CREDIT_REJECT_AUDIT_UNWRITABLE: append to $CREDIT_REJECT_AUDIT_PATH failed (rc=$audit_rc) — refusing the reject to preserve the audit trail." >&2
+        return 1
+    fi
+    return 0
+}
+
 # --- Tier-2 approval gate (incident 2026-04-29) ---
 # See skills-all/muso-ops-admin/scripts/muso-admin-api.sh for the canonical
 # version + design notes. This block is mirrored here because workspaces/operations
@@ -1745,6 +1841,15 @@ EOF
         # Scoped inside the helper to credit-request writes only, so this is
         # a no-op for any other path.
         write_credit_request_result "$method" "$path" "$body" "rejected_by_gate" "" "evidence-excerpt missing, too short/long, no fresh session log, Tier 1 web_fetch substitution, or insufficient grounded evidence — see stderr above"
+        return 1
+    fi
+
+    # Credit reject gate (incident 2026-07-22). Rejection is never autonomous —
+    # requires --confirmed-by + --approval-msg-id. Runs even in dry-run. Same
+    # truth-floor logging as the approve gate so compute-run-summary.sh sees
+    # the refusal.
+    if ! enforce_credit_reject_gate "$method" "$path" "$body"; then
+        write_credit_request_result "$method" "$path" "$body" "rejected_by_gate" "" "status=rejected without --confirmed-by <approver> + --approval-msg-id — rejection is never autonomous; keep the request in user_verification_needed or escalate to Jan"
         return 1
     fi
 
