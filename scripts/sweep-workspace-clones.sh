@@ -124,13 +124,20 @@ ERRORS_FILE="$(mktemp)"
 PAYLOAD_FILE="$(mktemp)"
 trap 'rm -f "$HELD_FILE" "$ERRORS_FILE" "$PAYLOAD_FILE"' EXIT
 
-# ── guards lifted from weekly-cleanup.sh ─────────────────────
+# ── guards lifted from weekly-cleanup.sh (normalization hardened) ────
+# Strip ALL trailing slashes ('' if the input was only slashes) so forms
+# like '//' cannot dodge the broad-root refusal below.
+normalize_root() {
+  local root="$1"
+  while [ "$root" != "${root%/}" ]; do root="${root%/}"; done
+  printf '%s' "$root"
+}
+
 guard_root() {
   local root="$1"
   if [ -z "$root" ] || [ "$root" = "/" ]; then
     log "FATAL: refusing to run with root='$root'"; exit 1
   fi
-  root="${root%/}"
   if [ -L "$root" ]; then
     log "FATAL: swept root is a symlink: $root"; exit 1
   fi
@@ -275,8 +282,18 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     return 0
   fi
 
-  # No .git at all → plain junk, mtime-only policy on the whole tree.
+  # No .git at all → plain junk, mtime-only policy on the whole tree —
+  # UNLESS a repo hides anywhere inside (tmp/build/checkout/.git): a nested
+  # clone with unique work must never ride out on the junk lane. A failed
+  # scan holds too (cannot prove absence → cannot delete).
   if [ ! -e "$d/.git" ]; then
+    local inner rc_inner=0
+    inner="$(find "$d" -xdev -name .git -print -quit 2>/dev/null)" || rc_inner=$?
+    if [ "$rc_inner" -ne 0 ] || [ -n "$inner" ]; then
+      held_nested=$((held_nested + 1))
+      hold "nested" "$d" "${inner:+repo at $inner inside a non-git tree}${inner:-nested-repo scan failed}"
+      return 0
+    fi
     if tree_fresh_since "$d" "$ref"; then
       active=$((active + 1)); return 0
     fi
@@ -420,6 +437,11 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     active=$((active + 1)); return 0
   fi
 
+  # Size and display sha are computed BEFORE the final audit: du over a
+  # multi-GB clone takes seconds, and nothing may widen the audit→rm window.
+  head_sha="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  kb="$(entry_kb "$d")"
+
   # TOCTOU rail: the live-network probes above widen the audit→rm window,
   # and the .git-pruned freshness rail cannot see git-only writes (a new
   # ref, stash, or index change made by a concurrent writer mid-sweep).
@@ -445,8 +467,6 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "unpushed commit appeared between audit and removal"; return 0
   fi
 
-  head_sha="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-  kb="$(entry_kb "$d")"
   if remove_entry "$d" "$kb" "clone (HEAD $head_sha)"; then
     swept=$((swept + 1)); freed_kb=$((freed_kb + kb))
   fi
@@ -541,6 +561,10 @@ if [ "$SKIP_HOST_GUARD" != "1" ] && ! hostname | grep -q '^ovh-node-8$'; then
   exit 0
 fi
 
+# Normalize BEFORE guarding, and sweep the normalized values — the guard's
+# checks must apply to the exact strings the sweep will use.
+REPOS_ROOT="$(normalize_root "$REPOS_ROOT")"
+WS_ROOT="$(normalize_root "$WS_ROOT")"
 guard_root "$REPOS_ROOT"
 guard_root "$WS_ROOT"
 

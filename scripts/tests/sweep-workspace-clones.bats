@@ -494,6 +494,44 @@ STUB
   [[ "$output" == *"between audit and removal"* ]]
 }
 
+@test "structural refusal: SWEEP_REPOS_ROOT=// exits 1 (no slash-form bypass)" {
+  SWEEP_REPOS_ROOT="//" run "$SWEEP" --apply
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FATAL"* ]]
+}
+
+@test "a nested clone inside a non-git junk dir is held, not junk-deleted" {
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/build"
+  mkclone "$TEST_TMPDIR/ws/cto/tmp/build/checkout"
+  echo unique-dirty-work >> "$TEST_TMPDIR/ws/cto/tmp/build/checkout/f.txt"
+  age_tree 10 "$TEST_TMPDIR/ws/cto/tmp/build"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMPDIR/ws/cto/tmp/build/checkout/f.txt" ]
+  [[ "$output" == *"nested"* ]]
+}
+
+@test "git-only state created during the size scan holds the clone (du before final audit)" {
+  mkclone "$TEST_TMPDIR/repos/raced-du"
+  age_tree 20 "$TEST_TMPDIR/repos/raced-du"
+  REAL_DU="$(command -v du)"
+  REAL_GIT="$(command -v git)"
+  export REAL_DU REAL_GIT INJECT_TARGET="$TEST_TMPDIR/repos/raced-du"
+  cat > "$TEST_TMPDIR/bin/du" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"$INJECT_TARGET"* && ! -e "$INJECT_TARGET/.git/refs/tags/du-race" ]]; then
+  "$REAL_GIT" -C "$INJECT_TARGET" tag du-race
+fi
+exec "$REAL_DU" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/du"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/du"; hash -r
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/raced-du" ]
+  [[ "$output" == *"between audit and removal"* ]]
+}
+
 @test "structural refusal: symlinked repos root exits 1" {
   rmdir "$TEST_TMPDIR/repos" 2>/dev/null || /bin/rm -rf "$TEST_TMPDIR/repos"
   mkdir -p "$TEST_TMPDIR/elsewhere"
