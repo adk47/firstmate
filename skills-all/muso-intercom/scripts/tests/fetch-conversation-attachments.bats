@@ -230,3 +230,12 @@ called_url() { grep -qF "$1" "$CURL_CALLS"; }
   [ "$status" -ne 0 ]
   [[ "$output" == *"Usage:"* ]]
 }
+
+# ---- path-traversal guard on conversation_id -------------------------------
+@test "conversation_id with path separators is rejected before any fetch" {
+  run bash "$SCRIPT" "../../etc/evil" --out-dir "$OUT_DIR"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"Invalid conversation_id"* ]]
+  # rejected before the token check and before curl — nothing was fetched.
+  [ ! -s "$CURL_CALLS" ]
+}

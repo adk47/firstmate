@@ -76,6 +76,14 @@ if [ -z "$CONVERSATION_ID" ]; then
   exit 2
 fi
 
+# Guard the id before it reaches a filesystem path (the default OUT_DIR embeds
+# it) or the Intercom URL: it must be a plain id token, never a path fragment.
+# This blocks `../` traversal in the default out-dir from a crafted argument.
+if [[ ! "$CONVERSATION_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  echo "Invalid conversation_id '${CONVERSATION_ID}': expected characters [A-Za-z0-9_-]." >&2
+  exit 2
+fi
+
 : "${MUSOAI_INTERCOM_TOKEN:?MUSOAI_INTERCOM_TOKEN must be set to an Intercom Bearer token -- see skills-all/muso-intercom/SKILL.md}"
 
 OUT_DIR="${OUT_DIR:-intercom-attachments/${CONVERSATION_ID}}"
