@@ -80,8 +80,10 @@ exec python3 /opt/hydra/scripts/close-stale-conversations.py --apply --limit 25 
 - `--notify` posts a masked summary to #cs_chats; keep it on for applies.
 
 Every close lands in `/var/log/close-stale-shadow.jsonl` (id, timestamp,
-email) — reversible, and the digest / ops-drain / dup-close all read it so
-closed conversations drop out of their views automatically.
+email) — reversible. ops-drain and dup-close read it as an exclusion source;
+the needs-human digest deliberately does NOT, so a conversation the customer
+reopens after a silent close surfaces there again (that is the recovery path,
+not a bug).
 
 ## Reporting
 

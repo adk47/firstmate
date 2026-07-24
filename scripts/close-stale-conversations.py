@@ -32,6 +32,12 @@ SAFETY — a conversation is closed ONLY when ALL of:
     damaged ownership set must never re-surface a mid-workflow conversation
     as closable. Its own shadow log is also a source (idempotency).
 
+Downstream, this closer's shadow log is read as an exclusion source by
+cs-ops-drain-candidates.py and close-duplicate-conversations.py (over-
+exclusion is their safe direction) but deliberately NOT by the needs-human
+digest — a conversation the customer REOPENS after our silent close must
+surface there (see the digest's default_state_paths note).
+
 The close is SILENT (no customer-facing message part), so it generates no new
 inbound. Every close is appended to a shadow log (id, timestamp, email) so it
 can be reversed; on --apply an unopenable shadow log is a HARD STOP before
@@ -51,7 +57,8 @@ Env:
                             (0 would make every we-spoke-last conversation
                             eligible the moment we reply — refused loudly)
   CLOSE_STALE_SHADOW_LOG    optional, default /var/log/close-stale-shadow.jsonl
-                            (falls back to /tmp if that path is not writable)
+                            (NO /tmp fallback — carries raw customer emails;
+                            unwritable = hard stop before any close)
   CLOSE_STALE_REVIEW_DIR    optional, default /var/lib/close-stale-conversations/
   CLOSE_STALE_SUMMARY_CHANNEL / CLOSE_STALE_SLACK_ACCOUNT / SLACK_NOTIFY_CONFIG
                             optional — see --notify (defaults: #cs_chats,
@@ -70,11 +77,14 @@ Flags:
   --notify      after an --apply run that closed >=1, post a masked summary
                 to #cs_chats as the operations Slack bot
 
-Exit codes: 0 ok; 1 usage/env/shadow-log error; 2 --apply refused (candidates
-over ceiling — nothing closed); 3 at least one close failed; 4 a sibling
-sweeper's de-confliction state is unreadable (nothing closed).
+Exit codes: 0 ok; 1 usage/env/shadow-log error, or a dry-run whose review
+export failed both write attempts (the export IS the review surface); 2
+--apply refused (candidates over ceiling — nothing closed); 3 at least one
+close failed; 4 a sibling sweeper's de-confliction state is unreadable
+(nothing closed).
 """
 import argparse
+import http.client
 import json
 import os
 import stat
@@ -245,6 +255,12 @@ def _ids_from_source(path, kind):
             cid = rec.get("id") or rec.get("conv_id") or rec.get("conversation_id")
             if cid:
                 ids.add(str(cid))
+    else:
+        # Fail CLOSED on an unknown kind: silently returning an empty set
+        # would zero that source's ownership (e.g. a future copy-paste of
+        # ops-drain's "jsonl-ops-drain" kind) and re-surface mid-workflow
+        # conversations as closable.
+        raise SiblingStateUnreadable(f"{path}: unknown source kind {kind!r}")
     return ids
 
 
@@ -436,20 +452,29 @@ def close_conversation(token, admin_id, conv_id):
 
 
 def open_shadow_log():
+    """NO /tmp fallback, unlike close-resolved's: the shadow log carries RAW
+    customer emails and runs as root, so appending through a predictable
+    world-writable /tmp path is a symlink-follow + PII-exposure hazard
+    (close-duplicate already flags that fallback as a known weakness). This
+    closer is HUMAN-RUN and hard-stops on (None, None) before any close —
+    the supervisor fixes /var/log perms and re-runs."""
     path = os.environ.get("CLOSE_STALE_SHADOW_LOG", "/var/log/close-stale-shadow.jsonl")
     try:
         return open(path, "a"), path
     except OSError:
-        fallback = "/tmp/close-stale-shadow.jsonl"
-        try:
-            return open(fallback, "a"), fallback
-        except OSError:
-            return None, None
+        return None, None
 
 
 # --------------------------------------------------------------------------
 # Optional #cs_chats summary (masked; best-effort, never fails the run).
 # --------------------------------------------------------------------------
+def _slack_escape(s):
+    """Escape for Slack mrkdwn — & < > in that order (same as close-resolved's).
+    A masked email carries one customer-controlled char (the local part's
+    first), which must never render as a raw entity/tag opener."""
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def format_slack_summary(closed, when, stale_days, shadow_path=None,
                          max_lines=SUMMARY_MAX_LINES):
     n = len(closed)
@@ -457,7 +482,7 @@ def format_slack_summary(closed, when, stale_days, shadow_path=None,
     lines = [f":broom: *Closed {n} stale conversation{plural}* "
              f"(we replied last, customer silent >{stale_days}d) — {when}"]
     for c in closed[:max_lines]:
-        lines.append(f"• conversation {c['id']} — {mask_email(c['email'])} — "
+        lines.append(f"• conversation {c['id']} — {_slack_escape(mask_email(c['email']))} — "
                      f"silent {c['silent_days']}d")
     if n > max_lines:
         lines.append(f"…and {n - max_lines} more")
@@ -529,6 +554,11 @@ def main(argv=None):
                     help="post a masked #cs_chats summary after an --apply run "
                          "that closed >=1")
     args = ap.parse_args(argv)
+    if args.limit < 0:
+        # Fail loud: eligible[:negative] would silently mean "close everything
+        # but the tail" — a ramp typo like --limit -25 must never widen a run.
+        print(f"ERROR: --limit must be >= 0, got {args.limit}", file=sys.stderr)
+        return 1
 
     token = os.environ.get("MUSOAI_INTERCOM_TOKEN")
     if not token:
@@ -555,10 +585,10 @@ def main(argv=None):
     eligible = [c for c in convs if is_eligible(c, owned, now, stale_secs)]
     eligible.sort(key=lambda c: c["lar"])  # oldest silence first
 
+    owned_counts = {name: len(ids) for name, ids in owned_by_source.items()}
     print(f"stale threshold: customer silent > {stale_days}d after our last reply")
     print(f"open conversations scanned: {len(convs)}")
-    print(f"owned by sibling sweepers: "
-          f"{ {name: len(ids) for name, ids in owned_by_source.items()} }")
+    print(f"owned by sibling sweepers: {owned_counts}")
     print(f"eligible (inbound, we spoke last, stale, unowned): {len(eligible)}")
 
     if not args.apply:
@@ -571,7 +601,9 @@ def main(argv=None):
             eligible, time.strftime("%Y-%m-%d", time.gmtime(now)), stale_days, now)
         print(f"review export: {review_path or 'FAILED (see stderr)'}")
         print("DRY-RUN — no conversations closed. Re-run with --apply to close.")
-        return 0
+        # A lost export is a failed dry-run: it is the supervised-drain review
+        # surface, and exit 0 would let a wrapper proceed to --apply without it.
+        return 0 if review_path or not eligible else 1
 
     if len(eligible) > args.ceiling:
         print(f"REFUSING --apply: {len(eligible)} candidates exceed the ceiling "
@@ -587,17 +619,29 @@ def main(argv=None):
         return 1
     closed, fail = [], []
     for c in targets:
+        silent_days = customer_silent_days(c, now)
+        # The catch wraps ONLY the close call: urllib wraps h.request()
+        # errors in URLError but lets getresponse()/body-read failures
+        # (RemoteDisconnected ⊂ ConnectionResetError ⊂ OSError, socket
+        # timeouts, IncompleteRead ⊂ http.client.HTTPException) escape raw —
+        # one mid-drain blip must land in `fail`, not crash the run
+        # (URLError ⊂ OSError). The shadow write stays OUTSIDE the catch: a
+        # shadow-write failure after a successful close must hard-crash, not
+        # be misfiled as a close failure — the close happened and losing its
+        # record silently is worse than aborting loudly.
         try:
             res = close_conversation(token, admin_id, c["id"])
-            shadow.write(json.dumps({
-                "id": c["id"], "closed_at": int(time.time()),
-                "email": c["email"],
-                "silent_days": customer_silent_days(c, now),
-                "new_state": res.get("state")}) + "\n")
-            shadow.flush()
-            closed.append({**c, "silent_days": customer_silent_days(c, now)})
-        except (urllib.error.URLError, ValueError) as e:
-            fail.append((c["id"], str(e)[:140]))
+        except (OSError, ValueError, http.client.HTTPException) as e:
+            fail.append((c["id"], f"{type(e).__name__}: {str(e)[:140]}"))
+            time.sleep(0.3)
+            continue
+        shadow.write(json.dumps({
+            "id": c["id"], "closed_at": int(time.time()),
+            "email": c["email"],
+            "silent_days": silent_days,
+            "new_state": res.get("state")}) + "\n")
+        shadow.flush()
+        closed.append({**c, "silent_days": silent_days})
         time.sleep(0.3)
     shadow.close()
     ok = len(closed)

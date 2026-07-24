@@ -19,8 +19,13 @@ has been silent for more than STALE_DAYS (default 30). It silently closes on
   - --apply respects --limit, hard-stops with zero closes when the candidate
     count exceeds the ceiling (default STALE_CEILING, --ceiling N overrides),
     and hard-stops when the shadow log cannot be opened;
-  - every close is shadow-logged under the "id" key (so the digest,
-    ops-drain, and dup-close sibling readers de-conflict against it as-is).
+  - every close is shadow-logged under the "id" key (so the ops-drain and
+    dup-close sibling readers de-conflict against it as-is; the digest
+    deliberately does NOT read it — reopened conversations must resurface);
+  - a mid-drain transport error (connection reset, timeout) lands in the
+    fail list instead of crashing the run;
+  - a dry-run whose review export could not be written anywhere exits
+    non-zero (the export is the supervised-drain review surface).
 
 Stdlib unittest + stubs only — no network. Runs under BOTH `python3 -m
 unittest tests.test_close_stale_conversations` (the CI py-tests convention)
@@ -326,6 +331,46 @@ class Apply(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(close_mock.call_count, 1)
             self.assertEqual(close_mock.call_args[0][2], "C2")
+
+    def test_transport_error_lands_in_fail_not_crash(self):
+        # RemoteDisconnected/ConnectionResetError escape urllib's URLError
+        # wrapping — a mid-drain blip must fail that one close, not the run.
+        with tempfile.TemporaryDirectory() as tmp:
+            def reset(token, admin_id, cid):
+                if cid == "C1":
+                    raise ConnectionResetError("Connection reset by peer")
+                return {"state": "closed"}
+
+            convs = [old_eligible("C1"), old_eligible("C2")]
+            code, _, _ = _run_main(["--apply"], convs, tmp, close_mock=reset)
+            self.assertEqual(code, 3)
+            with open(os.path.join(tmp, "close-stale-shadow.jsonl")) as f:
+                recs = [json.loads(line) for line in f]
+            self.assertEqual([r["id"] for r in recs], ["C2"])
+
+    def test_negative_limit_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            convs = [old_eligible("C1")]
+            code, close_mock, _ = _run_main(
+                ["--apply", "--limit", "-25"], convs, tmp)
+            self.assertEqual(code, 1)
+            close_mock.assert_not_called()
+
+    def test_unknown_source_kind_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "whatever.jsonl")
+            with open(path, "w") as f:
+                f.write('{"id": "C1"}\n')
+            with self.assertRaises(d.SiblingStateUnreadable):
+                d.owned_ids_by_source({"x": (path, "jsonl-ops-drain")})
+
+    def test_dry_run_exits_nonzero_when_export_lost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            convs = [old_eligible("C1")]
+            with mock.patch.object(d, "write_review_export", return_value=None):
+                code, close_mock, _ = _run_main([], convs, tmp)
+            self.assertEqual(code, 1)
+            close_mock.assert_not_called()
 
     def test_corrupt_sibling_state_fails_run_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

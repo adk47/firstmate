@@ -59,10 +59,9 @@ this mirrors.
                                  is a defensive no-op until that changes —
                                  see the script docstring / PR notes for the
                                  known gap)
-  - CLOSE_STALE_SHADOW_LOG      /var/log/close-stale-shadow.jsonl
-                                 (jsonl; each line has "id" — the human-run
-                                 stale-backlog closer,
-                                 scripts/close-stale-conversations.py)
+  NOTE: close-stale-shadow.jsonl is deliberately NOT a digest source — see
+  default_state_paths(); excluding it would permanently hide conversations
+  the customer reopened after a silent stale-close.
 
 Env:
   MUSOAI_INTERCOM_TOKEN       required
@@ -460,11 +459,14 @@ def default_state_paths():
         "dedup-shadow": (
             os.environ.get("DEDUP_SHADOW_LOG", "/var/log/dedup-shadow.jsonl"),
             "jsonl"),
-        # Stale-backlog closer (scripts/close-stale-conversations.py,
-        # human-run) — its closes must drop out of the digest immediately.
-        "close-stale": (
-            os.environ.get("CLOSE_STALE_SHADOW_LOG", "/var/log/close-stale-shadow.jsonl"),
-            "jsonl"),
+        # DELIBERATELY ABSENT: close-stale-shadow.jsonl (the human-run
+        # stale-backlog closer). A closed conversation never appears in this
+        # digest's open-only query, so excluding its append-only shadow here
+        # would have exactly one runtime effect: permanently hiding a
+        # conversation the customer REOPENED after our silent close — the one
+        # cohort that must surface as needs-human (its advertised recovery
+        # path is "the customer replies"). The closers/ops-drain DO read it,
+        # where over-exclusion is the safe direction.
     }
 
 
