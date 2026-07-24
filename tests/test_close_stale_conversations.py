@@ -443,6 +443,47 @@ class Apply(unittest.TestCase):
             self.assertEqual(code, 0)
             close_mock.assert_not_called()
 
+    def test_sibling_claims_candidate_mid_drain_vetoes(self):
+        # Ownership is re-read before EVERY mutation: a sibling sweeper
+        # claiming the id after our scan (here: a close-duplicate shadow row
+        # appearing while the drain is running) must veto the close.
+        with tempfile.TemporaryDirectory() as tmp:
+            c1, c2 = old_eligible("C1"), old_eligible("C2")
+            dup_log = os.path.join(tmp, "close-dup-shadow.jsonl")
+
+            def get_live(token, cid):
+                if cid == "C1":
+                    with open(dup_log, "w") as f:
+                        f.write(json.dumps({"id": "C1", "kept_id": "K"}) + "\n")
+                return fresh_payload(c1 if cid == "C1" else c2)
+
+            code, close_mock, stdout = _run_main(
+                ["--apply"], [c1, c2], tmp, get_mock=get_live)
+            self.assertEqual(code, 0)
+            self.assertEqual(close_mock.call_count, 1)
+            self.assertEqual(close_mock.call_args[0][2], "C2")
+            self.assertIn("skipped_live_recheck=1", stdout)
+
+    def test_sibling_state_corrupting_mid_drain_stops_remaining(self):
+        # Corrupt sibling state appearing MID-drain fails the rest closed
+        # (exit 4) while keeping the closes already made and their records.
+        with tempfile.TemporaryDirectory() as tmp:
+            c1, c2 = old_eligible("C1"), old_eligible("C2")
+            notify_state = os.path.join(tmp, "notified.json")
+
+            def get_live(token, cid):
+                if cid == "C2":
+                    with open(notify_state, "w") as f:
+                        f.write("{corrupt")
+                return fresh_payload(c1 if cid == "C1" else c2)
+
+            code, close_mock, _ = _run_main(
+                ["--apply"], [c1, c2], tmp, get_mock=get_live)
+            self.assertEqual(code, 4)
+            self.assertEqual(close_mock.call_count, 1)
+            self.assertEqual([r["id"] for r in _shadow_rows(tmp, "closed")],
+                             ["C1"])
+
     def test_recheck_fetch_failure_lands_in_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
             def get_boom(token, cid):

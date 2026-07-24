@@ -39,11 +39,13 @@ digest — a conversation the customer REOPENS after our silent close must
 surface there (see the digest's default_state_paths note).
 
 The close is SILENT (no customer-facing message part), so it generates no new
-inbound. Immediately before EACH close the conversation is re-fetched and the
-whole gate re-checked LIVE (still_eligible_live) — the scan snapshot may be
-minutes old by the time a ramped drain reaches a target, and a customer reply
-in that window must veto the close (it would never reopen an already-closed
-conversation).
+inbound. Immediately before EACH close the whole gate is re-checked LIVE:
+the conversation is re-fetched (still_eligible_live — the scan snapshot may
+be minutes old by the time a ramped drain reaches a target, and a customer
+reply in that window must veto the close, since it would never reopen an
+already-closed conversation) AND sibling ownership is re-read from the local
+state files (a sweeper can claim the id mid-drain; corrupt state mid-drain
+stops the remaining drain, fail closed).
 
 Shadow log contract (one JSON object per line, key "id"): an fsync'd
 {"kind":"attempt"} row is written BEFORE the mutation — "can't record" means
@@ -94,8 +96,9 @@ Flags:
 Exit codes: 0 ok; 1 usage/env/shadow-log error, or a dry-run whose review
 export failed both write attempts (the export IS the review surface); 2
 --apply refused (candidates over ceiling — nothing closed); 3 at least one
-close failed; 4 a sibling sweeper's de-confliction state is unreadable
-(nothing closed).
+close failed; 4 a sibling sweeper's de-confliction state is unreadable — at
+startup nothing is closed; mid-drain (the per-close ownership refresh) the
+REMAINING drain stops, closes already made keep their shadow records.
 """
 import argparse
 import http.client
@@ -707,6 +710,7 @@ def main(argv=None):
     transport_errors = (OSError, ValueError, http.client.HTTPException)
     closed, fail = [], []
     skipped_recheck = 0
+    abort_reason = None
     for c in targets:
         silent_days = customer_silent_days(c, now)
         # TOCTOU guard: re-fetch and re-verify LIVE immediately before the
@@ -718,7 +722,18 @@ def main(argv=None):
             fail.append((c["id"], f"recheck: {type(e).__name__}: {str(e)[:140]}"))
             time.sleep(0.3)
             continue
-        if not still_eligible_live(fresh, owned, now, stale_secs):
+        # Sibling OWNERSHIP is part of the live gate too: a sibling sweeper
+        # (close-resolved's 6h timer, resolve-notify, ...) can claim this id
+        # after our scan, so re-read the local state files before every
+        # mutation. Corrupt sibling state mid-drain stops the REMAINING
+        # drain (fail closed) — the closes already made keep their records.
+        try:
+            live_owned = set().union(
+                *owned_ids_by_source(default_state_paths()).values())
+        except SiblingStateUnreadable as e:
+            abort_reason = str(e)
+            break
+        if not still_eligible_live(fresh, live_owned, now, stale_secs):
             skipped_recheck += 1
             time.sleep(0.3)
             continue
@@ -762,6 +777,10 @@ def main(argv=None):
           f"skipped_live_recheck={skipped_recheck} (shadow log: {shadow_path})")
     for f in fail[:15]:
         print(f"  FAIL {f}", file=sys.stderr)
+    if abort_reason:
+        print(f"ERROR: sibling sweeper state unreadable mid-drain — stopped "
+              f"the remaining drain: {abort_reason}", file=sys.stderr)
+        return 4
 
     if args.notify and ok > 0:
         when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
