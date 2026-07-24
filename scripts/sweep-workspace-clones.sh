@@ -478,8 +478,20 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
 
   # Size and display sha are computed BEFORE the final audit: du over a
   # multi-GB clone takes seconds, and nothing may widen the audit→rm window.
+  local audit_head
+  audit_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" rev-parse HEAD 2>/dev/null || echo unresolvable)"
   head_sha="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   kb="$(entry_kb "$d")"
+
+  # A clean checkout during du moves HEAD to another pushed commit and
+  # freshens the worktree without touching status/stash/refs/unpushed —
+  # re-check worktree freshness and HEAD position as part of the audit.
+  if tree_fresh_since "$d" "$WINDOW_REF"; then
+    active=$((active + 1)); return 0
+  fi
+  if [ "$audit_head" != "$(GIT_OPTIONAL_LOCKS=0 git -C "$d" rev-parse HEAD 2>/dev/null || echo re-unresolvable)" ]; then
+    held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "HEAD moved between audit and removal"; return 0
+  fi
 
   # TOCTOU rail: the live-network probes above widen the audit→rm window,
   # and the .git-pruned freshness rail cannot see git-only writes (a new

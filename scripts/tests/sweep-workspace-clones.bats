@@ -576,6 +576,30 @@ STUB
   [[ "$output" == *"nested"* ]]
 }
 
+@test "a clean detached checkout during the size scan holds the clone" {
+  mkclone "$TEST_TMPDIR/repos/raced-checkout"
+  ( cd "$TEST_TMPDIR/repos/raced-checkout" && echo two > f2.txt && git add f2.txt \
+      && git commit -qm second && git push -q origin main )
+  age_tree 20 "$TEST_TMPDIR/repos/raced-checkout"
+  REAL_DU="$(command -v du)"
+  REAL_GIT="$(command -v git)"
+  export REAL_DU REAL_GIT INJECT_CO="$TEST_TMPDIR/repos/raced-checkout"
+  cat > "$TEST_TMPDIR/bin/du" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"$INJECT_CO"* && ! -e "$INJECT_CO/.done" ]]; then
+  : > "$INJECT_CO/.done"
+  "$REAL_GIT" -C "$INJECT_CO" checkout -q --detach HEAD~1
+fi
+exec "$REAL_DU" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/du"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/du"; hash -r
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/raced-checkout" ]
+  [[ "$output" == *"active_skipped=1"* || "$output" == *"HEAD moved"* ]]
+}
+
 @test "git-only state created during the size scan holds the clone (du before final audit)" {
   mkclone "$TEST_TMPDIR/repos/raced-du"
   age_tree 20 "$TEST_TMPDIR/repos/raced-du"
