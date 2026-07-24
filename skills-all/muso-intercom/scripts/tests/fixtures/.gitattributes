@@ -1,0 +1,11 @@
+# Binary magic-byte fixtures for fetch-conversation-attachments.sh type
+# detection. Mark them binary so `git diff` emits "Binary files differ" rather
+# than leaking raw bytes (e.g. the 0xff JPEG marker, the 0x89 PNG marker) into
+# the textual diff: the pr-validate `validate` job feeds that diff to a UTF-8
+# .decode() that aborts on the first non-UTF-8 byte. (sample.unknown is plain
+# text and intentionally left as-is.)
+sample.png binary
+sample.jpg binary
+sample.gif binary
+sample.webp binary
+sample.pdf binary
