@@ -81,6 +81,9 @@ mkclone() {
   name="${d//\//_}"
   origin="$TEST_TMPDIR/origins/$name.git"
   git init -q --bare "$origin"
+  # Pin the bare HEAD: the system default branch name varies (main vs
+  # master), and a clone of an origin whose HEAD dangles checks out nothing.
+  git -C "$origin" symbolic-ref HEAD refs/heads/main
   git init -q -b main "$d"
   ( cd "$d" && echo hello > f.txt && git add f.txt && git commit -qm init \
       && git remote add origin "$origin" && git push -q -u origin main )
@@ -323,7 +326,7 @@ mkclone() {
   # Rewrite origin/main to an unrelated history from a helper clone: the
   # candidate's cached origin/main still equals its local tip, but the live
   # server no longer contains that commit.
-  git clone -q "$(ls -d "$TEST_TMPDIR"/origins/*forced.git)" "$TEST_TMPDIR/aux-forced"
+  git clone -q -b main "$(ls -d "$TEST_TMPDIR"/origins/*forced.git)" "$TEST_TMPDIR/aux-forced"
   ( cd "$TEST_TMPDIR/aux-forced" && git checkout -q --orphan rewrite \
       && git rm -qrf . && echo other > o.txt && git add o.txt \
       && git commit -qm unrelated && git push -qf origin rewrite:main )
@@ -336,7 +339,7 @@ mkclone() {
 
 @test "a fast-forwarded live branch does not hold a stale clone (coverage preserved)" {
   mkclone "$TEST_TMPDIR/repos/behind"
-  git clone -q "$(ls -d "$TEST_TMPDIR"/origins/*behind.git)" "$TEST_TMPDIR/aux-behind"
+  git clone -q -b main "$(ls -d "$TEST_TMPDIR"/origins/*behind.git)" "$TEST_TMPDIR/aux-behind"
   ( cd "$TEST_TMPDIR/aux-behind" && echo more > m.txt && git add m.txt \
       && git commit -qm advance && git push -q origin main )
   age_tree 20 "$TEST_TMPDIR/repos/behind"
