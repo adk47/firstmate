@@ -176,7 +176,7 @@ cmd_events() {
     local days=7
     [[ "${1:-}" == "--days" ]] && days="${2:-7}"
     echo "Event stats for ad '$slug' (last ${days} days):"
-    echo "(Requires Athena query against ad_events table — use Athena skill for detailed analytics)"
+    echo "(Requires Trino query against postgresql_core.public.ad_events — use the muso-query-writer skill for detailed analytics)"
 }
 
 cmd_help() {

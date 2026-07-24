@@ -34,7 +34,7 @@ Muso.AI data model and database schema expert. Provides comprehensive knowledge 
 
 ## Source of Truth - Where Data Lives
 
-**Athena is READ-ONLY.** When users ask to UPDATE data:
+**Trino is READ-ONLY.** When users ask to UPDATE data:
 
 | Entity | Source of Truth | How to Update |
 |--------|-----------------|---------------|

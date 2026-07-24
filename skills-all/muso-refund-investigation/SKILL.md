@@ -14,7 +14,8 @@ depends-on:
   - muso-amplitude
   - muso-slack-formatter
 compatibility: |
-  Requires muso-stripe, muso-amplitude, muso-slack-formatter skills. Athena access for deep investigation.
+  Requires muso-stripe, muso-amplitude, muso-slack-formatter skills. Trino access
+  (via `muso query`) for deep investigation.
 metadata:
   version: "1.0"
   source-repo: "Muso-AI/muso-skills"
@@ -26,12 +27,14 @@ Standardized checklist for evaluating Muso.AI refund requests. Run every step in
 
 ## Investigation Checklist
 
+All SQL below runs on Trino: `muso query - <<'SQL'` heredocs (CSV with header; see `muso-query-writer`).
+
 ### 1. Identify the User
 
 Get user email or name from the requester. Use it to find:
 - Stripe customer ID (`stripe customers list --email="..."`)
 - Amplitude user (search by email via usersearch API)
-- Athena `public_users` record if needed (`SELECT id, email, createdat FROM public_users WHERE email = '...'`)
+- Trino user record if needed (`SELECT id, email, createdat FROM postgresql_core.public.users WHERE email = '...'`)
 
 ### 2. Repeat Offender Check (Stripe)
 
@@ -59,16 +62,16 @@ If a refund has already been issued on this account, the answer is *REFUND NOT A
 
 Users may create a new account with a different email to get another refund. Cross-reference identity using:
 
-1. *Claimed profiles* — Query Athena for the profile(s) claimed by this user. If the same profile was previously claimed by another account that already received a refund, this is the same person.
+1. *Claimed profiles* — Query Trino for the profile(s) claimed by this user. If the same profile was previously claimed by another account that already received a refund, this is the same person.
    ```sql
-   -- Find profiles claimed by this user
-   SELECT pp.profileid, pp.userid, u.email, u.createdat
-   FROM public_profile_permissions pp
-   JOIN public_users u ON u.id = pp.userid
-   WHERE pp.profileid IN (
-     SELECT profileid FROM public_profile_permissions WHERE userid = CURRENT_USER_ID
+   -- Find every account that claimed the same profile(s) as this user
+   SELECT c.profileid, c.userid, u.email, u.createdat
+   FROM postgresql_core.public.claiming c
+   JOIN postgresql_core.public.users u ON u.id = c.userid
+   WHERE c.profileid IN (
+     SELECT profileid FROM postgresql_core.public.claiming WHERE userid = CURRENT_USER_ID
    )
-   ORDER BY pp.profileid, u.createdat;
+   ORDER BY c.profileid, u.createdat;
    ```
    If multiple user IDs share the same claimed profile, check if any of those accounts have prior refunds in Stripe.
 
@@ -87,7 +90,7 @@ If any cross-reference matches an account with a prior refund → *REFUND NOT AL
 
 Build a complete picture of who this person is in the music industry.
 
-**a) Muso.AI Account Details (Athena)**
+**a) Muso.AI Account Details (Trino)**
 ```sql
 -- Full user record
 SELECT u.id, u.email, u.firstname, u.lastname, u.createdat, u.updatedat,
@@ -96,9 +99,9 @@ FROM postgresql_core.public.users u
 WHERE u.email = 'USER_EMAIL';
 
 -- Did they claim a profile?
-SELECT pp.profileid, pp.permission, pp.createdat as claim_date
-FROM postgresql_core.public.profile_permissions pp
-JOIN postgresql_core.public.users u ON u.id = pp.userid
+SELECT c.profileid, c.status, c.createdat as claim_date
+FROM postgresql_core.public.claiming c
+JOIN postgresql_core.public.users u ON u.id = c.userid
 WHERE u.email = 'USER_EMAIL';
 ```
 
@@ -107,7 +110,7 @@ WHERE u.email = 'USER_EMAIL';
 -- Get profile details from catalog
 SELECT _id, name, legal_name, known_as_names, profile_type, profile_sub_type,
   popularity, rank, credits_count, collaborations_count,
-  common_credits, primary_genre, country, city, about, years_active
+  common_credits, country, city, about
 FROM hive."platform-industry-bi-prod".matvw_catalog_profile
 WHERE _id = 'PROFILE_ID';
 ```
@@ -115,10 +118,10 @@ WHERE _id = 'PROFILE_ID';
 **c) Workspace & Team Context**
 ```sql
 -- Are they part of an organization/workspace?
-SELECT t.id as team_id, t.name as team_name, t.plan, wm.role
-FROM postgresql_core.public.workspace_members wm
-JOIN postgresql_core.public.teams t ON t.id = wm.teamid
-JOIN postgresql_core.public.users u ON u.id = wm.userid
+SELECT t.id as team_id, t.name as team_name, tu.roles
+FROM postgresql_core.public.team_users tu
+JOIN postgresql_core.public.teams t ON t.id = tu.teamid
+JOIN postgresql_core.public.users u ON u.id = tu.userid
 WHERE u.email = 'USER_EMAIL';
 ```
 
@@ -188,19 +191,17 @@ Capture:
 - Frequency and recency of engagement
 - Whether activity is concentrated right after subscribing (grab-and-go pattern)
 
-### 6. Athena Deep Dive (if needed)
+### 6. Trino Deep Dive (if needed)
 
-Only query Athena if Amplitude data is insufficient or user is not found there.
+Only query Trino if Amplitude data is insufficient or user is not found there.
 
 ```sql
 -- Basic user info
-SELECT id, email, createdat, updatedat FROM public_users WHERE email = 'USER_EMAIL';
+SELECT id, email, createdat, updatedat FROM postgresql_core.public.users WHERE email = 'USER_EMAIL';
 
--- Workspace activity
-SELECT * FROM public_workspace_members WHERE userid = USER_ID;
+-- Team/workspace membership
+SELECT * FROM postgresql_core.public.team_users WHERE userid = USER_ID;
 ```
-
-Use workgroup `clio-agent`, region `us-west-2`, no `--profile` flag.
 
 ### 7. Summary Report
 

@@ -18,7 +18,6 @@ allowed-tools:
 compatibility: |
   Requires GHL_WINBACK_API_KEY env var (or use key directly).
   Requires GOG_KEYRING_PASSWORD for Gmail sends via gog.
-  Requires AWS credentials for Athena queries.
 metadata:
   version: "1.0"
   created: "2026-03-21"

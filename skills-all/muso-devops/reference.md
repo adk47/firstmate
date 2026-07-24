@@ -1,5 +1,11 @@
 # Muso DevOps Reference
 
+> ⚠️ **HISTORICAL ARCHIVE — AWS was decommissioned 2026-05-31.** Everything below
+> describing AWS (EKS/ECS, CloudWatch, Lambda, Glue, S3 on AWS, us-west-2, AWS CLI
+> profiles, Secrets Manager/SSM) is knowledge-transfer history, NOT an instruction
+> to operate AWS. Live infra is OVH (K3s, Trino, OVH S3) — see
+> docs/lessons/infrastructure-topology.md and consult H-DevOps before touching infra.
+
 This skill covers infrastructure management, deployment processes, monitoring, and operational procedures for the Muso.AI platform. Use this reference when deploying services, managing infrastructure, troubleshooting operational issues, or understanding the CI/CD pipeline.
 
 Source: [DevOps Knowledge Transfer (Notion)](https://www.notion.so/DevOps-Knowledge-Transfer-1df0f087197f4669a0aaa8026ffc13cd)

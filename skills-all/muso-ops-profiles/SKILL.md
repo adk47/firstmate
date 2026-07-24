@@ -19,7 +19,7 @@ depends-on:
   - muso-slack-formatter
   - muso-query-writer
 compatibility: |
-  Requires: muso-ops-admin (API gateway), Athena (profile data), web_search.
+  Requires: muso-ops-admin (API gateway), Trino (profile data), web_search.
 metadata:
   version: "1.2"
   source-repo: "Muso-AI/muso-skills"
@@ -45,10 +45,10 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
   call GET "/admin/profile/search?keyword=John+Producer&limit=10"
 ```
 
-Supplement with Athena for richer results:
+Supplement with Trino for richer results (`muso query - <<'SQL'` heredoc):
 ```sql
 SELECT _id, name, profile_type, credits_count, common_credits,
-       collaborations_count, popularity, rank, country, primary_genre
+       collaborations_count, popularity, rank, country
 FROM hive."platform-industry-bi-prod".matvw_catalog_profile
 WHERE lower(name) LIKE '%john producer%'
   AND is_deleted = false
@@ -58,7 +58,7 @@ LIMIT 20
 
 ### View Profile Details
 
-Combine admin API + Athena for complete picture:
+Combine admin API + Trino for complete picture:
 
 ```bash
 # Admin API
@@ -67,15 +67,15 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 ```
 
 ```sql
--- Athena: full profile data
+-- Trino: full profile data
 SELECT * FROM hive."platform-industry-bi-prod".matvw_catalog_profile
 WHERE _id = '<profile_id>' AND is_deleted = false
 
--- Athena: claiming status
+-- Trino: claiming status
 SELECT * FROM postgresql_core.public.claiming
 WHERE profileid = '<profile_id>'
 
--- Athena: team/workspace
+-- Trino: team/workspace
 SELECT t.name, t.email, rs.status as seat_status
 FROM postgresql_core.public.roster_seats rs
 JOIN postgresql_core.public.teams t ON rs.teamid = t.id

@@ -18,7 +18,7 @@ depends-on:
   - muso-slack-formatter
   - muso-query-writer
 compatibility: |
-  Requires: muso-ops-admin (API gateway), Athena (credit analysis).
+  Requires: muso-ops-admin (API gateway), Trino (credit analysis).
 metadata:
   version: "1.1"
   source-repo: "Muso-AI/muso-skills"
