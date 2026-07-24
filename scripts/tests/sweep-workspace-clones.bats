@@ -325,6 +325,22 @@ mkclone() {
   [[ "$output" == *"probe-fail"* ]]
 }
 
+@test "a detached HEAD whose backing branch was deleted server-side is held" {
+  mkclone "$TEST_TMPDIR/repos/detached-orphan"
+  ( cd "$TEST_TMPDIR/repos/detached-orphan" \
+      && git checkout -q -b feature && echo work > w.txt && git add w.txt \
+      && git commit -qm feature-work && git push -q -u origin feature \
+      && git checkout -q --detach feature && git branch -q -D feature )
+  # Server deletes the branch: only the detached HEAD and a stale cached
+  # origin/feature still know commit A.
+  git -C "$(ls -d "$TEST_TMPDIR"/origins/*detached-orphan.git)" update-ref -d refs/heads/feature
+  age_tree 20 "$TEST_TMPDIR/repos/detached-orphan"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/detached-orphan" ]
+  [[ "$output" == *"not reachable from live origin"* ]]
+}
+
 @test "a force-pushed-away branch is held even when cached refs vouch for the tip" {
   mkclone "$TEST_TMPDIR/repos/forced"
   # Rewrite origin/main to an unrelated history from a helper clone: the
@@ -338,7 +354,7 @@ mkclone() {
   run "$SWEEP" --apply
   [ "$status" -eq 0 ]
   [ -d "$TEST_TMPDIR/repos/forced" ]
-  [[ "$output" == *"local-branch"* ]]
+  [[ "$output" == *"not reachable from live origin"* ]]
 }
 
 @test "a fast-forwarded live branch does not hold a stale clone (coverage preserved)" {

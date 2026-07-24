@@ -360,7 +360,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   # itself. One ls-remote snapshot covers heads and tags; it is network, but
   # only candidates that survived every other gate reach this, and any
   # failure holds — never passes.
-  local live_refs local_refs bad_ref refsha refname live_sha
+  local live_refs local_refs bad_ref refsha refname live_sha live_unreachable
   rc=0; live_refs="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" ls-remote origin 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git ls-remote: ${live_refs:0:120}"; return 0
@@ -398,21 +398,28 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
         live_sha="$(printf '%s\n' "$live_refs" | awk -v r="$refname" '$2 == r { print $1; exit }')"
         if [ -z "$live_sha" ]; then
           bad_ref="$refname"; break
-        fi
-        if [ "$live_sha" != "$refsha" ]; then
-          # The server moved this branch since our last fetch. A cached ref
-          # cannot prove our tip survived (a force-push may have orphaned
-          # it): fetch the live tip into an isolated namespace and require
-          # our tip to be its ancestor. Unprovable → hold.
-          if ! GIT_OPTIONAL_LOCKS=0 git -C "$d" fetch --quiet origin "+${refname}:refs/sweep-live/${refname#refs/heads/}" 2>/dev/null; then
-            bad_ref="$refname"; break
-          fi
-          if ! GIT_OPTIONAL_LOCKS=0 git -C "$d" merge-base --is-ancestor "$refsha" "refs/sweep-live/${refname#refs/heads/}" 2>/dev/null; then
-            bad_ref="$refname"; break
-          fi
         fi ;;
     esac
   done <<< "$local_refs"
+
+  # Live reachability for EVERY locally retained commit — HEAD included, so
+  # a detached HEAD backed only by a stale cached tracking ref (its server
+  # branch force-pushed or deleted) can never be lost. One namespace fetch
+  # of all live heads, then any commit reachable from --all (HEAD, branches,
+  # tags, stash tip, cached remotes) but not from the live snapshot holds.
+  live_unreachable=""
+  if [ -z "$bad_ref" ]; then
+    if ! GIT_OPTIONAL_LOCKS=0 git -C "$d" fetch --quiet origin '+refs/heads/*:refs/sweep-live/heads/*' 2>/dev/null; then
+      live_unreachable="fetch-failed"
+    else
+      rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" log --all --not --glob='refs/sweep-live' --oneline 2>&1 | head -3)" || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        live_unreachable="probe-failed: ${probe_out:0:100}"
+      elif [ -n "$probe_out" ]; then
+        live_unreachable="commits not reachable from live origin"
+      fi
+    fi
+  fi
   # Drop the isolated-namespace refs whatever the outcome (a held clone must
   # not accumulate sweep artifacts; fetched objects are unreferenced and gc-able).
   GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/sweep-live --format='%(refname)' 2>/dev/null \
@@ -423,7 +430,16 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     held_dirty=$((held_dirty + 1))
     case "$bad_ref" in
       refs/tags/*) hold "local-tag" "$d" "'${bad_ref#refs/tags/}' is absent from origin or at a different object" ;;
-      *) hold "local-branch" "$d" "'${bad_ref#refs/heads/}' diverges from its tracking ref, is gone from origin (live), or was force-moved past our tip" ;;
+      *) hold "local-branch" "$d" "'${bad_ref#refs/heads/}' diverges from its tracking ref or is gone from origin (live)" ;;
+    esac
+    return 0
+  fi
+  if [ -n "$live_unreachable" ]; then
+    case "$live_unreachable" in
+      fetch-failed|probe-failed*)
+        held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "live-reachability: $live_unreachable" ;;
+      *)
+        held_dirty=$((held_dirty + 1)); hold "unpushed-live" "$d" "$live_unreachable" ;;
     esac
     return 0
   fi
