@@ -236,6 +236,6 @@ called_url() { grep -qF "$1" "$CURL_CALLS"; }
   run bash "$SCRIPT" "../../etc/evil" --out-dir "$OUT_DIR"
   [ "$status" -eq 2 ]
   [[ "$output" == *"Invalid conversation_id"* ]]
-  # rejected before the token check and before curl — nothing was fetched.
+  # rejected before the token check and before curl -- nothing was fetched.
   [ ! -s "$CURL_CALLS" ]
 }
