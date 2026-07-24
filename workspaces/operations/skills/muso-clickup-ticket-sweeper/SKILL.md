@@ -62,6 +62,13 @@ The goal is to quickly convert a messy ClickUp bucket into:
 ## Batch workflow
 
 1. Build the bucket.
+   - Support tickets live in the **User Requests** list, id `901000600160`
+     (https://app.clickup.com/2283334/v/b/6-901000600160-2). Pass it
+     explicitly: `muso clickup tasks list --list 901000600160 --json`
+     (status filter: `--query 'statuses[]=to do'`). There is no
+     `CLICKUP_LIST_ID` env default in the exec environment - a listing
+     without `--list` returns no list id. Do not fall back to team-wide
+     search; if the list read itself fails, say so.
    - Pull ClickUp tasks and comments.
    - Filter by the requested concern/tag/status/date. For credit/manual buckets,
      keep the working JSONL in `tmp/`.

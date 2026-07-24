@@ -21,7 +21,7 @@ compatibility: |
 depends-on:
   - muso-cli
 metadata:
-  version: "1.1"
+  version: "1.2"
   source-repo: "Muso-AI/hydra"
 allowed-tools:
   - exec
@@ -29,17 +29,25 @@ allowed-tools:
 
 # ClickUp Skill (READ-ONLY)
 
-## Default List: Development Priorities
+## Known lists
 
-**Primary task list:** https://app.clickup.com/2283334/v/b/6-901214992012-2?pr=90120415925
+**Team ID:** `2283334`
 
-The main stable list for development priorities. Sprint lists change frequently;
-use this for general understanding of priorities.
+| List | ID | URL |
+|---|---|---|
+| **User Requests** (support board) | `901000600160` | https://app.clickup.com/2283334/v/b/6-901000600160-2 |
+| **Development Priorities** | `901214992012` | https://app.clickup.com/2283334/v/b/6-901214992012-2?pr=90120415925 |
 
-**Team ID:** `2283334` · **List ID:** `901214992012`
+When Jan (or ops) asks about tickets, user requests, UVN sweeps, or "to do"
+items, they almost always mean the **User Requests** board `901000600160`.
+Development Priorities is the stable dev list (sprint lists change frequently).
+Other boards exist — resolve their ids via the hierarchy `raw GET` commands
+below (`/folder/<id>/list`, `/space/<id>/list`), or from a ClickUp URL
+(`…/v/b/6-<LIST_ID>-2`).
 
-Pass `--list 901214992012` explicitly (the `CLICKUP_LIST_ID` env default points
-at the support board, a different list).
+**Always pass `--list <id>` explicitly.** There is NO `CLICKUP_LIST_ID` env
+default in the gateway exec environment (verified on node-8 2026-07-24) — a
+`tasks list` without `--list` fails with `no list id`.
 
 ## ⚠️ READ-ONLY — now structurally enforced
 
