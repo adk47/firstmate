@@ -297,6 +297,27 @@ mkclone() {
   [[ "$output" == *"local-branch"* ]]
 }
 
+@test "a branch deleted server-side after the last fetch is held (stale tracking ref is not proof)" {
+  mkclone "$TEST_TMPDIR/repos/gone-upstream"
+  ( cd "$TEST_TMPDIR/repos/gone-upstream" && git branch release && git push -q origin release )
+  git -C "$(ls -d "$TEST_TMPDIR"/origins/*gone-upstream.git)" update-ref -d refs/heads/release
+  age_tree 20 "$TEST_TMPDIR/repos/gone-upstream"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/gone-upstream" ]
+  [[ "$output" == *"local-branch"* ]]
+}
+
+@test "an unreachable remote holds the clone (live check fails closed)" {
+  mkclone "$TEST_TMPDIR/repos/offline"
+  ( cd "$TEST_TMPDIR/repos/offline" && git remote set-url origin "$TEST_TMPDIR/nonexistent-origin.git" )
+  age_tree 20 "$TEST_TMPDIR/repos/offline"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/offline" ]
+  [[ "$output" == *"probe-fail"* ]]
+}
+
 @test "tag name matching is exact: local v1 is not satisfied by remote v10" {
   mkclone "$TEST_TMPDIR/repos/tagname"
   ( cd "$TEST_TMPDIR/repos/tagname" && git tag v10 && git push -q origin v10 && git tag v1 )

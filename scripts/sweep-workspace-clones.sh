@@ -319,52 +319,63 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     held_dirty=$((held_dirty + 1)); hold "stash" "$d" "stash entries present"; return 0
   fi
 
-  # Ref parity, by NAME and OBJECT: commit reachability (above) is not ref
-  # safety — a local branch or tag whose exact (name, object-id) pair is not
-  # mirrored remotely still loses its pointer (and an annotated tag its
-  # message object) on deletion.
-  # Branches: refs/heads/<name>@<sha> needs refs/remotes/*/<name> at the SAME
-  # sha — a same-named tracking ref at another sha means the local position
-  # is not what the remote has.
-  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/heads --format='%(objectname) %(refname:short)' 2>&1)" || rc=$?
+  # Ref parity, by NAME and OBJECT, against the LIVE server: commit
+  # reachability (above) is not ref safety — a local branch or tag whose
+  # exact (name, object-id) pair is not on the server right now still loses
+  # its pointer (and an annotated tag its message object) on deletion.
+  # Cached refs/remotes/* are NOT proof: a branch deleted server-side after
+  # the clone's last fetch leaves a stale tracking ref that vouches for
+  # itself. One ls-remote snapshot covers heads and tags; it is network, but
+  # only candidates that survived every other gate reach this, and any
+  # failure holds — never passes.
+  local live_refs local_refs bad_ref refsha refname
+  rc=0; live_refs="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" ls-remote origin 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git for-each-ref: ${probe_out:0:120}"; return 0
+    held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git ls-remote: ${live_refs:0:120}"; return 0
   fi
-  local branch sha
-  while IFS=' ' read -r sha branch; do
-    [ -n "$branch" ] || continue
-    if ! GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref "refs/remotes/*/$branch" --format='%(objectname)' 2>/dev/null \
-        | grep -qxF -- "$sha"; then
-      held_dirty=$((held_dirty + 1)); hold "local-branch" "$d" "branch '$branch' has no same-named remote ref at $sha"; return 0
-    fi
-  done <<< "$probe_out"
-
-  # Tags: every local tag must exist on origin with the SAME object id —
-  # exact (sha, refs/tags/<name>) line match, so v1 is never satisfied by
-  # v10 and a same-named tag at a different object (rewritten/annotated
-  # locally) still holds. ls-remote is network, but only candidates that
-  # survived every other gate reach this; failure holds, never passes.
-  local remote_tags local_tags bad_tag tag
-  rc=0; local_tags="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/tags --format='%(objectname) %(refname:short)' 2>&1)" || rc=$?
+  rc=0; local_refs="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/heads refs/tags --format='%(objectname) %(refname)' 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git for-each-ref tags: ${local_tags:0:120}"; return 0
+    held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git for-each-ref: ${local_refs:0:120}"; return 0
   fi
-  if [ -n "$local_tags" ]; then
-    rc=0; remote_tags="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" ls-remote --tags origin 2>&1)" || rc=$?
-    if [ "$rc" -ne 0 ]; then
-      held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git ls-remote --tags: ${remote_tags:0:120}"; return 0
-    fi
-    bad_tag=""
-    while IFS=' ' read -r sha tag; do
-      [ -n "$tag" ] || continue
-      if ! printf '%s\n' "$remote_tags" \
-          | awk -v s="$sha" -v r="refs/tags/$tag" '$1 == s && $2 == r { found = 1 } END { exit found ? 0 : 1 }'; then
-        bad_tag="$tag"; break
-      fi
-    done <<< "$local_tags"
-    if [ -n "$bad_tag" ]; then
-      held_dirty=$((held_dirty + 1)); hold "local-tag" "$d" "tag '$bad_tag' is absent from origin or at a different object"; return 0
-    fi
+  # Tags: exact (sha, refname) live match — tags are immutable by
+  # convention, and an annotated tag OBJECT differing from origin's is data.
+  # Branches: BOTH conditions —
+  #   (a) a cached same-named refs/remotes/*/<name> at the SAME sha (a
+  #       diverged local pointer whose tip is merely reachable elsewhere
+  #       must hold), and
+  #   (b) the name exists on the LIVE server (a branch deleted server-side
+  #       after the last fetch leaves a stale tracking ref vouching for
+  #       itself — cached refs alone are not proof).
+  # Live exact-sha parity for branches would hold every stale clone forever
+  # (a stale local main is always behind the live main); (a)+(b) keeps the
+  # pointer-safety contract without reducing the sweeper to a no-op.
+  bad_ref=""
+  while IFS=' ' read -r refsha refname; do
+    [ -n "$refname" ] || continue
+    case "$refname" in
+      refs/tags/*)
+        if ! printf '%s\n' "$live_refs" \
+            | awk -v s="$refsha" -v r="$refname" '$1 == s && $2 == r { found = 1 } END { exit found ? 0 : 1 }'; then
+          bad_ref="$refname"; break
+        fi ;;
+      *)
+        if ! GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref "refs/remotes/*/${refname#refs/heads/}" --format='%(objectname)' 2>/dev/null \
+            | grep -qxF -- "$refsha"; then
+          bad_ref="$refname"; break
+        fi
+        if ! printf '%s\n' "$live_refs" \
+            | awk -v r="$refname" '$2 == r { found = 1 } END { exit found ? 0 : 1 }'; then
+          bad_ref="$refname"; break
+        fi ;;
+    esac
+  done <<< "$local_refs"
+  if [ -n "$bad_ref" ]; then
+    held_dirty=$((held_dirty + 1))
+    case "$bad_ref" in
+      refs/tags/*) hold "local-tag" "$d" "'${bad_ref#refs/tags/}' is absent from origin or at a different object" ;;
+      *) hold "local-branch" "$d" "'${bad_ref#refs/heads/}' diverges from its tracking ref or is gone from origin (live)" ;;
+    esac
+    return 0
   fi
 
   # Pre-rm recheck: in-progress operations and last-minute writes.
