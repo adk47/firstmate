@@ -425,6 +425,55 @@ STUB
   [[ "$output" == *"between audit and removal"* ]]
 }
 
+@test "a mount path with a literal backslash still registers (no awk -v mangling)" {
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/"'old\040clone'
+  echo x > "$TEST_TMPDIR/ws/cto/tmp/"'old\040clone/f'
+  age_tree 10 "$TEST_TMPDIR/ws/cto/tmp/"'old\040clone'
+  # Kernel encoding: the literal backslash becomes \134 in the mounts table.
+  printf 'dev %s/ws/cto/tmp/old\\134040clone ext4 rw 0 0\n' "$TEST_TMPDIR" \
+    > "$TEST_TMPDIR/mounts-backslash"
+  SWEEP_MOUNTS_FILE="$TEST_TMPDIR/mounts-backslash" run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/ws/cto/tmp/"'old\040clone' ]
+  [[ "$output" == *"mount"* ]]
+}
+
+@test "a nested repo appearing during the junk-lane size scan holds the dir" {
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/big-junk"
+  echo x > "$TEST_TMPDIR/ws/cto/tmp/big-junk/f"
+  age_tree 10 "$TEST_TMPDIR/ws/cto/tmp/big-junk"
+  REAL_DU="$(command -v du)"
+  export REAL_DU INJECT_JUNK="$TEST_TMPDIR/ws/cto/tmp/big-junk"
+  cat > "$TEST_TMPDIR/bin/du" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"$INJECT_JUNK"* && ! -d "$INJECT_JUNK/late/.git" ]]; then
+  mkdir -p "$INJECT_JUNK/late/.git"
+fi
+exec "$REAL_DU" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/du"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/du"; hash -r
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/ws/cto/tmp/big-junk" ]
+  [[ "$output" == *"during size scan"* ]]
+}
+
+@test "a stale sweep-live ref from a killed prior run is not trusted as live proof" {
+  mkclone "$TEST_TMPDIR/repos/stale-ns"
+  ( cd "$TEST_TMPDIR/repos/stale-ns" \
+      && git checkout -q -b feature && echo work > w.txt && git add w.txt \
+      && git commit -qm feature-work && git push -q -u origin feature \
+      && git checkout -q --detach feature && git branch -q -D feature \
+      && git update-ref refs/sweep-live/heads/ghost HEAD )
+  git -C "$(ls -d "$TEST_TMPDIR"/origins/*stale-ns.git)" update-ref -d refs/heads/feature
+  age_tree 20 "$TEST_TMPDIR/repos/stale-ns"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/stale-ns" ]
+  [[ "$output" == *"not reachable from live origin"* ]]
+}
+
 @test "tag name matching is exact: local v1 is not satisfied by remote v10" {
   mkclone "$TEST_TMPDIR/repos/tagname"
   ( cd "$TEST_TMPDIR/repos/tagname" && git tag v10 && git push -q origin v10 && git tag v1 )

@@ -161,13 +161,15 @@ mount_hazard() {
   [ -r "$MOUNTS_FILE" ] || return 0
   # The kernel octal-escapes whitespace in mount paths (' ' → \040): decode
   # before comparing, or a mount named "old clone" is invisible to the guard.
-  awk -v p="$1" -v pu="$1/" '
+  # The candidate path rides in via ENVIRON — awk -v would itself interpret
+  # backslash escapes, corrupting a path that literally contains one.
+  MH_P="$1" awk '
     {
       m = $2
       gsub(/\\040/, " ", m); gsub(/\\011/, "\t", m)
       gsub(/\\012/, "\n", m); gsub(/\\134/, "\\", m)
-      if (m == p) found = 1
-      if (index(m, pu) == 1) found = 1
+      if (m == ENVIRON["MH_P"]) found = 1
+      if (index(m, ENVIRON["MH_P"] "/") == 1) found = 1
     }
     END { exit found ? 0 : 1 }' "$MOUNTS_FILE"
 }
@@ -300,7 +302,20 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     if mount_hazard "$d"; then
       held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
     fi
+    # du over a large tree takes time — re-run every junk-lane guard right
+    # before removal so nothing created during the size scan is deleted.
     kb="$(entry_kb "$d")"
+    rc_inner=0
+    inner="$(find "$d" -xdev -name .git -print -quit 2>/dev/null)" || rc_inner=$?
+    if [ "$rc_inner" -ne 0 ] || [ -n "$inner" ]; then
+      held_nested=$((held_nested + 1)); hold "nested" "$d" "repo appeared during size scan"; return 0
+    fi
+    if tree_fresh_since "$d" "$ref"; then
+      active=$((active + 1)); return 0
+    fi
+    if mount_hazard "$d"; then
+      held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
+    fi
     if remove_entry "$d" "$kb" "junk"; then
       junk_deleted=$((junk_deleted + 1)); freed_kb=$((freed_kb + kb))
     fi
@@ -409,7 +424,15 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   # tags, stash tip, cached remotes) but not from the live snapshot holds.
   live_unreachable=""
   if [ -z "$bad_ref" ]; then
-    if ! GIT_OPTIONAL_LOCKS=0 git -C "$d" fetch --quiet origin '+refs/heads/*:refs/sweep-live/heads/*' 2>/dev/null; then
+    # A sweep killed after fetching leaves stale refs/sweep-live/* that the
+    # --glob check below would trust as live proof: clear the namespace
+    # BEFORE fetching, fail-closed, and fetch with pruning as the belt.
+    if ! GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/sweep-live --format='%(refname)' 2>/dev/null \
+        | while IFS= read -r stale_ref; do
+            git -C "$d" update-ref -d "$stale_ref" || exit 1
+          done; then
+      live_unreachable="probe-failed: could not clear stale sweep-live refs"
+    elif ! GIT_OPTIONAL_LOCKS=0 git -C "$d" fetch --quiet --prune origin '+refs/heads/*:refs/sweep-live/heads/*' 2>/dev/null; then
       live_unreachable="fetch-failed"
     else
       rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" log --all --not --glob='refs/sweep-live' --oneline 2>&1 | head -3)" || rc=$?
