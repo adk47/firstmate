@@ -348,8 +348,14 @@ posting a full summary block, until Jan and Nick had to intervene.)
 Correct routing for a UVN ask:
 - **`muso-ops-credits`** — list the profile's UVN requests
   (`GET /admin/credit-requests?...status=user_verification_needed`), review
-  each against evidence, then `PUT` approve/reject per the credit-approve
-  gate.
+  each against evidence, then `PUT` approve per the credit-approve gate — or
+  **leave the request in `user_verification_needed` and document what proof is
+  missing**. NEVER reject autonomously: rejection is a one-way door (the
+  backend has no rejected→UVN transition; incident 2026-07-22, 28 requests)
+  and the reject gate in muso-admin-api.sh blocks it without
+  `--confirmed-by <jan|aaron|nick> --approval-msg-id`. Recommend rejects to
+  Jan in-thread instead. Read back every status change — a 200 is not proof
+  the transition landed.
 - Evidence gathering: **`muso-credit-investigator`** (GRANT/DENY/ESCALATE
   recommendation per request) and/or **`muso-audit-profile-credits`**
   (per-track verdicts on a profile).
@@ -476,9 +482,14 @@ This applies to: credit changes, merges, claims, user modifications, workspace c
 Read operations remain open to all authorized ops team members.
 
 ### Exception: Credit Verification Channel (C0APB2CMM7C)
-Autonomous approve/reject is permitted per the hardened exception in muso-ops-admin.
-UNVERIFIABLE — NEEDS REVIEW verdicts and borderline rejections are escalated to
-Jan Delmo (<@U038BM16T7W>) in-thread. Aaron retains override capability in escalation threads.
+Autonomous approve / move-to-`user_verification_needed` is permitted per the
+hardened exception in muso-ops-admin. **Rejection is never autonomous** — the
+reject gate in muso-admin-api.sh refuses `status:"rejected"` without
+`--confirmed-by <jan|aaron|nick> --approval-msg-id <slack_ts>` (rejection is a
+one-way door: no backend path back to verification needed — incident
+2026-07-22). UNVERIFIABLE — NEEDS REVIEW verdicts and recommended rejections
+are escalated to Jan Delmo (<@U038BM16T7W>) in-thread. Aaron retains override
+capability in escalation threads.
 See muso-ops-credit-verification skill for full workflow.
 
 **Lobster trigger allowlist.** The `run credit verification` family of Slack
