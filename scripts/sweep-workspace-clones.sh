@@ -150,10 +150,19 @@ guard_root() {
 # SWEEP_MOUNTS_FILE overrides the mounts table for hermetic tests.
 MOUNTS_FILE="${SWEEP_MOUNTS_FILE:-/proc/self/mounts}"
 mount_hazard() {
-  [ -r "$MOUNTS_FILE" ] || return 1
-  awk -v p="$1" -v pu="$1/" \
-    '$2 == p { found = 1 } index($2, pu) == 1 { found = 1 } END { exit found ? 0 : 1 }' \
-    "$MOUNTS_FILE"
+  # Cannot inspect the mount table → cannot prove absence of a mount → hazard.
+  [ -r "$MOUNTS_FILE" ] || return 0
+  # The kernel octal-escapes whitespace in mount paths (' ' → \040): decode
+  # before comparing, or a mount named "old clone" is invisible to the guard.
+  awk -v p="$1" -v pu="$1/" '
+    {
+      m = $2
+      gsub(/\\040/, " ", m); gsub(/\\011/, "\t", m)
+      gsub(/\\012/, "\n", m); gsub(/\\134/, "\\", m)
+      if (m == p) found = 1
+      if (index(m, pu) == 1) found = 1
+    }
+    END { exit found ? 0 : 1 }' "$MOUNTS_FILE"
 }
 
 entry_kb() {
@@ -427,6 +436,13 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   rc=0; recheck="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/heads refs/tags --format='%(objectname) %(refname)' 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ] || [ "$recheck" != "$local_refs" ]; then
     held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "refs changed between audit and removal"; return 0
+  fi
+  # A concurrent detached-HEAD commit changes only HEAD + objects (clean
+  # status, no refs) — re-run the unpushed-content probe, which includes
+  # HEAD via --all, so such a commit can never be deleted with the clone.
+  rc=0; recheck="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" log --all --not --remotes --oneline 2>&1 | head -1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -n "$recheck" ]; then
+    held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "unpushed commit appeared between audit and removal"; return 0
   fi
 
   head_sha="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" rev-parse --short HEAD 2>/dev/null || echo unknown)"

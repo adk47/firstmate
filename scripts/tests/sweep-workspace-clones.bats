@@ -48,6 +48,10 @@ STUB
   export SWEEP_KEEP_LIST="core-backend hydra"
   export SWEEP_LOCKFILE="$TEST_TMPDIR/sweep.lock"
   export SWEEP_SKIP_HOST_GUARD=1
+  # An unreadable mount table is fail-closed (holds everything), and macOS
+  # has no /proc/self/mounts — pin an empty table for determinism.
+  : > "$TEST_TMPDIR/mounts-empty"
+  export SWEEP_MOUNTS_FILE="$TEST_TMPDIR/mounts-empty"
 
   export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
     GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -357,6 +361,52 @@ mkclone() {
   [ "$status" -eq 0 ]
   [ -d "$TEST_TMPDIR/ws/cto/tmp/mounted" ]
   [[ "$output" == *"mount"* ]]
+}
+
+@test "an octal-escaped mount path (spaces) still registers as a hazard" {
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/old clone"
+  echo x > "$TEST_TMPDIR/ws/cto/tmp/old clone/f"
+  age_tree 10 "$TEST_TMPDIR/ws/cto/tmp/old clone"
+  p="$TEST_TMPDIR/ws/cto/tmp/old clone"
+  printf 'dev %s ext4 rw 0 0\n' "${p// /\\040}" > "$TEST_TMPDIR/mounts-escaped"
+  SWEEP_MOUNTS_FILE="$TEST_TMPDIR/mounts-escaped" run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/ws/cto/tmp/old clone" ]
+  [[ "$output" == *"mount"* ]]
+}
+
+@test "an unreadable mount table holds candidates (never assumes no-hazard)" {
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/junky"
+  echo x > "$TEST_TMPDIR/ws/cto/tmp/junky/f"
+  age_tree 10 "$TEST_TMPDIR/ws/cto/tmp/junky"
+  SWEEP_MOUNTS_FILE="$TEST_TMPDIR/does-not-exist" run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/ws/cto/tmp/junky" ]
+  [[ "$output" == *"mount"* ]]
+}
+
+@test "a detached-HEAD commit created mid-sweep holds the clone at the removal gate" {
+  mkclone "$TEST_TMPDIR/repos/raced-detached"
+  age_tree 20 "$TEST_TMPDIR/repos/raced-detached"
+  REAL_GIT="$(command -v git)"
+  export REAL_GIT INJECT_TARGET="$TEST_TMPDIR/repos/raced-detached" INJECT_COUNT="$TEST_TMPDIR/inject-count-d"
+  cat > "$TEST_TMPDIR/bin/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"status --porcelain"* && "$*" == *"$INJECT_TARGET"* ]]; then
+  n=$(cat "$INJECT_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$INJECT_COUNT"
+  if [ "$n" -eq 2 ]; then
+    "$REAL_GIT" -C "$INJECT_TARGET" checkout -q --detach
+    "$REAL_GIT" -C "$INJECT_TARGET" commit -q --allow-empty -m raced-detached-work
+  fi
+fi
+exec "$REAL_GIT" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/git"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/git"; hash -r
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/raced-detached" ]
+  [[ "$output" == *"between audit and removal"* ]]
 }
 
 @test "tag name matching is exact: local v1 is not satisfied by remote v10" {
