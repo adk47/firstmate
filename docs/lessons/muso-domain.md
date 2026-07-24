@@ -37,6 +37,24 @@ matching a customer-supplied title.
 empty body, no batch variant. `POST /admin/profiles/unmerge` body `{unmergeFrom, profilesIds:[]}`
 (approval-gated).
 
+**Displayed profile credits are materialized — the bulk removal endpoint cannot remove
+them.** `DELETE /admin/profile/:id/credits` 200s but only deletes Muso-origin raw role
+rows via the raw-ingestion queue; the materialized credits users see survive, even when
+zero raw assertions remain (2026-07 La Mano 1.9 / Matt Wright: two 200'd bulk batches,
+no visible change after 24h, and an agent triage wrongly concluded per-track deletes
+would be equally futile). The per-track DELETE above IS effective: it edits the
+materialized rows directly and overrides still-active external raw credits
+(tidal/mlc/jaxsta) — canonical ops procedure per the 2026-02-04 KT ("manually remove
+incorrect credits (overrides raw source)"). Verify via the credits LIST (materializes
+~20s), never via the profile's `creditCount` (lagging cached stat). Whole-raw
+`POST /admin/profile/:id/unlink` is only safe for cleanly-wrong raws — sweep the
+profile's FULL credit list through `GET /admin/track/:id/raw-credits` first (checking only
+the requested tracks misses keep-assertions); raws are often mixed (one tidal raw asserted
+16 wrong + 26 correct tracks). More than 10 destructive DELETEs in 15 min trips the tier-2 gate:
+escalate for second-human approval (`--confirmed-by`/`--approval-msg-id` on the admin
+wrapper; muso-cli: `--approval-ref`), don't pace under it. Full playbook:
+`skills-all/muso-ops-tracks/SKILL.md` → Removal Requests.
+
 **`OPS_DRY_RUN=1` silently fakes success.** With it set in env, the admin-api wrapper
 short-circuits EVERY non-GET with a synthetic `{"http_status":200,"dryRun":true,"wouldHaveExecuted":true}`.
 A consumer that reads only `.http_status` reports success while nothing changed. Two

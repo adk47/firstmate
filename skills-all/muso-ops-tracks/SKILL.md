@@ -222,6 +222,49 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
   call DELETE "/admin/track/<track_id>/profile/<profile_id>/credits"
 ```
 
+### Removal Requests ("remove these tracks from profile X")
+
+🛑 **Never use the bulk profile endpoint (`DELETE /admin/profile/:id/credits`) for
+removal requests.** It returns 200 but only routes raw-role-row deletes through the
+raw-ingestion queue; the **materialized credits users see are untouched**, so the
+tracks never disappear (2026-07 La Mano 1.9 / Matt Wright incident: two 200'd bulk
+batches, zero visible change after 24h). The displayed credits are NOT a live view
+over raw sources — tracks with zero remaining raw assertions keep displaying.
+
+The effective lever is the per-track DELETE above, one (track, profile) pair per
+call. It edits the materialized credits directly and **overrides still-active
+external raw credits** (tidal/mlc/jaxsta) — the canonical procedure per
+`muso-clio/references/kt/2026-02-04_user-requests-pt-3.md` ("manually remove
+incorrect credits (overrides raw source)").
+
+Playbook:
+
+1. Resolve each requested title to its track id via
+   `GET /admin/profile/<profile_id>/credits?keyword=...` — match on title AND
+   artist (generic titles like "Intro"/"Baby" collide). If more than one
+   candidate still matches, STOP and confirm the exact track id with the
+   requester — never guess. The list's offset pagination has unstable
+   ordering: dedupe fetched items by track id.
+2. Canary one delete, read back the credits **list** to confirm it vanished
+   (~20s — this is a synchronous edit to materialized rows, not an async
+   pipeline job; the up-to-24h lag note in `muso-ops-profiles` applies to
+   raw-unlink, not this). Then process the rest.
+3. More than 10 destructive DELETEs in 15 min trips the tier-2 gate
+   (`policy_refused`) — expected. Escalate for second-human approval
+   (`--confirmed-by <approver>` + `--approval-msg-id <slack-ts>` on
+   `muso-admin-api.sh`; muso-cli calls the latter `--approval-ref`); do NOT
+   pace batches to slide under it.
+4. Verify N/N via the credits list. `creditCount` on `GET /admin/profile/:id`
+   is a lagging cached stat — never use it as the landed/not-landed signal.
+
+Caveats: primary-artist credits are refused by the server unless `?force=true`
+(ops use only — double-check before forcing). A wrongly-deleted credit is
+recoverable via the Add credit POST above.
+
+If the wrong credits trace to a wrong-artist raw link, consider also unlinking
+that raw profile so re-ingestion can't re-assert them — but see the mixed-raw
+warning in `muso-ops-profiles` → Unlink Raw Profile first.
+
 ### Trigger Capture
 
 Force-refresh analytics data for a track:

@@ -325,7 +325,23 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 Pre-flight checks:
 1. List the profile's raw links first (admin GET on the profile, or Trino
    `hive."platform-industry-bi-prod".matvw_catalog_profile.raw_ids`) so the operator has a known starting set.
-2. Confirm in Slack which raw IDs to drop, then echo them back before submit.
+2. ⚠️ **Check the raw isn't MIXED before unlinking.** A single source artist page
+   can aggregate several real-world people, so one raw ID may assert both wrong
+   AND correct credits (2026-07 Matt Wright case: one tidal raw asserted 16 wrong
+   tracks and 26 correct ones — unlinking it would have stripped half the
+   legitimate profile). Map first, over the profile's FULL credit inventory — not
+   just the tracks in the removal request: page through
+   `GET /admin/profile/<profile_id>/credits` to `total`, deduping items by track
+   id. The list's offset ordering is unstable, so one pass can silently DROP
+   rows as well as duplicate them — repeat the full pagination until two
+   consecutive deduped snapshots reconcile (identical track-id sets, count
+   matching `total`). Then `GET /admin/track/<track_id>/raw-credits` for each
+   track and bucket every track the candidate raw asserts into remove-vs-keep.
+   A raw counts as cleanly wrong only when that reconciled sweep shows zero
+   keep-tracks. If the snapshots won't reconcile or the inventory can't be
+   completed, do NOT unlink — remove the bad credits per-track instead
+   (`muso-ops-tracks` → Removal Requests).
+3. Confirm in Slack which raw IDs to drop, then echo them back before submit.
 
 Post-unlink: only release-date fields update in real time; the catalog pipeline
 takes up to 24h to reflect the unlink across credits and analytics.
