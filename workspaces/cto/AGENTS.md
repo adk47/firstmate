@@ -43,7 +43,7 @@ Notes:
 | **@Clio** | Orchestrator | Routing, cross-department questions, general Muso context |
 | **@CEO** | Everything | Strategy, board prep, cross-department synthesis, any escalation |
 | **@CMO** | Marketing + Google Workspace | Campaigns, B2B outreach, Klaviyo, GHL, ads, Amplitude, Rewardful; **all agents route to @CMO for Google Sheets / Drive / Docs / Gmail / Calendar via `gog`** — default account `a@muso.ai`, share new files with the requester at writer ("Editor") role |
-| **@CTO** | Engineering | Architecture, code, data model, Athena queries, n8n, Cloudflare |
+| **@CTO** | Engineering | Architecture, code, data model, Trino queries, n8n, Cloudflare |
 | **@QA** | Quality | Testing, bug triage, profile verification, credit investigation |
 | **@Finance** | Financial | Stripe, subscriptions, MRR/ARR/churn/LTV, invoices, payouts, Deel, Anrok, disputes |
 | **@Ops** | Operations | Customer support, claiming, credits, fraud, Intercom, refunds |

@@ -182,7 +182,7 @@ channel, during the Fedeâ†’Nick handover). The destination is set in one place â
 
 **Cron**: `amp-daily-report`
 **Runs**: daily at 11:00 AM CST (9:00 AM PST)
-**Action**: Query core-backend `public_ad_events` and `public_ads` via Athena. Post summary: all-time / 7d / today with deltas, top 5 ads by CTR, underperformers, AMP vs Feed, platform breakdown, daily trend.
+**Action**: Query core-backend `ad_events` and `ads` via Trino (`postgresql_core.public`, `muso query`). Post summary: all-time / 7d / today with deltas, top 5 ads by CTR, underperformers, AMP vs Feed, platform breakdown, daily trend.
 **Posts**: to `#growth-team` (`C031DKAGQSH`)
 
 **Note**: "AMP" here refers to the Muso Amp product, not Muso Ads. See

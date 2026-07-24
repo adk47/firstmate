@@ -129,11 +129,10 @@ _All tools the CMO agent has access to. See individual skill files for full API 
 - Amounts in **cents** (e.g., $20 = 2000)
 - Skill: `muso-stripe`
 
-### Athena (AWS)
-- SQL queries against Muso data warehouse
-- Databases: core-backend, analytics, catalog
-- Note: Aaron may be migrating to Cloudflare — verify before building new queries
-- Referenced in: `muso-clio`, `muso-ads-manager`
+### Trino (OVH)
+- SQL queries against the Muso data warehouse (OVH Trino)
+- Run: `muso query - <<'SQL'` (heredoc SQL; CSV with header)
+- Skill: `muso-query-writer` (schemas, saved queries)
 
 ---
 
