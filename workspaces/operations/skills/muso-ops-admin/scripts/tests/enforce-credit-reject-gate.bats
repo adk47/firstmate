@@ -124,7 +124,10 @@ source_gate() {
 
 @test "block: audit path unwritable refuses even with valid approval (fail-closed)" {
     source_gate
-    CREDIT_REJECT_AUDIT_PATH="/nonexistent-dir/no/credit-reject-audit.jsonl" \
+    # Parent is a regular FILE, so mkdir -p hits ENOTDIR and fails for ANY uid —
+    # unlike /nonexistent-dir, which root (the self-hosted CI runner) can create.
+    touch "$TEST_ROOT/not-a-dir"
+    CREDIT_REJECT_AUDIT_PATH="$TEST_ROOT/not-a-dir/sub/credit-reject-audit.jsonl" \
         CONFIRMED_BY="jan" APPROVAL_MSG_ID="1777474838.796239" \
         run enforce_credit_reject_gate PUT /admin/credit-requests "$REJECT_BODY"
     [ "$status" -ne 0 ]
