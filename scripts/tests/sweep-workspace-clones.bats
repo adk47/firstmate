@@ -262,6 +262,35 @@ mkclone() {
   [ -d "$TEST_TMPDIR/repos/mid-op" ]
 }
 
+@test "a local branch name with no remote counterpart is held (even at a pushed tip)" {
+  mkclone "$TEST_TMPDIR/repos/named-branch"
+  ( cd "$TEST_TMPDIR/repos/named-branch" && git branch release-candidate )
+  age_tree 20 "$TEST_TMPDIR/repos/named-branch"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/named-branch" ]
+  [[ "$output" == *"local-branch"* ]]
+}
+
+@test "a local-only tag on a pushed commit is held" {
+  mkclone "$TEST_TMPDIR/repos/local-tag"
+  ( cd "$TEST_TMPDIR/repos/local-tag" && git tag -a keepsake -m "annotated, never pushed" )
+  age_tree 20 "$TEST_TMPDIR/repos/local-tag"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/local-tag" ]
+  [[ "$output" == *"local-tag"* ]]
+}
+
+@test "tags that exist on origin do not hold the clone" {
+  mkclone "$TEST_TMPDIR/repos/pushed-tag"
+  ( cd "$TEST_TMPDIR/repos/pushed-tag" && git tag v1 && git push -q origin v1 )
+  age_tree 20 "$TEST_TMPDIR/repos/pushed-tag"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ ! -d "$TEST_TMPDIR/repos/pushed-tag" ]
+}
+
 @test "a tmp root that is itself a clone is skipped whole (worktree files survive)" {
   mkdir -p "$TEST_TMPDIR/ws/rogue"
   mkclone "$TEST_TMPDIR/ws/rogue/tmp"

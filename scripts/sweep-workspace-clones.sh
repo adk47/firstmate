@@ -17,7 +17,10 @@
 #   • not on the keep-list (exact basename match, repos/ lane only)
 #   • git-clean AND fully pushed: status --porcelain empty,
 #     `git log --all --not --remotes` empty (--all covers detached
-#     HEAD, tags, and the newest stash), `git stash list` empty
+#     HEAD, tags, and the newest stash), `git stash list` empty,
+#     every local branch has a same-named remote ref, and every
+#     local tag exists on origin (ls-remote; ref NAMES and annotated
+#     tag objects are data too, not just commits)
 #
 # Everything else lands in a fail-closed HELD lane (reported, never
 # deleted): dirty/unpushed/stashed, git-probe-failed (a git error is
@@ -314,6 +317,47 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   fi
   if [ -n "$probe_out" ]; then
     held_dirty=$((held_dirty + 1)); hold "stash" "$d" "stash entries present"; return 0
+  fi
+
+  # Ref-NAME parity: commit reachability (above) is not ref safety — a local
+  # branch or tag pointing at an already-pushed commit still loses its name
+  # (and an annotated tag its message) on deletion.
+  # Branches: every refs/heads/<name> needs a same-named refs/remotes/*/<name>.
+  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/heads --format='%(refname:short)' 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git for-each-ref: ${probe_out:0:120}"; return 0
+  fi
+  local branch
+  while IFS= read -r branch; do
+    [ -n "$branch" ] || continue
+    if [ -z "$(GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref "refs/remotes/*/$branch" 2>/dev/null)" ]; then
+      held_dirty=$((held_dirty + 1)); hold "local-branch" "$d" "branch '$branch' has no same-named remote ref"; return 0
+    fi
+  done <<< "$probe_out"
+
+  # Tags: local tag names must all exist on the remote (ls-remote — network,
+  # but only candidates that survived every other gate reach this; failure
+  # holds, never passes).
+  local remote_tags local_tags missing_tag tag
+  rc=0; local_tags="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/tags --format='%(refname:short)' 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git for-each-ref tags: ${local_tags:0:120}"; return 0
+  fi
+  if [ -n "$local_tags" ]; then
+    rc=0; remote_tags="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" ls-remote --tags origin 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git ls-remote --tags: ${remote_tags:0:120}"; return 0
+    fi
+    missing_tag=""
+    while IFS= read -r tag; do
+      [ -n "$tag" ] || continue
+      if ! printf '%s\n' "$remote_tags" | grep -qF "refs/tags/$tag"; then
+        missing_tag="$tag"; break
+      fi
+    done <<< "$local_tags"
+    if [ -n "$missing_tag" ]; then
+      held_dirty=$((held_dirty + 1)); hold "local-tag" "$d" "tag '$missing_tag' does not exist on origin"; return 0
+    fi
   fi
 
   # Pre-rm recheck: in-progress operations and last-minute writes.
