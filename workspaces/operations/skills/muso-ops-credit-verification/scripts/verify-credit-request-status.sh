@@ -29,13 +29,15 @@
 #
 # Exit codes:
 #   0   every requested id came back with the expected status
-#   1   at least one id came back with a different status, or was missing
-#       entirely from the result set (actual:"missing")
+#   1   at least one id came back with a different status, or was missing from
+#       the result set (actual:"missing"). A clean empty result set (none of the
+#       ids exist) is this case — every id "missing" — NOT an outage.
 #   2   argument validation failure (no Trino call attempted)
-#   3   UNVERIFIABLE — the Trino wrapper itself failed (non-zero exit,
-#       timeout, or empty/malformed output when ids were requested). This is
-#       NOT the same as "0 matched" — it means the readback could not run at
-#       all, so the write must NOT be treated as verified either way.
+#   3   UNVERIFIABLE — the Trino wrapper itself failed (non-zero exit, timeout,
+#       or non-blank output that parsed to no rows, i.e. an error page /
+#       truncated response). This is NOT the same as "0 matched" — it means the
+#       readback could not run at all, so the write must NOT be treated as
+#       verified either way.
 #
 # Env:
 #   TRINO_QUERY_SH             path to trino-query.sh. Same resolution chain
@@ -90,10 +92,12 @@ Optional:
 
 Exit codes:
   0    every id verified at the expected status
-  1    at least one id mismatched or was missing from the readback
+  1    at least one id mismatched or was missing from the readback (a clean
+       empty result — none of the ids exist — is all-missing, exit 1)
   2    argument validation failure (no Trino call attempted)
-  3    UNVERIFIABLE — the Trino readback itself failed; treat the write as
-       NOT verified either way, do not fall back to the admin list API.
+  3    UNVERIFIABLE — the Trino readback itself failed (non-zero exit, timeout,
+       or an error-page/truncated response); treat the write as NOT verified
+       either way, do not fall back to the admin list API.
 
 Stdout: one compact JSON line: {"expected":...,"matched":N,"mismatched":[...]}.
 EOF
@@ -159,7 +163,13 @@ for i in "${!ID_ARR[@]}"; do
         echo "ERROR: --ids contains a non-UUID entry: '$id_trimmed'. No Trino call attempted." >&2
         exit 2
     fi
-    ID_ARR[i]="$id_trimmed"
+    # Normalize to canonical lowercase. Postgres/Trino serialize uuid values in
+    # lowercase, and the classifier's map lookup is exact-string — so an
+    # uppercase-hex input for a row that exists and matches would otherwise miss
+    # the map and be falsely reported {actual:"missing"}. Lowercasing here fixes
+    # both the SQL literal and the lookup key, and makes the dedup below treat
+    # AAAA… and aaaa… as the same id.
+    ID_ARR[i]="${id_trimmed,,}"
 done
 
 # Deduplicate, preserving first-seen order. The readback answers a SET
@@ -322,16 +332,17 @@ if [[ -z "$MAP" ]] || ! printf '%s' "$MAP" | jq -e . >/dev/null 2>&1; then
     unverifiable "could not parse trino CSV into a JSON map; trino output: $(printf '%s' "$CSV" | tr '\n' ' ' | head -c 200)" 0 '[]'
 fi
 
+# A BLANK result set is a clean empty result: an explicit `WHERE id IN (...)`
+# legitimately matches zero rows when none of the requested ids exist (stale or
+# mistyped ids). Let it flow to the classifier so every id is reported
+# {actual:"missing"} with exit 1 — actionable ("these ids don't exist / didn't
+# transition"), NOT an outage. Reserve exit 3 for genuine failures: non-zero rc
+# and timeout (handled above), and NON-blank output that still parses to zero
+# rows (an error page or truncated response masquerading as a result).
 CSV_NONBLANK=$(printf '%s' "$CSV" | tr -d '[:space:]')
 MAP_LEN=$(printf '%s' "$MAP" | jq 'length')
-if [[ -z "$CSV_NONBLANK" ]]; then
-    # Empty output when ids WERE requested is UNVERIFIABLE, not "all missing" —
-    # we cannot distinguish a clean empty result (impossible here, since the
-    # WHERE clause is an explicit id list) from a silently truncated response.
-    unverifiable "trino returned empty output for a non-empty id list — cannot verify" 0 '[]'
-fi
-if [[ "$MAP_LEN" == "0" ]]; then
-    unverifiable "trino returned non-empty output that yielded no parseable rows (likely an error page, not a clean result)" 0 '[]'
+if [[ -n "$CSV_NONBLANK" && "$MAP_LEN" == "0" ]]; then
+    unverifiable "trino returned non-empty output that yielded no parseable rows (likely an error page or truncated response, not a clean result)" 0 '[]'
 fi
 
 # --- Classify each requested id ---------------------------------------------

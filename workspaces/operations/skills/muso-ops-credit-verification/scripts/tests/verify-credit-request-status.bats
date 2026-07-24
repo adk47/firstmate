@@ -64,7 +64,8 @@ STUB
     chmod +x "$TRINO_FAIL"
     export TRINO_FAIL
 
-    # Empty-output stub: rc=0 but zero bytes on stdout.
+    # Empty-output stub: rc=0 but zero bytes on stdout. This is a CLEAN empty
+    # result set (an explicit id list that matched no rows) -> all-missing.
     TRINO_EMPTY="$TEST_TMPDIR/trino-empty.sh"
     cat > "$TRINO_EMPTY" <<'STUB'
 #!/usr/bin/env bash
@@ -73,6 +74,32 @@ exit 0
 STUB
     chmod +x "$TRINO_EMPTY"
     export TRINO_EMPTY
+
+    # Error-page stub: rc=0 but NON-blank output that yields no parseable rows
+    # (an HTML/error body, not quoted CSV). Must stay UNVERIFIABLE (exit 3) —
+    # distinct from a clean empty result.
+    TRINO_ERRORPAGE="$TEST_TMPDIR/trino-errorpage.sh"
+    cat > "$TRINO_ERRORPAGE" <<'STUB'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "<html>502 Bad Gateway</html>"
+STUB
+    chmod +x "$TRINO_ERRORPAGE"
+    export TRINO_ERRORPAGE
+
+    # Uppercase-input stub: the caller passes an UPPERCASE-hex uuid; Postgres/
+    # Trino serialize it back in canonical lowercase. The script must normalize
+    # and still match it (not report it "missing").
+    ID_UPPER="AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+    export ID_UPPER
+    TRINO_LOWER_MATCH="$TEST_TMPDIR/trino-lower-match.sh"
+    cat > "$TRINO_LOWER_MATCH" <<STUB
+#!/usr/bin/env bash
+cat >/dev/null
+printf '"%s","user_verification_needed"\n' "${ID_UPPER,,}"
+STUB
+    chmod +x "$TRINO_LOWER_MATCH"
+    export TRINO_LOWER_MATCH
 
     # Invocation logger — asserts the stub was (not) called.
     export TRINO_CALL_LOG="$TEST_TMPDIR/trino-calls.log"
@@ -139,11 +166,31 @@ teardown() { teardown_tmp_env; }
     [[ "$stderr" == *"Do NOT treat this write as"* ]]
 }
 
-@test "empty output with ids requested -> exit 3" {
+@test "clean empty result (none of the ids exist) -> exit 1, all missing (not an outage)" {
+    # A blank result set for an explicit id list is legitimate — the ids just
+    # don't exist. It must classify as all-missing (exit 1), NOT unverifiable.
     run --separate-stderr env TRINO_QUERY_SH="$TRINO_EMPTY" \
+        bash "$WRAPPER" --expected user_verification_needed --ids "$ID1,$ID2"
+    [ "$status" -eq 1 ]
+    echo "$output" | jq -e '.matched == 0' >/dev/null
+    echo "$output" | jq -e --arg a "$ID1" --arg b "$ID2" \
+        '(.mismatched | map(.id) | sort) == ([$a,$b] | sort) and (.mismatched | all(.actual == "missing"))' >/dev/null
+}
+
+@test "non-blank error-page output -> exit 3 (unverifiable, NOT all-missing)" {
+    # rc=0 but garbage that parses to zero rows is an error page / truncation —
+    # it must stay UNVERIFIABLE, never collapse into a false all-missing.
+    run --separate-stderr env TRINO_QUERY_SH="$TRINO_ERRORPAGE" \
         bash "$WRAPPER" --expected user_verification_needed --ids "$ID1"
     [ "$status" -eq 3 ]
     [[ "$stderr" == *"UNVERIFIABLE"* ]]
+}
+
+@test "uppercase-hex uuid input matches a lowercase-serialized row" {
+    run --separate-stderr env TRINO_QUERY_SH="$TRINO_LOWER_MATCH" \
+        bash "$WRAPPER" --expected user_verification_needed --ids "$ID_UPPER"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.matched == 1 and .mismatched == []' >/dev/null
 }
 
 # --- Validation ---
