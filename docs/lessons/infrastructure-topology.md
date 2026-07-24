@@ -26,24 +26,27 @@ Vestigial AWS references are NOT evidence AWS is live -- confirm against the
 decommission runbook and the live OVH service manifests. Full spec:
 `docs/reference/ARCHITECTURE.md` and `H-DevOps:docs/server-map.md`.
 
-## 2. Two frozen `*v3*` STATS TABLES are dead -- the V3 pipeline and `/api/v3` are NOT
+## 2. "v3" triage: frozen tables are DEAD, the V3 pipeline is SUNSETTING, `/api/v3` is the keeper
 
-Two specific legacy stats tables are frozen and dead: `profile_v3_lifetime` and
-`profile_v3_tracks` ("v3 lifetime stats", frozen 2026-06-06). Do not read or build
-on them (see `docs/lessons/muso-domain.md`,
-`skills-all/muso-query-writer/trino-schemas.md`). **Athena is also gone** (retired
-2026-04-25) -- all analytics queries run through **OVH Trino** now.
+Three different things share the "v3" name -- treat them differently:
 
-**Do NOT over-generalize to "anything v3 is dead."** These are current and live:
-
-- The **V3 data-processing pipeline** -- the V3 / V3-critical Airflow DAGs
-  (`dag_full_materialize*`, `dag_industry_serving`, `dag_calculate_industry_db_*`,
-  ...) and the V3 PDP / query tier -- is the CURRENT pipeline generation.
-- The **`/api/v3`, `/api/w/v3`, `/api/m/v3`** REST routes are the live Muso API
-  (admin / web / mobile) -- keep using them.
-
-Only the two named frozen tables (and anything `trino-schemas.md` explicitly marks
-frozen) are dead.
+- **Dead now**: the two frozen legacy stats tables `profile_v3_lifetime` and
+  `profile_v3_tracks` ("v3 lifetime stats", frozen 2026-06-06). Do not read or build
+  on them (see `docs/lessons/muso-domain.md`,
+  `skills-all/muso-query-writer/trino-schemas.md`). **Athena is also gone** (retired
+  2026-04-25) -- all analytics queries run through **OVH Trino** now.
+- **Sunsetting -- do not build NEW dependencies on it** (CTO direction, 2026-07-24):
+  the **V3 data-processing pipeline** (the V3 Airflow DAGs, the BI export behind
+  `matvw_*` in `platform-industry-bi-prod`, the V3 PDP tier). It still SERVES
+  production today -- many query-writer saved queries, dedup sweeps, and fraud
+  lookups read `matvw_*`, so it is not switch-off-able yet and real breakage in it
+  still matters -- but the direction is migration OFF it: ops merge verification
+  already moved to the live-catalog admin read (PR #717), and core-backend readers
+  are cutting over to the `cube_analytics_*` views (the #9204/#9208 sweep). New
+  operational checks must use live sources (admin API / cube views), never the BI
+  matviews, whose watermark can lag days.
+- **Current and sanctioned -- the only "v3" to keep using**: the **`/api/v3`,
+  `/api/w/v3`, `/api/m/v3`** REST routes (admin / web / mobile live Muso API).
 
 ## 3. Consult H-DevOps before touching infra
 

@@ -95,6 +95,41 @@ mergeline() { # $1 epoch  $2 survivor  $3..$n losers
   [[ "$output" == *"merge audit log not found"* ]]
 }
 
+# The muso CLI records its merges in its own state file, not the wrapper's
+# /var/log/muso-ops log (split-brain found 2026-07-24: a CLI-submitted merge was
+# invisible to the watchdog). MERGE_LANDING_MERGES_FILE is a colon-separated
+# list so both feeds are ingested.
+
+@test "colon-list: merge only in the CLI state file is still detected" {
+  export MERGE_LANDING_MERGES_FILE="$TEST_TMPDIR/recent-merges.jsonl:$TEST_TMPDIR/cli-merges.jsonl"
+  printf '{"epoch":1000,"method":"POST","path":"/admin/profiles/merge","mergeInto":"SURV","profilesIds":["L_CLI"],"requester":"nick@muso.ai"}\n' \
+    > "$TEST_TMPDIR/cli-merges.jsonl"
+  # primary wrapper log does not exist at all
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" == *"L_CLI"* ]]
+}
+
+@test "colon-list: same pair in both feeds dedupes to one candidate" {
+  mergeline 2000 SURV L_STUCK   # writes to the primary feed (still the single default path)
+  export MERGE_LANDING_MERGES_FILE="$TEST_TMPDIR/recent-merges.jsonl:$TEST_TMPDIR/cli-merges.jsonl"
+  printf '{"epoch":1000,"method":"POST","path":"/admin/profiles/merge","mergeInto":"SURV","profilesIds":["L_STUCK"],"requester":"nick@muso.ai"}\n' \
+    > "$TEST_TMPDIR/cli-merges.jsonl"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  # exactly one bullet for the pair, not two
+  [ "$(printf '%s\n' "$output" | grep -c 'L_STUCK')" -eq 1 ]
+}
+
+@test "colon-list: SKIP only when every listed feed is missing" {
+  export MERGE_LANDING_MERGES_FILE="$TEST_TMPDIR/absent-a.jsonl:$TEST_TMPDIR/absent-b.jsonl"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"merge audit log not found"* ]]
+}
+
 @test "aged merge whose loser never landed → alerts with loser + survivor" {
   mergeline 1000 SURV L_STUCK
   run bash "$WD" --dry-run

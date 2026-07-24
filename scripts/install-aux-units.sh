@@ -1204,6 +1204,23 @@ cat > /etc/cron.d/merge-landing-watchdog << MERGELANDINGWD
 MERGELANDINGWD
 chmod 644 /etc/cron.d/merge-landing-watchdog
 
+# ─── muso CLI state-dir pin for ALL login/SSH contexts ────────
+# The gateways get MUSO_STATE_DIR=/var/log/muso-ops from their env files, but
+# an ad-hoc root SSH shell has no pin, so the CLI falls back to its XDG state
+# dir and merge audit lines land in /root/.local/state/muso — invisible to the
+# merge-landing watchdog's primary feed AND to the CLI's own cross-process
+# merge-overlap guard (split-brain found 2026-07-24). /etc/environment is read
+# by PAM for every session type, including non-interactive `ssh host cmd`.
+# Idempotent: replace-or-append the single line.
+if grep -q '^MUSO_STATE_DIR=' /etc/environment 2>/dev/null; then
+  sed -i 's|^MUSO_STATE_DIR=.*|MUSO_STATE_DIR=/var/log/muso-ops|' /etc/environment
+else
+  # guard: a pre-existing file without a trailing newline would glue our line
+  # onto its last var (and hide it from the grep above on the next run)
+  [ -s /etc/environment ] && [ -n "$(tail -c1 /etc/environment)" ] && echo >> /etc/environment
+  echo 'MUSO_STATE_DIR=/var/log/muso-ops' >> /etc/environment
+fi
+
 # ─── Prod-log alert watchdog at 5-min cadence ─────────────────
 # Posts NEW prod error-log lines (kubectl, read-only, redacted) to
 # #prod-alerts (C0BA8QMV3ME) so engineers see prod errors without asking the
