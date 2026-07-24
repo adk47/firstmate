@@ -411,6 +411,24 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     active=$((active + 1)); return 0
   fi
 
+  # TOCTOU rail: the live-network probes above widen the audit→rm window,
+  # and the .git-pruned freshness rail cannot see git-only writes (a new
+  # ref, stash, or index change made by a concurrent writer mid-sweep).
+  # Re-audit the local git state and require it UNCHANGED before removal.
+  local recheck
+  rc=0; recheck="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" status --porcelain 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -n "$recheck" ]; then
+    held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "worktree changed between audit and removal"; return 0
+  fi
+  rc=0; recheck="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" stash list 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -n "$recheck" ]; then
+    held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "stash appeared between audit and removal"; return 0
+  fi
+  rc=0; recheck="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/heads refs/tags --format='%(objectname) %(refname)' 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$recheck" != "$local_refs" ]; then
+    held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "refs changed between audit and removal"; return 0
+  fi
+
   head_sha="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   kb="$(entry_kb "$d")"
   if remove_entry "$d" "$kb" "clone (HEAD $head_sha)"; then

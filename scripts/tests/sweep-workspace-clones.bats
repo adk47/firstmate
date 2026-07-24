@@ -418,6 +418,32 @@ mkclone() {
   [[ "$output" == *"REPOS_TTL_DAYS"* ]]
 }
 
+@test "a ref created mid-sweep (after the first audit) holds the clone at the removal gate" {
+  mkclone "$TEST_TMPDIR/repos/raced"
+  age_tree 20 "$TEST_TMPDIR/repos/raced"
+  # git wrapper seam: on the SECOND `status --porcelain` for this clone (the
+  # TOCTOU re-audit), first create a tag — simulating a concurrent writer
+  # landing git-only state between the first audit and the removal gate.
+  REAL_GIT="$(command -v git)"
+  export REAL_GIT INJECT_TARGET="$TEST_TMPDIR/repos/raced" INJECT_COUNT="$TEST_TMPDIR/inject-count"
+  cat > "$TEST_TMPDIR/bin/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"status --porcelain"* && "$*" == *"$INJECT_TARGET"* ]]; then
+  n=$(cat "$INJECT_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$INJECT_COUNT"
+  if [ "$n" -eq 2 ]; then
+    "$REAL_GIT" -C "$INJECT_TARGET" tag injected-mid-sweep
+  fi
+fi
+exec "$REAL_GIT" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/git"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/git"; hash -r
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/raced" ]
+  [[ "$output" == *"between audit and removal"* ]]
+}
+
 @test "structural refusal: symlinked repos root exits 1" {
   rmdir "$TEST_TMPDIR/repos" 2>/dev/null || /bin/rm -rf "$TEST_TMPDIR/repos"
   mkdir -p "$TEST_TMPDIR/elsewhere"
