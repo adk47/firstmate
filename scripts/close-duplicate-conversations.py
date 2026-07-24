@@ -102,7 +102,8 @@ Env:
   # De-confliction inputs (reused verbatim from cs-needs-human-digest.py's
   # default_state_paths() env vars — see that module for detail):
   CLOSE_SHADOW_LOG, RESOLVE_NOTIFY_STATE, RESOLUTION_STATE_PATH,
-  RESOLUTION_SHADOW_LOG, OVERDUE_NOTIFY_STATE, DEDUP_SHADOW_LOG
+  RESOLUTION_SHADOW_LOG, OVERDUE_NOTIFY_STATE, DEDUP_SHADOW_LOG,
+  CLOSE_STALE_SHADOW_LOG
 
 Flags:
   --apply               actually close (default: dry-run — identify only,
@@ -384,6 +385,12 @@ def default_state_paths():
             "json"),
         "dedup-shadow": (
             os.environ.get("DEDUP_SHADOW_LOG", "/var/log/dedup-shadow.jsonl"),
+            "jsonl"),
+        # Stale-backlog closer (scripts/close-stale-conversations.py,
+        # human-run) — a conversation it already closed must not be grouped
+        # or re-closed here.
+        "close-stale": (
+            os.environ.get("CLOSE_STALE_SHADOW_LOG", "/var/log/close-stale-shadow.jsonl"),
             "jsonl"),
     }
 

@@ -59,6 +59,10 @@ this mirrors.
                                  is a defensive no-op until that changes —
                                  see the script docstring / PR notes for the
                                  known gap)
+  - CLOSE_STALE_SHADOW_LOG      /var/log/close-stale-shadow.jsonl
+                                 (jsonl; each line has "id" — the human-run
+                                 stale-backlog closer,
+                                 scripts/close-stale-conversations.py)
 
 Env:
   MUSOAI_INTERCOM_TOKEN       required
@@ -455,6 +459,11 @@ def default_state_paths():
         # forward-compatible no-op read, not an active exclusion source yet.
         "dedup-shadow": (
             os.environ.get("DEDUP_SHADOW_LOG", "/var/log/dedup-shadow.jsonl"),
+            "jsonl"),
+        # Stale-backlog closer (scripts/close-stale-conversations.py,
+        # human-run) — its closes must drop out of the digest immediately.
+        "close-stale": (
+            os.environ.get("CLOSE_STALE_SHADOW_LOG", "/var/log/close-stale-shadow.jsonl"),
             "jsonl"),
     }
 
