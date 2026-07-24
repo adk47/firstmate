@@ -82,7 +82,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run the daily profile movement report. Query Athena (workgroup: clio-agent, region: us-west-2) for: 1) PAID CHURNS in last 24h — separate B2B (muso_team_business_*) and B2P (muso_team_pro_* + muso_individual_*), include emails. 2) PAID JOINS in last 24h ranked by popularity. 3) POPULAR LITE USERS — claimed profiles with popularity 90+ and no paid subscription. Format for Slack with bullets. Flag biggest red flags.",
+        "message": "Run the daily profile movement report. Query via the muso CLI (read-only Trino): `muso query` against the postgresql_core catalog — consult the muso-query-writer skill (trino-schemas.md) for subscription/profile table mappings. Report: 1) PAID CHURNS in last 24h — separate B2B (muso_team_business_*) and B2P (muso_team_pro_* + muso_individual_*), include emails. 2) PAID JOINS in last 24h ranked by popularity. 3) POPULAR LITE USERS — claimed profiles with popularity 90+ and no paid subscription. Format for Slack with bullets. Flag biggest red flags.",
         "timeoutSeconds": 600,
         "model": "openai/gpt-5.6-sol",
         "thinking": "low",
@@ -281,7 +281,7 @@
           "openrouter/openai/gpt-5.6-luna",
           "openrouter/anthropic/claude-haiku-4.5"
         ],
-        "message": "Run the AMP Daily Report. Query core-backend tables public_ad_events and public_ads via Athena (workgroup: clio-agent, region: us-west-2). Build report: 1) Summary: all-time/7d/today views, clicks, CTR, unique viewers with deltas. 2) Top 5 ads by CTR. 3) Underperformers (CTR < 0.3% with >1K views). 4) AMP vs Feed breakdown. 5) Platform breakdown. 6) Daily trend 7 days. Format for Slack bullets, keep short.",
+        "message": "Run the AMP Daily Report. Query core-backend tables postgresql_core.public.ad_events and postgresql_core.public.ads via the muso CLI (read-only Trino): `muso query`. Build report: 1) Summary: all-time/7d/today views, clicks, CTR, unique viewers with deltas. 2) Top 5 ads by CTR. 3) Underperformers (CTR < 0.3% with >1K views). 4) AMP vs Feed breakdown. 5) Platform breakdown. 6) Daily trend 7 days. Format for Slack bullets, keep short.",
         "timeoutSeconds": 600,
         "thinking": "low"
       },
