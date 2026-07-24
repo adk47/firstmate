@@ -318,6 +318,44 @@ mkclone() {
   [[ "$output" == *"probe-fail"* ]]
 }
 
+@test "a force-pushed-away branch is held even when cached refs vouch for the tip" {
+  mkclone "$TEST_TMPDIR/repos/forced"
+  # Rewrite origin/main to an unrelated history from a helper clone: the
+  # candidate's cached origin/main still equals its local tip, but the live
+  # server no longer contains that commit.
+  git clone -q "$(ls -d "$TEST_TMPDIR"/origins/*forced.git)" "$TEST_TMPDIR/aux-forced"
+  ( cd "$TEST_TMPDIR/aux-forced" && git checkout -q --orphan rewrite \
+      && git rm -qrf . && echo other > o.txt && git add o.txt \
+      && git commit -qm unrelated && git push -qf origin rewrite:main )
+  age_tree 20 "$TEST_TMPDIR/repos/forced"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/forced" ]
+  [[ "$output" == *"local-branch"* ]]
+}
+
+@test "a fast-forwarded live branch does not hold a stale clone (coverage preserved)" {
+  mkclone "$TEST_TMPDIR/repos/behind"
+  git clone -q "$(ls -d "$TEST_TMPDIR"/origins/*behind.git)" "$TEST_TMPDIR/aux-behind"
+  ( cd "$TEST_TMPDIR/aux-behind" && echo more > m.txt && git add m.txt \
+      && git commit -qm advance && git push -q origin main )
+  age_tree 20 "$TEST_TMPDIR/repos/behind"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ ! -d "$TEST_TMPDIR/repos/behind" ]
+}
+
+@test "a candidate that IS a mountpoint is held (exact mount match)" {
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/mounted"
+  echo x > "$TEST_TMPDIR/ws/cto/tmp/mounted/f"
+  age_tree 10 "$TEST_TMPDIR/ws/cto/tmp/mounted"
+  printf 'dev %s ext4 rw 0 0\n' "$TEST_TMPDIR/ws/cto/tmp/mounted" > "$TEST_TMPDIR/mounts"
+  SWEEP_MOUNTS_FILE="$TEST_TMPDIR/mounts" run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/ws/cto/tmp/mounted" ]
+  [[ "$output" == *"mount"* ]]
+}
+
 @test "tag name matching is exact: local v1 is not satisfied by remote v10" {
   mkclone "$TEST_TMPDIR/repos/tagname"
   ( cd "$TEST_TMPDIR/repos/tagname" && git tag v10 && git push -q origin v10 && git tag v1 )

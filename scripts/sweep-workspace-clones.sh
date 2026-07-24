@@ -144,10 +144,16 @@ guard_root() {
   fi
 }
 
-has_mount_under() {
-  [ -r /proc/self/mounts ] || return 1
-  awk -v p="$1/" 'index($2, p) == 1 { found = 1 } END { exit found ? 0 : 1 }' \
-    /proc/self/mounts
+# True if $1 IS a mountpoint or any mountpoint lives under it. The exact-match
+# case matters: rm --one-file-system treats a command-line argument that is
+# itself a mountpoint as that filesystem's root and would wipe its contents.
+# SWEEP_MOUNTS_FILE overrides the mounts table for hermetic tests.
+MOUNTS_FILE="${SWEEP_MOUNTS_FILE:-/proc/self/mounts}"
+mount_hazard() {
+  [ -r "$MOUNTS_FILE" ] || return 1
+  awk -v p="$1" -v pu="$1/" \
+    '$2 == p { found = 1 } index($2, pu) == 1 { found = 1 } END { exit found ? 0 : 1 }' \
+    "$MOUNTS_FILE"
 }
 
 entry_kb() {
@@ -265,8 +271,8 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     if tree_fresh_since "$d" "$ref"; then
       active=$((active + 1)); return 0
     fi
-    if has_mount_under "$d"; then
-      held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint under candidate"; return 0
+    if mount_hazard "$d"; then
+      held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
     fi
     kb="$(entry_kb "$d")"
     if remove_entry "$d" "$kb" "junk"; then
@@ -279,8 +285,8 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   if tree_fresh_since "$d" "$ref"; then
     active=$((active + 1)); return 0
   fi
-  if has_mount_under "$d"; then
-    held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint under candidate"; return 0
+  if mount_hazard "$d"; then
+    held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
   fi
   if [ -n "$(find "$d" -xdev -mindepth 2 -name .git -print -quit 2>/dev/null)" ]; then
     held_nested=$((held_nested + 1)); hold "nested" "$d" "inner repo present"; return 0
@@ -328,7 +334,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   # itself. One ls-remote snapshot covers heads and tags; it is network, but
   # only candidates that survived every other gate reach this, and any
   # failure holds — never passes.
-  local live_refs local_refs bad_ref refsha refname
+  local live_refs local_refs bad_ref refsha refname live_sha
   rc=0; live_refs="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" ls-remote origin 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git ls-remote: ${live_refs:0:120}"; return 0
@@ -363,17 +369,35 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
             | grep -qxF -- "$refsha"; then
           bad_ref="$refname"; break
         fi
-        if ! printf '%s\n' "$live_refs" \
-            | awk -v r="$refname" '$2 == r { found = 1 } END { exit found ? 0 : 1 }'; then
+        live_sha="$(printf '%s\n' "$live_refs" | awk -v r="$refname" '$2 == r { print $1; exit }')"
+        if [ -z "$live_sha" ]; then
           bad_ref="$refname"; break
+        fi
+        if [ "$live_sha" != "$refsha" ]; then
+          # The server moved this branch since our last fetch. A cached ref
+          # cannot prove our tip survived (a force-push may have orphaned
+          # it): fetch the live tip into an isolated namespace and require
+          # our tip to be its ancestor. Unprovable → hold.
+          if ! GIT_OPTIONAL_LOCKS=0 git -C "$d" fetch --quiet origin "+${refname}:refs/sweep-live/${refname#refs/heads/}" 2>/dev/null; then
+            bad_ref="$refname"; break
+          fi
+          if ! GIT_OPTIONAL_LOCKS=0 git -C "$d" merge-base --is-ancestor "$refsha" "refs/sweep-live/${refname#refs/heads/}" 2>/dev/null; then
+            bad_ref="$refname"; break
+          fi
         fi ;;
     esac
   done <<< "$local_refs"
+  # Drop the isolated-namespace refs whatever the outcome (a held clone must
+  # not accumulate sweep artifacts; fetched objects are unreferenced and gc-able).
+  GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/sweep-live --format='%(refname)' 2>/dev/null \
+    | while IFS= read -r stale_ref; do
+        git -C "$d" update-ref -d "$stale_ref" 2>/dev/null || true
+      done
   if [ -n "$bad_ref" ]; then
     held_dirty=$((held_dirty + 1))
     case "$bad_ref" in
       refs/tags/*) hold "local-tag" "$d" "'${bad_ref#refs/tags/}' is absent from origin or at a different object" ;;
-      *) hold "local-branch" "$d" "'${bad_ref#refs/heads/}' diverges from its tracking ref or is gone from origin (live)" ;;
+      *) hold "local-branch" "$d" "'${bad_ref#refs/heads/}' diverges from its tracking ref, is gone from origin (live), or was force-moved past our tip" ;;
     esac
     return 0
   fi
