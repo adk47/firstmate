@@ -76,6 +76,10 @@
 #   SWEEP_SLACK_CHANNEL     default C0ADV2W76G4 (#clio_devops)
 #   SWEEP_SKIP_HOST_GUARD   1 = skip the ovh-node-8 guard AND the fixed
 #                           production-topology check on the two roots (tests)
+#   SWEEP_MOUNTS_FILE       mount table to consult (default /proc/self/mounts)
+#   SWEEP_PROC_DIR          proc tree for the live-handle scan (default /proc)
+#                           — dependency injection for tests, NOT a bypass:
+#                           a missing/unreadable tree still fails closed
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -351,6 +355,48 @@ reaudit_junk() {  # <quarantined-path> <cutoff-ref-file>
 # ── quarantine primitives ────────────────────────────────────
 QPATH=""; QDIR=""; QUARANTINE_ERROR=""
 
+# True if ANY live process holds the tree open — cwd or an open descriptor.
+# This is the other half of the no-writers guarantee: the quarantine rename
+# means no process can acquire a NEW handle (nothing can look the object up
+# by a name it does not know), and this catches the handles that already
+# existed. Without it, a process cwd'd inside can still create an allow-empty
+# commit or update a ref after the audit and before/while rm traverses, and
+# .git-only writes never move the worktree-freshness rail.
+#
+# Called immediately AFTER the rename on purpose: from that moment the set of
+# holders can only shrink, so one scan is sound. Scanning per candidate before
+# quarantine would be both slower and racy.
+#
+# Cannot enumerate → cannot prove absence → hazard. SWEEP_PROC_DIR is
+# dependency injection for tests (same role SWEEP_MOUNTS_FILE plays for the
+# mount table), NOT a bypass: a missing or unreadable tree still fails closed.
+PROC_DIR="${SWEEP_PROC_DIR:-/proc}"
+has_live_handles() {  # <path>
+  local p="$1" targets rc=0 l
+  [ -d "$PROC_DIR" ] || return 0
+  # GNU find prints every link target in ONE pass; a readlink-per-link loop
+  # over a real /proc would be thousands of forks per candidate. Measured on
+  # node-8: ~208ms for 725 processes / 11k links. Only candidates that already
+  # passed the staleness gates get here, so a weekly run pays this a few
+  # hundred times at worst.
+  targets="$(find "$PROC_DIR" -mindepth 2 -maxdepth 3 \
+      \( -name cwd -o -path "$PROC_DIR/[0-9]*/fd/*" \) -printf '%l\n' 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # BSD find (dev laptops) has no -printf. The fixture trees tests point at
+    # are tiny, so the fork-per-link fallback is fine there.
+    rc=0
+    targets="$(for l in "$PROC_DIR"/[0-9]*/cwd "$PROC_DIR"/[0-9]*/fd/*; do
+                 [ -L "$l" ] || continue
+                 readlink -- "$l" 2>/dev/null || true
+               done)" || rc=$?
+    [ "$rc" -eq 0 ] || return 0
+  fi
+  printf '%s\n' "$targets" | HP_P="$p" awk '
+    $0 == ENVIRON["HP_P"] { found = 1 }
+    index($0, ENVIRON["HP_P"] "/") == 1 { found = 1 }
+    END { exit found ? 0 : 1 }'
+}
+
 # Take the candidate OUT of the namespace, atomically. The target must be
 # GUARANTEED-private, not merely unlikely to collide: leftovers are retained
 # forever by design, so a recurring name (a PID, a timestamp) could already
@@ -381,6 +427,13 @@ quarantine_candidate() {  # <path> <id-at-classification>
   # rename(2) bumps ctime, so compare the rename-invariant subset.
   if [ -z "$id" ] || [ "$(id_stable "$(path_id "$q")")" != "$(id_stable "$id")" ]; then
     QUARANTINE_ERROR="object replaced before removal"
+    restore_quarantine "$q" "$p" "$qdir" || true
+    return 1
+  fi
+  # No new handle can be acquired from here (the name is private), so this one
+  # scan settles it: if nobody holds the tree open now, nobody will.
+  if has_live_handles "$q"; then
+    QUARANTINE_ERROR="live process holds the tree open (cwd or open fd)"
     restore_quarantine "$q" "$p" "$qdir" || true
     return 1
   fi

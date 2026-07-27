@@ -52,6 +52,11 @@ STUB
   # has no /proc/self/mounts — pin an empty table for determinism.
   : > "$TEST_TMPDIR/mounts-empty"
   export SWEEP_MOUNTS_FILE="$TEST_TMPDIR/mounts-empty"
+  # Same dependency-injection role for the live-handle scan: an empty proc
+  # tree means "no process holds anything open". Pointing at the REAL /proc
+  # would make every test depend on whatever else is running on the box.
+  mkdir -p "$TEST_TMPDIR/proc-empty"
+  export SWEEP_PROC_DIR="$TEST_TMPDIR/proc-empty"
 
   export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
     GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -927,6 +932,43 @@ STUB
   [[ "$output" == *"could not enumerate"* ]]
   # The summary still had to be emitted before the failure surfaced.
   [[ "$output" == *"swept_clones="* ]]
+}
+
+@test "a live process holding the clone open blocks deletion (real /proc, real handle)" {
+  # The window the quarantine alone cannot close: a process that already had a
+  # descriptor or cwd inside keeps writing through it. Uses the REAL /proc and
+  # a REAL background process — the whole point is that the handle survives the
+  # rename, which a static fixture cannot express.
+  [ -d /proc ] || skip "requires /proc (Linux); production and CI are node-8"
+  unset SWEEP_PROC_DIR
+  mkclone "$TEST_TMPDIR/repos/held-open"
+  age_tree 20 "$TEST_TMPDIR/repos/held-open"
+  # cwd inside the clone; /proc/<pid>/cwd follows the quarantine rename.
+  ( cd "$TEST_TMPDIR/repos/held-open" && exec sleep 60 ) &
+  local holder=$!
+  # Wait for the kernel to publish the cwd before sweeping.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(readlink "/proc/$holder/cwd" 2>/dev/null)" = "$TEST_TMPDIR/repos/held-open" ] && break
+    sleep 0.2
+  done
+  [ "$(readlink "/proc/$holder/cwd" 2>/dev/null)" = "$TEST_TMPDIR/repos/held-open" ]
+  run "$SWEEP" --apply
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/held-open" ]
+  [ -f "$TEST_TMPDIR/repos/held-open/f.txt" ]
+  [[ "$output" == *"live process holds the tree open"* ]]
+  [[ "$output" == *"restored from quarantine"* ]]
+}
+
+@test "an unreadable proc tree holds candidates (cannot prove absence of writers)" {
+  mkclone "$TEST_TMPDIR/repos/noproc"
+  age_tree 20 "$TEST_TMPDIR/repos/noproc"
+  SWEEP_PROC_DIR="$TEST_TMPDIR/proc-does-not-exist" run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/noproc" ]
+  [[ "$output" == *"live process holds the tree open"* ]]
 }
 
 @test "quarantine debris from an interrupted run is held, never swept" {
