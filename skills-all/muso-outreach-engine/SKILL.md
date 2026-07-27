@@ -585,7 +585,7 @@ The `{name_drop_line}` is selected based on the contact's company ICPCategory La
 
 ### Claimed Profile Name Drops
 
-When a contact's company has a claimed Muso profile (check Athena `public_claiming` or the company's domain), prioritize mentioning names relevant to that company's specific niche over the generic ICP mapping.
+When a contact's company has a claimed Muso profile (check `postgresql_core.public.claiming` via Trino or the company's domain), prioritize mentioning names relevant to that company's specific niche over the generic ICP mapping.
 
 ## Tone Reference
 

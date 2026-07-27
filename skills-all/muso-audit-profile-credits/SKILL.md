@@ -2,7 +2,7 @@
 name: muso-audit-profile-credits
 description: |
   Per-track audit of every existing approved credit on a Muso profile. Diffs
-  the profile's credit list against the industry-sourced catalog in Athena,
+  the profile's credit list against the industry-sourced catalog in Trino,
   bucketing each track as 🟢 industry-confirmed / 🟡 user-added externally
   verifiable / 🟠 user-added unverified / 🔴 missing from catalog. Produces
   a Slack-formatted per-track breakdown for ops review and removal decisions.
@@ -101,7 +101,7 @@ must be stated in the final output.
 Build `API_CREDITS`: a dict keyed by `trackId`, with `{title, credits[],
 popularity, status, addedAt}` per track.
 
-### Step 3: Industry-confirmed set (Athena)
+### Step 3: Industry-confirmed set (Trino)
 
 Pull every track in the industry-sourced catalog that references this profile
 in its authoritative `profiles[]` array:
@@ -139,7 +139,7 @@ For every `(track_id, api_credit)` in `API_CREDITS`:
 | `track_id in INDUSTRY_CONFIRMED` AND `api_credit.credits ⊄ industry.roles_on_track` | `role_expanded` | 🟢⚠️ | Track is industry-confirmed but ops/user added extra roles — note, usually fine |
 | `track_id NOT in INDUSTRY_CONFIRMED` AND resolves on Spotify/TIDAL with name match | `user_added_verified` | 🟡 | User-added, externally corroborated |
 | `track_id NOT in INDUSTRY_CONFIRMED` AND external check inconclusive | `user_added_unverified` | 🟠 | User-added, no external corroboration → needs review |
-| `track_id NOT in INDUSTRY_CONFIRMED` AND track does not exist in Athena at all | `suspicious` | 🔴 | Ghost track → investigate |
+| `track_id NOT in INDUSTRY_CONFIRMED` AND track does not exist in Trino at all | `suspicious` | 🔴 | Ghost track → investigate |
 
 Cap the external-check step at **20 tracks** to avoid excessive browser time.
 Select the 20 by: all 🔴 first, then 🟠 highest-popularity-first. State the
@@ -235,11 +235,11 @@ be investigated before user-added-unverified.
 
 ## Edge cases
 
-- **Profile has 0 API credits but Athena has industry-confirmed tracks**:
-  sync lag; post *"API returns 0 credits for profile; Athena shows X
+- **Profile has 0 API credits but Trino has industry-confirmed tracks**:
+  sync lag; post *"API returns 0 credits for profile; Trino shows X
   industry-sourced tracks — possible sync lag, investigate via backend
   team"* and stop.
-- **Athena returns 0 but API returns N credits**: the profile has NO
+- **Trino returns 0 but API returns N credits**: the profile has NO
   industry-sourced credits. Every credit is in the 🟡/🟠/🔴 pool. This is
   common for professionals whose industry records don't track them (live
   engineers, ghost producers) but also common for fraud. The external check
@@ -248,7 +248,7 @@ be investigated before user-added-unverified.
 - **Profile has more than 2000 credits**: not attempted; post *"profile has
   <M> credits, exceeds 2000-cap, not audited — escalate to engineering for
   batched workflow"*. Do not silently truncate.
-- **Athena query times out or errors**: post the error verbatim and stop.
+- **Trino query times out or errors**: post the error verbatim and stop.
   Do not approximate with API-only data — you'd lose the industry-confirmed
   signal, which is the whole point.
 - **Admin API returns 5xx mid-pagination**: post what's known, explicit
@@ -268,11 +268,10 @@ inherits from `muso-ops-credit-verification` and is load-bearing.
 ## Cost Notes
 
 - Admin API `/admin/profile/{id}/credits`: cheap (indexed lookup).
-- Athena `matvw_catalog_track` with `contains(TRANSFORM(profiles))`: this
+- Trino `matvw_catalog_track` with `contains(TRANSFORM(profiles))`: this
   table has ~190M rows; the TRANSFORM+contains filter cannot use partitions,
-  so it's a full scan unless you add a partition filter. If cost becomes an
-  issue, add `AND t.release_year >= 2010` (or equivalent) to limit scan.
-  Typical cost for one profile audit: ~2-5 GB scanned (~$0.01-0.03).
+  so it's a full scan — slow and cluster-loading. If runtime becomes an
+  issue, add `AND t.release_year >= 2010` (or equivalent) to limit the scan.
 - Browser checks: ~1-2s per track, 20 tracks → ~30-45s. Primary latency.
 
 ## Related skills

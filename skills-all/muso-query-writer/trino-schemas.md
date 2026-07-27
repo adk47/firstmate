@@ -67,6 +67,12 @@ WHERE is_deleted = false
 ```
 
 ### matvw_catalog_profile (29M profiles)
+
+> Column list verified against the live cluster 2026-07-24 (information_schema +
+> direct SELECT). The Athena-era columns `credits_count_1y`, `top_collaborators`,
+> `child_roles`, `genres`, `primary_genre`, `decades`, `years_active` do NOT exist
+> on the OVH matview — a SELECT naming them fails with "Column cannot be resolved".
+
 ```sql
 SELECT
     _id,                        -- Profile ID (string)
@@ -77,21 +83,17 @@ SELECT
     profile_type,               -- 'artist', 'professional', 'organization', 'person', 'band', 'compilation_profile', 'non_music_profile'
     profile_sub_type,           -- More specific type
     roles,                      -- array<string> of roles
-    child_roles,                -- array<struct> with detailed role breakdown
     common_credits,             -- array<string> of common credits
     credits_count,              -- Total credits
-    credits_count_1y,           -- Credits in last year
     collaborations_count,       -- Number of collaborators
-    top_collaborators,          -- array<struct> with id, name
     popularity, rank,           -- Scoring
-    genres,                     -- array<struct> with genre counts
-    primary_genre,              -- Main genre
-    decades,                    -- array<struct> of active decades
     country, state, city,       -- Location
     ipis,                       -- array<bigint> of IPI numbers
     images,                     -- Profile images
     about,                      -- Bio text
-    years_active,               -- Years in industry
+    merged_to_id,               -- Set when this profile was merged away
+    raw_profile_ids,            -- Source raw IDs
+    created_timestamp, updated_timestamp,
     is_deleted                  -- Soft delete flag
 FROM hive."platform-industry-bi-prod".matvw_catalog_profile
 WHERE is_deleted = false

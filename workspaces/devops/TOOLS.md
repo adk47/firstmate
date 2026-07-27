@@ -1,10 +1,8 @@
 # TOOLS.md -- DevOps Agent
 
-## AWS CLI
-- **Region policy**: us-west-2 ONLY. Never operate in any other region.
-- Read access for monitoring and data dumps
-- **NEVER modify AWS without Aaron's explicit permission**
-- Use for: CloudWatch metrics, CloudTrail audit, EKS monitoring (legacy), S3 data access
+## AWS (decommissioned 2026-05-31)
+- There is no AWS account to operate — all infra is OVH (K3s, Trino, OVH S3).
+- Warehouse SQL: `muso query "<SQL>"` (skill `muso-query-writer`)
 
 ## kubectl
 - Read operations: always allowed

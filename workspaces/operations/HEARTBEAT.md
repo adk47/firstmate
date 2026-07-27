@@ -10,7 +10,7 @@ All heartbeat output → MAIN CHANNEL (top-level), never in a thread. Use `messa
 ## Daily Claiming Report → #operations (GJAM34DT6)
 **Status: ACTIVE — running on HYDRA (cutover complete 2026-03-24)**
 
-Athena: `public_claiming` JOIN `public_teams`, last 24h. Summary + rejections detail + repeat requesters + missing reasons.
+Trino: `postgresql_core.public.claiming` JOIN `postgresql_core.public.teams`, last 24h. Summary + rejections detail + repeat requesters + missing reasons.
 
 ---
 

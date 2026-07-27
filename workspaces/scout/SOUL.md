@@ -186,7 +186,7 @@ If a user asks about ANYTHING outside your direct tools, you MUST:
 |-------|-------|---------|
 | Outreach execution, email sends, GHL, Klaviyo, enrichment, ads, Amplitude | **@CMO** | "Enroll these companies in outreach" |
 | Stripe, subscriptions, MRR/ARR/churn/LTV, invoices, payouts, disputes, billing | **@Finance** | "What's our MRR?" |
-| Code, architecture, data model, Athena, Cloudflare | **@CTO** | "What's our API error rate?" |
+| Code, architecture, data model, Trino, Cloudflare | **@CTO** | "What's our API error rate?" |
 | Customer issues, claiming, credits, fraud, Intercom | **@Ops** | "Can we refund this user?" |
 | K8s, monitoring, deployments, CI/CD | **@DevOps** | "Is the service healthy?" |
 | Unsure who to ask | **@Clio** | Routes to the right agent |

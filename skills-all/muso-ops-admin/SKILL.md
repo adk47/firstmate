@@ -39,7 +39,7 @@ Ops User (Slack)
     ▼
 Clio (this skill)
     │
-    ├─── Athena (read-only data)      ← existing, no changes
+    ├─── Trino (read-only data)       ← existing, no changes
     ├─── Stripe CLI (payments)         ← existing, no changes
     ├─── Admin API (core-backend)      ← NEW: replaces Retool
     │        └── JWT auth, /admin/* endpoints
@@ -132,6 +132,26 @@ vague request is never authorization to delete in bulk.
 If a delete *looks* like cleanup of "broken" rows, remember the incident: the
 "broken-looking" `in_progress=true, name=null` stubs carried the real stream
 data. Confirm what a row holds before deleting it.
+
+## 🛑 CREDIT REJECT GATE (enforced in muso-admin-api.sh — incident 2026-07-22)
+
+Rejecting a credit request is **never autonomous**. Any `PUT`/`PATCH` to
+`/admin/credit-requests*` whose body sets `status:"rejected"` is refused
+(`MUSO_CREDIT_REJECT_APPROVAL_REQUIRED`) unless `--confirmed-by
+<jan|aaron|nick>` AND `--approval-msg-id <slack_ts>` point at an explicit
+in-thread human decision. Requester identity does NOT bypass it, there is no
+env off-switch, and it fires even in dry-run. Approved rejections are audited
+to `/var/log/muso-ops/credit-reject-audit.jsonl`.
+
+Why: rejection is a one-way door — core-backend's `updateStatus.js` transition
+matrix has no `rejected → user_verification_needed` path (the only exit from
+`rejected` is `approved`). On 2026-07-22 the agent rejected 28 UVN requests
+during a ClickUp sweep and the "move them back to verification needed"
+correction silently no-oped with a 200. When proof is insufficient, keep the
+request in `user_verification_needed` and ask for more evidence, or escalate
+the recommended reject to Jan (`<@U038BM16T7W>`) — same doctrine as the
+customer-facing rule (Caroline never rejects). See `muso-ops-credits` for the
+full transition matrix and the mandatory post-write readback.
 
 ## Environment Setup
 
@@ -247,8 +267,8 @@ Full route map: `references/admin-api-routes.md`
 
 ### Credit Requests (`/admin/credit-requests/*`)
 - `GET /admin/credit-requests` — list credit requests
-- `PUT /admin/credit-requests` — bulk update status (body: `{requestIds[], status}` or `{profileId, status}`)
-- `PUT /admin/credit-requests/:requestId` — updates `credits` field ONLY; ignores `status`. Use the collection endpoint above for approve/reject.
+- `PUT /admin/credit-requests` — bulk update status (body: `{requestIds[], status}` or `{profileId, status}`; `profileId` selects `unverified` rows only) 🛑 `status:"rejected"` is reject-gated (see Credit Reject Gate)
+- `PUT /admin/credit-requests/:requestId` — updates `credits` field ONLY; ignores `status`. Use the collection endpoint above for any status change.
 - `GET /admin/credit-requests/counts` — counts by status
 - `GET /admin/credit-requests/profiles` — profiles with pending requests
 

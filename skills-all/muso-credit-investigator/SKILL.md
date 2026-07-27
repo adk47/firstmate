@@ -22,26 +22,24 @@ Triggers: "investigate credit", "should we approve", "is this legit", "credit re
 ## Investigation Checklist
 
 ### Step 1: Resolve the entity
-If given a credit request ID → look up in `public_credit_requests` to get userid, profileid, credits, trackid, spotifypopularity
+If given a credit request ID → look up in `postgresql_core.public.credit_requests` to get userid, profileid, credits, trackid, spotifypopularity
 If given a userid → pull all recent credit requests for that user
 If given a profileid → pull credit_requests WHERE profileid = X
 
 ### Step 2: Profile baseline
-Query `platform-industry-db-industry-prod`.catalog_profile WHERE _id = profileid:
+Query `hive."platform-industry-bi-prod".matvw_catalog_profile` WHERE _id = profileid:
 - Profile name, type (individual/organization)
 - common_credits — what roles is this person known for?
-- credits_count, credits_count_1y
-- years_active
-- top_collaborators — are they real known artists?
-- is_high_risk flag
+- credits_count, collaborations_count
+- popularity, rank
 
-Query `platform-industry-calc-prod`.profile_track_full WHERE profile_id = profileid:
+Query `hive."platform-industry-calc-prod".profile_track_full` WHERE profile_id = profileid:
 - Total streams (SUM of streams)
 - Number of tracks (COUNT)
 - Breakdown by credit type (what roles dominate)
 
 ### Step 3: Credit request history
-Query `public_credit_requests` WHERE userid = X:
+Query `postgresql_core.public.credit_requests` WHERE userid = X:
 - Total approved credits (all time, last 30 days, last 7 days, last 24h)
 - Role distribution — are they claiming one role type repeatedly?
 - Track popularity distribution — are they targeting high-pop tracks?
@@ -129,7 +127,7 @@ Calculate:
 
 ## Data Sources
 
-### Athena Queries (workgroup: clio-agent, region: us-west-2)
+### Trino Queries (`muso query - <<'SQL'` heredocs; CSV with header)
 
 **Credit request history (with docs + metadata):**
 ```sql
@@ -148,25 +146,25 @@ LIMIT 200
 
 **Profile catalog:** (note: uses `_id` not `id`)
 ```sql
-SELECT _id, name, profile_type, common_credits, credits_count, credits_count_1y,
-  years_active, top_collaborators, is_high_risk, primary_genre
-FROM "platform-industry-db-industry-prod".catalog_profile
+SELECT _id, name, profile_type, profile_sub_type, roles, common_credits,
+  credits_count, collaborations_count, popularity, rank
+FROM hive."platform-industry-bi-prod".matvw_catalog_profile
 WHERE _id = '{profileid}'
+  AND is_deleted = false
 ```
-- `credits_count` and similar are nested `{$numberlong, $numberint}` — extract `$numberlong`
-- `top_collaborators` is JSON array — empty = red flag for established roles
+- `collaborations_count` near zero = red flag for established roles
 
 **Profile stream total:**
 ```sql
 SELECT SUM(streams) as total_streams, COUNT(*) as num_tracks
-FROM "platform-industry-calc-prod".profile_track_full
+FROM hive."platform-industry-calc-prod".profile_track_full
 WHERE profile_id = '{profileid}'
 ```
 
 **Credit role breakdown:**
 ```sql
 SELECT credits, COUNT(*) as cnt, SUM(streams) as streams_attributed
-FROM "platform-industry-calc-prod".profile_track_full
+FROM hive."platform-industry-calc-prod".profile_track_full
 WHERE profile_id = '{profileid}'
 GROUP BY credits
 ORDER BY streams_attributed DESC

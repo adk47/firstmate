@@ -11,7 +11,7 @@ description: |
   Triggers: "verify", "verify profile", "is this legit", "where do credits come from",
   "credit source", "profile investigation", "authenticity"
 compatibility: |
-  Requires: AWS CLI (Athena), web_fetch for external lookups. Slack formatter for output.
+  Requires: Trino (via `muso query`), web_fetch for external lookups. Slack formatter for output.
 metadata:
   version: "1.0"
   source-repo: "Muso-AI/muso-skills"
@@ -38,15 +38,16 @@ verify af2153d9-2836-402c-a94e-c4fd6e4348d0
 
 ## Investigation Steps
 
-Run ALL of these checks, then combine into a single verdict.
+Run ALL of these checks, then combine into a single verdict. All SQL runs on
+Trino: `muso query - <<'SQL'` heredocs (CSV with header; see `muso-query-writer`).
 
-### Step 1: Profile Basics (Athena)
+### Step 1: Profile Basics (Trino)
 
 ```sql
 SELECT _id, name, profile_type, profile_sub_type, roles, common_credits,
-       credits_count, credits_count_1y, collaborations_count,
-       popularity, rank, country, ipis, about, years_active,
-       genres, primary_genre, decades, known_as_names, legal_name
+       credits_count, collaborations_count,
+       popularity, rank, country, ipis, about,
+       known_as_names, legal_name
 FROM hive."platform-industry-bi-prod".matvw_catalog_profile
 WHERE _id = '<PROFILE_ID>'
   AND is_deleted = false
@@ -54,12 +55,12 @@ WHERE _id = '<PROFILE_ID>'
 
 Key signals:
 - `ipis` — IPI numbers from performing rights orgs (ASCAP/BMI/SESAC/PRS). Having IPIs is a STRONG legitimacy signal — these are assigned by real PROs.
-- `credits_count` vs `credits_count_1y` — long history = organic. All credits in last year = suspicious.
+- `credits_count` — long history = organic; use Step 3's release timestamps to judge whether credits are concentrated in the recent past (suspicious).
 - `collaborations_count` — high collab count with known artists = legit.
 - `popularity` / `rank` — system-calculated from streaming data, not user-editable.
 - `known_as_names` / `legal_name` — aliases suggest industry presence.
 
-### Step 2: Claiming Check (Athena)
+### Step 2: Claiming Check (Trino)
 
 ```sql
 SELECT id, status, reason, profiletype, verificationlinks,
@@ -82,7 +83,7 @@ FROM postgresql_core.public.teams t
 WHERE t.id = '<TEAM_ID>'
 ```
 
-### Step 3: Credit Source Analysis (Athena)
+### Step 3: Credit Source Analysis (Trino)
 
 Get the profile's top tracks and analyze credit patterns:
 
@@ -104,7 +105,7 @@ Credit source signals:
 - **Release timestamps spanning years** → Organic career. High legitimacy.
 - **All releases in last 6 months** → Could be spam/padding. Investigate further.
 
-### Step 4: IPI Cross-Reference (Athena)
+### Step 4: IPI Cross-Reference (Trino)
 
 If profile has IPI numbers, check for duplicates/conflicts:
 
@@ -189,7 +190,7 @@ Use Slack mrkdwn. NO markdown tables. Structure:
 • Type: <type> | Credits: <count> | Collaborations: <count>
 • IPIs: <list> (registered with <PRO>)
 • Known as: <aliases>
-• Active: <years/decades>
+• Active: <release-year span from Step 3's top tracks>
 
 *Credit Sources*
 • Industry-captured: <count> (<percentage>%)

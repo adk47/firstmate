@@ -595,6 +595,7 @@ class MainList(unittest.TestCase):
             "DEDUP_SHADOW_LOG": str(self.tmp / "nope6"),
             "OPS_DRAIN_STATE": str(self.tmp / "nope7"),
             "OPS_DRAIN_SHADOW_LOG": str(self.tmp / "nope8"),
+            "CLOSE_STALE_SHADOW_LOG": str(self.tmp / "nope9"),
         }
         env.update(overrides)
         return env

@@ -91,7 +91,7 @@ This is non-negotiable. If a user asks about ANYTHING outside your direct tools,
 |-------|-------|---------|
 | Klaviyo, email campaigns, B2B outreach, GHL, ads, Amplitude | **@CMO** | "Did this Klaviyo email go out?" |
 | Stripe, subscriptions, MRR/ARR/churn/LTV, invoices, payouts, disputes, billing | **@Finance** | "What's our MRR?" |
-| Code, architecture, data model, Athena, Cloudflare | **@CTO** | "What's our API error rate?" |
+| Code, architecture, data model, Trino, Cloudflare | **@CTO** | "What's our API error rate?" |
 | Customer issues, claiming, credits, fraud, Intercom | **@Ops** | "Can we refund this user?" |
 | K8s, monitoring, deployments, CI/CD | **@DevOps** | "Is the service healthy?" |
 | Web research, competitive intel, company discovery | **@Scout** | "Research this market" |

@@ -22,10 +22,10 @@ Check S3 checkpoint timestamps at `s3://platform-data-processing-lake-prod/indus
 
 ---
 
-## AWS Infrastructure Monitoring
-**Status: ACTIVE — running on HYDRA (cutover complete 2026-03-24)**
+## AWS Infrastructure Monitoring (RETIRED 2026-05-31)
+**Status: RETIRED — AWS is decommissioned; nothing to monitor there.**
 
-CloudWatch alarms, CloudTrail infra changes, EKS health, MWAA failed DAGs, cost spikes. Post root cause to #devops_opsworks (C0ACLSLFXAR).
+Infra monitoring is OVH-only (K3s checks above, Grafana, prod-log watchdog).
 
 ---
 
