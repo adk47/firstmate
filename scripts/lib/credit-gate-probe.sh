@@ -68,9 +68,13 @@ export CREDIT_REJECT_AUDIT_PATH="${TMPDIR:-/tmp}/credit-gate-probe-audit.jsonl"
 bs='\'
 rc=0
 
-# assert_gated <label> <fn> <body> <expected-status> <expected-marker>
+# assert_gated <label> <fn> <method> <path> <body> <expected-status> <expected-marker>
+# Verb/path are parameters, not constants: `case "$method_uc" in PUT|PATCH)` is a
+# single droppable branch, so a PUT-only probe stays green if the PATCH arm
+# regresses on the box — and PATCH /admin/credit-requests/<id> is precisely the
+# route the 2026-04-22 incident found the bot using for individual approves.
 assert_gated() {
-    local label="$1" fn="$2" body="$3" want="$4" marker="$5" got out grc
+    local label="$1" fn="$2" method="$3" path="$4" body="$5" want="$6" marker="$7" got out grc
     # TRAP 2: the payload must actually decode to the status under test,
     # otherwise a pass-through is meaningless and would read as a gate failure.
     got="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null)"
@@ -82,7 +86,7 @@ assert_gated() {
         echo "BAD: $label — $fn is not defined (gate absent)"
         (( rc == 2 )) || rc=1; return
     fi
-    out="$("$fn" PUT /admin/credit-requests "$body" 2>&1)"; grc=$?
+    out="$("$fn" "$method" "$path" "$body" 2>&1)"; grc=$?
     if (( grc == 0 )); then
         echo "BAD: $label — gate ALLOWED it (rc=0); expected refusal"
         (( rc == 2 )) || rc=1; return
@@ -108,27 +112,40 @@ for _fn in enforce_credit_reject_gate enforce_credit_approve_gate; do
     fi
 done
 
-assert_gated "reject plain"    enforce_credit_reject_gate  '{"requestIds":["probe"],"status":"rejected"}'  rejected "$REJ_MARK"
-assert_gated "reject newline"  enforce_credit_reject_gate  "$(printf '{"requestIds":["probe"],\n"status":\n"rejected"}')" rejected "$REJ_MARK"
-assert_gated "reject uescape"  enforce_credit_reject_gate  '{"requestIds":["probe"],"status":"'"${bs}"'u0072ejected"}' rejected "$REJ_MARK"
-assert_gated "approve plain"   enforce_credit_approve_gate '{"requestIds":["probe"],"status":"approved"}'  approved "$APP_MARK"
-assert_gated "approve newline" enforce_credit_approve_gate "$(printf '{"requestIds":["probe"],\n"status":\n"approved"}')" approved "$APP_MARK"
-assert_gated "approve uescape" enforce_credit_approve_gate '{"requestIds":["probe"],"status":"'"${bs}"'u0061pproved"}' approved "$APP_MARK"
+COLL=/admin/credit-requests          # bulk/collection endpoint
+SINGLE=/admin/credit-requests/probe  # single-credit route (the 2026-04-22 shape)
 
-# Control: a non-reject/approve status must still pass straight through. Without
-# this a gate that refuses EVERYTHING would score a perfect run above.
-if ! declare -F enforce_credit_reject_gate >/dev/null 2>&1; then
-    grc=0  # absence already reported above; don't double-count as a behavior fail
-    out=""
-else
-    out="$(enforce_credit_reject_gate PUT /admin/credit-requests '{"requestIds":["probe"],"status":"user_verification_needed"}' 2>&1)"; grc=$?
-fi
-if (( grc == 0 )); then
-    echo "ok: uvn passthrough"
-else
-    echo "BAD: uvn passthrough — gate refused a non-reject status (rc=$grc)"
-    (( rc == 2 )) || rc=1
-fi
+assert_gated "reject plain"       enforce_credit_reject_gate  PUT   "$COLL"   '{"requestIds":["probe"],"status":"rejected"}'  rejected "$REJ_MARK"
+assert_gated "reject newline"     enforce_credit_reject_gate  PUT   "$COLL"   "$(printf '{"requestIds":["probe"],\n"status":\n"rejected"}')" rejected "$REJ_MARK"
+assert_gated "reject uescape"     enforce_credit_reject_gate  PUT   "$COLL"   '{"requestIds":["probe"],"status":"'"${bs}"'u0072ejected"}' rejected "$REJ_MARK"
+assert_gated "reject PATCH"       enforce_credit_reject_gate  PATCH "$SINGLE" '{"status":"rejected"}' rejected "$REJ_MARK"
+assert_gated "approve plain"      enforce_credit_approve_gate PUT   "$COLL"   '{"requestIds":["probe"],"status":"approved"}'  approved "$APP_MARK"
+assert_gated "approve newline"    enforce_credit_approve_gate PUT   "$COLL"   "$(printf '{"requestIds":["probe"],\n"status":\n"approved"}')" approved "$APP_MARK"
+assert_gated "approve uescape"    enforce_credit_approve_gate PUT   "$COLL"   '{"requestIds":["probe"],"status":"'"${bs}"'u0061pproved"}' approved "$APP_MARK"
+assert_gated "approve PATCH"      enforce_credit_approve_gate PATCH "$SINGLE" '{"status":"approved"}' approved "$APP_MARK"
+
+# Deny-all control, run against BOTH gates. A status neither gate owns must pass
+# straight through. Without this per-gate, a gate that refused EVERYTHING would
+# satisfy all of its own refusal assertions above and still look green — the
+# exact false green this control exists to prevent. (A reject-only control does
+# not cover a deny-all approve gate, and vice versa.)
+assert_passthrough() {
+    local label="$1" fn="$2" out grc
+    if ! declare -F "$fn" >/dev/null 2>&1; then
+        # absence already reported above; don't double-count as a behavior fail
+        echo "ok: $label (skipped — $fn absent, already reported)"
+        return
+    fi
+    out="$("$fn" PUT /admin/credit-requests '{"requestIds":["probe"],"status":"user_verification_needed"}' 2>&1)"; grc=$?
+    if (( grc == 0 )); then
+        echo "ok: $label"
+    else
+        echo "BAD: $label — $fn refused a status it does not own (rc=$grc); gate may be denying everything"
+        (( rc == 2 )) || rc=1
+    fi
+}
+assert_passthrough "uvn passthrough (reject gate)"  enforce_credit_reject_gate
+assert_passthrough "uvn passthrough (approve gate)" enforce_credit_approve_gate
 
 rm -f "$CREDIT_REJECT_AUDIT_PATH" 2>/dev/null
 exit $rc

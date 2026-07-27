@@ -46,13 +46,83 @@ fixture_at() {
   [[ "$output" != *"INVALID:"* ]]
 }
 
-@test "all seven assertions are actually exercised (no silently-skipped case)" {
+@test "all ten assertions are actually exercised (no silently-skipped case)" {
   run credit_gate_probe "$CANON"
   [ "$status" -eq 0 ]
-  for c in "reject plain" "reject newline" "reject uescape" \
-           "approve plain" "approve newline" "approve uescape" "uvn passthrough"; do
+  for c in "reject plain" "reject newline" "reject uescape" "reject PATCH" \
+           "approve plain" "approve newline" "approve uescape" "approve PATCH" \
+           "uvn passthrough (reject gate)" "uvn passthrough (approve gate)"; do
     [[ "$output" == *"ok: $c"* ]] || { echo "missing assertion: $c" >&2; return 1; }
   done
+}
+
+# ── Mutant coverage: each control must catch the drift it exists for ─────────
+# Built by mutating the REAL shipped script, so these pin actual deployed-drift
+# scenarios rather than the probe's own happy path.
+
+@test "CAN FAIL: PATCH dropped from the verb case is caught (single-credit route drift)" {
+  # The 2026-04-22 incident route: the bot uses PATCH /admin/credit-requests/<id>
+  # for individual writes. `case ... PUT|PATCH)` is one droppable branch — a
+  # PUT-only probe would stay green while PATCH silently went ungated.
+  local mut="$BATS_TEST_TMPDIR/mut-nopatch.sh"
+  sed 's/^        PUT|PATCH) ;;/        PUT) ;;/' "$CANON" > "$mut"
+  # sanity: the mutation actually applied to both gates
+  [ "$(grep -c '^        PUT) ;;' "$mut")" -eq 2 ]
+
+  run credit_gate_probe "$mut"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BAD: reject PATCH"* ]]
+  [[ "$output" == *"BAD: approve PATCH"* ]]
+  # the PUT-shaped assertions still pass — proving PATCH is what caught it
+  [[ "$output" == *"ok: reject plain"* ]]
+  [[ "$output" == *"ok: approve plain"* ]]
+}
+
+# deny_all_mutant <fn-name> <stderr-marker> <outfile> — copy the real script with
+# <fn> redefined to refuse everything. The override must be injected BEFORE the
+# file's source-safe guard (`if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then return`),
+# because when sourced that guard returns and anything appended after it is dead
+# code — the redefinition would silently never take effect.
+deny_all_mutant() {
+  local fn="$1" marker="$2" out="$3" guard
+  guard="$(grep -n 'BASH_SOURCE\[0\]' "$CANON" | head -1 | cut -d: -f1)"
+  [ -n "$guard" ] || { echo "source-guard not found in $CANON" >&2; return 1; }
+  head -n "$((guard - 1))" "$CANON" > "$out"
+  cat >> "$out" <<EOF
+$fn() { echo "$marker" >&2; return 1; }
+EOF
+  tail -n "+$guard" "$CANON" >> "$out"
+}
+
+@test "CAN FAIL: an approve gate that denies EVERYTHING is caught by its own passthrough control" {
+  # The false green the per-gate control exists for: all three approve refusal
+  # assertions still "pass" because the gate refuses everything.
+  local mut="$BATS_TEST_TMPDIR/mut-denyall.sh"
+  deny_all_mutant enforce_credit_approve_gate \
+    "credit_approve_gate: --evidence-excerpt is required for autonomous approves." "$mut"
+
+  run credit_gate_probe "$mut"
+  [ "$status" -eq 1 ]
+  # ONLY the approve-side passthrough catches it...
+  [[ "$output" == *"BAD: uvn passthrough (approve gate)"* ]]
+  [[ "$output" == *"denying everything"* ]]
+  # ...every refusal assertion still reads green, which is exactly the point
+  [[ "$output" == *"ok: approve plain"* ]]
+  [[ "$output" == *"ok: approve newline"* ]]
+  [[ "$output" == *"ok: approve uescape"* ]]
+  # and a reject-only control would have missed it entirely
+  [[ "$output" == *"ok: uvn passthrough (reject gate)"* ]]
+}
+
+@test "CAN FAIL: a reject gate that denies EVERYTHING is caught by its own passthrough control" {
+  local mut="$BATS_TEST_TMPDIR/mut-denyall-rej.sh"
+  deny_all_mutant enforce_credit_reject_gate \
+    "MUSO_CREDIT_REJECT_APPROVAL_REQUIRED: denying everything" "$mut"
+
+  run credit_gate_probe "$mut"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BAD: uvn passthrough (reject gate)"* ]]
+  [[ "$output" == *"ok: uvn passthrough (approve gate)"* ]]
 }
 
 # ── Negative: the probe catches the REAL historical regressions ──────────────
