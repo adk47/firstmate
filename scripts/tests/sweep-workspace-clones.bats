@@ -1065,6 +1065,41 @@ STUB
   [[ "$output" == *"tmp root is itself a mountpoint"* ]]
 }
 
+@test "an aged BARE repo at the candidate root is held, not junk-deleted" {
+  # A bare repo has no .git: HEAD/objects/refs sit at its root, so the junk
+  # lane used to see "no repo here" and delete the only copy of its objects.
+  git init -q --bare "$TEST_TMPDIR/repos/mirror.git"
+  ( cd "$TEST_TMPDIR" && git clone -q "$TEST_TMPDIR/repos/mirror.git" seed 2>/dev/null || true )
+  age_tree 30 "$TEST_TMPDIR/repos/mirror.git"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/mirror.git/objects" ]
+  [ -f "$TEST_TMPDIR/repos/mirror.git/HEAD" ]
+  [[ "$output" == *"bare git repository"* ]]
+}
+
+@test "an aged BARE repo nested inside a junk tree holds the whole tree" {
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/scratch/deep"
+  echo filler > "$TEST_TMPDIR/ws/cto/tmp/scratch/filler"
+  git init -q --bare "$TEST_TMPDIR/ws/cto/tmp/scratch/deep/vendor.git"
+  age_tree 30 "$TEST_TMPDIR/ws/cto/tmp/scratch"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/ws/cto/tmp/scratch/deep/vendor.git/objects" ]
+  [[ "$output" == *"bare repo at"* ]]
+}
+
+@test "bare detection does not hold ordinary clones (own .git is pruned)" {
+  # A regular clone's .git contains HEAD/objects/refs too — without pruning it
+  # every clone would look like it contained a bare repo and never be swept.
+  mkclone "$TEST_TMPDIR/repos/ordinary"
+  age_tree 20 "$TEST_TMPDIR/repos/ordinary"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ ! -d "$TEST_TMPDIR/repos/ordinary" ]
+  [[ "$output" != *"bare repo at"* ]]
+}
+
 @test "quarantine debris from an interrupted run is held, never swept" {
   # The prefix has already destroyed the keep-list basename match, so debris
   # must never be re-swept as an ordinary candidate.

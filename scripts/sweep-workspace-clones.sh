@@ -29,7 +29,9 @@
 # .git-is-a-file (linked worktree/submodule), nested inner repo,
 # no-remote scratch repos, mountpoint-under-candidate.
 # A TTL-expired dir with NO .git at all is plain junk: deleted by
-# mtime alone (covers rsync'd non-git trees and half-deleted wrecks).
+# mtime alone (covers rsync'd non-git trees and half-deleted wrecks) —
+# UNLESS it is, or contains, a BARE repository (HEAD/objects/refs at the
+# root, no .git), which is held: it holds the only copy of its objects.
 #
 # Probes run with GIT_OPTIONAL_LOCKS=0 so `git status` never writes
 # .git/index. Pre-rm recheck refuses in-progress operations
@@ -324,6 +326,51 @@ id_stable() {  # <path_id>
   printf '%s|%s|%s|%s' "$dev" "$ino" "$mtime" "$size"
 }
 
+# ── repository detection (regular AND bare) ──────────────────
+# A BARE repository has no .git at all: HEAD, objects/ and refs/ sit at its
+# root. That is precisely git's own is_git_directory() triple. Without this,
+# the plain-junk lane sees "no .git, no nested .git" and deletes the only copy
+# of a repo's objects and refs by mtime alone, with none of the dirty /
+# unpushed / no-remote / live-ref gates ever running.
+is_bare_repo() {  # <path>
+  [ -f "$1/HEAD" ] && [ -d "$1/objects" ] && [ -d "$1/refs" ]
+}
+
+# First bare repo strictly under <dir>, printed; nonzero if the scan FAILED.
+# The candidate's own .git is pruned: it contains HEAD/objects/refs too, and
+# without the prune every ordinary clone would look like it contained a bare
+# repo and be held forever.
+find_nested_bare() {  # <dir>
+  local d="$1" out rc=0
+  out="$(find "$d" -xdev -path "$d/.git" -prune -o -type f -name HEAD -print 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || return 2
+  printf '%s\n' "$out" | while IFS= read -r h; do
+    [ -n "$h" ] || continue
+    b="$(dirname -- "$h")"
+    if [ -d "$b/objects" ] && [ -d "$b/refs" ]; then printf '%s\n' "$b"; break; fi
+  done
+}
+
+# 0 = a repository (regular or BARE) is present at/under <dir>, OR the scan
+# could not prove otherwise. ONE copy, called by both the junk-lane pre-check
+# and its post-quarantine re-audit — a second copy is how the live-handle gate
+# went missing from a lane earlier in this PR.
+JUNK_REPO_REASON=""
+junk_repo_hazard() {  # <dir>
+  local d="$1" inner bare rc=0
+  JUNK_REPO_REASON=""
+  if is_bare_repo "$d"; then
+    JUNK_REPO_REASON="bare git repository (HEAD/objects/refs at root)"; return 0
+  fi
+  inner="$(find "$d" -xdev -name .git -print -quit 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then JUNK_REPO_REASON="nested-repo scan failed"; return 0; fi
+  if [ -n "$inner" ]; then JUNK_REPO_REASON="repo at $inner inside a non-git tree"; return 0; fi
+  rc=0; bare="$(find_nested_bare "$d")" || rc=$?
+  if [ "$rc" -ne 0 ]; then JUNK_REPO_REASON="bare-repo scan failed"; return 0; fi
+  if [ -n "$bare" ]; then JUNK_REPO_REASON="bare repo at $bare inside a non-git tree"; return 0; fi
+  return 1
+}
+
 # ── post-quarantine re-audits ────────────────────────────────
 # The moved ROOT's device/inode/mtime/size proves the root entry was not
 # swapped, and nothing more. rename(2) does NOT disturb an open descriptor or
@@ -340,10 +387,9 @@ REAUDIT_REASON=""
 reaudit_entry() { REAUDIT_REASON=""; return 0; }
 
 reaudit_junk() {  # <quarantined-path> <cutoff-ref-file>
-  local q="$1" cutoff_ref="$2" inner rc=0
-  inner="$(find "$q" -xdev -name .git -print -quit 2>/dev/null)" || rc=$?
-  if [ "$rc" -ne 0 ] || [ -n "$inner" ]; then
-    REAUDIT_REASON="repo appeared inside the tree before removal"; return 1
+  local q="$1" cutoff_ref="$2"
+  if junk_repo_hazard "$q"; then
+    REAUDIT_REASON="$JUNK_REPO_REASON (before removal)"; return 1
   fi
   if tree_fresh_since "$q" "$cutoff_ref"; then
     REAUDIT_REASON="tree written to before removal"; return 1
@@ -775,11 +821,9 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   # clone with unique work must never ride out on the junk lane. A failed
   # scan holds too (cannot prove absence → cannot delete).
   if [ ! -e "$d/.git" ]; then
-    local inner rc_inner=0
-    inner="$(find "$d" -xdev -name .git -print -quit 2>/dev/null)" || rc_inner=$?
-    if [ "$rc_inner" -ne 0 ] || [ -n "$inner" ]; then
+    if junk_repo_hazard "$d"; then
       held_nested=$((held_nested + 1))
-      hold "nested" "$d" "${inner:+repo at $inner inside a non-git tree}${inner:-nested-repo scan failed}"
+      hold "nested" "$d" "$JUNK_REPO_REASON"
       return 0
     fi
     if tree_fresh_since "$d" "$ref"; then
@@ -791,10 +835,8 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     # du over a large tree takes time — re-run every junk-lane guard right
     # before removal so nothing created during the size scan is deleted.
     kb="$(entry_kb "$d")"
-    rc_inner=0
-    inner="$(find "$d" -xdev -name .git -print -quit 2>/dev/null)" || rc_inner=$?
-    if [ "$rc_inner" -ne 0 ] || [ -n "$inner" ]; then
-      held_nested=$((held_nested + 1)); hold "nested" "$d" "repo appeared during size scan"; return 0
+    if junk_repo_hazard "$d"; then
+      held_nested=$((held_nested + 1)); hold "nested" "$d" "$JUNK_REPO_REASON (appeared during size scan)"; return 0
     fi
     if tree_fresh_since "$d" "$ref"; then
       active=$((active + 1)); return 0
@@ -824,6 +866,13 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   if [ "$rc" -ne 0 ] || [ -n "$probe_out" ]; then
     held_nested=$((held_nested + 1))
     hold "nested" "$d" "${probe_out:+inner repo present}${probe_out:-nested-repo scan failed}"
+    return 0
+  fi
+  # A nested BARE repo has no .git and is invisible to the scan above.
+  rc=0; probe_out="$(find_nested_bare "$d")" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -n "$probe_out" ]; then
+    held_nested=$((held_nested + 1))
+    hold "nested" "$d" "${probe_out:+bare repo at $probe_out inside the clone}${probe_out:-bare-repo scan failed}"
     return 0
   fi
 
