@@ -63,6 +63,10 @@
 #   MERGE_LANDING_LOCKFILE       single-run lock
 #   MERGE_LANDING_SLACK_CHANNEL  target channel (default #clio_devops)
 #   MERGE_LANDING_SKIP_HOST_GUARD 1 = skip the ovh-node-8 guard (tests)
+#   MERGE_LANDING_QUEUE_PROBE    0 = skip the Redpanda probe entirely
+#   MERGE_LANDING_QUEUE_PROBE_CMD  kubectl-equivalent (default kubectl; tests stub)
+#   MERGE_LANDING_QUEUE_TOPIC    admin merge topic to probe
+#   MERGE_LANDING_QUEUE_NAMESPACE  namespace holding the Redpanda brokers
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -85,6 +89,10 @@ CATALOG_CMD="${MERGE_LANDING_CATALOG_CMD:-/usr/local/bin/muso}"
 CATALOG_ENV="${MERGE_LANDING_CATALOG_ENV:-prod}"
 CATALOG_BATCH_SIZE="${MERGE_LANDING_CATALOG_BATCH_SIZE:-40}"
 SKIP_HOST_GUARD="${MERGE_LANDING_SKIP_HOST_GUARD:-0}"
+QUEUE_PROBE="${MERGE_LANDING_QUEUE_PROBE:-1}"
+QUEUE_PROBE_CMD="${MERGE_LANDING_QUEUE_PROBE_CMD:-kubectl}"
+QUEUE_TOPIC="${MERGE_LANDING_QUEUE_TOPIC:-industry-proc-catalog-admin-prod}"
+QUEUE_NAMESPACE="${MERGE_LANDING_QUEUE_NAMESPACE:-queuing}"
 DRY_RUN=0
 
 # slack-notify.sh reads this (target channel).
@@ -179,6 +187,66 @@ PYEOF
 }
 
 # ──────────────────────────────────────────────────────────────
+# probe_queue — best-effort read of the admin merge topic's retention frontier
+# and consumer lag. Prints one JSON object on success; non-zero on any failure.
+#
+# WHY: a merge that never landed is in one of two very different states, and the
+# operator instruction is OPPOSITE in each. Either the message is still queued
+# (it will fold on its own once the lane drains — do nothing), or it was DELETED
+# by topic retention (it will NEVER fold; rebuild the request from the audit
+# trail). Root-caused 2026-07-27: this lane's ~14.8d drain time equals its
+# ~14.8d effective retention window, so the tail is deleted as fast as the head
+# advances and merges evaporate with NO dead-letter row and NO log line. Without
+# this distinction an operator waits forever for a message that no longer exists
+# — which is exactly the wrong call that was made during the investigation.
+#
+# Produce is KEYLESS (helpers/sqs_helper.py calls p.produce() with no key=), so
+# a merge may sit on any partition. A request is provably gone only if it
+# predates the oldest record retained on EVERY partition — hence MIN below,
+# which under-claims "gone" rather than over-claiming it.
+#
+# FAIL OPEN: every failure path returns non-zero and the caller then renders
+# exactly as it did before this probe existed. A broken kubectl, a moved broker
+# pod, or a slow cluster must never suppress or weaken a stuck-merge page.
+# ──────────────────────────────────────────────────────────────
+probe_queue() {
+  local pod group_out frontier_ms total_lag part start ts
+  [ "$QUEUE_PROBE" = "1" ] || return 1
+  command -v "$QUEUE_PROBE_CMD" >/dev/null 2>&1 || return 1
+
+  # Bound every cluster call individually: `timeout` cannot wrap a shell
+  # function, and a hung kubectl must not stall the 30-min cron tick.
+  _kq() { timeout 20 "$QUEUE_PROBE_CMD" "$@" 2>/dev/null; }
+
+  pod="$(_kq get pods -n "$QUEUE_NAMESPACE" -o name \
+         | sed -n 's|^pod/||p' | grep -E '^redpanda-v2-[0-9]+$' | head -1)" || return 1
+  [ -n "$pod" ] || return 1
+
+  # One call yields per-partition LOG-START-OFFSET plus TOTAL-LAG.
+  group_out="$(_kq exec -n "$QUEUE_NAMESPACE" "$pod" -c redpanda -- \
+                rpk group describe "$QUEUE_TOPIC")" || return 1
+  [ -n "$group_out" ] || return 1
+
+  total_lag="$(printf '%s\n' "$group_out" | awk '$1=="TOTAL-LAG"{print $2; exit}')"
+  case "$total_lag" in ''|*[!0-9]*) return 1 ;; esac
+
+  # Oldest RETAINED record per partition → the conservative frontier.
+  frontier_ms=""
+  while read -r part start; do
+    [ -n "$part" ] || continue
+    ts="$(_kq exec -n "$QUEUE_NAMESPACE" "$pod" -c redpanda -- \
+          rpk topic consume "$QUEUE_TOPIC" -p "$part" -o "$start" -n 1 -f '%d\n' \
+          | tr -dc '0-9')"
+    case "$ts" in ''|*[!0-9]*) continue ;; esac
+    if [ -z "$frontier_ms" ] || [ "$ts" -lt "$frontier_ms" ]; then frontier_ms="$ts"; fi
+  done < <(printf '%s\n' "$group_out" | awk -v t="$QUEUE_TOPIC" '$1==t{print $2, $4}')
+
+  [ -n "$frontier_ms" ] || return 1
+  printf '{"frontier_epoch":%s,"total_lag":%s,"topic":"%s"}\n' \
+    "$((frontier_ms / 1000))" "$total_lag" "$QUEUE_TOPIC"
+}
+
+# ──────────────────────────────────────────────────────────────
 # decide_and_alert — pure detection core.
 #   $1 candidates_json  $2 catalog_json  $3 state_file  $4 payload_out  $5 persist(0|1)
 # catalog_json is the live admin profile-list response. A requested-direction
@@ -194,6 +262,7 @@ PYEOF
 decide_and_alert() {
   CANDIDATES_JSON="$1" CATALOG_JSON="$2" STATE_FILE="$3" PAYLOAD_OUT="$4" PERSIST="$5" \
   SLACK_CHANNEL="$SLACK_CHANNEL" NOW_EPOCH="${NOW_EPOCH_FOR_AGE:-0}" \
+  QUEUE_PROBE_JSON="${QUEUE_PROBE_JSON:-}" \
   python3 - <<'PYEOF'
 import json, os, re
 
@@ -204,6 +273,36 @@ payload_out= os.environ["PAYLOAD_OUT"]
 persist    = os.environ.get("PERSIST", "1") == "1"
 channel    = os.environ["SLACK_CHANNEL"]
 now        = int(os.environ.get("NOW_EPOCH", "0"))
+
+# Optional Redpanda probe (see probe_queue). Absent/garbage → no queue verdict
+# is rendered and the page reads exactly as it did before the probe existed.
+# A probe failure must never change WHETHER we alert, only how much detail the
+# bullet carries.
+try:
+    _p = json.loads(os.environ.get("QUEUE_PROBE_JSON") or "{}")
+    frontier = int(_p.get("frontier_epoch") or 0)
+    total_lag = int(_p.get("total_lag") or 0)
+except Exception:
+    frontier, total_lag = 0, 0
+
+
+def queue_note(ts):
+    """What the retention frontier proves about the enqueued merge message.
+
+    The frontier can only ever prove ABSENCE. A request older than the oldest
+    retained record cannot still be in the topic — that is definitive and
+    actionable. A newer one is merely *not disproven*: it may have been
+    consumed-and-failed, never produced, or be genuinely waiting. Deliberately
+    NOT phrased as "may still be queued" — on 2026-07-27 an exhaustive scan of
+    all 76k unconsumed messages found ZERO profile merges, so a
+    presence-implying label would send operators to wait for something that was
+    not there, which is the precise error this probe exists to prevent.
+    """
+    if not frontier or not ts:
+        return ""
+    if ts < frontier:
+        return " — msg GONE (past retention; rebuild from the audit trail)"
+    return f" — in retention window, presence UNCONFIRMED (lane {total_lag} behind)"
 
 with open(cand_path) as f:
     candidates = json.load(f)
@@ -301,7 +400,7 @@ new_alerted = set(alerted)
 for c in candidates:
     verdict = classify(c["survivor"], c["loser"])
     age_h = (now - c["ts"]) / 3600 if now else 0
-    row = (c["survivor"], c["loser"], c.get("requester", ""), age_h)
+    row = (c["survivor"], c["loser"], c.get("requester", ""), age_h, "")
     if verdict in RESOLVED:
         if c["key"] in alerted:
             # The async fold completed late — post a ✅ all-clear so #clio_devops
@@ -317,7 +416,9 @@ for c in candidates:
     elif verdict == "invalid":
         new_invalid.append(row)
     else:
-        new_alerts.append(row)
+        # Only a never-processed merge has a message to still be waiting for;
+        # a half-folded or malformed one is not a queue question.
+        new_alerts.append(row[:4] + (queue_note(c.get("ts", 0)),))
     new_alerted.add(c["key"])
 
 # Resolution must be driven by the ALERTED set, not just the candidate scan:
@@ -330,7 +431,7 @@ candidate_keys = {c["key"] for c in candidates}
 for key in sorted(alerted - candidate_keys):
     survivor, _, loser = key.partition(":")
     if loser and classify(survivor, loser) in RESOLVED:
-        resolved.append((survivor, loser, "", None))
+        resolved.append((survivor, loser, "", None, ""))
         new_alerted.discard(key)
 
 if not new_alerts and not new_partial and not new_invalid and not resolved:
@@ -355,10 +456,10 @@ if persist:
 def block(pairs, header, blurb, verb, qual):
     pairs.sort(key=lambda a: (a[0], a[1]))
     out = [header, blurb]
-    for survivor, loser, requester, age_h in pairs:
+    for survivor, loser, requester, age_h, note in pairs:
         age = f"{qual}{age_h:.0f}h" if age_h else "?"
         who = f" req={requester}" if requester else ""
-        out.append(f"• loser `{loser}` → survivor `{survivor}` — {verb} {age}{who}")
+        out.append(f"• loser `{loser}` → survivor `{survivor}` — {verb} {age}{who}{note}")
     return out
 
 lines = []
@@ -645,6 +746,21 @@ fi
 # retried next tick rather than silently marked "already alerted". In --dry-run
 # we persist immediately (persist=1) — a faithful dedupe rehearsal, no post.
 export NOW_EPOCH_FOR_AGE="$NOW_EPOCH"
+
+# Best-effort queue attribution. Bounded and fully optional: on ANY failure we
+# leave QUEUE_PROBE_JSON empty and the page renders as it always did. Never let
+# a cluster hiccup gate a stuck-merge alert.
+QUEUE_PROBE_JSON=""
+if [ "$QUEUE_PROBE" = "1" ]; then
+  if QUEUE_PROBE_JSON="$(probe_queue 2>/dev/null)" && [ -n "$QUEUE_PROBE_JSON" ]; then
+    log "queue probe ok: $QUEUE_PROBE_JSON"
+  else
+    QUEUE_PROBE_JSON=""
+    log "queue probe unavailable — alerting without queue attribution"
+  fi
+fi
+export QUEUE_PROBE_JSON
+
 if ! alert_block="$(decide_and_alert "$CANDIDATES_FILE" "$CATALOG_FILE" "$STATE_FILE" "$PAYLOAD_FILE" "$DRY_RUN")"; then
   log "WARN: detector classification failed — detector is BLIND this tick."
   alert_query_failure

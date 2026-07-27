@@ -357,6 +357,98 @@ STUB
   [[ "$output" != *"have now LANDED"* ]]
 }
 
+# ── queue attribution (added 2026-07-27) ────────────────────────────────────
+# A never-landed merge is either still queued (wait) or was deleted by topic
+# retention (it will NEVER land — rebuild from the audit trail). Telling an
+# operator to wait for a message that no longer exists is the exact wrong call,
+# so the bullet must say which. The probe is best-effort and MUST fail open.
+
+# Fake kubectl: `get pods` names a broker, `rpk group describe` emits the real
+# table shape, `rpk topic consume -f %d` emits the oldest retained timestamp in
+# ms. $QUEUE_STUB_TS_MS controls the retention frontier.
+_queue_stub() { # $1 oldest-retained-ms
+  cat > "$TEST_TMPDIR/bin/kubectl-stub" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    consume) echo "$1"; exit 0 ;;
+    describe) printf '%s\n' "TOTAL-LAG                4242" \\
+                "industry-proc-catalog-admin-prod  0  161717  86085  182534  20817"; exit 0 ;;
+  esac
+done
+case "\$1" in get) echo "pod/redpanda-v2-0"; exit 0 ;; esac
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/kubectl-stub"
+  export MERGE_LANDING_QUEUE_PROBE_CMD="$TEST_TMPDIR/bin/kubectl-stub"
+}
+
+@test "queue probe: request older than the retention frontier → msg GONE" {
+  mergeline 1000 SURV L_STUCK          # request ts=1000
+  _queue_stub 2000000                  # frontier = 2000s > 1000 → deleted
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" == *"msg GONE (past retention"* ]]
+  [[ "$output" != *"presence UNCONFIRMED"* ]]
+}
+
+@test "queue probe: request newer than the frontier → in-window, presence UNCONFIRMED" {
+  mergeline 1000 SURV L_STUCK          # request ts=1000
+  _queue_stub 500000                   # frontier = 500s < 1000 → still retained
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"in retention window, presence UNCONFIRMED (lane 4242 behind)"* ]]
+  [[ "$output" != *"msg GONE"* ]]
+}
+
+@test "queue probe failure degrades to a plain stuck page, never suppresses it" {
+  mergeline 1000 SURV L_STUCK
+  cat > "$TEST_TMPDIR/bin/kubectl-broken" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+  chmod +x "$TEST_TMPDIR/bin/kubectl-broken"
+  export MERGE_LANDING_QUEUE_PROBE_CMD="$TEST_TMPDIR/bin/kubectl-broken"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" == *"L_STUCK"* ]]
+  [[ "$output" == *"queue probe unavailable"* ]]
+  [[ "$output" != *"msg GONE"* ]]
+  [[ "$output" != *"presence UNCONFIRMED"* ]]
+}
+
+@test "queue probe is skipped entirely when disabled" {
+  mergeline 1000 SURV L_STUCK
+  export MERGE_LANDING_QUEUE_PROBE=0
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" != *"queue probe"* ]]
+}
+
+@test "queue attribution never appears on partial or malformed verdicts" {
+  # Those are not queue questions — a half-folded merge already ran.
+  mergeline 1000 SURV L_WRONG2
+  _queue_stub 2000000
+  cat > "$TEST_TMPDIR/bin/catalog-partial3" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[
+  {"id":"L_WRONG2","merged":{"mergedToId":"OTHER"},"deleted":{"date":"2026-01-01"}},
+  {"id":"SURV","merged":null,"deleted":null}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-partial3"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-partial3"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PARTIALLY FOLDED"* ]]
+  [[ "$output" != *"msg GONE"* ]]
+  [[ "$output" != *"presence UNCONFIRMED"* ]]
+}
+
 @test "catalog query returns EMPTY rows (silent failure) → BLIND, exit 1" {
   mergeline 1000 SURV L_STUCK
   # Stub exits 0 but emits nothing for the id query → must be treated as BLIND,
