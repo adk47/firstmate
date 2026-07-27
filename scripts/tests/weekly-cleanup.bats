@@ -388,6 +388,24 @@ STUB
   [[ "$output" == *"[sweep-clones"* ]]
 }
 
+@test "a failing clone sweeper fails the weekly cleanup (structural breakage is not masked)" {
+  # The sweeper's exit 1/2 mean the category never ran. Masking that would
+  # leave systemd reporting a healthy weekly cleanup — exactly what this
+  # script's exit contract forbids.
+  mkdir -p "$TEST_TMPDIR/sweeproot/ws"
+  export WEEKLY_CLEANUP_SKIP_SWEEP=0
+  # Missing repos root => the sweeper's structural refusal, exit 1.
+  export SWEEP_REPOS_ROOT="$TEST_TMPDIR/sweeproot/does-not-exist"
+  export SWEEP_WS_ROOT="$TEST_TMPDIR/sweeproot/ws"
+  export SWEEP_SKIP_HOST_GUARD=1
+  export SWEEP_LOCKFILE="$TEST_TMPDIR/sweep.lock"
+  run bash "$WC" --dry-run
+  [ "$status" -eq 1 ]
+  # The summary still had to be emitted before the failure surfaced.
+  [[ "$output" == *"clone-sweep: failed"* ]]
+  [[ "$output" == *"TOTAL freed_kb="* ]]
+}
+
 @test "clone sweeper skip knob is honored" {
   run bash "$WC" --dry-run
   [ "$status" -eq 0 ]
