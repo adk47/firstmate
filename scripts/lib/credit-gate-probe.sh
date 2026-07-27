@@ -147,6 +147,50 @@ assert_passthrough() {
 assert_passthrough "uvn passthrough (reject gate)"  enforce_credit_reject_gate
 assert_passthrough "uvn passthrough (approve gate)" enforce_credit_approve_gate
 
+# ── End-to-end through the CLI dispatcher ───────────────────────────────────
+# The assertions above call the gate FUNCTIONS directly, which proves they work
+# but NOT that they are still wired into `cmd_call`. A partial sync or hot patch
+# that leaves both functions intact while dropping either invocation from the
+# dispatcher would keep every assertion above green while real
+# `muso-admin-api.sh call ...` traffic went completely ungated — and "the gates
+# are live" is this probe's whole claim. So exercise the real CLI path too.
+#
+# Hermetic by construction: MUSO_API_URL points at a closed port (no request can
+# leave the box), OPS_DRY_RUN=1, and every state/runlog path is redirected into a
+# throwaway dir so a refusal cannot append to the real /var/log/muso-ops trail
+# (the workspace copy writes a truth-floor row on gate refusal). The gates fire
+# before the dry-run short-circuit, so the refusal is what we observe.
+assert_cli_gated() {
+    local label="$1" method="$2" path="$3" body="$4" marker="$5" sandbox out grc
+    sandbox="$(mktemp -d "${TMPDIR:-/tmp}/credit-gate-cli.XXXXXX")" || {
+        echo "INVALID: $label — could not create CLI sandbox dir"
+        rc=2; return
+    }
+    out="$(env \
+            MUSO_API_URL="http://127.0.0.1:0/none" \
+            MUSO_ADMIN_EMAIL="probe@invalid.test" \
+            MUSO_ADMIN_PASSWORD="probe" \
+            OPS_DRY_RUN=1 \
+            MUSO_OPS_STATE_DIR="$sandbox/state" \
+            OPS_RUNLOG_DIR="$sandbox/runlogs" \
+            OPS_DRY_RUN_AUDIT_PATH="$sandbox/dry-run-audit.jsonl" \
+            CREDIT_REJECT_AUDIT_PATH="$sandbox/credit-reject-audit.jsonl" \
+            PATH="$PATH" HOME="$HOME" \
+            bash "$SCRIPT" call "$method" "$path" "$body" 2>&1)"; grc=$?
+    rm -rf "$sandbox"
+    if (( grc == 0 )); then
+        echo "BAD: $label — CLI dispatcher ALLOWED it (rc=0); the gate is not wired into cmd_call"
+        (( rc == 2 )) || rc=1; return
+    fi
+    if [[ "$out" != *"$marker"* ]]; then
+        echo "BAD: $label — CLI refused (rc=$grc) but without '$marker'"
+        (( rc == 2 )) || rc=1; return
+    fi
+    echo "ok: $label"
+}
+assert_cli_gated "reject via CLI dispatcher"  PUT "$COLL" '{"requestIds":["probe"],"status":"rejected"}' "$REJ_MARK"
+assert_cli_gated "approve via CLI dispatcher" PUT "$COLL" '{"requestIds":["probe"],"status":"approved"}' "$APP_MARK"
+
 rm -f "$CREDIT_REJECT_AUDIT_PATH" 2>/dev/null
 exit $rc
 PROBE

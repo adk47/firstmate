@@ -46,14 +46,67 @@ fixture_at() {
   [[ "$output" != *"INVALID:"* ]]
 }
 
-@test "all ten assertions are actually exercised (no silently-skipped case)" {
+@test "all twelve assertions are actually exercised (no silently-skipped case)" {
   run credit_gate_probe "$CANON"
   [ "$status" -eq 0 ]
   for c in "reject plain" "reject newline" "reject uescape" "reject PATCH" \
            "approve plain" "approve newline" "approve uescape" "approve PATCH" \
-           "uvn passthrough (reject gate)" "uvn passthrough (approve gate)"; do
+           "uvn passthrough (reject gate)" "uvn passthrough (approve gate)" \
+           "reject via CLI dispatcher" "approve via CLI dispatcher"; do
     [[ "$output" == *"ok: $c"* ]] || { echo "missing assertion: $c" >&2; return 1; }
   done
+}
+
+# skill_tree_copy — copy the WHOLE muso-ops-admin skill dir, not just the script.
+# The CLI path resolves config from "$SCRIPT_DIR/../config" (tier2-endpoints.txt
+# etc.) and refuses every write when that is missing. A lone-script fixture would
+# therefore fail for the WRONG reason, making a "can fail" test vacuous — this
+# bit the first draft of the dispatcher mutant below.
+skill_tree_copy() {
+  local dest="$1"
+  mkdir -p "$dest"
+  cp -R "$REPO_ROOT/skills-all/muso-ops-admin" "$dest/"
+  echo "$dest/muso-ops-admin/scripts/muso-admin-api.sh"
+}
+
+@test "sanity: an unmutated skill-tree copy still passes all twelve (fixture is valid)" {
+  local script; script="$(skill_tree_copy "$BATS_TEST_TMPDIR/tree-ok")"
+  run credit_gate_probe "$script"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ok: reject via CLI dispatcher"* ]]
+  [[ "$output" == *"ok: approve via CLI dispatcher"* ]]
+}
+
+@test "CAN FAIL: gate functions intact but UNWIRED from cmd_call is caught by the CLI assertion" {
+  # The scenario the direct-function assertions cannot see: a partial sync or hot
+  # patch leaves enforce_credit_reject_gate defined and correct, but drops its
+  # invocation from the dispatcher — real `muso-admin-api.sh call ...` traffic
+  # then runs completely ungated.
+  local script; script="$(skill_tree_copy "$BATS_TEST_TMPDIR/tree-unwired")"
+  sed -i.bak 's|if ! enforce_credit_reject_gate "\$method" "\$path" "\$body"; then|if false; then # UNWIRED|' "$script"
+  [ "$(grep -c 'UNWIRED' "$script")" -eq 1 ]
+  # the function itself is untouched — that is the whole point
+  [ "$(grep -c '^enforce_credit_reject_gate()' "$script")" -eq 1 ]
+
+  run credit_gate_probe "$script"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BAD: reject via CLI dispatcher"* ]]
+  [[ "$output" == *"not wired into cmd_call"* ]]
+  # every direct-function assertion still passes — proving the CLI leg is what caught it
+  [[ "$output" == *"ok: reject plain"* ]]
+  [[ "$output" == *"ok: reject PATCH"* ]]
+  [[ "$output" == *"ok: uvn passthrough (reject gate)"* ]]
+}
+
+@test "CAN FAIL: approve gate UNWIRED from cmd_call is caught by the CLI assertion" {
+  local script; script="$(skill_tree_copy "$BATS_TEST_TMPDIR/tree-unwired-app")"
+  sed -i.bak 's|if ! enforce_credit_approve_gate "\$method" "\$path" "\$body"; then|if false; then # UNWIRED|' "$script"
+  [ "$(grep -c 'UNWIRED' "$script")" -eq 1 ]
+
+  run credit_gate_probe "$script"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BAD: approve via CLI dispatcher"* ]]
+  [[ "$output" == *"ok: approve plain"* ]]
 }
 
 # ── Mutant coverage: each control must catch the drift it exists for ─────────
