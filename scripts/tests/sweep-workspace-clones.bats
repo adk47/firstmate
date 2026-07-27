@@ -803,6 +803,52 @@ STUB
   [[ "$output" == *"before removal"* ]]
 }
 
+@test "a FILE occupying the quarantine namespace is never clobbered by a live quarantine" {
+  # Under a recurring (PID-derived) quarantine name this file could be the
+  # rename destination and be silently overwritten. The target is now a
+  # mktemp -d sibling, so held debris cannot be a destination.
+  printf 'irreplaceable\n' > "$TEST_TMPDIR/ws/cto/tmp/.sweep-quarantine.4242.victim"
+  age_path 30 "$TEST_TMPDIR/ws/cto/tmp/.sweep-quarantine.4242.victim"
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/victim"
+  echo junk > "$TEST_TMPDIR/ws/cto/tmp/victim/f"
+  age_tree 10 "$TEST_TMPDIR/ws/cto/tmp/victim"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  # Debris untouched, byte for byte.
+  grep -qx irreplaceable "$TEST_TMPDIR/ws/cto/tmp/.sweep-quarantine.4242.victim"
+  # ...and the real candidate still swept normally.
+  [ ! -d "$TEST_TMPDIR/ws/cto/tmp/victim" ]
+  [[ "$output" == *"quarantine leftover from an interrupted run"* ]]
+}
+
+@test "a DIRECTORY occupying the quarantine namespace is never nested into" {
+  # The directory case is the nastier half: `mv src existing_dir/` moves src
+  # INSIDE it rather than failing, which would strand the candidate and break
+  # restore. Assert the debris keeps exactly its original single entry.
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/.sweep-quarantine.4242.held/inner"
+  echo precious > "$TEST_TMPDIR/ws/cto/tmp/.sweep-quarantine.4242.held/inner/data"
+  age_tree 30 "$TEST_TMPDIR/ws/cto/tmp/.sweep-quarantine.4242.held"
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/held"
+  echo junk > "$TEST_TMPDIR/ws/cto/tmp/held/f"
+  age_tree 10 "$TEST_TMPDIR/ws/cto/tmp/held"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  grep -qx precious "$TEST_TMPDIR/ws/cto/tmp/.sweep-quarantine.4242.held/inner/data"
+  # Nothing was nested inside the debris directory.
+  [ "$(ls -A "$TEST_TMPDIR/ws/cto/tmp/.sweep-quarantine.4242.held" | wc -l | tr -d ' ')" = "1" ]
+  [ ! -d "$TEST_TMPDIR/ws/cto/tmp/held" ]
+  [[ "$output" == *"quarantine leftover from an interrupted run"* ]]
+}
+
+@test "quarantine leaves no directory behind on a successful sweep" {
+  mkclone "$TEST_TMPDIR/repos/tidy"
+  age_tree 20 "$TEST_TMPDIR/repos/tidy"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ ! -d "$TEST_TMPDIR/repos/tidy" ]
+  [ -z "$(find "$TEST_TMPDIR/repos" -maxdepth 1 -name '.sweep-quarantine.*' -print -quit)" ]
+}
+
 @test "quarantine debris from an interrupted run is held, never swept" {
   # The prefix has already destroyed the keep-list basename match, so debris
   # must never be re-swept as an ordinary candidate.

@@ -128,11 +128,14 @@ swept=0; freed_kb=0; junk_deleted=0; active=0; kept=0; rm_errors=0
 held_dirty=0; held_probe=0; held_gitfile=0; held_nested=0
 held_noremote=0; held_mount=0; held_inuse=0
 
-# Sibling name a candidate is renamed to for the final re-audit. A run killed
-# between the rename and the rm leaves one behind; the sweep HOLDS those
-# (never re-sweeps them) — the prefix has already destroyed the keep-list
-# basename match, so treating debris as an ordinary candidate could delete a
-# keep-listed clone that was merely mid-quarantine.
+# Prefix of the private sibling DIRECTORY a candidate is renamed into for the
+# final re-audit (created with mktemp -d, so the name is exclusive). A run
+# killed between the rename and the rm leaves one behind; the sweep HOLDS
+# those (never re-sweeps them) — the prefix has already destroyed the
+# keep-list basename match, so treating debris as an ordinary candidate could
+# delete a keep-listed clone that was merely mid-quarantine. Because debris is
+# retained indefinitely, the quarantine target can never be a name that might
+# recur (a PID, a timestamp) — see remove_entry.
 QUARANTINE_PREFIX=".sweep-quarantine."
 
 HELD_FILE="$(mktemp)"
@@ -398,13 +401,35 @@ remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id> <reaudit-fn> [r
   # the rename, $q is provably whatever occupied $p at that instant, under a
   # name no other writer knows — so the object re-audited is the object
   # removed.
-  local q
-  q="$(dirname -- "$p")/$QUARANTINE_PREFIX$$.$(basename -- "$p")"
+  #
+  # The target must be GUARANTEED-private, not merely unlikely to collide. A
+  # PID-derived name is neither: leftovers are retained forever by design, so
+  # after PID reuse the name can already exist — and then `mv` would silently
+  # overwrite a held file, or treat a held directory as a destination and nest
+  # the candidate INSIDE it, destroying the very object the hold promised to
+  # preserve and breaking restore. mktemp -d creates the sibling atomically
+  # and exclusively, so the leaf inside it cannot pre-exist.
+  local qdir q
+  qdir="$(mktemp -d "$(dirname -- "$p")/${QUARANTINE_PREFIX}XXXXXX" 2>/dev/null)" || {
+    rm_errors=$((rm_errors + 1))
+    echo "quarantine failed: $p: could not create a private sibling directory" >> "$ERRORS_FILE"
+    return 1
+  }
+  q="$qdir/$(basename -- "$p")"
   err="$(mv -- "$p" "$q" 2>&1)" || {
     rm_errors=$((rm_errors + 1))
     echo "quarantine failed: $p: ${err:0:200}" >> "$ERRORS_FILE"
+    rmdir "$qdir" 2>/dev/null || true
     return 1
   }
+  # Explicit move verification — never infer the outcome from mv's exit status
+  # alone. -e is false for a dangling symlink, so -L is its companion.
+  if { [ ! -e "$q" ] && [ ! -L "$q" ]; } || [ -e "$p" ] || [ -L "$p" ]; then
+    rm_errors=$((rm_errors + 1))
+    echo "quarantine failed: $p: rename did not land at $q" >> "$ERRORS_FILE"
+    rmdir "$qdir" 2>/dev/null || true
+    return 1
+  fi
   local refuse=""
   if [ "$(id_stable "$(path_id "$q")")" != "$(id_stable "$id")" ]; then
     refuse="object replaced before removal"
@@ -415,8 +440,9 @@ remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id> <reaudit-fn> [r
     held_inuse=$((held_inuse + 1))
     # Restore, but NEVER clobber: another writer may already own the name
     # again. GNU mv -n exits 0 when it declines, so prove the move happened.
-    if mv -n -- "$q" "$p" 2>/dev/null && [ ! -e "$q" ]; then
+    if mv -n -- "$q" "$p" 2>/dev/null && [ ! -e "$q" ] && [ ! -L "$q" ]; then
       hold "in-use" "$p" "$refuse — restored from quarantine"
+      rmdir "$qdir" 2>/dev/null || true
     else
       rm_errors=$((rm_errors + 1))
       echo "quarantine restore blocked (name retaken): object left at $q" >> "$ERRORS_FILE"
@@ -429,6 +455,7 @@ remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id> <reaudit-fn> [r
     echo "rm failed: $q (quarantined from $p): ${err:0:200}" >> "$ERRORS_FILE"
     return 1
   }
+  rmdir "$qdir" 2>/dev/null || true
   log "deleted $label $p (${kb} KB)"
 }
 
