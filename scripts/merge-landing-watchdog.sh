@@ -67,6 +67,7 @@
 #   MERGE_LANDING_QUEUE_PROBE_CMD  kubectl-equivalent (default kubectl; tests stub)
 #   MERGE_LANDING_QUEUE_TOPIC    admin merge topic to probe
 #   MERGE_LANDING_QUEUE_NAMESPACE  namespace holding the Redpanda brokers
+#   MERGE_LANDING_QUEUE_PROBE_DEADLINE  whole-probe budget in seconds (default 120)
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -93,6 +94,7 @@ QUEUE_PROBE="${MERGE_LANDING_QUEUE_PROBE:-1}"
 QUEUE_PROBE_CMD="${MERGE_LANDING_QUEUE_PROBE_CMD:-kubectl}"
 QUEUE_TOPIC="${MERGE_LANDING_QUEUE_TOPIC:-industry-proc-catalog-admin-prod}"
 QUEUE_NAMESPACE="${MERGE_LANDING_QUEUE_NAMESPACE:-queuing}"
+QUEUE_PROBE_DEADLINE="${MERGE_LANDING_QUEUE_PROBE_DEADLINE:-120}"
 DRY_RUN=0
 
 # slack-notify.sh reads this (target channel).
@@ -231,16 +233,34 @@ probe_queue() {
   case "$total_lag" in ''|*[!0-9]*) return 1 ;; esac
 
   # Oldest RETAINED record per partition → the conservative frontier.
+  #
+  # EVERY partition must be read. Skipping a failed/timed-out/empty one and
+  # taking MIN over the survivors silently RAISES the frontier, which makes
+  # queue_note() label older requests "msg GONE" when the skipped partition may
+  # still retain them — an operator would then rebuild a request that is in fact
+  # queued, and a duplicate merge can silently re-point a loser (see the
+  # partial-fold note above). That is precisely the over-claim the MIN exists to
+  # prevent, so any partition read failure fails the WHOLE probe and we emit no
+  # attribution at all. Fail-open on the probe is safe; a wrong frontier is not.
   frontier_ms=""
+  parts_expected=0
+  parts_read=0
+  probe_deadline=$(( SECONDS + QUEUE_PROBE_DEADLINE ))
   while read -r part start; do
     [ -n "$part" ] || continue
+    parts_expected=$((parts_expected + 1))
+    [ "$SECONDS" -lt "$probe_deadline" ] || return 1   # bound 20s × partition-count
     ts="$(_kq exec -n "$QUEUE_NAMESPACE" "$pod" -c redpanda -- \
           rpk topic consume "$QUEUE_TOPIC" -p "$part" -o "$start" -n 1 -f '%d\n' \
           | tr -dc '0-9')"
-    case "$ts" in ''|*[!0-9]*) continue ;; esac
+    case "$ts" in ''|*[!0-9]*) return 1 ;; esac
+    parts_read=$((parts_read + 1))
     if [ -z "$frontier_ms" ] || [ "$ts" -lt "$frontier_ms" ]; then frontier_ms="$ts"; fi
   done < <(printf '%s\n' "$group_out" | awk -v t="$QUEUE_TOPIC" '$1==t{print $2, $4}')
 
+  # No partitions enumerated, or coverage short of the full set → no proof.
+  [ "$parts_expected" -gt 0 ] || return 1
+  [ "$parts_read" -eq "$parts_expected" ] || return 1
   [ -n "$frontier_ms" ] || return 1
   printf '{"frontier_epoch":%s,"total_lag":%s,"topic":"%s"}\n' \
     "$((frontier_ms / 1000))" "$total_lag" "$QUEUE_TOPIC"

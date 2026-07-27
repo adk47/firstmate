@@ -481,6 +481,54 @@ STUB
   [[ "$output" != *"msg GONE"* ]]
 }
 
+# The frontier is only a proof of absence if EVERY partition was read. Skipping
+# a failed one and taking MIN over the survivors RAISES the frontier, which makes
+# older requests read as "msg GONE" while the skipped partition may still retain
+# them — an operator would rebuild a queued request, and a duplicate merge can
+# silently re-point a loser. So a single partition failure must kill the whole
+# probe, not just that partition.
+@test "queue probe: one partition read failing kills the whole probe" {
+  mergeline 1000 SURV L_STUCK          # ts=1000, older than p0's frontier below
+  cat > "$TEST_TMPDIR/bin/kubectl-p1fail" <<'STUB'
+#!/usr/bin/env bash
+# Parse the ACTUAL partition from the `-p <n>` pair. Matching a bare "1"
+# anywhere in argv is wrong: `rpk topic consume ... -n 1` contains a literal 1,
+# which would make every partition fail and quietly test the wrong branch.
+verb=""; part=""; prev=""
+for a in "$@"; do
+  case "$a" in consume|describe|get) [ -z "$verb" ] && verb="$a" ;; esac
+  [ "$prev" = "-p" ] && part="$a"
+  prev="$a"
+done
+case "$verb" in
+  get) echo "pod/redpanda-v2-0"; exit 0 ;;
+  describe)
+    printf '%s\n' "TOTAL-LAG                4242" \
+      "industry-proc-catalog-admin-prod  0  100  50  200  10" \
+      "industry-proc-catalog-admin-prod  1  100  50  200  10"; exit 0 ;;
+  consume)
+    # partition 1 unreadable; partition 0 answers with a LATE frontier that,
+    # taken alone, would wrongly label the ts=1000 request "msg GONE".
+    [ "$part" = "1" ] && exit 1
+    echo 2000000; exit 0 ;;
+esac
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/kubectl-p1fail"
+  export MERGE_LANDING_QUEUE_PROBE_CMD="$TEST_TMPDIR/bin/kubectl-p1fail"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  # The stuck page must still fire — probe failure never suppresses an alert...
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" == *"L_STUCK"* ]]
+  [[ "$output" == *"queue probe unavailable"* ]]
+  # ...but it must carry NO attribution, and above all must not claim GONE from
+  # a partial frontier (p0 alone would have said GONE for this ts=1000 request).
+  [[ "$output" != *"msg GONE"* ]]
+  [[ "$output" != *"presence UNCONFIRMED"* ]]
+}
+
 @test "queue probe failure degrades to a plain stuck page, never suppresses it" {
   mergeline 1000 SURV L_STUCK
   cat > "$TEST_TMPDIR/bin/kubectl-broken" <<'STUB'
