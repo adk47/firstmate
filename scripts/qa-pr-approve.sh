@@ -12,8 +12,11 @@ set -euo pipefail
 #   1. APPROVE ONLY. This never merges. Humans merge.
 #   2. Muso-AI repos only.
 #   3. Never self-approve: GitHub 422s if the PR author == the authenticated
-#      gh account (the gateway token is Aaron/adk47), so refuse early with a
-#      clear message instead of a confusing API error.
+#      account, so refuse early with a clear message instead of a confusing API
+#      error.
+#   3b. Never approve a PR touching a sensitive path (policies/, secrets/,
+#      CODEOWNERS, workflow files, this script) — regardless of author.
+#   3c. Never approve a PR by an author in the policy's author_deny list.
 #   4. Requester must be in the approval allowlist (Aaron/Serhii/Nick).
 #      NOTE: the agent supplies the UID, so this is defense-in-depth, not a
 #      cryptographic gate. The real identity signal is the Slack UID the gateway
@@ -29,20 +32,37 @@ set -euo pipefail
 #             5 requester-not-allowed | 6 log-failed | 7 gh-approve-failed
 #             8 ci-not-green | 9 open-blocking-findings
 #             10 rebase-warning-unfiled-or-unverified
+#             11 sensitive-path-blocked | 12 author-policy-blocked
 #
-# Env (mainly for tests): GH=gh override; QA_PR_APPROVE_LOG_DIR override log dir;
-# QA_REBASE_STATE_DIR override the rebase-integrity report dir (Guard 8);
+# Env (mainly for tests): QA_GH override the identity shim (GH overrides the gh
+# binary inside it);
+# QA_APPROVAL_POLICY override the policy file; QA_PR_APPROVE_LOG_DIR override log
+# dir; QA_REBASE_STATE_DIR override the rebase-integrity report dir (Guard 8);
 # QA_REBASE_REQUIRED_REPOS space-separated short names whose CI must have
 # written a report (default "hydra") — missing report there refuses (Guard 8).
 
-GH="${GH:-gh}"
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# NOTE: there is deliberately no `GH=` here. Every call goes through $QA_GH, and
+# a live-looking $GH next to it would invite a call that silently bypasses the
+# identity shim, the kill switch, and the per-repo token scoping. To override the
+# gh binary itself, set GH — qa-gh.sh honours it (GH_BIN).
+# Every GitHub call goes through the identity shim, which decides per repo
+# whether to run as the QA bot App or the ambient host login, and mints a scoped
+# installation token when it is the former. See scripts/qa-gh.sh.
+QA_GH="${QA_GH:-$_here/qa-gh.sh}"
+POLICY="${QA_APPROVAL_POLICY:-$_here/../policies/qa-approval-policy.json}"
 LOG_DIR="${QA_PR_APPROVE_LOG_DIR:-api-logs/github}"
 
-# Identity note: the approval is recorded by GitHub as the host account (adk47),
-# because that account is the universal CODEOWNER and so its approval unblocks the
-# merge. We do NOT have a dedicated bot user account, so the *body* is branded
-# "Muso QA Bot" (see the default below) to make clear it is an automated QA
-# action, not a manual review by Aaron.
+# Identity note: the approval is recorded under whichever identity the shim
+# selected for this repo — the `muso-qa-bot` GitHub App where it is enabled,
+# otherwise the ambient host account. The *body* is branded "Muso QA Bot" either
+# way so the write always reads as automation.
+#
+# A GitHub App can never be a CODEOWNER (CODEOWNERS takes users and teams only),
+# so on repos in the policy's require_human_codeowner_repos the bot's approval
+# counts toward the required review but does NOT unblock the merge. That is
+# intended: it restores the human sign-off that running as a universal-CODEOWNER
+# account had silently removed. The skill must say so in the result DM.
 
 # Approval allowlist — Slack UIDs of the only people who may trigger an approval.
 # Aaron U7RP6HKUZ, Serhii U03TYGJF1N3, Nick U0AL36NADEY.
@@ -58,7 +78,7 @@ die() { echo "qa-pr-approve: $2" >&2; exit "$1"; }
 repo_arg="$1"
 pr="$2"
 requester="$3"
-body="${4:-🤖 Approved by Muso QA Bot (automated review): CI is green and there are no blocking findings. Recorded via QA automation on the adk47 account, not a manual review by Aaron. A human still performs the merge.}"
+body="${4:-🤖 Approved by Muso QA Bot (automated review): CI is green and there are no blocking findings. A human still performs the merge.}"
 
 # --- Guard 2: Muso-AI repos only -------------------------------------------
 if [[ "$repo_arg" == */* ]]; then
@@ -76,13 +96,99 @@ allowed=0
 for uid in "${ALLOWED_UIDS[@]}"; do [ "$uid" = "$requester" ] && allowed=1 && break; done
 [ "$allowed" = 1 ] || die 5 "requester '$requester' is not authorized to approve PRs (allowlist: Aaron/Serhii/Nick)."
 
+# --- Identity ---------------------------------------------------------------
+# `gh api user` returns 403 "Resource not accessible by integration" under a
+# GitHub App installation token — there is no user behind an App token. Left
+# unhandled that makes $me empty, which silently voids Guard 3 AND makes Guard 8's
+# marker-author test compare against "" and match nothing, so every WARN head
+# would die exit 10. So the identity is DECLARED here, not discovered: ask the
+# API, and fall back to the policy's first bot login when it cannot answer.
+# `|| true` is load-bearing: under `set -e` + `pipefail` a failing jq (unreadable
+# policy) aborts the whole script at this assignment with jq's own exit code and
+# NO message, before the fallback below can run. `head -1` guards the other shape
+# — a file that is valid JSON followed by garbage, where jq emits the real value
+# and then fails, which would otherwise make this a two-line string.
+bot_logins_json="$(jq -c '(.identity.bot_logins // ["muso-qa-bot"]) | if type == "array" then . else ["muso-qa-bot"] end' "$POLICY" 2>/dev/null | head -1 || true)"
+[ -n "$bot_logins_json" ] || bot_logins_json='["muso-qa-bot"]'
+me="$("$QA_GH" --repo "$owner/$repo" api user --jq .login 2>/dev/null || true)"
+[ -n "$me" ] || me="$(printf '%s' "$bot_logins_json" | jq -r '.[0] // "muso-qa-bot"' 2>/dev/null || echo "muso-qa-bot")"
+
+# norm_login — collapse the THREE forms GitHub reports the same bot identity in,
+# so comparisons cannot silently miss. Verified against Muso-AI/auth's dependabot
+# PR on 2026-07-27:
+#   REST      (gh api .../pulls)          -> "dependabot[bot]"
+#   GraphQL   (gh pr view --json author)  -> "app/dependabot"
+#   GraphQL   (reviewThreads Bot{login})  -> "dependabot"
+# Guard 3 reads the middle one and $me/bot_logins carry the others, so comparing
+# raw strings matches nothing and the guard is silently dead.
+norm_login() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's,^app/,,' -e 's,\[bot\]$,,'; }
+
 # --- Guard 3: never self-approve -------------------------------------------
-me="$("$GH" api user --jq .login 2>/dev/null || true)"
-author="$("$GH" pr view "$pr" --repo "$owner/$repo" --json author --jq .author.login 2>/dev/null || true)"
+author="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" --json author --jq .author.login 2>/dev/null || true)"
 [ -n "$author" ] || die 7 "could not read PR author for $owner/$repo#$pr (does the PR exist / is gh authed?)."
-# GitHub logins are case-insensitive.
-if [ -n "$me" ] && [ "$(printf '%s' "$me" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$author" | tr '[:upper:]' '[:lower:]')" ]; then
-  die 4 "PR #$pr is authored by the gateway account ($author) — GitHub blocks self-approval. A different reviewer must approve it."
+# GitHub logins are case-insensitive. Compare against the CURRENT identity only,
+# not the whole bot_logins set: GitHub blocks approving your own PR, and that is
+# a fact about who is acting right now. Once the App is the actor, a PR by the
+# old host account is no longer self-approval — it is a policy question, and
+# Guard 3c below is what answers it. Conflating the two would report a misleading
+# reason and would wrongly refuse if the set ever grew.
+author_n="$(norm_login "$author")"
+me_n="$(norm_login "$me")"
+if [ -n "$me_n" ] && [ "$me_n" = "$author_n" ]; then
+  die 4 "PR #$pr is authored by the acting QA identity ($author) — GitHub blocks self-approval. A different reviewer must approve it."
+fi
+
+# --- Guard 3c: author policy ------------------------------------------------
+# Authors the bot must never approve, independent of who requested it. Defaults
+# to the host account: GitHub's self-approval block used to make approving its
+# PRs impossible, and moving to a dedicated identity would otherwise remove that
+# protection as an invisible side effect. Widening this is a deliberate policy PR.
+# Fail closed on a three-state read: `jq -e` alone cannot distinguish "not in the
+# list" (exit 1) from "author_deny is malformed / not an array" (exit 5), so a
+# wrong-typed policy would silently stop denying.
+deny_hit="$(jq -r --arg a "$author_n" \
+  '(.author_deny // []) | map(ascii_downcase | sub("^app/";"") | sub("\\[bot\\]$";""))
+   | index($a) | tostring' "$POLICY" 2>/dev/null || echo "__ERR__")"
+[ "$deny_hit" != "__ERR__" ] || die 12 "cannot evaluate author_deny in $POLICY — refusing to approve (fail closed)."
+[ "$deny_hit" = "null" ] || die 12 "PR #$pr is authored by '$author', who is in the policy's author_deny list — refusing to approve. A human must review it."
+
+# --- Guard 3b: sensitive paths ----------------------------------------------
+# Refuse to approve any PR touching security-relevant paths, REGARDLESS of author.
+# This is what actually replaces the protection the self-approval block used to
+# provide by accident, and it is strictly stronger — it also covers PRs by Nick
+# and Serhii, which the old behaviour did not. Note the deliberate self-reference:
+# policies/ and this script are both listed, so the bot cannot approve a change
+# that would widen its own authority.
+# Fail closed: an unreadable policy or an unreadable file list refuses.
+sensitive_json="$(jq -c --arg r "$owner/$repo" \
+  '((.sensitive_paths["*"] // []) + (.sensitive_paths[$r] // []))' "$POLICY" 2>/dev/null || true)"
+[ -n "$sensitive_json" ] || die 11 "cannot read sensitive_paths from $POLICY — refusing to approve (fail closed)."
+# An EMPTY pattern set disables this guard entirely, so treat it as unreadable
+# rather than as "nothing is sensitive" — a dropped or renamed key must refuse,
+# not silently approve everything.
+[ "$sensitive_json" != "[]" ] || die 11 "sensitive_paths in $POLICY is empty for $owner/$repo — refusing to approve (fail closed; a missing key must not disable this guard)."
+
+# `gh pr view --json files` issues `files(first: 100)` with NO pagination and no
+# pageInfo (verified with GH_DEBUG=api on 2026-07-27), and paths come back
+# alphabetically. hydra's sensitive prefixes (policies/, scripts/, secrets/) sort
+# late, so on a >100-file PR the guard would look clean simply because it never
+# saw them. Cross-check against changedFiles and refuse when the list is short —
+# the same fail-closed shape Guards 7 and 8 use for their hasNextPage limits.
+files_json="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" \
+  --json changedFiles,files 2>/dev/null || echo "__ERR__")"
+[ "$files_json" != "__ERR__" ] || die 11 "could not read the changed-file list for $owner/$repo#$pr — refusing to approve (fail closed)."
+printf '%s' "$files_json" | jq -e '.changedFiles == (.files | length)' >/dev/null 2>&1 \
+  || die 11 "PR #$pr reports $(printf '%s' "$files_json" | jq -r '.changedFiles // "?"') changed files but the API returned $(printf '%s' "$files_json" | jq -r '(.files // []) | length') — cannot verify sensitive paths on a truncated list; refusing (fail closed)."
+changed_files="$(printf '%s' "$files_json" | jq -r '.files[]?.path' 2>/dev/null || echo "__ERR__")"
+[ "$changed_files" != "__ERR__" ] || die 11 "could not extract changed-file paths for $owner/$repo#$pr — refusing (fail closed)."
+if [ -n "$changed_files" ]; then
+  hit="$(printf '%s\n' "$changed_files" \
+    | jq -R -s --argjson pats "$sensitive_json" \
+        '[ split("\n")[] | select(length > 0) as $f
+           | select(any($pats[]; . as $p | ($f | startswith($p)))) ] | .[0] // empty' \
+        2>/dev/null || echo "__ERR__")"
+  [ "$hit" != "__ERR__" ] || die 11 "could not evaluate sensitive paths for $owner/$repo#$pr — refusing (fail closed)."
+  [ -z "$hit" ] || die 11 "PR #$pr touches a sensitive path ($hit) — a human code owner must approve it, not the QA bot."
 fi
 
 # --- Guard 6: CI must be green --------------------------------------------
@@ -92,7 +198,7 @@ fi
 # Fail closed: refuse if the rollup can't be read (ERR), if ANY non-qa-review
 # check is not passing, OR if there are NO non-qa-review checks at all -- an
 # empty rollup is not proof CI ran, so it must not read as green (QA #398).
-bad_checks="$("$GH" pr view "$pr" --repo "$owner/$repo" --json statusCheckRollup \
+bad_checks="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" --json statusCheckRollup \
   --jq '[.statusCheckRollup[]? | select((.context // .name) != "qa-review")]
          | if length == 0 then "NO-CHECKS"
            else ([.[] | (((.conclusion // .state) // "PENDING") | ascii_upcase)
@@ -122,7 +228,7 @@ query($owner:String!,$repo:String!,$pr:Int!){
 GQL
 # Fail closed on >100 threads: if there is a second page we cannot see a blocker
 # that lives past the first 100, so refuse rather than approve blind (QA #398).
-open_blockers="$("$GH" api graphql -f query="$gql" -f owner="$owner" -f repo="$repo" -F pr="$pr" \
+open_blockers="$("$QA_GH" --repo "$owner/$repo" api graphql -f query="$gql" -f owner="$owner" -f repo="$repo" -F pr="$pr" \
   --jq '.data.repository.pullRequest.reviewThreads
          | if .pageInfo.hasNextPage then "MORE"
            else ([.nodes[]? | select(.isResolved == false)
@@ -156,7 +262,7 @@ open_blockers="$("$GH" api graphql -f query="$gql" -f owner="$owner" -f repo="$r
 # reports — same trust model as the self-hosted runner itself. The interior
 # field cross-check below catches accidental key mixups, not that adversary.
 RI_DIR="${QA_REBASE_STATE_DIR:-/var/lib/hydra-qa/rebase-integrity}"
-head_oid="$("$GH" pr view "$pr" --repo "$owner/$repo" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
+head_oid="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
 # 40-hex only: this value is spliced into a filesystem path and a jq program —
 # anything else (gh error text, multiline) must refuse, not degrade to
 # missing-file=pass.
@@ -184,15 +290,24 @@ else
     WARN)
       ri_marker="REBASE WARNING [${head_oid:0:7}]"
       # Same reviewThreads query as Guard 7, counting threads that carry the
-      # marker AND were filed by the gateway account ($me) — a marker comment
-      # posted by anyone else (e.g. the PR author pre-empting the finding) must
-      # not satisfy this gate. Fail closed on unreadable threads or a second page.
-      ri_filed="$("$GH" api graphql -f query="$gql" -f owner="$owner" -f repo="$repo" -F pr="$pr" \
-        --jq '.data.repository.pullRequest.reviewThreads
+      # marker AND were filed by the bot — a marker comment posted by anyone else
+      # (e.g. the PR author pre-empting the finding) must not satisfy this gate.
+      # Match against the whole bot_logins SET rather than one login: GraphQL
+      # reports an App as Bot{login:"muso-qa-bot"} while REST uses
+      # "muso-qa-bot[bot]", and PRs open across the cutover (or across a
+      # kill-switch rollback) carry threads filed under the host account. Testing
+      # one value would silently match nothing and refuse every WARN head.
+      # Fail closed on unreadable threads or a second page.
+      ri_filed="$("$QA_GH" --repo "$owner/$repo" api graphql -f query="$gql" -f owner="$owner" -f repo="$repo" -F pr="$pr" \
+        | jq -r --arg marker "$ri_marker" --argjson logins "$bot_logins_json" \
+            'def norm: ascii_downcase | sub("^app/";"") | sub("\\[bot\\]$";"");
+             .data.repository.pullRequest.reviewThreads
                | if .pageInfo.hasNextPage then "MORE"
                  else ([.nodes[]? | (.comments.nodes[0] // {})
-                        | select(((.body // "") | contains("'"$ri_marker"'"))
-                                 and ((.author.login // "") == "'"$me"'"))] | length | tostring)
+                        | select(((.body // "") | contains($marker))
+                                 and (((.author.login // "") | norm) as $a
+                                      | ($logins | map(norm) | index($a)) != null))]
+                       | length | tostring)
                  end' \
         2>/dev/null || echo "ERR")"
       if [ "$ri_filed" = "0" ]; then
@@ -208,19 +323,28 @@ fi
 # --- Guard 5: log BEFORE the write ------------------------------------------
 ts="$(date -u +%FT%TZ)"
 mkdir -p "$LOG_DIR" || die 6 "cannot create log dir $LOG_DIR — refusing to approve unlogged."
-log_line="$(printf '{"agent":"qa","action":"github_pr_approve","target":"%s/%s#%s","requester":"%s","timestamp":"%s","authorization":"qa-review-go-verdict"}' \
-  "$owner" "$repo" "$pr" "$requester" "$ts")"
+# "identity" records WHICH account made the write, so the audit trail can be
+# separated pre/post identity migration (and per repo during the staged cutover).
+log_line="$(printf '{"agent":"qa","action":"github_pr_approve","target":"%s/%s#%s","requester":"%s","identity":"%s","timestamp":"%s","authorization":"qa-review-go-verdict"}' \
+  "$owner" "$repo" "$pr" "$requester" "$me" "$ts")"
 printf '%s\n' "$log_line" >> "$LOG_DIR/$(date -u +%F).jsonl" || die 6 "cannot write audit log — refusing to approve unlogged."
 
 # --- Approve (NEVER merge) --------------------------------------------------
-if ! "$GH" pr review "$pr" --repo "$owner/$repo" --approve --body "$body"; then
+if ! "$QA_GH" --repo "$owner/$repo" pr review "$pr" --repo "$owner/$repo" --approve --body "$body"; then
   die 7 "gh pr review --approve failed for $owner/$repo#$pr."
 fi
 echo "qa-pr-approve: approved $owner/$repo#$pr as $me (requester $requester). NOT merged."
 
+# A GitHub App cannot be a CODEOWNER, so on these repos the approval counts
+# toward the required review but does NOT clear the code-owner gate. Say so
+# loudly — the requester will otherwise read the approval as merge-ready.
+if jq -e --arg r "$owner/$repo" '(.require_human_codeowner_repos // []) | index($r)' "$POLICY" >/dev/null 2>&1; then
+  echo "qa-pr-approve: NOTE — $owner/$repo requires a CODEOWNER review, which a bot identity can never satisfy. This PR still needs a human code owner's approval before it can merge."
+fi
+
 # --- Post-check: report real review/merge state, don't assume "done" --------
 echo "qa-pr-approve: post-approval state —"
-"$GH" pr view "$pr" --repo "$owner/$repo" --json reviewDecision,mergeStateStatus,state \
+"$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" --json reviewDecision,mergeStateStatus,state \
   --jq '"  reviewDecision=\(.reviewDecision)  mergeStateStatus=\(.mergeStateStatus)  state=\(.state)"' 2>/dev/null \
   || echo "  (could not read post-approval state; check the PR on GitHub)"
 echo "qa-pr-approve: if anything other than reviewDecision=APPROVED / a clean mergeStateStatus shows, tell the requester what still blocks (CODEOWNERS, required checks). A human performs the merge."

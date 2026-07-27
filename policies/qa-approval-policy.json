@@ -1,0 +1,70 @@
+{
+  "_comment": [
+    "qa-approval-policy.json — what the QA bot may approve, and under which identity.",
+    "",
+    "Read by scripts/qa-pr-approve.sh (guards) and scripts/qa-gh.sh (identity).",
+    "",
+    "WHY JSON, when the other files in policies/ are YAML: node-8 has jq 1.7 and no",
+    "yq (verified 2026-07-27), and nothing in scripts/ parses YAML. The two YAML",
+    "policies here are consumed by deploy.sh and pr-validate.yml, not by the review",
+    "path. A policy the approval guards cannot parse would have to fail closed on",
+    "every PR, so this one is JSON.",
+    "",
+    "WHY IT LIVES IN policies/: CODEOWNERS makes this directory @adk47-only and",
+    "hydra sets require_code_owner_reviews, so widening the bot's authority needs a",
+    "human code-owner approval. Guard 3b additionally forbids the bot from approving",
+    "any PR that touches policies/ — so it cannot approve the change that would let",
+    "it approve more. That self-reference is deliberate; do not 'simplify' it away."
+  ],
+
+  "version": 1,
+
+  "identity": {
+    "bot_logins": ["muso-qa-bot", "muso-qa-bot[bot]", "adk47"],
+    "app_repos": []
+  },
+
+  "author_deny": ["adk47"],
+
+  "merge_gate_repos": [],
+
+  "require_human_codeowner_repos": [
+    "Muso-AI/hydra",
+    "Muso-AI/industry-data-processing"
+  ],
+
+  "sensitive_paths": {
+    "*": [
+      ".github/workflows/"
+    ],
+    "Muso-AI/hydra": [
+      "policies/",
+      "secrets/",
+      "CODEOWNERS",
+      "cliproxyapi.conf",
+      "openclaw.json",
+      "openclaw-main.json",
+      "openclaw-edge.json",
+      "scripts/qa-pr-approve.sh",
+      "scripts/qa-gh.sh",
+      "scripts/qa-review-status.sh",
+      "scripts/qa-bot-app-verify.sh",
+      "scripts/qa-dispatch-pr-review.sh",
+      "scripts/lib/qa-github-app-token.sh",
+      "scripts/lib/qa-author-slack-uid.sh",
+      "scripts/lib/ensure-secret-perms.sh",
+      "scripts/deploy.sh",
+      "scripts/tests/qa-pr-approve.bats"
+    ]
+  },
+
+  "_field_notes": {
+    "identity.bot_logins": "Every login the bot has ever reviewed under. A SET, not one value: GraphQL returns Bot{login:'muso-qa-bot'} while REST returns 'muso-qa-bot[bot]', and PRs in flight across the cutover (or a kill-switch rollback) carry threads filed by 'adk47'. Guard 8 matches membership; drop 'adk47' only once no open PR carries an adk47-filed REBASE WARNING thread.",
+    "identity.app_repos": "Repos whose gh calls run as the App. Empty = every call falls through to the ambient host login, i.e. behaviour identical to before the shim existed. Grows one repo at a time during cutover.",
+    "merge_gate_repos": "Repos where `qa-review` is a REQUIRED status check, i.e. GitHub holds the merge until the bot reports success. On these repos every dispatch path MUST end in a reported status: GitHub never times out a required check that was never reported, so a silently-skipped review makes the PR permanently unmergeable. scripts/qa-review-status.sh owns that lifecycle and .github/workflows/qa-autoreview.yml calls it on every exit path. The check must also be app-pinned (checks:[{context,app_id}]) or anyone with repo write could post a green qa-review and bypass the gate — which requires the App, not a user, to be what posts it.",
+    "merge_gate_repos_INTENTIONALLY_EMPTY": "Muso-AI/hydra is the intended first (and for now only) entry, but this list stays EMPTY until two prerequisites land, because populating it starts seeding `pending` on real PRs: (1) the stale-pending watchdog that drives a lost dispatch to `failure` — it does NOT exist yet, and the comments in qa-autoreview.yml name it as the backstop; (2) the fix to scripts/qa-dispatch-pr-review.sh's stale sweep, which deletes never-run cron jobs and so can silently lose a review. Adding a repo here before those exist means a lost dispatch leaves a permanently pending gate with no automatic recovery.",
+    "author_deny": "PR authors the bot must never approve. 'adk47' preserves today's behaviour exactly: GitHub's self-approval block used to make this impossible, and a dedicated identity would silently remove it. Flipping this to [] is a deliberate separate decision, not a side effect of the identity migration.",
+    "require_human_codeowner_repos": "Repos where require_code_owner_reviews is on. A GitHub App can never be a CODEOWNER (CODEOWNERS takes users and teams only), so the bot's approval counts toward the required review but does NOT unblock merge. The skill MUST say so in the result DM, or authors read the green check as merge-ready.",
+    "sensitive_paths": "Prefix-matched against the PR's changed files. A hit refuses approval regardless of author (Guard 3b). This replaces the protection that the accidental self-approval block used to provide, and is strictly stronger: it also covers PRs by Nick and Serhii, which the old behaviour did not."
+  }
+}

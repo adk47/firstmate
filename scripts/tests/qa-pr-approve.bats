@@ -45,12 +45,23 @@ case "$sub" in
   api)
     if [ "${1:-}" = "graphql" ]; then
       if [ -n "${STUB_THREADS_JSON:-}" ]; then
-        printf '%s' "$STUB_THREADS_JSON" | jq -r "$(_jqflt "$@")"
+        _flt="$(_jqflt "$@")"
+        if [ -n "$_flt" ]; then
+          printf '%s' "$STUB_THREADS_JSON" | jq -r "$_flt"
+        else
+          # No --jq: emit the raw payload, exactly as real gh does. Guard 8 pipes
+          # gh into a separate jq so it can pass the bot-login set via --argjson
+          # (gh's own --jq takes no arguments).
+          printf '%s' "$STUB_THREADS_JSON"
+        fi
       else
         echo "${STUB_OPEN_BLOCKERS:-0}"                 # count of unresolved Critical/Important threads
       fi
     else
-      echo "${STUB_ME:-adk47}"                        # gh api user --jq .login
+      # No colon: an explicitly EMPTY STUB_ME must stay empty, so tests can model
+      # `gh api user` 403ing under a GitHub App installation token. With `:-` an
+      # empty value would silently fall back and the regression would go untested.
+      echo "${STUB_ME-adk47}"                         # gh api user --jq .login
     fi ;;
   pr)
     action="$1"; shift || true
@@ -64,6 +75,15 @@ case "$sub" in
           fi
         elif printf '%s ' "$@" | grep -q 'headRefOid'; then
           echo "${STUB_HEAD_OID:-0123456789abcdef0123456789abcdef01234567}"  # Guard 8 report key
+        elif printf '%s ' "$@" | grep -q -- 'changedFiles'; then
+          # Guard 3b: real gh returns {changedFiles, files:[{path}]} and truncates
+          # `files` at 100 with no pageInfo, so the guard cross-checks the count.
+          # STUB_CHANGED_COUNT lets a test model that truncation.
+          _f="${STUB_FILES:-src/app.ts}"
+          printf '%s\n' $_f | jq -R -s --arg n "${STUB_CHANGED_COUNT:-}" \
+            '[split("\n")[]|select(length>0)] as $p
+             | {changedFiles: (if $n == "" then ($p|length) else ($n|tonumber) end),
+                files: [$p[]|{path:.}]}'
         elif printf '%s ' "$@" | grep -q 'author'; then
           echo "${STUB_AUTHOR:-nsollazzo}"            # PR author login
         else
@@ -422,4 +442,220 @@ NO_THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}
     run "$SCRIPT" hydra 625 "$NICK"
   [ "$status" -eq 0 ]
   grep -q '^approve$' "$STUB_CALLS"
+}
+
+# ---------------------------------------------------------------------------
+# Bot identity — the App-token migration
+# ---------------------------------------------------------------------------
+# `gh api user` returns 403 "Resource not accessible by integration" under a
+# GitHub App installation token: there is no user behind an App token. The stub
+# models that as empty output (STUB_ME="").
+
+test_policy() {  # <json> — point the script at a throwaway policy
+  printf '%s' "$1" > "$TEST_TMPDIR/policy.json"
+  export QA_APPROVAL_POLICY="$TEST_TMPDIR/policy.json"
+}
+
+DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk47"],"app_repos":[]},
+  "author_deny":[],"require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]}}'
+
+@test "identity: gh api user 403s (App token) → falls back to a policy bot login, still approves" {
+  test_policy "$DEFAULT_POLICY"
+  STUB_ME="" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+  grep -q '"identity":"muso-qa-bot"' "$(logfile)"
+}
+
+@test "identity: Guard 3 fires on the app/<slug> author form gh actually returns" {
+  # `gh pr view --json author` is GraphQL and returns "app/<slug>" — NOT the REST
+  # "<slug>[bot]" form. Verified against Muso-AI/auth's dependabot PR 2026-07-27:
+  # REST said "dependabot[bot]", gh pr view said "app/dependabot". Comparing raw
+  # strings matches nothing, so norm_login() must collapse both.
+  test_policy "$DEFAULT_POLICY"
+  STUB_ME="" STUB_AUTHOR="app/muso-qa-bot" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 4 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "identity: Guard 3 also fires on the REST <slug>[bot] form" {
+  test_policy "$DEFAULT_POLICY"
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="muso-qa-bot[bot]" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 4 ]
+}
+
+@test "guard3c: author_deny matches across app/ and [bot] forms too" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":["adk47"],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="app/adk47" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 12 ]
+}
+
+@test "guard3c: malformed author_deny → exit 12 (fail closed), not a silent pass" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":"adk47",
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="adk47" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 12 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3b: >100 changed files (gh truncates) → exit 11, refuses on a partial list" {
+  # gh issues files(first: 100) with no pagination and returns paths alphabetically,
+  # so hydra's late-sorting sensitive prefixes would be invisible on a big PR.
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":[".github/workflows/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES="a.ts b.ts" STUB_CHANGED_COUNT=130 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 11 ]
+  echo "$output" | grep -q 'truncated'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3b: empty sensitive_paths → exit 11 (a dropped key must not disable the guard)" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 11 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "identity: gh api user 403s AND Guard 8 WARN → marker thread still resolves (the \$me-empty bug)" {
+  # Regression guard. Before the fix, an empty \$me made Guard 8 compare
+  # .author.login against "", match nothing, and refuse EVERY WARN head.
+  test_policy "$DEFAULT_POLICY"
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** rebase dropped work","author":{"login":"muso-qa-bot"}}]}}
+  ]}}}}}'
+  STUB_ME="" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "identity: a legacy marker thread filed by the OLD host account still counts (cutover/rollback)" {
+  # PRs open across the cutover carry adk47-filed REBASE WARNING threads. If the
+  # login test were a single value rather than the bot_logins set, those PRs
+  # would strand at exit 10 the moment the App took over.
+  test_policy "$DEFAULT_POLICY"
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** filed pre-cutover","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  STUB_ME="muso-qa-bot[bot]" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "identity: GraphQL Bot.login form (no [bot] suffix) matches the REST-form identity" {
+  test_policy "$DEFAULT_POLICY"
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** x","author":{"login":"muso-qa-bot"}}]}}
+  ]}}}}}'
+  STUB_ME="muso-qa-bot[bot]" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+}
+
+@test "self-approval still blocks when the acting identity authored the PR" {
+  test_policy "$DEFAULT_POLICY"
+  STUB_ME="muso-qa-bot[bot]" STUB_AUTHOR="muso-qa-bot[bot]" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 4 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# ---------------------------------------------------------------------------
+# Guard 3b — sensitive paths (exit 11)
+# ---------------------------------------------------------------------------
+
+@test "guard3b: PR touching policies/ → exit 11, never approves, never logs" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"],"Muso-AI/hydra":["policies/","secrets/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES="README.md policies/qa-approval-policy.json" \
+    QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 700 "$NICK"
+  [ "$status" -eq 11 ]
+  echo "$output" | grep -q 'sensitive path'
+  ! grep -q '^approve$' "$STUB_CALLS"
+  [ ! -f "$(logfile)" ]
+}
+
+@test "guard3b: the bot cannot approve a change to its own approval script" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"],"Muso-AI/hydra":["scripts/qa-pr-approve.sh"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES="scripts/qa-pr-approve.sh" \
+    QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 701 "$NICK"
+  [ "$status" -eq 11 ]
+}
+
+@test "guard3b: sensitive paths apply regardless of author (stronger than the old self-approve block)" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":[".github/workflows/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES=".github/workflows/deploy.yml" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 11 ]
+}
+
+@test "guard3b: ordinary source paths are unaffected → approves" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":[".github/workflows/"],"Muso-AI/hydra":["policies/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES="src/app.ts docs/README.md" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "unreadable policy → refuses (fail closed) at the first guard that reads it, never approves" {
+  # Guard 3c reads the policy before 3b does, and is itself fail-closed, so an
+  # unreadable policy dies 12 rather than reaching 3b's exit 11. Either way the
+  # invariant that matters holds: no approval without a readable policy.
+  export QA_APPROVAL_POLICY="$TEST_TMPDIR/does-not-exist.json"
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 12 ]
+  echo "$output" | grep -q 'fail closed'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# ---------------------------------------------------------------------------
+# Guard 3c — author_deny (exit 12)
+# ---------------------------------------------------------------------------
+
+@test "guard3c: author in author_deny → exit 12, never approves" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":["adk47"],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="adk47" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 12 ]
+  echo "$output" | grep -q 'author_deny'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3c: author_deny is case-insensitive (GitHub logins are)" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":["adk47"],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="ADK47" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 12 ]
+}
+
+@test "guard3c: flipping author_deny to [] lets the same PR through (the deliberate policy flip)" {
+  test_policy "$DEFAULT_POLICY"
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="adk47" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+# ---------------------------------------------------------------------------
+# Code-owner honesty
+# ---------------------------------------------------------------------------
+
+@test "codeowner repos: approval succeeds but says it does NOT unblock the merge" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":["Muso-AI/hydra"],"sensitive_paths":{"*":["nope/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 702 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+  echo "$output" | grep -q 'still needs a human code owner'
 }

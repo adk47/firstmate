@@ -13,6 +13,8 @@ openclaw-server-backup-*.json
 
 # Secrets (never commit actual secrets)
 secrets/*.yaml
+secrets/*.json
+qa-bot-app.json
 !secrets/.gitkeep
 
 # OS
