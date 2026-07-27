@@ -1026,6 +1026,45 @@ STUB
   [[ "$output" == *"'release'"* ]]
 }
 
+@test "a live process inside an old NON-GIT junk dir blocks its deletion" {
+  # The junk lane goes through remove_entry, which used to carry its own copy
+  # of the quarantine logic and therefore never ran the live-handle gate.
+  [ -d /proc ] || skip "requires /proc (Linux); production and CI are node-8"
+  unset SWEEP_PROC_DIR
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/junk-in-use"
+  echo x > "$TEST_TMPDIR/ws/cto/tmp/junk-in-use/f"
+  age_tree 10 "$TEST_TMPDIR/ws/cto/tmp/junk-in-use"
+  ( cd "$TEST_TMPDIR/ws/cto/tmp/junk-in-use" && exec sleep 60 ) &
+  local holder=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(readlink "/proc/$holder/cwd" 2>/dev/null)" = "$TEST_TMPDIR/ws/cto/tmp/junk-in-use" ] && break
+    sleep 0.2
+  done
+  [ "$(readlink "/proc/$holder/cwd" 2>/dev/null)" = "$TEST_TMPDIR/ws/cto/tmp/junk-in-use" ]
+  run "$SWEEP" --apply
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMPDIR/ws/cto/tmp/junk-in-use/f" ]
+  [[ "$output" == *"live process holds the tree open"* ]]
+}
+
+@test "a symlinked workspace alias cannot bypass the mount guard on its real root" {
+  # workspaces/alias -> workspaces/real, with workspaces/real/tmp mounted.
+  # /proc/self/mounts records the REAL path, so sweeping under the alias name
+  # would miss the mount entirely — and the alias sorts BEFORE the real name,
+  # so it is reached first.
+  mkdir -p "$TEST_TMPDIR/ws/real/tmp/precious"
+  echo irreplaceable > "$TEST_TMPDIR/ws/real/tmp/precious/data"
+  age_tree 10 "$TEST_TMPDIR/ws/real/tmp/precious"
+  ln -s "$TEST_TMPDIR/ws/real" "$TEST_TMPDIR/ws/alias"
+  printf 'tmpfs %s tmpfs rw 0 0\n' "$TEST_TMPDIR/ws/real/tmp" > "$TEST_TMPDIR/mounts-alias"
+  SWEEP_MOUNTS_FILE="$TEST_TMPDIR/mounts-alias" run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  grep -qx irreplaceable "$TEST_TMPDIR/ws/real/tmp/precious/data"
+  [[ "$output" == *"tmp root is itself a mountpoint"* ]]
+}
+
 @test "quarantine debris from an interrupted run is held, never swept" {
   # The prefix has already destroyed the keep-list basename match, so debris
   # must never be re-swept as an ordinary candidate.

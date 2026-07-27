@@ -500,7 +500,7 @@ remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id> <reaudit-fn> [r
   local p="$1" kb="$2" label="$3" expect="$4" id="$5" reaudit="$6"
   shift 6
   local reaudit_args=("$@")
-  local err rm_cmd is_tree=0 now_id
+  local is_tree=0 now_id
   if [ "$APPLY" -eq 0 ]; then
     log "DRY-RUN: would delete $label $p (${kb} KB)"
     return 0
@@ -539,71 +539,24 @@ remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id> <reaudit-fn> [r
     rm_cmd=(rm -rf ${RM_ONEFS[@]+"${RM_ONEFS[@]}"} --)
   fi
 
-  # Every check above is still check-then-act ON A PATHNAME: a swap in the
-  # window between the last stat and the rm would delete an object no guard
-  # ever saw, recursively and as root. Close it by taking the candidate OUT
-  # of the namespace first. rename(2) is atomic, and a sibling name in the
-  # SAME directory is same-filesystem by construction (no cross-device
-  # fallback to a copy, which a deletion-safety path must never do). After
-  # the rename, $q is provably whatever occupied $p at that instant, under a
-  # name no other writer knows — so the object re-audited is the object
-  # removed.
-  #
-  # The target must be GUARANTEED-private, not merely unlikely to collide. A
-  # PID-derived name is neither: leftovers are retained forever by design, so
-  # after PID reuse the name can already exist — and then `mv` would silently
-  # overwrite a held file, or treat a held directory as a destination and nest
-  # the candidate INSIDE it, destroying the very object the hold promised to
-  # preserve and breaking restore. mktemp -d creates the sibling atomically
-  # and exclusively, so the leaf inside it cannot pre-exist.
-  local qdir q
-  qdir="$(mktemp -d "$(dirname -- "$p")/${QUARANTINE_PREFIX}XXXXXX" 2>/dev/null)" || {
-    rm_errors=$((rm_errors + 1))
-    echo "quarantine failed: $p: could not create a private sibling directory" >> "$ERRORS_FILE"
-    return 1
-  }
-  q="$qdir/$(basename -- "$p")"
-  err="$(mv -- "$p" "$q" 2>&1)" || {
-    rm_errors=$((rm_errors + 1))
-    echo "quarantine failed: $p: ${err:0:200}" >> "$ERRORS_FILE"
-    rmdir "$qdir" 2>/dev/null || true
-    return 1
-  }
-  # Explicit move verification — never infer the outcome from mv's exit status
-  # alone. -e is false for a dangling symlink, so -L is its companion.
-  if { [ ! -e "$q" ] && [ ! -L "$q" ]; } || [ -e "$p" ] || [ -L "$p" ]; then
-    rm_errors=$((rm_errors + 1))
-    echo "quarantine failed: $p: rename did not land at $q" >> "$ERRORS_FILE"
-    rmdir "$qdir" 2>/dev/null || true
-    return 1
-  fi
-  local refuse=""
-  if [ "$(id_stable "$(path_id "$q")")" != "$(id_stable "$id")" ]; then
-    refuse="object replaced before removal"
-  elif ! "$reaudit" "$q" ${reaudit_args[@]+"${reaudit_args[@]}"}; then
-    refuse="$REAUDIT_REASON"
-  fi
-  if [ -n "$refuse" ]; then
+  # Quarantine through the SAME primitives the clone lane uses. An inline
+  # copy of this logic lived here before, and that is exactly how the
+  # live-handle gate ended up missing from this lane: a process with its cwd
+  # or an fd inside a junk tree survives the rename and can create fresh work
+  # after the re-audit returns, or while rm traverses.
+  if ! quarantine_candidate "$p" "$id"; then
     held_inuse=$((held_inuse + 1))
-    # Restore, but NEVER clobber: another writer may already own the name
-    # again. GNU mv -n exits 0 when it declines, so prove the move happened.
-    if mv -n -- "$q" "$p" 2>/dev/null && [ ! -e "$q" ] && [ ! -L "$q" ]; then
-      hold "in-use" "$p" "$refuse — restored from quarantine"
-      rmdir "$qdir" 2>/dev/null || true
-    else
-      rm_errors=$((rm_errors + 1))
-      echo "quarantine restore blocked (name retaken): object left at $q" >> "$ERRORS_FILE"
-      hold "in-use" "$q" "$refuse — LEFT QUARANTINED, restore blocked"
-    fi
+    hold "in-use" "$p" "$QUARANTINE_ERROR"
     return 1
   fi
-  err="$("${rm_cmd[@]}" "$q" 2>&1)" || {
-    rm_errors=$((rm_errors + 1))
-    echo "rm failed: $q (quarantined from $p): ${err:0:200}" >> "$ERRORS_FILE"
+  local q="$QPATH" qdir="$QDIR"
+  if ! "$reaudit" "$q" ${reaudit_args[@]+"${reaudit_args[@]}"}; then
+    held_inuse=$((held_inuse + 1))
+    hold "in-use" "$p" "$REAUDIT_REASON"
+    restore_quarantine "$q" "$p" "$qdir" || true
     return 1
-  }
-  rmdir "$qdir" 2>/dev/null || true
-  log "deleted $label $p (${kb} KB)"
+  fi
+  delete_quarantined "$q" "$qdir" "$label" "$p" "$kb" "$is_tree"
 }
 
 # ── the clone policy audit — the ONLY copy ───────────────────
@@ -1050,26 +1003,35 @@ if is_mountpoint "$REPOS_ROOT"; then
 fi
 
 sweep_root_depth1 "$REPOS_ROOT" "$REPOS_CUTOFF" "$REPOS_REF" "repos"
+swept_tmp_roots="|"
 for ws_tmp in "$WS_ROOT"/*/tmp "$WS_ROOT"/*/.tmp; do
   [ -d "$ws_tmp" ] || continue
   [ -L "$ws_tmp" ] && continue
-  # A symlinked intermediate (workspaces/x -> elsewhere) must not pull an
+  # A symlinked intermediate (workspaces/a -> workspaces/b) must not pull an
   # out-of-scope tree into the sweep: the resolved path stays under WS_ROOT.
   ws_tmp_real="$(realpath -- "$ws_tmp" 2>/dev/null)" || continue
   case "$ws_tmp_real" in "$WS_ROOT"/*) ;; *) continue ;; esac
+  # ...and from here ONLY the resolved path is used. /proc/self/mounts records
+  # REAL paths, so is_mountpoint/mount_hazard comparisons against the alias
+  # would miss a mount at or under the aliased tree — and rm
+  # --one-file-system cannot protect a candidate that already lives inside
+  # that mounted filesystem. Sweeping the alias name was the hole.
   # repos/ is a sibling of the agent workspaces; never double-sweep it.
-  case "$ws_tmp" in "$REPOS_ROOT"/*) continue ;; esac
-  if root_is_clone "$ws_tmp"; then
-    hold "clone-root" "$ws_tmp" "tmp root is itself a git clone — skipped whole"
+  case "$ws_tmp_real" in "$REPOS_ROOT"/*) continue ;; esac
+  # Several aliases can resolve to one tree; sweep it exactly once.
+  case "$swept_tmp_roots" in *"|$ws_tmp_real|"*) continue ;; esac
+  swept_tmp_roots="$swept_tmp_roots$ws_tmp_real|"
+  if root_is_clone "$ws_tmp_real"; then
+    hold "clone-root" "$ws_tmp_real" "tmp root is itself a git clone — skipped whole"
     held_gitfile=$((held_gitfile + 1))
     continue
   fi
-  if is_mountpoint "$ws_tmp"; then
-    hold "mount" "$ws_tmp" "tmp root is itself a mountpoint — skipped whole"
+  if is_mountpoint "$ws_tmp_real"; then
+    hold "mount" "$ws_tmp_real" "tmp root is itself a mountpoint — skipped whole"
     held_mount=$((held_mount + 1))
     continue
   fi
-  sweep_root_depth1 "$ws_tmp" "$TMP_CUTOFF" "$TMP_REF" "tmp"
+  sweep_root_depth1 "$ws_tmp_real" "$TMP_CUTOFF" "$TMP_REF" "tmp"
 done
 
 print_summary
