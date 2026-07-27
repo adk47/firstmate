@@ -217,11 +217,15 @@ def main() -> int:
     fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.fchmod(fd, 0o600)          # tighten BEFORE any bytes are written
-        with os.fdopen(fd, "w") as fh:
-            fh.write(payload)
     except BaseException:
-        os.close(fd)
+        os.close(fd)                  # still ours to close
         raise
+    # fdopen TAKES OWNERSHIP of fd from here: its context manager closes it on
+    # both the success and the exception path. Closing it ourselves after a write
+    # failure would raise EBADF and mask the real error, so there is no handler
+    # around this block on purpose.
+    with os.fdopen(fd, "w") as fh:
+        fh.write(payload)
 
     print(f"\nApp created: {app.get('slug')} (id {app['id']})")
     print(f"Key store written to {out} (0600)\n")

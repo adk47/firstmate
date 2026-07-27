@@ -9,8 +9,13 @@ set -uo pipefail
 #   1. is the key store present, 0600, and well-formed?
 #   2. does the private key actually sign a JWT GitHub accepts?
 #   3. is the App installed, and on which repos?
-#   4. does it hold push (write) on hydra?  <- the precondition for an approval
-#      or a status to COUNT; without it the gate silently never satisfies
+#   4. does it hold `pull_requests: write` and `statuses: write` on hydra?
+#      <- the precondition for an approval or a status to COUNT; without them the
+#      gate silently never satisfies. NOTE it must NOT hold contents write
+#      (`push`): the manifest deliberately requests `contents: read` so that
+#      approve is structurally not merge. Do not "fix" a failure here by
+#      broadening the App to contents write — that would defeat a core safety
+#      property of this change. `push` being false is CORRECT and expected.
 #   5. what is the App's bot login, in both REST and GraphQL form?  <- these
 #      differ ("name[bot]" vs "name") and Guard 8 matches on them
 #   6. what is the app_id?  <- needed to pin the required check

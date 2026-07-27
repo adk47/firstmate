@@ -10,18 +10,21 @@ guards, both found in review of PR #748:
 import os
 import stat
 
+import pytest
 
-def _write_like_register(path, payload):
+
+def _write_like_register(path, payload, writer=None):
     """Mirror the write in qa-bot-app-register.main() exactly."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.fchmod(fd, 0o600)
         observed = stat.S_IMODE(os.fstat(fd).st_mode)
-        with os.fdopen(fd, "w") as fh:
-            fh.write(payload)
     except BaseException:
         os.close(fd)
         raise
+    # fdopen takes ownership of fd; no handler here on purpose (see below).
+    with os.fdopen(fd, "w") as fh:
+        (writer or fh.write)(payload)
     return observed
 
 
@@ -54,3 +57,30 @@ def test_register_script_uses_fchmod_not_post_hoc_chmod():
         text = fh.read()
     assert "os.fchmod(fd, 0o600)" in text, "the descriptor must be tightened before writing"
     assert "out.write_text(" not in text, "write_text leaves the key at the process umask"
+
+
+def test_write_failure_surfaces_the_real_error_not_ebadf(tmp_path):
+    """A failing write must raise ITS OWN error, not EBADF from a double close.
+
+    `with os.fdopen(fd)` closes fd on the exception path too, so an outer
+    `except: os.close(fd)` would raise EBADF and mask the original failure.
+    """
+    out = tmp_path / "qa-bot-app.json"
+
+    def boom(_payload):
+        raise RuntimeError("disk full")
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        _write_like_register(out, "secret", writer=boom)
+
+
+def test_register_script_does_not_double_close_the_descriptor():
+    """Guard the source: the close must not wrap the fdopen block."""
+    src = os.path.join(os.path.dirname(__file__), "..", "scripts", "qa-bot-app-register.py")
+    with open(src, encoding="utf-8") as fh:
+        text = fh.read()
+    # the only os.close must be in the fchmod guard, before fdopen takes over
+    fchmod_at = text.index("os.fchmod(fd, 0o600)")
+    fdopen_at = text.index("os.fdopen(fd,")
+    close_at = text.index("os.close(fd)")
+    assert fchmod_at < close_at < fdopen_at, "os.close must precede fdopen taking ownership"
