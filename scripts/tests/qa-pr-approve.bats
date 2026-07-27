@@ -659,3 +659,29 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
   grep -q '^approve$' "$STUB_CALLS"
   echo "$output" | grep -q 'still needs a human code owner'
 }
+
+@test "guard3b: the bot cannot approve a PR that edits the reviewer SKILL itself" {
+  # The skill is as load-bearing as the wrapper: a PR that edits it to skip the
+  # 7-lens workflow, or to post qa-review=success directly, weakens the gate just
+  # as effectively as editing qa-pr-approve.sh. Without this the bot could
+  # approve the change that removes its own review authority.
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"],"Muso-AI/hydra":["skills-all/muso-github-code-review/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES="skills-all/muso-github-code-review/SKILL.md" \
+    QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 900 "$NICK"
+  [ "$status" -eq 11 ]
+  echo "$output" | grep -q 'sensitive path'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3b: the SHIPPED policy actually covers the reviewer skill and the QA scripts" {
+  # Guards the policy DATA, not just the code path — the entries above are the
+  # whole protection, and a dropped line is silent.
+  pol="$HYDRA_REPO/policies/qa-approval-policy.json"
+  for p in "skills-all/muso-github-code-review/" "scripts/qa-pr-approve.sh" \
+           "scripts/qa-gh.sh" "scripts/qa-review-status.sh" "policies/" "secrets/" "CODEOWNERS"; do
+    run jq -e --arg p "$p" '(.sensitive_paths["Muso-AI/hydra"] // []) + (.sensitive_paths["*"] // []) | index($p)' "$pol"
+    [ "$status" -eq 0 ]
+  done
+}

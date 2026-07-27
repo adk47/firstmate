@@ -37,13 +37,17 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
+# Least privilege, and kept honest: every entry must map to a call the QA path
+# actually makes. `issues: write` was dropped after confirming nothing in the
+# review, approval, status or thread-resolution paths touches the /issues/ API —
+# `pull_requests: write` already covers the batched review, inline comments and
+# resolveReviewThread. Re-add it only alongside the concrete call that needs it.
 PERMISSIONS = {
     "metadata": "read",        # mandatory
     "contents": "read",        # gh pr diff, reading files under review
     "pull_requests": "write",  # reviews, inline comments, resolve threads, APPROVE
     "statuses": "write",       # the qa-review gate status
     "checks": "read",          # statusCheckRollup mixes check-runs and statuses
-    "issues": "write",         # PR-level (non-review) comments
 }
 
 result: dict = {}
