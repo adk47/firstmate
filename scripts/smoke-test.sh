@@ -32,6 +32,10 @@ warn_check() { log "WARN: $*"; WARNINGS=$((WARNINGS + 1)); }
 _SMOKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/websearch-probe.sh
 source "$_SMOKE_DIR/lib/websearch-probe.sh"
+# credit_gate_probe — same split rationale; asserts the deployed credit
+# reject/approve gates still refuse (issue #754).
+# shellcheck source=lib/credit-gate-probe.sh
+source "$_SMOKE_DIR/lib/credit-gate-probe.sh"
 
 # expected_agent_count <profile> — print the count of enabled agents
 # in /opt/hydra/openclaw-<profile>.json. Returns "?" on any failure
@@ -484,6 +488,42 @@ if [[ "$OR_HTTP" == "200" ]]; then
 else
   fail_check "OpenRouter /api/v1/models returned ${OR_HTTP} — every agent will fail until this clears"
 fi
+
+# -------------------------------------------------------------------
+# Credit-request safety gates, as DEPLOYED (issue #754)
+# -------------------------------------------------------------------
+# CI's bats suites pin these gates in the REPO; nothing until now checked that
+# they landed INTACT ON THIS BOX. An rsync exclude/keepglob drift, a hot-patch
+# overwrite, or a partial sync can leave node-8 running a gate that no longer
+# enforces while every CI check and the deploy itself stay green. Both gates
+# have already shipped a fail-open bug of this class (#740 reject, #750 approve).
+#
+# Deliberately warn-only for now: this check sits in a path where a false
+# positive would hard-fail the deploy fleet-wide and trip the rollback step.
+# Promote to fail_check once it has run clean across a few deploys (#754).
+log "Checking credit-request safety gates (as deployed)..."
+for _gate_script in \
+  /opt/hydra/skills-all/muso-ops-admin/scripts/muso-admin-api.sh \
+  /opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh
+do
+  _gate_label="$(basename "$(dirname "$(dirname "$_gate_script")")")"
+  case "$_gate_script" in
+    */workspaces/*) _gate_label="workspace/$_gate_label" ;;
+    *)              _gate_label="skills-all/$_gate_label" ;;
+  esac
+  if [[ ! -f "$_gate_script" ]]; then
+    warn_check "Credit gates: $_gate_label — script not found at $_gate_script"
+    continue
+  fi
+  # credit_gate_probe runs the assertions in an isolated child process, so the
+  # API script's `set -euo pipefail` and globals cannot leak in here.
+  if _gate_out="$(credit_gate_probe "$_gate_script" 2>&1)"; then
+    pass_check "Credit gates: $_gate_label enforcing (reject + approve, incl. JSON-escape/newline evasions)"
+  else
+    warn_check "Credit gates: $_gate_label NOT fully enforcing — $(echo "$_gate_out" | grep -E '^(BAD|INVALID):' | tr '\n' ';')"
+  fi
+done
+unset _gate_script _gate_label _gate_out
 
 # -------------------------------------------------------------------
 # Results
