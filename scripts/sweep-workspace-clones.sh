@@ -35,7 +35,10 @@
 # .git/index. Pre-rm recheck refuses in-progress operations
 # (index.lock / MERGE_HEAD / rebase-*) and any write inside the
 # fresh-window. rm is contained: symlink candidates are unlinked
-# (never followed), mountpoints are skipped, --one-file-system.
+# (never followed), a candidate whose path type changed since it was
+# classified is refused (no silent upgrade to a recursive delete),
+# mountpoints are skipped, --one-file-system. The two swept roots must
+# be the exact production paths unless the host guard is waived.
 #
 # Invoked weekly with --apply by scripts/weekly-cleanup.sh
 # (hydra-weekly-cleanup.timer, Mon 04:30 UTC); also human-runnable.
@@ -60,7 +63,8 @@
 #   SWEEP_FRESH_WINDOW_SECS default 3600 (pre-rm recheck window)
 #   SWEEP_LOCKFILE          single-run lock (apply mode)
 #   SWEEP_SLACK_CHANNEL     default C0ADV2W76G4 (#clio_devops)
-#   SWEEP_SKIP_HOST_GUARD   1 = skip the ovh-node-8 guard (tests)
+#   SWEEP_SKIP_HOST_GUARD   1 = skip the ovh-node-8 guard AND the fixed
+#                           production-topology check on the two roots (tests)
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -151,6 +155,21 @@ guard_root() {
   fi
 }
 
+# guard_root's checks pass for ANY real directory, so a stale or mistyped
+# SWEEP_REPOS_ROOT / SWEEP_WS_ROOT (say /opt, /var, or /opt/hydra) would hand
+# this script — run weekly as root with --apply, inheriting the unit's
+# environment — an unrelated tree to age out and rm -rf. The production
+# topology is fixed, so require it exactly; arbitrary sandbox roots are legal
+# only under the same explicit test-only override that waives the host guard.
+PROD_WS_ROOT="/opt/hydra/workspaces"
+PROD_REPOS_ROOT="$PROD_WS_ROOT/repos"
+guard_prod_topology() {
+  if [ "$WS_ROOT" != "$PROD_WS_ROOT" ] || [ "$REPOS_ROOT" != "$PROD_REPOS_ROOT" ]; then
+    log "FATAL: out-of-scope roots (repos='$REPOS_ROOT' ws='$WS_ROOT') — production sweeps only $PROD_REPOS_ROOT and $PROD_WS_ROOT (set SWEEP_SKIP_HOST_GUARD=1 for sandbox roots)"
+    exit 1
+  fi
+}
+
 # True if $1 IS a mountpoint or any mountpoint lives under it. The exact-match
 # case matters: rm --one-file-system treats a command-line argument that is
 # itself a mountpoint as that filesystem's root and would wipe its contents.
@@ -226,14 +245,31 @@ mtime_epoch() {
   stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1" 2>/dev/null || echo "$NOW_EPOCH"
 }
 
-remove_entry() {  # <path> <kb> <label>
-  local p="$1" kb="$2" label="$3" err rm_cmd
+remove_entry() {  # <path> <kb> <label> <expect:entry|tree>
+  local p="$1" kb="$2" label="$3" expect="$4" err rm_cmd is_tree=0
   if [ "$APPLY" -eq 0 ]; then
     log "DRY-RUN: would delete $label $p (${kb} KB)"
     return 0
   fi
+  if [ ! -L "$p" ] && [ -d "$p" ]; then is_tree=1; fi
+  # The caller classified this path BEFORE the du seam. If another process
+  # swapped it since (a stale symlink or file replaced by a fresh directory,
+  # or vice versa), the type no longer matches what the guards ran against:
+  # recursing into that tree would delete something the freshness /
+  # nested-repo / mount rails never saw. Refuse the transition — the next
+  # run re-classifies from scratch.
+  if [ "$expect" = "entry" ] && [ "$is_tree" -eq 1 ]; then
+    held_inuse=$((held_inuse + 1))
+    hold "in-use" "$p" "entry became a directory between classification and removal"
+    return 1
+  fi
+  if [ "$expect" = "tree" ] && [ "$is_tree" -eq 0 ]; then
+    held_inuse=$((held_inuse + 1))
+    hold "in-use" "$p" "directory became a file/symlink between classification and removal"
+    return 1
+  fi
   rm_cmd=(rm -f --)
-  if [ ! -L "$p" ] && [ -d "$p" ]; then
+  if [ "$is_tree" -eq 1 ]; then
     # ${arr[@]+...}: safe under set -u with an empty array on bash 3.2 (macOS dev).
     rm_cmd=(rm -rf ${RM_ONEFS[@]+"${RM_ONEFS[@]}"} --)
   fi
@@ -263,7 +299,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   if [ -L "$d" ] || [ ! -d "$d" ]; then
     if [ "$(mtime_epoch "$d")" -lt "$cutoff" ]; then
       kb="$(entry_kb "$d")"
-      if remove_entry "$d" "$kb" "entry"; then
+      if remove_entry "$d" "$kb" "entry" entry; then
         junk_deleted=$((junk_deleted + 1)); freed_kb=$((freed_kb + kb))
       fi
     else
@@ -316,7 +352,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     if mount_hazard "$d"; then
       held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
     fi
-    if remove_entry "$d" "$kb" "junk"; then
+    if remove_entry "$d" "$kb" "junk" tree; then
       junk_deleted=$((junk_deleted + 1)); freed_kb=$((freed_kb + kb))
     fi
     return 0
@@ -518,7 +554,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "unpushed commit appeared between audit and removal"; return 0
   fi
 
-  if remove_entry "$d" "$kb" "clone (HEAD $head_sha)"; then
+  if remove_entry "$d" "$kb" "clone (HEAD $head_sha)" tree; then
     swept=$((swept + 1)); freed_kb=$((freed_kb + kb))
   fi
 }
@@ -618,6 +654,7 @@ REPOS_ROOT="$(normalize_root "$REPOS_ROOT")"
 WS_ROOT="$(normalize_root "$WS_ROOT")"
 guard_root "$REPOS_ROOT"
 guard_root "$WS_ROOT"
+[ "$SKIP_HOST_GUARD" = "1" ] || guard_prod_topology
 
 if [ "$APPLY" -eq 1 ]; then
   exec 9>"$LOCKFILE"

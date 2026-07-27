@@ -621,6 +621,48 @@ STUB
   [[ "$output" == *"between audit and removal"* ]]
 }
 
+@test "a stale symlink swapped for a directory during the du seam is never rm -rf'd" {
+  # Classified on the symlink lane (unlink-only, no freshness/nested/mount
+  # guards), then swapped for a directory while `du` runs: the removal must
+  # refuse the type transition rather than recurse into the new tree.
+  ln -s "$TEST_TMPDIR/origins" "$TEST_TMPDIR/ws/cto/tmp/stale-link"
+  age_path 10 "$TEST_TMPDIR/ws/cto/tmp/stale-link"
+  REAL_DU="$(command -v du)"
+  export REAL_DU INJECT_LINK="$TEST_TMPDIR/ws/cto/tmp/stale-link"
+  cat > "$TEST_TMPDIR/bin/du" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"$INJECT_LINK"* && -L "$INJECT_LINK" ]]; then
+  /bin/rm -f "$INJECT_LINK"
+  mkdir -p "$INJECT_LINK/fresh-work"
+  echo unique > "$INJECT_LINK/fresh-work/data.txt"
+fi
+exec "$REAL_DU" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/du"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/du"; hash -r
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMPDIR/ws/cto/tmp/stale-link/fresh-work/data.txt" ]
+  [[ "$output" == *"became a directory between classification and removal"* ]]
+}
+
+@test "structural refusal: out-of-scope roots are rejected in host-guarded mode" {
+  # The production topology is fixed; only the explicit test override permits
+  # sandbox roots. Pretend to be node-8 so the host guard passes and the
+  # topology check is the thing under test.
+  cat > "$TEST_TMPDIR/bin/hostname" <<'STUB'
+#!/bin/bash
+echo ovh-node-8
+STUB
+  chmod +x "$TEST_TMPDIR/bin/hostname"
+  unset SWEEP_SKIP_HOST_GUARD
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/hostname"; hash -r
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"out-of-scope roots"* ]]
+  [ -d "$TEST_TMPDIR/repos" ]
+}
+
 @test "structural refusal: symlinked repos root exits 1" {
   rmdir "$TEST_TMPDIR/repos" 2>/dev/null || /bin/rm -rf "$TEST_TMPDIR/repos"
   mkdir -p "$TEST_TMPDIR/elsewhere"
