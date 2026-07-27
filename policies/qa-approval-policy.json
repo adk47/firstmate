@@ -41,6 +41,8 @@
       "policies/",
       "secrets/",
       "CODEOWNERS",
+      ".github/CODEOWNERS",
+      "docs/CODEOWNERS",
       "cliproxyapi.conf",
       "openclaw.json",
       "openclaw-main.json",

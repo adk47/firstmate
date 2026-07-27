@@ -143,14 +143,25 @@ fi
 # to the host account: GitHub's self-approval block used to make approving its
 # PRs impossible, and moving to a dedicated identity would otherwise remove that
 # protection as an invisible side effect. Widening this is a deliberate policy PR.
-# Fail closed on a three-state read: `jq -e` alone cannot distinguish "not in the
-# list" (exit 1) from "author_deny is malformed / not an array" (exit 5), so a
-# wrong-typed policy would silently stop denying.
-deny_hit="$(jq -r --arg a "$author_n" \
-  '(.author_deny // []) | map(ascii_downcase | sub("^app/";"") | sub("\\[bot\\]$";""))
-   | index($a) | tostring' "$POLICY" 2>/dev/null || echo "__ERR__")"
-[ "$deny_hit" != "__ERR__" ] || die 12 "cannot evaluate author_deny in $POLICY — refusing to approve (fail closed)."
-[ "$deny_hit" = "null" ] || die 12 "PR #$pr is authored by '$author', who is in the policy's author_deny list — refusing to approve. A human must review it."
+# Fail closed on a four-state read. `jq -e` alone cannot distinguish "not in the
+# list" from "malformed", and `(.author_deny // [])` is worse: it silently turns a
+# MISSING or null key into an empty allow-list, so a policy that lost the key
+# would quietly start approving the very authors this guard exists to block. The
+# key must be present AND an array; an explicit [] is still honoured, because
+# that is the deliberate policy flip.
+deny_hit="$(jq -r --arg a "$author_n" '
+  if (has("author_deny") | not) or (.author_deny == null) then "__MISSING__"
+  elif (.author_deny | type) != "array" then "__BADTYPE__"
+  else (.author_deny | map(ascii_downcase | sub("^app/";"") | sub("\\[bot\\]$";""))
+        | index($a) | tostring)
+  end' "$POLICY" 2>/dev/null || echo "__ERR__")"
+case "$deny_hit" in
+  __ERR__)     die 12 "cannot read author_deny from $POLICY — refusing to approve (fail closed)." ;;
+  __MISSING__) die 12 "author_deny is missing or null in $POLICY — refusing to approve (fail closed; an absent key must not read as an empty allow-list). Set it to [] explicitly to allow all authors." ;;
+  __BADTYPE__) die 12 "author_deny in $POLICY is not an array — refusing to approve (fail closed)." ;;
+  null)        : ;;
+  *)           die 12 "PR #$pr is authored by '$author', who is in the policy's author_deny list — refusing to approve. A human must review it." ;;
+esac
 
 # --- Guard 3b: sensitive paths ----------------------------------------------
 # Refuse to approve any PR touching security-relevant paths, REGARDLESS of author.

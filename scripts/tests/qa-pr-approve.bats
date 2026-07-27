@@ -685,3 +685,52 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
     [ "$status" -eq 0 ]
   done
 }
+
+@test "guard3b: .github/CODEOWNERS is covered (GitHub honours it at HIGHER precedence than root)" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"],"Muso-AI/hydra":["CODEOWNERS",".github/CODEOWNERS","docs/CODEOWNERS"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES=".github/CODEOWNERS" QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 901 "$NICK"
+  [ "$status" -eq 11 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3b: docs/CODEOWNERS is covered too" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"],"Muso-AI/hydra":["CODEOWNERS",".github/CODEOWNERS","docs/CODEOWNERS"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES="docs/CODEOWNERS" QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 902 "$NICK"
+  [ "$status" -eq 11 ]
+}
+
+@test "guard3b: the SHIPPED policy covers all three GitHub CODEOWNERS locations" {
+  pol="$HYDRA_REPO/policies/qa-approval-policy.json"
+  for p in "CODEOWNERS" ".github/CODEOWNERS" "docs/CODEOWNERS"; do
+    run jq -e --arg p "$p" '(.sensitive_paths["Muso-AI/hydra"] // []) | index($p)' "$pol"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "guard3c: a MISSING author_deny key → exit 12 (absent must not read as empty allow-list)" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="adk47" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 12 ]
+  echo "$output" | grep -q 'missing or null'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3c: a NULL author_deny → exit 12" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":null,
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="adk47" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 12 ]
+}
+
+@test "guard3c: an EXPLICIT [] is still honoured as the deliberate policy flip" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="adk47" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
