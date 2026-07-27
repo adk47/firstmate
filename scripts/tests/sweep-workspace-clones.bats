@@ -1150,6 +1150,29 @@ STUB
   [[ "$output" == *"clone-root"* ]]
 }
 
+@test "a tmp root that IS a bare repo is skipped whole (objects/refs intact)" {
+  # A bare repo's HEAD/objects/refs ARE the depth-1 children, so without a
+  # root-level bare check they are enumerated as ordinary entries and deleted
+  # individually — destroying every object and ref the repo held.
+  mkdir -p "$TEST_TMPDIR/ws/bare-agent"
+  git init -q --bare "$TEST_TMPDIR/ws/bare-agent/tmp"
+  age_tree 30 "$TEST_TMPDIR/ws/bare-agent/tmp"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMPDIR/ws/bare-agent/tmp/HEAD" ]
+  [ -d "$TEST_TMPDIR/ws/bare-agent/tmp/objects" ]
+  [ -d "$TEST_TMPDIR/ws/bare-agent/tmp/refs" ]
+  [[ "$output" == *"clone-root"* ]]
+}
+
+@test "structural refusal: a repos root that IS a bare repo exits 1" {
+  git init -q --bare "$TEST_TMPDIR/bare-repos-root"
+  SWEEP_REPOS_ROOT="$TEST_TMPDIR/bare-repos-root" run "$SWEEP" --apply
+  [ "$status" -eq 1 ]
+  [ -d "$TEST_TMPDIR/bare-repos-root/objects" ]
+  [[ "$output" == *"is itself a git repository"* ]]
+}
+
 @test "quarantine debris from an interrupted run is held, never swept" {
   # The prefix has already destroyed the keep-list basename match, so debris
   # must never be re-swept as an ordinary candidate.

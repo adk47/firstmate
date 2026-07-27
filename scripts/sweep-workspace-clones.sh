@@ -1047,14 +1047,20 @@ trap 'rm -f "$HELD_FILE" "$ERRORS_FILE" "$PAYLOAD_FILE" "$REPOS_REF" "$TMP_REF" 
 
 # A swept root that is ITSELF a clone (someone ran `git clone repo .` in it)
 # must be skipped whole: its depth-1 entries are that clone's worktree files.
-# -e is FALSE for a dangling symlink, so a root whose .git link is broken was
-# not recognised as a clone: the depth-1 sweep then held only the .git entry
-# and deleted the root's other old worktree files one by one. Any .git marker
-# in any form — dir, file, live or broken link — means "doubtful, skip whole".
-root_is_clone() { [ -e "$1/.git" ] || [ -L "$1/.git" ]; }
+# True if the ROOT is itself a repository, in any form. Two ways this was
+# missed before:
+#   -e is FALSE for a dangling symlink, so a root whose .git link had broken
+#   read as "not a repo" and the depth-1 sweep held only the .git entry while
+#   deleting the root's other aged worktree files one by one;
+#   and a BARE repo has no .git at all — its HEAD/objects/refs ARE the
+#   depth-1 children, so an aged bare root would have had `objects/` and
+#   `refs/` deleted as ordinary junk, destroying every object and ref it held.
+# The per-candidate bare/nested checks never run against the root itself, so
+# the root predicate has to cover both cases here.
+root_is_repo() { [ -e "$1/.git" ] || [ -L "$1/.git" ] || is_bare_repo "$1"; }
 
-if root_is_clone "$REPOS_ROOT"; then
-  log "FATAL: $REPOS_ROOT is itself a git clone — refusing to sweep it"; exit 1
+if root_is_repo "$REPOS_ROOT"; then
+  log "FATAL: $REPOS_ROOT is itself a git repository (worktree or bare) — refusing to sweep it"; exit 1
 fi
 
 # A sweep root that IS a mountpoint hides its own hazard: the per-candidate
@@ -1084,8 +1090,8 @@ for ws_tmp in "$WS_ROOT"/*/tmp "$WS_ROOT"/*/.tmp; do
   # Several aliases can resolve to one tree; sweep it exactly once.
   case "$swept_tmp_roots" in *"|$ws_tmp_real|"*) continue ;; esac
   swept_tmp_roots="$swept_tmp_roots$ws_tmp_real|"
-  if root_is_clone "$ws_tmp_real"; then
-    hold "clone-root" "$ws_tmp_real" "tmp root is itself a git clone — skipped whole"
+  if root_is_repo "$ws_tmp_real"; then
+    hold "clone-root" "$ws_tmp_real" "tmp root is itself a git repository (worktree or bare) — skipped whole"
     held_gitfile=$((held_gitfile + 1))
     continue
   fi
