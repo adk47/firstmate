@@ -36,9 +36,12 @@
 # (index.lock / MERGE_HEAD / rebase-*) and any write inside the
 # fresh-window. rm is contained: symlink candidates are unlinked
 # (never followed), a candidate whose path type or stat identity
-# (device:inode:mtime:ctime:size) changed since it was classified is
-# refused (no silent upgrade to a recursive delete, and no deleting a
-# replacement object the guards never saw — ctime defeats inode reuse),
+# (device|inode|mtime|ctime|size, ns resolution) changed since it was
+# classified is refused (no silent upgrade to a recursive delete, and no
+# deleting a replacement object the guards never saw — ctime defeats inode
+# reuse), and the removal itself is quarantine-first: the candidate is
+# atomically renamed to a sibling name and re-audited under that name, so
+# the object deleted is provably the object audited,
 # mountpoints are skipped, --one-file-system. The two swept roots must
 # be the exact production paths unless the host guard is waived.
 #
@@ -124,6 +127,13 @@ NOW_EPOCH="$(date +%s)"
 swept=0; freed_kb=0; junk_deleted=0; active=0; kept=0; rm_errors=0
 held_dirty=0; held_probe=0; held_gitfile=0; held_nested=0
 held_noremote=0; held_mount=0; held_inuse=0
+
+# Sibling name a candidate is renamed to for the final re-audit. A run killed
+# between the rename and the rm leaves one behind; the sweep HOLDS those
+# (never re-sweeps them) — the prefix has already destroyed the keep-list
+# basename match, so treating debris as an ordinary candidate could delete a
+# keep-listed clone that was merely mid-quarantine.
+QUARANTINE_PREFIX=".sweep-quarantine."
 
 HELD_FILE="$(mktemp)"
 ERRORS_FILE="$(mktemp)"
@@ -263,10 +273,22 @@ mtime_epoch() {
 # compares equal when the inode is reused and size/mtime are forged. GNU's
 # human-readable %y/%z and BSD's %Fm/%Fc carry the full ns timestamp
 # (verified on ovh-node-8/ext4: %z -> '2026-07-27 11:57:33.770505722 +0000').
+# '|' separates the fields: the ns timestamps contain both ':' and ' '.
 path_id() {
-  stat -c '%d:%i:%y:%z:%s' -- "$1" 2>/dev/null \
-    || stat -f '%d:%i:%Fm:%Fc:%z' -- "$1" 2>/dev/null \
+  stat -c '%d|%i|%y|%z|%s' -- "$1" 2>/dev/null \
+    || stat -f '%d|%i|%Fm|%Fc|%z' -- "$1" 2>/dev/null \
     || true
+}
+
+# The rename-INVARIANT subset of a path_id: device, inode, mtime, size.
+# rename(2) bumps ctime (measured on ovh-node-8: .770505722 -> .776505699
+# across a mv), so the post-quarantine re-audit must drop that field while
+# the pre-quarantine check keeps it.
+id_stable() {  # <path_id>
+  local dev ino mtime ctime size
+  # shellcheck disable=SC2034  # ctime is parsed precisely so it can be DROPPED
+  IFS='|' read -r dev ino mtime ctime size <<< "$1"
+  printf '%s|%s|%s|%s' "$dev" "$ino" "$mtime" "$size"
 }
 
 remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id-at-classification>
@@ -308,9 +330,39 @@ remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id-at-classificatio
     # ${arr[@]+...}: safe under set -u with an empty array on bash 3.2 (macOS dev).
     rm_cmd=(rm -rf ${RM_ONEFS[@]+"${RM_ONEFS[@]}"} --)
   fi
-  err="$("${rm_cmd[@]}" "$p" 2>&1)" || {
+
+  # Every check above is still check-then-act ON A PATHNAME: a swap in the
+  # window between the last stat and the rm would delete an object no guard
+  # ever saw, recursively and as root. Close it by taking the candidate OUT
+  # of the namespace first. rename(2) is atomic, and a sibling name in the
+  # SAME directory is same-filesystem by construction (no cross-device
+  # fallback to a copy, which a deletion-safety path must never do). After
+  # the rename, $q is provably whatever occupied $p at that instant, under a
+  # name no other writer knows — so the object re-audited is the object
+  # removed.
+  local q
+  q="$(dirname -- "$p")/$QUARANTINE_PREFIX$$.$(basename -- "$p")"
+  err="$(mv -- "$p" "$q" 2>&1)" || {
     rm_errors=$((rm_errors + 1))
-    echo "rm failed: $p: ${err:0:200}" >> "$ERRORS_FILE"
+    echo "quarantine failed: $p: ${err:0:200}" >> "$ERRORS_FILE"
+    return 1
+  }
+  if [ "$(id_stable "$(path_id "$q")")" != "$(id_stable "$id")" ]; then
+    held_inuse=$((held_inuse + 1))
+    # Restore, but NEVER clobber: another writer may already own the name
+    # again. GNU mv -n exits 0 when it declines, so prove the move happened.
+    if mv -n -- "$q" "$p" 2>/dev/null && [ ! -e "$q" ]; then
+      hold "in-use" "$p" "object replaced before removal — restored from quarantine"
+    else
+      rm_errors=$((rm_errors + 1))
+      echo "quarantine restore blocked (name retaken): object left at $q" >> "$ERRORS_FILE"
+      hold "in-use" "$q" "object replaced before removal — LEFT QUARANTINED, restore blocked"
+    fi
+    return 1
+  fi
+  err="$("${rm_cmd[@]}" "$q" 2>&1)" || {
+    rm_errors=$((rm_errors + 1))
+    echo "rm failed: $q (quarantined from $p): ${err:0:200}" >> "$ERRORS_FILE"
     return 1
   }
   log "deleted $label $p (${kb} KB)"
@@ -329,6 +381,14 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     hold "clone-root" "$d" "swept root itself looks like a git clone"
     return 0
   fi
+
+  # Quarantine debris from a killed prior run: report it, never sweep it.
+  case "$name" in
+    "$QUARANTINE_PREFIX"*)
+      held_inuse=$((held_inuse + 1))
+      hold "in-use" "$d" "quarantine leftover from an interrupted run — needs human review"
+      return 0 ;;
+  esac
 
   # Identity of the object every guard below is about to be run against.
   # Everything that reaches a removal must still BE this object.

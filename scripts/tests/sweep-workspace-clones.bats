@@ -701,6 +701,81 @@ STUB
   [[ "$output" == *"identity changed between classification and removal"* ]]
 }
 
+@test "a replacement preserving size AND mtime across the seam is still refused (ctime)" {
+  # The hardest same-type replacement: identical size, identical mtime, and on
+  # ext4 quite possibly the recycled inode. Only ctime — which no userspace
+  # API can set — separates the objects.
+  printf 'stale\n' > "$TEST_TMPDIR/ws/cto/tmp/keepme.log"
+  age_path 10 "$TEST_TMPDIR/ws/cto/tmp/keepme.log"
+  REAL_DU="$(command -v du)"
+  export REAL_DU INJECT_FILE="$TEST_TMPDIR/ws/cto/tmp/keepme.log" \
+    OLD_STAMP="$(past_stamp 10)" MARKER="$TEST_TMPDIR/swapped"
+  cat > "$TEST_TMPDIR/bin/du" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"$INJECT_FILE"* && ! -e "$MARKER" ]]; then
+  : > "$MARKER"
+  /bin/rm -f "$INJECT_FILE"
+  printf 'fresh\n' > "$INJECT_FILE"          # same 6 bytes as 'stale\n'
+  touch -h -t "$OLD_STAMP" -- "$INJECT_FILE" # same mtime
+fi
+exec "$REAL_DU" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/du"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/du"; hash -r
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMPDIR/ws/cto/tmp/keepme.log" ]
+  grep -q fresh "$TEST_TMPDIR/ws/cto/tmp/keepme.log"
+  [[ "$output" == *"identity changed between classification and removal"* ]]
+}
+
+@test "a swap that lands after the final stat is caught post-quarantine and restored" {
+  # Injects the replacement into the rename seam itself — the window no
+  # amount of stat'ing can close. The quarantined object must fail the
+  # re-audit and be restored to its original name, untouched.
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/racy-junk"
+  echo original > "$TEST_TMPDIR/ws/cto/tmp/racy-junk/f"
+  age_tree 10 "$TEST_TMPDIR/ws/cto/tmp/racy-junk"
+  REAL_MV="$(command -v mv)"
+  export REAL_MV INJECT_DIR="$TEST_TMPDIR/ws/cto/tmp/racy-junk" \
+    MV_MARKER="$TEST_TMPDIR/mv-swapped"
+  cat > "$TEST_TMPDIR/bin/mv" <<'STUB'
+#!/usr/bin/env bash
+# Quarantine move for the target: do the real rename, then substitute a
+# DIFFERENT object under the quarantine name — simulating a writer that won
+# the race between the final stat and the rename.
+if [[ "$*" == *"$INJECT_DIR"* && "$*" == *".sweep-quarantine."* && ! -e "$MV_MARKER" ]]; then
+  : > "$MV_MARKER"
+  "$REAL_MV" "$@"
+  q="${@: -1}"
+  "$REAL_MV" "$q" "$q.displaced"
+  mkdir -p "$q"
+  echo impostor > "$q/f"
+  exit 0
+fi
+exec "$REAL_MV" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/mv"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/mv"; hash -r
+  [ "$status" -eq 0 ]
+  # Restored to the original name, and the impostor was never rm -rf'd.
+  [ -d "$TEST_TMPDIR/ws/cto/tmp/racy-junk" ]
+  grep -q impostor "$TEST_TMPDIR/ws/cto/tmp/racy-junk/f"
+  [[ "$output" == *"restored from quarantine"* ]]
+}
+
+@test "quarantine debris from an interrupted run is held, never swept" {
+  # The prefix has already destroyed the keep-list basename match, so debris
+  # must never be re-swept as an ordinary candidate.
+  mkclone "$TEST_TMPDIR/repos/.sweep-quarantine.999.hydra"
+  age_tree 30 "$TEST_TMPDIR/repos/.sweep-quarantine.999.hydra"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/.sweep-quarantine.999.hydra" ]
+  [[ "$output" == *"quarantine leftover from an interrupted run"* ]]
+}
+
 @test "a failing nested-repo scan in the clone lane holds the candidate (fail closed)" {
   # The clone lane's `find -mindepth 2 -name .git` probe must not treat a
   # scan ERROR as "no inner repo" — an unproven absence can never authorize
