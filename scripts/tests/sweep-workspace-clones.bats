@@ -1100,6 +1100,56 @@ STUB
   [[ "$output" != *"bare repo at"* ]]
 }
 
+@test "a commit surviving only in the reflog holds the clone" {
+  # `git log --all` walks REFS, not reflogs. A commit reset off its branch is
+  # still recoverable via `git reflog` — deleting the clone destroys the only
+  # copy while every ref-based gate reports clean.
+  mkclone "$TEST_TMPDIR/repos/reflog-only"
+  ( cd "$TEST_TMPDIR/repos/reflog-only" && echo unique > u.txt && git add u.txt \
+      && git commit -qm "unique work" && git reset -q --hard origin/main )
+  # Precondition: the commit is gone from every ref but alive in the reflog.
+  ( cd "$TEST_TMPDIR/repos/reflog-only" \
+      && [ -z "$(git log --all --not --remotes --oneline)" ] \
+      && [ -n "$(git log --all --reflog --not --remotes --oneline)" ] )
+  age_tree 20 "$TEST_TMPDIR/repos/reflog-only"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/reflog-only" ]
+  [[ "$output" == *"not on any remote"* ]]
+}
+
+@test "an ordinary read-only clone is NOT held by the reflog rail" {
+  # The inverse: a clone that was only cloned (and checked out) has reflog
+  # entries pointing at commits that ARE on the remote, so the reflog rail
+  # must not turn the sweeper into a no-op.
+  mkclone "$TEST_TMPDIR/repos/just-cloned"
+  # Detach and reattach: real reflog entries, but every one points at the
+  # PUSHED commit. (Creating a branch here would leave a local ref with no
+  # remote counterpart and be held by the branch-parity rail instead —
+  # passing for the wrong reason.)
+  ( cd "$TEST_TMPDIR/repos/just-cloned" && git checkout -q --detach HEAD && git checkout -q main )
+  ( cd "$TEST_TMPDIR/repos/just-cloned" \
+      && [ -n "$(git reflog --all | head -1)" ] \
+      && [ -z "$(git log --all --reflog --not --remotes --oneline)" ] )
+  age_tree 20 "$TEST_TMPDIR/repos/just-cloned"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ ! -d "$TEST_TMPDIR/repos/just-cloned" ]
+}
+
+@test "a tmp root with a DANGLING .git symlink is skipped whole" {
+  # -e is false for a broken link, so the root was not seen as a clone and its
+  # other old files were deleted one by one.
+  mkdir -p "$TEST_TMPDIR/ws/broken/tmp"
+  ln -s /nonexistent/gitdir "$TEST_TMPDIR/ws/broken/tmp/.git"
+  echo irreplaceable > "$TEST_TMPDIR/ws/broken/tmp/only-copy.txt"
+  age_tree 30 "$TEST_TMPDIR/ws/broken/tmp"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  grep -qx irreplaceable "$TEST_TMPDIR/ws/broken/tmp/only-copy.txt"
+  [[ "$output" == *"clone-root"* ]]
+}
+
 @test "quarantine debris from an interrupted run is held, never swept" {
   # The prefix has already destroyed the keep-list basename match, so debris
   # must never be re-swept as an ordinary candidate.

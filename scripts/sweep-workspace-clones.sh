@@ -16,8 +16,10 @@
 #     fetches bump .git internals; only worktree writes mean "in use")
 #   • not on the keep-list (exact basename match, repos/ lane only)
 #   • git-clean AND fully pushed: status --porcelain empty,
-#     `git log --all --not --remotes` empty (--all covers detached
-#     HEAD, tags, and the newest stash), `git stash list` empty,
+#     `git log --all --reflog --not --remotes` empty (--all covers
+#     detached HEAD, tags and the newest stash; --reflog covers work
+#     reset off a branch, which refs alone cannot see), `git stash
+#     list` empty,
 #     every local branch has a same-named remote ref, and every
 #     local tag exists on origin (ls-remote; ref NAMES and annotated
 #     tag objects are data too, not just commits)
@@ -632,7 +634,15 @@ clone_policy_audit() {  # <audit-path> <report-path>
     held_dirty=$((held_dirty + 1)); hold "dirty" "$rp" "$(echo "$probe_out" | wc -l | tr -d ' ') dirty path(s)"; return 1
   fi
 
-  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" log --all --not --remotes --oneline 2>&1 | head -5)" || rc=$?
+  # --reflog as well as --all: `--all` walks REFS only, so a commit reset off
+  # its branch survives in the reflog (git's own recovery path) while every
+  # ref-based gate reports clean. Verified: after `git reset --hard
+  # origin/main`, `log --all --not --remotes` is empty but the commit is still
+  # reachable via reflog. Clones that were only ever cloned-and-read have
+  # reflog entries pointing at commits that ARE on the remote, so --not
+  # --remotes still excludes them — this holds discarded local work, not
+  # ordinary clones.
+  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" log --all --reflog --not --remotes --oneline 2>&1 | head -5)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     held_probe=$((held_probe + 1)); hold "probe-fail" "$rp" "git log: ${probe_out:0:120}"; return 1
   fi
@@ -723,7 +733,7 @@ clone_policy_audit() {  # <audit-path> <report-path>
     elif ! GIT_OPTIONAL_LOCKS=0 git -C "$ap" fetch --quiet --prune origin '+refs/heads/*:refs/sweep-live/heads/*' 2>/dev/null; then
       live_unreachable="fetch-failed"
     else
-      rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" log --all --not --glob='refs/sweep-live' --oneline 2>&1 | head -3)" || rc=$?
+      rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" log --all --reflog --not --glob='refs/sweep-live' --oneline 2>&1 | head -3)" || rc=$?
       if [ "$rc" -ne 0 ]; then
         live_unreachable="probe-failed: ${probe_out:0:100}"
       elif [ -n "$probe_out" ]; then
@@ -1037,7 +1047,11 @@ trap 'rm -f "$HELD_FILE" "$ERRORS_FILE" "$PAYLOAD_FILE" "$REPOS_REF" "$TMP_REF" 
 
 # A swept root that is ITSELF a clone (someone ran `git clone repo .` in it)
 # must be skipped whole: its depth-1 entries are that clone's worktree files.
-root_is_clone() { [ -e "$1/.git" ]; }
+# -e is FALSE for a dangling symlink, so a root whose .git link is broken was
+# not recognised as a clone: the depth-1 sweep then held only the .git entry
+# and deleted the root's other old worktree files one by one. Any .git marker
+# in any form — dir, file, live or broken link — means "doubtful, skip whole".
+root_is_clone() { [ -e "$1/.git" ] || [ -L "$1/.git" ]; }
 
 if root_is_clone "$REPOS_ROOT"; then
   log "FATAL: $REPOS_ROOT is itself a git clone — refusing to sweep it"; exit 1
