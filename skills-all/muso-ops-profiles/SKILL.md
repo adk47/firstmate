@@ -140,7 +140,7 @@ approval to merge (`verified` means "owner re-check passed + all dups loaded", N
 2. **Confirm same person** — names, aliases, IPIs, credits, genres. *Stays your judgment.* The verified block's `matched_external_id_sources` + `shared_track_count`/`shared_track_ratio` corroborate but do **not** prove (collaboration/Empire/Maui confounds).
 3. **Check credit intersection** — shared tracks. *You MAY read `shared_track_count` / `compared_track_count` / `shared_track_ratio` off the verified block instead of recomputing — this is the time-saver.*
 4. **Identify primary** — usually higher popularity/credits/claim status. *Stays your judgment — the customer's `asserted_direction` is an untrusted claim.*
-5. **Capture pre-state for verification** — GET both profiles now and record `isClaimed`, `workspaces[]`, `playlist.id`, `rawProfiles[].id` for each. *MANDATORY and unchanged — this fresh GET re-confirms claim-state at merge time and supersedes any staleness in the verified block.* You will compare against post-state.
+5. **Capture pre-state for verification** — GET both profiles now and record `isClaimed`, `workspaces[]`, `playlist.id`, `rawProfiles[].id`, and the credit count for each. *MANDATORY and unchanged — this fresh GET re-confirms claim-state at merge time and supersedes any staleness in the verified block.* You will compare against post-state (the credit count is also what the async-landing re-fire rule below means by "survivor credits unchanged").
 6. **Dry-run first.** Run the call once with `OPS_DRY_RUN=1` and confirm the wrapper's intercept summary lists the exact `mergeInto` and `profilesIds[]` you intend. If anything mismatches, stop.
 7. **Show side-by-side comparison** to the requester before the real call.
 
@@ -195,52 +195,51 @@ GET both profiles and assert against the pre-state you captured in step 5:
 - **Loser:** if it was claimed pre-merge, the survivor's GET must now show its workspace under `workspaces[]`. The loser's GET should show `isClaimed: false` and `workspaces: []`. Loser's `playlist` should be `null` (or — if the survivor already had its own playlist — unchanged on loser, since the handler destroys the loser's in that case). **Do NOT check `merged` or `deleted` — those are async.**
 - **Loser had nothing claim-side?** Then the synchronous side is a no-op, both GETs will look identical to pre-state, and the only thing the call did is queue the async data-ingestion job. This is normal — it does *not* mean the call failed. Tell the requester explicitly: "Sync part: nothing to transfer; async credit/IPI/rawID merge queued, ETA minutes–hours."
 
-**Verifying the async merge actually landed (catalog — NOT the admin GET):**
+**Verifying the async merge actually landed (live catalog — NOT the plain admin GET, NOT Trino):**
 
-The admin GET reads core-backend and never reflects the async fold. But the **catalog**
-does, and you can read it directly via Trino. This is the only truthful "did it merge?"
-signal — do not tell the requester "it's done / it's expected" off the back of the 200 alone.
+The plain admin GET never reflects the async fold, and the BI matview
+(`matvw_catalog_profile`) is an analytics copy whose watermark can lag days — banned for
+this operational check since PR #717 (2026-07-21). The truthful "did it merge?" signal is
+the **batched admin profile-list read with `includeDeleted=true`**, which proxies the
+current Mongo catalog:
 
 ```bash
-# Correct path is /opt/hydra/scripts/trino-query.sh (NOT workspaces/operations).
-bash /opt/hydra/scripts/trino-query.sh <<'SQL'
-SELECT _id, name, merged_to_id, is_deleted, credits_count
-FROM "platform-industry-bi-prod".matvw_catalog_profile
-WHERE _id IN ('<survivor_id>','<loser_id>'[,'<loser_id2>'])
-SQL
+muso --env prod --json api GET /admin/profile \
+  --query includeDeleted=true --query limit=<number of ids listed> \
+  --query ids=<survivor_id> --query ids=<loser_id> [--query ids=<loser_id2>]
 ```
 
-- **Landed:** each loser shows `merged_to_id = <survivor_id>` (and/or `is_deleted = true`),
-  and the survivor's `credits_count` has grown. Report this as the confirmation.
+- **Landed:** each loser shows `merged.mergedToId == <survivor_id>` AND a `deleted` record.
   **Check BOTH directions:** the backend sometimes canonicalises the *other* profile as the
   survivor, so a landed merge can show up reversed — the nominal loser stays active while the
-  nominal survivor has `merged_to_id = <loser_id>` / `is_deleted = true`. Either direction means
+  nominal survivor carries `merged.mergedToId = <loser_id>` + `deleted`. Either direction means
   the pair collapsed = landed. (Verified live 2026-07-03: `0c242160→99813f55` landed reversed.)
-- **Not landed yet vs the matview just being stale — READ THIS.** `matvw_catalog_profile` is a
-  BI materialized view rebuilt on a **~DAILY** cadence (NOT minutes), so `merged_to_id` /
-  `is_deleted` lag the real MongoDB catalog by **up to ~a day**. A blank reading is therefore
-  **expected and meaningless until the matview has rebuilt past the merge.** Measured 2026-07-03:
-  every merge ≥~24h old showed as landed, but a batch from the night before still read blank
-  purely because the matview's data watermark hadn't advanced past it yet. So do **not** call a
-  sub-day-old blank reading a drop. To know if the matview is even caught up, compare its
-  watermark to the merge time:
-  `SELECT max(updated_timestamp) FROM "platform-industry-bi-prod".matvw_catalog_profile` (epoch
-  **millis**) — a merge is only judgeable once that exceeds the merge time (+ a margin for a slow
-  fold).
-- **Genuinely dropped (the real failure mode):** loser still blank/active **after the matview
-  watermark has passed the merge** (in practice ≳1–2 days). Then the async catalog fold was
-  **silently dropped** (industry-data-processing `common/process.py` deletes the SQS message on
-  any worker exception — no DLQ, no retry; see incident 2026-06-08/09, the repeated "@Ops it's
-  not merging" Jens Jungkurth / Shelby Archer threads). Say so plainly — "the merge was accepted
-  but has NOT landed in the catalog" — and **escalate to the catalog team (Aron / Oleg) to verify
-  + re-fire** (never a blind re-merge — re-firing against partially-folded state can damage the
-  survivor; verify the pair's current state first). Do NOT re-issue the
-  same `/admin/profiles/merge` call hoping it lands (it already 200'd; re-issuing just re-enqueues
-  the same job that drops). The `merge-landing-watchdog` (cron) — which now gates on that same
-  matview watermark, so it only pages genuine drops — also posts to #clio_devops for these,
-  so a stuck merge will surface even if no one re-checks.
+- **Not landed yet:** losers still show `merged: null, deleted: null`. The admin-lane queue can
+  back up behind bulk sync traffic (observed 2026-07-24: merges queued for hours+ behind a
+  credit-sync flood), so give it the watchdog's grace period (6h) before calling it stuck.
+- **Genuinely dropped/stuck (the real failure mode):** losers still `merged: null` after the
+  grace period. Historically the worker deleted the SQS message on any exception — no DLQ, no
+  retry (incidents 2026-06-08/09) — but since idp #1076 (2026-04) it retries with
+  visibility-timeout backoff, and since idp #1355 (2026-06) exhausted messages are captured to
+  Mongo `catalog_dead_letter` (inspectable/replayable by the catalog team). So first say it
+  plainly — "the merge was accepted but has NOT landed in the catalog" — and ask the catalog
+  team (Aron / Oleg) whether the loser id sits in `catalog_dead_letter`: a dead-letter row
+  means a deterministic worker error that a re-fire will hit again — replay/escalate, don't
+  re-fire. Only if there is no dead-letter row (message likely still queued or lost pre-#1355
+  style): **verify the pair's current state** — a re-fire is safe ONLY when the pair shows NO
+  partial fold: losers fully active, no merged/deleted on either side, survivor credits
+  unchanged vs the step-5 pre-state (no pre-state captured, e.g. you arrived from a watchdog
+  page → treat as unverifiable and escalate instead). Then ONE re-fire is acceptable — and it
+  must be observed: re-run this same admin list read afterwards until it lands or the grace
+  period passes again. The re-fire is itself a Tier-2 merge call: cite a fresh in-thread
+  approval (`--approval-msg-id`), not the original one. Re-firing against a PARTIALLY-folded
+  pair can damage the survivor — that case goes to the catalog team. Never loop blind
+  re-merges: if the one verified re-fire does not land either, stop and escalate with the
+  evidence.
+  The `merge-landing-watchdog` (cron, live-catalog-based since PR #717) also pages
+  #clio_devops for these, so a stuck merge will surface even if no one re-checks.
 
-**STOP-RULE — read this before you do anything if verification looks off:**
+**STOP-RULE — read this before you do anything if verification looks off** *(applies to the synchronous post-merge verification; a dropped ASYNC landing follows the verified-single-re-fire rule above instead of the wait-for-Aaron default)*:
 
 > If post-merge verification doesn't match expectations, you do **NOT**:
 > - Retry with mutated body shapes (`sourceId/targetId`, `profileId`, etc.). The backend rejects those with 400 — you don't gain information, you just spam the audit log.

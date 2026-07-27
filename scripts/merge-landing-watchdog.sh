@@ -46,7 +46,8 @@
 #               without consuming real alert state.
 #
 # Env knobs (mainly for tests — defaults target the live node-8 layout):
-#   MERGE_LANDING_MERGES_FILE    merge audit log (recent-merges.jsonl)
+#   MERGE_LANDING_MERGES_FILE    merge audit feed(s), colon-separated
+#                                (wrapper log + muso CLI state file)
 #   MERGE_LANDING_STATE_FILE     already-alerted survivor:loser set
 #   MERGE_LANDING_MIN_AGE_HOURS  coarse pre-filter: skip merges younger than this
 #                                (default 6; live catalog state is checked after
@@ -66,7 +67,16 @@
 set -euo pipefail
 
 LOGPREFIX="[merge-landing-watchdog $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
-MERGES_FILE="${MERGE_LANDING_MERGES_FILE:-/var/log/muso-ops/recent-merges.jsonl}"
+# Colon-separated list: the wrapper's audit log PLUS the muso CLI's fallback
+# state dirs (its /var/lib/muso-cli preferred fleet dir and the XDG last
+# resort — rungs 2 and 4 of muso-cli config.go's resolution chain). Pinned
+# contexts (MUSO_STATE_DIR=/var/log/muso-ops, enforced via /etc/environment by
+# install-aux-units.sh and the gateway env files) converge on the wrapper
+# path; the extra feeds are defense-in-depth for pin-escaped invocations
+# (split-brain found 2026-07-24: a root-SSH CLI merge was invisible to this
+# watchdog). NOTE: the CLI file is its overlap-guard state (300s horizon) —
+# append-only today, but not a contractual long-retention feed.
+MERGES_FILE="${MERGE_LANDING_MERGES_FILE:-/var/log/muso-ops/recent-merges.jsonl:/var/lib/muso-cli/recent-merges.jsonl:/root/.local/state/muso/recent-merges.jsonl}"
 STATE_FILE="${MERGE_LANDING_STATE_FILE:-/var/lib/merge-landing-watchdog/alerted.json}"
 LOCKFILE="${MERGE_LANDING_LOCKFILE:-/var/run/merge-landing-watchdog.lock}"
 MIN_AGE_HOURS="${MERGE_LANDING_MIN_AGE_HOURS:-6}"
@@ -119,8 +129,9 @@ now         = int(os.environ["NOW_EPOCH"])
 out_path    = os.environ["CANDIDATES_OUT"]
 
 cands = {}  # key "survivor:loser" -> dict (dedupe repeated re-issues of the same pair)
-try:
-    with open(merges_file) as f:
+for one_file in filter(None, merges_file.split(":")):
+  try:
+    with open(one_file) as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -155,7 +166,7 @@ try:
                         "requester": rec.get("requester", ""),
                         "ts": int(epoch),
                     }
-except FileNotFoundError:
+  except FileNotFoundError:
     pass
 
 with open(out_path, "w") as f:
@@ -496,7 +507,12 @@ if [ "$SKIP_HOST_GUARD" != "1" ] && ! hostname | grep -q '^ovh-node-8$'; then
   exit 0
 fi
 
-if [ ! -f "$MERGES_FILE" ]; then
+_any_feed=0
+IFS=':' read -ra _feed_paths <<< "$MERGES_FILE"
+for _feed in "${_feed_paths[@]}"; do
+  [ -f "$_feed" ] && { _any_feed=1; break; }
+done
+if [ "$_any_feed" -eq 0 ]; then
   log "SKIP: merge audit log not found: $MERGES_FILE"
   exit 0
 fi
