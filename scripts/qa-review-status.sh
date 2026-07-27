@@ -68,16 +68,26 @@ case "$state" in pending|success|failure|error) ;; *) die 2 "state must be pendi
 # meaningful part is never the bit that gets cut.
 [ "${#description}" -le 140 ] || description="${description:0:137}..."
 
-# Arming-order guard. `merge_gate_repos` (is the check required?) and
-# `identity.app_repos` (who posts it?) are independent lists, and branch
-# protection is a third source of truth out of the repo entirely. Arming the
-# first without the second is the worst failure shape available here: the status
-# posts fine from the host account, the UI shows a green qa-review row, and the
-# app-pinned required check sits unsatisfied forever with nothing looking wrong.
-# Refuse rather than post an unsatisfiable status.
-if jq -e --arg r "$repo" '(.merge_gate_repos // []) | index($r)' "$POLICY" >/dev/null 2>&1 \
-   && ! jq -e --arg r "$repo" '(.identity.app_repos // []) | index($r)' "$POLICY" >/dev/null 2>&1; then
-  die 3 "$repo is in .merge_gate_repos but NOT in .identity.app_repos — the status would be posted by the host account and could never satisfy an app-pinned required check. Add it to app_repos first."
+# Arming guard. On a gated repo the status MUST be posted by the App, because
+# branch protection pins the required check to its app_id and a host-posted
+# status can never satisfy that pin. The failure shape is the nastiest available:
+# the POST succeeds, the UI shows a qa-review row, and the required check sits
+# unsatisfied forever with nothing looking wrong. So refuse instead of posting.
+#
+# Mirror qa-gh.sh's FULL resolution order, not just app_repos — the kill switch
+# and QA_GH_IDENTITY=host both outrank it. Otherwise arming the emergency
+# rollback would silently make every open PR on a gated repo unmergeable.
+if jq -e --arg r "$repo" '(.merge_gate_repos // []) | index($r)' "$POLICY" >/dev/null 2>&1; then
+  host_flag="${QA_GH_HOST_FLAG:-/var/lib/hydra/qa-gh-host-identity}"
+  if [ -e "$host_flag" ] || [ -L "$host_flag" ]; then
+    die 3 "$repo is merge-gated but the host-identity kill switch ($host_flag) is active — a host-posted status cannot satisfy the app-pinned check. Remove the branch-protection pin before using the kill switch on a gated repo."
+  fi
+  if [ "${QA_GH_IDENTITY:-}" = "host" ]; then
+    die 3 "$repo is merge-gated but QA_GH_IDENTITY=host forces the host identity — a host-posted status cannot satisfy the app-pinned check."
+  fi
+  if ! jq -e --arg r "$repo" '(.identity.app_repos // []) | index($r)' "$POLICY" >/dev/null 2>&1; then
+    die 3 "$repo is in .merge_gate_repos but NOT in .identity.app_repos — the status would be posted by the host account and could never satisfy an app-pinned required check. Add it to app_repos first."
+  fi
 fi
 
 # target_url is the "Details" link. On a REQUIRED check it is the operator's only

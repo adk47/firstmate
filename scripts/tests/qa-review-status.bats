@@ -150,3 +150,26 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ "$status" -eq 3 ]
   echo "$output" | grep -q 'could not post'
 }
+
+@test "gated repo with the kill switch active → refuses (rollback must not silently wedge the gate)" {
+  printf '%s' '{"merge_gate_repos":["Muso-AI/hydra"],"identity":{"app_repos":["Muso-AI/hydra"]}}' > "$TEST_TMPDIR/policy.json"
+  touch "$TEST_TMPDIR/killswitch"
+  QA_GH_HOST_FLAG="$TEST_TMPDIR/killswitch" run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO"
+  [ "$status" -eq 3 ]
+  echo "$output" | grep -q 'kill switch'
+  ! grep -q -- '--method POST' "$QA_GH_LOG"
+}
+
+@test "gated repo with QA_GH_IDENTITY=host → refuses" {
+  printf '%s' '{"merge_gate_repos":["Muso-AI/hydra"],"identity":{"app_repos":["Muso-AI/hydra"]}}' > "$TEST_TMPDIR/policy.json"
+  QA_GH_IDENTITY=host run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO"
+  [ "$status" -eq 3 ]
+  ! grep -q -- '--method POST' "$QA_GH_LOG"
+}
+
+@test "UNgated repo with the kill switch active → posts normally (guard is gate-scoped)" {
+  touch "$TEST_TMPDIR/killswitch"
+  QA_GH_HOST_FLAG="$TEST_TMPDIR/killswitch" run "$SCRIPT" Muso-AI/core-backend "$SHA" success "GO"
+  [ "$status" -eq 0 ]
+  grep -q -- '--method POST' "$QA_GH_LOG"
+}

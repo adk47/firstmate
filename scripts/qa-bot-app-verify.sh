@@ -96,7 +96,11 @@ if [ -n "$inst_id" ]; then
   if [ "$stored" != "$inst_id" ]; then
     if [ "$fix_install_id" = 1 ]; then
       tmp="$KEYFILE.tmp.$$"
-      if jq --arg i "$inst_id" '.installation_id = $i' "$KEYFILE" > "$tmp" 2>/dev/null \
+      # umask BEFORE the redirection: `> "$tmp"` creates the file at the process
+      # umask (typically 0644), so chmod-after would leave the private key
+      # world-readable for the whole jq write. 0600-from-birth, like every other
+      # secret write in this change.
+      if ( umask 077; jq --arg i "$inst_id" '.installation_id = $i' "$KEYFILE" > "$tmp" 2>/dev/null ) \
          && chmod 600 "$tmp" && mv -f "$tmp" "$KEYFILE"; then
         ok "wrote installation_id=$inst_id into the key store"
       else
@@ -120,14 +124,28 @@ if [ -z "$tok" ]; then
   bad "could not mint an installation token scoped to $TARGET_REPO — is the App installed on it?"
 else
   ok "minted a token scoped to $TARGET_REPO"
-  # One fetch, reused by check 4 and the auto-merge note in check 7.
+  # One fetch, reused by the auto-merge note in check 7.
   repo_json="$(tok_api "/repos/$TARGET_REPO")"
-  perms="$(printf '%s' "$repo_json" \
-    | jq -r '.permissions // {} | "push=\(.push) pull=\(.pull)"' 2>/dev/null)"
-  case "$perms" in
-    *push=true*) ok "App has WRITE on $TARGET_REPO ($perms) — approvals and statuses will count" ;;
-    *) bad "App lacks write on $TARGET_REPO ($perms). A review/status from a read-only app does NOT satisfy branch protection." ;;
-  esac
+  # Check the GRANULAR App permissions, not the repo object's .permissions.push.
+  # That field is the classic {admin,push,pull} content-write triad; this App
+  # deliberately requests `contents: read`, so push is false even when the
+  # permissions that actually matter here are granted. Asserting on push would
+  # reject a correctly configured App. /installation returns what was granted.
+  inst_perms="$(tok_api /installation | jq -c '.permissions // {}' 2>/dev/null)"
+  [ -n "$inst_perms" ] && [ "$inst_perms" != "{}" ] || inst_perms="$(printf '%s' "$installs" \
+    | jq -c --arg i "$inst_id" '[.[] | select((.id|tostring) == $i)][0].permissions // {}' 2>/dev/null)"
+  pr_perm="$(printf '%s' "$inst_perms" | jq -r '.pull_requests // "none"' 2>/dev/null)"
+  st_perm="$(printf '%s' "$inst_perms" | jq -r '.statuses // "none"' 2>/dev/null)"
+  if [ "$pr_perm" = "write" ]; then
+    ok "pull_requests: write — reviews and approvals will count"
+  else
+    bad "pull_requests is '$pr_perm', need write. A review from a read-only app does NOT satisfy branch protection."
+  fi
+  if [ "$st_perm" = "write" ]; then
+    ok "statuses: write — the qa-review gate status can be posted"
+  else
+    bad "statuses is '$st_perm', need write. Without it the qa-review merge gate can never be satisfied."
+  fi
 fi
 
 # $app_slug is non-empty here: the JWT check above exits 1 when it cannot resolve.

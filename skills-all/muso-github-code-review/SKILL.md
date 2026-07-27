@@ -42,8 +42,11 @@ the gates below ARE the authorization. You keep the PR author updated in a Slack
 CI check, batched-review API, the `qa-pr-approve.sh` wrapper, logging — with these
 overrides. The dispatch message gives you the author's Slack UID.
 
-**Identity — make the automation legible.** GitHub records the review/approval
-under the host account (Aaron / adk47); there is no separate bot user. So lead the
+**Identity — make the automation legible.** Every GitHub call goes through
+`qa-gh.sh`, which records the write under the `muso-qa-bot` App on repos listed in
+`policies/qa-approval-policy.json` `.identity.app_repos`, and under the ambient host
+account elsewhere. Never call bare `gh` — a write from the wrong identity cannot
+satisfy an app-pinned required check. So lead the
 GitHub **review body** and the **approval body** with a clear `🤖 Muso QA Bot
 (automated review)` banner so it reads as automation, not a manual review by Aaron.
 The Slack DMs go out as the QA app, so they don't repeat the bot name in the text —
@@ -80,7 +83,7 @@ result leads with the ✅/⛔ state.
      it outright. The wrapper's Guard 8 re-derives all of this mechanically
      (exit 10).
    - The gated wrapper accepts the author UID.
-4. **Publish the `qa-review` commit status (Step 6b)** (best-effort — skip if the token lacks status scope, same as the Step 6 403 fallback) — `failure` on NO-GO,
+4. **Publish the `qa-review` commit status (Step 6b)** (best-effort on an UNGATED repo; on a repo in `.merge_gate_repos` it is a hard requirement — a missing terminal status leaves the required check pending and the PR unmergeable) — `failure` on NO-GO,
    `success` on GO — before the result DM, so the PR shows a red/green QA signal.
 5. **Never merge** (unchanged). A human merges.
 6. **LAST, DM the author the result as a threaded reply under the opening ts.** Lead
@@ -88,6 +91,14 @@ result leads with the ✅/⛔ state.
    Slack link to the PR (`<url|#N>` mrkdwn) so it is scannable at a glance:
    ```bash
    bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "✅ Approved <https://github.com/Muso-AI/hydra/pull/<PR>|#<PR>> — CI green and 0 unresolved blocking findings (fresh pass + carried-forward threads). Safe to merge." "$ts"
+   ```
+   **Do NOT say "Safe to merge" on a repo in `.require_human_codeowner_repos`** (hydra,
+   industry-data-processing). A bot identity can never satisfy a CODEOWNERS
+   requirement, so the approval counts toward the review count but does NOT unblock
+   the merge — `qa-pr-approve.sh` prints exactly this and its post-check reports the
+   real `reviewDecision`/`mergeStateStatus`. Say so instead:
+   ```bash
+   bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "✅ Approved <https://github.com/Muso-AI/hydra/pull/<PR>|#<PR>> — CI green, 0 blocking findings. Still needs a human CODEOWNER approval before it can merge." "$ts"
    # or, if not approved:
    bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "⛔ Reviewed <https://github.com/Muso-AI/hydra/pull/<PR>|#<PR>> — <N> blocking finding(s), not approved (<one-line reason>). Details on the PR." "$ts"
    ```
@@ -108,8 +119,13 @@ result leads with the ✅/⛔ state.
 
 ## Setup
 
-The gateway `gh` CLI is already authenticated at host level — just use it. Resolve
-the target from the request (a URL, or "PR 123 in core-backend"):
+Use `bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" <gh args...>` for every
+GitHub call — never bare `gh`. The shim picks the identity (App vs host) per repo and
+mints a repo-scoped token. A 404 on a repo you can see in the browser means the App is
+not installed there: report it, do not fall back to bare `gh`. Never invoke
+`qa-github-app-token.sh` yourself — it prints a live token to stdout.
+
+Resolve the target from the request (a URL, or "PR 123 in core-backend"):
 
 ```bash
 # From a URL like https://github.com/Muso-AI/core-backend/pull/123
@@ -123,7 +139,7 @@ If only a number + repo name are given, default `OWNER=Muso-AI`.
 ## Step 1 — Gather PR context
 
 ```bash
-gh pr view "$PR" --repo "$OWNER/$REPO" \
+bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" pr view "$PR" --repo "$OWNER/$REPO" \
   --json title,body,author,baseRefName,headRefName,state,isDraft,additions,deletions,changedFiles,files,headRefOid
 ```
 
@@ -149,15 +165,15 @@ author, scope (files / +/-), and whether it is a draft.
 No local checkout is needed; `gh` fetches the diff directly:
 
 ```bash
-gh pr diff "$PR" --repo "$OWNER/$REPO"                 # full diff
-gh pr diff "$PR" --repo "$OWNER/$REPO" --name-only     # changed files
+bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" pr diff "$PR" --repo "$OWNER/$REPO"                 # full diff
+bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" pr diff "$PR" --repo "$OWNER/$REPO" --name-only     # changed files
 ```
 
 To view **one file's** diff, use the files API — `gh pr diff` has **no** path
 filter:
 
 ```bash
-gh api "repos/$OWNER/$REPO/pulls/$PR/files" \
+bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" api "repos/$OWNER/$REPO/pulls/$PR/files" \
   --jq '.[] | select(.filename=="<path>") | .patch'
 ```
 
@@ -170,7 +186,7 @@ For full-file context around a hunk (diffs alone hide issues), read the file at 
 PR head:
 
 ```bash
-gh api "repos/$OWNER/$REPO/contents/<path>?ref=$(gh pr view "$PR" --repo "$OWNER/$REPO" --json headRefOid --jq .headRefOid)" \
+bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" api "repos/$OWNER/$REPO/contents/<path>?ref=$(bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" pr view "$PR" --repo "$OWNER/$REPO" --json headRefOid --jq .headRefOid)" \
   --jq '.content' | base64 -d
 ```
 
@@ -214,7 +230,7 @@ correctness lens needs it — or the requester asks — actually run the PR's te
 needs a checkout:
 
 ```bash
-gh pr checkout "$PR" --repo "$OWNER/$REPO"   # inside a clone of the repo
+bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" pr checkout "$PR" --repo "$OWNER/$REPO"   # inside a clone of the repo
 # or: clone the repo, then  git fetch origin pull/$PR/head && git checkout FETCH_HEAD
 ```
 
@@ -242,7 +258,7 @@ CI state is context for the verdict ("hold until green"), not a separate review.
 rollup with one repo-pinned command:
 
 ```bash
-gh pr checks "$PR" --repo "$OWNER/$REPO" || true   # every check, its state, and a run link
+bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" pr checks "$PR" --repo "$OWNER/$REPO" || true   # every check, its state, and a run link
 ```
 
 `gh pr checks` **exits non-zero by design** when any check is pending or failing — that is
@@ -372,7 +388,7 @@ cat > /tmp/pr-review.json <<JSONEOF
 {
   "commit_id": "<headRefOid>",
   "event": "COMMENT",
-  "body": "🤖 **Muso QA Bot** (automated review) — see inline comments. Posted via QA automation on the adk47 account, not a manual review by Aaron.",
+  "body": "🤖 **Muso QA Bot** (automated review) — see inline comments.",
   "comments": [
     {"path": "src/auth.js", "line": 45, "side": "RIGHT", "body": "🔴 **Critical:** user input passed straight into the query — parameterize it."},
     {"path": "src/util.js", "line": 8,  "side": "RIGHT", "body": "🔵 **Suggestion:** duplicates logic in core/utils.js:34."}
@@ -380,7 +396,7 @@ cat > /tmp/pr-review.json <<JSONEOF
 }
 JSONEOF
 
-gh api "repos/$OWNER/$REPO/pulls/$PR/reviews" --method POST --input /tmp/pr-review.json
+bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" api "repos/$OWNER/$REPO/pulls/$PR/reviews" --method POST --input /tmp/pr-review.json
 ```
 
 - **NEVER pass review/PR/diff text inline via `-f body='...'` or `-f body="..."`.** Always
@@ -452,7 +468,7 @@ calls it.
 `qa-review` status yet, so a re-review must run before the PR is green again (pairs
 with `dismiss_stale_reviews`). On NO-GO you set `failure` and stop — do not approve.
 Best-effort: if the Step 6 review POST already failed with a 403/scope error, the
-status POST will too — skip it, rely on the Slack DM, and do not loop or report a hard
+status POST will too — on an UNGATED repo skip it, rely on the Slack DM, and do not loop or report a hard
 failure.
 
 ## Logging (before any GitHub write)
@@ -479,7 +495,7 @@ unaddressed.) Before deciding GO:
 1. List the PR's unresolved review threads:
 
    ```bash
-   gh api graphql -f query='
+   bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" api graphql -f query='
      query($owner:String!,$repo:String!,$pr:Int!){
        repository(owner:$owner,name:$repo){
          pullRequest(number:$pr){
@@ -497,7 +513,7 @@ unaddressed.) Before deciding GO:
      at that location. If the fix is in place, resolve the thread; if not, it stays a
      blocker. Resolve with:
      ```bash
-     gh api graphql -f query='mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{ isResolved } } }' -f id="$THREAD_ID"
+     bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" api graphql -f query='mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{ isResolved } } }' -f id="$THREAD_ID"
      ```
      (`$THREAD_ID` is the `id` field of the thread from the list query above.)
    Resolving a thread asserts you verified the fix in the current diff — the approval
@@ -530,7 +546,7 @@ The wrapper enforces Muso-AI-only, self-approval refusal, the requester allowlis
 the audit log:
 
 ```bash
-bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "🤖 Approved by Muso QA Bot (automated review). Recorded on the adk47 account, not a manual review by Aaron." \
+bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "🤖 Approved by Muso QA Bot (automated review)." \
   || echo "qa-pr-approve: declined (exit $?) — a NO-GO / gate refusal is a normal review outcome; post the review, relay the reason, do not approve."
 ```
 
