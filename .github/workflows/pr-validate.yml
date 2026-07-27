@@ -1177,6 +1177,19 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_close_duplicate_conversations
+      - name: Run close-stale-conversations tests
+        # scripts/close-stale-conversations.py is a HUMAN-RUN silent closer
+        # for the stale we-spoke-last backlog (no timer). These lock the
+        # never-close-a-waiting-customer predicate (customer-last,
+        # never-replied, and the lar==lcr tie are all ineligible), the strict
+        # >STALE_DAYS staleness keyed to OUR last reply, id-only
+        # de-confliction with fail-closed corrupt-sibling handling (exit 4,
+        # zero closes), the dry-run zero-write + masked review export, the
+        # --apply ceiling hard-stop and shadow-log-unopenable hard stop. Same
+        # bare stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_close_stale_conversations
       - name: Run cs-selfserve-backlog tests
         # scripts/cs-selfserve-backlog.py is a READ-ONLY monthly signal report
         # (Phase 3): it sweeps the edge support trajectory JSONL, counts

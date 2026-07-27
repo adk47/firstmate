@@ -49,6 +49,9 @@ for display only, never used as a historical-ownership key. Sibling sources:
                              until its recheck_after, so a rejected leading row
                              cannot starve later candidates yet a transient
                              EXCLUDE is re-examined later)
+  - CLOSE_STALE_SHADOW_LOG  /var/log/close-stale-shadow.jsonl (jsonl; "id" —
+                             the human-run stale-backlog closer,
+                             scripts/close-stale-conversations.py)
 
 Output: ONE JSON object on stdout:
   {"candidates": [{"conversation_id", "masked_email", "created_at",
@@ -508,6 +511,12 @@ def default_state_paths():
         "ops-drain-shadow": (
             os.environ.get("OPS_DRAIN_SHADOW_LOG", "/var/log/cs-ops-drain-shadow.jsonl"),
             "jsonl-ops-drain"),
+        # Stale-backlog closer (scripts/close-stale-conversations.py,
+        # human-run) — a conversation it already closed is no longer a
+        # drain candidate.
+        "close-stale": (
+            os.environ.get("CLOSE_STALE_SHADOW_LOG", "/var/log/close-stale-shadow.jsonl"),
+            "jsonl"),
     }
 
 
