@@ -169,7 +169,16 @@ credit_gate_probe() {
         echo "INVALID: could not create temp probe file"
         return 2
     }
-    _credit_gate_probe_body > "$tmp"
+    # The emitter's success AND its output must both be checked. `bash` on an
+    # EMPTY file exits 0, so a write that failed part-way (exhausted filesystem,
+    # read-only TMPDIR) would run nothing and report success — probe invalidity
+    # laundered into the exact false green this helper exists to prevent. Caller
+    # errexit does not save us: credit_gate_probe is invoked in an `if`.
+    if ! _credit_gate_probe_body > "$tmp" 2>/dev/null || [[ ! -s "$tmp" ]]; then
+        rm -f "$tmp"
+        echo "INVALID: could not write the probe body (empty or failed write) — refusing to report a verdict"
+        return 2
+    fi
     # Isolated child: the sourced API script's `set -e` and globals stay in here.
     bash "$tmp" "$script"
     probe_rc=$?

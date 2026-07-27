@@ -159,6 +159,27 @@ EOF
   [[ "$output" != *"ok:"* ]]
 }
 
+# A failed/empty probe body must NEVER read as a pass: `bash <empty-file>` exits
+# 0, so an unchecked write turns probe invalidity into a green verdict — the
+# precise failure mode this helper promises to prevent.
+
+@test "emitter FAILURE → INVALID (rc=2), never a pass" {
+  _credit_gate_probe_body() { return 1; }
+  run credit_gate_probe "$CANON"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"INVALID"* ]]
+  [[ "$output" != *"ok:"* ]]
+}
+
+@test "emitter writes an EMPTY body → INVALID (rc=2), never a pass" {
+  # succeeds but produces no bytes (e.g. a write that died mid-flight)
+  _credit_gate_probe_body() { return 0; }
+  run credit_gate_probe "$CANON"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"INVALID"* ]]
+  [[ "$output" != *"ok:"* ]]
+}
+
 @test "a script defining NO gate functions is flagged, not silently green" {
   echo '#!/usr/bin/env bash' > "$BATS_TEST_TMPDIR/empty.sh"
   run credit_gate_probe "$BATS_TEST_TMPDIR/empty.sh"
