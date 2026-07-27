@@ -238,6 +238,17 @@ the boolean distinction, use `| tostring` and test the literal string, or an exp
 post-pipe value. Bind the iterator first: `any($items[] | . as $x |
 <expr-using-$x>)`, or build the boolean array and use the `array | any` form.
 
+**Python: `except urllib.error.URLError` does NOT catch a broken response read.** urllib only
+wraps exceptions raised by `h.request()`; failures during `getresponse()` or while reading the
+body escape raw — `http.client.RemoteDisconnected` (a `ConnectionResetError`, so `OSError`),
+socket timeouts, and `IncompleteRead` (an `http.client.HTTPException`). In a per-item loop over
+thousands of rows this is the difference between "one item fails, the run continues" and "the
+whole batch dies on a traceback at row 400". Catch `(OSError, ValueError,
+http.client.HTTPException)` — `URLError` and the connection errors are all `OSError` subclasses,
+`ValueError` covers `json.JSONDecodeError`. Keep any audit-log write OUTSIDE that catch, or a
+log failure gets misfiled as a remote failure. `scripts/close-stale-conversations.py` does this;
+`scripts/close-resolved-conversations.py:564` still has the narrow two-exception catch.
+
 **Do not instruct an agent to call the Lobster tool directly; wrap it in a shell helper
 called via `exec`.** The Lobster tool's gateway schema advertises `flowId` and
 `flowExpectedRevision` as optional (the one tool handles both run and resume), so the
