@@ -82,8 +82,16 @@ through the batched admin profile-list read with `includeDeleted=true`; it proxi
 current Mongo catalog and exposes `merged.mergedToId` plus `deleted`. A requested-direction
 landing requires both `loser.merged.mergedToId == survivor` and a loser deletion record;
 the exact inverse covers a direction flip. Do not use a BI materialized view for this
-operational check, and do not re-issue a 200'd merge blindly. Check the pair's current state
-and worker retry/dead-letter evidence first.
+operational check, and **do not re-issue a 200'd merge** — check the pair's current state and
+the worker evidence instead. Mongo `catalog_dead_letter` only captures messages the worker
+consumed and failed on after exhausting its (delay-free, 5-attempt) retries; the dominant loss
+mode is deletion *before* consumption, because the catalog-admin topic's observed retention
+(~14.8d) is as long as the lane's drain ETA. That leaves no dead-letter row and no log line, so
+a missing row does not mean the merge is still queued, and a re-fire is eaten the same way.
+Recovery is out-of-band — rebuild the request from the node-8 `recent-merges.jsonl` feeds plus
+core-backend's admin log and apply it directly, never a Kafka replay (root-caused 2026-07-27,
+39 merges lost 2026-06-02 → 07-26; `merge` is not idempotent, so every apply needs a per-pair
+Mongo pre-check).
 
 **`api.muso.ai` (prod) serves core-backend `master`, not `develop`.** `develop` is the
 repo DEFAULT branch (new PRs base off it), but only `master` deploys to prod. Any

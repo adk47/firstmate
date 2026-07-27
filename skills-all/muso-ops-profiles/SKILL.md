@@ -88,7 +88,7 @@ WHERE rs.profileid = '<profile_id>'
 
 **What the endpoint actually does** (verified against `core-backend:src/apis/_admin/profile/mergeProfiles.js` + `services/discovery-seats/handleProfileIdChange.js`):
 
-| Side                         | Synchronous (200 means done) | Asynchronous (queued via `requestDataIngestion`, may take minutes–hours, may silently never arrive) |
+| Side                         | Synchronous (200 means done) | Asynchronous (queued via `requestDataIngestion`; historically minutes–hours, but the lane is currently ~2 weeks behind and losing messages — see "Still `merged: null`" below) |
 | ---------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------- |
 | Where it lands               | core-backend Postgres        | industry-data-processing pipeline                                                                   |
 | What moves loser → survivor  | `Claiming`, `ProfilePlaylist`, `RosterSeats` (teams), `NfcCard` | `merged_to_id` set on loser; credits, IPIs, raw profile IDs (Spotify/Tidal) folded into survivor    |
@@ -140,7 +140,7 @@ approval to merge (`verified` means "owner re-check passed + all dups loaded", N
 2. **Confirm same person** — names, aliases, IPIs, credits, genres. *Stays your judgment.* The verified block's `matched_external_id_sources` + `shared_track_count`/`shared_track_ratio` corroborate but do **not** prove (collaboration/Empire/Maui confounds).
 3. **Check credit intersection** — shared tracks. *You MAY read `shared_track_count` / `compared_track_count` / `shared_track_ratio` off the verified block instead of recomputing — this is the time-saver.*
 4. **Identify primary** — usually higher popularity/credits/claim status. *Stays your judgment — the customer's `asserted_direction` is an untrusted claim.*
-5. **Capture pre-state for verification** — GET both profiles now and record `isClaimed`, `workspaces[]`, `playlist.id`, `rawProfiles[].id`, and the credit count for each. *MANDATORY and unchanged — this fresh GET re-confirms claim-state at merge time and supersedes any staleness in the verified block.* You will compare against post-state (the credit count is also what the async-landing re-fire rule below means by "survivor credits unchanged").
+5. **Capture pre-state for verification** — GET both profiles now and record `isClaimed`, `workspaces[]`, `playlist.id`, `rawProfiles[].id`, and the credit count for each. *MANDATORY and unchanged — this fresh GET re-confirms claim-state at merge time and supersedes any staleness in the verified block.* You will compare against post-state; the credit count is also the pre-state the catalog team needs for the per-pair partial-fold check before any out-of-band apply.
 6. **Dry-run first.** Run the call once with `OPS_DRY_RUN=1` and confirm the wrapper's intercept summary lists the exact `mergeInto` and `profilesIds[]` you intend. If anything mismatches, stop.
 7. **Show side-by-side comparison** to the requester before the real call.
 
@@ -160,7 +160,7 @@ approval to merge (`verified` means "owner re-check passed + all dups loaded", N
 *Credit Intersection:* 8 shared tracks
 *Name Similarity:* 95% (alias match)
 
-⚠️ This will queue a merge of [Name B] → [Name A]. Synchronous: claim/workspace/playlist/teams transfer. Async (industry pipeline, ETA minutes–hours, no SLA): credits, IPIs, raw Spotify/Tidal IDs.
+⚠️ This will queue a merge of [Name B] → [Name A]. Synchronous: claim/workspace/playlist/teams transfer. Async (industry pipeline, no SLA): credits, IPIs, raw Spotify/Tidal IDs. Do NOT quote an ETA while the admin lane is backlogged — say the fold is queued and that you will confirm when it lands.
 Proceed? (yes/no)
 ```
 
@@ -193,7 +193,7 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 
 GET both profiles and assert against the pre-state you captured in step 5:
 - **Loser:** if it was claimed pre-merge, the survivor's GET must now show its workspace under `workspaces[]`. The loser's GET should show `isClaimed: false` and `workspaces: []`. Loser's `playlist` should be `null` (or — if the survivor already had its own playlist — unchanged on loser, since the handler destroys the loser's in that case). **Do NOT check `merged` or `deleted` — those are async.**
-- **Loser had nothing claim-side?** Then the synchronous side is a no-op, both GETs will look identical to pre-state, and the only thing the call did is queue the async data-ingestion job. This is normal — it does *not* mean the call failed. Tell the requester explicitly: "Sync part: nothing to transfer; async credit/IPI/rawID merge queued, ETA minutes–hours."
+- **Loser had nothing claim-side?** Then the synchronous side is a no-op, both GETs will look identical to pre-state, and the only thing the call did is queue the async data-ingestion job. This is normal — it does *not* mean the call failed. Tell the requester explicitly: "Sync part: nothing to transfer; async credit/IPI/rawID merge queued — I'll confirm once it lands" (no ETA while the lane is backlogged).
 
 **Verifying the async merge actually landed (live catalog — NOT the plain admin GET, NOT Trino):**
 
@@ -214,32 +214,55 @@ muso --env prod --json api GET /admin/profile \
   survivor, so a landed merge can show up reversed — the nominal loser stays active while the
   nominal survivor carries `merged.mergedToId = <loser_id>` + `deleted`. Either direction means
   the pair collapsed = landed. (Verified live 2026-07-03: `0c242160→99813f55` landed reversed.)
-- **Not landed yet:** losers still show `merged: null, deleted: null`. The admin-lane queue can
-  back up behind bulk sync traffic (observed 2026-07-24: merges queued for hours+ behind a
-  credit-sync flood), so give it the watchdog's grace period (6h) before calling it stuck.
-- **Genuinely dropped/stuck (the real failure mode):** losers still `merged: null` after the
-  grace period. Historically the worker deleted the SQS message on any exception — no DLQ, no
-  retry (incidents 2026-06-08/09) — but since idp #1076 (2026-04) it retries with
-  visibility-timeout backoff, and since idp #1355 (2026-06) exhausted messages are captured to
-  Mongo `catalog_dead_letter` (inspectable/replayable by the catalog team). So first say it
-  plainly — "the merge was accepted but has NOT landed in the catalog" — and ask the catalog
-  team (Aron / Oleg) whether the loser id sits in `catalog_dead_letter`: a dead-letter row
-  means a deterministic worker error that a re-fire will hit again — replay/escalate, don't
-  re-fire. Only if there is no dead-letter row (message likely still queued or lost pre-#1355
-  style): **verify the pair's current state** — a re-fire is safe ONLY when the pair shows NO
-  partial fold: losers fully active, no merged/deleted on either side, survivor credits
-  unchanged vs the step-5 pre-state (no pre-state captured, e.g. you arrived from a watchdog
-  page → treat as unverifiable and escalate instead). Then ONE re-fire is acceptable — and it
-  must be observed: re-run this same admin list read afterwards until it lands or the grace
-  period passes again. The re-fire is itself a Tier-2 merge call: cite a fresh in-thread
-  approval (`--approval-msg-id`), not the original one. Re-firing against a PARTIALLY-folded
-  pair can damage the survivor — that case goes to the catalog team. Never loop blind
-  re-merges: if the one verified re-fire does not land either, stop and escalate with the
-  evidence.
-  The `merge-landing-watchdog` (cron, live-catalog-based since PR #717) also pages
-  #clio_devops for these, so a stuck merge will surface even if no one re-checks.
+- **Not landed yet:** losers still show `merged: null, deleted: null`. Give it the watchdog's
+  grace period (`MERGE_LANDING_MIN_AGE_HOURS`, 6h) before calling it stuck. The admin lane is
+  slow because `refresh_analytics_profile_full` eats ~49% of worker time from 0.9% of the
+  messages — the credit-`sync` flood is a red herring (99% of messages, 0.19% of time), so
+  "it's queued behind syncs" is never the explanation.
+- **Still `merged: null` after the grace period — say it plainly** ("the merge was accepted but
+  has NOT landed in the catalog") and **do not tell anyone to wait for the lane to drain.**
+  What to do next depends on the state. **This section supersedes the watchdog's page text**:
+  if the page you received still carries the older generic "verify + re-fire" steer, ignore
+  that and follow this — the state-specific verdicts below (which the page names for you once
+  PR #747 lands, classifying the pair and reading the topic's retention frontier) are the
+  authority.
+  - **Half folded** (loser carries `merged.mergedToId` pointing at a *different* survivor) →
+    **never re-fire**, catalog-team decision. The API's guards do NOT protect you here: both
+    checks in `base_merge_link_operations.py:314-317` test the *survivor*
+    (`already merged` / `already merged into a merged object`), so a loser already folded
+    elsewhere passes them and gets its `merged_to_id` **silently re-pointed**.
+  - **Malformed loser id** (e.g. a 35-char UUID) → no catalog row exists; it will never land
+    however often it is fired. Fix the request at source.
+  - **Message GONE (older than the retention frontier)** → the dominant loss mode, root-caused
+    2026-07-27 (39 merges lost 2026-06-02 → 07-26). The catalog-admin topic's *observed*
+    retention is ~14.8d (configured `retention.ms` is 7d; deletion is per closed segment,
+    `segment.ms` 14d) — as long as the lane's own drain ETA — so messages are **deleted before
+    the worker ever consumes them**, and `redpanda.remote.delete=true` means the tiered copies
+    are gone too. Recovery is out-of-band (below); a re-fire is eaten the same way.
+  - **Inside the retention window, presence unconfirmed** → do not re-fire yet; report the lane
+    lag and escalate. (Merges lost inside this window exist too and are still being attributed
+    between retention, broker-rejected produces, and consumer-group seeks.)
 
-**STOP-RULE — read this before you do anything if verification looks off** *(applies to the synchronous post-merge verification; a dropped ASYNC landing follows the verified-single-re-fire rule above instead of the wait-for-Aaron default)*:
+  **A missing `catalog_dead_letter` row is NOT evidence the message is still queued.** That
+  collection only captures messages the worker actually consumed and then failed on after
+  exhausting retries (`common/process.py:171-178`; the retry is an in-memory re-dispatch with
+  no delay, bounded by `MAX_MESSAGE_RECEIVE_COUNT`=5 — `change_visibility_timeout` is a no-op
+  on these Kafka-backed lanes, so there is no exponential backoff to wait out). A row there =
+  a deterministic worker error a re-fire would hit again → replay/escalate. At least two other
+  channels leave **no row and no log line**: retention deletion (above) and broker-rejected
+  produces (`grep KAFKA_PRODUCE_FAILED` in core-backend api logs — topic `max.message.bytes`
+  is 10× smaller than the producer's).
+
+  **Recovery is out-of-band, never a Kafka replay:** escalate to the catalog team (Aron / Oleg)
+  to rebuild the request from the audit trail — hydra's own merge feeds on node-8
+  (`/var/log/muso-ops/recent-merges.jsonl` plus the muso-CLI state-dir feeds the watchdog
+  reads) together with core-backend's admin log — and apply it directly, with a per-pair Mongo
+  pre-check first for the reasons above. Re-firing through the lane is appropriate again only
+  once the retention fix has landed, and still only after that pre-check.
+  The `merge-landing-watchdog` (cron, live-catalog-based since PR #717) pages #clio_devops for
+  all of these, so a stuck merge surfaces even if no one re-checks.
+
+**STOP-RULE — read this before you do anything if verification looks off** *(applies to the synchronous post-merge verification; a dropped ASYNC landing follows the no-re-fire / out-of-band-recovery path above)*:
 
 > If post-merge verification doesn't match expectations, you do **NOT**:
 > - Retry with mutated body shapes (`sourceId/targetId`, `profileId`, etc.). The backend rejects those with 400 — you don't gain information, you just spam the audit log.
