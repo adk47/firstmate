@@ -328,6 +328,41 @@ id_stable() {  # <path_id>
   printf '%s|%s|%s|%s' "$dev" "$ino" "$mtime" "$size"
 }
 
+# `git fetch --no-write-fetch-head` (git >= 2.29) keeps our own live-origin
+# snapshot from CLOBBERING the clone's FETCH_HEAD. Without it the audit
+# destroys the very pointer it is meant to protect — even for a clone it then
+# decides to HOLD. Verified on node-8 (git 2.43): the audit fetch rewrote
+# FETCH_HEAD from the fetched tip to the origin head.
+GIT_FETCH_EXTRA=()
+_gv="$(git --version 2>/dev/null | awk '{print $3}')"
+_gmaj="${_gv%%.*}"; _grest="${_gv#*.}"; _gmin="${_grest%%.*}"
+case "${_gmaj:-x}${_gmin:-x}" in
+  *[!0-9]*) ;;  # unparseable version: omit the flag rather than guess
+  *) if [ "$_gmaj" -gt 2 ] || { [ "$_gmaj" -eq 2 ] && [ "$_gmin" -ge 29 ]; }; then
+       GIT_FETCH_EXTRA=(--no-write-fetch-head)
+     fi ;;
+esac
+
+# FETCH_HEAD is a pseudo-ref that NEITHER --all NOR --reflog walks. A
+# `git fetch origin <ref>` with no destination refspec — a PR ref, say —
+# leaves the fetched tip only there, so if that ref is later deleted upstream
+# this clone holds the last copy. Verified: such a commit has no ref
+# containing it, its object is present, and the reachability probe reports
+# clean. These tips are fed to the probes as extra positive revs.
+fetch_head_tips() {  # <repo-path> -> one sha per line
+  local d="$1" f="$1/.git/FETCH_HEAD" sha
+  [ -f "$f" ] || return 0
+  while read -r sha _; do
+    case "$sha" in
+      ''|'#'*) continue ;;
+      *[!0-9a-fA-F]*) continue ;;
+    esac
+    if GIT_OPTIONAL_LOCKS=0 git -C "$d" cat-file -e "${sha}^{commit}" 2>/dev/null; then
+      printf '%s\n' "$sha"
+    fi
+  done < "$f"
+}
+
 # ── repository detection (regular AND bare) ──────────────────
 # A BARE repository has no .git at all: HEAD, objects/ and refs/ sit at its
 # root. That is precisely git's own is_git_directory() triple. Without this,
@@ -616,7 +651,12 @@ remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id> <reaudit-fn> [r
 # could park a commit where only the dropped checks would have seen it.
 # Returns 0 = safe to delete. A refusal has ALREADY held and counted itself.
 clone_policy_audit() {  # <audit-path> <report-path>
-  local ap="$1" rp="$2" probe_out rc
+  local ap="$1" rp="$2" probe_out rc line
+  # Captured BEFORE any fetch of ours can touch FETCH_HEAD.
+  local -a fh_tips=()
+  while IFS= read -r line; do
+    if [ -n "$line" ]; then fh_tips+=("$line"); fi
+  done < <(fetch_head_tips "$ap")
   # Git probes — a failed probe is NEVER "clean" (fail closed).
   rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" remote 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -642,7 +682,7 @@ clone_policy_audit() {  # <audit-path> <report-path>
   # reflog entries pointing at commits that ARE on the remote, so --not
   # --remotes still excludes them — this holds discarded local work, not
   # ordinary clones.
-  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" log --all --reflog --not --remotes --oneline 2>&1 | head -5)" || rc=$?
+  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" log --all --reflog ${fh_tips[@]+"${fh_tips[@]}"} --not --remotes --oneline 2>&1 | head -5)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     held_probe=$((held_probe + 1)); hold "probe-fail" "$rp" "git log: ${probe_out:0:120}"; return 1
   fi
@@ -730,10 +770,10 @@ clone_policy_audit() {  # <audit-path> <report-path>
             git -C "$ap" update-ref -d "$stale_ref" || exit 1
           done; then
       live_unreachable="probe-failed: could not clear stale sweep-live refs"
-    elif ! GIT_OPTIONAL_LOCKS=0 git -C "$ap" fetch --quiet --prune origin '+refs/heads/*:refs/sweep-live/heads/*' 2>/dev/null; then
+    elif ! GIT_OPTIONAL_LOCKS=0 git -C "$ap" fetch --quiet ${GIT_FETCH_EXTRA[@]+"${GIT_FETCH_EXTRA[@]}"} --prune origin '+refs/heads/*:refs/sweep-live/heads/*' 2>/dev/null; then
       live_unreachable="fetch-failed"
     else
-      rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" log --all --reflog --not --glob='refs/sweep-live' --oneline 2>&1 | head -3)" || rc=$?
+      rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" log --all --reflog ${fh_tips[@]+"${fh_tips[@]}"} --not --glob='refs/sweep-live' --oneline 2>&1 | head -3)" || rc=$?
       if [ "$rc" -ne 0 ]; then
         live_unreachable="probe-failed: ${probe_out:0:100}"
       elif [ -n "$probe_out" ]; then

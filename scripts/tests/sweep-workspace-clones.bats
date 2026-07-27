@@ -1173,6 +1173,58 @@ STUB
   [[ "$output" == *"is itself a git repository"* ]]
 }
 
+@test "a commit reachable only through FETCH_HEAD holds the clone" {
+  # `git fetch origin <ref>` with no destination refspec leaves the tip ONLY
+  # in FETCH_HEAD — no refs/remotes mapping at all. Neither --all nor --reflog
+  # walks it, so every gate reported clean and the last copy was deleted.
+  #
+  # The commit is produced in a SEPARATE repo on purpose: created locally it
+  # would land in this clone's reflog and be caught by the reflog rail
+  # instead, so the test would pass without exercising FETCH_HEAD at all.
+  c="$TEST_TMPDIR/repos/fetchhead"
+  mkclone "$c"
+  origin="$(ls -d "$TEST_TMPDIR"/origins/*fetchhead.git)"
+  git clone -q "$origin" "$TEST_TMPDIR/producer"
+  cd "$TEST_TMPDIR/producer"
+  echo pr > pr.txt
+  git add pr.txt
+  git commit -qm "PR work"
+  git push -q origin HEAD:refs/pull/7/head
+  pr_sha="$(git rev-parse HEAD)"
+  cd "$HYDRA_REPO"
+  # Fetch it into the candidate with NO destination refspec, then remove it
+  # upstream: FETCH_HEAD is now the only pointer anywhere.
+  git -C "$c" fetch -q origin refs/pull/7/head
+  git -C "$origin" update-ref -d refs/pull/7/head
+  [ -f "$c/.git/FETCH_HEAD" ]
+  grep -q "^$pr_sha" "$c/.git/FETCH_HEAD"
+  # Preconditions: no ref contains it, and the ref+reflog gate sees nothing.
+  [ -z "$(git -C "$c" for-each-ref --contains "$pr_sha" --format='%(refname)' 2>/dev/null)" ]
+  [ -z "$(git -C "$c" log --all --reflog --not --remotes --oneline)" ]
+  age_tree 20 "$c"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$c" ]
+  git -C "$c" cat-file -e "${pr_sha}^{commit}"
+  [[ "$output" == *"not on any remote"* ]]
+}
+
+@test "the audit's live-origin fetch does not clobber FETCH_HEAD" {
+  # Even for a clone we go on to HOLD, the audit must not destroy the
+  # operator's own FETCH_HEAD pointer as a side effect.
+  local c="$TEST_TMPDIR/repos/keepfetchhead"
+  mkclone "$c"
+  ( cd "$c" && echo x > x.txt && git add x.txt && git commit -qm "local only" )
+  ( cd "$c" && git fetch -q origin refs/heads/main )
+  local before; before="$(head -1 "$c/.git/FETCH_HEAD" | cut -c1-40)"
+  age_tree 20 "$c"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$c" ]
+  local after; after="$(head -1 "$c/.git/FETCH_HEAD" | cut -c1-40)"
+  [ "$before" = "$after" ]
+}
+
 @test "quarantine debris from an interrupted run is held, never swept" {
   # The prefix has already destroyed the keep-list basename match, so debris
   # must never be re-swept as an ordinary candidate.
