@@ -125,6 +125,7 @@ command -v git >/dev/null 2>&1 || { log "ERROR: git required"; exit 2; }
 NOW_EPOCH="$(date +%s)"
 
 swept=0; freed_kb=0; junk_deleted=0; active=0; kept=0; rm_errors=0
+enum_failed=0   # a root we could not fully enumerate = structural failure
 held_dirty=0; held_probe=0; held_gitfile=0; held_nested=0
 held_noremote=0; held_mount=0; held_inuse=0
 
@@ -204,6 +205,25 @@ mount_hazard() {
       gsub(/\\012/, "\n", m); gsub(/\\134/, "\\", m)
       if (m == ENVIRON["MH_P"]) found = 1
       if (index(m, ENVIRON["MH_P"] "/") == 1) found = 1
+    }
+    END { exit found ? 0 : 1 }' "$MOUNTS_FILE"
+}
+
+# True only if $1 IS ITSELF a mountpoint — EXACT match, no "or under".
+# A sweep ROOT needs this narrower form: mount_hazard's "anything beneath"
+# reading would refuse an entire lane the moment one candidate is a mount,
+# instead of holding just that candidate. An unreadable table returns false
+# here on purpose — the per-candidate mount_hazard is already fail-closed and
+# holds everything in that case, so this rail must not additionally convert
+# it into a whole-run structural abort.
+is_mountpoint() {
+  [ -r "$MOUNTS_FILE" ] || return 1
+  MP_P="$1" awk '
+    {
+      m = $2
+      gsub(/\\040/, " ", m); gsub(/\\011/, "\t", m)
+      gsub(/\\012/, "\n", m); gsub(/\\134/, "\\", m)
+      if (m == ENVIRON["MP_P"]) found = 1
     }
     END { exit found ? 0 : 1 }' "$MOUNTS_FILE"
 }
@@ -756,10 +776,25 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
 }
 
 sweep_root_depth1() {  # <root> <cutoff-epoch> <cutoff-ref-file> <lane>
-  local root="$1" cutoff="$2" ref="$3" lane="$4" p
+  local root="$1" cutoff="$2" ref="$3" lane="$4" p listing
+  # find in a process substitution DISCARDS its exit status: an I/O error or
+  # a root that vanishes mid-scan would just end the loop, and the run would
+  # report a clean sweep of a category it only partially enumerated. Land the
+  # listing first, check the status, and only then iterate.
+  listing="$(mktemp)"
+  if ! find "$root" -mindepth 1 -maxdepth 1 -print0 > "$listing" 2>/dev/null; then
+    rm -f "$listing"
+    log "FATAL: could not enumerate $root (scan failed) — refusing to report a partial sweep"
+    # Record, do NOT return nonzero: under set -e a failing call here would
+    # abort before print_summary, suppressing the very report that explains
+    # the failure. enum_failed drives the exit status after the summary.
+    enum_failed=1
+    return 0
+  fi
   while IFS= read -r -d '' p; do
     sweep_candidate "$p" "$cutoff" "$ref" "$lane"
-  done < <(find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+  done < "$listing"
+  rm -f "$listing"
 }
 
 print_summary() {
@@ -872,6 +907,14 @@ if root_is_clone "$REPOS_ROOT"; then
   log "FATAL: $REPOS_ROOT is itself a git clone — refusing to sweep it"; exit 1
 fi
 
+# A sweep root that IS a mountpoint hides its own hazard: the per-candidate
+# guard only sees mounts at or under a CHILD, and rm --one-file-system is no
+# protection because every child already lives inside that filesystem. So a
+# bind-mounted root would have its children recursively deleted.
+if is_mountpoint "$REPOS_ROOT"; then
+  log "FATAL: $REPOS_ROOT is itself a mountpoint — refusing to sweep it"; exit 1
+fi
+
 sweep_root_depth1 "$REPOS_ROOT" "$REPOS_CUTOFF" "$REPOS_REF" "repos"
 for ws_tmp in "$WS_ROOT"/*/tmp "$WS_ROOT"/*/.tmp; do
   [ -d "$ws_tmp" ] || continue
@@ -887,6 +930,11 @@ for ws_tmp in "$WS_ROOT"/*/tmp "$WS_ROOT"/*/.tmp; do
     held_gitfile=$((held_gitfile + 1))
     continue
   fi
+  if is_mountpoint "$ws_tmp"; then
+    hold "mount" "$ws_tmp" "tmp root is itself a mountpoint — skipped whole"
+    held_mount=$((held_mount + 1))
+    continue
+  fi
   sweep_root_depth1 "$ws_tmp" "$TMP_CUTOFF" "$TMP_REF" "tmp"
 done
 
@@ -894,9 +942,14 @@ print_summary
 
 if [ "$APPLY" -eq 0 ]; then
   log "DRY-RUN: no deletions, no Slack post."
+  [ "$enum_failed" -eq 0 ] || exit 1
   exit 0
 fi
 
 build_payload
 log "Posting summary to ${SLACK_CHANNEL}."
 slack_notify_payload_file "$PAYLOAD_FILE"
+
+# Reported first, then surfaced: a partial enumeration must not read as a
+# clean sweep to systemd (weekly-cleanup.sh propagates this).
+[ "$enum_failed" -eq 0 ] || exit 1

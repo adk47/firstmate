@@ -849,6 +849,59 @@ STUB
   [ -z "$(find "$TEST_TMPDIR/repos" -maxdepth 1 -name '.sweep-quarantine.*' -print -quit)" ]
 }
 
+@test "a repos root that IS a mountpoint is refused before enumeration" {
+  # The per-candidate guard only sees mounts at or under a CHILD, and
+  # --one-file-system cannot help when every child is already inside the
+  # root's own filesystem.
+  mkclone "$TEST_TMPDIR/repos/inside-a-mount"
+  age_tree 20 "$TEST_TMPDIR/repos/inside-a-mount"
+  printf 'tmpfs %s tmpfs rw 0 0\n' "$TEST_TMPDIR/repos" > "$TEST_TMPDIR/mounts-root"
+  SWEEP_MOUNTS_FILE="$TEST_TMPDIR/mounts-root" run "$SWEEP" --apply
+  [ "$status" -eq 1 ]
+  [ -d "$TEST_TMPDIR/repos/inside-a-mount" ]
+  [[ "$output" == *"is itself a mountpoint"* ]]
+}
+
+@test "a tmp root that IS a mountpoint is held whole, other lanes still sweep" {
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/old-junk"
+  echo x > "$TEST_TMPDIR/ws/cto/tmp/old-junk/f"
+  age_tree 10 "$TEST_TMPDIR/ws/cto/tmp/old-junk"
+  mkclone "$TEST_TMPDIR/repos/sweepable"
+  age_tree 20 "$TEST_TMPDIR/repos/sweepable"
+  printf 'tmpfs %s tmpfs rw 0 0\n' "$TEST_TMPDIR/ws/cto/tmp" > "$TEST_TMPDIR/mounts-tmproot"
+  SWEEP_MOUNTS_FILE="$TEST_TMPDIR/mounts-tmproot" run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  # The mounted tmp root is untouched...
+  [ -d "$TEST_TMPDIR/ws/cto/tmp/old-junk" ]
+  [[ "$output" == *"tmp root is itself a mountpoint"* ]]
+  # ...while the unmounted repos lane still swept normally.
+  [ ! -d "$TEST_TMPDIR/repos/sweepable" ]
+}
+
+@test "a failing depth-1 root enumeration is a structural failure, not a clean sweep" {
+  # find in a process substitution discards its status; a partial scan must
+  # never be reported as a completed sweep.
+  mkclone "$TEST_TMPDIR/repos/unscanned"
+  age_tree 20 "$TEST_TMPDIR/repos/unscanned"
+  REAL_FIND="$(command -v find)"
+  export REAL_FIND INJECT_ROOT="$TEST_TMPDIR/repos"
+  cat > "$TEST_TMPDIR/bin/find" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"-mindepth 1"* && "$*" == *"-maxdepth 1"* && "$*" == *"$INJECT_ROOT"* ]]; then
+  echo "find: $INJECT_ROOT: Input/output error" >&2; exit 1
+fi
+exec "$REAL_FIND" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/find"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/find"; hash -r
+  [ "$status" -eq 1 ]
+  [ -d "$TEST_TMPDIR/repos/unscanned" ]
+  [[ "$output" == *"could not enumerate"* ]]
+  # The summary still had to be emitted before the failure surfaced.
+  [[ "$output" == *"swept_clones="* ]]
+}
+
 @test "quarantine debris from an interrupted run is held, never swept" {
   # The prefix has already destroyed the keep-list basename match, so debris
   # must never be re-swept as an ordinary candidate.
