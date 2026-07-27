@@ -24,8 +24,8 @@
 - Used for data operations and monitoring
 - Atlas import DAG requires: `AIRFLOW_SECRET_INDUSTRY_ATLAS_{PROJECT_ID,PUBLIC_KEY,PRIVATE_KEY,CLUSTER_ID}`
 
-## Athena/Trino Patterns
-- AWS Athena queries migrated to Trino on OVH
+## Trino Patterns
+- All warehouse SQL runs on OVH Trino: `muso query "<SQL>"` (skill `muso-query-writer`)
 - Trino 479 running on ovh-node-6 (coordinator) + ovh-node-5 (workers)
 
 ## Amplitude

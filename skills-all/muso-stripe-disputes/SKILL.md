@@ -14,7 +14,8 @@ depends-on:
   - muso-stripe
   - muso-slack-formatter
 compatibility: |
-  Requires Stripe CLI with rak_dispute_read and rak_dispute_write. Optional: Amplitude, Athena access.
+  Requires Stripe CLI with rak_dispute_read and rak_dispute_write, and Trino access
+  via the muso CLI (`muso query`). Optional: Amplitude.
 metadata:
   version: "1.0"
   source-repo: "Muso-AI/muso-skills"
@@ -75,28 +76,32 @@ stripe refunds list -d "charge=ch_XXX"
 stripe customers retrieve cus_XXX | jq '.balance'
 ```
 
-#### b) Athena — User Activity & Profile Claims
+#### b) Trino — User Activity & Profile Claims
+
+Run on node-8 via the muso CLI (heredoc SQL; CSV with header row — prefer `--format json` when parsing):
+
 ```bash
 # User lookup
-SELECT id, email, createdat, updatedat 
-FROM postgresql_core.public.users 
+muso query - <<'SQL'
+SELECT id, email, createdat, updatedat
+FROM postgresql_core.public.users
 WHERE email = 'USER_EMAIL'
+SQL
 
 # Action log (shows every API call the user made)
-SELECT createdat, route, requestmethod 
-FROM postgresql_core.public.user_action_log 
-WHERE userid = USER_ID 
+muso query - <<'SQL'
+SELECT createdat, route, requestmethod
+FROM postgresql_core.public.user_action_log
+WHERE userid = USER_ID
 ORDER BY createdat DESC LIMIT 100
+SQL
 
-# Profile claims
-SELECT id, status, profileid, profiletype, createdat 
-FROM postgresql_core.public.claiming 
+# Profile claims (also covers the user's claimed profiles)
+muso query - <<'SQL'
+SELECT id, status, profileid, profiletype, createdat
+FROM postgresql_core.public.claiming
 WHERE userid = USER_ID
-
-# User's claimed profiles
-SELECT profileid, createdat 
-FROM postgresql_core.public.user_profiles 
-WHERE userid = USER_ID
+SQL
 ```
 
 #### c) Amplitude — Product Engagement (if available)
@@ -273,4 +278,4 @@ File: `memory/dispute-tracker.json`
 - *ToS inclusion:* Always reference https://credits.muso.ai/terms in evidence (per Liza's suggestion)
 - *One submission per dispute:* Evidence can only be submitted once — review before submitting with `submit=true`
 - *$15 dispute fee:* Stripe charges $15 per dispute regardless of outcome. Factor this into fight/accept decisions.
-- *Athena costs:* Use `clio-agent` workgroup, `us-west-2`, no `--profile` flag. Keep queries filtered by userid to minimize scan.
+- *Trino queries:* run via `muso query - <<'SQL'` heredocs (see `muso-query-writer`). Keep queries filtered by userid.

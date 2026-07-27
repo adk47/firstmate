@@ -39,7 +39,7 @@ Ops User (Slack)
     ▼
 Clio (this skill)
     │
-    ├─── Athena (read-only data)      ← existing, no changes
+    ├─── Trino (read-only data)       ← existing, no changes
     ├─── Stripe CLI (payments)         ← existing, no changes
     ├─── Admin API (core-backend)      ← NEW: replaces Retool
     │        └── JWT auth, /admin/* endpoints

@@ -632,6 +632,19 @@ jobs:
           bash scripts/check-admin-api-doc-contract.sh
           echo "::endgroup::"
 
+      - name: Dead-infra reference check — no agent may be pointed at Athena/AWS/dead-v3
+        # Finance escalation 2026-07-24: the daily-dispute-handler cron followed
+        # muso-stripe-disputes into a live "query Athena" section and died on
+        # AssumeRole InvalidClientTokenId. AWS was decommissioned 2026-05-31,
+        # Athena retired 2026-04-25, profile_v3_* tables are frozen. Prose !=
+        # enforcement, so this gate fails if any agent-facing surface points at
+        # them; historical/migration content is exempted (with reasons) via
+        # .dead-infra-allowlist.txt, whose entries go stale-red when reconciled.
+        run: |
+          echo "::group::Dead-infra reference check"
+          bash scripts/check-dead-infra-refs.sh
+          echo "::endgroup::"
+
       - name: Egress allowlist check — no unauthorized additions
         run: |
           echo "::group::Checking egress allowlist changes"

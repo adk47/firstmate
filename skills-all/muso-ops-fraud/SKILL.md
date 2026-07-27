@@ -18,7 +18,7 @@ depends-on:
   - muso-query-writer
 compatibility: |
   Requires: muso-verify-profile (authenticity scoring), web_search (external verification),
-  image tool (ID document analysis), Athena (pattern queries).
+  image tool (ID document analysis), Trino (pattern queries).
 metadata:
   version: "1.0"
   source-repo: "Muso-AI/muso-skills"
@@ -66,7 +66,7 @@ When ops uploads a government ID (photo/scan) to Slack:
 1. **Use `image` tool** to analyze the document
 2. **Extract:** Full name, document type, issuing country
 3. **Cross-reference** against:
-   - Profile name + known aliases (Athena)
+   - Profile name + known aliases (Trino)
    - Claiming applicant name
    - Workspace owner name
    - Web search: "[name on ID]" + "[city/country]" + music

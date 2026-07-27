@@ -5,7 +5,8 @@ description: |
   pipelines, and operational procedures.
   Triggers: "devops", "terraform", "deploy", "infrastructure", "ci/cd"
 compatibility: |
-  Optional: AWS CLI configured for Muso accounts/profiles. Some workflows assume Terraform familiarity.
+  Some workflows assume Terraform familiarity. Warehouse SQL runs on OVH Trino
+  via `muso query`.
 metadata:
   version: "1.0"
   source-repo: "Muso-AI/muso-skills"
@@ -17,35 +18,18 @@ Muso.AI DevOps and infrastructure expert. Provides knowledge of deployment, CI/C
 
 Source: [DevOps Knowledge Transfer (Notion)](https://www.notion.so/DevOps-Knowledge-Transfer-1df0f087197f4669a0aaa8026ffc13cd)
 
-## AWS CLI Profiles
+## ⚠️ AWS is decommissioned (2026-05-31) — historical content only
 
-| Profile | Account | Resources | Region |
-|---------|---------|-----------|--------|
-| `(retired 2026-04-25)` | Flagship | Athena, Glue (91 DBs), Route53, Lambda, ECS, EKS | us-west-2 |
-| `muso-readonly` | Plaque | S3 buckets | us-west-2 |
+**There is no AWS account to operate.** All infrastructure is OVH (K3s cluster,
+Trino warehouse, OVH S3 data lake). The AWS-era material in this skill and in
+[reference.md](./reference.md) (EKS/ECS, CloudWatch, Lambda, Glue, us-west-2
+region policy, AWS CLI profiles) is a knowledge-transfer ARCHIVE — read it for
+historical context, never as an instruction to run anything against AWS.
 
-### CRITICAL: Region Policy
-
-**All Muso resources (dev AND prod) are in `us-west-2`. Do NOT search other regions.**
-
-- Both dev (`*-dev`) and prod (`*-prod`) environments are in us-west-2
-- If a query returns empty results in us-west-2, report "no resources found" — do not automatically search other regions
-- Resources in other regions (eu-west-1, us-east-1, etc.) are abandoned staging/test artifacts from 2022 or earlier
-- Only search other regions if the user explicitly requests it
-
-```bash
-# Athena/Glue (Flagship)
-# RETIRED 2026-04-25 — saved queries now in skills-all/muso-query-writer/saved-queries/
-# (legacy: aws athena list-named-queries) 
-# RETIRED 2026-04-25 — use bash /opt/hydra/scripts/trino-query.sh "SHOW SCHEMAS FROM hive"
-# (legacy: aws glue get-databases) 
-
-# Lambda (Flagship) - us-west-2 ONLY
-aws lambda list-functions 
-
-# S3 (Plaque)
-aws s3 ls --profile muso-readonly 
-```
+Live equivalents:
+- Warehouse SQL: `muso query "<SQL>"` (skill `muso-query-writer`)
+- Infra topology + ground truth: `docs/lessons/infrastructure-topology.md`
+- Production infra changes are GitOps-managed by H-DevOps — consult them before touching infra
 
 ## When to Use
 

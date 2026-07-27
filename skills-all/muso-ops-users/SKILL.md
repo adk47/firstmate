@@ -19,7 +19,7 @@ depends-on:
   - muso-intercom
   - muso-slack-formatter
 compatibility: |
-  Requires: muso-ops-admin (API gateway), Athena, Amplitude, Stripe, Intercom
+  Requires: muso-ops-admin (API gateway), Trino, Amplitude, Stripe, Intercom
   for comprehensive user investigation.
 metadata:
   version: "1.1"
@@ -49,7 +49,7 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
   call GET "/admin/user?keyword=john@example.com&limit=10"
 ```
 
-**Step 2: Athena (account data)**
+**Step 2: Trino (account data)**
 ```sql
 SELECT id, email, first_name, last_name, createdat, updatedat, status
 FROM postgresql_core.public.users
@@ -145,7 +145,7 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 
 ### "User says credits are wrong"
 1. Look up user → find their claimed profiles
-2. Pull profile credits from Athena
+2. Pull profile credits from Trino
 3. Check raw credits vs displayed credits
 4. Cross-reference with industry data
 5. Identify the gap

@@ -6,7 +6,7 @@ _Every system I have access to, what it does, and who can use it. Load this EVER
 
 | System | Purpose | Access Level | Write Auth | Skill/Config |
 |--------|---------|-------------|------------|--------------|
-| **AWS (Athena/S3/CloudWatch/CloudTrail/EKS)** | Data lake queries, infra monitoring | Read-only | — | TOOLS.md (workgroup: `clio-agent`, region: `us-west-2`) |
+| **Trino (OVH data warehouse)** | Data lake queries | Read-only | — | `muso-query-writer`, `muso query` |
 | **Stripe** | Billing, subscriptions, MRR/ARR/churn/LTV, disputes, refunds | Read + Write | Aaron=full, others=payment links only | `stripe` CLI, `muso-stripe-subscription-analytics`, TOOLS.md |
 | **Google Workspace (gog)** | Gmail, Calendar, Drive, Sheets, Docs | Read + Write | Aaron+Nick=email write, others=read | `gog` CLI, TOOLS.md |
 | **Slack** | Messaging, channels | Read + Write | All (via message tool) | Built-in |
@@ -52,7 +52,7 @@ _Every system I have access to, what it does, and who can use it. Load this EVER
 | Skill | Purpose |
 |-------|---------|
 | `muso-clio` | Complete Muso.AI knowledge base |
-| `muso-query-writer` / `muso-athena-query` | Athena SQL queries against data lake |
+| `muso-query-writer` | Trino SQL queries against the data lake |
 | `muso-architect` | System architecture guidance |
 | `muso-data-expert` | Data model/schema expertise |
 | `muso-devops` | Infrastructure/Terraform/CI-CD |
