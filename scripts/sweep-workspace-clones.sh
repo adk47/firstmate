@@ -258,9 +258,14 @@ mtime_epoch() {
 # by the kernel on every inode change and is settable by NO userspace API —
 # not touch, not utimensat — so a replacement object cannot carry the stale
 # one's ctime. mtime and size are cheap corroboration in the same call.
+# NANOSECOND forms deliberately: GNU %Y/%Z and BSD %m/%c are whole SECONDS, so
+# a replacement created in the same second as the original's last status change
+# compares equal when the inode is reused and size/mtime are forged. GNU's
+# human-readable %y/%z and BSD's %Fm/%Fc carry the full ns timestamp
+# (verified on ovh-node-8/ext4: %z -> '2026-07-27 11:57:33.770505722 +0000').
 path_id() {
-  stat -c '%d:%i:%Y:%Z:%s' -- "$1" 2>/dev/null \
-    || stat -f '%d:%i:%m:%c:%z' -- "$1" 2>/dev/null \
+  stat -c '%d:%i:%y:%z:%s' -- "$1" 2>/dev/null \
+    || stat -f '%d:%i:%Fm:%Fc:%z' -- "$1" 2>/dev/null \
     || true
 }
 
