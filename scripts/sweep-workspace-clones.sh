@@ -291,8 +291,66 @@ id_stable() {  # <path_id>
   printf '%s|%s|%s|%s' "$dev" "$ino" "$mtime" "$size"
 }
 
-remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id-at-classification>
-  local p="$1" kb="$2" label="$3" expect="$4" id="$5" err rm_cmd is_tree=0 now_id
+# ── post-quarantine re-audits ────────────────────────────────
+# The moved ROOT's device/inode/mtime/size proves the root entry was not
+# swapped, and nothing more. rename(2) does NOT disturb an open descriptor or
+# a process whose cwd is inside the tree: such a writer keeps writing through
+# its existing handles, and overwriting an ALREADY-TRACKED file (or a git ref)
+# changes that file — never the root directory entry. So each lane re-runs its
+# full policy against the quarantined object, immediately before the rm.
+# Each sets REAUDIT_REASON and returns 1 to refuse.
+REAUDIT_REASON=""
+
+# Entry lane: the candidate IS a single file or symlink, so any write through
+# a surviving handle moves its own mtime/size — already covered by the
+# identity comparison. Nothing further to prove.
+reaudit_entry() { REAUDIT_REASON=""; return 0; }
+
+reaudit_junk() {  # <quarantined-path> <cutoff-ref-file>
+  local q="$1" cutoff_ref="$2" inner rc=0
+  inner="$(find "$q" -xdev -name .git -print -quit 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -n "$inner" ]; then
+    REAUDIT_REASON="repo appeared inside the tree before removal"; return 1
+  fi
+  if tree_fresh_since "$q" "$cutoff_ref"; then
+    REAUDIT_REASON="tree written to before removal"; return 1
+  fi
+  return 0
+}
+
+reaudit_clone() {  # <quarantined-path> <window-ref-file> <refs-snapshot>
+  local q="$1" window_ref="$2" refs_snapshot="$3" out rc=0
+  if [ -e "$q/.git/index.lock" ] || [ -e "$q/.git/MERGE_HEAD" ] \
+     || [ -e "$q/.git/rebase-merge" ] || [ -e "$q/.git/rebase-apply" ]; then
+    REAUDIT_REASON="git operation in progress before removal"; return 1
+  fi
+  if tree_fresh_since "$q" "$window_ref"; then
+    REAUDIT_REASON="worktree written to before removal"; return 1
+  fi
+  out="$(GIT_OPTIONAL_LOCKS=0 git -C "$q" status --porcelain 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -n "$out" ]; then
+    REAUDIT_REASON="worktree dirty before removal"; return 1
+  fi
+  rc=0; out="$(GIT_OPTIONAL_LOCKS=0 git -C "$q" stash list 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -n "$out" ]; then
+    REAUDIT_REASON="stash appeared before removal"; return 1
+  fi
+  rc=0; out="$(GIT_OPTIONAL_LOCKS=0 git -C "$q" for-each-ref refs/heads refs/tags --format='%(objectname) %(refname)' 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$out" != "$refs_snapshot" ]; then
+    REAUDIT_REASON="refs changed before removal"; return 1
+  fi
+  rc=0; out="$(GIT_OPTIONAL_LOCKS=0 git -C "$q" log --all --not --remotes --oneline 2>&1 | head -1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -n "$out" ]; then
+    REAUDIT_REASON="unpushed commit appeared before removal"; return 1
+  fi
+  return 0
+}
+
+remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id> <reaudit-fn> [reaudit-args...]
+  local p="$1" kb="$2" label="$3" expect="$4" id="$5" reaudit="$6"
+  shift 6
+  local reaudit_args=("$@")
+  local err rm_cmd is_tree=0 now_id
   if [ "$APPLY" -eq 0 ]; then
     log "DRY-RUN: would delete $label $p (${kb} KB)"
     return 0
@@ -347,16 +405,22 @@ remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id-at-classificatio
     echo "quarantine failed: $p: ${err:0:200}" >> "$ERRORS_FILE"
     return 1
   }
+  local refuse=""
   if [ "$(id_stable "$(path_id "$q")")" != "$(id_stable "$id")" ]; then
+    refuse="object replaced before removal"
+  elif ! "$reaudit" "$q" ${reaudit_args[@]+"${reaudit_args[@]}"}; then
+    refuse="$REAUDIT_REASON"
+  fi
+  if [ -n "$refuse" ]; then
     held_inuse=$((held_inuse + 1))
     # Restore, but NEVER clobber: another writer may already own the name
     # again. GNU mv -n exits 0 when it declines, so prove the move happened.
     if mv -n -- "$q" "$p" 2>/dev/null && [ ! -e "$q" ]; then
-      hold "in-use" "$p" "object replaced before removal — restored from quarantine"
+      hold "in-use" "$p" "$refuse — restored from quarantine"
     else
       rm_errors=$((rm_errors + 1))
       echo "quarantine restore blocked (name retaken): object left at $q" >> "$ERRORS_FILE"
-      hold "in-use" "$q" "object replaced before removal — LEFT QUARANTINED, restore blocked"
+      hold "in-use" "$q" "$refuse — LEFT QUARANTINED, restore blocked"
     fi
     return 1
   fi
@@ -398,7 +462,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   if [ -L "$d" ] || [ ! -d "$d" ]; then
     if [ "$(mtime_epoch "$d")" -lt "$cutoff" ]; then
       kb="$(entry_kb "$d")"
-      if remove_entry "$d" "$kb" "entry" entry "$cand_id"; then
+      if remove_entry "$d" "$kb" "entry" entry "$cand_id" reaudit_entry; then
         junk_deleted=$((junk_deleted + 1)); freed_kb=$((freed_kb + kb))
       fi
     else
@@ -451,7 +515,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     if mount_hazard "$d"; then
       held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
     fi
-    if remove_entry "$d" "$kb" "junk" tree "$cand_id"; then
+    if remove_entry "$d" "$kb" "junk" tree "$cand_id" reaudit_junk "$ref"; then
       junk_deleted=$((junk_deleted + 1)); freed_kb=$((freed_kb + kb))
     fi
     return 0
@@ -659,7 +723,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "unpushed commit appeared between audit and removal"; return 0
   fi
 
-  if remove_entry "$d" "$kb" "clone (HEAD $head_sha)" tree "$cand_id"; then
+  if remove_entry "$d" "$kb" "clone (HEAD $head_sha)" tree "$cand_id" reaudit_clone "$WINDOW_REF" "$local_refs"; then
     swept=$((swept + 1)); freed_kb=$((freed_kb + kb))
   fi
 }

@@ -765,6 +765,44 @@ STUB
   [[ "$output" == *"restored from quarantine"* ]]
 }
 
+@test "a write through a surviving handle after quarantine holds the clone (root entry unchanged)" {
+  # rename(2) does not disturb an open fd or a process cwd'd inside the tree.
+  # Overwriting an ALREADY-TRACKED file changes that file, never the root
+  # directory entry — so the root's device/inode/mtime/size still matches and
+  # only the full policy re-audit can catch it.
+  mkclone "$TEST_TMPDIR/repos/handle-race"
+  age_tree 20 "$TEST_TMPDIR/repos/handle-race"
+  REAL_MV="$(command -v mv)"
+  export REAL_MV INJECT_TARGET="$TEST_TMPDIR/repos/handle-race" \
+    ROOT_ID_FILE="$TEST_TMPDIR/root-id" MV_MARKER="$TEST_TMPDIR/handle-marker"
+  cat > "$TEST_TMPDIR/bin/mv" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"$INJECT_TARGET"* && "$*" == *".sweep-quarantine."* && ! -e "$MV_MARKER" ]]; then
+  : > "$MV_MARKER"
+  "$REAL_MV" "$@"
+  q="${@: -1}"
+  before="$(stat -f '%d|%i|%Fm|%z' -- "$q" 2>/dev/null || stat -c '%d|%i|%y|%s' -- "$q")"
+  printf 'unique work from a surviving handle\n' > "$q/f.txt"   # EXISTING tracked file
+  after="$(stat -f '%d|%i|%Fm|%z' -- "$q" 2>/dev/null || stat -c '%d|%i|%y|%s' -- "$q")"
+  # Prove the premise: the root entry is byte-identical across the write.
+  [ "$before" = "$after" ] && echo "ROOT_ENTRY_UNCHANGED" > "$ROOT_ID_FILE"
+  exit 0
+fi
+exec "$REAL_MV" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/mv"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/mv"; hash -r
+  [ "$status" -eq 0 ]
+  # The premise must actually have held, or the test proves nothing.
+  grep -q ROOT_ENTRY_UNCHANGED "$TEST_TMPDIR/root-id"
+  # Restored, and the unique work survived.
+  [ -d "$TEST_TMPDIR/repos/handle-race" ]
+  grep -q "unique work from a surviving handle" "$TEST_TMPDIR/repos/handle-race/f.txt"
+  [[ "$output" == *"restored from quarantine"* ]]
+  [[ "$output" == *"before removal"* ]]
+}
+
 @test "quarantine debris from an interrupted run is held, never swept" {
   # The prefix has already destroyed the keep-list basename match, so debris
   # must never be re-swept as an ordinary candidate.
