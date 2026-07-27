@@ -258,6 +258,12 @@ STUB
   [[ "$output" == *"Do NOT re-fire"* ]]
   [[ "$output" == *"L_WRONG"* ]]
   [[ "$output" != *"no aged merge is unresolved"* ]]
+  # The REASON is load-bearing, not decoration: both backend guards test the
+  # survivor, so a re-fire on a half-folded pair does NOT raise — it silently
+  # re-points the loser. Wording that implies an error would invite the exact
+  # damage ("it'll just throw, safe to try"), so pin the mechanism.
+  [[ "$output" == *"SILENTLY SUCCEEDS"* ]]
+  [[ "$output" != *"not idempotent"* ]]
 }
 
 # A well-formed id that is simply absent from the catalog is STUCK. The id must

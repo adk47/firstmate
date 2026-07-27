@@ -382,6 +382,14 @@ def classify(survivor, loser):
         # re-fire. (Live 2026-07-27: 695575be/8ce80ba2 folded into d9d61f4a —
         # a co-loser of the same request — while requested survivor 451c4bbc
         # received nothing.)
+        #
+        # This verdict is the most dangerous one to get wrong, because the
+        # backend does NOT protect against it: both guards in
+        # base_merge_link_operations.py:314-317 test the SURVIVOR
+        # (`main_obj.is_merged()`, and `main_obj.id in [loser.merged_to_id]`),
+        # so a loser already folded into some THIRD profile passes both. A
+        # re-fire therefore succeeds silently and re-points that loser away
+        # from where it actually landed — data loss with no error to catch.
         return "partial"
     return "stuck"  # active or missing → requested pair never processed
 
@@ -493,9 +501,12 @@ if new_partial:
     lines += block(new_partial,
                    f":warning: *Profile merge(s) PARTIALLY FOLDED — {len(new_partial)}*",
                    "The loser folded into a DIFFERENT profile than the one requested, and the "
-                   "requested survivor received nothing. *Do NOT re-fire* — `merge` is not "
-                   "idempotent and a re-fire against half-folded state can damage the survivor. "
-                   "Hand to the catalog team (Aron / Oleg) for a manual reconciliation.",
+                   "requested survivor received nothing. *Do NOT re-fire* — a re-fire here does "
+                   "NOT error, it SILENTLY SUCCEEDS: both merge guards test the survivor "
+                   "(`base_merge_link_operations.py:314-317`), so a loser already folded "
+                   "elsewhere passes them and has its `merged_to_id` re-pointed away from where "
+                   "it actually landed. Hand to the catalog team (Aron / Oleg) for a manual "
+                   "reconciliation.",
                    "partially folded", "≥")
 if new_invalid:
     lines += block(new_invalid,
