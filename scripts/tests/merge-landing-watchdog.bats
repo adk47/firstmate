@@ -357,6 +357,79 @@ STUB
   [[ "$output" != *"have now LANDED"* ]]
 }
 
+# ── verdict-versioned dedupe state (added 2026-07-27) ───────────────────────
+# State used to be a bare list of keys, so dedupe was verdict-BLIND: a pair
+# already paged as generic "stuck" stayed silent forever and could never deliver
+# the newer partial/malformed guidance. Live state on 2026-07-27 already held
+# all three real partial/malformed pairs, so shipping the classifier alone would
+# have left operators with only the old "verify + re-fire" page — the dangerous
+# instruction for a half-folded merge. Legacy lists load as verdict "stuck".
+
+_partial_catalog() { # $1 loser id
+  cat > "$TEST_TMPDIR/bin/catalog-mig" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[
+  {"id":"$1","merged":{"mergedToId":"OTHER"},"deleted":{"date":"2026-01-01"}},
+  {"id":"SURV","merged":null,"deleted":null}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-mig"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-mig"
+}
+
+@test "legacy list state: previously-alerted PARTIAL pair re-pages once with do-not-re-fire" {
+  printf '%s\n' '["SURV:L_MIGP"]' > "$MERGE_LANDING_STATE_FILE"   # old format, verdict-blind
+  mergeline 1000 SURV L_MIGP
+  _partial_catalog L_MIGP
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PARTIALLY FOLDED"* ]]
+  [[ "$output" == *"Do NOT re-fire"* ]]
+  [[ "$output" == *"L_MIGP"* ]]
+
+  # ...and exactly once: the verdict is now recorded, so the next tick is quiet.
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no aged merge is unresolved"* ]]
+}
+
+@test "legacy list state: previously-alerted MALFORMED pair re-pages once" {
+  printf '%s\n' "[\"SURV:$UUID_MALFORMED\"]" > "$MERGE_LANDING_STATE_FILE"
+  mergeline 1000 SURV "$UUID_MALFORMED"
+  cat > "$TEST_TMPDIR/bin/catalog-mig2" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[{"id":"SURV","merged":null,"deleted":null}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-mig2"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-mig2"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"MALFORMED id"* ]]
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no aged merge is unresolved"* ]]
+}
+
+@test "legacy list state: an unchanged STUCK pair does NOT re-page" {
+  # The migration must not turn every pre-existing key into fresh noise.
+  printf '%s\n' '["SURV:L_STUCK"]' > "$MERGE_LANDING_STATE_FILE"
+  mergeline 1000 SURV L_STUCK
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no aged merge is unresolved"* ]]
+}
+
+@test "state is persisted as key→verdict and survives a round-trip" {
+  mergeline 1000 SURV L_MIGP
+  _partial_catalog L_MIGP
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  run python3 -c "import json;d=json.load(open('$MERGE_LANDING_STATE_FILE'));import sys;sys.exit(0 if isinstance(d,dict) and d.get('SURV:L_MIGP')=='partial' else 1)"
+  [ "$status" -eq 0 ]
+}
+
 # ── queue attribution (added 2026-07-27) ────────────────────────────────────
 # A never-landed merge is either still queued (wait) or was deleted by topic
 # retention (it will NEVER land — rebuild from the audit trail). Telling an

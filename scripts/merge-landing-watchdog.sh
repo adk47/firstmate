@@ -385,18 +385,35 @@ def classify(survivor, loser):
         return "partial"
     return "stuck"  # active or missing → requested pair never processed
 
-# previously-alerted survivor:loser keys
+# Previously-alerted state: {"survivor:loser": verdict}.
+#
+# It used to be a bare LIST of keys, written before verdicts existed. Dedupe was
+# therefore verdict-blind: a pair already paged as generic "stuck" would stay
+# silent forever, so the partial/malformed pairs this script now warns about
+# would NEVER deliver their new guidance — the operator would be left with only
+# the old "verify + re-fire" page, which for a half-folded merge is the
+# dangerous instruction. Verified against the live state 2026-07-27: all three
+# real partial/malformed pairs were already in the set, and a simulated tick
+# emitted zero of the new blocks.
+#
+# A legacy list therefore loads as the verdict it implicitly meant — "stuck" —
+# so the first tick after this ships re-pages exactly those pairs whose true
+# verdict differs, once, and stays quiet afterwards.
 try:
     with open(state_file) as f:
-        alerted = set(json.load(f))
+        _raw = json.load(f)
+    if isinstance(_raw, dict):
+        alerted = {str(k): str(v) for k, v in _raw.items()}
+    else:
+        alerted = {str(k): "stuck" for k in _raw}
 except Exception:
-    alerted = set()
+    alerted = {}
 
 new_alerts  = []  # (survivor, loser, requester, age_hours) — never processed
 new_partial = []  # half-folded — re-firing these can damage the survivor
 new_invalid = []  # malformed id — can never land, fix at the request layer
 resolved    = []  # previously-alerted pairs whose loser has since landed
-new_alerted = set(alerted)
+new_alerted = dict(alerted)
 for c in candidates:
     verdict = classify(c["survivor"], c["loser"])
     age_h = (now - c["ts"]) / 3600 if now else 0
@@ -407,10 +424,10 @@ for c in candidates:
             # isn't left telling humans to hand off a merge that already landed,
             # and drop the pair from the alerted set.
             resolved.append(row)
-            new_alerted.discard(c["key"])
+            new_alerted.pop(c["key"], None)
         continue
-    if c["key"] in alerted:
-        continue  # already paged; stay deduped until it resolves
+    if alerted.get(c["key"]) == verdict:
+        continue  # already paged under THIS verdict; a changed verdict re-pages once
     if verdict == "partial":
         new_partial.append(row)
     elif verdict == "invalid":
@@ -419,7 +436,7 @@ for c in candidates:
         # Only a never-processed merge has a message to still be waiting for;
         # a half-folded or malformed one is not a queue question.
         new_alerts.append(row[:4] + (queue_note(c.get("ts", 0)),))
-    new_alerted.add(c["key"])
+    new_alerted[c["key"]] = verdict
 
 # Resolution must be driven by the ALERTED set, not just the candidate scan:
 # an alerted pair whose audit-log line is gone (log rotated/pruned) would
@@ -428,11 +445,11 @@ for c in candidates:
 # exact-merge observation can still resolve it. Request age is unknown without
 # the log line, so the bullet shows "?".
 candidate_keys = {c["key"] for c in candidates}
-for key in sorted(alerted - candidate_keys):
+for key in sorted(set(alerted) - candidate_keys):
     survivor, _, loser = key.partition(":")
     if loser and classify(survivor, loser) in RESOLVED:
         resolved.append((survivor, loser, "", None, ""))
-        new_alerted.discard(key)
+        new_alerted.pop(key, None)
 
 if not new_alerts and not new_partial and not new_invalid and not resolved:
     # Nothing new to page → leave the live alerted-set untouched (rewriting it
@@ -449,7 +466,7 @@ if d:
     os.makedirs(d, exist_ok=True)
 pending = state_file + ".pending"
 with open(pending, "w") as f:
-    json.dump(sorted(new_alerted), f, indent=2)
+    json.dump(new_alerted, f, indent=2, sort_keys=True)
 if persist:
     os.replace(pending, state_file)
 
