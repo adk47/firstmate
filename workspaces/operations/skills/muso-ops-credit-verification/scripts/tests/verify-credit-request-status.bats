@@ -112,6 +112,22 @@ printf '"%s","user_verification_needed"\n' "$ID1"
 STUB
     chmod +x "$TRINO_LOGGING_ALL_MATCHED"
     export TRINO_LOGGING_ALL_MATCHED
+
+    # SQL-capturing stub. Every other stub does `cat >/dev/null`, which throws
+    # the generated SQL away — that is exactly how a uuid-vs-varchar type error
+    # shipped green once (see the type-shape tests below). This one saves the
+    # SQL so we can assert its shape.
+    CV_SQL_CAPTURE="$TEST_TMPDIR/captured.sql"
+    export CV_SQL_CAPTURE
+    TRINO_CAPTURE_SQL="$TEST_TMPDIR/trino-capture-sql.sh"
+    cat > "$TRINO_CAPTURE_SQL" <<STUB
+#!/usr/bin/env bash
+cat > "$CV_SQL_CAPTURE"
+printf '"%s","user_verification_needed"\n' "$ID1"
+printf '"%s","user_verification_needed"\n' "$ID2"
+STUB
+    chmod +x "$TRINO_CAPTURE_SQL"
+    export TRINO_CAPTURE_SQL
 }
 
 teardown() { teardown_tmp_env; }
@@ -259,4 +275,49 @@ teardown() { teardown_tmp_env; }
         bash "$WRAPPER" --expected user_verification_needed --ids "$ID1,$ID2" --results-line 0
     [ "$status" -eq 0 ]
     [ ! -f "$CV_RESULTS_PATH" ]
+}
+
+# --- Generated SQL type shape -----------------------------------------------
+#
+# REGRESSION GUARD. `credit_requests.id` is a Postgres uuid, which the Trino
+# postgresql connector maps to Trino `uuid`, not varchar. Emitting a bare
+# quoted literal makes it varchar(36), and Trino refuses the comparison:
+#
+#   Query ... failed: line 1:76: IN value and list items must be the same type
+#   or coercible to a common type. Cannot find common type between uuid and
+#   varchar(36), all types (without duplicates): [uuid, varchar(36)]
+#
+# (reproduced against the live cluster on 2026-07-27). That fails at ANALYSIS
+# time, so the readback never returns a row and every caller degrades to exit 3
+# / UNVERIFIABLE — while every stub-based test above still passes, because the
+# stubs discard the SQL. These tests assert the type shape instead.
+
+@test "TYPE SHAPE: ids are emitted as typed UUID literals, not bare varchar" {
+    run --separate-stderr env TRINO_QUERY_SH="$TRINO_CAPTURE_SQL" \
+        bash "$WRAPPER" --expected user_verification_needed --ids "$ID1,$ID2"
+    [ "$status" -eq 0 ]
+    [ -f "$CV_SQL_CAPTURE" ]
+    sql=$(cat "$CV_SQL_CAPTURE")
+    # Each id must carry the UUID type prefix.
+    [[ "$sql" == *"UUID '$ID1'"* ]]
+    [[ "$sql" == *"UUID '$ID2'"* ]]
+}
+
+@test "TYPE SHAPE: no bare quoted uuid literal survives in the IN list" {
+    run --separate-stderr env TRINO_QUERY_SH="$TRINO_CAPTURE_SQL" \
+        bash "$WRAPPER" --expected user_verification_needed --ids "$ID1,$ID2"
+    [ "$status" -eq 0 ]
+    sql=$(cat "$CV_SQL_CAPTURE")
+    # Strip every correctly-typed literal; any remaining bare '<uuid>' is the bug.
+    residue=${sql//UUID \'/}
+    [[ "$residue" != *"'$ID1'"* ]]
+    [[ "$residue" != *"'$ID2'"* ]]
+}
+
+@test "TYPE SHAPE: multi-id IN list joins typed literals with commas" {
+    run --separate-stderr env TRINO_QUERY_SH="$TRINO_CAPTURE_SQL" \
+        bash "$WRAPPER" --expected user_verification_needed --ids "$ID1,$ID2"
+    [ "$status" -eq 0 ]
+    sql=$(cat "$CV_SQL_CAPTURE")
+    [[ "$sql" == *"IN (UUID '$ID1',UUID '$ID2')"* ]]
 }

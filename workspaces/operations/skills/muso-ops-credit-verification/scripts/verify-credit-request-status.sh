@@ -290,7 +290,15 @@ if ! command -v "$TRINO_SH" >/dev/null 2>&1 && [[ ! -x "$TRINO_SH" ]]; then
 fi
 
 # --- Build + run the SQL -----------------------------------------------------
-IN_LIST=$(printf '%s\n' "${ID_ARR[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))' | jq -r 'map("'\''" + . + "'\''") | join(",")')
+# `credit_requests.id` is a Postgres uuid, which the Trino postgresql connector
+# maps to Trino `uuid` — NOT varchar. A bare quoted literal is varchar(36), and
+# Trino refuses to compare the two ("Cannot find common type between uuid and
+# varchar(36)"), so the query fails analysis before returning a single row. That
+# would make every readback exit 3 / UNVERIFIABLE in production while the
+# hermetic tests still pass, because the stubs discard the SQL. Emit typed UUID
+# literals instead. Safe to interpolate: every id is UUID_REGEX-validated and
+# lowercased above, so nothing but hex and dashes reaches this string.
+IN_LIST=$(printf '%s\n' "${ID_ARR[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))' | jq -r 'map("UUID '\''" + . + "'\''") | join(",")')
 
 SQL="SELECT id, status FROM postgresql_core.public.credit_requests WHERE id IN (${IN_LIST})"
 
