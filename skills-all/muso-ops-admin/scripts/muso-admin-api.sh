@@ -318,7 +318,20 @@ enforce_credit_approve_gate() {
     esac
     # Match both /admin/credit-requests and /admin/credit-requests/<id>
     [[ "$path" == /admin/credit-requests* ]] || return 0
-    echo "$body" | grep -q '"status"[[:space:]]*:[[:space:]]*"approved"' || return 0
+    # Detect the approve STRUCTURALLY, the way core-backend's JSON.parse does —
+    # not by literal bytes. A body that parses to status:"approved" via a \uXXXX
+    # escape or an inter-token newline slips a line-oriented grep, and a miss
+    # here `return 0`s past the ENTIRE evidence requirement (fail-open: an
+    # autonomous approve with no browser grounding). jq normalizes both; the
+    # literal grep is kept as a belt-and-suspenders backstop for any
+    # jq/JSON.parse divergence. Gate if EITHER sees an approve — never less than
+    # the old grep-only behavior. Mirrors enforce_credit_reject_gate.
+    local status_val
+    status_val="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)"
+    if [[ "$status_val" != "approved" ]] \
+        && ! echo "$body" | grep -q '"status"[[:space:]]*:[[:space:]]*"approved"'; then
+        return 0
+    fi
 
     # Human override for per-credit verification: allow ONLY when --requester
     # resolves to Jan or Aaron — the humans authorized to approve individual
