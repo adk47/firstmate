@@ -91,6 +91,40 @@ write_session_log() {
     [ "$status" -eq 0 ]
 }
 
+# --- Trigger-evasion regressions: the gate must detect an approve the way
+# --- core-backend's JSON.parse does, not by literal bytes. A body that parses
+# --- to status:"approved" but dodges a line-oriented grep would `return 0` past
+# --- the ENTIRE evidence requirement — a fail-open autonomous approve with no
+# --- browser grounding. Mirrors the reject-gate evasion suite.
+
+@test "block: inter-token NEWLINE body status=approved still requires evidence" {
+    source_gate
+    local nl_body
+    nl_body=$'{"requestIds":["cr_1"],\n"status":\n"approved"}'
+    # sanity: the old literal grep MISSES this body (non-zero = no match)
+    run grep -q '"status"[[:space:]]*:[[:space:]]*"approved"' <<< "$nl_body"
+    [ "$status" -ne 0 ]
+    write_session_log "s.jsonl" '{}'
+    run enforce_credit_approve_gate PUT /admin/credit-requests "$nl_body"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--evidence-excerpt is required"* ]]
+}
+
+@test "block: \\uXXXX-escaped 'approved' body still requires evidence (jq decodes it like the backend)" {
+    source_gate
+    # backslash spliced from a var so no literal \u escape lives in this source
+    local bs='\' uesc_body
+    uesc_body='{"requestIds":["cr_1"],"status":"'"${bs}"'u0061pproved"}'
+    # sanity: raw bytes dodge the literal grep, but jq decodes to approved
+    run grep -q '"status"[[:space:]]*:[[:space:]]*"approved"' <<< "$uesc_body"
+    [ "$status" -ne 0 ]
+    [ "$(printf '%s' "$uesc_body" | jq -r '.status')" = "approved" ]
+    write_session_log "s.jsonl" '{}'
+    run enforce_credit_approve_gate PUT /admin/credit-requests "$uesc_body"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--evidence-excerpt is required"* ]]
+}
+
 @test "passthrough: PATCH + --requester aaron@muso.ai bypasses gate (same human override as PUT)" {
     source_gate
     REQUESTER_EMAIL="aaron@muso.ai" run enforce_credit_approve_gate PATCH /admin/credit-requests/cr_1 '{"status":"approved"}'
