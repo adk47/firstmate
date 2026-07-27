@@ -173,3 +173,34 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ "$status" -eq 0 ]
   grep -q -- '--method POST' "$QA_GH_LOG"
 }
+
+@test "ungated repo does not abort under set -e (qa_policy_has returning 1 is normal)" {
+  # Regression: calling qa_policy_has bare made `set -e` kill the script on the
+  # perfectly ordinary "repo is not in the list" path — every post silently
+  # exited 1 with no message.
+  printf '%s' '{"merge_gate_repos":["Muso-AI/other"],"identity":{"app_repos":[]}}' > "$TEST_TMPDIR/policy.json"
+  run "$SCRIPT" Muso-AI/hydra "$SHA" pending "queued"
+  [ "$status" -eq 0 ]
+  grep -q -- '--method POST' "$QA_GH_LOG"
+}
+
+@test "unreadable policy → exit 3 (must not read as 'ungated, safe to post')" {
+  export QA_APPROVAL_POLICY="$TEST_TMPDIR/absent.json"
+  run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO"
+  [ "$status" -eq 3 ]
+  ! grep -q -- '--method POST' "$QA_GH_LOG"
+}
+
+@test "malformed policy JSON → exit 3, never posts" {
+  printf '%s' 'not json {{{' > "$TEST_TMPDIR/policy.json"
+  run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO"
+  [ "$status" -eq 3 ]
+  ! grep -q -- '--method POST' "$QA_GH_LOG"
+}
+
+@test "merge_gate_repos present but not an array → exit 3 (schema failure fails closed)" {
+  printf '%s' '{"merge_gate_repos":"hydra","identity":{"app_repos":[]}}' > "$TEST_TMPDIR/policy.json"
+  run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO"
+  [ "$status" -eq 3 ]
+  ! grep -q -- '--method POST' "$QA_GH_LOG"
+}

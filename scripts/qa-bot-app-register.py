@@ -202,18 +202,26 @@ def main() -> int:
     # globs "$SECRETS_DIR"/*.json only, so this shape inherits the 0600
     # fail-closed self-heal that a .pem would silently miss.
     #
-    # Create it 0600 FROM BIRTH via os.open rather than write_text()+chmod: the
-    # latter leaves the private key world-readable at the process umask for the
-    # window between the two calls.
+    # Create it 0600 FROM BIRTH. Two traps here, both real:
+    #   - write_text() + chmod leaves the key at the process umask (0644) for the
+    #     duration of the write.
+    #   - os.open(..., 0o600) applies that mode ONLY when it creates the file. If
+    #     --out already exists 0644, O_TRUNC rewrites it in place and the old mode
+    #     survives; a chmod afterwards is too late, the key was already exposed.
+    # fchmod on the descriptor before writing closes both.
     payload = json.dumps({
         "app_id": str(app["id"]),
         "installation_id": "",   # filled in by qa-bot-app-verify.sh --fix-installation-id
         "private_key": app["pem"],
     }, indent=2) + "\n"
     fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(payload)
-    out.chmod(0o600)  # in case the file already existed with looser bits
+    try:
+        os.fchmod(fd, 0o600)          # tighten BEFORE any bytes are written
+        with os.fdopen(fd, "w") as fh:
+            fh.write(payload)
+    except BaseException:
+        os.close(fd)
+        raise
 
     print(f"\nApp created: {app.get('slug')} (id {app['id']})")
     print(f"Key store written to {out} (0600)\n")

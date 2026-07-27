@@ -51,6 +51,8 @@ _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QA_GH="${QA_GH:-$_here/qa-gh.sh}"
 POLICY="${QA_APPROVAL_POLICY:-$_here/../policies/qa-approval-policy.json}"
 CONTEXT="qa-review"
+# shellcheck source=lib/qa-policy.sh
+source "$_here/lib/qa-policy.sh"
 
 die() { echo "qa-review-status: $2" >&2; exit "$1"; }
 
@@ -77,7 +79,19 @@ case "$state" in pending|success|failure|error) ;; *) die 2 "state must be pendi
 # Mirror qa-gh.sh's FULL resolution order, not just app_repos — the kill switch
 # and QA_GH_IDENTITY=host both outrank it. Otherwise arming the emergency
 # rollback would silently make every open PR on a gated repo unmergeable.
-if jq -e --arg r "$repo" '(.merge_gate_repos // []) | index($r)' "$POLICY" >/dev/null 2>&1; then
+# An unreadable or malformed policy must NOT read as "ungated and therefore fine
+# to post": qa-gh.sh independently degrades the same bad policy to the host
+# identity, so the two together would produce exactly the host-owned status that
+# can never satisfy an App-pinned check — while this script returned 0.
+qa_policy_valid "$POLICY" \
+  || die 3 "cannot read or validate $POLICY — refusing to post $CONTEXT (fail closed; an unreadable policy must not read as 'ungated')."
+
+# `|| gate_rc=$?` is load-bearing under `set -e`: qa_policy_has returns 1 for the
+# perfectly normal "not in the list" case, and a bare call would abort the script.
+gate_rc=0
+qa_policy_has "$POLICY" '.merge_gate_repos' "$repo" || gate_rc=$?
+[ "$gate_rc" -ne 2 ] || die 3 "cannot evaluate .merge_gate_repos in $POLICY — refusing to post $CONTEXT (fail closed)."
+if [ "$gate_rc" -eq 0 ]; then
   host_flag="${QA_GH_HOST_FLAG:-/var/lib/hydra/qa-gh-host-identity}"
   if [ -e "$host_flag" ] || [ -L "$host_flag" ]; then
     die 3 "$repo is merge-gated but the host-identity kill switch ($host_flag) is active — a host-posted status cannot satisfy the app-pinned check. Remove the branch-protection pin before using the kill switch on a gated repo."
@@ -85,9 +99,10 @@ if jq -e --arg r "$repo" '(.merge_gate_repos // []) | index($r)' "$POLICY" >/dev
   if [ "${QA_GH_IDENTITY:-}" = "host" ]; then
     die 3 "$repo is merge-gated but QA_GH_IDENTITY=host forces the host identity — a host-posted status cannot satisfy the app-pinned check."
   fi
-  if ! jq -e --arg r "$repo" '(.identity.app_repos // []) | index($r)' "$POLICY" >/dev/null 2>&1; then
-    die 3 "$repo is in .merge_gate_repos but NOT in .identity.app_repos — the status would be posted by the host account and could never satisfy an app-pinned required check. Add it to app_repos first."
-  fi
+  app_rc=0
+  qa_policy_has "$POLICY" '.identity.app_repos' "$repo" || app_rc=$?
+  [ "$app_rc" -ne 2 ] || die 3 "cannot evaluate .identity.app_repos in $POLICY — refusing to post $CONTEXT (fail closed)."
+  [ "$app_rc" -eq 0 ] || die 3 "$repo is in .merge_gate_repos but NOT in .identity.app_repos — the status would be posted by the host account and could never satisfy an app-pinned required check. Add it to app_repos first."
 fi
 
 # target_url is the "Details" link. On a REQUIRED check it is the operator's only

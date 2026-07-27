@@ -55,11 +55,36 @@ jobs:
           # lookup, the policy read, jq) can fail and abort the step under
           # `set -e`; without this seed those paths would report nothing at all,
           # and GitHub never times out an unreported required check.
-          gated=0
-          if jq -e --arg r "$REPO" '(.merge_gate_repos // []) | index($r)' \
-               policies/qa-approval-policy.json >/dev/null 2>&1; then
-            gated=1
+          # Parse/validate SEPARATELY from membership. A single `jq -e ... index()`
+          # collapses "not gated" and "policy unreadable" into the same false,
+          # which would suppress every say_status below and — if branch
+          # protection were already App-pinned — leave the required check pending
+          # forever. That is the exact silent path this block exists to prevent,
+          # so a policy error is loud and fail-closed instead.
+          # shellcheck source=scripts/lib/qa-policy.sh
+          source scripts/lib/qa-policy.sh
+          POL=policies/qa-approval-policy.json
+          if ! qa_policy_valid "$POL"; then
+            echo "::error::$POL is unreadable or malformed — cannot determine gate state."
+            # Post a failure rather than nothing: on a gated repo silence is a
+            # permanent block, and on an ungated repo a red qa-review is harmless
+            # and visible. Best-effort, then fail the run loudly.
+            bash scripts/qa-review-status.sh "$REPO" "$HEAD_SHA" failure \
+              "QA gate state unknown — $POL is unreadable or malformed" || true
+            exit 1
           fi
+          # `|| _rc=$?` — qa_policy_has returns 1 for the normal "not gated" case,
+          # which would abort this `set -e` step if called bare.
+          _rc=0
+          qa_policy_has "$POL" '.merge_gate_repos' "$REPO" || _rc=$?
+          if [ "$_rc" -eq 2 ]; then
+            echo "::error::cannot evaluate .merge_gate_repos in $POL."
+            bash scripts/qa-review-status.sh "$REPO" "$HEAD_SHA" failure \
+              "QA gate state unknown — .merge_gate_repos unreadable" || true
+            exit 1
+          fi
+          gated=0
+          [ "$_rc" -eq 0 ] && gated=1
           say_status() {  # <state> <description> — best-effort, never aborts
             [ "$gated" = 1 ] || return 0
             bash scripts/qa-review-status.sh "$REPO" "$HEAD_SHA" "$1" "$2" \
