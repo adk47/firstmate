@@ -371,26 +371,51 @@ QPATH=""; QDIR=""; QUARANTINE_ERROR=""
 # dependency injection for tests (same role SWEEP_MOUNTS_FILE plays for the
 # mount table), NOT a bypass: a missing or unreadable tree still fails closed.
 PROC_DIR="${SWEEP_PROC_DIR:-/proc}"
-has_live_handles() {  # <path>
-  local p="$1" targets rc=0 l
-  [ -d "$PROC_DIR" ] || return 0
-  # GNU find prints every link target in ONE pass; a readlink-per-link loop
-  # over a real /proc would be thousands of forks per candidate. Measured on
-  # node-8: ~208ms for 725 processes / 11k links. Only candidates that already
-  # passed the staleness gates get here, so a weekly run pays this a few
-  # hundred times at worst.
-  targets="$(find "$PROC_DIR" -mindepth 2 -maxdepth 3 \
-      \( -name cwd -o -path "$PROC_DIR/[0-9]*/fd/*" \) -printf '%l\n' 2>/dev/null)" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    # BSD find (dev laptops) has no -printf. The fixture trees tests point at
-    # are tiny, so the fork-per-link fallback is fine there.
-    rc=0
-    targets="$(for l in "$PROC_DIR"/[0-9]*/cwd "$PROC_DIR"/[0-9]*/fd/*; do
-                 [ -L "$l" ] || continue
-                 readlink -- "$l" 2>/dev/null || true
-               done)" || rc=$?
-    [ "$rc" -eq 0 ] || return 0
+
+# GNU find capability, probed ONCE and separately from any runtime error.
+# Conflating the two is what made the first version of this fail open: on a
+# real /proc, plain `find` exits 1 as a matter of course (processes vanish
+# mid-scan — measured on node-8), so "nonzero => fall back" meant the fallback
+# was the normal path in production, not the dev-laptop exception.
+FIND_GNU=0
+_probe_dir="$(mktemp -d)"
+if find "$_probe_dir" -maxdepth 0 -ignore_readdir_race -printf '' >/dev/null 2>&1; then
+  FIND_GNU=1
+fi
+rmdir "$_probe_dir" 2>/dev/null || true
+
+# Every link target under the proc tree, one per line. Returns NONZERO if the
+# enumeration could not be completed — the caller treats that as a hazard.
+proc_link_targets() {
+  local l t
+  if [ "$FIND_GNU" -eq 1 ]; then
+    # -ignore_readdir_race: a process disappearing mid-scan is expected here
+    # and is NOT a failure (a dead process holds nothing). Any OTHER error
+    # still surfaces as a nonzero exit, which is exactly what we want.
+    # ~208ms on node-8 (725 processes / 11k links) in a single pass.
+    find "$PROC_DIR" -ignore_readdir_race -mindepth 2 -maxdepth 3 \
+      \( -name cwd -o -path "$PROC_DIR/[0-9]*/fd/*" \) -printf '%l\n' 2>/dev/null
+    return
   fi
+  # BSD find (dev laptops) has neither flag. Fixture trees are tiny, so the
+  # fork-per-link walk is fine — but it must FAIL CLOSED: a link that exists
+  # and cannot be read means we cannot prove absence of a writer.
+  for l in "$PROC_DIR"/[0-9]*/cwd "$PROC_DIR"/[0-9]*/fd/*; do
+    [ -L "$l" ] || continue
+    if ! t="$(readlink -- "$l" 2>/dev/null)"; then
+      # Vanished since the glob = benign; still present = unreadable = hazard.
+      if [ -L "$l" ]; then return 1; fi
+      continue
+    fi
+    printf '%s\n' "$t"
+  done
+}
+
+has_live_handles() {  # <path>
+  local p="$1" targets rc=0
+  [ -d "$PROC_DIR" ] || return 0
+  targets="$(proc_link_targets)" || rc=$?
+  [ "$rc" -eq 0 ] || return 0
   printf '%s\n' "$targets" | HP_P="$p" awk '
     $0 == ENVIRON["HP_P"] { found = 1 }
     index($0, ENVIRON["HP_P"] "/") == 1 { found = 1 }
@@ -664,7 +689,13 @@ clone_policy_audit() {  # <audit-path> <report-path>
           bad_ref="$refname"; break
         fi ;;
       *)
-        if ! GIT_OPTIONAL_LOCKS=0 git -C "$ap" for-each-ref "refs/remotes/*/${refname#refs/heads/}" --format='%(objectname)' 2>/dev/null \
+        # ORIGIN specifically, not refs/remotes/*/: the live check below only
+        # ever queries origin, so a wildcard lets a stale ref from ANOTHER
+        # remote vouch for the local pointer. With cached upstream/x == local
+        # x@A and live origin/x @B, both gates passed while no live remote
+        # preserved x@A — and deleting the clone lost that branch pointer even
+        # though commit A stayed reachable. Ref NAMES are data too.
+        if ! GIT_OPTIONAL_LOCKS=0 git -C "$ap" for-each-ref "refs/remotes/origin/${refname#refs/heads/}" --format='%(objectname)' 2>/dev/null \
             | grep -qxF -- "$refsha"; then
           bad_ref="$refname"; break
         fi

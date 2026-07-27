@@ -971,6 +971,61 @@ STUB
   [[ "$output" == *"live process holds the tree open"* ]]
 }
 
+@test "a failing proc enumeration holds candidates (no fail-open fallback)" {
+  # The scan must never authorize deletion off a partial enumeration. A find
+  # that errors for a reason OTHER than a process vanishing is a hazard.
+  # This exercises the GNU find path, which is the one production uses; BSD
+  # find takes the readlink fallback and never reaches the stub.
+  find . -maxdepth 0 -ignore_readdir_race -printf '' >/dev/null 2>&1 \
+    || skip "requires GNU find (the production path); CI is node-8"
+  mkclone "$TEST_TMPDIR/repos/procfail"
+  age_tree 20 "$TEST_TMPDIR/repos/procfail"
+  REAL_FIND="$(command -v find)"
+  export REAL_FIND
+  cat > "$TEST_TMPDIR/bin/find" <<'STUB'
+#!/usr/bin/env bash
+# Fail ONLY the proc scan; every other find (root enumeration, nested-repo
+# probes) must still work or the test would pass for the wrong reason.
+if [[ "$*" == *"$SWEEP_PROC_DIR"* ]]; then
+  echo "find: $SWEEP_PROC_DIR: Permission denied" >&2; exit 1
+fi
+exec "$REAL_FIND" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/find"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/find"; hash -r
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/procfail" ]
+  [[ "$output" == *"live process holds the tree open"* ]]
+}
+
+@test "a stale ref from ANOTHER remote does not vouch for a local branch" {
+  # local release@A, cached upstream/release@A, live origin/release@B with A
+  # an ancestor of B. Commit A survives via origin, but NO live remote carries
+  # the NAME release at A — deleting the clone would lose that pointer.
+  mkclone "$TEST_TMPDIR/repos/multi-remote"
+  local c="$TEST_TMPDIR/repos/multi-remote"
+  local origin; origin="$(ls -d "$TEST_TMPDIR"/origins/*multi-remote.git)"
+  ( cd "$c" && git checkout -q -b release && echo a > a.txt && git add a.txt \
+      && git commit -qm commit-A )
+  # A second remote that still carries release@A.
+  git init -q --bare "$TEST_TMPDIR/origins/upstream.git"
+  ( cd "$c" && git remote add upstream "$TEST_TMPDIR/origins/upstream.git" \
+      && git push -q upstream release )
+  # origin gets release@B, a DESCENDANT of A, pushed from a separate clone so
+  # our clone never caches refs/remotes/origin/release.
+  git clone -q "$origin" "$TEST_TMPDIR/pusher"
+  ( cd "$TEST_TMPDIR/pusher" && git fetch -q "$TEST_TMPDIR/origins/upstream.git" release \
+      && git checkout -q -B release FETCH_HEAD && echo b > b.txt && git add b.txt \
+      && git commit -qm commit-B && git push -q origin release )
+  age_tree 20 "$c"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$c" ]
+  [[ "$output" == *"local-branch"* ]]
+  [[ "$output" == *"'release'"* ]]
+}
+
 @test "quarantine debris from an interrupted run is held, never swept" {
   # The prefix has already destroyed the keep-list basename match, so debris
   # must never be re-swept as an ordinary candidate.
