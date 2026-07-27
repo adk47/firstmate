@@ -646,6 +646,81 @@ STUB
   [[ "$output" == *"became a directory between classification and removal"* ]]
 }
 
+@test "a stale file replaced by a FRESH file during the du seam is not deleted (same type, new inode)" {
+  # Type parity is not identity: the entry lane must refuse a same-type
+  # replacement, not just a symlink→directory transition.
+  echo stale > "$TEST_TMPDIR/ws/cto/tmp/scratch.log"
+  age_path 10 "$TEST_TMPDIR/ws/cto/tmp/scratch.log"
+  REAL_DU="$(command -v du)"
+  export REAL_DU INJECT_FILE="$TEST_TMPDIR/ws/cto/tmp/scratch.log"
+  cat > "$TEST_TMPDIR/bin/du" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"$INJECT_FILE"* ]] && ! grep -q brand-new "$INJECT_FILE" 2>/dev/null; then
+  /bin/rm -f "$INJECT_FILE"
+  echo brand-new > "$INJECT_FILE"
+fi
+exec "$REAL_DU" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/du"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/du"; hash -r
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMPDIR/ws/cto/tmp/scratch.log" ]
+  grep -q brand-new "$TEST_TMPDIR/ws/cto/tmp/scratch.log"
+  [[ "$output" == *"identity changed between classification and removal"* ]]
+}
+
+@test "a junk dir replaced by a DIFFERENT directory during the du seam is not rm -rf'd" {
+  # Directory→directory swap: same type, and the replacement is retro-aged so
+  # the post-du freshness rail cannot be what saves it — only the identity
+  # snapshot can.
+  mkdir -p "$TEST_TMPDIR/ws/cto/tmp/big-junk"
+  echo x > "$TEST_TMPDIR/ws/cto/tmp/big-junk/f"
+  age_tree 10 "$TEST_TMPDIR/ws/cto/tmp/big-junk"
+  REAL_DU="$(command -v du)"
+  export REAL_DU INJECT_DIR="$TEST_TMPDIR/ws/cto/tmp/big-junk" \
+    OLD_STAMP="$(past_stamp 10)" SWAP_AWAY="$TEST_TMPDIR/swapped-away"
+  cat > "$TEST_TMPDIR/bin/du" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"$INJECT_DIR"* && ! -e "$INJECT_DIR/replacement.txt" ]]; then
+  mv "$INJECT_DIR" "$SWAP_AWAY"
+  mkdir -p "$INJECT_DIR"
+  echo unique-work > "$INJECT_DIR/replacement.txt"
+  touch -h -t "$OLD_STAMP" -- "$INJECT_DIR/replacement.txt" "$INJECT_DIR"
+fi
+exec "$REAL_DU" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/du"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/du"; hash -r
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMPDIR/ws/cto/tmp/big-junk/replacement.txt" ]
+  [[ "$output" == *"identity changed between classification and removal"* ]]
+}
+
+@test "a failing nested-repo scan in the clone lane holds the candidate (fail closed)" {
+  # The clone lane's `find -mindepth 2 -name .git` probe must not treat a
+  # scan ERROR as "no inner repo" — an unproven absence can never authorize
+  # a recursive delete.
+  mkclone "$TEST_TMPDIR/repos/scanfail"
+  age_tree 20 "$TEST_TMPDIR/repos/scanfail"
+  REAL_FIND="$(command -v find)"
+  export REAL_FIND INJECT_TARGET="$TEST_TMPDIR/repos/scanfail"
+  cat > "$TEST_TMPDIR/bin/find" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"-mindepth 2"* && "$*" == *"$INJECT_TARGET"* ]]; then
+  echo "find: $INJECT_TARGET: Input/output error" >&2; exit 1
+fi
+exec "$REAL_FIND" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/find"
+  run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/find"; hash -r
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/scanfail" ]
+  [[ "$output" == *"nested-repo scan failed"* ]]
+}
+
 @test "structural refusal: out-of-scope roots are rejected in host-guarded mode" {
   # The production topology is fixed; only the explicit test override permits
   # sandbox roots. Pretend to be node-8 so the host guard passes and the

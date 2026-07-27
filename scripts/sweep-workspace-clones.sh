@@ -35,8 +35,9 @@
 # .git/index. Pre-rm recheck refuses in-progress operations
 # (index.lock / MERGE_HEAD / rebase-*) and any write inside the
 # fresh-window. rm is contained: symlink candidates are unlinked
-# (never followed), a candidate whose path type changed since it was
-# classified is refused (no silent upgrade to a recursive delete),
+# (never followed), a candidate whose path type OR device:inode changed
+# since it was classified is refused (no silent upgrade to a recursive
+# delete, and no deleting a replacement object the guards never saw),
 # mountpoints are skipped, --one-file-system. The two swept roots must
 # be the exact production paths unless the host guard is waived.
 #
@@ -245,8 +246,16 @@ mtime_epoch() {
   stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1" 2>/dev/null || echo "$NOW_EPOCH"
 }
 
-remove_entry() {  # <path> <kb> <label> <expect:entry|tree>
-  local p="$1" kb="$2" label="$3" expect="$4" err rm_cmd is_tree=0
+# device:inode of a path WITHOUT dereferencing symlinks (GNU stat -c, BSD
+# stat -f); empty when it cannot be read, which the removal gate treats as a
+# mismatch. This is the object's identity: a name can be re-pointed at a
+# different object without changing its type.
+path_id() {
+  stat -c '%d:%i' -- "$1" 2>/dev/null || stat -f '%d:%i' -- "$1" 2>/dev/null || true
+}
+
+remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id-at-classification>
+  local p="$1" kb="$2" label="$3" expect="$4" id="$5" err rm_cmd is_tree=0 now_id
   if [ "$APPLY" -eq 0 ]; then
     log "DRY-RUN: would delete $label $p (${kb} KB)"
     return 0
@@ -268,6 +277,17 @@ remove_entry() {  # <path> <kb> <label> <expect:entry|tree>
     hold "in-use" "$p" "directory became a file/symlink between classification and removal"
     return 1
   fi
+  # Type parity is not identity. A stale symlink can be unlinked and a FRESH
+  # symlink created at the same name, or a guarded directory swapped for a
+  # different directory, during the du seam: same type, different object, and
+  # none of the guards ever saw the new one. Compare the device:inode captured
+  # at classification — an unreadable identity on either side is a mismatch.
+  now_id="$(path_id "$p")"
+  if [ -z "$id" ] || [ -z "$now_id" ] || [ "$id" != "$now_id" ]; then
+    held_inuse=$((held_inuse + 1))
+    hold "in-use" "$p" "path identity changed between classification and removal (${id:-unreadable} -> ${now_id:-unreadable})"
+    return 1
+  fi
   rm_cmd=(rm -f --)
   if [ "$is_tree" -eq 1 ]; then
     # ${arr[@]+...}: safe under set -u with an empty array on bash 3.2 (macOS dev).
@@ -284,7 +304,7 @@ remove_entry() {  # <path> <kb> <label> <expect:entry|tree>
 # ── per-candidate policy ─────────────────────────────────────
 sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   local d="$1" cutoff="$2" ref="$3" lane="$4"
-  local name kb head_sha probe_out rc
+  local name kb head_sha probe_out rc cand_id
   name="$(basename "$d")"
 
   # A depth-1 .git means the swept ROOT is itself a clone worktree — never
@@ -295,11 +315,15 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     return 0
   fi
 
+  # Identity of the object every guard below is about to be run against.
+  # Everything that reaches a removal must still BE this object.
+  cand_id="$(path_id "$d")"
+
   # Symlinks and plain files: never followed; junk-aged by own mtime.
   if [ -L "$d" ] || [ ! -d "$d" ]; then
     if [ "$(mtime_epoch "$d")" -lt "$cutoff" ]; then
       kb="$(entry_kb "$d")"
-      if remove_entry "$d" "$kb" "entry" entry; then
+      if remove_entry "$d" "$kb" "entry" entry "$cand_id"; then
         junk_deleted=$((junk_deleted + 1)); freed_kb=$((freed_kb + kb))
       fi
     else
@@ -352,7 +376,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     if mount_hazard "$d"; then
       held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
     fi
-    if remove_entry "$d" "$kb" "junk" tree; then
+    if remove_entry "$d" "$kb" "junk" tree "$cand_id"; then
       junk_deleted=$((junk_deleted + 1)); freed_kb=$((freed_kb + kb))
     fi
     return 0
@@ -365,8 +389,14 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   if mount_hazard "$d"; then
     held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
   fi
-  if [ -n "$(find "$d" -xdev -mindepth 2 -name .git -print -quit 2>/dev/null)" ]; then
-    held_nested=$((held_nested + 1)); hold "nested" "$d" "inner repo present"; return 0
+  # Same fail-closed contract as the plain-junk lane: a scan that ERRORS has
+  # not ruled out an inner repo, and a command substitution alone discards
+  # find's exit status — capture it, and hold on any nonzero.
+  rc=0; probe_out="$(find "$d" -xdev -mindepth 2 -name .git -print -quit 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -n "$probe_out" ]; then
+    held_nested=$((held_nested + 1))
+    hold "nested" "$d" "${probe_out:+inner repo present}${probe_out:-nested-repo scan failed}"
+    return 0
   fi
 
   # Git probes — a failed probe is NEVER "clean" (fail closed).
@@ -554,7 +584,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "unpushed commit appeared between audit and removal"; return 0
   fi
 
-  if remove_entry "$d" "$kb" "clone (HEAD $head_sha)" tree; then
+  if remove_entry "$d" "$kb" "clone (HEAD $head_sha)" tree "$cand_id"; then
     swept=$((swept + 1)); freed_kb=$((freed_kb + kb))
   fi
 }
