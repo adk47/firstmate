@@ -416,16 +416,37 @@ After posting the review, publish your verdict as a commit status on the head SH
 it is a visible green/red signal on the PR (and can be made a required check). Set it
 on every review — `success` on GO, `failure` on NO-GO:
 
+Post it through `qa-review-status.sh` — **never** with a bare `gh api ... /statuses/`
+call. On repos where `qa-review` is a required check it is pinned to the QA bot App
+(`checks: [{context, app_id}]`), and a status posted by any other identity does not
+satisfy the pin: the check would sit unsatisfied and the PR would be unmergeable. The
+wrapper routes through the identity shim so the App is what posts it, and it applies the
+140-char description limit.
+
 ```bash
 verdict_state=success     # use "failure" when the verdict is NO-GO
 verdict_desc="GO — 0 blocking findings"   # or: "NO-GO — <N> blocking finding(s)"
-HEAD_SHA="$(gh pr view "$PR" --repo "$OWNER/$REPO" --json headRefOid --jq .headRefOid)"
-gh api "repos/$OWNER/$REPO/statuses/$HEAD_SHA" --method POST \
-  -f state="$verdict_state" \
-  -f context="qa-review" \
-  -f description="$verdict_desc" \
-  -f target_url="https://github.com/$OWNER/$REPO/pull/$PR/files"
+HEAD_SHA="$(bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" \
+  pr view "$PR" --repo "$OWNER/$REPO" --json headRefOid --jq .headRefOid)"
+bash /opt/hydra/scripts/qa-review-status.sh "$OWNER/$REPO" "$HEAD_SHA" \
+  "$verdict_state" "$verdict_desc" \
+  "https://github.com/$OWNER/$REPO/pull/$PR/files" \
+  || echo "qa-review-status: could not publish the verdict — report it, do not retry blind"
 ```
+
+The 5th argument is the "Details" link. On a merge-gated repo it is the operator's
+only in-UI route to why the check is red, so always pass it.
+
+**If the repo is in `.merge_gate_repos`, a missing status is a MERGE BLOCK, not a
+cosmetic gap.** The workflow armed `qa-review` as `pending` before dispatching; if
+you never publish a terminal state the PR cannot merge and GitHub will wait
+forever. So on a gated repo: retry once, and if it still fails, DM the author AND
+say plainly that the PR is blocked pending a manual status — do not fall back to
+"rely on the Slack DM" as you would on an ungated repo.
+
+Never invoke `qa-github-app-token.sh` yourself — it prints a live installation
+token to stdout, which would land in the session transcript. Only `qa-gh.sh`
+calls it.
 
 `$HEAD_SHA` is the head commit you reviewed. A new push creates a new SHA with no
 `qa-review` status yet, so a re-review must run before the PR is green again (pairs
