@@ -35,9 +35,10 @@
 # .git/index. Pre-rm recheck refuses in-progress operations
 # (index.lock / MERGE_HEAD / rebase-*) and any write inside the
 # fresh-window. rm is contained: symlink candidates are unlinked
-# (never followed), a candidate whose path type OR device:inode changed
-# since it was classified is refused (no silent upgrade to a recursive
-# delete, and no deleting a replacement object the guards never saw),
+# (never followed), a candidate whose path type or stat identity
+# (device:inode:mtime:ctime:size) changed since it was classified is
+# refused (no silent upgrade to a recursive delete, and no deleting a
+# replacement object the guards never saw — ctime defeats inode reuse),
 # mountpoints are skipped, --one-file-system. The two swept roots must
 # be the exact production paths unless the host guard is waived.
 #
@@ -246,12 +247,21 @@ mtime_epoch() {
   stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1" 2>/dev/null || echo "$NOW_EPOCH"
 }
 
-# device:inode of a path WITHOUT dereferencing symlinks (GNU stat -c, BSD
-# stat -f); empty when it cannot be read, which the removal gate treats as a
-# mismatch. This is the object's identity: a name can be re-pointed at a
-# different object without changing its type.
+# Full identity of a path WITHOUT dereferencing symlinks (GNU stat -c, BSD
+# stat -f): device, inode, mtime, ctime, size. Empty when it cannot be read,
+# which the removal gate treats as a mismatch.
+#
+# device:inode ALONE is not enough — unlink+create in the same directory
+# hands the new object the just-freed inode number on ext4, so a replacement
+# compares equal (demonstrated by the file→file regression failing on the
+# Linux CI runner while passing on APFS). ctime is what closes it: it is set
+# by the kernel on every inode change and is settable by NO userspace API —
+# not touch, not utimensat — so a replacement object cannot carry the stale
+# one's ctime. mtime and size are cheap corroboration in the same call.
 path_id() {
-  stat -c '%d:%i' -- "$1" 2>/dev/null || stat -f '%d:%i' -- "$1" 2>/dev/null || true
+  stat -c '%d:%i:%Y:%Z:%s' -- "$1" 2>/dev/null \
+    || stat -f '%d:%i:%m:%c:%z' -- "$1" 2>/dev/null \
+    || true
 }
 
 remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id-at-classification>
@@ -280,8 +290,8 @@ remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id-at-classificatio
   # Type parity is not identity. A stale symlink can be unlinked and a FRESH
   # symlink created at the same name, or a guarded directory swapped for a
   # different directory, during the du seam: same type, different object, and
-  # none of the guards ever saw the new one. Compare the device:inode captured
-  # at classification — an unreadable identity on either side is a mismatch.
+  # none of the guards ever saw the new one. Compare the full stat identity
+  # captured at classification — an unreadable one on either side is a mismatch.
   now_id="$(path_id "$p")"
   if [ -z "$id" ] || [ -z "$now_id" ] || [ "$id" != "$now_id" ]; then
     held_inuse=$((held_inuse + 1))

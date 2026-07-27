@@ -648,7 +648,10 @@ STUB
 
 @test "a stale file replaced by a FRESH file during the du seam is not deleted (same type, new inode)" {
   # Type parity is not identity: the entry lane must refuse a same-type
-  # replacement, not just a symlink→directory transition.
+  # replacement, not just a symlink→directory transition. This case is
+  # sharpest on the Linux CI runner, where ext4 hands the replacement the
+  # just-freed inode number — device:inode alone compares EQUAL there, and
+  # only the ctime in the identity snapshot catches it.
   echo stale > "$TEST_TMPDIR/ws/cto/tmp/scratch.log"
   age_path 10 "$TEST_TMPDIR/ws/cto/tmp/scratch.log"
   REAL_DU="$(command -v du)"
