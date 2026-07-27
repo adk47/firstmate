@@ -402,17 +402,24 @@ mkclone() {
 }
 
 @test "a detached-HEAD commit created mid-sweep holds the clone at the removal gate" {
+  # A concurrent writer lands an unpushed detached commit while the audit is
+  # running; later checks in that same audit must still catch it.
   mkclone "$TEST_TMPDIR/repos/raced-detached"
   age_tree 20 "$TEST_TMPDIR/repos/raced-detached"
   REAL_GIT="$(command -v git)"
-  export REAL_GIT INJECT_TARGET="$TEST_TMPDIR/repos/raced-detached" INJECT_COUNT="$TEST_TMPDIR/inject-count-d"
-  cat > "$TEST_TMPDIR/bin/git" <<'STUB'
+  export REAL_GIT INJECT_BASE="raced-detached" INJECT_MARK="$TEST_TMPDIR/mark-detached"
+cat > "$TEST_TMPDIR/bin/git" <<'STUB'
 #!/usr/bin/env bash
-if [[ "$*" == *"status --porcelain"* && "$*" == *"$INJECT_TARGET"* ]]; then
-  n=$(cat "$INJECT_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$INJECT_COUNT"
-  if [ "$n" -eq 2 ]; then
-    "$REAL_GIT" -C "$INJECT_TARGET" checkout -q --detach
-    "$REAL_GIT" -C "$INJECT_TARGET" commit -q --allow-empty -m raced-detached-work
+# The candidate is quarantined BEFORE the audit now, so `-C` points at the
+# private name. Match the BASENAME (which survives the rename) and act on the
+# path git was actually handed.
+if [[ "$*" == *"status --porcelain"* ]]; then
+  t=""; prev=""
+  for a in "$@"; do [ "$prev" = "-C" ] && t="$a"; prev="$a"; done
+  if [ -n "$t" ] && [ "$(basename "$t")" = "$INJECT_BASE" ] && [ ! -e "$INJECT_MARK" ]; then
+    : > "$INJECT_MARK"
+    "$REAL_GIT" -C "$t" checkout -q --detach
+    "$REAL_GIT" -C "$t" commit -q --allow-empty -m raced-detached-work
   fi
 fi
 exec "$REAL_GIT" "$@"
@@ -421,8 +428,10 @@ STUB
   run "$SWEEP" --apply
   rm -f "$TEST_TMPDIR/bin/git"; hash -r
   [ "$status" -eq 0 ]
+  [ -e "$TEST_TMPDIR/mark-detached" ]          # the injection actually fired
   [ -d "$TEST_TMPDIR/repos/raced-detached" ]
-  [[ "$output" == *"between audit and removal"* ]]
+  [[ "$output" == *"commits not on any remote"* ]]
+  [[ "$output" == *"restored from quarantine"* ]]
 }
 
 @test "a mount path with a literal backslash still registers (no awk -v mangling)" {
@@ -534,19 +543,23 @@ STUB
 }
 
 @test "a ref created mid-sweep (after the first audit) holds the clone at the removal gate" {
+  # git-only state (a local tag) landed by a concurrent writer during the
+  # audit: clean status, no worktree write, so only the ref-parity check sees it.
   mkclone "$TEST_TMPDIR/repos/raced"
   age_tree 20 "$TEST_TMPDIR/repos/raced"
-  # git wrapper seam: on the SECOND `status --porcelain` for this clone (the
-  # TOCTOU re-audit), first create a tag — simulating a concurrent writer
-  # landing git-only state between the first audit and the removal gate.
   REAL_GIT="$(command -v git)"
-  export REAL_GIT INJECT_TARGET="$TEST_TMPDIR/repos/raced" INJECT_COUNT="$TEST_TMPDIR/inject-count"
-  cat > "$TEST_TMPDIR/bin/git" <<'STUB'
+  export REAL_GIT INJECT_BASE="raced" INJECT_MARK="$TEST_TMPDIR/mark-raced"
+cat > "$TEST_TMPDIR/bin/git" <<'STUB'
 #!/usr/bin/env bash
-if [[ "$*" == *"status --porcelain"* && "$*" == *"$INJECT_TARGET"* ]]; then
-  n=$(cat "$INJECT_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$INJECT_COUNT"
-  if [ "$n" -eq 2 ]; then
-    "$REAL_GIT" -C "$INJECT_TARGET" tag injected-mid-sweep
+# The candidate is quarantined BEFORE the audit now, so `-C` points at the
+# private name. Match the BASENAME (which survives the rename) and act on the
+# path git was actually handed.
+if [[ "$*" == *"status --porcelain"* ]]; then
+  t=""; prev=""
+  for a in "$@"; do [ "$prev" = "-C" ] && t="$a"; prev="$a"; done
+  if [ -n "$t" ] && [ "$(basename "$t")" = "$INJECT_BASE" ] && [ ! -e "$INJECT_MARK" ]; then
+    : > "$INJECT_MARK"
+    "$REAL_GIT" -C "$t" tag injected-mid-sweep
   fi
 fi
 exec "$REAL_GIT" "$@"
@@ -555,8 +568,10 @@ STUB
   run "$SWEEP" --apply
   rm -f "$TEST_TMPDIR/bin/git"; hash -r
   [ "$status" -eq 0 ]
+  [ -e "$TEST_TMPDIR/mark-raced" ]
   [ -d "$TEST_TMPDIR/repos/raced" ]
-  [[ "$output" == *"between audit and removal"* ]]
+  [[ "$output" == *"local-tag"* ]]
+  [[ "$output" == *"restored from quarantine"* ]]
 }
 
 @test "structural refusal: SWEEP_REPOS_ROOT=// exits 1 (no slash-form bypass)" {
@@ -577,18 +592,21 @@ STUB
 }
 
 @test "a clean detached checkout during the size scan holds the clone" {
+  # du now runs on the QUARANTINED path and BEFORE the audit, so a checkout
+  # landing during it must be caught by the audit that follows.
   mkclone "$TEST_TMPDIR/repos/raced-checkout"
   ( cd "$TEST_TMPDIR/repos/raced-checkout" && echo two > f2.txt && git add f2.txt \
       && git commit -qm second && git push -q origin main )
   age_tree 20 "$TEST_TMPDIR/repos/raced-checkout"
   REAL_DU="$(command -v du)"
   REAL_GIT="$(command -v git)"
-  export REAL_DU REAL_GIT INJECT_CO="$TEST_TMPDIR/repos/raced-checkout"
+  export REAL_DU REAL_GIT INJECT_BASE="raced-checkout" INJECT_MARK="$TEST_TMPDIR/mark-co"
   cat > "$TEST_TMPDIR/bin/du" <<'STUB'
 #!/usr/bin/env bash
-if [[ "$*" == *"$INJECT_CO"* && ! -e "$INJECT_CO/.done" ]]; then
-  : > "$INJECT_CO/.done"
-  "$REAL_GIT" -C "$INJECT_CO" checkout -q --detach HEAD~1
+t="${@: -1}"
+if [ -d "$t" ] && [ "$(basename "$t")" = "$INJECT_BASE" ] && [ ! -e "$INJECT_MARK" ]; then
+  : > "$INJECT_MARK"
+  "$REAL_GIT" -C "$t" checkout -q --detach HEAD~1
 fi
 exec "$REAL_DU" "$@"
 STUB
@@ -596,20 +614,25 @@ STUB
   run "$SWEEP" --apply
   rm -f "$TEST_TMPDIR/bin/du"; hash -r
   [ "$status" -eq 0 ]
+  [ -e "$TEST_TMPDIR/mark-co" ]                 # the injection actually fired
   [ -d "$TEST_TMPDIR/repos/raced-checkout" ]
-  [[ "$output" == *"active_skipped=1"* || "$output" == *"HEAD moved"* ]]
+  [[ "$output" == *"restored from quarantine"* ]]
 }
 
 @test "git-only state created during the size scan holds the clone (du before final audit)" {
+  # A tag created while du runs: clean status, no worktree write. Only the
+  # ref-parity check in the following audit can see it.
   mkclone "$TEST_TMPDIR/repos/raced-du"
   age_tree 20 "$TEST_TMPDIR/repos/raced-du"
   REAL_DU="$(command -v du)"
   REAL_GIT="$(command -v git)"
-  export REAL_DU REAL_GIT INJECT_TARGET="$TEST_TMPDIR/repos/raced-du"
+  export REAL_DU REAL_GIT INJECT_BASE="raced-du" INJECT_MARK="$TEST_TMPDIR/mark-du"
   cat > "$TEST_TMPDIR/bin/du" <<'STUB'
 #!/usr/bin/env bash
-if [[ "$*" == *"$INJECT_TARGET"* && ! -e "$INJECT_TARGET/.git/refs/tags/du-race" ]]; then
-  "$REAL_GIT" -C "$INJECT_TARGET" tag du-race
+t="${@: -1}"
+if [ -d "$t" ] && [ "$(basename "$t")" = "$INJECT_BASE" ] && [ ! -e "$INJECT_MARK" ]; then
+  : > "$INJECT_MARK"
+  "$REAL_GIT" -C "$t" tag du-race
 fi
 exec "$REAL_DU" "$@"
 STUB
@@ -617,8 +640,10 @@ STUB
   run "$SWEEP" --apply
   rm -f "$TEST_TMPDIR/bin/du"; hash -r
   [ "$status" -eq 0 ]
+  [ -e "$TEST_TMPDIR/mark-du" ]
   [ -d "$TEST_TMPDIR/repos/raced-du" ]
-  [[ "$output" == *"between audit and removal"* ]]
+  [[ "$output" == *"local-tag"* ]]
+  [[ "$output" == *"restored from quarantine"* ]]
 }
 
 @test "a stale symlink swapped for a directory during the du seam is never rm -rf'd" {
@@ -800,7 +825,9 @@ STUB
   [ -d "$TEST_TMPDIR/repos/handle-race" ]
   grep -q "unique work from a surviving handle" "$TEST_TMPDIR/repos/handle-race/f.txt"
   [[ "$output" == *"restored from quarantine"* ]]
-  [[ "$output" == *"before removal"* ]]
+  # Caught by the single policy audit running on the quarantined object —
+  # the write made the worktree dirty, which the root-entry check cannot see.
+  [[ "$output" == *"dirty path(s)"* ]]
 }
 
 @test "a FILE occupying the quarantine namespace is never clobbered by a live quarantine" {

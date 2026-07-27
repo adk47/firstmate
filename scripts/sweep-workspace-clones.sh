@@ -39,11 +39,17 @@
 # (device|inode|mtime|ctime|size, ns resolution) changed since it was
 # classified is refused (no silent upgrade to a recursive delete, and no
 # deleting a replacement object the guards never saw — ctime defeats inode
-# reuse), and the removal itself is quarantine-first: the candidate is
-# atomically renamed to a sibling name and re-audited under that name, so
-# the object deleted is provably the object audited,
-# mountpoints are skipped, --one-file-system. The two swept roots must
-# be the exact production paths unless the host guard is waived.
+# reuse). Removal is quarantine-first: once the cheap staleness gates pass,
+# the candidate is atomically renamed into an exclusive mktemp -d sibling,
+# and size, policy audit and rm ALL run on that private name — so the object
+# deleted is provably the object audited. The clone policy audit exists in
+# exactly ONE place (clone_policy_audit) and runs ONCE, last, immediately
+# before the rm; an earlier audit-then-weaker-re-audit shape let the two
+# copies drift. A refusal restores the object to its original name (mv -n,
+# never clobbering) or reports it left quarantined. Mountpoints are skipped
+# (including a swept ROOT that is itself a mount), --one-file-system. The two
+# swept roots must be the exact production paths unless the host guard is
+# waived.
 #
 # Invoked weekly with --apply by scripts/weekly-cleanup.sh
 # (hydra-weekly-cleanup.timer, Mon 04:30 UTC); also human-runnable.
@@ -341,32 +347,75 @@ reaudit_junk() {  # <quarantined-path> <cutoff-ref-file>
   return 0
 }
 
-reaudit_clone() {  # <quarantined-path> <window-ref-file> <refs-snapshot>
-  local q="$1" window_ref="$2" refs_snapshot="$3" out rc=0
-  if [ -e "$q/.git/index.lock" ] || [ -e "$q/.git/MERGE_HEAD" ] \
-     || [ -e "$q/.git/rebase-merge" ] || [ -e "$q/.git/rebase-apply" ]; then
-    REAUDIT_REASON="git operation in progress before removal"; return 1
+
+# ── quarantine primitives ────────────────────────────────────
+QPATH=""; QDIR=""; QUARANTINE_ERROR=""
+
+# Take the candidate OUT of the namespace, atomically. The target must be
+# GUARANTEED-private, not merely unlikely to collide: leftovers are retained
+# forever by design, so a recurring name (a PID, a timestamp) could already
+# exist and mv would then overwrite a held file or nest inside a held
+# directory. mktemp -d creates the sibling exclusively, in the same directory
+# and therefore the same filesystem — no cross-device copy fallback, which a
+# deletion path must never do.
+quarantine_candidate() {  # <path> <id-at-classification>
+  local p="$1" id="$2" qdir q err
+  QPATH=""; QDIR=""; QUARANTINE_ERROR=""
+  qdir="$(mktemp -d "$(dirname -- "$p")/${QUARANTINE_PREFIX}XXXXXX" 2>/dev/null)" || {
+    QUARANTINE_ERROR="could not create a private sibling directory"
+    return 1
+  }
+  q="$qdir/$(basename -- "$p")"
+  err="$(mv -- "$p" "$q" 2>&1)" || {
+    QUARANTINE_ERROR="quarantine rename failed: ${err:0:120}"
+    rmdir "$qdir" 2>/dev/null || true
+    return 1
+  }
+  # Explicit move verification — never infer the outcome from mv's exit status
+  # alone. -e is false for a dangling symlink, so -L is its companion.
+  if { [ ! -e "$q" ] && [ ! -L "$q" ]; } || [ -e "$p" ] || [ -L "$p" ]; then
+    QUARANTINE_ERROR="quarantine rename did not land at $q"
+    rmdir "$qdir" 2>/dev/null || true
+    return 1
   fi
-  if tree_fresh_since "$q" "$window_ref"; then
-    REAUDIT_REASON="worktree written to before removal"; return 1
+  # rename(2) bumps ctime, so compare the rename-invariant subset.
+  if [ -z "$id" ] || [ "$(id_stable "$(path_id "$q")")" != "$(id_stable "$id")" ]; then
+    QUARANTINE_ERROR="object replaced before removal"
+    restore_quarantine "$q" "$p" "$qdir" || true
+    return 1
   fi
-  out="$(GIT_OPTIONAL_LOCKS=0 git -C "$q" status --porcelain 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ] || [ -n "$out" ]; then
-    REAUDIT_REASON="worktree dirty before removal"; return 1
-  fi
-  rc=0; out="$(GIT_OPTIONAL_LOCKS=0 git -C "$q" stash list 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ] || [ -n "$out" ]; then
-    REAUDIT_REASON="stash appeared before removal"; return 1
-  fi
-  rc=0; out="$(GIT_OPTIONAL_LOCKS=0 git -C "$q" for-each-ref refs/heads refs/tags --format='%(objectname) %(refname)' 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ] || [ "$out" != "$refs_snapshot" ]; then
-    REAUDIT_REASON="refs changed before removal"; return 1
-  fi
-  rc=0; out="$(GIT_OPTIONAL_LOCKS=0 git -C "$q" log --all --not --remotes --oneline 2>&1 | head -1)" || rc=$?
-  if [ "$rc" -ne 0 ] || [ -n "$out" ]; then
-    REAUDIT_REASON="unpushed commit appeared before removal"; return 1
-  fi
+  QPATH="$q"; QDIR="$qdir"
   return 0
+}
+
+# Put it back, NEVER clobbering a name another writer has retaken. GNU mv -n
+# exits 0 when it declines, so the move is proven rather than assumed.
+restore_quarantine() {  # <quarantined> <original> <qdir>
+  if mv -n -- "$1" "$2" 2>/dev/null && [ ! -e "$1" ] && [ ! -L "$1" ]; then
+    rmdir "$3" 2>/dev/null || true
+    log "restored from quarantine: $2"
+    return 0
+  fi
+  rm_errors=$((rm_errors + 1))
+  echo "quarantine restore blocked (name retaken): object left at $1" >> "$ERRORS_FILE"
+  hold "in-use" "$1" "restore blocked — LEFT QUARANTINED, needs human review"
+  return 1
+}
+
+delete_quarantined() {  # <quarantined> <qdir> <label> <original> <kb> <is-tree>
+  local q="$1" qdir="$2" label="$3" p="$4" kb="$5" is_tree="$6" err rm_cmd
+  rm_cmd=(rm -f --)
+  if [ "$is_tree" -eq 1 ]; then
+    # ${arr[@]+...}: safe under set -u with an empty array on bash 3.2 (macOS dev).
+    rm_cmd=(rm -rf ${RM_ONEFS[@]+"${RM_ONEFS[@]}"} --)
+  fi
+  err="$("${rm_cmd[@]}" "$q" 2>&1)" || {
+    rm_errors=$((rm_errors + 1))
+    echo "rm failed: $q (quarantined from $p): ${err:0:200}" >> "$ERRORS_FILE"
+    return 1
+  }
+  rmdir "$qdir" 2>/dev/null || true
+  log "deleted $label $p (${kb} KB)"
 }
 
 remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id> <reaudit-fn> [reaudit-args...]
@@ -479,6 +528,160 @@ remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id> <reaudit-fn> [r
   log "deleted $label $p (${kb} KB)"
 }
 
+# ── the clone policy audit — the ONLY copy ───────────────────
+# Runs ONCE, against <audit-path>, and reports against <report-path> (the
+# original name, which is what an operator recognises). It used to exist
+# twice — a pre-quarantine audit and a weaker post-quarantine re-audit — and
+# the two drifted: the second trusted mutable cached refs/remotes/* and
+# skipped live reachability, so a writer that kept its cwd across the rename
+# could park a commit where only the dropped checks would have seen it.
+# Returns 0 = safe to delete. A refusal has ALREADY held and counted itself.
+clone_policy_audit() {  # <audit-path> <report-path>
+  local ap="$1" rp="$2" probe_out rc
+  # Git probes — a failed probe is NEVER "clean" (fail closed).
+  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" remote 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    held_probe=$((held_probe + 1)); hold "probe-fail" "$rp" "git remote: ${probe_out:0:120}"; return 1
+  fi
+  if [ -z "$probe_out" ]; then
+    held_noremote=$((held_noremote + 1)); hold "no-remote" "$rp" "no remotes configured"; return 1
+  fi
+
+  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" status --porcelain 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    held_probe=$((held_probe + 1)); hold "probe-fail" "$rp" "git status: ${probe_out:0:120}"; return 1
+  fi
+  if [ -n "$probe_out" ]; then
+    held_dirty=$((held_dirty + 1)); hold "dirty" "$rp" "$(echo "$probe_out" | wc -l | tr -d ' ') dirty path(s)"; return 1
+  fi
+
+  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" log --all --not --remotes --oneline 2>&1 | head -5)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    held_probe=$((held_probe + 1)); hold "probe-fail" "$rp" "git log: ${probe_out:0:120}"; return 1
+  fi
+  if [ -n "$probe_out" ]; then
+    held_dirty=$((held_dirty + 1)); hold "unpushed" "$rp" "commits not on any remote"; return 1
+  fi
+
+  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" stash list 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    held_probe=$((held_probe + 1)); hold "probe-fail" "$rp" "git stash: ${probe_out:0:120}"; return 1
+  fi
+  if [ -n "$probe_out" ]; then
+    held_dirty=$((held_dirty + 1)); hold "stash" "$rp" "stash entries present"; return 1
+  fi
+
+  # Ref parity, by NAME and OBJECT, against the LIVE server: commit
+  # reachability (above) is not ref safety — a local branch or tag whose
+  # exact (name, object-id) pair is not on the server right now still loses
+  # its pointer (and an annotated tag its message object) on deletion.
+  # Cached refs/remotes/* are NOT proof: a branch deleted server-side after
+  # the clone's last fetch leaves a stale tracking ref that vouches for
+  # itself. One ls-remote snapshot covers heads and tags; it is network, but
+  # only candidates that survived every other gate reach this, and any
+  # failure holds — never passes.
+  local live_refs local_refs bad_ref refsha refname live_sha live_unreachable
+  rc=0; live_refs="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" ls-remote origin 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    held_probe=$((held_probe + 1)); hold "probe-fail" "$rp" "git ls-remote: ${live_refs:0:120}"; return 1
+  fi
+  rc=0; local_refs="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" for-each-ref refs/heads refs/tags --format='%(objectname) %(refname)' 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    held_probe=$((held_probe + 1)); hold "probe-fail" "$rp" "git for-each-ref: ${local_refs:0:120}"; return 1
+  fi
+  # Tags: exact (sha, refname) live match — tags are immutable by
+  # convention, and an annotated tag OBJECT differing from origin's is data.
+  # Branches: BOTH conditions —
+  #   (a) a cached same-named refs/remotes/*/<name> at the SAME sha (a
+  #       diverged local pointer whose tip is merely reachable elsewhere
+  #       must hold), and
+  #   (b) the name exists on the LIVE server (a branch deleted server-side
+  #       after the last fetch leaves a stale tracking ref vouching for
+  #       itself — cached refs alone are not proof).
+  # Live exact-sha parity for branches would hold every stale clone forever
+  # (a stale local main is always behind the live main); (a)+(b) keeps the
+  # pointer-safety contract without reducing the sweeper to a no-op.
+  bad_ref=""
+  while IFS=' ' read -r refsha refname; do
+    [ -n "$refname" ] || continue
+    case "$refname" in
+      refs/tags/*)
+        if ! printf '%s\n' "$live_refs" \
+            | awk -v s="$refsha" -v r="$refname" '$1 == s && $2 == r { found = 1 } END { exit found ? 0 : 1 }'; then
+          bad_ref="$refname"; break
+        fi ;;
+      *)
+        if ! GIT_OPTIONAL_LOCKS=0 git -C "$ap" for-each-ref "refs/remotes/*/${refname#refs/heads/}" --format='%(objectname)' 2>/dev/null \
+            | grep -qxF -- "$refsha"; then
+          bad_ref="$refname"; break
+        fi
+        live_sha="$(printf '%s\n' "$live_refs" | awk -v r="$refname" '$2 == r { print $1; exit }')"
+        if [ -z "$live_sha" ]; then
+          bad_ref="$refname"; break
+        fi ;;
+    esac
+  done <<< "$local_refs"
+
+  # Live reachability for EVERY locally retained commit — HEAD included, so
+  # a detached HEAD backed only by a stale cached tracking ref (its server
+  # branch force-pushed or deleted) can never be lost. One namespace fetch
+  # of all live heads, then any commit reachable from --all (HEAD, branches,
+  # tags, stash tip, cached remotes) but not from the live snapshot holds.
+  live_unreachable=""
+  if [ -z "$bad_ref" ]; then
+    # A sweep killed after fetching leaves stale refs/sweep-live/* that the
+    # --glob check below would trust as live proof: clear the namespace
+    # BEFORE fetching, fail-closed, and fetch with pruning as the belt.
+    if ! GIT_OPTIONAL_LOCKS=0 git -C "$ap" for-each-ref refs/sweep-live --format='%(refname)' 2>/dev/null \
+        | while IFS= read -r stale_ref; do
+            git -C "$ap" update-ref -d "$stale_ref" || exit 1
+          done; then
+      live_unreachable="probe-failed: could not clear stale sweep-live refs"
+    elif ! GIT_OPTIONAL_LOCKS=0 git -C "$ap" fetch --quiet --prune origin '+refs/heads/*:refs/sweep-live/heads/*' 2>/dev/null; then
+      live_unreachable="fetch-failed"
+    else
+      rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$ap" log --all --not --glob='refs/sweep-live' --oneline 2>&1 | head -3)" || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        live_unreachable="probe-failed: ${probe_out:0:100}"
+      elif [ -n "$probe_out" ]; then
+        live_unreachable="commits not reachable from live origin"
+      fi
+    fi
+  fi
+  # Drop the isolated-namespace refs whatever the outcome (a held clone must
+  # not accumulate sweep artifacts; fetched objects are unreferenced and gc-able).
+  GIT_OPTIONAL_LOCKS=0 git -C "$ap" for-each-ref refs/sweep-live --format='%(refname)' 2>/dev/null \
+    | while IFS= read -r stale_ref; do
+        git -C "$ap" update-ref -d "$stale_ref" 2>/dev/null || true
+      done
+  if [ -n "$bad_ref" ]; then
+    held_dirty=$((held_dirty + 1))
+    case "$bad_ref" in
+      refs/tags/*) hold "local-tag" "$rp" "'${bad_ref#refs/tags/}' is absent from origin or at a different object" ;;
+      *) hold "local-branch" "$rp" "'${bad_ref#refs/heads/}' diverges from its tracking ref or is gone from origin (live)" ;;
+    esac
+    return 1
+  fi
+  if [ -n "$live_unreachable" ]; then
+    case "$live_unreachable" in
+      fetch-failed|probe-failed*)
+        held_probe=$((held_probe + 1)); hold "probe-fail" "$rp" "live-reachability: $live_unreachable" ;;
+      *)
+        held_dirty=$((held_dirty + 1)); hold "unpushed-live" "$rp" "$live_unreachable" ;;
+    esac
+    return 1
+  fi
+
+  # Pre-rm recheck: in-progress operations and last-minute writes.
+  if [ -e "$ap/.git/index.lock" ] || [ -e "$ap/.git/MERGE_HEAD" ] \
+     || [ -e "$ap/.git/rebase-merge" ] || [ -e "$ap/.git/rebase-apply" ]; then
+    held_inuse=$((held_inuse + 1)); hold "in-use" "$rp" "git operation in progress"; return 1
+  fi
+  if tree_fresh_since "$ap" "$WINDOW_REF"; then
+    active=$((active + 1)); return 1
+  fi
+  return 0
+}
 # ── per-candidate policy ─────────────────────────────────────
 sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   local d="$1" cutoff="$2" ref="$3" lane="$4"
@@ -568,7 +771,9 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     return 0
   fi
 
-  # Git clone lanes.
+  # Git clone lanes. The cheap staleness gates run on the LIVE path: they only
+  # decide whether this is a candidate at all, and quarantining a clone that is
+  # merely fresh would rename a directory somebody is actively working in.
   if tree_fresh_since "$d" "$ref"; then
     active=$((active + 1)); return 0
   fi
@@ -585,194 +790,39 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
     return 0
   fi
 
-  # Git probes — a failed probe is NEVER "clean" (fail closed).
-  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" remote 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git remote: ${probe_out:0:120}"; return 0
-  fi
-  if [ -z "$probe_out" ]; then
-    held_noremote=$((held_noremote + 1)); hold "no-remote" "$d" "no remotes configured"; return 0
-  fi
-
-  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" status --porcelain 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git status: ${probe_out:0:120}"; return 0
-  fi
-  if [ -n "$probe_out" ]; then
-    held_dirty=$((held_dirty + 1)); hold "dirty" "$d" "$(echo "$probe_out" | wc -l | tr -d ' ') dirty path(s)"; return 0
-  fi
-
-  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" log --all --not --remotes --oneline 2>&1 | head -5)" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git log: ${probe_out:0:120}"; return 0
-  fi
-  if [ -n "$probe_out" ]; then
-    held_dirty=$((held_dirty + 1)); hold "unpushed" "$d" "commits not on any remote"; return 0
-  fi
-
-  rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" stash list 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git stash: ${probe_out:0:120}"; return 0
-  fi
-  if [ -n "$probe_out" ]; then
-    held_dirty=$((held_dirty + 1)); hold "stash" "$d" "stash entries present"; return 0
-  fi
-
-  # Ref parity, by NAME and OBJECT, against the LIVE server: commit
-  # reachability (above) is not ref safety — a local branch or tag whose
-  # exact (name, object-id) pair is not on the server right now still loses
-  # its pointer (and an annotated tag its message object) on deletion.
-  # Cached refs/remotes/* are NOT proof: a branch deleted server-side after
-  # the clone's last fetch leaves a stale tracking ref that vouches for
-  # itself. One ls-remote snapshot covers heads and tags; it is network, but
-  # only candidates that survived every other gate reach this, and any
-  # failure holds — never passes.
-  local live_refs local_refs bad_ref refsha refname live_sha live_unreachable
-  rc=0; live_refs="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" ls-remote origin 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git ls-remote: ${live_refs:0:120}"; return 0
-  fi
-  rc=0; local_refs="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/heads refs/tags --format='%(objectname) %(refname)' 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "git for-each-ref: ${local_refs:0:120}"; return 0
-  fi
-  # Tags: exact (sha, refname) live match — tags are immutable by
-  # convention, and an annotated tag OBJECT differing from origin's is data.
-  # Branches: BOTH conditions —
-  #   (a) a cached same-named refs/remotes/*/<name> at the SAME sha (a
-  #       diverged local pointer whose tip is merely reachable elsewhere
-  #       must hold), and
-  #   (b) the name exists on the LIVE server (a branch deleted server-side
-  #       after the last fetch leaves a stale tracking ref vouching for
-  #       itself — cached refs alone are not proof).
-  # Live exact-sha parity for branches would hold every stale clone forever
-  # (a stale local main is always behind the live main); (a)+(b) keeps the
-  # pointer-safety contract without reducing the sweeper to a no-op.
-  bad_ref=""
-  while IFS=' ' read -r refsha refname; do
-    [ -n "$refname" ] || continue
-    case "$refname" in
-      refs/tags/*)
-        if ! printf '%s\n' "$live_refs" \
-            | awk -v s="$refsha" -v r="$refname" '$1 == s && $2 == r { found = 1 } END { exit found ? 0 : 1 }'; then
-          bad_ref="$refname"; break
-        fi ;;
-      *)
-        if ! GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref "refs/remotes/*/${refname#refs/heads/}" --format='%(objectname)' 2>/dev/null \
-            | grep -qxF -- "$refsha"; then
-          bad_ref="$refname"; break
-        fi
-        live_sha="$(printf '%s\n' "$live_refs" | awk -v r="$refname" '$2 == r { print $1; exit }')"
-        if [ -z "$live_sha" ]; then
-          bad_ref="$refname"; break
-        fi ;;
-    esac
-  done <<< "$local_refs"
-
-  # Live reachability for EVERY locally retained commit — HEAD included, so
-  # a detached HEAD backed only by a stale cached tracking ref (its server
-  # branch force-pushed or deleted) can never be lost. One namespace fetch
-  # of all live heads, then any commit reachable from --all (HEAD, branches,
-  # tags, stash tip, cached remotes) but not from the live snapshot holds.
-  live_unreachable=""
-  if [ -z "$bad_ref" ]; then
-    # A sweep killed after fetching leaves stale refs/sweep-live/* that the
-    # --glob check below would trust as live proof: clear the namespace
-    # BEFORE fetching, fail-closed, and fetch with pruning as the belt.
-    if ! GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/sweep-live --format='%(refname)' 2>/dev/null \
-        | while IFS= read -r stale_ref; do
-            git -C "$d" update-ref -d "$stale_ref" || exit 1
-          done; then
-      live_unreachable="probe-failed: could not clear stale sweep-live refs"
-    elif ! GIT_OPTIONAL_LOCKS=0 git -C "$d" fetch --quiet --prune origin '+refs/heads/*:refs/sweep-live/heads/*' 2>/dev/null; then
-      live_unreachable="fetch-failed"
-    else
-      rc=0; probe_out="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" log --all --not --glob='refs/sweep-live' --oneline 2>&1 | head -3)" || rc=$?
-      if [ "$rc" -ne 0 ]; then
-        live_unreachable="probe-failed: ${probe_out:0:100}"
-      elif [ -n "$probe_out" ]; then
-        live_unreachable="commits not reachable from live origin"
-      fi
+  # From here the object leaves the namespace FIRST, and size, policy audit and
+  # removal all run on the private name. That is what makes the audit
+  # authoritative: nothing can be substituted after it passes, and there is no
+  # second copy of the policy to drift out of sync with this one.
+  local audit_path="$d" qpath="" qdir=""
+  if [ "$APPLY" -eq 1 ]; then
+    if ! quarantine_candidate "$d" "$cand_id"; then
+      held_inuse=$((held_inuse + 1))
+      hold "in-use" "$d" "$QUARANTINE_ERROR"
+      return 0
     fi
+    qpath="$QPATH"; qdir="$QDIR"; audit_path="$qpath"
   fi
-  # Drop the isolated-namespace refs whatever the outcome (a held clone must
-  # not accumulate sweep artifacts; fetched objects are unreferenced and gc-able).
-  GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/sweep-live --format='%(refname)' 2>/dev/null \
-    | while IFS= read -r stale_ref; do
-        git -C "$d" update-ref -d "$stale_ref" 2>/dev/null || true
-      done
-  if [ -n "$bad_ref" ]; then
-    held_dirty=$((held_dirty + 1))
-    case "$bad_ref" in
-      refs/tags/*) hold "local-tag" "$d" "'${bad_ref#refs/tags/}' is absent from origin or at a different object" ;;
-      *) hold "local-branch" "$d" "'${bad_ref#refs/heads/}' diverges from its tracking ref or is gone from origin (live)" ;;
-    esac
-    return 0
-  fi
-  if [ -n "$live_unreachable" ]; then
-    case "$live_unreachable" in
-      fetch-failed|probe-failed*)
-        held_probe=$((held_probe + 1)); hold "probe-fail" "$d" "live-reachability: $live_unreachable" ;;
-      *)
-        held_dirty=$((held_dirty + 1)); hold "unpushed-live" "$d" "$live_unreachable" ;;
-    esac
+
+  # du BEFORE the audit, deliberately: the audit must be the LAST thing that
+  # happens before the rm, with no seam in between for anything to change.
+  head_sha="$(GIT_OPTIONAL_LOCKS=0 git -C "$audit_path" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  kb="$(entry_kb "$audit_path")"
+
+  if ! clone_policy_audit "$audit_path" "$d"; then
+    if [ -n "$qpath" ]; then restore_quarantine "$qpath" "$d" "$qdir"; fi
     return 0
   fi
 
-  # Pre-rm recheck: in-progress operations and last-minute writes.
-  if [ -e "$d/.git/index.lock" ] || [ -e "$d/.git/MERGE_HEAD" ] \
-     || [ -e "$d/.git/rebase-merge" ] || [ -e "$d/.git/rebase-apply" ]; then
-    held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "git operation in progress"; return 0
+  if [ "$APPLY" -eq 0 ]; then
+    log "DRY-RUN: would delete clone (HEAD $head_sha) $d (${kb} KB)"
+    swept=$((swept + 1)); freed_kb=$((freed_kb + kb))
+    return 0
   fi
-  if tree_fresh_since "$d" "$WINDOW_REF"; then
-    active=$((active + 1)); return 0
-  fi
-
-  # Size and display sha are computed BEFORE the final audit: du over a
-  # multi-GB clone takes seconds, and nothing may widen the audit→rm window.
-  local audit_head
-  audit_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" rev-parse HEAD 2>/dev/null || echo unresolvable)"
-  head_sha="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-  kb="$(entry_kb "$d")"
-
-  # A clean checkout during du moves HEAD to another pushed commit and
-  # freshens the worktree without touching status/stash/refs/unpushed —
-  # re-check worktree freshness and HEAD position as part of the audit.
-  if tree_fresh_since "$d" "$WINDOW_REF"; then
-    active=$((active + 1)); return 0
-  fi
-  if [ "$audit_head" != "$(GIT_OPTIONAL_LOCKS=0 git -C "$d" rev-parse HEAD 2>/dev/null || echo re-unresolvable)" ]; then
-    held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "HEAD moved between audit and removal"; return 0
-  fi
-
-  # TOCTOU rail: the live-network probes above widen the audit→rm window,
-  # and the .git-pruned freshness rail cannot see git-only writes (a new
-  # ref, stash, or index change made by a concurrent writer mid-sweep).
-  # Re-audit the local git state and require it UNCHANGED before removal.
-  local recheck
-  rc=0; recheck="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" status --porcelain 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ] || [ -n "$recheck" ]; then
-    held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "worktree changed between audit and removal"; return 0
-  fi
-  rc=0; recheck="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" stash list 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ] || [ -n "$recheck" ]; then
-    held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "stash appeared between audit and removal"; return 0
-  fi
-  rc=0; recheck="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" for-each-ref refs/heads refs/tags --format='%(objectname) %(refname)' 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ] || [ "$recheck" != "$local_refs" ]; then
-    held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "refs changed between audit and removal"; return 0
-  fi
-  # A concurrent detached-HEAD commit changes only HEAD + objects (clean
-  # status, no refs) — re-run the unpushed-content probe, which includes
-  # HEAD via --all, so such a commit can never be deleted with the clone.
-  rc=0; recheck="$(GIT_OPTIONAL_LOCKS=0 git -C "$d" log --all --not --remotes --oneline 2>&1 | head -1)" || rc=$?
-  if [ "$rc" -ne 0 ] || [ -n "$recheck" ]; then
-    held_inuse=$((held_inuse + 1)); hold "in-use" "$d" "unpushed commit appeared between audit and removal"; return 0
-  fi
-
-  if remove_entry "$d" "$kb" "clone (HEAD $head_sha)" tree "$cand_id" reaudit_clone "$WINDOW_REF" "$local_refs"; then
+  if delete_quarantined "$qpath" "$qdir" "clone (HEAD $head_sha)" "$d" "$kb" 1; then
     swept=$((swept + 1)); freed_kb=$((freed_kb + kb))
   fi
+
 }
 
 sweep_root_depth1() {  # <root> <cutoff-epoch> <cutoff-ref-file> <lane>
