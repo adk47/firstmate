@@ -195,7 +195,7 @@ decide_and_alert() {
   CANDIDATES_JSON="$1" CATALOG_JSON="$2" STATE_FILE="$3" PAYLOAD_OUT="$4" PERSIST="$5" \
   SLACK_CHANNEL="$SLACK_CHANNEL" NOW_EPOCH="${NOW_EPOCH_FOR_AGE:-0}" \
   python3 - <<'PYEOF'
-import json, os
+import json, os, re
 
 cand_path  = os.environ["CANDIDATES_JSON"]
 catalog_path = os.environ["CATALOG_JSON"]
@@ -224,12 +224,40 @@ for item in items:
         item.get("deleted") is not None,
     )
 
-def is_stuck(survivor, loser):
+# A merge id that is not a well-formed UUID can never match a catalog row, so
+# the pair would alert on every tick forever. Observed live 2026-07-27: loser
+# `652996f-d521-48bb-97b0-dec38cdd508a` (35 chars, 7 hex in group 1) had been
+# re-alerting for ~1310h while all 12 well-formed siblings of the same bulk
+# call landed correctly — a request-layer typo the admin API accepted with a 200.
+UUID_RE = re.compile(
+    r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
+)
+
+# Verdicts that mean "the dedup intent is satisfied, stop paging humans".
+RESOLVED = frozenset({"landed", "collapsed"})
+
+
+def classify(survivor, loser):
+    """landed | collapsed | partial | invalid | stuck.
+
+    Split out of the original boolean is_stuck() on 2026-07-27: it returned
+    True for three materially different states, so an operator staring at a
+    page could not tell "never processed" (safe to re-fire once verified) from
+    "half folded" (a re-fire can DAMAGE the survivor) from "malformed id"
+    (will never land, no amount of re-firing helps).
+    """
     if loser not in catalog:
-        return True  # includeDeleted=true should return it; absence is unresolved
+        # includeDeleted=true should return it, so absence is unresolved — EXCEPT
+        # when the id is malformed, which can never match a row at all. Checked
+        # here rather than up front: presence in the catalog is itself proof the
+        # id is usable, whatever its shape, and the every-tick self-test uses
+        # short synthetic ids on purpose.
+        if not UUID_RE.match(loser):
+            return "invalid"
+        return "stuck"
     l_merged, l_deleted = catalog[loser]
     if l_merged == survivor and l_deleted:
-        return False  # exact requested-direction landing
+        return "landed"  # exact requested-direction landing
     # Loser is still active & unmerged. Before calling it a drop, check the
     # FLIPPED direction: the backend sometimes canonicalises the OTHER profile
     # as the survivor (e.g. by popularity/credits), so the nominal LOSER
@@ -240,8 +268,23 @@ def is_stuck(survivor, loser):
     # == 0c242160 — yet the nominal loser 0c242160 read active and false-flagged.)
     s = catalog.get(survivor)
     if s is not None and s[0] == loser and s[1]:
-        return False
-    return True  # active, missing, or merged elsewhere → requested pair unresolved
+        return "landed"
+    if l_merged and l_deleted:
+        # The loser folded into some THIRD profile, not the requested survivor.
+        if s is not None and s[0] == l_merged and s[1]:
+            # Survivor went to that same canonical → the whole group collapsed
+            # into one entity. Dedup intent satisfied. (Live 2026-07-27: losers
+            # 210ebd26/4c2ad26b AND recorded survivor c1f6b21d all carry
+            # mergedToId=4e675b56 after a superseding merge 16 min later — yet
+            # this alerted every tick for 326h because the old classifier had
+            # no case for collapse onto a third canonical.)
+            return "collapsed"
+        # Survivor untouched → PARTIALLY FOLDED. Never auto-resolve and never
+        # re-fire. (Live 2026-07-27: 695575be/8ce80ba2 folded into d9d61f4a —
+        # a co-loser of the same request — while requested survivor 451c4bbc
+        # received nothing.)
+        return "partial"
+    return "stuck"  # active or missing → requested pair never processed
 
 # previously-alerted survivor:loser keys
 try:
@@ -250,21 +293,32 @@ try:
 except Exception:
     alerted = set()
 
-new_alerts = []  # (survivor, loser, requester, age_hours)
-resolved   = []  # previously-alerted pairs whose loser has since landed
+new_alerts  = []  # (survivor, loser, requester, age_hours) — never processed
+new_partial = []  # half-folded — re-firing these can damage the survivor
+new_invalid = []  # malformed id — can never land, fix at the request layer
+resolved    = []  # previously-alerted pairs whose loser has since landed
 new_alerted = set(alerted)
 for c in candidates:
-    stuck = is_stuck(c["survivor"], c["loser"])
+    verdict = classify(c["survivor"], c["loser"])
     age_h = (now - c["ts"]) / 3600 if now else 0
-    if stuck and c["key"] not in alerted:
-        new_alerts.append((c["survivor"], c["loser"], c.get("requester", ""), age_h))
-        new_alerted.add(c["key"])
-    elif not stuck and c["key"] in alerted:
-        # The async fold completed late — post a ✅ all-clear so #clio_devops
-        # isn't left telling humans to hand off a merge that already landed,
-        # and drop the pair from the alerted set.
-        resolved.append((c["survivor"], c["loser"], c.get("requester", ""), age_h))
-        new_alerted.discard(c["key"])
+    row = (c["survivor"], c["loser"], c.get("requester", ""), age_h)
+    if verdict in RESOLVED:
+        if c["key"] in alerted:
+            # The async fold completed late — post a ✅ all-clear so #clio_devops
+            # isn't left telling humans to hand off a merge that already landed,
+            # and drop the pair from the alerted set.
+            resolved.append(row)
+            new_alerted.discard(c["key"])
+        continue
+    if c["key"] in alerted:
+        continue  # already paged; stay deduped until it resolves
+    if verdict == "partial":
+        new_partial.append(row)
+    elif verdict == "invalid":
+        new_invalid.append(row)
+    else:
+        new_alerts.append(row)
+    new_alerted.add(c["key"])
 
 # Resolution must be driven by the ALERTED set, not just the candidate scan:
 # an alerted pair whose audit-log line is gone (log rotated/pruned) would
@@ -275,11 +329,11 @@ for c in candidates:
 candidate_keys = {c["key"] for c in candidates}
 for key in sorted(alerted - candidate_keys):
     survivor, _, loser = key.partition(":")
-    if loser and not is_stuck(survivor, loser):
+    if loser and classify(survivor, loser) in RESOLVED:
         resolved.append((survivor, loser, "", None))
         new_alerted.discard(key)
 
-if not new_alerts and not resolved:
+if not new_alerts and not new_partial and not new_invalid and not resolved:
     # Nothing new to page → leave the live alerted-set untouched (rewriting it
     # would be a no-op) and emit no payload.
     raise SystemExit(0)
@@ -317,6 +371,21 @@ if new_alerts:
                    "— do NOT blind re-merge, a re-fire against partially-folded state can damage "
                    "the survivor; verify the pair's current state first.",
                    "stuck", "≥")
+if new_partial:
+    lines += block(new_partial,
+                   f":warning: *Profile merge(s) PARTIALLY FOLDED — {len(new_partial)}*",
+                   "The loser folded into a DIFFERENT profile than the one requested, and the "
+                   "requested survivor received nothing. *Do NOT re-fire* — `merge` is not "
+                   "idempotent and a re-fire against half-folded state can damage the survivor. "
+                   "Hand to the catalog team (Aron / Oleg) for a manual reconciliation.",
+                   "partially folded", "≥")
+if new_invalid:
+    lines += block(new_invalid,
+                   f":no_entry: *Profile merge(s) with a MALFORMED id — {len(new_invalid)}*",
+                   "The requested id is not a well-formed UUID, so this merge can never match a "
+                   "catalog row and will never land no matter how often it is re-fired. Fix the "
+                   "request at source; no catalog action is possible.",
+                   "unlandable", "≥")
 if resolved:
     lines += block(resolved,
                    f":white_check_mark: *Profile merge(s) previously flagged have now LANDED — {len(resolved)}*",

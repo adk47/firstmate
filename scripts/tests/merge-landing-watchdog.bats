@@ -74,6 +74,13 @@ STUB
   export MERGE_LANDING_MIN_AGE_HOURS=6
   # Pin "now" so age math is deterministic. ts=1000 below is ~277h before this.
   export MERGE_LANDING_NOW_EPOCH=1001000
+
+  # Production-shaped ids for the branches where id SHAPE is what is under test.
+  # UUID_MISSING: well-formed but absent from the catalog → stuck.
+  # UUID_MALFORMED: 7 hex in group 1 (35 chars) — the real 2026-07-27 typo that
+  # re-alerted for ~1310h because it can never match a catalog row.
+  export UUID_MISSING="11111111-2222-4333-8444-555555555555"
+  export UUID_MALFORMED="652996f-d521-48bb-97b0-dec38cdd508a"
 }
 
 teardown() { rm -rf "$TEST_TMPDIR"; }
@@ -233,6 +240,9 @@ STUB
   [[ "$output" == *"no aged merge is unresolved"* ]]
 }
 
+# Loser folded somewhere other than the requested survivor, survivor untouched.
+# Still unresolved — but reported as PARTIALLY FOLDED rather than the ordinary
+# "verify + re-fire" page, because re-firing this state can damage the survivor.
 @test "loser merged to a different profile remains unresolved" {
   mergeline 1000 SURV L_WRONG
   cat > "$TEST_TMPDIR/bin/catalog-wrong-target" <<'STUB'
@@ -244,12 +254,18 @@ STUB
 
   run bash "$WD" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" == *"PARTIALLY FOLDED"* ]]
+  [[ "$output" == *"Do NOT re-fire"* ]]
   [[ "$output" == *"L_WRONG"* ]]
+  [[ "$output" != *"no aged merge is unresolved"* ]]
 }
 
+# A well-formed id that is simply absent from the catalog is STUCK. The id must
+# be UUID-shaped: a malformed id is a different verdict (see the malformed-id
+# test below), so using a synthetic short id here would silently test the wrong
+# branch.
 @test "missing loser is unresolved, never silently treated as landed" {
-  mergeline 1000 SURV L_MISSING
+  mergeline 1000 SURV "$UUID_MISSING"
   cat > "$TEST_TMPDIR/bin/catalog-missing-loser" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' '{"data":{"items":[{"id":"SURV","merged":null,"deleted":null}]}}'
@@ -260,11 +276,11 @@ STUB
   run bash "$WD" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"accepted but NOT landed"* ]]
-  [[ "$output" == *"L_MISSING"* ]]
+  [[ "$output" == *"$UUID_MISSING"* ]]
 }
 
 @test "valid empty catalog result leaves both missing profiles unresolved" {
-  mergeline 1000 SURV L_MISSING
+  mergeline 1000 SURV "$UUID_MISSING"
   cat > "$TEST_TMPDIR/bin/catalog-empty-list" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' '{"data":{"items":[]}}'
@@ -275,7 +291,70 @@ STUB
   run bash "$WD" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"accepted but NOT landed"* ]]
-  [[ "$output" == *"L_MISSING"* ]]
+  [[ "$output" == *"$UUID_MISSING"* ]]
+}
+
+# ── verdict classes beyond stuck/landed (added 2026-07-27) ──────────────────
+# The classifier used to return a bare boolean, so "never processed",
+# "half folded" and "malformed id" all rendered as the same red page — and the
+# latter two re-alerted forever because they can never resolve. Each now has
+# its own verdict and its own operator instruction.
+
+@test "malformed loser id → MALFORMED block, not the generic stuck page" {
+  mergeline 1000 SURV "$UUID_MALFORMED"
+  # Real API behaviour: an id that cannot exist is simply absent from items.
+  cat > "$TEST_TMPDIR/bin/catalog-omits-unknown" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[{"id":"SURV","merged":null,"deleted":null}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-omits-unknown"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-omits-unknown"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"MALFORMED id"* ]]
+  [[ "$output" == *"$UUID_MALFORMED"* ]]
+  [[ "$output" != *"accepted but NOT landed"* ]]
+}
+
+@test "loser AND survivor collapsed onto a third canonical → landed, not stuck" {
+  mergeline 1000 SURV L_COLLAPSED
+  # Superseding merge: both sides folded into THIRD 16 min later. Dedup intent
+  # satisfied — this must never page. (Live: 210ebd26/4c2ad26b + c1f6b21d →
+  # 4e675b56, which alerted every tick for 326h under the old classifier.)
+  cat > "$TEST_TMPDIR/bin/catalog-collapsed" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[
+  {"id":"L_COLLAPSED","merged":{"mergedToId":"THIRD"},"deleted":{"date":"2026-01-01"}},
+  {"id":"SURV","merged":{"mergedToId":"THIRD"},"deleted":{"date":"2026-01-01"}}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-collapsed"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-collapsed"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"L_COLLAPSED"* ]]
+  [[ "$output" != *"accepted but NOT landed"* ]]
+}
+
+@test "partially-folded pair does not auto-resolve on a later tick" {
+  # It is not landed, so the ✅ all-clear must never fire for it — otherwise the
+  # channel would tell humans a damaged-state merge was fine.
+  printf '%s\n' '["SURV:L_PARTIAL"]' > "$MERGE_LANDING_STATE_FILE"
+  mergeline 1000 SURV L_PARTIAL
+  cat > "$TEST_TMPDIR/bin/catalog-partial2" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[
+  {"id":"L_PARTIAL","merged":{"mergedToId":"OTHER"},"deleted":{"date":"2026-01-01"}},
+  {"id":"SURV","merged":null,"deleted":null}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-partial2"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-partial2"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"landed after"* ]]
+  [[ "$output" != *"have now LANDED"* ]]
 }
 
 @test "catalog query returns EMPTY rows (silent failure) → BLIND, exit 1" {
