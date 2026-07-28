@@ -74,6 +74,13 @@ STUB
   export MERGE_LANDING_MIN_AGE_HOURS=6
   # Pin "now" so age math is deterministic. ts=1000 below is ~277h before this.
   export MERGE_LANDING_NOW_EPOCH=1001000
+
+  # Production-shaped ids for the branches where id SHAPE is what is under test.
+  # UUID_MISSING: well-formed but absent from the catalog → stuck.
+  # UUID_MALFORMED: 7 hex in group 1 (35 chars) — the real 2026-07-27 typo that
+  # re-alerted for ~1310h because it can never match a catalog row.
+  export UUID_MISSING="11111111-2222-4333-8444-555555555555"
+  export UUID_MALFORMED="652996f-d521-48bb-97b0-dec38cdd508a"
 }
 
 teardown() { rm -rf "$TEST_TMPDIR"; }
@@ -233,6 +240,9 @@ STUB
   [[ "$output" == *"no aged merge is unresolved"* ]]
 }
 
+# Loser folded somewhere other than the requested survivor, survivor untouched.
+# Still unresolved — but reported as PARTIALLY FOLDED rather than the ordinary
+# "verify + re-fire" page, because re-firing this state can damage the survivor.
 @test "loser merged to a different profile remains unresolved" {
   mergeline 1000 SURV L_WRONG
   cat > "$TEST_TMPDIR/bin/catalog-wrong-target" <<'STUB'
@@ -244,12 +254,24 @@ STUB
 
   run bash "$WD" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" == *"PARTIALLY FOLDED"* ]]
+  [[ "$output" == *"Do NOT re-fire"* ]]
   [[ "$output" == *"L_WRONG"* ]]
+  [[ "$output" != *"no aged merge is unresolved"* ]]
+  # The REASON is load-bearing, not decoration: both backend guards test the
+  # survivor, so a re-fire on a half-folded pair does NOT raise — it silently
+  # re-points the loser. Wording that implies an error would invite the exact
+  # damage ("it'll just throw, safe to try"), so pin the mechanism.
+  [[ "$output" == *"SILENTLY SUCCEEDS"* ]]
+  [[ "$output" != *"not idempotent"* ]]
 }
 
+# A well-formed id that is simply absent from the catalog is STUCK. The id must
+# be UUID-shaped: a malformed id is a different verdict (see the malformed-id
+# test below), so using a synthetic short id here would silently test the wrong
+# branch.
 @test "missing loser is unresolved, never silently treated as landed" {
-  mergeline 1000 SURV L_MISSING
+  mergeline 1000 SURV "$UUID_MISSING"
   cat > "$TEST_TMPDIR/bin/catalog-missing-loser" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' '{"data":{"items":[{"id":"SURV","merged":null,"deleted":null}]}}'
@@ -260,11 +282,11 @@ STUB
   run bash "$WD" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"accepted but NOT landed"* ]]
-  [[ "$output" == *"L_MISSING"* ]]
+  [[ "$output" == *"$UUID_MISSING"* ]]
 }
 
 @test "valid empty catalog result leaves both missing profiles unresolved" {
-  mergeline 1000 SURV L_MISSING
+  mergeline 1000 SURV "$UUID_MISSING"
   cat > "$TEST_TMPDIR/bin/catalog-empty-list" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' '{"data":{"items":[]}}'
@@ -275,7 +297,283 @@ STUB
   run bash "$WD" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"accepted but NOT landed"* ]]
-  [[ "$output" == *"L_MISSING"* ]]
+  [[ "$output" == *"$UUID_MISSING"* ]]
+}
+
+# ── verdict classes beyond stuck/landed (added 2026-07-27) ──────────────────
+# The classifier used to return a bare boolean, so "never processed",
+# "half folded" and "malformed id" all rendered as the same red page — and the
+# latter two re-alerted forever because they can never resolve. Each now has
+# its own verdict and its own operator instruction.
+
+@test "malformed loser id → MALFORMED block, not the generic stuck page" {
+  mergeline 1000 SURV "$UUID_MALFORMED"
+  # Real API behaviour: an id that cannot exist is simply absent from items.
+  cat > "$TEST_TMPDIR/bin/catalog-omits-unknown" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[{"id":"SURV","merged":null,"deleted":null}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-omits-unknown"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-omits-unknown"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"MALFORMED id"* ]]
+  [[ "$output" == *"$UUID_MALFORMED"* ]]
+  [[ "$output" != *"accepted but NOT landed"* ]]
+}
+
+@test "loser AND survivor collapsed onto a third canonical → landed, not stuck" {
+  mergeline 1000 SURV L_COLLAPSED
+  # Superseding merge: both sides folded into THIRD 16 min later. Dedup intent
+  # satisfied — this must never page. (Live: 210ebd26/4c2ad26b + c1f6b21d →
+  # 4e675b56, which alerted every tick for 326h under the old classifier.)
+  cat > "$TEST_TMPDIR/bin/catalog-collapsed" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[
+  {"id":"L_COLLAPSED","merged":{"mergedToId":"THIRD"},"deleted":{"date":"2026-01-01"}},
+  {"id":"SURV","merged":{"mergedToId":"THIRD"},"deleted":{"date":"2026-01-01"}}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-collapsed"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-collapsed"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"L_COLLAPSED"* ]]
+  [[ "$output" != *"accepted but NOT landed"* ]]
+}
+
+@test "partially-folded pair does not auto-resolve on a later tick" {
+  # It is not landed, so the ✅ all-clear must never fire for it — otherwise the
+  # channel would tell humans a damaged-state merge was fine.
+  printf '%s\n' '["SURV:L_PARTIAL"]' > "$MERGE_LANDING_STATE_FILE"
+  mergeline 1000 SURV L_PARTIAL
+  cat > "$TEST_TMPDIR/bin/catalog-partial2" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[
+  {"id":"L_PARTIAL","merged":{"mergedToId":"OTHER"},"deleted":{"date":"2026-01-01"}},
+  {"id":"SURV","merged":null,"deleted":null}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-partial2"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-partial2"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"landed after"* ]]
+  [[ "$output" != *"have now LANDED"* ]]
+}
+
+# ── verdict-versioned dedupe state (added 2026-07-27) ───────────────────────
+# State used to be a bare list of keys, so dedupe was verdict-BLIND: a pair
+# already paged as generic "stuck" stayed silent forever and could never deliver
+# the newer partial/malformed guidance. Live state on 2026-07-27 already held
+# all three real partial/malformed pairs, so shipping the classifier alone would
+# have left operators with only the old "verify + re-fire" page — the dangerous
+# instruction for a half-folded merge. Legacy lists load as verdict "stuck".
+
+_partial_catalog() { # $1 loser id
+  cat > "$TEST_TMPDIR/bin/catalog-mig" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[
+  {"id":"$1","merged":{"mergedToId":"OTHER"},"deleted":{"date":"2026-01-01"}},
+  {"id":"SURV","merged":null,"deleted":null}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-mig"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-mig"
+}
+
+@test "legacy list state: previously-alerted PARTIAL pair re-pages once with do-not-re-fire" {
+  printf '%s\n' '["SURV:L_MIGP"]' > "$MERGE_LANDING_STATE_FILE"   # old format, verdict-blind
+  mergeline 1000 SURV L_MIGP
+  _partial_catalog L_MIGP
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PARTIALLY FOLDED"* ]]
+  [[ "$output" == *"Do NOT re-fire"* ]]
+  [[ "$output" == *"L_MIGP"* ]]
+
+  # ...and exactly once: the verdict is now recorded, so the next tick is quiet.
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no aged merge is unresolved"* ]]
+}
+
+@test "legacy list state: previously-alerted MALFORMED pair re-pages once" {
+  printf '%s\n' "[\"SURV:$UUID_MALFORMED\"]" > "$MERGE_LANDING_STATE_FILE"
+  mergeline 1000 SURV "$UUID_MALFORMED"
+  cat > "$TEST_TMPDIR/bin/catalog-mig2" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[{"id":"SURV","merged":null,"deleted":null}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-mig2"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-mig2"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"MALFORMED id"* ]]
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no aged merge is unresolved"* ]]
+}
+
+@test "legacy list state: an unchanged STUCK pair does NOT re-page" {
+  # The migration must not turn every pre-existing key into fresh noise.
+  printf '%s\n' '["SURV:L_STUCK"]' > "$MERGE_LANDING_STATE_FILE"
+  mergeline 1000 SURV L_STUCK
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no aged merge is unresolved"* ]]
+}
+
+@test "state is persisted as key→verdict and survives a round-trip" {
+  mergeline 1000 SURV L_MIGP
+  _partial_catalog L_MIGP
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  run python3 -c "import json;d=json.load(open('$MERGE_LANDING_STATE_FILE'));import sys;sys.exit(0 if isinstance(d,dict) and d.get('SURV:L_MIGP')=='partial' else 1)"
+  [ "$status" -eq 0 ]
+}
+
+# ── queue attribution (added 2026-07-27) ────────────────────────────────────
+# A never-landed merge is either still queued (wait) or was deleted by topic
+# retention (it will NEVER land — rebuild from the audit trail). Telling an
+# operator to wait for a message that no longer exists is the exact wrong call,
+# so the bullet must say which. The probe is best-effort and MUST fail open.
+
+# Fake kubectl: `get pods` names a broker, `rpk group describe` emits the real
+# table shape, `rpk topic consume -f %d` emits the oldest retained timestamp in
+# ms. $QUEUE_STUB_TS_MS controls the retention frontier.
+_queue_stub() { # $1 oldest-retained-ms
+  cat > "$TEST_TMPDIR/bin/kubectl-stub" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    consume) echo "$1"; exit 0 ;;
+    describe) printf '%s\n' "TOTAL-LAG                4242" \\
+                "industry-proc-catalog-admin-prod  0  161717  86085  182534  20817"; exit 0 ;;
+  esac
+done
+case "\$1" in get) echo "pod/redpanda-v2-0"; exit 0 ;; esac
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/kubectl-stub"
+  export MERGE_LANDING_QUEUE_PROBE_CMD="$TEST_TMPDIR/bin/kubectl-stub"
+}
+
+@test "queue probe: request older than the retention frontier → msg GONE" {
+  mergeline 1000 SURV L_STUCK          # request ts=1000
+  _queue_stub 2000000                  # frontier = 2000s > 1000 → deleted
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" == *"msg GONE (past retention"* ]]
+  [[ "$output" != *"presence UNCONFIRMED"* ]]
+}
+
+@test "queue probe: request newer than the frontier → in-window, presence UNCONFIRMED" {
+  mergeline 1000 SURV L_STUCK          # request ts=1000
+  _queue_stub 500000                   # frontier = 500s < 1000 → still retained
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"in retention window, presence UNCONFIRMED (lane 4242 behind)"* ]]
+  [[ "$output" != *"msg GONE"* ]]
+}
+
+# The frontier is only a proof of absence if EVERY partition was read. Skipping
+# a failed one and taking MIN over the survivors RAISES the frontier, which makes
+# older requests read as "msg GONE" while the skipped partition may still retain
+# them — an operator would rebuild a queued request, and a duplicate merge can
+# silently re-point a loser. So a single partition failure must kill the whole
+# probe, not just that partition.
+@test "queue probe: one partition read failing kills the whole probe" {
+  mergeline 1000 SURV L_STUCK          # ts=1000, older than p0's frontier below
+  cat > "$TEST_TMPDIR/bin/kubectl-p1fail" <<'STUB'
+#!/usr/bin/env bash
+# Parse the ACTUAL partition from the `-p <n>` pair. Matching a bare "1"
+# anywhere in argv is wrong: `rpk topic consume ... -n 1` contains a literal 1,
+# which would make every partition fail and quietly test the wrong branch.
+verb=""; part=""; prev=""
+for a in "$@"; do
+  case "$a" in consume|describe|get) [ -z "$verb" ] && verb="$a" ;; esac
+  [ "$prev" = "-p" ] && part="$a"
+  prev="$a"
+done
+case "$verb" in
+  get) echo "pod/redpanda-v2-0"; exit 0 ;;
+  describe)
+    printf '%s\n' "TOTAL-LAG                4242" \
+      "industry-proc-catalog-admin-prod  0  100  50  200  10" \
+      "industry-proc-catalog-admin-prod  1  100  50  200  10"; exit 0 ;;
+  consume)
+    # partition 1 unreadable; partition 0 answers with a LATE frontier that,
+    # taken alone, would wrongly label the ts=1000 request "msg GONE".
+    [ "$part" = "1" ] && exit 1
+    echo 2000000; exit 0 ;;
+esac
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/kubectl-p1fail"
+  export MERGE_LANDING_QUEUE_PROBE_CMD="$TEST_TMPDIR/bin/kubectl-p1fail"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  # The stuck page must still fire — probe failure never suppresses an alert...
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" == *"L_STUCK"* ]]
+  [[ "$output" == *"queue probe unavailable"* ]]
+  # ...but it must carry NO attribution, and above all must not claim GONE from
+  # a partial frontier (p0 alone would have said GONE for this ts=1000 request).
+  [[ "$output" != *"msg GONE"* ]]
+  [[ "$output" != *"presence UNCONFIRMED"* ]]
+}
+
+@test "queue probe failure degrades to a plain stuck page, never suppresses it" {
+  mergeline 1000 SURV L_STUCK
+  cat > "$TEST_TMPDIR/bin/kubectl-broken" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+  chmod +x "$TEST_TMPDIR/bin/kubectl-broken"
+  export MERGE_LANDING_QUEUE_PROBE_CMD="$TEST_TMPDIR/bin/kubectl-broken"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" == *"L_STUCK"* ]]
+  [[ "$output" == *"queue probe unavailable"* ]]
+  [[ "$output" != *"msg GONE"* ]]
+  [[ "$output" != *"presence UNCONFIRMED"* ]]
+}
+
+@test "queue probe is skipped entirely when disabled" {
+  mergeline 1000 SURV L_STUCK
+  export MERGE_LANDING_QUEUE_PROBE=0
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accepted but NOT landed"* ]]
+  [[ "$output" != *"queue probe"* ]]
+}
+
+@test "queue attribution never appears on partial or malformed verdicts" {
+  # Those are not queue questions — a half-folded merge already ran.
+  mergeline 1000 SURV L_WRONG2
+  _queue_stub 2000000
+  cat > "$TEST_TMPDIR/bin/catalog-partial3" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"data":{"items":[
+  {"id":"L_WRONG2","merged":{"mergedToId":"OTHER"},"deleted":{"date":"2026-01-01"}},
+  {"id":"SURV","merged":null,"deleted":null}]}}'
+STUB
+  chmod +x "$TEST_TMPDIR/bin/catalog-partial3"
+  export MERGE_LANDING_CATALOG_CMD="$TEST_TMPDIR/bin/catalog-partial3"
+
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PARTIALLY FOLDED"* ]]
+  [[ "$output" != *"msg GONE"* ]]
+  [[ "$output" != *"presence UNCONFIRMED"* ]]
 }
 
 @test "catalog query returns EMPTY rows (silent failure) → BLIND, exit 1" {

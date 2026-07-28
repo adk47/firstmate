@@ -63,6 +63,11 @@
 #   MERGE_LANDING_LOCKFILE       single-run lock
 #   MERGE_LANDING_SLACK_CHANNEL  target channel (default #clio_devops)
 #   MERGE_LANDING_SKIP_HOST_GUARD 1 = skip the ovh-node-8 guard (tests)
+#   MERGE_LANDING_QUEUE_PROBE    0 = skip the Redpanda probe entirely
+#   MERGE_LANDING_QUEUE_PROBE_CMD  kubectl-equivalent (default kubectl; tests stub)
+#   MERGE_LANDING_QUEUE_TOPIC    admin merge topic to probe
+#   MERGE_LANDING_QUEUE_NAMESPACE  namespace holding the Redpanda brokers
+#   MERGE_LANDING_QUEUE_PROBE_DEADLINE  whole-probe budget in seconds (default 120)
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -85,6 +90,11 @@ CATALOG_CMD="${MERGE_LANDING_CATALOG_CMD:-/usr/local/bin/muso}"
 CATALOG_ENV="${MERGE_LANDING_CATALOG_ENV:-prod}"
 CATALOG_BATCH_SIZE="${MERGE_LANDING_CATALOG_BATCH_SIZE:-40}"
 SKIP_HOST_GUARD="${MERGE_LANDING_SKIP_HOST_GUARD:-0}"
+QUEUE_PROBE="${MERGE_LANDING_QUEUE_PROBE:-1}"
+QUEUE_PROBE_CMD="${MERGE_LANDING_QUEUE_PROBE_CMD:-kubectl}"
+QUEUE_TOPIC="${MERGE_LANDING_QUEUE_TOPIC:-industry-proc-catalog-admin-prod}"
+QUEUE_NAMESPACE="${MERGE_LANDING_QUEUE_NAMESPACE:-queuing}"
+QUEUE_PROBE_DEADLINE="${MERGE_LANDING_QUEUE_PROBE_DEADLINE:-120}"
 DRY_RUN=0
 
 # slack-notify.sh reads this (target channel).
@@ -179,6 +189,84 @@ PYEOF
 }
 
 # ──────────────────────────────────────────────────────────────
+# probe_queue — best-effort read of the admin merge topic's retention frontier
+# and consumer lag. Prints one JSON object on success; non-zero on any failure.
+#
+# WHY: a merge that never landed is in one of two very different states, and the
+# operator instruction is OPPOSITE in each. Either the message is still queued
+# (it will fold on its own once the lane drains — do nothing), or it was DELETED
+# by topic retention (it will NEVER fold; rebuild the request from the audit
+# trail). Root-caused 2026-07-27: this lane's ~14.8d drain time equals its
+# ~14.8d effective retention window, so the tail is deleted as fast as the head
+# advances and merges evaporate with NO dead-letter row and NO log line. Without
+# this distinction an operator waits forever for a message that no longer exists
+# — which is exactly the wrong call that was made during the investigation.
+#
+# Produce is KEYLESS (helpers/sqs_helper.py calls p.produce() with no key=), so
+# a merge may sit on any partition. A request is provably gone only if it
+# predates the oldest record retained on EVERY partition — hence MIN below,
+# which under-claims "gone" rather than over-claiming it.
+#
+# FAIL OPEN: every failure path returns non-zero and the caller then renders
+# exactly as it did before this probe existed. A broken kubectl, a moved broker
+# pod, or a slow cluster must never suppress or weaken a stuck-merge page.
+# ──────────────────────────────────────────────────────────────
+probe_queue() {
+  local pod group_out frontier_ms total_lag part start ts
+  [ "$QUEUE_PROBE" = "1" ] || return 1
+  command -v "$QUEUE_PROBE_CMD" >/dev/null 2>&1 || return 1
+
+  # Bound every cluster call individually: `timeout` cannot wrap a shell
+  # function, and a hung kubectl must not stall the 30-min cron tick.
+  _kq() { timeout 20 "$QUEUE_PROBE_CMD" "$@" 2>/dev/null; }
+
+  pod="$(_kq get pods -n "$QUEUE_NAMESPACE" -o name \
+         | sed -n 's|^pod/||p' | grep -E '^redpanda-v2-[0-9]+$' | head -1)" || return 1
+  [ -n "$pod" ] || return 1
+
+  # One call yields per-partition LOG-START-OFFSET plus TOTAL-LAG.
+  group_out="$(_kq exec -n "$QUEUE_NAMESPACE" "$pod" -c redpanda -- \
+                rpk group describe "$QUEUE_TOPIC")" || return 1
+  [ -n "$group_out" ] || return 1
+
+  total_lag="$(printf '%s\n' "$group_out" | awk '$1=="TOTAL-LAG"{print $2; exit}')"
+  case "$total_lag" in ''|*[!0-9]*) return 1 ;; esac
+
+  # Oldest RETAINED record per partition → the conservative frontier.
+  #
+  # EVERY partition must be read. Skipping a failed/timed-out/empty one and
+  # taking MIN over the survivors silently RAISES the frontier, which makes
+  # queue_note() label older requests "msg GONE" when the skipped partition may
+  # still retain them — an operator would then rebuild a request that is in fact
+  # queued, and a duplicate merge can silently re-point a loser (see the
+  # partial-fold note above). That is precisely the over-claim the MIN exists to
+  # prevent, so any partition read failure fails the WHOLE probe and we emit no
+  # attribution at all. Fail-open on the probe is safe; a wrong frontier is not.
+  frontier_ms=""
+  parts_expected=0
+  parts_read=0
+  probe_deadline=$(( SECONDS + QUEUE_PROBE_DEADLINE ))
+  while read -r part start; do
+    [ -n "$part" ] || continue
+    parts_expected=$((parts_expected + 1))
+    [ "$SECONDS" -lt "$probe_deadline" ] || return 1   # bound 20s × partition-count
+    ts="$(_kq exec -n "$QUEUE_NAMESPACE" "$pod" -c redpanda -- \
+          rpk topic consume "$QUEUE_TOPIC" -p "$part" -o "$start" -n 1 -f '%d\n' \
+          | tr -dc '0-9')"
+    case "$ts" in ''|*[!0-9]*) return 1 ;; esac
+    parts_read=$((parts_read + 1))
+    if [ -z "$frontier_ms" ] || [ "$ts" -lt "$frontier_ms" ]; then frontier_ms="$ts"; fi
+  done < <(printf '%s\n' "$group_out" | awk -v t="$QUEUE_TOPIC" '$1==t{print $2, $4}')
+
+  # No partitions enumerated, or coverage short of the full set → no proof.
+  [ "$parts_expected" -gt 0 ] || return 1
+  [ "$parts_read" -eq "$parts_expected" ] || return 1
+  [ -n "$frontier_ms" ] || return 1
+  printf '{"frontier_epoch":%s,"total_lag":%s,"topic":"%s"}\n' \
+    "$((frontier_ms / 1000))" "$total_lag" "$QUEUE_TOPIC"
+}
+
+# ──────────────────────────────────────────────────────────────
 # decide_and_alert — pure detection core.
 #   $1 candidates_json  $2 catalog_json  $3 state_file  $4 payload_out  $5 persist(0|1)
 # catalog_json is the live admin profile-list response. A requested-direction
@@ -194,8 +282,9 @@ PYEOF
 decide_and_alert() {
   CANDIDATES_JSON="$1" CATALOG_JSON="$2" STATE_FILE="$3" PAYLOAD_OUT="$4" PERSIST="$5" \
   SLACK_CHANNEL="$SLACK_CHANNEL" NOW_EPOCH="${NOW_EPOCH_FOR_AGE:-0}" \
+  QUEUE_PROBE_JSON="${QUEUE_PROBE_JSON:-}" \
   python3 - <<'PYEOF'
-import json, os
+import json, os, re
 
 cand_path  = os.environ["CANDIDATES_JSON"]
 catalog_path = os.environ["CATALOG_JSON"]
@@ -204,6 +293,36 @@ payload_out= os.environ["PAYLOAD_OUT"]
 persist    = os.environ.get("PERSIST", "1") == "1"
 channel    = os.environ["SLACK_CHANNEL"]
 now        = int(os.environ.get("NOW_EPOCH", "0"))
+
+# Optional Redpanda probe (see probe_queue). Absent/garbage → no queue verdict
+# is rendered and the page reads exactly as it did before the probe existed.
+# A probe failure must never change WHETHER we alert, only how much detail the
+# bullet carries.
+try:
+    _p = json.loads(os.environ.get("QUEUE_PROBE_JSON") or "{}")
+    frontier = int(_p.get("frontier_epoch") or 0)
+    total_lag = int(_p.get("total_lag") or 0)
+except Exception:
+    frontier, total_lag = 0, 0
+
+
+def queue_note(ts):
+    """What the retention frontier proves about the enqueued merge message.
+
+    The frontier can only ever prove ABSENCE. A request older than the oldest
+    retained record cannot still be in the topic — that is definitive and
+    actionable. A newer one is merely *not disproven*: it may have been
+    consumed-and-failed, never produced, or be genuinely waiting. Deliberately
+    NOT phrased as "may still be queued" — on 2026-07-27 an exhaustive scan of
+    all 76k unconsumed messages found ZERO profile merges, so a
+    presence-implying label would send operators to wait for something that was
+    not there, which is the precise error this probe exists to prevent.
+    """
+    if not frontier or not ts:
+        return ""
+    if ts < frontier:
+        return " — msg GONE (past retention; rebuild from the audit trail)"
+    return f" — in retention window, presence UNCONFIRMED (lane {total_lag} behind)"
 
 with open(cand_path) as f:
     candidates = json.load(f)
@@ -224,12 +343,40 @@ for item in items:
         item.get("deleted") is not None,
     )
 
-def is_stuck(survivor, loser):
+# A merge id that is not a well-formed UUID can never match a catalog row, so
+# the pair would alert on every tick forever. Observed live 2026-07-27: loser
+# `652996f-d521-48bb-97b0-dec38cdd508a` (35 chars, 7 hex in group 1) had been
+# re-alerting for ~1310h while all 12 well-formed siblings of the same bulk
+# call landed correctly — a request-layer typo the admin API accepted with a 200.
+UUID_RE = re.compile(
+    r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
+)
+
+# Verdicts that mean "the dedup intent is satisfied, stop paging humans".
+RESOLVED = frozenset({"landed", "collapsed"})
+
+
+def classify(survivor, loser):
+    """landed | collapsed | partial | invalid | stuck.
+
+    Split out of the original boolean is_stuck() on 2026-07-27: it returned
+    True for three materially different states, so an operator staring at a
+    page could not tell "never processed" (safe to re-fire once verified) from
+    "half folded" (a re-fire can DAMAGE the survivor) from "malformed id"
+    (will never land, no amount of re-firing helps).
+    """
     if loser not in catalog:
-        return True  # includeDeleted=true should return it; absence is unresolved
+        # includeDeleted=true should return it, so absence is unresolved — EXCEPT
+        # when the id is malformed, which can never match a row at all. Checked
+        # here rather than up front: presence in the catalog is itself proof the
+        # id is usable, whatever its shape, and the every-tick self-test uses
+        # short synthetic ids on purpose.
+        if not UUID_RE.match(loser):
+            return "invalid"
+        return "stuck"
     l_merged, l_deleted = catalog[loser]
     if l_merged == survivor and l_deleted:
-        return False  # exact requested-direction landing
+        return "landed"  # exact requested-direction landing
     # Loser is still active & unmerged. Before calling it a drop, check the
     # FLIPPED direction: the backend sometimes canonicalises the OTHER profile
     # as the survivor (e.g. by popularity/credits), so the nominal LOSER
@@ -240,31 +387,84 @@ def is_stuck(survivor, loser):
     # == 0c242160 — yet the nominal loser 0c242160 read active and false-flagged.)
     s = catalog.get(survivor)
     if s is not None and s[0] == loser and s[1]:
-        return False
-    return True  # active, missing, or merged elsewhere → requested pair unresolved
+        return "landed"
+    if l_merged and l_deleted:
+        # The loser folded into some THIRD profile, not the requested survivor.
+        if s is not None and s[0] == l_merged and s[1]:
+            # Survivor went to that same canonical → the whole group collapsed
+            # into one entity. Dedup intent satisfied. (Live 2026-07-27: losers
+            # 210ebd26/4c2ad26b AND recorded survivor c1f6b21d all carry
+            # mergedToId=4e675b56 after a superseding merge 16 min later — yet
+            # this alerted every tick for 326h because the old classifier had
+            # no case for collapse onto a third canonical.)
+            return "collapsed"
+        # Survivor untouched → PARTIALLY FOLDED. Never auto-resolve and never
+        # re-fire. (Live 2026-07-27: 695575be/8ce80ba2 folded into d9d61f4a —
+        # a co-loser of the same request — while requested survivor 451c4bbc
+        # received nothing.)
+        #
+        # This verdict is the most dangerous one to get wrong, because the
+        # backend does NOT protect against it: both guards in
+        # base_merge_link_operations.py:314-317 test the SURVIVOR
+        # (`main_obj.is_merged()`, and `main_obj.id in [loser.merged_to_id]`),
+        # so a loser already folded into some THIRD profile passes both. A
+        # re-fire therefore succeeds silently and re-points that loser away
+        # from where it actually landed — data loss with no error to catch.
+        return "partial"
+    return "stuck"  # active or missing → requested pair never processed
 
-# previously-alerted survivor:loser keys
+# Previously-alerted state: {"survivor:loser": verdict}.
+#
+# It used to be a bare LIST of keys, written before verdicts existed. Dedupe was
+# therefore verdict-blind: a pair already paged as generic "stuck" would stay
+# silent forever, so the partial/malformed pairs this script now warns about
+# would NEVER deliver their new guidance — the operator would be left with only
+# the old "verify + re-fire" page, which for a half-folded merge is the
+# dangerous instruction. Verified against the live state 2026-07-27: all three
+# real partial/malformed pairs were already in the set, and a simulated tick
+# emitted zero of the new blocks.
+#
+# A legacy list therefore loads as the verdict it implicitly meant — "stuck" —
+# so the first tick after this ships re-pages exactly those pairs whose true
+# verdict differs, once, and stays quiet afterwards.
 try:
     with open(state_file) as f:
-        alerted = set(json.load(f))
+        _raw = json.load(f)
+    if isinstance(_raw, dict):
+        alerted = {str(k): str(v) for k, v in _raw.items()}
+    else:
+        alerted = {str(k): "stuck" for k in _raw}
 except Exception:
-    alerted = set()
+    alerted = {}
 
-new_alerts = []  # (survivor, loser, requester, age_hours)
-resolved   = []  # previously-alerted pairs whose loser has since landed
-new_alerted = set(alerted)
+new_alerts  = []  # (survivor, loser, requester, age_hours) — never processed
+new_partial = []  # half-folded — re-firing these can damage the survivor
+new_invalid = []  # malformed id — can never land, fix at the request layer
+resolved    = []  # previously-alerted pairs whose loser has since landed
+new_alerted = dict(alerted)
 for c in candidates:
-    stuck = is_stuck(c["survivor"], c["loser"])
+    verdict = classify(c["survivor"], c["loser"])
     age_h = (now - c["ts"]) / 3600 if now else 0
-    if stuck and c["key"] not in alerted:
-        new_alerts.append((c["survivor"], c["loser"], c.get("requester", ""), age_h))
-        new_alerted.add(c["key"])
-    elif not stuck and c["key"] in alerted:
-        # The async fold completed late — post a ✅ all-clear so #clio_devops
-        # isn't left telling humans to hand off a merge that already landed,
-        # and drop the pair from the alerted set.
-        resolved.append((c["survivor"], c["loser"], c.get("requester", ""), age_h))
-        new_alerted.discard(c["key"])
+    row = (c["survivor"], c["loser"], c.get("requester", ""), age_h, "")
+    if verdict in RESOLVED:
+        if c["key"] in alerted:
+            # The async fold completed late — post a ✅ all-clear so #clio_devops
+            # isn't left telling humans to hand off a merge that already landed,
+            # and drop the pair from the alerted set.
+            resolved.append(row)
+            new_alerted.pop(c["key"], None)
+        continue
+    if alerted.get(c["key"]) == verdict:
+        continue  # already paged under THIS verdict; a changed verdict re-pages once
+    if verdict == "partial":
+        new_partial.append(row)
+    elif verdict == "invalid":
+        new_invalid.append(row)
+    else:
+        # Only a never-processed merge has a message to still be waiting for;
+        # a half-folded or malformed one is not a queue question.
+        new_alerts.append(row[:4] + (queue_note(c.get("ts", 0)),))
+    new_alerted[c["key"]] = verdict
 
 # Resolution must be driven by the ALERTED set, not just the candidate scan:
 # an alerted pair whose audit-log line is gone (log rotated/pruned) would
@@ -273,13 +473,13 @@ for c in candidates:
 # exact-merge observation can still resolve it. Request age is unknown without
 # the log line, so the bullet shows "?".
 candidate_keys = {c["key"] for c in candidates}
-for key in sorted(alerted - candidate_keys):
+for key in sorted(set(alerted) - candidate_keys):
     survivor, _, loser = key.partition(":")
-    if loser and not is_stuck(survivor, loser):
-        resolved.append((survivor, loser, "", None))
-        new_alerted.discard(key)
+    if loser and classify(survivor, loser) in RESOLVED:
+        resolved.append((survivor, loser, "", None, ""))
+        new_alerted.pop(key, None)
 
-if not new_alerts and not resolved:
+if not new_alerts and not new_partial and not new_invalid and not resolved:
     # Nothing new to page → leave the live alerted-set untouched (rewriting it
     # would be a no-op) and emit no payload.
     raise SystemExit(0)
@@ -294,17 +494,17 @@ if d:
     os.makedirs(d, exist_ok=True)
 pending = state_file + ".pending"
 with open(pending, "w") as f:
-    json.dump(sorted(new_alerted), f, indent=2)
+    json.dump(new_alerted, f, indent=2, sort_keys=True)
 if persist:
     os.replace(pending, state_file)
 
 def block(pairs, header, blurb, verb, qual):
     pairs.sort(key=lambda a: (a[0], a[1]))
     out = [header, blurb]
-    for survivor, loser, requester, age_h in pairs:
+    for survivor, loser, requester, age_h, note in pairs:
         age = f"{qual}{age_h:.0f}h" if age_h else "?"
         who = f" req={requester}" if requester else ""
-        out.append(f"• loser `{loser}` → survivor `{survivor}` — {verb} {age}{who}")
+        out.append(f"• loser `{loser}` → survivor `{survivor}` — {verb} {age}{who}{note}")
     return out
 
 lines = []
@@ -317,6 +517,24 @@ if new_alerts:
                    "— do NOT blind re-merge, a re-fire against partially-folded state can damage "
                    "the survivor; verify the pair's current state first.",
                    "stuck", "≥")
+if new_partial:
+    lines += block(new_partial,
+                   f":warning: *Profile merge(s) PARTIALLY FOLDED — {len(new_partial)}*",
+                   "The loser folded into a DIFFERENT profile than the one requested, and the "
+                   "requested survivor received nothing. *Do NOT re-fire* — a re-fire here does "
+                   "NOT error, it SILENTLY SUCCEEDS: both merge guards test the survivor "
+                   "(`base_merge_link_operations.py:314-317`), so a loser already folded "
+                   "elsewhere passes them and has its `merged_to_id` re-pointed away from where "
+                   "it actually landed. Hand to the catalog team (Aron / Oleg) for a manual "
+                   "reconciliation.",
+                   "partially folded", "≥")
+if new_invalid:
+    lines += block(new_invalid,
+                   f":no_entry: *Profile merge(s) with a MALFORMED id — {len(new_invalid)}*",
+                   "The requested id is not a well-formed UUID, so this merge can never match a "
+                   "catalog row and will never land no matter how often it is re-fired. Fix the "
+                   "request at source; no catalog action is possible.",
+                   "unlandable", "≥")
 if resolved:
     lines += block(resolved,
                    f":white_check_mark: *Profile merge(s) previously flagged have now LANDED — {len(resolved)}*",
@@ -576,6 +794,21 @@ fi
 # retried next tick rather than silently marked "already alerted". In --dry-run
 # we persist immediately (persist=1) — a faithful dedupe rehearsal, no post.
 export NOW_EPOCH_FOR_AGE="$NOW_EPOCH"
+
+# Best-effort queue attribution. Bounded and fully optional: on ANY failure we
+# leave QUEUE_PROBE_JSON empty and the page renders as it always did. Never let
+# a cluster hiccup gate a stuck-merge alert.
+QUEUE_PROBE_JSON=""
+if [ "$QUEUE_PROBE" = "1" ]; then
+  if QUEUE_PROBE_JSON="$(probe_queue 2>/dev/null)" && [ -n "$QUEUE_PROBE_JSON" ]; then
+    log "queue probe ok: $QUEUE_PROBE_JSON"
+  else
+    QUEUE_PROBE_JSON=""
+    log "queue probe unavailable — alerting without queue attribution"
+  fi
+fi
+export QUEUE_PROBE_JSON
+
 if ! alert_block="$(decide_and_alert "$CANDIDATES_FILE" "$CATALOG_FILE" "$STATE_FILE" "$PAYLOAD_FILE" "$DRY_RUN")"; then
   log "WARN: detector classification failed — detector is BLIND this tick."
   alert_query_failure
