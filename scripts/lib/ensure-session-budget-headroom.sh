@@ -55,10 +55,16 @@
 #     in ExecStartPre (openclaw-pre-start-heal.sh) without ever blocking a
 #     gateway start.
 #
-#   --check (read-only detector, for cron-health-watchdog.sh / CI): exit 1 if ANY
-#     agent is CRITICAL or WARN, printing one "  - <profile>/<agent>: …" line per
-#     finding. Exit 0 clean, exit 2 on read error. Matches the repo guard
-#     convention (0 clean / 1 violation / 2 err).
+#   --check (read-only detector, for cron-health-watchdog.sh / CI): prints one
+#     "  - [SEV] <profile>/<agent>: …" line per finding and exits on the repo
+#     guard convention (0 clean / 1 violation / 2 err):
+#       1  any CRITICAL or WARN was CONFIRMED — pages, even if another profile
+#          could not be evaluated (that profile is listed as UNEVALUATED in the
+#          same output, so the page says what was and was not checked)
+#       2  nothing confirmed but something could NOT be evaluated
+#       0  everything evaluated and clean
+#     Completeness and severity are INDEPENDENT: an unreachable edge gateway must
+#     never suppress a confirmed main/operations page.
 #
 # ── Findings ────────────────────────────────────────────────────────────────
 #   CRITICAL  agent sessions bytes > maxDiskBytes
@@ -179,21 +185,29 @@ _enabled_cron_counts() {
 }
 
 # collect_findings — emit "SEV<TAB>profile/agent<TAB>message" per finding on
-# stdout. Returns 2 on a read error that makes the check meaningless.
+# stdout, where SEV is CRITICAL, WARN, or UNEVALUATED.
 #
-# rc is STICKY-UPWARDS: a read error (2) on one profile must never be downgraded
-# to a mere violation (1) by a later profile, or an unreachable gateway would be
-# reported as if it had been successfully evaluated.
+# COMPLETENESS AND SEVERITY ARE INDEPENDENT AXES — do not collapse them.
+# An earlier version made the return code sticky-upwards (a read error outranked
+# a violation). That inverted the guard's whole purpose: with edge unreachable
+# and main/operations genuinely wedged, it returned 2, the watchdog treats 2 as
+# log-only, and the confirmed outage NEVER PAGED — it was not even printed.
+# So: a profile we could not evaluate is emitted as its own UNEVALUATED finding
+# (it is never silently dropped), while findings we DID confirm still drive the
+# exit code. Precedence is therefore violation-first:
+#   1  any CRITICAL/WARN  -> page, and list any UNEVALUATED profiles alongside
+#   2  only UNEVALUATED   -> nothing confirmed, cannot claim clean either
+#   0  nothing at all     -> clean
 collect_findings() {
-  local rc=0 profile agent maxb bytes warn_at ckeys ecount
-  _flag() { [ "$rc" -lt "$1" ] && rc="$1"; return 0; }
+  local viol=0 uneval=0 profile agent maxb bytes warn_at ckeys ecount
   for profile in $PROFILES; do
     [ -n "$profile" ] || continue
     [ -d "$STATE_ROOT/.openclaw-$profile" ] || continue
 
     maxb="$(_max_disk_bytes "$profile")" || {
-      log "ERROR: cannot read $STATE_ROOT/.openclaw-$profile/openclaw.json"
-      _flag 2; continue
+      printf 'UNEVALUATED\t%s\tcannot read %s/.openclaw-%s/openclaw.json — budget for this profile is UNKNOWN\n' \
+        "$profile" "$STATE_ROOT" "$profile"
+      uneval=1; continue
     }
     if [ -z "$maxb" ] || [ "$maxb" -le 0 ] 2>/dev/null; then
       # maxDiskBytes unset => enforceSessionDiskBudget returns early; dormant.
@@ -206,8 +220,9 @@ collect_findings() {
     # Agents that own at least one enabled cron — needed for the wedge signature.
     local enabled_map=""
     if ! enabled_map="$(_enabled_cron_counts "$profile")"; then
-      log "ERROR: 'openclaw --profile $profile cron list --all --json' failed"
-      _flag 2; continue
+      printf 'UNEVALUATED\t%s\t"openclaw --profile %s cron list --all --json" failed — the cron-eviction signal for this profile is UNKNOWN\n' \
+        "$profile" "$profile"
+      uneval=1; continue
     fi
 
     while read -r agent; do
@@ -218,12 +233,12 @@ collect_findings() {
       if [ "$bytes" -gt "$maxb" ]; then
         printf 'CRITICAL\t%s/%s\tsessions %s > maxDiskBytes %s — the reaper is deleting cron session entries; every cron on this agent will claim-error\n' \
           "$profile" "$agent" "$(_human "$bytes")" "$(_human "$maxb")"
-        _flag 1
+        viol=1
       elif [ "$bytes" -gt "$warn_at" ]; then
         printf 'WARN\t%s/%s\tsessions %s > %s%% of maxDiskBytes %s — raise session.maintenance.maxDiskBytes before it crosses\n' \
           "$profile" "$agent" "$(_human "$bytes")" \
           "$(printf '%s' "$WARN_RATIO" | awk '{printf "%d", $1 * 100}')" "$(_human "$maxb")"
-        _flag 1
+        viol=1
       fi
 
       # Wedge signature: owns enabled crons but has no cron session entries.
@@ -233,20 +248,24 @@ collect_findings() {
         if [ "$ckeys" = "0" ]; then
           printf 'CRITICAL\t%s/%s\t%s enabled cron(s) but ZERO ":cron:" session keys — cron sessions have been evicted; fires will die at setup with CronSessionLifecycleClaimError\n' \
             "$profile" "$agent" "$ecount"
-          _flag 1
+          viol=1
         elif [ "$ckeys" = "-1" ]; then
           # Unreadable index: NOT a wedge (don't page a permissions blip as an
-          # outage) but NOT clean either. Reporting 0 here would be a false
-          # all-clear on the one signal that actually catches the outage, so
-          # escalate to the read-error exit and let the caller say "could not
-          # evaluate".
-          log "ERROR: cannot read sessions.json for $profile/$agent — cron-eviction signal UNEVALUATED"
-          _flag 2
+          # outage) but NOT clean either — reporting nothing would be a false
+          # all-clear on the one signal that actually catches the outage.
+          printf 'UNEVALUATED\t%s/%s\tsessions.json unreadable — cron-eviction signal for this agent is UNKNOWN\n' \
+            "$profile" "$agent"
+          uneval=1
         fi
       fi
     done < <(_agent_dirs "$profile")
   done
-  return "$rc"
+  # Violation-first: a confirmed finding must page even when some other profile
+  # could not be evaluated (that profile is already in the output as
+  # UNEVALUATED, so the page says what was and was not checked).
+  [ "$viol" -eq 1 ] && return 1
+  [ "$uneval" -eq 1 ] && return 2
+  return 0
 }
 
 # _human <bytes> — compact size for log lines.
@@ -259,24 +278,36 @@ _human() {
   }'
 }
 
+# _emit_findings <findings> [stream] — print one "  - [SEV] target: msg" line per
+# finding. ALWAYS called whenever there is anything to say, whether the overall
+# result is a violation or only an unevaluated profile: a finding that was
+# collected but never printed is indistinguishable from one that was never found.
+_emit_findings() {
+  printf '%s\n' "$1" | while IFS=$'\t' read -r sev target msg; do
+    [ -n "$target" ] || continue
+    echo "  - [$sev] $target: $msg"
+  done
+}
+
 main() {
   local mode="${1:-report}" findings rc
   findings="$(collect_findings)"; rc=$?
 
   case "$mode" in
     --check|check)
-      if [ "$rc" -eq 2 ]; then
-        log "ERROR: could not evaluate session budget headroom"
-        return 2
-      fi
       if [ "$rc" -eq 1 ]; then
+        # Violations win over incomplete evaluation. Any UNEVALUATED profile is
+        # already in $findings, so the page states exactly what was and was not
+        # checked instead of swallowing the confirmed outage.
         log "SESSION BUDGET HEADROOM VIOLATION:"
-        printf '%s\n' "$findings" | while IFS=$'\t' read -r sev target msg; do
-          [ -n "$target" ] || continue
-          echo "  - [$sev] $target: $msg"
-        done
+        _emit_findings "$findings"
         log "Fix: raise session.maintenance.maxDiskBytes (and highWaterBytes) in openclaw-main.json / openclaw-edge.json, land the PR, and apply live with 'openclaw --profile <p> config set …' + a gateway restart (the running daemon caches the budget). NEVER run 'openclaw doctor --fix' (codex-auth fan-out)."
         return 1
+      fi
+      if [ "$rc" -eq 2 ]; then
+        log "ERROR: could not evaluate session budget headroom (nothing confirmed, but NOT clean):"
+        _emit_findings "$findings"
+        return 2
       fi
       log "clean: every agent is under maxDiskBytes and no cron surface is evicted ($PROFILES)"
       return 0
@@ -284,12 +315,10 @@ main() {
     report|"")
       if [ "$rc" -eq 1 ]; then
         log "session budget findings (report mode — not blocking start):"
-        printf '%s\n' "$findings" | while IFS=$'\t' read -r sev target msg; do
-          [ -n "$target" ] || continue
-          echo "  - [$sev] $target: $msg" >&2
-        done
+        _emit_findings "$findings" >&2
       elif [ "$rc" -eq 2 ]; then
-        log "WARNING: could not evaluate session budget headroom (continuing)"
+        log "WARNING: could not evaluate session budget headroom (continuing):"
+        _emit_findings "$findings" >&2
       else
         log "clean: every agent is under maxDiskBytes ($PROFILES)"
       fi

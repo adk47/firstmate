@@ -85,13 +85,18 @@ exit 99
 STUB
 
   # Fake openclaw: only `cron list --all --json` is used by the guard.
-  # $FAKE_CRON_FAIL makes it fail, exercising the read-error (exit 2) path.
+  # $FAKE_CRON_FAIL fails for every profile; $FAKE_CRON_FAIL_PROFILE fails for
+  # just one (so a multi-profile run can have one good and one unreachable
+  # gateway). Both exercise the read-error path.
   cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
 #!/bin/bash
 args="$*"
 case "$args" in
   *"cron list --all --json"*)
     [ -n "${FAKE_CRON_FAIL:-}" ] && exit 7
+    if [ -n "${FAKE_CRON_FAIL_PROFILE:-}" ]; then
+      case "$args" in *"--profile ${FAKE_CRON_FAIL_PROFILE} "*) exit 7 ;; esac
+    fi
     cat "$FAKE_CRON_JSON"
     ;;
   *) echo "unexpected openclaw invocation: $args" >&2; exit 90 ;;
@@ -178,16 +183,39 @@ teardown() {
   [[ "$output" == *"ERROR"* ]]
 }
 
-@test "a read error is not downgraded to a mere violation by a later profile" {
-  # Sticky-upwards rc: main errors (gateway down), edge would only WARN.
-  # Reporting 1 here would imply the whole fleet was successfully evaluated.
+@test "a confirmed violation still PAGES when another profile cannot be evaluated" {
+  # THE regression this guard exists to avoid. An earlier sticky-upwards rc made
+  # a read error outrank a violation, so with edge unreachable and main/ops
+  # genuinely over budget the script returned 2 — which the watchdog treats as
+  # log-only — and the confirmed outage never paged (it wasn't even printed).
+  # Completeness and severity are independent axes.
   export SESSION_BUDGET_PROFILES="main edge"
-  _mk_profile edge 10mb
-  _mk_agent edge sup $((9 * 1024 * 1024)) 1
-  _mk_agent main ops 1024 0
-  _set_enabled_crons ops 3
+  _mk_profile main 1mb
+  _mk_agent main ops $((5 * 1024 * 1024)) 2     # real CRITICAL on main
+  _set_enabled_crons ops 1
+  _mk_profile edge 1mb
+  mkdir -p "$SESSION_BUDGET_STATE_ROOT/.openclaw-edge/agents/sup/sessions"
+  FAKE_CRON_FAIL_PROFILE=edge run "$SCRIPT" --check   # edge gateway unreachable
+  [ "$status" -eq 1 ]                       # pages, does NOT collapse to 2
+  [[ "$output" == *"CRITICAL"* ]]
+  [[ "$output" == *"main/ops"* ]]           # the confirmed finding is PRINTED
+  [[ "$output" == *"UNEVALUATED"* ]]        # and edge is named, not swallowed
+  [[ "$output" == *"edge"* ]]
+}
+
+@test "an unevaluated profile is reported, never silently dropped" {
+  # Exit 2 must still SAY which profile it could not evaluate — a bare
+  # "could not evaluate" with no detail is not actionable.
+  export SESSION_BUDGET_PROFILES="main"
+  _mk_agent main ops 1024 3
+  _set_enabled_crons ops 1
   FAKE_CRON_FAIL=1 run "$SCRIPT" --check
   [ "$status" -eq 2 ]
+  [[ "$output" == *"UNEVALUATED"* ]]
+  [[ "$output" == *"main"* ]]
+  # Match the real all-clear phrase, not the bare word — the exit-2 log line
+  # legitimately contains "NOT clean".
+  [[ "$output" != *"clean: every agent"* ]]
 }
 
 @test "report mode always exits 0 so it can never block a gateway start" {
@@ -224,8 +252,8 @@ teardown() {
   _set_enabled_crons ops 4
   run "$SCRIPT" --check
   [ "$status" -eq 2 ]
-  [[ "$output" != *"ZERO"* ]]      # not misreported as the wedge
-  [[ "$output" != *"clean"* ]]     # and never a silent all-clear
+  [[ "$output" != *"ZERO"* ]]                  # not misreported as the wedge
+  [[ "$output" != *"clean: every agent"* ]]    # never a silent all-clear
   [[ "$output" == *"UNEVALUATED"* ]]
 }
 
