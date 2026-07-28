@@ -68,6 +68,11 @@
 #             like, and what would have caught 2026-07-27 on day one)
 #   WARN      agent sessions bytes > SESSION_BUDGET_WARN_RATIO * maxDiskBytes
 #
+# An UNREADABLE sessions.json on a cron-owning agent is neither of those: it is a
+# read error (exit 2), never a silent "clean". Treating it as zero cron keys
+# would page a permissions blip as an outage; treating it as no-finding would be
+# a false all-clear on the one signal that catches the outage.
+#
 # ── Env overrides (used by scripts/tests/ensure-session-budget-headroom.bats) ──
 #   SESSION_BUDGET_PROFILES    space-separated profiles (default "main edge")
 #   SESSION_BUDGET_WARN_RATIO  warn threshold as a fraction (default 0.8)
@@ -229,6 +234,14 @@ collect_findings() {
           printf 'CRITICAL\t%s/%s\t%s enabled cron(s) but ZERO ":cron:" session keys — cron sessions have been evicted; fires will die at setup with CronSessionLifecycleClaimError\n' \
             "$profile" "$agent" "$ecount"
           _flag 1
+        elif [ "$ckeys" = "-1" ]; then
+          # Unreadable index: NOT a wedge (don't page a permissions blip as an
+          # outage) but NOT clean either. Reporting 0 here would be a false
+          # all-clear on the one signal that actually catches the outage, so
+          # escalate to the read-error exit and let the caller say "could not
+          # evaluate".
+          log "ERROR: cannot read sessions.json for $profile/$agent — cron-eviction signal UNEVALUATED"
+          _flag 2
         fi
       fi
     done < <(_agent_dirs "$profile")

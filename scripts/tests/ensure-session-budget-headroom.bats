@@ -208,10 +208,14 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
-@test "unreadable sessions.json is not mistaken for the wedge" {
-  # A genuine 0 is the outage; unreadable is missing data. Conflating them turns
-  # a permissions blip into a false page. Uses an ENOTDIR file-parent rather than
-  # a chmod, because CI bats runs as root and root reads 0000 files anyway
+@test "unreadable sessions.json is a READ ERROR, not a wedge and not an all-clear" {
+  # Three-way distinction that has to hold:
+  #   0 cron keys  -> the outage (page)
+  #   unreadable   -> exit 2, "could not evaluate" (do NOT page a permissions
+  #                   blip as an outage, but do NOT report clean either — that
+  #                   would be a false all-clear on the decisive signal)
+  # Uses an ENOTDIR file-parent rather than a chmod, because CI bats runs as
+  # root and root reads 0000 files anyway
   # (memory/reference_ci_selfhosted_runner_root_unwritable_test).
   local d="$SESSION_BUDGET_STATE_ROOT/.openclaw-main/agents/ops/sessions"
   mkdir -p "$d"
@@ -219,8 +223,19 @@ teardown() {
   mkdir -p "$d/sessions.json"
   _set_enabled_crons ops 4
   run "$SCRIPT" --check
+  [ "$status" -eq 2 ]
+  [[ "$output" != *"ZERO"* ]]      # not misreported as the wedge
+  [[ "$output" != *"clean"* ]]     # and never a silent all-clear
+  [[ "$output" == *"UNEVALUATED"* ]]
+}
+
+@test "unreadable sessions.json still exits 0 in report mode (never blocks start)" {
+  local d="$SESSION_BUDGET_STATE_ROOT/.openclaw-main/agents/ops/sessions"
+  mkdir -p "$d/sessions.json"
+  _set_enabled_crons ops 4
+  run "$SCRIPT"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"ZERO"* ]]
+  [[ "$output" == *"could not evaluate"* ]]
 }
 
 @test "size units parse with binary multipliers (4gb == 4 GiB)" {
