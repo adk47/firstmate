@@ -183,7 +183,7 @@
       "memorySearch": {
         "enabled": false
       },
-      "bootstrapMaxChars": 50000,
+      "bootstrapMaxChars": 40000,
       "bootstrapTotalMaxChars": 120000,
       "bootstrapPromptTruncationWarning": "always",
       "compaction": {
@@ -200,6 +200,7 @@
     "list": [
       {
         "id": "support",
+        "bootstrapMaxChars": 50000,
         "default": true,
         "workspace": "/opt/hydra/workspaces/support",
         "model": {

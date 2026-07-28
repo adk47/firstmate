@@ -52,17 +52,33 @@ BOOTSTRAP_FILES=(
 )
 
 CFG=openclaw-edge.json
+AGENT=support
 
-# Read the real caps from the edge config so this guard tracks them if retuned.
-# `|| true` is load-bearing: under `set -euo pipefail` a missing key makes the
-# pipeline exit non-zero and kills the script BEFORE the `:-` default is ever
-# consulted, so without it a renamed config key fails CI with zero output
-# instead of falling back.
+# Fail loud if the config is gone: a silent fallback here would let the gate
+# pass green while measuring against a default the fleet does not run.
+[ -f "$CFG" ] || { echo "FAIL: $CFG not found; cannot resolve the real caps." >&2; exit 2; }
+
+# Resolve a cap the way openclaw itself does, by PATH not by position:
+#   resolveAgentConfig(cfg, agentId)?.<key> ?? cfg.agents.defaults.<key>
+# (dist/embedded-agent-helpers-*.js, verified on 2026.7.1). A plain
+# `grep | head -1` is WRONG here -- openclaw-edge.json now carries the key
+# twice (agents.defaults, and the support entry's override) and grep would
+# return whichever appears first in the file, which is the wrong one.
+# python3 is the house idiom for this (scripts/validate-shared-config.sh:18).
 read_cap() { # read_cap <json-key> <default>
-  local v
-  v=$(grep -oE "\"$1\"[[:space:]]*:[[:space:]]*[0-9]+" "$CFG" 2>/dev/null \
-        | grep -oE '[0-9]+' | head -1) || true
-  echo "${v:-$2}"
+  python3 - "$CFG" "$AGENT" "$1" "$2" <<'PY'
+import json, sys
+cfg_path, agent_id, key, default = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    with open(cfg_path) as fh:
+        cfg = json.load(fh)
+except Exception:
+    print(default); sys.exit(0)
+agents = cfg.get("agents") or {}
+entry = next((a for a in (agents.get("list") or []) if a.get("id") == agent_id), {})
+val = entry.get(key, (agents.get("defaults") or {}).get(key))
+print(val if isinstance(val, int) and val > 0 else default)
+PY
 }
 CAP=$(read_cap bootstrapMaxChars 40000)
 # A per-file pass says nothing about the sum -- openclaw drops whole files once
@@ -84,8 +100,12 @@ for f in "${BOOTSTRAP_FILES[@]}"; do
     echo "FAIL: $f is $CHARS chars, over the per-file bootstrap cap of $CAP." >&2
     echo "openclaw keeps a 75% HEAD and a 25% TAIL and drops the MIDDLE, so a band" >&2
     echo "around ~75% through $f vanishes from every injected prompt. Trim it under" >&2
-    echo "$CAP, or raise agents.defaults.bootstrapMaxChars in BOTH configs" >&2
-    echo "(validate-shared-config.sh requires main and edge to match)." >&2
+    echo "$CAP, or raise the cap for THIS AGENT ONLY via" >&2
+    echo "agents.list[id=$AGENT].bootstrapMaxChars in $CFG." >&2
+    echo "Do NOT raise agents.defaults.bootstrapMaxChars to fix one agent: that is" >&2
+    echo "compared across both profiles by validate-shared-config.sh, and it also" >&2
+    echo "scales memory-health-check.sh's 80% warn threshold for every other agent" >&2
+    echo "(raising 40000->50000 moves it 32000->40000 and silences live warnings)." >&2
     FAILED=1
   else
     echo "OK: $f is $CHARS chars (cap $CAP, headroom $((CAP - CHARS)))."
