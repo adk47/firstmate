@@ -606,9 +606,14 @@ systemctl stop openclaw-gateway-main.service
 
 # 3. Re-auth into the CANONICAL main store. Without --agent this writes to
 #    the configured-default agent (clio), NOT main — pass --agent main.
-#    Both accounts must be logged in.
+#    All THREE accounts must be logged in (a third was linked 2026-07-28).
 openclaw models auth login --provider openai-codex --agent main  # aaron@muso.ai
+openclaw models auth login --provider openai-codex --agent main  # aarondkaufman@gmail.com
 openclaw models auth login --provider openai-codex --agent main  # aaronkaufman@me.com
+# Verify all three landed in BOTH namespaces before moving on:
+openclaw --profile main models auth list | grep -c '^- openai:'                    # expect 3
+jq -r '.profiles|keys[]' /root/.openclaw-main/agents/main/agent/auth-profiles.json \
+  | grep -c '^openai-codex:'                                                        # expect 3
 
 # 3b. Runtime >= 2026.7 ONLY: the login wrote a runtime store, but canonical
 #     (agents/main/agent/auth-profiles.json) + the derived stores must be
@@ -832,8 +837,9 @@ journalctl -u openclaw-gateway-main -u openclaw-gateway-edge --since '-2h' \
 **Remediation (recover now — re-auth is unavoidable, the token is spent):**
 ```bash
 ssh root@40.160.32.80
-# 1. Re-auth BOTH accounts into the canonical main store (device-code = headless).
+# 1. Re-auth ALL THREE accounts into the canonical main store (device-code = headless).
 openclaw --profile main models auth login --provider openai-codex --device-code  # aaron@muso.ai
+openclaw --profile main models auth login --provider openai-codex --device-code  # aarondkaufman@gmail.com
 openclaw --profile main models auth login --provider openai-codex --device-code  # aaronkaufman@me.com
 # 2. Converge the lock dirs so it can't recur, then restart both gateways.
 /opt/hydra/scripts/lib/ensure-codex-refresh-lock-shared.sh
