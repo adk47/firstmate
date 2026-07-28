@@ -1,8 +1,10 @@
 name: external-pr-review
 
-# QA auto-review of PRs in OTHER Muso-AI repos (see the allowlist below — currently
-# ads-manager, auth, web-credits, web-credits-next, industry-data-processing,
-# octave-ui, core-backend, muso-cli), reusing hydra's qa agent + muso-github-code-review skill.
+# QA auto-review of PRs in OTHER Muso-AI repos (allowlist: the single source of
+# truth is scripts/lib/qa-external-repo-allowlist.sh — currently ads-manager,
+# auth, web-credits, web-credits-next, industry-data-processing, octave-ui,
+# core-backend, muso-cli, H-DevOps, analytics-worker, platform-data-processing),
+# reusing hydra's qa agent + muso-github-code-review skill.
 #
 # Transport: a source repo fires a repository_dispatch into hydra carrying the PR
 # coordinates in client_payload. New repos use event_type "external-qa-review";
@@ -19,6 +21,25 @@ name: external-pr-review
 # and an approval still requires real CI-green + a GO verdict on the actual PR. We
 # do NOT re-resolve the PR from GitHub here because no hydra-scoped token can read
 # the private source repos; adk47's auth (used by the skill) is the ground truth.
+#
+# Delivery caveat (#214, 2026-07-27): GitHub's repository_dispatch -> Actions-run
+# fan-out is BEST-EFFORT. The producer gets HTTP 204 ("event accepted") and then,
+# occasionally, no run is ever created — observed 4-6x in the week of 07-20..27
+# (e.g. the H-DevOps dispatch of 2026-07-26T16:43:39Z: producer green/204, yet
+# hydra's contiguous repository_dispatch run list jumps 16:11:28Z -> 18:27:58Z).
+# Not concurrency-cancel (this workflow has no concurrency group; zero cancelled
+# runs, all attempts=1), not the runner (offline would leave visible queued runs;
+# hydra-node8 shows none), not a types/filter or workflow-file-error window (no
+# main pushes near the drops). Hydra cannot retry an event it never received, so
+# the "Ack on target PR" first step below makes every DELIVERED dispatch visible
+# on the target PR — resender protocol: no ack comment appearing/refreshing
+# within ~5 minutes of a dispatch means GitHub dropped it; re-send the identical
+# dispatch. run-name below makes drops greppable from `gh run list` too.
+
+# Display-only: name each run after its payload so a missing run for a known
+# dispatch (and double-dispatch forensics) is visible straight from
+# `gh run list -R Muso-AI/hydra` instead of requiring per-run log digs.
+run-name: "qa ${{ github.event.client_payload.repo }}#${{ github.event.client_payload.pr_number }} @ ${{ github.event.client_payload.head_sha }} (${{ github.event.action }})"
 
 on:
   repository_dispatch:
@@ -33,8 +54,80 @@ jobs:
     # Same on-box runner as qa-autoreview/pr-validate; the openclaw CLI lives here.
     runs-on: [self-hosted, hydra]
     steps:
+      # Checked out FIRST (ahead of the ack) so both steps can gate on the same
+      # on-disk allowlist — scripts/lib/qa-external-repo-allowlist.sh, from main.
+      # The few seconds this costs are irrelevant against the ack's ~5-minute
+      # detection window; a checkout failure is itself a loud, visible run.
       - name: Checkout (default branch — main's dispatcher + UID map, not PR code)
         uses: actions/checkout@v5
+
+      # --- Visibility ack (#214) — MUST stay the first step that acts on the
+      #     payload. Upserts one marker comment on the target PR with this run's
+      #     URL the moment a run actually starts, converting GitHub's silent
+      #     repository_dispatch drops (204 to the producer, no run ever created
+      #     — see header) into a visible absence: dispatched but no ack within
+      #     ~5 min = dropped, re-dispatch. Upsert (not append) so synchronize
+      #     re-dispatches refresh one comment instead of spamming busy PRs.
+      #     Auth: QA_ACK_PAT repo secret if configured, else the runner's
+      #     ambient gh login (the gateway's adk47 account on this same box —
+      #     hydra's github.token cannot see the private source repos). Because
+      #     this step WRITES with those credentials on an attacker-influenceable
+      #     payload, it gates on the SAME repo allowlist as the dispatch step
+      #     below, before its first API call.
+      #     Best-effort by design: continue-on-error + no `-e`, always exit 0 —
+      #     the ack must never block or fail the review itself.
+      - name: Ack on target PR (make silent dispatch drops visible)
+        continue-on-error: true
+        env:
+          REPO: ${{ github.event.client_payload.repo }}
+          PR: ${{ github.event.client_payload.pr_number }}
+          HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          QA_ACK_PAT: ${{ secrets.QA_ACK_PAT }}
+        run: |
+          set -u
+          # Never point hydra's credentials at a repo we would refuse to review:
+          # same allowlist, same file, checked before any GitHub API call.
+          # A refused/malformed payload still fails loud in the validate step
+          # below (visible on hydra's side).
+          bash scripts/lib/qa-external-repo-allowlist.sh "$REPO" \
+            || { echo "ack: repo='$REPO' not in the external-review allowlist — skipping ack"; exit 0; }
+          [[ "$PR" =~ ^[0-9]+$ ]] || { echo "ack: malformed pr_number — skipping ack"; exit 0; }
+          # Don't echo an arbitrary payload string into a PR comment; the
+          # validate step will reject the run and the ack links to it.
+          [[ "$HEAD_SHA" =~ ^[0-9a-fA-F]{7,40}$ ]] || HEAD_SHA="(invalid head_sha — see run log)"
+          if [ -n "${QA_ACK_PAT:-}" ]; then export GH_TOKEN="$QA_ACK_PAT"; fi
+          marker="<!-- hydra-qa-ack ${REPO}#${PR} -->"
+          # Wording is deliberately about DELIVERY, not about a review starting.
+          # This step runs before the scope checks below (draft / base branch /
+          # author Slack-UID mapping), each of which ends the run with no review
+          # at all — a comment promising "QA review started" would be a lie on
+          # exactly those PRs. What is true here is only: the dispatch reached
+          # hydra and this run exists.
+          body="$(printf '%s\n🤖 Dispatch received by hydra for %s @ `%s` — run: %s\n\n_Delivery ack for the external-qa-review dispatch. If a (re-)dispatch does not create/refresh this comment within ~5 minutes, GitHub dropped the repository_dispatch — fire it again._\n\n_(Scope checks run next: a draft PR, a base branch outside develop/main/master, or an author with no Slack-UID mapping is skipped from here — see the run log.)_' \
+            "$marker" "${REPO}#${PR}" "$HEAD_SHA" "$RUN_URL")"
+          # --paginate is load-bearing: the marker stays where it was FIRST
+          # posted, so on a busy PR (>100 comments — core-backend, H-DevOps)
+          # it is not on page 1. An unpaginated lookup finds nothing and
+          # silently degrades the upsert into one new ack per re-dispatch,
+          # spamming exactly the PRs this feature exists for. `head -1` keeps
+          # us on the OLDEST marker so the target is stable across runs (and
+          # any duplicates already posted before this fix converge on one).
+          cid="$(gh api --paginate "repos/${REPO}/issues/${PR}/comments?per_page=100" 2>/dev/null \
+            | jq -r --arg m "$marker" '.[] | select(.body | startswith($m)) | .id' 2>/dev/null \
+            | head -1 || true)"
+          if [ -n "$cid" ]; then
+            if gh api -X PATCH "repos/${REPO}/issues/comments/${cid}" -f body="$body" >/dev/null 2>&1; then
+              echo "ack: refreshed ack comment ${cid} on ${REPO}#${PR}"; exit 0
+            fi
+            echo "ack: PATCH of comment ${cid} failed — falling through to POST"
+          fi
+          if gh api -X POST "repos/${REPO}/issues/${PR}/comments" -f body="$body" >/dev/null 2>&1; then
+            echo "ack: posted ack comment on ${REPO}#${PR}"
+          else
+            echo "ack: could not comment on ${REPO}#${PR} (no usable gh auth on the runner? set repo secret QA_ACK_PAT) — non-blocking"
+          fi
+          exit 0
 
       - name: Validate payload, map author, and dispatch QA auto-review
         env:
@@ -48,11 +141,11 @@ jobs:
           set -euo pipefail
 
           # --- Repo allowlist: only these Muso-AI repos may drive an external
-          #     review. Adding a repo = one line here + a Slack-UID mapping. ------
-          case "$REPO" in
-            Muso-AI/ads-manager|Muso-AI/auth|Muso-AI/web-credits|Muso-AI/web-credits-next|Muso-AI/industry-data-processing|Muso-AI/octave-ui|Muso-AI/core-backend|Muso-AI/muso-cli|Muso-AI/H-DevOps|Muso-AI/analytics-worker|Muso-AI/platform-data-processing) ;;
-            *) echo "repo='$REPO' not in the external-review allowlist — refusing."; exit 1 ;;
-          esac
+          #     review. ONE source of truth, shared with the ack step above —
+          #     adding a repo = one line in that file + a Slack-UID mapping. ----
+          if ! bash scripts/lib/qa-external-repo-allowlist.sh "$REPO"; then
+            echo "repo='$REPO' not in the external-review allowlist — refusing."; exit 1
+          fi
 
           # --- Format validation (defense-in-depth; the dispatcher re-checks). -
           if ! [[ "$PR" =~ ^[0-9]+$ ]]; then
