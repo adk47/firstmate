@@ -188,4 +188,6 @@ To add missing tables to snapshots, contact **Andre**. He manages:
 
 - Athena schemas: `skills/muso-query-writer/athena-schemas.md`
 - Data platform overview: `skills/muso-clio/references/data-platform/overview.md`
-- Data expert reference: `skills/muso-data-expert/reference.md`
+- Data expert reference: removed with the `muso-data-expert` skill (dead weight;
+  never bound to an agent). Current data-platform notes live in
+  `skills/muso-clio/references/data-platform/overview.md`.

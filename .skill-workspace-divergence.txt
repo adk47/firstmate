@@ -21,6 +21,4 @@
 # openclaw resolves at tier 4. Workspace copies shadow at openclaw's tier 1,
 # so a workspace shadow silently freezes agent doctrine in place. This file
 # gates the exception cases explicitly.
-workspaces/cmo/skills/muso-outreach-engine/SKILL.md -- newer-than-canonical orchestrator (v4.0) depending on workspace-only muso-outreach-* subskills; backport/converge tracked separately
-workspaces/cmo/skills/muso-winback-engine/SKILL.md -- newer-than-canonical orchestrator (v2.0) depending on workspace-only muso-winback-* subskills; backport/converge tracked separately
 workspaces/operations/skills/muso-ops-admin/SKILL.md -- workspace contains tier2-godmode-allowlist.txt that MUST NOT propagate to canonical (would leak privilege to ceo/cmo/cto/caroline via tier-4 managed fallback); plus newer credit-verification hardened-exception block
