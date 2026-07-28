@@ -99,6 +99,16 @@ _set_cap_signature() {
   done
 }
 
+# Real 2026-07-27 gateway wording for a server-side session revocation.
+_set_revoked_signature() {
+  local n="${1:-1}" i
+  : > "$TEST_TMPDIR/state/journal-fixture"
+  for (( i = 0; i < n; i++ )); do
+    echo 'node[1]: [model-fallback/decision] model fallback decision: decision=candidate_failed requested=openai/gpt-5.6-sol candidate=openai/gpt-5.6-sol reason=auth_permanent next=openrouter/openai/gpt-5.6-luna detail=Your access token could not be refreshed. Please log out and sign in again.' \
+      >> "$TEST_TMPDIR/state/journal-fixture"
+  done
+}
+
 teardown() { rm -rf "$TEST_TMPDIR"; }
 
 # Write a canonical store whose soonest codex expiry is N minutes from now.
@@ -356,4 +366,49 @@ JSON
   [ "$status" -eq 0 ]
   [ "$(grep -c -- '--auto' "$ROTATE_LOG")" -eq 1 ]
   grep -q "usage cap (keepalive auto-rotate)" "$ROTATE_LOG"
+}
+
+# ── session revocation → auto-rotate (2026-07-27) ─────────────────────────────
+# The 2h outage happened with two credentialed accounts idle: nothing connected
+# "the active account is dead" to the rotation lever that already existed.
+# Detection alone would not have shortened it — these lock in the reflex.
+
+@test "session-revocation signature → invokes account rotate --auto" {
+  _set_remaining_min 10080
+  _set_revoked_signature 3
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$ROTATE_LOG" ]
+  grep -q -- "--auto" "$ROTATE_LOG"
+  grep -q "session revoked upstream" "$ROTATE_LOG"
+}
+
+@test "no revocation signature → rotate never invoked" {
+  _set_remaining_min 10080
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -s "$ROTATE_LOG" ]
+}
+
+@test "revocation signature but a rotation ran inside the window → no re-rotate" {
+  # Right after a rotation the OLD revocation lines are still inside the journal
+  # window; re-firing would burn the rotate cooldown and flap accounts.
+  _set_remaining_min 10080
+  _set_revoked_signature 2
+  date +%s > "$CODEX_ROTATE_STAMP"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -s "$ROTATE_LOG" ]
+}
+
+@test "revocation rotate is attempted ONCE per tick, not once per signature class" {
+  # A cap and a revocation can both be live in one window (a capped account that
+  # was also revoked). Two rotations in one tick would flap.
+  _set_remaining_min 10080
+  _set_cap_signature 1
+  echo 'node[1]: detail=Your access token could not be refreshed. Please log out and sign in again.' \
+    >> "$TEST_TMPDIR/state/journal-fixture"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c -- '--auto' "$ROTATE_LOG")" -eq 1 ]
 }

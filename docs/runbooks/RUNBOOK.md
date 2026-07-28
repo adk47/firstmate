@@ -662,18 +662,28 @@ systemctl restart openclaw-gateway-main openclaw-gateway-edge
 openclaw --profile main agent --agent ceo --message "Reply with one word: pong"
 ```
 
-**Recovery (fallback — only if `codex-oauth-refresh.sh` reports `invalid_grant`,
-i.e. the refresh-token chain is dead):** device-code login, which needs the
-`openai` plugin transiently enabled (it owns the login). DANGER: enabling `openai`
-reroutes gpt-5.5 to the api-key endpoint (#90925), so it MUST be disabled before
-any gateway restart, and pause `openclaw-watchdog` first so it can't restart
-mid-window:
+**Recovery (fallback — only if `codex-oauth-refresh.sh` reports `invalid_grant` /
+`refresh_token_invalidated`, i.e. the refresh-token chain is dead):**
 ```bash
-openclaw --profile main plugins enable openai
-openclaw --profile main models auth login --provider openai-codex --device-code  # both accounts; menu: models auth add
-openclaw --profile main plugins disable openai      # CRITICAL: before any restart
-systemctl restart openclaw-gateway-main openclaw-gateway-edge
+/opt/hydra/scripts/lib/codex-reauth.sh              # prints a device URL + code
+/opt/hydra/scripts/lib/codex-reauth.sh --dry-run    # preview, mints nothing
 ```
+It drives the codex CLI's own `login --device-auth` (binary vendored inside the
+pinned `@openclaw/codex`), then merges into canonical, shreds the scratch
+credential, syncs to all agent stores and restarts. The account owner only has to
+open the URL and approve the code. Add `--verify-chain` to spend one rotation
+proving `codex-oauth-refresh.sh` can keep the new token fresh.
+
+> **Do NOT transiently enable the `openai` plugin to get a device login.** The
+> obvious command, `openclaw models auth login --provider openai-codex
+> --device-code`, fails **"No provider plugins found"** — that plugin owns the
+> flow and is disabled AND absent from `plugins.allow`, so `plugins enable openai`
+> is itself refused ("blocked by allowlist"). Forcing it back on reintroduces
+> #90925 while main self-restarts on memory pressure every ~40-60min, i.e. a
+> near-certain fleet-wide `invalid_api_key` mid-window. A hand-rolled curl to
+> `auth.openai.com/oauth/device/code` is also a dead end — Cloudflare answers 403.
+> (Verified end-to-end 2026-07-27; this block previously recommended exactly the
+> enable-plugin path and it does not work.)
 
 **Prevention (the durable fix):** the twice-weekly `codex-token-refresh.timer`
 (Sun+Wed 04:00 UTC → `scripts/codex-token-refresh.sh` → `codex-oauth-refresh.sh` +
@@ -741,11 +751,58 @@ Precedence everywhere: `CODEX_AUTH_PRIMARY` env > state file > baked default
 
 ---
 
+### Codex Session Revoked Upstream (`token_invalidated`) — needs a browser
+
+**Symptoms**: the whole codex fleet falls back to `openrouter/openai/gpt-5.6-luna`
+with `reason=auth_permanent` and detail *"Your access token could not be
+refreshed. Please log out and sign in again."*; a direct API call returns 401
+`token_invalidated`. **`refresh_token_reused` is 0** and **all three `ensure-*`
+guards read CLEAN** — nothing is structurally wrong, so no guard can see this.
+
+**Do not confuse this with the refresh race below.** Until 2026-07-27 the race
+detector also matched the generic `reason=auth_permanent` marker, so this
+incident paged as "Codex refresh-token race" and cost ~1h chasing lock
+convergence that was, and stayed, converged. The counters are now split; if you
+see a race page, confirm a non-zero `refresh_token_reused` before believing it.
+
+**Cause**: OpenAI ended the OAuth session for that account — a sign-in
+elsewhere, a password change, an admin action. External and unpreventable. The
+refresh chain dies with it, so `codex-oauth-refresh.sh` answers
+`refresh_token_invalidated` ("Your session has ended") and there is **no
+browser-free recovery**.
+
+**Triage** (distinguishes it from every neighbouring class):
+```bash
+journalctl -u openclaw-gateway-main --since "30 min ago" --no-pager | grep -c refresh_token_reused   # 0 => not the race
+/opt/hydra/scripts/lib/ensure-codex-auth.sh --check                  # CLEAN => not fan-out
+/opt/hydra/scripts/lib/ensure-codex-version-pinned.sh --check        # CLEAN => not #90925
+/opt/hydra/scripts/lib/codex-usage.sh                                # quota left => not the cap
+```
+
+**Remediation**:
+1. If another account still has quota, restore service FIRST — it needs no human:
+   `/opt/hydra/scripts/lib/codex-account-rotate.sh --auto`
+2. Then re-auth the dead account: `/opt/hydra/scripts/lib/codex-reauth.sh`
+   (device URL + code for the account owner; merges, syncs, restarts).
+
+**Caution — a token probe cannot certify health.** A `wss://` handshake and a
+plain HTTPS POST to `/v1/responses` both 401 for a credential that is serving
+production fine (the HTTP one misleadingly says `Missing scopes:
+api.responses.write`). They reliably prove a token is DEAD, never that it is
+alive. The only positive check is a real turn:
+`openclaw --profile main agent --agent ceo --message "Reply with one word: pong"`
+plus zero `model-fallback/decision` lines in the window.
+
+---
+
 ### Codex Refresh-Token Race (`refresh_token_reused`) — cross-process
 
 **Symptoms**: the WHOLE codex fleet falls back to
 `openrouter/openai/gpt-5.6-luna` with `reason=auth_permanent`; logs show
 `OpenAI Codex token refresh failed (401)` with `code: refresh_token_reused`.
+**Confirm a non-zero `refresh_token_reused` count** — `auth_permanent` alone is
+the generic auth-dead marker and more often means the session-revocation class
+above.
 Crucially, **`ensure-codex-auth.sh --check` is CLEAN** — this is NOT the
 fan-out incident above. Do not be misled into hunting for a stray store.
 

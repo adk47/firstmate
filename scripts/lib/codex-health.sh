@@ -46,12 +46,70 @@ codex_count_auth_invalidated() {
 # refresh race / permanent-auth fallback is in progress on the scanned journal.
 # The durable PREVENTION is scripts/lib/ensure-codex-refresh-lock-shared.sh
 # (converge the two processes' refresh-lock dirs); this detector is the alarm.
+# NOTE (2026-07-27): `reason=auth_permanent` was REMOVED from this pattern set.
+# It is the GENERIC "codex auth is dead" fallback marker emitted by every codex
+# auth failure class, not a race signature. Counting it here made a zero-race
+# incident page as "Codex refresh-token race", sending the operator down the
+# lock-convergence path for an hour while the real cause was a server-side
+# session revocation. Both real 2026-06-08 race lines still match on their own
+# strings ("OpenAI Codex token refresh failed" / the literal refresh_token_reused
+# code), so race detection is unchanged — see the bats cases below.
 codex_count_refresh_reused() {
   grep -c -i -E \
     -e "refresh_token_reused" \
     -e "OpenAI Codex token refresh failed" \
-    -e "reason=auth_permanent" \
     -e "token refresh failed.*\(?401\)?" || true
+}
+
+# codex_count_session_invalidated — count SERVER-SIDE session-revocation lines.
+# The 2026-07-27 signature and a distinct failure class: OpenAI ended the OAuth
+# session (sign-in elsewhere, password change, admin action), so the refresh
+# chain is dead too — codex-oauth-refresh.sh answers `refresh_token_invalidated`
+# ("Your session has ended. Please log in again."). All three ensure-* guards
+# read CLEAN throughout, because nothing is structurally wrong: the credential
+# is well-formed and converged, just revoked upstream. That is precisely why a
+# structural guard can never catch this class and a dedicated detector is needed.
+# Gateway wording differs from API wording, so BOTH are matched:
+#   gateway: "Your access token could not be refreshed. Please log out and sign in again."
+#   API:     "Your authentication token has been invalidated." / code token_invalidated
+# Remediation is device-code re-auth (scripts/lib/codex-reauth.sh) — NOT lock
+# convergence, NOT re-pinning, NOT a plain restart.
+codex_count_session_invalidated() {
+  grep -c -i -E \
+    -e "access token could not be refreshed" \
+    -e "token_invalidated" || true
+}
+
+# codex_count_auth_permanent — the GENERIC codex-auth-dead fallback marker.
+# `reason=auth_permanent` means "openclaw gave up on the codex credential and
+# dropped to the fallback rung" without saying why. Use ONLY as a catch-all
+# after the specific classes (race / session-invalidated / api-key-route /
+# token-expired) are ruled out, so the operator gets an honest "cause
+# unclassified" page rather than a confidently wrong one.
+codex_count_auth_permanent() {
+  grep -c -i -e "reason=auth_permanent" || true
+}
+
+# codex_count_openrouter_serving — count turns ACTUALLY SERVED by the paid
+# openrouter rung instead of codex. This is the LIVENESS signal, and it is a
+# different question from every counter above: those ask "is a known failure
+# string present?", this asks "is the fleet actually running on codex right now?"
+#
+# On 2026-07-27 all three ensure-* guards read CLEAN for the full ~2h outage,
+# because nothing was structurally wrong — the credential was well-formed,
+# converged, and simply revoked upstream. Only this question would have said
+# "no" the whole time. It is also the exact check used to confirm recovery.
+#
+# We key on the SUCCESS line (`decision=candidate_succeeded ... candidate=openrouter/...`)
+# rather than on failures, because a codex-served turn logs NO fallback decision
+# at all — success is silent, so absence of this line is the healthy state and
+# there is no positive "codex served it" line to count.
+#
+# Deliberately NOT matched: `- openrouter/... model configured, enabled
+# automatically` (a gateway STARTUP line, present on every boot — counting it
+# would make every restart look like a degradation).
+codex_count_openrouter_serving() {
+  grep -c -E "decision=candidate_succeeded.*candidate=openrouter/" || true
 }
 
 # codex_count_apikey_route — count Codex #90925 api-key-route 401s on stdin.
@@ -278,11 +336,32 @@ codex_health_gate() {
     echo "cannot read journald for ${unit} — codex model health unverifiable" >&2
     return 2
   fi
-  local reused invalidated apikey expired
+  local reused invalidated apikey expired revoked
   reused="$(printf '%s\n' "$journal" | codex_count_refresh_reused)"
   invalidated="$(printf '%s\n' "$journal" | codex_count_auth_invalidated)"
   apikey="$(printf '%s\n' "$journal" | codex_count_apikey_route)"
   expired="$(printf '%s\n' "$journal" | codex_count_token_expired)"
+  # Session revocation (2026-07-27) MUST degrade this gate. It is a genuine
+  # OAuth-route failure — every real turn falls to openrouter — but it matches
+  # NONE of the four signatures above: `refresh_token_reused` is 0, the wording
+  # differs from the May-29 auth-invalidated string, and the token is neither
+  # expired nor api-key-routed. Without this line the gate reads HEALTHY for the
+  # whole outage and lets consequential writes (Stripe refunds/credits via
+  # muso-stripe-write.sh, admin writes via muso-admin-api.sh, the CS drain)
+  # through on a fleet that is not running on codex at all — precisely the
+  # failure this gate exists to prevent.
+  revoked="$(printf '%s\n' "$journal" | codex_count_session_invalidated)"
+  # The generic marker degrades this gate too, and MUST keep doing so. Removing
+  # `reason=auth_permanent` from codex_count_refresh_reused was right for the
+  # WATCHDOG (it produced a confidently wrong "refresh race" diagnosis), but this
+  # is a fail-CLOSED money gate with a different requirement: it does not care
+  # WHICH class killed codex auth, only that it is dead. Without this line a bare
+  # auth_permanent line — the one signature every class emits — would let a Stripe
+  # refund through on a degraded fleet. Caught by
+  # scripts/tests/muso-stripe-write.bats "degraded journal (reason=auth_permanent)
+  # -> REFUSES"; the watchdog gets precision, the write gate gets caution.
+  local authperm
+  authperm="$(printf '%s\n' "$journal" | codex_count_auth_permanent)"
 
   # The api-key-route 401 is the ONE degradation signature that is ambiguous: a real
   # #90925 float (codex off-pin) mis-routes EVERY gpt-5.5 turn to the api-key endpoint
@@ -304,8 +383,13 @@ codex_health_gate() {
   fi
 
   if [ "${reused:-0}" -gt 0 ] || [ "${invalidated:-0}" -gt 0 ] \
-     || [ "$apikey_degraded" -gt 0 ] || [ "${expired:-0}" -gt 0 ]; then
-    echo "codex is DEGRADED in the last ${window}min (refresh-race/auth_permanent=${reused}, auth-invalidated=${invalidated}, apikey-route#90925=${apikey}/${apikey_verdict}, token-expired=${expired})" >&2
+     || [ "$apikey_degraded" -gt 0 ] || [ "${expired:-0}" -gt 0 ] \
+     || [ "${revoked:-0}" -gt 0 ] || [ "${authperm:-0}" -gt 0 ]; then
+    # Label says refresh-race ONLY — `auth_permanent` was removed from that
+    # counter on 2026-07-27 precisely because conflating them produced a
+    # confidently wrong diagnosis; leaving the old label here would reprint that
+    # same misdiagnosis on every degraded write gate.
+    echo "codex is DEGRADED in the last ${window}min (refresh-race=${reused}, auth-invalidated=${invalidated}, session-revoked=${revoked}, auth-permanent=${authperm}, apikey-route#90925=${apikey}/${apikey_verdict}, token-expired=${expired})" >&2
     return 1
   fi
   if [ "${apikey:-0}" -gt 0 ]; then

@@ -80,6 +80,10 @@ CODEX_KEEPALIVE_JOURNAL_BIN="${CODEX_KEEPALIVE_JOURNAL_BIN:-journalctl}"
 CODEX_KEEPALIVE_CAP_WINDOW_MIN="${CODEX_KEEPALIVE_CAP_WINDOW_MIN:-20}"
 CODEX_KEEPALIVE_CAP_SIG="${CODEX_KEEPALIVE_CAP_SIG:-reached your Codex subscription usage limit}"
 CODEX_ROTATE_STAMP="${CODEX_ROTATE_STAMP:-/var/lib/hydra/codex-account-rotate.last}"
+# Separate page cooldown for the "revoked AND no standby" case so it cannot be
+# masked by the usage-cap cooldown — they are different outages needing
+# different human actions.
+CODEX_KEEPALIVE_REVOKED_STAMP="${CODEX_KEEPALIVE_REVOKED_STAMP:-${KEEPALIVE_STATE_DIR:-/var/lib/hydra}/codex-keepalive-revoked-cooldown}"
 # Proactive rotation: switch accounts BEFORE the cap error ever fires, off a
 # fresh rate_limits snapshot (any window >= ROTATE_AT% used with its reset
 # still far away). Window-agnostic by design: OpenAI dropped the 5h window in
@@ -222,6 +226,62 @@ _earliest_reset_note() {
 # proactive check does not double-fire.
 CAP_ACTED=0
 
+# ── Session revocation → rotate, don't just page (2026-07-27) ────────────────
+# A revoked OAuth session leaves the ACTIVE account permanently unusable until a
+# human completes a browser login — exactly the usage-cap shape ("this account
+# cannot serve, another one can"), and exactly what the standby pool exists for.
+# On 2026-07-27 the fleet sat on the paid OpenRouter rung for ~2h with two other
+# credentialed accounts idle, because nothing connected "active account is dead"
+# to the rotation lever that already existed. Detection alone would not have
+# shortened that; this does.
+#
+# Rotation is the right REFLEX but not the cure — the revoked account still needs
+# codex-reauth.sh. codex-account-rotate.sh pages the outcome either way, so the
+# human still learns about it; they just aren't the critical path to service.
+_revoked_hits() {
+  local out
+  if ! command -v "$CODEX_KEEPALIVE_JOURNAL_BIN" >/dev/null 2>&1; then
+    log "revoked-check: $CODEX_KEEPALIVE_JOURNAL_BIN not found — skipping session-revocation detection"
+    echo 0; return 0
+  fi
+  # Same two signatures as codex_count_session_invalidated (gateway wording vs
+  # API wording). Kept as a literal here rather than sourcing codex-health.sh so
+  # keepalive stays dependency-light, but the strings MUST track that function.
+  out="$("$CODEX_KEEPALIVE_JOURNAL_BIN" -u openclaw-gateway-main -u openclaw-gateway-edge \
+          --since "-${CODEX_KEEPALIVE_CAP_WINDOW_MIN}min" --no-pager 2>/dev/null \
+        | grep -c -i -E -e "access token could not be refreshed" -e "token_invalidated")" || out=0
+  echo "${out:-0}"
+}
+
+_check_session_revoked() {
+  local hits rc
+  [ "$CAP_ACTED" -eq 1 ] && return 0        # a rotation already fired this tick
+  hits="$(_revoked_hits)"
+  if ! [[ "$hits" =~ ^[0-9]+$ ]] || [ "$hits" -eq 0 ]; then
+    return 0
+  fi
+  if _rotated_recently; then
+    log "revoked: signature present (${hits}x) but a rotation ran <${CODEX_KEEPALIVE_CAP_WINDOW_MIN}min ago — waiting for the journal window to clear"
+    return 0
+  fi
+  log "revoked: session-invalidated signature ${hits}x in last ${CODEX_KEEPALIVE_CAP_WINDOW_MIN}min — attempting account rotation"
+  rc=0
+  CAP_ACTED=1
+  "$CODEX_KEEPALIVE_ROTATE_BIN" --auto --reason "session revoked upstream (keepalive auto-rotate)" || rc=$?
+  case "$rc" in
+    0) log "revoked: auto-rotation kicked (the rotate script pages the outcome)" ;;
+    *)
+      # No healthy standby to rotate to — this is the genuinely human-blocked
+      # case, so page with the ONE command that actually recovers it.
+      if _cooldown_ok "$CODEX_KEEPALIVE_REVOKED_STAMP" "$COOLDOWN_MIN"; then
+        slack_notify_critical ":rotating_light: *Codex session revoked and NO standby available* — the active account's OAuth session was ended upstream (${hits}x signature in ${CODEX_KEEPALIVE_CAP_WINDOW_MIN}min) and auto-rotation could not find a healthy account (rc=$rc). The fleet is on the paid \`openrouter\` rung until a human re-auths: run \`/opt/hydra/scripts/lib/codex-reauth.sh\` on node-8 — it prints a device URL + code for the account owner, then merges, syncs and restarts."
+        date +%s > "$CODEX_KEEPALIVE_REVOKED_STAMP"
+        log "revoked: paged #clio_devops (no standby, rc=$rc)"
+      fi
+      ;;
+  esac
+}
+
 _check_usage_cap() {
   local hits rc stamp
   hits="$(_cap_hits)"
@@ -363,6 +423,7 @@ main() {
   # Usage-cap → account rotation (fleet-wide journal signal, checked once),
   # then the proactive pre-cap check (skipped if the reactive path just acted).
   _check_usage_cap
+  _check_session_revoked
   _check_proactive_rotate
 }
 

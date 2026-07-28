@@ -97,6 +97,118 @@ EOF
   [ "$output" -eq 0 ]
 }
 
+# ── codex_count_session_invalidated (2026-07-27) ──────────────
+# REAL lines from the 2026-07-27 openclaw-gateway-main journal. aaron@muso.ai's
+# ChatGPT session was revoked server-side; the fleet rode openrouter for ~2h.
+# The MISDIAGNOSIS these cases exist to prevent: refresh_reused used to match
+# `reason=auth_permanent`, so this zero-race incident paged as "refresh-token
+# race" and the runbook sent the operator to lock convergence — which was, and
+# stayed, perfectly CLEAN. Remediation for this class is device-code re-auth.
+
+@test "session_invalidated: counts the gateway wording (2026-07-27 real lines)" {
+  run codex_count_session_invalidated <<'EOF'
+Jul 27 15:59:04 ovh-node-8 node[1090392]: [diagnostic] lane task error: lane=nested:agent:devops:main durationMs=1231 error="FailoverError: Your access token could not be refreshed. Please log out and sign in again."
+Jul 27 15:59:04 ovh-node-8 node[1090392]: [model-fallback/decision] model fallback decision: decision=candidate_failed requested=openai/gpt-5.6-sol candidate=openai/gpt-5.6-sol reason=auth_permanent next=openrouter/openai/gpt-5.6-luna detail=Your access token could not be refreshed. Please log out and sign in again.
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 2 ]
+}
+
+@test "session_invalidated: counts the API wording (token_invalidated code)" {
+  run codex_count_session_invalidated <<'EOF'
+Jul 27 16:08:11 ovh-node-8 node[1090392]: probe: {"error":{"message":"Your authentication token has been invalidated. Please try signing in again.","code":"token_invalidated"}}
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
+@test "session_invalidated: a clean log is 0 (no false positive)" {
+  run codex_count_session_invalidated <<'EOF'
+Jul 27 17:03:44 ovh-node-8 node[2320706]: [agents/agent-command] [agent] run b114d315 ended with stopReason=stop
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+@test "session_invalidated: the May-29 auth_invalidated string is NOT this signature" {
+  # Keeps this detector distinct from codex_count_auth_invalidated — that class
+  # is a per-agent fan-out drift, healed by ensure-codex-auth.sh, NOT by re-auth.
+  run codex_count_session_invalidated <<'EOF'
+May 27 18:04:07 ovh-node-8 node[399557]: openai-codex/gpt-5.5: Your authentication token has been invalidated. Please try signing in again.
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+@test "REGRESSION: 2026-07-27 session-revocation lines do NOT read as a refresh race" {
+  # The exact misdiagnosis. If this ever returns non-zero again, the watchdog
+  # will once more tell the operator to converge locks during an outage that
+  # lock convergence cannot fix.
+  run codex_count_refresh_reused <<'EOF'
+Jul 27 15:59:04 ovh-node-8 node[1090392]: [diagnostic] lane task error: lane=nested:agent:devops:main durationMs=1231 error="FailoverError: Your access token could not be refreshed. Please log out and sign in again."
+Jul 27 15:59:04 ovh-node-8 node[1090392]: [model-fallback/decision] model fallback decision: decision=candidate_failed requested=openai/gpt-5.6-sol candidate=openai/gpt-5.6-sol reason=auth_permanent next=openrouter/openai/gpt-5.6-luna detail=Your access token could not be refreshed. Please log out and sign in again.
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+# ── codex_count_auth_permanent ────────────────────────────────
+
+@test "auth_permanent: counts the generic codex-auth-dead fallback marker" {
+  run codex_count_auth_permanent <<'EOF'
+Jul 27 15:59:04 ovh-node-8 node[1090392]: [model-fallback/decision] decision=candidate_failed requested=openai/gpt-5.6-sol reason=auth_permanent next=openrouter/openai/gpt-5.6-luna
+Jul 27 16:00:38 ovh-node-8 node[1090392]: [agent/embedded] embedded run failover decision: stage=prompt decision=fallback_model reason=auth_permanent from=openai/gpt-5.6-sol
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 2 ]
+}
+
+@test "auth_permanent: a successful codex turn is 0 (alert must clear)" {
+  run codex_count_auth_permanent <<'EOF'
+Jul 27 17:03:49 ovh-node-8 node[2320706]: [model-fallback/decision] model fallback decision: decision=candidate_succeeded requested=openai/gpt-5.6-sol candidate=openai/gpt-5.6-sol reason=unknown next=none
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+# ── codex_count_openrouter_serving (liveness) ─────────────────
+
+@test "openrouter_serving: counts a real fallback-served turn" {
+  run codex_count_openrouter_serving <<'EOF'
+Jul 27 17:29:44 ovh-node-8 node[2394778]: [model-fallback/decision] model fallback decision: decision=candidate_succeeded requested=openai/gpt-5.6-sol candidate=openrouter/openai/gpt-5.6-luna reason=unknown next=none
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
+@test "openrouter_serving: a codex-served turn is 0 (success is SILENT)" {
+  # A turn served by the primary logs no fallback decision at all, so a healthy
+  # window contains none of these lines.
+  run codex_count_openrouter_serving <<'EOF'
+Jul 27 17:03:49 ovh-node-8 node[2320706]: [agents/agent-command] [agent] run b114d315 ended with stopReason=stop
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+@test "openrouter_serving: the gateway STARTUP config line is NOT counted" {
+  # Present on every boot. Counting it would make each restart (main restarts on
+  # memory pressure many times a day) look like a codex degradation.
+  run codex_count_openrouter_serving <<'EOF'
+Jul 27 17:02:51 ovh-node-8 node[2320706]: - openrouter/openai/gpt-5.6-luna model configured, enabled automatically.
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+@test "openrouter_serving: a FAILED openrouter candidate is not a served turn" {
+  run codex_count_openrouter_serving <<'EOF'
+Jul 27 17:28:07 ovh-node-8 node[2394778]: [model-fallback/decision] model fallback decision: decision=candidate_failed requested=openai/gpt-5.6-sol candidate=openrouter/openai/gpt-5.6-luna reason=unknown
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
 # ── codex_count_apikey_route ──────────────────────────────────
 # REAL lines from the 2026-06-19 outage AFTER codex was floated to 2026.6.1: the
 # #90925 mis-route to the OpenAI api-key endpoint. These went unalerted because no

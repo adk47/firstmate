@@ -229,6 +229,34 @@ page; 120-min cooldown bounds cap-flap). Auto-trigger: `codex-keepalive.sh` on t
 journal signature; both-accounts-capped degrades honestly to the OpenRouter rung. See
 RUNBOOK §Troubleshooting → "Codex Usage Cap / Account Rotation".
 
+**Session REVOCATION is a SIXTH failure mode — upstream kills the session, and every
+structural guard stays CLEAN.** `token_invalidated` / "Your access token could not be
+refreshed. Please log out and sign in again." with `refresh_token_reused` = 0 means OpenAI
+ended the OAuth session for that account (a sign-in elsewhere, password change, admin
+action). The access token is well-formed and unexpired, the refresh chain is dead too
+(`codex-oauth-refresh.sh` answers `refresh_token_invalidated`, "Your session has ended"),
+and **all three `ensure-*` guards read CLEAN for the entire outage** — nothing is
+structurally wrong, the credential is simply revoked. 2026-07-27: the fleet rode openrouter
+~2h. **Recovery needs a browser**: `scripts/lib/codex-reauth.sh` drives the codex CLI's own
+`login --device-auth` (the vendored binary under `@openclaw/codex`), merges into canonical,
+shreds the scratch credential, syncs and restarts. **`openclaw models auth login --provider
+openai-codex --device-code` does NOT work here** — the `openai` plugin owns that flow and is
+disabled AND off `plugins.allow`; enabling it transiently reintroduces #90925 while main
+self-restarts on memory pressure every ~40-60min. A raw curl to
+`auth.openai.com/oauth/device/code` is Cloudflare-blocked (403).
+
+**Codex profile IDs live in THREE namespaces — do not "unify" them.**
+(1) canonical `auth-profiles.json` uses **`openai-codex:<email>`** — `codex-auth-sync.sh`
+selects on that prefix; (2) the derived runtime store (`auth_profile_store` sqlite) and
+(3) `auth.order.openai` in `openclaw-*.json` both use **`openai:<email>`**. openclaw
+resolves auth.order ids with an EXACT key lookup (`store.profiles[profileId]`) — only the
+provider KEY is normalized, never the id — so an `openai-codex:` entry in auth.order
+resolves to NOTHING and the fallback list is silently empty. That is why nothing failed over
+on 2026-07-27. Conversely, an `openai:`-keyed profile in *canonical* is invisible to
+`codex-auth-sync.sh` (this swallowed a valid recovery credential for 23min the same day).
+Verify live ids with `openclaw --profile main models auth list`; the namespace is gated in
+CI by `scripts/validate-shared-config.sh`.
+
 **DR layer 2 — when the code-level healers themselves fail, an AI healer escalates.**
 `scripts/dr-ai-healer.sh` ("AI-decides, code-executes"): the watchdog fires it when a
 CRITICAL signature persists 3 ticks (or immediately on restart-FAILED / crash-loop).

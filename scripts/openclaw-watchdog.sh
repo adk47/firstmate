@@ -373,9 +373,29 @@ MAIN_CODEX_LOGS_FRESH="$MAIN_LOGS_FRESH"
 _dr_track codex_refresh_race "$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS_FRESH" "$EDGE_LOGS_FRESH" | codex_count_refresh_reused)"
 
 if [ "${CODEX_REFRESH_RACE:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-refresh-cooldown" "$CODEX_COOLDOWN_MIN"; then
-  log "CODEX REFRESH RACE: ${CODEX_REFRESH_RACE} refresh_token_reused/auth_permanent lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
-  slack_notify_critical ":rotating_light: *Codex refresh-token race* — ${CODEX_REFRESH_RACE}x \`refresh_token_reused\`/\`auth_permanent\` across main+edge in last ${CHECK_WINDOW_MIN}min. The ENTIRE codex fleet (gpt-5.6) has degraded to \`openrouter/openai/gpt-5.6-luna\`. The single-use refresh token is spent → this needs *interactive re-auth*: \`openclaw --profile main models auth login --provider openai-codex --device-code\` for BOTH accounts (aaron@muso.ai, aaronkaufman@me.com), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. Prevention is the lock-dir convergence (ensure-codex-refresh-lock-shared.sh) — see the tripwire below."
+  log "CODEX REFRESH RACE: ${CODEX_REFRESH_RACE} refresh_token_reused lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
+  slack_notify_critical ":rotating_light: *Codex refresh-token race* — ${CODEX_REFRESH_RACE}x \`refresh_token_reused\` across main+edge in last ${CHECK_WINDOW_MIN}min. The ENTIRE codex fleet (gpt-5.6) has degraded to \`openrouter/openai/gpt-5.6-luna\`. The single-use refresh token is spent → this needs *interactive re-auth*: run \`/opt/hydra/scripts/lib/codex-reauth.sh\` on node-8 (device-code login + merge + sync + restart; it prints a URL and a code for Aaron). Prevention is the lock-dir convergence (ensure-codex-refresh-lock-shared.sh) — see the tripwire below.\n_NOTE: \`openclaw models auth login --provider openai-codex --device-code\` does NOT work here — the \`openai\` plugin that owns that flow is disabled and off \`plugins.allow\`._"
   date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-refresh-cooldown"
+fi
+
+# ── Codex SESSION REVOCATION watch (2026-07-27 outage) ────────────────────────
+# OpenAI ended the OAuth session server-side (sign-in elsewhere / password change
+# / admin action). The access token is structurally valid and unexpired, and the
+# refresh chain is dead too, so codex-oauth-refresh.sh answers
+# `refresh_token_invalidated`. ALL THREE ensure-* guards read CLEAN throughout —
+# nothing is structurally wrong, the credential is simply revoked upstream. That
+# is why this needs its own detector: no convergence check can ever see it.
+# Ordered BEFORE the generic auth_permanent catch-all so the specific, actionable
+# page wins. On 2026-07-27 this class was misreported as a refresh-token race and
+# cost ~1h chasing lock convergence that was, and stayed, converged.
+CODEX_SESSION_INVALID=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_count_session_invalidated)
+_dr_track codex_session_invalidated "$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS_FRESH" "$EDGE_LOGS_FRESH" | codex_count_session_invalidated)"
+
+if [ "${CODEX_SESSION_INVALID:-0}" -gt 0 ] && [ "${CODEX_REFRESH_RACE:-0}" -eq 0 ] \
+   && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-session-cooldown" "$CODEX_COOLDOWN_MIN"; then
+  log "CODEX SESSION REVOKED: ${CODEX_SESSION_INVALID} session-invalidated lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
+  slack_notify_critical ":rotating_light: *Codex session revoked upstream* — ${CODEX_SESSION_INVALID}x \`token_invalidated\`/\"access token could not be refreshed\" across main+edge in last ${CHECK_WINDOW_MIN}min, with ZERO \`refresh_token_reused\`. OpenAI ended the OAuth session for the active account, so the refresh chain is dead too — the fleet is on \`openrouter/openai/gpt-5.6-luna\`.\n*This is NOT the refresh race and NOT a token lapse* — the ensure-* guards will all read CLEAN; do not go chasing them. Recovery needs a real browser login: run \`/opt/hydra/scripts/lib/codex-reauth.sh\` on node-8, which prints a device URL + code for Aaron, then merges, syncs and restarts.\nIf another account still has quota, \`/opt/hydra/scripts/lib/codex-account-rotate.sh --auto\` may restore service immediately without waiting for a human."
+  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-session-cooldown"
 fi
 
 # Convergence tripwire: if the two processes' refresh-lock dirs are no longer ONE
@@ -457,8 +477,85 @@ fi
 
 if [ "${CODEX_TOKEN_EXPIRED:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-expired-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "CODEX OAUTH TOKEN EXPIRED: ${CODEX_TOKEN_EXPIRED} 'token is expired' lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
-  slack_notify_critical ":rotating_light: *Codex OAuth token expired* — ${CODEX_TOKEN_EXPIRED}x \`authentication token is expired\` across main+edge in last ${CHECK_WINDOW_MIN}min. The codex access token lapsed and refresh isn't renewing it → fleet on \`openrouter/openai/gpt-5.6-luna\`. Device-code re-auth BOTH accounts then restart: \`openclaw --profile main models auth login --provider openai-codex --device-code\` (aaron@muso.ai + aaronkaufman@me.com), then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`."
+  slack_notify_critical ":rotating_light: *Codex OAuth token expired* — ${CODEX_TOKEN_EXPIRED}x \`authentication token is expired\` across main+edge in last ${CHECK_WINDOW_MIN}min. The codex access token lapsed and refresh isn't renewing it → fleet on \`openrouter/openai/gpt-5.6-luna\`. FIRST try the browser-free path: \`/opt/hydra/scripts/lib/codex-oauth-refresh.sh\` then \`systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. Only if that reports \`invalid_grant\`/\`refresh_token_invalidated\` (chain dead) run \`/opt/hydra/scripts/lib/codex-reauth.sh\` for a device-code login.\n_NOTE: \`openclaw models auth login --provider openai-codex --device-code\` does NOT work here — the \`openai\` plugin that owns that flow is disabled and off \`plugins.allow\`._"
   date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-expired-cooldown"
+fi
+
+# ── Codex auth-dead CATCH-ALL ─────────────────────────────────────────────────
+# `reason=auth_permanent` with NONE of the specific classes matched. It says only
+# "openclaw gave up on the codex credential", never why. Deliberately vague
+# rather than confidently wrong: an unclassified page that says "triage this"
+# beats a precise-sounding one pointing at the wrong subsystem, which is exactly
+# what cost an hour on 2026-07-27. Placed here, after every specific detector has
+# been computed, so those variables are genuinely set and not `:-0` defaults.
+CODEX_AUTH_PERMANENT=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_count_auth_permanent)
+
+if [ "${CODEX_AUTH_PERMANENT:-0}" -gt 0 ] && [ "${CODEX_REFRESH_RACE:-0}" -eq 0 ] \
+   && [ "${CODEX_SESSION_INVALID:-0}" -eq 0 ] && [ "${CODEX_APIKEY_ROUTE:-0}" -eq 0 ] \
+   && [ "${CODEX_TOKEN_EXPIRED:-0}" -eq 0 ] \
+   && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-authperm-cooldown" "$CODEX_COOLDOWN_MIN"; then
+  log "CODEX AUTH DEAD (UNCLASSIFIED): ${CODEX_AUTH_PERMANENT} auth_permanent lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
+  slack_notify_critical ":rotating_light: *Codex auth failing — cause UNCLASSIFIED* — ${CODEX_AUTH_PERMANENT}x \`reason=auth_permanent\` across main+edge in last ${CHECK_WINDOW_MIN}min, but NONE of the known signatures (refresh race, session revoked, api-key route, token expired) matched. The fleet is on the openrouter fallback.\nTriage on node-8: \`ensure-codex-auth.sh --check\`, \`ensure-codex-version-pinned.sh --check\`, \`ensure-codex-refresh-lock-shared.sh --check\`, then read the live journal for the actual error string. If this fires repeatedly the signature is NEW — add a detector to \`scripts/lib/codex-health.sh\` so the next occurrence pages precisely."
+  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-authperm-cooldown"
+fi
+
+# ── Codex LIVENESS: is the fleet actually running on codex? ───────────────────
+# Every detector above asks "is a known failure string present?". This asks the
+# question that actually matters to the business: are turns being SERVED by
+# codex, or by the paid openrouter rung? On 2026-07-27 all three ensure-* guards
+# read CLEAN for the whole ~2h outage — nothing was structurally wrong, the
+# credential was simply revoked upstream — so only this question would have said
+# "no" throughout. It is signature-independent: it catches a NEW failure class
+# nobody has written a detector for yet, which is the whole point.
+#
+# Requires TWO CONSECUTIVE unhealthy ticks before paging. A single tick is noisy:
+# one transient auth blip during a session takeover or compaction can serve one
+# turn on the fallback and self-recover (observed 17:28 on 2026-07-27). Two ticks
+# means it is not recovering on its own.
+CODEX_OPENROUTER_SERVING=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_count_openrouter_serving)
+_CODEX_LIVENESS_STREAK_FILE="$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-liveness-streak"
+_CODEX_LIVENESS_LAST_FILE="$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-liveness-lastline"
+_CODEX_LIVENESS_STREAK=$(cat "$_CODEX_LIVENESS_STREAK_FILE" 2>/dev/null || echo 0)
+case "$_CODEX_LIVENESS_STREAK" in ''|*[!0-9]*) _CODEX_LIVENESS_STREAK=0 ;; esac
+
+# The streak must count DISTINCT degradation events, not re-observations of one.
+# This watchdog fires every 2min but reads a 15min journal window, so a single
+# fallback line is visible for ~7 consecutive ticks — a naive per-tick increment
+# would reach the 2-tick threshold ~4min after ONE transient blip, which is
+# exactly the noise the threshold exists to suppress (a real one was observed
+# 17:28 on 2026-07-27, self-recovered). So fingerprint the NEWEST matching line
+# and only advance the streak when it actually changes; an unchanged fingerprint
+# means we are still looking at the same event through an overlapping window.
+# Fingerprint PER GATEWAY, not over the concatenation. The two journals are
+# joined as "all main lines, then all edge lines", so a single `tail -n1` over
+# the pair always returns edge's last match whenever edge has ANY — a stale edge
+# event would then pin the fingerprint and silently hold the streak while main
+# kept degrading. A per-unit tuple changes whenever EITHER gateway sees something
+# new, which is the property the debounce actually needs.
+_codex_liveness_fp() {
+  printf '%s\n' "$1" | grep -E "decision=candidate_succeeded.*candidate=openrouter/" \
+    | tail -n1 | cksum 2>/dev/null || true
+}
+_CODEX_LIVENESS_NEWEST="main:$(_codex_liveness_fp "$MAIN_CODEX_LOGS")|edge:$(_codex_liveness_fp "$EDGE_LOGS")"
+_CODEX_LIVENESS_PREV=$(cat "$_CODEX_LIVENESS_LAST_FILE" 2>/dev/null || true)
+
+if [ "${CODEX_OPENROUTER_SERVING:-0}" -gt 0 ]; then
+  if [ "$_CODEX_LIVENESS_NEWEST" = "$_CODEX_LIVENESS_PREV" ]; then
+    log "CODEX LIVENESS: still the SAME newest fallback line as last tick (overlapping ${CHECK_WINDOW_MIN}min window) — streak held at ${_CODEX_LIVENESS_STREAK}"
+  else
+    _CODEX_LIVENESS_STREAK=$((_CODEX_LIVENESS_STREAK + 1))
+    echo "$_CODEX_LIVENESS_STREAK" > "$_CODEX_LIVENESS_STREAK_FILE"
+  fi
+  printf '%s' "$_CODEX_LIVENESS_NEWEST" > "$_CODEX_LIVENESS_LAST_FILE"
+  log "CODEX LIVENESS: ${CODEX_OPENROUTER_SERVING} turn(s) served by openrouter in last ${CHECK_WINDOW_MIN}min (consecutive tick ${_CODEX_LIVENESS_STREAK})"
+  if [ "$_CODEX_LIVENESS_STREAK" -ge 2 ] \
+     && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-liveness-cooldown" "$CODEX_COOLDOWN_MIN"; then
+    slack_notify_critical ":rotating_light: *Codex NOT serving — fleet on the paid openrouter rung* — ${CODEX_OPENROUTER_SERVING}x turns served by \`openrouter/*\` in the last ${CHECK_WINDOW_MIN}min, for ${_CODEX_LIVENESS_STREAK} consecutive checks. Agents are degraded AND this is costing per-token money.\nThis check is signature-independent, so the cause may be a class with no detector yet. Triage in order: (1) usage cap — \`/opt/hydra/scripts/lib/codex-usage.sh\` / rotate with \`codex-account-rotate.sh --auto\`; (2) session revoked — \`codex-reauth.sh\`; (3) token lapse — \`codex-oauth-refresh.sh\`; (4) the three \`ensure-*\` guards. If ALL read clean and none apply, the signature is new — capture the journal error string and add a detector to \`scripts/lib/codex-health.sh\`."
+    date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-liveness-cooldown"
+  fi
+else
+  [ "$_CODEX_LIVENESS_STREAK" -gt 0 ] && log "CODEX LIVENESS: recovered — codex is serving again (streak reset from ${_CODEX_LIVENESS_STREAK})"
+  rm -f "$_CODEX_LIVENESS_STREAK_FILE" "$_CODEX_LIVENESS_LAST_FILE"
 fi
 
 # ── web_search managed-provider reconnect watch (main) ─────────────────────

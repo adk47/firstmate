@@ -78,6 +78,32 @@ for prof in main edge; do
     pass "openclaw-${prof}.json: agentRuntime pinned to codex"
   fi
 done
+
+# auth.order profile-id NAMESPACE assertion (2026-07-27 outage).
+# openclaw resolves these ids with an EXACT key lookup into the runtime auth
+# profile store (`store.profiles[profileId]` in dist/profiles-*.js) — only the
+# provider KEY ("openai") is normalized, never the id. The runtime store is
+# keyed `openai:<email>` (written by scripts/lib/codex-auth-sync.sh), so an
+# `openai-codex:<email>` entry here silently resolves to NOTHING: the fallback
+# list looks populated while no rotation target actually exists. That is why
+# the fleet had no failover when aaron@muso.ai's session was invalidated and
+# rode openrouter for ~2h. Canonical auth-profiles.json legitimately uses the
+# `openai-codex:` prefix — these two namespaces are different layers, do not
+# "unify" them. Verify live ids with: openclaw --profile main models auth list
+for prof in main edge; do
+  bad=$(python3 -c "
+import json,sys
+with open('$HYDRA_ROOT/openclaw-${prof}.json') as f:
+    order = json.load(f).get('auth', {}).get('order', {}).get('openai', [])
+print(','.join(i for i in order if not i.startswith('openai:')))
+" 2>/dev/null)
+  if [ -n "$bad" ]; then
+    fail "openclaw-${prof}.json: auth.order.openai ids must use the runtime \"openai:<email>\" namespace, not \"openai-codex:\" (dangling: $bad)"
+  else
+    pass "openclaw-${prof}.json: auth.order.openai ids use the runtime namespace"
+  fi
+done
+
 compare_path "messages.queue" "Message queue config"
 compare_path "messages.ackReaction" "Message ack reaction"
 compare_path "messages.ackReactionScope" "Message ack reaction scope"
