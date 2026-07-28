@@ -1,0 +1,10 @@
+{
+  "id": "skiphost",
+  "source": {
+    "body": "<img src=\"https://evil.example.com/x.png\" alt=\"\">",
+    "attachments": [
+      {"url": "https://musoai.intercom-attachments-3.com/ok1.png", "content_type": "image/png", "name": "ok1.png"}
+    ]
+  },
+  "conversation_parts": { "conversation_parts": [] }
+}

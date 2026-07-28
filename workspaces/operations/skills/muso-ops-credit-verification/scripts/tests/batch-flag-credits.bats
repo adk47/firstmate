@@ -68,6 +68,41 @@ esac
 STUB
     chmod +x "$ADMIN_API_SH"
     export ADMIN_API_SH
+
+    # Fake verify script. Logs invocation args so tests can assert on
+    # whether/how it was called; STUB_VERIFY_MODE selects its exit behavior.
+    # Defaults to a clean match (exit 0) so every test that doesn't care
+    # about the readback still gets a passing default rather than hitting
+    # the real /opt/hydra path (nonexistent on test hosts).
+    VERIFY_LOG="$TEST_ROOT/verify-invocations.log"
+    export VERIFY_LOG
+
+    VERIFY_STATUS_SH="$TEST_ROOT/fake-verify-credit-request-status.sh"
+    cat > "$VERIFY_STATUS_SH" <<'STUB'
+#!/usr/bin/env bash
+printf 'ARGS: %s\n' "$*" >> "${VERIFY_LOG:-/dev/null}"
+
+case "${STUB_VERIFY_MODE:-matched}" in
+    matched)
+        printf '%s\n' '{"expected":"user_verification_needed","matched":9,"mismatched":[]}'
+        exit 0
+        ;;
+    mismatched)
+        printf '%s\n' '{"expected":"user_verification_needed","matched":1,"mismatched":[{"id":"22222222-2222-2222-2222-222222222222","actual":"unverified"}]}'
+        exit 1
+        ;;
+    unverifiable)
+        echo "[verify-credit-request-status] UNVERIFIABLE: trino down" >&2
+        exit 3
+        ;;
+    *)
+        echo "stub: unknown STUB_VERIFY_MODE=${STUB_VERIFY_MODE}" >&2
+        exit 99
+        ;;
+esac
+STUB
+    chmod +x "$VERIFY_STATUS_SH"
+    export VERIFY_STATUS_SH
 }
 
 teardown() {
@@ -77,14 +112,14 @@ teardown() {
 # --- Arg validation ---
 
 @test "missing --profile-id → exit 2" {
-    run bash "$WRAPPER" --reason high_velocity --ids "cr_1" --flag-reason name_mismatch
+    run bash "$WRAPPER" --reason high_velocity --ids "11111111-1111-1111-1111-111111111111" --flag-reason name_mismatch
     [ "$status" -eq 2 ]
     [[ "$output" == *"--profile-id is required"* ]]
     [ ! -f "$ADMIN_LOG" ]
 }
 
 @test "missing --reason → exit 2 (caller discipline; never UVN reasonless)" {
-    run bash "$WRAPPER" --profile-id p1 --ids "cr_1" --flag-reason name_mismatch
+    run bash "$WRAPPER" --profile-id p1 --ids "11111111-1111-1111-1111-111111111111" --flag-reason name_mismatch
     [ "$status" -eq 2 ]
     [[ "$output" == *"--reason is required"* ]]
     [ ! -f "$ADMIN_LOG" ]
@@ -101,33 +136,46 @@ teardown() {
 }
 
 @test "empty --ids entry → exit 2" {
-    run bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,,cr_2" --flag-reason name_mismatch
+    run bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "11111111-1111-1111-1111-111111111111,,22222222-2222-2222-2222-222222222222" --flag-reason name_mismatch
     [ "$status" -eq 2 ]
     [[ "$output" == *"empty entry"* ]]
     [ ! -f "$ADMIN_LOG" ]
 }
 
+@test "malformed (non-UUID) id → exit 2, NO API call (UUID contract before PUT)" {
+    # A non-UUID id must be rejected up front, never sent to the write API and
+    # then mis-reported as readback-unverifiable (exit 4). Same contract as
+    # verify-credit-request-status.sh; credit_requests.id is a uuid.
+    run bash "$WRAPPER" --profile-id p1 --reason high_velocity \
+        --ids "11111111-1111-1111-1111-111111111111,not-a-uuid" --flag-reason name_mismatch
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"non-UUID entry"* ]]
+    # No PUT attempted, and the readback verifier was never reached.
+    [ ! -f "$ADMIN_LOG" ]
+    [ ! -f "$VERIFY_LOG" ]
+}
+
 @test "--requester is refused → exit 2" {
-    run bash "$WRAPPER" --requester aaron@muso.ai --profile-id p1 --reason high_velocity --ids "cr_1" --flag-reason name_mismatch
+    run bash "$WRAPPER" --requester aaron@muso.ai --profile-id p1 --reason high_velocity --ids "11111111-1111-1111-1111-111111111111" --flag-reason name_mismatch
     [ "$status" -eq 2 ]
     [[ "$output" == *"--requester is forbidden"* ]]
     [ ! -f "$ADMIN_LOG" ]
 }
 
 @test "unknown argument → exit 2" {
-    run bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1" --unknown foo
+    run bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111" --unknown foo
     [ "$status" -eq 2 ]
     [[ "$output" == *"unknown argument"* ]]
 }
 
 @test "missing --flag-reason → exit 2" {
-    run bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1"
+    run bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111"
     [ "$status" -eq 2 ]
     [[ "$output" == *"--flag-reason is required"* ]]
 }
 
 @test "invalid --flag-reason value → exit 2" {
-    run bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1" --flag-reason looks_off
+    run bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111" --flag-reason looks_off
     [ "$status" -eq 2 ]
     [[ "$output" == *"not a valid enum value"* ]]
 }
@@ -142,7 +190,7 @@ echo "ENV_OPS_FLAG_REASON=${OPS_FLAG_REASON:-UNSET}" >> "${ADMIN_LOG:-/dev/null}
 printf '%s\n' '{"http_status":200,"dryRun":true,"body":null}'
 STUB
     chmod +x "$ADMIN_API_SH"
-    run bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1" --flag-reason name_mismatch
+    run bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111" --flag-reason name_mismatch
     [ "$status" -eq 0 ]
     grep -qF 'ENV_OPS_FLAG_REASON=name_mismatch' "$ADMIN_LOG"
 }
@@ -150,7 +198,7 @@ STUB
 # --- Endpoint shape (the 2026-04-27 fix) ---
 
 @test "ENDPOINT INVARIANT: uses PUT /admin/credit-requests with batch body" {
-    STUB_MODE=success_dryrun bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3" --flag-reason name_mismatch >/dev/null
+    STUB_MODE=success_dryrun bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222,33333333-3333-3333-3333-333333333333" --flag-reason name_mismatch >/dev/null
     # Single invocation (NOT N per-id calls)
     [ "$(grep -c '^ARGS:' "$ADMIN_LOG")" -eq 1 ]
     # PUT not PATCH; collection path not /<id>
@@ -161,15 +209,15 @@ STUB
     # Body shape: requestIds array + status, no reason field.
     body=$(grep '^LAST_ARG:' "$ADMIN_LOG" | sed 's/^LAST_ARG: //' | head -1)
     echo "$body" | jq -e '.status == "user_verification_needed"' >/dev/null
-    echo "$body" | jq -e '.requestIds == ["cr_1","cr_2","cr_3"]' >/dev/null
+    echo "$body" | jq -e '.requestIds == ["11111111-1111-1111-1111-111111111111","22222222-2222-2222-2222-222222222222","33333333-3333-3333-3333-333333333333"]' >/dev/null
     # Backend updateStatus does not consume `reason` — must NOT be in body.
     echo "$body" | jq -e 'has("reason") | not' >/dev/null
 }
 
 @test "ENDPOINT INVARIANT: trims whitespace from --ids before serializing" {
-    STUB_MODE=success_dryrun bash "$WRAPPER" --profile-id p1 --reason r --ids " cr_1 , cr_2 ,cr_3 " --flag-reason name_mismatch >/dev/null
+    STUB_MODE=success_dryrun bash "$WRAPPER" --profile-id p1 --reason r --ids " 11111111-1111-1111-1111-111111111111 , 22222222-2222-2222-2222-222222222222 ,33333333-3333-3333-3333-333333333333 " --flag-reason name_mismatch >/dev/null
     body=$(grep '^LAST_ARG:' "$ADMIN_LOG" | sed 's/^LAST_ARG: //' | head -1)
-    echo "$body" | jq -e '.requestIds == ["cr_1","cr_2","cr_3"]' >/dev/null
+    echo "$body" | jq -e '.requestIds == ["11111111-1111-1111-1111-111111111111","22222222-2222-2222-2222-222222222222","33333333-3333-3333-3333-333333333333"]' >/dev/null
 }
 
 @test "REGRESSION GUARD: PATCH /admin/credit-requests/<id> would 404 (legacy bug shape)" {
@@ -177,7 +225,7 @@ STUB
     # returns the exact 404 the real backend produces. Wrapper must treat
     # it as http_error (not "ok") and exit 1. This test exists to lock the
     # 2026-04-27 incident shape into CI.
-    STUB_MODE=http_404_patch_legacy run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1" --flag-reason name_mismatch
+    STUB_MODE=http_404_patch_legacy run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111" --flag-reason name_mismatch
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '.outcome == "http_error" and .http_status == 404' >/dev/null
 }
@@ -185,13 +233,13 @@ STUB
 # --- Successful paths ---
 
 @test "happy path (dry-run) → exit 0, outcome=dry_run_intercept" {
-    STUB_MODE=success_dryrun run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3" --flag-reason name_mismatch
+    STUB_MODE=success_dryrun run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222,33333333-3333-3333-3333-333333333333" --flag-reason name_mismatch
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.profile_id == "p1" and .requested == 3 and .outcome == "dry_run_intercept" and .http_status == 200' >/dev/null
 }
 
 @test "happy path (real 200) → exit 0, outcome=ok, no --evidence-excerpt flag" {
-    STUB_MODE=success_200 run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2" --flag-reason name_mismatch
+    STUB_MODE=success_200 run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222" --flag-reason name_mismatch
     [ "$status" -eq 0 ]
     echo "$output" | jq -e '.outcome == "ok" and .http_status == 200 and .requested == 2' >/dev/null
     # UVN is ungated — wrapper must NOT pass --evidence-excerpt.
@@ -199,7 +247,7 @@ STUB
 }
 
 @test "reason is forwarded to stderr (audit grep), NOT to API body" {
-    STUB_MODE=success_dryrun run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1" --flag-reason name_mismatch
+    STUB_MODE=success_dryrun run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "11111111-1111-1111-1111-111111111111" --flag-reason name_mismatch
     [ "$status" -eq 0 ]
     [[ "$stderr" == *"reason=\"high_velocity\""* ]]
     [[ "$stderr" == *"profile=p1"* ]]
@@ -210,13 +258,13 @@ STUB
 # --- Failure paths ---
 
 @test "HTTP 500 from updateStatus → exit 1, outcome=http_error" {
-    STUB_MODE=http_500 run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2" --flag-reason name_mismatch
+    STUB_MODE=http_500 run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222" --flag-reason name_mismatch
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '.outcome == "http_error" and .http_status == 500 and .requested == 2' >/dev/null
 }
 
 @test "connection refused (curl 7) → exit 1, stderr surfaces" {
-    STUB_MODE=connection_refused run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "cr_1,cr_2,cr_3" --flag-reason name_mismatch
+    STUB_MODE=connection_refused run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason high_velocity --ids "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222,33333333-3333-3333-3333-333333333333" --flag-reason name_mismatch
     [ "$status" -eq 1 ]
     echo "$output" | jq -e '.outcome == "http_error"' >/dev/null
     [[ "$stderr" == *"Failed to connect"* ]]
@@ -229,13 +277,68 @@ STUB
     # stderr swallowed, exit code ignored. Wrapper must propagate non-zero
     # even when its outputs are redirected.
     rc=0
-    STUB_MODE=http_500 bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1" >/dev/null 2>&1 || rc=$?
+    STUB_MODE=http_500 bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111" >/dev/null 2>&1 || rc=$?
     [ "$rc" -ne 0 ]
 }
 
 @test "admin script absent → exit 2 (plumbing failure surfaces)" {
     ADMIN_API_SH=/nonexistent/muso-admin-api.sh \
-        run bash "$WRAPPER" --profile-id p1 --reason r --ids "cr_1" --flag-reason name_mismatch
+        run bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111" --flag-reason name_mismatch
     [ "$status" -eq 2 ]
     [[ "$output" == *"muso-admin-api.sh not found"* ]]
+}
+
+# --- Automatic Trino readback (verify-credit-request-status.sh hook) ---
+
+@test "readback: invoked with the same ids after a stubbed 2xx PUT" {
+    STUB_MODE=success_200 STUB_VERIFY_MODE=matched \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222" --flag-reason name_mismatch
+    [ "$status" -eq 0 ]
+    [ -f "$VERIFY_LOG" ]
+    grep -qF -- '--expected user_verification_needed' "$VERIFY_LOG"
+    grep -qF -- '--ids 11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222' "$VERIFY_LOG"
+}
+
+@test "readback: NOT invoked on dry-run intercept" {
+    STUB_MODE=success_dryrun \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222" --flag-reason name_mismatch
+    [ "$status" -eq 0 ]
+    [ ! -f "$VERIFY_LOG" ]
+    echo "$output" | jq -e '.readback == "skipped"' >/dev/null
+}
+
+@test "readback: NOT invoked with --no-verify" {
+    STUB_MODE=success_200 \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222" --flag-reason name_mismatch --no-verify
+    [ "$status" -eq 0 ]
+    [ ! -f "$VERIFY_LOG" ]
+    echo "$output" | jq -e '.readback == "skipped"' >/dev/null
+}
+
+@test "readback: NOT invoked on http_error outcome (nothing to read back)" {
+    STUB_MODE=http_500 \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222" --flag-reason name_mismatch
+    [ "$status" -eq 1 ]
+    [ ! -f "$VERIFY_LOG" ]
+}
+
+@test "readback mismatch (verify exit 1) → wrapper exit 3" {
+    STUB_MODE=success_200 STUB_VERIFY_MODE=mismatched \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222" --flag-reason name_mismatch
+    [ "$status" -eq 3 ]
+    echo "$output" | jq -e '.readback.mismatched == [{id:"22222222-2222-2222-2222-222222222222", actual:"unverified"}]' >/dev/null
+}
+
+@test "readback unverifiable (verify exit 3) → wrapper exit 4" {
+    STUB_MODE=success_200 STUB_VERIFY_MODE=unverifiable \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222" --flag-reason name_mismatch
+    [ "$status" -eq 4 ]
+    echo "$output" | jq -e '.readback == "unverifiable"' >/dev/null
+}
+
+@test "readback: stdout summary contains the readback field on success" {
+    STUB_MODE=success_200 STUB_VERIFY_MODE=matched \
+        run --separate-stderr bash "$WRAPPER" --profile-id p1 --reason r --ids "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222" --flag-reason name_mismatch
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.readback.matched == 9 and .readback.expected == "user_verification_needed"' >/dev/null
 }

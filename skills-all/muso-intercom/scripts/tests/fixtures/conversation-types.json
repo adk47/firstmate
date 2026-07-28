@@ -1,0 +1,15 @@
+{
+  "id": "types",
+  "source": {
+    "body": "",
+    "attachments": [
+      {"url": "https://musoai.intercom-attachments-3.com/type-png", "content_type": "image/png", "name": "type-png"},
+      {"url": "https://musoai.intercom-attachments-3.com/type-jpeg", "content_type": "image/jpeg", "name": "type-jpeg"},
+      {"url": "https://musoai.intercom-attachments-3.com/type-gif", "content_type": "image/gif", "name": "type-gif"},
+      {"url": "https://musoai.intercom-attachments-3.com/type-webp", "content_type": "image/webp", "name": "type-webp"},
+      {"url": "https://musoai.intercom-attachments-3.com/type-pdf", "content_type": "application/pdf", "name": "type-pdf"},
+      {"url": "https://musoai.intercom-attachments-3.com/type-unknown", "content_type": "application/octet-stream", "name": "type-unknown"}
+    ]
+  },
+  "conversation_parts": { "conversation_parts": [] }
+}

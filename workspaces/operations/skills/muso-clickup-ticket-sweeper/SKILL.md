@@ -44,6 +44,17 @@ The goal is to quickly convert a messy ClickUp bucket into:
 - If notifying a customer, log the planned customer message before sending and
   record the send result in the ClickUp comment.
 - Do not let subagents write. Subagents only produce investigation packets.
+- Subagents never inspect Intercom attachments. Signed CDN URLs expire in ~30
+  minutes and subagents cannot read the parent's local files — a delegated
+  slice must return the conversation ID and flag `attachments_present`; the
+  parent downloads them fresh via the muso-intercom helper
+  (`fetch-conversation-attachments.sh <conversation_id>`) and inspects the
+  local files with vision. Never improvise `curl` + `file` pipelines.
+- Credit-request status readbacks go through
+  `scripts/verify-credit-request-status.sh` (see step 4) — never ad-hoc jq
+  against the admin API. A 200 from `PUT /admin/credit-requests` does NOT mean
+  the rows transitioned (per-row silent skips; 2026-07-23: 28 rejected rows
+  no-op'd under a 200).
 - Close only deterministic cases: readback-fixed, exact safe credit correction, duplicate/stale ticket, source-check answered, or async repair queued with a clear next state.
 - Keep open when the request is broad, ambiguous, source-backed metadata from DSPs, missing exact track/profile IDs, ownership mismatch, or needs customer proof.
 - Never invent ticket IDs, owners, escalations, or process. A write happened only if the tool returned a concrete success.
@@ -51,6 +62,13 @@ The goal is to quickly convert a messy ClickUp bucket into:
 ## Batch workflow
 
 1. Build the bucket.
+   - Support tickets live in the **User Requests** list, id `901000600160`
+     (https://app.clickup.com/2283334/v/b/6-901000600160-2). Pass it
+     explicitly: `muso clickup tasks list --list 901000600160 --json`
+     (status filter: `--query 'statuses[]=to do'`). There is no
+     `CLICKUP_LIST_ID` env default in the exec environment - a listing
+     without `--list` returns no list id. Do not fall back to team-wide
+     search; if the list read itself fails, say so.
    - Pull ClickUp tasks and comments.
    - Filter by the requested concern/tag/status/date. For credit/manual buckets,
      keep the working JSONL in `tmp/`.
@@ -63,6 +81,11 @@ The goal is to quickly convert a messy ClickUp bucket into:
      JSON investigation packet. They may use read-only Intercom/admin lookups if
      those tools are available to them, but they must never write. If read-only
      tools are unavailable, they should return `parent_readback_needed`.
+   - Attachments stay with the parent: subagents report `attachments_present`
+     plus the conversation ID and move on (their signed URLs will be expired
+     by inspection time). The parent runs the muso-intercom
+     `fetch-conversation-attachments.sh` helper and reads the downloaded
+     files with vision before deciding.
    - Keep one small slice local so the critical path keeps moving.
 
 3. For each ticket, recover missing IDs.
@@ -77,6 +100,12 @@ The goal is to quickly convert a messy ClickUp bucket into:
    - Use `references/decision-rubric.md` when the answer is not obvious.
    - For any admin write, log first, include `--requester <slack_id>`, execute,
      then read back.
+   - For credit-request status changes specifically, the readback is
+     mandatory and tooled — run
+     `bash /opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/verify-credit-request-status.sh --expected <status> --ids "<ids>"`
+     after the PUT. Exit 1 = rows did not transition (report the `{id, actual}`
+     list, keep the ticket open); exit 3 = readback unavailable (treat the
+     write as unverified and say so). Do not hand-roll jq for this.
    - Prefer partial safe fixes over all-or-nothing. Leave the ticket open if any
      requested part remains unsupported.
 
@@ -117,6 +146,7 @@ Ask subagents to return one JSON object per ticket:
   "ticket_id": "869...",
   "recommended_status": "resolved|open",
   "safe_action": "none|admin_write_needed|already_fixed|needs_human_review|parent_readback_needed",
+  "attachments_present": false,
   "evidence": [
     "Intercom 215... says ...",
     "Admin readback: profile ... has ..."
@@ -186,3 +216,5 @@ and exits non-zero if any ClickUp write fails.
 - ClickUp field update: `POST /api/v2/task/{task_id}/field/{field_id}`.
 - Admin wrapper: `skills/muso-ops-admin/scripts/muso-admin-api.sh --requester <id> call ...`.
 - Intercom conversation: `GET /conversations/{id}?display_as=plaintext`.
+- Intercom attachments (parent only): `bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-intercom/scripts/fetch-conversation-attachments.sh <conversation_id>`.
+- Credit-request status readback: `bash /opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/verify-credit-request-status.sh --expected <status> --ids "<ids>"`.

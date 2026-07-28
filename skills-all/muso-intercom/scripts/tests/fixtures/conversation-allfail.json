@@ -1,0 +1,11 @@
+{
+  "id": "allfail",
+  "source": {
+    "body": "",
+    "attachments": [
+      {"url": "https://musoai.intercom-attachments-3.com/fail1.png", "content_type": "image/png", "name": "fail1.png"},
+      {"url": "https://musoai.intercom-attachments-3.com/fail2.jpg", "content_type": "image/jpeg", "name": "fail2.jpg"}
+    ]
+  },
+  "conversation_parts": { "conversation_parts": [] }
+}

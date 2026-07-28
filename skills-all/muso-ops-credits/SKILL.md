@@ -123,6 +123,28 @@ not listed here **silently no-ops and still returns 200**):
 | `unverified`               | `approved` ONLY                                           |
 | `processing`               | `unverified`, `processing`, `user_verification_needed`    |
 
+`pending` is accepted by validation but transitions nothing. **`rejected →
+user_verification_needed` is NOT in the matrix today** — it lands only when the
+2026-07-23 core-backend fix (`383f50c0d`) deploys, which also makes the response
+carry `{updated, updatedIds, skippedIds}`. Until then a rejected→UVN "restore"
+silently no-ops under a 200 (2026-07-23: 28 rows reported success while zero
+moved) — which is exactly why the readback below is mandatory.
+
+**Therefore: NEVER trust a 200 from this endpoint. Always read back.**
+After every status PUT, verify with the tested readback script (do not
+compose ad-hoc jq):
+
+```bash
+bash /opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/verify-credit-request-status.sh \
+  --expected <target_status> --ids "<id1>,<id2>,..."
+```
+
+Exit 0 = all ids verified at the target status; exit 1 = at least one row did
+not transition (stdout lists `{id, actual}`); exit 3 = readback could not run
+(treat the write as UNVERIFIED — say so, never claim success). For
+UVN flagging specifically, prefer `batch-flag-credits.sh`, which now runs
+this readback automatically.
+
 **Approve:**
 ```bash
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
@@ -149,16 +171,14 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 The handler does NOT read a `reason` field — track the rationale in the audit
 log only, not in the request body.
 
-**Mandatory readback:** after ANY status PUT, re-fetch and confirm the ids
-actually landed. HTTP 200 means batch *acceptance*, not success — partial
-failures and disallowed transitions surface only on re-fetch:
-```bash
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/admin/credit-requests?profilesIds=<profile_id>&limit=50"
-```
-Verify each id now shows the target status. If a transition no-oped, say so
-honestly (check the matrix above for why) — never report a status change you
-have not read back.
+**Mandatory readback:** after ANY status PUT, confirm the ids actually landed
+using the `verify-credit-request-status.sh` readback documented above — HTTP 200
+means batch *acceptance*, not success; partial failures and disallowed
+transitions surface only on re-fetch. Do NOT use the
+`GET /admin/credit-requests?profilesIds=` list endpoint for this: it has no id
+filter, so it cannot answer "did THESE ids transition" without an unbounded
+scan-and-hope. If a transition no-oped, say so honestly (check the matrix above
+for why) — never report a status change you have not read back.
 
 Standard escalation rationales when recommending a reject to Jan (record in
 the audit log / escalation thread, not the request body):
