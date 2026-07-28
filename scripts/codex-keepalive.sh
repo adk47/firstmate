@@ -180,7 +180,7 @@ _cap_hits() {
 # _rotated_recently — true if the rotate stamp is younger than the cap window.
 # Right after a rotation the OLD signature lines are still inside the journal
 # window; re-triggering on them would burn the rotate cooldown and false-page
-# "both accounts capped".
+# "no rotation target left".
 _rotated_recently() {
   local last now
   [ -r "$CODEX_ROTATE_STAMP" ] || return 1
@@ -312,7 +312,7 @@ _check_usage_cap() {
         date +%s > "$stamp"
         log "cap: paged #clio_devops (no viable rotation target, rc=$rc)"
       else
-        log "cap: both-capped (rc=$rc) but page within its own cooldown — not re-paging"
+        log "cap: no rotation target (rc=$rc) but page within its own cooldown — not re-paging"
       fi ;;
     4)
       stamp="$KEEPALIVE_STATE_DIR/codex-keepalive-nostandby-cooldown"

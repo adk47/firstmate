@@ -28,36 +28,53 @@ set -euo pipefail
   exit 2
 }
 
-# Every bootstrap file openclaw injects for edge/support. SOUL and TOOLS are the
-# two that have actually breached; the rest are listed so a future one cannot
-# breach silently.
+# The bootstrap files openclaw injects for edge/support, per the injector's own
+# list in dist/workspace-*.js (SOUL, AGENTS, TOOLS, IDENTITY, USER, HEARTBEAT).
+#
+# SCOPE CAVEAT -- read before trusting a green run. deploy.sh rsync-EXCLUDES
+# workspaces/*/{TOOLS,IDENTITY,MEMORY,HEARTBEAT}.md (deploy.sh:791,850,851,858)
+# because agents edit them at runtime: the server owns those, and the repo copy
+# is only a seed. So for those four this gate measures a file that is never
+# deployed -- it catches repo-side bloat, NOT the live file. Measured drift
+# today: repo TOOLS.md 46104 chars vs live /opt/hydra 46162.
+# Only SOUL.md, AGENTS.md and USER.md are genuinely repo-owned and deployed.
+# The authoritative check for the server-owned four is on node-8
+# (scripts/memory-health-check.sh, which today measures only SOUL+MEMORY and in
+# bytes rather than chars -- extending it is tracked separately).
 BOOTSTRAP_FILES=(
-  workspaces/support/SOUL.md
-  workspaces/support/TOOLS.md
-  workspaces/support/AGENTS.md
-  workspaces/support/IDENTITY.md
-  workspaces/support/USER.md
-  workspaces/support/MEMORY.md
+  workspaces/support/SOUL.md      # repo-owned, deployed
+  workspaces/support/AGENTS.md    # repo-owned, deployed
+  workspaces/support/USER.md      # repo-owned, deployed
+  workspaces/support/TOOLS.md     # server-owned: seed only
+  workspaces/support/IDENTITY.md  # server-owned: seed only
+  workspaces/support/HEARTBEAT.md # server-owned: seed only
+  workspaces/support/MEMORY.md    # server-owned: seed only
 )
-[ -f workspaces/support/SOUL.md ] || { echo "Missing workspaces/support/SOUL.md" >&2; exit 2; }
 
-# Read the real per-file cap from the edge config so this guard tracks the
-# limit even if it's retuned; fall back to the openclaw default of 40000.
 CFG=openclaw-edge.json
-CAP=$(grep -oE '"bootstrapMaxChars"[[:space:]]*:[[:space:]]*[0-9]+' "$CFG" 2>/dev/null \
-        | grep -oE '[0-9]+' | head -1)
-CAP=${CAP:-40000}
 
-# Also assert the aggregate stays under the total cap -- a per-file pass says
-# nothing about the sum, and openclaw drops whole files once the total is spent.
-TOTAL_CAP=$(grep -oE '"bootstrapTotalMaxChars"[[:space:]]*:[[:space:]]*[0-9]+' "$CFG" 2>/dev/null \
-        | grep -oE '[0-9]+' | head -1)
-TOTAL_CAP=${TOTAL_CAP:-120000}
+# Read the real caps from the edge config so this guard tracks them if retuned.
+# `|| true` is load-bearing: under `set -euo pipefail` a missing key makes the
+# pipeline exit non-zero and kills the script BEFORE the `:-` default is ever
+# consulted, so without it a renamed config key fails CI with zero output
+# instead of falling back.
+read_cap() { # read_cap <json-key> <default>
+  local v
+  v=$(grep -oE "\"$1\"[[:space:]]*:[[:space:]]*[0-9]+" "$CFG" 2>/dev/null \
+        | grep -oE '[0-9]+' | head -1) || true
+  echo "${v:-$2}"
+}
+CAP=$(read_cap bootstrapMaxChars 40000)
+# A per-file pass says nothing about the sum -- openclaw drops whole files once
+# the total budget is spent, so assert the aggregate too.
+TOTAL_CAP=$(read_cap bootstrapTotalMaxChars 120000)
 
 FAILED=0
 TOTAL=0
 for f in "${BOOTSTRAP_FILES[@]}"; do
-  [ -f "$f" ] || continue
+  # Fail loud on a missing file rather than skipping it: a silent `continue`
+  # would let a deleted or renamed TOOLS.md pass this gate forever.
+  [ -f "$f" ] || { echo "FAIL: $f is listed as a bootstrap file but does not exist." >&2; FAILED=1; continue; }
   # Force a UTF-8 locale so `wc -m` counts CHARACTERS (what openclaw caps on),
   # not bytes -- in a non-UTF-8 root/CI context `wc -m` falls back to bytes and
   # would over-count any multibyte char, tripping a false FAIL.
