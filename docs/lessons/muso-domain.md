@@ -263,6 +263,39 @@ The plugin SDK coalesces rapid-fire user messages into one reply, so three dispa
 reply legitimately. To find real strands, count per-conv-id (dispatched but never replied), not
 totals.
 
+**A closer's shadow log must NOT be a de-confliction source for the needs-human digest.**
+Wiring one in looks obviously right and is actively harmful. The digest queries only OPEN
+conversations, so a closed conversation cannot appear in it anyway — the sole runtime effect
+of excluding an append-only close log is to hide a conversation the customer **reopened** by
+replying after the silent close. That is precisely the cohort that must resurface (reply-to-
+reopen is the advertised recovery path for every silent close), and the append-only log never
+prunes, so the conversation is buried forever. Exclusion is the safe direction only for the
+other CLOSERS and the ops-drain, where over-exclusion just means "leave it alone". Found
+building `close-stale-conversations.py` (PR #746); the `close-resolved` and `close-duplicate`
+shadows already wired into `cs-needs-human-digest.py`'s `default_state_paths()` carry the same
+latent bug — pre-existing and unfixed.
+
+**A scan-then-mutate sweep over thousands of records must re-verify LIVE immediately before
+each mutation.** The candidate list is a snapshot; a ramped drain reaches row 500 many minutes
+later, and in that window the world moves. Two independent things must be re-read per item, not
+once per run: (a) the record itself — a customer reply that lands before the close would never
+reopen an already-closed conversation, so closing on the stale snapshot silently buries a
+now-waiting customer (`still_eligible_live` re-fetches and re-runs the WHOLE gate, not just
+"is it still open"); and (b) sibling ownership — another sweeper can claim the id mid-drain,
+so `owned_ids_by_source(default_state_paths())` is re-read before every close, with corrupt
+sibling state mid-drain stopping the remaining drain fail-closed. QA caught (b) after (a) was
+fixed: re-fetching the record but judging it against the scan-time ownership set is a
+half-fix that still races.
+
+**Write the intent row BEFORE the mutation, the outcome row after — "can't record" must mean
+"don't do it".** An audit row written only after a successful call loses exactly the cases you
+most need: a mutation that lands remotely but whose response read fails leaves no trace, and a
+log-write failure after the call crashes with the action already taken. `close-stale`
+fsyncs an `{"kind":"attempt"}` row first, then `{"kind":"closed"}` / `{"kind":"close_failed"}`.
+Its own idempotency reader honors only `closed` rows so an ambiguous attempt is retried — safe
+precisely because of the live re-verify above (an already-closed record is skipped, never
+re-mutated), while sibling consumers read every row (over-exclusion, their safe direction).
+
 **The outbound email sanitizer rewrites every non-allowlisted email to `support@muso.ai`.** So
 a leaked-reasoning line naming a customer's real email becomes a FALSE "support@muso.ai is tied
 to X" in the shipped reply. When you see that string in a reply, suspect the redaction artifact
