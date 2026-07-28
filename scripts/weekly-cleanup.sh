@@ -44,6 +44,9 @@
 #   1  structural refusal (tmp root missing/symlinked/suspicious)
 #      → systemd marks the service failed
 #   2  usage error / missing dependency
+#   The clone sweeper's own 1/2 are PROPAGATED (after the summary and
+#   Slack post): those mean that category never ran, which is exactly
+#   the breakage this contract refuses to mask.
 #
 # Flags:
 #   --dry-run   walk everything and print would-delete lines; no
@@ -109,6 +112,8 @@ fi
 tmp_deleted=0; tmp_excluded=0; tmp_active=0; tmp_errors=0; tmp_freed_kb=0
 bak_deleted=0; bak_errors=0; bak_freed_kb=0
 apt_status="skipped"
+sweep_rc=0   # child exit code of the clone sweeper; propagated at exit
+sweep_status="skipped"
 
 ERRORS_FILE="$(mktemp)"
 PAYLOAD_FILE="$(mktemp)"
@@ -259,12 +264,40 @@ run_apt() {
 }
 
 # ──────────────────────────────────────────────────────────────
+# Category 4: stale agent git clones (workspaces/repos + */tmp).
+# Policy + its own Slack summary live in sweep-workspace-clones.sh;
+# this only wires it into the weekly cadence. WEEKLY_CLEANUP_SKIP_SWEEP=1
+# opts out (the bats suite MUST set it — the CI runner is node-8, so an
+# unstubbed test run would sweep the real workspace roots).
+# ──────────────────────────────────────────────────────────────
+run_clone_sweep() {
+  if [ "${WEEKLY_CLEANUP_SKIP_SWEEP:-0}" = "1" ]; then
+    sweep_status="skipped"
+    return 0
+  fi
+  local sweep_flag="--apply"
+  [ "$DRY_RUN" -eq 1 ] && sweep_flag="--dry-run"
+  if "$_CLEANUP_DIR/sweep-workspace-clones.sh" "$sweep_flag"; then
+    sweep_status="ok"
+  else
+    # $? here is the child's status — capture it BEFORE anything else runs.
+    # The sweeper's 1 (structural refusal) and 2 (usage/missing dependency)
+    # mean the category never ran; per this script's own contract those are
+    # unit failures, not counted-and-continued churn. Propagated at exit.
+    sweep_rc=$?
+    sweep_status="failed"
+    echo "sweep-workspace-clones.sh failed (exit $sweep_rc)" >> "$ERRORS_FILE"
+  fi
+}
+
+# ──────────────────────────────────────────────────────────────
 # Summary: stdout lines + Block Kit payload (real runs only)
 # ──────────────────────────────────────────────────────────────
 print_summary() {
   log "tmp: deleted=$tmp_deleted excluded=$tmp_excluded active_skipped=$tmp_active errors=$tmp_errors freed_kb=$tmp_freed_kb"
   log "bak: deleted=$bak_deleted errors=$bak_errors freed_kb=$bak_freed_kb"
   log "apt: $apt_status"
+  log "clone-sweep: $sweep_status"
   log "TOTAL freed_kb=$((tmp_freed_kb + bak_freed_kb))"
 }
 
@@ -274,7 +307,8 @@ build_payload() {
   TMP_DELETED="$tmp_deleted" TMP_EXCLUDED="$tmp_excluded" TMP_ACTIVE="$tmp_active" \
   TMP_ERRORS="$tmp_errors" TMP_FREED_KB="$tmp_freed_kb" TMP_AGE="$TMP_AGE_DAYS" \
   BAK_DELETED="$bak_deleted" BAK_ERRORS="$bak_errors" BAK_FREED_KB="$bak_freed_kb" \
-  BAK_AGE="$BAK_AGE_DAYS" APT_STATUS="$apt_status" ERRORS_FILE="$ERRORS_FILE" \
+  BAK_AGE="$BAK_AGE_DAYS" APT_STATUS="$apt_status" SWEEP_STATUS="$sweep_status" SWEEP_RC="$sweep_rc" \
+  ERRORS_FILE="$ERRORS_FILE" \
   PAYLOAD_OUT="$PAYLOAD_FILE" SLACK_CHANNEL="$SLACK_CHANNEL" python3 - <<'PYEOF'
 import json, os
 
@@ -283,7 +317,7 @@ td, te, ta, terr = (int(e[k]) for k in ("TMP_DELETED", "TMP_EXCLUDED", "TMP_ACTI
 bd, berr = int(e["BAK_DELETED"]), int(e["BAK_ERRORS"])
 total_kb = int(e["TMP_FREED_KB"]) + int(e["BAK_FREED_KB"])
 apt = e["APT_STATUS"]
-errors = terr + berr
+errors = terr + berr + (1 if e.get("SWEEP_RC", "0") != "0" else 0)
 
 def human(kb):
     if kb >= 1024 * 1024:
@@ -305,6 +339,7 @@ blocks = [
         {"type": "mrkdwn", "text": f"*/tmp (mtime >{e['TMP_AGE']}d):*\n{td} deleted · {te} excluded · {ta} active-skipped"},
         {"type": "mrkdwn", "text": f"*.bak/.orig (>{e['BAK_AGE']}d):*\n{bd} deleted"},
         {"type": "mrkdwn", "text": f"*apt autoremove/clean:*\n{apt}"},
+        {"type": "mrkdwn", "text": f"*clone sweep:*\n{e['SWEEP_STATUS']} (details in its own post)"},
     ]},
 ]
 
@@ -347,14 +382,20 @@ for root in $BAK_ROOTS; do
   clean_bak_root "$root"
 done
 run_apt
+run_clone_sweep
 
 print_summary
 
 if [ "$DRY_RUN" -eq 1 ]; then
   log "DRY-RUN: no Slack post."
-  exit 0
+  exit "$sweep_rc"
 fi
 
 build_payload
 log "Posting summary to ${SLACK_CHANNEL}."
 slack_notify_payload_file "$PAYLOAD_FILE"
+
+# Summary and Slack post happen FIRST, then the failure surfaces: a masked
+# structural refusal would otherwise leave systemd reporting a healthy weekly
+# cleanup for a category that never ran.
+exit "$sweep_rc"
