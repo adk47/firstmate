@@ -23,6 +23,13 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  # Needed for the qa-review gate status below. NOTE: this covers the fallback
+  # path only. Once `qa-review` is a required check pinned to the QA bot App
+  # (checks:[{context,app_id}]), the status must be posted BY THE APP to satisfy
+  # the pin — a status from github.token reports as github-actions[bot], a
+  # different app, and would not count. So hydra must be on the App identity
+  # (policies/qa-approval-policy.json .identity.app_repos) before the pin is set.
+  statuses: write
 
 jobs:
   dispatch:
@@ -41,6 +48,49 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
+
+          # Arm the gate FIRST, before any API call can fail. REPO and HEAD_SHA
+          # come from the event context with no network involved, so this is the
+          # one point that is reachable on every path. Everything below (the PR
+          # lookup, the policy read, jq) can fail and abort the step under
+          # `set -e`; without this seed those paths would report nothing at all,
+          # and GitHub never times out an unreported required check.
+          # Parse/validate SEPARATELY from membership. A single `jq -e ... index()`
+          # collapses "not gated" and "policy unreadable" into the same false,
+          # which would suppress every say_status below and — if branch
+          # protection were already App-pinned — leave the required check pending
+          # forever. That is the exact silent path this block exists to prevent,
+          # so a policy error is loud and fail-closed instead.
+          # shellcheck source=scripts/lib/qa-policy.sh
+          source scripts/lib/qa-policy.sh
+          POL=policies/qa-approval-policy.json
+          if ! qa_policy_valid "$POL"; then
+            echo "::error::$POL is unreadable or malformed — cannot determine gate state."
+            # Post a failure rather than nothing: on a gated repo silence is a
+            # permanent block, and on an ungated repo a red qa-review is harmless
+            # and visible. Best-effort, then fail the run loudly.
+            bash scripts/qa-review-status.sh "$REPO" "$HEAD_SHA" failure \
+              "QA gate state unknown — $POL is unreadable or malformed" || true
+            exit 1
+          fi
+          # `|| _rc=$?` — qa_policy_has returns 1 for the normal "not gated" case,
+          # which would abort this `set -e` step if called bare.
+          _rc=0
+          qa_policy_has "$POL" '.merge_gate_repos' "$REPO" || _rc=$?
+          if [ "$_rc" -eq 2 ]; then
+            echo "::error::cannot evaluate .merge_gate_repos in $POL."
+            bash scripts/qa-review-status.sh "$REPO" "$HEAD_SHA" failure \
+              "QA gate state unknown — .merge_gate_repos unreadable" || true
+            exit 1
+          fi
+          gated=0
+          [ "$_rc" -eq 0 ] && gated=1
+          say_status() {  # <state> <description> — best-effort, never aborts
+            [ "$gated" = 1 ] || return 0
+            bash scripts/qa-review-status.sh "$REPO" "$HEAD_SHA" "$1" "$2" \
+              || echo "::warning::could not post qa-review=$1 for ${HEAD_SHA:0:7}"
+          }
+          say_status pending "QA review queued for ${HEAD_SHA:0:7}"
 
           # Resolve the open PR that owns this commit.
           prjson="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" \
@@ -65,16 +115,42 @@ jobs:
           # the dispatcher's built-in Nick default for non-Nick authors.
           if ! REQUESTER_UID="$(bash scripts/lib/qa-author-slack-uid.sh "$AUTHOR")"; then
             echo "PR #${PR} author=${AUTHOR} has no Slack-UID mapping — skipping auto-review."
+            # FAILURE, not silence: QA cannot review this PR, and on a gated repo
+            # an unreviewable PR must not become mergeable. Says how to fix it.
+            say_status failure "no Slack-UID mapping for ${AUTHOR}; QA cannot review — add it to scripts/lib/qa-author-slack-uid.sh"
             exit 0
           fi
           if [ "$DRAFT" = "true" ]; then
             echo "PR #${PR} is a draft — skipping auto-review."
+            # Stays pending (a draft cannot merge anyway).
+            # CAVEAT for arming: pr-validate.yml declares no `types:`, so it runs
+            # on the DEFAULT set (opened/synchronize/reopened) — `ready_for_review`
+            # is NOT among them. Marking a draft ready therefore does NOT re-fire
+            # this workflow, and the pending would stick until the next push.
+            # Adding `ready_for_review` (and `edited`, see the base check below)
+            # to pr-validate.yml's triggers is a prerequisite for arming the gate.
+            say_status pending "draft — QA review runs when the PR is marked ready"
             exit 0
           fi
           if [ "$BASE" != "main" ]; then
             echo "PR #${PR} base=${BASE} (not main) — skipping auto-review."
+            # PENDING, not success. `success` here would be a review bypass: a PR
+            # can be retargeted off main while PR Validation runs, which lands a
+            # green qa-review on a head SHA nothing reviewed, and retargeting back
+            # to main reuses that same SHA. Pending is harmless on an ungated base
+            # (the check is only required on main) and cannot be laundered.
+            say_status pending "base ${BASE} is not gated — QA review applies to main only"
             exit 0
           fi
 
           echo "Dispatching QA auto-review of PR #${PR} @ ${HEAD_SHA} (author=${AUTHOR} -> ${REQUESTER_UID})"
-          bash scripts/qa-dispatch-pr-review.sh "$PR" "$HEAD_SHA" "$REPO" "$REQUESTER_UID"
+          # The gate was already armed `pending` at the top of this step, before
+          # any call that could fail. The dispatch below is fire-and-forget (a
+          # one-shot cron), so a lost dispatch leaves it pending — which is why
+          # the stale-pending watchdog is a hard prerequisite for adding any repo
+          # to .merge_gate_repos (it does not exist yet; see that field's
+          # _field_notes). Without it, a lost dispatch has no recovery path.
+          if ! bash scripts/qa-dispatch-pr-review.sh "$PR" "$HEAD_SHA" "$REPO" "$REQUESTER_UID"; then
+            say_status failure "QA review could not be dispatched — see the qa-autoreview workflow run"
+            exit 1
+          fi
