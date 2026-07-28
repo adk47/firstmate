@@ -266,7 +266,7 @@
           }
         }
       },
-      "bootstrapMaxChars": 40000,
+      "bootstrapMaxChars": 50000,
       "bootstrapTotalMaxChars": 120000,
       "bootstrapPromptTruncationWarning": "always",
       "compaction": {
