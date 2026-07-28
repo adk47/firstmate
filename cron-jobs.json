@@ -481,7 +481,7 @@
     },
     {
       "id": "9096a243-af2b-40a1-a900-2cc84b757928",
-      "agentId": "operations",
+      "agentId": "devops",
       "name": "codex-usage-report-aaron-twice-daily",
       "description": "DM Aaron twice daily with current Hydra Codex OAuth usage for every openai-codex:* account in the canonical auth store (aaron@muso.ai, aarondkaufman@gmail.com, aaronkaufman@me.com as of 2026-07-27). The account list is read dynamically from auth-profiles.json by codex-usage.sh, so adding an account needs no change here. Requested by Aaron on 2026-05-31.",
       "enabled": true,
@@ -514,7 +514,7 @@
     },
     {
       "id": "9c74494a-5129-422f-ab92-225e837a575b",
-      "agentId": "operations",
+      "agentId": "devops",
       "name": "codex-usage-report-nick-twice-daily",
       "description": "DM Nick the same twice-daily Hydra Codex OAuth usage report as Aaron (hydra#382), so delivery is verifiable. Runs the shared read-only scripts/codex-usage-report.sh and relays its stdout. Added 2026-06-01.",
       "enabled": true,

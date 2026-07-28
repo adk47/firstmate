@@ -265,8 +265,8 @@
       "pruneAfter": "14d",
       "maxEntries": 1000,
       "resetArchiveRetention": "7d",
-      "maxDiskBytes": "512mb",
-      "highWaterBytes": "384mb"
+      "maxDiskBytes": "4gb",
+      "highWaterBytes": "3gb"
     }
   },
   "web": {

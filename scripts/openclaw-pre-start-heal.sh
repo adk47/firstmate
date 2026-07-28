@@ -121,6 +121,23 @@ if [ -x "$SCRIPT_DIR/lib/ensure-secret-perms.sh" ]; then
   "$SCRIPT_DIR/lib/ensure-secret-perms.sh" || log "WARN: ensure-secret-perms.sh returned non-zero (non-fatal)"
 fi
 
+# ── Detector: session disk-budget headroom (NOT a healer) ──
+# openclaw 7.1's per-agent session reaper deletes session store ENTRIES once an
+# agent's sessions dir exceeds session.maintenance.maxDiskBytes and the
+# removable FILE set is exhausted. Slack keys are protected, `:cron:` keys are
+# not — so the agent's entire cron surface is evicted and every fire dies at
+# setup with CronSessionLifecycleClaimError. That killed all 8 `operations`
+# crons for ~25h on 2026-07-27 before anyone connected the symptom to the cause.
+# Unlike the ensure-* healers above there is nothing to re-assert here — picking
+# a new budget is a SIZING decision a human must make — so this only REPORTS
+# into the gateway's own journal (report mode always exits 0; the paging path is
+# cron-health-watchdog.sh). Logging it at start makes the state visible right
+# where someone debugging a dead cron is already looking.
+# See scripts/lib/ensure-session-budget-headroom.sh.
+if [ -x "$SCRIPT_DIR/lib/ensure-session-budget-headroom.sh" ]; then
+  "$SCRIPT_DIR/lib/ensure-session-budget-headroom.sh" || log "WARN: ensure-session-budget-headroom.sh returned non-zero (non-fatal)"
+fi
+
 is_valid() {
   # Returns 0 if `openclaw --profile <p> config validate` reports clean.
   # The CLI prints "Config valid: <path>" on stdout when ok and a multi-

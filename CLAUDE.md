@@ -293,6 +293,36 @@ future bump:
   Re-check #90308 on every bump; a release containing it lets us consider retiring the
   coalescing layer.
 
+## Session budgets must exceed each agent's PROTECTED footprint, or crons wedge
+
+`session.maintenance` has two caps, and BOTH silently kill cron surfaces when an
+agent outgrows them: `maxEntries` (index entries) and `maxDiskBytes` (sessions-dir
+bytes, enforced PER AGENT). In openclaw 7.1 the reapers protect `:slack:` keys and
+treat `:cron:` keys as disposable, so once an agent's protected footprint crosses a
+cap, every sweep deletes ALL that agent's cron session entries and every fire dies at
+setup with `CronSessionLifecycleClaimError` — restart-immune, no self-heal.
+This has now happened twice: `maxEntries` on 2026-07-16 (PR #694, 100 → 1000) and
+`maxDiskBytes` on 2026-07-27, when `operations` crossed 512mb and ALL 8 of its
+enabled crons died for ~25h (now 4gb/3gb).
+
+**openclaw never auto-prunes protected Slack threads, so the protected footprint
+grows without bound — every fixed cap is a future outage with a date on it.**
+Raising a cap buys time, it is not a fix.
+
+- **Detect:** `scripts/lib/ensure-session-budget-headroom.sh --check` (0 clean / 1
+  violation / 2 read error). Wired into `openclaw-pre-start-heal.sh` (report-only,
+  never blocks start) and `cron-health-watchdog.sh` (pages #clio_devops, 6h-deduped).
+  DETECT-AND-PAGE ONLY on purpose — re-sizing is a human decision, and auto-raising
+  would defer the same outage with nobody informed.
+- **Fast manual census:** an agent with enabled crons and ZERO `:cron:` keys in
+  `agents/<id>/sessions/sessions.json` is wedged right now.
+- **`config set` is NOT enough — restart the gateway.** The CLI says "No gateway
+  restart needed" (true for the file), but the running daemon caches the budget and
+  keeps enforcing the old one. Verify with `grep -c "disk budget still above"` on the
+  post-restart journal (expect 0).
+- Full evidence chain + the `sessions cleanup --dry-run --json` signature is in
+  `docs/lessons/openclaw-and-codex.md` under "Cron".
+
 ## Each gateway MUST pin `OPENCLAW_STATE_DIR` to its own profile
 
 Every gateway's systemd env file pins its profile state dir — `/etc/openclaw/main.env`

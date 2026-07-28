@@ -58,6 +58,16 @@ STUB
 
   export CRON_HEALTH_RUNS_DIR="$TEST_TMPDIR/runs"
   export CRON_HEALTH_JOBS_FILE="$TEST_TMPDIR/jobs.json"
+
+  # Hermeticity for the session-budget headroom block: CI runs on the LIVE
+  # node-8 host, where /root/.openclaw-main really exists. Left at its default
+  # the block would query the live gateway and — worse — stamp the PRODUCTION
+  # dedupe file, silently suppressing a real page for 6h. Disarm it by default
+  # (absent path → the `[ -x ]` guard skips it) and sandbox the state file; the
+  # tests that exercise the block point CRON_HEALTH_SESSION_BUDGET_CHECK at
+  # their own stub.
+  export CRON_HEALTH_SESSION_BUDGET_CHECK="$TEST_TMPDIR/no-session-budget-check"
+  export CRON_HEALTH_SESSION_BUDGET_STATE="$TEST_TMPDIR/session-budget-last-alert"
   export CRON_HEALTH_STATE_FILE="$TEST_TMPDIR/state.json"
   export CRON_HEALTH_LOCKFILE="$TEST_TMPDIR/wd.lock"
   export CRON_HEALTH_SKIP_HOST_GUARD=1
@@ -400,4 +410,100 @@ PY
   run bash "$WD" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" != *"BLIND"* ]]
+}
+
+# ──────────────────────────────────────────────────────────────
+# Session-budget headroom block (scripts/lib/ensure-session-budget-headroom.sh)
+#
+# Guards the 2026-07-27 wedge: an agent over session.maintenance.maxDiskBytes
+# makes openclaw's reaper delete that agent's cron SESSION entries, and every
+# fire then claim-errors. scan_failures only notices after N failed fires and
+# can't name the cause; this block pages on the capacity signal itself.
+# ──────────────────────────────────────────────────────────────
+
+# _stub_budget_check <exit-code> [output] — install a fake guard on the path the
+# watchdog reads.
+_stub_budget_check() {
+  local rc="$1"
+  local out="${2:-main/ops: over budget}"
+  cat > "$CRON_HEALTH_SESSION_BUDGET_CHECK" <<STUB
+#!/bin/bash
+echo "$out"
+exit $rc
+STUB
+  chmod +x "$CRON_HEALTH_SESSION_BUDGET_CHECK"
+}
+
+@test "session budget: a violation pages #clio_devops with the cause named" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_budget_check 1 "  - [CRITICAL] main/operations: 8 enabled cron(s) but ZERO"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "session-budget headroom alert" <<< "$output"
+  # The page must actually reach the (stubbed) Slack sender, and must carry the
+  # actionable cause rather than just "a cron failed".
+  grep -q "maxDiskBytes" "$TEST_TMPDIR/last-text"
+  grep -q "main/operations" "$TEST_TMPDIR/last-text"
+}
+
+@test "session budget: repeat ticks inside the interval do NOT re-page" {
+  # The watchdog ticks every 5 min; an undeduped page would post ~288x/day.
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_budget_check 1
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  local first
+  first="$(grep -c . "$STUB_CALLS")"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "page suppressed" <<< "$output"
+  [ "$(grep -c . "$STUB_CALLS")" -eq "$first" ]
+}
+
+@test "session budget: re-pages once the interval has elapsed" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_budget_check 1
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  # Backdate the stamp past the 6h window.
+  printf '%s' "$(( $(date -u +%s) - 21601 ))" > "$CRON_HEALTH_SESSION_BUDGET_STATE"
+  run bash "$WD"
+  grep -q "Posting session-budget headroom alert" <<< "$output"
+}
+
+@test "session budget: a clean check pages nothing" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_budget_check 0 "clean"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "session budget: a read error (exit 2) warns but does not page" {
+  # Exit 2 is "couldn't evaluate", not "all clear" and not "violation".
+  # Paging on it would turn a gateway blip into a false CRITICAL.
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_budget_check 2 "ERROR: cron list failed"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "could not evaluate" <<< "$output"
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "session budget: --dry-run never posts and never stamps the dedupe file" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_budget_check 1
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  grep -q "DRY-RUN: session budget" <<< "$output"
+  [ ! -s "$STUB_CALLS" ]
+  [ ! -f "$CRON_HEALTH_SESSION_BUDGET_STATE" ]
+}
+
+@test "session budget: the block is skipped entirely when the guard is absent" {
+  # Deploy-order safety: the watchdog must not break on a host where the guard
+  # script hasn't landed yet.
+  rm -f "$CRON_HEALTH_SESSION_BUDGET_CHECK"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
 }
