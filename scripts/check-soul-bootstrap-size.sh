@@ -41,6 +41,10 @@ set -euo pipefail
 # The authoritative check for the server-owned four is on node-8
 # (scripts/memory-health-check.sh, which today measures only SOUL+MEMORY and in
 # bytes rather than chars -- extending it is tracked separately).
+# openclaw's canonical set is 8 (workspace-DkQ7irPD.js): AGENTS, SOUL, TOOLS,
+# IDENTITY, USER, HEARTBEAT, BOOTSTRAP, MEMORY. Note MEMORY is declared via
+# DEFAULT_MEMORY_FILENAME = CANONICAL_ROOT_MEMORY_FILENAME = "MEMORY.md", so a
+# grep for the literal string misses it -- it IS a bootstrap file.
 BOOTSTRAP_FILES=(
   workspaces/support/SOUL.md      # repo-owned, deployed
   workspaces/support/AGENTS.md    # repo-owned, deployed
@@ -49,6 +53,13 @@ BOOTSTRAP_FILES=(
   workspaces/support/IDENTITY.md  # server-owned: seed only
   workspaces/support/HEARTBEAT.md # server-owned: seed only
   workspaces/support/MEMORY.md    # server-owned: seed only
+)
+
+# BOOTSTRAP.md is the 8th canonical name but is NOT required: it is the
+# un-onboarded-workspace marker (isWorkspaceBootstrapPending), so its ABSENCE
+# is the healthy steady state. Size it when present, never demand it.
+OPTIONAL_BOOTSTRAP_FILES=(
+  workspaces/support/BOOTSTRAP.md
 )
 
 CFG=openclaw-edge.json
@@ -87,10 +98,17 @@ TOTAL_CAP=$(read_cap bootstrapTotalMaxChars 120000)
 
 FAILED=0
 TOTAL=0
-for f in "${BOOTSTRAP_FILES[@]}"; do
-  # Fail loud on a missing file rather than skipping it: a silent `continue`
-  # would let a deleted or renamed TOOLS.md pass this gate forever.
-  [ -f "$f" ] || { echo "FAIL: $f is listed as a bootstrap file but does not exist." >&2; FAILED=1; continue; }
+for f in "${BOOTSTRAP_FILES[@]}" "${OPTIONAL_BOOTSTRAP_FILES[@]}"; do
+  if [ ! -f "$f" ]; then
+    # Optional names may legitimately be absent (BOOTSTRAP.md present == the
+    # workspace is still un-onboarded), so skip those quietly. For every other
+    # listed file, fail loud rather than skipping: a silent `continue` would let
+    # a deleted or renamed TOOLS.md pass this gate forever.
+    case " ${OPTIONAL_BOOTSTRAP_FILES[*]} " in
+      *" $f "*) continue ;;
+      *) echo "FAIL: $f is listed as a bootstrap file but does not exist." >&2; FAILED=1; continue ;;
+    esac
+  fi
   # Force a UTF-8 locale so `wc -m` counts CHARACTERS (what openclaw caps on),
   # not bytes -- in a non-UTF-8 root/CI context `wc -m` falls back to bytes and
   # would over-count any multibyte char, tripping a false FAIL.

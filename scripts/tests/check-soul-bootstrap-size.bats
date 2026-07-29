@@ -17,13 +17,24 @@ bats_require_minimum_version 1.5.0
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 SCRIPT="$HYDRA_REPO/scripts/check-soul-bootstrap-size.sh"
 
-# The set openclaw actually injects, per its own list in dist/workspace-*.js.
-INJECTED=(SOUL AGENTS TOOLS IDENTITY USER HEARTBEAT)
+# openclaw's CANONICAL workspace bootstrap set, verbatim from the Set literal in
+# dist/workspace-DkQ7irPD.js. All eight, deliberately:
+#   MEMORY is declared as DEFAULT_MEMORY_FILENAME = CANONICAL_ROOT_MEMORY_FILENAME
+#   = "MEMORY.md", so grepping the dist for the literal string misses it — it IS
+#   a bootstrap file. An earlier version of this list omitted MEMORY (caught in
+#   review) and BOOTSTRAP, which meant the completeness assertion below would
+#   have stayed green if either were dropped from the production guard.
+INJECTED=(SOUL AGENTS TOOLS IDENTITY USER HEARTBEAT MEMORY BOOTSTRAP)
+
+# BOOTSTRAP.md is canonical but NOT required — it is the un-onboarded-workspace
+# marker (isWorkspaceBootstrapPending), so its absence is the healthy state and
+# the guard must not demand it. Everything else must exist.
+REQUIRED=(SOUL AGENTS TOOLS IDENTITY USER HEARTBEAT MEMORY)
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
   mkdir -p "$TEST_TMPDIR/workspaces/support"
-  for f in "${INJECTED[@]}" MEMORY; do
+  for f in "${REQUIRED[@]}"; do
     echo "x" > "$TEST_TMPDIR/workspaces/support/$f.md"
   done
 }
@@ -39,13 +50,30 @@ write_cfg() {
 JSON
 }
 
-@test "BOOTSTRAP_FILES covers every file openclaw injects" {
-  # Regression cover for the omission the QA bot caught: HEARTBEAT.md was
-  # missing, so both the per-file guard and the total silently undercounted.
+@test "the guard lists every file in openclaw's canonical bootstrap set" {
+  # Regression cover for two omissions caught in review: HEARTBEAT.md was
+  # missing from the guard, and MEMORY/BOOTSTRAP were missing from THIS list —
+  # so the assertion itself would have stayed green while the guard undercounted.
+  # Checks the union of required + optional, since BOOTSTRAP.md lives in the
+  # optional array.
   for f in "${INJECTED[@]}"; do
     grep -q "workspaces/support/$f\.md" "$SCRIPT" \
-      || { echo "BOOTSTRAP_FILES is missing $f.md — openclaw injects it"; return 1; }
+      || { echo "guard is missing $f.md — it is in openclaw's canonical set"; return 1; }
   done
+}
+
+@test "BOOTSTRAP.md is optional: absent is healthy, present is sized" {
+  write_cfg 50000
+  # absent (the steady state) must not fail
+  cd "$TEST_TMPDIR" && run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"BOOTSTRAP.md is listed"* ]]
+  # present and over-cap must fail
+  head -c 400 /dev/zero | tr '\0' 'a' > "$TEST_TMPDIR/workspaces/support/BOOTSTRAP.md"
+  write_cfg 100
+  cd "$TEST_TMPDIR" && run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BOOTSTRAP.md"* ]]
 }
 
 @test "resolves the PER-AGENT cap when the support entry overrides defaults" {
