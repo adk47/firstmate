@@ -115,7 +115,13 @@ _parse_bytes() {
       else if (unit == "g" || unit == "gb") mult = 1024 * 1024 * 1024
       else if (unit == "t" || unit == "tb") mult = 1024 * 1024 * 1024 * 1024
       else exit 0
-      printf "%d", num * mult
+      # "%.0f", NOT "%d": awk %d goes through an integer conversion that clamps
+      # at INT32_MAX (2147483647) on older mawk builds, which would silently
+      # read a "4gb" cap as ~2GiB and drag the 80% warn line down with it.
+      # %.0f stays in double precision — exact for integers well past any
+      # plausible budget. (node-8 runs mawk 1.3.4, which does NOT clamp; this is
+      # portability hardening, not a live bug.) Same reason on _dir_bytes below.
+      printf "%.0f", num * mult
     }'
 }
 
@@ -155,7 +161,7 @@ fi
 # one per file, so this stays cheap on a 3.5k-file sessions dir.
 _dir_bytes() {
   find "$1" -type f -exec stat "$_STAT_SIZE_FLAG" {} + 2>/dev/null \
-    | awk '{s += $1} END {printf "%d", s + 0}'
+    | awk '{s += $1} END {printf "%.0f", s + 0}'
 }
 
 # _cron_key_count <profile> <agent> — number of ":cron:" keys in the agent's
