@@ -223,12 +223,22 @@ collect_findings() {
     # by a fractional ratio (which would silently truncate to 0).
     warn_at=$(( maxb * $(printf '%s' "$WARN_RATIO" | awk '{printf "%d", $1 * 100}') / 100 ))
 
-    # Agents that own at least one enabled cron — needed for the wedge signature.
+    # Agents that own at least one enabled cron — needed ONLY for the wedge
+    # signature. The disk-size checks below are independent of it, so a failed
+    # cron inventory must NOT skip them: `continue` here would mean an agent
+    # already over maxDiskBytes reports as merely UNEVALUATED (exit 2, watchdog
+    # logs without paging). That is the same confirmed-violation suppression the
+    # cross-profile precedence rule exists to prevent, one scope level down.
+    # Degrade the profile instead of abandoning it: record that the eviction
+    # signal is unknown, then still run every check that does not depend on it.
     local enabled_map=""
+    local have_inventory=1
     if ! enabled_map="$(_enabled_cron_counts "$profile")"; then
-      printf 'UNEVALUATED\t%s\t"openclaw --profile %s cron list --all --json" failed — the cron-eviction signal for this profile is UNKNOWN\n' \
+      printf 'UNEVALUATED\t%s\t"openclaw --profile %s cron list --all --json" failed — the cron-eviction signal for this profile is UNKNOWN (disk-size checks still ran)\n' \
         "$profile" "$profile"
-      uneval=1; continue
+      uneval=1
+      enabled_map=""        # the failed call may have emitted partial output
+      have_inventory=0
     fi
 
     while read -r agent; do
@@ -248,6 +258,9 @@ collect_findings() {
       fi
 
       # Wedge signature: owns enabled crons but has no cron session entries.
+      # Skipped (and only this) when the cron inventory could not be read — the
+      # profile is already flagged UNEVALUATED above.
+      [ "$have_inventory" -eq 1 ] || continue
       ecount="$(printf '%s\n' "$enabled_map" | awk -v a="$agent" '$1 == a {print $2; exit}')"
       if [ -n "$ecount" ] && [ "$ecount" -gt 0 ]; then
         ckeys="$(_cron_key_count "$profile" "$agent")"

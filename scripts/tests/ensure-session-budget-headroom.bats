@@ -203,6 +203,26 @@ teardown() {
   [[ "$output" == *"edge"* ]]
 }
 
+@test "a failed cron inventory does not suppress that SAME profile's size checks" {
+  # The intra-profile twin of the test above. The cron inventory is needed ONLY
+  # for the zero-cron-key correlation; the disk-size checks are independent. An
+  # earlier `continue` on inventory failure skipped them too, so an agent already
+  # over maxDiskBytes reported as merely UNEVALUATED (exit 2 -> watchdog logs,
+  # never pages) — the same confirmed-violation suppression, one scope down.
+  _mk_profile main 1mb
+  _mk_agent main ops $((5 * 1024 * 1024)) 0
+  _set_enabled_crons ops 4
+  FAKE_CRON_FAIL=1 run "$SCRIPT" --check
+  [ "$status" -eq 1 ]                       # pages, does NOT collapse to 2
+  [[ "$output" == *"CRITICAL"* ]]           # the size violation IS reported
+  [[ "$output" == *"main/ops"* ]]
+  [[ "$output" == *"UNEVALUATED"* ]]        # and the unknown signal is named
+  # The zero-cron-key correlation is the ONE thing that must be skipped: without
+  # the inventory we cannot know the agent owns enabled crons, and claiming the
+  # wedge on that basis would be a fabricated outage.
+  [[ "$output" != *"ZERO"* ]]
+}
+
 @test "an unevaluated profile is reported, never silently dropped" {
   # Exit 2 must still SAY which profile it could not evaluate — a bare
   # "could not evaluate" with no detail is not actionable.
