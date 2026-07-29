@@ -837,11 +837,28 @@ journalctl -u openclaw-gateway-main -u openclaw-gateway-edge --since '-2h' \
 **Remediation (recover now — re-auth is unavoidable, the token is spent):**
 ```bash
 ssh root@40.160.32.80
-# 1. Re-auth ALL THREE accounts into the canonical main store (device-code = headless).
-openclaw --profile main models auth login --provider openai-codex --device-code  # aaron@muso.ai
-openclaw --profile main models auth login --provider openai-codex --device-code  # aarondkaufman@gmail.com
-openclaw --profile main models auth login --provider openai-codex --device-code  # aaronkaufman@me.com
+# 1. Re-auth. Use codex-reauth.sh — do NOT reach for `openclaw models auth login`.
+#
+#    `openclaw models auth login --provider openai-codex --device-code` FAILS on
+#    this fleet with "No provider plugins found": the bundled `openai` plugin owns
+#    the device-code flow and hydra keeps it DISABLED and off `plugins.allow` to
+#    dodge #90925 (enabling it reroutes the fleet primary onto the api-key
+#    endpoint → fleet-wide `invalid_api_key`). Same note is on the watchdog page
+#    for this signature and in codex-reauth.sh's own header. This runbook used to
+#    print that command here; following it costs you time in an active outage.
+#
+#    codex-reauth.sh drives the codex CLI's OWN `login --device-auth` (the
+#    vendored binary under @openclaw/codex), then merges into canonical, shreds
+#    the scratch credential, syncs derived stores and restarts. It prints a URL
+#    and a code for Aaron to complete in a browser.
+/opt/hydra/scripts/lib/codex-reauth.sh
+# Verify all three accounts are present in BOTH namespaces before moving on:
+openclaw --profile main models auth list | grep -c '^- openai:'                    # expect 3
+jq -r '.profiles|keys[]' /root/.openclaw-main/agents/main/agent/auth-profiles.json \
+  | grep -c '^openai-codex:'                                                        # expect 3
 # 2. Converge the lock dirs so it can't recur, then restart both gateways.
+#    (codex-reauth.sh already restarts; this is the belt-and-braces path if you
+#    ran the convergence check above and it reported NOT converged.)
 /opt/hydra/scripts/lib/ensure-codex-refresh-lock-shared.sh
 systemctl restart openclaw-gateway-main.service openclaw-gateway-edge.service
 # 3. Verify: codex serving itself again, no fallback banner.
@@ -954,11 +971,16 @@ harm is noisy logs + a false page — both fixed below.
 > expired. Please try signing in again.` on the **OAuth** route
 > (`chatgpt.com/backend-api/codex/responses` on <= 2026.6;
 > `wss://api.openai.com/v1/responses` on >= 2026.7). This IS a token problem — the access
-> token lapsed and refresh stopped renewing it. Fix = device-code re-auth BOTH
-> accounts then restart: `openclaw --profile main models auth login --provider
-> openai-codex --device-code` (aaron@muso.ai + aaronkaufman@me.com),
-> `systemctl restart openclaw-gateway-main openclaw-gateway-edge`. The watchdog now
-> pages on this `authentication token is expired` signature too.
+> token lapsed and refresh stopped renewing it. Fix = FIRST try the browser-free
+> path, `/opt/hydra/scripts/lib/codex-oauth-refresh.sh` then
+> `systemctl restart openclaw-gateway-main openclaw-gateway-edge`; only if that
+> reports `invalid_grant`/`refresh_token_invalidated` (the chain is dead) run
+> `/opt/hydra/scripts/lib/codex-reauth.sh` for a device-code login. Do NOT reach for
+> `openclaw models auth login --provider openai-codex --device-code` — it fails
+> "No provider plugins found" here (the `openai` plugin owns that flow and is
+> disabled). All three accounts must end up logged in (aaron@muso.ai +
+> aarondkaufman@gmail.com + aaronkaufman@me.com — a third was linked 2026-07-28).
+> The watchdog now pages on this `authentication token is expired` signature too.
 
 ---
 
