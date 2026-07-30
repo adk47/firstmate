@@ -779,6 +779,15 @@ RSYNC_EXCLUDES=(
   # Server-owned per-run scratch, recreatable, never in the repo. Mirrored
   # KEEP glob in scripts/qa-clean-merge-scratch.sh (lockstep rule).
   --exclude='workspaces/*/final-*.json'
+  # Same agent, same lesson, new names: the company-finder run now also writes
+  # DOT-prefixed scratch ('.company-finder-raw-<date>.json',
+  # '.company-finder-final.json', '.company-finder-final-<date>.json' — observed
+  # on node-8 2026-07-30, blocked #772). The leading dot and the
+  # 'company-finder-' prefix mean neither '*tmp*' nor 'final-*.json' matches, so
+  # every PR whose pre-flight ran while they existed went red. Server-owned
+  # per-run scratch, recreatable, never in the repo. Mirrored KEEP glob in
+  # scripts/qa-clean-merge-scratch.sh (lockstep rule).
+  --exclude='workspaces/*/.company-finder-*.json'
   # QA credit-verification todo inventory — dated per-run working state the QA
   # agent writes on node-8 (e.g. credit-verification-todo-inventory-2026-07-21.json),
   # never in the repo. Server-owned scratch; mirrored KEEP glob in

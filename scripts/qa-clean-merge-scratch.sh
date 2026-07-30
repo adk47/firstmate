@@ -53,6 +53,7 @@ KEEP_GLOBS=(
   'openclaw-workspace-state.json'
   '*tmp*'                              # any 'tmp'-marked scratch: .tmp-*, tmp_*, *.tmp
   'final-*.json'                       # scout company-finder run scratch (2026-07-21, #719)
+  '.company-finder-*.json'             # same, dot-prefixed variant (2026-07-30, #772)
   'credit-verification-todo-inventory-*.json'  # QA credit-verification run scratch
   'TOOLS.md.bak-*' '*.md.bak-*'
   'write-activity.log'
