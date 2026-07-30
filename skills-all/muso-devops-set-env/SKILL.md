@@ -184,6 +184,9 @@ it grants broad dev authority (still audited + muso-dev-scoped).
   `path "secret/data/k8s/muso-dev/*"      { capabilities = ["read","patch","create","update"] }`
   `path "secret/data/k8s/muso-chat-dev/*" { capabilities = ["read","patch","create","update"] }`.
   Then prove on a throwaway dev key with rollback before Serhii's real token.
-- **Artem D's muso.ai email** is not yet confirmed; he is authorized by Slack UID
-  (`U0ACHTYUULT`) today. Add his email to `dev-envset-requesters.txt` +
-  `resolve_slack_to_email()` once known (NOT `artem@muso.ai` — that is Artem M, Mobile).
+- **Two different Artems are authorized for dev** — resolve them by Slack UID, never by
+  the display name "Artem". Artem M (Mobile) is `U02N2NP3H7F` / `artem@muso.ai` and is
+  mapped in `resolve_slack_to_email()`. **Artem D's** (DevOps Lead) muso.ai email is still
+  unconfirmed; he is authorized by Slack UID (`U0ACHTYUULT`) alone. Add his email to
+  `dev-envset-requesters.txt` + `resolve_slack_to_email()` once known — it is NOT
+  `artem@muso.ai`, which belongs to Artem M.
