@@ -30,16 +30,15 @@ serhii
 serhii@muso.ai
 U03TYGJF1N3
 
-# TWO different Artems are authorized for dev. Tell them apart by Slack UID —
-# the Slack display name "Artem" is ambiguous and must never be the deciding
-# factor. Both are listed below.
+# TWO different Artems are authorized for dev — tell them apart by Slack UID,
+# never by the ambiguous display name "Artem".
 
-# Artem D (Dolobanko) — DevOps Lead (U0ACHTYUULT).
-# Matched by Slack UID today. Add his confirmed muso.ai email here once known —
-# do NOT use artem@muso.ai, that belongs to Artem M below.
+# Artem D (Dolobanko) — DevOps Lead. Matched by Slack UID today. Add his
+# confirmed muso.ai email here once known — do NOT use artem@muso.ai, that
+# belongs to Artem M below.
 U0ACHTYUULT
 
-# Artem M (Mobile) — U02N2NP3H7F, artem@muso.ai. Added 2026-07-30 (Nick:
-# Serhii and Artem must have full control over dev without asking permission).
+# Artem M (Mobile). Added 2026-07-30 (Nick: Serhii and Artem must have full
+# control over dev without asking permission).
 U02N2NP3H7F
 artem@muso.ai

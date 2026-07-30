@@ -16,5 +16,8 @@ aaron
 aaron@muso.ai
 nick
 nick@muso.ai
-# Artem D (DevOps) — add their resolved muso.ai email once confirmed.
-# artem@muso.ai
+# Artem D (DevOps Lead, U0ACHTYUULT) — add his resolved muso.ai email once
+# confirmed. Do NOT uncomment artem@muso.ai for him: that address belongs to
+# Artem M (Mobile), a DIFFERENT person who holds DEV authority only and must
+# never reach this PROD list. Two people answer to "Artem" — confirm by Slack
+# UID before adding anyone here.

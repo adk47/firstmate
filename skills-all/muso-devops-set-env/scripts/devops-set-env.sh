@@ -128,15 +128,13 @@ resolve_slack_to_email() {
         U02S7TJ7QHY) echo "oleg@muso.ai" ;;
         U0AL36NADEY) echo "nick@muso.ai" ;;
         U0A8CCTTAAG) echo "liza@muso.ai" ;;
-        # There are TWO authorized Artems — never disambiguate them by the
-        # display name "Artem", only by UID.
         U02N2NP3H7F) echo "artem@muso.ai" ;;   # Artem M (Mobile) — dev authority
-        # Artem D (DevOps Lead) is U0ACHTYUULT. His muso.ai email is not yet
-        # confirmed, so he is intentionally NOT mapped here — his UID falls
-        # through and is matched directly (as the bare UID) in
+        # TWO different Artems are authorized: resolve them by UID, never by the
+        # display name "Artem". Artem D (DevOps Lead, U0ACHTYUULT) is
+        # intentionally NOT mapped here — his muso.ai email is unconfirmed, so his
+        # UID falls through and is matched as a bare UID in
         # dev-envset-requesters.txt. Do NOT map him to artem@muso.ai — that is
-        # Artem M (Mobile), the OTHER person mapped just above. Add his real
-        # email here once known.
+        # Artem M, just above. Add his real email here once known.
         *) echo "$input"; return 1 ;;
     esac
     return 0
