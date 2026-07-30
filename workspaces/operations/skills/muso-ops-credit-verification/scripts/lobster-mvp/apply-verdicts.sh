@@ -137,20 +137,27 @@ apply_chunked() {
     # Anything else — transport failure, another status, a dry-run intercept, or
     # a body with no usable updatedIds — refuses the WHOLE chunk. Success is
     # never inferred from a missing field.
-    local chunk_report=""
+    # Whether this response is one we should have been able to attribute row by
+    # row. Computed ONCE: the parse gate below and the refusal reason after it
+    # must never disagree about what "attributable" means.
+    local attributable=false
     if [[ "$chunk_rc" -eq 0 && "$chunk_dry" != "true" ]] \
        && [[ "$chunk_http" == "200" || "$chunk_http" == "409" ]]; then
+      attributable=true
+    fi
+
+    local chunk_report=""
+    if [[ "$attributable" == "true" ]]; then
       chunk_report=$(echo "$chunk_resp" | jq -c '
         (if (.body | type) == "object"
            then (if (.body | has("data")) then .body.data else .body end)
            else null end)
-        | if (type == "object" and has("updatedIds") and (.updatedIds | type) == "array")
-          then . else empty end
+        | select(type == "object" and has("updatedIds") and (.updatedIds | type) == "array")
       ' 2>/dev/null || true)
     fi
 
     if [[ -n "$chunk_report" ]]; then
-      local chunk_landed chunk_refused n_landed
+      local chunk_landed chunk_refused
       # Intersection in $ids order; `-` is safe here because ids are unique.
       chunk_landed=$(jq -nc --argjson ids "$chunk_ids" --argjson r "$chunk_report" \
         '$ids - ($ids - $r.updatedIds)')
@@ -163,19 +170,17 @@ apply_chunked() {
             | . as $id
             | { cr_id: $id,
                 reason: (($sk[] | select(.id == $id) | .reason) // ("http_" + $http)) } ]')
-      n_landed=$(echo "$chunk_landed" | jq 'length')
       landed_acc=$(printf '%s\n%s\n' "$landed_acc" "$chunk_landed" | jq -sc 'add')
       refused_acc=$(printf '%s\n%s\n' "$refused_acc" "$chunk_refused" | jq -sc 'add')
-      log_event "${bucket}_chunk_attributed" "$(jq -nc --argjson i "$i" --arg http "$chunk_http" --argjson landed "$chunk_landed" --argjson refused "$chunk_refused" --argjson n "$n_landed" '{chunk_index:$i, http_status:$http, landed_count:$n, landed_ids:$landed, refused:$refused}')"
+      log_event "${bucket}_chunk_attributed" "$(jq -nc --argjson i "$i" --arg http "$chunk_http" --argjson landed "$chunk_landed" --argjson refused "$chunk_refused" '{chunk_index:$i, http_status:$http, landed_count:($landed|length), landed_ids:$landed, refused:$refused}')"
     else
       local reason="http_$chunk_http"
       [[ "$chunk_dry" == "true" ]] && reason="dry_run_intercepted"
-      # A 200/409 we could not attribute is the dangerous case: the write may
-      # well have landed, but we cannot say for WHICH rows. Name it distinctly
-      # so it is never mistaken for a clean transport failure, and refuse the
-      # whole chunk rather than assume.
-      if [[ "$chunk_rc" -eq 0 && "$chunk_dry" != "true" ]] \
-         && [[ "$chunk_http" == "200" || "$chunk_http" == "409" ]]; then
+      # A response we SHOULD have been able to attribute but could not is the
+      # dangerous case: the write may well have landed, but we cannot say for
+      # WHICH rows. Name it distinctly so it is never mistaken for a clean
+      # transport failure, and refuse the whole chunk rather than assume.
+      if [[ "$attributable" == "true" ]]; then
         reason="unattributable_response_http_$chunk_http"
       fi
       local chunk_refused
