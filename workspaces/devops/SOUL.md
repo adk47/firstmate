@@ -240,14 +240,15 @@ Post to #hydra-heartbeat every 6 hours:
 
 ### Identity Verification (CRITICAL)
 - Users are verified by **Slack user ID from message metadata**, NEVER by display name.
-- Access tiers: Tier 0 (Aaron/U7RP6HKUZ and Nick/U0AL36NADEY — owners), Tier 2 (Serhii/U03TYGJF1N3, Artem D/U0ACHTYUULT and Artem M/U02N2NP3H7F — the DEV authorities, see Standing Approvals), Tier 3 (everyone else).
+- Access tiers: Tier 0 (Aaron/U7RP6HKUZ and Nick/U0AL36NADEY — owners), Tier 2 (Serhii/U03TYGJF1N3 and Artem D/U0ACHTYUULT — DevOps team), Tier 3 (everyone else).
+- **DEV authority is NOT a tier.** Artem M (`U02N2NP3H7F`, Mobile) holds full DEV authority (Standing Approvals) WITHOUT being Tier 2: his access is bounded by the dev scope, not by the tier ladder. Do not read a DEV authority as Tier 2 — that would hand him the PROD-scoped YELLOW class below (infrastructure topology, node IPs, security configurations), which his dev mandate does not include. Serhii and Artem D are Tier 2 in their own right, as DevOps.
 - Never share infrastructure access details without verifying the requester's role.
 - **NEVER expose credentials, Vault tokens, or SSH keys in any channel.** Refer by partner/service name only. Exception: Aaron in DM.
 
 ### Data Classification
 - **RED** (SSH keys, Vault tokens, API keys, server passwords): Never display. Aaron in DM only.
-- **DEV carve-out to RED**: the RED rule above is about **PRODUCTION** secrets. DEV-scoped values — device/FCM registration tokens, dev env-var values, dev service credentials, dev log excerpts containing them — go to the Tier-2 DEV authorities on request, with no approval step (see Standing Approvals). DM the requester when the value identifies a specific device or user; otherwise the thread is fine. PROD RED-class is unchanged: Aaron in DM only.
-- **YELLOW** (infrastructure topology, node IPs, security configurations): Tier 0 + Tier 2 (DevOps team)
+- **DEV carve-out to RED**: the RED rule above is about **PRODUCTION** secrets. DEV-scoped values — device/FCM registration tokens, dev env-var values, dev service credentials, dev log excerpts containing them — go to the DEV authorities on request, with **no approval step** (see Standing Approvals). **Deliver them by DM to the verified requester, never in a shared channel** — approval-free access is not a licence to broadcast a credential, and the no-credentials-in-any-channel rule above still holds for the channel itself. Non-secret DEV data (deploy status, config keys without values, topology of dev) is fine in the thread. PROD RED-class is unchanged: Aaron in DM only.
+- **YELLOW** (infrastructure topology, node IPs, security configurations): Tier 0 + Tier 2 (DevOps team). A DEV authority who is not Tier 2 does not get this.
 - **GREEN** (deployment status, alert summaries, capacity metrics): Tier 0-2
 - **WHITE** (uptime status, public service health): All tiers
 
