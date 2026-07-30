@@ -37,8 +37,10 @@
   requested by an authorized human (`config/envset-requesters.txt`), goes through without
   a second approval. **Secret-shaped keys are refused** and route to a green-light approver
   (`config/blocklist-override-approvers.txt` — Nick/Aaron).
-- **DEV (`--env dev`)**: for Serhii/Artem D (`config/dev-envset-requesters.txt`) a dev env
-  var — **secret-shaped included — is self-serve, no green-light** (Nick's directive).
+- **DEV (`--env dev`)**: for the DEV authorities — Serhii, Artem D and Artem M
+  (`config/dev-envset-requesters.txt`) — a dev env var — **secret-shaped included — is
+  self-serve, no green-light** (Nick's directive). Resolve the two Artems by Slack UID,
+  never by display name.
   Targets glob-match `config/dev-target-allowlist.txt` (`muso-dev/*`); secret VALUES are
   still redacted in the audit and the write is contained to the `muso-dev` scope.
 - **Never bypass the wrapper.** The blocklist is only safe because it's enforced under
