@@ -122,12 +122,62 @@ apply_chunked() {
 
     log_event "${bucket}_chunk_put_response" "$(jq -nc --argjson i "$i" --arg rc "$chunk_rc" --arg http "$chunk_http" --arg dr "$chunk_dry" --arg resp "$(echo "$chunk_resp" | head -c 300)" '{chunk_index:$i, put_rc:$rc, http_status:$http, dry_run_intercepted:$dr, response_head:$resp}')"
 
-    if [[ "$chunk_rc" -eq 0 && "$chunk_http" == "200" && "$chunk_dry" != "true" ]]; then
-      landed_acc=$(printf '%s\n%s\n' "$landed_acc" "$chunk_ids" | jq -sc 'add')
-      log_event "${bucket}_chunk_landed" "$(jq -nc --argjson i "$i" --argjson ids "$chunk_ids" '{chunk_index:$i, landed_ids:$ids}')"
+    # Attribute PER ROW from the response body, never from the HTTP code alone.
+    # The chunk-level inference this replaces read only the status: a 200 marked
+    # every id in the chunk landed — including rows the backend had explicitly
+    # reported in skippedIds — and any non-2xx marked every id refused,
+    # including rows that really did persist. That is how the 2026-07-23 sweeps
+    # reported rows as applied that had never moved.
+    #
+    # 200 and 409 both carry the same report. A 409 is the backend's "some rows
+    # were refused" answer and is a PARTIAL SUCCESS: its updatedIds are real and
+    # must not be re-attempted as failures. A success nests the report under
+    # .body.data; the error handler spreads it across .body.
+    #
+    # Anything else — transport failure, another status, a dry-run intercept, or
+    # a body with no usable updatedIds — refuses the WHOLE chunk. Success is
+    # never inferred from a missing field.
+    local chunk_report=""
+    if [[ "$chunk_rc" -eq 0 && "$chunk_dry" != "true" ]] \
+       && [[ "$chunk_http" == "200" || "$chunk_http" == "409" ]]; then
+      chunk_report=$(echo "$chunk_resp" | jq -c '
+        (if (.body | type) == "object"
+           then (if (.body | has("data")) then .body.data else .body end)
+           else null end)
+        | if (type == "object" and has("updatedIds") and (.updatedIds | type) == "array")
+          then . else empty end
+      ' 2>/dev/null || true)
+    fi
+
+    if [[ -n "$chunk_report" ]]; then
+      local chunk_landed chunk_refused n_landed
+      # Intersection in $ids order; `-` is safe here because ids are unique.
+      chunk_landed=$(jq -nc --argjson ids "$chunk_ids" --argjson r "$chunk_report" \
+        '$ids - ($ids - $r.updatedIds)')
+      # Everything targeted that did NOT move, each carrying the backend's own
+      # reason (illegal_transition / lost_race / not_found / seed_refused) when
+      # it named one.
+      chunk_refused=$(jq -nc --argjson ids "$chunk_ids" --argjson r "$chunk_report" --arg http "$chunk_http" '
+        (if ($r | has("skipped")) and ($r.skipped | type) == "array" then $r.skipped else [] end) as $sk
+        | [ ($ids - $r.updatedIds)[]
+            | . as $id
+            | { cr_id: $id,
+                reason: (($sk[] | select(.id == $id) | .reason) // ("http_" + $http)) } ]')
+      n_landed=$(echo "$chunk_landed" | jq 'length')
+      landed_acc=$(printf '%s\n%s\n' "$landed_acc" "$chunk_landed" | jq -sc 'add')
+      refused_acc=$(printf '%s\n%s\n' "$refused_acc" "$chunk_refused" | jq -sc 'add')
+      log_event "${bucket}_chunk_attributed" "$(jq -nc --argjson i "$i" --arg http "$chunk_http" --argjson landed "$chunk_landed" --argjson refused "$chunk_refused" --argjson n "$n_landed" '{chunk_index:$i, http_status:$http, landed_count:$n, landed_ids:$landed, refused:$refused}')"
     else
       local reason="http_$chunk_http"
       [[ "$chunk_dry" == "true" ]] && reason="dry_run_intercepted"
+      # A 200/409 we could not attribute is the dangerous case: the write may
+      # well have landed, but we cannot say for WHICH rows. Name it distinctly
+      # so it is never mistaken for a clean transport failure, and refuse the
+      # whole chunk rather than assume.
+      if [[ "$chunk_rc" -eq 0 && "$chunk_dry" != "true" ]] \
+         && [[ "$chunk_http" == "200" || "$chunk_http" == "409" ]]; then
+        reason="unattributable_response_http_$chunk_http"
+      fi
       local chunk_refused
       chunk_refused=$(echo "$chunk_ids" | jq -c --arg reason "$reason" '[.[] | {cr_id: ., reason: $reason}]')
       refused_acc=$(printf '%s\n%s\n' "$refused_acc" "$chunk_refused" | jq -sc 'add')
