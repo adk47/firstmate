@@ -174,6 +174,55 @@ session-claim race (transient ClaimError; real fix was session `maxEntries`)
 gets marginally more exposure — re-check ClaimError frequency if it seems
 chattier.
 
+**`CronSessionLifecycleClaimError` has a THIRD mode: the session DISK-budget
+wedge — same symptom as the `maxEntries` wedge, different knob.** On 2026-07-27
+all 8 enabled `operations` crons died for ~25h (support-email-triage-hourly,
+credit-verification-batch, both codex-usage-report DMs, systemic-data-issue,
+caroline-daily/weekly, credit-fleet-fraud-scan), every fire dying at SETUP in
+~1.1s with `CronSessionLifecycleClaimError`. `maxEntries` was already 1000 vs 445
+protected, so the PR #694 fix was NOT the cause. The culprit is the OTHER
+`session.maintenance` knob: `enforceSessionDiskBudget` (`dist/store-*.js`) is
+**PER-AGENT** (`sessionsDir = path.dirname(params.storePath)`). It first deletes
+removable FILES to get under `highWaterBytes`; when that set is exhausted and it
+is still over, it falls through to deleting session store **ENTRIES**
+(`delete params.store[key]`), oldest-`updatedAt` first, skipping only the active
+key and `shouldPreserveMaintenanceEntry`. Slack keys are protected; `:cron:` keys
+are not — so it eats the agent's whole cron surface, restart-immune, on every
+agent turn.
+- **The one-line census that proves it:** count keys per agent in
+  `agents/<id>/sessions/sessions.json`. `operations` read **445 slack / 0 cron**
+  while healthy `qa` read 117 / **49**. Zero `:cron:` keys on an agent that owns
+  enabled crons IS the outage.
+- **Confirm without guessing:** `openclaw --profile main sessions cleanup --agent
+  <id> --dry-run --json` → `"overBudget": true` with `"removedFiles": 0,
+  "removedEntries": 0` means "over budget and nothing left it is allowed to
+  delete" — i.e. it has already eaten every cron entry. The journal tell is
+  `[sessions/store] session disk budget still above high-water target after
+  cleanup`; its rate jumped 1–3/day → **451/day** the day the crons died.
+- **Fix (PR for this incident):** `maxDiskBytes` 512mb → **4gb**, `highWaterBytes`
+  384mb → **3gb** in BOTH repo configs. The largest agent's irreducible
+  (all-referenced, all-protected) footprint was 546 MiB growing ~13 MB/day.
+- **`config set` alone is NOT enough — the running daemon caches the budget.**
+  The CLI prints "No gateway restart needed" and that is true for the config
+  file, but the reaper kept enforcing the OLD 512mb until the gateway restarted;
+  cron entries were recreated and immediately re-eaten in between. Always
+  `config set` **then restart**, and verify with `grep -c "disk budget still
+  above"` on the post-restart journal (expect 0).
+- **Standing invariant, same as `maxEntries`:** BOTH budgets must exceed each
+  agent's PEAK PROTECTED footprint, and openclaw never auto-prunes protected
+  Slack threads, so that footprint grows WITHOUT BOUND. Raising a budget buys
+  time; it is not a permanent fix. Enforcement is
+  `scripts/lib/ensure-session-budget-headroom.sh` (`--check`: 0 clean / 1
+  violation / 2 read error), wired into `openclaw-pre-start-heal.sh` (report-only)
+  and `cron-health-watchdog.sh` (pages #clio_devops, 6h-deduped). It is
+  DETECT-AND-PAGE ONLY by design — re-sizing a budget is a human decision, and a
+  self-healing "just raise it" would defer the same outage with nobody informed.
+- **Why it went unnoticed for 25h:** `cron-health-watchdog.sh` DID page hourly
+  (`stuck: N consecutive restart/claim failures, not recovering`, N climbing
+  15→24) — correct, per-job, and unread. It named only the hourly triage (the
+  only job firing often enough to re-trip the streak), and could not say WHY.
+  That is exactly the gap the capacity-signal check above closes.
+
 ### Memory and bootstrap
 
 **Over-cap bootstrap files are MIDDLE-dropped, not tail-dropped.** `bootstrapMaxChars`

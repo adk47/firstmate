@@ -112,6 +112,54 @@ fi
 command -v python3 >/dev/null 2>&1 || { log "ERROR: python3 required but not on PATH"; exit 2; }
 
 # ──────────────────────────────────────────────────────────────
+# Session-budget headroom — catch the wedge BEFORE it eats the cron surface.
+#
+# The failure below is invisible to scan_failures until it has already happened:
+# once an agent's sessions dir crosses session.maintenance.maxDiskBytes,
+# openclaw's reaper deletes that agent's cron SESSION entries and every fire
+# claim-errors. On 2026-07-27 that killed all 8 `operations` crons for ~25h.
+# scan_failures does eventually page ("stuck: N consecutive restart/claim
+# failures") but only per-job, only after N fires, and it cannot say WHY.
+# This check names the cause and fires on the capacity signal beforehand.
+#
+# Deliberately rate-limited to one page per SESSION_BUDGET_ALERT_INTERVAL: this
+# is a slow-moving capacity signal and the watchdog ticks every 5 minutes, so an
+# undeduped page would post ~288 times a day and train everyone to ignore it.
+# See scripts/lib/ensure-session-budget-headroom.sh.
+# ──────────────────────────────────────────────────────────────
+SESSION_BUDGET_CHECK="${CRON_HEALTH_SESSION_BUDGET_CHECK:-$_WATCHDOG_DIR/lib/ensure-session-budget-headroom.sh}"
+SESSION_BUDGET_ALERT_STATE="${CRON_HEALTH_SESSION_BUDGET_STATE:-/var/lib/cron-health-watchdog/session-budget-last-alert}"
+SESSION_BUDGET_ALERT_INTERVAL="${CRON_HEALTH_SESSION_BUDGET_INTERVAL:-21600}"  # 6h
+
+if [ -x "$SESSION_BUDGET_CHECK" ]; then
+  _sb_out=""; _sb_rc=0
+  # `|| _sb_rc=$?` is required: this script runs under `set -e` and the guard
+  # exits 1 by design on every finding.
+  _sb_out="$("$SESSION_BUDGET_CHECK" --check 2>&1)" || _sb_rc=$?
+  if [ "$_sb_rc" -eq 1 ]; then
+    _sb_now="$(date -u +%s)"
+    _sb_last="$(cat "$SESSION_BUDGET_ALERT_STATE" 2>/dev/null || echo 0)"
+    case "$_sb_last" in (*[!0-9]*|"") _sb_last=0 ;; esac
+    if [ "$DRY_RUN" -eq 1 ]; then
+      log "DRY-RUN: session budget headroom violation (would page ${SLACK_CHANNEL}):"
+      printf '%s\n' "$_sb_out"
+    elif [ $((_sb_now - _sb_last)) -ge "$SESSION_BUDGET_ALERT_INTERVAL" ]; then
+      log "Posting session-budget headroom alert to ${SLACK_CHANNEL}."
+      printf '%s\n' "$_sb_out"
+      slack_notify_critical ":warning: *Session budget headroom* — an agent is at/over \`session.maintenance.maxDiskBytes\`, which makes openclaw's reaper delete cron session entries and wedge that agent's whole cron surface.\\n\\n\`\`\`$_sb_out\`\`\`\\n\\nFix: raise \`maxDiskBytes\`/\`highWaterBytes\` in \`openclaw-main.json\`/\`openclaw-edge.json\`, apply live with \`openclaw --profile <p> config set\`, then RESTART the gateway (the running daemon caches the budget). Never \`openclaw doctor --fix\`."
+      mkdir -p "$(dirname "$SESSION_BUDGET_ALERT_STATE")" 2>/dev/null || true
+      printf '%s' "$_sb_now" > "$SESSION_BUDGET_ALERT_STATE" 2>/dev/null || true
+    else
+      log "session budget headroom violation (page suppressed, last $((_sb_now - _sb_last))s ago)"
+    fi
+  elif [ "$_sb_rc" -eq 2 ]; then
+    # Read error, not an all-clear. Log loudly but don't page — an unreachable
+    # gateway already pages via the cron-failure path below.
+    log "WARN: session budget headroom check could not evaluate: $_sb_out"
+  fi
+fi
+
+# ──────────────────────────────────────────────────────────────
 # scan_failures — the pure detection core.
 #   $1 runs_dir  $2 jobs_file  $3 state_file  $4 payload_out  $5 persist(0|1)
 # Writes a Slack-ready JSON payload to $payload_out (only if there are
