@@ -147,10 +147,8 @@ terraform/
 
 ## Related References
 
-For comprehensive details, see the **muso-devops** skill which contains:
-- Complete Terraform file references
-- Jenkins shared library details
-- Mobile CI/CD (Android/iOS)
-- KEDA autoscaling configuration
-- EKS/ECS deployment specifics
-- Bastion host configuration
+The `muso-devops` skill that this section used to point at was removed as dead
+weight; it was never bound to the devops agent and its EKS/ECS content described
+AWS infrastructure decommissioned on 2026-05-31. For current infrastructure see
+`docs/lessons/infrastructure-topology.md` (all-OVH topology) and consult H-DevOps
+before touching infra.

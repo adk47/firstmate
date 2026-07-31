@@ -592,12 +592,16 @@ jobs:
           bash scripts/lint-no-em-dash.sh
           echo "::endgroup::"
 
-      - name: SOUL bootstrap-size check — Caroline SOUL.md must fit the cap
-        # SOUL.md over bootstrapMaxChars gets its TAIL truncated in the injected
-        # context on every turn (verified live on edge), silently dropping the
-        # Honesty / SLA-breach doctrine. This gate keeps it under the cap.
+      - name: Bootstrap-size check — Caroline's injected files must fit the cap
+        # A bootstrap file over bootstrapMaxChars has its MIDDLE removed in the
+        # injected context on every turn: openclaw keeps a 75% head and a 25%
+        # tail (trimBootstrapContent, BOOTSTRAP_HEAD_RATIO/TAIL_RATIO). Both
+        # SOUL.md (~44k) and TOOLS.md (46k, 310 warnings in 24h on 2026-07-28)
+        # have breached. NOTE: an earlier version of this comment said the TAIL
+        # was truncated and pointed at the trailing Honesty/SLA rules -- wrong;
+        # the tail survives. This gate covers every injected file plus the total.
         run: |
-          echo "::group::SOUL bootstrap-size check"
+          echo "::group::Bootstrap-size check"
           bash scripts/check-soul-bootstrap-size.sh
           echo "::endgroup::"
 

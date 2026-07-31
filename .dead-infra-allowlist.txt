@@ -18,8 +18,6 @@
 skills-all/muso-clio/references/ -- athena,aws,awscli,awsenv,awsprofile,uswest2,workgroup,assumerole,boto3 -- AWS-era KT transcripts + architecture reference library; migration mapping lives in references/trino/; athena/ doc is a tombstone
 skills-all/muso-clio/SKILL.md -- athena,aws,awscli -- Athena→Trino migration table (mapping, not instruction)
 skills-all/muso-cli/SKILL.md -- athena -- migration note (muso query does NOT rewrite legacy Athena names)
-skills-all/muso-architect/reference.md -- athena,aws -- KT-derived architecture history; retirement noted inline
-skills-all/muso-data-expert/reference.md -- athena,aws -- historical architecture notes (Athena retired 2026-04-25)
 skills-all/billion-streams-club/ -- v3 -- "NEVER profile_v3_*" warning is the doctrine itself
 skills-all/muso-streams-lookup/ -- v3 -- same NEVER-warning
 workspaces/operations/skills/muso-ops-fastlane/ -- v3 -- documents replacement of dead profile_v3_lifetime
@@ -31,8 +29,6 @@ workspaces/devops/TOOLS.md -- aws -- decommission tombstone (no AWS account to o
 workspaces/devops/HEARTBEAT.md -- aws -- retired AWS-monitoring heartbeat section (tombstone)
 workspaces/cto/SOUL.md -- aws,athena,v3 -- decommission record + frozen-v3-vs-live-V3 doctrine
 workspaces/qa/SOUL.md -- aws,athena,v3 -- infra ground-truth review doctrine (flag NEW AWS deps; frozen-v3 vs live-V3 distinction)
-skills-all/muso-devops/SKILL.md -- aws,uswest2 -- decommission banner names the retired AWS surfaces
-skills-all/muso-devops/reference.md -- aws,awscli,uswest2 -- AWS-era KT archive; banner at top marks it historical
 skills-all/muso-query-writer/SKILL.md -- athena,aws,awscli,uswest2 -- Athena→Trino migration doctrine + legacy-command mapping
 skills-all/muso-query-writer/reference.md -- athena,aws -- historical data-platform architecture notes
 skills-all/muso-query-writer/trino-schemas.md -- awscli,uswest2 -- legacy aws-cli command comments in the runner-mapping section
