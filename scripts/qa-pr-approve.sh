@@ -180,18 +180,42 @@ sensitive_json="$(jq -c --arg r "$owner/$repo" \
 [ "$sensitive_json" != "[]" ] || die 11 "sensitive_paths in $POLICY is empty for $owner/$repo — refusing to approve (fail closed; a missing key must not disable this guard)."
 
 # `gh pr view --json files` issues `files(first: 100)` with NO pagination and no
-# pageInfo (verified with GH_DEBUG=api on 2026-07-27), and paths come back
-# alphabetically. hydra's sensitive prefixes (policies/, scripts/, secrets/) sort
-# late, so on a >100-file PR the guard would look clean simply because it never
-# saw them. Cross-check against changedFiles and refuse when the list is short —
-# the same fail-closed shape Guards 7 and 8 use for their hasNextPage limits.
-files_json="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" \
-  --json changedFiles,files 2>/dev/null || echo "__ERR__")"
-[ "$files_json" != "__ERR__" ] || die 11 "could not read the changed-file list for $owner/$repo#$pr — refusing to approve (fail closed)."
-printf '%s' "$files_json" | jq -e '.changedFiles == (.files | length)' >/dev/null 2>&1 \
-  || die 11 "PR #$pr reports $(printf '%s' "$files_json" | jq -r '.changedFiles // "?"') changed files but the API returned $(printf '%s' "$files_json" | jq -r '(.files // []) | length') — cannot verify sensitive paths on a truncated list; refusing (fail closed)."
-changed_files="$(printf '%s' "$files_json" | jq -r '.files[]?.path' 2>/dev/null || echo "__ERR__")"
-[ "$changed_files" != "__ERR__" ] || die 11 "could not extract changed-file paths for $owner/$repo#$pr — refusing (fail closed)."
+# pageInfo (verified with GH_DEBUG=api on 2026-07-27). Read the independently
+# paginated REST endpoint instead, then cross-check its total against
+# changedFiles so an API failure or partial response still refuses fail-closed.
+reported_changed_files="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" \
+  --json changedFiles --jq .changedFiles 2>/dev/null || true)"
+[[ "$reported_changed_files" =~ ^[0-9]+$ ]] \
+  || die 11 "could not read the changed-file count for $owner/$repo#$pr — refusing to approve (fail closed)."
+files_json="$("$QA_GH" --repo "$owner/$repo" api --paginate --slurp \
+  "repos/$owner/$repo/pulls/$pr/files?per_page=100" 2>/dev/null)" \
+  || die 11 "could not read the paginated changed-file list for $owner/$repo#$pr — refusing to approve (fail closed)."
+printf '%s' "$files_json" \
+  | jq -e '
+      type == "array"
+      and all(.[];
+        type == "array"
+        and all(.[];
+          if type != "object" then false
+          else ((.filename | type) == "string" and (.filename | length) > 0)
+            and (.status as $s
+                 | (["added", "removed", "modified", "renamed", "copied", "changed", "unchanged"]
+                    | index($s)) != null)
+            and (if has("previous_filename")
+                 then ((.previous_filename | type) == "string"
+                       and (.previous_filename | length) > 0)
+                 else .status != "renamed"
+                 end)
+          end))' \
+    >/dev/null 2>&1 \
+  || die 11 "could not parse the paginated changed-file list for $owner/$repo#$pr — refusing to approve (fail closed)."
+returned_changed_files="$(printf '%s' "$files_json" | jq -r '[.[][]] | length')"
+[ "$reported_changed_files" = "$returned_changed_files" ] \
+  || die 11 "PR #$pr reports $reported_changed_files changed files but the API returned $returned_changed_files — cannot verify sensitive paths on a partial list; refusing (fail closed)."
+unique_changed_files="$(printf '%s' "$files_json" | jq -r '[.[][] | .filename] | unique | length')"
+[ "$returned_changed_files" = "$unique_changed_files" ] \
+  || die 11 "the paginated API returned duplicate filenames for $owner/$repo#$pr — cannot verify sensitive paths on an unstable list; refusing (fail closed)."
+changed_files="$(printf '%s' "$files_json" | jq -r '.[][] | .filename, (.previous_filename? // empty)')"
 if [ -n "$changed_files" ]; then
   hit="$(printf '%s\n' "$changed_files" \
     | jq -R -s --argjson pats "$sensitive_json" \

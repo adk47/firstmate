@@ -57,6 +57,22 @@ case "$sub" in
       else
         echo "${STUB_OPEN_BLOCKERS:-0}"                 # count of unresolved Critical/Important threads
       fi
+    elif printf '%s\n' "$@" | grep -qE '^repos/[^/]+/[^/]+/pulls/[0-9]+/files\?per_page=100$'; then
+      _args="$*"
+      if printf '%s' "$_args" | grep -q -- '--paginate' \
+        && printf '%s' "$_args" | grep -q -- '--slurp'; then
+        echo "files-api-paginated-slurped" >> "$STUB_CALLS"
+      fi
+      _page1="${STUB_FILES_PAGE_1:-${STUB_FILES:-src/app.ts}}"
+      _page2="${STUB_FILES_PAGE_2:-}"
+      if [ -n "${STUB_FILES_JSON:-}" ]; then
+        printf '%s' "$STUB_FILES_JSON"
+      else
+        jq -nc --arg p1 "$_page1" --arg p2 "$_page2" '
+          ($p1 | split(" ") | map(select(length > 0) | {filename: ., status: "modified"})) as $a
+          | ($p2 | split(" ") | map(select(length > 0) | {filename: ., status: "modified"})) as $b
+          | if ($b | length) > 0 then [$a, $b] else [$a] end'
+      fi
     else
       # No colon: an explicitly EMPTY STUB_ME must stay empty, so tests can model
       # `gh api user` 403ing under a GitHub App installation token. With `:-` an
@@ -76,14 +92,10 @@ case "$sub" in
         elif printf '%s ' "$@" | grep -q 'headRefOid'; then
           echo "${STUB_HEAD_OID:-0123456789abcdef0123456789abcdef01234567}"  # Guard 8 report key
         elif printf '%s ' "$@" | grep -q -- 'changedFiles'; then
-          # Guard 3b: real gh returns {changedFiles, files:[{path}]} and truncates
-          # `files` at 100 with no pageInfo, so the guard cross-checks the count.
-          # STUB_CHANGED_COUNT lets a test model that truncation.
-          _f="${STUB_FILES:-src/app.ts}"
-          printf '%s\n' $_f | jq -R -s --arg n "${STUB_CHANGED_COUNT:-}" \
-            '[split("\n")[]|select(length>0)] as $p
-             | {changedFiles: (if $n == "" then ($p|length) else ($n|tonumber) end),
-                files: [$p[]|{path:.}]}'
+          _page1="${STUB_FILES_PAGE_1:-${STUB_FILES:-src/app.ts}}"
+          _all="$_page1 ${STUB_FILES_PAGE_2:-}"
+          set -- $_all
+          echo "${STUB_CHANGED_COUNT:-$#}"
         elif printf '%s ' "$@" | grep -q 'author'; then
           echo "${STUB_AUTHOR:-nsollazzo}"            # PR author login
         else
@@ -499,15 +511,103 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
   ! grep -q '^approve$' "$STUB_CALLS"
 }
 
-@test "guard3b: >100 changed files (gh truncates) → exit 11, refuses on a partial list" {
-  # gh issues files(first: 100) with no pagination and returns paths alphabetically,
-  # so hydra's late-sorting sensitive prefixes would be invisible on a big PR.
+@test "guard3b: changed-file count mismatch with paginated REST list → exit 11 (fail closed)" {
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":[],"sensitive_paths":{"*":[".github/workflows/"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES="a.ts b.ts" STUB_CHANGED_COUNT=130 run "$SCRIPT" core-backend 123 "$NICK"
   [ "$status" -eq 11 ]
-  echo "$output" | grep -q 'truncated'
+  echo "$output" | grep -q 'reports 130 changed files'
+  echo "$output" | grep -q 'returned 2'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3b: >100 ordinary files from paginated REST → approves" {
+  page1=""
+  for i in $(seq 1 100); do page1="${page1}src/page-1-file-${i}.ts "; done
+  page2=""
+  for i in $(seq 1 35); do page2="${page2}src/page-2-file-${i}.ts "; done
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES_PAGE_1="$page1" STUB_FILES_PAGE_2="$page2" STUB_CHANGED_COUNT=135 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^files-api-paginated-slurped$' "$STUB_CALLS"
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3b: sensitive file on REST page 2 → exit 11 with the path" {
+  page1=""
+  for i in $(seq 1 100); do page1="${page1}src/page-1-file-${i}.ts "; done
+  page2=""
+  for i in $(seq 1 34); do page2="${page2}src/page-2-file-${i}.ts "; done
+  page2="${page2}policies/qa-approval-policy.json"
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES_PAGE_1="$page1" STUB_FILES_PAGE_2="$page2" STUB_CHANGED_COUNT=135 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 11 ]
+  echo "$output" | grep -q 'policies/qa-approval-policy.json'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3b: rename out of a sensitive path checks previous_filename → exit 11" {
+  files='[[{"filename":"src/app.ts","status":"modified"}],
+    [{"filename":"archive/old-policy.json","previous_filename":"policies/qa-approval-policy.json","status":"renamed"}]]'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES_JSON="$files" STUB_CHANGED_COUNT=2 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 11 ]
+  echo "$output" | grep -q 'policies/qa-approval-policy.json'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3b: duplicate filename across REST pages → exit 11 (fail closed)" {
+  files="$(jq -nc '
+    ([range(1; 101) | {filename: ("src/file-" + tostring + ".ts"), status: "modified"}]) as $page1
+    | [$page1, [{filename: "src/file-1.ts", status: "modified"}]]')"
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES_JSON="$files" STUB_CHANGED_COUNT=101 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 11 ]
+  echo "$output" | grep -q 'duplicate'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3b: empty filename in REST row → exit 11 (fail closed)" {
+  files='[[{"filename":"","status":"modified"}]]'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES_JSON="$files" STUB_CHANGED_COUNT=1 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 11 ]
+  echo "$output" | grep -q 'parse'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3b: empty previous_filename on renamed REST row → exit 11 (fail closed)" {
+  files='[[{"filename":"archive/policy.json","previous_filename":"","status":"renamed"}]]'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES_JSON="$files" STUB_CHANGED_COUNT=1 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 11 ]
+  echo "$output" | grep -q 'parse'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3b: unknown REST file status → exit 11 (fail closed)" {
+  files='[[{"filename":"src/app.ts","status":"mystery"}]]'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES_JSON="$files" STUB_CHANGED_COUNT=1 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 11 ]
+  echo "$output" | grep -q 'parse'
   ! grep -q '^approve$' "$STUB_CALLS"
 }
 
