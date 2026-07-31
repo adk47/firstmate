@@ -1,13 +1,36 @@
 # Handover: catalog-admin lane retention + refresh inflow (H-DevOps)
 
-**Status: PREVENTION, not an incident.** Nothing is on fire. `TOTAL-LAG` on
-`industry-proc-catalog-admin-prod` was 76,295 on 2026-07-27 and **7,870** on
-2026-07-28T17:12Z — the lane drained ~90% on its own. This is a request to close
-a structural gap so the failure cannot recur, at operator convenience.
+**Status: PREVENTION, not an incident.** Nothing is on fire. This is a request to
+close a structural gap so a silent-loss failure cannot recur, at operator
+convenience.
 
-Prepared 2026-07-28 by Nick. Two config changes, both on OVH prod, both
-reversible. Everything below was measured, not inferred; where a claim is
-second-hand it says so.
+Prepared 2026-07-28 by Nick, **re-measured 2026-07-31**. Two config changes, both
+on OVH prod, both reversible. Everything below was measured, not inferred; where a
+claim is second-hand it says so.
+
+### Current state, measured 2026-07-31T14:2xZ
+
+| | 2026-07-27 | 2026-07-28 | **2026-07-31** |
+|---|---|---|---|
+| `TOTAL-LAG` | 76,295 | 7,870 | **25,082** |
+| topic partitions | 9 | 9 | **27** |
+| prod replicas | 9 | 9 | **20** |
+| `retention.ms` | 7d | 7d | **7d — B1 still not applied** |
+
+**Lag tripled, but no new data was lost.** `LOG-START-OFFSET` on p0/p1/p2 is
+frozen at exactly **86085 / 106218 / 90207** — unchanged since 2026-07-27 — and
+partitions 3–26 have a start offset of **0**, i.e. retention has deleted nothing
+there at all. The silent-loss mechanism has not fired in four days.
+
+**Someone already applied a throughput fix** (partitions 9 → 27, replicas 9 → 20,
+memory limit 16Gi → 28Gi), and that is why the frontier stopped advancing. Credit
+where due; it also invalidates one of our earlier recommendations — see "What NOT
+to do" item 3, corrected below.
+
+**Still unapplied and still worth doing:** B1 (retention) and B2 (refresh
+debounce). `KAFKA_POLL_HOT_*` remain unset (both default 1), and `QUEUE_CATALOG` /
+`QUEUE_CATALOG_HIGH` still both point at this deployment's own topic, so the
+self-amplification loop described under "Durable fix" is intact.
 
 ## Why it matters
 
@@ -45,10 +68,12 @@ kubectl -n queuing exec redpanda-v2-0 -c redpanda -- \
 `rpk topic create … || echo TOPIC_ALREADY_EXISTS` and **exits 0**, so editing it
 changes nothing on a live topic. Please update it anyway (add an explicit
 `alter-config` line) so a rebuild-from-scratch is correct — and while there, the
-manifest still says `--partitions 3` when the live topic has **9**.
+manifest still says `--partitions 3` when the live topic now has **27**.
 
-**Verify:** `LOG-START-OFFSET` on p0/p1/p2 frozen at 86085 / 106218 / 90207 over
-48h.
+**Verify:** `LOG-START-OFFSET` on p0/p1/p2 stays frozen at 86085 / 106218 / 90207
+over 48h, and partitions 3-26 stay at 0. (Those values have already held since
+2026-07-27, so this confirms the change did no harm rather than proving it fixed
+something — the fix is that a FUTURE backlog cannot outrun retention.)
 
 ## B2 — cut refresh inflow at the source
 
@@ -68,8 +93,9 @@ switch because it keeps #1385's staleness fix while cutting enqueue rate up to
 ~288× for hot profiles.
 
 **Rollout caveat:** in-flight tasks run 820–1362 s and `executor.shutdown(wait=True)`
-blocks on them, while `terminationGracePeriodSeconds` is unset (30 s default) →
-SIGKILL mid-work. Raise the grace period, use `maxUnavailable: 1`.
+blocks on them, while `terminationGracePeriodSeconds` is now explicitly **30 s**
+(verified 2026-07-31) → SIGKILL mid-work. Raise the grace period, use
+`maxUnavailable: 1`.
 
 **Verify:** refresh share of the topic head drops from ~25–39% to single digits;
 `TOTAL-LAG` continues falling.
@@ -86,14 +112,21 @@ at ≥45 min — it will race manual work. Confirm quiet via `/root/wedge-eviden
    unaudited and recovers nothing.
 2. **Do not raise either concurrency knob alone.** Per-pod concurrency is
    `min(KAFKA_POLL_HOT_WORKERS, owned_partitions × KAFKA_POLL_HOT_INFLIGHT)`
-   (`config.py:285-286`); with 9 pods / 9 partitions each pod owns exactly 1, so
-   either knob by itself is a no-op. Raising **both** exhausts `PG_MAX_CONNECTIONS=5`
-   (SQLAlchemy pool derives to 5+2) and reintroduces the whale-profile OOM crashloop
-   that pinned this lane at 0 members on 2026-06-13.
-3. **Do not expand 9 → 12 partitions.** With 9 replicas the `range` assignor would
-   give 3 pods two partitions each, re-coupling them and reintroducing head-of-line
-   blocking. (The manifest's stated key-remapping rationale is also wrong —
-   `p.produce()` is called with **no `key=`**; worth correcting when you touch it.)
+   (`config.py:285-286`). Both are unset (default 1), so `WORKERS` is the binding
+   term and raising `INFLIGHT` alone is still a no-op — that holds at 27/20 just as
+   it did at 9/9. Raising **both** exhausts `PG_MAX_CONNECTIONS=5` (SQLAlchemy pool
+   derives to 5+2, still unchanged) and risks the whale-profile OOM crashloop that
+   pinned this lane at 0 members on 2026-06-13 — though the memory limit is now
+   28Gi, up from the 16Gi in force then, so that headroom is worth re-measuring
+   before assuming the old ceiling.
+3. ~~**Do not expand 9 → 12 partitions.**~~ **Withdrawn 2026-07-31 — this advice
+   was wrong.** The reasoning (an uneven `range` assignment re-couples pods) ignored
+   the more important constraint: a consumer group cannot usefully run more members
+   than partitions, so 9 partitions capped the lane at 9 consumers. The expansion to
+   27 is what allowed scaling to 20 replicas, and the retention frontier stopped
+   advancing as a result. Do not revert it. (The manifest's stated key-remapping
+   rationale is still wrong — `p.produce()` is called with **no `key=`**; worth
+   correcting when you touch the file.)
 4. **Do not set `QUEUE_CREDIT_SYNC_TARGET` here** — syncs cost 0.03 s each. Diverting
    them buries customer-facing credit syncs to fix a problem they do not cause.
 5. **Never route merges to `…_CATALOG_ADMIN_PRIORITY`** — it points at the fastlane
@@ -117,13 +150,13 @@ node-1 watchdog regex, or the new lane is unmonitored.
 
 B1 alone removes the silent-loss mode. This is optional.
 
-## Two open questions
+## Two earlier questions — both resolved, no action needed
 
-1. Is `industry-worker-v2-backlog` intentionally pinned to `20260714-373` while the
-   rest of the fleet moved to `20260727-390`?
-2. `Deploy: Infrastructure` has failed on every core-backend image-tag commit since
-   ≥2026-07-22 with `duplicate entries for key [name="AWS_SQS_INDUSTRY_PROC_RAW_HIGH"]`.
-   The YAML is **clean** (one occurrence per container; `--dry-run=server` exits 0) and
-   the "typed patch object" wording points at server-side-apply managed-field corruption
-   on the live object rather than a file bug — likely needs `--force-conflicts` or a
-   managed-field cleanup. Unrelated to the above.
+Recorded so nobody re-raises them. Verified 2026-07-31:
+
+1. `industry-worker-v2-backlog` was pinned to `20260714-373` while the fleet moved
+   on. **Resolved** — it and `industry-proc-catalog-admin` are both now on
+   `20260731-407`.
+2. `Deploy: Infrastructure` had failed on every core-backend image-tag commit since
+   >=2026-07-22 with `duplicate entries for key [name="AWS_SQS_INDUSTRY_PROC_RAW_HIGH"]`.
+   **Resolved** — the last three runs (2026-07-31 14:26, 14:33, 14:38Z) all succeeded.
