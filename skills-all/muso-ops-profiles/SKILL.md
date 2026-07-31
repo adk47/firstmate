@@ -221,20 +221,30 @@ muso --env prod --json api GET /admin/profile \
   "it's queued behind syncs" is never the explanation.
 - **Still `merged: null` after the grace period — say it plainly** ("the merge was accepted but
   has NOT landed in the catalog") and **do not tell anyone to wait for the lane to drain.**
-  What to do next depends on the state. **This section supersedes the watchdog's page text**:
-  if the page you received still carries the older generic "verify + re-fire" steer, ignore
-  that and follow this — the state-specific verdicts below (which the page names for you once
-  PR #747 lands, classifying the pair and reading the topic's retention frontier) are the
-  authority.
+  What to do next depends on the state. The watchdog page names the state for you (PR #747,
+  live since 2026-07-28): it classifies the pair and reads the topic's retention frontier.
+  The verdicts below are the authority for what to *do* about each.
   - **Half folded** (loser carries `merged.mergedToId` pointing at a *different* survivor) →
     **never re-fire**, catalog-team decision. The API's guards do NOT protect you here: both
     checks in `base_merge_link_operations.py:314-317` test the *survivor*
     (`already merged` / `already merged into a merged object`), so a loser already folded
     elsewhere passes them and gets its `merged_to_id` **silently re-pointed**.
+
+    **First ask whether the REQUEST was right, not just the fold.** Compare the entity
+    *types*: a company folded into a person (or vice versa) is a bad request the catalog
+    correctly declined to honour, not a fold to reconcile. Worked example (2026-07-28):
+    `695575be` "Drop Dead Productions" and `8ce80ba2` "DROP DEAD PRODUCTIONS INC" were
+    requested into `451c4bbc` **"Drew Lehman" — a person**; the catalog instead consolidated
+    both into `d9d61f4a` "Drop Dead Productions Inc", which is the right answer. The
+    disposition there is to reject the request and tell the requester, **not** to escalate a
+    reconciliation. Check names and credit counts on both sides before you escalate anything.
   - **Malformed loser id** (e.g. a 35-char UUID) → no catalog row exists; it will never land
     however often it is fired. Fix the request at source.
-  - **Message GONE (older than the retention frontier)** → the dominant loss mode, root-caused
-    2026-07-27 (39 merges lost 2026-06-02 → 07-26). The catalog-admin topic's *observed*
+  - **Message GONE (older than the retention frontier)** → root-caused 2026-07-27. Real but
+    **rare**: the first sweep with the #747 classifier live (2026-07-28) found 5 unlanded
+    pairs out of 511 examined, two of them in this state. An earlier "39 lost merges" figure
+    came from the pre-#747 detector, which could not recognise a third-canonical collapse and
+    so alerted on pairs that were fine — do not quote it. The catalog-admin topic's *observed*
     retention is ~14.8d (configured `retention.ms` is 7d; deletion is per closed segment,
     `segment.ms` 14d) — as long as the lane's own drain ETA — so messages are **deleted before
     the worker ever consumes them**, and `redpanda.remote.delete=true` means the tiered copies

@@ -354,10 +354,10 @@ NO_THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}
   ! grep -q '^approve$' "$STUB_CALLS"
 }
 
-@test "guard8: WARN + QA-filed marker thread RESOLVED by a human → approves (resolution is the ack)" {
+@test "guard8: WARN + QA-filed marker thread resolved by an INDEPENDENT human → approves (resolution is the ack)" {
   ri_report WARN
   THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
-    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** PR deletes recent main work","author":{"login":"adk47"}}]}}
+    {"isResolved":true,"resolvedBy":{"login":"aaronkaufman"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** PR deletes recent main work","author":{"login":"adk47"}}]}}
   ]}}}}}'
   STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
     run "$SCRIPT" core-backend 123 "$NICK"
@@ -396,6 +396,112 @@ NO_THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}
     run "$SCRIPT" core-backend 123 "$NICK"
   [ "$status" -eq 10 ]
   ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# --- Guard 8: staged rollout of the independence requirement -----------------
+# The rule ships DISABLED so the PR introducing it is not judged against itself
+# (a head created before the rule existed can never satisfy it). Default must be
+# byte-for-byte the previous behaviour; these two tests pin both halves of that.
+
+@test "guard8 rollout: flag OFF (default) → an author-resolved marker still approves" {
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"nsollazzo"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** PR deletes recent main work","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 rollout: flag OFF still requires the marker thread to EXIST" {
+  # Disabling the independence check must not disable the gate itself.
+  ri_report WARN
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$NO_THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# --- Guard 8: the acknowledgment must come from an INDEPENDENT human ---------
+# Observed on hydra#747: all eight REBASE WARNING threads were filed by the bot
+# and resolved by the PR author, so the gate passed while nobody but the author
+# had ever looked. The skill said "never resolve it yourself"; prose is not
+# enforcement. These tests are that enforcement.
+
+@test "guard8: marker thread resolved by the PR AUTHOR → exit 10 (self-certification)" {
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"nsollazzo"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** PR deletes recent main work","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  echo "$output" | grep -q 'independent human'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: author self-resolves under a DIFFERENT-CASE login → still exit 10" {
+  # GitHub logins are case-insensitive; a case-flipped resolver must not slip past.
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"NSollazzo"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** x","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: marker thread resolved by the BOT ITSELF → exit 10 (QA cannot clear its own finding)" {
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"adk47"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** x","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: bot resolving under the [bot]-suffixed login form → still exit 10" {
+  # The resolver is normalised through the same norm/bot_logins set as the filer,
+  # so app/x, x[bot] and x are all recognised as the bot.
+  test_policy "$DEFAULT_POLICY"
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"muso-qa-bot[bot]"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** x","author":{"login":"muso-qa-bot"}}]}}
+  ]}}}}}'
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: resolvedBy absent on a resolved thread → exit 10 (no resolver, no ack)" {
+  # GraphQL can report isResolved with a null resolvedBy; that is not an ack.
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":null,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** x","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: two marker threads, only one independently resolved → approves" {
+  # A re-filed marker (same head) must not be blocked by a stale author-resolved
+  # sibling: one genuine independent ack is enough.
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"nsollazzo"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** first pass","author":{"login":"adk47"}}]}},
+    {"isResolved":true,"resolvedBy":{"login":"aaronkaufman"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** re-filed","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
 }
 
 @test "guard8: report status ERROR → exit 10 (rebase state unverified, fail closed)" {
@@ -625,7 +731,7 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
   test_policy "$DEFAULT_POLICY"
   ri_report WARN
   THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
-    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** rebase dropped work","author":{"login":"muso-qa-bot"}}]}}
+    {"isResolved":true,"resolvedBy":{"login":"aaronkaufman"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** rebase dropped work","author":{"login":"muso-qa-bot"}}]}}
   ]}}}}}'
   STUB_ME="" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
     run "$SCRIPT" core-backend 123 "$NICK"
@@ -640,7 +746,7 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
   test_policy "$DEFAULT_POLICY"
   ri_report WARN
   THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
-    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** filed pre-cutover","author":{"login":"adk47"}}]}}
+    {"isResolved":true,"resolvedBy":{"login":"aaronkaufman"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** filed pre-cutover","author":{"login":"adk47"}}]}}
   ]}}}}}'
   STUB_ME="muso-qa-bot[bot]" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
     run "$SCRIPT" core-backend 123 "$NICK"
@@ -652,7 +758,7 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
   test_policy "$DEFAULT_POLICY"
   ri_report WARN
   THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
-    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** x","author":{"login":"muso-qa-bot"}}]}}
+    {"isResolved":true,"resolvedBy":{"login":"aaronkaufman"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** x","author":{"login":"muso-qa-bot"}}]}}
   ]}}}}}'
   STUB_ME="muso-qa-bot[bot]" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
     run "$SCRIPT" core-backend 123 "$NICK"

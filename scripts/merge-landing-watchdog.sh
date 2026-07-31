@@ -525,8 +525,11 @@ if new_partial:
                    "NOT error, it SILENTLY SUCCEEDS: both merge guards test the survivor "
                    "(`base_merge_link_operations.py:314-317`), so a loser already folded "
                    "elsewhere passes them and has its `merged_to_id` re-pointed away from where "
-                   "it actually landed. Hand to the catalog team (Aron / Oleg) for a manual "
-                   "reconciliation.",
+                   "it actually landed. FIRST check whether the REQUEST was right: compare the "
+                   "entity types — a company requested into a person (or vice versa) is a bad "
+                   "request the catalog correctly declined, so reject it and tell the requester "
+                   "rather than reconciling. Only if the request was sound, hand to the catalog "
+                   "team (Aron / Oleg) for a manual reconciliation.",
                    "partially folded", "≥")
 if new_invalid:
     lines += block(new_invalid,

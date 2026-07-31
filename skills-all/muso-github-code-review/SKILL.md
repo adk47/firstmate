@@ -319,6 +319,24 @@ cat "/var/lib/hydra-qa/rebase-integrity/${OWNER}__${REPO}-pr-${PR}-<headRefOid>.
      the acknowledgment — that is what "flag, don't block; force a human review"
      means mechanically. This extends the "never resolve a thread you have not
      confirmed fixed" rule.
+
+     > **Currently in force: exactly the sentence above.** Any human resolving the
+     > thread is a valid acknowledgment, **and the PR author counts as that
+     > human.** The stricter independence rule described below is **shipped
+     > DISABLED** (`QA_REBASE_ACK_REQUIRE_INDEPENDENT` defaults to `0`), so it is
+     > not policy yet and must not be applied when reviewing any PR — including
+     > the one that introduces it. Judge acknowledgments by what is deployed and
+     > enabled, never by what a diff proposes.
+
+     **Planned, behind a flag.** Guard 8 can read `resolvedBy` and refuse
+     (exit 10) unless the resolver is a human who is neither the PR author nor the
+     bot, rejecting a self-cleared warning mechanically rather than merely
+     discouraging it. It ships off and gets enabled in a follow-up once the code
+     is on node-8. Rolling it out in one step would be self-defeating: the PR
+     carrying the rule would be judged against it, and no head created before the
+     rule existed could satisfy it. Motivation: until 2026-07-28 the guard checked
+     only that the thread existed, and hydra#747 passed it with all eight warnings
+     self-resolved by their author.
   4. Verdict impact: an open rebase warning is a 🟡 blocker → **NO-GO** until a
      human resolves the thread.
 - **`status: "ERROR"`** → the analyzer could not verify the rebase. Say "rebase

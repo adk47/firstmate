@@ -248,6 +248,8 @@ bad_checks="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo"
 # state independently of the agent's GO verdict -- but note it TRUSTS isResolved,
 # which QA itself can set. It catches an UN-resolved blocker, not a wrongly-resolved
 # one; mechanical fix-verification is Part B (the CTO fix-and-re-review loop).
+# For the one finding where the resolver's identity IS the signal — the rebase
+# warning — Guard 8 below additionally checks resolvedBy.
 # Fail closed: if threads can't be read, refuse.
 read -r -d '' gql <<'GQL' || true
 query($owner:String!,$repo:String!,$pr:Int!){
@@ -255,7 +257,7 @@ query($owner:String!,$repo:String!,$pr:Int!){
     pullRequest(number:$pr){
       reviewThreads(first:100){
         pageInfo{ hasNextPage }
-        nodes{ isResolved comments(first:1){ nodes{ body author{ login } } } }
+        nodes{ isResolved resolvedBy{ login } comments(first:1){ nodes{ body author{ login } } } }
       }
     }
   }
@@ -284,9 +286,13 @@ open_blockers="$("$QA_GH" --repo "$owner/$repo" api graphql -f query="$gql" -f o
 #                     external repos it is genuine no-data → pass
 #   CLEAN           → pass
 #   WARN            → a review thread whose first comment carries the literal
-#                     "REBASE WARNING [<head sha7>]" marker must EXIST (resolved
-#                     or not — Guard 7 already blocks while it is unresolved; a
-#                     human resolving it is the acknowledgment)
+#                     "REBASE WARNING [<head sha7>]" marker must EXIST, be filed
+#                     by the bot, AND be resolved by a human who is neither the
+#                     PR author nor the bot. The acknowledgment is worth only the
+#                     independent eyes behind it: an author clearing their own
+#                     warning is self-certification, which is what this gate
+#                     exists to prevent (observed on hydra#747 — all eight
+#                     threads filed by the bot, all eight resolved by the author).
 #   ERROR/unreadable→ rebase state unverified → refuse (fail closed)
 # The sha7 in the marker forces re-filing per push; a new push lands with the
 # new head's checks pending, so Guard 6 covers the report-not-yet-written race.
@@ -324,7 +330,7 @@ else
     CLEAN) : ;;
     WARN)
       ri_marker="REBASE WARNING [${head_oid:0:7}]"
-      # Same reviewThreads query as Guard 7, counting threads that carry the
+      # Same reviewThreads query as Guard 7, reading the threads that carry the
       # marker AND were filed by the bot — a marker comment posted by anyone else
       # (e.g. the PR author pre-empting the finding) must not satisfy this gate.
       # Match against the whole bot_logins SET rather than one login: GraphQL
@@ -333,22 +339,64 @@ else
       # kill-switch rollback) carry threads filed under the host account. Testing
       # one value would silently match nothing and refuse every WARN head.
       # Fail closed on unreadable threads or a second page.
-      ri_filed="$("$QA_GH" --repo "$owner/$repo" api graphql -f query="$gql" -f owner="$owner" -f repo="$repo" -F pr="$pr" \
-        | jq -r --arg marker "$ri_marker" --argjson logins "$bot_logins_json" \
+      # One line per bot-filed marker thread: "<OK|SKIP> <resolver-or-unresolved>".
+      # OK means an independent human closed it; the resolver identity is compared
+      # through the same norm/$logins set as the filer, so a bot resolving under
+      # any of its three login spellings is still recognised as the bot.
+      #
+      # We do NOT also assert `resolvedBy.__typename == "User"`. That looks like a
+      # missing defence against an unlisted GitHub App resolving the thread, but
+      # PullRequestReviewThread.resolvedBy is typed `User` (a concrete OBJECT), not
+      # `Actor` — `Bot` implements Actor/Node/UniformResourceLocatable and is a
+      # DIFFERENT type, so the schema cannot produce one here. GitHub rejects the
+      # query at validation:
+      #   resolvedBy { ... on Bot { login } }
+      #   -> "Fragment on Bot can't be spread inside User" (parentName: "User")
+      # The check would therefore be unfalsifiable, and any test for it would pass
+      # with the check reverted — a vacuous assertion in a security gate. Were the
+      # type ever to loosen, a non-User actor could only arrive as null, which the
+      # jq maps to NONE -> SKIP -> exit 10 (covered by the "resolvedBy absent"
+      # test). The residual risk the type system CANNOT see is a machine USER
+      # account on a PAT; `bot_logins` is the control for that, which is why the
+      # resolver is tested against that set rather than against its type.
+      ri_threads="$("$QA_GH" --repo "$owner/$repo" api graphql -f query="$gql" -f owner="$owner" -f repo="$repo" -F pr="$pr" \
+        | jq -r --arg marker "$ri_marker" --arg author "$author" --argjson logins "$bot_logins_json" \
             'def norm: ascii_downcase | sub("^app/";"") | sub("\\[bot\\]$";"");
+             def isbot($l): ($logins | map(norm) | index($l)) != null;
              .data.repository.pullRequest.reviewThreads
                | if .pageInfo.hasNextPage then "MORE"
-                 else ([.nodes[]? | (.comments.nodes[0] // {})
-                        | select(((.body // "") | contains($marker))
-                                 and (((.author.login // "") | norm) as $a
-                                      | ($logins | map(norm) | index($a)) != null))]
-                       | length | tostring)
+                 else ([.nodes[]?
+                        | select(((.comments.nodes[0].body // "") | contains($marker))
+                                 and (((.comments.nodes[0].author.login // "") | norm) as $a
+                                      | isbot($a)))
+                        | ((.resolvedBy.login // "") | norm) as $r
+                        | (if (.isResolved == true) and ($r != "")
+                                and ($r != ($author | norm)) and ((isbot($r)) | not)
+                           then "OK" else "SKIP" end)
+                          + " " + (.resolvedBy.login // "unresolved")]
+                       | join("\n"))
                  end' \
         2>/dev/null || echo "ERR")"
-      if [ "$ri_filed" = "0" ]; then
+      case "$ri_threads" in
+        MORE|ERR)
+          die 10 "cannot verify the REBASE WARNING thread for $owner/$repo#$pr (threads unreadable or >100: $ri_threads) — refusing (fail closed)." ;;
+      esac
+      [ -n "$ri_threads" ] || \
         die 10 "rebase-integrity report for ${head_oid:0:7} is WARN but no '$ri_marker' review thread exists — file the finding (muso-github-code-review Step 3d) before approving."
-      elif ! [[ "$ri_filed" =~ ^[0-9]+$ ]]; then
-        die 10 "cannot verify the REBASE WARNING thread for $owner/$repo#$pr (threads unreadable or >100: $ri_filed) — refusing (fail closed)."
+      # STAGED ROLLOUT. Tightening an approval gate in one shot is a trap: the very
+      # PR that ships the rule is judged against it, and no head created before the
+      # rule existed can satisfy it — the change becomes unmergeable by
+      # construction. So the independence requirement ships DISABLED and is turned
+      # on by config once this is deployed. Default (0) is byte-for-byte the
+      # previous behaviour: the marker thread must exist, and Guard 7 above blocks
+      # while it is unresolved. Flip QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 in the
+      # follow-up (see muso-github-code-review SKILL.md "Scope") to require that
+      # the resolver be a human who is neither the PR author nor the bot.
+      if [ "${QA_REBASE_ACK_REQUIRE_INDEPENDENT:-0}" = "1" ]; then
+        if ! printf '%s\n' "$ri_threads" | grep -q '^OK '; then
+          ri_seen="$(printf '%s\n' "$ri_threads" | sed 's/^SKIP /rejected:/' | paste -sd' ' -)"
+          die 10 "the '$ri_marker' thread for $owner/$repo#$pr was never acknowledged by an independent human ($ri_seen) — neither the PR author ($author) nor the bot can clear its own rebase warning; ask another reviewer to resolve the thread."
+        fi
       fi
       ;;
     *) die 10 "rebase-integrity report for ${head_oid:0:7} is '$ri_status' — rebase state unverified; refusing to approve (fail closed)." ;;
