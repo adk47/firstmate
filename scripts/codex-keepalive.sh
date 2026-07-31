@@ -180,7 +180,7 @@ _cap_hits() {
 # _rotated_recently — true if the rotate stamp is younger than the cap window.
 # Right after a rotation the OLD signature lines are still inside the journal
 # window; re-triggering on them would burn the rotate cooldown and false-page
-# "both accounts capped".
+# "no rotation target left".
 _rotated_recently() {
   local last now
   [ -r "$CODEX_ROTATE_STAMP" ] || return 1
@@ -300,16 +300,19 @@ _check_usage_cap() {
     0) log "cap: auto-rotation kicked (the rotate script pages the outcome)" ;;
     3|7)
       # 3 = rotate refused on cooldown while the signature is still live (we
-      # already switched recently and the other account is capping too);
-      # 7 = the standby is KNOWN-capped per its archived snapshot. Either way:
-      # both subscriptions are spent and the fleet rides the OpenRouter rung.
+      # already switched recently and the account we landed on is capping too);
+      # 7 = every alternate is KNOWN-capped per its archived snapshot. Either
+      # way there is no viable rotation target and the fleet rides the
+      # OpenRouter rung. NOTE: the fleet has THREE linked codex accounts as of
+      # 2026-07-28, so this is "no candidate left", not "both are spent" —
+      # rotate enumerates canonical openai-codex profiles dynamically.
       stamp="$KEEPALIVE_STATE_DIR/codex-keepalive-bothcapped-cooldown"
       if _cooldown_ok "$stamp" "$COOLDOWN_MIN"; then
-        slack_notify ":no_entry: *Codex usage cap on BOTH accounts* — the cap signature is live and rotation cannot help ($( [ "$rc" -eq 7 ] && echo "the standby is known-capped per its archived quota snapshot" || echo "a rotation already ran recently" )). Fleet rides the \`openrouter/openai/gpt-5.6-luna\` fallback rung (paid api-key route) until a subscription window resets. $(_earliest_reset_note) Quotas: \`/opt/hydra/scripts/codex-usage-report.sh\`; manual override: \`/opt/hydra/scripts/lib/codex-account-rotate.sh --to <email> --force\`."
+        slack_notify ":no_entry: *Codex usage cap — no rotation target left* — the cap signature is live and rotation cannot help ($( [ "$rc" -eq 7 ] && echo "every alternate account is known-capped per its archived quota snapshot" || echo "a rotation already ran recently" )). Fleet rides the \`openrouter/openai/gpt-5.6-luna\` fallback rung (paid api-key route) until a subscription window resets. $(_earliest_reset_note) Quotas: \`/opt/hydra/scripts/codex-usage-report.sh\`; manual override: \`/opt/hydra/scripts/lib/codex-account-rotate.sh --to <email> --force\`."
         date +%s > "$stamp"
-        log "cap: paged #clio_devops (both accounts capped, rc=$rc)"
+        log "cap: paged #clio_devops (no viable rotation target, rc=$rc)"
       else
-        log "cap: both-capped (rc=$rc) but page within its own cooldown — not re-paging"
+        log "cap: no rotation target (rc=$rc) but page within its own cooldown — not re-paging"
       fi ;;
     4)
       stamp="$KEEPALIVE_STATE_DIR/codex-keepalive-nostandby-cooldown"

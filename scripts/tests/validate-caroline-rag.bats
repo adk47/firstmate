@@ -27,14 +27,26 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 # search` emits HIT (a line of basenames) so every assert grep matches; empty HIT
 # => No matches. Pass "no-dreaming" as $2 to omit the "Dreaming: off" line (to
 # exercise the profile-scoped dreaming assertion).
+# $3 = provider line override. Defaults to the real node-8 shape:
+#   Memory Search (support)
+#   Provider: openai (requested: openai)
+# The script's environment guard keys on `^Provider:`, so the stub MUST carry it
+# or every suite aborts (exit 2) before reaching its assertions. Pass "none" to
+# model an unconfigured profile (the wrong-host case) and "" to model the line
+# being absent entirely.
 write_openclaw_stub() {
   local hit="$1" dreaming_line="Dreaming: off"
+  local provider_line="Provider: openai (requested: openai)"
   [ "${2:-}" = "no-dreaming" ] && dreaming_line=""
+  case "${3-unset}" in
+    none) provider_line="Provider: none (requested: auto)" ;;
+    "")   provider_line="" ;;
+  esac
   cat > "$TEST_TMPDIR/bin/openclaw" <<STUB
 #!/usr/bin/env bash
 args="\$*"
 if [[ "\$args" == *"memory status"* ]]; then
-  printf '%s\n' "Embeddings: ready" "Vector store: ready" "$dreaming_line" "Issues:"
+  printf '%s\n' "$provider_line" "Embeddings: ready" "Vector store: ready" "$dreaming_line" "Issues:"
 elif [[ "\$args" == *"memory search"* ]]; then
   if [ -n "$hit" ]; then echo "  [0.70] $hit :: chunk"; else echo "No matches"; fi
 fi
@@ -83,4 +95,27 @@ STUB
   run env PROFILE=edge AGENT=support "$SCRIPT"
   [ "$status" -eq 1 ]
   [[ "$output" == *"dreaming not reporting off"* ]]
+}
+
+# ── environment guard ────────────────────────────────────────────────────────
+# Regression cover for the false-alarm class this guard exists to kill: run on a
+# host where the profile is unconfigured and every positive-marker grep misses,
+# so the script used to report five CONTENT failures plus a "run memory index
+# --force" hint that could not possibly help. It must abort instead.
+
+@test "guard: 'Provider: none' aborts (exit 2), does not report content failures" {
+  write_openclaw_stub "$ALL_HITS" "" none
+  run env PROFILE=edge AGENT=support "$SCRIPT"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"no embedding provider"* ]]
+  # must NOT masquerade as a content/index problem
+  [[ "$output" != *"embeddings not ready"* ]]
+  [[ "$output" != *"memory index --force"* ]]
+}
+
+@test "guard: a missing Provider line aborts (exit 2)" {
+  write_openclaw_stub "$ALL_HITS" "" ""
+  run env PROFILE=edge AGENT=support "$SCRIPT"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"no embedding provider"* ]]
 }

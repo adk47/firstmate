@@ -31,6 +31,26 @@ echo "Validating Caroline RAG on profile=$PROFILE agent=$AGENT..."
 # 1. memorySearch enabled + provider ready
 status_output=$(openclaw --profile "$PROFILE" memory status --agent "$AGENT" --deep 2>&1 || true)
 
+# Environment guard. Every check below greps for a positive marker, so an
+# unconfigured profile makes ALL of them miss and the script confidently
+# reports content failures plus a "run memory index --force" hint that cannot
+# possibly help. That is the opposite of fail-loud: it manufactures a
+# customer-facing-sounding incident out of running the wrong host.
+#
+# This is a post-deploy smoke test for the LIVE gateway and only means anything
+# on node-8. `Provider: none` means memorySearch resolved no embedding provider
+# at all -- an environment/config problem, never an index-content one.
+if ! echo "$status_output" | grep -q "^Provider:" \
+   || echo "$status_output" | grep -q "^Provider: none"; then
+  echo "ABORT: memorySearch reports no embedding provider for $PROFILE/$AGENT." >&2
+  echo "       This is an environment/config problem, NOT a stale index --" >&2
+  echo "       reindexing cannot fix it. Most common cause: this script was" >&2
+  echo "       run somewhere other than node-8, where the profile is empty." >&2
+  echo "       Observed:" >&2
+  echo "$status_output" | sed -n '1,6p' | sed 's/^/         /' >&2
+  exit 2
+fi
+
 if echo "$status_output" | grep -q "Embeddings: ready"; then
   pass "embeddings ready"
 else

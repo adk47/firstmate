@@ -255,13 +255,16 @@ JSON
   [[ "$output" == *"rotation ran"* ]]
 }
 
-@test "rotate refuses on cooldown (rc=3) → both-accounts-capped page, cooldown-limited" {
+@test "rotate refuses on cooldown (rc=3) → no-rotation-target page, cooldown-limited" {
   _set_remaining_min 10080
   _set_cap_signature 1
   echo 3 > "$TEST_TMPDIR/state/rotate-rc"
   run "$SCRIPT"
   [ "$status" -eq 0 ]
-  grep -q "BOTH accounts" "$PAGE_LOG"
+  # Wording is "no rotation target left", not "BOTH accounts": the fleet has
+  # THREE linked codex accounts as of 2026-07-28, so rc=3/rc=7 mean "no viable
+  # candidate remains", not "both are spent".
+  grep -q "no rotation target left" "$PAGE_LOG"
   # second run inside the page cooldown must not re-page
   : > "$PAGE_LOG"
   run "$SCRIPT"
@@ -287,7 +290,7 @@ JSON
   [ -s "$PAGE_LOG" ]
 }
 
-@test "rotate reports standby known-capped (rc=7) → both-capped page with reset ETA" {
+@test "rotate reports standby known-capped (rc=7) → no-rotation-target page with reset ETA" {
   _set_remaining_min 10080
   _set_cap_signature 1
   echo 7 > "$TEST_TMPDIR/state/rotate-rc"
@@ -297,7 +300,7 @@ JSON
     > "$CODEX_USAGE_ARCHIVE_DIR/openai-codex_x.snapshot.tsv"
   run "$SCRIPT"
   [ "$status" -eq 0 ]
-  grep -q "BOTH accounts" "$PAGE_LOG"
+  grep -q "no rotation target left" "$PAGE_LOG"
   grep -q "known-capped" "$PAGE_LOG"
   grep -q "Earliest known quota reset: in 1d" "$PAGE_LOG"
 }

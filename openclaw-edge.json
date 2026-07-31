@@ -192,13 +192,15 @@
       },
       "maxConcurrent": 10,
       "subagents": {
-        "maxConcurrent": 8
+        "maxConcurrent": 8,
+        "runTimeoutSeconds": 1800
       },
       "timeoutSeconds": 900
     },
     "list": [
       {
         "id": "support",
+        "bootstrapMaxChars": 50000,
         "default": true,
         "workspace": "/opt/hydra/workspaces/support",
         "model": {

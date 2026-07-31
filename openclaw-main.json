@@ -275,7 +275,8 @@
       },
       "maxConcurrent": 20,
       "subagents": {
-        "maxConcurrent": 24
+        "maxConcurrent": 24,
+        "runTimeoutSeconds": 1800
       },
       "timeoutSeconds": 900
     },

@@ -13,7 +13,6 @@ _Every system I have access to, what it does, and who can use it. Load this EVER
 | **GitHub** | Code repos, PRs, issues | Read-only default | Aaron authorizes writes | `gh` CLI, github skill |
 | **ClickUp** | Task management | Read-only | — | `muso-clickup` skill |
 | **Amplitude** | Product analytics | Read-only | — | `muso-amplitude` skill |
-| **ChartMogul (retired)** | Historical reference only; never use for current metrics | No active access | — | `muso-chartmogul` redirect |
 | **ProfitWell** | Subscription metrics | Read-only | — | `muso-profitwell` skill |
 | **Klaviyo** | Email/SMS marketing | Read + Write | Aaron+Nick=write, others=read | `muso-klaviyo` skill |
 | **Intercom** | Customer support/messaging | Read + Write | Aaron=write, others=read | `muso-intercom` skill |
@@ -53,9 +52,6 @@ _Every system I have access to, what it does, and who can use it. Load this EVER
 |-------|---------|
 | `muso-clio` | Complete Muso.AI knowledge base |
 | `muso-query-writer` | Trino SQL queries against the data lake |
-| `muso-architect` | System architecture guidance |
-| `muso-data-expert` | Data model/schema expertise |
-| `muso-devops` | Infrastructure/Terraform/CI-CD |
 | `dev-activity-report` | Daily GitHub commit reports |
 | `muso-refund-investigation` | Refund decision support |
 | `muso-refund-processor` | End-to-end refund execution (Stripe write) |

@@ -143,8 +143,14 @@ How the RUNTIME consumes it depends on the openclaw version:
   `main`. Re-auth MUST land in the canonical `main` store — pass
   `--agent main`. On 7.x, follow ANY re-auth with `codex-auth-sync.sh` (the
   login wrote a store the runtime reads, but canonical + the other derived
-  stores must be reconverged). Both accounts (`aaron@muso.ai`,
-  `aaronkaufman@me.com`) must be logged in.
+  stores must be reconverged). **All THREE accounts** (`aaron@muso.ai`,
+  `aarondkaufman@gmail.com`, `aaronkaufman@me.com`) must be logged in — a
+  third was linked as of 2026-07-28. Verify with
+  `openclaw --profile main models auth list` (expect three `openai:<email>`
+  oauth profiles) and `jq -r '.profiles|keys[]'` on canonical
+  `auth-profiles.json` (expect the same three under `openai-codex:`).
+  Any account missing from EITHER namespace is invisible to that half of the
+  system — see the profile-ID namespace rule below.
 
 This generalizes PR #376 (edge/Caroline symlink self-heal + fail-loud
 codex-health watchdog) to the whole fleet. Prose alone is not enforcement —
