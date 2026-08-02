@@ -39,6 +39,7 @@ case "$1" in
   Muso-AI/H-DevOps) ;;
   Muso-AI/analytics-worker) ;;
   Muso-AI/platform-data-processing) ;;
+  Muso-AI/tests-web-e2e) ;;
   # Add more as repos come into scope, e.g.:
   #   Muso-AI/<repo>) ;;
   *) exit 1 ;;  # unlisted -> fail-closed (caller refuses / skips)

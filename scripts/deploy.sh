@@ -800,6 +800,10 @@ RSYNC_EXCLUDES=(
   --exclude='workspaces/*/MEMORY.md'
   # Agent-created backups directory — never in repo, never overwritten.
   --exclude='workspaces/*/backups/'
+  # Per-PR QA review state (external-pr-review runs write
+  # workspaces/qa/pr-review-<n>.json at runtime). Server-owned; first
+  # flagged by pre-flight 2026-08-02 (pr-review-562.json).
+  --exclude='workspaces/qa/pr-review-*.json'
   # Generated reports (CSVs, PDFs, JSON dumps from agent runs).
   # Convention: agents that produce reports for human consumption
   # write them to workspaces/<agent>/reports/<filename>. They're
