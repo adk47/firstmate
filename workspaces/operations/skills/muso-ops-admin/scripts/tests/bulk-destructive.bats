@@ -166,7 +166,7 @@ seed_destructive_ops() {
 @test "non-DELETE verb is never gated even at threshold" {
     seed_destructive_ops 3
     run bash "$SCRIPT" call PATCH /admin/track/abc/analytics-sources \
-        '{"linkId":"L1","fromTrackId":"T2"}'
+        '{"linkId":"L1"}'
     [[ "$output" != *"MUSO_BULK_DESTRUCTIVE"* ]]
 }
 

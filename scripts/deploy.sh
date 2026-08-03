@@ -66,7 +66,16 @@ source "$SCRIPT_DIR/lib/muso-env-preflight.sh"
 # skills-all/muso-cli skill). Independent release cadence from openclaw;
 # bump deliberately. Installed from the repo's GitHub Release with
 # checksum verification (install_muso below) — never a bare latest.
-MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.10.0}"
+#
+# 0.11.1 carries the `tracks sources` verb group (muso-cli#36), which
+# skills-all/muso-ops-tracks now documents in place of hand-rolled
+# analytics-source payloads. The pin and the skill must move together: with
+# the pin behind, the skill documents verbs the installed CLI does not have.
+# Prod credentials still resolve — v0.11 reads the scoped MUSO_PROD_ADMIN_*
+# pair but keeps the generic MUSO_ADMIN_* as a production-only fallback
+# (internal/auth/env.go), which is what node-8's main.env carries; only
+# `--env dev` fails closed, and node-8 has no dev pair to begin with.
+MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.11.1}"
 
 # Detect if we're running on Node 8 (the HYDRA host)
 if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; then
