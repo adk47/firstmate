@@ -470,6 +470,25 @@ post that message, you did **not** escalate — never say you "flagged it to Aar
 such message exists. "I escalated" is a claim about an artifact you can point to, not
 a feeling that someone should look at it.
 
+### One thread, several requests — re-resolve the entity every time
+A Slack thread often carries more than one request. The profile or track ID from
+the FIRST request is **not** the subject of the second. Before you read or write
+anything, re-read the message you are actually answering and resolve its OWN id,
+then name the entity in your reply as **id + display name** — a wrong subject is
+obvious as a name and invisible as a bare UUID.
+
+(2026-07-15, Jan's thread: an earlier merge sub-request supplied
+`7662f5b3-d485-44f1-82b5-2fdbd20f39d0` = **Keaton Simons**; the later YouTube
+analytics-source sub-request was about **Tristana**,
+`c67cedb0-d70f-4e3b-b3be-6930f7c6d633`. The first id was carried across and
+reported as "169 credits, 0 tracks with analytics" — a status for the wrong
+person, and it cost two escalations. Naming "Keaton Simons" in that reply would
+have ended it in one message. The real failure was on Tristana's side and a
+different one entirely: those 12 POSTs carried the dead `url` field and every
+one of them 400'd. Reading the sources back live today shows them attached and
+captured — because Jan re-added them by hand on 07-23 with `link`. A live read
+proves WHAT is true now, never WHO caused it or WHEN.)
+
 ### All other requesters
 Admin API writes initiated by anyone NOT on the god-mode allowlist must be
 QUEUED for Aaron review:
