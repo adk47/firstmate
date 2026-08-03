@@ -985,6 +985,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # FULL history, not the default depth-1. scripts/tests/credit-gate-probe.bats
+          # reconstructs the real pre-#740 / pre-#750 muso-admin-api.sh from git
+          # (`git show <rev>^:...`) so its negative cases are anchored on gates that
+          # actually regressed, not hand-written mocks. Those revs are absent from a
+          # shallow clone. They resolved for months only because the single long-lived
+          # runner's work dir had accumulated the objects incidentally; adding runners
+          # on 2026-08-03 put the job on a fresh work dir and the fixtures vanished.
+          #
+          # fixture_at now degrades to `skip` rather than a bogus failure, so this is
+          # not about red CI — it is about COVERAGE. A skip silently retires the only
+          # tests proving the probe CAN FAIL, which is precisely the "unverified
+          # becomes a green tick" outcome that file's header exists to prevent. Pin
+          # the depth so those cases actually RUN on every runner, new or old.
+          fetch-depth: 0
 
       - name: Ensure bats + jq installed
         run: |
