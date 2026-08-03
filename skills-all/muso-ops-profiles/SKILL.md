@@ -12,8 +12,13 @@ description: |
   Triggers: "merge profile", "unmerge", "link spotify", "enrich profile", "profile search",
   "find profile", "profile details", "link external", "avatar upload",
   "unlink raw profile", "remove raw profile", "remove spotify link", "remove tidal link"
+
+  For the Collaborators list and collaborations count (including "remove these
+  collaborators"), use `muso-ops-collaborators` — that table is derived from
+  track co-credits and none of the procedures here apply to it.
 depends-on:
   - muso-ops-admin
+  - muso-ops-collaborators
   - muso-ops-audit
   - muso-verify-profile
   - muso-slack-formatter

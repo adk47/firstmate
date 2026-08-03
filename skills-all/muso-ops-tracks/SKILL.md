@@ -265,6 +265,10 @@ If the wrong credits trace to a wrong-artist raw link, consider also unlinking
 that raw profile so re-ingestion can't re-assert them — but see the mixed-raw
 warning in `muso-ops-profiles` → Unlink Raw Profile first.
 
+Credit removals do **not** refresh the profile's Collaborators list — that table
+is derived separately and needs its own rebuild. Finish with
+`muso-ops-collaborators`.
+
 ### Trigger Capture
 
 Force-refresh analytics data for a track:
