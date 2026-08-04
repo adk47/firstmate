@@ -562,6 +562,60 @@ provider) and restart the gateway:
 ssh root@40.160.32.80 "docker restart hydra-sandbox"
 ```
 
+**Mercury Bank API token (Finance):**
+
+Symptom: `HTTP 401 {"errors":{"errorCode":"noTokenInDBButMaybeMalformed"}}` from
+`GET https://api.mercury.com/api/v1/accounts`. That error means "Mercury has no
+record of this token" — a **revocation at the vendor**, not a malformed
+request. Confirm by sending deliberate garbage: it returns the identical 401.
+The Finance agent's daily CIB report and Liza's cash forecasts are blocked
+until it is replaced.
+
+Only a human can fix it — there is no self-heal, because minting a token needs
+the Mercury dashboard:
+
+```bash
+# 1. Mercury dashboard -> Settings -> API tokens -> new READ-ONLY token.
+#    Authorized: Aaron (U7RP6HKUZ) and Liza (U0A8CCTTAAG) via the Finance agent.
+# 2. Install it. `read -rs` keeps the token off the screen AND out of history
+#    (bash historises the command, not what read consumed), and printf is a
+#    builtin so it never appears in argv / `ps`.
+ssh root@40.160.32.80
+read -rsp 'Mercury token: ' MERCURY_TOKEN; echo
+printf 'MERCURY_API_KEY=%s\n' "$MERCURY_TOKEN" \
+  | install -m 600 -o root -g root /dev/stdin /opt/hydra/secrets/mercury.env
+unset MERCURY_TOKEN
+# 3. Verify — exit 0 means Mercury accepted it:
+bash /opt/hydra/scripts/lib/ensure-mercury-token.sh --check
+bash /opt/hydra/scripts/lib/ensure-secret-perms.sh --check
+```
+
+> ⚠️ Do **not** install it with a heredoc (`install ... <<'EOF'` with the token
+> inline). bash's `cmdhist` stores a multi-line command — heredoc body included —
+> as a single history entry, so that form plants the live token in
+> `/root/.bash_history`: another persistent plaintext copy on the same box, which
+> is the whole failure mode this credential already had once.
+
+Detection: `/etc/cron.d/mercury-token-watchdog` runs
+`scripts/mercury-token-watchdog.sh` daily at 08:45 UTC and pages #clio_devops
+(Nick + Aaron) until it is fixed. `scripts/lib/ensure-mercury-token.sh --check`
+is the read-only detector — 0 works / 1 broken / 2 could not evaluate.
+
+The credential lives at `/opt/hydra/secrets/mercury.env` (0600, perms held by
+`ensure-secret-perms.sh`). **Do not move it back under
+`workspaces/finance/.secrets/`**: that tree is inside every agent's sweep radius
+and is rsync-mirrored into the private `Muso-AI/hydra-audit` git repo, which is
+how the previous token leaked verbatim into the cmo/cto/clio session
+transcripts and got committed (2026-08-04).
+
+History — this token has been revoked twice, and the second death went
+unnoticed for ~8 weeks because nothing watched it:
+
+| Token | Worked | Dead by |
+|---|---|---|
+| A | 2026-04-28 → 04-29 | 2026-05-01 |
+| B | 2026-05-24 → 06-10 | 2026-07-13 (surfaced 08-03) |
+
 ---
 
 ### Codex Auth Invalidated / Silent Fallback

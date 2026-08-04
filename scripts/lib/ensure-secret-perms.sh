@@ -27,14 +27,29 @@
 #     (0 clean / 1 violation), used the same way as
 #     ensure-codex-refresh-lock-shared.sh --check.
 #
-# ── Why *.json ───────────────────────────────────────────────────────────────
-# Every file-based secret provider on hydra points at a *.json file in this dir
-# (llm-provider-keys.json = hydra-secrets, google-sa-hydra.json, vault-init.json).
-# The non-secret .gitkeep is intentionally excluded. Add a non-.json secret
-# store here only by widening the glob below — and document why.
+# ── What is guarded: EVERYTHING in the dir except .gitkeep ───────────────────
+# Every file-based openclaw secret provider on hydra points at a *.json file in
+# this dir (llm-provider-keys.json = hydra-secrets, google-sa-hydra.json,
+# vault-init.json), and 2026-08-04 added mercury.env. Rather than grow an
+# extension allow-list a third time, the glob is now deny-everything with the
+# one non-secret placeholder (.gitkeep) exempted — a new secret shape is covered
+# without anyone remembering to widen anything. See list_secrets() below.
+#
+# mercury.env is the Finance agent's read-only Mercury Bank API token. It moved
+# here from /opt/hydra/workspaces/finance/.secrets/ because anything under the workspace
+# tree is inside every agent's sweep radius AND inside the hydra-audit snapshot:
+# the live token had leaked verbatim into the cmo/cto/clio session transcripts
+# and was committed to the private Muso-AI/hydra-audit repo. This dir is
+# rsync-excluded from deploy, gitignored in the repo, and not snapshotted to
+# audit — the only place on the box where a secret stays put. It is read by
+# curl in scripts/lib/ensure-mercury-token.sh, not by openclaw's provider
+# loader, so it is not fail-closed the way the *.json stores are; it is guarded
+# here because "secrets in this dir are 0600" should hold for the whole dir
+# rather than for whichever extension happened to come first.
+#
 #
 # ── Env overrides (used by scripts/tests/ensure-secret-perms.bats) ───────────
-#   HYDRA_SECRETS_DIR   directory holding the *.json secret stores
+#   HYDRA_SECRETS_DIR   directory holding the secret stores
 #                       (default /opt/hydra/secrets).
 #
 # set -uo pipefail (NOT -e): ensure mode must never abort before its exit 0.
@@ -60,13 +75,26 @@ too_open() {
   (( (8#$mode) & 0077 ))
 }
 
-# list_secrets — emit each secret file path, one per line. nullglob so an empty
-# (or absent-of-json) dir yields nothing rather than a literal "*.json".
+# list_secrets — emit each secret file path, one per line.
+#
+# Deny-EVERYTHING, allowing back only the known non-secret placeholder. This
+# used to enumerate extensions (*.json, later *.json + *.env), which is the same
+# privilege-widening shape the .gitignore in this repo was just moved off: with
+# an allow-list, `secrets/foo.yaml` or `secrets/mercury-token.txt` is silently
+# never re-tightened, and every new secret shape needs someone to remember. The
+# old *.json-only form had exactly that gap for the *.yaml stores the .gitignore
+# had anticipated since day one.
+#
+# nullglob so an empty dir yields nothing rather than a literal "*"; dotglob so
+# a dotted store (`.env`) is not skipped — bash's `*` does not match a leading
+# dot, which would have been a silent hole. Subdirectories are filtered by -f.
 list_secrets() {
-  shopt -s nullglob
+  shopt -s nullglob dotglob
   local f
-  for f in "$SECRETS_DIR"/*.json; do
-    [ -f "$f" ] && printf '%s\n' "$f"
+  for f in "$SECRETS_DIR"/*; do
+    [ -f "$f" ] || continue
+    [ "${f##*/}" = ".gitkeep" ] && continue
+    printf '%s\n' "$f"
   done
 }
 

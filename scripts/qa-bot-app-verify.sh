@@ -66,9 +66,17 @@ if [ "$mode" = "600" ]; then
 else
   bad "$KEYFILE is $mode, expected 600 (run: chmod 600 $KEYFILE)"
 fi
+# ensure-secret-perms.sh guards every file directly inside its secrets dir
+# (deny-everything since 2026-08-04, .gitkeep excepted) — so what matters is
+# LOCATION, not extension. Asserting on the extension was a second copy of a
+# rule that had already drifted once.
 case "$KEYFILE" in
-  *.json) ok "key store is *.json, so ensure-secret-perms.sh covers it" ;;
-  *) bad "key store is not *.json — ensure-secret-perms.sh globs *.json only and will NOT re-tighten it" ;;
+  "${HYDRA_SECRETS_DIR:-/opt/hydra/secrets}"/*/*)
+    bad "key store is in a SUBDIR of the secrets dir — ensure-secret-perms.sh only walks the top level and will NOT re-tighten it" ;;
+  "${HYDRA_SECRETS_DIR:-/opt/hydra/secrets}"/*)
+    ok "key store is directly in the secrets dir, so ensure-secret-perms.sh covers it" ;;
+  *)
+    bad "key store is outside ${HYDRA_SECRETS_DIR:-/opt/hydra/secrets} — ensure-secret-perms.sh will NOT re-tighten it on drift" ;;
 esac
 app_id="$(jq -r '.app_id // empty' "$KEYFILE" 2>/dev/null)"
 if [ -n "$app_id" ]; then
