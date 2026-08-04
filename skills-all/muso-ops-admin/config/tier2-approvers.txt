@@ -8,10 +8,27 @@
 # list narrow — every entry can authorize a hard-to-reverse production
 # write (profile/track merges, deletes, etc.).
 #
-# NOTE: Aaron, Jan, and Nick are ALSO on tier2-godmode-allowlist.txt,
-# which lets them self-approve via --requester alone. This file is the
-# fallback path for delegated approvals where the operator explicitly
-# passes --confirmed-by <handle>.
+# NOTE: two different gates read this file and they do NOT behave the same.
+# Getting this backwards is what made the agent page a human unnecessarily
+# on 2026-07-31, so be precise:
+#
+#   - Tier-2 write gate (profile/track merges, etc.): Aaron, Jan and Nick
+#     self-approve via --requester alone, through the god-mode allowlist
+#     (tier2-godmode-allowlist.txt, operations workspace only).
+#
+#   - Bulk-destructive gate (>10 DELETEs in 15 min): god-mode does NOT
+#     apply. It always requires --confirmed-by <a handle from this file>
+#     AND --approval-msg-id <slack_ts> — including for Aaron, Jan and Nick.
+#
+# So being on this list does not let anyone skip the bulk gate. What
+# satisfies that gate is an explicit human decision naming the specific
+# rows; when the requester is on this list and enumerated the targets,
+# their own message IS that decision and no second human is needed. See
+# muso-ops-admin/SKILL.md section "BULK DESTRUCTIVE GATE".
+#
+# Handles only — the gate matches --confirmed-by literally and does not
+# resolve Slack ids (resolve_slack_to_email is applied to --requester
+# only), so adding a Uxxxxxxxx entry here would not work as expected.
 
 aaron
 aaron@muso.ai

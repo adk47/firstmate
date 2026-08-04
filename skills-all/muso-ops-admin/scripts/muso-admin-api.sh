@@ -31,6 +31,8 @@ REQUESTER_EMAIL=""   # Set via --requester flag
 EVIDENCE_EXCERPT=""  # Set via --evidence-excerpt flag (required for autonomous credit approves)
 CONFIRMED_BY=""      # Set via --confirmed-by flag (required for tier-2 writes — see enforce_tier2_approval_gate)
 APPROVAL_MSG_ID=""   # Set via --approval-msg-id flag (Slack message ID/ts of the in-thread approval — for audit)
+APPROVAL_AUTHOR_ID="" # Set via --approval-author-id flag (Slack user id of the approval message author — for audit, optional)
+APPROVAL_CHANNEL=""  # Set via --approval-channel flag (Slack channel id the approval message is in — for audit, optional)
 
 # Tier-2 enforcement state. Persisted to disk so the reverse-direction guard
 # fires across separate shell invocations (each agent exec is a new shell).
@@ -53,10 +55,12 @@ TIER2_REVERSE_WINDOW_SECS="${TIER2_REVERSE_WINDOW_SECS:-300}"
 # profile's lifetime stream count. This gate caps the blast radius: once
 # BULK_DESTRUCTIVE_THRESHOLD destructive DELETEs land within
 # BULK_DESTRUCTIVE_WINDOW_SECS, every further destructive DELETE is refused
-# unless an explicit second human approval (--confirmed-by + --approval-msg-id)
-# is supplied. Requester identity does NOT bypass this gate — the agent
-# auto-stamps --requester with whoever is in-thread, so it is not evidence
-# that a human reviewed a mass deletion.
+# unless an explicit human DECISION NAMING THOSE ROWS (--confirmed-by +
+# --approval-msg-id) is supplied. It need not come from a SECOND human: when the
+# requester is on the tier-2 approver list AND enumerated the exact targets,
+# their own request message is that decision. Requester identity alone still
+# does NOT bypass the gate — the agent auto-stamps --requester with whoever is
+# in-thread, so by itself it is not evidence that a human chose these rows.
 BULK_DESTRUCTIVE_PATH="${BULK_DESTRUCTIVE_PATH:-${MUSO_OPS_STATE_DIR}/destructive-ops.jsonl}"
 BULK_DESTRUCTIVE_AUDIT_PATH="${BULK_DESTRUCTIVE_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/bulk-destructive-audit.jsonl}"
 BULK_DESTRUCTIVE_THRESHOLD="${BULK_DESTRUCTIVE_THRESHOLD:-10}"
@@ -961,7 +965,11 @@ To proceed you must have an EXPLICIT in-thread human decision to delete this man
     --confirmed-by <handle>   (one of: $(cat "$TIER2_APPROVERS_PATH" 2>/dev/null | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | tr '\n' ' '))
     --approval-msg-id <slack_ts>
 
-Requester identity does NOT bypass this gate, and a stale/reused approval-msg-id is not a substitute for a real per-batch decision. Each call past the threshold needs genuine approval. If the operation is genuinely this large, hand it to a human to run.
+Requester identity does NOT bypass this gate. What satisfies it is an explicit human decision that NAMES the rows being deleted.
+
+If the person who asked is on the approver list above AND enumerated the exact targets (a list of ids/titles, or "all N of X" where you have already read and posted those N), their own request message IS that decision: pass their handle and the timestamp of THAT message. You do not need to find a second human, and you should not page anyone.
+
+That decision covers the target set it enumerated and ONLY that set — finishing an approved batch is not a new decision, but a different set of rows is. If the request was vague, or the requester is not on the list above, stop and get an explicit "yes, delete those N" before continuing.
 EOF
             return 1
         fi
@@ -997,7 +1005,9 @@ EOF
             --argjson count_at_trip "$count" \
             --argjson threshold "$BULK_DESTRUCTIVE_THRESHOLD" \
             --argjson window_secs "$BULK_DESTRUCTIVE_WINDOW_SECS" \
-            '{ts:$ts, method:$method, path:$path, requester:$requester, confirmed_by:$confirmed_by, approval_msg_id:$approval_msg_id, count_at_trip:$count_at_trip, threshold:$threshold, window_secs:$window_secs}' \
+            --arg approval_author_id "$APPROVAL_AUTHOR_ID" \
+            --arg approval_channel "$APPROVAL_CHANNEL" \
+            '{ts:$ts, method:$method, path:$path, requester:$requester, confirmed_by:$confirmed_by, approval_msg_id:$approval_msg_id, count_at_trip:$count_at_trip, threshold:$threshold, window_secs:$window_secs, approval_author_id:$approval_author_id, approval_channel:$approval_channel}' \
             >> "$BULK_DESTRUCTIVE_AUDIT_PATH" || audit_rc=$?
         if (( audit_rc != 0 )); then
             echo "MUSO_BULK_DESTRUCTIVE_AUDIT_UNWRITABLE: append to $BULK_DESTRUCTIVE_AUDIT_PATH failed (rc=$audit_rc) — refusing bulk-destructive write to preserve audit trail." >&2
@@ -1303,6 +1313,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --approval-msg-id)
             APPROVAL_MSG_ID="$2"
+            shift 2
+            ;;
+        --approval-author-id)
+            APPROVAL_AUTHOR_ID="$2"
+            shift 2
+            ;;
+        --approval-channel)
+            APPROVAL_CHANNEL="$2"
             shift 2
             ;;
         *) break ;;

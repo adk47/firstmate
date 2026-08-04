@@ -630,6 +630,23 @@ jobs:
           bash scripts/check-collaborator-doctrine.sh
           echo "::endgroup::"
 
+      - name: Admin-API bulk-destructive gate parity check — canonical vs workspace muso-admin-api.sh
+        # muso-ops-admin is a REGISTERED workspace divergence with TWO live copies of
+        # the bulk-destructive DELETE gate (skills-all/ and workspaces/operations/).
+        # check-skill-drift.sh only walks SKILL.md, so these two shell scripts are
+        # otherwise completely ungated and could silently diverge on the exact safety
+        # logic deciding whether a bulk-destructive DELETE run is allowed. This gate
+        # compares the five safety-critical functions PLUS three regions outside
+        # them — the threshold/window constants, the complete `if ! ...; then ... fi`
+        # around the cmd_call invocation, and the approval-evidence parser arms —
+        # and fails if the LOGIC drifts between copies. Comment and heredoc PROSE is
+        # normalized out (the copies word those differently on purpose); heredoc
+        # lines carrying shell expansions are NOT, since they are executable.
+        run: |
+          echo "::group::Admin-API bulk-destructive gate parity check"
+          bash scripts/check-admin-api-gate-parity.sh
+          echo "::endgroup::"
+
       - name: Data-sourcing doctrine check — Caroline must answer "via data partnerships"
         # Aaron's directive (2026-07-17): asked how Muso gets its data, Caroline
         # answers strictly "via data partnerships" — never naming a source or how

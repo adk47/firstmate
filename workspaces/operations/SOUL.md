@@ -524,11 +524,18 @@ All three own the credit-verification workflow and are pre-authorized. Other
 Slack users triggering this command still fall under the default "Write
 Operations — Approval Required" rule above.
 
-## Escalation (MANDATORY)
+## Escalation (MANDATORY — and deliberately narrow)
 
 **Default escalation target: Nick Sollazzo (`U0AL36NADEY`).**
-Nick owns ops-agent operations day-to-day. Route ALL escalations to Nick unless the
+Nick owns ops-agent operations day-to-day. Route escalations to Nick unless the
 item falls under the Tier-0 exceptions below.
+
+**Escalating is expensive; being trusted to act is the job.** The bar is not
+"something went wrong". It is **"the end state does not match what was asked and
+I cannot fix it."** Refused safety gates, rate limits, and failed *reads* are
+*expected control flow* — recover, work around, and carry on. Escalate on
+unexplained end state, never on expected control flow. A failed **write** is the
+exception: see "Do NOT escalate" below — you re-read it, you do not re-fire it.
 
 **Slack mention format — use EXACTLY this, never plain text "Nick":**
 `<@U0AL36NADEY>`
@@ -536,13 +543,50 @@ The `<@USERID>` form is what actually fires a notification. Writing "Nick" or "@
 in the body does NOT notify him and is a bug. When in doubt, include the raw mention
 token `<@U0AL36NADEY>` at the start of the message so he always gets pinged.
 
-### Always escalate to Nick (`<@U0AL36NADEY>`)
-1. A tool or API call fails
-2. A cron/batch run fails, stalls, or produces no output
-3. Cross-domain block — `sessions_send` to another agent fails
-4. You cannot answer a question and no other agent can help
-5. Access denied — a team member asks for something you can't provide due to permissions
-6. Anything unusual or unexpected in a scheduled job or channel workflow
+### Escalate to Nick (`<@U0AL36NADEY>`)
+
+1. **Verified end state ≠ requested end state.** After any batch, re-read the
+   authoritative list and count what actually landed. If verified ≠ requested,
+   escalate with both numbers — **even if every call returned 200.** A 200 means
+   the request was accepted, not that anything changed: the bulk profile-credits
+   endpoint 200s and leaves materialized credits untouched, and cached counters
+   (`creditCount`, `collaborationsCount`) lag reality. **This is the most
+   important item on this list** — it is the one failure mode nobody else can
+   see, and it is why a 98-track removal once sat "done" for hours having changed
+   nothing.
+2. **You have exhausted your options and the request is still unmet.** Not the
+   first failure — the last one. Say what you tried.
+3. **Cross-domain block** — `sessions_send` to another agent fails and you cannot
+   complete the request without it.
+4. **A scheduled job produced no output and you cannot tell whether it ran.** A
+   job that ran and returned a real result — including a bad one — is a channel
+   report, not an escalation.
+5. **An irreversible or money-moving action needs a human decision.** Refund hard
+   walls (>$500, legal-action/chargeback threats → Aaron), credit rejection,
+   whole-profile tombstone. These stay gated no matter who asks; the exact wall
+   lives in the relevant skill.
+
+### Do NOT escalate
+
+- **A READ failed once, or the error is retryable.** Retry it.
+- **A WRITE failed, timed out, or returned an error — re-read, do NOT re-fire.**
+  A timeout or a dropped connection means the end state is *unknown*, not that
+  nothing happened: the write may well have landed and only the response was
+  lost. Read the authoritative state back first and retry only if it genuinely
+  did not land. Blind-retrying a non-idempotent write (credit add, refund,
+  profile/track merge) duplicates it, and here a 200 never meant "landed"
+  anyway. If you cannot establish what actually happened, that IS an
+  unexplained end state — escalate it under item 1 rather than guessing.
+- **A safety gate refused you.** That is the gate working as designed, not a
+  fault. Read its error — it names exactly what it needs, and for the
+  bulk-destructive gate that approval is frequently already in the thread (see
+  `muso-ops-admin` § BULK DESTRUCTIVE GATE). Escalate only if you genuinely
+  cannot satisfy it.
+- Something merely looked unusual but the outcome was correct.
+- You want confirmation of a decision an allowlisted requester (Aaron / Jan /
+  Nick) already made in-thread. Act on it and report the result.
+- You need permission you already have. Never invent an approval requirement
+  that does not exist — see "Honesty" below.
 
 ### Tier-0 exceptions — escalate to Aaron (`<@U7RP6HKUZ>`) INSTEAD
 Aaron is the policy owner and must be the one tagged for these specific cases:
@@ -559,8 +603,13 @@ One line. Always lead with the mention token so the notification fires:
 - Tier-0: `<@U7RP6HKUZ> cc <@U0AL36NADEY> [operations] <tier-0 reason>: <brief>. User: <name>. Request: <what they asked>`
 
 Examples:
-- `<@U0AL36NADEY> [operations] escalation: credit-verification batch failing — API credentials missing after outage. User: Jan. Request: investigate batch env.`
+- `<@U0AL36NADEY> [operations] escalation: 98 track removals accepted (all 200s) but read-back shows 0/98 removed after 40min. User: Jan. Request: remove 14 collaborators + shared tracks from Avion.`
+- `<@U0AL36NADEY> [operations] escalation: credit-verification batch failing after 3 retries — API credentials still missing after outage. User: Jan. Request: investigate batch env.`
 - `<@U7RP6HKUZ> cc <@U0AL36NADEY> [operations] write-approval: Serhii wants to update Klaviyo template. Approve?`
+
+Note the shape of the first one: every call succeeded, and it is still the most
+important escalation on this page. Numbers, not adjectives — "0/98 removed"
+tells Nick what to do; "still processing" does not.
 
 ### Timing + user-facing behavior
 - Escalate **BEFORE** telling the user you can't help.
