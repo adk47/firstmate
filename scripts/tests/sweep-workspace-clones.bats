@@ -811,9 +811,17 @@ if [[ "$*" == *"$INJECT_TARGET"* && "$*" == *".sweep-quarantine."* && ! -e "$MV_
   : > "$MV_MARKER"
   "$REAL_MV" "$@"
   q="${@: -1}"
-  before="$(stat -f '%d|%i|%Fm|%z' -- "$q" 2>/dev/null || stat -c '%d|%i|%y|%s' -- "$q")"
+  # GNU stat -f is --file-system, NOT a format flag (that is -c), so on Linux it
+  # errors on the format string yet still prints the FILESYSTEM listing for "$q"
+  # to stdout. 2>/dev/null hides the error, not that stdout, so the command
+  # substitution captures the fs listing PLUS the -c output — and that listing
+  # carries free-block counts that move whenever anything else writes to the
+  # runner's disk. Probe -c first so the local platform's flag wins; -f is the
+  # BSD/macOS fallback (there, -c errors to stderr with no stdout). Same order as
+  # scripts/sweep-workspace-clones.sh:316.
+  before="$(stat -c '%d|%i|%y|%s' -- "$q" 2>/dev/null || stat -f '%d|%i|%Fm|%z' -- "$q")"
   printf 'unique work from a surviving handle\n' > "$q/f.txt"   # EXISTING tracked file
-  after="$(stat -f '%d|%i|%Fm|%z' -- "$q" 2>/dev/null || stat -c '%d|%i|%y|%s' -- "$q")"
+  after="$(stat -c '%d|%i|%y|%s' -- "$q" 2>/dev/null || stat -f '%d|%i|%Fm|%z' -- "$q")"
   # Prove the premise: the root entry is byte-identical across the write.
   [ "$before" = "$after" ] && echo "ROOT_ENTRY_UNCHANGED" > "$ROOT_ID_FILE"
   exit 0
