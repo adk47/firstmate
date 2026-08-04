@@ -337,8 +337,39 @@ cat "/var/lib/hydra-qa/rebase-integrity/${OWNER}__${REPO}-pr-${PR}-<headRefOid>.
      rule existed could satisfy it. Motivation: until 2026-07-28 the guard checked
      only that the thread existed, and hydra#747 passed it with all eight warnings
      self-resolved by their author.
-  4. Verdict impact: an open rebase warning is a 🟡 blocker → **NO-GO** until a
-     human resolves the thread.
+  4. **Skip step 2 when a prior head's ack CARRIES FORWARD.** The marker is
+     head-tagged, so a merge-from-`main` or any no-op push re-files a finding a
+     human already judged; hydra PRs have collected up to 11 acks of one
+     unchanged warning, and an ack that cheap gets clicked unread. The report's
+     `warn_digest` (sha256 over the warn signals' flagged LINES, not their
+     summaries — two different 10-line deletions in one file share a summary but
+     never a digest) makes "same finding" checkable. It carries forward only if
+     ALL of these hold:
+     ```bash
+     # this head's digest, then every OTHER head of this PR that shares it
+     # (the grep lists this head's own report too — ignore that one)
+     jq -r '.warn_digest' "/var/lib/hydra-qa/rebase-integrity/${OWNER}__${REPO}-pr-${PR}-<headRefOid>.json"
+     grep -l "<that digest>" "/var/lib/hydra-qa/rebase-integrity/${OWNER}__${REPO}-pr-${PR}-"*.json
+     ```
+     - this head's `warn_digest` is a real 64-hex value (reports predating the
+       field cannot carry — no identity, no carry), **and**
+     - another head of this PR has a WARN report with the identical digest,
+       **and**
+     - that head's `REBASE WARNING [<sha7>]` thread was filed by the bot and is
+       **resolved** — i.e. a human already acknowledged this exact finding. A
+       carried-forward ack clears exactly the same bar as a fresh one, so when
+       the independence flag above is enabled the prior head's resolver must
+       also be neither the PR author nor the bot. Carrying a weaker ack forward
+       would make this the cheapest way around that rule.
+
+     Then: still write the ⚠️ section in the body (step 1), but say the ack
+     carries forward from `<prior sha7>` and do **not** file a second 🟡. Guard 8
+     re-checks every leg itself and approves without a new thread; if any
+     leg fails it exits 10, so filing the 🟡 is always the safe fallback. If the
+     digest changed, the finding changed — file it.
+  5. Verdict impact: an open rebase warning is a 🟡 blocker → **NO-GO** until a
+     human resolves the thread. A carried-forward ack is not open, so it does
+     not block.
 - **`status: "ERROR"`** → the analyzer could not verify the rebase. Say "rebase
   state unverified — analyzer errored; re-run PR Validation" in the review body
   and do not approve (Guard 8 refuses with exit 10 anyway).
@@ -583,9 +614,10 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "🤖
   `exit 8` = CI is not green; `exit 9` = an unresolved Critical/Important thread is still
   open (carry it forward — fix it or resolve the thread, do not approve around it);
   `exit 10` = the rebase-integrity report for this head is WARN with no filed
-  `REBASE WARNING [<sha7>]` thread (file the Step 3d finding first), it is
-  ERROR/unreadable (rebase state unverified — a human must look), or it is
-  MISSING for a repo that requires one (hydra) — re-run PR Validation.
+  `REBASE WARNING [<sha7>]` thread **and no prior head's ack carries forward**
+  (file the Step 3d finding first), it is ERROR/unreadable (rebase state
+  unverified — a human must look), or it is MISSING for a repo that requires one
+  (hydra) — re-run PR Validation.
 - Report the wrapper's post-check (`reviewDecision` / `mergeStateStatus`). If GitHub still
   shows the PR blocked (CODEOWNERS, required checks pending), tell the requester what's
   outstanding — don't imply it's ready to merge.

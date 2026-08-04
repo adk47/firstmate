@@ -812,7 +812,19 @@ RSYNC_EXCLUDES=(
   # Per-PR QA review state (external-pr-review runs write
   # workspaces/qa/pr-review-<n>.json at runtime). Server-owned; first
   # flagged by pre-flight 2026-08-02 (pr-review-562.json).
-  --exclude='workspaces/qa/pr-review-*.json'
+  #
+  # Broadened 2026-08-03 from 'pr-review-*.json' to 'pr-review*.json': the
+  # muso-github-code-review skill writes the batched review body to
+  # /tmp/pr-review.json, but the agent has also written it relative to its
+  # workspace, landing an UNNUMBERED workspaces/qa/pr-review.json on node-8.
+  # The old glob required the '-' and so missed it. Because this pre-flight is
+  # a LIVE gate against the running server, that one stray file turned EVERY
+  # open PR red the moment it appeared (first failing run 14:10Z, after a
+  # 14:08Z green). Deliberately NOT mirrored into qa-clean-merge-scratch.sh's
+  # KEEP_GLOBS: that drift guard only covers 'workspaces/*/' file excludes, and
+  # the deploy must not delete this mid-review while the merge-scratch cleanup
+  # should still reap it afterwards as the per-run scratch it is.
+  --exclude='workspaces/qa/pr-review*.json'
   # Generated reports (CSVs, PDFs, JSON dumps from agent runs).
   # Convention: agents that produce reports for human consumption
   # write them to workspaces/<agent>/reports/<filename>. They're

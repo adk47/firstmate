@@ -461,3 +461,351 @@ timeline_json() { # <before-oid>... (one node per force-push event, oldest first
   jq -r '.signals[].commits[]' "$(state_file)" | grep -q 'touch'   # subject captured verbatim
   [ ! -f "$TEST_TMPDIR/pwned" ]                            # and never executed
 }
+
+# --- signal digest / warn_digest (cross-head ack carryover key) ----------------
+# Guard 8 in qa-pr-approve.sh carries a human's REBASE WARNING ack forward to a
+# new head only when warn_digest is byte-identical. These tests pin the two
+# properties that makes sound: STABLE when the flagged content is unchanged,
+# and DIFFERENT whenever the flagged lines differ — including when the summary
+# (which carries only a COUNT) is identical.
+
+@test "warn_digest: empty on CLEAN, 64-hex on WARN, and every signal carries a digest" {
+  commitf g.txt "$(lines 2 old)" "init g" 40
+  set_origin_main "$(tip)"
+  git -C "$R" checkout -q -b pr
+  commitf new.txt "$(lines 3 fresh)" "feat: add new"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.warn_digest' "$(state_file)")" = "" ]
+
+  git -C "$R" checkout -q main
+  commitf g.txt "$(printf '%s\n%s' "$(lines 2 old)" "$(lines 5 recent)")" "feat: recent work" 2
+  set_origin_main "$(tip)"
+  git -C "$R" checkout -q -b pr2
+  commitf g.txt "$(printf '%s\n%s' "$(lines 2 old)" "recent payload line 5")" "refactor g"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  [[ "$(jq -r '.warn_digest' "$(state_file)")" =~ ^[0-9a-f]{64}$ ]]
+  [ "$(jq -r '[.signals[] | select(.digest | test("^[0-9a-f]{64}$"))] | length' "$(state_file)")" \
+    = "$(jq -r '.signals | length' "$(state_file)")" ]
+}
+
+@test "warn_digest is STABLE across heads when the flagged lines are unchanged" {
+  # The PR #774 case: a merge commit from main moves the head; the PR's own
+  # deletions are untouched, so the human's ack still applies.
+  commitf g.txt "$(lines 2 old)" "init g" 40
+  commitf g.txt "$(printf '%s\n%s' "$(lines 2 old)" "$(lines 5 recent)")" "feat: recent work" 2
+  set_origin_main "$(tip)"
+  git -C "$R" checkout -q -b pr
+  commitf g.txt "$(printf '%s\n%s' "$(lines 2 old)" "recent payload line 5")" "refactor g"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  first="$(jq -r '.warn_digest' "$(state_file)")"
+
+  # unrelated commit → new head, identical flagged line set
+  commitf unrelated.txt "hello there" "chore: unrelated"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.warn_digest' "$(state_file)")" = "$first" ]
+  [[ "$first" =~ ^[0-9a-f]{64}$ ]]   # not vacuously equal on a missing key
+}
+
+@test "warn_digest DIFFERS when different lines are erased but the count is identical" {
+  # The soundness case: both heads delete exactly 4 recent lines from g.txt, so
+  # summary/files/commits are byte-identical. Keying carryover on the summary
+  # would inherit an ack across unrelated content; the digest must not.
+  commitf g.txt "$(lines 2 old)" "init g" 40
+  commitf g.txt "$(printf '%s\n%s' "$(lines 2 old)" "$(lines 8 recent)")" "feat: recent work" 2
+  set_origin_main "$(tip)"
+  base="$(tip)"
+
+  git -C "$R" checkout -q -b prA
+  commitf g.txt "$(printf '%s\n%s' "$(lines 2 old)" "$(lines 8 recent | sed -n '5,8p')")" "refactor g"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  a_digest="$(jq -r '.warn_digest' "$(state_file)")"
+  a_sum="$(jq -r '[.signals[] | select(.id=="erased-recent-base-work") | .summary] | .[0]' "$(state_file)")"
+
+  git -C "$R" checkout -q "$base"
+  git -C "$R" checkout -q -b prB
+  commitf g.txt "$(printf '%s\n%s' "$(lines 2 old)" "$(lines 8 recent | sed -n '1,4p')")" "refactor g"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  b_digest="$(jq -r '.warn_digest' "$(state_file)")"
+  b_sum="$(jq -r '[.signals[] | select(.id=="erased-recent-base-work") | .summary] | .[0]' "$(state_file)")"
+
+  [ "$a_sum" = "$b_sum" ]            # identical summary — the ambiguity being closed
+  [ "$a_digest" != "$b_digest" ]     # …but distinct digests
+}
+
+@test "warn_digest DIFFERS for equal-volume large-deletion of different content" {
+  # Same soundness property as the test above, for the OTHER line-window signal.
+  # large-deletion's summary carries only totals and `files` only the top-10 by
+  # volume, so two heads deleting different 15-line bodies from the same file
+  # render byte-identically; only a content-derived identity separates them.
+  # Base is 40d old so erased-recent-base-work (14d window) cannot also fire and
+  # supply the difference for us.
+  commitf big.txt "$(lines 40 body)" "init big" 40
+  set_origin_main "$(tip)"
+  base="$(tip)"
+
+  git -C "$R" checkout -q -b prA
+  commitf big.txt "$(lines 40 body | sed -n '1,10p;26,40p')" "trim middle"
+  HEAD="$(tip)"
+  run analyze RI_DEL_ABS=10 RI_DEL_RATIO=2
+  [ "$status" -eq 0 ]
+  a_digest="$(jq -r '.warn_digest' "$(state_file)")"
+  a_sum="$(jq -r '[.signals[] | select(.id=="large-deletion") | .summary] | .[0]' "$(state_file)")"
+  a_files="$(jq -rc '[.signals[] | select(.id=="large-deletion") | .files] | .[0]' "$(state_file)")"
+  # the signal must remain CARRYABLE — a fix that merely voided it would pass a
+  # "digests differ" assertion while silently disabling the feature
+  [ "$(jq -r '[.signals[] | select(.id=="large-deletion") | .carryable] | .[0]' "$(state_file)")" = true ]
+
+  git -C "$R" checkout -q "$base"
+  git -C "$R" checkout -q -b prB
+  commitf big.txt "$(lines 40 body | sed -n '1,20p;36,40p')" "trim middle"
+  HEAD="$(tip)"
+  run analyze RI_DEL_ABS=10 RI_DEL_RATIO=2
+  [ "$status" -eq 0 ]
+  b_digest="$(jq -r '.warn_digest' "$(state_file)")"
+  b_sum="$(jq -r '[.signals[] | select(.id=="large-deletion") | .summary] | .[0]' "$(state_file)")"
+  b_files="$(jq -rc '[.signals[] | select(.id=="large-deletion") | .files] | .[0]' "$(state_file)")"
+
+  [ "$a_sum" = "$b_sum" ]            # identical totals…
+  [ "$a_files" = "$b_files" ]        # …and identical file list
+  [[ "$a_digest" =~ ^[0-9a-f]{64}$ ]]
+  [ "$a_digest" != "$b_digest" ]     # …but distinct digests
+}
+
+# dup_blocks <marker-a> <marker-b> [omit] — a file holding the SAME three
+# payload lines in two blocks, each with distinct surrounding context. `omit`
+# selects which block's payload is left out (a|b|both|none). normalize_lines
+# sorts and dedups, so both blocks reduce to one identical 3-line set: only raw
+# position and context can tell "deleted block A" from "deleted block B".
+# `case` (not `[ ] ||`) so the helper's exit status is 0 on every branch.
+dup_blocks() {
+  local omit="${3:-none}" payload='shared payload line 1\nshared payload line 2\nshared payload line 3\n'
+  printf 'lead filler line one\nlead filler line two\nlead filler line three\n'
+  printf '%s\n' "$1"
+  case "$omit" in a|both) ;; *) printf "$payload" ;; esac
+  printf 'mid filler line one\nmid filler line two\nmid filler line three\n'
+  printf 'mid filler line four\nmid filler line five\nmid filler line six\n'
+  printf '%s\n' "$2"
+  case "$omit" in b|both) ;; *) printf "$payload" ;; esac
+  printf 'tail filler line one\ntail filler line two\ntail filler line three'
+}
+
+@test "erased digest DIFFERS for identical text deleted at two different locations" {
+  # The set-vs-sequence hole: `$WORK/erased` comes from normalize_lines, which
+  # sort -u's, so it carries neither multiplicity nor location. Both heads erase
+  # the same three normalized lines from the same file — identical count,
+  # summary, files and erased set. Only the hunk context separates them.
+  commitf d.txt "$(printf 'lead filler line one\nlead filler line two\nlead filler line three')" "init d" 40
+  commitf d.txt "$(dup_blocks 'alpha marker aaa' 'gamma marker bbb')" "feat: recent work" 2
+  set_origin_main "$(tip)"
+  base="$(tip)"
+
+  git -C "$R" checkout -q -b prA
+  commitf d.txt "$(dup_blocks 'alpha marker aaa' 'gamma marker bbb' a)" "drop a block"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  a_digest="$(jq -r '.warn_digest' "$(state_file)")"
+  a_sum="$(jq -r '[.signals[] | select(.id=="erased-recent-base-work") | .summary] | .[0]' "$(state_file)")"
+
+  git -C "$R" checkout -q "$base"
+  git -C "$R" checkout -q -b prB
+  commitf d.txt "$(dup_blocks 'alpha marker aaa' 'gamma marker bbb' b)" "drop a block"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  b_digest="$(jq -r '.warn_digest' "$(state_file)")"
+  b_sum="$(jq -r '[.signals[] | select(.id=="erased-recent-base-work") | .summary] | .[0]' "$(state_file)")"
+
+  [ "$a_sum" = "$b_sum" ]            # same count, same file — indistinguishable by summary
+  [[ "$a_digest" =~ ^[0-9a-f]{64}$ ]]
+  [[ "$b_digest" =~ ^[0-9a-f]{64}$ ]]
+  [ "$a_digest" != "$b_digest" ]
+}
+
+@test "reintroduced digest DIFFERS for identical text re-added at two locations" {
+  # Symmetric hole on the + side: re-adding the same text somewhere else is a
+  # different finding, and the deduped set cannot express that.
+  commitf d.txt "$(dup_blocks 'alpha marker aaa' 'gamma marker bbb')" "init d" 40
+  commitf d.txt "$(dup_blocks 'alpha marker aaa' 'gamma marker bbb' both)" "chore: strip both blocks" 2
+  set_origin_main "$(tip)"
+  base="$(tip)"
+
+  git -C "$R" checkout -q -b prA
+  commitf d.txt "$(dup_blocks 'alpha marker aaa' 'gamma marker bbb' b)" "restore a block"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  a_digest="$(jq -r '.warn_digest' "$(state_file)")"
+  a_sum="$(jq -r '[.signals[] | select(.id=="reintroduced-removed-lines") | .summary] | .[0]' "$(state_file)")"
+
+  git -C "$R" checkout -q "$base"
+  git -C "$R" checkout -q -b prB
+  commitf d.txt "$(dup_blocks 'alpha marker aaa' 'gamma marker bbb' a)" "restore a block"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  b_digest="$(jq -r '.warn_digest' "$(state_file)")"
+  b_sum="$(jq -r '[.signals[] | select(.id=="reintroduced-removed-lines") | .summary] | .[0]' "$(state_file)")"
+
+  [ "$a_sum" = "$b_sum" ]
+  [[ "$a_digest" =~ ^[0-9a-f]{64}$ ]]
+  [ "$a_digest" != "$b_digest" ]
+}
+
+# twin_blocks [omit] — two payload blocks whose surrounding context is BYTE-
+# IDENTICAL on both sides, so a -U3 hunk for either one renders the same text.
+# Context cannot separate these; only the occurrence ordinal can.
+twin_blocks() {
+  local omit="${1:-none}"
+  local ctx_before='ctx alpha line here\nctx beta line here\nctx gamma line here\n'
+  local ctx_after='ctx delta line here\nctx epsilon line here\nctx zeta line here\n'
+  local payload='shared payload line 1\nshared payload line 2\nshared payload line 3\n'
+  printf 'pad line number one\n'
+  printf "$ctx_before"; case "$omit" in a) ;; *) printf "$payload" ;; esac; printf "$ctx_after"
+  printf 'pad line number two\n'
+  printf "$ctx_before"; case "$omit" in b) ;; *) printf "$payload" ;; esac; printf "$ctx_after"
+  printf 'pad line number three'
+}
+
+@test "erased digest DIFFERS for duplicate blocks with IDENTICAL context" {
+  # Stripping @@ numbers made context the only locator, and context is not enough:
+  # two byte-identical blocks with byte-identical surroundings emit the same hunk
+  # body. The occurrence ordinal (how many identical slices precede this one in
+  # the merge-base image) is what separates them.
+  commitf t.txt "$(printf 'pad line number one\npad line number two\npad line number three')" "init t" 40
+  commitf t.txt "$(twin_blocks)" "feat: recent work" 2
+  set_origin_main "$(tip)"
+  base="$(tip)"
+
+  git -C "$R" checkout -q -b prA
+  commitf t.txt "$(twin_blocks a)" "drop one block"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  a_digest="$(jq -r '.warn_digest' "$(state_file)")"
+  a_sum="$(jq -r '[.signals[] | select(.id=="erased-recent-base-work") | .summary] | .[0]' "$(state_file)")"
+
+  git -C "$R" checkout -q "$base"
+  git -C "$R" checkout -q -b prB
+  commitf t.txt "$(twin_blocks b)" "drop one block"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  b_digest="$(jq -r '.warn_digest' "$(state_file)")"
+  b_sum="$(jq -r '[.signals[] | select(.id=="erased-recent-base-work") | .summary] | .[0]' "$(state_file)")"
+
+  [ "$a_sum" = "$b_sum" ]            # identical summary…
+  [[ "$a_digest" =~ ^[0-9a-f]{64}$ ]]
+  [[ "$b_digest" =~ ^[0-9a-f]{64}$ ]]
+  [ "$a_digest" != "$b_digest" ]     # …and now identical context too, still distinct
+}
+
+@test "occurrence ordinal survives an unrelated edit above the finding" {
+  # The reason the ordinal is used instead of the raw @@ line number: prepending
+  # unrelated lines shifts every absolute position but must NOT change the digest,
+  # or the ack never carries and the whole feature is inert.
+  commitf t.txt "$(printf 'pad line number one\npad line number two\npad line number three')" "init t" 40
+  commitf t.txt "$(twin_blocks)" "feat: recent work" 2
+  set_origin_main "$(tip)"
+  base="$(tip)"
+
+  git -C "$R" checkout -q -b prA
+  commitf t.txt "$(twin_blocks b)" "drop one block"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  plain="$(jq -r '.warn_digest' "$(state_file)")"
+
+  # same erasure, but main has since prepended unrelated lines to the same file
+  git -C "$R" checkout -q main
+  commitf t.txt "$(printf 'brand new header line\nanother header line\n%s' "$(twin_blocks)")" "feat: header" 1
+  set_origin_main "$(tip)"
+  git -C "$R" checkout -q -b prC
+  commitf t.txt "$(printf 'brand new header line\nanother header line\n%s' "$(twin_blocks b)")" "drop one block"
+  HEAD="$(tip)"
+  run analyze
+  [ "$status" -eq 0 ]
+  shifted="$(jq -r '.warn_digest' "$(state_file)")"
+
+  [[ "$plain" =~ ^[0-9a-f]{64}$ ]]
+  [ "$plain" = "$shifted" ]          # absolute lines moved; the finding did not
+}
+
+# twin_bulk [omit] — two BYTE-IDENTICAL 12-line blocks (identical context too),
+# large enough to trip large-deletion on its own. Same collision shape as
+# twin_blocks, sized for the volume signal rather than the line-window ones.
+twin_bulk() {
+  local omit="${1:-none}" ctx_b='ctx alpha line here\nctx beta line here\nctx gamma line here\n'
+  local ctx_a='ctx delta line here\nctx epsilon line here\nctx zeta line here\n'
+  printf 'pad line number one\n'
+  printf "$ctx_b"; case "$omit" in a|both) ;; *) lines 12 bulk ;; esac; printf "$ctx_a"
+  printf 'pad line number two\n'
+  printf "$ctx_b"; case "$omit" in b|both) ;; *) lines 12 bulk ;; esac; printf "$ctx_a"
+  printf 'pad line number three'
+}
+
+@test "large-deletion digest DIFFERS for identical duplicate blocks at two locations" {
+  # large-deletion's identity was a flat projection of deleted lines, so deleting
+  # either of two byte-identical blocks (with identical context) from one file
+  # produced the same digest. Routing it through hunks_containing --all gives each
+  # hunk the occurrence ordinal, which is what separates them. Base is 40d old so
+  # erased-recent-base-work cannot fire and supply the difference instead.
+  commitf b.txt "$(twin_bulk)" "init b" 40
+  set_origin_main "$(tip)"
+  base="$(tip)"
+
+  git -C "$R" checkout -q -b prA
+  commitf b.txt "$(twin_bulk a)" "drop a bulk block"
+  HEAD="$(tip)"
+  run analyze RI_DEL_ABS=10 RI_DEL_RATIO=2
+  [ "$status" -eq 0 ]
+  a_digest="$(jq -r '.warn_digest' "$(state_file)")"
+  a_sum="$(jq -r '[.signals[] | select(.id=="large-deletion") | .summary] | .[0]' "$(state_file)")"
+  [ "$(jq -r '[.signals[] | select(.id=="large-deletion") | .carryable] | .[0]' "$(state_file)")" = true ]
+
+  git -C "$R" checkout -q "$base"
+  git -C "$R" checkout -q -b prB
+  commitf b.txt "$(twin_bulk b)" "drop a bulk block"
+  HEAD="$(tip)"
+  run analyze RI_DEL_ABS=10 RI_DEL_RATIO=2
+  [ "$status" -eq 0 ]
+  b_digest="$(jq -r '.warn_digest' "$(state_file)")"
+  b_sum="$(jq -r '[.signals[] | select(.id=="large-deletion") | .summary] | .[0]' "$(state_file)")"
+
+  [ "$a_sum" = "$b_sum" ]            # identical totals and file — summary cannot separate
+  [[ "$a_digest" =~ ^[0-9a-f]{64}$ ]]
+  [ "$a_digest" != "$b_digest" ]
+}
+
+@test "a warn signal with no content identity is non-carryable and voids warn_digest" {
+  # Fail-closed default. stale-blob-regression passes no identity, so its
+  # id+files+commits+summary fallback is not provably content-sensitive; rather
+  # than hash it into the rollup, the whole report becomes non-carryable and
+  # Guard 8's 64-hex test rejects the empty value. This is what stops a FUTURE
+  # signal author from silently reintroducing the large-deletion hole.
+  commitf f.txt "$(lines 4 v1)" "f v1" 30
+  commitf f.txt "$(lines 4 v2)" "f v2" 30
+  set_origin_main "$(tip)"
+  git -C "$R" checkout -q -b pr
+  commitf f.txt "$(lines 4 v1)" "rework f"   # byte-identical to v1
+  HEAD="$(tip)"
+
+  run analyze
+  [ "$status" -eq 0 ]
+  [ "$(jq -r .status "$(state_file)")" = "WARN" ]                    # it still reports…
+  [ "$(jq -r '[.signals[] | select(.id=="stale-blob-regression") | .carryable] | .[0]' \
+      "$(state_file)")" = false ]
+  [ "$(jq -r '.warn_digest' "$(state_file)")" = "" ]                 # …but cannot carry an ack
+}

@@ -359,8 +359,16 @@ else
       # test). The residual risk the type system CANNOT see is a machine USER
       # account on a PAT; `bot_logins` is the control for that, which is why the
       # resolver is tested against that set rather than against its type.
-      ri_threads="$("$QA_GH" --repo "$owner/$repo" api graphql -f query="$gql" -f owner="$owner" -f repo="$repo" -F pr="$pr" \
-        | jq -r --arg marker "$ri_marker" --arg author "$author" --argjson logins "$bot_logins_json" \
+      #
+      # Fetched ONCE into a variable rather than piped straight into jq: the
+      # cross-head carryover below re-reads these same threads looking for OTHER
+      # heads' markers, and a second graphql round-trip could observe a different
+      # thread state mid-approval. Empty means the call failed — refuse there and
+      # then rather than letting jq turn a transport failure into "no threads".
+      ri_threads_json="$("$QA_GH" --repo "$owner/$repo" api graphql -f query="$gql" -f owner="$owner" -f repo="$repo" -F pr="$pr" 2>/dev/null || true)"
+      [ -n "$ri_threads_json" ] || \
+        die 10 "cannot read review threads for $owner/$repo#$pr (graphql call failed) — refusing (fail closed)."
+      ri_threads="$(jq -r --arg marker "$ri_marker" --arg author "$author" --argjson logins "$bot_logins_json" \
             'def norm: ascii_downcase | sub("^app/";"") | sub("\\[bot\\]$";"");
              def isbot($l): ($logins | map(norm) | index($l)) != null;
              .data.repository.pullRequest.reviewThreads
@@ -375,27 +383,90 @@ else
                            then "OK" else "SKIP" end)
                           + " " + (.resolvedBy.login // "unresolved")]
                        | join("\n"))
-                 end' \
+                 end' <<<"$ri_threads_json" \
         2>/dev/null || echo "ERR")"
       case "$ri_threads" in
         MORE|ERR)
           die 10 "cannot verify the REBASE WARNING thread for $owner/$repo#$pr (threads unreadable or >100: $ri_threads) — refusing (fail closed)." ;;
       esac
-      [ -n "$ri_threads" ] || \
-        die 10 "rebase-integrity report for ${head_oid:0:7} is WARN but no '$ri_marker' review thread exists — file the finding (muso-github-code-review Step 3d) before approving."
-      # STAGED ROLLOUT. Tightening an approval gate in one shot is a trap: the very
-      # PR that ships the rule is judged against it, and no head created before the
-      # rule existed can satisfy it — the change becomes unmergeable by
-      # construction. So the independence requirement ships DISABLED and is turned
-      # on by config once this is deployed. Default (0) is byte-for-byte the
-      # previous behaviour: the marker thread must exist, and Guard 7 above blocks
-      # while it is unresolved. Flip QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 in the
-      # follow-up (see muso-github-code-review SKILL.md "Scope") to require that
-      # the resolver be a human who is neither the PR author nor the bot.
-      if [ "${QA_REBASE_ACK_REQUIRE_INDEPENDENT:-0}" = "1" ]; then
-        if ! printf '%s\n' "$ri_threads" | grep -q '^OK '; then
-          ri_seen="$(printf '%s\n' "$ri_threads" | sed 's/^SKIP /rejected:/' | paste -sd' ' -)"
-          die 10 "the '$ri_marker' thread for $owner/$repo#$pr was never acknowledged by an independent human ($ri_seen) — neither the PR author ($author) nor the bot can clear its own rebase warning; ask another reviewer to resolve the thread."
+      if [ -z "$ri_threads" ]; then
+        # No thread for THIS head. Before refusing, try the cross-head carryover:
+        # a human resolving a REBASE WARNING judges the flagged CONTENT, not the
+        # sha, so that judgement still holds on a head whose report carries a
+        # byte-identical warn_digest (analyzer rolls it up from the warn signals'
+        # line-level digests). This is what stops the ack treadmill — hydra PRs
+        # have collected up to 11 acks of one unchanged finding, and an ack that
+        # cheap gets clicked unread, which is worse than the risk it guards.
+        # Every leg must hold, else fall through to the original refusal:
+        #   * this head's report has a real 64-hex warn_digest (a report predating
+        #     the field can never carry — no identity, no carry);
+        #   * some OTHER head of THIS pr has a report with the SAME digest whose
+        #     interior key matches its filename (no stale/mis-filed reports); and
+        #   * that head's marker thread was filed by the bot AND is RESOLVED — by
+        #     an INDEPENDENT human too, once the staged rollout below is enabled.
+        # The resolved check is load-bearing HERE specifically: Guard 7 only sees
+        # unresolved threads, so it cannot vouch for a prior head's ack the way it
+        # does for the current one. A carried-forward ack must clear exactly the
+        # same bar as a freshly-filed one — carrying a weaker ack forward would
+        # make this the cheapest way around the independence rule.
+        ri_digest="$(jq -r '.warn_digest // ""' "$ri_file" 2>/dev/null || echo "")"
+        ri_carried=""
+        if [[ "$ri_digest" =~ ^[0-9a-f]{64}$ ]]; then
+          # "<OK|SKIP> <sha7>" per RESOLVED bot-filed marker thread of ANY head,
+          # graded by the same independence test as $ri_threads above.
+          ri_acked_sha7s="$(jq -r --arg author "$author" --argjson logins "$bot_logins_json" \
+                'def norm: ascii_downcase | sub("^app/";"") | sub("\\[bot\\]$";"");
+                 def isbot($l): ($logins | map(norm) | index($l)) != null;
+                 .data.repository.pullRequest.reviewThreads
+                   | if .pageInfo.hasNextPage then empty
+                     else (.nodes[]? | select(.isResolved == true)
+                           | select(((.comments.nodes[0].author.login // "") | norm) as $a
+                                    | isbot($a))
+                           | select((.comments.nodes[0].body // "")
+                                    | test("REBASE WARNING \\[[0-9a-f]{7}\\]"))
+                           | ((.resolvedBy.login // "") | norm) as $r
+                           | (if ($r != "") and ($r != ($author | norm)) and ((isbot($r)) | not)
+                              then "OK" else "SKIP" end)
+                             + " " + ((.comments.nodes[0].body // "")
+                                      | capture("REBASE WARNING \\[(?<s>[0-9a-f]{7})\\]").s))
+                     end' <<<"$ri_threads_json" 2>/dev/null || true)"
+          # Mirrors the staged rollout: while the flag is off a resolved ack of
+          # any provenance carries, exactly as it satisfies the fresh-thread path.
+          if [ "${QA_REBASE_ACK_REQUIRE_INDEPENDENT:-0}" = "1" ]; then
+            ri_ack_re='^OK '
+          else
+            ri_ack_re='^(OK|SKIP) '
+          fi
+          for ri_prior in "$RI_DIR/${owner}__${repo}-pr-${pr}-"*.json; do
+            [ -f "$ri_prior" ] || continue
+            ri_p_head="${ri_prior##*-pr-"${pr}"-}"; ri_p_head="${ri_p_head%.json}"
+            [[ "$ri_p_head" =~ ^[0-9a-f]{40}$ ]] || continue
+            [ "$ri_p_head" != "$head_oid" ] || continue
+            printf '%s\n' "$ri_acked_sha7s" | grep -Eq -- "${ri_ack_re}${ri_p_head:0:7}\$" || continue
+            [ "$(jq -r --arg repo "$owner/$repo" --arg pr "$pr" --arg head "$ri_p_head" --arg d "$ri_digest" \
+                 'if (.repo == $repo) and ((.pr | tostring) == $pr) and (.head_sha == $head)
+                     and (.status == "WARN") and (.warn_digest == $d)
+                  then "OK" else "NO" end' "$ri_prior" 2>/dev/null || echo NO)" = "OK" ] || continue
+            ri_carried="$ri_p_head"; break
+          done
+        fi
+        [ -n "$ri_carried" ] || die 10 "rebase-integrity report for ${head_oid:0:7} is WARN but no '$ri_marker' review thread exists — file the finding (muso-github-code-review Step 3d) before approving."
+        echo "qa-pr-approve: REBASE WARNING for ${head_oid:0:7} carries forward the human ack on ${ri_carried:0:7} — identical warn_digest ${ri_digest:0:12}…"
+      else
+        # STAGED ROLLOUT. Tightening an approval gate in one shot is a trap: the very
+        # PR that ships the rule is judged against it, and no head created before the
+        # rule existed can satisfy it — the change becomes unmergeable by
+        # construction. So the independence requirement ships DISABLED and is turned
+        # on by config once this is deployed. Default (0) is byte-for-byte the
+        # previous behaviour: the marker thread must exist, and Guard 7 above blocks
+        # while it is unresolved. Flip QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 in the
+        # follow-up (see muso-github-code-review SKILL.md "Scope") to require that
+        # the resolver be a human who is neither the PR author nor the bot.
+        if [ "${QA_REBASE_ACK_REQUIRE_INDEPENDENT:-0}" = "1" ]; then
+          if ! printf '%s\n' "$ri_threads" | grep -q '^OK '; then
+            ri_seen="$(printf '%s\n' "$ri_threads" | sed 's/^SKIP /rejected:/' | paste -sd' ' -)"
+            die 10 "the '$ri_marker' thread for $owner/$repo#$pr was never acknowledged by an independent human ($ri_seen) — neither the PR author ($author) nor the bot can clear its own rebase warning; ask another reviewer to resolve the thread."
+          fi
         fi
       fi
       ;;

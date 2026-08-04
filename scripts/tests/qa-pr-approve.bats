@@ -940,3 +940,156 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
   [ "$status" -eq 0 ]
   grep -q '^approve$' "$STUB_CALLS"
 }
+
+# ---------------------------------------------------------------------------
+# Guard 8 — cross-head ack carryover (warn_digest)
+# A human resolving a REBASE WARNING judges CONTENT, not a sha. When a later
+# head's report carries a byte-identical warn_digest, that judgement still
+# applies, so the ack carries forward instead of re-filing. Everything else
+# still fails closed. (70% of hydra's rebase-warned PRs re-filed across heads;
+# PR #673 collected 11 acks — an ack treadmill trains rubber-stamping.)
+# ---------------------------------------------------------------------------
+
+PRIOR_OID="fedcba9876543210fedcba9876543210fedcba98"   # sha7 = fedcba9
+DIG_A="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"   # 64 hex
+DIG_B="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"   # 64 hex
+
+ri_report_d() {  # <status> <warn_digest> [head_oid] — report carrying a digest
+  local head="${3:-$HEAD_OID}"
+  mkdir -p "$QA_REBASE_STATE_DIR"
+  printf '{"repo":"Muso-AI/core-backend","pr":123,"head_sha":"%s","status":"%s","warn_digest":"%s"}' \
+    "$head" "$1" "$2" > "$QA_REBASE_STATE_DIR/Muso-AI__core-backend-pr-123-${head}.json"
+}
+
+prior_thread() {  # <isResolved> <sha7> <filer> [resolvedBy-login]
+  # resolvedBy omitted entirely when the 4th arg is absent — GraphQL reports a
+  # resolved thread with a null resolvedBy, and the carryover must grade that
+  # the same way the fresh-thread path does.
+  local resolved_by=""
+  if [ -n "${4:-}" ]; then
+    resolved_by="$(printf '"resolvedBy":{"login":"%s"},' "$4")"
+  fi
+  printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":%s,%s"comments":{"nodes":[{"body":"🟡 **Important — REBASE WARNING [%s]** PR deletes recent main work","author":{"login":"%s"}}]}}]}}}}}' \
+    "$1" "$resolved_by" "$2" "$3"
+}
+
+@test "guard8 carryover: prior head RESOLVED + identical warn_digest → approves without a new thread" {
+  ri_report_d WARN "$DIG_A"                      # current head
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"         # the acked head
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+  echo "$output" | grep -q 'carries forward'
+}
+
+@test "guard8 carryover: prior head resolved but DIFFERENT warn_digest → exit 10 (no inherited ack)" {
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_B" "$PRIOR_OID"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover: identical digest but prior thread filed by a non-bot → exit 10 (forged ack)" {
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 nsollazzo)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover: identical digest but prior thread UNRESOLVED → blocked (Guard 7 first)" {
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread false fedcba9 adk47)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 9 ]   # an unresolved 🟡 is Guard 7's to block; never an ack
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover: report predating the digest field (no warn_digest) → exit 10" {
+  ri_report WARN                                  # legacy report, no warn_digest
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover: no prior report at all → exit 10 (unchanged behaviour)" {
+  ri_report_d WARN "$DIG_A"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$NO_THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# --- carryover x staged independence rollout --------------------------------
+# The carryover is the cheapest possible route around the independence rule: if
+# a self-cleared ack carried forward, an author could self-resolve once on head
+# A and ride it on every later head. These pin that the carried ack clears the
+# SAME bar as a fresh one under each setting of the flag.
+
+@test "guard8 carryover + INDEPENDENT=1: prior ack by an independent human → carries forward" {
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47 aaronkaufman)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+  echo "$output" | grep -q 'carries forward'
+}
+
+@test "guard8 carryover + INDEPENDENT=1: prior ack self-resolved by the PR AUTHOR → exit 10" {
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47 nsollazzo)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover + INDEPENDENT=1: prior ack resolved by the BOT → exit 10" {
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47 adk47)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover + INDEPENDENT=1: prior thread resolved with a NULL resolver → exit 10" {
+  # No 4th arg ⇒ resolvedBy absent. Resolved-but-no-resolver is not an ack, and
+  # it must not become one just because the ack is being carried rather than filed.
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover + INDEPENDENT=0: an author-resolved prior ack still carries (staged default)" {
+  # Pins the rollout claim that the default is the PRE-independence behaviour:
+  # the same fixture that exits 10 above must approve while the flag is off.
+  # If this ever flips without the flag, the staged rollout has leaked.
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47 nsollazzo)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}

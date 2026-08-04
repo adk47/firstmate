@@ -87,12 +87,39 @@ note_skip() {
   echo "note: skipped — $1"
 }
 
-# add_signal <id> <severity> <summary> <files-newline-list> <commits-newline-list>
+# add_signal <id> <severity> <summary> <files-newline-list> <commits-newline-list> [identity]
 # Built with jq --arg ONLY: paths and commit subjects are PR-author-controlled.
+#
+# `identity` is the material whose byte-equality means "the SAME finding", hashed
+# into .digest and rolled up into the report's warn_digest. qa-pr-approve.sh
+# Guard 8 carries a human's REBASE WARNING ack forward to a new head only when
+# that digest matches, so identity MUST be what the human actually judged — the
+# affected content — never the summary: the line-window summaries carry only a
+# COUNT ("deletes 10 line(s) in F"), so two unrelated 10-line deletions in one
+# file render identically and a summary-keyed carryover would inherit an ack
+# across different content.
+#
+# The id+files+commits+summary fallback is NOT content-sensitive in general, so
+# a `warn` signal that omits `identity` is marked NON-CARRYABLE rather than
+# hashed into the rollup. It still reports exactly as before; it only voids the
+# report's warn_digest, so Guard 8 falls back to per-head re-filing. Fail-closed
+# is the default because the failure mode is a signal author FORGETTING to pass
+# identity — which must not silently produce a carryable-but-unsound digest.
+# `info` signals never reach the rollup, so they keep the plain fallback.
 add_signal() {
-  jq -cn --arg id "$1" --arg severity "$2" --arg summary "$3" \
-    --arg files "$4" --arg commits "$5" \
-    '{id:$id, severity:$severity, summary:$summary,
+  local id="$1" severity="$2" summary="$3" files="$4" commits="$5" identity="${6:-}"
+  local carryable=true
+  if [ -z "$identity" ]; then
+    [ "$severity" != warn ] || carryable=false
+    identity="$(printf '%s\n%s\n%s\n%s' "$id" "$files" "$commits" "$summary")"
+  fi
+  local digest
+  digest="$(printf '%s' "$identity" | sha256sum | awk '{print $1}')"
+  jq -cn --arg id "$id" --arg severity "$severity" --arg summary "$summary" \
+    --arg files "$files" --arg commits "$commits" --arg digest "$digest" \
+    --argjson carryable "$carryable" \
+    '{id:$id, severity:$severity, summary:$summary, digest:$digest,
+      carryable:$carryable,
       files:   ($files   | split("\n") | map(select(length>0))),
       commits: ($commits | split("\n") | map(select(length>0)))}' \
     >> "$WORK/signals.ndjson"
@@ -105,6 +132,91 @@ normalize_lines() {
   sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' \
     | awk -v m="$RI_MIN_LINE_LEN" 'length($0) >= m && $0 ~ /[[:alnum:]]/' \
     | sort -u
+}
+
+# hunks_containing <set-file> <+|-> <ref-file> — stdin: a unified diff of ONE
+# file; stdout: the hunks whose <side> lines include a member of <set-file>,
+# each prefixed with a stable occurrence ordinal.
+#
+# This exists because the detection sets (normalize_lines) are sorted, deduped
+# and whitespace-collapsed, so they carry neither MULTIPLICITY nor LOCATION: a
+# file holding the same normalized lines in two blocks renders "deleted block A"
+# and "deleted block B" identically, and an ack for one would carry onto the
+# other. Detection still wants that fuzziness; identity must not have it.
+#
+# Emitted hunks keep raw bodies (order + duplicates intact) and their context
+# lines. Context alone is NOT sufficient: two byte-identical blocks with
+# byte-identical surrounding context still collide. So each hunk also carries
+# `occurrence N` — how many times this hunk's own <side>-plus-context slice
+# already appears in <ref-file> BEFORE this hunk's start. Deleting the first
+# duplicate gives 0, the second gives 1.
+#
+# The raw `@@ -a,b +c,d @@` numbers are deliberately NOT used: absolute positions
+# shift whenever anything earlier in the file changes, churning the digest
+# without the finding differing — and a digest that churns never carries an ack,
+# which ships the feature inert. The ordinal survives that: inserting lines above
+# moves the block without changing how many identical blocks precede it.
+#
+# <ref-file> is the revision the <side> lines live in — the merge-base image for
+# `-` (deletions), the head image for `+` (additions).
+#
+# <set-file> may be the literal `--all`, meaning "every hunk that touches <side>
+# qualifies" — used by large-deletion, which is a volume signal with no
+# line-membership test but the same need for a location-bearing identity.
+hunks_containing() {
+  awk -v setfile="$1" -v side="$2" -v reffile="$3" -v minlen="$RI_MIN_LINE_LEN" '
+    function norm(s) {
+      gsub(/[[:space:]]+/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s); return s
+    }
+    # How many times sideln[1..ns] occurs in ref[] starting strictly before hstart.
+    function ordinal(   p, j, ok, c) {
+      c = 0
+      for (p = 1; p < hstart && p + ns - 1 <= M; p++) {
+        ok = 1
+        for (j = 1; j <= ns; j++) if (ref[p + j - 1] != sideln[j]) { ok = 0; break }
+        if (ok) c++
+      }
+      return c
+    }
+    function emit(   i) {
+      if (nb > 0 && hit) {
+        printf "@@ occurrence %d\n", ordinal()
+        for (i = 1; i <= nb; i++) printf "%s\n", body[i]
+      }
+      nb = 0; ns = 0; hit = 0
+    }
+    BEGIN {
+      matchall = (setfile == "--all")
+      if (!matchall) while ((getline l < setfile) > 0) want[l] = 1
+      while ((getline l < reffile) > 0) ref[++M] = l
+    }
+    /^@@/ {
+      emit()
+      o = $2; sub(/^-/, "", o); sub(/,.*/, "", o)
+      n = $3; sub(/^\+/, "", n); sub(/,.*/, "", n)
+      hstart = (side == "-") ? o + 0 : n + 0
+      inhunk = 1
+      next
+    }
+    # File headers only ever precede the first @@ (single-file diff), but the
+    # trailing space keeps a deleted "---" body line (rendered "----") out of this.
+    /^(diff |index |--- |\+\+\+ )/ { next }
+    # "\ No newline at end of file" is diff metadata, not file content.
+    /^\\/ { next }
+    inhunk {
+      body[++nb] = $0
+      c1 = substr($0, 1, 1)
+      if (c1 == " " || c1 == side) sideln[++ns] = substr($0, 2)
+      if (c1 == side) {
+        if (matchall) hit = 1
+        else {
+          b = norm(substr($0, 2))
+          if (length(b) >= minlen && b ~ /[[:alnum:]]/ && (b in want)) hit = 1
+        }
+      }
+    }
+    END { emit() }
+  '
 }
 
 # diff_side <+|-> <git-diff-args...> → body lines of that side, markers stripped
@@ -131,9 +243,11 @@ write_state() { # <status>
     --arg base_ref "$BASE_REF" --arg merge_base "${merge_base:-}" \
     --arg base_tip "${base_tip:-}" --arg generated_at "$(date -u +%FT%TZ)" \
     --arg status "$1" --argjson signals "$signals_json" --argjson skipped "$skipped_json" \
+    --arg warn_digest "${warn_digest:-}" \
     '{version: 1, repo: $repo, pr: $pr, head_sha: $head_sha, base_ref: $base_ref,
       merge_base: $merge_base, base_tip: $base_tip, generated_at: $generated_at,
-      status: $status, skipped: $skipped, signals: $signals}' > "$tmp" || { rm -f "$tmp"; return 1; }
+      status: $status, warn_digest: $warn_digest, skipped: $skipped,
+      signals: $signals}' > "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$out"
   # keep the state dir bounded — reports are per-head and go stale fast
   find "$RI_STATE_DIR" -maxdepth 1 -name '*.json' -mtime +30 -delete 2>/dev/null || true
@@ -229,11 +343,23 @@ if [ "$pr_file_count" -le "$RI_MAX_FILES" ]; then
     diff_side + "$merge_base" "$head_sha" -- "$F"    | normalize_lines > "$WORK/pr_added"
     # erased = (recently added on base ∩ deleted by PR) minus lines the PR
     # re-adds elsewhere in the file (a move is not an erasure)
-    n="$(comm -12 "$WORK/recent_added" "$WORK/pr_deleted" | comm -23 - "$WORK/pr_added" | grep -c . || true)"
+    comm -12 "$WORK/recent_added" "$WORK/pr_deleted" | comm -23 - "$WORK/pr_added" > "$WORK/erased"
+    n="$(grep -c . "$WORK/erased" || true)"
     if [ "$n" -ge "$RI_INTERSECT_MIN_LINES" ]; then
+      # identity = the erasure IN PLACE, not the summary and not the erased set.
+      # The summary's "$n line(s) in $F" is identical for any two erasures of the
+      # same size in one file; the erased set is deduped and unordered, so it is
+      # identical for two deletions of the same text at different locations.
+      # hunks_containing keeps the raw bodies and their context. Commit subjects
+      # are excluded on purpose — the 14d window slides, so they churn without
+      # the finding changing.
       add_signal erased-recent-base-work warn \
         "PR deletes $n line(s) that landed in $F on $BASE_REF within the last ${RI_RECENT_DAYS}d — possible clobber of recently-merged work" \
-        "$F" "$(git log --since="${RI_RECENT_DAYS} days ago" --format='%h %s' "$merge_base" -- "$F" | head -5)"
+        "$F" "$(git log --since="${RI_RECENT_DAYS} days ago" --format='%h %s' "$merge_base" -- "$F" | head -5)" \
+        "$(printf 'erased-recent-base-work\n%s\n' "$F"
+           git show "$merge_base:$F" > "$WORK/refimg" 2>/dev/null || : > "$WORK/refimg"
+           git -c core.quotepath=false diff --unified=3 "$merge_base" "$head_sha" -- "$F" \
+             | hunks_containing "$WORK/erased" - "$WORK/refimg")"
     fi
   done < "$WORK/s1b_candidates"
 fi
@@ -251,11 +377,19 @@ if [ "$pr_file_count" -le "$RI_MAX_FILES" ]; then
     diff_side - "$merge_base" "$head_sha" -- "$F"   | normalize_lines > "$WORK/pr_deleted"
     # reintroduced = (removed on base ∩ added by PR) minus lines the PR also
     # deletes (a move within the PR is not a reintroduction)
-    n="$(comm -12 "$WORK/base_removed" "$WORK/pr_added" | comm -23 - "$WORK/pr_deleted" | grep -c . || true)"
+    comm -12 "$WORK/base_removed" "$WORK/pr_added" | comm -23 - "$WORK/pr_deleted" > "$WORK/reintroduced"
+    n="$(grep -c . "$WORK/reintroduced" || true)"
     if [ "$n" -ge "$RI_INTERSECT_MIN_LINES" ]; then
+      # Same location/multiplicity argument as erased-recent-base-work above,
+      # mirrored onto the + side: re-adding the same text at a different place is
+      # a different finding, and the deduped set cannot tell those apart.
       add_signal reintroduced-removed-lines warn \
         "PR re-adds $n line(s) that were removed from $F on $BASE_REF within the last ${RI_RECENT_DAYS}d — possible reintroduction of fixed/reverted code" \
-        "$F" "$(git log --since="${RI_RECENT_DAYS} days ago" --format='%h %s' "$base_tip" -- "$F" | head -5)"
+        "$F" "$(git log --since="${RI_RECENT_DAYS} days ago" --format='%h %s' "$base_tip" -- "$F" | head -5)" \
+        "$(printf 'reintroduced-removed-lines\n%s\n' "$F"
+           git show "$head_sha:$F" > "$WORK/refimg" 2>/dev/null || : > "$WORK/refimg"
+           git -c core.quotepath=false diff --unified=3 "$merge_base" "$head_sha" -- "$F" \
+             | hunks_containing "$WORK/reintroduced" + "$WORK/refimg")"
     fi
   done < "$WORK/s4_candidates"
 fi
@@ -265,10 +399,30 @@ STAGE="large-deletion"
 git -c core.quotepath=false diff --numstat "$merge_base" "$head_sha" -- "${EXCLUDES[@]}" > "$WORK/numstat"
 read -r adds dels <<<"$(awk -F'\t' '$1 != "-" {a += $1; d += $2} END {printf "%d %d", a, d}' "$WORK/numstat")"
 if [ "$dels" -ge "$RI_DEL_ABS" ] && [ "$dels" -ge $(( RI_DEL_RATIO * (adds + 1) )) ]; then
+  # Identity is the deleted BODY IN PLACE, not the totals: the summary carries
+  # only counts and `files` only the top-10 by volume, so two heads deleting
+  # entirely different content with equal totals from the same files would
+  # otherwise hash alike and let an ack carry onto a deletion nobody judged.
+  #
+  # Built per-file through hunks_containing --all so every hunk carries the same
+  # occurrence ordinal the line-window signals use. A flat projection of the
+  # deleted lines is NOT enough: byte-identical duplicate blocks deleted at two
+  # different locations in one file render identically without it. The explicit
+  # path line keeps a block moving between files distinct too.
+  : > "$WORK/large_del_body"
+  while IFS= read -r F; do
+    [ -n "$F" ] || continue
+    git show "$merge_base:$F" > "$WORK/refimg" 2>/dev/null || : > "$WORK/refimg"
+    { printf '+++ %s\n' "$F"
+      git -c core.quotepath=false diff --unified=3 "$merge_base" "$head_sha" -- "$F" \
+        | hunks_containing --all - "$WORK/refimg"
+    } >> "$WORK/large_del_body"
+  done < <(awk -F'\t' '$1 != "-" && $2 > 0 {print $3}' "$WORK/numstat" | sort -u)
   add_signal large-deletion warn \
     "PR deletes $dels line(s) vs $adds added — deletion volume disproportionate to additions (RI_DEL_ABS=$RI_DEL_ABS, RI_DEL_RATIO=$RI_DEL_RATIO)" \
     "$(awk -F'\t' '$2 != "-"' "$WORK/numstat" | sort -t"$(printf '\t')" -k2,2nr | head -10 | cut -f3)" \
-    ""
+    "" \
+    "$(printf 'large-deletion\n'; cat "$WORK/large_del_body")"
 fi
 
 # --- S5 duplicate-patch-id / already-merged (patch-id over the PR range) --------
@@ -417,7 +571,25 @@ STAGE="report"
 sha7="${head_sha:0:7}"
 warn_count="$(jq -rs '[.[] | select(.severity == "warn")] | length' "$WORK/signals.ndjson")"
 status=CLEAN
-[ "$warn_count" -gt 0 ] && status=WARN
+if [ "$warn_count" -gt 0 ]; then
+  status=WARN
+  # One value covering the WHOLE warn set (sorted, so signal order can't perturb
+  # it). Guard 8's carryover compares this: gaining or losing any warn signal
+  # changes it, so an ack can never carry onto a head that grew a new finding.
+  #
+  # A single non-carryable warn signal voids the rollup for the whole report —
+  # the digest must mean "every warn finding here is content-identified", and a
+  # partial rollup would carry an ack while one finding's content went unchecked.
+  # Left unset in that case (and on CLEAN); write_state's `${warn_digest:-}`
+  # covers it under set -u, the same way it covers merge_base/base_tip on the
+  # early-ERROR path, and Guard 8's 64-hex test rejects the empty value.
+  noncarryable="$(jq -rs '[.[] | select(.severity == "warn" and .carryable == false)] | length' \
+    "$WORK/signals.ndjson")"
+  if [ "$noncarryable" -eq 0 ]; then
+    warn_digest="$(jq -rs '[.[] | select(.severity == "warn") | .digest] | sort | join("\n")' \
+      "$WORK/signals.ndjson" | sha256sum | awk '{print $1}')"
+  fi
+fi
 
 echo
 echo "Rebase integrity for PR #$PR @ $sha7 (base $BASE_REF, merge-base ${merge_base:0:7}): $status"
