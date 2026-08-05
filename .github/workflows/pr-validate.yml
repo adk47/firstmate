@@ -95,9 +95,11 @@ jobs:
         # that the QA auto-review (skill Step 3d) reads and qa-pr-approve.sh
         # Guard 8 re-derives from. Advisory by design: the exit is swallowed so
         # neither a signal nor an analyzer error can hard-fail CI — Guard 8 is
-        # the fail-closed consumer (WARN holds auto-approval until a human
-        # resolves the REBASE WARNING thread; ERROR — and, for hydra, a missing
-        # report — holds it outright).
+        # the fail-closed consumer (WARN holds auto-approval until the REBASE
+        # WARNING thread is resolved — by the reviewing skill itself, once it
+        # has verified the deletions were intended and written that reasoning
+        # into the thread, per SKILL.md Step 3d.3, or by a human; ERROR — and,
+        # for hydra, a missing report — holds it outright).
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
