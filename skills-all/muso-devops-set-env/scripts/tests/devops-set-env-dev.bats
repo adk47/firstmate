@@ -23,10 +23,13 @@ setup() {
     printf '%s\n' 'aaron@muso.ai' 'nick' > "$ENVSET_REQUESTERS_PATH"
     printf '%s\n' 'nick' 'nick@muso.ai' > "$BLOCKLIST_OVERRIDE_APPROVERS_PATH"
 
-    # --- dev fixtures (broad — the three DEV authorities; permissive muso-dev glob) ---
+    # --- dev fixtures (broad — the DEV authorities; permissive muso-dev glob) ---
+    # Deliberately does NOT contain U0ACHTYUULT (Artem D, ex-DevOps Lead, departed
+    # 2026-07-30) — the fixture mirrors the shipped allowlist so a revoked person
+    # cannot pass here and silently look authorized.
     export DEV_ENVSET_REQUESTERS_PATH="$TEST_ROOT/dev-requesters.txt"
     export DEV_TARGET_ALLOWLIST_PATH="$TEST_ROOT/dev-targets.txt"
-    printf '%s\n' 'nick' 'nick@muso.ai' 'aaron@muso.ai' 'serhii@muso.ai' 'U03TYGJF1N3' 'U0ACHTYUULT' \
+    printf '%s\n' 'nick' 'nick@muso.ai' 'aaron@muso.ai' 'serhii@muso.ai' 'U03TYGJF1N3' \
         'U02N2NP3H7F' 'artem@muso.ai' \
         > "$DEV_ENVSET_REQUESTERS_PATH"
     printf '%s\n' 'muso-dev/*' 'muso-chat-dev/*' > "$DEV_TARGET_ALLOWLIST_PATH"
@@ -59,46 +62,55 @@ dev_set() { # dev_set <requester> <set-args...>
     grep -q "^${SECRET_KEY}=abc123\$" "$DEVOPS_ENVSET_STUB_STORE"
 }
 
-@test "dev: Artem D (U0ACHTYUULT, email unmapped) is authorized via bare UID" {
+# Artem D (Dolobanko, U0ACHTYUULT) was a DEV authority until he left the company
+# on 2026-07-30. Revocation has to be enforced, not just documented: a departed
+# person's UID reaching a dev-secret write is the whole risk.
+@test "dev: departed Artem D (U0ACHTYUULT) is REFUSED (exit 3)" {
     run dev_set U0ACHTYUULT --target "$DEV_TARGET" --key "$SECRET_KEY" --value xyz
-    [ "$status" -eq 0 ]
-    grep -q "^${SECRET_KEY}=xyz\$" "$DEVOPS_ENVSET_STUB_STORE"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"DEVOPS_ENVSET_REQUESTER_DENIED"* ]]
+    # And nothing reached the backend.
+    [ ! -f "$DEVOPS_ENVSET_STUB_STORE" ] || ! grep -q "^${SECRET_KEY}=xyz\$" "$DEVOPS_ENVSET_STUB_STORE"
 }
 
-# There are TWO authorized Artems and they are told apart ONLY by Slack UID.
-# Artem M is mapped to an email; Artem D (above) deliberately is not. Attributing
-# a dev write to the wrong Artem would make the audit trail lie about who acted.
-@test "dev: Artem M (U02N2NP3H7F) is authorized and audits as artem@muso.ai" {
+@test "dev: Artem (U02N2NP3H7F) is authorized and audits as artem@muso.ai" {
     run dev_set U02N2NP3H7F --target "$DEV_TARGET" --key "$SECRET_KEY" --value mval
     [ "$status" -eq 0 ]
     grep -q "^${SECRET_KEY}=mval\$" "$DEVOPS_ENVSET_STUB_STORE"
-    # The UID must resolve to Artem M's email in the audit — not be left as a raw
-    # UID, and never Artem D's identity.
+    # The UID must resolve to his email in the audit, not be left as a raw UID —
+    # otherwise the audit trail cannot say who acted.
     run jq -r 'select(.key=="'"$SECRET_KEY"'") | .requester' "$AUDIT_PATH"
     [ "$output" = "artem@muso.ai" ]
 }
 
-@test "dev: the two Artems resolve to DIFFERENT identities (never conflated)" {
-    run bash "$SCRIPT" --requester U02N2NP3H7F resolve-email
-    [ "$output" = "artem@muso.ai" ]
-    # Artem D has no confirmed email, so his UID must fall through unchanged —
-    # if this ever returns artem@muso.ai, the two people have been merged.
-    run bash "$SCRIPT" --requester U0ACHTYUULT resolve-email
-    [ "$output" = "U0ACHTYUULT" ]
-}
-
 # The tests above run against a synthetic fixture allowlist, which means they
-# would still pass if the SHIPPED config forgot a DEV authority. This asserts the
-# real file — it is the only check that the grant actually reaches production.
-@test "dev: shipped dev-envset-requesters.txt authorizes all three DEV authorities" {
+# would still pass if the SHIPPED config were wrong. These assert the real file —
+# the only check that the grant, and the revocation, reach production.
+@test "dev: shipped dev-envset-requesters.txt authorizes exactly the DEV authorities" {
     local real="${BATS_TEST_DIRNAME}/../../config/dev-envset-requesters.txt"
     [ -f "$real" ]
-    for id in U03TYGJF1N3 U0ACHTYUULT U02N2NP3H7F; do
+    for id in U03TYGJF1N3 U02N2NP3H7F; do
         grep -qx "$id" "$real" || { echo "missing DEV authority UID: $id" >&2; return 1; }
     done
-    # Artem M's email is authorized; Artem D's is still unconfirmed and must NOT
-    # be guessed as artem@muso.ai (that is Artem M).
     grep -qx 'artem@muso.ai' "$real"
+}
+
+@test "dev: shipped config does NOT authorize departed Artem D (revocation holds)" {
+    local dev="${BATS_TEST_DIRNAME}/../../config/dev-envset-requesters.txt"
+    local prod="${BATS_TEST_DIRNAME}/../../config/envset-requesters.txt"
+    # Active (non-comment) lines only — a commented mention is documentation, an
+    # active line is authority. NOTE: assertions here capture to a variable and
+    # compare with [[ != ]] on purpose. A mid-test `! cmd | grep -q` is exempt
+    # from bats' errexit and can NEVER fail, so it would be a vacuous assertion.
+    local strip='s/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d'
+    local dev_hit prod_hit
+    dev_hit="$(sed "$strip" "$dev" | grep -cx 'U0ACHTYUULT' || true)"
+    prod_hit="$(sed "$strip" "$prod" | grep -cx 'U0ACHTYUULT' || true)"
+    [ "$dev_hit" -eq 0 ]
+    [ "$prod_hit" -eq 0 ]
+    # He must not have been silently remapped to the remaining Artem's address.
+    run bash "$SCRIPT" --requester U0ACHTYUULT resolve-email
+    [[ "$output" != "artem@muso.ai" ]]
 }
 
 @test "dev: a non-secret key is self-serve too (exit 0, not redacted)" {

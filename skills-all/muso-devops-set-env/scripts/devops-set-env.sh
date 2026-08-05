@@ -128,13 +128,11 @@ resolve_slack_to_email() {
         U02S7TJ7QHY) echo "oleg@muso.ai" ;;
         U0AL36NADEY) echo "nick@muso.ai" ;;
         U0A8CCTTAAG) echo "liza@muso.ai" ;;
-        U02N2NP3H7F) echo "artem@muso.ai" ;;   # Artem M (Mobile) — dev authority
-        # TWO different Artems are authorized: resolve them by UID, never by the
-        # display name "Artem". Artem D (DevOps Lead, U0ACHTYUULT) is
-        # intentionally NOT mapped here — his muso.ai email is unconfirmed, so his
-        # UID falls through and is matched as a bare UID in
-        # dev-envset-requesters.txt. Do NOT map him to artem@muso.ai — that is
-        # Artem M, just above. Add his real email here once known.
+        U02N2NP3H7F) echo "artem@muso.ai" ;;   # Artem (Mobile) — dev authority
+        # Artem D (Dolobanko, U0ACHTYUULT, ex-DevOps Lead) has LEFT the company
+        # (2026-07-30) and is deliberately absent from this map AND from
+        # dev-envset-requesters.txt. Do not re-add him. U02N2NP3H7F above is the
+        # only Artem now, so the old "two Artems" disambiguation no longer applies.
         *) echo "$input"; return 1 ;;
     esac
     return 0

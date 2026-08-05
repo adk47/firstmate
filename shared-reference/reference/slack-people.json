@@ -1,63 +1,150 @@
 {
-  "_purpose": "Authoritative Slack ID \u2192 name mapping. EVERY report that attributes a message to someone MUST resolve the sender_id through this file. No exceptions.",
+  "_purpose": "Authoritative Slack ID → person mapping. EVERY report that attributes a message to someone MUST resolve the sender_id through this file. No exceptions.",
+  "_roster": "Nick's authoritative roster, 2026-07-30. The NINE entries with `kind: \"human\"` AND `current: true` are the COMPLETE list of people currently at Muso — if a person is not flagged current here, they do not work at Muso, no matter what any other doc, memory file or workflow says. Never grant authority to a non-current person, never route an approval or escalation to one, and never describe one as a colleague in the present tense. Entries for former staff are retained ONLY so historical messages and commits still resolve to a name.",
+  "_github": "`github` is the person's GitHub login, verified against the Muso-AI org and github.com/users/<login> on 2026-07-30. `null` means no GitHub account is known for them (typically non-engineering roles) — do NOT guess one, and do not assume a Slack handle matches a GitHub login.",
+  "_kind": "`kind` is \"human\" or \"bot\". Non-human identities carry NO `current` field on purpose: `current` is the current-EMPLOYEE predicate, so a consumer filtering on it must never pick up an automation account. Always check `kind == \"human\"` before treating an entry as a person. Enforced by scripts/validate-shared-config.sh.",
   "U7RP6HKUZ": {
     "name": "Aaron Kaufman",
     "short": "Aaron",
-    "role": "CTO/Founder"
-  },
-  "U07NF5A77E2": {
-    "name": "Fede Pahlen",
-    "short": "Fede",
-    "role": "CMO"
-  },
-  "U038BM16T7W": {
-    "name": "Jan Delmo",
-    "short": "Jan",
-    "role": "Growth"
-  },
-  "U03TYGJF1N3": {
-    "name": "Serhii Ostapchuk",
-    "short": "Serhii",
-    "role": "DevOps"
-  },
-  "U0302FZQGCB": {
-    "name": "Andrey Morskoy",
-    "short": "Andrey",
-    "role": "Platform/Data Lead"
-  },
-  "U02S7TJ7QHY": {
-    "name": "Oleg",
-    "short": "Oleg",
-    "role": "Engineer"
-  },
-  "U0ADN1J282Z": {
-    "name": "Clio",
-    "short": "Clio",
-    "role": "AI Assistant"
+    "role": "CEO",
+    "github": "adk47",
+    "kind": "human",
+    "current": true
   },
   "U0AL36NADEY": {
     "name": "Nicholas Sollazzo",
     "short": "Nick",
-    "role": "Data Ops"
+    "role": "Chief Agent Officer",
+    "github": "nsollazzo",
+    "kind": "human",
+    "current": true
+  },
+  "U03TYGJF1N3": {
+    "name": "Serhii Ostapchuk",
+    "short": "Serhii",
+    "role": "CTO",
+    "github": "liflovs",
+    "kind": "human",
+    "current": true
+  },
+  "U02N2NP3H7F": {
+    "name": "Artem",
+    "short": "Artem",
+    "role": "Mobile Developer",
+    "github": "Korpyc",
+    "kind": "human",
+    "current": true
   },
   "U03LP8YHLPK": {
     "name": "Mariia Bubley",
     "short": "Mariia",
-    "role": "Design/UX"
+    "role": "Head of Product UI & UX Designer",
+    "github": "azure-kirin",
+    "kind": "human",
+    "current": true
   },
-  "U02N2NP3H7F": {
-    "name": "Ihor",
-    "short": "Ihor",
-    "role": "Engineering"
-  },
-  "U042AG73FEK": {
-    "name": "Unknown",
-    "short": "Unknown",
-    "role": "Engineering"
+  "U038BM16T7W": {
+    "name": "Jan Delmo",
+    "short": "Jan",
+    "role": "Head of Operations",
+    "github": null,
+    "kind": "human",
+    "current": true
   },
   "U0A8CCTTAAG": {
-    "name": "Liza",
+    "name": "Liza Basco",
     "short": "Liza",
-    "role": "Finance"
+    "role": "Accountant",
+    "github": null,
+    "kind": "human",
+    "current": true
+  },
+  "U0AV9C7CFRQ": {
+    "name": "Faith Undie",
+    "short": "Faith",
+    "role": "Community and Social Media Manager & Designer",
+    "github": null,
+    "kind": "human",
+    "current": true
+  },
+  "U02S7C96CGN": {
+    "name": "McLaren Amberti",
+    "short": "McLaren",
+    "role": "Sales Operations",
+    "github": null,
+    "kind": "human",
+    "current": true
+  },
+  "U0ADN1J282Z": {
+    "name": "Clio",
+    "short": "Clio",
+    "role": "AI Assistant (automation account, not an employee)",
+    "github": null,
+    "kind": "bot"
+  },
+  "U0ACHTYUULT": {
+    "name": "Artem Dolobanko",
+    "short": "Artem D",
+    "role": "former — DevOps Lead",
+    "github": null,
+    "kind": "human",
+    "current": false
+  },
+  "U0ACLT0GF9T": {
+    "name": "Volodymyr Popov",
+    "short": "Volodymyr",
+    "role": "former — Developer",
+    "github": null,
+    "kind": "human",
+    "current": false
+  },
+  "U0AH52J8BKM": {
+    "name": "Dmytro Ovdii",
+    "short": "Dmytro",
+    "role": "former — Developer",
+    "github": null,
+    "kind": "human",
+    "current": false
+  },
+  "U0AD37S5QAV": {
+    "name": "Bohdan",
+    "short": "Bohdan",
+    "role": "former — Developer",
+    "github": null,
+    "kind": "human",
+    "current": false
+  },
+  "U07NF5A77E2": {
+    "name": "Fede Pahlen",
+    "short": "Fede",
+    "role": "former — CMO",
+    "github": null,
+    "kind": "human",
+    "current": false
+  },
+  "U0302FZQGCB": {
+    "name": "Andrey Morskoy",
+    "short": "Andrey",
+    "role": "former — Platform/Data Lead",
+    "github": null,
+    "kind": "human",
+    "current": false
+  },
+  "U02S7TJ7QHY": {
+    "name": "Oleg",
+    "short": "Oleg",
+    "role": "former — Engineer",
+    "github": null,
+    "kind": "human",
+    "current": false
+  },
+  "U042AG73FEK": {
+    "name": "Ihor Shchuruk",
+    "short": "Ihor",
+    "role": "former — Developer",
+    "github": null,
+    "kind": "human",
+    "current": false,
+    "_note": "This is the Ihor who left the company. U02N2NP3H7F was previously mislabelled \"Ihor\" in this file; that UID is Artem (Mobile Developer). Identified from workspaces/cto/USER.md, which named U042AG73FEK as Ihor Shchuruk while this entry said \"Unknown\"."
   }
 }

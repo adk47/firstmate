@@ -226,7 +226,7 @@ These are GitHub server-side settings (classic branch protection), **not** in-re
 | @QA | Nick (+ Serhii) | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
 | @Finance | Liza | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
 | @Operations | Jan | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
-| @DevOps | Artem D | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
+| @DevOps | Nick (owner), Serhii (CTO) | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
 | @Scout | Nick | Personality, USER.md, MEMORY.md | Add skills, add integrations, new channels | Deny list, egress, security sections |
 | @CS | Jan + Leadership | Personality, USER.md (no MEMORY) | Add skills (rare) | Everything else — external users can NEVER modify |
 
@@ -241,4 +241,9 @@ Aaron (U7RP6HKUZ) can:
 - Revoke any agent's Slack tokens
 - Enter any agent's read-only mode manually
 
-No one else has SSH access to Node 8 except Aaron and Artem D (DevOps).
+**SSH access to Node 8 is Aaron (U7RP6HKUZ) and Nick (U0AL36NADEY) only.** Nobody
+else has it — not the CTO, not the engineering team, not the DEV authorities. In
+particular, holding full control of the DEV environment does NOT come with shell
+access to Node 8: dev autonomy is exercised through the agent and the
+`muso-devops-set-env` wrapper, never over SSH. (This line previously named a
+departed DevOps lead; corrected 2026-07-30 by Nick.)

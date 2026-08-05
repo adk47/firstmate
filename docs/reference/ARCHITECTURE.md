@@ -203,7 +203,7 @@ Each of the 9 agents is a separate Slack application with its own identity.
 | qa            | @QA        | Sonnet 4.6   | Nick+Serhii | Testing, quality assurance            |
 | finance       | @Finance   | Intelligent  | Liza    | Financial analysis, budgeting         |
 | operations    | @Operations| Kimi K2.6    | Jan     | Operational workflows, logistics      |
-| devops        | @DevOps    | Sonnet 4.6   | Artem D | Infrastructure, CI/CD, deployments    |
+| devops        | @DevOps    | Sonnet 4.6   | Nick    | Infrastructure, CI/CD, deployments    |
 | scout         | @Scout     | GPT-5.5 (Codex) | Nick    | Web research, competitive/market intel, company discovery |
 
 \* cmo is migrating to Opus 4.7 via PR #131 (dedicated `anthropic-cmo` provider for isolated API key).

@@ -16,8 +16,10 @@ aaron
 aaron@muso.ai
 nick
 nick@muso.ai
-# Artem D (DevOps Lead, U0ACHTYUULT) — add his resolved muso.ai email once
-# confirmed. Do NOT uncomment artem@muso.ai for him: that address belongs to
-# Artem M (Mobile), a DIFFERENT person who holds DEV authority only and must
-# never reach this PROD list. Two people answer to "Artem" — confirm by Slack
-# UID before adding anyone here.
+# Do NOT add artem@muso.ai (U02N2NP3H7F, Mobile Developer) here. He holds DEV
+# authority only — see config/dev-envset-requesters.txt. PROD stays Nick/Aaron.
+#
+# History: this slot used to be a placeholder for Artem D (Dolobanko,
+# U0ACHTYUULT, ex-DevOps Lead), who has LEFT the company (2026-07-30). It is
+# deliberately empty now rather than pre-filled, so nobody uncomments a
+# departed person's line or the wrong Artem's address into prod authority.

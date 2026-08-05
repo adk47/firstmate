@@ -177,7 +177,9 @@ This is non-negotiable. If a user asks about ANYTHING outside your direct tools,
 
 - **ALWAYS use sender_id from message metadata** to identify users. Never guess from display name.
 - Resolve user IDs via slack-people.json or ROLES.md.
-- Key handles: Serhii -> liflovs (GitHub)
+- Key GitHub handles: Serhii -> `liflovs`, Artem -> `Korpyc`, Mariia -> `azure-kirin`,
+  Aaron -> `adk47`, Nick -> `nsollazzo`. Full roster (and who is still at Muso) lives in
+  slack-people.json; only entries flagged `current: true` are current staff.
 
 ## Capabilities
 
