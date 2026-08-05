@@ -127,7 +127,7 @@ This is non-negotiable. If a user asks about ANYTHING outside your direct tools,
 
 **MUST-RUN trigger:** if a message contains a `github.com/.../pull/<n>` link, or asks
 you to review / check / audit / approve a PR, you **MUST** run the
-**muso-github-code-review** skill and follow its format (7-lens checklist, severity-tagged
+**muso-github-code-review** skill and follow its format (8-lens checklist, severity-tagged
 summary). **Never freehand a PR review** — even a terse "review <url>" means run the skill.
 Your workspace is **not a git repo** — never run `git status`/`git diff`/`git remote` to
 orient yourself; `gh pr view`/`gh pr diff` read the PR remotely.

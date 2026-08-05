@@ -138,7 +138,7 @@ description: |
 **Right:**
 ```yaml
 description: |
-  Review a GitHub PR for Muso-AI repos: fetch the diff, run a 7-lens checklist, post a
+  Review a GitHub PR for Muso-AI repos: fetch the diff, run an 8-lens checklist, post a
   Slack summary, then post a batched GitHub review after approval. Triggers: "review PR",
   "code review", "check/audit this PR", a github.com/<owner>/<repo>/pull/<n> URL.
 ```

@@ -111,6 +111,29 @@ jobs:
             || echo "::warning::rebase-integrity analyzer errored (exit $?) — rebase state UNVERIFIED for this head; QA auto-approval is held (Guard 8)"
           echo "::endgroup::"
 
+      - name: Blast radius check (advisory — warns, never blocks)
+        # Answers the question diff size cannot: if this change is wrong, what
+        # breaks? The reviewing agent has NO clone (its workspace is not a git
+        # repo), so it cannot grep for the callers of a changed script — this
+        # runner can, and hands the result over through the filesystem, the same
+        # way the rebase-integrity step above does. The QA skill (Step 3e) reads
+        # the report to scale review depth; Guard 9 in qa-pr-approve.sh consumes
+        # it only when QA_BLAST_RADIUS_GATE=1, which is NOT yet the default.
+        # Advisory by design: the exit is swallowed so neither a signal nor an
+        # analyzer error can hard-fail CI.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "::group::Blast radius check"
+          chmod +x scripts/check-blast-radius.sh
+          scripts/check-blast-radius.sh \
+            "${{ github.event.pull_request.number }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            || echo "::warning::blast-radius analyzer errored (exit $?) — impact UNVERIFIED for this head; the review proceeds on the 8 lenses alone"
+          echo "::endgroup::"
+
       - name: JSON Lint — validate gateway configs
         run: |
           echo "::group::Validating gateway configs"

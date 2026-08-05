@@ -2,7 +2,7 @@
 name: muso-github-code-review
 description: |
   Review and (when satisfied) approve a GitHub PR in Muso-AI repos: fetch the diff,
-  run a 7-lens checklist, post a severity-tagged Slack summary, and on a GO verdict
+  run an 8-lens checklist, post a severity-tagged Slack summary, and on a GO verdict
   approve via the gated wrapper (never merge). Triggers: "review PR"/"review this
   pull request", "approve PR", "code review", "check/audit this PR", any
   github.com/<owner>/<repo>/pull/<n> link.
@@ -24,7 +24,7 @@ allowed-tools:
 
 # Muso — GitHub Code Review
 
-End-to-end PR review: gather → diff → 7-lens analysis → Slack summary → human
+End-to-end PR review: gather → diff → 8-lens analysis → Slack summary → human
 approval → batched GitHub review. You run the whole thing yourself in one session.
 
 ## When Clio or CTO delegate a review
@@ -38,7 +38,7 @@ When the triggering message says **AUTO-REVIEW** (dispatched by
 `scripts/qa-dispatch-pr-review.sh` from the `qa-autoreview` GitHub Action), you are
 running headless: there is no person in the thread to approve, and the dispatch +
 the gates below ARE the authorization. You keep the PR author updated in a Slack DM
-(opening note → threaded result) and run the same review — diff fetch, 7 lenses,
+(opening note → threaded result) and run the same review — diff fetch, 8 lenses,
 CI check, batched-review API, the `qa-pr-approve.sh` wrapper, logging — with these
 overrides. The dispatch message gives you the author's Slack UID.
 
@@ -69,19 +69,26 @@ result leads with the ✅/⛔ state.
    `"authorization":"auto-review-dispatch"`).
 3. **Approve (Step 7) only if ALL of these hold** — otherwise post the review and
    stop without approving, and say which gate failed:
-   - **CI is fully green** — `gh pr checks <pr> --repo Muso-AI/hydra` shows every
-     check passed, with none `fail` or `pending`. In auto mode be strict: do NOT
-     apply Step 3c's "unrelated red gate" allowance — any non-green check means do
-     not approve. (Ignore the `qa-review` row in `gh pr checks` — that is your OWN status from Step 6b; the approval wrapper excludes it to avoid a circular dependency.)
+   - **CI is green, EXCEPT for policy-listed advisory checks** — every check
+     passed, with none `fail` or `pending`, other than those named in the policy's
+     `advisory_checks` (the deploy pre-flight and friends). **Changed 2026-08-03:**
+     this used to say "be strict — any non-green check means do not approve",
+     which held hydra#780 at a clean GO for days because a live rsync dry-run was
+     red against pre-existing server drift that had nothing to do with the diff.
+     Those checks now alert instead of blocking; every OTHER red check still holds
+     the approval. (Ignore the `qa-review` row — that is your OWN status from
+     Step 6b; the wrapper excludes it to avoid a circular dependency.)
    - **Verdict is GO** — no 🔴 Critical and no 🟡 Important findings, AND every prior
      unresolved 🔴/🟡 thread cleared per "Carry forward prior findings". A fresh-pass
-     0/0 is not GO if an earlier blocker is still open.
-   - **Rebase integrity is clear** — the Step 3d report is CLEAN. Missing counts
-     as no-data ONLY for external repos; for **hydra** a missing report is a
-     failed hand-off and holds approval (say so in the verdict/DM). A WARN holds
-     approval until a HUMAN resolves the 🟡 REBASE WARNING thread; an ERROR holds
-     it outright. The wrapper's Guard 8 re-derives all of this mechanically
-     (exit 10).
+     0/0 is not GO if an earlier blocker is still open. **This is the gate that
+     matters**: block on unresolved issues, never on unresolved paperwork.
+   - **Rebase integrity is clear** — the Step 3d report is CLEAN, or its WARN has
+     been resolved. Missing counts as no-data ONLY for external repos; for
+     **hydra** a missing report is a failed hand-off and holds approval (say so in
+     the verdict/DM). A WARN holds approval until the 🟡 REBASE WARNING thread is
+     resolved — **you may resolve it yourself once you have verified the deletions
+     were intended** (Step 3d.3); an ERROR holds it outright. The wrapper's Guard 8
+     re-derives the structural part mechanically (exit 10).
    - The gated wrapper accepts the author UID.
 4. **Publish the `qa-review` commit status (Step 6b)** (best-effort on an UNGATED repo; on a repo in `.merge_gate_repos` it is a hard requirement — a missing terminal status leaves the required check pending and the PR unmergeable) — `failure` on NO-GO,
    `success` on GO — before the result DM, so the PR shows a red/green QA signal.
@@ -92,20 +99,25 @@ result leads with the ✅/⛔ state.
    ```bash
    bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "✅ Approved <https://github.com/Muso-AI/hydra/pull/<PR>|#<PR>> — CI green and 0 unresolved blocking findings (fresh pass + carried-forward threads). Safe to merge." "$ts"
    ```
-   **Do NOT say "Safe to merge" on a repo in `.require_human_codeowner_repos`** (hydra,
-   industry-data-processing). A bot identity can never satisfy a CODEOWNERS
-   requirement, so the approval counts toward the review count but does NOT unblock
-   the merge — `qa-pr-approve.sh` prints exactly this and its post-check reports the
-   real `reviewDecision`/`mergeStateStatus`. Say so instead:
+   **Report what the post-check ACTUALLY says, not what the policy predicts.**
+   `require_human_codeowner_repos` only matters where the repo is ALSO in
+   `identity.app_repos` — a GitHub App can never be a CODEOWNER, but the host
+   account (`adk47`) IS the universal code owner under hydra's CODEOWNERS, and
+   `app_repos` is currently empty. So on hydra today the bot's approval DOES clear
+   the code-owner gate (verified: hydra#786 and #777 both went APPROVED → CLEAN).
+   Saying "still needs a human CODEOWNER" when it does not is exactly the friction
+   this skill was told to remove. Read the wrapper's post-check
+   `reviewDecision`/`mergeStateStatus` and relay THAT. Only if it still reports
+   blocked should you say so, naming the real reason:
    ```bash
-   bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "✅ Approved <https://github.com/Muso-AI/hydra/pull/<PR>|#<PR>> — CI green, 0 blocking findings. Still needs a human CODEOWNER approval before it can merge." "$ts"
+   bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "✅ Approved <https://github.com/Muso-AI/hydra/pull/<PR>|#<PR>> — CI green, 0 blocking findings. GitHub still reports <mergeStateStatus>: <what is outstanding>." "$ts"
    # or, if not approved:
    bash /opt/hydra/scripts/qa-slack-dm.sh <author-uid> "⛔ Reviewed <https://github.com/Muso-AI/hydra/pull/<PR>|#<PR>> — <N> blocking finding(s), not approved (<one-line reason>). Details on the PR." "$ts"
    ```
    Keep it to one line; the full review lives on the PR. (If you never got an opening
    ts, send it un-threaded rather than skipping it.) When the hold is a rebase
-   warning (Step 3d), name it: "⛔ Reviewed <url|#N> — REBASE WARNING: possible
-   rebase clobber; needs a human to review and resolve the PR thread."
+   warning (Step 3d), name it: "⛔ Reviewed <url|#N> — REBASE WARNING: I could not
+   confirm the deletions were intended; needs a human to check and resolve the thread."
 
 ## Access control
 
@@ -196,9 +208,9 @@ not the parent's. `gh pr diff` already scopes to the PR's base, so prefer it ove
 `git diff main...HEAD` (which would include the parent's changes and produce
 confused findings). Call out the stacked relationship in the summary.
 
-## Step 3 — Walk the 7-lens checklist (the review)
+## Step 3 — Walk the 8-lens checklist (the review)
 
-Go over every changed file once, through all seven lenses. This is the merged
+Go over every changed file once, through all eight lenses. This is the merged
 doctrine — be specific, cite `file:line`, and prefer real problems over style nits.
 
 1. **Correctness & edge cases** — Does the code do what the PR claims? Empty/null
@@ -209,7 +221,24 @@ doctrine — be specific, cite `file:line`, and prefer real problems over style 
    highest-value — silent failures are the costliest class.)
 3. **Test coverage** — Behavioral coverage of the new paths and their error cases,
    not line %. New functionality with no test? Critical paths only covered on the
-   happy path? Flag the specific missing case.
+   happy path? Flag the specific missing case. Four false-green patterns have shipped
+   here already — check each by name:
+   - **Verb/route gap** — the probe asserts one verb (`PUT`) while a sibling route
+     (`PATCH`) reaches the same handler ungated.
+   - **Single-gate control** — a deny-all control wired to only one of several gates,
+     so a broken sibling gate still satisfies every assertion. Run the control *per
+     gate*.
+   - **Empty-file pass** — `bash <empty file>` exits 0, so a generator that failed
+     part-way yields a green run. Assert the emitter's exit status *and* the file's
+     size.
+   - **Function, not wiring** — sourcing a script proves the function works, not that
+     the entrypoint still calls it. Assert end-to-end through the real dispatcher.
+   - **Vacuous negation in bats** — `! cmd` is exempt from `set -e`, and bats takes
+     the test result from the LAST command only. So a failing `! grep …` that is not
+     the final statement passes silently, and the "it must NOT do X" half of the
+     suite proves nothing. Verified in this repo: a `! grep -q FORBIDDEN` followed by
+     any passing line still reports `ok`. Use `if cmd; then false; fi`, which `set -e`
+     does honour.
 4. **Type design & invariants** — New types/schemas/models: are illegal states
    representable? Is the invariant enforced at construction, or only by convention?
    Encapsulation leaks, primitive obsession on domain concepts.
@@ -222,10 +251,43 @@ doctrine — be specific, cite `file:line`, and prefer real problems over style 
    hardcoded secrets/credentials, missing input validation, SQL injection, XSS,
    path traversal, missing auth checks; plus obvious performance traps (N+1 queries,
    blocking calls in hot paths).
+8. **Gate weakening & evasion** — Applies when the diff adds or edits an *enforcement
+   gate*: `check-*.sh`, `ensure-*.sh`, `validate-*.sh`, a `Guard` block, a CI gate
+   step, or any code whose job is to refuse. Gates authored in this repo have
+   repeatedly shipped with holes in them, so hold this lens to a higher bar than the
+   diff's size suggests — and read the *refusal* branch, not the success branch.
+   - **grep vs. parse** — a gate that decides by literal-byte `grep` is evaded by an
+     inter-token newline or `\uXXXX`-escaped quotes that `jq`/`JSON.parse` still
+     decode to the same value. Require the union of both checks, never the weaker one.
+   - **Fail-open on missing input** — an absent, empty, or unreadable config/policy
+     key must refuse (non-zero), never degrade to "allow all".
+   - **Unwired enforcement** — the gate function exists and is tested, but nothing
+     invokes it on the real path (see lens 3).
+   - **Concurrency & clock** — a gate keeping persistent state (history, lock,
+     cooldown file) needs `flock` for cross-process atomicity, must reject
+     future-dated stamps rather than compute a negative `NOW - t`, and must validate
+     non-numeric env overrides before arithmetic.
+   - **Discrimination without stability** — a change making a digest or detector
+     *more* discriminating must keep the test proving it stays **stable** when the
+     flagged content is unchanged. A digest that merely churns silently destroys the
+     feature it protects.
+
+### Every 🔴 and 🟡 needs a failure scenario
+
+These eight lenses push toward flagging more; this is the counterweight. A finding is
+Critical or Important only if you can state the concrete way it fails — specific
+inputs or state → the wrong output, a crash, or a silent pass — and that sentence
+belongs *in the finding*.
+
+If you cannot write it, the finding is 🟢/🔵 or it is nothing. "This looks risky",
+"this could be a problem", and "consider hardening this" are not findings.
+Over-flagging is the documented failure mode of automated reviewers, and here it has a
+mechanical cost: every false 🔴/🟡 is a thread a human must open, read, and resolve
+before Guard 7 will let the PR through.
 
 ## Step 3b — Run the tests (when warranted)
 
-The 7-lens pass is static (diff + file reads, no checkout). When the test-coverage or
+The 8-lens pass is static (diff + file reads, no checkout). When the test-coverage or
 correctness lens needs it — or the requester asks — actually run the PR's tests. That
 needs a checkout:
 
@@ -286,6 +348,13 @@ A red check that is **unrelated to this PR's diff** (e.g. a deploy pre-flight / 
 gate failing on pre-existing repo state) is not a finding against the PR: note it as
 context ("CI red on an unrelated gate") and do not raise it to 🔴/🟡.
 
+These gates are now also listed in the policy's `advisory_checks`, so the approval
+wrapper stops counting them too — previously this paragraph said "not a finding"
+while Guard 6 refused anyway, and the two disagreed. If you judge that a red
+advisory check IS caused by this diff (the PR edits `deploy.sh`, or adds a file the
+rsync gate rejects), that is a real 🔴/🟡 finding and the GO verdict must reflect it —
+the exemption is for pre-existing drift, not a blanket pass.
+
 ## Step 3d — Rebase-integrity report (advisory CI hand-off)
 
 PR Validation runs `scripts/check-rebase-integrity.sh` (advisory — it never fails
@@ -315,32 +384,36 @@ cat "/var/lib/hydra-qa/rebase-integrity/${OWNER}__${REPO}-pr-${PR}-<headRefOid>.
      marker text and inline placement are load-bearing: the approval wrapper's
      Guard 8 verifies a thread carrying this exact marker exists for this head
      (exit 10 if not), and Guard 7 blocks while it is unresolved.
-  3. **Never resolve a REBASE WARNING thread yourself.** A human resolving it IS
-     the acknowledgment — that is what "flag, don't block; force a human review"
-     means mechanically. This extends the "never resolve a thread you have not
-     confirmed fixed" rule.
+  3. **You MAY resolve the REBASE WARNING thread yourself** once you have
+     actually checked the signals against the diff and concluded the deletions
+     were intended rather than a clobber. **Changed 2026-08-03 (Nick,
+     explicit):** this used to say "never resolve it yourself — a human
+     resolving it IS the acknowledgment", which made every rebase warning a
+     manual step for a team that does not have review capacity. Resolution is
+     now yours to make, under the same rule as every other finding: never
+     resolve a thread you have not confirmed, and write the confirmation into
+     the thread so the judgment is auditable.
 
-     > **Currently in force: exactly the sentence above.** Any human resolving the
-     > thread is a valid acknowledgment, **and the PR author counts as that
-     > human.** The stricter independence rule described below is **shipped
-     > DISABLED** (`QA_REBASE_ACK_REQUIRE_INDEPENDENT` defaults to `0`), so it is
-     > not policy yet and must not be applied when reviewing any PR — including
-     > the one that introduces it. Judge acknowledgments by what is deployed and
-     > enabled, never by what a diff proposes.
+     When you resolve one, reply in the thread FIRST with what you checked —
+     which signals fired, which files, and why the deletion is intentional
+     (e.g. "the 6 deleted lines in X are the old implementation this PR
+     replaces; base's version is not lost"). A resolution with no reasoning is
+     indistinguishable from rubber-stamping.
 
-     **Planned, behind a flag.** Guard 8 can read `resolvedBy` and refuse
-     (exit 10) unless the resolver is a human who is neither the PR author nor the
-     bot, rejecting a self-cleared warning mechanically rather than merely
-     discouraging it. It ships off and gets enabled in a follow-up once the code
-     is on node-8. Rolling it out in one step would be self-defeating: the PR
-     carrying the rule would be judged against it, and no head created before the
-     rule existed could satisfy it. Motivation: until 2026-07-28 the guard checked
-     only that the thread existed, and hydra#747 passed it with all eight warnings
-     self-resolved by their author.
+     If you CANNOT convince yourself the deletions were intended, leave it
+     unresolved. That is a real 🔴/🟡 and Guard 7 will correctly hold the PR —
+     which is the behaviour you want: block on unresolved *issues*, never on
+     unresolved *paperwork*.
+
+     > `QA_REBASE_ACK_REQUIRE_INDEPENDENT` must stay `0`. Setting it to `1` makes
+     > Guard 8 refuse (exit 10) any warning resolved by the bot or the author,
+     > which contradicts the rule above — and it would also break the carryover
+     > in step 4, whose prior-head ack is now frequently yours. It is retained
+     > only so the stricter posture can be restored deliberately.
   4. **Skip step 2 when a prior head's ack CARRIES FORWARD.** The marker is
-     head-tagged, so a merge-from-`main` or any no-op push re-files a finding a
-     human already judged; hydra PRs have collected up to 11 acks of one
-     unchanged warning, and an ack that cheap gets clicked unread. The report's
+     head-tagged, so a merge-from-`main` or any no-op push re-files a finding
+     already judged; hydra PRs have collected up to 11 acks of one unchanged
+     warning, and an ack that cheap gets clicked unread. The report's
      `warn_digest` (sha256 over the warn signals' flagged LINES, not their
      summaries — two different 10-line deletions in one file share a summary but
      never a digest) makes "same finding" checkable. It carries forward only if
@@ -356,20 +429,18 @@ cat "/var/lib/hydra-qa/rebase-integrity/${OWNER}__${REPO}-pr-${PR}-<headRefOid>.
      - another head of this PR has a WARN report with the identical digest,
        **and**
      - that head's `REBASE WARNING [<sha7>]` thread was filed by the bot and is
-       **resolved** — i.e. a human already acknowledged this exact finding. A
-       carried-forward ack clears exactly the same bar as a fresh one, so when
-       the independence flag above is enabled the prior head's resolver must
-       also be neither the PR author nor the bot. Carrying a weaker ack forward
-       would make this the cheapest way around that rule.
+       **resolved** — i.e. this exact finding was already acknowledged, whether
+       by a human or by you under step 3. A carried-forward ack clears exactly
+       the same bar as a fresh one, never a lower one.
 
      Then: still write the ⚠️ section in the body (step 1), but say the ack
      carries forward from `<prior sha7>` and do **not** file a second 🟡. Guard 8
      re-checks every leg itself and approves without a new thread; if any
      leg fails it exits 10, so filing the 🟡 is always the safe fallback. If the
      digest changed, the finding changed — file it.
-  5. Verdict impact: an open rebase warning is a 🟡 blocker → **NO-GO** until a
-     human resolves the thread. A carried-forward ack is not open, so it does
-     not block.
+  5. Verdict impact: an open rebase warning is a 🟡 blocker → **NO-GO** until it
+     is resolved — by you, once verified, or by a human. A carried-forward ack
+     is not open, so it does not block.
 - **`status: "ERROR"`** → the analyzer could not verify the rebase. Say "rebase
   state unverified — analyzer errored; re-run PR Validation" in the review body
   and do not approve (Guard 8 refuses with exit 10 anyway).
@@ -382,6 +453,57 @@ version), `erased-recent-base-work` (PR deletes lines `main` gained recently),
 `info` entries (`already-merged`, `rewritten-commits`) are context, not blockers.
 Do NOT re-derive these signals yourself from `gh pr diff` — relay the
 CI-computed report only.
+
+## Step 3e — Blast radius (advisory CI hand-off)
+
+PR Validation runs `scripts/check-blast-radius.sh` (advisory — it never fails CI)
+and writes a per-head report on this host: what a wrong change would *reach*,
+which is the question diff size cannot answer. Read it with ONE exec —
+`<headRefOid>` comes from Step 1:
+
+```bash
+cat "/var/lib/hydra-qa/blast-radius/${OWNER}__${REPO}-pr-${PR}-<headRefOid>.json"
+```
+
+- **File missing** → for **external repos** this is genuine no-data (the analyzer
+  only runs in hydra's CI): note it as context and review on the 8 lenses alone.
+  For **hydra** PRs the hand-off failed — say so in the review body and do not
+  invent a radius from the diff.
+- **`status: "CLEAN"`** → the analyzer ran and found no reviewable files (the diff
+  was entirely generated/vendored paths — lockfiles, `dist/`, `node_modules/`).
+  This is a normal, valid report: treat it as `Blast radius: LOW` and move on.
+- **`status: "ERROR"`** → the analyzer could not verify impact. Say "blast radius
+  unverified — analyzer errored; re-run PR Validation" and review on the lenses alone.
+- **`status: "OK"`** → prepend a one-line **`Blast radius: <TIER>`** to the review
+  body, listing each fired signal's `id` and its evidence. Then scale depth by tier:
+
+| Tier | What it adds to the review |
+|---|---|
+| `LOW` | Nothing. The 8 lenses as written. |
+| `MEDIUM` / `HIGH` | **Reverse-caller contract check** — for every caller the report names, ask whether this diff changed something that caller depends on: output format, exit codes, or side effects. Plus: how is this reverted? |
+| `CRITICAL` | The above **plus a mandatory adversarial pass**: how would I evade this gate? What breaks fleet-wide if this is wrong? Assume the change is subtly incorrect and go looking for the evidence. |
+
+- **If `skipped` is non-empty, relay it too and say the tier is a LOWER BOUND.**
+  Above `BR_MAX_FILES` the analyzer stops computing `reverse-callers` and
+  `cron-reach`, so a big PR can report a low tier purely because the expensive
+  signals never ran. Reporting the tier without the skips is the confident
+  false-negative the limitations exist to prevent.
+- **Relay the report's `limitations` array verbatim** in the radius block. It is
+  load-bearing, not boilerplate: grep cannot prove a negative, a reference found
+  is not proof the path executes, and no runtime or concurrency behaviour is
+  modelled. Without it the tier reads as authoritative and invites confident
+  false findings — the documented failure mode of automated reviewers.
+- **The tier is not a finding.** It changes how hard you look, never what you
+  report. A `CRITICAL` radius with nothing wrong in the diff is still a GO. Every
+  🔴/🟡 still needs its own concrete failure scenario (Step 3).
+- Severity calibration: a real finding in a file the report flags `critical`
+  escalates one rung, because the same defect reaches further there.
+- Do **not** re-derive these signals yourself from `gh pr diff` — relay the
+  CI-computed report only, exactly as with the rebase-integrity report.
+
+> `deploy-path` is reported as `info` and **never lowers the tier**. An
+> undeployed file is unproven, not proven safe — do not argue a finding down
+> from it.
 
 ## Step 4 — Post the Slack summary
 
@@ -536,7 +658,7 @@ If you cannot log it, do not post it.
 
 ## Carry forward prior findings (before any GO)
 
-A fresh 7-lens pass is NOT enough: a GO must also clear every still-open finding
+A fresh 8-lens pass is NOT enough: a GO must also clear every still-open finding
 from earlier rounds — yours or a human's. (PR #287 was wrongly approved because a
 fresh pass scored 0/0 while its own 🔴/🟡 comments from 9 minutes earlier sat
 unaddressed.) Before deciding GO:
@@ -569,15 +691,16 @@ unaddressed.) Before deciding GO:
    wrapper (Guard 7) trusts that resolution. Never resolve a thread you have not
    confirmed fixed; an un-verified resolution is exactly how a blocker slips through.
    (Mechanical fix-verification arrives with the autofix loop in Part B.)
-   - **A human/Clio thread** (no severity emoji): assess it with the 7 lenses. If you
+   - **A human/Clio thread** (no severity emoji): assess it with the 8 lenses. If you
      judge it Critical/Important and it is unaddressed, it is a blocker. Do not resolve
      someone else's thread on their behalf — leave it and call it out.
 
 3. **Verdict rule:** GO requires no 🔴 Critical and no 🟡 Important findings **from the
    fresh pass OR from any unresolved prior thread.** If any blocker remains, the verdict
    is NO-GO even if this run's fresh pass found nothing. A 🟡 REBASE WARNING thread
-   counts like any other Important blocker — and only a HUMAN may resolve one
-   (Step 3d); never resolve it yourself.
+   counts like any other Important blocker — you may resolve one yourself once you
+   have verified the deletions were intended and written that reasoning into the
+   thread (Step 3d.3); never resolve one you have not confirmed.
 
 The gated wrapper (Step 7) independently re-checks unresolved 🔴/🟡 threads and CI, and
 will refuse to approve (exit 9 / exit 8) if you try to approve with a blocker open — so
@@ -611,13 +734,107 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "🤖
 - If the wrapper exits non-zero, relay the reason and do NOT retry blindly:
   `exit 3` = not a Muso-AI repo; `exit 4` = PR authored by the gateway account (GitHub
   blocks self-approval — another reviewer is needed); `exit 5` = requester not authorized;
-  `exit 8` = CI is not green; `exit 9` = an unresolved Critical/Important thread is still
+  `exit 8` = CI is not green — this ALSO fires when the rollup is unreadable, when
+  there are no non-qa-review checks at all, or when EVERY check is advisory-exempt
+  (none of which mean a red check; read the message and do not blindly re-run); `exit 9` = an unresolved Critical/Important thread is still
   open (carry it forward — fix it or resolve the thread, do not approve around it);
   `exit 10` = the rebase-integrity report for this head is WARN with no filed
   `REBASE WARNING [<sha7>]` thread **and no prior head's ack carries forward**
   (file the Step 3d finding first), it is ERROR/unreadable (rebase state
   unverified — a human must look), or it is MISSING for a repo that requires one
-  (hydra) — re-run PR Validation.
+  (hydra) — re-run PR Validation;
+  `exit 11` = the PR touches a path in `sensitive_paths_blocking` (that list ships
+  EMPTY, so this is rare and deliberate — a human must approve that one), OR the
+  policy's `sensitive_paths_blocking` key is unreadable/malformed, OR the changed-file
+  list could not be established while blocking paths are configured — the last two
+  mean the POLICY is broken, not the PR;
+  `exit 12` = the PR's author is in the policy's `author_deny` list, or `author_deny`
+  is missing/null/malformed (fail-closed) — report the policy state, do not retry;
+  `exit 13` = Guard 9 blast radius (only when `QA_BLAST_RADIUS_GATE=1`, not the default).
+
+### Relay every ⚠️ ALERT the wrapper prints
+
+**Changed 2026-08-03.** Sensitive paths (`policies/`, `scripts/qa-*`, `CODEOWNERS`,
+workflows, gateway config …) used to REFUSE the approval with `exit 11`. They no
+longer do — the wrapper approves and prints one or more `⚠️ ALERT — …` lines
+instead. A red **advisory** CI check (deploy pre-flight and friends, which fail on
+live server drift rather than on the diff) does the same.
+
+Those alert lines are now the ONLY signal that something needing eyes was
+auto-approved, so treat them as review content, not as log noise:
+
+**The wrapper runs in Step 7, AFTER Step 6 has already posted the review**, so the
+alerts do not exist yet when the review body is written — do NOT try to put them
+there, it cannot work. Both channels below come after the wrapper returns:
+
+1. **Post them as a follow-up PR comment**, so they land on the PR itself where the
+   person merging will see them (the Slack DM only reaches the author). Same
+   heredoc/`--input` rule as Step 6 — never inline via `-f body=`:
+   The heading depends on the OUTCOME — the wrapper replays its alerts on refusal
+   paths too, so "Auto-approved" would be a lie on a decline. Use
+   `## ⚠️ Auto-approved with alerts` when the wrapper exited 0, and
+   `## ⚠️ Alerts (NOT approved — <exit code / reason>)` when it refused.
+
+   This POST is a **separate external GitHub write**, so it needs its own
+   write-activity log line BEFORE it (same rule as the review POST). Everything
+   below is ONE control-flow block on purpose. The approval is already recorded
+   by the time any of this runs, so every failure path must end somewhere
+   explicit — and there must be exactly ONE post attempt path, or the happy path
+   posts the comment twice.
+   ```bash
+   alerts_json=/tmp/qa-alerts.json
+   cat > /tmp/qa-alerts.md <<'EOF'
+   ## ⚠️ Auto-approved with alerts
+   <every ⚠️ ALERT line, verbatim>
+   EOF
+   # Wrap the markdown into a JSON object FIRST. `--input` sends the file as the
+   # whole request body, so it must already BE {"body": "..."} — handing it raw
+   # markdown posts invalid JSON, and any -f/-F alongside --input lands in the
+   # query string instead of the payload. `jq -Rs` slurps stdin into one
+   # JSON-escaped string, so backticks, quotes and $VAR survive verbatim.
+   jq -Rs '{body: .}' < /tmp/qa-alerts.md > "$alerts_json"
+
+   post_alerts() {
+     bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" api \
+       "repos/$OWNER/$REPO/issues/$PR/comments" --method POST --input "$alerts_json"
+   }
+   go_red() {  # <why> — the PR is already approved; make it visibly unsafe to merge
+     # Honours the SAME guarantees Step 6b sets for the verdict status: pass the
+     # Details link, retry once, and escalate rather than return quietly. A
+     # go_red that silently fails is the worst case in this whole flow — the PR
+     # keeps its GREEN status AND its approval while the alert never published.
+     local url="https://github.com/$OWNER/$REPO/pull/$PR/files"
+     bash /opt/hydra/scripts/qa-review-status.sh "$OWNER/$REPO" "$HEAD_SHA" failure "$1" "$url" && return 0
+     sleep 3
+     bash /opt/hydra/scripts/qa-review-status.sh "$OWNER/$REPO" "$HEAD_SHA" failure "$1" "$url" && return 0
+     # Still failing: the PR is approved, green, and has no alert. Say so as
+     # loudly as this skill can, and name it as requiring a manual status.
+     echo "CRITICAL: could not publish qa-review=failure for $OWNER/$REPO#$PR — the PR is APPROVED and GREEN with an unpublished alert. It MUST NOT be merged until a human sets the status manually." >&2
+     bash /opt/hydra/scripts/qa-slack-dm.sh "<author-uid>" "⛔ <https://github.com/$OWNER/$REPO/pull/$PR|#$PR> — auto-approved, but its ⚠️ ALERT could not be published AND the red QA status could not be set. DO NOT MERGE until a human checks it." "${ts:-}"
+     return 1
+   }
+
+   if ! printf '{"agent":"qa","action":"github_pr_alert_comment","target":"%s/%s#%s","requester":"%s","timestamp":"%s","authorization":"auto-review-dispatch"}\n' \
+        "$OWNER" "$REPO" "$PR" "<author-uid>" "$(date -u +%FT%TZ)" \
+        >> "api-logs/github/$(date -u +%F).jsonl"; then
+     # No log ⇒ no post. Do NOT just exit: that leaves an approved, green PR with
+     # the alert unpublished and nothing on the PR saying so.
+     go_red "alert comment could not be audit-logged, so it was not posted — NOT safe to merge"
+   elif ! post_alerts; then
+     sleep 3
+     post_alerts || go_red "auto-approved with ALERTS that could not be published — NOT safe to merge"
+   fi
+   ```
+   A green PR whose alert never published is worse than a red one, because it
+   looks reviewed.
+2. Repeat them in the Slack result DM, above the verdict.
+3. Never summarise them away, and never drop one because the verdict was GO — GO is
+   exactly when they matter.
+4. The wrapper replays its alerts on EVERY exit path, refusal included — so relay them
+   on a decline too, not just on an approval.
+
+The team traded the old hard refusal for speed on the explicit understanding that
+the alert is loud. If you swallow it, the trade is a straight loss.
 - Report the wrapper's post-check (`reviewDecision` / `mergeStateStatus`). If GitHub still
   shows the PR blocked (CODEOWNERS, required checks pending), tell the requester what's
   outstanding — don't imply it's ready to merge.

@@ -14,8 +14,10 @@ set -euo pipefail
 #   3. Never self-approve: GitHub 422s if the PR author == the authenticated
 #      account, so refuse early with a clear message instead of a confusing API
 #      error.
-#   3b. Never approve a PR touching a sensitive path (policies/, secrets/,
-#      CODEOWNERS, workflow files, this script) — regardless of author.
+#   3b. Sensitive paths (policies/, secrets/, CODEOWNERS, workflow files, this
+#      script) ALERT and the approval PROCEEDS — see "Notice 3b" below. Only a
+#      path in the policy's `sensitive_paths_blocking` still refuses (exit 11),
+#      and that list ships EMPTY. Changed 2026-08-03; it used to refuse.
 #   3c. Never approve a PR by an author in the policy's author_deny list.
 #   4. Requester must be in the approval allowlist (Aaron/Serhii/Nick).
 #      NOTE: the agent supplies the UID, so this is defense-in-depth, not a
@@ -33,15 +35,21 @@ set -euo pipefail
 #             8 ci-not-green | 9 open-blocking-findings
 #             10 rebase-warning-unfiled-or-unverified
 #             11 sensitive-path-blocked | 12 author-policy-blocked
+#             13 blast-radius-critical-or-unverified (Guard 9; only reachable
+#                when QA_BLAST_RADIUS_GATE=1, which is NOT the default)
 #
 # Env (mainly for tests): QA_GH override the identity shim (GH overrides the gh
 # binary inside it);
 # QA_APPROVAL_POLICY override the policy file; QA_PR_APPROVE_LOG_DIR override log
 # dir; QA_REBASE_STATE_DIR override the rebase-integrity report dir (Guard 8);
 # QA_REBASE_REQUIRED_REPOS space-separated short names whose CI must have
-# written a report (default "hydra") — missing report there refuses (Guard 8).
+# written a report (default "hydra") — missing report there refuses (Guard 8);
+# QA_BLAST_RADIUS_GATE=1 enables Guard 9 (default 0 = off, a pure no-op);
+# QA_BLAST_STATE_DIR override the blast-radius report dir (Guard 9).
 
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/qa-policy.sh
+. "$_here/lib/qa-policy.sh"
 # NOTE: there is deliberately no `GH=` here. Every call goes through $QA_GH, and
 # a live-looking $GH next to it would invite a call that silently bypasses the
 # identity shim, the kill switch, and the per-repo token scoping. To override the
@@ -59,10 +67,12 @@ LOG_DIR="${QA_PR_APPROVE_LOG_DIR:-api-logs/github}"
 # way so the write always reads as automation.
 #
 # A GitHub App can never be a CODEOWNER (CODEOWNERS takes users and teams only),
-# so on repos in the policy's require_human_codeowner_repos the bot's approval
-# counts toward the required review but does NOT unblock the merge. That is
-# intended: it restores the human sign-off that running as a universal-CODEOWNER
-# account had silently removed. The skill must say so in the result DM.
+# so where the shim runs AS THE APP (repo in `identity.app_repos`) the approval
+# counts toward the required review but does NOT unblock the merge. Where it runs
+# as the host account, that account IS the universal code owner under hydra's
+# CODEOWNERS, so the approval DOES clear the gate. `app_repos` is empty today, so
+# the second case is the live one. The skill must relay the wrapper's post-check
+# `reviewDecision`/`mergeStateStatus` rather than predicting either outcome.
 
 # Approval allowlist — Slack UIDs of the only people who may trigger an approval.
 # Aaron U7RP6HKUZ, Serhii U03TYGJF1N3, Nick U0AL36NADEY.
@@ -72,7 +82,33 @@ LOG_DIR="${QA_PR_APPROVE_LOG_DIR:-api-logs/github}"
 # also updating SECURITY.md + workspaces/qa/SOUL.md + the muso-github-code-review skill.
 ALLOWED_UIDS=("U7RP6HKUZ" "U03TYGJF1N3" "U0AL36NADEY")
 
-die() { echo "qa-pr-approve: $2" >&2; exit "$1"; }
+die() { _replay_alerts; echo "qa-pr-approve: $2" >&2; exit "$1"; }
+
+# alert <message> — surface something the humans must SEE without blocking the
+# approval. Every line carries a stable marker so the reviewing skill can lift
+# them verbatim into the PR review body and the Slack DM.
+#
+# Emitted ONCE inline on stderr (ordering context in the cron journal, next to
+# whatever produced it) and ONCE at the end on stdout (the authoritative list
+# the agent relays). Printing to both streams inline made each alert appear
+# three times in a combined capture — and repetition-as-noise is exactly how a
+# signal gets tuned out, which for the sole replacement of a removed hard gate
+# would be self-defeating.
+ALERTS=()
+# Printed on EVERY exit path, success or refusal. Alerts are raised before the
+# guards that can refuse, so replaying only on success dropped them exactly when
+# a human was already being pulled in.
+_replay_alerts() {
+  [ "${#ALERTS[@]}" -gt 0 ] || return 0
+  echo "qa-pr-approve: ── ${#ALERTS[@]} ALERT(S) on this run — relay ALL of these ──"
+  local a
+  for a in "${ALERTS[@]}"; do echo "qa-pr-approve: ⚠️ ALERT — $a"; done
+  ALERTS=()
+}
+alert() {
+  ALERTS+=("$1")
+  echo "qa-pr-approve: ⚠️ ALERT — $1" >&2
+}
 
 [ "$#" -ge 3 ] || die 2 "usage: qa-pr-approve.sh <repo> <pr-number> <requester-uid> [body]"
 repo_arg="$1"
@@ -163,67 +199,135 @@ case "$deny_hit" in
   *)           die 12 "PR #$pr is authored by '$author', who is in the policy's author_deny list — refusing to approve. A human must review it." ;;
 esac
 
-# --- Guard 3b: sensitive paths ----------------------------------------------
-# Refuse to approve any PR touching security-relevant paths, REGARDLESS of author.
-# This is what actually replaces the protection the self-approval block used to
-# provide by accident, and it is strictly stronger — it also covers PRs by Nick
-# and Serhii, which the old behaviour did not. Note the deliberate self-reference:
-# policies/ and this script are both listed, so the bot cannot approve a change
-# that would widen its own authority.
-# Fail closed: an unreadable policy or an unreadable file list refuses.
+# --- Notice 3b: sensitive paths (ALERTS, does not block) ---------------------
+# WAS a hard refusal (exit 11). Changed 2026-08-03 on Nick's explicit direction:
+# the bot must surface issues and approve once they are resolved, not hand work
+# back to humans. Sensitive paths now produce a loud alert on the PR and in
+# Slack, and the approval proceeds.
+#
+# KNOWN AND ACCEPTED CONSEQUENCE: policies/ and this script are themselves in
+# the list, so the bot can now approve a change that widens its own authority.
+# That self-reference was the point of the old refusal. It is deliberately given
+# up in exchange for unblocking the team; the alert is what replaces it, so the
+# alert must never be silently dropped. If you are reading this because
+# something bad happened, the fix is to move the path back into
+# `sensitive_paths_blocking`, not to re-add a blanket refusal.
+#
+# A path listed in `sensitive_paths_blocking` still refuses (exit 11) — that key
+# ships EMPTY by default, so nothing blocks unless someone opts a path back in.
 sensitive_json="$(jq -c --arg r "$owner/$repo" \
   '((.sensitive_paths["*"] // []) + (.sensitive_paths[$r] // []))' "$POLICY" 2>/dev/null || true)"
-[ -n "$sensitive_json" ] || die 11 "cannot read sensitive_paths from $POLICY — refusing to approve (fail closed)."
-# An EMPTY pattern set disables this guard entirely, so treat it as unreadable
-# rather than as "nothing is sensitive" — a dropped or renamed key must refuse,
-# not silently approve everything.
-[ "$sensitive_json" != "[]" ] || die 11 "sensitive_paths in $POLICY is empty for $owner/$repo — refusing to approve (fail closed; a missing key must not disable this guard)."
+# sensitive_paths_blocking is the ONLY surviving hard path gate, so it must fail
+# CLOSED. `jq … // [] || echo '[]'` would collapse "policy unreadable" and "key
+# malformed" into "nothing blocks" — exactly the bug class scripts/lib/qa-policy.sh
+# was written to eliminate, and a straight weakening of what this script did
+# before sensitive paths stopped blocking. Distinguish the three states:
+# readable-and-absent (fine, nothing blocks) vs unreadable/malformed (refuse).
+if ! blocking_json="$(jq -ce --arg r "$owner/$repo" '
+      if (has("sensitive_paths_blocking") | not) then []
+      elif (.sensitive_paths_blocking | type) != "object" then error("not an object")
+      else ((.sensitive_paths_blocking["*"] // []) + (.sensitive_paths_blocking[$r] // []))
+      end' "$POLICY" 2>/dev/null)" || [ -z "$blocking_json" ]; then
+  die 11 "cannot read sensitive_paths_blocking from $POLICY — it is the only hard path gate left; refusing to approve (fail closed)."
+fi
+if [ -z "$sensitive_json" ] || [ "$sensitive_json" = "[]" ]; then
+  # Previously fail-closed. This notice cannot block any more, so an empty list
+  # means only that the ALERT is unreliable — but WHICH empty matters:
+  #   unreadable/malformed      -> jq failed, $sensitive_json empty       -> alert
+  #   `sensitive_paths` absent  -> the key was dropped or renamed         -> alert
+  #   present, nothing for repo -> a legitimate "[]", normal operation    -> quiet
+  # Alerting on the third case fired on every approval for a repo with no
+  # entries, and a "I am broken" line every run is how the signal gets ignored.
+  if [ -z "$sensitive_json" ]; then
+    alert "could not read sensitive_paths from $POLICY — proceeding without a sensitive-path alert for $owner/$repo#$pr."
+  elif ! jq -e 'has("sensitive_paths")' "$POLICY" >/dev/null 2>&1; then
+    alert "$POLICY has no sensitive_paths key at all — the sensitive-path alert is disabled for every repo. If that was not deliberate, restore the key."
+  fi
+  sensitive_json='[]'
+fi
 
 # `gh pr view --json files` issues `files(first: 100)` with NO pagination and no
 # pageInfo (verified with GH_DEBUG=api on 2026-07-27). Read the independently
 # paginated REST endpoint instead, then cross-check its total against
 # changedFiles so an API failure or partial response still refuses fail-closed.
+# file_trouble <message> — the changed-file list could not be established. That
+# no longer blocks the (non-blocking) alert path, but it MUST still fail closed
+# whenever `sensitive_paths_blocking` is non-empty, because we cannot prove the
+# PR misses those paths.
+file_trouble() {
+  if [ "$blocking_json" != "[]" ]; then
+    die 11 "$1 — refusing to approve (fail closed; sensitive_paths_blocking is configured and cannot be verified)."
+  fi
+  alert "$1 — proceeding without a sensitive-path alert for $owner/$repo#$pr."
+}
+
+# Each step below is a precondition for the next, so one if/elif chain says it
+# without a mutable "did we bail?" flag to keep in sync. `changed_files` staying
+# unset IS the bail signal — the consumer below already tests for it.
 reported_changed_files="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" \
   --json changedFiles --jq .changedFiles 2>/dev/null || true)"
-[[ "$reported_changed_files" =~ ^[0-9]+$ ]] \
-  || die 11 "could not read the changed-file count for $owner/$repo#$pr — refusing to approve (fail closed)."
-files_json="$("$QA_GH" --repo "$owner/$repo" api --paginate --slurp \
-  "repos/$owner/$repo/pulls/$pr/files?per_page=100" 2>/dev/null)" \
-  || die 11 "could not read the paginated changed-file list for $owner/$repo#$pr — refusing to approve (fail closed)."
-printf '%s' "$files_json" \
-  | jq -e '
-      type == "array"
-      and all(.[];
-        type == "array"
-        and all(.[];
-          if type != "object" then false
-          else ((.filename | type) == "string" and (.filename | length) > 0)
-            and (.status as $s
-                 | (["added", "removed", "modified", "renamed", "copied", "changed", "unchanged"]
-                    | index($s)) != null)
-            and (if has("previous_filename")
-                 then ((.previous_filename | type) == "string"
-                       and (.previous_filename | length) > 0)
-                 else .status != "renamed"
-                 end)
-          end))' \
-    >/dev/null 2>&1 \
-  || die 11 "could not parse the paginated changed-file list for $owner/$repo#$pr — refusing to approve (fail closed)."
-returned_changed_files="$(printf '%s' "$files_json" | jq -r '[.[][]] | length')"
-[ "$reported_changed_files" = "$returned_changed_files" ] \
-  || die 11 "PR #$pr reports $reported_changed_files changed files but the API returned $returned_changed_files — cannot verify sensitive paths on a partial list; refusing (fail closed)."
-unique_changed_files="$(printf '%s' "$files_json" | jq -r '[.[][] | .filename] | unique | length')"
-[ "$returned_changed_files" = "$unique_changed_files" ] \
-  || die 11 "the paginated API returned duplicate filenames for $owner/$repo#$pr — cannot verify sensitive paths on an unstable list; refusing (fail closed)."
-changed_files="$(printf '%s' "$files_json" | jq -r '.[][] | .filename, (.previous_filename? // empty)')"
-if [ -n "$changed_files" ]; then
-  hit="$(printf '%s\n' "$changed_files" \
-    | jq -R -s --argjson pats "$sensitive_json" \
+if ! [[ "$reported_changed_files" =~ ^[0-9]+$ ]]; then
+  file_trouble "could not read the changed-file count for $owner/$repo#$pr"
+elif ! files_json="$("$QA_GH" --repo "$owner/$repo" api --paginate --slurp \
+       "repos/$owner/$repo/pulls/$pr/files?per_page=100" 2>/dev/null)"; then
+  file_trouble "could not read the paginated changed-file list for $owner/$repo#$pr"
+elif ! printf '%s' "$files_json" \
+     | jq -e '
+         type == "array"
+         and all(.[];
+           type == "array"
+           and all(.[];
+             if type != "object" then false
+             else ((.filename | type) == "string" and (.filename | length) > 0)
+               and (.status as $s
+                    | (["added", "removed", "modified", "renamed", "copied", "changed", "unchanged"]
+                       | index($s)) != null)
+               and (if has("previous_filename")
+                    then ((.previous_filename | type) == "string"
+                          and (.previous_filename | length) > 0)
+                    else .status != "renamed"
+                    end)
+             end))' \
+       >/dev/null 2>&1; then
+  file_trouble "could not parse the paginated changed-file list for $owner/$repo#$pr"
+else
+  returned_changed_files="$(printf '%s' "$files_json" | jq -r '[.[][]] | length')"
+  unique_changed_files="$(printf '%s' "$files_json" | jq -r '[.[][] | .filename] | unique | length')"
+  if [ "$reported_changed_files" != "$returned_changed_files" ]; then
+    file_trouble "PR #$pr reports $reported_changed_files changed files but the API returned $returned_changed_files (partial list)"
+  elif [ "$returned_changed_files" != "$unique_changed_files" ]; then
+    file_trouble "the paginated API returned duplicate filenames for $owner/$repo#$pr (unstable list)"
+  else
+    changed_files="$(printf '%s' "$files_json" | jq -r '.[][] | .filename, (.previous_filename? // empty)')"
+  fi
+fi
+
+# match_paths <patterns-json> → the matching changed paths, one per line
+match_paths() {
+  printf '%s\n' "$changed_files" \
+    | jq -R -s --argjson pats "$1" \
         '[ split("\n")[] | select(length > 0) as $f
-           | select(any($pats[]; . as $p | ($f | startswith($p)))) ] | .[0] // empty' \
-        2>/dev/null || echo "__ERR__")"
-  [ "$hit" != "__ERR__" ] || die 11 "could not evaluate sensitive paths for $owner/$repo#$pr — refusing (fail closed)."
-  [ -z "$hit" ] || die 11 "PR #$pr touches a sensitive path ($hit) — a human code owner must approve it, not the QA bot."
+           | select(any($pats[]; . as $p | ($f | startswith($p)))) ] | join("\n")' \
+        -r 2>/dev/null || echo "__ERR__"
+}
+
+if [ -n "${changed_files:-}" ]; then
+  # The blocking subset first: it still refuses, and ships empty by default.
+  if [ "$blocking_json" != "[]" ]; then
+    bhit="$(match_paths "$blocking_json")"
+    [ "$bhit" != "__ERR__" ] || die 11 "could not evaluate sensitive_paths_blocking for $owner/$repo#$pr — refusing (fail closed)."
+    if [ -n "$bhit" ]; then
+      die 11 "PR #$pr touches a BLOCKING sensitive path ($(printf '%s' "$bhit" | head -1)) — a human must approve it, not the QA bot."
+    fi
+  fi
+  # The alerting set: loud, never blocking.
+  hit="$(match_paths "$sensitive_json")"
+  if [ "$hit" = "__ERR__" ]; then
+    alert "could not evaluate sensitive paths for $owner/$repo#$pr — approving without that alert."
+  elif [ -n "$hit" ]; then
+    hit_count="$(printf '%s' "$hit" | grep -c . || true)"
+    alert "PR #$pr touches $hit_count SENSITIVE path(s): $(printf '%s' "$hit" | tr '\n' ',' | sed 's/,$//; s/,/, /g'). These no longer hold the approval for a human — review them yourself."
+  fi
 fi
 
 # --- Guard 6: CI must be green --------------------------------------------
@@ -233,14 +337,91 @@ fi
 # Fail closed: refuse if the rollup can't be read (ERR), if ANY non-qa-review
 # check is not passing, OR if there are NO non-qa-review checks at all -- an
 # empty rollup is not proof CI ran, so it must not read as green (QA #398).
-bad_checks="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" --json statusCheckRollup \
-  --jq '[.statusCheckRollup[]? | select((.context // .name) != "qa-review")]
-         | if length == 0 then "NO-CHECKS"
-           else ([.[] | (((.conclusion // .state) // "PENDING") | ascii_upcase)
-                  | select(. != "SUCCESS" and . != "NEUTRAL" and . != "SKIPPED")] | length | tostring)
-           end' \
-  2>/dev/null || echo "ERR")"
-[ "$bad_checks" = "0" ] || die 8 "CI not green for $owner/$repo#$pr (non-passing/absent checks: $bad_checks) — refusing to approve."
+#
+# ADVISORY CHECKS (added 2026-08-03): some gates here are LIVE — the deploy
+# pre-flight rsync dry-run compares the repo against the running /opt/hydra and
+# reds on pre-existing server drift that has nothing to do with the diff. The
+# review skill already treats such reds as context rather than findings, but
+# this guard counted them and refused anyway, so a clean GO could sit blocked on
+# unrelated infrastructure (hydra#780). Checks named in the policy's
+# advisory_checks are now excluded from the refusal and alerted on instead.
+# Matching is by PREFIX, so the policy can carry a short stable token rather than
+# a full check title that changes when someone edits the workflow — and so a job
+# cannot smuggle the token in from the right. See the note below the read.
+#
+# The NO-CHECKS refusal is deliberately unchanged: an empty rollup is still not
+# proof CI ran. A repo whose ONLY checks are advisory therefore still refuses,
+# which is the fail-closed direction.
+# Per-repo, exactly like every sibling list in this policy. Matching is by PREFIX
+# on the check name, not `contains`: a substring test is fail-OPEN on a surface
+# the PR author controls, because .github/workflows/ is only alert-guarded now —
+# a PR could add a job named "... Deploy pre-flight ..." and buy itself an
+# exemption from Guard 6. A prefix still tolerates the trailing detail in
+# "Deploy pre-flight (rsync --delete dry-run vs /opt/hydra/)" without letting a
+# new job smuggle the token in from the right.
+advisory_json="$(jq -c --arg r "$owner/$repo" \
+  '((.advisory_checks["*"] // []) + (.advisory_checks[$r] // []))' "$POLICY" 2>/dev/null || echo '[]')"
+[ -n "$advisory_json" ] || advisory_json='[]'
+# ...UNLESS this PR edits the workflows that DEFINE the check names. GitHub runs a
+# same-repo PR's workflows from the PR HEAD, so job names in the rollup are
+# author-controlled: adding `name: Deploy pre-flight — validate` to the `validate`
+# job would exempt every gate inside it (skill-drift, secrets scan, JSON lint …)
+# and report green on a visibly red PR. Prefix matching does not help — prefixing
+# is exactly as reachable as infixing when the author owns the file. Notice 3b no
+# longer refuses on .github/workflows/, so this is the gate that closes it: a PR
+# touching workflow definitions gets NO advisory exemption at all.
+# NOTE the empty-changed_files branch: file_trouble() alerts but leaves
+# changed_files UNSET, so requiring `-n "$changed_files"` here meant a transient
+# files-API failure SKIPPED this gate and preserved the exemption — a fail-open
+# in the very gate that exists to close one. Unknown file list ⇒ we cannot prove
+# the PR does not edit workflows ⇒ no exemption.
+if [ -z "${changed_files:-}" ]; then
+  if [ "$advisory_json" != "[]" ]; then
+    alert "the changed-file list for $owner/$repo#$pr could not be established, so NO advisory-check exemption was applied — every check must be green. An unverifiable file list cannot rule out a self-granted exemption via a PR-authored workflow job name."
+  fi
+  advisory_json='[]'
+elif printf '%s\n' "$changed_files" | grep -q '^\.github/workflows/'; then
+  if [ "$advisory_json" != "[]" ]; then
+    alert "PR #$pr edits .github/workflows/, so NO advisory-check exemption was applied — every check must be green. Check names come from the PR's own workflow files, so an exemption there would be self-granted."
+  fi
+  advisory_json='[]'
+fi
+rollup_json="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" \
+  --json statusCheckRollup --jq '.statusCheckRollup' 2>/dev/null || echo "__ERR__")"
+if [ "$rollup_json" = "__ERR__" ] || [ -z "$rollup_json" ]; then
+  die 8 "could not read the CI rollup for $owner/$repo#$pr — refusing to approve (fail closed)."
+fi
+# Three DIFFERENT questions, three separate reads. Answering them all from one
+# filtered array made "no checks exist" and "every check is advisory-exempt"
+# indistinguishable, so an all-advisory repo refused with a message asserting CI
+# never ran. Both still REFUSE — neither is proof CI meaningfully gated the PR,
+# and that is the fail-closed direction — but they now say which one happened.
+counts="$(printf '%s' "$rollup_json" | jq -r --argjson adv "$advisory_json" '
+  [ .[]? | select((.context // .name) != "qa-review") ] as $all
+  | ($all | map(select((.context // .name) as $n
+        | any($adv[]; . as $a | ($n | startswith($a))) | not))) as $gating
+  | "\($all | length) \($gating | length) \(
+      $gating | map((((.conclusion // .state) // "PENDING") | ascii_upcase)
+                    | select(. != "SUCCESS" and . != "NEUTRAL" and . != "SKIPPED")) | length)"
+  ' 2>/dev/null || echo "ERR")"
+[ "$counts" != "ERR" ] || die 8 "could not evaluate the CI rollup for $owner/$repo#$pr — refusing to approve (fail closed)."
+read -r all_checks gating_checks bad_checks <<< "$counts"
+[ "$all_checks" != "0" ] \
+  || die 8 "no non-qa-review checks exist on $owner/$repo#$pr — an empty rollup is not proof CI ran; refusing to approve (fail closed)."
+[ "$gating_checks" != "0" ] \
+  || die 8 "every check on $owner/$repo#$pr is advisory-exempt ($all_checks total) — nothing actually gates this PR; refusing to approve (fail closed)."
+[ "$bad_checks" = "0" ] \
+  || die 8 "CI not green for $owner/$repo#$pr ($bad_checks non-passing of $gating_checks gating checks) — refusing to approve."
+
+# Any advisory check that is red gets said out loud — approved, not ignored.
+red_advisory="$(printf '%s' "$rollup_json" | jq -r --argjson adv "$advisory_json" '
+  [ .[]? | select((.context // .name) as $n | any($adv[]; . as $a | ($n | startswith($a))))
+         | select((((.conclusion // .state) // "PENDING") | ascii_upcase)
+                  | . != "SUCCESS" and . != "NEUTRAL" and . != "SKIPPED")
+         | (.context // .name) ] | join(", ")' 2>/dev/null || true)"
+if [ -n "$red_advisory" ]; then
+  alert "RED advisory check(s) NOT counted by Guard 6 on $owner/$repo#$pr: $red_advisory. These are treated as infrastructure/live-state gates rather than findings against this diff — confirm that is true before merging."
+fi
 
 # --- Guard 7: no unresolved Critical/Important review threads ---------------
 # Carry findings forward mechanically: any unresolved thread whose first comment
@@ -287,10 +468,16 @@ open_blockers="$("$QA_GH" --repo "$owner/$repo" api graphql -f query="$gql" -f o
 #   CLEAN           → pass
 #   WARN            → a review thread whose first comment carries the literal
 #                     "REBASE WARNING [<head sha7>]" marker must EXIST, be filed
-#                     by the bot, AND be resolved by a human who is neither the
-#                     PR author nor the bot. The acknowledgment is worth only the
-#                     independent eyes behind it: an author clearing their own
-#                     warning is self-certification, which is what this gate
+#                     by the bot, AND be RESOLVED — by anyone, including the
+#                     reviewing bot itself once it has verified the deletions
+#                     were intended and written that reasoning into the thread
+#                     (SKILL.md Step 3d.3). That is the DEFAULT and current
+#                     posture. Setting QA_REBASE_ACK_REQUIRE_INDEPENDENT=1
+#                     additionally demands a human who is neither the PR author
+#                     nor the bot; it is OFF and stays off. The paragraph below
+#                     describes that stricter mode, not today's behaviour:
+#                     an author clearing their own
+#                     warning is self-certification, which is what that mode
 #                     exists to prevent (observed on hydra#747 — all eight
 #                     threads filed by the bot, all eight resolved by the author).
 #   ERROR/unreadable→ rebase state unverified → refuse (fail closed)
@@ -474,6 +661,64 @@ else
   esac
 fi
 
+# --- Guard 9: blast radius (SHIPPED DISABLED — see below) --------------------
+# CI's check-blast-radius.sh writes a per-head report naming what a wrong change
+# would reach. When enabled, a CRITICAL tier holds auto-approval for a human.
+#
+# THIS SHIPS OFF (QA_BLAST_RADIUS_GATE unset/0 ⇒ this block is a pure no-op) and
+# is enabled in a follow-up once the code is on node-8. Enabling it in the PR
+# that introduces it would judge that PR against a rule no earlier head could
+# satisfy — the same trap ac67c64f documents for the rebase-ack rule — and this
+# PR's own diff trips the gate-edit signal, so it would refuse itself.
+#
+# Fails CLOSED once enabled: an unreadable or malformed report refuses rather
+# than defaulting to LOW. A gate that treats "I could not tell" as "safe" is the
+# fail-open pattern Guard 3b/3c exist to avoid.
+if [ "${QA_BLAST_RADIUS_GATE:-0}" = "1" ]; then
+  br_dir="${QA_BLAST_STATE_DIR:-/var/lib/hydra-qa/blast-radius}"
+  br_file="$br_dir/${owner}__${repo}-pr-${pr}-${head_oid}.json"
+  # Same repo-gating Guard 8 uses, and for the same reason: check-blast-radius.sh
+  # runs only in hydra's pr-validate.yml, but this script approves every repo in
+  # the external allowlist. Without this, flipping the flag would refuse EVERY
+  # core-backend / industry-data-processing approval on a report their CI never
+  # writes — a missing report is a failed hand-off only where one was expected.
+  br_required=0
+  for _r in ${QA_BLAST_REQUIRED_REPOS:-hydra}; do
+    [ "$_r" = "$repo" ] && br_required=1
+  done
+  if [ ! -r "$br_file" ]; then
+    if [ "$br_required" = 1 ]; then
+      die 13 "no blast-radius report for ${head_oid:0:7} ($br_file) — impact unverified; refusing to approve (fail closed). Re-run PR Validation."
+    fi
+    echo "qa-pr-approve: no blast-radius report for $owner/$repo (no analyzer in that repo's CI) — Guard 9 passes on no-data."
+  else
+  # Cross-check the interior fields against the filename, exactly as Guard 8
+  # does — INCLUDING .repo. Both report kinds live under /var/lib/hydra-qa/ and
+  # share the ${owner}__${repo}-pr-${pr}-${sha} key, so .repo is precisely the
+  # field that catches a cross-repo mis-file.
+  br_json="$(jq -e --arg r "$owner/$repo" --arg h "$head_oid" --arg p "$pr" \
+    'select(.repo == $r and .head_sha == $h and ((.pr | tostring) == $p))' "$br_file" 2>/dev/null)" \
+    || die 13 "blast-radius report at $br_file does not describe $owner/$repo#$pr @ ${head_oid:0:7} (interior repo/head_sha/pr mismatch) — refusing to approve."
+  br_status="$(printf '%s' "$br_json" | jq -r '.status // "MISSING"')"
+  br_tier="$(printf '%s' "$br_json" | jq -r '.tier // "MISSING"')"
+  case "$br_status" in
+    OK|CLEAN) ;;
+    *) die 13 "blast-radius analysis for ${head_oid:0:7} is '$br_status' — impact unverified; refusing to approve (fail closed)." ;;
+  esac
+  case "$br_tier" in
+    LOW|MEDIUM|HIGH) ;;
+    CRITICAL)
+      br_why="$(printf '%s' "$br_json" \
+        | jq -r '[.signals? // [] | .[]? | select(.severity? == "critical") | .id] | join(", ")' \
+        2>/dev/null || true)"
+      die 13 "blast radius is CRITICAL for $owner/$repo#$pr (${br_why:-unspecified}) — this change reaches too far to auto-approve; a human must review and approve it."
+      ;;
+    *) die 13 "blast-radius report for ${head_oid:0:7} has unrecognized tier '$br_tier' — refusing to approve (fail closed)." ;;
+  esac
+  echo "qa-pr-approve: blast radius $br_tier — below the CRITICAL hold."
+  fi
+fi
+
 # --- Guard 5: log BEFORE the write ------------------------------------------
 ts="$(date -u +%FT%TZ)"
 mkdir -p "$LOG_DIR" || die 6 "cannot create log dir $LOG_DIR — refusing to approve unlogged."
@@ -489,11 +734,31 @@ if ! "$QA_GH" --repo "$owner/$repo" pr review "$pr" --repo "$owner/$repo" --appr
 fi
 echo "qa-pr-approve: approved $owner/$repo#$pr as $me (requester $requester). NOT merged."
 
-# A GitHub App cannot be a CODEOWNER, so on these repos the approval counts
-# toward the required review but does NOT clear the code-owner gate. Say so
-# loudly — the requester will otherwise read the approval as merge-ready.
-if jq -e --arg r "$owner/$repo" '(.require_human_codeowner_repos // []) | index($r)' "$POLICY" >/dev/null 2>&1; then
-  echo "qa-pr-approve: NOTE — $owner/$repo requires a CODEOWNER review, which a bot identity can never satisfy. This PR still needs a human code owner's approval before it can merge."
+# A GitHub App cannot be a CODEOWNER, so where we run AS THE APP the approval
+# counts toward the required review but does NOT clear the code-owner gate.
+#
+# This used to fire on every repo in require_human_codeowner_repos, which was
+# misleading: identity.app_repos is empty, so every call falls through to the
+# host login (adk47) — and CODEOWNERS grants `* @adk47`, so the bot's approval
+# DOES satisfy the code-owner gate today (verified on hydra#786 and hydra#777,
+# both APPROVED → mergeStateStatus CLEAN). Telling people the PR "still needs a
+# human" when it does not is exactly the friction this pass exists to remove.
+# The note now fires only when the repo is actually served by the App identity.
+# Read through lib/qa-policy.sh rather than spelling `(.key // []) | index($r)`
+# inline: that idiom collapses "not a member" and "key missing / file malformed"
+# into one answer, which is the bug class the helper was written to close. Here
+# it would silently SUPPRESS the note — the same false-negative direction this
+# change set is trying to remove.
+# `|| _rc=$?` is load-bearing: qa_policy_has returns 1 for "not a member", which
+# is a NORMAL answer — as a bare command under `set -e` that would abort the
+# script after the approval was already recorded.
+_rc_co=0; qa_policy_has "$POLICY" '.require_human_codeowner_repos' "$owner/$repo" || _rc_co=$?
+_rc_app=0; qa_policy_has "$POLICY" '.identity.app_repos' "$owner/$repo" || _rc_app=$?
+if [ "$_rc_co" = 2 ] || [ "$_rc_app" = 2 ]; then
+  # 2 = key missing/null/not-an-array/unreadable. Never silently read as "no".
+  alert "could not determine the code-owner posture for $owner/$repo from $POLICY (rc $_rc_co/$_rc_app) — verify manually whether this approval clears the code-owner gate."
+elif [ "$_rc_co" = 0 ] && [ "$_rc_app" = 0 ]; then
+  echo "qa-pr-approve: NOTE — $owner/$repo is served by the GitHub App identity, which can never be a CODEOWNER. This approval counts as a review but does NOT clear the code-owner gate."
 fi
 
 # --- Post-check: report real review/merge state, don't assume "done" --------
@@ -502,3 +767,8 @@ echo "qa-pr-approve: post-approval state —"
   --jq '"  reviewDecision=\(.reviewDecision)  mergeStateStatus=\(.mergeStateStatus)  state=\(.state)"' 2>/dev/null \
   || echo "  (could not read post-approval state; check the PR on GitHub)"
 echo "qa-pr-approve: if anything other than reviewDecision=APPROVED / a clean mergeStateStatus shows, tell the requester what still blocks (CODEOWNERS, required checks). A human performs the merge."
+
+# Replay every alert LAST — after the post-check, so nothing prints below them.
+# The earlier inline echoes are for ordering context; this block is what the
+# agent is instructed to relay, and on a truncated tail it is what survives.
+_replay_alerts
