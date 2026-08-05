@@ -67,6 +67,16 @@ EOF
 }
 
 sends() { cat "$TEST_TMPDIR/slack-sends" 2>/dev/null || true; }
+
+# refute_sends <pattern> — fail if the pattern appears in what was posted.
+#
+# A plain function with the negation INSIDE, called un-negated: the call site is
+# not negated, so set -e checks the function's own status, while the `!` shields
+# only the grep. NOT a bare `! grep` at the call site (set -e ignores negated
+# commands, making it a no-op unless it is the test's last line), and NOT
+# `run grep ...; [ "$status" -ne 0 ]` — `run` clobbers the test's own $output and
+# $status, silently breaking later assertions in the same test that read them.
+refute_sends() { ! grep -qF -- "$1" "$TEST_TMPDIR/slack-sends"; }
 send_count() { sends | grep -c 'Mercury API token is dead' || true; }
 
 # ── detector verdict → action ─────────────────────────────────────────────────
@@ -252,6 +262,29 @@ send_count() { sends | grep -c 'Mercury API token is dead' || true; }
   stub_detector 1 "SENTINEL-401-DIAGNOSTIC"
   run "$WD"
   [[ "$(sends)" == *"SENTINEL-401-DIAGNOSTIC"* ]]
+}
+
+# The detector stamps its own "[ensure-mercury-token <ts>] LEVEL: " prefix. This
+# script adds its own, so passing the detector's line through verbatim
+# double-stamps the log and the page — as it did in the first production fire.
+@test "the detector's own log prefix is stripped, not double-stamped" {
+  cat > "$MERCURY_TOKEN_CHECK" <<'EOF'
+#!/usr/bin/env bash
+echo "[ensure-mercury-token 2026-08-05T08:45:01Z] VIOLATION: token REJECTED by Mercury (HTTP 401)" >&2
+exit 1
+EOF
+  chmod +x "$MERCURY_TOKEN_CHECK"
+  run "$WD"
+  [ "$status" -eq 0 ]
+  # the message survives...
+  [[ "$output" == *"token REJECTED by Mercury (HTTP 401)"* ]]
+  [[ "$(sends)" == *"token REJECTED by Mercury (HTTP 401)"* ]]
+  # ...but the detector's STAMP does not ride along into either surface.
+  # Match the bracketed stamp specifically, not the bare name: the remediation
+  # block legitimately contains `ensure-mercury-token.sh --check`, so forbidding
+  # the name outright asserts something the page is supposed to say.
+  [[ "$output" != *"[ensure-mercury-token"* ]]
+  refute_sends "[ensure-mercury-token"
 }
 
 @test "the page carries the remediation path and the credential location" {

@@ -100,6 +100,13 @@ else
   # `|| rc=$?` is required even without set -e: we need the guard's exit code,
   # and 1 is its designed answer, not a failure of this script.
   out="$("$CHECK" --check 2>&1)" || rc=$?
+  # Strip the detector's own "[ensure-mercury-token <ts>] LEVEL: " stamp. This
+  # script re-labels with its own prefix and severity, so passing the detector's
+  # line through verbatim double-stamps every cron-log entry AND the Slack page
+  # body — observed in the first production fire:
+  #   [mercury-token-watchdog …] VIOLATION: [ensure-mercury-token …] VIOLATION: token REJECTED…
+  # Applied per line: the detector may emit more than one.
+  out="$(printf '%s' "$out" | sed -E 's/^\[ensure-mercury-token [^]]*\] (VIOLATION|WARN|clean): ?//')"
   case "$rc" in
     0|1|2) ;;
     *) out="detector returned unexpected rc=${rc} (contract is 0/1/2): ${out:-<no output>}"; rc=2 ;;
