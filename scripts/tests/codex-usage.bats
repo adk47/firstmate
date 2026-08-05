@@ -98,7 +98,7 @@ run_report() { run env CODEX_USAGE_ROOT="$ROOT" "$SCRIPT" "$@"; }
   echo "$output" | grep -qF 'aaronkaufman@me.com* — idle standby'
   echo "$output" | grep -q 'no fresh quota snapshot'
   # only the two codex accounts appear; the anthropic profile does not
-  ! echo "$output" | grep -qi 'anthropic'
+  if echo "$output" | grep -qi 'anthropic'; then echo "the anthropic profile leaked into codex-usage output" >&2; false; fi
   # mrkdwn, not a markdown table
   ! echo "$output" | grep -q '|'
 }
@@ -138,11 +138,11 @@ run_report() { run env CODEX_USAGE_ROOT="$ROOT" "$SCRIPT" "$@"; }
   write_rollout "$OPS_SESS/rollout-a.jsonl" 3600 0 1
   run_report
   [ "$status" -eq 0 ]
-  ! echo "$output" | grep -q 'SECRET_ACCESS'
-  ! echo "$output" | grep -q 'SECRET_REFRESH'
+  if echo "$output" | grep -q 'SECRET_ACCESS'; then echo "the raw access token leaked into text output" >&2; false; fi
+  if echo "$output" | grep -q 'SECRET_REFRESH'; then echo "the raw refresh token leaked into text output" >&2; false; fi
   run_report --json
   [ "$status" -eq 0 ]
-  ! echo "$output" | grep -q 'SECRET_ACCESS'
+  if echo "$output" | grep -q 'SECRET_ACCESS'; then echo "the raw access token leaked into json output" >&2; false; fi
   ! echo "$output" | grep -q 'SECRET_REFRESH'
 }
 

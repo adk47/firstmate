@@ -186,7 +186,7 @@ drift_line_for() {
 
   run acknowledge_announced_hotpatches "$drift"
   [ "$status" -eq 0 ]
-  ! echo "$output" | grep -q 'skills-all/foo/SKILL.md'
+  if echo "$output" | grep -q 'skills-all/foo/SKILL.md'; then echo "the acked foo entry still appears in the remaining-drift output" >&2; false; fi
   echo "$output" | grep -q 'skills-all/bar/SKILL.md'
   grep -q 'drift acknowledged: skills-all/foo/SKILL.md' "$LOG_CALLS_FILE"
 }

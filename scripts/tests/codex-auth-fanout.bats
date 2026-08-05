@@ -176,7 +176,7 @@ link_to_canonical_profiles() {
     p="$(command -v "$b" 2>/dev/null)" && ln -sf "$p" "$TEST_TMPDIR/nojqbin/$b"
   done
   # Sanity: jq must NOT be resolvable through this PATH.
-  ! PATH="$TEST_TMPDIR/nojqbin" command -v jq >/dev/null 2>&1
+  if PATH="$TEST_TMPDIR/nojqbin" command -v jq >/dev/null 2>&1; then echo "the constructed nojqbin PATH still resolves jq, invalidating the fixture" >&2; false; fi
 
   run env -i PATH="$TEST_TMPDIR/nojqbin" CODEX_AUTH_ROOT="$ROOT" \
     "$TEST_TMPDIR/nojqbin/bash" "$SCRIPT" --check

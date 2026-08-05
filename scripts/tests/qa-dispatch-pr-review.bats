@@ -169,6 +169,6 @@ JSON
   run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   grep -qx 'STALEQA' "$STUB_ARGV"      # stale qa-autoreview job removed
-  ! grep -qx 'FRESHQA' "$STUB_ARGV"    # fresh (in-flight) qa-autoreview job left alone
+  if grep -qx 'FRESHQA' "$STUB_ARGV"; then echo "a fresh in-flight qa-autoreview job was wrongly swept" >&2; false; fi    # fresh (in-flight) qa-autoreview job left alone
   ! grep -qx 'OTHERCRON' "$STUB_ARGV"  # non-qa job never touched, even when stale
 }

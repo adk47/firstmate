@@ -329,9 +329,9 @@ STUB
   run "$WD"
   [ "$status" -eq 0 ]
   [[ "$output" == *"maintenance: openclaw upgrade - skipping"* ]]
-  # It did NOT touch the down gateway (negate a simple grep, not a pipeline):
-  ! grep -q "restart openclaw-gateway" "$SYSCTL_CALLS"
-  ! grep -q "reset-failed openclaw-gateway" "$SYSCTL_CALLS"
+  # It did NOT touch the down gateway:
+  if grep -q "restart openclaw-gateway" "$SYSCTL_CALLS"; then echo "active maintenance window still let the watchdog restart the gateway" >&2; false; fi
+  if grep -q "reset-failed openclaw-gateway" "$SYSCTL_CALLS"; then echo "active maintenance window still let the watchdog reset-failed the gateway" >&2; false; fi
   [[ "$output" != *"GATEWAY DOWN"* ]]
 }
 

@@ -98,7 +98,7 @@ run_wd() {
   [[ "$output" == *"would run"* ]]
   [[ "$output" == *"memory index --force"* ]]
   # No reindex actually ran, and no watermark was written.
-  ! grep -q "index" "$OC_CALLS"
+  if grep -q "index" "$OC_CALLS"; then echo "dry-run reindex actually invoked memory index" >&2; false; fi
   [ ! -f "$STATE" ]
 }
 
@@ -146,7 +146,7 @@ STUB
   # The index WAS rebuilt...
   grep -q "index" "$OC_CALLS"
   # ...but a successful heal stays SILENT: nothing posted, no green checkmark.
-  ! grep -q "slack send" "$STUB_CALLS"
+  if grep -q "slack send" "$STUB_CALLS"; then echo "a silent successful heal still posted to slack" >&2; false; fi
   [[ "$output" != *"white_check_mark"* ]]
   # The 6h cooldown watermark is NOT set on a silent success.
   [ ! -f "$STATE" ]
@@ -292,7 +292,7 @@ STUB
   # The heal STILL ran (repair is never skipped) ...
   grep -q "index" "$OC_CALLS"
   # ... but the noisy mid-restart page is suppressed: no post, no watermark, no ts.
-  ! grep -q "slack send" "$STUB_CALLS"
+  if grep -q "slack send" "$STUB_CALLS"; then echo "a within-grace heal still posted a noisy mid-restart page" >&2; false; fi
   [ ! -f "$STATE" ]
   [ ! -f "$TEST_TMPDIR/last-alert-ts" ]
 }
@@ -390,7 +390,7 @@ STUB
   # main heals with 'status --index' (clears the identity-metadata pause) ...
   grep -q "memory status --index" "$OC_CALLS"
   # ... and NEVER with 'index --force'.
-  ! grep -q "index --force" "$OC_CALLS"
+  if grep -q "index --force" "$OC_CALLS"; then echo "main profile heal wrongly used index --force instead of status --index" >&2; false; fi
   # A successful heal is silent.
   ! grep -q "slack send" "$STUB_CALLS"
 }
