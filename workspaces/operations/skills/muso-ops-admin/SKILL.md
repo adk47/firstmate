@@ -258,13 +258,18 @@ knows which human initiated the change. This mirrors Retool's pattern:
 - `Requester: <user's muso email>` — the human who asked for the operation
 - `Service: clio` — identifies that the change came through Clio
 
-**The wrapper script auto-resolves Slack IDs to emails:**
-- `U7RP6HKUZ` → `aaron@muso.ai`
-- `U03TYGJF1N3` → `serhii@muso.ai`
-- `U038BM16T7W` → `jan@muso.ai`
-- `U02S7TJ7QHY` → `oleg@muso.ai`
-- `U0AL36NADEY` → `nick@muso.ai`
-- `U0A8CCTTAAG` → `liza@muso.ai`
+**The wrapper script auto-resolves Slack IDs to emails.** The map holds exactly
+the people `shared-reference/reference/slack-people.json` lists as current staff
+(enforced by `scripts/tests/muso-admin-api-slack-resolve.bats`). Do not
+hand-write an address from memory — ask the script:
+
+```bash
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  resolve-email U7RP6HKUZ    # -> aaron@muso.ai
+```
+
+An unknown or departed UID is echoed back unchanged with exit 1 — it is never
+silently turned into someone else's address.
 
 Pass Slack ID OR email via `--requester` flag:
 ```bash

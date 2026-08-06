@@ -117,7 +117,14 @@ REDACTED_MARKER="[REDACTED:secret-shaped]"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-# --- Slack ID → email (kept in sync with muso-admin-api.sh:198-222) ---
+# --- Slack ID → email ---
+# Deliberately a SUBSET of muso-admin-api.sh's map, not a mirror of it: this
+# resolver only needs to name the humans who drive env sets. Authority still
+# comes from dev-envset-requesters.txt / envset-requesters.txt, never from an
+# arm here. What it must NOT do is resolve someone who has left — a departed
+# person's UID would land their live address in the /var/log/muso-devops audit
+# trail. Current-staff truth is shared-reference/reference/slack-people.json
+# (kind:"human" + current:true); Oleg (U02S7TJ7QHY) was removed for that reason.
 resolve_slack_to_email() {
     local input="$1"
     [[ "$input" == *@* ]] && { echo "$input"; return 0; }
@@ -125,7 +132,6 @@ resolve_slack_to_email() {
         U7RP6HKUZ)   echo "aaron@muso.ai" ;;
         U03TYGJF1N3) echo "serhii@muso.ai" ;;
         U038BM16T7W) echo "jan@muso.ai" ;;
-        U02S7TJ7QHY) echo "oleg@muso.ai" ;;
         U0AL36NADEY) echo "nick@muso.ai" ;;
         U0A8CCTTAAG) echo "liza@muso.ai" ;;
         U02N2NP3H7F) echo "artem@muso.ai" ;;   # Artem (Mobile) — dev authority
