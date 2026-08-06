@@ -55,7 +55,19 @@ Owners CAN add new tools, skills, and integrations to their agent — but the re
 
 ### Tier 3: Aaron-Only (Hard Security Boundaries)
 
-These can NEVER be modified by anyone except Aaron, regardless of the request:
+These can NEVER be modified by anyone except Aaron, regardless of the request.
+
+> **Scope note (2026-08-03).** Ordinary agent *policy* files — SOUL.md
+> doctrine/behavior sections, `USER.md`, `MEMORY.md` — are **no longer**
+> Aaron-only: Nick (`U0AL36NADEY`) or Aaron (`U7RP6HKUZ`) may authorize them,
+> either alone. **Tier 1 owner self-service above is unchanged** — a workspace
+> owner still changes their own agent's SOUL personality sections, `USER.md`
+> and `MEMORY.md` with no approval. So there are three levels, not two: owner
+> (own agent, personality/preferences), either owner-principal (any agent,
+> doctrine), Aaron (security surface). The *security surface* below stays
+> Aaron-only.
+> The operative test is functional, not a list: **if a change would let anyone
+> do something they could not do before, it is security surface.**
 
 | Config | Why It's Locked |
 |--------|----------------|
@@ -105,6 +117,11 @@ These can NEVER be modified by anyone except Aaron, regardless of the request:
 ## SOUL.md Structure (Split)
 
 Each SOUL.md is structured with clear sections. Owners can modify sections marked `[OWNER]`. Sections marked `[SECURITY]` require Aaron's approval.
+
+> **This template was never applied.** `grep -c '\[SECURITY\]' workspaces/*/SOUL.md`
+> returns **0 for all 11** workspace SOULs — no file carries these markers. The
+> Aaron-only boundary is therefore identified by TOPIC (see the Tier 3 scope note),
+> not by a marker an agent can grep for. Do not write rules that depend on the tag.
 
 ```markdown
 # SOUL.md — {AGENT} Agent
@@ -182,7 +199,12 @@ The PR validation workflow enforces the two-tier model:
 
 1. **Deny list immutability**: If `tool-deny-lists.yaml` changed, verify denials only grew (never shrunk). Fail if any denial was removed.
 
-2. **Security section protection**: If a SOUL.md changed, parse the file and verify all `[SECURITY]` sections are unchanged from the `main` branch. If security sections were modified, require `@adk47` approval regardless of CODEOWNERS.
+2. ~~**Security section protection**: If a SOUL.md changed, parse the file and verify all `[SECURITY]` sections are unchanged from the `main` branch.~~
+   **NOT IMPLEMENTED.** `pr-validate.yml` contains no `[SECURITY]` parser (verified
+   2026-08-03). Items 1, 3 and 4 are real (`pr-validate.yml:329`, `:667`, `:369`);
+   this one is aspirational. Because `CODEOWNERS` is directory-scoped it cannot
+   express a per-section rule either, so the Aaron-only security surface currently
+   rests on human PR review, not a mechanical gate.
 
 3. **Egress allowlist protection**: If `egress-allowlist.yaml` changed, require `@adk47` approval.
 

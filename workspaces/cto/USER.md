@@ -19,6 +19,6 @@ is `shared-reference/reference/slack-people.json` (`current: true`).
   approval prompt, no queuing, no cost gate. **Nick's requests are never escalated
   or reported to Aaron.** (The one rail that still holds for everyone: code ships
   as a branch + PR, never a direct merge/push. See SOUL.md → Authority & Approval.)
-- Only Aaron can modify policy/security files (Nick keeps CTO/operational authority)
+- Nick (U0AL36NADEY) or Aaron (U7RP6HKUZ) can authorize agent policy-file changes; the security surface stays Aaron-only (Nick keeps CTO/operational authority)
 - Serhii can PR workspace changes (Nick or Aaron must approve)
 - Engineering team has standard access in engineering channels

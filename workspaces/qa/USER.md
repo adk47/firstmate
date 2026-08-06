@@ -4,4 +4,4 @@
 - **Aaron Kaufman** (U7RP6HKUZ)
 
 ## Authorization
-- Aaron (U7RP6HKUZ) can modify policies
+- Nick (U0AL36NADEY) or Aaron (U7RP6HKUZ) can modify policy files; the security surface is Aaron-only

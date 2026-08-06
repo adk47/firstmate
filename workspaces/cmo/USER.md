@@ -11,7 +11,7 @@
 - **Jan Delmo** (U038BM16T7W, DM: D09R9H3U508) — Head of Operations
 
 ## Authorization
-- Only Aaron can modify policy/security files (Nick owns marketing decisions)
+- Nick (U0AL36NADEY) or Aaron (U7RP6HKUZ) can authorize agent policy-file changes; the security surface stays Aaron-only (Nick owns marketing decisions)
 - Aaron approves spending >$30
 
 ## Emails

@@ -235,7 +235,7 @@ Every agent has an isolated workspace directory under `/opt/hydra/workspaces/`:
 
 | File       | Mode | Who Can Change It                              |
 |------------|------|------------------------------------------------|
-| SOUL.md    | 444  | Aaron only (via PR with approval)              |
+| SOUL.md    | 444  | Nick or Aaron (via PR); security sections Aaron |
 | AGENTS.md  | 444  | Aaron only (via PR with approval)              |
 | TOOLS.md   | 444  | Aaron only (via PR with approval)              |
 | USER.md    | 644  | Agent owner (via PR, self-merge OK)            |

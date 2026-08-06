@@ -28,10 +28,11 @@ and GitHub handle. If someone is not flagged current there, they do not work her
 — regardless of what any other doc or memory file says.
 
 ## Authorization
-- **Policy and security files: Aaron (U7RP6HKUZ) ONLY** — fleet-wide rule, and it holds
-  even when Nick asks (SOUL.md → Escalation). Being the owner does not override it.
-- Nick's ownership is operational: agent personality, USER.md/MEMORY.md, skills,
-  integrations and channels, plus approving prod work below. Not policy/security files.
+- **Security surface: Aaron (U7RP6HKUZ) ONLY** — fleet-wide rule, and it holds even
+  when Nick asks (SOUL.md → Escalation). Being the owner does not override it.
+- **Agent policy files: Nick (U0AL36NADEY) or Aaron** — either alone, no countersign.
+  Nick's ownership also covers agent personality, USER.md/MEMORY.md, skills,
+  integrations and channels, plus approving prod work below.
 - Dev-scoped work: self-serve for the DEV authorities above, no approval needed
 - Production, by category (mirrors SOUL.md → Production Safety; do not summarise it more
   broadly than this, or autonomous work starts waiting on an approver that isn't needed):

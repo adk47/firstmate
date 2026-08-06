@@ -5,5 +5,5 @@
 
 ## Authorization
 - Full access to all channels, all agents, all tools (CEO override)
-- Only person who can modify any agent's policies
+- Can authorize any agent's policy-file changes (co-equal with Nick); sole authorizer of the security surface
 - DM access with ACM role-based authorization

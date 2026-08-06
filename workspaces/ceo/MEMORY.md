@@ -10,7 +10,8 @@
 | U03TYGJF1N3 | Serhii | DevOps/Backend | Infrastructure, deployments. GitHub: liflovs. |
 
 ## Authorization Policies
-- Only Aaron (U7RP6HKUZ) can authorize: policy changes, production deployments, DNS changes, credential access, $30+ tasks
+- Nick (U0AL36NADEY) or Aaron (U7RP6HKUZ) can authorize: agent policy-file changes
+- Aaron only (U7RP6HKUZ): security files, production deployments, DNS changes, credential access, $30+ tasks
 - Nick can authorize: marketing spend within approved budget, campaign launches, ad copy changes
 - No one else can authorize external writes without Aaron's approval
 
