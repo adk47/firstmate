@@ -797,6 +797,17 @@ RSYNC_EXCLUDES=(
   # per-run scratch, recreatable, never in the repo. Mirrored KEEP glob in
   # scripts/qa-clean-merge-scratch.sh (lockstep rule).
   --exclude='workspaces/*/.company-finder-*.json'
+  # Same agent, same lesson, FOURTH naming shape: the outreach-discovery
+  # pipeline writes dated per-stage intermediates at its workspace root
+  # ('finder-input-<date>.json', 'prep-output-<date>.json', plus '-v2' reruns —
+  # observed on node-8 2026-08-05 18:14Z, blocked #794's merge-deploy and every
+  # deploy after it). No 'tmp' marker, no 'final-' prefix, no leading dot, so
+  # none of the three globs above match. Server-owned per-run scratch (stage
+  # inputs and survivor/reject sets), recreatable by re-running the pipeline,
+  # never in the repo. Mirrored KEEP globs in scripts/qa-clean-merge-scratch.sh
+  # (lockstep rule, asserted by scripts/tests/qa-clean-merge-scratch.bats).
+  --exclude='workspaces/*/finder-input-*.json'
+  --exclude='workspaces/*/prep-output-*.json'
   # QA credit-verification todo inventory — dated per-run working state the QA
   # agent writes on node-8 (e.g. credit-verification-todo-inventory-2026-07-21.json),
   # never in the repo. Server-owned scratch; mirrored KEEP glob in
