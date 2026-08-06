@@ -34,7 +34,7 @@ All SQL below runs on Trino: `muso query - <<'SQL'` heredocs (CSV with header; s
 Get user email or name from the requester. Use it to find:
 - Stripe customer ID (`stripe customers list --email="..."`)
 - Amplitude user (search by email via usersearch API)
-- Trino user record if needed (`SELECT id, email, createdat FROM postgresql_core.public.users WHERE email = '...'`)
+- Muso user record: `muso users search '<email>' --env prod --json` (typed; use this, not SQL)
 
 ### 2. Repeat Offender Check (Stripe)
 
@@ -90,11 +90,24 @@ If any cross-reference matches an account with a prior refund → *REFUND NOT AL
 
 Build a complete picture of who this person is in the music industry.
 
-**a) Muso.AI Account Details (Trino)**
+**a) Muso.AI Account Details**
+
+Prefer the typed path — it is schema-stable, the SQL is not:
+
+```bash
+muso users search 'USER_EMAIL' --env prod --json
+```
+
+That returns the full user record including `misc.countryCode`. Only drop to SQL if you
+need to join against another table:
+
 ```sql
--- Full user record
-SELECT u.id, u.email, u.firstname, u.lastname, u.createdat, u.updatedat,
-  u.country, u.state, u.city, u.phone, u.company, u.jobtitle
+-- Full user record. NOTE: users has NO country/state/city/company/jobtitle columns —
+-- the only location signal is misc.countryCode (captured from IP at signup).
+SELECT u.id, u.email, u.firstname, u.lastname, u.fullname,
+  u.createdat, u.updatedat, u.lastactivetime,
+  u.phonenumber, u.stripecustomerid,
+  json_extract_scalar(u.misc, '$.countryCode') AS country_code
 FROM postgresql_core.public.users u
 WHERE u.email = 'USER_EMAIL';
 
@@ -132,7 +145,9 @@ stripe customers list --email="USER_EMAIL"
 Note: name, phone, address, metadata fields, created date.
 
 **Capture and report:**
-- Full name, location (city/state/country), job title, company
+- Full name; location — profile `country`/`city`/`state` if they claimed one, otherwise the
+  account's `misc.countryCode`. Job title and company are NOT held anywhere in Muso — do not
+  report them, and do not infer them.
 - Whether they claimed a profile — and if so: profile name, type (artist/professional/organization), popularity score, rank, credit count, genre, collaborators
 - If they're a *known name* in music — popularity 70+ = noteworthy, 85+ = major figure
 - Their role(s) in the industry: songwriter, producer, artist, label, publisher, etc.

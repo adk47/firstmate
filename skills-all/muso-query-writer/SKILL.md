@@ -237,8 +237,8 @@ LIMIT 20
 WITH profile_tracks AS (
     SELECT t._id AS track_id
     FROM hive."platform-industry-bi-prod".matvw_catalog_track t
-    CROSS JOIN UNNEST(t.profiles) AS p(profile)
-    WHERE profile.profile_id = 'PROFILE_ID' AND NOT t.is_deleted
+    CROSS JOIN UNNEST(t.profiles) AS p
+    WHERE p.profile_id = 'PROFILE_ID' AND NOT t.is_deleted
 )
 SELECT SUM(streams) AS total_streams
 FROM hive."platform-industry-bi-prod".matvw_stats_track_daily s

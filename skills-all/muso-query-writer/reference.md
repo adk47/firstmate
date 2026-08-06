@@ -138,15 +138,19 @@ LIMIT 100
 **Use Case**: Find all tracks where a profile has a specific role
 
 ```sql
+-- Role is NOT a field on the profiles row. The profiles row is
+-- (catalog_credits, profile_id, raw_recording_credit_ids); the role lives one
+-- level deeper, in catalog_credits[].child (broad role in .parent).
 SELECT
     t._id AS track_id,
     t.title,
-    p.profile.role,
-    p.profile.profile_id
+    c.child AS role,
+    p.profile_id
 FROM hive."platform-industry-bi-prod".matvw_catalog_track t
-CROSS JOIN UNNEST(t.profiles) AS p(profile)
-WHERE p.profile.profile_id = 'TARGET_PROFILE_ID'
-    AND p.profile.role = 'producer'
+CROSS JOIN UNNEST(t.profiles) AS p
+CROSS JOIN UNNEST(p.catalog_credits) AS c
+WHERE p.profile_id = 'TARGET_PROFILE_ID'
+    AND c.child = 'producer'
     AND NOT t.is_deleted
 ORDER BY t.popularity DESC
 LIMIT 100

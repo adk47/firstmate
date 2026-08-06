@@ -194,8 +194,8 @@ LIMIT 20
 ```sql
 SELECT t._id, t.title, t.isrcs, t.release_timestamp
 FROM hive."platform-industry-bi-prod".matvw_catalog_track t
-CROSS JOIN UNNEST(t.profiles) AS p(profile)
-WHERE profile.profile_id = 'PROFILE_ID_HERE'
+CROSS JOIN UNNEST(t.profiles) AS p
+WHERE p.profile_id = 'PROFILE_ID_HERE'
   AND t.is_deleted = false
 ORDER BY t.release_timestamp DESC
 ```
@@ -205,8 +205,8 @@ ORDER BY t.release_timestamp DESC
 WITH profile_tracks AS (
     SELECT t._id as track_id
     FROM hive."platform-industry-bi-prod".matvw_catalog_track t
-    CROSS JOIN UNNEST(t.profiles) AS p(profile)
-    WHERE profile.profile_id = 'PROFILE_ID_HERE'
+    CROSS JOIN UNNEST(t.profiles) AS p
+    WHERE p.profile_id = 'PROFILE_ID_HERE'
       AND t.is_deleted = false
 )
 SELECT
@@ -285,9 +285,9 @@ CROSS JOIN UNNEST(t.isrcs) AS i(isrc)
 WHERE t._id = 'TRACK_ID'
 
 -- Get all artists from tracks
-SELECT t._id, artist.catalog_profile_id, artist.name
+SELECT t._id, a.catalog_profile_id, a.name
 FROM hive."platform-industry-bi-prod".matvw_catalog_track t
-CROSS JOIN UNNEST(t.artists) AS a(artist)
+CROSS JOIN UNNEST(t.artists) AS a
 ```
 
 ### Access struct fields
@@ -361,11 +361,11 @@ WHERE date >= '2025-01-01' AND date < '2025-02-01';
 
 -- BAD: Cross join without limits during development
 SELECT * FROM matvw_catalog_track t
-CROSS JOIN UNNEST(t.profiles) AS p(profile);
+CROSS JOIN UNNEST(t.profiles) AS p;
 
 -- GOOD: Add LIMIT while developing
 SELECT * FROM matvw_catalog_track t
-CROSS JOIN UNNEST(t.profiles) AS p(profile)
+CROSS JOIN UNNEST(t.profiles) AS p
 LIMIT 100;
 
 -- BAD: JOIN two massive tables without filters
@@ -445,8 +445,8 @@ Before running any query, verify:
 SELECT p.name, SUM(s.streams)
 FROM hive."platform-industry-bi-prod".matvw_stats_track_daily s
 JOIN hive."platform-industry-bi-prod".matvw_catalog_track t ON s.track_id = t._id
-CROSS JOIN UNNEST(t.profiles) AS pr(profile)
-JOIN hive."platform-industry-bi-prod".matvw_catalog_profile p ON p._id = profile.profile_id
+CROSS JOIN UNNEST(t.profiles) AS pr
+JOIN hive."platform-industry-bi-prod".matvw_catalog_profile p ON p._id = pr.profile_id
 WHERE p._id = 'TARGET_PROFILE_ID'
 GROUP BY 1;
 
@@ -454,8 +454,8 @@ GROUP BY 1;
 WITH target_tracks AS (
     SELECT t._id AS track_id
     FROM hive."platform-industry-bi-prod".matvw_catalog_track t
-    CROSS JOIN UNNEST(t.profiles) AS pr(profile)
-    WHERE profile.profile_id = 'TARGET_PROFILE_ID'
+    CROSS JOIN UNNEST(t.profiles) AS pr
+    WHERE pr.profile_id = 'TARGET_PROFILE_ID'
       AND NOT t.is_deleted
 ),
 filtered_stats AS (
@@ -476,16 +476,16 @@ JOIN filtered_stats fs ON fs.track_id = tt.track_id;
 ```sql
 -- BAD: Unnest all 190M tracks then filter
 SELECT * FROM hive."platform-industry-bi-prod".matvw_catalog_track t
-CROSS JOIN UNNEST(t.profiles) AS p(profile)
-WHERE profile.profile_id = 'TARGET_ID';
+CROSS JOIN UNNEST(t.profiles) AS p
+WHERE p.profile_id = 'TARGET_ID';
 
 -- GOOD: Filter tracks first using contains(), then unnest
-SELECT t._id, t.title, profile.profile_id, credit.child AS role
+SELECT t._id, t.title, p.profile_id, c.child AS role
 FROM hive."platform-industry-bi-prod".matvw_catalog_track t
-CROSS JOIN UNNEST(t.profiles) AS p(profile)
-CROSS JOIN UNNEST(profile.catalog_credits) AS c(credit)
+CROSS JOIN UNNEST(t.profiles) AS p
+CROSS JOIN UNNEST(p.catalog_credits) AS c
 WHERE contains(transform(t.profiles, x -> x.profile_id), 'TARGET_ID')  -- Filter first!
-  AND profile.profile_id = 'TARGET_ID'
+  AND p.profile_id = 'TARGET_ID'
   AND NOT t.is_deleted;
 ```
 
@@ -505,8 +505,8 @@ WITH target_profile AS (
 )
 SELECT t.*
 FROM hive."platform-industry-bi-prod".matvw_catalog_track t
-CROSS JOIN UNNEST(t.profiles) AS p(profile)
-WHERE profile.profile_id = (SELECT _id FROM target_profile)
+CROSS JOIN UNNEST(t.profiles) AS p
+WHERE p.profile_id = (SELECT _id FROM target_profile)
   AND NOT t.is_deleted;
 ```
 
@@ -728,12 +728,12 @@ Get profiles credited on tracks:
 SELECT
     t._id AS track_id,
     t.title,
-    profile.profile_id,
-    credit.parent AS credit_category,
-    credit.child AS credit_role
+    p.profile_id,
+    c.parent AS credit_category,
+    c.child AS credit_role
 FROM hive."platform-industry-bi-prod".matvw_catalog_track AS t
-CROSS JOIN UNNEST(t.profiles) AS p(profile)
-CROSS JOIN UNNEST(profile.catalog_credits) AS c(credit)
+CROSS JOIN UNNEST(t.profiles) AS p
+CROSS JOIN UNNEST(p.catalog_credits) AS c
 WHERE NOT t.is_deleted
 ```
 
@@ -743,10 +743,10 @@ Get primary artists from tracks:
 SELECT
     t._id AS track_id,
     t.title,
-    artist.catalog_profile_id AS artist_id,
-    artist.name AS artist_name
+    a.catalog_profile_id AS artist_id,
+    a.name AS artist_name
 FROM hive."platform-industry-bi-prod".matvw_catalog_track AS t
-CROSS JOIN UNNEST(t.artists) AS a(artist)
+CROSS JOIN UNNEST(t.artists) AS a
 WHERE NOT t.is_deleted
 ```
 
@@ -781,8 +781,7 @@ WITH company_roster AS (
         member_id AS profile_id,
         membership_type  -- 'record_label', 'manager', 'publisher'
     FROM hive."platform-industry-bi-prod".matvw_catalog_member
-    WHERE NOT is_deleted
-      AND membership_type IN ('record_label', 'manager', 'publisher')
+    WHERE membership_type IN ('record_label', 'manager', 'publisher')
 )
 SELECT
     cr.company_id,
@@ -908,10 +907,10 @@ pro AS (
 ),
 profile_tracks AS (
     SELECT
-        profile.profile_id,
+        p.profile_id,
         t._id AS track_id
     FROM hive."platform-industry-bi-prod".matvw_catalog_track AS t
-    CROSS JOIN UNNEST(t.profiles) AS p(profile)
+    CROSS JOIN UNNEST(t.profiles) AS p
     WHERE NOT t.is_deleted
 ),
 profile_stats AS (

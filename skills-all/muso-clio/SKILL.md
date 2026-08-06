@@ -75,6 +75,33 @@ stripe invoices list -d "customer=cus_XXX"
 
 Use Trino (`bash /opt/hydra/scripts/trino-query.sh`) for: analytics trends, cross-system joins, historical analysis, or when Stripe CLI fails.
 
+### Don't hand-write SQL for a single record
+
+Trino is for **aggregate analytics over the Hive matviews**. For one user, profile, claim,
+or credit request, use the typed `muso` verb — it is schema-stable, hand-written SQL is not.
+The analytics schema is owned by another team and drifts without notice; every column you
+name is a guess until the cluster says otherwise.
+
+| Need | Use | Not |
+|---|---|---|
+| User by email | `muso users search '<email>' --env prod --json` | `SELECT … FROM users WHERE email = …` |
+| Profile / its credits | `muso profiles get <id>` / `muso profiles credits list <id>` | `matvw_catalog_profile` lookup |
+| Claiming records | `muso claiming list` / `muso claiming get <id>` | `SELECT … FROM claiming` |
+| Credit-request status | `muso credit-requests list` | `SELECT … FROM credit_requests` |
+
+When you *do* write SQL, validate it before trusting the result — `EXPLAIN (TYPE VALIDATE)
+<your query>` compiles it without executing and costs nothing:
+
+```bash
+bash /opt/hydra/scripts/trino-query.sh "EXPLAIN (TYPE VALIDATE) SELECT …"   # "true" = valid
+```
+
+Known traps: `users` has NO `country`/`state`/`city`/`company`/`jobtitle` (only
+`misc.countryCode`); there is no `workspace_members` table (membership is `team_users`);
+`claiming.profileid` is `varchar(255)` but `credit_requests.profileid` is `uuid`, so joining
+them needs an explicit `CAST`; and `UNNEST` of a row-typed array (`profiles`, `artists`,
+`catalog_credits`) must NOT carry a single-name alias list.
+
 ## File Output (Slack/OpenClaw only)
 
 Upload generated files (CSV, JSON, etc.) to the Slack thread via `files.uploadV2` using `$SLACK_BOT_TOKEN`:
