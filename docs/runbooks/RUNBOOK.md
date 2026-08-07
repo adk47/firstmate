@@ -1092,6 +1092,96 @@ cat /var/lib/hydra-dr/dr-ai-healer.log
 
 ---
 
+### #prod-alerts Is Too Loud / Went Quiet (`prod-log-alert-watchdog`)
+
+**Background.** `scripts/prod-log-alert-watchdog.sh` runs every 5 min from
+`/etc/cron.d/prod-log-alert-watchdog`. Two behaviors live in it:
+
+- **v2 — LIVE since 2026-08-05, the script's default.** An incident must PERSIST
+  (~5 min measured in log-line time) or hit a fast-path bypass before it posts;
+  eligible incidents roll up into one digest every 15 min; a classifier assigns
+  severity and writes a one-line cause; **only a P0 mentions a human**, and only
+  a paged digest wakes the devops agent.
+- **v1 — the rollback path** (`PROD_LOG_ALERT_V2=0`): posts a fingerprint the
+  FIRST time it is seen, then suppresses it for 6h. No persistence evidence, so
+  a 30-second blip alerts exactly like an outage. This is the behavior Aaron
+  asked us to stop on 2026-08-05. Kept for one release, then deleted.
+
+The cron sets **no** `PROD_LOG_ALERT_V2` — the default lives only in the script,
+so there is no cron-vs-script disagreement to debug. The cutover was a full
+switch with no shadow period (Nick's call, 2026-08-05).
+
+**Rollback to v1** — takes effect on the next tick, no deploy needed:
+
+```bash
+mkdir -p /etc/hydra
+touch /etc/hydra/prod-log-alert-v1.enabled     # revert to first-sighting alerting
+rm    /etc/hydra/prod-log-alert-v1.enabled     # back to v2
+```
+
+⚠️ **Use the flag file, not the cron file.** `/etc/cron.d/prod-log-alert-watchdog`
+is regenerated wholesale by `install-aux-units.sh`, which `deploy.sh` runs on
+every deploy — so a `PROD_LOG_ALERT_V2=0` line added there disappears the moment
+you ship the fix-forward, i.e. exactly when you are relying on it. The flag file
+is deploy-proof, same as `/etc/hydra/dr-ai-healer.disabled`. `PROD_LOG_ALERT_V2=0`
+as an env var still works for a one-off manual run.
+
+**First tick after the cutover.** The ledger (`incidents.json`) seeds itself once
+from v1's `seen.json`, so errors already inside their 6h suppression stay
+suppressed and the first digest is not a dump of everything currently firing.
+That seeding happens only while the ledger does not exist.
+
+**Too loud.**
+
+| Symptom | Lever |
+|---|---|
+| Same benign line every few hours | Add it to `config/alert-exclude-patterns.txt` (**grep ERE**) — it is then dropped before fingerprinting. |
+| Real but not worth 15-min granularity | Raise `PROD_LOG_ALERT_DIGEST_INTERVAL` (**seconds**, e.g. `1800` — not `30m`). |
+| Alerts arrive too eagerly | Raise `PROD_LOG_ALERT_PERSIST_SECONDS` (**seconds**, default `300`). |
+| Humans pinged too often | A mention needs all three: classifier `notify:page`, `severity:P0`, **and** blast radius (the same line across ≥`BLAST` deployments). Fast-path matches and single-deployment bursts deliberately do **not** page — both are computed from log text the reporter controls, so they would let crafted text supply its own corroboration. |
+| Something real was auto-muted | A mute needs `severity:P2` **and** no corroboration, is capped at 3 per digest, and every muted line is printed under "Auto-muted for 24h". Clear one by deleting its key from `incidents.json`. |
+
+⚠️ **Every numeric knob is seconds or a count — never a duration string**, and
+most reject `0`. The lone duration is `PROD_LOG_ALERT_WINDOW` (a
+`kubectl --since` value like `6m`). Both rules are enforced at startup with a
+named error and exit 2, because both fail *silently* otherwise:
+
+- `[ x -ge 15m ]` does not abort — it prints to stderr and evaluates false, which
+  pins the digest to "never due" and holds every persisting incident
+  indefinitely while the watchdog keeps reporting "nothing to post".
+- `0` inverts a `>=` test into always-true. `PROD_LOG_ALERT_BLAST=0` stamps
+  **every first sighting** with deterministic blast corroboration — the one leg
+  of the page gate a crafted log line must not be able to forge. To disable a
+  bypass, raise it out of reach (a huge `BURST`), never zero it.
+
+`COOLDOWN`, `DIGEST_INTERVAL` and `MUTE_SECONDS` are the only knobs that accept
+`0`, because there it means "off" in the direction of *more* alerting.
+
+**Went quiet — is it broken or is prod fine?** In order:
+
+1. `tail /var/log/prod-log-alert-watchdog.log`. `OK: nothing to post (eligible=…
+   immediate=… resolved=… digest_due=…)` is healthy silence and tells you which
+   gate held.
+2. **`SELF-TEST FAIL` + `ABORT` means the detector is refusing to run** and NO
+   alerting is happening. The message names which invariant broke; the overlap
+   case ("counting TICKS, not log timestamps") means a code change turned the
+   persistence gate into a no-op. Fix the code — do not disable the self-test.
+3. Everything muted? `jq '[.[]|select(.muted_until)]|length' /var/lib/prod-log-alert/incidents.json`.
+   Mutes are 24h TTLs set by the classifier; clear one by deleting its key.
+4. Suspect the classifier is mis-judging: `touch /etc/hydra/prod-alert-classifier.disabled`.
+   Digests keep posting, unclassified and with no mentions — visibility fails
+   OPEN, paging fails CLOSED. Nothing else needs changing.
+
+**State.** `/var/lib/prod-log-alert/incidents.json` — the ledger, one entry per
+live incident: `first_ts`/`last_ts` (kubelet log time, the persistence span),
+`total`, `state`, `posted_at`, `post_count`, `severity` (the classifier's last
+verdict, kept for forensics — nothing reads it back), `muted_until`. Plus
+`last-digest` and v1's `seen.json`. All are safe to delete: the next tick
+rebuilds them, at the cost of re-alerting once. Entries are dropped after 3
+ticks unseen, so the file tracks the live incident set, not history.
+
+---
+
 ### Agent Can't See a Recently-Shipped Skill (stale skill catalog)
 
 **Symptom:** an agent ignores a skill it was told to use, or "can't find" a skill that IS

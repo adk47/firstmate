@@ -62,7 +62,10 @@
 #     Schedules scripts/prod-log-alert-watchdog.sh every 5 minutes
 #     to post NEW prod error-log lines (kubectl read-only, redacted,
 #     fingerprint-deduped) to #prod-alerts C0BA8QMV3ME (Serhii's
-#     prod-log-visibility ask, 2026-06-09).
+#     prod-log-visibility ask, 2026-06-09). Since 2026-08-05 it runs
+#     the v2 path by default: persistence gate + 15-min digest +
+#     severity classifier, with only P0 paging a human. Also creates
+#     /var/lib/prod-log-alert for the fingerprint + incident state.
 #
 #   /etc/cron.d/caroline-rag-index-watchdog
 #     Schedules scripts/caroline-rag-index-watchdog.sh every 10 minutes
@@ -1241,6 +1244,27 @@ fi
 # the overlap means no gap between ticks, and the per-fingerprint cooldown
 # (6h) means a persistent error pages once, not every tick. Same ownership
 # rule: edit here + re-run install-aux-units.sh, never edit on node-8.
+#
+# Since 2026-08-05 the script defaults to the v2 path: an error must PERSIST
+# (~5 min of log-line time) or match a fast-path pattern before it posts,
+# eligible incidents roll up into one digest every 15 min, and only a P0 pages
+# a human. No env var is set here on purpose — the default lives in ONE place
+# (the script), so there is no cron-vs-script disagreement to debug at 3am.
+#
+# DO NOT wire a rollback through this file: the `cat >` below rewrites it
+# wholesale on every deploy, so an env var added here vanishes the moment a
+# fix-forward ships — mid-incident, silently. The rollback lever is the
+# deploy-proof flag file /etc/hydra/prod-log-alert-v1.enabled; see the RUNBOOK.
+#
+# /var/lib/prod-log-alert holds both the v1 fingerprint map (seen.json) and the
+# v2 incident ledger (incidents.json). `mkdir -p`, not `install -d`: install -d
+# re-chmods an EXISTING dir to 0755 even without -m.
+mkdir -p /var/lib/prod-log-alert
+# /etc/hydra is where the operator-facing switch FILES live (this watchdog's v1
+# rollback flag, the classifier kill switch, dr-ai-healer.disabled). Nothing
+# created it before, so `touch /etc/hydra/...` failed on a clean box — a lever
+# you only discover is missing while trying to pull it is not a lever.
+mkdir -p /etc/hydra
 cat > /etc/cron.d/prod-log-alert-watchdog << PRODLOGWD
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
 */5 * * * * root $HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh >> /var/log/prod-log-alert-watchdog.log 2>&1
