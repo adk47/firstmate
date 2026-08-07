@@ -996,15 +996,18 @@ If you see `invalid_api_key` / `Incorrect API key: sk-hydra…` but
 `ensure-codex-version-pinned.sh --check` is **CLEAN**, this is NOT #90925. Tell them
 apart by the record's context: a float 401s on **every** codex turn fleet-wide; the
 compaction case is scoped to `[agent/embedded] skipping codex app-server compaction for
-non-manual trigger` → `[openai-transport] api=openai-responses` 401 →
-`[compaction-diag] … trigger=cli_budget` and falls back to gpt-5.6-luna **for that one
-compaction**, while normal turns keep serving on OAuth. Root cause: openclaw's embedded
-compaction summarizer (`resolveEmbeddedCompactionTarget`) bypasses the codex OAuth
-runtime and hits the placeholder key even at the pinned version — a structural path,
-not a version drift (root-caused 2026-07-06: a stuck QA lane retried `cli_budget`
-compaction ~24× → 55 raw `invalid_api_key`, pin clean, fleet healthy; the watchdog
-paged it as a float). A re-pin/restart does nothing. It self-recovers; the only real
-harm is noisy logs + a false page — both fixed below.
+non-manual trigger` → raw OpenAI 401 → `[compaction-diag] … trigger=cli_budget` and a
+paid fallback **for that one compaction**, while normal turns keep serving on OAuth.
+Root cause in openclaw 2026.7.1: `runCliTurnCompactionLifecycle` converted the intentional
+"codex app-server owns automatic compaction" result into
+`fallbackToContextEngine:true`; the legacy context engine then summarized through the
+placeholder API-key route. This is not version drift. Hydra backports the upstream 7.2
+behavior with `scripts/patch-openclaw-codex-native-compaction.sh`: the intentional
+native-owned result is now a clean no-op, so local compaction does not reach the legacy
+summarizer or OpenRouter. Deploy reapplies the fail-closed patch after every runtime pin
+check and stops if its compiled-code anchor drifts. Keep the liveness detector
+conservative: fallback-decision records have no compaction/run identity, so filtering them
+after the fact can either hide real fallbacks or recreate the false page under concurrency.
 
 - **Watchdog**: the `:rotating_light: floated off pin` alert now runs the pin `--check`
   and only cries "float" when the pin actually **drifted**. A pin-clean 401 (the
@@ -1017,8 +1020,7 @@ harm is noisy logs + a false page — both fixed below.
   a **compaction-only** (pin-clean) 401 no longer over-blocks writes on a healthy fleet.
 - **`compaction.model` is NOT the fix**: openclaw docs say *do not set
   `agents.defaults.compaction.model` on Codex-backed agents* (it emits an "override
-  ignored" warning), and the fallback already lands on `openrouter/openai/gpt-5.6-luna`
-  — the exact model you'd set. Zero gain for fighting the framework; leave it unset.
+  ignored" warning). Native Codex owns automatic compaction; leave it unset.
 
 > **Related — Codex OAuth token lapse** (the original 2026-06-19 trigger, distinct
 > from the api-key-route bug above): logs show `401 ... authentication token is

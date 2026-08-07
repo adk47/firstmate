@@ -530,24 +530,22 @@ chains work fleet-wide. Swapping an OpenRouter OpenAI agent to a flat-fee Codex
 subscription is a config edit + an OAuth bootstrap on the live node + egress for
 `chatgpt.com:443` / `api.openai.com:443`.
 
-**Session compaction has its own model path that bypasses the codex OAuth runtime — so
-`invalid_api_key` 401s with the pin CLEAN are compaction, not a #90925 float.** A
-non-manual (`cli_budget`) compaction logs `[agent/embedded] skipping codex app-server
-compaction for non-manual trigger` and resolves a *separate* embedded summarizer target
-(`resolveEmbeddedCompactionTarget`) that routes `openai/gpt-5.5` through the raw
-`[openai-transport] api=openai-responses` (api-key) path — hitting hydra's placeholder
-`OPENAI_API_KEY` → 401 → fallback to `openrouter/openai/gpt-5.4-mini` **for that one
-compaction**, while normal agent turns keep serving on OAuth. This is a STRUCTURAL path
-present even at the pinned codex `2026.5.27`, distinct from #90925 (which mis-routes
-*every* turn only when floated to 6.x). Distinguish the two by the pin
-(`ensure-codex-version-pinned.sh --check`): drifted = real float (whole fleet on mini);
-clean = compaction-only (fleet healthy). Both the watchdog float alert and the
-admin/Stripe write-health gate (`codex_health_gate`) pin-gate the api-key signal so a
-compaction loop no longer false-pages or false-blocks writes
-(`codex_apikey_route_verdict` / `codex_pin_check_exit` in `scripts/lib/codex-health.sh`;
-root-caused 2026-07-06). Do NOT "fix" it with `agents.defaults.compaction.model` —
-openclaw docs say don't set it on Codex-backed agents (it emits an "override ignored"
-warning), and the fallback already lands on the exact model you'd pick.
+**Openclaw 2026.7.1's CLI budget lifecycle violated Codex-native compaction ownership.**
+The Codex harness correctly returned `codex app-server owns automatic compaction`, but
+`runCliTurnCompactionLifecycle` changed that intentional skip into
+`fallbackToContextEngine:true`. The legacy context engine then sent the summary through
+the raw OpenAI API-key route, hit hydra's placeholder key, and completed on a paid
+OpenRouter fallback. Normal agent turns remained on OAuth, but the fallback logger made
+the compaction completion indistinguishable from a served user turn and the long-running
+fallback chain could push concurrent turns onto OpenRouter. Openclaw 7.2 changes this exact
+case to a clean no-op; while hydra remains pinned to 7.1, deploy backports that narrow
+change with `scripts/patch-openclaw-codex-native-compaction.sh` and fails closed if the
+compiled anchor moves. Do not try to suppress these records in the liveness detector: the
+fallback-decision lines carry no compaction/run identity, so correlation is ambiguous under
+concurrency. Fix the producer path instead and keep liveness conservative. Pin-clean
+historical 401s remain compaction-only for the api-key verdict and write gate; a drifted pin
+remains a real #90925 float. Do not set `compaction.model` or `compaction.provider` on
+Codex-backed agents — native Codex owns compaction.
 
 ### Auth: one canonical store, shared by symlink (never fan out)
 

@@ -1889,6 +1889,10 @@ log "Step 4c.5/8: Pinning openclaw runtime to ${OPENCLAW_VERSION}..."
 if ! install_openclaw; then
   fail "openclaw runtime pin failed (target ${OPENCLAW_VERSION})"
 fi
+if ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
+  bash "$HYDRA_ROOT/scripts/patch-openclaw-codex-native-compaction.sh"; then
+  fail "Codex-native automatic compaction backport failed"
+fi
 
 # -------------------------------------------------------------------
 # Step 4d: Install plugins
