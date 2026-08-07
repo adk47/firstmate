@@ -65,6 +65,15 @@ require "$SKILL" "the ambiguous-name STOP gate" \
   "STOP and ask the requester for the exact"
 require "$SKILL" "the never-claim-removed rule" \
   'Never say "removed" until you have re-read the list'
+# Since industry-data-processing#1478 (deployed 2026-08-05) the rebuild endpoint
+# reads the aggregate twice and returns BOTH. The old doctrine ("never quote the
+# endpoint's echo") was correct against the old endpoint and is now wrong, so it
+# was replaced rather than kept — which means the replacement needs its own
+# anchors or a future compaction silently drops back to quoting one number.
+require "$SKILL" "the second (header-side) number the rebuild returns" \
+  "collaborationsCountVisible"
+require "$SKILL" "the asymmetric-evidence rule for the two numbers" \
+  "Disagreement is conclusive; agreement is not."
 
 # --- negative scan: no write-SQL against the serving tables, anywhere -------
 # Each file is flattened to a single line so multi-line SQL blocks

@@ -23,9 +23,12 @@ compatibility: |
   Requires: muso-ops-admin (muso-admin-api.sh) or muso-cli, and Trino
   (postgresql_catalog) for the type-inclusive read. Main gateway only.
 metadata:
-  version: "1.0"
+  version: "1.1"
   source-repo: "Muso-AI/hydra"
-  verified-against: "live prod reads + rebuild on d5776b6b (2026-07-29)"
+  verified-against: |
+    live prod reads + rebuild on d5776b6b (2026-07-29); rebuild read-back
+    doctrine against industry-data-processing fd2ede01 (#1478), deployed to
+    prod in image 20260805-413 (2026-08-05)
 allowed-tools:
   - exec
 ---
@@ -109,7 +112,7 @@ mutation.**
 deletes rows the tracks no longer support, and clears the profile API cache.
 Synchronous, idempotent, convergent — re-running it is the remedy for a bad run,
 so it does **not** need tier-2 approval artifacts
-(`api/v1/routers/admin/collaboration_router.py:88-130`).
+(`api/v1/routers/admin/collaboration_router.py:171-270`).
 
 **What rebuild does NOT do:**
 
@@ -121,7 +124,9 @@ so it does **not** need tier-2 approval artifacts
 - **It does not fix wrong credits.** It reads current state. Run it only *after*
   the credit edit shows in the credits list.
 - **It does not remove a pair backed by a real shared credit.** Nothing does.
-- **Do not promise it fixes the headline count.** See below.
+- **It does not promise the headline count is *visible* yet.** It now proves the
+  count is stored on the primary; the number the requester sees comes from a
+  replica. See below.
 
 ## The counting traps
 
@@ -137,7 +142,20 @@ as if it validates another.
    and the endpoint returned exactly 123.
 3. **`collaboratorsCount` on `GET /admin/profile/:id`** — the header number. It
    is stored separately in `catalog_profile_aggregations` and **is frequently
-   stale.** Same profile, same day: header 136 vs 123 countable rows.
+   stale.** Same profile, same day: header 136 vs 123 countable rows. Its
+   denominator matches neither number above: the aggregate counts `artist`
+   **and** `professional` rows
+   (`collaboration_router.py:72 _COUNTED_COLLABORATOR_TYPES`, mirroring the
+   offline `profile_collaborations_count.py` whitelist), while the admin list
+   returns artist only.
+
+And one split that explains most disagreements: **the rebuild writes the
+primary; the header and Trino both read replicas.** The aggregate is upserted
+through `CatalogWriterPostgreClient` (`PG_CATALOG_WRITER_CONNECT_STRING`), the
+profile header reads it through `CatalogReaderConnection` (the node-19 replica),
+and Trino reads a standby too. A header that lags a *confirmed* write is
+replication lag, not a failed upsert — and that, not a broken rebuild, is the
+most likely explanation of the 2026-07-29 observation below.
 
 Three traps that follow:
 
@@ -151,13 +169,31 @@ Three traps that follow:
   `professional` while its `collaborator_type` in the table is `artist`. Do not
   infer table state from the response field — they are different columns with
   the same-sounding name.
-- **A rebuild is not verified to fix the header.** The endpoint returns the
-  count it *intended* to write, not a read-back
-  (`collaboration_router.py:52-85` returns the SELECTed value). Measured
-  2026-07-29: a rebuild returned `collaborationsCount: 123` while both the
-  aggregations table and the profile header still read 136 ten minutes later.
-  **Report the observed header, never the endpoint's echo.** If the header
-  matters to the requester, escalate the drift to data-platform.
+- **A rebuild returns two numbers now — compare them, never quote one alone.**
+  Until 2026-08-05 the endpoint returned the count it *intended* to write, so a
+  correction that never became visible was indistinguishable from one that did
+  (measured 2026-07-29: a rebuild answered `collaborationsCount: 123` while the
+  aggregations table and the header still read 136 ten minutes later). Since
+  Muso-AI/industry-data-processing#1478 it reads the aggregate **twice** —
+  `collaborationsCount` re-read from the primary after the upsert commits
+  (`collaboration_router.py:105`), and `collaborationsCountVisible` read through
+  the profile header's own accessor, i.e. the number the requester will
+  actually see (`:161`). Read the pair:
+
+  | Response | Meaning | Action |
+  |---|---|---|
+  | `collaborationsCount` == `collaborationsCountVisible` | consistent — **not** proof; the reader may have fallen back to the primary | confirm the header on the profile and correlate the fallback log (see below), *then* done |
+  | the two differ | write is durable, replica is behind | re-read the header later; escalate replication if it persists |
+  | `collaborationsCountVisible: null` | could not be observed — the rebuild still succeeded | re-run; check logs |
+  | 502 `aggregate readback mismatch: computed=… stored=…` | the primary does not hold `computed` — the upsert missed, **or** a concurrent legitimate writer (V3 PDP / Spark) changed the row between commit and re-read. The endpoint cannot tell which | never report `computed`; escalate to data-platform quoting **both** numbers |
+  | 502 `aggregate write committed but could not be verified` | unproven, **not** failed | re-run; do not assume either outcome |
+
+  **Disagreement is conclusive; agreement is not.** `CatalogReaderConnection`
+  falls back to the primary when `PG_CATALOG_READER_CONNECT_STRING` is unset and
+  on a transient checkout error, so the two numbers can agree on exactly the run
+  where they should not — that fallback logs itself, so correlate before calling
+  it clean. When the header is what the requester cares about, confirm it on the
+  profile itself before promising anything.
 
 Type-inclusive read (bucket predicate is required — an unbucketed scan of all
 30 partitions gets killed by the standby's recovery conflict):

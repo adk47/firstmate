@@ -326,6 +326,29 @@ PY
   [[ "$output" == *"FAIL:"* ]]
 }
 
+# The rebuild endpoint reads the aggregate twice since
+# industry-data-processing#1478. Both halves of that doctrine are load-bearing:
+# without the second number the skill is back to quoting an unverified count,
+# and without the asymmetry rule an operator reads agreement as proof.
+
+@test "fails if the header-side rebuild number is removed" {
+  local skill="$TEST_TMPDIR/skills-all/muso-ops-collaborators/SKILL.md"
+  grep -vF -- "collaborationsCountVisible" "$skill" > "$skill.tmp"
+  mv "$skill.tmp" "$skill"
+  run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FAIL:"* ]]
+}
+
+@test "fails if the asymmetric-evidence rule for the two numbers is removed" {
+  local skill="$TEST_TMPDIR/skills-all/muso-ops-collaborators/SKILL.md"
+  grep -vF -- "Disagreement is conclusive; agreement is not." "$skill" > "$skill.tmp"
+  mv "$skill.tmp" "$skill"
+  run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FAIL:"* ]]
+}
+
 # --- fail-closed behaviour ---------------------------------------------------
 
 @test "refuses to pass vacuously when the doctrine skill is missing" {
