@@ -39,6 +39,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/codex-usage.sh"
 # shellcheck source=scripts/lib/codex-active-account.sh
 . "$HERE/lib/codex-active-account.sh"
+# Measured-quota helpers — cq_measure_read + cq_format_evidence are what make
+# every number in this report carry its age and provenance.
+# shellcheck source=scripts/lib/codex-quota.sh
+. "$HERE/lib/codex-quota.sh"
 
 CODEX_USAGE_ROOT="${CODEX_USAGE_ROOT:-/root}"
 AUTH_DIR="${AUTH_DIR:-$CODEX_USAGE_ROOT/.openclaw-main/agents/main/agent}"
@@ -86,36 +90,13 @@ main() {
   active="$(caa_state_key "$profiles" 2>/dev/null)" || active=""
   [ -n "$active" ] || active="$(cu_active_account "$state")"
 
-  # Freshest rate_limits snapshot anywhere in the fleet within the lookback
-  # window — attributed to the active account (the fleet runs ONE account at a
-  # time, so the freshest snapshot is the active account's).
-  local -a rollouts=()
-  local p
-  while IFS= read -r p; do
-    [ -n "$p" ] && rollouts+=("$p")
-  done < <(cu_collect_rollouts "$CODEX_USAGE_ROOT" "$ROLLOUT_LOOKBACK_HOURS")
-
-  local snap=""
-  if [ "${#rollouts[@]}" -gt 0 ]; then
-    snap="$(cu_latest_rate_limits "${rollouts[@]}")"
-  fi
-
-  local s_ts=""
-  [ -n "$snap" ] && s_ts="$(printf '%s' "$snap" | cut -f1)"
-
-  # Rotation-boundary guard: a snapshot that PREDATES the last account switch
-  # was emitted by the OUTGOING account — attributing it to the new active
-  # account would show the old (likely capped) quota under the wrong email,
-  # duplicated against the same numbers in the outgoing account's archive.
-  # Until the new account emits a snapshot, degrade honestly to "unavailable".
-  if [ -n "$snap" ] && [ -r "$CODEX_ROTATE_STAMP" ]; then
-    local rot_ts; rot_ts="$(head -n1 "$CODEX_ROTATE_STAMP" 2>/dev/null | tr -d '[:space:]')"
-    if [[ "$rot_ts" =~ ^[0-9]+$ ]] && [[ "$s_ts" =~ ^[0-9]+$ ]] && [ "$s_ts" -lt "$rot_ts" ]; then
-      snap=""; s_ts=""
-    fi
-  fi
-  local snap_fresh; snap_fresh="$(cu_is_fresh "${s_ts:-0}" "$FRESHNESS_HOURS")"
-
+  # No rollout scan here any more. This report used to derive the active
+  # account's numbers from the freshest rate_limits snapshot anywhere in the
+  # fleet, guarded by a rotation-boundary check. Rollouts carry no account
+  # identity on 7.x, so that attributed one subscription's usage to whichever
+  # account was nominally active — and every standby fell back to an archive
+  # written at rotation time. Both are replaced by per-account measurements
+  # (scripts/codex-quota-refresh.sh); see codex-quota.sh for the incident.
   local -a acct_rows=()
   local r
   while IFS= read -r r; do
@@ -130,59 +111,67 @@ main() {
   return 0
 }
 
-# Resolve (role, freshness) for an account id against the active account +
-# snapshot freshness. Echoes "<role>\t<freshness>".
-acct_role() {
-  local pid="$1"
-  if [ -n "$active" ] && [ "$pid" = "$active" ]; then
-    printf 'active\t%s' "$snap_fresh"
-  else
-    printf 'standby\tnone'
-  fi
-}
-
-# _acct_archive_row <pid> — archived snapshot TSV for a standby account (or
-# nothing). Kept as a function so emit_text/emit_json can't drift apart.
-_acct_archive_row() {
-  cu_archive_read "$CODEX_USAGE_ARCHIVE_DIR" "$1" 2>/dev/null || true
-}
-
 emit_text() {
   printf '*Codex usage* — %s\n' "$(report_timestamp)"
   if [ "${#acct_rows[@]}" -eq 0 ]; then
     printf '\n• no codex accounts found in auth-profiles.json\n'
     return
   fi
-  local row pid email plan role fresh arow age
+  # Every account is now reported from its OWN measurement, taken by
+  # scripts/codex-quota-refresh.sh against account/rateLimits/read.
+  #
+  # The previous shape reported the ACTIVE account from the freshest fleet-wide
+  # rollout and every standby from an archive written at rotation time. Because
+  # rollouts carry no account identity on 7.x, that attributed one subscription's
+  # numbers to whichever account was nominally active — and on 2026-08-06 this
+  # report told a human all three accounts were at 95-97% when a direct probe
+  # measured 100% / 4% / 0%. Two Pro subscriptions were reported as spent while
+  # sitting untouched.
+  #
+  # Rendering goes through cq_format_evidence, which structurally cannot print a
+  # percentage without its age and provenance, and prints "quota UNKNOWN (why)"
+  # rather than a stale number when there is no fresh reading.
+  local row pid email plan mrow now marker
+  now="$(date +%s)"
   for row in "${acct_rows[@]}"; do
     IFS=$'\t' read -r pid email plan <<<"$row"
-    IFS=$'\t' read -r role fresh <<<"$(acct_role "$pid")"
-    printf '\n'
-    if [ "$role" = active ] && [ "$fresh" = fresh ]; then
-      cu_format_account_block "$email" active fresh "$plan" "$snap"
-    elif [ "$role" = active ]; then
-      cu_format_account_block "$email" active "$fresh" "$plan"
-    else
-      arow="$(_acct_archive_row "$pid")"
-      age=""
-      if [ -n "$arow" ]; then
-        local ats; ats="$(printf '%s' "$arow" | cut -f1)"
-        [[ "$ats" =~ ^[0-9]+$ ]] && age="$(( $(date +%s) - ats ))"
-      fi
-      cu_format_account_block "$email" standby none "$plan" "$arow" "$age"
-    fi
+    mrow="$(cq_measure_read "$CODEX_USAGE_ARCHIVE_DIR" "$pid" 2>/dev/null || true)"
+    marker="idle standby"
+    [ -n "$active" ] && [ "$pid" = "$active" ] && marker="active"
+    printf '\n*%s* — %s (plan: %s)\n' "$email" "$marker" "${plan:--}"
+    printf '  • %s\n' "$(cq_format_evidence "$email" "$mrow" "$now")"
   done
+  # Fail loud IN THE CONTENT when the measurement layer is not running: a report
+  # that silently shows every account as UNKNOWN looks the same as one nobody
+  # has looked at, and this cron is often the only thing a human reads.
+  if [ ! -d "$CODEX_USAGE_ARCHIVE_DIR" ] || ! ls "$CODEX_USAGE_ARCHIVE_DIR"/*.measure.tsv >/dev/null 2>&1; then
+    printf '\n:warning: no per-account measurements on disk — check `codex-quota-refresh` cron and `/var/log/codex-quota-refresh.log` (kill switch: `/etc/hydra/codex-quota-probe.disabled`).\n'
+  fi
 }
 
 # _row_windows_json <tsv-row> — [{minutes,label,used_percent,resets_at},…]
 _row_windows_json() {
   local row="$1" f3 f4 f5 f6 f7 f8 w wm wp wr out="[]"
-  IFS=$'\t' read -r _ _ f3 f4 f5 f6 f7 f8 <<<"$row"
+  # TEN fields, not eight: measurement rows append `source` and `plan`. With an
+  # 8-field read the last name swallows the tail, so f8 becomes
+  # "<reset>\tprobe-live\tpro" — `jq --argjson r` then gets non-JSON, jq fails,
+  # and the `|| out="[]"` fallback nulls every field in the --json report. It
+  # is latent only while the weekly window is the sole window; it fires the
+  # moment OpenAI restores the 5h one.
+  IFS=$'\t' read -r _ _ f3 f4 f5 f6 f7 f8 _ _ <<<"$row"
   for w in "$f3|$f4|$f5" "$f6|$f7|$f8"; do
     IFS='|' read -r wm wp wr <<<"$w"
     [[ "$wm" =~ ^[0-9]+$ ]] || continue
+    # Validate the numerics BEFORE jq sees them. cq_parse_ratelimits emits "-"
+    # for a missing usedPercent (deliberately — an absent reading must not
+    # become a synthetic 0), and `--argjson p -` is a jq parse error. The
+    # `|| out="[]"` fallback below would then discard windows already
+    # accumulated, so one partial window erased a perfectly good primary and
+    # the --json report came back with empty windows and null legacy fields.
+    # Skip only the incomplete window; keep everything valid.
+    [[ "$wp" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "$wr" =~ ^[0-9]+$ ]] || continue
     out="$(jq -n --argjson prev "$out" --argjson m "$wm" \
-                 --argjson p "${wp:-0}" --argjson r "${wr:-0}" \
+                 --argjson p "$wp" --argjson r "$wr" \
                  --arg l "$(cu_window_label "$wm")" \
                  '$prev + [{minutes:$m,label:$l,used_percent:$p,resets_at:$r}]' 2>/dev/null)" || out="[]"
   done
@@ -206,19 +195,26 @@ _acct_json() {
 }
 
 emit_json() {
-  local row pid email plan role fresh obj objs="" arow
+  # Same source of truth as emit_text — the per-account MEASUREMENT. These two
+  # renderers must never diverge: a --json consumer reading the old inferred
+  # archive while the text report reads measurements would put two different
+  # numbers for the same account into circulation, which is the class of bug
+  # this whole change exists to remove.
+  local row pid email plan role obj objs="" mrow state now
+  now="$(date +%s)"
   if [ "${#acct_rows[@]}" -gt 0 ]; then
     for row in "${acct_rows[@]}"; do
       IFS=$'\t' read -r pid email plan <<<"$row"
-      IFS=$'\t' read -r role fresh <<<"$(acct_role "$pid")"
-      if [ "$role" = active ] && [ "$fresh" = fresh ]; then
-        obj="$(_acct_json "$email" "$role" "$fresh" "$plan" "$snap")"
-      elif [ "$role" = active ]; then
-        obj="$(_acct_json "$email" "$role" "$fresh" "$plan" "")"
+      role=standby
+      [ -n "$active" ] && [ "$pid" = "$active" ] && role=active
+      mrow="$(cq_measure_read "$CODEX_USAGE_ARCHIVE_DIR" "$pid" 2>/dev/null || true)"
+      # `freshness` carries the tri-state directly so a consumer cannot mistake
+      # "we could not measure it" for "it is fine".
+      state="$(cq_row_state "$mrow" "$CQ_CAP_PCT" "$CQ_MEASURE_MAX_AGE_MIN" "$now")"
+      if [ "$state" = unknown ]; then
+        obj="$(_acct_json "$email" "$role" unknown "$plan" "")"
       else
-        arow="$(_acct_archive_row "$pid")"
-        fresh="none"; [ -n "$arow" ] && fresh="archived"
-        obj="$(_acct_json "$email" "$role" "$fresh" "$plan" "$arow")"
+        obj="$(_acct_json "$email" "$role" "$state" "$plan" "$mrow")"
       fi
       objs+="$obj"$'\n'
     done

@@ -74,10 +74,33 @@ STUB
   # Hermeticity for the proactive/quota paths: archives + rollout scans stay
   # inside the sandbox (this suite may run on the node-8 CI runner as root).
   export CODEX_USAGE_ARCHIVE_DIR="$TEST_TMPDIR/archive"
+  # The measured-quota paths resolve the ACTIVE account via codex-active-account.sh,
+  # whose precedence is env > state file > baked default. Without these two the
+  # suite read the REAL /var/lib/hydra/codex-active-account on node-8 and fell
+  # back to the baked aaron@muso.ai — so every measurement fixture was filed
+  # under a key the script never looked up, and the guard under test was
+  # unreachable. Pin both into the sandbox, same as codex-account-rotate.bats.
+  export CODEX_ACTIVE_ACCOUNT_FILE="$TEST_TMPDIR/state/active-account"
+  export CODEX_ACTIVE_ACCOUNT_DEFAULT="openai-codex:a@x.com"
 }
 
 # Write a rollout snapshot under the sandbox store root.
 # _set_active_snapshot <age_seconds> <window_minutes> <used_pct> <resets_in_seconds>
+# _set_active_measurement <age_secs> <window_minutes> <used_pct> <reset_in_secs>
+# Write a MEASURED quota row for the active account (the baked-default
+# openai-codex:a@x.com, which caa_active_key resolves to with no state file).
+# Same argument shape as _set_active_snapshot so the proactive tests read as a
+# straight swap: the proactive path now decides on measured evidence instead of
+# the account-blind fleet-wide rollout it used to read.
+_set_active_measurement() {
+  local age="$1" wm="$2" pct="$3" rin="$4" now
+  now="$(date +%s)"
+  mkdir -p "$CODEX_USAGE_ARCHIVE_DIR"
+  printf '%s\t-\t%s\t%s\t%s\t-\t-\t-\tprobe-live\tpro\n' \
+    "$(( now - age ))" "$wm" "$pct" "$(( now + rin ))" \
+    > "$CODEX_USAGE_ARCHIVE_DIR/openai-codex_a_x.com.measure.tsv"
+}
+
 _set_active_snapshot() {
   local age="$1" wm="$2" pct="$3" rin="$4" now ts iso sess
   now="$(date +%s)"; ts="$(( now - age ))"
@@ -255,16 +278,20 @@ JSON
   [[ "$output" == *"rotation ran"* ]]
 }
 
-@test "rotate refuses on cooldown (rc=3) → no-rotation-target page, cooldown-limited" {
+@test "rotate refuses on cooldown (rc=3) → cooldown page that makes NO quota claim" {
   _set_remaining_min 10080
   _set_cap_signature 1
   echo 3 > "$TEST_TMPDIR/state/rotate-rc"
   run "$SCRIPT"
   [ "$status" -eq 0 ]
-  # Wording is "no rotation target left", not "BOTH accounts": the fleet has
-  # THREE linked codex accounts as of 2026-07-28, so rc=3/rc=7 mean "no viable
-  # candidate remains", not "both are spent".
-  grep -q "no rotation target left" "$PAGE_LOG"
+  # rc 3 means "we rotated recently", which is a statement about OUR clock and
+  # nothing else. It previously shared a headline with rc 7 ("every alternate
+  # account is known-capped"), and that merge is how the false 2026-08-05 page
+  # asserted three exhausted subscriptions while two sat at 4% and 0%.
+  grep -q "rotation deferred" "$PAGE_LOG"
+  grep -q "cooldown" "$PAGE_LOG"
+  run grep -q "capped" "$PAGE_LOG"
+  [ "$status" -ne 0 ]
   # second run inside the page cooldown must not re-page
   : > "$PAGE_LOG"
   run "$SCRIPT"
@@ -272,13 +299,160 @@ JSON
   [ ! -s "$PAGE_LOG" ]
 }
 
-@test "rotate reports no standby (rc=4) → honest no-standby page" {
+@test "rotate reports no standby (rc=4) → structural page, not a quota claim" {
   _set_remaining_min 10080
   _set_cap_signature 1
   echo 4 > "$TEST_TMPDIR/state/rotate-rc"
   run "$SCRIPT"
   [ "$status" -eq 0 ]
-  grep -q "NO viable standby" "$PAGE_LOG"
+  grep -q "no standby account exists" "$PAGE_LOG"
+  grep -q "STRUCTURAL" "$PAGE_LOG"
+}
+
+@test "rotate cannot measure any alternate (rc=8) → UNKNOWN page that denies a cap claim" {
+  _set_remaining_min 10080
+  _set_cap_signature 1
+  echo 8 > "$TEST_TMPDIR/state/rotate-rc"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q "cannot measure alternate account quota" "$PAGE_LOG"
+  # The page must explicitly disown the claim the old merged headline made.
+  grep -q "NOT a claim that those accounts are capped" "$PAGE_LOG"
+}
+
+# ── THE HEADLINE GUARD ───────────────────────────────────────────────────────
+# The behaviour this whole change is named for: a cap signature in the journal
+# is NOT evidence about the account WE run. openclaw's embedded path rotates
+# its own auth.order profiles and retries a spent head profile every ~75s
+# forever, so on 2026-08-05/06 aaron@muso.ai at 100% produced 143 cap lines in
+# three hours while our active account sat at 0% — and this script rotated the
+# state file (a different surface), burned the cooldown, and paged that every
+# account was capped.
+#
+# These three tests pin the whole decision table. Until CODEX_KEEPALIVE_CANON
+# derived from the sandbox store root, none of them could even reach the guard.
+
+@test "guard: cap signature + FRESH measured-healthy active → no rotate, says it is not ours" {
+  _set_remaining_min 10080
+  _set_cap_signature 5
+  _set_active_measurement 300 10080 10 200000    # 5min old, 10% used
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -s "$ROTATE_LOG" ]
+  grep -q "NOT our active account" "$PAGE_LOG"
+  grep -q "auth.order" "$PAGE_LOG"
+}
+
+@test "guard: a STALE healthy reading must NOT veto a real cap" {
+  # The collector runs every 20min and an account at 85% can be at 100% inside
+  # the hour, so vetoing on a 59-minute-old "healthy" row suppressed genuine
+  # caps. Anything older than one collector cycle plus slack falls through to
+  # the rotate actuator, which decides on its own measured gates.
+  _set_remaining_min 10080
+  _set_cap_signature 5
+  _set_active_measurement 3000 10080 10 200000   # 50min old > 25min veto window
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$ROTATE_LOG" ]
+  grep -q -- "--auto" "$ROTATE_LOG"
+}
+
+@test "guard: measured-CAPPED active rotates AND allows an unmeasured target" {
+  # Our account is provably spent, so any reachable standby beats the paid
+  # rung — refusing for want of a measurement would strand the fleet. The
+  # rotate script still pages that the target was unverified.
+  _set_remaining_min 10080
+  _set_cap_signature 5
+  _set_active_measurement 300 10080 100 200000
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$ROTATE_LOG" ]
+  grep -q -- "--allow-unmeasured" "$ROTATE_LOG"
+}
+
+@test "guard: session revocation always allows an unmeasured target" {
+  # A revoked session means the active account is DEAD. rc 8 protects an
+  # ELECTIVE choice and must never be able to fire here — that would recreate
+  # the 2026-07-27 ~2h outage where the fleet rode openrouter while a healthy
+  # standby idled.
+  _set_remaining_min 10080
+  _set_revoked_signature 3
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$ROTATE_LOG" ]
+  grep -q -- "--allow-unmeasured" "$ROTATE_LOG"
+}
+
+@test "proactive: a FUTURE-dated measurement must not trigger a rotate" {
+  _set_remaining_min 10080
+  _set_active_measurement "-7200" 10080 99 200000   # dated 2h in the FUTURE
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -s "$ROTATE_LOG" ]
+}
+
+@test "a FUTURE-dated rotate stamp must not suppress cap handling" {
+  # _rotated_recently would report "we just rotated" forever on a rolled-back
+  # clock, skipping BOTH cap and revocation handling.
+  _set_remaining_min 10080
+  _set_cap_signature 3
+  _set_active_measurement 300 10080 100 200000
+  echo "$(( $(date +%s) + 86400 ))" > "$CODEX_ROTATE_STAMP"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$ROTATE_LOG" ]
+}
+
+@test "cap+revocation in one tick with UNKNOWN quota: revocation still gets its rotate" {
+  # CAP_ACTED used to be set BEFORE the cap rotate, so a cap attempt that
+  # changed nothing (rc 8, quota unknown) still blocked _check_session_revoked
+  # — the one handler that passes --allow-unmeasured, because a revoked
+  # account is provably dead. Every tick repeated it and the fleet stayed on
+  # the paid rung while the reflex that could rescue it never ran.
+  _set_remaining_min 10080
+  # both signatures in one journal fixture, no measurement on disk => unknown
+  _set_cap_signature 2
+  _set_revoked_signature 2 >> /dev/null
+  {
+    echo 'node[1]: [auto-reply] dispatch notice="You'"'"'ve reached your Codex subscription usage limit."'
+    echo 'node[1]: [model-fallback/decision] reason=auth_permanent detail=Your access token could not be refreshed. Please log out and sign in again.'
+  } > "$TEST_TMPDIR/state/journal-fixture"
+  echo 8 > "$TEST_TMPDIR/state/rotate-rc"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # the revocation attempt must have happened, carrying --allow-unmeasured
+  grep -q -- "--allow-unmeasured" "$ROTATE_LOG"
+  grep -q "session revoked upstream" "$ROTATE_LOG"
+}
+
+@test "a FUTURE-dated cooldown stamp must not swallow a page" {
+  # `now - last` goes negative on a rolled-back clock or a bad manual write, so
+  # the >= comparison fails and the stamp reads as an eternally-active cooldown
+  # — silently suppressing every page on it until wall time catches up. Paging
+  # twice is recoverable; a page swallowed during an outage is not.
+  _set_remaining_min 10080
+  _set_cap_signature 1
+  echo 8 > "$TEST_TMPDIR/state/rotate-rc"
+  echo "$(( $(date +%s) + 86400 ))" > "$KEEPALIVE_STATE_DIR/codex-keepalive-quotaunknown-cooldown"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q "cannot measure alternate account quota" "$PAGE_LOG"
+}
+
+@test "rc 3, rc 7 and rc 8 each get their OWN cooldown stamp" {
+  # Sharing one stamp would let whichever state fired first mask the others for
+  # an hour — and they need different human responses.
+  _set_remaining_min 10080
+  _set_cap_signature 1
+  echo 3 > "$TEST_TMPDIR/state/rotate-rc"
+  run "$SCRIPT"
+  grep -q "rotation deferred" "$PAGE_LOG"
+  : > "$PAGE_LOG"
+  # a DIFFERENT state must still page even though rc 3 just did
+  echo 8 > "$TEST_TMPDIR/state/rotate-rc"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q "cannot measure alternate account quota" "$PAGE_LOG"
 }
 
 @test "cap detection failure-mode: expiry checks still run when journal stub is empty" {
@@ -290,26 +464,34 @@ JSON
   [ -s "$PAGE_LOG" ]
 }
 
-@test "rotate reports standby known-capped (rc=7) → no-rotation-target page with reset ETA" {
+@test "rotate reports every alternate MEASURED capped (rc=7) → page with reset ETA" {
   _set_remaining_min 10080
   _set_cap_signature 1
   echo 7 > "$TEST_TMPDIR/state/rotate-rc"
-  # standby archive: weekly capped, resets in ~25h → page must carry the ETA
+  # The ETA must come from a MEASUREMENT, not the legacy .snapshot.tsv archive:
+  # on 2026-08-06 every archive carried one account's reset epoch, so an
+  # inference-derived number inside a page framed as measured evidence would
+  # hand the operator a confident wrong recovery time.
   mkdir -p "$CODEX_USAGE_ARCHIVE_DIR"
-  printf '1\t-\t10080\t98\t%s\t-\t-\t-\n' "$(( $(date +%s) + 90000 ))" \
-    > "$CODEX_USAGE_ARCHIVE_DIR/openai-codex_x.snapshot.tsv"
+  printf '%s\t-\t10080\t98\t%s\t-\t-\t-\tprobe-live\tpro\n' \
+    "$(date +%s)" "$(( $(date +%s) + 90000 ))" \
+    > "$CODEX_USAGE_ARCHIVE_DIR/openai-codex_a_x.com.measure.tsv"
   run "$SCRIPT"
   [ "$status" -eq 0 ]
-  grep -q "no rotation target left" "$PAGE_LOG"
-  grep -q "known-capped" "$PAGE_LOG"
-  grep -q "Earliest known quota reset: in 1d" "$PAGE_LOG"
+  grep -q "every alternate account is measured CAPPED" "$PAGE_LOG"
+  grep -q "Earliest MEASURED quota reset: in 1d" "$PAGE_LOG"
 }
 
 # ── proactive rotation (rotate BEFORE the cap error ever fires) ──────────────
+# These now drive _set_active_measurement, not _set_active_rollout: the
+# proactive path reads the active account's own MEASUREMENT. It previously read
+# the fleet-wide rollout snapshot, which carries no account identity — so it
+# could rotate off an unattributed number in the same tick that the reactive
+# path had just declined to rotate on measured evidence.
 
 @test "proactive: fresh snapshot >= threshold with far reset → rotate --auto with proactive reason" {
   _set_remaining_min 10080
-  _set_active_snapshot 300 10080 96 200000   # 5min old, weekly 96%, resets ~2.3d
+  _set_active_measurement 300 10080 96 200000   # 5min old, weekly 96%, resets ~2.3d
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   [ -s "$ROTATE_LOG" ]
@@ -319,7 +501,7 @@ JSON
 
 @test "proactive: below threshold → no rotate" {
   _set_remaining_min 10080
-  _set_active_snapshot 300 10080 80 200000
+  _set_active_measurement 300 10080 80 200000
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   [ ! -s "$ROTATE_LOG" ]
@@ -327,7 +509,7 @@ JSON
 
 @test "proactive: window resets soon (< MIN_RESET) → ride it out, no rotate" {
   _set_remaining_min 10080
-  _set_active_snapshot 300 10080 99 1200   # resets in 20min < 60min floor
+  _set_active_measurement 300 10080 99 1200   # resets in 20min < 60min floor
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   [ ! -s "$ROTATE_LOG" ]
@@ -335,7 +517,7 @@ JSON
 
 @test "proactive: stale snapshot (> FRESH_MIN) → no rotate" {
   _set_remaining_min 10080
-  _set_active_snapshot "$(( 3 * 3600 ))" 10080 99 200000   # 3h old vs 90min freshness
+  _set_active_measurement "$(( 3 * 3600 ))" 10080 99 200000   # 3h old vs 90min freshness
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   [ ! -s "$ROTATE_LOG" ]
@@ -343,7 +525,7 @@ JSON
 
 @test "proactive: recent rotation stamp suppresses the check" {
   _set_remaining_min 10080
-  _set_active_snapshot 300 10080 99 200000
+  _set_active_measurement 300 10080 99 200000
   date +%s > "$CODEX_ROTATE_STAMP"
   run "$SCRIPT"
   [ "$status" -eq 0 ]
@@ -352,7 +534,7 @@ JSON
 
 @test "proactive: rotate declines (rc=7 standby capped) → quiet log, NO page" {
   _set_remaining_min 10080
-  _set_active_snapshot 300 10080 97 200000
+  _set_active_measurement 300 10080 97 200000
   echo 7 > "$TEST_TMPDIR/state/rotate-rc"
   run "$SCRIPT"
   [ "$status" -eq 0 ]

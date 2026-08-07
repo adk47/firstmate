@@ -1161,6 +1161,48 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CODEXKEEPALIVE
 chmod 644 /etc/cron.d/codex-keepalive
 
+# ─── Codex per-account quota measurement at 20-min cadence ────
+# codex-quota-refresh.sh probes EACH codex account's real quota via the
+# vendored `codex app-server` JSON-RPC method account/rateLimits/read and
+# persists it to /var/lib/hydra/codex-usage/<key>.measure.tsv.
+#
+# WHY (incident 2026-08-05/06): standby quota was never measured, only
+# inferred from the fleet-freshest rollout — which carries no account identity
+# on 7.x. The inference put the SAME subscription's numbers under three
+# different accounts (two archives shared a reset epoch to the second) and
+# produced a page claiming "every alternate account is known-capped" while two
+# Pro subscriptions sat at 4% and 0%.
+#
+# 20 min is deliberate: the probe is a network round-trip per account, the
+# thing it measures moves on the scale of hours, and codex-keepalive.sh (15
+# min) must never find a measurement older than its freshness floor. flock
+# keeps a slow probe from stacking. Explicit PATH for the same reason as the
+# keepalive block above (cron's default omits /usr/local/bin, and jq must
+# resolve or the collector degrades to silence).
+mkdir -p /etc/hydra
+# tmpfs scratch root for the probe — an access token written here never
+# reaches a disk block or a backup, and a reboot clears it regardless.
+install -d -m 700 /run/hydra 2>/dev/null || { mkdir -p /run/hydra; chmod 700 /run/hydra; }
+cat > /etc/cron.d/codex-quota-refresh << CODEXQUOTA
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/20 * * * * root flock -n /run/lock/codex-quota-refresh.lock $HYDRA_ROOT/scripts/codex-quota-refresh.sh >> /var/log/codex-quota-refresh.log 2>&1
+CODEXQUOTA
+chmod 644 /etc/cron.d/codex-quota-refresh
+
+# Seed the active-account ledger once, so cq_ledger_account_at can attribute
+# rollout snapshots from the moment this ships rather than only after the first
+# rotation. Append-only; never truncate an existing ledger.
+CODEX_LEDGER=/var/lib/hydra/codex-usage/active-account.log
+if [ ! -s "$CODEX_LEDGER" ]; then
+  mkdir -p "$(dirname "$CODEX_LEDGER")"
+  _seed_acct="$(head -n1 /var/lib/hydra/codex-active-account 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$_seed_acct" ] || _seed_acct="openai-codex:aaron@muso.ai"
+  printf '%s\t%s\t%s\n' "$(date +%s)" "$_seed_acct" "ledger seeded by install-aux-units.sh" >> "$CODEX_LEDGER"
+  chmod 600 "$CODEX_LEDGER"
+  log "  codex active-account ledger seeded with $_seed_acct"
+fi
+
 # ─── Cron-failure watchdog at 5-min cadence ───────────────────
 # Alerts #clio_devops the moment any openclaw cron run errors, so a
 # broken job can't rot silently in cron/runs/*.jsonl (the 2026-06
@@ -1701,7 +1743,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log {
     weekly
     rotate 4
     compress

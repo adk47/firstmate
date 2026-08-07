@@ -11,9 +11,13 @@
 #
 # Usage:
 #   codex-account-rotate.sh --to <email|openai-codex:email> [--force] [--reason "…"]
-#   codex-account-rotate.sh --auto [--force] [--reason "…"]
-#     --auto picks the first canonical openai-codex profile that is NOT the
-#     currently-active account ("the other one" on a 2-account fleet).
+#   codex-account-rotate.sh --auto [--force] [--allow-unmeasured] [--reason "…"]
+#     --auto picks the EMPTIEST candidate whose quota we have MEASURED as
+#     healthy (see codex-quota.sh). It refuses rather than guess: rc 7 when
+#     every alternate is measured capped, rc 8 when none has a fresh
+#     measurement. --allow-unmeasured permits an UNKNOWN target (the page then
+#     says the target was unverified); only --force will select one we
+#     measured as capped.
 #
 # Sequence (fail-loud at every step):
 #   1. validate the target against the canonical auth store (must exist AND
@@ -33,6 +37,19 @@
 #   · 3 cooldown refusal · 4 no alternate account · 5 sync failed (state
 #   restored, stores untouched) · 6 gateway restart failed (stores converged;
 #   token loads on the next successful start; watchdog owns the down-gateway page)
+#   · 7 every alternate is MEASURED capped · 8 no alternate has a fresh
+#     measurement (quota UNKNOWN — distinct from 7, see below)
+#
+# WHY 7 AND 8 ARE DIFFERENT (incident 2026-08-06): "we measured it and it is
+# capped" and "we could not measure it" are different facts that demand
+# different human responses, and collapsing them is how the fleet was rotated
+# onto an exhausted account. The old target gate asked cu_row_capped_until
+# "is this account capped until some future time?" — a 13-day-old archived row
+# whose reset had already lapsed answered "no", the caller read that as
+# "healthy", and the rotation landed on an account that capped again within
+# hours. cq_row_state replaces that boolean with capped|healthy|unknown, and
+# --auto now REFUSES an unknown target (rc 8) unless --allow-unmeasured says
+# the operator accepts the risk.
 #
 # Invoked by codex-keepalive.sh (--auto, on the usage-cap journal signature)
 # and by humans (RUNBOOK §"Codex Usage Cap / Account Rotation"). Tested by
@@ -49,6 +66,10 @@ source "$_DIR/codex-active-account.sh"
 # cu_archive_*, cu_row_capped_until) — no side effects at source time.
 # shellcheck source=codex-usage.sh
 source "$_DIR/codex-usage.sh"
+# Pure MEASURED-quota helpers (cq_measure_read, cq_row_state, cq_row_load,
+# cq_ledger_append, cq_format_evidence) — no side effects at source time.
+# shellcheck source=codex-quota.sh
+source "$_DIR/codex-quota.sh"
 if [ -r "$_DIR/slack-notify.sh" ]; then
   # shellcheck source=slack-notify.sh
   source "$_DIR/slack-notify.sh"
@@ -77,16 +98,27 @@ CODEX_ROTATE_MIN_TOKEN_MIN="${CODEX_ROTATE_MIN_TOKEN_MIN:-10}"
 CODEX_USAGE_ARCHIVE_DIR="${CODEX_USAGE_ARCHIVE_DIR:-/var/lib/hydra/codex-usage}"
 CODEX_ROTATE_TARGET_MAX_PCT="${CODEX_ROTATE_TARGET_MAX_PCT:-95}"
 CODEX_ROTATE_LOOKBACK_HOURS="${CODEX_ROTATE_LOOKBACK_HOURS:-48}"
+# Append-only active-account ledger — see codex-quota.sh. Lets a later rollout
+# snapshot be attributed to whoever was ACTUALLY active when it was emitted,
+# instead of to whoever is active now (the misattribution that put one
+# subscription's numbers under three account names on 2026-08-06).
+CODEX_ACTIVE_LEDGER="${CODEX_ACTIVE_LEDGER:-$CODEX_USAGE_ARCHIVE_DIR/active-account.log}"
 
-TARGET="" AUTO=0 FORCE=0 REASON="manual"
+TARGET="" AUTO=0 FORCE=0 REASON="manual" ALLOW_UNMEASURED=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --to)     shift; TARGET="${1:-}"; [ -n "$TARGET" ] || { log "ERROR: --to needs a value"; exit 2; } ;;
     --auto)   AUTO=1 ;;
     --force)  FORCE=1 ;;
+    # Accept a target we could not measure. The emergency path: when the active
+    # account is dead and nothing has a fresh reading, refusing would strand the
+    # fleet on the paid rung while a healthy standby idles (the failure this
+    # whole subsystem exists to prevent) — but the page must SAY the target was
+    # unmeasured rather than implying it was verified healthy.
+    --allow-unmeasured) ALLOW_UNMEASURED=1 ;;
     --reason) shift; REASON="${1:-manual}" ;;
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
-    *) log "ERROR: unknown argument: $1 (use --to/--auto/--force/--reason)"; exit 2 ;;
+    *) log "ERROR: unknown argument: $1 (use --to/--auto/--force/--allow-unmeasured/--reason)"; exit 2 ;;
   esac
   shift
 done
@@ -108,23 +140,98 @@ CURRENT="${CODEX_AUTH_PRIMARY:-$(caa_active_key "$CANON_PROFILES")}"
 MIN_EXP_MS=$(( ( $(date +%s) + CODEX_ROTATE_MIN_TOKEN_MIN * 60 ) * 1000 ))
 
 if [ "$AUTO" -eq 1 ]; then
-  # Candidates must be USABLE, not merely "the other key": an access token
-  # must be present and its expiry safely in the future — a candidate that
-  # fails either is skipped, so --auto lands on rc 4 instead of rotating the
-  # fleet onto a dead credential.
-  TARGET="$(jq -r --arg cur "$CURRENT" --argjson minexp "$MIN_EXP_MS" '
+  # Structurally usable candidates: an access token must be present and its
+  # expiry safely in the future — a candidate failing either is skipped, so
+  # --auto lands on rc 4 instead of rotating onto a dead credential.
+  CANDIDATES=()
+  while IFS= read -r _k; do
+    [ -n "$_k" ] && CANDIDATES+=("$_k")
+  done < <(jq -r --arg cur "$CURRENT" --argjson minexp "$MIN_EXP_MS" '
       .profiles | to_entries[]
       | select(.key | startswith("openai-codex:"))
       | select(.key != $cur)
       | select((.value.access // "") != "")
       | select(((.value.expires // 0) | (tonumber? // 0)) > $minexp)
       | .key' \
-      "$CANON_PROFILES" 2>/dev/null | head -n1)"
-  if [ -z "$TARGET" ]; then
+      "$CANON_PROFILES" 2>/dev/null)
+
+  if [ "${#CANDIDATES[@]}" -eq 0 ]; then
     log "no VIABLE alternate openai-codex profile in canonical (current: $CURRENT; candidates lacking an access token or with an expired/expiring token are skipped) — nothing to rotate to; run codex-oauth-refresh.sh / device-code re-auth for the standby"
     exit 4
   fi
+
+  # Pick the EMPTIEST measured-healthy candidate, not merely the first one in
+  # canonical's key order. "First viable" was a coin flip that could land on a
+  # 97%-used account while a 0% one sat next to it — with a drain-restart pair
+  # as the cost of finding out.
+  _NOW="$(date +%s)"
+  BEST="" BEST_LOAD="" SEEN_UNKNOWN=0
+  for _k in "${CANDIDATES[@]}"; do
+    _row="$(cq_measure_read "$CODEX_USAGE_ARCHIVE_DIR" "$_k" 2>/dev/null || true)"
+    _state="$(cq_row_state "$_row" "$CODEX_ROTATE_TARGET_MAX_PCT" "$CQ_MEASURE_MAX_AGE_MIN" "$_NOW")"
+    case "$_state" in
+      capped)   log "candidate $_k: $(cq_format_evidence "$_k" "$_row" "$_NOW")" ;;
+      unknown) SEEN_UNKNOWN=1; log "candidate $_k: $(cq_format_evidence "$_k" "$_row" "$_NOW")" ;;
+      healthy)
+        _load="$(cq_row_load "$_row" "$_NOW")" || _load=""
+        log "candidate $_k: $(cq_format_evidence "$_k" "$_row" "$_NOW")"
+        if [ -n "$_load" ] && { [ -z "$BEST_LOAD" ] || awk -v a="$_load" -v b="$BEST_LOAD" 'BEGIN{exit !(a+0 < b+0)}'; }; then
+          BEST="$_k"; BEST_LOAD="$_load"
+        fi ;;
+    esac
+  done
+
+  if [ -n "$BEST" ]; then
+    TARGET="$BEST"
+    log "auto target: $TARGET (lowest measured load: ${BEST_LOAD}%)"
+  elif { [ "$ALLOW_UNMEASURED" -eq 1 ] || [ "$FORCE" -eq 1 ]; } && _CQ_UNKNOWN="$(
+      for _k in "${CANDIDATES[@]}"; do
+        _row="$(cq_measure_read "$CODEX_USAGE_ARCHIVE_DIR" "$_k" 2>/dev/null || true)"
+        if [ "$(cq_row_state "$_row" "$CODEX_ROTATE_TARGET_MAX_PCT" "$CQ_MEASURE_MAX_AGE_MIN" "$_NOW")" = unknown ]; then
+          printf '%s' "$_k"; break
+        fi
+      done
+    )" && [ -n "$_CQ_UNKNOWN" ]; then
+    # --allow-unmeasured means "I accept a target we could not MEASURE". It does
+    # NOT mean "I accept a target we measured and know is capped" — those are
+    # different risks and only --force may take the second.
+    #
+    # This distinction is load-bearing: codex-keepalive.sh adds
+    # --allow-unmeasured whenever the ACTIVE account measures capped. If this
+    # branch could also select a known-capped alternate, then "active capped +
+    # every alternate capped" would drain-restart both gateways onto another
+    # spent account, exit 0, and thereby SUPPRESS the rc 7 "every alternate is
+    # measured CAPPED" page — turning an honest degradation into a silent
+    # restart loop. With no unknown candidate we fall through to rc 7/rc 8.
+    TARGET="$_CQ_UNKNOWN"
+    UNMEASURED_TARGET=1
+    log "auto target: $TARGET — no measured-healthy candidate; this one is UNMEASURED, proceeding (--allow-unmeasured/--force)"
+  elif [ "$FORCE" -eq 1 ]; then
+    # --force only: the operator accepts a MEASURED-capped target. Pick the
+    # least-loaded (soonest to recover) and label it accurately — never as
+    # "unmeasured", which would tell them we know less than we do.
+    for _k in "${CANDIDATES[@]}"; do
+      _row="$(cq_measure_read "$CODEX_USAGE_ARCHIVE_DIR" "$_k" 2>/dev/null || true)"
+      _load="$(cq_row_load "$_row" "$_NOW")" || _load=""
+      [ -n "$_load" ] || continue
+      if [ -z "$BEST_LOAD" ] || awk -v a="$_load" -v b="$BEST_LOAD" 'BEGIN{exit !(a+0 < b+0)}'; then
+        TARGET="$_k"; BEST_LOAD="$_load"
+      fi
+    done
+    [ -n "$TARGET" ] || TARGET="${CANDIDATES[0]}"
+    log "auto target: $TARGET — every candidate is MEASURED capped; --force selecting the least-loaded (${BEST_LOAD:-unknown}%)"
+  elif [ "$SEEN_UNKNOWN" -eq 1 ]; then
+    # rc 8, NOT rc 7: we do not know these accounts are capped, only that we
+    # cannot see them. Reporting that as "capped" is the false claim this
+    # subsystem was rebuilt to make impossible.
+    log "no alternate has a FRESH measurement (current: $CURRENT) — refusing to rotate onto an unverified account; run scripts/codex-quota-refresh.sh or pass --allow-unmeasured"
+    exit 8
+  else
+    log "every alternate is MEASURED capped (>= ${CODEX_ROTATE_TARGET_MAX_PCT}%) — refusing; the fleet rides the OpenRouter fallback rung until a window resets (--to/--force to override)"
+    exit 7
+  fi
 fi
+UNMEASURED_TARGET="${UNMEASURED_TARGET:-0}"
 
 # Accept a bare email for humans; profile keys pass through untouched.
 case "$TARGET" in
@@ -146,19 +253,49 @@ if [ "$TARGET" = "$CURRENT" ]; then
   exit 0
 fi
 
-# --auto target-quota viability: refuse a standby whose ARCHIVED snapshot says
-# it is still capped (any window >= threshold with a future reset) — the
-# rotation would land on another capped subscription and burn a drain-restart
-# pair for nothing. Explicit --to and --force bypass (operator knows better;
-# archives can be stale in the operator's favor, e.g. after a plan upgrade).
-if [ "$AUTO" -eq 1 ] && [ "$FORCE" -ne 1 ]; then
-  TARGET_ROW="$(cu_archive_read "$CODEX_USAGE_ARCHIVE_DIR" "$TARGET" 2>/dev/null || true)"
-  if [ -n "$TARGET_ROW" ]; then
-    if BLOCKED_UNTIL="$(cu_row_capped_until "$TARGET_ROW" "$CODEX_ROTATE_TARGET_MAX_PCT")"; then
-      log "target '$TARGET' is KNOWN-CAPPED per its archived snapshot (>= ${CODEX_ROTATE_TARGET_MAX_PCT}% with reset $(cu_human_resets_in "$BLOCKED_UNTIL")) — refusing; both subscriptions are spent, the fleet rides the OpenRouter fallback rung until then (--to/--force to override)"
-      exit 7
-    fi
-  fi
+# Explicit --to target-quota viability. (--auto already chose the emptiest
+# MEASURED-healthy candidate above, so this only guards a hand-picked target.)
+# A human naming an account we measured as capped is almost always acting on
+# stale knowledge — refuse once, and let --force say "I know, do it anyway"
+# (e.g. right after a plan upgrade, when our reading is stale in their favour).
+# The two flags mean the same thing here as in --auto, and the quota check is
+# ALWAYS computed. Gating the whole block on `ALLOW_UNMEASURED -ne 1` let
+# `--to <acct> --allow-unmeasured` skip the capped rejection entirely and
+# drain-restart both gateways onto a known-spent account — the same conflation
+# that was just fixed in auto mode, and without the --force acknowledgement the
+# comment above promises.
+if [ "$AUTO" -eq 0 ]; then
+  TARGET_ROW="$(cq_measure_read "$CODEX_USAGE_ARCHIVE_DIR" "$TARGET" 2>/dev/null || true)"
+  TARGET_STATE="$(cq_row_state "$TARGET_ROW" "$CODEX_ROTATE_TARGET_MAX_PCT")"
+  case "$TARGET_STATE" in
+    capped)
+      # A human naming an account we measured as capped is almost always acting
+      # on stale knowledge — refuse once, and let --force say "I know, do it
+      # anyway" (e.g. right after a plan upgrade, when our reading is stale in
+      # their favour). --allow-unmeasured is NOT that acknowledgement.
+      if [ "$FORCE" -ne 1 ]; then
+        log "target '$TARGET' is MEASURED capped — $(cq_format_evidence "$TARGET" "$TARGET_ROW") — refusing (--force to override; --allow-unmeasured does NOT cover a measured cap)"
+        exit 7
+      fi
+      log "target '$TARGET' is MEASURED capped — proceeding on --force"
+      ;;
+    unknown)
+      # Deliberately NOT a refusal on this path. --auto is machine-driven, so
+      # demanding a flag there costs nothing and stops the actuator guessing;
+      # --to is the HUMAN override, and a human naming an account is asserting
+      # knowledge the collector does not have (they just re-authed it, they can
+      # see the dashboard). Refusing here would put an extra flag between an
+      # operator and the recovery command the RUNBOOK tells them to run, during
+      # the incident it exists for.
+      #
+      # What we do NOT do is let it pass silently: the target is marked
+      # unmeasured so the success page says the quota was unverified rather
+      # than implying we checked it. That is the property that actually
+      # mattered on 2026-08-06 — the claim, not the gate.
+      UNMEASURED_TARGET=1
+      log "target '$TARGET' has no fresh measurement — proceeding on an explicit --to; the page will say the target was UNVERIFIED"
+      ;;
+  esac
 fi
 
 # Cooldown gate — bounds both-accounts-capped flapping to one restart pair
@@ -167,6 +304,10 @@ if [ "$FORCE" -ne 1 ] && [ -r "$CODEX_ROTATE_STAMP" ]; then
   last="$(cat "$CODEX_ROTATE_STAMP" 2>/dev/null || echo 0)"
   [[ "$last" =~ ^[0-9]+$ ]] || last=0
   now="$(date +%s)"
+  # A stamp in the FUTURE would make (now - last) negative, which satisfies the
+  # -lt below and refuses EVERY rotation until wall time catches up — a clock
+  # rollback would silently disable account failover. Treat it as no stamp.
+  [ "$last" -le "$now" ] || last=0
   if [ $(( now - last )) -lt $(( CODEX_ROTATE_COOLDOWN_MIN * 60 )) ]; then
     log "cooldown: last rotation $(( (now - last) / 60 ))min ago (< ${CODEX_ROTATE_COOLDOWN_MIN}min) — refusing (--force to override). If a cap signature is still live, BOTH accounts are likely capped and the fleet rides the OpenRouter fallback rung."
     exit 3
@@ -257,6 +398,13 @@ fi
 # or the keepalive would re-trigger a rotation storm against a sick gateway.
 date +%s > "$CODEX_ROTATE_STAMP" || log "WARN: could not write cooldown stamp $CODEX_ROTATE_STAMP"
 
+# Record the switch in the append-only ledger at the same moment, so a rollout
+# snapshot emitted after this instant can later be attributed to $TARGET and
+# one emitted before it to $CURRENT. Best-effort: a ledger write failure must
+# never abort a rotation that has already converged the auth stores.
+cq_ledger_append "$CODEX_ACTIVE_LEDGER" "$TARGET" "$REASON" \
+  || log "WARN: could not append to active-account ledger $CODEX_ACTIVE_LEDGER"
+
 RESTART_FAILED=0
 if [ "$CODEX_ROTATE_RESTART" = "1" ]; then
   # shellcheck source=gateway-restart.sh
@@ -281,5 +429,15 @@ if [ "$RESTART_FAILED" -ne 0 ]; then
   exit 6
 fi
 
-_page ":arrows_counterclockwise: codex active account rotated \`$CURRENT\` → \`$TARGET\` (reason: $REASON). Auth stores re-synced; standby quota now in use — \`/opt/hydra/scripts/codex-usage-report.sh\` for quotas."
+# The success page carries the EVIDENCE for the account we just moved onto,
+# or says plainly that we could not measure it. "Rotated to the standby" with
+# no number is what let a rotation onto an exhausted account read as a
+# successful recovery for hours (2026-08-06).
+if [ "$UNMEASURED_TARGET" -eq 1 ]; then
+  _page ":arrows_counterclockwise: codex active account rotated \`$CURRENT\` → \`$TARGET\` (reason: $REASON) — *target quota UNMEASURED*: rotating because the previous account was unusable, NOT because this one is known healthy. Auth stores re-synced. Verify with \`/opt/hydra/scripts/codex-quota-refresh.sh\` then \`/opt/hydra/scripts/codex-usage-report.sh\`."
+else
+  _TARGET_ROW="$(cq_measure_read "$CODEX_USAGE_ARCHIVE_DIR" "$TARGET" 2>/dev/null || true)"
+  _CURRENT_ROW="$(cq_measure_read "$CODEX_USAGE_ARCHIVE_DIR" "$CURRENT" 2>/dev/null || true)"
+  _page ":arrows_counterclockwise: codex active account rotated (reason: $REASON) — from $(cq_format_evidence "$CURRENT" "$_CURRENT_ROW") → to $(cq_format_evidence "$TARGET" "$_TARGET_ROW"). Auth stores re-synced; \`/opt/hydra/scripts/codex-usage-report.sh\` for the full picture."
+fi
 log "rotation complete: $CURRENT → $TARGET"

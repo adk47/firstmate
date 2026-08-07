@@ -94,6 +94,11 @@ CODEX_KEEPALIVE_ROTATE_AT="${CODEX_KEEPALIVE_ROTATE_AT:-95}"
 CODEX_KEEPALIVE_MIN_RESET_MIN="${CODEX_KEEPALIVE_MIN_RESET_MIN:-60}"
 CODEX_KEEPALIVE_PROACTIVE_FRESH_MIN="${CODEX_KEEPALIVE_PROACTIVE_FRESH_MIN:-90}"
 CODEX_USAGE_ARCHIVE_DIR="${CODEX_USAGE_ARCHIVE_DIR:-/var/lib/hydra/codex-usage}"
+# Max age of a measurement that is allowed to VETO a rotation ("the cap
+# signature is not our account"). Tighter than CQ_MEASURE_MAX_AGE_MIN because
+# vetoing on stale evidence suppresses a real cap — see _check_usage_cap. One
+# collector cycle (20min) plus slack.
+CODEX_KEEPALIVE_NOISE_MAX_AGE_MIN="${CODEX_KEEPALIVE_NOISE_MAX_AGE_MIN:-25}"
 
 # Source the shared Slack helper (same #clio_devops devops-bot path the
 # watchdog uses). Locate via this script's own dir so it works from a worktree
@@ -106,6 +111,20 @@ source "$_KEEPALIVE_DIR/lib/slack-notify.sh"
 # cu_archive_read, cu_row_capped_until, cu_human_resets_in) — no side effects.
 # shellcheck source=lib/codex-usage.sh
 source "$_KEEPALIVE_DIR/lib/codex-usage.sh"
+# Pure MEASURED-quota helpers (cq_measure_read, cq_row_state, cq_row_load,
+# cq_format_evidence). These are what let this script tell "our active account
+# is actually spent" apart from "the journal is full of openclaw's own
+# auth.order retry noise" — the distinction it got wrong on 2026-08-05.
+# shellcheck source=lib/codex-quota.sh
+source "$_KEEPALIVE_DIR/lib/codex-quota.sh"
+# shellcheck source=lib/codex-active-account.sh
+source "$_KEEPALIVE_DIR/lib/codex-active-account.sh"
+# Derive from STORE_ROOT like every other path in this script (line 159 builds
+# the same location that way). Hardcoding /root here made the measured-quota
+# guard unreachable under test — the suite overrides CODEX_KEEPALIVE_STORE_ROOT,
+# so _active_measured_row resolved against the real box, always came back empty,
+# and every test silently exercised the fall-through instead of the guard.
+CODEX_KEEPALIVE_CANON="${CODEX_KEEPALIVE_CANON:-$CODEX_KEEPALIVE_STORE_ROOT/.openclaw-main/agents/main/agent/auth-profiles.json}"
 
 # Stand down during a planned maintenance window (scripts/hydra-maintenance.sh):
 # a window is exactly when a human is deliberately touching codex/gateways, so
@@ -127,6 +146,17 @@ _cooldown_ok() {
   now=$(date +%s)
   [ -r "$stamp" ] || return 0
   last=$(cat "$stamp" 2>/dev/null || echo 0)
+  # A truncated or garbled stamp (an interrupted write, a hand-edit) would make
+  # the arithmetic below a syntax error and abort the tick — i.e. a corrupt
+  # cooldown file would silence the pager rather than reset it. Treat anything
+  # non-numeric as "no cooldown recorded". Same guard as the one in
+  # scripts/codex-quota-refresh.sh; keep the two in step.
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  # A stamp in the FUTURE (clock rollback, a bad manual write) must not be read
+  # as an active cooldown: `now - last` would stay negative and silently
+  # suppress every page on this stamp until wall time caught up. Paging twice is
+  # recoverable; a swallowed page during an outage is not.
+  [ "$last" -le "$now" ] || last=0
   [ "$(( now - last ))" -ge "$(( mins * 60 ))" ]
 }
 
@@ -187,6 +217,10 @@ _rotated_recently() {
   last="$(cat "$CODEX_ROTATE_STAMP" 2>/dev/null || echo 0)"
   [[ "$last" =~ ^[0-9]+$ ]] || return 1
   now=$(date +%s)
+  # Future-dated stamp: (now - last) goes negative and satisfies the -lt below,
+  # so this would report "we just rotated" forever and skip cap AND revocation
+  # handling entirely. Same clock-rollback class as _cooldown_ok.
+  [ "$last" -le "$now" ] || return 1
   [ "$(( now - last ))" -lt "$(( CODEX_KEEPALIVE_CAP_WINDOW_MIN * 60 ))" ]
 }
 
@@ -220,6 +254,54 @@ _earliest_reset_note() {
   done
   [ -n "$earliest" ] || return 0
   printf 'Earliest known quota reset: %s.' "$(cu_human_resets_in "$earliest")"
+}
+
+# _measured_earliest_reset_note — earliest recovery time across MEASURED rows.
+#
+# The rc 7 page is framed entirely as measured evidence, so it must not end
+# with a number from _earliest_reset_note(), which derives its ETA from the
+# fleet-wide rollout snapshot and the legacy *.snapshot.tsv archives — the very
+# misattribution this change retires. On 2026-08-06 every one of those archives
+# carried aaron@muso.ai's reset epoch, so the old note would hand an operator a
+# confident wrong time inside an otherwise-honest message. Emits nothing when
+# nothing was measured, rather than falling back to the inferred number.
+_measured_earliest_reset_note() {
+  local key row at earliest="" now
+  now="$(date +%s)"
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    row="$(cq_measure_read "$CODEX_USAGE_ARCHIVE_DIR" "$key" 2>/dev/null || true)"
+    [ -n "$row" ] || continue
+    at="$(cq_row_reset_at "$row" "$now")" || continue
+    if [ -z "$earliest" ] || [ "$at" -lt "$earliest" ]; then earliest="$at"; fi
+  done < <(jq -r '.profiles | keys[] | select(startswith("openai-codex:"))' \
+             "$CODEX_KEEPALIVE_CANON" 2>/dev/null)
+  [ -n "$earliest" ] || return 0
+  printf 'Earliest MEASURED quota reset: %s.' "$(cq_human_in "$earliest" "$now")"
+}
+
+# _measured_account_lines — one evidence line per configured codex account,
+# rendered exclusively through cq_format_evidence so a page can never carry a
+# bare percentage with no age or provenance, and an unmeasured account renders
+# as "quota UNKNOWN" rather than being silently omitted (an omitted account
+# reads as "not a problem", which is how two idle subscriptions went unnoticed
+# through the 2026-08-05 incident).
+_measured_account_lines() {
+  local key row out="" active now
+  # One clock for the whole page: cq_format_evidence forks `date +%s` when no
+  # `now` is passed, so an unthreaded loop also renders each account's age
+  # against a slightly different instant.
+  now="$(date +%s)"
+  active="$(caa_active_key "$CODEX_KEEPALIVE_CANON" 2>/dev/null)" || active=""
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    row="$(cq_measure_read "$CODEX_USAGE_ARCHIVE_DIR" "$key" 2>/dev/null || true)"
+    out="$out"$'\n'"• $(cq_format_evidence "${key#openai-codex:}" "$row" "$now")"
+    [ "$key" = "$active" ] && out="$out (active)"
+  done < <(jq -r '.profiles | keys[] | select(startswith("openai-codex:"))' \
+             "$CODEX_KEEPALIVE_CANON" 2>/dev/null)
+  [ -n "$out" ] || return 0
+  printf 'Measured quota:%s' "$out"
 }
 
 # Set to 1 when the reactive path invoked a rotation this tick, so the
@@ -266,8 +348,17 @@ _check_session_revoked() {
   fi
   log "revoked: session-invalidated signature ${hits}x in last ${CODEX_KEEPALIVE_CAP_WINDOW_MIN}min — attempting account rotation"
   rc=0
-  CAP_ACTED=1
-  "$CODEX_KEEPALIVE_ROTATE_BIN" --auto --reason "session revoked upstream (keepalive auto-rotate)" || rc=$?
+  # Same rule as the cap path: only claim the tick on an actual rotation.
+  # --allow-unmeasured is REQUIRED on this path. A revoked session means the
+  # active account is DEAD, so any reachable standby beats the paid openrouter
+  # rung — refusing because we could not measure the target would strand the
+  # whole fleet on exactly the outage this reflex exists to end (2026-07-27,
+  # ~2h). rc 8 must never be able to fire here: it protects an ELECTIVE choice,
+  # and this is not one. The rotate script still pages honestly that the target
+  # was unverified rather than implying it was measured healthy.
+  "$CODEX_KEEPALIVE_ROTATE_BIN" --auto --allow-unmeasured \
+    --reason "session revoked upstream (keepalive auto-rotate)" || rc=$?
+  [ "$rc" -eq 0 ] && CAP_ACTED=1
   case "$rc" in
     0) log "revoked: auto-rotation kicked (the rotate script pages the outcome)" ;;
     *)
@@ -282,8 +373,18 @@ _check_session_revoked() {
   esac
 }
 
+# _active_measured_row — the MEASURED quota row for the account the state file
+# says is active. Echoes nothing when there is no measurement (which reads as
+# `unknown` downstream, never as healthy).
+_active_measured_row() {
+  local key
+  key="$(caa_active_key "$CODEX_KEEPALIVE_CANON" 2>/dev/null)" || key=""
+  [ -n "$key" ] || return 1
+  cq_measure_read "$CODEX_USAGE_ARCHIVE_DIR" "$key" 2>/dev/null
+}
+
 _check_usage_cap() {
-  local hits rc stamp
+  local hits rc stamp row state
   hits="$(_cap_hits)"
   if ! [[ "$hits" =~ ^[0-9]+$ ]] || [ "$hits" -eq 0 ]; then
     return 0
@@ -292,32 +393,120 @@ _check_usage_cap() {
     log "cap: signature present (${hits}x) but a rotation ran <${CODEX_KEEPALIVE_CAP_WINDOW_MIN}min ago — waiting for the journal window to clear"
     return 0
   fi
-  log "cap: usage-limit signature ${hits}x in last ${CODEX_KEEPALIVE_CAP_WINDOW_MIN}min — attempting account rotation"
+
+  # ── The signature is NOT self-evidently about our active account. ──
+  # openclaw's embedded path runs its OWN profile rotation over
+  # auth.order.openai, independent of the state file this script actuates. Its
+  # per-profile rate-limit cooldown caps at 5 minutes, after which the head
+  # profile returns to the front of the order — so a permanently exhausted
+  # auth.order[0] emits this exact signature roughly every 75 seconds forever,
+  # no matter which account WE have made active.
+  #
+  # That is precisely what happened on 2026-08-05/06: aaron@muso.ai sat at 100%
+  # as auth.order[0] and produced 143 cap lines in three hours. This script read
+  # them as "the active account is spent", rotated the state file (a different
+  # surface entirely, which changed nothing), exhausted the rotate cooldown, and
+  # paged ":no_entry: no rotation target left — every alternate account is
+  # known-capped" while gmail sat at 4% and me.com at 0%.
+  #
+  # So: if we have a FRESH measurement saying the active account is fine, the
+  # signature is somebody else's problem and rotating cannot fix it. Say so and
+  # point at the real lever. `unknown` deliberately falls through to the rotate
+  # path — absence of measurement must not block a genuine cap response.
+  #
+  # FRESH here is deliberately STRICTER than the general CQ_MEASURE_MAX_AGE_MIN
+  # (60min) this guard used to inherit. The collector runs every 20 min, and an
+  # account at 85% when measured can be at 100% well inside an hour — so a
+  # 59-minute-old "healthy" row was enough to veto rotation during a real cap
+  # and page the exact opposite of the truth. Suppressing a genuine cap is the
+  # worse error of the two: a false "not ours" strands the fleet on the paid
+  # rung, whereas falling through merely reaches the rotate actuator, which has
+  # its own measured gates (rc 7/8) and refuses on its own evidence. Anything
+  # older than one collector cycle plus slack therefore does NOT get to veto.
+  row="$(_active_measured_row)" || row=""
+  state="$(cq_row_state "$row" "$CQ_CAP_PCT" "$CODEX_KEEPALIVE_NOISE_MAX_AGE_MIN")"
+  if [ "$state" = healthy ]; then
+    stamp="$KEEPALIVE_STATE_DIR/codex-keepalive-authorder-noise-cooldown"
+    if _cooldown_ok "$stamp" "$COOLDOWN_MIN"; then
+      slack_notify ":mag: *Codex cap signature is NOT our active account* — the usage-limit line appeared ${hits}x in ${CODEX_KEEPALIVE_CAP_WINDOW_MIN}min, but $(cq_format_evidence "the active account" "$row"). This is openclaw's own \`auth.order\` profile rotation retrying a spent profile (its cooldown caps at 5min, then the profile returns to the head of the order), not a cap on the account we run. Rotating the active account would change nothing. Check which account leads \`auth.order.openai\` — quotas: \`/opt/hydra/scripts/codex-usage-report.sh\`."
+      date +%s > "$stamp"
+      log "cap: signature ${hits}x but active account measures healthy — auth.order noise, not rotating (paged)"
+    else
+      log "cap: signature ${hits}x but active account measures healthy — auth.order noise, not rotating (within page cooldown)"
+    fi
+    return 0
+  fi
+
+  log "cap: usage-limit signature ${hits}x in last ${CODEX_KEEPALIVE_CAP_WINDOW_MIN}min, active account state=$state — attempting account rotation"
+
+  # When we MEASURED our own account as capped, the active subscription is
+  # spent and any reachable standby beats the paid rung — so an unmeasured
+  # target is acceptable and the rotate script will say so on the page.
+  # When the active account is merely `unknown`, we do NOT know the signature
+  # is even ours, so we keep rc 8: burning a drain-restart pair on a guess is
+  # the 2026-08-06 wasted-rotation failure, and a page naming the gap is the
+  # honest response.
+  local -a rotate_args=(--auto)
+  [ "$state" = capped ] && rotate_args+=(--allow-unmeasured)
   rc=0
-  CAP_ACTED=1
-  "$CODEX_KEEPALIVE_ROTATE_BIN" --auto --reason "usage cap (keepalive auto-rotate)" || rc=$?
+  "$CODEX_KEEPALIVE_ROTATE_BIN" "${rotate_args[@]}" --reason "usage cap (keepalive auto-rotate)" || rc=$?
+  # Claim the tick ONLY if a rotation actually happened. CAP_ACTED exists to
+  # stop two rotations in one tick; setting it before the call made a rotation
+  # that changed NOTHING still block the later handlers. The concrete failure:
+  # both signatures present with the active account's quota `unknown` → this
+  # path calls rotate without --allow-unmeasured, gets rc 8, and
+  # _check_session_revoked (which DOES pass --allow-unmeasured, because a
+  # revoked account is provably dead) then returns immediately. Every tick
+  # repeats it, so the fleet stays on the paid rung while the emergency reflex
+  # that could rescue it never runs.
+  [ "$rc" -eq 0 ] && CAP_ACTED=1
   case "$rc" in
     0) log "cap: auto-rotation kicked (the rotate script pages the outcome)" ;;
-    3|7)
-      # 3 = rotate refused on cooldown while the signature is still live (we
-      # already switched recently and the account we landed on is capping too);
-      # 7 = every alternate is KNOWN-capped per its archived snapshot. Either
-      # way there is no viable rotation target and the fleet rides the
-      # OpenRouter rung. NOTE: the fleet has THREE linked codex accounts as of
-      # 2026-07-28, so this is "no candidate left", not "both are spent" —
-      # rotate enumerates canonical openai-codex profiles dynamically.
+    3)
+      # Cooldown — we rotated recently and the signature is still live. This is
+      # NOT a statement about anyone's quota, and it must never be rendered as
+      # one. Merging it with rc 7 under a single "every alternate account is
+      # known-capped" headline is exactly how the false 2026-08-05 page was
+      # produced.
+      stamp="$KEEPALIVE_STATE_DIR/codex-keepalive-rotatecooldown-cooldown"
+      if _cooldown_ok "$stamp" "$COOLDOWN_MIN"; then
+        slack_notify ":hourglass_flowing_sand: *Codex rotation deferred — cooldown* — the cap signature is live but a rotation already ran inside the ${CODEX_ROTATE_COOLDOWN_MIN:-120}min cooldown, so the actuator declined. No claim is being made about any account's quota. Quotas: \`/opt/hydra/scripts/codex-usage-report.sh\`; override: \`/opt/hydra/scripts/lib/codex-account-rotate.sh --to <email> --force\`."
+        date +%s > "$stamp"
+        log "cap: paged #clio_devops (rotation on cooldown, rc=3)"
+      else
+        log "cap: rotation on cooldown (rc=3), page within its own cooldown — not re-paging"
+      fi ;;
+    7)
+      # Every alternate is MEASURED capped. This headline may only be used when
+      # the claim is backed by a fresh measurement — cq_format_evidence cannot
+      # render a percentage without its age and source, so an unmeasured
+      # account renders as UNKNOWN here rather than silently as "capped".
       stamp="$KEEPALIVE_STATE_DIR/codex-keepalive-bothcapped-cooldown"
       if _cooldown_ok "$stamp" "$COOLDOWN_MIN"; then
-        slack_notify ":no_entry: *Codex usage cap — no rotation target left* — the cap signature is live and rotation cannot help ($( [ "$rc" -eq 7 ] && echo "every alternate account is known-capped per its archived quota snapshot" || echo "a rotation already ran recently" )). Fleet rides the \`openrouter/openai/gpt-5.6-luna\` fallback rung (paid api-key route) until a subscription window resets. $(_earliest_reset_note) Quotas: \`/opt/hydra/scripts/codex-usage-report.sh\`; manual override: \`/opt/hydra/scripts/lib/codex-account-rotate.sh --to <email> --force\`."
+        slack_notify ":no_entry: *Codex — every alternate account is measured CAPPED* — the cap signature is live and rotation cannot help. Fleet rides the \`openrouter/openai/gpt-5.6-luna\` fallback rung (paid api-key route) until a window resets. $(_measured_account_lines) $(_measured_earliest_reset_note) Manual override: \`/opt/hydra/scripts/lib/codex-account-rotate.sh --to <email> --force\`."
         date +%s > "$stamp"
-        log "cap: paged #clio_devops (no viable rotation target, rc=$rc)"
+        log "cap: paged #clio_devops (all alternates measured capped, rc=7)"
       else
-        log "cap: no rotation target (rc=$rc) but page within its own cooldown — not re-paging"
+        log "cap: all alternates measured capped (rc=7) but page within its own cooldown — not re-paging"
+      fi ;;
+    8)
+      # NEW: the actuator declined because it could not MEASURE a target, which
+      # is a different fact from "the target is capped" and must never be
+      # reported as one. Before the tri-state existed, an absent or stale
+      # reading was read as healthy and the fleet was rotated onto an exhausted
+      # account (2026-08-06, me.com: a 13-day-old row with a lapsed reset).
+      stamp="$KEEPALIVE_STATE_DIR/codex-keepalive-quotaunknown-cooldown"
+      if _cooldown_ok "$stamp" "$COOLDOWN_MIN"; then
+        slack_notify ":grey_question: *Codex — cannot measure alternate account quota* — the cap signature is live, but no alternate account has a fresh measurement, so auto-rotation declined rather than guess. *This is NOT a claim that those accounts are capped* — it means we do not know. $(_measured_account_lines) Check the collector (\`/var/log/codex-quota-refresh.log\`, kill switch \`/etc/hydra/codex-quota-probe.disabled\`), or rotate deliberately with \`/opt/hydra/scripts/lib/codex-account-rotate.sh --to <email> --allow-unmeasured\`."
+        date +%s > "$stamp"
+        log "cap: paged #clio_devops (alternate quota unknown, rc=8)"
+      else
+        log "cap: alternate quota unknown (rc=8) but page within its own cooldown — not re-paging"
       fi ;;
     4)
       stamp="$KEEPALIVE_STATE_DIR/codex-keepalive-nostandby-cooldown"
       if _cooldown_ok "$stamp" "$COOLDOWN_MIN"; then
-        slack_notify ":no_entry: *Codex usage cap* hit and NO viable standby account in the canonical auth store (missing, no access token, or token expired) — fleet on the paid OpenRouter fallback rung until the window resets. Re-auth/refresh a second account (RUNBOOK §\"Codex Usage Cap / Account Rotation\")."
+        slack_notify ":no_entry_sign: *Codex — no standby account exists* — the cap signature is live and the canonical auth store holds no other usable codex profile (missing, no access token, or token expired). This is a STRUCTURAL fact about the credential store, not a quota claim. Fleet on the paid OpenRouter fallback rung until the window resets. Re-auth/refresh a second account (RUNBOOK §\"Codex Usage Cap / Account Rotation\")."
         date +%s > "$stamp"
         log "cap: paged #clio_devops (no viable standby account)"
       fi ;;
@@ -336,13 +525,27 @@ _check_proactive_rotate() {
     return 0
   fi
   local row ts now f3 f4 f5 f6 f7 f8 w wm wp wr rc
-  row="$(_active_snapshot)"
+  # MEASURED evidence, not the fleet-wide rollout snapshot. This path used to
+  # read _active_snapshot — the account-blind inference this whole change
+  # exists to retire — which meant the two halves of one tick could reach
+  # opposite conclusions from different data: _check_usage_cap could measure
+  # the active account healthy and decline to rotate, and then this function
+  # could rotate anyway off an unattributed snapshot belonging to whichever
+  # profile openclaw's own auth.order failover happened to be using. The result
+  # was an unnecessary drain-restart of both gateways off a measured-healthy
+  # account, plus a burnt 120-min cooldown that left the NEXT real cap able to
+  # do nothing but page "rotation deferred".
+  row="$(_active_measured_row)" || row=""
   [ -n "$row" ] || return 0
   now="$(date +%s)"
-  IFS=$'\t' read -r ts _ f3 f4 f5 f6 f7 f8 <<<"$row"
+  IFS=$'\t' read -r ts _ f3 f4 f5 f6 f7 f8 _ _ <<<"$row"
   [[ "$ts" =~ ^[0-9]+$ ]] || return 0
+  # Future-dated measurement: (now - ts) goes negative and passes the staleness
+  # test, so a rolled-back clock would let this rotate the fleet off a reading
+  # we have no reason to trust. Same guard as cq_row_state's.
+  [ "$ts" -le "$(( now + CQ_MAX_CLOCK_SKEW_SEC ))" ] || return 0
   if [ "$(( now - ts ))" -gt "$(( CODEX_KEEPALIVE_PROACTIVE_FRESH_MIN * 60 ))" ]; then
-    return 0   # snapshot too old to act on
+    return 0   # measurement too old to act on
   fi
   for w in "$f3|$f4|$f5" "$f6|$f7|$f8"; do
     IFS='|' read -r wm wp wr <<<"$w"

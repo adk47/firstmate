@@ -793,27 +793,81 @@ exhausted. sol/luna are model variants on ONE subscription, so the model-level
 fallback chain can never "try the other account" (2026-07-21 incident: aaron@
 capped at 100% while the paid standby idled fresh).
 
+> **FIRST, before believing any of that: measure. Then check whose signature it is.**
+>
+> ```bash
+> /opt/hydra/scripts/lib/codex-quota-probe.sh --all       # real per-account quota
+> ```
+>
+> This asks the Codex backend directly (`codex app-server` JSON-RPC
+> `account/rateLimits/read`) and takes ~7s per account. It is the ONLY
+> authoritative source — everything derived from rollouts is account-blind.
+>
+> Then ask whether the cap signature is even about the account we run:
+>
+> ```bash
+> jq -r '.auth.order.openai[0]' /opt/hydra/openclaw-main.json   # openclaw's head profile
+> cat /var/lib/hydra/codex-active-account                       # OUR active account
+> ```
+>
+> **These are two different rotation systems on two different surfaces.** Ours
+> drives `codex-home/auth.json` (the codex agentRuntime). openclaw's drives
+> `auth.order.openai` for the `[agent/embedded]` path and rotates profiles
+> itself. openclaw's per-profile rate-limit cooldown caps at **5 minutes**, then
+> the profile returns to the FRONT of the order — so an exhausted
+> `auth.order[0]` emits the cap signature about **every 75 seconds forever**,
+> regardless of which account we made active.
+>
+> On **2026-08-06** that produced 143 cap lines in 3h from aaron@muso.ai at 100%.
+> The keepalive read them as "our active account is spent", rotated the state
+> file (which changed nothing), burned the rotate cooldown, and paged
+> `:no_entry: no rotation target left — every alternate account is known-capped`
+> while gmail sat at **4%** and me.com at **0%**. The twice-daily usage report
+> agreed with the false page, because it inferred standby numbers from the
+> fleet-freshest rollout instead of measuring them.
+>
+> If the probe shows a healthy account and `auth.order[0]` is the capped one,
+> **this is not a quota incident** — reorder `auth.order.openai` least-loaded
+> first in the repo config and deploy. Do NOT edit `openclaw-*.json` on the box:
+> out-of-band writes trip the write-audit watcher and are reverted by the next
+> rsync. `codex-quota-refresh.sh` pages when the head profile is measured-capped.
+
 **Auto-recovery (default)**: `codex-keepalive.sh` (15-min cron) has TWO
-triggers for `scripts/lib/codex-account-rotate.sh --auto`:
-- **Proactive** (preferred): a fresh rate_limits snapshot showing any quota
-  window ≥95% used (`CODEX_KEEPALIVE_ROTATE_AT`) with its reset >60 min away —
+triggers for `scripts/lib/codex-account-rotate.sh --auto`, and BOTH now decide
+on the account's own MEASURED quota (`/var/lib/hydra/codex-usage/<key>.measure.tsv`,
+written every 20 min by `codex-quota-refresh.sh`), never on a fleet-wide
+rollout snapshot:
+- **Proactive** (preferred): the active account's measurement shows a window
+  ≥95% used (`CODEX_KEEPALIVE_ROTATE_AT`) with its reset >60 min away —
   rotates BEFORE the cap error ever fires, skipping the degraded window.
-- **Reactive** (backstop): the cap signature in the journal.
+- **Reactive** (backstop): the cap signature in the journal — but only after
+  checking the active account's measurement. If that reads healthy (under 25
+  min old), the signature is somebody else's and the keepalive says so instead
+  of rotating; see the preface above.
 
 The rotation writes the active-account state file
 (`/var/lib/hydra/codex-active-account`, deploy-proof: outside the rsync tree,
-re-resolved by `codex-auth-sync.sh` on every heal), **archives the outgoing
-account's freshest quota snapshot** to `/var/lib/hydra/codex-usage/` (rollouts
-are account-blind on 7.x — the archive is the only per-account quota
-knowledge; `resets_at` is absolute so it stays meaningful), re-syncs all
-runtime stores, drain-restarts both gateways, pages #clio_devops.
+re-resolved by `codex-auth-sync.sh` on every heal), appends the
+active-account **ledger** (`/var/lib/hydra/codex-usage/active-account.log`, so
+a later snapshot can be attributed to whoever was actually active when it was
+emitted), re-syncs all runtime stores, drain-restarts both gateways, pages
+#clio_devops with the measured evidence for both sides.
 
-Guards: 120-min cooldown (rc 3); target-viability — `--auto` refuses (rc 7) a
-standby whose ARCHIVED snapshot is still capped, and skips candidates whose
-token is missing/expired (rc 4). On rc 3/7 with the signature live, BOTH
-subscriptions are spent: the keepalive pages that honestly (with the earliest
-known reset ETA) and the fleet rides the OpenRouter rung (the model chain's
-job) until a window resets.
+**Guards, and what each exit code actually means** — these are NOT
+interchangeable, and treating them as one is what produced the false
+2026-08-05 page:
+
+| rc | meaning | what to do |
+|----|---------|-----------|
+| 3 | a rotation ran inside the 120-min cooldown | **no quota claim at all.** Wait, or `--force`. |
+| 4 | no other usable profile in canonical (missing/expired token) | structural — `codex-reauth.sh` / `codex-oauth-refresh.sh` |
+| 7 | every alternate is **measured** capped | genuine: ride OpenRouter until the earliest measured reset |
+| 8 | no alternate has a **fresh measurement** | **the collector is the problem, not the quota.** Check `/var/log/codex-quota-refresh.log` and `/etc/hydra/codex-quota-probe.disabled`; or rotate deliberately with `--allow-unmeasured`. |
+
+Only **rc 7** means the subscriptions are spent. **rc 8 means we cannot see
+them** — do not wait it out. `--allow-unmeasured` permits an UNKNOWN target
+(and the page says the target was unverified); only `--force` will select one
+we measured as capped.
 
 **Quota windows are NOT a fixed set**: OpenAI removed the 5h window ~Jul 12
 2026 ("temporarily", undocumented — may return); since then the weekly window
