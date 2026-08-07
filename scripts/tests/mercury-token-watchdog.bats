@@ -18,6 +18,7 @@ setup() {
   export MERCURY_ALERT_STATE="$TEST_TMPDIR/last-alert"
   export MERCURY_UNKNOWN_STATE="$TEST_TMPDIR/unknown-streak"
   export MERCURY_UNKNOWN_ALERT_STATE="$TEST_TMPDIR/unknown-last-alert"
+  export MERCURY_SNOOZE_STATE="$TEST_TMPDIR/snooze-until"
   export MERCURY_TOKEN_CHECK="$TEST_TMPDIR/bin/detector"
   export MERCURY_SKIP_HOST_GUARD=1
   mkdir -p "$TEST_TMPDIR/bin"
@@ -67,6 +68,9 @@ EOF
 }
 
 sends() { cat "$TEST_TMPDIR/slack-sends" 2>/dev/null || true; }
+
+# snooze_for <seconds> — acknowledge the outage for the given window.
+snooze_for() { printf '%s' "$(( $(date -u +%s) + $1 ))" > "$MERCURY_SNOOZE_STATE"; }
 
 # refute_sends <pattern> — fail if the pattern appears in what was posted.
 #
@@ -340,6 +344,145 @@ EOF
   run "$WD"
   [[ "$output" != *"page suppressed"* ]]
   [ -s "$MERCURY_ALERT_STATE" ]
+}
+
+# ── snooze ────────────────────────────────────────────────────────────────────
+#
+# A revoked token needs a human in the Mercury dashboard, so once Nick and Aaron
+# have the page, repeating it daily adds nothing. The snooze acknowledges the
+# outage for a bounded window. Every test below exists to keep it an
+# ACKNOWLEDGEMENT and stop it becoming a mute button.
+
+@test "an active snooze suppresses the page" {
+  snooze_for 86400
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [ -z "$(sends)" ]
+  [[ "$output" == *"SNOOZED until"* ]]
+}
+
+# Muting the pager must not mute the RECORD. The cron log is the only history of
+# how long the outage ran, and the 8-week miss is exactly what an unlogged
+# silence looks like in hindsight.
+@test "a snoozed tick still logs the verdict" {
+  snooze_for 86400
+  stub_detector 1 "SENTINEL-401-DIAGNOSTIC"
+  run "$WD"
+  [[ "$output" == *"VIOLATION"* ]]
+  [[ "$output" == *"SENTINEL-401-DIAGNOSTIC"* ]]
+}
+
+# The pair to the suppression test. A snooze that never lapses IS the eight-week
+# outage — the acknowledgement has to expire on its own.
+@test "an expired snooze pages again" {
+  snooze_for -86400
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"SNOOZED until"* ]]
+  [ "$(send_count)" -eq 1 ]
+}
+
+@test "an expired snooze file is cleared rather than left to confuse the next reader" {
+  snooze_for -86400
+  run "$WD"
+  [[ "$output" == *"snooze expired"* ]]
+  [ ! -e "$MERCURY_SNOOZE_STATE" ]
+}
+
+# A truncated or half-written acknowledgement must fail TOWARD the alarm. The
+# mirror choice — treating unparseable as "snoozed" — would let one bad write
+# silence a bank-credential outage indefinitely, with nothing to notice it.
+@test "a corrupt snooze file does NOT suppress" {
+  printf 'garbage' > "$MERCURY_SNOOZE_STATE"
+  run "$WD"
+  [ "$(send_count)" -eq 1 ]
+  [[ "$output" != *"SNOOZED until"* ]]
+}
+
+@test "an empty snooze file does NOT suppress" {
+  : > "$MERCURY_SNOOZE_STATE"
+  run "$WD"
+  [ "$(send_count)" -eq 1 ]
+}
+
+# The adjacent case to the `garbage` test, and the one that actually bites:
+# `garbage` contains no digits, so ANY parser rejects it and the test passes
+# whether or not the parser is sound. A VALID future epoch with junk appended is
+# what separates "validate the whole value" from "strip to digits first" — the
+# latter recovers a usable timestamp and silently mutes the outage.
+@test "a future epoch with trailing junk does NOT suppress" {
+  printf '%soops' "$(( $(date -u +%s) + 86400 ))" > "$MERCURY_SNOOZE_STATE"
+  run "$WD"
+  [ "$(send_count)" -eq 1 ]
+  [[ "$output" != *"SNOOZED until"* ]]
+}
+
+@test "junk in front of a valid epoch does NOT suppress either" {
+  printf 'oops%s' "$(( $(date -u +%s) + 86400 ))" > "$MERCURY_SNOOZE_STATE"
+  run "$WD"
+  [ "$(send_count)" -eq 1 ]
+}
+
+@test "a second line after a valid epoch does NOT suppress" {
+  printf '%s\nJUNK\n' "$(( $(date -u +%s) + 86400 ))" > "$MERCURY_SNOOZE_STATE"
+  run "$WD"
+  [ "$(send_count)" -eq 1 ]
+}
+
+# The stability pair to the three above: strict parsing must not reject the
+# spelling an operator actually types. `echo` and `date` both emit a trailing
+# newline, so rejecting it would make the documented one-liner a silent no-op.
+@test "a snooze written with a trailing newline still suppresses" {
+  printf '%s\n' "$(( $(date -u +%s) + 86400 ))" > "$MERCURY_SNOOZE_STATE"
+  run "$WD"
+  [ -z "$(sends)" ]
+  [[ "$output" == *"SNOOZED until"* ]]
+}
+
+# The narrowing that keeps the snooze honest: it acknowledges "the token is
+# revoked", which is not an acknowledgement of "the probe stopped working".
+# A broken detector is NEW information nobody has seen, so it still pages.
+@test "an active snooze does NOT suppress the UNKNOWN escalation" {
+  snooze_for 86400
+  stub_detector 2 "cannot evaluate: unexpected HTTP 000"
+  run "$WD"; run "$WD"; run "$WD"
+  [[ "$(sends)" == *"health UNKNOWN"* ]]
+  [[ "$(sends)" != *"Mercury API token is dead"* ]]
+}
+
+@test "recovery clears the snooze so a later re-revocation pages at once" {
+  snooze_for 86400
+  stub_detector 0 "clean: token works"
+  run "$WD"
+  [ ! -e "$MERCURY_SNOOZE_STATE" ]
+  stub_detector 1 "token REJECTED by Mercury (HTTP 401)"
+  run "$WD"
+  [ "$(send_count)" -eq 1 ]
+}
+
+# The snooze must not masquerade as a delivered page: if it advanced the
+# cooldown, the tick after expiry would be suppressed for another 20h.
+@test "a snoozed tick does not advance the cooldown" {
+  snooze_for 86400
+  run "$WD"
+  [ ! -e "$MERCURY_ALERT_STATE" ]
+}
+
+@test "--dry-run under an active snooze reports it and posts nothing" {
+  snooze_for 86400
+  run "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SNOOZED until"* ]]
+  [ -z "$(sends)" ]
+}
+
+# A rehearsal must not consume the acknowledgement, for the same reason it must
+# not advance the cooldown: --dry-run observes, it never mutates.
+@test "--dry-run does not delete an expired snooze file" {
+  snooze_for -86400
+  run "$WD" --dry-run
+  [ -e "$MERCURY_SNOOZE_STATE" ]
+  [ -z "$(sends)" ]
 }
 
 # ── host guard ────────────────────────────────────────────────────────────────

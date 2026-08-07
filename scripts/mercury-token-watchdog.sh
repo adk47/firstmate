@@ -41,6 +41,10 @@
 #   MERCURY_ALERT_INTERVAL       seconds between pages (default 20h)
 #   MERCURY_CHANNEL              Slack channel (default C0ADV2W76G4 #clio_devops)
 #   MERCURY_SKIP_HOST_GUARD      1 = skip the ovh-node-8 guard (tests)
+#   MERCURY_SNOOZE_STATE         operator acknowledgement (UTC epoch); while it
+#                                is in the future the REVOKED page is skipped and
+#                                the verdict is logged instead. Expires on its
+#                                own — see the snooze gate for why that matters.
 # ──────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -63,6 +67,8 @@ UNKNOWN_STATE="${MERCURY_UNKNOWN_STATE:-/var/lib/hydra/mercury-token-unknown-str
 UNKNOWN_THRESHOLD="${MERCURY_UNKNOWN_THRESHOLD:-3}"
 # Separate cooldown for the UNKNOWN page — see page_once().
 UNKNOWN_ALERT_STATE="${MERCURY_UNKNOWN_ALERT_STATE:-/var/lib/hydra/mercury-token-unknown-last-alert}"
+# Operator acknowledgement, holding a UTC epoch — see the snooze gate below.
+SNOOZE_STATE="${MERCURY_SNOOZE_STATE:-/var/lib/hydra/mercury-token-snooze-until}"
 
 # slack-notify.sh reads this; export before sourcing so its `:=` default
 # doesn't override us.
@@ -170,10 +176,12 @@ bash /opt/hydra/scripts/lib/ensure-mercury-token.sh --check   # expect exit 0
 case "$rc" in
   0)
     log "clean: Mercury token authenticates"
-    # Clear both stamps so a later re-revocation pages immediately instead of
+    # Clear every stamp so a later re-revocation pages immediately instead of
     # being suppressed by state from the previous outage. Inert at the daily
-    # cadence, load-bearing the moment anyone moves this to hourly.
-    rm -f "$ALERT_STATE" "$UNKNOWN_STATE" "$UNKNOWN_ALERT_STATE" 2>/dev/null || true
+    # cadence, load-bearing the moment anyone moves this to hourly. The snooze
+    # goes with them: an acknowledgement of THIS outage must not carry over and
+    # swallow the first page of the next one.
+    rm -f "$ALERT_STATE" "$UNKNOWN_STATE" "$UNKNOWN_ALERT_STATE" "$SNOOZE_STATE" 2>/dev/null || true
     exit 0
     ;;
   1)
@@ -230,6 +238,71 @@ esac
 
 log "VIOLATION: $out"
 
+# ── Snooze gate ───────────────────────────────────────────────────────────────
+# A revoked token is a HUMAN-GATED condition — nothing on this box can fix it —
+# so once Nick and Aaron have the page, repeating it daily adds no information
+# until someone opens the Mercury dashboard. The snooze file holds a UTC epoch;
+# while it is in the future, the Slack page is skipped.
+#
+# Acknowledge for 30 days:
+#   printf '%s' "$(date -u -d '+30 days' +%s)" > /var/lib/hydra/mercury-token-snooze-until
+# Cancel early:  rm -f /var/lib/hydra/mercury-token-snooze-until
+#
+# It is deliberately an EXPIRY, not a kill switch. The failure this watchdog was
+# built for was never a missing alarm — it was an outage everyone "knew about"
+# sitting untouched for eight weeks (Finance reported the 401 on 2026-07-13 and
+# again on 07-27; it reached a human on 08-03, when Liza asked for a forecast and
+# got a wall). An acknowledgement with no deadline reproduces that exactly, so
+# the silence always carries one.
+#
+# Three narrowings keep it an acknowledgement rather than a mute button:
+#   - Only this rc=1 REVOKED page is snoozed. The rc=2 "health UNKNOWN" page is a
+#     DIFFERENT condition — the probe itself broke — which nobody has
+#     acknowledged, so it still pages (the gate sits after the rc=2 branch has
+#     already exited).
+#   - The verdict is logged on every tick regardless. This mutes the pager, never
+#     the record: the cron log stays a complete history of how long the outage ran.
+#   - Unreadable, empty, or non-numeric reads as NO snooze. A half-written
+#     acknowledgement must fail toward the alarm; the mirror choice would let one
+#     bad write silence a bank-credential outage indefinitely.
+#
+# It deliberately does NOT touch $ALERT_STATE — a snooze is not a delivered page,
+# and advancing the cooldown here would buy the outage another 20h of quiet after
+# the acknowledgement had already lapsed.
+fmt_ts() {
+  # GNU (node-8) then BSD (a dev box running the bats suite), then a bare epoch.
+  date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || printf 'epoch %s' "$1"
+}
+
+# Validate the file's WHOLE contents — never sanitise them first. The sibling
+# stamps above read through `tr -dc '0-9'`, which is right for THEM (stripping
+# junk there yields a smaller/absent timestamp, so a corrupt file fails toward
+# paging). Here the safety direction is inverted: `1786106453oops` would strip to
+# a valid future epoch and silently mute a bank-credential outage. Same idiom,
+# opposite consequence — so this one parses strictly instead.
+#
+# Command substitution eats trailing newlines, so the natural `echo … > file`
+# spelling is accepted while embedded junk (`1786106453\nJUNK`) still fails: the
+# bash regex is not multiline, so `$` only matches end-of-string.
+# Bounded to 10 digits because `[ ... -gt ... ]` errors on a >64-bit integer, and
+# a garbage file must produce "no snooze", not a stderr spew.
+snooze_raw="$(cat "$SNOOZE_STATE" 2>/dev/null || true)"
+snooze_until=0
+[[ "$snooze_raw" =~ ^[0-9]{1,10}$ ]] && snooze_until="$snooze_raw"
+now_s="$(date -u +%s)"
+
+if [ "$snooze_until" -gt "$now_s" ]; then
+  log "SNOOZED until $(fmt_ts "$snooze_until") ($(( (snooze_until - now_s) / 86400 ))d left, per ${SNOOZE_STATE}) — page skipped, but the token is STILL broken"
+  exit 0
+fi
+
+if [ "$snooze_until" -gt 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+  log "snooze expired $(fmt_ts "$snooze_until") — resuming pages"
+  rm -f "$SNOOZE_STATE" 2>/dev/null || true
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
   # NOTE: unlike stuck-lane/prod-log-alert (whose --dry-run advances their
   # per-incident watermarks for a faithful rehearsal), this one leaves the
@@ -245,5 +318,10 @@ page_once "$ALERT_STATE" "<@${SLACK_UID_NICK}> <@${SLACK_UID_AARON}> :bank: *Mer
 
 This needs a human: $REMEDIATION
 
-Revoked twice already (Token A ~2026-05-01, Token B ~2026-06-10). Next page in $((ALERT_INTERVAL / 3600))h if still broken."
+Revoked twice already (Token A ~2026-05-01, Token B ~2026-06-10). Next page in $((ALERT_INTERVAL / 3600))h if still broken.
+
+Already on it and don't need the daily reminder? Acknowledge it for 30 days on node-8 — the silence expires on its own, so a forgotten outage still comes back:
+\`\`\`
+printf '%s' \"\$(date -u -d '+30 days' +%s)\" > $SNOOZE_STATE
+\`\`\`"
 exit 0

@@ -601,6 +601,29 @@ Detection: `/etc/cron.d/mercury-token-watchdog` runs
 (Nick + Aaron) until it is fixed. `scripts/lib/ensure-mercury-token.sh --check`
 is the read-only detector — 0 works / 1 broken / 2 could not evaluate.
 
+**Silencing the daily page while a replacement token is pending.** Minting one
+needs a human in a browser, so the reminder can outlive its usefulness. Snooze
+it for a bounded window rather than disabling the cron (which the next deploy
+reinstalls anyway, via `install-aux-units.sh`):
+
+```bash
+# node-8 — acknowledge for 30 days
+printf '%s' "$(date -u -d '+30 days' +%s)" > /var/lib/hydra/mercury-token-snooze-until
+# cancel early
+rm -f /var/lib/hydra/mercury-token-snooze-until
+```
+
+While it is in effect the watchdog still runs, still probes, and still writes
+the verdict to `/var/log/mercury-token-watchdog.log` — only the Slack post is
+skipped. The window **expires on its own**, and a recovered token clears the
+file, so a re-revocation later pages immediately. Two things it deliberately
+does not do: it does not silence the "health UNKNOWN" page (a broken *probe* is
+new information nobody acknowledged), and a corrupt or empty file counts as no
+snooze at all — a half-written acknowledgement fails toward the alarm.
+
+The expiry is the point. The table below is what an unbounded "yeah, we know"
+looks like after the fact.
+
 The credential lives at `/opt/hydra/secrets/mercury.env` (0600, perms held by
 `ensure-secret-perms.sh`). **Do not move it back under
 `workspaces/finance/.secrets/`**: that tree is inside every agent's sweep radius
