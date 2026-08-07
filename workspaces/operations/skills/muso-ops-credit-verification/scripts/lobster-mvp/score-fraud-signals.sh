@@ -46,7 +46,10 @@
 #                 over: <bool>, factors: { <name>: <weighted contribution>,...},
 #                 fired: [ <factor names that contributed > 0>, ... ],
 #                 reason: "fraud:<f1>+<f2>=<score>" | null,
-#                 muso_only_available: <bool> }
+#                 muso_only_available: <bool>,
+#                 muso_only_reason: <string|null> }  # set iff !muso_only_available;
+#                 carries fraud-muso-only-lookup.sh's fail-soft reason (its
+#                 stderr note reaches no operator-visible surface otherwise)
 #   * MODE = off      → input emitted UNCHANGED. No `_fraud`, no signal_fraud.
 #   * MODE = shadow   → `_fraud` annotated on every credit; `_signal.bucket`
 #                       UNCHANGED; a new top-level `signal_fraud` array lists
@@ -192,6 +195,11 @@ else
 fi
 MUSO_MAP=$(printf '%s' "$MUSO_WRAP" | jq -c '.data')
 MUSO_AVAILABLE=$(printf '%s' "$MUSO_WRAP" | jq '.available')
+# The helper carries an in-band `reason` string alongside available:false so
+# it reaches an operator-visible surface (the run summary) instead of only
+# this script's stderr, which no consumer reads. null when available:true or
+# when the wrapper predates/omits the field.
+MUSO_REASON=$(printf '%s' "$MUSO_WRAP" | jq -c '.reason // null')
 
 # ── The scoring jq program ──────────────────────────────────────────────────
 # Stages:
@@ -206,6 +214,7 @@ printf '%s' "$INPUT" | jq -c \
   --slurpfile rawf "$RAW_BATCH_FILE" \
   --argjson muso "$MUSO_MAP" \
   --argjson musoAvail "$MUSO_AVAILABLE" \
+  --argjson musoReason "$MUSO_REASON" \
   --arg mode "$CV_FRAUD_MODE" \
   --argjson threshold "$CV_FRAUD_THRESHOLD" \
   --argjson wRole "$CV_FRAUD_W_ROLE_INFLATION" \
@@ -300,6 +309,7 @@ printf '%s' "$INPUT" | jq -c \
             threshold: $threshold,
             over: ($score >= $threshold),
             muso_only_available: $musoAvail,
+            muso_only_reason: (if $musoAvail then null else $musoReason end),
             muso_only_pct: $muso_pct }
         | . as $fr
         | { key: $pid,
@@ -315,6 +325,7 @@ printf '%s' "$INPUT" | jq -c \
         ($profile_fraud[$c.profile_id] // {
             factors:{}, fired:[], score:0, threshold:$threshold,
             over:false, muso_only_available:$musoAvail,
+            muso_only_reason:(if $musoAvail then null else $musoReason end),
             muso_only_pct:null, reason:null }) as $fr
         | $c + { _fraud: $fr };
 

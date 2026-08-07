@@ -1121,6 +1121,7 @@ jobs:
                        workspaces/operations/skills/muso-support-email-triage/scripts/tests \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-fraud-signals.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/fraud-muso-only-lookup.bats \
+                       workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/fraud-muso-only-snapshot-writer.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/render-dry-run-summary.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/verify-credit-request-status.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/batch-flag-credits.bats \

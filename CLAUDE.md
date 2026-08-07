@@ -373,7 +373,7 @@ skills, 5 orphan scripts, and a dead Gmail plugin (rationale + cleanup in issue 
 2. **External MCP server I don't own**? → wire via `mcp.servers` in
    `openclaw-*.json` (transport: `streamable-http`)
 3. **Wall-clock schedule, no human in the loop**? → openclaw cron in
-   `cron-jobs.json` (sessionTarget=main)
+   `cron-jobs.json` (sessionTarget=isolated)
 4. **Deterministic multi-step pipeline, no LLM in the loop**? → Lobster `.lobster`
    file invoked via `exec → bash wrapper.sh` (never agent → lobster direct)
 5. **Git push / PR open / CI**? → `.github/workflows/*.yml`

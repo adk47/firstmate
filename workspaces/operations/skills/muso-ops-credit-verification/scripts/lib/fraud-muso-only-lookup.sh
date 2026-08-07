@@ -18,7 +18,8 @@
 #   profileIds, but we never inject an unvalidated token into SQL).
 #
 # Output (stdout, ALWAYS valid JSON, ALWAYS exit 0):
-#   { "available": <bool>, "data": { "<profileId>": <pct:number>, ... } }
+#   { "available": <bool>, "data": { "<profileId>": <pct:number>, ... },
+#     "reason": <string|omitted> }
 #
 #   `available` is the SOURCE OF TRUTH for whether the Trino signal could be
 #   computed this run — the caller MUST read it, NOT infer availability from
@@ -28,6 +29,13 @@
 #   distinction is load-bearing: inferring "down" from an empty map made a
 #   clean batch falsely cry "Trino UNAVAILABLE" (the inverted fail-soft bug,
 #   fixed 2026-06-08).
+#
+#   `reason` is present (a short human-readable string) ONLY when
+#   `available:false` — the same text emitted on stderr via soft_fail, now
+#   also carried in-band so a consumer that never sees this script's stderr
+#   (e.g. the fraud scorer's run summary, posted to Slack) can still surface
+#   WHY the signal was unavailable. Before this, the reason reached no
+#   operator-visible surface outside the raw transcript stderr.
 #
 #   data: { "<profileId>": <pct_muso_only_popularity:number>, ... }
 #   pct_muso_only_popularity is 0..100 (the same metric as
@@ -52,11 +60,39 @@
 #                                 deployed /opt/hydra path.
 #   CV_FRAUD_MUSO_MIN_TRACK_POP   total_track_popularity floor (mirrors the
 #                                 saved query's `> 50`). Default 50.
+#   CV_FRAUD_MUSO_SNAPSHOT_FILE   Daily-materialized snapshot written by
+#                                 fraud-muso-only-snapshot-writer.sh (cron).
+#                                 Default /var/lib/hydra/cv-fraud-muso-only-
+#                                 snapshot.json. When this file exists,
+#                                 parses, and is fresh (see below), it is read
+#                                 INSTEAD of calling Trino — this removes the
+#                                 batch's per-run Trino dependency (see
+#                                 fraud-issue-scorer-followups.md §1). A
+#                                 missing, unreadable, stale, or malformed
+#                                 snapshot is a MISS, not a failure: the
+#                                 script silently falls through to the live
+#                                 Trino query below (fail-soft semantics on
+#                                 the live path are unchanged). "Malformed"
+#                                 includes ANY data value that is not a number
+#                                 in 0..100 — one bad value rejects the WHOLE
+#                                 snapshot, because such a value does not lose
+#                                 the signal, it fabricates or suppresses one.
+#                                 See the check for the full reasoning.
+#   CV_FRAUD_MUSO_SNAPSHOT_MAX_AGE_HOURS
+#                                 Staleness threshold for the snapshot's
+#                                 generated_at timestamp. Default 36 (comfortably
+#                                 covers a daily cron missing one fire). Must be
+#                                 a non-negative integer; anything else is
+#                                 rejected with a warning and the default used.
+#                                 A snapshot dated more than 300s in the FUTURE
+#                                 is a MISS, never age 0 — see the skew note at
+#                                 the check itself.
 #
-# No side effects beyond the read-only Trino SELECT. Pure bash + jq + the
-# trino wrapper. set -euo pipefail is intentionally NOT used at the top
-# level: this script must reach its fail-soft "{}" emit even when an inner
-# command fails. Inner failures are checked explicitly.
+# No side effects beyond the read-only Trino SELECT (and, on the snapshot
+# path, a read-only file read). Pure bash + jq + the trino wrapper.
+# set -euo pipefail is intentionally NOT used at the top level: this script
+# must reach its fail-soft "{}" emit even when an inner command fails. Inner
+# failures are checked explicitly.
 
 set -uo pipefail
 
@@ -83,7 +119,7 @@ fi
 # (vs a healthy empty result, which is `available:true` with empty data).
 soft_fail() {
   echo "[fraud-muso-only-lookup] UNAVAILABLE this run: $1 — muso_only factor weighted 0 for the whole batch." >&2
-  printf '{"available":false,"data":{}}\n'
+  jq -c -n --arg reason "$1" '{available:false, data:{}, reason:$reason}'
   exit 0
 }
 
@@ -122,6 +158,117 @@ if [[ "$N_IDS" == "0" ]]; then
   echo "[fraud-muso-only-lookup] no valid profile IDs on input — nothing to query." >&2
   printf '{"available":true,"data":{}}\n'
   exit 0
+fi
+
+# --- Snapshot-first: read the daily materialized snapshot before hitting
+# Trino live (fraud-issue-scorer-followups.md §1) ---------------------------
+# Written by fraud-muso-only-snapshot-writer.sh's daily cron. A miss (file
+# absent/unreadable), malformed content (not the expected JSON shape — a
+# corrupt file must be treated as a MISS, never as "looked up, all clean";
+# that silent degrade-to-clean is the same trap the CSV parser above guards
+# against for the live path), or staleness all fall through silently to the
+# live query below — this block never calls soft_fail, it only either emits
+# a snapshot-backed result and exits, or does nothing and lets the rest of
+# the script run exactly as it did before this feature existed.
+CV_FRAUD_MUSO_SNAPSHOT_FILE="${CV_FRAUD_MUSO_SNAPSHOT_FILE:-/var/lib/hydra/cv-fraud-muso-only-snapshot.json}"
+CV_FRAUD_MUSO_SNAPSHOT_MAX_AGE_HOURS="${CV_FRAUD_MUSO_SNAPSHOT_MAX_AGE_HOURS:-36}"
+# Bash arithmetic resolves a non-numeric string as a variable name, i.e. 0 — so
+# a typo'd override ("36h", "-1", "") would silently make EVERY snapshot look
+# stale and quietly disable the feature, which is precisely the kind of silent
+# degrade this helper is built to avoid. Validate it and fall back to the
+# documented default instead of trusting garbage.
+if ! [[ "$CV_FRAUD_MUSO_SNAPSHOT_MAX_AGE_HOURS" =~ ^[0-9]+$ ]]; then
+  echo "[fraud-muso-only-lookup] CV_FRAUD_MUSO_SNAPSHOT_MAX_AGE_HOURS='$CV_FRAUD_MUSO_SNAPSHOT_MAX_AGE_HOURS' is not a non-negative integer — using the default 36h." >&2
+  CV_FRAUD_MUSO_SNAPSHOT_MAX_AGE_HOURS=36
+fi
+
+# A snapshot may be at most this far in the FUTURE and still be trusted. Writer
+# and reader share a host, so this only absorbs a second-boundary race; the
+# point is that anything beyond it is rejected rather than trusted forever.
+SNAPSHOT_FUTURE_SKEW_SECONDS=300
+
+if [[ -r "$CV_FRAUD_MUSO_SNAPSHOT_FILE" ]]; then
+  SNAPSHOT_RAW=$(cat "$CV_FRAUD_MUSO_SNAPSHOT_FILE" 2>/dev/null)
+  # Shape check: must be a JSON object with a string generated_at and an
+  # object data — NOT just "valid JSON" (an empty file, a truncated write, or
+  # some other JSON value must all be treated as malformed/miss).
+  #
+  # EVERY value must be a number IN 0..100, and a violation invalidates the
+  # WHOLE snapshot. This is not pedantry about types: jq's total ordering sorts
+  # all strings ABOVE all numbers, so `"not-a-number" > 50` is true. A single
+  # non-numeric value therefore does not degrade the signal, it INVERTS it —
+  # score-fraud-signals.sh:281 tests `($muso_pct != null) and ($muso_pct >
+  # $musoPct)`, so the garbage value passes both arms and silently ADDS the
+  # muso_only fraud factor, tipping credits into the fraud bucket on corrupt
+  # data. Falling back to live Trino is the only safe reading of a snapshot we
+  # cannot trust. The writer only ever emits numbers (its parser drops any row
+  # failing `tonumber`), so a violation means real corruption, not drift.
+  #
+  # The 0..100 bound is enforced for the same reason, not as a style check. The
+  # writer's percentage is mathematically bounded: its numerator
+  # `sum(if(is_muso_only, track_popularity, 0))` is a subset-sum of its
+  # denominator `sum(track_popularity)`, which `having sum(...) > N` keeps
+  # positive. So an out-of-range number is corruption exactly like a string is,
+  # and it fails the same way — `101 > 50` falsely ADDS the factor, while a
+  # negative silently SUPPRESSES a real one. It also catches jq's numeric
+  # coercions on hand-edited files: a literal `Infinity` is parsed as the
+  # finite 1.797e+308 (so only the range test rejects it), while `nan` becomes
+  # `null` and is already caught by the type test above.
+  #
+  # Keys are deliberately NOT UUID-checked here. The caller's IDs are already
+  # UUID-validated upstream and the projection is an exact-key lookup, so a
+  # non-UUID key can never be selected and cannot reach the output — while
+  # regex-testing every key costs ~150ms per batch at 30k profiles versus
+  # ~10ms for the value check that closes the actual hole.
+  if printf '%s' "$SNAPSHOT_RAW" | jq -e '
+        (type == "object")
+        and (.generated_at | type) == "string"
+        and (.data | type) == "object"
+        and (all(.data[]; type == "number" and . >= 0 and . <= 100))
+      ' >/dev/null 2>&1; then
+    GENERATED_AT=$(printf '%s' "$SNAPSHOT_RAW" | jq -r '.generated_at')
+    GENERATED_EPOCH=$(date -u -d "$GENERATED_AT" +%s 2>/dev/null \
+                       || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$GENERATED_AT" +%s 2>/dev/null \
+                       || echo "")
+    NOW_EPOCH=$(date -u +%s)
+    if [[ -z "$GENERATED_EPOCH" ]]; then
+      echo "[fraud-muso-only-lookup] snapshot at $CV_FRAUD_MUSO_SNAPSHOT_FILE has an unparseable generated_at — treating as a miss, falling back to live Trino." >&2
+    elif (( GENERATED_EPOCH > NOW_EPOCH + SNAPSHOT_FUTURE_SKEW_SECONDS )); then
+      # A future-dated snapshot must NEVER be trusted. AGE_HOURS would be
+      # negative, so it always satisfies the max-age test below — meaning a
+      # clock jump, a restored backup, or a hand-edited generated_at would pin
+      # the reader to that one snapshot until its timestamp finally arrived,
+      # even as every later writer run failed. That is the exact "silently keep
+      # serving stale data" failure the staleness check exists to prevent, so
+      # it is treated as a miss rather than as age 0.
+      echo "[fraud-muso-only-lookup] snapshot at $CV_FRAUD_MUSO_SNAPSHOT_FILE is dated in the future (generated_at=$GENERATED_AT, ${GENERATED_EPOCH}s > now ${NOW_EPOCH}s + ${SNAPSHOT_FUTURE_SKEW_SECONDS}s skew) — treating as a miss, falling back to live Trino." >&2
+    else
+      AGE_HOURS=$(( (NOW_EPOCH - GENERATED_EPOCH) / 3600 ))
+      if (( AGE_HOURS <= CV_FRAUD_MUSO_SNAPSHOT_MAX_AGE_HOURS )); then
+        echo "[fraud-muso-only-lookup] serving from snapshot generated_at=$GENERATED_AT (age ${AGE_HOURS}h) — no live Trino call this run." >&2
+        # Project the batch's IDs OUT of the snapshot, rather than scanning the
+        # snapshot and testing each key against the ID list. The snapshot holds
+        # every qualifying profile (tens of thousands); `$ids | index($k)` is a
+        # linear scan run once per snapshot entry, so that form costs
+        # O(snapshot × batch) and grows as the fleet's catalog does — measured
+        # 0.44s at 30k profiles × 500 IDs vs 0.019s here, on a path whose whole
+        # purpose is to be faster than the live query. `!= null` rather than a
+        # `//` default on purpose: a legitimate 0.0 percentage is falsy to jq's
+        # `//` and would be dropped.
+        printf '%s' "$SNAPSHOT_RAW" | jq -c --argjson ids "$IDS_JSON" \
+          '.data as $d
+           | {available:true,
+              data: ($ids | map(select($d[.] != null) | {key:., value:$d[.]}) | from_entries)}'
+        exit 0
+      else
+        echo "[fraud-muso-only-lookup] snapshot at $CV_FRAUD_MUSO_SNAPSHOT_FILE is stale (generated_at=$GENERATED_AT, age ${AGE_HOURS}h > ${CV_FRAUD_MUSO_SNAPSHOT_MAX_AGE_HOURS}h) — falling back to live Trino." >&2
+      fi
+    fi
+  else
+    echo "[fraud-muso-only-lookup] snapshot at $CV_FRAUD_MUSO_SNAPSHOT_FILE is malformed (not the expected {generated_at,data} shape, or a data value is not a number in 0..100) — treating as a miss, falling back to live Trino." >&2
+  fi
+else
+  echo "[fraud-muso-only-lookup] no snapshot at $CV_FRAUD_MUSO_SNAPSHOT_FILE — falling back to live Trino." >&2
 fi
 
 # --- Build the IN (...) list -----------------------------------------------

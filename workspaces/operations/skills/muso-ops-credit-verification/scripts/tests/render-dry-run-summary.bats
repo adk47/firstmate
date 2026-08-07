@@ -160,7 +160,21 @@ calls() { grep -c '^CALL ' "$OPENCLAW_CALLS_FILE" 2>/dev/null || echo 0; }
   [[ "$output" == *"muso-only Trino signal was UNAVAILABLE"* ]]
   # "see runlog" pointed at a file the lobster path never writes.
   [[ "$output" != *"see runlog"* ]]
+  # No muso_only_reason on this fixture (pre-fraud-issue-scorer-followups.md
+  # §1 shape) → the defensive "scorer stderr" fallback still applies.
   [[ "$output" == *"scorer stderr"* ]]
+}
+
+@test "fraud-unavailable warning surfaces the carried muso_only_reason instead of pointing at stderr" {
+  local fixture_fraud="$TEST_TMPDIR/fixture.fraud-reason.json"
+  jq '.would_uvn = [{"cr_id":"cr-U","_fraud":{"muso_only_available":false,"muso_only_reason":"trino-query.sh exited rc=1; trino stderr: trino exploded"}}]' "$FIXTURE" > "$fixture_fraud"
+  run --separate-stderr env -u THREAD_TS POST_PARENT_TO_CHANNEL=0 bash -c "'$RENDER' < '$fixture_fraud'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"muso-only Trino signal was UNAVAILABLE"* ]]
+  [[ "$output" == *"Reason: trino-query.sh exited rc=1; trino stderr: trino exploded"* ]]
+  # The reason reached the summary — no need to point the operator at a
+  # transcript they may not have.
+  [[ "$output" != *"scorer stderr"* ]]
 }
 
 # ── no-op compaction (2026-07-22: 30× "Sampled: 0 of 500" full-block spam) ──

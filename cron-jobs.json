@@ -998,6 +998,37 @@
       "state": {
         "consecutiveErrors": 0
       }
+    },
+    {
+      "id": "07380908-eaba-4a0b-942e-dfaf67803822",
+      "agentId": "operations",
+      "name": "credit-verification-fraud-muso-only-snapshot",
+      "description": "Daily 03:00 UTC: materializes the muso-only fraud signal (fraud-issue-scorer-followups.md §1) to /var/lib/hydra/cv-fraud-muso-only-snapshot.json so the credit-verification batch's fraud-muso-only-lookup.sh stops depending on live Trino latency for a 300s-capped full-scan cross-join over matvw_raw_recording_credit (unavailable on 2026-08-01 batch run — timeout, not schema drift). Deterministic command cron (no model); fail-loud to itself, leaves the prior snapshot untouched on failure.",
+      "enabled": true,
+      "createdAtMs": 1786021701000,
+      "updatedAtMs": 1786021701000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 3 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "bash",
+          "/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/lib/fraud-muso-only-snapshot-writer.sh"
+        ],
+        "cwd": "/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification",
+        "timeoutSeconds": 900
+      },
+      "delivery": {
+        "mode": "none"
+      },
+      "state": {
+        "consecutiveErrors": 0
+      }
     }
   ]
 }
