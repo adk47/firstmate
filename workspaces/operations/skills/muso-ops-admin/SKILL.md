@@ -383,8 +383,11 @@ Full route map: `references/admin-api-routes.md`
 - `POST /admin/profile/:profileId/encore-assets/generate` — generate encore assets
 - `PUT /admin/profile/:profileId/playlist/:status` — update playlist status
 - `POST /admin/profile/:profileId/playlist/regenerate` — regenerate playlist
-- `POST /admin/profile/enrichByUrl` — enrich from URL
-- `POST /admin/artist/:spotifyId/enrich` — enrich from Spotify
+- `POST /admin/profile/enrichByUrl` — enrich from URL. **Pass `profileId` or the
+  captured source attaches to nothing** (see muso-ops-profiles → Enrich Profile)
+- `POST /admin/artist/:spotifyId/enrich` — enrich a STANDALONE spotify artist.
+  **Cannot attach to a muso profile** (carries no profile reference); gated by
+  default, needs `MUSO_ENRICH_STANDALONE=1`
 - `GET /admin/professional/:professionalId/credits/export` — export credits
 - `POST /admin/profile/:profileId/audit/generate` — generate audit
 - `GET /admin/profile/:profileId/audit` — get audit status

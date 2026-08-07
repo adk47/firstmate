@@ -311,6 +311,19 @@ Only escalate to Nick when a track that HAS a resolved Spotify source stays empt
 well past the window (~1h) or reads 500 — a genuine pipeline bug. Do not report a
 fresh in-flight repair as "failing".
 
+**"Wait and re-check" only applies to a capture that can actually LAND. Check the
+call shape BEFORE you wait.** A profile capture attaches only when the request
+carried `profileId` (`POST /admin/profile/enrichByUrl`); `POST
+/admin/artist/<spotifyId>/enrich` carries no profile reference at all. Without
+that link the capture is still `accepted:true` with a `captureId`, and then
+attaches to nothing — forever. Re-checking cannot resolve it, so a third
+"still pending" report is not diligence, it is a missed diagnosis
+(2026-08-05: profile `ylsvoid` escalated three times before anyone noticed the
+call itself could never work). If a profile source has not appeared, first ask
+"did that call name the profile?" — if not, re-issue it correctly instead of
+waiting or escalating. The admin wrapper now refuses the unlinkable shapes
+outright; read its refusal text, it names the correct call.
+
 ### Ghost/source-less catalog rows are TRACK MERGE cleanup, NOT credit removal
 If a request says a profile credit is attached to a placeholder, ghost,
 duplicate, source-less, no-Spotify, no-ISRC, or no-artist track row, handle it

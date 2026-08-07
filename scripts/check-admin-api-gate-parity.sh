@@ -75,6 +75,16 @@ FUNCTIONS=(
     enforce_bulk_destructive_gate
     record_destructive_op
     is_tier2_approver
+    # Added 2026-08-05 with the profile-enrich link gate. It ships in BOTH
+    # copies because the operations agent executes the workspace one, so a
+    # canonical-only edit would leave the live copy ungated — precisely the
+    # drift this list exists to catch.
+    enforce_profile_enrich_link_gate
+    # The gate's path canonicalizer. Tracked for the same reason and because a
+    # divergence here silently changes WHICH requests the gate can see: the
+    # review found that a literal match let uppercase, dot-segment, fragment and
+    # repeated-slash spellings through to the same live route.
+    normalize_admin_path
 )
 
 [[ -f "$CANONICAL" ]] || {

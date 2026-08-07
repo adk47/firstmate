@@ -385,18 +385,40 @@ takes up to 24h to reflect the unlink across credits and analytics.
 
 ### Enrich Profile
 
-From URL (handler reads `enrichmentUrl` + optional `profileId`):
+**`profileId` is what makes the source attach. Without it the capture is
+accepted and then attaches to NOTHING.**
+
+A capture binds to a muso profile through exactly one value:
+`extra_data.profile_id`. `enrichByUrl` is the only route that carries it. When
+it is absent, the industry pipeline's match cascade has no name-matching rung,
+so the scrape falls through to "create new" and mints a **separate** profile.
+The profile you meant to fill stays empty forever.
+
+This is NOT the usual async delay. `{"accepted":true,"captureId":"..."}` means
+only "queued for capture" — it says nothing about linkage. **Re-checking will
+never make an unlinked source appear**, so do not report it as `still pending`
+and do not retry the same call. (Incident 2026-08-05, escalated three times
+before anyone noticed the call itself could not work.)
+
+**Attaching a source to an existing profile — the only call that works:**
 ```bash
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/profile/enrichByUrl" \
   '{"enrichmentUrl":"https://open.spotify.com/artist/...","profileId":"<profile_id>"}'
 ```
 
-From Spotify ID (path takes the spotify artist id):
-```bash
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/admin/artist/<spotify_artist_id>/enrich"
-```
+**`POST /admin/artist/<spotify_artist_id>/enrich` CANNOT attach to a profile.**
+It takes only a spotify artist id and sends no profile reference at all, so
+there is no body shape that makes it link. Use it *only* to refresh a standalone
+catalog entity that has no muso profile to attach to — never as a way to fill in
+a profile you just created. The admin wrapper refuses it by default; a genuinely
+standalone capture must opt in explicitly with `MUSO_ENRICH_STANDALONE=1`.
+
+**Verifying it landed:** re-read the profile and look for a `spotify` entry in
+`rawProfiles` (`GET /admin/profile/<profile_id>`). `rawProfiles` containing only
+`source":"muso"` means nothing has attached yet. Allow for catalog-lane latency
+before calling it a failure, but if the call carried no `profileId`, no amount of
+waiting will change the answer — re-issue it correctly instead.
 
 ### Upload Avatar
 

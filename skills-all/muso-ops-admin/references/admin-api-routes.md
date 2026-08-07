@@ -39,8 +39,8 @@ _Required headers: `Authorization: Bearer <token>`, `Requester: <user-email>`, `
 | POST | `/admin/profile` | profile.createProfile | |
 | GET | `/admin/profile/search` | profile.searchArtistsAndProfessionals | |
 | PUT | `/admin/profile/:professionalId/image` | profile.uploadProfileAvatar | fileUpload |
-| POST | `/admin/profile/enrichByUrl` | profile.enrichByUrl | |
-| POST | `/admin/artist/:spotifyId/enrich` | profile.enrichSpotify | |
+| POST | `/admin/profile/enrichByUrl` | profile.enrichByUrl | Body: `{enrichmentUrl, profileId?}`. `profileId` → `extra_data.profile_id` is the ONLY thing that attaches the capture to a profile; omit it and the source attaches to nothing |
+| POST | `/admin/artist/:spotifyId/enrich` | profile.enrichSpotify | Standalone artist capture. Sends NO profile reference — cannot attach to a muso profile. Wrapper-gated; needs `MUSO_ENRICH_STANDALONE=1` |
 | POST | `/admin/profiles/merge` | profile.mergeProfiles | Body: source+target IDs |
 | POST | `/admin/profiles/unmerge` | profile.unmergeProfiles | |
 | DELETE | `/admin/profile/:profileId/cache` | profile.clearProfileCache | |

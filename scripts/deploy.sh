@@ -801,13 +801,22 @@ RSYNC_EXCLUDES=(
   # pipeline writes dated per-stage intermediates at its workspace root
   # ('finder-input-<date>.json', 'prep-output-<date>.json', plus '-v2' reruns —
   # observed on node-8 2026-08-05 18:14Z, blocked #794's merge-deploy and every
-  # deploy after it). No 'tmp' marker, no 'final-' prefix, no leading dot, so
-  # none of the three globs above match. Server-owned per-run scratch (stage
-  # inputs and survivor/reject sets), recreatable by re-running the pipeline,
-  # never in the repo. Mirrored KEEP globs in scripts/qa-clean-merge-scratch.sh
-  # (lockstep rule, asserted by scripts/tests/qa-clean-merge-scratch.bats).
+  # deploy after it, then #805). No 'tmp' marker, no 'final-' prefix, no leading
+  # dot, so none of the three globs above match. Server-owned per-run scratch
+  # (stage inputs and survivor/reject sets), recreatable by re-running the
+  # pipeline, never in the repo. Mirrored KEEP globs in
+  # scripts/qa-clean-merge-scratch.sh (lockstep rule, asserted by
+  # scripts/tests/qa-clean-merge-scratch.bats).
   --exclude='workspaces/*/finder-input-*.json'
   --exclude='workspaces/*/prep-output-*.json'
+  # FIFTH shape, and the only self-inflicting one: the QA bot's own per-PR
+  # review scratch ('.pr-review-<N>.json', observed on node-8 2026-08-05 while
+  # it reviewed #805). The auto-review writes it INTO workspaces/qa/ during the
+  # very review that gates the PR, so the pre-flight on the next push sees a
+  # file the repo does not have and reds — on every PR the bot reviews.
+  # Server-owned per-run scratch, recreatable, never in the repo. Mirrored KEEP
+  # glob in scripts/qa-clean-merge-scratch.sh (lockstep rule).
+  --exclude='workspaces/*/.pr-review-*.json'
   # QA credit-verification todo inventory — dated per-run working state the QA
   # agent writes on node-8 (e.g. credit-verification-todo-inventory-2026-07-21.json),
   # never in the repo. Server-owned scratch; mirrored KEEP glob in
