@@ -93,6 +93,7 @@ Create dedicated read-only users for analytics/export work:
 
 ### PostgreSQL
 
+<!-- trino-sql-gate: skip (PostgreSQL DDL — CREATE ROLE/GRANT — not Trino SQL) -->
 ```sql
 -- Create read-only role
 CREATE ROLE muso_readonly;

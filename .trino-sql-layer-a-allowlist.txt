@@ -1,0 +1,23 @@
+# .trino-sql-layer-a-allowlist.txt — exemptions for scripts/check-trino-sql.sh's
+# Layer A (offline grep) patterns.
+#
+# Format: <path-or-dir-prefix/> -- <comma-separated pattern keys> -- <reason>
+#
+# Keys: awsdatacatalog, rawids, profilepermissions, v3
+#
+# Same semantics as .dead-infra-allowlist.txt: a hit passes only if an entry's
+# path matches the file (exact, or directory-prefix when path ends in '/') AND
+# lists that key. An entry whose path no longer exists, or that no longer
+# matches any hit for any of its keys, fails CI — the list can only shrink.
+#
+# skills-all/muso-query-writer/saved-queries/ is NOT listed here: it is
+# hard-excluded from both Layer A and Layer B (see scripts/check-trino-sql.sh
+# and scripts/lib/trino_sql_extract.py EXCLUDED_DIRS) — 258 files on bare
+# legacy names, a separately-tracked debt pile out of this gate's scope.
+skills-all/muso-clio/references/data-platform/formulas.md -- rawids -- JSON example schema field literally named "raw_ids" in a sample payload, not the matvw_catalog_profile.raw_ids Trino column
+skills-all/muso-ops-profiles/SKILL.md -- rawids -- prose pointing an operator at the raw_ids column as a known-starting-set description, not live SQL
+skills-all/billion-streams-club/SKILL.md -- v3 -- migration note naming the frozen profile_v3_lifetime table it replaces
+skills-all/billion-streams-club/scripts/streams-milestones.sh -- v3 -- same migration note, in a shell comment
+skills-all/muso-query-writer/trino-schemas.md -- v3 -- FROZEN-table migration-mapping row (documents the dead name, does not instruct querying it)
+skills-all/muso-streams-lookup/scripts/streams-lookup.sh -- v3 -- "DO NOT use profile_v3_lifetime / profile_v3_tracks" warning comment
+skills-all/muso-streams-lookup/SKILL.md -- v3 -- "NEVER profile_v3_lifetime or profile_v3_tracks" warning

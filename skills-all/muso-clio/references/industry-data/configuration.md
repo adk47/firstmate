@@ -111,6 +111,7 @@ uvicorn api.main:app --host=0.0.0.0 --port=8000 --workers=4
 ## PostgreSQL Schemas
 
 ### stats schema
+<!-- trino-sql-gate: skip (PostgreSQL DDL — CREATE TABLE — not Trino SQL) -->
 ```sql
 -- Profile stats
 CREATE TABLE stats.profile_stats (

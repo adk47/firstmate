@@ -1,0 +1,25 @@
+# .trino-sql-substitutions.txt — exemptions for scripts/check-trino-sql.sh's
+# placeholder substitution pass.
+#
+# Format: <TOKEN> -- <replacement> -- <reason>
+#
+# DELIBERATELY CONSERVATIVE (per the incident this file exists to prevent): an
+# earlier prototype inferred "ALL_CAPS token = placeholder" and clobbered
+# UPPER, REPLACE, CAST, LPAD — real Trino functions/keywords — producing ~10
+# false failures. This file substitutes ONLY the exact tokens listed below,
+# nowhere else. Any other unsubstitutable placeholder shape (`${VAR}`,
+# `<var>`, `%s`, a bare `?`) found outside a string literal makes the gate
+# SKIP that block (never silently pass, never silently substitute) and
+# print `SKIP <file>:<line>: unsubstitutable placeholder X`.
+#
+# Placeholders already INSIDE a string literal ('USER_EMAIL', '<PROFILE_ID>',
+# 'TARGET_ID', ...) need NO entry here — they are valid varchar literals as
+# written. If a literal placeholder is compared to a `uuid` column, Trino
+# rejects it (`Cannot apply operator: uuid = varchar(9)`) — that is a TRUE
+# POSITIVE the gate must NOT suppress via this file.
+#
+# A substitution entry matching nothing in the extracted SQL fails CI ("stale
+# entry") — this file can only shrink, same rule as .dead-infra-allowlist.txt.
+
+<true|false> -- TRUE -- skills-all/muso-ads-manager/SKILL.md UPDATE ads SET "isActive" = <true|false>: alternation of two valid literals; TRUE type-checks identically to FALSE for EXPLAIN VALIDATE purposes
+<B> -- 0 -- skills-all/muso-ops-collaborators/SKILL.md bucket predicate (bucket = sum(profile_id bytes) % 30, valid range 0-29); 0 is a valid bucket literal

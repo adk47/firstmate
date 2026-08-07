@@ -706,6 +706,24 @@ jobs:
           bash scripts/check-dead-infra-refs.sh
           echo "::endgroup::"
 
+      - name: Trino SQL staleness check — no stale SQL ships in skills-all/
+        # A sweep (behind PR #794) found 99 of 169 SQL statements in
+        # skills-all/ no longer compile against live Trino (schema drift:
+        # dropped/retyped columns, changed UNNEST alias arity, dead
+        # catalogs/tables) — five ops escalations trace back to this. Layer
+        # A is an offline grep for the historically top-recurring dead
+        # references (awsdatacatalog., raw_ids, profile_permissions,
+        # profile_v3_(lifetime|tracks)). Layer B compiles every extracted
+        # statement with a real `EXPLAIN (TYPE VALIDATE)` against the live
+        # cluster (self-hosted runners reach Trino via kubectl) and
+        # ratchets against .trino-sql-baseline.txt so pre-existing debt
+        # doesn't instantly redden every PR — only new regressions do.
+        # Scoped to files changed vs origin/main by default.
+        run: |
+          echo "::group::Trino SQL staleness check"
+          bash scripts/check-trino-sql.sh
+          echo "::endgroup::"
+
       - name: Egress allowlist check — no unauthorized additions
         run: |
           echo "::group::Checking egress allowlist changes"
@@ -1330,6 +1348,21 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_cs_ops_drain_candidates
+      - name: Run trino-sql-extract tests
+        # scripts/lib/trino_sql_extract.py is the pure/offline extraction
+        # layer for scripts/check-trino-sql.sh (the Trino SQL staleness
+        # gate — 5 ops escalations traced to skills-all/ SQL that no longer
+        # compiles against live Trino). These lock the statement-splitting
+        # state machine (a ';' inside a string/quoted-identifier/comment
+        # must NEVER split — the multi-statement safety invariant that
+        # Layer B's live sender depends on), comment-only trailing-fragment
+        # dropping, the skip-marker dialect opt-out, and the bash-comment
+        # false-positive fix (a `#`-prefixed line mentioning trino-query.sh
+        # in prose must never be treated as a live invocation). Same bare
+        # stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_trino_sql_extract
 
   plugin-tests:
     name: Plugin tests (vitest)
