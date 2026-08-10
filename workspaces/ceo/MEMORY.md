@@ -1,13 +1,11 @@
 # MEMORY.md -- CEO Agent
 
-## People Directory (Canonical Slack IDs)
-| Slack User ID | Name | Role | Notes |
-|---------------|------|------|-------|
-| U7RP6HKUZ | Aaron | CEO/CTO (Admin) | Founder. Final authority on all decisions. |
-| U0AL36NADEY | Nick | CMO / Owner | Marketing, ads, campaigns. Owner authority across the fleet. |
-| U038BM16T7W | Jay | QA Lead | Test planning, bug triage. Methodical. |
-| U0302FZQCGB | Andrey | Backend Lead | Data processing, analytics. Don't bluff with him -- he'll catch it. |
-| U03TYGJF1N3 | Serhii | DevOps/Backend | Infrastructure, deployments. GitHub: liflovs. |
+## People Directory
+
+The one roster in this file is **People Quick Reference** below, built from
+`shared-reference/reference/slack-people.json`. There is deliberately no second
+table here: two rosters both claiming to be canonical is how a sender ends up
+attributed to whichever one the agent happened to read first.
 
 ## Authorization Policies
 - Nick (U0AL36NADEY) or Aaron (U7RP6HKUZ) can authorize: agent policy-file changes
@@ -44,20 +42,33 @@
 ## Migrated from Clio (2026-03-23)
 
 ### People Quick Reference (Canonical Slack IDs)
+
+**`shared-reference/reference/slack-people.json` is authoritative.** The nine
+rows below are its `kind:"human"` + `current:true` entries — the complete
+current staff. Resolve every sender_id against it before naming anyone.
+
 | Slack User ID | Name | Role | Notes |
 |---------------|------|------|-------|
-| U7RP6HKUZ | Aaron Kaufman | CEO/CTO (Admin) | Founder. Final authority on all decisions. GitHub: adk47 |
-| U07NF5A77E2 | Fede Pahlen | CMO | Marketing, ads, campaigns. Don't take self-initiatives on his behalf. ClickUp: fede@muso.ai (93811619) |
-| U038BM16T7W | Jay | QA Lead | Test planning, bug triage. Methodical. |
-| U0302FZQCGB | Andrey Morskoy | Backend/Data Lead | Data processing, analytics, Athena/Spark patterns. GitHub: likely in devops. |
-| U03TYGJF1N3 | Serhii Ostapchuk | DevOps/Backend | Infrastructure, deployments. GitHub: liflovs |
-| U02S7TJ7QHY | Oleg | Catalog/Platform | Prefers clean tier breakdowns, one profile per team. |
-| — | Dima | Engineering | Always share underlying queries with results. |
-| — | Liza Basco | Finance | Stripe payout reports, dispute evidence. #finance_muso |
-| — | Jeff | CRM/GHL | Building CRM automation in GoHighLevel |
-| — | Kazy | Social Media | Executes social posts |
-| — | Mariia | Design | Email template design |
-| — | Ihor (Kopaniev) | DevOps | Infrastructure |
+| U7RP6HKUZ | Aaron Kaufman | CEO | Founder. Final authority on all decisions. GitHub: adk47 |
+| U0AL36NADEY | Nicholas Sollazzo | Chief Agent Officer | Operator of this fleet. GitHub: nsollazzo |
+| U03TYGJF1N3 | Serhii Ostapchuk | CTO | Infrastructure, deployments. GitHub: liflovs |
+| U038BM16T7W | Jan Delmo | Head of Operations | NOT "Jay", and not QA — see the note below. Email jan@, not jay@ |
+| U02N2NP3H7F | Artem | Mobile Developer | The only Artem now. GitHub: Korpyc |
+| U03LP8YHLPK | Mariia Bubley | Head of Product / UI & UX | Product and design, incl. email templates. GitHub: azure-kirin |
+| U0A8CCTTAAG | Liza Basco | Accountant | Stripe payout reports, dispute evidence. #finance_muso |
+| U0AV9C7CFRQ | Faith Undie | Community & Social Media | Community, social posts, design |
+| U02S7C96CGN | McLaren Amberti | Sales Operations | Email is `f@muso.ai` — single letter, not mclaren@ |
+
+**Former staff — historical threads only. Never grant authority, never route an
+approval or escalation, never describe as a current colleague:** Fede Pahlen
+(U07NF5A77E2, ex-CMO), Andrey Morskoy (U0302FZQGCB, ex-Platform/Data Lead),
+Oleg (U02S7TJ7QHY, ex-Engineer), Artem Dolobanko (U0ACHTYUULT, ex-DevOps Lead),
+Volodymyr Popov (U0ACLT0GF9T), Dmytro Ovdii (U0AH52J8BKM), Bohdan
+(U0AD37S5QAV), Ihor Shchuruk (U042AG73FEK).
+
+Names that previously sat in this table with no Slack ID — Dima, Jeff, Kazy,
+"Ihor (Kopaniev)" — are not on the roster and are therefore not current Muso
+staff. Do not treat them as colleagues or route work to them.
 
 ### Terminology — Product & Revenue Naming
 - **Pro** = individual subscription (monthly/annual). The core product.
