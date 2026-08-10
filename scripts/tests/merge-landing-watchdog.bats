@@ -850,3 +850,44 @@ print('SURV:L_LANDED' in s)
   [ -f "$TEST_TMPDIR/last-text" ]
   grep -q 'L_STUCK' "$TEST_TMPDIR/last-text"
 }
+
+# `tr -dc '0-9'` ran BEFORE the validity check, which made that check
+# unreachable: an rpk diagnostic like "ERR 2026 broker timeout" strips to
+# "2026" — a valid-looking epoch-ms — so `case ''|*[!0-9]*) return 1` could
+# never fire. The probe then invented a 1970 frontier, and since every real
+# request is newer than 1970 the bullet read "in retention window, presence
+# UNCONFIRMED" instead of the actionable "msg GONE (rebuild from the audit
+# trail)". The script's own contract at the QUEUE_PROBE_JSON parse is
+# "Absent/garbage → no queue verdict is rendered"; a fabricated frontier is
+# garbage that looks valid, so it violated exactly that.
+@test "queue probe: a digit-bearing error line fails the probe open, not into a bogus frontier" {
+  mergeline 1000 SURV L_STUCK
+  cat > "$TEST_TMPDIR/bin/kubectl-errline" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    consume) echo "ERR 2026 broker timeout"; exit 0 ;;
+    describe) printf '%s\n' "TOTAL-LAG                4242" \
+                "industry-proc-catalog-admin-prod  0  161717  86085  182534  20817"; exit 0 ;;
+  esac
+done
+case "$1" in get) echo "pod/redpanda-v2-0"; exit 0 ;; esac
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/kubectl-errline"
+  export MERGE_LANDING_QUEUE_PROBE_CMD="$TEST_TMPDIR/bin/kubectl-errline"
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accepted but NOT landed"* ]]   # the alert itself still fires
+  [[ "$output" != *"presence UNCONFIRMED"* ]]      # but NO queue verdict is rendered
+  [[ "$output" != *"msg GONE"* ]]
+}
+
+# The stability pair: strict validation must not reject the real rpk output,
+# which is a bare epoch-ms plus a newline.
+@test "queue probe: a clean numeric frontier still renders its verdict" {
+  mergeline 1000 SURV L_STUCK
+  _queue_stub 2000000
+  run bash "$WD" --dry-run
+  [[ "$output" == *"msg GONE (past retention"* ]]
+}

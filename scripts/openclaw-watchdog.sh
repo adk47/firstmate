@@ -305,11 +305,35 @@ EDGE_AUTH_PROFILES="${WATCHDOG_EDGE_AUTH_PROFILES:-/root/.openclaw-edge/agents/s
 CODEX_COOLDOWN_MIN=60  # token rotation is ~10-day; hourly re-alert is plenty
 
 # _codex_cooldown_ok <stampfile> <minutes> — true if last alert older than N min.
+# _sane_epoch <raw> <now> — echo a stamp that is SAFE for `$(( ))` epoch
+# arithmetic, else 0. "Digits only" is not enough; three digit-only strings are
+# still unsafe, and each breaks a cooldown differently:
+#   - `08` — digits, but INVALID OCTAL. Bash reads a leading zero as base-8, so
+#     `$(( ))` errors exactly like `1abc` does.
+#   - `9999999999` — a valid FUTURE epoch. The age goes negative, which reads as
+#     "just alerted/restarted" and suppresses for centuries.
+#   - >10 digits — beyond any plausible epoch, and wide enough to overflow.
+# `10#` forces base-10 so a leading zero is data, not a base marker. Anything not
+# provably safe becomes 0 = "no recent alert/restart", i.e. fail toward acting.
+_sane_epoch() {
+  local raw="$1" now="$2" v
+  case "$raw" in (''|*[!0-9]*) printf '0'; return ;; esac
+  [ "${#raw}" -le 10 ] || { printf '0'; return; }
+  v=$(( 10#$raw ))
+  [ "$v" -le "$now" ] || { printf '0'; return; }   # future stamp → treat as none
+  printf '%s' "$v"
+}
+
 _codex_cooldown_ok() {
   local f="$1" mins="$2" last now
   [ -f "$f" ] || return 0
   last=$(cat "$f" 2>/dev/null || echo 0)
   now=$(date +%s)
+  # Normalise before the arithmetic. This function is called inside an `if`
+  # condition, so a bad stamp does NOT abort the script — the failing `$(( ))`
+  # aborts the compound command, neither branch runs, and the alert is silently
+  # skipped while the tick sails on. A corrupt byte must never mute codex.
+  last=$(_sane_epoch "$last" "$now")
   [ "$(( (now - last) / 60 ))" -ge "$mins" ]
 }
 
@@ -642,6 +666,12 @@ if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -gt 0 ]; then
   if [ -f "$COOLDOWN_FILE" ]; then
     LAST_RESTART=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo "0")
     NOW=$(date +%s)
+    # Unlike _codex_cooldown_ok this is a plain assignment, so a bad stamp is
+    # FATAL: the `$(( ))` fails, ELAPSED is never set, and `set -u` (line 21)
+    # kills the tick on the next read — the watchdog stops watching everything
+    # else from one corrupt byte. A future stamp is worse than fatal: it reads
+    # as a restart that already happened and suppresses recovery indefinitely.
+    LAST_RESTART=$(_sane_epoch "$LAST_RESTART" "$NOW")
     ELAPSED=$(( (NOW - LAST_RESTART) / 60 ))
     if [ "$ELAPSED" -lt "$COOLDOWN_MIN" ]; then
       log "SKIP: Last restart was ${ELAPSED}min ago (cooldown: ${COOLDOWN_MIN}min)"
