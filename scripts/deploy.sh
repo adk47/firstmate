@@ -67,15 +67,27 @@ source "$SCRIPT_DIR/lib/muso-env-preflight.sh"
 # bump deliberately. Installed from the repo's GitHub Release with
 # checksum verification (install_muso below) — never a bare latest.
 #
-# 0.11.1 carries the `tracks sources` verb group (muso-cli#36), which
-# skills-all/muso-ops-tracks now documents in place of hand-rolled
-# analytics-source payloads. The pin and the skill must move together: with
-# the pin behind, the skill documents verbs the installed CLI does not have.
-# Prod credentials still resolve — v0.11 reads the scoped MUSO_PROD_ADMIN_*
+# 0.13.0 carries `profiles enrich --url --profile-id` (muso-cli#42), which
+# skills-all/muso-ops-profiles now documents as the typed, audited path for
+# attaching a source to a profile. It also still carries the `tracks sources`
+# verb group from 0.11.1 (muso-cli#36) that skills-all/muso-ops-tracks
+# documents. The pin and the skill must move together: with the pin behind,
+# the skill documents verbs the installed CLI does not have.
+#
+# 0.11.1 -> 0.13.0 is three commits, all additive, no breaking change:
+# muso-cli#39 (typed `collaborators list|rebuild`), #40 (`muso gh` group),
+# #42 (`profiles enrich`). Verified against the release before bumping, in
+# the order the lockstep rule requires: v0.13.0 contains #42's commit
+# (afc3c15); it ships muso_linux_amd64.tar.gz with a matching checksums.txt
+# entry (NOT muso-cli_linux_amd64.tar.gz, which install_muso does not use);
+# credentials resolve; and the binary was run against prod from node-8 --
+# `profiles get <uuid> --env prod --json` returned a real profile.
+#
+# Prod credentials still resolve — v0.11+ reads the scoped MUSO_PROD_ADMIN_*
 # pair but keeps the generic MUSO_ADMIN_* as a production-only fallback
 # (internal/auth/env.go), which is what node-8's main.env carries; only
 # `--env dev` fails closed, and node-8 has no dev pair to begin with.
-MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.11.1}"
+MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.13.0}"
 
 # Detect if we're running on Node 8 (the HYDRA host)
 if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; then

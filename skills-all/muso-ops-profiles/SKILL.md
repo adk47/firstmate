@@ -400,7 +400,18 @@ never make an unlinked source appear**, so do not report it as `still pending`
 and do not retry the same call. (Incident 2026-08-05, escalated three times
 before anyone noticed the call itself could not work.)
 
-**Attaching a source to an existing profile — the only call that works:**
+**Attaching a source to an existing profile — the typed verb (preferred):**
+```bash
+muso profiles enrich --url "https://open.spotify.com/artist/..." \
+  --profile-id "<profile_id>" --env prod --requester <email> --json
+```
+`--profile-id` is REQUIRED here — the verb refuses without it, because a capture
+that carries no profile link is accepted and then attaches to nothing. Use
+`--standalone` only for a deliberate capture with no profile to attach to.
+Requires muso-cli >= 0.13.0 (muso-cli#42).
+
+**Equivalent raw call**, if you need the wrapper's gates or a field the verb does
+not expose:
 ```bash
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/profile/enrichByUrl" \
