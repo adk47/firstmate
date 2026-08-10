@@ -21,38 +21,39 @@ jobs:
   deploy:
     runs-on: [self-hosted, hydra]
     steps:
-      - name: Check SLACK_WEBHOOK presence
-        run: |
-          # Non-blocking presence check. If the secret is missing, deploys
-          # still run — but every notify_slack call will silently drop,
-          # meaning no Slack visibility into failures. This step surfaces
-          # the rot as a GitHub Actions warning annotation so it's visible
-          # in the Actions UI without blocking the pipeline.
-          #
-          # To stop this warning firing: get the #hydra-heartbeat webhook
-          # URL from Slack app settings and run
-          #     gh secret set HYDRA_SLACK_WEBHOOK --repo Muso-AI/hydra
-          #
-          # This step was originally a fail-fast (exit 1) but was softened
-          # so PR #68 could merge before Aaron returned the webhook URL.
-          # If you want to re-harden it into a hard gate, change the
-          # '::warning::' below to '::error::' and add 'exit 1'.
-          if [ -z "${SLACK_WEBHOOK:-}" ]; then
-            echo "::warning::HYDRA_SLACK_WEBHOOK secret is empty or missing — deploy will proceed but Slack notifications will be dropped. Fix at https://github.com/Muso-AI/hydra/settings/secrets/actions (ask Aaron for the #hydra-heartbeat webhook URL, then: gh secret set HYDRA_SLACK_WEBHOOK --repo Muso-AI/hydra)"
-          else
-            echo "✓ SLACK_WEBHOOK is set (length: ${#SLACK_WEBHOOK})"
-          fi
-
       - name: Checkout
         uses: actions/checkout@v5
         with:
           # Full history: Step 4a's baseline-aware skill-drift check resolves
           # `git show <.deployed-sha>:<path>`, and that baseline can lag main by
-          # more than one commit (HEAD~1 target detection still works). Also
-          # required by "Refuse stale deploys" below, whose merge-base check
-          # needs full ancestry — reusing this existing full clone is the
-          # least invasive option (no second fetch step needed).
+          # more than one commit. rollback.sh also needs the last-known-good
+          # commit present locally to materialize it. Also required by "Refuse
+          # stale deploys" below, whose merge-base check needs full ancestry —
+          # reusing this existing full clone is the least invasive option (no
+          # second fetch step needed).
           fetch-depth: 0
+
+      - name: Check deploy notification path
+        run: |
+          # Deploy notifications go through `muso slack send --bot devops`
+          # (scripts/lib/slack-notify.sh) — the same path the watchdogs use,
+          # with the bot token in /etc/openclaw/main.env on node-8.
+          #
+          # This replaced a raw curl to $HYDRA_SLACK_WEBHOOK. That secret has
+          # NEVER existed on this repo, so every deploy notification since the
+          # workflow was written silently dropped — including the failure page.
+          # The old step warned about the missing secret on every single run,
+          # which trained everyone to ignore the annotation.
+          #
+          # Non-blocking on purpose: a broken notifier must not stop a deploy.
+          # It fails LOUD as a warning annotation instead of dropping silently.
+          set +e
+          . scripts/lib/slack-notify.sh 2>/dev/null
+          if command -v slack_load_env >/dev/null 2>&1 && slack_load_env devops >/dev/null 2>&1; then
+            echo "✓ deploy notifications will post via muso slack send --bot devops"
+          else
+            echo "::warning::Slack notify path unavailable (slack-notify.sh / MUSO_SLACK_BOT_TOKEN_DEVOPS in /etc/openclaw/main.env). Deploy proceeds, but success/failure notifications will not post."
+          fi
 
       - name: Refuse stale deploys
         # Incident 2026-07-23 (run 29992449557): a push-event run for OLDER
@@ -145,20 +146,18 @@ jobs:
           AUTHOR="${{ github.actor }}"
           TARGET="${{ steps.detect.outputs.target }}"
 
-          curl -sS -X POST "$SLACK_WEBHOOK" \
-            -H 'Content-Type: application/json' \
-            -d "{
-              \"text\": \":white_check_mark: HYDRA deployed successfully (target: ${TARGET})\",
-              \"blocks\": [
-                {
-                  \"type\": \"section\",
-                  \"text\": {
-                    \"type\": \"mrkdwn\",
-                    \"text\": \":white_check_mark: *HYDRA Deploy Successful* (target: ${TARGET})\n\n*Commit:* \`${COMMIT_SHA:0:7}\` — ${COMMIT_MSG}\n*Author:* ${AUTHOR}\n*Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\"
-                  }
-                }
-              ]
-            }" || echo "Slack notification failed (non-fatal)"
+          # Posts via `muso slack send --bot devops` (same path the watchdogs
+          # use). The former raw-curl-to-$SLACK_WEBHOOK was a permanent no-op:
+          # HYDRA_SLACK_WEBHOOK has never existed on this repo.
+          set +e
+          . scripts/lib/slack-notify.sh
+          MSG=$(printf '%s\n%s\n%s\n%s' \
+            ":white_check_mark: *HYDRA Deploy Successful* (target: ${TARGET})" \
+            "*Commit:* \`${COMMIT_SHA:0:7}\` — ${COMMIT_MSG}" \
+            "*Author:* ${AUTHOR}" \
+            "*Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')")
+          bash scripts/lib/deploy-notify.sh success "$MSG" \
+            || echo "::warning::Deploy succeeded but the Slack notification did not post."
 
       - name: Rollback on failure
         if: failure() && steps.stale_check.outputs.proceed == 'true'
@@ -168,17 +167,19 @@ jobs:
             chmod +x scripts/rollback.sh
             ./scripts/rollback.sh || echo "Rollback script failed"
           fi
-          curl -sS -X POST "$SLACK_WEBHOOK" \
-            -H 'Content-Type: application/json' \
-            -d "{
-              \"text\": \":rotating_light: HYDRA deployment FAILED — rollback initiated\",
-              \"blocks\": [
-                {
-                  \"type\": \"section\",
-                  \"text\": {
-                    \"type\": \"mrkdwn\",
-                    \"text\": \":rotating_light: *HYDRA Deploy FAILED* (target: ${{ steps.detect.outputs.target }})\n\n*Commit:* \`${{ github.sha }}\`\n*Author:* ${{ github.actor }}\n*Action:* Rollback initiated\n*Run:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n<@aaron> — please investigate\"
-                  }
-                }
-              ]
-            }" || echo "Slack notification failed (non-fatal)"
+          # deploy-notify.sh prepends REAL <@UID> mentions for Nick and Aaron
+          # and RETURNS the true delivery status. The former payload hardcoded
+          # the literal "<@aaron>" (Slack renders that as plain text and pings
+          # nobody) and curled an unset webhook, so deploy failures were
+          # entirely silent — that is how 2026-08-06's blocked deploy went
+          # unnoticed. A page that cannot report its own failure is the same
+          # bug one level up, so a non-zero here escalates to ::error::.
+          set +e
+          MSG=$(printf '%s\n%s\n%s\n%s\n%s' \
+            ":rotating_light: *HYDRA Deploy FAILED* (target: ${{ steps.detect.outputs.target }})" \
+            "*Commit:* \`${{ github.sha }}\`" \
+            "*Author:* ${{ github.actor }}" \
+            "*Action:* Rollback initiated" \
+            "*Run:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+          bash scripts/lib/deploy-notify.sh critical "$MSG" \
+            || echo "::error::Deploy FAILED and the Slack page did NOT post — nobody was notified. Check MUSO_SLACK_BOT_TOKEN_DEVOPS in /etc/openclaw/main.env and the devops bot's channel membership."
