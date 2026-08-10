@@ -118,13 +118,23 @@ REDACTED_MARKER="[REDACTED:secret-shaped]"
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 # --- Slack ID → email ---
-# Deliberately a SUBSET of muso-admin-api.sh's map, not a mirror of it: this
-# resolver only needs to name the humans who drive env sets. Authority still
-# comes from dev-envset-requesters.txt / envset-requesters.txt, never from an
-# arm here. What it must NOT do is resolve someone who has left — a departed
-# person's UID would land their live address in the /var/log/muso-devops audit
-# trail. Current-staff truth is shared-reference/reference/slack-people.json
-# (kind:"human" + current:true); Oleg (U02S7TJ7QHY) was removed for that reason.
+# A SUBSET, and deliberately not a mirror of anything. It is simultaneously:
+#   - BROADER than the authority lists — Jan (U038BM16T7W) and Liza
+#     (U0A8CCTTAAG) resolve here but appear on neither dev-envset-requesters.txt
+#     nor envset-requesters.txt, so they cannot set anything;
+#   - NARROWER than shared-reference/reference/slack-people.json — Mariia,
+#     Faith and McLaren have no arm, because none of them drive env sets.
+# So do not "sync" this map with either list; it tracks neither by design.
+#
+# An arm here grants NOTHING. Authority is the requesters files and only those.
+# Resolution merely supplies the address for the /var/log/muso-devops audit
+# line, which is why a missing person is cheap: their UID lands in that log raw,
+# on a request the authority gate refuses anyway.
+#
+# The one invariant that IS enforced (scripts/tests/muso-admin-api-slack-resolve.bats):
+# nobody the roster marks current:false may resolve, because a departed person's
+# UID would put their live address in the audit trail instead. Oleg
+# (U02S7TJ7QHY) was removed for exactly that reason; do not re-add him.
 resolve_slack_to_email() {
     local input="$1"
     [[ "$input" == *@* ]] && { echo "$input"; return 0; }
