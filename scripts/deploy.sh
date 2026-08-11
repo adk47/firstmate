@@ -67,6 +67,15 @@ source "$SCRIPT_DIR/lib/muso-env-preflight.sh"
 # bump deliberately. Installed from the repo's GitHub Release with
 # checksum verification (install_muso below) — never a bare latest.
 #
+# 0.13.1 makes async capture acceptance verifiable for `tracks capture`,
+# `tracks enrich`, and `profiles enrich` (muso-cli#44): the CLI now surfaces
+# `accepted`, `captureId`, and `enqueued`, and refuses an empty 2xx response.
+# The existing `status: requested` JSON contract stays backward-compatible.
+# Verified before bumping: v0.13.1 resolves to #44's merge commit (6100a0e),
+# the linux/amd64 asset matches checksums.txt, node-8 reports that exact version
+# and commit, a prod track capture returned a non-empty receipt with enqueued=1,
+# and an empty-2xx smoke exited 1 with no success output.
+#
 # 0.13.0 carries `profiles enrich --url --profile-id` (muso-cli#42), which
 # skills-all/muso-ops-profiles now documents as the typed, audited path for
 # attaching a source to a profile. It also still carries the `tracks sources`
@@ -87,7 +96,7 @@ source "$SCRIPT_DIR/lib/muso-env-preflight.sh"
 # pair but keeps the generic MUSO_ADMIN_* as a production-only fallback
 # (internal/auth/env.go), which is what node-8's main.env carries; only
 # `--env dev` fails closed, and node-8 has no dev pair to begin with.
-MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.13.0}"
+MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.13.1}"
 
 # Detect if we're running on Node 8 (the HYDRA host)
 if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; then
