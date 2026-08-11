@@ -31,6 +31,7 @@ ONBOARDED_REPOS=(
   Muso-AI/platform-data-processing
   Muso-AI/tests-web-e2e
   Muso-AI/feed-service
+  Muso-AI/analytics-controller
 )
 
 @test "allowlisted repo -> exit 0" {
