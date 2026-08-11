@@ -42,6 +42,7 @@ MUSO_OPS_STATE_DIR="${MUSO_OPS_STATE_DIR:-/var/log/muso-ops}"
 RECENT_MERGES_PATH="${RECENT_MERGES_PATH:-${MUSO_OPS_STATE_DIR}/recent-merges.jsonl}"
 TIER2_AUDIT_PATH="${TIER2_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/tier2-audit.jsonl}"
 CREDIT_REJECT_AUDIT_PATH="${CREDIT_REJECT_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/credit-reject-audit.jsonl}"
+FRAUD_UVN_ATTEMPT_PATH="${CV_FRAUD_ATTEMPT_PATH:-${MUSO_OPS_STATE_DIR}/fraud-uvn-attempts.jsonl}"
 TIER2_APPROVERS_PATH="${TIER2_APPROVERS_PATH:-${SCRIPT_DIR}/../config/tier2-approvers.txt}"
 TIER2_ENDPOINTS_PATH="${TIER2_ENDPOINTS_PATH:-${SCRIPT_DIR}/../config/tier2-endpoints.txt}"
 TIER2_GODMODE_PATH="${TIER2_GODMODE_PATH:-${SCRIPT_DIR}/../config/tier2-godmode-allowlist.txt}"
@@ -365,6 +366,103 @@ write_credit_request_result() {
         echo "WARN: could not append to ${results_path}; results line LOST for ${method_uc} ${path}" >&2
         return 0
     fi
+}
+
+# Persist fraud routing BEFORE the HTTP request. Fraud-routed rows use the
+# ordinary user_verification_needed DB status, so a timeout or post-commit 5xx
+# would otherwise erase the only durable fact that automation must never
+# reverse. Failure to write this marker refuses the API call.
+record_fraud_uvn_attempt() {
+    local method="$1" path="$2" body="${3:-}"
+    [[ "${OPS_FLAG_REASON:-}" == "fraud_multifactor" ]] || return 0
+    [[ "$path" == /admin/credit-requests* ]] || return 0
+
+    local method_uc intended_status request_ids
+    method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    case "$method_uc" in PUT|PATCH) ;; *) return 0 ;; esac
+    intended_status=$(printf '%s' "$body" | jq -r '.status // ""' 2>/dev/null || true)
+    [[ "$intended_status" == "user_verification_needed" ]] || return 0
+
+    if [[ "$method_uc" == "PUT" ]]; then
+        request_ids=$(printf '%s' "$body" | jq -ce '
+            .requestIds
+            | select(type == "array" and length > 0)
+            | select(all(.[]; type == "string" and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")))
+        ' 2>/dev/null) || {
+            echo "ERROR: refusing fraud UVN write with missing or invalid requestIds" >&2
+            return 1
+        }
+    else
+        local request_id
+        request_id="${path#/admin/credit-requests/}"
+        request_id="${request_id%%\?*}"
+        if [[ ! "$request_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "ERROR: refusing fraud UVN write with invalid request ID" >&2
+            return 1
+        fi
+        request_ids=$(jq -n -c --arg id "$request_id" '[$id]') || return 1
+    fi
+
+    local line
+    line=$(jq -n -c \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg run_id "${OPS_RUN_ID:-${RUN_ID:-}}" \
+        --arg method "$method_uc" \
+        --arg path "$path" \
+        --arg requester "${REQUESTER_EMAIL:-}" \
+        --argjson request_ids "$request_ids" \
+        '{
+            ts:$ts,
+            run_id:(if $run_id == "" then null else $run_id end),
+            method:$method,
+            path:$path,
+            request_ids:$request_ids,
+            intended_status:"user_verification_needed",
+            outcome:"attempt_started",
+            flag_reason:"fraud_multifactor",
+            requester:(if $requester == "" then null else $requester end)
+        }' 2>/dev/null) || {
+            echo "ERROR: could not build durable fraud UVN attempt marker" >&2
+            return 1
+        }
+
+    if ! mkdir -p "$(dirname "$FRAUD_UVN_ATTEMPT_PATH")" 2>/dev/null \
+       || ! { exec 7>"${FRAUD_UVN_ATTEMPT_PATH}.lock"; } 2>/dev/null \
+       || ! flock -w 10 7; then
+        echo "ERROR: durable fraud UVN attempt marker unavailable at ${FRAUD_UVN_ATTEMPT_PATH}; refusing API write" >&2
+        return 1
+    fi
+    # A successful write(2) is not durable enough for this guard: a host crash
+    # after the remote commit could discard page cache and recreate an unmarked
+    # fraud UVN. fsync both the file and parent directory before curl is allowed.
+    if ! python3 -c '
+import os
+import sys
+
+path, line = sys.argv[1:]
+fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+try:
+    payload = (line + "\n").encode("utf-8")
+    written = os.write(fd, payload)
+    if written != len(payload):
+        raise OSError(f"short fraud marker write: {written}/{len(payload)}")
+    os.fsync(fd)
+finally:
+    os.close(fd)
+dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+' "$FRAUD_UVN_ATTEMPT_PATH" "$line"; then
+        flock -u 7 || true
+        exec 7>&-
+        echo "ERROR: fraud UVN marker fsync failed at ${FRAUD_UVN_ATTEMPT_PATH}; refusing API write" >&2
+        return 1
+    fi
+    flock -u 7
+    exec 7>&-
+    return 0
 }
 
 # --- Slack ID → Email mapping ---
@@ -2190,6 +2288,13 @@ EOF
                 return 0
                 ;;
         esac
+    fi
+
+    # This marker is deliberately after the dry-run short-circuit and before
+    # token acquisition/curl. A real fraud-routing PUT cannot start unless its
+    # target IDs are already durably excluded from future approval automation.
+    if ! record_fraud_uvn_attempt "$method" "$path" "$body"; then
+        return 1
     fi
 
     local token

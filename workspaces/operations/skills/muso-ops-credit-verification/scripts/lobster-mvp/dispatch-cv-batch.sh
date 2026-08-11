@@ -204,6 +204,29 @@ if [[ ! -r "$PIPELINE_PATH" ]]; then
   exit 4
 fi
 
+# Serialize every real credit-status run with deterministic UVN automation.
+# The lock spans the whole synchronous pipeline, not just its final API call,
+# so both runners take their fraud snapshot and status decisions from a world
+# in which the other runner cannot be writing concurrently. Dry-runs never
+# write and therefore do not take this lock.
+if [[ "$DRY_RUN_STR" == "false" ]]; then
+  CREDIT_WRITE_LOCK_PATH="${CV_CREDIT_WRITE_LOCK_PATH:-/var/lib/hydra/credit-status-writes.lock}"
+  CREDIT_WRITE_LOCK_WAIT="${CV_CREDIT_WRITE_LOCK_WAIT_SECS:-900}"
+  if [[ ! "$CREDIT_WRITE_LOCK_WAIT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: CV_CREDIT_WRITE_LOCK_WAIT_SECS must be a positive integer" >&2
+    exit 5
+  fi
+  if ! mkdir -p "$(dirname "$CREDIT_WRITE_LOCK_PATH")" \
+     || ! { exec 8>"$CREDIT_WRITE_LOCK_PATH"; }; then
+    echo "ERROR: shared credit-write lock is unavailable at $CREDIT_WRITE_LOCK_PATH" >&2
+    exit 5
+  fi
+  if ! flock -w "$CREDIT_WRITE_LOCK_WAIT" 8; then
+    echo "ERROR: timed out waiting for shared credit-write lock at $CREDIT_WRITE_LOCK_PATH" >&2
+    exit 5
+  fi
+fi
+
 # --- build payload --------------------------------------------------------
 
 # Per-run unique raw-batch handoff file for the pick→fraud steps. A static
