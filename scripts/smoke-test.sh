@@ -38,6 +38,10 @@ source "$_SMOKE_DIR/lib/websearch-probe.sh"
 source "$_SMOKE_DIR/lib/credit-gate-probe.sh"
 # mesh_probe_* — same split rationale; classifies the Clio -> CTO round-trip
 # without trusting loose keywords in the reply (see lib/mesh-probe.sh).
+# cron_store_* — the canonical durable-cron accounting, shared with deploy.sh's
+# Step 6b convergence heal so the two can never disagree (see lib/cron-store.sh).
+# shellcheck source=lib/cron-store.sh
+source "$_SMOKE_DIR/lib/cron-store.sh"
 # shellcheck source=lib/mesh-probe.sh
 source "$_SMOKE_DIR/lib/mesh-probe.sh"
 
@@ -443,9 +447,10 @@ if needs_target "main"; then
   # two stale qa-autoreview one-shots — this whole check's reason for being).
   # We still count disabled PERSISTENT crons (via --all), matching the full
   # repo set (enabled + disabled) that deploy.sh imports — do NOT narrow this
-  # to enabled-only. `.total` is the scalar all-rows count (== the previous
-  # `cron status --json .jobs`); if the store ever paginates (hasMore) we fall
-  # back to it so we never UNDER-count and mask a genuinely-missing repo cron.
+  # to enabled-only. A PAGINATED response (hasMore) is UNKNOWN and fails loud:
+  # `.total` is the all-rows count including the ephemerals this check excludes,
+  # and openclaw 2026.7.1 exposes no paging flag, so the unseen rows cannot be
+  # fetched. Do not "fall back" to it — that is the bug, not the mitigation.
   if [ ! -f /opt/hydra/cron-jobs.json ]; then
     fail_check "Main: /opt/hydra/cron-jobs.json missing — repo file did not deploy"
   else
@@ -462,11 +467,18 @@ if needs_target "main"; then
     if [ -z "$LOADED_RAW" ]; then
       fail_check "Main: openclaw cron list --all --json returned nothing (gateway not running?)"
     else
-      LOADED_CRONS=$(echo "$LOADED_RAW" | jq '
-        if (.hasMore == true) then .total
-        else [ .jobs[] | select(((.schedule.kind == "at") and (.deleteAfterRun == true)) | not) ] | length
-        end' 2>/dev/null || echo "?")
-      if [[ "$EXPECTED_CRONS" == "?" || "$LOADED_CRONS" == "?" ]]; then
+      # The durable-cron filter lives ONCE in lib/cron-store.sh so this check
+      # and deploy.sh's Step 6b convergence heal can never drift apart and
+      # disagree about what "loaded" means. rc 2 = paginated: the durable count
+      # cannot be derived from a truncated page (and this openclaw build has no
+      # paging flag), so it is UNKNOWN and gets its own message rather than
+      # being reported as a parse failure.
+      CRON_COUNT_RC=0
+      LOADED_CRONS=$(cron_store_durable_count_from_json "$LOADED_RAW") || CRON_COUNT_RC=$?
+      (( CRON_COUNT_RC == 0 )) || LOADED_CRONS="?"
+      if (( CRON_COUNT_RC == 2 )); then
+        fail_check "Main: cron list came back PAGINATED (hasMore=true) — the durable cron count is unobtainable, so the store is unverifiable. Raw output: $LOADED_RAW"
+      elif [[ "$EXPECTED_CRONS" == "?" || "$LOADED_CRONS" == "?" ]]; then
         fail_check "Main: cron count check failed (expected=$EXPECTED_CRONS loaded=$LOADED_CRONS) — could not parse JSON. Raw output: $LOADED_RAW"
       elif [[ "$LOADED_CRONS" == "$EXPECTED_CRONS" ]]; then
         pass_check "Main: cron scheduler loaded $LOADED_CRONS jobs (matches repo)"

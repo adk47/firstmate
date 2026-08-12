@@ -2893,6 +2893,116 @@ if needs_target "edge"; then
 fi
 
 # -------------------------------------------------------------------
+# Step 6b: Converge the cron store (post-restart anti-clobber heal)
+# -------------------------------------------------------------------
+# The Step 5a import runs BEFORE the restart and is verified by a read-back —
+# but the still-running gateway can rewrite its stale in-memory cron table over
+# those rows at any point in the drain window, silently dropping the cron this
+# deploy was adding. Full mechanism, evidence, and the 2026-08-11 timeline:
+# scripts/lib/cron-store.sh.
+#
+# Detect it HERE, not in the smoke test: by Step 7 the only available outcome is
+# a rollback (which is what happened on 2026-08-11 — main sat undeployed and
+# every later push would have failed identically). One re-import + restart is
+# enough because the window we are re-opening is seconds, not the 320s drain.
+# A second failure is a real anomaly and fails loud rather than looping.
+if needs_target "main" && [ -f "$HYDRA_ROOT/cron-jobs.json" ]; then
+  log "Step 6b/8: Verifying the restarted gateway loaded the repo cron set..."
+  # shellcheck source=lib/cron-store.sh
+  source "$SCRIPT_DIR/lib/cron-store.sh"
+
+  # The decision itself lives in the lib so bats can drive every branch;
+  # deploy.sh supplies the real gateway lifecycle and turns exit codes into
+  # messages.
+  #
+  # The heal runs with the gateway STOPPED: saveCronStore is replace-all with no
+  # compare-and-swap, and the gateway is the only process that writes the cron
+  # store, so stopping it is what makes the import exclusive instead of racing
+  # a concurrent `cron add`. `Restart=always` does NOT apply after an explicit
+  # stop, so the start is guaranteed by a trap as well as by the lib.
+  cron_store_heal_stop() {
+    local svc="openclaw-gateway-${1}"
+    log "    stopping $svc for an exclusive cron-store import"
+    run_on_node8 "timeout 120 ${SYSTEMCTL_BIN:-systemctl} stop $svc" || return 1
+    run_on_node8 "${SYSTEMCTL_BIN:-systemctl} is-active --quiet $svc" && return 1
+    CRON_HEAL_STOPPED="$svc"
+    return 0
+  }
+  cron_store_heal_start() {
+    local profile="$1" svc="openclaw-gateway-${1}"
+    hard_restart_gateway "$svc" || return 1
+    verify_gateway_env_pin "$svc"
+    wait_for_agents_bound "$profile" 30 || true
+    CRON_HEAL_STOPPED=""
+    return 0
+  }
+  # Belt and braces: if anything between the stop and the start kills this
+  # script (set -e, a signal, an unexpected exit), bring the gateway back rather
+  # than leaving the fleet down. The lib already starts it on every path; this
+  # covers the paths the lib never reaches.
+  CRON_HEAL_STOPPED=""
+  cron_store_heal_trap() {
+    if [ -n "${CRON_HEAL_STOPPED:-}" ]; then
+      log "  ✗ deploy exited with $CRON_HEAL_STOPPED stopped — starting it back up"
+      run_on_node8 "${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || true
+      notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; attempted an emergency start. VERIFY the gateway is up."
+    fi
+  }
+  # COMPOSE with the existing EXIT trap (deploy lock release, set near the top
+  # of this script) — a bare `trap ... EXIT` here would REPLACE it and leak the
+  # deploy lock forever. Gateway first, lock second.
+  trap 'cron_store_heal_trap; release_deploy_lock "$LOCK_DIR"' EXIT
+  cron_store_heal_log() { log "    $*"; }
+  # Exported like GATEWAY_EXEC_FN above — same seam convention, and the export
+  # is also what tells the linter these are consumed by the sourced lib.
+  export CRON_STORE_STOP_FN=cron_store_heal_stop
+  export CRON_STORE_START_FN=cron_store_heal_start
+  export CRON_STORE_LOG_FN=cron_store_heal_log
+
+  cron_rc=0
+  cron_store_converge main "$HYDRA_ROOT/cron-jobs.json" || cron_rc=$?
+  case "$cron_rc" in
+    0)
+      log "  ✓ Main: gateway cron set matches the repo ($CRON_STORE_LOADED durable cron(s), compared by identity + schedule)" ;;
+    1)
+      log "  ✓ Main: cron store healed — gateway now matches the repo ($CRON_STORE_LOADED durable cron(s))"
+      notify_slack ":white_check_mark: HYDRA deploy: pre-restart cron import had been clobbered; the store was re-imported and the main gateway restarted. Now loaded $CRON_STORE_LOADED cron(s), matching the repo." ;;
+    2)
+      fail "cron convergence: could not count jobs in $HYDRA_ROOT/cron-jobs.json" ;;
+    3)
+      fail "cron convergence: 'openclaw --profile main cron list --all --json' failed or returned unparseable JSON — refusing to assume the cron store is correct" ;;
+    4)
+      fail "cron convergence: the gateway's cron list came back PAGINATED (hasMore=true). The durable count cannot be derived from a truncated page and this openclaw build exposes no paging flag, so the store is unverifiable — refusing to assume it is correct." ;;
+    5)
+      fail "cron convergence: re-import into the SQLite cron store FAILED — the gateway is running a stale cron set ($CRON_STORE_LOADED of $CRON_STORE_EXPECTED)" ;;
+    6)
+      fail "cron convergence: re-import persisted $CRON_STORE_PERSISTED row(s), expected $CRON_STORE_EXPECTED" ;;
+    7)
+      fail "cron convergence: the gateway stop/start seams were not supplied — refusing to import without an exclusive critical section" ;;
+    15)
+      fail "cron convergence: the repo-vs-gateway diff could not be COMPUTED before the heal, so the cron store is unverifiable. Nothing was stopped, imported or restarted. This usually means jq failed or the gateway returned an unexpected shape — check 'openclaw --profile main cron list --all --json'." ;;
+    16)
+      fail "cron convergence: the cron store WAS re-imported and openclaw-gateway-main WAS restarted, but the verifying diff could not be COMPUTED afterwards — convergence is UNVERIFIED, not known-bad. Check 'openclaw --profile main cron list --all --json' against /opt/hydra/cron-jobs.json before re-deploying." ;;
+    13)
+      fail "cron convergence: openclaw-gateway-main could not be STOPPED, so the import never ran and nothing was touched. The gateway is still up; investigate systemd before re-deploying." ;;
+    14)
+      fail "cron convergence: openclaw-gateway-main could not be STARTED after the cron import — THE MAIN GATEWAY IS DOWN. Run 'systemctl start openclaw-gateway-main' on node-8 now, then check 'systemctl status'." ;;
+    8)
+      fail "cron convergence: could not re-read the main gateway's cron list after the heal restart" ;;
+    12)
+      fail "cron convergence: the live cron store could not be READ, so the re-import refused to save — it could neither preserve scheduler state nor prove that no undeclared durable cron was about to be deleted. Nothing was changed. Check the gateway and the SQLite store at /root/.openclaw-main/state/openclaw.sqlite." ;;
+    11)
+      fail "cron convergence: a durable cron the repo does not declare appeared BETWEEN the drift check and the re-import, so the re-import ABORTED rather than delete it (saveCronStore is replace-all). Nothing was changed. Re-run the deploy; if the job is legitimate, commit it to cron-jobs.json first." ;;
+    10)
+      fail "cron convergence: the gateway holds durable cron(s) that cron-jobs.json does not declare (diff=$CRON_STORE_DIFF). REFUSING to heal — the re-import is delete-by-store-key and would DELETE them (this is the 2026-07-16 ChartMogul loss, PR #702/#706). Commit the job(s) to cron-jobs.json, or re-run with HYDRA_ALLOW_ORPHAN_CRON=1 to drop them deliberately." ;;
+    9)
+      fail "cron convergence: the gateway's cron set still does not match the repo after a re-import + restart (loaded $CRON_STORE_LOADED, repo declares $CRON_STORE_EXPECTED; diff=$CRON_STORE_DIFF). Either the clobber recurred or the store rejected a row — check 'journalctl -u openclaw-gateway-main' for 'cron: job added' around this deploy." ;;
+    *)
+      fail "cron convergence: unrecognized status $cron_rc from cron_store_converge" ;;
+  esac
+fi
+
+# -------------------------------------------------------------------
 # Step 7: Run smoke test
 # -------------------------------------------------------------------
 log "Step 7/8: Running smoke test..."
