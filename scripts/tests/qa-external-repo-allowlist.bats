@@ -30,6 +30,8 @@ ONBOARDED_REPOS=(
   Muso-AI/analytics-worker
   Muso-AI/platform-data-processing
   Muso-AI/tests-web-e2e
+  Muso-AI/muso-skills
+  Muso-AI/platform-ticker
   Muso-AI/feed-service
   Muso-AI/analytics-controller
 )
