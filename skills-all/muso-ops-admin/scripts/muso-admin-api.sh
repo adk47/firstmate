@@ -31,6 +31,8 @@ REQUESTER_EMAIL=""   # Set via --requester flag
 EVIDENCE_EXCERPT=""  # Set via --evidence-excerpt flag (required for autonomous credit approves)
 CONFIRMED_BY=""      # Set via --confirmed-by flag (required for tier-2 writes — see enforce_tier2_approval_gate)
 APPROVAL_MSG_ID=""   # Set via --approval-msg-id flag (Slack message ID/ts of the in-thread approval — for audit)
+APPROVAL_AUTHOR_ID="" # Set via --approval-author-id flag (Slack user id of the approval message author — for audit, optional)
+APPROVAL_CHANNEL=""  # Set via --approval-channel flag (Slack channel id the approval message is in — for audit, optional)
 
 # Tier-2 enforcement state. Persisted to disk so the reverse-direction guard
 # fires across separate shell invocations (each agent exec is a new shell).
@@ -53,10 +55,12 @@ TIER2_REVERSE_WINDOW_SECS="${TIER2_REVERSE_WINDOW_SECS:-300}"
 # profile's lifetime stream count. This gate caps the blast radius: once
 # BULK_DESTRUCTIVE_THRESHOLD destructive DELETEs land within
 # BULK_DESTRUCTIVE_WINDOW_SECS, every further destructive DELETE is refused
-# unless an explicit second human approval (--confirmed-by + --approval-msg-id)
-# is supplied. Requester identity does NOT bypass this gate — the agent
-# auto-stamps --requester with whoever is in-thread, so it is not evidence
-# that a human reviewed a mass deletion.
+# unless an explicit human DECISION NAMING THOSE ROWS (--confirmed-by +
+# --approval-msg-id) is supplied. It need not come from a SECOND human: when the
+# requester is on the tier-2 approver list AND enumerated the exact targets,
+# their own request message is that decision. Requester identity alone still
+# does NOT bypass the gate — the agent auto-stamps --requester with whoever is
+# in-thread, so by itself it is not evidence that a human chose these rows.
 BULK_DESTRUCTIVE_PATH="${BULK_DESTRUCTIVE_PATH:-${MUSO_OPS_STATE_DIR}/destructive-ops.jsonl}"
 BULK_DESTRUCTIVE_AUDIT_PATH="${BULK_DESTRUCTIVE_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/bulk-destructive-audit.jsonl}"
 BULK_DESTRUCTIVE_THRESHOLD="${BULK_DESTRUCTIVE_THRESHOLD:-10}"
@@ -203,14 +207,22 @@ resolve_slack_to_email() {
         echo "$input"
         return 0
     fi
-    # Resolve Slack ID to email
+    # Resolve Slack ID to email. This map MUST hold exactly the people
+    # shared-reference/reference/slack-people.json lists as kind:"human" +
+    # current:true — no more (a departed person must not resolve to a live
+    # address) and no fewer (an unmapped person silently becomes a raw UID in
+    # the Requester audit header, see the fail-closed path below).
+    # Gated by scripts/tests/muso-admin-api-slack-resolve.bats.
     case "$input" in
-        U7RP6HKUZ)  echo "aaron@muso.ai" ;;
-        U03TYGJF1N3) echo "serhii@muso.ai" ;;
-        U038BM16T7W) echo "jan@muso.ai" ;;
-        U02S7TJ7QHY) echo "oleg@muso.ai" ;;
-        U0AL36NADEY) echo "nick@muso.ai" ;;
-        U0A8CCTTAAG) echo "liza@muso.ai" ;;
+        U7RP6HKUZ)   echo "aaron@muso.ai" ;;   # Aaron Kaufman (CEO)
+        U03TYGJF1N3) echo "serhii@muso.ai" ;;  # Serhii Ostapchuk (CTO)
+        U038BM16T7W) echo "jan@muso.ai" ;;     # Jan Delmo (Head of Operations) — NOT jay@
+        U0AL36NADEY) echo "nick@muso.ai" ;;    # Nicholas Sollazzo (Chief Agent Officer)
+        U0A8CCTTAAG) echo "liza@muso.ai" ;;    # Liza Basco (Accountant)
+        U03LP8YHLPK) echo "mariia@muso.ai" ;;  # Mariia Bubley (Head of Product / UI & UX)
+        U02N2NP3H7F) echo "artem@muso.ai" ;;   # Artem (Mobile Developer)
+        U0AV9C7CFRQ) echo "faith@muso.ai" ;;   # Faith Undie (Community & Social Media)
+        U02S7C96CGN) echo "f@muso.ai" ;;       # McLaren Amberti (Sales Ops) — NOT mclaren@, single letter f
         *)
             # Unknown Slack ID — return as-is
             echo "$input"
@@ -846,6 +858,244 @@ EOF
     return 0
 }
 
+# normalize_admin_path PATH -> canonical, lower-cased path on stdout.
+#
+# The raw $path is concatenated straight into the curl URL, so ANY spelling that
+# reaches the same API route but slips a gate's match is a live bypass, not a
+# cosmetic near-miss. curl itself resolves dot-segments and drops the fragment
+# before the request leaves the machine, and Express routes case-insensitively by
+# default -- so /ADMIN/profile/ENRICHBYURL, /admin/profile/./enrichByUrl,
+# /admin/profile/x/../enrichByUrl and ...#frag all hit the SAME handler as the
+# canonical spelling while failing a literal match. Normalizing can only ever
+# make MORE paths match, so it cannot widen what gets through.
+#
+# NOTE: the older gates (is_tier2_endpoint, is_bulk_destructive_op) strip only the
+# query string and so remain exposed to these same spellings. Widening them is out
+# of scope here; see the PR description.
+normalize_admin_path() {
+    local p="$1" out="" seg rest
+    p="${p%%#*}"
+    p="${p%%\?*}"
+    p="$(printf %s "$p" | tr '[:upper:]' '[:lower:]')"
+    while [[ "$p" == *//* ]]; do p="${p//\/\//\/}"; done
+    # RFC 3986 5.2.4 remove_dot_segments, in FULL. An earlier cut handled only
+    # "/./" and "/seg/../" -- both of which require a FOLLOWING slash -- so the
+    # boundary forms "/admin/profile/enrichByUrl/." and "/../admin/profile/
+    # enrichByUrl" stayed non-canonical here and sailed past the case statement.
+    # Verified on the wire: curl sends the first as ".../enrichByUrl/" and the
+    # second as the exact canonical path, so both reached the live route with no
+    # profileId. Anything short of the whole algorithm leaves such a spelling.
+    while [[ -n "$p" ]]; do
+        case "$p" in
+            ../*)  p="${p#../}" ;;
+            ./*)   p="${p#./}" ;;
+            /./*)  p="/${p#/./}" ;;
+            /.)    p="/" ;;
+            /../*) p="/${p#/../}"; out="${out%/*}" ;;
+            /..)   p="/"; out="${out%/*}" ;;
+            .|..)  p="" ;;
+            *)
+                if [[ "$p" == /* ]]; then
+                    rest="${p:1}"
+                    if [[ "$rest" == */* ]]; then seg="/${rest%%/*}"; p="/${rest#*/}"
+                    else seg="/${rest}"; p=""; fi
+                else
+                    if [[ "$p" == */* ]]; then seg="${p%%/*}"; p="/${p#*/}"
+                    else seg="$p"; p=""; fi
+                fi
+                out="${out}${seg}" ;;
+        esac
+    done
+    p="$out"
+    while [[ "$p" == */ ]]; do p="${p%/}"; done
+    printf %s "$p"
+}
+
+# enforce_profile_enrich_link_gate METHOD PATH BODY -> 0 allow / 1 block.
+#
+# Incident 2026-08-05 (THIRD recurrence). Ops created profile ylsvoid
+# (15bb7a07-...), fired a Spotify capture, got back
+# {accepted:true, captureId:"156ae094-..."}, and the source never attached.
+# It never could have: nothing in that request named the profile.
+#
+# A capture binds to a muso profile through exactly ONE value —
+# extra_data.profile_id. core-backend's enrichByUrl.js threads `profileId`
+# into it; IDP reads it at base_raw_processor.py:129
+# (artist.muso_profile_id) and consumes it at sync_profile.py:318-323.
+# When it is absent, the match cascade (sync_profile.py:486-504:
+# raw_id -> exact spotify link -> IPI -> _sync_new) has NO name-matching
+# rung, so the scrape falls through to _sync_new and mints a SEPARATE
+# profile. The operator's profile stays empty forever.
+#
+# `accepted:true` is NOT evidence of linkage. The HTTP capture path uses
+# force_send_to_queue (capture_helper.py:94-121), which means only
+# "produced to Kafka". So the standard "200 = queued, wait and re-check"
+# doctrine — correct for a LINKED capture — can never resolve an unlinked
+# one. That is precisely why this was escalated three times.
+#
+# Two shapes are refused:
+#   POST /admin/profile/enrichByUrl        with no profileId in the body
+#   POST /admin/artist/<spotifyId>/enrich  (carries no profile ref AT ALL)
+#
+# Override for a genuinely standalone catalog capture (enriching a source
+# entity with no muso profile to attach to): MUSO_ENRICH_STANDALONE=1.
+enforce_profile_enrich_link_gate() {
+    local method="$1" path="$2" body="$3"
+
+    # Normalize method case defensively — `post` must gate the same as `POST`
+    # (same reasoning as enforce_credit_approve_gate).
+    local method_uc
+    method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    [[ "$method_uc" == "POST" ]] || return 0
+
+    # Normalize BEFORE matching -- see normalize_admin_path for why a literal
+    # match on $path is a live bypass (query string, fragment, case, dot
+    # segments, repeated/trailing slashes all reach the same route).
+    local norm_path
+    norm_path="$(normalize_admin_path "$path")"
+
+    # Only these two routes dispatch a profile-scoped capture. Patterns MUST be
+    # lower-case: normalize_admin_path lower-cases what it returns, so a
+    # camelCase pattern here would never match anything.
+    case "$norm_path" in
+        /admin/artist/*/enrich|/admin/profile/enrichbyurl) ;;
+        *) return 0 ;;
+    esac
+
+    # Explicit opt-in for a standalone capture. Checked AFTER the route match
+    # so the variable can never widen the gate to unrelated routes.
+    if [[ "${MUSO_ENRICH_STANDALONE:-0}" == "1" ]]; then
+        return 0
+    fi
+
+    # This route has no profileId parameter at all — there is no body shape
+    # that makes it attach, so it is refused outright rather than inspected.
+    if [[ "$norm_path" == /admin/artist/*/enrich ]]; then
+        cat >&2 <<EOF
+MUSO_ENRICH_CANNOT_LINK: refusing POST ${path}.
+
+This route takes ONLY a spotify artist id (core-backend enrichSpotify.js) and
+sends no profile reference, so the capture can never attach to a muso profile.
+It will answer {accepted:true, captureId:...} and then silently mint a SEPARATE
+standalone profile. Waiting and re-checking will NEVER make the source appear.
+
+To attach a source to an existing profile, use the route that carries the link:
+    bash \$0 call POST /admin/profile/enrichByUrl \\
+        '{"enrichmentUrl":"https://open.spotify.com/artist/<id>","profileId":"<profile_id>"}'
+
+If you genuinely want a standalone catalog capture with no profile to attach
+to, re-run with MUSO_ENRICH_STANDALONE=1.
+EOF
+        return 1
+    fi
+
+    # /admin/profile/enrichByUrl — the link is only present if the body
+    # actually carries profileId. Parse it the way core-backend's JSON.parse
+    # does rather than by literal bytes: a line-oriented grep is fooled by
+    # \uXXXX escapes and inter-token newlines, and a miss here would let the
+    # unlinkable call through (fail-open on the exact defect being gated).
+    #
+    # Fail CLOSED on an empty or unparseable body: we would rather refuse a
+    # body we cannot read than skip the link check on it. (`jq -e .` exits 4
+    # on empty input and 5 on invalid JSON; both are non-zero, verified.)
+    if ! printf '%s' "$body" | jq -e . >/dev/null 2>&1; then
+        cat >&2 <<EOF
+MUSO_ENRICH_BODY_UNPARSEABLE: refusing POST ${path} — body did not parse as
+JSON, so the required profileId link could not be verified.
+
+    bash \$0 call POST /admin/profile/enrichByUrl \\
+        '{"enrichmentUrl":"https://open.spotify.com/artist/<id>","profileId":"<profile_id>"}'
+EOF
+        return 1
+    fi
+
+    # A PRESENT profileId is not automatically a USABLE one, and the check must
+    # never round-trip the VALUE through the shell. `$(jq -r .profileId)` strips
+    # every trailing newline byte (command substitution does), so
+    # {"profileId":"<uuid>\n"} became a bare UUID inside the gate and passed,
+    # while the unchanged body still decoded to UUID+newline for core-backend and
+    # matched no profile — the silent non-attachment again. So jq classifies the
+    # value and returns only a short verdict TOKEN; nothing the shell can mangle.
+    #
+    # Two traps this encodes:
+    #   - jq/Oniguruma `$` matches BEFORE a trailing newline (verified: test()
+    #     with ^...$ returns true for "<uuid>\n"). \A and \z are the real anchors,
+    #     and the length==36 check makes it belt-and-braces.
+    #   - trimming and validating the trimmed copy blesses a value the API never
+    #     sees; the body goes to curl byte-for-byte, so padding must be REFUSED,
+    #     not silently cleaned.
+    local verdict profile_id_display profile_id_fixed
+    verdict="$(printf '%s' "$body" | jq -r '
+        def trimmed: gsub("^\\s+|\\s+$"; "");
+        if (.profileId|type) == "null" then "missing"
+        elif (.profileId|type) != "string" then "nottype:" + (.profileId|type)
+        elif (.profileId|trimmed) == "" then "missing"
+        elif .profileId != (.profileId|trimmed) then "whitespace"
+        elif (.profileId|length) != 36 then "malformed"
+        elif (.profileId|test("\\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\z")|not) then "malformed"
+        else "ok" end' 2>/dev/null || true)"
+    # Display copy only — JSON-encoded so a newline or tab is visible as \n / \t
+    # in the refusal instead of wrecking the message. Never used for the verdict.
+    profile_id_display="$(printf '%s' "$body" | jq -c '.profileId // ""' 2>/dev/null || true)"
+    # The corrected value to send back to the operator. Safe through command
+    # substitution BY CONSTRUCTION: it is the trimmed form, so it has no trailing
+    # whitespace left for the shell to strip. Display/advice only, never a verdict.
+    profile_id_fixed="$(printf '%s' "$body" | jq -r '(.profileId // "") | gsub("^\\s+|\\s+$"; "")' 2>/dev/null || true)"
+
+    case "$verdict" in
+        ok) return 0 ;;
+        missing)
+            cat >&2 <<EOF
+MUSO_ENRICH_MISSING_PROFILE_ID: refusing POST ${path} — no usable profileId in the body.
+
+Without profileId the capture carries no extra_data.profile_id, so it cannot
+bind to any profile. It will answer {accepted:true, captureId:...} and then
+mint a SEPARATE standalone profile; the profile you meant to fill stays empty.
+Re-checking later will NEVER show the source — this is not an async delay.
+
+Add the profile the source belongs to:
+    bash \$0 call POST /admin/profile/enrichByUrl \\
+        '{"enrichmentUrl":"<source-url>","profileId":"<profile_id>"}'
+
+If you genuinely want a standalone catalog capture with no profile to attach
+to, re-run with MUSO_ENRICH_STANDALONE=1.
+EOF
+            return 1 ;;
+        nottype:*)
+            cat >&2 <<EOF
+MUSO_ENRICH_PROFILE_ID_NOT_A_STRING: refusing POST ${path} — profileId is a
+JSON ${verdict#nottype:}, not a string.
+
+Only a string profile id can resolve to a profile. A number/bool/array/object
+is dispatched happily by the API and then matches nothing, which lands you in
+exactly the silent non-attachment this gate exists to prevent.
+EOF
+            return 1 ;;
+        whitespace)
+            cat >&2 <<EOF
+MUSO_ENRICH_PROFILE_ID_HAS_WHITESPACE: refusing POST ${path} — profileId
+carries surrounding whitespace (${profile_id_display}).
+
+The request body is sent to the API byte-for-byte, so the padding travels with
+it and the value matches no profile. Note a trailing newline counts and is easy
+to introduce with \$(cat file) or a heredoc. Send the bare 36-character id:
+
+    "profileId":"${profile_id_fixed}"
+EOF
+            return 1 ;;
+        *)
+            cat >&2 <<EOF
+MUSO_ENRICH_PROFILE_ID_MALFORMED: refusing POST ${path} — profileId
+${profile_id_display} is not a UUID.
+
+Muso profile ids are UUIDs (e.g. 15bb7a07-7249-4405-a37a-7255d1cb9321). A
+non-UUID id is accepted by the API and then matches no profile, so the captured
+source attaches to nothing exactly as if you had passed none at all.
+EOF
+            return 1 ;;
+    esac
+}
+
 record_merge_call() {
     local method="$1" path="$2" body="$3" http_code="$4"
     [[ "$path" == "/admin/profiles/merge" ]] || return 0
@@ -961,7 +1211,11 @@ To proceed you must have an EXPLICIT in-thread human decision to delete this man
     --confirmed-by <handle>   (one of: $(cat "$TIER2_APPROVERS_PATH" 2>/dev/null | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | tr '\n' ' '))
     --approval-msg-id <slack_ts>
 
-Requester identity does NOT bypass this gate, and a stale/reused approval-msg-id is not a substitute for a real per-batch decision. Each call past the threshold needs genuine approval. If the operation is genuinely this large, hand it to a human to run.
+Requester identity does NOT bypass this gate. What satisfies it is an explicit human decision that NAMES the rows being deleted.
+
+If the person who asked is on the approver list above AND enumerated the exact targets (a list of ids/titles, or "all N of X" where you have already read and posted those N), their own request message IS that decision: pass their handle and the timestamp of THAT message. You do not need to find a second human, and you should not page anyone.
+
+That decision covers the target set it enumerated and ONLY that set — finishing an approved batch is not a new decision, but a different set of rows is. If the request was vague, or the requester is not on the list above, stop and get an explicit "yes, delete those N" before continuing.
 EOF
             return 1
         fi
@@ -997,7 +1251,9 @@ EOF
             --argjson count_at_trip "$count" \
             --argjson threshold "$BULK_DESTRUCTIVE_THRESHOLD" \
             --argjson window_secs "$BULK_DESTRUCTIVE_WINDOW_SECS" \
-            '{ts:$ts, method:$method, path:$path, requester:$requester, confirmed_by:$confirmed_by, approval_msg_id:$approval_msg_id, count_at_trip:$count_at_trip, threshold:$threshold, window_secs:$window_secs}' \
+            --arg approval_author_id "$APPROVAL_AUTHOR_ID" \
+            --arg approval_channel "$APPROVAL_CHANNEL" \
+            '{ts:$ts, method:$method, path:$path, requester:$requester, confirmed_by:$confirmed_by, approval_msg_id:$approval_msg_id, count_at_trip:$count_at_trip, threshold:$threshold, window_secs:$window_secs, approval_author_id:$approval_author_id, approval_channel:$approval_channel}' \
             >> "$BULK_DESTRUCTIVE_AUDIT_PATH" || audit_rc=$?
         if (( audit_rc != 0 )); then
             echo "MUSO_BULK_DESTRUCTIVE_AUDIT_UNWRITABLE: append to $BULK_DESTRUCTIVE_AUDIT_PATH failed (rc=$audit_rc) — refusing bulk-destructive write to preserve audit trail." >&2
@@ -1155,6 +1411,14 @@ EOF
         return 1
     fi
 
+    # Profile-enrich link gate (incident 2026-08-05, third recurrence). Refuses
+    # a profile capture that carries no profileId — it would be "accepted" and
+    # then attach to nothing. Runs even in dry-run: the defect is the request
+    # SHAPE, so a dry-run must not report success for a call that can never work.
+    if ! enforce_profile_enrich_link_gate "$method" "$path" "$body"; then
+        return 1
+    fi
+
     # Bulk destructive-operation gate (incident 2026-05-26). Caps the blast
     # radius of mass DELETEs. Self-skips in dry-run.
     if ! enforce_bulk_destructive_gate "$method" "$path"; then
@@ -1233,6 +1497,15 @@ cmd_upload() {
         return 1
     fi
 
+    # cmd_upload reaches curl on its own path, so a gate wired only into cmd_call
+    # does not cover it. Wire the enrich-link gate in here too, or `upload` is a
+    # standing hole in the very promise this gate makes. (The OTHER gates --
+    # tier-2, merge-reverse, bulk-destructive -- are still absent from this
+    # function; that is pre-existing and flagged separately, not fixed here.)
+    if ! enforce_profile_enrich_link_gate "POST" "$path" ""; then
+        return 1
+    fi
+
     # Uploads are always writes — short-circuit unconditionally in dry-run.
     if is_dry_run_mode; then
         DRY_RUN_AUDIT_FAILED=0
@@ -1303,6 +1576,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --approval-msg-id)
             APPROVAL_MSG_ID="$2"
+            shift 2
+            ;;
+        --approval-author-id)
+            APPROVAL_AUTHOR_ID="$2"
+            shift 2
+            ;;
+        --approval-channel)
+            APPROVAL_CHANNEL="$2"
             shift 2
             ;;
         *) break ;;

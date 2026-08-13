@@ -7,7 +7,7 @@ description: |
   refused and routed to a human for a green-light; only allow-listed targets and
   authorized requesters are accepted; a window rate-cap bounds bursts.
   DEV (`--env dev`) is intentionally broad: an authorized dev requester (Serhii,
-  Artem D) may set ANY dev env var — secret-shaped included — with NO green-light;
+  Artem) may set ANY dev env var — secret-shaped included — with NO green-light;
   the secret VALUE is still redacted in the audit and the set is logged +
   rollback-hinted, contained to the muso-dev scope.
   Use when an authorized human asks to change a runtime config value
@@ -54,7 +54,7 @@ omitted flag never applies dev's looser rules to a prod target).
   green-light; requesters = `config/envset-requesters.txt` (narrow); targets =
   `config/target-allowlist.txt` (exact match).
 - **`--env dev`**: intentionally broad per Nick's directive (2026-07-17). A dev
-  requester (`config/dev-envset-requesters.txt` — Serhii, Artem D, Nick, Aaron)
+  requester (`config/dev-envset-requesters.txt` — Serhii, Artem, Nick, Aaron)
   may set ANY dev env var — **secret-shaped included, with NO green-light**.
   Targets = `config/dev-target-allowlist.txt` (glob, `muso-dev/*`). The secret
   VALUE is still redacted in the audit (`dev_self_serve:true`), the rate-cap still
@@ -149,7 +149,7 @@ PROD:
 - `config/blocklist-override-approvers.txt` — who can green-light a prod secret.
 
 DEV (`--env dev`):
-- `config/dev-envset-requesters.txt` — authorized dev humans (Serhii, Artem D, Nick, Aaron);
+- `config/dev-envset-requesters.txt` — authorized dev humans (Serhii, Artem, Nick, Aaron);
   also the dev rate-cap self-ack list.
 - `config/dev-target-allowlist.txt` — allowed dev targets (glob, e.g. `muso-dev/*`).
 - Dev Vault backend env (set at deploy, NOT in repo): `DEVOPS_ENVSET_BACKEND=vault`,
@@ -184,9 +184,9 @@ it grants broad dev authority (still audited + muso-dev-scoped).
   `path "secret/data/k8s/muso-dev/*"      { capabilities = ["read","patch","create","update"] }`
   `path "secret/data/k8s/muso-chat-dev/*" { capabilities = ["read","patch","create","update"] }`.
   Then prove on a throwaway dev key with rollback before Serhii's real token.
-- **Two different Artems are authorized for dev** — resolve them by Slack UID, never by
-  the display name "Artem". Artem M (Mobile) is `U02N2NP3H7F` / `artem@muso.ai` and is
-  mapped in `resolve_slack_to_email()`. **Artem D's** (DevOps Lead) muso.ai email is still
-  unconfirmed; he is authorized by Slack UID (`U0ACHTYUULT`) alone. Add his email to
-  `dev-envset-requesters.txt` + `resolve_slack_to_email()` once known — it is NOT
-  `artem@muso.ai`, which belongs to Artem M.
+- **There is exactly ONE Artem** as of 2026-07-30: Artem (Mobile Developer),
+  `U02N2NP3H7F` / `artem@muso.ai`, mapped in `resolve_slack_to_email()`. Artem D
+  (Dolobanko, `U0ACHTYUULT`, ex-DevOps Lead) **left the company and was revoked** from
+  `dev-envset-requesters.txt` and the UID map — do not re-add him. Older docs describing
+  "two Artems" are historical; the allowlist is the authority. Still verify requesters by
+  Slack UID, never by display name.

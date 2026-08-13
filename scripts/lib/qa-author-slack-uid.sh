@@ -31,6 +31,9 @@ case "$login" in
   adk47)     echo "U7RP6HKUZ"   ;;  # Aaron (authors web-credits-next PRs; the bot
                                     # can't self-approve, so those degrade to review-only)
   azure-kirin) echo "U03LP8YHLPK" ;;  # Mariia (octave-ui; authors web-credits-next PRs)
+  Korpyc)    echo "U02N2NP3H7F" ;;  # Artem, Mobile Developer (authors Muso-AI/mobile +
+                                    # core-backend PRs; was unmapped, so his PRs
+                                    # fail-closed to review-only for no good reason)
   # Add more as repos/authors come into scope, e.g.:
   #   <gh-login>) echo "<slack-uid>" ;;  # map a new GH author to their Slack UID
   *) exit 1 ;;                        # unknown -> fail-closed (caller skips)

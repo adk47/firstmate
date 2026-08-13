@@ -530,24 +530,22 @@ chains work fleet-wide. Swapping an OpenRouter OpenAI agent to a flat-fee Codex
 subscription is a config edit + an OAuth bootstrap on the live node + egress for
 `chatgpt.com:443` / `api.openai.com:443`.
 
-**Session compaction has its own model path that bypasses the codex OAuth runtime — so
-`invalid_api_key` 401s with the pin CLEAN are compaction, not a #90925 float.** A
-non-manual (`cli_budget`) compaction logs `[agent/embedded] skipping codex app-server
-compaction for non-manual trigger` and resolves a *separate* embedded summarizer target
-(`resolveEmbeddedCompactionTarget`) that routes `openai/gpt-5.5` through the raw
-`[openai-transport] api=openai-responses` (api-key) path — hitting hydra's placeholder
-`OPENAI_API_KEY` → 401 → fallback to `openrouter/openai/gpt-5.4-mini` **for that one
-compaction**, while normal agent turns keep serving on OAuth. This is a STRUCTURAL path
-present even at the pinned codex `2026.5.27`, distinct from #90925 (which mis-routes
-*every* turn only when floated to 6.x). Distinguish the two by the pin
-(`ensure-codex-version-pinned.sh --check`): drifted = real float (whole fleet on mini);
-clean = compaction-only (fleet healthy). Both the watchdog float alert and the
-admin/Stripe write-health gate (`codex_health_gate`) pin-gate the api-key signal so a
-compaction loop no longer false-pages or false-blocks writes
-(`codex_apikey_route_verdict` / `codex_pin_check_exit` in `scripts/lib/codex-health.sh`;
-root-caused 2026-07-06). Do NOT "fix" it with `agents.defaults.compaction.model` —
-openclaw docs say don't set it on Codex-backed agents (it emits an "override ignored"
-warning), and the fallback already lands on the exact model you'd pick.
+**Openclaw 2026.7.1's CLI budget lifecycle violated Codex-native compaction ownership.**
+The Codex harness correctly returned `codex app-server owns automatic compaction`, but
+`runCliTurnCompactionLifecycle` changed that intentional skip into
+`fallbackToContextEngine:true`. The legacy context engine then sent the summary through
+the raw OpenAI API-key route, hit hydra's placeholder key, and completed on a paid
+OpenRouter fallback. Normal agent turns remained on OAuth, but the fallback logger made
+the compaction completion indistinguishable from a served user turn and the long-running
+fallback chain could push concurrent turns onto OpenRouter. Openclaw 7.2 changes this exact
+case to a clean no-op; while hydra remains pinned to 7.1, deploy backports that narrow
+change with `scripts/patch-openclaw-codex-native-compaction.sh` and fails closed if the
+compiled anchor moves. Do not try to suppress these records in the liveness detector: the
+fallback-decision lines carry no compaction/run identity, so correlation is ambiguous under
+concurrency. Fix the producer path instead and keep liveness conservative. Pin-clean
+historical 401s remain compaction-only for the api-key verdict and write gate; a drifted pin
+remains a real #90925 float. Do not set `compaction.model` or `compaction.provider` on
+Codex-backed agents — native Codex owns compaction.
 
 ### Auth: one canonical store, shared by symlink (never fan out)
 
@@ -731,6 +729,84 @@ missing." Count exec/web_search records in the session jsonl: 0 = confabulation,
 not infra. Doctrine only weakly constrains a small brain; durable fixes are a brain
 upgrade or a post-boundary guard. Do not accept "forbidden workspace shadow" as the
 root cause for a skill that merged green (CI's drift check would have blocked it).
+
+### Per-account quota: two rotators, and why the archive lied (2026-08-05/06)
+
+**Two independent systems rotate codex accounts and neither knows about the other.**
+
+| | surface it drives | how it picks | what changes it |
+|---|---|---|---|
+| **hydra's** | each agent's `codex-home/auth.json` → the **codex agentRuntime** | `/var/lib/hydra/codex-active-account` → `codex-auth-sync.sh` | `codex-account-rotate.sh` |
+| **openclaw's** | the runtime `auth_profile_store` → the **`[agent/embedded]`** openai provider | `auth.order.openai`, in order | nothing — it is static config |
+
+openclaw's rotator emits `[agent/embedded] embedded run failover decision: …
+decision=rotate_profile reason=rate_limit … profile=sha256:<12hex>` and marks the
+failing profile with a cooldown computed by `calculateAuthProfileCooldownMs`:
+**30s → 60s → 300s, capped** (`dist/usage-BwF-Fcvq.js`), with `errorCount` reset
+after 24h. `resolveAuthProfileOrder` sorts in-cooldown profiles to the end, but
+`clearExpiredCooldowns` puts them back once the cooldown lapses. It never parks a
+profile for the multi-day reset the error text actually asks for.
+
+**Consequence: a permanently exhausted `auth.order[0]` is retried about every 75
+seconds, forever.** 2026-08-06: aaron@muso.ai at 100% produced **143** such lines
+in three hours. `codex-keepalive.sh` greps that same signature and read it as
+"our active account is capped" — but our active account was me.com at **0%**. It
+rotated the state file (the other surface entirely), changed nothing, exhausted
+the 120-min rotate cooldown, and paged `no rotation target left — every alternate
+account is known-capped`.
+
+**The `profile=sha256:` hash** is `redactIdentifier()` — SHA-256 of the full
+profile id, first 12 hex chars. To identify it, hash the candidates:
+`printf 'openai:aaron@muso.ai' | sha256sum | cut -c1-12`. Faster tell: the error
+text carries the account's own reset time (`Next reset in 2 days, Aug 8 at
+3:38 AM UTC`), and reset epochs are per-account anchored.
+
+**Why the archive was worse than useless.** Rollouts carry no account identity on
+7.x, so `codex-account-rotate.sh` archived the *fleet-freshest* snapshot under
+whichever account was rotating out, guarded only by "snapshot newer than the last
+rotation stamp". The live archives on 2026-08-06:
+
+```
+aaron@muso.ai  snap 1785968098 (Aug 5 22:14:58Z)  95%  reset 1786160293
+gmail          snap 1785976202 (Aug 6 00:30:02Z)  97%  reset 1786160293   <-- identical
+me.com         snap 1784903410 (Jul 24 14:30:10Z) 95%  reset 1785258161
+```
+
+Two accounts, snapshots 2h15m apart, **identical reset epoch to the second**.
+Weekly resets are per-account anchored — me.com's anchor is not congruent mod
+604800 with the Aug 8 anchor (remainder 297332s) — so that is arithmetically
+impossible for two subscriptions. Every row was really aaron@muso.ai's. A direct
+probe the same afternoon: **100% / 4% / 0%**.
+
+**And the stale row was read as healthy.** me.com's archive was 13 days old with
+a reset already in the PAST. `cu_row_capped_until` asks "capped until some future
+time?" and correctly answered "no" — the *caller* turned that into "healthy" and
+rotated the fleet onto it, which capped again within hours. Hence the tri-state:
+`cq_row_state` returns **capped | healthy | unknown**, and rotate distinguishes
+**rc 7 (measured capped)** from **rc 8 (could not measure)**.
+
+**Measuring for real.** `codex app-server` serves JSON-RPC
+**`account/rateLimits/read`** — the bare `account/rateLimits` is rejected, and
+the error helpfully enumerates every valid method (a good way to re-discover the
+surface after a codex bump). No session needed, just `initialize` → `initialized`.
+`CODEX_HOME` selects the account. There is no non-interactive CLI equivalent; the
+TUI `/usage` is interactive-only and `codex usage --json` does not exist upstream.
+Response shape: `.result.rateLimits.{primary,secondary}` with
+`usedPercent`/`windowDurationMins`/`resetsAt`, plus `planType` and
+`rateLimitResetCredits`.
+
+Two traps in that payload:
+- **`rateLimitsByLimitId` also carries per-model sub-limits** (e.g.
+  `codex_bengalfox` / GPT-5.3-Codex-Spark) which sit at 0% while the account that
+  owns them is fully spent. Read only the top-level `.rateLimits` (limitId
+  `codex`); min-ing or averaging across the map reports a dead account as fine.
+- **Parse windows by `windowDurationMins`, never positionally** — weekly has been
+  observed as `primary` with `secondary` null (2026-07-21 and again 2026-08-06).
+
+`rateLimitResetCredits` is worth knowing about: accounts can carry a granted
+one-shot "Full reset" credit with an `expiresAt`, redeemable via
+`account/rateLimitResetCredit/consume`. It is **use-it-or-lose-it and
+irreversible** — a human decision, never automation.
 
 ## The 2026.7.1 upgrade (staging-validated 2026-07-14)
 

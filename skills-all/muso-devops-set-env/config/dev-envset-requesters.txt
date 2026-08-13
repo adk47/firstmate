@@ -30,15 +30,12 @@ serhii
 serhii@muso.ai
 U03TYGJF1N3
 
-# TWO different Artems are authorized for dev — tell them apart by Slack UID,
-# never by the ambiguous display name "Artem".
-
-# Artem D (Dolobanko) — DevOps Lead. Matched by Slack UID today. Add his
-# confirmed muso.ai email here once known — do NOT use artem@muso.ai, that
-# belongs to Artem M below.
-U0ACHTYUULT
-
-# Artem M (Mobile). Added 2026-07-30 (Nick: Serhii and Artem must have full
-# control over dev without asking permission).
+# Artem (Mobile Developer) — U02N2NP3H7F. Added 2026-07-30 (Nick: Serhii and
+# Artem must have full control over dev without asking permission).
+#
+# There is exactly ONE Artem in the company as of 2026-07-30. Artem D
+# (Dolobanko, U0ACHTYUULT, ex-DevOps Lead) has LEFT and was removed from this
+# list — do not re-add him. If you are reconciling an older doc that names two
+# Artems, this list is the authority.
 U02N2NP3H7F
 artem@muso.ai

@@ -66,7 +66,37 @@ source "$SCRIPT_DIR/lib/muso-env-preflight.sh"
 # skills-all/muso-cli skill). Independent release cadence from openclaw;
 # bump deliberately. Installed from the repo's GitHub Release with
 # checksum verification (install_muso below) — never a bare latest.
-MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.10.0}"
+#
+# 0.13.1 makes async capture acceptance verifiable for `tracks capture`,
+# `tracks enrich`, and `profiles enrich` (muso-cli#44): the CLI now surfaces
+# `accepted`, `captureId`, and `enqueued`, and refuses an empty 2xx response.
+# The existing `status: requested` JSON contract stays backward-compatible.
+# Verified before bumping: v0.13.1 resolves to #44's merge commit (6100a0e),
+# the linux/amd64 asset matches checksums.txt, node-8 reports that exact version
+# and commit, a prod track capture returned a non-empty receipt with enqueued=1,
+# and an empty-2xx smoke exited 1 with no success output.
+#
+# 0.13.0 carries `profiles enrich --url --profile-id` (muso-cli#42), which
+# skills-all/muso-ops-profiles now documents as the typed, audited path for
+# attaching a source to a profile. It also still carries the `tracks sources`
+# verb group from 0.11.1 (muso-cli#36) that skills-all/muso-ops-tracks
+# documents. The pin and the skill must move together: with the pin behind,
+# the skill documents verbs the installed CLI does not have.
+#
+# 0.11.1 -> 0.13.0 is three commits, all additive, no breaking change:
+# muso-cli#39 (typed `collaborators list|rebuild`), #40 (`muso gh` group),
+# #42 (`profiles enrich`). Verified against the release before bumping, in
+# the order the lockstep rule requires: v0.13.0 contains #42's commit
+# (afc3c15); it ships muso_linux_amd64.tar.gz with a matching checksums.txt
+# entry (NOT muso-cli_linux_amd64.tar.gz, which install_muso does not use);
+# credentials resolve; and the binary was run against prod from node-8 --
+# `profiles get <uuid> --env prod --json` returned a real profile.
+#
+# Prod credentials still resolve — v0.11+ reads the scoped MUSO_PROD_ADMIN_*
+# pair but keeps the generic MUSO_ADMIN_* as a production-only fallback
+# (internal/auth/env.go), which is what node-8's main.env carries; only
+# `--env dev` fails closed, and node-8 has no dev pair to begin with.
+MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.13.1}"
 
 # Detect if we're running on Node 8 (the HYDRA host)
 if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; then
@@ -788,6 +818,26 @@ RSYNC_EXCLUDES=(
   # per-run scratch, recreatable, never in the repo. Mirrored KEEP glob in
   # scripts/qa-clean-merge-scratch.sh (lockstep rule).
   --exclude='workspaces/*/.company-finder-*.json'
+  # Same agent, same lesson, FOURTH naming shape: the outreach-discovery
+  # pipeline writes dated per-stage intermediates at its workspace root
+  # ('finder-input-<date>.json', 'prep-output-<date>.json', plus '-v2' reruns —
+  # observed on node-8 2026-08-05 18:14Z, blocked #794's merge-deploy and every
+  # deploy after it, then #805). No 'tmp' marker, no 'final-' prefix, no leading
+  # dot, so none of the three globs above match. Server-owned per-run scratch
+  # (stage inputs and survivor/reject sets), recreatable by re-running the
+  # pipeline, never in the repo. Mirrored KEEP globs in
+  # scripts/qa-clean-merge-scratch.sh (lockstep rule, asserted by
+  # scripts/tests/qa-clean-merge-scratch.bats).
+  --exclude='workspaces/*/finder-input-*.json'
+  --exclude='workspaces/*/prep-output-*.json'
+  # FIFTH shape, and the only self-inflicting one: the QA bot's own per-PR
+  # review scratch ('.pr-review-<N>.json', observed on node-8 2026-08-05 while
+  # it reviewed #805). The auto-review writes it INTO workspaces/qa/ during the
+  # very review that gates the PR, so the pre-flight on the next push sees a
+  # file the repo does not have and reds — on every PR the bot reviews.
+  # Server-owned per-run scratch, recreatable, never in the repo. Mirrored KEEP
+  # glob in scripts/qa-clean-merge-scratch.sh (lockstep rule).
+  --exclude='workspaces/*/.pr-review-*.json'
   # QA credit-verification todo inventory — dated per-run working state the QA
   # agent writes on node-8 (e.g. credit-verification-todo-inventory-2026-07-21.json),
   # never in the repo. Server-owned scratch; mirrored KEEP glob in
@@ -800,6 +850,22 @@ RSYNC_EXCLUDES=(
   --exclude='workspaces/*/MEMORY.md'
   # Agent-created backups directory — never in repo, never overwritten.
   --exclude='workspaces/*/backups/'
+  # Per-PR QA review state (external-pr-review runs write
+  # workspaces/qa/pr-review-<n>.json at runtime). Server-owned; first
+  # flagged by pre-flight 2026-08-02 (pr-review-562.json).
+  #
+  # Broadened 2026-08-03 from 'pr-review-*.json' to 'pr-review*.json': the
+  # muso-github-code-review skill writes the batched review body to
+  # /tmp/pr-review.json, but the agent has also written it relative to its
+  # workspace, landing an UNNUMBERED workspaces/qa/pr-review.json on node-8.
+  # The old glob required the '-' and so missed it. Because this pre-flight is
+  # a LIVE gate against the running server, that one stray file turned EVERY
+  # open PR red the moment it appeared (first failing run 14:10Z, after a
+  # 14:08Z green). Deliberately NOT mirrored into qa-clean-merge-scratch.sh's
+  # KEEP_GLOBS: that drift guard only covers 'workspaces/*/' file excludes, and
+  # the deploy must not delete this mid-review while the merge-scratch cleanup
+  # should still reap it afterwards as the per-run scratch it is.
+  --exclude='workspaces/qa/pr-review*.json'
   # Generated reports (CSVs, PDFs, JSON dumps from agent runs).
   # Convention: agents that produce reports for human consumption
   # write them to workspaces/<agent>/reports/<filename>. They're
@@ -1853,6 +1919,10 @@ log "Step 4c.5/8: Pinning openclaw runtime to ${OPENCLAW_VERSION}..."
 if ! install_openclaw; then
   fail "openclaw runtime pin failed (target ${OPENCLAW_VERSION})"
 fi
+if ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
+  bash "$HYDRA_ROOT/scripts/patch-openclaw-codex-native-compaction.sh"; then
+  fail "Codex-native automatic compaction backport failed"
+fi
 
 # -------------------------------------------------------------------
 # Step 4d: Install plugins
@@ -2582,6 +2652,34 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
           const m = await import(process.env.CRON_SDK);
           const store = JSON.parse(readFileSync(process.env.LIVE_CRON, "utf8"));
           const target = m.resolveCronStorePath();
+          // LAST-MOMENT store-only re-check.
+          //
+          // The guard above (detect-store-only-crons.py) reads the store ~50
+          // lines earlier and halts on a durable cron the repo does not
+          // declare. saveCronStore is delete-by-store_key + re-insert, so a
+          // cron created in the gap between that guard and this save is
+          // silently DELETED — the guard has already passed and never runs
+          // again. That is the 2026-07-16 ChartMogul loss shape (PR #702/#706)
+          // reachable through a window the guard cannot see.
+          //
+          // Re-checking against the store we read HERE shrinks that window from
+          // ~50 lines of deploy work to the microseconds before the save. It
+          // halts rather than dropping, exactly like the guard, and honours the
+          // same HYDRA_ALLOW_ORPHAN_CRON=1 override. Same check, same
+          // reasoning, same override as cron_store_reimport in
+          // scripts/lib/cron-store.sh — which is bats-covered; keep them in step.
+          if (process.env.HYDRA_ALLOW_ORPHAN_CRON !== "1") {
+            const declared = new Set((store.jobs || []).map((j) => j.id));
+            const cur = await m.loadCronStore(target);
+            const undeclared = (cur.jobs || [])
+              .filter((j) => !(j.schedule && j.schedule.kind === "at" && j.deleteAfterRun === true))
+              .filter((j) => !declared.has(j.id))
+              .map((j) => j.id);
+            if (undeclared.length > 0) {
+              console.error("STORE_ONLY_CRON_APPEARED " + undeclared.join(","));
+              process.exit(9);
+            }
+          }
           // saveCronStore/loadCronStore are ASYNC (the SDK wrappers return a
           // promise even though the underlying SQLite transaction is sync) —
           // they MUST be awaited, else process.exit(0) below fires before the
@@ -2607,6 +2705,14 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
     fi
     break
   done
+  if (( IMPORT_RC == 9 )); then
+    # A durable cron appeared between the store-only guard and this save. The
+    # store was NOT written, so the job is still there — halt and let a human
+    # decide, exactly as the guard would have.
+    log "  ✗ cron SQLite import: a durable cron the repo does not declare appeared AFTER the store-only guard ran:"
+    echo "$IMPORT_OUT" | sed 's/^/        /'
+    fail "cron SQLite import: the live cron store gained durable cron(s) after the store-only guard passed, so the import REFUSED to overwrite them (nothing was written). Commit them to cron-jobs.json, or re-run with HYDRA_ALLOW_ORPHAN_CRON=1 to drop them deliberately."
+  fi
   if (( IMPORT_RC != 0 )); then
     # Surface the node error body indented, like install_external_plugin,
     # then fail loud (fail -> notify_slack -> exit 1).
@@ -2820,6 +2926,116 @@ if needs_target "main"; then
 fi
 if needs_target "edge"; then
   wait_for_agents_bound "edge" 30 || true
+fi
+
+# -------------------------------------------------------------------
+# Step 6b: Converge the cron store (post-restart anti-clobber heal)
+# -------------------------------------------------------------------
+# The Step 5a import runs BEFORE the restart and is verified by a read-back —
+# but the still-running gateway can rewrite its stale in-memory cron table over
+# those rows at any point in the drain window, silently dropping the cron this
+# deploy was adding. Full mechanism, evidence, and the 2026-08-11 timeline:
+# scripts/lib/cron-store.sh.
+#
+# Detect it HERE, not in the smoke test: by Step 7 the only available outcome is
+# a rollback (which is what happened on 2026-08-11 — main sat undeployed and
+# every later push would have failed identically). One re-import + restart is
+# enough because the window we are re-opening is seconds, not the 320s drain.
+# A second failure is a real anomaly and fails loud rather than looping.
+if needs_target "main" && [ -f "$HYDRA_ROOT/cron-jobs.json" ]; then
+  log "Step 6b/8: Verifying the restarted gateway loaded the repo cron set..."
+  # shellcheck source=lib/cron-store.sh
+  source "$SCRIPT_DIR/lib/cron-store.sh"
+
+  # The decision itself lives in the lib so bats can drive every branch;
+  # deploy.sh supplies the real gateway lifecycle and turns exit codes into
+  # messages.
+  #
+  # The heal runs with the gateway STOPPED: saveCronStore is replace-all with no
+  # compare-and-swap, and the gateway is the only process that writes the cron
+  # store, so stopping it is what makes the import exclusive instead of racing
+  # a concurrent `cron add`. `Restart=always` does NOT apply after an explicit
+  # stop, so the start is guaranteed by a trap as well as by the lib.
+  cron_store_heal_stop() {
+    local svc="openclaw-gateway-${1}"
+    log "    stopping $svc for an exclusive cron-store import"
+    run_on_node8 "timeout 120 ${SYSTEMCTL_BIN:-systemctl} stop $svc" || return 1
+    run_on_node8 "${SYSTEMCTL_BIN:-systemctl} is-active --quiet $svc" && return 1
+    CRON_HEAL_STOPPED="$svc"
+    return 0
+  }
+  cron_store_heal_start() {
+    local profile="$1" svc="openclaw-gateway-${1}"
+    hard_restart_gateway "$svc" || return 1
+    verify_gateway_env_pin "$svc"
+    wait_for_agents_bound "$profile" 30 || true
+    CRON_HEAL_STOPPED=""
+    return 0
+  }
+  # Belt and braces: if anything between the stop and the start kills this
+  # script (set -e, a signal, an unexpected exit), bring the gateway back rather
+  # than leaving the fleet down. The lib already starts it on every path; this
+  # covers the paths the lib never reaches.
+  CRON_HEAL_STOPPED=""
+  cron_store_heal_trap() {
+    if [ -n "${CRON_HEAL_STOPPED:-}" ]; then
+      log "  ✗ deploy exited with $CRON_HEAL_STOPPED stopped — starting it back up"
+      run_on_node8 "${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || true
+      notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; attempted an emergency start. VERIFY the gateway is up."
+    fi
+  }
+  # COMPOSE with the existing EXIT trap (deploy lock release, set near the top
+  # of this script) — a bare `trap ... EXIT` here would REPLACE it and leak the
+  # deploy lock forever. Gateway first, lock second.
+  trap 'cron_store_heal_trap; release_deploy_lock "$LOCK_DIR"' EXIT
+  cron_store_heal_log() { log "    $*"; }
+  # Exported like GATEWAY_EXEC_FN above — same seam convention, and the export
+  # is also what tells the linter these are consumed by the sourced lib.
+  export CRON_STORE_STOP_FN=cron_store_heal_stop
+  export CRON_STORE_START_FN=cron_store_heal_start
+  export CRON_STORE_LOG_FN=cron_store_heal_log
+
+  cron_rc=0
+  cron_store_converge main "$HYDRA_ROOT/cron-jobs.json" || cron_rc=$?
+  case "$cron_rc" in
+    0)
+      log "  ✓ Main: gateway cron set matches the repo ($CRON_STORE_LOADED durable cron(s), compared by identity + schedule)" ;;
+    1)
+      log "  ✓ Main: cron store healed — gateway now matches the repo ($CRON_STORE_LOADED durable cron(s))"
+      notify_slack ":white_check_mark: HYDRA deploy: pre-restart cron import had been clobbered; the store was re-imported and the main gateway restarted. Now loaded $CRON_STORE_LOADED cron(s), matching the repo." ;;
+    2)
+      fail "cron convergence: could not count jobs in $HYDRA_ROOT/cron-jobs.json" ;;
+    3)
+      fail "cron convergence: 'openclaw --profile main cron list --all --json' failed or returned unparseable JSON — refusing to assume the cron store is correct" ;;
+    4)
+      fail "cron convergence: the gateway's cron list came back PAGINATED (hasMore=true). The durable count cannot be derived from a truncated page and this openclaw build exposes no paging flag, so the store is unverifiable — refusing to assume it is correct." ;;
+    5)
+      fail "cron convergence: re-import into the SQLite cron store FAILED — the gateway is running a stale cron set ($CRON_STORE_LOADED of $CRON_STORE_EXPECTED)" ;;
+    6)
+      fail "cron convergence: re-import persisted $CRON_STORE_PERSISTED row(s), expected $CRON_STORE_EXPECTED" ;;
+    7)
+      fail "cron convergence: the gateway stop/start seams were not supplied — refusing to import without an exclusive critical section" ;;
+    15)
+      fail "cron convergence: the repo-vs-gateway diff could not be COMPUTED before the heal, so the cron store is unverifiable. Nothing was stopped, imported or restarted. This usually means jq failed or the gateway returned an unexpected shape — check 'openclaw --profile main cron list --all --json'." ;;
+    16)
+      fail "cron convergence: the cron store WAS re-imported and openclaw-gateway-main WAS restarted, but the verifying diff could not be COMPUTED afterwards — convergence is UNVERIFIED, not known-bad. Check 'openclaw --profile main cron list --all --json' against /opt/hydra/cron-jobs.json before re-deploying." ;;
+    13)
+      fail "cron convergence: openclaw-gateway-main could not be STOPPED, so the import never ran and nothing was touched. The gateway is still up; investigate systemd before re-deploying." ;;
+    14)
+      fail "cron convergence: openclaw-gateway-main could not be STARTED after the cron import — THE MAIN GATEWAY IS DOWN. Run 'systemctl start openclaw-gateway-main' on node-8 now, then check 'systemctl status'." ;;
+    8)
+      fail "cron convergence: could not re-read the main gateway's cron list after the heal restart" ;;
+    12)
+      fail "cron convergence: the live cron store could not be READ, so the re-import refused to save — it could neither preserve scheduler state nor prove that no undeclared durable cron was about to be deleted. Nothing was changed. Check the gateway and the SQLite store at /root/.openclaw-main/state/openclaw.sqlite." ;;
+    11)
+      fail "cron convergence: a durable cron the repo does not declare appeared BETWEEN the drift check and the re-import, so the re-import ABORTED rather than delete it (saveCronStore is replace-all). Nothing was changed. Re-run the deploy; if the job is legitimate, commit it to cron-jobs.json first." ;;
+    10)
+      fail "cron convergence: the gateway holds durable cron(s) that cron-jobs.json does not declare (diff=$CRON_STORE_DIFF). REFUSING to heal — the re-import is delete-by-store-key and would DELETE them (this is the 2026-07-16 ChartMogul loss, PR #702/#706). Commit the job(s) to cron-jobs.json, or re-run with HYDRA_ALLOW_ORPHAN_CRON=1 to drop them deliberately." ;;
+    9)
+      fail "cron convergence: the gateway's cron set still does not match the repo after a re-import + restart (loaded $CRON_STORE_LOADED, repo declares $CRON_STORE_EXPECTED; diff=$CRON_STORE_DIFF). Either the clobber recurred or the store rejected a row — check 'journalctl -u openclaw-gateway-main' for 'cron: job added' around this deploy." ;;
+    *)
+      fail "cron convergence: unrecognized status $cron_rc from cron_store_converge" ;;
+  esac
 fi
 
 # -------------------------------------------------------------------

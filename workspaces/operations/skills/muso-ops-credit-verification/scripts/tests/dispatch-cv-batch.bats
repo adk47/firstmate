@@ -178,3 +178,51 @@ curl_calls() { grep -c '^CURL ' "$TEST_TMPDIR/curl.calls" 2>/dev/null || echo 0;
   [[ "$stderr" == *"guard state"* ]]
   [ "$(curl_calls)" -eq 1 ]
 }
+
+@test "real dispatch fails closed when the shared credit-write lock is held" {
+  if ! pipeline_deployed; then skip "pipeline file not deployed on this host"; fi
+  local lock_path="$TEST_TMPDIR/credit-status-writes.lock"
+  local ready_path="$TEST_TMPDIR/credit-status-writes.ready"
+  (
+    exec 7>"$lock_path"
+    flock 7
+    touch "$ready_path"
+    sleep 3
+  ) &
+  local holder_pid=$!
+  for _ in {1..100}; do
+    [[ -e "$ready_path" ]] && break
+    sleep 0.01
+  done
+  [[ -e "$ready_path" ]]
+
+  CV_DISPATCH_GUARD_DISABLE=1 \
+    CV_CREDIT_WRITE_LOCK_PATH="$lock_path" \
+    CV_CREDIT_WRITE_LOCK_WAIT_SECS=1 \
+    run --separate-stderr "$DISPATCH" 5 "" real
+  wait "$holder_pid"
+
+  [ "$status" -eq 5 ]
+  [[ "$stderr" == *"timed out waiting for shared credit-write lock"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "dry dispatch does not wait for the shared credit-write lock" {
+  if ! pipeline_deployed; then skip "pipeline file not deployed on this host"; fi
+  local lock_path="$TEST_TMPDIR/credit-status-writes.lock"
+  (
+    exec 7>"$lock_path"
+    flock 7
+    sleep 2
+  ) &
+  local holder_pid=$!
+
+  CV_DISPATCH_GUARD_DISABLE=1 \
+    CV_CREDIT_WRITE_LOCK_PATH="$lock_path" \
+    CV_CREDIT_WRITE_LOCK_WAIT_SECS=1 \
+    run --separate-stderr "$DISPATCH" 5 "" dry
+  wait "$holder_pid"
+
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 1 ]
+}

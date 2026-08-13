@@ -169,7 +169,7 @@ SELECT _id, name, profile_type, credits_count, common_credits,
        popularity, rank
 FROM hive."platform-industry-bi-prod".matvw_catalog_profile
 WHERE credits_count > 50
-  AND common_credits < 5
+  AND cardinality(common_credits) < 5   -- common_credits is array(varchar), not a count
   AND is_deleted = false
 ORDER BY credits_count DESC
 LIMIT 50

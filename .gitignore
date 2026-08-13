@@ -12,10 +12,25 @@ openclaw-server-backup-*.json
 .env.production
 
 # Secrets (never commit actual secrets)
-secrets/*.yaml
-secrets/*.json
-qa-bot-app.json
+#
+# Fail-CLOSED: ignore everything in secrets/ and allow back only the one
+# non-secret placeholder. This used to enumerate extensions (*.yaml, *.json),
+# which silently let any other extension through — 2026-08-04 the Finance
+# Mercury bank token moved into this dir as mercury.env and was therefore
+# committable, in a change whose entire purpose was getting that credential
+# OUT of a git repo. An allow-list of protected extensions is a privilege
+# widening waiting to happen; the deny-everything form closes the class, so a
+# future secrets/<anything> is covered without anyone remembering to add it.
+secrets/*
 !secrets/.gitkeep
+qa-bot-app.json
+
+# Any per-agent secret drop anywhere in the tree. The Mercury token leaked from
+# workspaces/finance/.secrets/ specifically, and that path is matched by none of
+# the rules above. NOTE this is a FILENAME guard, not a secret scanner — a token
+# pasted into a skill, a doc, or a runbook is still committable; content
+# scanning (gitleaks) is tracked separately.
+**/.secrets/
 
 # OS
 .DS_Store

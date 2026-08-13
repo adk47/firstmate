@@ -224,49 +224,10 @@ cu_fmt_pct() {
   awk -v p="${1:-0}" 'BEGIN{ if (p=="") p=0; if (p==int(p)) printf "%d", p; else printf "%.1f", p }'
 }
 
-# cu_format_window_lines <tsv-row>
-# Emit one "  • <label>: X% used · resets …" bullet per window present in the
-# row, plus a rate-limit-reached bullet when the snapshot flags one.
-cu_format_window_lines() {
-  local row="$1" now reached f3 f4 f5 f6 f7 f8 w wm wp wr
-  now="$(date +%s)"
-  IFS=$'\t' read -r _ reached f3 f4 f5 f6 f7 f8 <<<"$row"
-  for w in "$f3|$f4|$f5" "$f6|$f7|$f8"; do
-    IFS='|' read -r wm wp wr <<<"$w"
-    [[ "$wm" =~ ^[0-9]+$ ]] || continue
-    printf '  • %s: %s%% used · resets %s\n' \
-      "$(cu_window_label "$wm")" "$(cu_fmt_pct "$wp")" "$(cu_human_resets_in "$wr" "$now")"
-  done
-  if [ -n "${reached:-}" ] && [ "$reached" != "-" ]; then
-    printf '  • :no_entry: rate limit reached (%s)\n' "$reached"
-  fi
-}
-
-# cu_format_account_block <email> <active|standby> <fresh|stale|none> <plan> \
-#                         [tsv-row] [archived_age_seconds]
-# Emit the Slack-mrkdwn block for one account (bullets, no tables). The active
-# account with a fresh snapshot shows its window numbers; a standby with an
-# ARCHIVED snapshot (written at rotation time) shows its last-known numbers +
-# age — `resets_at` is absolute, so those stay meaningful; everything else
-# degrades to a plain, honest line (fail-loud-in-content).
-cu_format_account_block() {
-  local email="$1" role="$2" fresh="$3" plan="${4:-}" row="${5:-}" age="${6:-}"
-  local plan_sfx="${plan:+ (plan: $plan)}"
-  if [ "$role" = "active" ] && [ "$fresh" = "fresh" ] && [ -n "$row" ]; then
-    printf '*%s* — active%s\n' "$email" "$plan_sfx"
-    cu_format_window_lines "$row"
-  elif [ "$role" = "active" ]; then
-    printf '*%s* — active%s\n' "$email" "$plan_sfx"
-    printf '  • fresh quota snapshot unavailable — could not read current usage\n'
-  else
-    printf '*%s* — idle standby%s\n' "$email" "$plan_sfx"
-    if [ -n "$row" ]; then
-      local age_h="?"
-      [[ "$age" =~ ^[0-9]+$ ]] && age_h="$(( age / 3600 ))h"
-      printf '  • last known (%s ago):\n' "$age_h"
-      cu_format_window_lines "$row"
-    else
-      printf '  • no fresh quota snapshot (account has not run recently)\n'
-    fi
-  fi
-}
+# NOTE: cu_format_window_lines() and cu_format_account_block() were removed on
+# 2026-08-06. They rendered the old per-window bullets for codex-usage-report.sh,
+# which now renders one evidence line per account via cq_format_evidence() in
+# codex-quota.sh — the only sanctioned renderer of a quota claim, because it
+# cannot print a percentage without its age and provenance. Nothing else called
+# them. cu_window_label/cu_fmt_pct/cu_human_resets_in survive; they still have
+# live callers.

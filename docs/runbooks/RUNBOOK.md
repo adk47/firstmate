@@ -562,6 +562,83 @@ provider) and restart the gateway:
 ssh root@40.160.32.80 "docker restart hydra-sandbox"
 ```
 
+**Mercury Bank API token (Finance):**
+
+Symptom: `HTTP 401 {"errors":{"errorCode":"noTokenInDBButMaybeMalformed"}}` from
+`GET https://api.mercury.com/api/v1/accounts`. That error means "Mercury has no
+record of this token" — a **revocation at the vendor**, not a malformed
+request. Confirm by sending deliberate garbage: it returns the identical 401.
+The Finance agent's daily CIB report and Liza's cash forecasts are blocked
+until it is replaced.
+
+Only a human can fix it — there is no self-heal, because minting a token needs
+the Mercury dashboard:
+
+```bash
+# 1. Mercury dashboard -> Settings -> API tokens -> new READ-ONLY token.
+#    Authorized: Aaron (U7RP6HKUZ) and Liza (U0A8CCTTAAG) via the Finance agent.
+# 2. Install it. `read -rs` keeps the token off the screen AND out of history
+#    (bash historises the command, not what read consumed), and printf is a
+#    builtin so it never appears in argv / `ps`.
+ssh root@40.160.32.80
+read -rsp 'Mercury token: ' MERCURY_TOKEN; echo
+printf 'MERCURY_API_KEY=%s\n' "$MERCURY_TOKEN" \
+  | install -m 600 -o root -g root /dev/stdin /opt/hydra/secrets/mercury.env
+unset MERCURY_TOKEN
+# 3. Verify — exit 0 means Mercury accepted it:
+bash /opt/hydra/scripts/lib/ensure-mercury-token.sh --check
+bash /opt/hydra/scripts/lib/ensure-secret-perms.sh --check
+```
+
+> ⚠️ Do **not** install it with a heredoc (`install ... <<'EOF'` with the token
+> inline). bash's `cmdhist` stores a multi-line command — heredoc body included —
+> as a single history entry, so that form plants the live token in
+> `/root/.bash_history`: another persistent plaintext copy on the same box, which
+> is the whole failure mode this credential already had once.
+
+Detection: `/etc/cron.d/mercury-token-watchdog` runs
+`scripts/mercury-token-watchdog.sh` daily at 08:45 UTC and pages #clio_devops
+(Nick + Aaron) until it is fixed. `scripts/lib/ensure-mercury-token.sh --check`
+is the read-only detector — 0 works / 1 broken / 2 could not evaluate.
+
+**Silencing the daily page while a replacement token is pending.** Minting one
+needs a human in a browser, so the reminder can outlive its usefulness. Snooze
+it for a bounded window rather than disabling the cron (which the next deploy
+reinstalls anyway, via `install-aux-units.sh`):
+
+```bash
+# node-8 — acknowledge for 30 days
+printf '%s' "$(date -u -d '+30 days' +%s)" > /var/lib/hydra/mercury-token-snooze-until
+# cancel early
+rm -f /var/lib/hydra/mercury-token-snooze-until
+```
+
+While it is in effect the watchdog still runs, still probes, and still writes
+the verdict to `/var/log/mercury-token-watchdog.log` — only the Slack post is
+skipped. The window **expires on its own**, and a recovered token clears the
+file, so a re-revocation later pages immediately. Two things it deliberately
+does not do: it does not silence the "health UNKNOWN" page (a broken *probe* is
+new information nobody acknowledged), and a corrupt or empty file counts as no
+snooze at all — a half-written acknowledgement fails toward the alarm.
+
+The expiry is the point. The table below is what an unbounded "yeah, we know"
+looks like after the fact.
+
+The credential lives at `/opt/hydra/secrets/mercury.env` (0600, perms held by
+`ensure-secret-perms.sh`). **Do not move it back under
+`workspaces/finance/.secrets/`**: that tree is inside every agent's sweep radius
+and is rsync-mirrored into the private `Muso-AI/hydra-audit` git repo, which is
+how the previous token leaked verbatim into the cmo/cto/clio session
+transcripts and got committed (2026-08-04).
+
+History — this token has been revoked twice, and the second death went
+unnoticed for ~8 weeks because nothing watched it:
+
+| Token | Worked | Dead by |
+|---|---|---|
+| A | 2026-04-28 → 04-29 | 2026-05-01 |
+| B | 2026-05-24 → 06-10 | 2026-07-13 (surfaced 08-03) |
+
 ---
 
 ### Codex Auth Invalidated / Silent Fallback
@@ -716,27 +793,81 @@ exhausted. sol/luna are model variants on ONE subscription, so the model-level
 fallback chain can never "try the other account" (2026-07-21 incident: aaron@
 capped at 100% while the paid standby idled fresh).
 
+> **FIRST, before believing any of that: measure. Then check whose signature it is.**
+>
+> ```bash
+> /opt/hydra/scripts/lib/codex-quota-probe.sh --all       # real per-account quota
+> ```
+>
+> This asks the Codex backend directly (`codex app-server` JSON-RPC
+> `account/rateLimits/read`) and takes ~7s per account. It is the ONLY
+> authoritative source — everything derived from rollouts is account-blind.
+>
+> Then ask whether the cap signature is even about the account we run:
+>
+> ```bash
+> jq -r '.auth.order.openai[0]' /opt/hydra/openclaw-main.json   # openclaw's head profile
+> cat /var/lib/hydra/codex-active-account                       # OUR active account
+> ```
+>
+> **These are two different rotation systems on two different surfaces.** Ours
+> drives `codex-home/auth.json` (the codex agentRuntime). openclaw's drives
+> `auth.order.openai` for the `[agent/embedded]` path and rotates profiles
+> itself. openclaw's per-profile rate-limit cooldown caps at **5 minutes**, then
+> the profile returns to the FRONT of the order — so an exhausted
+> `auth.order[0]` emits the cap signature about **every 75 seconds forever**,
+> regardless of which account we made active.
+>
+> On **2026-08-06** that produced 143 cap lines in 3h from aaron@muso.ai at 100%.
+> The keepalive read them as "our active account is spent", rotated the state
+> file (which changed nothing), burned the rotate cooldown, and paged
+> `:no_entry: no rotation target left — every alternate account is known-capped`
+> while gmail sat at **4%** and me.com at **0%**. The twice-daily usage report
+> agreed with the false page, because it inferred standby numbers from the
+> fleet-freshest rollout instead of measuring them.
+>
+> If the probe shows a healthy account and `auth.order[0]` is the capped one,
+> **this is not a quota incident** — reorder `auth.order.openai` least-loaded
+> first in the repo config and deploy. Do NOT edit `openclaw-*.json` on the box:
+> out-of-band writes trip the write-audit watcher and are reverted by the next
+> rsync. `codex-quota-refresh.sh` pages when the head profile is measured-capped.
+
 **Auto-recovery (default)**: `codex-keepalive.sh` (15-min cron) has TWO
-triggers for `scripts/lib/codex-account-rotate.sh --auto`:
-- **Proactive** (preferred): a fresh rate_limits snapshot showing any quota
-  window ≥95% used (`CODEX_KEEPALIVE_ROTATE_AT`) with its reset >60 min away —
+triggers for `scripts/lib/codex-account-rotate.sh --auto`, and BOTH now decide
+on the account's own MEASURED quota (`/var/lib/hydra/codex-usage/<key>.measure.tsv`,
+written every 20 min by `codex-quota-refresh.sh`), never on a fleet-wide
+rollout snapshot:
+- **Proactive** (preferred): the active account's measurement shows a window
+  ≥95% used (`CODEX_KEEPALIVE_ROTATE_AT`) with its reset >60 min away —
   rotates BEFORE the cap error ever fires, skipping the degraded window.
-- **Reactive** (backstop): the cap signature in the journal.
+- **Reactive** (backstop): the cap signature in the journal — but only after
+  checking the active account's measurement. If that reads healthy (under 25
+  min old), the signature is somebody else's and the keepalive says so instead
+  of rotating; see the preface above.
 
 The rotation writes the active-account state file
 (`/var/lib/hydra/codex-active-account`, deploy-proof: outside the rsync tree,
-re-resolved by `codex-auth-sync.sh` on every heal), **archives the outgoing
-account's freshest quota snapshot** to `/var/lib/hydra/codex-usage/` (rollouts
-are account-blind on 7.x — the archive is the only per-account quota
-knowledge; `resets_at` is absolute so it stays meaningful), re-syncs all
-runtime stores, drain-restarts both gateways, pages #clio_devops.
+re-resolved by `codex-auth-sync.sh` on every heal), appends the
+active-account **ledger** (`/var/lib/hydra/codex-usage/active-account.log`, so
+a later snapshot can be attributed to whoever was actually active when it was
+emitted), re-syncs all runtime stores, drain-restarts both gateways, pages
+#clio_devops with the measured evidence for both sides.
 
-Guards: 120-min cooldown (rc 3); target-viability — `--auto` refuses (rc 7) a
-standby whose ARCHIVED snapshot is still capped, and skips candidates whose
-token is missing/expired (rc 4). On rc 3/7 with the signature live, BOTH
-subscriptions are spent: the keepalive pages that honestly (with the earliest
-known reset ETA) and the fleet rides the OpenRouter rung (the model chain's
-job) until a window resets.
+**Guards, and what each exit code actually means** — these are NOT
+interchangeable, and treating them as one is what produced the false
+2026-08-05 page:
+
+| rc | meaning | what to do |
+|----|---------|-----------|
+| 3 | a rotation ran inside the 120-min cooldown | **no quota claim at all.** Wait, or `--force`. |
+| 4 | no other usable profile in canonical (missing/expired token) | structural — `codex-reauth.sh` / `codex-oauth-refresh.sh` |
+| 7 | every alternate is **measured** capped | genuine: ride OpenRouter until the earliest measured reset |
+| 8 | no alternate has a **fresh measurement** | **the collector is the problem, not the quota.** Check `/var/log/codex-quota-refresh.log` and `/etc/hydra/codex-quota-probe.disabled`; or rotate deliberately with `--allow-unmeasured`. |
+
+Only **rc 7** means the subscriptions are spent. **rc 8 means we cannot see
+them** — do not wait it out. `--allow-unmeasured` permits an UNKNOWN target
+(and the page says the target was unverified); only `--force` will select one
+we measured as capped.
 
 **Quota windows are NOT a fixed set**: OpenAI removed the 5h window ~Jul 12
 2026 ("temporarily", undocumented — may return); since then the weekly window
@@ -942,15 +1073,18 @@ If you see `invalid_api_key` / `Incorrect API key: sk-hydra…` but
 `ensure-codex-version-pinned.sh --check` is **CLEAN**, this is NOT #90925. Tell them
 apart by the record's context: a float 401s on **every** codex turn fleet-wide; the
 compaction case is scoped to `[agent/embedded] skipping codex app-server compaction for
-non-manual trigger` → `[openai-transport] api=openai-responses` 401 →
-`[compaction-diag] … trigger=cli_budget` and falls back to gpt-5.6-luna **for that one
-compaction**, while normal turns keep serving on OAuth. Root cause: openclaw's embedded
-compaction summarizer (`resolveEmbeddedCompactionTarget`) bypasses the codex OAuth
-runtime and hits the placeholder key even at the pinned version — a structural path,
-not a version drift (root-caused 2026-07-06: a stuck QA lane retried `cli_budget`
-compaction ~24× → 55 raw `invalid_api_key`, pin clean, fleet healthy; the watchdog
-paged it as a float). A re-pin/restart does nothing. It self-recovers; the only real
-harm is noisy logs + a false page — both fixed below.
+non-manual trigger` → raw OpenAI 401 → `[compaction-diag] … trigger=cli_budget` and a
+paid fallback **for that one compaction**, while normal turns keep serving on OAuth.
+Root cause in openclaw 2026.7.1: `runCliTurnCompactionLifecycle` converted the intentional
+"codex app-server owns automatic compaction" result into
+`fallbackToContextEngine:true`; the legacy context engine then summarized through the
+placeholder API-key route. This is not version drift. Hydra backports the upstream 7.2
+behavior with `scripts/patch-openclaw-codex-native-compaction.sh`: the intentional
+native-owned result is now a clean no-op, so local compaction does not reach the legacy
+summarizer or OpenRouter. Deploy reapplies the fail-closed patch after every runtime pin
+check and stops if its compiled-code anchor drifts. Keep the liveness detector
+conservative: fallback-decision records have no compaction/run identity, so filtering them
+after the fact can either hide real fallbacks or recreate the false page under concurrency.
 
 - **Watchdog**: the `:rotating_light: floated off pin` alert now runs the pin `--check`
   and only cries "float" when the pin actually **drifted**. A pin-clean 401 (the
@@ -963,8 +1097,7 @@ harm is noisy logs + a false page — both fixed below.
   a **compaction-only** (pin-clean) 401 no longer over-blocks writes on a healthy fleet.
 - **`compaction.model` is NOT the fix**: openclaw docs say *do not set
   `agents.defaults.compaction.model` on Codex-backed agents* (it emits an "override
-  ignored" warning), and the fallback already lands on `openrouter/openai/gpt-5.6-luna`
-  — the exact model you'd set. Zero gain for fighting the framework; leave it unset.
+  ignored" warning). Native Codex owns automatic compaction; leave it unset.
 
 > **Related — Codex OAuth token lapse** (the original 2026-06-19 trigger, distinct
 > from the api-key-route bug above): logs show `401 ... authentication token is
@@ -1033,6 +1166,96 @@ rm /etc/hydra/dr-ai-healer.disabled
 # Watchdog-side escalation log:
 cat /var/lib/hydra-dr/dr-ai-healer.log
 ```
+
+---
+
+### #prod-alerts Is Too Loud / Went Quiet (`prod-log-alert-watchdog`)
+
+**Background.** `scripts/prod-log-alert-watchdog.sh` runs every 5 min from
+`/etc/cron.d/prod-log-alert-watchdog`. Two behaviors live in it:
+
+- **v2 — LIVE since 2026-08-05, the script's default.** An incident must PERSIST
+  (~5 min measured in log-line time) or hit a fast-path bypass before it posts;
+  eligible incidents roll up into one digest every 15 min; a classifier assigns
+  severity and writes a one-line cause; **only a P0 mentions a human**, and only
+  a paged digest wakes the devops agent.
+- **v1 — the rollback path** (`PROD_LOG_ALERT_V2=0`): posts a fingerprint the
+  FIRST time it is seen, then suppresses it for 6h. No persistence evidence, so
+  a 30-second blip alerts exactly like an outage. This is the behavior Aaron
+  asked us to stop on 2026-08-05. Kept for one release, then deleted.
+
+The cron sets **no** `PROD_LOG_ALERT_V2` — the default lives only in the script,
+so there is no cron-vs-script disagreement to debug. The cutover was a full
+switch with no shadow period (Nick's call, 2026-08-05).
+
+**Rollback to v1** — takes effect on the next tick, no deploy needed:
+
+```bash
+mkdir -p /etc/hydra
+touch /etc/hydra/prod-log-alert-v1.enabled     # revert to first-sighting alerting
+rm    /etc/hydra/prod-log-alert-v1.enabled     # back to v2
+```
+
+⚠️ **Use the flag file, not the cron file.** `/etc/cron.d/prod-log-alert-watchdog`
+is regenerated wholesale by `install-aux-units.sh`, which `deploy.sh` runs on
+every deploy — so a `PROD_LOG_ALERT_V2=0` line added there disappears the moment
+you ship the fix-forward, i.e. exactly when you are relying on it. The flag file
+is deploy-proof, same as `/etc/hydra/dr-ai-healer.disabled`. `PROD_LOG_ALERT_V2=0`
+as an env var still works for a one-off manual run.
+
+**First tick after the cutover.** The ledger (`incidents.json`) seeds itself once
+from v1's `seen.json`, so errors already inside their 6h suppression stay
+suppressed and the first digest is not a dump of everything currently firing.
+That seeding happens only while the ledger does not exist.
+
+**Too loud.**
+
+| Symptom | Lever |
+|---|---|
+| Same benign line every few hours | Add it to `config/alert-exclude-patterns.txt` (**grep ERE**) — it is then dropped before fingerprinting. |
+| Real but not worth 15-min granularity | Raise `PROD_LOG_ALERT_DIGEST_INTERVAL` (**seconds**, e.g. `1800` — not `30m`). |
+| Alerts arrive too eagerly | Raise `PROD_LOG_ALERT_PERSIST_SECONDS` (**seconds**, default `300`). |
+| Humans pinged too often | A mention needs all three: classifier `notify:page`, `severity:P0`, **and** blast radius (the same line across ≥`BLAST` deployments). Fast-path matches and single-deployment bursts deliberately do **not** page — both are computed from log text the reporter controls, so they would let crafted text supply its own corroboration. |
+| Something real was auto-muted | A mute needs `severity:P2` **and** no corroboration, is capped at 3 per digest, and every muted line is printed under "Auto-muted for 24h". Clear one by deleting its key from `incidents.json`. |
+
+⚠️ **Every numeric knob is seconds or a count — never a duration string**, and
+most reject `0`. The lone duration is `PROD_LOG_ALERT_WINDOW` (a
+`kubectl --since` value like `6m`). Both rules are enforced at startup with a
+named error and exit 2, because both fail *silently* otherwise:
+
+- `[ x -ge 15m ]` does not abort — it prints to stderr and evaluates false, which
+  pins the digest to "never due" and holds every persisting incident
+  indefinitely while the watchdog keeps reporting "nothing to post".
+- `0` inverts a `>=` test into always-true. `PROD_LOG_ALERT_BLAST=0` stamps
+  **every first sighting** with deterministic blast corroboration — the one leg
+  of the page gate a crafted log line must not be able to forge. To disable a
+  bypass, raise it out of reach (a huge `BURST`), never zero it.
+
+`COOLDOWN`, `DIGEST_INTERVAL` and `MUTE_SECONDS` are the only knobs that accept
+`0`, because there it means "off" in the direction of *more* alerting.
+
+**Went quiet — is it broken or is prod fine?** In order:
+
+1. `tail /var/log/prod-log-alert-watchdog.log`. `OK: nothing to post (eligible=…
+   immediate=… resolved=… digest_due=…)` is healthy silence and tells you which
+   gate held.
+2. **`SELF-TEST FAIL` + `ABORT` means the detector is refusing to run** and NO
+   alerting is happening. The message names which invariant broke; the overlap
+   case ("counting TICKS, not log timestamps") means a code change turned the
+   persistence gate into a no-op. Fix the code — do not disable the self-test.
+3. Everything muted? `jq '[.[]|select(.muted_until)]|length' /var/lib/prod-log-alert/incidents.json`.
+   Mutes are 24h TTLs set by the classifier; clear one by deleting its key.
+4. Suspect the classifier is mis-judging: `touch /etc/hydra/prod-alert-classifier.disabled`.
+   Digests keep posting, unclassified and with no mentions — visibility fails
+   OPEN, paging fails CLOSED. Nothing else needs changing.
+
+**State.** `/var/lib/prod-log-alert/incidents.json` — the ledger, one entry per
+live incident: `first_ts`/`last_ts` (kubelet log time, the persistence span),
+`total`, `state`, `posted_at`, `post_count`, `severity` (the classifier's last
+verdict, kept for forensics — nothing reads it back), `muted_until`. Plus
+`last-digest` and v1's `seen.json`. All are safe to delete: the next tick
+rebuilds them, at the cost of re-alerting once. Entries are dropped after 3
+ticks unseen, so the file tracks the live incident set, not history.
 
 ---
 

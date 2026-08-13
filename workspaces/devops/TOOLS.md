@@ -6,7 +6,8 @@
 
 ## kubectl
 - Read operations: always allowed
-- Write operations: require explicit approval from Aaron or Artem D
+- Write operations: require explicit approval from Nick or Aaron (PROD only — dev-scoped
+  writes are self-serve for the DEV authorities, see SOUL.md → Standing Approvals)
 - Cluster context: OVH K3s (7-node, 3 server + 4 agent)
 - Key namespaces: default, data-processing, monitoring, vault, longhorn-system
 
@@ -37,9 +38,9 @@
   requested by an authorized human (`config/envset-requesters.txt`), goes through without
   a second approval. **Secret-shaped keys are refused** and route to a green-light approver
   (`config/blocklist-override-approvers.txt` — Nick/Aaron).
-- **DEV (`--env dev`)**: for the DEV authorities — Serhii, Artem D and Artem M
+- **DEV (`--env dev`)**: for the DEV authorities — Serhii and Artem
   (`config/dev-envset-requesters.txt`) — a dev env var — **secret-shaped included — is
-  self-serve, no green-light** (Nick's directive). Resolve the two Artems by Slack UID,
+  self-serve, no green-light** (Nick's directive). Verify the requester by Slack UID,
   never by display name.
   Targets glob-match `config/dev-target-allowlist.txt` (`muso-dev/*`); secret VALUES are
   still redacted in the audit and the write is contained to the `muso-dev` scope.

@@ -147,7 +147,7 @@ require_linux() {
 
   run run_audit
   [ "$status" -eq 0 ]
-  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  if grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"; then echo "stale legit-log entry (>120s) was wrongly treated as legit" >&2; false; fi
   [ -f "$TEST_TMPDIR/slack.calls" ]
   grep -q 'Out-of-band write' "$TEST_TMPDIR/slack.calls"
 }
@@ -160,7 +160,7 @@ require_linux() {
 
   run run_audit
   [ "$status" -eq 0 ]
-  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  if grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"; then echo "sha256 mismatch (hostile write) was wrongly treated as legit" >&2; false; fi
   [ -f "$TEST_TMPDIR/slack.calls" ]
 }
 
@@ -169,7 +169,7 @@ require_linux() {
 
   run run_audit
   [ "$status" -eq 0 ]
-  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  if grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"; then echo "missing legit log was wrongly treated as legit" >&2; false; fi
   [ -f "$TEST_TMPDIR/slack.calls" ]
 }
 
@@ -233,7 +233,7 @@ require_linux() {
 
   run run_audit
   [ "$status" -eq 0 ]
-  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  if grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"; then echo "startup suppression window (>15s) wrongly silenced the alert" >&2; false; fi
   [ -f "$TEST_TMPDIR/slack.calls" ]
   grep -q 'Out-of-band write' "$TEST_TMPDIR/slack.calls"
 }
@@ -245,7 +245,7 @@ require_linux() {
 
   run run_audit
   [ "$status" -eq 0 ]
-  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  if grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"; then echo "empty ActiveEnterTimestamp wrongly silenced the alert" >&2; false; fi
   [ -f "$TEST_TMPDIR/slack.calls" ]
 }
 
@@ -259,7 +259,7 @@ require_linux() {
 
   run run_audit
   [ "$status" -eq 0 ]
-  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  if grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"; then echo "watched path outside .openclaw-<profile>/ wrongly matched the gateway-startup branch" >&2; false; fi
   [ -f "$TEST_TMPDIR/slack.calls" ]
 }
 
@@ -312,7 +312,7 @@ require_linux() {
 
   run run_audit
   [ "$status" -eq 0 ]
-  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  if grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"; then echo "a rejected (invalid config) reload was wrongly treated as legit self-persist" >&2; false; fi
   [ -f "$TEST_TMPDIR/slack.calls" ]
   grep -q 'Out-of-band write' "$TEST_TMPDIR/slack.calls"
 }
@@ -326,7 +326,7 @@ require_linux() {
 
   run run_audit
   [ "$status" -eq 0 ]
-  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  if grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"; then echo "reject+accept in the same window was wrongly treated as legit self-persist" >&2; false; fi
   [ -f "$TEST_TMPDIR/slack.calls" ]
 }
 
@@ -337,7 +337,7 @@ require_linux() {
 
   run run_audit
   [ "$status" -eq 0 ]
-  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  if grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"; then echo "a bare config-change-detected line with no accept was wrongly treated as legit" >&2; false; fi
   [ -f "$TEST_TMPDIR/slack.calls" ]
   grep -q 'Out-of-band write' "$TEST_TMPDIR/slack.calls"
 }
@@ -349,6 +349,6 @@ require_linux() {
 
   run run_audit
   [ "$status" -eq 0 ]
-  ! grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"
+  if grep -q '\[legit\]' "$OPENCLAW_AUDIT_LOG"; then echo "empty gateway journal wrongly silenced the alert" >&2; false; fi
   [ -f "$TEST_TMPDIR/slack.calls" ]
 }

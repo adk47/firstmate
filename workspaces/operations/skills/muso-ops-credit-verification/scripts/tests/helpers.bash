@@ -35,6 +35,17 @@ exit 0
 STUB
   chmod +x "$TEST_TMPDIR/bin/openclaw"
   export PATH="$TEST_TMPDIR/bin:$PATH"
+
+  # Hermetic snapshot default: fraud-muso-only-lookup.sh reads
+  # CV_FRAUD_MUSO_SNAPSHOT_FILE (default /var/lib/hydra/cv-fraud-muso-only-
+  # snapshot.json) BEFORE calling Trino. Without this override, any suite run
+  # on a host where the daily snapshot cron has actually fired (e.g. the
+  # self-hosted CI runner, once deployed) would silently read REAL prod data
+  # instead of exercising the TRINO_QUERY_SH stub — the exact "test depends
+  # on host state" trap the openclaw PATH-shadow above guards against for
+  # Slack. Point it at a guaranteed-absent path by default; tests that assert
+  # on snapshot behavior override it explicitly.
+  export CV_FRAUD_MUSO_SNAPSHOT_FILE="$TEST_TMPDIR/no-such-snapshot.json"
 }
 
 teardown_tmp_env() {
@@ -57,4 +68,27 @@ past_touch_stamp() {
   else
     date -r "$epoch" +%Y%m%d%H%M.%S
   fi
+}
+
+# Cross-platform helper to print an ISO8601 UTC timestamp N seconds in the
+# past (the shape fraud-muso-only-snapshot-writer.sh's generated_at uses).
+# Same GNU-vs-BSD `date` split as past_touch_stamp, different output format.
+#
+# Usage: write_snapshot "$path" "$(past_touch_stamp_iso 200000)" "$pid" 42.5
+past_touch_stamp_iso() {
+  local seconds_ago="$1" epoch
+  epoch=$(($(date +%s) - seconds_ago))
+  if date --version >/dev/null 2>&1; then
+    date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ
+  else
+    date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ
+  fi
+}
+
+# The mirror image of past_touch_stamp_iso: an ISO8601 UTC timestamp N seconds
+# in the FUTURE. Exists as its own name because `past_touch_stamp_iso -7200`
+# reads like a flag, not like "two hours from now", and the future-dated
+# snapshot tests are precisely about that distinction.
+future_stamp_iso() {
+  past_touch_stamp_iso "$(( -$1 ))"
 }

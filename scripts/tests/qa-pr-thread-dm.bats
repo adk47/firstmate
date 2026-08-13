@@ -55,8 +55,8 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   grep -q -- 'hydra#123: Guard reasoning leak' "$STUB_TEXT"
   grep -q -- 'https://github.com/Muso-AI/hydra/pull/123' "$STUB_TEXT"
   grep -q -- "I'll update this thread" "$STUB_TEXT"
-  ! grep -q -- 're-reviewing' "$STUB_TEXT"
-  ! grep -q -- 'Muso QA Bot' "$STUB_TEXT"
+  if grep -q -- 're-reviewing' "$STUB_TEXT"; then echo "first-review message wrongly used the re-review wording" >&2; false; fi
+  if grep -q -- 'Muso QA Bot' "$STUB_TEXT"; then echo "first-review message carried the redundant bot name" >&2; false; fi
   # The thread root is persisted for next time.
   [ "$(cat "$STATE_FILE")" = "1717171717.000100" ]
 }
@@ -92,7 +92,7 @@ STUB
   [ "$output" = "1717171717.000100" ]
   # Falls back to the title-less link (repo-prefixed), not a broken/empty one.
   grep -q -- '<https://github.com/Muso-AI/hydra/pull/123|hydra#123>' "$STUB_TEXT"
-  ! grep -q -- 'Guard reasoning leak' "$STUB_TEXT"
+  if grep -q -- 'Guard reasoning leak' "$STUB_TEXT"; then echo "title-fetch failure still leaked the fetched PR title into the message" >&2; false; fi
   [ "$(cat "$STATE_FILE")" = "1717171717.000100" ]
 }
 

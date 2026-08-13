@@ -62,7 +62,10 @@
 #     Schedules scripts/prod-log-alert-watchdog.sh every 5 minutes
 #     to post NEW prod error-log lines (kubectl read-only, redacted,
 #     fingerprint-deduped) to #prod-alerts C0BA8QMV3ME (Serhii's
-#     prod-log-visibility ask, 2026-06-09).
+#     prod-log-visibility ask, 2026-06-09). Since 2026-08-05 it runs
+#     the v2 path by default: persistence gate + 15-min digest +
+#     severity classifier, with only P0 paging a human. Also creates
+#     /var/lib/prod-log-alert for the fingerprint + incident state.
 #
 #   /etc/cron.d/caroline-rag-index-watchdog
 #     Schedules scripts/caroline-rag-index-watchdog.sh every 10 minutes
@@ -96,6 +99,15 @@
 #     #cs_chats C0ANM0PN9L5 (Sandy Vee incident, 2026-05/06: claim
 #     tickets sat unworked for weeks while the support agent kept
 #     re-promising the SLA).
+#
+#   /etc/cron.d/mercury-token-watchdog
+#     Schedules scripts/mercury-token-watchdog.sh daily to page
+#     #clio_devops when the Finance agent's read-only Mercury Bank API
+#     token is revoked. Twice in four months the token died silently
+#     (Token A ~2026-05-01, Token B ~2026-06-10) and the second death went
+#     unnoticed for ~8 weeks — there is no CIB cron and was no health
+#     check, so a dead banking credential was invisible until Liza asked
+#     for a forecast on 2026-08-03 and got a wall.
 #
 #   /etc/cron.d/ads-inquiry-watchdog
 #     Schedules scripts/ads-inquiry-watchdog.sh every 15 min to ping
@@ -199,6 +211,10 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/lib/ensure-mercury-token.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/lib/ensure-mercury-token.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/openclaw-edge-reindex-on-start.sh" ]] \
@@ -1145,6 +1161,48 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CODEXKEEPALIVE
 chmod 644 /etc/cron.d/codex-keepalive
 
+# ─── Codex per-account quota measurement at 20-min cadence ────
+# codex-quota-refresh.sh probes EACH codex account's real quota via the
+# vendored `codex app-server` JSON-RPC method account/rateLimits/read and
+# persists it to /var/lib/hydra/codex-usage/<key>.measure.tsv.
+#
+# WHY (incident 2026-08-05/06): standby quota was never measured, only
+# inferred from the fleet-freshest rollout — which carries no account identity
+# on 7.x. The inference put the SAME subscription's numbers under three
+# different accounts (two archives shared a reset epoch to the second) and
+# produced a page claiming "every alternate account is known-capped" while two
+# Pro subscriptions sat at 4% and 0%.
+#
+# 20 min is deliberate: the probe is a network round-trip per account, the
+# thing it measures moves on the scale of hours, and codex-keepalive.sh (15
+# min) must never find a measurement older than its freshness floor. flock
+# keeps a slow probe from stacking. Explicit PATH for the same reason as the
+# keepalive block above (cron's default omits /usr/local/bin, and jq must
+# resolve or the collector degrades to silence).
+mkdir -p /etc/hydra
+# tmpfs scratch root for the probe — an access token written here never
+# reaches a disk block or a backup, and a reboot clears it regardless.
+install -d -m 700 /run/hydra 2>/dev/null || { mkdir -p /run/hydra; chmod 700 /run/hydra; }
+cat > /etc/cron.d/codex-quota-refresh << CODEXQUOTA
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/20 * * * * root flock -n /run/lock/codex-quota-refresh.lock $HYDRA_ROOT/scripts/codex-quota-refresh.sh >> /var/log/codex-quota-refresh.log 2>&1
+CODEXQUOTA
+chmod 644 /etc/cron.d/codex-quota-refresh
+
+# Seed the active-account ledger once, so cq_ledger_account_at can attribute
+# rollout snapshots from the moment this ships rather than only after the first
+# rotation. Append-only; never truncate an existing ledger.
+CODEX_LEDGER=/var/lib/hydra/codex-usage/active-account.log
+if [ ! -s "$CODEX_LEDGER" ]; then
+  mkdir -p "$(dirname "$CODEX_LEDGER")"
+  _seed_acct="$(head -n1 /var/lib/hydra/codex-active-account 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$_seed_acct" ] || _seed_acct="openai-codex:aaron@muso.ai"
+  printf '%s\t%s\t%s\n' "$(date +%s)" "$_seed_acct" "ledger seeded by install-aux-units.sh" >> "$CODEX_LEDGER"
+  chmod 600 "$CODEX_LEDGER"
+  log "  codex active-account ledger seeded with $_seed_acct"
+fi
+
 # ─── Cron-failure watchdog at 5-min cadence ───────────────────
 # Alerts #clio_devops the moment any openclaw cron run errors, so a
 # broken job can't rot silently in cron/runs/*.jsonl (the 2026-06
@@ -1228,6 +1286,27 @@ fi
 # the overlap means no gap between ticks, and the per-fingerprint cooldown
 # (6h) means a persistent error pages once, not every tick. Same ownership
 # rule: edit here + re-run install-aux-units.sh, never edit on node-8.
+#
+# Since 2026-08-05 the script defaults to the v2 path: an error must PERSIST
+# (~5 min of log-line time) or match a fast-path pattern before it posts,
+# eligible incidents roll up into one digest every 15 min, and only a P0 pages
+# a human. No env var is set here on purpose — the default lives in ONE place
+# (the script), so there is no cron-vs-script disagreement to debug at 3am.
+#
+# DO NOT wire a rollback through this file: the `cat >` below rewrites it
+# wholesale on every deploy, so an env var added here vanishes the moment a
+# fix-forward ships — mid-incident, silently. The rollback lever is the
+# deploy-proof flag file /etc/hydra/prod-log-alert-v1.enabled; see the RUNBOOK.
+#
+# /var/lib/prod-log-alert holds both the v1 fingerprint map (seen.json) and the
+# v2 incident ledger (incidents.json). `mkdir -p`, not `install -d`: install -d
+# re-chmods an EXISTING dir to 0755 even without -m.
+mkdir -p /var/lib/prod-log-alert
+# /etc/hydra is where the operator-facing switch FILES live (this watchdog's v1
+# rollback flag, the classifier kill switch, dr-ai-healer.disabled). Nothing
+# created it before, so `touch /etc/hydra/...` failed on a clean box — a lever
+# you only discover is missing while trying to pull it is not a lever.
+mkdir -p /etc/hydra
 cat > /etc/cron.d/prod-log-alert-watchdog << PRODLOGWD
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
 */5 * * * * root $HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh >> /var/log/prod-log-alert-watchdog.log 2>&1
@@ -1248,6 +1327,36 @@ cat > /etc/cron.d/stale-ticket-watchdog << STALETICKETWD
 30 8 * * * root USE_MUSO_CLI=1 MUSO_BIN=/usr/local/bin/muso $HYDRA_ROOT/scripts/stale-ticket-watchdog.sh >> /var/log/stale-ticket-watchdog.log 2>&1
 STALETICKETWD
 chmod 644 /etc/cron.d/stale-ticket-watchdog
+
+# ─── Mercury token watchdog, daily ────────────────────────────
+# Pages #clio_devops (C0ADV2W76G4) when the Finance agent's read-only Mercury
+# Bank API token stops authenticating. Detect-only by design: replacing the
+# token needs a human in the Mercury dashboard, so there is nothing to
+# self-heal — same posture as ensure-session-budget-headroom.sh.
+#
+# Daily at 08:45 UTC, just after the stale-ticket digest. A revoked banking
+# credential is not latency-sensitive to the minute (it stays broken until a
+# human acts) and each tick costs one authenticated call to a bank API — a
+# 5-minute cadence would buy nothing and spend 288 of them a day. The script's
+# own 20h rate limit keeps a persistently-dead token to one page per day
+# instead of a daily nag that everyone learns to scroll past.
+# Same ownership rule: edit here + re-run install-aux-units.sh.
+# The cooldown stamps live here. `mkdir -p`, NOT `install -d`: this dir
+# pre-exists and is shared with codex-active-account / codex-usage / the QA
+# host-identity kill switch, and `install -d` re-chmods an EXISTING directory to
+# 0755 even with no -m (verified on node-8, coreutils 9.4: a 0700 dir came back
+# 0755). mkdir -p leaves an existing dir's mode alone, so this can never widen
+# someone else's state dir.
+mkdir -p /var/lib/hydra
+cat > /etc/cron.d/mercury-token-watchdog << MERCURYTOKENWD
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+# The detector reads the token from /opt/hydra/secrets/mercury.env (0600, kept
+# out of the workspace tree so agent sweeps and the hydra-audit snapshot can't
+# pick it up) and never prints it. MUSO_BIN is absolute: cron's PATH is minimal
+# and slack-notify.sh needs it to page.
+45 8 * * * root MUSO_BIN=/usr/local/bin/muso $HYDRA_ROOT/scripts/mercury-token-watchdog.sh >> /var/log/mercury-token-watchdog.log 2>&1
+MERCURYTOKENWD
+chmod 644 /etc/cron.d/mercury-token-watchdog
 
 # ─── Ads-inquiry watchdog every 15 min ────────────────────────
 # Pings Aaron in #cs_priority (C0BBTAVP44X) when a hydra-action-request
@@ -1634,7 +1743,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log {
     weekly
     rotate 4
     compress

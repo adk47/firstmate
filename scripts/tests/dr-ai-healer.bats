@@ -223,7 +223,7 @@ remediation_calls() { grep -v -- '--check' "$GUARD_CALLS" | grep -c . || true; }
   [ "$status" -eq 0 ]
   [[ "$output" == *"unknown action"* ]]
   [ "$(remediation_calls)" -eq 0 ]
-  ! grep -q "restart" "$SYSCTL_CALLS"
+  if grep -q "restart" "$SYSCTL_CALLS"; then echo "unknown/hallucinated action must not trigger a restart" >&2; false; fi
   grep -q 'NO safe automated fix' "$MUSO_TEXTS"
 }
 
@@ -259,7 +259,7 @@ remediation_calls() { grep -v -- '--check' "$GUARD_CALLS" | grep -c . || true; }
   [[ "$output" == *"DRY-RUN: would execute 'oauth_refresh'"* ]]
   [ -s "$CURL_BODY" ]
   [ "$(remediation_calls)" -eq 0 ]
-  ! grep -q "restart" "$SYSCTL_CALLS"
+  if grep -q "restart" "$SYSCTL_CALLS"; then echo "dry-run must not actually restart a gateway" >&2; false; fi
   [ ! -f "$DR_STATE_DIR/dr-ai-healer-cooldown" ]
 }
 
@@ -270,9 +270,9 @@ remediation_calls() { grep -v -- '--check' "$GUARD_CALLS" | grep -c . || true; }
   run "$HEALER" --trigger synthetic
   [ "$status" -eq 0 ]
   [ -s "$CURL_BODY" ]
-  ! grep -q 'supersecret123456' "$CURL_BODY"
-  ! grep -q 'rt-abc.def-999' "$CURL_BODY"
-  ! grep -q 'xoxb-11-22' "$CURL_BODY"
+  if grep -q 'supersecret123456' "$CURL_BODY"; then echo "access token leaked into the OpenRouter request body unredacted" >&2; false; fi
+  if grep -q 'rt-abc.def-999' "$CURL_BODY"; then echo "refresh token leaked into the OpenRouter request body unredacted" >&2; false; fi
+  if grep -q 'xoxb-11-22' "$CURL_BODY"; then echo "slack bot token leaked into the OpenRouter request body unredacted" >&2; false; fi
   grep -q 'REDACTED' "$CURL_BODY"
 }
 
@@ -311,7 +311,7 @@ STUB
   run "$HEALER" --trigger gateway_down
   [ "$status" -eq 0 ]
   [[ "$output" == *"not a number"* ]]
-  ! grep -q "restart" "$SYSCTL_CALLS"
+  if grep -q "restart" "$SYSCTL_CALLS"; then echo "non-numeric confidence must not authorize a restart" >&2; false; fi
   grep -q 'NO safe automated fix' "$MUSO_TEXTS"
 }
 
@@ -332,7 +332,7 @@ STUB
   run "$HEALER" --trigger codex_auth_invalidated
   [ "$status" -eq 0 ]
   [[ "$output" != *"OUTCOME: healed"* ]]
-  ! grep -q 'post-checks clean' "$MUSO_TEXTS"
+  if grep -q 'post-checks clean' "$MUSO_TEXTS"; then echo "dirty post-checks were announced as clean" >&2; false; fi
   grep -q 'did NOT recover' "$MUSO_TEXTS"
 }
 
@@ -365,7 +365,7 @@ STUB
   run "$HEALER" --trigger codex_apikey_float
   [ "$status" -eq 0 ]
   [[ "$output" != *"OUTCOME: healed"* ]]
-  ! grep -q 'post-checks clean' "$MUSO_TEXTS"
+  if grep -q 'post-checks clean' "$MUSO_TEXTS"; then echo "restart that did not actually recover was announced as clean" >&2; false; fi
   grep -q 'did NOT recover' "$MUSO_TEXTS"
 }
 
@@ -393,7 +393,7 @@ STUB
   run "$HEALER" --trigger gateway_down
   [ "$status" -eq 0 ]
   [[ "$output" != *"OUTCOME: healed"* ]]
-  ! grep -q 'post-checks clean' "$MUSO_TEXTS"
+  if grep -q 'post-checks clean' "$MUSO_TEXTS"; then echo "transient single active sample was announced as a clean recovery" >&2; false; fi
   grep -q 'did NOT recover' "$MUSO_TEXTS"
 }
 
@@ -408,7 +408,7 @@ STUB
   [ "$status" -eq 0 ]
   [[ "$output" == *"not authorized for trigger"* ]]
   [ "$(remediation_calls)" -eq 0 ]
-  ! grep -q "restart" "$SYSCTL_CALLS"
+  if grep -q "restart" "$SYSCTL_CALLS"; then echo "trigger-unauthorized action (prompt injection) must not restart" >&2; false; fi
   grep -q 'NO safe automated fix' "$MUSO_TEXTS"
 }
 
@@ -451,7 +451,7 @@ STUB
   [ "$status" -eq 0 ]
   [[ "$output" == *"precondition for 'repin_codex' not met"* ]]
   [ "$(remediation_calls)" -eq 0 ]
-  ! grep -q "restart" "$SYSCTL_CALLS"
+  if grep -q "restart" "$SYSCTL_CALLS"; then echo "clean precondition still authorized a restart" >&2; false; fi
   grep -q 'NO safe automated fix' "$MUSO_TEXTS"
 }
 
@@ -489,7 +489,7 @@ STUB
   [ "$status" -eq 0 ]
   [[ "$output" == *"precondition for 'repin_codex' not met"* ]]
   [ "$(remediation_calls)" -eq 0 ]
-  ! grep -q "restart" "$SYSCTL_CALLS"
+  if grep -q "restart" "$SYSCTL_CALLS"; then echo "unreadable (exit 2) guard state still authorized a restart" >&2; false; fi
   grep -q 'NO safe automated fix' "$MUSO_TEXTS"
 }
 
@@ -498,7 +498,7 @@ STUB
   run "$HEALER" --trigger codex_token_expired
   [ "$status" -eq 0 ]
   [ -s "$CURL_ARGS" ]
-  ! grep -q 'or-test-key' "$CURL_ARGS"          # argv is clean
+  if grep -q 'or-test-key' "$CURL_ARGS"; then echo "OpenRouter API key leaked into curl argv (proc-visible)" >&2; false; fi          # argv is clean
   grep -q 'Bearer or-test-key' "$CURL_CONFIG"   # ...but the header was delivered
 }
 
@@ -535,7 +535,7 @@ STUB
   run "$HEALER" --trigger gateway_down
   [ "$status" -eq 0 ]
   [[ "$output" != *"OUTCOME: healed"* ]]
-  ! grep -q 'post-checks clean' "$MUSO_TEXTS"
+  if grep -q 'post-checks clean' "$MUSO_TEXTS"; then echo "main crashing mid-poll was announced as a clean recovery" >&2; false; fi
   grep -q 'did NOT recover' "$MUSO_TEXTS"
 }
 
@@ -544,7 +544,7 @@ STUB
   run "$HEALER" --trigger crash_loop
   [ "$status" -eq 0 ]
   [[ "$output" == *"not authorized for trigger"* ]]
-  ! grep -q "restart" "$SYSCTL_CALLS"
+  if grep -q "restart" "$SYSCTL_CALLS"; then echo "crash_loop trigger must not authorize a bare restart" >&2; false; fi
   grep -q 'NO safe automated fix' "$MUSO_TEXTS"
 }
 
@@ -561,7 +561,7 @@ STUB
   run "$HEALER" --trigger codex_auth_invalidated
   [ "$status" -eq 0 ]
   [[ "$output" != *"ABORTED"* ]]
-  ! grep -q 'ABORTED' "$MUSO_TEXTS"
+  if grep -q 'ABORTED' "$MUSO_TEXTS"; then echo "truncation incorrectly aborted the run" >&2; false; fi
   [ -s "$CURL_BODY" ]   # the AI call still happened
 }
 
@@ -624,7 +624,7 @@ STUB
   [[ "$output" == *"refusing to write state"* ]]
   grep -q 'unsafe state dir' "$MUSO_TEXTS"
   [ ! -s "$CURL_BODY" ]
-  ! grep -q "restart" "$SYSCTL_CALLS"
+  if grep -q "restart" "$SYSCTL_CALLS"; then echo "symlink-attack state dir still let a restart execute" >&2; false; fi
   # Nothing was written through the symlink:
   [ -z "$(ls -A "$TEST_TMPDIR/attacker-target")" ]
 }

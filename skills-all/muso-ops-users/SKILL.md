@@ -51,7 +51,8 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 
 **Step 2: Trino (account data)**
 ```sql
-SELECT id, email, first_name, last_name, createdat, updatedat, status
+-- Column names are unseparated: firstname/lastname. There is NO status column.
+SELECT id, email, firstname, lastname, fullname, createdat, updatedat, lastactivetime
 FROM postgresql_core.public.users
 WHERE lower(email) = 'john@example.com'
 ```

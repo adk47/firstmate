@@ -173,7 +173,7 @@ b64url_decode() {
 @test "non-2xx from GitHub → exit 5 and the response body is NOT echoed (it can carry a token)" {
   CURL_FAIL=1 run "$MINT" --repo Muso-AI/core-backend
   [ "$status" -eq 5 ]
-  ! echo "$output" | grep -q 'ghs_'
+  if echo "$output" | grep -q 'ghs_'; then echo "a GitHub token leaked into the error output on a non-2xx response" >&2; false; fi
   ! echo "$output" | grep -q 'boom'
 }
 

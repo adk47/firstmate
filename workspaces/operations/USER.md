@@ -21,5 +21,5 @@
 - meljanecubon (U02SGEARGKS)
 
 ## Authorization
-- Owner and Aaron (U7RP6HKUZ) can modify policies
+- Owner (this workspace only, per `CODEOWNERS`), Nick (U0AL36NADEY), or Aaron (U7RP6HKUZ) can modify policy files; the security surface is Aaron-only
 - Team members have standard access in operations channels

@@ -13,20 +13,55 @@ HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 SCRIPT="$HYDRA_REPO/scripts/lib/qa-external-repo-allowlist.sh"
 WORKFLOW="$HYDRA_REPO/.github/workflows/external-pr-review.yml"
 
+# The onboarded repos, enumerated INDEPENDENTLY of the script under test.
+# Deliberately hardcoded: deriving this from the script would make the
+# acceptance test below tautological — it would still pass if a repo were
+# silently dropped from the allowlist. The drift guard keeps the two in sync.
+ONBOARDED_REPOS=(
+  Muso-AI/ads-manager
+  Muso-AI/auth
+  Muso-AI/web-credits
+  Muso-AI/web-credits-next
+  Muso-AI/industry-data-processing
+  Muso-AI/octave-ui
+  Muso-AI/core-backend
+  Muso-AI/muso-cli
+  Muso-AI/H-DevOps
+  Muso-AI/analytics-worker
+  Muso-AI/platform-data-processing
+  Muso-AI/tests-web-e2e
+  Muso-AI/muso-skills
+  Muso-AI/platform-ticker
+  Muso-AI/feed-service
+  Muso-AI/analytics-controller
+)
+
 @test "allowlisted repo -> exit 0" {
   run "$SCRIPT" Muso-AI/core-backend
   [ "$status" -eq 0 ]
 }
 
 @test "every onboarded repo is accepted" {
-  for repo in Muso-AI/ads-manager Muso-AI/auth Muso-AI/web-credits \
-              Muso-AI/web-credits-next Muso-AI/industry-data-processing \
-              Muso-AI/octave-ui Muso-AI/core-backend Muso-AI/muso-cli \
-              Muso-AI/H-DevOps Muso-AI/analytics-worker \
-              Muso-AI/platform-data-processing; do
+  for repo in "${ONBOARDED_REPOS[@]}"; do
     run "$SCRIPT" "$repo"
     [ "$status" -eq 0 ] || { echo "rejected onboarded repo: $repo"; return 1; }
   done
+}
+
+@test "the script's allowlist and this test's list are the SAME set (drift guard)" {
+  # A hardcoded expectation only ever protects what it enumerates, so the two
+  # lists drift silently in BOTH directions: onboarding a repo by editing only
+  # the script leaves it untested (that is how tests-web-e2e went uncovered),
+  # and deleting one from the script would narrow the gate with every existing
+  # test still green. Compare the sets, not just one side's membership.
+  script_list="$(grep -oE '^  Muso-AI/[A-Za-z0-9._-]+\)' "$SCRIPT" | sed 's/^ *//; s/)$//' | sort)"
+  test_list="$(printf '%s\n' "${ONBOARDED_REPOS[@]}" | sort)"
+  [ -n "$script_list" ]
+  if [ "$script_list" != "$test_list" ]; then
+    echo "allowlist drift between $SCRIPT and this test (< test-only, > script-only):"
+    diff <(echo "$test_list") <(echo "$script_list") || true
+    return 1
+  fi
 }
 
 @test "unlisted Muso-AI repo -> exit 1, no output (fail-closed)" {

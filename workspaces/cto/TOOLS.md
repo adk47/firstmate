@@ -9,7 +9,9 @@
   defaultBranchRef`), NOT from the Repository Map below — that table is a hint and
   can drift. core-backend/web-credits are `develop`, customer-api-mcp is `master`,
   hydra is `main`.
-- **Key GitHub handles**: Serhii -> liflovs, Andrey -> (verify in slack-people.json)
+- **Key GitHub handles**: Serhii -> `liflovs`, Artem -> `Korpyc`, Mariia -> `azure-kirin`,
+  Aaron -> `adk47`, Nick -> `nsollazzo`. Andrey Morskoy has left Muso. Verify anyone else
+  in slack-people.json — only `current: true` entries are current staff.
 - Monitor: commit activity on critical repos (core-backend, web-credits, industry-data-processing, analytics-worker)
 
 ## Repository Map

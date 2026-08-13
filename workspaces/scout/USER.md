@@ -9,4 +9,4 @@
 - **McLaren** — can request company batches and report review outcomes
 
 ## Authorization
-- Only Aaron (U7RP6HKUZ) can modify policy/security files (Nick owns research priorities)
+- Nick (U0AL36NADEY) or Aaron (U7RP6HKUZ) can authorize agent policy-file changes; the security surface stays Aaron-only (Nick owns research priorities)

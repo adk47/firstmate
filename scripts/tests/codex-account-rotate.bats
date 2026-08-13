@@ -40,6 +40,7 @@ JSON
   # (this suite may run on the node-8 CI runner as root).
   export CODEX_USAGE_ARCHIVE_DIR="$TEST_TMPDIR/archive"
   export CODEX_AUTH_ROOT="$TEST_TMPDIR/authroot"
+  export CODEX_ACTIVE_LEDGER="$TEST_TMPDIR/archive/active-account.log"
   mkdir -p "$CODEX_AUTH_ROOT"
 
   # codex-auth-sync stub: records the invocation (incl. the CODEX_AUTH_PRIMARY
@@ -95,6 +96,20 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 
 _canon="$TEST_TMPDIR/canon/auth-profiles.json"   # overwritten in setup-time expansions; use helper
 canon() { echo "$CANON_DIR/auth-profiles.json"; }
+
+# measure <email> <used_percent> <reset-offset-secs> [age-secs] [source]
+# Write a MEASURED quota row (codex-quota.sh format) for an account. Defaults
+# to a reading taken "now" — staleness is opt-in via <age-secs>, because a
+# fresh measurement is the normal case and the interesting tests are the ones
+# that deliberately age it out.
+measure() {
+  local email="$1" pct="$2" reset_off="$3" age="${4:-0}" src="${5:-probe-live}"
+  local now; now=$(date +%s)
+  mkdir -p "$CODEX_USAGE_ARCHIVE_DIR"
+  printf '%s\t-\t10080\t%s\t%s\t-\t-\t-\t%s\tpro\n' \
+    "$(( now - age ))" "$pct" "$(( now + reset_off ))" "$src" \
+    > "$CODEX_USAGE_ARCHIVE_DIR/openai-codex_${email/@/_}.measure.tsv"
+}
 
 # ── resolver (codex-active-account.sh) ──────────────────────────────────────
 
@@ -157,6 +172,17 @@ canon() { echo "$CANON_DIR/auth-profiles.json"; }
   [ ! -s "$RESTART_LOG" ]
 }
 
+@test "a FUTURE-dated cooldown stamp must not block rotation forever" {
+  # (now - last) goes negative on a rolled-back clock, satisfying the -lt test,
+  # so every rotation would be refused with rc 3 until wall time caught up —
+  # silently disabling account failover.
+  echo "$(( $(date +%s) + 86400 ))" > "$CODEX_ROTATE_STAMP"
+  measure k@y.com 10 90000
+  run "$ROTATE" --auto
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CODEX_ACTIVE_ACCOUNT_FILE")" = "openai-codex:k@y.com" ]
+}
+
 @test "--force bypasses the cooldown" {
   date +%s > "$CODEX_ROTATE_STAMP"
   run "$ROTATE" --to k@y.com --force
@@ -165,7 +191,10 @@ canon() { echo "$CANON_DIR/auth-profiles.json"; }
 }
 
 @test "--auto picks the profile that is not currently active" {
-  # no state file → current = default a@x.com → auto target must be k@y.com
+  # no state file → current = default a@x.com → auto target must be k@y.com.
+  # A MEASURED-healthy target is now a precondition for --auto (see the rc 8
+  # tests below); without one the actuator refuses rather than guessing.
+  measure k@y.com 10 90000
   run "$ROTATE" --auto
   [ "$status" -eq 0 ]
   [ "$(cat "$CODEX_ACTIVE_ACCOUNT_FILE")" = "openai-codex:k@y.com" ]
@@ -173,9 +202,133 @@ canon() { echo "$CANON_DIR/auth-profiles.json"; }
 
 @test "--auto again after a rotation flips back (2-account round-robin)" {
   echo "openai-codex:k@y.com" > "$CODEX_ACTIVE_ACCOUNT_FILE"
+  measure a@x.com 10 90000
   run "$ROTATE" --auto --force
   [ "$status" -eq 0 ]
   [ "$(cat "$CODEX_ACTIVE_ACCOUNT_FILE")" = "openai-codex:a@x.com" ]
+}
+
+@test "--auto with NO measurement for any candidate → exit 8, nothing changed" {
+  # rc 8 is deliberately NOT rc 7: we are not claiming the candidate is capped,
+  # only that we cannot see it. Guessing here is what rotated the fleet onto an
+  # exhausted account on 2026-08-06.
+  run "$ROTATE" --auto
+  [ "$status" -eq 8 ]
+  [ ! -e "$CODEX_ACTIVE_ACCOUNT_FILE" ]
+  [ ! -s "$SYNC_LOG" ]
+  [ ! -s "$RESTART_LOG" ]
+}
+
+@test "--auto with a STALE measurement → exit 8 (stale is not healthy)" {
+  # Fresh-looking numbers, but the reading is older than CQ_MEASURE_MAX_AGE_MIN.
+  measure k@y.com 10 90000 7200
+  run "$ROTATE" --auto
+  [ "$status" -eq 8 ]
+  [ ! -e "$CODEX_ACTIVE_ACCOUNT_FILE" ]
+}
+
+@test "--allow-unmeasured overrides rc 8 and flags the target as unverified" {
+  run "$ROTATE" --auto --allow-unmeasured
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CODEX_ACTIVE_ACCOUNT_FILE")" = "openai-codex:k@y.com" ]
+  [[ "$output" == *"UNMEASURED"* ]]
+}
+
+@test "--to with --allow-unmeasured must still refuse a measured-CAPPED target (exit 7)" {
+  # --allow-unmeasured previously short-circuited the ENTIRE quota check on the
+  # explicit path, so it silently bypassed the capped rejection too and
+  # drain-restarted both gateways onto a known-spent account without the
+  # --force acknowledgement the code promises.
+  measure k@y.com 99 90000
+  run "$ROTATE" --to k@y.com --allow-unmeasured
+  [ "$status" -eq 7 ]
+  [ ! -e "$CODEX_ACTIVE_ACCOUNT_FILE" ]
+  [ ! -s "$SYNC_LOG" ]
+  [ ! -s "$RESTART_LOG" ]
+}
+
+@test "--to on an UNMEASURED target proceeds but is labelled unverified" {
+  # The human override stays usable without an extra flag, but the page must
+  # not imply we checked a quota we never read.
+  run "$ROTATE" --to k@y.com
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CODEX_ACTIVE_ACCOUNT_FILE")" = "openai-codex:k@y.com" ]
+  grep -q "UNMEASURED" "$PAGE_LOG"
+}
+
+@test "--allow-unmeasured must NOT select a measured-CAPPED target (exit 7)" {
+  # keepalive adds --allow-unmeasured whenever the ACTIVE account measures
+  # capped. If this could also pick a known-capped alternate, "active capped +
+  # every alternate capped" would drain-restart both gateways onto another
+  # spent account, exit 0, and SUPPRESS the rc 7 page — an honest degradation
+  # turned into a silent restart loop. Only --force may take that risk.
+  measure k@y.com 99 90000
+  run "$ROTATE" --auto --allow-unmeasured
+  [ "$status" -eq 7 ]
+  [ ! -e "$CODEX_ACTIVE_ACCOUNT_FILE" ]
+  [ ! -s "$SYNC_LOG" ]
+  [ ! -s "$RESTART_LOG" ]
+}
+
+@test "--force MAY select a measured-capped target, and does not call it unmeasured" {
+  measure k@y.com 99 90000
+  run "$ROTATE" --auto --force
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CODEX_ACTIVE_ACCOUNT_FILE")" = "openai-codex:k@y.com" ]
+  [[ "$output" == *"MEASURED capped"* ]]
+  run grep -c "UNMEASURED" "$PAGE_LOG"
+  [ "$output" = "0" ]
+}
+
+@test "--allow-unmeasured still takes an UNKNOWN target over a capped one" {
+  cat > "$(canon)" <<'JSON'
+{"version":1,"profiles":{
+  "openai-codex:a@x.com":{"type":"oauth","email":"a@x.com","access":"A","refresh":"R","accountId":"ua","expires":9999999999999},
+  "openai-codex:b@z.com":{"type":"oauth","email":"b@z.com","access":"B","refresh":"R","accountId":"ub","expires":9999999999999},
+  "openai-codex:c@w.com":{"type":"oauth","email":"c@w.com","access":"C","refresh":"R","accountId":"uc","expires":9999999999999}
+}}
+JSON
+  measure b@z.com 99 90000        # measured capped
+  # c@w.com deliberately has NO measurement -> unknown
+  run "$ROTATE" --auto --allow-unmeasured
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CODEX_ACTIVE_ACCOUNT_FILE")" = "openai-codex:c@w.com" ]
+  [[ "$output" == *"UNMEASURED"* ]]
+}
+
+@test "--auto picks the EMPTIEST measured-healthy candidate, not the first key" {
+  # Three accounts; canonical key order would reach b@z.com first, but c@w.com
+  # is measurably emptier. "First viable" was a coin flip that could spend a
+  # drain-restart pair to land on the busier subscription.
+  cat > "$(canon)" <<'JSON'
+{"version":1,"profiles":{
+  "openai-codex:a@x.com":{"type":"oauth","email":"a@x.com","access":"A","refresh":"R","accountId":"ua","expires":9999999999999},
+  "openai-codex:b@z.com":{"type":"oauth","email":"b@z.com","access":"B","refresh":"R","accountId":"ub","expires":9999999999999},
+  "openai-codex:c@w.com":{"type":"oauth","email":"c@w.com","access":"C","refresh":"R","accountId":"uc","expires":9999999999999}
+}}
+JSON
+  measure b@z.com 70 90000
+  measure c@w.com 5  90000
+  run "$ROTATE" --auto
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CODEX_ACTIVE_ACCOUNT_FILE")" = "openai-codex:c@w.com" ]
+}
+
+@test "successful rotation appends the active-account ledger" {
+  measure k@y.com 10 90000
+  run "$ROTATE" --auto
+  [ "$status" -eq 0 ]
+  [ -s "$CODEX_ACTIVE_LEDGER" ]
+  run tail -n1 "$CODEX_ACTIVE_LEDGER"
+  [[ "$output" == *"openai-codex:k@y.com"* ]]
+}
+
+@test "a REFUSED rotation does not append the ledger" {
+  # The ledger is the attribution spine: an entry that did not correspond to a
+  # real switch would mis-attribute every later snapshot.
+  run "$ROTATE" --auto
+  [ "$status" -eq 8 ]
+  [ ! -s "$CODEX_ACTIVE_LEDGER" ]
 }
 
 @test "--auto with a single-account canonical → exit 4" {
@@ -299,14 +452,11 @@ JSON
   [ "$status" -eq 4 ]
 }
 
-@test "--auto refuses a target whose ARCHIVED snapshot is still capped → exit 7" {
-  # aaron (current) hits its cap; kaufman's archive from its last active stint
-  # says weekly 98% with a FUTURE reset → rotating would land on another
-  # capped subscription. rc 7 tells the keepalive "both capped".
-  local future=$(( $(date +%s) + 90000 ))
-  mkdir -p "$CODEX_USAGE_ARCHIVE_DIR"
-  printf '1\t-\t10080\t98\t%s\t-\t-\t-\n' "$future" \
-    > "$CODEX_USAGE_ARCHIVE_DIR/openai-codex_k_y.com.snapshot.tsv"
+@test "--auto refuses a target MEASURED as capped → exit 7" {
+  # aaron (current) hits its cap; kaufman measures 98% with a FUTURE reset →
+  # rotating would land on another spent subscription. rc 7 means "we looked,
+  # and it is capped" — distinct from rc 8 "we could not look".
+  measure k@y.com 98 90000
   run "$ROTATE" --auto
   [ "$status" -eq 7 ]
   [ ! -e "$CODEX_ACTIVE_ACCOUNT_FILE" ]
@@ -314,22 +464,35 @@ JSON
   [ ! -s "$RESTART_LOG" ]
 }
 
-@test "--auto proceeds when the archived cap's reset has PASSED" {
+# ── THE 2026-08-06 REGRESSION ANCHOR ────────────────────────────────────────
+# This test previously asserted the OPPOSITE ("--auto proceeds when the cap's
+# reset has PASSED") and that assertion encoded the bug. A row whose every
+# window reset lies in the past describes a quota period that is simply over;
+# it says NOTHING about the account's current usage. The old gate asked "is it
+# capped until some future time?", got "no", and the caller read that as
+# "healthy" — which is how the fleet was rotated onto aaronkaufman@me.com off a
+# 13-day-old row and hit the cap again within hours.
+#
+# A lapsed reading must be `unknown`, and unknown must refuse (rc 8).
+@test "regression: a measurement whose reset has LAPSED is unknown → exit 8, never a rotation" {
   local past=$(( $(date +%s) - 100 ))
   mkdir -p "$CODEX_USAGE_ARCHIVE_DIR"
-  printf '1\t-\t10080\t98\t%s\t-\t-\t-\n' "$past" \
-    > "$CODEX_USAGE_ARCHIVE_DIR/openai-codex_k_y.com.snapshot.tsv"
+  printf '%s\t-\t10080\t98\t%s\t-\t-\t-\tprobe-live\tpro\n' "$(date +%s)" "$past" \
+    > "$CODEX_USAGE_ARCHIVE_DIR/openai-codex_k_y.com.measure.tsv"
   run "$ROTATE" --auto
-  [ "$status" -eq 0 ]
-  [ "$(cat "$CODEX_ACTIVE_ACCOUNT_FILE")" = "openai-codex:k@y.com" ]
+  [ "$status" -eq 8 ]
+  [ "$status" -ne 0 ]
+  [ ! -e "$CODEX_ACTIVE_ACCOUNT_FILE" ]
+  [ ! -s "$SYNC_LOG" ]
 }
 
-@test "explicit --to bypasses the archived-cap viability gate" {
-  local future=$(( $(date +%s) + 90000 ))
-  mkdir -p "$CODEX_USAGE_ARCHIVE_DIR"
-  printf '1\t-\t10080\t98\t%s\t-\t-\t-\n' "$future" \
-    > "$CODEX_USAGE_ARCHIVE_DIR/openai-codex_k_y.com.snapshot.tsv"
+@test "explicit --to refuses a measured-capped target unless forced" {
+  measure k@y.com 98 90000
   run "$ROTATE" --to k@y.com
+  [ "$status" -eq 7 ]
+  [ ! -e "$CODEX_ACTIVE_ACCOUNT_FILE" ]
+
+  run "$ROTATE" --to k@y.com --force
   [ "$status" -eq 0 ]
   [ "$(cat "$CODEX_ACTIVE_ACCOUNT_FILE")" = "openai-codex:k@y.com" ]
 }

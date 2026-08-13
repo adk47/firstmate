@@ -245,6 +245,45 @@ print(json.dumps(c.get('session', {}).get('dmScope', '')))
 ")
 caroline_check "main.session.dmScope" '"per-channel-peer"' "$main_dmscope"
 
+# 11. slack-people.json roster invariants.
+# `current` is the current-EMPLOYEE predicate: eight agent SOULs resolve sender
+# IDs through this file, and USER.md files now tell agents that `current: true`
+# IS the complete staff list. Two ways that silently breaks: a bot carrying
+# `current` (an automation account reads as an employee, and anything using the
+# predicate for authority picks it up), or the count drifting away from the
+# roster without anyone noticing. Both are cheap to assert, so assert them.
+ROSTER="$(dirname "${BASH_SOURCE[0]}")/../shared-reference/reference/slack-people.json"
+roster_result=$(python3 - "$ROSTER" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding='utf-8'))
+except Exception as e:
+    print(f"FAIL unreadable: {e}"); raise SystemExit(0)
+people = {k: v for k, v in d.items() if isinstance(v, dict)}
+problems = []
+for uid, p in people.items():
+    kind = p.get('kind')
+    if kind not in ('human', 'bot'):
+        problems.append(f"{uid} ({p.get('name')}) has kind={kind!r}; must be 'human' or 'bot'")
+    if kind == 'bot' and 'current' in p:
+        problems.append(f"{uid} ({p.get('name')}) is a bot but carries `current` — "
+                        "the employee predicate must never match an automation account")
+    if kind == 'human' and not isinstance(p.get('current'), bool):
+        problems.append(f"{uid} ({p.get('name')}) is human but has no boolean `current`")
+n = sum(1 for p in people.values() if p.get('kind') == 'human' and p.get('current') is True)
+if n != 9:
+    problems.append(f"expected 9 current humans (Nick's roster, 2026-07-30), found {n} — "
+                    "update this count deliberately when someone joins or leaves")
+print("OK" if not problems else "FAIL " + "; ".join(problems))
+PY
+)
+if [[ "$roster_result" == OK ]]; then
+  echo "PASS  slack-people.json: 9 current humans, bots excluded from the employee predicate"
+else
+  echo "FAIL  slack-people.json: ${roster_result#FAIL }"
+  FAILURES=$((FAILURES + 1))
+fi
+
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "All shared settings match."

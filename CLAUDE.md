@@ -235,6 +235,51 @@ page; 120-min cooldown bounds cap-flap). Auto-trigger: `codex-keepalive.sh` on t
 journal signature; both-accounts-capped degrades honestly to the OpenRouter rung. See
 RUNBOOK §Troubleshooting → "Codex Usage Cap / Account Rotation".
 
+**TWO systems rotate codex accounts, on DIFFERENT surfaces, and they do not know about
+each other.** (a) *ours*: the state file above → `codex-auth-sync.sh` → every agent's
+`codex-home/auth.json` → the **codex agentRuntime** path. (b) *openclaw's*:
+`auth.order.openai` → the runtime `auth_profile_store` → the **`[agent/embedded]`** openai
+provider, which runs its own `decision=rotate_profile reason=rate_limit` failover. Nothing
+rewrites `auth.order`, and openclaw's per-profile rate-limit cooldown is only
+**30s → 60s → 300s capped**, after which `clearExpiredCooldowns` returns the profile to the
+FRONT of the order. So an exhausted `auth.order[0]` is retried **roughly every 75 seconds,
+forever** — 2026-08-06: aaron@muso.ai at 100% produced **143 cap lines in 3h**, and
+`codex-keepalive.sh` read that signature as "our active account is spent", rotated the
+state file (a different surface — it changed nothing), burned the rotate cooldown, and
+paged ":no_entry: no rotation target left — every alternate account is known-capped" while
+gmail sat at 4% and me.com at 0%. **The cap signature alone is NOT evidence about the
+account we run.** The keepalive now checks the active account's MEASURED quota first and
+says so when the signature is somebody else's. Keep `auth.order.openai` ordered
+least-loaded-first; `codex-quota-refresh.sh` pages when its head is measured-capped
+(detect-only — rewriting `openclaw-*.json` out of band trips the write-audit watcher and is
+reverted by the next rsync, so re-ordering is a PR).
+
+**Per-account quota is MEASURED now, never inferred — and "we could not measure it" is a
+THIRD state, not a synonym for healthy.** Rollouts carry no account identity on 7.x, so the
+old code archived the fleet-freshest snapshot under whichever account was rotating out. It
+was provably wrong: on 2026-08-06 two archives shared a reset epoch **to the second** from
+snapshots 2h15m apart (weekly resets are per-account anchored, so that is impossible), and
+a 13-day-old row for me.com whose reset had already LAPSED was read as "not capped" ⇒
+"healthy" ⇒ the fleet was rotated onto it and capped again within hours. **Measure with
+`scripts/lib/codex-quota-probe.sh`** — it runs the vendored `codex app-server` against a
+throwaway `CODEX_HOME` and calls JSON-RPC **`account/rateLimits/read`** (that exact name;
+the bare `account/rateLimits` is rejected — re-verify on every codex bump). Collector:
+`scripts/codex-quota-refresh.sh` (cron `*/20`, measures only, **can never rotate** — the
+keepalive stays the sole rotate trigger). **The probe never holds a refresh token**: it
+writes the same `SYNC-MANAGED-NO-REFRESH-TOKEN` sentinel `codex-auth-sync.sh` uses, skips
+any account expiring within 60min, runs on tmpfs, and asserts the credential was not
+rewritten before shredding — so it cannot violate the single-refresher invariant. If that
+assertion ever fires (rc 9) the collector **auto-writes `/etc/hydra/codex-quota-probe.disabled`**
+and pages; quota then reads UNKNOWN fleet-wide until a human understands why the credential
+moved and removes the file. The probe's cleanup trap is armed INSIDE the probe subshell, not
+just at file scope — both callers invoke it via command substitution, and a file-scope-only
+trap left a cleartext access token in `/run/hydra` on any signalled run.
+`cq_row_state` returns **capped | healthy | unknown**; rotate exits **7 = measured capped**
+vs **8 = quota unknown** (`--allow-unmeasured` is the emergency override, and its page says
+the target was unverified). **Never render a quota number outside `cq_format_evidence`** —
+it cannot print a percentage without its age and source, which is the mechanical form of
+"never assert a fact the system did not measure".
+
 **Session REVOCATION is a SIXTH failure mode — upstream kills the session, and every
 structural guard stays CLEAN.** `token_invalidated` / "Your access token could not be
 refreshed. Please log out and sign in again." with `refresh_token_reused` = 0 means OpenAI
@@ -373,7 +418,7 @@ skills, 5 orphan scripts, and a dead Gmail plugin (rationale + cleanup in issue 
 2. **External MCP server I don't own**? → wire via `mcp.servers` in
    `openclaw-*.json` (transport: `streamable-http`)
 3. **Wall-clock schedule, no human in the loop**? → openclaw cron in
-   `cron-jobs.json` (sessionTarget=main)
+   `cron-jobs.json` (sessionTarget=isolated)
 4. **Deterministic multi-step pipeline, no LLM in the loop**? → Lobster `.lobster`
    file invoked via `exec → bash wrapper.sh` (never agent → lobster direct)
 5. **Git push / PR open / CI**? → `.github/workflows/*.yml`

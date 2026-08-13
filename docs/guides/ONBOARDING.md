@@ -9,7 +9,7 @@
 
 ## Table of Contents
 
-1. [For Agent Owners](#for-agent-owners) (Nick, Liza, Jan, Artem D, Mariia)
+1. [For Agent Owners](#for-agent-owners) (Nick, Liza, Jan, Serhii, Mariia)
 2. [For Aaron (Admin)](#for-aaron-admin)
 3. [For Developers (CTO Team)](#for-developers-cto-team)
 
@@ -31,7 +31,7 @@ You have been assigned an AI agent that lives in Slack. Here is what you need to
 | Jan     | operations   | @Operations   | Operational workflows, logistics, processes   |
 | Nick    | scout        | @Scout        | Web research, competitive/market intel, company discovery |
 | Aaron   | coordinator  | @Buddy        | General help, triage, coordination            |
-| Artem D | devops       | @DevOps       | Infrastructure, CI/CD, deployments            |
+| Nick / Serhii | devops   | @DevOps       | Infrastructure, CI/CD, deployments            |
 
 ### How to Interact with Your Agent
 

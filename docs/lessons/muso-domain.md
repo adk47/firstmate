@@ -515,8 +515,9 @@ most people, but capture the exceptions, do not extrapolate: Jan is `jan@muso.ai
 if Slack display shows "jay"); McLaren Amberti is `f@muso.ai` (a single letter `f`, NOT `mclaren@`).
 McLaren is a distinct person and is NOT Mariia.
 
-**Authority and approval map (as stated 2026-06-24).** Aaron has full authority; policy and
-security-file changes are Aaron-only. Nick is the top-tier owner of everything AI plus most dev.
+**Authority and approval map (as stated 2026-06-24).** Aaron has full authority; security-file
+changes are Aaron-only. Agent policy files take either Nick's or Aaron's
+authorization (co-equal since 2026-08-03). Nick is the top-tier owner of everything AI plus most dev.
 Serhii owns most dev alongside Nick. Jan is the customer-support / operations captain. Mariia is
 junior (UI/UX plus newbie front-end) and must NOT hold elevated or auto-approve authority. Artem owns
 mobile. When an executable allowlist disagrees with this policy, TIGHTEN the wrapper to match the

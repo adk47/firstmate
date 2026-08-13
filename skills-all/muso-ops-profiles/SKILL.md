@@ -12,8 +12,13 @@ description: |
   Triggers: "merge profile", "unmerge", "link spotify", "enrich profile", "profile search",
   "find profile", "profile details", "link external", "avatar upload",
   "unlink raw profile", "remove raw profile", "remove spotify link", "remove tidal link"
+
+  For the Collaborators list and collaborations count (including "remove these
+  collaborators"), use `muso-ops-collaborators` — that table is derived from
+  track co-credits and none of the procedures here apply to it.
 depends-on:
   - muso-ops-admin
+  - muso-ops-collaborators
   - muso-ops-audit
   - muso-verify-profile
   - muso-slack-formatter
@@ -221,20 +226,30 @@ muso --env prod --json api GET /admin/profile \
   "it's queued behind syncs" is never the explanation.
 - **Still `merged: null` after the grace period — say it plainly** ("the merge was accepted but
   has NOT landed in the catalog") and **do not tell anyone to wait for the lane to drain.**
-  What to do next depends on the state. **This section supersedes the watchdog's page text**:
-  if the page you received still carries the older generic "verify + re-fire" steer, ignore
-  that and follow this — the state-specific verdicts below (which the page names for you once
-  PR #747 lands, classifying the pair and reading the topic's retention frontier) are the
-  authority.
+  What to do next depends on the state. The watchdog page names the state for you (PR #747,
+  live since 2026-07-28): it classifies the pair and reads the topic's retention frontier.
+  The verdicts below are the authority for what to *do* about each.
   - **Half folded** (loser carries `merged.mergedToId` pointing at a *different* survivor) →
     **never re-fire**, catalog-team decision. The API's guards do NOT protect you here: both
     checks in `base_merge_link_operations.py:314-317` test the *survivor*
     (`already merged` / `already merged into a merged object`), so a loser already folded
     elsewhere passes them and gets its `merged_to_id` **silently re-pointed**.
+
+    **First ask whether the REQUEST was right, not just the fold.** Compare the entity
+    *types*: a company folded into a person (or vice versa) is a bad request the catalog
+    correctly declined to honour, not a fold to reconcile. Worked example (2026-07-28):
+    `695575be` "Drop Dead Productions" and `8ce80ba2` "DROP DEAD PRODUCTIONS INC" were
+    requested into `451c4bbc` **"Drew Lehman" — a person**; the catalog instead consolidated
+    both into `d9d61f4a` "Drop Dead Productions Inc", which is the right answer. The
+    disposition there is to reject the request and tell the requester, **not** to escalate a
+    reconciliation. Check names and credit counts on both sides before you escalate anything.
   - **Malformed loser id** (e.g. a 35-char UUID) → no catalog row exists; it will never land
     however often it is fired. Fix the request at source.
-  - **Message GONE (older than the retention frontier)** → the dominant loss mode, root-caused
-    2026-07-27 (39 merges lost 2026-06-02 → 07-26). The catalog-admin topic's *observed*
+  - **Message GONE (older than the retention frontier)** → root-caused 2026-07-27. Real but
+    **rare**: the first sweep with the #747 classifier live (2026-07-28) found 5 unlanded
+    pairs out of 511 examined, two of them in this state. An earlier "39 lost merges" figure
+    came from the pre-#747 detector, which could not recognise a third-canonical collapse and
+    so alerted on pairs that were fine — do not quote it. The catalog-admin topic's *observed*
     retention is ~14.8d (configured `retention.ms` is 7d; deletion is per closed segment,
     `segment.ms` 14d) — as long as the lane's own drain ETA — so messages are **deleted before
     the worker ever consumes them**, and `redpanda.remote.delete=true` means the tiered copies
@@ -370,18 +385,51 @@ takes up to 24h to reflect the unlink across credits and analytics.
 
 ### Enrich Profile
 
-From URL (handler reads `enrichmentUrl` + optional `profileId`):
+**`profileId` is what makes the source attach. Without it the capture is
+accepted and then attaches to NOTHING.**
+
+A capture binds to a muso profile through exactly one value:
+`extra_data.profile_id`. `enrichByUrl` is the only route that carries it. When
+it is absent, the industry pipeline's match cascade has no name-matching rung,
+so the scrape falls through to "create new" and mints a **separate** profile.
+The profile you meant to fill stays empty forever.
+
+This is NOT the usual async delay. `{"accepted":true,"captureId":"..."}` means
+only "queued for capture" — it says nothing about linkage. **Re-checking will
+never make an unlinked source appear**, so do not report it as `still pending`
+and do not retry the same call. (Incident 2026-08-05, escalated three times
+before anyone noticed the call itself could not work.)
+
+**Attaching a source to an existing profile — the typed verb (preferred):**
+```bash
+muso profiles enrich --url "https://open.spotify.com/artist/..." \
+  --profile-id "<profile_id>" --env prod --requester <email> --json
+```
+`--profile-id` is REQUIRED here — the verb refuses without it, because a capture
+that carries no profile link is accepted and then attaches to nothing. Use
+`--standalone` only for a deliberate capture with no profile to attach to.
+Requires muso-cli >= 0.13.0 (muso-cli#42).
+
+**Equivalent raw call**, if you need the wrapper's gates or a field the verb does
+not expose:
 ```bash
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   call POST "/admin/profile/enrichByUrl" \
   '{"enrichmentUrl":"https://open.spotify.com/artist/...","profileId":"<profile_id>"}'
 ```
 
-From Spotify ID (path takes the spotify artist id):
-```bash
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/admin/artist/<spotify_artist_id>/enrich"
-```
+**`POST /admin/artist/<spotify_artist_id>/enrich` CANNOT attach to a profile.**
+It takes only a spotify artist id and sends no profile reference at all, so
+there is no body shape that makes it link. Use it *only* to refresh a standalone
+catalog entity that has no muso profile to attach to — never as a way to fill in
+a profile you just created. The admin wrapper refuses it by default; a genuinely
+standalone capture must opt in explicitly with `MUSO_ENRICH_STANDALONE=1`.
+
+**Verifying it landed:** re-read the profile and look for a `spotify` entry in
+`rawProfiles` (`GET /admin/profile/<profile_id>`). `rawProfiles` containing only
+`source":"muso"` means nothing has attached yet. Allow for catalog-lane latency
+before calling it a failure, but if the call carried no `profileId`, no amount of
+waiting will change the answer — re-issue it correctly instead.
 
 ### Upload Avatar
 

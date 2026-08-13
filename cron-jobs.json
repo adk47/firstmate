@@ -420,6 +420,38 @@
       }
     },
     {
+      "id": "46442766-c410-4ccd-966c-4de3c06eed8d",
+      "agentId": "operations",
+      "name": "uvn-ticket-popularity-under30-4h",
+      "description": "STAGED / DISABLED pending explicit approval for the autonomous admin-write gate. Once approved, every 4h at :15 run a deterministic ticket-scoped UVN approval pass. It accepts IDs only from structured TO DO hydra-action-request/action:credit-verify tickets, fetches authoritative live Spotify popularity, excludes fraud and backend hard-reject signals, atomically approves only rows still in user_verification_needed, verifies every exact ID, never rejects, and resolves only when every structured request ID reads approved. The dedicated conditional backend route makes either deployment order fail closed. Final summaries are announced to #credit-verification by the cron runner.",
+      "enabled": false,
+      "createdAtMs": 1786384653000,
+      "updatedAtMs": 1786384653000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "15 */4 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/uvn-under30-cron.py"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 1200
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
+      }
+    },
+    {
       "id": "fa4bb786-08fb-4437-a8b4-06654eff077e",
       "agentId": "operations",
       "name": "cs-ops-drain-4h",
@@ -991,6 +1023,37 @@
         ],
         "thinking": "high",
         "timeoutSeconds": 3600
+      },
+      "delivery": {
+        "mode": "none"
+      },
+      "state": {
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "07380908-eaba-4a0b-942e-dfaf67803822",
+      "agentId": "operations",
+      "name": "credit-verification-fraud-muso-only-snapshot",
+      "description": "Daily 03:00 UTC: materializes the muso-only fraud signal (fraud-issue-scorer-followups.md §1) to /var/lib/hydra/cv-fraud-muso-only-snapshot.json so the credit-verification batch's fraud-muso-only-lookup.sh stops depending on live Trino latency for a 300s-capped full-scan cross-join over matvw_raw_recording_credit (unavailable on 2026-08-01 batch run — timeout, not schema drift). Deterministic command cron (no model); fail-loud to itself, leaves the prior snapshot untouched on failure.",
+      "enabled": true,
+      "createdAtMs": 1786021701000,
+      "updatedAtMs": 1786021701000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 3 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "bash",
+          "/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/lib/fraud-muso-only-snapshot-writer.sh"
+        ],
+        "cwd": "/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification",
+        "timeoutSeconds": 900
       },
       "delivery": {
         "mode": "none"

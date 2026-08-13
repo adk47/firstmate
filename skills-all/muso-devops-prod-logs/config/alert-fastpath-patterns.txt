@@ -1,0 +1,60 @@
+# Fast-path filter for the prod-log-alert-watchdog v2 ONLY (one alternative per
+# line, OR-joined, matched case-insensitively). A line matching ANY of these
+# BYPASSES the persistence gate and the digest timer: it posts on first sighting.
+# It does NOT page anyone — see the next paragraph. Everything else must persist
+# for PROD_LOG_ALERT_PERSIST_SECONDS (default 5 min) first.
+#
+# ENGINE: python3 `re`, NOT grep ERE. The watchdog validates this file with
+# re.compile() at startup and fails closed on a syntax error. POSIX classes
+# ([[:space:]], [[:alpha:]]) are valid ERE but INVALID here — use \s, \w, etc.
+# The sibling alert-patterns.txt / alert-exclude-patterns.txt files ARE grep
+# ERE; do not copy syntax between them.
+#
+# These are matched against lines that have ALREADY passed the strict alert
+# pattern (fatal|uncaught|unhandled|exception) and the exclusion filter, so
+# each entry only has to say "…and this one cannot wait 5 minutes".
+#
+# THIS FILE DOES NOT AUTHORIZE PAGING — deliberately. Matching here buys an
+# immediate POST and nothing more. Waking a human additionally requires
+# non-textual corroboration (the same line across >=3 deployments, or a burst in
+# a single tick), because these patterns are matched against the log line BODY
+# and log lines carry user-controlled data: a track titled "Te Ves Fatal" hit the
+# alert pattern in production on 2026-06-12. If a text match could authorize a
+# page, anyone able to get a string logged could manufacture their own
+# corroboration and then prompt-inject the classifier for the rest.
+#
+# KEEP THIS LIST SHORT AND SPECIFIC. Every entry is a standing exemption from
+# the noise control this whole mechanism exists to provide — a broad pattern
+# here recreates the 2026-08-05 "these are transient and getting annoying"
+# problem with extra steps. Missing or empty file = no bypass at all, which is
+# the safe direction.
+
+# ── The pod itself is not staying up ──
+# NOTE: CrashLoopBackOff and OOMKilled are pod STATUS conditions — they are
+# reported by `kubectl get pods`, never by `kubectl logs`, which is all this
+# watchdog reads. They are kept only because some app images echo them into
+# their own logs; do not expect them to catch a real crash loop. Detecting that
+# properly needs a pod-status probe, which this watchdog does not do.
+CrashLoopBackOff
+OOMKilled
+OutOfMemoryError
+
+# ── Irreversible: data is being lost or mangled ──
+data (loss|corruption)
+corrupt(ed)? (row|record|index|table|partition)
+\bunrecoverable\b
+
+# ── Security exposure ──
+auth(entication|orization)? bypass
+(leaked|exposed) (secret|credential|token|api[_ -]?key)
+
+# ── DELIBERATELY NOT HERE YET: money paths ──
+# Payment/billing/checkout failures are user-visible and billable, so they look
+# like obvious fast-path material. They were drafted as
+#   (payment|billing|checkout|invoice|charge|refund)\w*\s+(fail|error|declin|exception)
+#   \bstripe\b.*\b(fatal|exception)\b
+# and pulled before first light: these lines have already matched
+# fatal|exception, so the first pattern catches ordinary retry chatter and the
+# second catches essentially every Stripe exception — each of which would then
+# page two people immediately. Add them once a week of real digests shows what
+# the actual volume is, narrowed to the specific signatures that matter.

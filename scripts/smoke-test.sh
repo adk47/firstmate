@@ -36,6 +36,14 @@ source "$_SMOKE_DIR/lib/websearch-probe.sh"
 # reject/approve gates still refuse (issue #754).
 # shellcheck source=lib/credit-gate-probe.sh
 source "$_SMOKE_DIR/lib/credit-gate-probe.sh"
+# mesh_probe_* — same split rationale; classifies the Clio -> CTO round-trip
+# without trusting loose keywords in the reply (see lib/mesh-probe.sh).
+# cron_store_* — the canonical durable-cron accounting, shared with deploy.sh's
+# Step 6b convergence heal so the two can never disagree (see lib/cron-store.sh).
+# shellcheck source=lib/cron-store.sh
+source "$_SMOKE_DIR/lib/cron-store.sh"
+# shellcheck source=lib/mesh-probe.sh
+source "$_SMOKE_DIR/lib/mesh-probe.sh"
 
 # expected_agent_count <profile> — print the count of enabled agents
 # in /opt/hydra/openclaw-<profile>.json. Returns "?" on any failure
@@ -350,23 +358,60 @@ if needs_target "main"; then
   #
   # Timeout bumped from 30s to 60s because a Clio→CTO LLM round-trip
   # via sessions_send can genuinely take 30-50s (Clio thinks, picks the
-  # tool, CTO thinks, Clio synthesizes the reply).
+  # tool, CTO thinks, Clio synthesizes the reply). Measured 2026-08-04 on
+  # node-8: 36s for a successful round-trip, so 60s is the right ceiling.
   #
   # Bounded retry (up to 3 attempts, same idiom as check_web_search's
   # attempt loop above) to cut false warn_check noise from LLM latency —
-  # any single attempt matching the grep pattern is a pass; only if all
-  # 3 attempts fail to match do we degrade to a warn.
+  # any single attempt the classifier calls `pass` is a pass; only if all
+  # 3 attempts fail to confirm do we degrade to a warn.
+  #
+  # PASS CRITERION (2026-08-04, QA finding on PR #791): a dedicated token from
+  # mesh_probe_verdict, NOT the old `grep -qi 'cto\|responded\|pong\|
+  # acknowledged'`. That keyword set matched the failure sentence "I couldn't
+  # reach CTO" on an rc=0 turn, so the probe could report PASS exactly when
+  # cross-agent messaging was broken. Harmless only while the probe could never
+  # reach rc=0 at all (see INVOCATION below) — repairing the call is what made
+  # the weak pattern load-bearing. See scripts/lib/mesh-probe.sh for the
+  # classifier, its three-state contract, and an honest note on what the token
+  # does and does not prove.
+  #
+  # INVOCATION (2026-08-04): must be `agent --agent <id> -m <text>`, the same
+  # form ping_agent() uses. There is NO `openclaw agent send` subcommand —
+  # `agent send clio "..."` parses as three stray positionals and exits 1 in
+  # ~0s with "Too many arguments for this command." That typo shipped in
+  # 42f0adb3 (2026-04-06) and this probe never passed once in the ~4 months
+  # since: 8/8 of the most recent deploys logged the warn, 0 logged a pass.
+  #
+  # It hid that long because the old `|| MESH_RESPONSE="TIMEOUT"` clobbered
+  # the captured stderr on ANY non-zero exit, so a usage error rendered
+  # identically to a real timeout. That cost two wrong diagnoses: issue #91
+  # (opened 2026-04-12 blaming post-deploy agent warm-up, closed 2026-05-28
+  # as "one-off, no recurrence" — it was recurring every single deploy), and
+  # the timeout/retry mitigations above, which treated latency that was never
+  # the problem. So: keep the rc, and report what actually happened. rc 124 is
+  # timeout's own signal for "deadline hit"; anything else non-zero is the
+  # command itself failing and must surface its stderr verbatim.
   log "  Testing cross-agent mesh behaviorally (Clio -> CTO via LLM)..."
   for attempt in 1 2 3; do
-    MESH_RESPONSE=$(timeout 60 openclaw --profile main agent send clio "ping cto via sessions_send and report back" 2>&1) || MESH_RESPONSE="TIMEOUT"
-    if echo "$MESH_RESPONSE" | grep -qi 'cto\|responded\|pong\|acknowledged'; then
+    # `if VAR=$(...)` (not `VAR=$(...); rc=$?`) because this script runs under
+    # `set -e` — a bare failing assignment would abort the whole smoke test.
+    # Same shape as _websearch_probe_attempt in scripts/lib/websearch-probe.sh.
+    if MESH_RESPONSE=$(timeout 60 openclaw --profile main agent --agent clio -m "$(mesh_probe_prompt)" 2>&1); then
+      MESH_RC=0
+    else
+      MESH_RC=$?
+    fi
+    MESH_VERDICT="$(mesh_probe_verdict "$MESH_RC" "$MESH_RESPONSE")"
+    if [[ "$MESH_VERDICT" == "pass" ]]; then
       pass_check "Main: Cross-agent mesh behavioral test passed (Clio -> CTO round-trip)"
       break
     fi
+    MESH_DETAIL="$(mesh_probe_detail "$MESH_RC" "$MESH_VERDICT" "$MESH_RESPONSE")"
     if [[ "$attempt" -lt 3 ]]; then
-      log "  Main: Cross-agent mesh behavioral test inconclusive on attempt $attempt, retrying..."
+      log "  Main: Cross-agent mesh behavioral test inconclusive on attempt $attempt ($MESH_DETAIL), retrying..."
     else
-      warn_check "Main: Cross-agent mesh behavioral test did not confirm within 60s after 3 attempts. Response was: $(echo "$MESH_RESPONSE" | head -c 200)"
+      warn_check "Main: Cross-agent mesh behavioral test did not confirm after 3 attempts — $MESH_DETAIL"
     fi
   done
 
@@ -402,9 +447,10 @@ if needs_target "main"; then
   # two stale qa-autoreview one-shots — this whole check's reason for being).
   # We still count disabled PERSISTENT crons (via --all), matching the full
   # repo set (enabled + disabled) that deploy.sh imports — do NOT narrow this
-  # to enabled-only. `.total` is the scalar all-rows count (== the previous
-  # `cron status --json .jobs`); if the store ever paginates (hasMore) we fall
-  # back to it so we never UNDER-count and mask a genuinely-missing repo cron.
+  # to enabled-only. A PAGINATED response (hasMore) is UNKNOWN and fails loud:
+  # `.total` is the all-rows count including the ephemerals this check excludes,
+  # and openclaw 2026.7.1 exposes no paging flag, so the unseen rows cannot be
+  # fetched. Do not "fall back" to it — that is the bug, not the mitigation.
   if [ ! -f /opt/hydra/cron-jobs.json ]; then
     fail_check "Main: /opt/hydra/cron-jobs.json missing — repo file did not deploy"
   else
@@ -421,11 +467,18 @@ if needs_target "main"; then
     if [ -z "$LOADED_RAW" ]; then
       fail_check "Main: openclaw cron list --all --json returned nothing (gateway not running?)"
     else
-      LOADED_CRONS=$(echo "$LOADED_RAW" | jq '
-        if (.hasMore == true) then .total
-        else [ .jobs[] | select(((.schedule.kind == "at") and (.deleteAfterRun == true)) | not) ] | length
-        end' 2>/dev/null || echo "?")
-      if [[ "$EXPECTED_CRONS" == "?" || "$LOADED_CRONS" == "?" ]]; then
+      # The durable-cron filter lives ONCE in lib/cron-store.sh so this check
+      # and deploy.sh's Step 6b convergence heal can never drift apart and
+      # disagree about what "loaded" means. rc 2 = paginated: the durable count
+      # cannot be derived from a truncated page (and this openclaw build has no
+      # paging flag), so it is UNKNOWN and gets its own message rather than
+      # being reported as a parse failure.
+      CRON_COUNT_RC=0
+      LOADED_CRONS=$(cron_store_durable_count_from_json "$LOADED_RAW") || CRON_COUNT_RC=$?
+      (( CRON_COUNT_RC == 0 )) || LOADED_CRONS="?"
+      if (( CRON_COUNT_RC == 2 )); then
+        fail_check "Main: cron list came back PAGINATED (hasMore=true) — the durable cron count is unobtainable, so the store is unverifiable. Raw output: $LOADED_RAW"
+      elif [[ "$EXPECTED_CRONS" == "?" || "$LOADED_CRONS" == "?" ]]; then
         fail_check "Main: cron count check failed (expected=$EXPECTED_CRONS loaded=$LOADED_CRONS) — could not parse JSON. Raw output: $LOADED_RAW"
       elif [[ "$LOADED_CRONS" == "$EXPECTED_CRONS" ]]; then
         pass_check "Main: cron scheduler loaded $LOADED_CRONS jobs (matches repo)"

@@ -10,4 +10,4 @@
 - Does NOT answer questions directly — always delegates
 
 ## Authorization
-- Only Aaron can modify coordinator policies
+- Nick (U0AL36NADEY) or Aaron (U7RP6HKUZ) can modify coordinator policy files; the security surface is Aaron-only

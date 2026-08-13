@@ -17,13 +17,20 @@ setup() {
   export TMPDIR="$BATS_TEST_TMPDIR"
 }
 
-# fixture_at <commit-ish> — materialize a historical muso-admin-api.sh, or skip
-# if the history isn't present (shallow clone on a CI runner).
+# fixture_at <commit-ish> — materialize a historical muso-admin-api.sh, echoing
+# its path. Returns non-zero if the history isn't present (shallow clone on a CI
+# runner); callers MUST handle that with `|| skip`.
+#
+# It cannot skip on its own: every caller invokes it as `fx="$(fixture_at ...)"`,
+# and `skip` inside command substitution only exits the subshell. The test then
+# runs on with an empty path and fails the status assertion instead of skipping
+# — which is exactly what reddened CI on 2026-08-03 the first time the runner
+# lacked the history for these SHAs.
 fixture_at() {
   local rev="$1" out="$BATS_TEST_TMPDIR/fixture-$2.sh"
   git -C "$REPO_ROOT" show "$rev:skills-all/muso-ops-admin/scripts/muso-admin-api.sh" \
-    > "$out" 2>/dev/null || skip "history for $rev unavailable (shallow clone)"
-  [ -s "$out" ] || skip "empty fixture for $rev"
+    > "$out" 2>/dev/null || return 1
+  [ -s "$out" ] || return 1
   echo "$out"
 }
 
@@ -181,7 +188,8 @@ EOF
 # ── Negative: the probe catches the REAL historical regressions ──────────────
 
 @test "CAN FAIL: pre-#750 script (approve trigger still literal-grep) is flagged" {
-  local fx; fx="$(fixture_at 'b7f7ce3e^' pre750)"
+  local fx; fx="$(fixture_at 'b7f7ce3e^' pre750)" \
+    || skip "history for b7f7ce3e^ unavailable (shallow clone)"
   run credit_gate_probe "$fx"
   [ "$status" -eq 1 ]
   # exactly the two evasions the #750 fix closed
@@ -194,7 +202,8 @@ EOF
 }
 
 @test "CAN FAIL: pre-#740 script (reject gate absent) reports ABSENCE, not a bad message" {
-  local fx; fx="$(fixture_at 'd682b5d0^' pre740)"
+  local fx; fx="$(fixture_at 'd682b5d0^' pre740)" \
+    || skip "history for d682b5d0^ unavailable (shallow clone)"
   run credit_gate_probe "$fx"
   [ "$status" -eq 1 ]
   # A missing gate is the worst deploy regression; it must not be described as

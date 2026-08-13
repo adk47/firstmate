@@ -148,7 +148,7 @@ counts_with() { jq -n --argjson tasks "$(printf '%s\n' "$@" | jq -s '.')" '{task
   echo "$output" | grep -q "Two days overdue"
   echo "$output" | grep -q "2d overdue"
   echo "$output" | grep -q "https://app.clickup.com/t/t1"
-  ! echo "$output" | grep -q "Due next week"
+  if echo "$output" | grep -q "Due next week"; then echo "due-next-week task leaked into the overdue/today/tomorrow digest" >&2; false; fi
   ! echo "$output" | grep -q "No due date"
 }
 
@@ -161,7 +161,7 @@ counts_with() { jq -n --argjson tasks "$(printf '%s\n' "$@" | jq -s '.')" '{task
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Overdue (1)"
   echo "$output" | grep -q "Still open"
-  ! echo "$output" | grep -q "Already resolved"
+  if echo "$output" | grep -q "Already resolved"; then echo "a resolved task leaked into the open-tasks digest" >&2; false; fi
   ! echo "$output" | grep -q "Marked done"
 }
 
@@ -197,7 +197,7 @@ counts_with() { jq -n --argjson tasks "$(printf '%s\n' "$@" | jq -s '.')" '{task
   # 1 parent + 3 bucket replies
   [ "$(grep -c 'slack send' "$STUB_CALLS")" -eq 4 ]
   # parent (call 1) is top-level: NO --thread-ts, carries the glance pointer
-  ! grep -q -- '--thread-ts' "$STUB_CALLS_DIR/call-1.line"
+  if grep -q -- '--thread-ts' "$STUB_CALLS_DIR/call-1.line"; then echo "the parent glance message wrongly carries a --thread-ts" >&2; false; fi
   grep -q 'details in thread' "$STUB_CALLS_DIR/call-1.line"
   # replies (calls 2-4) all thread under the PARENT's returned ts (call 1's)
   grep -q -- '--thread-ts 1717171711.000100' "$STUB_CALLS_DIR/call-2.line"
@@ -241,7 +241,7 @@ counts_with() { jq -n --argjson tasks "$(printf '%s\n' "$@" | jq -s '.')" '{task
   [ "$status" -eq 0 ]
   # exactly the parent glance, no thread replies
   [ "$(grep -c 'slack send' "$STUB_CALLS")" -eq 1 ]
-  ! grep -q -- '--thread-ts' "$STUB_CALLS_DIR/call-1.line"
+  if grep -q -- '--thread-ts' "$STUB_CALLS_DIR/call-1.line"; then echo "the sole parent message wrongly carries a --thread-ts" >&2; false; fi
   grep -qF '*1* opened' "$STUB_CALLS_DIR/call-1.line"
   # nothing is due, so no "details in thread" pointer
   ! grep -q 'details in thread' "$STUB_CALLS_DIR/call-1.line"
@@ -273,7 +273,7 @@ counts_with() { jq -n --argjson tasks "$(printf '%s\n' "$@" | jq -s '.')" '{task
   [ "$status" -eq 3 ]
   # parent was recorded (delivered before the failing reply)
   [ -f "$STUB_CALLS_DIR/call-1.line" ]
-  ! grep -q -- '--thread-ts' "$STUB_CALLS_DIR/call-1.line"
+  if grep -q -- '--thread-ts' "$STUB_CALLS_DIR/call-1.line"; then echo "the parent message wrongly carries a --thread-ts" >&2; false; fi
   echo "$output" | grep -q "FAILED to deliver"
 }
 

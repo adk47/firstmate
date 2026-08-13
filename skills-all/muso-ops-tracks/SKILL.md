@@ -16,8 +16,11 @@ depends-on:
   - muso-ops-audit
   - muso-slack-formatter
   - muso-query-writer
+  - muso-cli
 compatibility: |
-  Requires: muso-ops-admin (API gateway), Trino (track data).
+  Requires: muso-ops-admin (API gateway), Trino (track data), and a muso-cli
+  carrying the `tracks sources` verb group (Muso-AI/muso-cli#36) for the
+  analytics-link workflows.
 metadata:
   version: "1.1"
   source-repo: "Muso-AI/muso-skills"
@@ -65,44 +68,92 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 
 ### Manage Analytics Links
 
-**List links:**
+**Use `muso tracks sources` — do not hand-roll these payloads.** Every field
+name below is a trap that has cost real writes, and the CLI holds all of them
+still in typed code with golden tests. Hand-rolled `muso-admin-api.sh call`
+bodies are how the 2026-07-15 incident happened.
+
+> **Requires muso-cli >= 0.11.1** (the `tracks sources` verb group, Muso-AI/muso-cli#36).
+> Check before you rely on it:
+> ```bash
+> muso tracks --help 2>/dev/null | grep -qE '^[[:space:]]+sources[[:space:]]' || echo "CLI too old — escalate, do NOT hand-roll the payload"
+> ```
+> Test for the verb ROW, not the exit code: `muso tracks sources --help` prints the
+> parent `tracks` help and **exits 0** on a CLI that lacks the verb, so an
+> exit-status probe passes on exactly the version it must reject.
+> If the deployed CLI predates it, escalate to get muso-cli released rather than
+> reaching for `muso-admin-api.sh` — reconstructing these bodies by hand is the
+> exact failure this section exists to prevent.
+
+**List links** — the only evidence a source write landed:
 ```bash
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call GET "/admin/track/<track_id>/analytics-sources"
+muso --env prod --json tracks sources list <track_id>
 ```
 
 **Add link:**
 ```bash
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call POST "/admin/track/<track_id>/analytics-sources" \
-  '{"link":"https://open.spotify.com/track/..."}'
+muso --env prod --json tracks sources add <track_id> \
+  --link "https://open.spotify.com/track/..." --requester <you>@muso.ai
 ```
+The add reads the source list back and reports `attached` and `pending`. Trust
+those, not the HTTP status — see **Verify after writing** below.
 
 **Remove link:**
 ```bash
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call DELETE "/admin/track/<track_id>/analytics-sources" \
-  '{"linkId":"<link_id>"}'
+muso --env prod --json tracks sources remove <track_id> \
+  --link "https://open.spotify.com/track/..." --requester <you>@muso.ai --yes
 ```
+`--link` is required even when you know the link id: `deleteAnalyticsLink.js`
+runs `new URL(link)` before it ever looks at `linkId`, so an id-only body
+answers `400 Invalid link!`.
 
 🛑 **Bulk-gated (incident 2026-05-26).** This DELETE counts toward the bulk
 destructive budget — after 10 destructive DELETEs in 15 minutes the gate
-refuses further ones until you pass `--confirmed-by aaron --approval-msg-id <ts>`.
+refuses further ones until you pass `--confirmed-by aaron --approval-ref <slack-ts>`.
+(On `muso-admin-api.sh` that second flag is spelled `--approval-msg-id`; the CLI
+calls it `--approval-ref`. Use the CLI spelling with the commands above.)
 Removing analytics links in bulk to "clean up broken/pending sources" is the
 exact action that wiped 285 real source rows; the `in_progress=true, name=null`
 stubs carried live stream data. See `muso-ops-admin` → **Bulk Destructive Gate**.
 
 **Move link between tracks:**
 ```bash
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call PATCH "/admin/track/<track_id>/analytics-sources" \
-  '{"linkId":"<link_id>","fromTrackId":"<source_track_id>"}'
+muso --env prod --json tracks sources move <destination_track_id> \
+  --link-id <link_id> --requester <you>@muso.ai
 ```
+The track in the path is the **destination**. There is no source-track
+parameter — the PATCH body is `{id?, linkId?}` and any `fromTrackId` is
+silently ignored (`moveAnalyticsLink.js`).
 
 ⚠️ **A source can only be assigned to a single track.** If you see "Link is already assigned":
 1. Find which track currently has it
-2. Remove from incorrect track
-3. Add to correct track
+2. `tracks sources move` it onto the correct track (do NOT remove-then-add —
+   the remove is bulk-gated and destroys the captured counters)
+
+### Verify after writing
+
+**Incident 2026-07-15 → 2026-07-16.** Ops added 10 YouTube sources, reported
+success, and the requester came back with "analytics still at 0". Two separate
+mistakes, both avoidable here:
+
+1. **`200` is not evidence.** The add/remove/move endpoints all answer an empty
+   200 with no body and no link id. Only `tracks sources list` proves anything.
+   Re-run it and confirm the link is present.
+2. **`pending: true` means capture has not finished.** Capture is asynchronous.
+   Wait and re-check; do not report numbers off a pending source. If a source
+   is still pending long after, `muso tracks capture <track_id>` re-queues the
+   whole track at high priority.
+3. **A source attaches to a TRACK, not to a profile.** It only reaches a
+   profile's analytics if that profile holds a credit on that track. Verify
+   with `muso profiles credits list <profile_id>` — the TRACK column carries
+   the ids. Worked example: track `b7a75b06-f1ef-40c0-97be-df82ad6a3b75`
+   ("Mi Razón") carries a Tristana-produced YouTube video, but Tristana holds
+   no credit on it, so those 146k streams accrue to Patty Theone instead.
+4. **Report the entity you actually checked.** Name the id *and* the display
+   name in the reply. The same 2026-07-15 thread also carried a profile-merge
+   request, and the status readback was taken off that request's profile
+   (`7662f5b3…` = Keaton Simons) rather than the profile the sources belonged
+   to — which is why the work looked failed when it had succeeded.
 
 ### Merge Tracks
 
@@ -265,6 +316,10 @@ If the wrong credits trace to a wrong-artist raw link, consider also unlinking
 that raw profile so re-ingestion can't re-assert them — but see the mixed-raw
 warning in `muso-ops-profiles` → Unlink Raw Profile first.
 
+Credit removals do **not** refresh the profile's Collaborators list — that table
+is derived separately and needs its own rebuild. Finish with
+`muso-ops-collaborators`.
+
 ### Trigger Capture
 
 Force-refresh analytics data for a track:
@@ -333,7 +388,10 @@ the first two states.
 
 ## Common Issues (from Retool docs)
 
-- **"Link is already assigned to a different track"** → Find the current track, remove, then re-add
+- **"Link is already assigned to a different track"** → find which track has it, then
+  `tracks sources move` it onto the correct one. Do NOT remove-then-add: the remove is
+  bulk-gated and destroys the captured counters (see "A source can only be assigned to a
+  single track" above)
 - **Credits from Spotify are wrong** → User must fix on Spotify/distributor first. We mirror industry data.
 - **"Non-musical" link incorrectly marked** → Fix in Aurora stats DB: `is_not_music = false`. Updates next day.
 - **YouTube playlist claiming** → Assign the single YouTube link to any one of the user's tracks

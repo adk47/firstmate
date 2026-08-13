@@ -1,10 +1,10 @@
 name: external-pr-review
 
-# QA auto-review of PRs in OTHER Muso-AI repos (allowlist: the single source of
-# truth is scripts/lib/qa-external-repo-allowlist.sh — currently ads-manager,
-# auth, web-credits, web-credits-next, industry-data-processing, octave-ui,
-# core-backend, muso-cli, H-DevOps, analytics-worker, platform-data-processing),
-# reusing hydra's qa agent + muso-github-code-review skill.
+# QA auto-review of PRs in OTHER Muso-AI repos, reusing hydra's qa agent +
+# muso-github-code-review skill. The onboarded repos are enumerated in exactly
+# ONE place — scripts/lib/qa-external-repo-allowlist.sh; read that file for the
+# current list (a copy of it here just goes stale — this comment used to carry
+# one, and it had already drifted by the time tests-web-e2e was onboarded).
 #
 # Transport: a source repo fires a repository_dispatch into hydra carrying the PR
 # coordinates in client_payload. New repos use event_type "external-qa-review";

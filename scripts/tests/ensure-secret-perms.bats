@@ -49,12 +49,75 @@ mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
   [[ "$output" != *"tightened"* ]]
 }
 
-@test "ensure: non-.json files (e.g. .gitkeep) are NOT touched" {
+@test "ensure: .gitkeep — the one known non-secret — is NOT touched" {
   printf '' > "$HYDRA_SECRETS_DIR/.gitkeep"
   chmod 644 "$HYDRA_SECRETS_DIR/.gitkeep"
   run "$LIB"
   [ "$status" -eq 0 ]
   [ "$(mode_of "$HYDRA_SECRETS_DIR/.gitkeep")" = "644" ]   # untouched
+}
+
+# The pair to the .gitkeep test. The glob is deny-everything precisely so a
+# secret shape nobody anticipated is still guarded — an allow-list silently
+# exempted *.yaml for the entire life of this script, even though .gitignore
+# had listed secrets/*.yaml since day one.
+@test "ensure: an UNANTICIPATED extension is guarded (the allow-list gap)" {
+  for n in creds.yaml mercury-token.txt no-extension; do
+    printf 'x' > "$HYDRA_SECRETS_DIR/$n"; chmod 644 "$HYDRA_SECRETS_DIR/$n"
+  done
+  run "$LIB"
+  [ "$status" -eq 0 ]
+  for n in creds.yaml mercury-token.txt no-extension; do
+    [ "$(mode_of "$HYDRA_SECRETS_DIR/$n")" = "600" ]
+  done
+}
+
+# bash's `*` does not match a leading dot, so without dotglob a dotted store
+# would be silently skipped.
+@test "ensure: a DOTTED secret store (.env) is guarded, not skipped by the glob" {
+  printf 'K=v' > "$HYDRA_SECRETS_DIR/.env"
+  chmod 644 "$HYDRA_SECRETS_DIR/.env"
+  run "$LIB"
+  [ "$status" -eq 0 ]
+  [ "$(mode_of "$HYDRA_SECRETS_DIR/.env")" = "600" ]
+}
+
+@test "ensure: a subdirectory is not chmod'd as if it were a secret file" {
+  mkdir -p "$HYDRA_SECRETS_DIR/sub"; chmod 755 "$HYDRA_SECRETS_DIR/sub"
+  run "$LIB"
+  [ "$status" -eq 0 ]
+  [ "$(mode_of "$HYDRA_SECRETS_DIR/sub")" = "755" ]
+}
+
+# The pair to the .gitkeep test: widening the glob to *.env (2026-08-04, for
+# mercury.env) has to actually cover .env, or the guard silently exempts the
+# one secret it was widened for.
+@test "ensure: a too-open *.env secret (mercury.env) is tightened to 0600" {
+  printf 'MERCURY_API_KEY=x\n' > "$HYDRA_SECRETS_DIR/mercury.env"
+  chmod 644 "$HYDRA_SECRETS_DIR/mercury.env"
+  run "$LIB"
+  [ "$status" -eq 0 ]
+  [ "$(mode_of "$HYDRA_SECRETS_DIR/mercury.env")" = "600" ]
+  [[ "$output" == *"tightened mercury.env 644 -> 600"* ]]
+}
+
+@test "--check: a too-open *.env secret → exit 1 and names it, WITHOUT fixing it" {
+  printf 'MERCURY_API_KEY=x\n' > "$HYDRA_SECRETS_DIR/mercury.env"
+  chmod 644 "$HYDRA_SECRETS_DIR/mercury.env"
+  run "$LIB" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"mercury.env (644)"* ]]
+  [ "$(mode_of "$HYDRA_SECRETS_DIR/mercury.env")" = "644" ]
+}
+
+@test "ensure: *.json and *.env secrets are both covered in a single pass" {
+  printf 'x' > "$HYDRA_SECRETS_DIR/llm-provider-keys.json"; chmod 644 "$HYDRA_SECRETS_DIR/llm-provider-keys.json"
+  printf 'x' > "$HYDRA_SECRETS_DIR/mercury.env";            chmod 640 "$HYDRA_SECRETS_DIR/mercury.env"
+  run "$LIB"
+  [ "$status" -eq 0 ]
+  [ "$(mode_of "$HYDRA_SECRETS_DIR/llm-provider-keys.json")" = "600" ]
+  [ "$(mode_of "$HYDRA_SECRETS_DIR/mercury.env")" = "600" ]
+  [[ "$output" == *"tightened 2 too-open secret file(s)"* ]]
 }
 
 @test "ensure: a chmod-000 secret is NOT treated as too-open (0 group/other bits)" {

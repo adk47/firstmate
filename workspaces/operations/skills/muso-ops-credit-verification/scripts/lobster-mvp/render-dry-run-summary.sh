@@ -214,10 +214,26 @@ MUSO_UNAVAIL=$(echo "$INPUT" | jq -r '
   | any(. == false)
 ')
 if [[ "$MUSO_UNAVAIL" == "true" ]]; then
-  # No "see runlog": the lobster path writes no runlog jsonl. The failure
-  # reason (incl. the captured Trino error, post-#485) is on the fraud
-  # scorer's stderr, which lands in this run's agent/cron transcript.
-  TEXT+=$'\n\n:warning: muso-only Trino signal was UNAVAILABLE this run — fraud scores computed WITHOUT it (fail-soft; failure reason on the fraud scorer stderr in this run'"'"'s transcript).'
+  # The reason string now rides in-band on _fraud.muso_only_reason (carried
+  # from fraud-muso-only-lookup.sh's fail-soft wrapper through score-fraud-
+  # signals.sh — see fraud-issue-scorer-followups.md §1), so it can be
+  # surfaced HERE instead of only on the fraud scorer's stderr, which no
+  # operator reads (the 2026-08-01 escalation could not find the reason
+  # anywhere). Same credit shared with the availability check above; every
+  # credit in a run carries the same run-wide reason, so the first non-null
+  # one suffices.
+  MUSO_REASON=$(echo "$INPUT" | jq -r '
+    [ ((.would_approve // []) + (.would_uvn // []) + (.signal_fraud // []))[]
+      | ._fraud.muso_only_reason // empty ] | first // empty
+  ')
+  if [[ -n "$MUSO_REASON" ]]; then
+    TEXT+=$'\n\n:warning: muso-only Trino signal was UNAVAILABLE this run — fraud scores computed WITHOUT it (fail-soft). Reason: '"$MUSO_REASON"
+  else
+    # Defensive fallback: an older score-fraud-signals.sh build (predating
+    # the reason field) or a wrapper without it. No "see runlog": the
+    # lobster path writes no runlog jsonl.
+    TEXT+=$'\n\n:warning: muso-only Trino signal was UNAVAILABLE this run — fraud scores computed WITHOUT it (fail-soft; failure reason on the fraud scorer stderr in this run'"'"'s transcript).'
+  fi
 fi
 
 fi # end no-op-compaction else (full-block path)

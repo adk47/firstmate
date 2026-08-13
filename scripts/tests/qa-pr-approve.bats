@@ -84,10 +84,23 @@ case "$sub" in
     case "$action" in
       view)
         if printf '%s ' "$@" | grep -q 'statusCheckRollup'; then
+          # The stub serves DATA and lets the script do its own counting. It used
+          # to echo a pre-counted number, which only worked while the count was
+          # computed inside the gh --jq filter; Guard 6 now fetches the raw
+          # rollup so it can exclude policy-listed advisory checks with a jq
+          # --argjson (impossible through `gh --jq`). A stub that emulates the
+          # implementation instead of the API silently stops testing it.
           if [ -n "${STUB_ROLLUP_JSON:-}" ]; then
             printf '%s' "$STUB_ROLLUP_JSON" | jq -r "$(_jqflt "$@")"
           else
-            echo "${STUB_BAD_CHECKS:-0}"               # count of non-passing checks
+            # Synthesize one passing check plus STUB_BAD_CHECKS failing ones.
+            jq -rn --argjson n "${STUB_BAD_CHECKS:-0}" \
+              '{statusCheckRollup:
+                 ([{__typename:"CheckRun",name:"ci",conclusion:"SUCCESS"}]
+                  + [range($n) | {__typename:"CheckRun",
+                                  name:("failing-check-\(.)"),
+                                  conclusion:"FAILURE"}])}' \
+              | jq -r "$(_jqflt "$@")"
           fi
         elif printf '%s ' "$@" | grep -q 'headRefOid'; then
           echo "${STUB_HEAD_OID:-0123456789abcdef0123456789abcdef01234567}"  # Guard 8 report key
@@ -141,7 +154,7 @@ logfile() { echo "$QA_PR_APPROVE_LOG_DIR/$(date -u +%F).jsonl"; }
 @test "non-Muso-AI repo → exit 3, no approval, no log" {
   run "$SCRIPT" SomeOrg/secret 123 "$NICK"
   [ "$status" -eq 3 ]
-  ! grep -q '^approve$' "$STUB_CALLS"
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
   [ ! -f "$(logfile)" ]
 }
 
@@ -354,10 +367,10 @@ NO_THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}
   ! grep -q '^approve$' "$STUB_CALLS"
 }
 
-@test "guard8: WARN + QA-filed marker thread RESOLVED by a human → approves (resolution is the ack)" {
+@test "guard8: WARN + QA-filed marker thread resolved by an INDEPENDENT human → approves (resolution is the ack)" {
   ri_report WARN
   THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
-    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** PR deletes recent main work","author":{"login":"adk47"}}]}}
+    {"isResolved":true,"resolvedBy":{"login":"aaronkaufman"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** PR deletes recent main work","author":{"login":"adk47"}}]}}
   ]}}}}}'
   STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
     run "$SCRIPT" core-backend 123 "$NICK"
@@ -396,6 +409,112 @@ NO_THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}
     run "$SCRIPT" core-backend 123 "$NICK"
   [ "$status" -eq 10 ]
   ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# --- Guard 8: staged rollout of the independence requirement -----------------
+# The rule ships DISABLED so the PR introducing it is not judged against itself
+# (a head created before the rule existed can never satisfy it). Default must be
+# byte-for-byte the previous behaviour; these two tests pin both halves of that.
+
+@test "guard8 rollout: flag OFF (default) → an author-resolved marker still approves" {
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"nsollazzo"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** PR deletes recent main work","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 rollout: flag OFF still requires the marker thread to EXIST" {
+  # Disabling the independence check must not disable the gate itself.
+  ri_report WARN
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$NO_THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# --- Guard 8: the acknowledgment must come from an INDEPENDENT human ---------
+# Observed on hydra#747: all eight REBASE WARNING threads were filed by the bot
+# and resolved by the PR author, so the gate passed while nobody but the author
+# had ever looked. The skill said "never resolve it yourself"; prose is not
+# enforcement. These tests are that enforcement.
+
+@test "guard8: marker thread resolved by the PR AUTHOR → exit 10 (self-certification)" {
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"nsollazzo"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** PR deletes recent main work","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  echo "$output" | grep -q 'independent human'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: author self-resolves under a DIFFERENT-CASE login → still exit 10" {
+  # GitHub logins are case-insensitive; a case-flipped resolver must not slip past.
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"NSollazzo"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** x","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: marker thread resolved by the BOT ITSELF → exit 10 (QA cannot clear its own finding)" {
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"adk47"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** x","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: bot resolving under the [bot]-suffixed login form → still exit 10" {
+  # The resolver is normalised through the same norm/bot_logins set as the filer,
+  # so app/x, x[bot] and x are all recognised as the bot.
+  test_policy "$DEFAULT_POLICY"
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"muso-qa-bot[bot]"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** x","author":{"login":"muso-qa-bot"}}]}}
+  ]}}}}}'
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: resolvedBy absent on a resolved thread → exit 10 (no resolver, no ack)" {
+  # GraphQL can report isResolved with a null resolvedBy; that is not an ack.
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":null,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** x","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8: two marker threads, only one independently resolved → approves" {
+  # A re-filed marker (same head) must not be blocked by a stale author-resolved
+  # sibling: one genuine independent ack is enough.
+  ri_report WARN
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"nsollazzo"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** first pass","author":{"login":"adk47"}}]}},
+    {"isResolved":true,"resolvedBy":{"login":"aaronkaufman"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** re-filed","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
 }
 
 @test "guard8: report status ERROR → exit 10 (rebase state unverified, fail closed)" {
@@ -511,15 +630,180 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
   ! grep -q '^approve$' "$STUB_CALLS"
 }
 
-@test "guard3b: changed-file count mismatch with paginated REST list → exit 11 (fail closed)" {
+# ---------------------------------------------------------------------------
+# Notice 3b — sensitive paths ALERT, they no longer block (changed 2026-08-03).
+#
+# These tests used to assert exit 11. They now assert that the SAME path is
+# still DETECTED and named, and that the approval proceeds. The detection is
+# the part worth keeping: if these stopped matching, the alert would go quiet
+# and nobody would know the bot had approved a policy or credential change.
+# ---------------------------------------------------------------------------
+
+# assert_alerted <substring> — an alert was surfaced, and it mentions <substring>
+assert_alerted() {
+  echo "$output" | grep -q 'ALERT' || { echo "expected an ALERT, got: $output" >&2; return 1; }
+  echo "$output" | grep -qF "$1" || { echo "ALERT did not mention '$1': $output" >&2; return 1; }
+}
+
+@test "notice3b: changed-file count mismatch → alerts, still approves (no longer fail-closed)" {
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":[],"sensitive_paths":{"*":[".github/workflows/"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES="a.ts b.ts" STUB_CHANGED_COUNT=130 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  assert_alerted 'reports 130 changed files'
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "notice3b: count mismatch DOES still fail closed when sensitive_paths_blocking is set" {
+  # The escape hatch: a path opted back into blocking cannot be verified on a
+  # partial file list, so the wrapper must refuse rather than approve blind.
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":[".github/workflows/"]},
+    "sensitive_paths_blocking":{"*":["secrets/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES="a.ts b.ts" STUB_CHANGED_COUNT=130 run "$SCRIPT" core-backend 123 "$NICK"
   [ "$status" -eq 11 ]
-  echo "$output" | grep -q 'reports 130 changed files'
-  echo "$output" | grep -q 'returned 2'
   ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "notice3b: a path in sensitive_paths_blocking still refuses (exit 11)" {
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]},
+    "sensitive_paths_blocking":{"*":["secrets/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES="secrets/token.conf" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 11 ]
+  echo "$output" | grep -q 'BLOCKING sensitive path'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "alerts: the STDOUT replay is emitted, not just the inline stderr copy" {
+  # bats merges stderr into $output, so assert_alerted alone is satisfied by
+  # EITHER channel — the stdout replay block could be deleted with zero test
+  # failures. That replay is what SKILL.md tells the agent to relay, and since
+  # sensitive-path blocking was removed it IS the surviving protection.
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES="policies/qa-approval-policy.json" \
+    run --separate-stderr "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  # the authoritative list on STDOUT
+  echo "$output" | grep -q '── 1 ALERT(S) on this run'
+  echo "$output" | grep -qF 'policies/qa-approval-policy.json'
+  # and the inline copy on STDERR, for the cron journal
+  echo "$stderr" | grep -qF 'policies/qa-approval-policy.json'
+}
+
+@test "alerts: a REFUSAL still replays the alerts (they precede every guard that dies)" {
+  # Every alert() call site is followed by refusal paths. Replaying only on the
+  # success path dropped the alert exactly when a human was being pulled in.
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=1 \
+    STUB_FILES="policies/qa-approval-policy.json" \
+    run --separate-stderr "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 8 ]
+  echo "$output" | grep -q 'ALERT(S) on this run'
+  echo "$output" | grep -qF 'policies/qa-approval-policy.json'
+}
+
+@test "guard6: a PR editing .github/workflows/ gets NO advisory exemption" {
+  # GitHub runs a same-repo PR's workflows from the PR HEAD, so job names are
+  # author-controlled. Without this, naming a job "Deploy pre-flight — validate"
+  # would exempt the entire validate job (skill-drift, secrets scan, JSON lint…)
+  # and report green on a visibly red PR. Notice 3b no longer refuses on
+  # .github/workflows/, so this is the gate that closes it.
+  ROLLUP='{"statusCheckRollup":[
+    {"__typename":"CheckRun","name":"pr-validate","conclusion":"SUCCESS"},
+    {"__typename":"CheckRun","name":"Deploy pre-flight (rsync)","conclusion":"FAILURE"}]}'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]},
+    "advisory_checks":{"*":["Deploy pre-flight"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_ROLLUP_JSON="$ROLLUP" \
+    STUB_FILES=".github/workflows/pr-validate.yml" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 8 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard6: file-list failure + workflow-name spoof → NO exemption (exit 8)" {
+  # The combined case. file_trouble() alerts but leaves changed_files UNSET, so a
+  # gate written as `[ -n "$changed_files" ] && grep workflows` was SKIPPED on a
+  # transient files-API failure and PRESERVED the exemption — a fail-open in the
+  # gate whose whole job is closing one. Unknown file list ⇒ no exemption.
+  ROLLUP='{"statusCheckRollup":[
+    {"__typename":"CheckRun","name":"pr-validate","conclusion":"SUCCESS"},
+    {"__typename":"CheckRun","name":"Deploy pre-flight — validate","conclusion":"FAILURE"}]}'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]},
+    "advisory_checks":{"*":["Deploy pre-flight"]}}'
+  # STUB_CHANGED_COUNT mismatches the returned list -> file_trouble -> unset list
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_ROLLUP_JSON="$ROLLUP" \
+    STUB_FILES="a.ts b.ts" STUB_CHANGED_COUNT=99 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 8 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "alerts: a REFUSAL never claims the PR was approved" {
+  # die() replays alerts, so any alert asserting "auto-approved" would be a lie
+  # on every refusal path. Alert text must be state-neutral.
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=1 \
+    STUB_FILES="policies/qa-approval-policy.json" \
+    run --separate-stderr "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 8 ]
+  # the alert still surfaces...
+  echo "$output" | grep -qF 'policies/qa-approval-policy.json'
+  # ...but never asserts an approval that did not happen
+  if echo "$output" | grep -qiE 'was auto-approved|approved .*#123 with'; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard6 STABILITY: a PR NOT editing workflows keeps its advisory exemption" {
+  ROLLUP='{"statusCheckRollup":[
+    {"__typename":"CheckRun","name":"pr-validate","conclusion":"SUCCESS"},
+    {"__typename":"CheckRun","name":"Deploy pre-flight (rsync)","conclusion":"FAILURE"}]}'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]},
+    "advisory_checks":{"*":["Deploy pre-flight"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_ROLLUP_JSON="$ROLLUP" \
+    STUB_FILES="src/app.ts" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "notice3b: a MALFORMED sensitive_paths_blocking refuses (exit 11), never 'nothing blocks'" {
+  # It is the only surviving hard path gate, so it must fail CLOSED. A
+  # `(.key // []) || echo '[]'` read would collapse "malformed" into "empty" and
+  # silently disable the last gate — the bug class lib/qa-policy.sh exists for.
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]},
+    "sensitive_paths_blocking":"not-an-object"}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES="src/app.ts" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 11 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "notice3b: an ABSENT sensitive_paths_blocking is fine (readable, nothing blocks)" {
+  # Stability pair: absent must stay distinguishable from malformed, or the
+  # fail-closed read above would block every PR in the default config.
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_FILES="src/app.ts" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "notice3b: sensitive_paths_blocking ships EMPTY, so nothing blocks by default" {
+  pol="$HYDRA_REPO/policies/qa-approval-policy.json"
+  run jq -e '(.sensitive_paths_blocking // {}) | length == 0' "$pol"
+  [ "$status" -eq 0 ]
 }
 
 @test "guard3b: >100 ordinary files from paginated REST → approves" {
@@ -548,24 +832,24 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES_PAGE_1="$page1" STUB_FILES_PAGE_2="$page2" STUB_CHANGED_COUNT=135 \
     run "$SCRIPT" core-backend 123 "$NICK"
-  [ "$status" -eq 11 ]
-  echo "$output" | grep -q 'policies/qa-approval-policy.json'
-  ! grep -q '^approve$' "$STUB_CALLS"
+  [ "$status" -eq 0 ]
+  assert_alerted 'policies/qa-approval-policy.json'
+  grep -q '^approve$' "$STUB_CALLS"
 }
 
-@test "guard3b: rename out of a sensitive path checks previous_filename → exit 11" {
+@test "notice3b: rename out of a sensitive path still checks previous_filename → alerts" {
   files='[[{"filename":"src/app.ts","status":"modified"}],
     [{"filename":"archive/old-policy.json","previous_filename":"policies/qa-approval-policy.json","status":"renamed"}]]'
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES_JSON="$files" STUB_CHANGED_COUNT=2 run "$SCRIPT" core-backend 123 "$NICK"
-  [ "$status" -eq 11 ]
-  echo "$output" | grep -q 'policies/qa-approval-policy.json'
-  ! grep -q '^approve$' "$STUB_CALLS"
+  [ "$status" -eq 0 ]
+  assert_alerted 'policies/qa-approval-policy.json'
+  grep -q '^approve$' "$STUB_CALLS"
 }
 
-@test "guard3b: duplicate filename across REST pages → exit 11 (fail closed)" {
+@test "notice3b: duplicate filename across REST pages → alerts, still approves" {
   files="$(jq -nc '
     ([range(1; 101) | {filename: ("src/file-" + tostring + ".ts"), status: "modified"}]) as $page1
     | [$page1, [{filename: "src/file-1.ts", status: "modified"}]]')"
@@ -573,50 +857,66 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
     "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES_JSON="$files" STUB_CHANGED_COUNT=101 run "$SCRIPT" core-backend 123 "$NICK"
-  [ "$status" -eq 11 ]
-  echo "$output" | grep -q 'duplicate'
-  ! grep -q '^approve$' "$STUB_CALLS"
+  [ "$status" -eq 0 ]
+  assert_alerted 'duplicate'
+  grep -q '^approve$' "$STUB_CALLS"
 }
 
-@test "guard3b: empty filename in REST row → exit 11 (fail closed)" {
+@test "notice3b: empty filename in REST row → alerts, still approves" {
   files='[[{"filename":"","status":"modified"}]]'
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES_JSON="$files" STUB_CHANGED_COUNT=1 run "$SCRIPT" core-backend 123 "$NICK"
-  [ "$status" -eq 11 ]
-  echo "$output" | grep -q 'parse'
-  ! grep -q '^approve$' "$STUB_CALLS"
+  [ "$status" -eq 0 ]
+  assert_alerted 'parse'
+  grep -q '^approve$' "$STUB_CALLS"
 }
 
-@test "guard3b: empty previous_filename on renamed REST row → exit 11 (fail closed)" {
+@test "notice3b: empty previous_filename on renamed REST row → alerts, still approves" {
   files='[[{"filename":"archive/policy.json","previous_filename":"","status":"renamed"}]]'
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES_JSON="$files" STUB_CHANGED_COUNT=1 run "$SCRIPT" core-backend 123 "$NICK"
-  [ "$status" -eq 11 ]
-  echo "$output" | grep -q 'parse'
-  ! grep -q '^approve$' "$STUB_CALLS"
+  [ "$status" -eq 0 ]
+  assert_alerted 'parse'
+  grep -q '^approve$' "$STUB_CALLS"
 }
 
-@test "guard3b: unknown REST file status → exit 11 (fail closed)" {
+@test "notice3b: unknown REST file status → alerts, still approves" {
   files='[[{"filename":"src/app.ts","status":"mystery"}]]'
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":[],"sensitive_paths":{"*":["policies/"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES_JSON="$files" STUB_CHANGED_COUNT=1 run "$SCRIPT" core-backend 123 "$NICK"
-  [ "$status" -eq 11 ]
-  echo "$output" | grep -q 'parse'
-  ! grep -q '^approve$' "$STUB_CALLS"
+  [ "$status" -eq 0 ]
+  assert_alerted 'parse'
+  grep -q '^approve$' "$STUB_CALLS"
 }
 
-@test "guard3b: empty sensitive_paths → exit 11 (a dropped key must not disable the guard)" {
+@test "notice3b: a DROPPED sensitive_paths key alerts (the guard is disabled fleet-wide)" {
+  # Previously exit 11, on the reasoning that a dropped key must not silently
+  # disable the guard. The guard no longer blocks, so the equivalent protection
+  # is that the DEGRADATION IS ANNOUNCED rather than passing silently.
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[]}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  assert_alerted 'no sensitive_paths key at all'
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "notice3b STABILITY: a present-but-empty sensitive_paths does NOT cry wolf" {
+  # Pairs with the test above. `{}` (or a repo with no entries) is normal
+  # operation, not breakage — alerting there put a false "I am broken" line on
+  # every single approval, which is how a real alert gets tuned out.
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":[],"sensitive_paths":{}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
-  [ "$status" -eq 11 ]
-  ! grep -q '^approve$' "$STUB_CALLS"
+  [ "$status" -eq 0 ]
+  if echo "$output" | grep -q 'ALERT'; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  grep -q '^approve$' "$STUB_CALLS"
 }
 
 @test "identity: gh api user 403s AND Guard 8 WARN → marker thread still resolves (the \$me-empty bug)" {
@@ -625,7 +925,7 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
   test_policy "$DEFAULT_POLICY"
   ri_report WARN
   THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
-    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** rebase dropped work","author":{"login":"muso-qa-bot"}}]}}
+    {"isResolved":true,"resolvedBy":{"login":"aaronkaufman"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** rebase dropped work","author":{"login":"muso-qa-bot"}}]}}
   ]}}}}}'
   STUB_ME="" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
     run "$SCRIPT" core-backend 123 "$NICK"
@@ -640,7 +940,7 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
   test_policy "$DEFAULT_POLICY"
   ri_report WARN
   THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
-    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** filed pre-cutover","author":{"login":"adk47"}}]}}
+    {"isResolved":true,"resolvedBy":{"login":"aaronkaufman"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** filed pre-cutover","author":{"login":"adk47"}}]}}
   ]}}}}}'
   STUB_ME="muso-qa-bot[bot]" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
     run "$SCRIPT" core-backend 123 "$NICK"
@@ -652,7 +952,7 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
   test_policy "$DEFAULT_POLICY"
   ri_report WARN
   THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
-    {"isResolved":true,"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** x","author":{"login":"muso-qa-bot"}}]}}
+    {"isResolved":true,"resolvedBy":{"login":"aaronkaufman"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** x","author":{"login":"muso-qa-bot"}}]}}
   ]}}}}}'
   STUB_ME="muso-qa-bot[bot]" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
     run "$SCRIPT" core-backend 123 "$NICK"
@@ -670,33 +970,40 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
 # Guard 3b — sensitive paths (exit 11)
 # ---------------------------------------------------------------------------
 
-@test "guard3b: PR touching policies/ → exit 11, never approves, never logs" {
+@test "notice3b: PR touching policies/ → approves, logs, and ALERTS by path" {
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"],"Muso-AI/hydra":["policies/","secrets/"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES="README.md policies/qa-approval-policy.json" \
     QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 700 "$NICK"
-  [ "$status" -eq 11 ]
-  echo "$output" | grep -q 'sensitive path'
-  ! grep -q '^approve$' "$STUB_CALLS"
-  [ ! -f "$(logfile)" ]
+  [ "$status" -eq 0 ]
+  assert_alerted 'policies/qa-approval-policy.json'
+  grep -q '^approve$' "$STUB_CALLS"
+  # Guard 5 still holds: an approval is logged before it is written.
+  [ -f "$(logfile)" ]
 }
 
-@test "guard3b: the bot cannot approve a change to its own approval script" {
+@test "notice3b: the bot CAN now approve a change to its own approval script — but alerts" {
+  # This is the self-reference that was deliberately given up on 2026-08-03.
+  # The test exists to make that explicit rather than letting it look like an
+  # oversight: if this ever silently stops alerting, the trade has gone bad.
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"],"Muso-AI/hydra":["scripts/qa-pr-approve.sh"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES="scripts/qa-pr-approve.sh" \
     QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 701 "$NICK"
-  [ "$status" -eq 11 ]
+  [ "$status" -eq 0 ]
+  assert_alerted 'scripts/qa-pr-approve.sh'
+  grep -q '^approve$' "$STUB_CALLS"
 }
 
-@test "guard3b: sensitive paths apply regardless of author (stronger than the old self-approve block)" {
+@test "notice3b: sensitive paths are detected regardless of author" {
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":[],"sensitive_paths":{"*":[".github/workflows/"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES=".github/workflows/deploy.yml" run "$SCRIPT" core-backend 123 "$NICK"
-  [ "$status" -eq 11 ]
+  [ "$status" -eq 0 ]
+  assert_alerted '.github/workflows/deploy.yml'
 }
 
 @test "guard3b: ordinary source paths are unaffected → approves" {
@@ -750,29 +1057,54 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
 # Code-owner honesty
 # ---------------------------------------------------------------------------
 
-@test "codeowner repos: approval succeeds but says it does NOT unblock the merge" {
+@test "codeowner note: SILENT when app_repos is empty (the host login IS the code owner)" {
+  # The note used to fire for every repo in require_human_codeowner_repos, which
+  # was false: with app_repos empty every call runs as the host account (adk47),
+  # and CODEOWNERS grants `* @adk47`, so the approval DOES clear the code-owner
+  # gate. Telling people otherwise sent them looking for a human they did not need.
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":["Muso-AI/hydra"],"sensitive_paths":{"*":["nope/"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 702 "$NICK"
   [ "$status" -eq 0 ]
   grep -q '^approve$' "$STUB_CALLS"
-  echo "$output" | grep -q 'still needs a human code owner'
+  ! echo "$output" | grep -q 'does NOT clear the code-owner gate'
 }
 
-@test "guard3b: the bot cannot approve a PR that edits the reviewer SKILL itself" {
+@test "codeowner note: the condition requires BOTH lists, not just require_human_codeowner_repos" {
+  # The App path itself is not exercisable here: a non-empty identity.app_repos
+  # sends qa-gh.sh off to mint a real GitHub App installation token, which this
+  # harness has no credentials for (that is why no other test sets it). So the
+  # CONDITION is asserted directly — it is the part that regressed, and the part
+  # that decides whether people are told to go find a human they do not need.
+  cond='((.require_human_codeowner_repos // []) | index($r)) and ((.identity.app_repos // []) | index($r))'
+
+  # app_repos empty → host identity (adk47, the universal code owner) → silent
+  run jq -e --arg r "Muso-AI/hydra" "$cond" <<'P'
+{"identity":{"app_repos":[]},"require_human_codeowner_repos":["Muso-AI/hydra"]}
+P
+  [ "$status" -ne 0 ]
+
+  # repo served by the App → the App can never be a CODEOWNER → note fires
+  run jq -e --arg r "Muso-AI/hydra" "$cond" <<'P'
+{"identity":{"app_repos":["Muso-AI/hydra"]},"require_human_codeowner_repos":["Muso-AI/hydra"]}
+P
+  [ "$status" -eq 0 ]
+}
+
+@test "notice3b: a PR editing the reviewer SKILL is alerted on, and approved" {
   # The skill is as load-bearing as the wrapper: a PR that edits it to skip the
-  # 7-lens workflow, or to post qa-review=success directly, weakens the gate just
-  # as effectively as editing qa-pr-approve.sh. Without this the bot could
-  # approve the change that removes its own review authority.
+  # lens workflow, or to post qa-review=success directly, weakens the gate just
+  # as effectively as editing qa-pr-approve.sh. That is now an ALERT rather than
+  # a refusal, so the alert is the whole protection — it must keep firing.
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"],"Muso-AI/hydra":["skills-all/muso-github-code-review/"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES="skills-all/muso-github-code-review/SKILL.md" \
     QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 900 "$NICK"
-  [ "$status" -eq 11 ]
-  echo "$output" | grep -q 'sensitive path'
-  ! grep -q '^approve$' "$STUB_CALLS"
+  [ "$status" -eq 0 ]
+  assert_alerted 'skills-all/muso-github-code-review/SKILL.md'
+  grep -q '^approve$' "$STUB_CALLS"
 }
 
 @test "guard3b: the SHIPPED policy actually covers the reviewer skill and the QA scripts" {
@@ -786,21 +1118,136 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
   done
 }
 
-@test "guard3b: .github/CODEOWNERS is covered (GitHub honours it at HIGHER precedence than root)" {
+@test "notice3b: .github/CODEOWNERS is detected (GitHub honours it ABOVE the root file)" {
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"],"Muso-AI/hydra":["CODEOWNERS",".github/CODEOWNERS","docs/CODEOWNERS"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES=".github/CODEOWNERS" QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 901 "$NICK"
-  [ "$status" -eq 11 ]
-  ! grep -q '^approve$' "$STUB_CALLS"
+  [ "$status" -eq 0 ]
+  assert_alerted '.github/CODEOWNERS'
 }
 
-@test "guard3b: docs/CODEOWNERS is covered too" {
+@test "notice3b: docs/CODEOWNERS is detected too" {
   test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
     "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"],"Muso-AI/hydra":["CODEOWNERS",".github/CODEOWNERS","docs/CODEOWNERS"]}}'
   STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     STUB_FILES="docs/CODEOWNERS" QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 902 "$NICK"
-  [ "$status" -eq 11 ]
+  [ "$status" -eq 0 ]
+  assert_alerted 'docs/CODEOWNERS'
+}
+
+# ---------------------------------------------------------------------------
+# Guard 6 — advisory checks (added 2026-08-03)
+# ---------------------------------------------------------------------------
+
+@test "guard6: a RED advisory check no longer blocks — approves and alerts" {
+  # hydra#780: verdict GO, 0 findings, blocked solely because the deploy
+  # pre-flight rsync dry-run was red against live server state.
+  ROLLUP='{"statusCheckRollup":[
+    {"__typename":"CheckRun","name":"pr-validate","conclusion":"SUCCESS"},
+    {"__typename":"CheckRun","name":"Deploy pre-flight (rsync --delete dry-run vs /opt/hydra/)","conclusion":"FAILURE"}]}'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]},
+    "advisory_checks":{"*":["Deploy pre-flight"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_ROLLUP_JSON="$ROLLUP" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  assert_alerted 'Deploy pre-flight'
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard6: a red NON-advisory check still refuses (exit 8)" {
+  ROLLUP='{"statusCheckRollup":[
+    {"__typename":"CheckRun","name":"pr-validate","conclusion":"FAILURE"},
+    {"__typename":"CheckRun","name":"Deploy pre-flight (rsync)","conclusion":"FAILURE"}]}'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]},
+    "advisory_checks":{"*":["Deploy pre-flight"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_ROLLUP_JSON="$ROLLUP" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 8 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard6: with NO advisory_checks configured, a red deploy pre-flight still blocks" {
+  # Stability pair for the discrimination test above: the exemption must come
+  # from the policy, not from the check's name looking infrastructural.
+  ROLLUP='{"statusCheckRollup":[
+    {"__typename":"CheckRun","name":"pr-validate","conclusion":"SUCCESS"},
+    {"__typename":"CheckRun","name":"Deploy pre-flight (rsync)","conclusion":"FAILURE"}]}'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_ROLLUP_JSON="$ROLLUP" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 8 ]
+}
+
+@test "guard6: an all-advisory rollup still refuses, and SAYS so accurately" {
+  # Both this and the empty-rollup case refuse — neither proves CI gated the PR —
+  # but they must not share a message. The old code answered "did CI run" from
+  # the FILTERED array, so this case reported "no checks exist", which was false.
+  ROLLUP='{"statusCheckRollup":[
+    {"__typename":"CheckRun","name":"Deploy pre-flight (rsync)","conclusion":"SUCCESS"}]}'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]},
+    "advisory_checks":{"*":["Deploy pre-flight"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_ROLLUP_JSON="$ROLLUP" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 8 ]
+  echo "$output" | grep -q 'advisory-exempt'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard6: a genuinely EMPTY rollup refuses with the no-checks message" {
+  ROLLUP='{"statusCheckRollup":[]}'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]},
+    "advisory_checks":{"*":["Deploy pre-flight"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_ROLLUP_JSON="$ROLLUP" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 8 ]
+  echo "$output" | grep -q 'no non-qa-review checks exist'
+}
+
+@test "guard6: advisory matching is startswith, NOT contains (author-controlled names)" {
+  # .github/workflows/ is only alert-guarded now, so a PR can add a job. A
+  # `contains` test would let "Sneaky Deploy pre-flight shim" buy an exemption.
+  ROLLUP='{"statusCheckRollup":[
+    {"__typename":"CheckRun","name":"pr-validate","conclusion":"SUCCESS"},
+    {"__typename":"CheckRun","name":"Sneaky Deploy pre-flight shim","conclusion":"FAILURE"}]}'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]},
+    "advisory_checks":{"*":["Deploy pre-flight"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_ROLLUP_JSON="$ROLLUP" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 8 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard6: the SHIPPED policy exempts the deploy pre-flight, per-repo" {
+  pol="$HYDRA_REPO/policies/qa-approval-policy.json"
+  run jq -e '(.advisory_checks["Muso-AI/hydra"] // []) | index("Deploy pre-flight")' "$pol"
+  [ "$status" -eq 0 ]
+}
+
+@test "guard6: the SHIPPED policy names only REAL check names, never step names" {
+  # A gate that is a STEP inside another job can never appear in the rollup —
+  # only its enclosing job does. Listing one is dead config that reads as
+  # protection. These are the check names hydra actually publishes.
+  pol="$HYDRA_REPO/policies/qa-approval-policy.json"
+  real='["Bats","Deploy pre-flight","Plugin tests","Python syntax check","Python unit tests","Shellcheck","pr-title","qa-review","validate"]'
+  run jq -e --argjson real "$real" '
+    [ (.advisory_checks // {}) | .[][] ]
+    | all(. as $e | $real | any(startswith($e) or ($e | startswith(.))))' "$pol"
+  [ "$status" -eq 0 ]
+}
+
+@test "guard6: the SHIPPED policy never exempts the validate job" {
+  # validate carries the cron-orphan / doctrine / lint gates. Exempting it to
+  # reach one live-state step inside it would silence all of them.
+  pol="$HYDRA_REPO/policies/qa-approval-policy.json"
+  run jq -e '[ (.advisory_checks // {}) | .[][] ] | any(. == "validate")' "$pol"
+  [ "$status" -ne 0 ]
 }
 
 @test "guard3b: the SHIPPED policy covers all three GitHub CODEOWNERS locations" {
@@ -833,4 +1280,336 @@ DEFAULT_POLICY='{"identity":{"bot_logins":["muso-qa-bot","muso-qa-bot[bot]","adk
   STUB_ME="muso-qa-bot" STUB_AUTHOR="adk47" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
   [ "$status" -eq 0 ]
   grep -q '^approve$' "$STUB_CALLS"
+}
+
+# ---------------------------------------------------------------------------
+# Guard 8 — cross-head ack carryover (warn_digest)
+# A human resolving a REBASE WARNING judges CONTENT, not a sha. When a later
+# head's report carries a byte-identical warn_digest, that judgement still
+# applies, so the ack carries forward instead of re-filing. Everything else
+# still fails closed. (70% of hydra's rebase-warned PRs re-filed across heads;
+# PR #673 collected 11 acks — an ack treadmill trains rubber-stamping.)
+# ---------------------------------------------------------------------------
+
+PRIOR_OID="fedcba9876543210fedcba9876543210fedcba98"   # sha7 = fedcba9
+DIG_A="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"   # 64 hex
+DIG_B="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"   # 64 hex
+
+ri_report_d() {  # <status> <warn_digest> [head_oid] — report carrying a digest
+  local head="${3:-$HEAD_OID}"
+  mkdir -p "$QA_REBASE_STATE_DIR"
+  printf '{"repo":"Muso-AI/core-backend","pr":123,"head_sha":"%s","status":"%s","warn_digest":"%s"}' \
+    "$head" "$1" "$2" > "$QA_REBASE_STATE_DIR/Muso-AI__core-backend-pr-123-${head}.json"
+}
+
+prior_thread() {  # <isResolved> <sha7> <filer> [resolvedBy-login]
+  # resolvedBy omitted entirely when the 4th arg is absent — GraphQL reports a
+  # resolved thread with a null resolvedBy, and the carryover must grade that
+  # the same way the fresh-thread path does.
+  local resolved_by=""
+  if [ -n "${4:-}" ]; then
+    resolved_by="$(printf '"resolvedBy":{"login":"%s"},' "$4")"
+  fi
+  printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":%s,%s"comments":{"nodes":[{"body":"🟡 **Important — REBASE WARNING [%s]** PR deletes recent main work","author":{"login":"%s"}}]}}]}}}}}' \
+    "$1" "$resolved_by" "$2" "$3"
+}
+
+@test "guard8 carryover: prior head RESOLVED + identical warn_digest → approves without a new thread" {
+  ri_report_d WARN "$DIG_A"                      # current head
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"         # the acked head
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+  echo "$output" | grep -q 'carries forward'
+}
+
+@test "guard8 carryover: prior head resolved but DIFFERENT warn_digest → exit 10 (no inherited ack)" {
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_B" "$PRIOR_OID"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover: identical digest but prior thread filed by a non-bot → exit 10 (forged ack)" {
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 nsollazzo)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover: identical digest but prior thread UNRESOLVED → blocked (Guard 7 first)" {
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread false fedcba9 adk47)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 9 ]   # an unresolved 🟡 is Guard 7's to block; never an ack
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover: report predating the digest field (no warn_digest) → exit 10" {
+  ri_report WARN                                  # legacy report, no warn_digest
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover: no prior report at all → exit 10 (unchanged behaviour)" {
+  ri_report_d WARN "$DIG_A"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$NO_THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# --- carryover x staged independence rollout --------------------------------
+# The carryover is the cheapest possible route around the independence rule: if
+# a self-cleared ack carried forward, an author could self-resolve once on head
+# A and ride it on every later head. These pin that the carried ack clears the
+# SAME bar as a fresh one under each setting of the flag.
+
+@test "guard8 carryover + INDEPENDENT=1: prior ack by an independent human → carries forward" {
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47 aaronkaufman)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+  echo "$output" | grep -q 'carries forward'
+}
+
+@test "guard8 carryover + INDEPENDENT=1: prior ack self-resolved by the PR AUTHOR → exit 10" {
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47 nsollazzo)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover + INDEPENDENT=1: prior ack resolved by the BOT → exit 10" {
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47 adk47)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover + INDEPENDENT=1: prior thread resolved with a NULL resolver → exit 10" {
+  # No 4th arg ⇒ resolvedBy absent. Resolved-but-no-resolver is not an ack, and
+  # it must not become one just because the ack is being carried rather than filed.
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  QA_REBASE_ACK_REQUIRE_INDEPENDENT=1 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 carryover + INDEPENDENT=0: an author-resolved prior ack still carries (staged default)" {
+  # Pins the rollout claim that the default is the PRE-independence behaviour:
+  # the same fixture that exits 10 above must approve while the flag is off.
+  # If this ever flips without the flag, the staged rollout has leaked.
+  ri_report_d WARN "$DIG_A"
+  ri_report_d WARN "$DIG_A" "$PRIOR_OID"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    STUB_THREADS_JSON="$(prior_thread true fedcba9 adk47 nsollazzo)" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+
+# ---------------------------------------------------------------------------
+# Guard 9 — blast radius (scripts/check-blast-radius.sh hand-off)
+#
+# SHIPPED DISABLED. The FIRST test below is the one that matters most for this
+# change: with the flag at its default, behaviour must be byte-identical to
+# before Guard 9 existed. Everything after it describes what happens once the
+# follow-up sets QA_BLAST_RADIUS_GATE=1.
+# ---------------------------------------------------------------------------
+
+br_report() {  # <tier> [status] — well-formed per-head report Guard 9 keys on
+  mkdir -p "$QA_BLAST_STATE_DIR"
+  printf '{"repo":"Muso-AI/core-backend","pr":123,"head_sha":"%s","status":"%s","tier":"%s","signals":[{"id":"gate-edit","severity":"critical"}]}' \
+    "$HEAD_OID" "${2:-OK}" "$1" \
+    > "$QA_BLAST_STATE_DIR/Muso-AI__core-backend-pr-123-${HEAD_OID}.json"
+}
+
+br_report_raw() {  # <content> — raw bytes (malformed-JSON cases)
+  mkdir -p "$QA_BLAST_STATE_DIR"
+  printf '%s' "$1" > "$QA_BLAST_STATE_DIR/Muso-AI__core-backend-pr-123-${HEAD_OID}.json"
+}
+
+@test "guard9 INERT: flag unset + CRITICAL report → still approves (ships disabled)" {
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br"
+  br_report CRITICAL
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9 INERT: flag unset + NO report at all → still approves" {
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br-absent"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9: enabled + CRITICAL → exit 13, never approves" {
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br"
+  br_report CRITICAL
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 13 ]
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  echo "$output" | grep -q 'blast radius is CRITICAL'
+}
+
+@test "guard9: enabled + CRITICAL names the critical signals in the refusal" {
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br"
+  br_report CRITICAL
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  echo "$output" | grep -q 'gate-edit'
+}
+
+@test "guard9: enabled + LOW → approves" {
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br"
+  br_report LOW
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9: enabled + HIGH → approves (only CRITICAL holds)" {
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br"
+  br_report HIGH
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9: enabled + missing report on a REQUIRED repo → exit 13 (fail closed)" {
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br-absent"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    QA_BLAST_REQUIRED_REPOS="core-backend" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 13 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9: enabled + missing report on a NON-required repo → approves (no-data)" {
+  # check-blast-radius.sh runs only in hydra's pr-validate.yml, but this script
+  # approves every repo in the external allowlist. Without repo-gating, flipping
+  # the flag would refuse EVERY core-backend approval on a report their CI never
+  # writes. Guard 8 already carries exactly this list for the same reason.
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br-absent"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9: enabled + report whose interior .repo names a DIFFERENT repo → exit 13" {
+  # Both report kinds share /var/lib/hydra-qa/ and the same filename key, so
+  # .repo is the field that catches a cross-repo mis-file. Guard 8 checks it;
+  # Guard 9's copy originally did not.
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br"
+  mkdir -p "$QA_BLAST_STATE_DIR"
+  printf '{"repo":"Muso-AI/some-other-repo","pr":123,"head_sha":"%s","status":"OK","tier":"LOW","signals":[]}' \
+    "$HEAD_OID" > "$QA_BLAST_STATE_DIR/Muso-AI__core-backend-pr-123-${HEAD_OID}.json"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    QA_BLAST_REQUIRED_REPOS="core-backend" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 13 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9: enabled + malformed JSON → exit 13 (fail closed)" {
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br"
+  br_report_raw 'this is not json'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 13 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9: enabled + status CLEAN → approves (the analyzer really emits CLEAN)" {
+  # check-blast-radius.sh writes CLEAN when the diff is entirely generated paths.
+  # Narrowing the case to OK) left every Guard 9 test green while a lockfile-only
+  # hydra PR would refuse with "impact unverified".
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br"
+  br_report LOW CLEAN
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9: enabled + CRITICAL report with NO signals key → still exit 13" {
+  # jq exits 5 on `[.signals[]]` over a null, and set -e killed the script before
+  # die 13 — surfacing exit 5, which SKILL.md maps to "requester not authorized".
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br"
+  mkdir -p "$QA_BLAST_STATE_DIR"
+  printf '{"repo":"Muso-AI/core-backend","pr":123,"head_sha":"%s","status":"OK","tier":"CRITICAL"}' \
+    "$HEAD_OID" > "$QA_BLAST_STATE_DIR/Muso-AI__core-backend-pr-123-${HEAD_OID}.json"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    QA_BLAST_REQUIRED_REPOS="core-backend" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 13 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9: enabled + status ERROR → exit 13 (impact unverified)" {
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br"
+  br_report UNKNOWN ERROR
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 13 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9: enabled + interior head_sha mismatch → exit 13 (key-format drift)" {
+  # A report whose FILENAME matches this head but whose body describes another.
+  # Guard 8 carries the same cross-check for the same reason: without it, a key
+  # convention change silently serves a stale report as if it were this head's.
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br"
+  mkdir -p "$QA_BLAST_STATE_DIR"
+  printf '{"repo":"Muso-AI/core-backend","pr":123,"head_sha":"%s","status":"OK","tier":"LOW","signals":[]}' \
+    "ffffffffffffffffffffffffffffffffffffffff" \
+    > "$QA_BLAST_STATE_DIR/Muso-AI__core-backend-pr-123-${HEAD_OID}.json"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 13 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9: enabled + unrecognized tier → exit 13 (fail closed on the unknown)" {
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br"
+  br_report BANANAS
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 13 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
 }

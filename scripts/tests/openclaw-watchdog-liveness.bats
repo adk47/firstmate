@@ -329,9 +329,9 @@ STUB
   run "$WD"
   [ "$status" -eq 0 ]
   [[ "$output" == *"maintenance: openclaw upgrade - skipping"* ]]
-  # It did NOT touch the down gateway (negate a simple grep, not a pipeline):
-  ! grep -q "restart openclaw-gateway" "$SYSCTL_CALLS"
-  ! grep -q "reset-failed openclaw-gateway" "$SYSCTL_CALLS"
+  # It did NOT touch the down gateway:
+  if grep -q "restart openclaw-gateway" "$SYSCTL_CALLS"; then echo "active maintenance window still let the watchdog restart the gateway" >&2; false; fi
+  if grep -q "reset-failed openclaw-gateway" "$SYSCTL_CALLS"; then echo "active maintenance window still let the watchdog reset-failed the gateway" >&2; false; fi
   [[ "$output" != *"GATEWAY DOWN"* ]]
 }
 
@@ -347,4 +347,142 @@ STUB
   [[ "$output" != *"maintenance:"* ]]
   [[ "$output" == *"GATEWAY DOWN: openclaw-gateway-main"* ]]
   grep -q "restart openclaw-gateway-main" "$SYSCTL_CALLS"
+}
+
+_stub_edge_authfail() {
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *openclaw-gateway-edge*) echo 'openclaw[1]: authentication token has been invalidated' ;;
+esac
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+}
+
+# Agent runs with zero successes → the STUCK branch, which reads the restart stamp.
+_stub_stuck_agent_runs() {
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+echo 'openclaw[1]: run agent start'
+echo 'openclaw[1]: run agent end isError=true'
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+}
+
+# ── corrupt cooldown stamps ───────────────────────────────────────────────────
+#
+# Both stamps were read with a bare `cat` straight into `$(( ))`. Neither site
+# validated, and the two failure shapes are DIFFERENT — which is why both need
+# their own test:
+#   - `_codex_cooldown_ok` is called inside an `if` condition, so the arithmetic
+#     error aborts the compound command and NEITHER branch runs: the alert is
+#     silently skipped while the script sails on.
+#   - the restart cooldown is a plain assignment, so ELAPSED is never set and
+#     `set -u` kills the whole watchdog on the next read — it stops watching
+#     everything, from one corrupt byte.
+
+@test "a corrupt codex cooldown stamp does not silently swallow the auth alert" {
+  set_status openclaw-gateway-main active
+  set_status openclaw-gateway-edge active
+  printf '1abc' > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-auth-cooldown"
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *openclaw-gateway-edge*) echo 'openclaw[1]: authentication token has been invalidated' ;;
+esac
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"EDGE CODEX AUTH DEAD"* ]]
+  [[ "$output" != *"value too great for base"* ]]
+}
+
+# The stability pair: a genuinely FRESH stamp must still suppress, or the fix
+# would have simply deleted the cooldown.
+@test "a fresh codex cooldown stamp still suppresses the auth alert" {
+  set_status openclaw-gateway-main active
+  set_status openclaw-gateway-edge active
+  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-auth-cooldown"
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *openclaw-gateway-edge*) echo 'openclaw[1]: authentication token has been invalidated' ;;
+esac
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"EDGE CODEX AUTH DEAD"* ]]
+}
+
+# "Digits only" is not "safe for $(( ))". `08` is digits but invalid octal, so
+# it aborts the same way `1abc` did — and a digit-only FUTURE stamp is worse
+# than an abort: the age goes negative, which reads as "just alerted" and
+# suppresses for centuries. Both paths get both cases.
+@test "an octal-looking codex cooldown stamp does not swallow the auth alert" {
+  set_status openclaw-gateway-main active
+  set_status openclaw-gateway-edge active
+  printf '08' > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-auth-cooldown"
+  _stub_edge_authfail
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"EDGE CODEX AUTH DEAD"* ]]
+  [[ "$output" != *"value too great for base"* ]]
+}
+
+@test "a far-future codex cooldown stamp does not suppress the auth alert for centuries" {
+  set_status openclaw-gateway-main active
+  set_status openclaw-gateway-edge active
+  printf '9999999999' > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-auth-cooldown"
+  _stub_edge_authfail
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"EDGE CODEX AUTH DEAD"* ]]
+}
+
+@test "an octal-looking restart cooldown stamp does not kill the watchdog" {
+  set_status openclaw-gateway-main active
+  set_status openclaw-gateway-edge active
+  printf '08' > "$WATCHDOG_STATE_DIR/openclaw-watchdog-cooldown"
+  _stub_stuck_agent_runs
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"unbound variable"* ]]
+  [[ "$output" != *"value too great for base"* ]]
+}
+
+# A future restart stamp made ELAPSED negative, so the cooldown never expired
+# and the gateway was never restarted again — a stuck fleet with a watchdog
+# that reports "SKIP" forever.
+@test "a far-future restart cooldown stamp does not suppress the restart forever" {
+  set_status openclaw-gateway-main active
+  set_status openclaw-gateway-edge active
+  printf '9999999999' > "$WATCHDOG_STATE_DIR/openclaw-watchdog-cooldown"
+  _stub_stuck_agent_runs
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"SKIP: Last restart"* ]]
+}
+
+@test "a corrupt restart cooldown stamp does not kill the watchdog mid-tick" {
+  set_status openclaw-gateway-main active
+  set_status openclaw-gateway-edge active
+  printf '1abc' > "$WATCHDOG_STATE_DIR/openclaw-watchdog-cooldown"
+  # Agent runs with zero successes → the STUCK branch, which reads the stamp.
+  cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+echo 'openclaw[1]: run agent start'
+echo 'openclaw[1]: run agent end isError=true'
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/journalctl"
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"unbound variable"* ]]
+  [[ "$output" != *"value too great for base"* ]]
 }

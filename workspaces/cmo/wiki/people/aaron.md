@@ -19,7 +19,7 @@ related: [[people/fede]], [[workflows/outreach-engine]], [[channels/email-accoun
 
 ## Authority
 
-- CEO. Authorizes policy/security-file changes (Aaron-only fleet-wide).
+- CEO. Sole authorizer of security-file changes (Aaron-only fleet-wide). Agent policy files take either Nick's or Aaron's authorization.
 - **Spending approval**: any task estimated at $30+ in compute or API costs needs Aaron's explicit OK.
 - Approves outreach batches alongside Nick.
 - Owns the relationship with high value B2B prospects (proposal sent and beyond).

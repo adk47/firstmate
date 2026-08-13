@@ -264,6 +264,25 @@ STUB
   [[ "$fired" == *'"role_inflation"'* ]]
 }
 
+@test "fail-soft Trino: the helper's reason is carried onto _fraud.muso_only_reason (fraud-issue-scorer-followups.md §1)" {
+  run_scorer shadow "$RAW" "$TRINO_FAIL"
+  [ "$status" -eq 0 ]
+  reason=$(printf '%s' "$output" | jq -r --arg id cr-ming '.signal_approve[]|select(.cr_id==$id)._fraud.muso_only_reason')
+  # The lookup helper's stderr diagnostic ("trino-query.sh exited rc=1;
+  # trino stderr: trino exploded") must reach the JSON, not just this
+  # process's own stderr — the run summary reads from HERE, not from the
+  # fraud scorer's stderr, so a reason that only exists on stderr never
+  # reaches an operator.
+  [[ "$reason" == *"trino exploded"* ]]
+}
+
+@test "healthy Trino: muso_only_reason is null (available:true never carries a reason)" {
+  run_scorer shadow "$RAW" "$TRINO_OK"
+  [ "$status" -eq 0 ]
+  reason=$(printf '%s' "$output" | jq -r --arg id cr-ming '.signal_approve[]|select(.cr_id==$id)._fraud.muso_only_reason')
+  [ "$reason" = "null" ]
+}
+
 @test "fail-soft Trino: a loud UNAVAILABLE diagnostic reaches stderr" {
   run_scorer shadow "$RAW" "$TRINO_FAIL"
   [ "$status" -eq 0 ]

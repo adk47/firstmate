@@ -110,6 +110,37 @@ seed_destructive_ops() {
     [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_APPROVAL_REQUIRED"* ]]
 }
 
+# The refusal message is the text the agent actually reads at the moment it is
+# blocked, so it outranks any SKILL.md prose. It previously said "each call past
+# the threshold needs genuine approval ... hand it to a human to run", which
+# contradicted the enumerated-requester rule and is exactly what made the agent
+# page a human on delete 11.
+
+@test "refusal message tells the agent an enumerated requester's own message IS the decision" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"enumerated the exact targets"* ]]
+    [[ "$output" == *"their own request message IS that decision"* ]]
+    [[ "$output" == *"should not page anyone"* ]]
+}
+
+@test "refusal message no longer carries the contradictory hand-it-to-a-human guidance" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"hand it to a human to run"* ]]
+    [[ "$output" != *"Each call past the threshold needs genuine approval"* ]]
+}
+
+@test "refusal message still scopes the decision to the enumerated set only" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ONLY that set"* ]]
+    [[ "$output" == *"a different set of rows is"* ]]
+}
+
 @test "AT threshold with --confirmed-by NOT in allowlist is rejected" {
     seed_destructive_ops 3
     run bash "$SCRIPT" --confirmed-by jan --approval-msg-id 1.2 \
@@ -166,7 +197,7 @@ seed_destructive_ops() {
 @test "non-DELETE verb is never gated even at threshold" {
     seed_destructive_ops 3
     run bash "$SCRIPT" call PATCH /admin/track/abc/analytics-sources \
-        '{"linkId":"L1","fromTrackId":"T2"}'
+        '{"linkId":"L1"}'
     [[ "$output" != *"MUSO_BULK_DESTRUCTIVE"* ]]
 }
 

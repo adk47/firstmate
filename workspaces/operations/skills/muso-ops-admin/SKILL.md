@@ -113,9 +113,13 @@ This gate will be relaxed per-operation as we validate each endpoint in producti
 
 A deterministic gate in `muso-admin-api.sh` caps the blast radius of mass
 deletions. After **10 destructive `DELETE` calls within 15 minutes**, every
-further destructive `DELETE` is **refused** until an explicit second human
-approval is supplied. This runs in bash below the agent — you cannot talk your
-way past it.
+further destructive `DELETE` is **refused** until an explicit human decision
+**naming the rows being deleted** is supplied. This runs in bash below the agent
+— you cannot talk your way past it.
+
+That decision does not have to come from a *second* human: when the person who
+asked is on the approver list and enumerated the targets, their own request is
+the decision (see the two cases below).
 
 **Scope:** the `DELETE` verb (e.g. `DELETE /admin/track/:id/analytics-sources`,
 `DELETE /admin/track/:id/profile/:pid/credits`, `DELETE /admin/profile/:id/member`).
@@ -128,14 +132,57 @@ agent, not by god-mode either). Being Aaron, Jan, or Nick — or stamping
 "sources aren't capturing, fix it", collapsing a profile's stream count. A
 vague request is never authorization to delete in bulk.
 
+What lifts it is an explicit human decision passed as `--confirmed-by` +
+`--approval-msg-id`. That decision is often **already in the thread** — read on
+before escalating. (God-mode is about *who may initiate a write*; this gate is
+about *whether a human chose these specific rows*. Same people, different
+question — which is why the allowlist alone does not satisfy it, but their
+enumerated message does.)
+
 **When you hit `MUSO_BULK_DESTRUCTIVE_APPROVAL_REQUIRED`:**
+
 1. STOP. Do not loop, and do not split the work across calls to dodge the counter.
-2. Post the running count and exactly what you propose to delete (which
-   tracks/links, how many) to the Slack thread.
-3. Get an explicit human "yes, delete those N" from a tier-2 approver (Aaron).
-4. Re-issue with `--confirmed-by aaron --approval-msg-id <ts-of-that-message>`.
-   Each call past the threshold needs genuine approval — do not reuse a stale
-   `--approval-msg-id`. If the batch is genuinely large, hand it to a human.
+2. Decide which case you are in. This is the whole judgment:
+
+   **(a) The request already IS the decision.** The person who asked is on the
+   tier-2 approver list (`config/tier2-approvers.txt` — currently Aaron, Jan,
+   Nick) **and** they enumerated the exact targets. Their message is the explicit
+   human decision the gate is asking for. **Do not page anyone.** Re-issue with
+   their handle and the timestamp of *their* message — e.g. `--confirmed-by jan
+   --approval-msg-id <ts-of-their-request>`. Pass the **handle** (`jan`), not the
+   raw Slack id: `resolve_slack_to_email` is applied only to `--requester`, so
+   `U038BM16T7W` fails the allowlist match with
+   `MUSO_BULK_DESTRUCTIVE_APPROVAL_INVALID`.
+
+   Also pass `--approval-author-id <Uxxx>` and `--approval-channel <Cxxx>` for
+   the message you are citing. They are optional and never block the call, but
+   they are what makes a cited approval checkable afterwards — without them the
+   audit row records only a handle you typed, which is indistinguishable from
+   one you inferred.
+
+   **(b) Anything else** — the requester is not on that list, or the request did
+   not name what to delete. Post the running count and exactly what you propose
+   to delete (which tracks/links, how many) to the thread, and get an explicit
+   "yes, delete those N" before continuing.
+
+That one decision covers the target set it enumerated, and **only** that set.
+Finishing an approved batch is not a new decision; a *different* set of rows is,
+even from the same person in the same thread.
+
+**"Enumerated" has a hard meaning.** The request names the specific rows: a list
+of ids or titles, a screenshot you have transcribed into the thread as text, or
+"all N of X" where you have already read and posted those N. It is NOT enumerated
+if you inferred the set from a symptom. That distinction is the entire lesson of
+2026-05-26 — "sources aren't capturing, fix it" is a symptom, and reading it as
+authorization to delete 285 links collapsed a profile's stream count. Volume was
+never the problem. Vagueness was.
+
+**This reasoning does not generalize to the other gates.** It applies here
+because a wrongly-removed credit is recoverable (`POST` the credit back — see
+`muso-ops-tracks` § Add/Remove Credits). The credit reject gate below is a
+genuine one-way door with no inverse transition, so an enumerated request from an
+allowlisted requester still does **not** make rejection autonomous. If you cannot
+name the operation that undoes an action, treat it as irreversible.
 
 If a delete *looks* like cleanup of "broken" rows, remember the incident: the
 "broken-looking" `in_progress=true, name=null` stubs carried the real stream
@@ -211,13 +258,18 @@ knows which human initiated the change. This mirrors Retool's pattern:
 - `Requester: <user's muso email>` — the human who asked for the operation
 - `Service: clio` — identifies that the change came through Clio
 
-**The wrapper script auto-resolves Slack IDs to emails:**
-- `U7RP6HKUZ` → `aaron@muso.ai`
-- `U03TYGJF1N3` → `serhii@muso.ai`
-- `U038BM16T7W` → `jan@muso.ai`
-- `U02S7TJ7QHY` → `oleg@muso.ai`
-- `U0AL36NADEY` → `nick@muso.ai`
-- `U0A8CCTTAAG` → `liza@muso.ai`
+**The wrapper script auto-resolves Slack IDs to emails.** The map holds exactly
+the people `shared-reference/reference/slack-people.json` lists as current staff
+(enforced by `scripts/tests/muso-admin-api-slack-resolve.bats`). Do not
+hand-write an address from memory — ask the script:
+
+```bash
+bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
+  resolve-email U7RP6HKUZ    # -> aaron@muso.ai
+```
+
+An unknown or departed UID is echoed back unchanged with exit 1 — it is never
+silently turned into someone else's address.
 
 Pass Slack ID OR email via `--requester` flag:
 ```bash
@@ -331,8 +383,11 @@ Full route map: `references/admin-api-routes.md`
 - `POST /admin/profile/:profileId/encore-assets/generate` — generate encore assets
 - `PUT /admin/profile/:profileId/playlist/:status` — update playlist status
 - `POST /admin/profile/:profileId/playlist/regenerate` — regenerate playlist
-- `POST /admin/profile/enrichByUrl` — enrich from URL
-- `POST /admin/artist/:spotifyId/enrich` — enrich from Spotify
+- `POST /admin/profile/enrichByUrl` — enrich from URL. **Pass `profileId` or the
+  captured source attaches to nothing** (see muso-ops-profiles → Enrich Profile)
+- `POST /admin/artist/:spotifyId/enrich` — enrich a STANDALONE spotify artist.
+  **Cannot attach to a muso profile** (carries no profile reference); gated by
+  default, needs `MUSO_ENRICH_STANDALONE=1`
 - `GET /admin/professional/:professionalId/credits/export` — export credits
 - `POST /admin/profile/:profileId/audit/generate` — generate audit
 - `GET /admin/profile/:profileId/audit` — get audit status

@@ -28,7 +28,7 @@ _(initialized 2026-03-22)_
 - **Tier 1 (Read-only)**: View data, run reports, search. No auth needed beyond login.
 - **Tier 2 (Ops write)**: Credit claim approve/reject, profile edits, audit operations. Requires ops role.
 - **Tier 3 (Admin write)**: Subscription changes, refunds, merge operations. Requires admin role.
-- **Tier 4 (Super admin)**: Policy changes, credential access, DNS changes, production deployments. Aaron only (U7RP6HKUZ).
+- **Tier 4 (Super admin)**: Credential access, DNS changes, production deployments, security-file changes. Aaron only (U7RP6HKUZ). Agent policy-file changes take EITHER owner (Nick U0AL36NADEY or Aaron).
 
 ### "Why Protocol" for Write Operations
 - Every write operation that modifies production data must have a documented reason.

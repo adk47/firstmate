@@ -47,22 +47,25 @@ Skip the API and go straight to the join below — fast and reliable.
 ```bash
 bash /opt/hydra/scripts/trino-query.sh "
 SELECT
-  u.email                          AS user_email,
-  u.id                             AS user_id,
-  t.id                             AS workspace_id,
-  t.name                           AS workspace_name,
-  t.email                          AS workspace_email,
-  wm.role                          AS role,
-  (t.id = u.defaultteamid)         AS is_default_workspace
-FROM \"platform-core-backend-export-prod\".public_users u
-LEFT JOIN \"platform-core-backend-export-prod\".public_workspace_members wm
-  ON wm.userid = u.id
-LEFT JOIN \"platform-core-backend-export-prod\".public_teams t
-  ON t.id = wm.teamid
+  u.email                  AS user_email,
+  u.id                     AS user_id,
+  t.id                     AS workspace_id,
+  t.name                   AS workspace_name,
+  t.email                  AS workspace_email,
+  tu.roles                 AS roles,
+  (t.id = u.defaultteamid) AS is_default_workspace
+FROM postgresql_core.public.users u
+LEFT JOIN postgresql_core.public.team_users tu
+  ON tu.userid = u.id
+LEFT JOIN postgresql_core.public.teams t
+  ON t.id = tu.teamid
 WHERE lower(u.email) IN ('email1@example.com','email2@example.com')
 ORDER BY u.email, is_default_workspace DESC
 "
 ```
+
+Membership lives in `team_users` (`userid`, `teamid`, `roles` json) — there is no
+`workspace_members` table under any naming form.
 
 **Result interpretation:**
 - Email **not in any row** → no Muso user account for that email.
@@ -76,7 +79,7 @@ Has workspace: yes/no
 User id: <user_id>
 Workspace id: <workspace_id>
 Workspace email: <workspace_email>
-Role: <role>
+Roles: <roles>
 Default workspace: yes/no
 ```
 

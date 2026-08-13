@@ -95,9 +95,11 @@ jobs:
         # that the QA auto-review (skill Step 3d) reads and qa-pr-approve.sh
         # Guard 8 re-derives from. Advisory by design: the exit is swallowed so
         # neither a signal nor an analyzer error can hard-fail CI — Guard 8 is
-        # the fail-closed consumer (WARN holds auto-approval until a human
-        # resolves the REBASE WARNING thread; ERROR — and, for hydra, a missing
-        # report — holds it outright).
+        # the fail-closed consumer (WARN holds auto-approval until the REBASE
+        # WARNING thread is resolved — by the reviewing skill itself, once it
+        # has verified the deletions were intended and written that reasoning
+        # into the thread, per SKILL.md Step 3d.3, or by a human; ERROR — and,
+        # for hydra, a missing report — holds it outright).
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -109,6 +111,29 @@ jobs:
             "${{ github.event.pull_request.number }}" \
             "${{ github.event.pull_request.head.sha }}" \
             || echo "::warning::rebase-integrity analyzer errored (exit $?) — rebase state UNVERIFIED for this head; QA auto-approval is held (Guard 8)"
+          echo "::endgroup::"
+
+      - name: Blast radius check (advisory — warns, never blocks)
+        # Answers the question diff size cannot: if this change is wrong, what
+        # breaks? The reviewing agent has NO clone (its workspace is not a git
+        # repo), so it cannot grep for the callers of a changed script — this
+        # runner can, and hands the result over through the filesystem, the same
+        # way the rebase-integrity step above does. The QA skill (Step 3e) reads
+        # the report to scale review depth; Guard 9 in qa-pr-approve.sh consumes
+        # it only when QA_BLAST_RADIUS_GATE=1, which is NOT yet the default.
+        # Advisory by design: the exit is swallowed so neither a signal nor an
+        # analyzer error can hard-fail CI.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "::group::Blast radius check"
+          chmod +x scripts/check-blast-radius.sh
+          scripts/check-blast-radius.sh \
+            "${{ github.event.pull_request.number }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            || echo "::warning::blast-radius analyzer errored (exit $?) — impact UNVERIFIED for this head; the review proceeds on the 8 lenses alone"
           echo "::endgroup::"
 
       - name: JSON Lint — validate gateway configs
@@ -615,6 +640,38 @@ jobs:
           bash scripts/check-refund-doctrine.sh
           echo "::endgroup::"
 
+      - name: Collaborator derived-table doctrine check — no hand-written SQL on a rebuilt table
+        # Incident 2026-07-29: asked to remove ~24 named collaborators from a profile,
+        # @Ops proposed a 32-row direct production DELETE against
+        # catalog_profile_collaboration and escalated it for approval. That table is
+        # DERIVED from track co-credits — every rebuild recomputes it and deletes
+        # anything not currently backed, so hand-writes are silently reverted. A rebuild
+        # of that same profile reported rowsDeleted: 0 (all 32 rows were live and
+        # credit-backed). Prose != enforcement, so this gate fails if the
+        # muso-ops-collaborators anchors are removed OR if any skill doc starts handing
+        # agents write-SQL against the collaboration/aggregation serving tables.
+        run: |
+          echo "::group::Collaborator derived-table doctrine check"
+          bash scripts/check-collaborator-doctrine.sh
+          echo "::endgroup::"
+
+      - name: Admin-API bulk-destructive gate parity check — canonical vs workspace muso-admin-api.sh
+        # muso-ops-admin is a REGISTERED workspace divergence with TWO live copies of
+        # the bulk-destructive DELETE gate (skills-all/ and workspaces/operations/).
+        # check-skill-drift.sh only walks SKILL.md, so these two shell scripts are
+        # otherwise completely ungated and could silently diverge on the exact safety
+        # logic deciding whether a bulk-destructive DELETE run is allowed. This gate
+        # compares the five safety-critical functions PLUS three regions outside
+        # them — the threshold/window constants, the complete `if ! ...; then ... fi`
+        # around the cmd_call invocation, and the approval-evidence parser arms —
+        # and fails if the LOGIC drifts between copies. Comment and heredoc PROSE is
+        # normalized out (the copies word those differently on purpose); heredoc
+        # lines carrying shell expansions are NOT, since they are executable.
+        run: |
+          echo "::group::Admin-API bulk-destructive gate parity check"
+          bash scripts/check-admin-api-gate-parity.sh
+          echo "::endgroup::"
+
       - name: Data-sourcing doctrine check — Caroline must answer "via data partnerships"
         # Aaron's directive (2026-07-17): asked how Muso gets its data, Caroline
         # answers strictly "via data partnerships" — never naming a source or how
@@ -647,6 +704,24 @@ jobs:
         run: |
           echo "::group::Dead-infra reference check"
           bash scripts/check-dead-infra-refs.sh
+          echo "::endgroup::"
+
+      - name: Trino SQL staleness check — no stale SQL ships in skills-all/
+        # A sweep (behind PR #794) found 99 of 169 SQL statements in
+        # skills-all/ no longer compile against live Trino (schema drift:
+        # dropped/retyped columns, changed UNNEST alias arity, dead
+        # catalogs/tables) — five ops escalations trace back to this. Layer
+        # A is an offline grep for the historically top-recurring dead
+        # references (awsdatacatalog., raw_ids, profile_permissions,
+        # profile_v3_(lifetime|tracks)). Layer B compiles every extracted
+        # statement with a real `EXPLAIN (TYPE VALIDATE)` against the live
+        # cluster (self-hosted runners reach Trino via kubectl) and
+        # ratchets against .trino-sql-baseline.txt so pre-existing debt
+        # doesn't instantly redden every PR — only new regressions do.
+        # Scoped to files changed vs origin/main by default.
+        run: |
+          echo "::group::Trino SQL staleness check"
+          bash scripts/check-trino-sql.sh
           echo "::endgroup::"
 
       - name: Egress allowlist check — no unauthorized additions
@@ -970,6 +1045,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # FULL history, not the default depth-1. scripts/tests/credit-gate-probe.bats
+          # reconstructs the real pre-#740 / pre-#750 muso-admin-api.sh from git
+          # (`git show <rev>^:...`) so its negative cases are anchored on gates that
+          # actually regressed, not hand-written mocks. Those revs are absent from a
+          # shallow clone. They resolved for months only because the single long-lived
+          # runner's work dir had accumulated the objects incidentally; adding runners
+          # on 2026-08-03 put the job on a fresh work dir and the fixtures vanished.
+          #
+          # fixture_at now degrades to `skip` rather than a bogus failure, so this is
+          # not about red CI — it is about COVERAGE. A skip silently retires the only
+          # tests proving the probe CAN FAIL, which is precisely the "unverified
+          # becomes a green tick" outcome that file's header exists to prevent. Pin
+          # the depth so those cases actually RUN on every runner, new or old.
+          fetch-depth: 0
 
       - name: Ensure bats + jq installed
         run: |
@@ -1055,6 +1145,7 @@ jobs:
                        workspaces/operations/skills/muso-support-email-triage/scripts/tests \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-fraud-signals.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/fraud-muso-only-lookup.bats \
+                       workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/fraud-muso-only-snapshot-writer.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/render-dry-run-summary.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/verify-credit-request-status.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/batch-flag-credits.bats \
@@ -1264,6 +1355,21 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_cs_ops_drain_candidates
+      - name: Run trino-sql-extract tests
+        # scripts/lib/trino_sql_extract.py is the pure/offline extraction
+        # layer for scripts/check-trino-sql.sh (the Trino SQL staleness
+        # gate — 5 ops escalations traced to skills-all/ SQL that no longer
+        # compiles against live Trino). These lock the statement-splitting
+        # state machine (a ';' inside a string/quoted-identifier/comment
+        # must NEVER split — the multi-statement safety invariant that
+        # Layer B's live sender depends on), comment-only trailing-fragment
+        # dropping, the skip-marker dialect opt-out, and the bash-comment
+        # false-positive fix (a `#`-prefixed line mentioning trino-query.sh
+        # in prose must never be treated as a live invocation). Same bare
+        # stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_trino_sql_extract
 
   plugin-tests:
     name: Plugin tests (vitest)

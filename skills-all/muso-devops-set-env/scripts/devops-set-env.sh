@@ -117,7 +117,24 @@ REDACTED_MARKER="[REDACTED:secret-shaped]"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-# --- Slack ID → email (kept in sync with muso-admin-api.sh:198-222) ---
+# --- Slack ID → email ---
+# A SUBSET, and deliberately not a mirror of anything. It is simultaneously:
+#   - BROADER than the authority lists — Jan (U038BM16T7W) and Liza
+#     (U0A8CCTTAAG) resolve here but appear on neither dev-envset-requesters.txt
+#     nor envset-requesters.txt, so they cannot set anything;
+#   - NARROWER than shared-reference/reference/slack-people.json — Mariia,
+#     Faith and McLaren have no arm, because none of them drive env sets.
+# So do not "sync" this map with either list; it tracks neither by design.
+#
+# An arm here grants NOTHING. Authority is the requesters files and only those.
+# Resolution merely supplies the address for the /var/log/muso-devops audit
+# line, which is why a missing person is cheap: their UID lands in that log raw,
+# on a request the authority gate refuses anyway.
+#
+# The one invariant that IS enforced (scripts/tests/muso-admin-api-slack-resolve.bats):
+# nobody the roster marks current:false may resolve, because a departed person's
+# UID would put their live address in the audit trail instead. Oleg
+# (U02S7TJ7QHY) was removed for exactly that reason; do not re-add him.
 resolve_slack_to_email() {
     local input="$1"
     [[ "$input" == *@* ]] && { echo "$input"; return 0; }
@@ -125,16 +142,13 @@ resolve_slack_to_email() {
         U7RP6HKUZ)   echo "aaron@muso.ai" ;;
         U03TYGJF1N3) echo "serhii@muso.ai" ;;
         U038BM16T7W) echo "jan@muso.ai" ;;
-        U02S7TJ7QHY) echo "oleg@muso.ai" ;;
         U0AL36NADEY) echo "nick@muso.ai" ;;
         U0A8CCTTAAG) echo "liza@muso.ai" ;;
-        U02N2NP3H7F) echo "artem@muso.ai" ;;   # Artem M (Mobile) — dev authority
-        # TWO different Artems are authorized: resolve them by UID, never by the
-        # display name "Artem". Artem D (DevOps Lead, U0ACHTYUULT) is
-        # intentionally NOT mapped here — his muso.ai email is unconfirmed, so his
-        # UID falls through and is matched as a bare UID in
-        # dev-envset-requesters.txt. Do NOT map him to artem@muso.ai — that is
-        # Artem M, just above. Add his real email here once known.
+        U02N2NP3H7F) echo "artem@muso.ai" ;;   # Artem (Mobile) — dev authority
+        # Artem D (Dolobanko, U0ACHTYUULT, ex-DevOps Lead) has LEFT the company
+        # (2026-07-30) and is deliberately absent from this map AND from
+        # dev-envset-requesters.txt. Do not re-add him. U02N2NP3H7F above is the
+        # only Artem now, so the old "two Artems" disambiguation no longer applies.
         *) echo "$input"; return 1 ;;
     esac
     return 0

@@ -229,7 +229,7 @@ srv_write() {
   [ "$status" -eq 0 ]
   echo "$output" | grep -qx "SERVER-AHEAD skills-all/bar/SKILL.md"
   echo "$output" | grep -qx "CONFLICT skills-all/baz/SKILL.md"
-  ! echo "$output" | grep -q "REPO-AHEAD"
+  if echo "$output" | grep -q "REPO-AHEAD"; then echo "a REPO-AHEAD-only skill was wrongly included in the block list" >&2; false; fi
   ! echo "$output" | grep -q "skills-all/foo/SKILL.md"
 }
 
@@ -239,7 +239,7 @@ srv_write() {
   [ "$status" -eq 0 ]
   echo "$output" | grep -qx ">fcsT...... skills-all/muso-anrok/SKILL.md"
   # metadata-only (.f....t) and dir (cd++) lines are not content drift
-  ! echo "$output" | grep -q "unchanged"
+  if echo "$output" | grep -q "unchanged"; then echo "a metadata-only (non-content) change was wrongly included in the block list" >&2; false; fi
   ! echo "$output" | grep -q "somedir"
 }
 
