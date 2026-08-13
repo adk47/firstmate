@@ -1111,6 +1111,11 @@ jobs:
         # transitioned" gap) and batch-flag-credits.bats — the latter existed
         # but was NEVER pinned here, so it was dead in CI until now. Both are
         # hermetic (TRINO_QUERY_SH / VERIFY_STATUS_SH stubbed, no network).
+        #
+        # ALSO render-slack-summary.bats — the Slack outcome-contract suite that
+        # covers the transport_error rendering added with the apply-transport
+        # hardening. Same rationale: unlisted here == dead in CI. Hermetic (no
+        # network, no Slack token).
         run: |
           set -euo pipefail
           # The self-hosted runner may carry production bot credentials. Bats
@@ -1137,12 +1142,15 @@ jobs:
                        workspaces/operations/skills/muso-ops-admin/scripts/tests \
                        workspaces/operations/skills/muso-caroline-weekly-review/scripts/tests \
                        workspaces/operations/skills/muso-support-email-triage/scripts/tests \
+                       workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/apply-verdicts.bats \
+                       workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/compute-run-summary.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-fraud-signals.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/fraud-muso-only-lookup.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/fraud-muso-only-snapshot-writer.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/render-dry-run-summary.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/verify-credit-request-status.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/batch-flag-credits.bats \
+                       workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/render-slack-summary.bats \
                        workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
                        workspaces/support/skills/order-fulfillment/scripts/tests \
                        "${sa_dirs[@]}" \

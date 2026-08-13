@@ -71,6 +71,8 @@ rejected_by_gate=$(jq -r '.reconciliation.approved_rejected_by_gate // 0' <<<"$f
 rejected_pre_flight=$(jq -r '.reconciliation.approved_rejected_pre_flight // 0' <<<"$finished")
 http_error_uvn=$(jq -r '.reconciliation.verification_needed_http_error // 0' <<<"$finished")
 http_error_approved=$(jq -r '.reconciliation.approved_http_error // 0' <<<"$finished")
+transport_error_uvn=$(jq -r '.reconciliation.verification_needed_transport_error // 0' <<<"$finished")
+transport_error_approved=$(jq -r '.reconciliation.approved_transport_error // 0' <<<"$finished")
 
 # Dry-run prefix and timestamp derivation.
 dry_prefix=""
@@ -108,12 +110,18 @@ elif (( rejected_by_gate > 0 || rejected_pre_flight > 0 )); then
     banner=$'\n:warning: '"${total_blocked}"' approve(s) blocked (pre-flight + gate) — see runlog.'
 fi
 
-# Optional secondary warning if UVN or approve http_errors exist (network
-# issues, not dry-run intercepts).
+# Optional secondary warning if UVN or approve HTTP errors exist. Transport
+# failures are counted separately below.
 http_err_total=$((http_error_uvn + http_error_approved))
 http_err_line=""
 if (( http_err_total > 0 )); then
     http_err_line=$'\n:warning: '"${http_err_total}"' admin-API call(s) errored (see results.jsonl).'
+fi
+
+transport_err_total=$((transport_error_uvn + transport_error_approved))
+transport_err_line=""
+if (( transport_err_total > 0 )); then
+    transport_err_line=$'\n:rotating_light: '"${transport_err_total}"' admin-API write(s): no backend refusal was observed; delivery remains unconfirmed after the safe retry policy. Reconcile current credit state before retrying.'
 fi
 
 # Fraud token on the one-line counter — only when the multi-factor detector
@@ -124,7 +132,7 @@ if (( fraud_flagged > 0 )); then
     fraud_token=" | :rotating_light: Fraud: ${fraud_flagged}"
 fi
 
-parent="${dry_prefix}Credit batch complete — ${ts_human}${banner}${http_err_line}
+parent="${dry_prefix}Credit batch complete — ${ts_human}${banner}${http_err_line}${transport_err_line}
 Fetched: ${fetched} | Approved: ${approved} | → verification_needed: ${verification_needed} | Escalated: ${escalated} | Skipped: ${skipped}${fraud_token}
 Run ID: ${RUN_ID}"
 
@@ -169,6 +177,15 @@ if [[ -f "$results_path" ]]; then
     uvn_errored=$(jq -s -r '
         [.[]
          | select(.intended_status == "user_verification_needed" and .outcome == "http_error")
+         | .request_ids[]?]
+        | unique | .[]
+    ' "$results_path" 2>/dev/null || true)
+
+    # Transport failures are distinct from HTTP errors: no backend response
+    # was received. Include both approve and UVN intentions in one section.
+    transport_errored=$(jq -s -r '
+        [.[]
+         | select(.outcome == "transport_error")
          | .request_ids[]?]
         | unique | .[]
     ' "$results_path" 2>/dev/null || true)
@@ -299,6 +316,22 @@ if [[ -f "$results_path" ]]; then
             printed=$((printed + 1))
         done <<< "$uvn_errored"
         thread+=$'\n'
+    fi
+
+    if [[ -n "$transport_errored" ]]; then
+        count=$(printf '%s' "$transport_errored" | grep -c .)
+        thread+=":rotating_light: *Transport failures — delivery unconfirmed for ${count} credit(s):*"$'\n'
+        printed=0
+        while IFS= read -r id; do
+            [[ -z "$id" ]] && continue
+            if (( printed >= 25 )); then
+                thread+="  … +$((count - 25)) more (see results.jsonl)"$'\n'
+                break
+            fi
+            thread+="  • \`${id}\`"$'\n'
+            printed=$((printed + 1))
+        done <<< "$transport_errored"
+        thread+="  Reason: no HTTP response after the safe retry policy. Reconcile current credit state before retrying; see transport_error in results.jsonl."$'\n'$'\n'
     fi
 
     if [[ -n "$config_mismatch" ]]; then
