@@ -25,9 +25,9 @@ compatibility: |
   muso-verify-profile (authenticity scoring), web_search/web_fetch (external
   verification), image tool (ID-document checks).
 metadata:
-  version: "1.1"
-  source-repo: "Muso-AI/muso-skills"
-  verified-against: "core-backend/src/apis/index.w.js (2026-04-28)"
+  version: "1.2"
+  source-repo: "Muso-AI/hydra"
+  verified-against: "core-backend claiming list/reject services (2026-08-13)"
 ---
 
 # Muso Ops — Claiming
@@ -58,6 +58,17 @@ WHERE status = 'pending'
 ORDER BY createdat DESC
 LIMIT 20
 ```
+
+The admin API returns newest-first. Before any queue-sweep writes, build a
+complete read-only snapshot with `--page 1, 2, 3, ...` until a page contains
+fewer rows than `--limit`; never stop after the first page. Capture `total` from
+page 1 and require every page's `total` to equal it. Reject an enumeration if any
+exact claim ID appears twice, or if the unique accumulated count does not equal
+`total`. Run a second complete enumeration immediately afterward and require the
+same total and exact claim-ID set twice in a row; restart until the queue is
+stable rather than processing a mixed or partial snapshot. Then sort the stable
+API items by `createdAt ASC` and process oldest-first. For the Trino path, remove
+the `LIMIT` and use `ORDER BY createdat ASC`.
 
 Present as:
 ```
@@ -195,6 +206,7 @@ Standard rejection reasons:
 - "Suspected impersonation — name mismatch with external sources"
 - "Previously rejected claim for same profile — no new evidence"
 - "Insufficient verification — no matching credits in industry data"
+- "already claimed by your workspace" (exact same-team artist/professional duplicate only — see Queue Sweep)
 
 ### Revert Claim
 
@@ -213,15 +225,77 @@ against `muso agent-docs`: the dangerous tier is DELETEs plus /merge,
 exit 5, the stderr hint names the missing artifact — supply that after
 human confirmation; never pre-emptively pass `--yes`.
 
-### Batch Review
+### Batch Review (Queue Sweep)
 
-When ops says "show me today's claims" or "process the queue":
+The following normalized block is the authoritative sweep contract. Prose in
+this section may explain these directives but must not override them.
 
-1. Pull all pending claims
-2. For each, run automated checks (Steps 2-5 above)
-3. Pre-sort into: likely approve / needs review / likely reject
-4. Present summary with recommendations
-5. Process one-by-one with confirmation
+<!-- queue-sweep-contract:v1 -->
+- pagination: all_pages
+- processing_order: oldest_first
+- stable_snapshot_passes: 2
+- mutation_revalidation: per_claim
+- ledger_lock: memory/claiming-escalations.lock
+- lock_mode: exclusive_fail_closed
+<!-- /queue-sweep-contract:v1 -->
+
+"Show me today's claims" is read-only: use List Pending Claims above and do not
+create ledger entries, send Slack posts, or change claim state. Enter this queue
+sweep only when ops explicitly says "process the queue" or otherwise authorizes
+claim processing.
+
+For an authorized queue sweep:
+
+1. Read `memory/claiming-escalations.json` and re-check every open escalation
+   for new evidence or a human decision. Resolve or re-surface those entries
+   before starting new work.
+2. Pull ALL pending claims using full pagination, combine the pages, and sort
+   oldest-first as described under List Pending Claims.
+3. For each, run automated checks (Steps 2-5 above).
+4. Pre-sort into: likely approve / needs review / likely reject.
+5. Present the summary with recommendations.
+6. Process one-by-one with confirmation, oldest-first.
+
+Immediately before each claim mutation, re-fetch the claim with
+`muso claiming get <id> --json` and require `status == pending` plus exact
+`profileId` and `teamId` equality with the snapshot. Then use fully paginated
+`muso claiming list --profile-id <profileId> --json` with no status filter;
+require unique `count == total` and evaluate every returned status and team.
+Escalate if any different-team claim with `pending` or `processed` status
+appeared. Treat rejected, reverted, or closed history as risk evidence, not an
+active contest. If any value changed or the history cannot be proven complete,
+do not write; refresh the snapshot and re-evaluate the claim.
+
+**Same-team duplicates:** if claim history proves an exact profile-ID and team-ID
+match against an existing processed claim, recommend rejection with reason
+"already claimed by your workspace". Do not infer a duplicate from similar
+names or emails. The team already owns the exact profile, so this is a standing
+disposition rather than an identity decision. It still requires normal write
+authorization and per-item confirmation. This rule applies only to artist and
+professional claims. Never use it for `profileType == organization`: organization
+rejection can remove the workspace company seat and public lists, so escalate it
+for a human decision instead.
+
+**Contested claims (two DIFFERENT teams, same profile) are always human
+decisions.** Add them to the Escalation Ledger and route them to the current
+default target in the Operations SOUL's `## Escalation` section; do not approve
+a contested claim autonomously.
+
+**No silent abstentions.** Every pending claim older than 72h must leave the
+sweep with exactly one disposition: **approve**, **reject**, or **ESCALATED**.
+Escalated means both a durable ledger entry and a Slack post as defined below.
+"Needs review" without those artifacts is not a disposition.
+
+End every sweep with a digest:
+
+```
+📊 *Claiming Sweep Digest — YYYY-MM-DD*
+Queue: X pending (Y older than 72h)
+✅ Approved: N   ❌ Rejected: N (M same-team duplicates)
+🔺 Escalated: N (new ledger entries: #id, #id)
+♻️ Re-surfaced: N resolved / N still open
+Oldest remaining pending: #<id> (<age>) — why it is still pending
+```
 
 **NEVER batch-approve without individual confirmation.** Even if all look clean,
 confirm each one. Speed < accuracy for claiming.
@@ -238,7 +312,88 @@ During any claim review, automatically flag if:
 - 🚩 Name on profile vs name on verification links mismatch
 - 🚩 Profile was recently created (< 30 days) with high credit count
 
-When 2+ flags trigger, escalate to Aaron regardless of tier.
+When 2+ flags trigger during an explicitly authorized queue sweep, escalate via
+the ledger + Slack workflow below. During a read-only review, return an
+escalation recommendation only; do not create a ledger entry or Slack post.
+Tier 4 is always read-only and never triggers those writes.
+
+## Escalation Ledger (No Silent Abstentions)
+
+Track escalations in `memory/claiming-escalations.json` in the agent workspace:
+
+```json
+{
+  "escalations": [
+    {
+      "claimId": 12345,
+      "flags": ["contested — two teams, same profile", "name mismatch"],
+      "date": "2026-08-12",
+      "status": "open",
+      "slack_ts": "1755...",
+      "resolution": null
+    }
+  ]
+}
+```
+
+- The one lock target for every sweep process is
+  `memory/claiming-escalations.lock`, resolved relative to the active agent
+  workspace. Open that stable path without truncating the ledger, then acquire
+  it with this exact fail-closed protocol:
+
+  ```bash
+  command -v flock >/dev/null || exit 1
+  exec {claiming_lock_fd}>"memory/claiming-escalations.lock" || exit 1
+  flock -x -w 30 "$claiming_lock_fd" || exit 1
+  ```
+
+  If the directory, lock-file open, `flock` lookup, or acquisition fails, halt
+  the sweep with `ESCALATION LOCK FAILED`; do not read or mutate the ledger,
+  post to Slack, or process later claims. All participants must use this exact
+  path; never use the ledger file, a temporary file, or another path as the lock target.
+- Acquire that lock before the first ledger read and hold it across the complete
+  delivery transaction: validate and upsert the record, read Slack history,
+  append the audit entry, post only if authoritative readback found no delivery,
+  persist `slack_ts`, and re-read the ledger to verify it. Release the descriptor
+  only after the verified state is durable. This serializes duplicate detection
+  and Slack delivery, not merely each individual file write.
+- While holding the lock, write ledger changes to a temporary file in `memory/`
+  and atomically rename it over `memory/claiming-escalations.json`. If the ledger
+  does not exist, initialize it once as `{"escalations": []}` through that same
+  atomic path. If it exists but is malformed or `.escalations` is not an array,
+  halt the sweep and report the persistence failure; never overwrite or silently
+  reset it.
+- Keep exactly one ledger record per `claimId`. Upsert flags and resolution into
+  that record; never append a duplicate or create a second Slack post for an
+  already-open claim unless the seven-day re-post rule applies.
+- An open record without `slack_ts` is incomplete delivery, not a seven-day
+  reminder. Search #operations history for the exact claim ID first. If the post
+  exists, attach its timestamp atomically. Post exactly once only when readback
+  proves it does not exist, then persist and verify the returned timestamp.
+- `status` transitions from `open` to `resolved`. On resolution, record the
+  disposition, who decided, and the date in `resolution`.
+- Every escalation gets both artifacts during the sweep in which it is found:
+  1. atomically persist the ledger entry above; then
+  2. append the pre-write audit entry to `api-logs/admin/YYYY-MM-DD.jsonl`
+     relative to the active agent workspace (never a hardcoded home path), then
+     post in #operations,
+     tagging the current default target from the Operations SOUL `## Escalation`
+     section with the claim ID, profile, flags, and a one-line ask.
+  Record the post's timestamp as `slack_ts` with another atomic ledger update,
+  then re-read the file and verify the record before releasing the lock.
+  If any persistence or post step fails, halt the sweep and report
+  `ESCALATION DELIVERY FAILED`; do not treat the escalation as delivered or
+  continue into later claim mutations.
+- Every sweep starts by re-surfacing all `open` entries and checking whether
+  new evidence or a human decision makes them resolvable. For an escalation with
+  no human response after seven days, search #operations history for the claim ID
+  and stored `slack_ts` before writing. Re-post only if authoritative readback
+  proves no reminder landed; otherwise update `slack_ts` from the existing post.
+  A failed or timed-out Slack write has unknown outcome: re-read history first and
+  never blind-retry it.
+- Contested claims always enter this ledger; never hardcode a person here because
+  escalation ownership is maintained in the Operations SOUL `## Escalation`
+  section.
 
 ## Alternatives to Suggest
 
