@@ -186,6 +186,21 @@ The wrapper invokes the `verify-credit-batch-mvp.lobster` pipeline:
    Cloudflare's 100s origin timeout. Audit log:
    `/var/log/openclaw/lobster-apply.jsonl`. Refuses to claim "landed"
    if any response carries `dryRun:true`.
+
+   **Attribution is per ROW, on both surfaces.** The backend has reported
+   `{updated, updatedIds, skipped[]}` since 2026-07-27, and a 409 is its
+   "some rows were refused" answer — the ids in `updatedIds` really did
+   move. `apply-verdicts.sh` intersects the chunk with `updatedIds` and
+   carries each refusal's own reason (`illegal_transition`, `lost_race`,
+   `not_found`, `seed_refused`); `muso-admin-api.sh` writes the SAME split
+   into the `<run_id>.results.jsonl` truth floor (an `ok` row for the ids
+   that moved, an `http_error` row for the rest), so
+   `compute-run-summary.sh` and the Slack summary reconcile a partial 409
+   as "N landed" instead of "everything failed". A 200/409 whose body
+   carries no usable `updatedIds` is `unattributable_response` in the
+   ledger and refuses the whole chunk in the sweep — the write may have
+   landed but not for any row we can name, and that never counts as
+   landed.
 5. `render-dry-run-summary.sh` — posts the Slack summary. With a non-empty
    `THREAD_TS` (the @-mention path) it replies in the user's thread; with an
    empty `THREAD_TS` (the autonomous 4h cron path) the pipeline sets

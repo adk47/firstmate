@@ -24,6 +24,9 @@ setup() {
 
     mkdir -p "$TEST_ROOT/bin"
     export CURL_CALLS="$TEST_ROOT/curl.calls"
+    # The 200 bodies carry the backend's per-row report (updatedIds): since
+    # 2026-07-27 a bulk credit-request PUT is attributed row by row, so a 200
+    # with no updatedIds is recorded as `unattributable_response`, not `ok`.
     cat > "$TEST_ROOT/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 calls=0
@@ -35,7 +38,7 @@ case "${CURL_STUB_MODE:-ok}" in
             printf '\n000'
             exit 6
         fi
-        printf '{"ok":true}\n200'
+        printf '{"ok":true,"data":{"updatedIds":["cr_1"],"skippedIds":[],"skipped":[]}}\n200'
         ;;
     persistent_dns)
         printf '\n000'
@@ -54,14 +57,14 @@ case "${CURL_STUB_MODE:-ok}" in
         elif (( calls == 1 )); then
             printf '{"token":"fresh-token"}'
         else
-            printf '{"ok":true}\n200'
+            printf '{"ok":true,"data":{"updatedIds":["cr_1"],"skippedIds":[],"skipped":[]}}\n200'
         fi
         ;;
     login_persistent_dns)
         exit 6
         ;;
     *)
-        printf '{"ok":true}\n200'
+        printf '{"ok":true,"data":{"updatedIds":["cr_1"],"skippedIds":[],"skipped":[]}}\n200'
         ;;
 esac
 STUB

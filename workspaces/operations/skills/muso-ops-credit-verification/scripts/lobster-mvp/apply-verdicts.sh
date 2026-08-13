@@ -127,6 +127,14 @@ apply_chunked() {
     # intentionally captured for the apply log, so extract the last valid JSON
     # line rather than requiring the entire combined stream to be JSON.
     chunk_json=$(printf '%s\n' "$chunk_resp" | jq -Rrc 'fromjson? // empty' | tail -1)
+    if [[ -z "$chunk_json" ]]; then
+      # The per-line extraction above only sees envelopes printed on ONE line.
+      # A pretty-printed envelope spans several, so every line fails fromjson
+      # and the whole chunk would be misread as "no response" — which the
+      # per-row attribution below then refuses. Fall back to parsing the whole
+      # stream as a single value before concluding there is nothing to read.
+      chunk_json=$(printf '%s\n' "$chunk_resp" | jq -sRc 'fromjson? // empty' 2>/dev/null || true)
+    fi
     chunk_http=$(echo "$chunk_json" | jq -r '.http_status // empty' 2>/dev/null || true)
     chunk_dry=$(echo "$chunk_json" | jq -r '.dryRun // false' 2>/dev/null || echo false)
     chunk_transport_exit=$(echo "$chunk_json" | jq -r '.transport_error.curl_exit // empty' 2>/dev/null || true)
@@ -144,10 +152,49 @@ apply_chunked() {
       log_event "${bucket}_chunk_transport_retried" "$(jq -nc --argjson i "$i" --argjson attempts "$chunk_attempts" --argjson retry_exits "$chunk_retry_exits" --argjson recovered "$recovered" '{chunk_index:$i, attempts:$attempts, retry_exits:$retry_exits, recovered:$recovered}')"
     fi
 
-    if [[ "$chunk_rc" -eq 0 && "$chunk_http" == "200" && "$chunk_dry" != "true" ]]; then
-      landed_acc=$(printf '%s\n%s\n' "$landed_acc" "$chunk_ids" | jq -sc 'add')
-      log_event "${bucket}_chunk_landed" "$(jq -nc --argjson i "$i" --argjson ids "$chunk_ids" '{chunk_index:$i, landed_ids:$ids}')"
-    elif [[ -n "$chunk_transport_exit" ]]; then
+    # Attribute PER ROW from the response body, never from the HTTP code alone.
+    # The chunk-level inference this replaces read only the status: a 200 marked
+    # every id in the chunk landed — including rows the backend had explicitly
+    # reported in skippedIds — and any non-2xx marked every id refused,
+    # including rows that really did persist. That is how the 2026-07-23 sweeps
+    # reported rows as applied that had never moved.
+    #
+    # 200 and 409 both carry the same report. A 409 is the backend's "some rows
+    # were refused" answer and is a PARTIAL SUCCESS: its updatedIds are real and
+    # must not be re-attempted as failures. A success nests the report under
+    # .body.data; the error handler spreads it across .body.
+    #
+    # Anything else — another status, a dry-run intercept, or a body with no
+    # usable updatedIds — refuses the WHOLE chunk. Success is never inferred
+    # from a missing field. A curl-level transport failure also refuses the
+    # whole chunk, but through its own branch below so it stays distinguishable
+    # from a refusal the backend actually answered.
+    # Whether this response is one we should have been able to attribute row by
+    # row. Computed ONCE: the parse gate below and the refusal reason after it
+    # must never disagree about what "attributable" means.
+    local attributable=false
+    if [[ "$chunk_rc" -eq 0 && "$chunk_dry" != "true" ]] \
+       && [[ "$chunk_http" == "200" || "$chunk_http" == "409" ]]; then
+      attributable=true
+    fi
+
+    local chunk_report=""
+    if [[ "$attributable" == "true" ]]; then
+      # Parse the EXTRACTED envelope, not the raw stream: the raw stream can
+      # carry a stderr warning line ahead of the JSON, and the envelope may be
+      # pretty-printed. $chunk_json is already normalised for both.
+      chunk_report=$(printf '%s' "$chunk_json" | jq -c '
+        (if (.body | type) == "object"
+           then (if (.body | has("data")) then .body.data else .body end)
+           else null end)
+        | select(type == "object" and has("updatedIds") and (.updatedIds | type) == "array")
+      ' 2>/dev/null || true)
+    fi
+
+    # A curl-level failure never produced a response body, so there is nothing
+    # to attribute row by row: classify it as transport (PR #718) before the
+    # per-row parse (PR #774) and before the catch-all refusal below.
+    if [[ -n "$chunk_transport_exit" ]]; then
       local transport_reason="transport_curl_${chunk_transport_exit}"
       local chunk_transport_failed
       chunk_transport_failed=$(echo "$chunk_ids" | jq -c \
@@ -157,9 +204,33 @@ apply_chunked() {
         '[.[] | {cr_id: ., reason: $reason, curl_exit: $curl_exit, attempts: $attempts}]')
       transport_failed_acc=$(printf '%s\n%s\n' "$transport_failed_acc" "$chunk_transport_failed" | jq -sc 'add')
       log_event "${bucket}_chunk_transport_failed" "$(jq -nc --argjson i "$i" --argjson curl_exit "$chunk_transport_exit" --argjson attempts "$chunk_attempts" --argjson ids "$chunk_ids" '{chunk_index:$i, curl_exit:$curl_exit, attempts:$attempts, transport_failed_ids:$ids}')"
+    elif [[ -n "$chunk_report" ]]; then
+      local chunk_landed chunk_refused
+      # Intersection in $ids order; `-` is safe here because ids are unique.
+      chunk_landed=$(jq -nc --argjson ids "$chunk_ids" --argjson r "$chunk_report" \
+        '$ids - ($ids - $r.updatedIds)')
+      # Everything targeted that did NOT move, each carrying the backend's own
+      # reason (illegal_transition / lost_race / not_found / seed_refused) when
+      # it named one.
+      chunk_refused=$(jq -nc --argjson ids "$chunk_ids" --argjson r "$chunk_report" --arg http "$chunk_http" '
+        (if ($r | has("skipped")) and ($r.skipped | type) == "array" then $r.skipped else [] end) as $sk
+        | [ ($ids - $r.updatedIds)[]
+            | . as $id
+            | { cr_id: $id,
+                reason: (($sk[] | select(.id == $id) | .reason) // ("http_" + $http)) } ]')
+      landed_acc=$(printf '%s\n%s\n' "$landed_acc" "$chunk_landed" | jq -sc 'add')
+      refused_acc=$(printf '%s\n%s\n' "$refused_acc" "$chunk_refused" | jq -sc 'add')
+      log_event "${bucket}_chunk_attributed" "$(jq -nc --argjson i "$i" --arg http "$chunk_http" --argjson landed "$chunk_landed" --argjson refused "$chunk_refused" '{chunk_index:$i, http_status:$http, landed_count:($landed|length), landed_ids:$landed, refused:$refused}')"
     else
       local reason="http_$chunk_http"
       [[ "$chunk_dry" == "true" ]] && reason="dry_run_intercepted"
+      # A response we SHOULD have been able to attribute but could not is the
+      # dangerous case: the write may well have landed, but we cannot say for
+      # WHICH rows. Name it distinctly so it is never mistaken for a clean
+      # transport failure, and refuse the whole chunk rather than assume.
+      if [[ "$attributable" == "true" ]]; then
+        reason="unattributable_response_http_$chunk_http"
+      fi
       local chunk_refused
       chunk_refused=$(echo "$chunk_ids" | jq -c --arg reason "$reason" '[.[] | {cr_id: ., reason: $reason}]')
       refused_acc=$(printf '%s\n%s\n' "$refused_acc" "$chunk_refused" | jq -sc 'add')

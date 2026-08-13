@@ -374,6 +374,88 @@ write_credit_request_result() {
     fi
 }
 
+# Per-row truth floor for the BULK credit-request PUT.
+#
+# The backend has reported per-row outcomes since 2026-07-27 (core-backend
+# #9226/#9227): a 200 can still name rows it refused, and a 409 is the "some
+# rows were refused" answer whose `updatedIds` really did persist. Classifying
+# the whole `requestIds` array from the HTTP code alone therefore writes a
+# truth floor that is wrong in BOTH directions — and compute-run-summary.sh
+# sums `request_ids | length` per outcome, so a partially successful 409
+# reconciles as zero landed and can trip `run_finished_silent_failure` while
+# apply-verdicts.sh (which does read the per-row report) calls those same rows
+# landed. Same response, two contradictory operator-facing stories.
+#
+# So: when the response is attributable, split the ledger into one `ok` row for
+# the ids the backend named and one `http_error` row for the rest. When it is
+# NOT attributable — a 200/409 whose body carries no usable `updatedIds` — the
+# write may well have landed but we cannot say for WHICH rows, which is a
+# different problem from a clean transport failure: record it as
+# `unattributable_response` rather than inferring success from a missing field.
+# `landed` in compute-run-summary.sh does not include that outcome, so those
+# rows show up as attempted-but-not-landed and surface loudly.
+#
+# Returns 0 when it wrote the ledger, 1 when the caller must fall back to
+# whole-array classification (any non-bulk-PUT, or a status we cannot read a
+# row report from).
+write_credit_request_result_per_row() {
+    local method="$1" path="$2" body="${3:-}" http_status="$4" response_body="${5:-}"
+    # Transport telemetry travels with every row this writer emits, so the
+    # bulk-PUT path keeps the preconnect-retry evidence the whole-array
+    # classification used to carry.
+    local transport_attempts="${6:-}" transport_retry_exits="${7:-[]}"
+
+    [[ "$path" == /admin/credit-requests* ]] || return 1
+    local method_uc
+    method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    [[ "$method_uc" == "PUT" ]] || return 1
+    [[ "$http_status" == "200" || "$http_status" == "409" ]] || return 1
+
+    local attempted
+    attempted=$(printf '%s' "$body" | jq -c 'select((.requestIds | type) == "array") | .requestIds' 2>/dev/null || true)
+    [[ -n "$attempted" ]] || return 1
+    [[ "$(printf '%s' "$attempted" | jq 'length')" -gt 0 ]] || return 1
+
+    local intended_status
+    intended_status=$(printf '%s' "$body" | jq -r '.status // ""' 2>/dev/null || echo '')
+
+    # A success nests the report under .data; the error handler spreads it
+    # across the top level. Both shapes, same field. (Mirrors the parse in
+    # apply-verdicts.sh — the two must never disagree about what
+    # "attributable" means.)
+    local updated
+    updated=$(printf '%s' "$response_body" | jq -c '
+        (if type == "object" then (if has("data") then .data else . end) else null end)
+        | select(type == "object" and (.updatedIds | type) == "array")
+        | .updatedIds' 2>/dev/null || true)
+
+    if [[ -z "$updated" ]]; then
+        write_credit_request_result "$method" "$path" "$body" \
+            "unattributable_response" "$http_status" "$response_body" \
+            "$transport_attempts" "$transport_retry_exits"
+        return 0
+    fi
+
+    local landed refused
+    # Intersection in $attempted order; `-` is safe here because ids are unique.
+    landed=$(jq -nc --argjson a "$attempted" --argjson u "$updated" '$a - ($a - $u)')
+    refused=$(jq -nc --argjson a "$attempted" --argjson u "$updated" '$a - $u')
+
+    if [[ "$(printf '%s' "$landed" | jq 'length')" -gt 0 ]]; then
+        write_credit_request_result "$method" "$path" \
+            "$(jq -nc --argjson ids "$landed" --arg st "$intended_status" '{requestIds:$ids, status:$st}')" \
+            "ok" "$http_status" "" \
+            "$transport_attempts" "$transport_retry_exits"
+    fi
+    if [[ "$(printf '%s' "$refused" | jq 'length')" -gt 0 ]]; then
+        write_credit_request_result "$method" "$path" \
+            "$(jq -nc --argjson ids "$refused" --arg st "$intended_status" '{requestIds:$ids, status:$st}')" \
+            "http_error" "$http_status" "$response_body" \
+            "$transport_attempts" "$transport_retry_exits"
+    fi
+    return 0
+}
+
 # Persist fraud routing BEFORE the HTTP request. Fraud-routed rows use the
 # ordinary user_verification_needed DB status, so a timeout or post-commit 5xx
 # would otherwise erase the only durable fact that automation must never
@@ -2461,15 +2543,20 @@ EOF
     local response_body
     response_body=$(echo "$response" | sed '$d')
 
-    # Truth floor: classify 2xx as `ok`, non-2xx as `http_error`. The helper
-    # self-scopes to credit-request writes, so non-credit-request paths are
+    # Truth floor. A bulk credit-request PUT carries a per-row report, so it is
+    # attributed row by row (see write_credit_request_result_per_row); every
+    # other call classifies 2xx as `ok`, non-2xx as `http_error`. The helpers
+    # self-scope to credit-request writes, so non-credit-request paths are
     # a no-op. HTTP body is included in the error field for post-mortem.
-    if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-        write_credit_request_result "$method" "$path" "$body" "ok" "$http_code" "" \
-            "$transport_attempts" "$transport_retry_exits"
-    else
-        write_credit_request_result "$method" "$path" "$body" "http_error" "$http_code" "$response_body" \
-            "$transport_attempts" "$transport_retry_exits"
+    if ! write_credit_request_result_per_row "$method" "$path" "$body" "$http_code" "$response_body" \
+            "$transport_attempts" "$transport_retry_exits"; then
+        if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+            write_credit_request_result "$method" "$path" "$body" "ok" "$http_code" "" \
+                "$transport_attempts" "$transport_retry_exits"
+        else
+            write_credit_request_result "$method" "$path" "$body" "http_error" "$http_code" "$response_body" \
+                "$transport_attempts" "$transport_retry_exits"
+        fi
     fi
 
     # Record successful merges for the reverse-direction guard.

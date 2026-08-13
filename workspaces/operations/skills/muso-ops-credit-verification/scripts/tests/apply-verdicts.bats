@@ -26,7 +26,10 @@ printf 'retries=%s delay=%s\n' \
   "${MUSO_ADMIN_RETRY_DELAY_SECONDS:-}" >> "$ADMIN_CALLS"
 case "${ADMIN_STUB_MODE:-ok}" in
   recovered_dns)
-    printf '{"http_status":200,"body":{"ok":true},"transport_attempts":2,"transport_retry_exits":[6]}\n'
+    # The body carries the backend's per-row report: since 2026-07-27 a bulk
+    # PUT is attributed row by row, so an envelope with no updatedIds is
+    # `unattributable`, never landed (see apply-verdicts-attribution.bats).
+    printf '{"http_status":200,"body":{"ok":true,"data":{"updatedIds":["cr_1"],"skippedIds":[],"skipped":[]}},"transport_attempts":2,"transport_retry_exits":[6]}\n'
     ;;
   persistent_dns)
     echo 'WARN: simulated truth-floor write warning' >&2
@@ -41,7 +44,7 @@ case "${ADMIN_STUB_MODE:-ok}" in
     printf '{"http_status":500,"body":{"error":"server"},"transport_attempts":1,"transport_retry_exits":[]}\n'
     ;;
   *)
-    printf '{"http_status":200,"body":{"ok":true},"transport_attempts":1,"transport_retry_exits":[]}\n'
+    printf '{"http_status":200,"body":{"ok":true,"data":{"updatedIds":["cr_1"],"skippedIds":[],"skipped":[]}},"transport_attempts":1,"transport_retry_exits":[]}\n'
     ;;
 esac
 STUB
