@@ -337,11 +337,51 @@ write_fence() {
   [[ "$output" == *"unsubstitutable placeholder"* ]]
 }
 
-@test "ratchet: zero blocks extracted from a non-empty scope exits 2 (refuse to pass vacuously)" {
+# Zero blocks from a non-empty scope has TWO causes needing OPPOSITE answers.
+# This used to be one test asserting exit 2 for both, which reddened any PR that
+# edited an SQL-free skills-all/ doc: the scope is every changed *.md/*.sh, so a
+# pure-prose SKILL.md landed in "refusing to pass vacuously" — a gate failure
+# reported against a PR with no SQL to be stale. Observed on PR #826.
+@test "vacuity: a scope whose files carry NO SQL exits 0 (nothing to compile)" {
   echo 'no SQL here, just prose' > "$TEST_TMPDIR/skills-all/dummy/a.md"
+  run run_gate_py "skills-all/dummy/a.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to compile"* ]]
+}
+
+@test "vacuity: ordinary bash fences are not SQL markers (exits 0)" {
+  # The extractor opens ```bash only to look for a trino-query.sh / muso query
+  # invocation INSIDE. A skill full of ordinary bash examples carries no SQL —
+  # treating every fence as a marker is what made the first fix still refuse.
+  printf '```bash\nls -la /tmp\n```\n' > "$TEST_TMPDIR/skills-all/dummy/a.md"
+  run run_gate_py "skills-all/dummy/a.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to compile"* ]]
+}
+
+@test "vacuity: a commented trino-query.sh mention is documentation, not SQL (exits 0)" {
+  printf '```bash\n# bash trino-query.sh "SELECT 1"\n```\n' > "$TEST_TMPDIR/skills-all/dummy/a.md"
+  run run_gate_py "skills-all/dummy/a.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to compile"* ]]
+}
+
+@test "vacuity: a file that DOES carry a sql fence but yields no block still exits 2" {
+  # This is the real extractor-broken signal the vacuity refusal exists for:
+  # the marker says SQL is here, extraction disagrees. It must stay fail-closed,
+  # otherwise the fix above becomes a bypass.
+  printf '```sql\n```\n' > "$TEST_TMPDIR/skills-all/dummy/a.md"
   run run_gate_py "skills-all/dummy/a.md"
   [ "$status" -eq 2 ]
   [[ "$output" == *"refusing to pass vacuously"* ]]
+}
+
+@test "vacuity: SQL that is entirely declared-skipped exits 0, not 2" {
+  printf '<!-- trino-sql-gate: skip (fixture) -->\n```sql\nSELECT 1\n```\n' \
+    > "$TEST_TMPDIR/skills-all/dummy/a.md"
+  run run_gate_py "skills-all/dummy/a.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"declared-skipped"* ]]
 }
 
 # --------------------------------------------------------------- False green --

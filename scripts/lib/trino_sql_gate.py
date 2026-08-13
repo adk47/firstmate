@@ -314,7 +314,56 @@ def run_gate(files, root: Path, baseline_path: Path, subs_path: Path,
         if not files:
             print("No Trino-SQL-relevant files in scope — nothing to check.")
             return 0
-        print("Extracted zero SQL blocks from a non-empty file scope — refusing to pass vacuously.", file=sys.stderr)
+        # Zero blocks from a non-empty scope has TWO causes needing OPPOSITE
+        # answers, and collapsing them into one refusal reddened honest PRs:
+        # the scope is every changed skills-all/*.{md,sh}, so editing one
+        # SQL-free doc (e.g. a SKILL.md that is pure prose) landed here and
+        # exited 2 with "refusing to pass vacuously" — a gate failure reported
+        # against a PR that has no SQL to be stale.
+        #
+        #   (a) nothing in scope CARRIES SQL      -> zero blocks is the truth; pass.
+        #   (b) something carries SQL markers but
+        #       extraction still yielded nothing  -> the extractor is broken; REFUSE.
+        #
+        # Discriminated with the extractor's OWN markers, so this can never
+        # drift into disagreeing with what extraction actually looks for.
+        # A declared skip also legitimately explains an empty result.
+        if result.skipped_declared:
+            print("All SQL in scope is declared-skipped — nothing left to compile.")
+            return 0
+        sql_bearing = []
+        for rel in files:
+            try:
+                text = (root / rel).read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                # Fail closed: an unreadable file is not evidence of "no SQL".
+                print(f"Unreadable file in scope {rel}: {exc} — refusing to pass vacuously.",
+                      file=sys.stderr)
+                return 2
+            for line in text.splitlines():
+                # A ```sql fence is unconditionally SQL. A ```bash/shell/sh
+                # fence is NOT — the extractor opens those only to look for a
+                # trino-query.sh / `muso query` invocation inside, so a skill
+                # full of ordinary bash examples carries no SQL. Matching every
+                # fence here is what made the first cut of this fix still refuse
+                # a pure-prose SKILL.md.
+                fence = tse.FENCE_OPEN_RE.match(line)
+                if fence and fence.group(1).lower() == "sql":
+                    sql_bearing.append(rel)
+                    break
+                # Mirror extract_bash_blob: a `#`-commented mention of
+                # trino-query.sh is documentation, not an invocation.
+                if line.lstrip().startswith("#"):
+                    continue
+                if tse._INVOKE_RE.search(line):
+                    sql_bearing.append(rel)
+                    break
+        if not sql_bearing:
+            print(f"No SQL in the {len(files)} changed file(s) in scope — nothing to compile.")
+            return 0
+        print("Extracted zero SQL blocks from files that DO carry SQL markers "
+              f"({', '.join(sql_bearing[:5])}) — extraction is broken, not the scope; "
+              "refusing to pass vacuously.", file=sys.stderr)
         return 2
 
     exit_code = 0
