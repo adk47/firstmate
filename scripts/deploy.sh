@@ -98,6 +98,32 @@ source "$SCRIPT_DIR/lib/muso-env-preflight.sh"
 # `--env dev` fails closed, and node-8 has no dev pair to begin with.
 MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.13.1}"
 
+# FLOOR — the oldest muso the skills in THIS tree can actually run against.
+# The default above is overrideable (`MUSO_CLI_VERSION=0.11.1 scripts/deploy.sh`),
+# and without this guard that override installs 0.11.1, PASSES install_muso's
+# post-install assertion (which only checks installed == requested), and then
+# syncs a muso-github-code-review that dies at Step 1 with "unknown command".
+# Ordering alone cannot prevent that — the CLI is correctly installed first, it
+# is simply too old. Raise this whenever a skill starts calling a newer verb.
+#
+# 0.12.0 is the floor because skills-all/muso-github-code-review calls
+# `muso gh review-bundle` from Step 1, and the `muso gh` group landed in
+# muso-cli#40, released as v0.12.0. The default pin above (0.13.1) still
+# carries that group — verified in muso-cli at v0.13.1: internal/cli/gh.go
+# registers review-bundle/checks/threads/approve, and reviewBundleResult
+# still emits `threadsTruncated`, `rebaseIntegrity` and `filesCountMismatch`,
+# which is exactly what the skill consumes.
+MUSO_CLI_MIN_VERSION="0.12.0"
+if ! version_at_least "$MUSO_CLI_MIN_VERSION" "$MUSO_CLI_VERSION"; then
+  echo "FATAL: MUSO_CLI_VERSION=$MUSO_CLI_VERSION is below the $MUSO_CLI_MIN_VERSION floor" >&2
+  echo "       required by the skills in this tree (muso-github-code-review calls" >&2
+  echo "       'muso gh', added in 0.12.0). Deploying would install a CLI too old" >&2
+  echo "       for the skills it ships alongside." >&2
+  echo "       To roll the CLI back, roll the skills back in the SAME commit and" >&2
+  echo "       lower MUSO_CLI_MIN_VERSION with them — do not override past this." >&2
+  exit 1
+fi
+
 # Detect if we're running on Node 8 (the HYDRA host)
 if hostname | grep -q 'node-8\|ovh-node-8' || [ -d "/opt/hydra/workspaces" ]; then
   HYDRA_LOCAL=true
@@ -865,6 +891,10 @@ RSYNC_EXCLUDES=(
   # KEEP_GLOBS: that drift guard only covers 'workspaces/*/' file excludes, and
   # the deploy must not delete this mid-review while the merge-scratch cleanup
   # should still reap it afterwards as the per-run scratch it is.
+  #
+  # Keep it a PREFIX match. Nothing in this repo writes these files — the AGENT
+  # picks the name at runtime, so the suffix is not guaranteed and re-narrowing
+  # the glob to a known shape would just reopen the same live-gate outage.
   --exclude='workspaces/qa/pr-review*.json'
   # Generated reports (CSVs, PDFs, JSON dumps from agent runs).
   # Convention: agents that produce reports for human consumption
@@ -1819,6 +1849,29 @@ DEL_BRIEFING
 preflight_drift_check
 
 # -------------------------------------------------------------------
+# Step 4a.5: pin the muso CLI — BEFORE anything is synced.
+# -------------------------------------------------------------------
+# Ordering is a correctness requirement, not tidiness. Skills call muso verbs,
+# so the two directions of skew are NOT symmetric:
+#   CLI newer than skills  -> safe (verbs are additive; an older skill calls
+#                             only verbs that still exist)
+#   skills newer than CLI  -> BROKEN (e.g. muso-github-code-review calling
+#                             `muso gh` against 0.11.1 dies "unknown command",
+#                             which reads as a broken skill, not a stale pin)
+# This block used to run at Step 4d.6, i.e. AFTER the Step 4b rsync and the
+# Step 4c managed-skills sync. That left a window where new skills were live
+# against the old CLI — and because a failed pin calls `fail`, an install error
+# ABORTED the deploy with the incompatible skills already on the server and no
+# rollback. Pinning first makes the failure mode safe: nothing has been synced
+# yet, so aborting here leaves the fleet exactly as it was.
+if needs_target "main" || needs_target "edge"; then
+  log "Step 4a.5/8: Pinning muso CLI to ${MUSO_CLI_VERSION} (before sync)..."
+  if ! install_muso; then
+    fail "muso CLI pin failed (target ${MUSO_CLI_VERSION}) — aborting BEFORE any sync, fleet unchanged"
+  fi
+fi
+
+# -------------------------------------------------------------------
 # Step 4b: rsync repo to Node 8
 # -------------------------------------------------------------------
 if $HYDRA_LOCAL; then
@@ -2013,8 +2066,14 @@ for _profile in main edge; do
 done
 
 # -------------------------------------------------------------------
-# Step 4d.6: Pin the muso CLI (main + edge)
+# muso CLI pin: MOVED to Step 4a.5 (before the Step 4b rsync).
 # -------------------------------------------------------------------
+# It used to run here, after skills were already on the server. Skills call
+# muso verbs, so a skill newer than the CLI is a live breakage while a CLI
+# newer than the skills is harmless — the pin therefore has to happen first.
+# See the Step 4a.5 block for the full rationale.
+#
+# Context kept here because it explains WHY the pin covers both profiles:
 # muso is the admin-API/policy CLI. main-gateway agents use it (soak phase),
 # and as of the Caroline self-serve work the EDGE gateway consumes it too: the
 # support-tools gated-write tools (profiles_claim_self, credits_verify,
@@ -2024,12 +2083,6 @@ done
 # main OR edge is targeted so an edge-only deploy still upgrades it. The edge
 # process additionally needs MUSO_STATE_DIR + a muso login (see the edge env
 # block) — without them the gated writes fail closed.
-if needs_target "main" || needs_target "edge"; then
-  log "Step 4d.6/8: Pinning muso CLI to ${MUSO_CLI_VERSION}..."
-  if ! install_muso; then
-    fail "muso CLI pin failed (target ${MUSO_CLI_VERSION})"
-  fi
-fi
 
 # NOTE: drift baseline (.deployed-sha) is updated AFTER Step 7 (smoke test
 # passes), not here. Writing it now would advance the baseline before we
