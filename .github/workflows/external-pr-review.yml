@@ -13,14 +13,27 @@ name: external-pr-review
 # land here. See each repo's .github/workflows/qa-autoreview-trigger.yml (the
 # producer) and scripts/qa-dispatch-pr-review.sh (what we call).
 #
-# Trust model: a repository_dispatch can only be sent by a caller holding a PAT
-# with write access to hydra (each source repo's secrets.DEVOPS_DISPATCH_PAT), so
-# the payload is authenticated. We still FORMAT-validate every field below and
-# allowlist the repo, and the downstream skill re-fetches the PR as the gateway's
-# gh account (adk47) — so a bogus PR number or unreadable repo fails safe there,
-# and an approval still requires real CI-green + a GO verdict on the actual PR. We
-# do NOT re-resolve the PR from GitHub here because no hydra-scoped token can read
-# the private source repos; adk47's auth (used by the skill) is the ground truth.
+# Trust model: a repository_dispatch is AUTHENTICATED (the sender holds a PAT with
+# write access to hydra — each source repo's secrets.DEVOPS_DISPATCH_PAT) but it is
+# NOT AUTHORITATIVE. Any holder of any allowlisted repo's dispatch PAT can put
+# arbitrary values in client_payload, including `author`. That field decides the
+# requester UID, and the requester UID decides the APPROVAL TIER in
+# scripts/qa-pr-approve.sh — so trusting the payload author let a caller claim
+# `author: nsollazzo` on a PR somebody else wrote and buy that PR an UNSCOPED
+# approval. (Guard 4b binds the SCOPED tier to the PR's real author, so only the
+# unscoped tier was ever forgeable — which is the tier that matters.)
+#
+# So the dispatch step below RE-RESOLVES the PR's real author from the GitHub API
+# and refuses when it disagrees with the payload, or when it cannot be read at all.
+# hydra CAN read those private repos here: not with `github.token` (that is what
+# the older version of this comment meant, and it is still true), but with the same
+# credentials the ack step uses — the QA_ACK_PAT repo secret when configured, else
+# the runner's ambient adk47 gh login on this box. The ack step reads AND writes
+# those repos with exactly that chain today.
+#
+# Everything else stays defense-in-depth: FORMAT-validate every field, allowlist
+# the repo, and the downstream skill re-fetches the PR as adk47 — so an approval
+# still requires real CI-green + a GO verdict on the actual PR.
 #
 # Delivery caveat (#214, 2026-07-27): GitHub's repository_dispatch -> Actions-run
 # fan-out is BEST-EFFORT. The producer gets HTTP 204 ("event accepted") and then,
@@ -137,6 +150,7 @@ jobs:
           AUTHOR: ${{ github.event.client_payload.author }}
           BASE: ${{ github.event.client_payload.base }}
           IS_DRAFT: ${{ github.event.client_payload.is_draft }}
+          QA_ACK_PAT: ${{ secrets.QA_ACK_PAT }}
         run: |
           set -euo pipefail
 
@@ -165,11 +179,38 @@ jobs:
             echo "PR #${PR} is a draft — skipping."; exit 0
           fi
 
+          # --- Re-resolve the PR's REAL author server-side. --------------------
+          #     client_payload.author is attacker-controlled (see the trust-model
+          #     header): it selects the requester UID, which selects the approval
+          #     TIER in qa-pr-approve.sh. Ask GitHub who actually opened the PR and
+          #     refuse on any disagreement, so a forged or stale dispatch cannot
+          #     buy itself somebody else's authority.
+          #
+          #     Same credential chain as the ack step above: QA_ACK_PAT if the repo
+          #     secret is set, else the runner's ambient adk47 gh login. FAIL
+          #     CLOSED — a gate that skips what it cannot verify IS the bug, so an
+          #     unreadable author ends the run non-zero and loudly, never "proceed
+          #     with the payload value".
+          if [ -n "${QA_ACK_PAT:-}" ]; then export GH_TOKEN="$QA_ACK_PAT"; fi
+          #     `gh`'s own stderr lands in the run log; the variable keeps stdout
+          #     only, so an error string can never be mistaken for a login.
+          REAL_AUTHOR=""
+          if ! REAL_AUTHOR="$(gh api "repos/${REPO}/pulls/${PR}" --jq .user.login)" \
+             || [ -z "$REAL_AUTHOR" ]; then
+            echo "::error::could not read the real author of ${REPO}#${PR} from the GitHub API — refusing to dispatch on the unverified client_payload author (fail closed). Check QA_ACK_PAT / the runner's gh login."
+            exit 1
+          fi
+          if [ "$REAL_AUTHOR" != "$AUTHOR" ]; then
+            echo "::error::client_payload.author='${AUTHOR}' but ${REPO}#${PR} is really authored by '${REAL_AUTHOR}' — refusing this dispatch (forged or stale payload). The author decides the requester UID and therefore the approval tier, so a mismatch is never dispatched."
+            exit 1
+          fi
+
           # --- Author -> Slack UID. Fail-CLOSED: skip a PR we cannot DM. --------
-          if ! REQUESTER_UID="$(bash scripts/lib/qa-author-slack-uid.sh "$AUTHOR")"; then
-            echo "PR #${PR} author='$AUTHOR' has no Slack-UID mapping — skipping (add it to scripts/lib/qa-author-slack-uid.sh to enable)."
+          #     Mapped from REAL_AUTHOR, never from the payload value.
+          if ! REQUESTER_UID="$(bash scripts/lib/qa-author-slack-uid.sh "$REAL_AUTHOR")"; then
+            echo "PR #${PR} author='$REAL_AUTHOR' has no Slack-UID mapping — skipping (add it to scripts/lib/qa-author-slack-uid.sh to enable)."
             exit 0
           fi
 
-          echo "Dispatching QA auto-review of ${REPO}#${PR} @ ${HEAD_SHA} (author=${AUTHOR} -> ${REQUESTER_UID})"
+          echo "Dispatching QA auto-review of ${REPO}#${PR} @ ${HEAD_SHA} (author=${REAL_AUTHOR} -> ${REQUESTER_UID})"
           bash scripts/qa-dispatch-pr-review.sh "$PR" "$HEAD_SHA" "$REPO" "$REQUESTER_UID"

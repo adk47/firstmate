@@ -11,6 +11,7 @@ HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 SCRIPT="$HYDRA_REPO/scripts/qa-dispatch-pr-review.sh"
 
 GOOD_SHA="0f175183abf"   # 11 hex chars — valid
+NICK="U0AL36NADEY"       # a requester UID; REQUIRED now — the script has no default
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
@@ -45,7 +46,7 @@ STUB
 teardown() { rm -rf "$TEST_TMPDIR"; }
 
 @test "happy path: dispatches one cron add for the qa agent on main" {
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
   # targets the qa agent, the main profile, and the per-PR job name (now
@@ -57,8 +58,8 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   grep -qx -- '--delete-after-run' "$STUB_ARGV"
 }
 
-@test "happy path: message carries the PR URL + AUTO-REVIEW + Nick's requester UID" {
-  run "$SCRIPT" 123 "$GOOD_SHA"
+@test "happy path: message carries the PR URL + AUTO-REVIEW + the passed requester UID" {
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   grep -q 'AUTO-REVIEW' "$STUB_ARGV"
   grep -q 'github.com/Muso-AI/hydra/pull/123' "$STUB_ARGV"
@@ -66,11 +67,29 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 }
 
 @test "happy path: opening DM routed through the per-PR thread helper" {
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   # The opening note goes through qa-pr-thread-dm.sh (threads re-reviews), not a
   # bare qa-slack-dm.sh call with an inline "reviewing PR" string.
   grep -q 'qa-pr-thread-dm.sh Muso-AI/hydra 123 U0AL36NADEY' "$STUB_ARGV"
+}
+
+@test "requester UID absent from BOTH the 4th arg and the env -> exit 2, no dispatch" {
+  # B1: the dispatcher used to default this to Nick's UNSCOPED UID, so a two-arg
+  # manual dispatch of ANY author's PR silently carried his approval authority and
+  # logged him as the requester. There must be no default at all.
+  run env -u QA_REVIEW_REQUESTER_UID "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 2 ]
+  echo "$output" | grep -q 'requester-uid is REQUIRED'
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "the removed default UID appears nowhere in the dispatcher as a fallback" {
+  # Pins the fix itself: a literal personal UID on the REQUESTER_UID assignment is
+  # the exact shape that regressed. (The UID may legitimately appear in comments.)
+  if grep -qE '^REQUESTER_UID=.*U[A-Z0-9]{6,}' "$SCRIPT"; then
+    echo "REQUESTER_UID still carries a hardcoded personal Slack UID fallback" >&2; false
+  fi
 }
 
 @test "missing args -> usage exit 2, no dispatch" {
@@ -145,7 +164,7 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 }
 
 @test "fallback delivery disabled via --no-deliver (skill owns Slack delivery)" {
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   # --no-deliver is the actual off-switch for the runner's fallback delivery. Without
   # it the isolated cron's final text delivery fails with "Delivering to Slack requires
@@ -166,7 +185,7 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   {"id":"OTHERCRON","name":"some-other-cron","createdAtMs":$stale_ms}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   grep -qx 'STALEQA' "$STUB_ARGV"      # stale qa-autoreview job removed
   if grep -qx 'FRESHQA' "$STUB_ARGV"; then echo "a fresh in-flight qa-autoreview job was wrongly swept" >&2; false; fi    # fresh (in-flight) qa-autoreview job left alone
