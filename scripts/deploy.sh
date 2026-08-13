@@ -2652,6 +2652,34 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
           const m = await import(process.env.CRON_SDK);
           const store = JSON.parse(readFileSync(process.env.LIVE_CRON, "utf8"));
           const target = m.resolveCronStorePath();
+          // LAST-MOMENT store-only re-check.
+          //
+          // The guard above (detect-store-only-crons.py) reads the store ~50
+          // lines earlier and halts on a durable cron the repo does not
+          // declare. saveCronStore is delete-by-store_key + re-insert, so a
+          // cron created in the gap between that guard and this save is
+          // silently DELETED — the guard has already passed and never runs
+          // again. That is the 2026-07-16 ChartMogul loss shape (PR #702/#706)
+          // reachable through a window the guard cannot see.
+          //
+          // Re-checking against the store we read HERE shrinks that window from
+          // ~50 lines of deploy work to the microseconds before the save. It
+          // halts rather than dropping, exactly like the guard, and honours the
+          // same HYDRA_ALLOW_ORPHAN_CRON=1 override. Same check, same
+          // reasoning, same override as cron_store_reimport in
+          // scripts/lib/cron-store.sh — which is bats-covered; keep them in step.
+          if (process.env.HYDRA_ALLOW_ORPHAN_CRON !== "1") {
+            const declared = new Set((store.jobs || []).map((j) => j.id));
+            const cur = await m.loadCronStore(target);
+            const undeclared = (cur.jobs || [])
+              .filter((j) => !(j.schedule && j.schedule.kind === "at" && j.deleteAfterRun === true))
+              .filter((j) => !declared.has(j.id))
+              .map((j) => j.id);
+            if (undeclared.length > 0) {
+              console.error("STORE_ONLY_CRON_APPEARED " + undeclared.join(","));
+              process.exit(9);
+            }
+          }
           // saveCronStore/loadCronStore are ASYNC (the SDK wrappers return a
           // promise even though the underlying SQLite transaction is sync) —
           // they MUST be awaited, else process.exit(0) below fires before the
@@ -2677,6 +2705,14 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
     fi
     break
   done
+  if (( IMPORT_RC == 9 )); then
+    # A durable cron appeared between the store-only guard and this save. The
+    # store was NOT written, so the job is still there — halt and let a human
+    # decide, exactly as the guard would have.
+    log "  ✗ cron SQLite import: a durable cron the repo does not declare appeared AFTER the store-only guard ran:"
+    echo "$IMPORT_OUT" | sed 's/^/        /'
+    fail "cron SQLite import: the live cron store gained durable cron(s) after the store-only guard passed, so the import REFUSED to overwrite them (nothing was written). Commit them to cron-jobs.json, or re-run with HYDRA_ALLOW_ORPHAN_CRON=1 to drop them deliberately."
+  fi
   if (( IMPORT_RC != 0 )); then
     # Surface the node error body indented, like install_external_plugin,
     # then fail loud (fail -> notify_slack -> exit 1).
