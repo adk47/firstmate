@@ -574,9 +574,11 @@ APPROVED_LANDED=0
 APPROVED_REJECTED_BY_GATE=0
 APPROVED_REJECTED_PRE_FLIGHT=0
 APPROVED_HTTP_ERROR=0
+APPROVED_UNATTRIBUTABLE=0
 UVN_ATTEMPTED=0
 UVN_LANDED=0
 UVN_HTTP_ERROR=0
+UVN_UNATTRIBUTABLE=0
 # Fraud (multi-factor batch detector, fraud-detection-spec.md). A
 # fraud-flagged credit lands in .results.jsonl as a UVN write carrying
 # flag_reason="fraud_multifactor" (the closed-list enum batch-flag-credits.sh
@@ -615,9 +617,12 @@ if [[ -f "$results_path" ]]; then
                                 ([ $rows[] | select(.intended_status == "approved" and .outcome == "rejected_pre_flight") | (.request_ids | length) ] | add // 0),
             approved_http_error:
                                 ([ $rows[] | select(.intended_status == "approved" and .outcome == "http_error") | (.request_ids | length) ] | add // 0),
+            approved_unattributable:
+                                ([ $rows[] | select(.intended_status == "approved" and .outcome == "unattributable_response") | (.request_ids | length) ] | add // 0),
             uvn_attempted:      ([ $rows[] | select(.intended_status == "user_verification_needed") | (.request_ids | length) ] | add // 0),
             uvn_landed:         ([ $rows[] | select(.intended_status == "user_verification_needed" and landed) | (.request_ids | length) ] | add // 0),
             uvn_http_error:     ([ $rows[] | select(.intended_status == "user_verification_needed" and .outcome == "http_error") | (.request_ids | length) ] | add // 0),
+            uvn_unattributable: ([ $rows[] | select(.intended_status == "user_verification_needed" and .outcome == "unattributable_response") | (.request_ids | length) ] | add // 0),
             fraud_flagged:      ([ $rows[] | select(.intended_status == "user_verification_needed" and .flag_reason == "fraud_multifactor" and landed) | (.request_ids | length) ] | add // 0)
         }
     ' "$results_path" 2>/dev/null || true)
@@ -628,9 +633,11 @@ if [[ -f "$results_path" ]]; then
         APPROVED_REJECTED_BY_GATE=$(echo "$reconciled" | jq -r '.approved_rejected_by_gate')
         APPROVED_REJECTED_PRE_FLIGHT=$(echo "$reconciled" | jq -r '.approved_rejected_pre_flight')
         APPROVED_HTTP_ERROR=$(echo "$reconciled" | jq -r '.approved_http_error')
+        APPROVED_UNATTRIBUTABLE=$(echo "$reconciled" | jq -r '.approved_unattributable')
         UVN_ATTEMPTED=$(echo "$reconciled" | jq -r '.uvn_attempted')
         UVN_LANDED=$(echo "$reconciled" | jq -r '.uvn_landed')
         UVN_HTTP_ERROR=$(echo "$reconciled" | jq -r '.uvn_http_error')
+        UVN_UNATTRIBUTABLE=$(echo "$reconciled" | jq -r '.uvn_unattributable')
         FRAUD_FLAGGED=$(echo "$reconciled" | jq -r '.fraud_flagged')
     else
         echo "WARN: results.jsonl at $results_path parsed to malformed reconciliation; falling back to session-only counts" >&2
@@ -741,8 +748,10 @@ summary=$(jq -n \
     --argjson a_rejected "$APPROVED_REJECTED_BY_GATE" \
     --argjson a_preflight "$APPROVED_REJECTED_PRE_FLIGHT" \
     --argjson a_http_err "$APPROVED_HTTP_ERROR" \
+    --argjson a_unattr "$APPROVED_UNATTRIBUTABLE" \
     --argjson v_attempted "$UVN_ATTEMPTED" \
     --argjson v_http_err "$UVN_HTTP_ERROR" \
+    --argjson v_unattr "$UVN_UNATTRIBUTABLE" \
     --argjson fraud "$FRAUD_FLAGGED" \
     --argjson e "$ESCALATED" \
     --argjson si "$SKIPPED_IDEMPOTENT" \
@@ -772,9 +781,11 @@ summary=$(jq -n \
             approved_rejected_by_gate:$a_rejected,
             approved_rejected_pre_flight:$a_preflight,
             approved_http_error:$a_http_err,
+            approved_unattributable:$a_unattr,
             verification_needed_attempted:$v_attempted,
             verification_needed_landed:$v,
             verification_needed_http_error:$v_http_err,
+            verification_needed_unattributable:$v_unattr,
             fraud_flagged:$fraud,
             session_derived_approved:$a_session,
             session_derived_verification_needed:$v_session
@@ -783,7 +794,7 @@ summary=$(jq -n \
         dryRun:$dry,
         derived_from:{
             session_jsonl:["preflight_ok","fetched","errors","session_derived_*"],
-            results_jsonl:["approved","verification_needed","fraud_flagged","approved_attempted","approved_rejected_by_gate","approved_rejected_pre_flight","approved_http_error","silent_failure_detected"],
+            results_jsonl:["approved","verification_needed","fraud_flagged","approved_attempted","approved_rejected_by_gate","approved_rejected_pre_flight","approved_http_error","approved_unattributable","silent_failure_detected"],
             runlog:["escalated","skipped_idempotent","skipped_cap"]
         }
     }')

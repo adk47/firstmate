@@ -1117,6 +1117,12 @@ jobs:
         # any 200 and refused on any non-2xx, so rows the backend had reported
         # as skipped were counted applied, and rows that really persisted were
         # counted failed. Hermetic (ADMIN_API_SH stubbed with fixed envelopes).
+        #
+        # ALSO results-per-row-attribution.bats — the same attribution on the
+        # OTHER surface: muso-admin-api.sh's .results.jsonl truth floor and the
+        # compute-run-summary.sh reconciliation built from it. End-to-end
+        # (wrapper → ledger → canonical summary) with `curl` stubbed, so a
+        # partially successful 409 can never again reconcile as zero landed.
         run: |
           set -euo pipefail
           # The self-hosted runner may carry production bot credentials. Bats
@@ -1150,6 +1156,7 @@ jobs:
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/verify-credit-request-status.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/batch-flag-credits.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/apply-verdicts-attribution.bats \
+                       workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/results-per-row-attribution.bats \
                        workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
                        workspaces/support/skills/order-fulfillment/scripts/tests \
                        "${sa_dirs[@]}" \
