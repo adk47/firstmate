@@ -401,10 +401,26 @@ mk_variant() {
   [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
 }
 
+@test "tiers: both allowlist loops use the bash-3.2-safe empty-array expansion" {
+  # SHAPE assertion, and it is load-bearing rather than pedantic: the two
+  # behavioural tests below can only FAIL on bash 3.2, but CI runs Linux where
+  # /bin/bash is bash 5 — there, a bare "${ARR[@]}" on an empty array is
+  # perfectly legal, so the guard could be reverted with CI fully green. This
+  # test fails on every bash, so the pin actually runs where it is enforced.
+  local bare
+  bare="$(grep -nE 'for (uid|spec) in "\$\{(UNSCOPED_UIDS|SCOPED_APPROVERS)\[@\]\}"' "$SCRIPT" || true)"
+  if [ -n "$bare" ]; then
+    echo "unguarded array expansion (crashes under set -u on bash 3.2): $bare" >&2; false
+  fi
+  [ "$(grep -cE '\$\{(UNSCOPED_UIDS|SCOPED_APPROVERS)\[@\]\+"\$\{(UNSCOPED_UIDS|SCOPED_APPROVERS)\[@\]\}"\}' "$SCRIPT")" -eq 3 ]
+}
+
 @test "tiers: emptying SCOPED_APPROVERS degrades to a clean die 5, never an unbound-variable crash" {
   # `set -u` + bash 3.2 (macOS /bin/bash) aborts on "${ARR[@]}" when ARR is
   # empty: exit 1, no message, no audit trail. Emptying a table is exactly the
   # edit the header block invites, so it must stay a graceful refusal.
+  # NOTE: this can only go red on bash 3.2 — see the shape test above, which is
+  # what pins the guard on CI's bash 5.
   variant="$(mk_variant 's#^SCOPED_APPROVERS=(.*#SCOPED_APPROVERS=()#')"
   QA_APPROVAL_POLICY="$HYDRA_REPO/policies/qa-approval-policy.json" \
     STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="develop" \
@@ -474,8 +490,14 @@ mk_variant() {
 # ---------------------------------------------------------------------------
 
 @test "null guard: \"author\": null → exit 7, never approves (must not read as the string \"null\")" {
-  STUB_ME="adk47" STUB_AUTHOR_NULL=1 STUB_BASE_REF="develop" \
-    run "$SCRIPT" core-backend 55 "$NICK"
+  # EXPORTED in the body, deliberately NOT the `VAR=x run ...` prefix the rest of
+  # this file uses. These two tests reached the stub through that prefix and were
+  # NON-DETERMINISTIC: ~10% of full-suite runs took the all-green path instead,
+  # and the failure mode was the wrapper RECORDING AN APPROVAL. A flaky test is
+  # bad; a flaky test whose flake direction is "approved" is a broken pin, and
+  # these two are the only thing pinning the `// ""` guards.
+  export STUB_ME="adk47" STUB_AUTHOR_NULL=1 STUB_BASE_REF="develop"
+  run "$SCRIPT" core-backend 55 "$NICK"
   [ "$status" -eq 7 ]
   echo "$output" | grep -q 'could not read PR author'
   if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
@@ -487,8 +509,9 @@ mk_variant() {
   # the base arrives as "null" and Guard 4b still exits 5 — but as a plain
   # mismatch ("must be develop (got null)"), not as the FAIL-CLOSED unreadable
   # path. Asserting the fail-closed wording is what makes this mutation-sensitive.
-  STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_NULL=1 \
-    run "$SCRIPT" Muso-AI/web-credits-next 56 "$MARIIA"
+  # Exported in the body for the same reason as the test above.
+  export STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_NULL=1
+  run "$SCRIPT" Muso-AI/web-credits-next 56 "$MARIIA"
   [ "$status" -eq 5 ]
   echo "$output" | grep -q 'base branch could not be read'
   if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi

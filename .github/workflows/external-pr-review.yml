@@ -168,6 +168,13 @@ jobs:
           if ! [[ "$HEAD_SHA" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
             echo "head_sha='$HEAD_SHA' not a 7-40 char hex sha — refusing."; exit 1
           fi
+          # AUTHOR is validated HERE, with its siblings, because it is now
+          # compared against the API below: an omitted/garbage author must be
+          # refused as a malformed payload, not surface later as a confusing
+          # "forged or stale payload" mismatch against a real login.
+          if ! [[ "$AUTHOR" =~ ^[A-Za-z0-9](-?[A-Za-z0-9])*$ ]]; then
+            echo "author='$AUTHOR' is not a valid GitHub login — refusing."; exit 1
+          fi
 
           # --- Scope: PRs targeting develop, main, or master, non-draft. -------
           #     (core-backend's stable branch is master; no other onboarded repo
@@ -187,20 +194,41 @@ jobs:
           #     buy itself somebody else's authority.
           #
           #     Same credential chain as the ack step above: QA_ACK_PAT if the repo
-          #     secret is set, else the runner's ambient adk47 gh login. FAIL
-          #     CLOSED — a gate that skips what it cannot verify IS the bug, so an
+          #     secret is set, else the runner's ambient gh login. FAIL CLOSED —
+          #     a gate that skips what it cannot verify IS the bug, so an
           #     unreadable author ends the run non-zero and loudly, never "proceed
           #     with the payload value".
-          if [ -n "${QA_ACK_PAT:-}" ]; then export GH_TOKEN="$QA_ACK_PAT"; fi
+          #
+          #     This makes a GitHub read a HARD dependency of every external
+          #     review, so the chain was VERIFIED rather than assumed before it
+          #     shipped (2026-08-13, on node-8): the runner services all run as
+          #     User=root (`systemctl cat 'actions.runner.*'`), and root's gh is
+          #     authed as org-admin adk47, which resolved `.user.login` on a real
+          #     PR in auth, H-DevOps, analytics-controller, core-backend,
+          #     web-credits-next and industry-data-processing — i.e. the private
+          #     repos this could plausibly have failed on. The ack step's
+          #     "no usable gh auth on the runner?" branch is a legacy hedge, not
+          #     an observed state. RE-VERIFY THIS if the runners are ever moved
+          #     off root or onto a different host, because that is the day this
+          #     step starts failing every external review closed.
+          #
+          #     GH_TOKEN is scoped to THIS call, not exported: nothing later in
+          #     the step (the dispatcher, the openclaw CLI) needs the PAT, and a
+          #     credential the ack step keeps to itself should not ride along.
           #     `gh`'s own stderr lands in the run log; the variable keeps stdout
           #     only, so an error string can never be mistaken for a login.
           REAL_AUTHOR=""
-          if ! REAL_AUTHOR="$(gh api "repos/${REPO}/pulls/${PR}" --jq .user.login)" \
+          if ! REAL_AUTHOR="$(GH_TOKEN="${QA_ACK_PAT:-${GH_TOKEN:-}}" gh api "repos/${REPO}/pulls/${PR}" --jq .user.login)" \
              || [ -z "$REAL_AUTHOR" ]; then
             echo "::error::could not read the real author of ${REPO}#${PR} from the GitHub API — refusing to dispatch on the unverified client_payload author (fail closed). Check QA_ACK_PAT / the runner's gh login."
             exit 1
           fi
-          if [ "$REAL_AUTHOR" != "$AUTHOR" ]; then
+          #     Case-fold both sides: GitHub logins are case-INsensitive, so a
+          #     producer emitting `Azure-Kirin` names the same human as
+          #     `azure-kirin`. Comparing raw would hard-fail a legitimate dispatch
+          #     as "forged". qa-pr-approve.sh folds logins for the same reason.
+          if [ "$(printf '%s' "$REAL_AUTHOR" | tr '[:upper:]' '[:lower:]')" \
+             != "$(printf '%s' "$AUTHOR" | tr '[:upper:]' '[:lower:]')" ]; then
             echo "::error::client_payload.author='${AUTHOR}' but ${REPO}#${PR} is really authored by '${REAL_AUTHOR}' — refusing this dispatch (forged or stale payload). The author decides the requester UID and therefore the approval tier, so a mismatch is never dispatched."
             exit 1
           fi

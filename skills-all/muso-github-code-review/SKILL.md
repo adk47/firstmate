@@ -758,11 +758,17 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "🤖
   condition that failed — relay it
   verbatim and say a human reviewer signs this one off; do NOT retry, re-request with a
   different UID, or approve around it;
-  `exit 7` = the wrapper could not read the PR's **author** (the PR does not exist, or the
-  gh call failed) — or the `gh pr review --approve` write itself failed. This one hits
-  **every** requester, unscoped included, and is usually TRANSIENT: say so, and a single
-  re-run is reasonable once you have confirmed the PR really exists (unlike exits 5/8/9,
-  which are verdicts to relay, not to retry);
+  `exit 7` = one of TWO different failures, and they need OPPOSITE responses — tell them
+  apart by whether an audit-log line for this PR already exists (the wrapper logs
+  immediately BEFORE the write, so its presence proves the approve was attempted):
+  **no log line** = the wrapper could not read the PR's **author** (the PR does not exist,
+  or the gh call failed); nothing was written, it is usually TRANSIENT, and a single re-run
+  is reasonable once you have confirmed the PR really exists.
+  **a log line already exists** = the `gh pr review --approve` write itself failed AFTER
+  logging; do NOT re-run (that double-writes the audit trail and may double-approve) —
+  check `gh pr view --json reviewDecision` to see whether the approval actually landed,
+  and relay that. This exit hits **every** requester, unscoped included.
+  (Unlike exits 5/8/9, which are verdicts to relay and never to retry.);
   `exit 8` = CI is not green — this ALSO fires when the rollup is unreadable, when
   there are no non-qa-review checks at all, or when EVERY check is advisory-exempt
   (none of which mean a red check; read the message and do not blindly re-run); `exit 9` = an unresolved Critical/Important thread is still
