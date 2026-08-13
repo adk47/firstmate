@@ -5,10 +5,10 @@ setup() {
   JOB='46442766-c410-4ccd-966c-4de3c06eed8d'
 }
 
-@test "UVN cron is a deterministic command on the four-hour offset" {
+@test "enabled UVN cron is a deterministic command on the four-hour offset" {
   run jq -e --arg id "$JOB" '
     .jobs[] | select(.id == $id)
-    | .enabled == false
+    | .enabled == true
       and .agentId == "operations"
       and .schedule == {kind:"cron", expr:"15 */4 * * *", tz:"UTC"}
       and .payload.kind == "command"
@@ -59,7 +59,7 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
-@test "the staged service requester remains blocked by the autonomous approval gate" {
+@test "the service requester is allowed only through the conditional UVN approval gate" {
   run bash -c '
     source "$1"
     REQUESTER_EMAIL="uvn-popularity-cron@hydra-ops"
@@ -67,6 +67,5 @@ setup() {
     enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status \
       "{\"requestIds\":[\"11111111-1111-4111-8111-111111111111\"],\"status\":\"approved\",\"expectedStatus\":\"user_verification_needed\"}"
   ' _ "$ROOT/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"--evidence-excerpt is required"* ]]
+  [ "$status" -eq 0 ]
 }
