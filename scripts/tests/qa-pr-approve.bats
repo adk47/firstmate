@@ -8,7 +8,10 @@ bats_require_minimum_version 1.5.0
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 SCRIPT="$HYDRA_REPO/scripts/qa-pr-approve.sh"
 
-NICK="U0AL36NADEY"   # allowlisted requester
+NICK="U0AL36NADEY"   # allowlisted requester (UNSCOPED)
+AARON="U7RP6HKUZ"    # the other UNSCOPED approver
+MARIIA="U03LP8YHLPK" # SCOPED: own azure-kirin PRs, Muso-AI/web-credits-next, base develop
+SERHII="U03TYGJF1N3" # REMOVED from the allowlist 2026-08-13 — review-only now
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
@@ -34,6 +37,22 @@ setup() {
   # NOTE: production `gh` uses gojq; this stub runs local jq. The node-8 live
   # smoke covers the gojq path. Both should behave identically for the filters
   # used here (no gojq-specific extensions).
+  #
+  # NOTE — MODELLING AN ABSENT/NULL FIELD. `jq -nc --arg x "$V"` ALWAYS binds a
+  # JSON STRING, so no value of an --arg-built stub can ever produce a JSON null.
+  # That is why `STUB_AUTHOR=""` models "empty string", NOT "author: null", and
+  # why the `// ""` guards in the script's shared author,baseRefName filter were
+  # untested for a year: removing BOTH guards kept all 140 tests green. Use
+  # STUB_AUTHOR_NULL=1 / STUB_BASE_NULL=1 (below) to emit a genuine null.
+  #
+  # AND the divergence that makes a naive null test assert the OPPOSITE of
+  # production: this stub pipes through LOCAL `jq -r`, which prints the literal
+  # 4-char string `null` for a null scalar, whereas real `gh --jq` prints an
+  # EMPTY line. So a guardless filter yields author="null" here and author=""
+  # under real gh. Both are wrong-and-dangerous in different ways ("null" sails
+  # past `[ -n "$author" ]`), and the `// ""` guards make the two agree on "" —
+  # which is exactly why the tests below assert the GUARDED behaviour (empty →
+  # die 7 / fail-closed message) rather than asserting on the string "null".
   STUBBIN="$TEST_TMPDIR/bin"; mkdir -p "$STUBBIN"
   cat > "$STUBBIN/gh" <<'STUB'
 #!/usr/bin/env bash
@@ -109,8 +128,31 @@ case "$sub" in
           _all="$_page1 ${STUB_FILES_PAGE_2:-}"
           set -- $_all
           echo "${STUB_CHANGED_COUNT:-$#}"
-        elif printf '%s ' "$@" | grep -q 'author'; then
-          echo "${STUB_AUTHOR:-nsollazzo}"            # PR author login
+        elif printf '%s ' "$@" | grep -qE 'author|baseRefName'; then
+          # Guard 3 + Guard 4b share ONE `--json author,baseRefName` call whose
+          # --jq filter emits two lines. Serve the API SHAPE and run the
+          # script's real filter through _jqflt, so the filter itself is
+          # exercised rather than re-implemented here (same rationale as the
+          # rollup arm). This arm must stay ABOVE nothing in particular, but it
+          # must match BOTH field names: the joined args contain 'author', so a
+          # separate baseRefName-only arm placed after it would be dead.
+          #
+          # `${STUB_BASE_REF-develop}` uses `-`, NOT `:-`: STUB_BASE_REF="" must
+          # stay EMPTY so tests can model an unreadable base branch (Guard 4b
+          # fails closed on it). Default is `develop` so the scoped happy path
+          # needs no extra setup; unscoped requesters ignore the base entirely.
+          # `${STUB_AUTHOR-nsollazzo}` likewise uses `-`: an explicitly EMPTY
+          # STUB_AUTHOR models an author the API could not give us, which must
+          # still die 7 now that the field shares a call with baseRefName.
+          #
+          # STUB_AUTHOR_NULL=1 / STUB_BASE_NULL=1 emit a GENUINE JSON null for
+          # that field — the shape a deleted/ghost PR author really produces
+          # ("author": null). --arg can never express this (see the NOTE in
+          # setup()), so without these knobs the `// ""` guards are untestable.
+          jq -nc --arg a "${STUB_AUTHOR-nsollazzo}" --arg b "${STUB_BASE_REF-develop}" \
+            --argjson an "${STUB_AUTHOR_NULL:-0}" --argjson bn "${STUB_BASE_NULL:-0}" \
+            '{author: (if $an == 1 then null else {login: $a} end),
+              baseRefName: (if $bn == 1 then null else $b end)}' | jq -r "$(_jqflt "$@")"
         else
           echo "  reviewDecision=APPROVED  mergeStateStatus=CLEAN  state=OPEN"
         fi ;;
@@ -162,6 +204,295 @@ logfile() { echo "$QA_PR_APPROVE_LOG_DIR/$(date -u +%F).jsonl"; }
   run "$SCRIPT" core-backend 123 "U999NOTALLOWED"
   [ "$status" -eq 5 ]
   ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# ---------------------------------------------------------------------------
+# Scoped approval authority (2026-08-13, Nick-authorized)
+#   Mariia (U03LP8YHLPK) may approve ONLY her own azure-kirin PRs in
+#   Muso-AI/web-credits-next targeting base `develop`.
+#   Serhii (U03TYGJF1N3) was REMOVED from the allowlist entirely.
+#   Aaron / Nick stay unscoped.
+# Every refusal below asserts the approve write never happened. `$STUB_CALLS`
+# is created empty in setup(), so a plain grep is a real assertion.
+# ---------------------------------------------------------------------------
+
+@test "scoped: Mariia on web-credits-next, author azure-kirin, base develop → approves" {
+  STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="develop" \
+    run "$SCRIPT" Muso-AI/web-credits-next 42 "$MARIIA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+  grep -q '"target":"Muso-AI/web-credits-next#42"' "$(logfile)"
+  grep -q "\"requester\":\"$MARIIA\"" "$(logfile)"
+}
+
+@test "scoped: Mariia's own PR is NOT self-approval — Guard 3 compares author to \$me, not the requester" {
+  # The whole point of the grant: she requests approval of a PR she authored.
+  # Guard 3 must stay about the acting identity (adk47), not about her.
+  STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="develop" \
+    run "$SCRIPT" Muso-AI/web-credits-next 43 "$MARIIA"
+  [ "$status" -eq 0 ]
+  if echo "$output" | grep -q 'self-approval'; then
+    echo "Guard 3 fired on a scoped author's own PR — that conflates requester with acting identity" >&2; false
+  fi
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "scoped: author login case is normalized — Azure-Kirin still approves" {
+  STUB_ME="adk47" STUB_AUTHOR="Azure-Kirin" STUB_BASE_REF="develop" \
+    run "$SCRIPT" Muso-AI/web-credits-next 44 "$MARIIA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "scoped: Mariia on the right repo but base main → exit 5, no approval, no log" {
+  STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="main" \
+    run "$SCRIPT" Muso-AI/web-credits-next 45 "$MARIIA"
+  [ "$status" -eq 5 ]
+  echo "$output" | grep -q 'base branch must be develop'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
+@test "scoped: Mariia on a DIFFERENT repo (octave-ui) → exit 5, no approval" {
+  STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="develop" \
+    run "$SCRIPT" Muso-AI/octave-ui 46 "$MARIIA"
+  [ "$status" -eq 5 ]
+  echo "$output" | grep -q 'repo must be Muso-AI/web-credits-next'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
+@test "scoped: Mariia on web-credits-next/develop but SOMEONE ELSE authored it → exit 5" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_REF="develop" \
+    run "$SCRIPT" Muso-AI/web-credits-next 47 "$MARIIA"
+  [ "$status" -eq 5 ]
+  echo "$output" | grep -q 'PR author must be azure-kirin'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
+@test "scoped: FAIL CLOSED — unreadable base branch refuses (exit 5), never approves" {
+  # STUB_BASE_REF="" models the API answering with a null/absent baseRefName.
+  # An empty base is NOT evidence the scope is satisfied.
+  STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="" \
+    run "$SCRIPT" Muso-AI/web-credits-next 48 "$MARIIA"
+  [ "$status" -ne 0 ]
+  [ "$status" -eq 5 ]
+  echo "$output" | grep -q 'base branch could not be read'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
+@test "removed: Serhii on hydra → exit 5 (was allowed before 2026-08-13), no approval, no log" {
+  STUB_ME="adk47" STUB_AUTHOR="liflovs" QA_REBASE_REQUIRED_REPOS="other" \
+    run "$SCRIPT" hydra 49 "$SERHII"
+  [ "$status" -eq 5 ]
+  echo "$output" | grep -q 'is not authorized to approve PRs'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
+@test "removed: Serhii on web-credits-next → exit 5 (not scoped in, either)" {
+  STUB_ME="adk47" STUB_AUTHOR="liflovs" STUB_BASE_REF="develop" \
+    run "$SCRIPT" Muso-AI/web-credits-next 50 "$SERHII"
+  [ "$status" -eq 5 ]
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
+@test "removed: the exit-5 message must not claim Serhii is still allowed" {
+  run "$SCRIPT" core-backend 123 "$SERHII"
+  [ "$status" -eq 5 ]
+  # The roster in the refusal text is the operator-facing contract.
+  echo "$output" | grep -q 'unscoped: Aaron U7RP6HKUZ, Nick U0AL36NADEY'
+  if echo "$output" | grep -q 'Aaron/Serhii/Nick'; then
+    echo "refusal text still advertises the pre-2026-08-13 roster" >&2; false
+  fi
+  # Message text alone is not the point of the removal — assert the refusal is
+  # REAL, exactly as every sibling refusal test does.
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
+# ---------------------------------------------------------------------------
+# Guard 4b scope: an app/bot-decorated author must NOT satisfy a HUMAN scope
+# entry. norm_login (right for Guards 3/3c/8, which collapse one bot identity's
+# three spellings) WIDENS a scope entry: before this fix, STUB_AUTHOR of both
+# "app/azure-kirin" and "azure-kirin[bot]" APPROVED on Mariia's UID.
+# ---------------------------------------------------------------------------
+
+@test "scoped: an 'app/'-decorated author does NOT match the human scope entry → exit 5, no approval" {
+  STUB_ME="adk47" STUB_AUTHOR="app/azure-kirin" STUB_BASE_REF="develop" \
+    run "$SCRIPT" Muso-AI/web-credits-next 60 "$MARIIA"
+  [ "$status" -eq 5 ]
+  echo "$output" | grep -q 'App/bot decoration'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
+@test "scoped: a '[bot]'-decorated author does NOT match the human scope entry → exit 5, no approval" {
+  STUB_ME="adk47" STUB_AUTHOR="azure-kirin[bot]" STUB_BASE_REF="develop" \
+    run "$SCRIPT" Muso-AI/web-credits-next 61 "$MARIIA"
+  [ "$status" -eq 5 ]
+  echo "$output" | grep -q 'App/bot decoration'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
+# ---------------------------------------------------------------------------
+# A SCOPED principal must clear every OTHER guard too. Without these, a refactor
+# could let a scoped requester skip CI-green / open-blockers / self-approval and
+# the suite would stay green — the scoped tier is only as safe as the guards it
+# still passes through. Mirrors the existing NICK cases, on Mariia's scope.
+# ---------------------------------------------------------------------------
+
+@test "scoped: Mariia in scope but CI not green → exit 8, no approval" {
+  STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="develop" STUB_BAD_CHECKS=2 \
+    run "$SCRIPT" Muso-AI/web-credits-next 62 "$MARIIA"
+  [ "$status" -eq 8 ]
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+}
+
+@test "scoped: Mariia in scope but an unresolved blocking thread is open → exit 9, no approval" {
+  STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="develop" \
+    STUB_BAD_CHECKS=0 STUB_OPEN_BLOCKERS=1 \
+    run "$SCRIPT" Muso-AI/web-credits-next 63 "$MARIIA"
+  [ "$status" -eq 9 ]
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+}
+
+@test "scoped: Mariia in scope but the acting identity authored the PR → exit 4, no approval" {
+  # Guard 3 is about $me, and it must still fire for a scoped requester.
+  STUB_ME="azure-kirin" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="develop" \
+    run "$SCRIPT" Muso-AI/web-credits-next 64 "$MARIIA"
+  [ "$status" -eq 4 ]
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+}
+
+# ---------------------------------------------------------------------------
+# Tier precedence: the tables are ADDITIVE GRANTS, not intersecting restrictions.
+# Guard 4b's comment claimed "unscoped requesters never enter this block" while
+# the loop ran unconditionally, so a UID in BOTH tables was silently DEMOTED to
+# scoped-only — adding Nick to SCOPED_APPROVERS made `hydra 70 U0AL36NADEY` exit
+# 5, i.e. an apparent widening actually REVOKED his org-wide authority.
+# Pinned against a patched COPY of the script so the shipped tables stay honest.
+# ---------------------------------------------------------------------------
+
+# mk_variant <sed-script> — a patched copy of qa-pr-approve.sh that still finds
+# its siblings (lib/, qa-gh.sh) via symlinks; POLICY comes from the env override.
+mk_variant() {
+  local dir="$TEST_TMPDIR/variant"
+  mkdir -p "$dir"
+  ln -s "$HYDRA_REPO/scripts/lib" "$dir/lib"
+  ln -s "$HYDRA_REPO/scripts/qa-gh.sh" "$dir/qa-gh.sh"
+  sed "$1" "$SCRIPT" > "$dir/qa-pr-approve.sh"
+  chmod +x "$dir/qa-pr-approve.sh"
+  printf '%s' "$dir/qa-pr-approve.sh"
+}
+
+@test "tiers: a UID in BOTH tables keeps UNSCOPED authority (Guard 4b is skipped, not applied)" {
+  variant="$(mk_variant 's#^SCOPED_APPROVERS=(#SCOPED_APPROVERS=("U0AL36NADEY|Muso-AI/web-credits-next|azure-kirin|develop" #')"
+  # Nick is now in BOTH tables. This PR is outside that scoped entry in every
+  # field (hydra, author nsollazzo, base main) — his UNSCOPED grant must win.
+  QA_APPROVAL_POLICY="$HYDRA_REPO/policies/qa-approval-policy.json" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_REF="main" \
+    QA_REBASE_REQUIRED_REPOS="other" run "$variant" hydra 70 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "tiers: emptying SCOPED_APPROVERS degrades to a clean die 5, never an unbound-variable crash" {
+  # `set -u` + bash 3.2 (macOS /bin/bash) aborts on "${ARR[@]}" when ARR is
+  # empty: exit 1, no message, no audit trail. Emptying a table is exactly the
+  # edit the header block invites, so it must stay a graceful refusal.
+  variant="$(mk_variant 's#^SCOPED_APPROVERS=(.*#SCOPED_APPROVERS=()#')"
+  QA_APPROVAL_POLICY="$HYDRA_REPO/policies/qa-approval-policy.json" \
+    STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="develop" \
+    run /bin/bash "$variant" Muso-AI/web-credits-next 71 "$MARIIA"
+  [ "$status" -eq 5 ]
+  echo "$output" | grep -q 'is not authorized to approve PRs'
+  if echo "$output" | grep -q 'unbound variable'; then
+    echo "empty SCOPED_APPROVERS crashed under set -u instead of refusing" >&2; false
+  fi
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+}
+
+@test "tiers: emptying UNSCOPED_UIDS degrades to a clean die 5, never an unbound-variable crash" {
+  variant="$(mk_variant 's#^UNSCOPED_UIDS=(.*#UNSCOPED_UIDS=()#')"
+  QA_APPROVAL_POLICY="$HYDRA_REPO/policies/qa-approval-policy.json" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" \
+    run /bin/bash "$variant" core-backend 72 "$NICK"
+  [ "$status" -eq 5 ]
+  echo "$output" | grep -q 'is not authorized to approve PRs'
+  if echo "$output" | grep -q 'unbound variable'; then
+    echo "empty UNSCOPED_UIDS crashed under set -u instead of refusing" >&2; false
+  fi
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+}
+
+@test "unscoped: Aaron approves on hydra with no scope conditions" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_REF="literally-anything" \
+    QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 51 "$AARON"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+  grep -q "\"requester\":\"$AARON\"" "$(logfile)"
+}
+
+@test "unscoped: Nick approves on hydra with no scope conditions" {
+  STUB_ME="adk47" STUB_AUTHOR="liflovs" STUB_BASE_REF="literally-anything" \
+    QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 52 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "unscoped: an unreadable base branch does NOT block an unscoped requester" {
+  # Guard 4b is scoped-only; base is irrelevant for Aaron/Nick and must not
+  # become a new fail-closed surface for them.
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_REF="" \
+    run "$SCRIPT" core-backend 53 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "author read still dies 7 when the PR is unreadable, even though base is fetched with it" {
+  STUB_ME="adk47" STUB_AUTHOR="" STUB_BASE_REF="develop" \
+    run "$SCRIPT" core-backend 54 "$NICK"
+  [ "$status" -eq 7 ]
+  echo "$output" | grep -q 'could not read PR author'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+}
+
+# ---------------------------------------------------------------------------
+# The `// ""` null guards in the shared `--json author,baseRefName` filter.
+# A deleted/ghost PR author makes GitHub return `"author": null`. WITHOUT the
+# guard the field arrives as the 4-char string "null" (this stub) or as an empty
+# line (real gh) — and "null" sails straight past `[ -n "$author" ]`, so an
+# UNSCOPED requester approves a PR whose author was never actually read.
+# These two tests are the only thing pinning those guards: with them removed,
+# both go red (mutation-verified). See the NOTE in setup() for why --arg-built
+# stubs could never reach this shape.
+# ---------------------------------------------------------------------------
+
+@test "null guard: \"author\": null → exit 7, never approves (must not read as the string \"null\")" {
+  STUB_ME="adk47" STUB_AUTHOR_NULL=1 STUB_BASE_REF="develop" \
+    run "$SCRIPT" core-backend 55 "$NICK"
+  [ "$status" -eq 7 ]
+  echo "$output" | grep -q 'could not read PR author'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
+@test "null guard: \"baseRefName\": null → Guard 4b refuses the scoped requester (exit 5), never approves" {
+  # The MESSAGE is load-bearing here, not just the exit code: without the guard
+  # the base arrives as "null" and Guard 4b still exits 5 — but as a plain
+  # mismatch ("must be develop (got null)"), not as the FAIL-CLOSED unreadable
+  # path. Asserting the fail-closed wording is what makes this mutation-sensitive.
+  STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_NULL=1 \
+    run "$SCRIPT" Muso-AI/web-credits-next 56 "$MARIIA"
+  [ "$status" -eq 5 ]
+  echo "$output" | grep -q 'base branch could not be read'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
 }
 
 @test "owner/repo form with Muso-AI owner is accepted" {

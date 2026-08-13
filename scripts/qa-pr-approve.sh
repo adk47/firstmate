@@ -19,7 +19,10 @@ set -euo pipefail
 #      path in the policy's `sensitive_paths_blocking` still refuses (exit 11),
 #      and that list ships EMPTY. Changed 2026-08-03; it used to refuse.
 #   3c. Never approve a PR by an author in the policy's author_deny list.
-#   4. Requester must be in the approval allowlist (Aaron/Serhii/Nick).
+#   4. Requester must be in the approval allowlist — either UNSCOPED (Aaron,
+#      Nick) or SCOPED (Mariia, restricted to her own web-credits-next PRs on
+#      base `develop`). Checked in two stages: Guard 4 (membership, no network)
+#      and Guard 4b (scope, once the PR's author and base branch are known).
 #      NOTE: the agent supplies the UID, so this is defense-in-depth, not a
 #      cryptographic gate. The real identity signal is the Slack UID the gateway
 #      put in the message metadata; the agent is trusted to pass it faithfully.
@@ -31,7 +34,9 @@ set -euo pipefail
 #     <repo>  short name (e.g. core-backend) or owner/repo (owner must be Muso-AI)
 #
 # Exit codes: 0 ok | 2 usage | 3 repo-not-muso | 4 self-approval-blocked
-#             5 requester-not-allowed | 6 log-failed | 7 gh-approve-failed
+#             5 requester-not-allowed (Guard 4: not on the allowlist at all, OR
+#                Guard 4b: a scoped requester outside their scope — the message
+#                says which condition failed) | 6 log-failed | 7 gh-approve-failed
 #             8 ci-not-green | 9 open-blocking-findings
 #             10 rebase-warning-unfiled-or-unverified
 #             11 sensitive-path-blocked | 12 author-policy-blocked
@@ -74,13 +79,44 @@ LOG_DIR="${QA_PR_APPROVE_LOG_DIR:-api-logs/github}"
 # the second case is the live one. The skill must relay the wrapper's post-check
 # `reviewDecision`/`mergeStateStatus` rather than predicting either outcome.
 
-# Approval allowlist — Slack UIDs of the only people who may trigger an approval.
-# Aaron U7RP6HKUZ, Serhii U03TYGJF1N3, Nick U0AL36NADEY.
-# DELIBERATELY excludes Mariia (azure-kirin, U03LP8YHLPK): her PRs ARE auto-REVIEWED
-# (see scripts/lib/qa-author-slack-uid.sh) but a human signs off the approval — a
-# UI/newbie author's own PRs must not auto-approve. Do not re-add without a human
-# also updating SECURITY.md + workspaces/qa/SOUL.md + the muso-github-code-review skill.
-ALLOWED_UIDS=("U7RP6HKUZ" "U03TYGJF1N3" "U0AL36NADEY")
+# ===========================================================================
+# Approval allowlist — the ONLY people who may trigger an approval. Two tiers.
+# Last changed 2026-08-13 on Nick's explicit authorization (U0AL36NADEY).
+#
+# UNSCOPED_UIDS — may approve any Muso-AI PR the other guards allow.
+#   Aaron U7RP6HKUZ, Nick U0AL36NADEY. Both are Tier 0 owners
+#   (workspaces/coordinator/SECURITY.md "Known User IDs").
+#
+# SCOPED_APPROVERS — may approve ONLY where every scope condition holds.
+#   Format (pipe-separated, positional):  UID|owner/repo|pr-author|base-branch
+#   Mariia (azure-kirin, U03LP8YHLPK) is scoped to her OWN azure-kirin PRs in
+#   Muso-AI/web-credits-next targeting base `develop`, and nothing else. WHY
+#   scoped rather than unscoped: her PRs were already auto-REVIEWED (see
+#   scripts/lib/qa-author-slack-uid.sh) but approval was withheld because a
+#   broad grant to a UI-focused author would let the bot sign off anywhere in
+#   the org. Narrowing the grant to one repo + one base branch + her own
+#   authorship keeps the automation's blast radius equal to the surface she
+#   already owns day to day, and every other guard (CI green, GO verdict, no
+#   unresolved blocking findings, never merge, no self-approval) still applies
+#   unchanged — this table only decides WHO may ask.
+#
+# REMOVED 2026-08-13: Serhii (liflovs, U03TYGJF1N3). His PRs are still
+#   auto-REVIEWED — he stays in scripts/lib/qa-author-slack-uid.sh, which drives
+#   review dispatch and the DM — but the bot must no longer record a formal
+#   approval on them. An `exit 5` on one of his PRs is the intended outcome, not
+#   a fault to work around.
+#
+# WIDENING THIS TABLE (adding a UID, or loosening any scope field) requires a
+# human decision from Aaron or Nick, and the same PR must update ALL FOUR docs
+# that restate this contract in prose — nothing enforces them mechanically:
+#   workspaces/coordinator/SECURITY.md   (there is NO repo-root SECURITY.md)
+#   workspaces/qa/SOUL.md
+#   workspaces/qa/AGENTS.md
+#   skills-all/muso-github-code-review/SKILL.md  (Step 7 + the exit-code crib)
+# and add the matching cases to scripts/tests/qa-pr-approve.bats.
+# ===========================================================================
+UNSCOPED_UIDS=("U7RP6HKUZ" "U0AL36NADEY")
+SCOPED_APPROVERS=("U03LP8YHLPK|Muso-AI/web-credits-next|azure-kirin|develop")
 
 die() { _replay_alerts; echo "qa-pr-approve: $2" >&2; exit "$1"; }
 
@@ -128,9 +164,28 @@ fi
 [[ "$pr" =~ ^[0-9]+$ ]] || die 2 "pr-number must be numeric, got '$pr'."
 
 # --- Guard 4: requester in allowlist (fail fast, no network) ----------------
+# Stage A of the allowlist: membership in the UNION of the unscoped and scoped
+# tables. A UID in neither dies here, before any API call, exactly as before.
+# Whether a SCOPED requester may approve THIS PR needs the PR's author and base
+# branch, which cost a round-trip — that is Guard 4b, below Guard 3.
+#
+# `${ARR[@]+"${ARR[@]}"}` — NOT a bare `"${ARR[@]}"`. Under `set -u` bash 3.2
+# (macOS /bin/bash, which runs these scripts and their tests locally) an EMPTY
+# array expansion is an "unbound variable" ABORT: exit 1 with no die message and
+# no audit trail. Emptying a table is precisely the edit the header block above
+# invites a future maintainer to make, so the crash-on-empty shape must not exist.
+# With the guard, an emptied table degrades to a clean `die 5`.
 allowed=0
-for uid in "${ALLOWED_UIDS[@]}"; do [ "$uid" = "$requester" ] && allowed=1 && break; done
-[ "$allowed" = 1 ] || die 5 "requester '$requester' is not authorized to approve PRs (allowlist: Aaron/Serhii/Nick)."
+unscoped_match=0   # Stage A matched the UNSCOPED table — see Guard 4b
+for uid in ${UNSCOPED_UIDS[@]+"${UNSCOPED_UIDS[@]}"}; do
+  [ "$uid" = "$requester" ] && allowed=1 && unscoped_match=1 && break
+done
+if [ "$allowed" != 1 ]; then
+  for spec in ${SCOPED_APPROVERS[@]+"${SCOPED_APPROVERS[@]}"}; do
+    [ "${spec%%|*}" = "$requester" ] && allowed=1 && break
+  done
+fi
+[ "$allowed" = 1 ] || die 5 "requester '$requester' is not authorized to approve PRs (unscoped: Aaron U7RP6HKUZ, Nick U0AL36NADEY; scoped: Mariia U03LP8YHLPK — her own azure-kirin PRs in Muso-AI/web-credits-next targeting 'develop'). Serhii U03TYGJF1N3 was removed on 2026-08-13: his PRs are reviewed, never auto-approved."
 
 # --- Identity ---------------------------------------------------------------
 # `gh api user` returns 403 "Resource not accessible by integration" under a
@@ -160,7 +215,15 @@ me="$("$QA_GH" --repo "$owner/$repo" api user --jq .login 2>/dev/null || true)"
 norm_login() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's,^app/,,' -e 's,\[bot\]$,,'; }
 
 # --- Guard 3: never self-approve -------------------------------------------
-author="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" --json author --jq .author.login 2>/dev/null || true)"
+# ONE round-trip for both PR facts the guards below need: the author (Guard 3,
+# Guard 3c, Guard 8) and the base branch (Guard 4b). The filter emits them as
+# two lines in a fixed order; `// ""` keeps a null/absent field as an EMPTY LINE
+# rather than dropping it, so line 2 can never slide up into $author. `|| true`
+# preserves the existing behaviour on a failed call: both stay empty and the
+# die 7 below fires with the same message it always did.
+pr_meta="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" --json author,baseRefName --jq '(.author.login // ""), (.baseRefName // "")' 2>/dev/null || true)"
+author="$(printf '%s\n' "$pr_meta" | sed -n 1p)"
+base_ref="$(printf '%s\n' "$pr_meta" | sed -n 2p)"
 [ -n "$author" ] || die 7 "could not read PR author for $owner/$repo#$pr (does the PR exist / is gh authed?)."
 # GitHub logins are case-insensitive. Compare against the CURRENT identity only,
 # not the whole bot_logins set: GitHub blocks approving your own PR, and that is
@@ -198,6 +261,71 @@ case "$deny_hit" in
   null)        : ;;
   *)           die 12 "PR #$pr is authored by '$author', who is in the policy's author_deny list — refusing to approve. A human must review it." ;;
 esac
+
+# --- Guard 4b: scoped requesters must satisfy EVERY scope condition ---------
+# Stage B of the allowlist. A requester listed in SCOPED_APPROVERS must match one
+# of their entries in FULL: repo, PR author, and base branch. This is deliberately
+# NOT Guard 3: Guard 3 compares the author to the ACTING identity ($me) and blocks
+# GitHub's own self-approval 422 — a scoped author requesting approval of their OWN
+# PR is the INTENDED case here, and must keep working.
+#
+# UNSCOPED REQUESTERS NEVER ENTER THIS BLOCK — and that is now enforced by
+# `$unscoped_match` from Guard 4, not merely asserted in prose. The loop used to
+# run unconditionally, so a UID present in BOTH tables was silently DEMOTED to
+# scoped-only: add Nick to SCOPED_APPROVERS and `qa-pr-approve.sh hydra 70
+# U0AL36NADEY` started refusing exit 5, i.e. an edit that reads as "grant Nick an
+# extra narrow path" quietly REVOKED his org-wide authority. Unscoped wins: the
+# tables are additive grants, never intersecting restrictions.
+#
+# FAIL CLOSED. An empty $base_ref means the API did not give us one (missing
+# field, malformed response, or a partial read), which is NOT evidence the base
+# matches — it is refused, mirroring the die 7 on an unreadable author above.
+# Runs BEFORE the audit log and before any write, so a refusal leaves no trace
+# of an approval that never happened.
+#
+# The author test is a CASE-FOLD ONLY comparison, deliberately NOT norm_login.
+# norm_login exists to collapse the three spellings of one BOT identity (Guards
+# 3/3c/8 need that), but stripping `app/` and `[bot]` here WIDENS a human scope
+# entry: with norm_login, both `app/azure-kirin` and `azure-kirin[bot]` matched the
+# `azure-kirin` scope and approved. A scope entry names a HUMAN, so a decorated
+# author is refused outright rather than folded onto them.
+#
+# KNOWN LIMIT (open, documented, deliberately not fixed here): the base branch is
+# read once, before the approval. GitHub's retention behaviour for an existing
+# approving review when a PR is RETARGETED to another base afterwards was not
+# verified — if the review survives the retarget, a scoped approval obtained on
+# `develop` could end up sitting on a PR whose base is now something else. What
+# would settle it is a live experiment (approve a PR on base develop, retarget it,
+# re-read `reviewDecision`); until someone runs it, no re-check mechanism is built
+# on an unverified assumption.
+scoped_hit=0   # the requester appears in the scoped table at all
+scope_ok=0     # some entry of theirs is satisfied in full
+scope_why=""
+lc_login() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+if [ "$unscoped_match" != 1 ]; then
+for spec in ${SCOPED_APPROVERS[@]+"${SCOPED_APPROVERS[@]}"}; do
+  IFS='|' read -r s_uid s_repo s_author s_base <<<"$spec"
+  [ "$s_uid" = "$requester" ] || continue
+  scoped_hit=1
+  why=""
+  [ "$s_repo" = "$owner/$repo" ] || why="$why; repo must be $s_repo (got $owner/$repo)"
+  if [ "${author#app/}" != "$author" ] || [ "${author%\[bot\]}" != "$author" ]; then
+    why="$why; PR author '$author' carries GitHub App/bot decoration — a scoped grant names a human ($s_author) and never matches an app or bot identity"
+  elif [ "$(lc_login "$s_author")" != "$(lc_login "$author")" ]; then
+    why="$why; PR author must be $s_author (got $author)"
+  fi
+  if [ -z "$base_ref" ]; then
+    why="$why; base branch could not be read from the API — refusing (fail closed), it must be $s_base"
+  elif [ "$s_base" != "$base_ref" ]; then
+    why="$why; base branch must be $s_base (got $base_ref)"
+  fi
+  if [ -z "$why" ]; then scope_ok=1; break; fi
+  scope_why="${scope_why:+$scope_why | }${why#; }"
+done
+fi
+if [ "$scoped_hit" = 1 ] && [ "$scope_ok" != 1 ]; then
+  die 5 "requester '$requester' may only approve PRs inside a restricted scope, and $owner/$repo#$pr is outside it — $scope_why. A human reviewer must approve this one; widening the scope is a deliberate PR against SCOPED_APPROVERS in scripts/qa-pr-approve.sh."
+fi
 
 # --- Notice 3b: sensitive paths (ALERTS, does not block) ---------------------
 # WAS a hard refusal (exit 11). Changed 2026-08-03 on Nick's explicit direction:
