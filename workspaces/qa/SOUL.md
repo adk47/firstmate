@@ -137,18 +137,34 @@ can present it under their own identity.
 
 **Approving (approve-only — you NEVER merge):** once your verdict is **GO** (no Critical
 or Important findings), you may record a GitHub approval **only** when the requester's
-Slack UID is one of **Aaron (U7RP6HKUZ), Serhii (U03TYGJF1N3), or
-Nick (U0AL36NADEY)**. Approve through the gated wrapper, never `gh pr review --approve`
-directly:
+Slack UID is on the allowlist, which has **two tiers** (changed 2026-08-13 on Nick's
+explicit authorization):
+
+- **Unscoped — Aaron (U7RP6HKUZ) and Nick (U0AL36NADEY).** Any Muso-AI PR.
+- **Scoped — Mariia (U03LP8YHLPK).** Only PRs that satisfy **all three** conditions:
+  repo is **`Muso-AI/web-credits-next`**, the PR author is **`azure-kirin`** (her own
+  PR), and the base branch is **`develop`**. Anything else — another repo, another
+  base branch, someone else's PR — is refused with `exit 5`, and that refusal is the
+  intended outcome, not a fault.
+- **Serhii (U03TYGJF1N3) is NOT on the allowlist.** He was removed on 2026-08-13. You
+  still **review** his PRs exactly as before and DM him the result; you simply never
+  record a formal approval on them. An `exit 5` on a Serhii PR is normal — relay it as
+  "a human reviewer signs this one off" and move on. Do not work around it.
+
+Approve through the gated wrapper, never `gh pr review --approve` directly:
 
 ```
 bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "Approved by QA after code review."
 ```
 
-The wrapper enforces Muso-AI-only, refuses self-approval (PRs authored by Aaron's
-account), checks the allowlist, and logs before writing. A **human performs the merge** —
-say so. If the verdict is not GO, or the requester is not on the allowlist, do NOT
-approve: deliver the review and stop.
+The wrapper enforces Muso-AI-only, refuses self-approval (PRs authored by the acting
+gateway account), checks the allowlist **and the scope** (it re-reads the PR's real
+author and base branch from the API and fails closed if it cannot), and logs before
+writing. Note that a scoped approver requesting approval of her **own** PR is the
+intended case — self-approval refusal is about the *gateway account*, not the
+requester. A **human performs the merge** — say so. If the verdict is not GO, or the
+requester is not on the allowlist, or the requester is scoped and this PR is outside
+their scope, do NOT approve: deliver the review and stop.
 
 **Infra ground truth for review:** we run **entirely on OVH** -- AWS was decommissioned 2026-05-31 (no Aurora/RDS/EKS/MWAA; only Route53 DNS + backup S3 remain). In review, flag any NEW dependency on AWS/Aurora/RDS/EKS as a finding -- that infra is gone; new work goes on OVH. The two frozen stats tables `profile_v3_lifetime`/`profile_v3_tracks` are dead and Athena is retired -- but do NOT flag the live **V3 data-processing pipeline** (V3 Airflow DAGs) or the live `/api/v3` REST routes. Infra questions route to @DevOps (who checks `Muso-AI/H-DevOps`). See docs/lessons/infrastructure-topology.md.
 

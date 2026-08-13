@@ -314,7 +314,66 @@ def run_gate(files, root: Path, baseline_path: Path, subs_path: Path,
         if not files:
             print("No Trino-SQL-relevant files in scope — nothing to check.")
             return 0
-        print("Extracted zero SQL blocks from a non-empty file scope — refusing to pass vacuously.", file=sys.stderr)
+        # Zero blocks from a non-empty scope has TWO causes needing OPPOSITE
+        # answers, and collapsing them into one refusal reddened honest PRs:
+        # the scope is every changed skills-all/*.{md,sh}, so editing one
+        # SQL-free doc (e.g. a SKILL.md that is pure prose) landed here and
+        # exited 2 with "refusing to pass vacuously" — a gate failure reported
+        # against a PR that has no SQL to be stale.
+        #
+        #   (a) nothing in scope CARRIES SQL      -> zero blocks is the truth; pass.
+        #   (b) something carries SQL markers but
+        #       extraction still yielded nothing  -> the extractor is broken; REFUSE.
+        #
+        # Discriminated with the extractor's OWN markers, so this can never
+        # drift into disagreeing with what extraction actually looks for.
+        # A declared skip legitimately explains an empty result FOR THE FILE THAT
+        # DECLARED IT — and only that file. Returning 0 as soon as any skip
+        # existed (the first cut of this fix) let one file's valid declared-skip
+        # mask a sibling file that carries SQL markers and yields no block, i.e.
+        # exactly the extractor-broken case this branch exists to refuse. So the
+        # scan runs over EVERY file first and passes only when every SQL-bearing
+        # file is accounted for.
+        skipped_files = {s.file for s in result.skipped_declared}
+        sql_bearing = []
+        for rel in files:
+            try:
+                text = (root / rel).read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                # Fail closed: an unreadable file is not evidence of "no SQL".
+                print(f"Unreadable file in scope {rel}: {exc} — refusing to pass vacuously.",
+                      file=sys.stderr)
+                return 2
+            for line in text.splitlines():
+                # A ```sql fence is unconditionally SQL. A ```bash/shell/sh
+                # fence is NOT — the extractor opens those only to look for a
+                # trino-query.sh / `muso query` invocation inside, so a skill
+                # full of ordinary bash examples carries no SQL. Matching every
+                # fence here is what made the first cut of this fix still refuse
+                # a pure-prose SKILL.md.
+                fence = tse.FENCE_OPEN_RE.match(line)
+                if fence and fence.group(1).lower() == "sql":
+                    sql_bearing.append(rel)
+                    break
+                # Mirror extract_bash_blob: a `#`-commented mention of
+                # trino-query.sh is documentation, not an invocation.
+                if line.lstrip().startswith("#"):
+                    continue
+                if tse._INVOKE_RE.search(line):
+                    sql_bearing.append(rel)
+                    break
+        # A SQL-bearing file is accounted for only if IT declared the skip.
+        unaccounted = [f for f in sql_bearing if f not in skipped_files]
+        if not unaccounted:
+            if sql_bearing:
+                print(f"All SQL in scope ({len(sql_bearing)} file(s)) is declared-skipped "
+                      "— nothing left to compile.")
+            else:
+                print(f"No SQL in the {len(files)} changed file(s) in scope — nothing to compile.")
+            return 0
+        print("Extracted zero SQL blocks from files that DO carry SQL markers "
+              f"({', '.join(unaccounted[:5])}) — extraction is broken, not the scope; "
+              "refusing to pass vacuously.", file=sys.stderr)
         return 2
 
     exit_code = 0

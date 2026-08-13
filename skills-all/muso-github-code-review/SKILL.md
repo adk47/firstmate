@@ -711,11 +711,27 @@ keep this ledger honest.
 Approve **only** when BOTH hold:
 - your verdict is **GO** — no 🔴 Critical and no 🟡 Important findings, including any
   carried-forward unresolved thread (see "Carry forward prior findings"); and
-- the requester's Slack UID is one of: **Aaron, Serhii, Nick**.
+- the requester's Slack UID is on the approval allowlist, which has **two tiers**
+  (changed 2026-08-13, authorized by Nick):
+  - **Unscoped** — **Aaron** (`U7RP6HKUZ`) and **Nick** (`U0AL36NADEY`): any Muso-AI PR.
+  - **Scoped** — **Mariia** (`U03LP8YHLPK`): **only** when the repo is
+    `Muso-AI/web-credits-next`, the PR author is `azure-kirin` (her own PR), **and**
+    the base branch is `develop`. All three must hold. Her PRs on that repo+branch
+    therefore auto-approve; anything else of hers is review-only.
+  - **Serhii** (`U03TYGJF1N3`) is **no longer on the allowlist** (removed 2026-08-13).
+    Keep reviewing and DM'ing his PRs exactly as before — just never approve them. An
+    `exit 5` on a Serhii PR is a **normal outcome to relay**, not an error to work
+    around, and not a reason to retry or escalate.
 
 Approve through the gated wrapper — **never** call `gh pr review --approve` directly.
-The wrapper enforces Muso-AI-only, self-approval refusal, the requester allowlist, and
-the audit log:
+The wrapper enforces Muso-AI-only, self-approval refusal, the requester allowlist **and
+its scope** (it re-reads the PR's real author and base branch from the API), and the
+audit log. The two unreadable cases are **different exits, with different reach**: an
+unreadable **author** is `exit 7` and applies to **every** requester, scoped or not; an
+unreadable **base branch** is `exit 5` and only reaches a **scoped** requester, because
+Guard 4b is the only thing that reads the base. Note self-approval refusal is about the
+*gateway account* authoring the PR, not about the requester — a scoped approver asking
+for approval of her **own** PR is the intended case:
 
 ```bash
 bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "🤖 Approved by Muso QA Bot (automated review)." \
@@ -733,7 +749,26 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "🤖
 - **You approve; you never merge.** A human merges — say so to the requester.
 - If the wrapper exits non-zero, relay the reason and do NOT retry blindly:
   `exit 3` = not a Muso-AI repo; `exit 4` = PR authored by the gateway account (GitHub
-  blocks self-approval — another reviewer is needed); `exit 5` = requester not authorized;
+  blocks self-approval — another reviewer is needed); `exit 5` = requester not authorized
+  — either they are not on the allowlist at all (e.g. **Serhii**, review-only since
+  2026-08-13) or they are a **scoped** approver and this PR is outside their scope (e.g.
+  Mariia on a repo other than `Muso-AI/web-credits-next`, on a base other than `develop`,
+  on a PR she did not author, or on a PR whose **base branch the API would not return** —
+  that last one fails closed and is scoped-requester-only). The message names the
+  condition that failed — relay it
+  verbatim and say a human reviewer signs this one off; do NOT retry, re-request with a
+  different UID, or approve around it;
+  `exit 7` = one of TWO different failures, and they need OPPOSITE responses — tell them
+  apart by whether an audit-log line for this PR already exists (the wrapper logs
+  immediately BEFORE the write, so its presence proves the approve was attempted):
+  **no log line** = the wrapper could not read the PR's **author** (the PR does not exist,
+  or the gh call failed); nothing was written, it is usually TRANSIENT, and a single re-run
+  is reasonable once you have confirmed the PR really exists.
+  **a log line already exists** = the `gh pr review --approve` write itself failed AFTER
+  logging; do NOT re-run (that double-writes the audit trail and may double-approve) —
+  check `gh pr view --json reviewDecision` to see whether the approval actually landed,
+  and relay that. This exit hits **every** requester, unscoped included.
+  (Unlike exits 5/8/9, which are verdicts to relay and never to retry.);
   `exit 8` = CI is not green — this ALSO fires when the rollup is unreadable, when
   there are no non-qa-review checks at all, or when EVERY check is advisory-exempt
   (none of which mean a red check; read the message and do not blindly re-run); `exit 9` = an unresolved Critical/Important thread is still

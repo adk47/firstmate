@@ -46,7 +46,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
-          # Nick — the QA DM target (same constant as qa-dispatch-pr-review.sh).
+          # Nick — the QA DM target for the merged-PR notice. This is an
+          # INDEPENDENT constant: qa-dispatch-pr-review.sh used to carry the same
+          # default, but it was removed on 2026-08-13 because there it doubled as
+          # the qa-pr-approve allowlist gate, so defaulting it silently conferred
+          # one person's approval authority. Here the UID is only a DM target and
+          # gates nothing, so a fixed value is fine — do not go looking for a
+          # shared constant to sync with.
           REQUESTER_UID: U0AL36NADEY
         run: |
           set -euo pipefail
