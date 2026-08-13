@@ -327,10 +327,14 @@ def run_gate(files, root: Path, baseline_path: Path, subs_path: Path,
         #
         # Discriminated with the extractor's OWN markers, so this can never
         # drift into disagreeing with what extraction actually looks for.
-        # A declared skip also legitimately explains an empty result.
-        if result.skipped_declared:
-            print("All SQL in scope is declared-skipped — nothing left to compile.")
-            return 0
+        # A declared skip legitimately explains an empty result FOR THE FILE THAT
+        # DECLARED IT — and only that file. Returning 0 as soon as any skip
+        # existed (the first cut of this fix) let one file's valid declared-skip
+        # mask a sibling file that carries SQL markers and yields no block, i.e.
+        # exactly the extractor-broken case this branch exists to refuse. So the
+        # scan runs over EVERY file first and passes only when every SQL-bearing
+        # file is accounted for.
+        skipped_files = {s.file for s in result.skipped_declared}
         sql_bearing = []
         for rel in files:
             try:
@@ -358,11 +362,17 @@ def run_gate(files, root: Path, baseline_path: Path, subs_path: Path,
                 if tse._INVOKE_RE.search(line):
                     sql_bearing.append(rel)
                     break
-        if not sql_bearing:
-            print(f"No SQL in the {len(files)} changed file(s) in scope — nothing to compile.")
+        # A SQL-bearing file is accounted for only if IT declared the skip.
+        unaccounted = [f for f in sql_bearing if f not in skipped_files]
+        if not unaccounted:
+            if sql_bearing:
+                print(f"All SQL in scope ({len(sql_bearing)} file(s)) is declared-skipped "
+                      "— nothing left to compile.")
+            else:
+                print(f"No SQL in the {len(files)} changed file(s) in scope — nothing to compile.")
             return 0
         print("Extracted zero SQL blocks from files that DO carry SQL markers "
-              f"({', '.join(sql_bearing[:5])}) — extraction is broken, not the scope; "
+              f"({', '.join(unaccounted[:5])}) — extraction is broken, not the scope; "
               "refusing to pass vacuously.", file=sys.stderr)
         return 2
 

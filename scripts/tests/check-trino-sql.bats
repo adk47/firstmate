@@ -384,6 +384,21 @@ write_fence() {
   [[ "$output" == *"declared-skipped"* ]]
 }
 
+@test "vacuity: one file's declared skip must NOT mask a broken sibling (exits 2)" {
+  # QA #826: the first cut returned 0 as soon as ANY declared skip existed,
+  # before scanning the rest of the scope — so a valid skip in one file hid the
+  # extractor-broken case in another. A skip only ever accounts for the file
+  # that declared it.
+  printf '<!-- trino-sql-gate: skip (fixture) -->\n```sql\nSELECT 1\n```\n' \
+    > "$TEST_TMPDIR/skills-all/dummy/a.md"
+  printf '```sql\n```\n' > "$TEST_TMPDIR/skills-all/dummy/b.md"
+  run run_gate_py "skills-all/dummy/a.md" "skills-all/dummy/b.md"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"refusing to pass vacuously"* ]]
+  # and it must name the BROKEN file, not the skipped one
+  [[ "$output" == *"b.md"* ]]
+}
+
 # --------------------------------------------------------------- False green --
 # Each test below pins a path that previously let a real failure exit 0. They
 # are the regression locks for the three enforcement-gate defects found in
