@@ -945,6 +945,40 @@ _tier0_audit_recompute_gate() {
     return 0
 }
 
+is_uvn_popularity_cron_approval() {
+    local method="$1" path="$2" body="$3"
+
+    # Standing authorization for the deterministic under-30 cron. Keep this
+    # narrower than the ordinary approve surface: the dedicated service
+    # identity must opt in, use the conditional endpoint, transition only
+    # UVN -> approved, and submit one unique UUID batch no larger than the
+    # cron's own 50-row chunk. Any near miss falls through to the normal
+    # evidence gate below.
+    [[ "${UVN_POPULARITY_CRON:-0}" == "1" ]] || return 1
+    [[ "${REQUESTER_EMAIL:-}" == "uvn-popularity-cron@hydra-ops" ]] || return 1
+    [[ "$method" == "PUT" ]] || return 1
+    [[ "$path" == "/admin/credit-requests/conditional-status" ]] || return 1
+
+    printf '%s' "$body" | jq -e '
+        type == "object"
+        and ((keys | sort) == ["expectedStatus", "requestIds", "status"])
+        and .status == "approved"
+        and .expectedStatus == "user_verification_needed"
+        and (
+            .requestIds as $ids
+            | ($ids | type) == "array"
+            and ($ids | length) > 0
+            and ($ids | length) <= 50
+            and all($ids[];
+                type == "string"
+                and length == 36
+                and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+            )
+            and (($ids | map(ascii_downcase) | unique | length) == ($ids | length))
+        )
+    ' >/dev/null 2>&1
+}
+
 enforce_credit_approve_gate() {
     local method="$1" path="$2" body="$3"
 
@@ -974,6 +1008,10 @@ enforce_credit_approve_gate() {
     status_val="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)"
     if [[ "$status_val" != "approved" ]] \
         && ! echo "$body" | grep -q '"status"[[:space:]]*:[[:space:]]*"approved"'; then
+        return 0
+    fi
+
+    if is_uvn_popularity_cron_approval "$method" "$path" "$body"; then
         return 0
     fi
 

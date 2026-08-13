@@ -23,7 +23,7 @@ setup() {
     # was inherited from /var/log/openclaw/credit-batch-runs.
     export OPS_RUNLOG_DIR="$TEST_ROOT/runlogs"
     mkdir -p "$OPS_RUNLOG_DIR"
-    unset REQUESTER_EMAIL CV_APPROVE_GATE_DISABLED EVIDENCE_EXCERPT \
+    unset REQUESTER_EMAIL UVN_POPULARITY_CRON CV_APPROVE_GATE_DISABLED EVIDENCE_EXCERPT \
           CV_SESSION_LOG_OVERRIDE CV_SESSION_RUN_STARTED_TS
     export CV_REQUIRED_LOADS=2
     export CV_SESSION_MAX_AGE_MIN=10
@@ -200,6 +200,62 @@ write_session_log() {
     source_gate
     write_session_log "s.jsonl" '{}'
     REQUESTER_EMAIL="someone@evil.com" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+}
+
+# --- Dedicated UVN popularity cron authorization ---------------------------
+
+@test "UVN popularity cron: exact conditional UVN-to-approved batch is allowed" {
+    source_gate
+    REQUESTER_EMAIL="uvn-popularity-cron@hydra-ops" \
+    UVN_POPULARITY_CRON=1 \
+        run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status \
+            '{"requestIds":["11111111-1111-4111-8111-111111111111","22222222-2222-4222-8222-222222222222"],"status":"approved","expectedStatus":"user_verification_needed"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "UVN popularity cron: near-miss request shapes still require normal evidence" {
+    source_gate
+    export REQUESTER_EMAIL="uvn-popularity-cron@hydra-ops"
+    export UVN_POPULARITY_CRON=1
+
+    local valid='{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"user_verification_needed"}'
+    local missing_expected='{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved"}'
+    local wrong_expected='{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"unverified"}'
+    local empty_ids='{"requestIds":[],"status":"approved","expectedStatus":"user_verification_needed"}'
+    local invalid_id='{"requestIds":["not-a-uuid"],"status":"approved","expectedStatus":"user_verification_needed"}'
+    local newline_id=$'{"requestIds":["11111111-1111-4111-8111-111111111111\\n"],"status":"approved","expectedStatus":"user_verification_needed"}'
+    local duplicate_ids='{"requestIds":["11111111-1111-4111-8111-111111111111","11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"user_verification_needed"}'
+    local too_many_ids
+    too_many_ids=$(jq -nc '{requestIds:[range(51) | "11111111-1111-4111-8111-" + (("000000000000" + tostring)[-12:])],status:"approved",expectedStatus:"user_verification_needed"}')
+    local extra_key='{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"user_verification_needed","force":true}'
+
+    run enforce_credit_approve_gate PATCH /admin/credit-requests/conditional-status "$valid"
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PUT /admin/credit-requests "$valid"
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$missing_expected"
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$wrong_expected"
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$empty_ids"
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$invalid_id"
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$newline_id"
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$duplicate_ids"
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$too_many_ids"
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$extra_key"
+    [ "$status" -eq 1 ]
+
+    UVN_POPULARITY_CRON=0 run enforce_credit_approve_gate \
+        PUT /admin/credit-requests/conditional-status "$valid"
+    [ "$status" -eq 1 ]
+    REQUESTER_EMAIL="someone@evil.com" run enforce_credit_approve_gate \
+        PUT /admin/credit-requests/conditional-status "$valid"
     [ "$status" -eq 1 ]
 }
 

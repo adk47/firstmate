@@ -423,8 +423,8 @@
       "id": "46442766-c410-4ccd-966c-4de3c06eed8d",
       "agentId": "operations",
       "name": "uvn-ticket-popularity-under30-4h",
-      "description": "STAGED / DISABLED pending explicit approval for the autonomous admin-write gate. Once approved, every 4h at :15 run a deterministic ticket-scoped UVN approval pass. It accepts IDs only from structured TO DO hydra-action-request/action:credit-verify tickets, fetches authoritative live Spotify popularity, excludes fraud and backend hard-reject signals, atomically approves only rows still in user_verification_needed, verifies every exact ID, never rejects, and resolves only when every structured request ID reads approved. The dedicated conditional backend route makes either deployment order fail closed. Final summaries are announced to #credit-verification by the cron runner.",
-      "enabled": false,
+      "description": "ENABLED 2026-08-13 after Nick authorized the autonomous admin-write gate. Every 4h at :15 run a deterministic ticket-scoped UVN approval pass. It accepts IDs only from structured TO DO hydra-action-request/action:credit-verify tickets, fetches authoritative live Spotify popularity, excludes fraud and backend hard-reject signals, atomically approves only rows still in user_verification_needed, verifies every exact ID, never rejects, and resolves only when every structured request ID reads approved. The dedicated conditional backend route makes either deployment order fail closed. Final summaries are announced to #credit-verification by the cron runner.",
+      "enabled": true,
       "createdAtMs": 1786384653000,
       "updatedAtMs": 1786384653000,
       "schedule": {
