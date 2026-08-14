@@ -7,6 +7,12 @@
 # hydra's own adk47 / QA_ACK_PAT credentials. Anything unlisted MUST fail-closed
 # BEFORE any GitHub write, so a caller holding a dispatch PAT cannot aim those
 # credentials at an arbitrary repo. These tests encode that fail-closed contract.
+#
+# `--list` enumerates the same array a reconciler needs to walk. Because any
+# flag that exits 0 is a potential fail-open hole against the attacker-
+# influenceable repo payload, this file also asserts `--list` is recognized
+# ONLY as an exact sole argument, and that enumeration + membership can never
+# silently drift apart (parity test).
 bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
@@ -48,22 +54,6 @@ ONBOARDED_REPOS=(
   done
 }
 
-@test "the script's allowlist and this test's list are the SAME set (drift guard)" {
-  # A hardcoded expectation only ever protects what it enumerates, so the two
-  # lists drift silently in BOTH directions: onboarding a repo by editing only
-  # the script leaves it untested (that is how tests-web-e2e went uncovered),
-  # and deleting one from the script would narrow the gate with every existing
-  # test still green. Compare the sets, not just one side's membership.
-  script_list="$(grep -oE '^  Muso-AI/[A-Za-z0-9._-]+\)' "$SCRIPT" | sed 's/^ *//; s/)$//' | sort)"
-  test_list="$(printf '%s\n' "${ONBOARDED_REPOS[@]}" | sort)"
-  [ -n "$script_list" ]
-  if [ "$script_list" != "$test_list" ]; then
-    echo "allowlist drift between $SCRIPT and this test (< test-only, > script-only):"
-    diff <(echo "$test_list") <(echo "$script_list") || true
-    return 1
-  fi
-}
-
 @test "unlisted Muso-AI repo -> exit 1, no output (fail-closed)" {
   run "$SCRIPT" Muso-AI/hydra
   [ "$status" -eq 1 ]
@@ -94,6 +84,11 @@ ONBOARDED_REPOS=(
   [ "$status" -eq 2 ]
 }
 
+@test "two args -> usage exit 2" {
+  run "$SCRIPT" Muso-AI/core-backend Muso-AI/auth
+  [ "$status" -eq 2 ]
+}
+
 @test "the ack step gates on this script BEFORE any gh API call" {
   # Regression guard for the #755 review finding: the visibility-ack step used
   # to write to the target PR before the allowlist was consulted.
@@ -118,4 +113,97 @@ ONBOARDED_REPOS=(
   [ -n "$checkout_line" ]
   [ -n "$ack_line" ]
   [ "$checkout_line" -lt "$ack_line" ]
+}
+
+# --- --list / enumeration mode -------------------------------------------
+
+@test "enumeration (env, no args) -> exit 0, output is exactly the 16 repos, one per line" {
+  run env QA_EXTERNAL_REPO_ALLOWLIST_ENUMERATE=1 "$SCRIPT"
+  [ "$status" -eq 0 ]
+  expected="$(printf '%s\n' "${ONBOARDED_REPOS[@]}")"
+  [ "$output" = "$expected" ]
+}
+
+@test "parity: every enumerated line, fed back as membership arg, exits 0, and counts match" {
+  run env QA_EXTERNAL_REPO_ALLOWLIST_ENUMERATE=1 "$SCRIPT"
+  [ "$status" -eq 0 ]
+  list_count=0
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    list_count=$((list_count + 1))
+    run "$SCRIPT" "$repo"
+    [ "$status" -eq 0 ] || { echo "enumeration emitted a repo the predicate rejects: $repo"; return 1; }
+  done <<< "$output"
+  [ "$list_count" -eq "${#ONBOARDED_REPOS[@]}" ]
+}
+
+@test "glob-shaped input Muso-AI/* -> exit 1 (proves literal compare, not glob match)" {
+  run "$SCRIPT" 'Muso-AI/*'
+  [ "$status" -eq 1 ]
+}
+
+@test "--lists -> refused (argv can never enumerate)" {
+  run "$SCRIPT" --lists
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "-x -> not treated as enumeration" {
+  run "$SCRIPT" -x
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "--list plus an extra arg -> usage exit 2, not enumeration" {
+  run "$SCRIPT" --list extra
+  [ "$status" -eq 2 ]
+}
+
+@test "leading-space ' --list' -> refused" {
+  run "$SCRIPT" ' --list'
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
+@test "Muso-AI/a/b -> exit 1 (extra path segment rejected by format guard)" {
+  run "$SCRIPT" Muso-AI/a/b
+  [ "$status" -eq 1 ]
+}
+
+@test "../../etc/passwd -> exit 1" {
+  run "$SCRIPT" '../../etc/passwd'
+  [ "$status" -eq 1 ]
+}
+
+# --- The workflow-payload attack this env gate exists to close ---------------
+# external-pr-review.yml passes the raw client_payload.repo as the SINGLE
+# argument to this script and reads rc 0 as "allowed". An argv `--list` flag was
+# therefore indistinguishable from a trusted enumeration call and returned 0,
+# letting the ack step cross its credential gate on an unvalidated repo.
+
+@test "ATTACK: payload '--list' as the single argument is REFUSED (rc 1), never enumeration" {
+  run "$SCRIPT" -- '--list'
+  [ "$status" -ne 0 ]
+  run "$SCRIPT" '--list'
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
+@test "ATTACK: payload '--list' is refused EVEN IF the enumerate env var is set" {
+  run env QA_EXTERNAL_REPO_ALLOWLIST_ENUMERATE=1 "$SCRIPT" '--list'
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
+@test "an argument is ALWAYS the predicate, never enumeration, whatever the env says" {
+  run env QA_EXTERNAL_REPO_ALLOWLIST_ENUMERATE=1 "$SCRIPT" 'Muso-AI/not-a-real-repo'
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+  run env QA_EXTERNAL_REPO_ALLOWLIST_ENUMERATE=1 "$SCRIPT" 'Muso-AI/core-backend'
+  [ "$status" -eq 0 ]
+}
+
+@test "no args WITHOUT the env var -> usage exit 2, never a silent empty list" {
+  run "$SCRIPT"
+  [ "$status" -eq 2 ]
 }

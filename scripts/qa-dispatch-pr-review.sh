@@ -103,7 +103,9 @@ EOF
 # Idempotency: a re-push reruns CI and re-dispatches. Drop any still-pending job
 # for this PR so we review the latest SHA, not a stale one. Best-effort — never
 # fail the dispatch over cleanup.
-old_ids="$("$OPENCLAW" --profile "$PROFILE" cron list --json 2>/dev/null \
+# --all: bare `cron list` HIDES disabled rows (scripts/lib/cron-store.sh:54-64),
+# so an idempotency check without it can miss a disabled leftover job.
+old_ids="$("$OPENCLAW" --profile "$PROFILE" cron list --all --json 2>/dev/null \
   | jq -r --arg n "$job_name" '.jobs[]? | select(.name==$n) | .id' 2>/dev/null || true)"
 while IFS= read -r id; do
   [ -n "$id" ] || continue
@@ -112,19 +114,90 @@ done <<< "$old_ids"
 
 # Sweep stale qa-autoreview-pr-* one-shots left behind by earlier runs. A failed run is
 # NOT reaped by --delete-after-run (deletion is gated on outcome=ok), so dead jobs pile up
-# in the cron list. A review finishes well inside the 1200s timeout, so any qa-autoreview
-# job created >1h ago is definitely done (a succeeded one already self-deleted) and safe to
-# remove. The >1h cutoff leaves any in-flight review (other PR) untouched. Conservative on
-# missing timestamps (default far-future = never swept). Best-effort — never fail dispatch.
-stale_cutoff_ms=$(( ($(date -u +%s) - 3600) * 1000 ))
-stale_ids="$("$OPENCLAW" --profile "$PROFILE" cron list --json 2>/dev/null \
-  | jq -r --argjson c "$stale_cutoff_ms" \
-      '.jobs[]? | select((.name // "") | startswith("qa-autoreview-pr-"))
-                | select((.createdAtMs // 9999999999999) < $c) | .id' 2>/dev/null || true)"
-while IFS= read -r id; do
-  [ -n "$id" ] || continue
-  "$OPENCLAW" --profile "$PROFILE" cron rm "$id" >/dev/null 2>&1 || true
-done <<< "$stale_ids"
+# in the cron list.
+#
+# Premise: run EVIDENCE, not elapsed time. The sweep used to delete any job whose
+# createdAtMs was >1h in the past, on the theory that a review always finishes well
+# inside the 1200s timeout. That is an elapsed-time test, not a completion test: a
+# job that only QUEUED (and never ran) is created up front, so an hour-old queued
+# job was being deleted before it ever fired -- silently losing the review
+# (muso-skills#2, core-backend#9243). Jobs are created --delete-after-run, which
+# self-deletes only on a successful run, so anything the sweep still sees was, by
+# construction, NOT a successful completion.
+#
+# Verified live field shape (node-8, `cron list --all --json`): run evidence is
+# nested under `.state`, not a top-level `lastRunAtMs` (that key does not exist):
+#   queued, never run   -> .state has nextRunAtMs only
+#   currently running   -> .state.runningAtMs present, top-level .status=="running"
+#   completed >=1 run   -> .state.lastRunAtMs/.lastStatus/.lastRunStatus present
+#
+# Rule: "has run" and "is not running" are two SEPARATE conditions, and this
+# file must agree with qar_cron_state (scripts/lib/qa-reconcile.sh) on what
+# "running" means -- that reconciler checks .state.runningAtMs / top-level
+# .status=="running" FIRST and treats a job carrying both runningAtMs and
+# lastRunAtMs as authoritatively running (e.g. a re-run of a job that already
+# completed once). A predicate that only looked at lastRunAtMs would delete
+# that same in-flight job out from under the reconciler -- reaping a live
+# review whenever the qa lane is wedged past the 1200s timeout.
+#
+# Delete a qa-autoreview-pr-* job iff ALL of:
+#   - .state.lastRunAtMs is present (it has run at least once), AND
+#   - .state.runningAtMs is NOT present, AND top-level .status != "running"
+#     (it is not currently running), AND
+#   - .state.lastRunAtMs is older than 1800s (the 1200s job timeout plus
+#     margin -- encodes "cannot still be running" as a second, independent
+#     check; unlike a createdAt cutoff this can never reap a job that queued
+#     for an hour and only just started).
+# A job with no .state.lastRunAtMs (never run), or one that is currently
+# running, is NEVER deleted here, regardless of age -- it is logged instead
+# so a stuck job is visible without being silently reaped.
+#
+# --all: bare `cron list` hides disabled rows. If the response is paginated
+# (hasMore==true) the durable set is unobtainable -- no pagination flags exist on
+# this build -- so the sweep is skipped entirely rather than acting on a partial
+# list. Best-effort throughout -- never fail dispatch over cleanup.
+stale_cutoff_ms=$(( ($(date -u +%s) - 1800) * 1000 ))
+cron_json="$("$OPENCLAW" --profile "$PROFILE" cron list --all --json 2>/dev/null || true)"
+
+if echo "$cron_json" | jq -e '.hasMore == true' >/dev/null 2>&1; then
+  echo "qa-dispatch-pr-review: stale sweep skipped -- cron list is paginated (hasMore=true), durable set unobtainable" >&2
+else
+  # jq traps: has("lastRunAtMs") for presence (the `//` operator treats a `false`
+  # value as null and would misclassify); `| numbers` guards the comparison (jq
+  # sorts strings ABOVE numbers, so a non-numeric field would compare > cutoff as
+  # true). A compile error exits with rc>0 with no -e flag in play, so a nonzero
+  # jq_rc here means jq broke, not "no matches" (an empty match set is rc 0).
+  if stale_ids="$(echo "$cron_json" | jq -r --argjson c "$stale_cutoff_ms" '
+        .jobs[]? | select((.name // "") | startswith("qa-autoreview-pr-"))
+                 | select((.state // {}) | has("lastRunAtMs"))
+                 | select((.state // {}) | has("runningAtMs") | not)
+                 | select(.status != "running")
+                 | select((.state.lastRunAtMs | numbers) < $c)
+                 | .id' 2>/dev/null)"; then
+    jq_rc=0
+  else
+    jq_rc=$?
+  fi
+
+  if [ "$jq_rc" -ne 0 ]; then
+    echo "qa-dispatch-pr-review: stale sweep skipped -- jq failed parsing cron list (rc=$jq_rc)" >&2
+  else
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      "$OPENCLAW" --profile "$PROFILE" cron rm "$id" >/dev/null 2>&1 || true
+    done <<< "$stale_ids"
+
+    if never_run_names="$(echo "$cron_json" | jq -r '
+          .jobs[]? | select((.name // "") | startswith("qa-autoreview-pr-"))
+                   | select(((.state // {}) | has("lastRunAtMs") | not))
+                   | .name' 2>/dev/null)"; then
+      while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        echo "qa-dispatch-pr-review: leaving never-completed qa-autoreview job in place (no .state.lastRunAtMs): $name" >&2
+      done <<< "$never_run_names"
+    fi
+  fi
+fi
 
 # Fire-and-forget one-shot. --delete-after-run cleans up on success.
 #
