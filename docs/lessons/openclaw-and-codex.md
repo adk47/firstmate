@@ -217,6 +217,12 @@ agent turn.
   and `cron-health-watchdog.sh` (pages #clio_devops, 6h-deduped). It is
   DETECT-AND-PAGE ONLY by design — re-sizing a budget is a human decision, and a
   self-healing "just raise it" would defer the same outage with nobody informed.
+  **Until 2026-08-14 that guard checked only the DISK half of the invariant it
+  states here**, so the `maxEntries` wedge recurred on `scout` (issue #829) and
+  the guard's remediation text sent the diagnosis at `maxDiskBytes` while the
+  agent sat at 17.6% of it. It now checks both caps and names the binding one;
+  caps are `maxEntries` 10000 and 8gb/6gb. A finding that names a cap you have
+  not measured as binding is the tell — check the OTHER reaper.
 - **Why it went unnoticed for 25h:** `cron-health-watchdog.sh` DID page hourly
   (`stuck: N consecutive restart/claim failures, not recovering`, N climbing
   15→24) — correct, per-job, and unread. It named only the hourly triage (the
