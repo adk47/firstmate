@@ -221,6 +221,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/openclaw-edge-reindex-on-start.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/stuck-lane-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/stuck-lane-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/qa-review-reconcile.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/qa-review-reconcile.sh missing or not executable"
 [[ -f "$HYDRA_ROOT/scripts/overdue-verification-notifier.py" ]] \
   || fail "$HYDRA_ROOT/scripts/overdue-verification-notifier.py missing"
 [[ -f "$HYDRA_ROOT/scripts/resolve-notify.py" ]] \
@@ -1743,7 +1745,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/qa-review-reconcile.log {
     weekly
     rotate 4
     compress
@@ -1779,3 +1781,57 @@ if [[ -x "$HYDRA_ROOT/scripts/lib/setup-cto-clone-hooks.sh" ]]; then
     log "  WARN: setup-cto-clone-hooks.sh failed — CTO push-audit guard may not be active"
   fi
 fi
+
+# ─── QA auto-review reconciler, every 15 min ───────────────────
+# Recovers reviews the one-shot-cron dispatch lane silently loses: a
+# dispatch arms a one-shot openclaw cron to run qa-dispatch-pr-review.sh; a
+# gateway restart between arm and fire kills it; openclaw never re-arms a
+# past-due one-shot; a later sweep deletes the never-fired row with no
+# trace. Confirmed real losses: muso-skills#2 (18h) and
+# core-backend#9243 (15 days). A systemd timer (not another openclaw cron)
+# is deliberately load-bearing here — it must survive exactly the failure
+# mode it's reconciling (a gateway restart), so it cannot itself be gateway
+# state. See scripts/qa-review-reconcile.sh's header for the full
+# mechanism-decision rationale and env knobs.
+cat > /etc/systemd/system/qa-review-reconcile.service << QARECONCILESVC
+[Unit]
+Description=QA auto-review reconciler (recovers PRs the one-shot-cron dispatch lane lost)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# 17 gh pr list calls plus a commits/<sha> lookup per in-scope PR, plus two
+# more calls per in-scope PR — real --dry-run ticks against the live org ran
+# minutes, not seconds. Without this the default DefaultTimeoutStartSec=90s
+# SIGTERMs the tick before its single end-of-run state write, discarding
+# every attempts/last_attempt_epoch recorded that tick (state is written
+# ONCE, after all repo loops complete) — the cooldown never engages and the
+# same candidates re-dispatch every 15 minutes forever.
+TimeoutStartSec=1800
+ExecStart=$HYDRA_ROOT/scripts/qa-review-reconcile.sh
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=append:/var/log/qa-review-reconcile.log
+StandardError=append:/var/log/qa-review-reconcile.log
+QARECONCILESVC
+
+cat > /etc/systemd/system/qa-review-reconcile.timer << QARECONCILETMR
+[Unit]
+Description=Every 15 min — reconcile lost QA auto-review dispatches
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=15min
+RandomizedDelaySec=60s
+Unit=qa-review-reconcile.service
+
+[Install]
+WantedBy=timers.target
+QARECONCILETMR
+
+systemctl daemon-reload
+
+qarc=qa-review-reconcile.timer
+systemctl enable "$qarc" >/dev/null 2>&1 || log "WARN: could not enable $qarc"
+systemctl start "$qarc" >/dev/null 2>&1 || log "WARN: could not start $qarc"
+log "  $qarc: $(systemctl is-active "$qarc" 2>/dev/null || echo unknown)"

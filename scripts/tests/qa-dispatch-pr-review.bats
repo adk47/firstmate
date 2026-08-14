@@ -33,8 +33,14 @@ for a in "$@"; do
   prev="$a"
 done
 case "$sub" in
-  # `cron list` returns STUB_LIST_JSON if a test set one, else no jobs.
-  list) if [ -f "${STUB_LIST_JSON:-}" ]; then cat "${STUB_LIST_JSON}"; else echo '{"jobs":[]}'; fi ;;
+  # `cron list` returns STUB_LIST_JSON if a test set one, else no jobs. A test
+  # can also force the call to fail outright (STUB_LIST_FAIL) or return raw
+  # garbage (STUB_LIST_GARBAGE) to prove the sweep degrades safely.
+  list)
+    if [ -n "${STUB_LIST_FAIL:-}" ]; then exit 1; fi
+    if [ -n "${STUB_LIST_GARBAGE:-}" ]; then echo "not json at all"; exit 0; fi
+    if [ -f "${STUB_LIST_JSON:-}" ]; then cat "${STUB_LIST_JSON}"; else echo '{"jobs":[]}'; fi
+    ;;
   add)  echo "cron-add" >> "$STUB_CALLS"; echo '{"ok":true}' ;;
   rm)   echo "cron-rm"  >> "$STUB_CALLS" ;;
 esac
@@ -173,21 +179,154 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   ! grep -qx -- '--announce'  "$STUB_ARGV"
 }
 
-@test "sweeps stale qa-autoreview-pr-* one-shots, leaves fresh + non-qa jobs alone" {
+# --- stale sweep: run-evidence, not elapsed time ---------------------------
+#
+# Premise: a job is only safe to reap once it has COMPLETED a run
+# (.state.lastRunAtMs present and old enough to rule out "still running"). A
+# createdAt-only cutoff used to reap jobs that queued and never fired
+# (muso-skills#2, core-backend#9243) -- these tests pin the new predicate.
+
+@test "job with completed run older than 1800s -> IS rm'd (exact id)" {
   now_ms=$(( $(date -u +%s) * 1000 ))
-  stale_ms=$(( now_ms - 7200000 ))   # 2h ago — a done/failed run
-  fresh_ms=$(( now_ms - 60000 ))     # 1m ago — possibly in-flight
+  old_done_ms=$(( now_ms - 2000000 ))  # ~33min ago, > 1800s cutoff
   export STUB_LIST_JSON="$TEST_TMPDIR/list.json"
   cat > "$STUB_LIST_JSON" <<JSON
 {"jobs":[
-  {"id":"STALEQA","name":"qa-autoreview-pr-999","createdAtMs":$stale_ms},
-  {"id":"FRESHQA","name":"qa-autoreview-pr-998","createdAtMs":$fresh_ms},
-  {"id":"OTHERCRON","name":"some-other-cron","createdAtMs":$stale_ms}
+  {"id":"OLDDONE","name":"qa-autoreview-pr-Muso-AI-hydra-999","state":{"lastRunAtMs":$old_done_ms}}
 ]}
 JSON
   QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
-  grep -qx 'STALEQA' "$STUB_ARGV"      # stale qa-autoreview job removed
-  if grep -qx 'FRESHQA' "$STUB_ARGV"; then echo "a fresh in-flight qa-autoreview job was wrongly swept" >&2; false; fi    # fresh (in-flight) qa-autoreview job left alone
-  ! grep -qx 'OTHERCRON' "$STUB_ARGV"  # non-qa job never touched, even when stale
+  grep -qx 'OLDDONE' "$STUB_ARGV"
+  [ "$(grep -c '^cron-rm$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "job with NO .state.lastRunAtMs, created 3h ago -> NOT rm'd, and it is logged" {
+  now_ms=$(( $(date -u +%s) * 1000 ))
+  old_created_ms=$(( now_ms - 10800000 ))  # 3h ago
+  export STUB_LIST_JSON="$TEST_TMPDIR/list.json"
+  cat > "$STUB_LIST_JSON" <<JSON
+{"jobs":[
+  {"id":"NEVERRUN","name":"qa-autoreview-pr-Muso-AI-hydra-998","createdAtMs":$old_created_ms,"state":{"nextRunAtMs":$now_ms}}
+]}
+JSON
+  run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  ! grep -qx 'NEVERRUN' "$STUB_ARGV"
+  [ ! -s "$STUB_CALLS" ] || [ "$(grep -c '^cron-rm$' "$STUB_CALLS")" -eq 0 ]
+  echo "$output" | grep -q 'qa-autoreview-pr-Muso-AI-hydra-998'
+}
+
+@test "job with .state.runningAtMs and no lastRunAtMs -> NOT rm'd (in flight)" {
+  now_ms=$(( $(date -u +%s) * 1000 ))
+  running_ms=$(( now_ms - 500 ))
+  export STUB_LIST_JSON="$TEST_TMPDIR/list.json"
+  cat > "$STUB_LIST_JSON" <<JSON
+{"jobs":[
+  {"id":"RUNNINGQA","name":"qa-autoreview-pr-Muso-AI-hydra-997","status":"running","state":{"runningAtMs":$running_ms}}
+]}
+JSON
+  run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  ! grep -qx 'RUNNINGQA' "$STUB_ARGV"
+  [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
+}
+
+@test "job with .state.lastRunAtMs 60s ago -> NOT rm'd (inside the timeout margin)" {
+  now_ms=$(( $(date -u +%s) * 1000 ))
+  recent_ms=$(( now_ms - 60000 ))
+  export STUB_LIST_JSON="$TEST_TMPDIR/list.json"
+  cat > "$STUB_LIST_JSON" <<JSON
+{"jobs":[
+  {"id":"RECENTQA","name":"qa-autoreview-pr-Muso-AI-hydra-996","state":{"lastRunAtMs":$recent_ms}}
+]}
+JSON
+  run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  ! grep -qx 'RECENTQA' "$STUB_ARGV"
+}
+
+@test "job with BOTH old lastRunAtMs AND runningAtMs -> NOT rm'd (running wins)" {
+  now_ms=$(( $(date -u +%s) * 1000 ))
+  old_done_ms=$(( now_ms - 2000000 ))  # ~33min ago, > 1800s cutoff
+  running_ms=$(( now_ms - 500 ))
+  export STUB_LIST_JSON="$TEST_TMPDIR/list.json"
+  cat > "$STUB_LIST_JSON" <<JSON
+{"jobs":[
+  {"id":"RERUNQA","name":"qa-autoreview-pr-Muso-AI-hydra-994","state":{"lastRunAtMs":$old_done_ms,"runningAtMs":$running_ms}}
+]}
+JSON
+  run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  ! grep -qx 'RERUNQA' "$STUB_ARGV"
+  [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
+}
+
+@test "job with old lastRunAtMs AND top-level status running -> NOT rm'd" {
+  now_ms=$(( $(date -u +%s) * 1000 ))
+  old_done_ms=$(( now_ms - 2000000 ))  # ~33min ago, > 1800s cutoff
+  export STUB_LIST_JSON="$TEST_TMPDIR/list.json"
+  cat > "$STUB_LIST_JSON" <<JSON
+{"jobs":[
+  {"id":"STATUSRUNQA","name":"qa-autoreview-pr-Muso-AI-hydra-993","status":"running","state":{"lastRunAtMs":$old_done_ms}}
+]}
+JSON
+  run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  ! grep -qx 'STATUSRUNQA' "$STUB_ARGV"
+  [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
+}
+
+@test "non-qa job never touched, even when its (fictional) run evidence is stale" {
+  now_ms=$(( $(date -u +%s) * 1000 ))
+  old_done_ms=$(( now_ms - 2000000 ))
+  export STUB_LIST_JSON="$TEST_TMPDIR/list.json"
+  cat > "$STUB_LIST_JSON" <<JSON
+{"jobs":[
+  {"id":"OTHERCRON","name":"some-other-cron","state":{"lastRunAtMs":$old_done_ms}}
+]}
+JSON
+  run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  ! grep -qx 'OTHERCRON' "$STUB_ARGV"
+}
+
+@test "hasMore true -> the sweep is skipped entirely, NO rm calls at all" {
+  now_ms=$(( $(date -u +%s) * 1000 ))
+  old_done_ms=$(( now_ms - 2000000 ))
+  export STUB_LIST_JSON="$TEST_TMPDIR/list.json"
+  cat > "$STUB_LIST_JSON" <<JSON
+{"hasMore":true,"jobs":[
+  {"id":"WOULDBESTALE","name":"qa-autoreview-pr-Muso-AI-hydra-995","state":{"lastRunAtMs":$old_done_ms}}
+]}
+JSON
+  run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  ! grep -qx 'WOULDBESTALE' "$STUB_ARGV"
+  [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
+}
+
+@test "cron list returns garbage -> no rm calls, dispatch still succeeds" {
+  export STUB_LIST_GARBAGE=1
+  run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "cron list fails outright -> sweep does not fail the dispatch" {
+  export STUB_LIST_FAIL=1
+  run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "cron list is called with --all on BOTH the idempotency and stale-sweep calls" {
+  run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  # Two `cron list` invocations happen per dispatch (idempotency cleanup, then
+  # the stale sweep) -- both must carry --all, or a disabled row is invisible
+  # to whichever one dropped it (bare `cron list` HIDES disabled rows).
+  [ "$(grep -cx -- '--all' "$STUB_ARGV")" -eq 2 ]
 }
