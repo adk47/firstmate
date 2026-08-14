@@ -16,8 +16,15 @@ set -euo pipefail
 #      error.
 #   3b. Sensitive paths (policies/, secrets/, CODEOWNERS, workflow files, this
 #      script) ALERT and the approval PROCEEDS — see "Notice 3b" below. Only a
-#      path in the policy's `sensitive_paths_blocking` still refuses (exit 11),
-#      and that list ships EMPTY. Changed 2026-08-03; it used to refuse.
+#      path in the policy's `sensitive_paths_blocking` still refuses (exit 11).
+#      Changed 2026-08-03; it used to refuse for the whole list.
+#      NARROWED BACK 2026-08-14: that key is no longer empty. It now carries the
+#      AUTHORITY SURFACE — this script, policies/qa-approval-policy.json, and the
+#      three CODEOWNERS spellings — because the bot approves as adk47, the
+#      universal code owner, so an allowlist widening would otherwise satisfy
+#      require_code_owner_reviews with no Aaron in the loop (Tier 3 is Aaron-only,
+#      docs/reference/GOVERNANCE.md). Everything else stays alert-only, so the
+#      blanket refusal that made the bot unusable is NOT back.
 #   3c. Never approve a PR by an author in the policy's author_deny list.
 #   4. Requester must be in the approval allowlist — either UNSCOPED (Aaron,
 #      Nick) or SCOPED (Mariia, restricted to her own web-credits-next PRs on
@@ -106,8 +113,16 @@ LOG_DIR="${QA_PR_APPROVE_LOG_DIR:-api-logs/github}"
 #   approval on them. An `exit 5` on one of his PRs is the intended outcome, not
 #   a fault to work around.
 #
-# WIDENING THIS TABLE (adding a UID, or loosening any scope field) requires a
-# human decision from Aaron or Nick, and the same PR must update ALL FOUR docs
+# WIDENING THIS TABLE (adding a UID, or loosening any scope field) requires
+# AARON. It is not a Tier 2 doctrine edit that either owner-principal may
+# authorize: docs/reference/GOVERNANCE.md keeps the security surface Aaron-only,
+# and its test is functional — "if a change would let anyone do something they
+# could not do before, it is security surface". Adding a UID here is precisely
+# that. (An earlier draft of this comment said "Aaron or Nick", which contradicted
+# the governing doc and would have let the widening self-authorize.) Guard 3b now
+# enforces it rather than asking: this file is in `sensitive_paths_blocking`, so
+# a PR touching it refuses exit 11 and a human has to approve.
+# The same PR must also update ALL FOUR docs
 # that restate this contract in prose — nothing enforces them mechanically:
 #   workspaces/coordinator/SECURITY.md   (there is NO repo-root SECURITY.md)
 #   workspaces/qa/SOUL.md
@@ -333,16 +348,19 @@ fi
 # back to humans. Sensitive paths now produce a loud alert on the PR and in
 # Slack, and the approval proceeds.
 #
-# KNOWN AND ACCEPTED CONSEQUENCE: policies/ and this script are themselves in
-# the list, so the bot can now approve a change that widens its own authority.
-# That self-reference was the point of the old refusal. It is deliberately given
-# up in exchange for unblocking the team; the alert is what replaces it, so the
-# alert must never be silently dropped. If you are reading this because
-# something bad happened, the fix is to move the path back into
-# `sensitive_paths_blocking`, not to re-add a blanket refusal.
+# The 2026-08-03 change accepted a known consequence: policies/ and this script
+# are in the ALERTING list, so the bot could approve a change that widens its own
+# authority, with the alert as the only backstop. That is the case the comment
+# below said to fix "if you are reading this because something bad happened" —
+# and on 2026-08-14 it was fixed, the prescribed way: the specific authority
+# paths moved into `sensitive_paths_blocking`, NOT a re-added blanket refusal.
 #
-# A path listed in `sensitive_paths_blocking` still refuses (exit 11) — that key
-# ships EMPTY by default, so nothing blocks unless someone opts a path back in.
+# So the self-reference is closed again for the paths that grant authority (this
+# script, the policy, CODEOWNERS) while every other sensitive path keeps the
+# alert-only behaviour the team asked for. A path in `sensitive_paths_blocking`
+# refuses exit 11; that key is NON-EMPTY now, which also means `file_trouble`
+# below fails closed — an unverifiable changed-file list can no longer be waved
+# through, because we cannot prove the PR misses a blocking path.
 sensitive_json="$(jq -c --arg r "$owner/$repo" \
   '((.sensitive_paths["*"] // []) + (.sensitive_paths[$r] // []))' "$POLICY" 2>/dev/null || true)"
 # sensitive_paths_blocking is the ONLY surviving hard path gate, so it must fail
@@ -440,7 +458,8 @@ match_paths() {
 }
 
 if [ -n "${changed_files:-}" ]; then
-  # The blocking subset first: it still refuses, and ships empty by default.
+  # The blocking subset first: it refuses, and since 2026-08-14 it is non-empty
+  # (the authority surface — this script, the policy, CODEOWNERS).
   if [ "$blocking_json" != "[]" ]; then
     bhit="$(match_paths "$blocking_json")"
     [ "$bhit" != "__ERR__" ] || die 11 "could not evaluate sensitive_paths_blocking for $owner/$repo#$pr — refusing (fail closed)."

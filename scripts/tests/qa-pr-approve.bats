@@ -1154,10 +1154,75 @@ assert_alerted() {
   grep -q '^approve$' "$STUB_CALLS"
 }
 
-@test "notice3b: sensitive_paths_blocking ships EMPTY, so nothing blocks by default" {
+# --- the AUTHORITY SURFACE is blocking as SHIPPED (narrowed 2026-08-14) -------
+# These run against the real policies/qa-approval-policy.json, not a synthetic
+# one: the point is what the repo actually ships, since that is what decides
+# whether a widening of the bot's own authority can be self-approved. The
+# predecessor of this block asserted the key ships EMPTY — i.e. it encoded the
+# gap. Aaron-only for the security surface: docs/reference/GOVERNANCE.md.
+
+@test "authority: the SHIPPED policy blocks the files that decide who may approve" {
   pol="$HYDRA_REPO/policies/qa-approval-policy.json"
-  run jq -e '(.sensitive_paths_blocking // {}) | length == 0' "$pol"
+  run jq -e '
+    (.sensitive_paths_blocking["Muso-AI/hydra"] // []) as $b
+    | ([ "policies/qa-approval-policy.json", "scripts/qa-pr-approve.sh",
+         "CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS" ]
+       | all(. as $p | $b | index($p) != null))' "$pol"
   [ "$status" -eq 0 ]
+}
+
+@test "authority: the SHIPPED policy does NOT re-block the alert-only paths" {
+  # The 2026-08-03 change exists because a blanket refusal made the bot unusable.
+  # Narrowing must stay narrow, so these must remain approvable.
+  pol="$HYDRA_REPO/policies/qa-approval-policy.json"
+  run jq -e '
+    (.sensitive_paths_blocking["Muso-AI/hydra"] // []) as $b
+    | ([ "scripts/deploy.sh", "scripts/qa-gh.sh", "scripts/qa-dispatch-pr-review.sh",
+         "skills-all/muso-github-code-review/", "scripts/lib/qa-author-slack-uid.sh" ]
+       | all(. as $p | $b | index($p) == null))' "$pol"
+  [ "$status" -eq 0 ]
+}
+
+@test "authority: a PR touching qa-pr-approve.sh refuses (exit 11) under the SHIPPED policy" {
+  QA_APPROVAL_POLICY="$HYDRA_REPO/policies/qa-approval-policy.json" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_REF="main" STUB_BAD_CHECKS=0 \
+    STUB_FILES="scripts/qa-pr-approve.sh" \
+    QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 70 "$NICK"
+  [ "$status" -eq 11 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+  echo "$output" | grep -qF 'scripts/qa-pr-approve.sh'
+}
+
+@test "authority: a PR touching the approval POLICY refuses (exit 11) under the SHIPPED policy" {
+  QA_APPROVAL_POLICY="$HYDRA_REPO/policies/qa-approval-policy.json" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_REF="main" STUB_BAD_CHECKS=0 \
+    STUB_FILES="policies/qa-approval-policy.json" \
+    QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 70 "$NICK"
+  [ "$status" -eq 11 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "authority: a PR touching .github/CODEOWNERS refuses (exit 11) under the SHIPPED policy" {
+  # CODEOWNERS decides who satisfies require_code_owner_reviews, and the bot
+  # posts as adk47 — the universal code owner. Adding an owner is authority.
+  QA_APPROVAL_POLICY="$HYDRA_REPO/policies/qa-approval-policy.json" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_REF="main" STUB_BAD_CHECKS=0 \
+    STUB_FILES=".github/CODEOWNERS" \
+    QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 70 "$NICK"
+  [ "$status" -eq 11 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "authority REGRESSION GUARD: deploy.sh is sensitive but still APPROVES (no blanket refusal)" {
+  # If this ever flips to 11, someone re-broadened the blocking list and the bot
+  # is on its way back to being unusable. That is the failure this test exists
+  # to catch — it is not a happy-path duplicate of the cases above.
+  QA_APPROVAL_POLICY="$HYDRA_REPO/policies/qa-approval-policy.json" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_REF="main" STUB_BAD_CHECKS=0 \
+    STUB_FILES="scripts/deploy.sh" \
+    QA_REBASE_REQUIRED_REPOS="other" run "$SCRIPT" hydra 70 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
 }
 
 @test "guard3b: >100 ordinary files from paginated REST → approves" {
