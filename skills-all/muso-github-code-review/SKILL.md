@@ -778,22 +778,31 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> "🤖
   (file the Step 3d finding first), it is ERROR/unreadable (rebase state
   unverified — a human must look), or it is MISSING for a repo that requires one
   (hydra) — re-run PR Validation;
-  `exit 11` = the PR touches a path in `sensitive_paths_blocking` (that list ships
-  EMPTY, so this is rare and deliberate — a human must approve that one), OR the
-  policy's `sensitive_paths_blocking` key is unreadable/malformed, OR the changed-file
-  list could not be established while blocking paths are configured — the last two
-  mean the POLICY is broken, not the PR;
+  `exit 11` = the PR touches a path in `sensitive_paths_blocking`. Since 2026-08-14
+  that list carries the AUTHORITY SURFACE — `policies/qa-approval-policy.json`,
+  `scripts/qa-pr-approve.sh`, and the three `CODEOWNERS` spellings — so a PR that
+  changes who may approve is refused here BY DESIGN and needs Aaron, not the bot
+  (Tier 3, `docs/reference/GOVERNANCE.md`). Relay it as "a human must approve this
+  one", never as a fault to work around. Also `exit 11` if the
+  `sensitive_paths_blocking` key is unreadable/malformed, OR the changed-file list
+  could not be established — those two mean the POLICY is broken, not the PR;
   `exit 12` = the PR's author is in the policy's `author_deny` list, or `author_deny`
   is missing/null/malformed (fail-closed) — report the policy state, do not retry;
   `exit 13` = Guard 9 blast radius (only when `QA_BLAST_RADIUS_GATE=1`, not the default).
 
 ### Relay every ⚠️ ALERT the wrapper prints
 
-**Changed 2026-08-03.** Sensitive paths (`policies/`, `scripts/qa-*`, `CODEOWNERS`,
-workflows, gateway config …) used to REFUSE the approval with `exit 11`. They no
-longer do — the wrapper approves and prints one or more `⚠️ ALERT — …` lines
-instead. A red **advisory** CI check (deploy pre-flight and friends, which fail on
-live server drift rather than on the diff) does the same.
+**Changed 2026-08-03, narrowed 2026-08-14.** Sensitive paths (`policies/`,
+`scripts/qa-*`, `CODEOWNERS`, workflows, gateway config …) used to REFUSE the
+approval with `exit 11`. Most no longer do — the wrapper approves and prints one or
+more `⚠️ ALERT — …` lines instead. A red **advisory** CI check (deploy pre-flight and
+friends, which fail on live server drift rather than on the diff) does the same.
+
+The exception is the **authority surface** — `policies/qa-approval-policy.json`,
+`scripts/qa-pr-approve.sh`, `CODEOWNERS` — which went back to refusing (`exit 11`) on
+2026-08-14. Those files decide who may approve, and the bot posts as `adk47`, the
+universal code owner, so without that refusal a PR widening the bot's own authority
+would satisfy the code-owner gate by itself. Everything else keeps alerting.
 
 Those alert lines are now the ONLY signal that something needing eyes was
 auto-approved, so treat them as review content, not as log noise:
