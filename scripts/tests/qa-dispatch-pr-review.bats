@@ -210,7 +210,7 @@ JSON
   {"id":"NEVERRUN","name":"qa-autoreview-pr-Muso-AI-hydra-998","createdAtMs":$old_created_ms,"state":{"nextRunAtMs":$now_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'NEVERRUN' "$STUB_ARGV"
   [ ! -s "$STUB_CALLS" ] || [ "$(grep -c '^cron-rm$' "$STUB_CALLS")" -eq 0 ]
@@ -226,7 +226,7 @@ JSON
   {"id":"RUNNINGQA","name":"qa-autoreview-pr-Muso-AI-hydra-997","status":"running","state":{"runningAtMs":$running_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'RUNNINGQA' "$STUB_ARGV"
   [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
@@ -241,7 +241,7 @@ JSON
   {"id":"RECENTQA","name":"qa-autoreview-pr-Muso-AI-hydra-996","state":{"lastRunAtMs":$recent_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'RECENTQA' "$STUB_ARGV"
 }
@@ -256,7 +256,7 @@ JSON
   {"id":"RERUNQA","name":"qa-autoreview-pr-Muso-AI-hydra-994","state":{"lastRunAtMs":$old_done_ms,"runningAtMs":$running_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'RERUNQA' "$STUB_ARGV"
   [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
@@ -271,7 +271,7 @@ JSON
   {"id":"STATUSRUNQA","name":"qa-autoreview-pr-Muso-AI-hydra-993","status":"running","state":{"lastRunAtMs":$old_done_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'STATUSRUNQA' "$STUB_ARGV"
   [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
@@ -286,7 +286,7 @@ JSON
   {"id":"OTHERCRON","name":"some-other-cron","state":{"lastRunAtMs":$old_done_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'OTHERCRON' "$STUB_ARGV"
 }
@@ -300,7 +300,7 @@ JSON
   {"id":"WOULDBESTALE","name":"qa-autoreview-pr-Muso-AI-hydra-995","state":{"lastRunAtMs":$old_done_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'WOULDBESTALE' "$STUB_ARGV"
   [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
@@ -308,7 +308,7 @@ JSON
 
 @test "cron list returns garbage -> no rm calls, dispatch still succeeds" {
   export STUB_LIST_GARBAGE=1
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
   [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
@@ -316,14 +316,14 @@ JSON
 
 @test "cron list fails outright -> sweep does not fail the dispatch" {
   export STUB_LIST_FAIL=1
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
   [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
 }
 
 @test "cron list is called with --all on BOTH the idempotency and stale-sweep calls" {
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   # Two `cron list` invocations happen per dispatch (idempotency cleanup, then
   # the stale sweep) -- both must carry --all, or a disabled row is invisible
