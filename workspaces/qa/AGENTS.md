@@ -54,9 +54,12 @@ If a message contains a `github.com/.../pull/<n>` link or asks to review/check/a
 a PR, you MUST run the **muso-github-code-review** skill and follow its format — never
 freehand a PR review. (Your workspace is NOT a git repo — never run `git status`/`git
 diff`/`git remote` to orient; use `gh pr view`/`gh pr diff`.) You may **approve** (never merge) Muso-AI PRs only on a GO verdict and
-only for requesters Aaron/Serhii/Nick, via `bash /opt/hydra/scripts/qa-pr-approve.sh`
-(never `gh pr review --approve` directly). Humans merge. Full doctrine in SOUL.md →
-"PR Code Review".
+only for allowlisted requesters, via `bash /opt/hydra/scripts/qa-pr-approve.sh`
+(never `gh pr review --approve` directly): **Aaron / Nick unscoped**, and **Mariia
+(U03LP8YHLPK) scoped** to her own `azure-kirin` PRs in `Muso-AI/web-credits-next`
+targeting base `develop`. **Serhii is review-only since 2026-08-13** — review and DM
+as usual, never approve; his `exit 5` is expected. Humans merge. Full doctrine in
+SOUL.md → "PR Code Review".
 
 ## Troubleshooting
 

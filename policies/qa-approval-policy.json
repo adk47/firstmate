@@ -26,7 +26,28 @@
     "",
     "If that turns out to be too much, the fix is to list the specific path under",
     "sensitive_paths_blocking (which still refuses, exit 11) \u2014 NOT to restore a",
-    "blanket refusal, which is what made the bot unusable for this team."
+    "blanket refusal, which is what made the bot unusable for this team.",
+    "",
+    "NARROWED 2026-08-14: it turned out to be too much, so the prescribed fix above",
+    "is now applied \u2014 to the AUTHORITY SURFACE only, not to the whole alert list.",
+    "docs/reference/GOVERNANCE.md is Tier 3 Aaron-only for the security surface, and",
+    "its operative test is functional: 'if a change would let anyone do something",
+    "they could not do before, it is security surface'. Widening this policy or the",
+    "approval allowlist is exactly that. The bot posts as adk47, which IS the",
+    "universal code owner (see the note above), so WITHOUT a hard gate its approval",
+    "satisfies require_code_owner_reviews and an allowlist widening lands with no",
+    "Aaron in the loop \u2014 the self-reference the 2026-08-03 change knowingly traded",
+    "away. Five paths now REFUSE (exit 11) so a human, not the bot, approves them:",
+    "qa-approval-policy.json and qa-pr-approve.sh (they decide WHO may approve) and",
+    "the three CODEOWNERS spellings (they decide who satisfies the code-owner gate).",
+    "",
+    "Everything else in sensitive_paths stays ALERT-ONLY and is deliberately NOT",
+    "listed here \u2014 deploy.sh, qa-gh.sh, scripts/lib/qa-*.sh, the review skill, the",
+    "workflows. Those are the paths whose blanket refusal made the bot unusable;",
+    "they do not widen the bot's authority, so they do not belong in this key.",
+    "Consequence, and it is the intended one: a PR editing this file or",
+    "qa-pr-approve.sh can no longer be auto-approved \u2014 including the PR that",
+    "introduced this very narrowing."
   ],
   "version": 1,
   "identity": {
@@ -46,7 +67,15 @@
       "Deploy pre-flight"
     ]
   },
-  "sensitive_paths_blocking": {},
+  "sensitive_paths_blocking": {
+    "Muso-AI/hydra": [
+      "policies/qa-approval-policy.json",
+      "scripts/qa-pr-approve.sh",
+      "CODEOWNERS",
+      ".github/CODEOWNERS",
+      "docs/CODEOWNERS"
+    ]
+  },
   "require_human_codeowner_repos": [
     "Muso-AI/hydra",
     "Muso-AI/industry-data-processing"
@@ -88,7 +117,7 @@
     "author_deny": "PR authors the bot must never approve. 'adk47' preserves today's behaviour exactly: GitHub's self-approval block used to make this impossible, and a dedicated identity would silently remove it. Flipping this to [] is a deliberate separate decision, not a side effect of the identity migration.",
     "require_human_codeowner_repos": "Repos where require_code_owner_reviews is on. This changes the bot's reporting ONLY where the repo is ALSO in identity.app_repos: a GitHub App can never be a CODEOWNER (CODEOWNERS takes users and teams only), so there the approval counts toward the required review but does NOT unblock merge. With app_repos empty (today) every call runs as the host account, which IS the universal code owner under hydra's CODEOWNERS \u2014 so the approval DOES clear the gate, verified on hydra#786 and #777 (both APPROVED, then mergeStateStatus CLEAN). The skill must relay the wrapper's post-check reviewDecision/mergeStateStatus rather than predict either outcome; asserting 'still needs a human CODEOWNER' when it does not was the friction removed on 2026-08-03.",
     "sensitive_paths": "Prefix-matched against the PR's changed files. A hit ALERTS and the approval proceeds (Notice 3b) \u2014 it stopped refusing on 2026-08-03; see the _comment block. The list must cover every input that defines the bot's own review authority, not just the executables: skills-all/muso-github-code-review/ is included because a PR editing the reviewer SKILL to skip the lens workflow, or to post qa-review=success directly, weakens the gate just as effectively as editing qa-pr-approve.sh. scripts/check-blast-radius.sh is included for the same reason \u2014 it defines what counts as high-impact. Since a hit no longer blocks, the ALERT is the entire protection: if the reviewing skill stops relaying it, these entries do nothing.",
-    "sensitive_paths_blocking": "Same prefix matching, but a hit REFUSES (exit 11). Ships EMPTY: nothing blocks unless a path is deliberately opted back in after the 2026-08-03 change. This is the only surviving hard path gate, so the reader fails CLOSED \u2014 an unreadable or malformed key refuses rather than degrading to 'nothing blocks'.",
+    "sensitive_paths_blocking": "Same prefix matching, but a hit REFUSES (exit 11). Carries the AUTHORITY SURFACE since 2026-08-14 \u2014 the files that decide who may approve (this policy, qa-pr-approve.sh) and who satisfies the code-owner gate (the three CODEOWNERS spellings). Everything else in sensitive_paths stays alert-only. This is the only surviving hard path gate, so the reader fails CLOSED \u2014 an unreadable or malformed key refuses rather than degrading to 'nothing blocks', and because the key is now non-empty an unverifiable changed-file list also refuses.",
     "advisory_checks": "Per-repo, like every sibling list here. A check whose name STARTS WITH one of these is excluded from Guard 6's CI-green refusal and alerted on instead \u2014 for gates that test live server state rather than the diff (the deploy pre-flight rsync dry-run reds on pre-existing /opt/hydra drift). Matching is startswith, NOT contains: .github/workflows/ is only alert-guarded now, so a substring test would let a PR add a job whose name merely contains the token and buy itself an exemption. Entries must be real CHECK names (job names or status contexts) \u2014 a gate that is a STEP inside another job cannot be named here, because the rollup only ever shows the enclosing job (that job is 'validate', which must never be exempted)."
   }
 }

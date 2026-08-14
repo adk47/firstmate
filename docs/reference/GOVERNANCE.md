@@ -228,12 +228,14 @@ These are GitHub server-side settings (classic branch protection), **not** in-re
   remains (exit 9). Because the required code-owner approval (`* @adk47`) is what gates
   merge, withholding the approval blocks the merge.
 - **`qa-review` is intentionally NOT a required status check.** Required checks are
-  repo-wide, but the QA auto-review only runs on `nsollazzo` PRs (`qa-autoreview.yml`),
-  so requiring `qa-review` would permanently block every other contributor's PR on a
-  status that is never reported. Revisit only if/when QA reviews **all** PRs to `main`
-  (scope expansion — out of scope here). Until then the red status is a visible signal +
-  defense-in-depth, and the wrapper refusal (no approval) is the real merge block for
-  Nick's PRs.
+  repo-wide, but `qa-autoreview.yml` reviews a PR only when its author has a Slack-UID
+  mapping in `scripts/lib/qa-author-slack-uid.sh` — an UNMAPPED author's PR is skipped,
+  so requiring `qa-review` would permanently block it on a status that is never reported.
+  (The workflow does post `qa-review=failure` on that skip, naming the missing mapping,
+  so the remaining gap is narrow.) Revisit once every contributor to `main` is mapped —
+  the old blanket claim that QA "only runs on `nsollazzo` PRs" stopped being true on
+  2026-07-10 and is no longer a reason on its own. Until then the red status is a visible
+  signal + defense-in-depth, and the wrapper refusal (no approval) is the real merge block.
 
 ---
 

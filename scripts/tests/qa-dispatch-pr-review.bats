@@ -11,6 +11,7 @@ HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 SCRIPT="$HYDRA_REPO/scripts/qa-dispatch-pr-review.sh"
 
 GOOD_SHA="0f175183abf"   # 11 hex chars — valid
+NICK="U0AL36NADEY"       # a requester UID; REQUIRED now — the script has no default
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
@@ -51,7 +52,7 @@ STUB
 teardown() { rm -rf "$TEST_TMPDIR"; }
 
 @test "happy path: dispatches one cron add for the qa agent on main" {
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
   # targets the qa agent, the main profile, and the per-PR job name (now
@@ -63,8 +64,8 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   grep -qx -- '--delete-after-run' "$STUB_ARGV"
 }
 
-@test "happy path: message carries the PR URL + AUTO-REVIEW + Nick's requester UID" {
-  run "$SCRIPT" 123 "$GOOD_SHA"
+@test "happy path: message carries the PR URL + AUTO-REVIEW + the passed requester UID" {
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   grep -q 'AUTO-REVIEW' "$STUB_ARGV"
   grep -q 'github.com/Muso-AI/hydra/pull/123' "$STUB_ARGV"
@@ -72,11 +73,29 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 }
 
 @test "happy path: opening DM routed through the per-PR thread helper" {
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   # The opening note goes through qa-pr-thread-dm.sh (threads re-reviews), not a
   # bare qa-slack-dm.sh call with an inline "reviewing PR" string.
   grep -q 'qa-pr-thread-dm.sh Muso-AI/hydra 123 U0AL36NADEY' "$STUB_ARGV"
+}
+
+@test "requester UID absent from BOTH the 4th arg and the env -> exit 2, no dispatch" {
+  # B1: the dispatcher used to default this to Nick's UNSCOPED UID, so a two-arg
+  # manual dispatch of ANY author's PR silently carried his approval authority and
+  # logged him as the requester. There must be no default at all.
+  run env -u QA_REVIEW_REQUESTER_UID "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 2 ]
+  echo "$output" | grep -q 'requester-uid is REQUIRED'
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "the removed default UID appears nowhere in the dispatcher as a fallback" {
+  # Pins the fix itself: a literal personal UID on the REQUESTER_UID assignment is
+  # the exact shape that regressed. (The UID may legitimately appear in comments.)
+  if grep -qE '^REQUESTER_UID=.*U[A-Z0-9]{6,}' "$SCRIPT"; then
+    echo "REQUESTER_UID still carries a hardcoded personal Slack UID fallback" >&2; false
+  fi
 }
 
 @test "missing args -> usage exit 2, no dispatch" {
@@ -151,7 +170,7 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 }
 
 @test "fallback delivery disabled via --no-deliver (skill owns Slack delivery)" {
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   # --no-deliver is the actual off-switch for the runner's fallback delivery. Without
   # it the isolated cron's final text delivery fails with "Delivering to Slack requires
@@ -176,7 +195,7 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   {"id":"OLDDONE","name":"qa-autoreview-pr-Muso-AI-hydra-999","state":{"lastRunAtMs":$old_done_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   grep -qx 'OLDDONE' "$STUB_ARGV"
   [ "$(grep -c '^cron-rm$' "$STUB_CALLS")" -eq 1 ]
@@ -191,7 +210,7 @@ JSON
   {"id":"NEVERRUN","name":"qa-autoreview-pr-Muso-AI-hydra-998","createdAtMs":$old_created_ms,"state":{"nextRunAtMs":$now_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'NEVERRUN' "$STUB_ARGV"
   [ ! -s "$STUB_CALLS" ] || [ "$(grep -c '^cron-rm$' "$STUB_CALLS")" -eq 0 ]
@@ -207,7 +226,7 @@ JSON
   {"id":"RUNNINGQA","name":"qa-autoreview-pr-Muso-AI-hydra-997","status":"running","state":{"runningAtMs":$running_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'RUNNINGQA' "$STUB_ARGV"
   [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
@@ -222,7 +241,7 @@ JSON
   {"id":"RECENTQA","name":"qa-autoreview-pr-Muso-AI-hydra-996","state":{"lastRunAtMs":$recent_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'RECENTQA' "$STUB_ARGV"
 }
@@ -237,7 +256,7 @@ JSON
   {"id":"RERUNQA","name":"qa-autoreview-pr-Muso-AI-hydra-994","state":{"lastRunAtMs":$old_done_ms,"runningAtMs":$running_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'RERUNQA' "$STUB_ARGV"
   [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
@@ -252,7 +271,7 @@ JSON
   {"id":"STATUSRUNQA","name":"qa-autoreview-pr-Muso-AI-hydra-993","status":"running","state":{"lastRunAtMs":$old_done_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'STATUSRUNQA' "$STUB_ARGV"
   [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
@@ -267,7 +286,7 @@ JSON
   {"id":"OTHERCRON","name":"some-other-cron","state":{"lastRunAtMs":$old_done_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'OTHERCRON' "$STUB_ARGV"
 }
@@ -281,7 +300,7 @@ JSON
   {"id":"WOULDBESTALE","name":"qa-autoreview-pr-Muso-AI-hydra-995","state":{"lastRunAtMs":$old_done_ms}}
 ]}
 JSON
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   ! grep -qx 'WOULDBESTALE' "$STUB_ARGV"
   [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
@@ -289,7 +308,7 @@ JSON
 
 @test "cron list returns garbage -> no rm calls, dispatch still succeeds" {
   export STUB_LIST_GARBAGE=1
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
   [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
@@ -297,14 +316,14 @@ JSON
 
 @test "cron list fails outright -> sweep does not fail the dispatch" {
   export STUB_LIST_FAIL=1
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   [ "$(grep -c '^cron-rm$' "$STUB_CALLS" 2>/dev/null)" -eq 0 ]
   [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
 }
 
 @test "cron list is called with --all on BOTH the idempotency and stale-sweep calls" {
-  run "$SCRIPT" 123 "$GOOD_SHA"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
   # Two `cron list` invocations happen per dispatch (idempotency cleanup, then
   # the stale sweep) -- both must carry --all, or a disabled row is invisible

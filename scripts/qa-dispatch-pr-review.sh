@@ -22,19 +22,25 @@ set -euo pipefail
 # 274 runs — so the historical isolated-tool-loss concern does not apply on this
 # build (verified on node-8, not assumed).
 #
-# Scope: hydra PRs (default) AND any other Muso-AI repo passed explicitly — e.g.
-# Muso-AI/ads-manager via .github/workflows/external-pr-review.yml. The repo and
-# the requester/Slack-DM UID are now parameters (positional or env); when omitted
-# they default to hydra + Nick, preserving the original single-repo behavior. The
-# requester UID is BOTH the qa-pr-approve allowlist gate and the Slack DM target,
-# so a caller that wants the bot to approve must pass an allowlisted UID.
+# Scope: hydra PRs (default repo) AND any other Muso-AI repo passed explicitly —
+# e.g. Muso-AI/ads-manager via .github/workflows/external-pr-review.yml.
+#
+# The requester UID is REQUIRED and has NO default. It is BOTH the qa-pr-approve
+# allowlist gate and the Slack DM target, so a baked-in default would hand every
+# manually-dispatched review the approval authority of whoever that default names
+# — a two-arg `qa-dispatch-pr-review.sh <PR> <SHA>` on somebody else's PR would
+# silently confer it AND write a false requester into the audit log, defeating any
+# removal from the allowlist. The caller must resolve the PR's real author to a
+# UID (scripts/lib/qa-author-slack-uid.sh) and pass it; both workflow callers do.
 #
 # Usage:
-#   qa-dispatch-pr-review.sh <pr-number> <head-sha> [repo] [requester-uid]
+#   qa-dispatch-pr-review.sh <pr-number> <head-sha> [repo] <requester-uid>
+#   (requester-uid may come from QA_REVIEW_REQUESTER_UID instead of the 4th arg;
+#    absent from BOTH is a hard exit 2, never a default.)
 #
 # Args / env overrides (positional wins over env; env mainly for tests):
-#   repo           ${QA_REVIEW_REPO:-Muso-AI/hydra}        (must be Muso-AI/<name>)
-#   requester-uid  ${QA_REVIEW_REQUESTER_UID:-U0AL36NADEY} (Slack UID; approve+DM)
+#   repo           ${QA_REVIEW_REPO:-Muso-AI/hydra}   (must be Muso-AI/<name>)
+#   requester-uid  $QA_REVIEW_REQUESTER_UID           (Slack UID; approve+DM) REQUIRED
 #   OPENCLAW       openclaw binary (default: openclaw)
 # (No delivery-target override: the cron uses --no-deliver and the skill owns all
 # Slack delivery itself, so there is nothing for the cron to target.)
@@ -50,12 +56,14 @@ die() { echo "qa-dispatch-pr-review: $2" >&2; exit "$1"; }
 # --- Arg validation: fail loud. A silent no-op dispatcher is worse than none
 #     (cf. dispatch-cv-batch.sh --help typo that fired 500 real writes). --------
 [ "$#" -ge 2 ] && [ "$#" -le 4 ] \
-  || die 2 "usage: qa-dispatch-pr-review.sh <pr-number> <head-sha> [repo] [requester-uid]"
+  || die 2 "usage: qa-dispatch-pr-review.sh <pr-number> <head-sha> [repo] <requester-uid>"
 pr="$1"
 sha="$2"
-# repo/requester are optional positionals; fall back to env, then the hydra defaults.
+# repo falls back to env, then the hydra default. The requester does NOT fall back
+# to any person: see the header — an approval-bearing default is a silent grant.
 REPO="${3:-${QA_REVIEW_REPO:-Muso-AI/hydra}}"
-REQUESTER_UID="${4:-${QA_REVIEW_REQUESTER_UID:-U0AL36NADEY}}"
+REQUESTER_UID="${4:-${QA_REVIEW_REQUESTER_UID:-}}"
+[ -n "$REQUESTER_UID" ] || die 2 "requester-uid is REQUIRED — pass it as the 4th argument or set QA_REVIEW_REQUESTER_UID. There is deliberately NO default: this UID is both the qa-pr-approve allowlist gate and the DM target, so defaulting it would confer one person's approval authority on any PR dispatched by hand and log them as the requester. Resolve the PR's real author with scripts/lib/qa-author-slack-uid.sh."
 [[ "$pr" =~ ^[0-9]+$ ]] || die 2 "pr-number must be numeric, got '$pr'."
 [[ "$sha" =~ ^[0-9a-fA-F]{7,40}$ ]] || die 2 "head-sha must be a 7-40 char hex sha, got '$sha'."
 # Only Muso-AI repos: matches the owner guard in qa-pr-approve.sh, and keeps a

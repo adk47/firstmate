@@ -252,6 +252,7 @@ emit_dry_run_response() {
 #   dry_run_intercept   — OPS_DRY_RUN=1 write short-circuit fired
 #   ok                  — real API returned 2xx
 #   http_error          — real API returned non-2xx
+#   transport_error     — curl failed before an HTTP response was available
 #
 # Failure mode: if we can't write the line, emit a LOUD stderr warning but
 # never break the main call. Same philosophy as write_dry_run_audit.
@@ -260,6 +261,7 @@ emit_dry_run_response() {
 write_credit_request_result() {
     local method="$1" path="$2" body="${3:-}"
     local outcome="$4" http_status="${5:-}" error="${6:-}"
+    local transport_attempts="${7:-}" transport_retry_exits="${8:-[]}"
 
     # Scope: only credit-request writes.
     [[ "$path" == /admin/credit-requests* ]] || return 0
@@ -338,6 +340,8 @@ write_credit_request_result() {
         --arg outcome "$outcome" \
         --arg http_status "$http_status" \
         --arg error "$error" \
+        --arg transport_attempts "$transport_attempts" \
+        --argjson transport_retry_exits "$transport_retry_exits" \
         --arg requester "${REQUESTER_EMAIL:-}" \
         --arg flag_reason "${OPS_FLAG_REASON:-}" \
         --arg credited_name "${OPS_CREDITED_NAME:-}" \
@@ -353,6 +357,8 @@ write_credit_request_result() {
             outcome:$outcome,
             http_status: (if $http_status == "" then null else ($http_status | tonumber? // $http_status) end),
             error:     (if $error     == "" then null else $error     end),
+            transport_attempts: (if $transport_attempts == "" then null else ($transport_attempts | tonumber) end),
+            transport_retry_exits:$transport_retry_exits,
             flag_reason: (if $flag_reason == "" then null else $flag_reason end),
             credited_name: (if $credited_name == "" then null else $credited_name end),
             track_title: (if $track_title == "" then null else $track_title end),
@@ -366,6 +372,88 @@ write_credit_request_result() {
         echo "WARN: could not append to ${results_path}; results line LOST for ${method_uc} ${path}" >&2
         return 0
     fi
+}
+
+# Per-row truth floor for the BULK credit-request PUT.
+#
+# The backend has reported per-row outcomes since 2026-07-27 (core-backend
+# #9226/#9227): a 200 can still name rows it refused, and a 409 is the "some
+# rows were refused" answer whose `updatedIds` really did persist. Classifying
+# the whole `requestIds` array from the HTTP code alone therefore writes a
+# truth floor that is wrong in BOTH directions — and compute-run-summary.sh
+# sums `request_ids | length` per outcome, so a partially successful 409
+# reconciles as zero landed and can trip `run_finished_silent_failure` while
+# apply-verdicts.sh (which does read the per-row report) calls those same rows
+# landed. Same response, two contradictory operator-facing stories.
+#
+# So: when the response is attributable, split the ledger into one `ok` row for
+# the ids the backend named and one `http_error` row for the rest. When it is
+# NOT attributable — a 200/409 whose body carries no usable `updatedIds` — the
+# write may well have landed but we cannot say for WHICH rows, which is a
+# different problem from a clean transport failure: record it as
+# `unattributable_response` rather than inferring success from a missing field.
+# `landed` in compute-run-summary.sh does not include that outcome, so those
+# rows show up as attempted-but-not-landed and surface loudly.
+#
+# Returns 0 when it wrote the ledger, 1 when the caller must fall back to
+# whole-array classification (any non-bulk-PUT, or a status we cannot read a
+# row report from).
+write_credit_request_result_per_row() {
+    local method="$1" path="$2" body="${3:-}" http_status="$4" response_body="${5:-}"
+    # Transport telemetry travels with every row this writer emits, so the
+    # bulk-PUT path keeps the preconnect-retry evidence the whole-array
+    # classification used to carry.
+    local transport_attempts="${6:-}" transport_retry_exits="${7:-[]}"
+
+    [[ "$path" == /admin/credit-requests* ]] || return 1
+    local method_uc
+    method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    [[ "$method_uc" == "PUT" ]] || return 1
+    [[ "$http_status" == "200" || "$http_status" == "409" ]] || return 1
+
+    local attempted
+    attempted=$(printf '%s' "$body" | jq -c 'select((.requestIds | type) == "array") | .requestIds' 2>/dev/null || true)
+    [[ -n "$attempted" ]] || return 1
+    [[ "$(printf '%s' "$attempted" | jq 'length')" -gt 0 ]] || return 1
+
+    local intended_status
+    intended_status=$(printf '%s' "$body" | jq -r '.status // ""' 2>/dev/null || echo '')
+
+    # A success nests the report under .data; the error handler spreads it
+    # across the top level. Both shapes, same field. (Mirrors the parse in
+    # apply-verdicts.sh — the two must never disagree about what
+    # "attributable" means.)
+    local updated
+    updated=$(printf '%s' "$response_body" | jq -c '
+        (if type == "object" then (if has("data") then .data else . end) else null end)
+        | select(type == "object" and (.updatedIds | type) == "array")
+        | .updatedIds' 2>/dev/null || true)
+
+    if [[ -z "$updated" ]]; then
+        write_credit_request_result "$method" "$path" "$body" \
+            "unattributable_response" "$http_status" "$response_body" \
+            "$transport_attempts" "$transport_retry_exits"
+        return 0
+    fi
+
+    local landed refused
+    # Intersection in $attempted order; `-` is safe here because ids are unique.
+    landed=$(jq -nc --argjson a "$attempted" --argjson u "$updated" '$a - ($a - $u)')
+    refused=$(jq -nc --argjson a "$attempted" --argjson u "$updated" '$a - $u')
+
+    if [[ "$(printf '%s' "$landed" | jq 'length')" -gt 0 ]]; then
+        write_credit_request_result "$method" "$path" \
+            "$(jq -nc --argjson ids "$landed" --arg st "$intended_status" '{requestIds:$ids, status:$st}')" \
+            "ok" "$http_status" "" \
+            "$transport_attempts" "$transport_retry_exits"
+    fi
+    if [[ "$(printf '%s' "$refused" | jq 'length')" -gt 0 ]]; then
+        write_credit_request_result "$method" "$path" \
+            "$(jq -nc --argjson ids "$refused" --arg st "$intended_status" '{requestIds:$ids, status:$st}')" \
+            "http_error" "$http_status" "$response_body" \
+            "$transport_attempts" "$transport_retry_exits"
+    fi
+    return 0
 }
 
 # Persist fraud routing BEFORE the HTTP request. Fraud-routed rows use the
@@ -517,6 +605,67 @@ check_env() {
     [[ -n "${MUSO_ADMIN_PASSWORD:-}" ]] || die "MUSO_ADMIN_PASSWORD not set"
 }
 
+# Run curl with the opt-in pre-connect retry policy used by the Lobster bulk
+# PUT path. Results are returned through CURL_RETRY_* globals so callers can
+# preserve curl's exit code and emit their own domain-specific envelope.
+CURL_RETRY_RESPONSE=""
+CURL_RETRY_RC=0
+CURL_RETRY_ATTEMPTS=0
+CURL_RETRY_EXITS='[]'
+run_curl_with_preconnect_retry() {
+    local max_preconnect_retries="${MUSO_ADMIN_PRECONNECT_RETRIES:-0}"
+    local retry_delay_seconds="${MUSO_ADMIN_RETRY_DELAY_SECONDS:-2}"
+
+    CURL_RETRY_RESPONSE=""
+    CURL_RETRY_RC=0
+    CURL_RETRY_ATTEMPTS=0
+    CURL_RETRY_EXITS='[]'
+
+    if ! [[ "$max_preconnect_retries" =~ ^[01]$ ]]; then
+        echo "muso-admin-api: MUSO_ADMIN_PRECONNECT_RETRIES must be 0 or 1" >&2
+        CURL_RETRY_RC=2
+        return 2
+    fi
+    if ! [[ "$retry_delay_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "muso-admin-api: MUSO_ADMIN_RETRY_DELAY_SECONDS must be a non-negative number" >&2
+        CURL_RETRY_RC=2
+        return 2
+    fi
+
+    while true; do
+        CURL_RETRY_ATTEMPTS=$((CURL_RETRY_ATTEMPTS + 1))
+        if CURL_RETRY_RESPONSE=$("$@"); then
+            CURL_RETRY_RC=0
+            return 0
+        else
+            CURL_RETRY_RC=$?
+        fi
+
+        case "$CURL_RETRY_RC" in
+            5|6|7)
+                if (( CURL_RETRY_ATTEMPTS <= max_preconnect_retries )); then
+                    CURL_RETRY_EXITS=$(jq -nc \
+                        --argjson exits "$CURL_RETRY_EXITS" \
+                        --argjson rc "$CURL_RETRY_RC" \
+                        '$exits + [$rc]')
+                    if [[ "$retry_delay_seconds" != "0" ]]; then
+                        sleep "$retry_delay_seconds"
+                    fi
+                    continue
+                fi
+                ;;
+        esac
+        return "$CURL_RETRY_RC"
+    done
+}
+
+is_curl_transport_exit() {
+    case "$1" in
+        5|6|7|18|28|35|52|55|56|60) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 get_token() {
     # Return cached token if fresh
     if [[ -f "$TOKEN_CACHE" ]]; then
@@ -531,11 +680,24 @@ get_token() {
     fi
 
     # Login and cache
-    local resp
-    resp=$(curl -sf -X POST "${MUSO_API_URL}/admin/user/login" \
+    local resp login_rc
+    if run_curl_with_preconnect_retry curl -sf -X POST "${MUSO_API_URL}/admin/user/login" \
         -H "Content-Type: application/json" \
-        -d "{\"email\":\"${MUSO_ADMIN_EMAIL}\",\"password\":\"${MUSO_ADMIN_PASSWORD}\"}" 2>&1) \
-        || die "Login failed: $resp"
+        -d "{\"email\":\"${MUSO_ADMIN_EMAIL}\",\"password\":\"${MUSO_ADMIN_PASSWORD}\"}"; then
+        resp="$CURL_RETRY_RESPONSE"
+    else
+        login_rc="$CURL_RETRY_RC"
+        echo "ERROR: Login failed: curl_exit_${login_rc}" >&2
+        if is_curl_transport_exit "$login_rc"; then
+            jq -nc \
+                --argjson rc "$login_rc" \
+                --argjson attempts "$CURL_RETRY_ATTEMPTS" \
+                --argjson retry_exits "$CURL_RETRY_EXITS" \
+                '{http_status:null, body:null,
+                  transport_error:{stage:"login", curl_exit:$rc, attempts:$attempts, retry_exits:$retry_exits}}'
+        fi
+        return "$login_rc"
+    fi
 
     local token
     token=$(echo "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('authentication',{}).get('accessToken','') or d.get('data',{}).get('user',{}).get('accessToken','') or d.get('token',''))")
@@ -551,8 +713,16 @@ get_token() {
 
 cmd_login() {
     check_env
-    local token
-    token=$(get_token)
+    local token token_rc
+    if token=$(get_token); then
+        token_rc=0
+    else
+        token_rc=$?
+    fi
+    if (( token_rc != 0 )); then
+        [[ -n "$token" ]] && printf '%s\n' "$token"
+        return "$token_rc"
+    fi
     echo "OK: Token acquired (${#token} chars). Cached at $TOKEN_CACHE"
 }
 
@@ -945,6 +1115,40 @@ _tier0_audit_recompute_gate() {
     return 0
 }
 
+is_uvn_popularity_cron_approval() {
+    local method="$1" path="$2" body="$3"
+
+    # Standing authorization for the deterministic under-30 cron. Keep this
+    # narrower than the ordinary approve surface: the dedicated service
+    # identity must opt in, use the conditional endpoint, transition only
+    # UVN -> approved, and submit one unique UUID batch no larger than the
+    # cron's own 50-row chunk. Any near miss falls through to the normal
+    # evidence gate below.
+    [[ "${UVN_POPULARITY_CRON:-0}" == "1" ]] || return 1
+    [[ "${REQUESTER_EMAIL:-}" == "uvn-popularity-cron@hydra-ops" ]] || return 1
+    [[ "$method" == "PUT" ]] || return 1
+    [[ "$path" == "/admin/credit-requests/conditional-status" ]] || return 1
+
+    printf '%s' "$body" | jq -e '
+        type == "object"
+        and ((keys | sort) == ["expectedStatus", "requestIds", "status"])
+        and .status == "approved"
+        and .expectedStatus == "user_verification_needed"
+        and (
+            .requestIds as $ids
+            | ($ids | type) == "array"
+            and ($ids | length) > 0
+            and ($ids | length) <= 50
+            and all($ids[];
+                type == "string"
+                and length == 36
+                and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+            )
+            and (($ids | map(ascii_downcase) | unique | length) == ($ids | length))
+        )
+    ' >/dev/null 2>&1
+}
+
 enforce_credit_approve_gate() {
     local method="$1" path="$2" body="$3"
 
@@ -974,6 +1178,10 @@ enforce_credit_approve_gate() {
     status_val="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)"
     if [[ "$status_val" != "approved" ]] \
         && ! echo "$body" | grep -q '"status"[[:space:]]*:[[:space:]]*"approved"'; then
+        return 0
+    fi
+
+    if is_uvn_popularity_cron_approval "$method" "$path" "$body"; then
         return 0
     fi
 
@@ -2297,8 +2505,25 @@ EOF
         return 1
     fi
 
-    local token
-    token=$(get_token)
+    local token token_rc token_json token_transport_exit token_attempts token_retry_exits
+    if token=$(get_token); then
+        token_rc=0
+    else
+        token_rc=$?
+    fi
+    if (( token_rc != 0 )); then
+        token_json=$(printf '%s\n' "$token" | jq -Rrc 'fromjson? // empty' | tail -1)
+        token_transport_exit=$(echo "$token_json" | jq -r '.transport_error.curl_exit // empty' 2>/dev/null || true)
+        if [[ "$token_transport_exit" =~ ^[0-9]+$ ]]; then
+            token_attempts=$(echo "$token_json" | jq -r '.transport_error.attempts // 1')
+            token_retry_exits=$(echo "$token_json" | jq -c '.transport_error.retry_exits // []')
+            write_credit_request_result "$method" "$path" "$body" \
+                "transport_error" "" "login_curl_exit_${token_transport_exit}" \
+                "$token_attempts" "$token_retry_exits"
+            printf '%s\n' "$token_json"
+        fi
+        return "$token_rc"
+    fi
 
     local -a curl_args=(
         -s -w "\n%{http_code}"
@@ -2318,8 +2543,37 @@ EOF
         curl_args+=(-d "$body")
     fi
 
-    local response
-    response=$(curl "${curl_args[@]}")
+    # Retries are opt-in because this wrapper serves non-idempotent endpoints
+    # too. Only curl failures that prove no connection was established are
+    # repeated. Timeouts and resets remain delivery-ambiguous and are surfaced
+    # without retry.
+    local response="" curl_rc=0 transport_attempts=0 transport_retry_exits='[]'
+    if run_curl_with_preconnect_retry curl "${curl_args[@]}"; then
+        response="$CURL_RETRY_RESPONSE"
+    else
+        curl_rc="$CURL_RETRY_RC"
+        transport_attempts="$CURL_RETRY_ATTEMPTS"
+        transport_retry_exits="$CURL_RETRY_EXITS"
+
+        # Invalid retry configuration failed before curl ran; surface the
+        # configuration error without misclassifying it as transport.
+        if (( transport_attempts == 0 )); then
+            return "$curl_rc"
+        fi
+
+        write_credit_request_result "$method" "$path" "$body" \
+            "transport_error" "" "curl_exit_${curl_rc}" \
+            "$transport_attempts" "$transport_retry_exits"
+        jq -nc \
+            --argjson rc "$curl_rc" \
+            --argjson attempts "$transport_attempts" \
+            --argjson retry_exits "$transport_retry_exits" \
+            '{http_status:null, body:null,
+              transport_error:{curl_exit:$rc, attempts:$attempts, retry_exits:$retry_exits}}'
+        return "$curl_rc"
+    fi
+    transport_attempts="$CURL_RETRY_ATTEMPTS"
+    transport_retry_exits="$CURL_RETRY_EXITS"
 
     # Extract HTTP status code (last line) and body (everything else)
     local http_code
@@ -2327,21 +2581,45 @@ EOF
     local response_body
     response_body=$(echo "$response" | sed '$d')
 
-    # Truth floor: classify 2xx as `ok`, non-2xx as `http_error`. The helper
-    # self-scopes to credit-request writes, so non-credit-request paths are
+    # Truth floor. A bulk credit-request PUT carries a per-row report, so it is
+    # attributed row by row (see write_credit_request_result_per_row); every
+    # other call classifies 2xx as `ok`, non-2xx as `http_error`. The helpers
+    # self-scope to credit-request writes, so non-credit-request paths are
     # a no-op. HTTP body is included in the error field for post-mortem.
-    if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-        write_credit_request_result "$method" "$path" "$body" "ok" "$http_code" ""
-    else
-        write_credit_request_result "$method" "$path" "$body" "http_error" "$http_code" "$response_body"
+    if ! write_credit_request_result_per_row "$method" "$path" "$body" "$http_code" "$response_body" \
+            "$transport_attempts" "$transport_retry_exits"; then
+        if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+            write_credit_request_result "$method" "$path" "$body" "ok" "$http_code" "" \
+                "$transport_attempts" "$transport_retry_exits"
+        else
+            write_credit_request_result "$method" "$path" "$body" "http_error" "$http_code" "$response_body" \
+                "$transport_attempts" "$transport_retry_exits"
+        fi
     fi
 
     # Record successful merges for the reverse-direction guard.
     record_merge_call "$method" "$path" "$body" "$http_code"
 
-    # Output JSON with status
-    echo "{\"http_status\": $http_code, \"body\": $response_body}" 2>/dev/null \
-        || echo "{\"http_status\": $http_code, \"raw\": $(echo "$response_body" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}"
+    # Output a parseable envelope even when the response body is empty or is
+    # not JSON. transport_* fields let the caller distinguish a clean first
+    # attempt from a recovered pre-connect failure.
+    if [[ -n "$response_body" ]] && jq -e . >/dev/null 2>&1 <<<"$response_body"; then
+        jq -nc \
+            --arg http "$http_code" \
+            --argjson body "$response_body" \
+            --argjson attempts "$transport_attempts" \
+            --argjson retry_exits "$transport_retry_exits" \
+            '{http_status:($http | tonumber? // $http), body:$body,
+              transport_attempts:$attempts, transport_retry_exits:$retry_exits}'
+    else
+        jq -nc \
+            --arg http "$http_code" \
+            --arg raw "$response_body" \
+            --argjson attempts "$transport_attempts" \
+            --argjson retry_exits "$transport_retry_exits" \
+            '{http_status:($http | tonumber? // $http), raw:$raw,
+              transport_attempts:$attempts, transport_retry_exits:$retry_exits}'
+    fi
 }
 
 cmd_upload() {
@@ -2375,8 +2653,16 @@ cmd_upload() {
         return 0
     fi
 
-    local token
-    token=$(get_token)
+    local token token_rc
+    if token=$(get_token); then
+        token_rc=0
+    else
+        token_rc=$?
+    fi
+    if (( token_rc != 0 )); then
+        [[ -n "$token" ]] && printf '%s\n' "$token"
+        return "$token_rc"
+    fi
 
     local -a curl_args=(
         -s -w "\n%{http_code}"

@@ -112,25 +112,49 @@ skipped, so always use explicit `requestIds` for anything past `unverified`).
 Valid statuses: `pending`, `processing`, `approved`, `rejected`, `unverified`,
 `user_verification_needed`.
 
-**Transition matrix** (hard-coded per-branch in the handler — any transition
-not listed here **silently no-ops and still returns 200**):
+**Transition matrix.** The canonical list lives in ONE place in the backend —
+`core-backend/src/services/credit-requests/statusTransitions.js` — and both the
+handler's legality check and its guarded `UPDATE` read it, so the table below
+cannot drift from one half of the enforcement:
 
 | Target status              | Allowed prior statuses                                    |
 |----------------------------|-----------------------------------------------------------|
 | `approved`                 | `unverified`, `user_verification_needed`, `rejected`, `processing` |
 | `rejected` (human-only)    | `unverified`, `user_verification_needed`, `approved`, `processing` |
-| `user_verification_needed` | `unverified` ONLY                                         |
+| `user_verification_needed` | `unverified`, `rejected`                                  |
 | `unverified`               | `approved` ONLY                                           |
 | `processing`               | `unverified`, `processing`, `user_verification_needed`    |
 
-`pending` is accepted by validation but transitions nothing. **`rejected →
-user_verification_needed` is NOT in the matrix today** — it lands only when the
-2026-07-23 core-backend fix (`383f50c0d`) deploys, which also makes the response
-carry `{updated, updatedIds, skippedIds}`. Until then a rejected→UVN "restore"
-silently no-ops under a 200 (2026-07-23: 28 rows reported success while zero
-moved) — which is exactly why the readback below is mandatory.
+`pending` is accepted by validation but is in no allowed-from list, so a
+`pending` row never transitions.
 
-**Therefore: NEVER trust a 200 from this endpoint. Always read back.**
+**`approved → user_verification_needed` is refused, deliberately.** Approved
+rows exit via `unverified` (or `rejected`), the edges that publish the catalog
+delete; sending one straight to the verification screen would leave its credits
+live on the track. A sweep that tries it gets the row back as
+`illegal_transition` — it is not a bug to fix by widening the matrix.
+
+**`rejected → user_verification_needed` DOES work** (shipped 2026-07-27, PRs
+#9222/#9226 develop, #9227 master). The 2026-07-23 incident, where 28 rows
+reported success while zero moved, is closed.
+
+**Reading the response.** A status PUT reports what actually persisted:
+
+```json
+{ "updated": 2, "updatedIds": ["<id>", "<id>"],
+  "skippedIds": ["<id>"],
+  "skipped": [{"id": "<id>", "reason": "illegal_transition"}],
+  "failedIds": [] }
+```
+
+`reason` is one of `not_found`, `illegal_transition`, `lost_race`,
+`seed_refused`. **A 409 is a PARTIAL SUCCESS, not a total failure**: it means at
+least one row was refused because its catalog seed could not be published, and
+it carries the same report — the ids in `updatedIds` really did move and must
+not be re-attempted. Only `failedIds` needs retrying, after the spotify metadata
+is repaired. Never infer per-row outcomes from the status code alone.
+
+**Even so: never claim success from the response alone. Always read back.**
 After every status PUT, verify with the tested readback script (do not
 compose ad-hoc jq):
 
