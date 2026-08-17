@@ -50,6 +50,7 @@ AUDIT_ROOT = Path(os.environ.get(
 WRITE_LOCK_PATH = Path(os.environ.get("CV_CREDIT_WRITE_LOCK_PATH", "/var/lib/hydra/credit-status-writes.lock"))
 UNRESOLVED_PATH = Path(os.environ.get("UVN_UNRESOLVED_PATH", "/var/lib/hydra/uvn-under30-unresolved.json"))
 AUTOMATION_TAG = "automation:uvn-under30"
+MANUAL_HANDOFF_MARKER = "Manual review handoff recorded by the under-30 credit check."
 
 
 class RunError(RuntimeError):
@@ -137,6 +138,14 @@ def is_automation_ready_task(task: dict[str, Any]) -> bool:
     required_tags = {"hydra-action-request", "action:credit-verify", AUTOMATION_TAG}
     status = str(task.get("status", {}).get("status", "")).strip().lower()
     return status == "to do" and required_tags.issubset(tags)
+
+
+def has_manual_handoff(comments: list[dict[str, Any]]) -> bool:
+    return any(
+        MANUAL_HANDOFF_MARKER
+        in str(comment.get("comment_text") or comment.get("text_content") or "")
+        for comment in comments
+    )
 
 
 def get_task_and_comments(task_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -496,10 +505,12 @@ def run_locked(run_id: str) -> int:
         ticket_approved: list[str] = []
         failure: str | None = None
         remove_eligibility = False
+        manual_handoff_present = False
         try:
             task, comments = get_task_and_comments(task_id)
             if not is_automation_ready_task(task):
                 continue
+            manual_handoff_present = has_manual_handoff(comments)
             scanned += 1
             profile_id, scoped_ids = parse_ticket_scope(task, comments)
             rows = list_profile_requests(profile_id)
@@ -540,6 +551,19 @@ def run_locked(run_id: str) -> int:
                 current_fraud_ids = load_required_fraud_ids()
                 current_rows = list_profile_requests(profile_id)
                 assert_rows_match_scope(profile_id, scoped_ids, current_rows)
+                # Refresh the authoritative popularity values after the final
+                # ticket/fraud/request read. Only this second lookup is used for
+                # the approval decision, keeping popularity at the write edge.
+                live_by_track = {}
+                for request_id in planned_chunk:
+                    row = current_rows[request_id]
+                    track_id = row.get("spotifyTrackId")
+                    if row.get("status") != UVN or request_id in current_fraud_ids:
+                        continue
+                    if not isinstance(track_id, str) or not track_id:
+                        continue
+                    if track_id not in live_by_track:
+                        live_by_track[track_id] = spotify_lookup(track_id)
                 safe_chunk: list[str] = []
                 for request_id in planned_chunk:
                     row = current_rows[request_id]
@@ -605,20 +629,22 @@ def run_locked(run_id: str) -> int:
             remaining += 1
             failure = str(exc)
         if failure:
-            comment_written = False
-            try:
-                update_ticket(
-                    run_id,
-                    task_id,
-                    f"Automated credit check {run_id}: this ticket could not be processed safely, "
-                    "so it remains open for manual review. No credits were rejected. "
-                    f"Reason: {failure[:300]}",
-                    False,
-                )
-                changed = True
-                comment_written = True
-            except (RunError, OSError, subprocess.TimeoutExpired):
-                hard_failures += 1
+            comment_written = remove_eligibility and manual_handoff_present
+            if not comment_written:
+                marker = f" {MANUAL_HANDOFF_MARKER}" if remove_eligibility else ""
+                try:
+                    update_ticket(
+                        run_id,
+                        task_id,
+                        f"Automated credit check {run_id}: this ticket could not be processed safely, "
+                        "so it remains open for manual review. No credits were rejected. "
+                        f"Reason: {failure[:300]}{marker}",
+                        False,
+                    )
+                    changed = True
+                    comment_written = True
+                except (RunError, OSError, subprocess.TimeoutExpired):
+                    hard_failures += 1
             if remove_eligibility and comment_written:
                 try:
                     remove_automation_tag(run_id, task_id)

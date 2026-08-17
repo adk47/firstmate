@@ -128,8 +128,8 @@ def parse_ticket_scope(task: dict[str, Any], comments: Iterable[dict[str, Any]])
             if block.get("action_type") != "credit-verify":
                 raise PolicyError("structured action type is not credit-verify")
             details = block.get("details")
-            _require_automation_recommendation(details, required=False)
             added_ids = _request_ids_from_details(details, required=False)
+            _require_automation_recommendation(details, required=added_ids is not None)
             raw_update_profile = block.get("customer_profile_id")
             update_profile = None
             if raw_update_profile not in (None, ""):

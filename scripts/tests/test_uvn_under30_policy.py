@@ -41,11 +41,14 @@ def block(
     return f"---ACTION-REQUEST---\n{json.dumps(payload)}\n---END-ACTION-REQUEST---"
 
 
-def update_block(ids=None, profile=PROFILE1):
+def update_block(ids=None, profile=PROFILE1, recommendation="recommend-approve"):
+    details = {"pending_credits": [{"cr_id": value} for value in (ids or [CR2])]}
+    if recommendation is not None:
+        details["recommendation"] = recommendation
     payload = {
         "action_type": "credit-verify",
         "customer_profile_id": profile,
-        "details": {"pending_credits": [{"cr_id": value} for value in (ids or [CR2])]},
+        "details": details,
     }
     return f"---ACTION-REQUEST-UPDATE---\n{json.dumps(payload)}\n---END-ACTION-REQUEST-UPDATE---"
 
@@ -112,6 +115,13 @@ class TicketScopeTests(unittest.TestCase):
 
         self.assertEqual(profile, PROFILE1)
         self.assertEqual(ids, {CR1})
+
+    def test_scope_changing_update_requires_fresh_approve_recommendation(self):
+        with self.assertRaisesRegex(PolicyError, "recommendation is missing"):
+            parse_ticket_scope(
+                task(),
+                [{"comment_text": update_block(recommendation=None)}],
+            )
 
     def test_base_needs_human_recommendation_is_not_automation_eligible(self):
         with self.assertRaisesRegex(PolicyError, "requires human review"):

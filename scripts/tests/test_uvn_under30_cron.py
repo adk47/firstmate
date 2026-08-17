@@ -202,6 +202,33 @@ class CronOrchestrationTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("Credit verification automation needs attention.", output.getvalue())
 
+    def test_popularity_is_refreshed_at_write_edge(self):
+        output = io.StringIO()
+        with (
+            patch.object(cron, "load_fraud_ids", return_value=set()),
+            patch.object(cron, "list_todo_tickets", return_value=[task()]),
+            patch.object(cron, "get_task_and_comments", return_value=(task(), [])),
+            patch.object(cron, "list_profile_requests", return_value={CR_ID: credit()}),
+            patch.object(
+                cron,
+                "spotify_lookup",
+                side_effect=[
+                    {"found": True, "track": {"popularity": 29}},
+                    {"found": True, "track": {"popularity": 30}},
+                ],
+            ) as spotify_lookup,
+            patch.object(cron, "approve_chunk") as approve,
+            patch.object(cron, "update_ticket") as update,
+            redirect_stdout(output),
+        ):
+            rc = cron.run_locked("run-1")
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(spotify_lookup.call_count, 2)
+        approve.assert_not_called()
+        update.assert_not_called()
+        self.assertEqual(output.getvalue().strip(), "NO_REPLY")
+
     def test_policy_failure_posts_a_plain_english_summary_for_manual_review(self):
         output = io.StringIO()
         with (
@@ -209,13 +236,14 @@ class CronOrchestrationTests(unittest.TestCase):
             patch.object(cron, "list_todo_tickets", return_value=[task()]),
             patch.object(cron, "get_task_and_comments", return_value=(task(), [])),
             patch.object(cron, "parse_ticket_scope", side_effect=cron.PolicyError("bad scope")),
-            patch.object(cron, "update_ticket"),
+            patch.object(cron, "update_ticket") as update,
             patch.object(cron, "remove_automation_tag") as remove_tag,
             redirect_stdout(output),
         ):
             rc = cron.run_locked("run-1")
 
         self.assertEqual(rc, 0)
+        self.assertIn(cron.MANUAL_HANDOFF_MARKER, update.call_args.args[2])
         remove_tag.assert_called_once_with("run-1", "ticket-1")
         self.assertEqual(
             output.getvalue().strip(),
@@ -272,6 +300,24 @@ class CronOrchestrationTests(unittest.TestCase):
 
         self.assertEqual(rc, 1)
         remove_tag.assert_not_called()
+
+    def test_existing_manual_handoff_only_removes_tag_on_retry(self):
+        output = io.StringIO()
+        comments = [{"comment_text": cron.MANUAL_HANDOFF_MARKER}]
+        with (
+            patch.object(cron, "load_fraud_ids", return_value=set()),
+            patch.object(cron, "list_todo_tickets", return_value=[task()]),
+            patch.object(cron, "get_task_and_comments", return_value=(task(), comments)),
+            patch.object(cron, "parse_ticket_scope", side_effect=cron.PolicyError("bad scope")),
+            patch.object(cron, "update_ticket") as update,
+            patch.object(cron, "remove_automation_tag") as remove_tag,
+            redirect_stdout(output),
+        ):
+            rc = cron.run_locked("run-2")
+
+        self.assertEqual(rc, 0)
+        update.assert_not_called()
+        remove_tag.assert_called_once_with("run-2", "ticket-1")
 
 
 class TicketWriteTests(unittest.TestCase):
