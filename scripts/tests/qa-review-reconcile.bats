@@ -259,6 +259,25 @@ setup_lib() {
   run qar_attempts_exhausted 1 2; [ "$status" -ne 0 ]
 }
 
+@test "lib: qar_read_fail_should_page — due when never paged or interval elapsed, suppressed inside it, and ALWAYS due on garbage or a FUTURE stamp (fail toward paging, never toward silence)" {
+  setup_lib
+  # Never paged / interval elapsed -> due.
+  run qar_read_fail_should_page 0 10000 21600;      [ "$status" -eq 0 ]
+  run qar_read_fail_should_page 1000 22600 21600;   [ "$status" -eq 0 ]
+  # Inside the window -> suppressed.
+  run qar_read_fail_should_page 1000 22599 21600;   [ "$status" -ne 0 ]
+  # Garbage stamp -> due (an unreadable stamp must never buy silence).
+  run qar_read_fail_should_page "abc" 10000 21600;  [ "$status" -eq 0 ]
+  run qar_read_fail_should_page "" 10000 21600;     [ "$status" -eq 0 ]
+  # FUTURE stamp (host clock stepped back, or corrupted state) -> due.
+  # Without this arm `now - last` is negative, which reads as "inside the
+  # window" and suppresses the alert until the future time PLUS the interval —
+  # a read outage could stay silent far beyond 6h, which is the exact
+  # under-alerting direction this predicate exists to prevent.
+  run qar_read_fail_should_page 99999 10000 21600;  [ "$status" -eq 0 ]
+  run qar_read_fail_should_page 10001 10000 21600;  [ "$status" -eq 0 ]
+}
+
 @test "lib: qar_state_read — missing file is normal first run ('{}', rc 0)" {
   setup_lib
   run qar_state_read "$BATS_TEST_TMPDIR/nope.json"
@@ -1652,4 +1671,65 @@ JSON
   run "$SCRIPT" --once
   [ "$status" -eq 0 ]
   [ "$(wc -l < "$CURL_CALLS")" -eq 1 ]
+}
+
+@test "e2e 43: a read-failure page whose Slack send FAILS does not persist the suppression stamp -- the next tick retries and delivers" {
+  # Mirrors e2e 8c for the exhaustion page. page() is fire-and-forget by
+  # design, so stamping off it would let ONE transient Slack error buy 6h of
+  # silence on a repo whose reads are broken -- the exact silent-loss
+  # invariant this reconciler exists to eliminate, reintroduced inside the
+  # dedupe meant to protect it.
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="shaslackfail000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 57 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  export STUB_COMMIT_FAIL=1
+  base="$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))"
+  export QA_RECONCILE_NOW_EPOCH="$base"
+
+  run "$SCRIPT" --once; run "$SCRIPT" --once
+  [ ! -s "$SLACK_CALLS" ]
+
+  # Threshold tick, but Slack is down for every send this tick. FAIL_ALWAYS,
+  # not FAIL_ONCE: a threshold tick emits TWO pages (candidate + stage), so
+  # failing only the first would still let the second stamp and mask the bug.
+  export STUB_SLACK_FAIL_ALWAYS=1
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  # Nothing may be stamped for pages that never landed.
+  [ "$(jq -r '.__meta__.read_fail_last_alert // {} | length' "$QA_RECONCILE_STATE_FILE")" -eq 0 ]
+
+  # Next tick, 15 min later: still failing, still inside the 6h window -- but
+  # since nothing was ever delivered it must page again, not stay silent.
+  unset STUB_SLACK_FAIL_ALWAYS
+  : > "$SLACK_CALLS"
+  export QA_RECONCILE_NOW_EPOCH="$(( base + 900 ))"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ -s "$SLACK_CALLS" ]
+  # Delivered this time -> now the stamp persists.
+  [ "$(jq -r '.__meta__.read_fail_last_alert // {} | length' "$QA_RECONCILE_STATE_FILE")" -gt 0 ]
+}
+
+@test "e2e 44: a FUTURE-dated suppression stamp does not silence a live read failure" {
+  # A backward host-clock step (or corrupted state) writes a stamp ahead of
+  # now. Subtracting gives a negative age, which naively reads as "inside the
+  # window" and would suppress until that future time + 6h.
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="shafuture00000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 58 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  export STUB_COMMIT_FAIL=1
+  base="$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))"
+
+  # Seed both stamps far in the future, alongside the repo epoch.
+  jq --argjson f "$(( base + 999999 ))" '
+    .__meta__.read_fail_last_alert = {"Muso-AI/core-backend": {"__candidate__": $f, "commit": $f}}
+  ' "$QA_RECONCILE_STATE_FILE" > "$TEST_TMPDIR/seed.json"
+  mv "$TEST_TMPDIR/seed.json" "$QA_RECONCILE_STATE_FILE"
+
+  export QA_RECONCILE_NOW_EPOCH="$base"
+  run "$SCRIPT" --once; run "$SCRIPT" --once
+  : > "$SLACK_CALLS"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ -s "$SLACK_CALLS" ]
 }

@@ -317,11 +317,21 @@ page_read_failure() {
     return 0
   fi
   github_status_probe
-  page "$msg $_GH_STATUS_NOTE"
-  # page() no-ops under --dry-run, so a rehearsal must not advance the
-  # suppression stamp — doing so would let a dry run silence a real page.
-  if [ "$DRY_RUN" -eq 0 ]; then
-    state_json="$(qar_state_set_read_fail_last_alert "$state_json" "$repo" "$stage" "$NOW_EPOCH")"
+  # page_confirmed, NOT page: the stamp below PERSISTS "already paged", so it
+  # may only advance on CONFIRMED delivery. page() swallows Slack failures by
+  # design (`|| true`), so stamping off it would let ONE transient Slack error
+  # buy a full interval of silence on a repo whose reads are broken — the
+  # exact silent-loss invariant this reconciler exists to eliminate,
+  # reintroduced inside the guard meant to protect it. This is the same
+  # contract the exhaustion page above already follows. (e2e 43)
+  if page_confirmed "$msg $_GH_STATUS_NOTE"; then
+    # page_confirmed returns 0 WITHOUT sending under --dry-run, so the
+    # dry-run guard still stands: a rehearsal must not advance the stamp.
+    if [ "$DRY_RUN" -eq 0 ]; then
+      state_json="$(qar_state_set_read_fail_last_alert "$state_json" "$repo" "$stage" "$NOW_EPOCH")"
+    fi
+  else
+    log "read-failure page for $repo/$stage was NOT confirmed delivered — suppression stamp deliberately NOT advanced; the next tick retries."
   fi
 }
 

@@ -585,14 +585,26 @@ qar_state_set_read_fail_last_alert() {
 
 # qar_read_fail_should_page <last-epoch> <now-epoch> <interval-s> — rc 0 when a
 # page is due (never paged, or the interval has elapsed), rc 1 to suppress.
-# Non-numeric/garbage state is treated as "never paged" (rc 0): under-alerting
-# is the dangerous direction here, so an unreadable stamp must fail toward
-# paging, never toward silence.
+#
+# EVERY unusual input fails toward PAGING (rc 0), never toward silence.
+# Under-alerting is the dangerous direction: this predicate guards the only
+# notification for a repo whose reads are broken, so a weird stamp must cost a
+# duplicate page, never a missed one. Three such arms, all pinned by tests:
+#   - non-numeric/empty stamp (unreadable state)
+#   - last <= 0 (never paged; explicit rather than relying on `now` being a
+#     large epoch — with a small `now` the subtraction below would otherwise
+#     read "never paged" as "inside the window")
+#   - last > now (host clock stepped backward, or corrupted state). Without
+#     this, `now - last` is NEGATIVE, compares as less than the interval, and
+#     suppresses until that future time PLUS the interval — an outage could
+#     stay silent far beyond 6h.
 qar_read_fail_should_page() {
   local last="$1" now="$2" interval="$3"
   case "$last" in (*[!0-9]*|"") return 0 ;; esac
   case "$now" in (*[!0-9]*|"") return 0 ;; esac
   case "$interval" in (*[!0-9]*|"") return 0 ;; esac
+  if [ "$last" -le 0 ]; then return 0; fi
+  if [ "$last" -gt "$now" ]; then return 0; fi
   [ $((now - last)) -ge "$interval" ]
 }
 
