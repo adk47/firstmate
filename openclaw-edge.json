@@ -265,10 +265,10 @@
     "maintenance": {
       "mode": "enforce",
       "pruneAfter": "14d",
-      "maxEntries": 1000,
+      "maxEntries": 10000,
       "resetArchiveRetention": "7d",
-      "maxDiskBytes": "4gb",
-      "highWaterBytes": "3gb"
+      "maxDiskBytes": "8gb",
+      "highWaterBytes": "6gb"
     }
   },
   "web": {

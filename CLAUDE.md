@@ -352,9 +352,12 @@ bytes, enforced PER AGENT). In openclaw 7.1 the reapers protect `:slack:` keys a
 treat `:cron:` keys as disposable, so once an agent's protected footprint crosses a
 cap, every sweep deletes ALL that agent's cron session entries and every fire dies at
 setup with `CronSessionLifecycleClaimError` — restart-immune, no self-heal.
-This has now happened twice: `maxEntries` on 2026-07-16 (PR #694, 100 → 1000) and
+This has now happened three times: `maxEntries` on 2026-07-16 (PR #694, 100 → 1000);
 `maxDiskBytes` on 2026-07-27, when `operations` crossed 512mb and ALL 8 of its
-enabled crons died for ~25h (now 4gb/3gb).
+enabled crons died for ~25h; and `maxEntries` AGAIN on 2026-08-14 (issue #829),
+when `scout`'s 1,145 protected Slack threads crossed 1000 while it sat at 17.6%
+of its disk budget — the guard fired but named the wrong cap. Caps are now
+`maxEntries` 10000 and `maxDiskBytes`/`highWaterBytes` 8gb/6gb.
 
 **openclaw never auto-prunes protected Slack threads, so the protected footprint
 grows without bound — every fixed cap is a future outage with a date on it.**

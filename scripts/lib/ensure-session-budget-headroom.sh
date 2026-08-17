@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# ensure-session-budget-headroom.sh — page BEFORE openclaw's per-agent session
-# disk-budget reaper starts cannibalising cron sessions and silently kills an
-# agent's entire cron surface.
+# ensure-session-budget-headroom.sh — page BEFORE either of openclaw's per-agent
+# session-maintenance reapers (disk budget OR entry cap) starts cannibalising
+# cron sessions and silently kills an agent's entire cron surface.
 #
 # ── The bug this closes (2026-07-27 → 07-28 operations cron outage) ──────────
 # openclaw 7.1's `enforceSessionDiskBudget`
@@ -66,13 +66,52 @@
 #     Completeness and severity are INDEPENDENT: an unreachable edge gateway must
 #     never suppress a confirmed main/operations page.
 #
+# ── TWO reapers, not one (2026-08-14 scout outage, issue #829) ──────────────
+# The guard originally checked only the DISK half above, even though the
+# invariant it documents names both caps. That gap produced a second outage and
+# then misdirected its diagnosis: main/scout lost its cron surface while sitting
+# at 754,813,973 B — 0.70GiB, 17.6% of its 4gb maxDiskBytes. The disk reaper was
+# never involved. The ENTRY reaper was:
+#
+#   capEntryCount(store, maxEntries):
+#     maxRemovableEntries = max(0, maxEntries - protectedCount)
+#     toRemove = <non-protected keys>.slice(maxRemovableEntries)
+#
+# scout held 1,145 protected Slack thread keys (1,140 of them in one channel —
+# #company-finder, its own cron's delivery target) against maxEntries 1000, so
+# maxRemovableEntries was 0 and the slice was the ENTIRE removable set: every
+# ":cron:" key, deleted on every store load. Evidence at the time: 234 `.deleted.`
+# tombstones in two days versus 1 for healthy `qa`.
+#
+# The two reapers are independent and either one alone wedges a cron surface, so
+# EVERY check must be scoped to its own reaper. In particular an unset
+# maxDiskBytes makes only the byte checks dormant — `maxEntries` defaults rather
+# than disabling (DEFAULT_SESSION_MAX_ENTRIES), so it is never dormant.
+#
 # ── Findings ────────────────────────────────────────────────────────────────
 #   CRITICAL  agent sessions bytes > maxDiskBytes
-#             (the reaper is already eating cron entries)
+#             (the disk reaper is already eating cron entries)
+#   CRITICAL  agent PROTECTED entry count >= maxEntries
+#             (the entry reaper can spare nothing removable — issue #829)
 #   CRITICAL  agent has >=1 ENABLED cron but ZERO ":cron:" keys in sessions.json
 #             (the decisive wedge signature — this is what a live outage looks
 #             like, and what would have caught 2026-07-27 on day one)
 #   WARN      agent sessions bytes > SESSION_BUDGET_WARN_RATIO * maxDiskBytes
+#   WARN      agent protected entries > SESSION_BUDGET_WARN_RATIO * maxEntries
+#
+# The entry-cap findings count PROTECTED entries, never total entries: an agent
+# far above maxEntries in total is healthy if its removable keys absorb the cap,
+# whereas protected growth alone is what starves it. Both are scoped to agents
+# owning enabled MODEL-TURN crons — a cron surface is what these reapers can
+# destroy, and only model-turn crons have a ":cron:" session key to lose
+# (`payload.kind:"command"` jobs never create one, so counting them would page a
+# healthy agent forever; see _enabled_cron_counts).
+#
+# A configured `maxEntries` of 0 is NOT dormant — upstream's `?? DEFAULT` fills
+# only a nullish value, so 0 stands and pins maxRemovableEntries at 0, the
+# maximal wedge. A `maxEntries` that is not a non-negative integer is a profile-
+# level UNEVALUATED, never an abort: it feeds bash arithmetic, whose errors are
+# fatal to the subshell collect_findings runs in.
 #
 # An UNREADABLE sessions.json on a cron-owning agent is neither of those: it is a
 # read error (exit 2), never a silent "clean". Treating it as zero cron keys
@@ -92,6 +131,10 @@ set -uo pipefail
 PROFILES="${SESSION_BUDGET_PROFILES:-main edge}"
 WARN_RATIO="${SESSION_BUDGET_WARN_RATIO:-0.8}"
 STATE_ROOT="${SESSION_BUDGET_STATE_ROOT:-/root}"
+
+# bash arithmetic is integer-only, so the warn thresholds scale by 100 rather
+# than multiplying by a fractional ratio (which would silently truncate to 0).
+WARN_RATIO_PCT="$(printf '%s' "$WARN_RATIO" | awk '{printf "%d", $1 * 100}')"
 
 LOGPREFIX="[ensure-session-budget-headroom $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
 log() { echo "$LOGPREFIX $*" >&2; }
@@ -138,6 +181,27 @@ _max_disk_bytes() {
   _parse_bytes "$raw"
 }
 
+# openclaw's fallback when session.maintenance.maxEntries is absent
+# (store-*.js: `maxEntries: maintenance?.maxEntries ?? DEFAULT_SESSION_MAX_ENTRIES`).
+# This is the key asymmetry with the disk half: an absent maxDiskBytes makes
+# enforceSessionDiskBudget return early (genuinely dormant), but an absent
+# maxEntries just resolves to this default and the reaper runs anyway. Treating
+# "unset" as dormant here would be a false all-clear on a live reaper.
+DEFAULT_SESSION_MAX_ENTRIES=500
+
+# _max_entries <profile> — print the entry cap actually in force for a profile,
+# falling back to openclaw's default when the key is unset. Returns 1 only when
+# the config itself cannot be read (same condition as _max_disk_bytes, so one
+# UNEVALUATED finding covers both).
+_max_entries() {
+  local profile="$1" cfg raw
+  cfg="$STATE_ROOT/.openclaw-$profile/openclaw.json"
+  [ -r "$cfg" ] || return 1
+  raw="$(jq -r '.session.maintenance.maxEntries // empty' "$cfg" 2>/dev/null)" || return 1
+  [ -n "$raw" ] || { printf '%s' "$DEFAULT_SESSION_MAX_ENTRIES"; return 0; }
+  printf '%s' "$raw"
+}
+
 # _agent_dirs <profile> — print each agent id that has a sessions dir.
 _agent_dirs() {
   local profile="$1" d
@@ -176,16 +240,55 @@ _cron_key_count() {
     "$f" 2>/dev/null || printf '%s' -1
 }
 
+# _protected_key_count <profile> <agent> — number of NON-REMOVABLE keys in the
+# agent's sessions.json, mirroring openclaw's isProtectedSessionMaintenanceEntry:
+# a threadId in the key, an external group/channel key, or an entry whose
+# chatType is group/channel/thread. Prints -1 when unreadable/unparseable.
+#
+# This — not the total entry count — is the quantity that starves the reaper.
+# capEntryCount removes `keys.slice(maxRemovableEntries)` where
+# `maxRemovableEntries = max(0, maxEntries - protectedCount)`, so an agent can
+# sit far ABOVE maxEntries in total and stay healthy (the cap just trims its
+# removable keys), while an agent whose PROTECTED count alone reaches maxEntries
+# loses every removable key on every load. Counting totals would page the
+# healthy case and miss nothing the protected count does not already catch.
+_protected_key_count() {
+  local f="$STATE_ROOT/.openclaw-$1/agents/$2/sessions/sessions.json"
+  [ -r "$f" ] || { printf '%s' -1; return; }
+  jq -r '(.entries // .)
+         | (if type == "object" then to_entries else map({key: .key, value: .}) end)
+         | [ .[] | select((.key | type == "string")
+               and ((.key | test(":thread:|:channel:|:group:"))
+                    or (((.value.chatType // .value.origin.chatType // "")
+                         | ascii_downcase) as $c
+                        | $c == "group" or $c == "channel" or $c == "thread"))) ]
+         | length' \
+    "$f" 2>/dev/null || printf '%s' -1
+}
+
 # _enabled_cron_counts <profile> — print "<agentId> <count>" per agent that owns
-# at least one ENABLED cron. Returns 1 when the gateway query fails, so an
-# unreachable gateway is a read error (exit 2) rather than a silent all-clear.
+# at least one ENABLED MODEL-TURN cron. Returns 1 when the gateway query fails,
+# so an unreachable gateway is a read error (exit 2) rather than a silent
+# all-clear.
+#
+# `payload.kind:"command"` crons are excluded because ONLY model-turn crons ever
+# get a ":cron:" session key (same filter, same reason, as
+# scripts/hydra-fleet-instrument.sh). Counting them would make every finding
+# below wrong in both directions: an agent whose enabled crons are ALL command
+# kind legitimately has zero ":cron:" keys, so the wedge signature would page it
+# as an outage forever (live today: `finance` runs 4 enabled crons, 3 of them
+# command kind — disable its one model-turn job and the guard cries wolf), and
+# the entry-cap line would claim more cron sessions are at risk than exist.
+# `.payload.kind?` (optional) so a non-object payload degrades to "kept" instead
+# of erroring the whole inventory into UNEVALUATED.
 _enabled_cron_counts() {
   local profile="$1" out
   out="$(openclaw --profile "$profile" cron list --all --json 2>/dev/null)" || return 1
   [ -n "$out" ] || return 1
   printf '%s' "$out" | jq -r '
       (.jobs // [])
-      | map(select(.enabled == true) | .agentId // "default")
+      | map(select(.enabled == true and ((.payload.kind? // "") != "command"))
+            | .agentId // "default")
       | group_by(.)[]
       | "\(.[0]) \(length)"' 2>/dev/null || return 1
 }
@@ -206,6 +309,7 @@ _enabled_cron_counts() {
 #   0  nothing at all     -> clean
 collect_findings() {
   local viol=0 uneval=0 profile agent maxb bytes warn_at ckeys ecount
+  local maxe pkeys entry_warn_at disk_dormant
   for profile in $PROFILES; do
     [ -n "$profile" ] || continue
     [ -d "$STATE_ROOT/.openclaw-$profile" ] || continue
@@ -215,13 +319,38 @@ collect_findings() {
         "$profile" "$STATE_ROOT" "$profile"
       uneval=1; continue
     }
+    # Same file, same failure condition — already reported above, so this cannot
+    # fail on its own once _max_disk_bytes succeeded.
+    maxe="$(_max_entries "$profile")" || maxe=""
+
+    # maxEntries is taken RAW from the config (unlike maxDiskBytes, which
+    # _parse_bytes reduces to digits), and it feeds arithmetic below. Validate it
+    # as a bare non-negative integer FIRST: an arithmetic error inside $(( )) is
+    # fatal to the command-substitution subshell collect_findings runs in, so a
+    # `"maxEntries": "1k"` typo would abandon this profile AND every later one,
+    # emit no findings at all, and still return 1 — i.e. page a CRITICAL with an
+    # empty body. Reject it as UNEVALUATED instead, and keep the disk half running.
+    case "$maxe" in
+      ''|*[!0-9]*)
+        printf 'UNEVALUATED\t%s\tsession.maintenance.maxEntries is %s, not a non-negative integer — the entry-cap signal for this profile is UNKNOWN (disk checks still ran)\n' \
+          "$profile" "${maxe:-<unreadable>}"
+        uneval=1
+        maxe=""
+        ;;
+    esac
+
+    disk_dormant=0
     if [ -z "$maxb" ] || [ "$maxb" -le 0 ] 2>/dev/null; then
-      # maxDiskBytes unset => enforceSessionDiskBudget returns early; dormant.
-      continue
+      # maxDiskBytes unset => enforceSessionDiskBudget returns early, so the DISK
+      # half is dormant. The ENTRY cap is a separate reaper that upstream always
+      # enforces (it defaults rather than disabling), so this must skip only the
+      # byte checks — `continue` here would abandon the profile and blind the
+      # guard to exactly the half that fired in #829.
+      disk_dormant=1
     fi
-    # bash arithmetic is integer-only, so scale by 100 rather than multiplying
-    # by a fractional ratio (which would silently truncate to 0).
-    warn_at=$(( maxb * $(printf '%s' "$WARN_RATIO" | awk '{printf "%d", $1 * 100}') / 100 ))
+
+    warn_at=$(( ${maxb:-0} * WARN_RATIO_PCT / 100 ))
+    entry_warn_at=$(( ${maxe:-0} * WARN_RATIO_PCT / 100 ))
 
     # Agents that own at least one enabled cron — needed ONLY for the wedge
     # signature. The disk-size checks below are independent of it, so a failed
@@ -243,39 +372,84 @@ collect_findings() {
 
     while read -r agent; do
       [ -n "$agent" ] || continue
-      bytes="$(_dir_bytes "$STATE_ROOT/.openclaw-$profile/agents/$agent/sessions")"
-      [ -n "$bytes" ] || continue
 
-      if [ "$bytes" -gt "$maxb" ]; then
-        printf 'CRITICAL\t%s/%s\tsessions %s > maxDiskBytes %s — the reaper is deleting cron session entries; every cron on this agent will claim-error\n' \
-          "$profile" "$agent" "$(_human "$bytes")" "$(_human "$maxb")"
-        viol=1
-      elif [ "$bytes" -gt "$warn_at" ]; then
-        printf 'WARN\t%s/%s\tsessions %s > %s%% of maxDiskBytes %s — raise session.maintenance.maxDiskBytes before it crosses\n' \
-          "$profile" "$agent" "$(_human "$bytes")" \
-          "$(printf '%s' "$WARN_RATIO" | awk '{printf "%d", $1 * 100}')" "$(_human "$maxb")"
-        viol=1
+      if [ "$disk_dormant" -eq 0 ]; then
+        bytes="$(_dir_bytes "$STATE_ROOT/.openclaw-$profile/agents/$agent/sessions")"
+        if [ -n "$bytes" ]; then
+          if [ "$bytes" -gt "$maxb" ]; then
+            printf 'CRITICAL\t%s/%s\tsessions %s > maxDiskBytes %s — the reaper is deleting cron session entries; every cron on this agent will claim-error\n' \
+              "$profile" "$agent" "$(_human "$bytes")" "$(_human "$maxb")"
+            viol=1
+          elif [ "$bytes" -gt "$warn_at" ]; then
+            printf 'WARN\t%s/%s\tsessions %s > %s%% of maxDiskBytes %s — raise session.maintenance.maxDiskBytes before it crosses\n' \
+              "$profile" "$agent" "$(_human "$bytes")" "$WARN_RATIO_PCT" "$(_human "$maxb")"
+            viol=1
+          fi
+        fi
+      fi
+
+      # ── Key-based checks ────────────────────────────────────────────────────
+      # Both the entry-cap check and the wedge signature only matter for agents
+      # that own enabled MODEL-TURN crons: a cron surface is the thing these reapers can
+      # destroy. Entry-cap pressure on a chat-only agent is ordinary maintenance,
+      # and paging on it would drown the signal that catches the outage.
+      # Skipped when the cron inventory could not be read — the profile is
+      # already flagged UNEVALUATED above.
+      [ "$have_inventory" -eq 1 ] || continue
+      ecount="$(printf '%s\n' "$enabled_map" | awk -v a="$agent" '$1 == a {print $2; exit}')"
+      [ -n "$ecount" ] && [ "$ecount" -gt 0 ] || continue
+
+      pkeys="$(_protected_key_count "$profile" "$agent")"
+      ckeys="$(_cron_key_count "$profile" "$agent")"
+      if [ "$pkeys" = "-1" ] || [ "$ckeys" = "-1" ]; then
+        # Unreadable index: NOT a wedge (don't page a permissions blip as an
+        # outage) but NOT clean either — reporting nothing would be a false
+        # all-clear on the one signal that actually catches the outage.
+        printf 'UNEVALUATED\t%s/%s\tsessions.json unreadable — entry-cap and cron-eviction signals for this agent are UNKNOWN\n' \
+          "$profile" "$agent"
+        uneval=1
+        continue
+      fi
+
+      # Entry-cap half: capEntryCount removes keys.slice(maxRemovableEntries)
+      # with maxRemovableEntries = max(0, maxEntries - protectedCount). Once the
+      # PROTECTED footprint alone reaches maxEntries that slice is the whole
+      # removable set, so every ":cron:" key dies on each store load — no matter
+      # how far under maxDiskBytes the agent sits. This is the #829 signature.
+      # No `maxe > 0` guard: a configured 0 is NOT dormant. Upstream's
+      # `?? DEFAULT_SESSION_MAX_ENTRIES` only fills a NULLISH value, so 0 stands
+      # and pins maxRemovableEntries at max(0, 0 - protectedCount) = 0 — the
+      # maximal wedge, every removable key deleted on every load. `pkeys >= maxe`
+      # is trivially true there, so the CRITICAL branch covers it; treating it as
+      # dormant reported a fleet-wide cron kill as "clean".
+      if [ -n "$maxe" ]; then
+        if [ "$pkeys" -ge "$maxe" ]; then
+          # Report the ENABLED-CRON count as what is at risk, never as a count of
+          # ":cron:" keys present — this finding fires alongside the wedge line,
+          # which reports ZERO keys, and two numbers that read as the same
+          # quantity but disagree is how #829 got misdiagnosed in the first place.
+          printf 'CRITICAL\t%s/%s\t%s protected (non-removable) entries >= maxEntries %s — capEntryCount can spare NOTHING, so the ":cron:" session key for every one of this agent'"'"'s %s enabled model-turn cron(s) is deleted on each store load; raise session.maintenance.maxEntries\n' \
+            "$profile" "$agent" "$pkeys" "$maxe" "$ecount"
+          viol=1
+        elif [ "$pkeys" -gt "$entry_warn_at" ]; then
+          # State the REMAINING removable slots, not just the ratio: capEntryCount
+          # keeps only the first maxRemovableEntries removable keys, so eviction
+          # begins as soon as that number drops below the agent's removable set —
+          # well before the protected count reaches the cap. A WARN that only says
+          # "before it crosses" would read as "nothing has happened yet" while
+          # cron keys are already being trimmed.
+          printf 'WARN\t%s/%s\t%s protected entries > %s%% of maxEntries %s — only %s removable slot(s) left for %s enabled model-turn cron(s); raise session.maintenance.maxEntries\n' \
+            "$profile" "$agent" "$pkeys" "$WARN_RATIO_PCT" "$maxe" \
+            "$(( maxe - pkeys ))" "$ecount"
+          viol=1
+        fi
       fi
 
       # Wedge signature: owns enabled crons but has no cron session entries.
-      # Skipped (and only this) when the cron inventory could not be read — the
-      # profile is already flagged UNEVALUATED above.
-      [ "$have_inventory" -eq 1 ] || continue
-      ecount="$(printf '%s\n' "$enabled_map" | awk -v a="$agent" '$1 == a {print $2; exit}')"
-      if [ -n "$ecount" ] && [ "$ecount" -gt 0 ]; then
-        ckeys="$(_cron_key_count "$profile" "$agent")"
-        if [ "$ckeys" = "0" ]; then
-          printf 'CRITICAL\t%s/%s\t%s enabled cron(s) but ZERO ":cron:" session keys — cron sessions have been evicted; fires will die at setup with CronSessionLifecycleClaimError\n' \
-            "$profile" "$agent" "$ecount"
-          viol=1
-        elif [ "$ckeys" = "-1" ]; then
-          # Unreadable index: NOT a wedge (don't page a permissions blip as an
-          # outage) but NOT clean either — reporting nothing would be a false
-          # all-clear on the one signal that actually catches the outage.
-          printf 'UNEVALUATED\t%s/%s\tsessions.json unreadable — cron-eviction signal for this agent is UNKNOWN\n' \
-            "$profile" "$agent"
-          uneval=1
-        fi
+      if [ "$ckeys" = "0" ]; then
+        printf 'CRITICAL\t%s/%s\t%s enabled model-turn cron(s) but ZERO ":cron:" session keys — cron sessions have been evicted; fires will die at setup with CronSessionLifecycleClaimError\n' \
+          "$profile" "$agent" "$ecount"
+        viol=1
       fi
     done < <(_agent_dirs "$profile")
   done
@@ -320,7 +494,7 @@ main() {
         # checked instead of swallowing the confirmed outage.
         log "SESSION BUDGET HEADROOM VIOLATION:"
         _emit_findings "$findings"
-        log "Fix: raise session.maintenance.maxDiskBytes (and highWaterBytes) in openclaw-main.json / openclaw-edge.json, land the PR, and apply live with 'openclaw --profile <p> config set …' + a gateway restart (the running daemon caches the budget). NEVER run 'openclaw doctor --fix' (codex-auth fan-out)."
+        log "Fix: raise the cap the finding above actually names — session.maintenance.maxEntries for a protected-entry finding, maxDiskBytes (and highWaterBytes) for a bytes finding. TWO independent reapers evict cron sessions, so an agent can be wedged on the entry cap while sitting at a fraction of its disk budget (issue #829: main/scout, 17.6% of maxDiskBytes). Raising the cap that is not binding changes nothing. Land the values in openclaw-main.json / openclaw-edge.json, then apply live with 'openclaw --profile <p> config set …' + a gateway restart (the running daemon caches the budget). NEVER run 'openclaw doctor --fix' (codex-auth fan-out)."
         return 1
       fi
       if [ "$rc" -eq 2 ]; then
@@ -328,7 +502,7 @@ main() {
         _emit_findings "$findings"
         return 2
       fi
-      log "clean: every agent is under maxDiskBytes and no cron surface is evicted ($PROFILES)"
+      log "clean: every agent is under maxDiskBytes AND maxEntries, and no cron surface is evicted ($PROFILES)"
       return 0
       ;;
     report|"")
@@ -339,7 +513,7 @@ main() {
         log "WARNING: could not evaluate session budget headroom (continuing):"
         _emit_findings "$findings" >&2
       else
-        log "clean: every agent is under maxDiskBytes ($PROFILES)"
+        log "clean: every agent is under maxDiskBytes AND maxEntries ($PROFILES)"
       fi
       return 0
       ;;

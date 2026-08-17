@@ -19,7 +19,10 @@ bats_require_minimum_version 1.5.0
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 SCRIPT="$HYDRA_REPO/scripts/lib/ensure-session-budget-headroom.sh"
 
-# _mk_profile <profile> <maxDiskBytes|"unset">
+# _mk_profile <profile> <maxDiskBytes|"unset"> [maxEntries|"unset"]
+#
+# maxEntries defaults to "unset" so every pre-existing caller keeps exercising
+# the disk half alone.
 #
 # NOTE: every `local` below declares ONE variable per statement on purpose.
 # `local p="$1" dir="…$p"` expands ALL right-hand sides BEFORE performing any of
@@ -28,29 +31,42 @@ SCRIPT="$HYDRA_REPO/scripts/lib/ensure-session-budget-headroom.sh"
 _mk_profile() {
   local p="$1"
   local max="$2"
+  local ents="${3:-unset}"
   local dir="$SESSION_BUDGET_STATE_ROOT/.openclaw-$p"
   mkdir -p "$dir"
-  if [ "$max" = "unset" ]; then
-    echo '{"session":{"maintenance":{"mode":"enforce"}}}' > "$dir/openclaw.json"
-  else
-    printf '{"session":{"maintenance":{"mode":"enforce","maxDiskBytes":"%s"}}}\n' \
-      "$max" > "$dir/openclaw.json"
-  fi
+  python3 - "$dir/openclaw.json" "$max" "$ents" <<'PY'
+import json, sys
+path, max_disk, max_entries = sys.argv[1], sys.argv[2], sys.argv[3]
+m = {"mode": "enforce"}
+if max_disk != "unset":
+    m["maxDiskBytes"] = max_disk
+if max_entries != "unset":
+    m["maxEntries"] = int(max_entries)
+json.dump({"session": {"maintenance": m}}, open(path, "w"))
+PY
 }
 
-# _mk_agent <profile> <agent> <padding-bytes> <cron-key-count>
+# _mk_agent <profile> <agent> <padding-bytes> <cron-key-count> [protected-key-count]
+#
+# The protected keys are Slack channel+thread keys, which is what openclaw's
+# isProtectedSessionMaintenanceEntry actually protects (a `threadId` in the key,
+# or chatType group/channel/thread). Default 1 preserves the original fixture.
 _mk_agent() {
   local p="$1"
   local a="$2"
   local bytes="$3"
   local cronkeys="$4"
+  local protkeys="${5:-1}"
   local d="$SESSION_BUDGET_STATE_ROOT/.openclaw-$p/agents/$a/sessions"
   mkdir -p "$d"
-  # sessions.json with N cron keys plus one protected slack key.
-  python3 - "$d/sessions.json" "$cronkeys" "$a" <<'PY'
+  # sessions.json with N cron keys plus M protected slack keys.
+  python3 - "$d/sessions.json" "$cronkeys" "$a" "$protkeys" <<'PY'
 import json, sys
-path, n, agent = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-store = {f"agent:{agent}:slack:channel:c123": {"updatedAt": 1}}
+path, n, agent, m = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+store = {}
+for i in range(m):
+    store[f"agent:{agent}:slack:channel:c123:thread:{1000 + i}.0"] = {
+        "updatedAt": 1, "chatType": "thread"}
 for i in range(n):
     store[f"agent:{agent}:cron:job-{i}"] = {"updatedAt": 1}
 open(path, "w").write(json.dumps(store))
@@ -141,7 +157,7 @@ teardown() {
   _set_enabled_crons ops 8
   run "$SCRIPT" --check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"8 enabled cron(s) but ZERO"* ]]
+  [[ "$output" == *"8 enabled model-turn cron(s) but ZERO"* ]]
   [[ "$output" == *"CronSessionLifecycleClaimError"* ]]
 }
 
@@ -165,14 +181,193 @@ teardown() {
   [[ "$output" != *"CRITICAL"* ]]
 }
 
-@test "dormant when maxDiskBytes is unset (reaper returns early upstream)" {
+@test "the BYTE checks are dormant when maxDiskBytes is unset (reaper returns early upstream)" {
   # enforceSessionDiskBudget: `if (maxBytes == null || highWaterBytes == null)
-  # return null`. Nothing can be evicted, so nothing to guard.
+  # return null`. Nothing can be evicted BY SIZE, so a 50MB dir must not be
+  # flagged however large it grows.
+  #
+  # SCOPE CORRECTION (#829): this test used to give the agent ZERO cron keys
+  # against 5 enabled crons and still assert exit 0 — i.e. it pinned the
+  # behaviour that an unset disk cap suppressed the wedge signature for the
+  # whole profile. That was a false all-clear: the entry reaper is a separate
+  # mechanism that upstream never disables, so those 5 crons were genuinely
+  # dying while the guard reported clean. Dormancy of one reaper is now scoped
+  # to that reaper's own checks; see the next test for the corrected case.
   _mk_profile main unset
-  _mk_agent main ops $((50 * 1024 * 1024)) 0
+  _mk_agent main ops $((50 * 1024 * 1024)) 3
   _set_enabled_crons ops 5
   run "$SCRIPT" --check
   [ "$status" -eq 0 ]
+  [[ "$output" == *"clean"* ]]
+}
+
+@test "the wedge signature still fires when maxDiskBytes is unset" {
+  # An agent with enabled crons and zero cron keys is a confirmed outage no
+  # matter which reaper emptied it. Gating this on the disk cap being configured
+  # made the guard's single most decisive signal silently conditional.
+  _mk_profile main unset
+  _mk_agent main ops 1024 0
+  _set_enabled_crons ops 5
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"5 enabled model-turn cron(s) but ZERO"* ]]
+}
+
+# ── Entry-cap half of the invariant (issue #829) ─────────────────────────────
+# CLAUDE.md states BOTH maxDiskBytes AND maxEntries must stay above an agent's
+# peak protected footprint, but only the disk half was ever enforced here. On
+# 2026-08-14 main/scout lost its cron surface while sitting at 0.70GiB of a 4gb
+# budget — 17.6% — because its 1,145 protected Slack threads had crossed
+# maxEntries 1000. The guard fired the eviction signature but named the wrong
+# cap, and the incident report followed it to a fix that would have changed
+# nothing.
+
+@test "CRITICAL when the protected footprint reaches maxEntries, far under maxDiskBytes" {
+  # The exact #829 state. capEntryCount computes
+  #   maxRemovableEntries = max(0, maxEntries - protectedCount)
+  # which is 0 here, so EVERY non-protected entry — i.e. every ":cron:" key — is
+  # deleted on each store load no matter how much disk headroom remains.
+  _mk_profile main 4gb 1000
+  _mk_agent main scout 1024 0 1145
+  _set_enabled_crons scout 1
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CRITICAL"* ]]
+  [[ "$output" == *"main/scout"* ]]
+  [[ "$output" == *"maxEntries"* ]]
+  # It must NOT blame the disk cap: that misdirection is the bug being fixed.
+  [[ "$output" != *"maxDiskBytes 4"* ]]
+}
+
+@test "WARN when the protected footprint crosses the ratio but not maxEntries" {
+  # The lead time that was missing: scout should have warned at 800, days before
+  # its cron surface died.
+  _mk_profile main 4gb 1000
+  _mk_agent main scout 1024 4 900
+  _set_enabled_crons scout 1
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"WARN"* ]]
+  [[ "$output" == *"maxEntries"* ]]
+  [[ "$output" != *"CRITICAL"* ]]
+}
+
+@test "entry-cap check still runs when maxDiskBytes is unset" {
+  # Regression guard: the dormant-disk-budget branch used to `continue` the whole
+  # profile. With the entry cap added, that early exit would skip the half of the
+  # invariant that actually fires — a dormant disk reaper says nothing about the
+  # entry reaper, which upstream always enforces.
+  _mk_profile main unset 1000
+  _mk_agent main scout 1024 0 1200
+  _set_enabled_crons scout 1
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"maxEntries"* ]]
+}
+
+@test "an absent maxEntries falls back to openclaw's default of 500, not to dormant" {
+  # Unlike maxDiskBytes — whose absence makes enforceSessionDiskBudget return
+  # early — an absent maxEntries resolves to DEFAULT_SESSION_MAX_ENTRIES (500)
+  # upstream. Treating it as dormant would be a false all-clear on a live reaper.
+  _mk_profile main 4gb unset
+  _mk_agent main scout 1024 0 600
+  _set_enabled_crons scout 1
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"maxEntries"* ]]
+  [[ "$output" == *"500"* ]]
+}
+
+@test "cron keys do not count toward the protected footprint" {
+  # Only non-removable entries starve capEntryCount. An agent whose entry count
+  # is over the cap purely because of removable cron keys is healthy — the
+  # reaper trims those to fit, which is ordinary maintenance, not a wedge.
+  _mk_profile main 4gb 1000
+  _mk_agent main scout 1024 900 200   # 1100 total entries, only 200 protected
+  _set_enabled_crons scout 1
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean"* ]]
+}
+
+@test "a chat-only agent is never flagged on the entry cap" {
+  # Entry-cap pressure only matters where it can evict a cron surface. Paging on
+  # every busy chat agent would drown the signal that catches the outage.
+  _mk_profile main 4gb 1000
+  _mk_agent main cto 1024 0 5000
+  echo '{"jobs":[]}' > "$FAKE_CRON_JSON"
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean"* ]]
+}
+
+@test "maxEntries 0 is a CRITICAL wedge, never dormant" {
+  # Upstream's `maintenance?.maxEntries ?? DEFAULT` only fills a NULLISH value, so
+  # a configured 0 stands and pins maxRemovableEntries at max(0, 0 - protected) =
+  # 0 — every removable key, i.e. every ":cron:" key, deleted on each store load.
+  # Skipping the check on `maxe <= 0` reported that fleet-wide kill as "clean".
+  _mk_profile main 4gb 0
+  _mk_agent main scout 1024 4 1200
+  _set_enabled_crons scout 4
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CRITICAL"* ]]
+  [[ "$output" == *"maxEntries 0"* ]]
+}
+
+@test "a non-integer maxEntries is UNEVALUATED, and never aborts the scan" {
+  # `maxEntries: "1k"` used to reach `$(( maxe * PCT / 100 ))`, whose arithmetic
+  # error is FATAL to the command-substitution subshell collect_findings runs in:
+  # the function died on the spot, every finding for this profile and all later
+  # ones was dropped, and it still returned 1 — a CRITICAL page with an empty
+  # body. The disk half must survive an unusable entry cap.
+  _mk_profile main 1mb
+  python3 - "$SESSION_BUDGET_STATE_ROOT/.openclaw-main/openclaw.json" <<'PY'
+import json, sys
+json.dump({"session": {"maintenance": {
+    "mode": "enforce", "maxDiskBytes": "1mb", "maxEntries": "1k"}}},
+    open(sys.argv[1], "w"))
+PY
+  _mk_agent main ops $((2 * 1024 * 1024)) 3
+  _set_enabled_crons ops 2
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"UNEVALUATED"* ]]
+  [[ "$output" == *"not a non-negative integer"* ]]
+  # The over-budget disk finding must still be reported, not swallowed.
+  [[ "$output" == *"maxDiskBytes"* ]]
+  [[ "$output" == *"main/ops"* ]]
+}
+
+@test "command-kind crons do not count toward the wedge signature" {
+  # ONLY model-turn crons get a ":cron:" session key (same filter, same reason,
+  # as scripts/hydra-fleet-instrument.sh). An agent whose enabled crons are all
+  # payload.kind:"command" legitimately has zero, so counting them pages a
+  # healthy agent as a permanent outage.
+  _mk_agent main finance 1024 0 10
+  python3 - "$FAKE_CRON_JSON" <<'PY'
+import json, sys
+json.dump({"jobs": [
+    {"id": f"c{i}", "enabled": True, "agentId": "finance",
+     "payload": {"kind": "command"}} for i in range(3)]},
+    open(sys.argv[1], "w"))
+PY
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean"* ]]
+}
+
+@test "the remediation line names the entry cap, not just the disk cap" {
+  # The operator-facing text is the actual defect surface in #829: it named only
+  # maxDiskBytes/highWaterBytes, so the responder raised the cap that was not
+  # binding. A guard that reports the wrong lever is worse than one that is silent.
+  _mk_profile main 4gb 1000
+  _mk_agent main scout 1024 0 1145
+  _set_enabled_crons scout 1
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"maxEntries"* ]]
+  [[ "$output" == *"Fix:"* ]]
 }
 
 @test "exit 2 when the gateway cron query fails (never a silent all-clear)" {

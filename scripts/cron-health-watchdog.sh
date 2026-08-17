@@ -146,7 +146,11 @@ if [ -x "$SESSION_BUDGET_CHECK" ]; then
     elif [ $((_sb_now - _sb_last)) -ge "$SESSION_BUDGET_ALERT_INTERVAL" ]; then
       log "Posting session-budget headroom alert to ${SLACK_CHANNEL}."
       printf '%s\n' "$_sb_out"
-      slack_notify_critical ":warning: *Session budget headroom* — an agent is at/over \`session.maintenance.maxDiskBytes\`, which makes openclaw's reaper delete cron session entries and wedge that agent's whole cron surface.\\n\\n\`\`\`$_sb_out\`\`\`\\n\\nFix: raise \`maxDiskBytes\`/\`highWaterBytes\` in \`openclaw-main.json\`/\`openclaw-edge.json\`, apply live with \`openclaw --profile <p> config set\`, then RESTART the gateway (the running daemon caches the budget). Never \`openclaw doctor --fix\`."
+      # Name BOTH caps and defer to the finding for which one is binding. Naming
+      # only maxDiskBytes here is what misdirected issue #829: main/scout was
+      # wedged by the ENTRY reaper while sitting at 17.6% of its disk budget, and
+      # the responder followed this text to a lever that changed nothing.
+      slack_notify_critical ":warning: *Session budget headroom* — an agent is at/over one of \`session.maintenance\`'s two per-agent caps (\`maxDiskBytes\` or \`maxEntries\`). Either reaper deletes cron session entries and wedges that agent's whole cron surface.\\n\\n\`\`\`$_sb_out\`\`\`\\n\\nFix: raise the cap the finding above actually names — \`maxEntries\` for a protected-entry finding, \`maxDiskBytes\`/\`highWaterBytes\` for a bytes finding; raising the one that is not binding changes nothing. Land it in \`openclaw-main.json\`/\`openclaw-edge.json\`, apply live with \`openclaw --profile <p> config set\`, then RESTART the gateway (the running daemon caches the budget). Never \`openclaw doctor --fix\`."
       mkdir -p "$(dirname "$SESSION_BUDGET_ALERT_STATE")" 2>/dev/null || true
       printf '%s' "$_sb_now" > "$SESSION_BUDGET_ALERT_STATE" 2>/dev/null || true
     else
