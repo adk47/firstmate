@@ -20,20 +20,27 @@ cron = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cron)
 
 CR_ID = "11111111-1111-4111-8111-111111111111"
-PROFILE_ID = "profile-1"
+PROFILE_ID = "33333333-3333-4333-8333-333333333333"
 
 
-def task():
+def task(automation_ready=True):
     action = {
         "action_type": "credit-verify",
         "customer_profile_id": PROFILE_ID,
-        "details": {"pending_credits": [{"cr_id": CR_ID}]},
+        "details": {
+            "pending_credits": [{"cr_id": CR_ID}],
+            "recommendation": "recommend-approve",
+        },
     }
     return {
         "id": "ticket-1",
         "description": f"---ACTION-REQUEST---\n{json.dumps(action)}\n---END-ACTION-REQUEST---",
         "status": {"status": "to do"},
-        "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"}],
+        "tags": [
+            {"name": "hydra-action-request"},
+            {"name": "action:credit-verify"},
+            *([{"name": "automation:uvn-under30"}] if automation_ready else []),
+        ],
     }
 
 
@@ -80,8 +87,17 @@ class CronOrchestrationTests(unittest.TestCase):
         self.assertEqual(approve.call_args.args[2], [CR_ID])
         update.assert_called_once()
         self.assertTrue(update.call_args.args[3])
-        self.assertIn("1 approval(s) confirmed by readback", output)
-        self.assertIn("rejects: 0", output)
+        self.assertEqual(
+            output.strip(),
+            "\n".join([
+                "Credit verification check complete.",
+                "• Tickets ready for automatic review: 1",
+                "• Requests approved after confirming live Spotify popularity below 30: 1",
+                "• Tickets resolved: 1",
+                "• Tickets still open: 0",
+                "No credits were rejected.",
+            ]),
+        )
 
     def test_fraud_marker_prevents_approval_and_ticket_write(self):
         rc, output, approve, update = self.run_main(
@@ -114,8 +130,194 @@ class CronOrchestrationTests(unittest.TestCase):
         update.assert_called_once()
         self.assertFalse(update.call_args.args[3])
 
+    def test_ticket_without_automation_eligibility_tag_is_left_for_manual_review(self):
+        output = io.StringIO()
+        with (
+            patch.object(cron, "load_fraud_ids", return_value=set()),
+            patch.object(cron, "list_todo_tickets", return_value=[task(automation_ready=False)]),
+            patch.object(cron, "get_task_and_comments") as get_task,
+            redirect_stdout(output),
+        ):
+            rc = cron.run_locked("run-1")
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(output.getvalue().strip(), "NO_REPLY")
+        get_task.assert_not_called()
+
+    def test_ticket_removed_from_automation_between_list_and_detail_is_ignored(self):
+        for current_task in [task(automation_ready=False), {**task(), "status": {"status": "resolved"}}]:
+            with self.subTest(current_task=current_task):
+                output = io.StringIO()
+                with (
+                    patch.object(cron, "load_fraud_ids", return_value=set()),
+                    patch.object(cron, "list_todo_tickets", return_value=[task()]),
+                    patch.object(cron, "get_task_and_comments", return_value=(current_task, [])),
+                    patch.object(cron, "update_ticket") as update,
+                    redirect_stdout(output),
+                ):
+                    rc = cron.run_locked("run-1")
+
+                self.assertEqual(rc, 0)
+                self.assertEqual(output.getvalue().strip(), "NO_REPLY")
+                update.assert_not_called()
+
+    def test_ticket_removed_during_scope_recheck_is_ignored(self):
+        for current_task in [task(automation_ready=False), {**task(), "status": {"status": "resolved"}}]:
+            with self.subTest(current_task=current_task):
+                output = io.StringIO()
+                with (
+                    patch.object(cron, "load_fraud_ids", return_value=set()),
+                    patch.object(cron, "list_todo_tickets", return_value=[task()]),
+                    patch.object(
+                        cron,
+                        "get_task_and_comments",
+                        side_effect=[(task(), []), (current_task, [])],
+                    ),
+                    patch.object(cron, "list_profile_requests", return_value={CR_ID: credit()}),
+                    patch.object(cron, "update_ticket") as update,
+                    redirect_stdout(output),
+                ):
+                    rc = cron.run_locked("run-1")
+
+                self.assertEqual(rc, 0)
+                self.assertEqual(output.getvalue().strip(), "NO_REPLY")
+                update.assert_not_called()
+
+    def test_mid_run_fraud_truth_failure_still_fails_the_cron(self):
+        output = io.StringIO()
+        with (
+            patch.object(
+                cron,
+                "load_fraud_ids",
+                side_effect=[set(), cron.PolicyError("malformed truth floor")],
+            ),
+            patch.object(cron, "list_todo_tickets", return_value=[task()]),
+            patch.object(cron, "get_task_and_comments", return_value=(task(), [])),
+            patch.object(cron, "list_profile_requests", return_value={CR_ID: credit()}),
+            patch.object(cron, "update_ticket"),
+            redirect_stdout(output),
+        ):
+            rc = cron.run_locked("run-1")
+
+        self.assertEqual(rc, 1)
+        self.assertIn("Credit verification automation needs attention.", output.getvalue())
+
+    def test_policy_failure_posts_a_plain_english_summary_for_manual_review(self):
+        output = io.StringIO()
+        with (
+            patch.object(cron, "load_fraud_ids", return_value=set()),
+            patch.object(cron, "list_todo_tickets", return_value=[task()]),
+            patch.object(cron, "get_task_and_comments", return_value=(task(), [])),
+            patch.object(cron, "parse_ticket_scope", side_effect=cron.PolicyError("bad scope")),
+            patch.object(cron, "update_ticket"),
+            patch.object(cron, "remove_automation_tag") as remove_tag,
+            redirect_stdout(output),
+        ):
+            rc = cron.run_locked("run-1")
+
+        self.assertEqual(rc, 0)
+        remove_tag.assert_called_once_with("run-1", "ticket-1")
+        self.assertEqual(
+            output.getvalue().strip(),
+            "\n".join([
+                "Credit verification automation needs attention.",
+                "1 ticket could not be processed safely and is still open for manual review.",
+                "• Tickets ready for automatic review: 1",
+                "• Requests approved after confirming live Spotify popularity below 30: 0",
+                "• Tickets resolved: 0",
+                "• Tickets still open: 1",
+                "No credits were rejected.",
+            ]),
+        )
+
+    def test_runtime_failure_posts_the_summary_and_still_fails_the_cron(self):
+        output = io.StringIO()
+        with (
+            patch.object(cron, "load_fraud_ids", return_value=set()),
+            patch.object(cron, "list_todo_tickets", return_value=[task()]),
+            patch.object(cron, "get_task_and_comments", side_effect=cron.RunError("bad scope")),
+            patch.object(cron, "update_ticket"),
+            patch.object(cron, "remove_automation_tag") as remove_tag,
+            redirect_stdout(output),
+        ):
+            rc = cron.run_locked("run-1")
+
+        self.assertEqual(rc, 1)
+        remove_tag.assert_not_called()
+        self.assertEqual(
+            output.getvalue().strip(),
+            "\n".join([
+                "Credit verification automation needs attention.",
+                "1 ticket could not be processed safely and is still open for manual review.",
+                "• Tickets ready for automatic review: 0",
+                "• Requests approved after confirming live Spotify popularity below 30: 0",
+                "• Tickets resolved: 0",
+                "• Tickets still open: 1",
+                "No credits were rejected.",
+            ]),
+        )
+
+    def test_failed_manual_review_comment_keeps_ticket_enrolled_for_retry(self):
+        output = io.StringIO()
+        with (
+            patch.object(cron, "load_fraud_ids", return_value=set()),
+            patch.object(cron, "list_todo_tickets", return_value=[task()]),
+            patch.object(cron, "get_task_and_comments", return_value=(task(), [])),
+            patch.object(cron, "parse_ticket_scope", side_effect=cron.PolicyError("bad scope")),
+            patch.object(cron, "update_ticket", side_effect=cron.RunError("comment failed")),
+            patch.object(cron, "remove_automation_tag") as remove_tag,
+            redirect_stdout(output),
+        ):
+            rc = cron.run_locked("run-1")
+
+        self.assertEqual(rc, 1)
+        remove_tag.assert_not_called()
+
+
+class TicketWriteTests(unittest.TestCase):
+    def test_policy_handoff_removes_only_the_automation_tag(self):
+        with (
+            patch.object(cron, "audit") as audit,
+            patch.object(cron, "clickup") as clickup,
+        ):
+            cron.remove_automation_tag("run-1", "ticket-1")
+
+        clickup.assert_called_once_with(
+            "DELETE",
+            "/task/ticket-1/tag/automation%3Auvn-under30",
+        )
+        self.assertEqual(audit.call_count, 2)
+
 
 class SharedLockEntrypointTests(unittest.TestCase):
+    def test_startup_failure_summary_is_plain_english(self):
+        self.assertEqual(
+            cron.render_startup_failure("backend timed out"),
+            "\n".join([
+                "Credit verification automation needs attention.",
+                "The automatic check could not start, so no tickets were reviewed or changed.",
+                "No credits were approved or rejected.",
+                "Technical details: backend timed out",
+            ]),
+        )
+
+    def test_initial_dependency_timeout_is_reported_without_a_traceback(self):
+        output = io.StringIO()
+        with (
+            patch.object(cron, "load_required_fraud_ids", return_value=set()),
+            patch.object(
+                cron,
+                "list_todo_tickets",
+                side_effect=subprocess.TimeoutExpired(["muso"], 120),
+            ),
+            redirect_stdout(output),
+        ):
+            rc = cron.run_locked("run-1")
+
+        self.assertEqual(rc, 1)
+        self.assertIn("The automatic check could not start", output.getvalue())
+        self.assertNotIn("Traceback", output.getvalue())
+
     def test_real_entrypoint_fails_before_external_boundaries_when_lock_is_held(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

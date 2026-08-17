@@ -67,6 +67,28 @@ function ticketResult(r: CreateTicketResult): AgentToolResult<unknown> {
 // Caroline from filing would *cause* dropped customers, the exact harm we're
 // fixing. profile-merge has its own richer gate above.
 const PROFILE_ANCHOR_REQUIRED = new Set(["profile-update", "bulk-credit-change", "unmerge-request"]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// A credit-verification ticket remains a valid human-review handoff even when
+// it lacks exact request ids. Only the stricter shape below may opt into the
+// autonomous UVN under-30 runner. The runner re-validates the same scope before
+// every write, so this tag is an eligibility marker rather than authorization.
+function hasAutomationReadyUvnScope(
+  actionType: string,
+  customerProfileId: string | undefined,
+  details: Record<string, unknown> | undefined,
+): boolean {
+  if (actionType !== "credit-verify" || !customerProfileId || !UUID_RE.test(customerProfileId)) {
+    return false;
+  }
+  if (details?.recommendation !== "recommend-approve") return false;
+  const pending = details?.pending_credits;
+  return Array.isArray(pending) && pending.length > 0 && pending.every((item) => {
+    if (typeof item !== "object" || item === null) return false;
+    const requestId = (item as Record<string, unknown>).cr_id;
+    return typeof requestId === "string" && UUID_RE.test(requestId);
+  });
+}
 
 // A profile merge's "main" profile (this ticket's required field) and its
 // "survivor" (the name dedupe_check and the profiles_consolidate tool use) are
@@ -425,6 +447,10 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       const gist = params.titleGist?.trim() || params.summary;
       const customerName =
         typeof params.details?.customer_name === "string" ? params.details.customer_name : undefined;
+      const tags = buildTicketTags({ actionType: params.actionType, tier, details });
+      if (hasAutomationReadyUvnScope(params.actionType, params.customerProfileId, details)) {
+        tags.push("automation:uvn-under30");
+      }
 
       const body: Record<string, unknown> = {
         name: buildTicketTitle({ actionType: params.actionType, gist, customerEmail: params.customerEmail }),
@@ -433,7 +459,7 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         priority,
         due_date: slaDueDateMs(tier, Date.now()),
         due_date_time: false,
-        tags: buildTicketTags({ actionType: params.actionType, tier, details: params.details }),
+        tags,
         custom_fields: customFields,
       };
       if (params.actionType === "profile-merge" && profileMergeAssigneeId) {

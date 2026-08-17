@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from uvn_under30_policy import (
     APPROVED,
@@ -49,9 +49,14 @@ AUDIT_ROOT = Path(os.environ.get(
 ))
 WRITE_LOCK_PATH = Path(os.environ.get("CV_CREDIT_WRITE_LOCK_PATH", "/var/lib/hydra/credit-status-writes.lock"))
 UNRESOLVED_PATH = Path(os.environ.get("UVN_UNRESOLVED_PATH", "/var/lib/hydra/uvn-under30-unresolved.json"))
+AUTOMATION_TAG = "automation:uvn-under30"
 
 
 class RunError(RuntimeError):
+    pass
+
+
+class TicketNoLongerEligible(RuntimeError):
     pass
 
 
@@ -123,6 +128,17 @@ def list_todo_tickets() -> list[dict[str, Any]]:
     raise RunError("ClickUp pagination exceeded 100 pages")
 
 
+def is_automation_ready_task(task: dict[str, Any]) -> bool:
+    tags = {
+        str(tag.get("name", "")).strip().lower()
+        for tag in task.get("tags", [])
+        if isinstance(tag, dict)
+    }
+    required_tags = {"hydra-action-request", "action:credit-verify", AUTOMATION_TAG}
+    status = str(task.get("status", {}).get("status", "")).strip().lower()
+    return status == "to do" and required_tags.issubset(tags)
+
+
 def get_task_and_comments(task_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     task = clickup("GET", f"/task/{task_id}")
     if not isinstance(task, dict):
@@ -147,6 +163,13 @@ def get_task_and_comments(task_id: str) -> tuple[dict[str, Any], list[dict[str, 
         seen_cursors.add(cursor)
         query = [f"start={start}", f"start_id={start_id}"]
     raise RunError(f"ClickUp comment pagination exceeded 100 pages for {task_id}")
+
+
+def load_required_fraud_ids() -> set[str]:
+    try:
+        return load_fraud_ids(FRAUD_ROOT, FRAUD_ATTEMPT_PATH)
+    except PolicyError as exc:
+        raise RunError(f"fraud safety data is unavailable: {exc}") from exc
 
 
 def list_profile_requests(profile_id: str) -> dict[str, dict[str, Any]]:
@@ -356,6 +379,8 @@ def assert_ticket_scope(
     expected_ids: set[str],
 ) -> None:
     task, comments = get_task_and_comments(task_id)
+    if not is_automation_ready_task(task):
+        raise TicketNoLongerEligible
     profile_id, scoped_ids = parse_ticket_scope(task, comments)
     if profile_id != expected_profile_id or scoped_ids != expected_ids:
         raise PolicyError("ticket scope changed during the run")
@@ -405,32 +430,77 @@ def update_ticket(
     return resolve
 
 
+def remove_automation_tag(run_id: str, task_id: str) -> None:
+    audit(run_id, "automation_tag_remove_planned", {"ticket_id": task_id, "tag": AUTOMATION_TAG})
+    clickup("DELETE", f"/task/{task_id}/tag/{quote(AUTOMATION_TAG, safe='')}")
+    audit(run_id, "automation_tag_remove_complete", {"ticket_id": task_id, "tag": AUTOMATION_TAG})
+
+
+def render_summary(
+    scanned: int,
+    approved_count: int,
+    resolved: int,
+    remaining: int,
+    failures: int,
+) -> str:
+    lines = [
+        (
+            "Credit verification automation needs attention."
+            if failures
+            else "Credit verification check complete."
+        )
+    ]
+    if failures:
+        ticket_word = "ticket" if failures == 1 else "tickets"
+        verb = "is" if failures == 1 else "are"
+        lines.append(
+            f"{failures} {ticket_word} could not be processed safely and {verb} still open "
+            "for manual review."
+        )
+    lines.extend([
+        f"• Tickets ready for automatic review: {scanned}",
+        f"• Requests approved after confirming live Spotify popularity below 30: {approved_count}",
+        f"• Tickets resolved: {resolved}",
+        f"• Tickets still open: {remaining}",
+        "No credits were rejected.",
+    ])
+    return "\n".join(lines)
+
+
+def render_startup_failure(reason: object) -> str:
+    detail = str(reason).strip()[:300] or "unknown error"
+    return "\n".join([
+        "Credit verification automation needs attention.",
+        "The automatic check could not start, so no tickets were reviewed or changed.",
+        "No credits were approved or rejected.",
+        f"Technical details: {detail}",
+    ])
+
+
 def run_locked(run_id: str) -> int:
-    scanned = approved_count = resolved = remaining = failures = 0
+    scanned = approved_count = resolved = remaining = failures = hard_failures = 0
     changed = False
     try:
         # Validate the landed fraud truth floor before inspecting any ticket;
         # each approval chunk reloads it again at the write boundary.
-        load_fraud_ids(FRAUD_ROOT, FRAUD_ATTEMPT_PATH)
+        load_required_fraud_ids()
         tickets = list_todo_tickets()
-    except (PolicyError, RunError, OSError) as exc:
-        print(f"UVN under-30 cron failed before writes: {exc}")
+    except (PolicyError, RunError, OSError, subprocess.TimeoutExpired) as exc:
+        print(render_startup_failure(exc))
         return 1
 
     for listed_task in tickets:
         task_id = str(listed_task.get("id", ""))
-        tags = {
-            str(tag.get("name", "")).strip().lower()
-            for tag in listed_task.get("tags", [])
-            if isinstance(tag, dict)
-        }
-        if not task_id or not {"hydra-action-request", "action:credit-verify"}.issubset(tags):
+        if not task_id or not is_automation_ready_task(listed_task):
             continue
-        scanned += 1
         ticket_approved: list[str] = []
         failure: str | None = None
+        remove_eligibility = False
         try:
             task, comments = get_task_and_comments(task_id)
+            if not is_automation_ready_task(task):
+                continue
+            scanned += 1
             profile_id, scoped_ids = parse_ticket_scope(task, comments)
             rows = list_profile_requests(profile_id)
             assert_rows_match_scope(profile_id, scoped_ids, rows)
@@ -449,7 +519,7 @@ def run_locked(run_id: str) -> int:
             for index in range(0, len(candidates), 50):
                 planned_chunk = candidates[index:index + 50]
                 assert_ticket_scope(task_id, profile_id, scoped_ids)
-                current_fraud_ids = load_fraud_ids(FRAUD_ROOT, FRAUD_ATTEMPT_PATH)
+                current_fraud_ids = load_required_fraud_ids()
                 current_rows = list_profile_requests(profile_id)
                 assert_rows_match_scope(profile_id, scoped_ids, current_rows)
                 live_by_track: dict[str, dict[str, Any]] = {}
@@ -467,7 +537,7 @@ def run_locked(run_id: str) -> int:
                 # fraud marker, hard-reject signal, or track binding to change.
                 # Re-read all mutable policy inputs once more at the write edge.
                 assert_ticket_scope(task_id, profile_id, scoped_ids)
-                current_fraud_ids = load_fraud_ids(FRAUD_ROOT, FRAUD_ATTEMPT_PATH)
+                current_fraud_ids = load_required_fraud_ids()
                 current_rows = list_profile_requests(profile_id)
                 assert_rows_match_scope(profile_id, scoped_ids, current_rows)
                 safe_chunk: list[str] = []
@@ -501,10 +571,11 @@ def run_locked(run_id: str) -> int:
                 and not scoped_ids.intersection(load_unresolved_ids())
             )
             if ticket_approved or should_resolve:
+                request_word = "request" if len(ticket_approved) == 1 else "requests"
                 comment = (
-                    f"UVN popularity automation {run_id}: {len(ticket_approved)} request(s) "
-                    f"approved with live Spotify popularity below 30 and authoritative readback. "
-                    f"Rejected: 0. {'All structured request IDs are approved; resolving.' if should_resolve else 'Ticket remains TO DO.'}"
+                    f"Automated credit check {run_id}: approved {len(ticket_approved)} {request_word} "
+                    "because live Spotify popularity was below 30, then confirmed the new status. "
+                    f"No credits were rejected. {'All requests on this ticket are approved, so it is being resolved.' if should_resolve else 'The ticket remains open for review.'}"
                 )
                 actually_resolved = update_ticket(
                     run_id,
@@ -521,31 +592,48 @@ def run_locked(run_id: str) -> int:
                 resolved += 1
             else:
                 remaining += 1
-        except (PolicyError, RunError, OSError, subprocess.TimeoutExpired) as exc:
+        except TicketNoLongerEligible:
+            continue
+        except PolicyError as exc:
             failures += 1
             remaining += 1
             failure = str(exc)
+            remove_eligibility = True
+        except (RunError, OSError, subprocess.TimeoutExpired) as exc:
+            failures += 1
+            hard_failures += 1
+            remaining += 1
+            failure = str(exc)
         if failure:
+            comment_written = False
             try:
                 update_ticket(
                     run_id,
                     task_id,
-                    f"UVN popularity automation {run_id}: no rejection was made; ticket remains TO DO because {failure[:300]}",
+                    f"Automated credit check {run_id}: this ticket could not be processed safely, "
+                    "so it remains open for manual review. No credits were rejected. "
+                    f"Reason: {failure[:300]}",
                     False,
                 )
                 changed = True
-            except (RunError, OSError):
-                pass
+                comment_written = True
+            except (RunError, OSError, subprocess.TimeoutExpired):
+                hard_failures += 1
+            if remove_eligibility and comment_written:
+                try:
+                    remove_automation_tag(run_id, task_id)
+                    changed = True
+                except (RunError, OSError, subprocess.TimeoutExpired):
+                    hard_failures += 1
 
     if not changed and failures == 0:
         print("NO_REPLY")
         return 0
-    print(
-        f"UVN under-30 pass: {scanned} ticket(s) scanned; {approved_count} approval(s) "
-        f"confirmed by readback; {resolved} ticket(s) resolved; {remaining} remain TO DO; "
-        f"rejects: 0; failures: {failures}."
-    )
-    return 1 if failures else 0
+    print(render_summary(scanned, approved_count, resolved, remaining, failures))
+    # A policy mismatch is a successful fail-closed handoff: the ticket stays
+    # open, gets a plain-English explanation, and the same summary reaches
+    # Slack. Runtime and dependency failures still fail the cron for paging.
+    return 1 if hard_failures else 0
 
 
 def main() -> int:
@@ -554,8 +642,8 @@ def main() -> int:
     try:
         with credit_write_lock():
             return run_locked(run_id)
-    except (PolicyError, RunError, OSError) as exc:
-        print(f"UVN under-30 cron failed before writes: {exc}")
+    except (PolicyError, RunError, OSError, subprocess.TimeoutExpired) as exc:
+        print(render_startup_failure(exc))
         return 1
 
 

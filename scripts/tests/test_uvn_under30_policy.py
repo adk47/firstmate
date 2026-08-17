@@ -20,18 +20,28 @@ from uvn_under30_policy import (  # noqa: E402
 
 CR1 = "11111111-1111-4111-8111-111111111111"
 CR2 = "22222222-2222-4222-8222-222222222222"
+PROFILE1 = "33333333-3333-4333-8333-333333333333"
+PROFILE2 = "44444444-4444-4444-8444-444444444444"
 
 
-def block(ids=None, profile="profile-1", action_type="credit-verify"):
+def block(
+    ids=None,
+    profile=PROFILE1,
+    action_type="credit-verify",
+    recommendation="recommend-approve",
+):
     payload = {
         "action_type": action_type,
         "customer_profile_id": profile,
-        "details": {"pending_credits": [{"cr_id": value} for value in (ids or [CR1])]},
+        "details": {
+            "pending_credits": [{"cr_id": value} for value in (ids or [CR1])],
+            "recommendation": recommendation,
+        },
     }
     return f"---ACTION-REQUEST---\n{json.dumps(payload)}\n---END-ACTION-REQUEST---"
 
 
-def update_block(ids=None, profile="profile-1"):
+def update_block(ids=None, profile=PROFILE1):
     payload = {
         "action_type": "credit-verify",
         "customer_profile_id": profile,
@@ -44,14 +54,20 @@ def task(description=None, tags=None, status="to do"):
     return {
         "description": description or block(),
         "status": {"status": status},
-        "tags": [{"name": value} for value in (tags or ["hydra-action-request", "action:credit-verify"])],
+        "tags": [
+            {"name": value}
+            for value in (
+                tags
+                or ["hydra-action-request", "action:credit-verify", "automation:uvn-under30"]
+            )
+        ],
     }
 
 
 def row(**overrides):
     value = {
         "id": CR1,
-        "profileId": "profile-1",
+        "profileId": PROFILE1,
         "status": "user_verification_needed",
         "spotifyTrackId": "spotify-1",
         "spotifyPopularity": 1,
@@ -72,12 +88,69 @@ class TicketScopeTests(unittest.TestCase):
             task(description=block()),
             [{"comment_text": "customer prose with an unrelated UUID\n" + update_block()}],
         )
-        self.assertEqual(profile, "profile-1")
+        self.assertEqual(profile, PROFILE1)
         self.assertEqual(ids, {CR1, CR2})
 
-    def test_requires_both_exact_tags(self):
+    def test_requires_explicit_automation_eligibility_tag(self):
         with self.assertRaises(PolicyError):
-            parse_ticket_scope(task(tags=["action:credit-verify"]), [])
+            parse_ticket_scope(task(tags=["hydra-action-request", "action:credit-verify"]), [])
+
+    def test_evidence_only_update_does_not_replace_the_original_scope(self):
+        payload = {
+            "action_type": "credit-verify",
+            "customer_profile_id": PROFILE1,
+            "details": {"proof": {"kind": "private", "attachments_referenced": True}},
+        }
+        comment = {
+            "comment_text": (
+                f"---ACTION-REQUEST-UPDATE---\n{json.dumps(payload)}\n"
+                "---END-ACTION-REQUEST-UPDATE---"
+            )
+        }
+
+        profile, ids = parse_ticket_scope(task(), [comment])
+
+        self.assertEqual(profile, PROFILE1)
+        self.assertEqual(ids, {CR1})
+
+    def test_base_needs_human_recommendation_is_not_automation_eligible(self):
+        with self.assertRaisesRegex(PolicyError, "requires human review"):
+            parse_ticket_scope(task(description=block(recommendation="needs-human")), [])
+
+    def test_evidence_only_update_can_downgrade_ticket_to_human_review(self):
+        payload = {
+            "action_type": "credit-verify",
+            "customer_profile_id": PROFILE1,
+            "details": {
+                "recommendation": "needs-human",
+                "reason": "possible credit-theft / contradicting credit",
+            },
+        }
+        comment = {
+            "comment_text": (
+                f"---ACTION-REQUEST-UPDATE---\n{json.dumps(payload)}\n"
+                "---END-ACTION-REQUEST-UPDATE---"
+            )
+        }
+
+        with self.assertRaisesRegex(PolicyError, "requires human review"):
+            parse_ticket_scope(task(), [comment])
+
+    def test_scope_changing_update_requires_a_profile(self):
+        payload = {
+            "action_type": "credit-verify",
+            "customer_profile_id": None,
+            "details": {"pending_credits": [{"cr_id": CR2}]},
+        }
+        comment = {
+            "comment_text": (
+                f"---ACTION-REQUEST-UPDATE---\n{json.dumps(payload)}\n"
+                "---END-ACTION-REQUEST-UPDATE---"
+            )
+        }
+
+        with self.assertRaises(PolicyError):
+            parse_ticket_scope(task(), [comment])
 
     def test_rejects_malformed_structured_update(self):
         with self.assertRaises(PolicyError):
@@ -85,7 +158,7 @@ class TicketScopeTests(unittest.TestCase):
 
     def test_rejects_cross_profile_updates(self):
         with self.assertRaises(PolicyError):
-            parse_ticket_scope(task(), [{"comment_text": update_block(profile="profile-2")}])
+            parse_ticket_scope(task(), [{"comment_text": update_block(profile=PROFILE2)}])
 
 
 class QualificationTests(unittest.TestCase):
