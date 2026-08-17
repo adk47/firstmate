@@ -19,9 +19,9 @@
     "profiles": {},
     "order": {
       "openai": [
-        "openai:aaronkaufman@me.com",
+        "openai:aaron@muso.ai",
         "openai:aarondkaufman@gmail.com",
-        "openai:aaron@muso.ai"
+        "openai:aaronkaufman@me.com"
       ]
     }
   },
