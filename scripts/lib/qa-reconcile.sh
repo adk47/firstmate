@@ -532,6 +532,84 @@ qar_state_set_stage_failure_count() {
   fi
 }
 
+# ── Read-failure PAGE dedupe ───────────────────────────────────────────────
+# The counters above are the DETECTION record and must keep incrementing every
+# tick — but the page built off them must not. Both read-failure watchdogs
+# re-page on EVERY tick once their counter is at/over the threshold, and the
+# reconciler ticks every 15 minutes, so a sustained upstream failure posts ~2
+# messages per affected repo per tick indefinitely. On 2026-08-17 a GitHub
+# incident (Issues/PRs/Actions major outage; api.github.com answering 404 then
+# 503 on repos/*/commits for private org repos) put 9 repos over the threshold
+# at once — ~18 pages every 15 minutes about a single upstream event nobody
+# could act on. That is the failure mode cron-health-watchdog.sh already names:
+# "an undeduped page would post ~288 times a day and train everyone to ignore
+# it" — and an alert people have learned to ignore is indistinguishable from
+# the silent loss this reconciler exists to kill.
+#
+# Stamped per (repo, stage) — the same granularity the page is emitted at, so
+# one noisy repo can never suppress a genuinely different repo's first page.
+# The aggregate (candidate) watchdog stamps under the reserved pseudo-stage
+# "__candidate__", which cannot collide with a real stage name.
+#
+# The stamp is CLEARED whenever the underlying counter resets to 0 (see
+# qar_state_set_stage_failure_count / ..._repo_candidate_failure_count callers
+# in qa-review-reconcile.sh): a repo that breaks, recovers, and breaks again an
+# hour later must page again immediately. Without that clear, the dedupe would
+# convert a real second incident into silence for the rest of the interval.
+
+# qar_state_read_fail_last_alert <state-json> <repo> <stage> — echo the epoch
+# at which this (repo, stage) last PAGED for a read failure, 0 if never.
+qar_state_read_fail_last_alert() {
+  jq -r --arg r "$2" --arg s "$3" '(.__meta__.read_fail_last_alert[$r][$s] // 0)' <<<"$1" 2>/dev/null || echo 0
+}
+
+# qar_state_set_read_fail_last_alert <state-json> <repo> <stage> <epoch> — echo
+# new state with that stamp set. epoch=0 removes the entry (and the repo entry
+# once empty) rather than storing an explicit zero, mirroring
+# qar_state_set_stage_failure_count, so the map only ever lists (repo, stage)
+# pairs with a live suppression window.
+qar_state_set_read_fail_last_alert() {
+  local state="$1" repo="$2" stage="$3" epoch="$4"
+  if [ "$epoch" -eq 0 ]; then
+    jq -c --arg r "$repo" --arg s "$stage" '
+      .__meta__.read_fail_last_alert = ((.__meta__.read_fail_last_alert // {})
+        | .[$r] = ((.[$r] // {}) | del(.[$s]))
+        | if (.[$r] // {}) == {} then del(.[$r]) else . end)
+    ' <<<"$state" 2>/dev/null
+  else
+    jq -c --arg r "$repo" --arg s "$stage" --argjson e "$epoch" '
+      .__meta__.read_fail_last_alert = ((.__meta__.read_fail_last_alert // {}) | .[$r] = ((.[$r] // {}) | .[$s] = $e))
+    ' <<<"$state" 2>/dev/null
+  fi
+}
+
+# qar_read_fail_should_page <last-epoch> <now-epoch> <interval-s> — rc 0 when a
+# page is due (never paged, or the interval has elapsed), rc 1 to suppress.
+# Non-numeric/garbage state is treated as "never paged" (rc 0): under-alerting
+# is the dangerous direction here, so an unreadable stamp must fail toward
+# paging, never toward silence.
+qar_read_fail_should_page() {
+  local last="$1" now="$2" interval="$3"
+  case "$last" in (*[!0-9]*|"") return 0 ;; esac
+  case "$now" in (*[!0-9]*|"") return 0 ;; esac
+  case "$interval" in (*[!0-9]*|"") return 0 ;; esac
+  [ $((now - last)) -ge "$interval" ]
+}
+
+# qar_state_prune_read_fail_alerts <state-json> <repos-newline-list> — echo new
+# state with __meta__.read_fail_last_alert restricted to repos still in scope,
+# mirroring qar_state_prune_stage_failures so a de-allowlisted repo cannot
+# leave a stamp growing the state file forever.
+qar_state_prune_read_fail_alerts() {
+  local state="$1" repos="$2" repos_json
+  repos_json="$(printf '%s\n' "$repos" | grep -v '^$' | jq -R -s -c 'split("\n") | map(select(length > 0))' 2>/dev/null)" || repos_json='[]'
+  jq -c --argjson repos "$repos_json" '
+    if (.__meta__.read_fail_last_alert // null) == null then .
+    else .__meta__.read_fail_last_alert = ((.__meta__.read_fail_last_alert // {}) | with_entries(select(.key as $k | $repos | index($k) != null)))
+    end
+  ' <<<"$state" 2>/dev/null
+}
+
 # qar_state_prune_stage_failures <state-json> <repos-newline-list> — echo new
 # state with __meta__.stage_failures restricted to repos still in scope, so a
 # repo dropped from the allowlist cannot leave a stage-failure row growing

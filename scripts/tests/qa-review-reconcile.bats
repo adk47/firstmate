@@ -480,6 +480,22 @@ STUB
   chmod +x "$STUBBIN/muso"
   export MUSO_SLACK_BOT_TOKEN_DEVOPS="fake-token-for-tests"
 
+  # --- curl stub (githubstatus.com probe) -----------------------------------
+  # Stubbed unconditionally so the suite NEVER reaches the real network: an
+  # un-stubbed probe would make CI's verdict depend on GitHub's live status
+  # page, which is exactly the kind of hidden external dependency this suite
+  # exists to keep out. Default = "All Systems Operational" so pre-existing
+  # tests see the local-cause wording.
+  export CURL_CALLS="$TEST_TMPDIR/curl_calls"; : > "$CURL_CALLS"
+  cat > "$STUBBIN/curl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$CURL_CALLS"
+[ -n "${STUB_GH_STATUS_FAIL:-}" ] && exit 1
+if [ -n "${STUB_GH_STATUS_BODY:-}" ]; then printf '%s' "$STUB_GH_STATUS_BODY"; exit 0; fi
+printf '%s' '{"status":{"description":"All Systems Operational"},"components":[]}'
+STUB
+  chmod +x "$STUBBIN/curl"
+
   # --- allowlist stub --------------------------------------------------------
   ALLOWLIST_STUB="$TEST_TMPDIR/allowlist.sh"
   cat > "$ALLOWLIST_STUB" <<'STUB'
@@ -554,7 +570,11 @@ JSON
   export QA_RECONCILE_CRON_STALE_S=1800
   export QA_RECONCILE_AGE_CEILING_S=1209600
   export QA_RECONCILE_TICK_FAIL_THRESHOLD=3
-  unset STUB_SLACK_FAIL_ONCE STUB_SLACK_FAIL_ALWAYS STUB_REVIEWS_FAIL STUB_STATUS_FAIL STUB_STATUS_MALFORMED STUB_TIMELINE_FAIL STUB_COMMIT_FAIL STUB_CRON_JSON STUB_CRON_FAIL STUB_ALLOWLIST_REPOS STUB_DEFAULT_COMMIT_DATE STUB_AUTHOR_FAIL_RC STUB_PRLIST_FAIL_REPOS
+  unset STUB_SLACK_FAIL_ONCE STUB_SLACK_FAIL_ALWAYS STUB_REVIEWS_FAIL STUB_STATUS_FAIL STUB_STATUS_MALFORMED STUB_TIMELINE_FAIL STUB_COMMIT_FAIL STUB_CRON_JSON STUB_CRON_FAIL STUB_ALLOWLIST_REPOS STUB_DEFAULT_COMMIT_DATE STUB_AUTHOR_FAIL_RC STUB_PRLIST_FAIL_REPOS STUB_GH_STATUS_FAIL STUB_GH_STATUS_BODY
+  # Long enough that every pre-existing test keeps its single-page semantics
+  # (each seeds a fresh state dir, so nothing is ever suppressed by inheritance);
+  # the dedupe tests below set their own value.
+  export QA_RECONCILE_READ_FAIL_ALERT_INTERVAL=21600
 }
 
 teardown() { rm -rf "$TEST_TMPDIR"; }
@@ -1487,4 +1507,149 @@ JSON
   [ -s "$SLACK_CALLS" ]
   survived="$(jq -r --arg k "$stale_key" '.[$k].attempts // "MISSING"' "$QA_RECONCILE_STATE_FILE")"
   [ "$survived" = "1" ]
+}
+
+# ── Read-failure page dedupe + upstream attribution ────────────────────────
+# Regression cover for the 2026-08-17 GitHub incident: 9 repos crossed the
+# read-failure threshold at once and BOTH watchdogs re-paged every 15-min tick,
+# because the page was emitted straight off the counter with no rate limit.
+
+@test "e2e 38: a sustained read failure pages ONCE per interval, not every tick -- the detection counter keeps advancing while the page is suppressed" {
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="shadedupe000000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 51 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  export STUB_COMMIT_FAIL=1
+  base="$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))"
+  export QA_RECONCILE_NOW_EPOCH="$base"
+
+  # Ticks 1-2: below threshold, no page.
+  run "$SCRIPT" --once; [ "$status" -eq 0 ]
+  run "$SCRIPT" --once; [ "$status" -eq 0 ]
+  [ ! -s "$SLACK_CALLS" ]
+
+  # Tick 3: threshold reached -> pages (candidate + stage = 2 sends).
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  first_sends="$(wc -l < "$SLACK_CALLS")"
+  [ "$first_sends" -gt 0 ]
+
+  # Tick 4, 15 minutes later and still failing: the counter MUST advance (the
+  # detection record is what proves the outage is ongoing) but NO new page.
+  export QA_RECONCILE_NOW_EPOCH="$(( base + 900 ))"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"consecutive count now 4"* ]]
+  [[ "$output" == *"page suppressed for Muso-AI/core-backend"* ]]
+  [ "$(wc -l < "$SLACK_CALLS")" -eq "$first_sends" ]
+
+  # Still suppressed just before the interval elapses.
+  export QA_RECONCILE_NOW_EPOCH="$(( base + 21599 ))"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$SLACK_CALLS")" -eq "$first_sends" ]
+
+  # Once the 6h interval has elapsed the page repeats -- a still-broken repo
+  # must not go quiet forever.
+  export QA_RECONCILE_NOW_EPOCH="$(( base + 21600 ))"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$SLACK_CALLS")" -gt "$first_sends" ]
+}
+
+@test "e2e 39: recovery CLEARS the suppression window -- a repo that breaks, recovers, then breaks again inside the interval pages again immediately" {
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="sharecover00000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 52 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  export STUB_COMMIT_FAIL=1
+  base="$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))"
+  export QA_RECONCILE_NOW_EPOCH="$base"
+
+  run "$SCRIPT" --once; run "$SCRIPT" --once; run "$SCRIPT" --once
+  [ -s "$SLACK_CALLS" ]
+
+  # Recover: the stamp must be cleared alongside the counter.
+  unset STUB_COMMIT_FAIL
+  mk_commit "Muso-AI/core-backend" "$sha" "2026-01-01T00:00:00Z"
+  export QA_RECONCILE_NOW_EPOCH="$(( base + 900 ))"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.__meta__.read_fail_last_alert // {} | length' "$QA_RECONCILE_STATE_FILE")" -eq 0 ]
+
+  # Break again well inside the 6h window -- this is a NEW incident and must
+  # page on its own threshold run, not inherit the previous one's silence.
+  export STUB_COMMIT_FAIL=1
+  : > "$SLACK_CALLS"
+  export QA_RECONCILE_NOW_EPOCH="$(( base + 1800 ))"; run "$SCRIPT" --once
+  export QA_RECONCILE_NOW_EPOCH="$(( base + 2700 ))"; run "$SCRIPT" --once
+  [ ! -s "$SLACK_CALLS" ]
+  export QA_RECONCILE_NOW_EPOCH="$(( base + 3600 ))"; run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ -s "$SLACK_CALLS" ]
+}
+
+@test "e2e 40: read-failure page names an ACTIVE GitHub incident instead of blaming our token" {
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="shaoutage000000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 53 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  export STUB_COMMIT_FAIL=1
+  export STUB_GH_STATUS_BODY='{"status":{"description":"Partial System Outage"},"components":[{"name":"Pull Requests","status":"major_outage"},{"name":"API Requests","status":"degraded_performance"}]}'
+  base="$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))"
+  export QA_RECONCILE_NOW_EPOCH="$base"
+
+  run "$SCRIPT" --once; run "$SCRIPT" --once
+  run "$SCRIPT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ACTIVE INCIDENT"* ]]
+  [[ "$output" == *"Partial System Outage"* ]]
+  [[ "$output" == *"Pull Requests=major_outage"* ]]
+  # The old text asserted a local cause; it must no longer do so under an outage.
+  [[ "$output" != *"most likely LOCAL"* ]]
+}
+
+@test "e2e 41: an operational GitHub status keeps the LOCAL-cause hypothesis, and an unreadable status page is UNRESOLVED -- never silently 'healthy'" {
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="shastatus00000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 54 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  export STUB_COMMIT_FAIL=1
+  base="$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))"
+  export QA_RECONCILE_NOW_EPOCH="$base"
+
+  run "$SCRIPT" --once; run "$SCRIPT" --once
+  run "$SCRIPT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"most likely LOCAL"* ]]
+  [[ "$output" == *"permissions/token-scope/rate-limit"* ]]
+
+  # Probe fails -> the page must say so, and must NOT claim either cause.
+  export STUB_GH_STATUS_FAIL=1
+  run "$SCRIPT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"UNRESOLVED"* ]]
+  [[ "$output" != *"most likely LOCAL"* ]]
+  [[ "$output" != *"ACTIVE INCIDENT"* ]]
+}
+
+@test "e2e 42: the githubstatus probe runs at most ONCE per tick no matter how many repos page, and never at all when nothing pages" {
+  export STUB_ALLOWLIST_REPOS="$(printf 'Muso-AI/core-backend\nMuso-AI/feed-service')"
+  seed_epoch_state "Muso-AI/core-backend"
+  # seed_epoch_state writes a single-repo state; add the second repo's epoch.
+  jq '.__repo_epochs__["Muso-AI/feed-service"] = 1' "$QA_RECONCILE_STATE_FILE" > "$TEST_TMPDIR/s.json"
+  mv "$TEST_TMPDIR/s.json" "$QA_RECONCILE_STATE_FILE"
+  mk_pr_list "Muso-AI/core-backend" 55 "shaprobe0000000000000000000000000000001" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_pr_list "Muso-AI/feed-service" 56 "shaprobe0000000000000000000000000000002" main false nsollazzo "2026-01-01T00:00:00Z"
+  export STUB_COMMIT_FAIL=1
+  base="$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))"
+  export QA_RECONCILE_NOW_EPOCH="$base"
+
+  # Ticks below the threshold page nothing, so the probe must not fire at all.
+  run "$SCRIPT" --once; [ "$status" -eq 0 ]
+  [ ! -s "$CURL_CALLS" ]
+
+  run "$SCRIPT" --once; [ "$status" -eq 0 ]
+  : > "$CURL_CALLS"
+
+  # Threshold tick: 2 repos x 2 watchdogs = 4 pages, but ONE probe.
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$CURL_CALLS")" -eq 1 ]
 }

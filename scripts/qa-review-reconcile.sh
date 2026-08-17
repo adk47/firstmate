@@ -236,6 +236,12 @@ PAGE_CAP="${QA_RECONCILE_PAGE_CAP:-3}"
 CRON_STALE_S="${QA_RECONCILE_CRON_STALE_S:-1800}"
 AGE_CEILING_S="${QA_RECONCILE_AGE_CEILING_S:-1209600}"
 TICK_FAIL_THRESHOLD="${QA_RECONCILE_TICK_FAIL_THRESHOLD:-3}"
+# One read-failure page per (repo, stage) per this window. 6h matches
+# cron-health-watchdog.sh's SESSION_BUDGET_ALERT_INTERVAL — the same
+# slow-moving-signal-on-a-fast-tick shape. See the "Read-failure PAGE dedupe"
+# block in lib/qa-reconcile.sh for why this is load-bearing rather than taste.
+READ_FAIL_ALERT_INTERVAL="${QA_RECONCILE_READ_FAIL_ALERT_INTERVAL:-21600}"
+GITHUB_STATUS_URL="${QA_RECONCILE_GITHUB_STATUS_URL:-https://www.githubstatus.com/api/v2/summary.json}"
 PRLIST_LIMIT="${QA_RECONCILE_PRLIST_LIMIT:-300}"
 DRY_RUN=0
 
@@ -253,6 +259,70 @@ page() {
   # Best-effort, but never in dry-run: dry-run must page nothing.
   [ "$DRY_RUN" -eq 1 ] && { log "[dry-run] WOULD PAGE: $1"; return 0; }
   slack_notify_critical "$1" || true
+}
+
+# ── Upstream-attribution for read-failure pages ────────────────────────────
+# A read failure has two very different causes with identical local symptoms,
+# and the old page text asserted the wrong one. It guessed
+# "(permissions/token-scope/rate-limit?)" — all LOCAL causes — but on
+# 2026-08-17 the actual cause was a GitHub incident, and the tell was only
+# visible off-box: api.github.com answered 404 (not 5xx) on
+# repos/<org>/<repo>/commits for PRIVATE org repos while /contents on the same
+# repo, and /commits on PUBLIC repos, both stayed 200. That split is
+# impossible under any permission model, but it reads exactly like a revoked
+# scope, and the page pointed the reader straight at the wrong hypothesis.
+#
+# So: ask githubstatus.com and report what it actually said. Three outcomes,
+# never collapsed to two — "we could not measure it" is its own state, not a
+# synonym for healthy (the same rule codex-quota's cq_format_evidence enforces:
+# never render a fact the system did not measure).
+#
+# Probed at most ONCE per tick and cached in _GH_STATUS_NOTE.
+#
+# This deliberately SETS A GLOBAL and returns nothing, instead of the more
+# natural `note="$(github_status_note)"`. Command substitution forks a
+# subshell, so a cache flag set inside one never propagates back to the parent
+# — the memo would silently never hit and a 9-repo storm would make one probe
+# PER PAGE (4 probes for 4 pages, caught by e2e 42) rather than one per tick.
+# Callers must read $_GH_STATUS_NOTE directly, never $(...) this.
+_GH_STATUS_CHECKED=0
+_GH_STATUS_NOTE=""
+github_status_probe() {
+  [ "$_GH_STATUS_CHECKED" -eq 1 ] && return 0
+  _GH_STATUS_CHECKED=1
+  local body desc degraded
+  if ! body="$(curl -sS --max-time 10 "$GITHUB_STATUS_URL" 2>/dev/null)" || [ -z "$body" ]; then
+    _GH_STATUS_NOTE="GitHub status could not be read, so upstream-vs-local is UNRESOLVED — check https://www.githubstatus.com before suspecting our token."
+  elif ! desc="$(jq -re '.status.description // empty' <<<"$body" 2>/dev/null)"; then
+    _GH_STATUS_NOTE="GitHub status returned an unparseable response, so upstream-vs-local is UNRESOLVED — check https://www.githubstatus.com before suspecting our token."
+  elif [ "$desc" = "All Systems Operational" ]; then
+    _GH_STATUS_NOTE="GitHub status reports \"$desc\", so this is most likely LOCAL — suspect permissions/token-scope/rate-limit."
+  else
+    degraded="$(jq -r '[.components[]? | select(.status != "operational") | "\(.name)=\(.status)"] | join(", ")' <<<"$body" 2>/dev/null)"
+    _GH_STATUS_NOTE="GitHub is reporting an ACTIVE INCIDENT (\"$desc\"${degraded:+; $degraded}) — this is very likely UPSTREAM, not our token. Expect it to clear on its own; the counters reset on the first successful read."
+  fi
+  return 0
+}
+
+# page_read_failure <repo> <stage> <message> — page for a read failure, at most
+# once per (repo, stage) per READ_FAIL_ALERT_INTERVAL, appending what
+# githubstatus.com actually said. Reads and writes the caller's $state_json in
+# place (the repo loop is not a subshell, and state is written once at
+# end-of-tick), so a suppressed page leaves the stamp untouched.
+page_read_failure() {
+  local repo="$1" stage="$2" msg="$3" last
+  last="$(qar_state_read_fail_last_alert "$state_json" "$repo" "$stage")"
+  if ! qar_read_fail_should_page "$last" "$NOW_EPOCH" "$READ_FAIL_ALERT_INTERVAL"; then
+    log "read-failure page suppressed for $repo/$stage (last paged $((NOW_EPOCH - last))s ago, interval ${READ_FAIL_ALERT_INTERVAL}s) — detection counters still advancing."
+    return 0
+  fi
+  github_status_probe
+  page "$msg $_GH_STATUS_NOTE"
+  # page() no-ops under --dry-run, so a rehearsal must not advance the
+  # suppression stamp — doing so would let a dry run silence a real page.
+  if [ "$DRY_RUN" -eq 0 ]; then
+    state_json="$(qar_state_set_read_fail_last_alert "$state_json" "$repo" "$stage" "$NOW_EPOCH")"
+  fi
 }
 
 # page_confirmed <message> — like page(), but rc 0 ONLY on CONFIRMED delivery.
@@ -335,6 +405,7 @@ state_json="$(qar_state_ensure_repo_epochs "$state_json" "$REPOS_NEWLINE" "$NOW_
 # lib/qa-reconcile.sh's qar_state_prune_stage_failures) so a repo dropped
 # from the allowlist cannot leave a stale row growing the state file.
 state_json="$(qar_state_prune_stage_failures "$state_json" "$REPOS_NEWLINE")"
+state_json="$(qar_state_prune_read_fail_alerts "$state_json" "$REPOS_NEWLINE")"
 
 if [ "$STATE_FILE_MISSING" -eq 1 ]; then
   log "FIRST RUN: $STATE_FILE did not exist. Minted repo epochs = now for ${#REPOS[@]} repos; attempt history is empty. Dispatching nothing this tick (a rebuilt storm guard with no history must not immediately act on an unknown backlog)."
@@ -719,10 +790,15 @@ for repo in "${REPOS[@]}"; do
     state_json="$(qar_state_set_repo_candidate_failure_count "$state_json" "$repo" "$cand_fail_n")"
     log "CANDIDATE READ FAILURE: $repo — all $repo_reads_attempted per-PR read(s) failed this tick (classes: $repo_failed_classes); consecutive count now $cand_fail_n."
     if [ "$cand_fail_n" -ge "$TICK_FAIL_THRESHOLD" ]; then
-      page "qa-review-reconcile: $repo — every per-PR read (classes: $repo_failed_classes) has failed for $cand_fail_n consecutive ticks. Reviews for this repo may be silently unclassifiable (permissions/token-scope/rate-limit?) — this is the invisible-loss class this reconciler exists to kill."
+      page_read_failure "$repo" "__candidate__" \
+        "qa-review-reconcile: $repo — every per-PR read (classes: $repo_failed_classes) has failed for $cand_fail_n consecutive ticks. Reviews for this repo may be silently unclassifiable — this is the invisible-loss class this reconciler exists to kill."
     fi
   else
     state_json="$(qar_state_set_repo_candidate_failure_count "$state_json" "$repo" 0)"
+    # Recovery clears the suppression window too: a repo that breaks, recovers,
+    # then breaks again inside the interval must page again, not inherit the
+    # previous incident's silence.
+    state_json="$(qar_state_set_read_fail_last_alert "$state_json" "$repo" "__candidate__" 0)"
   fi
 
   # ── Per-repo, per-STAGE read-failure watchdog ──────────────────────────
@@ -742,8 +818,11 @@ for repo in "${REPOS[@]}"; do
       continue
     fi
     if [ "$st_failed" -lt "$st_attempted" ]; then
-      # At least one success this tick for this stage — reset.
+      # At least one success this tick for this stage — reset. Clearing the
+      # page stamp alongside the counter keeps the dedupe from carrying one
+      # incident's silence into the next (see the candidate branch above).
       state_json="$(qar_state_set_stage_failure_count "$state_json" "$repo" "$stage" 0)"
+      state_json="$(qar_state_set_read_fail_last_alert "$state_json" "$repo" "$stage" 0)"
       continue
     fi
     # Every attempt of this stage failed this tick (and at least one was
@@ -752,7 +831,8 @@ for repo in "${REPOS[@]}"; do
     state_json="$(qar_state_set_stage_failure_count "$state_json" "$repo" "$stage" "$stage_fail_n")"
     log "STAGE READ FAILURE: $repo/$stage — all $st_attempted attempt(s) of this stage failed this tick; consecutive count now $stage_fail_n."
     if [ "$stage_fail_n" -ge "$TICK_FAIL_THRESHOLD" ]; then
-      page "qa-review-reconcile: $repo — the '$stage' read stage has failed every attempt for $stage_fail_n consecutive ticks. PRs in this repo may be silently unclassifiable on this stage alone (other stages may be healthy) — this is the invisible-loss class this reconciler exists to kill."
+      page_read_failure "$repo" "$stage" \
+        "qa-review-reconcile: $repo — the '$stage' read stage has failed every attempt for $stage_fail_n consecutive ticks. PRs in this repo may be silently unclassifiable on this stage alone (other stages may be healthy) — this is the invisible-loss class this reconciler exists to kill."
     fi
   done
 done
