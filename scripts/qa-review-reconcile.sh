@@ -290,7 +290,7 @@ _GH_STATUS_NOTE=""
 github_status_probe() {
   [ "$_GH_STATUS_CHECKED" -eq 1 ] && return 0
   _GH_STATUS_CHECKED=1
-  local body desc degraded
+  local body desc degraded detail
   if ! body="$(curl -sS --max-time 10 "$GITHUB_STATUS_URL" 2>/dev/null)" || [ -z "$body" ]; then
     _GH_STATUS_NOTE="GitHub status could not be read, so upstream-vs-local is UNRESOLVED — check https://www.githubstatus.com before suspecting our token."
   elif ! desc="$(jq -re '.status.description // empty' <<<"$body" 2>/dev/null)"; then
@@ -298,8 +298,29 @@ github_status_probe() {
   elif [ "$desc" = "All Systems Operational" ]; then
     _GH_STATUS_NOTE="GitHub status reports \"$desc\", so this is most likely LOCAL — suspect permissions/token-scope/rate-limit."
   else
-    degraded="$(jq -r '[.components[]? | select(.status != "operational") | "\(.name)=\(.status)"] | join(", ")' <<<"$body" 2>/dev/null)"
-    _GH_STATUS_NOTE="GitHub is reporting an ACTIVE INCIDENT (\"$desc\"${degraded:+; $degraded}) — this is very likely UPSTREAM, not our token. Expect it to clear on its own; the counters reset on the first successful read."
+    # The component breakdown is decorative; parsing it must never be able to
+    # kill the tick. A document with a valid top-level .status.description but
+    # a non-object component entry (`"components":[5]`) makes
+    # `select(.status != ...)` raise "Cannot index number with string" and jq
+    # exit 5. Unguarded under `set -euo pipefail` that aborts the reconciler
+    # MID-LOOP — before page_confirmed, and before the single end-of-tick
+    # state write — so every affected repo would lose both its read-failure
+    # page AND its counter advance, on every retry. Two layers: skip
+    # non-object entries by construction, and still treat any residual jq
+    # failure as "detail unavailable". (e2e 45)
+    #
+    # NOT downgraded to UNRESOLVED: `.status.description` was parsed
+    # successfully above, so "there is an active incident" is a MEASURED fact
+    # and keeps its meaning. Only the per-component detail is unknown, and the
+    # note says exactly that — consistent with never rendering a fact the
+    # system did not measure, in both directions.
+    detail=""
+    if degraded="$(jq -r '[.components[]? | select(type == "object") | select(.status != "operational") | "\(.name)=\(.status)"] | join(", ")' <<<"$body" 2>/dev/null)"; then
+      if [ -n "$degraded" ]; then detail="; $degraded"; fi
+    else
+      detail="; component detail unavailable (unparseable components)"
+    fi
+    _GH_STATUS_NOTE="GitHub is reporting an ACTIVE INCIDENT (\"$desc\"$detail) — this is very likely UPSTREAM, not our token. Expect it to clear on its own; the counters reset on the first successful read."
   fi
   return 0
 }

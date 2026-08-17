@@ -1733,3 +1733,58 @@ JSON
   [ "$status" -eq 0 ]
   [ -s "$SLACK_CALLS" ]
 }
+
+@test "e2e 45: a valid incident description with MALFORMED components still pages -- the decorative parse can never abort the tick" {
+  # Regression for the set -e abort: `"components":[5]` makes
+  # `select(.status != "operational")` raise "Cannot index number" and jq exit
+  # 5. Unguarded, that killed the reconciler mid-loop under `set -euo
+  # pipefail` -- before page_confirmed AND before the single end-of-tick state
+  # write -- so the repo lost its page and its counter advance on every retry.
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="shabadcomp0000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 59 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  export STUB_COMMIT_FAIL=1
+  export STUB_GH_STATUS_BODY='{"status":{"description":"Partial System Outage"},"components":[5]}'
+  base="$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))"
+  export QA_RECONCILE_NOW_EPOCH="$base"
+
+  run "$SCRIPT" --once; run "$SCRIPT" --once
+  : > "$SLACK_CALLS"
+  run "$SCRIPT" --once
+  # The tick must COMPLETE (not abort mid-loop) ...
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tick complete"* ]]
+  # ... the page must still go out ...
+  [ -s "$SLACK_CALLS" ]
+  # ... the counter advance must be persisted by the end-of-tick write ...
+  [ "$(jq -r '.__meta__.stage_failures["Muso-AI/core-backend"].commit // 0' "$QA_RECONCILE_STATE_FILE")" -eq 3 ]
+  # ... and the measured description survives while only the detail is dropped.
+  # Step past the dedupe window first: the tick above just stamped, so a
+  # same-instant rehearsal would be (correctly) suppressed and never probe.
+  export QA_RECONCILE_NOW_EPOCH="$(( base + 21600 ))"
+  run "$SCRIPT" --dry-run
+  [[ "$output" == *"ACTIVE INCIDENT"* ]]
+  [[ "$output" == *"Partial System Outage"* ]]
+  # Junk entries are skipped by construction, so the note carries the measured
+  # description with NO component breakdown -- and must not falsely claim the
+  # collection was unparseable when it was simply empty of usable entries.
+  [[ "$output" != *"component detail unavailable"* ]]
+  [[ "$output" != *"=null"* ]]
+}
+
+@test "e2e 46: a components array MIXING valid objects and junk still reports the valid ones" {
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="shamixcomp0000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 60 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  export STUB_COMMIT_FAIL=1
+  export STUB_GH_STATUS_BODY='{"status":{"description":"Partial System Outage"},"components":[5,{"name":"Pull Requests","status":"major_outage"},"junk"]}'
+  base="$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))"
+  export QA_RECONCILE_NOW_EPOCH="$base"
+
+  run "$SCRIPT" --once; run "$SCRIPT" --once
+  run "$SCRIPT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ACTIVE INCIDENT"* ]]
+  [[ "$output" == *"Pull Requests=major_outage"* ]]
+  [[ "$output" != *"component detail unavailable"* ]]
+}
