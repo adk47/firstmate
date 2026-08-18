@@ -46,22 +46,66 @@ def _extract_blocks(text: str, start: str, end: str) -> list[dict[str, Any]]:
     return blocks
 
 
+def _normalize_uuid(value: Any, label: str) -> str:
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise PolicyError(f"structured {label} is not a UUID") from exc
+
+
+def _request_ids_from_details(details: Any, *, required: bool) -> set[str] | None:
+    if not isinstance(details, dict):
+        raise PolicyError("structured details are malformed")
+    if "pending_credits" not in details and not required:
+        return None
+    pending = details.get("pending_credits")
+    if not isinstance(pending, list) or not pending:
+        raise PolicyError("structured pending credits are missing")
+    request_ids: set[str] = set()
+    for pending_credit in pending:
+        cr_id = pending_credit.get("cr_id") if isinstance(pending_credit, dict) else None
+        request_ids.add(_normalize_uuid(cr_id, "credit request ID"))
+    return request_ids
+
+
+def _require_automation_recommendation(details: Any, *, required: bool) -> None:
+    if not isinstance(details, dict):
+        raise PolicyError("structured details are malformed")
+    if "recommendation" not in details:
+        if required:
+            raise PolicyError("structured automation recommendation is missing")
+        return
+    if details["recommendation"] != "recommend-approve":
+        raise PolicyError("ticket recommendation requires human review")
+
+
 def parse_ticket_scope(task: dict[str, Any], comments: Iterable[dict[str, Any]]) -> tuple[str, set[str]]:
-    """Return the one profile and exact UUID request IDs from structured blocks."""
+    """Return the one profile and exact UUID request IDs from structured blocks.
+
+    The description owns the initial complete scope. Follow-up comments are
+    deltas: evidence-only updates may omit pending_credits, while any update
+    that adds request ids must repeat the same profile and carry valid UUIDs.
+    """
     tags = {
         str(tag.get("name", "")).strip().lower()
         for tag in task.get("tags", [])
         if isinstance(tag, dict)
     }
-    if not {"hydra-action-request", "action:credit-verify"}.issubset(tags):
+    required_tags = {
+        "hydra-action-request",
+        "action:credit-verify",
+        "automation:uvn-under30",
+    }
+    if not required_tags.issubset(tags):
         raise PolicyError("required ticket tags are missing")
     if str(task.get("status", {}).get("status", "")).strip().lower() != "to do":
         raise PolicyError("ticket is not TO DO")
 
-    blocks = _extract_blocks(str(task.get("description") or task.get("text_content") or ""), ACTION_START, ACTION_END)
-    for comment in comments:
-        text = str(comment.get("comment_text") or comment.get("text_content") or "")
-        blocks.extend(_extract_blocks(text, UPDATE_START, UPDATE_END))
+    blocks = _extract_blocks(
+        str(task.get("description") or task.get("text_content") or ""),
+        ACTION_START,
+        ACTION_END,
+    )
     if not blocks:
         raise PolicyError("no structured action request")
 
@@ -70,24 +114,35 @@ def parse_ticket_scope(task: dict[str, Any], comments: Iterable[dict[str, Any]])
     for block in blocks:
         if block.get("action_type") != "credit-verify":
             raise PolicyError("structured action type is not credit-verify")
-        profile_id = block.get("customer_profile_id")
-        if not isinstance(profile_id, str) or not profile_id.strip():
-            raise PolicyError("structured profile ID is missing")
-        profile_ids.add(profile_id.strip())
+        profile_ids.add(_normalize_uuid(block.get("customer_profile_id"), "profile ID"))
         details = block.get("details")
-        pending = details.get("pending_credits") if isinstance(details, dict) else None
-        if not isinstance(pending, list) or not pending:
-            raise PolicyError("structured pending credits are missing")
-        for pending_credit in pending:
-            cr_id = pending_credit.get("cr_id") if isinstance(pending_credit, dict) else None
-            try:
-                normalized = str(uuid.UUID(str(cr_id)))
-            except (ValueError, TypeError, AttributeError) as exc:
-                raise PolicyError("structured credit request ID is not a UUID") from exc
-            request_ids.add(normalized)
+        _require_automation_recommendation(details, required=True)
+        request_ids.update(_request_ids_from_details(details, required=True) or set())
     if len(profile_ids) != 1:
         raise PolicyError("structured blocks disagree on profile ID")
-    return next(iter(profile_ids)), request_ids
+    profile_id = next(iter(profile_ids))
+
+    for comment in comments:
+        text = str(comment.get("comment_text") or comment.get("text_content") or "")
+        for block in _extract_blocks(text, UPDATE_START, UPDATE_END):
+            if block.get("action_type") != "credit-verify":
+                raise PolicyError("structured action type is not credit-verify")
+            details = block.get("details")
+            added_ids = _request_ids_from_details(details, required=False)
+            _require_automation_recommendation(details, required=added_ids is not None)
+            raw_update_profile = block.get("customer_profile_id")
+            update_profile = None
+            if raw_update_profile not in (None, ""):
+                update_profile = _normalize_uuid(raw_update_profile, "profile ID")
+                if update_profile != profile_id:
+                    raise PolicyError("structured blocks disagree on profile ID")
+            if added_ids is None:
+                continue
+            if update_profile is None:
+                raise PolicyError("structured profile ID is missing")
+            request_ids.update(added_ids)
+
+    return profile_id, request_ids
 
 
 def has_hard_reject_signal(credit_request: dict[str, Any]) -> bool:
