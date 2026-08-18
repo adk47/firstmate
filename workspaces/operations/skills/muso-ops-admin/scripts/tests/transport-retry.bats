@@ -51,6 +51,23 @@ case "${CURL_STUB_MODE:-ok}" in
     http_500)
         printf '{"error":"server"}\n500'
         ;;
+    large_json)
+        printf '{"data":{"padding":"'
+        head -c 150000 /dev/zero | tr '\0' x
+        printf '"}}\n200'
+        ;;
+    large_raw)
+        head -c 150000 /dev/zero | tr '\0' x
+        printf '\n200'
+        ;;
+    large_http_500)
+        printf '{"error":"'
+        head -c 150000 /dev/zero | tr '\0' x
+        printf '"}\n500'
+        ;;
+    json_stream)
+        printf '{"first":true}{"second":true}\n200'
+        ;;
     login_transient_dns)
         if (( calls == 0 )); then
             exit 6
@@ -152,6 +169,56 @@ call_credit_update() {
     ' >/dev/null
     [ "$(wc -l < "$CURL_CALLS")" -eq 1 ]
     jq -e '.outcome == "http_error" and .http_status == 500' "$CV_RESULTS_PATH" >/dev/null
+}
+
+@test "large JSON response body is returned without crossing the argv limit" {
+    run --separate-stderr env CURL_STUB_MODE=large_json \
+        bash "$SCRIPT" call GET /admin/credit-requests
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | jq -e '
+        .http_status == 200
+        and .transport_attempts == 1
+        and .transport_retry_exits == []
+        and (.body.data.padding | length) == 150000
+    ' >/dev/null
+}
+
+@test "large raw response body is returned without crossing the argv limit" {
+    run --separate-stderr env CURL_STUB_MODE=large_raw \
+        bash "$SCRIPT" call GET /admin/credit-requests
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | jq -e '
+        .http_status == 200
+        and .transport_attempts == 1
+        and .transport_retry_exits == []
+        and (.raw | length) == 150000
+    ' >/dev/null
+}
+
+@test "large HTTP error is returned and recorded without crossing the argv limit" {
+    call_credit_update large_http_500 1
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | jq -e '
+        .http_status == 500
+        and (.body.error | length) == 150000
+    ' >/dev/null
+    [ "$(wc -l < "$CV_RESULTS_PATH")" -eq 1 ]
+    jq -e '
+        .outcome == "http_error"
+        and .http_status == 500
+        and ((.error | fromjson | .error | length) == 150000)
+    ' "$CV_RESULTS_PATH" >/dev/null
+}
+
+@test "multiple JSON documents remain one raw response envelope" {
+    run --separate-stderr env CURL_STUB_MODE=json_stream \
+        bash "$SCRIPT" call GET /admin/credit-requests
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+    printf '%s' "$output" | jq -e '
+        .http_status == 200
+        and .raw == "{\"first\":true}{\"second\":true}"
+    ' >/dev/null
 }
 
 @test "missing token cache retries transient login DNS before the credit PUT" {

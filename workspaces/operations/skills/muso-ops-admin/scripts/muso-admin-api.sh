@@ -330,7 +330,7 @@ write_credit_request_result() {
     # carries the claim metadata the dispatcher validated structurally against
     # the excerpt. Lets post-batch auditing answer "what was being verified?"
     # without parsing back through the inbound message.
-    if ! line=$(jq -n -c \
+    if ! line=$(printf '%s' "$error" | jq -Rsc \
         --arg ts "$ts" \
         --arg run_id "$run_id" \
         --arg method "$method_uc" \
@@ -339,7 +339,6 @@ write_credit_request_result() {
         --arg intended_status "$intended_status" \
         --arg outcome "$outcome" \
         --arg http_status "$http_status" \
-        --arg error "$error" \
         --arg transport_attempts "$transport_attempts" \
         --argjson transport_retry_exits "$transport_retry_exits" \
         --arg requester "${REQUESTER_EMAIL:-}" \
@@ -347,7 +346,7 @@ write_credit_request_result() {
         --arg credited_name "${OPS_CREDITED_NAME:-}" \
         --arg track_title "${OPS_TRACK_TITLE:-}" \
         --arg role "${OPS_ROLE:-}" \
-        '{
+        '. as $error | {
             ts:$ts,
             run_id:    (if $run_id    == "" then null else $run_id    end),
             method:$method,
@@ -2602,22 +2601,23 @@ EOF
 
     # Output a parseable envelope even when the response body is empty or is
     # not JSON. transport_* fields let the caller distinguish a clean first
-    # attempt from a recovered pre-connect failure.
-    if [[ -n "$response_body" ]] && jq -e . >/dev/null 2>&1 <<<"$response_body"; then
-        jq -nc \
+    # attempt from a recovered pre-connect failure. Stream the body over stdin:
+    # putting a large API response in --arg/--argjson crosses Linux's per-arg
+    # limit before jq can start.
+    if [[ -n "$response_body" ]] && printf '%s' "$response_body" | jq -es \
+            'length == 1 and .[0] != null and .[0] != false' >/dev/null 2>&1; then
+        printf '%s' "$response_body" | jq -cs \
             --arg http "$http_code" \
-            --argjson body "$response_body" \
             --argjson attempts "$transport_attempts" \
             --argjson retry_exits "$transport_retry_exits" \
-            '{http_status:($http | tonumber? // $http), body:$body,
+            '{http_status:($http | tonumber? // $http), body:.[0],
               transport_attempts:$attempts, transport_retry_exits:$retry_exits}'
     else
-        jq -nc \
+        printf '%s' "$response_body" | jq -Rsc \
             --arg http "$http_code" \
-            --arg raw "$response_body" \
             --argjson attempts "$transport_attempts" \
             --argjson retry_exits "$transport_retry_exits" \
-            '{http_status:($http | tonumber? // $http), raw:$raw,
+            '{http_status:($http | tonumber? // $http), raw:.,
               transport_attempts:$attempts, transport_retry_exits:$retry_exits}'
     fi
 }
