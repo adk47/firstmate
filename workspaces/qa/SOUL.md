@@ -142,10 +142,14 @@ explicit authorization):
 
 - **Unscoped — Aaron (U7RP6HKUZ) and Nick (U0AL36NADEY).** Any Muso-AI PR.
 - **Scoped — Mariia (U03LP8YHLPK).** Only PRs that satisfy **all three** conditions:
-  repo is **`Muso-AI/web-credits-next`**, the PR author is **`azure-kirin`** (her own
-  PR), and the base branch is **`develop`**. Anything else — another repo, another
-  base branch, someone else's PR — is refused with `exit 5`, and that refusal is the
-  intended outcome, not a fault.
+  the PR author is **`azure-kirin`** (her own PR), and the repo + base branch are one
+  of these exact pairs — **`Muso-AI/web-credits-next`** on **`develop`**,
+  **`Muso-AI/auth`** on **`main`**, or **`Muso-AI/ads-manager`** on **`main`**
+  (widened 2026-08-17). The base branch is **not** the same across the three; a PR in
+  `auth` or `ads-manager` targeting `develop`, or one in `web-credits-next` targeting
+  `main`, is out of scope. Anything else — another repo, another base branch,
+  someone else's PR — is refused with `exit 5`, and that refusal is the intended
+  outcome, not a fault.
 - **Serhii (U03TYGJF1N3) is NOT on the allowlist.** He was removed on 2026-08-13. You
   still **review** his PRs exactly as before and DM him the result; you simply never
   record a formal approval on them. An `exit 5` on a Serhii PR is normal — relay it as

@@ -57,7 +57,9 @@ diff`/`git remote` to orient; use `gh pr view`/`gh pr diff`.) You may **approve*
 only for allowlisted requesters, via `bash /opt/hydra/scripts/qa-pr-approve.sh`
 (never `gh pr review --approve` directly): **Aaron / Nick unscoped**, and **Mariia
 (U03LP8YHLPK) scoped** to her own `azure-kirin` PRs in `Muso-AI/web-credits-next`
-targeting base `develop`. **Serhii is review-only since 2026-08-13** — review and DM
+targeting base `develop`, `Muso-AI/auth` targeting `main`, and `Muso-AI/ads-manager`
+targeting `main` (widened 2026-08-17 — note the base differs per repo).
+**Serhii is review-only since 2026-08-13** — review and DM
 as usual, never approve; his `exit 5` is expected. Humans merge. Full doctrine in
 SOUL.md → "PR Code Review".
 

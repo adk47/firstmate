@@ -283,6 +283,74 @@ logfile() { echo "$QA_PR_APPROVE_LOG_DIR/$(date -u +%F).jsonl"; }
   [ ! -f "$(logfile)" ]
 }
 
+# ---------------------------------------------------------------------------
+# Scope widened 2026-08-17: auth and ads-manager added, BOTH on base `main`
+# while web-credits-next stays on `develop`. The per-repo base is the whole
+# risk in this change — a copy-pasted `develop` would leave both new rows dead
+# and the failure would be an exit 5 indistinguishable from "not allowlisted".
+# So each new repo is pinned on BOTH sides: it approves on its own base, and it
+# refuses on the other repo's base.
+#
+# NOTE these use `export` in the body rather than the `VAR=x run ...` prefix
+# used above. The prefix form is not reliably delivered to the stub (it drops
+# in roughly 1 run in 10 of the full suite) and it flakes TOWARD approval —
+# the dangerous direction for a scope test, which would then pass while
+# proving nothing.
+# ---------------------------------------------------------------------------
+
+@test "scoped: Mariia on auth, author azure-kirin, base main → approves" {
+  export STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="main"
+  run "$SCRIPT" Muso-AI/auth 80 "$MARIIA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+  grep -q '"target":"Muso-AI/auth#80"' "$(logfile)"
+  grep -q "\"requester\":\"$MARIIA\"" "$(logfile)"
+}
+
+@test "scoped: Mariia on ads-manager, author azure-kirin, base main → approves" {
+  export STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="main"
+  run "$SCRIPT" Muso-AI/ads-manager 81 "$MARIIA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+  grep -q '"target":"Muso-AI/ads-manager#81"' "$(logfile)"
+}
+
+@test "scoped: Mariia on auth but base develop → exit 5 (the base is per-repo, not uniform)" {
+  export STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="develop"
+  run "$SCRIPT" Muso-AI/auth 82 "$MARIIA"
+  [ "$status" -eq 5 ]
+  echo "$output" | grep -q 'base branch must be main'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
+@test "scoped: Mariia on ads-manager but base develop → exit 5" {
+  export STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="develop"
+  run "$SCRIPT" Muso-AI/ads-manager 83 "$MARIIA"
+  [ "$status" -eq 5 ]
+  echo "$output" | grep -q 'base branch must be main'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
+@test "scoped: the widening does NOT loosen authorship — someone else's auth PR → exit 5" {
+  export STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_REF="main"
+  run "$SCRIPT" Muso-AI/auth 84 "$MARIIA"
+  [ "$status" -eq 5 ]
+  echo "$output" | grep -q 'PR author must be azure-kirin'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
+@test "scoped: the widening adds exactly 3 repos — a 4th (octave-ui) still refuses on base main" {
+  # Guards against a future edit that swaps the repo list for a wildcard.
+  export STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="main"
+  run "$SCRIPT" Muso-AI/octave-ui 85 "$MARIIA"
+  [ "$status" -eq 5 ]
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected match" >&2; false; fi
+  [ ! -f "$(logfile)" ]
+}
+
 @test "removed: Serhii on hydra → exit 5 (was allowed before 2026-08-13), no approval, no log" {
   STUB_ME="adk47" STUB_AUTHOR="liflovs" QA_REBASE_REQUIRED_REPOS="other" \
     run "$SCRIPT" hydra 49 "$SERHII"
@@ -421,7 +489,13 @@ mk_variant() {
   # edit the header block invites, so it must stay a graceful refusal.
   # NOTE: this can only go red on bash 3.2 — see the shape test above, which is
   # what pins the guard on CI's bash 5.
-  variant="$(mk_variant 's#^SCOPED_APPROVERS=(.*#SCOPED_APPROVERS=()#')"
+  # The table is a MULTI-LINE array (it holds one row per repo since
+  # 2026-08-17), so emptying it means collapsing the whole block, not
+  # rewriting one line: the old single-line `s#^SCOPED_APPROVERS=(.*#...#`
+  # left the entry rows and the closing paren dangling. Within the block,
+  # turn the opening line into the empty array and delete every other line.
+  # Plain BRE — `(` and `)` are literal — so this works under BSD and GNU sed.
+  variant="$(mk_variant '/^SCOPED_APPROVERS=(/,/^)$/{ s#^SCOPED_APPROVERS=($#SCOPED_APPROVERS=()#; /^SCOPED_APPROVERS=()$/!d; }')"
   QA_APPROVAL_POLICY="$HYDRA_REPO/policies/qa-approval-policy.json" \
     STUB_ME="adk47" STUB_AUTHOR="azure-kirin" STUB_BASE_REF="develop" \
     run /bin/bash "$variant" Muso-AI/web-credits-next 71 "$MARIIA"

@@ -426,9 +426,13 @@ Approve **only** when BOTH hold:
 - the requester's Slack UID is on the approval allowlist, which has **two tiers**
   (changed 2026-08-13, authorized by Nick):
   - **Unscoped** — **Aaron** (`U7RP6HKUZ`) and **Nick** (`U0AL36NADEY`): any Muso-AI PR.
-  - **Scoped** — **Mariia** (`U03LP8YHLPK`): **only** when the repo is
-    `Muso-AI/web-credits-next`, the PR author is `azure-kirin` (her own PR), **and**
-    the base branch is `develop`. All three must hold. Her PRs on that repo+branch
+  - **Scoped** — **Mariia** (`U03LP8YHLPK`): **only** when the PR author is
+    `azure-kirin` (her own PR) **and** the repo + base branch are one of these exact
+    pairs (widened 2026-08-17):
+    `Muso-AI/web-credits-next` + `develop`, `Muso-AI/auth` + `main`,
+    `Muso-AI/ads-manager` + `main`. The base is **not** uniform across the three —
+    a PR in `auth`/`ads-manager` targeting `develop` is out of scope, as is one in
+    `web-credits-next` targeting `main`. Her PRs on those repo+branch pairs
     therefore auto-approve; anything else of hers is review-only.
   - **Serhii** (`U03TYGJF1N3`) is **no longer on the allowlist** (removed 2026-08-13).
     Keep reviewing and DM'ing his PRs exactly as before — just never approve them. An
@@ -464,7 +468,8 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> \
   blocks self-approval — another reviewer is needed); `exit 5` = requester not authorized
   — either they are not on the allowlist at all (e.g. **Serhii**, review-only since
   2026-08-13) or they are a **scoped** approver and this PR is outside their scope (e.g.
-  Mariia on a repo other than `Muso-AI/web-credits-next`, on a base other than `develop`,
+  Mariia on a repo outside {`web-credits-next`, `auth`, `ads-manager`}, on a base other
+  than that repo's allowed one (`develop` for web-credits-next, `main` for the other two),
   on a PR she did not author, or on a PR whose **base branch the API would not return** —
   that last one fails closed and is scoped-requester-only). The message names the
   condition that failed — relay it

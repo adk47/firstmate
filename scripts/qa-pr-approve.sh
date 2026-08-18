@@ -97,15 +97,29 @@ LOG_DIR="${QA_PR_APPROVE_LOG_DIR:-api-logs/github}"
 # SCOPED_APPROVERS — may approve ONLY where every scope condition holds.
 #   Format (pipe-separated, positional):  UID|owner/repo|pr-author|base-branch
 #   Mariia (azure-kirin, U03LP8YHLPK) is scoped to her OWN azure-kirin PRs in
-#   Muso-AI/web-credits-next targeting base `develop`, and nothing else. WHY
+#   the three repos where she ships the octave-ui design system —
+#   Muso-AI/web-credits-next (base `develop`), Muso-AI/auth (base `main`), and
+#   Muso-AI/ads-manager (base `main`) — and nothing else. WHY
 #   scoped rather than unscoped: her PRs were already auto-REVIEWED (see
 #   scripts/lib/qa-author-slack-uid.sh) but approval was withheld because a
 #   broad grant to a UI-focused author would let the bot sign off anywhere in
-#   the org. Narrowing the grant to one repo + one base branch + her own
+#   the org. Narrowing the grant to named repos + one base branch each + her own
 #   authorship keeps the automation's blast radius equal to the surface she
 #   already owns day to day, and every other guard (CI green, GO verdict, no
 #   unresolved blocking findings, never merge, no self-approval) still applies
 #   unchanged — this table only decides WHO may ask.
+#
+#   WIDENED 2026-08-17 (auth, ads-manager) on Nick's request. The three repos
+#   are one workstream: octave-ui is consumed by all of them, and the same
+#   version bump lands as a PR in each (web-credits-next#636, auth#45,
+#   ads-manager#132 were the 0.7.0 rollout). Granting only one of the three
+#   meant two thirds of an identical, dependency-only change still needed a
+#   human to click approve on a GO verdict.
+#   NOTE the base branches DIFFER — web-credits-next ships through `develop`,
+#   the other two through `main`. That is per-repo fact, not an inconsistency
+#   to normalise: a copy-paste of `develop` into the auth/ads-manager rows
+#   would make both rows dead (Guard 4b compares the base exactly), and the
+#   failure would be a silent exit 5 that looks identical to "not allowlisted".
 #
 # REMOVED 2026-08-13: Serhii (liflovs, U03TYGJF1N3). His PRs are still
 #   auto-REVIEWED — he stays in scripts/lib/qa-author-slack-uid.sh, which drives
@@ -131,7 +145,11 @@ LOG_DIR="${QA_PR_APPROVE_LOG_DIR:-api-logs/github}"
 # and add the matching cases to scripts/tests/qa-pr-approve.bats.
 # ===========================================================================
 UNSCOPED_UIDS=("U7RP6HKUZ" "U0AL36NADEY")
-SCOPED_APPROVERS=("U03LP8YHLPK|Muso-AI/web-credits-next|azure-kirin|develop")
+SCOPED_APPROVERS=(
+  "U03LP8YHLPK|Muso-AI/web-credits-next|azure-kirin|develop"
+  "U03LP8YHLPK|Muso-AI/auth|azure-kirin|main"
+  "U03LP8YHLPK|Muso-AI/ads-manager|azure-kirin|main"
+)
 
 die() { _replay_alerts; echo "qa-pr-approve: $2" >&2; exit "$1"; }
 
@@ -200,7 +218,7 @@ if [ "$allowed" != 1 ]; then
     [ "${spec%%|*}" = "$requester" ] && allowed=1 && break
   done
 fi
-[ "$allowed" = 1 ] || die 5 "requester '$requester' is not authorized to approve PRs (unscoped: Aaron U7RP6HKUZ, Nick U0AL36NADEY; scoped: Mariia U03LP8YHLPK — her own azure-kirin PRs in Muso-AI/web-credits-next targeting 'develop'). Serhii U03TYGJF1N3 was removed on 2026-08-13: his PRs are reviewed, never auto-approved."
+[ "$allowed" = 1 ] || die 5 "requester '$requester' is not authorized to approve PRs (unscoped: Aaron U7RP6HKUZ, Nick U0AL36NADEY; scoped: Mariia U03LP8YHLPK — her own azure-kirin PRs in Muso-AI/web-credits-next targeting 'develop', Muso-AI/auth targeting 'main', Muso-AI/ads-manager targeting 'main'). Serhii U03TYGJF1N3 was removed on 2026-08-13: his PRs are reviewed, never auto-approved."
 
 # --- Identity ---------------------------------------------------------------
 # `gh api user` returns 403 "Resource not accessible by integration" under a
