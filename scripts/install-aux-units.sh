@@ -223,6 +223,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/stuck-lane-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/qa-review-reconcile.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/qa-review-reconcile.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/qa-approval-retry.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/qa-approval-retry.sh missing or not executable"
 [[ -f "$HYDRA_ROOT/scripts/overdue-verification-notifier.py" ]] \
   || fail "$HYDRA_ROOT/scripts/overdue-verification-notifier.py missing"
 [[ -f "$HYDRA_ROOT/scripts/resolve-notify.py" ]] \
@@ -1745,7 +1747,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/qa-review-reconcile.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log {
     weekly
     rotate 4
     compress
@@ -1835,3 +1837,63 @@ qarc=qa-review-reconcile.timer
 systemctl enable "$qarc" >/dev/null 2>&1 || log "WARN: could not enable $qarc"
 systemctl start "$qarc" >/dev/null 2>&1 || log "WARN: could not start $qarc"
 log "  $qarc: $(systemctl is-active "$qarc" 2>/dev/null || echo unknown)"
+
+# ─── QA approval retry, every 10 min ───────────────────────────────
+# Sibling of the reconciler above, for the OTHER half of the bot. The
+# reconciler recovers a review that never happened; this recovers an APPROVAL
+# that was withheld and never re-asked. The dispatch producer fires on
+# `pull_request` (push time, parallel with CI), so the review routinely lands
+# while checks are still running; Guard 8 of qa-pr-approve.sh correctly
+# refuses on PENDING, the skill is told not to retry, and nothing ever asks
+# again. Measured: Mariia's 12 most recent web-credits-next PRs carried a GO
+# verdict and ZERO approvals despite her scoped grant being live since
+# 2026-08-13. See scripts/qa-approval-retry.sh's header.
+#
+# 10 min (vs the reconciler's 15) because this rides out a CI window rather
+# than a lost dispatch — the sooner it re-asks after checks go green, the
+# smaller the gap between "mergeable" and "marked mergeable".
+cat > /etc/systemd/system/qa-approval-retry.service << QAAPPROVERETRYSVC
+[Unit]
+Description=QA approval retry (re-asks for approvals withheld while CI was still pending)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# NOTE: no backticks below — this heredoc is UNQUOTED so that \$HYDRA_ROOT
+# expands, which also makes backticks command-substitute AS ROOT at install
+# time (pr(1) is real coreutils, so 'pr list' actually ran and silently ate
+# the words from this comment).
+# One "pr list" per allowlisted repo plus a reviews read per open PR, against
+# the live org — the same order of magnitude as the reconciler, which measured
+# in minutes. systemd's DefaultTimeoutStartSec=90s would SIGTERM the tick
+# mid-sweep; this script holds no state, so a truncated tick loses only the
+# remaining repos (not accumulated counters), but a partial sweep still means
+# some PRs are never re-asked that tick.
+TimeoutStartSec=1800
+ExecStart=$HYDRA_ROOT/scripts/qa-approval-retry.sh
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=append:/var/log/qa-approval-retry.log
+StandardError=append:/var/log/qa-approval-retry.log
+QAAPPROVERETRYSVC
+
+cat > /etc/systemd/system/qa-approval-retry.timer << QAAPPROVERETRYTMR
+[Unit]
+Description=Every 10 min — re-ask for QA approvals withheld by the CI race
+
+[Timer]
+OnBootSec=12min
+OnUnitActiveSec=10min
+RandomizedDelaySec=60s
+Unit=qa-approval-retry.service
+
+[Install]
+WantedBy=timers.target
+QAAPPROVERETRYTMR
+
+systemctl daemon-reload
+
+qart=qa-approval-retry.timer
+systemctl enable "$qart" >/dev/null 2>&1 || log "WARN: could not enable $qart"
+systemctl start "$qart" >/dev/null 2>&1 || log "WARN: could not start $qart"
+log "  $qart: $(systemctl is-active "$qart" 2>/dev/null || echo unknown)"
