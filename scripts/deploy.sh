@@ -863,7 +863,20 @@ RSYNC_EXCLUDES=(
   # file the repo does not have and reds — on every PR the bot reviews.
   # Server-owned per-run scratch, recreatable, never in the repo. Mirrored KEEP
   # glob in scripts/qa-clean-merge-scratch.sh (lockstep rule).
-  --exclude='workspaces/*/.pr-review-*.json'
+  #
+  # Widened 2026-08-19 from '.pr-review-*.json' to '.*pr-review-*.json': the QA
+  # bot's EXTERNAL cross-repo PR review (source PR core-backend#9398) writes a
+  # differently-prefixed sibling shape, 'workspaces/qa/.qa-pr-review-<repo>-<pr>-
+  # <sha>.json' (observed on node-8 2026-08-19, run 32230870418, blocking file
+  # '.qa-pr-review-core-backend-9398-960314e.json'). It matched neither this
+  # glob (extra 'qa-' before 'pr-review-' breaks the fixed dot-prefix) nor
+  # 'workspaces/qa/pr-review*.json' below (leading dot breaks that one), so
+  # every deploy hard-failed at Step 4a. Same writer, same server-owned
+  # per-run scratch, never in the repo — the widened glob subsumes both
+  # shapes without matching anything tracked (verified: no workspaces/*/
+  # tracked file contains 'pr-review'). Mirrored KEEP glob in
+  # scripts/qa-clean-merge-scratch.sh (lockstep rule).
+  --exclude='workspaces/*/.*pr-review-*.json'
   # QA credit-verification todo inventory — dated per-run working state the QA
   # agent writes on node-8 (e.g. credit-verification-todo-inventory-2026-07-21.json),
   # never in the repo. Server-owned scratch; mirrored KEEP glob in

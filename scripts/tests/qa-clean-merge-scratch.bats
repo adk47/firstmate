@@ -91,6 +91,22 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ -e "$TARGET/SOUL.md" ]
 }
 
+@test "external cross-repo QA review scratch ('.qa-pr-review-<repo>-<pr>-<sha>.json') is kept, not deleted" {
+  # Regression for run 32230870418 (2026-08-19): the QA bot's external
+  # cross-repo review writes this shape into workspaces/qa/, and it matched
+  # neither the old '.pr-review-*.json' KEEP glob (extra 'qa-' prefix) nor
+  # 'pr-review*.json' (leading dot) — so deploy.sh's rsync --delete pre-flight
+  # flagged it and blocked every deploy. Must be treated as legit runtime
+  # scratch, same as the '.pr-review-<N>.json' shape.
+  echo x > "$TARGET/SOUL.md"
+  echo x > "$TARGET/.qa-pr-review-core-backend-9398-960314e.json"
+
+  run "$SCRIPT" "$TARGET"
+  [ "$status" -eq 0 ]
+  [ -e "$TARGET/.qa-pr-review-core-backend-9398-960314e.json" ]
+  [ -e "$TARGET/SOUL.md" ]
+}
+
 @test "drift guard: KEEP globs cover every workspaces/*/ FILE exclude in deploy.sh" {
   # Extract deploy.sh's workspaces/*/<fileglob> excludes (single path component,
   # no trailing slash = a file, not a dir). Every one must be a KEEP glob, else a

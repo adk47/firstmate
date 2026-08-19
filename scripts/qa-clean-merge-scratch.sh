@@ -56,7 +56,9 @@ KEEP_GLOBS=(
   '.company-finder-*.json'             # same, dot-prefixed variant (2026-07-30, #772)
   'finder-input-*.json'                # outreach-discovery dated stage input (2026-08-05, #794)
   'prep-output-*.json'                 # outreach-discovery dated stage output (2026-08-05, #794)
-  '.pr-review-*.json'                  # QA bot per-PR review scratch (2026-08-05, #805)
+  '.*pr-review-*.json'                 # QA bot per-PR review scratch (2026-08-05, #805);
+                                        # widened 2026-08-19 for the external cross-repo
+                                        # review shape '.qa-pr-review-<repo>-<pr>-<sha>.json'
   'credit-verification-todo-inventory-*.json'  # QA credit-verification run scratch
   'TOOLS.md.bak-*' '*.md.bak-*'
   'write-activity.log'
