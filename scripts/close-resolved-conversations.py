@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Silently close Intercom conversations whose ClickUp ticket(s) are all resolved.
+"""Silently close Intercom conversations whose ClickUp tickets are customer-complete.
 
-Closes the regrowth axis where a customer's request was handled (the ClickUp
-ticket is resolved) but the Intercom conversation was never closed — the
+Closes the regrowth axis where a customer's requested state was verified but
+the Intercom conversation was never closed — the
 decoupling that let the open-conversation pile grow unbounded. Root cause +
 triage: docs/2026-06-02-queue-triage-report.md.
 
@@ -11,17 +11,19 @@ SAFETY — a conversation is closed ONLY when BOTH of:
     `customer_last` (customer waiting on us) and `never_replied` (a chat that
     never got an answer — possibly a dropped customer). We never silently bury
     a conversation that still needs a human, AND
-  - the conversation is tied to a resolved ticket. How that tie is established
+  - the conversation is tied to a customer-complete ticket: terminal ClickUp
+    workflow (excluding `impossible`) plus exactly one
+    `customer-outcome:complete` tag. How that tie is established
     depends on the mode:
       * default (what the unattended daily timer runs): PRECISE linkage only.
         The conversation id appears in a ClickUp ticket's "Intercom Link" field
         (added in #417) and EVERY ticket linked to THIS conversation is
-        resolved/closed. A conversation with no linked ticket — or with any
+        customer-complete. A conversation with no linked ticket — or with any
         open linked ticket — is left alone. So a new/unrelated conversation
-        for a customer who merely had older resolved tickets is NOT closed.
+        for a customer who merely had older complete tickets is NOT closed.
       * --backfill (explicit, human-run, one-time): for conversations with no
         #417 link, fall back to loose email matching — the customer's email
-        matches >=1 ticket and EVERY email-matched ticket is resolved. This
+        matches >=1 ticket and EVERY email-matched ticket is customer-complete. This
         drains the pre-#417 backlog under supervision; the timer never uses it.
 The close is SILENT (no customer-facing message), so it generates no new
 inbound — safe to run while CS has no bandwidth.
@@ -49,7 +51,7 @@ Flags:
   --apply       actually close (default: dry-run — list only, no writes)
   --backfill    ALSO close pre-#417 conversations matched loosely by customer
                 email (no #417 link). Off by default so the unattended timer
-                only closes conversations precisely linked to a resolved ticket.
+                only closes conversations precisely linked to a customer-complete ticket.
   --limit N     cap the number closed this run (ramp safely)
   --notify      after an --apply run that closed >=1, post a summary (count +
                 clickable ClickUp + Intercom links) to #cs_chats as the
@@ -68,6 +70,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.customer_outcome import customer_complete  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
@@ -183,10 +189,9 @@ def clickup_get(url, key):
     return _retry_json(urllib.request.Request(url, headers={"Authorization": key}))
 
 
-def _ticket_resolved(t):
-    """True if a ClickUp task counts as resolved/closed (handled)."""
-    st = t.get("status") or {}
-    return (st.get("type") in ("closed", "done")) or (st.get("status") in ("resolved", "impossible"))
+def _ticket_customer_complete(t):
+    """True only when workflow and customer-visible outcome are complete."""
+    return customer_complete(t)
 
 
 def _notifier_owned(t):
@@ -248,12 +253,12 @@ def build_ticket_index(key, list_id):
     email_states: email(lower) -> set[bool]  — loose, by "User Email" field.
                   Used only by --backfill for the pre-#417 backlog.
     conv_states:  intercom_conv_id -> {
-                    "resolved": set[bool],                # True iff each linked ticket resolved
+                    "complete": set[bool],                # True iff each ticket is customer-complete
                     "tickets":  {task_id: {"name","url"}},# linked ClickUp tickets (for summary links)
                     "intercom_url": str,                  # the #417 "Intercom Link" deeplink
                   }
                   — precise, by the #417 "Intercom Link" field. The default
-                  matching path. Eligibility reads only ["resolved"]; "tickets"
+                  matching path. Eligibility reads only ["complete"]; "tickets"
                   and "intercom_url" exist purely to build the #cs_chats summary.
     notify_owed:  intercom_conv_id -> set[task_id]  — hydra-action-request tickets
                   (OPEN or resolved) resolve-notify may still owe a "your request
@@ -277,7 +282,7 @@ def build_ticket_index(key, list_id):
         if not tasks:
             break
         for t in tasks:
-            done = _ticket_resolved(t)
+            done = _ticket_customer_complete(t)
             tid = t.get("id")
             tname = t.get("name") or tid
             # A ticket resolve-notify owes a note for — record it against the
@@ -303,8 +308,8 @@ def build_ticket_index(key, list_id):
                     conv_id = _conv_id_from_link(val)
                     if conv_id:
                         cs = conv_states.setdefault(
-                            conv_id, {"resolved": set(), "tickets": {}, "intercom_url": str(val)})
-                        cs["resolved"].add(done)
+                            conv_id, {"complete": set(), "tickets": {}, "intercom_url": str(val)})
+                        cs["complete"].add(done)
                         cs["intercom_url"] = str(val)
                         if tid:
                             cs["tickets"][tid] = {"name": tname, "url": CLICKUP_TASK_URL.format(tid)}
@@ -342,7 +347,7 @@ def fetch_open_convs(token):
 
 def is_eligible(conv, email_states, conv_states, backfill=False,
                 held_ticket_ids=None, defer_convs=None):
-    """Eligible to close iff we spoke last AND it is tied to a resolved ticket.
+    """Eligible to close iff we spoke last and every linked ticket is customer-complete.
 
     We-spoke-last is required first (excludes never_replied + customer_last).
 
@@ -360,13 +365,13 @@ def is_eligible(conv, email_states, conv_states, backfill=False,
     description deeplink), so it also covers tickets the closer's #417-only
     index below would miss.
 
-    The tie to a resolved ticket is then established, most-precise-first:
+    The tie to a customer-complete ticket is established, most-precise-first:
       1. PRECISE (#417 link): if this conversation id is linked to any ticket,
          that linkage is authoritative — close iff EVERY linked ticket is
-         resolved and NONE is in resolve-notify's active batch (held).
+         customer-complete and NONE is in resolve-notify's active batch (held).
       2. EMAIL fallback (--backfill only): for conversations with no link, the
          pre-#417 path — close iff the customer's email matches >=1 ticket and
-         EVERY email-matched ticket is resolved.
+         EVERY email-matched ticket is customer-complete.
     """
     lar, lcr = conv["lar"], conv["lcr"]
     # Strictly admin-last. Intercom timestamps are second-granular, so lar == lcr
@@ -382,7 +387,7 @@ def is_eligible(conv, email_states, conv_states, backfill=False,
         linked_ids = set((conv_states[cid].get("tickets") or {}).keys())
         if linked_ids & (held_ticket_ids or set()):
             return False
-        return all(conv_states[cid]["resolved"])
+        return all(conv_states[cid]["complete"])
     if not backfill:  # steady-state: precise links only, never loose email
         return False
     # Backfill is an explicit human-run compatibility path and cannot map its
@@ -497,7 +502,7 @@ def should_notify(apply, notify_enabled, ok):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Silently close conversations whose ClickUp ticket is resolved")
+    ap = argparse.ArgumentParser(description="Silently close conversations whose ClickUp ticket is customer-complete")
     ap.add_argument("--apply", action="store_true", help="actually close (default: dry-run)")
     ap.add_argument("--backfill", action="store_true",
                     help="also close pre-#417 conversations matched loosely by email")
@@ -540,7 +545,7 @@ def main():
     print(f"resolve-notify processed (seen) tickets: {len(seen_ticket_ids)}")
     print(f"deferred (resolve-notify owes an unsent note): {len(defer_convs)}")
     print(f"open conversations scanned: {len(convs)}")
-    print(f"eligible (linked ticket resolved AND we replied last): {len(eligible)}")
+    print(f"eligible (linked ticket customer-complete AND we replied last): {len(eligible)}")
 
     if not args.apply:
         for c in eligible[:15]:

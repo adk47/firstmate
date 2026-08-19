@@ -45,12 +45,48 @@ from importlib import util
 spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 task = {"id": "T1", "status": {"type": "done", "status": "complete"},
-        "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"}],
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"},
+                 {"name": "customer-outcome:complete"}],
         "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/CONV9"}],
         "description": "---ACTION-REQUEST---\n{\"customer_email\": \"A@B.com\"}\n---END-ACTION-REQUEST---"}
 c, r = mod.extract_candidate(task, int(os.environ['RESOLVE_NOTIFY_NOW']))
 assert c and r is None, (c, r)
 assert c["conv_id"] == "CONV9" and c["email"] == "a@b.com", c
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "extract_candidate: resolved without customer-complete outcome fails closed" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+task = {"id": "T1", "status": {"type": "done", "status": "resolved"},
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"}],
+        "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/CONV9"}],
+        "description": "---ACTION-REQUEST---\n{\"customer_email\": \"A@B.com\"}\n---END-ACTION-REQUEST---"}
+c, r = mod.extract_candidate(task, int(os.environ['RESOLVE_NOTIFY_NOW']))
+assert c is None and r == "customer-outcome", (c, r)
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "extract_candidate: impossible never becomes customer-complete" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+task = {"id": "T1", "status": {"type": "done", "status": "impossible"},
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"},
+                 {"name": "customer-outcome:complete"}],
+        "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/CONV9"}],
+        "description": "---ACTION-REQUEST---\n{\"customer_email\": \"A@B.com\"}\n---END-ACTION-REQUEST---"}
+c, r = mod.extract_candidate(task, int(os.environ['RESOLVE_NOTIFY_NOW']))
+assert c is None and r == "customer-outcome", (c, r)
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
@@ -66,7 +102,8 @@ mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 # "Analytics handling" / common-issues.md row #7), so a resolved analytics ticket
 # gets the same "it's sorted" resolve note as credit-verify et al.
 task = {"id": "T1", "status": {"type": "done", "status": "complete"},
-        "tags": [{"name": "hydra-action-request"}, {"name": "action:analytics-followup"}],
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:analytics-followup"},
+                 {"name": "customer-outcome:complete"}],
         "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/CONV9"}],
         "description": "---ACTION-REQUEST---\n{\"customer_email\": \"A@B.com\"}\n---END-ACTION-REQUEST---"}
 assert "analytics-followup" in mod.ALLOWLIST, "analytics-followup must be allowlisted"
@@ -85,7 +122,8 @@ from importlib import util
 spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 task = {"id": "T1", "status": {"type": "open", "status": "in progress"},
-        "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"}],
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"},
+                 {"name": "customer-outcome:complete"}],
         "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/C1"}],
         "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---"}
 c, r = mod.extract_candidate(task, int(os.environ['RESOLVE_NOTIFY_NOW']))
@@ -119,7 +157,8 @@ from importlib import util
 spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 task = {"id": "T1", "status": {"type": "done"},
-        "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"}],
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"},
+                 {"name": "customer-outcome:complete"}],
         "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/C1"}],
         "description": "---ACTION-REQUEST---\n{\"customer_email\": \"   \"}\n---END-ACTION-REQUEST---"}
 c, r = mod.extract_candidate(task, int(os.environ['RESOLVE_NOTIFY_NOW']))
@@ -188,7 +227,8 @@ spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 def task(tid, conv):
     return {"id": tid, "status": {"type": "done"},
-            "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"}],
+            "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"},
+                     {"name": "customer-outcome:complete"}],
             "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/" + conv}],
             "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---"}
 mod.fetch_all_tasks = lambda key, lid: [task("T1", "C1"), task("T2", "C2")]
@@ -216,7 +256,8 @@ mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 mod.write_state(os.environ["RESOLVE_NOTIFY_STATE"], {
     mod.SEED_SENTINEL: 1781000000, "TOLD": 1781000000, "conv:COLD": 1781000000})
 task = {"id": "T9", "status": {"type": "done"},
-        "tags": [{"name": "hydra-action-request"}, {"name": "action:profile-claim"}],
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:profile-claim"},
+                 {"name": "customer-outcome:complete"}],
         "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/C9"}],
         "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---"}
 mod.fetch_all_tasks = lambda key, lid: [task]
@@ -247,7 +288,8 @@ spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 mod.write_state(os.environ["RESOLVE_NOTIFY_STATE"], {mod.SEED_SENTINEL: 1781000000})
 task = {"id": "T9", "status": {"type": "done"},
-        "tags": [{"name": "hydra-action-request"}, {"name": "action:profile-claim"}],
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:profile-claim"},
+                 {"name": "customer-outcome:complete"}],
         "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/C9"}],
         "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---"}
 mod.fetch_all_tasks = lambda key, lid: [task]
@@ -275,7 +317,8 @@ mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 mod.write_state(os.environ["RESOLVE_NOTIFY_STATE"], {
     mod.SEED_SENTINEL: 1781000000, "T9": 1781000000, "conv:C9": 1781000000})
 task = {"id": "T9", "status": {"type": "done"},
-        "tags": [{"name": "hydra-action-request"}, {"name": "action:profile-claim"}],
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:profile-claim"},
+                 {"name": "customer-outcome:complete"}],
         "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/C9"}],
         "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---"}
 mod.fetch_all_tasks = lambda key, lid: [task]
@@ -299,7 +342,8 @@ mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 mod.write_state(os.environ["RESOLVE_NOTIFY_STATE"], {mod.SEED_SENTINEL: 1781000000})
 def task(i):
     return {"id": f"T{i}", "status": {"type": "done"},
-            "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"}],
+            "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"},
+                     {"name": "customer-outcome:complete"}],
             "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": f"/conversation/C{i}"}],
             "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---"}
 mod.fetch_all_tasks = lambda key, lid: [task(i) for i in range(40)]  # > default MAX 25
@@ -359,7 +403,8 @@ mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 mod.write_state(os.environ["RESOLVE_NOTIFY_STATE"], {mod.SEED_SENTINEL: 1781000000})
 def task(i):
     return {"id": f"T{i}", "status": {"type": "done"},
-            "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"}],
+            "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"},
+                     {"name": "customer-outcome:complete"}],
             "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": f"/conversation/C{i}"}],
             "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---"}
 mod.fetch_all_tasks = lambda key, lid: [task(i) for i in range(26)]
@@ -400,7 +445,8 @@ mod.write_state(os.environ["RESOLVE_NOTIFY_STATE"], {
     mod.SEED_SENTINEL: 1781000000, mod.BULK_BACKLOG_KEY: backlog})
 def task(i):
     return {"id": f"T{i}", "status": {"type": "done"},
-            "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"}],
+            "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"},
+                     {"name": "customer-outcome:complete"}],
             "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": f"/conversation/C{i}"}],
             "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---"}
 mod.fetch_all_tasks = lambda key, lid: [task(i) for i in range(6)]
@@ -431,7 +477,8 @@ mod.write_state(os.environ["RESOLVE_NOTIFY_STATE"], {
     mod.SEED_SENTINEL: 1781000000, mod.BULK_BACKLOG_KEY: backlog})
 def task(i):
     return {"id": f"T{i}", "status": {"type": "done"},
-            "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"}],
+            "tags": [{"name": "hydra-action-request"}, {"name": "action:credit-verify"},
+                     {"name": "customer-outcome:complete"}],
             "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": f"/conversation/C{i}"}],
             "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---"}
 mod.fetch_all_tasks = lambda key, lid: [task(i) for i in range(3)]

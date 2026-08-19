@@ -15,6 +15,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.customer_outcome import (  # noqa: E402
+    OUTCOME_COMPLETE,
+    customer_outcome_of,
+    outcome_tag,
+    outcome_tags_of,
+)
+
 from uvn_under30_policy import (
     APPROVED,
     PolicyError,
@@ -149,9 +157,8 @@ def has_manual_handoff(comments: list[dict[str, Any]]) -> bool:
 
 
 def get_task_and_comments(task_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    task = clickup("GET", f"/task/{task_id}")
-    if not isinstance(task, dict):
-        raise RunError(f"ClickUp task {task_id} returned malformed detail")
+    task = get_task(task_id)
+
     comments: list[dict[str, Any]] = []
     query: list[str] = []
     seen_cursors: set[tuple[str, str]] = set()
@@ -172,6 +179,13 @@ def get_task_and_comments(task_id: str) -> tuple[dict[str, Any], list[dict[str, 
         seen_cursors.add(cursor)
         query = [f"start={start}", f"start_id={start_id}"]
     raise RunError(f"ClickUp comment pagination exceeded 100 pages for {task_id}")
+
+
+def get_task(task_id: str) -> dict[str, Any]:
+    task = clickup("GET", f"/task/{task_id}")
+    if not isinstance(task, dict):
+        raise RunError(f"ClickUp task {task_id} returned malformed detail")
+    return task
 
 
 def load_required_fraud_ids() -> set[str]:
@@ -386,13 +400,39 @@ def assert_ticket_scope(
     task_id: str,
     expected_profile_id: str,
     expected_ids: set[str],
-) -> None:
+) -> dict[str, Any]:
     task, comments = get_task_and_comments(task_id)
     if not is_automation_ready_task(task):
         raise TicketNoLongerEligible
     profile_id, scoped_ids = parse_ticket_scope(task, comments)
     if profile_id != expected_profile_id or scoped_ids != expected_ids:
         raise PolicyError("ticket scope changed during the run")
+    return task
+
+
+def replace_customer_outcome_tag(
+    run_id: str,
+    task_id: str,
+    task: dict[str, Any],
+    outcome: str,
+) -> None:
+    desired = outcome_tag(outcome)
+    existing = outcome_tags_of(task)
+    audit(run_id, "customer_outcome_write_planned", {
+        "ticket_id": task_id,
+        "outcome": outcome,
+        "replaces": sorted(existing - {desired}),
+    })
+    for tag in sorted(existing - {desired}):
+        clickup("DELETE", f"/task/{task_id}/tag/{quote(tag, safe='')}")
+    if desired not in existing:
+        clickup("POST", f"/task/{task_id}/tag/{quote(desired, safe='')}")
+    if customer_outcome_of(get_task(task_id)) != outcome:
+        raise RunError(f"customer outcome readback failed for ClickUp task {task_id}")
+    audit(run_id, "customer_outcome_write_complete", {
+        "ticket_id": task_id,
+        "outcome": outcome,
+    })
 
 
 def assert_rows_match_scope(
@@ -423,7 +463,7 @@ def update_ticket(
         # The comment write above is itself mutable ticket state. Re-read every
         # field and every comment after it, then check the exact request set and
         # durable unresolved-write state immediately before the status PUT.
-        assert_ticket_scope(task_id, expected_profile_id, expected_ids)
+        current_task = assert_ticket_scope(task_id, expected_profile_id, expected_ids)
         rows = list_profile_requests(expected_profile_id)
         assert_rows_match_scope(expected_profile_id, expected_ids, rows)
         if not every_scoped_request_approved(expected_ids, rows):
@@ -434,6 +474,8 @@ def update_ticket(
             audit(run_id, "clickup_resolve_skipped", {"ticket_id": task_id, "reason": "unresolved approval attempt"})
             audit(run_id, "clickup_write_complete", {"ticket_id": task_id, "resolve": False})
             return False
+        replace_customer_outcome_tag(
+            run_id, task_id, current_task, OUTCOME_COMPLETE)
         clickup("PUT", f"/task/{task_id}", {"status": "resolved"})
     audit(run_id, "clickup_write_complete", {"ticket_id": task_id, "resolve": resolve})
     return resolve

@@ -8,9 +8,9 @@ These tests lock the invariants that make the close safe:
 
   - we must have spoken last (never close a chat where the customer is waiting,
     `customer_last`, or that never got an answer, `never_replied`);
-  - the close must be tied to a *resolved ticket for THIS conversation* — by
+  - the close must be tied to a *customer-complete ticket for THIS conversation* — by
     default only via the precise #417 "Intercom Link", so an unrelated/new
-    conversation for a customer who merely had older resolved tickets is left
+    conversation for a customer who merely had older complete tickets is left
     alone; the loose email match is reachable only behind `--backfill`;
   - an open ticket linked to the conversation blocks the close even under
     backfill, and email matching with any open ticket is skipped.
@@ -47,9 +47,9 @@ def link(conv_id, ws="abc123"):
 
 
 def cs(*resolved, tickets=None, intercom_url=None):
-    """A conv_states value. is_eligible reads only ["resolved"]; tickets and
+    """A conv_states value. is_eligible reads only ["complete"]; tickets and
     intercom_url exist for the summary builder."""
-    return {"resolved": set(resolved), "tickets": tickets or {}, "intercom_url": intercom_url}
+    return {"complete": set(resolved), "tickets": tickets or {}, "intercom_url": intercom_url}
 
 
 class TestIsEligible(unittest.TestCase):
@@ -150,9 +150,9 @@ class TestIsEligible(unittest.TestCase):
     # ---- unrelated same-email conversations: the core of finding #1 ----
 
     def test_unrelated_same_email_not_eligible_by_default(self):
-        # The customer has only resolved tickets (email_states all True) but THIS
+        # The customer has only complete tickets (email_states all True) but THIS
         # conversation has no #417 link. In the unattended default it must NOT be
-        # closed just because the same person had older resolved tickets.
+        # closed just because the same person had older complete tickets.
         conv = make_conv(cid="c-new", email="alice@example.com")
         email_states = {"alice@example.com": {True}}
         self.assertFalse(cr.is_eligible(conv, email_states, {}, backfill=False))
@@ -193,7 +193,7 @@ class TestBuildTicketIndex(unittest.TestCase):
 
     @staticmethod
     def _task(status_type="open", status_name="open", email=None, link_val=None,
-              tid=None, name=None, tags=None, description=None):
+              tid=None, name=None, tags=None, description=None, outcome="complete"):
         cf = []
         if email is not None:
             cf.append({"id": cr.USER_EMAIL_FIELD, "value": email})
@@ -204,8 +204,11 @@ class TestBuildTicketIndex(unittest.TestCase):
             t["id"] = tid
         if name is not None:
             t["name"] = name
-        if tags is not None:
-            t["tags"] = [{"name": n} for n in tags]
+        tag_names = list(tags or [])
+        if outcome is not None:
+            tag_names.append(f"customer-outcome:{outcome}")
+        if tag_names:
+            t["tags"] = [{"name": n} for n in tag_names]
         if description is not None:
             t["description"] = description
         return t
@@ -217,9 +220,16 @@ class TestBuildTicketIndex(unittest.TestCase):
             self._task("open", "in progress", email="c@x.com", link_val=link("3")),
         ]
         email_states, conv_states, _ = self._run(tasks)
-        resolved = {k: v["resolved"] for k, v in conv_states.items()}
+        resolved = {k: v["complete"] for k, v in conv_states.items()}
         self.assertEqual(resolved, {"1": {True}, "2": {True}, "3": {False}})
         self.assertEqual(email_states, {"a@x.com": {True}, "b@x.com": {True}, "c@x.com": {False}})
+
+    def test_resolved_without_customer_complete_outcome_fails_closed(self):
+        task = self._task(
+            "closed", "resolved", email="a@x.com", link_val=link("1"), outcome=None)
+        email_states, conv_states, _ = self._run([task])
+        self.assertEqual(conv_states["1"]["complete"], {False})
+        self.assertEqual(email_states["a@x.com"], {False})
 
     def test_ticket_id_name_and_intercom_url_captured(self):
         # The summary links come from here: each conv keeps its linked ClickUp
@@ -241,7 +251,7 @@ class TestBuildTicketIndex(unittest.TestCase):
         self.assertIn("999", conv_states)
 
     def test_same_email_accumulates_open_and_resolved(self):
-        # An email with both an open and a resolved ticket -> {False, True},
+        # An email with both an open and a complete ticket -> {False, True},
         # which all() then rejects: this is what stops a backfill close.
         tasks = [
             self._task("closed", "done", email="a@x.com"),

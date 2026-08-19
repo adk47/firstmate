@@ -358,9 +358,9 @@ done
 systemctl daemon-reload
 log "  intercom-data-complaint-watchdog: retired (replaced by systemic-data-issue-report-daily cron)"
 
-# ─── Close resolved-ticket conversations (steady-state sync) ──
-# Silently closes Intercom conversations whose ClickUp ticket(s) are all
-# resolved AND where we replied last — keeps "ticket resolved" and "chat
+# ─── Close customer-complete conversations (steady-state sync) ──
+# Silently closes Intercom conversations whose linked ClickUp tickets are all
+# customer-complete AND where we replied last — keeps "request done" and "chat
 # closed" in sync so the open-conversation pile stops regrowing on that axis.
 # Conservative + reversible: never closes a chat that has an open ticket, a
 # customer waiting on us, or one that was never answered; every close is
@@ -370,7 +370,7 @@ log "  intercom-data-complaint-watchdog: retired (replaced by systemic-data-issu
 # closed >=1 (no daily noise). See scripts/close-resolved-conversations.py.
 cat > /etc/systemd/system/close-resolved-conversations.service << CLOSERESVC
 [Unit]
-Description=Close Intercom conversations whose ClickUp ticket is resolved
+Description=Close Intercom conversations whose ClickUp ticket is customer-complete
 # Starting the closer also runs resolve-notify first. This guarantees a newly-
 # resolved bulk is persisted before the closer reads its held-ticket snapshot.
 Requires=resolve-notify.service
@@ -454,7 +454,8 @@ log "  $ovn: $(systemctl is-active "$ovn" 2>/dev/null || echo unknown)"
 # ─── Proactive resolution notifier (every 6h) ─────────────────
 # The close-the-loop counterpart of the overdue notifier: sends ONE in-app
 # Intercom "your request is sorted" note to a customer when their verification
-# ticket flips RESOLVED — today close-resolved-conversations.py closes the chat
+# ticket becomes customer-complete (resolved + customer-outcome:complete) — today
+# close-resolved-conversations.py closes the chat
 # SILENTLY, so a finished request just goes quiet. The notify makes us
 # "we spoke last", which is exactly close-resolved's gate, so the close batch
 # (above) then closes the conversation. Same safety-first design as the overdue

@@ -15,7 +15,7 @@ Workflow per ticket id (read from stdin, one per line):
      double-messaging when Jan/Yann replied in parallel.
   4. Dry-run by default: print the proposed message to stdout. With
      --apply: POST the reply to Intercom, comment on the ClickUp ticket,
-     and set ticket status to "resolved".
+     stamp `customer-outcome:complete`, and set ticket status to "resolved".
 
 Designed to be safe in the wrong hands: --dry-run is the default, --apply
 is explicit, and the script refuses to send if any of (email, conv, merge
@@ -40,7 +40,18 @@ Exit codes:
   1 — usage / env error
   3 — at least one ticket failed mid-run; check stderr (cron-visible)
 """
-import argparse, datetime as dt, json, os, sys, urllib.request, urllib.error
+import argparse
+import datetime as dt
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from lib.customer_outcome import outcome_tag, outcome_tags_of  # noqa: E402
 
 CLICKUP_API = os.environ.get("CLICKUP_API", "https://api.clickup.com/api/v2")
 INTERCOM_API = "https://api.intercom.io"
@@ -187,7 +198,28 @@ def post_intercom_reply(conv_id, admin_id, message, intercom_token):
     return body
 
 
-def comment_and_close_ticket(ticket_id, conv_id, clickup_key):
+def replace_customer_outcome(ticket_id, ticket, outcome, clickup_key):
+    desired = outcome_tag(outcome)
+    existing = outcome_tags_of(ticket)
+    for tag in sorted(existing - {desired}):
+        s, body = http(
+            "DELETE",
+            f"{CLICKUP_API}/task/{ticket_id}/tag/{urllib.parse.quote(tag, safe='')}",
+            {"Authorization": clickup_key},
+        )
+        if s not in (200, 204):
+            raise RuntimeError(f"clickup remove outcome tag {ticket_id} -> {s}: {body}")
+    if desired not in existing:
+        s, body = http(
+            "POST",
+            f"{CLICKUP_API}/task/{ticket_id}/tag/{urllib.parse.quote(desired, safe='')}",
+            {"Authorization": clickup_key},
+        )
+        if s not in (200, 201):
+            raise RuntimeError(f"clickup add outcome tag {ticket_id} -> {s}: {body}")
+
+
+def comment_and_close_ticket(ticket_id, ticket, conv_id, clickup_key):
     http("POST", f"{CLICKUP_API}/task/{ticket_id}/comment",
          {"Authorization": clickup_key},
          body={
@@ -195,6 +227,7 @@ def comment_and_close_ticket(ticket_id, conv_id, clickup_key):
                              f"(Intercom conv {conv_id}). Closing.",
              "notify_all": False,
          })
+    replace_customer_outcome(ticket_id, ticket, "complete", clickup_key)
     s, _ = http("PUT", f"{CLICKUP_API}/task/{ticket_id}",
                 {"Authorization": clickup_key},
                 body={"status": "resolved"})
@@ -242,7 +275,7 @@ def process(ticket_id, args, env):
         # Still close the secondary ticket — the customer was told via the
         # first one. The closing comment will note this.
         if args.apply:
-            comment_and_close_ticket(ticket_id, conv_id,
+            comment_and_close_ticket(ticket_id, ticket, conv_id,
                                      env["CLICKUP_API_KEY"])
         return
 
@@ -269,7 +302,7 @@ def process(ticket_id, args, env):
     # failure; a future ticket sharing this conv must NOT inherit a phantom
     # "already handled" state and silently close without messaging.
     _SEEN_CONVS.add(conv_id)
-    comment_and_close_ticket(ticket_id, conv_id, env["CLICKUP_API_KEY"])
+    comment_and_close_ticket(ticket_id, ticket, conv_id, env["CLICKUP_API_KEY"])
     print(f"[{ticket_id}] applied: replied + closed", file=sys.stderr)
 
 

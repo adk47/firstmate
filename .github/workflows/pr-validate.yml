@@ -1242,6 +1242,15 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_close_resolved_conversations
+      - name: Run customer-outcome contract tests
+        # ClickUp workflow status is not customer-visible proof. These tests lock
+        # the shared fail-closed outcome predicate and every automated writer's
+        # tag-before-status ordering.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v \
+            tests.test_customer_outcome \
+            tests.test_resolution_writers
       - name: Run abuse-block list tests
         # skills-all/muso-abuse-block/scripts/abuse-block.py is CUSTOMER-FACING:
         # tagging a contact silences Caroline for them. These lock the dry-run

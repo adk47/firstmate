@@ -35,9 +35,11 @@ HOW IT WORKS (one daily run):
      deliberately a soft "please verify" — NOT "it's fixed" — because the signal
      is "an admin touched your entity," not a positive source-vs-Muso re-check.
      It invites a reply, so a wrong match self-corrects instead of going quiet.
-  4. CLOSE: notifying makes us "spoke last", so we then close the Intercom
-     conversation, and best-effort flip any linked ClickUp ticket to resolved.
-     Every close is shadow-logged and reversible.
+  4. CLOSE + WAIT: notifying makes us "spoke last", so we close the Intercom
+     conversation, but linked ClickUp tickets remain `waiting` with
+     `customer-outcome:verification-required`. An entity touch is not proof
+     that the customer's exact complaint is fixed. Every close is shadow-logged
+     and reversible; a customer reply reopens the conversation.
   5. ROLL UP TO AARON: post "your fixes closed N conversations across M issues",
      attributed to the action_log row (route + the admin who shipped it + when).
      THIS is the part that answers "is anything checking that my work closes
@@ -68,7 +70,7 @@ Dry-run by default; --apply is the only path that messages/closes/writes state.
 Env:
   MUSOAI_INTERCOM_TOKEN     required — Intercom Bearer.
   MUSO_BIN                  muso CLI for the action_log Trino query (default: muso).
-  CLICKUP_API_KEY           optional — only to flip a linked ClickUp ticket resolved.
+  CLICKUP_API_KEY           optional — annotate a linked ticket as waiting for verification.
   INTERCOM_ADMIN_ID         optional, default 5763097 (Caroline) — admin we post AS.
   CLICKUP_LIST_ID           optional, default 901000600160 (User Requests).
   CLICKUP_INTERCOM_LINK_FIELD_ID  optional, default c32dbf6e-... (#417 link field).
@@ -105,7 +107,12 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.customer_outcome import outcome_tag, outcome_tags_of  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
@@ -118,7 +125,7 @@ SLACK_API = "https://slack.com/api/chat.postMessage"
 
 # "Intercom Link" custom field (#417); value is the conversation deeplink
 # https://app.intercom.com/a/inbox/<ws>/inbox/conversation/<convId>. Used to map
-# a conversation back to its ClickUp ticket so we can flip it resolved.
+# a conversation back to its ClickUp ticket so we can request verification.
 INTERCOM_LINK_FIELD = os.environ.get(
     "CLICKUP_INTERCOM_LINK_FIELD_ID", "c32dbf6e-f680-4ff1-a532-192bb96245c3")
 _CONV_ID_RE = re.compile(r"/conversation/([^/?#\s\"']+)")
@@ -573,17 +580,37 @@ def build_conv_to_tasks(key, list_id):
     return index
 
 
-def flip_ticket_resolved(task_id, key, route, at):
-    """Set a ClickUp task to resolved + leave an audit comment. Best-effort."""
-    clickup_put(f"{CLICKUP_API}/task/{task_id}", key, {"status": "resolved"})
+def mark_ticket_verification_required(task_id, key, route, at):
+    """Keep the ticket waiting because an entity touch is not proof of success."""
     body = (f"Automated closure by resolution-matcher — a data fix "
             f"({route}) touching this customer's cited entity executed at {at}; "
-            f"customer was notified to verify. Closing ticket.")
-    try:
-        http("POST", f"{CLICKUP_API}/task/{task_id}/comment", {"Authorization": key},
-             body={"comment_text": body, "notify_all": False})
-    except (RuntimeError, urllib.error.URLError, ValueError):
-        pass  # status already flipped; a missing comment must not fail the close
+            f"customer was notified to verify. Keeping the ticket waiting until "
+            f"the customer-visible result is confirmed.")
+    s, resp = http("POST", f"{CLICKUP_API}/task/{task_id}/comment",
+                   {"Authorization": key},
+                   body={"comment_text": body, "notify_all": False})
+    if s not in (200, 201):
+        raise RuntimeError(f"clickup comment {task_id} -> {s}: {resp}")
+
+    task = clickup_get(f"{CLICKUP_API}/task/{task_id}", key)
+    desired = outcome_tag("verification-required")
+    for tag in sorted(outcome_tags_of(task) - {desired}):
+        s, resp = http(
+            "DELETE",
+            f"{CLICKUP_API}/task/{task_id}/tag/{urllib.parse.quote(tag, safe='')}",
+            {"Authorization": key},
+        )
+        if s not in (200, 204):
+            raise RuntimeError(f"clickup remove outcome tag {task_id} -> {s}: {resp}")
+    if desired not in outcome_tags_of(task):
+        s, resp = http(
+            "POST",
+            f"{CLICKUP_API}/task/{task_id}/tag/{urllib.parse.quote(desired, safe='')}",
+            {"Authorization": key},
+        )
+        if s not in (200, 201):
+            raise RuntimeError(f"clickup add outcome tag {task_id} -> {s}: {resp}")
+    clickup_put(f"{CLICKUP_API}/task/{task_id}", key, {"status": "waiting"})
 
 
 # --------------------------------------------------------------------------
@@ -934,25 +961,27 @@ def main(argv=None):
                 state[member_state_key(m)] = now_epoch
                 write_state(state_path, state)
                 dirty = True
-                # 3) Close the conv + flip linked tickets — BEST-EFFORT. We already
-                #    spoke last, so close-resolved-conversations.py is the backstop
-                #    that will close this conv on its next run if our close fails.
-                closed_tickets = []
+                # 3) Close the conv + mark linked tickets verification-required —
+                #    BEST-EFFORT. If the direct close fails, leaving the conversation
+                #    open is safe; the waiting ticket deliberately does not qualify
+                #    for the customer-complete closer.
+                updated_tickets = []
                 try:
                     close_conversation(cid, admin_id, token)
                 except (RuntimeError, urllib.error.URLError, ValueError) as e:
                     print(f"resolution-matcher: conv close failed for {cid} "
-                          f"(message sent; close-resolved will retry): {e}", file=sys.stderr)
+                          f"(message sent; leaving conversation open): {e}", file=sys.stderr)
                 for tid in conv_to_tasks.get(cid, []):
                     try:
-                        flip_ticket_resolved(tid, clickup_key, m["fix"]["route"], m["fix"]["at"])
-                        closed_tickets.append(tid)
+                        mark_ticket_verification_required(
+                            tid, clickup_key, m["fix"]["route"], m["fix"]["at"])
+                        updated_tickets.append(tid)
                     except (RuntimeError, urllib.error.URLError, ValueError) as e:
-                        print(f"resolution-matcher: ticket flip failed for {tid}: {e}",
+                        print(f"resolution-matcher: ticket outcome update failed for {tid}: {e}",
                               file=sys.stderr)
                 shadow_append(shadow_path, {
                     "conv_id": cid, "issue_slug": m["issue_slug"], "email_acted": True,
-                    "closed_tickets": closed_tickets, "fix": m["fix"],
+                    "verification_required_tickets": updated_tickets, "fix": m["fix"],
                     "at": now_epoch})
             else:
                 seen_convs.add(cid)

@@ -272,9 +272,10 @@ fi
 # When applying: only iterate to_close.jsonl
 mv "$tmp/to_close.jsonl" "$tmp/matches.jsonl"
 
-# 5. Apply: set status=resolved FIRST, then comment. If the status update
-#    fails, we want the ticket left clean rather than annotated-but-still-open
-#    (which would generate duplicate comments on the next run).
+# 5. Apply: stamp the machine-readable customer outcome before status=resolved.
+#    If either outcome write fails, leave the ticket open. Consumers require
+#    both signals, so an interrupted run can never produce a false "all sorted"
+#    message or silent close.
 closed=0
 failed=0
 while IFS= read -r match; do
@@ -282,6 +283,30 @@ while IFS= read -r match; do
   merge_at=$(echo "$match" | jq -r '.merge_at')
   matched_by=$(echo "$match" | jq -r '.matched_by')
   pid=$(echo "$match" | jq -r '.customer_profile_id')
+
+  # Replace any stale outcome before marking the customer-visible merge done.
+  if ! current_task=$(clickup_curl GET "/task/$task_id"); then
+    echo "close-merged-tickets: task read failed for $task_id; refusing to resolve" >&2
+    failed=$((failed+1))
+    continue
+  fi
+  while IFS= read -r old_tag; do
+    [ -z "$old_tag" ] && continue
+    [ "$old_tag" = "customer-outcome:complete" ] && continue
+    encoded_tag=$(jq -rn --arg tag "$old_tag" '$tag | @uri')
+    if ! clickup_curl DELETE "/task/$task_id/tag/$encoded_tag" '{}' >/dev/null; then
+      echo "close-merged-tickets: stale outcome removal failed for $task_id; refusing to resolve" >&2
+      failed=$((failed+1))
+      continue 2
+    fi
+  done < <(echo "$current_task" | jq -r '.tags[]?.name | select(startswith("customer-outcome:"))')
+  if ! echo "$current_task" | jq -e '[.tags[]?.name] | index("customer-outcome:complete") != null' >/dev/null; then
+    if ! clickup_curl POST "/task/$task_id/tag/customer-outcome%3Acomplete" '{}' >/dev/null; then
+      echo "close-merged-tickets: customer outcome write failed for $task_id; refusing to resolve" >&2
+      failed=$((failed+1))
+      continue
+    fi
+  fi
 
   # Build the PUT body — resolve status, optionally add assignees.
   if [ -n "$add_assignees" ]; then

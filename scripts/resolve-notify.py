@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
-"""Proactively tell a customer when their request has been resolved.
+"""Proactively tell a customer when their request is verified complete.
 
 The close-the-loop counterpart of overdue-verification-notifier.py. Today
 close-resolved-conversations.py SILENTLY closes an Intercom conversation once
-its ClickUp ticket(s) resolve — the customer is never told "it's done", so a
-finished request just goes quiet. This sends ONE in-app Intercom reply per
-newly-resolved verification ticket: "good news, your request is sorted." The
-existing close-resolved batch then closes the conversation (the notify makes us
+its ClickUp ticket(s) are customer-complete — the customer is never told "it's
+done", so a finished request just goes quiet. This sends ONE in-app Intercom
+reply per newly customer-complete ticket: "good news, your request is sorted."
+The existing close-resolved batch then closes the conversation (the notify makes us
 "we spoke last", which is close-resolved's gate).
 
 This is CUSTOMER-FACING OUTBOUND, so the design is safety-first and mirrors the
 overdue notifier exactly. It must never message the wrong person, the same
 person twice, or about a conversation that is already closed, and a wiped state
-file must not blast the whole resolved backlog.
+file must not blast the whole customer-complete backlog.
 
 Eligibility (every gate must pass; any fail -> skip + count the reason):
   1. ClickUp list 901000600160, tag `hydra-action-request`, exactly one
      `action:<type>` and it is in the Tier-1 verification allowlist (ALLOWLIST).
-  2. RESOLVED — `_ticket_resolved()` (done/closed type, or resolved/impossible
-     status). The ClickUp fetch uses include_closed=true so true closed-type
-     resolutions are visible too (not just done-type), matching close-resolved.
+  2. CUSTOMER COMPLETE — ClickUp work is terminal (but not `impossible`) AND
+     the ticket carries exactly one valid `customer-outcome:*` tag whose value
+     is `complete`. A terminal status alone fails closed.
   3. Recover the Intercom conversation id from the #417 "Intercom Link" custom
      field, else an anchored parse of the description deeplink. Missing -> skip.
-  4. Per-conversation dedupe: one customer may have several resolved tickets but
+  4. Per-conversation dedupe: one customer may have several complete tickets but
      ONE conversation -> at most one "done" message per conversation, this run
      AND ever (persistent state keyed on both ticket id and `conv:<id>`).
   5. Fresh GET /conversations/{id} right before sending, then:
@@ -32,12 +32,12 @@ Eligibility (every gate must pass; any fail -> skip + count the reason):
          customer), the conversation is assigned to a non-bot human, its state
          != open (closed/snoozed -> never reopen with a "done" note), or it
          carries a social / abuse-block tag. A customer who spoke LAST is NOT
-         suppressed here — a resolved request where the customer is waiting on
+         suppressed here — a completed request where the customer is waiting on
          us is exactly who should hear it's done.
 
 Cold-start: on the FIRST run (no, or empty, state file), seed ALL currently-
-resolved tickets+conversations as already-seen and send NOTHING. Thereafter
-only tickets that go newly resolved are candidates. Per-run cap (MAX) bounds any
+complete tickets+conversations as already-seen and send NOTHING. Thereafter
+only tickets that become customer-complete are candidates. Per-run cap (MAX) bounds any
 blast; sending is gated behind `--apply` (default dry-run). A newly-observed
 batch above MAX is persisted and held for one run; later runs drain that exact
 snapshot at MAX only after one warning is confirmed delivered. State writes
@@ -84,6 +84,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.customer_outcome import customer_complete, workflow_terminal  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
@@ -199,11 +203,9 @@ def post_intercom_reply(conv_id, admin_id, message, token):
 # --------------------------------------------------------------------------
 # Pure logic (no network — directly unit-testable).
 # --------------------------------------------------------------------------
-def _ticket_resolved(t):
-    """True if a ClickUp task is handled. Mirrors close-resolved-conversations."""
-    st = t.get("status") or {}
-    return (st.get("type") in ("closed", "done")
-            or st.get("status") in ("resolved", "impossible"))
+def _ticket_customer_complete(t):
+    """True only when workflow and customer-visible outcome are complete."""
+    return customer_complete(t)
 
 
 def _conv_id_from_link(value):
@@ -272,8 +274,10 @@ def extract_candidate(task, now_epoch):
     if len(atypes) != 1 or atypes[0] not in ALLOWLIST:
         return None, "action-type"
     atype = atypes[0]
-    if not _ticket_resolved(task):
+    if not workflow_terminal(task):
         return None, "not-resolved"
+    if not _ticket_customer_complete(task):
+        return None, "customer-outcome"
     conv_id = conv_id_of(task)
     if not conv_id:
         return None, "no-conv"
@@ -495,13 +499,23 @@ def _self_test(now_epoch):
                                "value": "https://app.intercom.com/a/inbox/w/inbox/conversation/C1"}],
             "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---"}
 
-    resolved = dict(base, status={"type": "done", "status": "complete"})
+    resolved = dict(base, status={"type": "done", "status": "complete"},
+                    tags=base["tags"] + [{"name": "customer-outcome:complete"}])
     c, r = extract_candidate(resolved, now_epoch)
     assert c and r is None and c["conv_id"] == "C1" and c["email"] == "a@b.com", ("resolved", c, r)
 
     open_t = dict(base, status={"type": "open", "status": "in progress"})
     c, r = extract_candidate(open_t, now_epoch)
     assert c is None and r == "not-resolved", ("open-not-dropped", c, r)
+
+    no_outcome = dict(base, status={"type": "done", "status": "resolved"})
+    c, r = extract_candidate(no_outcome, now_epoch)
+    assert c is None and r == "customer-outcome", ("missing-outcome-not-dropped", c, r)
+
+    impossible = dict(base, status={"type": "done", "status": "impossible"},
+                      tags=base["tags"] + [{"name": "customer-outcome:complete"}])
+    c, r = extract_candidate(impossible, now_epoch)
+    assert c is None and r == "customer-outcome", ("impossible-not-dropped", c, r)
 
     refund = dict(base, status={"type": "done", "status": "complete"},
                   tags=[{"name": "hydra-action-request"}, {"name": "action:subscription-refund"}])
@@ -510,6 +524,7 @@ def _self_test(now_epoch):
 
     # A whitespace-only customer_email must fail CLOSED (no-email), not pass as "".
     ws = dict(base, status={"type": "done"},
+              tags=base["tags"] + [{"name": "customer-outcome:complete"}],
               description="---ACTION-REQUEST---\n{\"customer_email\": \"   \"}\n---END-ACTION-REQUEST---")
     c, r = extract_candidate(ws, now_epoch)
     assert c is None and r == "no-email", ("whitespace-email-not-dropped", c, r)
@@ -829,10 +844,12 @@ def _post_anomaly(text):
 
 def _bulk_warning(count, default_max, preview=False):
     if preview:
-        return (f"resolve-notify would hold {count} newly-resolved tickets in "
+        return (f"resolve-notify would hold {count} newly customer-complete "
+                f"tickets in "
                 f"apply mode because this exceeds the {default_max}-ticket "
                 f"automatic threshold. Dry-run sent nothing and changed no state.")
-    return (f":warning: resolve-notify held {count} newly-resolved tickets for "
+    return (f":warning: resolve-notify held {count} newly customer-complete "
+            f"tickets for "
             f"one run; this exceeds the {default_max}-ticket automatic "
             f"threshold. Sent nothing. State is readable, the timer remains "
             f"enabled, and later runs will drain at up to {default_max} per run after this "
