@@ -87,6 +87,34 @@ if [[ "$(jq 'length' <<<"$BATCH")" -eq 0 ]]; then
   fail_json 1 EMPTY_BATCH "empty batch — nothing to post"
 fi
 
+# Render and bound the exact Slack payload before any ledger mutation. A payload
+# rejected or truncated by Slack must never leave suggested rows without a post.
+POST_TEXT="$(jq -rn --argjson batch "$BATCH" --argjson rejects "$REJECTS" --arg date "$DATE" '
+  def line($label; $v): if ($v // "") != "" then "\n     \($label): \($v)" else "" end;
+  def company($i):
+    "  \($i + 1). *\(.name)* (`\(.domain)`)"
+    + (if (.tier // "") != "" then " — Tier \(.tier)" else "" end)
+    + line("Website"; .website) + line("LinkedIn"; .linkedin)
+    + (if ((.hq // "") != "") or ((.size // "") != "")
+       then "\n     HQ: \(.hq // "—") | Size: \(.size // "—")" else "" end)
+    + line("Why"; .why) + line("Spend signal"; .spend_signal)
+    + line("First touch"; .first_touch)
+    + ((.flags // []) | map("\n     ⚠ " + .) | join(""));
+  ($batch | length) as $n
+  | "*New Company Batch, \($date)* (\($n) parent companies)\n"
+  + ( [ $batch | group_by(.vertical // "Uncategorized")[]
+        | "\n" + ((.[0].vertical // "Uncategorized") + ":")
+          + "\n" + ( [ to_entries[] | .key as $k | (.value | company($k)) ] | join("\n") ) ]
+      | join("\n") )
+  + ( if ($rejects | length) > 0
+      then "\n\nRejected considerations: "
+           + ( [ $rejects[] | "\(.name) \(.reason)" ] | join(" · ") )
+      else "" end )')"
+POST_BYTES="$(LC_ALL=C printf '%s' "$POST_TEXT" | wc -c | tr -d '[:space:]')"
+if [[ "$POST_BYTES" -gt 39000 ]]; then
+  fail_json 1 PAYLOAD_TOO_LARGE "rendered Slack payload is ${POST_BYTES} bytes (max 39000)"
+fi
+
 # ── Step 0: prefetch the three ledger.sh dedupe sources ONCE, shared by BOTH
 # downstream ledger.sh calls (record-rejects + suggest) via LEDGER_SNAPSHOT_DIR
 # — collapses 6 sequential ~16s NocoDB snapshots to 3 (97s -> ~50s). The
@@ -163,29 +191,7 @@ if [[ "$rc" -ne 0 ]]; then
   esac
 fi
 
-# ── Step 3: ledger is written — ONLY NOW format + post ──────────────────────
-POST_TEXT="$(jq -rn --argjson batch "$BATCH" --argjson rejects "$REJECTS" --arg date "$DATE" '
-  def line($label; $v): if ($v // "") != "" then "\n     \($label): \($v)" else "" end;
-  def company($i):
-    "  \($i + 1). *\(.name)* (`\(.domain)`)"
-    + (if (.tier // "") != "" then " — Tier \(.tier)" else "" end)
-    + line("Website"; .website) + line("LinkedIn"; .linkedin)
-    + (if ((.hq // "") != "") or ((.size // "") != "")
-       then "\n     HQ: \(.hq // "—") | Size: \(.size // "—")" else "" end)
-    + line("Why"; .why) + line("Spend signal"; .spend_signal)
-    + line("First touch"; .first_touch)
-    + ((.flags // []) | map("\n     ⚠ " + .) | join(""));
-  ($batch | length) as $n
-  | "*New Company Batch, \($date)* (\($n) parent companies)\n"
-  + ( [ $batch | group_by(.vertical // "Uncategorized")[]
-        | "\n" + ((.[0].vertical // "Uncategorized") + ":")
-          + "\n" + ( [ to_entries[] | .key as $k | (.value | company($k)) ] | join("\n") ) ]
-      | join("\n") )
-  + ( if ($rejects | length) > 0
-      then "\n\nRejected considerations: "
-           + ( [ $rejects[] | "\(.name) \(.reason)" ] | join(" · ") )
-      else "" end )')"
-
+# ── Step 3: ledger is written — ONLY NOW post the prevalidated payload ──────
 # shellcheck source=../lib/slack-notify.sh
 source "$SLACK_NOTIFY_SH"
 slack_load_env "$SLACK_ACCOUNT" \

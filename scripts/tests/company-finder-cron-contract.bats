@@ -6,9 +6,11 @@ setup() {
   MESSAGE="$(jq -r '.payload.message' <<<"$JOB")"
 }
 
-@test "company-finder cron uses the enforced wrappers exactly once" {
-  [ "$(grep -o '/opt/hydra/scripts/company-finder/prep-batch.sh' <<<"$MESSAGE" | wc -l)" -eq 1 ]
-  [ "$(grep -o '/opt/hydra/scripts/company-finder/finalize-batch.sh' <<<"$MESSAGE" | wc -l)" -eq 1 ]
+@test "company-finder cron uses the atomic stage tools exactly once" {
+  [ "$(grep -o 'company_finder_prep' <<<"$MESSAGE" | wc -l)" -eq 1 ]
+  [ "$(grep -o 'company_finder_finalize' <<<"$MESSAGE" | wc -l)" -eq 1 ]
+  [[ "$MESSAGE" != *"prep-batch.sh"* ]]
+  [[ "$MESSAGE" != *"finalize-batch.sh"* ]]
 }
 
 @test "company-finder cron never instructs lower-level pipeline calls" {
@@ -18,10 +20,11 @@ setup() {
 }
 
 @test "company-finder cron stays silent after the finalizer posts" {
-  [[ "$MESSAGE" == *"If the finalizer succeeds"* ]]
+  [[ "$MESSAGE" == *'status="posted"'* ]]
   [[ "$MESSAGE" == *"exactly NO_REPLY and nothing else"* ]]
 }
 
-@test "company-finder cron does not finalize an empty batch" {
-  [[ "$MESSAGE" == *"If no companies qualify, do not call the finalizer"* ]]
+@test "company-finder cron stops when prep returns the no-candidates terminal" {
+  [[ "$MESSAGE" == *'status="no_candidates"'* ]]
+  [[ "$MESSAGE" == *"do not call the finalizer"* ]]
 }

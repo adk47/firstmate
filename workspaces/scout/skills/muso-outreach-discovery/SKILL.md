@@ -3,10 +3,10 @@ name: muso-outreach-discovery
 description: |
   Daily parent company discovery for Muso Ads B2B outreach. Finds new parent
   companies matching target verticals through an enforced pipeline: discover
-  (bounded) → prep-batch.sh (dedupe + liveness) → LinkedIn evidence + tier +
-  select → finalize-batch.sh (records the Seen Ledger AND posts). The two wrapper
-  scripts are mandatory: a batch reaches #company-finder ONLY as finalize-batch.sh
-  output — never hand-assembled or hand-posted.
+  (bounded) → company_finder_prep (dedupe + liveness) → LinkedIn evidence + tier +
+  select → company_finder_finalize (records the Seen Ledger AND posts). The two
+  atomic tools are mandatory: a batch reaches #company-finder ONLY through the
+  finalizer — never hand-assembled or hand-posted.
 
   Runs as a cron at 1 PM CEST daily, and on demand when McLaren/Nick asks
   "find me N companies in category X" — the full criteria below apply to the
@@ -21,21 +21,21 @@ depends-on:
   - muso-slack-formatter
   - muso-nocodb
 metadata:
-  version: "3.0"
-  last-updated: "2026-06-22"
-  status: "enforced pipeline: prep-batch.sh (dedupe+liveness) + finalize-batch.sh (ledger+post gate)"
+  version: "3.1"
+  last-updated: "2026-08-18"
+  status: "atomic pipeline: company_finder_prep + company_finder_finalize"
 ---
 
 # Muso Outreach Discovery
 
 Finds new parent companies matching Muso Ads target verticals. Discovery + tier
 judgment are LLM-driven; **dedupe, liveness, the ledger write and the Slack post
-are deterministic scripts you MUST exec** — `prep-batch.sh` then
-`finalize-batch.sh`. Skipping them is exactly the 2026-06 leak: batches
+run behind two atomic tools you MUST call** — `company_finder_prep` then
+`company_finder_finalize`. Skipping them is exactly the 2026-06 leak: batches
 hand-assembled from `web_search`, posted with zero dedupe, duplicates compounding
-because nothing was ledgered. The wrappers make the correct path the *easy* path
-(dedupe + ledger + post in one exec call), so there's no reason to hand-roll a
-batch — see **THE INVARIANT** below.
+because nothing was ledgered. The tools wait for the host scripts to exit, capture
+stdout/stderr/exit status atomically, and retain the exact stage evidence — see
+**THE INVARIANT** below.
 
 ## Access Control
 
@@ -120,21 +120,23 @@ a secondary cue. Classify every selected company (Step 4) and show its tier in t
 ## Pipeline (normative — steps in this order, no skipping)
 
 ```
-discover (bounded)  →  prep-batch.sh  →  [you: LinkedIn evidence + rollup +
-  tier + select top N]  →  finalize-batch.sh   (records the ledger AND posts)
+discover (bounded)  →  company_finder_prep  →  [you: LinkedIn evidence + rollup +
+  tier + select top N]  →  company_finder_finalize   (ledger + post)
 ```
 
 > **THE INVARIANT — read it twice.** A company batch reaches #company-finder
-> **only** as the output of `finalize-batch.sh`. You never hand-post a batch to
+> **only** as the output of `company_finder_finalize`. You never hand-post a batch to
 > the channel, never hand-run dedupe, and never write or *recall* dedupe/ledger
-> output yourself. If you did not exec `prep-batch.sh` **and** `finalize-batch.sh`
-> in THIS session, you have not produced a valid batch — say so plainly and post
+> output yourself. A run is complete only at `status="posted"` or the explicit
+> terminal `status="no_candidates"`. `status="prepared"` is never success. If
+> both tools were not called for a non-empty run in THIS session, you have not
+> produced a valid batch — say so plainly and post
 > nothing. (Batches assembled from `web_search` and hand-posted, skipping these,
 > are exactly the 2026-06 leak: duplicates shipped, nothing ledgered, dups
 > compounding every run.)
 
 > **This skill is in your context, so it is available — run it, don't go hunting for it.** If you
-> can read this, `prep-batch.sh` and `finalize-batch.sh` are available to you. Never `read` a
+> can read this, `company_finder_prep` and `company_finder_finalize` are available to you. Never `read` a
 > `SKILL.md` from a filesystem path to "verify" the skill exists, never treat a failed file read as
 > proof a tool is missing, and never escalate a "tool availability blocker" or say the skill "isn't
 > in your toolset." The only correct response to a company-finder request is to run the pipeline.
@@ -167,43 +169,21 @@ Union everything into one JSON array:
   failure.
 
 
-### Step 2: `prep-batch.sh` — dedupe + liveness in ONE call
+### Step 2: `company_finder_prep` — atomic dedupe + liveness
 
-```bash
-echo "$UNION_JSON" | bash /opt/hydra/scripts/company-finder/prep-batch.sh
-# -> { "survivors":[…], "rejects":{duplicates,dead,name_flags}, "stats":{…} }
+```json
+{"candidates":[{"name":"…","domain":"…","vertical":"…","why":"…"}]}
 ```
 
-Runs the deterministic dedupe (Company Intelligence + Contacts + Seen Ledger,
-normalized set-match) then the website-liveness check, and returns the alive-new
-**survivors** plus categorized rejects. Carry forward **ONLY** `.survivors`.
+The tool requires the `candidates` field; omitted input fails instead of silently
+becoming `[]`. It waits for the deterministic wrapper to exit, validates the full
+JSON, and durably records stdin/stdout/stderr/exit status before returning.
 
-- **Runtime + how to exec it (READ THIS — it is why McLaren's batch failed on
-  2026-07-22).** The dedup snapshot is served from an out-of-band cache, so this
-  call normally returns in **a second or two**. When the cache is cold/stale it
-  falls back to a **~50s** live 3-table snapshot — LONGER than a code-mode cell's
-  default 10s yield, in which case you get back `Script running with cell ID N …
-  Wall time 10.0s` with EMPTY output. That empty "still running" is the cell
-  YIELDING, **not** a failure and **not** a result. Handle it like this:
-  1. **Run prep-batch EXACTLY ONCE per union**, in a cell whose FIRST line is a
-     long-yield pragma:
-     `// @exec: {"yield_time_ms": 90000, "max_output_tokens": 16000}`
-     (raise `max_output_tokens` above the 1000 default or the survivors JSON gets
-     truncated).
-  2. If it returns `Script running with cell ID N`, **poll the SAME cell** with
-     `wait({cell_id: N, yield_time_ms: 90000, max_tokens: 16000})` repeatedly until
-     it reports an exit code + JSON. **Pass `max_tokens: 16000` on EVERY `wait` too**
-     — `wait` defaults to 10000 and will otherwise truncate the survivors JSON of a
-     yielded run, producing a false missing-JSON / PARTIAL. Do NOT stop after one or
-     two polls, and NEVER report a "still running" yield as PARTIAL/UNSAFE.
-  3. **NEVER launch a second prep-batch cell while one is still running.** Concurrent
-     prep-batch runs pound NocoDB, trip its rate limit, and each gets *slower* (429
-     backoff) — the opposite of what you want. One cell, then `wait`.
-  The gate has only FAILED on a non-zero **exit code** or genuinely missing JSON
-  (see fail-closed below). The same exec discipline applies to `finalize-batch.sh`
-  (Step 5): its ledger collision check is a LIVE ~50s read (a single shared
-  table snapshot reused across both ledger writes) + a Slack post, so give
-  it the same pragma + single patient `wait`.
+- `status="prepared"` → carry forward **ONLY** `.survivors` to Step 5. This state
+  is non-terminal and must never be reported as success.
+- `status="no_candidates"` → successful terminal; reply `NO_REPLY`.
+- `status="failed"` → do not ship; report PARTIAL/UNSAFE with `.error` and the
+  `.diagnosticId` when present. Never retry blindly or launch the scripts through `exec`.
 - A survivor with `verification == "blocked"` is bot-walled — KEEP it, but add a
   `flags` entry `"site bot-walled, eyeball it"` in Step 4 so the post shows ⚠.
 - `.rejects.name_flags[]` = NEW companies with a partial name overlap — keep, note
@@ -253,46 +233,28 @@ LinkedIn URL recalled without a fetch is not evidence.
   (they stay re-surfaceable); only DEAD / NO_LINKEDIN / IN_GHL / SUBSIDIARY are
   terminal rejects.
 
-### Step 5: `finalize-batch.sh` — ledger + POST in ONE call (the gate)
+### Step 5: `company_finder_finalize` — atomic ledger + post gate
 
-Assemble the final object and pipe it in. **This is the only way a batch reaches
+Assemble the final object and call the tool. **This is the only way a batch reaches
 the channel.**
 
-```bash
-echo "$FINAL_JSON" | BATCH_SOURCE="manual" \
-  bash /opt/hydra/scripts/company-finder/finalize-batch.sh
-# $FINAL_JSON = {
-#   "batch":   [ {name,domain,vertical,tier,website,linkedin,hq,size,why,
-#                 spend_signal,first_touch,evidence,
-#                 flags?:["site bot-walled, eyeball it"]}, … ],
-#   "rejects": [ {name,domain,reason:"DEAD"|"NO_LINKEDIN"|"IN_GHL"|"SUBSIDIARY"} ],
-#   "date":    "YYYY-MM-DD"
-# }
-# -> { "posted":{ts,channel}, "ledger":{suggested,rejects_recorded} }
+```json
+{
+  "batch": [{"name":"…","domain":"…","vertical":"…","tier":"…"}],
+  "rejects": [{"name":"…","domain":"…","reason":"DEAD"}],
+  "date": "YYYY-MM-DD"
+}
 ```
 
 It records the terminal rejects, writes the batch to the Seen Ledger
 (`Status=suggested` — what stops a company from EVER being re-suggested), and
-**only on a clean ledger write formats and posts the batch to #company-finder
-itself.** You do not post; the script does, after the ledger. Use
-`BATCH_SOURCE="cron:company-finder-daily"` for the cron, `manual` (default) on
-demand. It runs single-flight now (~50s, one shared table snapshot behind
-both ledger writes) — a second call while one is in flight gets turned away
-rather than piling onto NocoDB.
+**only on a clean ledger write posts the batch to #company-finder.**
 
-- Every non-zero exit also prints ONE line of JSON on stdout —
-  `{"error":"<MARKER>","exit":<code>,"detail":"<short>"}` — so you can tell
-  failure modes apart even if stderr got clipped.
-- **Fail-closed:** non-zero exit → the batch is NOT in the channel, by design.
-  - `{"error":"ALREADY_RUNNING"}` (exit 5) = another finalize-batch.sh is
-    already running → **wait and poll the existing cell, never relaunch.**
-  - `{"error":"LEDGER_COLLISION"}` (exit 3) = a company slipped past dedupe
-    (prep-batch skipped or raced) → re-run from Step 2 on the union; never
-    retry blindly.
-  - any other marker (`LEDGER_SOURCE_UNAVAILABLE`, `LEDGER_WRITE_OR_POST_FAILED`,
-    `USAGE`, `EMPTY_BATCH`, …) → report PARTIAL/UNSAFE naming the marker
-    verbatim; do NOT hand-post as a fallback (that reintroduces the exact bug
-    this gate closes).
+- `status="posted"` → successful terminal; the ledger and channel post both landed.
+- If every prepared survivor is removed by the evidence/tier/rollup checks, do
+  not call the finalizer; the silent rule applies.
+- `status="failed"` → nothing is reported as success. Report PARTIAL/UNSAFE with
+  `.error` and the `.diagnosticId` when present; do not hand-post or bypass the tool.
 - Review flips (`approve`/`reject`) stay on `ledger.sh` directly — see Step 6.
 
 Then wait for Nick/McLaren to react ✅ / 👍 (approve) or report rejects.
@@ -350,9 +312,9 @@ Never post "nothing new found" messages.
 
 - 5 parent companies per day (cron); hard max 10 per on-demand run
 - Always parents, never subsidiaries
-- **Dedupe + liveness only via `prep-batch.sh`** on the whole union (ONE call,
+- **Dedupe + liveness only via `company_finder_prep`** on the whole union (ONE call,
   never per-category, never hand-rolled)
-- **Ledger + post only via `finalize-batch.sh`** — a batch reaches the channel
+- **Ledger + post only via `company_finder_finalize`** — a batch reaches the channel
   ONLY as its output; never hand-post, never recall/fabricate dedupe/ledger output
 - Discovery is bounded — never park in `sessions_yield` waiting on subagents
 - Tier every selected company; honor an explicit "Tier N only" filter (drop the rest)

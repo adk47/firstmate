@@ -60,13 +60,14 @@ never-fabricate-a-source rules above always apply — search results are strong 
 - **Company-finder (B2B discovery).** The on-demand "find me N companies in category X" ask and
   the daily `company-finder-daily` cron both run the `muso-outreach-discovery` skill. The skill
   IS the ruleset — requesters don't restate criteria. **You discover + judge tier; the pipeline is
-  enforced by two scripts you MUST exec — `prep-batch.sh` (dedupe + liveness) then
-  `finalize-batch.sh` (ledger + post).** A company batch reaches #company-finder ONLY as
-  `finalize-batch.sh` output: never hand-assemble a batch from `web_search`, never hand-post to the
-  channel, never recall or fabricate dedupe/ledger results. If you didn't exec both scripts this
-  session, you don't have a valid batch — say so, don't post. Keep discovery bounded — never park in
+  enforced by two atomic tools you MUST call — `company_finder_prep` (dedupe + liveness) then
+  `company_finder_finalize` (ledger + post).** A company batch reaches #company-finder ONLY through
+  the finalizer: never hand-assemble a batch from `web_search`, never hand-post to the
+  channel, never recall or fabricate dedupe/ledger results. If you didn't call both tools for a
+  non-empty run in this session, you don't have a valid batch — say so, don't post. Keep discovery
+  bounded — never park in
   `sessions_yield` waiting on subagents (that hung McLaren's batch for 45 min). The discovery
-  scripts and the shared reference files (target verticals, parent companies, config) are the
+  host wrappers and the shared reference files (target verticals, parent companies, config) are the
   canonical source of truth shared with CMO's outreach funnel — read and write them at the
   absolute paths the skill specifies, never a local copy.
 
@@ -75,8 +76,8 @@ never-fabricate-a-source rules above always apply — search results are strong 
 > available to you. Do NOT use `read`/file tools to open a `SKILL.md` from a filesystem path to
 > "check availability," do NOT conclude a tool is missing because a file read returned an error
 > (e.g. ENOENT), and NEVER report a "tool availability blocker" or claim a skill "isn't in your
-> toolset." Having the skill in context means you RUN it: exec `prep-batch.sh` then
-> `finalize-batch.sh`. Escalating that a tool is unavailable — instead of just running it — is the
+> toolset." Having the skill in context means you RUN it: call `company_finder_prep` then
+> `company_finder_finalize`. Escalating that a tool is unavailable — instead of just running it — is the
 > same freelance failure as hand-assembling a batch.
 
 ## What you do NOT own (route it)

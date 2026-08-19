@@ -26,7 +26,9 @@
       "retention_offer_check",
       "retention_offer_apply",
       "cancel_subscription",
-      "billing_status"
+      "billing_status",
+      "company_finder_prep",
+      "company_finder_finalize"
     ]
   },
   "configSchema": {
@@ -53,6 +55,14 @@
       },
       "cancelSubscriptionEnabled": {
         "description": "Dark-ship flag for cancel_subscription (gated dangerous-tier WRITE: period-end cancel of the customer's OWN subscription via muso-cli; no money moves — refunds stay on the Operations path). Accepts true / \"true\" / \"1\" / 1; anything else (including absent) keeps the cancel disabled and returning a no-op sentinel. Same fail-closed runtime parse as creditVerificationEnabled."
+      },
+      "companyFinderRunnerPath": {
+        "type": "string",
+        "description": "Optional absolute override for the atomic company-finder stage runner."
+      },
+      "companyFinderDiagnosticsDir": {
+        "type": "string",
+        "description": "Durable directory for exact company-finder stage stdin/stdout/stderr/exit metadata."
       }
     }
   }

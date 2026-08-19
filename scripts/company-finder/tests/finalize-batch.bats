@@ -15,6 +15,7 @@ setup() {
   cat > "$STUB/ledger.sh" <<'EOF'
 #!/usr/bin/env bash
 cmd="$1"; IN="$(cat)"
+: > "$LEDGER_CALLED_MARKER"
 case "$cmd" in
   record-rejects)
     [ "${REJECTS_RC:-0}" -ne 0 ] && { echo "LEDGER_WRITE_FAILED" >&2; exit "$REJECTS_RC"; }
@@ -43,6 +44,7 @@ EOF
   export MUSO_BIN="$STUB/muso"
   export SLACK_ACCOUNT="scout"
   export MUSO_CALLED_MARKER="$BATS_TEST_TMPDIR/muso_called"
+  export LEDGER_CALLED_MARKER="$BATS_TEST_TMPDIR/ledger_called"
   export POST_OUT="$BATS_TEST_TMPDIR/post.txt"
 
   # Single-flight lock dir — never touch /var/lib in tests.
@@ -77,6 +79,15 @@ EOF
 @test "non-object stdin exits 1" {
   run bash "$SUT" <<<'[]'
   [ "$status" -eq 1 ]
+}
+
+@test "oversized rendered payload fails before any ledger mutation" {
+  OVERSIZED="$(jq -nc '{batch:[{name:"Alpha",domain:"alpha.com",vertical:"Plugins",why:("x" * 40000)}]}')"
+  run bash "$SUT" <<<"$OVERSIZED"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'"error":"PAYLOAD_TOO_LARGE"'* ]]
+  [ ! -f "$LEDGER_CALLED_MARKER" ]
+  [ ! -f "$MUSO_CALLED_MARKER" ]
 }
 
 @test "happy path: ledger then post; returns ts + ledger counts" {

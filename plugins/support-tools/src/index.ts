@@ -28,6 +28,12 @@ import {
 } from "./tools/subscription-retention.js";
 import { createBillingStatusTool } from "./tools/billing-status.js";
 import { createSupportActionRouterTool } from "./tools/support-action-router.js";
+import {
+  createCompanyFinderFinalizeTool,
+  createCompanyFinderPrepTool,
+  DEFAULT_COMPANY_FINDER_DIAGNOSTICS_DIR,
+  DEFAULT_COMPANY_FINDER_RUNNER,
+} from "./tools/company-finder-batch.js";
 // Explicit annotation: against the 2026.7.1 SDK, tsc can no longer name the
 // inferred entry type without reaching into openclaw/dist internals (TS2742).
 const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
@@ -106,6 +112,28 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
     // Shared across sessions (like rateLimiter) so repeat create_ticket calls
     // in one conversation append to the earlier ticket instead of duplicating.
     const sessionTickets = new SessionTicketRegistry();
+
+    const companyFinderRunnerPath =
+      pluginConfig.companyFinderRunnerPath ?? DEFAULT_COMPANY_FINDER_RUNNER;
+    const companyFinderDiagnosticsDir =
+      pluginConfig.companyFinderDiagnosticsDir ?? DEFAULT_COMPANY_FINDER_DIAGNOSTICS_DIR;
+    const companyFinderDeps = (ctx: any) => ({
+      runnerPath: companyFinderRunnerPath,
+      diagnosticsDir: companyFinderDiagnosticsDir,
+      sessionKey: ctx.sessionKey ?? "unknown",
+      sessionId: ctx.sessionId ?? "unknown",
+      agentId: ctx.agentId ?? "unknown",
+      requesterSenderId: ctx.requesterSenderId,
+      rateLimiter,
+    });
+    api.registerTool(
+      (ctx: any) => createCompanyFinderPrepTool(companyFinderDeps(ctx)),
+      { name: "company_finder_prep" },
+    );
+    api.registerTool(
+      (ctx: any) => createCompanyFinderFinalizeTool(companyFinderDeps(ctx)),
+      { name: "company_finder_finalize" },
+    );
 
     api.registerTool(() => createSupportActionRouterTool(), { name: "support_action_router" });
 
