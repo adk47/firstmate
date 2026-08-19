@@ -54,13 +54,54 @@ describe("company-finder atomic batch tools", () => {
     expect(runProcess).not.toHaveBeenCalled();
   });
 
+  it("rejects lookalike company-finder cron run sessions", async () => {
+    const runProcess = vi.fn();
+    const tool = createCompanyFinderPrepTool(deps(runProcess as unknown as RunProcessImpl, {
+      sessionKey: `${COMPANY_FINDER_CRON_SESSION}:run:not-a-runtime-uuid`,
+    }));
+
+    const out = await parseResult(tool.execute("call-lookalike", { candidates: [] }));
+
+    expect(out).toMatchObject({ ok: false, status: "failed", error: "COMPANY_FINDER_NOT_AUTHORIZED" });
+    expect(runProcess).not.toHaveBeenCalled();
+  });
+
+  it("rejects the configured cron run session outside the Scout agent", async () => {
+    const runProcess = vi.fn();
+    const tool = createCompanyFinderPrepTool(deps(runProcess as unknown as RunProcessImpl, {
+      sessionKey: `${COMPANY_FINDER_CRON_SESSION}:run:61cb8fa7-a51c-4305-9d33-b454d6d8f8cb`,
+      agentId: "cmo",
+    }));
+
+    const out = await parseResult(tool.execute("call-wrong-agent", { candidates: [] }));
+
+    expect(out).toMatchObject({ ok: false, status: "failed", error: "COMPANY_FINDER_NOT_AUTHORIZED" });
+    expect(runProcess).not.toHaveBeenCalled();
+  });
+
+  it("rejects isolated runs from a different Scout cron", async () => {
+    const runProcess = vi.fn();
+    const tool = createCompanyFinderPrepTool(deps(runProcess as unknown as RunProcessImpl, {
+      sessionKey: "agent:scout:cron:00000000-0000-4000-8000-000000000000:run:61cb8fa7-a51c-4305-9d33-b454d6d8f8cb",
+    }));
+
+    const out = await parseResult(tool.execute("call-wrong-cron", { candidates: [] }));
+
+    expect(out).toMatchObject({ ok: false, status: "failed", error: "COMPANY_FINDER_NOT_AUTHORIZED" });
+    expect(runProcess).not.toHaveBeenCalled();
+  });
+
   it("bounds the prep union to the skill's 3-4x discovery budget", () => {
     const tool = createCompanyFinderPrepTool(deps(vi.fn() as unknown as RunProcessImpl));
 
     expect((tool.parameters as any).properties.candidates.maxItems).toBe(40);
   });
 
-  it("allows an approved requester through trusted inbound metadata", async () => {
+  it.each([
+    ["Nick", "U0AL36NADEY"],
+    ["Aaron", "U7RP6HKUZ"],
+    ["McLaren", "U02S7C96CGN"],
+  ])("allows approved requester %s through trusted inbound metadata", async (_name, requesterSenderId) => {
     const runProcess: RunProcessImpl = async () => ({
       stdout: '{"survivors":[],"rejects":{"duplicates":[],"dead":[],"name_flags":[]},"stats":{"checked":0}}',
       stderr: "",
@@ -68,7 +109,7 @@ describe("company-finder atomic batch tools", () => {
     });
     const tool = createCompanyFinderPrepTool(deps(runProcess, {
       sessionKey: "agent:scout:slack:channel:company-finder",
-      requesterSenderId: "U02S7C96CGN",
+      requesterSenderId,
     }));
 
     const out = await parseResult(tool.execute("call-2", { candidates: [] }));
@@ -163,7 +204,9 @@ describe("company-finder atomic batch tools", () => {
         exitCode: 0,
       };
     };
-    const tool = createCompanyFinderFinalizeTool(deps(runProcess));
+    const tool = createCompanyFinderFinalizeTool(deps(runProcess, {
+      sessionKey: `${COMPANY_FINDER_CRON_SESSION}:run:9ce2ade0-39a8-4057-9378-44e31e587ae2`,
+    }));
     const params = {
       batch: [{
         name: "A",

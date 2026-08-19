@@ -107,6 +107,8 @@ export const DEFAULT_COMPANY_FINDER_DIAGNOSTICS_DIR =
   process.env.COMPANY_FINDER_DIAGNOSTICS_DIR ?? "/var/lib/hydra/company-finder-runs";
 export const COMPANY_FINDER_CRON_SESSION =
   "agent:scout:cron:86adfcce-fe8a-4707-9c22-ad2bd4e43260";
+const COMPANY_FINDER_CRON_RUN_PREFIX = `${COMPANY_FINDER_CRON_SESSION}:run:`;
+const CRON_RUN_ID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
 const AUTHORIZED_REQUESTERS = new Set([
   "U0AL36NADEY", // Nick
@@ -183,9 +185,15 @@ export function runProcessGroup(
   });
 }
 
+function isCompanyFinderCronSession(sessionKey: string): boolean {
+  if (sessionKey === COMPANY_FINDER_CRON_SESSION) return true;
+  if (!sessionKey.startsWith(COMPANY_FINDER_CRON_RUN_PREFIX)) return false;
+  return CRON_RUN_ID_PATTERN.test(sessionKey.slice(COMPANY_FINDER_CRON_RUN_PREFIX.length));
+}
+
 function isAuthorized(deps: ToolDeps): boolean {
   if (deps.agentId !== "scout") return false;
-  if (deps.sessionKey === COMPANY_FINDER_CRON_SESSION) return true;
+  if (isCompanyFinderCronSession(deps.sessionKey)) return true;
   return Boolean(deps.requesterSenderId && AUTHORIZED_REQUESTERS.has(deps.requesterSenderId));
 }
 
@@ -263,7 +271,7 @@ async function runStage(
 ): Promise<StageResult> {
   const diagnostic = await startDiagnostic(deps, stage, toolCallId, input);
   const runProcess = deps.runProcessImpl ?? runProcessGroup;
-  const source = deps.sessionKey === COMPANY_FINDER_CRON_SESSION
+  const source = isCompanyFinderCronSession(deps.sessionKey)
     ? "cron:company-finder-daily"
     : "manual";
   let stdout = "";
