@@ -1,3 +1,25 @@
+/**
+ * Read-only analytics triage for support.
+ *
+ * THE INVARIANT THIS FILE EXISTS TO HOLD: never report a number the backend did
+ * not measure.
+ *
+ * `GET /analytics-status` serves its lifetime metrics from a Redis-cached cube
+ * read and never queries Trino inline. On a cache miss it says so honestly —
+ * `cubeStatus: "warming"`, `lifetime: null` — and schedules a background warm.
+ * This tool used to collapse that into `(analytics.lifetime ?? {})` and then
+ * read `Number(lifetime.tracksWithData ?? 0)`, turning "not measured" into a
+ * confident `0`. Worse, the backend classifies `status` from the history row
+ * alone on a cold pass, so a healthy profile with history and an unread cube
+ * comes back `inconsistent` — which mapped to `create_analytics_followup`.
+ *
+ * The result on 2026-08-18: Saga Beats (327 credits, 278 tracks, healthy) was
+ * reported to support as `ready: false, 0 tracks, 0 credits` and escalated as a
+ * data mismatch. The analytics were never broken; the cache was cold.
+ *
+ * So: `measured` gates every cube-derived field, unmeasured reads report null
+ * rather than zero, and a warming cube retries once before answering.
+ */
 import { Type, type Static } from "@sinclair/typebox";
 import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
 import type { RateLimiter } from "../rate-limiter.js";
@@ -20,7 +42,16 @@ interface ToolDeps {
   adminClient: MusoAdminClient;
   rateLimiter: RateLimiter;
   sessionId: string;
+  /** Injectable for tests; defaults to a real timer. */
+  sleep?: (ms: number) => Promise<void>;
 }
+
+// A cold cube read schedules a background warm and returns immediately, so the
+// value of retrying is that the warm has usually landed by the second read.
+// Kept short: this runs inside a live support conversation.
+const WARM_RETRY_DELAY_MS = 1500;
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const PII_KEYS = new Set(["email", "phone", "phoneNumber", "address", "paymentMethod", "stripeId"]);
 
@@ -71,7 +102,11 @@ function platformKeys(platform: string): string[] {
   }
 }
 
-function inspectRequestedPlatform(platformTotals: Record<string, unknown>, sourcePlatform: string | undefined) {
+function inspectRequestedPlatform(
+  platformTotals: Record<string, unknown>,
+  sourcePlatform: string | undefined,
+  measured: boolean,
+) {
   const platform = normalizePlatform(sourcePlatform);
   if (!platform) return null;
   const keys = platformKeys(platform);
@@ -79,6 +114,17 @@ function inspectRequestedPlatform(platformTotals: Record<string, unknown>, sourc
     return {
       platform,
       recognized: false,
+      has_data: null,
+      total: null,
+    };
+  }
+  // Unmeasured is NOT "zero". Summing absent keys yields 0, which would answer
+  // "does this customer have Spotify data?" with a confident "no" on the
+  // strength of a read that never happened.
+  if (!measured) {
+    return {
+      platform,
+      recognized: true,
       has_data: null,
       total: null,
     };
@@ -103,6 +149,13 @@ function supportActionForStatus(status: string): string {
     case "stale":
     case "inconsistent":
       return "create_analytics_followup";
+    // The cube never answered. Every metric below is unmeasured, and the
+    // backend's own `status` for this profile was classified from the history
+    // row ALONE — which is why a cold read surfaces as `inconsistent` (history
+    // present, no lifetime data) and used to open a false analytics ticket.
+    // See the header note.
+    case "warming":
+      return "retry_after_warm";
     default:
       return "human_review";
   }
@@ -122,13 +175,15 @@ function diagnosisForStatus(status: string): string {
       return "Analytics data exists for this profile, but the latest observed update is older than expected.";
     case "inconsistent":
       return "Analytics readiness and visible data disagree for this profile, so a human should review it.";
+    case "warming":
+      return "The analytics cache for this profile is still warming, so no metrics were read. This is a cold-cache state, not a data problem — retry the lookup shortly.";
     default:
       return "Analytics status could not be determined from the available read-only signals.";
   }
 }
 
 export function createProfileAnalyticsStatusTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
-  const { adminClient, rateLimiter, sessionId } = deps;
+  const { adminClient, rateLimiter, sessionId, sleep = defaultSleep } = deps;
 
   return {
     name: "profile_analytics_status",
@@ -180,18 +235,54 @@ export function createProfileAnalyticsStatusTool(deps: ToolDeps): AgentTool<type
 
         if (!profileId) return structuredFailure("no_match");
 
-        const statusResp = await adminClient.get<{ data?: Record<string, unknown> } | Record<string, unknown>>(
-          `/api/v3/admin/profile/${encodeURIComponent(profileId)}/analytics-status`,
-        );
-        if (!statusResp.ok) return structuredFailure("lookup_unavailable");
+        const readAnalytics = async (): Promise<Record<string, unknown> | null> => {
+          const resp = await adminClient.get<{ data?: Record<string, unknown> } | Record<string, unknown>>(
+            `/api/v3/admin/profile/${encodeURIComponent(profileId)}/analytics-status`,
+          );
+          if (!resp.ok) return null;
+          return ((resp.data as any)?.data ?? resp.data ?? {}) as Record<string, unknown>;
+        };
 
-        const analytics = ((statusResp.data as any)?.data ?? statusResp.data ?? {}) as Record<string, unknown>;
-        const lifetime = (analytics.lifetime ?? {}) as Record<string, unknown>;
+        let analytics = await readAnalytics();
+        if (!analytics) return structuredFailure("lookup_unavailable");
+
+        // A cold read scheduled a background warm and returned without touching
+        // the cube. Give that warm a moment and read once more — in the common
+        // case the second read is fully populated and support gets a real
+        // answer instead of a shrug.
+        if (String(analytics.cubeStatus ?? "") === "warming") {
+          await sleep(WARM_RETRY_DELAY_MS);
+          const retried = await readAnalytics();
+          if (retried) analytics = retried;
+        }
+
+        const cubeStatus = String(analytics.cubeStatus ?? "");
+        const lifetimeRaw = analytics.lifetime ?? null;
+        const lifetime = (lifetimeRaw ?? {}) as Record<string, unknown>;
         const freshness = (analytics.freshness ?? {}) as Record<string, unknown>;
         const latestRun = (analytics.latestRun ?? {}) as Record<string, unknown>;
         const platformTotals = (lifetime.platformTotals ?? {}) as Record<string, unknown>;
-        const status = String(analytics.status ?? "unknown");
-        const requestedPlatform = inspectRequestedPlatform(platformTotals, params.source_platform);
+
+        // Did a cube read actually happen?
+        //   ready   -> yes. `lifetime: null` then means genuinely empty, and 0
+        //              is a true statement about this profile.
+        //   warming -> no. Nothing below was measured.
+        //   absent  -> the backend predates cubeStatus; fall back to the only
+        //              evidence available rather than assuming either way.
+        const measured = cubeStatus === "ready" ? true
+          : cubeStatus === "warming" ? false
+          : lifetimeRaw !== null;
+
+        // Report the cube state as the status when it is the reason we have no
+        // numbers. The backend's own `status` is classified from the history row
+        // alone on a cold read, so it reads `inconsistent`/`missing` for a
+        // perfectly healthy profile — which is what escalated Saga Beats.
+        const status = !measured && cubeStatus === "warming"
+          ? "warming"
+          : String(analytics.status ?? "unknown");
+        const requestedPlatform = inspectRequestedPlatform(platformTotals, params.source_platform, measured);
+        const metric = (key: string): number | null =>
+          measured ? Number((lifetime as Record<string, unknown>)[key] ?? 0) : null;
 
         const output = {
           found: true,
@@ -207,8 +298,14 @@ export function createProfileAnalyticsStatusTool(deps: ToolDeps): AgentTool<type
           },
           analytics: {
             status,
+            // initialized is derived from the history row, which IS read on a
+            // cold pass, so it stays a boolean.
             initialized: Boolean(analytics.analyticsInitialized),
-            ready: Boolean(analytics.analyticsReady),
+            // ready is not: the backend computes it from lifetime cube data, so
+            // an unread cube yields `false` — a claim that the profile is not
+            // ready, made without looking. That literal `ready: false` is what
+            // support escalated on 2026-08-18 for a profile that was fine.
+            ready: measured ? Boolean(analytics.analyticsReady) : null,
             diagnosis: diagnosisForStatus(status),
             support_action: supportActionForStatus(status),
             freshness: {
@@ -219,11 +316,16 @@ export function createProfileAnalyticsStatusTool(deps: ToolDeps): AgentTool<type
               latest_run_date: String(latestRun.date ?? ""),
               in_progress_tracks_count: Number(latestRun.inProgressTracksCount ?? 0),
             },
+            cube_status: cubeStatus || null,
             metrics: {
-              tracks_with_data: Number(lifetime.tracksWithData ?? 0),
-              credit_count: Number(lifetime.creditCount ?? 0),
-              totals: lifetime.totals ?? {},
-              platform_totals: platformTotals,
+              // `measured: false` means the cube was never read. The numeric
+              // fields are null rather than 0 precisely so that a cold cache
+              // cannot be reported to a customer as "you have no data".
+              measured,
+              tracks_with_data: metric("tracksWithData"),
+              credit_count: metric("creditCount"),
+              totals: measured ? (lifetime.totals ?? {}) : null,
+              platform_totals: measured ? platformTotals : null,
               requested_platform: requestedPlatform,
             },
           },

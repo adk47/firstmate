@@ -75,7 +75,7 @@ Not every message needs a reply, and not every customer wants the same register.
 Analytics and stream counts now run on our upgraded platform. There is no special carve-out anymore -- treat analytics like any other data complaint.
 
 - **DO** call `profile_status` first to ground your reply in what the customer's profile actually shows (latest credits, claim state, workspace/seat).
-- **DO** call `profile_analytics_status` before deciding whether the analytics data is fresh, delayed, missing, stale, or inconsistent. If plan/seat could explain it, call `subscription_status` too.
+- **DO** call `profile_analytics_status` before deciding whether the analytics data is fresh, delayed, missing, stale, or inconsistent. If plan/seat could explain it, call `subscription_status` too. If it returns `warming` (or `metrics.measured: false`), the analytics cache was cold and nothing was read: say the numbers are still loading and check again. Never tell a customer they have no data on the strength of that reading.
 - **If the data looks fine**, walk them through the basics: analytics need an active Pro or Business plan with a seat assigned to their profile (see `reference/faq.md`).
 - **If their data genuinely looks off or stale**, handle it like any data-integrity issue: file `create_ticket` with `actionType: analytics-followup`, quote the SLA once (2 business days), and you MAY use normal escalation language. The new story is simple and honest: *"Analytics are running on our upgraded platform now. If yours still looks off, tell me what you're seeing and I'll take a closer look and flag it for our team."*
 - **DO** emit the `[[PRIORITY]]` token on a genuine analytics complaint, same as any other data complaint (see the Priority signal section).

@@ -175,6 +175,7 @@ data-integrity issue.
 3. Call `profile_analytics_status` for the resolved profile. Use its structured status to decide the next move:
    - `fresh`: answer from the profile/subscription/status evidence and ask for the exact track/platform/count if the customer's complaint is more specific than the profile-level status.
    - `delayed` or `initializing`: explain that data is still processing. Do not quote exact refresh timing.
+   - `warming` (or any result with `metrics.measured: false`): the analytics cache was cold, so no numbers were read. The tool already retried once. Do NOT file a ticket and do NOT quote the metrics, they are `null` rather than `0` for exactly this reason. Tell the customer their numbers are still loading and re-run the check before concluding anything.
    - `missing`, `stale`, or `inconsistent`: file `create_ticket` with `actionType: analytics-followup`.
 
 4. If subscription and seat are fine and the data still looks off or stale, treat it like any data-integrity issue: file `create_ticket` with `actionType: analytics-followup`, then tell the customer plainly you've flagged it and quote the SLA once (2 business days). New story, simple and honest: *"Analytics are running on our upgraded platform now. If yours still looks off, tell me what you're seeing and I'll take a closer look and flag it for our team."* Your reply uses escalation language, so the ticket call is atomic with it – see Rule 1.

@@ -211,3 +211,139 @@ describe("profile_analytics_status", () => {
       .toEqual({ found: false, reason: "lookup_unavailable" });
   });
 });
+
+
+// ── Cold-cube regression suite (2026-08-18) ───────────────────────────────
+// Note the payloads above carry NO `cubeStatus`: they predate it, and they are
+// left that way on purpose so the legacy-fallback path stays covered.
+
+const COLD_PROFILE_ID = "8158f1d0-ced1-457c-98ec-442c169783b2";
+
+/** What core-backend really returns on a cold miss: it read nothing and says so. */
+const WARMING = {
+  profileId: COLD_PROFILE_ID,
+  status: "inconsistent", // classified from the history row ALONE — not a verdict about data
+  cubeStatus: "warming",
+  analyticsInitialized: true,
+  analyticsReady: false,
+  freshness: { latestObservedAt: "2026-08-18T04:00:00.000Z", latestObservedAgeHours: 6, staleAfterHours: 48 },
+  latestRun: { date: "2026-08-18T00:00:00.000Z", inProgressTracksCount: 0 },
+  lifetime: null,
+};
+
+/** The same profile once the cube has actually been read: healthy. */
+const WARM = {
+  ...WARMING,
+  status: "fresh",
+  cubeStatus: "ready",
+  analyticsReady: true,
+  lifetime: {
+    tracksWithData: 278,
+    creditCount: 327,
+    totals: { streams: 1000000, shazams: 0, views: 0, videos: 0 },
+    platformTotals: { spotify_streams: 900000, youtube_streams: 100000 },
+  },
+};
+
+function makeSequencedTool(analyticsSequence: Record<string, unknown>[]) {
+  let calls = 0;
+  const get = vi.fn(async (path: string) => {
+    if (path.includes("/analytics-status")) {
+      const body = analyticsSequence[Math.min(calls, analyticsSequence.length - 1)];
+      calls += 1;
+      return { ok: true, status: 200, data: { data: body } } as AdminClientResult<unknown>;
+    }
+    return {
+      ok: true,
+      status: 200,
+      data: { data: { id: COLD_PROFILE_ID, name: "Saga Beats", isClaimed: true } },
+    } as AdminClientResult<unknown>;
+  });
+  const tool = createProfileAnalyticsStatusTool(
+    makeDeps({
+      adminClient: { get } as unknown as MusoAdminClient,
+      sleep: async () => {}, // no real delay in tests
+    }),
+  );
+  return { tool, analyticsCalls: () => calls };
+}
+
+describe("profile_analytics_status — a cold cube must never read as zero", () => {
+  it("retries a warming cube and answers from the warmed read", async () => {
+    const { tool, analyticsCalls } = makeSequencedTool([WARMING, WARM]);
+    const out = await call(tool, { profile_id: COLD_PROFILE_ID });
+
+    expect(analyticsCalls()).toBe(2);
+    expect(out.analytics.status).toBe("fresh");
+    expect(out.analytics.support_action).toBe("answer_from_status");
+    expect(out.analytics.metrics.measured).toBe(true);
+    expect(out.analytics.metrics.tracks_with_data).toBe(278);
+    expect(out.analytics.metrics.credit_count).toBe(327);
+  });
+
+  it("never escalates, and never reports zeros, while the cube is still warming", async () => {
+    const { tool } = makeSequencedTool([WARMING, WARMING]);
+    const out = await call(tool, { profile_id: COLD_PROFILE_ID });
+
+    // This is the exact regression that escalated Saga Beats on 2026-08-18.
+    expect(out.analytics.support_action).not.toBe("create_analytics_followup");
+    expect(out.analytics.support_action).toBe("retry_after_warm");
+    expect(out.analytics.status).toBe("warming");
+    expect(out.analytics.cube_status).toBe("warming");
+
+    expect(out.analytics.metrics.measured).toBe(false);
+    expect(out.analytics.metrics.tracks_with_data).toBeNull();
+    expect(out.analytics.metrics.credit_count).toBeNull();
+    expect(out.analytics.metrics.totals).toBeNull();
+    expect(out.analytics.metrics.platform_totals).toBeNull();
+    // `ready: false` was the literal claim support acted on.
+    expect(out.analytics.ready).toBeNull();
+  });
+
+  it("does not answer a platform question from an unread cube", async () => {
+    const { tool } = makeSequencedTool([WARMING, WARMING]);
+    const out = await call(tool, { profile_id: COLD_PROFILE_ID, source_platform: "spotify" });
+
+    expect(out.analytics.metrics.requested_platform).toEqual({
+      platform: "spotify",
+      recognized: true,
+      has_data: null, // NOT false — we did not look
+      total: null,
+    });
+  });
+
+  it("still escalates a genuine inconsistency, where the cube WAS read", async () => {
+    const { tool, analyticsCalls } = makeSequencedTool([{ ...WARMING, cubeStatus: "ready" }]);
+    const out = await call(tool, { profile_id: COLD_PROFILE_ID });
+
+    expect(analyticsCalls()).toBe(1); // nothing was warming, so no retry
+    expect(out.analytics.status).toBe("inconsistent");
+    expect(out.analytics.support_action).toBe("create_analytics_followup");
+    // A completed read that found nothing: zero is a TRUE statement here.
+    expect(out.analytics.metrics.measured).toBe(true);
+    expect(out.analytics.metrics.tracks_with_data).toBe(0);
+  });
+
+  it("still escalates missing and stale", async () => {
+    for (const status of ["missing", "stale"]) {
+      const { tool } = makeSequencedTool([{ ...WARM, status }]);
+      const out = await call(tool, { profile_id: COLD_PROFILE_ID });
+      expect(out.analytics.support_action).toBe("create_analytics_followup");
+    }
+  });
+
+  it("falls back to lifetime presence when the backend sends no cubeStatus", async () => {
+    const { cubeStatus: _warm, ...legacyWarm } = WARM as Record<string, unknown>;
+    const warm = makeSequencedTool([legacyWarm]);
+    const warmOut = await call(warm.tool, { profile_id: COLD_PROFILE_ID });
+    expect(warm.analyticsCalls()).toBe(1); // no cubeStatus means nothing to retry on
+    expect(warmOut.analytics.metrics.measured).toBe(true);
+    expect(warmOut.analytics.metrics.tracks_with_data).toBe(278);
+
+    const { cubeStatus: _cold, ...legacyCold } = WARMING as Record<string, unknown>;
+    const cold = makeSequencedTool([legacyCold]);
+    const coldOut = await call(cold.tool, { profile_id: COLD_PROFILE_ID });
+    expect(coldOut.analytics.metrics.measured).toBe(false);
+    expect(coldOut.analytics.metrics.tracks_with_data).toBeNull();
+  });
+});
