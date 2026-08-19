@@ -40,7 +40,32 @@ ONBOARDED_REPOS=(
   Muso-AI/platform-ticker
   Muso-AI/feed-service
   Muso-AI/analytics-controller
+  Muso-AI/ios-app
+  Muso-AI/android-app
 )
+
+# The mobile repos were onboarded 2026-08-19 for REVIEW ONLY, on purpose: Artem
+# (Korpyc) must keep merging his own PRs whatever the bot says. Two things make
+# that true and only one of them lives in this repo, so pin the one that does.
+#   - here: Muso-AI/ios-app / android-app must stay OUT of .merge_gate_repos,
+#     the switch that turns `qa-review` into a required check GitHub waits on
+#     forever.
+#   - not here: nobody adding `qa-review` to those repos' branch protection.
+#     Verified absent at onboarding (neither develop nor main declares any
+#     required_status_checks or required_pull_request_reviews) but not testable
+#     from hydra CI -- if it is ever added, this test still passes and NO-GO
+#     starts blocking merges.
+# A comment saying "advisory" is not enforcement; this is.
+@test "the mobile repos are onboarded for REVIEW only -- never merge-gated" {
+  local policy="$HYDRA_REPO/policies/qa-approval-policy.json"
+  for repo in Muso-AI/ios-app Muso-AI/android-app; do
+    run jq -e --arg r "$repo" '.merge_gate_repos | index($r) == null' "$policy"
+    [ "$status" -eq 0 ] || {
+      echo "$repo is in .merge_gate_repos -- it was onboarded advisory-only, so a NO-GO must never hold its merge"
+      return 1
+    }
+  done
+}
 
 @test "allowlisted repo -> exit 0" {
   run "$SCRIPT" Muso-AI/core-backend
@@ -117,7 +142,7 @@ ONBOARDED_REPOS=(
 
 # --- --list / enumeration mode -------------------------------------------
 
-@test "enumeration (env, no args) -> exit 0, output is exactly the 16 repos, one per line" {
+@test "enumeration (env, no args) -> exit 0, output is exactly the onboarded repos, one per line" {
   run env QA_EXTERNAL_REPO_ALLOWLIST_ENUMERATE=1 "$SCRIPT"
   [ "$status" -eq 0 ]
   expected="$(printf '%s\n' "${ONBOARDED_REPOS[@]}")"

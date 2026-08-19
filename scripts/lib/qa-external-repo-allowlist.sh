@@ -67,6 +67,8 @@ REPOS=(
   Muso-AI/platform-ticker
   Muso-AI/feed-service
   Muso-AI/analytics-controller
+  Muso-AI/ios-app
+  Muso-AI/android-app
   # Add more as repos come into scope, e.g.:
   #   Muso-AI/<repo>
 )
