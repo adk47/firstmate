@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, extractImageAttachments, extractDocumentAttachments } from "../src/filters.js";
+import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, extractImageAttachments, extractDocumentAttachments, IMAGE_MIME_ALLOWLIST, CANDIDATE_IMAGE_MIME_ALLOWLIST } from "../src/filters.js";
 import type { IntercomWebhookPayload, IntercomPartAttachment } from "../src/types.js";
 import userCreated from "./fixtures/conversation-user-created.json";
 import userReplied from "./fixtures/conversation-user-replied.json";
@@ -276,7 +276,7 @@ describe("extractImageAttachments", () => {
 
   it("keeps a structured PNG attachment with its content_type", () => {
     const result = extractImageAttachments([img({})], "");
-    expect(result).toEqual([{
+    expect(result.refs).toEqual([{
       url: "https://downloads.intercomcdn.com/i/o/abc/screenshot.png",
       contentType: "image/png",
       name: "screenshot.png",
@@ -288,7 +288,7 @@ describe("extractImageAttachments", () => {
       [img({ url: "https://downloads.intercomcdn.com/i/o/x.jpg", content_type: "image/jpg" })],
       "",
     );
-    expect(result[0].contentType).toBe("image/jpeg");
+    expect(result.refs[0].contentType).toBe("image/jpeg");
   });
 
   it("drops non-image MIMEs from the IMAGE extractor (PDF goes via extractDocumentAttachments; audio/video unsupported)", () => {
@@ -304,7 +304,7 @@ describe("extractImageAttachments", () => {
       ],
       "",
     );
-    expect(result).toEqual([]);
+    expect(result.refs).toEqual([]);
   });
 
   it("extracts inline <img> from HTML body when no structured attachments present", () => {
@@ -314,7 +314,7 @@ describe("extractImageAttachments", () => {
     // hallucination class of bugs PR #358 mitigated.
     const html = '<p>look at this</p><img src="https://downloads.intercomcdn.com/i/o/inline/foo.png" alt="x">';
     const result = extractImageAttachments(undefined, html);
-    expect(result).toEqual([{
+    expect(result.refs).toEqual([{
       url: "https://downloads.intercomcdn.com/i/o/inline/foo.png",
       contentType: "image/png",
     }]);
@@ -323,8 +323,8 @@ describe("extractImageAttachments", () => {
   it("supports single-quoted src attributes in HTML", () => {
     const html = "<img src='https://downloads.intercomcdn.com/i/o/inline/bar.jpg'>";
     const result = extractImageAttachments(undefined, html);
-    expect(result[0]?.url).toBe("https://downloads.intercomcdn.com/i/o/inline/bar.jpg");
-    expect(result[0]?.contentType).toBe("image/jpeg");
+    expect(result.refs[0]?.url).toBe("https://downloads.intercomcdn.com/i/o/inline/bar.jpg");
+    expect(result.refs[0]?.contentType).toBe("image/jpeg");
   });
 
   it("ignores non-Intercom CDN <img> hosts (defense against XSS-style leakage)", () => {
@@ -332,14 +332,14 @@ describe("extractImageAttachments", () => {
     // hoping we'd fetch+forward an attacker-controlled URL. The CDN host
     // allowlist refuses anything not on intercomcdn.{com,io}.
     const html = '<img src="https://evil.example.com/payload.png">';
-    expect(extractImageAttachments(undefined, html)).toEqual([]);
+    expect(extractImageAttachments(undefined, html).refs).toEqual([]);
   });
 
   it("merges structured + inline HTML, deduping by URL", () => {
     const sharedUrl = "https://downloads.intercomcdn.com/i/o/shared.png";
     const html = `<img src="${sharedUrl}"><img src="https://downloads.intercomcdn.com/i/o/extra.jpg">`;
     const result = extractImageAttachments([img({ url: sharedUrl })], html);
-    expect(result.map((r) => r.url)).toEqual([
+    expect(result.refs.map((r) => r.url)).toEqual([
       sharedUrl,
       "https://downloads.intercomcdn.com/i/o/extra.jpg",
     ]);
@@ -350,7 +350,7 @@ describe("extractImageAttachments", () => {
     // fetching, and we never want to fetch URLs of unknown type — could
     // be HTML, a tracking pixel, or anything. Drop is the right call.
     const html = '<img src="https://downloads.intercomcdn.com/i/o/unknown">';
-    expect(extractImageAttachments(undefined, html)).toEqual([]);
+    expect(extractImageAttachments(undefined, html).refs).toEqual([]);
   });
 
   it("keeps a structured upload on the intercom-attachments-<N> host (the real Messenger-widget host)", () => {
@@ -363,13 +363,13 @@ describe("extractImageAttachments", () => {
     const url =
       "https://musoai.intercom-attachments-3.com/i/o/dwjzhcge/2446934281/abc/image.png?expires=1&signature=x";
     const result = extractImageAttachments([img({ url, content_type: "image/png" })], "");
-    expect(result).toEqual([{ url, contentType: "image/png", name: "screenshot.png" }]);
+    expect(result.refs).toEqual([{ url, contentType: "image/png", name: "screenshot.png" }]);
   });
 
   it("keeps the bare intercom-attachments.com host (no numeric suffix)", () => {
     const url = "https://musoai.intercom-attachments.com/i/o/x/image.jpg";
     const result = extractImageAttachments([img({ url, content_type: "image/jpeg" })], "");
-    expect(result[0]?.url).toBe(url);
+    expect(result.refs[0]?.url).toBe(url);
   });
 
   it("still rejects look-alike hosts (allowlist not loosened into a substring match)", () => {
@@ -380,16 +380,16 @@ describe("extractImageAttachments", () => {
       extractImageAttachments(
         [img({ url: "https://intercom-attachments-3.com.evil.com/x.png" })],
         "",
-      ),
+      ).refs,
     ).toEqual([]);
     expect(
-      extractImageAttachments(undefined, '<img src="https://evil.com/intercomcdn.com/x.png">'),
+      extractImageAttachments(undefined, '<img src="https://evil.com/intercomcdn.com/x.png">').refs,
     ).toEqual([]);
   });
 
   it("handles undefined inputs gracefully", () => {
-    expect(extractImageAttachments(undefined, undefined)).toEqual([]);
-    expect(extractImageAttachments([], "")).toEqual([]);
+    expect(extractImageAttachments(undefined, undefined).refs).toEqual([]);
+    expect(extractImageAttachments([], "").refs).toEqual([]);
   });
 });
 
@@ -756,7 +756,7 @@ describe("extractImageAttachments — structured CDN host allowlist", () => {
       }],
       "",
     );
-    expect(result).toEqual([]);
+    expect(result.refs).toEqual([]);
   });
 
   it("accepts structured attachments hosted on the Intercom CDN (sanity counter-test)", () => {
@@ -769,7 +769,107 @@ describe("extractImageAttachments — structured CDN host allowlist", () => {
       }],
       "",
     );
-    expect(result).toHaveLength(1);
-    expect(result[0].url).toContain("intercomcdn.com");
+    expect(result.refs).toHaveLength(1);
+    expect(result.refs[0].url).toContain("intercomcdn.com");
+  });
+});
+
+describe("extractImageAttachments — HEIC/HEIF candidates and counted drops", () => {
+  const heicAtt = (url: string, ct: string): IntercomPartAttachment =>
+    ({ url, content_type: ct, name: "IMG_0042" }) as IntercomPartAttachment;
+  const CDN = "https://musoai.intercom-attachments-3.com";
+
+  it("admits image/heic and image/heif as candidates", () => {
+    // WHY: these missed the positive allowlist and hit a bare `continue`, so
+    // every iPhone "High Efficiency" photo was invisible to Caroline with no
+    // trace anywhere. They are CANDIDATES only — attachments.ts transcodes
+    // them before anything reaches a model.
+    const drops: string[] = [];
+    const result = extractImageAttachments(
+      [heicAtt(`${CDN}/a.heic`, "image/heic"), heicAtt(`${CDN}/b.heif`, "image/heif")],
+      "",
+      { warn: (m) => drops.push(m) },
+    );
+    expect(result.refs.map((r) => r.contentType)).toEqual(["image/heic", "image/heif"]);
+    expect(result.unsupported).toEqual([]);
+    expect(drops).toEqual([]);
+  });
+
+  it("keeps HEIF out of the forwardable IMAGE_MIME_ALLOWLIST", () => {
+    // The two sets are deliberately different: IMAGE_MIME_ALLOWLIST is
+    // "safe to forward verbatim". A HEIC forwarded verbatim is an image no
+    // model can read.
+    expect(IMAGE_MIME_ALLOWLIST.has("image/heic")).toBe(false);
+    expect(CANDIDATE_IMAGE_MIME_ALLOWLIST.has("image/heic")).toBe(true);
+    expect(CANDIDATE_IMAGE_MIME_ALLOWLIST.has("image/png")).toBe(true);
+  });
+
+  it("infers image/heic and image/heif from inline <img> URL extensions", () => {
+    const html = `<img src="${CDN}/inline.heic"><img src="${CDN}/inline.HEIF">`;
+    const result = extractImageAttachments(undefined, html, { warn: () => {} });
+    expect(result.refs.map((r) => r.contentType)).toEqual(["image/heic", "image/heif"]);
+  });
+
+  it("COUNTS and LOGS unsupported types instead of dropping them silently", () => {
+    // WHY: the silent `continue` is the actual root cause here. HEIC was
+    // invisible for as long as it was because nothing anywhere recorded a
+    // refusal — the next unsupported type must be visible on day one.
+    const drops: string[] = [];
+    const result = extractImageAttachments(
+      [
+        heicAtt(`${CDN}/a.tiff`, "image/tiff"),
+        heicAtt(`${CDN}/b.tiff`, "image/tiff"),
+        heicAtt(`${CDN}/c.svg`, "image/svg+xml"),
+        heicAtt(`${CDN}/d.png`, "image/png"),
+      ],
+      "",
+      { warn: (m) => drops.push(m) },
+    );
+    expect(result.refs).toHaveLength(1);
+    expect(drops).toHaveLength(1);
+    expect(drops[0]).toContain("dropped 3 unsupported image attachment(s)");
+    expect(drops[0]).toContain("image/tiff:2");
+    expect(drops[0]).toContain("image/svg+xml:1");
+  });
+
+  it("does not count PDFs as image drops (they have their own extractor)", () => {
+    const drops: string[] = [];
+    extractImageAttachments([heicAtt(`${CDN}/a.pdf`, "application/pdf")], "", {
+      warn: (m) => drops.push(m),
+    });
+    expect(drops).toEqual([]);
+  });
+
+  it("emits no log line when nothing was dropped", () => {
+    const drops: string[] = [];
+    extractImageAttachments([heicAtt(`${CDN}/a.png`, "image/png")], "", { warn: (m) => drops.push(m) });
+    expect(drops).toEqual([]);
+  });
+
+  it("classifyEvent threads the log through and surfaces HEIC attachments", () => {
+    const drops: string[] = [];
+    const payload = {
+      topic: "conversation.user.created",
+      id: "evt_heic",
+      data: {
+        item: {
+          id: "conv_heic",
+          source: {
+            body: "see screenshot",
+            author: { type: "user", id: "u1", email: "a@b.com" },
+            attachments: [
+              { url: `${CDN}/shot.heic`, content_type: "image/heic", name: "IMG_1.heic" },
+              { url: `${CDN}/nope.tiff`, content_type: "image/tiff", name: "scan.tiff" },
+            ],
+          },
+        },
+      },
+    } as unknown as IntercomWebhookPayload;
+    const result = classifyEvent(payload, { warn: (m) => drops.push(m) });
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.attachments?.map((a) => a.contentType)).toEqual(["image/heic"]);
+    }
+    expect(drops[0]).toContain("image/tiff:1");
   });
 });

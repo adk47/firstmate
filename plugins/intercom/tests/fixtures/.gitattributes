@@ -1,0 +1,6 @@
+# Binary image fixture for the magic-byte / HEIC transcode tests. Mark it
+# binary so `git diff` emits "Binary files differ" instead of leaking raw
+# bytes into the textual diff: the pr-validate `validate` job feeds that diff
+# to a UTF-8 .decode() that aborts on the first non-UTF-8 byte. (Same
+# rationale as skills-all/muso-intercom/scripts/tests/fixtures/.gitattributes.)
+apple-multi-image.heic binary

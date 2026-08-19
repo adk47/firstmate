@@ -4,6 +4,7 @@ import type {
   IntercomClient,
   RiskAssessment,
   ImageAttachmentRef,
+  UnsupportedAttachmentRef,
   DocumentAttachmentRef,
 } from "./types.js";
 import { RateLimitError } from "./outbound.js";
@@ -26,7 +27,10 @@ import {
 const apiShapeWarned = new Set<string>();
 
 export type HandlerAction =
-  | { action: "dispatch_to_agent"; conversationId: string; body: string; authorId: string; attachments?: ImageAttachmentRef[]; documents?: DocumentAttachmentRef[] }
+  // `unsupportedAttachments` rides here for the same reason `attachments` does:
+  // the channel needs it to build the turn. Dropping it at this hop would put
+  // the silent-drop back exactly where it was, one layer down.
+  | { action: "dispatch_to_agent"; conversationId: string; body: string; authorId: string; attachments?: ImageAttachmentRef[]; documents?: DocumentAttachmentRef[]; unsupportedAttachments?: UnsupportedAttachmentRef[] }
   | { action: "escalate"; conversationId: string; assessment: RiskAssessment; body: string }
   | { action: "escalate_legacy"; conversationId: string; category: string; matchedPattern: string; body: string }
   | { action: "state_updated"; conversationId: string; description: string }
@@ -325,6 +329,9 @@ export async function handleWebhookEvent(
             : {}),
           ...(classified.documents && classified.documents.length > 0
             ? { documents: classified.documents }
+            : {}),
+          ...(classified.unsupportedAttachments && classified.unsupportedAttachments.length > 0
+            ? { unsupportedAttachments: classified.unsupportedAttachments }
             : {}),
         },
         state,

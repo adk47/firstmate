@@ -223,15 +223,16 @@ import {
   combineBatchBodies,
   mergeBatchMedia,
   orderBatch,
+  resolveBatchMedia,
   type QueuedInboundMessage,
   type ResolvedInboundMessage,
 } from "../src/channel.js";
 
-// Mirror channel.ts runDispatchBatch: order by timestamp, await mediaReady.
+// Exactly what channel.ts runDispatchBatch does: order by timestamp, then run
+// the REAL media-resolution step (not a copy of it — a copy would keep passing
+// after production stopped carrying a field).
 async function resolveBatch(unordered: QueuedInboundMessage[]): Promise<ResolvedInboundMessage[]> {
-  return Promise.all(
-    orderBatch(unordered).map(async ({ mediaReady, ...rest }) => ({ ...rest, media: await mediaReady })),
-  );
+  return resolveBatchMedia(orderBatch(unordered));
 }
 
 describe("burst coalescing through the channel helpers", () => {
@@ -241,7 +242,7 @@ describe("burst coalescing through the channel helpers", () => {
     authorId: "user-1",
     messageId: id,
     timestamp: ts,
-    mediaReady: Promise.resolve(media),
+    mediaReady: Promise.resolve({ entries: media, unreadable: [] }),
     imageRefCount: media.length,
     documentRefCount: 0,
   });
@@ -294,8 +295,8 @@ describe("burst coalescing through the channel helpers", () => {
     });
 
     // A enqueued first with a media download that resolves LATER than B arrives.
-    let resolveAMedia!: (v: any[]) => void;
-    const aMedia = new Promise<any[]>((res) => (resolveAMedia = res));
+    let resolveAMedia!: (v: import("../src/channel.js").MessageMedia) => void;
+    const aMedia = new Promise<import("../src/channel.js").MessageMedia>((res) => (resolveAMedia = res));
     const a: QueuedInboundMessage = {
       body: "", authorId: "u", messageId: "A-image", timestamp: 10,
       mediaReady: aMedia, imageRefCount: 1, documentRefCount: 0,
@@ -306,7 +307,7 @@ describe("burst coalescing through the channel helpers", () => {
     // B (later text) arrives while A's media is still downloading → must queue.
     expect(q.enqueue("conv-1", qm("later text", "B-text", 20))).toBe("queued");
 
-    resolveAMedia([att("/a.png")]);
+    resolveAMedia({ entries: [att("/a.png")], unreadable: [] });
     await flush();
 
     expect(order).toEqual(["A-image", "B-text"]); // send order preserved, not reversed

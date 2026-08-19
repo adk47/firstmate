@@ -1,0 +1,9 @@
+{
+  "id": "heicbad",
+  "source": {
+    "body": "<p>photo from my iPhone</p>",
+    "attachments": [
+      {"url": "https://musoai.intercom-attachments-3.com/broken.heic", "content_type": "image/heic", "name": "broken.HEIC"}
+    ]
+  }
+}

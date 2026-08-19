@@ -5,6 +5,7 @@ import type {
   AssigneeType,
   ImageAttachmentRef,
   DocumentAttachmentRef,
+  UnsupportedAttachmentRef,
 } from "./types.js";
 import { MAX_PROCESSED_EVENT_IDS } from "./types.js";
 
@@ -19,6 +20,32 @@ export const IMAGE_MIME_ALLOWLIST = new Set<string>([
   "image/jpg", // some clients emit jpg, normalize on the way out
   "image/webp",
   "image/gif",
+]);
+
+// MIMEs that are IMAGES but that no vision model can read as-is. They are
+// admitted as CANDIDATES here and transcoded to JPEG in attachments.ts
+// (bounded `heif-convert` subprocess). Keeping them OUT of
+// IMAGE_MIME_ALLOWLIST is deliberate: that set is the "safe to forward
+// verbatim" set, and attachments.ts uses it to constrain the server
+// Content-Type override. A HEIC must never be forwarded un-transcoded.
+//
+// Why this exists: every iPhone screenshot/photo shared from an Apple device
+// with "High Efficiency" capture arrives as image/heic. Before 2026-08-18 it
+// missed the positive allowlist above and hit a SILENT `continue` below — no
+// log, nothing surfaced to the agent, so Caroline answered as if the customer
+// had sent no image at all.
+export const HEIF_MIME_ALLOWLIST = new Set<string>([
+  "image/heic",
+  "image/heif",
+]);
+
+// The set `extractImageAttachments` admits as candidates. Forwardable MIMEs
+// plus the transcode-required HEIF family. NOT the set attachments.ts trusts
+// for the Content-Type override — bytes decide that (see
+// detectImageFormatFromBytes).
+export const CANDIDATE_IMAGE_MIME_ALLOWLIST = new Set<string>([
+  ...IMAGE_MIME_ALLOWLIST,
+  ...HEIF_MIME_ALLOWLIST,
 ]);
 
 // MIME allowlist for document forwarding. PDF only today. Documents take a
@@ -60,7 +87,8 @@ const HTML_IMG_SRC_RE = /<img\b[^>]*\bsrc=(?:"([^"]+)"|'([^']+)')[^>]*>/gi;
 
 function inferContentTypeFromUrl(url: string): string | undefined {
   // Intercom CDN URLs typically end in `.png`, `.jpg`, `.jpeg`, `.gif`,
-  // `.webp` (sometimes with query string). Strip query, lowercase ext.
+  // `.webp`, `.heic`/`.heif` (sometimes with query string). Strip query,
+  // lowercase ext.
   const pathOnly = url.split("?")[0] ?? "";
   const match = /\.([a-z0-9]+)$/i.exec(pathOnly);
   if (!match) return undefined;
@@ -69,6 +97,16 @@ function inferContentTypeFromUrl(url: string): string | undefined {
   if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
   if (ext === "gif") return "image/gif";
   if (ext === "webp") return "image/webp";
+  if (ext === "heic") return "image/heic";
+  if (ext === "heif") return "image/heif";
+  // Extensions that name a REAL image we simply cannot forward. They are not in
+  // CANDIDATE_IMAGE_MIME_ALLOWLIST, so returning them still refuses the ref —
+  // the point is to distinguish "an image arrived and we refuse its type" from
+  // "we have no idea what this URL is". Only the first may be reported to the
+  // agent as a missing attachment; see extractImageAttachments.
+  if (ext === "tif" || ext === "tiff") return "image/tiff";
+  if (ext === "bmp") return "image/bmp";
+  if (ext === "svg") return "image/svg+xml";
   return undefined;
 }
 
@@ -87,21 +125,95 @@ function extractInlineHtmlImageUrls(body: string | undefined): string[] {
   return urls;
 }
 
+/**
+ * Logging seam for attachment candidates we refuse. Defaults to
+ * `console.warn` (the plugin's established logging route — see config.ts /
+ * handoff.ts), overridable for tests.
+ */
+export interface FilterLog {
+  warn?: (msg: string) => void;
+}
+
+const defaultFilterLog: FilterLog = { warn: (msg) => console.warn(msg) };
+
+/**
+ * What one message's image extraction produced: the refs the download pipeline
+ * will fetch, AND every attachment it refused on content-type.
+ *
+ * `unsupported` is a RETURN VALUE, not a log line, deliberately. The refusal
+ * used to be counted-and-`continue`d, which is indistinguishable downstream
+ * from "the customer attached nothing", leaving the agent no trace to ask
+ * about. A caller can only ignore this half by destructuring it away on
+ * purpose, in a diff a reviewer can see.
+ */
+export interface ExtractedImageAttachments {
+  refs: ImageAttachmentRef[];
+  /** Delivered, recognised as an attachment, and NOT forwardable. */
+  unsupported: UnsupportedAttachmentRef[];
+}
+
 export function extractImageAttachments(
   structured: IntercomPartAttachment[] | undefined,
   body: string | undefined,
-): ImageAttachmentRef[] {
+  log: FilterLog = defaultFilterLog,
+): ExtractedImageAttachments {
   const seen = new Set<string>();
   const out: ImageAttachmentRef[] = [];
+  const unsupported: UnsupportedAttachmentRef[] = [];
+  // Counted, not silent. An unsupported content_type used to hit a bare
+  // `continue` here: the customer saw their image upload succeed, Intercom
+  // delivered it, and the plugin dropped it leaving ZERO trace anywhere — so
+  // the next unsupported type (heic was one for a year) is invisible until a
+  // human notices Caroline answering around a screenshot. One aggregated line
+  // per message keeps it cheap.
+  //
+  // Counting alone is not enough: an `image/tiff` that dies here leaves the
+  // agent answering from an evidence set it cannot even know is incomplete.
+  // So a drop we can attribute to a real customer file is also RETURNED — see
+  // `reportable` below for where that line is drawn and why it is not simply
+  // "every drop".
+  const dropped = new Map<string, number>();
+  // `reportable` = we KNOW a customer file arrived here. Every drop is counted
+  // for the log (diagnostics); only a reportable one becomes an agent-visible
+  // record, because the [ATTACHMENT_STATUS] block is a factual claim that the
+  // customer sent something.
+  const countDrop = (
+    url: string,
+    ct: string,
+    reportable: boolean,
+    reason: UnsupportedAttachmentRef["reason"] = "unsupported_type",
+  ) => {
+    const key = ct || "(none)";
+    dropped.set(key, (dropped.get(key) ?? 0) + 1);
+    if (reportable) unsupported.push({ url, contentType: ct, reason });
+  };
 
   for (const att of structured ?? []) {
     if (!att?.url || seen.has(att.url)) continue;
+    const ct = (att.content_type ?? "").toLowerCase();
     // CDN host allowlist — parity with the inline `<img>` branch below.
     // Refuses arbitrary URLs even if Intercom's payload claims an
     // allowlisted image content_type.
-    if (!INTERCOM_CDN_HOST_RE.test(att.url)) continue;
-    const ct = (att.content_type ?? "").toLowerCase();
-    if (!IMAGE_MIME_ALLOWLIST.has(ct)) continue;
+    //
+    // REPORTED, not silently skipped, and checked BEFORE the document split so
+    // this one branch covers PDFs too (extractDocumentAttachments skips the same
+    // refs silently, so exactly one record is produced). A structured
+    // `attachments[]` entry is unambiguously a file the customer sent; dropping
+    // it without a record is the doctrine failure again — an HMAC-valid event
+    // carrying an upload on a newly introduced CDN host would reach the agent
+    // as "nothing was attached".
+    if (!INTERCOM_CDN_HOST_RE.test(att.url)) {
+      countDrop(att.url, ct, true, "host_not_allowed");
+      continue;
+    }
+    // Documents have their own extractor; don't count them as image drops.
+    if (DOCUMENT_MIME_ALLOWLIST.has(ct)) continue;
+    if (!CANDIDATE_IMAGE_MIME_ALLOWLIST.has(ct)) {
+      // `attachments[]` with a declared content_type is unambiguously a file the
+      // customer sent, whatever the type says. Always reported.
+      countDrop(att.url, ct, true);
+      continue;
+    }
     seen.add(att.url);
     out.push({
       url: att.url,
@@ -113,12 +225,46 @@ export function extractImageAttachments(
   for (const url of extractInlineHtmlImageUrls(body)) {
     if (seen.has(url)) continue;
     const inferred = inferContentTypeFromUrl(url);
-    if (!inferred || !IMAGE_MIME_ALLOWLIST.has(inferred)) continue;
+    if (!inferred || !CANDIDATE_IMAGE_MIME_ALLOWLIST.has(inferred)) {
+      // An inline <img> is only reportable when the extension NAMES an image we
+      // recognize and refuse (`.tiff`, `.bmp`, `.svg`). With no inferable type
+      // we do not know a customer file is involved at all — an extensionless
+      // Intercom-hosted <img> can be a signature graphic or a tracking pixel,
+      // and telling the agent "1 attachment did NOT reach you" about one would
+      // have it apologizing for a file nobody sent. That is the same doctrine
+      // failing, pointed the other way. Still counted for the log either way.
+      countDrop(url, inferred ?? "", inferred !== undefined);
+      continue;
+    }
     seen.add(url);
     out.push({ url, contentType: inferred });
   }
 
-  return out;
+  if (dropped.size > 0) {
+    const total = [...dropped.values()].reduce((a, b) => a + b, 0);
+    const breakdown = [...dropped.entries()]
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([ct, n]) => `${ct}:${n}`)
+      .join(",");
+    log.warn?.(
+      `[intercom:filters] dropped ${total} unsupported image attachment(s) types=${breakdown}`,
+    );
+  }
+
+  // One record per ATTACHMENT, not per drop site. The same URL can be refused
+  // twice — once from `attachments[]` on its declared content_type, once from
+  // the inline <img> scrape on its inferred one — and the [ATTACHMENT_STATUS]
+  // block is a count the agent reads out loud ("2 attachment(s) did NOT reach
+  // you"), so a double entry is a false statement about what the customer sent.
+  // A URL that any path DID accept is not reported at all: it reached the agent.
+  const reported = new Set<string>();
+  const dedupedUnsupported = unsupported.filter((ref) => {
+    if (seen.has(ref.url) || reported.has(ref.url)) return false;
+    reported.add(ref.url);
+    return true;
+  });
+
+  return { refs: out, unsupported: dedupedUnsupported };
 }
 
 // Extract document (PDF) attachments from the structured `attachments[]` only.
@@ -145,7 +291,10 @@ export function extractDocumentAttachments(
   return out;
 }
 
-export function classifyEvent(payload: IntercomWebhookPayload): ClassifiedEvent {
+export function classifyEvent(
+  payload: IntercomWebhookPayload,
+  log: FilterLog = defaultFilterLog,
+): ClassifiedEvent {
   const { topic, data } = payload;
   const conversation = data.item;
   const conversationId = conversation.id;
@@ -162,12 +311,21 @@ export function classifyEvent(payload: IntercomWebhookPayload): ClassifiedEvent 
       // message this PR is meant to forward. (Clio review of PR #360.)
       const structuredAttachments =
         lastPart?.attachments ?? conversation.source?.attachments;
-      const attachments = extractImageAttachments(structuredAttachments, body);
+      const { refs: attachments, unsupported: unsupportedAttachments } =
+        extractImageAttachments(structuredAttachments, body, log);
       const documents = extractDocumentAttachments(structuredAttachments);
       // Allow empty body if at least one image OR document attachment was
       // extracted — a customer can drag-drop an image/PDF with no caption and
       // we still want to forward it. Otherwise treat empty as a malformed event.
-      if (!body && attachments.length === 0 && documents.length === 0) {
+      // An unsupported attachment still counts as "the customer sent
+      // something": treating it as an empty body would drop the whole message
+      // and the agent would never learn anything arrived.
+      if (
+        !body &&
+        attachments.length === 0 &&
+        documents.length === 0 &&
+        unsupportedAttachments.length === 0
+      ) {
         return { kind: "unknown", topic: `${topic}:empty_body` };
       }
       const partAuthor = lastPart?.author;
@@ -191,6 +349,7 @@ export function classifyEvent(payload: IntercomWebhookPayload): ClassifiedEvent 
         ...(verifiedName ? { verifiedName } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
         ...(documents.length > 0 ? { documents } : {}),
+        ...(unsupportedAttachments.length > 0 ? { unsupportedAttachments } : {}),
       };
     }
 

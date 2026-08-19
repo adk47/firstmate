@@ -1,0 +1,9 @@
+{
+  "id": "heic",
+  "source": {
+    "body": "<p>photo from my iPhone</p>",
+    "attachments": [
+      {"url": "https://musoai.intercom-attachments-3.com/IMG_0042.heic", "content_type": "image/heic", "name": "IMG_0042.HEIC"}
+    ]
+  }
+}

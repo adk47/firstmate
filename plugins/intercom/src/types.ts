@@ -119,6 +119,25 @@ export interface DocumentAttachmentRef {
   name?: string;
 }
 
+// An attachment Intercom DELIVERED that no forwarding path accepts (image/tiff,
+// image/bmp, video/*, …). Same shape as the two refs above, kept distinct so it
+// can never be mistaken for something the pipeline will try to download: these
+// are refused at classify time and never fetched.
+//
+// It exists because counting the drop was not enough: a content-type dropped
+// at extraction with only a log line left the agent answering from an evidence
+// set it had no way to know was incomplete. Carrying the ref is what lets
+// channel.ts mint an `unsupported_type` record for it.
+export interface UnsupportedAttachmentRef {
+  url: string;
+  contentType: string;
+  name?: string;
+  /** WHY it was refused, decided at extraction time. Kept as a literal union
+   *  here (rather than importing UnreadableReason) because attachments.ts
+   *  already imports from filters.ts — the other direction would be a cycle. */
+  reason: "unsupported_type" | "host_not_allowed";
+}
+
 export interface IntercomAuthor {
   type: "user" | "admin" | "bot";
   id: string;
@@ -351,6 +370,10 @@ export type ClassifiedEvent =
       verifiedName?: string;
       attachments?: ImageAttachmentRef[];
       documents?: DocumentAttachmentRef[];
+      /** Delivered but not forwardable (unsupported content-type). Carried so
+       *  the dispatch layer can tell the agent one arrived — see
+       *  `unsupported_type` in attachments.ts. */
+      unsupportedAttachments?: UnsupportedAttachmentRef[];
     }
   | { kind: "admin_reply"; conversationId: string; adminId: string; adminType: AssigneeType; messageId: string }
   | { kind: "assigned"; conversationId: string; assigneeId: string; assigneeType: AssigneeType }

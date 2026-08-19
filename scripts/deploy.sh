@@ -2276,6 +2276,48 @@ run_on_node8() {
   fi
 }
 
+# -------------------------------------------------------------------
+# Host media-binary pre-flight (WARN ONLY — never halts a deploy)
+# -------------------------------------------------------------------
+# The intercom plugin shells out to two HOST binaries rather than bundling a
+# JS decoder, because deploy rsyncs plugins with --exclude=node_modules and
+# native deps are fragile under the openclaw single-file packaging contract
+# (see plugins/intercom/src/attachments.ts):
+#
+#   pdftoppm     (poppler-utils)      — PDF pages → PNG for the vision path
+#   heif-convert (libheif-examples)   — HEIC/HEIF → JPEG
+#
+# Install on node-8 with:
+#   apt-get install -y poppler-utils libheif-examples
+#
+# Until 2026-08-18 this requirement lived ONLY in a source comment, so a
+# missing package was invisible until a customer's attachment came back
+# unreadable in production. Both paths degrade gracefully (the PDF still goes
+# for text extraction; a HEIC resolves to an explicit `unreadable` result), so
+# this WARNS rather than halting — a deploy must never wedge on a missing
+# optional package, and this check is brand new. Promote to a hard failure only
+# after it has been observed green for a while.
+check_media_host_binaries() {
+  local missing_bins="" probe_rc=0 probe_out
+  probe_out=$(run_on_node8 'for b in pdftoppm heif-convert; do command -v "$b" >/dev/null 2>&1 || printf "%s " "$b"; done' 2>&1) || probe_rc=$?
+  if (( probe_rc != 0 )); then
+    log "  ⚠ could not probe node-8 for media binaries (rc=$probe_rc): $probe_out"
+    return 0
+  fi
+  missing_bins="$(printf '%s' "$probe_out" | tr -d '\r\n' | sed 's/[[:space:]]*$//')"
+  if [[ -n "$missing_bins" ]]; then
+    log "  ⚠ node-8 is missing media binaries: $missing_bins"
+    log "    Intercom attachments will degrade (PDFs not rasterized / HEIC not decoded)."
+    log "    Fix: ssh node-8 && apt-get install -y poppler-utils libheif-examples"
+  else
+    log "  ✓ media binaries present on node-8 (pdftoppm, heif-convert)"
+  fi
+  return 0
+}
+
+log "  Pre-flight: host media binaries (pdftoppm, heif-convert)..."
+check_media_host_binaries
+
 # Post-sync inline (runs locally on node-8).
 #
 # IMPORTANT: `bash << 'POSTSYNC'` starts a CHILD bash process. The child

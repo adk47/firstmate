@@ -672,6 +672,22 @@ jobs:
           bash scripts/check-admin-api-gate-parity.sh
           echo "::endgroup::"
 
+      - name: Attachment-status honesty doctrine check — absence of the block proves nothing
+        # PR #843, rounds 3-7: every round found another path that dropped or truncated
+        # a customer attachment without minting an [ATTACHMENT_STATUS] record, while the
+        # contract told Caroline that the ABSENCE of that block proved every attachment
+        # arrived. That promise is unbounded — it holds only if every current AND future
+        # drop path reports perfectly — so eight fixed paths later it was still false.
+        # The promise was withdrawn instead: the block is a positive claim about the
+        # items it LISTS, its absence proves nothing, and a file Caroline cannot account
+        # for is one she ASKS about rather than declaring delivered or failed. Prose !=
+        # enforcement, so this gate fails if the honest wording is dropped from any of
+        # the four surfaces that carry it, or if the old promise is re-added to any.
+        run: |
+          echo "::group::Attachment-status honesty doctrine check"
+          bash scripts/check-attachment-status-doctrine.sh
+          echo "::endgroup::"
+
       - name: Data-sourcing doctrine check — Caroline must answer "via data partnerships"
         # Aaron's directive (2026-07-17): asked how Muso gets its data, Caroline
         # answers strictly "via data partnerships" — never naming a source or how

@@ -50,6 +50,16 @@ The goal is to quickly convert a messy ClickUp bucket into:
   parent downloads them fresh via the muso-intercom helper
   (`fetch-conversation-attachments.sh <conversation_id>`) and inspects the
   local files with vision. Never improvise `curl` + `file` pipelines.
+- **Never claim "corrupt evidence" or "decoder failure" without an
+  `unreadable` marker.** The helper prints one JSON line per attachment. A
+  line carrying `"unreadable": true` plus an `unreadable_reason` is the ONLY
+  artifact that licenses that claim, and it licenses it for the lines it
+  appears on only. The inference fails in BOTH directions: absence of images is
+  NOT evidence of unreadable images — the attachment may never have been
+  fetched, the conversation ID may be wrong, or the signed URL may have expired
+  — and absence of an `unreadable` marker is NOT evidence that every
+  attachment arrived. If you did not run the helper and read its output, you do
+  not know: say so and ask, rather than reporting the set as complete.
 - Credit-request status readbacks go through
   `scripts/verify-credit-request-status.sh` (see step 4) — never ad-hoc jq
   against the admin API. A 200 from `PUT /admin/credit-requests` does NOT mean
@@ -86,6 +96,43 @@ The goal is to quickly convert a messy ClickUp bucket into:
      by inspection time). The parent runs the muso-intercom
      `fetch-conversation-attachments.sh` helper and reads the downloaded
      files with vision before deciding.
+   - Read the helper's manifest, not just the directory. Each line is
+     `{"path", "source_url", "detected_type", "bytes"}`, plus:
+     - `"converted_from": "heic"` + `"original_path"` — the file was an
+       iPhone HEIC and has been transcoded to JPEG for you. Inspect `path`
+       (the JPEG); `original_path` is the untouched original.
+     - `"unreadable": true` + `"unreadable_reason"` — the bytes arrived and did
+       not become usable evidence. The reasons are NOT interchangeable; each
+       licenses a different diagnosis:
+       - `pipeline_failed` — nothing ever examined the file: `heif-convert` is
+         not installed (`apt-get install -y libheif-examples`) or the transcode
+         hit its 12s bound. A node-8 provisioning problem. Say that, and say
+         NOTHING about the file itself — you have no evidence about it.
+       - `heic_decode_failed` — libheif looked at the payload and refused it.
+         A valid HEIC header proves the container, never the payload, so this
+         is EITHER a damaged upload OR a variant we cannot decode and the
+         helper cannot tell which. Do NOT diagnose provisioning here: the
+         binary ran. Do NOT call the file corrupt either.
+       - `corrupt_or_unrecognized` — the bytes matched no container we know.
+         That is EITHER a damaged/truncated upload OR a valid file in a format
+         we cannot read (TIFF, MP4, ZIP, DOCX...), and the helper CANNOT tell
+         which. Never report it as damaged. The line's `declared_type` is what
+         the uploading client claimed — a hint, NOT verified — so do not
+         promote it to a conclusion either. Ask for a JPEG/PNG screenshot
+         rather than the same file again.
+       - `oversize` — the file decoded FINE and its JPEG was over the 10MB
+         cap. That is not a decode failure and must never be reported as
+         corrupt.
+       Report the reason verbatim and do NOT guess at the contents.
+     An attachment with no `unreadable` marker was decoded fine — if you
+     cannot see anything in it, that is a vision/reading problem on your
+     side, not corrupt evidence. The converse does NOT hold: the absence of a
+     marker for a file the customer says they sent proves nothing. Treat it as
+     unaccounted for and ask, rather than asserting it arrived or that it failed.
+     Inspect only the paths the manifest printed on THIS run. The out-dir is
+     reused per conversation and the index restarts at 1 each run, so a
+     directory listing can mix in an earlier run's files -- a stale image read
+     as current evidence is cross-ticket contamination, not a caching quirk.
    - Keep one small slice local so the critical path keeps moving.
 
 3. For each ticket, recover missing IDs.
@@ -217,4 +264,10 @@ and exits non-zero if any ClickUp write fails.
 - Admin wrapper: `skills/muso-ops-admin/scripts/muso-admin-api.sh --requester <id> call ...`.
 - Intercom conversation: `GET /conversations/{id}?display_as=plaintext`.
 - Intercom attachments (parent only): `bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-intercom/scripts/fetch-conversation-attachments.sh <conversation_id>`.
+  Emits one JSON line per attachment; HEIC/HEIF is transcoded to JPEG, and
+  anything undecodable carries `"unreadable": true` + `"unreadable_reason"`
+  (`pipeline_failed` | `heic_decode_failed` | `corrupt_or_unrecognized` |
+  `oversize`). That marker
+  is the only basis for reporting unreadable evidence; its absence is not a
+  basis for reporting that the evidence set is complete.
 - Credit-request status readback: `bash /opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/verify-credit-request-status.sh --expected <status> --ids "<ids>"`.

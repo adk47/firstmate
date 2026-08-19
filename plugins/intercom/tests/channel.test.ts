@@ -591,6 +591,7 @@ describe("combineBatchBodies / mergeBatchMedia (dispatch coalescing)", () => {
     messageId: "part-1",
     timestamp: 1000,
     media: [],
+    unreadable: [],
     imageRefCount: 0,
     documentRefCount: 0,
     ...over,

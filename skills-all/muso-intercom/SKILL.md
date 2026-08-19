@@ -95,8 +95,53 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-intercom/scripts/fetch-c
 ```
 
 Prints one JSON line per downloaded attachment:
-`{"path":"...","source_url":"...","detected_type":"png|jpeg|gif|webp|pdf|unknown","bytes":N}`.
-Read the downloaded files with vision to inspect them. Rules:
+`{"path":"...","source_url":"...","detected_type":"png|jpeg|gif|webp|heic|pdf|unknown","bytes":N}`.
+Read the downloaded files with vision to inspect them.
+
+Two extra keys can appear, and both change what you may conclude:
+
+- `"converted_from":"heic"` + `"original_path":"..."` -- the attachment was an
+  iPhone HEIC and has been transcoded to JPEG for you (`heif-convert`, from
+  the `libheif-examples` package). Inspect `path`; `original_path` is the
+  untouched original.
+- `"unreadable":true` + `"unreadable_reason":"heic_decode_failed"`,
+  `"corrupt_or_unrecognized"`, `"oversize"` or `"pipeline_failed"` -- the bytes
+  arrived and did not become usable evidence. This marker is the ONLY basis for
+  reporting unreadable or corrupt evidence, and it claims something about the
+  lines it appears on and nothing else. A manifest carrying no `unreadable` line
+  is NOT proof that every attachment was fetched: if the conversation references
+  a file the manifest does not list, report what you did and did not receive and
+  ASK -- never call it corrupt, and never call the set complete. The reasons are
+  NOT interchangeable:
+  - `pipeline_failed` -- we never examined the file at all: `heif-convert` is
+    not installed (`apt-get install -y libheif-examples`) or the transcode blew
+    its 12s bound. A node-8 provisioning problem. Say NOTHING about the file
+    itself; you have no evidence about it.
+  - `heic_decode_failed` -- libheif looked at the payload and refused it. That
+    is EITHER a damaged/truncated upload OR a variant we cannot decode, and the
+    helper cannot tell which. A valid HEIC header proves the container, never
+    the payload. Report that it could not be decoded; do NOT assert it is
+    corrupt, and do NOT assert the customer's file is fine.
+  - `corrupt_or_unrecognized` -- the bytes matched no container we know. That
+    is EITHER a damaged/truncated upload OR a valid file in a format we cannot
+    read (TIFF, MP4, ZIP, DOCX...), and the helper CANNOT tell which. Never
+    report it as damaged. Each line carries `declared_type`, the content-type
+    the uploading client claimed: a hint, NOT something we verified -- clients
+    mislabel constantly, which is why the bytes are sniffed at all. Ask for a
+    JPEG/PNG screenshot rather than the same file again.
+  - `oversize` -- the opposite of a failure: the HEIC decoded FINE and the
+    resulting JPEG was over the 10MB cap, so it was refused. Never report an
+    `oversize` file as corrupt or undecodable -- ask for a smaller version or a
+    screenshot.
+
+Read the MANIFEST, never the directory. The default out-dir is reused per
+conversation and the index restarts at 1 on every run, so the directory can
+hold files from earlier runs. Only the JSON lines this invocation printed
+describe this invocation's attachments; the helper removes the outputs it owns
+before re-converting, but a stale `1.png` from a differently-shaped earlier run
+can still sit there. Never glob the directory and inspect what you find.
+
+Rules:
 
 - **Inspect attachments centrally** (the agent handling the request). Do NOT
   hand attachment URLs to delegated subagents for inspection -- by the time
