@@ -363,6 +363,14 @@ of its disk budget — the guard fired but named the wrong cap. Caps are now
 grows without bound — every fixed cap is a future outage with a date on it.**
 Raising a cap buys time, it is not a fix.
 
+- **Bound:** `hydra-session-thread-retention@{main,edge}.timer` runs every 6h. It selects only
+  terminal Slack channel thread sessions inactive for 14d, then deletes them
+  through the gateway's `sessions.delete` lifecycle API with session-id + updatedAt
+  compare guards and the Hydra `requireInactive` runtime backport. The gateway
+  archives transcripts but never interrupts active work; the exact key matcher
+  excludes channel roots, DMs, synthetic sessions, and all
+  `:cron:` keys. Dry-run manually with
+  `scripts/prune-completed-slack-thread-sessions.sh --profile main`.
 - **Detect:** `scripts/lib/ensure-session-budget-headroom.sh --check` (0 clean / 1
   violation / 2 read error). Wired into `openclaw-pre-start-heal.sh` (report-only,
   never blocks start) and `cron-health-watchdog.sh` (pages #clio_devops, 6h-deduped).

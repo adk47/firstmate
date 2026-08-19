@@ -1989,6 +1989,10 @@ if ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
   bash "$HYDRA_ROOT/scripts/patch-openclaw-codex-native-compaction.sh"; then
   fail "Codex-native automatic compaction backport failed"
 fi
+if ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
+  bash "$HYDRA_ROOT/scripts/patch-openclaw-inactive-session-delete.sh"; then
+  fail "OpenClaw inactive-session delete backport failed"
+fi
 
 # -------------------------------------------------------------------
 # Step 4d: Install plugins

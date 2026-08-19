@@ -10,6 +10,13 @@
 #     sessions.resolve({ label: "@Role" }) keeps working for
 #     agent-to-agent messaging. Also runs on boot.
 #
+#   hydra-session-thread-retention@{main,edge}.timer / .service
+#     Every 6h, removes terminal Slack channel thread sessions older
+#     than 14d through each gateway's native sessions.delete lifecycle API.
+#     This bounds the protected session footprint without touching channel
+#     roots, DMs, active work, or the disposable :cron: keys whose survival
+#     is the reason this maintenance exists.
+#
 #   openclaw-gateway-{main,edge}.service.d/override.conf
 #     Drop-ins that add ExecStartPre self-heal + a restart ceiling
 #     so a schema-invalid openclaw.json can't crash-loop the
@@ -301,6 +308,50 @@ log "  $tmr: $state"
 
 log "done. Next fires:"
 systemctl list-timers "$tmr" --no-pager 2>/dev/null | head -4 || true
+
+# ─── Protected Slack-thread retention ────────────────────────
+[[ -x "$HYDRA_ROOT/scripts/prune-completed-slack-thread-sessions.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/prune-completed-slack-thread-sessions.sh missing or not executable"
+
+cat > /etc/systemd/system/hydra-session-thread-retention@.service << RETENTIONSVC
+[Unit]
+Description=Bound completed protected Slack-thread sessions through the %i gateway API
+After=network-online.target openclaw-gateway-%i.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SESSION_THREAD_RETENTION_DAYS=14
+Environment=SESSION_THREAD_MAX_DELETES=100
+ExecStart=$HYDRA_ROOT/scripts/prune-completed-slack-thread-sessions.sh --profile %i --apply
+# At most 100 gateway calls x 30s, plus listing and summary overhead.
+TimeoutStartSec=60min
+RETENTIONSVC
+
+cat > /etc/systemd/system/hydra-session-thread-retention@.timer << RETENTIONTMR
+[Unit]
+Description=Prune completed protected Slack-thread sessions for %i every 6 hours
+
+[Timer]
+OnBootSec=20min
+OnUnitActiveSec=6h
+RandomizedDelaySec=15min
+Persistent=true
+Unit=hydra-session-thread-retention@%i.service
+
+[Install]
+WantedBy=timers.target
+RETENTIONTMR
+
+systemctl daemon-reload
+for profile in main edge; do
+  retention_tmr="hydra-session-thread-retention@${profile}.timer"
+  systemctl enable "$retention_tmr" >/dev/null 2>&1 || fail "could not enable $retention_tmr"
+  systemctl start "$retention_tmr" >/dev/null 2>&1 || fail "could not start $retention_tmr"
+  retention_state="$(systemctl is-active "$retention_tmr" 2>/dev/null || true)"
+  [[ "$retention_state" == "active" ]] || fail "$retention_tmr is not active (state: ${retention_state:-unknown})"
+  log "  $retention_tmr: $retention_state"
+done
 
 # ─── Intercom intake-outage watchdog ─────────────────────────
 # Alerts #clio_devops (C0ADV2W76G4) via the devops bot when inbound

@@ -7,6 +7,7 @@
 #
 # Re-applies the patches that OpenClaw updates overwrite:
 # 1. Codex-native automatic compaction fix (runtime JS)
+# 2. Non-interrupting inactive-session deletion (runtime JS)
 # The historical mention-gate patch is retired on current versions and is not run.
 #
 # Retired:
@@ -27,6 +28,15 @@ if [ -f "$HYDRA_ROOT/scripts/patch-openclaw-codex-native-compaction.sh" ]; then
         bash "$HYDRA_ROOT/scripts/patch-openclaw-codex-native-compaction.sh"
 else
     echo "ERROR: patch-openclaw-codex-native-compaction.sh not found"
+    exit 1
+fi
+
+# 2. Non-interrupting inactive-session deletion (runtime JS — overwritten by update)
+if [ -f "$HYDRA_ROOT/scripts/patch-openclaw-inactive-session-delete.sh" ]; then
+    OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
+        bash "$HYDRA_ROOT/scripts/patch-openclaw-inactive-session-delete.sh"
+else
+    echo "ERROR: patch-openclaw-inactive-session-delete.sh not found"
     exit 1
 fi
 
