@@ -62,6 +62,7 @@ REPOS=(
   Muso-AI/H-DevOps
   Muso-AI/analytics-worker
   Muso-AI/platform-data-processing
+  Muso-AI/platform-data-processing-v4
   Muso-AI/tests-web-e2e
   Muso-AI/muso-skills
   Muso-AI/platform-ticker
