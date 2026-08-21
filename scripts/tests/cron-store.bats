@@ -36,6 +36,10 @@ STUB
   # Never inherit the operator override from the environment: a test that meant
   # to assert the refusal would silently assert the drop instead.
   unset HYDRA_ALLOW_ORPHAN_CRON
+  # The read retry exists for a post-restart gateway, not for these tests:
+  # sleep 0 keeps the suite fast. Attempt COUNTS are asserted instead of wall
+  # time, which is the more precise signal anyway.
+  export CRON_STORE_READ_POLL_SECS=0
   # shellcheck source=../lib/cron-store.sh
   source "$LIB"
 }
@@ -198,6 +202,163 @@ stub_openclaw() {
   stub_openclaw 'gateway not running'
   run cron_store_gateway_durable_count main
   [ "$status" -ne 0 ]
+}
+
+# --- the post-restart read retry -------------------------------------------
+#
+# WHY THIS BLOCK EXISTS
+# ---------------------
+# Step 6b runs seconds after the gateway restarts, and `cron list --all --json`
+# needs the gateway's HTTP server to be listening. On 2026-08-18 a single
+# attempt landed 1s before it came up (restart 12:43:45, "http server
+# listening" 12:43:50); the refused connection surfaced as "failed or returned
+# unparseable JSON" and rolled back a deploy whose diff never touched cron.
+# A transient connect failure is not evidence about the store's contents — but
+# a PERMANENT one still has to fail, and within a bounded budget.
+
+# Fail the first $1 invocations with $3 on stderr, then serve $2. Counts every
+# invocation to $TEST_TMPDIR/attempts so tests assert attempts, not seconds.
+stub_openclaw_flaky() {
+  local fail_times="$1" payload="$2"
+  local err_text="${3:-connect ECONNREFUSED 127.0.0.1:18789}"
+  local stub="$TEST_TMPDIR/bin/openclaw"
+  {
+    echo '#!/bin/bash'
+    printf 'n=$(cat %s/attempts 2>/dev/null || echo 0)\n' "$TEST_TMPDIR"
+    printf 'n=$((n+1)); printf "%%s" "$n" > %s/attempts\n' "$TEST_TMPDIR"
+    printf 'if [ "$n" -le %s ]; then printf "%%s\\n" %s >&2; exit 1; fi\n' \
+      "$fail_times" "'$err_text'"
+    printf 'cat <<%s\n%s\nPAYLOAD\n' "'PAYLOAD'" "$payload"
+  } > "$stub"
+  chmod +x "$stub"
+  export OPENCLAW_BIN="$stub"
+}
+
+@test "gateway read retries past a not-yet-listening gateway and succeeds" {
+  stub_openclaw_flaky 2 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}'
+  run cron_store_gateway_durable_count main
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+  # 2 refusals + 1 success: the transient failure must not surface at all.
+  run cat "$TEST_TMPDIR/attempts"
+  [ "$output" = "3" ]
+}
+
+@test "gateway jobset retries past a not-yet-listening gateway and succeeds" {
+  stub_openclaw_flaky 3 '{"jobs":[{"id":"j1","name":"a","schedule":{"kind":"cron"}}]}'
+  run cron_store_gateway_jobset main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"j1"* ]]
+}
+
+@test "gateway read gives up after a bounded number of attempts" {
+  export CRON_STORE_READ_TRIES=4
+  stub_openclaw_flaky 99 '{"jobs":[]}'
+  run cron_store_gateway_jobset main
+  [ "$status" -ne 0 ]
+  # Bounded: a permanently dead gateway must fail, not hang the deploy.
+  run cat "$TEST_TMPDIR/attempts"
+  [ "$output" = "4" ]
+}
+
+@test "a successful first read does not retry" {
+  stub_openclaw_flaky 0 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}'
+  run cron_store_gateway_durable_count main
+  [ "$status" -eq 0 ]
+  run cat "$TEST_TMPDIR/attempts"
+  [ "$output" = "1" ]
+}
+
+@test "a failed read reports WHY on stderr, not just that it failed" {
+  export CRON_STORE_READ_TRIES=2
+  stub_openclaw_flaky 99 '{"jobs":[]}' 'connect ECONNREFUSED 127.0.0.1:18789'
+  # --separate-stderr: the payload goes to stdout, the diagnosis to stderr.
+  # Without this the caller cannot tell a refused connection from a corrupt
+  # store — which is exactly how a healthy cron store got a deploy rolled back.
+  run --separate-stderr cron_store_gateway_jobset main
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"ECONNREFUSED"* ]]
+}
+
+@test "a successful read stays silent on stderr" {
+  # A stale error must never be attributed to a healthy read.
+  stub_openclaw_flaky 1 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}'
+  run --separate-stderr cron_store_gateway_durable_count main
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+  [[ "$stderr" != *"ECONNREFUSED"* ]]
+}
+
+@test "the handoff uses no shared-path temp file a local user could pre-place" {
+  # The first version of this retry handed the error back through
+  # /tmp/cron-store-read-err.$$ — a predictable name in a world-writable
+  # directory. A local user can pre-place that path as a symlink, and `: >`
+  # follows it, truncating an arbitrary root-owned file from a root deploy.
+  # stderr needs no shared state, so there is no such path to race.
+  run grep -nE 'TMPDIR|/tmp/cron-store' "$LIB"
+  [ "$status" -ne 0 ]
+  # Every temp file this lib does use must come from mktemp (atomic, 0600).
+  run bash -c "grep -n '>[[:space:]]*\"\$err\"' '$LIB' | wc -l"
+  [ "$output" -ge 1 ]
+  run grep -c 'err="\$(mktemp)"' "$LIB"
+  [ "$output" -ge 1 ]
+}
+
+@test "a non-numeric tries override is REFUSED, not silently read as zero" {
+  # `banana` evaluates to 0 in arithmetic context, so the loop would make zero
+  # attempts and report failure without ever contacting the gateway — turning a
+  # healthy cron store into a FATAL and a rollback. Refusing loudly is the only
+  # safe reading of a knob we cannot understand.
+  export CRON_STORE_READ_TRIES=banana
+  stub_openclaw_flaky 0 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}'
+  run --separate-stderr cron_store_gateway_jobset main
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"CRON_STORE_READ_TRIES"* ]]
+  [[ "$stderr" == *"positive integer"* ]]
+  # And it must NOT have quietly consumed an attempt on the way out.
+  [ ! -f "$TEST_TMPDIR/attempts" ]
+}
+
+@test "an expression-valued tries override cannot execute a command" {
+  # Bash recursively evaluates a variable's VALUE in arithmetic context, so
+  # `(( i <= CRON_STORE_READ_TRIES ))` would RUN the substitution — as root,
+  # inside the deploy. Validation has to happen before any arithmetic touches
+  # the value.
+  export CRON_STORE_READ_TRIES='a[$(touch '"$TEST_TMPDIR"'/pwned)0]'
+  stub_openclaw_flaky 0 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}'
+  run --separate-stderr cron_store_gateway_jobset main
+  [ "$status" -ne 0 ]
+  [ ! -f "$TEST_TMPDIR/pwned" ]
+}
+
+@test "a zero tries override is REFUSED — a gate that never runs is not a pass" {
+  export CRON_STORE_READ_TRIES=0
+  stub_openclaw_flaky 0 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}'
+  run --separate-stderr cron_store_gateway_jobset main
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"positive integer"* ]]
+  [ ! -f "$TEST_TMPDIR/attempts" ]
+}
+
+@test "a malformed poll override is REFUSED" {
+  export CRON_STORE_READ_POLL_SECS=-1
+  stub_openclaw_flaky 0 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}'
+  run --separate-stderr cron_store_gateway_jobset main
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"CRON_STORE_READ_POLL_SECS"* ]]
+}
+
+@test "shipped retry defaults cover a real gateway restart" {
+  # Guards the budget, not the mechanism: the measured gap between exec and
+  # "http server listening" was ~5s on 2026-08-18. Defaults must exceed it.
+  ( unset CRON_STORE_READ_TRIES CRON_STORE_READ_POLL_SECS
+    source "$LIB"
+    # (N-1), not N: attempt 1 runs at t=0 and the sleep is skipped after the
+    # last one, so N attempts span (N-1) x poll seconds. Multiplying by N
+    # overstates the window — 4x2 would "prove" 8s while the final attempt
+    # actually lands at 6s, leaving a gateway that comes up at 7s to recreate
+    # the rollback race.
+    [ "$(( (CRON_STORE_READ_TRIES - 1) * CRON_STORE_READ_POLL_SECS ))" -ge 8 ] )
 }
 
 # --- cron_store_repo_count --------------------------------------------------

@@ -196,6 +196,73 @@ cron_store_diff_is_empty() {
   [ "$n" = "0" ]
 }
 
+# Tunables, named like the GATEWAY_*/RI_* knobs elsewhere in scripts/.
+# 5 attempts x 2s covers the ~5s a gateway takes from exec to "http server
+# listening" (measured 2026-08-18 on node-8: 12:43:45 restart -> 12:43:50
+# listening) without stretching a genuinely dead gateway's deploy by much.
+CRON_STORE_READ_TRIES="${CRON_STORE_READ_TRIES:-5}"
+CRON_STORE_READ_POLL_SECS="${CRON_STORE_READ_POLL_SECS:-2}"
+
+# _cron_store_gateway_read <profile>
+# Echo the raw `cron list --all --json` output, retrying a bounded number of
+# times. RETRY EXISTS FOR ONE REASON: this runs seconds after a gateway
+# restart, and the CLI needs the gateway's HTTP server to be listening. On
+# 2026-08-18 a single attempt landed 1s before it came up, and the resulting
+# refused connection was reported as an unverifiable cron store — rolling back
+# a deploy whose diff never touched cron. A transient connect failure is not
+# evidence about the store's contents.
+#
+# Bounded on purpose: a permanently dead gateway must still FAIL, and fail
+# within a knowable budget, rather than hang the deploy.
+_cron_store_gateway_read() {
+  local profile="$1" bin raw err rc i
+  bin="${OPENCLAW_BIN:-openclaw}"
+
+  # VALIDATE BEFORE ANY ARITHMETIC. Bash recursively evaluates a variable's
+  # VALUE in an arithmetic context, so `(( i <= CRON_STORE_READ_TRIES ))` with
+  # CRON_STORE_READ_TRIES='a[$(cmd)0]' RUNS cmd — in the root deploy process
+  # (verified: the injected command printed). Worse for everyday use, a benign
+  # typo like `banana` evaluates to 0, so the loop makes ZERO attempts, the
+  # read returns failure without ever contacting the gateway, and a perfectly
+  # healthy cron store becomes a FATAL + rollback. Refuse both up front rather
+  # than let a knob decide how much of the gate runs.
+  if [[ ! "$CRON_STORE_READ_TRIES" =~ ^[0-9]+$ ]] || [ "$CRON_STORE_READ_TRIES" -lt 1 ]; then
+    printf '        cron-store: CRON_STORE_READ_TRIES must be a positive integer, got %s\n' \
+      "$(printf '%q' "$CRON_STORE_READ_TRIES")" >&2
+    return 1
+  fi
+  if [[ ! "$CRON_STORE_READ_POLL_SECS" =~ ^[0-9]+$ ]]; then
+    printf '        cron-store: CRON_STORE_READ_POLL_SECS must be a non-negative integer, got %s\n' \
+      "$(printf '%q' "$CRON_STORE_READ_POLL_SECS")" >&2
+    return 1
+  fi
+
+  err="$(mktemp)"
+  for (( i = 1; i <= CRON_STORE_READ_TRIES; i++ )); do
+    rc=0
+    raw=$("$bin" --profile "$profile" cron list --all --json 2>"$err") || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      printf '%s' "$raw"
+      rm -f "$err"
+      return 0
+    fi
+    [ "$i" -lt "$CRON_STORE_READ_TRIES" ] && sleep "$CRON_STORE_READ_POLL_SECS"
+  done
+  # Report WHY on stderr, so a refused connection is never mistaken for a
+  # corrupt store. Same idiom cron_store_reimport uses below: the caller's
+  # fatal line lands directly under this, and the deploy log carries both.
+  #
+  # Deliberately NOT handed back through a shared file: every caller invokes
+  # this as `raw=$(_cron_store_gateway_read ...)`, so a variable cannot cross
+  # the subshell, and a predictable path under a world-writable /tmp is a
+  # symlink target a local user can pre-place — `: >` follows it and would
+  # truncate an arbitrary root-owned file. stderr already flows to the caller
+  # and needs no shared state at all.
+  [ -s "$err" ] && sed 's/^/        /' "$err" >&2
+  rm -f "$err"
+  return 1
+}
+
 # cron_store_gateway_durable_count <profile>
 # Echo the count of durable crons the RUNNING gateway has loaded. This reports
 # the gateway's in-memory table, not SQLite — before a restart it still shows
@@ -203,9 +270,8 @@ cron_store_diff_is_empty() {
 # Propagates cron_store_durable_count_from_json's rc (1 = unknown,
 # 2 = paginated) so the caller can say which kind of blind it is.
 cron_store_gateway_durable_count() {
-  local profile="$1" bin raw
-  bin="${OPENCLAW_BIN:-openclaw}"
-  raw=$("$bin" --profile "$profile" cron list --all --json 2>/dev/null) || return 1
+  local profile="$1" raw
+  raw=$(_cron_store_gateway_read "$profile") || return 1
   cron_store_durable_count_from_json "$raw"
 }
 
@@ -214,9 +280,8 @@ cron_store_gateway_durable_count() {
 # gateway's in-memory table, not SQLite — before a restart it still shows the
 # pre-import set, which is precisely what makes the clobber detectable.
 cron_store_gateway_jobset() {
-  local profile="$1" bin raw
-  bin="${OPENCLAW_BIN:-openclaw}"
-  raw=$("$bin" --profile "$profile" cron list --all --json 2>/dev/null) || return 1
+  local profile="$1" raw
+  raw=$(_cron_store_gateway_read "$profile") || return 1
   cron_store_jobset_from_json "$raw"
 }
 

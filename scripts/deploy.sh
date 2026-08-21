@@ -636,10 +636,13 @@ install_plugin() {
   return 0
 }
 
-# wait_for_agents_bound — polls `openclaw agents list --bindings` until
-# the BOUND count matches the expected count for the given profile,
-# or the timeout elapses. Called between Step 6 (gateway restart)
-# and Step 7 (smoke test) to close the warm-up race.
+# wait_for_agents_bound — polls the RUNNING gateway via `openclaw health
+# --json` until the agents it reports match the expected count for the given
+# profile, or the timeout elapses. Called between Step 6 (gateway restart)
+# and Step 7 (smoke test) to close the warm-up race — and, since Step 6b
+# queries the gateway directly, to close the readiness race with it too.
+# See the probe comment in the poll loop for why a local `agents list` read
+# cannot serve as this gate.
 #
 # Expected count is derived from the config file, NOT hardcoded —
 # this prevents the magic-number failure class where adding or
@@ -686,12 +689,38 @@ PYEOF
 
   local elapsed=0
   local bound=0
+  local health_json=""
   while (( elapsed < timeout_sec )); do
-    # Count agent entries in the CLI output. openclaw lists each bound
-    # agent as a line starting with "- <name>" — this is the stable
-    # structural signal, not the word BOUND (which appears nowhere in
-    # recent CLI versions; verified 2026-04-08 on live main gateway).
-    bound=$(openclaw --profile "$profile" agents list --bindings 2>/dev/null | grep -c '^- ' || true)
+    # Probe the RUNNING gateway, not local state. `openclaw agents list
+    # --bindings` reads the on-disk agent config and answers the full count
+    # even when no gateway is listening (verified 2026-08-18 on node-8: it
+    # printed 9 against a dead --url AND under --timeout 1), so it made this
+    # entire warmup a no-op. `openclaw health` is a live round-trip to the
+    # gateway ("Fetch health from the running gateway"): it exits non-zero
+    # when unreachable, and its .agents array is exactly the bound set.
+    #
+    # This matters because Step 6b runs immediately after and its
+    # `cron list --all --json` DOES require the gateway — on 2026-08-18 the
+    # no-op probe returned "bound after 0s" one second before the gateway's
+    # HTTP server started listening, so Step 6b read a refused connection as
+    # an unverifiable cron store and rolled the whole deploy back.
+    #
+    # Any failure (unreachable, non-JSON, ok=false) must yield 0 so the loop
+    # keeps polling — never a spurious match.
+    # Two statements, not one pipeline: under `set -o pipefail` a failing
+    # `openclaw` makes the whole pipeline non-zero even though python already
+    # printed its 0 for EOF, so a trailing `|| echo 0` appends a SECOND zero and
+    # `bound` becomes "0\n0" — every poll then dies with an arithmetic syntax
+    # error and the timeout line reads "0\n0/9". Absorbing the CLI's status
+    # first keeps the fallback to exactly one value.
+    health_json=$(openclaw --profile "$profile" health --json 2>/dev/null || true)
+    bound=$(printf '%s' "$health_json" \
+      | python3 -c 'import json,sys
+try:
+    h = json.load(sys.stdin)
+    print(len(h["agents"]) if h.get("ok") is True and isinstance(h.get("agents"), list) else 0)
+except Exception:
+    print(0)' 2>/dev/null || echo 0)
     if (( bound == expected )); then
       log "    ✓ All $bound/$expected agents bound on $profile after ${elapsed}s"
       return 0
@@ -3118,7 +3147,7 @@ if needs_target "main" && [ -f "$HYDRA_ROOT/cron-jobs.json" ]; then
     2)
       fail "cron convergence: could not count jobs in $HYDRA_ROOT/cron-jobs.json" ;;
     3)
-      fail "cron convergence: 'openclaw --profile main cron list --all --json' failed or returned unparseable JSON — refusing to assume the cron store is correct" ;;
+      fail "cron convergence: 'openclaw --profile main cron list --all --json' failed or returned unparseable JSON after ${CRON_STORE_READ_TRIES} attempt(s) — refusing to assume the cron store is correct (the CLI's own error is logged directly above)" ;;
     4)
       fail "cron convergence: the gateway's cron list came back PAGINATED (hasMore=true). The durable count cannot be derived from a truncated page and this openclaw build exposes no paging flag, so the store is unverifiable — refusing to assume it is correct." ;;
     5)
