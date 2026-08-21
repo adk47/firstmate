@@ -260,13 +260,34 @@ _qar_post_alert_comment() { # <repo> <pr> <json-file>
 # arrives green, and "mostly refused" is not a property to rely on for an
 # approval write.
 #
-# The wrapper has no expected-sha parameter, and adding one is not available to
-# THIS PR: scripts/qa-pr-approve.sh is one of the authority-surface paths that
-# refuse with exit 11, so editing it here would make the bot decline this PR
-# outright. That contract belongs in its own PR. Caller-side, the window is
-# closed from both ends instead — re-confirm the head immediately before the
-# write, then verify from the recorded review WHICH sha the approval actually
-# landed on, since that is the only authoritative answer.
+# Guard 14 NARROWS the rest at the wrapper. It does not close it. This lane
+# exports QA_PR_APPROVE_EXPECT_HEAD (plus _BASE, _BASE_OID and _QUIET_SINCE),
+# and the wrapper refuses with exit 14 when GitHub's live head is not the sha
+# this turn's verdict was pinned to. That check sits on the far side of every
+# other guard, so it shrinks the exposed window from "this whole turn" down to
+# the wrapper's own read-to-write span — but it is still check-then-act, and a
+# push landing inside that last span is approved.
+#
+# It cannot be made atomic, and the obvious fix makes things worse. GitHub's
+# reviews API accepts a commit_id but does NOT validate it against the live
+# head: POSTing a review pinned to a stale sha returns 200 and records that sha
+# verbatim (measured against this very PR on 2026-08-18 — head a92b7295, review
+# pinned to 37a163cd, accepted and stored as 37a163cd). So pinning prevents
+# nothing. Worse, it would BLIND the readback below, which detects the race
+# precisely by comparing the sha the approval landed on against the reviewed
+# head — pin the write and that comparison is true by construction, turning a
+# race we currently catch into one we never see.
+#
+# So the caller-side belt is load-bearing, not redundant, and it has to be a
+# POST-write readback: re-confirm the head immediately before the write, then
+# read the recorded review to learn WHICH sha the approval actually landed on,
+# and redden the PR when that is not the reviewed one. That is detection, not
+# prevention — the approval cannot be retracted from here — which is the honest
+# limit of this design and is why the red status plus the author DM exist.
+#
+# Guard 14 is also OPT-IN: a caller that exports nothing keeps the old
+# behavior, which is what keeps the wrapper backward-compatible for the agent
+# lane.
 
 # qar_unresolved_threads_since <repo> <pr> <iso-timestamp> — how many unresolved
 # review threads have had activity after <iso-timestamp>. Prints ERR when it
@@ -308,6 +329,12 @@ qar_unresolved_threads_since() { # <repo> <pr> <since>
           pageInfo{ hasPreviousPage }
           nodes{ createdAt author{ login } } } }
       } } } }'
+  # Starts from the ROOT and proves the path exists. GitHub can answer HTTP 200
+  # with `pullRequest: null` plus an `errors` array (transient resource or
+  # permission failure); a filter rooted at .reviewThreads lets that null flow
+  # through as "no threads" and emit 0, so the caller would read "nobody
+  # objected" from a response that established nothing.
+  #
   # The timestamp is passed to LOCAL jq via --arg rather than interpolated into
   # a `gh --jq` filter: `gh api` has no --arg (that is a documented trap in this
   # repo), and interpolating a value into a jq program is how a crafted value
@@ -315,7 +342,10 @@ qar_unresolved_threads_since() { # <repo> <pr> <since>
   out="$("$QA_GH" --repo "$repo" api graphql -f query="$gql" \
         -f owner="${repo%%/*}" -f repo="${repo#*/}" -F pr="$pr" 2>/dev/null \
         | jq -r --arg since "$since" --argjson bots "$bot_logins_json" \
-            '.data.repository.pullRequest.reviewThreads
+            'if (.errors // [] | length) > 0
+               or ((.data.repository.pullRequest.reviewThreads // null) | type) != "object"
+             then "ERR"
+             else .data.repository.pullRequest.reviewThreads
              | if .pageInfo.hasNextPage then "ERR"
                else ([.nodes[]? | select(.isResolved == false)]) as $t
                  | if any($t[]; (.comments.pageInfo.hasPreviousPage // false)
@@ -326,7 +356,8 @@ qar_unresolved_threads_since() { # <repo> <pr> <since>
                             and ((.author.login // "") as $l | ($bots | index($l)) == null)))]
                          | length | tostring)
                    end
-               end' 2>/dev/null || echo "ERR")"
+               end
+             end' 2>/dev/null || echo "ERR")"
   [ -n "$out" ] || out="ERR"
   printf '%s' "$out"
 }
@@ -771,9 +802,21 @@ for repo in "${REPOS[@]}"; do
     # write atomic — nothing caller-side can — but it collapses the window from
     # "the whole turn" (reviews read, verdict parse, UID lookup) to one API
     # call, and it is fail-closed: a head we cannot name is never approved.
-    live_head="$("$QA_GH" --repo "$repo" api "repos/$repo/pulls/$pr" --jq '.head.sha' 2>/dev/null || echo "")"
-    if [ -z "$live_head" ]; then
-      log "READ-FAILURE: could not re-confirm the head of $repo#$pr immediately before approving — skipped rather than approving a head we cannot name."
+    # ONE read, three facts: the head we are about to approve, and the base the
+    # verdict was formed against (name + tip). All three are handed to the
+    # wrapper below so it can re-verify them under the same read that performs
+    # the write — the window this side genuinely cannot close.
+    pr_state="$("$QA_GH" --repo "$repo" api "repos/$repo/pulls/$pr" \
+      --jq '[(.head.sha // ""), (.base.ref // ""), (.base.sha // "")] | @tsv' 2>/dev/null || echo "")"
+    live_head="$(printf '%s' "$pr_state" | cut -f1)"
+    live_base_ref="$(printf '%s' "$pr_state" | cut -f2)"
+    live_base_sha="$(printf '%s' "$pr_state" | cut -f3)"
+    # ALL THREE or nothing. Approving with only some expectations handed over
+    # would silently disable the rest of the wrapper's Guard 14 — a retarget or
+    # base rewrite would sail through while the log still read like a normal
+    # approval. Unverifiable means refuse, exactly as everywhere else here.
+    if [ -z "$live_head" ] || [ -z "$live_base_ref" ] || [ -z "$live_base_sha" ]; then
+      log "READ-FAILURE: could not read head+base for $repo#$pr immediately before approving (head='${live_head:-?}' base='${live_base_ref:-?}'@'${live_base_sha:-?}') — skipped rather than approving with part of the wrapper contract silently disabled."
       read_fail=$((read_fail + 1)); safety_fail=$((safety_fail + 1)); continue
     fi
     if [ "$live_head" != "$head_sha" ]; then
@@ -787,8 +830,26 @@ for repo in "${REPOS[@]}"; do
     # by evidence rather than by guessing from the exit code.
     attempt_at="$(date -u +%FT%TZ)"
     rc=0
-    out="$("$QA_APPROVE" "$repo" "$pr" "$uid" \
-      "🤖 Approved by Muso QA Bot (automated review): CI is green and there are no blocking findings. A human still performs the merge." 2>&1)" || rc=$?
+    # Hand the wrapper what this tick believes, so IT can re-check under the same
+    # read that writes. Without these the wrapper's Guard 14 is inert and the
+    # gap between the checks above and the approval is only ever noticed after
+    # the fact, by the readback — which cannot retract an approval.
+    # Unconditional: the read above already refused if any of them was missing,
+    # so there is no partial hand-off to reason about. An earlier version omitted
+    # empty values, which FAILED OPEN — it silently disabled the base half of
+    # Guard 14 while still approving.
+    # Exported inside a SUBSHELL, not as an env-assignment prefix. A prefix built
+    # by expansion (`${x:+VAR=val}`) is NOT treated as an assignment by bash — it
+    # becomes a positional ARGUMENT to the command, which silently corrupts the
+    # wrapper's argv. The subshell also keeps these out of the rest of the tick.
+    out="$(
+      export QA_PR_APPROVE_EXPECT_HEAD="$head_sha"
+      export QA_PR_APPROVE_EXPECT_QUIET_SINCE="$go_at"
+      export QA_PR_APPROVE_EXPECT_BASE="$live_base_ref"
+      export QA_PR_APPROVE_EXPECT_BASE_OID="$live_base_sha"
+      "$QA_APPROVE" "$repo" "$pr" "$uid" \
+        "🤖 Approved by Muso QA Bot (automated review): CI is green and there are no blocking findings. A human still performs the merge." 2>&1
+    )" || rc=$?
 
     # exit 7 covers two very different things: a pre-write read failure (it never
     # got as far as approving) and `gh pr review --approve` returning non-zero,

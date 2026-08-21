@@ -62,7 +62,11 @@ _jqflt() { local p=""; for a in "$@"; do [ "$p" = "--jq" ] && { printf '%s' "$a"
 sub="$1"; shift || true
 case "$sub" in
   api)
-    if [ "${1:-}" = "graphql" ]; then
+    if printf '%s\n' "$@" | grep -qE '^repos/[^/]+/[^/]+/compare/'; then
+      # Guard 14 asks whether the base moved FORWARD or was rewritten.
+      # STUB_BASE_MOVE="" models GitHub not answering.
+      printf '%s' "${STUB_BASE_MOVE-ahead}"
+    elif [ "${1:-}" = "graphql" ]; then
       if [ -n "${STUB_THREADS_JSON:-}" ]; then
         _flt="$(_jqflt "$@")"
         if [ -n "$_flt" ]; then
@@ -122,12 +126,18 @@ case "$sub" in
               | jq -r "$(_jqflt "$@")"
           fi
         elif printf '%s ' "$@" | grep -q 'headRefOid'; then
-          echo "${STUB_HEAD_OID:-0123456789abcdef0123456789abcdef01234567}"  # Guard 8 report key
+          # `-` not `:-`: STUB_HEAD_OID="" must model an UNREADABLE answer for
+          # Guard 14, not silently fall back to the default (same convention as
+          # STUB_BASE_REF above). Guard 8 still gets its report key by default.
+          echo "${STUB_HEAD_OID-0123456789abcdef0123456789abcdef01234567}"  # Guard 8 report key
         elif printf '%s ' "$@" | grep -q -- 'changedFiles'; then
           _page1="${STUB_FILES_PAGE_1:-${STUB_FILES:-src/app.ts}}"
           _all="$_page1 ${STUB_FILES_PAGE_2:-}"
           set -- $_all
           echo "${STUB_CHANGED_COUNT:-$#}"
+        elif printf '%s ' "$@" | grep -q 'baseRefOid'; then
+          # Guard 14's base-OID read. STUB_BASE_OID="" models an unreadable answer.
+          printf '%s' "${STUB_BASE_OID-basetip0}"
         elif printf '%s ' "$@" | grep -qE 'author|baseRefName'; then
           # Guard 3 + Guard 4b share ONE `--json author,baseRefName` call whose
           # --jq filter emits two lines. Serve the API SHAPE and run the
@@ -160,6 +170,16 @@ case "$sub" in
         echo "approve" >> "$STUB_CALLS"
         # prove the audit log already exists at approve time (log-before-write)
         [ -f "${QA_PR_APPROVE_LOG_DIR}/$(date -u +%F).jsonl" ] && echo "log-present-at-approve" >> "$STUB_CALLS"
+        # WHICH sha GitHub would attach this approval to. `gh pr review
+        # --approve` sends no commit_id, so the answer is whatever the head is
+        # at WRITE time, not whatever a guard read earlier.
+        #
+        # STUB_HEAD_MOVES_TO models the push landing in the gap between the last
+        # guard read and this write — state that changes when the approve call
+        # begins, which is the interleaving a static stub cannot express. Every
+        # pre-write read still answers with the old sha, because at read time
+        # the push genuinely had not happened yet.
+        echo "approved-on:${STUB_HEAD_MOVES_TO:-${STUB_HEAD_OID-0123456789abcdef0123456789abcdef01234567}}" >> "$STUB_CALLS"
         exit "${STUB_APPROVE_RC:-0}" ;;
     esac ;;
 esac
@@ -2104,5 +2124,547 @@ br_report_raw() {  # <content> — raw bytes (malformed-JSON cases)
   STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
     run "$SCRIPT" core-backend 123 "$NICK"
   [ "$status" -eq 13 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# ── Guard 14: caller-asserted expected state, re-read AT the write ──────────
+# OPT-IN. The 162 tests above all run with both variables unset and are
+# unchanged by this guard — that IS the backward-compatibility assertion.
+
+@test "guard14: unset → no extra reads, approves exactly as before" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard14: expected base MATCHES the live base → approves" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_REF="develop" \
+    QA_PR_APPROVE_EXPECT_BASE="develop" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard14: base retargeted since the verdict → exit 14, never approves" {
+  # Same head sha, same green checks, different comparison.
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_REF="main" \
+    QA_PR_APPROVE_EXPECT_BASE="develop" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14: unreadable base → exit 14 (fail closed, never approves)" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_REF="" \
+    QA_PR_APPROVE_EXPECT_BASE="develop" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14: a HUMAN objection at/after the verdict → exit 14, never approves" {
+  # Untagged, so Guard 7 lets it through; this is what catches it.
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[
+    {"isResolved":false,"comments":{"pageInfo":{"hasPreviousPage":false},"nodes":[
+      {"createdAt":"2026-08-18T12:00:00Z","author":{"login":"some-human"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+    QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T11:00:00Z" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14: the review's OWN thread at the same second must NOT strand the PR" {
+  # The review files its finding threads at its own submitted_at. Without the
+  # non-bot filter, `>=` makes the review an objection to itself and the PR
+  # could never be approved — the exact failure the retry lane exists to fix.
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[
+    {"isResolved":false,"comments":{"pageInfo":{"hasPreviousPage":false},"nodes":[
+      {"createdAt":"2026-08-18T11:00:00Z","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+    QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T11:00:00Z" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard14: a HUMAN objection in the SAME SECOND as the verdict blocks (>= not >)" {
+  # GitHub timestamps are second-granular, so a strict `>` would miss this.
+  # Pairs with the bot-thread test above: same second, opposite outcome, and the
+  # author is the only thing that differs.
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[
+    {"isResolved":false,"comments":{"pageInfo":{"hasPreviousPage":false},"nodes":[
+      {"createdAt":"2026-08-18T11:00:00Z","author":{"login":"some-human"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+    QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T11:00:00Z" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14: a human comment BEFORE the verdict does not block" {
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[
+    {"isResolved":false,"comments":{"pageInfo":{"hasPreviousPage":false},"nodes":[
+      {"createdAt":"2026-08-18T09:00:00Z","author":{"login":"some-human"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+    QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T11:00:00Z" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+}
+
+@test "guard14: a RESOLVED thread after the verdict does not block" {
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[
+    {"isResolved":true,"comments":{"pageInfo":{"hasPreviousPage":false},"nodes":[
+      {"createdAt":"2026-08-18T12:00:00Z","author":{"login":"some-human"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+    QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T11:00:00Z" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+}
+
+@test "guard14: a human reply on a thread the BOT opened still blocks" {
+  # Classifying by the last author would let a bot reply erase a human hold;
+  # classifying by the first would miss a reply on an old thread.
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[
+    {"isResolved":false,"comments":{"pageInfo":{"hasPreviousPage":false},"nodes":[
+      {"createdAt":"2026-08-18T09:00:00Z","author":{"login":"adk47"}},
+      {"createdAt":"2026-08-18T12:00:00Z","author":{"login":"some-human"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+    QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T11:00:00Z" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14: >100 threads is caught EARLIER by guard7 (exit 9), not 14" {
+  # Documents the interaction rather than asserting 14: Guard 7 already refuses
+  # a second page of threads, and it runs first. If a future reordering ever
+  # made Guard 14 the one to see it, this test says so by changing colour.
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":true},"nodes":[]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+    QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T11:00:00Z" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 9 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14: a truncated comment window at/after the verdict → exit 14" {
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[
+    {"isResolved":false,"comments":{"pageInfo":{"hasPreviousPage":true},"nodes":[
+      {"createdAt":"2026-08-18T12:00:00Z","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+    QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T11:00:00Z" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# ── bot_logins shape, enforced in the wrapper itself ────────────────────────
+# The wrapper parses .identity.bot_logins independently of lib/qa-policy.sh and
+# used to fall back to ["muso-qa-bot"] for any wrong shape — silently changing
+# which reviews count as the bot's.
+
+@test "bot_logins: a bare STRING refuses (exit 2), never approves" {
+  # With "adk47" as a string the real bot drops OUT of the derived set, so a
+  # resolved REBASE WARNING filed under adk47 stops counting and Guard 8 would
+  # refuse a PR it should have passed.
+  jq '.identity.bot_logins = "adk47"' "$HYDRA_REPO/policies/qa-approval-policy.json" \
+    > "$TEST_TMPDIR/bad-bot-logins.json"
+  export QA_APPROVAL_POLICY="$TEST_TMPDIR/bad-bot-logins.json"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 2 ]
+  echo "$output" | grep -q 'bot_logins'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "bot_logins: an OBJECT refuses (exit 2)" {
+  jq '.identity.bot_logins = {}' "$HYDRA_REPO/policies/qa-approval-policy.json" \
+    > "$TEST_TMPDIR/bad-bot-logins.json"
+  export QA_APPROVAL_POLICY="$TEST_TMPDIR/bad-bot-logins.json"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 2 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "bot_logins: non-string elements refuse (exit 2)" {
+  jq '.identity.bot_logins = [123]' "$HYDRA_REPO/policies/qa-approval-policy.json" \
+    > "$TEST_TMPDIR/bad-bot-logins.json"
+  export QA_APPROVAL_POLICY="$TEST_TMPDIR/bad-bot-logins.json"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 2 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "bot_logins: ABSENT is still allowed (the built-in default stands)" {
+  # Derived from the REAL policy with only this key removed, so the test cannot
+  # pass or fail for an unrelated missing-key reason.
+  jq 'del(.identity.bot_logins)' "$HYDRA_REPO/policies/qa-approval-policy.json" \
+    > "$TEST_TMPDIR/no-bot-logins.json"
+  export QA_APPROVAL_POLICY="$TEST_TMPDIR/no-bot-logins.json"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "bot_logins: an UNREADABLE policy still dies 12 at guard3c, not 2" {
+  # This guard owns SHAPE only. Readability stays guard3c's, with its own
+  # documented exit code that agents relay.
+  export QA_APPROVAL_POLICY="$TEST_TMPDIR/does-not-exist.json"
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 12 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# ── Guard 14: base OID (force-push, which a NAME check cannot see) ──────────
+
+@test "guard14/oid: identical base OID → approves" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_OID="basetip0" \
+    QA_PR_APPROVE_EXPECT_BASE_OID="basetip0" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard14/oid: base merely ADVANCED (ahead) → approves, not a false refusal" {
+  # baseRefOid is the branch TIP, so it moves on every merge into main. A plain
+  # equality pin would refuse constantly and make the contract unusable.
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_OID="newtip99" STUB_BASE_MOVE="ahead" \
+    QA_PR_APPROVE_EXPECT_BASE_OID="basetip0" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard14/oid: base REWRITTEN (diverged) → exit 14, never approves" {
+  # The force-push case: same baseRefName, different history underneath.
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_OID="rewrit99" STUB_BASE_MOVE="diverged" \
+    QA_PR_APPROVE_EXPECT_BASE_OID="basetip0" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  echo "$output" | grep -q 'REWRITTEN'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14/oid: base ROLLED BACK (behind) → exit 14" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_OID="oldtip99" STUB_BASE_MOVE="behind" \
+    QA_PR_APPROVE_EXPECT_BASE_OID="basetip0" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14/oid: compare unanswerable → exit 14 (never guesses)" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_OID="newtip99" STUB_BASE_MOVE="" \
+    QA_PR_APPROVE_EXPECT_BASE_OID="basetip0" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14/oid: unreadable live base OID → exit 14" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_OID="" \
+    QA_PR_APPROVE_EXPECT_BASE_OID="basetip0" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14/oid: unset → the base-OID path is skipped entirely" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BASE_OID="anything" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+# ── Guard 14: the quiet-since value is lexically compared, so it must be typed ─
+
+@test "guard14/quiet: a malformed timestamp REFUSES (exit 14), never approves" {
+  # Every real timestamp sorts below "null"/"ERR", so `>= $since` is false for
+  # all of them: the objection check would silently return 0 and approve.
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[
+    {"isResolved":false,"comments":{"pageInfo":{"hasPreviousPage":false},"nodes":[
+      {"createdAt":"2026-08-18T12:00:00Z","author":{"login":"some-human"}}]}}
+  ]}}}}}'
+  for bad in null ERR abc 2026-08-18 "2026-08-18 11:00:00"; do
+    : > "$STUB_CALLS"
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+      QA_PR_APPROVE_EXPECT_QUIET_SINCE="$bad" \
+      run "$SCRIPT" core-backend 123 "$NICK"
+    [ "$status" -eq 14 ]
+    ! grep -q '^approve$' "$STUB_CALLS"
+  done
+}
+
+@test "guard14/quiet: a shape-correct but IMPOSSIBLE timestamp refuses" {
+  # 9999-99-99T99:99:99Z matches the glob and sorts ABOVE every real timestamp,
+  # so every comment would compare below it and the guard would pass while
+  # ignoring a live objection — the same fail-open by another route.
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[
+    {"isResolved":false,"comments":{"pageInfo":{"hasPreviousPage":false},"nodes":[
+      {"createdAt":"2026-08-18T12:00:00Z","author":{"login":"some-human"}}]}}
+  ]}}}}}'
+  for bad in 9999-99-99T99:99:99Z 2026-13-01T00:00:00Z 2026-08-32T00:00:00Z 2026-08-18T24:00:00Z 2026-08-18T00:60:00Z 2026-00-10T00:00:00Z; do
+    : > "$STUB_CALLS"
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+      QA_PR_APPROVE_EXPECT_QUIET_SINCE="$bad" \
+      run "$SCRIPT" core-backend 123 "$NICK"
+    [ "$status" -eq 14 ]
+    ! grep -q '^approve$' "$STUB_CALLS"
+  done
+}
+
+@test "guard14/quiet: an impossible timestamp that is NOT in the future still refuses" {
+  # Isolates the RANGE check from the future check. 09:00:61 is past (so the
+  # future check does not fire) and sorts ABOVE the 09:00:00 comment, so without
+  # range validation the objection is skipped and the PR is approved. Every
+  # other impossible value I tried was also lexically in the future, which meant
+  # the future check masked the range check entirely and its removal reded
+  # nothing.
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[
+    {"isResolved":false,"comments":{"pageInfo":{"hasPreviousPage":false},"nodes":[
+      {"createdAt":"2026-08-18T09:00:00Z","author":{"login":"some-human"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+    QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T09:00:61Z" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  echo "$output" | grep -q 'not a real instant'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14/quiet: a VALID but FUTURE timestamp refuses" {
+  # Range checks alone do not close this: 2099-01-01T00:00:00Z is a real instant
+  # and still ranks above every comment. A verdict's submitted_at is by
+  # definition in the past.
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[
+    {"isResolved":false,"comments":{"pageInfo":{"hasPreviousPage":false},"nodes":[
+      {"createdAt":"2026-08-18T12:00:00Z","author":{"login":"some-human"}}]}}
+  ]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+    QA_PR_APPROVE_EXPECT_QUIET_SINCE="2099-01-01T00:00:00Z" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  echo "$output" | grep -q 'FUTURE'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14/quiet: the real .submitted_at shape is accepted" {
+  # A well-behaved caller passes exactly this, so the shape check must not
+  # become a refusal-for-everyone.
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+    QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T11:00:00Z" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+# ── Guard 14: head sha — the expectation with NO tolerance ──────────────────
+# NOTE: the live head value is left at the stub default in these tests and the
+# EXPECTATION is varied instead. STUB_HEAD_OID is also Guard 8's rebase-report
+# key, so moving it perturbs an earlier guard and the test would stop measuring
+# Guard 14 at all.
+
+@test "guard14/head: matching head → approves" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" \
+    QA_PR_APPROVE_EXPECT_HEAD="0123456789abcdef0123456789abcdef01234567" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard14/head: head swapped to an ALREADY-GREEN commit → exit 14, never approves" {
+  # The race the retry lane documents but cannot close: every other guard
+  # validates the NEW head perfectly well (checks green, rebase report present),
+  # so only an equality check on this side stops it.
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    QA_PR_APPROVE_EXPECT_HEAD="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  echo "$output" | grep -q 'moved from'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14/head: a push landing AFTER the guard read is NOT caught — only the caller's post-write readback can see it" {
+  # Guard 14 is check-then-act. A push landing between its read and
+  # `gh pr review --approve` is approved on a commit the verdict never covered.
+  # Every other test returns static stub state, so none of them can express
+  # this; STUB_HEAD_MOVES_TO mutates the live head the instant the guard read
+  # returns, which is the only way to exercise the ordering.
+  #
+  # This race is NOT fixable by pinning the write to a commit_id. GitHub accepts
+  # a commit_id that is not the live head and records it verbatim — measured
+  # 2026-08-18 against hydra#839: head a92b7295, review POSTed with
+  # commit_id=37a163cd, answered 200 and stored as 37a163cd. So a pin prevents
+  # nothing, and it would BLIND qa-approval-retry.sh's post-write readback,
+  # which detects this race precisely by comparing the sha the approval landed
+  # on against the reviewed head — pinned, that comparison is true by
+  # construction. Detection beats a fix that only looks like one.
+  export STUB_ME="adk47" STUB_AUTHOR="nsollazzo"
+  export QA_PR_APPROVE_EXPECT_HEAD="0123456789abcdef0123456789abcdef01234567"
+  export STUB_HEAD_MOVES_TO="ffffffffffffffffffffffffffffffffffffffff"
+  run "$SCRIPT" core-backend 123 "$NICK"
+
+  # Guard 14 passes — the read it made returned exactly what the caller expected.
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+
+  # ...and the approval lands on the commit nobody reviewed. This assertion is
+  # the finding, pinned: if it ever stops holding, the wrapper gained an atomic
+  # write and the caller-side backstop can be revisited.
+  grep -q '^approved-on:ffffffffffffffffffffffffffffffffffffffff$' "$STUB_CALLS"
+
+  # The wrapper cannot warn about what it never saw. `run` + status, not a bare
+  # `!`: a negated command is a no-op under set -e unless it is the last line.
+  run grep -q 'moved from' <<< "$output"
+  [ "$status" -ne 0 ]
+}
+
+# Calendar validity, not just range. An impossible-but-in-range date sorts above
+# every real timestamp in its month, so it silently disables the quiet-since
+# filter — the same fail-open the range bounds were added to close, one layer
+# down. Each case below is chosen to be in the PAST, so it isolates the calendar
+# check from the future check that follows it.
+@test "guard14/quiet: seconds :60 is rejected — it outranks a real :59 objection" {
+  # ISO-8601 allows :60 for a leap second, but the only legal value here is a
+  # GitHub `submitted_at`, which is formatted from Unix time and never carries
+  # one. Allowing it is pure downside: "…T09:00:60Z" sorts ABOVE a genuine
+  # objection at 09:00:59Z, so that objection compares below $since and `noisy`
+  # returns 0. Proven below by the sort order, then by the refusal.
+  run jq -rn '"2026-08-18T09:00:59Z" < "2026-08-18T09:00:60Z"'
+  [ "$output" = "true" ]
+
+  export STUB_ME="adk47" STUB_AUTHOR="nsollazzo"
+  export QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T09:00:60Z"
+  run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  echo "$output" | grep -q 'not a real instant'
+  # the whole point of the finding: the write must never be reached
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected approve" >&2; false; fi
+}
+
+@test "guard14/quiet: seconds :59 is still accepted — the bound must not over-refuse" {
+  export STUB_ME="adk47" STUB_AUTHOR="nsollazzo"
+  export STUB_THREADS_JSON='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}}'
+  export QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T09:00:59Z"
+  run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard14/quiet: Feb 31 is rejected — it passes every range bound and outranks real Feb comments" {
+  export STUB_ME="adk47" STUB_AUTHOR="nsollazzo"
+  export QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-02-31T12:00:00Z"
+  run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  echo "$output" | grep -q 'not a real calendar date'
+  if grep -q '^approve$' "$STUB_CALLS"; then echo "vacuous-negation guard: unexpected approve" >&2; false; fi
+}
+
+@test "guard14/quiet: Feb 29 in a NON-leap year is rejected" {
+  export STUB_ME="adk47" STUB_AUTHOR="nsollazzo"
+  export QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-02-29T12:00:00Z"
+  run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  echo "$output" | grep -q 'has 28 days'
+}
+
+@test "guard14/quiet: Feb 29 in a LEAP year is accepted (the guard must not over-refuse)" {
+  export STUB_ME="adk47" STUB_AUTHOR="nsollazzo"
+  # An empty-but-well-formed threads payload: without it the stub falls through
+  # to a bare `0`, the quiet query reads a non-envelope and returns ERR, and the
+  # test would pass/fail for a reason that has nothing to do with the calendar.
+  export STUB_THREADS_JSON='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}}'
+  export QA_PR_APPROVE_EXPECT_QUIET_SINCE="2024-02-29T12:00:00Z"
+  run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard14/quiet: Feb 29 in a CENTURY non-leap year (1900) is rejected — %4 alone would accept it" {
+  # 1900 is divisible by 4 but not 400, so it is NOT a leap year. This is the
+  # case a naive `year % 4 == 0` test gets wrong.
+  export STUB_ME="adk47" STUB_AUTHOR="nsollazzo"
+  export QA_PR_APPROVE_EXPECT_QUIET_SINCE="1900-02-29T12:00:00Z"
+  run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  echo "$output" | grep -q 'has 28 days'
+}
+
+@test "guard14/quiet: Feb 29 in a 400-year leap year (2000) is accepted" {
+  export STUB_ME="adk47" STUB_AUTHOR="nsollazzo"
+  # An empty-but-well-formed threads payload: without it the stub falls through
+  # to a bare `0`, the quiet query reads a non-envelope and returns ERR, and the
+  # test would pass/fail for a reason that has nothing to do with the calendar.
+  export STUB_THREADS_JSON='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}}'
+  export QA_PR_APPROVE_EXPECT_QUIET_SINCE="2000-02-29T12:00:00Z"
+  run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard14/quiet: April 31 is rejected (30-day month)" {
+  export STUB_ME="adk47" STUB_AUTHOR="nsollazzo"
+  export QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-04-31T12:00:00Z"
+  run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  echo "$output" | grep -q 'has 30 days'
+}
+
+@test "guard14/quiet: Jan 31 is accepted (31-day month) — the table must not be uniformly strict" {
+  export STUB_ME="adk47" STUB_AUTHOR="nsollazzo"
+  # An empty-but-well-formed threads payload: without it the stub falls through
+  # to a bare `0`, the quiet query reads a non-envelope and returns ERR, and the
+  # test would pass/fail for a reason that has nothing to do with the calendar.
+  export STUB_THREADS_JSON='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}}'
+  export QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-01-31T12:00:00Z"
+  run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard14/head: unset → the head path is skipped entirely" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard14/head: an unreadable head never approves (an earlier guard refuses first)" {
+  # In production the same empty read reaches Guard 8's report key, so Guard 8
+  # refuses before Guard 14 is consulted. The invariant that matters — no
+  # approval on a head we cannot name — holds either way; this pins WHICH guard
+  # owns it so a future reordering shows up here.
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_HEAD_OID="" \
+    QA_PR_APPROVE_EXPECT_HEAD="0123456789abcdef0123456789abcdef01234567" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -ne 0 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14/quiet: a 200-with-errors GraphQL envelope is ERR, not 'no objections'" {
+  # GitHub can answer HTTP 200 with pullRequest:null plus an errors array. A
+  # filter rooted at .reviewThreads lets that null flow through as "no threads"
+  # and emit 0, so the guard would pass having established nothing.
+  THREADS='{"data":{"repository":{"pullRequest":null}},"errors":[{"message":"Resource not accessible"}]}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+    QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T09:00:00Z" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard14/quiet: a null pullRequest WITHOUT an errors array is also ERR" {
+  THREADS='{"data":{"repository":{"pullRequest":null}}}'
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_THREADS_JSON="$THREADS" \
+    QA_PR_APPROVE_EXPECT_QUIET_SINCE="2026-08-18T09:00:00Z" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 14 ]
   ! grep -q '^approve$' "$STUB_CALLS"
 }

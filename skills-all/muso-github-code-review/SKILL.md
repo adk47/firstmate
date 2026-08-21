@@ -506,6 +506,18 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> \
   `exit 12` = the PR's author is in the policy's `author_deny` list, or `author_deny`
   is missing/null/malformed (fail-closed) — report the policy state, do not retry;
   `exit 13` = Guard 9 blast radius (only when `QA_BLAST_RADIUS_GATE=1`, not the default).
+  `exit 14` = Guard 14, the OPT-IN expected-state contract. Only reachable when a
+  caller sets `QA_PR_APPROVE_EXPECT_HEAD`, `QA_PR_APPROVE_EXPECT_BASE`,
+  `QA_PR_APPROVE_EXPECT_BASE_OID` and/or `QA_PR_APPROVE_EXPECT_QUIET_SINCE`;
+  unset (which is this skill's case) the guard is skipped entirely. It means the PR
+  changed between the verdict and the write — the HEAD moved (exact equality, no
+  benign case), the base was retargeted (name) or
+  REWRITTEN under the same name (OID, distinguished from an ordinary
+  fast-forward via GitHub's compare status), or an
+  unresolved NON-bot review thread with activity at/after the verdict timestamp
+  (Guard 7 only blocks 🔴/🟡-tagged ones). It is the wrapper refusing to approve a
+  PR its caller's verdict no longer describes, so it is a CORRECT outcome, never a
+  fault to work around: a fresh review must supply the verdict.
 - If the verdict is **not** GO, do NOT approve: post the findings and stop.
 
 Then report the wrapper's post-check (`reviewDecision` / `mergeStateStatus`). If

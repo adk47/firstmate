@@ -238,7 +238,13 @@ case "${1:-}" in
           [ "${STUB_LIVE_HEAD_RC:-0}" = "0" ] || exit 1
           _sha="${STUB_LIVE_HEAD:-abc123}"
         fi
-        _out="$(printf '{"head":{"sha":"%s"}}' "$_sha")"
+        # STUB_PR_STATE_NO_BASE models an API answer with no base fields, so the
+        # caller's "omit empty expectations" path is reachable.
+        if [ -n "${STUB_PR_STATE_NO_BASE:-}" ]; then
+          _out="$(printf '{"head":{"sha":"%s"}}' "$_sha")"
+        else
+          _out="$(printf '{"head":{"sha":"%s"},"base":{"ref":"develop","sha":"basetip0"}}' "$_sha")"
+        fi
         _filt=""; _prev=""
         for a in "$@"; do [ "$_prev" = "--jq" ] && _filt="$a"; _prev="$a"; done
         if [ -n "$_filt" ]; then printf '%s' "$_out" | jq -r "$_filt"; else printf '%s' "$_out"; fi
@@ -503,7 +509,7 @@ No Critical or Important findings.'
   export STUB_LIVE_HEAD_RC=1
   run "$SCRIPT"
   [ "$status" -eq 3 ]   # single candidate => all of them failed => blackout
-  [[ "${lines[*]}" == *"could not re-confirm the head"* ]]
+  [[ "${lines[*]}" == *"could not read head+base"* ]]
   [[ "${lines[*]}" == *"read_failures=1"* ]]
   run wc -l < "$APPROVE_CALLS"
   [ "$status" -eq 0 ]
@@ -1573,4 +1579,65 @@ SH
   run "$SCRIPT"
   [ "$status" -eq 2 ]
   [[ "$output" == *"enumerated empty"* ]]
+}
+
+# ── The wrapper contract is actually HANDED OVER ───────────────────────────
+# Guard 14 is inert unless its caller sets the expectations, so "the wrapper can
+# check this" and "the wrapper does check this" are different claims. These pin
+# the second one.
+
+@test "the approve call passes the reviewed head and verdict time to the wrapper" {
+  alerting_go
+  export QA_APPROVE="$TEST_TMPDIR/echo-expect.sh"
+  cat > "$QA_APPROVE" <<'SH'
+#!/usr/bin/env bash
+{
+  echo "HEAD=${QA_PR_APPROVE_EXPECT_HEAD:-unset}"
+  echo "QUIET=${QA_PR_APPROVE_EXPECT_QUIET_SINCE:-unset}"
+  echo "BASE=${QA_PR_APPROVE_EXPECT_BASE:-unset}"
+  echo "BASEOID=${QA_PR_APPROVE_EXPECT_BASE_OID:-unset}"
+  echo "ARGC=$#"
+} >> "$APPROVE_CALLS"
+SH
+  chmod +x "$QA_APPROVE"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q '^HEAD=abc123$' "$APPROVE_CALLS"
+  grep -q '^QUIET=2026-08-17T10:51:41Z$' "$APPROVE_CALLS"
+  # ...and BOTH base expectations. Asserting only HEAD/QUIET left the base pair
+  # unpinned: deleting or misspelling either export here would keep this suite
+  # green while Guard 14 went inert for retargets and base rewrites in this
+  # lane — the exact wiring this end-to-end test exists to prove.
+  grep -q '^BASE=develop$' "$APPROVE_CALLS"
+  grep -q '^BASEOID=basetip0$' "$APPROVE_CALLS"
+  # argv must stay exactly <repo> <pr> <uid> <body> — a prefix built by
+  # expansion would have leaked the expectations in as positional arguments.
+  grep -q '^ARGC=4$' "$APPROVE_CALLS"
+}
+
+@test "a PR read missing either base field REFUSES, never approves with half a contract" {
+  # Omitting the empty expectations failed OPEN: the wrapper's base checks would
+  # be silently skipped while the approval still went through, so a retarget or
+  # base rewrite in the gap would sail past.
+  alerting_go
+  export STUB_PR_STATE_NO_BASE=1
+  run "$SCRIPT"
+  [ "$status" -eq 3 ]   # single candidate => all of them failed => blackout
+  [[ "${lines[*]}" == *"could not read head+base"* ]]
+  run wc -l < "$APPROVE_CALLS"
+  [ "$status" -eq 0 ]
+  [ "${output// /}" = "0" ]
+}
+
+@test "a 200-with-errors GraphQL envelope is a read failure, not 'no objections'" {
+  # Same fail-open the wrapper had: pullRequest:null + errors[] flowing through
+  # a .reviewThreads-rooted filter as "no threads".
+  alerting_go
+  export STUB_THREADS_JSON='{"data":{"repository":{"pullRequest":null}},"errors":[{"message":"Resource not accessible"}]}'
+  run "$SCRIPT"
+  [ "$status" -eq 3 ]   # single candidate => all failed a safety read => blackout
+  [[ "${lines[*]}" == *"could not establish whether"* ]]
+  run wc -l < "$APPROVE_CALLS"
+  [ "$status" -eq 0 ]
+  [ "${output// /}" = "0" ]
 }

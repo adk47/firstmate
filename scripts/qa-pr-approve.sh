@@ -232,6 +232,31 @@ fi
 # NO message, before the fallback below can run. `head -1` guards the other shape
 # — a file that is valid JSON followed by garbage, where jq emits the real value
 # and then fails, which would otherwise make this a two-line string.
+# FAIL CLOSED on the SHAPE of .identity.bot_logins, before deriving it.
+#
+# The parse below falls back to ["muso-qa-bot"] for anything that is not an
+# array, which is worse than it looks: with `bot_logins: "adk47"` the real bot
+# drops OUT of the set, so a resolved REBASE WARNING filed under adk47 stops
+# counting as a recognised acknowledgement and Guard 8 refuses a PR it should
+# have passed. `{}` / `[123]` do the same by matching nothing. None of these
+# raise, so this read is the only place they can be caught.
+#
+# Scoped to THIS key on purpose rather than calling qa_policy_valid on the whole
+# file: the guards below have their own fail-closed reads with their own
+# DOCUMENTED exit codes (author_deny -> 12, sensitive_paths_blocking -> 11), and
+# a blanket validator here would preempt them and collapse every malformed-policy
+# refusal into one code, which is a downgrade for the agents that relay it.
+# lib/qa-policy.sh's qa_policy_valid covers the same shape for callers that want
+# the whole-file check.
+# Only for a policy that is READABLE and parses: an unreadable or malformed file
+# is already fail-closed by Guard 3c with the documented exit 12, and preempting
+# that would change a code agents relay. This guard owns SHAPE, nothing else.
+if [ -r "$POLICY" ] && jq -e . "$POLICY" >/dev/null 2>&1 \
+   && ! jq -e '((.identity // {}) | has("bot_logins") | not)
+               or ((.identity.bot_logins) | type == "array" and all(.[]; type == "string" and length > 0))' \
+        "$POLICY" >/dev/null 2>&1; then
+  die 2 ".identity.bot_logins in $POLICY is not an array of non-empty strings — refusing. A wrong shape here does not fail loudly: it silently changes which reviews count as the bot's (a bare string makes the membership test a SUBSTRING match), which would let Guard 8 refuse an acknowledged rebase warning."
+fi
 bot_logins_json="$(jq -c '(.identity.bot_logins // ["muso-qa-bot"]) | if type == "array" then . else ["muso-qa-bot"] end' "$POLICY" 2>/dev/null | head -1 || true)"
 [ -n "$bot_logins_json" ] || bot_logins_json='["muso-qa-bot"]'
 me="$("$QA_GH" --repo "$owner/$repo" api user --jq .login 2>/dev/null || true)"
@@ -882,6 +907,227 @@ if [ "${QA_BLAST_RADIUS_GATE:-0}" = "1" ]; then
   esac
   echo "qa-pr-approve: blast radius $br_tier — below the CRITICAL hold."
   fi
+fi
+
+# --- Guard 14: caller-asserted expected state, re-read AT the write ---------
+# OPT-IN. With neither variable set, this block is skipped entirely and the
+# wrapper behaves exactly as before.
+#
+# Every guard above reads its evidence once, then a few hundred lines of other
+# guards run before the write. For a caller that approves LONG after the review
+# — scripts/qa-approval-retry.sh re-asks on a 10-minute timer — the gap that
+# matters is not inside any one guard, it is between "the verdict described THIS
+# pull request" and "the approval is recorded". That caller cannot close the gap
+# from outside: only the process that performs the write can re-read immediately
+# before writing. This is that hook, and it is the reason it lives here rather
+# than in the caller.
+#
+#   QA_PR_APPROVE_EXPECT_HEAD         head sha the verdict was formed against.
+#                                     The one expectation with no tolerance:
+#                                     exact equality. A push swaps the head to
+#                                     an already-green commit and Guards 6/8
+#                                     happily validate the NEW one, so without
+#                                     this the wrapper records an approval on a
+#                                     commit the verdict never covered. The
+#                                     caller's own post-write readback can turn
+#                                     the PR red afterwards but CANNOT retract
+#                                     the approval, which is exactly why the
+#                                     check has to happen on this side.
+#   QA_PR_APPROVE_EXPECT_BASE         base ref NAME the verdict was formed
+#                                     against. Catches a RETARGET (develop ->
+#                                     main), which keeps the head sha and its
+#                                     green checks.
+#   QA_PR_APPROVE_EXPECT_BASE_OID     base branch TIP the verdict was formed
+#                                     against. Catches a base FORCE-PUSH, which
+#                                     a name check cannot see: the name is still
+#                                     "main" while the history underneath it was
+#                                     rewritten.
+#
+#                                     NOT a plain equality test. baseRefOid is
+#                                     the branch tip, so it moves on every merge
+#                                     into the base — pinning it outright would
+#                                     refuse constantly on an active repo and
+#                                     make the contract unusable. Instead, when
+#                                     it differs, ask GitHub whether the base
+#                                     merely moved FORWARD (compare status
+#                                     "ahead"/"identical" = the reviewed
+#                                     comparison still holds) or was REWRITTEN
+#                                     ("diverged"/"behind" = it does not).
+#   QA_PR_APPROVE_EXPECT_QUIET_SINCE  ISO-8601 timestamp (the verdict's own
+#                                     submitted_at). Refuses if any UNRESOLVED
+#                                     review thread has NON-BOT activity at or
+#                                     after it — Guard 7 above only blocks
+#                                     threads tagged 🔴/🟡, so a plain human
+#                                     "hold, this is wrong" is invisible to it.
+#
+# Both fail CLOSED: an answer we cannot read refuses, never approves.
+#
+# `>=` not `>`, because GitHub timestamps are second-granular and an objection
+# filed in the same second as the verdict would slip past a strict compare. The
+# non-bot filter is what makes `>=` safe: the review files its OWN finding
+# threads at its own submitted_at, so without it a review would be an objection
+# to itself and the PR could never be approved.
+if [ -n "${QA_PR_APPROVE_EXPECT_HEAD:-}" ]; then
+  live_head_oid="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" \
+    --json headRefOid --jq '.headRefOid // ""' 2>/dev/null || true)"
+  [ -n "$live_head_oid" ] \
+    || die 14 "could not re-read the head sha for $owner/$repo#$pr immediately before the write (caller expected ${QA_PR_APPROVE_EXPECT_HEAD:0:7}) — refusing rather than approving a commit we cannot name."
+  [ "$live_head_oid" = "$QA_PR_APPROVE_EXPECT_HEAD" ] \
+    || die 14 "$owner/$repo#$pr moved from ${QA_PR_APPROVE_EXPECT_HEAD:0:7} to ${live_head_oid:0:7} between the caller's read and this write — the GO verdict covers the old commit; refusing. Exact equality on purpose: unlike the base, there is no benign way for the head to change."
+fi
+
+if [ -n "${QA_PR_APPROVE_EXPECT_BASE:-}" ]; then
+  live_base="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" \
+    --json baseRefName --jq '.baseRefName // ""' 2>/dev/null || true)"
+  [ -n "$live_base" ] \
+    || die 14 "could not re-read the base ref for $owner/$repo#$pr immediately before the write (caller expected '$QA_PR_APPROVE_EXPECT_BASE') — refusing rather than approving against an unverified base."
+  [ "$live_base" = "$QA_PR_APPROVE_EXPECT_BASE" ] \
+    || die 14 "$owner/$repo#$pr now targets '$live_base' but the caller's verdict was formed against '$QA_PR_APPROVE_EXPECT_BASE' — that is a different comparison; refusing. A fresh review must supply the verdict."
+fi
+
+if [ -n "${QA_PR_APPROVE_EXPECT_BASE_OID:-}" ]; then
+  live_base_oid="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" \
+    --json baseRefOid --jq '.baseRefOid // ""' 2>/dev/null || true)"
+  [ -n "$live_base_oid" ] \
+    || die 14 "could not re-read the base OID for $owner/$repo#$pr immediately before the write (caller expected '$QA_PR_APPROVE_EXPECT_BASE_OID') — refusing rather than approving against an unverified base."
+  if [ "$live_base_oid" != "$QA_PR_APPROVE_EXPECT_BASE_OID" ]; then
+    # `compare/<expected>...<live>` reports <live> RELATIVE TO <expected>:
+    #   ahead / identical -> the base only gained commits; the reviewed
+    #                        comparison still holds, and refusing here would
+    #                        break on ordinary traffic into main.
+    #   behind / diverged -> the base was rolled back or rewritten underneath
+    #                        the PR; the verdict describes a comparison that no
+    #                        longer exists.
+    base_move="$("$QA_GH" --repo "$owner/$repo" api \
+      "repos/$owner/$repo/compare/$QA_PR_APPROVE_EXPECT_BASE_OID...$live_base_oid" \
+      --jq '.status // ""' 2>/dev/null || true)"
+    case "$base_move" in
+      ahead|identical) : ;;
+      "") die 14 "$owner/$repo#$pr: the base moved from ${QA_PR_APPROVE_EXPECT_BASE_OID:0:7} to ${live_base_oid:0:7} and GitHub could not tell us whether that was a fast-forward or a rewrite — refusing rather than guessing." ;;
+      *)  die 14 "$owner/$repo#$pr: the base was REWRITTEN, not advanced (${QA_PR_APPROVE_EXPECT_BASE_OID:0:7} -> ${live_base_oid:0:7}, compare status '$base_move') — the verdict describes a comparison that no longer exists; refusing. A fresh review must supply the verdict." ;;
+    esac
+  fi
+fi
+
+if [ -n "${QA_PR_APPROVE_EXPECT_QUIET_SINCE:-}" ]; then
+  # SHAPE-CHECK FIRST. The comparison below is lexical, so a malformed value
+  # fails OPEN rather than closed: every real GitHub timestamp sorts BELOW
+  # "null", "ERR" or "abc", so `>= $since` is false for all of them, `noisy`
+  # comes back 0, and a genuine human objection is silently ignored on the way
+  # to an approval. Verified:
+  #   jq -rn '"2026-08-18T12:00:00Z" >= "null"'  ->  false
+  # Require GitHub's exact UTC form, which is what .submitted_at always is, so
+  # a well-behaved caller never trips this.
+  #
+  # The other two variables need no equivalent: a wrong EXPECT_BASE simply fails
+  # to match and refuses, and a malformed EXPECT_BASE_OID makes the compare call
+  # return empty, which is already an explicit refusal. Only this one is lexical.
+  case "$QA_PR_APPROVE_EXPECT_QUIET_SINCE" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+    *) die 14 "QA_PR_APPROVE_EXPECT_QUIET_SINCE='$QA_PR_APPROVE_EXPECT_QUIET_SINCE' is not a GitHub UTC timestamp (YYYY-MM-DDTHH:MM:SSZ) — refusing. The comparison is lexical, so a malformed value would silently rank BELOW every real timestamp and hide any objection raised since the verdict." ;;
+  esac
+  # Shape is not enough. `9999-99-99T99:99:99Z` matches the glob above and sorts
+  # ABOVE every real timestamp, so every comment would compare below it, `noisy`
+  # would be 0, and the guard would pass while ignoring a live objection — the
+  # same fail-open by another route. Check the fields are real...
+  #
+  # Seconds cap at 59, NOT 60. ISO-8601 permits :60 for a leap second, but the
+  # only legal value here is a GitHub `submitted_at`, and GitHub formats from
+  # Unix time so it never emits one. Allowing :60 therefore buys nothing and
+  # costs safety: "2026-08-18T09:00:60Z" sorts ABOVE a real objection at
+  # 09:00:59Z, so that objection compares below $since, `noisy` returns 0, and
+  # the approval proceeds over it.
+  _q_mo="${QA_PR_APPROVE_EXPECT_QUIET_SINCE:5:2}"
+  _q_d="${QA_PR_APPROVE_EXPECT_QUIET_SINCE:8:2}"
+  _q_h="${QA_PR_APPROVE_EXPECT_QUIET_SINCE:11:2}"
+  _q_mi="${QA_PR_APPROVE_EXPECT_QUIET_SINCE:14:2}"
+  _q_s="${QA_PR_APPROVE_EXPECT_QUIET_SINCE:17:2}"
+  if [ "$((10#$_q_mo))" -lt 1 ] || [ "$((10#$_q_mo))" -gt 12 ] \
+     || [ "$((10#$_q_d))" -lt 1 ] || [ "$((10#$_q_d))" -gt 31 ] \
+     || [ "$((10#$_q_h))" -gt 23 ] || [ "$((10#$_q_mi))" -gt 59 ] \
+     || [ "$((10#$_q_s))" -gt 59 ]; then
+    die 14 "QA_PR_APPROVE_EXPECT_QUIET_SINCE='$QA_PR_APPROVE_EXPECT_QUIET_SINCE' is shape-correct but not a real instant — refusing. An impossible timestamp sorts above every real one and would silently disable this guard."
+  fi
+  # Range bounds are not a CALENDAR check. "2026-02-31T12:00:00Z" satisfies
+  # every bound above (month 02, day 31 <= 31), and from March onward it is not
+  # future-dated either — yet it sorts ABOVE every real February timestamp, so
+  # every comment in that window compares below it, `noisy` returns 0, and a
+  # live human objection is filtered out on the way to an approval. Same
+  # fail-open as the impossible-value case, one layer down. Verified:
+  #   jq -rn '"2026-02-28T23:59:59Z" < "2026-02-31T12:00:00Z"'  -> true
+  #
+  # Validated in pure bash, NOT by round-tripping through `date`: the two date
+  # implementations disagree, and the disagreement is silent in the unsafe
+  # direction. GNU (node-8/CI) rejects `date -u -d 2026-02-31T12:00:00Z`, while
+  # BSD (macOS dev boxes) ROLLS it to 2026-03-03 and exits 0 — so a `date`-based
+  # guard would be correct in CI and quietly wrong wherever it is developed. A
+  # days-in-month table is deterministic on both.
+  #
+  # The month bound above already pinned $_q_mo to 1..12, so this case is total.
+  case "$((10#$_q_mo))" in
+    1|3|5|7|8|10|12) _q_maxd=31 ;;
+    4|6|9|11)        _q_maxd=30 ;;
+    *)
+      _q_y="${QA_PR_APPROVE_EXPECT_QUIET_SINCE:0:4}"
+      # Gregorian rule in full: 2026 and 2100 are NOT leap years, 2024 and 2000
+      # are. Testing only `% 4` would accept 2100-02-29.
+      if [ "$((10#$_q_y % 4))" -eq 0 ] \
+         && { [ "$((10#$_q_y % 100))" -ne 0 ] || [ "$((10#$_q_y % 400))" -eq 0 ]; }; then
+        _q_maxd=29
+      else
+        _q_maxd=28
+      fi ;;
+  esac
+  if [ "$((10#$_q_d))" -gt "$_q_maxd" ]; then
+    die 14 "QA_PR_APPROVE_EXPECT_QUIET_SINCE='$QA_PR_APPROVE_EXPECT_QUIET_SINCE' is not a real calendar date (month $_q_mo has $_q_maxd days) — refusing. An impossible date passes the range bounds yet sorts above every real timestamp in its month, silently disabling this guard."
+  fi
+
+  # ...and that it is in the PAST. A perfectly valid FUTURE value (2099-01-01T
+  # 00:00:00Z) passes every range check and still ranks above every comment, so
+  # range validation alone does not close this. A verdict's submitted_at is by
+  # definition already in the past.
+  _q_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [[ "$QA_PR_APPROVE_EXPECT_QUIET_SINCE" > "$_q_now" ]]; then
+    die 14 "QA_PR_APPROVE_EXPECT_QUIET_SINCE='$QA_PR_APPROVE_EXPECT_QUIET_SINCE' is in the FUTURE (now $_q_now) — refusing. A verdict timestamp is always in the past, and a future one ranks above every comment, silently disabling this guard."
+  fi
+
+  quiet_gql='query($owner:String!,$repo:String!,$pr:Int!){
+    repository(owner:$owner,name:$repo){ pullRequest(number:$pr){
+      reviewThreads(first:100){
+        pageInfo{ hasNextPage }
+        nodes{ isResolved comments(last:100){
+          pageInfo{ hasPreviousPage }
+          nodes{ createdAt author{ login } } } }
+      } } } }'
+  # The timestamp goes to LOCAL jq via --arg: `gh api` has no --arg, and
+  # interpolating a caller-supplied value into a jq program would let that value
+  # rewrite the program. Fail closed on a second page for the same reason
+  # Guard 7 does — a blocker past the first 100 is invisible, and invisible must
+  # not read as absent.
+  noisy="$("$QA_GH" --repo "$owner/$repo" api graphql -f query="$quiet_gql" \
+      -f owner="$owner" -f repo="$repo" -F pr="$pr" 2>/dev/null \
+      | jq -r --arg since "$QA_PR_APPROVE_EXPECT_QUIET_SINCE" --argjson bots "$bot_logins_json" \
+        'if (.errors // [] | length) > 0
+            or ((.data.repository.pullRequest.reviewThreads // null) | type) != "object"
+         then "ERR"
+         else .data.repository.pullRequest.reviewThreads
+         | if .pageInfo.hasNextPage then "ERR"
+           else ([.nodes[]? | select(.isResolved == false)]) as $t
+             | if any($t[]; (.comments.pageInfo.hasPreviousPage // false)
+                            and ((.comments.nodes[0].createdAt // "") >= $since))
+               then "ERR"
+               else ([$t[] | select(any(.comments.nodes[]?;
+                        ((.createdAt // "") >= $since)
+                        and ((.author.login // "") as $l | ($bots | index($l)) == null)))]
+                     | length | tostring)
+               end
+           end
+         end' 2>/dev/null || echo "ERR")"
+  [ -n "$noisy" ] || noisy="ERR"
+  [ "$noisy" != "ERR" ] \
+    || die 14 "could not establish whether $owner/$repo#$pr has drawn objections since $QA_PR_APPROVE_EXPECT_QUIET_SINCE (unreadable, or more threads/comments than one page) — refusing rather than approving over a blocker we cannot see."
+  [ "$noisy" = "0" ] \
+    || die 14 "$owner/$repo#$pr has $noisy unresolved review thread(s) with non-bot activity at or after $QA_PR_APPROVE_EXPECT_QUIET_SINCE — someone objected after the verdict was formed; refusing. Guard 7 does not catch these because they are untagged."
 fi
 
 # --- Guard 5: log BEFORE the write ------------------------------------------
