@@ -26,6 +26,15 @@
 # qa_policy_valid <file> — 0 if the file parses AND every list-typed key that is
 # present is actually an array. Absent keys are allowed here; callers that
 # require a specific key assert it themselves (see qa_policy_has's exit 2).
+#
+# .identity.bot_logins is checked down to its ELEMENTS, unlike its siblings,
+# because every wrong shape fails SILENTLY rather than raising: consumers feed
+# it to `$bots | index($login)`, where `{}` / `[]` / `[123]` match nothing (so
+# no review is ever recognised as the bot's) and a bare STRING degrades to a
+# SUBSTRING test (so login "adk4" matches bot "adk47" — misidentification, not
+# a no-op). Non-emptiness is deliberately NOT required here: a caller that
+# cannot function without entries asserts that itself, and refusing an empty
+# list in the shared validator would fail callers that never classify a bot.
 qa_policy_valid() {
   local f="$1"
   [ -r "$f" ] || return 1
@@ -36,6 +45,8 @@ qa_policy_valid() {
     and ((has("author_deny")                 | not) or (.author_deny                 | type == "array"))
     and ((has("identity")                    | not) or (.identity                    | type == "object"))
     and (((.identity // {}) | has("app_repos") | not) or ((.identity.app_repos)       | type == "array"))
+    and (((.identity // {}) | has("bot_logins") | not)
+         or ((.identity.bot_logins) | type == "array" and all(.[]; type == "string" and length > 0)))
   ' "$f" >/dev/null 2>&1
 }
 
