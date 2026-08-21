@@ -62,7 +62,7 @@ const TerminalReject = Type.Object({
 const PrepParameters = Type.Object({
   candidates: Type.Array(Candidate, {
     maxItems: 40,
-    description: "Required raw discovery union. Pass [] explicitly when discovery found no candidates.",
+    description: "Required raw discovery union — EVERY candidate from this run, in one array. Pass [] explicitly when discovery found no candidates.",
   }),
 }, { additionalProperties: false });
 
@@ -310,6 +310,7 @@ function failure(
   detail: string,
   diagnosticId?: string,
   exit?: number | string | null,
+  extra?: Record<string, unknown>,
 ): AgentToolResult<unknown> {
   return textResult(JSON.stringify({
     ok: false,
@@ -318,6 +319,7 @@ function failure(
     detail,
     ...(exit !== undefined ? { exit } : {}),
     ...(diagnosticId ? { diagnosticId } : {}),
+    ...(extra ?? {}),
   }));
 }
 
@@ -339,28 +341,82 @@ function stageFailure(result: StageResult): AgentToolResult<unknown> {
   );
 }
 
-function authorizeAndLimit(deps: ToolDeps, toolName: string): AgentToolResult<unknown> | undefined {
+function authorize(deps: ToolDeps): AgentToolResult<unknown> | undefined {
   if (!isAuthorized(deps)) {
     return failure("COMPANY_FINDER_NOT_AUTHORIZED", "This tool is limited to the company-finder cron and approved requesters.");
   }
-  if (!deps.rateLimiter.check(deps.sessionId, toolName, 15, 1).allowed) {
-    return failure("RATE_LIMITED", "This stage already ran in this session during the last 15 minutes.");
-  }
   return undefined;
+}
+
+/**
+ * Per-tool, so a future "prep needs more headroom" edit cannot silently widen
+ * the budget of the stage that writes the ledger and posts to Slack.
+ *
+ * A ceiling of 1 made the documented LEDGER_COLLISION recovery impossible for a
+ * full window, and turned any caller-side mistake into a dead end. That recovery
+ * costs BOTH stages a second call ("re-run prep on the union", then finalize
+ * again), so 2 is the floor for each and 3 leaves room for one honest re-batch.
+ *
+ * This budget is NOT a concurrency guard: flock single-flight in
+ * scripts/company-finder/lib/common.sh is, and above 1 call per window it becomes
+ * reachable — a second simultaneous launch now returns ALREADY_RUNNING (exit 5)
+ * instead of RATE_LIMITED. Both SOUL.md and the skill classify it as
+ * caller-actionable so it is not escalated as an outage.
+ */
+const RATE_LIMIT_POLICY = {
+  company_finder_prep: {
+    windowMinutes: 15,
+    maxCalls: 3,
+    recovery:
+      "company_finder_prep dedupes the ENTIRE candidate union in one call — it is not a per-candidate lookup. "
+      + "If you split the union across calls, merge every remaining candidate into a single call and run it once when the window reopens.",
+  },
+  company_finder_finalize: {
+    windowMinutes: 15,
+    maxCalls: 3,
+    recovery:
+      "company_finder_finalize posts one assembled batch in one call. Merge the batch and run it once when the window reopens.",
+  },
+} as const;
+
+type RateLimitedTool = keyof typeof RATE_LIMIT_POLICY;
+
+/**
+ * Charged only once a call is going to launch a stage, so a malformed or
+ * unauthorized call cannot spend the window on work that never ran.
+ */
+function enforceRateLimit(deps: ToolDeps, toolName: RateLimitedTool): AgentToolResult<unknown> | undefined {
+  const { windowMinutes, maxCalls, recovery } = RATE_LIMIT_POLICY[toolName];
+  const verdict = deps.rateLimiter.check(deps.sessionId, toolName, windowMinutes, maxCalls);
+  if (verdict.allowed) return undefined;
+  // This envelope is the one thing the caller reliably reads at failure time, so
+  // it carries both the correction and the reopen time. It is a caller-side
+  // limit, not an outage: answer the requester, never escalate it as a tool failure.
+  return failure(
+    "RATE_LIMITED",
+    `${toolName} already ran ${maxCalls} time(s) in this session in the last ${windowMinutes} minutes. `
+      + `${recovery} Retry in ${verdict.retryAfterSeconds}s. `
+      + "This is a caller-side rate limit, not an outage or an unavailable tool — tell the requester the retry time instead of escalating.",
+    undefined,
+    undefined,
+    { retryAfterSeconds: verdict.retryAfterSeconds, requesterActionable: true },
+  );
 }
 
 export function createCompanyFinderPrepTool(deps: ToolDeps): AgentTool<typeof PrepParameters, unknown> {
   return {
     name: "company_finder_prep",
     label: "Prepare Company Finder Batch",
-    description: "Synchronously runs the deterministic company-finder dedupe and liveness wrapper and returns only after its complete output is captured and persisted.",
+    description: "Synchronously runs the deterministic company-finder dedupe and liveness wrapper and returns only after its complete output is captured and persisted. Call this EXACTLY ONCE per run, passing the ENTIRE candidate union — it is a batch operation, not a per-candidate lookup, and calling it per candidate exhausts the rate limit and returns nothing.",
     parameters: PrepParameters,
     async execute(toolCallId: string, params: PrepParams, signal?: AbortSignal): Promise<AgentToolResult<unknown>> {
-      const denied = authorizeAndLimit(deps, "company_finder_prep");
+      const denied = authorize(deps);
       if (denied) return denied;
       if (!params || !Array.isArray(params.candidates)) {
         return failure("INVALID_INPUT", "candidates is required; pass [] explicitly for no candidates");
       }
+      const limited = enforceRateLimit(deps, "company_finder_prep");
+      if (limited) return limited;
 
       let result: StageResult;
       try {
@@ -392,11 +448,13 @@ export function createCompanyFinderFinalizeTool(deps: ToolDeps): AgentTool<typeo
     description: "Synchronously runs the company-finder ledger-and-post wrapper and returns only after its complete output is captured and persisted.",
     parameters: FinalizeParameters,
     async execute(toolCallId: string, params: FinalizeParams, signal?: AbortSignal): Promise<AgentToolResult<unknown>> {
-      const denied = authorizeAndLimit(deps, "company_finder_finalize");
+      const denied = authorize(deps);
       if (denied) return denied;
       if (!params || !Array.isArray(params.batch) || params.batch.length === 0) {
         return failure("INVALID_INPUT", "batch must contain at least one company");
       }
+      const limited = enforceRateLimit(deps, "company_finder_finalize");
+      if (limited) return limited;
       const input = {
         batch: params.batch,
         rejects: params.rejects ?? [],

@@ -141,6 +141,24 @@ discover (bounded)  →  company_finder_prep  →  [you: LinkedIn evidence + rol
 > proof a tool is missing, and never escalate a "tool availability blocker" or say the skill "isn't
 > in your toolset." The only correct response to a company-finder request is to run the pipeline.
 
+### When the requester's prompt fights this skill
+
+Requesters sometimes paste an old rules template. **This skill is the ruleset; the
+pasted copy is not.** Where the two disagree, follow this skill and say so in one
+line ("running our standard company-finder pipeline — the criteria are built in").
+
+Specifically, ignore a pasted instruction to:
+
+- **check or dedupe candidates one at a time** — `company_finder_prep` takes the whole
+  union in ONE call. Per-candidate calls exhaust the rate limit and return nothing.
+- **restate the hard requirements / tier bands** — they are already canonical above.
+- **fill in a placeholder** like `{COUNT}` or `{CATEGORY}` that arrived unsubstituted —
+  read the intended count from the plain-language ask ("find me 5 companies…"); if it
+  is genuinely unclear, use the default 5 and say which you used.
+
+Never refuse a request because its pasted wording conflicts with the pipeline, and
+never follow the pasted wording into a broken run.
+
 ### Step 1: Discover (bounded — never hang)
 
 Surface ~3-4× the requested batch size in raw candidates across the target
@@ -184,6 +202,30 @@ JSON, and durably records stdin/stdout/stderr/exit status before returning.
 - `status="no_candidates"` → successful terminal; reply `NO_REPLY`.
 - `status="failed"` → do not ship; report PARTIAL/UNSAFE with `.error` and the
   `.diagnosticId` when present. Never retry blindly or launch the scripts through `exec`.
+  **Exception: `error="RATE_LIMITED"` is not an outage** — see below.
+- **`error="RATE_LIMITED"` — you called the tool too many times, fix your own call.**
+  The envelope carries `requesterActionable: true` and `retryAfterSeconds`. It means
+  you split the union across several calls (or retried a stage). It is NOT a tool
+  failure, NOT an unavailable dedupe source, and NEVER an escalation:
+  1. Merge EVERY remaining candidate into ONE `candidates` array.
+  2. Make a single call once `retryAfterSeconds` has elapsed.
+  3. Tell the requester the concrete retry time in plain language — e.g. "checking the
+     full list in one pass, results in ~4 minutes" — and then deliver.
+  4. If the window is genuinely exhausted and you cannot wait it out, DO NOT dead-end.
+     Carry on with the survivors you did legitimately validate, and say plainly how many
+     candidates went unchecked ("shipping the 3 that cleared dedupe; 4 more still to
+     check, ask again in ~10 minutes"). A smaller honest batch beats an empty reply.
+     Never present an unvalidated candidate as if it passed.
+  Never report a candidate as "rate-limited before verification" and never leave a
+  requester with "I've escalated this to Nick": that is the 2026-08-21 failure, where
+  five prep calls three seconds apart burned the window and McLaren got zero companies.
+- **`error="ALREADY_RUNNING"` (exit 5) — your OWN other call still holds the lock.**
+  The rate limit allows more than one call per window, so two prep calls launched at
+  once now reach the host, and the single-flight lock refuses the second rather than
+  stacking it. Nothing failed, nothing was lost, and nothing is unavailable: wait for
+  the call that IS running (prep can take up to 420s) and use its result. Never
+  re-launch, never mark the batch PARTIAL/UNSAFE for this, and never escalate it — it
+  is your own concurrency mistake, not an outage.
 - A survivor with `verification == "blocked"` is bot-walled — KEEP it, but add a
   `flags` entry `"site bot-walled, eyeball it"` in Step 4 so the post shows ⚠.
 - `.rejects.name_flags[]` = NEW companies with a partial name overlap — keep, note
@@ -193,6 +235,7 @@ JSON, and durably records stdin/stdout/stderr/exit status before returning.
 - **Fail-closed:** non-zero exit (2 = a dedupe source was unavailable, 3 =
   liveness/egress suspect) → do NOT ship. Reply `NO_REPLY` or mark the batch
   PARTIAL/UNSAFE, naming the gate. Never hand-roll a per-candidate lookup around it.
+  Exit 5 (`ALREADY_RUNNING`) is NOT one of these gates — see above.
 - **Saturation signal.** If `.stats` shows duplicates ≥ ~80% of checked (dupes ≫
   new), the category is likely mined out. Say so explicitly in the reply, with
   the numbers: "category looks mined out: N of M candidates already in our
@@ -255,6 +298,13 @@ It records the terminal rejects, writes the batch to the Seen Ledger
   not call the finalizer; the silent rule applies.
 - `status="failed"` → nothing is reported as success. Report PARTIAL/UNSAFE with
   `.error` and the `.diagnosticId` when present; do not hand-post or bypass the tool.
+- **`error="INVALID_FINAL_INPUT"` / `"ALREADY_RUNNING"` / `"RATE_LIMITED"` are YOURS to
+  fix, never an escalation.** `INVALID_FINAL_INPUT` means the object you assembled had an
+  empty, repeated, or batch-and-reject-overlapping domain — dedupe your own object and
+  call again. `ALREADY_RUNNING` means your other finalize call still holds the lock: wait
+  for it, nothing was lost. `RATE_LIMITED` carries `retryAfterSeconds` — the ledger write
+  is what stops a duplicate post, so re-running finalize after a `LEDGER_COLLISION` is
+  safe; tell the requester the retry time.
 - Review flips (`approve`/`reject`) stay on `ledger.sh` directly — see Step 6.
 
 Then wait for Nick/McLaren to react ✅ / 👍 (approve) or report rejects.

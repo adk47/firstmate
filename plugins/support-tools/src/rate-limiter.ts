@@ -3,10 +3,19 @@ interface BucketEntry {
   windowStart: number;
 }
 
+/**
+ * A refusal always carries the reopen time: a refusal that cannot say when to
+ * come back leaves the caller with nothing to do but escalate. Modelled as a
+ * union so callers get that guarantee from the type, not from a runtime check.
+ */
+export type RateLimitVerdict =
+  | { allowed: true }
+  | { allowed: false; retryAfterSeconds: number };
+
 export class RateLimiter {
   private buckets = new Map<string, BucketEntry>();
 
-  check(sessionId: string, toolName: string, windowMinutes: number, maxCalls: number): { allowed: boolean } {
+  check(sessionId: string, toolName: string, windowMinutes: number, maxCalls: number): RateLimitVerdict {
     const key = `${sessionId}:${toolName}`;
     const now = Date.now();
     const windowMs = windowMinutes * 60_000;
@@ -19,7 +28,8 @@ export class RateLimiter {
     }
 
     if (entry.count >= maxCalls) {
-      return { allowed: false };
+      const remainingMs = entry.windowStart + windowMs - now;
+      return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil(remainingMs / 1000)) };
     }
 
     entry.count++;

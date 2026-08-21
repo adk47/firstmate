@@ -19,6 +19,9 @@ type RunProcessImpl = (
 const parseResult = async (result: Promise<any>) =>
   JSON.parse((await result).content[0].text);
 
+const PREP_OK_STDOUT =
+  '{"survivors":[],"rejects":{"duplicates":[],"dead":[],"name_flags":[]},"stats":{"checked":0}}';
+
 describe("company-finder atomic batch tools", () => {
   let diagnosticsDir: string;
 
@@ -103,7 +106,7 @@ describe("company-finder atomic batch tools", () => {
     ["McLaren", "U02S7C96CGN"],
   ])("allows approved requester %s through trusted inbound metadata", async (_name, requesterSenderId) => {
     const runProcess: RunProcessImpl = async () => ({
-      stdout: '{"survivors":[],"rejects":{"duplicates":[],"dead":[],"name_flags":[]},"stats":{"checked":0}}',
+      stdout: PREP_OK_STDOUT,
       stderr: "",
       exitCode: 0,
     });
@@ -229,19 +232,72 @@ describe("company-finder atomic batch tools", () => {
     expect(capturedSource).toBe("cron:company-finder-daily");
   });
 
-  it("rate-limits repeated stage launches in one session", async () => {
+  it("allows an honest re-batch, then refuses with a reopen time and the correction", async () => {
     const runProcess: RunProcessImpl = async () => ({
-      stdout: '{"survivors":[],"rejects":{"duplicates":[],"dead":[],"name_flags":[]},"stats":{"checked":0}}',
+      stdout: PREP_OK_STDOUT,
       stderr: "",
       exitCode: 0,
     });
     const tool = createCompanyFinderPrepTool(deps(runProcess));
+    const candidates = [{ name: "A", domain: "a.com", vertical: "v" }];
 
-    const first = await parseResult(tool.execute("call-7", { candidates: [] }));
-    const second = await parseResult(tool.execute("call-8", { candidates: [] }));
+    const results = [];
+    for (const id of ["rl-1", "rl-2", "rl-3", "rl-4"]) {
+      results.push(await parseResult(tool.execute(id, { candidates })));
+    }
+    const blocked = results[3];
 
-    expect(first.status).toBe("no_candidates");
-    expect(second).toMatchObject({ ok: false, error: "RATE_LIMITED" });
+    // A LEDGER_COLLISION or a corrected union needs at least one honest retry;
+    // a ceiling of 1 made that impossible for a full window.
+    expect(results.slice(0, 3).every((r) => r.ok)).toBe(true);
+    expect(blocked).toMatchObject({ ok: false, error: "RATE_LIMITED", requesterActionable: true });
+    // Without a reopen time neither Scout nor the requester can act on the refusal;
+    // the 2026-08 failure mode was Scout escalating to a human instead of retrying.
+    expect(blocked.retryAfterSeconds).toBeGreaterThan(0);
+    expect(blocked.retryAfterSeconds).toBeLessThanOrEqual(15 * 60);
+    // The refusal is the one place Scout reliably reads at failure time, so the
+    // correction for a per-candidate burst has to travel in it.
+    expect(blocked.detail).toMatch(/one call/i);
+  });
+
+  it("does not spend the rate-limit budget on calls that never launch a stage", async () => {
+    const runProcess = vi.fn(async () => ({
+      stdout: PREP_OK_STDOUT,
+      stderr: "",
+      exitCode: 0,
+    }));
+    const tool = createCompanyFinderPrepTool(deps(runProcess as unknown as RunProcessImpl));
+
+    for (const id of ["bad-1", "bad-2", "bad-3"]) {
+      const rejected = await parseResult(tool.execute(id, {} as any));
+      expect(rejected).toMatchObject({ ok: false, error: "INVALID_INPUT" });
+    }
+    const good = await parseResult(tool.execute("good-1", { candidates: [] }));
+
+    // A malformed call runs no host script, so charging it locks the tool for
+    // 15 minutes over nothing.
+    expect(good).toMatchObject({ ok: true, status: "no_candidates" });
+    expect(runProcess).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps separate sessions on separate rate-limit buckets", async () => {
+    const runProcess: RunProcessImpl = async () => ({
+      stdout: PREP_OK_STDOUT,
+      stderr: "",
+      exitCode: 0,
+    });
+    const shared = new RateLimiter();
+    const mk = (sessionId: string) =>
+      createCompanyFinderPrepTool(deps(runProcess, { rateLimiter: shared, sessionId }));
+
+    const a = mk("session-a");
+    const b = mk("session-b");
+    for (const id of ["s-1", "s-2", "s-3"]) await a.execute(id, { candidates: [] });
+    const other = await parseResult(b.execute("s-4", { candidates: [] }));
+
+    // If sessionId ever collapsed to a constant, one caller (or the 13:00 cron)
+    // would lock out everyone else.
+    expect(other).toMatchObject({ ok: true, status: "no_candidates" });
   });
 
   it("does not resolve abort until a TERM-ignoring process group is gone", async () => {
