@@ -488,6 +488,35 @@ id/email). Resolve email -> workspace via `muso teams list --email <e>` or the s
   payment; voluntary cancel drops at period end); customer-facing version lives in
   `workspaces/support/reference/founding-member.md`.
 
+## Sentry (error monitoring)
+
+Org `musoai` (`https://musoai.sentry.io`, region `https://us.sentry.io`), projects
+`core-backend`, `credits-web-next`, `muso-auth`, `flutter`. Wiring, token scopes and alert-rule
+setup live in RUNBOOK §"Sentry issue triage"; the triage doctrine lives in the
+`sentry-issue-triage` skill. What bites you:
+
+**Sentry's `issue.priority:high` is not a severity signal here.** Measured 2026-08-21, fourteen of
+the fifteen org-wide high-priority issues were Flutter client-side network noise — socket closed,
+request timeouts, TLS handshake failures, CDN aborts, DNS lookup failures. Anything that pages or
+auto-fixes off that field fires all day on errors no commit can fix. Severity has to be our own
+rule (project + new/regressed + rising user impact or an auth/payment/subscription culprit).
+
+**Most Sentry issues are not code bugs, and "fix them" is the wrong instruction.** Of the five
+unresolved core-backend issues over seven days (2026-08-21): one unhandled Stripe path
+(`CORE-BACKEND-K9`), one missing prod env var (`CORE-BACKEND-115`, `TUWUNEL_*`/`MATRIX_SERVER_NAME`),
+one Stripe lock contention (`117`), one exhausted Spotify account pool (`116`), one credit
+materialization failure (`114`). Editing code for 115 or 116 would have been actively wrong.
+Classification is the deliverable; opening no PR is a valid success.
+
+**The Sentry project name is not the repo name**, and `flutter` ships through App Store review,
+so it can never be part of a same-day fix-and-release loop no matter how loud its volume is. The
+project-to-repo-to-base map lives once, in the `sentry-issue-triage` skill.
+
+**Do not poll the Sentry API on a schedule.** Sentry's own docs: *"Polling the API for updates will
+likely trigger rate limiting quickly; webhooks are recommended instead."* Detection latency is not
+the bottleneck anyway — `CORE-BACKEND-K9` sat unresolved from 2025-03-19 with 1404 events across
+256 users. Nobody triaging is the bottleneck, and an hourly poll does not fix that.
+
 ## People & roles
 
 This is the most churn-prone data in this doc. Treat the tables below as a starting point and

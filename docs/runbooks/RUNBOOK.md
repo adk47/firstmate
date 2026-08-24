@@ -13,7 +13,8 @@
 2. [Deploy](#deploy)
 3. [Maintenance Windows](#maintenance-windows)
 4. [Troubleshooting](#troubleshooting)
-5. [Emergency Procedures](#emergency-procedures)
+5. [Sentry issue triage](#sentry-issue-triage)
+6. [Emergency Procedures](#emergency-procedures)
 
 ---
 
@@ -1355,6 +1356,259 @@ ssh root@40.160.32.80 "cd /opt/hydra/audit && git status"
 # Manual push
 ssh root@40.160.32.80 "cd /opt/hydra/audit && git add -A && git commit -m 'manual audit push' && git push"
 ```
+
+---
+
+## Sentry issue triage
+
+Sentry is reached through an MCP server registered on the **main** gateway, and
+issues arrive as Slack alerts posted into a channel the CTO agent watches.
+
+**Alerts do NOT summon the agent as deployed today.** `cto`'s `#prod-alerts`
+binding is `requireMention: true`, so an alert posted without a literal `<@U...>`
+produces zero agent turns - a human still has to pull `cto` into the thread.
+That is a deliberate choice, not an oversight (see "Think before you add that
+mention" below): auto-summoning was switched off on 2026-07-21 for token cost.
+Do not read this section as describing an unattended pipeline. The
+engineering doctrine (classification taxonomy, the P0 rule, the project-to-repo
+map, the twin-port rule) lives in the `sentry-issue-triage` skill; this section
+is only the wiring.
+
+Org: `musoai` (`https://musoai.sentry.io`, region `https://us.sentry.io`).
+Projects: `core-backend`, `credits-web-next`, `muso-auth`, `flutter`.
+
+### Register the Sentry MCP server
+
+`.mcp.servers` is deliberately absent from the repo configs so tokens never land
+in git. `sync_profile_config()` in `scripts/deploy.sh` **preserves** the live
+`.mcp.servers` across deploys, so this is a one-time runtime registration on
+node-8, not a repo change.
+
+```bash
+# 1. Mint a Sentry token (Settings -> Auth Tokens). Minimum read-only scopes:
+#      org:read  project:read  event:read
+#    Add event:write ONLY if the agent should resolve/assign issues in Sentry.
+#    Prefer an Internal Integration over a Personal token: personal-token scopes
+#    are fixed at creation and the token dies if its creator leaves the org.
+
+# 2. Register. Transport MUST be streamable-http (scripts/lint-openclaw-config.sh
+#    rejects any stdio/mcp-remote entry at PR time; an mcp-remote subprocess trio
+#    shares the gateway's process group and a reaper takes the gateway down).
+#    The token lives ONLY inside this entry, i.e. in
+#    /root/.openclaw-main/openclaw.json (root-readable). There is no env-var
+#    indirection here: openclaw does not expand ${VARS} in mcp headers, so
+#    putting SENTRY_MCP_TOKEN in main.env would be a dead line that misleads
+#    whoever later tries to revoke the credential.
+```
+
+**There is deliberately no `openclaw mcp set` recipe here.** Every form of it
+puts the credential in a process argument - either as `--arg` to jq or as the
+JSON blob handed to `openclaw` - and `/proc/<pid>/cmdline` is world-readable
+(0444), so any local process can read the token while that command runs.
+Reading into a shell variable avoids the shell HISTORY, not argv. `mcp set` also
+refuses this config (below), so the jq path is both the only safe form and the
+only working one.
+
+**`mcp set` will REFUSE this config as-is.** `openclaw-main.json` still carries
+the legacy `plugins.installs` key, and `mcp set`/`mcp unset` reject any config
+containing it (the runtime tolerates it; only the writer does not). See
+`docs/lessons/openclaw-and-codex.md` -> "`mcp set`/`mcp unset` refuse configs
+containing a legacy `plugins.installs` key". Until that key is migrated, add the
+entry by hand instead - jq into a temp file, announce, atomic rename:
+
+```bash
+cfg=/root/.openclaw-main/openclaw.json
+tmp=$(mktemp -p "$(dirname "$cfg")")
+# FAIL-FAST. `jq ... > "$tmp"` truncates $tmp before jq runs, so a jq failure
+# (malformed config, bad filter) leaves it EMPTY -- and an unguarded `mv` then
+# replaces the LIVE gateway config with a zero-byte file, taking the gateway
+# down. Reproduced: jq_rc=5, resulting config 0 bytes. Never announce or rename
+# anything jq did not successfully produce.
+# Read the token WITHOUT echo and pass it via the environment, never on the
+# command line. A pasted literal lands in the interactive shell's history AND in
+# jq's argv - and /proc/<pid>/cmdline is world-readable (mode 444), so the
+# credential would be exposed to every local process for the life of the jq
+# call. /proc/<pid>/environ is 0600, so `env.` is the safer channel.
+read -rsp 'Sentry token (input hidden): ' SENTRY_TOKEN; echo
+[ -n "$SENTRY_TOKEN" ] || { echo "no token entered - aborting" >&2; exit 1; }
+
+# ONE transform, ONE rename: register the server AND deny it to every agent
+# except cto/qa in the same atomic write. Doing the deny as a second command
+# would leave a window where the server is live (the rename triggers a restart)
+# and unscoped - and if that second command failed, the window would be
+# permanent. `tools.deny` is literal with NO glob expansion, so every id is
+# spelled out. Ids are `<safeServerName>__<toolName>`; confirm the safe name in
+# the gateway log (`[bundle-mcp] server key "<raw>" registered as "<safeName>"`)
+# before trusting the `sentry__` prefix - a second server colliding on the safe
+# name gets a `-2` suffix.
+ids='["sentry__find_organizations","sentry__find_projects","sentry__search_issues",
+      "sentry__search_events","sentry__get_sentry_resource","sentry__update_issue",
+      "sentry__analyze_issue_with_seer","sentry__search_sentry_tools",
+      "sentry__execute_sentry_tool"]'
+
+# NOTE the shape: agents live at `.agents.list` (an array of {id, ...}), NOT at
+# `.agents`. `.agents` is an object {defaults, list}, so `.agents |= map(...)`
+# iterates its VALUES and dies on `Cannot index array with string "id"`.
+# `SENTRY_TOKEN=... jq` exports it for THIS command only. `read` makes a shell
+# variable, and jq's `env.` sees only EXPORTED ones - without this prefix the
+# header is written as "Sentry-Bearer " with no token, and (before the check
+# below) that empty config was announced, renamed over the live file and the
+# gateway restarted, leaving every Sentry request failing auth.
+SENTRY_TOKEN="$SENTRY_TOKEN" \
+jq --arg hdr "Sentry-Bearer" --argjson ids "$ids" '
+  .mcp.servers.sentry = {
+    "transport": "streamable-http",
+    "url": "https://mcp.sentry.dev/mcp",
+    "headers": { "Authorization": ($hdr + " " + env.SENTRY_TOKEN) }
+  }
+  | .agents.list |= map(
+      if .id == "cto" or .id == "qa" then .
+      else .tools.deny = (((.tools.deny // []) + $ids) | unique) end)
+' "$cfg" > "$tmp" || {
+  rm -f "$tmp"; unset SENTRY_TOKEN; echo "jq failed - live config untouched" >&2; exit 1; }
+unset SENTRY_TOKEN   # out of the shell as soon as it is in $tmp
+
+# Validate BOTH halves before announcing or renaming: the server must be there,
+# and every non-cto/qa agent must carry all nine ids. Fail closed - a partial
+# result must never reach the live config.
+jq -e --argjson ids "$ids" '
+  (.mcp.servers.sentry.url == "https://mcp.sentry.dev/mcp")
+  and (.mcp.servers.sentry.headers.Authorization
+       | test("^Sentry-Bearer .+$"))          # non-empty token, not just the prefix
+  and ([ .agents.list[] | select(.id != "cto" and .id != "qa")
+         | (($ids - (.tools.deny // [])) | length) ] | add == 0)
+  and ([ .agents.list[] | select(.id == "cto" or .id == "qa")
+         | ((.tools.deny // []) | map(select(startswith("sentry__"))) | length) ] | add == 0)
+' "$tmp" >/dev/null || {
+  rm -f "$tmp"; echo "server entry or deny set incomplete - aborting" >&2; exit 1; }
+
+# Guard the ANNOUNCE like everything else: this block has no `set -e`, so an
+# unguarded announce that fails (log unwritable or full) would still fall
+# through to `mv`, changing the live config with no announcement - and the audit
+# watcher then pages #clio_devops treating a legitimate write as out-of-band.
+# On failure, remove $tmp: it holds the TOKEN and must not be left on disk.
+if ! ANNOUNCE_SHA="$(sha256sum "$tmp" | awk '{print $1}')" \
+     /opt/hydra/scripts/lib/announce-legit-write.sh sentry-mcp-register "$cfg"; then
+  rm -f "$tmp"
+  echo "announce-legit-write failed - live config untouched, temp file removed" >&2
+  exit 1
+fi
+
+# Atomic rename - this is what actually registers the server and scopes it, and
+# it triggers the gateway restart. Nothing above changes the live config.
+mv "$tmp" "$cfg" || { rm -f "$tmp"; echo "rename failed - live config untouched" >&2; exit 1; }
+echo "registered and scoped; the gateway will restart once in-flight tasks drain"
+```
+
+**Verify after the restart drains**, before trusting the scoping:
+
+```bash
+openclaw --profile main mcp list | grep -i sentry
+jq -r '.agents.list[] | "\(.id): \((.tools.deny // []) | map(select(startswith("sentry__"))) | length)"' \
+  /root/.openclaw-main/openclaw.json
+# expect 0 for cto and qa, 9 for every other agent
+```
+
+### The deny list is required, but it is NOT an isolation boundary
+
+The transform above denies the Sentry tools to every agent except `cto` and
+`qa`. Do that - but do not mistake it for containment. Two things are true on
+this host today:
+
+- every agent runs with `tools.exec.security: "full"` and `ask: "off"`, and no
+  agent denies `exec`, so a prompt-injected agent can reach `/tools/invoke`
+  through the shell and bypass `tools.deny` entirely. This repo already records
+  the general form: *"`before_tool_call` hook as YOLO-mode safety -> silent
+  no-op for exec; enforce at the bash boundary instead."*
+- the token sits in `/root/.openclaw-main/openclaw.json`, which any exec-capable
+  agent on the box can read and then use directly against the Sentry API, with
+  or without the MCP server.
+
+So the deny is **defence in depth**: it stops ordinary and accidental use by the
+other seven agents and makes the intent explicit. The control that actually
+bounds the blast radius is the **token's own scopes**:
+
+- **Do not mint `event:write`.** Without it a bypass can read issue data; with
+  it a bypass can resolve, assign and mutate production issues. The triage skill
+  never needs write - it records outcomes in its own ledger.
+- Accept that read access to production issue data (which includes customer
+  emails and geo) is reachable by any compromised exec-capable agent here, and
+  set the token's lifetime and rotation cadence with that in mind.
+
+Real isolation would need a separate gateway/profile or a process boundary that
+does not exist today. Do not claim it from this deny list.
+
+### Alert rules (configured in Sentry, not in this repo)
+
+Do **not** poll the Sentry API on a schedule. Sentry's own guidance is explicit:
+*"Polling the API for updates will likely trigger rate limiting quickly;
+webhooks are recommended instead."* Detection latency is also not the
+bottleneck here - `CORE-BACKEND-K9` sat unresolved from 2025-03-19 with 1404
+events. The bottleneck is that nobody triages.
+
+Configure two alert rules over `core-backend`, `credits-web-next` and
+`muso-auth` (never `flutter` - it ships through App Store review, so there is no
+same-day fix to deploy):
+
+| Rule | Condition | Delivers to |
+|---|---|---|
+| `sentry-p0` | new or regressed issue, rising user impact, or a culprit on an auth/payment/subscription path | the paging channel |
+| `sentry-triage` | any new issue in the three projects | the triage channel |
+
+Route both through Sentry's native Slack integration. Two things about the
+destination channel are load-bearing and easy to get wrong:
+
+**A posted alert does NOT summon the agent.** `cto`'s binding for `#prod-alerts`
+(`C0BA8QMV3ME`) is `{"enabled": true, "requireMention": true, "allowBots": true}`
+in `openclaw-main.json`. `allowBots` lets a Sentry message through, but
+`requireMention` means the agent only wakes on a literal `<@U...>` mention in the
+message body. A Sentry alert rule that posts without one produces a clean-looking
+channel full of alerts and **zero** agent turns: a silent no-op that reads as a
+working integration. To auto-summon, put the mention in the Sentry Slack action's
+notes field.
+
+**Think before you add that mention.** DevOps deliberately STOPPED auto-summoning
+`cto` on prod alerts on 2026-07-21 (PR #723, "reduce codex token burn") - see
+`workspaces/cto/SOUL.md`, which now reads "when a human tags you". Adding the
+mention to a Sentry rule re-creates exactly the cost regression that PR removed,
+on a second alert stream. The conservative default is to post WITHOUT a mention
+and let a human pull `cto` in on the alerts that matter; only add the mention if
+you have decided the token cost is worth it, and say so here when you do.
+
+**Mind which skill a `#prod-alerts` mention summons.** `workspaces/cto/SOUL.md`
+binds that channel to `cto-prod-alert-triage` (the prod-LOG alert skill). A
+Sentry alert landing there summons that skill, not `sentry-issue-triage` - which
+is the one with the classification taxonomy, the P0 rule, and the project map.
+Either use a dedicated Sentry channel (and bind `cto` to it), or update SOUL.md
+to route Sentry-sourced threads to `sentry-issue-triage`.
+
+**Do not key severity on Sentry's `issue.priority:high`.** Measured 2026-08-21,
+fourteen of the fifteen org-wide high-priority issues were Flutter client-side
+network noise (socket closed, request timeouts, TLS handshake failures, CDN
+aborts, DNS failures). The usable P0 rule is the three-part one in the
+`sentry-issue-triage` skill.
+
+### Turning it off
+
+- Alerts only: disable the rules in Sentry.
+- Everything: `openclaw --profile main mcp unset "sentry"` (`remove` is not a
+  subcommand), or - while `plugins.installs` is still present and `mcp unset`
+  refuses - the same jq + announce + atomic-rename path as registration, with
+  `del(.mcp.servers.sentry)`. That entry is the only place the token lives, so
+  removing it removes the credential; revoke it in Sentry too. The skill
+  degrades to read-only doctrine with no tools behind it; nothing else depends
+  on it.
+
+### Known noise
+
+Roughly eighty percent of org-wide event volume is the Flutter app's
+`error_reporting_service.dart in ErrorReportingService.recordError` recording
+ordinary transient network failures as errors: socket closed (1024 events),
+request timeouts (810), CDN connection aborts (554), TLS handshake failures
+(175), Knock DNS lookup failures (161). Filtering transient network exceptions
+at the reporting call site would cut org-wide noise sharply and make every
+downstream signal, including the P0 rule, far more reliable. That is a mobile
+change, not a backend one.
 
 ---
 

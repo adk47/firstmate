@@ -72,6 +72,26 @@ yourself.
   itself (`gh repo view ... defaultBranchRef`) — never assume `main`. Muso repos
   differ: core-backend / web-credits use `develop`, customer-api-mcp uses
   `master`, hydra uses `main`.
+- **core-backend is split-path: a `develop` PR does NOT reach production.**
+  `develop` serves the dev environment; `master` serves `api.muso.ai`. The two
+  branches are permanently diverged (measured 2026-08-17: `ahead_by=289,
+  behind_by=58`), so **NEVER merge `develop` into `master`** — that would drag
+  hundreds of unrelated commits into prod. Production is reached by a per-change
+  **twin PR**: cherry-pick the same change onto its own
+  `cto/<slug>-<ts>-master` branch based on `master`, and open it as a second
+  PR in the same run — **step 9 of the procedure below is where you actually do
+  it**; this bullet only states the rule. Open the twin at fix time — a twin
+  that is left for later is historically the one that never gets opened. Reuse
+  step 5's `<ts>` (a date alone collides on a same-day retry, which is exactly
+  what step 5's unique-name rail exists to prevent). If the cherry-pick does NOT
+  apply cleanly and you hand-port instead, **verify the ported logic, not the
+  tests**: a twin pair has passed byte-identical test diffs while the two
+  branches' predicates behaved differently (one silently denied access). State
+  the resulting rule in one sentence per branch and confirm they match. Say
+  plainly in your report that prod is not covered until the twin merges, and
+  never merge it yourself:
+  merging `master` IS an unattended production release (`deploy-to-ovh.yaml`,
+  no CI on core-backend PRs, no second confirmation after merge).
 - **Requesters**: god-mode requesters — Nick (`U0AL36NADEY`) or Aaron
   (`U7RP6HKUZ`) — proceed with no approval. Other authorized engineers (e.g.
   Serhii `U03TYGJF1N3`) follow the normal queue/approval path. Identify by the
@@ -89,7 +109,7 @@ yourself.
 
 > **Run steps 2–6 as ONE continuous shell session** so the variables set in step
 > 2 (`repo`, `name`, `clone`, `base`, and later `branch`) persist into the `ship`
-> hand-off (step 7). Shell state does NOT survive across separate `exec` calls —
+> hand-off (step 7) and the twin step (step 9). Shell state does NOT survive across separate `exec` calls —
 > if you must split the work, re-derive those variables at the top of each block.
 > The non-empty guards below make a lost variable fail LOUD: without them a blank
 > `$repo` would write a `target:""` audit row (jq still exits 0) and leave `ship`
@@ -173,7 +193,9 @@ yourself.
 
 7. **Ship the change through ship-kit (`ship`).** Do NOT hand-run
    `git add`/`commit`/`push` or `gh pr create` yourself — `ship` owns the entire
-   commit → PR → green pipeline. First re-assert the rails as a fail-closed
+   commit → PR → green pipeline. (The single exception is the core-backend
+   `master` twin in step 9, which `ship` cannot open because it ships one branch
+   → one PR.) First re-assert the rails as a fail-closed
    pre-flight (a corrupted `$branch` must never reach a push), then hand off:
    ```
    [ -n "$repo" ] && [ -n "$base" ] && [ -n "$clone" ] && [ -n "$branch" ] || { echo "missing repo/base/clone/branch — refusing to ship"; exit 1; }
@@ -245,11 +267,176 @@ yourself.
    this is what `ship`'s babysit stage then loops against to reach green. Relay
    QA's verdict under your own identity when it comes.
 
-9. **Report** to the requester in-thread: e.g. *"I opened a PR: <url>, ran it
-   through our ship pipeline, and asked QA to review it."* Observe Response
-   Hygiene — `ship` / babysit / reflect name internals freely in their own output,
-   but YOUR message must NOT mention Codex, OpenClaw, ship-kit, the clone path,
-   sessions, or any other internal architecture.
+   **Capture the PR's identity here — step 9 refuses to run without it.** Read
+   it from the branch rather than retyping it, so the twin is provably linked to
+   the PR that was actually opened:
+
+   ```
+   dev_pr_url=$(gh pr view "$branch" --repo "$repo" --json url   -q .url)   || {
+     echo "cannot read the develop PR url for $branch" >&2; exit 1; }
+   dev_pr_title=$(gh pr view "$branch" --repo "$repo" --json title -q .title) || {
+     echo "cannot read the develop PR title for $branch" >&2; exit 1; }
+   [ -n "$dev_pr_url" ] && [ -n "$dev_pr_title" ] || {
+     echo "develop PR identity is empty - refusing to continue to the twin" >&2; exit 1; }
+   ```
+
+   Skipping this leaves step 9's `${dev_pr_url:?}` guard to abort the run, which
+   means no twin, which means the fix stays dev-only - the exact production gap
+   step 9 exists to close.
+
+9. **core-backend ONLY — open the `master` twin now, in this same run.** A
+   `develop` PR does not reach production (split-path rule above), and `ship`
+   owns exactly one branch → one PR, so the twin is the one place you DO hand-run
+   `git`/`gh` yourself. Every other repo skips this step entirely.
+   ```
+   # This block guards EVERY fallible command itself. Nothing upstream sets
+   # `set -e`, so an unguarded failure just falls through: a failed `git push`
+   # would continue into the PR step, reuse a stale PR, and hand QA a
+   # "ported=clean" production twin whose remote branch never received the
+   # commits. Verified by running the block with a broken remote.
+   die() { echo "twin step: $*" >&2; exit 1; }
+
+   # The twin's ONLY link back to the reviewed change is its title and body, so
+   # they are real values, not placeholders. Fail closed rather than let GitHub
+   # create a production PR literally titled "<same title, master twin>" whose
+   # body links to "<url>" - untraceable to its develop PR, which is the
+   # procedure's safety invariant.
+   dev_pr_url="${dev_pr_url:?set dev_pr_url to the develop PR ship just opened}"
+   dev_pr_title="${dev_pr_title:?set dev_pr_title to the title of that PR}"
+
+   if [ "$repo" = "Muso-AI/core-backend" ]; then
+     # EVERY commit this run put on $branch, oldest first. `ship` Stage 4 runs
+     # smart-commit, which clusters the change into as many logical commits as
+     # it needs, so taking only the tip would cherry-pick HALF a fix onto
+     # master and still report ported=clean -- a partial fix shipped to
+     # production, silently. Word-splitting $shas below is intentional.
+     shas=$(git -C "$clone" rev-list --reverse "origin/$base".."$branch")
+     [ -n "$shas" ] || { echo "no commits on $branch over origin/$base" >&2; exit 1; }
+     twin="${branch}-master"     # reuses step 5's UTC timestamp → retry-safe, still cto/*
+     git -C "$clone" fetch origin master || die "cannot fetch origin/master"
+     # RESUMABLE: a conflicted first run exits below with $twin already created,
+     # so `switch -c` would die "branch already exists" on the rerun and the
+     # guard above would abort the run. Reuse
+     # the branch instead -- and never `switch -C`, which would reset it and
+     # silently destroy a hand-port that was just committed.
+     if git -C "$clone" show-ref --verify --quiet "refs/heads/$twin"; then
+       git -C "$clone" switch "$twin" || die "cannot switch to existing $twin"
+     else
+       git -C "$clone" switch -c "$twin" origin/master || die "cannot create $twin"
+     fi
+     if [ -n "$(git -C "$clone" rev-list origin/master.."$twin")" ]; then
+       # A resumed run. Distinguish a RESUMED CLEAN cherry-pick from a
+       # hand-port: comparing patch-ids answers it exactly (this is a real
+       # cherry-pick, not a squash, so patch-id is reliable here). Without
+       # this, retrying after a successful clean cherry-pick would demand a
+       # hand-port acknowledgement that never applied.
+       # EVERY commit must be present, not just one: a twin carrying only the
+       # last of a two-commit fix would otherwise pass as a resumed clean
+       # cherry-pick.
+       want_pids=$(for c in $shas; do
+                     git -C "$clone" show "$c" | git patch-id --stable | awk '{print $1}'
+                   done | sort -u)
+       have_pids=$(git -C "$clone" rev-list origin/master.."$twin" | while read -r c; do
+                     git -C "$clone" show "$c" | git patch-id --stable | awk '{print $1}'
+                   done | sort -u)
+       missing=$(comm -23 <(printf '%s\n' "$want_pids") <(printf '%s\n' "$have_pids"))
+       # EXTRAS matter as much as missing ones. A subset check passes a twin
+       # that carries every wanted commit PLUS an unrelated manual commit, and
+       # would then push that stray change into the production PR under
+       # ported=clean, with no hand-port acknowledgement. Require exact
+       # equivalence in both directions.
+       extra=$(comm -13 <(printf '%s\n' "$want_pids") <(printf '%s\n' "$have_pids"))
+       if [ -z "$missing" ] && [ -z "$extra" ]; then
+         ported=clean       # resumed after a successful cherry-pick of EXACTLY the range
+       else
+         # "The branch has commits" is NOT "the fix is ported": an unrelated or
+         # partial commit would otherwise push a twin PR that looks like
+         # production coverage and does not contain the change -- worse than no
+         # twin, because it reads as done. Completion is never inferred.
+         if [ "${TWIN_HANDPORT_VERIFIED:-0}" != "1" ]; then
+           echo "twin $twin does not match the develop range: UNVERIFIED." >&2
+           [ -n "$missing" ] && echo "  missing patch-ids: $(echo $missing | tr '\n' ' ')" >&2
+           [ -n "$extra" ]   && echo "  unexpected extra commits on the twin" >&2
+           echo "Diff it against the develop fix, state the resulting rule in one" >&2
+           echo "sentence per branch, and only then re-run with" >&2
+           echo "TWIN_HANDPORT_VERIFIED=1 to push and open the twin." >&2
+           exit 1
+         fi
+         ported=hand
+       fi
+     elif git -C "$clone" cherry-pick $shas; then
+       ported=clean
+     else
+       # Guard the abort, and stop MECHANICALLY rather than by prose. A
+       # multi-commit fix can apply commit 1 and conflict on commit 2; if the
+       # abort then fails (a locked index in the shared clone, say), the old
+       # code fell through with commit 1 still on the twin -- and the
+       # empty-twin guard below only catches an EMPTY twin, so it pushed a
+       # PARTIAL fix to production as ported=hand with no acknowledgement
+       # (TWIN_HANDPORT_VERIFIED is only checked on the resumed path).
+       git -C "$clone" cherry-pick --abort \
+         || die "cherry-pick --abort FAILED - $twin is in an unknown state; resolve it by hand before retrying"
+       die "cherry-pick conflicted - hand-port the change onto $twin, COMMIT it, then re-run with TWIN_HANDPORT_VERIFIED=1"
+     fi
+     # Fail-closed: never push or PR a twin that carries no commits. Without this
+     # the hand-port path pushes an unchanged copy of origin/master and
+     # `gh pr create` dies with "No commits between ..." -- leaving NO twin at
+     # all, which is the exact failure this step exists to prevent.
+     if [ -z "$(git -C "$clone" rev-list origin/master.."$twin")" ]; then
+       echo "twin $twin has no commits over origin/master (ported=$ported):" >&2
+       echo "the hand-port was never committed -- refusing to push an empty twin" >&2
+       exit 1
+     fi
+     # A failed push is fatal: everything below reports a twin that the remote
+     # does not actually carry.
+     git -C "$clone" push -u origin "$twin" || die "push of $twin failed - the remote does NOT carry this change"
+     # IDEMPOTENT: a run that died after `gh pr create` succeeded must still be
+     # able to reach the QA hand-off below. Creating again returns "a pull
+     # request already exists" non-zero, and the guard above would then abort
+     # the run BEFORE QA is ever contacted -- leaving the production
+     # twin permanently outside the review path. So reuse an open PR if one
+     # exists, and only create when there is none.
+     twin_url=$(gh pr list --repo "$repo" --head "$twin" --base master \
+                  --state open --json url --jq '.[0].url // empty') \
+       || die "could not query existing PRs for $twin"
+     if [ -z "$twin_url" ]; then
+       twin_url=$(gh pr create --repo "$repo" --base master --head "$twin" \
+         --title "$dev_pr_title (master twin)" \
+         --body "Production twin of the develop PR $dev_pr_url. ported=$ported") \
+         || die "gh pr create failed for $twin"
+     fi
+     [ -n "$twin_url" ] || die "no twin PR url - refusing to report a twin that may not exist"
+     echo "twin PR: $twin_url (ported=$ported)"
+   fi
+   ```
+   If `ported=hand`, **verify the ported logic, not the tests** (see the
+   split-path rule): state the resulting rule in one sentence per branch and
+   confirm they match.
+
+   **Then put the twin through QA and WAIT for its verdict, exactly as step 8
+   waits for the `develop` PR.** `sessions_send` to **@QA** with the twin URL,
+   saying plainly that it is a core-backend *production* twin, that
+   core-backend runs **no CI on pull requests** so review is the entire gate,
+   and — when `ported=hand` — that it is a hand-port rather than a clean
+   cherry-pick, so the predicate needs comparing and copied tests prove
+   nothing. Do not report completion until that verdict is in.
+
+   Getting this order wrong is how the wrong behavior reaches production: the
+   twin is created after step 8's wait, so without its own wait the
+   already-green `develop` PR looks like the reviewed artifact while the twin —
+   the one that actually reaches `api.muso.ai`, and the only one carrying
+   hand-port risk — is the one nobody read. **Never merge either one.**
+
+10. **Report** to the requester in-thread, and for core-backend state **both**
+    verdicts explicitly — the `develop` PR's and the `master` twin's — plus the
+    fact that production is not covered until the twin merges. A report naming
+    only one verdict reads as "reviewed" for a change that was not.
+    e.g. *"I opened a PR: <url>, ran it
+    through our ship pipeline, and asked QA to review it."* Observe Response
+    Hygiene — `ship` / babysit / reflect name internals freely in their own output,
+    but YOUR message must NOT mention Codex, OpenClaw, ship-kit, the clone path,
+    sessions, or any other internal architecture. For core-backend, say plainly
+    that production is not covered until the `master` twin merges.
 
 ## If something goes wrong
 

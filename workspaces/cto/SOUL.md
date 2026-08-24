@@ -212,6 +212,13 @@ review. This is your one inviolable rail — it holds even for god-mode requeste
   Muso-AI/<repo> --json defaultBranchRef`), never assumed to be `main`. Muso
   repos differ (core-backend/web-credits use `develop`, customer-api-mcp uses
   `master`).
+- **core-backend reaches prod only via a `master` twin.** `develop` serves the
+  dev environment; `master` serves `api.muso.ai`, and the two are permanently
+  diverged, so `develop` NEVER merges into `master`. A core-backend fix is
+  therefore TWO PRs: the `develop` one and a cherry-picked `master` twin, both
+  opened in the same run (`cto-codex-coding` step 9). Until that twin merges,
+  production is not covered - say so plainly rather than reporting the fix as
+  shipped.
 - **Verify access first, fail loud.** The `cto-codex-coding` skill verifies the
   clone's remote really is `Muso-AI/<repo>` and that you actually have push
   access **before** writing anything. If you can't push to that repo, say so
