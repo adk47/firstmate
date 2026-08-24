@@ -55,6 +55,33 @@ set -uo pipefail
 # --- overridable paths (production defaults; tests redirect these) ----------
 ADMIN_API="${FASTLANE_ADMIN_API:-/opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh}"
 TRINO="${FASTLANE_TRINO:-/opt/hydra/scripts/trino-query.sh}"
+# The cube read is best-effort AND now runs BEFORE the admin POST, so an
+# unbounded Trino stall would hold the fire hostage: the wrapper would time out
+# at the agent and the fastlane would never be issued at all. Bound it — a
+# timed-out read is simply an unmeasured baseline (null), never a blocked fire.
+#
+# TWO bounds, because per-read alone is not enough: profile scope takes an
+# arbitrary list of ids, so N profiles against a stalled Trino would still cost
+# N x TRINO_TIMEOUT and blow the agent's exec timeout — the later POSTs never
+# fire and no report is printed at all. TRINO_BATCH_BUDGET caps what the whole
+# batch may spend on baselines; past it, later profiles get a null baseline and
+# their fire goes out on time.
+TRINO_TIMEOUT="${FASTLANE_TRINO_TIMEOUT:-30}"
+TRINO_BATCH_BUDGET="${FASTLANE_TRINO_BATCH_BUDGET:-60}"
+# Validate BEFORE either value reaches an arithmetic context: (( )) evaluates a
+# variable's VALUE recursively, so a non-numeric override silently becomes 0 and
+# a crafted one would run a command substitution.
+#
+# The per-read timeout must be strictly POSITIVE. GNU `timeout 0` means "no
+# limit", so a 0 — whether passed deliberately or produced by a non-numeric
+# override — would silently DISABLE the very bound it looks like it sets, and
+# one hung read would again mean no POST and no report at all.
+#
+# The batch budget MAY be 0, and that asymmetry is deliberate: there 0 means
+# "spend nothing on baselines", which tightens the bound (every profile takes a
+# null baseline and fires immediately) instead of removing it.
+[[ "$TRINO_TIMEOUT" =~ ^[0-9]+$ ]] && (( TRINO_TIMEOUT > 0 )) || TRINO_TIMEOUT=30
+[[ "$TRINO_BATCH_BUDGET" =~ ^[0-9]+$ ]] || TRINO_BATCH_BUDGET=60
 AUDIT_PATH="${FASTLANE_AUDIT_PATH:-/var/log/openclaw/fastlane-apply.jsonl}"
 
 UUID_RE='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
@@ -153,10 +180,12 @@ ts_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # is the muso.ai profile-page lifetime headline, recomputed continuously from track_daily.
 # Echoes "creditcount|trackswithdata|streams|spotifystreams|youtubestreams"
 # or empty string on any failure (readback is best-effort, never blocks the fire).
+# read_lifetime <profile_id> [seconds] — seconds bounds THIS read (default
+# TRINO_TIMEOUT). Never called with 0: GNU `timeout 0` means "no limit".
 read_lifetime() {
-  local pid="$1" csv line
+  local pid="$1" budget="${2:-$TRINO_TIMEOUT}" csv line
   csv="$(printf "SELECT profile_credits_count, tracks_count, ce_streams, ce_spotify_streams, ce_youtube_streams FROM postgresql_olap.public.cube_analytics_profile_view WHERE period='all' AND profile_id='%s'" "$pid" \
-    | "$TRINO" 2>/dev/null)" || return 0
+    | timeout "$budget" "$TRINO" 2>/dev/null)" || return 0
   # Trino CSV quotes every field and emits no header; take the first data row.
   line="$(printf '%s\n' "$csv" | grep -m1 . || true)"
   [[ -n "$line" ]] || return 0
@@ -177,9 +206,44 @@ _Full rescrape across all sources: new catalog/tracks land in minutes–tens of 
 _dry-run: no writes; the would-be POST is logged to the dry-run audit._"
 
 any_ok=0
+any_baseline=0
+# Batch-wide ceiling on time spent reading baselines (see TRINO_BATCH_BUDGET).
+baseline_deadline=$(( $(date +%s) + TRINO_BATCH_BUDGET ))
 
 for pid in "${PROFILE_IDS[@]}"; do
   ep="$(endpoint_for "$pid")"
+
+  # BASELINE, read BEFORE the fire. The POST is fire-and-forget: the scrape and
+  # cube refresh happen async in the backend, and cubes recompute ~1-5 min after
+  # the refresh message is processed. A cube read taken AFTER the POST is
+  # therefore still the pre-run value — but racily so, and rendered bare under an
+  # "enqueued" bullet it reads as this run's result. That is how "recalculation
+  # returned success" became evidence a correction had landed when it had not
+  # (W34 ops review: l1lroldyy, Sleiman Damien). Reading first makes the
+  # "before this run" label exact instead of approximate.
+  # Bounded per read AND across the batch precisely so this cannot delay or
+  # prevent the POST below, however many profiles the batch carries.
+  baseline=""
+  if [[ "$SCOPE" != "user" && "$MODE" != "dry" ]]; then
+    baseline_left=$(( baseline_deadline - $(date +%s) ))
+    if (( baseline_left > 0 )); then
+      baseline="$(read_lifetime "$pid" \
+        "$(( baseline_left < TRINO_TIMEOUT ? baseline_left : TRINO_TIMEOUT ))")"
+    fi
+  fi
+  # "not measured" must stay distinguishable from a measured zero — a failed
+  # cube read is null in the audit, never 0.
+  baseline_json="null"
+  if [[ -n "$baseline" ]]; then
+    IFS='|' read -r b_cc b_twd b_streams b_sp b_yt <<<"$baseline"
+    baseline_json="$(jq -nc \
+      --arg cc "$b_cc" --arg twd "$b_twd" --arg s "$b_streams" \
+      --arg sp "$b_sp" --arg yt "$b_yt" \
+      '{credits:(($cc|tonumber?) // null), tracks:(($twd|tonumber?) // null),
+        streams:(($s|tonumber?) // null), spotify_streams:(($sp|tonumber?) // null),
+        youtube_streams:(($yt|tonumber?) // null)}')" || baseline_json="null"
+  fi
+
   body="$(jq -nc --arg t "$TRIGGER_SOURCE" '{triggerSource:$t}')"
   out="$(bash "$ADMIN_API" --requester "$REQUESTER" call POST "$ep" "$body" 2>&1)"
   rc=$?
@@ -204,13 +268,14 @@ for pid in "${PROFILE_IDS[@]}"; do
     --arg lane "$LANE" --arg scope "$SCOPE" --arg endpoint "POST ${ep}" \
     --arg http "$http_status" --arg result "$result" \
     --arg bootstrapped "$bootstrapped" --arg discovered "$discovered" --arg refreshed "$refreshed" \
-    --arg dry "$is_dry" --arg ok "$ok" \
+    --arg dry "$is_dry" --arg ok "$ok" --argjson baseline "$baseline_json" \
     '{ts:$ts, agent:"operations", action:"fast_lane_multi_profile", requester:$requester,
        profile_id:$pid, lane:$lane, scope:$scope, endpoint:$endpoint,
        trigger_source:$trigger, mode:$mode,
        http_status:($http|tonumber? // null), result:$result,
        bootstrapped:($bootstrapped=="true"), discovered:($discovered=="true"),
-       refreshed:($refreshed=="true"), dry_run:($dry=="true"), success:($ok=="true")}')"
+       refreshed:($refreshed=="true"), dry_run:($dry=="true"), success:($ok=="true"),
+       baseline_before:$baseline}')"
 
   if [[ "$ok" == "true" ]]; then
     if [[ "$is_dry" == "true" ]]; then
@@ -237,11 +302,11 @@ for pid in "${PROFILE_IDS[@]}"; do
         REPORT+="
    :warning: a queue send failed (discovered=${discovered:-?}, refreshed=${refreshed:-?}) — logged + Sentry backend-side; safe to re-fire (idempotent)."
       fi
-      life="$(read_lifetime "$pid")"
-      if [[ -n "$life" ]]; then
-        IFS='|' read -r cc twd streams sp yt <<<"$life"
+      if [[ -n "$baseline" ]]; then
+        IFS='|' read -r cc twd streams sp yt <<<"$baseline"
+        any_baseline=1
         REPORT+="
-   streams=${streams:-?} · spotify=${sp:-?} · youtube=${yt:-?} · credits=${cc:-?} · tracks=${twd:-?}"
+   _baseline, before this run_ — streams=${streams:-?} · spotify=${sp:-?} · youtube=${yt:-?} · credits=${cc:-?} · tracks=${twd:-?}"
       fi
     fi
   else
@@ -260,6 +325,12 @@ else
   REPORT+="
 
 _Analytics refresh is async (~130s per profile). Re-check the dashboard shortly. Profiles over ~25K credits (catalog orgs) are skipped by design._"
+fi
+
+if [[ "$any_baseline" == "1" ]]; then
+  REPORT+="
+
+:warning: _The cube figures above are the state **before** this run and do not reflect this run — the refresh is async. Re-read the cube once it recomputes to see the effect. And note a fastlane/recalculate merges with \`GREATEST\`, so it can only ever RAISE a number: **it cannot apply a downward correction.** If credits were removed and the total should DROP, re-firing this will never do it — that needs an authoritative stats correction from data-platform._"
 fi
 
 printf '%s\n' "$REPORT"

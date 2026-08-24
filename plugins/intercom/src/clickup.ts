@@ -25,6 +25,15 @@ interface CreateClickupTicketDeps {
 // conversation (escalationFiredAt gate) and its ticket doubles as the
 // human-handoff record referenced by the Slack alert — it must always exist,
 // even if Caroline already filed a same-type request.
+//
+// That "at most once" premise is load-bearing HERE — with no dedupe of its own,
+// a second call to this function is a second ticket on one conversation, which
+// is what a duplicate Conversation-link group in ClickUp looks like. The gate
+// alone does not guarantee it: executeEscalation ROLLS THE GATE BACK when the
+// farewell and the Slack ping both fail, so the conversation can reach this path
+// twice. What actually keeps the premise true is `state.escalationTicketId`
+// (escalation-action.ts Step 2), which survives that rollback and makes the retry
+// reuse the existing ticket. Do not remove it without adding real dedupe here.
 export async function createClickupTicket(
   deps: CreateClickupTicketDeps,
   params: CreateTicketParams,

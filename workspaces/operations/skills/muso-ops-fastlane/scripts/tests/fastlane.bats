@@ -87,12 +87,12 @@ STUB
   # Records a marker to TRINO_CALLS so tests can assert whether readback ran.
   TRINO_CALLS="$TEST_ROOT/trino-calls.log"; export TRINO_CALLS
   TRINO_STUB="$TEST_ROOT/trino-stub.sh"; export FASTLANE_TRINO="$TRINO_STUB"
-  cat >"$TRINO_STUB" <<'STUB'
+  cat >"$FASTLANE_TRINO" <<'STUB'
 #!/usr/bin/env bash
 echo called >> "$TRINO_CALLS"
 echo '"45","42","1234567","1000000","234567"'
 STUB
-  chmod +x "$TRINO_STUB"
+  chmod +x "$FASTLANE_TRINO"
 }
 
 teardown() { rm -rf "$TEST_ROOT"; }
@@ -136,6 +136,160 @@ teardown() { rm -rf "$TEST_ROOT"; }
   [ "$status" -eq 0 ]
   [[ "$output" == *"streams=1234567"* ]]
   [[ "$output" == *"tracks=42"* ]]
+}
+
+# WHY: the cube read fires immediately after a fire-and-forget POST, but the
+# refresh message is processed asynchronously and cubes recompute ~1-5 min
+# later. So these numbers are the state BEFORE this run, and can never reflect
+# it. Rendered bare under a "enqueued" bullet they read as the result, which
+# is how "recalculation returned success" became evidence that a correction
+# landed when it had not (W34 ops review: l1lroldyy, Sleiman Damien).
+@test "cube readback is labelled as a pre-fire baseline, not this run's result" {
+  run bash "$SCRIPT" "11111111-2222-3333-4444-555555555555" "" "U038BM16T7W" real
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"before this run"* ]]
+}
+
+@test "report never presents the baseline as proof the fastlane landed" {
+  run bash "$SCRIPT" "11111111-2222-3333-4444-555555555555" "" "U038BM16T7W" real
+  [ "$status" -eq 0 ]
+  # An explicit statement that the numbers above cannot show this run's effect.
+  [[ "$output" == *"do not reflect this run"* ]]
+}
+
+# WHY: a baseline is only useful if a later verification can diff against it.
+# Keeping it in the report alone means the "did it actually land?" question is
+# re-answered from memory. Persist it next to the fire it belongs to.
+@test "audit line records the pre-fire baseline for later verification" {
+  run bash "$SCRIPT" "11111111-2222-3333-4444-555555555555" "" "U038BM16T7W" real
+  [ "$status" -eq 0 ]
+  run jq -r '.baseline_before.streams | tostring' "$FASTLANE_AUDIT_PATH"
+  [[ "$output" == "1234567" ]]
+  run jq -r '.baseline_before.tracks | tostring' "$FASTLANE_AUDIT_PATH"
+  [[ "$output" == "42" ]]
+}
+
+@test "audit baseline is null when the cube read fails (never a confident zero)" {
+  # A Trino stub that fails must not be recorded as "streams: 0" — that is the
+  # null-collapsed-to-zero trap: "not measured" must stay distinguishable.
+  cat >"$FASTLANE_TRINO" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+  chmod +x "$FASTLANE_TRINO"
+  run bash "$SCRIPT" "11111111-2222-3333-4444-555555555555" "" "U038BM16T7W" real
+  [ "$status" -eq 0 ]
+  run jq -r '.baseline_before' "$FASTLANE_AUDIT_PATH"
+  [[ "$output" == "null" ]]
+}
+
+# WHY: the baseline read moved BEFORE the POST, which puts a best-effort,
+# non-essential Trino query directly in front of the only thing this wrapper
+# exists to do. Trino accepting the connection and then stalling would hold the
+# fire hostage — the agent times out and the fastlane is never issued at all,
+# with nothing in the report to say so. A stalled read must degrade to an
+# unmeasured baseline, never to a skipped fire.
+@test "a hanging Trino read cannot block the fastlane POST" {
+  cat >"$FASTLANE_TRINO" <<'STUB'
+#!/usr/bin/env bash
+echo called >> "$TRINO_CALLS"
+sleep 20
+STUB
+  chmod +x "$FASTLANE_TRINO"
+  export FASTLANE_TRINO_TIMEOUT=1
+
+  # The outer bound is what makes this test able to FAIL: an unbounded read
+  # would sit on that sleep, so the wrapper gets killed here (status 124)
+  # instead of quietly passing once the sleep ends. -k forces SIGKILL: bash
+  # blocked in a command substitution defers SIGTERM until its child returns.
+  run timeout -k 2 15 bash "$SCRIPT" "11111111-2222-3333-4444-555555555555" "" "U038BM16T7W" real
+  [ "$status" -eq 0 ]
+  # The read was attempted, bounded, and abandoned...
+  grep -q called "$TRINO_CALLS"
+  # ...and the fire it precedes still happened.
+  grep -q "/admin/analytics/11111111-2222-3333-4444-555555555555/fast-lane" "$CALLS"
+  # An abandoned read is an unmeasured baseline, not a zero.
+  run jq -r '.baseline_before' "$FASTLANE_AUDIT_PATH"
+  [[ "$output" == "null" ]]
+}
+
+# WHY: bounding each read is not enough. Profile scope takes an arbitrary list
+# of ids, so N profiles against a stalled Trino cost N x the per-read timeout —
+# enough to blow the agent's exec timeout, at which point the REMAINING fires
+# never go out and the report is never printed. The batch budget is what keeps
+# a stalled dependency from turning "one unmeasured baseline" into "most of this
+# batch was never fired".
+@test "a stalled Trino cannot cost the batch more than the baseline budget" {
+  cat >"$FASTLANE_TRINO" <<'STUB'
+#!/usr/bin/env bash
+echo called >> "$TRINO_CALLS"
+sleep 20
+STUB
+  chmod +x "$FASTLANE_TRINO"
+  export FASTLANE_TRINO_TIMEOUT=1
+  export FASTLANE_TRINO_BATCH_BUDGET=1
+
+  run timeout -k 2 15 bash "$SCRIPT" \
+    "11111111-2222-3333-4444-555555555555 22222222-3333-4444-5555-666666666666 33333333-4444-5555-6666-777777777777" \
+    "" "U038BM16T7W" real
+  [ "$status" -eq 0 ]
+  # Every profile in the batch still got its fire...
+  run wc -l <"$CALLS"
+  [ "${output// /}" -eq 3 ]
+  # ...and the budget stopped further reads after the first one spent it, so the
+  # cost is bounded by the budget rather than by the number of profiles.
+  run wc -l <"$TRINO_CALLS"
+  [ "${output// /}" -eq 1 ]
+}
+
+# WHY: GNU `timeout 0` means NO LIMIT, not "expire immediately". So a per-read
+# timeout of 0 does not tighten the bound — it removes it, and one hung read
+# again means no POST and no report. `^[0-9]+$` alone accepts 0, so the check
+# has to be strictly positive.
+@test "a zero per-read timeout is rejected, not passed to timeout as no-limit" {
+  cat >"$FASTLANE_TRINO" <<'STUB'
+#!/usr/bin/env bash
+echo called >> "$TRINO_CALLS"
+sleep 20
+STUB
+  chmod +x "$FASTLANE_TRINO"
+  export FASTLANE_TRINO_TIMEOUT=0
+  # A small batch budget is what makes this test fast AND decisive: the read is
+  # bounded by min(budget, per-read). If 0 survives validation that min is 0 —
+  # `timeout 0` — and the stub's sleep runs to the outer bound below.
+  export FASTLANE_TRINO_BATCH_BUDGET=2
+
+  run timeout -k 2 15 bash "$SCRIPT" "11111111-2222-3333-4444-555555555555" "" "U038BM16T7W" real
+  [ "$status" -eq 0 ]
+  grep -q "/admin/analytics/11111111-2222-3333-4444-555555555555/fast-lane" "$CALLS"
+  run jq -r '.baseline_before' "$FASTLANE_AUDIT_PATH"
+  [[ "$output" == "null" ]]
+}
+
+# WHY: the mirror of the above, pinning a DELIBERATE asymmetry. A zero batch
+# budget means "spend nothing on baselines" — it tightens the bound rather than
+# removing it — so it must be honoured, not clamped back up to the default.
+@test "a zero batch budget skips baseline reads entirely and still fires" {
+  export FASTLANE_TRINO_BATCH_BUDGET=0
+  run bash "$SCRIPT" "11111111-2222-3333-4444-555555555555" "" "U038BM16T7W" real
+  [ "$status" -eq 0 ]
+  grep -q "/admin/analytics/11111111-2222-3333-4444-555555555555/fast-lane" "$CALLS"
+  [ ! -s "$TRINO_CALLS" ]
+  run jq -r '.baseline_before' "$FASTLANE_AUDIT_PATH"
+  [[ "$output" == "null" ]]
+}
+
+@test "a non-numeric timeout override falls back to the default, never to 0" {
+  # (( )) evaluates a variable's VALUE, so an unvalidated "banana" would become 0
+  # — and GNU `timeout 0` means NO limit, silently undoing the bound.
+  export FASTLANE_TRINO_TIMEOUT=banana
+  export FASTLANE_TRINO_BATCH_BUDGET=banana
+  run bash "$SCRIPT" "11111111-2222-3333-4444-555555555555" "" "U038BM16T7W" real
+  [ "$status" -eq 0 ]
+  grep -q "/admin/analytics/11111111-2222-3333-4444-555555555555/fast-lane" "$CALLS"
+  # The read still ran under the fallback bound.
+  run jq -r '.baseline_before.streams | tostring' "$FASTLANE_AUDIT_PATH"
+  [[ "$output" == "1234567" ]]
 }
 
 @test "dry mode exports OPS_DRY_RUN=1 and reports a no-write run" {

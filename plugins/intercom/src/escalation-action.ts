@@ -5,7 +5,7 @@ import type {
   RiskAssessment,
 } from "./types.js";
 import { IntercomAssignmentConflictError } from "./outbound.js";
-import { intercomDeeplink } from "./ticket-format.js";
+import { intercomDeeplink, getTierForAction, TIER_SLAS } from "./ticket-format.js";
 
 export interface TicketResult {
   ok: boolean;
@@ -138,25 +138,50 @@ export async function executeEscalation(deps: ExecuteEscalationDeps): Promise<vo
   const email = state.knownFacts?.accountEmail ?? "unknown (no accountEmail on file)";
 
   // Step 2 — file ClickUp ticket.
+  //
+  // A previous attempt may have created the ticket and then rolled the dedupe
+  // gate back (farewell AND Slack both failed), which is what lets us be here
+  // twice for one conversation. The ticket is not the thing that failed, so
+  // re-filing it just produces a duplicate Conversation-link group in ClickUp —
+  // and this path deliberately runs no open-ticket dedupe to catch that (see
+  // clickup.ts). Reuse the remembered id instead; only the delivery is retried.
+  const actionType = assessment.suggestedActionType ?? "support-general";
   let ticket: TicketResult = { ok: false, error: "ticket creation skipped" };
-  try {
-    ticket = await createTicket({
-      actionType: assessment.suggestedActionType ?? "support-general",
-      customerEmail: state.knownFacts?.accountEmail ?? "unknown@unknown",
-      customerProfileId: state.knownFacts?.musoProfileId,
-      summary: assessment.reason ?? "support",
-      conversationSummary: buildSummary(assessment, currentMessage),
-      conversationId,
-      workspaceId: account.workspaceId,
-    });
-    if (ticket.ok) {
-      log.info(`[intercom:escalation] ticket created conv=${conversationId} id=${ticket.ticketId}`);
-    } else {
-      log.warn(`[intercom:escalation] ticket creation failed conv=${conversationId} err=${ticket.error}`);
+  if (state.escalationTicketId) {
+    // Quote the SLA of the ticket we are REUSING, not one recomputed from this
+    // retry's assessment. The two can differ — a refund escalation files a Tier 3
+    // ticket (5-10 business days), and the next message can reassess as
+    // support-general (Tier 1, 2 business days). The ticket's ClickUp due date is
+    // fixed at creation, so recomputing would promise a window it does not have.
+    const filedActionType = state.escalationTicketActionType ?? actionType;
+    ticket = { ok: true, ticketId: state.escalationTicketId, sla: TIER_SLAS[getTierForAction(filedActionType)] };
+    log.info(
+      `[intercom:escalation] reusing ticket from a rolled-back attempt conv=${conversationId} id=${state.escalationTicketId} — retrying delivery only`,
+    );
+  } else {
+    try {
+      ticket = await createTicket({
+        actionType,
+        customerEmail: state.knownFacts?.accountEmail ?? "unknown@unknown",
+        customerProfileId: state.knownFacts?.musoProfileId,
+        summary: assessment.reason ?? "support",
+        conversationSummary: buildSummary(assessment, currentMessage),
+        conversationId,
+        workspaceId: account.workspaceId,
+      });
+      if (ticket.ok) {
+        // Remember it BEFORE the delivery steps run: if they fail we roll the
+        // dedupe gate back, and that rollback's saveState is what persists this.
+        state.escalationTicketId = ticket.ticketId;
+        state.escalationTicketActionType = actionType;
+        log.info(`[intercom:escalation] ticket created conv=${conversationId} id=${ticket.ticketId}`);
+      } else {
+        log.warn(`[intercom:escalation] ticket creation failed conv=${conversationId} err=${ticket.error}`);
+      }
+    } catch (err) {
+      ticket = { ok: false, error: String(err) };
+      log.warn(`[intercom:escalation] ticket creation threw conv=${conversationId} err=${err}`);
     }
-  } catch (err) {
-    ticket = { ok: false, error: String(err) };
-    log.warn(`[intercom:escalation] ticket creation threw conv=${conversationId} err=${err}`);
   }
 
   // Step 3 — post farewell.

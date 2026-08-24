@@ -101,10 +101,15 @@ The wrapper reports the response fields `discovered` / `refreshed`:
 ### Caveats (current, 2026-07-09)
 
 1. The refresh leg rides the `industry-proc-catalog-admin` consumer. If a
-   partition of that group is **wedged** (p2 is, right now), calls whose profile
-   hashes to it queue until it clears — the response says `refreshed=true` but
-   cubes don't move. Check the group's consumed offsets before assuming the call
-   failed.
+   partition of that group is **wedged**, calls whose profile hashes to it queue
+   until it clears — the response says `refreshed=true` but cubes never move.
+   **`refreshed=true` is an enqueue receipt, not a landing receipt**, so it is
+   evidence of nothing on its own. Check the group's consumed offsets before
+   reporting a fastlane as done — the failure this actually produces is a
+   confident false "success", not a visible error. (p2 was wedged as of
+   2026-07-09; do NOT carry that forward as current — re-check the offsets, and
+   if a partition is still wedged six weeks on, say so and escalate rather than
+   re-firing.)
 2. Discovery only covers platforms we have **raw identities** for. An empty
    `muso:`-only shell has nothing to discover — attach a DSP identity first
    (claim-link ingestion / `enrichByUrl`).
@@ -223,11 +228,21 @@ For each distinct id, `fastlane.sh`:
    `/admin/user/<id>/fast-lane-plus` (plus/user). (No credit-approve gate applies
    to analytics paths; `dry` mode sets `OPS_DRY_RUN=1` so the write is logged,
    not sent.)
-2. For profile scope, reads current stream/track counts from the live OLAP cube
+2. For profile scope, reads stream/track counts from the live OLAP cube
    `postgresql_olap.public.cube_analytics_profile_view` (`ce_streams` @ `period='all'`,
-   best-effort) so the report answers "what's the stream count after the fastlane?".
-   (Replaces the dead `profile_v3_lifetime`, frozen 2026-06-06.) User scope skips
-   this readback (we don't hold the fanned-out profile ids).
+   best-effort, and bounded both per read (`FASTLANE_TRINO_TIMEOUT`, 30s) and
+   across the whole batch (`FASTLANE_TRINO_BATCH_BUDGET`, 60s) so a stalled
+   Trino can never delay or prevent the fires it precedes, however many profiles
+   the batch carries — an abandoned or skipped read is a `null` baseline, never
+   a zero) **before** firing, and reports them as an explicitly-labelled
+   **baseline**. It is NOT an "after" number and cannot be: the POST is
+   fire-and-forget and cubes recompute ~1–5 min after the refresh message is
+   processed, so any read taken during this call predates the effect. The
+   baseline is also written to the audit line as `baseline_before` so a later
+   check can diff against it — that diff, not this call's exit status, is what
+   proves the fastlane landed. (Replaces the dead `profile_v3_lifetime`, frozen
+   2026-06-06.) User scope skips this readback (we don't hold the fanned-out
+   profile ids).
 3. Appends a JSONL audit line (including `lane`/`scope`/`endpoint` and, for plus,
    `discovered`/`refreshed`) to `/var/log/openclaw/fastlane-apply.jsonl`.
 
@@ -247,6 +262,19 @@ channel ID (e.g. `c0apb2cmm7c` for `C0APB2CMM7C`) makes the post fail
 - Fastlane is idempotent: re-firing the same profile is safe (`GREATEST`/
   `COALESCE` merge), so "do the fastlane again after the tracks are updated" is
   fine to run.
+- **That same `GREATEST` merge means a fastlane can only ever RAISE a number —
+  it CANNOT apply a downward correction.** The `track_daily` upsert is
+  `GREATEST(stored, EXCLUDED)` behind a `WHERE EXCLUDED.x > stored.x` no-op
+  guard, so a re-baseline or a suppress-to-zero lands **nothing** while the call
+  returns 200 and the report says `enqueued`. Only an authoritative stats
+  correction (`authoritative_stats_correction=True`, data-platform) replaces a
+  stored value. So: **if credits were removed and the total should go DOWN,
+  fastlane/recalculate will never do it, no matter how many times it is
+  re-fired.** Say so and escalate to data-platform instead of re-running.
+  (W34 ops review: l1lroldyy stayed at 409,967,846 against an expected
+  ~23,718,036, and Sleiman Damien at 2,850,231,232 against ~1,590,766,105,
+  through repeated "successful" recalculations. The recalculations were not
+  broken — they are structurally incapable of lowering a number.)
 
 ## Out of scope (do not improvise these here)
 

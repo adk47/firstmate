@@ -165,6 +165,18 @@ export interface IntercomSessionState {
   updatedAt: string;
   knownFacts?: KnownFacts;
   escalationFiredAt?: string | null;
+  // ClickUp ticket id from the escalation's Step 2, kept so a rollback of
+  // `escalationFiredAt` (both farewell AND Slack failed, so the retry must be
+  // allowed) does not also re-file the ticket that already exists. The escalation
+  // path deliberately skips the open-ticket dedupe (see clickup.ts) on the premise
+  // that it fires at most once per conversation — this field is what keeps that
+  // premise true across a rollback. Survives rollback ON PURPOSE.
+  escalationTicketId?: string | null;
+  // The suggestedActionType the ticket above was FILED with. The ticket carries
+  // that action's tier, priority and ClickUp due date, and a retry can arrive
+  // with a different assessment — so the SLA quoted to the customer must be
+  // derived from this, not from whatever the retry reassessed.
+  escalationTicketActionType?: string | null;
   // Dedup gate for the priority signal (Lane A). Set once per conversation the
   // first time Caroline's `[[PRIORITY]]` token fires, so we tag the conversation
   // `ai:data-complaint` (for the systemic watchdog's count) only once. Distinct

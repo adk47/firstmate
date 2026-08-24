@@ -241,6 +241,113 @@ describe("executeEscalation", () => {
     expect(errors.some((m) => m.includes("[intercom:ALERT]") && m.includes("rolled back"))).toBe(true);
   });
 
+  // WHY: the rollback above re-opens the escalation gate so the next webhook can
+  // retry the farewell/Slack delivery. But the ClickUp ticket was already created
+  // in Step 2, and its id was thrown away with the local — so the retry filed a
+  // SECOND ticket for the same conversation. clickup.ts deliberately skips the
+  // open-ticket dedupe on the premise that "escalation fires at most once per
+  // conversation (escalationFiredAt gate)", and this rollback is precisely what
+  // falsifies that premise. Result: duplicate Conversation-link groups in ClickUp
+  // (W34 ops review). Retrying delivery is correct; re-filing the ticket is not.
+  it("remembers a created ticket across a rollback so the retry does not file a second", async () => {
+    const state = makeState();
+    let ticketCalls = 0;
+    const deps = () => ({
+      state,
+      conversationId: "conv1",
+      assessment,
+      currentMessage: "i want a refund",
+      account,
+      client: {
+        replyToConversation: async () => { throw new Error("intercom 503"); },
+        assignConversation: async () => {},
+        getConversation: async () => ({} as any),
+      },
+      saveState: async () => {},
+      createTicket: async () => { ticketCalls += 1; return { ok: true as const, ticketId: "T-DUP", sla: "5-10 business days" }; },
+      postSlack: async () => { throw new Error("slack down"); },
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    });
+
+    await executeEscalation(deps());
+    // The gate is re-opened so delivery can be retried...
+    expect(state.escalationFiredAt).toBeNull();
+    // ...but the ticket that DID get created must survive the rollback.
+    expect(state.escalationTicketId).toBe("T-DUP");
+
+    // Next inbound message re-escalates. It must reuse the ticket, not file another.
+    await executeEscalation(deps());
+    expect(ticketCalls).toBe(1);
+  });
+
+  // WHY: the reused ticket's tier — and therefore its ClickUp due date — was
+  // fixed when it was FILED. A retry arrives with a fresh assessment, which can
+  // land on a different action type (a later message reassessed as
+  // support-general, or an explicit-human request bypassing the gate). Deriving
+  // the SLA from that assessment tells the customer "2 business days" about a
+  // Tier 3 refund ticket that is actually due in 5-10 — a promise nothing in
+  // ClickUp will keep.
+  it("quotes the reused ticket's own SLA, not one recomputed from the retry's assessment", async () => {
+    const state = makeState();
+    const farewells: string[] = [];
+    const deps = (a: RiskAssessment) => ({
+      state,
+      conversationId: "conv1",
+      assessment: a,
+      currentMessage: "i want a refund",
+      account,
+      client: {
+        replyToConversation: async (p: { body: string }) => { farewells.push(p.body); throw new Error("intercom 503"); },
+        assignConversation: async () => {},
+        getConversation: async () => ({} as any),
+      },
+      saveState: async () => {},
+      createTicket: async () => ({ ok: true as const, ticketId: "T-REFUND", sla: "5-10 business days" }),
+      postSlack: async () => { throw new Error("slack down"); },
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    });
+
+    // First attempt: a refund → Tier 3 ticket, 5-10 business days. Both delivery
+    // signals fail, so the gate rolls back and the ticket is remembered.
+    await executeEscalation(deps(assessment));
+    expect(state.escalationTicketId).toBe("T-REFUND");
+
+    // The retry reassesses as plain support (Tier 1, "2 business days").
+    await executeEscalation(deps({ ...assessment, reason: "support", suggestedActionType: "support-general" }));
+    expect(farewells).toHaveLength(2);
+    expect(farewells[1]).toContain("T-REFUND");
+    expect(farewells[1]).toContain("5-10 business days");
+    expect(farewells[1]).not.toContain("2 business days");
+  });
+
+  it("files a ticket on retry when the first attempt never created one", async () => {
+    // The mirror case: a rollback after a FAILED ticket creation must still allow
+    // the retry to file one, or a stranded customer gets no ticket at all.
+    const state = makeState();
+    let ticketCalls = 0;
+    const deps = () => ({
+      state,
+      conversationId: "conv1",
+      assessment,
+      currentMessage: "i want a refund",
+      account,
+      client: {
+        replyToConversation: async () => { throw new Error("intercom 503"); },
+        assignConversation: async () => {},
+        getConversation: async () => ({} as any),
+      },
+      saveState: async () => {},
+      createTicket: async () => { ticketCalls += 1; return { ok: false as const, error: "ClickUp 401" }; },
+      postSlack: async () => { throw new Error("slack down"); },
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    });
+
+    await executeEscalation(deps());
+    expect(state.escalationTicketId).toBeFalsy();
+    await executeEscalation(deps());
+    expect(ticketCalls).toBe(2);
+  });
+
   it("does NOT roll back when farewell succeeds even if Slack fails", async () => {
     const state = makeState();
     await executeEscalation({

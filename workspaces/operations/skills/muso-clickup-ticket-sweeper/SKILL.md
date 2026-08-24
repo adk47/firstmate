@@ -181,6 +181,16 @@ The goal is to quickly convert a messy ClickUp bucket into:
    - State how many were checked, how many were resolved, how many were kept
      open, how many customers were notified or drafted-only, and how many are
      left in the bucket.
+   - **Never let a ready customer message die as a count.** Intercom writes are
+     Aaron-only (`muso-intercom` SKILL.md), so every message you draft but
+     cannot send needs a human who *can* send it. For each ticket whose
+     `customer_message.mode` is `draft` with reason `no safe send path`, list it
+     by ticket id with its Intercom link and `<@U7RP6HKUZ>` (Aaron) — itemised,
+     never folded into the "drafted-only: N" aggregate. A draft parked in a
+     ClickUp comment plus a number in a summary reaches nobody: that is exactly
+     how an approved customer update went unsent in the W34 ops review. If the
+     count is non-zero and the itemised list is empty, the report is wrong —
+     fix it before posting.
    - Mention only high-signal blockers or unusual tool failures.
    - Use Slack mrkdwn: no tables, no markdown headings, links as `<url|label>`.
 
