@@ -228,11 +228,26 @@ The block decides mechanically and reports `$state`; act on it:
   id, and resume it instead of opening another:
 
   ```bash
-  repo=Muso-AI/core-backend   # from the Step 4 map, for THIS issue's project
+  # Derive the repo from the id's PROJECT via the Step 4 map. Hardcoding
+  # core-backend here would make a MUSO-AUTH-* or CREDITS-WEB-NEXT-* run search
+  # the wrong repo, find nothing, and license a duplicate PR - the false
+  # negative is silent, which is the worst shape for this check.
+  case "$short_id" in
+    CORE-BACKEND-*)      repo=Muso-AI/core-backend ;;
+    MUSO-AUTH-*)         repo=Muso-AI/auth ;;
+    CREDITS-WEB-NEXT-*)  repo=Muso-AI/web-credits-next ;;
+    *) echo "no repo mapping for $short_id -- cannot check for a dead run's PRs; STOP and map it first" >&2
+       exit 1 ;;
+  esac
+
+  # Guard the query. An unguarded `gh pr list` that fails (auth, transport)
+  # returns empty, which is indistinguishable from "no prior PRs" and licenses
+  # the duplicate this check exists to prevent. Absence must be PROVEN.
   existing=$(gh pr list --repo "$repo" --state open --search "$short_id" \
-               --json url,headRefName --jq '.[] | "\(.url) (\(.headRefName))"')
+               --json url,headRefName --jq '.[] | "\(.url) (\(.headRefName))"') \
+    || { echo "could not query $repo for existing PRs -- treat as UNKNOWN, not as none; STOP" >&2; exit 1; }
   if [ -n "$existing" ]; then
-    echo "a previous run already opened work for $short_id:"
+    echo "a previous run already opened work for $short_id in $repo:"
     printf '%s\n' "$existing"
     echo "RESUME these -- do not open a second branch/PR pair."
   fi

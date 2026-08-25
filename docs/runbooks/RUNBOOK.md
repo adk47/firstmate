@@ -1500,14 +1500,76 @@ mv "$tmp" "$cfg" || { rm -f "$tmp"; echo "rename failed - live config untouched"
 echo "registered and scoped; the gateway will restart once in-flight tasks drain"
 ```
 
-**Verify after the restart drains**, before trusting the scoping:
+**The nine ids above are a FLOOR, not the authority.** They are what this
+endpoint exposed when the runbook was written; the remote server serves whatever
+MCP skills are active for the token, so the real inventory can be larger (the
+catalog also reaches further tools *through* `sentry__execute_sentry_tool`,
+which is why denying that one matters most). A literal list written ahead of
+registration can only ever be a guess - so **reconcile against what the gateway
+actually registered**, after the restart drains, and fail loud on any gap:
 
 ```bash
+cfg=/root/.openclaw-main/openclaw.json
+
+# Enumerate from the CONNECTED catalog. `mcp list --json` returns the configured
+# mcp.servers definitions and has NO .tools[] (verified: it returns `{}` here),
+# and a journal grep can only prove that SOME id appeared in recent lines - if
+# the window happens to mention one tool, a naive check passes and reports
+# "reconciled" while every other tool stays un-denied. That false green is worse
+# than the hardcoded list it replaced, so journal output stays diagnostic only.
+#
+# `mcp probe` connects and lists real capabilities. Its shape is
+# {generatedAt, servers, tools:[], diagnostics:[]} and it exits 0 WITH AN EMPTY
+# tools[] when nothing is reachable - so rc is not the gate, emptiness is.
+probe=$(openclaw --profile main mcp probe sentry --json) \
+  || { echo "mcp probe failed - cannot prove the deny list is complete; STOP" >&2; exit 1; }
+
+actual=$(jq -r '
+  (.tools // [])
+  | map(if type == "string" then . else (.id // .name // empty) end)
+  | map(select(. != null and . != ""))
+  | map(if startswith("sentry") then . else "sentry__" + . end)
+  | unique[]' <<<"$probe" | sort -u)
+
+[ -n "$actual" ] || {
+  echo "mcp probe returned NO tools for sentry - the catalog is unproven, so the" >&2
+  echo "deny list cannot be called complete. Do NOT proceed on the assumption" >&2
+  echo "that the nine hardcoded ids cover it." >&2
+  exit 1; }
+echo "probed catalog ($(printf '%s\n' "$actual" | wc -l | tr -d ' ') tools): $(printf '%s ' $actual)"
+
+# Capture and VALIDATE the agent list before the loop. `for agent in $(jq ...)`
+# fails OPEN: if $cfg is unreadable or has no .agents.list, the substitution is
+# empty, the loop body never runs, gap stays 0, and the block reports
+# "reconciled" having checked nothing. Same false-green shape as the journal
+# fallback above -- an absent result must never read as a clean result.
+agents=$(jq -e -r '
+  if (.agents.list | type) != "array" or (.agents.list | length) == 0
+  then error("no .agents.list array")
+  else .agents.list[].id end' "$cfg") \
+  || { echo "cannot read .agents.list from $cfg - scoping is UNVERIFIED; STOP" >&2; exit 1; }
+
+# and there must be at least one non-cto/qa agent to check, or the pass is vacuous
+[ "$(printf '%s\n' "$agents" | grep -vcE '^(cto|qa)$')" -gt 0 ] \
+  || { echo "no non-cto/qa agents found - refusing to report a vacuous pass" >&2; exit 1; }
+
+# every probed id must be denied for every agent except cto/qa
+gap=0
+for agent in $agents; do
+  case "$agent" in cto|qa) continue ;; esac
+  denied=$(jq -r --arg a "$agent" '.agents.list[] | select(.id==$a) | (.tools.deny // [])[]' "$cfg" | sort -u)
+  missing=$(comm -23 <(printf '%s\n' "$actual") <(printf '%s\n' "$denied"))
+  [ -n "$missing" ] && { echo "GAP $agent: $(printf '%s ' $missing)" >&2; gap=1; }
+done
+[ "$gap" -eq 0 ] || { echo "deny list is INCOMPLETE against the probed catalog - widen it and re-apply" >&2; exit 1; }
+
 openclaw --profile main mcp list | grep -i sentry
-jq -r '.agents.list[] | "\(.id): \((.tools.deny // []) | map(select(startswith("sentry__"))) | length)"' \
-  /root/.openclaw-main/openclaw.json
-# expect 0 for cto and qa, 9 for every other agent
+echo "scoping reconciled against the probed catalog"
 ```
+
+If this reports a gap, add the missing ids to the `ids` array above and re-run
+the registration transform - do not leave the difference unscoped on the
+assumption that the extra tools are harmless.
 
 ### The deny list is required, but it is NOT an isolation boundary
 

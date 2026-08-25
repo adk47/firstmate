@@ -203,3 +203,62 @@ now_ts() { python3 -c "import datetime;print(datetime.datetime.now(datetime.time
   run jq -r '.short_id' "$LEDGER"
   [ "$output" = "X-1" ]
 }
+
+# ---- stale-lease recovery: project -> repo mapping + guarded query ---------
+# This block decides WHICH repo to search for a dead run's PRs. A typo mapping
+# MUSO-AUTH-* back to core-backend, or dropping the `||` so an auth/transport
+# error reads as "no PRs", both produce the same silent duplicate PR this
+# recovery exists to prevent -- with CI green either way.
+
+setup_recovery() {
+  REC="$BATS_TEST_TMPDIR/recovery.sh"
+  awk '/^  # Derive the repo from the id.s PROJECT via the Step 4 map/ {grab=1}
+       grab {line=$0; sub(/^  /,"",line); print line; if (line=="fi") exit}' \
+    "$SKILL" > "$REC"
+  [ -s "$REC" ] || fail "could not extract the stale-recovery block"
+  # the block reads $short_id from the caller
+  sed -i.bak '1i\
+short_id="$1"
+' "$REC"
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+}
+
+stub_gh_ok()   { printf '#!/bin/sh\nexit 0\n'  > "$BATS_TEST_TMPDIR/bin/gh"; chmod +x "$BATS_TEST_TMPDIR/bin/gh"; }
+stub_gh_fail() { printf '#!/bin/sh\nexit 1\n'  > "$BATS_TEST_TMPDIR/bin/gh"; chmod +x "$BATS_TEST_TMPDIR/bin/gh"; }
+
+@test "recovery: CORE-BACKEND-* searches core-backend" {
+  setup_recovery; stub_gh_ok
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash -c '. "$1" CORE-BACKEND-K9; echo "repo=$repo"' _ "$REC"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"repo=Muso-AI/core-backend"* ]]
+}
+
+@test "recovery: MUSO-AUTH-* searches auth, NOT core-backend" {
+  setup_recovery; stub_gh_ok
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash -c '. "$1" MUSO-AUTH-42; echo "repo=$repo"' _ "$REC"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"repo=Muso-AI/auth"* ]]
+  [[ "$output" != *"core-backend"* ]]
+}
+
+@test "recovery: CREDITS-WEB-NEXT-* searches web-credits-next" {
+  setup_recovery; stub_gh_ok
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash -c '. "$1" CREDITS-WEB-NEXT-7; echo "repo=$repo"' _ "$REC"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"repo=Muso-AI/web-credits-next"* ]]
+}
+
+@test "recovery: an unmapped id REFUSES rather than guessing a repo" {
+  setup_recovery; stub_gh_ok
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash -c '. "$1" FLUTTER-19H' _ "$REC"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no repo mapping"* ]]
+}
+
+@test "recovery: a FAILED gh query is UNKNOWN, never 'no prior PRs'" {
+  setup_recovery; stub_gh_fail
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash -c '. "$1" CORE-BACKEND-K9' _ "$REC"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"treat as UNKNOWN"* ]]
+  [[ "$output" != *"RESUME"* ]]
+}

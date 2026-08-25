@@ -111,3 +111,109 @@ run_block() { printf '%s\n' "$1" | bash "$BLOCK"; }
   run bash -c "ls $(dirname "$CFG")/tmp.* 2>/dev/null | wc -l | tr -d ' '"
   [ "$output" = "0" ]
 }
+
+# ---- deny-list reconciliation against the PROBED catalog -------------------
+# `mcp list --json` has no .tools[] (it returns the configured definitions), and
+# a journal grep only proves SOME id appeared recently -- if the window mentions
+# one tool, a naive check reports "reconciled" while the rest stay un-denied.
+# These cases pin that the enumeration comes from `mcp probe` and fails closed.
+
+setup_reconcile() {
+  RCFG="$BATS_TEST_TMPDIR/rcfg.json"
+  cat > "$RCFG" <<'JSON'
+{"agents":{"list":[{"id":"cto"},{"id":"qa"},
+ {"id":"cmo","tools":{"deny":["sentry__search_issues","sentry__find_projects"]}},
+ {"id":"scout","tools":{"deny":["sentry__search_issues","sentry__find_projects","sentry__get_trace_details"]}}]}}
+JSON
+  RECON="$BATS_TEST_TMPDIR/recon.sh"
+  awk '/^# Enumerate from the CONNECTED catalog/ {grab=1}
+       grab {print; if ($0 ~ /^echo "scoping reconciled/) exit}'     "$HYDRA_REPO/docs/runbooks/RUNBOOK.md" > "$RECON"
+  [ -s "$RECON" ] || fail "could not extract the reconciliation block"
+  sed -i.bak '/^openclaw --profile main mcp list | grep -i sentry$/d' "$RECON"
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+}
+
+# $1 = JSON that the stubbed `openclaw mcp probe` should emit
+stub_probe() {
+  printf '#!/bin/sh
+cat <<'"'"'P'"'"'
+%s
+P
+exit 0
+' "$1" > "$BATS_TEST_TMPDIR/bin/openclaw"
+  chmod +x "$BATS_TEST_TMPDIR/bin/openclaw"
+}
+
+@test "reconcile: ALL probed tool ids are enumerated, not just one" {
+  setup_reconcile
+  stub_probe '{"tools":[{"name":"search_issues"},{"name":"find_projects"},{"name":"get_trace_details"},{"name":"execute_sentry_tool"}]}'
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
+  [ "$status" -ne 0 ]                       # cmo is missing two of them
+  [[ "$output" == *"probed catalog (4 tools)"* ]]
+  [[ "$output" == *"GAP cmo"* ]]
+  [[ "$output" == *"sentry__get_trace_details"* ]]
+  [[ "$output" == *"sentry__execute_sentry_tool"* ]]
+}
+
+@test "reconcile: passes only when every agent denies every probed id" {
+  setup_reconcile
+  stub_probe '{"tools":[{"name":"search_issues"},{"name":"find_projects"}]}'
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"scoping reconciled against the probed catalog"* ]]
+}
+
+@test "reconcile: an EMPTY probe refuses instead of reporting success" {
+  # probe exits 0 with tools:[] when nothing is reachable, so rc is not the gate
+  setup_reconcile
+  stub_probe '{"generatedAt":"x","servers":{},"tools":[],"diagnostics":[]}'
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"catalog is unproven"* ]]
+  [[ "$output" != *"reconciled"* ]]
+}
+
+@test "reconcile: a failing probe refuses" {
+  setup_reconcile
+  printf '#!/bin/sh
+exit 1
+' > "$BATS_TEST_TMPDIR/bin/openclaw"
+  chmod +x "$BATS_TEST_TMPDIR/bin/openclaw"
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"mcp probe failed"* ]]
+  [[ "$output" != *"reconciled"* ]]
+}
+
+@test "reconcile: an unreadable config refuses instead of a vacuous pass" {
+  # `for agent in $(jq ...)` fails OPEN: a broken cfg yields no loop items, gap
+  # stays 0, and the block would report "reconciled" having checked no agent.
+  setup_reconcile
+  stub_probe '{"tools":[{"name":"search_issues"}]}'
+  echo '{ not valid json' > "$RCFG"
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"scoping is UNVERIFIED"* ]]
+  [[ "$output" != *"reconciled"* ]]
+}
+
+@test "reconcile: a config with no .agents.list refuses" {
+  setup_reconcile
+  stub_probe '{"tools":[{"name":"search_issues"}]}'
+  echo '{"agents":{"defaults":{}}}' > "$RCFG"
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"scoping is UNVERIFIED"* ]]
+  [[ "$output" != *"reconciled"* ]]
+}
+
+@test "reconcile: a cto/qa-only fleet refuses a vacuous pass" {
+  # nothing to check is not the same as everything checked
+  setup_reconcile
+  stub_probe '{"tools":[{"name":"search_issues"}]}'
+  echo '{"agents":{"list":[{"id":"cto"},{"id":"qa"}]}}' > "$RCFG"
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"vacuous pass"* ]]
+  [[ "$output" != *"reconciled"* ]]
+}
