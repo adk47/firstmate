@@ -10,7 +10,7 @@ compatibility: |
   Requires `muso` (reads); writes via `qa-gh.sh` (review),
   `qa-review-status.sh` (status), `qa-pr-approve.sh` (approval); `pnpm`.
 metadata:
-  version: "2.0"
+  version: "2.1"
   source-repo: "Muso-AI/hydra"
 allowed-tools:
   - exec
@@ -20,6 +20,10 @@ allowed-tools:
 
 Bundle → 8-lens analysis → Slack summary → approval → batched review.
 Relay your summary to whoever delegated this, not CTO.
+
+Three verdicts, not two: **GO**, **NO-GO**, and **CANNOT REVIEW** (the tool
+failed; nothing was reviewed). All three are defined below; CANNOT REVIEW has
+its own section because getting it wrong costs a whole diagnostic cycle.
 
 ## Auto mode (AUTO-REVIEW dispatch, no human in the loop)
 
@@ -52,6 +56,10 @@ ARE the authorization. Message carries the author's Slack UID.
   authorized. **Block on unresolved issues, never on unresolved paperwork.**
 - Publish `qa-review` status before the DM — required on
   `.merge_gate_repos`. Never merge; close with a threaded DM, ✅/⛔ + link.
+  **If you could not review at all, the verdict is CANNOT REVIEW, not NO-GO** —
+  see the "CANNOT REVIEW" section. There is no human in this thread to notice
+  the difference for you, which is exactly why the token has to be in the
+  output.
   **Report what the wrapper's post-check ACTUALLY says, not what the policy
   predicts.** `.require_human_codeowner_repos` only bites where the repo is
   ALSO in `identity.app_repos` — a GitHub App can never be a CODEOWNER, but
@@ -95,27 +103,128 @@ installation token to stdout, which would land in the session transcript. Only
 
 Bundle fields: `pr` (title, body, author, baseRefName, headRefName, state,
 isDraft, additions, deletions, changedFiles, headRefOid), `files[]`
-(path, status, patch), `diff`, `checks`, `threads[]`, `rebaseIntegrity`
-(parsed report or `null`).
+(path, status, patch, additions, deletions), `diff`, `diffSource`,
+`checks`, `threads[]`, `rebaseIntegrity` (parsed report or `null`).
 
 ### Check the bundle's integrity flags FIRST — before reviewing
 
-The bundle reports when its own view is incomplete. Both are fail-closed
-signals: acting on a partial view is how a real blocker gets missed.
+The bundle reports when its own view is incomplete. These are fail-closed
+signals: acting on a partial view is how a real blocker gets missed. Every one
+of them is a **CANNOT REVIEW** condition, never a NO-GO — see "CANNOT REVIEW"
+below for why the distinction is load-bearing and how to publish it.
 
 - **`filesCountMismatch` set** → `pr.changedFiles` disagrees with the number of
   files returned. You are looking at an incomplete diff. Do NOT review it and do
-  NOT approve. Post NO-GO, say the file list could not be verified, and stop.
+  NOT approve. Post **CANNOT REVIEW**, say the file list could not be verified,
+  and stop.
 - **`threadsTruncated` true** → more unresolved threads exist than the bundle
   returned (page cap). Carry-forward is therefore unreliable, and an unresolved
   blocker may be invisible to you. Re-query with
   `muso gh threads "$PR" --repo "$OWNER/$REPO" --json` (it hard-fails rather than
-  silently truncating). If it still cannot return a complete list, post NO-GO and
-  say so — never approve off a truncated thread list.
+  silently truncating). If it still cannot return a complete list, post
+  **CANNOT REVIEW** and say so — never approve off a truncated thread list.
+- **`diffSource` is `"per-file-patches"`** → `diff` is not GitHub's own bytes.
+  GitHub refused the whole-PR diff for size (its 20,000-line cap) and the CLI
+  reassembled it from the paginated per-file patches. **That is a normal,
+  reviewable bundle — review it as usual.** It is how a release promotion above
+  the cap gets reviewed at all; before it existed the whole bundle died and the
+  PR got a bare NO-GO (web-credits-next#740, 2026-08-25: 234 files / 15,730
+  lines). Say one line in the review body that the diff was paged per file, so
+  the reader knows why the byte-for-byte diff differs from `gh pr diff`.
+  (An **absent** `diffSource` means the deployed `muso` predates this field —
+  read it as `"pr-diff"`, because that older CLI has no fallback at all: on an
+  over-cap diff it fails the whole bundle, which is the last bullet below. Never
+  read an absent field as "degraded".)
+- **`diffDegraded.filesWithoutPatch` non-empty** → those files' textual changes
+  are INVISIBLE to you: GitHub suppressed their patch for size. Binary files are
+  never listed here (they carry no reviewable text either way), so every name in
+  this list is a real hole. Post **CANNOT REVIEW**, name the files, and stop —
+  reviewing the other 200 files and calling it GO would be a verdict about a
+  diff you did not see.
+- **`muso gh review-bundle` itself failed** (non-zero exit, no bundle at all) →
+  there is nothing to review. Post **CANNOT REVIEW** with the command's own
+  error, verbatim. Do not retry more than once, and never fall back to a
+  hand-assembled `gh pr diff`: if the bundle refused, its integrity checks
+  refused with it.
 
-Neither flag is a style nit. `scripts/qa-pr-approve.sh` refuses for these same
+None of these is a style nit. `scripts/qa-pr-approve.sh` refuses for the same
 reasons independently (Guards 7 and 11), so ignoring them here just moves the
 failure later and makes it more confusing.
+
+### The head you reviewed vs. the head the dispatch named
+
+The dispatch message carries `head commit <sha>` — the head **at dispatch
+time**. The bundle reads the PR's head as it is **now** (`pr.headRefOid`), and
+that is the correct thing to review: it is what the review, the status, and any
+approval are all keyed to. But the two can differ, because a push can land
+between the dispatch and the bundle.
+
+Compare them once, right after Step 1. If they differ, say so in one line in
+the review body and in the Slack DM: `Reviewed <pr.headRefOid[:7]> — the branch
+had moved from the dispatched <dispatch sha[:7]>.` This costs nothing and
+prevents the author reading a verdict as being about the commit they were told
+was reviewed. It is **not** a blocker: the bundle is internally consistent (the
+CLI re-reads head and base after gathering and refuses a mixed-revision bundle),
+and a newer head is more current, not less valid. Do not chase the branch — a
+further push will re-dispatch and get its own review.
+
+## CANNOT REVIEW — the third verdict (tool failure, not objection)
+
+**Added 2026-08-26, from web-credits-next#740.** That release PR (234 files /
+15,730 lines) blew past GitHub's 20,000-line whole-diff cap, the bundle died,
+and the bot posted a bare **NO-GO**. A NO-GO says *"I read this change and it is
+wrong."* Nothing had been read. The author and the orchestrator both spent a
+full diagnostic cycle hunting for the objection that did not exist.
+
+So there are **three** verdicts, and the third has its own token:
+
+| Verdict | Means | `qa-review` state | Approve? |
+|---|---|---|---|
+| `GO` | reviewed, no 🔴/🟡 | `success` | yes, if Step 7's gates pass |
+| `NO-GO` | reviewed, blocking findings | `failure` | no |
+| `CANNOT REVIEW` | **could not review — the tool failed** | `failure` | **no** |
+
+**CANNOT REVIEW is blocking.** It is not a softer NO-GO and it is emphatically
+not a GO: an unreviewed PR must not merge, and `qa-review` stays `failure`
+exactly as on a NO-GO. What changes is only that a human reading it knows the
+diff is not the problem. Fail-closed in the direction of "blocking but honest".
+
+**When to use it — any INFRASTRUCTURAL reason review is impossible**, not just
+the diff cap: a failed/degraded bundle (every case under "Check the bundle's
+integrity flags FIRST"), a 403/404 that hides the PR, an unreadable file list,
+a thread list that cannot be completed. If you could read the change and chose
+to block it, that is NO-GO. If you could not read the change, that is CANNOT
+REVIEW. **Never mix them in one verdict**, and never dress a tool failure up as
+a finding to make the verdict look normal.
+
+**How to publish it** — same three writes as any other review, with the token
+carried through all three so no reader has to infer it:
+
+1. **Review body** (Step 6, `event: COMMENT` as always). Lead with it and give
+   the reason in the same sentence:
+   `⛔ **Verdict: CANNOT REVIEW** — <what failed, concretely>.`
+   Then say what a human has to do. File **no** 🔴/🟡 findings you did not
+   actually derive from code — the counts are 0, and saying so is the honest
+   report.
+2. **Commit status** (Step 6). State is `failure`; the description **must start
+   with the literal `CANNOT REVIEW: `** — that prefix is what makes the merge
+   gate's red readable in the GitHub UI without opening the review:
+   ```bash
+   verdict_state=failure
+   verdict_desc="CANNOT REVIEW: diff exceeds GitHub's 20,000-line cap and could not be paged"
+   ```
+   Keep the reason short: `qa-review-status.sh` truncates at 140 chars, and the
+   prefix must survive.
+3. **Slack DM** (the closing threaded reply). `⛔` + the PR link + one line:
+   *not approved — QA could not review this (\<reason\>); this is a tool failure,
+   not a finding on your code.* Never report it as "found issues".
+
+**Never approve on a CANNOT REVIEW**, for any reason, including "CI is green
+and it is only a promotion". Step 7's gate is a GO verdict, and this is not one.
+`scripts/qa-approval-retry.sh` parses the token independently and will not
+re-ask for the approval either — its parser ranks CANNOT REVIEW above NO-GO
+precisely so a carried-forward `Verdict: GO` from an older head cannot be read
+as this head's verdict.
 
 ## Step 3 — Walk the 8-lens checklist (the review)
 
@@ -374,13 +483,16 @@ lands at all:**
 
 **Publish the verdict as a commit status** on **every** review — no
 terminal status hangs the PR unmergeable. **The state MUST track the verdict:
-`success` on GO, `failure` on NO-GO.** Publishing `success` after finding
-blockers turns the app-pinned required check green and defeats the merge gate —
-copy the variable, never the literal:
+`success` on GO, `failure` on NO-GO, `failure` on CANNOT REVIEW.** Publishing
+`success` after finding blockers turns the app-pinned required check green and
+defeats the merge gate — and publishing it after failing to review at all would
+be worse, because the PR would look reviewed. Copy the variable, never the
+literal:
 
 ```bash
-verdict_state=success                       # NO-GO  -> failure
-verdict_desc="GO — 0 blocking findings"     # NO-GO  -> "NO-GO — <N> blocking finding(s)"
+verdict_state=success                       # NO-GO -> failure; CANNOT REVIEW -> failure
+verdict_desc="GO — 0 blocking findings"     # NO-GO -> "NO-GO — <N> blocking finding(s)"
+                                            # CANNOT REVIEW -> "CANNOT REVIEW: <reason>"
 bash /opt/hydra/scripts/qa-review-status.sh "$OWNER/$REPO" "<pr.headRefOid>" \
   "$verdict_state" "$verdict_desc" "https://github.com/$OWNER/$REPO/pull/$PR/files"
 ```
@@ -416,13 +528,17 @@ thread on their behalf.
 deletions were intended and written that reasoning into the thread (Step 3);
 never resolve one you have not confirmed. Step 7 independently re-checks
 this + CI. **This is the gate that matters: block on unresolved issues, never
-on unresolved paperwork.**
+on unresolved paperwork.** And GO requires that you actually reviewed: if any
+CANNOT REVIEW condition fired, the verdict is CANNOT REVIEW regardless of how
+few findings the part you *could* see produced.
 
 ## Step 7 — Approve the PR (approve-only, gated)
 
 Approve **only** when BOTH hold:
 - your verdict is **GO** — no 🔴 Critical and no 🟡 Important findings, including any
-  carried-forward unresolved thread (see "Carry forward prior findings"); and
+  carried-forward unresolved thread (see "Carry forward prior findings"). A
+  **CANNOT REVIEW** verdict is not a GO and never becomes one: skip Step 7
+  entirely; and
 - the requester's Slack UID is on the approval allowlist, which has **two tiers**
   (changed 2026-08-13, authorized by Nick):
   - **Unscoped** — **Aaron** (`U7RP6HKUZ`) and **Nick** (`U0AL36NADEY`): any Muso-AI PR.
@@ -621,4 +737,10 @@ the alert is loud. If you swallow it, the trade is a straight loss.
   findings naturally; never mention `sessions_send`, workspaces, tiers, cron, or
   any internal routing in it.
 - **Large PRs**: the bundle returns the whole diff — don't try to hold a
-  3,000-line diff in one reasoning pass. Walk `files[]` file by file.
+  3,000-line diff in one reasoning pass. Walk `files[]` file by file. Past
+  GitHub's 20,000-line whole-diff cap `diff` is reassembled from those same
+  per-file patches (`diffSource: "per-file-patches"`), so walking `files[]` is
+  the identical procedure and the only thing that changes is the one line you
+  add to the body saying the diff was paged. **A big PR is a longer review, not
+  an unreviewable one** — reach for CANNOT REVIEW only when a named tool failure
+  actually hid something from you, never because the diff was tiring.

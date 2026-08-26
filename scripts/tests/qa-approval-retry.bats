@@ -335,6 +335,45 @@ No Critical or Important findings.'
   [ "$output" = "none" ]
 }
 
+# ── CANNOT REVIEW: a tool failure, not a code objection ──────────────────
+# Added 2026-08-26 after web-credits-next#740, where the diff exceeded
+# GitHub's 20,000-line whole-diff cap, no review was possible at all, and
+# the bot posted a bare NO-GO — indistinguishable from "the bot objects to
+# this release". The token exists so humans and this lane can tell
+# tool-failure from objection. It must NEVER read as GO.
+
+@test "verdict: CANNOT REVIEW parses as CANNOT-REVIEW, never GO" {
+  run verdict_of '**Verdict: CANNOT REVIEW** — the diff exceeded GitHub 20,000-line cap.'
+  [ "$status" -eq 0 ]
+  [ "$output" = "CANNOT-REVIEW" ]
+}
+
+@test "verdict: heading and hyphenated spellings both parse" {
+  run verdict_of '## Verdict: CANNOT-REVIEW'
+  [ "$status" -eq 0 ]
+  [ "$output" = "CANNOT-REVIEW" ]
+  run verdict_of 'verdict: cannot review — the file list could not be verified'
+  [ "$status" -eq 0 ]
+  [ "$output" = "CANNOT-REVIEW" ]
+}
+
+@test "verdict: CANNOT REVIEW beside a GO elsewhere still refuses to be GO" {
+  # The severity order is CANNOT REVIEW > NO-GO > GO. A body that carries a
+  # prior GO in its carry-forward section must not be approved on the
+  # strength of it when this head could not be reviewed at all.
+  run verdict_of '**Verdict: CANNOT REVIEW** — diff unfetchable.
+
+**Carry-forward:** the prior review was **Verdict: GO** on the old head.'
+  [ "$status" -eq 0 ]
+  [ "$output" = "CANNOT-REVIEW" ]
+}
+
+@test "verdict: the words 'cannot review' in prose are not a verdict" {
+  run verdict_of 'I cannot review the generated files, but everything else is fine. **Verdict: GO**'
+  [ "$status" -eq 0 ]
+  [ "$output" = "GO" ]
+}
+
 # ── Sweep behaviour ──────────────────────────────────────────────────────
 
 @test "GO verdict on the live head with no approval asks the wrapper" {
@@ -344,6 +383,20 @@ No Critical or Important findings.'
   run grep -c "Muso-AI/web-credits-next 636 U03LP8YHLPK" "$APPROVE_CALLS"
   [ "$status" -eq 0 ]
   [ "$output" = "1" ]
+}
+
+@test "CANNOT REVIEW verdict never asks the wrapper, and says so in the log" {
+  export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMMENTED","commit_id":"abc123","submitted_at":"2026-08-17T10:08:28Z","body":"**Verdict: CANNOT REVIEW** — GitHub refused the diff (20,000-line cap)."}]'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # Assert on the tick's own output BEFORE any other `run` clobbers it.
+  # Silence would leave an unreviewed PR with nothing saying a human has to
+  # look at it — being distinguishable is the entire point of the token.
+  [[ "$output" == *"CANNOT REVIEW"* ]]
+  [[ "$output" == *"tool failure, not a code objection"* ]]
+  run wc -l < "$APPROVE_CALLS"
+  [ "$status" -eq 0 ]
+  [ "${output// /}" = "0" ]
 }
 
 @test "NO-GO verdict never asks the wrapper" {

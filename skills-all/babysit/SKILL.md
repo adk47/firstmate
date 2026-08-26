@@ -113,6 +113,12 @@ gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$
 - **A red status posted by a review bot is its NO-GO verdict, not a CI failure.**
   Distinguish a bot-posted commit status (the bot's approve/reject signal) from the real CI
   checks (build / test / lint). They go red for different reasons and need different fixes.
+  **A third case exists: read the status DESCRIPTION before you start fixing code.** A
+  `qa-review` failure whose description starts `CANNOT REVIEW:` is not an objection to the
+  diff at all — the bot could not SEE the change (diff over GitHub's size cap, partial file
+  list, truncated thread list). Nothing in the diff will clear it; the named tool failure has
+  to be fixed, or a human reviews the PR. Treating it as a code finding burns a full cycle
+  looking for a defect that was never reported (web-credits-next#740, 2026-08-25).
 - **`gh ... --jq` is gojq** (not local jq) — validate emoji / `test()` filters with real
   `gh` when unsure.
 - **A review bot can post COMMENT-not-approved if it reviewed mid-CI** (a race); a clean

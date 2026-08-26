@@ -202,16 +202,29 @@ fi
 # then hinge on section ordering someone is free to change. Preferring NO-GO
 # is the fail-closed direction: the worst case is that a genuinely-GO PR is
 # left for a human, never that a blocked PR is approved.
+#
+# CANNOT REVIEW (added 2026-08-26) is the THIRD token, and it is not a code
+# objection: it means the bot could not see the change at all — an
+# infrastructural failure (the diff would not fetch, the file list was
+# partial, the thread list was truncated). It used to be posted as a NO-GO,
+# which is how web-credits-next#740 read as "the bot objects to this
+# release" when the bot had in fact reviewed nothing. It is matched here for
+# ONE reason: so a body carrying it can never fall through to a lucky "GO"
+# from some other sentence, and so this lane's log says which of the two
+# non-approving outcomes it saw. It ranks ABOVE NO-GO in the precedence
+# below because it is the more severe statement — NO-GO means "I read it and
+# it is wrong", CANNOT REVIEW means "I could not read it". Neither approves.
 qar_verdict() {
   local body="$1" toks
   toks="$(printf '%s' "$body" \
-    | grep -oiE 'verdict[[:space:]*_#:]*[[:space:]]*(NO-GO|GO)([^A-Za-z-]|$)' \
-    | grep -oiE '(NO-GO|GO)' \
+    | grep -oiE 'verdict[[:space:]*_#:]*[[:space:]]*(CANNOT[[:space:]_-]+REVIEW|NO-GO|GO)([^A-Za-z-]|$)' \
+    | grep -oiE '(CANNOT[[:space:]_-]+REVIEW|NO-GO|GO)' \
     | tr '[:lower:]' '[:upper:]' || true)"
   case "$toks" in
-    *NO-GO*) echo "NO-GO" ;;
-    *GO*)    echo "GO" ;;
-    *)       echo "none" ;;
+    *CANNOT*REVIEW*) echo "CANNOT-REVIEW" ;;
+    *NO-GO*)         echo "NO-GO" ;;
+    *GO*)            echo "GO" ;;
+    *)               echo "none" ;;
   esac
 }
 
@@ -746,6 +759,16 @@ for repo in "${REPOS[@]}"; do
     if [ "$verdict" != "GO" ]; then
       # NO-GO is the reviewer doing its job; "none" is an unparseable body.
       # Neither is a candidate, and neither is an error.
+      #
+      # CANNOT-REVIEW is neither of those and is worth a line: the bot could
+      # not SEE the change (diff unfetchable, partial file list, truncated
+      # threads). Retrying cannot help — nothing about this lane re-fetches
+      # a diff — so it is skipped like the rest, but silently skipping it
+      # would leave a PR sitting unreviewed with nothing in the log saying
+      # a human has to look. Logged, never retried, never approved.
+      if [ "$verdict" = "CANNOT-REVIEW" ]; then
+        log "SKIP: $repo#$pr — the review verdict is CANNOT REVIEW (the bot could not see the change; this is a tool failure, not a code objection). A human must review it; this lane cannot repair it."
+      fi
       skipped=$((skipped + 1)); continue
     fi
 
