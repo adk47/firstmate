@@ -96,7 +96,7 @@ source "$SCRIPT_DIR/lib/muso-env-preflight.sh"
 # pair but keeps the generic MUSO_ADMIN_* as a production-only fallback
 # (internal/auth/env.go), which is what node-8's main.env carries; only
 # `--env dev` fails closed, and node-8 has no dev pair to begin with.
-MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.13.1}"
+MUSO_CLI_VERSION="${MUSO_CLI_VERSION:-0.13.3}"
 
 # FLOOR — the oldest muso the skills in THIS tree can actually run against.
 # The default above is overrideable (`MUSO_CLI_VERSION=0.11.1 scripts/deploy.sh`),
