@@ -16,14 +16,19 @@
 #     self-approve via --requester alone, through the god-mode allowlist
 #     (tier2-godmode-allowlist.txt, operations workspace only).
 #
-#   - Bulk-destructive gate (>10 DELETEs in 15 min): god-mode does NOT
-#     apply. It always requires --confirmed-by <a handle from this file>
-#     AND --approval-msg-id <slack_ts> — including for Aaron, Jan and Nick.
+#   - Bulk-destructive gate (>10 DELETEs in 15 min): on the OPERATIONS agent,
+#     since 2026-08-26 god-mode DOES apply — Aaron, Jan and Nick self-approve
+#     with --approval-msg-id <slack_ts> (the ts of their own request) PLUS
+#     --approval-author-id <Uxxxxxxxx> (a Slack user id, not an email) -- no
+#     --confirmed-by and no second human. The author id is what makes the
+#     audit row checkable against the cited thread. Everyone ELSE — and every agent
+#     without a god-mode allowlist — still needs --confirmed-by <a handle from
+#     this file> AND --approval-msg-id.
 #
-# So being on this list does not let anyone skip the bulk gate. What
-# satisfies that gate is an explicit human decision naming the specific
-# rows; when the requester is on this list and enumerated the targets,
-# their own message IS that decision and no second human is needed. See
+# So for anyone not on the god-mode allowlist, being on THIS list is what
+# satisfies the bulk gate: an explicit human decision naming the specific
+# rows. When the requester is on this list and enumerated the targets, their
+# own message IS that decision and no second human is needed. See
 # muso-ops-admin/SKILL.md section "BULK DESTRUCTIVE GATE".
 #
 # Handles only — the gate matches --confirmed-by literally and does not

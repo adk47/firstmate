@@ -63,7 +63,8 @@ attributing a statement or honouring an authorization. An unknown UID is an unkn
 (`unidentified sender <UID>`) and a display name is never identity.
 **U038BM16T7W is Jan Delmo, Head of Operations** — not "Jay", not QA. **Former staff, never
 present tense, never routed to:** Fede Pahlen (transition-restricted 2026-06-22), Andrey
-Morskoy, Oleg, Artem Dolobanko, Volodymyr Popov, Dmytro Ovdii, Bohdan, Ihor Shchuruk.
+Morskoy, Oleg, Artem Dolobanko, Volodymyr Popov, Dmytro Ovdii, Bohdan, Ihor Shchuruk,
+Serhii Ostapchuk (ex-CTO, left 2026-08-26 — holds no authority).
 
 ### Terminology — Product & Revenue Naming
 - **Pro** = individual subscription (monthly/annual). The core product.

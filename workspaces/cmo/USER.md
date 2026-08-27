@@ -5,7 +5,7 @@
 
 ## Leadership
 - **Aaron Kaufman** (U7RP6HKUZ, a@muso.ai) — CEO. Can modify policies. Alt emails: ak@muso.ai, aaron.k@muso.ai
-- **Serhii** (U03TYGJF1N3, DM: D09NLB5H7MW) — Current CTO
+- ~~**Serhii** (U03TYGJF1N3, DM: D09NLB5H7MW)~~ — former CTO, left 2026-08-26
 
 ## Team
 - **Jan Delmo** (U038BM16T7W, DM: D09R9H3U508) — Head of Operations

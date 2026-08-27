@@ -44,6 +44,34 @@ TIER2_AUDIT_PATH="${TIER2_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/tier2-audit.jsonl}"
 CREDIT_REJECT_AUDIT_PATH="${CREDIT_REJECT_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/credit-reject-audit.jsonl}"
 TIER2_APPROVERS_PATH="${TIER2_APPROVERS_PATH:-${SCRIPT_DIR}/../config/tier2-approvers.txt}"
 TIER2_ENDPOINTS_PATH="${TIER2_ENDPOINTS_PATH:-${SCRIPT_DIR}/../config/tier2-endpoints.txt}"
+# God-mode allowlist. The self-approve branch below ships in BOTH copies because
+# check-admin-api-gate-parity.sh requires identical safety logic -- but on THIS
+# copy it must never fire, and "the repo ships no allowlist here" is not enough
+# to guarantee that.
+#
+# Why: deploy.sh (see its RSYNC_EXCLUDES rationale) deliberately preserves a
+# SERVER-ONLY canonical tier2-godmode-allowlist.txt that the repo omits, and it
+# is present on node-8 at
+# /opt/hydra/skills-all/muso-ops-admin/config/tier2-godmode-allowlist.txt with
+# aaron/jan/nick in it. Defaulting to ${SCRIPT_DIR}/../config/ would pick that
+# file up the moment this branch deployed, handing bulk-DELETE self-approval to
+# every canonical caller -- including the support skills that execute this
+# script directly (customer-credit-removal, order-fulfillment). CI would not
+# have caught it: the placement gate inspects the CHECKOUT, where the file is
+# genuinely absent.
+#
+# So this copy points at a path that cannot exist. is_tier2_godmode_requester
+# fail-closes on a missing file, so god-mode is inert here BY CONSTRUCTION
+# rather than by the accident of what is or is not in a config directory. The
+# operations workspace copy resolves its own real allowlist and is unaffected.
+# check-no-canonical-godmode-allowlist.sh pins this default.
+# NOT overridable: assigned outright, with no ${TIER2_GODMODE_PATH:-...}
+# indirection. An env override on THIS copy could otherwise point it at the
+# operations allowlist and activate the branch for a non-operations caller, which
+# is precisely the bypass this constant exists to prevent. The operations
+# workspace copy keeps the overridable form -- its tests need fixtures, and
+# god-mode there is the intended behaviour.
+TIER2_GODMODE_PATH="/nonexistent/canonical-copy-has-no-god-mode"
 # Reverse-direction guard window. A second merge that points the OTHER way
 # within this many seconds is the 2026-04-29 incident pattern; refuse it.
 TIER2_REVERSE_WINDOW_SECS="${TIER2_REVERSE_WINDOW_SECS:-300}"
@@ -215,7 +243,6 @@ resolve_slack_to_email() {
     # Gated by scripts/tests/muso-admin-api-slack-resolve.bats.
     case "$input" in
         U7RP6HKUZ)   echo "aaron@muso.ai" ;;   # Aaron Kaufman (CEO)
-        U03TYGJF1N3) echo "serhii@muso.ai" ;;  # Serhii Ostapchuk (CTO)
         U038BM16T7W) echo "jan@muso.ai" ;;     # Jan Delmo (Head of Operations) — NOT jay@
         U0AL36NADEY) echo "nick@muso.ai" ;;    # Nicholas Sollazzo (Chief Agent Officer)
         U0A8CCTTAAG) echo "liza@muso.ai" ;;    # Liza Basco (Accountant)
@@ -662,6 +689,26 @@ is_tier2_endpoint() {
     done < "$TIER2_ENDPOINTS_PATH"
     (( restore_extglob )) && shopt -u extglob
     return "$rc"
+}
+
+is_tier2_godmode_requester() {
+    local handle="$1"
+    [[ -n "$handle" ]] || return 1
+    [[ -f "$TIER2_GODMODE_PATH" ]] || return 1
+    local handle_lc
+    handle_lc="$(printf %s "$handle" | tr '[:upper:]' '[:lower:]')"
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        # Trim ALL surrounding whitespace incl. tabs and \r — IDE-saved
+        # files commonly carry trailing spaces or CRLF, and a fragile trim
+        # silently locks self-approving requesters out of god-mode.
+        line="$(printf %s "$line" | tr -d '[:space:]\r')"
+        [[ -z "$line" ]] && continue
+        local entry_lc
+        entry_lc="$(printf %s "$line" | tr '[:upper:]' '[:lower:]')"
+        [[ "$handle_lc" == "$entry_lc" ]] && return 0
+    done < "$TIER2_GODMODE_PATH"
+    return 1
 }
 
 is_tier2_approver() {
@@ -1188,22 +1235,165 @@ count_recent_destructive_ops() {
         "$BULK_DESTRUCTIVE_PATH" 2>/dev/null || echo 0
 }
 
-# enforce_bulk_destructive_gate METHOD PATH -> 0 allow / 1 block.
-# Runs in cmd_call after the merge guard, before the dry-run short-circuit.
+write_bulk_destructive_audit() {
+    local method="$1" path="$2" confirmed_by="$3" count="$4" bypass="${5:-}" godmode_path="${6:-}"
+
+    if ! mkdir -p "$(dirname "$BULK_DESTRUCTIVE_AUDIT_PATH")" 2>/dev/null; then
+        echo "MUSO_BULK_DESTRUCTIVE_AUDIT_UNWRITABLE: cannot create $(dirname "$BULK_DESTRUCTIVE_AUDIT_PATH") — refusing bulk-destructive write to preserve audit trail." >&2
+        return 1
+    fi
+    local ts audit_rc=0
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq -n -c \
+        --arg ts "$ts" \
+        --arg method "$method" \
+        --arg path "$path" \
+        --arg requester "${REQUESTER_EMAIL:-}" \
+        --arg confirmed_by "$confirmed_by" \
+        --arg approval_msg_id "$APPROVAL_MSG_ID" \
+        --argjson count_at_trip "$count" \
+        --argjson threshold "$BULK_DESTRUCTIVE_THRESHOLD" \
+        --argjson window_secs "$BULK_DESTRUCTIVE_WINDOW_SECS" \
+        --arg approval_author_id "$APPROVAL_AUTHOR_ID" \
+        --arg approval_channel "$APPROVAL_CHANNEL" \
+        --arg bypass "$bypass" \
+        --arg godmode_path "$godmode_path" \
+        '{ts:$ts, method:$method, path:$path, requester:$requester, confirmed_by:$confirmed_by, approval_msg_id:$approval_msg_id, count_at_trip:$count_at_trip, threshold:$threshold, window_secs:$window_secs, approval_author_id:$approval_author_id, approval_channel:$approval_channel}
+         + (if $bypass == "" then {} else {bypass:$bypass} end)
+         + (if $godmode_path == "" then {} else {godmode_allowlist:$godmode_path} end)' \
+        >> "$BULK_DESTRUCTIVE_AUDIT_PATH" || audit_rc=$?
+    if (( audit_rc != 0 )); then
+        echo "MUSO_BULK_DESTRUCTIVE_AUDIT_UNWRITABLE: append to $BULK_DESTRUCTIVE_AUDIT_PATH failed (rc=$audit_rc) — refusing bulk-destructive write to preserve audit trail." >&2
+        return 1
+    fi
+    return 0
+}
+
 enforce_bulk_destructive_gate() {
     local method="$1" path="$2"
     is_bulk_destructive_op "$method" "$path" || return 0
     is_dry_run_mode && return 0
 
-    local count
+    local count audit_confirmed_by="" audit_bypass="" audit_godmode_path=""
     count="$(count_recent_destructive_ops)"
     [[ "$count" =~ ^[0-9]+$ ]] || count=0
     if (( count >= BULK_DESTRUCTIVE_THRESHOLD )); then
-        # Threshold reached. Require an EXPLICIT second approval REGARDLESS of
-        # requester (do not exempt by requester identity; that omission is the
-        # point — the agent auto-stamps --requester with whoever is in-thread).
-        if [[ -z "$CONFIRMED_BY" ]]; then
-            cat >&2 <<EOF
+        # Threshold reached. Two ways past it, and only two.
+        #
+        # (1) GOD-MODE SELF-APPROVE (policy 2026-08-26). Aaron, Jan and Nick are
+        # co-equal on the operations surface and Jan owns it, so paging one of
+        # them to authorize what another already asked for is pure delay, not
+        # safety. They clear this gate themselves. What is still required is the
+        # AUDIT ANCHOR — --approval-msg-id, the ts of their own request message —
+        # so "who said delete these rows" stays answerable afterwards.
+        #
+        # This does NOT reopen incident 2026-05-26: that was 285 DELETEs off a
+        # VAGUE request ("sources aren't capturing, fix it"), and vagueness has
+        # no message to cite. Volume was never the problem. Anyone off the
+        # god-mode list is unchanged and still needs a real second approver, so
+        # the blast-radius cap stands for the whole rest of the org.
+        if is_tier2_godmode_requester "${REQUESTER_EMAIL:-}"; then
+            if [[ -z "$APPROVAL_MSG_ID" ]]; then
+                cat >&2 <<EOF
+MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_MSG_REQUIRED: ${count} destructive DELETE(s) in the last ${BULK_DESTRUCTIVE_WINDOW_SECS}s have reached the bulk threshold (${BULK_DESTRUCTIVE_THRESHOLD}).
+
+'${REQUESTER_EMAIL:-}' is on the god-mode allowlist and clears this gate alone. You do not need anyone else. Re-issue the SAME call with:
+    --approval-msg-id <slack_ts of THEIR request message>
+
+That timestamp is the audit anchor — it records which message authorized deleting these rows. Take it from the request you are already acting on; do not ask for a new one and do not wait.
+
+Two things this does not cover: if the request never named what to delete, read the rows back and post the list first (you cannot cite a decision that was not made). If a DIFFERENT set of rows comes up later, that is a new decision and needs its own message.
+EOF
+                return 1
+            fi
+            # PROVENANCE. Nothing here authenticates: every flag is a string the
+            # caller supplies, and that is equally true of the --confirmed-by path
+            # below (on the pre-2026-08-26 gate, `--confirmed-by jan
+            # --approval-msg-id x` was accepted just the same). What this branch
+            # must not do is make forging CHEAPER: --requester is auto-stamped
+            # from whoever is in-thread, so if the msg-id were any non-empty
+            # string, self-approval would cost the agent nothing deliberate.
+            #
+            # So require a citation that is checkable AFTER the fact:
+            #   - a real Slack ts shape, not a placeholder;
+            #   - the Slack id of the message AUTHOR, which must itself be an
+            #     allowlisted identity.
+            # Someone reading the audit row can then open that exact message and
+            # see whether it named these rows. Authenticating the citation
+            # against Slack at call time is the real fix and belongs in its own
+            # change -- it has to cover BOTH approval paths, not just this one.
+            if [[ ! "$APPROVAL_MSG_ID" =~ ^[0-9]{10}\.[0-9]{6}$ ]]; then
+                cat >&2 <<EOF
+MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_MSG_INVALID: --approval-msg-id '${APPROVAL_MSG_ID}' is not a Slack message timestamp.
+Expected the ts of THEIR request message, e.g. 1787416248.722279 (10 digits, a dot, 6 digits). Copy it from the message you are acting on; do not invent one and do not pass a placeholder.
+EOF
+                return 1
+            fi
+            if [[ -z "$APPROVAL_AUTHOR_ID" ]]; then
+                cat >&2 <<EOF
+MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_AUTHOR_REQUIRED: self-approval also needs --approval-author-id <Uxxxxxxxx>, the Slack id of whoever WROTE the message you are citing.
+Without it the audit row records only a timestamp and a handle you typed, which is indistinguishable from one you inferred. Pass the author id from the same message as --approval-msg-id. You still do not need anyone else's approval.
+EOF
+                return 1
+            fi
+            # Must be a Slack UID, not an email. resolve_slack_to_email echoes
+            # an unrecognised input straight back, so without this shape check
+            # `--approval-author-id jan@muso.ai` would sail through the
+            # allowlist match below and the flag would prove nothing beyond what
+            # --requester already claims. The point of naming an author is to
+            # name a Slack IDENTITY that can be looked up in the cited thread.
+            if [[ ! "$APPROVAL_AUTHOR_ID" =~ ^U[A-Z0-9]{6,}$ ]]; then
+                cat >&2 <<EOF
+MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_AUTHOR_INVALID: --approval-author-id '${APPROVAL_AUTHOR_ID}' is not a Slack user id.
+Pass the Uxxxxxxxx id of whoever wrote the message you are citing (an email is not accepted here — the id is what makes the row checkable against the thread).
+EOF
+                return 1
+            fi
+            local _author_email
+            _author_email="$(resolve_slack_to_email "$APPROVAL_AUTHOR_ID" 2>/dev/null || true)"
+            if ! is_tier2_godmode_requester "$_author_email"; then
+                cat >&2 <<EOF
+MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_AUTHOR_INVALID: --approval-author-id '${APPROVAL_AUTHOR_ID}' does not resolve to a god-mode identity.
+Self-approval means the cited message was written by someone who can authorize this. Cite a message authored by an allowlisted requester, or use --confirmed-by <approver> --approval-msg-id <ts> instead.
+EOF
+                return 1
+            fi
+
+            # A god-mode requester does not NEED --confirmed-by, but if the
+            # caller supplied one it must still be a real approver. Skipping the
+            # check would let `--confirmed-by <not-an-approver>` through (it was
+            # refused before this branch existed) and then quietly attribute the
+            # approval to the requester instead — an audit row naming someone the
+            # caller never did. Validate it, and record what was actually named.
+            if [[ -n "$CONFIRMED_BY" ]]; then
+                if ! is_tier2_approver "$CONFIRMED_BY"; then
+                    cat >&2 <<EOF
+MUSO_BULK_DESTRUCTIVE_APPROVAL_INVALID: --confirmed-by '${CONFIRMED_BY}' is not in the tier-2 approver allowlist.
+'${REQUESTER_EMAIL:-}' is on the god-mode allowlist and does not need --confirmed-by at all — drop the flag, or name a real approver from $TIER2_APPROVERS_PATH.
+EOF
+                    return 1
+                fi
+                audit_confirmed_by="$CONFIRMED_BY"
+            else
+                # Their own message IS the decision.
+                audit_confirmed_by="${REQUESTER_EMAIL:-}"
+            fi
+            audit_bypass="god_mode_self_approve"
+            # Record WHICH allowlist granted this. TIER2_GODMODE_PATH is an env
+            # override (every path/threshold in this wrapper is — see the note in
+            # check-no-canonical-godmode-allowlist.sh), so a caller who controls
+            # the environment can point it anywhere. That cannot be closed here,
+            # but it can be made VISIBLE: an audit row naming a foreign allowlist
+            # is evidence, where a bare bypass flag would look routine.
+            audit_godmode_path="$TIER2_GODMODE_PATH"
+        # (2) EXPLICIT SECOND APPROVER, for everyone else. Unchanged by the
+        # 2026-08-26 policy: off the god-mode list, --requester is attribution,
+        # never authorization, and an --approval-msg-id alone is not a skeleton
+        # key. This is the branch that still holds the 2026-05-26 blast-radius
+        # cap for the rest of the org.
+        else
+            if [[ -z "$CONFIRMED_BY" ]]; then
+                cat >&2 <<EOF
 MUSO_BULK_DESTRUCTIVE_APPROVAL_REQUIRED: ${count} destructive DELETE(s) in the last ${BULK_DESTRUCTIVE_WINDOW_SECS}s have reached the bulk threshold (${BULK_DESTRUCTIVE_THRESHOLD}).
 This is the 2026-05-26 incident class (285 analytics-source DELETEs off one vague request). STOP autonomous deletion now.
 
@@ -1211,54 +1401,34 @@ To proceed you must have an EXPLICIT in-thread human decision to delete this man
     --confirmed-by <handle>   (one of: $(cat "$TIER2_APPROVERS_PATH" 2>/dev/null | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | tr '\n' ' '))
     --approval-msg-id <slack_ts>
 
-Requester identity does NOT bypass this gate. What satisfies it is an explicit human decision that NAMES the rows being deleted.
+'${REQUESTER_EMAIL:-<no --requester>}' is not on the god-mode allowlist, so this call needs an approver's decision that NAMES the rows being deleted.
 
 If the person who asked is on the approver list above AND enumerated the exact targets (a list of ids/titles, or "all N of X" where you have already read and posted those N), their own request message IS that decision: pass their handle and the timestamp of THAT message. You do not need to find a second human, and you should not page anyone.
 
 That decision covers the target set it enumerated and ONLY that set — finishing an approved batch is not a new decision, but a different set of rows is. If the request was vague, or the requester is not on the list above, stop and get an explicit "yes, delete those N" before continuing.
 EOF
-            return 1
-        fi
-        if ! is_tier2_approver "$CONFIRMED_BY"; then
-            cat >&2 <<EOF
+                return 1
+            fi
+            if ! is_tier2_approver "$CONFIRMED_BY"; then
+                cat >&2 <<EOF
 MUSO_BULK_DESTRUCTIVE_APPROVAL_INVALID: --confirmed-by '${CONFIRMED_BY}' is not in the tier-2 approver allowlist.
 Allowed approvers (from $TIER2_APPROVERS_PATH):
 $(cat "$TIER2_APPROVERS_PATH" 2>/dev/null | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | sed 's/^/  - /' || echo "  (file missing)")
 EOF
-            return 1
-        fi
-        if [[ -z "$APPROVAL_MSG_ID" ]]; then
-            echo "MUSO_BULK_DESTRUCTIVE_APPROVAL_REQUIRED: --approval-msg-id <slack_ts> is required alongside --confirmed-by for bulk-destructive writes (audit trail)." >&2
-            return 1
+                return 1
+            fi
+            if [[ -z "$APPROVAL_MSG_ID" ]]; then
+                echo "MUSO_BULK_DESTRUCTIVE_APPROVAL_REQUIRED: --approval-msg-id <slack_ts> is required alongside --confirmed-by for bulk-destructive writes (audit trail)." >&2
+                return 1
+            fi
+            audit_confirmed_by="$CONFIRMED_BY"
         fi
 
-        # Audit the approved bulk-destructive write BEFORE executing. Fail-closed
-        # if the audit can't be written — "deleted en masse, no record of who
-        # approved it" is the worse failure mode.
-        if ! mkdir -p "$(dirname "$BULK_DESTRUCTIVE_AUDIT_PATH")" 2>/dev/null; then
-            echo "MUSO_BULK_DESTRUCTIVE_AUDIT_UNWRITABLE: cannot create $(dirname "$BULK_DESTRUCTIVE_AUDIT_PATH") — refusing bulk-destructive write to preserve audit trail." >&2
-            return 1
-        fi
-        local ts audit_rc=0
-        ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        jq -n -c \
-            --arg ts "$ts" \
-            --arg method "$method" \
-            --arg path "$path" \
-            --arg requester "${REQUESTER_EMAIL:-}" \
-            --arg confirmed_by "$CONFIRMED_BY" \
-            --arg approval_msg_id "$APPROVAL_MSG_ID" \
-            --argjson count_at_trip "$count" \
-            --argjson threshold "$BULK_DESTRUCTIVE_THRESHOLD" \
-            --argjson window_secs "$BULK_DESTRUCTIVE_WINDOW_SECS" \
-            --arg approval_author_id "$APPROVAL_AUTHOR_ID" \
-            --arg approval_channel "$APPROVAL_CHANNEL" \
-            '{ts:$ts, method:$method, path:$path, requester:$requester, confirmed_by:$confirmed_by, approval_msg_id:$approval_msg_id, count_at_trip:$count_at_trip, threshold:$threshold, window_secs:$window_secs, approval_author_id:$approval_author_id, approval_channel:$approval_channel}' \
-            >> "$BULK_DESTRUCTIVE_AUDIT_PATH" || audit_rc=$?
-        if (( audit_rc != 0 )); then
-            echo "MUSO_BULK_DESTRUCTIVE_AUDIT_UNWRITABLE: append to $BULK_DESTRUCTIVE_AUDIT_PATH failed (rc=$audit_rc) — refusing bulk-destructive write to preserve audit trail." >&2
-            return 1
-        fi
+        # ONE audit call for every path that gets past the threshold — a new
+        # approval branch cannot forget it. Fail-closed: no audit, no DELETE.
+        write_bulk_destructive_audit \
+            "$method" "$path" "$audit_confirmed_by" "$count" "$audit_bypass" \
+            "$audit_godmode_path" || return 1
     fi
 
     # Record this attempt BEFORE the DELETE is issued, and FAIL CLOSED if it

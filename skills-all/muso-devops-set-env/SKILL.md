@@ -6,8 +6,8 @@ description: |
   blocklist: secret-shaped keys (passwords, tokens, keys, DB/connection URLs) are
   refused and routed to a human for a green-light; only allow-listed targets and
   authorized requesters are accepted; a window rate-cap bounds bursts.
-  DEV (`--env dev`) is intentionally broad: an authorized dev requester (Serhii,
-  Artem) may set ANY dev env var — secret-shaped included — with NO green-light;
+  DEV (`--env dev`) is intentionally broad: an authorized dev requester (Artem;
+  Serhii LEFT the company 2026-08-26) may set ANY dev env var — secret-shaped included — with NO green-light;
   the secret VALUE is still redacted in the audit and the set is logged +
   rollback-hinted, contained to the muso-dev scope.
   Use when an authorized human asks to change a runtime config value
@@ -54,7 +54,8 @@ omitted flag never applies dev's looser rules to a prod target).
   green-light; requesters = `config/envset-requesters.txt` (narrow); targets =
   `config/target-allowlist.txt` (exact match).
 - **`--env dev`**: intentionally broad per Nick's directive (2026-07-17). A dev
-  requester (`config/dev-envset-requesters.txt` — Serhii, Artem, Nick, Aaron)
+  requester (`config/dev-envset-requesters.txt` — Artem, Nick, Aaron; Serhii
+  removed 2026-08-26 on leaving the company)
   may set ANY dev env var — **secret-shaped included, with NO green-light**.
   Targets = `config/dev-target-allowlist.txt` (glob, `muso-dev/*`). The secret
   VALUE is still redacted in the audit (`dev_self_serve:true`), the rate-cap still
@@ -90,7 +91,7 @@ bash "$SKILL_DIR/scripts/devops-set-env.sh" --requester <slack_id|email> \
   --reason "investigating elevated 5xx in #infra-alerts"
 
 # Set a DEV env var (secret-shaped is self-serve for a dev requester — no green-light):
-bash "$SKILL_DIR/scripts/devops-set-env.sh" --requester U03TYGJF1N3 --env dev \
+bash "$SKILL_DIR/scripts/devops-set-env.sh" --requester U02N2NP3H7F --env dev \
   set --target muso-dev/core-backend-config --key TUWUNEL_REGISTRATION_TOKEN \
   --value "$(openssl rand -hex 24)" --reason "dev tuwunel registration token"
 
@@ -149,7 +150,7 @@ PROD:
 - `config/blocklist-override-approvers.txt` — who can green-light a prod secret.
 
 DEV (`--env dev`):
-- `config/dev-envset-requesters.txt` — authorized dev humans (Serhii, Artem, Nick, Aaron);
+- `config/dev-envset-requesters.txt` — authorized dev humans (Artem, Nick, Aaron; Serhii removed 2026-08-26);
   also the dev rate-cap self-ack list.
 - `config/dev-target-allowlist.txt` — allowed dev targets (glob, e.g. `muso-dev/*`).
 - Dev Vault backend env (set at deploy, NOT in repo): `DEVOPS_ENVSET_BACKEND=vault`,
@@ -183,7 +184,7 @@ it grants broad dev authority (still audited + muso-dev-scoped).
   them (`config/dev-target-allowlist.txt` + the backend scope guard both allow chat-dev):
   `path "secret/data/k8s/muso-dev/*"      { capabilities = ["read","patch","create","update"] }`
   `path "secret/data/k8s/muso-chat-dev/*" { capabilities = ["read","patch","create","update"] }`.
-  Then prove on a throwaway dev key with rollback before Serhii's real token.
+  Then prove on a throwaway dev key with rollback before anyone's real token.
 - **There is exactly ONE Artem** as of 2026-07-30: Artem (Mobile Developer),
   `U02N2NP3H7F` / `artem@muso.ai`, mapped in `resolve_slack_to_email()`. Artem D
   (Dolobanko, `U0ACHTYUULT`, ex-DevOps Lead) **left the company and was revoked** from

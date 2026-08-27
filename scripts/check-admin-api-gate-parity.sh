@@ -85,6 +85,13 @@ FUNCTIONS=(
     # review found that a literal match let uppercase, dot-segment, fragment and
     # repeated-slash spellings through to the same live route.
     normalize_admin_path
+    # Added 2026-08-26 with the god-mode self-approve port. Both were carved out
+    # of enforce_bulk_destructive_gate (which IS tracked), so without listing
+    # them here the port QUIETLY SHRANK this gate's coverage: the fail-closed
+    # audit write and the predicate that decides WHO may self-approve a mass
+    # DELETE both became editable in one copy only, with nothing in CI to notice.
+    write_bulk_destructive_audit
+    is_tier2_godmode_requester
 )
 
 [[ -f "$CANONICAL" ]] || {

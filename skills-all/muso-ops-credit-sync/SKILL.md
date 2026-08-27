@@ -36,12 +36,13 @@ Profile merge is the wrong tool (the profiles must remain separate, and merge
 is tier-2). This skill reconciles instead: page both credit lists, diff on
 `(trackId, role)`, and `POST /admin/track/<trackId>/profile/<orgId>/credits`
 for each missing pair. Decided on the 2026-06-09 EOD call; retire this skill
-when Serhii ships the native link in core-backend.
+when core-backend ships the native link (originally Serhii's; he left 2026-08-26,
+so the owner is now whoever the CTO seat routes to).
 
 **Additive-only — HARD RULE.** Removal semantics were left undecided on the
 call. The script never issues a DELETE; credits present on the org but not on
 the person are reported as `org_only_extras` for human review. Do NOT "fix"
-extras by deleting credits, even if asked — escalate to Jan/Serhii.
+extras by deleting credits, even if asked — escalate to Jan.
 
 **Role mapping — HARD RULE (Jan, 2026-06-10).** Professional/artist roles
 (Primary Artist, Composer, Lyricist, ...) must NEVER appear on an org

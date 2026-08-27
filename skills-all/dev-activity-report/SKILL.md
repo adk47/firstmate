@@ -31,7 +31,7 @@ Output format: structured lines (`REPO:`, `COMMIT:sha|adds|dels|message|date`, `
 ## GitHub Username Map
 
 - Aaron Kaufman → `adk47`
-- Serhii Ostapchuk → `liflovs`
+- ~~Serhii Ostapchuk → `liflovs`~~ (left the company 2026-08-26 — drop from new reports)
 - Add new devs here as needed (check `gh api repos/Muso-AI/<repo>/commits --jq '.[].author.login'`)
 
 ## Report Format (Slack mrkdwn)

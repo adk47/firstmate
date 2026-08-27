@@ -9,9 +9,11 @@
 #   only, NOT per-run). Once BULK_DESTRUCTIVE_THRESHOLD is reached, every
 #   further destructive DELETE is refused unless --confirmed-by <approver> AND
 #   --approval-msg-id <ts> are supplied.
-# - God-mode / requester identity does NOT bypass this gate (regression test
-#   for the incident: the agent auto-stamps --requester with whoever's
-#   in-thread).
+# - A requester on the GOD-MODE allowlist (aaron/jan/nick) self-approves with
+#   --approval-msg-id alone — their own request message is the decision, and no
+#   second human is paged (policy 2026-08-26). Requester identity alone is
+#   still not enough: the msg-id is the audit anchor, and everyone off that
+#   list still needs --confirmed-by (the 2026-05-26 blast-radius cap).
 # - A deny-list (config/bulk-destructive-exclude.txt) exempts harmless DELETEs
 #   (e.g. profile cache). A MISSING exclude file means EVERYTHING counts.
 # - Dry-run self-skips the gate and records nothing.
@@ -53,8 +55,9 @@ EOF
 POST /admin/profiles/merge
 POST /admin/profiles/unmerge
 EOF
-    # Seed god-mode WITH the requesters we test below — the whole point of
-    # case "god-mode does NOT bypass" is that being on this list does not help.
+    # Seed god-mode WITH the requesters we test below — the self-approve cases
+    # assert that being on this list is exactly what clears the gate, and the
+    # non-god-mode case asserts that being off it is not survivable.
     cat > "$TIER2_GODMODE_PATH" <<EOF
 aaron@muso.ai
 jan@muso.ai
@@ -168,19 +171,108 @@ seed_destructive_ops() {
     grep -q '"count_at_trip":3' "$BULK_DESTRUCTIVE_AUDIT_PATH"
 }
 
-# --- God-mode / requester identity does NOT bypass (incident regression) ---
+# --- God-mode self-approval (policy 2026-08-26) ---
+#
+# Rationale lives with the code, in enforce_bulk_destructive_gate's branch
+# comment. What matters for these tests: the god-mode branch still demands an
+# AUDIT ANCHOR (--approval-msg-id), and the non-god-mode regression test below
+# is the one that must never go green wrongly.
 
-@test "god-mode requester (jan) does NOT bypass the bulk gate" {
+@test "god-mode requester (jan) self-approves the bulk gate with his own msg-id" {
+    seed_destructive_ops 3
+    # Precondition: jan is NOT in this harness's approver file (setup() seeds
+    # aaron only), so passing here proves self-approval reads the GOD-MODE list
+    # and not tier2-approvers.txt. Asserted via run/status because a bare
+    # `! grep` is a no-op under bats' set -e unless it is the last line, and
+    # `grep -v` would pass on any non-matching line.
+    run grep -q jan "$TIER2_APPROVERS_PATH"
+    [ "$status" -ne 0 ]
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1779999999.002222 --approval-author-id U038BM16T7W \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [[ "$output" != *"MUSO_BULK_DESTRUCTIVE_APPROVAL"* ]]
+    [[ "$output" != *"MUSO_BULK_DESTRUCTIVE_SELF_APPROVE"* ]]
+    [ -f "$BULK_DESTRUCTIVE_AUDIT_PATH" ]
+    grep -q '"bypass":"god_mode_self_approve"' "$BULK_DESTRUCTIVE_AUDIT_PATH"
+    grep -q '"requester":"jan@muso.ai"' "$BULK_DESTRUCTIVE_AUDIT_PATH"
+    grep -q '"confirmed_by":"jan@muso.ai"' "$BULK_DESTRUCTIVE_AUDIT_PATH"
+    grep -q '"approval_msg_id":"1779999999.002222"' "$BULK_DESTRUCTIVE_AUDIT_PATH"
+    grep -q '"count_at_trip":3' "$BULK_DESTRUCTIVE_AUDIT_PATH"
+}
+
+@test "god-mode requester (aaron) self-approves the bulk gate with his own msg-id" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" --requester aaron@muso.ai --approval-msg-id 1779999999.004444 --approval-author-id U7RP6HKUZ \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [[ "$output" != *"MUSO_BULK_DESTRUCTIVE_APPROVAL"* ]]
+    grep -q '"bypass":"god_mode_self_approve"' "$BULK_DESTRUCTIVE_AUDIT_PATH"
+    grep -q '"requester":"aaron@muso.ai"' "$BULK_DESTRUCTIVE_AUDIT_PATH"
+}
+
+# The refusal an allowlisted requester hits must be SELF-SERVE. If it reads as
+# "go find a human", the agent pages one — that is the whole bug this policy
+# fixes, and the refusal text outranks any SKILL.md prose because it is what
+# the agent reads at the moment it is blocked.
+@test "god-mode requester without --approval-msg-id gets self-serve wording, never a page" {
     seed_destructive_ops 3
     run bash "$SCRIPT" --requester jan@muso.ai \
         call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
     [ "$status" -eq 1 ]
-    [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_APPROVAL_REQUIRED"* ]]
+    [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_MSG_REQUIRED"* ]]
+    [[ "$output" == *"--approval-msg-id"* ]]
+    [[ "$output" == *"You do not need anyone else"* ]]
+    # Whole phrases, not substrings: a bare *"page"* also matches "pages" and
+    # "paged", so an innocuous rewording would go red for no policy reason.
+    [[ "$output" != *"page anyone"* ]]
+    [[ "$output" != *"second human"* ]]
+    [[ "$output" != *"get an approver"* ]]
 }
 
-@test "god-mode requester (aaron) does NOT bypass the bulk gate" {
+# A god-mode requester does not need --confirmed-by, but a BOGUS one must still
+# be refused rather than silently swapped for the requester's own name. Before
+# this branch existed the same flag value was rejected outright; letting it
+# through would put a name in the audit row that the caller never supplied.
+@test "god-mode requester passing a BOGUS --confirmed-by is still refused" {
     seed_destructive_ops 3
-    run bash "$SCRIPT" --requester aaron@muso.ai \
+    run bash "$SCRIPT" --requester jan@muso.ai --confirmed-by mallory \
+        --approval-msg-id 1779999999.008888 --approval-author-id U038BM16T7W \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_APPROVAL_INVALID"* ]]
+    [ ! -f "$BULK_DESTRUCTIVE_AUDIT_PATH" ]
+}
+
+# A VALID --confirmed-by from a god-mode requester is honoured and recorded as
+# given, so the audit says who the caller actually named.
+@test "god-mode requester passing a VALID --confirmed-by has it recorded, not overwritten" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" --requester jan@muso.ai --confirmed-by aaron \
+        --approval-msg-id 1779999999.009999 --approval-author-id U038BM16T7W \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [[ "$output" != *"MUSO_BULK_DESTRUCTIVE_APPROVAL"* ]]
+    grep -q '"confirmed_by":"aaron"' "$BULK_DESTRUCTIVE_AUDIT_PATH"
+    grep -q '"requester":"jan@muso.ai"' "$BULK_DESTRUCTIVE_AUDIT_PATH"
+    grep -q '"bypass":"god_mode_self_approve"' "$BULK_DESTRUCTIVE_AUDIT_PATH"
+}
+
+# THE regression test for incident 2026-05-26. An --approval-msg-id alone must
+# never be a skeleton key: only membership of the god-mode list turns the
+# requester's own message into the decision. If this ever goes green while the
+# call succeeds, the blast-radius cap is gone for everyone.
+@test "a NON-god-mode requester at threshold is still blocked, msg-id or not" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" --requester notallowed@muso.ai --approval-msg-id 1779999999.006666 \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_APPROVAL_REQUIRED"* ]]
+    [ ! -f "$BULK_DESTRUCTIVE_AUDIT_PATH" ]
+}
+
+# Fail-closed: god-mode is opt-in via the allowlist file. A missing file must
+# collapse every requester back to the --confirmed-by path, never open it up.
+@test "missing god-mode allowlist file collapses jan back to the approver path" {
+    seed_destructive_ops 3
+    rm -f "$TIER2_GODMODE_PATH"
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1779999999.007777 \
         call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
     [ "$status" -eq 1 ]
     [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_APPROVAL_REQUIRED"* ]]
@@ -252,4 +344,113 @@ seed_destructive_ops() {
     [[ "$output" != *"MUSO_BULK_DESTRUCTIVE"* ]]
     [ -f "$BULK_DESTRUCTIVE_PATH" ]
     [ "$(grep -c '"method":"DELETE"' "$BULK_DESTRUCTIVE_PATH")" -eq 1 ]
+}
+
+# --- Forged / unusable provenance (QA #873, finding 2) ---------------------
+#
+# Nothing here authenticates -- every flag is caller-supplied, and that was
+# equally true of the --confirmed-by path before this branch existed (clean HEAD
+# accepted `--confirmed-by jan --approval-msg-id x`). What these assert is that
+# self-approval cannot be CHEAPER to forge than that path: the citation has to
+# be a real ts, authored by an allowlisted identity, so an auditor can open the
+# exact message afterwards and see whether it named these rows.
+
+@test "self-approve refuses a placeholder msg-id (the 'x' case)" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id x \
+        --approval-author-id U038BM16T7W \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_MSG_INVALID"* ]]
+    [ ! -f "$BULK_DESTRUCTIVE_AUDIT_PATH" ]
+}
+
+@test "self-approve refuses a malformed timestamp (right shape, wrong digits)" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 123.456 \
+        --approval-author-id U038BM16T7W \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_MSG_INVALID"* ]]
+}
+
+@test "self-approve refuses a cited message with no author id" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1779999999.010101 \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_AUTHOR_REQUIRED"* ]]
+    [ ! -f "$BULK_DESTRUCTIVE_AUDIT_PATH" ]
+}
+
+# The teeth: forging now requires naming a specific allowlisted person as the
+# AUTHOR of the cited message, not merely stamping --requester (which the agent
+# fills in automatically from whoever is in-thread).
+@test "self-approve refuses an author who is not an allowlisted identity" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1779999999.111111 \
+        --approval-author-id U0NOTAPERSON \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_AUTHOR_INVALID"* ]]
+    [ ! -f "$BULK_DESTRUCTIVE_AUDIT_PATH" ]
+}
+
+@test "self-approve records the cited author + channel so the row is checkable" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1779999999.121212 \
+        --approval-author-id U038BM16T7W --approval-channel C0APB2CMM7C \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [[ "$output" != *"MUSO_BULK_DESTRUCTIVE_SELF_APPROVE"* ]]
+    grep -q '"approval_author_id":"U038BM16T7W"' "$BULK_DESTRUCTIVE_AUDIT_PATH"
+    grep -q '"approval_channel":"C0APB2CMM7C"' "$BULK_DESTRUCTIVE_AUDIT_PATH"
+}
+
+# QA #873 finding 1: TIER2_GODMODE_PATH is an env override, as are every other
+# path/threshold in this wrapper (BULK_DESTRUCTIVE_THRESHOLD=999999 disabled the
+# gate outright long before this branch existed). That class cannot be closed
+# from inside the gate. What it CAN do is leave evidence, so a self-approve
+# granted by an unexpected allowlist is visible in the audit trail instead of
+# looking like a routine one.
+@test "self-approve records which allowlist granted it" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1779999999.131313 \
+        --approval-author-id U038BM16T7W \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [[ "$output" != *"MUSO_BULK_DESTRUCTIVE_SELF_APPROVE"* ]]
+    grep -q "\"godmode_allowlist\":\"$TIER2_GODMODE_PATH\"" "$BULK_DESTRUCTIVE_AUDIT_PATH"
+}
+
+# The second-approver path is NOT a god-mode grant, so it must not carry the key.
+@test "second-approver audit row carries no godmode_allowlist key" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" --confirmed-by aaron --approval-msg-id 1779999999.141414 \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [[ "$output" != *"MUSO_BULK_DESTRUCTIVE_APPROVAL"* ]]
+    run grep -q godmode_allowlist "$BULK_DESTRUCTIVE_AUDIT_PATH"
+    [ "$status" -ne 0 ]
+}
+
+# QA #873: an email is not a Slack identity. resolve_slack_to_email echoes an
+# unrecognised input back unchanged, so without a shape check
+# `--approval-author-id jan@muso.ai` would match the allowlist and the flag
+# would prove nothing --requester does not already claim.
+@test "self-approve refuses an email-shaped author id" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1779999999.151515 \
+        --approval-author-id jan@muso.ai \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_AUTHOR_INVALID"* ]]
+    [[ "$output" == *"not a Slack user id"* ]]
+    [ ! -f "$BULK_DESTRUCTIVE_AUDIT_PATH" ]
+}
+
+@test "self-approve refuses a lowercase/short pseudo-UID" {
+    seed_destructive_ops 3
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1779999999.161616 \
+        --approval-author-id u038bm \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_AUTHOR_INVALID"* ]]
 }

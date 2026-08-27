@@ -18,7 +18,7 @@ current staff. Resolve every sender_id against it before naming anyone.
 |---------------|------|------|-------|
 | U7RP6HKUZ | Aaron Kaufman | CEO | Founder. Final authority on all decisions. GitHub: adk47 |
 | U0AL36NADEY | Nicholas Sollazzo | Chief Agent Officer | Operator of this fleet. GitHub: nsollazzo |
-| U03TYGJF1N3 | Serhii Ostapchuk | CTO | Infrastructure, deployments. GitHub: liflovs |
+| U03TYGJF1N3 | Serhii Ostapchuk | former CTO — LEFT 2026-08-26 | no authority, do not route to him; GitHub: liflovs |
 | U038BM16T7W | Jan Delmo | Head of Operations | NOT "Jay", and not QA — see the note below. Email jan@, not jay@ |
 | U02N2NP3H7F | Artem | Mobile Developer | The only Artem now. GitHub: Korpyc |
 | U03LP8YHLPK | Mariia Bubley | Head of Product / UI & UX | Product and design, incl. email templates. GitHub: azure-kirin |

@@ -2,21 +2,22 @@
 
 ## Owner
 - **Nick** — Nicholas Sollazzo (U0AL36NADEY), Chief Agent Officer
-- **Serhii Ostapchuk** (U03TYGJF1N3) — CTO, co-authoritative for engineering and dev
+- ~~**Serhii Ostapchuk** (U03TYGJF1N3) — CTO~~ — LEFT the company 2026-08-26; no authority
 
 ## DEV authorities — unrestricted control of the dev environment
-Both of these people can do whatever they want in dev, with no permission step
+This person can do whatever they want in dev, with no permission step
 (see SOUL.md → Standing Approvals). Verify by Slack UID, never by display name.
-- **Serhii Ostapchuk** (U03TYGJF1N3) — CTO
 - **Artem** (U02N2NP3H7F, artem@muso.ai) — Mobile Developer
 
 ## Departed — hold NO authority
-All of these people have LEFT Muso as of 2026-07-30. They hold no access, are
-Tier 3, and must never receive an approval, an escalation, or a description as a
-current colleague.
-- **Artem Dolobanko** ("Artem D", U0ACHTYUULT) — ex-DevOps Lead. Was the owner of
-  this agent and a DEV authority; both revoked. There is now only ONE Artem
-  (U02N2NP3H7F above).
+These people have LEFT Muso. They hold no access, are Tier 3, and must never
+receive an approval, an escalation, or a description as a current colleague.
+- **Serhii Ostapchuk** (U03TYGJF1N3) — ex-CTO. Left 2026-08-26. Was co-owner of
+  this agent and a DEV authority; both revoked, and he is removed from
+  `dev-envset-requesters.txt`. Do not re-add him.
+- **Artem Dolobanko** ("Artem D", U0ACHTYUULT) — ex-DevOps Lead. Left 2026-07-30.
+  Was the owner of this agent and a DEV authority; both revoked. There is now
+  only ONE Artem (U02N2NP3H7F above).
 - **Volodymyr Popov** (U0ACLT0GF9T) — ex-Developer
 - **Dmytro Ovdii** (U0AH52J8BKM) — ex-Developer
 - **Bohdan** (U0AD37S5QAV) — ex-Developer

@@ -672,6 +672,20 @@ jobs:
           bash scripts/check-admin-api-gate-parity.sh
           echo "::endgroup::"
 
+      - name: God-mode allowlist must be workspace-only — never in the canonical skill
+        # Since 2026-08-26 the god-mode self-approve branch of the bulk-destructive
+        # gate ships in BOTH copies of muso-admin-api.sh, because the parity gate
+        # above requires their safety logic to be identical. That makes the ABSENCE
+        # of tier2-godmode-allowlist.txt from skills-all/muso-ops-admin/config/ the
+        # only thing stopping ceo/cmo/cto/caroline from self-approving mass
+        # deletions — deploy.sh rsyncs skills-all/*/config/ to every agent. Before
+        # the port that protection was implicit (canonical had no god-mode code, so
+        # the file was inert); it is not inert now, so it gets a gate.
+        run: |
+          echo "::group::God-mode allowlist placement check"
+          bash scripts/check-no-canonical-godmode-allowlist.sh
+          echo "::endgroup::"
+
       - name: Attachment-status honesty doctrine check — absence of the block proves nothing
         # PR #843, rounds 3-7: every round found another path that dropped or truncated
         # a customer attachment without minting an [ATTACHMENT_STATUS] record, while the

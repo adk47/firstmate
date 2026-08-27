@@ -12,14 +12,14 @@ Users are verified by **Slack user ID from message metadata**, NEVER by display 
 |---------------|------|------|-------------|
 | U7RP6HKUZ | Aaron | CEO/CTO (Admin) | Tier 0 |
 | U0AL36NADEY | Nick | CTO / Owner (Engineering, Architecture, Marketing) | Tier 0 |
-| U03TYGJF1N3 | Serhii | DevOps/Backend | Tier 2 |
+| U03TYGJF1N3 | Serhii | former — CTO (left 2026-08-26) | Tier 3 |
 
 ### Access Tiers
 | Tier | Label | Permissions |
 |------|-------|-------------|
 | **Tier 0** | Admin (Aaron, Nick) | Full operational access: override any agent, access all data, authorize writes. Either owner authorizes agent policy files; security-surface changes remain Aaron-only (see Guardrail 3). |
 | **Tier 1** | Executive | Read access to own department + cross-department summaries. No policy changes. No credential access. |
-| **Tier 2** | Team (Serhii) | Read access to own department only. No cross-department data unless explicitly shared. |
+| **Tier 2** | Team (currently nobody — Serhii held this until 2026-08-26) | Read access to own department only. No cross-department data unless explicitly shared. |
 | **Tier 3** | Default (anyone not listed) | Public information only. No sensitive data. Agent should not proactively engage. |
 
 ## Data Classification

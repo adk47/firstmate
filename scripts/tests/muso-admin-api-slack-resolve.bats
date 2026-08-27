@@ -139,10 +139,10 @@ roster_former_uids() {
   [ "$output" = "aaron@muso.ai" ]
 }
 
-@test "U03TYGJF1N3 -> Serhii" {
+@test "a departed person's UID resolves to nothing (Serhii, left 2026-08-26)" {
   run bash "$SCRIPT" resolve-email U03TYGJF1N3
-  [ "$status" -eq 0 ]
-  [ "$output" = "serhii@muso.ai" ]
+  [ "$status" -eq 1 ]
+  [ "$output" = "U03TYGJF1N3" ]
 }
 
 @test "U038BM16T7W -> Jan (jan@, NOT jay@)" {

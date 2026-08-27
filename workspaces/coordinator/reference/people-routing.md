@@ -20,7 +20,7 @@ the roster before naming anyone; never invent a person from a display name.
 |---------------|------|------|----------------|
 | U7RP6HKUZ | Aaron Kaufman | CEO | CEO agent |
 | U0AL36NADEY | Nicholas Sollazzo | Chief Agent Officer | answer directly (operator) |
-| U03TYGJF1N3 | Serhii Ostapchuk | CTO | CTO agent |
+| U03TYGJF1N3 | Serhii Ostapchuk | former CTO — LEFT 2026-08-26 | no authority, do not route to him |
 | U038BM16T7W | Jan Delmo | Head of Operations | Operations agent |
 | U02N2NP3H7F | Artem | Mobile Developer | CTO agent |
 | U03LP8YHLPK | Mariia Bubley | Head of Product / UI & UX | (no product agent — answer directly) |

@@ -8,10 +8,19 @@
 # Ported from workspaces/operations/skills/muso-ops-admin/scripts/tests/
 # bulk-destructive.bats — that suite covered only the workspace copy of
 # muso-admin-api.sh, leaving the canonical copy (also live, executed by the
-# same agent) with zero regression coverage. The canonical copy has no
-# god-mode / TIER2_GODMODE_PATH concept (that's workspace-only), so those
-# vars are dropped here; the "requester identity does not bypass" cases are
-# kept since canonical enforces that same invariant without a bypass list.
+# same agent) with zero regression coverage.
+#
+# Since 2026-08-26 the canonical copy DOES carry the god-mode self-approve
+# branch — check-admin-api-gate-parity.sh requires both copies' safety logic to
+# be identical, so a workspace-only branch is not an option. What canonical does
+# NOT carry is `config/tier2-godmode-allowlist.txt`, and
+# `is_tier2_godmode_requester` fail-closes on a missing file. So the behaviour
+# asserted here is unchanged — requester identity still does not bypass the gate
+# on this copy — but it now rests on the file's ABSENCE rather than the code's.
+# That absence is itself gated by check-no-canonical-godmode-allowlist.sh; the
+# test at the bottom of this file pins the fail-closed half.
+# TIER2_GODMODE_PATH is deliberately left unset below so the default resolves to
+# the (nonexistent) canonical config path, exactly as it does in production.
 #
 # Gate contract:
 # - Counts DELETE calls within the last BULK_DESTRUCTIVE_WINDOW_SECS (window-
@@ -284,4 +293,59 @@ seed_destructive_ops() {
     [ -f "$BULK_DESTRUCTIVE_AUDIT_PATH" ]
     grep -q '"approval_author_id":""' "$BULK_DESTRUCTIVE_AUDIT_PATH"
     grep -q '"approval_channel":""' "$BULK_DESTRUCTIVE_AUDIT_PATH"
+}
+
+# --- The canonical copy's god-mode branch must be INERT (policy 2026-08-26) ---
+#
+# This is the load-bearing test for the ported branch. On this copy the branch
+# exists but must never fire, because skills-all/muso-ops-admin/config/ carries
+# no tier2-godmode-allowlist.txt. If someone adds that file, ceo/cmo/cto and
+# caroline gain the ability to self-approve mass deletions — this test plus
+# check-no-canonical-godmode-allowlist.sh are what stand in the way.
+
+@test "canonical: a god-mode-looking requester still CANNOT self-approve (no allowlist file here)" {
+    seed_destructive_ops 3
+    # jan@muso.ai is on the operations workspace's allowlist. Here there is no
+    # allowlist at all, so he must fall through to the --confirmed-by path.
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1779999999.123 \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_APPROVAL_REQUIRED"* ]]
+    [[ "$output" != *"MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_MSG_REQUIRED"* ]]
+    [ ! -f "$BULK_DESTRUCTIVE_AUDIT_PATH" ]
+}
+
+@test "canonical: the god-mode allowlist file does not exist in this skill" {
+    [ ! -e "${BATS_TEST_DIRNAME}/../../config/tier2-godmode-allowlist.txt" ]
+}
+
+# --- an env override must not be able to activate god-mode here (QA #873) ---
+#
+# The canonical copy is what every non-operations agent runs, and what the
+# support skills exec directly. Its TIER2_GODMODE_PATH is assigned outright
+# (no ${VAR:-default} indirection) precisely so an invocation-environment
+# override cannot point it at a real allowlist and enter the self-approve
+# branch. Reproduces the exact attack from the review.
+
+@test "canonical: TIER2_GODMODE_PATH override CANNOT activate self-approval" {
+    seed_destructive_ops 3
+    local allow="$TEST_ROOT/attacker-allowlist.txt"
+    printf 'jan@muso.ai\naaron@muso.ai\n' > "$allow"
+    TIER2_GODMODE_PATH="$allow" run bash "$SCRIPT" --requester jan@muso.ai \
+        --approval-msg-id 1787416248.722279 --approval-author-id U038BM16T7W \
+        call DELETE /admin/track/abc/analytics-sources '{"linkId":"L1"}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_BULK_DESTRUCTIVE_APPROVAL_REQUIRED"* ]]
+    [[ "$output" != *"SELF_APPROVE"* ]]
+    [ ! -f "$BULK_DESTRUCTIVE_AUDIT_PATH" ]
+}
+
+# Structural companion: the assignment must stay non-overridable. A future edit
+# reintroducing ${TIER2_GODMODE_PATH:-...} would silently restore the bypass and
+# the behavioural test above would still pass in a fixture-free run.
+@test "canonical: the god-mode path assignment takes no env override" {
+    run grep -E '^TIER2_GODMODE_PATH=' "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'${TIER2_GODMODE_PATH'* ]]
+    [[ "$output" == *"/nonexistent/"* ]]
 }

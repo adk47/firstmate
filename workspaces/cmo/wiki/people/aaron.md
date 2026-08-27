@@ -71,7 +71,7 @@ failure modes when this motion is broken.
 - `muso-stripe`: Aaron and Fede (via specific skills)
 - `muso-contract-invoicer`: Aaron only
 - `muso-winback-engine`: Aaron only
-- `muso-ads-manager`: Aaron, Serhii, Fede
+- `muso-ads-manager`: Aaron, Nick (Serhii removed 2026-08-26, Fede former CMO)
 
 ## History
 

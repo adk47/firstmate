@@ -89,7 +89,7 @@ WHERE rs.profileid = '<profile_id>'
 
 ### Merge Profiles
 
-⚠️ **Tier 2 — Aaron approval required.** Significant, hard-to-undo. Reversing a merge by calling it again with `mergeInto`/`profilesIds[]` swapped is a documented production-damage pattern (incident 2026-04-29; see "Stop-rule" below).
+⚠️ **Tier 2 — approval required.** Aaron, Jan and Nick each self-authorize this (god-mode, `--requester` alone on the operations agent); anyone else needs one of them to approve, cited as `--confirmed-by <handle> --approval-msg-id <slack_ts>`. Significant, hard-to-undo. Reversing a merge by calling it again with `mergeInto`/`profilesIds[]` swapped is a documented production-damage pattern (incident 2026-04-29; see "Stop-rule" below).
 
 **What the endpoint actually does** (verified against `core-backend:src/apis/_admin/profile/mergeProfiles.js` + `services/discovery-seats/handleProfileIdChange.js`):
 
@@ -141,7 +141,7 @@ approval to merge (`verified` means "owner re-check passed + all dups loaded", N
 
 **Pre-merge checklist (MANDATORY):**
 
-1. **Aaron approved this exact direction in the same Slack thread.** Jan, Nick, Serhii, anyone else asking is a *requester*, not an *approver*. If Aaron has not posted `:white_check_mark:` (or equivalent explicit "go") in-thread for *this* `mergeInto`/`profilesIds`, stop and ask.
+1. **An approver signed off on this exact direction in the same Slack thread.** The approvers are Aaron, Jan and Nick, co-equal — and when one of *them* is the requester, their own request naming this `mergeInto`/`profilesIds` IS the approval (god-mode self-authorizes; do not page a second one of them). Anyone else asking is a *requester*, not an *approver*: without an explicit in-thread "go" from Aaron, Jan or Nick for *this* direction, stop and ask.
 2. **Confirm same person** — names, aliases, IPIs, credits, genres. *Stays your judgment.* The verified block's `matched_external_id_sources` + `shared_track_count`/`shared_track_ratio` corroborate but do **not** prove (collaboration/Empire/Maui confounds).
 3. **Check credit intersection** — shared tracks. *You MAY read `shared_track_count` / `compared_track_count` / `shared_track_ratio` off the verified block instead of recomputing — this is the time-saver.*
 4. **Identify primary** — usually higher popularity/credits/claim status. *Stays your judgment — the customer's `asserted_direction` is an untrusted claim.*

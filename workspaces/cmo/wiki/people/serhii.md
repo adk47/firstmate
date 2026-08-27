@@ -8,7 +8,7 @@ last-verified: 2026-04-09
 related: [[people/nick]], [[people/aaron]]
 ---
 
-# Serhii (Current CTO)
+# Serhii (former CTO — LEFT the company 2026-08-26)
 
 ## Identity
 
@@ -34,7 +34,7 @@ related: [[people/nick]], [[people/aaron]]
 ## Status Note
 
 Fede mentioned Nick is likely to become CTO. Until that transition is confirmed,
-Serhii remains the primary CTO. See [[people/nick]].
+Serhii LEFT the company on 2026-08-26 and holds no authority; this page is kept for historical context only. See [[people/nick]].
 
 ## History
 

@@ -73,7 +73,13 @@ SH
   # The note contrasts --approval-msg-id with --approval-ref, so a bare
   # '--approval-ref' anchor would still match it and the guard would pass while
   # operators had no usable override.
-  grep -v -- '--confirmed-by aaron --approval-ref' \
+  #
+  # The approver in this line used to be hardcoded `aaron`. Since 2026-08-26 it
+  # is `<their handle>` — the requester's own, when they are allowlisted — so the
+  # mutation targets that form instead. Deleting the line must still turn the
+  # guard red; if this ever passes, the guard has stopped requiring an
+  # operational override and operators who trip the threshold are stuck.
+  grep -v -- '--confirmed-by <their handle> --approval-ref' \
     "$TEST_TMPDIR/skills-all/muso-ops-tracks/SKILL.md" \
     > "$TEST_TMPDIR/skills-all/muso-ops-tracks/SKILL.md.tmp"
   mv "$TEST_TMPDIR/skills-all/muso-ops-tracks/SKILL.md.tmp" "$TEST_TMPDIR/skills-all/muso-ops-tracks/SKILL.md"

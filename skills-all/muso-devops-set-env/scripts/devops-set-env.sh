@@ -140,7 +140,6 @@ resolve_slack_to_email() {
     [[ "$input" == *@* ]] && { echo "$input"; return 0; }
     case "$input" in
         U7RP6HKUZ)   echo "aaron@muso.ai" ;;
-        U03TYGJF1N3) echo "serhii@muso.ai" ;;
         U038BM16T7W) echo "jan@muso.ai" ;;
         U0AL36NADEY) echo "nick@muso.ai" ;;
         U0A8CCTTAAG) echo "liza@muso.ai" ;;

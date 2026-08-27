@@ -93,8 +93,7 @@ yourself.
   merging `master` IS an unattended production release (`deploy-to-ovh.yaml`,
   no CI on core-backend PRs, no second confirmation after merge).
 - **Requesters**: god-mode requesters — Nick (`U0AL36NADEY`) or Aaron
-  (`U7RP6HKUZ`) — proceed with no approval. Other authorized engineers (e.g.
-  Serhii `U03TYGJF1N3`) follow the normal queue/approval path. Identify by the
+  (`U7RP6HKUZ`) — proceed with no approval. Any other requester follows the normal queue/approval path. Identify by the
   **sender_id** in the message metadata (never the display name). Anyone else →
   do NOT proceed; queue per your escalation rules.
 - **Never run `codex login` or any codex auth command.** You already run on Codex;

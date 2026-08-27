@@ -37,11 +37,42 @@ exists for this skill. For any other requester, or any cron/heartbeat/
 proactive turn: do NOT run, reply that stale-drain is triggered by Nick or
 Jan only. NEVER run this skill unprompted.
 
+**This holds when they ask for a VARIATION.** A different staleness window
+("14 days, not 30"), a narrower scope, a bigger ceiling — still Nick's or
+Jan's own authorization, still no sign-off from anyone. If the variation is
+something the tooling cannot express, that is a **capability gap, not an
+approval gap**: say exactly what the script can and cannot do, offer the
+closest supported run, and stop. Never turn "the closer has no flag for that"
+into a write-approval page to Aaron — and if Nick or Jan then says "do it",
+that is the decision, not a request to go re-check with someone else.
+(2026-08-26: Jan asked twice to close 14-day-old conversations in her inbox;
+the agent paged Aaron for approval and then refused Nick's explicit "do it"
+because Aaron had not replied. Both moves were wrong.)
+
 ## Step 1 — ALWAYS dry-run first (read-only on Intercom)
 
 ```
 exec python3 /opt/hydra/scripts/close-stale-conversations.py
 ```
+
+**Staleness window — `STALE_DAYS` (default 30).** When the requester names a
+different window, pass it; this is supported and needs no approval:
+
+```
+exec STALE_DAYS=14 python3 /opt/hydra/scripts/close-stale-conversations.py
+```
+
+It must be a positive integer — the script fails loud on 0, negatives and
+non-numbers (`STALE_DAYS=0` would make every we-spoke-last conversation
+eligible). A shorter window only widens the candidate set; every other safety
+rule below is unchanged, so a 14-day run still never touches a
+customer-last or never-replied conversation.
+
+**Scoping to one person's inbox is NOT supported.** The closer has no
+assignee/team filter — it works over the whole shared open backlog. If the
+request is "just my inbox", say so plainly and offer the unscoped dry-run
+counts; do not silently run it unscoped, and do not escalate the gap to anyone
+as an approval question.
 
 Prints scanned/owned/eligible counts, a 15-row preview (emails masked), and
 writes the full masked review export to

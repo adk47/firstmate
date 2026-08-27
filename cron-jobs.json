@@ -308,7 +308,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run the daily dev activity report. For each developer (adk47=Aaron, liflovs=Serhii), run the dev-report.sh script or use gh CLI to get commits from the last 24h across all Muso-AI repos (core-backend, web-credits, platform-data-processing, industry-data-processing, analytics-worker, mobile, devops, feed-service, customer-api-mcp, render-service, web-encore). For each dev: 1) Big Picture — group commits into themes, explain what was accomplished and why it matters. 2) Commit stats — per-repo counts, additions/deletions. 3) Individual commits with sha and +/-. 4) Cadence — total commits, average interval. Format for Slack mrkdwn (no tables, bullets only). Post each dev report as a separate message. If zero commits, say so briefly.",
+        "message": "Run the daily dev activity report. For each developer (adk47=Aaron; Serhii/liflovs LEFT the company 2026-08-26 — do NOT report on him), run the dev-report.sh script or use gh CLI to get commits from the last 24h across all Muso-AI repos (core-backend, web-credits, platform-data-processing, industry-data-processing, analytics-worker, mobile, devops, feed-service, customer-api-mcp, render-service, web-encore). For each dev: 1) Big Picture — group commits into themes, explain what was accomplished and why it matters. 2) Commit stats — per-repo counts, additions/deletions. 3) Individual commits with sha and +/-. 4) Cadence — total commits, average interval. Format for Slack mrkdwn (no tables, bullets only). Post each dev report as a separate message. If zero commits, say so briefly.",
         "timeoutSeconds": 300,
         "thinking": "low",
         "model": "openai/gpt-5.6-sol",
@@ -810,7 +810,7 @@
       "id": "64a92c48-410b-45a9-bbe1-9284bb5c2380",
       "agentId": "operations",
       "name": "profile-org-credit-sync-daily",
-      "description": "Daily additive profile→org credit sync over the standing pairs in muso-ops-credit-sync/config/sync-pairs.txt (first pair: Colin Leonard → Sing Mastering, per the 2026-06-09 EOD call). Interim until core-backend grows a native profile→org credit link (Serhii); retire this job when that ships. Additive-only: the script never DELETEs; org-only extras are reported for human review. Posts to #credit-verification only when something was added, failed, or org-only extras exist (NO_REPLY otherwise). SHIPPED enabled:false — flip after the live --dry-run + first manual run verify the credits-list response shape (script fail-louds on contract surprises).",
+      "description": "Daily additive profile→org credit sync over the standing pairs in muso-ops-credit-sync/config/sync-pairs.txt (first pair: Colin Leonard → Sing Mastering, per the 2026-06-09 EOD call). Interim until core-backend grows a native profile→org credit link; retire this job when that ships. Additive-only: the script never DELETEs; org-only extras are reported for human review. Posts to #credit-verification only when something was added, failed, or org-only extras exist (NO_REPLY otherwise). SHIPPED enabled:false — flip after the live --dry-run + first manual run verify the credits-list response shape (script fail-louds on contract surprises).",
       "enabled": false,
       "createdAtMs": 1781106407915,
       "updatedAtMs": 1781106407915,

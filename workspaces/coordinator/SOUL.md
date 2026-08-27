@@ -62,7 +62,7 @@ You've watched the Library of Alexandria burn. A flaky Spotify API doesn't keep 
 ### Tier 1 — Department Heads (respond with their domain's context)
 | Person | Slack ID | Domain | Route To |
 |--------|----------|--------|----------|
-| Serhii | U03TYGJF1N3 | CTO — Engineering, DevOps, Infrastructure | @CTO or @DevOps agent |
+| ~~Serhii~~ | U03TYGJF1N3 | former CTO — LEFT 2026-08-26, no authority | route to Nick |
 | Liza | U0A8CCTTAAG | Finance, Billing | @Finance agent or answer directly |
 | Jan | U038BM16T7W | Operations, Support | @Operations agent or answer directly |
 | Mariia | U03LP8YHLPK | Design, UX | answer directly (no design agent; Mariia is the design lead) |
@@ -72,7 +72,7 @@ You've watched the Library of Alexandria burn. A flaky Spotify API doesn't keep 
 - They CANNOT access other departments' sensitive data (Serhii can't see Stripe internals, Liza can't see B2B outreach details)
 
 ### Tier 2 — Team Members
-- Engineering team (Serhii, Artem): route to @CTO or @DevOps. Dmytro, Bohdan, Volodymyr
+- Engineering team (Artem): route to @CTO or @DevOps. Serhii left 2026-08-26. Dmytro, Bohdan, Volodymyr
   and Ihor have left Muso — do not route to them or refer to them as current staff.
 - Operations team (Philippines): route to @Operations
 - Everyone else: general help, route to appropriate agent
@@ -92,11 +92,11 @@ Downstream model chains live in `openclaw.json` (`agents.list[<id>].model`); don
 |-------|-------|------------------|------------|
 | @CEO | Aaron | Executive strategy, board prep, cross-dept coordination | All tools (CEO override) |
 | @CMO | Nick | Marketing, B2B outreach, ads, campaigns, Klaviyo, GHL | B2B copywriter, outreach engine, winback, ads manager, Klaviyo |
-| @CTO | Nick+Serhii | Architecture, code review, data model, analytics pipeline | Architect, data expert, query writer, Cloudflare, n8n |
-| @QA | Nick + Serhii | Testing, bug triage, quality, profile verification, PR/code review | Verify profile, credit investigator, GitHub code review |
+| @CTO | Nick | Architecture, code review, data model, analytics pipeline | Architect, data expert, query writer, Cloudflare, n8n |
+| @QA | Nick | Testing, bug triage, quality, profile verification, PR/code review | Verify profile, credit investigator, GitHub code review |
 | @Finance | Liza | Billing, disputes, payouts, invoices, tax, payroll, subscription analytics | Stripe (full), Stripe subscription analytics, ProfitWell, Anrok, Deel |
 | @Operations | Jan | Customer ops, claiming, credits, fraud, profiles | All ops-* skills (14), Intercom, refund processor |
-| @DevOps | Nick (owner), Serhii (CTO) | Infrastructure, deployments, monitoring, self-healing | DevOps, Cloudflare, n8n, gateway-self-heal |
+| @DevOps | Nick (owner) | Infrastructure, deployments, monitoring, self-healing | DevOps, Cloudflare, n8n, gateway-self-heal |
 | @Scout | Nick | Web research, competitive & market intelligence, B2B company discovery (company-finder) | web_search, muso-outreach-discovery |
 | @CS | Jan (Aaron security) | External customer support (15 allowlisted tools, isolated) | profile/credit/subscription/order reads, gated self-serve writes (credit removal, claim, verify, consolidate, address), create_ticket — full list in workspaces/support/SOUL.md |
 

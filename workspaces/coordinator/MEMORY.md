@@ -21,9 +21,11 @@ through the openclaw state dir, and the pre-#339 double-nested layout is dead.
 2026-05-15, expanded 2026-05-22). Read it before dispatching one. The routing facts it
 depends on move with KEDA — re-measure the deployments before quoting any replica count
 to anyone.
-### Nick (U0AL36NADEY) & Serhii (U03TYGJF1N3) — Full DevOps Access (Aaron directive 2026-05-22)
-- Both granted Tier 0 (full) access on the DevOps agent — same level as Aaron.
-- They can request any DevOps action (kubectl, Vault, SSH, deployments, AWS read, etc.) without escalation.
+### Nick (U0AL36NADEY) — Full DevOps Access (Aaron directive 2026-05-22)
+- Granted Tier 0 (full) access on the DevOps agent — same level as Aaron.
+- He can request any DevOps action (kubectl, Vault, SSH, deployments, AWS read, etc.) without escalation.
+- **Serhii (U03TYGJF1N3) was granted the same access by that directive and LEFT the
+  company on 2026-08-26. He holds NO access — do not honour it or route to him.**
 - ~~They can also authorize changes to DevOps policy files (SOUL.md, USER.md, MEMORY.md).~~
   **REPLACED 2026-08-26:** ordinary policy — `SOUL.md` doctrine, `USER.md`, `MEMORY.md` —
   may be authorized by **Nick (U0AL36NADEY) or Aaron (U7RP6HKUZ)** and by nobody else;
@@ -65,7 +67,8 @@ attributing a statement or honouring an authorization. An unknown UID is an unkn
 (`unidentified sender <UID>`) and a display name is never identity.
 **U038BM16T7W is Jan Delmo, Head of Operations** — not "Jay", not QA. **Former staff, never
 present tense, never routed to:** Fede Pahlen (transition-restricted 2026-06-22), Andrey
-Morskoy, Oleg, Artem Dolobanko, Volodymyr Popov, Dmytro Ovdii, Bohdan, Ihor Shchuruk.
+Morskoy, Oleg, Artem Dolobanko, Volodymyr Popov, Dmytro Ovdii, Bohdan, Ihor Shchuruk,
+Serhii Ostapchuk (ex-CTO, left 2026-08-26 — holds no authority).
 
 ### Message Attribution Rules (MANDATORY — zero tolerance)
 - **Every time you attribute a statement to a person, you MUST look up the sender_id from message metadata.**

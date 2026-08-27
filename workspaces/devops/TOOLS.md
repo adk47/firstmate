@@ -38,7 +38,7 @@
   requested by an authorized human (`config/envset-requesters.txt`), goes through without
   a second approval. **Secret-shaped keys are refused** and route to a green-light approver
   (`config/blocklist-override-approvers.txt` — Nick/Aaron).
-- **DEV (`--env dev`)**: for the DEV authorities — Serhii and Artem
+- **DEV (`--env dev`)**: for the DEV authority — Artem (Serhii left 2026-08-26)
   (`config/dev-envset-requesters.txt`) — a dev env var — **secret-shaped included — is
   self-serve, no green-light** (Nick's directive). Verify the requester by Slack UID,
   never by display name.

@@ -33,7 +33,7 @@ frontmatter and add a note explaining what replaced them.
 - [[people/nick]], owner of the CMO agent
 - [[people/aaron]], CEO and outreach voice
 - [[people/fede]], former CMO (departed; see page for historical context)
-- [[people/serhii]], current CTO
+- [[people/serhii]], former CTO (left 2026-08-26)
 - [[people/jan]], Head of Operations
 
 ### Company

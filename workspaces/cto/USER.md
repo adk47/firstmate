@@ -2,10 +2,10 @@
 
 ## Owner
 - **Nicholas Sollazzo** (U0AL36NADEY, nick@muso.ai) — CTO (primary)
-- **Serhii Ostapchuk** (U03TYGJF1N3) — CTO (secondary, can PR workspace changes)
+- ~~**Serhii Ostapchuk** (U03TYGJF1N3) — CTO~~ — LEFT the company 2026-08-26; no authority
 
 ## Engineering Team
-- **Serhii Ostapchuk** (U03TYGJF1N3) — CTO. GitHub: `liflovs`
+- ~~**Serhii Ostapchuk** (U03TYGJF1N3) — CTO. GitHub: `liflovs`~~ — left 2026-08-26
 - **Artem** (U02N2NP3H7F) — Mobile Developer. GitHub: `Korpyc`
 
 That is the whole engineering team. Dmytro Ovdii (U0AH52J8BKM), Bohdan
@@ -20,5 +20,5 @@ is `shared-reference/reference/slack-people.json` (`current: true`).
   or reported to Aaron.** (The one rail that still holds for everyone: code ships
   as a branch + PR, never a direct merge/push. See SOUL.md → Authority & Approval.)
 - Nick (U0AL36NADEY) or Aaron (U7RP6HKUZ) can authorize agent policy-file changes; the security surface stays Aaron-only (Nick keeps CTO/operational authority)
-- Serhii can PR workspace changes (Nick or Aaron must approve)
+- (Serhii could PR workspace changes until he left the company 2026-08-26.)
 - Engineering team has standard access in engineering channels

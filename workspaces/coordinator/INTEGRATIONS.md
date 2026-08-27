@@ -56,7 +56,7 @@ _Every system I have access to, what it does, and who can use it. Load this EVER
 | `muso-refund-investigation` | Refund decision support |
 | `muso-refund-processor` | End-to-end refund execution (Stripe write) |
 | `muso-contract-invoicer` | Stripe invoices from contracts (Aaron only) |
-| `muso-ads-manager` | AMP ad management (Aaron+Serhii+Nick) |
+| `muso-ads-manager` | AMP ad management (Aaron+Nick) |
 
 ## Marketing & Outreach Skills
 

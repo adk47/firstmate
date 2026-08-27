@@ -65,8 +65,12 @@ incorrect credits (overrides raw source)"). Verify via the credits LIST (materia
 profile's FULL credit list through `GET /admin/track/:id/raw-credits` first (checking only
 the requested tracks misses keep-assertions); raws are often mixed (one tidal raw asserted
 16 wrong + 26 correct tracks). More than 10 destructive DELETEs in 15 min trips the tier-2 gate:
-escalate for second-human approval (`--confirmed-by`/`--approval-msg-id` on the admin
-wrapper; muso-cli: `--approval-ref`), don't pace under it. Full playbook:
+cite the decision, don't pace under it. When Aaron, Jan or Nick asked and named the
+targets, their own request message IS the decision — on the operations agent
+`--approval-msg-id <ts>` + `--approval-author-id <Uxxxxxxxx>` clear it (Slack user id, not an
+email), elsewhere add `--confirmed-by <their handle>`
+(muso-cli spells the timestamp `--approval-ref`). Only a vague request, or one from
+someone off that list, needs a second human. Full playbook:
 `skills-all/muso-ops-tracks/SKILL.md` → Removal Requests.
 
 **`OPS_DRY_RUN=1` silently fakes success.** With it set in env, the admin-api wrapper
@@ -534,7 +538,7 @@ the same change.
 | Liza Basco | `U0A8CCTTAAG` | `liza@muso.ai` | Accountant |
 | Mariia Bubley | `U03LP8YHLPK` | `mariia@muso.ai` | UI/UX designer + junior front-end dev |
 | Nicholas Sollazzo (Nick) | `U0AL36NADEY` | `nick@muso.ai` | Chief Agent Officer |
-| Serhii Ostapchuk | `U03TYGJF1N3` | `serhii@muso.ai` | CTO |
+| Serhii Ostapchuk | `U03TYGJF1N3` | `serhii@muso.ai` | former CTO — LEFT 2026-08-26 |
 | Artem | `U02N2NP3H7F` | `artem@muso.ai` | Mobile developer |
 | Faith Undie | `U0AV9C7CFRQ` | `faith@muso.ai` | Community & Social / Designer |
 | McLaren Amberti | `U02S7C96CGN` | `f@muso.ai` | Sales Operations |

@@ -29,7 +29,7 @@ and only marks the system as "ready" once every item is green.
 - [ ] Read `USER.md` and list all 4 authorized users with IDs
 - [ ] Confirm owner: Nick (U0AL36NADEY)
 - [ ] Confirm CEO: Aaron Kaufman (U7RP6HKUZ, a@muso.ai)
-- [ ] Confirm CTO current: Serhii (U03TYGJF1N3)
+- [ ] Confirm who the current CTO is (Serhii, U03TYGJF1N3, left 2026-08-26 — seat may be vacant)
 - [ ] Confirm Head of Ops: Jan Delmo (U038BM16T7W)
 
 ## Phase 2, Environment Variables

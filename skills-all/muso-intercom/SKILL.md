@@ -25,8 +25,23 @@ Query and manage Muso.AI customer messaging and support data from Intercom.
 ## Write Access Control (MANDATORY – check FIRST)
 
 **Write operations (send messages, update contacts, tag, close conversations, etc.):**
-- `U7RP6HKUZ` (Aaron) → full write access
-- Everyone else → READ ONLY. Politely decline write requests: "Intercom writes are Aaron-only. Ask him directly."
+- `U7RP6HKUZ` (Aaron), `U038BM16T7W` (Jan), `U0AL36NADEY` (Nick) → full write
+  access, co-equal. Their request IS the authorization: execute it and report
+  the result. **Never route one of them to another for sign-off**, and never
+  answer a Tier-1 "do it" with "I'm waiting on Aaron": that is inventing an
+  approval requirement that does not exist.
+- Everyone else → READ ONLY. Politely decline write requests: "Intercom writes
+  need Jan, Nick or Aaron. Want me to ask Jan?"
+
+**A request that falls outside a safe wrapper is not an approval problem.** If
+Jan or Nick asks for a variation the tooling can't express (a different
+staleness window, a narrower scope), the missing piece is a *capability*, not a
+signature. Say plainly what the tool can and cannot do, do the part that is
+supported, and never convert "my script doesn't have that flag" into "Aaron
+must approve this". Escalating a capability gap to a human as an approval
+request is the 2026-08-26 failure (Jan asked twice to close her 14-day-old
+inbox; the agent posted a write-approval page to Aaron, then refused Nick's
+explicit "do it" on the grounds that Aaron had not answered).
 
 **Read operations (search, list, view):** available to all authorized users.
 

@@ -25,10 +25,10 @@ nick@muso.ai
 aaron
 aaron@muso.ai
 
-# Serhii — "dev king" (U03TYGJF1N3)
-serhii
-serhii@muso.ai
-U03TYGJF1N3
+# Serhii Ostapchuk (U03TYGJF1N3, ex-CTO, "dev king") has LEFT the company and
+# was removed from this list on 2026-08-26 — do not re-add him. Historical docs
+# and the 2026-07-17 "dev king" directive still name him; this list is the
+# authority, not the prose.
 
 # Artem (Mobile Developer) — U02N2NP3H7F. Added 2026-07-30 (Nick: Serhii and
 # Artem must have full control over dev without asking permission).

@@ -89,10 +89,33 @@ dev_set() { # dev_set <requester> <set-args...>
 @test "dev: shipped dev-envset-requesters.txt authorizes exactly the DEV authorities" {
     local real="${BATS_TEST_DIRNAME}/../../config/dev-envset-requesters.txt"
     [ -f "$real" ]
-    for id in U03TYGJF1N3 U02N2NP3H7F; do
+    # Serhii (U03TYGJF1N3) was a DEV authority until he left the company on
+    # 2026-08-26; the revocation is asserted in its own test below, alongside
+    # Artem D's. Artem M is the remaining standing DEV authority.
+    for id in U02N2NP3H7F; do
         grep -qx "$id" "$real" || { echo "missing DEV authority UID: $id" >&2; return 1; }
     done
     grep -qx 'artem@muso.ai' "$real"
+}
+
+@test "dev: shipped config does NOT authorize departed Serhii (revocation holds)" {
+    local dev="${BATS_TEST_DIRNAME}/../../config/dev-envset-requesters.txt"
+    local prod="${BATS_TEST_DIRNAME}/../../config/envset-requesters.txt"
+    # Same shape as the Artem D test below: active (non-comment) lines only, and
+    # capture-then-compare rather than `! cmd | grep -q`, which bats' errexit
+    # exempts and which could therefore never fail. Serhii is still NAMED in
+    # comments there on purpose ("do not re-add him"), so a plain grep would
+    # match documentation and pass vacuously.
+    local strip='s/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d'
+    local dev_uid dev_handle dev_email prod_hit
+    dev_uid="$(sed "$strip" "$dev" | grep -cx 'U03TYGJF1N3' || true)"
+    dev_handle="$(sed "$strip" "$dev" | grep -cx 'serhii' || true)"
+    dev_email="$(sed "$strip" "$dev" | grep -cx 'serhii@muso.ai' || true)"
+    prod_hit="$(sed "$strip" "$prod" | grep -cx 'U03TYGJF1N3' || true)"
+    [ "$dev_uid" -eq 0 ]
+    [ "$dev_handle" -eq 0 ]
+    [ "$dev_email" -eq 0 ]
+    [ "$prod_hit" -eq 0 ]
 }
 
 @test "dev: shipped config does NOT authorize departed Artem D (revocation holds)" {

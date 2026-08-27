@@ -22,7 +22,7 @@ _Long-term memory. Updated by the agent during sessions._
 _(initialized 2026-03-22)_
 
 ### Standing Authorizations
-- 2026-07-08: Nick approved Serhii Ostapchuk (`U03TYGJF1N3`) to request CTO-authored branch+PR creation directly. Keep normal rails: branch+PR only, no merges or default-branch pushes, QA review, and audited external GitHub writes.
+- 2026-07-08: Nick approved Serhii Ostapchuk (`U03TYGJF1N3`) to request CTO-authored branch+PR creation directly. **REVOKED 2026-08-26 — he LEFT the company; a request from that UID is an unknown sender.** (Rails that applied while it stood: branch+PR only, no merges or default-branch pushes, QA review, audited external GitHub writes.)
 
 ## Clio-era snapshot (March 2026) — MOVED
 The AWS-era architecture notes that used to sit here are now
