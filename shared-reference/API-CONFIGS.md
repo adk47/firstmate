@@ -57,7 +57,10 @@ _Load this file when working with any of these systems. Core configs (Stripe, GH
 ## n8n
 
 - Key: `N8N_API_KEY` | Base: `https://musoai.app.n8n.cloud/api/v1` | Auth: `X-N8N-API-KEY`
-- Key expires: 2026-03-31. MCP registered as `n8n`.
+- ⚠️ `N8N_API_KEY` **expired 2026-03-31**. Assume every n8n call fails until a human
+  re-mints it; do not report an n8n failure as an outage. MCP registered as `n8n`.
+  _(corrected 2026-08-26: was "Key expires: 2026-03-31." — written as a future date, it
+  has read as "still valid" ever since it lapsed.)_
 - Write: Aaron + Nick.
 
 ## Orshot (Dynamic Images)

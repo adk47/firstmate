@@ -1,4 +1,19 @@
-# Muso Access (access.muso.ai)
+> ⚠️ **HISTORICAL — undated public marketing-page copy for access.muso.ai (scrape date
+> unknown). Do not act on this document.** It is a *marketing claim*, not an internal
+> count: the audience figures below (**500K+** verified professionals, **350K** email
+> subscribers, **300K+** push reach) conflict with what we measure internally — three
+> durable figures exist for the same claim (**820,000 / 500K+ / 465,671**), and only
+> **465,671** was ever live-queried (2026-04-19), with **820K explicitly flagged wrong**.
+> Re-pull before quoting any of them, and never present a marketing number as an internal
+> one. Also: **"Muso Access" is the retired former name** — the product is **Muso Ads**
+> (see `workspaces/cmo/reference/product-naming.md`); every "Muso Access" below is stale
+> branding, left in place because this file is a record of what the page said.
+> Retained for history only. Verified stale 2026-08-26.
+
+# Muso Ads (access.muso.ai) — public marketing-page copy
+
+_(corrected 2026-08-26: this file was titled `# Muso Access (access.muso.ai)`. "Muso Access"
+is a forbidden former name.)_
 
 ## Overview
 

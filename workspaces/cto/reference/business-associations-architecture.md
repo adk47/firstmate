@@ -1,3 +1,16 @@
+> ⚠️ **HISTORICAL — a February-2026 design proposal. NEVER IMPLEMENTED (as of 2026-08-26).
+> Do not act on this document.** Nothing below shipped; describing it as how Muso works is
+> wrong. What actually shipped instead: **`ad_account`** is the advertiser identity (campaigns
+> reference `adAccountId` and need neither catalog presence nor credits); a catalog org is
+> linked as the ad-account team's **organization roster seat** (existing ads snapshot
+> `companyProfileId` and are **NOT** backfilled by late linking); public People come from the
+> explicitly-managed **`staff` roster** via **`GET /v4/profile/:id/members`** — **never** the
+> private workspace-members endpoint, which exposes email, permissions, role and last activity;
+> and org `roles` is a **closed 15-value vocabulary**, not free text. Any "SQS message type"
+> named below would today be a Kafka (Redpanda) topic. Current state:
+> `/opt/hydra/shared-reference/AGENT_CURRENT_TRUTH.md`.
+> Retained for history only. Verified stale 2026-08-26.
+
 # Business & Product Associations — Architecture Proposal
 
 **Date:** 2026-02-17
@@ -314,7 +327,7 @@ GET    /api/v1/track/{id}/business-associations?profile_context={id}
 
 ### Industry Data Processing (catalog worker)
 
-New SQS message types:
+New queue message types (Redpanda/Kafka — 'SQS' naming is legacy): _(corrected 2026-08-26: was "New SQS message types:")_
 - `business_association.sync` — process new/updated associations
 - `business_association.derive` — recompute derived associations when membership changes
 

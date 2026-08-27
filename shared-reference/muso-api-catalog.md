@@ -1,6 +1,13 @@
 # Muso.AI API Catalog
 
-> Generated from source code on 2026-02-20. Last updated: 2026-03-22. This is the authoritative reference for all API endpoints.
+> ⚠️ **SNAPSHOT, NOT AUTHORITY.** ~5 months stale. A starting point for finding a route,
+> never proof that a route, its auth, or its response shape is current. Validate against
+> live code before quoting a contract. Known INCOMPLETE — see §10 "Surfaces missing from
+> this catalog".
+>
+> ~~Generated from source code on 2026-02-20. Last updated: 2026-03-22. This is the authoritative reference for all API endpoints.~~
+> **Corrected 2026-08-26:** generated 2026-02-20, last updated 2026-03-22 — it was never
+> re-generated, so "authoritative reference" has been false since roughly then.
 
 ---
 
@@ -164,7 +171,10 @@ New common v5 namespace providing unified search endpoints (not scoped to custom
 
 ### `/api/c/v4` — Customer/Partner API
 
-Auth: API key via `x-api-key` header → API Gateway → `x-api-gw-auth` header. Max page size: 50.
+Auth: API key via `x-api-key` header → **Kong** → `x-api-gw-auth` header. Max page size: 50.
+_(corrected 2026-08-26: was "API Gateway", which read as AWS API Gateway. The gateway is
+**Kong OSS, self-hosted, 3 replicas** — there is no AWS API Gateway. ~270 legacy Kong
+consumers exist on this surface.)_
 
 - `GET /api/c/v4/profile/:profileId` — Profile details
 - `GET /api/c/v4/profile/:profileId/credits` — Profile credits
@@ -541,8 +551,8 @@ class ProfileCredit(BaseModel):
     p_line: str | None
     c_line: str | None
     spotifyLabel: str | None
-    streams: int | None            # Aurora-only
-    genres: list[str] | None       # Aurora-only
+    streams: int | None            # PG-stats-path only (formerly "Aurora-only"; self-hosted PG17)
+    genres: list[str] | None       # PG-stats-path only (formerly "Aurora-only"; self-hosted PG17)
     auditNumISRCsAffected: int | None
     auditStatus: str | None
 ```
@@ -692,7 +702,9 @@ Routes in `apps/backend/src/routes/`:
 
 ## 6. Analytics Worker (`Muso-AI/analytics-worker`)
 
-Background worker service — no HTTP API (processes SQS messages).
+Background worker service — no HTTP API (**consumes Redpanda/Kafka topics; "SQS" in old
+code and env-var names is a shim.**) _(corrected 2026-08-26: was "processes SQS messages" —
+there is no live AWS SQS.)_
 
 ---
 
@@ -711,6 +723,29 @@ Internal service for rendering (posters, exports, etc.) — no public API.
 ## 9. AI Chat Service (`Muso-AI/ai-chat-service`)
 
 AI chat integration service.
+
+---
+
+## 10. Surfaces missing from this catalog
+
+_Added 2026-08-26._ These exist in production but were never catalogued above. Their absence
+here is the main reason this document must not be treated as authoritative — a route missing
+from this file is not evidence the route does not exist.
+
+- **ticker-api nowcast** — `GET /v1/nowcast/<profile_id>`. **The profile UUID is REQUIRED**;
+  bare `/v1/nowcast` and `/v1/nowcast/` return **404**, which is a route error, not a nowcast
+  outage. Do not escalate a bare-path 404 as an incident.
+- **Platform API** — `api.platform.muso.ai` is **live** (not "coming"), fronted by Kong.
+  platform.muso.ai itself is live behind an @muso.ai better-auth gate.
+- **`/w/v3/*`** — public profile routes. Not documented above at all.
+- **`POST /v4/profile/:id/views`** — server-side profile views. **This is the SOLD metric.**
+  It is NOT the raw Amplitude `profile_view` event; do not substitute one for the other when
+  quoting a customer or an advertiser.
+- **Insights / `followersTotal`** — the follower count. ⚠️ Profile-detail `followsCount` is
+  **OUTGOING follows** (who the profile follows) and is **never** a follower count. These have
+  been confused before.
+- **Credits submissions** — the credit-submission surface behind "Add Missing Credits".
+- **Feed activities** — the activity/feed surface.
 
 ---
 

@@ -75,6 +75,13 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
 - Never share an internal team member's email or assign a specific reviewer by name – the operations team triages from the ticket queue.
 - Never reference internal tools or URLs (e.g., admin dashboards, retool). Customer-facing URLs only.
 - If the customer can't provide URLs and only knows profile names, run `profile_lookup` to confirm matches before opening the ticket – include the resolved profile IDs in `details` instead of (or alongside) URLs. `profile_credits_status` also surfaces same-name duplicate CANDIDATES (claim state + credit counts) when the customer can't name the duplicates yet – candidates only, never confirmed duplicates.
+- **Known cause (2026-08-26, internal; do not quote the mechanism to customers):**
+  a claim can mint an EMPTY twin of the profile rather than attaching to the
+  populated one. The signature is a duplicate with the right name and few or zero
+  credits, created around the time they claimed. That is our defect (IDP #1538), not
+  customer error, so never imply they created it or claimed the wrong profile. File
+  the `profile-merge` ticket as normal and note "empty twin, likely claim-mint" in
+  `details` so ops can batch them.
 
 ---
 
@@ -127,6 +134,14 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
    reads the pending queue (`credit.pending`, `pending_verification` state) before
    you enter the proof flow.
 7. **Escalate:** If they've submitted documentation and the claim has been open more than 5 business days with no update, create a ticket with category "Credit Claim – Documentation Submitted". SLA: 2 business days.
+
+**Notes:**
+- **Before asking for more proof:** a credit sitting in `user_verification_needed` is
+  usually NOT under suspicion. Most holds today are transient pipeline states
+  (commonly the track still being captured) surfaced as if they were risk decisions
+  (internal ref IDP #1537). Never tell a customer their credit was flagged, doubted,
+  or held for review of their honesty. If they have already sent proof once, do not
+  ask again; say it is with the team and file the follow-up. _(added 2026-08-26)_
 
 ---
 

@@ -85,6 +85,12 @@ the customer and have **no fixed timeline** – never promise one. For those, fo
 the `customer-credit-verification` flow: ask for proof (see common-issues row #5 for
 what to ask for) and file for the team when warranted.
 
+_(added 2026-08-26)_ A hold is usually NOT suspicion. Most `user_verification_needed`
+holds today are transient pipeline states (commonly the track still being captured)
+surfaced as if they were risk decisions (internal ref IDP #1537). Never tell a customer
+their credit was flagged or doubted, and if they have already sent proof once, do not
+ask again.
+
 ### What credit roles are supported?
 We support all standard music industry roles: Artist, Featured Artist, Producer, Executive Producer, Co-Producer, Writer, Composer, Lyricist, Mixing Engineer, Mastering Engineer, Recording Engineer, A&R, Creative Director, and more.
 

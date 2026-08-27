@@ -1,3 +1,17 @@
+> ⚠️ **HISTORICAL — describes the AWS-era pipeline as of 2026-03-09. Do not act on this document.**
+> The architecture audited here is AWS-era and fully decommissioned (April 2026): read every
+> Aurora/RDS as self-hosted **PG17** (primary node-17, replica node-19; node-18 is gone), every
+> MWAA as self-hosted **Airflow 2.10.3** in namespace `data-processing`, every Athena as
+> **Trino**, every SQS as **Redpanda/Kafka**, and every EKS as **OVH K3s** — so Part 5's cost
+> analysis (~$21,500/mo) prices a bill that no longer exists, and the recommendations in
+> Parts 6–8 push analytics *into* the relational store, the opposite of the current north star
+> (ClickHouse takes analytics OFF PG-17). Part 8 additionally assigns work to people who have
+> since left Muso and proposes V3 DAG-schedule and OLAP-cube changes that are forbidden without
+> an explicit brief — doubly so while cube promotion is frozen. Current state:
+> `/opt/hydra/shared-reference/AGENT_CURRENT_TRUTH.md`. Part 3 (the V3 calculation dependency
+> tree) is the only section still worth reading, and only as archaeology.
+> Retained for history only. Verified stale 2026-08-26.
+
 # Muso.AI Data Pipeline Architecture Audit
 
 **Date:** 2026-03-09
@@ -378,7 +392,7 @@ Things I couldn't determine from code alone:
 
 1. **What exactly did you turn off?** — You mentioned turning off "some S3 things." Can you check if any S3 event notifications or bucket policies were modified beyond the SKIP_S3_CAPTURE flag and lifecycle changes?
 
-2. **Is the orchestrator DAG actually succeeding?** — I don't have MWAA console access. Check if `Run_Industry_Orchestrator_V2` has been completing successfully. If capture_aggregate is failing (because S3 data is missing for shazam), it could be blocking the entire downstream pipeline.
+2. **Is the orchestrator DAG actually succeeding?** — ~~I don't have MWAA console access.~~ **Corrected 2026-08-26:** MWAA is retired; Airflow is self-hosted at `airflow.ak.muso.ai` (namespace `data-processing`) and is directly queryable, so this is no longer a blocked check. Check if `Run_Industry_Orchestrator_V2` has been completing successfully. If capture_aggregate is failing (because S3 data is missing for shazam), it could be blocking the entire downstream pipeline.
 
 3. **Are OLAP cubes actually being rebuilt?** — Check the `Run_Persist_OLAP` DAG status. If this isn't running, the app would show stale data everywhere.
 

@@ -1,3 +1,12 @@
+> ⚠️ **HISTORICAL — a March-2026 planning artefact. Do not act on this document.**
+> Its blockers, timeline and "what I need from Aaron" list describe March 2026, not today:
+> HOLE 1 (admin API credentials) has been closed since ~2026-04 and must not be re-requested,
+> and Athena is retired — Trino via `/opt/hydra/scripts/trino-query.sh` is the default query
+> path. The operator/authority tiers shown below are illustrative examples only;
+> `MEMORY.md` + `shared-reference/reference/slack-people.json` win over them, as does
+> `/opt/hydra/shared-reference/AGENT_CURRENT_TRUTH.md` for current state.
+> Retained for history only. Verified stale 2026-08-26.
+
 # Retool Replacement — Master Plan & Gap Analysis
 
 _Created: 2026-03-07 by Clio_
@@ -33,11 +42,20 @@ _Created: 2026-03-07 by Clio_
 
 ## 🔴 HOLES — What's Needed to Make This Work
 
-### HOLE 1: Admin API Credentials (BLOCKER)
-**What:** I need `MUSO_API_URL`, `MUSO_ADMIN_EMAIL`, `MUSO_ADMIN_PASSWORD` set in `~/.zshrc`
-**Why:** Every ops skill calls core-backend's `/w/admin/*` endpoints via JWT auth
-**Status:** ⏳ Waiting for Aaron to DM credentials
-**Impact:** ALL write ops skills are blocked without this
+### HOLE 1: Admin API Credentials — **CLOSED**
+Admin API credentials are in place and the ops write skills are live. Audited admin
+writes have run continuously since ~2026-04; see `api-logs/admin/YYYY-MM-DD.jsonl`.
+**Do not re-request credentials.**
+
+Historical record of why this was ever a blocker:
+
+~~**What:** I need `MUSO_API_URL`, `MUSO_ADMIN_EMAIL`, `MUSO_ADMIN_PASSWORD` set in `~/.zshrc`~~
+~~**Why:** Every ops skill calls core-backend's `/w/admin/*` endpoints via JWT auth~~
+~~**Status:** ⏳ Waiting for Aaron to DM credentials~~
+~~**Impact:** ALL write ops skills are blocked without this~~
+
+**Corrected 2026-08-26:** the credentials landed ~2026-04; the "BLOCKER" heading and the
+"waiting for Aaron" status are both obsolete.
 
 ### HOLE 2: Admin API Route Verification (HIGH)
 **What:** I mapped 156 endpoints from memory + Retool docs, but haven't verified all routes exist in the current codebase

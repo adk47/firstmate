@@ -1,3 +1,10 @@
+> ⚠️ **HISTORICAL — a point-in-time catalog pull dated 2026-02-11. Do not act on this document.**
+> 📌 **POINT-IN-TIME 2026-02-11 — NOT CURRENT. Re-pull before quoting; do not extrapolate.**
+> 🔒 **INTERNAL ONLY.** The **29M+** profile figure that every tier below is derived from is an
+> internal catalog count and **must never be quoted externally** (`cmo/MEMORY.md:68`); the
+> public figure is **4M+**. Both the totals and the tier splits have moved since February.
+> Retained for history only. Verified stale 2026-08-26.
+
 # Muso.AI — Audience Tier Breakdown
 
 **Date:** February 11, 2026
