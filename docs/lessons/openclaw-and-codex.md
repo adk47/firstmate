@@ -369,9 +369,17 @@ streamable-HTTP. Register live with `openclaw --profile main mcp set "<Name>"
 
 **MCP tool ids are `<safeServerName>__<toolName>` (double underscore).** Server and
 tool names are sanitized (`[^A-Za-z0-9_-]` -> `-`, prefix `mcp-` if not starting
-with a letter) and truncated (server 30, tool 64 chars), case preserved. `tools.deny`
-is literal Set-membership with NO glob expansion, so list each full tool id; a
-truncated/sanitized name can differ from what you expect. A second server colliding
+with a letter) and truncated (server 30, tool 64 chars), case preserved. **`tools.deny` entries are GLOB patterns, not literal set membership** -- an
+earlier version of this file said the opposite and was wrong. Verified in the
+running runtime (2026.7.1, `dist/tool-policy-match-*.js`): `makeToolPolicyMatcher`
+feeds `policy.deny` through `compileGlobPatterns`, and `compileGlobPattern` maps
+`"*"` to match-all, a pattern containing `*` to
+`new RegExp("^" + escaped.replaceAll("\\*", ".*") + "$")`, and anything else to
+an exact match. So `sentry__*` denies every current AND future `sentry__` tool,
+which is what you want for an MCP server whose catalog is defined remotely.
+Enumerating ids is brittle: a tool added upstream is silently available to every
+agent you meant to exclude. Note a truncated/sanitized name can still differ from
+what you expect. A second server colliding
 on the safe-name gets a `-2` suffix, silently breaking existing deny entries. Grep
 the gateway log for `[bundle-mcp] server key "<raw>" registered as "<safeName>"`.
 

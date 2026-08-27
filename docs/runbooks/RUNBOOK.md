@@ -1483,15 +1483,22 @@ read -rsp 'Sentry token (input hidden): ' SENTRY_TOKEN; echo
 # except cto/qa in the same atomic write. Doing the deny as a second command
 # would leave a window where the server is live (the rename triggers a restart)
 # and unscoped - and if that second command failed, the window would be
-# permanent. `tools.deny` is literal with NO glob expansion, so every id is
-# spelled out. Ids are `<safeServerName>__<toolName>`; confirm the safe name in
+# permanent. `tools.deny` entries are GLOB patterns (verified in the 2026.7.1
+# runtime: compileGlobPattern turns a pattern containing `*` into
+# /^...$/), so prefer `sentry__*` over enumerating ids -- an enumeration silently
+# exposes any tool the remote server adds later. The ids below remain useful for
+# the RECONCILIATION step, which proves what the catalog actually contains. Ids are `<safeServerName>__<toolName>`; confirm the safe name in
 # the gateway log (`[bundle-mcp] server key "<raw>" registered as "<safeName>"`)
 # before trusting the `sentry__` prefix - a second server colliding on the safe
 # name gets a `-2` suffix.
-ids='["sentry__find_organizations","sentry__find_projects","sentry__search_issues",
-      "sentry__search_events","sentry__get_sentry_resource","sentry__update_issue",
-      "sentry__analyze_issue_with_seer","sentry__search_sentry_tools",
-      "sentry__execute_sentry_tool"]'
+# ONE wildcard, not an enumeration. `tools.deny` entries are compiled as glob
+# patterns (verified in the 2026.7.1 runtime), so `sentry__*` denies every
+# current AND future sentry tool. Installing the literal ids here would REPLACE
+# that durable protection: the next tool Sentry adds would be available to every
+# excluded agent, and this recipe would have been the thing that opened it.
+# The explicit ids still matter, but only for the reconciliation step below,
+# which proves what the live catalog actually contains.
+deny_glob='["sentry__*"]'
 
 # NOTE the shape: agents live at `.agents.list` (an array of {id, ...}), NOT at
 # `.agents`. `.agents` is an object {defaults, list}, so `.agents |= map(...)`
@@ -1502,7 +1509,7 @@ ids='["sentry__find_organizations","sentry__find_projects","sentry__search_issue
 # below) that empty config was announced, renamed over the live file and the
 # gateway restarted, leaving every Sentry request failing auth.
 SENTRY_TOKEN="$SENTRY_TOKEN" \
-jq --arg hdr "Sentry-Bearer" --argjson ids "$ids" '
+jq --arg hdr "Sentry-Bearer" --argjson ids "$deny_glob" '
   .mcp.servers.sentry = {
     "transport": "streamable-http",
     "url": "https://mcp.sentry.dev/mcp",
@@ -1518,12 +1525,12 @@ unset SENTRY_TOKEN   # out of the shell as soon as it is in $tmp
 # Validate BOTH halves before announcing or renaming: the server must be there,
 # and every non-cto/qa agent must carry all nine ids. Fail closed - a partial
 # result must never reach the live config.
-jq -e --argjson ids "$ids" '
+jq -e --argjson ids "$deny_glob" '
   (.mcp.servers.sentry.url == "https://mcp.sentry.dev/mcp")
   and (.mcp.servers.sentry.headers.Authorization
        | test("^Sentry-Bearer .+$"))          # non-empty token, not just the prefix
   and ([ .agents.list[] | select(.id != "cto" and .id != "qa")
-         | (($ids - (.tools.deny // [])) | length) ] | add == 0)
+         | ((((.tools.deny // []) | index("sentry__*")) == null) | if . then 1 else 0 end) ] | add == 0)
   and ([ .agents.list[] | select(.id == "cto" or .id == "qa")
          | ((.tools.deny // []) | map(select(startswith("sentry__"))) | length) ] | add == 0)
 ' "$tmp" >/dev/null || {
@@ -1600,23 +1607,49 @@ agents=$(jq -e -r '
 [ "$(printf '%s\n' "$agents" | grep -vcE '^(cto|qa)$')" -gt 0 ] \
   || { echo "no non-cto/qa agents found - refusing to report a vacuous pass" >&2; exit 1; }
 
-# every probed id must be denied for every agent except cto/qa
+# Every probed id must be COVERED for every agent except cto/qa.
+#
+# Covered, not literally present: `tools.deny` entries are compiled as GLOB
+# patterns, so `sentry__*` denies each of these without any of them appearing in
+# the array. A plain `comm -23` of probed ids against deny entries reports every
+# single tool as a GAP against a config that is in fact fully scoped - it fails
+# CLOSED, which is the safe direction, but it makes the documented sequence
+# unrunnable and sends the operator off adding literals that undo the wildcard.
+# Evaluate the same way the runtime does.
+covers() {  # covers <deny-pattern> <tool-id>
+  case "$1" in
+    *"*"*) case "$2" in ${1}) return 0 ;; *) return 1 ;; esac ;;
+    *)     [ "$1" = "$2" ] ;;
+  esac
+}
+
 gap=0
 for agent in $agents; do
   case "$agent" in cto|qa) continue ;; esac
-  denied=$(jq -r --arg a "$agent" '.agents.list[] | select(.id==$a) | (.tools.deny // [])[]' "$cfg" | sort -u)
-  missing=$(comm -23 <(printf '%s\n' "$actual") <(printf '%s\n' "$denied"))
-  [ -n "$missing" ] && { echo "GAP $agent: $(printf '%s ' $missing)" >&2; gap=1; }
+  denied=$(jq -r --arg a "$agent" '.agents.list[] | select(.id==$a) | (.tools.deny // [])[]' "$cfg")
+  missing=""
+  while IFS= read -r tool; do
+    [ -n "$tool" ] || continue
+    hit=0
+    while IFS= read -r pat; do
+      [ -n "$pat" ] || continue
+      covers "$pat" "$tool" && { hit=1; break; }
+    done <<< "$denied"
+    [ "$hit" -eq 1 ] || missing="${missing}${missing:+ }$tool"
+  done <<< "$actual"
+  [ -n "$missing" ] && { echo "GAP $agent: $missing" >&2; gap=1; }
 done
-[ "$gap" -eq 0 ] || { echo "deny list is INCOMPLETE against the probed catalog - widen it and re-apply" >&2; exit 1; }
+[ "$gap" -eq 0 ] || { echo "deny list does not COVER the probed catalog - widen it and re-apply" >&2; exit 1; }
 
 openclaw --profile main mcp list | grep -i sentry
 echo "scoping reconciled against the probed catalog"
 ```
 
-If this reports a gap, add the missing ids to the `ids` array above and re-run
-the registration transform - do not leave the difference unscoped on the
-assumption that the extra tools are harmless.
+If this reports a gap, the wildcard is missing for that agent - restore
+`sentry__*` in `deny_glob` above and re-apply. **Do not "fix" a gap by adding
+the individual ids**: that replaces durable coverage with a snapshot, and the
+next tool Sentry adds is open again. The probed ids are inventory here, not the
+policy.
 
 ### The deny list is required, but it is NOT an isolation boundary
 

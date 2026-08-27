@@ -74,9 +74,17 @@ run_block() { printf '%s\n' "$1" | bash "$BLOCK"; }
 @test "registration and scoping land in ONE write: server + denies together" {
   run run_block "tok-abc123"
   [ "$status" -eq 0 ]
+  # ONE wildcard per agent, not nine literals. `tools.deny` compiles to glob
+  # patterns, so `sentry__*` covers tools that do not exist yet; an enumeration
+  # would leave the next tool Sentry adds available to every excluded agent --
+  # and this recipe would have been what opened it.
   run jq -r '[.agents.list[] | select(.id!="cto" and .id!="qa")
-             | ((.tools.deny // []) | map(select(startswith("sentry__"))) | length)] | unique | @csv' "$CFG"
-  [ "$output" = "9" ]
+             | ((.tools.deny // []) | index("sentry__*")) != null] | unique | @csv' "$CFG"
+  [ "$output" = "true" ]
+  # and no brittle literal ids sneaked back in alongside it
+  run jq -r '[.agents.list[] | (.tools.deny // [])[]
+             | select(startswith("sentry__")) | select(. != "sentry__*")] | length' "$CFG"
+  [ "$output" = "0" ]
   run jq -r '[.agents.list[] | select(.id=="cto" or .id=="qa")
              | ((.tools.deny // []) | map(select(startswith("sentry__"))) | length)] | add' "$CFG"
   [ "$output" = "0" ]
@@ -161,6 +169,38 @@ exit 0
   run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
   [ "$status" -eq 0 ]
   [[ "$output" == *"scoping reconciled against the probed catalog"* ]]
+}
+
+@test "reconcile: a WILDCARD deny covers every probed id (the documented policy)" {
+  # The regression this pins: the registration block writes `sentry__*`, but the
+  # reconciliation used to compare probed ids against deny entries with
+  # `comm -23`. Against a fully-scoped config that reported EVERY tool as a GAP
+  # and exited 1 -- fail-closed, but it made the documented sequence unrunnable
+  # and sent the operator off adding literals that undo the wildcard.
+  setup_reconcile
+  cat > "$RCFG" <<'JSON'
+{"agents":{"list":[{"id":"cto"},{"id":"qa"},
+ {"id":"cmo","tools":{"deny":["sentry__*"]}},
+ {"id":"scout","tools":{"deny":["sentry__*","web_search"]}}]}}
+JSON
+  stub_probe '{"tools":[{"name":"search_issues"},{"name":"find_projects"},{"name":"brand_new_tool"}]}'
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"reconciled"* ]]
+}
+
+@test "reconcile: a wildcard for SOME agents still flags the one without it" {
+  setup_reconcile
+  cat > "$RCFG" <<'JSON'
+{"agents":{"list":[{"id":"cto"},{"id":"qa"},
+ {"id":"cmo","tools":{"deny":["sentry__*"]}},
+ {"id":"scout","tools":{"deny":["sentry__search_issues"]}}]}}
+JSON
+  stub_probe '{"tools":[{"name":"search_issues"},{"name":"find_projects"}]}'
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"GAP scout"* ]]
+  [[ "$output" != *"GAP cmo"* ]]
 }
 
 @test "reconcile: an EMPTY probe refuses instead of reporting success" {
