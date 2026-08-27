@@ -106,6 +106,25 @@ if [ -x "$SCRIPT_DIR/lib/ensure-codex-version-pinned.sh" ]; then
   "$SCRIPT_DIR/lib/ensure-codex-version-pinned.sh" "$PROFILE" || log "WARN: ensure-codex-version-pinned.sh returned non-zero (non-fatal)"
 fi
 
+# ── Healer: Sentry MCP registration (runtime-only, therefore fragile) ──
+# .mcp.servers carries an auth token and is therefore registered at RUNTIME, not
+# committed. Runtime config state on this box is NOT durable: on 2026-08-26 a
+# failed deploy ATTEMPT fired rollback.sh, which restored the profile configs
+# with a plain `cp` and destroyed the Sentry registration 17 hours after it was
+# made. Nothing alerted -- the deploy reported success, because only attempt 2
+# succeeded and `gh run list` shows just the latest attempt.
+#
+# rollback.sh is fixed (lib/sync-profile-config.sh), but "we fixed the one cause
+# we found" is the assumption that failed the first time. This healer makes the
+# cause irrelevant: /opt/hydra/secrets/sentry.env is the source of truth and the
+# config entry is derived from it before every start. MAIN PROFILE ONLY -- the
+# server is registered on main; edge has no Sentry agents.
+# Best-effort and NEVER blocks a start: an absent secrets file is a clean
+# "cannot heal", not a failure to boot.
+if [ "$PROFILE" = "main" ] && [ -x "$SCRIPT_DIR/lib/ensure-sentry-mcp.sh" ]; then
+  "$SCRIPT_DIR/lib/ensure-sentry-mcp.sh" || log "WARN: ensure-sentry-mcp.sh returned non-zero (non-fatal)"
+fi
+
 # ── Healer: secret-file permissions (fail-closed secret loader) ──
 # openclaw resolves file-based secret providers at (re)start/reload and is
 # FAIL-CLOSED: a group/other-accessible secret file is rejected ("permissions

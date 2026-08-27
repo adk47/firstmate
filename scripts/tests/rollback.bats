@@ -32,6 +32,11 @@ setup() {
   # RSYNC_EXCLUDES literals, so the suite must exercise the real parse (and will
   # notice if a deploy.sh refactor breaks it).
   cp "$REPO_ROOT/scripts/deploy.sh" "$SRC/scripts/deploy.sh"
+  # rollback.sh sources these; without them the script dies at `source` under
+  # `set -e` and every assertion below fails for the wrong reason.
+  cp "$REPO_ROOT/scripts/lib/sync-profile-config.sh" "$SRC/scripts/lib/sync-profile-config.sh"
+  [ -f "$REPO_ROOT/scripts/lib/announce-legit-write.sh" ] \
+    && cp "$REPO_ROOT/scripts/lib/announce-legit-write.sh" "$SRC/scripts/lib/announce-legit-write.sh"
   chmod +x "$SRC/scripts/rollback.sh"
   # smoke-test.sh is invoked by Step 3; make it a pass-through.
   printf '#!/usr/bin/env bash\nexit 0\n' > "$SRC/scripts/smoke-test.sh"
@@ -250,7 +255,12 @@ run_rollback() {
 
   [ "$status" -eq 0 ]
   [ -f "$STATE/.openclaw-main/openclaw.json" ]
-  [ "$(cat "$STATE/.openclaw-main/openclaw.json")" = '{"profile":"main"}' ]
+  # NOT byte-equality with the repo copy. Since 2026-08-26 the profile sync
+  # PRESERVES the live `.mcp.servers` block (scripts/lib/sync-profile-config.sh)
+  # and re-serialises, so the result is correctly not byte-identical. Asserting
+  # equality here would re-assert the bug that destroyed the Sentry MCP
+  # registration. Assert the repo copy WON instead.
+  [ "$(jq -r .profile "$STATE/.openclaw-main/openclaw.json")" = "main" ]
   [[ "$STATE" == "$BATS_TEST_TMPDIR"* ]]
 }
 

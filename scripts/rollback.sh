@@ -254,6 +254,8 @@ fi
 # now the tree we just synced ($DEPLOY_PATH — identical to /opt/hydra in a real
 # run) and the destination root is injectable. The remote branch below runs the
 # heredoc ON node-8, where the real paths are the only correct ones.
+# shellcheck source=lib/sync-profile-config.sh
+. "$HYDRA_ROOT/scripts/lib/sync-profile-config.sh"
 PROFILE_SRC_ROOT="${PROFILE_SRC_ROOT:-$DEPLOY_PATH}"
 PROFILE_STATE_ROOT="${PROFILE_STATE_ROOT:-/root}"
 if $HYDRA_LOCAL; then
@@ -262,11 +264,22 @@ if $HYDRA_LOCAL; then
     src="$PROFILE_SRC_ROOT/openclaw-${profile}.json"
     dst="$PROFILE_STATE_ROOT/.openclaw-${profile}/openclaw.json"
     if [ -f "$src" ]; then
-      mkdir -p "$PROFILE_STATE_ROOT/.openclaw-${profile}"
-      ANNOUNCE_SHA="$(sha256sum "$src" | awk '{print $1}')" \
-        "$HYDRA_ROOT/scripts/lib/announce-legit-write.sh" rollback "$dst" || true
-      cp "$src" "$dst" && echo "  Synced ${profile} profile config" || echo "  WARNING: Failed to sync ${profile} profile config"
-      cmp -s "$src" "$dst" || SYNC_FAILED=1
+      # NOT a plain `cp`. sync_profile_config preserves the live
+      # `.mcp.servers` block -- runtime MCP registrations carry auth tokens
+      # that are deliberately never committed, so a straight copy destroys
+      # them. That is exactly what happened on 2026-08-26 (deploy run
+      # 32933062895 attempt 1 failed -> this path fired -> the Sentry MCP
+      # registration was wiped). See scripts/lib/sync-profile-config.sh.
+      if sync_profile_config "$src" "$dst" rollback; then
+        echo "  Synced ${profile} profile config"
+      else
+        echo "  WARNING: Failed to sync ${profile} profile config"
+        SYNC_FAILED=1
+      fi
+      # Deliberately NOT `cmp -s "$src" "$dst"`: when the live file carried MCP
+      # servers the result is CORRECTLY not byte-identical to the repo copy.
+      # Asserting equality would be asserting the bug. Validate shape instead.
+      jq -e . "$dst" >/dev/null 2>&1 || SYNC_FAILED=1
     else
       echo "  WARNING: $src not found — skipping ${profile}"
     fi
@@ -276,15 +289,32 @@ if $HYDRA_LOCAL; then
 else
   if ! ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" << 'SYNC'
 set -euo pipefail
+# This branch runs ON node-8 via ssh, so it sources the DEPLOYED lib rather than
+# the checkout's. If a deploy failed before syncing scripts/, that file may not
+# exist yet -- refuse loudly instead of dying on a bare `source` error, and
+# above all never fall back to `cp`: a plain copy is precisely the bug this
+# module exists to fix (it destroys every runtime MCP registration).
+if [ ! -r /opt/hydra/scripts/lib/sync-profile-config.sh ]; then
+  echo "  ERROR: /opt/hydra/scripts/lib/sync-profile-config.sh is missing." >&2
+  echo "  Refusing to restore profile configs: without it the only alternative" >&2
+  echo "  is a plain cp, which would destroy live .mcp.servers registrations." >&2
+  echo "  Sync scripts/ to /opt/hydra first, then re-run the rollback." >&2
+  exit 1
+fi
+# shellcheck source=lib/sync-profile-config.sh
+. /opt/hydra/scripts/lib/sync-profile-config.sh
 for profile in main edge; do
   src="/opt/hydra/openclaw-${profile}.json"
   dst="/root/.openclaw-${profile}/openclaw.json"
   if [ -f "$src" ]; then
-    mkdir -p "/root/.openclaw-${profile}"
-    ANNOUNCE_SHA="$(sha256sum "$src" | awk '{print $1}')" \
-      /opt/hydra/scripts/lib/announce-legit-write.sh rollback "$dst" || true
-    cp "$src" "$dst" && echo "  Synced ${profile} profile config" || echo "  WARNING: Failed to sync ${profile} profile config"
-    cmp -s "$src" "$dst" || SYNC_FAILED=1
+    # Same rule as the local branch: preserve live .mcp.servers, never `cp`.
+    if sync_profile_config "$src" "$dst" rollback; then
+      echo "  Synced ${profile} profile config"
+    else
+      echo "  WARNING: Failed to sync ${profile} profile config"
+      SYNC_FAILED=1
+    fi
+    jq -e . "$dst" >/dev/null 2>&1 || SYNC_FAILED=1
   else
     echo "  WARNING: $src not found — skipping ${profile}"
   fi

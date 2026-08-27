@@ -1377,6 +1377,53 @@ is only the wiring.
 Org: `musoai` (`https://musoai.sentry.io`, region `https://us.sentry.io`).
 Projects: `core-backend`, `credits-web-next`, `muso-auth`, `flutter`.
 
+### The registration is runtime-only, therefore fragile — read this first
+
+**It has already been destroyed once.** Registered 2026-08-25 12:59, gone by
+2026-08-26 05:11. Root cause, from `/var/log/openclaw-legitimate-writes.log`
+(which names every writer of the live config):
+
+| Time | Writer | Result |
+|---|---|---|
+| 08-25 12:59:31 | `sentry-mcp-register` | registered |
+| 08-26 04:40:49 | `deploy.sh` | `preserved 1 live MCP server(s)` |
+| **08-26 05:11:15** | **`rollback`** | **destroyed** |
+| 08-26 06:14:32 | `deploy.sh` | `preserved 0` |
+
+Deploy run `32933062895` **attempt 1** failed, `deploy.yml`'s `Rollback on
+failure` fired `rollback.sh`, and that script restored the profile configs with
+a plain `cp` — no `.mcp.servers` preservation, unlike the forward path. Then
+attempt 2 re-ran and succeeded, so **GitHub reported the whole run green**:
+`gh run list` shows only the latest attempt. Use
+`gh api repos/Muso-AI/hydra/actions/runs/<id> --jq .run_attempt` to see the
+truth.
+
+Fixed in `scripts/lib/sync-profile-config.sh` — one implementation, used by both
+`deploy.sh` and `rollback.sh`, because two copies of that rule drifted and the
+drift *was* the bug.
+
+**Two things follow, and both matter more than the recipe below:**
+
+1. **The source of truth is `/opt/hydra/secrets/sentry.env`** (root, `0600`,
+   `SENTRY_API_TOKEN=...`), not the config. `scripts/lib/ensure-sentry-mcp.sh`
+   re-derives the config entry from it before every gateway start
+   (`openclaw-pre-start-heal.sh`) and `openclaw-watchdog.sh` pages if it drifts
+   while running. If the file is missing, the healer says so and heals nothing —
+   create it and the next start converges.
+2. **The `tools.deny` scoping below is NOT durable and never was.**
+   `sync_profile_config` preserves *only* `.mcp.servers`; `agents.list` is
+   overwritten from the repo on every deploy. A runtime `jq` transform that adds
+   `tools.deny` therefore survives until the next deploy — it lasted ~17 hours.
+   **To persist, the deny list must be committed to `openclaw-main.json`**,
+   which is Aaron-gated security surface (`workspaces/cto/SOUL.md:416`). The
+   recipe below is still the correct *shape*; just do not mistake a green
+   verification for a durable one. Re-verify after a deploy, which is the check
+   that would have caught this.
+
+`openclaw mcp set` is not an option here: it refuses any config containing the
+legacy `plugins.installs` key, which this one still has. It would not have
+helped anyway — it writes the same field a rollback overwrites.
+
 ### Register the Sentry MCP server
 
 `.mcp.servers` is deliberately absent from the repo configs so tokens never land
@@ -1584,15 +1631,34 @@ this host today:
   no-op for exec; enforce at the bash boundary instead."*
 - the token sits in `/root/.openclaw-main/openclaw.json`, which any exec-capable
   agent on the box can read and then use directly against the Sentry API, with
-  or without the MCP server.
+  or without the MCP server. **This is no longer hypothetical.** On 2026-08-26 a
+  scan of agent state found the live token (71 chars, matching the last-4 shown
+  in Sentry) inside the codex logs of `operations`, `qa` AND `clio` -
+  `/root/.openclaw-main/agents/<id>/agent/codex-home/logs_2.sqlite`. Two of those
+  three are agents the deny list exists to exclude. Rotating the token does not
+  fix this; it only resets the clock, because the next read puts the new one
+  there too. Treat the token's SCOPES as the only real bound.
 
 So the deny is **defence in depth**: it stops ordinary and accidental use by the
 other seven agents and makes the intent explicit. The control that actually
 bounds the blast radius is the **token's own scopes**:
 
-- **Do not mint `event:write`.** Without it a bypass can read issue data; with
-  it a bypass can resolve, assign and mutate production issues. The triage skill
-  never needs write - it records outcomes in its own ledger.
+- **The live token is WRITE-CAPABLE as of 2026-08-26, by Nick's explicit
+  decision** ("I want hydra to do shit" - the agents should be able to act in
+  Sentry, not only read it). Scopes:
+  `alerts:read, alerts:write, event:read, event:write, member:read, org:read,
+  project:read, project:releases, project:write, team:read`.
+  An earlier version of this line said "do not mint `event:write`". That advice
+  was overtaken; recording the reversal here rather than leaving the runbook
+  contradicting the deployed reality.
+
+  What that means concretely, given the token demonstrably reaches agents that
+  are supposed to be denied (see below): a prompt-injected or compromised agent
+  can resolve/assign/mutate production issues, modify projects and releases,
+  and - the one worth watching - **modify or delete alert rules** (`alerts:write`).
+  The last of those can disable the detection layer itself, which is a change
+  you would not necessarily notice. If Sentry alerting ever goes quiet
+  unexpectedly, check the alert rules before assuming the errors stopped.
 - Accept that read access to production issue data (which includes customer
   emails and geo) is reachable by any compromised exec-capable agent here, and
   set the token's lifetime and rotation cadence with that in mind.

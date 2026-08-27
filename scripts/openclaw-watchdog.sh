@@ -219,6 +219,50 @@ if [ -x "$_WATCHDOG_DIR/lib/ensure-secret-perms.sh" ]; then
   fi
 fi
 
+# ── Sentry MCP registration drift (runtime-only state, no other alarm) ───────
+# .mcp.servers carries an auth token so it is registered at RUNTIME, never
+# committed -- which means nothing in git can restore it and no CI check can
+# notice it is gone. On 2026-08-26 a failed deploy ATTEMPT fired rollback.sh,
+# which restored the profile configs with a plain `cp` and destroyed the Sentry
+# registration 17 hours after it was made. The deploy reported success (only
+# attempt 2 passed, and `gh run list` shows just the latest attempt), the
+# gateway was healthy, every existing guard read clean, and the loss was found
+# days later by an unrelated dry-run failing. That silence is the bug this
+# block closes.
+#
+# pre-start-heal re-converges it on every (re)start; this catches drift while
+# the gateway keeps running, and PAGES rather than healing silently -- if
+# something is removing it repeatedly we need to know, not to paper over it.
+# Exit 1 = drifted (repairable), 2 = cannot tell. Both are worth saying out
+# loud; only 1 is worth auto-healing.
+if [ ! -x "$_WATCHDOG_DIR/lib/ensure-sentry-mcp.sh" ]; then
+  # FAIL-OPEN GUARD, CLOSED. A bare `if [ -x ... ]` means that deleting the
+  # healer (partial deploy, stray cleanup, lost exec bit) silently disables this
+  # alarm FOREVER -- and the missing registration it exists to catch then
+  # persists with no heal and no page. An absent enforcement mechanism is itself
+  # the alarm condition, not a reason to stay quiet.
+  log "SENTRY MCP HEALER MISSING: $_WATCHDOG_DIR/lib/ensure-sentry-mcp.sh is absent or not executable"
+  slack_notify_critical ":satellite: *Sentry MCP healer is MISSING* on node-8 (\`lib/ensure-sentry-mcp.sh\` absent or not executable) — the drift check and auto-heal are DISABLED, so a lost registration would go unnoticed indefinitely. Expected from a deploy of \`scripts/lib/\`; check the last deploy."
+elif [ -x "$_WATCHDOG_DIR/lib/ensure-sentry-mcp.sh" ]; then
+  SENTRY_MCP_OUT=$("$_WATCHDOG_DIR/lib/ensure-sentry-mcp.sh" --check 2>&1) || SENTRY_MCP_RC=$?
+  case "${SENTRY_MCP_RC:-0}" in
+    0) ;;
+    1) log "SENTRY MCP DRIFT: ${SENTRY_MCP_OUT}"
+       if "$_WATCHDOG_DIR/lib/ensure-sentry-mcp.sh" >/dev/null 2>&1; then
+         slack_notify ":satellite: *Sentry MCP registration had vanished* from \`/root/.openclaw-main/openclaw.json\` and the watchdog re-registered it from \`/opt/hydra/secrets/sentry.env\`. It is runtime-only state (the entry carries a token), so nothing in git would have restored it. Find out what removed it — \`/var/log/openclaw-legitimate-writes.log\` names every writer."
+       else
+         slack_notify_critical ":satellite: *Sentry MCP registration is GONE and could not be restored* — \`cto\`/\`qa\` have no Sentry tools. Usually \`/opt/hydra/secrets/sentry.env\` is missing (root, 0600, \`SENTRY_API_TOKEN=...\`). See RUNBOOK §Sentry issue triage.\n\`\`\`${SENTRY_MCP_OUT}\`\`\`"
+       fi ;;
+    *) # exit 2 = cannot tell (unreadable/invalid config, no secrets file). This
+       # used to only log, which meant Sentry could be unavailable INDEFINITELY
+       # with nothing paging -- the exact silent-failure shape this block exists
+       # to close. "We could not check" is a third state, not a quiet pass.
+       log "SENTRY MCP UNVERIFIABLE (exit ${SENTRY_MCP_RC}): ${SENTRY_MCP_OUT}"
+       slack_notify_critical ":satellite: *Sentry MCP state UNVERIFIABLE* on node-8 (exit ${SENTRY_MCP_RC}) — the healer could not tell whether the registration is present, so \`cto\`/\`qa\` may have no Sentry tools and nothing will notice. Usually an unreadable/invalid \`/root/.openclaw-main/openclaw.json\` or a missing \`/opt/hydra/secrets/sentry.env\`.\n\`\`\`${SENTRY_MCP_OUT}\`\`\`" ;;
+  esac
+  unset SENTRY_MCP_RC
+fi
+
 # ── Gateway liveness (BOTH profiles) — checked BEFORE the activity logic ──────
 # A FAILED/inactive gateway emits ZERO agent runs, which the "No agent activity
 # — system idle, no action needed" branch further down silently swallows (it

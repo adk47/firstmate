@@ -2142,109 +2142,31 @@ done
 # copy wins for every other field. Mirrors the cron-state preservation
 # pattern used in Step 5a (below) for the same reason: deploys must
 # not silently wipe server-registered runtime state.
-sync_profile_config() {
-  local src="$1" dst="$2"
-  mkdir -p "$(dirname "$dst")"
-  if [ ! -f "$dst" ]; then
-    cp "$src" "$dst"
-    return
-  fi
-  SRC="$src" DST="$dst" ANNOUNCE_HELPER="$SCRIPT_DIR/lib/announce-legit-write.sh" \
-    python3 - <<'PYEOF' || fail "profile config sync failed for $dst"
-import hashlib, json, os, subprocess, sys, tempfile, time
-src_path = os.environ['SRC']
-dst_path = os.environ['DST']
-announce_helper = os.environ.get('ANNOUNCE_HELPER', '')
-
-def warn(msg):
-    # Match the deploy.sh log() format so aggregators see a consistent shape.
-    sys.stderr.write(f"  WARNING: {msg}\n")
-
-with open(src_path) as f:
-    repo_cfg = json.load(f)
-
-live_cfg = None
-try:
-    with open(dst_path) as f:
-        live_cfg = json.load(f)
-except json.JSONDecodeError as e:
-    # Live file is unparseable. Back it up before we overwrite — it may hold
-    # auth tokens or server definitions that can be recovered by hand. The
-    # alternative (silently treating as empty) permanently destroys that state
-    # and is the exact class of silent failure this PR is meant to eliminate.
-    ts = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
-    quarantine = f"{dst_path}.corrupted.{ts}"
-    try:
-        os.rename(dst_path, quarantine)
-        warn(f"live config {dst_path} is not valid JSON ({e.msg}); "
-             f"moved to {quarantine} before overwrite")
-    except OSError as move_err:
-        warn(f"live config {dst_path} is not valid JSON and could not be "
-             f"quarantined ({move_err}); proceeding with repo copy")
-    live_cfg = {}
-
-preserved = {}
-if isinstance(live_cfg, dict):
-    mcp = live_cfg.get('mcp')
-    if isinstance(mcp, dict):
-        servers = mcp.get('servers')
-        if isinstance(servers, dict):
-            preserved = servers
-        elif servers is not None:
-            warn(f"live {dst_path} has non-dict .mcp.servers "
-                 f"({type(servers).__name__}); ignoring, not preserving")
-    elif mcp is not None:
-        warn(f"live {dst_path} has non-dict .mcp "
-             f"({type(mcp).__name__}); ignoring, not preserving")
-else:
-    warn(f"live {dst_path} parsed but root is not a JSON object; ignoring")
-
-if preserved:
-    repo_cfg.setdefault('mcp', {})['servers'] = preserved
-
-# Atomic write to avoid torn-read by a concurrently-starting gateway.
-tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(dst_path), delete=False)
-try:
-    json.dump(repo_cfg, tmp, indent=2)
-    tmp.flush()
-    os.fsync(tmp.fileno())
-    tmp.close()
-    # Announce the legitimate write before renaming so
-    # openclaw-config-write-audit.sh's inotify-triggered alert can
-    # match on path+sha256 and suppress the "out-of-band write" Slack
-    # page. See scripts/lib/announce-legit-write.sh.
-    if announce_helper and os.path.isfile(announce_helper):
-        with open(tmp.name, 'rb') as fh:
-            sha = hashlib.sha256(fh.read()).hexdigest()
-        subprocess.run(
-            [announce_helper, 'deploy.sh', dst_path],
-            check=False,
-            env={**os.environ, 'ANNOUNCE_SHA': sha},
-        )
-    os.replace(tmp.name, dst_path)
-except Exception:
-    try:
-        os.unlink(tmp.name)
-    except OSError:
-        pass
-    raise
-sys.stderr.write(f"  preserved {len(preserved)} live MCP server(s) in {dst_path}\n")
-PYEOF
-}
+# sync_profile_config now lives in scripts/lib/sync-profile-config.sh so that
+# rollback.sh uses the SAME implementation. It previously existed only here, and
+# rollback.sh restored profile configs with a plain `cp` -- so the forward path
+# preserved runtime MCP registrations and the rollback path destroyed them
+# (2026-08-26, deploy run 32933062895 attempt 1). Two copies of this rule
+# drifted, and the drift was the bug. Do not re-inline it.
+# shellcheck source=lib/sync-profile-config.sh
+. "$SCRIPT_DIR/lib/sync-profile-config.sh"
 
 log "  Syncing profile configs..."
 if needs_target "main"; then
-  sync_profile_config "$DEPLOY_PATH/openclaw-main.json" /root/.openclaw-main/openclaw.json
+  sync_profile_config "$DEPLOY_PATH/openclaw-main.json" /root/.openclaw-main/openclaw.json deploy.sh \
+    || fail "profile config sync failed for /root/.openclaw-main/openclaw.json"
   # Mirror to legacy default path as defense-in-depth (see cron sync below
   # for the same rationale) — preserve its `.mcp.servers` the same way as
   # the profile-specific path, so if the pre-multi-profile gateway ever
   # reanimates (smoke-test.sh hard-fails the deploy if it does) it will
   # still have the server list rather than being silently stripped.
-  sync_profile_config "$DEPLOY_PATH/openclaw-main.json" /root/.openclaw/openclaw.json
+  sync_profile_config "$DEPLOY_PATH/openclaw-main.json" /root/.openclaw/openclaw.json deploy.sh \
+    || fail "profile config sync failed for /root/.openclaw/openclaw.json"
   log "  Synced main profile config (+ default openclaw.json)"
 fi
 if needs_target "edge"; then
-  sync_profile_config "$DEPLOY_PATH/openclaw-edge.json" /root/.openclaw-edge/openclaw.json
+  sync_profile_config "$DEPLOY_PATH/openclaw-edge.json" /root/.openclaw-edge/openclaw.json deploy.sh \
+    || fail "profile config sync failed for /root/.openclaw-edge/openclaw.json"
   log "  Synced edge profile config"
 fi
 # Schema validate the post-merge result for every profile we just touched.
