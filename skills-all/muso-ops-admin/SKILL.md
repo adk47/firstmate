@@ -276,6 +276,31 @@ the recommended reject to Jan (`<@U038BM16T7W>`) — same doctrine as the
 customer-facing rule (Caroline never rejects). See `muso-ops-credits` for the
 full transition matrix and the mandatory post-write readback.
 
+### The credit-APPROVE gate has one live bypass — `CV_APPROVE_GATE_DISABLED`
+
+Documented here because it is otherwise invisible: it appears in exactly one
+line of bash and in no runbook, and a reviewer who met it cold would reasonably
+assume it was dead. It is not.
+
+- **Who sets it:** only
+  `muso-ops-credit-verification/scripts/lobster-mvp/apply-verdicts.sh`, when
+  applying an `approved` verdict, driven by `verify-credit-batch-mvp.lobster` on
+  the 4-hourly credit-verification cron.
+- **Why:** that path approves off algorithmic signals rather than browser
+  evidence, and passes a signal digest as `--evidence-excerpt`. The
+  approve-gate's checks all presuppose a human browser session (Tier-1 quorum,
+  session-log freshness, excerpt-to-tool-result matching), so a pipeline cannot
+  satisfy them and every batch approval would be refused.
+- **What it skips:** all of them. It is a blanket pass-through on autonomous
+  credit approval.
+
+**It is not an operator knob.** Never set it by hand, never set it from an
+agent turn, and never add a second caller without a policy decision — the
+evidence rails are the only thing standing between an automated verdict and a
+live credit write. Equally: **do not delete it.** Removing it stops autonomous
+credit approval on a cron nobody watches. Its in-code comment used to claim it
+had no callers, which nearly caused exactly that during the #873 review.
+
 ## Environment Setup
 
 Required env vars — **CONFIGURED AND WORKING:**

@@ -1194,8 +1194,25 @@ enforce_credit_approve_gate() {
             ;;
     esac
 
-    # Allow opt-out for explicitly non-CV admin scripts that need to approve credits
-    # (currently none — placeholder for future).
+    # LIVE PRODUCTION BYPASS — do NOT remove, and do not read this as a placeholder.
+    #
+    # Exactly one caller sets it:
+    #   muso-ops-credit-verification/scripts/lobster-mvp/apply-verdicts.sh
+    # when it applies an `approved` verdict, driven by
+    #   pipelines/verify-credit-batch-mvp.lobster  (4-hourly credit-verification cron).
+    #
+    # Why it exists: that path approves off ALGORITHMIC signals, not browser
+    # evidence, and passes a signal digest as --evidence-excerpt
+    # (`lobster-signal:approve_owning_track=100;total_risk<80;…`). The checks
+    # below all presuppose a human-driven browser session — Tier-1 quorum,
+    # session-log freshness, excerpt-to-tool-result matching — so they cannot be
+    # satisfied by a pipeline and would refuse every batch approval.
+    #
+    # This comment previously said "currently none — placeholder for future",
+    # which was false on every clause and nearly got the variable deleted during
+    # the #873 review. Deleting it breaks autonomous credit approval on a cron
+    # nobody is watching. Setting it skips EVERY evidence requirement below, so
+    # it is not an operator knob and must not be set by hand or by an agent.
     if [[ "${CV_APPROVE_GATE_DISABLED:-0}" == "1" ]]; then
         return 0
     fi
