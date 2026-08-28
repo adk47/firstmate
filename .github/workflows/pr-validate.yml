@@ -870,7 +870,13 @@ jobs:
           # The array holds --exclude= lines plus targeted --include= overrides
           # (e.g. skills-all/<skill>/config/ carve-outs from the unanchored
           # config/ exclude) — count both.
-          declared=$(sed -n '/^RSYNC_EXCLUDES=(/,/^)$/p' scripts/deploy.sh | grep -cE -- "--(exclude|include)=")
+          #
+          # ANCHORED, so only real array ENTRIES count. The unanchored form
+          # matched any line mentioning a flag, comments included, so writing a
+          # comment that named the flag it was explaining inflated `declared` by
+          # one and failed this gate — reporting "the array format likely
+          # changed" when nothing about the format had. Observed on PR #881.
+          declared=$(sed -n '/^RSYNC_EXCLUDES=(/,/^)$/p' scripts/deploy.sh | grep -cE '^[[:space:]]*--(exclude|include)=')
           if [ "${#RSYNC_EXCLUDES[@]}" -ne "$declared" ] || [ "${#RSYNC_EXCLUDES[@]}" -lt 15 ]; then
             echo "::error::RSYNC_EXCLUDES extraction problem: eval'd ${#RSYNC_EXCLUDES[@]} entries but the deploy.sh array block declares $declared --exclude=/--include= lines (expected equal, and ≥15). The sed range or array format likely changed."
             exit 1
