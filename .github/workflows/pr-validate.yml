@@ -809,6 +809,22 @@ jobs:
           # can lag this PR by many commits.
           fetch-depth: 0
 
+      - name: skills-all config include pairs (same guard the deploy runs)
+        # THE SHIFT-LEFT THIS JOB ALREADY CLAIMED TO BE. The deploy carries a guard that
+        # every skills-all/<skill>/config/ has an rsync include pair before the unanchored
+        # --exclude='config/' — without it the config silently never reaches the server.
+        # That guard was only ever run at DEPLOY time, so on 2026-08-28 #874 merged a
+        # config dir with no pair and every deploy on main failed until it was added:
+        # the check was right, it just fired after merge, which is the one moment when
+        # acting on it costs a broken fleet deploy instead of a red check.
+        #
+        # Same script the deploy calls, not a copy of it.
+        run: |
+          echo "::group::skills-all config include pairs"
+          chmod +x scripts/lib/check-skills-config-includes.sh
+          ./scripts/lib/check-skills-config-includes.sh . scripts/deploy.sh
+          echo "::endgroup::"
+
       - name: Rsync dry-run against /opt/hydra/
         # This is a "shift-left" copy of scripts/deploy.sh Step 4a. The
         # deploy's pre-flight check catches server-state-would-be-wiped

@@ -1067,6 +1067,11 @@ RSYNC_EXCLUDES=(
   --include='muso-devops-set-env/config/**'
   --include='muso-ops-credit-sync/config/'
   --include='muso-ops-credit-sync/config/**'
+  # sentry-issue-triage ships watchdog-exclude-patterns.txt. Added 2026-08-28 after
+  # #874 landed the config without this pair: the deploy's own guard caught it, but at
+  # DEPLOY time, so every deploy on main failed from 4539ddb0 onward until this line.
+  --include='sentry-issue-triage/config/'
+  --include='sentry-issue-triage/config/**'
   # muso-ops-admin is a SELECTIVE exception (NOT a blanket include). Its config
   # carries server-side divergence we must never clobber: tier2-godmode-allowlist.txt
   # exists ONLY on node-8 (deliberately absent from canonical). So we sync the
@@ -1240,36 +1245,16 @@ RSYNC_EXCLUDES=(
 # -------------------------------------------------------------------
 # Guard: every skills-all/<skill>/config/ needs an explicit include pair
 # -------------------------------------------------------------------
-# The unanchored --exclude='config/' above swallows skills-all/*/config/
-# unless a per-skill include pair precedes it. Forgetting the pair ships a
-# skill without its config — a SILENT runtime failure, already hit twice
-# (prod-log watchdog fail-closed every tick 2026-06-10; set-env gate
-# configs never reached the server). Fail the deploy loudly at the source
-# instead. muso-ops-admin is the named exception: its canonical config has
-# deliberate server-side divergence (drifted tier2-approvers.txt + godmode
-# allowlist) and must NOT be synced — see the rationale above the includes.
-# rsync filter rules are first-match-wins, so an include AFTER the
-# --exclude='config/' line is dead — check ordering, not mere presence.
-cfg_exclude_idx=-1
-cfg_idx=0
-for cfg_rule in "${RSYNC_EXCLUDES[@]}"; do
-  [[ "$cfg_rule" == "--exclude=config/" ]] && cfg_exclude_idx="$cfg_idx" && break
-  cfg_idx=$(( cfg_idx + 1 ))
-done
-[[ "$cfg_exclude_idx" -ge 0 ]] || fail "RSYNC_EXCLUDES no longer contains --exclude='config/' — the skills-all config guard needs updating"
-for cfg_dir in "$HYDRA_ROOT"/skills-all/*/config; do
-  [[ -d "$cfg_dir" ]] || continue
-  cfg_skill="$(basename "$(dirname "$cfg_dir")")"
-  cfg_include_idx=-1
-  cfg_idx=0
-  for cfg_rule in "${RSYNC_EXCLUDES[@]}"; do
-    [[ "$cfg_rule" == "--include=${cfg_skill}/config/" ]] && cfg_include_idx="$cfg_idx" && break
-    cfg_idx=$(( cfg_idx + 1 ))
-  done
-  if (( cfg_include_idx < 0 || cfg_include_idx > cfg_exclude_idx )); then
-    fail "skills-all/${cfg_skill}/config/ exists but RSYNC_EXCLUDES has no --include='${cfg_skill}/config/' pair BEFORE --exclude='config/' (rsync is first-match-wins) — the config would silently never reach the server (unanchored exclude gotcha, see PR #474). Add the include pair next to the existing ones."
-  fi
-done
+# Extracted to scripts/lib/check-skills-config-includes.sh on 2026-08-28 so that
+# pr-validate's rsync pre-flight — which already exists as a deliberate "shift-left copy"
+# of this step — can run the SAME implementation. It could not before, and that is how
+# #874 shipped a config dir with no include pair: this guard fired correctly, but at
+# deploy time, blocking every deploy on main from 4539ddb0 until the pair was added.
+# A second copy of the check in the workflow would have been the drift it exists to stop.
+if ! "$HYDRA_ROOT/scripts/lib/check-skills-config-includes.sh" "$HYDRA_ROOT" "$HYDRA_ROOT/scripts/deploy.sh"; then
+  fail "a skills-all config directory would silently not reach the server — see the include pair suggested above."
+fi
+
 # muso-ops-admin/config/ is a SELECTIVE include (the 3 repo-authoritative files
 # above). The server-only tier2-godmode-allowlist.txt must stay protected from
 # BOTH transfer and rsync --delete. Enforce that here so a future edit can't
@@ -1279,6 +1264,19 @@ done
 #     server-only godmode file leaks into the sync;
 #   - no rule may ever NAME tier2-godmode-allowlist.txt in an include.
 if printf '%s\n' "${RSYNC_EXCLUDES[@]}" | grep -qFx -- "--include=muso-ops-admin/config/"; then
+  # Recomputed here rather than inherited. The generic config-include guard moved into
+  # scripts/lib/check-skills-config-includes.sh, which runs in its own process, so this
+  # index is no longer left behind in this shell. Deriving it locally is what keeps this
+  # check independent of that extraction instead of silently comparing against an unset
+  # variable — which under `set -u` would abort, and without it would compare against 0
+  # and pass everything.
+  cfg_exclude_idx=-1
+  cfg_idx=0
+  for cfg_rule in "${RSYNC_EXCLUDES[@]}"; do
+    [[ "$cfg_rule" == "--exclude=config/" ]] && cfg_exclude_idx="$cfg_idx" && break
+    cfg_idx=$(( cfg_idx + 1 ))
+  done
+  (( cfg_exclude_idx >= 0 )) || fail "RSYNC_EXCLUDES no longer contains --exclude='config/' — the muso-ops-admin godmode protection check needs updating."
   oa_protect_idx=-1
   oa_idx=0
   for cfg_rule in "${RSYNC_EXCLUDES[@]}"; do
