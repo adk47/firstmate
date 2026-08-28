@@ -226,6 +226,39 @@ else
   log "  WARNING: parsed only ${#EXCLUDE_PATTERNS[@]} excludes from $LKG_DEPLOY_SH + $DEPLOY_SH (expected >= ${ROLLBACK_MIN_EXCLUDES:-20})."
   log "  WARNING: syncing WITHOUT --delete. Files the failed deploy added will survive; remove them by hand."
 fi
+# --------------------------------------------------------------------------
+# Protect agent-authored state from --delete, WITHOUT disarming the rollback.
+#
+# 2026-08-27: deploy.sh Step 4a correctly refused a sync that would delete four
+# workspaces/operations/*.sql files the ops agent had written. The failure path
+# then ran THIS script, whose rsync --delete removed all four -- the guard's own
+# handler destroying the state the guard exists to protect. Their .csv siblings
+# survived only because workspaces/*/*.csv is in RSYNC_EXCLUDES, which shows the
+# limit of that mechanism: an exclude list spares only what someone predicted,
+# and agents keep inventing file types.
+#
+# rsync `protect` rules, NOT --exclude and NOT a dry-run probe:
+#   - `protect` spares a path from --delete while still TRANSFERRING it, so the
+#     last-known-good CONTENT is still restored over anything the failed deploy
+#     modified. A plain --exclude would skip the transfer too and leave bad
+#     content in place.
+#   - It is STATIC. An earlier version of this fix probed with --dry-run and
+#     built per-path excludes from the result; that had a TOCTOU window (an
+#     agent writing between probe and sync was unprotected) and needed rsync
+#     metacharacter escaping, since filter rules are globs. A fixed rule has
+#     neither problem.
+#   - --delete stays ON everywhere else, so the failed deploy's additions under
+#     repo-owned trees (scripts/, .github/, plugins/ ...) are still cleaned up.
+#
+# The residue: a failed deploy that ADDS a file under these two trees leaves it
+# behind. That is the trade this script already documents -- a leftover file is
+# bad, destroying production data is worse -- and deploy.sh's own pre-flight
+# refuses to delete server state on the forward path anyway.
+for mutable in workspaces skills-all; do
+  ROLLBACK_EXCLUDES+=("--filter=P /${mutable}/**")
+done
+log "  Protecting agent-authored trees from --delete: workspaces/, skills-all/"
+
 log "  Syncing last-known-good tree ($PREVIOUS_SHA) to Node 8..."
 if $HYDRA_LOCAL; then
   rsync -a \

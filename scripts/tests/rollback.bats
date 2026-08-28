@@ -156,6 +156,59 @@ run_rollback() {
   [ ! -f "$DEPLOY/scripts/bad-new-file.sh" ]
 }
 
+# Regression for 2026-08-27. deploy.sh Step 4a refused a sync because it would
+# delete four workspaces/operations/*.sql files the ops agent had written; the
+# failure path then ran this script and rsync --delete removed them. The .csv
+# siblings survived only because workspaces/*/*.csv is in RSYNC_EXCLUDES -- an
+# exclude list spares only what someone predicted, and the agents keep inventing
+# file types nobody listed.
+#
+# Both halves matter, so both are asserted here: agent-authored state under
+# workspaces/ survives, AND the failed deploy's own additions are still removed.
+# An earlier version of this fix disarmed --delete entirely and passed the first
+# assertion while silently breaking the second.
+@test "SAFETY: agent-authored files an exclude never predicted survive --delete" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  mkdir -p "$DEPLOY/workspaces/operations" "$DEPLOY/scripts"
+
+  # the shape that was destroyed: unlisted extension next to a listed one
+  printf 'SELECT 1\n'  > "$DEPLOY/workspaces/operations/roc_legion_track_stats.sql"
+  printf 'a,b\n'       > "$DEPLOY/workspaces/operations/roc_legion_track_stats.csv"
+  # and a file the failed deploy added, which must STILL be removed
+  printf 'from the bad deploy\n' > "$DEPLOY/scripts/bad-new-file.sh"
+
+  run_rollback
+
+  [ -f "$DEPLOY/workspaces/operations/roc_legion_track_stats.sql" ]
+  [ "$(cat "$DEPLOY/workspaces/operations/roc_legion_track_stats.sql")" = "SELECT 1" ]
+  [ -f "$DEPLOY/workspaces/operations/roc_legion_track_stats.csv" ]
+  [ ! -f "$DEPLOY/scripts/bad-new-file.sh" ]
+}
+
+@test "SAFETY: a file written just before the sync is still protected (no TOCTOU)" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  mkdir -p "$DEPLOY/skills-all" "$DEPLOY/scripts"
+  printf 'late\n' > "$DEPLOY/skills-all/late.sql"
+  printf 'from the bad deploy\n' > "$DEPLOY/scripts/bad-new-file.sh"
+
+  run_rollback
+
+  [ -f "$DEPLOY/skills-all/late.sql" ]
+  [ ! -f "$DEPLOY/scripts/bad-new-file.sh" ]
+}
+
+# protect spares from --delete but must NOT skip the transfer: last-known-good
+# content still has to overwrite whatever the failed deploy left.
+@test "SAFETY: protected trees still get last-known-good CONTENT restored" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  mkdir -p "$DEPLOY/skills-all"
+  printf 'BAD\n' > "$DEPLOY/skills-all/marker.md"
+
+  run_rollback
+
+  [ "$(cat "$DEPLOY/skills-all/marker.md")" = "GOOD" ]
+}
+
 @test "SAFETY: --delete must NOT wipe protected server state" {
   # The counterpart to the test above. Deleting with a truncated exclude list
   # during an incident would destroy live agent state that has no backup, which
