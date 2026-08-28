@@ -128,6 +128,7 @@ SLACK_API = "https://slack.com/api/chat.postMessage"
 # a conversation back to its ClickUp ticket so we can request verification.
 INTERCOM_LINK_FIELD = os.environ.get(
     "CLICKUP_INTERCOM_LINK_FIELD_ID", "c32dbf6e-f680-4ff1-a532-192bb96245c3")
+# Canonical shared copy: scripts/lib/intercom_link.py — keep this in sync with it.
 _CONV_ID_RE = re.compile(r"/conversation/([^/?#\s\"']+)")
 
 # A 8-4-4-4-12 hex UUID — the identifier customers cite for a track / credit /

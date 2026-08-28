@@ -99,6 +99,7 @@ DEFAULT_LIST_ID = "901000600160"
 # https://app.intercom.com/a/inbox/<ws>/inbox/conversation/<convId>.
 INTERCOM_LINK_FIELD = os.environ.get(
     "CLICKUP_INTERCOM_LINK_FIELD_ID", "c32dbf6e-f680-4ff1-a532-192bb96245c3")
+# Canonical shared copy: scripts/lib/intercom_link.py — keep this in sync with it.
 _CONV_ID_RE = re.compile(r"/conversation/([^/?#\s\"']+)")
 
 # Only proactively reach out about verification-class work the customer was

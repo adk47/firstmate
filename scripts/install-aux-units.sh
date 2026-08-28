@@ -287,6 +287,10 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/cs-sla-report.py missing"
 [[ -f "$HYDRA_ROOT/scripts/close-duplicate-conversations.py" ]] \
   || fail "$HYDRA_ROOT/scripts/close-duplicate-conversations.py missing"
+[[ -f "$HYDRA_ROOT/scripts/clickup-todo-dedupe.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/clickup-todo-dedupe.py missing"
+[[ -f "$HYDRA_ROOT/scripts/lib/intercom_link.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/lib/intercom_link.py missing (clickup-todo-dedupe imports it)"
 [[ -f "$HYDRA_ROOT/scripts/cs-selfserve-backlog.py" ]] \
   || fail "$HYDRA_ROOT/scripts/cs-selfserve-backlog.py missing"
 [[ -f "$HYDRA_ROOT/scripts/cs-ops-drain-candidates.py" ]] \
@@ -899,6 +903,58 @@ cdup=close-duplicate-conversations.timer
 systemctl enable "$cdup" >/dev/null 2>&1 || log "WARN: could not enable $cdup"
 systemctl start "$cdup" >/dev/null 2>&1 || log "WARN: could not start $cdup"
 log "  $cdup: $(systemctl is-active "$cdup" 2>/dev/null || echo unknown)"
+
+# ─── ClickUp TO DO dedupe (hourly) ────
+# Replaces the manual "@Ops find duplicate TO DO tickets by Conversation link"
+# request Jan was filing 2-3x/day. It does NOT implement that literal rule:
+# sharing an Intercom conversation is not a duplicate signal (7/7 of the pairs
+# the hand-run moved were different action types, i.e. distinct customer
+# requests; 29 real asks ended up buried in Waiting against 4 true duplicates).
+# It moves only what is provably redundant — Tier A: same conversation AND same
+# action type (create_ticket's own dedupe key, so a hit means its dedupe was
+# escaped); Tier B: a bare intercom-auto-handoff escalation on a conversation
+# that already has a real action ticket. Everything else that merely shares a
+# conversation is reported to #cs_chats and left in TO DO.
+# Writes go through the audited batch helper, each move carries an audit
+# comment and is read back, and a run wanting more than --max-moves aborts with
+# zero writes and pages #clio_devops. See scripts/clickup-todo-dedupe.py.
+# ROLLBACK: reverting the repo files alone leaves the installed timer
+# running on node-8 against a script that may no longer exist. A rollback
+# of this surface MUST also run:
+#   systemctl disable --now clickup-todo-dedupe.timer
+cat > /etc/systemd/system/clickup-todo-dedupe.service << CUDEDUPESVC
+[Unit]
+Description=Hourly ClickUp TO DO dedupe (same-conversation + same-action, and redundant auto-handoffs)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# node-8 SIGTERMs any Type=oneshot unit with no explicit start timeout.
+TimeoutStartSec=600
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/clickup-todo-dedupe.py
+CUDEDUPESVC
+
+cat > /etc/systemd/system/clickup-todo-dedupe.timer << CUDEDUPETMR
+[Unit]
+Description=Hourly — ClickUp TO DO duplicate sweep
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=180
+Unit=clickup-todo-dedupe.service
+
+[Install]
+WantedBy=timers.target
+CUDEDUPETMR
+
+systemctl daemon-reload
+cud=clickup-todo-dedupe.timer
+systemctl enable "$cud" >/dev/null 2>&1 || log "WARN: could not enable $cud"
+systemctl start "$cud" >/dev/null 2>&1 || log "WARN: could not start $cud"
+log "  $cud: $(systemctl is-active "$cud" 2>/dev/null || echo unknown)"
 
 # ─── Caroline autonomous-behavior digest (daily 16:00 UTC) ────
 # Read-only daily digest of Caroline's autonomous self-serve activity so we can

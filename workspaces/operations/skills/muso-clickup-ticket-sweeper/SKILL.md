@@ -34,6 +34,37 @@ The goal is to quickly convert a messy ClickUp bucket into:
 
 ## Hard rules
 
+- **A shared Intercom Conversation link is NOT a duplicate signal, and you must
+  never bulk-move tickets on that basis.** `create_ticket` already dedupes on
+  (conversation, actionType) with a 7-day window, so a customer raising several
+  different asks in one thread is SUPPOSED to produce several tickets. Running
+  the naive "same link -> move to Waiting" rule by hand moved 7 pairs, and 7 of
+  7 were different action types — 19 genuine customer requests
+  (`bulk-credit-change`, `credit-correction`, `profile-merge`, …) were buried in
+  Waiting against 4 real duplicates. Creation time does not separate them
+  either: 5 of the 7 were filed within 4 minutes of each other.
+  A ticket is only redundant when:
+    1. it shares a conversation **and** the same `action:<type>` tag with an
+       older ticket **of the same kind** — real-vs-real, or handoff-vs-handoff,
+       never a real ask against an older `intercom-auto-handoff` record — and
+       the two were filed within create_ticket's dedupe reach for that action —
+       7 days normally, but only **24 hours for `profile-merge` and
+       `track-merge`**, which skip the ClickUp fallback entirely and rely on a
+       24h in-memory registry, so a later merge request is deliberate
+       (create_ticket's own dedupe key, so a hit means its dedupe was escaped).
+       Both carve-outs are load-bearing. `create-ticket.ts` deliberately excludes
+       handoff tickets from that lookup, so a real ask sharing an action tag with
+       an older auto-handoff was filed ON PURPOSE; and past 7 days it treats a
+       same-type ask as a NEW REQUEST, so a wider gap is not an escaped dedupe
+       either. Two handoffs on one conversation still dedupe against each other, or
+    2. it is a bare `intercom-auto-handoff` escalation on a conversation that
+       already carries a real, non-handoff action ticket.
+  Anything else that merely shares a conversation stays in TO DO.
+  **This now runs automatically** — `scripts/clickup-todo-dedupe.py` on the
+  hourly `clickup-todo-dedupe.timer`, reporting to #cs_chats. If someone asks
+  for a duplicate sweep, point them at the cron; do not hand-run the naive rule.
+- Read the `action:<type>` **tag**, never the `[bracket]` name prefix, when
+  comparing ticket types — the prefix is cosmetic and drifts from the tag.
 - Customer-facing notification is not automatic. Draft it for resolved tickets;
   send only when the requester explicitly asks for notification and an approved
   Caroline/Intercom send path is available.

@@ -89,6 +89,7 @@ INTERCOM_LINK_FIELD = os.environ.get(
 # description-deeplink conv id extracted here is byte-identical to the one the
 # notifier targets — otherwise the defer set (notify_owed) would key on a
 # different id than the open conversation and silently fail to defer.
+# Canonical shared copy: scripts/lib/intercom_link.py — keep this in sync with it.
 _CONV_ID_RE = re.compile(r"/conversation/([^/?#\s\"']+)")
 DEFAULT_LIST_ID = "901000600160"
 CLICKUP_TASK_URL = "https://app.clickup.com/t/{}"
