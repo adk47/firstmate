@@ -20,9 +20,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HYDRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$HYDRA_ROOT"
+# NOTE: the cd into the working checkout happens AFTER arg parsing --
+# --workdir may point this run at another repo's managed checkout.
 
-DRAFT_FILE="$HYDRA_ROOT/RELEASE_NOTES_DRAFT.md"
 DRY_RUN="${DRY_RUN:-0}"
 
 log() { echo "[release] $*"; }
@@ -41,10 +41,20 @@ exit_no_release() { echo "[release] $*" >&2; exit 10; }
 VERSION=""
 NO_EDIT=0
 FROM_REF=""
+WORKDIR=""
+EXPECT_REPO=""
+NO_ANNOUNCE=0
+AT_SHA=""
+AUTO_SUFFIX=0
 for arg in "$@"; do
   case "$arg" in
     --no-edit) NO_EDIT=1 ;;
     --from=*)  FROM_REF="${arg#--from=}" ;;
+    --at=*)    AT_SHA="${arg#--at=}" ;;
+    --auto-suffix) AUTO_SUFFIX=1 ;;
+    --workdir=*) WORKDIR="${arg#--workdir=}" ;;
+    --repo=*)  EXPECT_REPO="${arg#--repo=}" ;;
+    --no-announce) NO_ANNOUNCE=1 ;;
     --help|-h)
       cat <<'USAGE'
 Usage:
@@ -52,6 +62,11 @@ Usage:
   ./scripts/release.sh v2026.5.26.1    same-day hotfix override
   ./scripts/release.sh --no-edit       skip $EDITOR review
   ./scripts/release.sh --from=<ref>    explicit range start (bootstrap or override)
+  ./scripts/release.sh --at=<sha>      tag this exact commit (must be on origin/main)
+  ./scripts/release.sh --auto-suffix   append .N when today's tag already exists
+  ./scripts/release.sh --workdir=<p>   cut the release in another repo's checkout
+  ./scripts/release.sh --repo=<o/n>    assert the checkout really is this repo
+  ./scripts/release.sh --no-announce   tag + publish, but post nothing to Slack
   DRY_RUN=1 ./scripts/release.sh       generate notes only, no tag/push/release
 
 Mirrors openclaw: tag directly off main, no release branches. Requires gh
@@ -77,12 +92,50 @@ if [[ ! "$VERSION" =~ ^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(\.[0-9]+)?$ ]]; then
   die "version '$VERSION' does not match vYYYY.M.D[.N]"
 fi
 
+# ─── Resolve the working checkout ───────────────────────────────────
+# Default is hydra's own tree, which keeps every existing invocation
+# (and release-cron.sh) behaving exactly as before. --workdir points the
+# same machinery at another repo's managed checkout so one implementation
+# cuts releases for web-credits-next / auth / hydra alike.
+WORKDIR="${WORKDIR:-$HYDRA_ROOT}"
+[[ -d "$WORKDIR/.git" ]] || die "--workdir '$WORKDIR' is not a git checkout"
+cd "$WORKDIR"
+
+# The draft is written INTO the checkout for hydra (where it is gitignored,
+# .gitignore:151) so the documented RELEASE_NOTES_DRAFT.md path still holds.
+# For any other repo it goes to a temp file instead: an untracked draft left
+# behind by a mid-run failure would trip the dirty-tree check below and wedge
+# every subsequent release of that repo.
+if [[ "$WORKDIR" == "$HYDRA_ROOT" ]]; then
+  DRAFT_FILE="$WORKDIR/RELEASE_NOTES_DRAFT.md"
+else
+  DRAFT_FILE="$(mktemp -t release-notes.XXXXXX.md)"
+fi
+
 # ─── Preflight ──────────────────────────────────────────────────────
 log "Preflight checks..."
 
-branch=$(git rev-parse --abbrev-ref HEAD)
-if [[ "$branch" != "main" ]]; then
-  die "must be on main (currently on '$branch'). Releases cut off main only."
+# Identify the repo from the checkout itself, then assert it against
+# --repo when given. gh resolves nameWithOwner from the cwd's remote, so
+# a --workdir pointing at the wrong tree would otherwise tag the wrong
+# repository -- silently, and unrecoverably once the tag is pushed.
+# No fallback default. A hardcoded `|| echo Muso-AI/hydra` made the --repo
+# assertion below pass trivially whenever discovery FAILED and the expected
+# repo was hydra -- an assertion that cannot fail is not an assertion, and
+# this one guards which repository receives a tag that cannot be un-cut.
+REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" \
+  || die "could not determine the repository for the checkout at $WORKDIR (is its origin set, and gh authenticated?)"
+[[ -n "$REPO" ]] || die "gh returned an empty repository name for $WORKDIR — refusing to tag an unidentified repo."
+if [[ -n "$EXPECT_REPO" && "$EXPECT_REPO" != "$REPO" ]]; then
+  die "--repo says '$EXPECT_REPO' but the checkout at $WORKDIR is '$REPO'. Refusing to tag the wrong repository."
+fi
+log "  Repo: $REPO (checkout: $WORKDIR)"
+
+if [[ -z "$AT_SHA" ]]; then
+  branch=$(git rev-parse --abbrev-ref HEAD)
+  if [[ "$branch" != "main" ]]; then
+    die "must be on main (currently on '$branch'). Releases cut off main only."
+  fi
 fi
 
 if [[ -n "$(git status --porcelain)" ]]; then
@@ -92,18 +145,63 @@ fi
 log "  Fetching origin/main..."
 git fetch --tags origin main >/dev/null 2>&1 || die "git fetch failed. Check network / origin remote."
 
-# Require exact equality with origin/main, not just "not behind". An
-# operator with a locally-committed-but-unpushed change on main would
-# otherwise pass the behind check, and `git push origin <tag>` would
-# attach those commits to the server as reachable-from-tag-only — i.e.
-# a release tag pointing at code that is NOT on origin/main's branch
-# ref. Caught in Clio's review of PR #330.
 local_sha=$(git rev-parse HEAD)
 remote_sha=$(git rev-parse origin/main)
-if [[ "$local_sha" != "$remote_sha" ]]; then
-  ahead=$(git rev-list --count origin/main..HEAD)
-  behind=$(git rev-list --count HEAD..origin/main)
-  die "local main must exactly match origin/main before release (ahead=$ahead, behind=$behind). Push or pull first."
+
+if [[ -n "$AT_SHA" ]]; then
+  # --at pins the commit that a deploy actually put into production.
+  # main may legitimately have moved on since, so exact equality with
+  # origin/main is the wrong gate here. The invariant that still MUST
+  # hold is the one PR #330 cared about: never publish a tag pointing at
+  # code that is not on origin/main. Ancestry is exactly that check.
+  at_full=$(git rev-parse --verify --quiet "${AT_SHA}^{commit}") \
+    || die "--at '$AT_SHA' does not resolve to a commit in this checkout"
+  if [[ "$local_sha" != "$at_full" ]]; then
+    die "--at pins $at_full but the checkout is at $local_sha. The caller must check out the pinned commit first."
+  fi
+  if ! git merge-base --is-ancestor "$at_full" "$remote_sha"; then
+    die "--at commit $at_full is not reachable from origin/main. Refusing to tag code that is not on main."
+  fi
+  behind=$(git rev-list --count "${at_full}..${remote_sha}")
+  log "  Pinned to $(git rev-parse --short "$at_full") (origin/main is $behind commit(s) ahead)"
+else
+  # Require exact equality with origin/main, not just "not behind". An
+  # operator with a locally-committed-but-unpushed change on main would
+  # otherwise pass the behind check, and `git push origin <tag>` would
+  # attach those commits to the server as reachable-from-tag-only — i.e.
+  # a release tag pointing at code that is NOT on origin/main's branch
+  # ref. Caught in Clio's review of PR #330.
+  if [[ "$local_sha" != "$remote_sha" ]]; then
+    ahead=$(git rev-list --count origin/main..HEAD)
+    behind=$(git rev-list --count HEAD..origin/main)
+    die "local main must exactly match origin/main before release (ahead=$ahead, behind=$behind). Push or pull first."
+  fi
+fi
+
+# ─── Same-day suffix resolution ────────────────────────────────────
+# Per-deploy cadence means several releases can land on one date, so the
+# documented vYYYY.M.D.N form has to be reachable without a human picking
+# N. Walk upward from the base tag to the first name free BOTH locally and
+# on origin -- checking only one of the two would push a tag that already
+# exists remotely and fail after the notes were built.
+tag_taken() {
+  local candidate="$1"
+  git rev-parse -q --verify "refs/tags/$candidate" >/dev/null 2>&1 && return 0
+  git ls-remote --tags --exit-code origin "refs/tags/$candidate" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+if [[ "$AUTO_SUFFIX" -eq 1 ]]; then
+  base="$VERSION"
+  n=0
+  while tag_taken "$VERSION"; do
+    n=$(( n + 1 ))
+    if [[ "$n" -gt 50 ]]; then
+      die "more than 50 releases already tagged for ${base} today — refusing to keep incrementing."
+    fi
+    VERSION="${base}.${n}"
+  done
+  [[ "$VERSION" == "$base" ]] || log "  ${base} is taken; using $VERSION"
 fi
 
 if git rev-parse "$VERSION" >/dev/null 2>&1; then
@@ -213,7 +311,7 @@ emit_section() {
 # readable in the URL; resolve everything else to a short sha. Surfaced
 # in v2026.5.26 bootstrap DRY_RUN where --from=HEAD~11 produced a 404
 # compare link.
-REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo Muso-AI/hydra)"
+# REPO was resolved and asserted up in the preflight section.
 if git rev-parse --verify "refs/tags/${PRIOR_REF}" >/dev/null 2>&1; then
   PRIOR_URL_REF="$PRIOR_REF"
 elif [[ "$PRIOR_REF" =~ ^[0-9a-f]{7,40}$ ]]; then
@@ -257,6 +355,37 @@ if [[ ! -s "$DRAFT_FILE" ]]; then
   die "$DRAFT_FILE is empty after edit. Aborting."
 fi
 
+# ─── Canonical URLs ────────────────────────────────────────────────
+# Computed here, ABOVE the dry-run stop, so a dry run can hand a caller
+# the exact links the real run would produce. A --dry-run render of the
+# Slack message that carried different URLs than the live one would be
+# worthless as a preview.
+RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
+COMPARE_URL="https://github.com/${REPO}/compare/${PRIOR_URL_REF}...${VERSION}"
+
+# Hand the result back to a programmatic caller. release-watch.sh needs
+# the version and the rendered notes to build its own Block Kit message;
+# parsing them back out of this script's log would be brittle. The notes
+# are COPIED out of the way so the caller owns a stable path that the
+# unconditional draft cleanup below cannot pull out from under it.
+emit_result() {
+  [[ -n "${RELEASE_OUTPUT_FILE:-}" ]] || return 0
+  local notes_keep
+  notes_keep="$(mktemp -t release-notes-kept.XXXXXX.md)"
+  cp "$DRAFT_FILE" "$notes_keep"
+  {
+    printf 'version=%s\n'      "$VERSION"
+    printf 'repo=%s\n'         "$REPO"
+    printf 'prior_ref=%s\n'    "$PRIOR_URL_REF"
+    printf 'release_url=%s\n'  "$RELEASE_URL"
+    printf 'compare_url=%s\n'  "$COMPARE_URL"
+    printf 'notes_file=%s\n'   "$notes_keep"
+    printf 'commit_count=%s\n' "$TOTAL"
+    printf 'dry_run=%s\n'      "$DRY_RUN"
+  } > "$RELEASE_OUTPUT_FILE"
+  log "  Result written to $RELEASE_OUTPUT_FILE (notes: $notes_keep)"
+}
+
 # ─── Dry-run stop ──────────────────────────────────────────────────
 if [[ "$DRY_RUN" == "1" ]]; then
   log "DRY_RUN=1 — stopping before tag/push/release."
@@ -264,6 +393,8 @@ if [[ "$DRY_RUN" == "1" ]]; then
   echo "────────────────────────────────────────"
   cat "$DRAFT_FILE"
   echo "────────────────────────────────────────"
+  emit_result
+  rm -f "$DRAFT_FILE"
   log "Re-run without DRY_RUN=1 to ship."
   exit 0
 fi
@@ -292,10 +423,10 @@ fi
 # + `|| log ...` so payload-build errors, Python failures, or curl
 # failures do NOT propagate to release.sh's exit status. Caught in
 # Clio's review of PR #330.
-RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
-COMPARE_URL="https://github.com/${REPO}/compare/${PRIOR_URL_REF}...${VERSION}"
-
-if [[ -r "$HYDRA_ROOT/scripts/lib/slack-notify.sh" ]]; then
+# RELEASE_URL / COMPARE_URL were computed above the dry-run stop.
+if [[ "$NO_ANNOUNCE" -eq 1 ]]; then
+  log "  (--no-announce — the caller owns the Slack announcement)"
+elif [[ -r "$HYDRA_ROOT/scripts/lib/slack-notify.sh" ]]; then
   (
     # shellcheck source=lib/slack-notify.sh
     source "$HYDRA_ROOT/scripts/lib/slack-notify.sh"
@@ -421,6 +552,8 @@ PYEOF
 else
   log "  (slack-notify.sh not found — skipping Slack announcement; release is live regardless)"
 fi
+
+emit_result
 
 # ─── Clean up the draft ────────────────────────────────────────────
 rm -f "$DRAFT_FILE"

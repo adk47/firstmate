@@ -51,30 +51,95 @@ hard-won knowledge we built up locally over time:
 
 ## Releases
 
-Hydra cuts daily releases off `main` (mirroring openclaw's pattern — no
-release branches, no canary; tag is a labeling event, not a gate).
+Releases are announced in **#releases** (`C0BSY512MQT`). **Live today: hydra
+and web-credits-next.** auth is configured but `enabled=0` until its upstream
+posts a rollout status, and mobile is Phase 2 — both are silent on purpose, so
+expected silence there is not a watcher failure (details below). Deploy and
+release stay decoupled: merging to `main` deploys, and the tag + announcement
+is a labeling event after the fact, never a gate.
+
+**Cadence is per-repo**, set by the `cadence` field in
+`scripts/lib/release-repos.sh`:
+- `per-deploy` — one release per confirmed prod deploy. **web-credits-next**
+  (~0.7 deploys/day; each web deploy is already a `release/promote-develop-*`
+  train, so a deploy IS a release). **auth** carries the same cadence but is
+  `enabled=0`, so it announces nothing yet.
+- `daily` — at most ONE release per calendar day (Europe/Rome, from 08:00),
+  rolling up everything that shipped since the last cut. **hydra** is `daily`:
+  it deploys ~2.7x/day and is internal agent-ops plumbing, so per-deploy posts
+  would drown the product releases this channel exists to surface.
+  A held tick records **nothing** — that is what makes the roll-up work.
 
 - **Tag format**: `vYYYY.M.D` with no leading zero on month/day
-  (e.g., `v2026.5.26`). Multi-cut days append `.N` (`v2026.5.26.1`).
-- **How to cut**: `./scripts/release.sh` — opens generated notes in
-  `$EDITOR`, then tags, pushes, creates the GH release, and posts a
-  Block Kit announcement to #clio_devops via the devops bot.
-- **Dry-run**: `DRY_RUN=1 ./scripts/release.sh` previews the notes
-  without tagging or publishing.
+  (e.g. `v2026.5.26`). Several releases can land on one date, so
+  `release.sh --auto-suffix` walks to the first free `.N` (`v2026.5.26.1`)
+  checking BOTH the local tag and origin.
+- **What drives it**: `hydra-release-watch.timer` (every 5 min) runs
+  `scripts/release-watch.sh`. Detection is pure gh/git/jq and reads an
+  **authoritative per-SHA record**, never an inference:
+  - **web-credits-next / auth** — H-DevOps posts a commit status on the app
+    repo's own commit (`H-DevOps / deploy` = "Rollout to muso-prod
+    (success)"). That names the sha directly.
+  - **hydra** — a completed, successful `deploy.yml` run on `main`.
+- **Do NOT correlate the `auto: bump muso/<svc> … post-deploy` commit.**
+  Earlier revisions did, by timestamp and then by ordinal position, and both
+  are unsound: a bump proves a rollout happened but never names a sha, a
+  dispatch proves acceptance but not rollout, a failed rollout writes no bump
+  at all, and Actions concurrency does not guarantee ordering. The commit
+  status is the only signal carrying identity.
+- **A repo with no such status cannot be announced**, and is `enabled=0`
+  rather than enabled-but-silent. `deploy-auth.yaml` posted none as of
+  2026-08-27, so auth is disabled for the same reason mobile is: its
+  upstream does not produce the signal. Flip it to `1` when
+  https://github.com/Muso-AI/H-DevOps/pull/2799 merges.
+- **An unresolved rollout past the grace window fails LOUD, never silently.**
+  Every enabled repo is required to have a working status writer, so a
+  `pending` that never reaches a terminal state and a record that never
+  appears at all are both indeterminate: skipping could drop a real release,
+  announcing past it could strand one. Below the window it simply waits.
+- **Candidates are drained oldest-first, one per tick**, so two rollouts
+  landing between ticks both get announced. A dispatch with no rollout record
+  is skipped, not mis-attributed. A **re-run of an old deploy** keeps its
+  original `headSha`, so the watcher also refuses any sha that does not
+  descend from the last announced one.
+- **Highlights come from a tool-less model call, and are never
+  load-bearing.** Commit subjects are author-controlled, so they are
+  UNTRUSTED input to a language model: the call is direct HTTP with no
+  agent, no session and no tools (same posture as `dr-ai-healer.sh`), the
+  output is length- and count-bounded, and it is mrkdwn-escaped before it
+  reaches Slack. **Never route this through an openclaw agent turn** — that
+  runtime has `exec`, which would let a crafted commit subject cause real
+  side effects. If the call fails the release is **still announced** with the
+  deterministic rendering plus an explicit "highlights unavailable" line.
+- **Fails closed on config, best-effort on delivery.** No
+  `RELEASES_SLACK_CHANNEL` (from `/etc/hydra/releases.env`) means the
+  watcher refuses to run at all — tags cannot be un-cut, so publishing
+  releases nobody can see is worse than not running. A Slack failure
+  *during* a run is different: the release is already published by then, so
+  the post is best-effort and the state file still advances.
+- **Per-repo config lives in ONE table**: `scripts/lib/release-repos.sh`
+  (display name, emoji, detector, service, rollback link, and a
+  `cadence` knob). Adding a repo is a table row.
+- **State**: `/var/lib/hydra-release/{repos,announced,highlights}` — under
+  `/var/lib`, NOT `/opt/hydra`, which the deploy rsync overwrites.
+- **Bootstrap**: a repo that has never been released has no prior tag, and
+  `release.sh` refuses to publish full history. Seed a baseline once:
+  `./scripts/release-watch.sh --repo=<key> --bootstrap=<ref>`; the next
+  prod deploy is then the first announced release.
+- **Dry-run**: `./scripts/release-watch.sh --repo=<key> --dry-run` renders
+  the exact Block Kit payload to stdout and tags/posts nothing. Human logs
+  go to stderr — stdout is the machine channel (`NO_REPLY`, or the payload).
+- **Mobile is deliberately silent (Phase 2).** Neither prod lane reaches
+  users today: `mobile-ios-native.yaml` stops at TestFlight and
+  `mobile-android-native.yaml` uploads to Play track `alpha` as a
+  **draft**. Announcing those as "released" would be false. The `ios-app` /
+  `android-app` rows are `enabled=0` until H-DevOps ships to production.
 - **No CHANGELOG.md**: GitHub releases are the changelog. Don't
   introduce a tracked CHANGELOG file.
-- **Cron**: `hydra-release.timer` fires Mon..Fri 08:00 Europe/Rome
-  on node-8, invoking `scripts/release-cron.sh`. The wrapper operates
-  against a **dedicated git checkout at `/var/lib/hydra-release/repo`**
-  — NOT `/opt/hydra/`, which is the rsync target and has no `.git`.
-  `install-aux-units.sh` initializes the checkout on first deploy
-  (clone via `gh repo clone` + local `user.name`/`user.email` for tag
-  identity). Each fire: `git fetch && git reset --hard origin/main`
-  then `release.sh --no-edit`. Date-gated to first fire on
-  2026-05-28T06:00Z; disable with
-  `systemctl disable --now hydra-release.timer` if commit-subject
-  hygiene goes bad. Inspect upcoming fires with
-  `systemctl list-timers hydra-release.timer`.
+- **`hydra-release.timer` is installed but DISABLED.** hydra's daily cut is
+  now the watcher's `cadence=daily`, which posts to #releases in the shared
+  format instead of #clio_devops. Do not enable the old timer alongside the
+  watcher — both would tag the same day.
 
 ## Hot-patching skills on node-8
 

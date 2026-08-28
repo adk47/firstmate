@@ -1297,6 +1297,63 @@ A fresh agent session then loads the live catalog. **Never `rm /root/.openclaw`*
 
 ---
 
+### Release Announcements — nothing posted / duplicate / no highlights
+
+**What runs**: `hydra-release-watch.timer` every 5 min →
+`scripts/release-watch.sh` → tag + GitHub release via `scripts/release.sh` →
+Block Kit post to #releases. Log: `/var/log/hydra-release-watch.log`.
+State: `/var/lib/hydra-release/{repos,announced,highlights}`.
+
+```bash
+systemctl list-timers hydra-release-watch.timer
+journalctl -u hydra-release-watch -n 100 --no-pager
+# What the watcher believes shipped last, per repo:
+#   last_run_id is the checkpoint; last_date drives the daily gate.
+tail -50 /var/log/hydra-release-watch.log
+cat /var/lib/hydra-release/announced/web-credits-next
+```
+
+**First question, always: was anything actually released?** A quiet channel is
+the correct output on a day with no prod deploy. `NO_REPLY` in the log means
+"checked, nothing new" — that is success, not a failure.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Every tick exits non-zero, `RELEASES_SLACK_CHANNEL is unset` | `/etc/hydra/releases.env` missing or lacks the channel id | Write `RELEASES_SLACK_CHANNEL=<id>` there. This is fail-closed **on purpose**: tags cannot be un-cut, so it refuses to publish releases nobody can see. |
+| A repo never announces and the log is quiet | its commits carry no `H-DevOps / deploy` success status | Check `gh api repos/Muso-AI/<repo>/commits/<sha>/status`. No status = nothing authoritatively says that sha reached prod, so the watcher stays silent by design. auth is in this state until the companion H-DevOps change lands. |
+| A repo never announces, log says `refusing to publish full history` | never released, so no prior tag and no state to bound the range | Seed once: `./scripts/release-watch.sh --repo=<key> --bootstrap=<ref>`. The next prod deploy is the first announced release. |
+| `does not descend from the last announced` | someone re-ran an OLD deploy workflow run — a re-run keeps its original `headSha` but gets a fresh `createdAt` | Nothing to fix. The guard is correct: that run shipped old code, and announcing it would publish a bogus release. |
+| `rollout still pending — waiting` | a deploy is genuinely in flight | Expected. It announces on the next tick once the rollout reports success. |
+| `rollout unresolved (state='none'…)` | the dispatch succeeded but no `H-DevOps / deploy` status exists yet | Expected while a deploy is running. It announces once the rollout reports success. |
+| `no resolved … rollout after <n>s` + `INDETERMINATE` + non-zero exit | past the grace window with no terminal state — either `pending` that never finished, or no record at all | Whether that sha reached prod is genuinely unknown, so the watcher refuses to guess in either direction. Inspect the H-DevOps run for that repo, then re-seed: `./scripts/release-watch.sh --repo=<key> --bootstrap=<sha currently live>`. |
+| auth never announces | expected — auth is `enabled=0` until H-DevOps#2799 gives it a `H-DevOps / deploy` status writer | Flip the row to `1` in `scripts/lib/release-repos.sh` once that merges. |
+| Post says `⚠️ plain-language highlights unavailable` | the highlights call failed — most often a missing/rotated OpenRouter key, otherwise a model or network error | The release IS announced and correct; only the plain-English layer is missing. Highlights are a **direct, tool-less HTTP call**, NOT an agent turn — the gateway is irrelevant here. Check `OPENROUTER_API_KEY` in `/opt/hydra/secrets/llm-provider-keys.json`, then the log line naming the failure. Never re-cut the tag to retry. |
+| Release tagged + on GitHub, but no Slack post | delivery failed after publish (best-effort by design) | Confirm the devops bot is a member of #releases. The state file already advanced, so it will NOT re-post; announce manually if it matters. |
+| Two posts for one release | should be impossible — state is written atomically and keyed on the shipped sha | Inspect `/var/lib/hydra-release/announced/<key>`; if `last_marker` is stale, the state file was reverted or the state dir was wiped. |
+| Wrong version number (`.1`, `.2` suffixes) | expected: several prod releases landed the same day | `--auto-suffix` walks to the first free `.N`, checking local AND origin tags. |
+| hydra posts nothing despite deploying several times | expected: hydra is `cadence=daily` | One roll-up per Europe/Rome day from 08:00. Log says `holding`. Held ticks record nothing, so the next cut covers everything. |
+| A `daily` repo announced twice in one day | `last_date` in its state file was cleared or the clock/TZ moved | Check `last_date=` in `/var/lib/hydra-release/announced/<key>` against `TZ=Europe/Rome date +%F`. |
+
+**Preview without touching anything** (safe on prod, tags and posts nothing):
+
+```bash
+./scripts/release-watch.sh --repo=web-credits-next --dry-run
+```
+
+Human logs go to **stderr**; stdout is the machine channel (`NO_REPLY`, or the
+payload JSON). Pipe stdout alone to inspect the message.
+
+**Mobile posts nothing, and that is correct.** `ios-app` / `android-app` are
+`enabled=0` in `scripts/lib/release-repos.sh` because neither H-DevOps prod
+lane reaches users: iOS stops at TestFlight, Android uploads to Play track
+`alpha` as a **draft**. Announcing those as released would be false.
+
+**Reverting to the old daily cut**: `systemctl disable --now
+hydra-release-watch.timer && systemctl enable --now hydra-release.timer`.
+Never run both — they would both tag the same day.
+
+---
+
 ### Node 8 Unreachable
 
 **Symptoms**: Cannot SSH to 40.160.32.80, agents are all offline.

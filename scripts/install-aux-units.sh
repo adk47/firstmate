@@ -148,7 +148,33 @@
 #     CTO_NIGHTLY_MAX_FIX_TURNS rounds. Never dispatches the agent without a
 #     delta.
 #
-#   hydra-release.timer / .service
+#   hydra-release-watch.timer / .service
+#     The LIVE release path. Every 5 min, scripts/release-watch.sh asks
+#     each ENABLED repo whether a confirmed PROD release has landed that
+#     was not announced yet. Detection reads an authoritative PER-SHA
+#     record, never an inference:
+#       - web-credits-next / auth: H-DevOps posts an `H-DevOps / deploy`
+#         commit STATUS on the app repo's own commit, which names the sha
+#         directly. (auth is enabled=0 until its upstream writes one.)
+#       - hydra: a completed, successful deploy.yml run on main.
+#     An earlier revision correlated H-DevOps' `auto: bump ... post-deploy`
+#     commits instead; that was removed because a bump proves a rollout
+#     happened but never names a sha. See CLAUDE.md ## Releases.
+#     It pins the sha that actually shipped (main may have moved since),
+#     cuts a CalVer tag + GitHub release via release.sh --at, and posts a
+#     Block Kit message to #releases. The plain-language highlights come
+#     from a TOOL-LESS direct HTTP model call -- never an agent turn, since
+#     commit subjects are untrusted input and an agent runtime has exec --
+#     and if it fails the release is still announced with the deterministic
+#     conventional-commit rendering.
+#     Fails CLOSED when RELEASES_SLACK_CHANNEL is unset
+#     (/etc/hydra/releases.env) rather than cutting tags nobody sees.
+#     State: /var/lib/hydra-release/{repos,announced,highlights}.
+#
+#   hydra-release.timer / .service   [INSTALLED, DISABLED]
+#     The SUPERSEDED daily cut, kept installed so reverting to a daily
+#     cadence is one `systemctl enable --now` away. Do not run it
+#     alongside the watcher — both would tag the same day.
 #     Daily-release cron. Mon..Fri 08:00 Europe/Rome. Invokes
 #     scripts/release-cron.sh, which:
 #       1. cd's to a DEDICATED git checkout at /var/lib/hydra-release/
@@ -1612,11 +1638,129 @@ RELEASETMR
 
 systemctl daemon-reload
 
-tmr=hydra-release.timer
-systemctl enable "$tmr" >/dev/null 2>&1 || log "WARN: could not enable $tmr"
-systemctl start "$tmr" >/dev/null 2>&1 || log "WARN: could not start $tmr"
-state=$(systemctl is-active "$tmr" 2>/dev/null || echo unknown)
-log "  $tmr: $state (first real fire gated to 2026-05-28T06:00Z)"
+# The daily cut is SUPERSEDED by hydra-release-watch.timer, which cuts a
+# release per confirmed prod deploy instead of once a weekday morning.
+# The unit files stay installed on purpose: reverting to the daily cadence
+# is then `systemctl enable --now hydra-release.timer` plus flipping the
+# repo's `cadence` field in scripts/lib/release-repos.sh, with nothing to
+# reinstall. Leaving BOTH enabled would double-cut every morning.
+# Fail CLOSED, and VERIFY rather than assume. The previous form swallowed a
+# failed disable and logged success regardless, so a timer that stayed
+# enabled would run alongside the watcher and both would cut a tag for the
+# same day. Tags cannot be un-cut, so this aborts before the watcher is
+# installed rather than leaving two release paths armed.
+ensure_superseded_timer_off() {
+  local tmr="$1" en act
+  systemctl disable --now "$tmr" >/dev/null 2>&1 || true
+  # `|| true` is REQUIRED on the capture, not sloppiness: `is-enabled` exits
+  # non-zero for the expected "disabled" answer, and set -e would abort here.
+  # It does mean a systemd/D-Bus error is indistinguishable from an answer,
+  # so the DECISION below must not be a blacklist. It once was, rejecting
+  # only "enabled"/"active" -- which let an empty string (query failed) read
+  # as safe and arm the watcher next to a live daily timer.
+  en="$(systemctl is-enabled "$tmr" 2>/dev/null || true)"
+  act="$(systemctl is-active "$tmr" 2>/dev/null || true)"
+  # An empty answer is AMBIGUOUS: the unit may not exist (safe -- nothing can
+  # fire), or the query itself may have failed (unknown). Resolve which,
+  # rather than assuming. Assuming "safe" is precisely the bug this guard had.
+  if [[ -z "$en" ]] && ! systemctl cat "$tmr" >/dev/null 2>&1; then
+    log "  $tmr: not installed — nothing to supersede"
+    return 0
+  fi
+  # Past that, accept ONLY states that positively prove the timer cannot
+  # fire. Anything else -- an unknown state, or the empty string left by a
+  # failed query on a unit that DOES exist -- is indeterminate, and
+  # indeterminate fails CLOSED. Tags cannot be un-cut, so refusing to
+  # install is always cheaper than double-cutting a release.
+  case "$en" in
+    disabled|masked|masked-runtime|static|indirect|not-found) ;;
+    *) fail "$tmr: cannot confirm it is disabled (is-enabled returned '${en:-<query failed>}'). Refusing to install hydra-release-watch.timer alongside it: both would cut a release for the same day. Resolve it by hand, then re-run." ;;
+  esac
+  case "$act" in
+    inactive|failed|deactivating|unknown|not-found) ;;
+    *) fail "$tmr: cannot confirm it is stopped (is-active returned '${act:-<query failed>}'). Refusing to install hydra-release-watch.timer alongside it: both would cut a release for the same day. Resolve it by hand, then re-run." ;;
+  esac
+  log "  $tmr: disabled (enabled=$en active=$act) — superseded by hydra-release-watch.timer"
+}
+
+ensure_superseded_timer_off hydra-release.timer
+
+# ─── Per-deploy release watcher (every 5 min) ─────────────────
+# Detects confirmed PROD releases across the ENABLED repos (hydra and
+# web-credits-next today; auth once its upstream posts a rollout status),
+# cuts a CalVer tag + GitHub release for each, and announces them in
+# #releases. Detection is pure gh/git/jq against a per-sha commit status;
+# the highlights come from a tool-less direct HTTP model call, and a failed
+# call degrades to the deterministic rendering rather than skipping the
+# announcement.
+cat > /etc/systemd/system/hydra-release-watch.service << RELWATCHSVC
+[Unit]
+Description=Hydra release watcher (announces confirmed prod releases in #releases)
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/release-watch.sh
+# The channel id lives here, NOT in the unit: it is environment, and the
+# script fails closed without it rather than cutting tags nobody sees.
+# The leading '-' keeps the unit valid before the file exists.
+EnvironmentFile=-/etc/hydra/releases.env
+# node-8 SIGTERMs any Type=oneshot that does not set this, at the 90s
+# default. A tick can legitimately run for minutes: up to three repos,
+# each waiting on a highlights turn, plus clone/fetch on a cold checkout.
+TimeoutStartSec=1800
+# HOME for gh's config, PATH for git/gh/jq/openclaw/muso.
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=append:/var/log/hydra-release-watch.log
+StandardError=append:/var/log/hydra-release-watch.log
+RELWATCHSVC
+
+cat > /etc/systemd/system/hydra-release-watch.timer << RELWATCHTMR
+[Unit]
+Description=Check for confirmed prod releases every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+# NOT Persistent: a missed tick is harmless because detection is
+# state-based, not time-based. The next tick sees the same unannounced
+# release and handles it. Catching up on missed fires would only produce
+# a burst of redundant runs after downtime.
+Persistent=false
+RandomizedDelaySec=30s
+Unit=hydra-release-watch.service
+
+[Install]
+WantedBy=timers.target
+RELWATCHTMR
+
+systemctl daemon-reload
+
+# The watcher fails closed without a channel id, so enabling the timer
+# before /etc/hydra/releases.env exists is safe: every tick exits non-zero
+# with the reason, and nothing is tagged.
+if [ ! -r /etc/hydra/releases.env ]; then
+  log "  NOTE: /etc/hydra/releases.env absent — release-watch will refuse to run until"
+  log "        it carries RELEASES_SLACK_CHANNEL=<#releases channel id>."
+fi
+
+# Fail CLOSED. This is now the LIVE release path, so a timer that silently
+# fails to arm means every production release afterwards goes unannounced
+# with nothing but a log warning to say so. The best-effort form was
+# inherited from units where a missed tick is recoverable; this one is not.
+ensure_timer_armed() {
+  local tmr="$1" en act
+  systemctl enable "$tmr" >/dev/null 2>&1 || true
+  systemctl start "$tmr"  >/dev/null 2>&1 || true
+  en="$(systemctl is-enabled "$tmr" 2>/dev/null || true)"
+  act="$(systemctl is-active "$tmr" 2>/dev/null || true)"
+  if [[ "$en" != "enabled" || "$act" != "active" ]]; then
+    fail "$tmr did not arm (enabled=$en active=$act). This is the live release path: leaving it unarmed means every prod release goes unannounced. Fix the unit, then re-run."
+  fi
+  log "  $tmr: enabled=$en active=$act"
+}
+
+ensure_timer_armed hydra-release-watch.timer
 
 # ─── Daily self-improvement audit (08:00 UTC) ─────────────────
 # Was a hand-installed root crontab line (untracked, lost on node
