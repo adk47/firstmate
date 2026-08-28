@@ -618,6 +618,11 @@
               "enabled": true,
               "requireMention": true,
               "allowBots": true
+            },
+            "C0BSVKNU96V": {
+              "enabled": true,
+              "requireMention": true,
+              "allowBots": true
             }
           },
           "streaming": {

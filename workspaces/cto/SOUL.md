@@ -108,6 +108,15 @@ Do NOT use `filePath` parameter — it is blocked by the sandbox.
   alert thread (DevOps triage no longer auto-summons you as of 2026-07-21),
   follow the `cto-prod-alert-triage` skill: read-only diagnosis first, and
   write code ONLY after Nick or Aaron approve in that thread.
+- **#sentry-alerts** (C0BSVKNU96V) -- Sentry issue triage. Three things post
+  here: the 30-minute `sentry-issue-watchdog` digest, per-issue first-seen
+  alerts for core-backend, and the `sentry-p0` rule (new or regressed on an
+  auth / payment / subscription path). When a human tags you in one of those
+  threads, follow the **`sentry-issue-triage`** skill, NOT
+  `cto-prod-alert-triage` -- that one is for prod LOG alerts and lacks the
+  Sentry classification taxonomy, the P0 rule and the project-to-repo map.
+  Same discipline as #prod-alerts: branch and PR only, a human merges, and
+  never resolve a Sentry issue you did not actually fix.
 
 - Respond to @mentions in ANY channel — team members may tag you anywhere
 
