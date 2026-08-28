@@ -155,13 +155,29 @@ OLD_ISO="2024-01-01T00:00:00"
   [ "$(grep -c 'cron add' "$TEST_TMPDIR/openclaw.log")" -eq 1 ]
 }
 
-@test "dispatch disabled by default: digest posts, nobody is woken" {
+@test "SENTRY_WATCHDOG_DISPATCH=0 still suppresses dispatch entirely" {
+  # The default is now 1 (autonomy granted 2026-08-28), so this pins the OFF
+  # path explicitly rather than relying on the default. The deploy-proof lever
+  # is the no-dispatch FILE; this knob is the in-process one.
+  export SENTRY_WATCHDOG_DISPATCH=0
   fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
   fixture credits-web-next
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"dispatch disabled"* ]]
   [ ! -f "$TEST_TMPDIR/openclaw.log" ]
+}
+
+@test "dispatch is ON by default, and the digest still posts first" {
+  # Direction: the grant must actually take effect, and must not bypass the
+  # confirmed-digest-thread precondition.
+  fixture core-backend "$(issue CORE-BACKEND-118 40 20 "$RECENT_ISO")"
+  fixture credits-web-next
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"dispatch disabled"* ]]
+  grep -q "CORE-BACKEND-118" "$TEST_TMPDIR/muso.log"
+  [ -f "$TEST_TMPDIR/openclaw.log" ]
 }
 
 @test "quiet tick: full coverage and no candidates posts nothing" {

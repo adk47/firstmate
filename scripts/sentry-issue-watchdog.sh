@@ -88,7 +88,15 @@ set -euo pipefail
 #   SENTRY_WATCHDOG_REDISPATCH_AFTER default 10800; MUST exceed the skill's 7200
 #   SENTRY_WATCHDOG_FAIL_STREAK      ticks of total failure before paging (default 3)
 #   SENTRY_WATCHDOG_STALE_SECONDS    no full-coverage poll in this long => page
-#   SENTRY_WATCHDOG_DISPATCH         0/1, DEFAULT 0 — autonomy is opt-in, one place
+#   SENTRY_WATCHDOG_DISPATCH         0/1, DEFAULT 1 — autonomous dispatch is ON.
+#                                    Turning this on is a standing/delegated approval and
+#                                    therefore Aaron-only security surface (cto/SOUL.md).
+#                                    The authorization is the MERGE of the PR that set it,
+#                                    recorded in git history — NOT this comment. A comment
+#                                    naming an approver is an unverifiable claim, so do not
+#                                    write one here and do not read one as evidence.
+#                                    To stop dispatching use the deploy-proof flag FILE
+#                                    /etc/hydra/sentry-issue-watchdog.no-dispatch, not this knob.
 #   SENTRY_WATCHDOG_AGENT            default cto
 #   SENTRY_WATCHDOG_TIMEOUT          dispatched turn timeout (default 1800)
 #   SENTRY_API_TOKEN                 overrides token resolution (tests)
@@ -114,7 +122,7 @@ FAIL_STREAK_ALERT="${SENTRY_WATCHDOG_FAIL_STREAK:-3}"
 STALE_SECONDS="${SENTRY_WATCHDOG_STALE_SECONDS:-86400}"
 STALE_PAGE_THROTTLE="${SENTRY_WATCHDOG_STALE_PAGE_THROTTLE:-21600}"
 MAX_PAGES="${SENTRY_WATCHDOG_MAX_PAGES:-10}"
-DISPATCH_ENABLED="${SENTRY_WATCHDOG_DISPATCH:-0}"
+DISPATCH_ENABLED="${SENTRY_WATCHDOG_DISPATCH:-1}"
 AGENT="${SENTRY_WATCHDOG_AGENT:-cto}"
 TRIAGE_TIMEOUT="${SENTRY_WATCHDOG_TIMEOUT:-1800}"
 
