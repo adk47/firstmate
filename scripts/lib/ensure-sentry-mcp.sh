@@ -125,7 +125,12 @@ ensure_sentry_mcp_main() {
       esm_log "DRIFT: the live token does not match $ESM_SECRETS (rotated credential still installed)."
       [ "$mode" = "--check" ] && return 1
     else
-      [ "$mode" = "--check" ] && esm_log "OK: sentry MCP registered, well-formed and current."
+      # Log the healthy path in BOTH modes. Converge runs from
+      # openclaw-pre-start-heal.sh, where silence-on-success made "the healer ran
+      # and found nothing to do" indistinguishable from "the healer never ran" --
+      # so the one state we most want to be able to assert after an incident was
+      # the one state that left no trace.
+      esm_log "OK: sentry MCP registered, well-formed and current."
       return 0
     fi
   fi

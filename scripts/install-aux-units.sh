@@ -74,6 +74,19 @@
 #     severity classifier, with only P0 paging a human. Also creates
 #     /var/lib/prod-log-alert for the fingerprint + incident state.
 #
+#   /etc/cron.d/sentry-issue-watchdog
+#     Schedules scripts/sentry-issue-watchdog.sh every 30 minutes to
+#     poll Sentry for NEW unresolved issues in the code-owning
+#     projects (core-backend, credits-web-next, muso-auth -- flutter
+#     is deliberately never queried) and post one digest to
+#     #sentry-alerts. Dispatching the cto agent to triage one of them
+#     is OFF by default (SENTRY_WATCHDOG_DISPATCH=0 in the script) --
+#     autonomy is opted into in exactly one place, so turning it on is
+#     a one-line reviewable diff. Also creates
+#     /var/lib/hydra-sentry-watchdog (its own dispatch state) and
+#     /var/lib/hydra-sentry-triage (the triage skill's ledger, created
+#     here so the skill's mkdir is never the first thing to touch it).
+#
 #   /etc/cron.d/caroline-rag-index-watchdog
 #     Schedules scripts/caroline-rag-index-watchdog.sh every 10 minutes
 #     to self-heal + alert #clio_devops when Caroline's memory_search
@@ -212,6 +225,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/merge-landing-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/sentry-issue-watchdog.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/sentry-issue-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/clickup-sla-digest.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/clickup-sla-digest.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh" ]] \
@@ -1368,6 +1383,33 @@ cat > /etc/cron.d/prod-log-alert-watchdog << PRODLOGWD
 */5 * * * * root $HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh >> /var/log/prod-log-alert-watchdog.log 2>&1
 PRODLOGWD
 chmod 644 /etc/cron.d/prod-log-alert-watchdog
+
+# ─── Sentry issue watchdog, every 30 min ──────────────────────
+# Polls Sentry for new unresolved issues in the code-owning projects and posts
+# ONE digest to #sentry-alerts. Cadence is deliberately slow: detection latency
+# was never the bottleneck (CORE-BACKEND-K9 sat unresolved from 2025-03-19),
+# triage was. 3 requests / 30 min = 144/day, against a measured Sentry burst
+# limit of 5 per ~1s window.
+#
+# Same rule as the prod-log block above: set NO env vars here. This file is
+# regenerated wholesale on every deploy, so a knob added here disappears the
+# moment a fix-forward ships. The deploy-proof levers are the flag files
+# /etc/hydra/sentry-issue-watchdog.{disabled,no-dispatch}; see the RUNBOOK.
+#
+# TWO state dirs, and the second one is not ours: /var/lib/hydra-sentry-triage
+# belongs to the sentry-issue-triage SKILL (its seen.jsonl ledger and .lock).
+# Creating it here means the skill's own `mkdir -p` is never the first thing to
+# touch it, so the watchdog can treat "ledger absent" as "nothing triaged yet"
+# and "ledger unreadable" as an error -- two different states that a
+# first-run-creates-it race would otherwise blur.
+# `mkdir -p`, not `install -d`: install -d re-chmods an EXISTING dir to 0755
+# even without -m, and the ledger dir is shared state.
+mkdir -p /var/lib/hydra-sentry-watchdog /var/lib/hydra-sentry-triage
+cat > /etc/cron.d/sentry-issue-watchdog << SENTRYWD
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+*/30 * * * * root $HYDRA_ROOT/scripts/sentry-issue-watchdog.sh >> /var/log/sentry-issue-watchdog.log 2>&1
+SENTRYWD
+chmod 644 /etc/cron.d/sentry-issue-watchdog
 
 # ─── Stale-ticket watchdog, daily ─────────────────────────────
 # Posts a digest of overdue hydra-action-request ClickUp tickets to

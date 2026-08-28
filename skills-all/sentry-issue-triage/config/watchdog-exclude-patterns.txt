@@ -1,0 +1,47 @@
+# watchdog-exclude-patterns.txt — issues sentry-issue-watchdog.sh will NOT wake
+# the cto agent for.
+#
+# One extended-regex (ERE) alternative per line, matched case-insensitively
+# against "title | culprit | metadata.type". Blank lines and #-comments ignored.
+#
+# EDIT HERE AND DEPLOY. Never edit this on node-8: rsync overwrites it on the
+# next deploy and the divergence is silent.
+#
+# A pattern that does not COMPILE stops the run (exit 3) rather than silently
+# disabling the exclusion and flooding the digest — fail closed.
+#
+# ── KEEP THIS LIST SHORT, AND BIASED TOWARD LETTING THINGS THROUGH ──
+#
+# The cost of a false exclusion is invisible and permanent: the issue never
+# reaches the digest, so nobody ever decides about it. The cost of a false
+# INCLUSION is one agent turn that classifies it as client-noise and records
+# that verdict in the ledger, after which it is deduped forever. Those costs are
+# not symmetric, so when in doubt, do not add the pattern.
+#
+# An earlier draft of this file seeded the whole "transient network" family
+# (socket hang up, ECONNRESET, request timeout, TLS handshake, DNS lookup) from
+# the RUNBOOK's Known-noise list, on the theory that the same shapes leak into
+# the backend. That was wrong in a way worth recording: those shapes are noise
+# in the FLUTTER project, and flutter is never queried by this watchdog
+# (exclusion by construction). So the patterns could only ever fire on the
+# backend — where the same string means something completely different.
+# Verified against live data 2026-08-25: CORE-BACKEND-R6 is "Error: socket hang
+# up" with 738 events and 88 users, and alongside CORE-BACKEND-RZ/XH ("connect
+# EPERM 10.43.43.86:8000") it looks like one internal service being unreachable.
+# That is a real config-or-infra finding, and the pattern would have buried it.
+#
+# The rule that survives: exclude only what is unambiguously NOT ours to fix —
+# someone else's browser, someone else's bot. Never exclude a shape that could
+# describe our own infrastructure failing.
+
+# --- browser-side fetch failures (credits-web-next is a web app; these are the
+#     user's network, and carry no stack we can act on) ---
+TypeError: Failed to fetch
+NetworkError when attempting to fetch resource
+Load failed
+
+# --- third-party CDN asset delivery, outside anything we deploy ---
+assets-cdn-prod\.muso\.ai
+
+# --- bot and scanner traffic against public routes ---
+(wp-admin|wp-login|phpmyadmin|\.env)\b

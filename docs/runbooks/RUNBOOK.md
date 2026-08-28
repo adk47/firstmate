@@ -1549,9 +1549,16 @@ if ! ANNOUNCE_SHA="$(sha256sum "$tmp" | awk '{print $1}')" \
 fi
 
 # Atomic rename - this is what actually registers the server and scopes it, and
-# it triggers the gateway restart. Nothing above changes the live config.
+# it registers and scopes. Nothing above changes the live config.
+#
+# It does NOT restart the gateway: openclaw watches this file and HOT RELOADS
+# it. Observed 2026-08-25 registering the sentry server -- the journal shows
+#   [reload] config change detected; evaluating reload (agents.list, mcp)
+#   [reload] config hot reload applied (agents.list, mcp)
+# with MainPID unchanged from the previous deploy. Do not wait for a restart
+# that never comes, and do not restart by hand to "make it take".
 mv "$tmp" "$cfg" || { rm -f "$tmp"; echo "rename failed - live config untouched" >&2; exit 1; }
-echo "registered and scoped; the gateway will restart once in-flight tasks drain"
+echo "registered and scoped; openclaw hot-reloads this file (no restart, PID unchanged)"
 ```
 
 **The nine ids above are a FLOOR, not the authority.** They are what this
@@ -1699,13 +1706,114 @@ bounds the blast radius is the **token's own scopes**:
 Real isolation would need a separate gateway/profile or a process boundary that
 does not exist today. Do not claim it from this deny list.
 
+#### The token is also in codex's bug-report buffer, by design
+
+Measured 2026-08-27. Every agent's `codex-home/logs_*.sqlite` carries the live
+Sentry token in plaintext:
+
+```
+DEBUG codex_core::session::handlers … op: RefreshMcpServers { config: … mcp_servers:
+  Object {"sentry": Object {"url": …, "http_headers": Object {"Authorization":
+  String("Sentry-Bearer <TOKEN>")}}}
+```
+
+`mcp.servers` is global in `openclaw.json`, so **every** agent receives the
+refresh and logs the header - the `tools.deny` scoping above filters tool
+*calls*, never credential *reads*. `qa` accumulated 50 such rows in 18 hours.
+
+Three things are NOT true of this, and were checked rather than assumed:
+
+- **It is not a non-root exposure.** The files are `0644`, but `/root` is `0700`,
+  so nothing can traverse to them. Verified: `setpriv --reuid=1000 … head -c1`
+  on one of these files returns unreadable.
+- **It does not leave the box in a backup.** There is no state backup job - no
+  timer on node-8, no `age`/S3 reference in this repo.
+- **`RUST_LOG` cannot silence it.** This is the `bounded_feedback_logs` sink, not
+  the tracing `EnvFilter`. It captures at TRACE (75k rows from `hyper_util` alone
+  in one agent), well below the binary's `codex_core=info` default, and codex
+  exposes no config key to disable it.
+
+So it grants a root-capable agent nothing it did not already have - those agents
+can read `/opt/hydra/secrets/sentry.env` directly.
+
+**The risk that IS real: this is codex's feedback/bug-report buffer**
+(`feedback_log_body`, `feedback_doctor_report`). Its purpose is being shipped to
+OpenAI when someone files a report.
+
+> **Never run a codex feedback or doctor report while a live credentialed MCP
+> server is registered.** It will send the credential upstream.
+
+The same applies to any future MCP server registered with an auth header, and to
+any support bundle that sweeps `codex-home/`.
+
+To scrub after a rotation (the rows survive the credential, so an old token stays
+recoverable indefinitely otherwise):
+
+```bash
+# per DB: DELETE the matching rows, checkpoint, VACUUM, then re-grep the FILE
+# BYTES of the main DB *and* its -wal/-shm sidecars.
+#
+# The byte-level re-check is the ground truth: a row count of 0 is not proof.
+# And the -wal file is not optional -- a checkpoint can be refused while codex
+# holds the DB, which leaves the token bytes sitting in logs_*.sqlite-wal while
+# a main-DB-only grep prints a reassuring 0. Stop the gateways first if the
+# checkpoint will not truncate.
+python3 - <<'EOF'
+import sqlite3, subprocess, glob, sys
+tok = next(l.split("=",1)[1].strip() for l in open("/opt/hydra/secrets/sentry.env")
+           if l.startswith("SENTRY_API_TOKEN="))
+dirty = []
+for f in glob.glob("/root/.openclaw-*/agents/*/agent/codex-home/logs_*.sqlite"):
+    c = sqlite3.connect(f, timeout=30)
+    c.execute("delete from logs where feedback_log_body like ?", (f"%{tok}%",))
+    c.commit()
+    # A refused checkpoint is a REPORTED failure, not a silent one: (busy, log,
+    # checkpointed) -- busy != 0 means the WAL was not fully folded in.
+    busy, wal_pages, ckpt_pages = c.execute("pragma wal_checkpoint(TRUNCATE)").fetchone()
+    if busy:
+        print(f"  !! {f}: checkpoint BUSY (wal={wal_pages} ckpt={ckpt_pages}) — stop the gateway and rerun")
+    try:
+        c.execute("vacuum")
+    except sqlite3.OperationalError as e:
+        print(f"  !! {f}: vacuum refused ({e}) — freed pages may still hold the token")
+    c.close()
+    # Verify the MAIN DB *and* every sidecar.
+    for probe in glob.glob(f + "*"):
+        hit = subprocess.run(["grep","-caF",tok,probe],capture_output=True,text=True).stdout.strip()
+        if hit not in ("0",""):
+            dirty.append(probe)
+            print(f"  STILL PRESENT: {probe}")
+print("clean" if not dirty else f"{len(dirty)} file(s) still hold the token")
+sys.exit(1 if dirty else 0)
+EOF
+```
+
+Scrubbing is point-in-time: the sink re-captures on the next MCP refresh. It is
+what you do after rotating a credential, not a control that keeps the buffer clean.
+
 ### Alert rules (configured in Sentry, not in this repo)
 
-Do **not** poll the Sentry API on a schedule. Sentry's own guidance is explicit:
+Do **not** poll the Sentry API at high frequency. Sentry's own guidance is
 *"Polling the API for updates will likely trigger rate limiting quickly;
 webhooks are recommended instead."* Detection latency is also not the
 bottleneck here - `CORE-BACKEND-K9` sat unresolved from 2025-03-19 with 1404
 events. The bottleneck is that nobody triages.
+
+**One bounded exception exists, and this paragraph was amended to admit it**
+(`scripts/sentry-issue-watchdog.sh`, added 2026-08-25). It polls three projects
+once every 30 minutes: **3 requests / 30 min = 144/day**, against a *measured*
+limit of `x-sentry-rate-limit-limit: 5` over a ~1s window - i.e. a burst limit,
+which sequential half-hourly requests never approach. It also handles 429
+explicitly. If you are adding a second poller, do this arithmetic again rather
+than citing this exception; two of these is a different question from one.
+
+The reasoning above still governs the design: because latency is not the
+bottleneck, the cadence stays slow, and the watchdog exists to close the
+**triage** gap (nobody looks at these), not the **detection** gap.
+
+Measured while writing it: `statsPeriod` accepts only `''`, `24h` and `14d` -
+`7d` is rejected with `{"detail":"Invalid stats_period..."}`, so the watchdog
+pulls `14d` and filters `firstSeen` locally.
 
 Configure two alert rules over `core-backend`, `credits-web-next` and
 `muso-auth` (never `flutter` - it ships through App Store review, so there is no
@@ -1749,9 +1857,67 @@ network noise (socket closed, request timeouts, TLS handshake failures, CDN
 aborts, DNS failures). The usable P0 rule is the three-part one in the
 `sentry-issue-triage` skill.
 
+### The issue watchdog
+
+`scripts/sentry-issue-watchdog.sh`, installed by `install-aux-units.sh` as
+`/etc/cron.d/sentry-issue-watchdog`, `*/30`, logging to
+`/var/log/sentry-issue-watchdog.log`. It polls the three code-owning projects,
+posts one digest to **#sentry-alerts (`C0BSVKNU96V`)**, and - **only when
+explicitly enabled** - wakes `cto` on exactly one candidate.
+
+The channel id is a **constant in the script**, not a cron env var: the cron
+file is regenerated wholesale on every deploy, so a channel that lived only
+there would vanish on the next one and every tick would exit 2.
+
+**Dispatch is OFF by default.** `SENTRY_WATCHDOG_DISPATCH` defaults to `0` in
+the script, which is the single place the default lives. Turning autonomy on is
+therefore a one-line reviewable diff, and reverting it is the same.
+
+**Levers, in the order you should reach for them.** All are FILES. Do not put
+env vars in the cron file - `install-aux-units.sh` regenerates it wholesale on
+every deploy, so a knob added there disappears the moment a fix-forward ships,
+which is precisely mid-incident.
+
+| Lever | Effect |
+|---|---|
+| `touch /etc/hydra/sentry-issue-watchdog.no-dispatch` | keeps polling and digesting, wakes nobody |
+| `touch /etc/hydra/sentry-issue-watchdog.disabled` | exits 0 before any network call |
+| `rm /etc/cron.d/sentry-issue-watchdog` | **not durable** - regenerated by the next deploy |
+
+**Reading a digest.** A healthy tick says `N new issue(s) in 3/3 projects`, or
+posts nothing at all when there is nothing new. A tick that could not read
+everything says `PARTIAL COVERAGE: queried 2/3 projects (muso-auth: http_500)`
+and exits non-zero. **It will never say "no new issues" when it failed to
+query** - that distinction is the whole point of the script and is pinned by
+`scripts/tests/sentry-issue-watchdog.bats`. If you see partial coverage
+repeatedly, the credential or the API is the problem, not the filter.
+
+**Blindness pages itself.** Three consecutive all-fail ticks, a 401/403, or no
+full-coverage poll in 24h each page `#clio_devops`. A 401 pages immediately
+without waiting for the streak, because a dead credential is not a transient.
+
+**Token.** Resolved in order: `$SENTRY_API_TOKEN`, then
+`/opt/hydra/secrets/sentry.env` (mode 0600 enforced; refused if looser), then
+the live `mcp.servers.sentry` header in `openclaw-main.json`. Note the prefix
+differs between them: the MCP entry stores `Sentry-Bearer <tok>`, the REST API
+needs `Bearer <tok>`. If you rotate one and not the other, the watchdog 401s
+while the agent's MCP keeps working, or vice versa - the auth page is what tells
+you.
+
+**Dry run:** `SENTRY_WATCHDOG_SKIP_HOST_GUARD=1 SENTRY_WATCHDOG_STATE_DIR=/tmp/wd \
+  scripts/sentry-issue-watchdog.sh --dry-run` prints the digest and the dispatch
+it *would* make, touching no state and posting nothing.
+
+**Tuning noise:** `skills-all/sentry-issue-triage/config/watchdog-exclude-patterns.txt`
+(ERE, one per line, matched against `title | culprit | metadata.type`). A
+pattern that does not compile **stops the run** rather than silently disabling
+the exclusion. Edit it here and deploy; editing it on node-8 is overwritten by
+the next rsync, silently.
+
 ### Turning it off
 
 - Alerts only: disable the rules in Sentry.
+- The watchdog: `touch /etc/hydra/sentry-issue-watchdog.disabled` (above).
 - Everything: `openclaw --profile main mcp unset "sentry"` (`remove` is not a
   subcommand), or - while `plugins.installs` is still present and `mcp unset`
   refuses - the same jq + announce + atomic-rename path as registration, with

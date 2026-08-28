@@ -65,6 +65,20 @@ authz() { jq -r '.mcp.servers.sentry.headers.Authorization // "ABSENT"' "$ENSURE
   [ "$(sha256sum "$ENSURE_SENTRY_MCP_CFG" | cut -d' ' -f1)" = "$before" ]
 }
 
+@test "converge SAYS SO when it finds nothing to fix, so a clean run is provable" {
+  # Direction first: a healthy converge must leave EVIDENCE, not be silent.
+  # openclaw-pre-start-heal.sh calls the healer without --check, and while that
+  # path was silent on success "the healer ran and was fine" and "the healer
+  # never ran" produced identical logs -- the exact state you want to assert
+  # after an incident was the one that left no trace.
+  run "$HEALER"                     # first pass registers it (logs HEALED)
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"HEALED"* ]]
+  run "$HEALER"                     # second pass has nothing to do
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK: sentry MCP registered, well-formed and current."* ]]
+}
+
 @test "an EMPTY token in an existing header counts as drift and is repaired" {
   # This config looks registered and 401s on every call.
   cfg_with '{"agents":{"list":[{"id":"cto"}]},"mcp":{"servers":{"sentry":{"url":"https://mcp.sentry.dev/mcp","transport":"streamable-http","headers":{"Authorization":"Sentry-Bearer "}}}}}'
