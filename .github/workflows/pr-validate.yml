@@ -672,6 +672,20 @@ jobs:
           bash scripts/check-admin-api-gate-parity.sh
           echo "::endgroup::"
 
+      - name: Agent-bridge doctrine check — CS/ops REQUEST, they never fix the data lane
+        # 2026-08-26: the CS/ops agents were attempting data-layer fixes without lane
+        # knowledge. A "0 plays / flat graph" cluster looked like a capture gap and was a
+        # frozen serving generation (platform-data-processing-v4#222) — a capture-side fix
+        # would have found nothing. A "credits missing" cluster looked like a bad flag and
+        # was an AUTHORIZED deletion 13-19 days older than it (industry-data-processing#1539)
+        # — "restoring" those credits would have reversed a deliberate human action.
+        # scripts/agent-bridge-request.sh is the runtime gate; this checks the doctrine
+        # anchors around it (ops SOUL, Caroline SOUL, skill, wrapper, notifier, registration).
+        run: |
+          echo "::group::Agent-bridge doctrine check"
+          bash scripts/check-agent-bridge-doctrine.sh
+          echo "::endgroup::"
+
       - name: God-mode allowlist must be workspace-only — never in the canonical skill
         # Since 2026-08-26 the god-mode self-approve branch of the bulk-destructive
         # gate ships in BOTH copies of muso-admin-api.sh, because the parity gate
