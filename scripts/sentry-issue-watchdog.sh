@@ -368,6 +368,7 @@ BUDGET_FILE="$STATE_DIR/budget.json"
 LAST_FAIL_PAGE="$STATE_DIR/last-fail-page"
 FIRST_RUN_FILE="$STATE_DIR/first-run"
 LAST_STALE_PAGE="$STATE_DIR/last-stale-page"
+DIGESTED_FILE="$STATE_DIR/digested.json"
 
 NOW="${SENTRY_WATCHDOG_NOW:-$(date -u +%s)}"
 _require_uint SENTRY_WATCHDOG_NOW "$NOW" NOW
@@ -857,6 +858,158 @@ else
   header="Sentry triage digest - PARTIAL COVERAGE: queried $N_OK/$N_QUERIED projects ($(esc "$ERRORS"))"
 fi
 
+# Budget is loaded HERE, before the digest filter, because the filter needs to
+# know how many issues can ACTUALLY dispatch this tick -- see dispatch_slots.
+
+# Budget. Three states, not two -- conflating them is how a fail-closed guard
+# becomes a permanent outage OR a fail-open:
+#   absent      -> nothing dispatched today yet. FRESH, count 0. (First ever run
+#                  hits this; treating it as unparseable pinned the very first
+#                  tick at "exhausted 3/3", which was both wrong and a lie in
+#                  the log.)
+#   unparseable -> EXHAUSTED. We cannot prove we have budget left, so we do not
+#                  spend it.
+#   parseable   -> use it, rolling over on a new UTC day.
+budget_day=""; budget_used=0
+if [ ! -e "$BUDGET_FILE" ]; then
+  budget_day="$TODAY"; budget_used=0
+else
+  budget_day="$(jq -r '.day // ""' "$BUDGET_FILE" 2>/dev/null || echo "PARSE_FAIL")"
+  # `.count // 0` treats a MISSING or null count as "zero spent", so a
+  # current-day file like {"day":"2026-08-27"} handed back the whole daily
+  # dispatch budget. Absent is not zero -- it means we cannot prove what we
+  # already spent, which is the fail-CLOSED case. Same shape as jq's `//`
+  # swallowing `false`: the default fires on more inputs than you think.
+  budget_used="$(jq -r 'if (.count | type) == "number" then .count else "PARSE_FAIL" end' "$BUDGET_FILE" 2>/dev/null || echo "PARSE_FAIL")"
+fi
+budget_used="$(uint_sane "$budget_used" || echo PARSE_FAIL)"
+if [ "$budget_day" = "PARSE_FAIL" ] || [ "$budget_used" = "PARSE_FAIL" ]; then
+  log "WARN: $BUDGET_FILE unreadable — treating today's budget as EXHAUSTED (fail-closed)."
+  budget_used="$MAX_PER_DAY"; budget_day="$TODAY"
+fi
+# Rollover is a privilege granted only by a day we can actually read. `jq -r
+# '.day // ""'` SUCCEEDS on {"count":3} and yields "", so a truncated or
+# hand-edited state file used to look like "some other day" and reset the count
+# to zero -- three extra dispatches past a hard cap that exists because codex
+# weekly quota is the binding constraint. Missing / malformed / future stays
+# EXHAUSTED; only a well-formed day strictly in the past rolls over.
+if [ "$budget_day" != "$TODAY" ]; then
+  case "$budget_day" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+      if ! valid_utc_date "$budget_day"; then
+        log "WARN: budget day '$budget_day' is not a real calendar date — treating today as EXHAUSTED (fail-closed)."
+        budget_day="$TODAY"; budget_used="$MAX_PER_DAY"
+      elif [ "$budget_day" \< "$TODAY" ]; then
+        budget_day="$TODAY"; budget_used=0
+      else
+        log "WARN: budget day '$budget_day' is in the FUTURE — treating today as EXHAUSTED (fail-closed)."
+        budget_day="$TODAY"; budget_used="$MAX_PER_DAY"
+      fi ;;
+    *)
+      log "WARN: budget day '$budget_day' is missing or malformed — treating today as EXHAUSTED (fail-closed)."
+      budget_day="$TODAY"; budget_used="$MAX_PER_DAY" ;;
+  esac
+fi
+
+# ── Only DIGEST what has not been digested before ────────────────────────
+# An issue stays a candidate for the whole NEW_WINDOW (7 days), and ticks are
+# 30 minutes, so without this the same issue is posted 336 times. That is not a
+# digest, it is a nag, and a channel that repeats itself is one people stop
+# reading -- which defeats the entire point of routing Sentry here.
+#
+# dispatched.json only ever suppressed re-DISPATCH; nothing suppressed
+# re-DIGEST. Separate concerns, separate state.
+if [ ! -s "$DIGESTED_FILE" ]; then
+  echo '{}' > "$DIGESTED_FILE"
+elif ! jq -e 'type == "object"' "$DIGESTED_FILE" >/dev/null 2>&1; then
+  log "WARN: $DIGESTED_FILE was not a JSON object — starting a fresh one (one repeat digest, then quiet)."
+  echo '{}' > "$DIGESTED_FILE"
+fi
+
+# Forget entries older than NEW_WINDOW so a genuinely-new recurrence is heard
+# again, and the file cannot grow without bound.
+# `($now - .value) < $w` alone KEEPS a future timestamp: the difference is
+# negative, which is trivially less than the window, so the entry survives and
+# that issue is filtered as already-seen until the wall clock catches up --
+# silent suppression, the worst direction. Require the age to be non-negative
+# too. Same class as ts_sane elsewhere in this file; I missed it here.
+jq --argjson now "$NOW" --argjson w "$NEW_WINDOW" \
+   'with_entries(select((.value | type) == "number"
+                        and ($now - .value) >= 0
+                        and ($now - .value) < $w))' \
+   "$DIGESTED_FILE" > "$WORKDIR/digested.pruned" 2>/dev/null \
+   && mv "$WORKDIR/digested.pruned" "$DIGESTED_FILE"
+
+# EXCEPT anything eligible to dispatch this tick. Eligibility is computed ABOVE
+# (line ~820) against the redispatch lease, so an issue digested on tick 1 can
+# legitimately come back for a retry once REDISPATCH_AFTER has elapsed while it
+# is still inside NEW_WINDOW. Filtering it out here would drop the digest, leave
+# POST_TS empty, and the dispatch-on path would then exit 1 with "no confirmed
+# digest thread" -- turning a quiet tick into a failure.
+#
+# It also has to stay in for a plain correctness reason: dispatch REPLIES into
+# the digest thread. If we are going to dispatch an issue we must digest it,
+# or the diagnosis has nowhere to land.
+# The carve-out applies ONLY when this tick could actually dispatch. With
+# dispatch off (or suppressed), eligibility is still computed but nothing is
+# woken, so keeping an already-digested issue in would just re-post it -- the
+# exact noise this block exists to remove.
+# The carve-out is bounded by REAL capacity, not just "dispatch is on". An
+# eligible issue that cannot dispatch this tick -- daily budget spent, or beyond
+# MAX_PER_TICK -- must NOT be re-digested: it would repost every 30 minutes for
+# the rest of the day and recreate the exact flood this block removes. So the
+# keep list is the first N eligible ids, N = what this tick can actually spend.
+dispatch_slots=0
+if [ "$DISPATCH_ENABLED" = "1" ] && [ ! -e "$NO_DISPATCH_FILE" ] && [ "$MAINT" != "1" ]; then
+  dispatch_slots=$(( MAX_PER_DAY - budget_used ))
+  [ "$dispatch_slots" -lt 0 ] && dispatch_slots=0
+  [ "$dispatch_slots" -gt "$MAX_PER_TICK" ] && dispatch_slots="$MAX_PER_TICK"
+fi
+if [ "$dispatch_slots" -gt 0 ]; then
+  head -n "$dispatch_slots" "$ELIGIBLE" > "$WORKDIR/eligible.keep"
+  jq --slurpfile seen "$DIGESTED_FILE" --rawfile elig "$WORKDIR/eligible.keep" \
+     '($elig | split("\n") | map(select(length > 0))) as $keep
+      | .candidates |= map(select($seen[0][.short_id] == null
+                                  or (.short_id | IN($keep[]))))' \
+     "$CANDIDATES" > "$WORKDIR/candidates.fresh" 2>/dev/null \
+     && mv "$WORKDIR/candidates.fresh" "$CANDIDATES"
+else
+  jq --slurpfile seen "$DIGESTED_FILE" \
+     '.candidates |= map(select($seen[0][.short_id] == null))' \
+     "$CANDIDATES" > "$WORKDIR/candidates.fresh" 2>/dev/null \
+     && mv "$WORKDIR/candidates.fresh" "$CANDIDATES"
+fi
+
+# Re-derive ELIGIBLE from what SURVIVED the filter, and recompute the count.
+# eligible_count was computed before de-duplication, so leaving it stale lets a
+# tick claim it has work to dispatch while CANDIDATES is empty -- POST_TS then
+# stays empty and the dispatch-on path exits 1 on "no confirmed digest thread".
+# Deriving both from the same post-filter set is what makes that unrepresentable
+# rather than merely unlikely.
+if [ -s "$ELIGIBLE" ]; then
+  # awk, NOT sort+comm. ELIGIBLE is in CANDIDATE PRIORITY order (highest impact
+  # first) and the dispatch loop takes the first MAX_PER_TICK from it. sort/comm
+  # reorders alphabetically, so with MAX_PER_TICK=1 a low-impact "A" issue would
+  # be dispatched ahead of a high-impact "Z" and could burn the last daily slot.
+  # An order-preserving intersection is load-bearing, not a style choice.
+  jq -r '.candidates[].short_id' "$CANDIDATES" 2>/dev/null > "$WORKDIR/cand.ids"
+  awk 'NR==FNR { keep[$0]=1; next } ($0 in keep)' \
+      "$WORKDIR/cand.ids" "$ELIGIBLE" > "$WORKDIR/elig.kept"
+  mv "$WORKDIR/elig.kept" "$ELIGIBLE"
+  eligible_count="$(wc -l < "$ELIGIBLE" | tr -d ' ')"
+fi
+
+repeat_total="$cand_total"
+cand_total="$(jq -r '.candidates | length' "$CANDIDATES")"
+repeat_total=$(( repeat_total - cand_total ))
+[ "$repeat_total" -gt 0 ] && log "$repeat_total candidate(s) already digested earlier — not repeating them."
+
+# Rebuild the header now that cand_total reflects only the unseen ones.
+if [ "$COVERAGE_OK" = "1" ]; then
+  header="Sentry triage digest - $cand_total new issue(s) in $N_OK/$N_QUERIED projects"
+  [ "$cand_total" -eq 0 ] && header="Sentry triage digest - no new issues ($N_OK/$N_QUERIED projects queried)"
+fi
+
 body="$header"
 if [ "$cand_total" -gt 0 ]; then
   while IFS=$'\t' read -r sid proj title culprit cnt users link; do
@@ -885,6 +1038,16 @@ if [ "$cand_total" -gt 0 ] || [ "$COVERAGE_OK" = "0" ]; then
     jq -n --arg c "$DIGEST_CHANNEL" --arg t "$body" '{channel:$c, text:$t, unfurl_links:false}' > "$payload"
     if POST_TS="$(slack_notify_payload_file_ts "$payload")" && [ -n "$POST_TS" ]; then
       log "digest posted (ts=$POST_TS)."
+      # Mark as digested ONLY after a confirmed post. An unconfirmed delivery
+      # that still recorded them would silence the issue forever, which is the
+      # worst possible direction for this to fail in.
+      if jq --argjson now "$NOW" --slurpfile c "$CANDIDATES" \
+            'reduce $c[0].candidates[] as $i (.; .[$i.short_id] = $now)' \
+            "$DIGESTED_FILE" > "$WORKDIR/digested.new" 2>/dev/null; then
+        mv "$WORKDIR/digested.new" "$DIGESTED_FILE"
+      else
+        log "WARN: could not record digested ids — they may be repeated next tick."
+      fi
     else
       POST_TS=""
       log "WARN: digest delivery NOT confirmed — not advancing any dispatch state this tick."
@@ -937,55 +1100,6 @@ if [ -z "$POST_TS" ] && [ "$DRY_RUN" = "0" ]; then
   exit 1
 fi
 
-# Budget. Three states, not two -- conflating them is how a fail-closed guard
-# becomes a permanent outage OR a fail-open:
-#   absent      -> nothing dispatched today yet. FRESH, count 0. (First ever run
-#                  hits this; treating it as unparseable pinned the very first
-#                  tick at "exhausted 3/3", which was both wrong and a lie in
-#                  the log.)
-#   unparseable -> EXHAUSTED. We cannot prove we have budget left, so we do not
-#                  spend it.
-#   parseable   -> use it, rolling over on a new UTC day.
-budget_day=""; budget_used=0
-if [ ! -e "$BUDGET_FILE" ]; then
-  budget_day="$TODAY"; budget_used=0
-else
-  budget_day="$(jq -r '.day // ""' "$BUDGET_FILE" 2>/dev/null || echo "PARSE_FAIL")"
-  # `.count // 0` treats a MISSING or null count as "zero spent", so a
-  # current-day file like {"day":"2026-08-27"} handed back the whole daily
-  # dispatch budget. Absent is not zero -- it means we cannot prove what we
-  # already spent, which is the fail-CLOSED case. Same shape as jq's `//`
-  # swallowing `false`: the default fires on more inputs than you think.
-  budget_used="$(jq -r 'if (.count | type) == "number" then .count else "PARSE_FAIL" end' "$BUDGET_FILE" 2>/dev/null || echo "PARSE_FAIL")"
-fi
-budget_used="$(uint_sane "$budget_used" || echo PARSE_FAIL)"
-if [ "$budget_day" = "PARSE_FAIL" ] || [ "$budget_used" = "PARSE_FAIL" ]; then
-  log "WARN: $BUDGET_FILE unreadable — treating today's budget as EXHAUSTED (fail-closed)."
-  budget_used="$MAX_PER_DAY"; budget_day="$TODAY"
-fi
-# Rollover is a privilege granted only by a day we can actually read. `jq -r
-# '.day // ""'` SUCCEEDS on {"count":3} and yields "", so a truncated or
-# hand-edited state file used to look like "some other day" and reset the count
-# to zero -- three extra dispatches past a hard cap that exists because codex
-# weekly quota is the binding constraint. Missing / malformed / future stays
-# EXHAUSTED; only a well-formed day strictly in the past rolls over.
-if [ "$budget_day" != "$TODAY" ]; then
-  case "$budget_day" in
-    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
-      if ! valid_utc_date "$budget_day"; then
-        log "WARN: budget day '$budget_day' is not a real calendar date — treating today as EXHAUSTED (fail-closed)."
-        budget_day="$TODAY"; budget_used="$MAX_PER_DAY"
-      elif [ "$budget_day" \< "$TODAY" ]; then
-        budget_day="$TODAY"; budget_used=0
-      else
-        log "WARN: budget day '$budget_day' is in the FUTURE — treating today as EXHAUSTED (fail-closed)."
-        budget_day="$TODAY"; budget_used="$MAX_PER_DAY"
-      fi ;;
-    *)
-      log "WARN: budget day '$budget_day' is missing or malformed — treating today as EXHAUSTED (fail-closed)."
-      budget_day="$TODAY"; budget_used="$MAX_PER_DAY" ;;
-  esac
-fi
 
 dispatch_one() {
   local sid="$1"

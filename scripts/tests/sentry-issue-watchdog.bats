@@ -459,6 +459,153 @@ OLD_ISO="2024-01-01T00:00:00"
   [ ! -f "$TEST_TMPDIR/state/last-success" ]
 }
 
+@test "an EXHAUSTED daily budget does not re-digest eligible issues" {
+  # QA #887 round 2. will_dispatch=1 was not enough: with the daily budget
+  # spent, an eligible issue was kept in the digest but then blocked at the cap,
+  # so it reposted every 30 minutes for the rest of the day -- recreating the
+  # flood this PR exists to remove.
+  export SENTRY_WATCHDOG_DISPATCH=1
+  mkdir -p "$TEST_TMPDIR/state"
+  fixture core-backend "$(issue CORE-BACKEND-118 40 20 "$RECENT_ISO")"
+  fixture credits-web-next
+  run "$SCRIPT"                                   # tick 1 digests it
+  grep -q "CORE-BACKEND-118" "$TEST_TMPDIR/muso.log"
+
+  # burn the day's budget, then advance past the redispatch lease
+  printf '{"day":"%s","count":%s}' \
+    "$(date -u -d @1800000000 +%Y-%m-%d 2>/dev/null || date -u -r 1800000000 +%Y-%m-%d)" \
+    "${SENTRY_WATCHDOG_MAX_PER_DAY:-3}" > "$TEST_TMPDIR/state/budget.json"
+  : > "$TEST_TMPDIR/muso.log"
+  export SENTRY_WATCHDOG_NOW=$(( 1800000000 + 20000 ))
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  run grep -q "CORE-BACKEND-118" "$TEST_TMPDIR/muso.log"
+  [ "$status" -ne 0 ]                             # must stay quiet, not repost
+}
+
+@test "eligible issues beyond MAX_PER_TICK are not re-digested" {
+  # Same shape, the other cap: only what this tick can actually spend is kept.
+  export SENTRY_WATCHDOG_DISPATCH=1
+  export SENTRY_WATCHDOG_MAX_PER_TICK=1
+  fixture core-backend "$(issue CORE-BACKEND-118 40 20 "$RECENT_ISO")" \
+                       "$(issue CORE-BACKEND-119 41 21 "$RECENT_ISO")"
+  fixture credits-web-next
+  run "$SCRIPT"
+  : > "$TEST_TMPDIR/muso.log"
+  export SENTRY_WATCHDOG_NOW=$(( 1800000000 + 20000 ))
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # at most ONE of the two may come back...
+  n=0
+  grep -q "CORE-BACKEND-118" "$TEST_TMPDIR/muso.log" && n=$(( n + 1 ))
+  grep -q "CORE-BACKEND-119" "$TEST_TMPDIR/muso.log" && n=$(( n + 1 ))
+  [ "$n" -le 1 ]
+}
+
+@test "with one slot and two new issues, the HIGHEST-IMPACT one is dispatched" {
+  # Candidates are ordered (-user_count, -count, short_id) and the dispatch loop
+  # takes the first MAX_PER_TICK from ELIGIBLE, so an alphabetical reorder
+  # (sort+comm) would spend the only slot on the wrong issue.
+  #
+  # The fixture makes the two orders DISAGREE:
+  #   CORE-BACKEND-A1  10 events /  1 user   -> alphabetically FIRST, low impact
+  #   CORE-BACKEND-Z9  10 events / 50 users  -> alphabetically LAST,  high impact
+  #
+  # It must be ONE tick with BOTH issues new: two earlier attempts failed to
+  # discriminate because the de-dup filter had already reduced the set to a
+  # single element, and order cannot matter in a set of one.
+  export SENTRY_WATCHDOG_DISPATCH=1
+  export SENTRY_WATCHDOG_MAX_PER_TICK=1
+  fixture core-backend "$(issue CORE-BACKEND-A1 10 1 "$RECENT_ISO")" \
+                       "$(issue CORE-BACKEND-Z9 10 50 "$RECENT_ISO")"
+  fixture credits-web-next
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dispatched CORE-BACKEND-Z9"* ]]
+  [[ "$output" != *"dispatched CORE-BACKEND-A1"* ]]
+}
+
+@test "a FUTURE-dated digest timestamp cannot silently suppress an issue" {
+  # ($now - .value) < $w is trivially TRUE for a future value, so the entry
+  # survived pruning and the issue was filtered as already-seen until the wall
+  # clock caught up. Silent suppression is the worst direction for this to fail.
+  export SENTRY_WATCHDOG_DISPATCH=0
+  mkdir -p "$TEST_TMPDIR/state"
+  printf '{"CORE-BACKEND-118": 9999999999}' > "$TEST_TMPDIR/state/digested.json"
+  fixture core-backend "$(issue CORE-BACKEND-118 40 20 "$RECENT_ISO")"
+  fixture credits-web-next
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q "CORE-BACKEND-118" "$TEST_TMPDIR/muso.log"   # must NOT be suppressed
+}
+
+@test "dispatch ON: a redispatch-eligible issue is re-digested, not dropped" {
+  # QA #887's exact scenario. Eligibility is computed BEFORE de-duplication, so
+  # an issue digested on tick 1 that becomes redispatch-eligible later (past
+  # REDISPATCH_AFTER, still inside NEW_WINDOW) was removed from CANDIDATES: no
+  # digest, POST_TS empty, and the dispatch-on path exits 1 with "no confirmed
+  # digest thread" -- a quiet tick reported as a failure.
+  #
+  # It also has to be re-digested for a plain correctness reason: dispatch
+  # REPLIES into the digest thread, so a dispatch without one has nowhere to land.
+  export SENTRY_WATCHDOG_DISPATCH=1
+  export SENTRY_WATCHDOG_REDISPATCH_AFTER=10800
+  fixture core-backend "$(issue CORE-BACKEND-118 40 20 "$RECENT_ISO")"
+  fixture credits-web-next
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+
+  : > "$TEST_TMPDIR/muso.log"
+  export SENTRY_WATCHDOG_NOW=$(( 1800000000 + 20000 ))   # past REDISPATCH_AFTER
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]                                     # must NOT fail the tick
+  grep -q "CORE-BACKEND-118" "$TEST_TMPDIR/muso.log"      # and must be re-digested
+}
+
+@test "the SAME issue is not digested twice" {
+  # Direction: a digest that repeats itself is a nag. An issue stays a candidate
+  # for the whole 7-day NEW_WINDOW and ticks are 30 minutes, so without
+  # de-duplication one issue is posted 336 times and the channel stops being read.
+  export SENTRY_WATCHDOG_DISPATCH=0
+  fixture core-backend "$(issue CORE-BACKEND-118 40 20 "$RECENT_ISO")"
+  fixture credits-web-next
+  run "$SCRIPT"                                  # tick 1: posts it
+  grep -q "CORE-BACKEND-118" "$TEST_TMPDIR/muso.log"
+
+  : > "$TEST_TMPDIR/muso.log"
+  run "$SCRIPT"                                  # tick 2: same issue, must stay quiet
+  [ "$status" -eq 0 ]
+  run grep -q "CORE-BACKEND-118" "$TEST_TMPDIR/muso.log"
+  [ "$status" -ne 0 ]
+}
+
+@test "a genuinely NEW issue still gets through after a repeat" {
+  # The complement: de-duplication must not silence the next real issue.
+  export SENTRY_WATCHDOG_DISPATCH=0
+  fixture core-backend "$(issue CORE-BACKEND-118 40 20 "$RECENT_ISO")"
+  fixture credits-web-next
+  run "$SCRIPT"
+  : > "$TEST_TMPDIR/muso.log"
+  fixture core-backend "$(issue CORE-BACKEND-118 40 20 "$RECENT_ISO")" \
+                       "$(issue CORE-BACKEND-999 50 30 "$RECENT_ISO")"
+  run "$SCRIPT"
+  grep -q "CORE-BACKEND-999" "$TEST_TMPDIR/muso.log"      # the new one posts
+  run grep -q "CORE-BACKEND-118" "$TEST_TMPDIR/muso.log"  # the old one does not
+  [ "$status" -ne 0 ]
+}
+
+@test "an UNCONFIRMED digest does not mark issues as digested" {
+  # Worst-direction guard: recording them on a failed post would silence the
+  # issue forever. Delivery fails, so the next tick must still try.
+  export SENTRY_WATCHDOG_DISPATCH=0
+  fixture core-backend "$(issue CORE-BACKEND-118 40 20 "$RECENT_ISO")"
+  fixture credits-web-next
+  : > "$TEST_TMPDIR/muso.fail"
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [ "$(jq -r 'keys|length' "$TEST_TMPDIR/state/digested.json" 2>/dev/null || echo 0)" -eq 0 ]
+}
+
 @test "an UNCONFIRMED digest is a failure even on the dispatch-OFF default path" {
   # Direction: the cron's exit code must mean "somebody was told". Deriving it
   # from COVERAGE_OK alone reported success on the DEFAULT production path --
