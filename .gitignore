@@ -74,6 +74,12 @@ workspaces/*/*.csv
 workspaces/*/*.png
 workspaces/*/*.jpg
 workspaces/*/*.txt
+# Agent ad-hoc analytics SQL (see RSYNC_EXCLUDES in scripts/deploy.sh and
+# KEEP_GLOBS in scripts/qa-clean-merge-scratch.sh -- the three lists describe
+# the same runtime-artifact class from three directions: do not deploy-delete,
+# do not sweep, do not commit).
+workspaces/*/*.sql
+workspaces/*/.bridge-*.json
 workspaces/*/generated/
 workspaces/*/presentations/
 workspaces/*/exports/

@@ -396,7 +396,7 @@ install_muso() {
 
   local dl_rc=0
   dl_out=$(timeout 120 gh release download "v${MUSO_CLI_VERSION}" --repo Muso-AI/muso-cli \
-    --pattern "$asset" --pattern checksums.txt --dir "$tmp" 2>&1) || dl_rc=$?
+    --pattern "$asset" --pattern checksums.txt --dir "$tmp" 2>&1) || dl_rc=$?  # hydra-hook: reviewed-indirection reviewed-argv (gh by literal name; the expansion is a version ARG)
   if (( dl_rc != 0 )); then
     log "    ✗ install_muso: gh release download v${MUSO_CLI_VERSION} failed (rc=$dl_rc):"
     echo "$dl_out" | sed 's/^/        /'
@@ -781,7 +781,7 @@ trap 'release_deploy_lock "$LOCK_DIR"' EXIT
 # setting hooks up here is "guarantee they're active"; silently
 # failing would break that guarantee while pretending it succeeded.
 if [[ -x "$SCRIPT_DIR/setup-hooks.sh" ]] && [[ -d "$HYDRA_ROOT/.git" ]]; then
-  if ! hook_setup_out=$("$SCRIPT_DIR/setup-hooks.sh" 2>&1); then
+  if ! hook_setup_out=$("$SCRIPT_DIR/setup-hooks.sh" 2>&1); then  # hydra-hook: reviewed-indirection (repo script by path)
     log "  WARNING: setup-hooks.sh failed — pre-commit guard may not be active."
     log "  Run manually to investigate: scripts/setup-hooks.sh"
     echo "$hook_setup_out" | sed 's/^/    /'
@@ -1205,6 +1205,17 @@ RSYNC_EXCLUDES=(
   --exclude='workspaces/*/wiki/'
   # Runtime text dumps (e.g., workspaces/operations/pending-credits-*.txt)
   --exclude='workspaces/*/*.txt'
+  # Agent ad-hoc analytics SQL at the workspace top level (e.g. Ops writing
+  # workspaces/operations/roc_legion_*.sql during a catalog investigation).
+  # Same category as the scratch *.csv/*.txt above: generated per-investigation,
+  # never tracked, and rsync --delete would destroy it mid-session.
+  --exclude='workspaces/*/*.sql'
+  # agent-bridge in-flight request state (scripts/agent-bridge-request.sh),
+  # written into the agent workspace while a request is open and removed when
+  # it closes. Transient by design, so a deploy that lands mid-request would
+  # otherwise delete the state of a live escalation -- and the pre-flight
+  # dry-run fails on it, which twice blocked THIS PR on an unrelated lane.
+  --exclude='workspaces/*/.bridge-*.json'
   # Agent ad-hoc scratch python at the workspace top level (NOT skills/scripts,
   # which are tracked). Iterative throwaway investigations — hardcoded test
   # filenames, demo API keys, near-duplicate files. Same category as the
@@ -1251,7 +1262,7 @@ RSYNC_EXCLUDES=(
 # #874 shipped a config dir with no include pair: this guard fired correctly, but at
 # deploy time, blocking every deploy on main from 4539ddb0 until the pair was added.
 # A second copy of the check in the workflow would have been the drift it exists to stop.
-if ! "$HYDRA_ROOT/scripts/lib/check-skills-config-includes.sh" "$HYDRA_ROOT" "$HYDRA_ROOT/scripts/deploy.sh"; then
+if ! "$HYDRA_ROOT/scripts/lib/check-skills-config-includes.sh" "$HYDRA_ROOT" "$HYDRA_ROOT/scripts/deploy.sh"; then  # hydra-hook: reviewed-indirection reviewed-argv (repo script by literal path)
   fail "a skills-all config directory would silently not reach the server — see the include pair suggested above."
 fi
 
@@ -1351,7 +1362,7 @@ drift_check_against_baseline() {
   # Single-call form saves a round-trip vs probe-then-cat AND closes
   # a tiny race where the file could be deleted between the two calls.
   local last_sha=""
-  if $HYDRA_LOCAL; then
+  if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
     if [[ -f "$DEPLOY_PATH/.deployed-sha" ]]; then
       last_sha=$(cat "$DEPLOY_PATH/.deployed-sha")
     fi
@@ -1439,7 +1450,7 @@ drift_check_against_baseline() {
   # but different timestamps (e.g., agent-edited skills on node-8).
   # Using -rc gives a pure content-only comparison.
   local dry_out dry_rc=0
-  if $HYDRA_LOCAL; then
+  if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
     dry_out=$(rsync -rcn --itemize-changes \
       "${RSYNC_EXCLUDES[@]}" \
       "$HYDRA_ROOT/" "$DEPLOY_PATH/" 2>&1) || dry_rc=$?
@@ -1578,14 +1589,14 @@ if [ -x "$LINT_OPENCLAW_CFG" ]; then
   needs_target "main" && lint_targets+=("$HYDRA_ROOT/openclaw-main.json")
   needs_target "edge" && lint_targets+=("$HYDRA_ROOT/openclaw-edge.json")
   if (( ${#lint_targets[@]} > 0 )); then
-    "$LINT_OPENCLAW_CFG" "${lint_targets[@]}" || fail "openclaw config lint: repo contains mcp-remote stdio entries"
+    "$LINT_OPENCLAW_CFG" "${lint_targets[@]}" || fail "openclaw config lint: repo contains mcp-remote stdio entries"  # hydra-hook: reviewed-indirection reviewed-argv (repo linter by path)
     log "  openclaw configs free of mcp-remote stdio entries."
   fi
 fi
 
 # Run drift check when deploying all or multiple profiles
 if [[ "$TARGET" == "all" ]] || [[ "$TARGET" == *","* ]]; then
-  "$SCRIPT_DIR/validate-shared-config.sh" || fail "Shared config drift detected"
+  "$SCRIPT_DIR/validate-shared-config.sh" || fail "Shared config drift detected"  # hydra-hook: reviewed-indirection (repo script by path)
 fi
 
 # -------------------------------------------------------------------
@@ -1663,7 +1674,7 @@ preflight_drift_check() {
   # false positives. --delete is still needed here to detect server-only
   # files that would be wiped.
   local dry_out dry_rc=0
-  if $HYDRA_LOCAL; then
+  if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
     dry_out=$(rsync -rcn --delete --itemize-changes \
       "${RSYNC_EXCLUDES[@]}" \
       "$HYDRA_ROOT/" "$DEPLOY_PATH/" 2>&1) || dry_rc=$?
@@ -1690,7 +1701,7 @@ preflight_drift_check() {
   # so the gate never silently weakens. The blunt fallback still uses the same
   # itemize columns (YXcstpoguax: col 2 'f', col 3 'c' or col 4 's').
   local last_sha=""
-  if $HYDRA_LOCAL && [[ -f "$DEPLOY_PATH/.deployed-sha" ]]; then
+  if $HYDRA_LOCAL && [[ -f "$DEPLOY_PATH/.deployed-sha" ]]; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
     last_sha=$(tr -d '[:space:]' < "$DEPLOY_PATH/.deployed-sha" 2>/dev/null || true)
   fi
   # shellcheck source=lib/drift-check.sh
@@ -1914,7 +1925,7 @@ fi
 # -------------------------------------------------------------------
 # Step 4b: rsync repo to Node 8
 # -------------------------------------------------------------------
-if $HYDRA_LOCAL; then
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
   log "Step 4b/8: Local sync (running on Node 8)..."
   rsync -a --delete \
     "${RSYNC_EXCLUDES[@]}" \
@@ -2204,7 +2215,7 @@ if [ -x "$LINT_OPENCLAW_CFG" ]; then
   fi
   if (( ${#live_lint_targets[@]} > 0 )); then
     "$LINT_OPENCLAW_CFG" "${live_lint_targets[@]}" \
-      || fail "openclaw config lint failed on live config — see preceding stderr for the profile + server name; rewrite with \`openclaw --profile <p> mcp set\` to transport: \"streamable-http\""
+      || fail "openclaw config lint failed on live config — see preceding stderr for the profile + server name; rewrite with \`openclaw --profile <p> mcp set\` to transport: \"streamable-http\""  # hydra-hook: reviewed-indirection reviewed-argv (repo linter by path)
     log "  Live openclaw configs free of mcp-remote stdio entries."
   fi
 fi
@@ -2218,8 +2229,8 @@ fi
 log "Step 5a/8: Running post-sync setup..."
 
 run_on_node8() {
-  if $HYDRA_LOCAL; then
-    bash -c "$1"
+  if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+    bash -c "$1"  # hydra-hook: reviewed-indirection (local/ssh dispatcher; the ssh branch below passes the same string)
   else
     ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" "$1"
   fi
@@ -2856,11 +2867,11 @@ fi
 # cron file. Idempotent — safe to run on every deploy. Must come
 # BEFORE Step 6's gateway restart so the next start picks up the
 # drop-in's ExecStartPre.
-if $HYDRA_LOCAL; then
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
   log "Step 5c/8: Installing/refreshing aux systemd units..."
   if [ -x "$DEPLOY_PATH/scripts/install-aux-units.sh" ]; then
     "$DEPLOY_PATH/scripts/install-aux-units.sh" "$DEPLOY_PATH" \
-      || fail "install-aux-units.sh failed — see preceding output"
+      || fail "install-aux-units.sh failed — see preceding output"  # hydra-hook: reviewed-indirection reviewed-argv (deployed script by path)
     log "  Aux units installed/refreshed."
   else
     log "  install-aux-units.sh missing or not executable — skipping (laptop deploy?)"
@@ -3103,7 +3114,7 @@ fi
 # Step 7: Run smoke test
 # -------------------------------------------------------------------
 log "Step 7/8: Running smoke test..."
-if ! "$SCRIPT_DIR/smoke-test.sh" "$TARGET"; then
+if ! "$SCRIPT_DIR/smoke-test.sh" "$TARGET"; then  # hydra-hook: reviewed-indirection reviewed-argv (repo script by literal path)
   fail "Smoke test failed after deploy"
 fi
 log "  Smoke test passed."
@@ -3125,7 +3136,7 @@ if command -v git >/dev/null 2>&1 \
   fi
   # Write via stdin pipe rather than embedding the value in a remote
   # shell command — sidesteps quoting/injection issues entirely.
-  if $HYDRA_LOCAL; then
+  if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
     printf '%s\n' "$DEPLOYED_SHA" > "$DEPLOY_PATH/.deployed-sha"
   else
     printf '%s\n' "$DEPLOYED_SHA" \
@@ -3198,7 +3209,7 @@ fi
 if needs_target "edge" && [ -x "$SCRIPT_DIR/validate-caroline-rag.sh" ]; then
   log "Post-flight: Caroline RAG check (edge/support)..."
   rag_rc=0
-  PROFILE=edge AGENT=support "$SCRIPT_DIR/validate-caroline-rag.sh" || rag_rc=$?
+  PROFILE=edge AGENT=support "$SCRIPT_DIR/validate-caroline-rag.sh" || rag_rc=$?  # hydra-hook: reviewed-indirection (repo script by literal path)
   if [ "$rag_rc" -eq 0 ]; then
     log "  Caroline RAG check passed."
   else
@@ -3259,7 +3270,7 @@ fi
 if needs_target "main" && [ -x "$SCRIPT_DIR/validate-caroline-rag.sh" ]; then
   log "Post-flight: Caroline RAG check (main/cmo canary)..."
   main_rag_rc=0
-  PROFILE=main AGENT=cmo "$SCRIPT_DIR/validate-caroline-rag.sh" || main_rag_rc=$?
+  PROFILE=main AGENT=cmo "$SCRIPT_DIR/validate-caroline-rag.sh" || main_rag_rc=$?  # hydra-hook: reviewed-indirection (repo script by literal path)
   if [ "$main_rag_rc" -eq 0 ]; then
     log "  Caroline RAG main check passed."
   else

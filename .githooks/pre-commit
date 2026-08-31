@@ -85,6 +85,56 @@ fi
 #       the shared array (so a future "I'll just call rsync directly"
 #       can't accidentally bypass the excludes)
 # ---------------------------------------------------------------
+# Shell token classes shared by BOTH scanners below: the preprocessor decides
+# whether a line executes an interpreter, and the detector decides whether a
+# command is rsync. They ask the same structural question, and every time they
+# were maintained separately they drifted -- wrapper operands (round 10 vs 20),
+# first-command-only (21), keyword prefixes (22). One definition, passed to
+# both awk programs, is what stops that recurring.
+HOOK_KEYWORDS='if|then|elif|else|do|while|until|!'
+HOOK_WRAPPERS='command|exec|sudo|doas|su|runuser|nohup|setsid|unshare|chroot|time|timeout|env|nice|ionice|stdbuf|xargs|flock|watch|strace|coproc|builtin'
+# `find` is NOT in that list. Every wrapper above ALWAYS executes the command
+# after it, so scanning on past its options is right. find does not: its
+# operands are paths and predicates, and `find /tmp -name rsync -print` names
+# a FILE. Treating find as a wrapper made that operand read as an rsync call
+# and rejected a correct commit (QA finding 41) -- the outage class this check
+# exists to fix. find only executes at an explicit action primary, so that is
+# what opens a command slot.
+HOOK_EXECSLOT='^-(exec|execdir|ok|okdir)$'
+# Tools that KEEP SCANNING but whose words are operands until an action
+# primary above opens a command slot.
+HOOK_OPERAND_TOOLS='find'
+# The destructive rsync flags this whole check exists to police. A
+# reviewed-indirection marker may say "this unresolvable command word is fine";
+# it may NEVER say "this command that deletes is fine", because that is the one
+# assertion the gate is here to refuse. `reccomment` is computed per RECORD, so
+# without this a marker anywhere on a line authorised every command on it, and
+# `cmd=rsync; $cmd -az --delete ./ live/; gh release download v1  # marker`
+# passed (QA finding 42). Prefix-matched so --del, --delete-after,
+# --delete-during and --delete-excluded are all covered without listing them.
+HOOK_DESTRUCTIVE='(^|[[:space:]])--(del|remove-source-files)'
+# An OPTION whose own spelling is an expansion. `--$suffix` constructs
+# --delete at run time, so matching only the literal flag above left the
+# marker authorising a destructive sync it could not see (QA finding 43).
+# Narrow on purpose: the finding asked to refuse a marked site whose argv
+# carries ANY expansion, but measured against deploy.sh that refuses 16 of its
+# 19 marked lines (`if $HYDRA_LOCAL`, `"$LINT_OPENCLAW_CFG" "${targets[@]}"`,
+# `--pattern "$asset"`) and recreates the commit-blocking outage. deploy.sh
+# spells zero options dynamically, so refusing THAT costs nothing and still
+# refuses the construction the finding demonstrates.
+HOOK_DYNOPT='(^|[[:space:]])"?-{1,2}[^[:space:]]*[$`]'
+# What counts as a PLAIN WORD inside quotes. Quoting a command name does not
+# stop it executing, so `"rsync" -a ...` and `"bash" -c ...` are real calls --
+# but a quoted span holding an expansion, a space or a metacharacter is data.
+# Shared for the same reason as the lists above: round 24 fixed this in the
+# detector and round 25 found the identical hole still open in the
+# preprocessor, because the rule lived in two places.
+HOOK_PLAINWORD='^[A-Za-z0-9_./-]+$'
+# A leading REDIRECTION word, which may precede the command: 2>err, >out, <in,
+# &>both, 2>>log. Shared for the same reason as the classes above -- cmdword()
+# has skipped these since round 26 and interp_cmd() did not, which is finding
+# 32b and the sixth time one rule lived in two places.
+HOOK_REDIR='^([0-9]*|&)(<|>)'
 echo "  [2/7] deploy.sh safety excludes"
 DEPLOY_SH="scripts/deploy.sh"
 # This list is the enforced SUBSET of deploy.sh's RSYNC_EXCLUDES. The
@@ -138,6 +188,8 @@ required_excludes=(
   "workspaces/*/research/"
   "workspaces/*/wiki/"
   "workspaces/*/*.txt"
+  "workspaces/*/*.sql"
+  "workspaces/*/.bridge-*.json"
   "workspaces/*/skills/*/references/daily-batches/"
   "workspaces/*/tmp/"
   "workspaces/*/state/"
@@ -169,28 +221,498 @@ else
   # (e.g. `bash << 'POSTSYNC'`) — without this, deploy.sh's POSTSYNC
   # heredoc body would flow through unstripped, re-creating the exact
   # silent-bypass class this preprocessor was meant to close.
-  deploy_code=$(awk '
-    BEGIN { in_heredoc = 0; marker = "" }
+  # LC_ALL=C: these awk programs scan byte by byte and rely on blank() being
+  # LENGTH-PRESERVING so offsets index the original record. Byte semantics make
+  # that exact, and identical on BSD awk and gawk; in a UTF-8 locale BSD awk
+  # also aborts with "towc: multibyte conversion failure" on this file.
+  deploy_code=$(LC_ALL=C awk -v sq="'" -v dq='"' -v kw="$HOOK_KEYWORDS" -v wrap="$HOOK_WRAPPERS" -v plainw="$HOOK_PLAINWORD" -v redir="$HOOK_REDIR" -v execslot="$HOOK_EXECSLOT" -v otool="$HOOK_OPERAND_TOOLS" -v destructive="$HOOK_DESTRUCTIVE" -v dynopt="$HOOK_DYNOPT" '
+    # Position of the first `<<` that is genuinely a redirect: outside quotes,
+    # and not the `<<<` of a here-string. Matching heredoc-looking text
+    # anywhere on the line meant a quoted STRING containing <<DOC opened
+    # heredoc state and swallowed the rest of the file (QA finding 14) --
+    # while deploy.sh:2372 is `bash << POSTSYNC` with a QUOTED marker, so
+    # quoted text near << cannot simply be ignored either.
+    function hdpos(s,   n, i, c, q, esc) {
+      n = length(s); q = ""; esc = 0
+      for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (esc) { esc = 0; continue }
+        if (q == sq) { if (c == sq) q = ""; continue }
+        if (c == "\\") { esc = 1; continue }
+        if (q == dq) { if (c == dq) q = ""; continue }
+        if (c == sq || c == dq) { q = c; continue }
+        if (c == "<" && substr(s, i + 1, 1) == "<") {
+          if (substr(s, i + 2, 1) == "<") { i = i + 2; continue }
+          return i
+        }
+      }
+      return 0
+    }
+    # Split a line into shell WORDS, quote-aware. tk[i] is the word text with
+    # quotes removed and double-quote escapes resolved; tkq[i] is the quote
+    # character it was written in (empty if unquoted); ntk is the count.
+    function toks(s,   n, i, c, q, cur, cq, started) {
+      ntk = 0; n = length(s); i = 1
+      while (i <= n) {
+        while (i <= n && substr(s, i, 1) ~ /[[:space:]]/) i++
+        if (i > n) break
+        cur = ""; cq = ""; started = 0
+        while (i <= n && (substr(s, i, 1) !~ /[[:space:]]/ || q != "")) {
+          c = substr(s, i, 1)
+          if (c == sq || c == dq) {
+            if (cq == "") cq = c
+            q = c; i++
+            while (i <= n && substr(s, i, 1) != q) {
+              if (q == dq && substr(s, i, 1) == "\\" && i < n) { cur = cur substr(s, i + 1, 1); i += 2; continue }
+              cur = cur substr(s, i, 1); i++
+            }
+            i++; q = ""; started = 1; continue
+          }
+          cur = cur c; i++; started = 1
+        }
+        if (started) { ntk++; tk[ntk] = cur; tkq[ntk] = cq }
+      }
+    }
+    # 1 when the COMMAND WORD of the line is a shell interpreter. Matching
+    # interpreter name anywhere on the line instead made inert data
+    # (`printf "%s" bash -c "..."`) read as an execution and reject a safe
+    # commit -- the outage class this PR exists to fix (QA finding 19b).
+    function interp_cmd(s,   i, sawwrap, scanon, iskip) {
+      toks(s); sawwrap = 0
+      for (i = 1; i <= ntk; i++) {
+        # Redirections come FIRST: a heredoc redirect may be quoted
+        # (`<<\047SCRIPT\047 bash`), and the data guard below would otherwise
+        # reject it before the interpreter after it is ever seen (QA 33a).
+        if (tk[i] ~ redir) { if (tk[i] ~ /^([0-9]*|&)(<|>)+$/) iskip = 1; continue }
+        if (iskip) { iskip = 0; continue }                 # redirection target
+        # A quoted word is data ONLY when it is not a plain word: quoting a
+        # command name does not stop it executing (QA finding 25).
+        if (tkq[i] != "" && tk[i] !~ plainw) return 0
+        if (tk[i] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) continue  # VAR=val prefix
+        if (tk[i] ~ "^(" kw ")$") continue                 # keyword prefix
+        if (tk[i] ~ "(^|/)(" wrap ")$") { sawwrap = 1; continue }
+        # find is not a wrapper: keep scanning, but only its action primary
+        # opens a command slot, so `find ... -exec bash -c` is still reached
+        # while `find /tmp -name rsync` is not a call (QA 41).
+        if (tk[i] ~ "(^|/)(" otool ")$") { scanon = 1; continue }
+        if (scanon && !sawwrap) { if (tk[i] ~ execslot) sawwrap = 1; continue }
+        # find is not a wrapper, so its action primary is what opens the slot.
+        if (tk[i] ~ execslot) { sawwrap = 1; continue }
+        if (tk[i] ~ /(^|\/)(bash|sh|zsh|ksh|dash)$/) return 1
+        if (tk[i] ~ execslot) { sawwrap = 1; continue }
+        if (!sawwrap) return 0
+        # Past a wrapper, options and their operands are indistinguishable
+        # without each wrapper option table (`sudo -u root` has one, `time -p`
+        # none), so scan on to the wrapped command word instead of treating the
+        # next token as it. Returning here classified `sudo -u root bash <<X`
+        # as inert and discarded an executable heredoc (QA finding 20) -- the
+        # same shape as the round-9 wrapper bug in the detector is cmdword().
+        continue
+      }
+      return 0
+    }
+    # 1 when the & at position i is part of an fd-dup redirection (2>&1, <&0,
+    # &>log) rather than a command separator. The DETECTOR has exempted this
+    # since QA 31b; the PREPROCESSOR did not, so `2>&1 bash -c \047...\047` split
+    # into `2>` and `1 bash -c ...`, interp_cmd() read the command word as
+    # "1", and the literal script was never emitted for inspection
+    # (QA finding 38). Same predicate, so the two halves cannot disagree.
+    function fddup(s, i) {
+      return (substr(s, i, 1) == "&" && (substr(s, i - 1, 1) ~ /[<>]/ || substr(s, i + 1, 1) == ">"))
+    }
+    # Start offset of the command segment that CONTAINS pos: the character
+    # after the last control/grouping operator before it, skipping any that sit
+    # inside quotes. Inspecting only the first command word of a line meant a
+    # heredoc or -c script owned by a LATER command was classified inert
+    # (QA finding 21).
+    function seg_start(s, pos,   i, c, q, st) {
+      st = 1; q = ""
+      for (i = 1; i < pos && i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (q == sq) { if (c == sq) q = ""; continue }
+        if (c == "\\") { i++; continue }
+        if (q == dq) { if (c == dq) q = ""; continue }
+        if (c == sq || c == dq) { q = c; continue }
+        if (fddup(s, i)) continue
+        if (c ~ /[;&|(){}]/) st = i + 1
+      }
+      return st
+    }
+    # End offset (exclusive) of the command segment containing pos: the first
+    # control/grouping operator at or after it that is not inside quotes.
+    # Pairs with seg_start() so a construct can be bound to its WHOLE owning
+    # command, not just the text leading up to it.
+    function seg_end(s, pos,   i, c, q) {
+      q = ""
+      for (i = pos; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (q == sq) { if (c == sq) q = ""; continue }
+        if (c == "\\") { i++; continue }
+        if (q == dq) { if (c == dq) q = ""; continue }
+        if (c == sq || c == dq) { q = c; continue }
+        if (fddup(s, i)) continue
+        if (c ~ /[;&|(){}]/) return i
+      }
+      return length(s) + 1
+    }
+    # Every command-substitution body on the line, concatenated and prefixed
+    # with separators so split_cmds() treats each as its own command.
+    function subst_bodies(s,   i, c, q, depth, st, out) {
+      q = ""; depth = 0; out = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (depth > 0) {
+          if (c == "(") depth++
+          else if (c == ")") { depth--; if (depth == 0) out = out " ; " substr(s, st, i - st) }
+          continue
+        }
+        if (q == sq) { if (c == sq) q = ""; continue }
+        if (c == "\\") { i++; continue }
+        if (q == dq && c != dq && !(c == "$" && substr(s, i + 1, 1) == "(")) continue
+        if (c == "$" && substr(s, i + 1, 1) == "(") { depth = 1; st = i + 2; i++; continue }
+        if (c == dq) { q = (q == dq ? "" : dq); continue }
+        if (c == sq) { q = sq; continue }
+      }
+      return out
+    }
+    # Split a line into command segments at unquoted control/grouping
+    # operators, filling segtext[1..n]. Same boundary set as seg_start().
+    function split_cmds(s,   i, c, q, st, n) {
+      n = 0; st = 1; q = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (q == sq) { if (c == sq) q = ""; continue }
+        if (c == "\\") { i++; continue }
+        if (q == dq) { if (c == dq) q = ""; continue }
+        if (c == sq || c == dq) { q = c; continue }
+        if (fddup(s, i)) continue
+        if (c ~ /[;&|(){}]/) { n++; segtext[n] = substr(s, st, i - st); st = i + 1 }
+      }
+      n++; segtext[n] = substr(s, st)
+      return n
+    }
+    # The heredoc delimiter token that starts at hp. A delimiter is an ordinary
+    # shell WORD, so it may contain punctuation (`DOC-END`, `EOF.1`) and may be
+    # quoted. Accepting only [A-Za-z_][A-Za-z0-9_]* recorded `DOC` for
+    # <<DOC-END, so the terminator never matched and every following command
+    # was swallowed as heredoc body -- the gate silently switching itself off
+    # (QA finding 23, same class as 13a and 14).
+    function hdmarker(s, hp,   i, c, q, m) {
+      i = hp + 2
+      if (substr(s, i, 1) == "-") i++
+      while (i <= length(s) && substr(s, i, 1) ~ /[[:space:]]/) i++
+      # A delimiter is one shell WORD, and a word may be built from adjacent
+      # quoted and unquoted fragments: <<\047DO\047C is terminated by DOC after
+      # quote removal (QA finding 27a). Concatenate fragments rather than
+      # stopping at the first one.
+      m = ""
+      while (i <= length(s) && substr(s, i, 1) !~ /[[:space:];&|<>()]/) {
+        c = substr(s, i, 1)
+        if (c == sq || c == dq) {
+          q = c; i++
+          while (i <= length(s) && substr(s, i, 1) != q) { m = m substr(s, i, 1); i++ }
+          i++; continue
+        }
+        # Quote removal applies to UNQUOTED fragments only: `<<\\DOC` terminates
+        # on DOC (QA 26b), but inside single quotes a backslash is literal, so
+        # a quoted `DO\\C` delimiter keeps it (QA 33b). Stripping after the
+        # scan removed both, and that heredoc then never closed.
+        if (c == "\\" && i < length(s)) { m = m substr(s, i + 1, 1); i += 2; continue }
+        m = m c; i++
+      }
+      return m
+    }
+    # Text of an actual trailing COMMENT, or "" if the line has none. The
+    # reviewed-indirection marker is only honoured here: matching it anywhere
+    # on the line let printed DATA containing the marker text switch the
+    # refusal off (QA finding 29c).
+    # The CODE half of a line: everything before an unquoted comment. Exact
+    # complement of comment_text() below, so the two cannot disagree about
+    # where a comment starts.
+    function code_text(s,   i, c, q) {
+      q = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (q == sq) { if (c == sq) q = ""; continue }
+        if (c == "\\") { i++; continue }
+        if (q == dq) { if (c == dq) q = ""; continue }
+        if (c == sq || c == dq) { q = c; continue }
+        if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[[:space:];&|()]/)) return substr(s, 1, i - 1)
+      }
+      return s
+    }
+    # Hex digit value, or -1.
+    function hexv(c,   p) { p = index("0123456789abcdef", tolower(c)); return p - 1 }
+    # Decode a bash ANSI-C ($\047...\047) body. Sets ansi_bad=1 and returns ""
+    # for anything it cannot decode, so the caller FAILS CLOSED rather than
+    # passing a half-decoded string on.
+    #
+    # Enumerating escapes one incident at a time does not converge: \n and \t
+    # (QA 33c), then hex and octal spellings (QA 35b), then the unicode
+    # and control-char spellings (QA 40) -- each naming a separator the
+    # previous list missed. So decode the whole grammar and refuse the
+    # remainder, which bounds the class instead of extending the list again.
+    function ansi_c(s,   i, n, c, d, v, k, out, digits, c2, ctl) {
+      ansi_bad = 0; out = ""; n = length(s)
+      ctl = "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_"
+      for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (c != "\\") { out = out c; continue }
+        d = substr(s, i + 1, 1)
+        if (d == "n") { out = out "\n"; i++; continue }
+        if (d == "t") { out = out "\t"; i++; continue }
+        if (d == "r") { out = out "\r"; i++; continue }
+        if (d == "a") { out = out sprintf("%c", 7);  i++; continue }
+        if (d == "b") { out = out sprintf("%c", 8);  i++; continue }
+        if (d == "f") { out = out sprintf("%c", 12); i++; continue }
+        if (d == "v") { out = out sprintf("%c", 11); i++; continue }
+        if (d == "e" || d == "E") { out = out sprintf("%c", 27); i++; continue }
+        if (d == "\\" || d == sq || d == dq || d == "?") { out = out d; i++; continue }
+        if (d == "x" || d == "u" || d == "U") {
+          digits = (d == "x" ? 2 : (d == "u" ? 4 : 8))
+          v = 0; k = 0
+          while (k < digits && hexv(substr(s, i + 2 + k, 1)) >= 0) { v = v * 16 + hexv(substr(s, i + 2 + k, 1)); k++ }
+          if (k == 0 || v == 0) { ansi_bad = 1; return "" }
+          # Only ASCII can be a command separator; anything above is ordinary
+          # text, and awk cannot render it portably.
+          out = out (v < 128 ? sprintf("%c", v) : "?")
+          i += 1 + k; continue
+        }
+        if (d == "c") {
+          c2 = substr(s, i + 2, 1)
+          v = index(ctl, toupper(c2)) - 1
+          if (c2 == "" || v < 0) { ansi_bad = 1; return "" }
+          if (v == 0) { ansi_bad = 1; return "" }
+          out = out sprintf("%c", v); i += 2; continue
+        }
+        if (d ~ /[0-7]/) {
+          v = 0; k = 0
+          while (k < 3 && substr(s, i + 1 + k, 1) ~ /[0-7]/) { v = v * 8 + (substr(s, i + 1 + k, 1) + 0); k++ }
+          if (v == 0) { ansi_bad = 1; return "" }
+          out = out sprintf("%c", v); i += k; continue
+        }
+        ansi_bad = 1; return ""
+      }
+      return out
+    }
+    function comment_text(s,   i, c, q) {
+      q = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (q == sq) { if (c == sq) q = ""; continue }
+        if (c == "\\") { i++; continue }
+        if (q == dq) { if (c == dq) q = ""; continue }
+        if (c == sq || c == dq) { q = c; continue }
+        if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[[:space:];&|()]/)) return substr(s, i)
+      }
+      return ""
+    }
+    BEGIN { in_heredoc = 0; marker = ""; keep_body = 0 }
     {
       if (in_heredoc) {
-        if ($0 == marker) { in_heredoc = 0; marker = "" }
+        line = $0
+        if (dash) sub(/^\t+/, "", line)
+        if (line == marker) { in_heredoc = 0; marker = ""; keep_body = 0; dash = 0; next }
+        # An interpreter heredoc body is shell that RUNS (deploy.sh has a real
+        # `bash << POSTSYNC`), so it is emitted as code. Every other body --
+        # cat briefings, python, printf -- stays discarded, because those quote
+        # rsync flags in explanatory prose and reading them as calls is what
+        # blocked every commit for eleven weeks.
+        if (keep_body) print
         next
       }
+      rawline = $0
+      # Strip comments BEFORE looking for a heredoc: detection ran first, so a
+      # comment merely MENTIONING one (`# example: cat <<DOC`) put the
+      # preprocessor into heredoc mode and discarded every following line,
+      # silently disabling the gate for the rest of the file (QA finding 13a).
+      #
+      # Stripping only WHOLE-LINE comments left the same hole open for a
+      # TRAILING one: `echo safe # prose mentions <<PHANTOM` opened a heredoc
+      # that never closes, and everything after it was swallowed as body
+      # (QA finding 39). The shell treats that token as comment text, so the
+      # gate must too. rawline keeps the original for the reviewed-marker
+      # checks, which read the comment on purpose.
+      # The DETECTOR reads this preprocessed stream, so the reviewed-indirection
+      # marker has to survive the strip or every marked site in deploy.sh
+      # reverts to unreviewed. Carry that one comment through and drop the
+      # rest: it is the only comment either scanner assigns meaning to.
+      # Carry the marker AND its qualifiers, but nothing else on the comment.
+      # A fixed canonical string silently dropped `reviewed-argv`, so the
+      # second assertion never reached the detector; carrying the comment
+      # VERBATIM would re-expose the heredoc-in-a-comment bug above, since the
+      # strip happens before hdpos(). Matching the marker vocabulary is what
+      # keeps both properties.
+      keepmark = ""
+      if (match(comment_text($0), /hydra-hook:[[:space:]]*reviewed-indirection([[:space:]]+reviewed-argv)?/)) \
+        keepmark = "  # " substr(comment_text($0), RSTART, RLENGTH)
+      $0 = code_text($0) keepmark
+
       # detect <<MARKER, << MARKER, <<-MARKER, << '"'"'MARKER'"'"', <<"MARKER", etc.
-      # The regex permits optional `-`, optional whitespace, optional
-      # quote (single or double), then the marker word, then matching quote.
-      if (match($0, /<<-?[[:space:]]*['"'"'"]?[A-Za-z_][A-Za-z0-9_]*['"'"'"]?/)) {
-        m = substr($0, RSTART, RLENGTH)
-        gsub(/^<<-?[[:space:]]*['"'"'"]?/, "", m)
-        gsub(/['"'"'"]$/, "", m)
+      # `<<<WORD` is a here-STRING, not a heredoc, and must not open one -- it
+      # swallowed the rest of the file the same way.
+      hp = hdpos($0)
+      if (hp > 0 && (m = hdmarker($0, hp)) != "") {
         in_heredoc = 1
         marker = m
+        # `<<-` strips leading TABS from the terminator, so the closing marker
+        # may be indented. Without this the heredoc never closed.
+        dash = (substr($0, hp, 3) ~ /^<<-/)
+        # Options may sit between the interpreter and the redirect
+        # (`bash -s <<SCRIPT`), so they are skipped rather than required absent.
+        # Option OPERANDS (`bash -O extglob <<SCRIPT`) defeat any fixed token
+        # pattern, exactly as they did for -c, so the command word decides
+        # (QA finding 19a).
+        # The command word may sit on EITHER side of the redirect: both
+        # `bash <<SCRIPT` and `<<SCRIPT bash` execute the body (QA 33a). The
+        # second probe is what covers the redirect-first form.
+        #
+        # DO NOT REORDER interp_cmd() so the quoted-word-is-data guard runs
+        # before its redirection skip. A heredoc redirect can itself be quoted
+        # (`<<SCRIPT` tokenises with the quotes around the delimiter), so that
+        # order rejects the token as data before the interpreter after it is
+        # ever reached -- which is the bug QA 33a reported and the ordering
+        # inside interp_cmd() is what fixes. Pinned by:
+        #   scripts/tests/pre-commit-rsync-invariant.bats
+        #     "a heredoc redirect before its interpreter is executable"
+        ss = seg_start($0, hp)
+        keep_body = interp_cmd(substr($0, ss, hp - ss) " x")
+        if (!keep_body) keep_body = interp_cmd($0)
         print  # keep the opening line so structural counters still see it
         next
       }
-      # strip whole-line comments
-      sub(/^[[:space:]]*#.*$/, "")
+      # `eval <literal>` executes its argument, so the literal is rewritten in
+      # place: the detector then judges the commands inside it in command
+      # position, and no `eval` token survives to trip the indirection guard
+      # below. A NON-literal eval is left alone and fails closed there.
+      if (match($0, /(^|[[:space:];&|(])eval[[:space:]]+/)) {
+        pre = substr($0, 1, RSTART + RLENGTH - 1)
+        r2 = substr($0, RSTART + RLENGTH)
+        q2 = substr(r2, 1, 1); sk = 2
+        if (q2 == "$" && substr(r2, 2, 1) == "\047") { q2 = "\047"; sk = 3 }
+        if (q2 == "\047" || q2 == "\"") {
+          b2 = substr(r2, sk); o2 = ""; end2 = 0
+          for (k2 = 1; k2 <= length(b2); k2++) {
+            c2 = substr(b2, k2, 1)
+            if (q2 == "\"" && c2 == "\\" && k2 < length(b2)) { o2 = o2 substr(b2, k2 + 1, 1); k2++; continue }
+            if (c2 == q2) { end2 = k2; break }
+            o2 = o2 c2
+          }
+          # Everything AFTER the closing quote is still part of this line and
+          # must survive the rewrite. Emitting only the eval body and advancing
+          # to the next record discarded any following command, so
+          # `eval "..."; rsync -az --delete ./ live/` slipped through entirely
+          # (QA finding 16).
+          suf2 = (end2 > 0 ? substr(b2, end2 + 1) : "")
+          # A double-quoted argument containing an expansion is not a literal
+          # script -- its real text is only known at run time. Fall through so
+          # the eval token survives and trips the fail-closed guard. Single
+          # quotes suppress expansion, so those are always literal.
+          if (!(q2 == "\"" && o2 ~ /[$`]/)) {
+            sub(/(^|[[:space:];&|(])eval[[:space:]]+.*$/, "", pre)
+            print pre o2 suf2
+            next
+          }
+        }
+      }
       print
+      # Scan forward to `-c` across ANY preceding tokens rather than requiring
+      # each to be -prefixed: an interpreter option may take an OPERAND
+      # (`bash -O extglob -c ...`), and a pattern that assumes otherwise walks
+      # straight past the script it exists to inspect (QA finding 18, the same
+      # lesson as the wrapper operands in round 10).
+      # A literal `sh -c "..."` argument is a script, not a string. Emit its
+      # body as its own line so the detector judges the commands inside it.
+      # A non-literal argument (deploy.sh uses `bash -c "$1"`) yields nothing
+      # to scan and is left alone.
+      # Emit a literal `-c` script as its own line so its commands are judged.
+      # Recognition goes through the COMMAND WORD and the tokenizer, not a
+      # regex over the whole line: `printf "%s" bash -c "..."` names an
+      # interpreter in DATA position, and emitting its argument as code
+      # invented an unguarded call and rejected a safe commit (QA finding 19b).
+      # Each command on the line is judged separately: an interpreter may be
+      # the second command (`printf ready; bash -c ...`), not the first.
+      # $( ) executes its body, so substitution contents are appended as extra
+      # command segments and scanned for interpreter execution too
+      # (QA finding 29b).
+      # EVERY unquoted here-string on the line, not just the first: a `<<<`
+      # inside quoted data is not an operator, and a line may carry more than
+      # one redirect. Scanning with index() matched the token in a string and
+      # then stopped looking, so the executable here-string after it was never
+      # seen.
+      hq2 = ""; hi = 1
+      while (hi <= length($0)) {
+        hcc = substr($0, hi, 1)
+        if (hq2 == sq) { if (hcc == sq) hq2 = ""; hi++; continue }
+        if (hcc == "\\") { hi += 2; continue }
+        if (hq2 == dq) { if (hcc == dq) hq2 = ""; hi++; continue }
+        if (hcc == sq || hcc == dq) { hq2 = hcc; hi++; continue }
+        if (substr($0, hi, 3) != "<<<") { hi++; continue }
+        # The OWNING SEGMENT, not just the text before the operator: bash
+        # accepts a redirect ahead of its command word, so
+        # `<<< \047rsync ...\047 bash` puts the interpreter AFTER the
+        # here-string and a prefix-only probe never saw it (QA finding 34a).
+        # interp_cmd() already skips redirections and their targets, so the
+        # payload in the middle of the segment does not confuse it.
+        hss = seg_start($0, hi); hse = seg_end($0, hi + 3)
+        if (interp_cmd(substr($0, hss, hse - hss))) {
+          hrest = substr($0, hi + 3)
+          sub(/^[[:space:]]+/, "", hrest)
+          hq = substr(hrest, 1, 1)
+          if (hq == sq || hq == dq) {
+            hbody = substr(hrest, 2); ho = ""
+            for (hk = 1; hk <= length(hbody); hk++) {
+              hc = substr(hbody, hk, 1)
+              if (hq == dq && hc == "\\" && hk < length(hbody)) { ho = ho substr(hbody, hk + 1, 1); hk++; continue }
+              if (hc == hq) break
+              ho = ho hc
+            }
+            if (hq == dq && ho ~ /[$`]/) {
+              if (comment_text(rawline) !~ /hydra-hook:[[:space:]]*reviewed-indirection/) print "eval \"$__hook_indirection__\""
+            } else if (ho != "") print ho
+          } else if (comment_text(rawline) !~ /hydra-hook:[[:space:]]*reviewed-indirection/) {
+            print "eval \"$__hook_indirection__\""
+          }
+        }
+        hi += 3
+      }
+
+      nseg = split_cmds($0 subst_bodies($0))
+      for (si = 1; si <= nseg; si++) {
+      if (interp_cmd(segtext[si])) {
+        for (ti = 1; ti <= ntk; ti++) {
+          if ((tkq[ti] == "" || tk[ti] ~ plainw) && tk[ti] == "-c" && ti < ntk && tkq[ti + 1] != "") {
+            cbody = tk[ti + 1]
+            # ANSI-C form: the $ sits outside the quotes, so toks() keeps it.
+            if (tkq[ti + 1] == sq && substr(cbody, 1, 1) == "$") {
+              cbody = substr(cbody, 2)
+              # $\047...\047 decodes escapes, so \n really is a command
+              # separator; leaving it literal kept both commands in one segment
+              # and hid the second (QA finding 33c).
+              # Bash decodes \n \t AND hex/octal forms, each of which can be a
+              # newline and therefore a real command separator (QA 35b).
+              cbody = ansi_c(cbody)
+              if (ansi_bad) {
+                if (comment_text(rawline) !~ /hydra-hook:[[:space:]]*reviewed-indirection/) print "eval \"$__hook_indirection__\""
+                break
+              }
+            }
+            # A script argument holding an expansion is NOT a literal: its real
+            # text only exists at run time, so `bash -c "$cmd"` can run anything
+            # (QA finding 28). Emit the same indirection sentinel a non-literal
+            # eval produces, so the gate refuses instead of reporting green.
+            # A site a human has judged safe -- deploy.sh run_on_node8() is a
+            # local/ssh dispatcher -- carries an explicit marker on the line.
+            if (tkq[ti + 1] == dq && cbody ~ /[$`]/) {
+              if (cbody ~ destructive || cbody ~ dynopt || comment_text(rawline) !~ /hydra-hook:[[:space:]]*reviewed-indirection/) print "eval \"$__hook_indirection__\""
+              break
+            }
+            if (cbody != "") print cbody
+            break
+          }
+        }
+      }
+      }
     }
   ' "$DEPLOY_SH")
 
@@ -205,22 +727,427 @@ else
     for p in "${missing_excludes[@]}"; do red "      --exclude='$p'"; done
   fi
 
-  # Count rsync invocations (in code, not comments) and array refs.
-  # The regex must match both bare invocations (`rsync -a ...` at line
-  # start) AND command-substitution patterns (`dry_out=$(rsync -an ...`).
-  # We anchor on `rsync ` followed by a flag (`-`) so it never matches
-  # the word "rsync" in prose, then rely on the comment-stripped
-  # `deploy_code` to avoid matching documentation text.
-  # We require: ≥1 rsync call AND every rsync call references the array.
-  rsync_calls=$(grep -cE '(^|[[:space:]]|\()rsync -' <<<"$deploy_code") || rsync_calls=0
-  rsync_with_excludes=$(grep -cF '"${RSYNC_EXCLUDES[@]}"' <<<"$deploy_code") || rsync_with_excludes=0
+  # Assert: ≥1 rsync call AND every rsync call passes "${RSYNC_EXCLUDES[@]}".
+  #
+  # Join line-continuations FIRST, so a multi-line invocation is one record.
+  # deploy.sh writes six of its eight rsync calls as
+  #     dry_out=$(rsync -rcn --itemize-changes \
+  #       "${RSYNC_EXCLUDES[@]}" \
+  #       ./ "$dest")
+  # so the array sits on a different LINE from `rsync -`.
+  #
+  # This check used to compare two line counts — lines matching `rsync -`
+  # against lines containing the array — and require them to be equal. That
+  # was wrong in both directions and is pinned by
+  # scripts/tests/pre-commit-rsync-invariant.bats:
+  #   - FALSE POSITIVE: the counts can never match on a correct deploy.sh
+  #     (continuation lines, plus the exclude-ordering validation loop below
+  #     which references the array without being an rsync call). It failed
+  #     EVERY commit from 2026-06-11 until this fix. Humans passed
+  #     --no-verify; agents obeyed and could not commit at all.
+  #   - FALSE NEGATIVE: equal totals also hold when one rsync loses the array
+  #     and an unrelated reference is added elsewhere — the exact case this
+  #     check exists to catch.
+  #
+  # Finding calls by anchoring on a COMMAND POSITION cannot work: the set of
+  # positions is open-ended (`if rsync`, `then rsync`, `do rsync`, `! rsync`,
+  # `command rsync`, `sudo rsync`, ...), and any prefix list we enumerate is a
+  # false negative waiting to happen — an unguarded `--delete` behind an
+  # un-listed keyword would sail through. The previous regex anchored on
+  # line-start/punctuation and did exactly that (QA finding, PR #869).
+  #
+  # Root cause instead: the ONLY reason a naive `rsync -` match over-fires is
+  # prose inside string literals — deploy.sh:1289's own fail() message says
+  # "...would be synced and rsync --delete could destroy it", which comment
+  # stripping cannot remove because it is code, not a comment.
+  #
+  # So: detect calls on a copy with quoted-string CONTENTS blanked, and test
+  # the guard on the ORIGINAL record (the array reference "${RSYNC_EXCLUDES[@]}"
+  # is itself a quoted string, so it only survives in the original). Line
+  # continuations are joined first, because six of deploy.sh's eight calls
+  # carry the array on a following line.
+  read -r rsync_calls rsync_unguarded rsync_indirection < <(
+    LC_ALL=C awk -v sq="'" -v dq='"' -v kw="$HOOK_KEYWORDS" -v wrap="$HOOK_WRAPPERS" -v plainw="$HOOK_PLAINWORD" -v redir="$HOOK_REDIR" -v execslot="$HOOK_EXECSLOT" -v otool="$HOOK_OPERAND_TOOLS" -v destructive="$HOOK_DESTRUCTIVE" -v dynopt="$HOOK_DYNOPT" -v guard='"${RSYNC_EXCLUDES[@]}"' '
+      # An rsync invocation is a COMMAND WORD, not the token sequence
+      # "rsync -" appearing somewhere in a line. Matching text made the check
+      # wrong in both directions: `printf "%s" rsync --delete` blocked a safe
+      # commit, and `rsync $opts ./ live/` was invisible because its first
+      # argument is not a literal flag.
+      #
+      # blank() blanks the CONTENTS of every quoted string (so prose is never
+      # scanned) while leaving $( ) and backtick bodies visible, and records
+      # each body span so it can be analysed as its own command list. Length is
+      # preserved, so offsets index the ORIGINAL record.
+      # NOTE: this awk program sits inside a shell single-quoted string --
+      # never write a literal apostrophe in these comments.
+      function blank(s,   n, i, c, q, out, esc, depth, qs, kind, st) {
+        n = length(s); q = ""; out = ""; esc = 0; depth = 0; nbody = 0
+        for (i = 1; i <= n; i++) {
+          c = substr(s, i, 1)
+          if (esc) { out = out " "; esc = 0; continue }
+          if (q == sq) { if (c == sq) q = ""; out = out " "; continue }
+          if (c == "\\") { out = out " "; esc = 1; continue }
+          if (c == "$" && substr(s, i + 1, 1) == "(") {
+            qs[depth] = q; kind[depth] = "("; st[depth] = i + 2; depth++; q = ""
+            out = out "  "; i++; continue
+          }
+          if (c == "`") {
+            if (depth > 0 && kind[depth - 1] == "`") {
+              depth--; q = qs[depth]
+              nbody++; bs[nbody] = st[depth]; be[nbody] = i - 1
+            } else { qs[depth] = q; kind[depth] = "`"; st[depth] = i + 1; depth++; q = "" }
+            out = out " "; continue
+          }
+          # An ordinary subshell nested inside a substitution must push a
+          # level, or its close-paren pops the SUBSTITUTION and the commands
+          # after it are blanked as string content (QA finding 13b).
+          if (c == "(" && q == "" && depth > 0) {
+            qs[depth] = q; kind[depth] = "p"; st[depth] = i + 1; depth++
+            out = out c; continue
+          }
+          if (c == ")" && q == "" && depth > 0 && (kind[depth - 1] == "(" || kind[depth - 1] == "p")) {
+            depth--; q = qs[depth]
+            if (kind[depth] == "(") { nbody++; bs[nbody] = st[depth]; be[nbody] = i - 1 }
+            out = out (kind[depth] == "p" ? c : " "); continue
+          }
+          if (q == "") {
+            # Shell word CONCATENATION: r"syn"c and r\\sync both run rsync after
+            # quote removal (QA finding 27b). At a word boundary, resolve the
+            # whole word; if it reduces to a plain word, emit that value padded
+            # to the original width so offsets stay aligned. Words that do not
+            # reduce to a plain word fall through and are blanked as before,
+            # which keeps prose and "${RSYNC_EXCLUDES[@]}" out of the matcher.
+            if (c !~ /[[:space:]]/ && (i == 1 || substr(s, i - 1, 1) ~ /[[:space:];&|(){}]/)) {
+              we = i; val = ""
+              while (we <= n && substr(s, we, 1) !~ /[[:space:];&|(){}<>]/) {
+                cc = substr(s, we, 1)
+                if (cc == "\\" && we < n) { val = val substr(s, we + 1, 1); we += 2; continue }
+                if (cc == sq || cc == dq) {
+                  qq = cc; we++
+                  while (we <= n && substr(s, we, 1) != qq) { val = val substr(s, we, 1); we++ }
+                  we++; continue
+                }
+                val = val cc; we++
+              }
+              if (we > i && val ~ plainw && val != substr(s, i, we - i)) {
+                out = out val
+                for (z = length(val); z < we - i; z++) out = out " "
+                i = we - 1; continue
+              }
+            }
+            if (c == dq || c == sq) {
+              # A quoted span whose content is a PLAIN WORD keeps its text:
+              # quoting a command NAME is valid shell and runs normally, so
+              # `"rsync" -az --delete` must still be seen as a call (QA finding
+              # 24). Anything holding an expansion, space or metacharacter stays
+              # blanked, which is what keeps prose -- and the guard literal
+              # "${RSYNC_EXCLUDES[@]}" -- out of the matcher. Length is
+              # preserved either way: the quotes themselves become spaces.
+              qe = i + 1
+              while (qe <= n && substr(s, qe, 1) != c) qe++
+              if (qe <= n && substr(s, i + 1, qe - i - 1) ~ plainw) {
+                out = out " " substr(s, i + 1, qe - i - 1) " "; i = qe; continue
+              }
+              q = c; out = out " "
+            } else out = out c
+          }
+          else { if (c == q) q = ""; out = out " " }
+        }
+        return out
+      }
+      # First command word of a segment: skip VAR=val assignments and the
+      # keywords/wrappers a command may be introduced by.
+      # Find the command word. Sets cw_off to its offset within t (1-based) so
+      # the caller can bound argv to the command itself: a VAR=... prefix is
+      # not an rsync argument, and the guard named there excludes nothing
+      # (QA finding 9a).
+      #
+      # Wrapper OPTIONS are skipped as well as wrapper names -- skipping only
+      # the name returned `-u` for `sudo -u nobody rsync ...` (QA finding 9b).
+      # After a wrapper, an option may take an operand (`sudo -u nobody`) or
+      # not (`time -p`), and the two are indistinguishable without each
+      # wrapper option table, so one extra token is examined. That is
+      # deliberately fail-toward-detection: the cost is a blocked commit on a
+      # line like `sudo echo rsync`, not an unguarded delete reaching prod.
+      function cmdword(t,   n, i, w, sawwrap, scanon, first, skipnext) {
+        n = length(t); i = 1; sawwrap = 0; first = ""
+        while (i <= n) {
+          while (i <= n && substr(t, i, 1) ~ /[[:space:]]/) i++
+          if (i > n) break
+          cw_off = i
+          w = ""
+          while (i <= n && substr(t, i, 1) !~ /[[:space:]]/) { w = w substr(t, i, 1); i++ }
+          if (w ~ /^[A-Za-z_][A-Za-z0-9_]*=/) continue
+          # A redirection may PRECEDE the command word (`2>/tmp/err rsync ...`),
+          # so leading redirection words are skipped; a bare operator also
+          # consumes its target (`> /tmp/out rsync ...`) -- QA finding 26a.
+          if (w ~ redir) { if (w ~ /^([0-9]*|&)(<|>)+$/) skipnext = 1; continue }
+          if (skipnext) { skipnext = 0; continue }
+          if (w ~ "^(" kw ")$") continue
+          if (w ~ "(^|/)(" wrap ")$") { sawwrap = 1; continue }
+          # An operand-bearing tool: keep scanning, but its words are PATHS
+          # and predicates, so `find /tmp -name rsync -print` names a FILE and
+          # runs nothing. Demoting find out of the wrapper list alone was not
+          # enough -- the scan then stopped AT find and never reached -exec.
+          if (w ~ "(^|/)(" otool ")$") { scanon = 1; continue }
+          if (scanon && !sawwrap) { if (w ~ execslot) sawwrap = 1; continue }
+          if (w ~ /(^|\/)rsync$/) return w
+          # `find ... -exec CMD ...` runs CMD, so an action primary opens a
+          # command slot. -execdir/-ok/-okdir do the same; listing only -exec
+          # left three spellings of the same execution unscanned.
+          if (w ~ execslot) { sawwrap = 1; continue }
+          # A non-literal `eval` is unanalysable. The preprocessor rewrites
+          # literal evals away, so anything reaching here is indirection the
+          # gate cannot inspect, and it refuses rather than passing silently.
+          if (w ~ /(^|\/)eval$/) { indirection++; return "" }
+          if (!sawwrap) return w
+          # Past a wrapper, options and their operands are indistinguishable
+          # without each wrapper option table (`sudo -u nobody -g nogroup` has
+          # two, `time -p` has none), so scan on until the wrapped command
+          # word is found rather than guessing how many to skip. A wrapper
+          # line whose target is rsync is therefore always judged.
+          continue
+        }
+        return first
+      }
+      # 1 when the COMMAND-POSITION word carries an expansion in RAW text.
+      # cmdword() runs on BLANKED text, where an unresolvable word is already
+      # spaces, so it silently skips past it and reports the NEXT word -- for
+      # `r${mid}c -az ...` it returns "-az". Testing only the first character
+      # of the segment therefore missed every expansion that is not word
+      # INITIAL, and bash still expands `r${mid}c` to rsync (QA finding 36).
+      # Same skip rules as cmdword() so an assignment prefix, a redirection,
+      # a keyword or a wrapper does not count as the command word.
+      function cw_expands(so, eo, want,   i, c, cc, w, wq, q, qq, dep, sawwrap, scanon, skipnext, td) {
+        # `[[ ... ]]` is a TEST, not a command, and its `||`/`&&` are test
+        # operators -- but scan() splits on them as command boundaries, so the
+        # operand after one arrives here looking like a command word. An
+        # unclosed `[[` before this segment means we are inside a test and
+        # there is no command position to judge (deploy.sh:220).
+        td = 0
+        for (i = 1; i < so; i++) {
+          if (substr(rec, i, 2) == "[[") { td++; i++ }
+          else if (substr(rec, i, 2) == "]]") { td--; i++ }
+        }
+        if (td > 0) return 0
+        i = so; sawwrap = 0; skipnext = 0; cwdone = 0
+        while (i <= eo) {
+          while (i <= eo && substr(rec, i, 1) ~ /[[:space:]]/) i++
+          if (i > eo) return 0
+          w = ""; wq = 0; q = ""
+          while (i <= eo) {
+            c = substr(rec, i, 1)
+            if (q == "" && c ~ /[[:space:]]/) break
+            if (c == "\\") { w = w substr(rec, i + 1, 1); i += 2; continue }
+            # A substitution is ONE word however much whitespace it contains.
+            # Breaking at the space inside `x=$(basename "$d")` left the walker
+            # standing inside the substitution, where it read `"$d")` as a
+            # command word and refused 30 correct lines of deploy.sh.
+            if (q != sq && c == "$" && substr(rec, i + 1, 1) == "(") {
+              wq = 1; dep = 1; i += 2
+              while (i <= eo && dep > 0) {
+                cc = substr(rec, i, 1)
+                if (cc == "\\") { i += 2; continue }
+                if (qq == sq) { if (cc == sq) qq = ""; i++; continue }
+                if (qq == dq) { if (cc == dq) qq = ""; i++; continue }
+                if (cc == sq || cc == dq) { qq = cc; i++; continue }
+                if (cc == "(") dep++
+                else if (cc == ")") dep--
+                i++
+              }
+              w = w "$()"; continue
+            }
+            if (q != sq && c == "`") {
+              wq = 1; i++
+              while (i <= eo && substr(rec, i, 1) != "`") { if (substr(rec, i, 1) == "\\") i++; i++ }
+              i++; w = w "``"; continue
+            }
+            if (q == sq) { if (c == sq) q = ""; else w = w c; i++; continue }
+            if (q == dq) {
+              if (c == dq) q = ""
+              else { if (c == "$" || c == "`") wq = 1; w = w c }
+              i++; continue
+            }
+            if (c == sq) { q = sq; i++; continue }
+            if (c == dq) { q = dq; i++; continue }
+            if (c == "$" || c == "`") wq = 1
+            w = w c; i++
+          }
+          # want=1 asks about ARGV. Past the command word every remaining
+          # word counts, and reusing this walker is the point: a separate
+          # whitespace-splitting version mis-read a command word that
+          # CONTAINS a space (a backtick substitution) as half argv.
+          if (want && cwdone) { if (wq) return 1; continue }
+          if (w ~ /^[A-Za-z_][A-Za-z0-9_]*=/) continue
+          if (w ~ redir) { if (w ~ /^([0-9]*|&)(<|>)+$/) skipnext = 1; continue }
+          if (skipnext) { skipnext = 0; continue }
+          if (w ~ "^(" kw ")$") continue
+          if (w ~ "(^|/)(" wrap ")$") { sawwrap = 1; continue }
+          if (w ~ "(^|/)(" otool ")$") { scanon = 1; continue }
+          if (scanon && !sawwrap) { if (w ~ execslot) sawwrap = 1; continue }
+          if (w ~ execslot) { sawwrap = 1; continue }
+          # Past a wrapper an option, an operand and the wrapped command are
+          # indistinguishable without a per-wrapper option table, exactly as
+          # in cmdword(). That cuts both ways, so the answer is to FAIL CLOSED
+          # rather than to guess: any expansion after a wrapper might be the
+          # wrapped command, and `sudo r${mid}c -az --delete ./ live/` runs an
+          # unguarded rsync (QA finding 37). Returning at the first word past
+          # the wrapper is not enough either -- `sudo -u root r${mid}c` hides
+          # the expansion behind an option -- so scan the whole segment and
+          # refuse on the first expansion found. deploy.sh pays for this with
+          # ONE reviewed marker, on a find whose operand is a path.
+          if (sawwrap) { if (wq) return 1; continue }
+          if (want) { cwdone = 1; continue }
+          return wq
+        }
+        return 0
+      }
+      # Judge one command: is it rsync, and if so does its ARGV carry the guard.
+      # Text after a redirection operator is not argv -- the array supplied as a
+      # here-string is stdin and excludes nothing.
+      function judge(so, eo, truepos,   bt, rt, cw, k, j, i2, ch, segraw) {
+        if (eo < so) return
+        bt = substr(b, so, eo - so + 1)
+        cw_off = 0
+        cw = cmdword(bt)
+        if (cw !~ /(^|\/)rsync$/) {
+          # An EXPANSION in command position names its command only at run
+          # time, so this gate cannot judge it and refuses instead of skipping
+          # the segment silently (QA finding 29a). blank() leaves such a word
+          # as spaces, which is why cw is empty here.
+          # BACKTICKS are a command substitution too. Matching only $-led words
+          # let `printf rsync` -az --delete ./ live/ fall through as "not
+          # rsync" and the segment was skipped in silence (QA finding 35).
+          # blank() already records backtick bodies -- it is only this
+          # command-position test that was $-only.
+          if (truepos) {
+            # The marker is scoped to the RECORD, so it must not be able to
+            # authorise a segment that deletes. Judged on THIS segment, not
+            # the line, which is what binds the review to its own command.
+            segraw = substr(rec, so, eo - so + 1)
+            # Three levels, strongest first: a literal destructive flag is
+            # never reviewable; argv that expands needs the explicit
+            # reviewed-argv assertion as well; anything else needs the
+            # ordinary marker.
+            if (cw_expands(so, eo, 0) \
+                && (segraw ~ destructive || segraw ~ dynopt \
+                    || reccomment !~ /hydra-hook:[[:space:]]*reviewed-indirection/ \
+                    || (cw_expands(so, eo, 1) && reccomment !~ /reviewed-argv/))) indirection++
+          }
+          return
+        }
+        calls++
+        if (cw_off > 1) { so = so + cw_off - 1; bt = substr(b, so, eo - so + 1) }
+        # The guard only counts where rsync would read it as an OPTION.
+        #   - `--` ends option parsing, so anything after it expands as
+        #     operands (source paths) and excludes nothing;
+        #   - a literal inside a command substitution is an argument to the
+        #     INNER command, not an option to this rsync.
+        # Treating the bare literal anywhere in the span as proof of guarding
+        # reported both as green (QA finding 17).
+        for (k = so; k <= eo - 1; k++) {
+          if (substr(b, k, 2) == "--" && substr(b, k + 2, 1) ~ /[[:space:]]|^$/ \
+              && (k == so || substr(b, k - 1, 1) ~ /[[:space:]]/)) { eo = k - 1; break }
+        }
+        if (eo < so) { unguarded++; return }
+        rt = substr(rec, so, eo - so + 1)
+        # Redirections may sit BETWEEN argv elements. Truncating argv at the
+        # first one hid a guard that followed it and REJECTED a correctly
+        # guarded call (QA finding 27c) -- the commit-blocking class. Blank the
+        # operator and its target instead, so the rest of argv still counts,
+        # while a here-string still cannot supply the guard.
+        for (k = so; k <= eo; k++) {
+          if (substr(b, k, 1) !~ /[<>]/) continue
+          j = k
+          while (j <= eo && substr(b, j, 1) ~ /[<>]/) j++
+          while (j <= eo && substr(b, j, 1) ~ /[[:space:]]/) j++
+          while (j <= eo && substr(b, j, 1) !~ /[[:space:]]/) j++
+          for (i2 = k; i2 < j; i2++) rt = substr(rt, 1, i2 - so) " " substr(rt, i2 - so + 2)
+          k = j - 1
+        }
+        # Only bodies NESTED INSIDE argv are masked. A body that CONTAINS this
+        # call is the substitution the call itself lives in -- deploy.sh writes
+        # six of its eight calls as dry_out=$(rsync ... "${RSYNC_EXCLUDES[@]}")
+        # -- and masking that would erase the call is own guard.
+        for (k = 1; k <= nbody; k++) {
+          if (bs[k] <= so || be[k] > eo) continue
+          for (j = (bs[k] > so ? bs[k] : so); j <= (be[k] < eo ? be[k] : eo); j++)
+            rt = substr(rt, 1, j - so) " " substr(rt, j - so + 2)
+        }
+        if (index(rt, guard) == 0) unguarded++
+      }
+      # Split a span at top-level control operators and judge each command.
+      # Split a span at every COMMAND POSITION and judge each command. Control
+      # operators end a command; so does shell grouping punctuation -- a
+      # subshell or brace group starts a fresh command, and treating ( and { as
+      # ordinary tokens made cmdword() return the bracket and miss the call
+      # inside it (QA finding 8).
+      # truepos marks a segment that begins at a REAL command boundary (record
+      # start, or ; & |). Segments produced by grouping punctuation are often
+      # argument fragments, and treating those as commands made the dynamic
+      # command-word check over-fire 4x on deploy.sh.
+      function scan(so, eo,   k, seg, truepos) {
+        seg = so; truepos = 1
+        for (k = so; k <= eo; k++) {
+          # An ampersand inside an fd-dup redirection (2>&1, <&0, &>log) is
+          # part of the redirection, not a command separator. Splitting there
+          # put the guard in a different segment and REJECTED a correctly
+          # guarded call (QA finding 31b).
+          if (substr(b, k, 1) == "&" && (substr(b, k - 1, 1) ~ /[<>]/ || substr(b, k + 1, 1) == ">")) continue
+          if (substr(b, k, 1) ~ /[;&|(){}]/) {
+            judge(seg, k - 1, truepos)
+            truepos = (substr(b, k, 1) ~ /[;&|]/)
+            seg = k + 1
+          }
+        }
+        judge(seg, eo, truepos)
+      }
+      {
+        while (/\\$/ && (getline nxt) > 0) { sub(/\\$/, ""); $0 = $0 nxt }
+        rec = $0
+        reccomment = ""     # trailing comment text, filled in by the strip below
+        b = blank(rec)
+
+        for (i = 1; i <= length(b); i++) {
+          c = substr(b, i, 1)
+          if (c == "#" && (i == 1 || substr(b, i - 1, 1) ~ /[[:space:];&|()]/)) {
+            # Keep the comment text: the reviewed-indirection marker is only
+            # valid HERE, not anywhere on the record. Testing the raw record
+            # let printed data authorise itself (QA finding 30) -- the same
+            # bypass fixed in the preprocessor one round earlier.
+            reccomment = substr(rec, i)
+            b = substr(b, 1, i - 1); rec = substr(rec, 1, i - 1); break
+          }
+        }
+
+        # Each command-substitution body is its own command list, so it is
+        # scanned separately; masking the bodies out of the parent keeps a
+        # substitution from being read as part of the enclosing command.
+        top = b
+        for (i = 1; i <= nbody; i++) {
+          if (bs[i] > length(b)) continue
+          e = be[i]; if (e > length(b)) e = length(b)
+          for (j = bs[i]; j <= e; j++) top = substr(top, 1, j - 1) " " substr(top, j + 1)
+        }
+        save = b; b = top; scan(1, length(b)); b = save
+        for (i = 1; i <= nbody; i++) {
+          if (bs[i] > length(b)) continue
+          e = be[i]; if (e > length(b)) e = length(b)
+          scan(bs[i], e)
+        }
+      }
+      END { printf "%d %d %d\n", calls + 0, unguarded + 0, indirection + 0 }
+    ' <<<"$deploy_code"
+  )
   if (( rsync_calls == 0 )); then
     fail "deploy.sh contains zero rsync calls — something is very wrong"
-  elif (( rsync_with_excludes != rsync_calls )); then
-    fail "deploy.sh has $rsync_calls rsync call(s) but $rsync_with_excludes reference \${RSYNC_EXCLUDES[@]} (must match exactly)"
+  elif (( ${rsync_indirection:-0} > 0 )); then
+    fail "deploy.sh uses shell indirection this gate cannot inspect (${rsync_indirection} site(s): a non-literal \`eval\`, or an interpreter script whose text is only known at run time). Write the command plainly, or mark a reviewed site with '# hydra-hook: reviewed-indirection'."
+  elif (( rsync_unguarded > 0 )); then
+    fail "deploy.sh has $rsync_unguarded of $rsync_calls rsync call(s) that do not pass \"\${RSYNC_EXCLUDES[@]}\" — every rsync must"
   fi
 
-  if (( ${#missing_excludes[@]} > 0 )) || (( rsync_calls == 0 )) || (( rsync_with_excludes != rsync_calls )); then
+  if (( ${#missing_excludes[@]} > 0 )) || (( rsync_calls == 0 )) || (( rsync_unguarded > 0 )) || (( ${rsync_indirection:-0} > 0 )); then
     cat <<'BRIEFING'
 
   ── BRIEFING ──────────────────────────────────────────────────────
@@ -279,7 +1206,8 @@ else
        in deploy.sh today: dry-runs in Step 0 and Step 4a (each with
        local + remote variants = 4), real syncs in Step 4b (local +
        remote = 2), Step 4c skills sync (1), and install_plugin update
-       path (1). The exact count may grow as new steps are added.)
+       path (1). The count is free to grow — the check asserts that no
+       rsync call LACKS the array, not that any two totals are equal.)
     5. Re-run: bash .githooks/pre-commit
 
   IF YOU INTENTIONALLY REMOVED AN EXCLUDE:

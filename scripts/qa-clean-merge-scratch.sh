@@ -52,6 +52,7 @@ KEEP_GLOBS=(
   'MEMORY.md' 'IDENTITY.md' 'HEARTBEAT.md' 'TOOLS.md'
   'openclaw-workspace-state.json'
   '*tmp*'                              # any 'tmp'-marked scratch: .tmp-*, tmp_*, *.tmp
+  '.bridge-*.json'                     # agent-bridge in-flight request state (#877)
   'final-*.json'                       # scout company-finder run scratch (2026-07-21, #719)
   '.company-finder-*.json'             # same, dot-prefixed variant (2026-07-30, #772)
   'finder-input-*.json'                # outreach-discovery dated stage input (2026-08-05, #794)
@@ -62,7 +63,7 @@ KEEP_GLOBS=(
   'credit-verification-todo-inventory-*.json'  # QA credit-verification run scratch
   'TOOLS.md.bak-*' '*.md.bak-*'
   'write-activity.log'
-  '*.jpeg' '*.jpg' '*.webp' '*.gif' '*.png' '*.pdf' '*.csv' '*.txt' '*.py'
+  '*.jpeg' '*.jpg' '*.webp' '*.gif' '*.png' '*.pdf' '*.csv' '*.txt' '*.py' '*.sql'
   '.env'
 )
 
