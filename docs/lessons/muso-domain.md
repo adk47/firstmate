@@ -560,3 +560,7 @@ policy, do not loosen the policy to match the wrapper.
 `5763097` (`operations@muso.ai`); Nick `10206197`; Aaron `5201828`; the Operator/bot `4359478`.
 Note that `jandelmo89@gmail.com` (admin id `5465657`) is Jan's Intercom ADMIN account, not a
 customer; exclude it and all `@muso.ai` addresses from customer-complaint analysis.
+This table is for READING conversations, not a menu of posting identities: any agent-authored
+customer-facing reply posts as Caroline (`5763097`), never under a human's admin id — on
+2026-08-31 the ops agent's escalation follow-ups posted with Nick's id, showing customers
+"Nicholas Sollazzo" mid-thread. The muso-intercom skill's Reply Identity section is the rule.

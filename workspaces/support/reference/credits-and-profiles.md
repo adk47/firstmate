@@ -129,10 +129,19 @@ Muso acts as a mirror of what exists in the music industry. If incorrect credits
 ### Adding a Missing Credit
 To add a missing credit, ask the customer to search for the track or release in
 the Muso app, open the track, choose Add Missing Credits when available, select
-the role, and submit supporting proof. If the button is missing, the profile
-cannot be edited, the track cannot be found, or the customer is trying to edit an
-already claimed profile, collect the profile link, track or release link,
-requested role, and screenshots so the team can review manually.
+the role, and submit supporting proof.
+
+**The track must be on Spotify.** If the track or song is not available on
+Spotify (a YouTube- or Instagram-only release, a live session video, etc.), we
+cannot add the track, song, or associated credits to their Muso profile for now.
+Tell the customer that plainly – do not promise a manual review and do not
+submit anything for a track that isn't on Spotify.
+
+If the track IS on Spotify but the button is missing, the track cannot be found
+in Muso, the profile cannot be edited, or the customer is trying to edit an
+already claimed profile, collect the profile link, track or release link
+(including the Spotify link), requested role, and screenshots so the team can
+review manually.
 
 ---
 

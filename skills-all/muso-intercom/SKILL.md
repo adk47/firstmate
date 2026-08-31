@@ -47,6 +47,23 @@ explicit "do it" on the grounds that Aaron had not answered).
 
 Always verify `sender_id` from inbound metadata before any write operation.
 
+## Reply Identity (MANDATORY for customer-facing writes)
+
+Agent-authored, customer-facing conversation replies MUST post as **Caroline,
+`admin_id: "5763097"`**, so the customer sees one consistent support identity for
+the whole thread. A human's Slack authorization authorizes the *write*; it never
+changes the *posting identity*. Never post a reply, note-to-customer, or closing
+message under a human admin id (Nick `10206197`, Aaron `5201828`, Jan `5465657`):
+on 2026-08-31 escalation follow-ups posted with Nick's id showed customers
+"Nicholas Sollazzo" mid-thread instead of Caroline. (Same rationale as
+muso-ops-dedup, which pins `INTERCOM_ADMIN_ID=5763097` "so the reply matches the
+rest of the thread".) Internal notes carry `5763097` too. On an assignment call
+`5763097` is the ACTOR (`admin_id`), never the ASSIGNEE: an escalated conversation
+is assigned to the configured human escalation inbox (`defaultInboxId`) so a
+teammate picks it up – assigning it back to Caroline leaves the bot active and the
+handoff silently never happens. The only exception to any of this is a human
+posting as themselves from the Intercom UI.
+
 ## Authentication
 
 The API token is available as `$MUSOAI_INTERCOM_TOKEN` in the environment.

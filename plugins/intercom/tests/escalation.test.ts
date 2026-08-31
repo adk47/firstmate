@@ -138,24 +138,69 @@ describe("assessRisk — track-merge requests are handled by the ticket lane, no
 });
 
 describe("assessRisk Layer 1 (rules)", () => {
-  it("fires on 'refund' → suggestedActionType subscription-refund", async () => {
+  // Plain refund/cancel requests must NOT rule-escalate. Commit 7484ade removed
+  // "refund" from the legacy triggers so those go through the agent flow; PR #238
+  // silently reintroduced them in RISK_RULES, which pre-empted the refund-retention
+  // skill (PRs #649/#657) on the very messages it was built for — a founding member's
+  // "Please cancel my subscription" was handed off 3s after arrival with zero save
+  // attempt (conv 215475695183812, 2026-08-28). Caroline runs the 3-gate retention
+  // flow and creates the subscription-refund action-request herself when it's
+  // exhausted. Dispute-grade billing signals (chargeback etc.) still rule-escalate.
+  it("does NOT fire on 'i want a refund' — retention flow handles it", async () => {
     const r = await assessRisk("i want a refund", [], baseState, noJudge);
+    expect(r.triggered).toBe(false);
+  });
+
+  it("does NOT fire on 'money back' — retention flow handles it", async () => {
+    const r = await assessRisk("I'd like my money back", [], baseState, noJudge);
+    expect(r.triggered).toBe(false);
+  });
+
+  it("does NOT fire on 'Please cancel my subscription' — retention flow handles it", async () => {
+    const r = await assessRisk("Please cancel my subscription", [], baseState, noJudge);
+    expect(r.triggered).toBe(false);
+  });
+
+  it("does NOT fire on 'I want to cancel my plan'", async () => {
+    const r = await assessRisk("I want to cancel my plan", [], baseState, noJudge);
+    expect(r.triggered).toBe(false);
+  });
+
+  it("does NOT fire on 'unsubscribe'", async () => {
+    const r = await assessRisk("please unsubscribe me", [], baseState, noJudge);
+    expect(r.triggered).toBe(false);
+  });
+
+  it("fires on 'chargeback' → refund_intent subscription-refund", async () => {
+    const r = await assessRisk("I'm filing a chargeback with my bank", [], baseState, noJudge);
     expect(r.triggered).toBe(true);
     expect(r.source).toBe("rule");
     expect(r.reason).toBe("refund_intent");
     expect(r.suggestedActionType).toBe("subscription-refund");
   });
 
-  it("fires on 'close my account' → cancel_intent", async () => {
+  it("fires on 'unauthorized charge' → refund_intent", async () => {
+    const r = await assessRisk("there's an unauthorized charge on my card", [], baseState, noJudge);
+    expect(r.triggered).toBe(true);
+    expect(r.reason).toBe("refund_intent");
+  });
+
+  // cancel_intent now matches ONLY account close/delete, so its action type must be
+  // data-deletion, not subscription-refund: the ticket title renders the action label
+  // ("[refund] Escalation: …" vs "[data-deletion] …") and that is what ops triages on.
+  // Both are tier 3, so SLA and priority are unchanged.
+  it("fires on 'close my account' → cancel_intent / data-deletion (not retention)", async () => {
     const r = await assessRisk("close my account", [], baseState, noJudge);
     expect(r.triggered).toBe(true);
     expect(r.reason).toBe("cancel_intent");
+    expect(r.suggestedActionType).toBe("data-deletion");
   });
 
-  it("fires on 'I want to cancel my subscription' → cancel_intent", async () => {
-    const r = await assessRisk("I want to cancel my subscription", [], baseState, noJudge);
+  it("fires on 'delete my account' → cancel_intent / data-deletion", async () => {
+    const r = await assessRisk("please delete my account", [], baseState, noJudge);
     expect(r.triggered).toBe(true);
     expect(r.reason).toBe("cancel_intent");
+    expect(r.suggestedActionType).toBe("data-deletion");
   });
 
   it("does NOT fire on 'what's the cancellation policy?'", async () => {
@@ -300,7 +345,7 @@ describe("assessRisk Layer 2 (judge)", () => {
       called = true;
       return { shouldHandoff: true, reasons: [], suggestedActionType: "support-general", confidence: "high" };
     };
-    const r = await assessRisk("i want a refund", [], { ...baseState, userTurnCount: 5 }, { judge });
+    const r = await assessRisk("i'm filing a chargeback", [], { ...baseState, userTurnCount: 5 }, { judge });
     expect(called).toBe(false);
     expect(r.source).toBe("rule");
   });

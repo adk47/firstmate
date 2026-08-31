@@ -49,6 +49,7 @@ Account and profile deletion requests are handled by our support team. Create a 
 4. Submit the claim with proof that connects you to that role
 
 **Before submitting, check:**
+- Is the track on Spotify? If it isn't (e.g. a YouTube- or Instagram-only release or a live session video), we can't add the track or its credits for now, so there is nothing to submit yet (agent note: say so plainly, don't promise a review – see credits-and-profiles.md)
 - Is this a Muso-sourced credit or does it come from an external platform?
 - If external (e.g. a Spotify or distributor feed), you need to fix it at the source first (see below)
 - Useful proof includes official credits, distributor metadata, PRO registrations, split sheets, session screenshots, invoices, contracts, or collaborator confirmation

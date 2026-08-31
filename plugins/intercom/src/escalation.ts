@@ -30,12 +30,19 @@ interface RiskRule {
 
 const RISK_RULES: RiskRule[] = [
   {
+    // Dispute-grade billing signals ONLY. Plain "refund" / "money back" /
+    // "cancel my subscription" deliberately do NOT rule-escalate: commit 7484ade
+    // removed "refund" from the legacy triggers so exit intents flow to the agent,
+    // and the refund-retention skill (PRs #649/#657) runs a 3-gate save flow that
+    // creates the subscription-refund action-request itself once retention is
+    // exhausted. Reintroducing those keywords here (PR #238) pre-empted that skill
+    // on its own triggers — a founding member's "Please cancel my subscription"
+    // was handed off 3s after arrival with zero save attempt (conv
+    // 215475695183812, 2026-08-28). Do not add them back; the safety nets for a
+    // mishandled exit are the magic keywords, the turn-count cap, and the judge.
     reason: "refund_intent",
     actionType: "subscription-refund",
     patterns: [
-      /\brefund\b/i,
-      /\bmoney back\b/i,
-      /\bpro[ -]?rate\b/i,
       /\bchargeback\b/i,
       /\bbilling dispute\b/i,
       /\binvoice dispute\b/i,
@@ -43,14 +50,13 @@ const RISK_RULES: RiskRule[] = [
     ],
   },
   {
+    // Account closure/deletion — NOT subscription cancellation, which the retention
+    // skill owns (see above). data-deletion is the same tier (3) as subscription-refund,
+    // so SLA and priority are unchanged; it is the ticket LABEL ops triages on that would
+    // otherwise read "[refund]" for a request that is nothing of the sort.
     reason: "cancel_intent",
-    actionType: "subscription-refund",
-    // Anchored to subscription/account intent so generic "cancellation policy?" or
-    // "I cancelled last month and was charged" don't auto-handoff.
+    actionType: "data-deletion",
     patterns: [
-      /\b(want|need|trying)\s+to\s+cancel\b/i,
-      /\bcancel\s+(?:my|the|this)\s+(subscription|plan|account|membership)\b/i,
-      /\bunsubscribe\b/i,
       /\bclose\s+(my )?account\b/i,
       /\bdelete\s+(my )?account\b/i,
     ],

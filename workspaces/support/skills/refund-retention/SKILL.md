@@ -53,6 +53,8 @@ Say something like:
 >
 > "Of course, if you'd rather just go ahead with the refund request, I can do that too."
 
+**Founding members:** when `[CONVERSATION_CONTEXT]` carries a `founding member: since <year>` line, open Gate 1 by acknowledging their tenure in one warm sentence before the diagnose question – e.g. "You've been with us since [year], and that genuinely means a lot – I'd hate to see you go without at least trying to help." Same gates, same offers (no special discounts beyond the standard save hierarchy), same always-visible exit – the difference is the recognition, per SOUL.md's founding-member doctrine.
+
 **Categorize the response into one of:**
 
 | Category | Signals |

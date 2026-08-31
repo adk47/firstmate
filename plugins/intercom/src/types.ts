@@ -470,6 +470,7 @@ export type RiskSource = "user_request" | "rule" | "judge";
 
 export type RiskActionType =
   | "subscription-refund"
+  | "data-deletion"
   | "dispute"
   | "support-general";
 

@@ -702,10 +702,22 @@ describe("handler — flag on (assessRisk path)", () => {
     expect(out!.userTurnCount).toBe(1);
   });
 
-  it("returns escalate action when refund intent fires", async () => {
+  it("dispatches plain 'refund' to the agent (retention flow owns it, not a rule)", async () => {
     const state = makeState();
     const { result } = await handleWebhookEvent(
       makeUserPayload("i want a refund"),
+      state,
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: true } },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+  });
+
+  it("returns escalate action when refund intent fires (dispute-grade signal)", async () => {
+    const state = makeState();
+    const { result } = await handleWebhookEvent(
+      makeUserPayload("i'm filing a chargeback"),
       state,
       "bot",
       undefined,
@@ -914,7 +926,7 @@ describe("handler — personalization enrichment", () => {
     const state = makeState();
     const enrich = vi.fn(async () => {});
     const { result } = await handleWebhookEvent(
-      makeVerifiedUserPayload("i want a refund", { email: "jane@example.com", name: "Jane" }),
+      makeVerifiedUserPayload("i'm filing a chargeback", { email: "jane@example.com", name: "Jane" }),
       state, "bot", undefined, { ...enabled, enrich },
     );
     expect(result.action).toBe("escalate");

@@ -92,7 +92,7 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
 **Resolution path:**
 0. **Ground first**: call `profile_credits_status` with the profile and the track/role in question, then branch on its diagnosis: `on_this_profile` → the credit is already visible, show them where; `pending_verification` → it's in review, not missing (Row #5 flow); `on_other_profile` → wrong-profile correction, file the handoff packet it returns; `not_found` → continue below.
 1. Is the credit missing or incorrect?
-   - If **missing**: ask if they've tried "Add Missing Credits" in the app. If not, walk them through it (log in > navigate to track/album > Add Missing Credits > specify role > submit). Reviews within 48 hours.
+   - If **missing**: first check the track is on Spotify – if it isn't (YouTube/Instagram-only release, live session video), we cannot add the track or its credits for now; say so plainly instead of promising a review. Otherwise ask if they've tried "Add Missing Credits" in the app. If not, walk them through it (log in > navigate to track/album > Add Missing Credits > specify role > submit). Reviews within 48 hours.
    - If **incorrect**: continue to step 2.
 2. Is the credit sourced from Muso or an external platform?
    - Ask: does the incorrect credit appear on Spotify, Apple Music, or their distributor in the same wrong form?
