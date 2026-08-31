@@ -11,6 +11,10 @@
 # exact candidate pattern and can never be selected.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/version-compare.sh
+source "$SCRIPT_DIR/lib/version-compare.sh"
+
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
 PROFILE="main"
 MODE="dry-run"
@@ -76,6 +80,35 @@ run_openclaw() {
     "$OPENCLAW_BIN" --profile "$PROFILE" "$@"
 }
 
+# openclaw >= 2026.8's sessions.delete rejects our 7.1-era `requireInactive`
+# param outright (INVALID_REQUEST: "unexpected property 'requireInactive'"),
+# failing every delete on that runtime (staging-verified 2026-08-31 against a
+# live 2026.8.1 gateway — Gate E). It is not needed there either: the delete
+# path runs under runExclusiveSessionLifecycleMutation +
+# prepareSessionLifecycleDrain and natively refuses to delete a session with
+# active work, throwing a retryable "could not safely stop before deletion"
+# instead — so the dist patch requireInactive existed to backport is retired
+# on 2.0. expectedSessionId/expectedSessionUpdatedAt (the real revival-race
+# guard) are unaffected either way and stay in the payload on both runtimes.
+# Routed through run_openclaw (not version-compare.sh's own hardcoded
+# `openclaw --version`) so this respects OPENCLAW_BIN/--profile exactly like
+# every other call this script makes, and so it is stubbable the same way.
+RUNTIME_VER="$(run_openclaw --version 2>/dev/null | awk 'NR==1 {print $2}')" || RUNTIME_VER=""
+# QA bot finding (PR #897 round 2): emptiness alone is not the full check —
+# any NON-empty token (e.g. a mangled "OpenClaw 2026.invalid" whose second
+# awk field is "2026.invalid") used to pass through untouched, and
+# version_at_least's sort -V comparison on a non-version-shaped token is
+# unspecified, silently selecting whichever payload shape sort -V happens to
+# order it under. Validate the token looks like a real version first.
+if [[ -z "$RUNTIME_VER" || ! "$RUNTIME_VER" =~ ^[0-9]{4}(\.[0-9]+)+$ ]]; then
+  echo "could not determine openclaw runtime version (\`openclaw --version\` returned nothing/unparseable: '${RUNTIME_VER}') — refusing to guess which sessions.delete payload shape this gateway expects (a wrong guess fails every delete on >= 2026.8, or is silently rejected as unrecognized below it)" >&2
+  exit 2
+fi
+PRUNE_2026_8_PLUS=0
+if version_at_least "2026.8" "$RUNTIME_VER"; then
+  PRUNE_2026_8_PLUS=1
+fi
+
 rc=0
 sessions_json=$(run_openclaw sessions --all-agents --json --limit all 2>&1) || rc=$?
 if ((rc != 0)) || ! jq -e '.sessions | type == "array"' >/dev/null 2>&1 <<<"$sessions_json"; then
@@ -121,18 +154,26 @@ while IFS= read -r candidate; do
   agent_id=$(jq -r '.agentId' <<<"$candidate")
   session_id=$(jq -r '.sessionId' <<<"$candidate")
   updated_at=$(jq -r '.updatedAt' <<<"$candidate")
-  params=$(jq -nc --arg key "$key" --arg agent "$agent_id" --arg session "$session_id" \
-    --argjson updated "$updated_at" '
-      {key:$key,agentId:$agent,expectedSessionId:$session,
-       expectedSessionUpdatedAt:$updated,requireInactive:true,deleteTranscript:true}
-    ')
+  if ((PRUNE_2026_8_PLUS)); then
+    params=$(jq -nc --arg key "$key" --arg agent "$agent_id" --arg session "$session_id" \
+      --argjson updated "$updated_at" '
+        {key:$key,agentId:$agent,expectedSessionId:$session,
+         expectedSessionUpdatedAt:$updated,deleteTranscript:true}
+      ')
+  else
+    params=$(jq -nc --arg key "$key" --arg agent "$agent_id" --arg session "$session_id" \
+      --argjson updated "$updated_at" '
+        {key:$key,agentId:$agent,expectedSessionId:$session,
+         expectedSessionUpdatedAt:$updated,requireInactive:true,deleteTranscript:true}
+      ')
+  fi
 
   rc=0
   response=$(run_openclaw gateway call sessions.delete \
     --json --timeout 30000 --params "$params" 2>&1) || rc=$?
   if ((rc == 0)) && jq -e '.ok == true' >/dev/null 2>&1 <<<"$response"; then
     deleted=$((deleted + 1))
-  elif grep -qiE 'changed before deletion|still active' <<<"$response"; then
+  elif grep -qiE 'changed before deletion|still active|could not safely stop before deletion' <<<"$response"; then
     raced=$((raced + 1))
   else
     failed=$((failed + 1))

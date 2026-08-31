@@ -10,9 +10,16 @@ setup() {
   export SESSION_THREAD_RETENTION_DAYS=14
   export SESSION_THREAD_MAX_DELETES=100
 
+  export FAKE_OPENCLAW_VERSION="${FAKE_OPENCLAW_VERSION:-2026.7.1}"
+
   cat > "$OPENCLAW_STUB" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+
+if [[ " $* " == *" --version "* || "${*: -1}" == "--version" ]]; then
+  echo "openclaw ${FAKE_OPENCLAW_VERSION:-2026.7.1}"
+  exit 0
+fi
 
 if [[ " $* " == *" sessions --all-agents --json --limit all "* ]]; then
   [[ "${OPENCLAW_HOME:-}" == "/root" ]] || { echo 'OpenClaw home was not pinned' >&2; exit 98; }
@@ -32,6 +39,14 @@ if [[ " $* " == *" gateway call sessions.delete "* ]]; then
     shift
   done
   printf '%s\n' "$params" >> "$OPENCLAW_STUB_LOG"
+  # 2026.8's real sessions.delete rejects the 7.1-era requireInactive param
+  # outright — mirror that here so a regression that re-adds it on >= 2026.8
+  # fails this same delete instead of silently succeeding.
+  if [[ "$(printf '%s\n%s\n' "2026.8" "${FAKE_OPENCLAW_VERSION:-2026.7.1}" | sort -V | head -1)" == "2026.8" ]] \
+    && jq -e 'has("requireInactive")' >/dev/null 2>&1 <<<"$params"; then
+    echo "invalid sessions.delete params: at root: unexpected property 'requireInactive'" >&2
+    exit 1
+  fi
   if [[ "$(jq -r '.expectedSessionId' <<<"$params")" == "race" ]]; then
     echo 'Session changed before deletion. Retry.' >&2
     exit 1
@@ -186,4 +201,125 @@ STUB
   grep -Fq '|| fail "could not start $retention_tmr"' "$REPO_ROOT/scripts/install-aux-units.sh"
   grep -Fq '$retention_tmr is not active' "$REPO_ROOT/scripts/install-aux-units.sh"
   ! grep -Fq 'hydra-session-thread-retention.service' "$REPO_ROOT/scripts/install-aux-units.sh"
+}
+
+# ── openclaw >= 2026.8: requireInactive is retired ───────────────────────────
+# Staging-verified 2026-08-31 (Gate E) against a live 2026.8.1 gateway:
+# sessions.delete REJECTS requireInactive outright
+# (INVALID_REQUEST: "unexpected property 'requireInactive'"). The stub above
+# reproduces that exact rejection for ANY payload carrying the key once
+# FAKE_OPENCLAW_VERSION is >= 2026.8, so this is a real regression trap: if
+# the param is ever re-added to the 2026.8+ branch, this delete fails and
+# `deleted` drops below 1 / `failed` rises above 0.
+
+@test "2026.8+: apply omits requireInactive and still deletes" {
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  export OPENCLAW_STUB_SESSIONS='{"sessions":[
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000001","agentId":"scout","sessionId":"old-done","updatedAt":1990000000000,"status":"done"}
+  ]}'
+
+  run bash "$SUT" --profile main --apply
+
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.deleted' <<<"$output")" -eq 1 ]
+  [ "$(jq -r '.failed' <<<"$output")" -eq 0 ]
+  [ "$(wc -l < "$OPENCLAW_STUB_LOG")" -eq 1 ]
+  jq -e 'select(.agentId == "scout" and .expectedSessionId == "old-done" and .expectedSessionUpdatedAt == 1990000000000 and .deleteTranscript == true and (has("requireInactive") | not))' \
+    "$OPENCLAW_STUB_LOG" >/dev/null
+}
+
+@test "below 2026.8: apply still sends requireInactive unchanged" {
+  export FAKE_OPENCLAW_VERSION=2026.7.1
+  export OPENCLAW_STUB_SESSIONS='{"sessions":[
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000001","agentId":"scout","sessionId":"old-done","updatedAt":1990000000000,"status":"done"}
+  ]}'
+
+  run bash "$SUT" --profile main --apply
+
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.deleted' <<<"$output")" -eq 1 ]
+  jq -e 'select(.requireInactive == true)' "$OPENCLAW_STUB_LOG" >/dev/null
+}
+
+@test "2026.8+: a session that cannot safely stop before deletion is a race, not a failure" {
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  export OPENCLAW_STUB_SESSIONS='{"sessions":[
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000006","agentId":"scout","sessionId":"race","updatedAt":1990000000000,"status":"done"}
+  ]}'
+  # The generic stub only special-cases expectedSessionId "race" for the
+  # pre-existing "changed before deletion" message; override it here to
+  # exercise the new "could not safely stop" alternation instead.
+  cat > "$OPENCLAW_STUB" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ " $* " == *" --version "* ]]; then
+  echo "openclaw ${FAKE_OPENCLAW_VERSION:-2026.7.1}"
+  exit 0
+fi
+if [[ " $* " == *" sessions --all-agents --json --limit all "* ]]; then
+  printf '%s\n' "$OPENCLAW_STUB_SESSIONS"
+  exit 0
+fi
+if [[ " $* " == *" gateway call sessions.delete "* ]]; then
+  echo "Session agent:scout:slack:channel:c1:thread:1900000000.000006 could not safely stop before deletion: active work in progress. Retry after active work or worker recovery finishes." >&2
+  exit 1
+fi
+echo "unexpected openclaw argv: $*" >&2
+exit 99
+STUB
+  chmod +x "$OPENCLAW_STUB"
+
+  run bash "$SUT" --profile main --apply
+
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.raced' <<<"$output")" -eq 1 ]
+  [ "$(jq -r '.failed' <<<"$output")" -eq 0 ]
+}
+
+# ── QA bot finding (PR #897, 2026-08-31): an unparseable runtime version must
+# abort loudly BEFORE any gateway mutation, never silently fall back to the
+# pre-2026.8 requireInactive payload shape — that shape fails every delete on
+# an actual 2.0 gateway (silent pruning outage). FAKE_OPENCLAW_VERSION's own
+# `${:-default}` can't express "produced nothing", so this overrides the stub.
+@test "unparseable runtime version: aborts loudly before any gateway mutation" {
+  cat > "$OPENCLAW_STUB" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ " $* " == *" --version "* || "${*: -1}" == "--version" ]]; then
+  echo ""
+  exit 0
+fi
+echo "unexpected openclaw argv (should never be reached): $*" >&2
+exit 99
+STUB
+  chmod +x "$OPENCLAW_STUB"
+
+  run bash "$SUT" --profile main --apply
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not determine openclaw runtime version"* ]]
+  [ ! -e "$OPENCLAW_STUB_LOG" ]
+}
+
+# QA bot finding (PR #897 round 2): emptiness alone was checked, but any
+# NON-empty garbage token (e.g. a mangled "OpenClaw 2026.invalid" whose
+# second awk field is "2026.invalid") passed straight through into
+# version_at_least, which selected a payload shape from an unspecified
+# sort -V comparison instead of refusing to guess.
+@test "garbage (non-version-shaped) runtime version: aborts loudly before any gateway mutation" {
+  cat > "$OPENCLAW_STUB" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ " $* " == *" --version "* || "${*: -1}" == "--version" ]]; then
+  echo "OpenClaw 2026.invalid"
+  exit 0
+fi
+echo "unexpected openclaw argv (should never be reached): $*" >&2
+exit 99
+STUB
+  chmod +x "$OPENCLAW_STUB"
+
+  run bash "$SUT" --profile main --apply
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not determine openclaw runtime version"* ]]
+  [ ! -e "$OPENCLAW_STUB_LOG" ]
 }

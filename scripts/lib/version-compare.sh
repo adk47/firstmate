@@ -13,7 +13,16 @@ version_at_least() {
 }
 
 # openclaw_runtime_version → prints the installed runtime version ("2026.7.1")
-# or nothing when openclaw is missing/unparseable. Never fails the caller.
+# or nothing when openclaw is missing/unparseable/malformed. Never fails the
+# caller. QA bot finding (PR #897 round 3): a non-empty but non-version-shaped
+# token (e.g. "OpenClaw 2026.invalid") used to pass straight through to
+# callers' `sort -V` comparisons, where the result is unspecified. Validating
+# the shape HERE means every caller's existing empty-⇒-fail-loud/UNEVALUATED
+# path already covers "malformed" too, for free.
 openclaw_runtime_version() {
-  openclaw --version 2>/dev/null | awk 'NR==1 {print $2}' || true
+  local ver
+  ver="$(openclaw --version 2>/dev/null | awk 'NR==1 {print $2}')" || true
+  if [[ "$ver" =~ ^[0-9]{4}(\.[0-9]+)+$ ]]; then
+    printf '%s' "$ver"
+  fi
 }

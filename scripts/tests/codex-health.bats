@@ -152,6 +152,53 @@ EOF
   [ "$output" -eq 0 ]
 }
 
+# ── codex_count_auth_profile_migration_required (openclaw >= 2026.8) ──────────
+# A NEW 2.0 failure class: the runtime expects credentials in the shared
+# authProfiles.store row and refuses to serve codex when a host has not
+# converged onto that shape, with the literal AUTH_PROFILE_MIGRATION_REQUIRED
+# code or the human-readable "requires legacy credential migration" tail.
+
+@test "auth_profile_migration_required: counts the literal code" {
+  run codex_count_auth_profile_migration_required <<'EOF'
+Aug 31 10:00:00 ovh-node-8 node[123]: probe: {"error":{"message":"...","code":"AUTH_PROFILE_MIGRATION_REQUIRED"}}
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
+@test "auth_profile_migration_required: counts the human-readable tail" {
+  run codex_count_auth_profile_migration_required <<'EOF'
+Aug 31 10:01:00 ovh-node-8 node[123]: [model-fallback/decision] decision=candidate_failed reason=auth_permanent detail=this credential requires legacy credential migration before it can be used
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
+@test "auth_profile_migration_required: sums both signatures across lines" {
+  run codex_count_auth_profile_migration_required <<'EOF'
+Aug 31 10:00:00 ovh-node-8 node[123]: probe: {"error":{"code":"AUTH_PROFILE_MIGRATION_REQUIRED"}}
+Aug 31 10:01:00 ovh-node-8 node[124]: detail=requires legacy credential migration
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 2 ]
+}
+
+@test "auth_profile_migration_required: a clean log is 0 (no false positive)" {
+  run codex_count_auth_profile_migration_required <<'EOF'
+Jul 27 17:03:44 ovh-node-8 node[2320706]: [agents/agent-command] [agent] run b114d315 ended with stopReason=stop
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
+@test "auth_profile_migration_required: distinct from session_invalidated (2026-07-27 lines are NOT this signature)" {
+  run codex_count_auth_profile_migration_required <<'EOF'
+Jul 27 15:59:04 ovh-node-8 node[1090392]: [diagnostic] lane task error: lane=nested:agent:devops:main durationMs=1231 error="FailoverError: Your access token could not be refreshed. Please log out and sign in again."
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
+}
+
 # ── codex_count_auth_permanent ────────────────────────────────
 
 @test "auth_permanent: counts the generic codex-auth-dead fallback marker" {

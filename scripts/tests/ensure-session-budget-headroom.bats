@@ -85,12 +85,44 @@ json.dump({"jobs": jobs}, open(path, "w"))
 PY
 }
 
+# ── openclaw >= 2026.8 fixtures ──────────────────────────────────────────────
+# On 2.0 sessions.json is gone; the guard reads
+# `openclaw --profile <p> sessions --all-agents --json` instead, which in
+# production is backed by per-agent SQLite. So the fixture here is a REAL
+# sqlite file per agent (not a stub JSON blob) — the `openclaw` stub below
+# reads it with node:sqlite and renders the CLI's JSON shape, exercising the
+# same node:sqlite path the production code effectively goes through the CLI
+# for. Byte-budget padding is a real inserted BLOB row (not appended raw
+# bytes), so the db stays a valid file for anything that ever needs to reopen
+# it.
+#
+# _mk_agent_2026_8 <agent> <padding-bytes> <cron-key-count> [protected-key-count]
+_mk_agent_2026_8() {
+  local a="$1" bytes="$2" cronkeys="$3" protkeys="${4:-1}"
+  mkdir -p "$FAKE_SESSIONS_DIR"
+  node --experimental-sqlite --no-warnings -e '
+    const {DatabaseSync} = require("node:sqlite");
+    const [ , dbPath, agent, bytesStr, cronStr, protStr] = process.argv;
+    const bytes = parseInt(bytesStr, 10), n = parseInt(cronStr, 10), m = parseInt(protStr, 10);
+    const db = new DatabaseSync(dbPath);
+    db.exec("CREATE TABLE sessions (key TEXT, chatType TEXT)");
+    const ins = db.prepare("insert into sessions (key, chatType) values (?, ?)");
+    for (let i = 0; i < m; i++) ins.run(`agent:${agent}:slack:channel:c123:thread:${1000 + i}.0`, "thread");
+    for (let i = 0; i < n; i++) ins.run(`agent:${agent}:cron:job-${i}`, null);
+    if (bytes > 0) {
+      db.exec("CREATE TABLE padding (data BLOB)");
+      db.prepare("insert into padding (data) values (?)").run(Buffer.alloc(bytes));
+    }
+  ' "$FAKE_SESSIONS_DIR/$a.sqlite" "$a" "$bytes" "$cronkeys" "$protkeys"
+}
+
 setup() {
   TEST_TMPDIR="$(mktemp -d)"
   export TEST_TMPDIR
   export SESSION_BUDGET_STATE_ROOT="$TEST_TMPDIR/root"
   export SESSION_BUDGET_PROFILES="main"
   export FAKE_CRON_JSON="$TEST_TMPDIR/cron.json"
+  export FAKE_SESSIONS_DIR="$TEST_TMPDIR/sessions-2026-8"
 
   mkdir -p "$TEST_TMPDIR/bin"
 
@@ -107,6 +139,9 @@ STUB
   cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
 #!/bin/bash
 args="$*"
+case "$1" in
+  --version) echo "openclaw ${FAKE_OPENCLAW_VERSION:-2026.7.1}"; exit 0 ;;
+esac
 case "$args" in
   *"cron list --all --json"*)
     [ -n "${FAKE_CRON_FAIL:-}" ] && exit 7
@@ -114,6 +149,74 @@ case "$args" in
       case "$args" in *"--profile ${FAKE_CRON_FAIL_PROFILE} "*) exit 7 ;; esac
     fi
     cat "$FAKE_CRON_JSON"
+    ;;
+  *"sessions --all-agents --json"*)
+    [ -n "${FAKE_SESSIONS_FAIL:-}" ] && exit 7
+    # QA bot finding (PR #897 round 2): the guard must query the sessions
+    # CLI exactly ONCE per profile, never re-query per collector. Log every
+    # call (for the "exactly once" assertion), and optionally fail every
+    # call PAST the first (for the "a later transient failure cannot read
+    # as clean" assertion) — a stub that succeeds once then fails.
+    [ -n "${FAKE_SESSIONS_CALL_LOG:-}" ] && echo "call" >> "$FAKE_SESSIONS_CALL_LOG"
+    if [ -n "${FAKE_SESSIONS_FAIL_AFTER_FIRST:-}" ] && [ -n "${FAKE_SESSIONS_CALL_LOG:-}" ]; then
+      [ "$(wc -l < "$FAKE_SESSIONS_CALL_LOG")" -gt 1 ] && exit 7
+    fi
+    # The production code MUST always send --limit all (the CLI paginates at
+    # 100 by default) — assert it here so a regression that drops the flag
+    # fails this stub loudly instead of silently under-counting.
+    case "$args" in
+      *"--limit all"*) ;;
+      *) echo "test stub: sessions call is missing --limit all ($args)" >&2; exit 91 ;;
+    esac
+    # FAKE_SESSIONS_PAGINATED simulates the CLI still returning a partial
+    # page (the adversarial/defensive case — the guard must never trust
+    # --limit all on faith).
+    if [ -n "${FAKE_SESSIONS_PAGINATED:-}" ]; then
+      echo '{"stores":[{"agentId":"ops","path":"/nonexistent"}],"sessions":[],"count":100,"totalCount":1758,"hasMore":true}'
+      exit 0
+    fi
+    # FAKE_SESSIONS_NULL_STORES reproduces the QA bot's exact round-5 fixture
+    # (PR #897): stores/sessions are null instead of arrays, yet the
+    # bookkeeping counters (count/totalCount/hasMore) are internally
+    # consistent — this must be UNEVALUATED via the schema gate, never a
+    # false clean from `.stores[]?` silently iterating null as "nothing".
+    if [ -n "${FAKE_SESSIONS_NULL_STORES:-}" ]; then
+      echo '{"stores":null,"sessions":null,"count":0,"totalCount":0,"hasMore":false}'
+      exit 0
+    fi
+    node --experimental-sqlite --no-warnings -e '
+      const {DatabaseSync} = require("node:sqlite");
+      const fs = require("fs"), path = require("path");
+      const dir = process.argv[1];
+      const stores = [], sessions = [];
+      if (fs.existsSync(dir)) {
+        for (const f of fs.readdirSync(dir)) {
+          if (!f.endsWith(".sqlite")) continue;
+          const agentId = f.replace(/\.sqlite$/, "");
+          const p = path.join(dir, f);
+          stores.push({agentId, path: p});
+          const db = new DatabaseSync(p, {readOnly: true});
+          // Real 2026.8 entries carry NO chatType field at all (staging-
+          // verified 2026-08-31) — omit it here too, so this fixture proves
+          // classification works from .key alone, the verified mechanism.
+          for (const row of db.prepare("select key from sessions").all()) {
+            sessions.push({agentId, key: row.key});
+          }
+        }
+      }
+      // QA bot finding (PR #897 round 3): a stores[] entry whose path is
+      // absent/unreadable on disk must be UNEVALUATED, not read as 0 bytes.
+      // FAKE_SESSIONS_BROKEN_PATH_AGENT adds exactly that shape — a real
+      // stores[] entry naming a path that does not exist.
+      const brokenAgent = process.env.FAKE_SESSIONS_BROKEN_PATH_AGENT || "";
+      if (brokenAgent) {
+        stores.push({agentId: brokenAgent, path: path.join(dir, "vanished-" + brokenAgent + ".sqlite")});
+      }
+      process.stdout.write(JSON.stringify({
+        stores, sessions,
+        count: sessions.length, totalCount: sessions.length, hasMore: false,
+      }));
+    ' "$FAKE_SESSIONS_DIR"
     ;;
   *) echo "unexpected openclaw invocation: $args" >&2; exit 90 ;;
 esac
@@ -588,4 +691,217 @@ STUB
   _mk_profile main 3mb
   run "$SCRIPT" --check
   [ "$status" -eq 1 ]
+}
+
+# ── openclaw >= 2026.8 (sessions.json gone, per-agent SQLite via the CLI) ────
+# Mirrors a handful of the 7.1 cases above against the real-sqlite fixture, to
+# prove the runtime split reaches the same verdicts from the same underlying
+# data, not just that it runs without erroring.
+
+@test "2026.8+: clean when every agent is well under the budget" {
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  _mk_agent_2026_8 ops 1024 3
+  _set_enabled_crons ops 2
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean"* ]]
+}
+
+@test "2026.8+: CRITICAL when an agent's session store exceeds maxDiskBytes" {
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  _mk_profile main 1mb
+  _mk_agent_2026_8 ops $((2 * 1024 * 1024)) 3
+  _set_enabled_crons ops 2
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CRITICAL"* ]]
+  [[ "$output" == *"main/ops"* ]]
+  [[ "$output" == *"maxDiskBytes"* ]]
+}
+
+@test "2026.8+: CRITICAL on the wedge signature: enabled crons but ZERO cron session keys" {
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  _mk_agent_2026_8 ops 1024 0
+  _set_enabled_crons ops 8
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"8 enabled model-turn cron(s) but ZERO"* ]]
+  [[ "$output" == *"CronSessionLifecycleClaimError"* ]]
+}
+
+@test "2026.8+: CRITICAL when the protected footprint reaches maxEntries, far under maxDiskBytes" {
+  # The #829 shape, replayed against the SQLite-backed data source.
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  _mk_profile main 4gb 1000
+  _mk_agent_2026_8 scout 1024 5 1000
+  _set_enabled_crons scout 3
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CRITICAL"* ]]
+  [[ "$output" == *"protected (non-removable) entries >= maxEntries"* ]]
+}
+
+@test "2026.8+: a failed sessions CLI call is UNEVALUATED, never a silent all-clear" {
+  # Distinct failure mode from 7.1's unreadable sessions.json: here the whole
+  # per-agent data source for the profile is gone, not just one agent's file.
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  export FAKE_SESSIONS_FAIL=1
+  _mk_agent_2026_8 ops 1024 3
+  _set_enabled_crons ops 2
+  run "$SCRIPT" --check
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"UNEVALUATED"* ]]
+  [[ "$output" == *"sessions --all-agents --json"* ]]
+}
+
+@test "2026.8+: report mode never blocks on a failed sessions CLI call" {
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  export FAKE_SESSIONS_FAIL=1
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+}
+
+@test "2026.8+: a partial (paginated) sessions page is UNEVALUATED, never clean" {
+  # Adversarial case (2026-08-31 staging finding): the CLI paginates at 100
+  # by default, and this must never be trusted at face value even with
+  # --limit all sent. The stub here returns hasMore:true, count(100) <
+  # totalCount(1758) regardless — proving the guard checks the response
+  # shape itself, not just that it sent the right flag. Without the
+  # pagination-paranoia gate this fixture reports clean (0 findings from an
+  # empty "sessions" array) — the mutation this test exists to catch.
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  export FAKE_SESSIONS_PAGINATED=1
+  _set_enabled_crons ops 8
+  run "$SCRIPT" --check
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"UNEVALUATED"* ]]
+  [[ "$output" == *"PARTIAL page"* ]]
+  [[ "$output" == *"hasMore=true"* ]]
+  [[ "$output" != *"CRITICAL"* ]]
+}
+
+@test "2026.8+: a counter-consistent but null stores/sessions response is UNEVALUATED, never clean" {
+  # QA bot finding (PR #897 round 5, thread 3898259244): the fixture
+  # `{"stores":null,"sessions":null,"count":0,"totalCount":0,"hasMore":false}`
+  # satisfies the existing hasMore/count/totalCount bookkeeping check
+  # (0==0, hasMore false) while stores/sessions are null, not arrays.
+  # `_agent_dirs`'s `.stores[]?` then silently iterates null as "nothing",
+  # so zero agents are enumerated and the profile reads as clean with zero
+  # findings — a false clean, not a stricter one. The schema gate must
+  # catch this BEFORE the bookkeeping check gets a chance to pass it.
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  export FAKE_SESSIONS_NULL_STORES=1
+  _set_enabled_crons ops 2
+  run "$SCRIPT" --check
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"UNEVALUATED"* ]]
+  [[ "$output" == *"missing/null/wrong-typed field"* ]]
+  [[ "$output" != *"CRITICAL"* ]]
+}
+
+@test "2026.8+: report mode never blocks on a null stores/sessions response" {
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  export FAKE_SESSIONS_NULL_STORES=1
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+}
+
+@test "2026.8+: report mode never blocks on a partial (paginated) sessions page" {
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  export FAKE_SESSIONS_PAGINATED=1
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+}
+
+# QA bot finding (PR #897 round 2): _sessions_json's cache used to be a bash
+# associative array, mutated inside `$(...)`/pipe subshells whose writes
+# never escape — so every per-agent collector re-issued the real CLI call
+# instead of reading a cache. A transient failure on any call PAST the first
+# (i.e. after collect_findings already validated the first response as a
+# complete page) silently starved that later collector's jq input, which
+# reads as "nothing to report" — a false clean, not UNEVALUATED. The fix
+# fetches to a FILE exactly once per profile, in the parent frame, and every
+# collector only ever reads that file.
+@test "2026.8+ sessions CLI is queried EXACTLY ONCE per profile, never re-queried per collector" {
+  _mk_agent_2026_8 ops 1024 3
+  _set_enabled_crons ops 2
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  export FAKE_SESSIONS_CALL_LOG="$TEST_TMPDIR/sessions-call-log"
+  : > "$FAKE_SESSIONS_CALL_LOG"
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean"* ]]
+  [ "$(wc -l < "$FAKE_SESSIONS_CALL_LOG")" -eq 1 ]
+}
+
+@test "2026.8+ a sessions CLI failure on a call PAST the first cannot produce a false clean" {
+  _mk_agent_2026_8 ops 1024 3
+  _set_enabled_crons ops 2
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  export FAKE_SESSIONS_CALL_LOG="$TEST_TMPDIR/sessions-call-log"
+  export FAKE_SESSIONS_FAIL_AFTER_FIRST=1
+  : > "$FAKE_SESSIONS_CALL_LOG"
+  run "$SCRIPT" --check
+  # With only ONE real call ever made, this must still read the complete,
+  # successful first response and report clean — never silently starve a
+  # later collector and let that read as clean by accident.
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean"* ]]
+  [ "$(wc -l < "$FAKE_SESSIONS_CALL_LOG")" -eq 1 ]
+}
+
+# ── QA bot finding (PR #897, 2026-08-31): an unparseable runtime version must
+# not silently guess < 2026.8 and run the (on an actual 2.0 box, absent)
+# 7.1 file-tree checks — that risks a false "clean" when there is real
+# budget/eviction risk unevaluated. Overrides the shared stub for --version
+# only, since FAKE_OPENCLAW_VERSION's `${:-default}` can't itself express
+# "produced nothing".
+_stub_unparseable_openclaw_version() {
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
+#!/bin/bash
+args="$*"
+case "$1" in
+  --version) echo ""; exit 0 ;;
+esac
+echo "unexpected openclaw invocation: $args" >&2
+exit 90
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+}
+
+@test "unparseable runtime version: --check exits 2 (UNEVALUATED), never a false clean" {
+  _stub_unparseable_openclaw_version
+  # An agent well under any conceivable budget: if the guard silently
+  # guessed pre-2026.8 and ran the (on 2.0, absent) file-tree checks, it
+  # would find nothing and report clean instead of UNEVALUATED.
+  _mk_agent main ops 1024 3
+  _set_enabled_crons ops 2
+  run "$SCRIPT" --check
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"UNEVALUATED"* ]]
+  [[ "$output" == *"could not determine openclaw runtime version"* ]]
+  [[ "$output" != *"CRITICAL"* ]]
+}
+
+@test "unparseable runtime version: report mode never blocks on it (still exits 0)" {
+  _stub_unparseable_openclaw_version
+  _mk_agent main ops 1024 3
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+}
+
+@test "2026.8+ an agent whose stores[] path is absent on disk is UNEVALUATED, never 0-byte clean" {
+  # QA bot finding (PR #897 round 3): a stores[] entry naming a path that
+  # doesn't actually exist on disk used to `return 0` with NO stdout, which
+  # the caller reads as "nothing to check" and silently skips — false clean
+  # disk headroom for an agent whose SQLite store vanished.
+  _mk_agent_2026_8 ops 1024 3
+  _set_enabled_crons ops 2
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  export FAKE_SESSIONS_BROKEN_PATH_AGENT=ghost
+  run "$SCRIPT" --check
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"UNEVALUATED"* ]]
+  [[ "$output" == *"main/ghost"* ]]
+  [[ "$output" == *"session store path absent or unreadable"* ]]
 }

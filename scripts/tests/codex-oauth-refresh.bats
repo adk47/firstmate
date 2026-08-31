@@ -238,6 +238,97 @@ SYNC
   [ ! -e "$TEST_TMPDIR/sync-ran" ]
 }
 
+# --- openclaw >= 2026.8 break-glass gate ------------------------------------
+# On 2.0 native in-process auto-refresh is the sole refresher; a second
+# refresher racing it reproduces the 2026-06-08 refresh_token_reused
+# incident. Stub `openclaw --version` directly in the test body (not via a
+# VAR=x prefix on `run`, which bats delivers unreliably to stubs).
+
+_stub_openclaw_version() {
+  cat > "$TEST_TMPDIR/bin/openclaw" <<STUB
+#!/bin/bash
+[ "\$1" = "--version" ] && echo "openclaw $1"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+}
+
+@test "break-glass gate: refuses to run on runtime >= 2026.8 without --break-glass" {
+  _stub_openclaw_version "2026.8.1"
+  run "$SCRIPT"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"REFUSING"* ]]
+  [[ "$output" == *"2026.8"* ]]
+  # Refused before ever touching the store or the network.
+  [ "$(jq -r '.profiles["openai-codex:a@x.com"].access' "$CODEX_AUTH_STORE")" = "OLD_ACCESS_A" ]
+}
+
+@test "break-glass gate: --break-glass overrides on runtime >= 2026.8" {
+  _stub_openclaw_version "2026.8.1"
+  run "$SCRIPT" --break-glass
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"REFUSING"* ]]
+  [ "$(jq -r '.profiles["openai-codex:a@x.com"].access' "$CODEX_AUTH_STORE")" = "NEW_ACCESS" ]
+}
+
+@test "break-glass gate: is a no-op on runtime < 2026.8" {
+  _stub_openclaw_version "2026.7.1"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"REFUSING"* ]]
+  [ "$(jq -r '.profiles["openai-codex:a@x.com"].access' "$CODEX_AUTH_STORE")" = "NEW_ACCESS" ]
+}
+
+# QA bot finding (PR #897 round 2): an unknown/unparseable runtime must NOT
+# be treated as a no-op — a false "still 7.x, safe to run" guess on an
+# unidentifiable-but-actually-upgraded host races native refresh exactly like
+# the >= 2026.8 case. Refuse loudly instead; --break-glass remains the sole
+# override, and its own log line must say the runtime was unverified.
+@test "break-glass gate: refuses to run when the runtime cannot be determined (empty output)" {
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
+#!/bin/bash
+[ "$1" = "--version" ] && echo ""
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+  run "$SCRIPT"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"REFUSING"* ]]
+  [[ "$output" == *"could not determine openclaw runtime version"* ]]
+  [ "$(jq -r '.profiles["openai-codex:a@x.com"].access' "$CODEX_AUTH_STORE")" = "OLD_ACCESS_A" ]
+}
+
+@test "break-glass gate: refuses to run when \`openclaw --version\` fails outright" {
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
+#!/bin/bash
+exit 1
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+  run "$SCRIPT"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"REFUSING"* ]]
+  [[ "$output" == *"could not determine openclaw runtime version"* ]]
+}
+
+@test "break-glass gate: --break-glass overrides when the runtime cannot be determined, and says so" {
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
+#!/bin/bash
+exit 1
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+  run "$SCRIPT" --break-glass
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"REFUSING"* ]]
+  [[ "$output" == *"--break-glass: runtime version could not be verified"* ]]
+  [ "$(jq -r '.profiles["openai-codex:a@x.com"].access' "$CODEX_AUTH_STORE")" = "NEW_ACCESS" ]
+}
+
+@test "break-glass gate: --dry-run still refuses on runtime >= 2026.8 without --break-glass" {
+  _stub_openclaw_version "2026.8.1"
+  run "$SCRIPT" --dry-run
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"REFUSING"* ]]
+}
+
 @test "id_token in the response is captured into the profile as idToken" {
   cat > "$RESP_FILE" <<'JSON'
 {"access_token":"NEW_ACCESS","refresh_token":"NEW_REFRESH","expires_in":864000,"token_type":"Bearer","id_token":"NEW_ID"}

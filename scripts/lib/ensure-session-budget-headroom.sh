@@ -125,8 +125,49 @@
 #                              dir is "<root>/.openclaw-<profile>" (default "/root")
 #   `openclaw` is resolved from PATH so tests can stub it.
 #
+# ── openclaw >= 2026.8 (sessions.json is gone there) ──────────────────────────
+# session.maintenance's two caps (maxDiskBytes / maxEntries) and the config
+# file they live in are unchanged on 2.0, so the config reads below stay
+# runtime-agnostic. What moves is the DATA the reapers act on: 7.1 keeps it in
+# each agent's agents/<id>/sessions/sessions.json; 2026.8+ has no such file —
+# session storage lives in per-agent SQLite, exposed only through
+# `openclaw --profile <p> sessions --all-agents --json`
+# (-> {stores:[{agentId,path}], sessions:[...], count, totalCount, hasMore,
+# ...}). Every collector that used to read sessions.json directly
+# (_agent_dirs, the per-agent byte count, _cron_key_count,
+# _protected_key_count) is therefore runtime-gated: below 2026.8 they keep
+# reading the file tree exactly as before; at/above it they read this ONE
+# cached CLI call instead, and the byte count stats the single SQLite file
+# `stores[].path` names rather than summing a directory.
+#
+# Staging-verified on a live 2026.8.1 gateway (2026-08-31):
+#  - The CLI PAGINATES: default `--limit` is 100 (a 1758-entry profile came
+#    back as count:100, totalCount:1758). Un-limited, that undercounts every
+#    per-agent metric silently — a false-clean, exactly the failure class this
+#    guard exists to prevent. `_sessions_json` therefore always passes
+#    `--limit all` (verified: returns count==totalCount, hasMore:false), AND
+#    `collect_findings` treats a still-partial response (hasMore==true or
+#    count!=totalCount) as UNEVALUATED rather than trusting a partial page.
+#  - Entry `.key` is exactly the 7.1 format (`agent:<id>:slack:channel:<c>:
+#    thread:<ts>`, `agent:<id>:cron:...`), so the ":cron:"/":thread:|:channel:
+#    |:group:" key-pattern matchers below are the VERIFIED classification
+#    mechanism — the same convention prune-completed-slack-thread-sessions.sh
+#    already relies on. `chatType` does NOT exist on 2.0 entries (both
+#    `.chatType` and `.origin.chatType` sampled null on every live entry;
+#    real fields are abortedLastRun, acpRuntime, ageMs, agentId, agentRuntime,
+#    contextTokens, inputTokens, key, kind, label, lastInteractionAt, model,
+#    modelProvider, outputTokens, sessionId, sessionStartedAt, status,
+#    systemSent, totalTokens, totalTokensFresh, updatedAt, visibility) — the
+#    chatType fallback branch below is dead code on 2.0 (kept only because it
+#    is harmless: `// ""` degrades to the key-pattern test either way) and
+#    must not be read as evidence chatType is part of the 2.0 shape.
+#
 # set -uo pipefail (NOT -e): report mode must never abort before its exit 0.
 set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=version-compare.sh
+source "$SCRIPT_DIR/version-compare.sh"
 
 PROFILES="${SESSION_BUDGET_PROFILES:-main edge}"
 WARN_RATIO="${SESSION_BUDGET_WARN_RATIO:-0.8}"
@@ -135,6 +176,23 @@ STATE_ROOT="${SESSION_BUDGET_STATE_ROOT:-/root}"
 # bash arithmetic is integer-only, so the warn thresholds scale by 100 rather
 # than multiplying by a fractional ratio (which would silently truncate to 0).
 WARN_RATIO_PCT="$(printf '%s' "$WARN_RATIO" | awk '{printf "%d", $1 * 100}')"
+
+# Resolved once so every collector below reads a consistent runtime answer
+# instead of shelling out repeatedly. An UNPARSEABLE runtime is NOT guessed
+# either direction: guessing < 2026.8 on an actual 2.0 box would run the old
+# file-tree checks against a layout (agents/*/sessions/sessions.json) that no
+# longer exists there — _agent_dirs finds zero agents, and collect_findings
+# reports a false "clean" with real budget/eviction risk unevaluated (the
+# exact failure class this guard exists to avoid). collect_findings instead
+# emits an explicit UNEVALUATED finding per profile and skips guessing.
+RUNTIME_VER="$(openclaw_runtime_version)"
+SESSION_BUDGET_2026_8_PLUS=0
+SESSION_BUDGET_RUNTIME_UNKNOWN=0
+if [ -z "$RUNTIME_VER" ]; then
+  SESSION_BUDGET_RUNTIME_UNKNOWN=1
+elif version_at_least "2026.8" "$RUNTIME_VER"; then
+  SESSION_BUDGET_2026_8_PLUS=1
+fi
 
 LOGPREFIX="[ensure-session-budget-headroom $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
 log() { echo "$LOGPREFIX $*" >&2; }
@@ -202,9 +260,60 @@ _max_entries() {
   printf '%s' "$raw"
 }
 
-# _agent_dirs <profile> — print each agent id that has a sessions dir.
+# _sessions_json_fetch <profile> / _sessions_json <profile> — the ONE call to
+# `openclaw --profile <profile> sessions --all-agents --json --limit all`
+# (2026.8+ only) per profile, and every per-agent collector's read of it.
+#
+# QA bot finding (PR #897 round 2): an in-memory associative-array cache is
+# USELESS here — every caller reads it through a `$(...)` or `| jq` pipeline
+# (e.g. `sessions_raw="$(_sessions_json "$profile")"`, `_sessions_json
+# "$profile" | jq ...`), and bash runs BOTH sides of that in a subshell. A
+# write to `_SESSIONS_JSON_CACHE` inside a subshell never escapes it, so the
+# "cache" always misses and every collector re-issues the real CLI call —
+# meaning a transient failure on any LATER call (after the first one
+# succeeded and passed the hasMore/count/totalCount check in collect_findings)
+# silently starves that one collector's jq input, which reads as "found
+# nothing" (clean), not UNEVALUATED. A FILE persists across subshells (they
+# share a filesystem), so this fetches to disk exactly once, in the parent
+# scope (collect_findings' own frame), before any collector runs, and every
+# collector — however deeply piped/subshelled — only ever reads that file.
+#
+# `--limit all` is NOT optional: the CLI paginates (default --limit is 100; a
+# live 1758-entry profile came back as count:100, totalCount:1758 without
+# it), and an unlimited call would silently undercount every per-agent metric
+# — a false-clean. `--limit all` is staging-verified to return
+# count==totalCount, hasMore:false.
+_sessions_json_file() { printf '%s/sessions-%s.json' "$SESSION_BUDGET_TMPDIR" "$1"; }
+
+_sessions_json_fetch() {
+  local profile="$1" out f
+  f="$(_sessions_json_file "$profile")"
+  out="$(openclaw --profile "$profile" sessions --all-agents --json --limit all 2>/dev/null)" || true
+  printf '%s' "$out" > "$f"
+}
+
+# _sessions_json <profile> — prints the fetched file's contents, or empty if
+# the fetch was never run / failed / returned nothing. Never issues a call
+# itself — callers must call `_sessions_json_fetch` first (collect_findings
+# does this once per profile, ahead of every collector).
+_sessions_json() {
+  local profile="$1" f
+  f="$(_sessions_json_file "$profile")"
+  [ -r "$f" ] && cat "$f" || printf ''
+}
+
+# _agent_dirs <profile> — print each agent id that owns session storage.
+# 7.1: each agent with a sessions/ dir. 2026.8+: sessions.json is gone, so
+# this reads the `stores[]` list _sessions_json cached instead — a failed/
+# empty call therefore enumerates ZERO agents here, which is why
+# collect_findings checks _sessions_json itself (not just this function's
+# output) before trusting an empty agent list as "nothing to report".
 _agent_dirs() {
   local profile="$1" d
+  if [ "$SESSION_BUDGET_2026_8_PLUS" -eq 1 ]; then
+    _sessions_json "$profile" | jq -r '.stores[]?.agentId // empty' 2>/dev/null
+    return
+  fi
   for d in "$STATE_ROOT/.openclaw-$profile"/agents/*/sessions; do
     [ -d "$d" ] || continue
     basename "$(dirname "$d")"
@@ -228,11 +337,51 @@ _dir_bytes() {
     | awk '{s += $1} END {printf "%.0f", s + 0}'
 }
 
-# _cron_key_count <profile> <agent> — number of ":cron:" keys in the agent's
-# sessions.json. Prints -1 when the file is unreadable/unparseable so callers can
-# distinguish "no data" from a genuine zero (a genuine zero IS the wedge).
+# _agent_bytes <profile> <agent> — bytes used by one agent's session storage,
+# runtime-aware. 7.1 sums the sessions/ directory (_dir_bytes, matching the
+# reaper's own per-file accounting). 2026.8+ has no such directory to sum —
+# session storage is the single SQLite file the `stores[]` entry for this
+# agent names — so this stats that one file instead. Prints -1 (same sentinel
+# as _cron_key_count/_protected_key_count) when the agent's store path is
+# absent or unreadable — QA bot finding (PR #897 round 3): this used to
+# `return 0` with NO stdout, which the caller's `[ -n "$bytes" ]` guard reads
+# as "nothing to check" and silently skips — an agent whose SQLite path
+# vanished (deleted, permission change, disk issue) then reports no finding
+# at all, i.e. false-clean disk headroom, instead of UNEVALUATED. Every agent
+# reaching this function was already enumerated FROM `stores[]` (see
+# _agent_dirs), so a missing/unreadable path here is a genuine anomaly, not
+# an expected "no store entry" case.
+_agent_bytes() {
+  local profile="$1" agent="$2" path
+  if [ "$SESSION_BUDGET_2026_8_PLUS" -eq 1 ]; then
+    path="$(_sessions_json "$profile" | jq -r --arg a "$agent" \
+      '.stores[]? | select(.agentId == $a) | .path // empty' 2>/dev/null | head -1)"
+    if [ -z "$path" ] || [ ! -r "$path" ]; then
+      printf '%s' -1
+      return
+    fi
+    stat "$_STAT_SIZE_FLAG" "$path" 2>/dev/null
+    return
+  fi
+  _dir_bytes "$STATE_ROOT/.openclaw-$profile/agents/$agent/sessions"
+}
+
+# _cron_key_count <profile> <agent> — number of ":cron:" keys for this agent.
+# 7.1: reads the agent's sessions.json. 2026.8+: filters the cached
+# `sessions --all-agents --json` array by agentId instead (see the header
+# comment on the `.sessions[]` shape assumption). Prints -1 when the source is
+# unreadable/unparseable so callers can distinguish "no data" from a genuine
+# zero (a genuine zero IS the wedge).
 _cron_key_count() {
-  local f="$STATE_ROOT/.openclaw-$1/agents/$2/sessions/sessions.json"
+  local profile="$1" agent="$2"
+  if [ "$SESSION_BUDGET_2026_8_PLUS" -eq 1 ]; then
+    _sessions_json "$profile" | jq -r --arg a "$agent" '
+      [ .sessions[]? | select(.agentId == $a) | (.key // "")
+        | select(type == "string" and test(":cron:")) ] | length' \
+      2>/dev/null || printf '%s' -1
+    return
+  fi
+  local f="$STATE_ROOT/.openclaw-$profile/agents/$agent/sessions/sessions.json"
   [ -r "$f" ] || { printf '%s' -1; return; }
   jq -r '(.entries // .)
          | (if type == "object" then keys else [.[].key] end)
@@ -253,7 +402,20 @@ _cron_key_count() {
 # loses every removable key on every load. Counting totals would page the
 # healthy case and miss nothing the protected count does not already catch.
 _protected_key_count() {
-  local f="$STATE_ROOT/.openclaw-$1/agents/$2/sessions/sessions.json"
+  local profile="$1" agent="$2"
+  if [ "$SESSION_BUDGET_2026_8_PLUS" -eq 1 ]; then
+    _sessions_json "$profile" | jq -r --arg a "$agent" '
+      [ .sessions[]? | select(.agentId == $a)
+        | select((.key | type == "string")
+              and ((.key | test(":thread:|:channel:|:group:"))
+                   or (((.chatType // .origin.chatType // "")
+                        | ascii_downcase) as $c
+                       | $c == "group" or $c == "channel" or $c == "thread"))) ]
+      | length' \
+      2>/dev/null || printf '%s' -1
+    return
+  fi
+  local f="$STATE_ROOT/.openclaw-$profile/agents/$agent/sessions/sessions.json"
   [ -r "$f" ] || { printf '%s' -1; return; }
   jq -r '(.entries // .)
          | (if type == "object" then to_entries else map({key: .key, value: .}) end)
@@ -310,9 +472,17 @@ _enabled_cron_counts() {
 collect_findings() {
   local viol=0 uneval=0 profile agent maxb bytes warn_at ckeys ecount
   local maxe pkeys entry_warn_at disk_dormant
+  local sessions_raw sessions_hasmore sessions_count sessions_totalcount
   for profile in $PROFILES; do
     [ -n "$profile" ] || continue
     [ -d "$STATE_ROOT/.openclaw-$profile" ] || continue
+
+    if [ "$SESSION_BUDGET_RUNTIME_UNKNOWN" -eq 1 ]; then
+      printf 'UNEVALUATED\t%s\tcould not determine openclaw runtime version ("openclaw --version" returned nothing/unparseable) — refusing to guess whether the 7.1 file-tree checks or the 2026.8+ sessions-API checks apply to this profile\n' \
+        "$profile"
+      uneval=1
+      continue
+    fi
 
     maxb="$(_max_disk_bytes "$profile")" || {
       printf 'UNEVALUATED\t%s\tcannot read %s/.openclaw-%s/openclaw.json — budget for this profile is UNKNOWN\n' \
@@ -322,6 +492,70 @@ collect_findings() {
     # Same file, same failure condition — already reported above, so this cannot
     # fail on its own once _max_disk_bytes succeeded.
     maxe="$(_max_entries "$profile")" || maxe=""
+
+    # 2026.8+: sessions.json is gone, so every per-agent check below reads
+    # through _sessions_json instead. A failed/empty CLI call makes
+    # _agent_dirs enumerate zero agents, which would otherwise look like a
+    # profile with nothing to report — check the call itself first so that
+    # reads as UNEVALUATED, not a false "clean", same shape as the maxb read
+    # failure above.
+    if [ "$SESSION_BUDGET_2026_8_PLUS" -eq 1 ]; then
+      # The ONE real CLI call for this profile, run directly (not inside a
+      # `$(...)`/pipe) so its file write lands in this frame, not a
+      # subshell that discards it. Every collector below reads the file via
+      # `_sessions_json`, however deeply it pipes/subshells that read.
+      _sessions_json_fetch "$profile"
+      sessions_raw="$(_sessions_json "$profile")"
+      if [ -z "$sessions_raw" ]; then
+        printf 'UNEVALUATED\t%s\t"openclaw --profile %s sessions --all-agents --json --limit all" failed or returned nothing — session budget/eviction signals for this profile are UNKNOWN (disk config was readable, but there is no per-agent data to check it against)\n' \
+          "$profile" "$profile"
+        uneval=1
+        continue
+      fi
+
+      # Schema gate FIRST, before the completeness/paranoia gate below. QA
+      # bot finding (PR #897 round 5): a malformed-but-counter-consistent
+      # response — `{"stores":null,"sessions":null,"count":0,"totalCount":0,
+      # "hasMore":false}` — passes hasMore/count/totalCount cleanly (0==0,
+      # hasMore false), yet `.stores`/`.sessions` are null, not arrays.
+      # `_agent_dirs`'s `.stores[]?` then iterates null as "nothing" (the
+      # `?` suppresses the type error), so zero agents get enumerated and
+      # the profile silently reads as "nothing to check" = CLEAN, even
+      # though the whole snapshot is unusable. Validate the FULL shape —
+      # .stores/.sessions must be arrays, .count/.totalCount numbers,
+      # .hasMore a boolean — fail-closed (UNEVALUATED) on ANY null, absent,
+      # or wrong-typed field before trusting the snapshot at all.
+      sessions_schema_ok="$(printf '%s' "$sessions_raw" | jq -r '
+        (has("stores") and (.stores | type == "array"))
+        and (has("sessions") and (.sessions | type == "array"))
+        and (has("count") and (.count | type == "number"))
+        and (has("totalCount") and (.totalCount | type == "number"))
+        and (has("hasMore") and (.hasMore | type == "boolean"))
+      ' 2>/dev/null)"
+      if [ "$sessions_schema_ok" != "true" ]; then
+        printf 'UNEVALUATED\t%s\t"openclaw --profile %s sessions --all-agents --json --limit all" returned a response with a missing/null/wrong-typed field (stores/sessions must be arrays, count/totalCount numbers, hasMore a boolean) — trusting a malformed snapshot would silently undercount or entirely skip session budget/eviction signals for this profile\n' \
+          "$profile" "$profile"
+        uneval=1
+        continue
+      fi
+
+      # Paranoia gate: `--limit all` is supposed to return a complete page
+      # (count==totalCount, hasMore:false), but never TRUST that on faith —
+      # a partial page silently undercounts every per-agent metric below,
+      # which is a false-clean, not a stricter one. Any sign this is a
+      # partial page (hasMore true, or count/totalCount mismatch/missing)
+      # is UNEVALUATED, same as a failed call.
+      sessions_hasmore="$(printf '%s' "$sessions_raw" | jq -r '.hasMore // false' 2>/dev/null)"
+      sessions_count="$(printf '%s' "$sessions_raw" | jq -r '.count // "null"' 2>/dev/null)"
+      sessions_totalcount="$(printf '%s' "$sessions_raw" | jq -r '.totalCount // "null"' 2>/dev/null)"
+      if [ "$sessions_hasmore" != "false" ] || [ "$sessions_count" = "null" ] \
+        || [ "$sessions_totalcount" = "null" ] || [ "$sessions_count" != "$sessions_totalcount" ]; then
+        printf 'UNEVALUATED\t%s\t"openclaw --profile %s sessions --all-agents --json --limit all" returned a PARTIAL page (hasMore=%s count=%s totalCount=%s) — trusting it would silently undercount session budget/eviction signals for this profile\n' \
+          "$profile" "$profile" "$sessions_hasmore" "$sessions_count" "$sessions_totalcount"
+        uneval=1
+        continue
+      fi
+    fi
 
     # maxEntries is taken RAW from the config (unlike maxDiskBytes, which
     # _parse_bytes reduces to digits), and it feeds arithmetic below. Validate it
@@ -374,8 +608,16 @@ collect_findings() {
       [ -n "$agent" ] || continue
 
       if [ "$disk_dormant" -eq 0 ]; then
-        bytes="$(_dir_bytes "$STATE_ROOT/.openclaw-$profile/agents/$agent/sessions")"
-        if [ -n "$bytes" ]; then
+        bytes="$(_agent_bytes "$profile" "$agent")"
+        if [ "$bytes" = "-1" ]; then
+          # QA bot finding (PR #897 round 3): an agent that was enumerated
+          # FROM stores[] but whose store path is now absent/unreadable is a
+          # genuine anomaly, not "0 bytes used" — report it as UNEVALUATED
+          # rather than silently skipping the byte check for this agent.
+          printf 'UNEVALUATED\t%s/%s\tsession store path absent or unreadable — disk-budget signal for this agent is UNKNOWN\n' \
+            "$profile" "$agent"
+          uneval=1
+        elif [ -n "$bytes" ]; then
           if [ "$bytes" -gt "$maxb" ]; then
             printf 'CRITICAL\t%s/%s\tsessions %s > maxDiskBytes %s — the reaper is deleting cron session entries; every cron on this agent will claim-error\n' \
               "$profile" "$agent" "$(_human "$bytes")" "$(_human "$maxb")"
@@ -484,6 +726,11 @@ _emit_findings() {
 
 main() {
   local mode="${1:-report}" findings rc
+  # Backs _sessions_json_fetch/_sessions_json's file-based per-profile cache
+  # (see their comment): a real file, not a bash variable, so the write
+  # survives every collector's `$(...)`/pipe subshell.
+  SESSION_BUDGET_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/session-budget-headroom.XXXXXX")"
+  trap 'rm -rf "$SESSION_BUDGET_TMPDIR"' EXIT
   findings="$(collect_findings)"; rc=$?
 
   case "$mode" in

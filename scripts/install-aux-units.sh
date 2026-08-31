@@ -220,6 +220,25 @@ HYDRA_ROOT="${1:-/opt/hydra}"
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] install-aux-units: $*"; }
 fail() { log "FATAL: $*"; exit 1; }
 
+# Runtime-aware install gate: on openclaw >= 2026.8 the codex-token-refresh
+# timer below must NOT be installed (see its own block for why). Resolve
+# once, here, so both the (non-)install and the active-teardown share one
+# answer. Unknown/unparseable runtime FAILS LOUD rather than guessing: a
+# false "pre-2026.8" guess on an actual 2.0 box would (re)install/re-enable
+# this timer alongside the native in-process refresher, reproducing the
+# 2026-06-08 refresh_token_reused fleet-kill. This runs from deploy/operator
+# context, where a hard failure is visible and correct — unlike a background
+# guard, there is no "unevaluated" state to fall back to here.
+# shellcheck source=lib/version-compare.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/version-compare.sh"
+AUX_RUNTIME_VER="$(openclaw_runtime_version)"
+[ -n "$AUX_RUNTIME_VER" ] \
+  || fail "could not determine openclaw runtime version (\`openclaw --version\` returned nothing/unparseable) — refusing to guess whether codex-token-refresh.timer belongs on this host (2026-06-08 refresh_token_reused class)"
+AUX_RUNTIME_IS_2026_8_PLUS=0
+if version_at_least "2026.8" "$AUX_RUNTIME_VER"; then
+  AUX_RUNTIME_IS_2026_8_PLUS=1
+fi
+
 [[ $EUID -eq 0 ]] || fail "must run as root (systemd unit writes require it)"
 [[ -x "$HYDRA_ROOT/scripts/provision-peer-labels.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/provision-peer-labels.sh missing or not executable"
@@ -1706,7 +1725,7 @@ systemctl daemon-reload
 # same day. Tags cannot be un-cut, so this aborts before the watcher is
 # installed rather than leaving two release paths armed.
 ensure_superseded_timer_off() {
-  local tmr="$1" en act
+  local tmr="$1" reason="${2:-superseded and must not run}" en act
   systemctl disable --now "$tmr" >/dev/null 2>&1 || true
   # `|| true` is REQUIRED on the capture, not sloppiness: `is-enabled` exits
   # non-zero for the expected "disabled" answer, and set -e would abort here.
@@ -1730,16 +1749,16 @@ ensure_superseded_timer_off() {
   # install is always cheaper than double-cutting a release.
   case "$en" in
     disabled|masked|masked-runtime|static|indirect|not-found) ;;
-    *) fail "$tmr: cannot confirm it is disabled (is-enabled returned '${en:-<query failed>}'). Refusing to install hydra-release-watch.timer alongside it: both would cut a release for the same day. Resolve it by hand, then re-run." ;;
+    *) fail "$tmr: cannot confirm it is disabled (is-enabled returned '${en:-<query failed>}'). ${reason}. Resolve it by hand, then re-run." ;;
   esac
   case "$act" in
     inactive|failed|deactivating|unknown|not-found) ;;
-    *) fail "$tmr: cannot confirm it is stopped (is-active returned '${act:-<query failed>}'). Refusing to install hydra-release-watch.timer alongside it: both would cut a release for the same day. Resolve it by hand, then re-run." ;;
+    *) fail "$tmr: cannot confirm it is stopped (is-active returned '${act:-<query failed>}'). ${reason}. Resolve it by hand, then re-run." ;;
   esac
-  log "  $tmr: disabled (enabled=$en active=$act) — superseded by hydra-release-watch.timer"
+  log "  $tmr: disabled (enabled=$en active=$act) — ${reason}"
 }
 
-ensure_superseded_timer_off hydra-release.timer
+ensure_superseded_timer_off hydra-release.timer "superseded by hydra-release-watch.timer: both would cut a release for the same day"
 
 # ─── Per-deploy release watcher (every 5 min) ─────────────────
 # Detects confirmed PROD releases across the ENABLED repos (hydra and
@@ -1931,7 +1950,14 @@ log "  $ctmr: $cstate (fires Mon 04:30 UTC)"
 # weekly cadence would let one missed Sunday lapse the token by Wednesday).
 # codex-keepalive.sh (every 15m) is the safety net if refreshes keep failing.
 # Same ownership rule: edit here + re-run install.
-cat > /etc/systemd/system/codex-token-refresh.service << CODEXREFRESHSVC
+#
+# openclaw >= 2026.8: do NOT install this timer. Native in-process auto-refresh
+# is the sole refresher there (see scripts/lib/codex-oauth-refresh.sh's own
+# >= 2026.8 --break-glass gate) — a second, out-of-band refresher racing it
+# reproduces the 2026-06-08 refresh_token_reused incident. If this unit
+# survives from a prior 7.x-era install, actively tear it down instead.
+if [ "$AUX_RUNTIME_IS_2026_8_PLUS" -eq 0 ]; then
+  cat > /etc/systemd/system/codex-token-refresh.service << CODEXREFRESHSVC
 [Unit]
 Description=HYDRA codex OAuth token refresh (+ gateway reload)
 
@@ -1948,7 +1974,7 @@ StandardOutput=append:/var/log/codex-token-refresh.log
 StandardError=append:/var/log/codex-token-refresh.log
 CODEXREFRESHSVC
 
-cat > /etc/systemd/system/codex-token-refresh.timer << CODEXREFRESHTMR
+  cat > /etc/systemd/system/codex-token-refresh.timer << CODEXREFRESHTMR
 [Unit]
 Description=Run the HYDRA codex OAuth token refresh twice weekly (Sun+Wed 04:00 UTC)
 
@@ -1964,13 +1990,17 @@ Unit=codex-token-refresh.service
 WantedBy=timers.target
 CODEXREFRESHTMR
 
-systemctl daemon-reload
+  systemctl daemon-reload
 
-rtmr=codex-token-refresh.timer
-systemctl enable "$rtmr" >/dev/null 2>&1 || log "WARN: could not enable $rtmr"
-systemctl start "$rtmr" >/dev/null 2>&1 || log "WARN: could not start $rtmr"
-rstate=$(systemctl is-active "$rtmr" 2>/dev/null || echo unknown)
-log "  $rtmr: $rstate (fires Sun+Wed 04:00 UTC)"
+  rtmr=codex-token-refresh.timer
+  systemctl enable "$rtmr" >/dev/null 2>&1 || log "WARN: could not enable $rtmr"
+  systemctl start "$rtmr" >/dev/null 2>&1 || log "WARN: could not start $rtmr"
+  rstate=$(systemctl is-active "$rtmr" 2>/dev/null || echo unknown)
+  log "  $rtmr: $rstate (fires Sun+Wed 04:00 UTC)"
+else
+  log "  codex-token-refresh.timer: NOT installed — runtime ${AUX_RUNTIME_VER} >= 2026.8, native in-process auto-refresh is the sole refresher there"
+  ensure_superseded_timer_off codex-token-refresh.timer "runtime ${AUX_RUNTIME_VER} >= 2026.8: native in-process auto-refresh is the sole refresher, a second one would race it (refresh_token_reused shape)"
+fi
 
 # ─── company-finder dedupe-cache refresh (timer) ──────────────
 # Precompute the ~50s NocoDB dedup snapshot out-of-band so prep-batch.sh

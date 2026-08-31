@@ -466,6 +466,28 @@ if [ "${CODEX_SESSION_INVALID:-0}" -gt 0 ] && [ "${CODEX_REFRESH_RACE:-0}" -eq 0
   date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-session-cooldown"
 fi
 
+# ── Codex AUTH-PROFILE MIGRATION REQUIRED watch (openclaw >= 2026.8) ──────────
+# On 2.0 the runtime expects credentials in the shared authProfiles.store row
+# (config_machine_state / per-agent auth_profile_store), not the legacy
+# per-agent JSON files this fleet ran on 7.x. A host that upgraded without
+# first converging onto that shape refuses to serve codex and says so with the
+# literal `AUTH_PROFILE_MIGRATION_REQUIRED` code, or "requires legacy
+# credential migration". Structurally this is its own class — the credential
+# is well-formed, just in the wrong shape for the runtime reading it — so it
+# gets its own detector rather than folding into the session-revocation or
+# catch-all paths. Ordered before the generic auth_permanent catch-all so the
+# specific, actionable page wins. See scripts/lib/codex-auth-invariants.sh,
+# the read-only checker for the 2.0 shape this signature means is missing.
+CODEX_AUTH_MIGRATION_REQUIRED=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex_count_auth_profile_migration_required)
+_dr_track codex_auth_migration_required "$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS_FRESH" "$EDGE_LOGS_FRESH" | codex_count_auth_profile_migration_required)"
+
+if [ "${CODEX_AUTH_MIGRATION_REQUIRED:-0}" -gt 0 ] \
+   && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-migration-cooldown" "$CODEX_COOLDOWN_MIN"; then
+  log "CODEX AUTH PROFILE MIGRATION REQUIRED: ${CODEX_AUTH_MIGRATION_REQUIRED} migration-required lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
+  slack_notify_critical ":rotating_light: *Codex auth profile migration required* — ${CODEX_AUTH_MIGRATION_REQUIRED}x \`AUTH_PROFILE_MIGRATION_REQUIRED\`/\"requires legacy credential migration\" across main+edge in last ${CHECK_WINDOW_MIN}min. The runtime is >= 2026.8 and expects the shared \`authProfiles.store\` row (config_machine_state), but a host has not converged onto that shape — the credential is well-formed, just in the wrong place.\n*This is NOT a refresh race, session revocation, or token lapse* — run \`scripts/lib/codex-auth-invariants.sh --check\` on node-8 to see exactly which invariant is violated (non-\`openai:*\` keys, un-archived legacy files, per-agent fan-out, missing/short store row) before touching anything."
+  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-migration-cooldown"
+fi
+
 # Convergence tripwire: if the two processes' refresh-lock dirs are no longer ONE
 # shared physical dir, the race can recur on the next (~daily) refresh — alert
 # BEFORE it bites. --check is read-only: exit 1 = not converged (CONV_OUT names
@@ -560,7 +582,7 @@ CODEX_AUTH_PERMANENT=$(printf '%s\n%s\n' "$MAIN_CODEX_LOGS" "$EDGE_LOGS" | codex
 
 if [ "${CODEX_AUTH_PERMANENT:-0}" -gt 0 ] && [ "${CODEX_REFRESH_RACE:-0}" -eq 0 ] \
    && [ "${CODEX_SESSION_INVALID:-0}" -eq 0 ] && [ "${CODEX_APIKEY_ROUTE:-0}" -eq 0 ] \
-   && [ "${CODEX_TOKEN_EXPIRED:-0}" -eq 0 ] \
+   && [ "${CODEX_TOKEN_EXPIRED:-0}" -eq 0 ] && [ "${CODEX_AUTH_MIGRATION_REQUIRED:-0}" -eq 0 ] \
    && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-authperm-cooldown" "$CODEX_COOLDOWN_MIN"; then
   log "CODEX AUTH DEAD (UNCLASSIFIED): ${CODEX_AUTH_PERMANENT} auth_permanent lines (main+edge) in last ${CHECK_WINDOW_MIN}min"
   slack_notify_critical ":rotating_light: *Codex auth failing — cause UNCLASSIFIED* — ${CODEX_AUTH_PERMANENT}x \`reason=auth_permanent\` across main+edge in last ${CHECK_WINDOW_MIN}min, but NONE of the known signatures (refresh race, session revoked, api-key route, token expired) matched. The fleet is on the openrouter fallback.\nTriage on node-8: \`ensure-codex-auth.sh --check\`, \`ensure-codex-version-pinned.sh --check\`, \`ensure-codex-refresh-lock-shared.sh --check\`, then read the live journal for the actual error string. If this fires repeatedly the signature is NEW — add a detector to \`scripts/lib/codex-health.sh\` so the next occurrence pages precisely."

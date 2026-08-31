@@ -56,7 +56,14 @@ LOGPREFIX="[codex-oauth-refresh $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
 log() { echo "$LOGPREFIX $1"; }
 
 DRY_RUN=0
-[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+BREAK_GLASS=0
+for _arg in "$@"; do
+  case "$_arg" in
+    --dry-run) DRY_RUN=1 ;;
+    --break-glass) BREAK_GLASS=1 ;;
+  esac
+done
+unset _arg
 
 # Optional Slack page on failure (best-effort; absent in the bats sandbox).
 _REFRESH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,6 +72,45 @@ if [ -r "$_REFRESH_DIR/slack-notify.sh" ]; then
   source "$_REFRESH_DIR/slack-notify.sh"
 fi
 _page() { declare -F slack_notify >/dev/null && slack_notify "$1" || true; }
+
+# ── openclaw >= 2026.8 gate ───────────────────────────────────────────────
+# On 2.0 the native runtime owns in-process auto-refresh of the shared
+# authProfiles.store row itself (the whole reason this script exists on 7.x —
+# nothing in-process refreshed codex there — no longer holds). This script
+# rotating the SAME single-use refresh token out-of-band, concurrently with
+# that native refresh, is exactly the two-refresher race that produced
+# `refresh_token_reused` in the 2026-06-08 main+edge incident: whichever side
+# loses the race POSTs an already-spent token and the whole chain dies.
+# --break-glass is the explicit, logged override for a human who has verified
+# nothing else is refreshing this token (e.g. native refresh itself is
+# confirmed broken and this is a deliberate manual recovery). Runtime
+# unknown/unparseable is ALSO gated (QA bot finding, PR #897 round 2): an
+# upgraded-but-unidentifiable host is exactly the case where guessing
+# "still 7.x, safe to run" races native refresh and reproduces
+# refresh_token_reused — refuse to guess is the RIGHT failure mode here, same
+# as the >= 2026.8 case, just with a distinct reason so a human can tell "we
+# know this is 2.0" apart from "we could not identify the host at all".
+# shellcheck source=version-compare.sh
+source "$_REFRESH_DIR/version-compare.sh"
+if [ "$BREAK_GLASS" -eq 0 ]; then
+  _runtime_ver="$(openclaw_runtime_version)"
+  if [ -z "$_runtime_ver" ]; then
+    log "REFUSING: could not determine openclaw runtime version (\`openclaw --version\` returned nothing/unparseable) — refusing to guess whether native in-process auto-refresh already owns this token on this host (the refresh_token_reused class). Pass --break-glass to override."
+    _page ":warning: *codex-oauth-refresh.sh refused to run* on node-8 — could not determine the openclaw runtime version, so it cannot verify whether native in-process auto-refresh already owns the shared codex token here. A second out-of-band refresh would risk the 2026-06-08 \`refresh_token_reused\` incident. If this was an intentional manual recovery, re-run with \`--break-glass\`."
+    exit 3
+  fi
+  if version_at_least "2026.8" "$_runtime_ver"; then
+    log "REFUSING: runtime $_runtime_ver >= 2026.8 — native in-process auto-refresh is the SOLE refresher there; running this too would race it (the refresh_token_reused shape). Pass --break-glass to override."
+    _page ":warning: *codex-oauth-refresh.sh refused to run* on node-8 — runtime is \`$_runtime_ver\` (>= 2026.8), where native in-process auto-refresh is the sole refresher for the shared codex token. A second out-of-band refresh here would race it exactly like the 2026-06-08 \`refresh_token_reused\` incident. If this was an intentional manual recovery, re-run with \`--break-glass\`."
+    exit 3
+  fi
+else
+  _runtime_ver="$(openclaw_runtime_version 2>/dev/null || true)"
+  if [ -z "$_runtime_ver" ]; then
+    log "--break-glass: runtime version could not be verified (unknown/unparseable) — proceeding on explicit human override anyway."
+  fi
+fi
+unset _runtime_ver
 
 # Structural preconditions fail loud AND page — a broken refresher would
 # otherwise surface only as a failed systemd unit with no alert.

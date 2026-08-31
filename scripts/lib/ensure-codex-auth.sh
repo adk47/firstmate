@@ -229,14 +229,19 @@ run_check() {
 # When the runtime is absent or pre-2026.7, legacy symlink behavior runs
 # unchanged (and the sync script itself no-ops below 2026.7, so double
 # invocation is safe).
+# QA bot finding (PR #897 round 4): runtime_ver is resolved EXACTLY ONCE in
+# main() and passed in here as $1 — this must NOT re-probe
+# `openclaw --version` itself. A re-probe can transiently disagree with
+# main()'s already-resolved value (flaky command, momentary unavailability),
+# which silently steers this call onto a different runtime-era path than the
+# rest of the same invocation used.
 maybe_delegate_to_sync() {
-  local lib_dir sync_script runtime_ver
+  local runtime_ver="$1"
+  shift
+  local lib_dir sync_script
   lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   sync_script="$lib_dir/codex-auth-sync.sh"
   [ -x "$sync_script" ] || return 1
-  # shellcheck source=version-compare.sh
-  source "$lib_dir/version-compare.sh"
-  runtime_ver="$(openclaw_runtime_version)"
   [ -n "$runtime_ver" ] || return 1
   if version_at_least "2026.7" "$runtime_ver"; then
     log "runtime $runtime_ver >= 2026.7 — delegating to codex-auth-sync.sh"
@@ -246,15 +251,80 @@ maybe_delegate_to_sync() {
   return 1
 }
 
+# openclaw >= 2026.8: shared codex auth moves again, out from under BOTH the
+# symlink fabric (this script's legacy mode) AND codex-auth-sync.sh's
+# sqlite-row-plus-codex-home fan-out — the runtime now serves every agent
+# straight from the shared authProfiles.store row (config_machine_state) with
+# per-agent auth_profile_store rows expected EMPTY (read-through inheritance).
+# There is nothing left for this script to converge: no files to symlink, no
+# access token to fan out. codex-auth-invariants.sh is the >= 2026.8 read-only
+# checker for that shape. --check mode propagates its exit code (the repo's
+# 0/1/2 convention carries straight through); default/--ensure mode is
+# report-only here too — codex-auth-invariants.sh has no write mode to run,
+# so "ensure" always exits 0 (ExecStartPre must never block start on a report).
+# QA bot finding (PR #897 round 4): runtime_ver is resolved EXACTLY ONCE in
+# main() and passed in here as $2 — this must NOT re-probe
+# `openclaw --version` itself (see maybe_delegate_to_sync above for why).
+maybe_delegate_to_invariants() {
+  local mode="$1" runtime_ver="$2" lib_dir inv_script
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  inv_script="$lib_dir/codex-auth-invariants.sh"
+  [ -n "$runtime_ver" ] || return 1
+  version_at_least "2026.8" "$runtime_ver" || return 1
+  # From here the runtime IS >= 2026.8, so this auth surface belongs SOLELY
+  # to codex-auth-invariants.sh. QA bot finding (PR #897 round 3): a missing
+  # or unexecutable checker used to fall through (return 1) into the legacy
+  # < 2026.7 symlink-fabric / codex-auth-sync.sh checks below — those cannot
+  # evaluate a 2.0 store at all, so a missing checker must refuse loud
+  # (--check) or skip (ensure), never silently run the wrong-era checks.
+  if [ ! -x "$inv_script" ]; then
+    if [ "$mode" = "check" ]; then
+      log "ERROR: runtime $runtime_ver >= 2026.8 but codex-auth-invariants.sh is missing or not executable at $inv_script — refusing to fall through to the legacy pre-2026.7 checks, which cannot evaluate this auth surface"
+      exit 2
+    fi
+    log "WARNING: runtime $runtime_ver >= 2026.8 but codex-auth-invariants.sh is missing or not executable at $inv_script — skipping (best-effort; never running the legacy pre-2026.7 convergence on a 2.0 store)"
+    exit 0
+  fi
+  log "runtime $runtime_ver >= 2026.8 — delegating to codex-auth-invariants.sh (report-only; nothing left here to symlink or fan out)"
+  if [ "$mode" = "check" ]; then
+    "$inv_script" --check
+    exit $?
+  fi
+  "$inv_script" --check || true
+  exit 0
+}
+
 main() {
+  # An unparseable runtime version must not silently fall through to the
+  # legacy 7.1 symlink-fabric checks below — those files are INERT on
+  # >= 2026.7/2026.8, so guessing "pre-2026.7" on an actual 2.0+ box whose
+  # version we simply could not read would run_check a fan-out signal that
+  # cannot exist there anymore (false clean) or run_ensure symlinks nobody
+  # reads. Resolve once, here, and never guess.
+  local lib_dir runtime_ver
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # shellcheck source=version-compare.sh
+  source "$lib_dir/version-compare.sh"
+  runtime_ver="$(openclaw_runtime_version)"
+
   case "${1:-}" in
     --check)
-      maybe_delegate_to_sync --check || true
+      if [ -z "$runtime_ver" ]; then
+        log "ERROR: could not determine openclaw runtime version (\`openclaw --version\` returned nothing/unparseable) — refusing to guess whether the 2026.8+ invariants checker, the 2026.7+ sync checker, or the legacy symlink-fabric check applies"
+        exit 2
+      fi
+      maybe_delegate_to_invariants check "$runtime_ver"
+      maybe_delegate_to_sync "$runtime_ver" --check || true
       run_check
       exit $?
       ;;
     ""|--ensure)
-      maybe_delegate_to_sync || true
+      if [ -z "$runtime_ver" ]; then
+        log "ERROR: could not determine openclaw runtime version (\`openclaw --version\` returned nothing/unparseable) — refusing to guess which auth surface to converge; skipping without writing anything (best-effort, must never block start)"
+        exit 0
+      fi
+      maybe_delegate_to_invariants ensure "$runtime_ver"
+      maybe_delegate_to_sync "$runtime_ver" || true
       run_ensure
       # Ensure mode is best-effort and must never block start.
       exit 0

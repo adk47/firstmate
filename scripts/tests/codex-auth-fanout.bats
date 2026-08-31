@@ -175,6 +175,10 @@ link_to_canonical_profiles() {
   for b in bash env date ln cp readlink basename dirname sed cat grep awk; do
     p="$(command -v "$b" 2>/dev/null)" && ln -sf "$p" "$TEST_TMPDIR/nojqbin/$b"
   done
+  # The runtime-version gate in main() runs before the jq check, so openclaw
+  # must resolve here too — otherwise this exercises the "unparseable
+  # runtime" gate (covered separately) instead of isolating "no jq".
+  cp "$TEST_TMPDIR/bin/openclaw" "$TEST_TMPDIR/nojqbin/openclaw"
   # Sanity: jq must NOT be resolvable through this PATH.
   if PATH="$TEST_TMPDIR/nojqbin" command -v jq >/dev/null 2>&1; then echo "the constructed nojqbin PATH still resolves jq, invalidating the fixture" >&2; false; fi
 
@@ -221,4 +225,187 @@ link_to_canonical_profiles() {
   check
   [ "$status" -eq 2 ]
   echo "$output" | grep -q 'delegating to codex-auth-sync.sh'
+}
+
+@test "runtime >= 2026.8 delegates ensure mode to codex-auth-invariants.sh, always exit 0" {
+  # On 2.0 the runtime serves every agent from the shared authProfiles.store
+  # row directly; there is nothing left here to symlink or fan out, so
+  # "ensure" is a pure report and must never block start (ExecStartPre).
+  # The sandbox has no 2.0 state at all, so the invariants checker itself
+  # would exit 2 (UNEVALUATED) — proving delegation happened is that the
+  # wrapper still forces exit 0 around that.
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  ensure
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'delegating to codex-auth-invariants.sh'
+}
+
+@test "runtime >= 2026.8 delegates --check mode to codex-auth-invariants.sh and propagates its exit code" {
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  check
+  # This sandbox's fixture is 7.x-shaped (un-archived auth-profiles.json /
+  # auth-state.json regular files under the canonical agent dir, no 2.0
+  # sqlite state at all) — codex-auth-invariants.sh correctly reads that as a
+  # CRITICAL violation (exit 1), not a false-clean 0. Proving the wrapper's
+  # exit code IS that propagated value (not its own legacy 0/1/2) is the
+  # point of this test.
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'delegating to codex-auth-invariants.sh'
+}
+
+# ── unparseable/unknown runtime must never guess ─────────────────────────────
+# QA bot finding (PR #897, 2026-08-31): an unparseable `openclaw --version`
+# must not silently fall through to the legacy 7.1 symlink-fabric checks —
+# those files are INERT on >= 2026.7/2026.8, so guessing "pre-2026.7" there
+# would run_check a fan-out signal that cannot exist anymore (false clean) or
+# run_ensure symlinks nobody reads. Both modes must refuse to guess.
+
+@test "unparseable runtime version: --check fails loud (exit 2), never runs the legacy fan-out check" {
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
+#!/bin/bash
+if [ "$1" = "--version" ]; then echo "garbage"; exit 0; fi
+echo "test stub: unexpected openclaw call ($*)" >&2
+exit 99
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+
+  # Plant a fan-out shape that the legacy check WOULD flag (exit 1) if it ran
+  # — proving the script instead exits 2 (UNEVALUATED-style) BEFORE reaching
+  # it, rather than guessing pre-2026.7 and running it anyway.
+  plant_codex_regular_file "$SUPPORT_DIR/auth-profiles.json"
+
+  check
+  [ "$status" -eq 2 ]
+  echo "$output" | grep -qi 'could not determine openclaw runtime version'
+}
+
+@test "unparseable runtime version: ensure mode exits 0 (never blocks start) but writes nothing" {
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
+#!/bin/bash
+if [ "$1" = "--version" ]; then echo ""; exit 0; fi
+echo "test stub: unexpected openclaw call ($*)" >&2
+exit 99
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+
+  # support/ has no auth files yet — if legacy ensure mode ran (guessing
+  # pre-2026.7), it would symlink them into existence.
+  ensure
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qi 'could not determine openclaw runtime version'
+  [ ! -e "$SUPPORT_DIR/auth-profiles.json" ]
+  [ ! -e "$SUPPORT_DIR/auth-state.json" ]
+}
+
+# ── QA bot round 3 (CRITICAL, fresh): a missing/unexecutable invariants
+# checker on >= 2026.8 must never fall through to the legacy pre-2026.7
+# symlink-fabric / codex-auth-sync.sh checks — those cannot evaluate a 2.0
+# store at all. Builds a sandboxed copy of scripts/lib/ so
+# codex-auth-invariants.sh can be made absent/unexecutable without touching
+# the real repo file every other test in this suite relies on.
+_sandbox_lib_without_invariants() {
+  local mode="$1" sandbox_lib="$TEST_TMPDIR/lib-no-invariants"
+  mkdir -p "$sandbox_lib"
+  cp "$HYDRA_REPO/scripts/lib/ensure-codex-auth.sh" "$sandbox_lib/"
+  cp "$HYDRA_REPO/scripts/lib/version-compare.sh" "$sandbox_lib/"
+  cp "$HYDRA_REPO/scripts/lib/codex-auth-sync.sh" "$sandbox_lib/"
+  if [ "$mode" = "unexecutable" ]; then
+    cp "$HYDRA_REPO/scripts/lib/codex-auth-invariants.sh" "$sandbox_lib/"
+    chmod -x "$sandbox_lib/codex-auth-invariants.sh"
+  fi
+  # else "absent": codex-auth-invariants.sh is not copied at all.
+  chmod +x "$sandbox_lib/ensure-codex-auth.sh" "$sandbox_lib/codex-auth-sync.sh"
+  printf '%s' "$sandbox_lib/ensure-codex-auth.sh"
+}
+
+@test "runtime >= 2026.8, invariants checker ABSENT: --check refuses (exit 2), never runs legacy checks" {
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  local sandboxed_script
+  sandboxed_script="$(_sandbox_lib_without_invariants absent)"
+  # Plant a fan-out shape the legacy check WOULD flag (exit 1) if it ran.
+  plant_codex_regular_file "$SUPPORT_DIR/auth-profiles.json"
+  run env CODEX_AUTH_ROOT="$ROOT" "$sandboxed_script" --check
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"codex-auth-invariants.sh is missing or not executable"* ]]
+  [[ "$output" != *"delegating to codex-auth-sync.sh"* ]]
+}
+
+@test "runtime >= 2026.8, invariants checker UNEXECUTABLE: --check refuses (exit 2), never runs legacy checks" {
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  local sandboxed_script
+  sandboxed_script="$(_sandbox_lib_without_invariants unexecutable)"
+  plant_codex_regular_file "$SUPPORT_DIR/auth-profiles.json"
+  run env CODEX_AUTH_ROOT="$ROOT" "$sandboxed_script" --check
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"codex-auth-invariants.sh is missing or not executable"* ]]
+  [[ "$output" != *"delegating to codex-auth-sync.sh"* ]]
+}
+
+@test "runtime >= 2026.8, invariants checker ABSENT: ensure mode warns + skips, never blocks start, never runs legacy" {
+  export FAKE_OPENCLAW_VERSION=2026.8.1
+  local sandboxed_script
+  sandboxed_script="$(_sandbox_lib_without_invariants absent)"
+  # support/ has no auth files yet — if legacy ensure mode ran, it would
+  # symlink them into existence.
+  run env CODEX_AUTH_ROOT="$ROOT" "$sandboxed_script"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"codex-auth-invariants.sh is missing or not executable"* ]]
+  [[ "$output" != *"delegating to codex-auth-sync.sh"* ]]
+  [ ! -e "$SUPPORT_DIR/auth-profiles.json" ]
+  [ ! -e "$SUPPORT_DIR/auth-state.json" ]
+}
+
+# ── runtime_ver must be probed exactly once ───────────────────────────────
+# QA bot finding (PR #897 round 4): main() resolves the runtime version once,
+# but maybe_delegate_to_invariants and maybe_delegate_to_sync each used to
+# RE-CALL openclaw_runtime_version — a stub that answers 2026.8.1 on the
+# first `openclaw --version` call and fails on every call after reproduces
+# main()'s single resolved value silently disagreeing with a helper's own
+# re-probe: main() sees 2026.8.1 and clears the "unparseable" gate, but the
+# re-probing helper gets nothing and falls through toward the legacy
+# pre-2026.7 checks. This uses the same invariants-checker-ABSENT sandbox as
+# the tests above (rather than letting the real 2026.8 path run) so the
+# assertion is scoped to ensure-codex-auth.sh's OWN `--version` calls —
+# codex-auth-invariants.sh is a separate process that legitimately probes
+# again on its own once delegated to, which is not what this finding is
+# about. With the fix, main() probes once and passes runtime_ver into both
+# helpers as an argument, so exactly ONE call happens even though two
+# helpers run.
+@test "openclaw --version succeeds once then fails: --check still takes the 2026.8 path via a single probe" {
+  local count_file="$TEST_TMPDIR/version-call-count"
+  rm -f "$count_file"
+  cat > "$TEST_TMPDIR/bin/openclaw" <<STUB
+#!/bin/bash
+if [ "\$1" = "--version" ]; then
+  n=0
+  [ -f "$count_file" ] && n="\$(cat "$count_file")"
+  n=\$((n + 1))
+  printf '%s' "\$n" > "$count_file"
+  if [ "\$n" -eq 1 ]; then
+    echo "OpenClaw 2026.8.1 (test)"
+    exit 0
+  fi
+  exit 1
+fi
+echo "test stub: unexpected openclaw call (\$*)" >&2
+exit 99
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+
+  local sandboxed_script
+  sandboxed_script="$(_sandbox_lib_without_invariants absent)"
+  plant_codex_regular_file "$SUPPORT_DIR/auth-profiles.json"
+  run env CODEX_AUTH_ROOT="$ROOT" "$sandboxed_script" --check
+  # Same shape as "runtime >= 2026.8, invariants checker ABSENT: --check
+  # refuses" above: main() resolved 2026.8.1 on its single probe, so the
+  # missing-checker path fires (exit 2), never the legacy fan-out check
+  # (which WOULD see the planted regular file and exit 1). A re-probing
+  # helper getting a failed second call would instead see an empty
+  # runtime_ver and fall through toward the legacy pre-2026.7 checks.
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"codex-auth-invariants.sh is missing or not executable"* ]]
+  [[ "$output" != *"could not determine openclaw runtime version"* ]]
+  [[ "$output" != *"delegating to codex-auth-sync.sh"* ]]
+  [ -f "$count_file" ]
+  [ "$(cat "$count_file")" = "1" ]
 }

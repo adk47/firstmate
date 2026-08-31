@@ -80,6 +80,27 @@ codex_count_session_invalidated() {
     -e "token_invalidated" || true
 }
 
+# codex_count_auth_profile_migration_required — count openclaw >= 2026.8
+# shared-auth-store MIGRATION-BLOCKED lines on stdin. This is a NEW 2.0
+# failure class, distinct from every class above: on 2.0 the runtime expects
+# credentials in the shared authProfiles.store row
+# (config_machine_state / auth_profile_store), not the legacy per-agent JSON
+# files this fleet ran on 7.x. A host that upgraded without first converging
+# onto that shape (or whose store lost its row) refuses to serve codex and
+# says so with the literal `AUTH_PROFILE_MIGRATION_REQUIRED` code, or the
+# human-readable "requires legacy credential migration" tail. Structurally
+# this is closer to codex_count_session_invalidated than to a refresh race:
+# the credential is well-formed on disk, it is simply in the wrong SHAPE for
+# the runtime reading it — see scripts/lib/codex-auth-invariants.sh, the
+# read-only checker for that shape. Remediation is a migration/re-sync onto
+# the shared store, NOT lock convergence, NOT re-pinning, NOT a plain
+# restart.
+codex_count_auth_profile_migration_required() {
+  grep -c -i -E \
+    -e "AUTH_PROFILE_MIGRATION_REQUIRED" \
+    -e "requires legacy credential migration" || true
+}
+
 # codex_count_auth_permanent — the GENERIC codex-auth-dead fallback marker.
 # `reason=auth_permanent` means "openclaw gave up on the codex credential and
 # dropped to the fallback rung" without saying why. Use ONLY as a catch-all
