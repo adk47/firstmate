@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createChatChannelPlugin } from "openclaw/plugin-sdk/core";
-import { runPassiveAccountLifecycle } from "openclaw/plugin-sdk/channel-lifecycle";
+import { runPassiveAccountLifecycle } from "openclaw/plugin-sdk/channel-outbound";
 import { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-ingress";
 import { dispatchInboundDirectDmWithRuntime } from "openclaw/plugin-sdk/channel-inbound";
 import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";

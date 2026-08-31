@@ -22,7 +22,7 @@
  */
 
 import { getActiveMemorySearchManager } from "openclaw/plugin-sdk/memory-host-search";
-import { getRuntimeConfig } from "openclaw/plugin-sdk/config-runtime";
+import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import type { IntercomAccountConfig, IntercomSessionState, KbSnippet } from "./types.js";
 
 export type { KbSnippet };
