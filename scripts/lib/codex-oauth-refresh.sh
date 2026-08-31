@@ -123,6 +123,13 @@ for key in "${_keys[@]}"; do
   access="$(printf '%s' "$resp" | jq -r '.access_token // empty' 2>/dev/null || true)"
   new_refresh="$(printf '%s' "$resp" | jq -r '.refresh_token // empty' 2>/dev/null || true)"
   expires_in="$(printf '%s' "$resp" | jq -r '.expires_in // empty' 2>/dev/null || true)"
+  # id_token: present in the refresh response (openid scope) but DISCARDED
+  # until 2026-08-31. openclaw 2026.8.1's codex 0.151.0 validates the id token
+  # on external-auth injection ("invalid ID token format" on our historical
+  # access-token stand-in), so capture the genuine one into canonical whenever
+  # the response carries it. OPTIONAL by design: an absent id_token must not
+  # fail the rotation (pre-2.0 nothing consumes it).
+  id_tok="$(printf '%s' "$resp" | jq -r '.id_token // empty' 2>/dev/null || true)"
 
   if [ -z "$access" ] || [ -z "$new_refresh" ] || ! [[ "$expires_in" =~ ^[0-9]+$ ]]; then
     local_err="$(printf '%s' "$resp" | jq -r '.error // .error_description // "unparseable response"' 2>/dev/null || true)"
@@ -134,8 +141,9 @@ for key in "${_keys[@]}"; do
   tmp="$STORE.tmp.$$"
   # chmod+mv are INSIDE the guard: a chmod/mv failure (RO fs, perms) must route
   # to the else (recovery log + page), not abort the script via set -e.
-  if jq --arg k "$key" --arg a "$access" --arg r "$new_refresh" --argjson e "$new_expires" \
-       '.profiles[$k].access=$a | .profiles[$k].refresh=$r | .profiles[$k].expires=$e' \
+  if jq --arg k "$key" --arg a "$access" --arg r "$new_refresh" --arg i "$id_tok" --argjson e "$new_expires" \
+       '.profiles[$k].access=$a | .profiles[$k].refresh=$r | .profiles[$k].expires=$e
+        | if $i != "" then .profiles[$k].idToken=$i else . end' \
        "$STORE" > "$tmp" 2>/dev/null && [ -s "$tmp" ] && chmod 600 "$tmp" && mv "$tmp" "$STORE"; then
     log "$key: refreshed OK — new expiry $(date -u -d "@$(( new_expires / 1000 ))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "+${expires_in}s")"
     ok=$((ok+1))

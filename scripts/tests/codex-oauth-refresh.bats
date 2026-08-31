@@ -237,3 +237,23 @@ SYNC
   [[ "$output" == *"sync SKIPPED"* ]]
   [ ! -e "$TEST_TMPDIR/sync-ran" ]
 }
+
+@test "id_token in the response is captured into the profile as idToken" {
+  cat > "$RESP_FILE" <<'JSON'
+{"access_token":"NEW_ACCESS","refresh_token":"NEW_REFRESH","expires_in":864000,"token_type":"Bearer","id_token":"NEW_ID"}
+JSON
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.profiles["openai-codex:a@x.com"].idToken' "$CODEX_AUTH_STORE")" = "NEW_ID" ]
+  [ "$(jq -r '.profiles["openai-codex:b@x.com"].idToken' "$CODEX_AUTH_STORE")" = "NEW_ID" ]
+  # rotation fields still intact alongside the capture
+  [ "$(jq -r '.profiles["openai-codex:a@x.com"].refresh' "$CODEX_AUTH_STORE")" = "NEW_REFRESH" ]
+}
+
+@test "absent id_token: rotation succeeds and NO idToken key is invented" {
+  # default RESP_FILE carries no id_token — the capture must be optional
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.profiles["openai-codex:a@x.com"] | has("idToken")' "$CODEX_AUTH_STORE")" = "false" ]
+  [ "$(jq -r '.profiles["openai-codex:a@x.com"].access' "$CODEX_AUTH_STORE")" = "NEW_ACCESS" ]
+}
