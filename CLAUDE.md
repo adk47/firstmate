@@ -409,6 +409,27 @@ future bump:
   Re-check #90308 on every bump; a release containing it lets us consider retiring the
   coalescing layer.
 
+**2026.8.1 ("OpenClaw 2.0") addendum — researched 2026-08-31, upgrade planned, prod
+window gated on the first correction release (see docs/runbooks/UPGRADE-2026.8.1.md
+for the full runbook, staging gates A–M, and target architecture).** What changes:
+- **The doctor-for-auth prohibition is REVISED for this one migration.** 2.0's
+  `doctor --fix` imports auth into the inheritance-base store that secondary agents
+  read through (no per-agent fan-out — the 2026-05-29 storm mechanism is gone), and
+  it is the ONLY sanctioned auth+session JSON→SQLite migration path. It runs ONCE
+  per state dir during the window, after the sentinel scrub (runbook Phase 2), and
+  never routinely. Config shape stays PR-owned; doctor migrates state only.
+- **Native in-process auto-refresh replaces `codex-token-refresh.timer`** at the
+  window (disabled permanently BEFORE first 2.0 boot — two refreshers on a
+  single-use rotating token is the refresh_token_reused race, self-inflicted).
+- **#90308 re-check result**: auto-closed UNMERGED 2026-07-29 (stale-bot). #97538
+  closed "already-fixed"; 2026.8.1 ships adjacent fixes (#104256 reply-lane release
+  after hung plugin work; prompt-lock/terminal-cleanup serialization) but canonical
+  #85532 stays open — the coalescing layer and stuck-lane watchdog remain
+  load-bearing until staging Gate L plus quiet prod evidence say otherwise.
+- `agents.defaults.imageModel.primary: "codex/gpt-5.6-sol"` is the ONE surviving
+  valid `codex/*` ref in 2.0 (bounded codex app-server image turns) — do not
+  "migrate" it to `openai/*`.
+
 ## Session budgets must exceed each agent's PROTECTED footprint, or crons wedge
 
 `session.maintenance` has two caps, and BOTH silently kill cron surfaces when an
