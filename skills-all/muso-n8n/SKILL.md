@@ -1,3 +1,14 @@
+---
+name: muso-n8n
+description: |
+  USE THIS to manage Muso.AI's n8n workflow automation (musoai.app.n8n.cloud) via the
+  Public REST API / MCP server: list, inspect, run, activate/deactivate workflows,
+  monitor and retry/stop executions, and read credentials, tags, users, variables,
+  projects, and data tables. ACCESS-GATED: write ops (create/update/delete/activate/
+  retry/stop) are Aaron (U7RP6HKUZ) ONLY; everyone else is READ-ONLY — send write
+  requests to Aaron.
+---
+
 # n8n Integration Skill
 
 Manage n8n workflows, executions, credentials, and more via the n8n Public REST API.

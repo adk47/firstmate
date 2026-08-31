@@ -1,3 +1,14 @@
+---
+name: muso-credit-investigator
+description: |
+  USE THIS when Ops asks "should we approve this credit request?", "is this profile
+  legit?", "investigate user/credit", or when a profile is flagged by the Daily Fraud
+  Scan. Given a user/profile/credit-request ID, runs a deep credit-authenticity
+  investigation (catalog baseline, submission velocity, stream-inflation, web verify,
+  risk scoring) and returns a GRANT / WATCH / DENY / ESCALATE report. Read-only; all
+  ops team members may trigger it.
+---
+
 # muso-credit-investigator
 
 ## Purpose

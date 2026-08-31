@@ -1,3 +1,12 @@
+---
+name: muso-anrok
+description: |
+  USE THIS for Muso.AI's Anrok sales-tax / VAT compliance: calculate tax on Stripe
+  invoices, create/update/void/negate transactions, manage exemption certificates,
+  product mappings, and list filings. ACCESS-GATED: write access is Aaron (U7RP6HKUZ)
+  ONLY, read access is Liza (U0A8CCTTAAG) — everyone else is blocked; direct them to Aaron.
+---
+
 # Anrok — Sales Tax & VAT Compliance
 
 Anrok is Muso.AI's global sales tax and VAT solution for SaaS. Handles tax calculation, filing, returns, and compliance.

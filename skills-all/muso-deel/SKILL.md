@@ -1,3 +1,13 @@
+---
+name: muso-deel
+description: |
+  USE THIS for Muso.AI's Deel contractor-payroll platform: look up people/contractors,
+  contracts, invoices, payment runs, timesheets, invoice adjustments (bonuses/expenses/
+  deductions), groups, and webhooks. ACCESS-GATED: BOTH read and write are Aaron
+  (U7RP6HKUZ) ONLY — everyone else is blocked because Deel holds highly sensitive PII
+  (addresses, birth dates, bank/compensation info). Never expose this data outside Aaron's DM.
+---
+
 # muso-deel — Deel Payroll & Contractor Management
 
 Deel is Muso.AI's contractor payroll platform. All team members are hired as contractors through Deel.
