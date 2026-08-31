@@ -70,9 +70,16 @@ const PROFILE_ANCHOR_REQUIRED = new Set(["profile-update", "bulk-credit-change",
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // A credit-verification ticket remains a valid human-review handoff even when
-// it lacks exact request ids. Only the stricter shape below may opt into the
-// autonomous UVN under-30 runner. The runner re-validates the same scope before
-// every write, so this tag is an eligibility marker rather than authorization.
+// it lacks exact request ids. Only the exact-scope shape below (UUID profile +
+// UUID cr_id on every pending credit) may opt into the autonomous UVN under-30
+// runner. Caroline's `recommendation` deliberately does NOT gate eligibility:
+// it is customer-influenced pre-screen evidence for the human reviewer, and
+// requiring recommend-approve made the runner unreachable — that value only
+// exists when catalog corroboration already let the gated credits_verify
+// approve directly (0 of 1,440 TO DO tickets ever carried the tag). The
+// runner's own policy (sub-30, fraud truth-floor, hard-reject rules,
+// still-UVN, exact-ID re-verify before every write) is the gate, so this tag
+// is an eligibility marker rather than authorization.
 function hasAutomationReadyUvnScope(
   actionType: string,
   customerProfileId: string | undefined,
@@ -81,7 +88,6 @@ function hasAutomationReadyUvnScope(
   if (actionType !== "credit-verify" || !customerProfileId || !UUID_RE.test(customerProfileId)) {
     return false;
   }
-  if (details?.recommendation !== "recommend-approve") return false;
   const pending = details?.pending_credits;
   return Array.isArray(pending) && pending.length > 0 && pending.every((item) => {
     if (typeof item !== "object" || item === null) return false;

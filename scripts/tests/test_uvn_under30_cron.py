@@ -29,7 +29,9 @@ def task(automation_ready=True):
         "customer_profile_id": PROFILE_ID,
         "details": {
             "pending_credits": [{"cr_id": CR_ID}],
-            "recommendation": "recommend-approve",
+            # needs-human is the mainline enrolled population now: the cron's
+            # own policy is the gate, not Caroline's untrusted recommendation.
+            "recommendation": "needs-human",
         },
     }
     return {

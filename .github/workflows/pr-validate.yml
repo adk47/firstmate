@@ -1460,6 +1460,25 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_trino_sql_extract
+      - name: Run UVN under-30 cron policy + orchestration tests
+        # scripts/uvn_under30_policy.py is the pure policy layer the
+        # ticket-scoped UVN popularity cron (scripts/uvn-under30-cron.py)
+        # trusts for scope parsing, fraud truth-floor loading, and the
+        # sub-30 qualification rules; the cron suite locks the approve /
+        # fail-closed orchestration around it. Both suites ALREADY gate CI
+        # through the bats-tests job (its scripts/ discovery picks up
+        # uvn-under30-cron-contract.bats, whose "policy boundary tests
+        # pass" case shells out to them) — this direct run is deliberate
+        # duplication so a failure of the 2026-08-31 enrollment-gate change
+        # (drop the recommend-approve requirement) is attributed to the
+        # exact suite here instead of a wrapped bats case. The files live
+        # under scripts/tests/ (not the root tests/ package), self-insert
+        # their sys.path, and are stdlib-only (no pytest/network) — run
+        # directly, same bare python3.
+        run: |
+          set -euo pipefail
+          python3 scripts/tests/test_uvn_under30_policy.py
+          python3 scripts/tests/test_uvn_under30_cron.py
 
   plugin-tests:
     name: Plugin tests (vitest)

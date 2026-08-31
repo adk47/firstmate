@@ -370,30 +370,32 @@ describe("create_ticket body, due date and tags", () => {
     ]);
   });
 
-  it("marks only fully scoped credit-verification tickets as UVN automation-ready", async () => {
+  it("marks exact-id credit-verification tickets automation-ready regardless of recommendation", async () => {
     const profileId = "11111111-1111-4111-8111-111111111111";
     const requestId = "22222222-2222-4222-8222-222222222222";
-    const readyDeps = makeDeps();
-    const readyTool = createCreateTicketTool(readyDeps);
-    await run(readyTool, {
-      ...CLAIM,
-      actionType: "credit-verify",
-      customerProfileId: profileId,
-      details: {
-        pending_credits: [{ cr_id: requestId }],
-        recommendation: "recommend-approve",
-      },
-    });
-    const readyBody = (vi.mocked(readyDeps.http.post).mock.calls[0][1] as any).body;
-    expect(readyBody.tags).toContain("automation:uvn-under30");
+    // Eligibility is exact scope only (UUID profile + UUID cr_ids); the
+    // `recommendation` field is deliberately ignored — full rationale on
+    // hasAutomationReadyUvnScope in src/tools/create-ticket.ts. All three
+    // recommendation states must tag identically.
+    for (const details of [
+      { pending_credits: [{ cr_id: requestId }], recommendation: "recommend-approve" },
+      { pending_credits: [{ cr_id: requestId }], recommendation: "needs-human" },
+      { pending_credits: [{ cr_id: requestId }] },
+    ]) {
+      const readyDeps = makeDeps();
+      const readyTool = createCreateTicketTool(readyDeps);
+      await run(readyTool, {
+        ...CLAIM,
+        actionType: "credit-verify",
+        customerProfileId: profileId,
+        details,
+      });
+      const readyBody = (vi.mocked(readyDeps.http.post).mock.calls[0][1] as any).body;
+      expect(readyBody.tags).toContain("automation:uvn-under30");
+    }
 
     for (const params of [
       { customerProfileId: profileId, details: { credit_request_id: requestId } },
-      { customerProfileId: profileId, details: { pending_credits: [{ cr_id: requestId }] } },
-      {
-        customerProfileId: profileId,
-        details: { pending_credits: [{ cr_id: requestId }], recommendation: "needs-human" },
-      },
       { customerProfileId: profileId, details: { pending_credits: [{ cr_id: "not-a-uuid" }] } },
       { customerProfileId: undefined, details: { pending_credits: [{ cr_id: requestId }] } },
     ]) {

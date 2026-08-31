@@ -19,7 +19,7 @@ setup() {
       and .delivery.to == "C0APB2CMM7C"
       and (.delivery.bestEffort // false) == false
       and (.description | contains("automation:uvn-under30"))
-      and (.description | contains("recommend-approve disposition"))
+      and (.description | contains("recommendation does not gate enrollment"))
       and (.description | contains("Plain-English summaries"))
   ' "$ROOT/cron-jobs.json"
   [ "$status" -eq 0 ]

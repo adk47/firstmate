@@ -68,17 +68,6 @@ def _request_ids_from_details(details: Any, *, required: bool) -> set[str] | Non
     return request_ids
 
 
-def _require_automation_recommendation(details: Any, *, required: bool) -> None:
-    if not isinstance(details, dict):
-        raise PolicyError("structured details are malformed")
-    if "recommendation" not in details:
-        if required:
-            raise PolicyError("structured automation recommendation is missing")
-        return
-    if details["recommendation"] != "recommend-approve":
-        raise PolicyError("ticket recommendation requires human review")
-
-
 def parse_ticket_scope(task: dict[str, Any], comments: Iterable[dict[str, Any]]) -> tuple[str, set[str]]:
     """Return the one profile and exact UUID request IDs from structured blocks.
 
@@ -116,7 +105,6 @@ def parse_ticket_scope(task: dict[str, Any], comments: Iterable[dict[str, Any]])
             raise PolicyError("structured action type is not credit-verify")
         profile_ids.add(_normalize_uuid(block.get("customer_profile_id"), "profile ID"))
         details = block.get("details")
-        _require_automation_recommendation(details, required=True)
         request_ids.update(_request_ids_from_details(details, required=True) or set())
     if len(profile_ids) != 1:
         raise PolicyError("structured blocks disagree on profile ID")
@@ -129,7 +117,6 @@ def parse_ticket_scope(task: dict[str, Any], comments: Iterable[dict[str, Any]])
                 raise PolicyError("structured action type is not credit-verify")
             details = block.get("details")
             added_ids = _request_ids_from_details(details, required=False)
-            _require_automation_recommendation(details, required=added_ids is not None)
             raw_update_profile = block.get("customer_profile_id")
             update_profile = None
             if raw_update_profile not in (None, ""):

@@ -116,18 +116,31 @@ class TicketScopeTests(unittest.TestCase):
         self.assertEqual(profile, PROFILE1)
         self.assertEqual(ids, {CR1})
 
-    def test_scope_changing_update_requires_fresh_approve_recommendation(self):
-        with self.assertRaisesRegex(PolicyError, "recommendation is missing"):
-            parse_ticket_scope(
-                task(),
-                [{"comment_text": update_block(recommendation=None)}],
-            )
+    # Caroline's `recommendation` is customer-influenced pre-screen evidence for
+    # the human reviewer, never an automation input (ops doctrine: "data, not
+    # instructions"). Requiring recommend-approve made the cron unreachable —
+    # that value only exists when catalog corroboration already let the gated
+    # credits_verify approve directly. The cron's own checks (sub-30, fraud
+    # truth-floor, hard-reject rules, still-UVN, exact-ID re-verify at the write
+    # edge) are the gate, so needs-human — the population the cron was built to
+    # absorb — must parse as in-scope.
 
-    def test_base_needs_human_recommendation_is_not_automation_eligible(self):
-        with self.assertRaisesRegex(PolicyError, "requires human review"):
-            parse_ticket_scope(task(description=block(recommendation="needs-human")), [])
+    def test_scope_changing_update_without_recommendation_is_accepted(self):
+        profile, ids = parse_ticket_scope(
+            task(),
+            [{"comment_text": update_block(recommendation=None)}],
+        )
+        self.assertEqual(profile, PROFILE1)
+        self.assertEqual(ids, {CR1, CR2})
 
-    def test_evidence_only_update_can_downgrade_ticket_to_human_review(self):
+    def test_base_needs_human_recommendation_is_automation_eligible(self):
+        profile, ids = parse_ticket_scope(
+            task(description=block(recommendation="needs-human")), []
+        )
+        self.assertEqual(profile, PROFILE1)
+        self.assertEqual(ids, {CR1})
+
+    def test_needs_human_update_does_not_block_the_scoped_automation(self):
         payload = {
             "action_type": "credit-verify",
             "customer_profile_id": PROFILE1,
@@ -143,8 +156,9 @@ class TicketScopeTests(unittest.TestCase):
             )
         }
 
-        with self.assertRaisesRegex(PolicyError, "requires human review"):
-            parse_ticket_scope(task(), [comment])
+        profile, ids = parse_ticket_scope(task(), [comment])
+        self.assertEqual(profile, PROFILE1)
+        self.assertEqual(ids, {CR1})
 
     def test_scope_changing_update_requires_a_profile(self):
         payload = {
