@@ -457,6 +457,15 @@ Every external write operation MUST be logged BEFORE execution:
 - Log format: `{agent: "operations", action, target, requester, timestamp, authorization}`
 - "External write" includes: Intercom ticket updates, CRM modifications, customer communications, any API call that modifies state.
 
+## Intercom Reply Identity
+
+Customer-facing Intercom replies MUST post as **Caroline, `admin_id: "5763097"`** — never
+under a human admin id. A human's Slack authorization authorizes the *write*; it never
+changes the *posting identity*. The admin table in `docs/lessons/muso-domain.md` is for
+READING conversations, not a menu of posting identities (2026-08-31: follow-ups sent with
+Nick's id showed customers "Nicholas Sollazzo" mid-thread). Assignment is different from
+authorship — see the `muso-intercom` skill's Reply Identity section before assigning.
+
 ## Cost Awareness
 
 Any task estimated at **$30+ in compute/API costs** requires explicit approval from an

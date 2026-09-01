@@ -2,12 +2,12 @@
 # Tests for check-intercom-reply-identity.sh: the mechanical backstop that keeps the
 # Intercom reply-identity doctrine (agent-authored customer-facing replies post as
 # Caroline 5763097, never under a human's admin id) from silently regressing out of
-# skills-all/muso-intercom/SKILL.md, workspaces/operations/TOOLS.md and
+# skills-all/muso-intercom/SKILL.md, workspaces/operations/SOUL.md and
 # docs/lessons/muso-domain.md -- and that refuses any agent-callable surface binding a
 # human admin id to an Intercom identity field.
 #
 # Hermetic: the anchor checks run against temp COPIES of the real files via the
-# INTERCOM_SKILL_FILE / OPS_TOOLS_FILE / MUSO_LESSONS_FILE overrides, and the scan runs
+# INTERCOM_SKILL_FILE / OPS_SOUL_FILE / MUSO_LESSONS_FILE overrides, and the scan runs
 # against a synthetic tree via INTERCOM_SCAN_ROOT, so a test never edits tracked sources.
 bats_require_minimum_version 1.5.0
 
@@ -17,10 +17,10 @@ SCRIPT="$HYDRA_REPO/scripts/check-intercom-reply-identity.sh"
 setup() {
   TEST_TMPDIR="$(mktemp -d)"
   cp "$HYDRA_REPO/skills-all/muso-intercom/SKILL.md" "$TEST_TMPDIR/SKILL.md"
-  cp "$HYDRA_REPO/workspaces/operations/TOOLS.md" "$TEST_TMPDIR/TOOLS.md"
+  cp "$HYDRA_REPO/workspaces/operations/SOUL.md" "$TEST_TMPDIR/SOUL.md"
   cp "$HYDRA_REPO/docs/lessons/muso-domain.md" "$TEST_TMPDIR/muso-domain.md"
   export INTERCOM_SKILL_FILE="$TEST_TMPDIR/SKILL.md"
-  export OPS_TOOLS_FILE="$TEST_TMPDIR/TOOLS.md"
+  export OPS_SOUL_FILE="$TEST_TMPDIR/SOUL.md"
   export MUSO_LESSONS_FILE="$TEST_TMPDIR/muso-domain.md"
 
   # Empty synthetic scan tree by default, so anchor tests are not affected by the
@@ -50,7 +50,7 @@ write_scanned() {
 }
 
 @test "passes on the real repo as committed (no override)" {
-  unset INTERCOM_SKILL_FILE OPS_TOOLS_FILE MUSO_LESSONS_FILE INTERCOM_SCAN_ROOT
+  unset INTERCOM_SKILL_FILE OPS_SOUL_FILE MUSO_LESSONS_FILE INTERCOM_SCAN_ROOT
   run "$SCRIPT"
   [ "$status" -eq 0 ]
 }
@@ -79,7 +79,7 @@ write_scanned() {
 }
 
 @test "fails when the rule is removed from the always-injected ops surface" {
-  strip "$TEST_TMPDIR/TOOLS.md" "5763097"
+  strip "$TEST_TMPDIR/SOUL.md" "5763097"
   run "$SCRIPT"
   [ "$status" -eq 1 ]
   [[ "$output" == *"always-injected ops surface"* ]]

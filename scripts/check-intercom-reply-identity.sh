@@ -32,11 +32,11 @@ ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CAROLINE_ADMIN_ID="5763097"
 
 SKILL="${INTERCOM_SKILL_FILE:-$ROOT/skills-all/muso-intercom/SKILL.md}"
-OPS_TOOLS="${OPS_TOOLS_FILE:-$ROOT/workspaces/operations/TOOLS.md}"
+OPS_SOUL="${OPS_SOUL_FILE:-$ROOT/workspaces/operations/SOUL.md}"
 LESSONS="${MUSO_LESSONS_FILE:-$ROOT/docs/lessons/muso-domain.md}"
 
-for f in "$SKILL" "$OPS_TOOLS" "$LESSONS"; do
-  [ -f "$f" ] || { echo "Missing $f (run from repo root, or set INTERCOM_SKILL_FILE / OPS_TOOLS_FILE / MUSO_LESSONS_FILE)." >&2; exit 2; }
+for f in "$SKILL" "$OPS_SOUL" "$LESSONS"; do
+  [ -f "$f" ] || { echo "Missing $f (run from repo root, or set INTERCOM_SKILL_FILE / OPS_SOUL_FILE / MUSO_LESSONS_FILE)." >&2; exit 2; }
 done
 
 fail=0
@@ -60,11 +60,18 @@ require "$SKILL" "Caroline's admin id as the posting identity" \
 require "$SKILL" "the authorization-is-not-identity distinction" \
   "under a human admin id"
 
-# --- operations TOOLS.md: the always-injected bootstrap surface -----------------
+# --- operations SOUL.md: the always-injected bootstrap surface ------------------
 # The ops agent is the one that got this wrong, and it got it wrong while composing a
-# raw API call -- i.e. without necessarily loading the skill above. TOOLS.md is injected
+# raw API call -- i.e. without necessarily loading the skill above. SOUL.md is injected
 # every turn, so the rule has to be here too, not only in the on-demand skill.
-require "$OPS_TOOLS" "the reply-identity rule on the always-injected ops surface" \
+#
+# It is anchored on SOUL.md and NOT on TOOLS.md, which is where PR #900 first put it.
+# `deploy.sh` rsync-EXCLUDES `workspaces/*/TOOLS.md` (seed-but-runtime-owned, same class
+# as MEMORY.md/IDENTITY.md/HEARTBEAT.md), so that edit merged green, deployed green, and
+# never reached the agent -- while this gate went green asserting the repo copy. A gate
+# anchored on a surface the deploy does not ship proves the anchor exists where nothing
+# reads it. Before anchoring on any workspace file, check deploy.sh for an exclude.
+require "$OPS_SOUL" "the reply-identity rule on the always-injected ops surface" \
   "$CAROLINE_ADMIN_ID"
 
 # --- docs/lessons/muso-domain.md: the admin table that caused the misread -------
