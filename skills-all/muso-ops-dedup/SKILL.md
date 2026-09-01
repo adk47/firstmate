@@ -205,11 +205,13 @@ printf "869dadcrq\n" \
 
 **Pre-checklist:**
 
-1. `INTERCOM_ADMIN_ID` defaults to `5763097` (Caroline) so the reply
-   appears under the same admin that handled the rest of the Intercom
-   thread. Only set the env var if you deliberately want a different
-   teammate's avatar on the reply — using Aaron's id here, for example,
-   causes a jarring identity switch mid-conversation.
+1. The reply always posts as Caroline (`5763097`), the same admin that
+   handled the rest of the Intercom thread. This is NOT configurable:
+   `scripts/lib/intercom_identity.py` ignores any other
+   `INTERCOM_ADMIN_ID` value and warns on stderr. Do not try to post
+   under a human admin id — a human's authorization authorizes the
+   WRITE, it never changes the posting IDENTITY (2026-08-31: customers
+   saw support replies signed with a human's name).
 2. Per-conv dedup is automatic: if two tickets resolve to the same
    Intercom conversation, only the first triggers a reply.
 3. Customers whose email isn't in Intercom get a `skip: no Intercom conv`

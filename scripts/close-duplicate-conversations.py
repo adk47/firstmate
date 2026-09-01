@@ -86,7 +86,7 @@ Safety model:
 
 Env:
   MUSOAI_INTERCOM_TOKEN       required
-  INTERCOM_ADMIN_ID           optional, default 5763097 (Caroline)
+  INTERCOM_ADMIN_ID           ignored unless it is 5763097 (Caroline); the posting identity is fixed
   DUP_TIER_B_WINDOW_DAYS      optional, default 14
   CLOSE_DUP_SHADOW_LOG        optional, default /var/log/close-duplicate-shadow.jsonl
   CLOSE_DUP_POINTER_STATE     optional, default /var/lib/close-duplicate/pointer-posted.json
@@ -137,6 +137,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.intercom_identity import resolve_admin_id  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
@@ -898,7 +903,7 @@ def main():
     if not token:
         print("ERROR: MUSOAI_INTERCOM_TOKEN is required", file=sys.stderr)
         return 1
-    admin_id = os.environ.get("INTERCOM_ADMIN_ID", "5763097")
+    admin_id = resolve_admin_id()
     window_days = int(os.environ.get("DUP_TIER_B_WINDOW_DAYS", str(DEFAULT_TIER_B_WINDOW_DAYS)))
 
     try:

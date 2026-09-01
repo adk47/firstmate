@@ -99,7 +99,7 @@ customer-reply audit.
 |---|---|---|
 | `CLICKUP_API_KEY` | (required) | ClickUp personal token |
 | `MUSOAI_INTERCOM_TOKEN` | (required) | Intercom Bearer |
-| `INTERCOM_ADMIN_ID` | `5763097` (Caroline) | Admin user the reply is posted AS — defaults to Caroline so the merge confirmation matches the rest of the Intercom thread; override only when you intentionally want a different teammate's avatar on the reply |
+| `INTERCOM_ADMIN_ID` | `5763097` (Caroline), NOT overridable | Admin user the reply is posted AS. Pinned to Caroline by `scripts/lib/intercom_identity.py` so the merge confirmation matches the rest of the Intercom thread; any other value is ignored and warned about on stderr. Customer-facing writes are never attributed to a human |
 
 ### Safety contract
 

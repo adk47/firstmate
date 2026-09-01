@@ -34,7 +34,7 @@ a shadow log (id, timestamp, email) so it can be reversed.
 Env:
   MUSOAI_INTERCOM_TOKEN          required
   CLICKUP_API_KEY                required
-  INTERCOM_ADMIN_ID             optional, default 5763097 (Caroline)
+  INTERCOM_ADMIN_ID             ignored unless it is 5763097 (Caroline); the posting identity is fixed
   CLICKUP_LIST_ID               optional, default 901000600160 (User Requests)
   CLICKUP_INTERCOM_LINK_FIELD_ID optional, default c32dbf6e-... (#417 link field)
   CLOSE_SHADOW_LOG              optional, default /var/log/close-resolved-shadow.jsonl
@@ -74,6 +74,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.customer_outcome import customer_complete  # noqa: E402
+from lib.intercom_identity import resolve_admin_id  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
@@ -517,7 +518,7 @@ def main():
     if not token or not key:
         print("ERROR: MUSOAI_INTERCOM_TOKEN and CLICKUP_API_KEY are required", file=sys.stderr)
         return 1
-    admin_id = os.environ.get("INTERCOM_ADMIN_ID", "5763097")
+    admin_id = resolve_admin_id()
     list_id = os.environ.get("CLICKUP_LIST_ID", DEFAULT_LIST_ID)
     resolve_state = os.environ.get(
         "RESOLVE_NOTIFY_STATE", "/var/lib/resolve-notify/notified.json")

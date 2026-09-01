@@ -29,11 +29,11 @@ so the merge confirmation matches the rest of the Intercom thread.
 Env:
   CLICKUP_API_KEY        required
   MUSOAI_INTERCOM_TOKEN  required
-  INTERCOM_ADMIN_ID      optional — defaults to 5763097 (Caroline) so the
-                         merge confirmation lands under the same admin
-                         that handled the rest of the Intercom thread.
-                         Override only when you intentionally want a
-                         different teammate's avatar on the reply.
+  INTERCOM_ADMIN_ID      ignored unless it is 5763097 (Caroline). The posting
+                         identity is fixed, so the merge confirmation always
+                         lands under the same admin that handled the rest of
+                         the Intercom thread. Any other value is ignored and
+                         reported on stderr — it is NOT an override.
 
 Exit codes:
   0 — all input rows processed cleanly
@@ -52,6 +52,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from lib.customer_outcome import outcome_tag, outcome_tags_of  # noqa: E402
+from lib.intercom_identity import resolve_admin_id  # noqa: E402
 
 CLICKUP_API = os.environ.get("CLICKUP_API", "https://api.clickup.com/api/v2")
 INTERCOM_API = "https://api.intercom.io"
@@ -67,10 +68,10 @@ MESSAGE = (
 )
 
 # Caroline's Intercom admin id — same admin that handles the rest of the
-# Intercom thread (see openclaw-main.json `botAdminId`). Defaulting here
-# keeps the merge-done reply from flipping to a different admin avatar
-# mid-thread. Override via env INTERCOM_ADMIN_ID if you really mean to
-# post as someone else.
+# Intercom thread (see openclaw-main.json `botAdminId`). This keeps the
+# merge-done reply from flipping to a different admin avatar mid-thread.
+# The id is NOT overridable: resolve_admin_id() ignores any non-Caroline
+# INTERCOM_ADMIN_ID rather than posting as someone else.
 CAROLINE_ADMIN_ID = "5763097"
 
 
@@ -295,7 +296,7 @@ def process(ticket_id, args, env):
         _SEEN_CONVS.add(conv_id)
         return
 
-    post_intercom_reply(conv_id, env["INTERCOM_ADMIN_ID"], message,
+    post_intercom_reply(conv_id, env["ADMIN_ID"], message,
                         env["MUSOAI_INTERCOM_TOKEN"])
     # Mark dedup ONLY after the customer-facing write succeeded. If
     # post_intercom_reply raised, the caller's exception handler logs the
@@ -316,11 +317,14 @@ def main():
     env = {
         "CLICKUP_API_KEY": os.environ.get("CLICKUP_API_KEY"),
         "MUSOAI_INTERCOM_TOKEN": os.environ.get("MUSOAI_INTERCOM_TOKEN"),
-        # `or CAROLINE_ADMIN_ID` collapses unset + exported-but-empty to
-        # the Caroline default, so the reply always lands under the same
-        # admin that handled the rest of the thread unless deliberately
-        # overridden.
-        "INTERCOM_ADMIN_ID": os.environ.get("INTERCOM_ADMIN_ID") or CAROLINE_ADMIN_ID,
+        # Always Caroline: unset, exported-but-empty and a wrong value all
+        # resolve to CAROLINE_ADMIN_ID, so the reply lands under the same
+        # admin that handled the rest of the thread. Not overridable.
+        # Keyed "ADMIN_ID", deliberately NOT the env-var name: this dict is
+        # internal, and mirroring the env name here made it read like a direct
+        # env access to both humans and the structural guard in
+        # tests/test_intercom_identity.py.
+        "ADMIN_ID": resolve_admin_id(),
     }
     missing = [k for k, v in env.items() if not v]
     if missing:

@@ -47,7 +47,7 @@ above MAX on a freshly-written state file aborts and pages instead of sending
 Env:
   CLICKUP_API_KEY                 required
   MUSOAI_INTERCOM_TOKEN           required
-  INTERCOM_ADMIN_ID              optional, default 5763097 (Caroline)
+  INTERCOM_ADMIN_ID              ignored unless it is 5763097 (Caroline); the posting identity is fixed
   CLICKUP_LIST_ID                optional, default 901000600160
   CLICKUP_INTERCOM_LINK_FIELD_ID optional, default c32dbf6e-... (#417 link field)
   OVERDUE_NOTIFY_STATE           optional, default
@@ -80,6 +80,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.intercom_identity import resolve_admin_id  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
@@ -557,7 +562,7 @@ def main():
         print("overdue-verification-notifier: CLICKUP_API_KEY and "
               "MUSOAI_INTERCOM_TOKEN are required", file=sys.stderr)
         return 1
-    admin_id = os.environ.get("INTERCOM_ADMIN_ID") or CAROLINE_ADMIN_ID
+    admin_id = resolve_admin_id()
     list_id = os.environ.get("CLICKUP_LIST_ID", DEFAULT_LIST_ID)
     state_path = os.environ.get(
         "OVERDUE_NOTIFY_STATE",

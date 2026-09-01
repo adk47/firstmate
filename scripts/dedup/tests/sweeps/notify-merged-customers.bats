@@ -99,7 +99,7 @@ mod.check_admin_replied_since = lambda conv_id, merge_at, tok: False
 mod.comment_and_close_ticket = lambda *a, **k: None
 
 args = types.SimpleNamespace(apply=False)
-env = {'CLICKUP_API_KEY': 'k', 'MUSOAI_INTERCOM_TOKEN': 'k', 'INTERCOM_ADMIN_ID': None}
+env = {'CLICKUP_API_KEY': 'k', 'MUSOAI_INTERCOM_TOKEN': 'k', 'ADMIN_ID': None}
 mod.process('T1', args, env)
 mod.process('T2', args, env)
 PYEOF
@@ -136,7 +136,7 @@ mod.find_intercom_conv = lambda email, tok: {'id': 'CONV-1', 'updated_at': 1}
 mod.check_admin_replied_since = lambda conv_id, merge_at, tok: False
 
 args = types.SimpleNamespace(apply=True)
-env = {'CLICKUP_API_KEY': 'k', 'MUSOAI_INTERCOM_TOKEN': 't', 'INTERCOM_ADMIN_ID': 'admin-42'}
+env = {'CLICKUP_API_KEY': 'k', 'MUSOAI_INTERCOM_TOKEN': 't', 'ADMIN_ID': 'admin-42'}
 mod.process('T1', args, env)
 
 reply = [c for c in captured['calls'] if '/conversations/CONV-1/reply' in c['url']]
@@ -179,7 +179,7 @@ mod.post_intercom_reply = boom
 mod.comment_and_close_ticket = lambda *a, **k: None
 
 args = types.SimpleNamespace(apply=True)
-env = {'CLICKUP_API_KEY': 'k', 'MUSOAI_INTERCOM_TOKEN': 't', 'INTERCOM_ADMIN_ID': 'admin-42'}
+env = {'CLICKUP_API_KEY': 'k', 'MUSOAI_INTERCOM_TOKEN': 't', 'ADMIN_ID': 'admin-42'}
 try:
     mod.process('T1', args, env)
 except RuntimeError:
@@ -252,8 +252,13 @@ PYEOF
   echo "$output" | grep -qx "ok"
 }
 
-@test "explicit INTERCOM_ADMIN_ID override still wins over Caroline default" {
-  # Sanity: setting INTERCOM_ADMIN_ID overrides the default. Pairs with
+@test "explicit INTERCOM_ADMIN_ID override is IGNORED; the reply still posts as Caroline" {
+  # Inverted 2026-09-01: this used to assert the override WON, which encoded
+  # the defect we now forbid — an env var could move the customer-facing
+  # posting identity onto a human. `/etc/openclaw/main.env` really does carry
+  # a human's id, so any agent-invoked run inherited it. The identity is a
+  # constant of the system (scripts/lib/intercom_identity.py), so a
+  # non-Caroline value must be ignored and Caroline used instead. Pairs with
   # the test above to pin both halves of the env contract.
   script=$(mktemp)
   cat > "$script" <<PYEOF
@@ -289,8 +294,8 @@ mod.main()
 reply = [c for c in captured['calls'] if '/conversations/CONV-1/reply' in c['url']]
 assert len(reply) == 1, 'expected exactly one reply call'
 body = reply[0]['body']
-assert body['admin_id'] == '9999999', body
-assert body['admin_id'] != mod.CAROLINE_ADMIN_ID, body
+assert body['admin_id'] == mod.CAROLINE_ADMIN_ID, body
+assert body['admin_id'] != '9999999', body
 print('ok')
 PYEOF
   run python3 "$script"

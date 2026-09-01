@@ -29,8 +29,10 @@ API shapes:
 
 Env:
   MUSOAI_INTERCOM_TOKEN  required
-  INTERCOM_ADMIN_ID      optional, default 5763097 (Caroline bot admin — same admin
-                         that owns the rest of the Intercom thread)
+  INTERCOM_ADMIN_ID      ignored unless it is 5763097 (Caroline bot admin — the
+                         same admin that owns the rest of the Intercom thread).
+                         The posting identity is fixed: any other value is
+                         ignored and reported on stderr, never obeyed.
   ABUSE_BLOCK_TAG        optional, default "abuse-block" — MUST match a tag name in
                          openclaw-edge.json blockedChannelTags or blocking is a no-op
   ABUSE_BLOCK_LOG        optional, default /var/log/abuse-block.jsonl (falls back to
@@ -66,6 +68,34 @@ INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
 DEFAULT_ADMIN_ID = "5763097"  # Caroline bot admin (openclaw-edge.json botAdminId)
 DEFAULT_TAG = "abuse-block"
+
+
+def resolve_admin_id(env=None):
+    """Return the admin id to post under. Always Caroline's.
+
+    Deliberate duplicate of scripts/lib/intercom_identity.py. This file is
+    deployed standalone as a skill (skills/muso-abuse-block/scripts/), with no
+    lib/ alongside it, so it cannot import the canonical module. Keep the two in
+    step; tests/test_intercom_identity.py asserts this copy enforces the same
+    rule. See that module's docstring for why a wrong value is IGNORED rather
+    than obeyed or treated as fatal.
+    """
+    if env is None:
+        env = os.environ
+    raw = env.get("INTERCOM_ADMIN_ID")
+    if raw is None:
+        return DEFAULT_ADMIN_ID
+    candidate = raw.strip()
+    if not candidate or candidate == DEFAULT_ADMIN_ID:
+        return DEFAULT_ADMIN_ID
+    print(
+        f"[intercom:identity] INTERCOM_ADMIN_ID={candidate!r} is not Caroline "
+        f"({DEFAULT_ADMIN_ID}); ignoring it and posting as Caroline. "
+        f"Customer-facing writes must never be attributed to a human. "
+        f"Unset INTERCOM_ADMIN_ID or set it to {DEFAULT_ADMIN_ID} to silence this.",
+        file=sys.stderr,
+    )
+    return DEFAULT_ADMIN_ID
 
 
 def _req(method, path, token, body=None, admin_header=False):
@@ -219,7 +249,7 @@ def main():
         print("ERROR: pass exactly one of --email or --contact-id", file=sys.stderr)
         return 1
 
-    admin_id = os.environ.get("INTERCOM_ADMIN_ID", DEFAULT_ADMIN_ID)
+    admin_id = resolve_admin_id()
     tag_name = os.environ.get("ABUSE_BLOCK_TAG", DEFAULT_TAG)
     action = "unblock" if args.remove else "block"
 

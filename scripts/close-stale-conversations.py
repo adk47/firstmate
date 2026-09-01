@@ -68,7 +68,7 @@ mask_email only, never a raw address) for the supervised-drain review.
 
 Env:
   MUSOAI_INTERCOM_TOKEN     required
-  INTERCOM_ADMIN_ID         optional, default 5763097 (operations@muso.ai)
+  INTERCOM_ADMIN_ID         ignored unless it is 5763097 (Caroline); the posting identity is fixed
   STALE_DAYS                optional, default 30; must be a positive integer
                             (0 would make every we-spoke-last conversation
                             eligible the moment we reply — refused loudly)
@@ -109,6 +109,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.intercom_identity import resolve_admin_id  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
@@ -654,7 +659,7 @@ def main(argv=None):
         print(f"ERROR: STALE_DAYS must be a positive integer, got "
               f"{os.environ.get('STALE_DAYS')!r}", file=sys.stderr)
         return 1
-    admin_id = os.environ.get("INTERCOM_ADMIN_ID", "5763097")
+    admin_id = resolve_admin_id()
     stale_secs = stale_days * 86400
     now = int(time.time())
 

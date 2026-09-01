@@ -1332,6 +1332,19 @@ jobs:
           python3 -m unittest -v \
             tests.test_customer_outcome \
             tests.test_resolution_writers
+      - name: Run Intercom reply-identity resolver tests
+        # scripts/lib/intercom_identity.py is the single resolution point for the
+        # admin id EVERY unattended Intercom writer posts under. 2026-08-31:
+        # customers saw replies signed with a human's name because the id came
+        # from INTERCOM_ADMIN_ID, which /etc/openclaw/main.env sets to a human.
+        # These lock the invariant that made that impossible again — the posting
+        # identity is a constant, an override is IGNORED (not obeyed, not fatal),
+        # and no writer resolves the env var itself. Without this step the suite
+        # exists but never runs, which is the same as not having it. Same bare
+        # stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_intercom_identity
       - name: Run abuse-block list tests
         # skills-all/muso-abuse-block/scripts/abuse-block.py is CUSTOMER-FACING:
         # tagging a contact silences Caroline for them. These lock the dry-run

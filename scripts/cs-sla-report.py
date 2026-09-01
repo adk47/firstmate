@@ -52,13 +52,15 @@ AI-resolved / total-inbound caveats (read before trusting the number):
   3. Intercom's weekly-cadence conversation_statistics cannot attribute
      WHICH sweep closed a given conversation - only machine-vs-human. Per-
      sweep attribution is out of scope (see plan checklist item 5).
-  4. The sweeps themselves (close-duplicate-conversations.py,
-     close-resolved-conversations.py, resolution-matcher.py) read
-     INTERCOM_ADMIN_ID; this report reads the separate CAROLINE_ADMIN_ID.
-     Both default to "5763097", but if someone overrides INTERCOM_ADMIN_ID
-     in shared.env/edge.env without also overriding CAROLINE_ADMIN_ID here,
-     attribution silently diverges (sweeps close as one id, this report
-     checks against another) rather than failing loud.
+  4. This report reads CAROLINE_ADMIN_ID; the sweeps
+     (close-duplicate-conversations.py, close-resolved-conversations.py,
+     resolution-matcher.py) post through scripts/lib/intercom_identity.py.
+     Since 2026-09-01 that resolver PINS the sweeps to 5763097 — an
+     INTERCOM_ADMIN_ID override is ignored, not obeyed — so the old divergence
+     hazard (sweeps closing as one id while this report checks another) can no
+     longer be caused from that side. It can still be caused from THIS side:
+     overriding CAROLINE_ADMIN_ID here makes the report check for an id the
+     sweeps never post under, and the counts silently read as human-resolved.
   5. The ratio's population is a LAGGED ARRIVAL COHORT (inbound conversations
      created 7-14 days ago, judged as of report time), NOT "this week's
      arrivals". Judging same-week arrivals against same-week closes

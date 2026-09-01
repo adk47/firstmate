@@ -71,7 +71,7 @@ Env:
   MUSOAI_INTERCOM_TOKEN     required — Intercom Bearer.
   MUSO_BIN                  muso CLI for the action_log Trino query (default: muso).
   CLICKUP_API_KEY           optional — annotate a linked ticket as waiting for verification.
-  INTERCOM_ADMIN_ID         optional, default 5763097 (Caroline) — admin we post AS.
+  INTERCOM_ADMIN_ID         ignored unless it is 5763097 (Caroline); the posting identity is fixed.
   CLICKUP_LIST_ID           optional, default 901000600160 (User Requests).
   CLICKUP_INTERCOM_LINK_FIELD_ID  optional, default c32dbf6e-... (#417 link field).
   RESOLUTION_FEED_PATH      optional, default /var/lib/resolution-matcher/cluster-feed.jsonl
@@ -113,6 +113,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.customer_outcome import outcome_tag, outcome_tags_of  # noqa: E402
+from lib.intercom_identity import resolve_admin_id  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
@@ -832,7 +833,7 @@ def main(argv=None):
         return 1
     muso_bin = os.environ.get("MUSO_BIN", "muso")
     clickup_key = os.environ.get("CLICKUP_API_KEY")
-    admin_id = os.environ.get("INTERCOM_ADMIN_ID") or CAROLINE_ADMIN_ID
+    admin_id = resolve_admin_id()
     list_id = os.environ.get("CLICKUP_LIST_ID", DEFAULT_LIST_ID)
     feed_path = os.environ.get("RESOLUTION_FEED_PATH",
                                "/var/lib/resolution-matcher/cluster-feed.jsonl")

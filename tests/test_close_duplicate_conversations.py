@@ -683,12 +683,18 @@ class TestApplyGating(unittest.TestCase):
         # --apply assertion).
         m_export.assert_not_called()
 
-    def test_admin_id_read_from_env_not_hardcoded(self):
-        """Fix 4: hermeticity check — override INTERCOM_ADMIN_ID to a value
-        that could never be the module's hardcoded default, and confirm
-        main() actually uses it (proves the suite isn't accidentally
-        passing only because the host runner happens to have the default
-        set — see test_close_duplicate_conversations.py:273 QA finding)."""
+    def test_admin_id_ignores_a_non_caroline_env_override(self):
+        """Hermeticity check, inverted 2026-09-01: this used to override
+        INTERCOM_ADMIN_ID to 99999 and assert main() OBEYED it, which encoded
+        the very defect we now forbid — an env var could move the customer-
+        facing posting identity onto a human. The identity is a constant of the
+        system (scripts/lib/intercom_identity.py), so the override must be
+        IGNORED and Caroline used instead.
+
+        This still serves the original hermeticity purpose, and serves it
+        better: asserting Caroline while the env says 99999 proves the value
+        comes from the module rather than leaking in from the host runner's
+        environment (the original QA finding at line 273)."""
         import sys as _sys
         older = conv("O", email="x@y.com", lar=200, lcr=100, created_at=1000)
         kept = conv("K", email="x@y.com", lar=300, lcr=100, created_at=5000)
@@ -704,7 +710,7 @@ class TestApplyGating(unittest.TestCase):
              mock.patch.object(_sys, "argv", ["m", "--apply"]):
             rc = m.main()
         self.assertEqual(rc, 0)
-        m_close.assert_called_once_with("t", "99999", "O")
+        m_close.assert_called_once_with("t", "5763097", "O")
 
 
 class TestApplyShadowLogPreWriteFailure(unittest.TestCase):
