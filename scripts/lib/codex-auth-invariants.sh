@@ -106,8 +106,18 @@ if ! version_at_least "$RUNTIME_FLOOR" "$runtime_ver"; then
 fi
 
 # ── node:sqlite helper ───────────────────────────────────────────────────────
-# Subcommand: `read_state <sqlitePath> <stateKey>` — prints the state_json
-# column for that row, or nothing if the row/table/db is absent. Distinguishes
+# Subcommand: `read_state <sqlitePath> <stateKey>` — prints the stored JSON
+# for that row, or nothing if the row/table/db is absent. THIS table's schema is
+# `config_machine_state(state_key, value_json, updated_at_ms)` — verified in the
+# 2026.8.1 and 2026.8.2 dists (8 references to value_json in config_machine_state
+# statements, 0 to state_json) and against a live migrated store. It is aliased
+# to state_json below purely so the property read stays put.
+# Scope that claim to config_machine_state ONLY: `state_json` is a real column
+# elsewhere upstream — `auth_profile_state(state_key, state_json, updated_at)`
+# and `cron_jobs.state_json` both declare it, and doctor's own migration
+# projects this cell as `{state_json: row.value_json}`. Do NOT "correct" a
+# state_json query against those tables on the strength of this comment.
+# Distinguishes
 # "absent" (exit 0, empty stdout) from a REAL read error (locked/corrupt file
 # → exit 3), same contract as codex-auth-sync.sh's `read` subcommand, so a
 # --check run never mistakes an unreadable store for a clean one.
@@ -121,7 +131,7 @@ if (cmd === "read_state") {
     const db = new DatabaseSync(dbPath, {readOnly: true});
     let r;
     try {
-      r = db.prepare("select state_json from config_machine_state where state_key=?").get(key);
+      r = db.prepare("select value_json as state_json from config_machine_state where state_key=?").get(key);
     } catch (e) {
       if (/no such table/i.test(String(e.message))) process.exit(0);
       throw e;

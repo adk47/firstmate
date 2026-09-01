@@ -28,7 +28,7 @@ _seed_shared_store() {
   node --experimental-sqlite --no-warnings -e "
 const {DatabaseSync}=require('node:sqlite');
 const db=new DatabaseSync('$dir/openclaw.sqlite');
-db.exec('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, state_json TEXT, updated_at INTEGER)');
+db.exec('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT, updated_at_ms INTEGER)');
 const store={version:1, profiles: $profiles_json};
 db.prepare('insert into config_machine_state values (?,?,?)').run('authProfiles.store', JSON.stringify(store), Date.now());
 "
@@ -162,7 +162,7 @@ STUB
   node --experimental-sqlite --no-warnings -e "
 const {DatabaseSync}=require('node:sqlite');
 const db=new DatabaseSync('$INV_ROOT/.openclaw-main/state/openclaw.sqlite');
-db.exec('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, state_json TEXT, updated_at INTEGER)');
+db.exec('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT, updated_at_ms INTEGER)');
 "
   run "$SCRIPT" --check
   [ "$status" -eq 1 ]
@@ -260,7 +260,7 @@ db.exec('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, state_js
   node --experimental-sqlite --no-warnings -e "
 const {DatabaseSync}=require('node:sqlite');
 const db=new DatabaseSync('$dir/openclaw.sqlite');
-db.exec('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, state_json TEXT, updated_at INTEGER)');
+db.exec('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT, updated_at_ms INTEGER)');
 db.prepare('insert into config_machine_state values (?,?,?)').run('authProfiles.store', JSON.stringify({version:1, profiles: 'corrupt-not-an-object'}), Date.now());
 "
   run "$SCRIPT" --check
@@ -350,7 +350,7 @@ db.prepare('insert into auth_profile_store values (?,?,?)').run('primary', JSON.
   node --experimental-sqlite --no-warnings -e "
 const {DatabaseSync}=require('node:sqlite');
 const db=new DatabaseSync('$dir/openclaw.sqlite');
-db.exec('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, state_json TEXT, updated_at INTEGER)');
+db.exec('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT, updated_at_ms INTEGER)');
 db.prepare('insert into config_machine_state values (?,?,?)').run('authProfiles.store', JSON.stringify({version:1}), Date.now());
 "
   run "$SCRIPT" --check
@@ -390,4 +390,41 @@ db.prepare('insert into auth_profile_store values (?,?,?)').run('primary', JSON.
   [[ "$output" != *"CRITICAL"* ]]
   [[ "$output" == *"CODEX_EXPECTED_PROFILES_MAIN"* ]]
   [[ "$output" == *"three"* ]]
+}
+
+# ── shared-store schema contract (follow-up to PR #897) ─────────────────────
+# #897 shipped `select state_json from config_machine_state`, and the fixtures
+# above CREATE'd the table with that same column — which config_machine_state
+# does not have (it is real in OTHER tables, e.g. auth_profile_state and
+# cron_jobs, so the name looks plausible). The stub therefore encoded the bug:
+# the suite stayed green while the checker could never read a real store.
+# Against a live 2026.8.2 store it exited 3 on every call => permanent
+# UNEVALUATED for the most important invariant, on every 2.0 host.
+#
+# The real schema (2026.8.1 and 2026.8.2 dists, and a live migrated store) is
+# config_machine_state(state_key, value_json, updated_at_ms). These two tests
+# pin it from both sides: revert the query to a bare `state_json` and the first
+# goes red; the second proves a wrong-column store is reported UNEVALUATED
+# rather than silently "clean".
+
+@test "reads the REAL 2.0 column (value_json) — clean on a correctly-shaped store" {
+  # setup() already seeded 3 profiles through _seed_shared_store, which now
+  # writes the real schema.
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean"* ]]
+}
+
+@test "UNEVALUATED (exit 2) when the store has no value_json column" {
+  rm -f "$INV_ROOT/.openclaw-main/state/openclaw.sqlite"
+  node --experimental-sqlite --no-warnings -e "
+const {DatabaseSync}=require('node:sqlite');
+const db=new DatabaseSync('$INV_ROOT/.openclaw-main/state/openclaw.sqlite');
+db.exec('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, state_json TEXT, updated_at INTEGER)');
+const store={version:1, profiles:{}};
+db.prepare('insert into config_machine_state values (?,?,?)').run('authProfiles.store', JSON.stringify(store), Date.now());
+"
+  run "$SCRIPT" --check
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"UNREADABLE"* ]]
 }
