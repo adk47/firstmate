@@ -46,6 +46,10 @@ EXPECT_REPO=""
 NO_ANNOUNCE=0
 AT_SHA=""
 AUTO_SUFFIX=0
+# Production branch. Not every repo calls it `main`: core-backend ships from
+# `master` (its DEFAULT branch is `develop`, which is dev-only and must never
+# be tagged). Defaults to main so every existing caller is unchanged.
+BRANCH="main"
 for arg in "$@"; do
   case "$arg" in
     --no-edit) NO_EDIT=1 ;;
@@ -53,6 +57,7 @@ for arg in "$@"; do
     --at=*)    AT_SHA="${arg#--at=}" ;;
     --auto-suffix) AUTO_SUFFIX=1 ;;
     --workdir=*) WORKDIR="${arg#--workdir=}" ;;
+    --branch=*) BRANCH="${arg#--branch=}" ;;
     --repo=*)  EXPECT_REPO="${arg#--repo=}" ;;
     --no-announce) NO_ANNOUNCE=1 ;;
     --help|-h)
@@ -62,7 +67,8 @@ Usage:
   ./scripts/release.sh v2026.5.26.1    same-day hotfix override
   ./scripts/release.sh --no-edit       skip $EDITOR review
   ./scripts/release.sh --from=<ref>    explicit range start (bootstrap or override)
-  ./scripts/release.sh --at=<sha>      tag this exact commit (must be on origin/main)
+  ./scripts/release.sh --branch=<name> production branch (default: main)
+  ./scripts/release.sh --at=<sha>      tag this exact commit (must be on the prod branch)
   ./scripts/release.sh --auto-suffix   append .N when today's tag already exists
   ./scripts/release.sh --workdir=<p>   cut the release in another repo's checkout
   ./scripts/release.sh --repo=<o/n>    assert the checkout really is this repo
@@ -70,7 +76,8 @@ Usage:
   DRY_RUN=1 ./scripts/release.sh       generate notes only, no tag/push/release
 
 Mirrors openclaw: tag directly off main, no release branches. Requires gh
-CLI authenticated, clean working tree on main, exactly matching origin/main.
+CLI authenticated, clean working tree on the production branch (--branch,
+default main), exactly matching its origin ref.
 First-ever release (no prior tag) requires --from=<ref> to scope the range.
 USAGE
       exit 0 ;;
@@ -133,8 +140,8 @@ log "  Repo: $REPO (checkout: $WORKDIR)"
 
 if [[ -z "$AT_SHA" ]]; then
   branch=$(git rev-parse --abbrev-ref HEAD)
-  if [[ "$branch" != "main" ]]; then
-    die "must be on main (currently on '$branch'). Releases cut off main only."
+  if [[ "$branch" != "$BRANCH" ]]; then
+    die "must be on $BRANCH (currently on '$branch'). Releases cut off $BRANCH only."
   fi
 fi
 
@@ -142,39 +149,39 @@ if [[ -n "$(git status --porcelain)" ]]; then
   die "working tree is dirty. Commit, stash, or clean up first."
 fi
 
-log "  Fetching origin/main..."
-git fetch --tags origin main >/dev/null 2>&1 || die "git fetch failed. Check network / origin remote."
+log "  Fetching origin/$BRANCH..."
+git fetch --tags origin "$BRANCH" >/dev/null 2>&1 || die "git fetch failed. Check network / origin remote."
 
 local_sha=$(git rev-parse HEAD)
-remote_sha=$(git rev-parse origin/main)
+remote_sha=$(git rev-parse "origin/$BRANCH")
 
 if [[ -n "$AT_SHA" ]]; then
   # --at pins the commit that a deploy actually put into production.
-  # main may legitimately have moved on since, so exact equality with
-  # origin/main is the wrong gate here. The invariant that still MUST
+  # The branch may legitimately have moved on since, so exact equality with
+  # origin/$BRANCH is the wrong gate here. The invariant that still MUST
   # hold is the one PR #330 cared about: never publish a tag pointing at
-  # code that is not on origin/main. Ancestry is exactly that check.
+  # code that is not on origin/$BRANCH. Ancestry is exactly that check.
   at_full=$(git rev-parse --verify --quiet "${AT_SHA}^{commit}") \
     || die "--at '$AT_SHA' does not resolve to a commit in this checkout"
   if [[ "$local_sha" != "$at_full" ]]; then
     die "--at pins $at_full but the checkout is at $local_sha. The caller must check out the pinned commit first."
   fi
   if ! git merge-base --is-ancestor "$at_full" "$remote_sha"; then
-    die "--at commit $at_full is not reachable from origin/main. Refusing to tag code that is not on main."
+    die "--at commit $at_full is not reachable from origin/$BRANCH. Refusing to tag code that is not on $BRANCH."
   fi
   behind=$(git rev-list --count "${at_full}..${remote_sha}")
-  log "  Pinned to $(git rev-parse --short "$at_full") (origin/main is $behind commit(s) ahead)"
+  log "  Pinned to $(git rev-parse --short "$at_full") (origin/$BRANCH is $behind commit(s) ahead)"
 else
-  # Require exact equality with origin/main, not just "not behind". An
-  # operator with a locally-committed-but-unpushed change on main would
-  # otherwise pass the behind check, and `git push origin <tag>` would
+  # Require exact equality with origin/$BRANCH, not just "not behind". An
+  # operator with a locally-committed-but-unpushed change on that branch
+  # would otherwise pass the behind check, and `git push origin <tag>` would
   # attach those commits to the server as reachable-from-tag-only — i.e.
-  # a release tag pointing at code that is NOT on origin/main's branch
+  # a release tag pointing at code that is NOT on origin/$BRANCH's branch
   # ref. Caught in Clio's review of PR #330.
   if [[ "$local_sha" != "$remote_sha" ]]; then
-    ahead=$(git rev-list --count origin/main..HEAD)
-    behind=$(git rev-list --count HEAD..origin/main)
-    die "local main must exactly match origin/main before release (ahead=$ahead, behind=$behind). Push or pull first."
+    ahead=$(git rev-list --count "origin/${BRANCH}..HEAD")
+    behind=$(git rev-list --count "HEAD..origin/${BRANCH}")
+    die "local $BRANCH must exactly match origin/$BRANCH before release (ahead=$ahead, behind=$behind). Push or pull first."
   fi
 fi
 

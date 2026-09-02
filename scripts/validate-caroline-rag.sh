@@ -142,6 +142,13 @@ case "$PROFILE/$AGENT" in
     # active-incidents.md is TRANSIENT by design (sections deleted when an incident
     # ends), so its probe is SOFT -- a miss here must not false-fail every deploy.
     assert_retrieval_soft "why are my stream counts frozen and not updating" "active-incidents.md"
+    # recent-changes.md is GENERATED on the server by support-changelog-sync.sh
+    # and is rsync-excluded, so it is legitimately ABSENT on a fresh box, before
+    # the timer is enabled, or in any window where nothing customer-visible
+    # shipped. Soft for the same reason as active-incidents.md: a miss must not
+    # false-fail every deploy. A HIT proves the generated feed is reachable by
+    # the index, which is the whole delivery path for it.
+    assert_retrieval_soft "what changed on the platform recently" "recent-changes.md"
     ;;
 esac
 

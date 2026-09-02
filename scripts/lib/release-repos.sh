@@ -29,8 +29,15 @@
 #   deploy_st  commit-status context proving a prod rollout, or `-` when the
 #              repo has none. A repo without one cannot be announced safely
 #              and must stay enabled=0.
-#   sender     workflow file in the APP repo whose successful runs on main
-#              produce the candidate commits
+#   sender     workflow file in the APP repo whose successful runs on the
+#              production branch produce the candidate commits
+#   branch     the repo's PRODUCTION branch. NOT always `main`: core-backend
+#              ships from `master` and its DEFAULT branch is `develop`, which
+#              is dev-only and must never be read as shipped. Every detector,
+#              the checkout fetch, the bootstrap lookup and release.sh's
+#              ancestry gate read this -- before it existed all five
+#              hardcoded `main`, so a non-main repo produced a detector that
+#              silently found nothing forever.
 #   cadence    per-deploy = announce every confirmed prod release.
 #              daily      = at most ONE announced release per calendar day
 #                           (Europe/Rome), from 08:00 onward, rolling up
@@ -50,6 +57,28 @@
 # Actions concurrency does not guarantee ordering, a failed rollout writes
 # no bump, and two deploys can overlap. The commit status is the record
 # that actually carries the identity, so it is the only thing used here.
+#
+# core-backend is enabled=1 because it DOES produce the signal: measured on
+# node-8 2026-09-01, its last master commits each carry `H-DevOps / deploy`
+# (alongside build / migrate-db / health-check), so the shipped sha is named
+# directly. Its production branch is `master`; `develop` is dev-only.
+#
+# It is `per-deploy`, NOT `daily`, and the reason is its ROLLOUT RATE, not a
+# preference. `next_release_by_status` returns the OLDEST unannounced sha with a
+# rollout record and drains ONE per tick. Under `per-deploy` (a tick every 5
+# min) that trivially keeps up. Under `daily` it would drain one per DAY, so a
+# repo rolling out more than once a day accumulates a backlog: each post would
+# describe progressively staler code, and eventually the checkpoint falls out of
+# RUN_WINDOW_MAX and the tick fails loud. core-backend rolls out several times a
+# day, so `daily` is not available to it.
+#
+# `daily` is safe for the `hydra` detector at any rate (it returns the NEWEST
+# run, so a held tick genuinely rolls up), and safe for a `status` repo that
+# ships at most once a day. It is NOT generally safe to pair `daily` with
+# `status` on a busy repo. Making `daily` correct there means teaching the
+# status detector to select the NEWEST candidate and checkpoint past the
+# intermediates -- release.sh already derives the changelog range from the last
+# tag, so nothing would be dropped. Not done here; no repo needs it yet.
 #
 # auth is enabled=0 for the same reason mobile is: its upstream does not yet
 # produce the signal this detector needs. `deploy-auth.yaml` posted zero
@@ -73,13 +102,14 @@
 # draft, so announcing either as "released" would be false.
 # ──────────────────────────────────────────────────────────────
 
-# key|repo|enabled|emoji|display|detector|deploy_st|sender|cadence|rollback
+# key|repo|enabled|emoji|display|detector|deploy_st|sender|cadence|rollback|branch
 _RELEASE_REPO_TABLE='
-hydra|Muso-AI/hydra|1|🛠️|hydra (agent ops)|hydra|-|deploy.yml|daily|https://github.com/Muso-AI/hydra/blob/main/docs/runbooks/RUNBOOK.md
-web-credits-next|Muso-AI/web-credits-next|1|🌐|muso.ai web|status|H-DevOps / deploy|deploy-to-ovh.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/rollback.md
-auth|Muso-AI/auth|0|🔐|muso auth (login.muso.ai)|status|H-DevOps / deploy|trigger-deploy.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/rollback.md
-ios-app|Muso-AI/ios-app|0|📱|muso iOS|store|-|dispatch-build.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/mobile-native-cicd.md
-android-app|Muso-AI/android-app|0|🤖|muso Android|store|-|dispatch-build.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/mobile-native-cicd.md
+hydra|Muso-AI/hydra|1|🛠️|hydra (agent ops)|hydra|-|deploy.yml|daily|https://github.com/Muso-AI/hydra/blob/main/docs/runbooks/RUNBOOK.md|main
+web-credits-next|Muso-AI/web-credits-next|1|🌐|muso.ai web|status|H-DevOps / deploy|deploy-to-ovh.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/rollback.md|main
+core-backend|Muso-AI/core-backend|1|⚙️|muso platform (backend)|status|H-DevOps / deploy|deploy-to-ovh.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/rollback.md|master
+auth|Muso-AI/auth|0|🔐|muso auth (login.muso.ai)|status|H-DevOps / deploy|trigger-deploy.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/rollback.md|main
+ios-app|Muso-AI/ios-app|0|📱|muso iOS|store|-|dispatch-build.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/mobile-native-cicd.md|main
+android-app|Muso-AI/android-app|0|🤖|muso Android|store|-|dispatch-build.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/mobile-native-cicd.md|main
 '
 
 # release_repo_keys [--enabled-only]
@@ -101,7 +131,7 @@ release_repo_keys() {
 # `repo`, would send a tag to the wrong place.
 release_repo_field() {
   local want_key="$1" want_field="$2"
-  local -a names=(key repo enabled emoji display detector deploy_st sender cadence rollback)
+  local -a names=(key repo enabled emoji display detector deploy_st sender cadence rollback branch)
   local idx=-1 i
   for i in "${!names[@]}"; do
     [[ "${names[$i]}" == "$want_field" ]] && idx="$i" && break

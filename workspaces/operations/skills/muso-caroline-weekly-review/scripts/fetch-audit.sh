@@ -3,7 +3,7 @@
 # audit lines and (when the tool-ctx prereq is landed) support-tool call records.
 #
 # Output: $WORKDIR/audit.jsonl
-# Each line: {"kind": "leak"|"tool_call", ...fields}
+# Each line: {"kind": "leak"|"reasoning_leak"|"typography"|"tool_call", ...fields}
 
 set -euo pipefail
 
@@ -135,6 +135,35 @@ grep_tolerant -E 'intercom:reasoning-leak' "$journal_tmp" \
       jq -nc --arg action "$action" --arg conv "$conv" --arg reason "$reason" \
              --argjson markers "$markers" --arg sample "$sample" \
         '{kind: "reasoning_leak", action: $action, conv: $conv, reason: $reason, markers: $markers, sample: $sample}'
+    done >> "$OUTPUT"
+
+# 1c. Outbound typography-guard rewrites (the em-dash -> en-dash swap).
+#   [intercom:typography] conv=<id> count=<n>
+# WHY this is collected: sanitize-typography.ts rewrites EVERY em-dash Caroline
+# writes into an en-dash before the reply ships (a guaranteed char swap, by
+# design). scan-voice.sh scans SHIPPED bodies, so em-dash counts there are
+# structurally ~0 and the en-dashes it does find are largely OUR OWN output, not
+# Caroline reaching for one. Grading her prose on that number measures the
+# guardrail instead of the agent -- it produced a "6 en-dash voice tells" finding
+# and a SOUL.md rewrite (PR #892) that could not have moved it.
+# This row carries the count the guard actually rewrote, which is the real
+# pre-sanitizer em-dash signal, and lets scan-voice.sh subtract the rest.
+grep_tolerant -E 'intercom:typography' "$journal_tmp" \
+  | while IFS= read -r line; do
+      conv=$(printf '%s' "$line" | grep -oE 'conv=[0-9]+' | head -1 | cut -d= -f2 || true)
+      count=$(printf '%s' "$line" | grep -oE 'count=[0-9]+' | head -1 | cut -d= -f2 || true)
+      # A malformed line must not be silently dropped. Dropping it shrinks the
+      # rewrite map while scan-voice.sh still reports `available`, so the
+      # unadjusted en-dashes get graded as Caroline's -- the exact false-green
+      # this metric exists to remove. Emit an explicit error marker instead and
+      # let the consumer degrade to `unavailable`.
+      if [ -z "$conv" ] || [ -z "$count" ]; then
+        jq -nc --arg line "$(printf '%s' "$line" | cut -c1-120)" \
+          '{kind: "typography_error", reason: "unparseable", sample: $line}'
+        continue
+      fi
+      jq -nc --arg conv "$conv" --argjson count "$count" \
+        '{kind: "typography", conv: $conv, count: $count}'
     done >> "$OUTPUT"
 
 # 2. Support-tool calls (only if prereq landed). Both the grep filter and the

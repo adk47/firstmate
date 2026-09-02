@@ -916,6 +916,23 @@ RSYNC_EXCLUDES=(
   # in git as a seed, but agents modify it post-deploy and we must not
   # overwrite those modifications with the seed on subsequent deploys.
   --exclude='workspaces/*/MEMORY.md'
+  # Caroline's shipped-work feed, GENERATED on the server by
+  # scripts/support-changelog-sync.sh (daily timer) into a directory the repo
+  # otherwise owns. It is deliberately inside reference/ because that is the
+  # ONLY path Caroline's RAG index covers (openclaw-edge.json:
+  # support.memorySearch.extraPaths=["reference"]), so it cannot live anywhere
+  # else and still reach her. Without this exclude rsync --delete would wipe it
+  # on every deploy (blinding her until the next timer tick) AND the Step 4a
+  # pre-flight would read it as a would-delete server file and red every PR --
+  # the same failure class as the five scratch shapes above. Server-owned,
+  # regenerated daily, never tracked in the repo.
+  #
+  # NOTE the shape: this is workspaces/<agent>/<subdir>/<file>, not the
+  # workspaces/*/<file> form that scripts/qa-clean-merge-scratch.sh mirrors, so
+  # the KEEP_GLOBS drift guard (which extracts exclude='workspaces/*/[^/]+')
+  # does not require a mirror here. Keep it that way: a depth-1 rename would
+  # silently start requiring one.
+  --exclude='workspaces/support/reference/recent-changes.md'
   # Agent-created backups directory — never in repo, never overwritten.
   --exclude='workspaces/*/backups/'
   # Per-PR QA review state (external-pr-review runs write

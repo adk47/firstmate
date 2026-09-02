@@ -166,3 +166,155 @@ EOF
   grep -qx 'dash-total: 0 tells' "$WORKDIR/voice-summary.txt"
   grep -qx 'blacklist-total: 0' "$WORKDIR/voice-summary.txt"
 }
+
+# ─── Sanitizer attribution (v2) ──────────────────────────────────────────────
+# sanitize-typography.ts swaps every em-dash Caroline writes to an en-dash BEFORE
+# the reply ships, and this scan reads shipped bodies. Uncorrected, the en-dash
+# tally is mostly our own guard's output and the em-dash tally is structurally ~0
+# -- which is how the weekly roll-up reported "6 en-dash voice tells" and the
+# improver opened PR #892 rewriting a SOUL.md rule that could not move it.
+# These pin the correction.
+
+write_audit() { cat > "$WORKDIR/audit.jsonl"; }
+
+@test "en-dash tally subtracts the guard's own em-dash rewrites" {
+  # 4 en-dashes shipped, 3 of which the guard created from Caroline's em-dashes.
+  write_convs <<'EOF'
+{"id":"111","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"a – b – c – d – e"}]}
+EOF
+  write_audit <<'EOF'
+{"kind":"typography","conv":"111","count":3}
+EOF
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  grep -qx 'en-dash: 1 tells across 1 convs' "$WORKDIR/voice-summary.txt"
+  grep -qx 'em-dash-rewritten: 3 tells across 1 convs' "$WORKDIR/voice-summary.txt"
+  grep -qx 'sanitizer-attribution: available' "$WORKDIR/voice-summary.txt"
+}
+
+@test "a conversation whose en-dashes are ALL guard rewrites scores zero tells" {
+  # This is the exact shape that produced the false finding: every en-dash in the
+  # shipped body came from the sanitizer, so Caroline's en-dash tell count is 0.
+  write_convs <<'EOF'
+{"id":"222","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"x – y – z"}]}
+EOF
+  write_audit <<'EOF'
+{"kind":"typography","conv":"222","count":2}
+EOF
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  grep -qx 'en-dash: 0 tells across 0 convs' "$WORKDIR/voice-summary.txt"
+  grep -qx 'dash-total: 0 tells' "$WORKDIR/voice-summary.txt"
+}
+
+@test "rewrites exceeding the sampled bodies floor at zero, never negative" {
+  # The journal window and the 200-conversation sample do not line up exactly, so
+  # the guard can report more rewrites than the sampled bodies contain.
+  write_convs <<'EOF'
+{"id":"333","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"only – one"}]}
+EOF
+  write_audit <<'EOF'
+{"kind":"typography","conv":"333","count":9}
+EOF
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  grep -qx 'en-dash: 0 tells across 0 convs' "$WORKDIR/voice-summary.txt"
+}
+
+@test "no audit file: attribution is 'unavailable', NOT a measured zero" {
+  # An unmeasured zero and a measured zero are different facts. Printing 0 here is
+  # what let the guardrail's output be read as Caroline's prose in the first place.
+  write_convs <<'EOF'
+{"id":"444","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"p – q"}]}
+EOF
+  rm -f "$WORKDIR/audit.jsonl"
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  grep -qx 'em-dash-rewritten: unavailable' "$WORKDIR/voice-summary.txt"
+  grep -qx 'sanitizer-attribution: unavailable' "$WORKDIR/voice-summary.txt"
+  # ...and the observed count is reported unadjusted rather than silently dropped.
+  grep -qx 'en-dash: 1 tells across 1 convs' "$WORKDIR/voice-summary.txt"
+}
+
+@test "an unreadable journal (source=none) is unavailable even with an audit file" {
+  # fetch-audit.sh writes an audit with no typography rows when no journal source
+  # is readable, which is indistinguishable from a genuinely clean week.
+  write_convs <<'EOF'
+{"id":"555","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"m – n"}]}
+EOF
+  write_audit <<'EOF'
+{"kind":"leak","marker":"x","snippet":"y"}
+EOF
+  export CAROLINE_REASONING_LEAK_SOURCE=none
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  grep -qx 'sanitizer-attribution: unavailable' "$WORKDIR/voice-summary.txt"
+}
+
+@test "an audit with a readable journal and no rewrites is a measured zero" {
+  write_convs <<'EOF'
+{"id":"666","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"r – s"}]}
+EOF
+  write_audit <<'EOF'
+{"kind":"leak","marker":"x","snippet":"y"}
+EOF
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  grep -qx 'em-dash-rewritten: 0 tells across 0 convs' "$WORKDIR/voice-summary.txt"
+  grep -qx 'sanitizer-attribution: available' "$WORKDIR/voice-summary.txt"
+  grep -qx 'en-dash: 1 tells across 1 convs' "$WORKDIR/voice-summary.txt"
+}
+
+@test "the guard's per-CONVERSATION count is subtracted ONCE, not once per reply" {
+  # scan-voice emits one row per Caroline PART; the typography audit line is per
+  # CONVERSATION. Subtracting the conversation total from every part row
+  # over-corrects by (parts - 1) x rewrites. Here: 3 replies, 4 en-dashes total,
+  # 2 of them the guard's -- so 2 real tells, not 0.
+  write_convs <<'EOF'
+{"id":"777","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"a – b"},{"author":{"type":"admin","id":"caroline-admin-123"},"body":"c – d"},{"author":{"type":"admin","id":"caroline-admin-123"},"body":"e – f – g"}]}
+EOF
+  write_audit <<'EOF'
+{"kind":"typography","conv":"777","count":2}
+EOF
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  grep -qx 'en-dash: 2 tells across 1 convs' "$WORKDIR/voice-summary.txt"
+  grep -qx 'em-dash-rewritten: 2 tells across 1 convs' "$WORKDIR/voice-summary.txt"
+}
+
+@test "the syslog fallback source is unattributable, not a partial measurement" {
+  # fetch-audit.sh's syslog branch has no --since window, so its typography rows
+  # cover an unknown fraction of the scanned window. Subtracting that as if it
+  # were the whole truth under-corrects and labels the result measured.
+  write_convs <<'EOF'
+{"id":"888","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"h – i – j"}]}
+EOF
+  write_audit <<'EOF'
+{"kind":"typography","conv":"888","count":1}
+EOF
+  export CAROLINE_REASONING_LEAK_SOURCE=syslog
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  grep -qx 'sanitizer-attribution: unavailable' "$WORKDIR/voice-summary.txt"
+  grep -qx 'em-dash-rewritten: unavailable' "$WORKDIR/voice-summary.txt"
+  grep -qx 'en-dash: 2 tells across 1 convs' "$WORKDIR/voice-summary.txt"
+}
+
+@test "a malformed typography row degrades attribution to unavailable" {
+  # Dropping an unparseable row shrinks the rewrite map while still reporting
+  # `available`, so the unadjusted en-dashes get graded as Caroline's -- the
+  # exact false-green this metric exists to remove.
+  write_convs <<'EOF'
+{"id":"777","parts":[{"author":{"type":"admin","id":"caroline-admin-123"},"body":"a – b – c"}]}
+EOF
+  write_audit <<'EOF'
+{"kind":"typography","conv":"777","count":1}
+{"kind":"typography_error","reason":"unparseable","sample":"[intercom:typography] conv= count="}
+EOF
+  run "$SCRIPTS_DIR/scan-voice.sh"
+  [ "$status" -eq 0 ]
+  grep -qx 'sanitizer-attribution: unavailable' "$WORKDIR/voice-summary.txt"
+  grep -qx 'em-dash-rewritten: unavailable' "$WORKDIR/voice-summary.txt"
+  # ...and the en-dash count is reported UNADJUSTED rather than partially corrected.
+  grep -qx 'en-dash: 2 tells across 1 convs' "$WORKDIR/voice-summary.txt"
+}

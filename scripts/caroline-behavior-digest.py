@@ -119,12 +119,15 @@ error during --post.
 """
 import argparse
 import calendar
+import contextlib
+import io
 import json
 import os
 import shlex
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -660,6 +663,136 @@ def write_state(path, state):
     os.replace(tmp, path)
 
 
+def append_history(path, row):
+    """Append one row to the append-only trend log. True on success.
+
+    state.json holds exactly ONE snapshot, so the week-over-week delta it feeds is
+    a 1-lag diff with no trend behind it: nothing in the system could answer "is
+    Caroline getting better". This log is the series. Append-only and best-effort
+    -- a failure to record history must never fail a digest that already posted.
+    """
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a") as f:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+        return True
+    except OSError as exc:
+        # Best-effort for the RUN -- a digest that already has its numbers must
+        # still post -- but never silent. A read-only or full filesystem makes
+        # every append fail while the log stays readable, so the series silently
+        # stops growing and the trend reports a stale baseline forever.
+        print(f"WARN: could not append to the trend history at {path}: "
+              f"{type(exc).__name__}: {exc}. The series is NOT growing.",
+              file=sys.stderr)
+        return False
+
+
+def load_history(path, cap=2000):
+    """(rows, readable, writable). Newest last. Malformed LINES skipped, not fatal.
+
+    `readable` separates "the log does not exist yet" (a young series, expected
+    on a fresh box) from "it exists but cannot be read" (read-only dir, full
+    disk, permissions). read_jsonl collapses both to [], so a permanently broken
+    history rendered as "no four-week baseline yet" forever while the feature was
+    dead. Non-fatal either way -- a digest that already has its numbers must
+    still post -- but the caller can now say which one it is.
+
+    Deliberately reuses read_jsonl rather than re-parsing: a second JSONL reader
+    would drift from it, and read_jsonl already counts malformed lines for the
+    anomaly path. The count is discarded here (a torn history row is not worth
+    paging over) exactly as the other tolerant callers do.
+    """
+    # Writability matters as much as readability WHEN WE ARE GOING TO WRITE: a
+    # readable-but-unwritable log never grows, so the baseline silently freezes
+    # and the headline reports a stale trend forever. In --check nothing is
+    # written, so an unwritable path says nothing about the series -- flagging it
+    # there would emit a spurious warning on any host without the state dir.
+    # Probed with os.access, which mutates nothing, so --check stays read-only.
+    parent = os.path.dirname(path) or "."
+    # For a missing log the question is "can we CREATE it here", so the parent
+    # must be a directory AND writable. os.access alone is wrong: on a parent
+    # that is a regular file it reports that FILE's writability and we would
+    # call the log creatable when os.makedirs is going to raise
+    # NotADirectoryError.
+    writable = os.access(path, os.W_OK) if os.path.exists(path) \
+        else (os.path.isdir(parent) and os.access(parent, os.W_OK))
+    if not os.path.exists(path):
+        return [], True, writable     # nothing recorded yet: legitimately young
+    try:
+        with open(path):
+            pass
+    except OSError:
+        return [], False, writable    # exists but unreadable: broken, say so
+    rows, _ = read_jsonl(path)
+    return rows[-cap:], True, writable
+
+
+def autonomy_rate(totals):
+    """(applied, attempted, pct) over TERMINAL gated write outcomes, or pct=None.
+
+    Attempted is applied + routed + backend-refused: the decisions that actually
+    reached a verdict. previews/authorized/shadow are excluded because they are
+    not outcomes. Returns pct=None on n=0 rather than 0.0 -- an unmeasured rate
+    and a measured zero are different facts.
+    """
+    applied = totals.get("success", 0)
+    attempted = applied + totals.get("route_to_human", 0) + totals.get("backend_refused", 0)
+    if attempted <= 0:
+        return applied, attempted, None
+    return applied, attempted, 100.0 * applied / attempted
+
+
+def history_baseline(history, now_ts, days=28, tolerance_days=7):
+    """The recorded row closest to `days` ago, or None if the log does not reach
+    back that far. Never extrapolates: no row in the window means no baseline."""
+    target = now_ts - days * 86400
+    best, best_gap = None, tolerance_days * 86400
+    for row in history:
+        ts = row.get("ts")
+        if not isinstance(ts, (int, float)):
+            continue
+        gap = abs(ts - target)
+        if gap <= best_gap:
+            best, best_gap = row, gap
+    return best
+
+
+def autonomy_trend_line(totals_real, history, now_ts, history_readable=True):
+    """The headline that answers "is this working": the share of gated write
+    attempts Caroline completed herself, against a four-week-old baseline.
+
+    Always renders the basis (n of m). A percentage without its denominator is
+    exactly how 21-of-252 could be read as healthy.
+    """
+    applied, attempted, pct = autonomy_rate(totals_real)
+    if pct is None:
+        return "*Autonomy rate (7d):* no gated write attempts to measure."
+    head = (f"*Autonomy rate (7d):* {pct:.0f}% of gated write attempts completed "
+            f"without a human ({applied} of {attempted})")
+    if not history_readable:
+        # A log that cannot be read OR WRITTEN is not a young series. Either way
+        # the trend is dead, and "no baseline yet" would hide that behind a
+        # legitimate-looking message for as long as it stayed broken.
+        return head + " — trend unavailable: the history log could not be read or written."
+    base = history_baseline(history or [], now_ts)
+    if base is None:
+        return head + " — no four-week baseline yet."
+    b_applied, b_attempted, b_pct = autonomy_rate(base.get("totals_real") or {})
+    if b_pct is None:
+        # A row exists; it just recorded no terminal outcomes. Saying "no
+        # baseline yet" would misreport a measured week as a missing one.
+        return head + " — the four-week baseline recorded no gated write attempts."
+    arrow = "up" if pct > b_pct else ("down" if pct < b_pct else "flat")
+    # Render the baseline's REAL age, not the nominal 28 days: history_baseline
+    # accepts anything within a 7-day tolerance, so "four weeks ago" can be a
+    # 21-day-old row. Never assert a number the data did not measure.
+    b_ts = base.get("ts")
+    age = (f"{int(round((now_ts - b_ts) / 86400.0))} days ago"
+           if isinstance(b_ts, (int, float)) else "in the baseline week")
+    return (head + f" — {arrow} from {b_pct:.0f}% ({b_applied} of {b_attempted}) "
+            f"{age}.")
+
+
 # --------------------------------------------------------------------------
 # Slack.
 # --------------------------------------------------------------------------
@@ -769,12 +902,20 @@ def _reconcile_line(reconcile, routed_count):
 
 
 def build_digest(s24, s7, s_all, ops, reopen_selfserve, reopen_done, reopen_close,
-                 anomalies, prev7, reconcile=None):
+                 anomalies, prev7, reconcile=None, history=None, now_ts=None,
+                 history_readable=True):
     """Compose the #cs_chats digest text. Pure (no I/O). `reconcile` (optional,
     trailing so the historical positional callers keep working) is the routed-credit
     disposition dict from reconcile_routes, or None -> the line renders 'not checked'."""
     crit, warn = anomalies
     lines = [":robot_face: *Caroline autonomy — daily behavior digest*"]
+
+    # Lead with the trend, not a snapshot. The question this digest exists to
+    # answer is "is the AI doing more of the work than it was", and a single
+    # week's numbers cannot answer it.
+    lines.append(autonomy_trend_line(s7["totals_real"], history,
+                                     now_ts if now_ts is not None else time.time(),
+                                     history_readable))
 
     # Lead with what she actually DID (the auto-close loop is the bulk of it), then
     # the self-serve WRITES. succ7 counts REAL customers only -- smoke probes are
@@ -948,6 +1089,78 @@ def _self_test(now):
     ]
     events = selfserve_reopen_events(wsample)
     assert events == [("C1", now - 100)], events
+
+    # --- autonomy rate + trend ------------------------------------------------
+    # The metric that answers "is the AI doing more of the work". n=0 must be
+    # None, never 0.0: an unmeasured rate and a measured zero are different facts.
+    assert autonomy_rate({"success": 21, "route_to_human": 221,
+                          "backend_refused": 10})[2] is not None
+    _a, _n, _p = autonomy_rate({"success": 21, "route_to_human": 221,
+                                "backend_refused": 10})
+    assert (_a, _n) == (21, 252) and abs(_p - 8.333) < 0.01, (_a, _n, _p)
+    # previews/authorized/shadow are not outcomes and must not dilute the rate.
+    assert autonomy_rate({"success": 1, "route_to_human": 1, "backend_refused": 0,
+                          "preview": 98, "authorized": 50})[1] == 2
+    assert autonomy_rate({"success": 0, "route_to_human": 0,
+                          "backend_refused": 0})[2] is None
+
+    # A baseline is only used when the log actually reaches back that far.
+    _hist = [{"ts": now - 28 * DAY, "totals_real": {"success": 10, "route_to_human": 90,
+                                                    "backend_refused": 0}}]
+    assert history_baseline(_hist, now) is not None
+    assert history_baseline([{"ts": now - 3 * DAY, "totals_real": {}}], now) is None
+    assert history_baseline([], now) is None
+    # Malformed rows are skipped, not fatal.
+    assert history_baseline([{"ts": "nope"}], now) is None
+
+    _line = autonomy_trend_line({"success": 21, "route_to_human": 221,
+                                 "backend_refused": 10}, _hist, now)
+    assert "21 of 252" in _line, _line          # always renders its basis
+    assert "down from 10%" in _line, _line      # 8% now vs 10% four weeks ago
+    _nb = autonomy_trend_line({"success": 1, "route_to_human": 1,
+                               "backend_refused": 0}, [], now)
+    assert "no four-week baseline yet" in _nb, _nb
+    assert "1 of 2" in _nb, _nb
+    # An UNREADABLE log must not read as a young series -- that hid a dead
+    # feature behind a legitimate-looking message for as long as it stayed broken.
+    _un = autonomy_trend_line({"success": 1, "route_to_human": 1,
+                               "backend_refused": 0}, [], now,
+                              history_readable=False)
+    assert "trend unavailable" in _un, _un
+    assert "no four-week baseline yet" not in _un, _un
+    # Unwritable history. The failure is induced by putting the log UNDER A
+    # FILE, so os.makedirs raises NotADirectoryError: a path like
+    # /nonexistent/... is not a portable failure, because CI runs bats as ROOT
+    # and root happily creates it at the filesystem root (it passed on a
+    # read-only macOS root and failed on the Linux runner, while littering it).
+    # Permissions are no good either -- root bypasses them.
+    with tempfile.NamedTemporaryFile() as _f:
+        _under_file = os.path.join(_f.name, "history.jsonl")
+        # Missing file under a non-directory: readable-as-young, NOT writable.
+        assert load_history(_under_file) == ([], True, False)
+        # append_history reports failure rather than swallowing it. The inline
+        # self-test runs on EVERY invocation, not just --self-test, so the
+        # warning it deliberately emits must be captured -- otherwise it prints
+        # on every real run and lands in the merged stdout+stderr that callers
+        # parse as JSON (three digest tests went red exactly this way).
+        _null = io.StringIO()
+        with contextlib.redirect_stderr(_null):
+            assert append_history(_under_file, {"ts": 1}) is False
+        assert "NOT growing" in _null.getvalue(), _null.getvalue()
+    # The baseline's REAL age is rendered, not the nominal 28 days: the lookup
+    # accepts +-7 days, so a 21-day-old row must not be reported as four weeks.
+    _hist21 = [{"ts": now - 21 * DAY, "totals_real": {"success": 10,
+                                                     "route_to_human": 90,
+                                                     "backend_refused": 0}}]
+    _old = autonomy_trend_line({"success": 21, "route_to_human": 221,
+                                "backend_refused": 10}, _hist21, now)
+    assert "21 days ago" in _old, _old
+    # A baseline row that recorded no terminal outcomes is NOT "no baseline yet".
+    _empty_base = autonomy_trend_line(
+        {"success": 21, "route_to_human": 221, "backend_refused": 10},
+        [{"ts": now - 28 * DAY, "totals_real": {"preview": 5}}], now)
+    assert "recorded no gated write attempts" in _empty_base, _empty_base
+    assert "no four-week baseline yet" not in _empty_base, _empty_base
     mc = misconfig_counts(wsample)
     assert mc == {"refused_no_approver": 1}, mc
 
@@ -1125,6 +1338,10 @@ def main():
                                  "/var/log/overdue-verification-notifier.log")
     digest_state = os.environ.get("CAROLINE_DIGEST_STATE",
                                   "/var/lib/caroline-behavior-digest/state.json")
+    # Append-only trend series. Lives beside state.json under /var/lib (NOT
+    # /opt/hydra, which the deploy rsync overwrites).
+    digest_history = os.environ.get("CAROLINE_DIGEST_HISTORY",
+                                    "/var/lib/caroline-behavior-digest/history.jsonl")
     apply_ceiling = int(os.environ.get("CAROLINE_DIGEST_APPLY_CEILING", "40"))
     reopen_cap = int(os.environ.get("CAROLINE_DIGEST_REOPEN_MAX", "300"))
     # Route reconciliation (--post only): the read-only muso-read wrapper command
@@ -1218,8 +1435,19 @@ def main():
             reopen_selfserve = reopen_done = reopen_close = {
                 "checked": 0, "reopened": 0, "errors": 0}
 
+    history, hist_readable, hist_writable = load_history(digest_history)
+    # An unwritable log only breaks the SERIES if this run was going to extend
+    # it, which only --post does.
+    history_ok = hist_readable and (hist_writable or not args.post)
+    if not history_ok:
+        why = "could not be read" if not hist_readable else "is not writable, so the series cannot grow"
+        print(f"WARN: trend history at {digest_history} {why}; "
+              "the digest will say the trend is unavailable rather than young",
+              file=sys.stderr)
     text = build_digest(s24, s7, s_all, ops, reopen_selfserve, reopen_done,
-                        reopen_close, anomalies, prev7, reconcile=reconcile)
+                        reopen_close, anomalies, prev7, reconcile=reconcile,
+                        history=history, now_ts=now,
+                        history_readable=history_ok)
     summary = {"now": now, "s24_totals": s24["totals"], "s7_totals": s7["totals"],
                "s7_totals_real": s7["totals_real"], "ops": ops,
                "uvn_7d": s7["per_verb_real"]["credits_verify"],
@@ -1239,10 +1467,14 @@ def main():
     if not post_slack(text, channel, cfg, account):
         rc = 3
 
+    # Resolved unconditionally: the failed-append alert below needs them too, and
+    # they were previously bound only inside `if crit:`, so a run with no critical
+    # anomaly would have raised NameError on that path.
+    alert_ch = os.environ.get("CAROLINE_DIGEST_ALERT_CHANNEL", DEFAULT_ALERT_CHANNEL)
+    mentions = (os.environ.get("CAROLINE_DIGEST_PAGE_MENTION", DEFAULT_PAGE_MENTION)).split()
+    ping = " ".join(f"<@{m}>" for m in mentions if m)
+
     if crit:
-        alert_ch = os.environ.get("CAROLINE_DIGEST_ALERT_CHANNEL", DEFAULT_ALERT_CHANNEL)
-        mentions = (os.environ.get("CAROLINE_DIGEST_PAGE_MENTION", DEFAULT_PAGE_MENTION)).split()
-        ping = " ".join(f"<@{m}>" for m in mentions if m)
         alert = (f":rotating_light: *Caroline autonomy — CRITICAL* {ping}\n"
                  + "\n".join(f"• {c}" for c in crit))
         if not post_slack(alert, alert_ch, cfg, account):
@@ -1251,6 +1483,34 @@ def main():
     # snapshot the REAL-customer totals under a real-format-specific key -- the
     # headline's WoW delta is real-to-real and never reads a stale full-count snap.
     write_state(digest_state, {"snapshot7_real": s7["totals_real"], "ts": now})
+    # ...and append the same measurement to the series. Recorded only on --post,
+    # so a --check run (which the improver uses) can never pollute the trend with
+    # an off-schedule sample.
+    _applied, _attempted, _pct = autonomy_rate(s7["totals_real"])
+    appended = append_history(digest_history, {
+        "ts": now,
+        "date": time.strftime("%Y-%m-%d", time.gmtime(now)),
+        "iso_week": time.strftime("%G-W%V", time.gmtime(now)),
+        "totals_real": s7["totals_real"],
+        "autonomy_applied": _applied,
+        "autonomy_attempted": _attempted,
+        "autonomy_pct": round(_pct, 2) if _pct is not None else None,
+        "closes_7d": ops.get("closes_7d"),
+        "notifies_7d": ops.get("notifies_7d"),
+    })
+    # os.access can say writable while the write still fails (a full disk, a
+    # quota, a filesystem that went read-only between the probe and the append).
+    # The digest has already posted by now, so this cannot change the headline --
+    # but an append that fails every day freezes the baseline forever, and only
+    # stderr would record it. Alert, and make the exit code non-zero so the
+    # systemd unit shows failed.
+    if not appended:
+        post_slack(f":warning: *Caroline autonomy trend is not being recorded* {ping}\n"
+                   f"• `append_history` failed writing `{digest_history}` on {socket.gethostname()}. "
+                   f"The digest still posted, but the series has stopped growing, so the "
+                   f"four-week baseline will freeze and then silently go stale.",
+                   alert_ch, cfg, account)
+        rc = 3
     print(json.dumps(summary, sort_keys=True))
     return rc
 

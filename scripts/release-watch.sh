@@ -289,9 +289,10 @@ daily_gate_open() {
 # ordering under Actions concurrency, so equal counts do not prove the two
 # sequences align. Reading the per-sha record removes the inference entirely.
 next_release_by_status() {
-  local key="$1" repo sender ctx runs
+  local key="$1" repo sender ctx runs branch
   repo="$(release_repo_field "$key" repo)"       || return 2
   sender="$(release_repo_field "$key" sender)"   || return 2
+  branch="$(release_repo_field "$key" branch)"   || return 2
   ctx="$(release_repo_field "$key" deploy_st)"   || return 2
   if [[ -z "$ctx" || "$ctx" == "-" ]]; then
     warn "$key: no deploy-status context configured, so no sha can be confirmed as live."
@@ -311,7 +312,7 @@ next_release_by_status() {
   # backlog, and fail loud rather than announce over a gap we cannot see.
   local limit="$RUN_WINDOW" candidates reached
   while :; do
-    runs="$(gh run list --repo "$repo" --workflow "$sender" --branch main \
+    runs="$(gh run list --repo "$repo" --workflow "$sender" --branch "$branch" \
               --limit "$limit" --json databaseId,headSha,conclusion,createdAt,status 2>/dev/null)" || {
       warn "$key: gh run list failed"
       return 2
@@ -456,7 +457,7 @@ next_release_by_status() {
 
 # detect_hydra <key>
 # Prints "<sha>\t<created_at>" for the newest completed, successful deploy
-# run on main, or nothing. hydra deploys itself from its own GitHub Actions,
+# run on the prod branch, or nothing. hydra deploys itself from its own Actions,
 # so that run IS the prod-release event: there is no separate rollout record
 # to correlate, and the run's headSha is the shipped commit.
 #
@@ -464,16 +465,17 @@ next_release_by_status() {
 # createdAt, so this can legitimately point backwards; the monotonicity
 # guard in process_repo is what rejects that.
 detect_hydra() {
-  local key="$1" repo sender runs
+  local key="$1" repo sender runs branch
   repo="$(release_repo_field "$key" repo)"     || return 1
   sender="$(release_repo_field "$key" sender)" || return 1
+  branch="$(release_repo_field "$key" branch)" || return 1
   # A small window is safe HERE, unlike next_release_by_status: this detector
   # takes the NEWEST successful run and release.sh derives the changelog range
   # from the last tag, so everything between is rolled up and nothing can fall
   # below the window. The status detector drains oldest-first against a
   # checkpoint, which is why a truncated window loses releases there and needs
   # the reach guard. Do not copy that guard here; do not shrink this to 1.
-  runs="$(gh run list --repo "$repo" --workflow "$sender" --branch main \
+  runs="$(gh run list --repo "$repo" --workflow "$sender" --branch "$branch" \
             --limit 20 --json databaseId,headSha,conclusion,createdAt,status 2>/dev/null)" || {
     warn "$key: gh run list failed"
     return 1
@@ -510,13 +512,15 @@ ensure_checkout() {
     git -C "$dir" config user.email "devops@muso.ai" || true
   fi
 
-  git -C "$dir" fetch --tags --prune --quiet origin main || { warn "$key: fetch failed"; return 1; }
+  local branch; branch="$(release_repo_field "$key" branch)" || return 1
+  git -C "$dir" fetch --tags --prune --quiet origin "$branch" \
+    || { warn "$key: fetch of origin/$branch failed"; return 1; }
   printf '%s' "$dir"
 }
 
 # pin_checkout <key> <dir> <sha> -- detach onto the commit that shipped.
 # release.sh --at then asserts HEAD matches it AND that it is reachable from
-# origin/main before anything is tagged.
+# origin/<prod branch> before anything is tagged.
 pin_checkout() {
   local key="$1" dir="$2" sha="$3"
   git -C "$dir" checkout --quiet --detach "$sha" 2>/dev/null || {
@@ -797,6 +801,9 @@ process_repo() {
   local result rc=0
   result="$(mktemp -t release-result.XXXXXX)"
   local -a rel_args=( --workdir="$dir" --repo="$repo" --at="$sha" --no-edit --no-announce --auto-suffix )
+  # release.sh gates on ancestry from origin/<branch>; without this it would
+  # resolve origin/main, which does not exist for a repo shipping from master.
+  rel_args+=( --branch="$(release_repo_field "$key" branch)" )
   [[ -n "$from_ref" ]] && rel_args+=( --from="$from_ref" )
   set +e
   # release.sh logs (and, under DRY_RUN, cats the notes) to ITS stdout.
@@ -936,7 +943,8 @@ if [[ -n "$BOOTSTRAP_REF" ]]; then
   # stamping its timestamp would make the pairing skip past that release and
   # leave the watcher wedged until another manual re-seed.
   braw="$(gh run list --repo "$(release_repo_field "$bkey" repo)" \
-            --workflow "$(release_repo_field "$bkey" sender)" --branch main \
+            --workflow "$(release_repo_field "$bkey" sender)" \
+            --branch "$(release_repo_field "$bkey" branch)" \
             --limit 100 --json databaseId,headSha,conclusion,createdAt,status 2>/dev/null || echo '[]')"
   brun_at="$(printf '%s' "$braw" | jq -r --arg sha "$bsha" '
     [ .[] | select(.status=="completed" and .conclusion=="success" and .headSha==$sha) ]

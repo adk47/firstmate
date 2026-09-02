@@ -248,6 +248,45 @@ describe("SanitizingIntercomClient", () => {
     expect(logged.some((m) => m.includes("[intercom:typography]") && m.includes("conv=conv_em"))).toBe(true);
   });
 
+  it("emits the typography line in the exact shape fetch-audit.sh parses", async () => {
+    // CONSUMER CONTRACT. This line is not just a log: the Caroline weekly review
+    // reads it to tell Caroline's OWN em-dash usage apart from this sanitizer's
+    // rewrites. Because the swap is guaranteed, a scan of SENT bodies sees only
+    // en-dashes, so without this count the review grades our guardrail instead of
+    // the agent -- which is exactly what produced a false "6 en-dash voice tells"
+    // finding and the SOUL.md rewrite in PR #892.
+    //
+    // Consumers (keep in lockstep if this format changes):
+    //   workspaces/operations/skills/muso-caroline-weekly-review/scripts/fetch-audit.sh
+    //     greps /intercom:typography/ then `conv=[0-9]+` and `count=[0-9]+`
+    //   .../scripts/scan-voice.sh  subtracts that count per conversation
+    //
+    // A shape change here degrades that measurement SILENTLY: zero parsed rows on
+    // a readable journal renders as "measured zero rewrites", not "unavailable".
+    //
+    // This drives the REAL client and parses what it actually logged. Asserting
+    // on a locally-built template string instead would be a tautology: it can
+    // never fail when outbound.ts changes the format, which is the only event
+    // this test exists to catch.
+    const inner = new MockIntercomClient();
+    const logged: string[] = [];
+    const client = new SanitizingIntercomClient(inner, {
+      error: (msg) => logged.push(msg),
+    });
+    const conversationId = "12345"; // real Intercom ids are numeric; conv=[0-9]+ relies on it
+    await client.replyToConversation({
+      conversationId,
+      adminId: "admin_1",
+      body: "one — two — three — four", // three em-dashes -> count=3
+    });
+
+    const line = logged.find((m) => /intercom:typography/.test(m));
+    expect(line).toBeDefined();
+    // Exactly the three greps fetch-audit.sh step 1c runs over the journal.
+    expect(line!.match(/conv=([0-9]+)/)?.[1]).toBe(conversationId);
+    expect(line!.match(/count=([0-9]+)/)?.[1]).toBe("3");
+  });
+
   it("sanitizes a body containing a disallowed email before delegating", async () => {
     const inner = new MockIntercomClient();
     const logged: string[] = [];

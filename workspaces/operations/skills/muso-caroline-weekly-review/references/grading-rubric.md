@@ -20,6 +20,18 @@ exist so this can't happen):
   — per-marker dash tell totals, distinct-conv counts, the `top-dash-convs` repeat list,
   and `blacklist-total` / `blacklist-by-marker`. Use these numbers directly; never
   recompute them.
+  - **Dash tells are sanitizer-corrected (summary v2).** `sanitize-typography.ts`
+    rewrites every em-dash Caroline writes into an en-dash BEFORE the reply ships, and
+    this scan reads shipped bodies. So `en-dash` is ALREADY net of the guard's own
+    swaps, and `em-dash-rewritten` is the real pre-sanitizer em-dash signal — the one
+    that actually reflects Caroline reaching for one. Do NOT report a raw en-dash count
+    as a voice tell: an uncorrected count is mostly our own guardrail's output, and
+    grading it produced a finding and a SOUL.md rewrite (PR #892) that could not move
+    the number.
+  - `sanitizer-attribution: unavailable` means the journal could not be read *in full*
+    this run (no source at all, or the windowless syslog fallback), so
+    `em-dash-rewritten` is **unknown, not zero** and the `en-dash` count is
+    unadjusted. Say so in the finding rather than reporting either as measured.
 - `${WORKDIR}/voice-scan.jsonl` (from `scan-voice.sh`): the per-hit EVIDENCE behind the
   summary, one row per voice tell in a Caroline-authored body —
   `{kind:"dash", marker:"em-dash"|"en-dash", count}` dash occurrences and

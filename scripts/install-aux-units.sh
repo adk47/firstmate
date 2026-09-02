@@ -171,6 +171,14 @@
 #     (/etc/hydra/releases.env) rather than cutting tags nobody sees.
 #     State: /var/lib/hydra-release/{repos,announced,highlights}.
 #
+#   support-changelog-sync.timer / .service
+#     Daily render of Caroline's shipped-work feed into her RAG-indexed
+#     reference/ directory -- the only auto-updating path into her
+#     knowledge, since she has no Slack bindings and no exec. A render
+#     with NEW lines is staged under /var/lib and announced; only
+#     `--promote` publishes it, so review blocks publication rather
+#     than trailing it.
+#
 #   hydra-release.timer / .service   [INSTALLED, DISABLED]
 #     The SUPERSEDED daily cut, kept installed so reverting to a daily
 #     cadence is one `systemctl enable --now` away. Do not run it
@@ -300,6 +308,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/resolution-matcher.py missing"
 [[ -f "$HYDRA_ROOT/scripts/caroline-behavior-digest.py" ]] \
   || fail "$HYDRA_ROOT/scripts/caroline-behavior-digest.py missing"
+[[ -f "$HYDRA_ROOT/scripts/support-changelog-sync.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/support-changelog-sync.sh missing"
 [[ -f "$HYDRA_ROOT/scripts/cs-needs-human-digest.py" ]] \
   || fail "$HYDRA_ROOT/scripts/cs-needs-human-digest.py missing"
 [[ -f "$HYDRA_ROOT/scripts/cs-sla-report.py" ]] \
@@ -1031,6 +1041,78 @@ cbd=caroline-behavior-digest.timer
 systemctl enable "$cbd" >/dev/null 2>&1 || log "WARN: could not enable $cbd"
 systemctl start "$cbd" >/dev/null 2>&1 || log "WARN: could not start $cbd"
 log "  $cbd: $(systemctl is-active "$cbd" 2>/dev/null || echo unknown)"
+
+# ─── Caroline shipped-work feed (daily 05:30 UTC) ─────────────────────────
+# Renders customer-visible product changes into
+# workspaces/support/reference/recent-changes.md, the ONLY directory Caroline's
+# RAG index covers (openclaw-edge.json: support.memorySearch.extraPaths=["reference"]).
+# She runs on openclaw-edge with no Slack bindings and no exec, so #releases can
+# never reach her; a file in that directory is the only delivery path there is.
+#
+# Safe to run unattended because PUBLICATION IS GATED, not the run. A render
+# carrying new lines is STAGED to /var/lib/hydra-support-changelog/pending.md --
+# outside reference/, so outside Caroline's RAG index -- and announced in Slack.
+# Nothing reaches her until a human runs `--promote`, which re-runs the leak gate
+# over the staged body before installing.
+#
+# That gate exists because the leak filter is shape-based: it catches every
+# identifier-shaped leak, but a novel lowercase codename carrying no code shape
+# can survive it (QA review on PR #904), and a vocabulary filter cannot close it
+# -- measured, a KB-seeded one rejected 24 of 42 legitimate lines, and codenames
+# are ordinary words anyway ("redwood", "mint", "encore"). Reporting what was
+# published after installing it does not help either; the line is already
+# retrievable by then. So review blocks publication.
+#
+# A render whose lines are all already live installs directly: nothing new to
+# review, so the rolling window cannot manufacture busywork.
+#   /opt/hydra/scripts/support-changelog-sync.sh --dry-run   # also prints what the gate refused
+#   /opt/hydra/scripts/support-changelog-sync.sh --promote   # the human gate
+# The file it writes is rsync-excluded in deploy.sh; without that exclude every
+# deploy would delete it AND red the Step 4a pre-flight.
+# Staging dir for renders awaiting promotion. mkdir -p, never `install -d`:
+# install -d re-chmods an EXISTING directory even without -m.
+mkdir -p /var/lib/hydra-support-changelog
+cat > /etc/systemd/system/support-changelog-sync.service << CHANGELOGSVC
+[Unit]
+Description=Render Caroline's shipped-work feed into her RAG-indexed reference/
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Up to five model calls (one per ISO week in the window) at 90s each, PLUS the
+# rollout-boundary scan: one commit-status API call per candidate commit, which
+# measured ~62s per repo for a 250-commit window on node-8, so ~2min of gh
+# traffic before any model call. node-8 SIGTERMs a Type=oneshot that outruns the
+# 90s default, which would leave the feed silently stale, so budget it
+# explicitly and leave headroom above the ~10min worst case.
+TimeoutStartSec=1800
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$HYDRA_ROOT/scripts/support-changelog-sync.sh
+CHANGELOGSVC
+
+cat > /etc/systemd/system/support-changelog-sync.timer << CHANGELOGTMR
+[Unit]
+Description=Daily — refresh Caroline's shipped-work feed at 05:30 UTC
+
+[Timer]
+# Ahead of the 06:00 Rome digests so the feed is current for the working day.
+OnCalendar=*-*-* 05:30:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+Unit=support-changelog-sync.service
+
+[Install]
+WantedBy=timers.target
+CHANGELOGTMR
+
+systemctl daemon-reload
+scs=support-changelog-sync.timer
+systemctl enable "$scs" >/dev/null 2>&1 || log "WARN: could not enable $scs"
+systemctl start "$scs" >/dev/null 2>&1 || log "WARN: could not start $scs"
+log "  $scs: $(systemctl is-active "$scs" 2>/dev/null || echo unknown)"
 
 # ─── Daily ClickUp SLA digest (08:00 America/New_York) ────────
 # Posts overdue / due-today / due-tomorrow open support tickets to

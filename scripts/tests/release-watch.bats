@@ -1313,3 +1313,91 @@ JSON
   [ "$status" -ne 0 ]
   [[ "$output" == *"unknown repo key"* ]]
 }
+
+# ─── Production branch is per-repo, not always `main` ────────────────────────
+# release-repos.sh advertises "a new repo is one table row rather than a code
+# change". That was FALSE for any repo whose prod branch is not `main`:
+# release-watch.sh hardcoded `--branch main` in the status detector, the hydra
+# detector, the checkout fetch and the bootstrap lookup, and release.sh gated on
+# origin/main in four more places. core-backend ships from `master` (its DEFAULT
+# branch is `develop`, which is dev-only), so the row alone would have produced
+# a detector that silently found nothing forever -- a dead row that reads as a
+# working lane. These pin the column and its wiring.
+
+@test "every configured repo declares a production branch" {
+  # A blank branch would render as `--branch ""` / `origin/` and match nothing.
+  source "$HYDRA_REPO/scripts/lib/release-repos.sh"
+  local k b
+  for k in $(release_repo_keys); do
+    b="$(release_repo_field "$k" branch)"
+    [ -n "$b" ] || { echo "repo '$k' has an empty branch field" >&2; return 1; }
+  done
+}
+
+@test "core-backend ships from master, never develop" {
+  source "$HYDRA_REPO/scripts/lib/release-repos.sh"
+  [ "$(release_repo_field core-backend branch)" = "master" ]
+  # develop is core-backend's DEFAULT branch and is dev-only. Reading it as
+  # shipped would announce code that never reached a customer.
+  [ "$(release_repo_field core-backend branch)" != "develop" ]
+}
+
+@test "the main-shipping repos still say main (no silent retarget)" {
+  source "$HYDRA_REPO/scripts/lib/release-repos.sh"
+  [ "$(release_repo_field hydra branch)" = "main" ]
+  [ "$(release_repo_field web-credits-next branch)" = "main" ]
+}
+
+@test "no hardcoded branch survives in the watcher" {
+  run grep -nE -- '--branch main|origin main' "$HYDRA_REPO/scripts/release-watch.sh"
+  [ "$status" -ne 0 ]
+}
+
+@test "both detectors resolve branch into a local before using it" {
+  # An undeclared $branch under `set -u` aborts the run; without -u it would
+  # expand empty and the detector would match nothing. Assert it is declared.
+  run grep -c 'branch="$(release_repo_field "$key" branch)"' "$HYDRA_REPO/scripts/release-watch.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 3 ]   # status detector, hydra detector, checkout fetch
+}
+
+@test "release.sh accepts --branch and defaults it to main" {
+  grep -q -- '--branch=\*) BRANCH="\${arg#--branch=}" ;;' "$HYDRA_REPO/scripts/release.sh"
+  grep -q '^BRANCH="main"' "$HYDRA_REPO/scripts/release.sh"
+}
+
+@test "release.sh gates ancestry on the chosen branch, not origin/main" {
+  # The ancestry gate is what stops a tag pointing at code that is not on the
+  # production branch. If it still resolved origin/main it would simply fail to
+  # resolve for a master-shipping repo.
+  run grep -nE 'origin/main' "$HYDRA_REPO/scripts/release.sh"
+  [ "$status" -ne 0 ]
+}
+
+@test "the watcher passes the repo's branch through to release.sh" {
+  grep -q 'rel_args+=( --branch="$(release_repo_field "$key" branch)" )' \
+    "$HYDRA_REPO/scripts/release-watch.sh"
+}
+
+@test "no enabled repo pairs cadence=daily with a busy status detector" {
+  # Not a blanket ban: `daily` + `status` is fine for a repo shipping at most
+  # once a day. It is unsafe for a BUSY one, because next_release_by_status
+  # drains ONE candidate per tick and `daily` makes that one per DAY, so the
+  # backlog grows. No enabled repo needs the pairing today; this pins that, so
+  # adding one is a deliberate decision rather than an accident.
+  source "$HYDRA_REPO/scripts/lib/release-repos.sh"
+  local k
+  for k in $(release_repo_keys --enabled-only); do
+    if [ "$(release_repo_field "$k" cadence)" = "daily" ] &&
+       [ "$(release_repo_field "$k" detector)" = "status" ]; then
+      echo "repo '$k' pairs daily with the oldest-first status detector" >&2
+      return 1
+    fi
+  done
+}
+
+@test "core-backend is per-deploy, the cadence its detector implements" {
+  source "$HYDRA_REPO/scripts/lib/release-repos.sh"
+  [ "$(release_repo_field core-backend cadence)" = "per-deploy" ]
+  [ "$(release_repo_field core-backend detector)" = "status" ]
+}

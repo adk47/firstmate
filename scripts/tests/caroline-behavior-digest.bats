@@ -466,7 +466,12 @@ mod.get_conversation = fake_get
 mod.post_slack = lambda *a, **k: True
 os.environ.update({"CAROLINE_DIGEST_AUDIT":"/dev/null","CAROLINE_DIGEST_WRAPPER_LOGS":"/dev/null",
   "CLOSE_RESOLVED_SHADOW":"/dev/null","RESOLVE_NOTIFY_LOG":rl,"OVERDUE_NOTIFY_LOG":ol,
-  "MUSOAI_INTERCOM_TOKEN":"t","CAROLINE_DIGEST_SKIP_HOST_GUARD":"1"})
+  "MUSOAI_INTERCOM_TOKEN":"t","CAROLINE_DIGEST_SKIP_HOST_GUARD":"1",
+  # Isolate the trend log. Unset, this defaults to /var/lib/caroline-behavior-digest/
+  # and the CI runner IS node-8 running as root, so the suite would append junk
+  # rows to the production history -- and a --post run now returns 3 when the
+  # append fails, so an unwritable default also reds the test off-host.
+  "CAROLINE_DIGEST_HISTORY": os.path.join(os.environ["BATS_TEST_TMPDIR"], "history.jsonl")})
 sys.argv = ["d","--post"]
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
@@ -500,7 +505,12 @@ mod.get_conversation = fake_get
 mod.post_slack = lambda *a, **k: True
 os.environ.update({"CAROLINE_DIGEST_AUDIT":"/dev/null","CAROLINE_DIGEST_WRAPPER_LOGS":"/dev/null",
   "CLOSE_RESOLVED_SHADOW":sh,"RESOLVE_NOTIFY_LOG":"/dev/null","OVERDUE_NOTIFY_LOG":"/dev/null",
-  "MUSOAI_INTERCOM_TOKEN":"t","CAROLINE_DIGEST_SKIP_HOST_GUARD":"1"})
+  "MUSOAI_INTERCOM_TOKEN":"t","CAROLINE_DIGEST_SKIP_HOST_GUARD":"1",
+  # Isolate the trend log. Unset, this defaults to /var/lib/caroline-behavior-digest/
+  # and the CI runner IS node-8 running as root, so the suite would append junk
+  # rows to the production history -- and a --post run now returns 3 when the
+  # append fails, so an unwritable default also reds the test off-host.
+  "CAROLINE_DIGEST_HISTORY": os.path.join(os.environ["BATS_TEST_TMPDIR"], "history.jsonl")})
 sys.argv = ["d","--post"]
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
