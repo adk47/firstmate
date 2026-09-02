@@ -2,7 +2,9 @@
 name: muso-intercom
 description: |
   Intercom customer messaging and support. Query conversations, contacts, companies.
-  WRITE ACCESS: Aaron (U7RP6HKUZ) ONLY. All other users are READ-ONLY.
+  WRITE ACCESS: Aaron (U7RP6HKUZ), Jan (U038BM16T7W), Nick (U0AL36NADEY) co-equal;
+  everyone else is READ-ONLY. Every conversation write goes through
+  /opt/hydra/scripts/intercom-ops-write.sh (internal note by default).
 
   Use when: viewing conversations, searching contacts/users, looking up companies,
   checking tags, viewing segments, browsing help articles, or querying support data.
@@ -33,6 +35,13 @@ Query and manage Muso.AI customer messaging and support data from Intercom.
 - Everyone else → READ ONLY. Politely decline write requests: "Intercom writes
   need Jan, Nick or Aaron. Want me to ask Jan?"
 
+Authorization is not a path. A note or reply goes through the wrapper in "Writing to
+a conversation" below; a bulk stale close through `cs-stale-drain`; an abuse tag or
+close through `muso-abuse-block`. A write with no wrapper today (a single
+conversation's close, an assignment, a tag, a snooze, a contact update) is done by
+the human in the inbox: say so plainly and do the supported part, never a hand-typed
+curl.
+
 **A request that falls outside a safe wrapper is not an approval problem.** If
 Jan or Nick asks for a variation the tooling can't express (a different
 staleness window, a narrower scope), the missing piece is a *capability*, not a
@@ -46,6 +55,48 @@ explicit "do it" on the grounds that Aaron had not answered).
 **Read operations (search, list, view):** available to all authorized users.
 
 Always verify `sender_id` from inbound metadata before any write operation.
+
+## Writing to a conversation (MANDATORY path)
+
+Reads are raw curl. A WRITE into a conversation is **never a raw curl**: it goes through
+the wrapper, which pins Caroline's identity, logs the write to `api-logs/` before it
+happens, and verifies what Intercom actually created.
+
+```bash
+# Internal note (the default). Not visible to the customer. --audience is required and
+# becomes the first line: "Note to Jan (internal Ops note, not visible to the customer)."
+/opt/hydra/scripts/intercom-ops-write.sh note \
+  --conversation CONVERSATION_ID --requested-by SLACK_USER_ID \
+  --audience Jan --body-file /path/to/note.txt
+
+# Customer-facing reply. ONLY when the human explicitly said to answer the CUSTOMER.
+/opt/hydra/scripts/intercom-ops-write.sh reply \
+  --conversation CONVERSATION_ID --requested-by SLACK_USER_ID \
+  --customer-facing --approved-by SLACK_USER_ID --body-file /path/to/reply.txt
+```
+
+- **A resolution, summary or status asked for in Slack is a NOTE.** "Do resolution",
+  "summarize this", "what's the status" all mean: tell the team, in the inbox, as an
+  internal note addressed to whoever asked (`--audience Jan`) or to `team`. The customer
+  is answered only when the human says so in words ("reply to the customer", "tell
+  them ...").
+- `--requested-by` is the Slack user id from message metadata of the human who asked.
+  The wrapper refuses anyone outside the write allowlist above; that refusal is the
+  answer, not a reason to post another way.
+- `--approved-by` is a HUMAN's Slack user id. Self-approval, god-mode and agent
+  identities never authorize a customer-facing reply (2026-08-31: a self-approved reply
+  reached customers under a human's name).
+- The customer never sees internal surfaces. The wrapper refuses a customer-facing body
+  that carries an issue link, "Ops resolution", "ticket", an admin id, a Slack mention,
+  or any pattern Caroline's outbound sanitizer redacts
+  (`plugins/intercom/src/sanitize-tool-leak.ts`: tool tokens, "tool failed", ClickUp,
+  openclaw, HYDRA). Paraphrase the bridge's `customer_safe_summary` in Caroline's
+  voice; quote the normal SLA, never an engineering ETA.
+- `--dry-run` renders the exact payload and posts nothing; `--validate` checks only.
+- Closing, assigning, tagging and snoozing are outside this wrapper. Bulk stale closes
+  go through the `cs-stale-drain` skill and abuse tagging/closing through
+  `muso-abuse-block`; any other close, assignment, tag or snooze is a human's action in
+  the inbox, not a hand-typed curl.
 
 ## Reply Identity (MANDATORY for customer-facing writes)
 
@@ -355,7 +406,7 @@ curl -s \
 
 ## Tips
 
-- **READ-ONLY ONLY** - Never modify data
+- Reads are raw curl. Writes go through `/opt/hydra/scripts/intercom-ops-write.sh`, never a raw curl (see "Writing to a conversation")
 - Search endpoints use POST but are read-only (query, not mutation)
 - Search operators: `=`, `!=`, `~` (contains), `!~`, `>`, `<`, `IN`, `NIN`
 - Use `| jq` to parse and filter JSON responses

@@ -701,6 +701,20 @@ jobs:
           bash scripts/check-intercom-reply-identity.sh
           echo "::endgroup::"
 
+      - name: Intercom ops-write doctrine check — writes go through the wrapper, note by default
+        # 2026-09-01: the ops agent resolved an escalated conversation by composing a raw
+        # curl POST /conversations/<id>/reply from memory. It chose "note" (internal,
+        # correct); on 2026-08-31 the same hand-typed path chose "comment" self-approved as
+        # god_mode and customers saw a human's name mid-thread. Whether the customer reads
+        # the text was one word in a payload the agent typed itself. The runtime gate is
+        # scripts/intercom-ops-write.sh; this checks the doctrine anchors around it (ops
+        # SOUL, muso-intercom skill, wrapper pins, registration) and that no agent-copied
+        # doc carries a raw write recipe.
+        run: |
+          echo "::group::Intercom ops-write doctrine check"
+          bash scripts/check-intercom-ops-write-doctrine.sh
+          echo "::endgroup::"
+
       - name: God-mode allowlist must be workspace-only — never in the canonical skill
         # Since 2026-08-26 the god-mode self-approve branch of the bulk-destructive
         # gate ships in BOTH copies of muso-admin-api.sh, because the parity gate

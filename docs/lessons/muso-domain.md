@@ -421,13 +421,20 @@ bot on every thread follow-up, and a silent bot in a thread is by design.
 
 ## Caroline (support agent) domain
 
-**The outbound sanitizer bans a fixed word list; grep the FULL list.** Caroline's reply sanitizer
-redacts these words from customer-facing text: tool, lookup, error, unavailable, system, API,
-ticket, ClickUp, openclaw, HYDRA. When authoring or reviewing any customer-facing KB answer or
-reply text, grep the COMPLETE list (a partial grep once missed "system" and "error", which the
-sanitizer would redact mid-sentence into a garbled reply). Use the approved alternatives ("flag for
-our team" not "ticket", "payment/billing issue" not "error"/"system error"). The ban applies to
-what she says to customers, not to internal guidance prose.
+**The outbound sanitizer's list is CODE; grep `plugins/intercom/src/sanitize-tool-leak.ts`, not a
+prose copy.** Its `PATTERNS` array redacts the support-tool tokens (`profile_status`,
+`create_ticket`, ...), the bare word "ticket", fixed phrases ("tool failed", "error fetching",
+"unable to look up", "the system says", "my system", "there was an issue with"), and ClickUp /
+openclaw / HYDRA (all-caps only). It does NOT redact bare "tool", "lookup", "error",
+"unavailable", "system" or "API": those are Caroline's voice rules in `workspaces/support/SOUL.md`
+(which also says "API" is fine, it is the product name), enforced by prose only. An earlier
+version of this paragraph listed them as sanitizer words, and `scripts/intercom-ops-write.sh`
+copied that sentence, refusing approved customer replies for saying "error". The wrapper now
+carries the `PATTERNS` list and `check-intercom-ops-write-doctrine.sh` fails CI when the two
+drift. When authoring customer-facing copy, grep the COMPLETE array (a partial grep once missed
+a phrase the sanitizer redacts mid-sentence into a garbled reply) and use the approved
+alternatives ("flag for our team" not "ticket"). The ban applies to what she says to
+customers, not to internal guidance prose.
 
 **Time-bound copy is tagged `EXPIRES YYYY-MM-DD`.** The date is the first day the surrounding copy
 goes stale. Two forms: bold markdown (visible doctrine Caroline reads in context) and an HTML
@@ -564,3 +571,23 @@ This table is for READING conversations, not a menu of posting identities: any a
 customer-facing reply posts as Caroline (`5763097`), never under a human's admin id — on
 2026-08-31 the ops agent's escalation follow-ups posted with Nick's id, showing customers
 "Nicholas Sollazzo" mid-thread. The muso-intercom skill's Reply Identity section is the rule.
+
+**Ops writes into a conversation only through `scripts/intercom-ops-write.sh`.** On
+2026-09-01 the ops agent, asked in Slack to "do resolution" on an escalated conversation,
+posted an internal note (correct: `part_type: note`, customer never saw it) by composing
+the POST from memory; the day before, the same hand-typed path had posted customer-facing
+comments self-approved as `god_mode`. Whether the customer reads the text was one word in
+a payload the agent typed itself. The wrapper makes it mechanical: internal note by
+default with a "Note to <audience>" first line so an inbox reader sees it is internal and
+who asked for it; a customer-facing reply only with `--customer-facing --approved-by
+<human Slack id>`; leaky customer bodies (issue links, "ticket", "Ops resolution") refused;
+identity pinned to Caroline; api-log written before the POST; response `part_type`
+verified. **`POST /conversations/{id}/reply` answers with the whole conversation, not the
+part**: the top-level `id` is the conversation id and the part just created is the LAST
+entry of `conversation_parts.conversation_parts` (`plugins/intercom/src/outbound.ts`
+learned this the hard way; the wrapper's first draft read a top-level `part_type`, which
+would have exited 4 on every real write while the note had already landed, because its
+curl stub answered a shape the API never sends). `scripts/check-intercom-ops-write-doctrine.sh`
+fails CI if the anchors erode, the allowlist drifts from the skill or the roster, or a
+skill doc grows a raw write recipe. Notes posted via the API render in Intercom's yellow
+note styling; that bubble is NOT a customer message.

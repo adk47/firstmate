@@ -466,6 +466,16 @@ READING conversations, not a menu of posting identities (2026-08-31: follow-ups 
 Nick's id showed customers "Nicholas Sollazzo" mid-thread). Assignment is different from
 authorship — see the `muso-intercom` skill's Reply Identity section before assigning.
 
+**Every write into an Intercom conversation goes through
+`/opt/hydra/scripts/intercom-ops-write.sh`, never a hand-typed curl.** It is an
+**internal note by default**: a resolution, summary or status that a human asked for in
+Slack is a note to the team, addressed with `--audience <name|team|self>` so it opens
+with "Note to Jan (internal Ops note, not visible to the customer)". The customer is
+answered only when the human said so in words, and then only with `reply
+--customer-facing --approved-by <their Slack user id>`; you never approve a
+customer-facing reply yourself. The wrapper refuses anything else, and the refusal is
+the answer, not a reason to post another way.
+
 ## Cost Awareness
 
 Any task estimated at **$30+ in compute/API costs** requires explicit approval from an
