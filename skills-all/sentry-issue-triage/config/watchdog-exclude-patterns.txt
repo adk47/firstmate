@@ -45,3 +45,16 @@ assets-cdn-prod\.muso\.ai
 
 # --- bot and scanner traffic against public routes ---
 (wp-admin|wp-login|phpmyadmin|\.env)\b
+
+# --- browser-extension "distributor" timeouts (Chrome's Google Docs Offline /
+#     language-service extensions injecting into the page). cto classified
+#     CREDITS-WEB-NEXT-49 and -4A as client-noise on 2026-09-01/02, and the
+#     2026-09-02 dry run showed 15 more siblings (4E, 4F, 4G, 4K, 45..4R)
+#     queued to eat five days of dispatch budget one by one.
+#     Deliberately NARROW, per the rule above: the exact title shape observed
+#     (a non-Error promise rejection) and ONLY the extension's own symbol
+#     families (locale word lists are `<lang>_words`, e.g. en_words,
+#     nn-NO_words). A first-party class that happens to end in Distributor
+#     (none exists in web-credits-next as of 2026-09-02, but the rule is
+#     "could describe ours") does not match and still reaches triage. ---
+Non-Error promise rejection captured with value: Request timeout (lettersVoices|dictateState|availableLanguages|availableTextCheckLanguages|appSettings|prediction|textCheckers|topics|[a-z]{2}(-[A-Z]{2})?_words)Distributor\.getValue

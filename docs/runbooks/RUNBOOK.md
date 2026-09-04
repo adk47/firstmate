@@ -1421,15 +1421,51 @@ ssh root@40.160.32.80 "cd /opt/hydra/audit && git add -A && git commit -m 'manua
 Sentry is reached through an MCP server registered on the **main** gateway, and
 issues arrive as Slack alerts posted into a channel the CTO agent watches.
 
-**Alerts do NOT summon the agent as deployed today.** `cto`'s `#prod-alerts`
-binding is `requireMention: true`, so an alert posted without a literal `<@U...>`
-produces zero agent turns - a human still has to pull `cto` into the thread.
-That is a deliberate choice, not an oversight (see "Think before you add that
-mention" below): auto-summoning was switched off on 2026-07-21 for token cost.
-Do not read this section as describing an unattended pipeline. The
+**This IS an unattended pipeline since 2026-09-02.** Slack alerts alone still
+do not summon the agent (`requireMention: true` on the channel bindings; see
+"Think before you add that mention" below), but `scripts/sentry-issue-watchdog.sh`
+(cron `*/30`, `/etc/cron.d/sentry-issue-watchdog`) polls the three code-owning
+projects, posts a digest to `#sentry-alerts`, and dispatches at most 1 issue per
+tick / 3 per day to `cto` (PR #886). In that turn the `sentry-issue-triage`
+skill classifies the issue and, under **Nick's standing autofix authorization**
+recorded in the skill, acts on it without waiting for anyone:
+
+| Verdict | What happens unattended |
+|---|---|
+| `code-fixable` | fix PR opened to `develop` (core-backend, web-credits-next) and **merged by the watchdog once QA's `qa-review` status is GO** (posted by QA's own App identity), CI is green and it is mergeable. **Prerequisite:** the repo is listed in `policies/qa-approval-policy.json` `app_repos`; until then QA's GO is host-posted, the watchdog refuses it, tags Nick, and **a human merges**. auth gets a PR to `main` and core-backend a `master` twin PR, both production and human-merged |
+| `client-noise` | issue **archived in Sentry until escalating** with a reason comment - it leaves the inbox and the digest, and reopens itself on a spike |
+| everything else | written diagnosis in the thread naming the owner; no write |
+
+Nick is tagged (`<@U0AL36NADEY>`) in the issue's thread when the PR opens,
+when the watchdog merges it after QA's GO (or when QA says NO-GO, once per
+head), and when a human merges the twin / auth PR (merge-notify pass). The
+agent never merges and never pushes a default branch; the CTO pre-push guard
+is unchanged. **The merge never bypasses branch protection:** web-credits-next
+`develop` requires 1 approving review, and QA approves with the host login
+(`adk47`) today, the same login that authors the PR, so its formal approval
+self-blocks there; the watchdog waits for a human approval (or QA on its App
+identity once `policies/qa-approval-policy.json` `app_repos` lists the repo).
+core-backend `develop` requires nothing and its PR checks are thin (the
+qa-autoreview `dispatch` job and `test`), so QA's GO is most of its gate; red
+CI after a GO tags Nick once per head instead of waiting silently. Off switches, deploy-proof:
+`touch /etc/hydra/sentry-issue-watchdog.no-dispatch` (poll + digest, wake nobody),
+`touch /etc/hydra/sentry-issue-watchdog.no-merge` (everything except the QA-gated
+merge), or `touch /etc/hydra/sentry-issue-watchdog.disabled` (stop entirely).
+The merge is bound to the reviewed head (`gh pr merge --match-head-commit`), reads
+both classic protection and rulesets for a review requirement, and tags Nick
+once if no QA review has started after 6h or if a base needs an approving review
+it cannot supply. Ledger states in `/var/lib/hydra-sentry-triage/seen.jsonl`
+(latest row per id decides):
+`awaiting-approval` = diagnosed code-fixable, re-dispatched to open the PR
+**only if the watchdog originated it** (its `dispatched.json` names the id and
+the row carries a dispatch nonce from the watchdog's bounded per-issue
+history, an exact match; a human's thread row has none and waits for that human) and for at most `SENTRY_WATCHDOG_MAX_ATTEMPTS`
+(3) unattended runs, after which Nick is tagged once and it waits for a human;
+`in-progress` = a turn holds the lease (older than 3h = a crashed run: ours is
+re-dispatched, a human's is tagged once); any Step 3 class = triaged. The
 engineering doctrine (classification taxonomy, the P0 rule, the project-to-repo
-map, the twin-port rule) lives in the `sentry-issue-triage` skill; this section
-is only the wiring.
+map, the twin-port rule, the authorization bounds) lives in the skill; this
+section is only the wiring.
 
 Org: `musoai` (`https://musoai.sentry.io`, region `https://us.sentry.io`).
 Projects: `core-backend`, `credits-web-next`, `muso-auth`, `flutter`.

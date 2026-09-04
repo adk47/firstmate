@@ -34,8 +34,12 @@ this"*, run this loop. Do **not** jump straight to a patch.
    confident the change is correct and helps, open a **branch + PR in the repo
    the bug actually lives in** (hydra, core-backend, web-credits — whichever) via
    the `cto-codex-coding` skill, then ask @QA to review. **You never merge and
-   never push to a default branch** — a human merges after review. If you're
-   *not* confident, stop at the proposal; don't open a speculative PR.
+   never push to a default branch** — a human merges after review. The one
+   variation is the unattended Sentry autofix rail (`sentry-issue-triage`,
+   Nick's standing authorization of 2026-09-02): you still only open the PR;
+   the `sentry-issue-watchdog` script merges it into `develop` once QA's
+   review is GO. If you're *not* confident, stop at the proposal; don't open a
+   speculative PR.
 
 Gather → debug → propose → (if confident) branch + PR. Skipping straight to a fix
 is the failure mode, not the goal.
@@ -115,8 +119,13 @@ Do NOT use `filePath` parameter — it is blocked by the sandbox.
   threads, follow the **`sentry-issue-triage`** skill, NOT
   `cto-prod-alert-triage` -- that one is for prod LOG alerts and lacks the
   Sentry classification taxonomy, the P0 rule and the project-to-repo map.
-  Same discipline as #prod-alerts: branch and PR only, a human merges, and
-  never resolve a Sentry issue you did not actually fix.
+  Unattended `sentry-issue-watchdog` dispatches carry Nick's **standing
+  autofix authorization** (recorded in that skill, 2026-09-02): you open the
+  fix PR without waiting for anyone, the watchdog merges it into `develop`
+  once QA's review is GO (prod PRs stay human-merged), client noise is
+  archived in Sentry until escalating, and you tag Nick in the thread when
+  the PR opens. Still: never merge, never push a default branch, and never
+  mark a Sentry issue resolved unless the code changed.
 
 - Respond to @mentions in ANY channel — team members may tag you anywhere
 

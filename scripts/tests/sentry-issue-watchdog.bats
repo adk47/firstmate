@@ -48,6 +48,7 @@ setup() {
   mk_curl_stub
   mk_muso_stub
   mk_openclaw_stub
+  mk_gh_stub
   export SENTRY_WATCHDOG_CURL_BIN="$STUBBIN/curl"
   export SENTRY_WATCHDOG_OPENCLAW_BIN="$STUBBIN/openclaw"
   export PATH="$STUBBIN:$PATH"
@@ -123,6 +124,58 @@ done
 echo '{"id":"job-1"}'
 STUB
   chmod +x "$STUBBIN/openclaw"
+}
+
+
+# gh stub for the merge-notify pass: `gh pr view <url> --json ...` answers from
+# $FIXTURES/gh.<pr-number>.json (default: open, unmerged); gh.fail => exit 1
+# with nothing on stdout, exactly the "transport died" shape the pass must read
+# as UNKNOWN rather than as "not merged".
+mk_gh_stub() {
+  cat > "$STUBBIN/gh" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$FIXTURES/../gh.log"
+[ -r "$FIXTURES/../gh.fail" ] && exit 1
+case "$1 $2" in
+  "pr merge")
+    printf '%s\n' "$*" >> "$FIXTURES/../gh.merge.log"
+    [ -r "$FIXTURES/../gh.merge.fail" ] && { echo "merge refused" >&2; exit 1; }
+    # Faithful to --match-head-commit: refuse when the sha is not the PR's head.
+    want=""; prev=""; url=""
+    for a in "$@"; do [ "$prev" = "--match-head-commit" ] && want="$a"; case "$a" in https://*) url="$a" ;; esac; prev="$a"; done
+    n="${url##*/}"
+    have="$(jq -r '.headRefOid // ""' "$FIXTURES/gh.$n.json" 2>/dev/null)"
+    [ -n "$want" ] || { echo "stub: merge without --match-head-commit" >&2; exit 1; }
+    [ "$want" = "$have" ] || { echo "head mismatch (HTTP 405)" >&2; exit 1; }
+    exit 0 ;;
+  "api "*)
+    repo="$(printf '%s' "$*" | sed -n 's#.*repos/Muso-AI/\([^/]*\)/.*#\1#p')"
+    case "$*" in
+      "api user"*) echo '{"login":"adk47"}'; exit 0 ;;
+      *"/commits/"*"/status"*)
+        # who posted qa-review on this head and what it says NOW: fixture per
+        # sha holds "<login> [<state>]"; default QA's App, success
+        sha="$(printf '%s' "$*" | sed -n 's#.*/commits/\([^/]*\)/status.*#\1#p')"
+        if [ -r "$FIXTURES/gh.creator.$sha" ]; then read -r c st < "$FIXTURES/gh.creator.$sha"; else c="muso-qa-bot[bot]"; st=""; fi
+        [ -n "$st" ] || st="success"
+        [ "$c" = "none" ] && { echo '{"statuses":[]}'; exit 0; }
+        jq -nc --arg c "$c" --arg st "$st" '{statuses:[{context:"qa-review", state:$st, creator:{login:$c}}]}'; exit 0 ;;
+      *"/rules/branches/"*)
+        if [ -r "$FIXTURES/gh.rules.$repo.json" ]; then cat "$FIXTURES/gh.rules.$repo.json"; else echo '[]'; fi; exit 0 ;;
+      *"/branches/"*"/protection"*)
+        # classic protection: fixture per repo, transport error, else GitHub's real 404 shape
+        [ -r "$FIXTURES/gh.protection.$repo.err" ] && { echo "error connecting to api.github.com" >&2; exit 1; }
+        if [ -r "$FIXTURES/gh.protection.$repo.json" ]; then cat "$FIXTURES/gh.protection.$repo.json"; exit 0; fi
+        echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+    esac
+    exit 0 ;;
+esac
+url=""
+for a in "$@"; do case "$a" in https://*) url="$a" ;; esac; done
+n="${url##*/}"
+if [ -r "$FIXTURES/gh.$n.json" ]; then cat "$FIXTURES/gh.$n.json"; else echo '{"state":"OPEN","mergedAt":null,"mergeCommit":null}'; fi
+STUB
+  chmod +x "$STUBBIN/gh"
 }
 
 # issue <shortId> <count> <users> <firstSeenIso> [level] [substatus] [title]
@@ -1107,4 +1160,783 @@ OLD_ISO="2024-01-01T00:00:00"
   local contract
   contract="$(ls "$TEST_TMPDIR"/state/dispatch/*.json)"
   [ "$(stat -c %a "$contract" 2>/dev/null || stat -f %Lp "$contract")" = "600" ]
+}
+
+# ── standing autofix grant: awaiting rows drain, terminal rows read true ──
+# 2026-09-02: eight issues sat at `awaiting-approval` for days while the digest
+# called them "claimed in ledger" and never re-dispatched them. Under Nick's
+# standing autofix authorization an awaiting row is exactly the case the grant
+# covers, so it is ELIGIBLE (subject to the same redispatch lease and budget),
+# and the ledger read mirrors the skill's own Step 1 classes instead of
+# guessing from `outcome`.
+
+ledger_row() { # <id> <class> [outcome-json] [extra-json]
+  mkdir -p "$SENTRY_WATCHDOG_LEDGER_DIR"
+  jq -nc --arg id "$1" --arg c "$2" --argjson o "${3:-null}" --argjson x "${4:-{\}}" \
+    '{ts:(($ENV.SENTRY_WATCHDOG_NOW|tonumber)|todateiso8601), short_id:$id, class:$c,
+      summary:"s", outcome:$o, twin:null} + $x' >> "$SENTRY_WATCHDOG_LEDGER_DIR/seen.jsonl"
+}
+
+# The watchdog re-dispatches only rows it ORIGINATED (present in its own
+# dispatched.json); a human-started row keeps waiting for that human.
+# originated <id> <epoch> [nonce] -- the watchdog handed out <nonce> for <id>;
+# a ledger row is "ours" only when its contract field equals that nonce.
+originated() {
+  mkdir -p "$SENTRY_WATCHDOG_STATE_DIR"
+  jq -n --arg id "$1" --argjson ts "$2" --arg n "${3:-n-$1}" \
+    '{($id): {state:"dispatched", last_dispatch_ts:$ts, dispatch_attempts:1, nonces:[$n]}}' \
+    > "$SENTRY_WATCHDOG_STATE_DIR/dispatched.json"
+}
+ours() { printf '{"contract":"n-%s"}' "$1"; }
+
+@test "an awaiting-approval row is dispatched under the standing grant, and the contract says who triggered it" {
+  # The row carries the nonce the watchdog handed out: it is ours.
+  ledger_row CORE-BACKEND-118 awaiting-approval null "$(ours CORE-BACKEND-118)"
+  originated CORE-BACKEND-118 $((1800000000 - 20000))
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'cron add' "$TEST_TMPDIR/openclaw.log")" -eq 1 ]
+  local contract
+  contract="$(ls "$TEST_TMPDIR"/state/dispatch/*.json)"
+  [ "$(jq -r .trigger "$contract")" = "sentry-issue-watchdog" ]
+  run grep -q "claimed in ledger" "$TEST_TMPDIR/muso.log"
+  [ "$status" -ne 0 ]
+}
+
+@test "an awaiting row is NOT re-dispatched inside the redispatch lease" {
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"                                   # tick 1: fresh dispatch
+  [ "$(grep -c 'cron add' "$TEST_TMPDIR/openclaw.log")" -eq 1 ]
+  n="$(jq -r '."CORE-BACKEND-118".nonces[-1]' "$TEST_TMPDIR/state/dispatched.json")"
+  ledger_row CORE-BACKEND-118 awaiting-approval null "{\"contract\":\"$n\"}"   # the turn diagnosed it
+  export SENTRY_WATCHDOG_NOW=$((1800000000 + 1800))
+  run "$SCRIPT"                                   # tick 2: lease still live
+  [ "$(grep -c 'cron add' "$TEST_TMPDIR/openclaw.log")" -eq 1 ]
+  export SENTRY_WATCHDOG_NOW=$((1800000000 + 90000))   # next UTC day, lease expired
+  run "$SCRIPT"
+  [ "$(grep -c 'cron add' "$TEST_TMPDIR/openclaw.log")" -eq 2 ]
+}
+
+@test "a finished diagnosis with a null outcome reads 'already triaged', not 'claimed'" {
+  # Step 5 terminates four of the five classes at the diagnosis with outcome
+  # null. Calling those "claimed" hid the real state from the digest.
+  ledger_row CORE-BACKEND-118 client-noise
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/openclaw.log" ]
+  grep -q "CORE-BACKEND-118: already triaged" "$TEST_TMPDIR/muso.log"
+}
+
+@test "an in-progress row is held (claimed), never dispatched" {
+  ledger_row CORE-BACKEND-118 in-progress
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/openclaw.log" ]
+  grep -q "CORE-BACKEND-118: claimed in ledger" "$TEST_TMPDIR/muso.log"
+}
+
+@test "a HUMAN-initiated awaiting row is NOT landed unattended — it waits for that human" {
+  ledger_row CORE-BACKEND-118 awaiting-approval      # no dispatched.json entry
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/openclaw.log" ]
+  grep -q "CORE-BACKEND-118: awaiting (human-initiated, awaiting a human)" "$TEST_TMPDIR/muso.log"
+}
+
+@test "a watchdog-originated in-progress lease older than REDISPATCH_AFTER is stale and re-dispatched" {
+  # A crashed autofix turn used to read "claimed in ledger" forever.
+  ledger_row CORE-BACKEND-118 in-progress null '{"ts":"2027-01-14T08:00:00Z","contract":"n-CORE-BACKEND-118"}'   # 24h old, ours
+  originated CORE-BACKEND-118 $((1800000000 - 86400))
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'cron add' "$TEST_TMPDIR/openclaw.log")" -eq 1 ]
+}
+
+@test "a stale in-progress lease that a HUMAN started is held, not re-dispatched" {
+  ledger_row CORE-BACKEND-118 in-progress null '{"ts":"2027-01-14T08:00:00Z"}'
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/openclaw.log" ]
+  grep -q "CORE-BACKEND-118: stale (human-initiated" "$TEST_TMPDIR/muso.log"
+}
+
+@test "the LATEST row decides: awaiting then in-progress is held, in-progress then terminal is triaged" {
+  ledger_row CORE-BACKEND-118 awaiting-approval
+  ledger_row CORE-BACKEND-118 in-progress
+  ledger_row CORE-BACKEND-119 in-progress
+  ledger_row CORE-BACKEND-119 needs-human
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")" "$(issue CORE-BACKEND-119 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/openclaw.log" ]
+  grep -q "CORE-BACKEND-118: claimed in ledger" "$TEST_TMPDIR/muso.log"
+  grep -q "CORE-BACKEND-119: already triaged" "$TEST_TMPDIR/muso.log"
+}
+
+# ── merge-notify: tag Nick when a fix PR is merged ────────────────────────
+# Direct develop landings are announced by the skill itself at push time; this
+# pass covers the PRs a human still merges (the core-backend master twin, auth).
+
+merged_pr() { # <number>
+  jq -nc '{state:"MERGED", mergedAt:"2027-01-15T10:00:00Z", mergeCommit:{oid:"abc123"}}' > "$FIXTURES/gh.$1.json"
+}
+outcome_row() { # <id> <outcome-url> <twin-url|null>
+  ledger_row "$1" code-fixable "\"$2\"" \
+    "$(jq -nc --arg t "$3" '{twin:(if $t=="null" then null else $t end), channel_id:"C0SENTRY", thread_ts:"1756000000.111111", landed:"develop"}')"
+}
+
+@test "merge-notify: a merged twin PR tags Nick ONCE in the issue's thread, then never again" {
+  outcome_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/commit/deadbeef" "https://github.com/Muso-AI/core-backend/pull/77"
+  merged_pr 77
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log"
+  grep -q 'pull/77' "$TEST_TMPDIR/muso.log"
+  grep -q 'CORE-BACKEND-118' "$TEST_TMPDIR/muso.log"
+  grep -q -- '--thread-ts 1756000000.111111' "$TEST_TMPDIR/muso.log"
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+  # a commit URL is not a PR: it must never be looked up
+  run grep -q 'commit/deadbeef' "$TEST_TMPDIR/gh.log"
+  [ "$status" -ne 0 ]
+  run "$SCRIPT"
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+  [ "$(jq -r '."https://github.com/Muso-AI/core-backend/pull/77" | type' "$TEST_TMPDIR/state/notified.json")" = "number" ]
+}
+
+@test "merge-notify: an unmerged PR posts nothing and stays pending" {
+  outcome_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/78" null
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q 'pull/78' "$TEST_TMPDIR/gh.log"
+  run grep -q '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log"
+  [ "$status" -ne 0 ]
+}
+
+@test "merge-notify: a gh failure is UNKNOWN — no post, no state, retried next tick" {
+  outcome_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/79" null
+  merged_pr 79
+  : > "$TEST_TMPDIR/gh.fail"
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"merge-notify"*"UNKNOWN"* ]]
+  run grep -q '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log"
+  [ "$status" -ne 0 ]
+  rm -f "$TEST_TMPDIR/gh.fail"
+  run "$SCRIPT"
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+}
+
+@test "merge-notify: a failed Slack post does not mark the PR notified" {
+  outcome_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/80" null
+  merged_pr 80
+  : > "$TEST_TMPDIR/muso.fail"
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  # the stub logs the ATTEMPT (then fails), so one line exists but no state
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+  [ "$(jq -r '."https://github.com/Muso-AI/core-backend/pull/80" // "absent"' "$TEST_TMPDIR/state/notified.json")" = "absent" ]
+  [[ "$output" == *"NOT confirmed"* ]]
+  rm -f "$TEST_TMPDIR/muso.fail"
+  run "$SCRIPT"                                   # retried, now confirmed
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 2 ]
+  [ "$(jq -r '."https://github.com/Muso-AI/core-backend/pull/80" | type' "$TEST_TMPDIR/state/notified.json")" = "number" ]
+  run "$SCRIPT"                                   # and never again
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 2 ]
+}
+
+@test "merge-notify: a PR URL outside github.com/Muso-AI is never queried (ledger text is data)" {
+  outcome_row CORE-BACKEND-118 "https://evil.example/Muso-AI/core-backend/pull/81" null
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_TMPDIR/gh.log" ]
+}
+
+@test "merge-notify: an EMPTY channel_id with a thread_ts does not shift fields — falls back to the digest channel ROOT (a ts without its channel is meaningless)" {
+  ledger_row CORE-BACKEND-118 code-fixable '"https://github.com/Muso-AI/core-backend/pull/83"' \
+    '{"channel_id":"", "thread_ts":"1756000000.222222"}'
+  merged_pr 83
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  grep -q -- '--channel C0SENTRY' "$TEST_TMPDIR/muso.log"
+  grep -q 'pull/83' "$TEST_TMPDIR/muso.log"
+  # the thread ts belongs to another channel: posting it under the digest
+  # channel is thread_not_found (a failed post, retried forever)
+  run grep -q -- '--thread-ts 1756000000.222222' "$TEST_TMPDIR/muso.log"
+  [ "$status" -ne 0 ]
+  run grep -q -- '--channel 1756000000' "$TEST_TMPDIR/muso.log"
+  [ "$status" -ne 0 ]
+}
+
+@test "merge-notify: the same PR URL in two rows posts ONCE" {
+  outcome_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/commit/aaa" "https://github.com/Muso-AI/core-backend/pull/84"
+  outcome_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/commit/aaa" "https://github.com/Muso-AI/core-backend/pull/84"
+  merged_pr 84
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+}
+
+# ── qa-merge: a develop PR merges only on QA's GO ─────────────────────────
+# Nick, 2026-09-02: "it should always wait qa to approve the prs". QA's GO is
+# the `qa-review` commit status it publishes on the head sha; the watchdog
+# merges the develop PR when that is SUCCESS, every other check is green, the
+# PR is mergeable, and any formal-review requirement on the base is met. Prod
+# branches (master twin, auth main) are never auto-merged.
+
+qa_row() { # <id> <pr-url>
+  ledger_row "$1" code-fixable "\"$2\"" \
+    '{"landed":"pr","merge_policy":"qa-gated","channel_id":"C0SENTRY","thread_ts":"1756000000.444444"}'
+}
+# pr_fixture <number> <qa-state|ABSENT> [mergeable] [reviewDecision] [base] [extra-check-conclusion]
+pr_fixture() {
+  local n="$1" qa="$2" m="${3:-MERGEABLE}" rd="${4:-}" base="${5:-develop}" ci="${6:-}"
+  jq -n --arg qa "$qa" --arg m "$m" --arg rd "$rd" --arg base "$base" --arg ci "$ci" '
+    {state:"OPEN", mergedAt:null, mergeCommit:null, mergeable:$m, headRefOid:"feedface",
+     reviewDecision:$rd, baseRefName:$base, isDraft:false,
+     statusCheckRollup: (
+       (if $qa == "ABSENT" then [] else [{context:"qa-review", state:$qa}] end)
+       + (if $ci == "" then [] else [{name:"build", status:"COMPLETED", conclusion:$ci}] end))}' \
+    > "$FIXTURES/gh.$n.json"
+}
+
+@test "qa-merge: develop PR with QA GO, no other checks (core-backend), mergeable, unprotected -> merged once, Nick tagged once" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/90"
+  pr_fixture 90 SUCCESS
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q 'pr merge https://github.com/Muso-AI/core-backend/pull/90 --merge --match-head-commit feedface' "$TEST_TMPDIR/gh.merge.log"
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+  grep -q 'merged into develop' "$TEST_TMPDIR/muso.log"
+  grep -q -- '--thread-ts 1756000000.444444' "$TEST_TMPDIR/muso.log"
+  # next tick: the PR now reads MERGED; neither a second merge nor a second tag
+  jq '.state="MERGED"' "$FIXTURES/gh.90.json" > "$FIXTURES/t" && mv "$FIXTURES/t" "$FIXTURES/gh.90.json"
+  run "$SCRIPT"
+  [ "$(grep -c 'pr merge' "$TEST_TMPDIR/gh.merge.log")" -eq 1 ]
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+}
+
+@test "qa-merge: no qa-review status yet -> waits, nothing merged" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/91"
+  pr_fixture 91 ABSENT
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  [[ "$output" == *"waiting for QA"* ]]
+}
+
+@test "qa-merge: QA NO-GO -> Nick tagged once, never merged; a later GO on the same head merges" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/92"
+  pr_fixture 92 FAILURE
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  grep -q 'NO-GO' "$TEST_TMPDIR/muso.log"
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+  run "$SCRIPT"
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+  pr_fixture 92 SUCCESS
+  run "$SCRIPT"
+  grep -q 'pull/92 --merge' "$TEST_TMPDIR/gh.merge.log"
+}
+
+@test "qa-merge: a red CI check blocks the merge even with QA GO" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/93"
+  pr_fixture 93 SUCCESS MERGEABLE "" develop FAILURE
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+}
+
+@test "qa-merge: CHANGES_REQUESTED blocks the merge" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/94"
+  pr_fixture 94 SUCCESS MERGEABLE CHANGES_REQUESTED
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+}
+
+@test "qa-merge: a base that REQUIRES reviews waits for a formal approval — never an admin bypass" {
+  qa_row CREDITS-WEB-NEXT-41 "https://github.com/Muso-AI/web-credits-next/pull/95"
+  jq -n '{required_pull_request_reviews:{required_approving_review_count:1}}' > "$FIXTURES/gh.protection.web-credits-next.json"
+  pr_fixture 95 SUCCESS MERGEABLE REVIEW_REQUIRED
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  [[ "$output" == *"formal approval"* ]]
+  pr_fixture 95 SUCCESS MERGEABLE APPROVED
+  run "$SCRIPT"
+  grep -q 'pull/95 --merge' "$TEST_TMPDIR/gh.merge.log"
+}
+
+@test "qa-merge: a PR whose base is master is NEVER auto-merged" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/96"
+  pr_fixture 96 SUCCESS MERGEABLE APPROVED master
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+}
+
+@test "qa-merge: a failed merge posts nothing and is retried next tick" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/97"
+  pr_fixture 97 SUCCESS
+  : > "$TEST_TMPDIR/gh.merge.fail"
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  run grep -q '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log"
+  [ "$status" -ne 0 ]
+  rm -f "$TEST_TMPDIR/gh.merge.fail"
+  run "$SCRIPT"
+  [ "$(grep -c 'pull/97 --merge' "$TEST_TMPDIR/gh.merge.log")" -eq 2 ]
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+}
+
+@test "qa-merge: a not-mergeable PR (conflict) waits" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/98"
+  pr_fixture 98 SUCCESS CONFLICTING
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+}
+
+@test "qa-merge: a live cto-codex-coding row (merge_policy human) on develop is NEVER merged by the script" {
+  ledger_row CORE-BACKEND-118 code-fixable '"https://github.com/Muso-AI/core-backend/pull/100"' \
+    '{"landed":"pr","merge_policy":"human","channel_id":"C0SENTRY","thread_ts":"1756000000.5"}'
+  pr_fixture 100 SUCCESS MERGEABLE APPROVED
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+}
+
+@test "qa-merge: a repo outside core-backend/web-credits-next is never merged even with a qa-gated row" {
+  qa_row MUSO-AUTH-7 "https://github.com/Muso-AI/auth/pull/101"
+  pr_fixture 101 SUCCESS MERGEABLE APPROVED
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+}
+
+@test "qa-merge: a merge bound to a head that moved is refused and retried, never merged blind" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/102"
+  pr_fixture 102 SUCCESS
+  # the stub compares --match-head-commit with the fixture head; simulate a push after the read
+  jq '.headRefOid="newhead1"' "$FIXTURES/gh.102.json" > "$FIXTURES/t"
+  cat > "$STUBBIN/gh-wrap" <<'W'
+#!/bin/bash
+# on the FIRST view answer with the old head, then swap the fixture so the merge sees a new one
+if [ "$1 $2" = "pr view" ] && [ ! -e "$FIXTURES/../swapped" ]; then
+  cat "$FIXTURES/gh.102.json"; mv "$FIXTURES/t" "$FIXTURES/gh.102.json"; : > "$FIXTURES/../swapped"; exit 0
+fi
+exec "$(dirname "$0")/gh.real" "$@"
+W
+  chmod +x "$STUBBIN/gh-wrap"; mv "$STUBBIN/gh" "$STUBBIN/gh.real"; mv "$STUBBIN/gh-wrap" "$STUBBIN/gh"
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q -- '--match-head-commit feedface' "$TEST_TMPDIR/gh.merge.log"
+  [[ "$output" == *"FAILED (head moved"* ]]
+  run grep -q 'merged into develop' "$TEST_TMPDIR/muso.log"
+  [ "$status" -ne 0 ]
+}
+
+@test "qa-merge: pending CI (real IN_PROGRESS shape), a draft, and mergeable UNKNOWN all wait" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/103"
+  jq -n '{state:"OPEN", mergeable:"MERGEABLE", headRefOid:"feedface", reviewDecision:"", baseRefName:"develop", isDraft:false,
+          statusCheckRollup:[{context:"qa-review", state:"SUCCESS"}, {name:"build", status:"IN_PROGRESS", conclusion:""}]}' > "$FIXTURES/gh.103.json"
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"; [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  pr_fixture 103 SUCCESS; jq '.isDraft=true' "$FIXTURES/gh.103.json" > "$FIXTURES/t" && mv "$FIXTURES/t" "$FIXTURES/gh.103.json"
+  run "$SCRIPT"; [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  pr_fixture 103 SUCCESS UNKNOWN
+  run "$SCRIPT"; [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+}
+
+@test "qa-merge: qa-review ERROR (cannot review) tags Nick and never merges" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/104"
+  pr_fixture 104 ERROR
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  grep -q 'NO-GO' "$TEST_TMPDIR/muso.log"
+}
+
+@test "qa-merge: a protection transport error is UNKNOWN — no merge, retried" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/105"
+  pr_fixture 105 SUCCESS
+  : > "$FIXTURES/gh.protection.core-backend.err"
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  [[ "$output" == *"branch protection"*"UNKNOWN"* ]]
+  rm -f "$FIXTURES/gh.protection.core-backend.err"
+  run "$SCRIPT"
+  grep -q 'pull/105 --merge' "$TEST_TMPDIR/gh.merge.log"
+}
+
+@test "qa-merge: a RULESET requiring a pull-request review is honoured like classic protection" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/106"
+  jq -n '[{type:"pull_request", parameters:{required_approving_review_count:1}}]' > "$FIXTURES/gh.rules.core-backend.json"
+  pr_fixture 106 SUCCESS MERGEABLE REVIEW_REQUIRED
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  grep -q 'requires an approving review' "$TEST_TMPDIR/muso.log"
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+  run "$SCRIPT"
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]    # once per head
+}
+
+@test "qa-merge: no qa-review for 6h tags Nick once that the dispatch may have dropped" {
+  ledger_row CORE-BACKEND-118 code-fixable '"https://github.com/Muso-AI/core-backend/pull/107"' \
+    '{"landed":"pr","merge_policy":"qa-gated","channel_id":"C0SENTRY","thread_ts":"1756000000.6","ts":"2027-01-14T20:00:00Z"}'   # 12h old
+  pr_fixture 107 ABSENT
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  grep -q 'no QA review has completed' "$TEST_TMPDIR/muso.log"
+  run "$SCRIPT"
+  [ "$(grep -c 'no QA review has completed' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+}
+
+@test "qa-merge: a fresh PR with no qa-review yet is NOT nagged" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/108"
+  pr_fixture 108 ABSENT
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  run grep -q 'no QA review has completed' "$TEST_TMPDIR/muso.log"
+  [ "$status" -ne 0 ]
+}
+
+@test "qa-merge: the no-merge flag file stops merging without touching digest or dispatch" {
+  export SENTRY_WATCHDOG_NO_MERGE_FILE="$TEST_TMPDIR/nomerge"; : > "$SENTRY_WATCHDOG_NO_MERGE_FILE"
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/109"
+  pr_fixture 109 SUCCESS
+  fixture core-backend "$(issue CORE-BACKEND-119 4 2 "$RECENT_ISO")"; fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  [[ "$output" == *"suppressed via"* ]]
+  [ "$(grep -c 'cron add' "$TEST_TMPDIR/openclaw.log")" -eq 1 ]
+}
+
+@test "qa-merge: a merge whose Slack tag fails is tagged exactly once by merge-notify on the next tick" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/110"
+  pr_fixture 110 SUCCESS
+  : > "$TEST_TMPDIR/muso.fail"
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  grep -q 'pull/110 --merge' "$TEST_TMPDIR/gh.merge.log"
+  rm -f "$TEST_TMPDIR/muso.fail"
+  jq '.state="MERGED" | .mergedAt="2027-01-15T10:00:00Z"' "$FIXTURES/gh.110.json" > "$FIXTURES/t" && mv "$FIXTURES/t" "$FIXTURES/gh.110.json"
+  run "$SCRIPT"
+  [ "$(grep -c 'pull/110 --merge' "$TEST_TMPDIR/gh.merge.log")" -eq 1 ]
+  [ "$(grep -c 'fix for CORE-BACKEND-118 merged: https://github.com/Muso-AI/core-backend/pull/110' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+  run "$SCRIPT"
+  [ "$(grep -c 'pull/110' "$TEST_TMPDIR/muso.log")" -eq 2 ]   # the failed attempt + the one confirmed tag
+}
+
+@test "qa-merge: dry-run merges nothing" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/99"
+  pr_fixture 99 SUCCESS
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT" --dry-run
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  [[ "$output" == *"would merge"* ]]
+}
+
+@test "SENTRY_WATCHDOG_MAX_ATTEMPTS is validated fail-closed like every other arithmetic knob" {
+  export SENTRY_WATCHDOG_MAX_ATTEMPTS="3x"
+  run "$SCRIPT"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"SENTRY_WATCHDOG_MAX_ATTEMPTS"* ]]
+  export SENTRY_WATCHDOG_MAX_ATTEMPTS="0"
+  run "$SCRIPT"
+  [ "$status" -eq 2 ]
+}
+
+@test "notify_once: delivered but NOT recorded is reported as a failure, and the alert repeats next tick" {
+  outcome_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/commit/aaa" "https://github.com/Muso-AI/core-backend/pull/111"
+  merged_pr 111
+  fixture core-backend; fixture credits-web-next
+  export SENTRY_WATCHDOG_FAIL_RECORD=1
+  run "$SCRIPT"
+  [ "$(grep -c 'pull/111' "$TEST_TMPDIR/muso.log")" -eq 1 ]           # the post went out
+  [[ "$output" == *"could not record"* ]]
+  run grep -q 'tagged Nick for CORE-BACKEND-118' <<<"$output"          # but the caller was NOT told "tagged once"
+  [ "$status" -ne 0 ]
+  [ "$(jq -r '."https://github.com/Muso-AI/core-backend/pull/111" // "absent"' "$TEST_TMPDIR/state/notified.json")" = "absent" ]
+  unset SENTRY_WATCHDOG_FAIL_RECORD
+  run "$SCRIPT"
+  [ "$(grep -c 'pull/111' "$TEST_TMPDIR/muso.log")" -eq 2 ]           # repeated once, then recorded
+  [ "$(jq -r '."https://github.com/Muso-AI/core-backend/pull/111" | type' "$TEST_TMPDIR/state/notified.json")" = "number" ]
+}
+
+@test "the SHIPPED exclude file drops the observed extension distributor timeouts but keeps a same-shaped first-party title eligible" {
+  export SENTRY_WATCHDOG_EXCLUDE_FILE="$HYDRA_REPO/skills-all/sentry-issue-triage/config/watchdog-exclude-patterns.txt"
+  local ext='UnhandledRejection: Non-Error promise rejection captured with value: Request timeout lettersVoicesDistributor.getValue'
+  local loc='UnhandledRejection: Non-Error promise rejection captured with value: Request timeout nn-NO_wordsDistributor.getValue'
+  local ours='UnhandledRejection: Non-Error promise rejection captured with value: Request timeout RightsDistributor.getValue'
+  fixture credits-web-next "$(issue CREDITS-WEB-NEXT-4E 4 0 "$RECENT_ISO" error new "$ext")" \
+                           "$(issue CREDITS-WEB-NEXT-4R 3 0 "$RECENT_ISO" error new "$loc")" \
+                           "$(issue CREDITS-WEB-NEXT-99 4 0 "$RECENT_ISO" error new "$ours")"
+  fixture core-backend
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q 'CREDITS-WEB-NEXT-99' "$TEST_TMPDIR/muso.log"
+  run grep -q 'CREDITS-WEB-NEXT-4E' "$TEST_TMPDIR/muso.log"; [ "$status" -ne 0 ]
+  run grep -q 'CREDITS-WEB-NEXT-4R' "$TEST_TMPDIR/muso.log"; [ "$status" -ne 0 ]
+}
+
+@test "two DISTINCT stale human leases on the same issue page twice, not once per issue lifetime" {
+  ledger_row CORE-BACKEND-118 in-progress null '{"ts":"2027-01-14T08:00:00Z"}'   # crash 1, 24h old
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  [ "$(grep -c 'crashed run' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+  run "$SCRIPT"                                                               # same lease: no repeat
+  [ "$(grep -c 'crashed run' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+  ledger_row CORE-BACKEND-118 needs-human null '{"ts":"2027-01-14T09:00:00Z"}'   # that run was closed out
+  ledger_row CORE-BACKEND-118 in-progress null '{"ts":"2027-01-14T10:00:00Z"}'   # crash 2, a NEW human lease, still >3h old
+  run "$SCRIPT"
+  [ "$(grep -c 'crashed run' "$TEST_TMPDIR/muso.log")" -eq 2 ]
+}
+
+@test "qa-merge: an audit row is written BEFORE the merge, naming head, target, authority and the GO's creator" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/130"
+  pr_fixture 130 SUCCESS
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  grep -q 'pull/130 --merge' "$TEST_TMPDIR/gh.merge.log"
+  local f; f="$(ls "$TEST_TMPDIR"/state/audit/*.jsonl)"
+  [ "$(jq -r 'select(.action=="qa-merge") | .target' "$f")" = "https://github.com/Muso-AI/core-backend/pull/130" ]
+  [ "$(jq -r 'select(.action=="qa-merge") | .head' "$f")" = "feedface" ]
+  [ "$(jq -r 'select(.action=="qa-merge") | .qa_status_creator' "$f")" = "muso-qa-bot[bot]" ]
+  [ "$(jq -r 'select(.action=="qa-merge") | .authorization' "$f")" = "standing sentry-autofix authorization (Nick U0AL36NADEY)" ]
+}
+
+@test "qa-merge: an unwritable audit log REFUSES the merge (never merge unlogged)" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/131"
+  pr_fixture 131 SUCCESS
+  : > "$TEST_TMPDIR/not-a-dir"
+  export SENTRY_WATCHDOG_AUDIT_DIR="$TEST_TMPDIR/not-a-dir"      # a FILE where the dir must be: mkdir -p fails, even as root
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  [[ "$output" == *"refusing to merge unlogged"* ]]
+  unset SENTRY_WATCHDOG_AUDIT_DIR
+  run "$SCRIPT"
+  grep -q 'pull/131 --merge' "$TEST_TMPDIR/gh.merge.log"
+}
+
+@test "merge-notify runs even when dispatch is off" {
+  outcome_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/82" null
+  merged_pr 82
+  export SENTRY_WATCHDOG_DISPATCH=0
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  grep -q 'pull/82' "$TEST_TMPDIR/muso.log"
+}
+
+# ── re-dispatch bounds (attempt cap, origin freshness, crashed human runs) ──
+
+@test "re-dispatch is CAPPED: after MAX_ATTEMPTS unattended runs with no outcome the issue is held for a human and Nick is paged once" {
+  ledger_row CORE-BACKEND-118 awaiting-approval null '{"contract":"n-cap"}'      # ours (nonce matches)
+  mkdir -p "$SENTRY_WATCHDOG_STATE_DIR"
+  jq -n '{"CORE-BACKEND-118":{state:"dispatched", last_dispatch_ts:(1800000000 - 20000), dispatch_attempts:3, nonces:["n-cap"]}}' \
+    > "$SENTRY_WATCHDOG_STATE_DIR/dispatched.json"
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_TMPDIR/openclaw.log" ]
+  grep -q "CORE-BACKEND-118: re-dispatch cap" "$TEST_TMPDIR/muso.log"
+  grep -q 'unattended runs did not reach an outcome' "$TEST_TMPDIR/muso.log"
+  export SENTRY_WATCHDOG_NOW=$((1800000000 + 1800))
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/openclaw.log" ]
+  [ "$(grep -c 'unattended runs did not reach an outcome' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+}
+
+@test "an issue the watchdog dispatched long ago and a HUMAN later re-opened is NOT landed unattended: the awaiting row carries no dispatch nonce" {
+  originated CORE-BACKEND-118 $((1800000000 - 30 * 86400))                       # ours, a month ago
+  ledger_row CORE-BACKEND-118 needs-human null "$(ours CORE-BACKEND-118)"
+  ledger_row CORE-BACKEND-118 in-progress null "{\"ts\":\"$(jq -rn '(1800000000 - 3600)|todateiso8601')\"}"   # a thread re-open
+  ledger_row CORE-BACKEND-118 awaiting-approval null "{\"ts\":\"$(jq -rn '(1800000000 - 3000)|todateiso8601')\"}"
+  fixture core-backend "$(issue CORE-BACKEND-118 40 20 "$RECENT_ISO" error regressed)"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/openclaw.log" ]
+  grep -q "CORE-BACKEND-118: awaiting (human-initiated, awaiting a human)" "$TEST_TMPDIR/muso.log"
+}
+
+@test "an awaiting row whose contract is a DIFFERENT nonce than ours (an older dispatch, or forged) is not re-dispatched" {
+  originated CORE-BACKEND-118 $((1800000000 - 20000)) "n-current"
+  ledger_row CORE-BACKEND-118 awaiting-approval null '{"contract":"n-previous"}'
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/openclaw.log" ]
+  grep -q "CORE-BACKEND-118: awaiting (human-initiated, awaiting a human)" "$TEST_TMPDIR/muso.log"
+}
+
+@test "a real dispatch records its nonce, and a row echoing that nonce is ours on the next tick" {
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  n="$(jq -r '."CORE-BACKEND-118".nonces[-1]' "$TEST_TMPDIR/state/dispatched.json")"
+  [ "$n" = "$(jq -r .nonce "$TEST_TMPDIR"/state/dispatch/*.json)" ]
+  ledger_row CORE-BACKEND-118 awaiting-approval null "{\"contract\":\"$n\"}"
+  export SENTRY_WATCHDOG_NOW=$((1800000000 + 90000))
+  run "$SCRIPT"
+  [ "$(grep -c 'cron add' "$TEST_TMPDIR/openclaw.log")" -eq 2 ]
+}
+
+@test "a redispatched turn that never starts does not strand the row: the previous nonce still counts as ours until the cap" {
+  originated CORE-BACKEND-118 $((1800000000 - 20000)) "n-A"
+  ledger_row CORE-BACKEND-118 awaiting-approval null '{"contract":"n-A"}'
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"                                             # redispatch B recorded; turn B never writes a row
+  [ "$(grep -c 'cron add' "$TEST_TMPDIR/openclaw.log")" -eq 1 ]
+  [ "$(jq -r '."CORE-BACKEND-118".nonces|length' "$TEST_TMPDIR/state/dispatched.json")" -eq 2 ]
+  export SENTRY_WATCHDOG_NOW=$((1800000000 + 90000))         # lease expired, new day
+  run "$SCRIPT"                                             # row still carries n-A: still ours -> redispatched again
+  [ "$(grep -c 'cron add' "$TEST_TMPDIR/openclaw.log")" -eq 2 ]
+  run grep -q "human-initiated" "$TEST_TMPDIR/muso.log"; [ "$status" -ne 0 ]
+  export SENTRY_WATCHDOG_NOW=$((1800000000 + 180000))
+  run "$SCRIPT"                                             # attempt 3 = MAX_ATTEMPTS -> held and paged, not stranded silently
+  [ "$(grep -c 'cron add' "$TEST_TMPDIR/openclaw.log")" -eq 2 ]
+  grep -q 'unattended runs did not reach an outcome' "$TEST_TMPDIR/muso.log"   # the cap page (a quiet tick posts no digest)
+}
+
+@test "qa-merge: a qa-review GO posted by the MERGING login (host-posted) is not QA's - tagged once, never merged" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/120"
+  pr_fixture 120 SUCCESS
+  echo "adk47" > "$FIXTURES/gh.creator.feedface"      # the stub's `gh api user` is adk47 too
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  grep -q "not by QA's own App identity" "$TEST_TMPDIR/muso.log"
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+  run "$SCRIPT"
+  [ "$(grep -c '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+}
+
+@test "qa-merge: rollup GO but the commit status flipped to failure before the merge -> not merged (state and creator read together)" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/123"
+  pr_fixture 123 SUCCESS                                            # the rollup read says GO
+  echo "muso-qa-bot[bot] failure" > "$FIXTURES/gh.creator.feedface"  # QA's CURRENT status row says NO-GO
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  [[ "$output" == *"qa-review is 'failure' on the commit status right now"* ]]
+  run grep -q '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log"; [ "$status" -ne 0 ]
+  echo "muso-qa-bot[bot] success" > "$FIXTURES/gh.creator.feedface"
+  run "$SCRIPT"
+  grep -q 'pull/123 --merge' "$TEST_TMPDIR/gh.merge.log"
+}
+
+@test "qa-merge: a qa-review GO from an unlisted login is not QA's either" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/121"
+  pr_fixture 121 SUCCESS
+  echo "some-writer" > "$FIXTURES/gh.creator.feedface"
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+}
+
+@test "qa-merge: an unreadable creator / policy is UNKNOWN - no merge, no tag, retried" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/122"
+  pr_fixture 122 SUCCESS
+  echo "none" > "$FIXTURES/gh.creator.feedface"       # no status rows on the head at all
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  [[ "$output" == *"could not verify who posted qa-review"* ]]
+  run grep -q '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log"; [ "$status" -ne 0 ]
+  rm -f "$FIXTURES/gh.creator.feedface"
+  export SENTRY_WATCHDOG_QA_POLICY="$TEST_TMPDIR/absent-policy"
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  unset SENTRY_WATCHDOG_QA_POLICY
+  run "$SCRIPT"
+  grep -q 'pull/122 --merge' "$TEST_TMPDIR/gh.merge.log"
+}
+
+@test "a stale lease a HUMAN started is paged ONCE as a crashed run, never filed silently as 'awaiting a human'" {
+  ledger_row CORE-BACKEND-118 in-progress null '{"ts":"2027-01-14T08:00:00Z"}'   # 24h old, no dispatched.json entry
+  fixture core-backend "$(issue CORE-BACKEND-118 4 2 "$RECENT_ISO")"
+  fixture credits-web-next
+  export SENTRY_WATCHDOG_DISPATCH=1
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/openclaw.log" ]
+  grep -q 'crashed run' "$TEST_TMPDIR/muso.log"
+  grep -q '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log"
+  run "$SCRIPT"
+  [ "$(grep -c 'crashed run' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+}
+
+@test "qa-merge: QA GO but red CI tags Nick once per head instead of waiting silently" {
+  qa_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/112"
+  pr_fixture 112 SUCCESS MERGEABLE "" develop FAILURE
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  grep -q 'CI is red' "$TEST_TMPDIR/muso.log"
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  [ "$(grep -c 'CI is red' "$TEST_TMPDIR/muso.log")" -eq 1 ]
+}
+
+@test "qa-merge: qa-review stuck at PENDING for 6h is nagged like ABSENT" {
+  ledger_row CORE-BACKEND-118 code-fixable '"https://github.com/Muso-AI/core-backend/pull/113"' \
+    '{"landed":"pr","merge_policy":"qa-gated","channel_id":"C0SENTRY","thread_ts":"1756000000.7","ts":"2027-01-14T20:00:00Z"}'
+  pr_fixture 113 PENDING
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ ! -f "$TEST_TMPDIR/gh.merge.log" ]
+  grep -q 'no QA review has completed' "$TEST_TMPDIR/muso.log"
+  grep -q 'qa-review=PENDING' "$TEST_TMPDIR/muso.log"
+}
+
+@test "merge-notify: a CLOSED (unmerged) PR is recorded as terminal — no tag, never polled again" {
+  outcome_row CORE-BACKEND-118 "https://github.com/Muso-AI/core-backend/pull/79" null
+  jq -n '{state:"CLOSED", mergedAt:null, mergeCommit:null}' > "$FIXTURES/gh.79.json"
+  fixture core-backend; fixture credits-web-next
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  run grep -q '<@U0AL36NADEY>' "$TEST_TMPDIR/muso.log"
+  [ "$status" -ne 0 ]
+  [ "$(grep -c 'pull/79' "$TEST_TMPDIR/gh.log")" -eq 1 ]
+  [ "$(jq -r '."https://github.com/Muso-AI/core-backend/pull/79" | type' "$TEST_TMPDIR/state/notified.json")" = "number" ]
+  run "$SCRIPT"
+  [ "$(grep -c 'pull/79' "$TEST_TMPDIR/gh.log")" -eq 1 ]
 }
