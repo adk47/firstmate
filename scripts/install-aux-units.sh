@@ -1090,6 +1090,8 @@ EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/edge.env
 Environment=HOME=/root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Review notices go to #cs_chats; the channel default lives in the script, not
+# here, because --promote is run by hand and inherits no unit environment.
 ExecStart=$HYDRA_ROOT/scripts/support-changelog-sync.sh
 CHANGELOGSVC
 

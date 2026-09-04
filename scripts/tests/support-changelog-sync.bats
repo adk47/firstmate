@@ -125,6 +125,69 @@ accept() {
   done
 }
 
+# --- security-disclosure: the gate was identifier-shaped, this class is not ---
+# Found by the human read-through gate on the first live render (2026-09-04).
+# All three lines below were PUBLISHED by the pre-fix gate: they carry no repo
+# name, no path, no casing tell, no issue ref -- nothing the identifier rules
+# look for. What makes them unpublishable is the DISCLOSURE, not the shape.
+# Telling a customer we shipped a fix for exposed password-reset links, or for
+# cross-workspace profile access, is a vulnerability disclosure; describing how
+# the risk engine scores them is a fraud-evasion aid. Both are decisions for a
+# human, never for an AI support agent paraphrasing a changelog.
+#
+# Note two of the three came from titles that never said "security"
+# (fix(profile): pin the workspace-membership authorization reads to the
+# primary), so a selection-stage type filter alone would NOT have caught them.
+# The render-stage rule is the load-bearing one.
+
+@test "rejects a credential-exposure disclosure (real: shipped 2026-W34)" {
+  reject "password reset links are no longer exposed, and reset emails continue through the expected channel"
+}
+
+@test "rejects a cross-tenant authorization disclosure (real: shipped 2026-W35)" {
+  reject "unauthorized users can no longer view profiles from other workspaces"
+}
+
+@test "rejects risk-engine internals (real: shipped 2026-W34)" {
+  reject "high risk scores are no longer incorrectly rejected as unscored"
+}
+
+@test "rejects explicit vulnerability vocabulary" {
+  for t in \
+    "a security issue in checkout has been fixed" \
+    "we patched a vulnerability in the sharing links" \
+    "a cross site scripting exploit is no longer possible" \
+    "privilege escalation on shared profiles has been closed" \
+    "a data breach affecting saved cards was contained"; do
+    run bash "$SYNC" --check-line "$t"
+    [ "$status" -ne 0 ] || { echo "LEAK: accepted vulnerability disclosure: $t" >&2; return 1; }
+  done
+}
+
+@test "rejects a credentials-in-logs disclosure" {
+  reject "session tokens are no longer written to logs"
+}
+
+@test "rejects an access-to-other-people disclosure" {
+  reject "customers can no longer see other customers saved payment methods"
+}
+
+# The rules above are deliberately blunt, so these pin the cost. A product
+# change that merely MENTIONS passwords or visibility is normal customer news
+# and must survive -- if these ever start failing, the disclosure rules have
+# widened into the product vocabulary and are dropping real knowledge.
+@test "accepts ordinary password prose that discloses nothing" {
+  accept "customers can now reset their password from the settings page"
+}
+
+@test "accepts ordinary visibility prose that discloses nothing" {
+  accept "anonymous visitors can now see stream headlines and all time chart peaks"
+}
+
+@test "accepts a product change that merely restores a sign-in feature" {
+  accept "partner sign-in consent and account claim features are available again"
+}
+
 @test "rejects an em-dash (the customer-surface lint rule)" {
   reject "credits now verify faster $(printf '—') no waiting"
 }
@@ -246,6 +309,14 @@ case "$*" in
     fi
     echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; exit 0 ;;
   *"pr list"*)   [ "${GH_MODE:-}" = "prlist-fail" ] && exit 1
+                 # One safe feature plus one security fix, which is the window
+                 # shape that made the incompleteness footer lie: the security
+                 # title is dropped at SELECTION, so it never reached a counter.
+                 if [ "${GH_MODE:-}" = "mixed-disclosure" ]; then
+                   printf 'bbbb\t2026-09-01\tfeat(x): a customer visible change\n'
+                   printf 'cccc\t2026-09-01\tfix(session): close a privilege escalation in the token check\n'
+                   exit 0
+                 fi
                  printf 'bbbb\t2026-09-01\tfeat(x): a customer visible change\n'; exit 0 ;;
 esac
 exit 0
@@ -332,6 +403,126 @@ _stage_env() {
   [ ! -f "$SUPPORT_CHANGELOG_OUT" ]
 }
 
+# ─── Withholding must be COUNTED, not just done (QA review #909, Important 2) ─
+# The disclosure rule drops a security fix at SELECTION, before the model call.
+# Nothing counted those drops, so a window holding one safe feature and one
+# security fix rendered the safe line with degraded=0 and dropped=0 -- and the
+# incompleteness footer, which keys off exactly those two counters, was omitted.
+# The file then read as an EXHAUSTIVE list of the window to Caroline, which is
+# the one conclusion it must never support ("nothing changed, so it is not us").
+#
+# These drive the whole renderer end to end rather than grepping the source
+# condition: a source assertion cannot see a counter that is never incremented.
+
+_stub_model() {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  cat > "$BATS_TEST_TMPDIR/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+printf '{"choices":[{"finish_reason":"stop","message":{"content":"- your invoices now show the correct total."}}]}'
+exit 0
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/curl"
+  export OPENROUTER_API_KEY=test-key
+}
+
+@test "a window whose security fix was withheld renders the incompleteness footer" {
+  _stub_gh
+  _stub_model
+  export GH_MODE=mixed-disclosure
+  run bash "$SYNC" --dry-run
+  [ "$status" -eq 0 ]
+  # The safe line is published and the withheld one never appears.
+  [[ "$output" == *"invoices now show the correct total"* ]]
+  [[ "$output" != *"privilege escalation"* ]] || {
+    echo "LEAK: a withheld security title reached the render" >&2; return 1; }
+  [[ "$output" == *"Treat this list as incomplete"* ]] || {
+    echo "the footer was omitted for a window that withheld a customer-visible change" >&2
+    echo "$output" >&2
+    return 1; }
+}
+
+@test "a window with nothing withheld does NOT claim to be incomplete" {
+  # The falsifiability guard for the test above: without this, an unconditional
+  # footer would satisfy it and the counter could go back to never incrementing.
+  _stub_gh
+  _stub_model
+  run bash "$SYNC" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"invoices now show the correct total"* ]]
+  [[ "$output" != *"Treat this list as incomplete"* ]] || {
+    echo "a complete window was labelled incomplete; the footer is unconditional" >&2
+    return 1; }
+}
+
+@test "the run log reports what selection withheld, not only what the gate rejected" {
+  # An operator reading "0 rejected by the leak gate" on a window that silently
+  # dropped a security fix has been told the render is complete.
+  _stub_gh
+  _stub_model
+  export GH_MODE=mixed-disclosure
+  run bash "$SYNC" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"withheld"* ]] || {
+    echo "the log never mentions withholding" >&2; echo "$output" >&2; return 1; }
+}
+
+# ─── The promote confirmation lands with the review (QA review #909, Imp. 1) ──
+# The CS channel was set ONLY as `Environment=` on the systemd unit, but
+# --promote is run BY HAND from an operator shell, which inherits no unit
+# environment. scripts/lib/slack-notify.sh assigns SLACK_CHANNEL=C0ADV2W76G4
+# (#clio_devops) at source time, so the fallback was never empty and never
+# failed loudly -- the confirmation for a CONTENT review just quietly landed in
+# the infra pager channel, away from the humans who reviewed the render.
+
+_stub_slack_recorder() {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  cat > "$BATS_TEST_TMPDIR/bin/muso-recorder" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$BATS_TEST_TMPDIR/slack-argv.txt"
+exit 0
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/muso-recorder"
+  export MUSO_BIN="$BATS_TEST_TMPDIR/bin/muso-recorder"
+  # slack_load_env needs only the bot token present in the environment.
+  export MUSO_SLACK_BOT_TOKEN_DEVOPS=test-token
+}
+
+@test "a hand-run --promote confirms in the CS channel, not the infra pager" {
+  _stage_env
+  _stub_slack_recorder
+  # Exactly the environment an operator has: no unit Environment= at all.
+  unset SUPPORT_CHANGELOG_SLACK_CHANNEL
+  printf '# x\n\n- your invoices now show the correct total.\n' > "$SUPPORT_CHANGELOG_STAGE"
+  { printf 'core-backend=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+    printf 'web-credits-next=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'; } > "$SUPPORT_CHANGELOG_STAGE.boundary"
+  run bash "$SYNC" --promote "$(sha256sum "$SUPPORT_CHANGELOG_STAGE" | cut -c1-16)"
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/slack-argv.txt" ] || {
+    echo "the promote confirmation was never sent" >&2; return 1; }
+  grep -q -- '--channel C0ANM0PN9L5' "$BATS_TEST_TMPDIR/slack-argv.txt" || {
+    echo "the confirmation did not go to the CS channel:" >&2
+    cat "$BATS_TEST_TMPDIR/slack-argv.txt" >&2
+    return 1; }
+  grep -q -- '--channel C0ADV2W76G4' "$BATS_TEST_TMPDIR/slack-argv.txt" && {
+    echo "the confirmation went to the infra pager channel" >&2; return 1; }
+  return 0
+}
+
+@test "an explicit channel override still wins over the built-in default" {
+  # The default must be a default, not a hardcode: the unit (and an operator
+  # testing against a scratch channel) must still be able to redirect it.
+  _stage_env
+  _stub_slack_recorder
+  export SUPPORT_CHANGELOG_SLACK_CHANNEL=C0TESTCHAN
+  printf '# x\n\n- your invoices now show the correct total.\n' > "$SUPPORT_CHANGELOG_STAGE"
+  { printf 'core-backend=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+    printf 'web-credits-next=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'; } > "$SUPPORT_CHANGELOG_STAGE.boundary"
+  run bash "$SYNC" --promote "$(sha256sum "$SUPPORT_CHANGELOG_STAGE" | cut -c1-16)"
+  [ "$status" -eq 0 ]
+  grep -q -- '--channel C0TESTCHAN' "$BATS_TEST_TMPDIR/slack-argv.txt" || {
+    echo "the override was ignored:" >&2; cat "$BATS_TEST_TMPDIR/slack-argv.txt" >&2; return 1; }
+}
+
 @test "--promote publishes a clean staged render and clears the staging file" {
   _stage_env
   printf '# x\n\n- your invoices now show the correct total.\n' > "$SUPPORT_CHANGELOG_STAGE"
@@ -386,6 +577,48 @@ _stage_env() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"old; re-run to rebuild"* ]]
   [ ! -f "$SUPPORT_CHANGELOG_OUT" ]
+}
+
+@test "the incompleteness footer fires on a render-stage gate drop too" {
+  # The third way the file can be incomplete, after a degraded week and a
+  # selection-stage withhold: the model answers, and the leak gate refuses one
+  # of the lines it produced. Previously a SOURCE assertion, on the premise that
+  # reaching the footer needed a stubbed model call -- it does, so this stubs it.
+  _stub_gh
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  # NB: \\n, not \n. In a single-quoted printf FORMAT, \n becomes a raw newline,
+  # which is illegal inside a JSON string: jq then returns empty content and the
+  # script reports a degraded week -- the footer would appear for the wrong
+  # reason and this test would pass without ever exercising the gate.
+  cat > "$BATS_TEST_TMPDIR/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+printf '{"choices":[{"finish_reason":"stop","message":{"content":"- your invoices now show the correct total.\\n- fixed the resolver in src/identity/user.ts"}}]}'
+exit 0
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/curl"
+  export OPENROUTER_API_KEY=test-key
+  # Streams SPLIT on purpose. Under --dry-run the script echoes each refused
+  # line to stderr -- that run IS the human read-through, and a gate whose
+  # decisions you cannot see is not reviewable. bats `run` merges both streams,
+  # so asserting the leak is absent from the merged output would fail on the
+  # operator's own audit trail. The DOCUMENT is stdout; the reasons are stderr.
+  run bash -c "bash '$SYNC' --dry-run 2>'$BATS_TEST_TMPDIR/err'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"invoices now show the correct total"* ]]
+  [[ "$output" != *"src/identity/user.ts"* ]] || {
+    echo "LEAK: a code-shaped line survived into the rendered document" >&2
+    echo "$output" >&2
+    return 1; }
+  [[ "$output" == *"Treat this list as incomplete"* ]] || {
+    echo "the footer was omitted for a render that dropped a line at the gate" >&2
+    echo "$output" >&2
+    return 1
+  }
+  # ...and the reviewer is still shown what was refused.
+  grep -q 'src/identity/user.ts' "$BATS_TEST_TMPDIR/err" || {
+    echo "the dry run hid its own rejection from the reviewer" >&2
+    cat "$BATS_TEST_TMPDIR/err" >&2
+    return 1; }
 }
 
 @test "the staging path is OUTSIDE the RAG-indexed reference directory" {

@@ -102,6 +102,20 @@ CHANGELOG_KEY_FILE="${SUPPORT_CHANGELOG_KEY_FILE:-/opt/hydra/secrets/llm-provide
 CHANGELOG_URL="${SUPPORT_CHANGELOG_URL:-https://openrouter.ai/api/v1/chat/completions}"
 CHANGELOG_MODEL="${SUPPORT_CHANGELOG_MODEL:-openai/gpt-5.6-luna}"
 
+# Where the review request and its promote confirmation go: #cs_chats, the
+# humans who can actually judge the copy. slack-notify.sh's default would put a
+# daily multi-message content review into the infra pager channel, next to
+# codex auth failures and deploy rollbacks, where it competes with alerts that
+# must not be scrolled past. This default lives HERE, not only as an
+# `Environment=` on the systemd unit, because --promote is run BY HAND from an
+# operator shell that inherits no unit environment. And it cannot be left to
+# fall through: lib/slack-notify.sh ASSIGNS `SLACK_CHANNEL=C0ADV2W76G4`
+# (#clio_devops) at source time, so an unset value is never empty and never
+# fails loudly -- the confirmation for a content review just quietly lands in
+# the infra pager channel, away from the reviewers. Failure PAGES still use
+# slack_notify's devops default on purpose: a broken render is a devops event.
+SUPPORT_CHANGELOG_SLACK_CHANNEL="${SUPPORT_CHANGELOG_SLACK_CHANNEL:-C0ANM0PN9L5}"
+
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/release-repos.sh
 source "$SELF_DIR/lib/release-repos.sh"
@@ -136,7 +150,7 @@ slack_escape() {
 notify_or_fail() {
   local text="$1" pf
   pf="$(mktemp)" || return 1
-  jq -n --arg c "${SUPPORT_CHANGELOG_SLACK_CHANNEL:-${SLACK_CHANNEL:-}}" --arg t "$text" \
+  jq -n --arg c "$SUPPORT_CHANGELOG_SLACK_CHANNEL" --arg t "$text" \
     '{channel:$c, text:$t}' > "$pf" 2>/dev/null || { rm -f "$pf"; return 1; }
   slack_notify_payload_file_status "$pf"
   local rc=$?
@@ -201,6 +215,44 @@ _DENY_CI=(
   # --dry-run before the timer is enabled. Add a term the day you see it leak.
   '\b(uvn|idp|devlog|tier-?2|godmode|muso-cli|muso-read|cs-ops|ops-admin|matvw|backfill|blockkit|mrkdwn)\b'
 )
+# Security DISCLOSURE, which is a different class from every rule above. Those
+# reject a line for its SHAPE -- a path, an issue ref, a casing tell. These
+# reject it for what it TELLS the reader. "password reset links are no longer
+# exposed" carries no identifier at all and sailed through the whole gate on
+# the first live render (2026-09-04); so did a cross-workspace profile access
+# fix and a risk-scoring change. Paraphrasing any of those to a customer is a
+# vulnerability disclosure or a fraud-evasion aid, and that is a human's
+# decision -- Aaron's, or legal's -- never an AI support agent's, and never one
+# made silently by a daily cron.
+#
+# Applied at BOTH stages: to the PR title before the model is called (so it
+# cannot paraphrase what it never saw) and to the rendered line (so it cannot
+# invent one from a title that never said "security" -- two of the three real
+# leaks came from exactly that, e.g. "pin the workspace-membership
+# authorization reads to the primary").
+#
+# Deliberately blunt, and it will drop the occasional benign line. That trade is
+# the right way round: a dropped line costs Caroline a little knowledge for a
+# day, a published one cannot be recalled from a customer's inbox. The
+# `accepts ordinary ... prose` tests pin the cost so the rules cannot quietly
+# widen into ordinary product vocabulary.
+_DENY_DISCLOSURE=(
+  '\b(vulnerabilit(y|ies)|exploit|security (issue|hole|flaw|bug|fix|patch|advisory|problem)|attack|breach|malicious)'
+  '\b(cross[ -]?site (scripting|request forgery)|sql injection|code injection|privilege escalation|remote code execution|clickjacking|session (fixation|hijack)|csrf|xss|ssrf|idor|cve-[0-9])'
+  '\b(leak|expos|disclos|exfiltrat)'                     # the exposure predicate
+  '\b(unauthori[sz]ed|unauthenticated|impersonat)'
+  # A credential noun near a logging/plaintext verb. Scoped to one sentence so
+  # "the api key page now links to key management" stays publishable.
+  '\b(token|credential|secret|password|api key)s?\b[^.]{0,40}\b(log|logs|logged|logging|plain ?text|clear ?text)\b'
+  # "closed a hole that let people see other people's things".
+  '\bno longer (see|view|access|read|open|reach|download)\b[^.]{0,60}\b(other|another|someone else|third part)'
+  # Fraud/risk internals. Not a disclosure -- an evasion aid. Describing how the
+  # risk engine scores a request tells the people gaming it what to change.
+  '\b((risk|fraud) (score|scoring|threshold|engine|check|detection|rule|model)|(high|low|medium)[ -]risk|unscored|auto[ -]?approv)'
+)
+# One alternation, so the selection filter and the render gate can never drift.
+_DENY_DISCLOSURE_RE="$(IFS='|'; printf '%s' "${_DENY_DISCLOSURE[*]}")"
+
 # Uppercase tokens a customer legitimately reads. Anything else uppercase is
 # treated as an internal codename (B2, UVN, IDP) and rejected.
 _ACRONYM_OK=' API PDF CSV FAQ GDPR URL ID IDS VAT EU UK US USA AI PRO ISRC UPC DSP EP LP TV OK SMS QR PM AM '
@@ -229,6 +281,9 @@ line_is_safe() {
   done
   for pat in "${_DENY_CI[@]}"; do
     if printf '%s' "$line" | grep -qiE "$pat"; then echo "internal name: $pat" >&2; return 1; fi
+  done
+  for pat in "${_DENY_DISCLOSURE[@]}"; do
+    if printf '%s' "$line" | grep -qiE "$pat"; then echo "disclosure: $pat" >&2; return 1; fi
   done
 
   # Uppercase codenames. grep exits 1 on no match, which is the common case, so
@@ -408,8 +463,13 @@ case "${1:-}" in
     install -m 644 "$STAGE" "$OUT"
     rm -f "$STAGE" "$STAGE.boundary"
     log "promoted $STAGE -> $OUT (digest ${actual})"
+    # Same channel as the review request that preceded it -- a confirmation
+    # that lands somewhere other than the thing it confirms is noise. Still
+    # best-effort: the file is ALREADY published by this point, so a Slack
+    # failure must not fail the promote (the release watcher makes the same
+    # call for the same reason).
     SLACK_NOTIFY_REQUESTER="support-changelog-sync" \
-      slack_notify ":white_check_mark: *Caroline shipped-work feed promoted* on node-8 — the reviewed render is now live in her knowledge base."
+      notify_or_fail ":white_check_mark: *Caroline shipped-work feed promoted* on node-8 — the reviewed render is now live in her knowledge base." || true
     exit 0 ;;
   "")        ;;
   *)         echo "usage: $0 [--dry-run | --promote | --check-line <text>]" >&2; exit 2 ;;
@@ -433,6 +493,7 @@ trap 'rm -rf "$WORK"' EXIT
 # were themselves unsafe.
 published=0
 dropped=0
+withheld=0
 degraded=0
 held=0
 # key -> the rollout boundary sha this render was computed against, persisted
@@ -539,12 +600,40 @@ done
 # the MAX_TITLES_PER_CALL cap fall entirely on whichever repo is listed last --
 # in a busy week every web change would be dropped and every backend change
 # kept, every week, with only a generic "capping" warning to say so.
+#
+# The second filter is the disclosure rule (see $_DENY_DISCLOSURE). Dropping
+# these HERE, before the model call, means a security fix is never translated
+# in the first place -- the render-stage gate stays as the backstop for a
+# paraphrase the title did not telegraph. The `security` conventional scope is
+# named explicitly because the vocabulary rules match prose, not `fix(security):`.
+#
+# The two stages are split so the disclosure drops can be COUNTED. They are not
+# the same kind of drop as the type filter above it: a `chore:` or `ci:` commit
+# is genuinely not a customer-visible change, and its absence makes the render
+# no less complete. A withheld security fix IS a customer-visible change that we
+# refuse to describe, so it is an INCOMPLETENESS and has to reach the footer.
+# Uncounted, a window holding one safe feature and one security fix rendered the
+# safe line with degraded=0/dropped=0 and read to Caroline as the exhaustive
+# list of everything that shipped -- supporting exactly the conclusion the
+# footer exists to block ("nothing changed, so it is not us").
+TYPED="$WORK/typed.tsv"
 KEPT="$WORK/kept.tsv"
 grep -viE $'\t'"(chore|ci|test|tests|build|refactor|docs|style|revert)(\([^)]*\))?!?:" "$RAW" \
-  | sort -r > "$KEPT" || true
+  | sort -r > "$TYPED" || true
+grep -viE $'\t'"[a-z]+\(security\)" "$TYPED" \
+  | grep -viE "$_DENY_DISCLOSURE_RE" > "$KEPT" || true
+withheld=$(( $(wc -l < "$TYPED") - $(wc -l < "$KEPT") ))
 [[ -s "$KEPT" ]] || {
-  warn "nothing customer-visible in the window; leaving $OUT untouched"
-  page "no customer-visible change found in ${DAYS} days, which for these repos means the fetch or the type filter broke, not a quiet month."
+  # Distinguish the two ways this can be empty. "The fetch broke" is a very
+  # different page from "every change in the window was a security fix", and
+  # sending the first when it was the second starts a false hunt.
+  if (( withheld > 0 )); then
+    warn "every customer-visible change in the window was withheld by the disclosure rule (${withheld}); leaving $OUT untouched"
+    page "all ${withheld} customer-visible change(s) in the window were withheld by the disclosure rule. Correct if the window really was all security work; a gate bug otherwise."
+  else
+    warn "nothing customer-visible in the window; leaving $OUT untouched"
+    page "no customer-visible change found in ${DAYS} days, which for these repos means the fetch or the type filter broke, not a quiet month."
+  fi
   exit 1
 }
 
@@ -716,7 +805,12 @@ When you use it:
 HEADER
 cat "$BODY" >> "$DOC"
 printf '_Covers the last %s days. Regenerated daily._\n' "$DAYS" >> "$DOC"
-if (( degraded > 0 )); then
+# Also on `dropped`, not just on a failed week. The gate withholds whole
+# classes of change on purpose now (security disclosures, risk-engine
+# internals), so a render can be complete-looking and still be missing the
+# thing a customer is asking about. Caroline must never read this file as an
+# exhaustive list and conclude "nothing changed, so it is not us".
+if (( degraded > 0 || dropped > 0 || withheld > 0 )); then
   printf '\n_Some changes in this window could not be summarised and are missing here. Treat this list as incomplete._\n' >> "$DOC"
 fi
 
@@ -733,7 +827,7 @@ fi
 
 if (( DRY_RUN )); then
   cat "$DOC"
-  log "dry run: ${published} line(s) published, ${dropped} rejected by the leak gate, ${held} held (not rolled out), ${degraded} week(s) degraded; $OUT untouched"
+  log "dry run: ${published} line(s) published, ${dropped} rejected by the leak gate, ${withheld} withheld before translation, ${held} held (not rolled out), ${degraded} week(s) degraded; $OUT untouched"
   exit 0
 fi
 
@@ -769,7 +863,7 @@ if [[ -s "$added" ]]; then
   for bkey in $CHANGELOG_REPO_KEYS; do
     [[ -n "${BOUNDARY[$bkey]:-}" ]] && printf '%s=%s\n' "$bkey" "${BOUNDARY[$bkey]}" >> "$STAGE.boundary"
   done
-  log "STAGED $STAGE (digest ${stage_digest}): ${n_added} new line(s) awaiting review; $OUT unchanged"
+  log "STAGED $STAGE (digest ${stage_digest}): ${n_added} new line(s) awaiting review, ${withheld} withheld before translation; $OUT unchanged"
 
   # The notice must expose EVERY line it authorises. Truncating the list while
   # still handing over the promote command let an operator publish lines they
@@ -809,7 +903,7 @@ fi
 # Nothing new to review: the rolling window only dropped or reordered lines a
 # human already approved, so installing adds no unreviewed content.
 install -m 644 "$DOC" "$OUT"
-log "wrote $OUT: ${published} line(s), ${dropped} rejected by the leak gate, ${held} change(s) held (not yet rolled out), ${degraded} week(s) degraded"
+log "wrote $OUT: ${published} line(s), ${dropped} rejected by the leak gate, ${withheld} withheld before translation, ${held} change(s) held (not yet rolled out), ${degraded} week(s) degraded"
 if (( degraded > 0 )); then
   page "it published, but ${degraded} week(s) could not be summarised and are MISSING from the feed."
 fi
