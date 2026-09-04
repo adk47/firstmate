@@ -483,8 +483,12 @@ exit 0
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/muso-recorder"
   export MUSO_BIN="$BATS_TEST_TMPDIR/bin/muso-recorder"
-  # slack_load_env needs only the bot token present in the environment.
+  # slack_load_env needs the bot token present in the environment, per bot:
+  # a missing token makes it return non-zero and the send never happens, so
+  # both bots this script uses must be stubbed or the argv assertions below
+  # would pass vacuously on a message that was never sent.
   export MUSO_SLACK_BOT_TOKEN_DEVOPS=test-token
+  export MUSO_SLACK_BOT_TOKEN_OPERATIONS=test-token
 }
 
 @test "a hand-run --promote confirms in the CS channel, not the infra pager" {
@@ -506,6 +510,54 @@ STUB
   grep -q -- '--channel C0ADV2W76G4' "$BATS_TEST_TMPDIR/slack-argv.txt" && {
     echo "the confirmation went to the infra pager channel" >&2; return 1; }
   return 0
+}
+
+@test "the review notice is sent by a bot that is actually IN the CS channel" {
+  # Delivery, not just addressing. slack-notify.sh assigns SLACK_NOTIFY_BOT at
+  # SOURCE time, so an unset value silently resolves to `devops` -- and the
+  # devops token cannot even RESOLVE C0ANM0PN9L5 (`channel_not_found`, verified
+  # against conversations.info on 2026-09-04), while `operations` is a member.
+  # A correct channel with the wrong bot is a notice nobody receives: the first
+  # live render staged a digest and every one of its notice chunks failed to
+  # deliver. Bot and channel have to be chosen together.
+  _stage_env
+  _stub_slack_recorder
+  unset SUPPORT_CHANGELOG_SLACK_CHANNEL SUPPORT_CHANGELOG_SLACK_BOT
+  printf '# x\n\n- your invoices now show the correct total.\n' > "$SUPPORT_CHANGELOG_STAGE"
+  { printf 'core-backend=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+    printf 'web-credits-next=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'; } > "$SUPPORT_CHANGELOG_STAGE.boundary"
+  run bash "$SYNC" --promote "$(sha256sum "$SUPPORT_CHANGELOG_STAGE" | cut -c1-16)"
+  [ "$status" -eq 0 ]
+  grep -q -- '--bot operations' "$BATS_TEST_TMPDIR/slack-argv.txt" || {
+    echo "the notice was sent by a bot that is not in the CS channel:" >&2
+    cat "$BATS_TEST_TMPDIR/slack-argv.txt" >&2
+    return 1; }
+}
+
+@test "a failure page still reaches the infra pager, not the CS channel" {
+  # The CS bot override must be scoped to the review notice. Failure pages are
+  # a devops event and must keep landing in #clio_devops with the devops bot --
+  # if the override leaked to global scope, every page would be re-routed to a
+  # content-review channel and the infra on-call would never see it.
+  _stage_env
+  _stub_slack_recorder
+  export SUPPORT_CHANGELOG_KEY_FILE="$BATS_TEST_TMPDIR/no-such-key.json"
+  unset OPENROUTER_API_KEY SUPPORT_CHANGELOG_SLACK_CHANNEL SUPPORT_CHANGELOG_SLACK_BOT
+  # NB: no second _stub_gh here. _stage_env already called it, and it resets
+  # MUSO_BIN to /nonexistent -- re-running it would silently discard the
+  # recorder and this test would then only prove that nothing was sent.
+  run bash "$SYNC"
+  [ "$status" -ne 0 ]
+  [ -f "$BATS_TEST_TMPDIR/slack-argv.txt" ] || {
+    echo "the failure paged nobody at all" >&2; return 1; }
+  grep -q -- '--bot devops' "$BATS_TEST_TMPDIR/slack-argv.txt" || {
+    echo "the failure page was not sent by the devops bot:" >&2
+    cat "$BATS_TEST_TMPDIR/slack-argv.txt" >&2
+    return 1; }
+  grep -q -- '--channel C0ADV2W76G4' "$BATS_TEST_TMPDIR/slack-argv.txt" || {
+    echo "the failure page missed the infra pager channel:" >&2
+    cat "$BATS_TEST_TMPDIR/slack-argv.txt" >&2
+    return 1; }
 }
 
 @test "an explicit channel override still wins over the built-in default" {

@@ -116,6 +116,16 @@ CHANGELOG_MODEL="${SUPPORT_CHANGELOG_MODEL:-openai/gpt-5.6-luna}"
 # slack_notify's devops default on purpose: a broken render is a devops event.
 SUPPORT_CHANGELOG_SLACK_CHANNEL="${SUPPORT_CHANGELOG_SLACK_CHANNEL:-C0ANM0PN9L5}"
 
+# ...and the bot that sends it, which is NOT a separate knob from the channel:
+# the devops bot is not in #cs_chats and its token cannot even resolve the ID
+# (`conversations.info` answers `channel_not_found`, not `not_in_channel`),
+# while the operations bot is a member. The same source-time assignment trap
+# applies -- lib/slack-notify.sh sets `SLACK_NOTIFY_BOT=devops` when sourced,
+# so an unset value is never empty and never fails loudly. Addressing the right
+# channel with the wrong bot is a notice nobody receives: the first live render
+# staged a digest and every notice chunk failed to deliver.
+SUPPORT_CHANGELOG_SLACK_BOT="${SUPPORT_CHANGELOG_SLACK_BOT:-operations}"
+
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/release-repos.sh
 source "$SELF_DIR/lib/release-repos.sh"
@@ -149,6 +159,15 @@ slack_escape() {
 
 notify_or_fail() {
   local text="$1" pf
+  # Scoped to this function ON PURPOSE. slack-notify.sh reads SLACK_NOTIFY_BOT
+  # at CALL time, so a `local` here reaches _slack_post_payload through bash's
+  # dynamic scoping and reverts on return -- which is what keeps `page()` on
+  # the devops bot and the infra pager channel. A broken render is a devops
+  # event and must not be re-routed into a content-review channel.
+  # Dynamic scoping is invisible to shellcheck, which sees only that nothing in
+  # THIS function reads the variable. _slack_post_payload does, one frame down.
+  # shellcheck disable=SC2034
+  local SLACK_NOTIFY_BOT="$SUPPORT_CHANGELOG_SLACK_BOT"
   pf="$(mktemp)" || return 1
   jq -n --arg c "$SUPPORT_CHANGELOG_SLACK_CHANNEL" --arg t "$text" \
     '{channel:$c, text:$t}' > "$pf" 2>/dev/null || { rm -f "$pf"; return 1; }
