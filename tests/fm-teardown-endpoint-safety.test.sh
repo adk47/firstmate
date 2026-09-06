@@ -253,8 +253,8 @@ test_supported_backend_endpoint_records_validate() {
 
 # Orca 1.4.197 identifies a worktree as "<repo id>::<absolute path>" while
 # earlier releases returned a plain token; both must validate, and a
-# composite whose path part is empty, relative, control-laden, dot-walking,
-# or shell-hostile must refuse before any runtime call.
+# composite whose path part is empty, relative, control-laden, or dot-walking
+# must refuse before any runtime call.
 test_orca_composite_worktree_ids_validate_and_refuse() {
   local dir id repo composite bad rc
   repo=24ab7047-5712-4006-9a32-acf89077adce
@@ -274,12 +274,13 @@ test_orca_composite_worktree_ids_validate_and_refuse() {
 
   fm_backend_orca_worktree_id_valid "$repo::/Users/captain/my project/fm-task" \
     || fail "composite Orca worktree id with a spaced path refused"
+  fm_backend_orca_worktree_id_valid "$repo::/Users/x/Projects (work)/repo/fm-task" \
+    || fail "composite Orca worktree id with parentheses in its path refused"
   fm_backend_orca_worktree_id_valid "wt-legacy-token" \
     || fail "legacy plain Orca worktree id refused"
   for bad in "$repo::" "$repo::relative/path" "$repo::/" \
     "$repo::/Users/captain/../etc" "$repo::/Users/captain/./fm-task" "$repo::/Users/captain/fm-task/.." \
-    "$repo::/Users/captain/a::b" "$repo::/Users/captain/\$HOME/fm-task" "$repo::/Users/captain/fm-task;rm" \
-    "$repo::/Users/captain/fm\"task" "bad repo::/Users/captain/fm-task" "::/Users/captain/fm-task" \
+    "$repo::/Users/captain/a::b" "bad repo::/Users/captain/fm-task" "::/Users/captain/fm-task" \
     "$(printf '%s::/Users/captain/fm-task\nextra' "$repo")" \
     "$(printf '%s::/Users/captain/fm-task\textra' "$repo")" \
     "wt:legacy-with-colon" ""; do
@@ -292,7 +293,7 @@ test_orca_composite_worktree_ids_validate_and_refuse() {
 
   id=orca-composite-bad
   for bad in "empty-path:$repo::" "relative-path:$repo::relative/path" \
-    "dot-dot:$repo::/Users/captain/../fm-task" "hostile:$repo::/Users/captain/\$HOME"; do
+    "dot-dot:$repo::/Users/captain/../fm-task"; do
     dir=$(make_case "orca-composite-${bad%%:*}")
     fm_write_meta "$dir/home/state/$id.meta" \
       "window=fm-$id" "endpoint_task_id=$id" "terminal=term-composite-bad" \

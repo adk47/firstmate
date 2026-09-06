@@ -392,13 +392,12 @@ fm_backend_endpoint_atom_valid() {  # <value>
 # for a worktree id and refuse everything else. Orca releases before 1.4.197
 # returned a plain atom; 1.4.197 returns "<repo id>::<absolute worktree path>"
 # (docs/verification/runtime-backends.md "Orca"). The repo id must pass the
-# atom rule; the path must be absolute, contain no control characters, no
-# "." or ".." segment, no second "::", and none of the shell metacharacters
-# a real worktree path never needs. Spaces and other ordinary path bytes stay
-# legal because the id is only ever passed as one quoted argument to orca.
+# atom rule and there must be exactly one "::" separator; the path must be a
+# non-empty absolute path with no control characters, no "." or ".." segment,
+# and no second "::". Every other byte is ordinary path content because the id
+# is only ever passed to orca as one quoted argv element.
 fm_backend_orca_worktree_id_valid() {  # <value>
-  local value=$1 repo path hostile
-  hostile='\\$`"'"'"'*?[]{}|&;<>()!#'
+  local value=$1 repo path
   case "$value" in
     *::*) ;;
     *) fm_backend_endpoint_atom_valid "$value"; return ;;
@@ -412,7 +411,6 @@ fm_backend_orca_worktree_id_valid() {  # <value>
     *) return 1 ;;
   esac
   case "/$path/" in *'/../'*|*'/./'*) return 1 ;; esac
-  case "$path" in *["$hostile"]*) return 1 ;; esac
   return 0
 }
 
