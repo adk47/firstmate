@@ -388,6 +388,34 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+# fm_backend_orca_worktree_id_valid: accept the two shapes Orca has emitted
+# for a worktree id and refuse everything else. Orca releases before 1.4.197
+# returned a plain atom; 1.4.197 returns "<repo id>::<absolute worktree path>"
+# (docs/verification/runtime-backends.md "Orca"). The repo id must pass the
+# atom rule; the path must be absolute, contain no control characters, no
+# "." or ".." segment, no second "::", and none of the shell metacharacters
+# a real worktree path never needs. Spaces and other ordinary path bytes stay
+# legal because the id is only ever passed as one quoted argument to orca.
+fm_backend_orca_worktree_id_valid() {  # <value>
+  local value=$1 repo path hostile
+  hostile='\\$`"'"'"'*?[]{}|&;<>()!#'
+  case "$value" in
+    *::*) ;;
+    *) fm_backend_endpoint_atom_valid "$value"; return ;;
+  esac
+  repo=${value%%::*}
+  path=${value#*::}
+  fm_backend_endpoint_atom_valid "$repo" || return 1
+  case "$path" in
+    ''|/|*::*|*[[:cntrl:]]*) return 1 ;;
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "/$path/" in *'/../'*|*'/./'*) return 1 ;; esac
+  case "$path" in *["$hostile"]*) return 1 ;; esac
+  return 0
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -508,7 +536,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       if [ "$window" != "fm-$id" ] \
         || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
+        || ! fm_backend_orca_worktree_id_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi

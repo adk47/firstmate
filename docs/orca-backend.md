@@ -42,6 +42,7 @@ worktree=<absolute Orca worktree path>
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+`orca_worktree_id=` holds whatever `orca worktree create` returned, either a plain token or the `<repo id>::<absolute worktree path>` composite that Orca 1.4.197 emits, and `bin/fm-backend.sh` validates both shapes (see [runtime-backends.md](verification/runtime-backends.md) "Orca").
 
 ## Current lifecycle and safety
 
