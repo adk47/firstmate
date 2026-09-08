@@ -136,6 +136,15 @@
 #     sales lead was closed-as-answered and forwarded to Nick by
 #     email; Aaron, who owns ads, never saw it).
 #
+#   /etc/tmpfiles.d/tmp.conf
+#     /tmp age policy keyed on mtime only (`D /tmp 1777 root root mM:14d`),
+#     installed verbatim from scripts/aux-units/tmp.conf. Codifies the
+#     2026-08-26 node-8 hand-edit that ended the disk-pressure alerts: the
+#     stock newest-of(atime,mtime,ctime) age test was permanently defeated by
+#     a nightly read-walk refreshing atime, so 7d/30d policies reclaimed 0
+#     bytes while /tmp grew to ~200 GB (H-DevOps devops-agent route #285).
+#     Hard-guarded: the source must carry the mM: prefix, or install fails.
+#
 #   cto-nightly-driver.timer / .service
 #     Every 30 min. Runs scripts/cto-nightly-driver.sh, the deterministic
 #     overnight supervisor for the nightly CTO issue-fixer's currently-open
@@ -2245,6 +2254,64 @@ qarc=qa-review-reconcile.timer
 systemctl enable "$qarc" >/dev/null 2>&1 || log "WARN: could not enable $qarc"
 systemctl start "$qarc" >/dev/null 2>&1 || log "WARN: could not start $qarc"
 log "  $qarc: $(systemctl is-active "$qarc" 2>/dev/null || echo unknown)"
+
+# ─── /tmp age policy keyed on mtime (/etc/tmpfiles.d/tmp.conf) ─────
+# --- BEGIN tmpfiles-age-by-mtime ---
+# Installed VERBATIM from scripts/aux-units/tmp.conf (no substitutions, so
+# the template is the source of truth, unlike the heredoc units above).
+# WHY (2026-08-11 -> 2026-08-26, node-8 disk pressure): systemd-tmpfiles ages
+# an entry by newest-of(atime,btime,ctime,mtime); / is relatime and a nightly
+# ~19:15Z read-walk of /tmp refreshed atime on every entry, so the stock `D
+# /tmp ... 30d` (and a hand-tightened 7d) matured 0 entries while /tmp grew
+# to ~200 GB. The `mM:` age-by prefix restricts the test to mtime. This was a
+# hand-edit on node-8 until 2026-09-05; codified so a rebuild keeps it.
+#
+# Invariant guard: the source MUST carry the mM: prefix. Regressing to a
+# plain age silently re-creates the 0-bytes-reclaimed failure while looking
+# correctly configured, so the installer refuses to ship it.
+#
+# `systemd-tmpfiles --create <file>` parse-validates the installed file (it
+# creates missing dirs from D lines, never removes anything). On a parse
+# failure the previous file is restored (or the new one removed, which
+# un-masks the stock 30d policy) and the installer fails loudly.
+# TMPFILES_D is overridable ONLY so tests can run this block against a temp
+# dir; production always uses /etc/tmpfiles.d.
+TMPFILES_D="${TMPFILES_D:-/etc/tmpfiles.d}"
+tmpconf_src="$HYDRA_ROOT/scripts/aux-units/tmp.conf"
+tmpconf_dst="$TMPFILES_D/tmp.conf"
+[[ -f "$tmpconf_src" ]] || fail "$tmpconf_src missing (tmpfiles /tmp age policy)"
+grep -Eq '^D /tmp 1777 root root mM:[0-9]+[smhdw]?$' "$tmpconf_src" \
+  || fail "$tmpconf_src must declare 'D /tmp 1777 root root mM:<age>' (mtime-keyed age; see block comment)"
+mkdir -p "$TMPFILES_D"
+if cmp -s "$tmpconf_src" "$tmpconf_dst"; then
+  log "  tmpfiles tmp.conf: up to date ($(grep '^D /tmp' "$tmpconf_dst"))"
+else
+  tmpconf_prev=""
+  if [[ -f "$tmpconf_dst" ]]; then
+    tmpconf_prev="$(mktemp)"
+    cp -p "$tmpconf_dst" "$tmpconf_prev"
+    # Keep the FIRST pre-managed copy for the rollback documented in the
+    # template; later re-installs never overwrite it. tmpfiles.d only reads
+    # *.conf, so the sidecar is inert.
+    [[ -f "$tmpconf_dst.pre-managed" ]] || cp -p "$tmpconf_dst" "$tmpconf_dst.pre-managed"
+  fi
+  install -m 644 "$tmpconf_src" "$tmpconf_dst"
+  if systemd-tmpfiles --create "$tmpconf_dst"; then
+    log "  tmpfiles tmp.conf: installed ($(grep '^D /tmp' "$tmpconf_dst"))"
+  else
+    if [[ -n "$tmpconf_prev" ]]; then
+      install -m 644 "$tmpconf_prev" "$tmpconf_dst"
+      log "  tmpfiles tmp.conf: parse FAILED, previous file restored"
+    else
+      rm -f "$tmpconf_dst"
+      log "  tmpfiles tmp.conf: parse FAILED, new file removed (stock policy un-masked)"
+    fi
+    if [[ -n "$tmpconf_prev" ]]; then rm -f "$tmpconf_prev"; fi
+    fail "systemd-tmpfiles rejected $tmpconf_src"
+  fi
+  if [[ -n "$tmpconf_prev" ]]; then rm -f "$tmpconf_prev"; fi
+fi
+# --- END tmpfiles-age-by-mtime ---
 
 # ─── QA approval retry, every 10 min ───────────────────────────────
 # Sibling of the reconciler above, for the OTHER half of the bot. The
