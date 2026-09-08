@@ -423,7 +423,7 @@
       "id": "46442766-c410-4ccd-966c-4de3c06eed8d",
       "agentId": "operations",
       "name": "uvn-ticket-popularity-under30-4h",
-      "description": "ENABLED 2026-08-13 after Nick authorized the autonomous admin-write gate. Every 4h at :15 run a deterministic ticket-scoped UVN approval pass. It accepts IDs only from structured TO DO hydra-action-request/action:credit-verify tickets that carry the automation:uvn-under30 eligibility tag (exact-ID scope; Caroline's recommendation does not gate enrollment — the cron's own policy is the gate), fetches authoritative live Spotify popularity, excludes fraud and backend hard-reject signals, atomically approves only rows still in user_verification_needed, verifies every exact ID, never rejects, and resolves only when every structured request ID reads approved. The dedicated conditional backend route makes either deployment order fail closed. Plain-English summaries are announced to #credit-verification by the cron runner; policy mismatches are de-enrolled once and remain open for manual review without turning the run into a recurring command-failure alert.",
+      "description": "ENABLED 2026-08-13 after Nick authorized the autonomous admin-write gate; PROFILE-SCOPED since 2026-09-04 (measured: 39 of 40 tickets carry no cr_ids, so exact-id enrollment approved nothing for three weeks while humans approved 99.5% of the routed requests, median 2.2h). Every 4h at :15 run a deterministic UVN approval pass. A TO DO hydra-action-request/action:credit-verify ticket carrying the automation:uvn-under30 eligibility tag and a UUID profile is in scope (Caroline's recommendation does not gate enrollment — the cron's own policy is the gate); the cron resolves that profile's live user_verification_needed rows from the backend itself (exact ids in the ticket only narrow the scope), fetches authoritative live Spotify popularity, excludes fraud and backend hard-reject signals, atomically approves only rows still in user_verification_needed with popularity below 30, verifies every exact ID, never rejects, and resolves the ticket only when the profile has nothing left in verification; rows it cannot approve are listed on the ticket for the human reviewer. --mode shadow (the deploy default) records would-approve rows to /var/log/muso-ops/uvn-under30-shadow.jsonl and writes nothing; flip the argv to --mode apply after the shadow review, --limit caps approvals per run; /etc/hydra/uvn-under30-cron.disabled silences it. The dedicated conditional backend route makes either deployment order fail closed. Plain-English summaries are announced to #credit-verification by the cron runner; in apply mode policy mismatches are de-enrolled once and remain open for manual review without turning the run into a recurring command-failure alert, and in shadow mode they are named in the summary instead (shadow writes nothing). A dead popularity route or the run's own time budget (UVN_RUN_BUDGET_SECS, 900s, inside the 1200s runner timeout) stops the run early with a summary rather than letting the runner kill it silently.",
       "enabled": true,
       "createdAtMs": 1786384653000,
       "updatedAtMs": 1786384653000,
@@ -438,7 +438,11 @@
         "kind": "command",
         "argv": [
           "python3",
-          "/opt/hydra/scripts/uvn-under30-cron.py"
+          "/opt/hydra/scripts/uvn-under30-cron.py",
+          "--mode",
+          "shadow",
+          "--limit",
+          "25"
         ],
         "cwd": "/opt/hydra",
         "timeoutSeconds": 1200

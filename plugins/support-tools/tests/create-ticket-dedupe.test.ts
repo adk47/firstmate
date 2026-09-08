@@ -370,17 +370,21 @@ describe("create_ticket body, due date and tags", () => {
     ]);
   });
 
-  it("marks exact-id credit-verification tickets automation-ready regardless of recommendation", async () => {
+  it("marks profile-scoped credit-verification tickets automation-ready regardless of ids or recommendation", async () => {
     const profileId = "11111111-1111-4111-8111-111111111111";
     const requestId = "22222222-2222-4222-8222-222222222222";
-    // Eligibility is exact scope only (UUID profile + UUID cr_ids); the
-    // `recommendation` field is deliberately ignored — full rationale on
-    // hasAutomationReadyUvnScope in src/tools/create-ticket.ts. All three
-    // recommendation states must tag identically.
+    // Eligibility is a UUID profile. Exact cr_ids only narrow the runner's
+    // scope; the `recommendation` field is deliberately ignored — full
+    // rationale on hasAutomationReadyUvnScope in src/tools/create-ticket.ts.
     for (const details of [
       { pending_credits: [{ cr_id: requestId }], recommendation: "recommend-approve" },
       { pending_credits: [{ cr_id: requestId }], recommendation: "needs-human" },
       { pending_credits: [{ cr_id: requestId }] },
+      // The live shape (measured 2026-09-04: 39 of 40 tickets): no cr_ids at all.
+      { pending_credits: [{ role: "Mixing", track_title: "Song" }], proof: { kind: "private" } },
+      { credit_request_id: requestId },
+      {},
+      undefined,
     ]) {
       const readyDeps = makeDeps();
       const readyTool = createCreateTicketTool(readyDeps);
@@ -395,8 +399,9 @@ describe("create_ticket body, due date and tags", () => {
     }
 
     for (const params of [
-      { customerProfileId: profileId, details: { credit_request_id: requestId } },
       { customerProfileId: profileId, details: { pending_credits: [{ cr_id: "not-a-uuid" }] } },
+      { customerProfileId: profileId, details: { pending_credits: "not-a-list" } },
+      { customerProfileId: "not-a-uuid", details: { pending_credits: [{ cr_id: requestId }] } },
       { customerProfileId: undefined, details: { pending_credits: [{ cr_id: requestId }] } },
     ]) {
       const manualDeps = makeDeps();

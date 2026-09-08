@@ -70,16 +70,19 @@ const PROFILE_ANCHOR_REQUIRED = new Set(["profile-update", "bulk-credit-change",
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // A credit-verification ticket remains a valid human-review handoff even when
-// it lacks exact request ids. Only the exact-scope shape below (UUID profile +
-// UUID cr_id on every pending credit) may opt into the autonomous UVN under-30
-// runner. Caroline's `recommendation` deliberately does NOT gate eligibility:
-// it is customer-influenced pre-screen evidence for the human reviewer, and
-// requiring recommend-approve made the runner unreachable — that value only
-// exists when catalog corroboration already let the gated credits_verify
-// approve directly (0 of 1,440 TO DO tickets ever carried the tag). The
+// it lacks exact request ids. The autonomous UVN under-30 runner is enrolled
+// by PROFILE: it resolves the profile's live pending rows from the backend
+// itself, so all it needs from the ticket is a UUID profile. Exact `cr_id`s,
+// when Caroline does supply them, only narrow that scope, and a `cr_id` that
+// is present but not a UUID is a malformed block that must not enroll.
+// History: the earlier exact-id gate (UUID cr_id on every pending credit) was
+// never satisfied in production — 39 of 40 tickets measured on 2026-09-04
+// carried no cr_ids at all — so the runner approved nothing for three weeks.
+// Caroline's `recommendation` deliberately does NOT gate eligibility: it is
+// customer-influenced pre-screen evidence for the human reviewer. The
 // runner's own policy (sub-30, fraud truth-floor, hard-reject rules,
-// still-UVN, exact-ID re-verify before every write) is the gate, so this tag
-// is an eligibility marker rather than authorization.
+// still-UVN, re-verify before every write) is the gate, so this tag is an
+// eligibility marker rather than authorization.
 function hasAutomationReadyUvnScope(
   actionType: string,
   customerProfileId: string | undefined,
@@ -89,9 +92,12 @@ function hasAutomationReadyUvnScope(
     return false;
   }
   const pending = details?.pending_credits;
-  return Array.isArray(pending) && pending.length > 0 && pending.every((item) => {
+  if (pending === undefined || pending === null) return true;
+  if (!Array.isArray(pending)) return false;
+  return pending.every((item) => {
     if (typeof item !== "object" || item === null) return false;
     const requestId = (item as Record<string, unknown>).cr_id;
+    if (requestId === undefined || requestId === null || requestId === "") return true;
     return typeof requestId === "string" && UUID_RE.test(requestId);
   });
 }

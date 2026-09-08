@@ -53,27 +53,43 @@ def _normalize_uuid(value: Any, label: str) -> str:
         raise PolicyError(f"structured {label} is not a UUID") from exc
 
 
-def _request_ids_from_details(details: Any, *, required: bool) -> set[str] | None:
+def _request_ids_from_details(details: Any) -> set[str] | None:
+    """Exact request ids a structured block names, or None when it names none.
+
+    Caroline's tickets carry the profile UUID but almost never a `cr_id`
+    (measured 2026-09-04: 39 of 40), so an entry without one is evidence-only
+    and the ticket is profile-scoped. A `cr_id` that IS present must be a UUID;
+    anything else is a malformed block and fails closed.
+    """
     if not isinstance(details, dict):
         raise PolicyError("structured details are malformed")
-    if "pending_credits" not in details and not required:
-        return None
     pending = details.get("pending_credits")
-    if not isinstance(pending, list) or not pending:
-        raise PolicyError("structured pending credits are missing")
+    if pending is None:
+        return None
+    if not isinstance(pending, list):
+        raise PolicyError("structured pending credits are malformed")
     request_ids: set[str] = set()
     for pending_credit in pending:
-        cr_id = pending_credit.get("cr_id") if isinstance(pending_credit, dict) else None
+        if not isinstance(pending_credit, dict):
+            raise PolicyError("structured pending credit is malformed")
+        cr_id = pending_credit.get("cr_id")
+        if cr_id in (None, ""):
+            continue
         request_ids.add(_normalize_uuid(cr_id, "credit request ID"))
-    return request_ids
+    return request_ids or None
 
 
-def parse_ticket_scope(task: dict[str, Any], comments: Iterable[dict[str, Any]]) -> tuple[str, set[str]]:
-    """Return the one profile and exact UUID request IDs from structured blocks.
+def parse_ticket_scope(
+    task: dict[str, Any], comments: Iterable[dict[str, Any]]
+) -> tuple[str, set[str] | None]:
+    """Return the one profile and, when the ticket names any, exact request IDs.
 
-    The description owns the initial complete scope. Follow-up comments are
-    deltas: evidence-only updates may omit pending_credits, while any update
-    that adds request ids must repeat the same profile and carry valid UUIDs.
+    The scope is the PROFILE: the cron resolves that profile's live pending
+    rows from the backend itself (resolve_profile_scope). Exact ids in the
+    description or in follow-up comments only ever NARROW that scope; they
+    never widen it. Evidence-only updates may omit pending_credits, while any
+    update that adds request ids must repeat the same profile and carry valid
+    UUIDs. Returns None as the second value when no block names an id.
     """
     tags = {
         str(tag.get("name", "")).strip().lower()
@@ -99,13 +115,16 @@ def parse_ticket_scope(task: dict[str, Any], comments: Iterable[dict[str, Any]])
         raise PolicyError("no structured action request")
 
     profile_ids: set[str] = set()
-    request_ids: set[str] = set()
+    narrowing: set[str] | None = None
     for block in blocks:
         if block.get("action_type") != "credit-verify":
             raise PolicyError("structured action type is not credit-verify")
         profile_ids.add(_normalize_uuid(block.get("customer_profile_id"), "profile ID"))
-        details = block.get("details")
-        request_ids.update(_request_ids_from_details(details, required=True) or set())
+        if not isinstance(block.get("details"), dict):
+            raise PolicyError("structured details are malformed")
+        named = _request_ids_from_details(block.get("details"))
+        if named:
+            narrowing = (narrowing or set()) | named
     if len(profile_ids) != 1:
         raise PolicyError("structured blocks disagree on profile ID")
     profile_id = next(iter(profile_ids))
@@ -116,7 +135,7 @@ def parse_ticket_scope(task: dict[str, Any], comments: Iterable[dict[str, Any]])
             if block.get("action_type") != "credit-verify":
                 raise PolicyError("structured action type is not credit-verify")
             details = block.get("details")
-            added_ids = _request_ids_from_details(details, required=False)
+            added_ids = _request_ids_from_details(details)
             raw_update_profile = block.get("customer_profile_id")
             update_profile = None
             if raw_update_profile not in (None, ""):
@@ -127,9 +146,71 @@ def parse_ticket_scope(task: dict[str, Any], comments: Iterable[dict[str, Any]])
                 continue
             if update_profile is None:
                 raise PolicyError("structured profile ID is missing")
-            request_ids.update(added_ids)
+            narrowing = (narrowing or set()) | added_ids
 
-    return profile_id, request_ids
+    return profile_id, narrowing
+
+
+def resolve_profile_scope(
+    profile_id: str,
+    narrowing: set[str] | None,
+    rows_by_id: dict[str, dict[str, Any]],
+    max_rows: int = 100,
+) -> set[str]:
+    """Turn a ticket's profile (plus optional exact ids) into the request ids in scope.
+
+    Without narrowing the scope is every live user_verification_needed row of
+    that profile, read from the backend, never from the ticket, and a profile
+    carrying more pending rows than max_rows is refused: a queue that size is
+    a bulk submission a human should look at, not a customer asking about
+    their pending credits. With narrowing the scope is exactly those ids, each
+    of which must exist and belong to the profile; the ticket has already
+    bounded the blast radius, so the queue size does not apply.
+    """
+    if narrowing is None:
+        pending = pending_request_ids(profile_id, rows_by_id)
+        if len(pending) > max_rows:
+            raise PolicyError(f"profile has more than {max_rows} pending requests")
+        return pending
+    for request_id in narrowing:
+        row = rows_by_id.get(request_id)
+        if not isinstance(row, dict) or row.get("profileId") != profile_id:
+            raise PolicyError("a scoped credit request is missing or belongs to another profile")
+    return set(narrowing)
+
+
+def pending_request_ids(profile_id: str, rows_by_id: dict[str, dict[str, Any]]) -> set[str]:
+    """The live user_verification_needed rows of one profile.
+
+    This one predicate decides what the cron may approve, when a ticket may
+    resolve, and what the human reviewer is shown as still pending.
+    """
+    return {
+        request_id
+        for request_id, row in rows_by_id.items()
+        if isinstance(row, dict)
+        and row.get("profileId") == profile_id
+        and row.get("status") == UVN
+    }
+
+
+def no_pending_rows_remaining(profile_id: str, rows_by_id: dict[str, dict[str, Any]]) -> bool:
+    return not pending_request_ids(profile_id, rows_by_id)
+
+
+def live_popularity(live_spotify: Any) -> int | float | None:
+    """The measured popularity in a spotify_lookup result, or None when there is none.
+
+    The approval gate and every human-facing "popularity N" line read the
+    number through this one parser, so they cannot disagree about it.
+    """
+    if not isinstance(live_spotify, dict) or live_spotify.get("found") is not True:
+        return None
+    track = live_spotify.get("track")
+    popularity = track.get("popularity") if isinstance(track, dict) else None
+    if isinstance(popularity, bool) or not isinstance(popularity, (int, float)):
+        return None
+    return popularity
 
 
 def has_hard_reject_signal(credit_request: dict[str, Any]) -> bool:
@@ -162,15 +243,10 @@ def qualifies_for_approval(
         return False
     if has_hard_reject_signal(credit_request):
         return False
-    if not credit_request.get("spotifyTrackId") or live_spotify.get("found") is not True:
+    if not credit_request.get("spotifyTrackId"):
         return False
-    track = live_spotify.get("track")
-    popularity = track.get("popularity") if isinstance(track, dict) else None
-    return (
-        isinstance(popularity, (int, float))
-        and not isinstance(popularity, bool)
-        and 0 <= popularity < 30
-    )
+    popularity = live_popularity(live_spotify)
+    return popularity is not None and 0 <= popularity < 30
 
 
 def every_scoped_request_approved(request_ids: set[str], rows_by_id: dict[str, dict[str, Any]]) -> bool:

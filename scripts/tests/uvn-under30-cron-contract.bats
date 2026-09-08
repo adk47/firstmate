@@ -12,7 +12,7 @@ setup() {
       and .agentId == "operations"
       and .schedule == {kind:"cron", expr:"15 */4 * * *", tz:"UTC"}
       and .payload.kind == "command"
-      and .payload.argv == ["python3", "/opt/hydra/scripts/uvn-under30-cron.py"]
+      and .payload.argv == ["python3", "/opt/hydra/scripts/uvn-under30-cron.py", "--mode", "shadow", "--limit", "25"]
       and .payload.cwd == "/opt/hydra"
       and .delivery.mode == "announce"
       and .delivery.channel == "slack"
@@ -20,6 +20,8 @@ setup() {
       and (.delivery.bestEffort // false) == false
       and (.description | contains("automation:uvn-under30"))
       and (.description | contains("recommendation does not gate enrollment"))
+      and (.description | contains("PROFILE-SCOPED"))
+      and (.description | contains("--mode shadow"))
       and (.description | contains("Plain-English summaries"))
   ' "$ROOT/cron-jobs.json"
   [ "$status" -eq 0 ]
@@ -53,6 +55,15 @@ setup() {
   [ "$status" -eq 0 ]
 
   run python3 "$ROOT/scripts/tests/test_uvn_under30_cron.py"
+  [ "$status" -eq 0 ]
+}
+
+@test "the cron guards its host, honours the kill switch, and defaults to shadow" {
+  run grep -nF 'socket.gethostname()' "$ROOT/scripts/uvn-under30-cron.py"
+  [ "$status" -eq 0 ]
+  run grep -nF '/etc/hydra/uvn-under30-cron.disabled' "$ROOT/scripts/uvn-under30-cron.py"
+  [ "$status" -eq 0 ]
+  run grep -nF 'default="shadow"' "$ROOT/scripts/uvn-under30-cron.py"
   [ "$status" -eq 0 ]
 }
 

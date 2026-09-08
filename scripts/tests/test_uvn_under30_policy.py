@@ -12,9 +12,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from uvn_under30_policy import (  # noqa: E402
     PolicyError,
     every_scoped_request_approved,
+    live_popularity,
     load_fraud_ids,
+    no_pending_rows_remaining,
     parse_ticket_scope,
+    pending_request_ids,
     qualifies_for_approval,
+    resolve_profile_scope,
 )
 
 
@@ -183,6 +187,106 @@ class TicketScopeTests(unittest.TestCase):
     def test_rejects_cross_profile_updates(self):
         with self.assertRaises(PolicyError):
             parse_ticket_scope(task(), [{"comment_text": update_block(profile=PROFILE2)}])
+
+    # Caroline's tickets carry the profile UUID but (measured 2026-09-04: 39 of 40)
+    # no cr_ids, so exact-id enrollment was unreachable and the cron approved
+    # nothing for three weeks. A block without ids is now a PROFILE scope: the
+    # cron resolves the exact ids from the backend itself. Ids, when present,
+    # only ever NARROW that scope.
+    def test_block_without_pending_credits_is_profile_scoped(self):
+        payload = {
+            "action_type": "credit-verify",
+            "customer_profile_id": PROFILE1,
+            "details": {"proof": {"kind": "private"}, "recommendation": "needs-human"},
+        }
+        description = f"---ACTION-REQUEST---\n{json.dumps(payload)}\n---END-ACTION-REQUEST---"
+        profile, narrowing = parse_ticket_scope(task(description=description), [])
+        self.assertEqual(profile, PROFILE1)
+        self.assertIsNone(narrowing)
+
+    def test_pending_credits_without_ids_are_evidence_only(self):
+        payload = {
+            "action_type": "credit-verify",
+            "customer_profile_id": PROFILE1,
+            "details": {"pending_credits": [{"role": "Mixing", "track_title": "Song"}]},
+        }
+        description = f"---ACTION-REQUEST---\n{json.dumps(payload)}\n---END-ACTION-REQUEST---"
+        profile, narrowing = parse_ticket_scope(task(description=description), [])
+        self.assertEqual(profile, PROFILE1)
+        self.assertIsNone(narrowing)
+
+    def test_present_but_invalid_id_still_fails_closed(self):
+        payload = {
+            "action_type": "credit-verify",
+            "customer_profile_id": PROFILE1,
+            "details": {"pending_credits": [{"cr_id": "not-a-uuid"}]},
+        }
+        description = f"---ACTION-REQUEST---\n{json.dumps(payload)}\n---END-ACTION-REQUEST---"
+        with self.assertRaises(PolicyError):
+            parse_ticket_scope(task(description=description), [])
+
+    def test_update_can_narrow_a_profile_scope(self):
+        payload = {
+            "action_type": "credit-verify",
+            "customer_profile_id": PROFILE1,
+            "details": {},
+        }
+        description = f"---ACTION-REQUEST---\n{json.dumps(payload)}\n---END-ACTION-REQUEST---"
+        profile, narrowing = parse_ticket_scope(
+            task(description=description), [{"comment_text": update_block(ids=[CR2])}]
+        )
+        self.assertEqual(profile, PROFILE1)
+        self.assertEqual(narrowing, {CR2})
+
+
+class ProfileScopeTests(unittest.TestCase):
+    def test_profile_scope_is_the_live_uvn_rows_of_that_profile_only(self):
+        rows = {
+            CR1: row(),
+            CR2: row(id=CR2, status="approved"),
+            "cr3": row(id="cr3", profileId=PROFILE2),
+        }
+        self.assertEqual(resolve_profile_scope(PROFILE1, None, rows), {CR1})
+
+    def test_narrowing_keeps_exact_ids_and_requires_them_to_belong_to_the_profile(self):
+        rows = {CR1: row(), CR2: row(id=CR2, status="approved")}
+        self.assertEqual(resolve_profile_scope(PROFILE1, {CR1, CR2}, rows), {CR1, CR2})
+        with self.assertRaises(PolicyError):
+            resolve_profile_scope(PROFILE1, {CR1, "cr3"}, rows)
+        with self.assertRaises(PolicyError):
+            resolve_profile_scope(PROFILE1, {CR1}, {CR1: row(profileId=PROFILE2)})
+
+    def test_profile_scope_refuses_oversized_queues(self):
+        rows = {f"cr{i}": row(id=f"cr{i}") for i in range(3)}
+        with self.assertRaises(PolicyError):
+            resolve_profile_scope(PROFILE1, None, rows, max_rows=2)
+        self.assertEqual(len(resolve_profile_scope(PROFILE1, None, rows, max_rows=3)), 3)
+
+    def test_narrowing_bypasses_the_queue_cap(self):
+        # Exact ids already bound the blast radius; a busy profile must not
+        # turn a narrowed (safer) ticket into a de-enrolled one.
+        rows = {f"cr{i}": row(id=f"cr{i}") for i in range(3)}
+        self.assertEqual(resolve_profile_scope(PROFILE1, {"cr0"}, rows, max_rows=2), {"cr0"})
+
+    def test_pending_request_ids_is_the_one_pending_predicate(self):
+        rows = {CR1: row(), CR2: row(id=CR2, status="approved"), "cr3": row(id="cr3", profileId=PROFILE2)}
+        self.assertEqual(pending_request_ids(PROFILE1, rows), {CR1})
+        self.assertEqual(pending_request_ids(PROFILE2, rows), {"cr3"})
+
+    def test_live_popularity_reads_only_a_measured_number(self):
+        self.assertEqual(live_popularity(spotify(0)), 0)
+        self.assertEqual(live_popularity(spotify(29.5)), 29.5)
+        self.assertIsNone(live_popularity(spotify(True)))
+        self.assertIsNone(live_popularity(spotify("12")))
+        self.assertIsNone(live_popularity(spotify()))
+        self.assertIsNone(live_popularity({"found": False}))
+        self.assertIsNone(live_popularity({"popularity": 12}))
+        self.assertIsNone(live_popularity(None))
+
+    def test_no_pending_rows_remaining_ignores_other_profiles(self):
+        self.assertTrue(no_pending_rows_remaining(PROFILE1, {CR1: row(status="approved")}))
+        self.assertTrue(no_pending_rows_remaining(PROFILE1, {CR1: row(profileId=PROFILE2)}))
+        self.assertFalse(no_pending_rows_remaining(PROFILE1, {CR1: row()}))
 
 
 class QualificationTests(unittest.TestCase):
