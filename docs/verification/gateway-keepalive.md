@@ -1,0 +1,97 @@
+# Inference-gateway keep-alive verification
+
+Active empirical facts behind [`../gateway-keepalive.md`](../gateway-keepalive.md).
+Refresh this record after a Claude Code upgrade that changes hook events or the `StopFailure` payload.
+
+## Which hook a 503 turn end fires
+
+Verified 2026-09-09 on Claude Code 2.1.266, macOS 25.4.0.
+
+A local stub answering every request with HTTP 503 was put in front of the session through project-scoped `env.ANTHROPIC_BASE_URL`, with all four Claude lifecycle events registered to a payload-logging hook.
+Claude Code retried internally for about four minutes, then gave up and ended the turn.
+
+Events fired, in order: `UserPromptSubmit`, `StopFailure`, `SessionEnd`.
+`Stop` did not fire.
+
+The `StopFailure` payload:
+
+```json
+{
+  "session_id": "33b7d5cb-904c-40f1-a835-ec72350acca5",
+  "transcript_path": "…/33b7d5cb-904c-40f1-a835-ec72350acca5.jsonl",
+  "cwd": "…",
+  "prompt_id": "92216084-6515-47b9-8792-2308bc7c9a1e",
+  "effort": {"level": "high"},
+  "hook_event_name": "StopFailure",
+  "error": "server_error",
+  "last_assistant_message": "API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary — try again in a moment. If it persists, check your inference gateway (127.0.0.1:18503)."
+}
+```
+
+The same conclusion is visible in live fleet state independent of the stub: a lane stalled on the pooled gateway the same day recorded `state=idle source=claude-hook event=stop-failure`, which is the busy contract's `StopFailure` writer and not its `Stop` writer.
+
+This is why the keep-alive's detector is registered on `StopFailure` rather than `Stop`.
+
+## Why the detector cannot block or continue the turn
+
+`StopFailure` is executed outside the REPL loop.
+In 2.1.266 the executor is:
+
+```js
+async function F7e(e,n,r=pf){                              // executeStopFailureHooks
+  …
+  await nA({ …, hookInput:{ …, hook_event_name:"StopFailure", error:d, … } });
+}
+```
+
+`nA` is `executeHooksOutsideREPL`; it returns per-hook results and `F7e` discards them.
+`Stop` is executed by `qJ` (`executeStopHooks`), an async generator whose results are yielded back into the turn loop, which is what lets exit 2 plus stderr force a continuation there.
+`StopFailure` is also a member of the event set the binary treats as non-blockable, alongside `Notification`, `SessionStart`, `SessionEnd`, and `PostToolUseFailure`.
+
+A `StopFailure` hook therefore has no continuation channel at all, whatever it exits with.
+`tests/fm-gateway-keepalive.test.sh` pins that the detector always exits 0, so this cannot be "fixed" later into a blocker that could not work.
+
+## The typed error enum
+
+`StopFailure`'s `error` field is a closed enum in 2.1.266:
+
+```
+authentication_failed, oauth_org_not_allowed, account_on_hold, billing_error,
+rate_limit, overloaded, invalid_request, model_not_found, server_error,
+unknown, max_output_tokens
+```
+
+`overloaded` and `server_error` are the transient gateway class.
+`authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `billing_error`, `rate_limit`, `invalid_request`, `model_not_found`, and `max_output_tokens` are never retried.
+`unknown` is the fallback and carries no verdict on its own, so an unrecognised kind can still be caught by its wording but can never be retried on the kind alone.
+
+## Error-text census
+
+Taken 2026-09-09 across 201 transcripts in this fleet's `~/.claude/projects`, counting assistant entries carrying `isApiErrorMessage: true`.
+These are the strings the text classifier is written against; the counts are what makes the deny list load-bearing rather than theoretical.
+
+| Count | Text (truncated) | Class |
+|---|---|---|
+| 2427 | `API Error: 503 Service temporarily unavailable. …` | transient |
+| 1692 | `API Error: 503 All accounts are temporarily unavailable. …` | transient |
+| 990 | `Prompt is too long` | permanent |
+| 212 | `Autocompact is thrashing: …` | permanent |
+| 141 | `API Error: Unable to connect to API (ENOTFOUND)` | outage, not retried |
+| 83 | `API Error: 529 Overloaded. …` | transient |
+| 48 | `Prompt is too long · automatic compaction failed: API Error: 503 …` | permanent, and carries a 503 |
+| 37 | `API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited` | permanent |
+| 36 | `API Error: 500 Internal server error. …` | transient |
+| 30 | `You've hit your limit · resets …` | permanent |
+| 17 | `API Error: Unable to connect to API (ConnectionRefused)` | outage, not retried |
+| 15 | `Login expired · Please run /login` | permanent |
+| 12 | `API Error: 400 messages.…` | permanent |
+
+The 48-occurrence row is the reason the deny list is checked before the transient patterns and beats the typed kind as well: it is a context failure wearing a gateway failure's code, and re-ringing it would spend the whole budget with no chance of progress.
+
+The rendered text uses an em dash (`—`), not a hyphen.
+`tests/fm-gateway-keepalive.test.sh` quotes these strings verbatim, so a classifier rewritten against a hyphen fails there instead of silently never matching in production.
+
+## Not yet verified live
+
+The primary keep-alive agent's launchd job has been exercised as a script (`bin/fm-keepalive-agent.sh --dry-run`), not yet across a real launchd-scheduled stall.
+Its endpoint discovery covers tmux, herdr, and the cmux and orca terminal identifiers those runtimes export; a runtime that exports none of them requires the installer's explicit `--backend`/`--target`, and the agent stays inert and says so rather than guessing.

@@ -1875,6 +1875,74 @@ test_stale_terminal_status_overridden_by_active_run() {
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
 }
 
+# --- transient gateway stall: re-rung with a continue instruction, not wedged ---
+# A crew whose last output is a gateway 503 is idle with unfinished work. Before
+# this, the wedge timer escalated it as a possible wedge and a human had to type
+# "carry on". The watcher now enqueues one bounded continue instruction through
+# the ordinary steering inbox and absorbs the poll, and only a spent budget
+# surfaces - as the crew's own declared external wait rather than a wedge.
+
+test_gateway_stall_is_re_rung_instead_of_wedge_escalated() {
+  local dir state fakebin out capture_file window key pane_hash sig pid msgs
+  dir=$(make_case gateway-stall-rering); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-stalled"
+  # The exact text Claude Code renders when the pooled gateway has no routable
+  # account, em dash and all.
+  printf 'API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary \u2014 try again in a moment.' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/stalled.meta"
+  printf 'working: implementing the fix\n' > "$state/stalled.status"
+  sig=$(seen_sig "$state/stalled.status"); printf '%s' "$sig" > "$state/.seen-stalled_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$(cat "$capture_file")")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Not provably working, and the wedge timer is already past its threshold: the
+  # exact state that used to produce a wedge escalation.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle at prompt'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_GATEWAY_RETRY_BACKOFF=0 FM_GATEWAY_RETRY_MAX=2 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "the watcher exited for a gateway-stalled pane instead of re-ringing it: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a gateway keep-alive re-ring must not print a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a gateway keep-alive re-ring must not enqueue a wake"
+  [ -f "$state/stalled.gateway-stall" ] || fail "the watcher did not open a stall record for the pane"
+  msgs=$(find "$state/stalled.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$msgs" = 1 ] || fail "expected exactly one continue instruction in the steering inbox, found $msgs"
+  grep -qi 'continue exactly where you left off' "$state/stalled.inbox"/*.msg \
+    || fail "the enqueued instruction is not the keep-alive continue line"
+  reap "$pid"
+  ack_stopped_cycle "$state" 2>/dev/null || true
+
+  # Spend the budget, then prove the pane hands back to ordinary triage having
+  # DECLARED the wait rather than staying silently absorbed forever.
+  printf 'v1 first=%s attempts=2 last=%s notified=0 kind=pane\n' \
+    "$(( $(date +%s) - 60 ))" "$(( $(date +%s) - 60 ))" > "$state/stalled.gateway-stall"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_GATEWAY_RETRY_BACKOFF=0 FM_GATEWAY_RETRY_MAX=2 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" >/dev/null 2>&1 || true
+  reap "$pid"
+  grep -q 'paused \[key=gateway-503\]' "$state/stalled.status" \
+    || fail "a spent keep-alive budget must declare the external wait on the crew's status log"
+  msgs=$(find "$state/stalled.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$msgs" = 1 ] || fail "a spent budget must stop re-ringing; found $msgs instructions"
+  unset FM_FAKE_CREW_STATE
+  pass "a gateway-stalled crew is re-rung with a bounded continue instruction and declares an external wait when the budget is spent"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -4313,6 +4381,7 @@ test_unreadable_status_reports_once_per_file_state
 test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
+test_gateway_stall_is_re_rung_instead_of_wedge_escalated
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

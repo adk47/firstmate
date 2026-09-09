@@ -264,6 +264,42 @@ test_claude_hooks_semantic_lifecycle() {
   pass "claude hooks open on UserPromptSubmit and close on Stop, StopFailure, and SessionEnd"
 }
 
+# The gateway keep-alive detector rides the SAME spawn-written settings file, as
+# its own StopFailure entry rather than a second command on the busy writer's
+# line: it reads the payload from stdin, and chained behind another command it
+# would race that command for the same pipe. Driven here through the settings
+# file fm-spawn actually wrote, so a wiring change that stops registering it, or
+# that collapses it back onto the busy writer's entry, fails.
+test_claude_hooks_register_the_gateway_keepalive_detector() {
+  local rec id=busy-cl-gw state settings cmd out payload
+  command -v jq >/dev/null 2>&1 || { pass "gateway detector wiring skipped: no jq on this host"; return; }
+  rec=$(make_spawn_case claude-gateway claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$WT_DIR/.claude/settings.local.json"
+
+  jq -e '.hooks.StopFailure | length == 2' "$settings" >/dev/null     || fail "the gateway detector must be its own StopFailure entry, not chained behind the busy writer"
+  cmd=$(jq -r '.hooks.StopFailure[1].hooks[0].command' "$settings")
+  case "$cmd" in
+    *fm-gateway-stall-hook.sh*) : ;;
+    *) fail "the second StopFailure entry is not the gateway detector: $cmd" ;;
+  esac
+
+  payload=$(jq -nc --arg m 'API Error: 503 All accounts are temporarily unavailable.' \
+    '{hook_event_name:"StopFailure",error:"server_error",last_assistant_message:$m}')
+  printf '%s' "$payload" | sh -c "$cmd" || fail "the registered detector command failed"
+  [ -f "$state/$id.gateway-stall" ] \
+    || fail "the registered detector did not record the stall against this task"
+
+  payload=$(jq -nc '{hook_event_name:"StopFailure",error:"rate_limit",last_assistant_message:"You\u2019ve hit your limit"}')
+  printf '%s' "$payload" | sh -c "$cmd" || fail "the registered detector command failed"
+  [ ! -f "$state/$id.gateway-stall" ] \
+    || fail "a non-retryable failure must drop the stall record the registered detector wrote"
+  pass "the spawn-written claude settings register the gateway keep-alive detector as its own StopFailure entry"
+}
+
 test_claude_hooks_stale_incarnation_harmless() {
   local rec id=busy-cl-2 out state settings
   rec=$(make_spawn_case claude-stale claude "$id")
@@ -420,6 +456,7 @@ test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
+test_claude_hooks_register_the_gateway_keepalive_detector
 test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
