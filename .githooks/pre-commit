@@ -147,6 +147,7 @@ DEPLOY_SH="scripts/deploy.sh"
 required_excludes=(
   "workspaces/*/memory/"
   "workspaces/*/api-logs/"
+  "/api-logs/"
   "workspaces/*/MEMORY.md"
   "workspaces/*/backups/"
   "workspaces/*/reports/"
@@ -195,6 +196,7 @@ required_excludes=(
   "workspaces/*/state/"
   "workspaces/*/scripts/"
   "__pycache__/"
+  ".ruff_cache/"
   "*.pyc"
   "workspaces/*/.wrangler/"
 )

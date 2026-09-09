@@ -1,0 +1,11 @@
+Hello {recipient_name},
+
+Thanks for submitting your Muso profile claim{claim_plural}. We need a little more evidence before we can finish reviewing {claim_object}.
+
+{claim_blocks}
+
+Please confirm your relationship to every profile listed above and reply with the applicable supporting evidence. You may redact sensitive details that are unrelated to verifying the claim. {pending_sentence}
+
+Best,
+Caroline
+Muso Support

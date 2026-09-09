@@ -835,6 +835,17 @@ RSYNC_EXCLUDES=(
   # Workspace runtime data (real, accumulating data)
   --exclude='workspaces/*/memory/'
   --exclude='workspaces/*/api-logs/'
+  # The SAME audit trail, written at the REPO ROOT instead of inside a
+  # workspace. scripts/qa-pr-approve.sh:74 defaults LOG_DIR to the relative
+  # `api-logs/github`, so a caller whose cwd is /opt/hydra (rather than an
+  # agent workspace) lands it here. First appeared 2026-09-09 when the QA
+  # agent approved a PR through that path, and it blocked the deploy: the
+  # exclude above is scoped one directory too deep to cover it. These are
+  # records of real agent write actions with no backup, so they are protected
+  # rather than deleted. ANCHORED with a leading slash on purpose — a bare
+  # `api-logs/` would also match inside plugin trees, which install_plugin()
+  # rsyncs with this same array (see the note on that call site).
+  --exclude='/api-logs/'
   # openclaw >= 2026.7 writes a workspace-setup marker into each agent
   # workspace at first boot (workspace_setup_state). Server-owned runtime
   # state — never tracked in the repo; without this exclude every rsync
@@ -1003,6 +1014,12 @@ RSYNC_EXCLUDES=(
   # 2026-04-14 (PR #102) after running worker sanity checks on node-8.
   --exclude='__pycache__/'
   --exclude='*.pyc'
+  # ruff's lint cache. Created when a skill-workshop session lints python it
+  # authored inside a workspace skill dir (tripped the deploy pre-flight on
+  # 2026-09-09, blocking the #917 merge-deploy 45s after the skill landed).
+  # Build-tool cache, regenerated on each ruff run, never seeded from the
+  # repo. Same category as __pycache__ and .wrangler.
+  --exclude='.ruff_cache/'
   # Hot-patch timestamped backups (convention: <orig>.bak.YYYYMMDDTHHMMSSZ
   # OR <orig>.bak-YYYYMMDDTHHMMSSZ-<tag>). Created on the live server when
   # an operator hot-patches a script or SKILL.md and copies the original
