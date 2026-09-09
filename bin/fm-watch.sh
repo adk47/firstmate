@@ -49,7 +49,9 @@
 #                          wait or verified captain-held transfer uses the long
 #                          pause recheck cadence (under afk it is instead handed
 #                          to the daemon as this plain reason, once per
-#                          declaration; busy_turn_bound_check owns that handoff);
+#                          declaration; declared_wait_absorb owns that exception
+#                          for the busy bound and the idle provably-working
+#                          stale alike);
 #                          every other pane goes through the same wedge timer and
 #                          surfaces with the identical "stale: ..." reason,
 #                          escalation count, and demand-deep-inspection marker,
@@ -845,59 +847,80 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
-# Apply the busy-pane completed-turn bound to a window whose bound has already
-# crossed, honoring the worker's OWN declared external wait. Prints/queues
-# nothing itself; it only chooses which absorber owns the crossed bound.
-# 0 when the declared-pause cadence took the pane, 1 when the wedge timer did.
+# Absorb a window under the worker's OWN declared external wait, when one stands.
+# The single owner of that exception for BOTH wedge paths: the busy-pane
+# completed-turn bound (busy_turn_bound_check) and the idle provably-working
+# stale (the non-terminal `working` arms of the main loop). Prints/queues nothing
+# itself; it only chooses which absorber owns the pane. 0 when the declared-wait
+# cadence took it, 1 when no declaration stands and the caller owns the wedge
+# timer - so an undeclared pane keeps the identical wake, timing, and escalation
+# counter it had before.
 #
-# A busy pane past BUSY_TURN_MAX_SECS is normally a wedge suspect because a hung
-# foreground call can hide behind a busy signature. A `paused:` declaration or
-# verified captain-held transfer instead identifies that live foreground call as
-# the expected external wait. The caller has already confirmed liveness through
-# the busy verdict, so this exception does not suppress undeclared wedges or
-# alter the separate non-busy classification. handle_paused_stale keeps the
+# A pane past its bound is normally a wedge suspect: a hung foreground call can
+# hide behind a busy signature, and a frozen pipeline behind a static run step.
+# A `paused:` declaration or verified captain-held transfer instead identifies
+# that live call or static step as the expected external wait. Every caller has
+# already confirmed liveness - a busy verdict, or an actively-running run step or
+# busy pane from crew_absorb_class - so this exception never suppresses an
+# undeclared wedge, and a parked crew with NO such proof still takes
+# pause_state_class's own liveness gates, which surface a live agent on first
+# sight rather than coming here. The declaration outranks that liveness proof
+# deliberately: the worker's log is append-only, so a pause appended AFTER its
+# run started (a CI step that cannot complete until a human acts) is the common
+# shape, and the recheck cadence below still bounds a declaration left behind
+# by a run that resumed without lifting it. handle_paused_stale keeps the
 # exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS. Away mode
 # remains daemon-owned and receives the undecorated wake identity for its own
 # classification, which is why the declaration is read before the afk branch
-# rather than after it.
-busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
+# rather than after it; only the busy path can reach that branch, because the
+# idle paths hand every stale to the daemon before classifying it.
+declared_wait_absorb() {  # <window> <task> <hash> <since-file> <escalation-file>
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 key statusf declared
   statusf="$STATE/$task.status"
-  if status_is_paused_or_captain_held "$(last_status_line "$statusf")"; then
-    if afk_present; then
-      # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
-      # and lets the daemon classify the declaration itself - the undecorated
-      # identity the rest of this function's contract promises. Running the wedge
-      # timer here instead would decorate the wake as a possible wedge, and that
-      # decoration overrides the daemon's own pause verdict for the pane: the
-      # ladder then climbs on every re-arm, escalating a crew that declared the
-      # wait itself once per FM_STALE_ESCALATE_SECS for as long as the wait lasts.
-      # The one-shot is keyed on the DECLARATION (the status log's signature),
-      # never on the pane hash: a busy pane's harness footer ticks on every
-      # capture, so a hash-keyed one-shot would re-fire on every poll and the
-      # daemon, which relaunches the watcher after each handled wake, would be
-      # woken in a loop for the whole declared wait. The suppressor therefore
-      # advances to the declaration rather than the hash, and the daemon is woken
-      # once per distinct declaration. The wedge timer, escalation count and
-      # write-deferral chain are cleared exactly as handle_paused_stale clears
-      # them, so an undeclared busy phase that had already started the timer does
-      # not resume its count the moment the declaration is lifted. Normal-mode
-      # pause tracking stays unwritten here, exactly as the idle away-mode handoff
-      # leaves it, because the daemon owns that bookkeeping.
-      key=$(window_key "$win")
-      rm -f "$since_file" "$escalation_file"
-      clear_write_tracking "$key"
-      declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
-      if [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" != "$declared" ]; then
-        fm_wake_append stale "$win" "stale: $win" || exit 1
-        printf '%s' "$declared" > "$STATE/.stale-$key"
-        wake "stale: $win"
-      fi
-      return 0
+  status_is_paused_or_captain_held "$(last_status_line "$statusf")" || return 1
+  if afk_present; then
+    # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
+    # and lets the daemon classify the declaration itself - the undecorated
+    # identity the rest of this function's contract promises. Running the wedge
+    # timer here instead would decorate the wake as a possible wedge, and that
+    # decoration overrides the daemon's own pause verdict for the pane: the
+    # ladder then climbs on every re-arm, escalating a crew that declared the
+    # wait itself once per FM_STALE_ESCALATE_SECS for as long as the wait lasts.
+    # The one-shot is keyed on the DECLARATION (the status log's signature),
+    # never on the pane hash: a busy pane's harness footer ticks on every
+    # capture, so a hash-keyed one-shot would re-fire on every poll and the
+    # daemon, which relaunches the watcher after each handled wake, would be
+    # woken in a loop for the whole declared wait. The suppressor therefore
+    # advances to the declaration rather than the hash, and the daemon is woken
+    # once per distinct declaration. The wedge timer, escalation count and
+    # write-deferral chain are cleared exactly as handle_paused_stale clears
+    # them, so an undeclared busy phase that had already started the timer does
+    # not resume its count the moment the declaration is lifted. Normal-mode
+    # pause tracking stays unwritten here, exactly as the idle away-mode handoff
+    # leaves it, because the daemon owns that bookkeeping.
+    key=$(window_key "$win")
+    rm -f "$since_file" "$escalation_file"
+    clear_write_tracking "$key"
+    declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
+    if [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" != "$declared" ]; then
+      fm_wake_append stale "$win" "stale: $win" || exit 1
+      printf '%s' "$declared" > "$STATE/.stale-$key"
+      wake "stale: $win"
     fi
-    handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
+  handle_paused_stale "$win" "$task" "$h"
+  return 0
+}
+
+# Apply the busy-pane completed-turn bound to a window whose bound has already
+# crossed: the worker's own declared external wait (declared_wait_absorb) takes
+# the pane, else the wedge timer does. The caller has already confirmed
+# liveness through the busy verdict. 0 when the declared-pause cadence took the
+# pane, 1 when the wedge timer did.
+busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
+  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
+  declared_wait_absorb "$win" "$task" "$h" "$since_file" "$escalation_file" && return 0
   wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task"
   return 1
 }
@@ -1937,7 +1960,10 @@ EOF
           # on first sight, never every poll) via pause_state_class, which returns:
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
-          #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
+          #     genuinely frozen run still escalates past STALE_ESCALATE_SECS -
+          #     unless the crew declared the wait itself, in which case
+          #     declared_wait_absorb takes the pane onto the long cadence exactly
+          #     as it does for a busy pane past its turn bound;
           #   - paused: a declared wait pause_state_class admits (its header owns which
           #     liveness evidence each kind of crew must supply), so absorb on the long
           #     PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
@@ -1950,10 +1976,12 @@ EOF
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
               working)
-                clear_pause_tracking "$key"
-                printf '%s' "$h" > "$sf"
-                date +%s > "$ssf"
-                triage_log "absorbed non-terminal stale (provably working): $w"
+                if ! declared_wait_absorb "$w" "$task" "$h" "$ssf" "$ewf"; then
+                  clear_pause_tracking "$key"
+                  printf '%s' "$h" > "$sf"
+                  date +%s > "$ssf"
+                  triage_log "absorbed non-terminal stale (provably working): $w"
+                fi
                 ;;
               paused)
                 handle_paused_stale "$w" "$task" "$h"
@@ -1965,12 +1993,19 @@ EOF
           else
             task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+              # The declaration still stands here (the lifted case was cleared at
+              # the top of this loop), so an active run behind it is the declared
+              # wait, not a wedge suspect: declared_wait_absorb owns that call, and
+              # the wedge timer below is reached only if the declaration was lifted
+              # between this branch's read and the helper's own.
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) clear_pause_state "$key"
-                         printf '%s' "$h" > "$sf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
-                         triage_log "absorbed non-terminal stale (provably working): $w" ;;
+                working) if ! declared_wait_absorb "$w" "$task" "$h" "$ssf" "$ewf"; then
+                           clear_pause_state "$key"
+                           printf '%s' "$h" > "$sf"
+                           wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
+                           triage_log "absorbed non-terminal stale (provably working): $w"
+                         fi ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
@@ -2012,16 +2047,16 @@ EOF
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
-          # Inconclusive, but the declared wait itself still stands, so only the
-          # per-hash bookkeeping resets. The re-surface throttle bounds the
-          # DECLARATION, not the pane hash: an idle parked pane whose display
-          # ticks (a clock, a token counter) changes hash without changing what
-          # is being waited on, and clearing the throttle here would hand that
-          # same wait a fresh window on every tick - the first sight of each new
-          # hash reaches surface_nonterminal_stale below, so the whole declared
-          # wait would re-alarm far inside PAUSE_RESURFACE_SECS.
-          none)   clear_stale_hash_tracking "$key" ;;
-          *)      clear_pause_tracking "$key" ;;
+          # Inconclusive or actively running, but the declared wait itself still
+          # stands, so only the per-hash bookkeeping resets. The re-surface
+          # throttle bounds the DECLARATION, not the pane hash: an idle parked
+          # pane whose display ticks (a clock, a token counter) changes hash
+          # without changing what is being waited on, and clearing the throttle
+          # here would hand that same wait a fresh window on every tick - the
+          # first sight of each new hash reaches surface_nonterminal_stale or
+          # declared_wait_absorb below, so the whole declared wait would re-alarm
+          # far inside PAUSE_RESURFACE_SECS.
+          *)      clear_stale_hash_tracking "$key" ;;
         esac
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
         # Same rule as the stable-hash branch: never clear pause bookkeeping the
