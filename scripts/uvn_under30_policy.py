@@ -213,6 +213,39 @@ def live_popularity(live_spotify: Any) -> int | float | None:
     return popularity
 
 
+def approved_ids_from_records(records: Iterable[Any], cutoff_iso: str) -> set[str]:
+    """Request ids this automation approved AND read back since cutoff_iso.
+
+    Only `approve_verified` counts: `approve_planned` is written before the
+    call and an unresolved attempt may never have landed, so counting it would
+    invent reversals out of writes that never happened.
+    """
+    ids: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict) or record.get("action") != "approve_verified":
+            continue
+        if str(record.get("ts") or "") < cutoff_iso:
+            continue
+        for request_id in record.get("request_ids") or []:
+            if isinstance(request_id, str) and request_id:
+                ids.add(request_id)
+    return ids
+
+
+def reversal_verdict(
+    approved_ids: set[str], still_approved: set[str], max_reversals: int
+) -> tuple[list[str], bool]:
+    """(ids no longer approved, whether that count trips the breaker).
+
+    A person undoing one of our approvals is the only direct evidence that the
+    sub-30 rule approved something it should not have. Humans reversed 0 of 127
+    of their own approvals in the 45 days before this automation wrote
+    anything, so the tolerance is deliberately near zero.
+    """
+    reversed_ids = sorted(set(approved_ids) - set(still_approved))
+    return reversed_ids, len(reversed_ids) > max_reversals
+
+
 def has_hard_reject_signal(credit_request: dict[str, Any]) -> bool:
     verification = credit_request.get("verificationData")
     rules = verification.get("rule_risk_percent") if isinstance(verification, dict) else None

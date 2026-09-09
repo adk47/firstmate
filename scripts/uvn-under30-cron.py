@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager, nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -29,6 +29,8 @@ from uvn_under30_policy import (
     APPROVED,
     PolicyError,
     UVN,
+    approved_ids_from_records,
+    reversal_verdict,
     every_scoped_request_approved,
     has_hard_reject_signal,
     live_popularity,
@@ -75,6 +77,20 @@ EXPECTED_HOST = os.environ.get("UVN_EXPECTED_HOST", "ovh-node-8")
 # A profile carrying more pending rows than this is a bulk submission for a
 # human, not a customer asking about their pending credits.
 MAX_PROFILE_ROWS = 100
+# A human undoing our approvals is the one signal that the sub-30 rule approved
+# something it should not have. Humans reversed 0 of 127 of their own approvals
+# in the 45 days before this automation wrote anything, so the tolerance is
+# near zero and the lane stops writing rather than repeat a mistake hourly.
+# Read and validated at USE time, like CV_CREDIT_WRITE_LOCK_WAIT_SECS: a guard
+# that silently disables itself on a typo'd env var is worse than no guard, and
+# int() at import would only produce a traceback with no summary.
+DEFAULT_REVERSAL_WINDOW_DAYS = "14"
+DEFAULT_MAX_REVERSALS = "1"
+MAX_REVERSAL_WINDOW_DAYS = 365
+# Stated to human reviewers on the ticket, so it must match the schedule in
+# cron-jobs.json. The contract test pins the two together: a cadence change that
+# leaves this behind tells a reviewer to wait four times longer than it takes.
+RUN_CADENCE_TEXT = "every hour"
 # The cron runner kills the process at timeoutSeconds (1200 in cron-jobs.json)
 # with no summary. A slow-but-alive route never trips the per-call timeout, so
 # the run itself stops at this budget and still announces what it did.
@@ -106,6 +122,14 @@ class RunBudgetExhausted(StopRun):
     """The run reached its time budget before the cron runner could kill it."""
 
     headline = "The run reached its time budget, so it stopped early and no further tickets were assessed."
+
+
+class ReversalCircuitOpen(RunError):
+    """Humans have been undoing our approvals; stop writing until reviewed."""
+
+
+class ReversalCheckUnavailable(RunError):
+    """The reversal history could not be read, so writes cannot be justified."""
 
 
 class ApprovalAttemptError(RunError):
@@ -236,6 +260,106 @@ def get_task(task_id: str) -> dict[str, Any]:
     if not isinstance(task, dict):
         raise RunError(f"ClickUp task {task_id} returned malformed detail")
     return task
+
+
+def reversal_settings() -> tuple[int, int]:
+    """(window days, tolerated reversals), or refuse.
+
+    Both bound a write gate, so an unusable value must stop the run rather than
+    quietly widen it: a window of 0 filters every record out and the breaker
+    would pass on an empty history it never actually read.
+    """
+    def bounded(raw: str, name: str, low: int, high: int) -> int:
+        text = str(raw).strip()
+        if not text.lstrip("-").isdigit():
+            raise ReversalCheckUnavailable(f"{name} must be an integer, got {raw!r}")
+        value = int(text)
+        if value < low or value > high:
+            raise ReversalCheckUnavailable(f"{name} must be between {low} and {high}, got {value}")
+        return value
+
+    window = bounded(
+        os.environ.get("UVN_REVERSAL_WINDOW_DAYS", DEFAULT_REVERSAL_WINDOW_DAYS),
+        "UVN_REVERSAL_WINDOW_DAYS", 1, MAX_REVERSAL_WINDOW_DAYS,
+    )
+    tolerance = bounded(
+        os.environ.get("UVN_MAX_REVERSALS", DEFAULT_MAX_REVERSALS),
+        "UVN_MAX_REVERSALS", 0, 1000,
+    )
+    return window, tolerance
+
+
+def load_recent_approvals(days: int) -> set[str]:
+    """Request ids this automation approved and read back within the window.
+
+    A history we cannot read is not a history with nothing in it. The audit root
+    is where this cron writes its own approvals, so an absent or unreadable one
+    means we cannot prove earlier writes held — refuse, exactly as
+    load_fraud_ids does for the fraud truth floor.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff_iso = cutoff.isoformat()
+    records: list[Any] = []
+    try:
+        if not AUDIT_ROOT.is_dir():
+            raise ReversalCheckUnavailable(f"approval audit root is unavailable: {AUDIT_ROOT}")
+        paths = sorted(AUDIT_ROOT.glob("*.jsonl"))
+    except OSError as exc:
+        raise ReversalCheckUnavailable(f"approval audit root could not be read: {AUDIT_ROOT}") from exc
+    for path in paths:
+        try:
+            if datetime.strptime(path.stem, "%Y-%m-%d").replace(tzinfo=timezone.utc) < cutoff.replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ):
+                continue
+        except ValueError:
+            pass
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError as exc:
+                        raise ReversalCheckUnavailable(
+                            f"approval audit record is unreadable at {path}"
+                        ) from exc
+        except OSError as exc:
+            raise ReversalCheckUnavailable(f"approval audit file could not be read: {path}") from exc
+    return approved_ids_from_records(records, cutoff_iso)
+
+
+def assert_no_reversal_streak(run_id: str) -> None:
+    """Refuse to approve when humans have been undoing our approvals.
+
+    Fails closed: if the readback cannot run we cannot prove our past writes
+    held, which is not the same as proving they did.
+    """
+    window_days, tolerance = reversal_settings()
+    approved = load_recent_approvals(window_days)
+    if not approved:
+        return
+    ids = sorted(approved)
+    try:
+        still_approved = verify_status(ids)
+    except (RunError, subprocess.TimeoutExpired) as exc:
+        raise ReversalCheckUnavailable(
+            f"earlier approvals could not be checked for reversals: {str(exc)[:200]}"
+        ) from exc
+    reversed_ids, tripped = reversal_verdict(approved, still_approved, tolerance)
+    if reversed_ids:
+        audit(run_id, "reversal_observed", {
+            "request_ids": reversed_ids,
+            "checked": len(ids),
+            "window_days": window_days,
+            "tripped": tripped,
+        })
+    if tripped:
+        raise ReversalCircuitOpen(
+            f"{len(reversed_ids)} of {len(ids)} previously approved requests are no longer approved: "
+            + ", ".join(reversed_ids[:10])
+        )
 
 
 def load_required_fraud_ids() -> set[str]:
@@ -696,6 +820,32 @@ def render_summary(
     return "\n".join(lines)
 
 
+def render_reversal_halt(reason: object) -> str:
+    """Someone undid our approvals. Name that cause and only that cause."""
+    return "\n".join([
+        "Credit verification automation is paused and needs a human decision.",
+        "It stopped before reviewing any ticket because approvals it made earlier are "
+        "no longer approved, which usually means someone disagreed with them.",
+        "No credits were approved or rejected in this run.",
+        f"Details: {str(reason).strip()[:400]}",
+        "Someone should look at those requests before this runs in apply mode again; "
+        "set the argv back to --mode shadow to keep collecting evidence meanwhile.",
+    ])
+
+
+def render_reversal_unavailable(reason: object) -> str:
+    """We could not CHECK for reversals, which is not the same as finding one."""
+    return "\n".join([
+        "Credit verification automation stopped before reviewing any ticket.",
+        "Its record of earlier approvals could not be checked, so it cannot show that "
+        "those approvals still stand. Nothing is known to be wrong with them.",
+        "No credits were approved or rejected in this run.",
+        f"Details: {str(reason).strip()[:400]}",
+        "Fix the setting or the audit record and re-run; --mode shadow keeps collecting "
+        "evidence meanwhile.",
+    ])
+
+
 def render_startup_failure(reason: object) -> str:
     detail = str(reason).strip()[:300] or "unknown error"
     return "\n".join([
@@ -772,7 +922,17 @@ def run_locked(run_id: str, *, mode: str, limit: int) -> int:
         # Validate the landed fraud truth floor before inspecting any ticket;
         # each approval chunk reloads it again at the write boundary.
         load_required_fraud_ids()
+        # Shadow writes nothing, so the breaker must never blind the very data
+        # a human needs in order to judge the reversals it reports.
+        if mode == "apply":
+            assert_no_reversal_streak(run_id)
         tickets = list_todo_tickets()
+    except ReversalCircuitOpen as exc:
+        print(render_reversal_halt(exc))
+        return 1
+    except ReversalCheckUnavailable as exc:
+        print(render_reversal_unavailable(exc))
+        return 1
     except (PolicyError, RunError, OSError, subprocess.TimeoutExpired) as exc:
         print(render_startup_failure(exc))
         return 1
@@ -909,7 +1069,7 @@ def run_locked(run_id: str, *, mode: str, limit: int) -> int:
                         lines.append(
                             "The approval cap for this run was reached; rows below popularity 30 are reviewed next run."
                             if limit_reached
-                            else "This check re-runs every 4 hours; rows at or above popularity 30 need a human."
+                            else f"This check re-runs {RUN_CADENCE_TEXT}; rows at or above popularity 30 need a human."
                         )
                 actually_resolved = update_ticket(
                     run_id,

@@ -5,14 +5,14 @@ setup() {
   JOB='46442766-c410-4ccd-966c-4de3c06eed8d'
 }
 
-@test "enabled UVN cron is a deterministic command on the four-hour offset" {
+@test "enabled UVN cron is a deterministic hourly command clear of the batch" {
   run jq -e --arg id "$JOB" '
     .jobs[] | select(.id == $id)
     | .enabled == true
       and .agentId == "operations"
-      and .schedule == {kind:"cron", expr:"15 */4 * * *", tz:"UTC"}
+      and .schedule == {kind:"cron", expr:"30 * * * *", tz:"UTC"}
       and .payload.kind == "command"
-      and .payload.argv == ["python3", "/opt/hydra/scripts/uvn-under30-cron.py", "--mode", "shadow", "--limit", "25"]
+      and .payload.argv == ["python3", "/opt/hydra/scripts/uvn-under30-cron.py", "--mode", "apply", "--limit", "25"]
       and .payload.cwd == "/opt/hydra"
       and .delivery.mode == "announce"
       and .delivery.channel == "slack"
@@ -21,6 +21,7 @@ setup() {
       and (.description | contains("automation:uvn-under30"))
       and (.description | contains("recommendation does not gate enrollment"))
       and (.description | contains("PROFILE-SCOPED"))
+      and (.description | contains("REVERSAL BREAKER"))
       and (.description | contains("--mode shadow"))
       and (.description | contains("Plain-English summaries"))
   ' "$ROOT/cron-jobs.json"
@@ -65,6 +66,28 @@ setup() {
   [ "$status" -eq 0 ]
   run grep -nF 'default="shadow"' "$ROOT/scripts/uvn-under30-cron.py"
   [ "$status" -eq 0 ]
+}
+
+@test "apply mode cannot write without the reversal breaker in front of it" {
+  run grep -nF 'assert_no_reversal_streak(run_id)' "$ROOT/scripts/uvn-under30-cron.py"
+  [ "$status" -eq 0 ]
+  run grep -nF 'if mode == "apply":' "$ROOT/scripts/uvn-under30-cron.py"
+  [ "$status" -eq 0 ]
+  run grep -nF 'raise ReversalCheckUnavailable' "$ROOT/scripts/uvn-under30-cron.py"
+  [ "$status" -eq 0 ]
+}
+
+@test "the cadence a ticket comment promises matches the scheduled one" {
+  run jq -r --arg id "$JOB" '.jobs[] | select(.id == $id) | .schedule.expr' "$ROOT/cron-jobs.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "30 * * * *" ]
+
+  run grep -nF 'RUN_CADENCE_TEXT = "every hour"' "$ROOT/scripts/uvn-under30-cron.py"
+  [ "$status" -eq 0 ]
+
+  # the promise must be interpolated, never a second hard-coded interval
+  run grep -nE 're-runs every [0-9]' "$ROOT/scripts/uvn-under30-cron.py"
+  [ "$status" -eq 1 ]
 }
 
 @test "the automation has no rejection write path" {

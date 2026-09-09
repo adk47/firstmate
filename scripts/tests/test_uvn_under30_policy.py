@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from uvn_under30_policy import (  # noqa: E402
     PolicyError,
+    approved_ids_from_records,
+    reversal_verdict,
     every_scoped_request_approved,
     live_popularity,
     load_fraud_ids,
@@ -287,6 +289,47 @@ class ProfileScopeTests(unittest.TestCase):
         self.assertTrue(no_pending_rows_remaining(PROFILE1, {CR1: row(status="approved")}))
         self.assertTrue(no_pending_rows_remaining(PROFILE1, {CR1: row(profileId=PROFILE2)}))
         self.assertFalse(no_pending_rows_remaining(PROFILE1, {CR1: row()}))
+
+
+class ReversalCircuitTests(unittest.TestCase):
+    """A human undoing our approvals is the one signal that must stop the lane.
+
+    Humans reversed 0 of 127 approvals in the 45 days before this automation
+    wrote anything, so a reversal is not noise — it means the sub-30 rule
+    approved something a person disagreed with, and the lane must stop writing
+    before it repeats the mistake at cron speed.
+    """
+
+    def records(self):
+        return [
+            {"action": "approve_verified", "ts": "2026-09-08T12:00:00+00:00", "request_ids": [CR1]},
+            {"action": "approve_verified", "ts": "2026-09-09T12:00:00+00:00", "request_ids": [CR2]},
+            {"action": "shadow_would_approve", "ts": "2026-09-09T12:00:00+00:00", "request_ids": ["ignored"]},
+            {"action": "approve_verified", "ts": "2026-08-01T12:00:00+00:00", "request_ids": ["too-old"]},
+            "not-a-record",
+        ]
+
+    def test_only_verified_approvals_inside_the_window_count(self):
+        ids = approved_ids_from_records(self.records(), "2026-09-08T00:00:00+00:00")
+        self.assertEqual(ids, {CR1, CR2})
+
+    def test_planned_but_unverified_approvals_are_not_counted(self):
+        planned = [{"action": "approve_planned", "ts": "2026-09-09T12:00:00+00:00", "request_ids": [CR1]}]
+        self.assertEqual(approved_ids_from_records(planned, "2026-09-08T00:00:00+00:00"), set())
+
+    def test_no_history_is_not_a_reversal(self):
+        self.assertEqual(reversal_verdict(set(), set(), 1), ([], False))
+
+    def test_one_reversal_is_tolerated_and_named_but_two_trip_the_breaker(self):
+        reversed_ids, tripped = reversal_verdict({CR1, CR2}, {CR2}, 1)
+        self.assertEqual(reversed_ids, [CR1])
+        self.assertFalse(tripped)
+        reversed_ids, tripped = reversal_verdict({CR1, CR2}, set(), 1)
+        self.assertEqual(reversed_ids, sorted([CR1, CR2]))
+        self.assertTrue(tripped)
+
+    def test_a_zero_tolerance_setting_trips_on_the_first_reversal(self):
+        self.assertEqual(reversal_verdict({CR1}, set(), 0), ([CR1], True))
 
 
 class QualificationTests(unittest.TestCase):

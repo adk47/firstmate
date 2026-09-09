@@ -61,6 +61,21 @@ def credit(status="user_verification_needed", request_id=CR_ID, track="spotify-1
 
 
 class CronOrchestrationTests(unittest.TestCase):
+    def setUp(self):
+        # Tests that drive run_locked() directly are about ticket orchestration.
+        # The reversal breaker has its own tests; here it must not fire on this
+        # machine's missing audit root. Tests about the breaker itself call
+        # use_real_breaker().
+        self._breaker_patcher = patch.object(cron, "load_recent_approvals", return_value=set())
+        self._breaker_patcher.start()
+        self._breaker_active = True
+        self.addCleanup(self.use_real_breaker)
+
+    def use_real_breaker(self):
+        if self._breaker_active:
+            self._breaker_patcher.stop()
+            self._breaker_active = False
+
     def _counted(self, lookup):
         def wrapped(track_id, timeout=None):
             self.lookup_calls += 1
@@ -80,10 +95,18 @@ class CronOrchestrationTests(unittest.TestCase):
         argv=("--mode", "apply", "--limit", "25"),
         approve_result=None,
         lookup=None,
+        prior_approvals=None,
+        still_approved=None,
+        unpatch_history=False,
     ):
         output = io.StringIO()
         ticket = ticket or task()
         popularity = popularity or {}
+        verify_kw = (
+            {"side_effect": still_approved}
+            if isinstance(still_approved, Exception)
+            else {"return_value": set(still_approved or set())}
+        )
 
         self.lookup_calls = 0
 
@@ -99,6 +122,9 @@ class CronOrchestrationTests(unittest.TestCase):
             patch.object(cron, "KILL_SWITCH_PATH", Path("/nonexistent/uvn-under30-cron.disabled")),
             patch.object(cron, "credit_write_lock", return_value=nullcontext()),
             patch.object(cron, "load_fraud_ids", return_value=fraud_ids),
+            (nullcontext() if unpatch_history
+             else patch.object(cron, "load_recent_approvals", return_value=set(prior_approvals or set()))),
+            patch.object(cron, "verify_status", **verify_kw) as verify,
             patch.object(cron, "load_unresolved_ids", return_value=unresolved_ids or set()),
             patch.object(cron, "list_todo_tickets", return_value=[ticket]),
             patch.object(cron, "get_task_and_comments", return_value=(ticket, [])),
@@ -107,11 +133,13 @@ class CronOrchestrationTests(unittest.TestCase):
             patch.object(cron, "approve_chunk", side_effect=approve_result or (lambda run_id, task_id, ids: set(ids))) as approve,
             patch.object(cron, "update_ticket", side_effect=lambda *args, **kwargs: args[3]) as update,
             patch.object(cron, "shadow_record") as shadow,
-            patch.object(cron, "audit"),
+            patch.object(cron, "audit") as audit,
             redirect_stdout(output),
         ):
             rc = cron.main(list(argv))
         self.shadow = shadow
+        self.verify = verify
+        self.audit = audit
         return rc, output.getvalue(), approve, update
 
     def test_approves_exact_ticket_id_then_resolves_after_authoritative_state(self):
@@ -423,6 +451,116 @@ class CronOrchestrationTests(unittest.TestCase):
         self.assertEqual(cron.lookup_timeout(10_000), cron.LOOKUP_TIMEOUT_SECS)
         self.assertGreaterEqual(cron.lookup_timeout(0), 1)
 
+    def test_reversal_streak_stops_apply_before_any_write(self):
+        # A person undoing our approvals is the only direct evidence the sub-30
+        # rule approved something it should not have. Writing again at cron
+        # speed before a human looks is the failure this breaker prevents.
+        rc, output, approve, update = self.run_main(
+            set(), [{CR_ID: credit()}] * 4, ticket=task(ids=False),
+            prior_approvals={CR_ID, CR_ID_2}, still_approved=set(),
+        )
+        self.assertEqual(rc, 1)
+        approve.assert_not_called()
+        update.assert_not_called()
+        self.assertIn("previously approved", output)
+        self.assertIn(CR_ID, output)
+        self.assertIn("No credits were approved", output)
+
+    def test_shadow_mode_is_not_blocked_by_the_reversal_breaker(self):
+        # Shadow writes nothing, so a reversal streak must not blind the very
+        # data a human needs in order to judge those reversals.
+        rc, _, approve, _ = self.run_main(
+            set(), [{CR_ID: credit()}] * 4, ticket=task(ids=False), argv=("--mode", "shadow"),
+            prior_approvals={CR_ID, CR_ID_2}, still_approved=set(),
+        )
+        self.assertEqual(rc, 0)
+        approve.assert_not_called()
+        self.shadow.assert_called_once()
+
+    def test_tolerated_single_reversal_still_approves_and_is_recorded(self):
+        rc, _, approve, _ = self.run_main(
+            set(), [{CR_ID: credit()}, {CR_ID: credit()}, {CR_ID: credit()}, {CR_ID: credit("approved")}],
+            ticket=task(ids=False),
+            prior_approvals={CR_ID, CR_ID_2}, still_approved={CR_ID_2},
+        )
+        self.assertEqual(rc, 0)
+        approve.assert_called_once()
+        recorded = [c.args[1] for c in self.audit.call_args_list]
+        self.assertIn("reversal_observed", recorded)
+
+    def test_unreadable_reversal_history_refuses_to_write(self):
+        # Unable to prove our past approvals held is not the same as proving
+        # they did, so the lane fails closed.
+        rc, output, approve, _ = self.run_main(
+            set(), [{CR_ID: credit()}] * 4, ticket=task(ids=False),
+            prior_approvals={CR_ID}, still_approved=cron.RunError("trino down"),
+        )
+        self.assertEqual(rc, 1)
+        approve.assert_not_called()
+        self.assertIn("could not be checked", output)
+
+    def test_missing_or_unreadable_audit_root_refuses_to_write(self):
+        # An absent history is not evidence of no reversals; it is evidence we
+        # cannot tell. Mirrors load_fraud_ids, which refuses on a missing root.
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "absent"
+            a_file = Path(tmp) / "not-a-dir"
+            a_file.write_text("", encoding="utf-8")
+            self.use_real_breaker()
+            for root in (missing, a_file):
+                with self.subTest(root=root.name), patch.object(cron, "AUDIT_ROOT", root):
+                    rc, output, approve, update = self.run_main(
+                        set(), [{CR_ID: credit()}] * 4, ticket=task(ids=False),
+                        prior_approvals=None, unpatch_history=True,
+                    )
+                    self.assertEqual(rc, 1)
+                    approve.assert_not_called()
+                    update.assert_not_called()
+                    self.assertIn("could not be checked", output)
+                    self.assertNotIn("someone disagreed", output)
+
+    def test_readable_but_empty_audit_root_is_a_clean_start(self):
+        self.use_real_breaker()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(cron, "AUDIT_ROOT", Path(tmp)):
+                rc, _, approve, _ = self.run_main(
+                    set(), [{CR_ID: credit()}, {CR_ID: credit()}, {CR_ID: credit()}, {CR_ID: credit("approved")}],
+                    ticket=task(ids=False), unpatch_history=True,
+                )
+        self.assertEqual(rc, 0)
+        approve.assert_called_once()
+
+    def test_a_misconfigured_breaker_setting_refuses_to_write(self):
+        # A guard that silently disables itself on a bad env var is worse than
+        # no guard: window 0 filters every record out and the breaker passes.
+        for env in (
+            {"UVN_REVERSAL_WINDOW_DAYS": "0"},
+            {"UVN_REVERSAL_WINDOW_DAYS": "-1"},
+            {"UVN_REVERSAL_WINDOW_DAYS": "abc"},
+            {"UVN_REVERSAL_WINDOW_DAYS": "100000"},
+            {"UVN_MAX_REVERSALS": "-1"},
+            {"UVN_MAX_REVERSALS": "abc"},
+        ):
+            with self.subTest(**env), patch.dict(os.environ, env):
+                rc, output, approve, update = self.run_main(
+                    set(), [{CR_ID: credit()}] * 4, ticket=task(ids=False),
+                    prior_approvals={CR_ID}, still_approved={CR_ID},
+                )
+                self.assertEqual(rc, 1)
+                approve.assert_not_called()
+                update.assert_not_called()
+                self.assertIn("could not be checked", output)
+                self.assertNotIn("someone disagreed", output)
+
+    def test_no_prior_approvals_means_no_breaker_and_no_readback(self):
+        rc, _, approve, _ = self.run_main(
+            set(), [{CR_ID: credit()}, {CR_ID: credit()}, {CR_ID: credit()}, {CR_ID: credit("approved")}],
+            ticket=task(ids=False),
+        )
+        self.assertEqual(rc, 0)
+        approve.assert_called_once()
+        self.verify.assert_not_called()
+
     def test_fraud_marker_prevents_approval_and_ticket_write(self):
         rc, output, approve, update = self.run_main(
             {CR_ID},
@@ -675,6 +813,7 @@ class SharedLockEntrypointTests(unittest.TestCase):
         output = io.StringIO()
         with (
             patch.object(cron, "load_required_fraud_ids", return_value=set()),
+            patch.object(cron, "load_recent_approvals", return_value=set()),
             patch.object(
                 cron,
                 "list_todo_tickets",
