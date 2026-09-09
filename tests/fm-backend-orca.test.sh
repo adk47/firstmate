@@ -851,6 +851,90 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
   pass "fm-teardown.sh backend=orca: scout report gate then helper-backed worktree removal"
 }
 
+# Orca 1.4.197 returns "<repo id>::<absolute path>" worktree ids
+# (docs/verification/runtime-backends.md "Orca"); teardown must accept that
+# shape, pass it verbatim to orca worktree show for the path-match check, and
+# remove the worktree through the same composite selector.
+test_scout_teardown_removes_orca_worktree_with_composite_id() {
+  local proj wt data state config id out rc neutral composite
+  id="orcacompositez2"
+  proj="$TMP_ROOT/composite-project"
+  wt="$TMP_ROOT/composite-wt"
+  data="$TMP_ROOT/composite-data"
+  state="$TMP_ROOT/composite-state"
+  config="$TMP_ROOT/composite-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  composite="24ab7047-5712-4006-9a32-acf89077adce::$wt"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term_cfc5e5dc-1c92-44ec-afeb-5f478bc23c36" \
+    "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=$composite" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case composite
+  printf '{"ok":true,"result":{"worktree":{"id":"%s","repoId":"24ab7047-5712-4006-9a32-acf89077adce","path":"%s"}}}\n' \
+    "$composite" "$wt" > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "Orca scout teardown should accept a composite worktree id"$'\n'"$out"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''show'$'\x1f''--worktree'$'\x1f'"id:$composite"$'\x1f''--json' \
+    "teardown did not resolve the composite Orca worktree id verbatim for the path-match check"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term_cfc5e5dc-1c92-44ec-afeb-5f478bc23c36'$'\x1f''--json' \
+    "teardown did not close the recorded Orca terminal"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$composite"$'\x1f''--force'$'\x1f''--json' \
+    "teardown did not remove the Orca worktree through its composite selector"
+  assert_absent "$state/$id.meta" "teardown should remove task metadata"
+  pass "fm-teardown.sh backend=orca: composite worktree id passes validation and the path-match check verbatim"
+}
+
+test_teardown_refuses_malformed_orca_composite_id() {
+  local proj wt data state config id out rc neutral bad n=0
+  id="orcacompositebadz4"
+  proj="$TMP_ROOT/composite-bad-project"
+  wt="$TMP_ROOT/composite-bad-wt"
+  data="$TMP_ROOT/composite-bad-data"
+  config="$TMP_ROOT/composite-bad-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  for bad in "24ab7047-5712-4006-9a32-acf89077adce::" \
+    "24ab7047-5712-4006-9a32-acf89077adce::relative/$id" \
+    "24ab7047-5712-4006-9a32-acf89077adce::$TMP_ROOT/../composite-bad-wt"; do
+    n=$((n + 1))
+    state="$TMP_ROOT/composite-bad-state-$n"
+    mkdir -p "$state"
+    touch "$state/.last-watcher-beat"
+    fm_write_meta "$state/$id.meta" \
+      "window=fm-$id" "endpoint_task_id=$id" "terminal=term-composite-bad" "worktree=$wt" "project=$proj" \
+      "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+      "backend=orca" "orca_worktree_id=$bad" \
+      "decisions_reviewed=1" "decision_keys="
+    orca_case "composite-bad-$n"
+    printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$bad" "$wt" > "$RESP/1.out"
+    neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+    set +e
+    out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+      "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "Orca teardown should refuse malformed composite worktree id $bad"
+    assert_contains "$out" "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." \
+      "malformed composite Orca worktree id $bad should refuse with the endpoint metadata message"
+    assert_present "$state/$id.meta" "refused malformed composite id $bad must preserve task metadata"
+    [ ! -s "$LOG" ] || fail "malformed composite id $bad reached orca before refusal: $(cat "$LOG")"
+  done
+  pass "fm-teardown.sh backend=orca: malformed composite worktree ids refuse before any Orca call"
+}
+
 test_scout_teardown_refuses_orca_id_path_mismatch() {
   local proj wt other_wt data state config id out rc neutral
   id="orcascoutmismatchz5"
@@ -1361,6 +1445,8 @@ test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
 test_scout_teardown_removes_orca_worktree_via_helper
+test_scout_teardown_removes_orca_worktree_with_composite_id
+test_teardown_refuses_malformed_orca_composite_id
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
 test_teardown_preserves_metadata_when_orca_remove_error_json

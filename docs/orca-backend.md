@@ -42,6 +42,7 @@ worktree=<absolute Orca worktree path>
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+`orca_worktree_id=` holds whatever `orca worktree create` returned, either a plain token or the `<repo id>::<absolute worktree path>` composite that Orca 1.4.197 emits, and `bin/fm-backend.sh` validates both shapes (see [runtime-backends.md](verification/runtime-backends.md) "Orca").
 
 ## Current lifecycle and safety
 
@@ -70,7 +71,7 @@ It never raw-deletes an Orca worktree.
 - The app must be running and report ready.
 - Secondmate spawns are unsupported.
 - Escape is unsupported.
-- Orca exposes no stable CLI version or protocol marker, so readiness is the compatibility gate rather than a version floor.
+- Firstmate does not gate on the version or capability list Orca reports, so readiness is the compatibility gate rather than a version floor.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.
 - Orca's worktree shape is unverified against the spawn-time Claude workspace-trust check in `bin/fm-claude-trust.sh`, which refuses any path that is not a linked git worktree sharing the project's git common dir, so a claude spawn on Orca fails loudly at that check rather than launching if Orca clones instead of linking.
 
@@ -80,6 +81,7 @@ It never raw-deletes an Orca worktree.
 tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
 ```
 
 [`verification/runtime-backends.md`](verification/runtime-backends.md#orca) records the real readiness and response-shape smoke.

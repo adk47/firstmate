@@ -983,30 +983,53 @@ The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discov
 
 ## Orca
 
-Real readiness was verified against `/usr/local/bin/orca` with `/Applications/Orca.app` bundle version 1.4.116.
+On 2026-09-05, real readiness was verified against `/Applications/Orca.app/Contents/Resources/bin/orca` at Orca 1.4.197 (`orca --version`), refreshing the earlier 1.4.116 evidence.
 
 ```sh
+orca --version
 orca status --json
 ```
 
 Observed fields:
 
 ```text
+1.4.197
 result.runtime.reachable=true
 result.runtime.state=ready
+result.runtime.appVersion=1.4.197
 ```
 
 `orca terminal create --json` returned `result.terminal.handle`.
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
 Speculative bare ids and nested terminal fields were deliberately rejected.
 
+On the same date, Orca 1.4.197 reported `result.worktree.id` as a composite `<repo id>::<absolute worktree path>` rather than the plain token 1.4.116 returned, where the repo id is a UUID and the path is the workspace directory Orca created, for example `<uuid>::/Users/<user>/orca/workspaces/<project>/fm-<task>`.
+`fm-spawn.sh` records that value verbatim as `orca_worktree_id=`, and the `id:` selector resolves it unchanged, confirmed read-only against one of this fleet's own task worktrees:
+
+```sh
+orca worktree list --json
+orca worktree show --worktree "id:<repo id>::<absolute worktree path>" --json
+```
+
+Observed fields:
+
+```text
+ok=true
+result.worktree.id=<repo id>::<absolute worktree path>
+result.worktree.repoId=<repo id>
+result.worktree.path=<absolute worktree path>
+```
+
+`bin/fm-backend.sh`'s `fm_backend_orca_worktree_id_valid` accepts both the legacy plain-token shape and this composite shape, and `tests/fm-backend-orca.test.sh` plus `tests/fm-teardown-endpoint-safety.test.sh` pin that teardown resolves and removes a composite id through the same `id:` selector while malformed composites still refuse.
+
 ```sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
 ```
 
-The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
+The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, composite worktree id acceptance, and path-matched release refusal.
 
 ## cmux
 
