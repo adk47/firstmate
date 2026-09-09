@@ -65,6 +65,12 @@
 #                          an unhandled record's ladder cannot advance; quiet
 #                          successful attempts never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
+# An idle pane whose last output is a transient inference-gateway error is
+# absorbed instead, and re-rung with a bounded continue instruction through the
+# same steering inbox (gateway_stall_check; bin/fm-gateway-retry-lib.sh owns the
+# classifier and both bounds). That absorb prints nothing: a crew that carries
+# on is not news. Only a spent budget surfaces, and it does so as the crew's own
+# declared external wait rather than as a wedge.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -135,6 +141,11 @@ mkdir -p "$STATE"
 # gate and the wake emission (inbox_steer_check below).
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# Transient inference-gateway stalls: bin/fm-gateway-retry-lib.sh owns the
+# classifier, the bounded ladder, and the durable record; this watcher only
+# supplies the pane it already captured and the delivery (gateway_stall_check).
+# shellcheck source=bin/fm-gateway-retry-lib.sh
+. "$SCRIPT_DIR/fm-gateway-retry-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -388,6 +399,65 @@ inbox_steer_check() {  # <window> <task>
       wake "$reason"
       ;;
   esac
+}
+
+# Keep a crew alive across a transient inference-gateway stall, one cheap check
+# per idle recorded window per poll. 0 when this window is inside the bounded
+# re-ring ladder and ordinary stale triage must stand down for this poll;
+# 1 when it is not the ladder's business.
+#
+# WHY THIS IS HERE AND NOT ONLY IN A HOOK. When the gateway runs out of routable
+# accounts the harness ends the turn with an API error and the crew sits idle at
+# its prompt with its work unfinished, which the wedge timer then escalates as a
+# possible wedge - a crew that needs one sentence to carry on gets treated as a
+# crew that needs a human. Claude Code reports that turn end through StopFailure,
+# which it executes outside its REPL loop, so the crew's own hook cannot resume
+# it (docs/verification/gateway-keepalive.md). Something outside the session has
+# to say "carry on", and the steering inbox is already exactly that channel.
+# Putting the ladder here also means every crew already running gets the
+# behaviour without being relaunched.
+#
+# The delivery is an ORDINARY steer: a durable record plus the constant
+# doorbell, so it is re-rung, acknowledged, and escalated by the same ladder as
+# any other firstmate instruction, and a crew that comes back on its own simply
+# finds the message already moot. bin/fm-gateway-retry-lib.sh owns entry, exit,
+# backoff, and both bounds; this function owns only the delivery and the
+# absorb. Nothing here interrupts, signals, or restarts the worker.
+gateway_stall_check() {  # <window> <task> <tail40>
+  local w=$1 task=$2 tail40=$3 rec paused_line
+  [ -n "$task" ] || return 1
+  [ -f "$STATE/$task.meta" ] || return 1
+  fm_gateway_stalled_now "$STATE" "$task" "$tail40" || return 1
+  if fm_gateway_budget_spent "$STATE" "$task"; then
+    # The gateway is not briefly out of accounts, it is out. Declare it once as
+    # the external wait it is, so the pane takes the long declared-wait cadence
+    # every other bounded wait takes instead of a wedge escalation, and hand the
+    # window back to ordinary triage which owns that cadence.
+    if ! fm_gateway_notified "$STATE" "$task"; then
+      paused_line=$(fm_gateway_paused_status_line "$STATE" "$task")
+      if printf '%s\n' "$paused_line" >> "$STATE/$task.status" 2>/dev/null; then
+        fm_gateway_mark_notified "$STATE" "$task" || true
+        triage_log "gateway keep-alive budget spent, declared external wait: $w"
+      fi
+    fi
+    return 1
+  fi
+  if ! fm_gateway_attempt_due "$STATE" "$task"; then
+    triage_log "absorbed stale (gateway keep-alive backoff, attempt $(( $(fm_gateway_attempts "$STATE" "$task") + 1 )) pending): $w"
+    return 0
+  fi
+  # Charge the attempt BEFORE delivering it. A charge that cannot be persisted
+  # must not buy a delivery: the budget is the only thing standing between a
+  # transient stall and an unbounded re-ring loop, so an uncounted send is the
+  # one failure this ladder cannot absorb.
+  fm_gateway_record_attempt "$STATE" "$task" || return 1
+  if ! rec=$(fm_task_inbox_write "$STATE" "$task" "$FM_GATEWAY_CONTINUE_TEXT"); then
+    triage_log "gateway keep-alive could not enqueue a continue instruction: $w"
+    return 0
+  fi
+  fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || true
+  triage_log "gateway keep-alive continue sent (attempt $(fm_gateway_attempts "$STATE" "$task")): $w"
+  return 0
 }
 
 # 0 (benign/absorb) if EVERY task in a no-verb "signal:" wake has positive work
@@ -1891,6 +1961,18 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # An idle pane whose last output is a transient gateway error is a crew that
+    # needs one sentence, not a supervisor. Checked BEFORE the stale bookkeeping
+    # below so the keep-alive ladder owns the window while it is running: a pane
+    # being re-rung must not also accumulate wedge escalations for the same
+    # quiet stretch. The check is deliberately not tied to the >=2 poll
+    # stability rule the wedge timer uses - the evidence here is a specific
+    # rendered failure, not "nothing changed" - and it hands the window straight
+    # back once either bound is spent, which is when the stale bookkeeping below
+    # is the right owner again.
+    if [ "$busy_now" -ne 0 ] && gateway_stall_check "$w" "$task" "$tail40"; then
+      continue
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

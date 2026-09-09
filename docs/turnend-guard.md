@@ -9,6 +9,9 @@ Related PreToolUse guards deny unsafe commands before execution rather than dete
 Their separate owners are [`arm-pretool-check.md`](arm-pretool-check.md), [`cd-guard.md`](cd-guard.md), and [`subagent-guard.md`](subagent-guard.md).
 Do not infer this guard's scope, loop safety, or compatibility tradeoffs for those guards.
 
+A turn that ends because the inference gateway failed is a separate concern with its own owner, [`gateway-keepalive.md`](gateway-keepalive.md).
+Claude reports that turn end through `StopFailure`, which it executes outside its REPL loop, so nothing on that event can block a stop or force a continuation the way this guard does on `Stop`.
+
 ## Current invariant
 
 `bin/fm-guard.sh` is a pull-based warning that runs only when another supervision command invokes it.

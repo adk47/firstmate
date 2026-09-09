@@ -21,6 +21,9 @@ Only an exhausted failure with no verified watcher commits one last-resort notic
 The Claude turn-end guard owns that notice commit contract, the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
 
+Continuity above assumes a session that can still take a turn.
+A primary whose own turn ended on an inference-gateway failure is idle with nothing inside it able to resume, so its recovery has a separate out-of-session owner, [`gateway-keepalive.md`](gateway-keepalive.md).
+
 ## Actionable wake ordering
 
 After an actionable Pi or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.

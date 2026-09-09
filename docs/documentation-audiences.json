@@ -353,6 +353,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/gateway-keepalive.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/herdr-backend.md",
       "audience": "operator-current"
     },
@@ -426,6 +430,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/gateway-keepalive.md",
       "audience": "maintainer-verification"
     },
     {
