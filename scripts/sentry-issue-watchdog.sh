@@ -1168,8 +1168,13 @@ qa_creator_ok() {
     MERGER_LOGIN="$(_bounded 30 gh api user 2>/dev/null | jq -r '.login // empty' 2>/dev/null || true)"
     [ -n "$MERGER_LOGIN" ] || return 1
   fi
-  row="$(_bounded 60 gh api "repos/$repo/commits/$head/status" 2>/dev/null \
-           | jq -r '[.statuses[] | select(.context == "qa-review")] | .[0]
+  # The LIST endpoint (/statuses, newest first), NOT the combined /status: the
+  # combined view returns creator:null on every row (observed 2026-09-08 on
+  # web-credits-next#889/#891 with both the host token and this token), which
+  # made this check answer UNKNOWN forever and never take its designed
+  # "host-posted GO, tag once" path.
+  row="$(_bounded 60 gh api "repos/$repo/commits/$head/statuses?per_page=100" 2>/dev/null \
+           | jq -r '[.[] | select(.context == "qa-review")] | .[0]
                     | select(. != null) | "\(.state // "")\t\(.creator.login // "")"' 2>/dev/null || true)"
   IFS=$'\t' read -r state creator <<<"$row"
   [ -n "$creator" ] && [ -n "$state" ] || return 1

@@ -152,14 +152,20 @@ case "$1 $2" in
     repo="$(printf '%s' "$*" | sed -n 's#.*repos/Muso-AI/\([^/]*\)/.*#\1#p')"
     case "$*" in
       "api user"*) echo '{"login":"adk47"}'; exit 0 ;;
-      *"/commits/"*"/status"*)
-        # who posted qa-review on this head and what it says NOW: fixture per
-        # sha holds "<login> [<state>]"; default QA's App, success
-        sha="$(printf '%s' "$*" | sed -n 's#.*/commits/\([^/]*\)/status.*#\1#p')"
+      *"/commits/"*"/statuses"*)
+        # the LIST endpoint (newest first), faithful to real gh: creator is
+        # populated here. Fixture per sha holds "<login> [<state>]"; default
+        # QA's App, success.
+        sha="$(printf '%s' "$*" | sed -n 's#.*/commits/\([^/?]*\)/statuses.*#\1#p')"
         if [ -r "$FIXTURES/gh.creator.$sha" ]; then read -r c st < "$FIXTURES/gh.creator.$sha"; else c="muso-qa-bot[bot]"; st=""; fi
         [ -n "$st" ] || st="success"
-        [ "$c" = "none" ] && { echo '{"statuses":[]}'; exit 0; }
-        jq -nc --arg c "$c" --arg st "$st" '{statuses:[{context:"qa-review", state:$st, creator:{login:$c}}]}'; exit 0 ;;
+        [ "$c" = "none" ] && { echo '[]'; exit 0; }
+        jq -nc --arg c "$c" --arg st "$st" '[{context:"qa-review", state:$st, creator:{login:$c}}]'; exit 0 ;;
+      *"/commits/"*"/status"*)
+        # the COMBINED endpoint, faithful to real gh: creator is ALWAYS null
+        # here (observed 2026-09-08). Anything reading the creator from this
+        # endpoint must fail its test.
+        jq -nc '{state:"success", statuses:[{context:"qa-review", state:"success", creator:null}]}'; exit 0 ;;
       *"/rules/branches/"*)
         if [ -r "$FIXTURES/gh.rules.$repo.json" ]; then cat "$FIXTURES/gh.rules.$repo.json"; else echo '[]'; fi; exit 0 ;;
       *"/branches/"*"/protection"*)
