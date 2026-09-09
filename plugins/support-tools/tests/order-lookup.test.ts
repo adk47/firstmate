@@ -120,3 +120,106 @@ describe("createOrderLookupTool", () => {
     expect(out).toEqual({ found: false, reason: "rate_limited" });
   });
 });
+
+// The admin order DTO (core-backend `services/orders/mapOrderToDto.js`) carries NO
+// hold reason — only status, shipment and taxId. The doctrine tells Caroline to ask
+// for exactly what a held order is waiting on, so the tool derives that here. These
+// tests pin the derivation, because getting it wrong is customer-visible: asking a
+// Brazilian for an "RFC", or re-asking for a phone number we already hold.
+describe("createOrderLookupTool — fulfilment holds", () => {
+  let rateLimiter: RateLimiter;
+  beforeEach(() => { rateLimiter = new RateLimiter(); });
+
+  const held = (over: Record<string, unknown>, shipmentOver: Record<string, unknown> = {}) => ({
+    data: {
+      ...ORDER_BODY.data,
+      ...over,
+      shipment: { ...ORDER_BODY.data.shipment, ...shipmentOver },
+    },
+  });
+
+  const lookup = async (body: unknown) => {
+    const get = vi.fn(async () => ({ ok: true, status: 200, data: body }));
+    const tool = createOrderLookupTool({ adminClient: makeClient(get as any), rateLimiter, sessionId: "s" });
+    return parse(await tool.execute("c", { order_ref: UUID }));
+  };
+
+  it("returns hold: null for an order that is not held", async () => {
+    const out = await lookup(ORDER_BODY); // PROCESSING
+    expect(out.order.hold).toBeNull();
+  });
+
+  it("names the tax id by what the DESTINATION calls it, not 'tax id'", async () => {
+    const out = await lookup(held(
+      { status: "NEEDS_TAX_ID", taxId: { present: false } },
+      { address: { ...ORDER_BODY.data.shipment.address, countryCode: "BR" } },
+    ));
+    expect(out.order.hold).toEqual({
+      status: "NEEDS_TAX_ID",
+      missing: ["taxId"],
+      taxIdLabel: "CPF or CNPJ",
+      countryCode: "BR",
+    });
+  });
+
+  it("says RNC for a Dominican order (the DGII's name), never the wire key RCN", async () => {
+    const out = await lookup(held({ status: "NEEDS_TAX_ID", taxId: { present: false } })); // DO
+    expect(out.order.hold.taxIdLabel).toBe("RNC");
+  });
+
+  // THE REGRESSION THIS SECTION EXISTS FOR. `shipment.phoneNumber` is the PRODIGI
+  // recipient's phone, and a held order was never sent to Prodigi, so the deployed
+  // DTO returns null for it on EVERY held order -- including one whose perfectly
+  // good phone sits in details.shipping.phone. Deriving "needs a phone" from that
+  // field sent Caroline back to the customer for a number we already had, on every
+  // single held order.
+  it("does NOT report a missing phone on a NEEDS_TAX_ID order whose phone is invisible pre-Prodigi", async () => {
+    const out = await lookup(held(
+      { status: "NEEDS_TAX_ID", taxId: { present: false } },
+      { address: { ...ORDER_BODY.data.shipment.address, countryCode: "MX" }, phoneNumber: null },
+    ));
+    expect(out.order.hold.missing).toEqual(["taxId"]);
+    expect(out.order.hold.missing).not.toContain("phone");
+  });
+
+  it("reads the hold from the STATUS, so a null Prodigi phone changes nothing", async () => {
+    // Same order, phone field present vs null: the descriptor must be identical.
+    const withPhone = await lookup(held({ status: "NEEDS_TAX_ID", taxId: { present: false } }, { phoneNumber: "+1 809 555 0100" }));
+    const withNull = await lookup(held({ status: "NEEDS_TAX_ID", taxId: { present: false } }, { phoneNumber: null }));
+    expect(withPhone.order.hold).toEqual(withNull.order.hold);
+  });
+
+  it("reports phone on NEEDS_CONTACT_INFO — the status is the backend's own statement", async () => {
+    // processOrder only reaches NEEDS_CONTACT_INFO when the stored phone failed
+    // isUsablePhone AND the tax id was fine, so the status proves it on its own.
+    const out = await lookup(held({ status: "NEEDS_CONTACT_INFO", taxId: { present: true } }, { phoneNumber: null }));
+    expect(out.order.hold.missing).toEqual(["phone"]);
+    expect(out.order.hold.taxIdLabel).toBeNull();
+  });
+
+  it("does NOT list a tax id that is already on file", async () => {
+    // Contradictory state (id stored, hold not yet released). Demanding it again
+    // would ask the customer for something we hold; an empty list routes to the team.
+    const out = await lookup(held({ status: "NEEDS_TAX_ID", taxId: { present: true, type: "rcn" } }));
+    expect(out.order.hold.missing).toEqual([]);
+    expect(out.order.hold.taxIdLabel).toBeNull();
+  });
+
+  it("still says a tax id is needed when the destination is not in our country table", async () => {
+    // The backend held it, so an id IS wanted -- our table has simply fallen behind.
+    // Reporting missing: [] here would tell Caroline nothing is outstanding.
+    const out = await lookup(held(
+      { status: "NEEDS_TAX_ID", taxId: { present: false } },
+      { address: { ...ORDER_BODY.data.shipment.address, countryCode: "US" } },
+    ));
+    expect(out.order.hold.missing).toEqual(["taxId"]);
+    expect(out.order.hold.taxIdLabel).toBeNull();
+    expect(out.order.hold.countryCode).toBe("US");
+  });
+
+  it("survives an order with no shipment at all", async () => {
+    const out = await lookup({ data: { ...ORDER_BODY.data, status: "NEEDS_CONTACT_INFO", shipment: null } });
+    expect(out.order.hold.missing).toEqual(["phone"]);
+    expect(out.order.hold.countryCode).toBeNull();
+  });
+});

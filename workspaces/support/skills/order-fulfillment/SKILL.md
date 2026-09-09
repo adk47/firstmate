@@ -122,6 +122,23 @@ confirmed address back to Prodigi.
   id and call `order_lookup` – you can read them the status and tracking link
   directly. File an `order-fulfillment` request only if something looks wrong or the
   lookup is unavailable.
+- **"I ordered a plaque and never heard anything" – CHECK THE STATUS BEFORE ANYTHING
+  ELSE.** `order_lookup` returning `NEEDS_TAX_ID` or `NEEDS_CONTACT_INFO` means the
+  order is paid and deliberately on hold because we are missing something customs or
+  the courier requires: it has not shipped and it will not until that value arrives.
+  The `hold` field names what is outstanding: `hold.missing` lists `taxId` or
+  `phone`, and `hold.taxIdLabel` is what that destination calls the id (e.g. "RFC or
+  CURP", "CPF or CNPJ") – ask for it by that name, never as "tax id". Ask the verified
+  owner for it and apply it with `order_address_update` – saving it releases the hold
+  on its own. **If `hold.missing` comes back empty, the order is held on something
+  this lookup can't see – file an `order-fulfillment` request rather than guessing at
+  what to ask for.** Note that `order_address_update` requires a recipient phone and
+  the stored one is NOT visible on a held order (the lookup's `shipment.phoneNumber`
+  is the print vendor's copy, and a held order was never sent to them), so confirm the
+  phone with the customer as part of the release – that is a field you cannot read,
+  not one you are re-asking for. A `NEEDS_TAX_ID` order can also be short a phone
+  without saying so, and confirming it covers that too. See
+  `reference/orders-and-fulfillment.md` "Fulfilment holds".
 - **Customs hold / "stuck at customs" / "asked to pay a fee" / Mexico "never arrived"**
   – for Mexico especially, a parcel held or returned at customs still shows as
   `SHIPPED` (the status doesn't track returns). If it's a missing tax id, get the

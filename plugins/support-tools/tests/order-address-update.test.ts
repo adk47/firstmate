@@ -114,6 +114,38 @@ describe("createOrderAddressUpdateTool", () => {
     expect(calls[0].body).not.toHaveProperty("taxIdType");
   });
 
+  it("validates the tax id against the DESTINATION country, not Mexico's shapes", async () => {
+    // Before the rules were country-scoped this was rejected as tax_id_invalid: an
+    // 11-digit CPF is neither a 12–13-char RFC nor an 18-char CURP, so a held
+    // Brazilian order could not be released by Caroline at all — even though
+    // core-backend accepts it and would release the hold on save.
+    const { tool, calls } = makeTool({ stdout: '{"ok":true,"mode":"dry-run","applied":false}' });
+    const br = { ...VALID_RECIPIENT, country: "BR", tax_id: "111.444.777-35" };
+    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "owner@x.com", recipient: br }));
+    expect(out.ok).toBe(true);
+    expect(calls[0].body!.taxId).toBe("11144477735");
+    expect(calls[0].body!.taxIdType).toBe("cpf");
+  });
+
+  it("refuses an id valid for another country, before exec", async () => {
+    // A Mexican RFC on a Brazilian order. The backend 400s on this; catching it here
+    // gives Caroline the local id name instead of a generic failure one layer later.
+    const { tool, calls } = makeTool({ stdout: '{"ok":true}' });
+    const mixed = { ...VALID_RECIPIENT, country: "BR", tax_id: "GODE561231GR8" };
+    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: mixed }));
+    expect(out.error).toBe("tax_id_invalid");
+    expect(out.detail).toMatch(/CPF or CNPJ/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refuses a tax id for a destination with no customs requirement", async () => {
+    const { tool, calls } = makeTool({ stdout: '{"ok":true}' });
+    const us = { ...VALID_RECIPIENT, country: "US", tax_id: "123456789" };
+    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: us }));
+    expect(out.error).toBe("tax_id_invalid");
+    expect(calls).toHaveLength(0);
+  });
+
   it("refuses a malformed tax_id before exec", async () => {
     const { tool, calls } = makeTool({ stdout: '{"ok":true}' });
     const bad = { ...VALID_RECIPIENT, country: "MX", tax_id: "123" };

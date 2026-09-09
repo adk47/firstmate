@@ -87,6 +87,21 @@ function nameLooksLikeStreet(name: string): boolean {
   return /\d/.test(name) && STREET_TOKENS.test(name);
 }
 
+// Shortest plausible dialable number (local subscriber numbers bottom out around 7).
+// Mirrors core-backend `services/orders/recipientContact.js`'s MIN_PHONE_DIGITS.
+export const MIN_PHONE_DIGITS = 7;
+
+// Prodigi marks the recipient phone mandatory and couriers require one on the
+// commercial invoice, so an order without a usable one is held as NEEDS_CONTACT_INFO
+// and `PUT /admin/orders/:id` 400s on an unusable value. Deliberately a shape check,
+// not a validator, exactly as the backend does it: Stripe does not guarantee E.164
+// for wallet payments, and refusing a real but oddly-formatted number would hold a
+// shippable order for no customs benefit.
+export function isUsablePhone(value: unknown): boolean {
+  if (typeof value !== "string" && typeof value !== "number") return false;
+  return String(value).replace(/\D/g, "").length >= MIN_PHONE_DIGITS;
+}
+
 export function validateProdigiAddress(input: ProdigiAddressInput | unknown): AddressValidation {
   const addr: ProdigiAddressInput =
     input && typeof input === "object" ? (input as ProdigiAddressInput) : {};
@@ -105,6 +120,14 @@ export function validateProdigiAddress(input: ProdigiAddressInput | unknown): Ad
   const country = val(addr.country);
   if (country !== "" && !ISO2_RE.test(country)) {
     invalid.push({ field: "Country", reason: "must be a 2-letter ISO country code (e.g. DO, US)" });
+  }
+  // A phone the backend will refuse is worse than none: releasing a
+  // NEEDS_CONTACT_INFO hold is exactly what this tool is for, and forwarding an
+  // undialable number gets a 400 from the wrapper that reads to Caroline as a tool
+  // failure rather than "ask the customer for a longer number".
+  const phone = val(addr.phone);
+  if (phone !== "" && !isUsablePhone(phone)) {
+    invalid.push({ field: "Phone number", reason: `must contain at least ${MIN_PHONE_DIGITS} digits — couriers need a dialable number for customs clearance` });
   }
 
   const warnings: string[] = [];
@@ -147,92 +170,170 @@ export function toStripeAddress(input: ProdigiAddressInput): StripeAddress {
   return out;
 }
 
-// --- Recipient tax ID (Mexico RFC / CURP) -----------------------------------
+// --- Recipient tax ID (customs-gated destinations) ---------------------------
 //
-// Since 1 Jan 2025 Mexican customs (SAT, art. 3.7.5) requires the *recipient's*
-// RFC or CURP on imports; without it the parcel is held at customs and returned.
-// Prodigi's recipient payload has no dedicated tax field, so the backend embeds
-// the value into the recipient address it sends Prodigi (see the order tax-id
-// backend spec). This helper normalizes + shape-checks what Caroline collects
-// before it rides along in the `PUT /admin/orders/:id` body as `taxId`/`taxIdType`.
+// Customs in eight Latin-American destinations requires the *recipient's* tax id
+// on imports (Mexico's SAT art. 3.7.5 since 2025-01-01 is only the most common
+// case); without it the parcel is held and returned. Prodigi's recipient payload
+// has no dedicated tax field, so the backend embeds the value into the recipient
+// address it sends Prodigi.
 //
-//   RFC  — 12 (legal entities) or 13 (individuals) alphanumeric chars
-//   CURP — 18 alphanumeric chars
+// This table MIRRORS core-backend `src/services/orders/taxId.js`'s TAX_ID_RULES,
+// which is the authority: `PUT /admin/orders/:id` re-validates the id against the
+// destination country and rejects a mismatch with `expectedTaxIdLabels(country)`.
+// We pre-check here only so Caroline gets specific fix-it feedback before the
+// wrapper runs — so the two MUST agree. A plugin rule stricter than the backend's
+// false-rejects a valid id and leaves a shippable order held; a looser one produces
+// a "saved" the backend then refuses. Keep them in lockstep: if a country or shape
+// changes there, change it here in the same PR.
 //
-// We strip spaces/dots/dashes, upper-case, and require a valid RFC/CURP length:
-// an obviously-malformed id is rejected because applying a bad one is no better
-// than applying none (it still bounces at customs). Type is inferred from length
-// (RFC 12–13, CURP 18); an explicit tax_id_type may confirm but not override it —
-// a mismatch is rejected, matching the backend's length-per-type validation.
-export type TaxIdType = "rfc" | "curp";
+// Scoping is per COUNTRY, never global: an 11-digit Brazilian CPF and an Argentine
+// CUIT are the same shape, so a global match would print a CPF on a parcel to
+// Argentina as a CUIT and be returned by customs.
+export type TaxIdType = "rfc" | "curp" | "cpf" | "cnpj" | "rut" | "cuit" | "ruc" | "nit" | "rcn";
+
+interface TaxIdTypeRule {
+  pattern: RegExp; // matched against the SANITIZED value (upper-case, punctuation stripped)
+  label: string; // what the customer's country calls it — this is what Caroline asks for
+  shape: string; // human description of the shape, for the fix-it message
+}
+
+const TAX_ID_RULES: Readonly<Record<string, Readonly<Record<string, TaxIdTypeRule>>>> = Object.freeze({
+  // Mexico — RFC 12 (company) / 13 (individual), CURP exactly 18. The alphanumeric
+  // exception: both encode name characters, and Ñ/& are legitimate id characters.
+  MX: {
+    rfc: { pattern: /^[A-ZÑ&0-9]{12,13}$/, label: "RFC", shape: "12–13 letters/digits" },
+    curp: { pattern: /^[A-ZÑ&0-9]{18}$/, label: "CURP", shape: "18 letters/digits" },
+  },
+  BR: {
+    cpf: { pattern: /^[0-9]{11}$/, label: "CPF", shape: "11 digits" },
+    cnpj: { pattern: /^[0-9]{14}$/, label: "CNPJ", shape: "14 digits" },
+  },
+  // Chile — 7–8 digits plus a check digit that may be the letter K.
+  CL: { rut: { pattern: /^[0-9]{7,8}[0-9K]$/, label: "RUT", shape: "8–9 characters, may end in K" } },
+  AR: { cuit: { pattern: /^[0-9]{11}$/, label: "CUIT", shape: "11 digits" } },
+  PE: { ruc: { pattern: /^[0-9]{11}$/, label: "RUC", shape: "11 digits" } },
+  CO: { nit: { pattern: /^[0-9]{9,10}$/, label: "NIT", shape: "9–10 digits" } },
+  EC: { ruc: { pattern: /^[0-9]{13}$/, label: "RUC", shape: "13 digits" } },
+  // Dominican Republic — 9 digits (company RNC) or the 11-digit cédula.
+  // The customer-facing name is **RNC** (Registro Nacional de Contribuyentes, per
+  // the DGII). The `rcn` TYPE KEY is deliberately kept: it is the wire value
+  // core-backend stores and Stripe's `do_rcn` tax-id type, and a type hint is
+  // checked against that key. Only the label — what Caroline says out loud — is RNC.
+  DO: { rcn: { pattern: /^([0-9]{9}|[0-9]{11})$/, label: "RNC", shape: "9 or 11 digits" } },
+});
+
+/** The rules for a destination, or null when it isn't customs-gated. */
+function rulesForCountry(country: unknown): Readonly<Record<string, TaxIdTypeRule>> | null {
+  const key = typeof country === "string" ? country.trim().toUpperCase() : "";
+  return TAX_ID_RULES[key] ?? null;
+}
+
+/** Whether a destination country requires a recipient tax id for customs. */
+export function requiresTaxId(country: unknown): boolean {
+  return rulesForCountry(country) !== null;
+}
+
+/**
+ * The id names a destination expects, joined for a human: 'BR' -> "CPF or CNPJ".
+ * Empty string when the country isn't gated. This is the label Caroline reads to
+ * the customer, so it must be the LOCAL name — "tax id" means nothing to them.
+ */
+export function expectedTaxIdLabels(country: unknown): string {
+  const rules = rulesForCountry(country);
+  if (!rules) return "";
+  const labels = Object.values(rules).map((r) => r.label);
+  return labels.length > 1 ? `${labels.slice(0, -1).join(", ")} or ${labels[labels.length - 1]}` : labels[0];
+}
+
+/** "RFC is 12–13 letters/digits, CURP is 18 letters/digits" — for the fix-it message. */
+function describeTaxIdShapes(rules: Readonly<Record<string, TaxIdTypeRule>>): string {
+  return Object.values(rules)
+    .map((r) => `${r.label} is ${r.shape}`)
+    .join(", ");
+}
 
 export interface TaxIdResult {
   ok: boolean;
-  value: string; // normalized: upper-case, alphanumeric only
-  type: TaxIdType | null; // inferred/provided; null if indeterminate
+  value: string; // normalized: upper-case, punctuation stripped
+  type: TaxIdType | null; // resolved within the destination's rules; null when invalid
   reason?: string; // set when ok === false
-  warnings: string[];
 }
 
-// RFC/CURP are A–Z and 0–9, PLUS `Ñ` (appears in the name portion of an
-// individual RFC/CURP) and `&` (appears in a company RFC's name initials). Both
-// are legitimate id characters, so the charset must allow them or valid ids get
-// false-rejected. NB: core-backend currently strips non-`[A-Z0-9]` (mangling
-// Ñ/&) — flagged for the backend in the order tax-id spec.
-const TAXID_CHAR_RE = /^[A-Z0-9Ñ&]{10,18}$/;
+// Upper-case + strip punctuation/spaces, KEEPING the chars an id legitimately uses:
+// Ñ (the name portion of an RFC/CURP) and & (a company RFC's name initials). NFC so
+// a decomposed Ñ counts as one character. Mirrors core-backend's sanitizeTaxIdValue —
+// stripping a different character set would make the two disagree on the same input.
+function sanitizeTaxIdValue(value: unknown): string {
+  return val(value).normalize("NFC").toUpperCase().replace(/[^A-Z0-9Ñ&]/g, "");
+}
 
-export function normalizeTaxId(rawValue: unknown, rawType?: unknown): TaxIdResult {
-  // val() does the string type-guard + trim (the trailing whitespace it trims is
-  // also removed by the replace below — kept for consistency with the other
-  // validators in this file); strip inner spaces/dots/dashes and upper-case.
-  const value = val(rawValue).replace(/[\s.\-]/g, "").toUpperCase();
-  const warnings: string[] = [];
+/**
+ * Normalize + shape-check a recipient tax id against its DESTINATION country.
+ *
+ * `country` is required and decides which shapes are valid: grading a Brazilian CPF
+ * against Mexico's rules (or vice versa) either false-rejects a valid id or accepts
+ * one that customs will bounce. A malformed id is rejected rather than forwarded —
+ * applying a bad one is no better than applying none, since it still bounces at
+ * customs, and the backend would drop it anyway (a false "saved" to the customer).
+ *
+ * An explicit `tax_id_type` may CONFIRM the shape-inferred type but never override
+ * it, and must be a type this destination accepts. A hint naming another country's
+ * type is a mismatch, not a licence to relabel: Stripe collects the id against the
+ * BILLING country, which need not be the destination.
+ */
+export function normalizeTaxId(rawValue: unknown, rawType?: unknown, country?: unknown): TaxIdResult {
+  const value = sanitizeTaxIdValue(rawValue);
+  if (!value) return { ok: false, value: "", type: null, reason: "empty" };
 
-  if (!value) return { ok: false, value: "", type: null, reason: "empty", warnings };
-  if (!TAXID_CHAR_RE.test(value)) {
+  const rules = rulesForCountry(country);
+  if (!rules) {
+    // Not a customs-gated destination (or no country supplied). Forwarding the id
+    // would produce a 400 from the backend, so say what is actually wrong.
+    const where = val(country) ? val(country).toUpperCase() : "the destination";
     return {
       ok: false,
       value,
       type: null,
-      reason: "must be 10–18 letters/digits (Mexico RFC is 12–13, CURP is 18)",
-      warnings,
+      reason: `${where} has no customs tax-id requirement — don't collect one for this order`
     };
   }
 
-  // Type is determined by length: RFC is 12–13 chars, CURP is 18.
-  const type: TaxIdType | null =
-    value.length === 18 ? "curp" : value.length === 12 || value.length === 13 ? "rfc" : null;
+  const matches = Object.entries(rules)
+    .filter(([, r]) => r.pattern.test(value))
+    .map(([type]) => type as TaxIdType);
 
-  // An explicit tax_id_type may CONFIRM the length-inferred type but never override
-  // it: a declared type that disagrees with the length is rejected, not forwarded.
-  // The backend applies the same length-per-type rule (it nulls a type that
-  // contradicts the value's shape), so overriding here would only produce a false
-  // "saved" before the backend drops the id.
+  if (matches.length === 0) {
+    return {
+      ok: false,
+      value,
+      type: null,
+      reason: `not a valid ${expectedTaxIdLabels(country)} for ${val(country).toUpperCase()} — ${describeTaxIdShapes(rules)}`
+    };
+  }
+
   const provided = typeof rawType === "string" ? rawType.trim().toLowerCase() : "";
-  if (provided && provided !== "rfc" && provided !== "curp") {
-    warnings.push(`unrecognized tax_id_type "${provided}" — expected rfc or curp; using the length-inferred type`);
-  } else if ((provided === "rfc" || provided === "curp") && provided !== type) {
-    return {
-      ok: false,
-      value,
-      type: null,
-      reason: `tax_id_type "${provided}" doesn't match the id's length (RFC is 12–13 chars, CURP is 18) — double-check the id and its type`,
-      warnings,
-    };
+  if (provided) {
+    if (!rules[provided]) {
+      // A type this destination doesn't use at all (e.g. 'rfc' on a Brazilian order).
+      return {
+        ok: false,
+        value,
+        type: null,
+        reason: `tax_id_type "${provided}" isn't used by ${val(country).toUpperCase()} — expected ${expectedTaxIdLabels(country)}`
+      };
+    }
+    if (!matches.includes(provided as TaxIdType)) {
+      return {
+        ok: false,
+        value,
+        type: null,
+        reason: `tax_id_type "${provided}" doesn't match the id's shape (${describeTaxIdShapes(rules)}) — double-check the id and its type`
+      };
+    }
+    return { ok: true, value, type: provided as TaxIdType };
   }
 
-  // No valid length (a 10–11 or 14–17 char value) is neither RFC nor CURP — reject
-  // it rather than forward a typeless id the backend can't classify and would
-  // silently drop (a false "saved" to the customer).
-  if (!type) {
-    return {
-      ok: false,
-      value,
-      type: null,
-      reason: "couldn't tell if this is an RFC (12–13 chars) or a CURP (18 chars) — please double-check the id",
-      warnings,
-    };
-  }
-
-  return { ok: true, value, type, warnings };
+  // Unhinted: the patterns are disjoint per type within a country, so the match is exact.
+  return { ok: true, value, type: matches[0] };
 }

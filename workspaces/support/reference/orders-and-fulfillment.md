@@ -21,6 +21,57 @@ be ordered on any plan (including free Lite) – a paid subscription is not requ
 - **SHIPPED** – Prodigi has dispatched it; tracking is available.
 - **CANCELLED** – cancelled by Prodigi or by us.
 
+### Fulfilment holds – a paid order that is deliberately NOT being printed
+
+Two more statuses sit between `PAID` and `PROCESSING`. They mean the order is paid but
+we are holding it on purpose, because sending it to Prodigi as-is would get the parcel
+rejected or returned:
+
+- **NEEDS_TAX_ID** – the destination's customs requires the recipient's tax id and we
+  don't have one. See the customs section below for which id each country wants.
+- **NEEDS_CONTACT_INFO** – no usable recipient phone number. Prodigi requires one, and
+  couriers need it on the commercial invoice to raise a customs query.
+
+**A held order looks exactly like "nothing happened" to the customer.** It is paid, it
+is not shipping, and it will stay that way until someone supplies the missing detail.
+So if a customer says they ordered a plaque and never heard anything, check the status
+first – if it is one of these, you have the answer and the fix.
+
+Supplying the missing value **releases the hold automatically** – the order goes to
+Prodigi as soon as it is saved. Use `order_address_update` with `tax_id` (and/or the
+phone); you do not set the status by hand, and you should not tell the customer we
+"reactivated" anything.
+
+`order_lookup` returns a `hold` object on exactly these two statuses, so you never
+have to work out what is missing yourself:
+
+| Field | What it is |
+|---|---|
+| `hold.missing` | `["taxId"]` or `["phone"]` – what the hold status proves is outstanding |
+| `hold.taxIdLabel` | what the destination calls the id ("RFC or CURP", "CPF or CNPJ") |
+| `hold.countryCode` | the destination, e.g. `MX` |
+
+The admin API carries no hold reason of its own, so this is derived from the status,
+the destination, and whether a tax id is already on file.
+
+**The stored phone is not visible on a held order.** The lookup's
+`shipment.phoneNumber` is the *print vendor's* copy of the recipient, and a held
+order is precisely one we never sent to them – so it reads empty on every hold,
+whatever number we actually have. `hold` therefore never infers the phone from it.
+Two consequences:
+
+- `NEEDS_CONTACT_INFO` means the phone IS the problem – the backend only lands on
+  that status when the stored phone is unusable and the tax id is fine.
+- `NEEDS_TAX_ID` means the tax id is missing, and the order may be short a phone as
+  well without anything saying so (an order missing both is filed under the tax id).
+
+Since `order_address_update` needs a recipient phone anyway, confirm it with the
+customer as part of the release. That is not re-asking for something we can see.
+
+**An empty `missing` on a held order is not "nothing is needed"** – it means the
+reason isn't visible here (e.g. the id is already stored but the release hasn't
+re-run). File an `order-fulfillment` request; don't invent a thing to ask for.
+
 The shipping address is collected on the **Stripe checkout page**, not in the app, so
 a customer can't simply re-edit it in their settings after paying – address fixes go
 through the team.
@@ -78,8 +129,10 @@ What this means for support:
 
 - For a Mexico order, collect the recipient's **RFC or CURP** alongside the address.
   `order_address_update` takes it via the `tax_id` field (pass `tax_id_type` `rfc` or
-  `curp` if you know it; it's otherwise inferred from the length). It's normalized and
-  shape-checked (10–18 letters/digits) before it's applied.
+  `curp` if you know it; it's otherwise inferred from the value's shape). It is
+  normalized and shape-checked **against the destination country** before it's
+  applied – so the same field carries a Brazilian CPF on a Brazilian order, and a
+  Mexican RFC is rejected on one.
 - **Customs duties/fees are paid by the recipient**, set by Mexican customs – not by
   Muso and not something Caroline can waive. If a customer is asked to pay a customs
   charge to release their parcel, that's the local customs office, not a Muso charge.
@@ -87,8 +140,24 @@ What this means for support:
   stays `SHIPPED`). So "it never arrived" on a Mexico order is often a customs return –
   look the order up, and if it's still editable add the RFC/CURP; if it already shipped
   or came back, flag it for the team to arrange a re-send.
-- Other countries can require a recipient tax ID too; the same `tax_id` field carries
-  whatever the destination needs. Mexico is just the most common case today.
+- **Seven other destinations are gated the same way** – the same `tax_id` field carries
+  whatever the destination needs, but ask for it **by its local name**, because "tax id"
+  means nothing to most customers:
+
+  | Country | Ask for |
+  |---|---|
+  | Mexico (MX) | **RFC** (12–13 chars) or **CURP** (18) |
+  | Brazil (BR) | **CPF** (11 digits) or **CNPJ** (14) |
+  | Chile (CL) | **RUT** (8–9 chars, may end in K) |
+  | Argentina (AR) | **CUIT** (11 digits) |
+  | Peru (PE) | **RUC** (11 digits) |
+  | Colombia (CO) | **NIT** (9–10 digits) |
+  | Ecuador (EC) | **RUC** (13 digits) |
+  | Dominican Republic (DO) | **RNC** (9 or 11 digits) |
+
+  Mexico is still the most common case by far. An id of the wrong shape for the
+  destination is rejected rather than stored – a Brazilian CPF on a Mexican order is
+  not "close enough", it would still be turned away at customs.
 
 ## Address field mapping
 

@@ -45,8 +45,8 @@ const Recipient = Type.Object({
   postcode: Type.String({ minLength: 1, pattern: LINE }),
   country: Type.String({ minLength: 1, pattern: LINE, description: "2-letter ISO country code (e.g. DO, US) — NOT the full country name" }),
   email: Type.Optional(Type.String({ pattern: EMAIL_PATTERN })),
-  tax_id: Type.Optional(Type.String({ pattern: LINE, description: "Recipient tax ID. For Mexico (country MX) this is the RFC (12–13 chars) or CURP (18 chars), which customs has required since 2025 — without it the parcel is held and returned. Omit for countries that don't require one." })),
-  tax_id_type: Type.Optional(Type.String({ pattern: LINE, description: "Optional: 'rfc' or 'curp'. Inferred from the value's length if omitted." })),
+  tax_id: Type.Optional(Type.String({ pattern: LINE, description: "Recipient tax ID, required by customs in MX (RFC/CURP), BR (CPF/CNPJ), CL (RUT), AR (CUIT), PE (RUC), CO (NIT), EC (RUC) and DO (RNC) — without it the parcel is held and returned. Validated against the destination country, so ask for it by its local name. Omit for every other country." })),
+  tax_id_type: Type.Optional(Type.String({ pattern: LINE, description: "Optional: the id's type, lower-cased ('rfc', 'curp', 'cpf', 'cnpj', 'rut', 'cuit', 'ruc', 'nit', 'rcn'). Inferred from the value's shape if omitted; a type the destination doesn't use is rejected." })),
 });
 
 const Parameters = Type.Object({
@@ -80,7 +80,7 @@ export function createOrderAddressUpdateTool(deps: ToolDeps): AgentTool<typeof P
     description:
       "Correct a plaque/poster order's shipping recipient (name, phone, address, and tax id) and push it to the print vendor. " +
       "ONLY for the verified order owner — the wrapper refuses if the requester isn't the owner. " +
-      "For Mexico (country MX), also collect the recipient's RFC or CURP tax id via tax_id — customs holds and returns the parcel without it. " +
+      "For a customs-gated destination (MX, BR, CL, AR, PE, CO, EC, DO), also collect the recipient's tax id via tax_id — customs holds and returns the parcel without it, and supplying it releases a NEEDS_TAX_ID hold. " +
       "Always call apply=false first to preview, get explicit customer confirmation, then call apply=true with intercomConvId. " +
       "Rejects addresses with lines over 40 chars or missing required fields. Rate limit: 5 calls per 60 minutes per session.",
     parameters: Parameters,
@@ -106,12 +106,16 @@ export function createOrderAddressUpdateTool(deps: ToolDeps): AgentTool<typeof P
         return textResult(JSON.stringify({ ok: false, error: "address_invalid", validation }));
       }
 
-      // Optional recipient tax id (Mexico RFC/CURP). Shape-check before exec so a
-      // malformed id gets specific fix-it feedback, mirroring the address gate. A
-      // bad id is no better than none — it still bounces at customs.
+      // Optional recipient tax id for a customs-gated destination. Shape-check before
+      // exec so a malformed id gets specific fix-it feedback, mirroring the address
+      // gate. A bad id is no better than none — it still bounces at customs.
+      //
+      // The DESTINATION country scopes which shapes are valid, and must be passed:
+      // the backend validates against `effectiveAddress.country` and 400s on a
+      // mismatch, so validating without it here would disagree with the authority.
       let taxId: { taxId: string; taxIdType?: string } | null = null;
       if (params.recipient.tax_id && params.recipient.tax_id.trim()) {
-        const t = normalizeTaxId(params.recipient.tax_id, params.recipient.tax_id_type);
+        const t = normalizeTaxId(params.recipient.tax_id, params.recipient.tax_id_type, input.country);
         if (!t.ok) {
           return textResult(JSON.stringify({ ok: false, error: "tax_id_invalid", detail: t.reason }));
         }

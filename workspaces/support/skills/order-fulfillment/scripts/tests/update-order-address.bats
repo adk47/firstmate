@@ -57,10 +57,11 @@ teardown() { rm -rf "$TEST_TMP"; }
 api_responses() { : > "$MUSO_API_RESPONSE_FILE"; for r in "$@"; do printf '%s\n' "$r" >> "$MUSO_API_RESPONSE_FILE"; done; }
 jget() { printf '%s' "$output" | jq -r "$1"; }
 
-# Order GET envelope: status PROCESSING, owner = $1, address on file.
+# Order GET envelope: owner = $1, status = $2 (default PROCESSING), address on file.
 order_envelope() {
   local owner="${1:-$REQUESTER_EMAIL}"
-  printf '{"http_status":200,"body":{"data":{"id":"%s","status":"PROCESSING","customerEmail":"%s","shipment":{"address":{"line1":"apto 1101"}}}}}' "$ORDER_REF" "$owner"
+  local order_status="${2:-PROCESSING}"
+  printf '{"http_status":200,"body":{"data":{"id":"%s","status":"%s","customerEmail":"%s","shipment":{"address":{"line1":"apto 1101"}}}}}' "$ORDER_REF" "$order_status" "$owner"
 }
 
 run_dry() { run bash "$SCRIPT" --order-ref "$ORDER_REF" --customer-email "$REQUESTER_EMAIL" --body-file "$BODY_FILE" --intercom-conv-id "$CONV_ID"; }
@@ -74,6 +75,39 @@ run_apply() { run bash "$SCRIPT" --order-ref "$ORDER_REF" --customer-email "$REQ
   [ "$(jget '.mode')" = "dry-run" ]
   [ "$(jget '.applied')" = "false" ]
   grep -q '"status":"would_update"' "$OUA_AUDIT_LOG"
+}
+
+# A held order is precisely what this tool exists to clear: the backend accepts the
+# update on a hold status and releases the order. Reporting editable:false there told
+# Caroline to give up on the only orders she could actually fix.
+@test "reports a NEEDS_TAX_ID order as editable" {
+  api_responses "$(order_envelope "$REQUESTER_EMAIL" NEEDS_TAX_ID)"
+  run_dry
+  [ "$status" -eq 0 ]
+  [ "$(jget '.editable')" = "true" ]
+  [ "$(jget '.order_status')" = "NEEDS_TAX_ID" ]
+}
+
+@test "reports a NEEDS_CONTACT_INFO order as editable" {
+  api_responses "$(order_envelope "$REQUESTER_EMAIL" NEEDS_CONTACT_INFO)"
+  run_dry
+  [ "$(jget '.editable')" = "true" ]
+}
+
+@test "still reports a shipped order as not editable" {
+  api_responses "$(order_envelope "$REQUESTER_EMAIL" SHIPPED)"
+  run_dry
+  [ "$(jget '.editable')" = "false" ]
+}
+
+# The admin order DTO (core-backend services/orders/mapOrderToDto.js) returns no hold
+# reason, so this preview has nothing to pass through -- a `hold` key here could only
+# ever be a null read off a field that does not exist, which reads to Caroline as
+# "the backend says nothing is outstanding". order_lookup derives the real descriptor.
+@test "emits no hold key on a held order (the admin API carries no hold reason)" {
+  api_responses "$(order_envelope "$REQUESTER_EMAIL" NEEDS_TAX_ID)"
+  run_dry
+  [ "$(jget 'has("hold")')" = "false" ]
 }
 
 @test "refuses when the requester is not the order owner" {

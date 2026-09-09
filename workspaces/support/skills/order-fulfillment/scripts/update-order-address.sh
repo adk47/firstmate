@@ -318,7 +318,14 @@ if (( apply == 0 )); then
       order_ref: $order_ref, order_id: $order_id, order_status: $status,
       current_address: $current_address,
       proposed: $body[0],
-      editable: ($status == "PAID" or $status == "PROCESSING")
+      # A pre-Prodigi hold (NEEDS_TAX_ID / NEEDS_CONTACT_INFO) is the state this tool
+      # exists to clear -- core-backend PUT /admin/orders/:id allows exactly
+      # [PAID, PROCESSING, ...HOLD_STATUSES] and releases the order on save. Reporting
+      # them as not editable told Caroline to give up on the only orders she can fix.
+      # What the hold is WAITING on is not readable here: the admin order DTO carries
+      # no hold reason, so order_lookup derives it -- do not reintroduce a
+      # `.body.data.hold` passthrough, that field does not exist.
+      editable: ((["PAID","PROCESSING","NEEDS_TAX_ID","NEEDS_CONTACT_INFO"] | index($status)) != null)
     }'
   exit 0
 fi
