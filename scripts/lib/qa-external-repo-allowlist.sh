@@ -70,6 +70,7 @@ REPOS=(
   Muso-AI/analytics-controller
   Muso-AI/ios-app
   Muso-AI/android-app
+  Muso-AI/muso-data-steward
   # Add more as repos come into scope, e.g.:
   #   Muso-AI/<repo>
 )

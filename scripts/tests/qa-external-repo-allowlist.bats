@@ -43,6 +43,7 @@ ONBOARDED_REPOS=(
   Muso-AI/analytics-controller
   Muso-AI/ios-app
   Muso-AI/android-app
+  Muso-AI/muso-data-steward
 )
 
 # The mobile repos were onboarded 2026-08-19 for REVIEW ONLY, on purpose: Artem
