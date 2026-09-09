@@ -911,6 +911,26 @@ RSYNC_EXCLUDES=(
   # never in the repo. Server-owned scratch; mirrored KEEP glob in
   # scripts/qa-clean-merge-scratch.sh (lockstep rule).
   --exclude='workspaces/*/credit-verification-todo-inventory-*.json'
+  # SIXTH shape: npm's lockfile, regenerated in-place by anything that runs
+  # `npm`/`npx` inside a workspace. Observed on node-8 2026-09-08 15:03:17Z as
+  # workspaces/qa/package-lock.json -- 81 bytes, lockfileVersion 3, "packages":
+  # {}, with no package.json and no node_modules/ beside it, so nothing on the
+  # server consumes it. It first reddened Step 4a on #915, a PR whose diff
+  # touches nothing under workspaces/; the file's mtime falls inside the gap
+  # between #914's green pre-flight (2026-09-07T15:25:55Z) and #915's red
+  # (2026-09-09T07:16:01Z), which dates it to the server rather than to any PR.
+  # Until excluded it blocks EVERY hydra PR, the same failure class as the five
+  # scratch shapes above.
+  #
+  # Deleting it on node-8 unblocks once but does not hold: unlike the invented
+  # scratch names above, 'package-lock.json' is a fixed name npm regenerates on
+  # any future run in any workspace, so cleanup alone recurs. The exclude is the
+  # durable fix and it matches nothing tracked (git ls-files finds no
+  # package-lock.json anywhere in the repo) -- cf. the identical treatment for
+  # plugins at 'plugins/*/package-lock.json' below. Server-owned install
+  # artifact, recreatable, never in the repo. Mirrored KEEP glob in
+  # scripts/qa-clean-merge-scratch.sh (lockstep rule).
+  --exclude='workspaces/*/package-lock.json'
   # Agent long-term memory (written by agents at runtime, should survive
   # deploys — see docs/guides/WORKSPACE-FILE-OWNERSHIP.md). MEMORY.md IS tracked
   # in git as a seed, but agents modify it post-deploy and we must not
