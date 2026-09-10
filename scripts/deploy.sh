@@ -2874,8 +2874,32 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
           if (process.env.HYDRA_ALLOW_ORPHAN_CRON !== "1") {
             const declared = new Set((store.jobs || []).map((j) => j.id));
             const cur = await m.loadCronStore(target);
+            // Runtime-declared rows (declarationKey) belong to the openclaw runtime, created
+            // from config at boot with regenerating ids — never committable.
+            // Mirrors runtime_declared in scripts/lib/cron-store.sh and
+            // is_runtime_declared in detect-store-only-crons.py; keep all three
+            // in step (the comment above this block says why).
+            // Namespace + the runtime payload invariant: the key alone is
+            // forgeable via cron add --declaration-key (QA finding, PR #924).
+            // Mirrors runtime_declared in scripts/lib/cron-store.sh and
+            // is_runtime_declared in detect-store-only-crons.py; all four stay
+            // in step. NOTE: embedded in a SINGLE-QUOTED shell string — no
+            // apostrophes and no backticks anywhere in this block.
+            const isRuntimeDeclared = (j) => {
+              const k = j.declarationKey;
+              if (typeof k !== "string") return false;
+              const p = j.payload && typeof j.payload === "object" ? j.payload : {};
+              if (k.startsWith("heartbeat:")) return p.kind === "heartbeat";
+              if (k.startsWith("heartbeat-task:")) return true;
+              if (k.startsWith("skill-collection-review:")) return p.kind === "skillCollectionReview";
+              if (k === "memory-core:memory-dreaming-promotion")
+                return p.kind === "agentTurn" &&
+                  p.message === "__openclaw_memory_core_short_term_promotion_dream__";
+              return false;
+            };
             const undeclared = (cur.jobs || [])
               .filter((j) => !(j.schedule && j.schedule.kind === "at" && j.deleteAfterRun === true))
+              .filter((j) => !isRuntimeDeclared(j))
               .filter((j) => !declared.has(j.id))
               .map((j) => j.id);
             if (undeclared.length > 0) {

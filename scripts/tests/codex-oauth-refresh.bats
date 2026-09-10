@@ -48,6 +48,22 @@ STUB
 echo "test stub: ssh refused ($*)" >&2; exit 99
 STUB
   chmod +x "$TEST_TMPDIR/bin/ssh"
+  # openclaw stub: the script's >= 2026.8 break-glass gate shells out to
+  # `openclaw --version`, so WITHOUT this the suite reads the RUNTIME INSTALLED
+  # ON THE HOST. That is not hypothetical: node-8 ran 2026.7.1 (gate no-op, all
+  # green) until the 2026-09-10 8.2 cutover installed 2026.8.2, at which point
+  # the gate began REFUSING and all 13 non-gate tests here went red on every PR
+  # — a suite failing on host state it never set. Default to a pre-8 runtime so
+  # these tests exercise refresh mechanics deterministically; every test that is
+  # ABOUT the gate overwrites this stub in its own body (see
+  # _stub_openclaw_version and the unparseable-runtime cases below), so none of
+  # them is weakened by this default.
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
+#!/bin/bash
+[ "$1" = "--version" ] && { echo "openclaw 2026.7.1"; exit 0; }
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
   # Record every attempted `muso` invocation. This suite never intentionally
   # sends Slack notifications, so teardown fails if a credential inherited
   # from the parent environment activates the notifier.

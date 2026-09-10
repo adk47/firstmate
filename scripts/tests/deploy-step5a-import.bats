@@ -145,6 +145,62 @@ run_step5a() { run --separate-stderr node --input-type=module -e "$(cat "$PROG")
   [ "$(printf '%s' "$output" | jq -r '.persisted')" = "2" ]
 }
 
+@test "step5a: a runtime-DECLARED cron in that window does NOT block the import" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  seed_repo
+  # openclaw >= 2026.8.2 declares these from config at boot and regenerates
+  # their ids every boot, so they can never be committed to cron-jobs.json.
+  # On 2026-09-10 they blocked deploy pass 2 outright (11 unexpected, 0 missing).
+  seed_store '{"jobs":[
+    {"id":"r1"},
+    {"id":"boot-uuid-a","name":"heartbeat-clio","declarationKey":"heartbeat:clio","payload":{"kind":"heartbeat"},"schedule":{"kind":"every","everyMs":1800000}}
+  ]}'
+
+  run_step5a
+  [ "$status" -eq 0 ]
+}
+
+@test "step5a: a BLANK declarationKey still blocks (fail closed, not excluded)" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  seed_repo
+  seed_store '{"jobs":[
+    {"id":"r1"},
+    {"id":"ambiguous","name":"blank-key","declarationKey":"","schedule":{"kind":"every","everyMs":3600000}}
+  ]}'
+
+  run_step5a
+  [ "$status" -eq 9 ]
+}
+
+# QA finding (PR #924): `openclaw cron add --declaration-key custom:billing` is
+# a real operator action, so a custom key must block exactly like no key at all.
+# QA finding round 2 (PR #924): heartbeat: is not a reserved namespace, so a
+# forged one is operator work and must block exactly like a custom key.
+@test "step5a: a FORGED heartbeat: key with an operator payload still blocks" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  seed_repo
+  seed_store '{"jobs":[
+    {"id":"r1"},
+    {"id":"human","name":"billing-hb","declarationKey":"heartbeat:billing","payload":{"kind":"agentTurn","message":"run billing"},"schedule":{"kind":"every","everyMs":3600000}}
+  ]}'
+
+  run_step5a
+  [ "$status" -eq 9 ]
+}
+
+@test "step5a: a CUSTOM declarationKey still blocks (operator work, not a runtime declaration)" {
+
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  seed_repo
+  seed_store '{"jobs":[
+    {"id":"r1"},
+    {"id":"human","name":"billing-cron","declarationKey":"custom:billing","schedule":{"kind":"every","everyMs":3600000}}
+  ]}'
+
+  run_step5a
+  [ "$status" -eq 9 ]
+}
+
 @test "step5a: HYDRA_ALLOW_ORPHAN_CRON=1 drops the undeclared job deliberately" {
   if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
   seed_repo

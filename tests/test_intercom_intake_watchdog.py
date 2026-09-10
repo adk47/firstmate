@@ -25,6 +25,7 @@ import json
 import os
 import pathlib
 import sys
+import tempfile
 import unittest
 import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
@@ -185,13 +186,34 @@ class Assess(unittest.TestCase):
         self.assertEqual(AT - a["window_end"], 10 * 3600)
 
 
-class MainDecisions(unittest.TestCase):
+class _MainTestCase(unittest.TestCase):
+    """Base for the tests that call main().
+
+    main() stands down during a planned maintenance window, and resolves that
+    by shelling out to the real scripts/hydra-maintenance.sh, which reads
+    $HYDRA_MAINTENANCE_FLAG (default /run/hydra-maintenance). On the self-hosted
+    runner that default path is the fleet's LIVE flag: with a window open (an
+    openclaw cutover, say) every main() test below would watch the watchdog skip
+    and fail on host state it never set. Point the guard at a path inside a temp
+    dir that is deliberately never created, exactly as
+    scripts/tests/intercom-intake-watchdog.bats does — so these tests judge
+    intake health, never /run. The guard's own active/expired/malformed
+    behaviour is covered hermetically in that bats suite.
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.env = {"HYDRA_MAINTENANCE_FLAG": os.path.join(tmp.name, "absent-flag.json")}
+
+
+class MainDecisions(_MainTestCase):
     """End-to-end health verdicts and the single Slack side effect."""
 
     def _run(self, argv, *, convs=None, search_error=None, slack_token="xoxb-test"):
         """Invoke main() with stubbed network; return (rc, stdout, stderr, slack_mock)."""
         out, err = io.StringIO(), io.StringIO()
-        env = {"MUSOAI_INTERCOM_TOKEN": "tok"}
+        env = {**self.env, "MUSOAI_INTERCOM_TOKEN": "tok"}
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
             sys, "argv", ["intercom-intake-watchdog.py", *argv]
         ), mock.patch.object(
@@ -276,12 +298,12 @@ class MainDecisions(unittest.TestCase):
         self.assertIn("Intercom API failed", err)
 
 
-class MainUsageErrors(unittest.TestCase):
+class MainUsageErrors(_MainTestCase):
     """Clean exits on bad environment / input — never a stack trace."""
 
     def test_missing_token_exits_one(self):
         err = io.StringIO()
-        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
             sys, "argv", ["intercom-intake-watchdog.py", "--check"]
         ), redirect_stderr(err), redirect_stdout(io.StringIO()):
             rc = wd.main()
@@ -291,7 +313,7 @@ class MainUsageErrors(unittest.TestCase):
     def test_bad_at_value_exits_one(self):
         err = io.StringIO()
         with mock.patch.dict(
-            os.environ, {"MUSOAI_INTERCOM_TOKEN": "tok"}, clear=True
+            os.environ, {**self.env, "MUSOAI_INTERCOM_TOKEN": "tok"}, clear=True
         ), mock.patch.object(
             sys, "argv", ["intercom-intake-watchdog.py", "--check", "--at", "not-a-date"]
         ), redirect_stderr(err), redirect_stdout(io.StringIO()):

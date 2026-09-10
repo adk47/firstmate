@@ -104,8 +104,39 @@
 export CRON_STORE_RUNTIME_KEYS="state updatedAtMs"
 
 _CRON_STORE_JQ_DEFS='
+  def runtime_declared:
+    # openclaw >= 2026.8.2 declares crons from config at boot and REGENERATES
+    # their ids every boot, so they can never appear in cron-jobs.json. Counting
+    # them made Step 6b unpassable on 2026-09-10 ("loaded 44, repo declares 33";
+    # 11 unexpected, 0 missing).
+    # NAMESPACE **+ RUNTIME PAYLOAD INVARIANT** (QA finding, PR #924). The key
+    # alone is forgeable: the runtime refuses a user `cron add` only for its
+    # system-owned prefixes (heartbeat-task:, skill-collection-review:), so an
+    # operator CAN key an ordinary durable cron `heartbeat:billing` — and a
+    # key-only rule would exempt it and let the replace-all import delete it.
+    # `cron add` cannot build a heartbeat/skillCollectionReview payload, so the
+    # payload is the non-forgeable half. Verified against every live declared
+    # row in both profiles (14/14) on 2026-09-10.
+    # Anything else is NOT declared and keeps its protection, so a new runtime
+    # namespace halts the deploy loudly instead of being dropped.
+    ((.declarationKey | type) == "string")
+      and (
+        (if (.payload | type) == "object" then .payload else {} end) as $p
+        | if (.declarationKey | startswith("heartbeat:"))
+            then ($p.kind == "heartbeat")
+          elif (.declarationKey | startswith("heartbeat-task:"))
+            then true
+          elif (.declarationKey | startswith("skill-collection-review:"))
+            then ($p.kind == "skillCollectionReview")
+          elif (.declarationKey == "memory-core:memory-dreaming-promotion")
+            then ($p.kind == "agentTurn"
+                  and $p.message == "__openclaw_memory_core_short_term_promotion_dream__")
+          else false end
+      );
   def durable:
-    [ .jobs[] | select(((.schedule.kind == "at") and (.deleteAfterRun == true)) | not) ];
+    [ .jobs[]
+      | select(((.schedule.kind == "at") and (.deleteAfterRun == true)) | not)
+      | select(runtime_declared | not) ];
   def canon:
     # enabled normalizes on BOTH sides so a null-vs-false spelling difference is
     # not a false mismatch; the runtime keys are dropped on both sides.
@@ -387,8 +418,29 @@ cron_store_reimport() {
         // the only safe answer, so the abort is loud rather than silent.
         if (!allowOrphan) {
           const declared = new Set((store.jobs || []).map((j) => j.id));
+          // Runtime-declared rows (declarationKey) belong to the openclaw runtime, created
+          // from config at boot with ids that regenerate — never committable.
+          // See runtime_declared in the jq defs above; keep the two in step.
+          // Namespace + the runtime payload invariant: the key alone is
+          // forgeable via cron add --declaration-key (QA finding, PR #924).
+          // NOTE: this JS is embedded in a SINGLE-QUOTED shell string, so no
+          // apostrophes and no backticks may appear anywhere in this block.
+          // Mirrors runtime_declared in the jq defs above; keep them in step.
+          const isRuntimeDeclared = (j) => {
+            const k = j.declarationKey;
+            if (typeof k !== "string") return false;
+            const p = j.payload && typeof j.payload === "object" ? j.payload : {};
+            if (k.startsWith("heartbeat:")) return p.kind === "heartbeat";
+            if (k.startsWith("heartbeat-task:")) return true;
+            if (k.startsWith("skill-collection-review:")) return p.kind === "skillCollectionReview";
+            if (k === "memory-core:memory-dreaming-promotion")
+              return p.kind === "agentTurn" &&
+                p.message === "__openclaw_memory_core_short_term_promotion_dream__";
+            return false;
+          };
           const undeclared = (liveJobs || [])
             .filter((j) => !(j.schedule && j.schedule.kind === "at" && j.deleteAfterRun === true))
+            .filter((j) => !isRuntimeDeclared(j))
             .filter((j) => !declared.has(j.id))
             .map((j) => j.id);
           if (undeclared.length > 0) {

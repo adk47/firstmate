@@ -111,6 +111,87 @@ stub_openclaw() {
   [ "$output" = "1" ]
 }
 
+@test "runtime-DECLARED crons are NOT counted as durable (8.2 boot-declared)" {
+  # openclaw >= 2026.8.2 declares crons from config at boot (heartbeat:<agent>,
+  # skill-collection-review:<agent>, memory-core:*) and regenerates their ids
+  # every boot, so they can never appear in cron-jobs.json. Counting them made
+  # Step 6b refuse forever on 2026-09-10: "loaded 44, repo declares 33".
+  local json='{"jobs":[
+    {"id":"a","name":"repo-job","schedule":{"kind":"every","everyMs":3600000}},
+    {"id":"b","name":"heartbeat-clio","declarationKey":"heartbeat:clio","payload":{"kind":"heartbeat"},"schedule":{"kind":"every","everyMs":1800000}},
+    {"id":"c","name":"skill-collection-review-ceo","declarationKey":"skill-collection-review:ceo","payload":{"kind":"skillCollectionReview"},"schedule":{"kind":"every","everyMs":86400000}}
+  ]}'
+  run cron_store_durable_count_from_json "$json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+}
+
+@test "an EMPTY declarationKey is still counted (fail closed, not excluded)" {
+  local json='{"jobs":[{"id":"a","schedule":{"kind":"every","everyMs":3600000}},
+                       {"id":"b","declarationKey":"","schedule":{"kind":"every","everyMs":3600000}}]}'
+  run cron_store_durable_count_from_json "$json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+}
+
+# QA finding (PR #924): the durable set must exclude only the namespaces the
+# RUNTIME declares. `cron add --declaration-key custom:billing` is an operator
+# action the runtime permits, so that row stays durable and keeps its
+# protection — otherwise Step 6b's count silently absorbs a cron about to be
+# deleted.
+@test "a CUSTOM declarationKey is still counted as durable (operator work)" {
+  local json='{"jobs":[{"id":"a","schedule":{"kind":"every","everyMs":3600000}},
+                       {"id":"b","declarationKey":"custom:billing","schedule":{"kind":"every","everyMs":3600000}}]}'
+  run cron_store_durable_count_from_json "$json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+}
+
+# QA finding round 2 (PR #924): the namespace alone is forgeable, so the durable
+# set must also require the runtime payload invariant.
+@test "a FORGED heartbeat: key with an operator payload stays durable" {
+  local json='{"jobs":[{"id":"a","schedule":{"kind":"every","everyMs":3600000}},
+                       {"id":"b","declarationKey":"heartbeat:billing","payload":{"kind":"agentTurn","message":"run billing"},"schedule":{"kind":"every","everyMs":3600000}}]}'
+  run cron_store_durable_count_from_json "$json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+}
+
+@test "a real namespace with NO payload stays durable (fail closed)" {
+  local json='{"jobs":[{"id":"a","schedule":{"kind":"every","everyMs":3600000}},
+                       {"id":"b","declarationKey":"heartbeat:x","schedule":{"kind":"every","everyMs":3600000}}]}'
+  run cron_store_durable_count_from_json "$json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+}
+
+@test "durable exclusion covers every runtime namespace, and only as a PREFIX" {
+  local json='{"jobs":[
+    {"id":"a","name":"repo-job","schedule":{"kind":"every","everyMs":3600000}},
+    {"id":"b","declarationKey":"heartbeat:clio","payload":{"kind":"heartbeat"},"schedule":{"kind":"every","everyMs":1800000}},
+    {"id":"c","declarationKey":"heartbeat-task:clio","payload":{"kind":"heartbeatTask"},"schedule":{"kind":"every","everyMs":1800000}},
+    {"id":"d","declarationKey":"skill-collection-review:ceo","payload":{"kind":"skillCollectionReview"},"schedule":{"kind":"every","everyMs":86400000}},
+    {"id":"e","declarationKey":"memory-core:memory-dreaming-promotion","payload":{"kind":"agentTurn","message":"__openclaw_memory_core_short_term_promotion_dream__"},"schedule":{"kind":"cron","expr":"0 3 * * *"}},
+    {"id":"f","declarationKey":"custom:heartbeat:clio","schedule":{"kind":"every","everyMs":3600000}},
+    {"id":"g","declarationKey":"memory-core:something-else","schedule":{"kind":"every","everyMs":3600000}}
+  ]}'
+  # a (repo job) + f (substring, not prefix) + g (near-miss on the exact key) = 3
+  run cron_store_durable_count_from_json "$json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "3" ]
+}
+
+@test "a repo-shaped job set (no declarationKey anywhere) counts unchanged" {
+  # Guards the other direction: the exclusion must be a no-op on the repo side,
+  # where all 33 declared jobs carry no declarationKey (verified 2026-09-10).
+  local json='{"jobs":[{"id":"a","schedule":{"kind":"every","everyMs":3600000}},
+                       {"id":"b","schedule":{"kind":"cron","expr":"0 * * * *"}},
+                       {"id":"c","schedule":{"kind":"every","everyMs":900000}}]}'
+  run cron_store_durable_count_from_json "$json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "3" ]
+}
+
 @test "a PAGINATED response is UNKNOWN (rc 2), never .total" {
   # .total is the ALL-ROWS count and includes the ephemerals this filter exists
   # to exclude, so substituting it over-reports durables and would make Step 6b
@@ -721,6 +802,43 @@ export async function loadCronStore(target) {
   if ("$behavior" === "shortread") return { jobs: [{ id: "j1" }] };  // declared, so only the COUNT is short
   let cur = { jobs: [] };
   try { cur = JSON.parse(readFileSync(target + ".sqlite-sim", "utf8")); } catch (e) {}
+  if ("$behavior" === "concurrent-add-declared" && !existsSync(process.env.OPENCLAW_STATE_DIR + "/.add-seen")) {
+    // Same window, but the row openclaw >= 2026.8.2 DECLARES from config at
+    // boot (heartbeat:<agent> etc). Its id regenerates every boot, so it can
+    // never be committed and must NOT abort the save.
+    writeFileSync(process.env.OPENCLAW_STATE_DIR + "/.add-seen", "1");
+    cur.jobs = (cur.jobs || []).concat([
+      { id: "boot-uuid-a", name: "heartbeat-clio", declarationKey: "heartbeat:clio", payload: { kind: "heartbeat" }, schedule: { kind: "every", everyMs: 1800000 } },
+    ]);
+  }
+  if ("$behavior" === "concurrent-add-forgedhb" && !existsSync(process.env.OPENCLAW_STATE_DIR + "/.add-seen")) {
+    // A forged heartbeat: namespace carrying an OPERATOR payload. The runtime
+    // does not reserve heartbeat:, so this is human work and must still abort.
+    writeFileSync(process.env.OPENCLAW_STATE_DIR + "/.add-seen", "1");
+    cur.jobs = (cur.jobs || []).concat([
+      { id: "forged-hb-add", name: "forged hb", declarationKey: "heartbeat:billing", payload: { kind: "agentTurn", message: "run billing" }, schedule: { kind: "cron", expr: "*/5 * * * *" } },
+    ]);
+  }
+  if ("$behavior" === "concurrent-add-customkey" && !existsSync(process.env.OPENCLAW_STATE_DIR + "/.add-seen")) {
+    // "openclaw cron add --declaration-key custom:billing" is a REAL operator
+    // action (the runtime refuses only heartbeat-task: / skill-collection-review:),
+    // so this row is human work and must still abort the destructive save.
+    // NOTE: no backticks in here — this heredoc is UNQUOTED (<<SDK), so bash
+    // command-substitutes them. A backticked "openclaw cron add ..." in this
+    // comment actually RAN the real CLI on node-8 and broke 15 reimport tests,
+    // while passing locally where openclaw is not installed.
+    writeFileSync(process.env.OPENCLAW_STATE_DIR + "/.add-seen", "1");
+    cur.jobs = (cur.jobs || []).concat([
+      { id: "custom-key-add", name: "billing cron", declarationKey: "custom:billing", schedule: { kind: "cron", expr: "*/5 * * * *" } },
+    ]);
+  }
+  if ("$behavior" === "concurrent-add-blankkey" && !existsSync(process.env.OPENCLAW_STATE_DIR + "/.add-seen")) {
+    // A BLANK declarationKey is ambiguous, so it keeps the protection.
+    writeFileSync(process.env.OPENCLAW_STATE_DIR + "/.add-seen", "1");
+    cur.jobs = (cur.jobs || []).concat([
+      { id: "blank-key-add", name: "blank key", declarationKey: "", schedule: { kind: "cron", expr: "*/5 * * * *" } },
+    ]);
+  }
   if ("$behavior" === "concurrent-add" && !existsSync(process.env.OPENCLAW_STATE_DIR + "/.add-seen")) {
     // Simulates an operator adding a recurring cron AFTER converge took its
     // snapshot but BEFORE the save — the window the in-save re-check closes.
@@ -1183,6 +1301,54 @@ _jobs_full_plus_live_extra() {
   [ "$status" -eq 3 ]
   [[ "$stderr" == *"added-during-drain"* ]]
   # Nothing was written: the save never ran.
+  [ ! -e "$TEST_TMPDIR/state/.openclaw-main/cron/jobs.json.sqlite-sim" ]
+}
+
+@test "reimport: a runtime-DECLARED cron in that window does NOT abort the save" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  setup_converge
+  stub_sdk concurrent-add-declared
+
+  run --separate-stderr cron_store_reimport main "$REPO_JSON"
+  [ "$status" -eq 0 ]
+  # The save DID run — this is the whole point: on 2026-09-10 these rows made
+  # deploy pass 2 unpassable (loaded 44 vs repo 33, 11 unexpected, 0 missing).
+  [ -f "$TEST_TMPDIR/state/.openclaw-main/cron/jobs.json.sqlite-sim" ]
+}
+
+@test "reimport: a BLANK declarationKey in that window STILL aborts (fail closed)" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  setup_converge
+  stub_sdk concurrent-add-blankkey
+
+  run --separate-stderr cron_store_reimport main "$REPO_JSON"
+  [ "$status" -eq 3 ]
+  [[ "$stderr" == *"blank-key-add"* ]]
+  [ ! -e "$TEST_TMPDIR/state/.openclaw-main/cron/jobs.json.sqlite-sim" ]
+}
+
+# QA finding (PR #924): the in-save re-check must allowlist runtime namespaces,
+# not accept any nonblank declarationKey — otherwise an operator cron keyed
+# `custom:billing` is silently deleted by the replace-all save.
+@test "reimport: a FORGED heartbeat: key in that window STILL aborts (operator work)" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  setup_converge
+  stub_sdk concurrent-add-forgedhb
+
+  run --separate-stderr cron_store_reimport main "$REPO_JSON"
+  [ "$status" -eq 3 ]
+  [[ "$stderr" == *"forged-hb-add"* ]]
+  [ ! -e "$TEST_TMPDIR/state/.openclaw-main/cron/jobs.json.sqlite-sim" ]
+}
+
+@test "reimport: a CUSTOM declarationKey in that window STILL aborts (operator work)" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  setup_converge
+  stub_sdk concurrent-add-customkey
+
+  run --separate-stderr cron_store_reimport main "$REPO_JSON"
+  [ "$status" -eq 3 ]
+  [[ "$stderr" == *"custom-key-add"* ]]
   [ ! -e "$TEST_TMPDIR/state/.openclaw-main/cron/jobs.json.sqlite-sim" ]
 }
 
