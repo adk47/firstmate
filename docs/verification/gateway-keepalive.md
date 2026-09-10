@@ -96,4 +96,7 @@ The rendered text uses an em dash (`—`), not a hyphen.
 ## Not yet verified live
 
 The primary keep-alive agent's launchd job has been exercised as a script (`bin/fm-keepalive-agent.sh --dry-run`) and through the session-start install sweep against a fake launchd, not yet across a real launchd-scheduled stall.
-Its endpoint discovery covers tmux, herdr, and the cmux and orca terminal identifiers those runtimes export; a runtime that exports none of them requires the installer's explicit `--backend`/`--target`, and the agent stays inert and says so rather than guessing.
+Its endpoint discovery covers tmux and herdr through the shared supervisor-pane discovery owner (`bin/fm-supervisor-target-lib.sh`), plus cmux's own `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID` pair and their legacy `CMUX_TAB_ID`/`CMUX_PANEL_ID` spellings, composed into the `<workspace>:<surface>` target `bin/backends/cmux.sh` parses.
+The cmux path is proved only by unit test over the real `record` interface, not against a live cmux install; treat it as unproved in production until a cmux primary has actually installed the job.
+An orca primary exports no terminal identifier a child process can read - orca ids come from the orca CLI at spawn time - so orca requires the installer's explicit `--backend`/`--target`, as does any other runtime that proves nothing.
+The agent stays inert and says so rather than guessing.

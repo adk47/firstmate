@@ -448,6 +448,89 @@ test_primary_agent_is_inert_without_a_recorded_endpoint() {
   pass "the primary keep-alive is inert, and says so, without a proved endpoint"
 }
 
+# Endpoint detection driven over the real `record`/`read` interface, in an
+# environment stripped of every marker the caller is not testing, so each case
+# proves what the session could actually observe about its own pane.
+endpoint_record() {  # <state-dir> <env assignments...>; echoes "<backend> <target>"
+  local dir=$1
+  shift
+  env -u TMUX_PANE -u TMUX -u HERDR_ENV -u HERDR_SESSION -u HERDR_PANE_ID \
+    -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND \
+    -u CMUX_WORKSPACE_ID -u CMUX_SURFACE_ID -u CMUX_TAB_ID -u CMUX_PANEL_ID \
+    -u ORCA_TERMINAL_ID \
+    "$@" "$ENDPOINT" record --state "$dir"
+}
+
+test_endpoint_detects_a_cmux_primary_in_the_shape_the_backend_parses() {
+  local sdir out
+  sdir="$TMP_ROOT/endpoint-cmux/state"
+  rm -rf "$TMP_ROOT/endpoint-cmux"
+  mkdir -p "$sdir"
+
+  out=$(endpoint_record "$sdir" CMUX_WORKSPACE_ID=ws-1 CMUX_SURFACE_ID=sf-1) \
+    || fail "a cmux primary's own identifiers proved no endpoint"
+  [ "$out" = 'cmux ws-1:sf-1' ] || fail "expected 'cmux ws-1:sf-1', got '$out'"
+  [ "$("$ENDPOINT" read --state "$sdir" --field backend)" = cmux ] \
+    || fail "the record did not name cmux as the backend"
+  # The recorded target must be what the cmux adapter actually parses, not a
+  # shape only this script agrees with.
+  (
+    . "$ROOT/bin/backends/cmux.sh"
+    t=$("$ENDPOINT" read --state "$sdir" --field target)
+    fm_backend_cmux_parse_target "$t" || exit 1
+    [ "$FM_BACKEND_CMUX_WORKSPACE" = ws-1 ] && [ "$FM_BACKEND_CMUX_SURFACE" = sf-1 ]
+  ) || fail "the recorded cmux target is not the <workspace>:<surface> the adapter parses"
+
+  out=$(endpoint_record "$sdir" CMUX_TAB_ID=ws-2 CMUX_PANEL_ID=sf-2) \
+    || fail "cmux's legacy identifier spellings proved no endpoint"
+  [ "$out" = 'cmux ws-2:sf-2' ] || fail "expected 'cmux ws-2:sf-2', got '$out'"
+
+  # Half a pair is not a pane: nothing to prove, so nothing is recorded.
+  rm -f "$sdir/.primary-endpoint"
+  endpoint_record "$sdir" CMUX_WORKSPACE_ID=ws-3 >/dev/null 2>&1 \
+    && fail "a workspace with no surface must not prove an endpoint"
+  [ ! -e "$sdir/.primary-endpoint" ] || fail "a failed detection still wrote a record"
+  pass "endpoint detection resolves a cmux primary into the target the cmux adapter parses"
+}
+
+test_endpoint_refuses_a_runtime_it_cannot_read() {
+  local state
+  state="$TMP_ROOT/endpoint-unproved/state"
+  rm -rf "$TMP_ROOT/endpoint-unproved"
+  mkdir -p "$state"
+
+  # orca ids come from the orca CLI at spawn time, never from the environment;
+  # an inherited ORCA_TERMINAL_ID proves nothing and must not be believed.
+  endpoint_record "$state" ORCA_TERMINAL_ID=orca-1 >/dev/null 2>&1 \
+    && fail "an environment variable orca never exports proved an endpoint"
+  [ ! -e "$state/.primary-endpoint" ] || fail "an unproved runtime still wrote a record"
+
+  # The explicit override is the documented way in for such a runtime.
+  env -u TMUX_PANE -u TMUX -u HERDR_ENV -u HERDR_PANE_ID -u FM_SUPERVISOR_TARGET \
+    -u FM_SUPERVISOR_BACKEND -u CMUX_WORKSPACE_ID -u CMUX_SURFACE_ID \
+    "$ENDPOINT" record --state "$state" --backend orca --target orca-1 >/dev/null \
+    || fail "the explicit --backend/--target override was refused"
+  [ "$("$ENDPOINT" read --state "$state" --field target)" = orca-1 ] \
+    || fail "the override did not reach the record"
+  pass "a runtime whose identifiers cannot be read needs the explicit override, and gets it"
+}
+
+test_endpoint_record_carries_only_the_fields_it_documents() {
+  local state line
+  state="$TMP_ROOT/endpoint-fields/state"
+  rm -rf "$TMP_ROOT/endpoint-fields"
+  mkdir -p "$state"
+  endpoint_record "$state" TMUX_PANE='%7' >/dev/null || fail "a tmux primary proved no endpoint"
+  line=$("$ENDPOINT" read --state "$state")
+  case "$line" in
+    'v1 backend=tmux target=%7 harness='*' ts='*) : ;;
+    *) fail "unexpected record line '$line'" ;;
+  esac
+  "$ENDPOINT" read --state "$state" --field pid >/dev/null 2>&1 \
+    && fail "the record still carries the dropped pid field"
+  pass "the endpoint record is exactly the documented v1 line"
+}
+
 test_installer_plist_has_no_dead_flag() {
   # The plist is the generated artifact launchd consumes; the agent takes no
   # --once, so the job must not pass one.
@@ -609,6 +692,9 @@ test_primary_agent_stops_at_the_budget_and_reports_the_outage
 test_primary_agent_repairs_lapsed_supervision_once_per_episode
 test_primary_agent_stands_down_in_away_mode_and_when_idle
 test_primary_agent_is_inert_without_a_recorded_endpoint
+test_endpoint_detects_a_cmux_primary_in_the_shape_the_backend_parses
+test_endpoint_refuses_a_runtime_it_cannot_read
+test_endpoint_record_carries_only_the_fields_it_documents
 test_installer_plist_has_no_dead_flag
 test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoint
 test_session_start_keepalive_honours_the_opt_out_and_its_scope
