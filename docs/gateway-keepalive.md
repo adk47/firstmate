@@ -91,6 +91,7 @@ The primary has no status log of its own, so the two ways its keep-alive can fai
 
 The installer refusing is one of them: a primary whose terminal identifiers cannot be read from the environment - a plain terminal with no multiplexer, or a cmux tab whose wrapper stripped the `CMUX_*` variables - proves no endpoint, so no job is installed and the sweep would otherwise be silent forever.
 Run `bin/fm-keepalive-install.sh install` from the primary pane, passing `--backend` and `--target` when discovery cannot read them.
+A home that did exactly that is then quiet: once the job is loaded and knows a pane, a later session start that cannot read its own endpoint leaves the recorded one alone rather than reporting a job it can see is running.
 
 A spent budget on the primary is the other: the keep-alive stops re-ringing after the ladder's bounds, which is exactly the genuine outage worth surfacing, and this is the primary's equivalent of a crewmate's `paused [key=gateway-503]` status line.
 The agent records it once per episode, not on every pass, and clears it once the primary is no longer stalled; a successful install clears the installer's own notice the same way, so a resolved problem stops being reported.

@@ -1380,7 +1380,7 @@ primary_keepalive_setup() {
     reason=$(sed -n '1p' "${errf:-/dev/null}" 2>/dev/null)
     reason=${reason#error: }
     fm_keepalive_notice_write "$STATE" install \
-      "the primary keep-alive job is not installed - ${reason:-the installer refused without a reason}; run bin/fm-keepalive-install.sh install from this home's primary pane, passing --backend and --target when this terminal's identifiers cannot be read" \
+      "this home's primary has no working keep-alive - ${reason:-the installer refused without a reason}; run bin/fm-keepalive-install.sh install from this home's primary pane, passing --backend and --target when this terminal's identifiers cannot be read" \
       || true
   fi
   [ -z "$errf" ] || rm -f "$errf"
