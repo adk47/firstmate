@@ -752,6 +752,34 @@ test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoin
   pass "the main home's session start installs the keep-alive once, stays quiet after, re-points it on relaunch, and re-bootstraps a job launchd is not running"
 }
 
+test_session_start_stays_quiet_for_a_job_installed_with_an_explicit_endpoint() {
+  # The home that followed the KEEPALIVE line's own remediation: installed by
+  # hand with --backend/--target because its terminal proves nothing. Later
+  # session starts still prove nothing, and its job is running fine.
+  local home out rc=0
+  home=$(make_locked_primary_checkout keepalive-override)
+  HOME="$home/fakehome" PATH="$home/fakebin:$PATH" \
+    FM_FAKE_LAUNCHCTL_LOG="$home/launchctl.log" \
+    "$home/bin/fm-keepalive-install.sh" install --home "$home" \
+    --backend tmux --target '%77' >/dev/null \
+    || fail "the documented --backend/--target install refused"
+  [ -n "$(installed_plist "$home")" ] || fail "the override install wrote no plist"
+
+  out=$(run_sweep "$home" env -u TMUX_PANE -u TMUX -u HERDR_ENV -u HERDR_SESSION \
+    -u HERDR_PANE_ID -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND \
+    -u CMUX_WORKSPACE_ID -u CMUX_SURFACE_ID -u CMUX_TAB_ID -u CMUX_PANEL_ID \
+    -u ORCA_TERMINAL_ID) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a healthy keep-alive must not fail session start"
+  printf '%s\n' "$out" | grep -q '^KEEPALIVE: ' \
+    && fail "a job that is installed and loaded was reported as broken: $out"
+  fm_keepalive_notice_read "$home/state" >/dev/null 2>&1 \
+    && fail "a healthy keep-alive recorded a failure notice"
+  [ "$(keepalive_lines "$out")" = 0 ] || fail "a healthy keep-alive must be quiet: $out"
+  [ "$("$ENDPOINT" read --state "$home/state" --field target)" = '%77' ] \
+    || fail "the session that could prove no endpoint overwrote the recorded one"
+  pass "session start leaves a loaded job installed with an explicit endpoint alone, and says nothing"
+}
+
 test_session_start_reports_a_primary_that_could_not_be_kept_alive() {
   # A primary whose terminal proves no endpoint gets no job at all, which is the
   # captain's ask going unmet; the sweep must say so and still finish.
@@ -846,5 +874,6 @@ test_installer_plist_has_no_dead_flag
 test_installer_keeps_a_pre_existing_plist_a_failed_reload_did_not_write
 test_installer_plist_survives_xml_significant_paths
 test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoint
+test_session_start_stays_quiet_for_a_job_installed_with_an_explicit_endpoint
 test_session_start_reports_a_primary_that_could_not_be_kept_alive
 test_session_start_keepalive_honours_the_opt_out_and_its_scope

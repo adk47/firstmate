@@ -31,9 +31,9 @@
 # that endpoint and refuse rather than guessing when they cannot (`install`
 # takes --backend/--target for a terminal whose identifiers this build cannot
 # read from the environment). `ensure` is the quiet idempotent form session
-# start uses: it always re-records the endpoint, installs or re-bootstraps the job
-# whenever launchd is not actually running it, and prints one line only when it
-# installed it or re-pointed it at a different pane, so a routine start says nothing.
+# start uses: it installs or re-bootstraps the job whenever launchd is not
+# actually running it, re-records the endpoint - best effort once the job is
+# loaded and knows a pane - and prints only an install or a re-point.
 #
 # macOS only: launchd is the scheduler. On any other platform this refuses and
 # names the equivalent it does not install for you.
@@ -191,17 +191,27 @@ EOM
     ;;
   ensure)
     require_macos 2>/dev/null || exit 1
-    previous="$(endpoint_field backend) $(endpoint_field target)"
+    prev_backend=$(endpoint_field backend)
+    prev_target=$(endpoint_field target)
+    if [ -f "$PLIST" ] && job_loaded; then
+      # A loaded job that already knows a pane is healthy even when THIS session
+      # cannot read its own endpoint: an install that took --backend/--target is
+      # exactly that home, and re-detection here is only a refresh.
+      if ! record=$(record_endpoint 2>/dev/null); then
+        [ -z "$prev_backend" ] || [ -z "$prev_target" ] || exit 0
+        echo "the launchd job is loaded but this home has no recorded primary pane and this session's own terminal endpoint could not be read, so the keep-alive has nothing to supervise" >&2
+        exit 1
+      fi
+      [ "$prev_backend $prev_target" = "$record" ] \
+        || echo "refreshed: primary endpoint now $record for launchd job $LABEL"
+      exit 0
+    fi
     record=$(record_endpoint 2>/dev/null) || {
       echo "this session's own terminal endpoint could not be read, so no primary pane was recorded and no job was installed" >&2
       exit 1
     }
-    if [ ! -f "$PLIST" ] || ! job_loaded; then
-      write_and_load_job || exit 1
-      echo "installed: launchd job $LABEL every ${INTERVAL}s, primary endpoint $record"
-    elif [ "$previous" != "$record" ]; then
-      echo "refreshed: primary endpoint now $record for launchd job $LABEL"
-    fi
+    write_and_load_job || exit 1
+    echo "installed: launchd job $LABEL every ${INTERVAL}s, primary endpoint $record"
     ;;
   status)
     echo "label: $LABEL"
