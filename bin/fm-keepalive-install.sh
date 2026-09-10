@@ -31,9 +31,9 @@
 # that endpoint and refuse rather than guessing when they cannot (`install`
 # takes --backend/--target for a terminal whose identifiers this build cannot
 # read from the environment). `ensure` is the quiet idempotent form session
-# start uses: it always re-records the endpoint, installs the job only when the
-# plist is absent, and prints one line only when it installed the job or
-# re-pointed it at a different pane, so a routine session start says nothing.
+# start uses: it always re-records the endpoint, installs or re-bootstraps the job
+# whenever launchd is not actually running it, and prints one line only when it
+# installed it or re-pointed it at a different pane, so a routine start says nothing.
 #
 # macOS only: launchd is the scheduler. On any other platform this refuses and
 # names the equivalent it does not install for you.
@@ -42,7 +42,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 CMD=${1:-}
 [ "$#" -eq 0 ] || shift
@@ -112,31 +112,46 @@ endpoint_field() {  # <field>
   "$SCRIPT_DIR/fm-keepalive-endpoint.sh" read --state "$STATE" --field "$1" 2>/dev/null | tr -d '\n'
 }
 
+# launchd parses the plist as XML, so a home path or PATH entry carrying &, < or
+# > would otherwise produce a document launchctl refuses to load.
+xml_escape() {  # <value>
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+    -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+
+job_loaded() { launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; }
+
 # Write the plist and load it. StandardOut/Error go to the home's own state dir,
 # not a shared location, so two homes' jobs cannot interleave into one file.
 write_and_load_job() {
+  local x_label x_script x_home x_state x_path
+  x_label=$(xml_escape "$LABEL")
+  x_script=$(xml_escape "$SCRIPT_DIR")
+  x_home=$(xml_escape "$HOME_DIR")
+  x_state=$(xml_escape "$STATE")
+  x_path=$(xml_escape "$PATH")
   mkdir -p "$HOME/Library/LaunchAgents" || return 1
   cat > "$PLIST" <<EOM
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>$LABEL</string>
+  <key>Label</key><string>$x_label</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$SCRIPT_DIR/fm-keepalive-agent.sh</string>
+    <string>$x_script/fm-keepalive-agent.sh</string>
     <string>--home</string>
-    <string>$HOME_DIR</string>
+    <string>$x_home</string>
   </array>
   <key>StartInterval</key><integer>$INTERVAL</integer>
   <key>RunAtLoad</key><false/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>$STATE/.keepalive-agent.out</string>
-  <key>StandardErrorPath</key><string>$STATE/.keepalive-agent.err</string>
+  <key>StandardOutPath</key><string>$x_state/.keepalive-agent.out</string>
+  <key>StandardErrorPath</key><string>$x_state/.keepalive-agent.err</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>$PATH</string>
-    <key>FM_HOME</key><string>$HOME_DIR</string>
+    <key>PATH</key><string>$x_path</string>
+    <key>FM_HOME</key><string>$x_home</string>
   </dict>
 </dict>
 </plist>
@@ -145,7 +160,8 @@ EOM
   if ! launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; then
     # Older macOS releases only accept the legacy verb.
     launchctl load "$PLIST" 2>/dev/null || {
-      echo "error: launchctl refused to load $PLIST; the plist was written but the job is not running" >&2
+      rm -f "$PLIST"
+      echo "error: launchctl refused to load the keep-alive job for $HOME_DIR; nothing was left installed" >&2
       return 1
     }
   fi
@@ -172,7 +188,7 @@ EOM
     require_macos 2>/dev/null || exit 1
     previous="$(endpoint_field backend) $(endpoint_field target)"
     record=$(record_endpoint 2>/dev/null) || exit 1
-    if [ ! -f "$PLIST" ]; then
+    if [ ! -f "$PLIST" ] || ! job_loaded; then
       write_and_load_job 2>/dev/null || exit 1
       echo "installed: launchd job $LABEL every ${INTERVAL}s, primary endpoint $record"
     elif [ "$previous" != "$record" ]; then
@@ -183,8 +199,11 @@ EOM
     echo "label: $LABEL"
     echo "plist: $PLIST$([ -f "$PLIST" ] || printf ' (absent)')"
     if [ "$(uname 2>/dev/null)" = Darwin ]; then
-      launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | sed -n 's/^[[:space:]]*\(state\|last exit code\|runs\) *= */  \1 = /p' \
-        || echo "  not loaded"
+      if job_loaded; then
+        launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | sed -n 's/^[[:space:]]*\(state\|last exit code\|runs\) *= */  \1 = /p'
+      else
+        echo "  not loaded"
+      fi
     fi
     echo "endpoint: $("$SCRIPT_DIR/fm-keepalive-endpoint.sh" read --state "$STATE" 2>/dev/null || echo 'none recorded')"
     if [ -f "$STATE/.keepalive-agent.log" ]; then
