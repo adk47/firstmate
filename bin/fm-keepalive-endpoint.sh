@@ -10,12 +10,16 @@
 #
 # This writes what the session itself can prove about its endpoint into
 # state/.primary-endpoint, so the out-of-session supervisor can read the CURRENT
-# pane rather than guess one. The record is refreshed by the primary's own
-# StopFailure hook, so a firstmate relaunched into a different pane re-points
-# the supervisor without a reinstall.
+# pane rather than guess one. The main home's session start refreshes the record
+# from the lock-owning primary's own environment (bin/fm-bootstrap.sh
+# primary_keepalive_setup), so a firstmate relaunched into a different pane
+# re-points the supervisor without a reinstall.
 #
 # Record format, one line:
-#   v1 backend=<backend> target=<target> pid=<session-pid> ts=<epoch>
+#   v1 backend=<backend> target=<target> harness=<harness> pid=<session-pid> ts=<epoch>
+# <harness> is the session's own harness as bin/fm-harness.sh detects it from
+# this process tree, so the supervisor can read the pane's busy footer with the
+# right signature; `unknown` when detection cannot tell.
 #
 # It NEVER guesses. When the environment proves no endpoint, `record` writes
 # nothing and fails; the installer's explicit --backend/--target is then the
@@ -24,7 +28,7 @@
 #
 # Usage:
 #   fm-keepalive-endpoint.sh record [--state <dir>] [--backend <b>] [--target <t>]
-#   fm-keepalive-endpoint.sh read   [--state <dir>] [--field backend|target|pid|ts]
+#   fm-keepalive-endpoint.sh read   [--state <dir>] [--field backend|target|harness|pid|ts]
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,10 +116,12 @@ case "$CMD" in
       echo "error: this session's own terminal endpoint could not be proved from the environment; pass --backend and --target explicitly" >&2
       exit 1
     fi
+    harness=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null | tr -d '[:space:]') || harness=''
+    case "$harness" in ''|*[!A-Za-z0-9._-]*) harness=unknown ;; esac
     mkdir -p "$STATE_DIR" || exit 1
     tmp="$RECORD.tmp.$$"
-    printf 'v1 backend=%s target=%s pid=%s ts=%s\n' \
-      "$backend" "$target" "${PPID:-0}" "$(date +%s)" > "$tmp" || { rm -f "$tmp"; exit 1; }
+    printf 'v1 backend=%s target=%s harness=%s pid=%s ts=%s\n' \
+      "$backend" "$target" "$harness" "${PPID:-0}" "$(date +%s)" > "$tmp" || { rm -f "$tmp"; exit 1; }
     mv -f "$tmp" "$RECORD" || { rm -f "$tmp"; exit 1; }
     printf '%s %s\n' "$backend" "$target"
     ;;

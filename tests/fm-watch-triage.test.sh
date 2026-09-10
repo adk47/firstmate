@@ -1879,8 +1879,12 @@ test_stale_terminal_status_overridden_by_active_run() {
 # A crew whose last output is a gateway 503 is idle with unfinished work. Before
 # this, the wedge timer escalated it as a possible wedge and a human had to type
 # "carry on". The watcher now enqueues one bounded continue instruction through
-# the ordinary steering inbox and absorbs the poll, and only a spent budget
-# surfaces - as the crew's own declared external wait rather than a wedge.
+# the steering inbox as a fire-and-forget record and absorbs the poll, and only
+# a spent budget surfaces - as the crew's own declared external wait rather
+# than a wedge. The record MUST be fire-and-forget: during a real outage the
+# crew cannot acknowledge it, and an ordinary steer left unhandled would be
+# escalated by the inbox's own ladder into stuck-crewmate recovery, the exact
+# wedge treatment the gateway ladder exists to avoid.
 
 test_gateway_stall_is_re_rung_instead_of_wedge_escalated() {
   local dir state fakebin out capture_file window key pane_hash sig pid msgs
@@ -1919,6 +1923,9 @@ test_gateway_stall_is_re_rung_instead_of_wedge_escalated() {
   [ "$msgs" = 1 ] || fail "expected exactly one continue instruction in the steering inbox, found $msgs"
   grep -qi 'continue exactly where you left off' "$state/stalled.inbox"/*.msg \
     || fail "the enqueued instruction is not the keep-alive continue line"
+  bash -c '. "$1"; fm_task_inbox_is_fire_and_forget "$2"' _ \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$(find "$state/stalled.inbox" -name '*.msg' | head -1)" \
+    || fail "the continue instruction must be a fire-and-forget record, or the inbox ladder escalates the outage into stuck-crewmate recovery"
   reap "$pid"
   ack_stopped_cycle "$state" 2>/dev/null || true
 
@@ -1941,6 +1948,43 @@ test_gateway_stall_is_re_rung_instead_of_wedge_escalated() {
   [ "$msgs" = 1 ] || fail "a spent budget must stop re-ringing; found $msgs instructions"
   unset FM_FAKE_CREW_STATE
   pass "a gateway-stalled crew is re-rung with a bounded continue instruction and declares an external wait when the budget is spent"
+}
+
+# A secondmate is admitted to the pane-stale path only to serve its declared
+# wait's bounded re-surface, and the gateway ladder must not piggyback on that
+# admission: a secondmate home runs its own session-start keep-alive for its own
+# primary, and docs/gateway-keepalive.md promises a mate's pane is never read for
+# a stall. A paused mate whose pane shows the transient error is therefore still
+# re-surfaced as a paused mate, and never sent a continue instruction.
+test_gateway_stalled_secondmate_is_not_re_rung() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back
+  dir=$(make_case gateway-stall-secondmate); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/mate-503.status"
+  window="test:fm-mate-503"
+  printf 'API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary \u2014 try again in a moment.' > "$capture_file"
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/mate-503.meta"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-mate-503_status"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  pane_hash=$(hash_text "$(cat "$capture_file")")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_GATEWAY_RETRY_BACKOFF=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not re-surface the paused secondmate whose pane shows a gateway error"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the paused secondmate lost its bounded re-surface to the gateway ladder"
+  [ ! -e "$state/mate-503.gateway-stall" ] || fail "the primary's watcher opened a gateway stall record for a SECONDMATE pane"
+  [ ! -d "$state/mate-503.inbox" ] || [ "$(find "$state/mate-503.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 0 ] \
+    || fail "the primary's watcher sent a secondmate a gateway continue instruction"
+  unset FM_FAKE_CREW_STATE
+  pass "a secondmate pane showing a transient gateway error is never re-rung by the primary's watcher"
 }
 
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
@@ -4382,6 +4426,7 @@ test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_gateway_stall_is_re_rung_instead_of_wedge_escalated
+test_gateway_stalled_secondmate_is_not_re_rung
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

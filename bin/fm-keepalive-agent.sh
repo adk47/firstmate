@@ -14,7 +14,10 @@
 #   1. GATEWAY STALL. The primary's pane is idle showing a transient
 #      inference-gateway error. Re-ring it with a continue line, on the same
 #      bounded ladder crewmates get (bin/fm-gateway-retry-lib.sh owns entry,
-#      backoff, and both bounds).
+#      backoff, and both bounds). Gated on the pane being IDLE by the same
+#      rendered busy predicate every other pane reader uses
+#      (bin/fm-composer-lib.sh, fm_busy_lines_match), so a primary the captain
+#      already nudged and that is mid-turn is never typed into.
 #   2. LAPSED SUPERVISION. The primary is alive but its watcher beacon is stale
 #      past grace and no auto-arm claim is in progress, so the fleet is running
 #      unsupervised. Re-ring the primary with the home's own repair line
@@ -35,7 +38,7 @@
 # lock, and every action it can take is bounded by a durable budget that
 # survives its own restart.
 #
-# Usage: fm-keepalive-agent.sh [--home <dir>] [--once] [--dry-run] [--verbose]
+# Usage: fm-keepalive-agent.sh [--home <dir>] [--dry-run] [--verbose]
 #   --home     the firstmate home to supervise; defaults to FM_HOME, then the
 #              repository root this script lives in
 #   --dry-run  classify and log, deliver nothing
@@ -55,7 +58,6 @@ VERBOSE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --home) HOME_DIR=${2:-}; shift 2 || exit 2 ;;
-    --once) shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --verbose) VERBOSE=1; shift ;;
     -h|--help) sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -79,6 +81,10 @@ GRACE=${FM_GUARD_GRACE:-300}
 . "$SCRIPT_DIR/fm-gateway-retry-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$SCRIPT_DIR/fm-composer-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 log() {  # <message>
   local line
@@ -114,19 +120,23 @@ endpoint_field() {  # <field>
 
 BACKEND=$(endpoint_field backend)
 TARGET=$(endpoint_field target)
+HARNESS=$(endpoint_field harness)
+[ "$HARNESS" != unknown ] || HARNESS=''
 if [ -z "$BACKEND" ] || [ -z "$TARGET" ]; then
-  log "inert: no recorded primary endpoint for $HOME_DIR (run bin/fm-keepalive-install.sh from the primary pane, or pass --backend/--target)"
+  log "inert: no recorded primary endpoint for $HOME_DIR (the main home's session start records it; a secondmate home runs bin/fm-keepalive-install.sh from its primary pane, or passes --backend/--target)"
   exit 0
 fi
 
 # The session lock's owner is what makes this home's primary a real thing rather
-# than a remembered pane id. Reading it here also means a home whose session
-# ended is REPORTED rather than re-rung: sending a continue line into a pane
-# that is now a plain shell would type firstmate's words at a prompt.
-LOCK_PID=$(sed -n 's/^pid=//p' "$STATE/.lock" 2>/dev/null | head -1)
+# than a remembered pane id. state/.lock holds the BARE pid bin/fm-lock.sh wrote,
+# and liveness is the shared harness predicate every sibling reader uses, so a
+# reused pid that is no longer a harness is not a live session. A home whose
+# session ended is REPORTED rather than re-rung: sending a continue line into a
+# pane that is now a plain shell would type firstmate's words at a prompt.
+LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
 case "$LOCK_PID" in ''|*[!0-9]*) LOCK_PID='' ;; esac
 SESSION_LIVE=0
-if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
+if [ -n "$LOCK_PID" ] && fm_harness_pid_alive "$LOCK_PID"; then
   SESSION_LIVE=1
 fi
 
@@ -138,7 +148,17 @@ if [ -z "$PANE" ]; then
   exit 0
 fi
 
-if fm_gateway_stalled_now "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE" "$PANE"; then
+# The same busy verdict bin/fm-watch.sh gates on: a backend's native semantic
+# state when it has one, else the recorded harness's busy signature over the
+# footer area of the capture already read. A busy primary is mid-turn - most
+# likely because the captain or a previous pass already nudged it - and nothing
+# may be typed into it, so step 1 stands down without classifying or charging.
+pane_is_busy() {
+  [ "$(fm_backend_busy_state "$BACKEND" "$TARGET" 2>/dev/null)" = busy ] && return 0
+  printf '%s' "$PANE" | grep -v '^[[:space:]]*$' | tail -12 | fm_busy_lines_match "$HARNESS"
+}
+
+if ! pane_is_busy && fm_gateway_stalled_now "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE" "$PANE"; then
   if [ "$SESSION_LIVE" -eq 0 ]; then
     log "gateway stall seen but this home's session lock names no live owner; not re-ringing a pane that may no longer be firstmate"
     exit 0

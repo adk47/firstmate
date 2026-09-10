@@ -2971,25 +2971,12 @@ if [ "$KIND" != secondmate ]; then
       mkdir -p "$WT/.claude"
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
-      # StopFailure carries a SECOND, INDEPENDENT hook entry: the transient
-      # inference-gateway detector (bin/fm-gateway-stall-hook.sh). StopFailure
-      # fires only for an API-error turn end, and a gateway that has run out of
-      # routable accounts is by far its most common cause in this fleet, so this
-      # is the one place that learns about the stall the instant it happens. It
-      # only RECORDS: Claude runs StopFailure outside its REPL loop, so no hook
-      # on this event can resume the turn, and the re-ring is the watcher's
-      # (bin/fm-watch.sh gateway_stall_check). It is a separate entry rather
-      # than a second command on the busy writer's line because it CONSUMES THE
-      # PAYLOAD from stdin: chained behind another command it would race that
-      # command for the same pipe. It is silent, never blocks, and always exits
-      # 0, so a detector can never break the harness's own failure path.
       j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
-      j_gateway=$(json_escape "$(shell_quote "$FM_ROOT/bin/fm-gateway-stall-hook.sh") --task $(shell_quote "$ID") --state $(shell_quote "$STATE_REAL") 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]},{"hooks":[{"type":"command","command":"$j_gateway"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;

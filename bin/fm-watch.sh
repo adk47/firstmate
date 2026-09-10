@@ -417,15 +417,24 @@ inbox_steer_check() {  # <window> <task>
 # Putting the ladder here also means every crew already running gets the
 # behaviour without being relaunched.
 #
-# The delivery is an ORDINARY steer: a durable record plus the constant
-# doorbell, so it is re-rung, acknowledged, and escalated by the same ladder as
-# any other firstmate instruction, and a crew that comes back on its own simply
-# finds the message already moot. bin/fm-gateway-retry-lib.sh owns entry, exit,
-# backoff, and both bounds; this function owns only the delivery and the
-# absorb. Nothing here interrupts, signals, or restarts the worker.
-gateway_stall_check() {  # <window> <task> <tail40>
-  local w=$1 task=$2 tail40=$3 rec paused_line
+# The delivery is a FIRE-AND-FORGET steer: a durable record plus the constant
+# doorbell, excluded from the inbox's own re-ring ladder. During a real outage
+# the crew cannot acknowledge anything, and an ordinary steer left unhandled
+# would be escalated by that ladder into stuck-crewmate recovery - the exact
+# wedge treatment this check exists to avoid. The gateway ladder owns every
+# re-ring and both bounds (bin/fm-gateway-retry-lib.sh owns entry, exit,
+# backoff, and the budget); this function owns only the delivery and the
+# absorb. A crew that comes back on its own simply finds the message moot.
+# Nothing here interrupts, signals, or restarts the worker.
+#
+# A secondmate is never read for a stall. The loop below admits a mate only to
+# serve its declared wait's bounded re-surface, and a secondmate home runs its
+# own session-start keep-alive for its own primary; this check must not
+# piggyback on that admission (docs/gateway-keepalive.md).
+gateway_stall_check() {  # <window> <task> <kind> <tail40>
+  local w=$1 task=$2 kind=$3 tail40=$4 rec paused_line
   [ -n "$task" ] || return 1
+  [ "$kind" != secondmate ] || return 1
   [ -f "$STATE/$task.meta" ] || return 1
   fm_gateway_stalled_now "$STATE" "$task" "$tail40" || return 1
   if fm_gateway_budget_spent "$STATE" "$task"; then
@@ -451,7 +460,7 @@ gateway_stall_check() {  # <window> <task> <tail40>
   # transient stall and an unbounded re-ring loop, so an uncounted send is the
   # one failure this ladder cannot absorb.
   fm_gateway_record_attempt "$STATE" "$task" || return 1
-  if ! rec=$(fm_task_inbox_write "$STATE" "$task" "$FM_GATEWAY_CONTINUE_TEXT"); then
+  if ! rec=$(fm_task_inbox_write "$STATE" "$task" "$FM_GATEWAY_CONTINUE_TEXT" fire-and-forget); then
     triage_log "gateway keep-alive could not enqueue a continue instruction: $w"
     return 0
   fi
@@ -1970,7 +1979,7 @@ EOF
     # rendered failure, not "nothing changed" - and it hands the window straight
     # back once either bound is spent, which is when the stale bookkeeping below
     # is the right owner again.
-    if [ "$busy_now" -ne 0 ] && gateway_stall_check "$w" "$task" "$tail40"; then
+    if [ "$busy_now" -ne 0 ] && gateway_stall_check "$w" "$task" "$kind" "$tail40"; then
       continue
     fi
     if [ "$h" = "$prev" ]; then

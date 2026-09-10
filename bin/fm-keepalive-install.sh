@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Install, inspect, or remove this home's launchd keep-alive job.
+# Install, inspect, refresh, or remove this home's launchd keep-alive job.
 #
 # The job runs bin/fm-keepalive-agent.sh every few minutes so a PRIMARY
 # firstmate session that is itself stalled - on a transient inference-gateway
 # error, or with its fleet supervision lapsed - has something outside the
 # session that can notice and nudge it.
 #
-# THIS IS OPT-IN AND NEVER AUTO-INSTALLED. It writes into the captain's own
-# LaunchAgents directory and then runs unattended forever, which is exactly the
-# kind of standing change firstmate does not make on its own initiative. Nothing
-# in session start, bootstrap, or self-update calls it.
+# WHO INSTALLS IT. The MAIN home's session start keeps it installed and pointed
+# at the current primary pane through `ensure` (bin/fm-bootstrap.sh
+# primary_keepalive_setup), so the primary recovers itself without a manual
+# step; a config/keepalive-off file opts that home out. A SECONDMATE home is
+# opt-in: run `install` from its primary pane by hand. Both write into the
+# captain's own LaunchAgents directory and then run unattended, which is why the
+# main-home path is scoped to the lock-owning primary session and nothing else.
 #
 # Per-home by construction. The job label carries a digest of the home path, the
 # plist passes that home explicitly, and every artifact it writes lives under
@@ -19,16 +22,18 @@
 # Usage:
 #   fm-keepalive-install.sh install [--home <dir>] [--interval <secs>]
 #                                   [--backend <b>] [--target <t>]
+#   fm-keepalive-install.sh ensure  [--home <dir>] [--interval <secs>]
 #   fm-keepalive-install.sh status  [--home <dir>]
 #   fm-keepalive-install.sh uninstall [--home <dir>]
 #
-# `install` must be run FROM THE PRIMARY PANE, because that is the only place
-# the session's own terminal endpoint can be observed; it records that endpoint
-# and refuses rather than guessing when it cannot (--backend/--target override
-# it for a terminal whose identifiers this build cannot read from the
-# environment). The primary's own StopFailure hook refreshes the record
-# afterwards, so a firstmate relaunched into a new pane re-points the job
-# without a reinstall.
+# `install` and `ensure` must be run FROM THE PRIMARY PANE, because that is the
+# only place the session's own terminal endpoint can be observed; both record
+# that endpoint and refuse rather than guessing when they cannot (`install`
+# takes --backend/--target for a terminal whose identifiers this build cannot
+# read from the environment). `ensure` is the quiet idempotent form session
+# start uses: it always re-records the endpoint, installs the job only when the
+# plist is absent, and prints one line only when it installed the job or
+# re-pointed it at a different pane, so a routine session start says nothing.
 #
 # macOS only: launchd is the scheduler. On any other platform this refuses and
 # names the equivalent it does not install for you.
@@ -37,7 +42,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-usage() { sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 CMD=${1:-}
 [ "$#" -eq 0 ] || shift
@@ -86,33 +91,32 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 require_macos() {
   [ "$(uname 2>/dev/null)" = Darwin ] && return 0
-  cat >&2 <<EOF
+  cat >&2 <<EOM
 error: the keep-alive job is installed through launchd and this host is not macOS.
 Nothing was installed. The equivalent elsewhere is a systemd user timer, or a
 cron entry, running exactly:
   $SCRIPT_DIR/fm-keepalive-agent.sh --home $HOME_DIR
 every $INTERVAL seconds. Firstmate does not write those for you.
-EOF
+EOM
   return 1
 }
 
-case "$CMD" in
-  install)
-    require_macos || exit 1
-    if ! record=$("$SCRIPT_DIR/fm-keepalive-endpoint.sh" record --state "$STATE" \
-        ${WANT_BACKEND:+--backend "$WANT_BACKEND"} ${WANT_TARGET:+--target "$WANT_TARGET"}); then
-      cat >&2 <<EOF
-error: this session's own terminal endpoint could not be proved, so the job was
-not installed - a keep-alive that does not know which pane is firstmate would
-type into whatever it found. Run this from the primary firstmate pane, or pass
---backend and --target explicitly.
-EOF
-      exit 1
-    fi
-    mkdir -p "$HOME/Library/LaunchAgents" || exit 1
-    # StandardOut/Error go to the home's own state dir, not a shared location,
-    # so two homes' jobs cannot interleave into one file.
-    cat > "$PLIST" <<EOF
+# Record this session's own endpoint, or fail loudly: a keep-alive that does not
+# know which pane is firstmate would type into whatever it found.
+record_endpoint() {  # prints "<backend> <target>"
+  "$SCRIPT_DIR/fm-keepalive-endpoint.sh" record --state "$STATE" \
+    ${WANT_BACKEND:+--backend "$WANT_BACKEND"} ${WANT_TARGET:+--target "$WANT_TARGET"}
+}
+
+endpoint_field() {  # <field>
+  "$SCRIPT_DIR/fm-keepalive-endpoint.sh" read --state "$STATE" --field "$1" 2>/dev/null | tr -d '\n'
+}
+
+# Write the plist and load it. StandardOut/Error go to the home's own state dir,
+# not a shared location, so two homes' jobs cannot interleave into one file.
+write_and_load_job() {
+  mkdir -p "$HOME/Library/LaunchAgents" || return 1
+  cat > "$PLIST" <<EOM
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -123,7 +127,6 @@ EOF
     <string>$SCRIPT_DIR/fm-keepalive-agent.sh</string>
     <string>--home</string>
     <string>$HOME_DIR</string>
-    <string>--once</string>
   </array>
   <key>StartInterval</key><integer>$INTERVAL</integer>
   <key>RunAtLoad</key><false/>
@@ -137,17 +140,44 @@ EOF
   </dict>
 </dict>
 </plist>
-EOF
-    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-    if ! launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; then
-      # Older macOS releases only accept the legacy verb.
-      launchctl load "$PLIST" 2>/dev/null || {
-        echo "error: launchctl refused to load $PLIST; the plist was written but the job is not running" >&2
-        exit 1
-      }
+EOM
+  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  if ! launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; then
+    # Older macOS releases only accept the legacy verb.
+    launchctl load "$PLIST" 2>/dev/null || {
+      echo "error: launchctl refused to load $PLIST; the plist was written but the job is not running" >&2
+      return 1
+    }
+  fi
+  return 0
+}
+
+case "$CMD" in
+  install)
+    require_macos || exit 1
+    if ! record=$(record_endpoint); then
+      cat >&2 <<EOM
+error: this session's own terminal endpoint could not be proved, so the job was
+not installed - a keep-alive that does not know which pane is firstmate would
+type into whatever it found. Run this from the primary firstmate pane, or pass
+--backend and --target explicitly.
+EOM
+      exit 1
     fi
+    write_and_load_job || exit 1
     echo "installed $LABEL every ${INTERVAL}s for $HOME_DIR (primary endpoint: $record)"
     echo "log: $STATE/.keepalive-agent.log"
+    ;;
+  ensure)
+    require_macos 2>/dev/null || exit 1
+    previous="$(endpoint_field backend) $(endpoint_field target)"
+    record=$(record_endpoint 2>/dev/null) || exit 1
+    if [ ! -f "$PLIST" ]; then
+      write_and_load_job 2>/dev/null || exit 1
+      echo "installed: launchd job $LABEL every ${INTERVAL}s, primary endpoint $record"
+    elif [ "$previous" != "$record" ]; then
+      echo "refreshed: primary endpoint now $record for launchd job $LABEL"
+    fi
     ;;
   status)
     echo "label: $LABEL"
