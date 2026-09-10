@@ -23,7 +23,7 @@ DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"
 # Pinned openclaw runtime version. Updated together with this file so the
 # version change appears in git history alongside any deploy-script tweaks
 # the upgrade requires. Bump in lockstep with docs/guides/REPO-MANAGEMENT.md.
-OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.7.1}"
+OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.8.2}"
 
 # Minimum Node.js for the pinned runtime (openclaw 2026.7.1 raised the floor
 # to >=22.22.3 — its bin refuses to start below it, so a deploy on an old Node
@@ -280,6 +280,21 @@ plugin_runtime_version() { # <profile> <pkg e.g. @openclaw/slack>
     | head -1
 }
 
+# plugin_install_version_flags <plugin-version> — prints the version-gated
+# extra flags for `openclaw plugins install`. The externalized plugins are
+# pinned in lockstep with the runtime, so the plugin version IS the runtime
+# generation: >= 2026.8 needs --accept-capabilities (non-interactive
+# capability ack; the install is refused without it), while the 7.x CLI does
+# not know the option and would fail the whole install on it. An empty or
+# unparseable version prints nothing — the caller's install then fails loud
+# on the CLI's own error rather than on a guessed flag.
+plugin_install_version_flags() {
+  local v="${1:-}"
+  if [[ -n "$v" ]] && [[ "$v" =~ ^[0-9]{4}(\.[0-9]+)+$ ]] && version_at_least "2026.8" "$v"; then
+    printf '%s' "--accept-capabilities"
+  fi
+}
+
 install_external_plugin() {
   # Pins ONE externalized @openclaw/* plugin per-profile under
   # ~/.openclaw-<profile>/npm/. Args: <pkg> <version> (e.g.
@@ -296,7 +311,14 @@ install_external_plugin() {
   # does NOT bypass the dangerous-code guard (that is the separate
   # --dangerously-force-unsafe-install flag). --pin records the tracked
   # spec as the exact resolved version so a stray `plugins update --all`
-  # can never float it off the pinned build.
+  # can never float it off the pinned build. --accept-capabilities is
+  # openclaw 2026.8+'s new non-interactive ack for a plugin's declared
+  # capability manifest (unattested capabilities are refused otherwise).
+  # It is added ONLY when the target plugin version is >= 2026.8 (the plugins
+  # are pinned in lockstep with the runtime): the 7.x CLI rejects the unknown
+  # option, so the supported OPENCLAW_VERSION=2026.7.1 override (a rollback
+  # deploy) would otherwise install the 7.1 runtime and then fail every plugin
+  # install — see plugin_install_version_flags() above.
   local pkg="$1" version="$2"
   local profile installed
   for profile in main edge; do
@@ -308,7 +330,9 @@ install_external_plugin() {
     fi
     log "    Installing ${pkg}@$version on $profile (was: ${installed:-not installed})"
     local install_out install_rc=0
-    install_out=$(openclaw --profile "$profile" plugins install "${pkg}@${version}" --force --pin 2>&1) || install_rc=$?
+    local -a extra_flags=()
+    read -r -a extra_flags <<< "$(plugin_install_version_flags "$version")"
+    install_out=$(openclaw --profile "$profile" plugins install "${pkg}@${version}" --force --pin "${extra_flags[@]}" 2>&1) || install_rc=$?
     if (( install_rc != 0 )); then
       log "    ✗ openclaw plugins install ${pkg}@${version} ($profile) failed (rc=$install_rc):"
       echo "$install_out" | sed 's/^/        /'
@@ -2077,13 +2101,26 @@ log "Step 4c.5/8: Pinning openclaw runtime to ${OPENCLAW_VERSION}..."
 if ! install_openclaw; then
   fail "openclaw runtime pin failed (target ${OPENCLAW_VERSION})"
 fi
-if ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
-  bash "$HYDRA_ROOT/scripts/patch-openclaw-codex-native-compaction.sh"; then
-  fail "Codex-native automatic compaction backport failed"
-fi
-if ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
-  bash "$HYDRA_ROOT/scripts/patch-openclaw-inactive-session-delete.sh"; then
-  fail "OpenClaw inactive-session delete backport failed"
+# Codex-native automatic compaction backport retired: upstream #95831 ships
+# it natively in the 2026.8.1 dist (staging-verified —
+# docs/runbooks/UPGRADE-2026.8.1.md). scripts/patch-openclaw-codex-native-compaction.sh
+# is deleted; do not reintroduce the invocation.
+#
+# The remaining dist patches (inactive-session-delete, mention-gate) anchor
+# against known-good source text and fail loud on a mismatch, so they are
+# not silently harmful on 2026.8+ — but their upstream anchors are UNVERIFIED
+# against the 2.0 dist and the mention-gate patch is already retired (no
+# longer invoked, see the historical note near the cron sync below). Gate
+# both behind the runtime so a 2026.8+ deploy makes the "not re-evaluated
+# yet" intent explicit instead of relying on the patch's own anchor-fail to
+# discover it. Re-evaluate for docs/runbooks/UPGRADE-2026.8.1.md Phase 3.
+if version_at_least "2026.8" "$OPENCLAW_VERSION"; then
+  log "  openclaw ${OPENCLAW_VERSION} >= 2026.8 — inactive-session-delete/mention-gate dist patches are retired-pending-reevaluation on 2.0, skipping (docs/runbooks/UPGRADE-2026.8.1.md)"
+else
+  if ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
+    bash "$HYDRA_ROOT/scripts/patch-openclaw-inactive-session-delete.sh"; then
+    fail "OpenClaw inactive-session delete backport failed"
+  fi
 fi
 
 # -------------------------------------------------------------------
@@ -2272,6 +2309,46 @@ if [ -x "$LINT_OPENCLAW_CFG" ]; then
       || fail "openclaw config lint failed on live config — see preceding stderr for the profile + server name; rewrite with \`openclaw --profile <p> mcp set\` to transport: \"streamable-http\""  # hydra-hook: reviewed-indirection reviewed-argv (repo linter by path)
     log "  Live openclaw configs free of mcp-remote stdio entries."
   fi
+fi
+
+# -------------------------------------------------------------------
+# Step 4d.6: Refuse un-archived legacy stores ahead of the 2.0 cutover
+# -------------------------------------------------------------------
+# openclaw 2026.8+ moves shared auth into
+# <state-dir>/state/openclaw.sqlite (config_machine_state row
+# authProfiles.store) and the session-lifecycle/cron-claim machinery no
+# longer reads the per-agent sessions.json index. Restarting a >=2026.8
+# gateway with the pre-8.1 JSON stores still in place risks the runtime
+# either ignoring live state (a silent downgrade of session/auth data)
+# or a doctor-driven migration racing the cold-archive procedure this
+# repo requires — docs/runbooks/UPGRADE-2026.8.1.md Phase 2 (cold state
+# archive, gateways stopped) MUST run before this deploy, and Phase 4
+# (post-mint verification) depends on it having run cleanly. Refuse
+# past config-sync, before the Step 6 restart, rather than find out via
+# a broken smoke test.
+if version_at_least "2026.8" "$OPENCLAW_VERSION"; then
+  for _profile in main edge; do
+    needs_target "$_profile" || continue
+    _legacy_state_dir="/root/.openclaw-${_profile}"
+    if [[ ! -d "$_legacy_state_dir" ]]; then
+      log "  Step 4d.6: ${_legacy_state_dir} does not exist — skipping legacy-store gate (fresh host / CI)."
+      continue
+    fi
+    _legacy_found=()
+    for _lf in "$_legacy_state_dir"/agents/*/sessions/sessions.json; do
+      [[ -e "$_lf" ]] && _legacy_found+=("$_lf")
+    done
+    for _lf in "$_legacy_state_dir"/agents/*/agent/auth-profiles.json; do
+      { [[ -f "$_lf" ]] || [[ -L "$_lf" ]]; } && _legacy_found+=("$_lf")
+    done
+    if [[ -f "$_legacy_state_dir/exec-approvals.json" ]]; then
+      _legacy_found+=("$_legacy_state_dir/exec-approvals.json")
+    fi
+    if (( ${#_legacy_found[@]} > 0 )); then
+      fail "un-archived pre-2026.8.1 legacy store(s) found on profile=${_profile}: ${_legacy_found[*]} — cold-archive state per docs/runbooks/UPGRADE-2026.8.1.md Phase 2, then re-run; see Phase 4 for the mint step this gate protects"
+    fi
+  done
+  log "  Step 4d.6: no un-archived legacy stores found."
 fi
 
 # -------------------------------------------------------------------

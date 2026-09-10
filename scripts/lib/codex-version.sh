@@ -36,26 +36,38 @@
 # lockstep with OPENCLAW_VERSION in deploy.sh).
 #
 # ── Runtime-aware resolution (the merge→upgrade hazard window) ────────────────
-# Between merging the 2026.7.1 bump and actually upgrading the runtime on
-# node-8 (a manual, windowed procedure — docs/runbooks/UPGRADE-2026.7.1.md),
-# the rsynced repo carries the NEW pin while the box still runs 2026.6.1. Any
-# gateway restart in that window re-runs the ExecStartPre pin healer — a static
-# 2026.7.1 pin would install codex@7.1 onto the 6.1 core (an untested mix, and
-# 6.x codex on this host means #90925 401s). So the pin resolves against the
-# runtime it will actually serve:
+# Between merging a runtime bump and actually upgrading node-8 (a manual,
+# windowed procedure — docs/runbooks/UPGRADE-2026.7.1.md,
+# docs/runbooks/UPGRADE-2026.8.1.md), the rsynced repo carries the NEW pin
+# while the box still runs the OLD core. Any gateway restart in that window
+# re-runs the ExecStartPre pin healer — a static pin at the new version would
+# install a mismatched codex plugin onto the old core (an untested mix, and
+# for the 6.x/7.x boundary specifically, 6.x codex on this host means #90925
+# 401s). So the pin resolves against the runtime it will actually serve:
 #   - deploy.sh sets OPENCLAW_VERSION before sourcing this file → the pin
 #     matches the runtime the SAME deploy installs at Step 4c.5 (before the
 #     plugin step 4d consumes the pin);
 #   - the ExecStartPre healer / watchdog have no OPENCLAW_VERSION → the pin
-#     resolves against the INSTALLED `openclaw --version`, so a 6.1 box heals
-#     to 2026.5.27 and a 7.1 box heals to 2026.7.1, on either side of the
-#     upgrade window.
+#     resolves against the INSTALLED `openclaw --version`, so a box heals to
+#     the pin for whichever rung it is actually running, on either side of
+#     any upgrade window.
 # Env override (CI / one-off) still wins, same as the other pins in deploy.sh.
+#
+# Ladder (checked most-specific-first — a >=2026.8 runtime also satisfies
+# version_at_least "2026.7", so 2026.8 MUST be tested before it):
+#   >= 2026.8  -> 2026.8.2  (2.0 upgrade window — docs/runbooks/UPGRADE-2026.8.1.md;
+#                            2026.8.2 is the correction release, staging-validated
+#                            2026-09-01: fixes the exec-approvals doctor abort and
+#                            folds session import into plain `doctor --fix`)
+#   >= 2026.7  -> 2026.7.1  (staging-validated 2026-07-14, see history above)
+#   otherwise  -> 2026.5.27 (the #90925 dodge, held for pre-7.x cores)
 # shellcheck source=version-compare.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/version-compare.sh"
 if [ -z "${OPENCLAW_CODEX_VERSION:-}" ]; then
   _codex_pin_ref="${OPENCLAW_VERSION:-$(openclaw_runtime_version)}"
-  if [ -n "$_codex_pin_ref" ] && version_at_least "2026.7" "$_codex_pin_ref"; then
+  if [ -n "$_codex_pin_ref" ] && version_at_least "2026.8" "$_codex_pin_ref"; then
+    OPENCLAW_CODEX_VERSION="2026.8.2"
+  elif [ -n "$_codex_pin_ref" ] && version_at_least "2026.7" "$_codex_pin_ref"; then
     OPENCLAW_CODEX_VERSION="2026.7.1"
   else
     # Unknown or pre-2026.7 runtime: hold the last version verified clean on

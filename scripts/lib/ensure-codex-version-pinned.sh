@@ -50,6 +50,20 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=codex-version.sh
 [ -r "$SCRIPT_DIR/codex-version.sh" ] && source "$SCRIPT_DIR/codex-version.sh"
+# shellcheck source=version-compare.sh
+source "$SCRIPT_DIR/version-compare.sh"
+
+# codex_install_flags — the 2026.8+ CLI REFUSES a plugin install without
+# --accept-capabilities (its non-interactive capability ack), and the 7.x CLI
+# rejects the option as unknown. Same contract as deploy.sh's
+# plugin_install_version_flags(): gate it on the pinned version, print nothing
+# for an unparseable pin (the install then fails on the CLI's own error).
+codex_install_flags() {
+  local v="${1:-}"
+  if [ -n "$v" ] && [[ "$v" =~ ^[0-9]{4}(\.[0-9]+)+$ ]] && version_at_least "2026.8" "$v"; then
+    printf '%s' "--accept-capabilities"
+  fi
+}
 
 PINNED="${CODEX_PINNED_VERSION:-${OPENCLAW_CODEX_VERSION:-2026.5.27}}"
 PROFILES="${CODEX_PIN_PROFILES:-main edge}"
@@ -123,7 +137,9 @@ run_ensure() {
       continue  # already pinned — fast no-op, no npm
     fi
     log "codex on '$p' is '${installed:-not installed}' (want $PINNED) — re-pinning"
-    if openclaw --profile "$p" plugins install "@openclaw/codex@${PINNED}" --force --pin >/dev/null 2>&1; then
+    local -a pin_flags=()
+    read -r -a pin_flags <<< "$(codex_install_flags "$PINNED")"
+    if openclaw --profile "$p" plugins install "@openclaw/codex@${PINNED}" --force --pin "${pin_flags[@]}" >/dev/null 2>&1; then
       installed="$(codex_installed_version "$p" 2>/dev/null)"
       if [ "$installed" = "$PINNED" ]; then
         log "re-pinned codex@${PINNED} on '$p' (gateway start loads it)"

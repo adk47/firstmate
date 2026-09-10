@@ -45,6 +45,14 @@ case "$args" in
   *"plugins install"*)
     inst="$(printf '%s' "$args" | sed -nE 's#.*@openclaw/codex@([0-9.]+).*#\1#p')"
     printf '%s\n' "$args" >> "$FAKE_CODEX_INSTALL_LOG"
+    # ENFORCE the real CLI contract (QA finding, PR #899): a 2026.8+ plugin install
+    # is REFUSED without --accept-capabilities; a 7.x CLI rejects the option.
+    major="${inst%%.*}"; minor="$(printf '%s' "$inst" | cut -d. -f2)"
+    if [ "$major" -gt 2026 ] || { [ "$major" -eq 2026 ] && [ "$minor" -ge 8 ]; }; then
+      case " $args " in *" --accept-capabilities "*) ;; *) echo "error: plugin declares capabilities; pass --accept-capabilities to acknowledge" >&2; exit 1;; esac
+    else
+      case " $args " in *" --accept-capabilities "*) echo "error: unknown option '--accept-capabilities'" >&2; exit 1;; esac
+    fi
     echo "$inst" > "$FAKE_CODEX_STATE"
     echo "Pinned npm install record to @openclaw/codex@${inst}."
     ;;
@@ -128,4 +136,25 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   run "$SCRIPT" main
   [ "$status" -eq 0 ]
   [ "$(cat "$FAKE_CODEX_STATE")" = "2026.5.27" ]
+}
+
+# ── QA round 14 (PR #899): the healer's install argv must be version-gated ───
+
+@test "ensure: a 2026.8.x pin installs WITH --accept-capabilities (the 8.x CLI refuses without it) and lands" {
+  echo "2026.7.1" > "$FAKE_CODEX_STATE"
+  export CODEX_PIN_PROFILES="main" CODEX_PINNED_VERSION="2026.8.2"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qE "plugins install @openclaw/codex@2026.8.2 --force --pin --accept-capabilities$" "$FAKE_CODEX_INSTALL_LOG"
+  [ "$(cat "$FAKE_CODEX_STATE")" = "2026.8.2" ]
+  [[ "$output" != *"failed to re-pin"* ]]
+}
+
+@test "ensure: a 2026.7.1 pin installs WITHOUT the flag (the 7.x CLI rejects it) and lands" {
+  echo "2026.6.1" > "$FAKE_CODEX_STATE"
+  export CODEX_PIN_PROFILES="main" CODEX_PINNED_VERSION="2026.7.1"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qE "plugins install @openclaw/codex@2026.7.1 --force --pin$" "$FAKE_CODEX_INSTALL_LOG"
+  [ "$(cat "$FAKE_CODEX_STATE")" = "2026.7.1" ]
 }

@@ -1616,8 +1616,12 @@ jobs:
         # `pnpm install` quietly resolves a stale openclaw, the build
         # passes against the wrong SDK, and the regression only surfaces
         # at deploy time. Procedure when this step fails: in each plugin
-        # dir, `rm pnpm-lock.yaml && pnpm install` to regenerate against
-        # current OPENCLAW_VERSION, then commit the refreshed lockfiles.
+        # dir, `rm -rf node_modules pnpm-lock.yaml && pnpm install` to
+        # regenerate against current OPENCLAW_VERSION, then commit the
+        # refreshed lockfiles. Removing node_modules is REQUIRED, not
+        # tidiness: with the tree still present pnpm reuses the installed
+        # version and silently rewrites the SAME old pin, so the gate stays
+        # red with no visible reason (observed on the 8.1 -> 8.2 bump).
         run: |
           set -euo pipefail
           DEPLOY_VER=$(grep '^OPENCLAW_VERSION=' scripts/deploy.sh \
@@ -1646,7 +1650,7 @@ jobs:
               echo "  ✓ $lock pins openclaw@$DEPLOY_VER ($entry_count unique entr$([ "$entry_count" = "1" ] && echo y || echo ies))"
             else
               mismatch_csv=$(printf '%s\n' "$MISMATCH" | paste -sd, -)
-              echo "::error::$lock contains openclaw version(s) other than $DEPLOY_VER: $mismatch_csv — regenerate with: (cd $(dirname $lock) && rm pnpm-lock.yaml && pnpm install)"
+              echo "::error::$lock contains openclaw version(s) other than $DEPLOY_VER: $mismatch_csv — regenerate with: (cd $(dirname $lock) && rm -rf node_modules pnpm-lock.yaml && pnpm install) — node_modules MUST go too, or pnpm silently re-pins the old version"
               fail=1
             fi
           done

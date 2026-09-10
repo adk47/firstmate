@@ -1192,7 +1192,13 @@ export const intercomPlugin = createChatChannelPlugin({
           const dispatchTimeoutMs = account.dispatchTimeoutMs ?? DEFAULT_DISPATCH_TIMEOUT_MS;
           const dispatchPromise = dispatchInboundDirectDmWithRuntime({
             cfg,
-            runtime: { channel: runtime },
+            // openclaw@2026.8.1 types this param as the full PluginRuntime, but the 8.1
+            // implementation reads ONLY runtime.channel(.reply/.inbound) — verified
+            // exhaustively against dist/channel-inbound-*.js on 2026-08-31. Our
+            // ChannelRuntimeSurface wrapper satisfies every access; drop this cast when
+            // upstream narrows the param type (or exposes a real PluginRuntime to
+            // channel plugins).
+            runtime: { channel: runtime } as unknown as Parameters<typeof dispatchInboundDirectDmWithRuntime>[0]["runtime"],
             channel: "intercom",
             channelLabel: "Intercom",
             accountId: account.accountId,
