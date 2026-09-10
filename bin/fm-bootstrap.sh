@@ -1362,7 +1362,7 @@ startup_memory_budget_setup() {
 # no working keep-alive, which never fails session start but must not be silent:
 # a primary that cannot recover itself is the captain's ask going unmet.
 primary_keepalive_setup() {
-  local installer out errf reason
+  local installer out errf reason rc
   [ "$(uname 2>/dev/null)" = Darwin ] || return 0
   if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
     return 0
@@ -1373,10 +1373,14 @@ primary_keepalive_setup() {
   installer="$FM_HOME/bin/fm-keepalive-install.sh"
   [ -x "$installer" ] || return 0
   errf=$(mktemp "${TMPDIR:-/tmp}/fm-keepalive-ensure.XXXXXX" 2>/dev/null) || errf=''
-  if out=$("$installer" ensure --home "$FM_HOME" 2>"${errf:-/dev/null}"); then
+  rc=0
+  out=$("$installer" ensure --home "$FM_HOME" 2>"${errf:-/dev/null}") || rc=$?
+  if [ "$rc" -eq 0 ]; then
     fm_keepalive_notice_clear "$STATE" install
     [ -z "$out" ] || echo "BOOTSTRAP_INFO: primary keep-alive $out"
-  else
+  elif [ "$rc" -ne 3 ]; then
+    # 3 is the installer saying it could not observe the job at all, which is
+    # evidence for nothing; every other failure is a keep-alive this home lacks.
     reason=$(sed -n '1p' "${errf:-/dev/null}" 2>/dev/null)
     reason=${reason#error: }
     fm_keepalive_notice_write "$STATE" install \

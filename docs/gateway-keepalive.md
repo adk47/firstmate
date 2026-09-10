@@ -81,6 +81,7 @@ When nothing proves an endpoint, the agent stays inert and says so.
 The main home installs it for you.
 `bin/fm-bootstrap.sh`'s `primary_keepalive_setup` runs in the locked mutating sweep of every session start, so it never fires from a lock-refused session or a child worktree, and it is scoped three ways: the main home only, a genuine primary checkout only, and the session that actually holds this home's fleet lock only, so a scratch session opened at the repo root can never record its own pane as the primary.
 It refreshes `state/.primary-endpoint` from the session's own environment, installs the launchd job whenever launchd is not actually running it - absent, unloaded, or booted out - and stays quiet when the job is loaded and pointed at this pane.
+A reload uses whichever pane it has: the one this session proved, or the one already recorded, since writing and loading the job needs no endpoint of its own.
 It prints exactly one `BOOTSTRAP_INFO: primary keep-alive installed ...` or `... refreshed ...` fact when it did either; that line is a completed no-action fact, never an actionable diagnostic.
 A failed install never fails session start.
 
@@ -95,6 +96,9 @@ A home that did exactly that is then quiet: once the job is loaded and knows a p
 
 A spent budget on the primary is the other: the keep-alive stops re-ringing after the ladder's bounds, which is exactly the genuine outage worth surfacing, and this is the primary's equivalent of a crewmate's `paused [key=gateway-503]` status line.
 The agent records it once per episode, not on every pass, and clears it once the primary is no longer stalled; a successful install clears the installer's own notice the same way, so a resolved problem stops being reported.
+
+Neither is reported from a session that cannot see the job at all.
+Every launchctl query goes through the per-user GUI domain, which an ssh session or a login-session transition cannot reach, and a query that fails for that reason is evidence about the domain rather than about the job: the sweep then leaves the recorded state exactly as it is, reinstalls nothing, and reports nothing new.
 
 To opt the home out, create `config/keepalive-off`; the sweep then does nothing at all.
 Secondmate homes are opt-in exactly as before: run the installer by hand **from that home's primary pane**, which is the only place the session's own endpoint can be observed:
