@@ -3,6 +3,16 @@
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   JOB='46442766-c410-4ccd-966c-4de3c06eed8d'
+  # The digit quantifier binds only to the numeric spellings; "-hourly" and
+  # "-daily" state a cadence without a digit and must match too.
+  CADENCE_SUFFIX='-([0-9]+(h|m|min)|hourly|daily)$'
+}
+
+cadence_matches() {
+  # `--` is load-bearing: the pattern starts with "-", so without it grep reads
+  # the pattern as an option, exits 2, and every caller reads that as "no
+  # cadence found" — a guard that could never fail.
+  printf '%s' "$1" | grep -qE -- "$CADENCE_SUFFIX"
 }
 
 @test "enabled UVN cron is a deterministic hourly command clear of the batch" {
@@ -26,6 +36,47 @@ setup() {
       and (.description | contains("Plain-English summaries"))
   ' "$ROOT/cron-jobs.json"
   [ "$status" -eq 0 ]
+}
+
+@test "the job name encodes no cadence to go stale" {
+  run jq -r --arg id "$JOB" '.jobs[] | select(.id == $id) | .name' "$ROOT/cron-jobs.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "uvn-ticket-popularity-under30" ]
+
+  local name="$output"
+
+  # The schedule moved 4-hourly -> hourly and the name said "-4h" for a day.
+  # A cadence stated in two places drifts; the schedule is the only authority.
+  run cadence_matches "$name"
+  [ "$status" -ne 0 ]
+}
+
+@test "the cadence guard catches every spelling, not just the numeric ones" {
+  # This guard exists to fail a FUTURE rename. If it only catches "-4h", a
+  # rename to "-hourly" reintroduces the exact drift it was written to stop
+  # while the assertions above stay green, so every spelling gets a case.
+  for bad in uvn-ticket-popularity-4h \
+             uvn-ticket-popularity-15m \
+             uvn-ticket-popularity-30min \
+             uvn-ticket-popularity-hourly \
+             uvn-ticket-popularity-daily; do
+    run cadence_matches "$bad"
+    [ "$status" -eq 0 ] || {
+      echo "cadence guard missed: $bad" >&2
+      return 1
+    }
+  done
+
+  # ...and stays quiet on the name we actually ship, whose trailing digits are
+  # a threshold rather than a cadence.
+  for ok in uvn-ticket-popularity-under30 \
+            credit-verification-batch; do
+    run cadence_matches "$ok"
+    [ "$status" -ne 0 ] || {
+      echo "cadence guard false-positived on: $ok" >&2
+      return 1
+    }
+  done
 }
 
 @test "the main unverified batch remains at minute zero" {
