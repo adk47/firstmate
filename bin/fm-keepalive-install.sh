@@ -192,9 +192,12 @@ EOM
   ensure)
     require_macos 2>/dev/null || exit 1
     previous="$(endpoint_field backend) $(endpoint_field target)"
-    record=$(record_endpoint 2>/dev/null) || exit 1
+    record=$(record_endpoint 2>/dev/null) || {
+      echo "this session's own terminal endpoint could not be read, so no primary pane was recorded and no job was installed" >&2
+      exit 1
+    }
     if [ ! -f "$PLIST" ] || ! job_loaded; then
-      write_and_load_job 2>/dev/null || exit 1
+      write_and_load_job || exit 1
       echo "installed: launchd job $LABEL every ${INTERVAL}s, primary endpoint $record"
     elif [ "$previous" != "$record" ]; then
       echo "refreshed: primary endpoint now $record for launchd job $LABEL"

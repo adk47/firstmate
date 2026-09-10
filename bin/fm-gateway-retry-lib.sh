@@ -278,6 +278,63 @@ fm_gateway_stall_age() {  # <state-dir> <scope>
   printf '0'
 }
 
+# --- the primary's keep-alive notice -----------------------------------------
+#
+# One line at <state>/.keepalive-uninstalled:
+#   v1 ts=<epoch> kind=<install|outage> reason=<one line, remediation included>
+#
+# The primary has no status log of its own, so the two ways its keep-alive can
+# fail to keep it alive - the installer refusing (kind=install) and the ladder
+# spending its budget on the primary (kind=outage) - would otherwise reach
+# nobody. This is that channel: whoever hits the condition records it, and the
+# next session start reports it as an actionable KEEPALIVE line. Each writer
+# clears its own kind once the condition it recorded no longer holds, so a
+# resolved problem stops being reported; deleting the file by hand is safe.
+
+fm_keepalive_notice_path() { printf '%s/.keepalive-uninstalled' "$1"; }
+
+_fm_keepalive_notice_line() {  # <state-dir>
+  local line
+  line=$(cat "$(fm_keepalive_notice_path "$1")" 2>/dev/null) || return 1
+  case "$line" in v1\ ts=*\ kind=*\ reason=?*) printf '%s' "$line" ;; *) return 1 ;; esac
+}
+
+fm_keepalive_notice_write() {  # <state-dir> <kind> <reason>
+  local state=$1 kind=$2 reason=$3 rec tmp
+  [ -d "$state" ] || mkdir -p "$state" 2>/dev/null || return 1
+  reason=$(printf '%s' "$reason" | tr '\n\t' '  ')
+  [ -n "$reason" ] || return 1
+  rec=$(fm_keepalive_notice_path "$state")
+  tmp="$rec.tmp.$$"
+  printf 'v1 ts=%s kind=%s reason=%s\n' "$(date +%s)" "$kind" "$reason" > "$tmp" 2>/dev/null \
+    || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$rec" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
+# Prints the recorded reason; fails when there is no readable notice.
+fm_keepalive_notice_read() {  # <state-dir>
+  local line
+  line=$(_fm_keepalive_notice_line "$1") || return 1
+  printf '%s' "${line#* reason=}"
+}
+
+fm_keepalive_notice_kind() {  # <state-dir>
+  local line
+  line=$(_fm_keepalive_notice_line "$1") || return 1
+  line=${line#* kind=}
+  printf '%s' "${line%% *}"
+}
+
+# Clear the notice; with a kind, only when that is the kind recorded, so one
+# writer's resolution cannot silence the other's unresolved condition.
+fm_keepalive_notice_clear() {  # <state-dir> [kind]
+  local state=$1 kind=${2:-}
+  if [ -n "$kind" ]; then
+    [ "$(fm_keepalive_notice_kind "$state" 2>/dev/null)" = "$kind" ] || return 0
+  fi
+  rm -f "$(fm_keepalive_notice_path "$state")" 2>/dev/null || true
+}
+
 # THE entry and exit decision for the re-ring ladder, shared by the watcher and
 # the primary keep-alive agent so an agent cannot be in the ladder for one and
 # out of it for the other. <pane-text> is the rendered tail the caller already
