@@ -85,6 +85,8 @@ GRACE=${FM_GUARD_GRACE:-300}
 . "$SCRIPT_DIR/fm-composer-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 
 log() {  # <message>
   local line
@@ -206,18 +208,9 @@ rm -f "$STATE/.keepalive-session-gone" 2>/dev/null || true
 # --- 3. lapsed supervision ---------------------------------------------------
 
 # Only a home that actually has something to supervise can have LAPSED
-# supervision. An idle home with no work and no relay poll is correctly quiet,
-# and nagging it would be this agent inventing work.
-NEEDS_SUPERVISION=0
-for f in "$STATE"/*.meta; do
-  [ -e "$f" ] || continue
-  NEEDS_SUPERVISION=1
-  break
-done
-[ "$NEEDS_SUPERVISION" -eq 1 ] || [ ! -e "$STATE/x-watch.check.sh" ] || NEEDS_SUPERVISION=1
-if [ "$NEEDS_SUPERVISION" -eq 0 ]; then
-  exit 0
-fi
+# supervision. An idle home is correctly quiet, and nagging it would be this
+# agent inventing work; bin/fm-supervision-lib.sh owns what counts as work.
+fm_supervision_needed "$STATE" "$GRACE" || exit 0
 
 # Away mode hands supervision to its own daemon, which owns the watcher's
 # lifecycle and legitimately leaves gaps between cycles. Standing down there is

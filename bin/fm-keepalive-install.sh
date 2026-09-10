@@ -124,7 +124,8 @@ job_loaded() { launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; }
 # Write the plist and load it. StandardOut/Error go to the home's own state dir,
 # not a shared location, so two homes' jobs cannot interleave into one file.
 write_and_load_job() {
-  local x_label x_script x_home x_state x_path
+  local x_label x_script x_home x_state x_path pre_existing=0
+  [ ! -f "$PLIST" ] || pre_existing=1
   x_label=$(xml_escape "$LABEL")
   x_script=$(xml_escape "$SCRIPT_DIR")
   x_home=$(xml_escape "$HOME_DIR")
@@ -160,8 +161,12 @@ EOM
   if ! launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; then
     # Older macOS releases only accept the legacy verb.
     launchctl load "$PLIST" 2>/dev/null || {
-      rm -f "$PLIST"
-      echo "error: launchctl refused to load the keep-alive job for $HOME_DIR; nothing was left installed" >&2
+      if [ "$pre_existing" -eq 1 ]; then
+        echo "error: launchctl refused to load the keep-alive job for $HOME_DIR; $PLIST was already installed and is left in place, but launchd is not running it" >&2
+      else
+        rm -f "$PLIST"
+        echo "error: launchctl refused to load the keep-alive job for $HOME_DIR; nothing was left installed" >&2
+      fi
       return 1
     }
   fi
