@@ -1,7 +1,6 @@
 {
   "meta": {
-    "lastTouchedVersion": "2026.4.2",
-    "lastTouchedAt": "2026-04-06T18:48:15.231Z"
+    "lastTouchedVersion": "2026.4.2"
   },
   "wizard": {
     "lastRunAt": "2026-04-03T12:27:42.003Z",
@@ -41,8 +40,7 @@
             ],
             "maxTokens": 128000,
             "reasoning": true,
-            "contextWindow": 1050000,
-            "api": "openai-completions"
+            "contextWindow": 1050000
           },
           {
             "id": "gpt-5.6-sol",
@@ -53,8 +51,7 @@
             ],
             "maxTokens": 128000,
             "reasoning": true,
-            "contextWindow": 1050000,
-            "api": "openai-completions"
+            "contextWindow": 1050000
           },
           {
             "id": "gpt-5.6-luna",
@@ -65,8 +62,7 @@
             ],
             "maxTokens": 128000,
             "reasoning": true,
-            "contextWindow": 1050000,
-            "api": "openai-completions"
+            "contextWindow": 1050000
           }
         ]
       },
@@ -242,33 +238,8 @@
         }
       },
       "workspace": "/opt/hydra/workspaces/neutral",
-      "memorySearch": {
-        "enabled": true,
-        "provider": "openai",
-        "model": "text-embedding-3-small",
-        "remote": {
-          "baseUrl": "https://openrouter.ai/api/v1",
-          "apiKey": {
-            "source": "file",
-            "provider": "hydra-secrets",
-            "id": "/OPENROUTER_API_KEY"
-          }
-        },
-        "extraPaths": ["reference"],
-        "store": {
-          "vector": {
-            "enabled": true
-          }
-        },
-        "query": {
-          "hybrid": {
-            "enabled": true
-          }
-        }
-      },
       "bootstrapMaxChars": 40000,
       "bootstrapTotalMaxChars": 120000,
-      "bootstrapPromptTruncationWarning": "always",
       "compaction": {
         "mode": "default",
         "keepRecentTokens": 40000
@@ -278,7 +249,10 @@
         "maxConcurrent": 24,
         "runTimeoutSeconds": 1800
       },
-      "timeoutSeconds": 900
+      "timeoutSeconds": 900,
+      "sessionStore": {
+        "agentId": "clio"
+      }
     },
     "list": [
       {
@@ -530,29 +504,17 @@
     "suppressToolErrors": true,
     "ackReaction": "eyes",
     "ackReactionScope": "all",
-    "removeAckAfterReply": true,
     "statusReactions": {
       "enabled": true
     },
     "groupChat": {
       "visibleReplies": "automatic"
-    },
-    "tts": {
-      "auto": "off",
-      "provider": "elevenlabs",
-      "providers": {
-        "elevenlabs": {
-          "apiKey": "sk_0b8a03cf43ae73f1656fa9c989dc2b12e24ebb9da6fdd237",
-          "voiceId": "NtS6nEHDYMQC9QczMQuq"
-        }
-      }
     }
   },
   "commands": {
     "native": "auto",
     "nativeSkills": "auto",
-    "restart": true,
-    "ownerDisplay": "raw"
+    "restart": true
   },
   "session": {
     "dmScope": "per-channel-peer",
@@ -565,12 +527,7 @@
       "highWaterBytes": "6gb"
     }
   },
-  "cron": {
-    "maxConcurrentRuns": 12
-  },
-  "web": {
-    "enabled": false
-  },
+  "cron": {},
   "channels": {
     "slack": {
       "mode": "socket",
@@ -585,9 +542,6 @@
         "direct": "all",
         "group": "all",
         "channel": "all"
-      },
-      "thread": {
-        "requireExplicitMention": true
       },
       "channels": {},
       "accounts": {
@@ -704,7 +658,13 @@
       "streaming": {
         "mode": "partial",
         "nativeTransport": true
+      },
+      "implicitMentions": {
+        "threadParticipation": false
       }
+    },
+    "whatsapp": {
+      "enabled": false
     }
   },
   "gateway": {
@@ -727,8 +687,7 @@
       "127.0.0.1"
     ],
     "tailscale": {
-      "mode": "off",
-      "resetOnExit": false
+      "mode": "off"
     },
     "http": {
       "endpoints": {
@@ -805,28 +764,6 @@
         "enabled": true
       }
     },
-    "installs": {
-      "lossless-claw": {
-        "source": "npm",
-        "spec": "@martian-engineering/lossless-claw",
-        "installPath": "/Users/admin/.openclaw/extensions/lossless-claw",
-        "version": "0.3.0",
-        "resolvedName": "@martian-engineering/lossless-claw",
-        "resolvedVersion": "0.3.0",
-        "resolvedSpec": "@martian-engineering/lossless-claw@0.3.0",
-        "integrity": "sha512-SsY0bp3SoSzEu+KB8fOBke46MFhTmslfWg6OvC4pShq34ig2+V+jkTFAHib8PTZ0MoethAddR+ZmRN9OASorAA==",
-        "shasum": "bc9725d6d59d9b1523128ab528f1258c4258fa3f",
-        "resolvedAt": "2026-03-15T16:41:53.234Z",
-        "installedAt": "2026-03-15T16:42:31.664Z"
-      },
-      "muso-credit-verification-enforcer": {
-        "source": "path",
-        "spec": "/root/.openclaw-main/extensions/muso-credit-verification-enforcer",
-        "installPath": "/root/.openclaw-main/extensions/muso-credit-verification-enforcer",
-        "resolvedName": "@muso/credit-verification-enforcer",
-        "resolvedVersion": "0.1.0"
-      }
-    },
     "load": {
       "paths": [
         "/root/.openclaw-main/extensions/support-tools"
@@ -860,8 +797,6 @@
   "browser": {
     "enabled": true,
     "executablePath": "/root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome",
-    "remoteCdpTimeoutMs": 60000,
-    "remoteCdpHandshakeTimeoutMs": 60000,
     "headless": true,
     "noSandbox": true
   },
@@ -879,6 +814,39 @@
           "MUSO_ADMIN_EMAIL",
           "MUSO_ADMIN_PASSWORD"
         ]
+      }
+    }
+  },
+  "memory": {
+    "search": {
+      "enabled": true,
+      "provider": "openai",
+      "model": "text-embedding-3-small",
+      "remote": {
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "apiKey": {
+          "source": "file",
+          "provider": "hydra-secrets",
+          "id": "/OPENROUTER_API_KEY"
+        }
+      },
+      "extraPaths": [
+        "reference"
+      ],
+      "store": {
+        "vector": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "tts": {
+    "auto": "off",
+    "provider": "elevenlabs",
+    "providers": {
+      "elevenlabs": {
+        "apiKey": "sk_0b8a03cf43ae73f1656fa9c989dc2b12e24ebb9da6fdd237",
+        "speakerVoiceId": "NtS6nEHDYMQC9QczMQuq"
       }
     }
   }

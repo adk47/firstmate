@@ -116,7 +116,9 @@ compare_path "tools.exec" "Tools exec security config"
 # default (12000 / "once") would reintroduce the original bug.
 compare_path "agents.defaults.bootstrapMaxChars" "Bootstrap per-file cap"
 compare_path "agents.defaults.bootstrapTotalMaxChars" "Bootstrap total cap"
-compare_path "agents.defaults.bootstrapPromptTruncationWarning" "Bootstrap truncation warning mode"
+# (Removed on the 2026.8.1 reshape: agents.defaults.bootstrapPromptTruncationWarning
+# is schema-rejected by openclaw 2.0 — the warning behavior became built-in, so
+# there is no key left to pin. See docs/runbooks/UPGRADE-2026.8.1.md.)
 
 # --- Caroline RAG safety invariants (added 2026-05-14) ---
 # See PR B: feat/caroline-rag-enablement
@@ -178,11 +180,13 @@ extra_paths=$(python3 -c "
 import json
 with open('$EDGE') as f:
     c = json.load(f)
-support = next((a for a in c.get('agents', {}).get('list', []) if a.get('id') == 'support'), {})
-paths = support.get('memorySearch', {}).get('extraPaths', [])
+# 2026.8.1 reshape: per-agent memorySearch overrides are schema-rejected by
+# openclaw 2.0; the support override (identical to the global block) moved to
+# the global memory.search. The invariant now lives there.
+paths = c.get('memory', {}).get('search', {}).get('extraPaths', [])
 print(json.dumps(paths))
 ")
-caroline_check "edge.support.memorySearch.extraPaths" '["reference"]' "$extra_paths"
+caroline_check "edge.memory.search.extraPaths" '["reference"]' "$extra_paths"
 
 # 5. Session scope must remain per-channel-peer for per-conversation isolation.
 dmscope=$(python3 -c "

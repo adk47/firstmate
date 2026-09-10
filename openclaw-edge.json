@@ -1,7 +1,6 @@
 {
   "meta": {
-    "lastTouchedVersion": "2026.3.23",
-    "lastTouchedAt": "2026-04-01T13:45:50.821Z"
+    "lastTouchedVersion": "2026.3.23"
   },
   "wizard": {
     "lastRunAt": "2026-02-19T06:12:59.869Z",
@@ -41,8 +40,7 @@
             ],
             "maxTokens": 128000,
             "reasoning": true,
-            "contextWindow": 1050000,
-            "api": "openai-completions"
+            "contextWindow": 1050000
           },
           {
             "id": "gpt-5.6-sol",
@@ -53,8 +51,7 @@
             ],
             "maxTokens": 128000,
             "reasoning": true,
-            "contextWindow": 1050000,
-            "api": "openai-completions"
+            "contextWindow": 1050000
           },
           {
             "id": "gpt-5.6-luna",
@@ -65,8 +62,7 @@
             ],
             "maxTokens": 128000,
             "reasoning": true,
-            "contextWindow": 1050000,
-            "api": "openai-completions"
+            "contextWindow": 1050000
           }
         ]
       },
@@ -180,12 +176,8 @@
       },
       "thinkingDefault": "medium",
       "workspace": "/opt/hydra/workspaces/support",
-      "memorySearch": {
-        "enabled": false
-      },
       "bootstrapMaxChars": 40000,
       "bootstrapTotalMaxChars": 120000,
-      "bootstrapPromptTruncationWarning": "always",
       "compaction": {
         "mode": "default",
         "keepRecentTokens": 40000
@@ -195,7 +187,10 @@
         "maxConcurrent": 8,
         "runTimeoutSeconds": 1800
       },
-      "timeoutSeconds": 900
+      "timeoutSeconds": 900,
+      "sessionStore": {
+        "agentId": "support"
+      }
     },
     "list": [
       {
@@ -211,20 +206,10 @@
           ]
         },
         "thinkingDefault": "medium",
-        "memorySearch": {
-          "enabled": true,
-          "provider": "openai",
-          "model": "text-embedding-3-small",
-          "remote": {
-            "baseUrl": "https://openrouter.ai/api/v1",
-            "apiKey": { "source": "file", "provider": "hydra-secrets", "id": "/OPENROUTER_API_KEY" }
-          },
-          "extraPaths": ["reference"],
-          "store": { "vector": { "enabled": true } },
-          "query": { "hybrid": { "enabled": true } }
-        },
         "tools": {
-          "deny": ["exec"]
+          "deny": [
+            "exec"
+          ]
         }
       }
     ]
@@ -251,14 +236,12 @@
     },
     "ackReaction": "eyes",
     "ackReactionScope": "all",
-    "removeAckAfterReply": true,
     "visibleReplies": "automatic"
   },
   "commands": {
     "native": "auto",
     "nativeSkills": "auto",
-    "restart": true,
-    "ownerDisplay": "raw"
+    "restart": true
   },
   "session": {
     "dmScope": "per-channel-peer",
@@ -270,9 +253,6 @@
       "maxDiskBytes": "8gb",
       "highWaterBytes": "6gb"
     }
-  },
-  "web": {
-    "enabled": false
   },
   "channels": {
     "slack": {
@@ -289,9 +269,6 @@
         "group": "all",
         "channel": "all"
       },
-      "thread": {
-        "requireExplicitMention": true
-      },
       "channels": {},
       "accounts": {
         "support": {
@@ -307,6 +284,9 @@
       "streaming": {
         "mode": "partial",
         "nativeTransport": true
+      },
+      "implicitMentions": {
+        "threadParticipation": false
       }
     },
     "intercom": {
@@ -314,7 +294,11 @@
         "default": {
           "enabled": true,
           "workspaceId": "dwjzhcge",
-          "token": { "source": "env", "provider": "hydra-env", "id": "MUSOAI_INTERCOM_TOKEN" },
+          "token": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSOAI_INTERCOM_TOKEN"
+          },
           "webhookSecret": "43c744d5-5043-4f3f-b7fb-36440af1e8d7",
           "botAdminId": "5763097",
           "defaultInboxId": "5465657",
@@ -350,7 +334,11 @@
             "judgeMinTurnCount": 4
           },
           "clickup": {
-            "apiKey": { "source": "env", "provider": "hydra-env", "id": "CLICKUP_API_KEY" },
+            "apiKey": {
+              "source": "env",
+              "provider": "hydra-env",
+              "id": "CLICKUP_API_KEY"
+            },
             "listId": "901000600160",
             "userEmailFieldId": "e8618c74-d065-4b75-9a5a-86d658392409",
             "profileIdFieldId": "347d23bf-ed7b-40c2-bd10-5bd6ac7210b1"
@@ -358,6 +346,9 @@
         }
       },
       "enabled": true
+    },
+    "whatsapp": {
+      "enabled": false
     }
   },
   "gateway": {
@@ -380,8 +371,7 @@
       "127.0.0.1"
     ],
     "tailscale": {
-      "mode": "off",
-      "resetOnExit": false
+      "mode": "off"
     },
     "http": {
       "endpoints": {
@@ -432,28 +422,31 @@
         "config": {
           "creditVerificationEnabled": true,
           "profilesClaimSelfEnabled": true,
-          "creditsVerifyEnabled":     true,
+          "creditsVerifyEnabled": true,
           "profilesConsolidateEnabled": true,
-          "foundingBuybackEnabled":  true,
-          "retentionOfferEnabled":   true,
+          "foundingBuybackEnabled": true,
+          "retentionOfferEnabled": true,
           "cancelSubscriptionEnabled": true,
-          "musoApiBase":             "https://api.muso.ai",
-          "adminEmail":              { "source": "env", "provider": "hydra-env", "id": "MUSO_ADMIN_EMAIL" },
-          "adminPassword":           { "source": "env", "provider": "hydra-env", "id": "MUSO_ADMIN_PASSWORD" },
-          "clickupApiKey":           { "source": "env", "provider": "hydra-env", "id": "CLICKUP_API_KEY" },
-          "clickupListId":           "901000600160",
+          "musoApiBase": "https://api.muso.ai",
+          "adminEmail": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_ADMIN_EMAIL"
+          },
+          "adminPassword": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_ADMIN_PASSWORD"
+          },
+          "clickupApiKey": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "CLICKUP_API_KEY"
+          },
+          "clickupListId": "901000600160",
           "clickupUserEmailFieldId": "e8618c74-d065-4b75-9a5a-86d658392409",
           "clickupProfileIdFieldId": "347d23bf-ed7b-40c2-bd10-5bd6ac7210b1"
         }
-      }
-    },
-    "installs": {
-      "intercom": {
-        "source": "path",
-        "spec": "/root/.openclaw-edge/extensions/intercom",
-        "installPath": "/root/.openclaw-edge/extensions/intercom",
-        "resolvedName": "@muso/intercom",
-        "resolvedVersion": "0.1.0"
       }
     },
     "load": {
@@ -487,6 +480,29 @@
           "MUSO_ADMIN_PASSWORD",
           "MUSOAI_INTERCOM_TOKEN"
         ]
+      }
+    }
+  },
+  "memory": {
+    "search": {
+      "enabled": true,
+      "provider": "openai",
+      "model": "text-embedding-3-small",
+      "remote": {
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "apiKey": {
+          "source": "file",
+          "provider": "hydra-secrets",
+          "id": "/OPENROUTER_API_KEY"
+        }
+      },
+      "extraPaths": [
+        "reference"
+      ],
+      "store": {
+        "vector": {
+          "enabled": true
+        }
       }
     }
   }
