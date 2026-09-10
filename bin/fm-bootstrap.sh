@@ -110,9 +110,9 @@
 #          additive.
 #          primary_keepalive_setup (main home only, macOS only) records the
 #          lock-owning primary session's own terminal endpoint and installs the
-#          launchd keep-alive job when it is absent, printing one
-#          "BOOTSTRAP_INFO: primary keep-alive installed ..." or "... refreshed
-#          ..." fact and nothing when the job is already installed and pointed
+#          launchd keep-alive job whenever launchd is not running it, printing
+#          one "BOOTSTRAP_INFO: primary keep-alive installed ..." or "...
+#          refreshed ..." fact and nothing when the job is loaded and pointed
 #          at this pane. config/keepalive-off opts the home out entirely.
 #          Secondmate homes stay opt-in through bin/fm-keepalive-install.sh.
 #          A failed install never fails session start.

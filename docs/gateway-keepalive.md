@@ -80,7 +80,7 @@ When nothing proves an endpoint, the agent stays inert and says so.
 
 The main home installs it for you.
 `bin/fm-bootstrap.sh`'s `primary_keepalive_setup` runs in the locked mutating sweep of every session start, so it never fires from a lock-refused session or a child worktree, and it is scoped three ways: the main home only, a genuine primary checkout only, and the session that actually holds this home's fleet lock only, so a scratch session opened at the repo root can never record its own pane as the primary.
-It refreshes `state/.primary-endpoint` from the session's own environment, installs the launchd job only when it is absent, and stays quiet when the job is already installed and pointed at this pane.
+It refreshes `state/.primary-endpoint` from the session's own environment, installs the launchd job whenever launchd is not actually running it - absent, unloaded, or booted out - and stays quiet when the job is loaded and pointed at this pane.
 It prints exactly one `BOOTSTRAP_INFO: primary keep-alive installed ...` or `... refreshed ...` fact when it did either; that line is a completed no-action fact, never an actionable diagnostic.
 A failed install never fails session start.
 

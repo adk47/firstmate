@@ -424,6 +424,23 @@ test_primary_agent_repairs_lapsed_supervision_once_per_episode() {
   pass "the primary keep-alive repairs lapsed supervision once per episode"
 }
 
+test_primary_agent_repairs_supervision_for_a_procevent_only_home() {
+  # A registered process-to-event source is a wait on an external process, not
+  # a task: it has no state/<id>.meta, and it still needs a running watcher.
+  local home sent
+  home=$(make_primary_home primary-procevent)
+  rm -f "$home/state/t1.meta"
+  FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" register lavish keepalive-src -- \
+    /bin/sh -c 'exit 0' >/dev/null \
+    || fail "could not register a process-event source"
+  touch -t 202001010000 "$home/state/.last-watcher-beat"
+  sent=$(with_live_lock "$home" agent_pass "$home" "$home/recovered.txt")
+  [ "$sent" -ge 1 ] || fail "a home whose only supervision need is a registered event source was left unsupervised"
+  grep -qi 'supervision has been down' "$home/send.log" \
+    || fail "what reached the pane is not a supervision repair line"
+  pass "the primary keep-alive repairs supervision for a home whose only wait is an event source"
+}
+
 test_primary_agent_stands_down_in_away_mode_and_when_idle() {
   local home sent
   home=$(make_primary_home primary-standdown)
@@ -550,6 +567,44 @@ test_installer_plist_has_no_dead_flag() {
   grep -q "$ROOT/bin/fm-keepalive-agent.sh" "$plist" || fail "the job does not run this home's agent"
   grep -q -- '--once' "$plist" && fail "the job passes a --once the agent does not take"
   pass "the launchd job runs the agent with --home only"
+}
+
+test_installer_keeps_a_pre_existing_plist_a_failed_reload_did_not_write() {
+  # A launchctl that cannot be reached is not evidence the job is gone, so a
+  # failed reload must never take away an installation someone else made.
+  local home fakebin out plist before
+  home="$TMP_ROOT/plist-failed-reload"
+  rm -rf "${home:?}"
+  mkdir -p "$home/state" "$home/fakehome"
+  fakebin=$(fm_fakebin "$home")
+  fm_fake_exit0 "$fakebin" launchctl
+  printf '#!/usr/bin/env bash\nprintf Darwin\\\\n\n' > "$fakebin/uname"
+  chmod +x "$fakebin/uname"
+  out=$(HOME="$home/fakehome" PATH="$fakebin:$PATH" TMUX_PANE='%3' \
+    "$ROOT/bin/fm-keepalive-install.sh" install --home "$home" 2>&1) \
+    || fail "install refused: $out"
+  plist=$(find "$home/fakehome/Library/LaunchAgents" -name 'ai.firstmate.keepalive.*.plist' | head -1)
+  [ -n "$plist" ] || fail "install wrote no plist"
+  before=$(shasum < "$plist")
+
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/launchctl"
+  chmod +x "$fakebin/launchctl"
+  out=$(HOME="$home/fakehome" PATH="$fakebin:$PATH" TMUX_PANE='%3' \
+    "$ROOT/bin/fm-keepalive-install.sh" install --home "$home" 2>&1) \
+    && fail "a launchctl that refused every verb was reported as success"
+  [ -f "$plist" ] || fail "a failed reload deleted a plist this invocation did not create"
+  [ "$(shasum < "$plist")" = "$before" ] || fail "the surviving plist is not the one that was installed"
+  case "$out" in
+    *"left in place"*) : ;;
+    *) fail "the failed reload did not report that the installed job was left alone: $out" ;;
+  esac
+
+  rm -f "$plist"
+  out=$(HOME="$home/fakehome" PATH="$fakebin:$PATH" TMUX_PANE='%3' \
+    "$ROOT/bin/fm-keepalive-install.sh" install --home "$home" 2>&1) \
+    && fail "a launchctl that refused every verb was reported as success"
+  [ ! -f "$plist" ] || fail "a first install that could not load left a plist claiming it had"
+  pass "a failed reload keeps a plist it did not write, and a failed first install leaves none"
 }
 
 test_installer_plist_survives_xml_significant_paths() {
@@ -733,12 +788,14 @@ test_primary_agent_refuses_a_pane_with_no_live_session
 test_primary_agent_requires_the_lock_owner_to_be_a_harness
 test_primary_agent_stops_at_the_budget_and_reports_the_outage
 test_primary_agent_repairs_lapsed_supervision_once_per_episode
+test_primary_agent_repairs_supervision_for_a_procevent_only_home
 test_primary_agent_stands_down_in_away_mode_and_when_idle
 test_primary_agent_is_inert_without_a_recorded_endpoint
 test_endpoint_detects_a_cmux_primary_in_the_shape_the_backend_parses
 test_endpoint_refuses_a_runtime_it_cannot_read
 test_endpoint_record_carries_only_the_fields_it_documents
 test_installer_plist_has_no_dead_flag
+test_installer_keeps_a_pre_existing_plist_a_failed_reload_did_not_write
 test_installer_plist_survives_xml_significant_paths
 test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoint
 test_session_start_keepalive_honours_the_opt_out_and_its_scope
