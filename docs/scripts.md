@@ -46,10 +46,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-session-lock-lib.sh` | Shared session-lock harness identity (ancestry walk and holder liveness) for fm-lock.sh and the Claude Stop auto-arm |
 | `fm-claude-stop-autoarm.sh` | Claude Stop `asyncRewake` hook owning tokenless watcher continuity with single-flight exit-2 rewake (docs/watcher-continuity.md) |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
-| `fm-gateway-retry-lib.sh` | Single owner of the transient inference-gateway classifier, durable stall record, and twice-bounded re-ring ladder (docs/gateway-keepalive.md) |
-| `fm-gateway-stall-hook.sh` | Claude `StopFailure` detector recording a transient gateway stall; records only, never blocks or continues |
-| `fm-keepalive-agent.sh`  | One bounded out-of-session pass over the primary: gateway re-ring, dead-session report, lapsed-supervision repair line |
-| `fm-keepalive-install.sh` | Install, inspect, or remove this home's opt-in launchd keep-alive job |
+| `fm-gateway-retry-lib.sh` | Single owner of the transient inference-gateway pane classifier, durable stall record, and twice-bounded re-ring ladder (docs/gateway-keepalive.md) |
+| `fm-keepalive-agent.sh`  | One bounded out-of-session pass over the primary: gateway re-ring on an idle pane, dead-session report, lapsed-supervision repair line |
+| `fm-keepalive-install.sh` | Install, ensure, inspect, or remove this home's launchd keep-alive job; the main home's session start runs `ensure`, secondmate homes opt in by hand |
 | `fm-keepalive-endpoint.sh` | Record and read the primary session's own terminal endpoint for the out-of-session keep-alive |
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |
 | `fm-kimi-turnend-hook.sh` | Surgically install or remove Kimi's guarded global crew turn-end hook                |

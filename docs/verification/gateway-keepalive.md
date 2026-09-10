@@ -30,9 +30,9 @@ The `StopFailure` payload:
 
 The same conclusion is visible in live fleet state independent of the stub: a lane stalled on the pooled gateway the same day recorded `state=idle source=claude-hook event=stop-failure`, which is the busy contract's `StopFailure` writer and not its `Stop` writer.
 
-This is why the keep-alive's detector is registered on `StopFailure` rather than `Stop`.
+This is why the keep-alive cannot be a `Stop` hook: the event a gateway failure raises is `StopFailure`.
 
-## Why the detector cannot block or continue the turn
+## Why a StopFailure hook cannot block or continue the turn
 
 `StopFailure` is executed outside the REPL loop.
 In 2.1.266 the executor is:
@@ -49,10 +49,12 @@ async function F7e(e,n,r=pf){                              // executeStopFailure
 `StopFailure` is also a member of the event set the binary treats as non-blockable, alongside `Notification`, `SessionStart`, `SessionEnd`, and `PostToolUseFailure`.
 
 A `StopFailure` hook therefore has no continuation channel at all, whatever it exits with.
-`tests/fm-gateway-keepalive.test.sh` pins that the detector always exits 0, so this cannot be "fixed" later into a blocker that could not work.
+This is the reason the keep-alive is built as detect-then-re-ring from outside the session rather than as a blocking hook: the rendered pane is the single detector, and the watcher or the launchd keep-alive agent delivers the continue instruction.
+An earlier revision also registered a `StopFailure` hook purely to open the stall record a few seconds before the next pane poll; it was removed because both re-ringing actors classify the pane anyway, the first attempt waits out a backoff regardless, and a record opened by anything other than the pane could hold the ladder open against a pane that had already recovered.
 
 ## The typed error enum
 
+Recorded for the next reader who considers a typed detector; nothing in the keep-alive reads this field, because no actor outside the session ever sees the payload.
 `StopFailure`'s `error` field is a closed enum in 2.1.266:
 
 ```
@@ -62,13 +64,13 @@ unknown, max_output_tokens
 ```
 
 `overloaded` and `server_error` are the transient gateway class.
-`authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `billing_error`, `rate_limit`, `invalid_request`, `model_not_found`, and `max_output_tokens` are never retried.
-`unknown` is the fallback and carries no verdict on its own, so an unrecognised kind can still be caught by its wording but can never be retried on the kind alone.
+`authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `billing_error`, `rate_limit`, `invalid_request`, `model_not_found`, and `max_output_tokens` are the kinds that must never be retried, and the text deny list covers their rendered wording.
 
 ## Error-text census
 
 Taken 2026-09-09 across 201 transcripts in this fleet's `~/.claude/projects`, counting assistant entries carrying `isApiErrorMessage: true`.
-These are the strings the text classifier is written against; the counts are what makes the deny list load-bearing rather than theoretical.
+These are the strings the pane classifier is written against; the counts are what makes the deny list load-bearing rather than theoretical.
+Only the rendered `API Error: <5xx>` shape is a positive match, and only within the bounded tail window above the prompt; the gateway's own sentences and the bare word `Overloaded` are not matched on their own, so a crewmate printing this repository's sources cannot classify as stalled.
 
 | Count | Text (truncated) | Class |
 |---|---|---|
@@ -93,5 +95,5 @@ The rendered text uses an em dash (`—`), not a hyphen.
 
 ## Not yet verified live
 
-The primary keep-alive agent's launchd job has been exercised as a script (`bin/fm-keepalive-agent.sh --dry-run`), not yet across a real launchd-scheduled stall.
+The primary keep-alive agent's launchd job has been exercised as a script (`bin/fm-keepalive-agent.sh --dry-run`) and through the session-start install sweep against a fake launchd, not yet across a real launchd-scheduled stall.
 Its endpoint discovery covers tmux, herdr, and the cmux and orca terminal identifiers those runtimes export; a runtime that exports none of them requires the installer's explicit `--backend`/`--target`, and the agent stays inert and says so rather than guessing.

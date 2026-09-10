@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Behavior tests for the transient inference-gateway keep-alive:
-# the classifier (both signals plus the deny list that beats them), the twice-bounded
-# retry ladder, the StopFailure detector hook, and the watcher's re-ring backstop.
+# the rendered-pane classifier (the bounded tail window and the deny list that
+# beats it), the twice-bounded retry ladder, the out-of-session primary
+# keep-alive agent, and the main home's session-start install sweep.
 #
 # The classifier's inputs are quoted from the real transcripts this fleet
 # produced, so a wording change that would blind it in production fails here.
@@ -11,7 +12,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LIB="$ROOT/bin/fm-gateway-retry-lib.sh"
-HOOK="$ROOT/bin/fm-gateway-stall-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-gateway-keepalive)
 
 # shellcheck source=bin/fm-gateway-retry-lib.sh
@@ -32,6 +32,20 @@ E_LONG='Prompt is too long'
 E_400='API Error: 400 messages.25.content.3: `thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified.'
 E_REFUSED='API Error: Unable to connect to API (ConnectionRefused)'
 
+# The idle Claude screen below a turn-ending error: the error, a blank row, the
+# bordered empty composer, and the shortcut footer. This is the shape a pane
+# reader actually sees, so the bounded tail window is exercised against it.
+IDLE_FOOTER=$(printf '\n╭──────────────────────────────╮\n│ >                            │\n╰──────────────────────────────╯\n  ? for shortcuts')
+
+# <n> non-blank lines of ordinary agent output.
+ordinary_lines() {  # <count>
+  local i=1
+  while [ "$i" -le "$1" ]; do
+    printf '⏺ step %s of the task finished cleanly\n' "$i"
+    i=$(( i + 1 ))
+  done
+}
+
 new_state() {  # <name>
   local d="$TMP_ROOT/$1/state"
   rm -rf "${TMP_ROOT:?}/${1:?}"
@@ -44,8 +58,10 @@ test_text_classifier_accepts_the_real_transient_errors() {
   for t in "$E503_ACCOUNTS" "$E503_SERVICE" "$E529" "$E500"; do
     fm_gateway_text_is_transient "$t" \
       || fail "the text classifier missed a real transient gateway error: ${t:0:40}"
+    fm_gateway_text_is_transient "$(printf '%s\n%s' "$t" "$IDLE_FOOTER")" \
+      || fail "the classifier missed a real transient error rendered above the idle composer and footer: ${t:0:40}"
   done
-  pass "text classifier accepts every transient gateway error this fleet has produced"
+  pass "text classifier accepts every transient gateway error this fleet has produced, bare and above the idle footer"
 }
 
 test_deny_list_beats_a_transient_code_inside_a_permanent_failure() {
@@ -54,14 +70,58 @@ test_deny_list_beats_a_transient_code_inside_a_permanent_failure() {
   # because the context, not the gateway, is what failed.
   fm_gateway_text_is_transient "$E_COMPACT_503" \
     && fail "a compaction failure carrying a 503 must never be treated as retryable"
-  fm_gateway_is_transient server_error "$E_COMPACT_503" \
-    && fail "permanent text must beat even a transient TYPED kind"
   local t
   for t in "$E_LIMIT" "$E_LOGIN" "$E_LONG" "$E_400" ""; do
     fm_gateway_text_is_transient "$t" \
       && fail "a non-retryable failure was classified transient: ${t:0:40}"
   done
-  pass "the deny list beats a transient code inside a permanent failure, and beats a transient typed kind"
+  pass "the deny list beats a transient code inside a permanent failure"
+}
+
+test_deny_list_matches_anywhere_while_the_transient_match_is_bounded() {
+  # A deny hit must never be narrowed away: a permanent failure far up the
+  # capture still vetoes a transient error rendered right above the footer.
+  local pane
+  pane=$(printf '%s\n%s\n%s\n%s' "$E_LIMIT" "$(ordinary_lines 20)" "$E503_ACCOUNTS" "$IDLE_FOOTER")
+  fm_gateway_text_is_transient "$pane" \
+    && fail "a deny-list hit above the bounded tail window was narrowed away"
+  pass "the deny list matches anywhere in the capture while the transient match reads only the tail"
+}
+
+test_a_recovered_agent_with_the_old_error_in_scrollback_is_not_stalled() {
+  # The bug this pins: a crew that hit a 503, was re-rung, carried on, and went
+  # idle again still has the old error in its 40-line scrollback. Only the few
+  # lines immediately above the prompt say what the LAST turn did.
+  local st pane
+  st=$(new_state recovered-scrollback)
+  pane=$(printf '%s\n%s\n%s' "$E503_ACCOUNTS" "$(ordinary_lines 12)" "$IDLE_FOOTER")
+  fm_gateway_text_is_transient "$pane" \
+    && fail "an error that scrolled above the last turn's output was still classified as a live stall"
+  fm_gateway_note_stall "$st" task-r pane || fail "could not open a stall record"
+  fm_gateway_record_attempt "$st" task-r || fail "could not charge an attempt"
+  fm_gateway_stalled_now "$st" task-r "$pane" \
+    && fail "a recovered crew with the old error in scrollback was kept in the ladder"
+  fm_gateway_stall_open "$st" task-r \
+    && fail "leaving the ladder must drop the record so a later stall starts fresh"
+  pass "a recovered agent whose scrollback still holds the old error is not re-rung"
+}
+
+test_repository_text_naming_the_errors_is_not_a_stall() {
+  # A crewmate that greps or cats this repository's own sources prints the
+  # gateway's sentences and the word overloaded at its prompt. None of that is
+  # the harness's rendered "API Error: <5xx>" shape.
+  local pane
+  pane=$(printf '%s\n%s' "$(cat <<'TXT'
+bin/fm-gateway-retry-lib.sh:34:# word such as "overloaded".
+docs/gateway-keepalive.md:12: the gateway's own out-of-capacity sentences
+tests/fm-gateway-keepalive.test.sh:22: All accounts are temporarily unavailable
+tests/fm-gateway-keepalive.test.sh:23: Service temporarily unavailable
+Overloaded
+TXT
+)" "$IDLE_FOOTER")
+  fm_gateway_text_is_transient "$pane" \
+    && fail "repository text mentioning overloaded and the gateway sentences was classified as a stall"
+  pass "repository text naming the errors without the rendered API Error shape is not a stall"
 }
 
 test_a_gateway_that_is_simply_down_is_not_retried() {
@@ -72,24 +132,10 @@ test_a_gateway_that_is_simply_down_is_not_retried() {
   pass "an unreachable gateway is left to surface as an outage"
 }
 
-test_typed_kind_and_text_are_independent_positives() {
-  # Either signal alone must carry a verdict, because each is the ONLY signal
-  # available to one of the two detectors.
-  fm_gateway_is_transient server_error '' || fail "the typed kind alone must carry a positive verdict"
-  fm_gateway_is_transient overloaded '' || fail "the typed kind alone must carry a positive verdict"
-  fm_gateway_is_transient '' "$E503_ACCOUNTS" || fail "the text alone must carry a positive verdict"
-  fm_gateway_is_transient unknown "$E503_ACCOUNTS" || fail "an unrecognised kind must not veto matching text"
-  # ...and losing one must not turn a real stall into a miss.
-  fm_gateway_is_transient unknown '' && fail "an unknown kind with no text must not be retried"
-  fm_gateway_is_transient rate_limit "$E503_ACCOUNTS" \
-    && fail "a permanent TYPED kind must beat matching transient text"
-  pass "typed kind and text are independent positives, and either permanent signal vetoes"
-}
-
 test_ladder_is_bounded_by_attempts() {
   local st
   st=$(new_state attempts-bound)
-  fm_gateway_note_stall "$st" task-a server_error || fail "could not open a stall record"
+  fm_gateway_note_stall "$st" task-a || fail "could not open a stall record"
   FM_GATEWAY_RETRY_MAX=3 FM_GATEWAY_RETRY_HORIZON=99999
   export FM_GATEWAY_RETRY_MAX FM_GATEWAY_RETRY_HORIZON
   fm_gateway_budget_spent "$st" task-a && fail "a fresh stall must not start with a spent budget"
@@ -110,7 +156,7 @@ test_ladder_is_bounded_by_wall_clock_independently() {
   st=$(new_state horizon-bound)
   now=$(date +%s)
   rec="$st/task-b.gateway-stall"
-  printf 'v1 first=%s attempts=1 last=%s notified=0 kind=server_error\n' \
+  printf 'v1 first=%s attempts=1 last=%s notified=0 kind=pane\n' \
     "$(( now - 4000 ))" "$(( now - 4000 ))" > "$rec"
   FM_GATEWAY_RETRY_MAX=99 FM_GATEWAY_RETRY_HORIZON=2700
   export FM_GATEWAY_RETRY_MAX FM_GATEWAY_RETRY_HORIZON
@@ -128,16 +174,16 @@ test_re_noting_a_stall_cannot_push_the_next_attempt_out_of_reach() {
   st=$(new_state anchor-stability)
   FM_GATEWAY_RETRY_BACKOFF=1
   export FM_GATEWAY_RETRY_BACKOFF
-  fm_gateway_note_stall "$st" task-c server_error || fail "could not open a stall record"
+  fm_gateway_stalled_now "$st" task-c "$E503_ACCOUNTS" || fail "a stalled pane must open the record"
   first_open=$(fm_gateway_first_seen "$st" task-c)
   sleep 2
-  fm_gateway_note_stall "$st" task-c server_error || fail "re-noting must succeed"
+  fm_gateway_stalled_now "$st" task-c "$E503_ACCOUNTS" || fail "re-sighting must keep the record"
   [ "$(fm_gateway_first_seen "$st" task-c)" = "$first_open" ] \
     || fail "re-noting an open stall moved its wall-clock anchor"
   fm_gateway_attempt_due "$st" task-c \
     || fail "re-noting an open stall pushed the next attempt out of reach"
   unset FM_GATEWAY_RETRY_BACKOFF
-  pass "re-noting an open stall moves neither the horizon anchor nor the backoff anchor"
+  pass "re-sighting an open stall moves neither the horizon anchor nor the backoff anchor"
 }
 
 test_first_attempt_waits_out_its_backoff() {
@@ -145,7 +191,7 @@ test_first_attempt_waits_out_its_backoff() {
   st=$(new_state first-backoff)
   FM_GATEWAY_RETRY_BACKOFF=3600
   export FM_GATEWAY_RETRY_BACKOFF
-  fm_gateway_note_stall "$st" task-d server_error || fail "could not open a stall record"
+  fm_gateway_note_stall "$st" task-d || fail "could not open a stall record"
   fm_gateway_attempt_due "$st" task-d \
     && fail "a stall must not be re-rung the instant it is first seen"
   unset FM_GATEWAY_RETRY_BACKOFF
@@ -162,44 +208,28 @@ test_backoff_ladder_repeats_its_last_step() {
   pass "the backoff ladder repeats its last step past its own length"
 }
 
-test_pane_is_authoritative_after_the_first_attempt() {
-  # The hook's record bridges the gap between the harness failing the turn and
-  # the next poll rendering it, and nothing more. Once an attempt is charged, an
-  # agent whose pane has moved on is working again and must leave the ladder,
-  # or the keep-alive would keep interrupting a recovered agent.
+test_pane_is_the_single_detector() {
+  # A record only ever exists because a pane showed the error, and a pane that
+  # no longer shows it ends the stall whatever the record says: there is no
+  # second detector whose word can hold the ladder open against the pane.
   local st
   st=$(new_state pane-authority)
-  fm_gateway_note_stall "$st" task-e server_error || fail "could not open a stall record"
   fm_gateway_stalled_now "$st" task-e 'ordinary pane output' \
-    || fail "a hook-opened record with no attempts yet must hold the ladder open"
-  fm_gateway_record_attempt "$st" task-e || fail "could not charge an attempt"
+    && fail "an ordinary pane must not enter the ladder"
+  fm_gateway_stall_open "$st" task-e && fail "an ordinary pane must open no record"
+  fm_gateway_stalled_now "$st" task-e "$E503_ACCOUNTS" || fail "a stalled pane must enter the ladder"
+  fm_gateway_stall_open "$st" task-e || fail "a stalled pane must open the record"
   fm_gateway_stalled_now "$st" task-e 'ordinary pane output' \
-    && fail "after an attempt, a pane that moved on must leave the ladder"
+    && fail "a pane that moved on before any attempt must still leave the ladder"
   fm_gateway_stall_open "$st" task-e \
     && fail "leaving the ladder must drop the record so a later stall starts fresh"
-  pass "the rendered pane is authoritative once an attempt has been charged"
-}
-
-test_stale_hook_record_expires_without_a_pane_match() {
-  local st rec now
-  st=$(new_state stale-record)
-  now=$(date +%s)
-  rec="$st/task-f.gateway-stall"
-  printf 'v1 first=%s attempts=0 last=%s notified=0 kind=server_error\n' \
-    "$(( now - 900 ))" "$(( now - 900 ))" > "$rec"
-  touch -t "$(date -r "$(( now - 900 ))" +%Y%m%d%H%M.%S 2>/dev/null || date +%Y%m%d%H%M.%S)" "$rec" 2>/dev/null || true
-  FM_GATEWAY_STALL_FRESH=300
-  export FM_GATEWAY_STALL_FRESH
-  fm_gateway_stalled_now "$st" task-f 'ordinary pane output' \
-    && fail "a hook record older than its freshness window must not hold the ladder open alone"
-  unset FM_GATEWAY_STALL_FRESH
-  pass "a stale hook record expires instead of holding the ladder open forever"
+  pass "the rendered pane is the single detector: it alone opens, keeps, and ends a stall"
 }
 
 test_spent_budget_declares_an_external_wait_not_a_wedge() {
   local st line
   st=$(new_state paused-line)
-  fm_gateway_note_stall "$st" task-g server_error || fail "could not open a stall record"
+  fm_gateway_note_stall "$st" task-g || fail "could not open a stall record"
   fm_gateway_record_attempt "$st" task-g || fail "could not charge an attempt"
   line=$(fm_gateway_paused_status_line "$st" task-g)
   case "$line" in
@@ -209,72 +239,6 @@ test_spent_budget_declares_an_external_wait_not_a_wedge() {
   pass "a spent budget declares a keyed external wait rather than a wedge"
 }
 
-# --- the StopFailure detector hook ------------------------------------------
-
-run_hook() {  # <state-dir> <task> <payload-json>
-  printf '%s' "$3" | env -u GROK_AGENT -u GROK_HOOK_EVENT \
-    "$HOOK" --task "$2" --state "$1"
-}
-
-test_hook_records_a_transient_stop_failure() {
-  local st
-  command -v jq >/dev/null 2>&1 || { pass "hook payload tests skipped: no jq on this host"; return; }
-  st=$(new_state hook-transient)
-  run_hook "$st" task-h "$(jq -nc --arg m "$E503_ACCOUNTS" \
-    '{hook_event_name:"StopFailure",error:"server_error",last_assistant_message:$m}')" \
-    || fail "the hook must always exit 0"
-  fm_gateway_stall_open "$st" task-h || fail "a transient StopFailure was not recorded"
-  pass "the StopFailure hook records a transient gateway stall"
-}
-
-test_hook_clears_the_record_on_any_other_failure() {
-  local st
-  command -v jq >/dev/null 2>&1 || { pass "hook payload tests skipped: no jq on this host"; return; }
-  st=$(new_state hook-clears)
-  fm_gateway_note_stall "$st" task-i server_error || fail "could not seed a stall record"
-  run_hook "$st" task-i "$(jq -nc --arg m "$E_LIMIT" \
-    '{hook_event_name:"StopFailure",error:"rate_limit",last_assistant_message:$m}')" \
-    || fail "the hook must always exit 0"
-  fm_gateway_stall_open "$st" task-i \
-    && fail "a different failure proves the earlier stall is over and must drop its budget"
-  pass "the StopFailure hook drops a stale stall record on any other failure"
-}
-
-test_hook_is_inert_on_a_foreign_or_unreadable_payload() {
-  local st
-  st=$(new_state hook-inert)
-  run_hook "$st" task-j '' || fail "empty input must exit 0"
-  fm_gateway_stall_open "$st" task-j && fail "empty input must record nothing"
-  run_hook "$st" task-j 'not json at all' || fail "malformed input must exit 0"
-  fm_gateway_stall_open "$st" task-j && fail "malformed input must record nothing"
-  if command -v jq >/dev/null 2>&1; then
-    run_hook "$st" task-j "$(jq -nc '{hook_event_name:"Stop",stop_hook_active:false}')" \
-      || fail "a non-StopFailure event must exit 0"
-    fm_gateway_stall_open "$st" task-j && fail "a Stop payload must record nothing"
-    printf '%s' "$(jq -nc --arg m "$E503_ACCOUNTS" \
-      '{hook_event_name:"StopFailure",error:"server_error",last_assistant_message:$m}')" \
-      | GROK_HOOK_EVENT=stop "$HOOK" --task task-k --state "$st" \
-      || fail "a foreign host payload must exit 0"
-    fm_gateway_stall_open "$st" task-k \
-      && fail "the hook must stand down on a foreign harness host"
-  fi
-  pass "the StopFailure hook is inert on empty, malformed, wrong-event, and foreign-host input"
-}
-
-test_hook_never_exits_two() {
-  # StopFailure is executed outside Claude's REPL loop, so exit 2 buys nothing
-  # and only risks being read as a hook failure. Pinned so nobody "upgrades"
-  # this detector into a blocker that cannot work.
-  local st rc=0
-  command -v jq >/dev/null 2>&1 || { pass "hook payload tests skipped: no jq on this host"; return; }
-  st=$(new_state hook-exit)
-  printf '%s' "$(jq -nc --arg m "$E503_ACCOUNTS" \
-    '{hook_event_name:"StopFailure",error:"server_error",last_assistant_message:$m}')" \
-    | env -u GROK_AGENT -u GROK_HOOK_EVENT "$HOOK" --task task-l --state "$st" >/dev/null 2>&1 || rc=$?
-  [ "$rc" -eq 0 ] || fail "the detector hook exited $rc; it must always exit 0"
-  pass "the StopFailure detector never exits 2"
-}
-
 # --- the out-of-session primary keep-alive agent ------------------------------
 #
 # Driven over a real fake backend rather than asserted on its source, because
@@ -282,6 +246,34 @@ test_hook_never_exits_two() {
 
 AGENT="$ROOT/bin/fm-keepalive-agent.sh"
 ENDPOINT="$ROOT/bin/fm-keepalive-endpoint.sh"
+
+# A fake process table: the pid named by FM_FAKE_LOCK_PID is a live claude
+# harness, every other pid is a plain shell. This is what makes state/.lock
+# mean "a live firstmate session" the way bin/fm-lock.sh and its readers mean
+# it, rather than "some process is alive".
+write_fake_ps() {  # <fakebin>
+  cat > "$1/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+harness=${FM_FAKE_LOCK_PID:-}
+case "$field" in
+  comm=) if [ "$pid" = "$harness" ]; then printf '/usr/local/bin/claude\n'; else printf '/bin/bash\n'; fi ;;
+  args=) if [ "$pid" = "$harness" ]; then printf 'claude --resume\n'; else printf 'bash\n'; fi ;;
+  ppid=) if [ "$pid" = "$harness" ]; then printf '1\n'; else printf '%s\n' "${harness:-1}"; fi ;;
+  *) printf '\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$1/ps"
+}
 
 make_primary_home() {  # <name>; echoes the home dir
   local name=$1 home
@@ -298,17 +290,19 @@ esac
 exit 0
 SH
   chmod +x "$home/fakebin/tmux"
+  write_fake_ps "$home/fakebin"
   : > "$home/send.log"
   printf 'window=x:y\nkind=ship\n' > "$home/state/t1.meta"
   TMUX_PANE='%9' "$ENDPOINT" record --state "$home/state" >/dev/null \
     || fail "could not record a primary endpoint for $name"
-  printf '%s' "$E503_ACCOUNTS" > "$home/pane.txt"
-  printf '%s\n' 'ordinary output, nothing wrong' > "$home/recovered.txt"
+  printf '%s\n%s' "$E503_ACCOUNTS" "$IDLE_FOOTER" > "$home/pane.txt"
+  printf '%s\n%s' 'ordinary output, nothing wrong' "$IDLE_FOOTER" > "$home/recovered.txt"
+  printf '%s\n%s\n%s' "$E503_ACCOUNTS" '⏺ carrying on with the interrupted step' \
+    '✻ Thinking… (esc to interrupt)' > "$home/busy.txt"
   printf '%s\n' "$home"
 }
 
-# Runs one agent pass with a live session lock and echoes how many keystroke
-# batches reached the pane.
+# Runs one agent pass and echoes how many keystroke batches reached the pane.
 agent_pass() {  # <home> <pane-file> [extra env...]
   local home=$1 pane=$2
   shift 2
@@ -318,13 +312,15 @@ agent_pass() {  # <home> <pane-file> [extra env...]
   wc -l < "$home/send.log" | tr -d ' '
 }
 
+# Seeds state/.lock exactly as bin/fm-lock.sh writes it - a BARE pid - naming a
+# live process the fake process table reports as a claude harness.
 with_live_lock() {  # <home> <command...>
   local home=$1 pid rc
   shift
   sleep 30 &
   pid=$!
-  printf 'pid=%s\n' "$pid" > "$home/state/.lock"
-  "$@"
+  printf '%s\n' "$pid" > "$home/state/.lock"
+  FM_FAKE_LOCK_PID=$pid "$@"
   rc=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
@@ -343,17 +339,62 @@ test_primary_agent_re_rings_a_stalled_primary() {
   pass "the primary keep-alive re-rings a primary stalled on a gateway error"
 }
 
+test_primary_agent_never_types_into_a_busy_primary() {
+  # The captain, or an earlier pass, already nudged the primary and it is
+  # mid-turn with the old error still on screen. Typing now would land a second
+  # continue line in a running turn.
+  local home sent
+  home=$(make_primary_home primary-busy)
+  touch "$home/state/.last-watcher-beat"
+  sent=$(with_live_lock "$home" agent_pass "$home" "$home/busy.txt" \
+    env FM_GATEWAY_RETRY_BACKOFF=0)
+  [ "$sent" -eq 0 ] || fail "the keep-alive typed into a primary that is mid-turn"
+  [ ! -f "$home/state/.primary.gateway-stall" ] \
+    || fail "a busy primary must not be charged a gateway stall"
+  pass "the primary keep-alive stands down while the primary's pane is busy"
+}
+
+test_primary_agent_drops_the_record_once_the_primary_recovered() {
+  local home sent now
+  home=$(make_primary_home primary-recovered)
+  touch "$home/state/.last-watcher-beat"
+  now=$(date +%s)
+  printf 'v1 first=%s attempts=1 last=%s notified=0 kind=pane\n' \
+    "$(( now - 100 ))" "$(( now - 100 ))" > "$home/state/.primary.gateway-stall"
+  sent=$(with_live_lock "$home" agent_pass "$home" "$home/recovered.txt" \
+    env FM_GATEWAY_RETRY_BACKOFF=0)
+  [ "$sent" -eq 0 ] || fail "a recovered primary was re-rung"
+  [ ! -f "$home/state/.primary.gateway-stall" ] \
+    || fail "a recovered primary's stall record was kept, so a later stall would start with a spent budget"
+  pass "the primary keep-alive drops the stall record once the primary's pane has moved on"
+}
+
 test_primary_agent_refuses_a_pane_with_no_live_session() {
   # The dangerous case: the pane may no longer be firstmate at all, and typing
   # a paragraph at a plain shell prompt is worse than doing nothing.
   local home sent
   home=$(make_primary_home primary-dead-session)
-  printf 'pid=999999\n' > "$home/state/.lock"
+  printf '999999\n' > "$home/state/.lock"
   sent=$(agent_pass "$home" "$home/pane.txt" env FM_GATEWAY_RETRY_BACKOFF=0)
   [ "$sent" -eq 0 ] || fail "the keep-alive typed into a pane whose session lock names no live owner"
   grep -q 'no live owner' "$home/state/.keepalive-agent.log" \
     || fail "the refusal was not reported"
   pass "the primary keep-alive refuses to type into a pane with no live session"
+}
+
+test_primary_agent_requires_the_lock_owner_to_be_a_harness() {
+  # A bare pid that is alive but is not a harness process is a reused pid, not
+  # firstmate. The same liveness predicate the lock's own readers use decides.
+  local home sent pid
+  home=$(make_primary_home primary-reused-pid)
+  sleep 30 &
+  pid=$!
+  printf '%s\n' "$pid" > "$home/state/.lock"
+  sent=$(FM_FAKE_LOCK_PID=0 agent_pass "$home" "$home/pane.txt" env FM_GATEWAY_RETRY_BACKOFF=0)
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$sent" -eq 0 ] || fail "a live non-harness pid in state/.lock was treated as a running firstmate session"
+  pass "the primary keep-alive treats a live non-harness lock pid as no session"
 }
 
 test_primary_agent_stops_at_the_budget_and_reports_the_outage() {
@@ -407,26 +448,167 @@ test_primary_agent_is_inert_without_a_recorded_endpoint() {
   pass "the primary keep-alive is inert, and says so, without a proved endpoint"
 }
 
+test_installer_plist_has_no_dead_flag() {
+  # The plist is the generated artifact launchd consumes; the agent takes no
+  # --once, so the job must not pass one.
+  local home fakebin out plist
+  home="$TMP_ROOT/plist-shape"
+  rm -rf "${home:?}"
+  mkdir -p "$home/state" "$home/fakehome"
+  fakebin=$(fm_fakebin "$home")
+  fm_fake_exit0 "$fakebin" launchctl
+  printf '#!/usr/bin/env bash\nprintf Darwin\\\\n\n' > "$fakebin/uname"
+  chmod +x "$fakebin/uname"
+  out=$(HOME="$home/fakehome" PATH="$fakebin:$PATH" TMUX_PANE='%3' \
+    "$ROOT/bin/fm-keepalive-install.sh" install --home "$home" 2>&1) \
+    || fail "install refused: $out"
+  plist=$(find "$home/fakehome/Library/LaunchAgents" -name 'ai.firstmate.keepalive.*.plist' | head -1)
+  [ -n "$plist" ] || fail "install wrote no plist"
+  grep -q "$ROOT/bin/fm-keepalive-agent.sh" "$plist" || fail "the job does not run this home's agent"
+  grep -q -- '--once' "$plist" && fail "the job passes a --once the agent does not take"
+  pass "the launchd job runs the agent with --home only"
+}
+
+# --- the main home's session-start install sweep ------------------------------
+#
+# Driven through the real bin/fm-bootstrap.sh over a genuine primary checkout:
+# a plain git repository carrying AGENTS.md, its own bin/, a state dir, and a
+# session lock owned by this process tree (through the fake process table). The
+# launchd side is a fake launchctl and a HOME under the fixture, so nothing
+# leaves the fixture.
+
+BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
+
+make_locked_primary_checkout() {  # <name>; echoes the home dir
+  local name=$1 home fakebin
+  home="$TMP_ROOT/boot-$name"
+  rm -rf "${home:?}"
+  mkdir -p "$home/state" "$home/config" "$home/fakehome"
+  git init -q "$home"
+  cp -R "$ROOT/bin" "$home/bin"
+  : > "$home/AGENTS.md"
+  printf '700\n' > "$home/state/.lock"
+  fakebin=$(fm_fakebin "$home")
+  write_fake_ps "$fakebin"
+  cat > "$fakebin/launchctl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_LAUNCHCTL_LOG:-/dev/null}"
+exit 0
+SH
+  chmod +x "$fakebin/launchctl"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_FAKE_UNAME:-Darwin}"
+SH
+  chmod +x "$fakebin/uname"
+  printf '%s\n' "$home"
+}
+
+# One session-start bootstrap over <home>; prints its stdout.
+run_sweep() {  # <home> [env...]
+  local home=$1
+  shift
+  HOME="$home/fakehome" PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_FAKE_LOCK_PID=700 FM_FAKE_LAUNCHCTL_LOG="$home/launchctl.log" \
+    FM_BOOTSTRAP_NETWORK=skip TMUX_PANE='%9' "$@" "$BOOTSTRAP" 2>/dev/null
+}
+
+keepalive_lines() {  # <output>
+  printf '%s\n' "$1" | grep -c '^BOOTSTRAP_INFO: primary keep-alive ' || true
+}
+
+installed_plist() {  # <home>
+  find "$1/fakehome/Library/LaunchAgents" -name 'ai.firstmate.keepalive.*.plist' 2>/dev/null | head -1
+}
+
+test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoint() {
+  local home out plist sum1 sum2 loads
+  home=$(make_locked_primary_checkout install)
+  out=$(run_sweep "$home")
+  [ "$(keepalive_lines "$out")" = 1 ] || fail "expected exactly one primary keep-alive fact on first session start, got: $out"
+  printf '%s\n' "$out" | grep -q '^BOOTSTRAP_INFO: primary keep-alive installed' \
+    || fail "the first session start did not report the install: $out"
+  plist=$(installed_plist "$home")
+  [ -n "$plist" ] || fail "session start installed no launchd job"
+  grep -q "$home/bin/fm-keepalive-agent.sh" "$plist" || fail "the job does not run this home's own agent"
+  grep -q 'bootstrap' "$home/launchctl.log" || fail "the job was written but never loaded"
+  [ "$("$ENDPOINT" read --state "$home/state" --field target)" = '%9' ] \
+    || fail "session start did not record the primary's own pane"
+
+  sum1=$(shasum < "$plist")
+  loads=$(wc -l < "$home/launchctl.log" | tr -d ' ')
+  out=$(run_sweep "$home")
+  [ "$(keepalive_lines "$out")" = 0 ] || fail "a session start with the job already installed must be quiet, got: $out"
+  sum2=$(shasum < "$plist")
+  [ "$sum1" = "$sum2" ] || fail "an already-installed job was rewritten"
+  [ "$(wc -l < "$home/launchctl.log" | tr -d ' ')" = "$loads" ] || fail "an already-installed job was reloaded"
+
+  out=$(run_sweep "$home" env TMUX_PANE='%10')
+  [ "$(keepalive_lines "$out")" = 1 ] || fail "a relaunch into a new pane must report one refresh, got: $out"
+  printf '%s\n' "$out" | grep -q '^BOOTSTRAP_INFO: primary keep-alive refreshed' \
+    || fail "the relaunch was not reported as a refresh: $out"
+  [ "$("$ENDPOINT" read --state "$home/state" --field target)" = '%10' ] \
+    || fail "the relaunched primary's pane was not re-recorded"
+  [ "$(wc -l < "$home/launchctl.log" | tr -d ' ')" = "$loads" ] || fail "a refresh must not reload the job"
+  pass "the main home's session start installs the keep-alive once, stays quiet after, and re-points it on relaunch"
+}
+
+test_session_start_keepalive_honours_the_opt_out_and_its_scope() {
+  local home out
+  home=$(make_locked_primary_checkout opt-out)
+  : > "$home/config/keepalive-off"
+  out=$(run_sweep "$home")
+  [ "$(keepalive_lines "$out")" = 0 ] || fail "config/keepalive-off must silence the sweep, got: $out"
+  [ -z "$(installed_plist "$home")" ] || fail "config/keepalive-off must install nothing"
+
+  home=$(make_locked_primary_checkout linux)
+  out=$(run_sweep "$home" env FM_FAKE_UNAME=Linux)
+  [ "$(keepalive_lines "$out")" = 0 ] || fail "a non-macOS host must print nothing, got: $out"
+  [ -z "$(installed_plist "$home")" ] || fail "a non-macOS host must install nothing"
+
+  home=$(make_locked_primary_checkout secondmate)
+  printf 'mate-1\n' > "$home/.fm-secondmate-home"
+  out=$(run_sweep "$home")
+  [ "$(keepalive_lines "$out")" = 0 ] || fail "a secondmate home stays opt-in, got: $out"
+  [ -z "$(installed_plist "$home")" ] || fail "a secondmate home must not be auto-installed"
+
+  home=$(make_locked_primary_checkout unowned)
+  printf '999999\n' > "$home/state/.lock"
+  out=$(run_sweep "$home")
+  [ "$(keepalive_lines "$out")" = 0 ] || fail "a session that does not own the fleet lock must not record its pane, got: $out"
+  [ -z "$(installed_plist "$home")" ] || fail "a session that does not own the fleet lock must install nothing"
+  [ ! -e "$home/state/.primary-endpoint" ] || fail "a session that does not own the fleet lock recorded its pane as the primary"
+
+  home=$(make_locked_primary_checkout detect-only)
+  out=$(run_sweep "$home" env FM_BOOTSTRAP_DETECT_ONLY=1)
+  [ "$(keepalive_lines "$out")" = 0 ] || fail "a detect-only session start must not install, got: $out"
+  [ -z "$(installed_plist "$home")" ] || fail "a detect-only session start installed the job"
+  pass "the session-start keep-alive sweep honours config/keepalive-off, macOS only, main home only, lock ownership, and detect-only"
+}
+
 
 test_text_classifier_accepts_the_real_transient_errors
 test_deny_list_beats_a_transient_code_inside_a_permanent_failure
+test_deny_list_matches_anywhere_while_the_transient_match_is_bounded
+test_a_recovered_agent_with_the_old_error_in_scrollback_is_not_stalled
+test_repository_text_naming_the_errors_is_not_a_stall
 test_a_gateway_that_is_simply_down_is_not_retried
-test_typed_kind_and_text_are_independent_positives
 test_ladder_is_bounded_by_attempts
 test_ladder_is_bounded_by_wall_clock_independently
 test_re_noting_a_stall_cannot_push_the_next_attempt_out_of_reach
 test_first_attempt_waits_out_its_backoff
 test_backoff_ladder_repeats_its_last_step
-test_pane_is_authoritative_after_the_first_attempt
-test_stale_hook_record_expires_without_a_pane_match
+test_pane_is_the_single_detector
 test_spent_budget_declares_an_external_wait_not_a_wedge
-test_hook_records_a_transient_stop_failure
-test_hook_clears_the_record_on_any_other_failure
-test_hook_is_inert_on_a_foreign_or_unreadable_payload
-test_hook_never_exits_two
 test_primary_agent_re_rings_a_stalled_primary
+test_primary_agent_never_types_into_a_busy_primary
+test_primary_agent_drops_the_record_once_the_primary_recovered
 test_primary_agent_refuses_a_pane_with_no_live_session
+test_primary_agent_requires_the_lock_owner_to_be_a_harness
 test_primary_agent_stops_at_the_budget_and_reports_the_outage
 test_primary_agent_repairs_lapsed_supervision_once_per_episode
 test_primary_agent_stands_down_in_away_mode_and_when_idle
 test_primary_agent_is_inert_without_a_recorded_endpoint
+test_installer_plist_has_no_dead_flag
+test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoint
+test_session_start_keepalive_honours_the_opt_out_and_its_scope

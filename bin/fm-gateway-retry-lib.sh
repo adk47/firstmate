@@ -10,39 +10,38 @@
 # with its work unfinished. Nothing in the harness resumes it: the recovery is
 # to send the agent a message telling it to continue, which is exactly what the
 # steering inbox already does. This library holds the decision of WHEN that is
-# the right thing to do, so the three actors that can make it - the Claude
-# StopFailure hook (bin/fm-gateway-stall-hook.sh), the watcher
-# (bin/fm-watch.sh), and the primary keep-alive agent
-# (bin/fm-keepalive-agent.sh) - share one classifier, one budget, and one
-# record instead of three drifting copies.
+# the right thing to do, so the two actors that can make it - the watcher
+# (bin/fm-watch.sh) for a crewmate or scout, and the primary keep-alive agent
+# (bin/fm-keepalive-agent.sh) for the primary session - share one classifier,
+# one budget, and one record instead of two drifting copies.
 #
 # WHY NOT A BLOCKING HOOK. Claude Code ends an API-error turn through
 # StopFailure, never Stop, and StopFailure is executed OUTSIDE the REPL loop
 # (executeStopFailureHooks awaits the hook runner and discards its result), so a
 # StopFailure hook cannot block the stop or force a continuation the way the
 # turn-end guard does on Stop. Verified live on 2.1.266; see
-# docs/verification/gateway-keepalive.md. The hook is therefore a DETECTOR that
-# records the stall, and re-ringing is done by an actor outside the session.
+# docs/verification/gateway-keepalive.md. Detection is therefore done from the
+# RENDERED PANE by an actor outside the session, which is also the only signal
+# that keeps saying "still stalled" for as long as the stall lasts.
 #
-# CLASSIFICATION reads two independent signals and lets either carry a positive
-# verdict, because they fail for different reasons:
+# CLASSIFICATION reads the pane's tail. A turn-ending API error renders in the
+# few lines immediately above the harness's prompt and footer, so the transient
+# match is bounded to the last FM_GATEWAY_TAIL_LINES non-blank lines of whatever
+# the caller captured - the same bounded footer window bin/fm-watch.sh's busy
+# match uses, and for the same reason: an agent that recovered and went idle
+# again with the old error still in its scrollback must not be re-rung, and an
+# agent that merely printed this repository's own sources must not be either.
+# Only the harness's rendered "API Error: <5xx>" shape matches, never a bare
+# word such as "overloaded".
 #
-#   1. The harness's TYPED error kind. Claude Code's StopFailure payload carries
-#      a closed enum (`error`), of which `overloaded` and `server_error` are the
-#      transient gateway class. This is the structural signal and it does not
-#      depend on rendered wording.
-#   2. The error TEXT. The watcher and the keep-alive agent read a rendered pane
-#      and have no typed field at all, so the text classifier is the only source
-#      available to them.
-#
-# A DENY list runs first and wins outright over both. It exists because the
-# non-retryable failures are the expensive mistakes: re-ringing an agent whose
-# prompt is too long, whose credential expired, or which hit a usage limit burns
-# the budget without any chance of progress, and one of those failures
-# ("Prompt is too long - automatic compaction failed: API Error: 503 ...")
-# literally contains a 503 in its text. The deny patterns and the transient
-# patterns below were both taken from a census of the real transcripts this
-# fleet produced, not from guesses.
+# A DENY list runs first, over the WHOLE supplied text, and wins outright. It
+# exists because the non-retryable failures are the expensive mistakes:
+# re-ringing an agent whose prompt is too long, whose credential expired, or
+# which hit a usage limit burns the budget without any chance of progress, and
+# one of those failures ("Prompt is too long - automatic compaction failed: API
+# Error: 503 ...") literally contains a 503 in its text. The deny patterns and
+# the transient patterns below were both taken from a census of the real
+# transcripts this fleet produced, not from guesses.
 #
 # BUDGET. A stall record is bounded twice, because either bound alone is
 # insufficient: an attempt count stops a fast loop, and a wall-clock horizon
@@ -55,14 +54,14 @@
 #   FM_GATEWAY_RETRY_MAX        default 8; re-ring attempts before the budget is spent
 #   FM_GATEWAY_RETRY_HORIZON    default 2700; seconds from first stall before the budget is spent
 #   FM_GATEWAY_RETRY_BACKOFF    default "30 60 120 300"; per-attempt wait, last value repeats
-#   FM_GATEWAY_STALL_FRESH      default 300; how long a hook-opened record alone keeps the ladder open
+#   FM_GATEWAY_TAIL_LINES       default 10; non-blank pane lines above the footer the transient match reads
 #
-# No side effects on source. Dependency-light: pure shell plus date/stat.
+# No side effects on source. Dependency-light: pure shell plus date.
 
 FM_GATEWAY_RETRY_MAX_DEFAULT=8
 FM_GATEWAY_RETRY_HORIZON_DEFAULT=2700
 FM_GATEWAY_RETRY_BACKOFF_DEFAULT='30 60 120 300'
-FM_GATEWAY_STALL_FRESH_DEFAULT=300
+FM_GATEWAY_TAIL_LINES_DEFAULT=10
 
 # The exact instruction a stalled agent is re-rung with. It deliberately names
 # the cause and asks for continuation rather than restatement, so the agent picks
@@ -82,10 +81,10 @@ fm_gateway_retry_horizon() {
   printf '%s' "$h"
 }
 
-fm_gateway_stall_fresh() {
-  local f=${FM_GATEWAY_STALL_FRESH:-$FM_GATEWAY_STALL_FRESH_DEFAULT}
-  case "$f" in ''|*[!0-9]*) f=$FM_GATEWAY_STALL_FRESH_DEFAULT ;; esac
-  printf '%s' "$f"
+fm_gateway_tail_lines() {
+  local n=${FM_GATEWAY_TAIL_LINES:-$FM_GATEWAY_TAIL_LINES_DEFAULT}
+  case "$n" in ''|*[!0-9]*|0) n=$FM_GATEWAY_TAIL_LINES_DEFAULT ;; esac
+  printf '%s' "$n"
 }
 
 # Seconds to wait before delivery attempt <n> (1-based). The configured ladder's
@@ -114,8 +113,8 @@ fm_gateway_backoff_secs() {  # <attempt>
 # --- classification ----------------------------------------------------------
 
 # 0 when the text names a failure that must NEVER be retried. Checked before any
-# transient match and beats it, because these strings can carry a transient code
-# inside a non-transient failure.
+# transient match, over the whole supplied text, and beats it, because these
+# strings can carry a transient code inside a non-transient failure.
 fm_gateway_text_is_permanent() {  # <text>
   local t
   t=$(printf '%s' "${1-}" | tr '[:upper:]' '[:lower:]')
@@ -136,61 +135,26 @@ fm_gateway_text_is_permanent() {  # <text>
   return 1
 }
 
-# 0 when the text names a transient gateway failure worth re-ringing for.
-# Matches the harness's rendered "API Error: <5xx>" shape and the gateway's own
-# out-of-capacity sentences, so it works whether the code or the body survives
-# in whatever the caller could read.
-fm_gateway_text_is_transient() {  # <text>
-  local t
-  t=$(printf '%s' "${1-}" | tr '[:upper:]' '[:lower:]')
-  [ -n "$t" ] || return 1
-  fm_gateway_text_is_permanent "$t" && return 1
+# 0 when the rendered pane tail shows a transient gateway failure worth
+# re-ringing for. The deny list is consulted over the whole text; the transient
+# match reads only the last FM_GATEWAY_TAIL_LINES non-blank lines, which is where
+# a turn-ending API error renders, immediately above the prompt and footer.
+fm_gateway_text_is_transient() {  # <pane-text>
+  local text=${1-} t
+  [ -n "$text" ] || return 1
+  fm_gateway_text_is_permanent "$text" && return 1
+  t=$(printf '%s\n' "$text" | grep -v '^[[:space:]]*$' | tail -n "$(fm_gateway_tail_lines)" \
+    | tr '[:upper:]' '[:lower:]')
   case "$t" in
     *'api error: 500'*|*'api error: 502'*|*'api error: 503'*|*'api error: 504'*|*'api error: 529'*) return 0 ;;
-    *'all accounts are temporarily unavailable'*) return 0 ;;
-    *'service temporarily unavailable'*) return 0 ;;
-    *'overloaded'*) return 0 ;;
   esac
-  return 1
-}
-
-# 0 when the harness's TYPED error kind is the transient gateway class. Only the
-# two kinds that mean "the far side could not serve this request right now"
-# qualify; every other kind of the closed enum, including the `unknown` fallback,
-# is left to the text classifier so an unrecognised kind can still be caught by
-# its wording but can never be retried on the kind alone.
-fm_gateway_kind_is_transient() {  # <error-kind>
-  case "${1-}" in
-    overloaded|server_error) return 0 ;;
-  esac
-  return 1
-}
-
-# 0 when the typed kind is one that must never be retried whatever the text says.
-fm_gateway_kind_is_permanent() {  # <error-kind>
-  case "${1-}" in
-    authentication_failed|oauth_org_not_allowed|account_on_hold|billing_error) return 0 ;;
-    rate_limit|invalid_request|model_not_found|max_output_tokens) return 0 ;;
-  esac
-  return 1
-}
-
-# The combined verdict both detectors use: 0 when this failure should be
-# re-rung. A permanent typed kind or permanent text wins outright; otherwise
-# either independent signal is enough.
-fm_gateway_is_transient() {  # <error-kind> <text>
-  local kind=${1-} text=${2-}
-  fm_gateway_kind_is_permanent "$kind" && return 1
-  fm_gateway_text_is_permanent "$text" && return 1
-  fm_gateway_kind_is_transient "$kind" && return 0
-  fm_gateway_text_is_transient "$text" && return 0
   return 1
 }
 
 # --- durable stall record ----------------------------------------------------
 #
 # One record per stalled agent, at <state>/<scope>.gateway-stall:
-#   v1 first=<epoch> attempts=<n> last=<epoch> notified=<0|1> kind=<error-kind>
+#   v1 first=<epoch> attempts=<n> last=<epoch> notified=<0|1> kind=<detector>
 # <scope> is the task id for a crewmate or scout, and the reserved id below for
 # the primary session, which has no task record of its own. Removing the file is
 # always safe: it only costs the current stall its accumulated budget.
@@ -257,7 +221,7 @@ _fm_gateway_write() {  # <state-dir> <scope> <first> <attempts> <last> <notified
   [ -d "$state" ] || mkdir -p "$state" 2>/dev/null || return 1
   tmp="$rec.tmp.$$"
   printf 'v1 first=%s attempts=%s last=%s notified=%s kind=%s\n' \
-    "$3" "$4" "$5" "$6" "${7:-unknown}" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    "$3" "$4" "$5" "$6" "${7:-pane}" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$rec" 2>/dev/null || { rm -f "$tmp"; return 1; }
   return 0
 }
@@ -266,8 +230,8 @@ _fm_gateway_write() {  # <state-dir> <scope> <first> <attempts> <last> <notified
 # record that is already open: every detector calls this on every sighting, and
 # advancing the ladder's anchors here would restart the backoff on each poll and
 # the horizon would never be reached.
-fm_gateway_note_stall() {  # <state-dir> <scope> [error-kind]
-  local state=$1 scope=$2 kind=${3:-unknown} now
+fm_gateway_note_stall() {  # <state-dir> <scope> [detector]
+  local state=$1 scope=$2 kind=${3:-pane} now
   fm_gateway_stall_open "$state" "$scope" && return 0
   now=$(date +%s)
   _fm_gateway_write "$state" "$scope" "$now" 0 "$now" 0 "$kind"
@@ -282,7 +246,7 @@ fm_gateway_record_attempt() {  # <state-dir> <scope>
   attempts=$(( $(fm_gateway_attempts "$state" "$scope") + 1 ))
   notified=0
   fm_gateway_notified "$state" "$scope" && notified=1
-  kind=$(_fm_gateway_field "$(fm_gateway_record_path "$state" "$scope")" kind unknown)
+  kind=$(_fm_gateway_field "$(fm_gateway_record_path "$state" "$scope")" kind pane)
   _fm_gateway_write "$state" "$scope" "$first" "$attempts" "$(date +%s)" "$notified" "$kind"
 }
 
@@ -292,7 +256,7 @@ fm_gateway_mark_notified() {  # <state-dir> <scope>
   local state=$1 scope=$2 first attempts kind
   first=$(fm_gateway_first_seen "$state" "$scope") || first=$(date +%s)
   attempts=$(fm_gateway_attempts "$state" "$scope")
-  kind=$(_fm_gateway_field "$(fm_gateway_record_path "$state" "$scope")" kind unknown)
+  kind=$(_fm_gateway_field "$(fm_gateway_record_path "$state" "$scope")" kind pane)
   _fm_gateway_write "$state" "$scope" "$first" "$attempts" "$(date +%s)" 1 "$kind"
 }
 
@@ -314,38 +278,17 @@ fm_gateway_stall_age() {  # <state-dir> <scope>
   printf '0'
 }
 
-# Seconds since the record was last written, or a large number when absent.
-fm_gateway_record_age() {  # <state-dir> <scope>
-  local rec mtime
-  rec=$(fm_gateway_record_path "$1" "$2")
-  [ -f "$rec" ] || { printf '999999'; return 0; }
-  mtime=$(stat -f %m "$rec" 2>/dev/null || stat -c %Y "$rec" 2>/dev/null || true)
-  case "$mtime" in ''|*[!0-9]*) printf '999999'; return 0 ;; esac
-  printf '%s' "$(( $(date +%s) - mtime ))"
-}
-
 # THE entry and exit decision for the re-ring ladder, shared by the watcher and
 # the primary keep-alive agent so an agent cannot be in the ladder for one and
-# out of it for the other. <pane-text> is whatever rendered tail the caller
-# already read; pass an empty string when there is none.
-#
-# The rendered pane is authoritative, because it is the one signal that keeps
-# saying "still stalled" for as long as the stall lasts. The hook's record alone
-# holds the ladder open ONLY before the first attempt is charged: that is the
-# gap between the harness failing the turn and the next poll rendering it, and
-# it is the only window in which the record knows something the pane does not.
-# After an attempt, a pane that no longer shows the error is a recovered agent,
-# and the record is dropped rather than re-ringing an agent that is already
+# out of it for the other. <pane-text> is the rendered tail the caller already
+# read. The pane is the only detector: a tail showing the transient error opens
+# or keeps the record, and a tail that no longer shows it is a recovered agent,
+# whose record is dropped rather than re-ringing an agent that is already
 # working again.
 fm_gateway_stalled_now() {  # <state-dir> <scope> <pane-text>
   local state=$1 scope=$2 pane=${3-}
   if fm_gateway_text_is_transient "$pane"; then
     fm_gateway_note_stall "$state" "$scope" pane || return 1
-    return 0
-  fi
-  fm_gateway_stall_open "$state" "$scope" || return 1
-  if [ "$(fm_gateway_attempts "$state" "$scope")" -eq 0 ] \
-    && [ "$(fm_gateway_record_age "$state" "$scope")" -lt "$(fm_gateway_stall_fresh)" ]; then
     return 0
   fi
   fm_gateway_clear "$state" "$scope"
