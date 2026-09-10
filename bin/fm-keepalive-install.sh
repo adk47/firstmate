@@ -193,25 +193,28 @@ EOM
     require_macos 2>/dev/null || exit 1
     prev_backend=$(endpoint_field backend)
     prev_target=$(endpoint_field target)
+    previous=''
+    [ -z "$prev_backend" ] || [ -z "$prev_target" ] || previous="$prev_backend $prev_target"
+    # This session's own pane, when it can prove one. A home whose terminal
+    # proves nothing is not stuck: state/.primary-endpoint is exactly the record
+    # an install that took --backend/--target left for later sessions to use.
+    record=$(record_endpoint 2>/dev/null) || record=''
     if [ -f "$PLIST" ] && job_loaded; then
-      # A loaded job that already knows a pane is healthy even when THIS session
-      # cannot read its own endpoint: an install that took --backend/--target is
-      # exactly that home, and re-detection here is only a refresh.
-      if ! record=$(record_endpoint 2>/dev/null); then
-        [ -z "$prev_backend" ] || [ -z "$prev_target" ] || exit 0
+      if [ -z "$record" ]; then
+        [ -n "$previous" ] && exit 0
         echo "the launchd job is loaded but this home has no recorded primary pane and this session's own terminal endpoint could not be read, so the keep-alive has nothing to supervise" >&2
         exit 1
       fi
-      [ "$prev_backend $prev_target" = "$record" ] \
+      [ "$previous" = "$record" ] \
         || echo "refreshed: primary endpoint now $record for launchd job $LABEL"
       exit 0
     fi
-    record=$(record_endpoint 2>/dev/null) || {
-      echo "this session's own terminal endpoint could not be read, so no primary pane was recorded and no job was installed" >&2
+    if [ -z "$record" ] && [ -z "$previous" ]; then
+      echo "this session's own terminal endpoint could not be read and this home has no recorded primary pane, so no job was installed" >&2
       exit 1
-    }
+    fi
     write_and_load_job || exit 1
-    echo "installed: launchd job $LABEL every ${INTERVAL}s, primary endpoint $record"
+    echo "installed: launchd job $LABEL every ${INTERVAL}s, primary endpoint ${record:-$previous}"
     ;;
   status)
     echo "label: $LABEL"

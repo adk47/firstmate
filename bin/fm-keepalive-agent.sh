@@ -196,7 +196,10 @@ if ! pane_is_busy && fm_gateway_stalled_now "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE"
   exit 0
 fi
 
-fm_keepalive_notice_clear "$STATE" outage
+# Only a record that has actually been examined and dropped is evidence the
+# outage ended. A busy pane never reached the classifier and proves nothing.
+fm_gateway_stall_open "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE" \
+  || fm_keepalive_notice_clear "$STATE" outage
 
 # --- 2. session gone ---------------------------------------------------------
 
