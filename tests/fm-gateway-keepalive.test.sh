@@ -552,6 +552,35 @@ test_installer_plist_has_no_dead_flag() {
   pass "the launchd job runs the agent with --home only"
 }
 
+test_installer_plist_survives_xml_significant_paths() {
+  # launchd parses the plist as XML, so a home or PATH entry carrying & or < is
+  # the difference between a job that loads and one that silently never runs.
+  command -v python3 >/dev/null 2>&1 || { pass "skipped: python3 not found"; return 0; }
+  local home fakebin out plist
+  home="$TMP_ROOT/plist-r&d<x>"
+  rm -rf "${home:?}"
+  mkdir -p "$home/state" "$home/fakehome"
+  fakebin=$(fm_fakebin "$home")
+  fm_fake_exit0 "$fakebin" launchctl
+  printf '#!/usr/bin/env bash\nprintf Darwin\\\\n\n' > "$fakebin/uname"
+  chmod +x "$fakebin/uname"
+  out=$(HOME="$home/fakehome" PATH="$fakebin:$home/r&d/bin:$PATH" TMUX_PANE='%3' \
+    "$ROOT/bin/fm-keepalive-install.sh" install --home "$home" 2>&1) \
+    || fail "install refused: $out"
+  plist=$(find "$home/fakehome/Library/LaunchAgents" -name 'ai.firstmate.keepalive.*.plist' | head -1)
+  [ -n "$plist" ] || fail "install wrote no plist"
+  python3 - "$plist" "$home" <<'PY' || fail "the plist launchd would parse does not carry the paths it was given"
+import plistlib, sys
+job = plistlib.load(open(sys.argv[1], 'rb'))
+home = sys.argv[2]
+assert job['ProgramArguments'][1:] == ['--home', home], job['ProgramArguments']
+assert job['EnvironmentVariables']['FM_HOME'] == home, job['EnvironmentVariables']
+assert job['StandardOutPath'] == home + '/state/.keepalive-agent.out', job['StandardOutPath']
+assert home + '/r&d/bin' in job['EnvironmentVariables']['PATH'].split(':'), job['EnvironmentVariables']['PATH']
+PY
+  pass "the generated plist stays well-formed for a home and PATH carrying XML-significant characters"
+}
+
 # --- the main home's session-start install sweep ------------------------------
 #
 # Driven through the real bin/fm-bootstrap.sh over a genuine primary checkout:
@@ -576,7 +605,8 @@ make_locked_primary_checkout() {  # <name>; echoes the home dir
   cat > "$fakebin/launchctl" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_FAKE_LAUNCHCTL_LOG:-/dev/null}"
-exit 0
+[ "${1:-}" != print ] && exit 0
+exit "${FM_FAKE_LAUNCHCTL_PRINT_RC:-0}"
 SH
   chmod +x "$fakebin/launchctl"
   cat > "$fakebin/uname" <<'SH'
@@ -604,6 +634,12 @@ installed_plist() {  # <home>
   find "$1/fakehome/Library/LaunchAgents" -name 'ai.firstmate.keepalive.*.plist' 2>/dev/null | head -1
 }
 
+# Only the verbs that (re)load the job count as a load; a liveness probe is not
+# one.
+load_ops() {  # <home>
+  grep -c '^\(bootstrap\|load\) ' "$1/launchctl.log" 2>/dev/null || true
+}
+
 test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoint() {
   local home out plist sum1 sum2 loads
   home=$(make_locked_primary_checkout install)
@@ -619,12 +655,12 @@ test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoin
     || fail "session start did not record the primary's own pane"
 
   sum1=$(shasum < "$plist")
-  loads=$(wc -l < "$home/launchctl.log" | tr -d ' ')
+  loads=$(load_ops "$home")
   out=$(run_sweep "$home")
   [ "$(keepalive_lines "$out")" = 0 ] || fail "a session start with the job already installed must be quiet, got: $out"
   sum2=$(shasum < "$plist")
   [ "$sum1" = "$sum2" ] || fail "an already-installed job was rewritten"
-  [ "$(wc -l < "$home/launchctl.log" | tr -d ' ')" = "$loads" ] || fail "an already-installed job was reloaded"
+  [ "$(load_ops "$home")" = "$loads" ] || fail "an already-installed job was reloaded"
 
   out=$(run_sweep "$home" env TMUX_PANE='%10')
   [ "$(keepalive_lines "$out")" = 1 ] || fail "a relaunch into a new pane must report one refresh, got: $out"
@@ -632,8 +668,15 @@ test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoin
     || fail "the relaunch was not reported as a refresh: $out"
   [ "$("$ENDPOINT" read --state "$home/state" --field target)" = '%10' ] \
     || fail "the relaunched primary's pane was not re-recorded"
-  [ "$(wc -l < "$home/launchctl.log" | tr -d ' ')" = "$loads" ] || fail "a refresh must not reload the job"
-  pass "the main home's session start installs the keep-alive once, stays quiet after, and re-points it on relaunch"
+  [ "$(load_ops "$home")" = "$loads" ] || fail "a refresh must not reload the job"
+
+  # A plist on disk proves only that a file exists: launchd may have booted the
+  # job out, or never loaded it at all.
+  out=$(run_sweep "$home" env TMUX_PANE='%10' FM_FAKE_LAUNCHCTL_PRINT_RC=1)
+  printf '%s\n' "$out" | grep -q '^BOOTSTRAP_INFO: primary keep-alive installed' \
+    || fail "a plist whose job is not loaded was reported as healthy: $out"
+  [ "$(load_ops "$home")" -gt "$loads" ] || fail "the job launchd is not running was never re-bootstrapped"
+  pass "the main home's session start installs the keep-alive once, stays quiet after, re-points it on relaunch, and re-bootstraps a job launchd is not running"
 }
 
 test_session_start_keepalive_honours_the_opt_out_and_its_scope() {
@@ -696,5 +739,6 @@ test_endpoint_detects_a_cmux_primary_in_the_shape_the_backend_parses
 test_endpoint_refuses_a_runtime_it_cannot_read
 test_endpoint_record_carries_only_the_fields_it_documents
 test_installer_plist_has_no_dead_flag
+test_installer_plist_survives_xml_significant_paths
 test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoint
 test_session_start_keepalive_honours_the_opt_out_and_its_scope
