@@ -429,6 +429,26 @@ test_primary_agent_stops_at_the_budget_and_reports_the_outage() {
   pass "the primary keep-alive stops at its budget, records the outage for session start, and clears it on recovery"
 }
 
+test_primary_outage_notice_survives_a_busy_pane() {
+  # A busy pane is never classified, so it carries no evidence the outage ended.
+  # The captain typing a nudge into a still-503ing primary is exactly that.
+  local home now
+  home=$(make_primary_home primary-outage-busy)
+  now=$(date +%s)
+  printf 'v1 first=%s attempts=8 last=%s notified=0 kind=pane\n' \
+    "$(( now - 100 ))" "$(( now - 100 ))" > "$home/state/.primary.gateway-stall"
+  with_live_lock "$home" agent_pass "$home" "$home/pane.txt" \
+    env FM_GATEWAY_RETRY_BACKOFF=0 FM_GATEWAY_RETRY_MAX=8 >/dev/null
+  [ "$(fm_keepalive_notice_kind "$home/state")" = outage ] \
+    || fail "the spent budget recorded no outage notice to begin with"
+
+  with_live_lock "$home" agent_pass "$home" "$home/busy.txt" \
+    env FM_GATEWAY_RETRY_BACKOFF=0 FM_GATEWAY_RETRY_MAX=8 >/dev/null
+  [ "$(fm_keepalive_notice_kind "$home/state")" = outage ] \
+    || fail "a busy pane erased an outage notice nothing had resolved"
+  pass "a busy primary pane leaves an unresolved outage notice exactly as it is"
+}
+
 test_primary_agent_repairs_lapsed_supervision_once_per_episode() {
   local home first second
   home=$(make_primary_home primary-supervision)
@@ -780,6 +800,36 @@ test_session_start_stays_quiet_for_a_job_installed_with_an_explicit_endpoint() {
   pass "session start leaves a loaded job installed with an explicit endpoint alone, and says nothing"
 }
 
+test_session_start_reloads_an_unloaded_job_from_the_recorded_endpoint() {
+  # Everything needed to reload the job is on disk, including the pane the
+  # override install recorded, so a session start that can prove no endpoint of
+  # its own must re-bootstrap rather than declare the home uninstallable.
+  local home out loads rc=0
+  home=$(make_locked_primary_checkout keepalive-unloaded)
+  HOME="$home/fakehome" PATH="$home/fakebin:$PATH" \
+    FM_FAKE_LAUNCHCTL_LOG="$home/launchctl.log" \
+    "$home/bin/fm-keepalive-install.sh" install --home "$home" \
+    --backend tmux --target '%77' >/dev/null \
+    || fail "the documented --backend/--target install refused"
+  loads=$(load_ops "$home")
+
+  out=$(run_sweep "$home" env -u TMUX_PANE -u TMUX -u HERDR_ENV -u HERDR_SESSION \
+    -u HERDR_PANE_ID -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND \
+    -u CMUX_WORKSPACE_ID -u CMUX_SURFACE_ID -u CMUX_TAB_ID -u CMUX_PANEL_ID \
+    -u ORCA_TERMINAL_ID FM_FAKE_LAUNCHCTL_PRINT_RC=1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "reloading the job must not fail session start"
+  printf '%s\n' "$out" | grep -q '^BOOTSTRAP_INFO: primary keep-alive installed' \
+    || fail "an unloaded job with a recorded pane was not reloaded: $out"
+  [ "$(load_ops "$home")" -gt "$loads" ] || fail "the unloaded job was never bootstrapped again"
+  printf '%s\n' "$out" | grep -q '^KEEPALIVE: ' \
+    && fail "a home that could be reloaded was reported as having no keep-alive: $out"
+  fm_keepalive_notice_read "$home/state" >/dev/null 2>&1 \
+    && fail "a reloadable home recorded a keep-alive failure notice"
+  [ "$("$ENDPOINT" read --state "$home/state" --field target)" = '%77' ] \
+    || fail "the reload lost the recorded primary pane"
+  pass "session start reloads an unloaded job from the endpoint this home already recorded"
+}
+
 test_session_start_reports_a_primary_that_could_not_be_kept_alive() {
   # A primary whose terminal proves no endpoint gets no job at all, which is the
   # captain's ask going unmet; the sweep must say so and still finish.
@@ -863,6 +913,7 @@ test_primary_agent_drops_the_record_once_the_primary_recovered
 test_primary_agent_refuses_a_pane_with_no_live_session
 test_primary_agent_requires_the_lock_owner_to_be_a_harness
 test_primary_agent_stops_at_the_budget_and_reports_the_outage
+test_primary_outage_notice_survives_a_busy_pane
 test_primary_agent_repairs_lapsed_supervision_once_per_episode
 test_primary_agent_repairs_supervision_for_a_procevent_only_home
 test_primary_agent_stands_down_in_away_mode_and_when_idle
@@ -875,5 +926,6 @@ test_installer_keeps_a_pre_existing_plist_a_failed_reload_did_not_write
 test_installer_plist_survives_xml_significant_paths
 test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoint
 test_session_start_stays_quiet_for_a_job_installed_with_an_explicit_endpoint
+test_session_start_reloads_an_unloaded_job_from_the_recorded_endpoint
 test_session_start_reports_a_primary_that_could_not_be_kept_alive
 test_session_start_keepalive_honours_the_opt_out_and_its_scope
