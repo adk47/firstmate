@@ -26,14 +26,23 @@
 #   fm-keepalive-install.sh status  [--home <dir>]
 #   fm-keepalive-install.sh uninstall [--home <dir>]
 #
-# `install` and `ensure` must be run FROM THE PRIMARY PANE, because that is the
-# only place the session's own terminal endpoint can be observed; both record
-# that endpoint and refuse rather than guessing when they cannot (`install`
-# takes --backend/--target for a terminal whose identifiers this build cannot
-# read from the environment). `ensure` is the quiet idempotent form session
-# start uses: it installs or re-bootstraps the job whenever launchd is not
-# actually running it, re-records the endpoint - best effort once the job is
-# loaded and knows a pane - and prints only an install or a re-point.
+# WHERE THE PANE COMES FROM. `install` must be run FROM THE PRIMARY PANE, the
+# only place the session's own terminal endpoint can be observed, and it refuses
+# rather than guessing when it cannot (--backend/--target supply a terminal whose
+# identifiers this build cannot read from the environment). `ensure` is the quiet
+# idempotent form session start uses: it re-records the endpoint when this
+# session can prove one, falls back to the pane already in state/.primary-endpoint
+# when it cannot, installs or re-bootstraps the job whenever launchd is not
+# actually running it, and prints only an install or a re-point. It refuses only
+# when there is neither a detectable pane nor a recorded one, because a
+# keep-alive that does not know which pane is firstmate would type into whatever
+# it found.
+#
+# WHAT IT WILL NOT GUESS AT. Every launchctl query here goes through the per-user
+# GUI domain, which is unreachable from a session with no Aqua login - over ssh,
+# or during a login-session transition. That says nothing about the job, so
+# `ensure` reports it as unobservable (exit 3) and changes nothing rather than
+# reinstalling a job it cannot see or declaring this home unprotected.
 #
 # macOS only: launchd is the scheduler. On any other platform this refuses and
 # names the equivalent it does not install for you.
@@ -42,7 +51,10 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-usage() { sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# shellcheck source=bin/fm-remote-job-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-remote-job-lib.sh"
+
+usage() { sed -n '2,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 CMD=${1:-}
 [ "$#" -eq 0 ] || shift
@@ -121,6 +133,15 @@ xml_escape() {  # <value>
 
 job_loaded() { launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; }
 
+# A launchctl query that fails because the per-user Aqua domain is unreachable -
+# an ssh session, a login-session transition - says nothing about the job. This
+# is the same boundary bin/fm-remote-job-lib.sh draws before its own load check.
+require_gui_domain() {
+  fm_remote_job_gui_available "$(id -u)" && return 0
+  echo "launchd's per-user GUI domain is not reachable from this session (no Aqua login session for uid $(id -u)), so nothing here can see or change the keep-alive job; log that account in at the console and run this again" >&2
+  return 1
+}
+
 # Write the plist and load it. StandardOut/Error go to the home's own state dir,
 # not a shared location, so two homes' jobs cannot interleave into one file.
 write_and_load_job() {
@@ -176,6 +197,7 @@ EOM
 case "$CMD" in
   install)
     require_macos || exit 1
+    require_gui_domain || exit 1
     if ! record=$(record_endpoint); then
       cat >&2 <<EOM
 error: this session's own terminal endpoint could not be proved, so the job was
@@ -191,6 +213,7 @@ EOM
     ;;
   ensure)
     require_macos 2>/dev/null || exit 1
+    require_gui_domain || exit 3
     prev_backend=$(endpoint_field backend)
     prev_target=$(endpoint_field target)
     previous=''
@@ -220,7 +243,9 @@ EOM
     echo "label: $LABEL"
     echo "plist: $PLIST$([ -f "$PLIST" ] || printf ' (absent)')"
     if [ "$(uname 2>/dev/null)" = Darwin ]; then
-      if job_loaded; then
+      if ! fm_remote_job_gui_available "$(id -u)"; then
+        echo "  launchd's per-user GUI domain is not reachable from this session, so whether the job is loaded cannot be read here"
+      elif job_loaded; then
         launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | sed -n 's/^[[:space:]]*\(state\|last exit code\|runs\) *= */  \1 = /p'
       else
         echo "  not loaded"

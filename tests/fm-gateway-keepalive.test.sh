@@ -608,8 +608,8 @@ test_installer_plist_has_no_dead_flag() {
 }
 
 test_installer_keeps_a_pre_existing_plist_a_failed_reload_did_not_write() {
-  # A launchctl that cannot be reached is not evidence the job is gone, so a
-  # failed reload must never take away an installation someone else made.
+  # A reachable domain whose load verbs refuse is not evidence the job is gone,
+  # so a failed reload must never take away an installation someone else made.
   local home fakebin out plist before
   home="$TMP_ROOT/plist-failed-reload"
   rm -rf "${home:?}"
@@ -625,11 +625,15 @@ test_installer_keeps_a_pre_existing_plist_a_failed_reload_did_not_write() {
   [ -n "$plist" ] || fail "install wrote no plist"
   before=$(shasum < "$plist")
 
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/launchctl"
+  cat > "$fakebin/launchctl" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = print ] && exit 0
+exit 1
+SH
   chmod +x "$fakebin/launchctl"
   out=$(HOME="$home/fakehome" PATH="$fakebin:$PATH" TMUX_PANE='%3' \
     "$ROOT/bin/fm-keepalive-install.sh" install --home "$home" 2>&1) \
-    && fail "a launchctl that refused every verb was reported as success"
+    && fail "a launchctl that refused every load verb was reported as success"
   [ -f "$plist" ] || fail "a failed reload deleted a plist this invocation did not create"
   [ "$(shasum < "$plist")" = "$before" ] || fail "the surviving plist is not the one that was installed"
   case "$out" in
@@ -699,7 +703,11 @@ make_locked_primary_checkout() {  # <name>; echoes the home dir
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_FAKE_LAUNCHCTL_LOG:-/dev/null}"
 [ "${1:-}" != print ] && exit 0
-exit "${FM_FAKE_LAUNCHCTL_PRINT_RC:-0}"
+# gui/<uid>/<label> asks about the job; gui/<uid> asks about the domain itself.
+case "${2:-}" in
+  */*/*) exit "${FM_FAKE_LAUNCHCTL_PRINT_RC:-0}" ;;
+  *) exit "${FM_FAKE_LAUNCHCTL_GUI_RC:-0}" ;;
+esac
 SH
   chmod +x "$fakebin/launchctl"
   cat > "$fakebin/uname" <<'SH'
@@ -830,6 +838,32 @@ test_session_start_reloads_an_unloaded_job_from_the_recorded_endpoint() {
   pass "session start reloads an unloaded job from the endpoint this home already recorded"
 }
 
+test_session_start_changes_nothing_when_the_launchd_domain_is_unreachable() {
+  # An ssh session or a login-session transition cannot reach the per-user GUI
+  # domain. Every launchctl query fails there, which is evidence about the
+  # domain and none at all about the job.
+  local home out loads rc=0
+  home=$(make_locked_primary_checkout keepalive-nogui)
+  out=$(run_sweep "$home")
+  printf '%s\n' "$out" | grep -q '^BOOTSTRAP_INFO: primary keep-alive installed' \
+    || fail "the fixture did not install a healthy job to begin with: $out"
+  loads=$(load_ops "$home")
+  fm_keepalive_notice_write "$home/state" outage "the gateway kept this primary stalled" \
+    || fail "could not stage an unresolved outage notice"
+
+  out=$(run_sweep "$home" env FM_FAKE_LAUNCHCTL_GUI_RC=1 FM_FAKE_LAUNCHCTL_PRINT_RC=1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "an unreachable launchd domain must not fail session start"
+  printf '%s\n' "$out" | grep -qF 'no working keep-alive' \
+    && fail "a job the session could not observe was reported as missing: $out"
+  [ "$(load_ops "$home")" = "$loads" ] \
+    || fail "an unreachable domain must not tear down or reload the job"
+  [ "$(fm_keepalive_notice_kind "$home/state")" = outage ] \
+    || fail "the unresolved outage notice was overwritten by a session that could see nothing"
+  printf '%s\n' "$out" | grep -q '^KEEPALIVE: the gateway kept this primary stalled' \
+    || fail "the outage still waiting on the captain stopped being reported: $out"
+  pass "a session that cannot reach the launchd domain reports nothing new and changes nothing"
+}
+
 test_session_start_reports_a_primary_that_could_not_be_kept_alive() {
   # A primary whose terminal proves no endpoint gets no job at all, which is the
   # captain's ask going unmet; the sweep must say so and still finish.
@@ -927,5 +961,6 @@ test_installer_plist_survives_xml_significant_paths
 test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoint
 test_session_start_stays_quiet_for_a_job_installed_with_an_explicit_endpoint
 test_session_start_reloads_an_unloaded_job_from_the_recorded_endpoint
+test_session_start_changes_nothing_when_the_launchd_domain_is_unreachable
 test_session_start_reports_a_primary_that_could_not_be_kept_alive
 test_session_start_keepalive_honours_the_opt_out_and_its_scope
