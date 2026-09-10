@@ -408,7 +408,25 @@ test_primary_agent_stops_at_the_budget_and_reports_the_outage() {
   [ "$sent" -eq 0 ] || fail "a spent budget must stop the re-ring"
   grep -q 'OUTAGE' "$home/state/.keepalive-agent.log" \
     || fail "a spent budget must report the outage the captain asked to be told about"
-  pass "the primary keep-alive stops at its budget and reports a real outage"
+
+  # The log has no reader during an outage, so the outage must also reach the
+  # notice the next session start reports.
+  [ "$(fm_keepalive_notice_kind "$home/state")" = outage ] \
+    || fail "a spent budget on the primary left no keep-alive notice for session start to report"
+  case "$(fm_keepalive_notice_read "$home/state")" in
+    *127.0.0.1:8080*) : ;;
+    *) fail "the recorded outage does not name what the captain has to check" ;;
+  esac
+
+  with_live_lock "$home" agent_pass "$home" "$home/pane.txt" \
+    env FM_GATEWAY_RETRY_BACKOFF=0 FM_GATEWAY_RETRY_MAX=8 >/dev/null
+  [ "$(fm_keepalive_notice_kind "$home/state")" = outage ] \
+    || fail "a continuing outage must not be re-recorded away by the next pass"
+
+  with_live_lock "$home" agent_pass "$home" "$home/recovered.txt" >/dev/null
+  fm_keepalive_notice_read "$home/state" >/dev/null 2>&1 \
+    && fail "a primary that recovered is still reported as a live outage"
+  pass "the primary keep-alive stops at its budget, records the outage for session start, and clears it on recovery"
 }
 
 test_primary_agent_repairs_lapsed_supervision_once_per_episode() {
@@ -734,6 +752,36 @@ test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoin
   pass "the main home's session start installs the keep-alive once, stays quiet after, re-points it on relaunch, and re-bootstraps a job launchd is not running"
 }
 
+test_session_start_reports_a_primary_that_could_not_be_kept_alive() {
+  # A primary whose terminal proves no endpoint gets no job at all, which is the
+  # captain's ask going unmet; the sweep must say so and still finish.
+  local home out rc=0
+  home=$(make_locked_primary_checkout keepalive-unprovable)
+  out=$(run_sweep "$home" env -u TMUX_PANE -u TMUX -u HERDR_ENV -u HERDR_SESSION \
+    -u HERDR_PANE_ID -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND \
+    -u CMUX_WORKSPACE_ID -u CMUX_SURFACE_ID -u CMUX_TAB_ID -u CMUX_PANEL_ID \
+    -u ORCA_TERMINAL_ID) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a keep-alive that could not be installed must not fail session start"
+  [ -z "$(installed_plist "$home")" ] || fail "the job was installed for a pane nobody proved"
+  [ "$(keepalive_lines "$out")" = 0 ] || fail "a failure must not be reported as a completed fact: $out"
+  printf '%s\n' "$out" | grep -q '^KEEPALIVE: ' \
+    || fail "a primary with no keep-alive was left silent: $out"
+  printf '%s\n' "$out" | grep -q 'fm-keepalive-install.sh install' \
+    || fail "the actionable line does not name the remediation: $out"
+  [ "$(fm_keepalive_notice_kind "$home/state")" = install ] \
+    || fail "the sweep reported the failure without recording it for the next session start"
+
+  # Started from a pane it can read, the same home installs and stops reporting.
+  out=$(run_sweep "$home")
+  printf '%s\n' "$out" | grep -q '^BOOTSTRAP_INFO: primary keep-alive installed' \
+    || fail "the retry from a readable pane did not install the job: $out"
+  printf '%s\n' "$out" | grep -q '^KEEPALIVE: ' \
+    && fail "a resolved keep-alive failure is still being reported: $out"
+  fm_keepalive_notice_read "$home/state" >/dev/null 2>&1 \
+    && fail "a successful install left the failure notice behind"
+  pass "session start reports and then clears a primary that could not be kept alive"
+}
+
 test_session_start_keepalive_honours_the_opt_out_and_its_scope() {
   local home out
   home=$(make_locked_primary_checkout opt-out)
@@ -798,4 +846,5 @@ test_installer_plist_has_no_dead_flag
 test_installer_keeps_a_pre_existing_plist_a_failed_reload_did_not_write
 test_installer_plist_survives_xml_significant_paths
 test_session_start_installs_the_primary_keepalive_once_and_refreshes_its_endpoint
+test_session_start_reports_a_primary_that_could_not_be_kept_alive
 test_session_start_keepalive_honours_the_opt_out_and_its_scope

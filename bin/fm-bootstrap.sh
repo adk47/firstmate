@@ -20,6 +20,7 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "KEEPALIVE: <why this primary has no working keep-alive>; <remediation>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
@@ -115,7 +116,10 @@
 #          refreshed ..." fact and nothing when the job is loaded and pointed
 #          at this pane. config/keepalive-off opts the home out entirely.
 #          Secondmate homes stay opt-in through bin/fm-keepalive-install.sh.
-#          A failed install never fails session start.
+#          A failed install never fails session start; it records
+#          state/.keepalive-uninstalled (bin/fm-gateway-retry-lib.sh owns that
+#          record) and reports it as an actionable KEEPALIVE line here, as does
+#          a primary-side gateway outage the keep-alive agent recorded.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
 #          alone and run the network half off the digest's blocking path:
@@ -179,6 +183,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# shellcheck source=bin/fm-gateway-retry-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-gateway-retry-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh disable=SC1091
@@ -1352,10 +1358,11 @@ startup_memory_budget_setup() {
 # lock - so a scratch session opened at the repo root, or a lock-refused
 # session, can never record its own pane as the primary. Quiet when the job is
 # already installed and pointed at this pane; one BOOTSTRAP_INFO fact when it
-# installed or re-pointed it; silent when it could not, because a missing
-# keep-alive is not a reason to fail session start.
+# installed or re-pointed it; one actionable KEEPALIVE line when the primary has
+# no working keep-alive, which never fails session start but must not be silent:
+# a primary that cannot recover itself is the captain's ask going unmet.
 primary_keepalive_setup() {
-  local installer out
+  local installer out errf reason
   [ "$(uname 2>/dev/null)" = Darwin ] || return 0
   if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
     return 0
@@ -1365,8 +1372,21 @@ primary_keepalive_setup() {
   fm_session_lock_owned_by_self "$STATE" || return 0
   installer="$FM_HOME/bin/fm-keepalive-install.sh"
   [ -x "$installer" ] || return 0
-  out=$("$installer" ensure --home "$FM_HOME" 2>/dev/null) || return 0
-  [ -z "$out" ] || echo "BOOTSTRAP_INFO: primary keep-alive $out"
+  errf=$(mktemp "${TMPDIR:-/tmp}/fm-keepalive-ensure.XXXXXX" 2>/dev/null) || errf=''
+  if out=$("$installer" ensure --home "$FM_HOME" 2>"${errf:-/dev/null}"); then
+    fm_keepalive_notice_clear "$STATE" install
+    [ -z "$out" ] || echo "BOOTSTRAP_INFO: primary keep-alive $out"
+  else
+    reason=$(sed -n '1p' "${errf:-/dev/null}" 2>/dev/null)
+    reason=${reason#error: }
+    fm_keepalive_notice_write "$STATE" install \
+      "the primary keep-alive job is not installed - ${reason:-the installer refused without a reason}; run bin/fm-keepalive-install.sh install from this home's primary pane, passing --backend and --target when this terminal's identifiers cannot be read" \
+      || true
+  fi
+  [ -z "$errf" ] || rm -f "$errf"
+  if reason=$(fm_keepalive_notice_read "$STATE"); then
+    echo "KEEPALIVE: $reason"
+  fi
 }
 
 if [ "${1:-}" = "install" ]; then

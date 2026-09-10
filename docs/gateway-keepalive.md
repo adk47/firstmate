@@ -84,6 +84,17 @@ It refreshes `state/.primary-endpoint` from the session's own environment, insta
 It prints exactly one `BOOTSTRAP_INFO: primary keep-alive installed ...` or `... refreshed ...` fact when it did either; that line is a completed no-action fact, never an actionable diagnostic.
 A failed install never fails session start.
 
+## When the primary has no working keep-alive
+
+The primary has no status log of its own, so the two ways its keep-alive can fail to keep it alive are recorded in `state/.keepalive-uninstalled` and reported by the next session start as an actionable `KEEPALIVE:` line naming the remediation.
+`bin/fm-gateway-retry-lib.sh` owns that record's format.
+
+The installer refusing is one of them: a primary whose terminal identifiers cannot be read from the environment - a plain terminal with no multiplexer, or a cmux tab whose wrapper stripped the `CMUX_*` variables - proves no endpoint, so no job is installed and the sweep would otherwise be silent forever.
+Run `bin/fm-keepalive-install.sh install` from the primary pane, passing `--backend` and `--target` when discovery cannot read them.
+
+A spent budget on the primary is the other: the keep-alive stops re-ringing after the ladder's bounds, which is exactly the genuine outage worth surfacing, and this is the primary's equivalent of a crewmate's `paused [key=gateway-503]` status line.
+The agent records it once per episode, not on every pass, and clears it once the primary is no longer stalled; a successful install clears the installer's own notice the same way, so a resolved problem stops being reported.
+
 To opt the home out, create `config/keepalive-off`; the sweep then does nothing at all.
 Secondmate homes are opt-in exactly as before: run the installer by hand **from that home's primary pane**, which is the only place the session's own endpoint can be observed:
 

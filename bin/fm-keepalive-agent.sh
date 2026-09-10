@@ -168,6 +168,9 @@ if ! pane_is_busy && fm_gateway_stalled_now "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE"
   if fm_gateway_budget_spent "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE"; then
     if ! fm_gateway_notified "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE"; then
       log "OUTAGE: the inference gateway has kept the primary stalled through $(fm_gateway_attempts "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE") continue attempts over $(fm_gateway_stall_age "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE")s; no longer re-ringing"
+      fm_keepalive_notice_write "$STATE" outage \
+        "the inference gateway kept this home's primary stalled through $(fm_gateway_attempts "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE") continue attempts and the keep-alive stopped re-ringing it; check the gateway at 127.0.0.1:8080, then tell the primary to continue" \
+        || true
       fm_gateway_mark_notified "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE" || true
     fi
     exit 0
@@ -192,6 +195,8 @@ if ! pane_is_busy && fm_gateway_stalled_now "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE"
   fi
   exit 0
 fi
+
+fm_keepalive_notice_clear "$STATE" outage
 
 # --- 2. session gone ---------------------------------------------------------
 
