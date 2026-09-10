@@ -16,7 +16,7 @@
 # re-points the supervisor without a reinstall.
 #
 # Record format, one line:
-#   v1 backend=<backend> target=<target> harness=<harness> pid=<session-pid> ts=<epoch>
+#   v1 backend=<backend> target=<target> harness=<harness> ts=<epoch>
 # <harness> is the session's own harness as bin/fm-harness.sh detects it from
 # this process tree, so the supervisor can read the pane's busy footer with the
 # right signature; `unknown` when detection cannot tell.
@@ -28,7 +28,7 @@
 #
 # Usage:
 #   fm-keepalive-endpoint.sh record [--state <dir>] [--backend <b>] [--target <t>]
-#   fm-keepalive-endpoint.sh read   [--state <dir>] [--field backend|target|harness|pid|ts]
+#   fm-keepalive-endpoint.sh read   [--state <dir>] [--field backend|target|harness|ts]
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +38,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 . "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
 
 usage() {
-  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 CMD=${1:-}
@@ -65,26 +65,25 @@ fi
 RECORD="$STATE_DIR/.primary-endpoint"
 
 # Resolve this process's own terminal endpoint from the environment it
-# inherited. tmux and herdr come from the shared discovery owner; cmux and orca
-# expose their own identifiers, and are read here rather than added to that
-# owner because the away daemon it serves has no verified primitives for either
+# inherited. tmux and herdr come from the shared discovery owner, which is asked
+# here rather than copied: both functions return non-zero when they have only
+# their configured fallback to offer, which is exactly this script's "nothing
+# proved" case. cmux is read locally rather than added to that owner because the
+# away daemon it serves has no verified primitives for it
 # (bin/fm-supervise-daemon.sh's FM_SUPERVISOR_SUPPORTED_BACKENDS) and must not
-# start resolving panes it cannot drive.
+# start resolving panes it cannot drive. The cmux identifiers are the ones
+# bin/fm-backend.sh records from cmux's shipped source, composed into the
+# "<workspace>:<surface>" target bin/backends/cmux.sh parses.
 detect_endpoint() {  # prints "<backend>\t<target>", or fails
-  if [ -n "${TMUX_PANE:-}" ]; then
-    printf '%s\t%s' tmux "$TMUX_PANE"
+  local target backend workspace surface
+  if target=$(discover_supervisor_target) && backend=$(discover_supervisor_backend); then
+    printf '%s\t%s' "$backend" "$target"
     return 0
   fi
-  if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
-    printf '%s\t%s:%s' herdr "${HERDR_SESSION:-default}" "$HERDR_PANE_ID"
-    return 0
-  fi
-  if [ -n "${CMUX_TERMINAL_ID:-}" ]; then
-    printf '%s\t%s' cmux "$CMUX_TERMINAL_ID"
-    return 0
-  fi
-  if [ -n "${ORCA_TERMINAL_ID:-}" ]; then
-    printf '%s\t%s' orca "$ORCA_TERMINAL_ID"
+  workspace=${CMUX_WORKSPACE_ID:-${CMUX_TAB_ID:-}}
+  surface=${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}
+  if [ -n "$workspace" ] && [ -n "$surface" ]; then
+    printf '%s\t%s:%s' cmux "$workspace" "$surface"
     return 0
   fi
   return 1
@@ -120,8 +119,8 @@ case "$CMD" in
     case "$harness" in ''|*[!A-Za-z0-9._-]*) harness=unknown ;; esac
     mkdir -p "$STATE_DIR" || exit 1
     tmp="$RECORD.tmp.$$"
-    printf 'v1 backend=%s target=%s harness=%s pid=%s ts=%s\n' \
-      "$backend" "$target" "$harness" "${PPID:-0}" "$(date +%s)" > "$tmp" || { rm -f "$tmp"; exit 1; }
+    printf 'v1 backend=%s target=%s harness=%s ts=%s\n' \
+      "$backend" "$target" "$harness" "$(date +%s)" > "$tmp" || { rm -f "$tmp"; exit 1; }
     mv -f "$tmp" "$RECORD" || { rm -f "$tmp"; exit 1; }
     printf '%s %s\n' "$backend" "$target"
     ;;
