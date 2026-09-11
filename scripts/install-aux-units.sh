@@ -2181,6 +2181,80 @@ CANONREFRESHTMR
   systemctl start "$ctmr" >/dev/null 2>&1 || log "WARN: could not start $ctmr"
   cstate=$(systemctl is-active "$ctmr" 2>/dev/null || echo unknown)
   log "  $ctmr: $cstate (fires Sun+Wed 04:00 UTC; refresh + restart only if something rotated)"
+
+  # ─── codex edge auth-cell mirror (timer, >= 2026.8 only) ───
+  # On 2.0 each PROFILE reads its own shared auth cell and edge's came out of
+  # the 2026-09-10 migration EMPTY (Caroline on paid openrouter). The mirror
+  # copies main's per-account ACCESS credentials into edge's cell with a
+  # sentinel refresh slot — never a refresh token (single-refresher
+  # invariant). Primary path is openclaw-pre-start-heal.sh edge (every edge
+  # start re-mirrors); this daily tick is the belt for a missed pre-start.
+  # 04:30 UTC = 30 min AFTER the Sun+Wed 04:00 canonical refresher, so a
+  # freshly rotated access token is mirrored the same morning. It restarts
+  # edge ONLY when it actually changed the cell (drain-aware, same helper as
+  # deploy.sh), and stands down inside a maintenance window.
+  [[ -x "$HYDRA_ROOT/scripts/lib/codex-edge-mirror.sh" ]] \
+    || fail "$HYDRA_ROOT/scripts/lib/codex-edge-mirror.sh missing or not executable"
+  # AUX_SYSTEMD_UNIT_DIR: test seam so scripts/tests/install-aux-units-codex-mirror.bats
+  # can assert the GENERATED units; production always writes /etc/systemd/system.
+  AUX_UNIT_DIR="${AUX_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+
+  # Failures that never reach the script's own pager (ExecStart missing, killed
+  # by TimeoutStartSec, node absent) page through the OnFailure template unit.
+  [[ -x "$HYDRA_ROOT/scripts/notify-unit-failed.sh" ]] \
+    || fail "$HYDRA_ROOT/scripts/notify-unit-failed.sh missing or not executable"
+  cat > "$AUX_UNIT_DIR"/hydra-unit-failed@.service << UNITFAILEDSVC
+[Unit]
+Description=HYDRA page #clio_devops that unit %i failed (OnFailure= target)
+
+[Service]
+Type=oneshot
+TimeoutStartSec=60
+ExecStart=$HYDRA_ROOT/scripts/notify-unit-failed.sh %i
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+UNITFAILEDSVC
+
+  cat > "$AUX_UNIT_DIR"/codex-edge-mirror.service << EDGEMIRRORSVC
+[Unit]
+Description=HYDRA codex auth-cell mirror main→edge (2.0 SQLite cell) + conditional drain restart
+OnFailure=hydra-unit-failed@%n.service
+
+[Service]
+Type=oneshot
+# The edge gateway restart (only when the cell changed) can spend 35s on a
+# safe-restart request, 390s draining, 180s in systemd's stop/start budgets
+# and 30s confirming the hard fallback; the mirror itself is sub-second.
+TimeoutStartSec=900
+ExecStart=$HYDRA_ROOT/scripts/lib/codex-edge-mirror.sh --restart
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=append:/var/log/codex-edge-mirror.log
+StandardError=append:/var/log/codex-edge-mirror.log
+EDGEMIRRORSVC
+
+  cat > "$AUX_UNIT_DIR"/codex-edge-mirror.timer << EDGEMIRRORTMR
+[Unit]
+Description=Mirror main's codex auth cell into edge daily (04:30 UTC, after the 04:00 refresher)
+
+[Timer]
+OnCalendar=*-*-* 04:30:00 UTC
+# A missed tick (box down) fires on next boot rather than skipping a day.
+Persistent=true
+RandomizedDelaySec=5min
+Unit=codex-edge-mirror.service
+
+[Install]
+WantedBy=timers.target
+EDGEMIRRORTMR
+
+  systemctl daemon-reload
+
+  mtmr=codex-edge-mirror.timer
+  systemctl enable "$mtmr" >/dev/null 2>&1 || log "WARN: could not enable $mtmr"
+  systemctl start "$mtmr" >/dev/null 2>&1 || log "WARN: could not start $mtmr"
+  mstate=$(systemctl is-active "$mtmr" 2>/dev/null || echo unknown)
+  log "  $mtmr: $mstate (fires daily 04:30 UTC; restarts edge only if the cell changed)"
 fi
 
 # ─── company-finder dedupe-cache refresh (timer) ──────────────

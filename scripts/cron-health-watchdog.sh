@@ -127,6 +127,21 @@ command -v python3 >/dev/null 2>&1 || { log "ERROR: python3 required but not on 
 # undeduped page would post ~288 times a day and train everyone to ignore it.
 # See scripts/lib/ensure-session-budget-headroom.sh.
 # ──────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# Single-run lock — taken HERE, before ANY block that touches shared state
+# (the session-budget stamp, the unit-failure spool, the cron-failure
+# watermarks and their pages), so one lock guards the whole run. It used to
+# be taken only just before scan_failures, which let two overlapping ticks
+# interleave on the spool: tick B's startup recovery renamed back the claim
+# tick A was mid-delivering, then B claimed and posted the same record while
+# A's cleanup found nothing — duplicate Critical pages (QA finding on #935,
+# round 13). Dry-run mutates nothing and takes no lock.
+# ──────────────────────────────────────────────────────────────
+if [ "$DRY_RUN" -eq 0 ]; then
+  exec 9>"$LOCKFILE"
+  flock -n 9 || { log "SKIP: another cron-health-watchdog run holds $LOCKFILE"; exit 0; }
+fi
+
 SESSION_BUDGET_CHECK="${CRON_HEALTH_SESSION_BUDGET_CHECK:-$_WATCHDOG_DIR/lib/ensure-session-budget-headroom.sh}"
 SESSION_BUDGET_ALERT_STATE="${CRON_HEALTH_SESSION_BUDGET_STATE:-/var/lib/cron-health-watchdog/session-budget-last-alert}"
 SESSION_BUDGET_ALERT_INTERVAL="${CRON_HEALTH_SESSION_BUDGET_INTERVAL:-21600}"  # 6h
@@ -161,6 +176,87 @@ if [ -x "$SESSION_BUDGET_CHECK" ]; then
     # gateway already pages via the cron-failure path below.
     log "WARN: session budget headroom check could not evaluate: $_sb_out"
   fi
+fi
+
+# ──────────────────────────────────────────────────────────────
+# Unpaged unit-failure spool (scripts/notify-unit-failed.sh, codex-edge-mirror.sh)
+# hydra-unit-failed@.service is the OnFailure= target for timer-driven oneshots
+# (codex-edge-mirror.service first) and the mirror pages for itself. When a
+# page delivery fails, the producer writes ONE record per file into this spool
+# (<unit>.<epoch>.<pid>.unpaged, temp name then rename). A marker nothing
+# reads is an unobservable failure, so this tick consumes the spool:
+#   - recover: any *.claim.* left by a tick that died mid-delivery is renamed
+#     back to its *.unpaged name (atomic, no data copied) before scanning;
+#   - claim: every *.unpaged is renamed to *.claim.<pid> BEFORE it is read —
+#     a producer never holds an fd on a claimable file (it writes a temp name
+#     and renames), so nothing can be appended into a claimed inode;
+#   - page CRITICAL once per unit (record count, newest age, last reason)
+#     through the STATUS-returning payload path; on confirmed delivery the
+#     claims are deleted, otherwise every claim is renamed back and retried
+#     next tick. A claim is never dropped unless delivered or provably back.
+# ──────────────────────────────────────────────────────────────
+UNIT_FAILED_MARKER_DIR="${CRON_HEALTH_UNIT_FAILED_MARKER_DIR:-/var/lib/hydra/unit-failed-unpaged}"
+
+_uf_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+# <unit>.<epoch>.<pid>.unpaged[.claim.<pid>]  →  <unit>
+_uf_unit_of() { local n; n="$(basename "$1")"; n="${n%%.unpaged*}"; printf '%s\n' "$n" | sed -E 's/\.[0-9]+\.[0-9]+$//'; }
+
+if [ -d "$UNIT_FAILED_MARKER_DIR" ]; then
+  for _uf_orphan in "$UNIT_FAILED_MARKER_DIR"/*.unpaged.claim.*; do
+    [ -f "$_uf_orphan" ] || continue
+    if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN: orphaned unit-failure claim $(basename "$_uf_orphan") — would restore"; continue; fi
+    if mv -f "$_uf_orphan" "${_uf_orphan%%.claim.*}" 2>/dev/null; then
+      log "restored orphaned unit-failure claim $(basename "$_uf_orphan")"
+    else
+      log "WARN: could not restore orphaned claim $_uf_orphan — kept for the next tick"
+    fi
+  done
+
+  # Claim everything present NOW; files spooled after this point belong to
+  # the next tick.
+  _uf_claims=()
+  for _uf_spool in "$UNIT_FAILED_MARKER_DIR"/*.unpaged; do
+    [ -f "$_uf_spool" ] || continue
+    if [ "$DRY_RUN" -eq 1 ]; then
+      log "DRY-RUN: unpaged unit failure $(_uf_unit_of "$_uf_spool") (record $(( $(date -u +%s) - $(_uf_mtime "$_uf_spool") ))s old) — would page ${SLACK_CHANNEL}"
+      continue
+    fi
+    if mv -f "$_uf_spool" "$_uf_spool.claim.$$" 2>/dev/null; then _uf_claims+=("$_uf_spool.claim.$$"); fi   # else: another tick claimed it
+  done
+
+  # Group the claims by unit and page once per unit.
+  _uf_units="$(for _c in "${_uf_claims[@]+"${_uf_claims[@]}"}"; do _uf_unit_of "$_c"; done | sort -u)"
+  for _uf_unit in $_uf_units; do
+    _uf_mine=(); _uf_newest=""; _uf_count=0
+    for _c in "${_uf_claims[@]}"; do
+      [ "$(_uf_unit_of "$_c")" = "$_uf_unit" ] || continue
+      _uf_mine+=("$_c"); _uf_count=$((_uf_count + 1))
+      if [ -z "$_uf_newest" ] || [ "$(_uf_mtime "$_c")" -ge "$(_uf_mtime "$_uf_newest")" ]; then _uf_newest="$_c"; fi
+    done
+    _uf_age=$(( $(date -u +%s) - $(_uf_mtime "$_uf_newest") )); [ "$_uf_age" -ge 0 ] || _uf_age=0
+    _uf_last="$(cut -f3- "$_uf_newest" 2>/dev/null | head -n1 | tr '`' "'" | cut -c1-300)"
+    _uf_rc=1
+    _uf_payload="$(mktemp 2>/dev/null)" && {
+      if jq -n --arg c "$SLACK_CHANNEL" \
+        --arg t ":rotating_light: <@${SLACK_UID_NICK}> <@${SLACK_UID_AARON}> *systemd unit FAILED and its page was NOT delivered* on node-8: \`${_uf_unit}\` — its notifier could not reach Slack (${_uf_count} record(s), newest ${_uf_age}s old; last reason: ${_uf_last:-unknown}). The unit has been failed and unalerted since then. \`systemctl status ${_uf_unit}\`; spool: \`${UNIT_FAILED_MARKER_DIR}\` (records cleared by this watchdog once you see this)." \
+        '{channel:$c, text:$t}' > "$_uf_payload" 2>/dev/null; then
+        _uf_rc=0; slack_notify_payload_file_status "$_uf_payload" || _uf_rc=$?
+      else
+        log "WARN: could not build the unit-failure page for ${_uf_unit}"
+      fi
+      rm -f "$_uf_payload"
+    }
+    if [ "$_uf_rc" -eq 0 ]; then
+      rm -f "${_uf_mine[@]}"
+      log "Paged unpaged unit failure ${_uf_unit} (${_uf_count} record(s), newest ${_uf_age}s old) — claimed records cleared."
+    else
+      _uf_back=0
+      for _c in "${_uf_mine[@]}"; do
+        if mv -f "$_c" "${_c%%.claim.*}" 2>/dev/null; then _uf_back=$((_uf_back + 1)); else log "WARN: could not restore claim $_c — kept for startup recovery"; fi
+      done
+      log "unpaged unit failure ${_uf_unit}: page delivery FAILED again (rc=${_uf_rc}) — ${_uf_back}/${_uf_count} record(s) re-queued for the next tick"
+    fi
+  done
 fi
 
 # ──────────────────────────────────────────────────────────────
@@ -657,11 +753,7 @@ elif [ ! -d "$CRON_RUNS_DIR" ]; then
   exit 0
 fi
 
-# Single-run lock so overlapping ticks never double-post.
-if [ "$DRY_RUN" -eq 0 ]; then
-  exec 9>"$LOCKFILE"
-  flock -n 9 || { log "SKIP: another cron-health-watchdog run holds $LOCKFILE"; exit 0; }
-fi
+# (single-run lock: taken at the TOP of the script — see "Single-run lock".)
 
 PAYLOAD_FILE="$(mktemp)"
 trap 'rm -f "$PAYLOAD_FILE"' EXIT

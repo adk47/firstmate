@@ -961,3 +961,48 @@ session-store cap delete NEW sessions ("capped session entry count" →
 lockfiles must be regenerated against the 7.1 SDK (support-tools needed an
 explicit entry-type annotation, TS2742). The lane wedge (#97538, fix PR #90308)
 is NOT fixed in 7.1 — the #616/#668 mitigations stay load-bearing.
+
+### edge's 2.0 auth cell is populated by a MIRROR, and an absent row is a silent paid fallback
+
+**Symptom (2026-09-10T12:39Z → 2026-09-11T15:20Z):** every edge turn logged
+`[model-fallback/decision] … requested=openai/gpt-5.6-sol … next=openrouter/openai/gpt-5.6-luna
+detail=Explicit auth order for openai has no usable profiles.` (171 lines in 6h) while
+`codex-auth-invariants.sh --check` was **clean** — edge's `authProfiles.store` row was
+ABSENT and the checker's `CODEX_EXPECTED_PROFILES_EDGE=0` reads that as the designed
+pre-login state. Nothing paged: an explicit `auth.order` with zero resolvable ids is
+rejected as `explicit-order`, which is a *model* fallback (paid OpenRouter), not an auth
+error signature the watchdog knows.
+
+**Mechanism:** on >= 2026.8 the runtime reads auth per PROFILE from
+`<stateDir>/state/openclaw.sqlite` (`config_machine_state`, `state_key='authProfiles.store'`,
+column `value_json`; pragma: `state_key TEXT PK, value_json TEXT, updated_at_ms INTEGER`).
+The 7.x fabric (`codex-auth-sync.sh`, `codex-home/auth.json`) is inert there, and doctor
+only imports what a profile's own JSON held — edge's were derived sentinels, scrubbed
+before doctor, so edge got no row.
+
+**Fix:** `scripts/lib/codex-edge-mirror.sh` (2026-09-11). Per `openai:<email>` profile it
+writes a whitelisted copy — `type, provider, email, access, accountId, chatgptPlanType,
+expires, idToken` + `refresh = SYNC-MANAGED-NO-REFRESH-TOKEN` — in ONE transaction per
+profile and re-reads the target to assert no source refresh token landed. Tokens never
+leave the node process (bash sees lengths and ids only). Guards that are all falsified by a
+bats mutation: refuses a target profile that already holds a REAL refresh token (an
+independent chain is not ours to overwrite), refuses a source whose refresh slot is a
+sentinel (never mirror a mirror), refuses a stored `accountId` that differs from the
+token's `https://api.openai.com/auth.chatgpt_account_id` claim (dist
+`buildChatgptAuthTokensParams` throws `has a different ChatGPT account ID than its access
+token` on exactly that), never creates `config_machine_state` on an un-migrated store,
+never writes below 2026.8 or on an unknown runtime, and `--dry-run` prints the plan
+value-free. `--restart` (the timer path) drain-restarts edge only when it wrote something
+and stands down inside a maintenance window; plain ensure (ExecStartPre) never restarts.
+
+**Proof of the hot-apply (2026-09-11T15:20Z):** `openclaw --profile edge agent --agent
+support --json --message "Reply with only: PONG"` → `winnerModel=gpt-5.6-sol
+fallbackUsed=false requestShaping.authMode=auth-profile` in 2.96s; `no usable profiles`
+count since restart = 0. The first turn after restart showed `fallbackUsed=true` with
+`attempts[0].result=rotate_profile reason=rate_limit` — that is the head `auth.order`
+account's QUOTA (see "auth.order head capped"), not auth: the winner was still
+`gpt-5.6-sol` on the next profile.
+
+**Do not** run the runbook's Phase 5 device logins on edge: a real refresh token on edge is
+a second single-use chain per account, and the mirror refuses to overwrite it precisely so
+the conflict is loud instead of silently rotating.

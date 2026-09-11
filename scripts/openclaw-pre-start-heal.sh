@@ -74,6 +74,24 @@ if [ -x "$SCRIPT_DIR/lib/ensure-codex-auth.sh" ]; then
   "$SCRIPT_DIR/lib/ensure-codex-auth.sh" || log "WARN: ensure-codex-auth.sh returned non-zero (non-fatal)"
 fi
 
+# ── Healer: edge's 2.0 shared auth cell mirrors main's (edge only) ──
+# On openclaw >= 2026.8 the symlink fabric above is inert (the runtime reads
+# <stateDir>/state/openclaw.sqlite → authProfiles.store per PROFILE) and edge's
+# cell came out of the 2026-09-10 migration with NO row, so Caroline rode paid
+# OpenRouter. The mirror copies main's per-account ACCESS credentials into
+# edge's cell with a sentinel refresh slot (single-refresher invariant intact)
+# — here, BEFORE ExecStart, because the gateway snapshots auth at startup: the
+# restart codex-canonical-refresh.sh performs right after rotating main's chain
+# is exactly the moment edge must re-mirror. Idempotent; below 2026.8 it is a
+# no-op; never blocks start. Daily belt: codex-edge-mirror.timer (04:30 UTC).
+# The mirror pages for itself on every failure (structural or incomplete),
+# in every mode but --check, with its own cooldown and a durable marker for
+# cron-health-watchdog.sh when delivery fails — so this path stays a plain
+# non-fatal warning: the gateway must still start.
+if [ "$PROFILE" = "edge" ] && [ -x "$SCRIPT_DIR/lib/codex-edge-mirror.sh" ]; then
+  "$SCRIPT_DIR/lib/codex-edge-mirror.sh" || log "WARN: codex-edge-mirror.sh returned non-zero (non-fatal) — edge may boot without codex auth (openrouter fallback); the mirror has paged or left a marker"
+fi
+
 # ── Healer: Codex OAuth refresh-lock convergence (cross-process) ──
 # Centralizing the auth STORE (above) shares the single-use refresh token across
 # the main+edge gateway processes, but does NOT coordinate the two writers:

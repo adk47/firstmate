@@ -40,16 +40,29 @@ for a in "$@"; do
   [ "$prev" = "--text" ] && printf '%s' "$a" > "$TEST_TMPDIR/last-text"
   prev="$a"
 done
+# concurrent-producer seam: a second unit failure SPOOLED during delivery
+[ -n "${STUB_MUSO_SPOOL_NEW:-}" ] && printf 'during-delivery\tcodex-edge-mirror.service\tSECOND failure spooled during delivery\n' > "$STUB_MUSO_SPOOL_NEW"
 echo '{"channel":"C0TEST","ts":"1717171717.000100"}'
+exit "${STUB_MUSO_RC:-0}"
 STUB
   # flock shim: macOS has no flock(1); use the real one when present (Linux CI)
   # so single-run locking still behaves, otherwise no-op so real-run tests work.
   cat > "$TEST_TMPDIR/bin/flock" <<'STUB'
 #!/bin/bash
-[ -x /usr/bin/flock ] && exec /usr/bin/flock "$@"
+for _f in /usr/bin/flock /opt/homebrew/bin/flock; do [ -x "$_f" ] && exec "$_f" "$@"; done
 exit 0
 STUB
-  chmod +x "$TEST_TMPDIR/bin/ssh" "$TEST_TMPDIR/bin/muso" "$TEST_TMPDIR/bin/flock"
+  # mv stub: a storage-failure seam for the spool consumer — fails when the
+  # DESTINATION matches STUB_MV_FAIL_PATTERN, otherwise the real mv. (root on
+  # CI ignores permission bits, and mv onto a directory moves INTO it, so a
+  # filesystem trick cannot force a deterministic rename failure.)
+  cat > "$TEST_TMPDIR/bin/mv" <<'STUB'
+#!/bin/bash
+dest="${@: -1}"
+if [ -n "${STUB_MV_FAIL_PATTERN:-}" ] && [[ "$dest" =~ $STUB_MV_FAIL_PATTERN ]]; then echo "mv: stubbed failure for $dest" >&2; exit 1; fi
+exec /bin/mv "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/ssh" "$TEST_TMPDIR/bin/muso" "$TEST_TMPDIR/bin/flock" "$TEST_TMPDIR/bin/mv"
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
 
   # jobs.json id->name/agent map shared by most tests.
@@ -68,6 +81,8 @@ STUB
   # their own stub.
   export CRON_HEALTH_SESSION_BUDGET_CHECK="$TEST_TMPDIR/no-session-budget-check"
   export CRON_HEALTH_SESSION_BUDGET_STATE="$TEST_TMPDIR/session-budget-last-alert"
+  # Hermeticity: never scan the LIVE /var/lib/hydra/unit-failed-unpaged on CI.
+  export CRON_HEALTH_UNIT_FAILED_MARKER_DIR="$TEST_TMPDIR/unit-failed-unpaged"
   export CRON_HEALTH_STATE_FILE="$TEST_TMPDIR/state.json"
   export CRON_HEALTH_LOCKFILE="$TEST_TMPDIR/wd.lock"
   export CRON_HEALTH_SKIP_HOST_GUARD=1
@@ -85,7 +100,7 @@ STUB
   export CRON_HEALTH_MIN_STREAK=1
 }
 
-teardown() { rm -rf "$TEST_TMPDIR"; }
+teardown() { if [ -n "${LOCK_HOLDER_PID:-}" ]; then pkill -P "$LOCK_HOLDER_PID" 2>/dev/null; kill "$LOCK_HOLDER_PID" 2>/dev/null; fi; rm -rf "$TEST_TMPDIR"; }
 
 # Helper: write a runs file from stdin lines.
 runfile() { cat > "$TEST_TMPDIR/runs/$1.jsonl"; }
@@ -506,4 +521,128 @@ STUB
   rm -f "$CRON_HEALTH_SESSION_BUDGET_CHECK"
   run bash "$WD"
   [ "$status" -eq 0 ]
+}
+
+# ──────────────────────────────────────────────────────────────
+# Unpaged unit-failure SPOOL (notify-unit-failed.sh / codex-edge-mirror.sh
+# write <unit>.<epoch>.<pid>.unpaged, one record per file, temp+rename;
+# systemd ignores an OnFailure unit's rc, so this watchdog is the only
+# consumer). It claims whole files by rename; no producer holds an fd on a
+# claimable file, so there is no append surface to race on.
+# ──────────────────────────────────────────────────────────────
+_spool_record() {  # <unit> <epoch> <reason>
+  mkdir -p "$CRON_HEALTH_UNIT_FAILED_MARKER_DIR"
+  printf '2026-09-11T18:00:00Z\t%s\t%s\n' "$1" "$3" > "$CRON_HEALTH_UNIT_FAILED_MARKER_DIR/$1.$2.111.unpaged"
+}
+_stub_marker() { _spool_record "$1" 1000 "deploy-notify.sh exited 1 (Slack rejected or the CLI failed)"; }
+_spool_ls() { ls "$CRON_HEALTH_UNIT_FAILED_MARKER_DIR" 2>/dev/null | sort | tr '\n' ' '; }
+
+@test "unit-failed spool: present → pages critical naming the unit, record count + age + reason, then clears the claimed files" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_marker codex-edge-mirror.service
+  _spool_record codex-edge-mirror.service 1001 "second record"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "Paged unpaged unit failure codex-edge-mirror.service (2 record(s)" <<< "$output"
+  [ "$(grep -c 'slack send' "$STUB_CALLS")" -eq 1 ]     # ONE page per unit, not per record
+  grep -q "<@U" "$TEST_TMPDIR/last-text"
+  grep -q "codex-edge-mirror.service" "$TEST_TMPDIR/last-text"
+  grep -Eq "newest [0-9]+s old" "$TEST_TMPDIR/last-text"
+  grep -q "second record" "$TEST_TMPDIR/last-text"
+  [ -z "$(_spool_ls)" ]
+}
+
+@test "unit-failed spool: delivery fails again → every claim is renamed BACK to *.unpaged for the next tick" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_marker codex-edge-mirror.service
+  STUB_MUSO_RC=1 run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "page delivery FAILED again (rc=1) — 1/1 record(s) re-queued" <<< "$output"
+  [ "$(_spool_ls)" = "codex-edge-mirror.service.1000.111.unpaged " ]
+}
+
+@test "unit-failed spool: no token → nothing sent, records KEPT (never cleared on a silent no-op)" {
+  _stub_marker codex-edge-mirror.service
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  [ ! -s "$STUB_CALLS" ]
+  [ "$(_spool_ls)" = "codex-edge-mirror.service.1000.111.unpaged " ]
+}
+
+@test "unit-failed spool: dry-run names it and claims nothing" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_marker codex-edge-mirror.service
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  grep -q "DRY-RUN: unpaged unit failure codex-edge-mirror.service" <<< "$output"
+  [ ! -s "$STUB_CALLS" ]
+  [ "$(_spool_ls)" = "codex-edge-mirror.service.1000.111.unpaged " ]
+}
+
+@test "unit-failed spool: a record spooled by the producer DURING delivery is untouched by this tick and delivered by the next" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_marker codex-edge-mirror.service
+  STUB_MUSO_SPOOL_NEW="$CRON_HEALTH_UNIT_FAILED_MARKER_DIR/codex-edge-mirror.service.2000.222.unpaged" run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "1 record(s)" "$TEST_TMPDIR/last-text"
+  [ "$(_spool_ls)" = "codex-edge-mirror.service.2000.222.unpaged " ]
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "SECOND failure spooled during delivery" "$TEST_TMPDIR/last-text"
+  [ -z "$(_spool_ls)" ]
+}
+
+@test "unit-failed spool: an ORPHANED claim (tick died after the rename) is renamed back on startup and delivered" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  mkdir -p "$CRON_HEALTH_UNIT_FAILED_MARKER_DIR"
+  printf 'orphan\tcodex-edge-mirror.service\tstranded by a killed tick\n' > "$CRON_HEALTH_UNIT_FAILED_MARKER_DIR/codex-edge-mirror.service.1000.111.unpaged.claim.4242"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "restored orphaned unit-failure claim" <<< "$output"
+  grep -q "stranded by a killed tick" "$TEST_TMPDIR/last-text"
+  [ -z "$(_spool_ls)" ]
+}
+
+@test "unit-failed spool: delivery fails AND the rename-back fails → the claim is KEPT for startup recovery (never lost)" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_marker codex-edge-mirror.service
+  STUB_MUSO_RC=1 STUB_MV_FAIL_PATTERN='[.]unpaged$' run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "could not restore claim" <<< "$output"
+  [[ "$(_spool_ls)" == *"codex-edge-mirror.service.1000.111.unpaged.claim."* ]]
+}
+
+@test "unit-failed spool: two units → two pages, each cleared" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_marker codex-edge-mirror.service
+  _spool_record codex-edge-mirror@edge 1500 "pre-start structural failure"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'slack send' "$STUB_CALLS")" -eq 2 ]
+  [ -z "$(_spool_ls)" ]
+}
+
+@test "overlapping ticks: a run that starts while another holds the tick lock exits WITHOUT touching the spool (no reclaim, no second page)" {
+  real_flock=""; for _f in /usr/bin/flock /opt/homebrew/bin/flock; do [ -x "$_f" ] && real_flock="$_f"; done
+  [ -n "$real_flock" ] || skip "no real flock(1) on this host"
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_marker codex-edge-mirror.service
+  printf 'orphan\tcodex-edge-mirror.service\tmid-delivery by tick A\n' > "$CRON_HEALTH_UNIT_FAILED_MARKER_DIR/codex-edge-mirror.service.1000.111.unpaged.claim.4242"
+  # tick A holds the single-run lock (it is mid-delivery)
+  "$real_flock" "$CRON_HEALTH_LOCKFILE" sleep 30 &
+  LOCK_HOLDER_PID=$!; export LOCK_HOLDER_PID
+  sleep 1
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "SKIP: another cron-health-watchdog run holds" <<< "$output"
+  [ ! -s "$STUB_CALLS" ]
+  [ "$(_spool_ls)" = "codex-edge-mirror.service.1000.111.unpaged codex-edge-mirror.service.1000.111.unpaged.claim.4242 " ]   # untouched: no reclaim, no claim
+  # release: flock's `sleep` child inherits the lock fd, so it must die too
+  pkill -P "$LOCK_HOLDER_PID" 2>/dev/null || true; kill "$LOCK_HOLDER_PID" 2>/dev/null || true
+  wait "$LOCK_HOLDER_PID" 2>/dev/null || true; LOCK_HOLDER_PID=""; sleep 1
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "restored orphaned unit-failure claim" <<< "$output"
+  [ "$(grep -c 'slack send' "$STUB_CALLS")" -eq 1 ]
+  [ -z "$(_spool_ls)" ]
 }

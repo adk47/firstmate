@@ -545,6 +545,18 @@ with gateways stopped.
 
 ## Phase 5 — edge device logins (Option B) + close
 
+> **SUPERSEDED 2026-09-11 — do NOT run the device logins below.** edge's cell is
+> populated by `scripts/lib/codex-edge-mirror.sh` (main's ACCESS credentials with a
+> sentinel refresh slot; `openclaw-pre-start-heal.sh edge` + `codex-edge-mirror.timer`).
+> Three device logins on edge would create a second single-use refresh chain per
+> account — the fan-out topology the single-refresher invariant forbids — and the
+> mirror REFUSES to overwrite a real refresh token, so the two would fight loudly.
+> Verify edge with `codex-edge-mirror.sh --check` (exact profile-set equality with
+> main), not with `CODEX_EXPECTED_PROFILES_EDGE=3`. The CI-deploy re-enable and the
+> maintenance-window close below still apply. See CLAUDE.md "edge's auth cell is a
+> MIRROR of main's" and docs/lessons/openclaw-and-codex.md.
+
+
 Re-enable the CI deploy AFTER the fleet is verified:
 `gh workflow enable "Deploy HYDRA" --repo Muso-AI/hydra` (nothing replays;
 the next merge to main deploys normally and must pass the 4d.6 gate cleanly).

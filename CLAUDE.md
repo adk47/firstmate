@@ -430,6 +430,26 @@ for the full runbook, staging gates A–M, and target architecture).** What chan
   valid `codex/*` ref in 2.0 (bounded codex app-server image turns) — do not
   "migrate" it to `openai/*`.
 
+**On 2026.8.x edge's auth cell is a MIRROR of main's, never a login (added
+2026-09-11).** Each PROFILE reads its own `<stateDir>/state/openclaw.sqlite` →
+`config_machine_state` row `authProfiles.store` (column `value_json`, profiles
+keyed `openai:<email>`). Doctor populated main's cell at the 2026-09-10 cutover;
+edge's was scrubbed on purpose and came up with NO row, so every Caroline turn
+fell back to paid OpenRouter (`Explicit auth order for openai has no usable
+profiles`) for ~27h. `scripts/lib/codex-edge-mirror.sh` copies main's per-account
+ACCESS credentials (access + accountId + expires + plan + email + idToken) into
+edge's cell with the `SYNC-MANAGED-NO-REFRESH-TOKEN` sentinel in the refresh
+slot — the real refresh token is copied NOWHERE (single-refresher invariant; it
+re-reads the target after every write and fails loud on a leak). `access` and
+`accountId` are always written together in one transaction: the runtime decodes
+the account id from the token and THROWS on a mismatch. It runs from
+`openclaw-pre-start-heal.sh edge` (ExecStartPre — so the edge restart the
+canonical refresher performs loads the freshly rotated token) and from
+`codex-edge-mirror.timer` (daily 04:30 UTC, restarts edge only if the cell
+changed). **Detect**: `codex-edge-mirror.sh --check`; **dry-run**: `--dry-run`.
+The runbook's "Option B" (three device logins on edge) is RETIRED: it would have
+created a second refresh chain per account, the exact fan-out topology above.
+
 ## Session budgets must exceed each agent's PROTECTED footprint, or crons wedge
 
 `session.maintenance` has two caps, and BOTH silently kill cron surfaces when an
