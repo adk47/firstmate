@@ -2091,8 +2091,68 @@ CODEXREFRESHTMR
   rstate=$(systemctl is-active "$rtmr" 2>/dev/null || echo unknown)
   log "  $rtmr: $rstate (fires Sun+Wed 04:00 UTC)"
 else
-  log "  codex-token-refresh.timer: NOT installed — runtime ${AUX_RUNTIME_VER} >= 2026.8, native in-process auto-refresh is the sole refresher there"
-  ensure_superseded_timer_off codex-token-refresh.timer "runtime ${AUX_RUNTIME_VER} >= 2026.8: native in-process auto-refresh is the sole refresher, a second one would race it (refresh_token_reused shape)"
+  # CORRECTION (2026-09-11): this branch used to claim native in-process
+  # auto-refresh is the sole refresher on >= 2026.8. That is FALSE on this box.
+  # The bundled `openai` plugin owns the refresh-on-use machinery and hydra
+  # keeps it DISABLED to dodge #90925; a disabled plugin still OWNS provider
+  # `openai`, so the refresh path resolves to `configured-unavailable` and
+  # throws before any builtin fallback. Measured 2026-09-11: no ENABLED plugin
+  # owns provider openai, codex declares providers=[], no codex timer armed,
+  # and the earliest access token expired 2026-09-20T12:56:09Z. Retiring the
+  # old timer on that premise left the fleet with NO refresher for 24h.
+  # codex-canonical-refresh.timer below restores the contract against 2.0's
+  # SQLite cell. The OLD unit stays off: it targets the pre-8.1 JSON store,
+  # which doctor archived.
+  log "  codex-token-refresh.timer: NOT installed — runtime ${AUX_RUNTIME_VER} >= 2026.8 (it targets the pre-8.1 JSON store, which no longer exists); superseded by codex-canonical-refresh.timer"
+  ensure_superseded_timer_off codex-token-refresh.timer "runtime ${AUX_RUNTIME_VER} >= 2026.8: it refreshes the pre-8.1 JSON store that doctor archived; codex-canonical-refresh.timer refreshes the SQLite cell instead"
+
+  [[ -x "$HYDRA_ROOT/scripts/codex-canonical-refresh.sh" ]] \
+    || fail "$HYDRA_ROOT/scripts/codex-canonical-refresh.sh missing or not executable"
+
+  cat > /etc/systemd/system/codex-canonical-refresh.service << CANONREFRESHSVC
+[Unit]
+Description=HYDRA codex OAuth canonical refresh (2.0 SQLite cell) + conditional drain restart
+
+[Service]
+Type=oneshot
+# Same budget as the retired codex-token-refresh.service: the gateways restart
+# serially and each can spend 35s on a safe-restart request, 390s draining,
+# 180s in systemd's stop/start budgets and 30s confirming the hard fallback.
+TimeoutStartSec=1800
+ExecStart=$HYDRA_ROOT/scripts/codex-canonical-refresh.sh
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=append:/var/log/codex-canonical-refresh.log
+StandardError=append:/var/log/codex-canonical-refresh.log
+CANONREFRESHSVC
+
+  cat > /etc/systemd/system/codex-canonical-refresh.timer << CANONREFRESHTMR
+[Unit]
+Description=Refresh the HYDRA codex OAuth chain twice weekly (Sun+Wed 04:00 UTC)
+
+[Timer]
+# Sun+Wed matches the retired timer. Access tokens live 10 days (measured: JWT
+# iat->exp = 864000s), so twice weekly gives ~3 attempts before an expiry while
+# halving the restart count versus daily. 04:00 UTC is the night-side minimum
+# of the 7-day Intercom dispatch histogram (04Z = 5 dispatches; 01Z/06Z = 30).
+OnCalendar=Sun,Wed *-*-* 04:00:00 UTC
+# If the box was down at the scheduled time, fire on next boot rather than skip
+# and risk a lapse (same tradeoff as the retired unit).
+Persistent=true
+RandomizedDelaySec=10min
+Unit=codex-canonical-refresh.service
+
+[Install]
+WantedBy=timers.target
+CANONREFRESHTMR
+
+  systemctl daemon-reload
+
+  ctmr=codex-canonical-refresh.timer
+  systemctl enable "$ctmr" >/dev/null 2>&1 || log "WARN: could not enable $ctmr"
+  systemctl start "$ctmr" >/dev/null 2>&1 || log "WARN: could not start $ctmr"
+  cstate=$(systemctl is-active "$ctmr" 2>/dev/null || echo unknown)
+  log "  $ctmr: $cstate (fires Sun+Wed 04:00 UTC; refresh + restart only if something rotated)"
 fi
 
 # ─── company-finder dedupe-cache refresh (timer) ──────────────

@@ -55,7 +55,7 @@ seed_store() {
   node --experimental-sqlite -e '
     const {DatabaseSync}=require("node:sqlite");
     const db=new DatabaseSync(process.argv[1]);
-    db.exec("CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL)");
+    db.exec("CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)");  // updated_at_MS: verified against the live 8.2 cell on node-8 (pragma table_info -> state_key:TEXT, value_json:TEXT, updated_at_ms:INTEGER). This fixture previously created `updated_at`, a column that does not exist in the real store — the same fabricated-schema class #905 fixed in codex-auth-invariants.bats. It passed only while nothing referenced the column.
     const profiles = {};
     profiles[process.argv[2]] = {type:"oauth", provider:"openai", email:"test@example.com", access:process.argv[4], refresh:process.argv[3], accountId:"acct-1", chatgptPlanType:"pro", expires:1000};
     db.prepare("insert into config_machine_state values (?,?,?)").run("authProfiles.store", JSON.stringify({version:1, profiles}), 1);
@@ -176,7 +176,7 @@ STUB
   node --experimental-sqlite -e '
     const {DatabaseSync}=require("node:sqlite");
     const db=new DatabaseSync(process.argv[1]);
-    db.exec("CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL)");
+    db.exec("CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)");  // updated_at_MS: verified against the live 8.2 cell on node-8 (pragma table_info -> state_key:TEXT, value_json:TEXT, updated_at_ms:INTEGER). This fixture previously created `updated_at`, a column that does not exist in the real store — the same fabricated-schema class #905 fixed in codex-auth-invariants.bats. It passed only while nothing referenced the column.
     db.prepare("insert into config_machine_state values (?,?,?)").run("authProfiles.store", JSON.stringify({version:1, profiles:{"openai:aaron@muso.ai":{type:"oauth",provider:"openai",access:"old-access"}}}), 1);
   ' "$STATE_DIR/state/openclaw.sqlite" 2>/dev/null
   echo "aaron@muso.ai" > "$CODEX_ACTIVE_ACCOUNT_FILE"
@@ -261,7 +261,7 @@ seed_store_two() { # two profiles, same shape as seed_store
   node --experimental-sqlite -e '
     const {DatabaseSync}=require("node:sqlite");
     const db=new DatabaseSync(process.argv[1]);
-    db.exec("CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL)");
+    db.exec("CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)");  // updated_at_MS: verified against the live 8.2 cell on node-8 (pragma table_info -> state_key:TEXT, value_json:TEXT, updated_at_ms:INTEGER). This fixture previously created `updated_at`, a column that does not exist in the real store — the same fabricated-schema class #905 fixed in codex-auth-invariants.bats. It passed only while nothing referenced the column.
     const mk=(e,r)=>({type:"oauth", provider:"openai", email:e, access:"old-access", refresh:r, accountId:"a", chatgptPlanType:"pro", expires:1000});
     const profiles={"openai:one@x.com":mk("one@x.com","old-ONE"), "openai:two@x.com":mk("two@x.com","old-TWO")};
     db.prepare("insert into config_machine_state values (?,?,?)").run("authProfiles.store", JSON.stringify({version:1, profiles}), 1);
@@ -313,4 +313,169 @@ start_barrier_token_server() {
   # (without the lock both arrive within milliseconds and the barrier releases both at once)
   t1=$(awk 'NR==1{print $2}' "$TEST_TMPDIR/server.log"); t2=$(awk 'NR==2{print $2}' "$TEST_TMPDIR/server.log")
   [ -n "$t1" ] && [ -n "$t2" ] && [ $(( t2 - t1 )) -ge 1000 ]
+}
+
+
+# ── --all-profiles sweep (the scheduled refresher path) ──────────────────────
+#
+# The sweep exists because nothing on this box refreshes the codex chain since
+# codex-token-refresh.timer was retired at the 2026-09-10 cutover on the false
+# premise that 8.2's native in-process refresh takes over (it cannot: the
+# `openai` plugin owns that machinery and is deliberately disabled for #90925).
+# Tokens expire 2026-09-20T12:56:09Z.
+#
+# Every rotation here goes through the LOOPBACK token server — never a real
+# endpoint. A real refresh token is single-use, so spending one outside the
+# script's own lock-and-write-back would invalidate the live chain for every
+# account (the 2026-05-29 fan-out mechanism).
+
+# seed_multi <id:refresh> ... — build a cell holding several profiles.
+seed_multi() {
+  node --experimental-sqlite -e '
+    const {DatabaseSync}=require("node:sqlite");
+    const db=new DatabaseSync(process.argv[1]);
+    db.exec("CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)");
+    const profiles = {};
+    for (const spec of process.argv.slice(2)) {
+      const i = spec.indexOf("=");
+      const id = spec.slice(0, i), refresh = spec.slice(i + 1);
+      profiles[id] = {type:"oauth", provider:"openai", email:"t@example.com", access:"old-access", refresh, accountId:"acct-1", chatgptPlanType:"pro", expires:1000};
+    }
+    db.prepare("insert into config_machine_state values (?,?,?)").run("authProfiles.store", JSON.stringify({version:1, profiles}), 1);
+  ' "$STATE_DIR/state/openclaw.sqlite" "$@" 2>/dev/null
+}
+
+@test "sweep: --all-profiles rotates every REAL profile in the cell" {
+  seed_multi "openai:a@x.com=real-refresh-A" "openai:b@x.com=real-refresh-B"
+  start_token_server "$GOOD_RESPONSE"
+  run_mint --all-profiles
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"attempted=2"* ]]
+  [[ "$output" == *"ok=2"* ]]
+  # Both rows carry the rotated material, proving each was written (not just counted).
+  js="$(store_json)"
+  [ "$(printf '%s' "$js" | jq -r '.profiles["openai:a@x.com"].refresh')" = "new-refresh-ROTATED" ]
+  [ "$(printf '%s' "$js" | jq -r '.profiles["openai:b@x.com"].refresh')" = "new-refresh-ROTATED" ]
+  stop_token_server
+}
+
+@test "sweep: a SENTINEL profile is SKIPPED, and the real one still rotates" {
+  # A sentinel means a DERIVED store copy with nothing to rotate. Aborting on it
+  # would leave the real chains unrefreshed; "recovering" past it could rotate a
+  # real single-use chain twice in one run. Skip is the only safe answer.
+  seed_multi "openai:real@x.com=real-refresh-R" "openai:derived@x.com=SYNC-MANAGED-NO-REFRESH-TOKEN"
+  start_token_server "$GOOD_RESPONSE"
+  run_mint --all-profiles
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skip openai:derived@x.com"* ]]
+  [[ "$output" == *"attempted=1"* ]]
+  [[ "$output" == *"skipped=1"* ]]
+  js="$(store_json)"
+  [ "$(printf '%s' "$js" | jq -r '.profiles["openai:real@x.com"].refresh')" = "new-refresh-ROTATED" ]
+  # The sentinel row is untouched — it was never POSTed.
+  [ "$(printf '%s' "$js" | jq -r '.profiles["openai:derived@x.com"].refresh')" = "SYNC-MANAGED-NO-REFRESH-TOKEN" ]
+  stop_token_server
+}
+
+@test "sweep: an ALL-SKIPPED sweep REFUSES rather than reporting success" {
+  # Every profile derived/tokenless means a broken canonical store, not a
+  # healthy no-op. Exiting 0 here would make the timer green while nothing on
+  # the box refreshes anything — the exact silence this whole item removes.
+  seed_multi "openai:d1@x.com=SYNC-MANAGED-NO-REFRESH-TOKEN" "openai:d2@x.com=STAGING-whatever"
+  start_token_server "$GOOD_RESPONSE"
+  run_mint --all-profiles
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"attempted NOTHING"* ]]
+  stop_token_server
+}
+
+@test "sweep: one failing profile makes the whole sweep exit non-zero (timer goes red)" {
+  seed_multi "openai:a@x.com=real-refresh-A" "openai:b@x.com=real-refresh-B"
+  # An endpoint that errors: both rotations fail, so the sweep must fail.
+  start_token_server '{"error":"invalid_grant","error_description":"nope"}'
+  run_mint --all-profiles
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"sweep FAILED"* ]]
+  stop_token_server
+}
+
+@test "sweep: --all-profiles and --profile-id are mutually exclusive" {
+  seed_store "openai:a@x.com" "real-refresh-A"
+  run_mint --all-profiles --profile-id "openai:a@x.com"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"mutually exclusive"* ]]
+}
+
+@test "sweep: does NOT consult the active-account file (it sweeps the cell)" {
+  # The single-profile path refuses when the active-account file is missing.
+  # The sweep must not inherit that refusal — its ids come from the cell.
+  seed_multi "openai:a@x.com=real-refresh-A"
+  export CODEX_ACTIVE_ACCOUNT_FILE="$TEST_TMPDIR/definitely-absent"
+  start_token_server "$GOOD_RESPONSE"
+  run_mint --all-profiles
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ok=1"* ]]
+  stop_token_server
+}
+
+@test "sweep: the REAL producer output splits in the REAL loop (per-profile boundary)" {
+  # Explicit producer-to-loop boundary regression. The existing sweep tests
+  # already prove this indirectly (they assert each profile's row in the STORE
+  # carries the rotated token, which is only reachable if the id split
+  # correctly), but a reviewer read the tab-delimited IFS as the non-splitting
+  # form, so pin the boundary directly: three profiles in, three DISTINCT ids
+  # rotated out. If the row failed to split, pid would be the whole line, every
+  # lookup would miss, and attempted would still be 3 while ok dropped to 0.
+  seed_multi "openai:a@x.com=real-A" "openai:b@x.com=real-B" "openai:c@x.com=real-C"
+  start_token_server "$GOOD_RESPONSE"
+  run_mint --all-profiles
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"attempted=3"* ]]
+  [[ "$output" == *"ok=3"* ]]
+  [[ "$output" == *"failed=0"* ]]
+  js="$(store_json)"
+  for id in a b c; do
+    [ "$(printf '%s' "$js" | jq -r --arg k "openai:$id@x.com" '.profiles[$k].refresh')" = "new-refresh-ROTATED" ]
+  done
+  # And no malformed id leaked through: a non-splitting IFS would log a mint
+  # failure naming an id containing the state word.
+  [[ "$output" != *"real-A"* ]]
+  [[ "$output" != *"x.com	"* ]]
+  stop_token_server
+}
+
+@test "sweep: a COMMITTED rotation is reported even when a later profile FAILS" {
+  # The bug: _mint_one commits immediately, so A is persisted and its old
+  # refresh token spent; B then fails and the old code exited before printing
+  # the marker, so the wrapper skipped the restart and A stayed unloaded.
+  seed_multi "openai:a@x.com=real-A" "openai:b@x.com=real-B"
+  # An endpoint that answers once and then errors: A rotates, B gets invalid_grant.
+  node -e '
+    const http=require("http"); let n=0;
+    const srv=http.createServer((req,res)=>{ let d=""; req.on("data",c=>d+=c); req.on("end",()=>{
+      n++; res.writeHead(200,{"content-type":"application/json"});
+      res.end(n===1 ? process.argv[1] : JSON.stringify({error:"invalid_grant"}));
+    }); });
+    srv.listen(0,"127.0.0.1",()=>{ require("fs").writeFileSync(process.argv[2], String(srv.address().port)); });
+  ' "$GOOD_RESPONSE" "$TEST_TMPDIR/port" &
+  TOKEN_SERVER_PID=$!
+  for _ in $(seq 1 50); do [ -s "$TEST_TMPDIR/port" ] && break; sleep 0.1; done
+  export CODEX_OAUTH_TOKEN_URL="http://127.0.0.1:$(cat "$TEST_TMPDIR/port")/token"
+  export CODEX_MINT_RECOVERY_DIR="$TEST_TMPDIR/recovery"; mkdir -p "$CODEX_MINT_RECOVERY_DIR"
+
+  run_mint --all-profiles
+  # non-zero because one profile failed...
+  [ "$status" -ne 0 ]
+  # ...but the marker IS emitted, reporting the one committed rotation
+  [[ "$output" == *"SWEEP_ROTATED=1"* ]]
+  stop_token_server
+}
+
+@test "sweep: an ALL-FAILED sweep emits NO marker (nothing committed)" {
+  seed_multi "openai:a@x.com=real-A" "openai:b@x.com=real-B"
+  start_token_server '{"error":"invalid_grant"}'
+  run_mint --all-profiles
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"SWEEP_ROTATED="* ]]
+  stop_token_server
 }

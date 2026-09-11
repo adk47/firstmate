@@ -73,10 +73,17 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --state-dir)  STATE_DIR="${2:?--state-dir needs a path}"; shift 2 ;;
     --profile-id) PROFILE_ID="${2:?--profile-id needs an id}"; shift 2 ;;
+    --all-profiles) ALL_PROFILES=1; shift ;;
     -h|--help)    sed -n '2,44p' "$0"; exit 0 ;;
     *)            log "ERROR: unknown argument: $1 (see --help)"; exit 2 ;;
   esac
 done
+
+ALL_PROFILES="${ALL_PROFILES:-0}"
+if [ "$ALL_PROFILES" = "1" ] && [ -n "${PROFILE_ID:-}" ]; then
+  log "ERROR: --all-profiles and --profile-id are mutually exclusive"
+  exit 2
+fi
 
 command -v "$NODE_BIN" >/dev/null 2>&1 || { log "ERROR: node not found (needed for node:sqlite + fetch)"; exit 2; }
 
@@ -88,7 +95,7 @@ if [ -z "$runtime_ver" ] || ! version_at_least "$RUNTIME_FLOOR" "$runtime_ver"; 
 fi
 
 # ── profile-id derivation ───────────────────────────────────────────────────
-if [ -z "$PROFILE_ID" ]; then
+if [ "$ALL_PROFILES" != "1" ] && [ -z "$PROFILE_ID" ]; then
   raw=""
   if [ -r "$CODEX_ACTIVE_ACCOUNT_FILE" ]; then
     raw="$(head -n1 "$CODEX_ACTIVE_ACCOUNT_FILE" 2>/dev/null | tr -d '[:space:]')" || raw=""
@@ -217,8 +224,8 @@ store.profiles[profileId] = profile;
 const newValueJson = JSON.stringify(store);
 try {
   db.exec("BEGIN IMMEDIATE");
-  const res = db.prepare("update config_machine_state set value_json=? where state_key=?")
-    .run(newValueJson, "authProfiles.store");
+  const res = db.prepare("update config_machine_state set value_json=?, updated_at_ms=? where state_key=?")
+    .run(newValueJson, Date.now(), "authProfiles.store");
   if (res.changes !== 1) throw new Error(`expected 1 row updated, got ${res.changes}`);
   db.exec("COMMIT");
 } catch (e) {
@@ -254,11 +261,120 @@ if ! flock -w "${CODEX_MINT_LOCK_WAIT_SECS:-300}" 9; then
   log "ERROR: another mint holds $MINT_LOCK for >${CODEX_MINT_LOCK_WAIT_SECS:-300}s — not proceeding (a concurrent mint would clobber the cell)"
   exit 2
 fi
-if "$NODE_BIN" --experimental-sqlite --no-warnings --input-type=module -e "$NODE_HELPER" \
-    "$DB_PATH" "$PROFILE_ID" "$OAUTH_TOKEN_URL" "$OAUTH_CLIENT_ID" "$OAUTH_SCOPE"; then
-  log "mint OK — restart the gateway on $STATE_DIR to load the new token"
-  exit 0
-else
+_mint_one() {
+  "$NODE_BIN" --experimental-sqlite --no-warnings --input-type=module -e "$NODE_HELPER" \
+    "$DB_PATH" "$1" "$OAUTH_TOKEN_URL" "$OAUTH_CLIENT_ID" "$OAUTH_SCOPE"
+}
+
+if [ "$ALL_PROFILES" != "1" ]; then
+  if _mint_one "$PROFILE_ID"; then
+    log "mint OK — restart the gateway on $STATE_DIR to load the new token"
+    exit 0
+  fi
   log "mint FAILED — $DB_PATH left untouched"
   exit 1
 fi
+
+# ── --all-profiles sweep ────────────────────────────────────────────────────
+# Enumerate INSIDE the flock we already hold, so the id list and every rotation
+# see one consistent cell. ONE acquisition for the whole sweep, not one per
+# profile: three separate acquisitions would let another writer interleave and
+# clobber a fresh credential with a stale whole-cell snapshot.
+#
+# A profile whose refresh slot carries a SENTINEL is SKIPPED, not failed. A
+# sentinel means that row is a DERIVED copy with nothing to rotate; aborting on
+# it would leave the real profiles unrefreshed, and a loop that tried to
+# "recover" past it risks rotating a real single-use chain twice in one run.
+_enum="$("$NODE_BIN" --experimental-sqlite --no-warnings -e '
+  const { DatabaseSync } = require("node:sqlite");
+  const db = new DatabaseSync(process.argv[1], { readOnly: true });
+  const row = db.prepare("select value_json from config_machine_state where state_key=?").get("authProfiles.store");
+  if (!row || !row.value_json) process.exit(3);
+  const profiles = (JSON.parse(row.value_json).profiles) || {};
+  const SENTINEL_RE = /^(STAGING-|SYNC-MANAGED)/;
+  for (const [id, pr] of Object.entries(profiles)) {
+    const r = pr && typeof pr.refresh === "string" ? pr.refresh : "";
+    const st = !r ? "none" : (SENTINEL_RE.test(r) ? "sentinel" : "real");
+    process.stdout.write(id + "\t" + st + "\n");
+  }
+' "$DB_PATH" 2>/dev/null)" || {
+  log "ERROR: could not enumerate profiles from $DB_PATH — refusing the sweep"
+  exit 2
+}
+
+if [ -z "$_enum" ]; then
+  log "ERROR: authProfiles.store holds NO profiles — refusing (an empty sweep must not read as success)"
+  exit 2
+fi
+
+attempted=0; succeeded=0; failed=0; skipped=0
+
+# Emit SWEEP_ROTATED on EVERY exit path once a rotation has been COMMITTED.
+# _mint_one persists each rotation immediately, so profile A can be written to
+# the cell and its old single-use refresh token SPENT, and then profile B can
+# fail and exit before any marker is printed. The wrapper would see a non-zero
+# rc, skip the restart, and leave A's fresh credentials persisted-but-unloaded:
+# the running gateway keeps serving a snapshot whose refresh chain has already
+# moved on. A committed rotation MUST be loadable even when a later profile
+# fails, so the count is reported from a trap rather than from the success path.
+# Also covers being killed mid-sweep (SIGTERM at the systemd TimeoutStartSec).
+# `return 0` is load-bearing, and ONLY under `set -e` (which this script sets
+# at :53) — measured, because my first comment here got the mechanism wrong:
+#   set -euo pipefail ; t(){ [ 0 -ge 1 ] && echo hi; } ; trap t EXIT ; exit 2  -> 1
+#   set -euo pipefail ; t(){ ... ; return 0; }          ; trap t EXIT ; exit 2  -> 2
+#   (no set -e)       ; t(){ [ 0 -ge 1 ] && echo hi; }  ; trap t EXIT ; exit 2  -> 2
+# So under set -e an EXIT trap whose LAST command fails replaces the script's
+# status with 1. Without the `return 0`, an all-skipped sweep exited 1 instead
+# of its intended 2 — caught by this suite's own all-skipped regression.
+_emit_rotated() {
+  [ "${succeeded:-0}" -ge 1 ] && printf 'SWEEP_ROTATED=%s\n' "$succeeded"
+  return 0
+}
+trap _emit_rotated EXIT
+# IFS=$'\t' rather than a literal tab in quotes. The literal tab WORKED
+# (proven: the extracted line splits openai:a@x.com<TAB>real correctly), but
+# it is an INVISIBLE character in source — indistinguishable from IFS="\\t",
+# which does NOT split and would make every rotation look up a nonexistent
+# profile id. A reviewer read it as the broken form, and any editor, patch or
+# copy-paste that converts tabs to spaces turns correct code into silently
+# broken code. $'\t' is explicit and cannot be mangled.
+while IFS=$'\t' read -r pid pstate; do
+  [ -n "$pid" ] || continue
+  if [ "$pstate" = "sentinel" ]; then
+    skipped=$((skipped + 1))
+    log "skip $pid — refresh slot carries a sentinel (derived store copy; nothing to rotate)"
+    continue
+  fi
+  if [ "$pstate" = "none" ]; then
+    skipped=$((skipped + 1))
+    log "skip $pid — no refresh token on this profile"
+    continue
+  fi
+  attempted=$((attempted + 1))
+  if _mint_one "$pid"; then
+    succeeded=$((succeeded + 1))
+  else
+    failed=$((failed + 1))
+    log "mint FAILED for $pid"
+  fi
+done <<EOF
+$_enum
+EOF
+
+log "sweep: attempted=$attempted ok=$succeeded failed=$failed skipped=$skipped"
+
+# Non-zero on ANY failure so the timer goes red. Non-zero ALSO when nothing was
+# attempted: an all-skipped sweep means every profile is derived or tokenless,
+# which is a broken canonical store, not a healthy no-op.
+if [ "$failed" -gt 0 ]; then
+  log "sweep FAILED — $failed profile(s) did not rotate"
+  exit 1
+fi
+if [ "$attempted" -eq 0 ]; then
+  log "ERROR: sweep attempted NOTHING ($skipped skipped) — refusing to report success"
+  exit 2
+fi
+log "sweep OK ($succeeded rotated) — restart the gateway on $STATE_DIR to load the new tokens"
+# The marker is emitted by the EXIT trap above — the SINGLE emission point, so
+# every exit path reports a committed rotation identically.
+exit 0
