@@ -124,7 +124,190 @@ source "$_KEEPALIVE_DIR/lib/codex-active-account.sh"
 # guard unreachable under test — the suite overrides CODEX_KEEPALIVE_STORE_ROOT,
 # so _active_measured_row resolved against the real box, always came back empty,
 # and every test silently exercised the fall-through instead of the guard.
-CODEX_KEEPALIVE_CANON="${CODEX_KEEPALIVE_CANON:-$CODEX_KEEPALIVE_STORE_ROOT/.openclaw-main/agents/main/agent/auth-profiles.json}"
+# CODEX_KEEPALIVE_CANON is assigned ONLY by kal_store_for_profile below and is
+# EMPTY when that resolver fails. It used to default to the legacy JSON path, so
+# on >= 2026.8 a failed cell projection left every direct consumer
+# (_active_measured_row, _measured_account_lines, _measured_earliest_reset_note)
+# reading an obsolete file the runtime no longer uses — QA finding on #931,
+# round 3. Read it through kal_canon(), never directly.
+CODEX_KEEPALIVE_CANON=""
+
+# ── 2026.8+: the canonical JSON is GONE; project the shared SQLite cell ───────
+# `openclaw doctor --fix` migrated canonical auth-profiles.json into
+# <stateDir>/state/openclaw.sqlite -> config_machine_state row
+# 'authProfiles.store' (column value_json) and ARCHIVED the JSON as
+# *.migrated-<ts>-<uuid>. This script kept reading the JSON path, so from the
+# 2026-09-10 cutover every tick went BLIND: it paged hourly while providing
+# ZERO coverage (the worst combination — noise plus a blind spot).
+#
+# Rather than teach five call sites a second store shape, materialize a
+# 7.x-SHAPED, REDACTED view of the cell once and point CODEX_KEEPALIVE_CANON at
+# it. Two properties are deliberate:
+#
+#   REDACTED — only `expires` is copied. Nothing here ever needs a token
+#   (_codex_remaining_ms wants expiries; the selectors want keys;
+#   caa_state_key only asserts `.profiles[$k] != null`), and writing
+#   access/refresh into a temp file would create a brand-new secret-on-disk
+#   surface for a MONITORING script. See codex-quota-probe.sh for why we are
+#   strict about this.
+#
+#   7.x-SHAPED — the cell keys profiles `openai:<email>`, but every consumer
+#   here speaks `openai-codex:<email>`: the `startswith("openai-codex:")`
+#   selectors below, and caa_state_key comparing against
+#   /var/lib/hydra/codex-active-account (which holds an `openai-codex:` id).
+#   Selecting on the wrong prefix returns an EMPTY set, which this script would
+#   read as "no codex profiles" — a silent false clean, not a loud failure
+#   (the three-namespace trap that swallowed a valid credential on 2026-07-27).
+#   Translating once, here, keeps those call sites and the rotation state file
+#   untouched.
+#
+# Fail-safe: any failure leaves CODEX_KEEPALIVE_CANON pointing at the
+# (now absent) JSON, so the existing BLIND page still fires. Blind-and-loud is
+# the intended failure mode; blind-and-quiet is not.
+kal_state_db() {
+  printf '%s/.openclaw-%s/state/openclaw.sqlite' \
+    "$CODEX_KEEPALIVE_STORE_ROOT" "${1:-main}"
+}
+
+kal_project_cell() {
+  local profile="${1:-main}" db out
+  db="$(kal_state_db "$profile")"
+  [ -r "$db" ] || return 1
+  command -v node >/dev/null 2>&1 || return 1
+  out="$(KAL_DB="$db" node --experimental-sqlite --no-warnings -e '
+    const { DatabaseSync } = require("node:sqlite");
+    let db;
+    try { db = new DatabaseSync(process.env.KAL_DB, { readOnly: true }); }
+    catch (e) { process.exit(1); }
+    let row;
+    try {
+      row = db.prepare(
+        "select value_json from config_machine_state where state_key=?"
+      ).get("authProfiles.store");
+    } catch (e) { process.exit(1); }
+    if (!row || !row.value_json) process.exit(1);
+    let store;
+    try { store = JSON.parse(row.value_json); } catch (e) { process.exit(1); }
+    const src = (store && store.profiles) || {};
+    const out = {};
+    for (const [k, v] of Object.entries(src)) {
+      // openai:<email> -> openai-codex:<email>; leave anything else as-is so a
+      // future provider is visible rather than silently dropped.
+      const key = k.startsWith("openai:") ? "openai-codex:" + k.slice(7) : k;
+      const e = v && typeof v.expires === "number" ? v.expires : null;
+      out[key] = e === null ? {} : { expires: e };
+    }
+    process.stdout.write(JSON.stringify({ profiles: out }));
+  ' 2>/dev/null)" || return 1
+  [ -n "$out" ] || return 1
+  printf '%s' "$out" | jq -e '.profiles | type == "object"' >/dev/null 2>&1 || return 1
+  printf '%s' "$out"
+}
+
+# shellcheck source=lib/version-compare.sh
+source "$_KEEPALIVE_DIR/lib/version-compare.sh"
+KAL_RUNTIME_VER="$(openclaw_runtime_version 2>/dev/null || true)"
+# THREE states, not two. The first version defaulted KAL_USE_CELL=0, which
+# conflated "positively identified as pre-2026.8" with "could not tell" — so on
+# a real 8.2 host whose `openclaw --version` was unavailable or malformed, this
+# fell back to reading the obsolete legacy JSON. With a stale readable one
+# carrying future expiries that reports HEALTHY and suppresses the BLIND page
+# while the live cell may be missing or corrupt. Same false-healthy family as
+# the legacy-fallback finding on this PR, one level up: there the fallback fired
+# when the projection failed, here it fires when the VERSION GATE cannot decide.
+#
+# `unknown` must be loud, not lenient: the legacy JSON is only ever the truth on
+# a version we positively parsed as < 2026.8.
+# The shape check is REDUNDANT-BY-DESIGN defence in depth, and I am recording
+# that rather than implying it is covered: openclaw_runtime_version already
+# sanitizes, returning EMPTY for "banana", "2026", "abc.def" and empty alike,
+# and a value only for a release-shaped string (measured). So the reachable
+# unknown path is the EMPTY one — which IS tested three ways below. Loosening
+# this regex changes no test, because nothing the helper returns can fail it.
+# It stays as the belt to the helper's braces: if that contract ever loosens,
+# this keeps `unknown` fail-closed instead of silently trusting a junk string.
+KAL_VERSION_STATE="unknown"
+if printf '%s' "$KAL_RUNTIME_VER" | grep -Eq '^[0-9]{4}(\.[0-9]+)+$'; then
+  if version_at_least "2026.8" "$KAL_RUNTIME_VER"; then
+    KAL_VERSION_STATE="cell"
+  else
+    KAL_VERSION_STATE="legacy"
+  fi
+fi
+KAL_USE_CELL=0
+[ "$KAL_VERSION_STATE" = "cell" ] && KAL_USE_CELL=1
+
+# KAL_CANON_DIR may be pre-set by tests/debugging to a directory that will NOT
+# be cleaned up, so the projected payload can be inspected (it is the only way
+# to assert the redaction and the id translation from outside this script —
+# there is no main guard here, so the suite cannot source these functions).
+if [ -z "${KAL_CANON_DIR:-}" ]; then
+  KAL_CANON_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-keepalive-canon.XXXXXX")" || KAL_CANON_DIR=""
+  [ -n "$KAL_CANON_DIR" ] && trap 'rm -rf "$KAL_CANON_DIR"' EXIT
+fi
+
+# kal_store_for_profile <profile> — echo a path to a READABLE 7.x-shaped store
+# for that profile, projecting the SQLite cell on >= 2026.8. Non-zero if none.
+# Every consumer must go through this: _codex_remaining_ms builds its own path,
+# and pointing only CODEX_KEEPALIVE_CANON at the projection left the BLIND check
+# still reading the archived JSON — i.e. the hourly false page would have
+# survived the fix. Caught by scripts/tests/codex-keepalive.bats.
+kal_store_for_profile() {
+  local profile="$1" json out target
+  json="$CODEX_KEEPALIVE_STORE_ROOT/.openclaw-$profile/agents/main/agent/auth-profiles.json"
+  # Unknown runtime -> no store at all. Reading the legacy JSON here is the
+  # false-healthy path described above; "I cannot tell which store is the truth"
+  # must surface as BLIND, not as a healthy read of a file that may be obsolete.
+  [ "$KAL_VERSION_STATE" = "unknown" ] && return 1
+  if [ "$KAL_USE_CELL" -ne 1 ]; then
+    [ -r "$json" ] || return 1
+    printf '%s' "$json"; return 0
+  fi
+  # NO JSON FALLBACK ON >= 2026.8. The first version of this fell back to any
+  # readable canonical JSON when the projection failed, reasoning that the file
+  # is "usually absent" so the BLIND page would still fire. That is exactly
+  # backwards, and QA caught it on #931: on 8.2 the runtime does not use that
+  # file at all, so a readable STALE one with future expiries makes
+  # _codex_remaining_ms report healthy and SUPPRESSES the BLIND page while the
+  # real auth cell is unusable — blind-and-QUIET, the failure this whole change
+  # exists to remove. And a readable legacy JSON is not hypothetical: doctor
+  # archives it next to the live path, and the window runbook renamed one to
+  # auth-profiles.json.SPENT-DO-NOT-USE-* precisely because such files linger.
+  # On this runtime the cell is the only truth: if it cannot be projected, the
+  # honest answer is "I cannot see the token", which is what rc 2 -> BLIND says.
+  [ -n "$KAL_CANON_DIR" ] || return 1
+  target="$KAL_CANON_DIR/$profile-auth-profiles.json"
+  if [ ! -r "$target" ]; then
+    out="$(kal_project_cell "$profile" 2>/dev/null)" || out=""
+    if [ -n "$out" ]; then
+      ( umask 077; printf '%s' "$out" > "$target" )
+    fi
+  fi
+  [ -r "$target" ] && { printf '%s' "$target"; return 0; }
+  return 1
+}
+
+# CODEX_KEEPALIVE_CANON is what caa_active_key and the keys[] selectors read; it
+# is always the MAIN profile's store.
+# Resolver failure => NO store (empty), never the legacy path: on >= 2026.8 and
+# on an unknown runtime the legacy JSON is not the truth, and a readable stale
+# one would let the quota consumers below attribute a live cap signature to a
+# key the runtime is not using.
+if _kal_main_store="$(kal_store_for_profile main 2>/dev/null)"; then
+  CODEX_KEEPALIVE_CANON="$_kal_main_store"
+else
+  CODEX_KEEPALIVE_CANON=""
+fi
+unset _kal_main_store
+
+# kal_canon — the ONE accessor for the main canonical store: echoes the
+# resolver-selected path, non-zero when the resolver could not select one. Every
+# consumer that needs profile keys goes through here, so "no store" is one
+# answer in one place rather than a path that happens to be unreadable.
+kal_canon() {
+  [ -n "$CODEX_KEEPALIVE_CANON" ] && [ -r "$CODEX_KEEPALIVE_CANON" ] || return 1
+  printf '%s' "$CODEX_KEEPALIVE_CANON"
+}
 
 # Stand down during a planned maintenance window (scripts/hydra-maintenance.sh):
 # a window is exactly when a human is deliberately touching codex/gateways, so
@@ -166,8 +349,8 @@ _cooldown_ok() {
 # if the store is missing/unreadable/not JSON.
 _codex_remaining_ms() {
   local profile="$1" store now_ms rem
-  store="$CODEX_KEEPALIVE_STORE_ROOT/.openclaw-$profile/agents/main/agent/auth-profiles.json"
-  [ -r "$store" ] || return 2
+  store="$(kal_store_for_profile "$profile" 2>/dev/null)" || return 2
+  [ -n "$store" ] && [ -r "$store" ] || return 2
   now_ms="$(( $(date +%s) * 1000 ))"
   # `.expires | numbers` drops absent/non-numeric expiries instead of letting a
   # malformed profile turn min() into a jq runtime error.
@@ -184,9 +367,29 @@ _page_expiring() {
   slack_notify ":hourglass_flowing_sand: *Codex OAuth token expiring* on node-8 (\`${profile}\`) — ~${rem_min}m left and the scheduled auto-refresh has not renewed it. Refresh NOW to avoid the fleet dropping to \`openrouter/openai/gpt-5.6-luna\`: \`/opt/hydra/scripts/lib/codex-oauth-refresh.sh && systemctl restart openclaw-gateway-main openclaw-gateway-edge\`. If it reports \`invalid_grant\` the refresh token is dead → device-code re-auth (RUNBOOK §\"Codex Token Lapse\"). (Proactive pre-empt — the reactive watchdog only fires AFTER the 401s start.)"
 }
 
+# kal_store_hint <profile> — the store the RESOLVER actually selected, plus the
+# command that inspects it. A page must send the responder to the store this
+# run treated as authoritative, not to a fixed path: on 2026.8+ the cell is the
+# truth and the JSON is archived, so naming the JSON on a missing/corrupt cell
+# — the exact new failure path — points at the wrong file at 4am.
+kal_store_hint() {
+  local profile="$1"
+  case "$KAL_VERSION_STATE" in
+    cell)
+      printf 'the shared auth cell `%s/.openclaw-%s/state/openclaw.sqlite` (table `config_machine_state`, row `authProfiles.store`) — inspect with `/opt/hydra/scripts/lib/codex-auth-invariants.sh --check`' \
+        "$CODEX_KEEPALIVE_STORE_ROOT" "$profile" ;;
+    legacy)
+      printf 'the canonical JSON `%s/.openclaw-%s/agents/main/agent/auth-profiles.json`' \
+        "$CODEX_KEEPALIVE_STORE_ROOT" "$profile" ;;
+    *)
+      printf 'NO store — the openclaw runtime version could not be determined (`%s`), so neither the 2.0 cell nor the legacy JSON can be trusted as authoritative; check `openclaw --version` first' \
+        "${KAL_RUNTIME_VER:-<empty>}" ;;
+  esac
+}
+
 _page_blind() {
   local profile="$1" reason="$2"
-  slack_notify ":rotating_light: *Codex keepalive BLIND* on node-8 (\`${profile}\`) — ${reason}. The pre-expiry safety net cannot see the codex token, so the next lapse would hit UNWARNED (exactly the 2026-07-14 silent window). Check \`${CODEX_KEEPALIVE_STORE_ROOT}/.openclaw-${profile}/agents/main/agent/auth-profiles.json\` and RUNBOOK §\"Codex Token Lapse\"."
+  slack_notify ":rotating_light: *Codex keepalive BLIND* on node-8 (\`${profile}\`) — ${reason}. The pre-expiry safety net cannot see the codex token, so the next lapse would hit UNWARNED (exactly the 2026-07-14 silent window). Authoritative store for this run: $(kal_store_hint "$profile"). See RUNBOOK §\"Codex Token Lapse\"."
 }
 
 # ── usage-cap detection → account rotation ───────────────────────────────────
@@ -266,7 +469,8 @@ _earliest_reset_note() {
 # confident wrong time inside an otherwise-honest message. Emits nothing when
 # nothing was measured, rather than falling back to the inferred number.
 _measured_earliest_reset_note() {
-  local key row at earliest="" now
+  local key row at earliest="" now canon
+  canon="$(kal_canon)" || return 0
   now="$(date +%s)"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
@@ -275,7 +479,7 @@ _measured_earliest_reset_note() {
     at="$(cq_row_reset_at "$row" "$now")" || continue
     if [ -z "$earliest" ] || [ "$at" -lt "$earliest" ]; then earliest="$at"; fi
   done < <(jq -r '.profiles | keys[] | select(startswith("openai-codex:"))' \
-             "$CODEX_KEEPALIVE_CANON" 2>/dev/null)
+             "$canon" 2>/dev/null)
   [ -n "$earliest" ] || return 0
   printf 'Earliest MEASURED quota reset: %s.' "$(cq_human_in "$earliest" "$now")"
 }
@@ -287,19 +491,20 @@ _measured_earliest_reset_note() {
 # reads as "not a problem", which is how two idle subscriptions went unnoticed
 # through the 2026-08-05 incident).
 _measured_account_lines() {
-  local key row out="" active now
+  local key row out="" active now canon
+  canon="$(kal_canon)" || return 0
   # One clock for the whole page: cq_format_evidence forks `date +%s` when no
   # `now` is passed, so an unthreaded loop also renders each account's age
   # against a slightly different instant.
   now="$(date +%s)"
-  active="$(caa_active_key "$CODEX_KEEPALIVE_CANON" 2>/dev/null)" || active=""
+  active="$(caa_active_key "$canon" 2>/dev/null)" || active=""
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     row="$(cq_measure_read "$CODEX_USAGE_ARCHIVE_DIR" "$key" 2>/dev/null || true)"
     out="$out"$'\n'"• $(cq_format_evidence "${key#openai-codex:}" "$row" "$now")"
     [ "$key" = "$active" ] && out="$out (active)"
   done < <(jq -r '.profiles | keys[] | select(startswith("openai-codex:"))' \
-             "$CODEX_KEEPALIVE_CANON" 2>/dev/null)
+             "$canon" 2>/dev/null)
   [ -n "$out" ] || return 0
   printf 'Measured quota:%s' "$out"
 }
@@ -377,8 +582,9 @@ _check_session_revoked() {
 # says is active. Echoes nothing when there is no measurement (which reads as
 # `unknown` downstream, never as healthy).
 _active_measured_row() {
-  local key
-  key="$(caa_active_key "$CODEX_KEEPALIVE_CANON" 2>/dev/null)" || key=""
+  local key canon
+  canon="$(kal_canon)" || return 1
+  key="$(caa_active_key "$canon" 2>/dev/null)" || key=""
   [ -n "$key" ] || return 1
   cq_measure_read "$CODEX_USAGE_ARCHIVE_DIR" "$key" 2>/dev/null
 }
@@ -391,6 +597,17 @@ _check_usage_cap() {
   fi
   if _rotated_recently; then
     log "cap: signature present (${hits}x) but a rotation ran <${CODEX_KEEPALIVE_CAP_WINDOW_MIN}min ago — waiting for the journal window to clear"
+    return 0
+  fi
+  # No resolved canonical store => no account attribution is possible. Neither
+  # branch below is safe then: "not ours" needs the active KEY (which only the
+  # store can validate), and the rotate path needs the same key to measure a
+  # target. Falling through used to reach the rotate actuator on an empty key,
+  # or — while CANON still defaulted to the legacy JSON — classify a real cap as
+  # auth.order noise off a stale file. The BLIND page from the expiry loop owns
+  # this tick; this is a refusal, not a second page.
+  if ! kal_canon >/dev/null; then
+    log "cap: usage-limit signature ${hits}x but the canonical auth store could not be resolved (runtime state=${KAL_VERSION_STATE}) — cannot attribute it to an account; refusing to classify it as noise or to rotate (BLIND page owns this tick)"
     return 0
   fi
 
@@ -586,7 +803,11 @@ main() {
     # logged "skipping" for hours while the fleet 401'd).
     blind_reason=""
     if ! rem=$(_codex_remaining_ms "$profile"); then
-      blind_reason="the canonical auth store is missing/unreadable/not JSON"
+      if [ "$KAL_VERSION_STATE" = "unknown" ]; then
+        blind_reason="runtime version unknown ('${KAL_RUNTIME_VER:-<empty>}') — refusing to guess which auth store is authoritative; the legacy JSON is only trusted on a positively parsed pre-2026.8 runtime"
+      else
+        blind_reason="the canonical auth store is missing/unreadable/not JSON"
+      fi
     elif [ -z "$rem" ] || ! [[ "$rem" =~ ^-?[0-9]+$ ]]; then
       blind_reason="no openai-codex profile with a numeric expiry in the canonical auth store (rem='$rem')"
     fi

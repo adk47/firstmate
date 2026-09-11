@@ -42,6 +42,20 @@ exit 99
 STUB
   chmod +x "$TEST_TMPDIR/bin/ssh"
 
+  # ITEM F / HERMETICITY: pin the runtime this suite tests. codex-keepalive.sh
+  # now branches on `openclaw --version` (>= 2026.8 projects the SQLite cell;
+  # below that it reads the canonical JSON). Without a stub the branch is
+  # decided by whatever node-8 happens to be running, which is exactly how
+  # codex-oauth-refresh.bats silently went red across the 2026-09-10 cutover.
+  # Default to a pre-8 runtime so the existing JSON-store tests keep asserting
+  # the semantics they were written for; the cell tests below override this.
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'OCSTUB'
+#!/bin/bash
+[ "$1" = "--version" ] && { echo "openclaw 2026.7.1"; exit 0; }
+exit 0
+OCSTUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+
   PATH="$TEST_TMPDIR/bin:$PATH"
   export PATH
 
@@ -596,4 +610,306 @@ JSON
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   [ "$(grep -c -- '--auto' "$ROTATE_LOG")" -eq 1 ]
+}
+
+
+# ── 2026.8+ SQLite cell projection ───────────────────────────────────────────
+#
+# The 2026-09-10 cutover archived the canonical auth-profiles.json into
+# <stateDir>/state/openclaw.sqlite (config_machine_state row 'authProfiles.store',
+# column value_json). This script kept reading the JSON path, so it went BLIND on
+# every tick and paged hourly while providing ZERO coverage. These tests pin the
+# projection AND its two deliberate properties: redaction, and the
+# openai: -> openai-codex: namespace translation.
+
+_kal_stub_runtime() {
+  cat > "$TEST_TMPDIR/bin/openclaw" <<OCSTUB
+#!/bin/bash
+[ "\$1" = "--version" ] && { echo "openclaw $1"; exit 0; }
+exit 0
+OCSTUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+}
+
+# _kal_seed_cell <profile> <expires-ms> [extra-json-for-profile]
+# Builds a REAL SQLite cell keyed the way 8.2 keys it (openai:<email>) and
+# carrying token material, so the redaction assertion has something to catch.
+_kal_seed_cell() {
+  local profile="$1" expires="$2"
+  local db="$TEST_TMPDIR/root/.openclaw-$profile/state/openclaw.sqlite"
+  mkdir -p "$(dirname "$db")"
+  KAL_DB="$db" KAL_EXP="$expires" node --experimental-sqlite --no-warnings -e '
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(process.env.KAL_DB);
+    db.exec("create table if not exists config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT, updated_at_ms INTEGER)");
+    const store = { profiles: {
+      "openai:a@x.com": { provider: "openai", access: "SUPERSECRET_ACCESS_A", refresh: "SUPERSECRET_REFRESH_A", idToken: "SUPERSECRET_ID_A", expires: Number(process.env.KAL_EXP) },
+      "openai:b@x.com": { provider: "openai", access: "SUPERSECRET_ACCESS_B", refresh: "SUPERSECRET_REFRESH_B", expires: Number(process.env.KAL_EXP) + 7200000 }
+    } };
+    db.prepare("insert or replace into config_machine_state (state_key, value_json, updated_at_ms) values (?,?,?)")
+      .run("authProfiles.store", JSON.stringify(store), Date.now());
+  '
+}
+
+@test "cell: on 2026.8.2 the projection is used and expiries are read from it" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  _kal_stub_runtime 2026.8.2
+  # 90 minutes out: comfortably valid, so no expiring page and NOT blind.
+  _kal_seed_cell main "$(( ($(date +%s) + 5400) * 1000 ))"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # The BLIND page is the tell that the projection did not happen.
+  ! grep -qi "keepalive BLIND" "$PAGE_LOG" 2>/dev/null
+}
+
+@test "cell: an EXPIRING cell token still pages (coverage is genuinely restored)" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  _kal_stub_runtime 2026.8.2
+  # 20 minutes out — inside the pre-expiry warning band.
+  _kal_seed_cell main "$(( ($(date +%s) + 1200) * 1000 ))"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qiE "expiring|BLIND" "$PAGE_LOG" 2>/dev/null
+}
+
+@test "cell: the projection REDACTS — no token material reaches disk" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  _kal_stub_runtime 2026.8.2
+  _kal_seed_cell main "$(( ($(date +%s) + 5400) * 1000 ))"
+  # KAL_CANON_DIR is honoured and NOT cleaned up, so we can inspect exactly what
+  # the script wrote. This script is a MONITOR: it never needs a token, so a
+  # token in its temp file would be a brand-new secret-on-disk surface.
+  export KAL_CANON_DIR="$TEST_TMPDIR/canon"
+  mkdir -p "$KAL_CANON_DIR"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -r "$KAL_CANON_DIR/main-auth-profiles.json" ]
+  proj="$(cat "$KAL_CANON_DIR/main-auth-profiles.json")"
+  [[ "$proj" != *"SUPERSECRET_ACCESS"* ]]
+  [[ "$proj" != *"SUPERSECRET_REFRESH"* ]]
+  [[ "$proj" != *"SUPERSECRET_ID"* ]]
+  # and it DID carry the one field it needs
+  [[ "$proj" == *"expires"* ]]
+}
+
+@test "cell: ids are translated openai: -> openai-codex: in the PROJECTION" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  _kal_stub_runtime 2026.8.2
+  _kal_seed_cell main "$(( ($(date +%s) + 5400) * 1000 ))"
+  export KAL_CANON_DIR="$TEST_TMPDIR/canon"
+  mkdir -p "$KAL_CANON_DIR"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # Assert on the PROJECTED file, not on the seeded cell (asserting the seed
+  # would be tautological). Without this translation the
+  # startswith("openai-codex:") selectors match NOTHING and the script reads
+  # "no codex profiles" — a silent false clean.
+  keys="$(jq -r '.profiles | keys | join(",")' "$KAL_CANON_DIR/main-auth-profiles.json")"
+  [[ "$keys" == *"openai-codex:a@x.com"* ]]
+  [[ "$keys" == *"openai-codex:b@x.com"* ]]
+  [[ "$keys" != *"\"openai:a@x.com\""* ]]
+}
+
+@test "cell: a MISSING cell on 2026.8.2 falls back and still pages BLIND (fail-safe)" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  _kal_stub_runtime 2026.8.2
+  # No cell seeded, and no canonical JSON either.
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qi "keepalive BLIND" "$PAGE_LOG" 2>/dev/null
+}
+
+@test "cell: missing cell + readable HEALTHY legacy JSON still pages BLIND (no false healthy)" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  # QA finding on #931. The first version of the resolver fell back to any
+  # readable canonical JSON when the cell projection failed. On >= 2026.8 the
+  # runtime does not use that file, so a readable STALE one with future
+  # expiries made _codex_remaining_ms report healthy and SUPPRESSED the BLIND
+  # page while the real auth cell was unusable — blind-and-QUIET, the exact
+  # failure this change exists to remove. Not hypothetical: doctor archives
+  # that file beside the live path and the window runbook renamed one to
+  # auth-profiles.json.SPENT-DO-NOT-USE-* because such files linger.
+  _kal_stub_runtime 2026.8.2
+  # NO cell seeded. A perfectly healthy-looking legacy JSON, 90 minutes out.
+  exp=$(( ($(date +%s) + 5400) * 1000 ))
+  cat > "$STORE_DIR/auth-profiles.json" <<JSON
+{"profiles":{"openai-codex:a@x.com":{"access":"stale","refresh":"stale","expires":$exp}}}
+JSON
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # It must NOT read that file and call the fleet healthy.
+  grep -qi "keepalive BLIND" "$PAGE_LOG"
+}
+
+@test "cell: a readable legacy JSON does not mask a CORRUPT cell either" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  _kal_stub_runtime 2026.8.2
+  # A cell that exists but is not a usable sqlite database.
+  mkdir -p "$TEST_TMPDIR/root/.openclaw-main/state"
+  printf 'this is not sqlite' > "$TEST_TMPDIR/root/.openclaw-main/state/openclaw.sqlite"
+  exp=$(( ($(date +%s) + 5400) * 1000 ))
+  cat > "$STORE_DIR/auth-profiles.json" <<JSON
+{"profiles":{"openai-codex:a@x.com":{"access":"stale","refresh":"stale","expires":$exp}}}
+JSON
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qi "keepalive BLIND" "$PAGE_LOG"
+}
+
+# QA finding on #931 (round 3): with the cell FAILED, CODEX_KEEPALIVE_CANON used
+# to stay pointed at the legacy JSON and the direct quota consumers
+# (_active_measured_row, _measured_account_lines, _measured_earliest_reset_note)
+# read it without the resolver. A readable stale JSON plus a fresh HEALTHY
+# measurement for the state-file key then let _check_usage_cap call a live cap
+# "not our active account" and skip rotation — the fleet stayed on the paid rung
+# with a usable standby idle, while the expiry loop was correctly paging BLIND.
+@test "cell: FAILED cell + stale healthy JSON + cap signature + fresh healthy measurement → cap check REFUSES (no rotate, no 'not ours'), BLIND still pages" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  _kal_stub_runtime 2026.8.2
+  mkdir -p "$TEST_TMPDIR/root/.openclaw-main/state"
+  printf 'this is not sqlite' > "$TEST_TMPDIR/root/.openclaw-main/state/openclaw.sqlite"
+  _kal_healthy_legacy_json
+  _set_cap_signature 5
+  _set_active_measurement 300 10080 10 200000    # 5min old, 10% used: the false-veto bait
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qi "keepalive BLIND" "$PAGE_LOG"
+  [ ! -s "$ROTATE_LOG" ]
+  run grep -c "NOT our active account" "$PAGE_LOG"
+  [ "$output" = "0" ]
+  run "$SCRIPT"
+  [[ "$output" == *"canonical auth store could not be resolved (runtime state=cell)"* ]]
+  [[ "$output" == *"refusing to classify it as noise or to rotate"* ]]
+}
+
+@test "cell: UNKNOWN runtime + stale healthy JSON + cap signature + fresh healthy measurement → cap check REFUSES too" {
+  _kal_stub_runtime "banana"
+  _kal_healthy_legacy_json
+  _set_cap_signature 5
+  _set_active_measurement 300 10080 10 200000
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qi "keepalive BLIND" "$PAGE_LOG"
+  [ ! -s "$ROTATE_LOG" ]
+  run grep -c "NOT our active account" "$PAGE_LOG"
+  [ "$output" = "0" ]
+  [[ "$output" != *"NOT our active account"* ]]
+}
+
+@test "cell: with a HEALTHY cell the cap guard still reaches its decision table (not over-tightened)" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  _kal_stub_runtime 2026.8.2
+  _kal_seed_cell main "$(( ($(date +%s) + 5400) * 1000 ))"
+  _set_cap_signature 5
+  _set_active_measurement 300 10080 10 200000
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -s "$ROTATE_LOG" ]
+  grep -q "NOT our active account" "$PAGE_LOG"
+}
+
+@test "cell: on a PRE-2026.8 runtime the cell is ignored even if present" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  _kal_stub_runtime 2026.7.1
+  # Seed a healthy cell but NO json store: a 7.1 runtime must not read the cell,
+  # so it must still go BLIND rather than silently picking up 8.2 state.
+  _kal_seed_cell main "$(( ($(date +%s) + 5400) * 1000 ))"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qi "keepalive BLIND" "$PAGE_LOG" 2>/dev/null
+}
+
+
+# ── the version gate, with the system PUT IN each state ─────────────────────
+# Three states, and the legacy JSON is trusted in exactly ONE of them. Added
+# after the bot found that "cannot determine the version" silently took the
+# pre-2026.8 path and read an obsolete file as healthy.
+
+_kal_healthy_legacy_json() {
+  exp=$(( ($(date +%s) + 5400) * 1000 ))
+  cat > "$STORE_DIR/auth-profiles.json" <<JSON
+{"profiles":{"openai-codex:a@x.com":{"access":"stale","refresh":"stale","expires":$exp}}}
+JSON
+}
+
+@test "version EMPTY + healthy stale JSON -> BLIND naming the unknown version" {
+  # openclaw missing or its --version silent. On a real 8.2 host this used to
+  # read the obsolete JSON and report healthy.
+  cat > "$TEST_TMPDIR/bin/openclaw" <<'OCSTUB'
+#!/bin/bash
+exit 0
+OCSTUB
+  chmod +x "$TEST_TMPDIR/bin/openclaw"
+  _kal_healthy_legacy_json
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qi "keepalive BLIND" "$PAGE_LOG"
+  [[ "$output" == *"runtime version unknown"* ]]
+}
+
+@test "version GARBAGE + healthy stale JSON -> BLIND (no lenient parse)" {
+  _kal_stub_runtime "banana"
+  _kal_healthy_legacy_json
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qi "keepalive BLIND" "$PAGE_LOG"
+  [[ "$output" == *"runtime version unknown"* ]]
+}
+
+@test "version TRUNCATED (2026) + healthy stale JSON -> BLIND" {
+  # A shape that would satisfy a loose numeric check but is not a release.
+  _kal_stub_runtime "2026"
+  _kal_healthy_legacy_json
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qi "keepalive BLIND" "$PAGE_LOG"
+}
+
+@test "version POSITIVELY pre-2026.8 + JSON -> the JSON path still works (not over-tightened)" {
+  # The other direction: the fix must not break the one state where the legacy
+  # store IS the truth, or 7.x hosts lose their keepalive entirely.
+  _kal_stub_runtime 2026.7.1
+  _kal_healthy_legacy_json
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  ! grep -qi "keepalive BLIND" "$PAGE_LOG" 2>/dev/null
+}
+
+
+# ── the BLIND page must name the store the RESOLVER selected ────────────────
+# One per version state. A fixed path sends the responder to the wrong file on
+# exactly the new failure path (missing/corrupt cell on 2026.8+).
+
+@test "page text: on 2026.8+ names the CELL and its row, not the JSON" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  _kal_stub_runtime 2026.8.2
+  run "$SCRIPT"        # no cell seeded -> BLIND
+  [ "$status" -eq 0 ]
+  page="$(cat "$PAGE_LOG")"
+  [[ "$page" == *"state/openclaw.sqlite"* ]]
+  [[ "$page" == *"authProfiles.store"* ]]
+  [[ "$page" == *"codex-auth-invariants.sh --check"* ]]
+  # must NOT send them to the archived JSON
+  [[ "$page" != *"agents/main/agent/auth-profiles.json"* ]]
+}
+
+@test "page text: on a pre-2026.8 runtime names the canonical JSON" {
+  _kal_stub_runtime 2026.7.1
+  # no JSON present -> BLIND on the legacy path
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  page="$(cat "$PAGE_LOG")"
+  [[ "$page" == *"agents/main/agent/auth-profiles.json"* ]]
+  [[ "$page" != *"state/openclaw.sqlite"* ]]
+}
+
+@test "page text: on an UNKNOWN runtime names neither store and points at --version" {
+  _kal_stub_runtime "banana"
+  _kal_healthy_legacy_json
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  page="$(cat "$PAGE_LOG")"
+  [[ "$page" == *"could not be determined"* ]]
+  [[ "$page" == *"openclaw --version"* ]]
+  [[ "$page" != *"state/openclaw.sqlite"* ]]
 }
