@@ -44,6 +44,12 @@ source "$_SMOKE_DIR/lib/credit-gate-probe.sh"
 source "$_SMOKE_DIR/lib/cron-store.sh"
 # shellcheck source=lib/mesh-probe.sh
 source "$_SMOKE_DIR/lib/mesh-probe.sh"
+# restart_recovery_* — same split rationale; tells a main-session restart
+# recovery REPLAY (every direct turn on `agent:<id>:main` is rejected with
+# "changed while starting work" until the replay's journal terminal line) apart
+# from a genuinely broken agent (see lib/restart-recovery.sh).
+# shellcheck source=lib/restart-recovery.sh
+source "$_SMOKE_DIR/lib/restart-recovery.sh"
 
 # expected_agent_count <profile> — print the count of enabled agents
 # in /opt/hydra/openclaw-<profile>.json. Returns "?" on any failure
@@ -130,6 +136,51 @@ check_channel_health() {
   fi
 }
 
+# recovery_gate <profile> <session-keys-csv> <label> — run before any
+# direct-turn probe of a main session; list EVERY session the probe touches
+# (the mesh probe nests a sessions_send into agent:cto:main, so a replay on
+# the downstream key rejects it just the same). After a FORCED restart (drain skipped) the gateway
+# replays each interrupted `agent:<id>:main` under main-session restart
+# recovery, and for the whole replay every direct turn on that key is rejected
+# at claim time with `Session "<key>" changed while starting work. Retry.`
+# (2026-09-11: agent:clio:main replayed for 16.5 min; the smoke test logged it
+# as "did not return PONG", which reads like a broken agent). Waits up to
+# SMOKE_RECOVERY_WAIT_SECS for the journal's terminal line, then:
+#   0 → clear, probe.   1 → still replaying: an explicit WARN naming the cause,
+#   caller SKIPS the probe.   2 → journal unreadable: log it and probe anyway —
+#   the probe itself still fails loud, so the original behaviour is the safe
+#   fallback here, not a silent skip.
+SMOKE_RECOVERY_WAIT_SECS="${SMOKE_RECOVERY_WAIT_SECS:-120}"
+# A key that already exhausted its wait is skipped on sight — clio is gated
+# twice (mesh probe, then its ping), and paying the budget twice buys nothing.
+declare -A _RECOVERY_PENDING=()
+recovery_gate() {
+  local profile="$1" keys="$2" label="$3" rc=0 key
+  local -a key_list=()
+  IFS=, read -r -a key_list <<< "$keys"
+  for key in "${key_list[@]}"; do
+    if [[ -n "$key" && -n "${_RECOVERY_PENDING[$key]:-}" ]]; then
+      warn_check "$label: '$key' still under restart recovery (already waited ${SMOKE_RECOVERY_WAIT_SECS}s above) — LLM probe SKIPPED."
+      return 1
+    fi
+  done
+  restart_recovery_wait "$profile" "$keys" "$SMOKE_RECOVERY_WAIT_SECS" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1)
+      key="$RESTART_RECOVERY_PENDING_KEY"
+      _RECOVERY_PENDING[$key]=1
+      warn_check "$label: '$key' is still under main-session restart recovery after ${SMOKE_RECOVERY_WAIT_SECS}s — LLM probe SKIPPED. Expected after a forced restart, not an agent fault: direct turns return 'changed while starting work' until the journal logs 'restart recovery terminal: session=$key'. Re-probe by hand once it does (docs/lessons/deploy-ci-pr.md)."
+      return 1 ;;
+    3)
+      warn_check "$label: SMOKE_RECOVERY_WAIT_SECS='$SMOKE_RECOVERY_WAIT_SECS' is not a non-negative integer — restart-recovery gate for '$keys' SKIPPED, probing without it"
+      return 0 ;;
+    *)
+      log "  $label: could not read the gateway journal to check restart recovery for '$keys' (rc=$rc); probing anyway"
+      return 0 ;;
+  esac
+}
+
 ping_agent() {
   # ping_agent <profile> <agent_id> <label>
   # Runs a real LLM round-trip via openclaw agent --agent X -m "...".
@@ -139,15 +190,34 @@ ping_agent() {
   local profile="$1"
   local agent_id="$2"
   local label="$3"
-  local start elapsed response
+  local start elapsed response rc verdict
+  recovery_gate "$profile" "agent:${agent_id}:main" "$label" || return 0
   start=$(date +%s)
-  response=$(timeout 60 openclaw --profile "$profile" agent --agent "$agent_id" -m "respond with the exact word PONG and nothing else" 2>&1) || response="TIMEOUT"
-  elapsed=$(( $(date +%s) - start ))
-  if echo "$response" | grep -qi 'pong'; then
-    pass_check "$label: agent '$agent_id' responded PONG in ${elapsed}s"
+  # `if VAR=$(...)` keeps BOTH the exit status and the captured output (same
+  # shape as the mesh probe below). The old `|| response="TIMEOUT"` replaced
+  # the output on ANY non-zero exit — and `openclaw agent` exits 1 on a
+  # restart-recovery claim rejection, so the exact error was gone before
+  # anything could classify it (QA round 2 on PR #934).
+  if response=$(timeout 60 openclaw --profile "$profile" agent --agent "$agent_id" -m "respond with the exact word PONG and nothing else" 2>&1); then
+    rc=0
   else
-    warn_check "$label: agent '$agent_id' did not return PONG within 60s (elapsed=${elapsed}s). Response head: $(echo "$response" | head -c 200)"
+    rc=$?
   fi
+  elapsed=$(( $(date +%s) - start ))
+  verdict="$(restart_recovery_ping_verdict "$rc" "$response")"
+  case "$verdict" in
+    pass)
+      pass_check "$label: agent '$agent_id' responded PONG in ${elapsed}s" ;;
+    recovery)
+      # The gate read clear but the turn still hit the recovery claim: a
+      # replay (re)started between the read and the turn. Name it — this is
+      # not a 60s timeout and not a broken agent.
+      warn_check "$label: agent '$agent_id' rejected the turn with the restart-recovery claim error (a main-session replay is in progress; see recovery_gate). Response head: $(echo "$response" | head -c 200)" ;;
+    timeout)
+      warn_check "$label: agent '$agent_id' did not return PONG within 60s (elapsed=${elapsed}s, rc=124). Response head: $(echo "$response" | head -c 200)" ;;
+    *)
+      warn_check "$label: agent '$agent_id' did not return PONG (elapsed=${elapsed}s, rc=$rc). Response head: $(echo "$response" | head -c 200)" ;;
+  esac
 }
 needs_target() { [[ "$TARGET" == "all" || ",$TARGET," == *",$1,"* ]]; }
 
@@ -441,7 +511,14 @@ if needs_target "main"; then
   # timeout's own signal for "deadline hit"; anything else non-zero is the
   # command itself failing and must surface its stderr verbatim.
   log "  Testing cross-agent mesh behaviorally (Clio -> CTO via LLM)..."
+  # The probe is a direct turn on agent:clio:main that nests a sessions_send
+  # into agent:cto:main; a restart-recovery replay on EITHER key rejects it
+  # (all 3 attempts failed in ~1s each at 14:44:22-24Z on 2026-09-11 while
+  # clio's key was held). Gate both keys like ping_agent.
+  MESH_GATED=0
+  recovery_gate main agent:clio:main,agent:cto:main "Main" || MESH_GATED=1
   for attempt in 1 2 3; do
+    if [[ "$MESH_GATED" -eq 1 ]]; then break; fi
     # `if VAR=$(...)` (not `VAR=$(...); rc=$?`) because this script runs under
     # `set -e` — a bare failing assignment would abort the whole smoke test.
     # Same shape as _websearch_probe_attempt in scripts/lib/websearch-probe.sh.
