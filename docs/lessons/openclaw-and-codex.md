@@ -708,6 +708,38 @@ refusal disappears" — true, and the wrong assertion: declaring `"exact"` repla
 refusal with a SILENT capability downgrade. **Re-verify the 16-name list on every
 openclaw/codex bump.**
 
+**codex 0.151.0 (@openclaw/codex 2026.8.2) changed the ROLLOUT SHAPE of a native web
+search — "0 `web_search_end` events since the cutover" is a measurement artefact, not an
+outage.** Through codex 0.144.3 a native search persisted as
+`{"type":"event_msg","payload":{"type":"web_search_end",...}}`; from 0.151.0 the legacy event
+is gone and the same search is `{"type":"event_msg","payload":{"type":"item_completed","item":
+{"type":"Extension","kind":"web.search","results":[...]}}}` (the model reaches it through
+code mode as `tools.web__run(...)`; gpt-5.6-sol/luna are `use_responses_lite` models, so the
+hosted Responses `web_search` tool is never emitted and the standalone extension is the only
+search path — `codex-rs/core/src/tools/spec_plan.rs`). Every hydra counter that grepped the
+literal `web_search_end` (the smoke probe, the debug probes, the handoff notes) read 0 for
+28h after the plugin bump (2026-09-10 12:47Z) while scout ran 17 real searches, which sent a
+whole investigation chasing a codex config bug that did not exist. The REAL outage in that
+window was the `sentry__*` deny incident above: every live-config backup through 2026-09-10
+12:56Z still carried the denies (restricted native surface → managed plan → openclaw's own
+`web_search` dynamic tool exposed and failing "disabled or no provider"); PR #929's config
+reached the live file at 2026-09-11 14:37Z, the 14:43Z restart activated it, and native
+search has fired fleet-wide since (per-session matrix: every scout session before 14:37
+shows `openclaw__web_search` + 0 `web__run`, every session after shows the inverse).
+Three probe traps, all observed live 2026-09-11: (1) **count the JSON shape, never the
+substring** — the review bot's rollouts quote PR prose containing the literal event name;
+(2) **the hosted search backend summarises with the recent conversation as input** — in
+scout's persistent `main` session that history carried the prior outage, and the backend
+returned "SEARCH_STATUS: error: web_search is disabled or no provider is available." as the
+search OUTPUT of a real 29-result search, so a text-regex verdict flipped a working search
+into FAIL; the probe now runs in a fresh `--session-id` and positive rollout evidence outranks
+any break string in the text; (3) a discriminator that asks the model to "call the
+web_search tool" steers it to `openclaw__web_search` whenever that tool is exposed (managed
+plan only), and `bbc.com/news` is robots-blocked for the backend — neither result says
+anything about native search. `scripts/lib/websearch-probe.sh` (`_websearch_rollout_hits`)
+is the one shape-aware counter; reuse it instead of grepping rollouts. **Re-verify the
+persisted shape on every codex bump.**
+
 **Codex refuses competitive-intel / scraping prompts (cyber-safety classifier).**
 `codex/gpt-5.5` returns a refusal flagged for "possible cybersecurity risk" on
 B2B-intel / company-scraping / competitor-list tasks; openclaw can't read the

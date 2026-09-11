@@ -26,10 +26,38 @@
 #     (`[tools] web_search failed: Reconnecting`) — it never logs successes,
 #     so "nothing broken in the journal" is not proof something ran either.
 # The one authoritative signal that a REAL web_search call executed is a
-# `web_search_end` event in the scout agent's codex-home session rollout:
-# verified live, a successful probe produced 12 web_search_end / 0
-# Reconnecting in the newest rollout; the broken (managed-provider
-# misconfigured) state produced Reconnecting / 0 web_search_end.
+# search event in the probed agent's codex-home session rollout, counted by
+# JSON STRUCTURE (never substring — the review bot's rollouts quote PR
+# prose containing the literal event name). The persisted shape depends on
+# the vendored codex binary (both verified live on node-8):
+#   - codex <= 0.144.3: `{"type":"event_msg","payload":{"type":"web_search_end",...}}`
+#   - codex >= 0.151.0 (@openclaw/codex 2026.8.2): the legacy event is gone;
+#     a native search is `{"type":"event_msg","payload":{"type":"item_completed",
+#     "item":{"type":"Extension","kind":"web.search","results":[...]}}}`.
+#     A substring grep for `web_search_end` read 0 for 28h (2026-09-10 12:47
+#     -> 2026-09-11) while 17 real searches ran, so this probe could never
+#     PASS and every "0 events since the cutover" reading was a false
+#     negative.
+# Verified live 2026-07-16: a successful probe produced 12 web_search_end /
+# 0 Reconnecting; the broken (managed-provider misconfigured) state produced
+# Reconnecting / 0 web_search_end.
+#
+# Two more live facts (2026-09-11) shape the verdict and the invocation:
+#   - The hosted search backend summarises its results with the RECENT
+#     CONVERSATION as input. In scout's persistent `main` session that
+#     history carried a real prior outage, and the backend returned
+#     "SEARCH_STATUS: error: web_search is disabled or no provider is
+#     available." as the search OUTPUT over 29 real results (rollout
+#     Extension item, musicbrainz.org first). So the probe runs in a FRESH
+#     `--session-id` per attempt, and positive rollout evidence outranks a
+#     break signature in the model text: the text can be an echo, the
+#     structural event cannot.
+#   - A prompt that says "call the web_search tool" steers the model to
+#     openclaw's own `web_search` dynamic tool whenever that is exposed —
+#     which only happens on the managed plan (restricted native surface, cf.
+#     the 2026-09-10 sentry__* deny incident), where it fails with "disabled
+#     or no provider". That IS a real break and the text signature still
+#     catches it — a native-plan thread never exposes that tool.
 # ──────────────────────────────────────────────────────────────
 
 # _websearch_rollout_glob <profile> — glob for the scout agent's codex-home
@@ -57,28 +85,54 @@ _websearch_newest_rollout() {
   ls -t $glob 2>/dev/null | head -n1 || true
 }
 
-# _websearch_rollout_hits <path> — count of `web_search_end` events in the
-# given rollout file. Echoes 0 (not an error) for an empty/missing path — a
-# profile with no rollout history yet has made "0 real calls so far".
+# _websearch_rollout_hits <path> — count of persisted search events in the
+# given rollout file, in EITHER shape (legacy `web_search_end` event, or the
+# codex >= 0.151.0 `item_completed` Extension `web.search` item), matched by
+# JSON structure. Malformed lines are skipped (`fromjson?`). Echoes 0 (not an
+# error) for an empty/missing path — a profile with no rollout history yet
+# has made "0 real calls so far". A missing jq fails LOUD (nonzero + stderr)
+# BEFORE the empty-path shortcut, so a host that cannot count is detected on
+# the baseline read even when no rollout exists yet: reading 0 would silently
+# turn every probe into "inconclusive". Callers MUST capture this status
+# (`if ! n="$(_websearch_rollout_hits ...)"`) — a bare command substitution
+# discards it (QA #937).
 _websearch_rollout_hits() {
   local path="$1" n
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "ERROR: websearch-probe: jq is required to count rollout search events by JSON shape" >&2
+    return 2
+  fi
   [ -n "$path" ] && [ -r "$path" ] || { echo 0; return; }
-  n=$(grep -c 'web_search_end' "$path" 2>/dev/null) || true
+  # jq's own status is propagated past `wc`/`tr` via PIPESTATUS: a jq crash
+  # must surface as an error, never be read as "0 real calls" (jq-fail-open
+  # class). Malformed lines are already tolerated by `fromjson?`.
+  if ! n=$(jq -R -r 'fromjson? | select(.type == "event_msg")
+        | select((.payload.type == "web_search_end")
+              or (.payload.type == "item_completed"
+                  and .payload.item.type == "Extension"
+                  and .payload.item.kind == "web.search"))
+        | 1' "$path" | wc -l | tr -d ' '; exit "${PIPESTATUS[0]}"); then
+    echo "ERROR: websearch-probe: jq failed while counting search events in ${path}" >&2
+    return 3
+  fi
   echo "${n:-0}"
 }
 
 # _websearch_real_call_ran <profile> <baseline_path> <baseline_hits> —
-# echoes 1 iff the newest scout rollout gained a web_search_end event since
+# echoes 1 iff the newest rollout of that agent gained a search event since
 # the pre-probe baseline (a brand-new rollout file counts as "gained" if it
 # carries >=1 hit); echoes 0 otherwise, including "nothing changed" — the
 # "model replied without actually calling the tool" case FINDING 2 (PR #704
-# QA review) exists to catch.
+# QA review) exists to catch. Returns NONZERO (echoing nothing) when the
+# counter itself failed — the caller must not read that as "0 real calls".
 _websearch_real_call_ran() {
   local profile="$1" agent="$2" baseline_path="$3" baseline_hits="$4"
   local glob after_path after_hits
   glob="$(_websearch_rollout_glob "$profile" "$agent")"
   after_path="$(_websearch_newest_rollout "$glob")"
-  after_hits="$(_websearch_rollout_hits "$after_path")"
+  if ! after_hits="$(_websearch_rollout_hits "$after_path")"; then
+    return 2
+  fi
   if [ "$after_path" != "$baseline_path" ]; then
     if [ "${after_hits:-0}" -gt 0 ]; then
       echo 1
@@ -97,9 +151,9 @@ _websearch_real_call_ran() {
 # _websearch_probe_verdict <response_text> <real_call_ran:0|1> — pure
 # classification, no I/O.
 #
-# FINDING 1 fix (PR #704 QA): a BROKEN signature in the response text wins
-# REGARDLESS of real_call_ran and regardless of the agent process's exit
-# code — this function is handed the captured text directly, so a break can
+# FINDING 1 fix (PR #704 QA): a BROKEN signature in the response text is
+# matched REGARDLESS of the agent process's exit code — this function is
+# handed the captured text directly, so a break can
 # never be lost to a `response=$(...) || response="TIMEOUT"` clobber
 # upstream (the original bug: a Reconnecting failure that also made the
 # agent process exit non-zero discarded the real output before it could be
@@ -107,16 +161,23 @@ _websearch_real_call_ran() {
 # FINDING 2 fix (PR #704 QA): PASS requires real_call_ran=1 (positive
 # rollout evidence of an actual tool call); model text alone (e.g. a
 # hallucinated "SEARCH_STATUS: ok") is never sufficient on its own.
+# 2026-09-11: positive rollout evidence OUTRANKS a break signature in the
+# text. The hosted search backend echoed "web_search is disabled or no
+# provider is available" as the search output of a real 29-result search
+# (see header) — a structural event proves the call ran, the text proves
+# nothing either way. A break signature only fails the probe when NO search
+# event was persisted during the attempt (that is exactly the managed-plan
+# outage: the openclaw `web_search` tool errors and native never fires).
 # Anything else is "inconclusive" — callers retry once, then warn; this
 # function never returns fail on an inconclusive read.
 _websearch_probe_verdict() {
   local response="$1" real_call_ran="$2"
-  if echo "$response" | grep -qiE 'Reconnecting|disabled or no provider is available|provider reconnection failed'; then
-    echo fail
-    return
-  fi
   if [ "${real_call_ran:-0}" -eq 1 ]; then
     echo pass
+    return
+  fi
+  if echo "$response" | grep -qiE 'Reconnecting|disabled or no provider is available|provider reconnection failed'; then
+    echo fail
     return
   fi
   echo inconclusive
@@ -126,24 +187,40 @@ _websearch_probe_verdict() {
 # and echoes exactly two lines: `VERDICT=<fail|pass|inconclusive>` and
 # `DETAIL=<diagnostic text>` (the matched break signature on fail, a short
 # rollout-evidence note on pass, or the raw exit code + reason on
-# inconclusive). Snapshots the newest scout rollout + its web_search_end
-# count BEFORE invoking openclaw (the baseline), invokes the agent turn
-# WITHOUT clobbering the captured output on a nonzero exit (FINDING 1), then
-# classifies via _websearch_probe_verdict.
+# inconclusive). Snapshots the agent's newest rollout + its search-event
+# count BEFORE invoking openclaw (the baseline), invokes the agent turn in a
+# FRESH session (so the agent's persistent `main` history cannot poison the
+# hosted search summariser — see header) WITHOUT clobbering the captured
+# output on a nonzero exit (FINDING 1), then classifies via
+# _websearch_probe_verdict.
 websearch_probe_attempt() {
   local profile="$1" prompt="$2" agent="${3:-scout}"
-  local glob baseline_path baseline_hits response rc real_ran verdict detail
+  local glob baseline_path baseline_hits response rc real_ran verdict detail session_id
   glob="$(_websearch_rollout_glob "$profile" "$agent")"
   baseline_path="$(_websearch_newest_rollout "$glob")"
-  baseline_hits="$(_websearch_rollout_hits "$baseline_path")"
+  # A counter that cannot run (no jq) is a BLOCKING verdict at this boundary,
+  # not an inconclusive one: the dispatcher reads only the VERDICT line, and a
+  # bare `x="$(...)"` would discard the helper's nonzero status and let Step 7
+  # retry, warn and deploy with nothing measured (QA #937). Fail closed here,
+  # before spending an agent turn.
+  if ! baseline_hits="$(_websearch_rollout_hits "$baseline_path" 2>&1)"; then
+    echo "VERDICT=fail"
+    echo "DETAIL=probe cannot measure rollout evidence, failing closed: ${baseline_hits}"
+    return 0
+  fi
+  session_id="websearch-probe-$(date +%s)-$$"
 
-  if response=$(timeout 150 openclaw --profile "$profile" agent --agent "$agent" --json --message "$prompt" 2>&1); then
+  if response=$(timeout 150 openclaw --profile "$profile" agent --agent "$agent" --session-id "$session_id" --json --message "$prompt" 2>&1); then
     rc=0
   else
     rc=$?
   fi
 
-  real_ran="$(_websearch_real_call_ran "$profile" "$agent" "$baseline_path" "$baseline_hits")"
+  if ! real_ran="$(_websearch_real_call_ran "$profile" "$agent" "$baseline_path" "$baseline_hits" 2>&1)"; then
+    echo "VERDICT=fail"
+    echo "DETAIL=probe cannot measure rollout evidence, failing closed: ${real_ran}"
+    return 0
+  fi
   verdict="$(_websearch_probe_verdict "$response" "$real_ran")"
 
   case "$verdict" in
@@ -151,7 +228,7 @@ websearch_probe_attempt() {
       detail="$(echo "$response" | grep -ioE 'Reconnecting[^"]*|disabled or no provider is available|provider reconnection failed' | head -1)"
       ;;
     pass)
-      detail="confirmed via ${agent} rollout web_search_end event"
+      detail="confirmed via ${agent} rollout search event (web_search_end or item_completed/Extension web.search)"
       ;;
     *)
       detail="rc=${rc}, no confirmed tool call (agent may not have searched, or timed out)"
@@ -182,7 +259,9 @@ websearch_probe_attempt() {
 # failure degrades to WARN that names the agent and the exact policy path.
 #
 # The rollout-event standard is UNCHANGED: a pass still requires a real
-# `web_search_end` event. Reply text is never evidence, for either agent.
+# search event in the rollout (`web_search_end`, or the codex >= 0.151.0
+# `item_completed` Extension `web.search` item). Reply text is never
+# evidence, for either agent.
 # ──────────────────────────────────────────────────────────────
 
 # Mirrors CODEX_TOOL_POLICY_SAFE_DENY_NAMES from @openclaw/codex. Denying one
@@ -299,7 +378,7 @@ websearch_reference_agent() {
 #           cannot attribute it, so we must not downgrade it)
 #   warn  — scout broken but the deny-free reference works => per-agent
 #           restriction, named, deploy proceeds with it visible
-#   pass  — reference confirmed a real web_search_end
+#   pass  — reference confirmed a real search event in its rollout
 #   inconclusive — nothing proven either way; caller retries then warns
 websearch_scoped_verdict() {
   local ref="$1" scout="$2" restriction="$3"

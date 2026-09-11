@@ -249,11 +249,15 @@ needs_target() { [[ "$TARGET" == "all" || ",$TARGET," == *",$1,"* ]]; }
 # which the model can produce from training data without ever calling
 # web_search (verified live: `openclaw agent --json` carries no tool-call
 # transcript, and the gateway journal logs failures only, never successes —
-# the one authoritative signal is a `web_search_end` event in the scout
-# agent's codex-home rollout). Both are fixed in the lib: the break regex is
-# checked against the captured response text regardless of exit code, and a
-# PASS requires the scout rollout to have gained a web_search_end event
-# during the attempt.
+# the one authoritative signal is a search event in the probed agent's
+# codex-home rollout — legacy `web_search_end`, or the codex >= 0.151.0
+# `item_completed` Extension `web.search` item — counted by JSON shape). Both
+# are fixed in the lib: the break regex is checked against the captured
+# response text regardless of exit code, and a PASS requires the agent's
+# rollout to have gained a search event during the attempt (positive rollout
+# evidence outranks the text — the hosted search backend can echo the break
+# string over real results; the probe also runs in a fresh session so the
+# agent's `main` history cannot feed that echo).
 #
 # Verdict is deliberately asymmetric: fail loud on a REAL break, but never
 # flake the deploy on ordinary LLM non-determinism (the agent choosing not
