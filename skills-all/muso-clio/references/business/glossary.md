@@ -110,14 +110,33 @@ A role assignment linking a profile to a track or album:
 
 ---
 
+## Identity Concepts
+
+The model works like YouTube: the Google account is the login and is never shown, everything you do you do *as a channel*, every account gets a personal channel at creation (viewers included), a Brand Account channel has several managers who post as it, and the channel switcher is global. Canonical: `muso-docs/adr/2026-09-11-identity-model-accounts-channels-workspaces.md` (proposed 2026-09-11).
+
+### Account
+The human's login (`users` row: email, plan, OAuth ids). Never a node on the social graph, never shown to other users. YouTube: the Google account.
+
+### Identity
+A catalog profile an account may act as. Every social edge (follow, connection, chat room, post, view) is identity-to-identity, never account-to-account.
+- **Personal identity**: the auto-profile minted at signup (`users.neptuneProfessionalId`), self-claimed on the default workspace. Every account has one, listeners included (consumer roles such as `Audiophile`). Claiming your own person profile folds the shell into it, so one person has one primary identity. YouTube: the personal channel.
+- **Managed identity**: a claimed profile the account holds write rights on through a workspace (`canUserRepresentProfile`). YouTube: a Brand Account channel.
+- **Worn identity ("appear as")**: `users.representationProfileId`, ONE global column. YouTube: the channel switcher. There is no standalone workspace switch: the one switcher shows the personal identity on top and one collapsed group per workspace; the user picks an identity *inside* a workspace, so the active (identity, workspace) pair is always explicit. Each group remembers its last pick; a group with nothing to wear is entered as the personal identity.
+- Two identities of one account are never auto-linked: aliases are private.
+
+### Manager
+A workspace member with write rights on an identity. Managers are members of every chat room of that identity, get its notifications and act as it; the counterpart sees only the identity. Read rights grant none of this.
+
 ## Organization Concepts
 
 ### Workspace/Team
-Organization unit for collaboration:
+Management container, not an identity scope (YouTube has no equivalent; Meta Business Portfolio is the closest):
 - Seats (profile slots)
-- Members (user accounts)
-- Billing/subscription
-- Roster (managed profiles)
+- Members (user accounts) with per-profile rights (write/read)
+- Billing/subscription and connect quota
+- Roster (managed profiles) — the Your-work subject, remembered per workspace
+- Grants the right to wear an identity; never decides which one is worn — the user does, by picking an identity inside the workspace's group in the switcher
+- The workspace inbox is a filter over the account's identities, not a scope: rooms are keyed on profile pairs and carry no workspace
 
 ### Roster
 A workspace-managed set of profiles:
@@ -186,6 +205,8 @@ Process where a user verifies ownership of a profile:
 2. Provide verification (ID/social login)
 3. Admin review
 4. Claim approved/denied
+
+A processed claiming (personal `userId`, or a workspace `teamId` plus member rights) is what makes a profile an identity the account may act as. The personal identity's claiming is created at signup/backfill, not by this review flow.
 
 ### Merging
 Combining duplicate profiles:
