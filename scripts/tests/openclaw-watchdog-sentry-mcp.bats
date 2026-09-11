@@ -110,3 +110,44 @@ run_block() {
   run_block
   grep -q '^CRITICAL .*healer is MISSING' "$CALLS"
 }
+
+# ──────────────────────────────────────────────────────────────
+# Disabled mode (PR #929). The healer's ESM_ENABLED constant defaults to OFF,
+# so `--check` returns 3 when the server is still registered, and healing
+# REMOVES it. Reusing rc=1 here would make the watchdog heal by deleting while
+# its Slack copy says "re-registered" — QA #929 v3 finding 1.
+# ──────────────────────────────────────────────────────────────
+
+@test "disabled-but-present (--check 3) that heals: notifies REMOVED, not re-registered" {
+  mk_healer 3 0
+  run_block
+  grep -q '^NOTIFY' "$CALLS"
+  run grep '^NOTIFY' "$CALLS"
+  [[ "$output" == *"REMOVED"* ]]
+  [[ "$output" != *"re-registered"* ]]
+  [[ "$output" != *"had vanished"* ]]
+}
+
+@test "disabled-but-present (--check 3) names the constant so the fix is findable" {
+  mk_healer 3 0
+  run_block
+  run grep '^NOTIFY' "$CALLS"
+  [[ "$output" == *"ESM_ENABLED"* ]]
+}
+
+@test "disabled-but-present (--check 3) that CANNOT heal: pages critical" {
+  mk_healer 3 1
+  run_block
+  grep -q '^CRITICAL' "$CALLS"
+  run grep '^CRITICAL' "$CALLS"
+  [[ "$output" == *"could NOT be removed"* ]]
+}
+
+@test "rc=3 is NOT treated as the rc=1 re-register path" {
+  # The whole point of the separate code: if 3 ever falls through to the rc=1
+  # branch, the operator is told the opposite of what happened.
+  mk_healer 3 0
+  run_block
+  run cat "$CALLS"
+  [[ "$output" != *"re-registered it from"* ]]
+}

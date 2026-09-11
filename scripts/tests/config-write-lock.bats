@@ -32,6 +32,14 @@ setup() {
   export ENSURE_SENTRY_MCP_ANNOUNCE="$TMP/noop.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/noop.sh"; chmod +x "$TMP/noop.sh"
   export SPC_ANNOUNCE_HELPER="$TMP/noop.sh"
+
+  # The healer's ESM_ENABLED constant defaults to DISABLED (PR #929). The two
+  # healer cases below set sentry ABSENT so it "wants to heal", which in disabled
+  # mode is an idempotent no-op that returns BEFORE taking the lock — so they
+  # would assert nothing. They are about the REGISTER path's locking, so opt in
+  # explicitly. The disabled path gets its own contention case at the end of this
+  # file; it is a second writer and needs the same guarantee.
+  export ENSURE_SENTRY_MCP_ENABLED=1
 }
 
 lockpath() { printf '%s.writers.lock' "$CFG"; }
@@ -123,4 +131,34 @@ lockpath() { printf '%s.writers.lock' "$CFG"; }
   # repo content won either way; the file is never torn
   run jq -r '.profile' "$CFG"
   [ "$output" = "main" ]
+}
+
+@test "DISABLED mode: the strip path also REFUSES rather than writing unlocked" {
+  # The disabled branch is a SECOND write path against the live gateway config,
+  # so every guarantee the register path has must hold for it too. Sentry is
+  # PRESENT here so the healer actually reaches its lock instead of taking the
+  # idempotent no-op return.
+  export ENSURE_SENTRY_MCP_ENABLED=0
+  printf '%s\n' '{"agents":{"list":[{"id":"cto"}]},"mcp":{"servers":{"sentry":{"transport":"streamable-http","url":"https://mcp.sentry.dev/mcp","headers":{"Authorization":"Sentry-Bearer tok"}},"othersrv":{"url":"https://example.invalid/mcp"}}}}' > "$CFG"
+  before="$(sha256sum "$CFG" | cut -d' ' -f1)"
+  exec 8>"$(lockpath)"; flock 8
+  run env ENSURE_SENTRY_MCP_LOCK_WAIT=1 "$HEALER"
+  exec 8>&-
+  [ "$status" -ne 0 ]
+  # it did NOT fall through and strip unlocked
+  [ "$(sha256sum "$CFG" | cut -d' ' -f1)" = "$before" ]
+  [ "$(jq -r '.mcp.servers.sentry.url' "$CFG")" = "https://mcp.sentry.dev/mcp" ]
+}
+
+@test "DISABLED mode: the no-op path takes NO lock (it writes nothing)" {
+  # The converse, and why the two cases above needed the opt-in: with sentry
+  # already absent there is nothing to write, so the healer must succeed without
+  # contending for the lock at all.
+  export ENSURE_SENTRY_MCP_ENABLED=0
+  printf '%s\n' '{"agents":{"list":[{"id":"cto"}]}}' > "$CFG"
+  exec 8>"$(lockpath)"; flock 8
+  run env ENSURE_SENTRY_MCP_LOCK_WAIT=1 "$HEALER"
+  exec 8>&-
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already absent"* ]]
 }

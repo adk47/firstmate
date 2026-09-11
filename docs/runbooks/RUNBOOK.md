@@ -1519,6 +1519,33 @@ helped anyway — it writes the same field a rollback overwrites.
 
 ### Register the Sentry MCP server
 
+> **STOP — the Sentry MCP is DISABLED and this recipe will NOT stick (2026-09-11).**
+>
+> `scripts/lib/ensure-sentry-mcp.sh` carries `ESM_ENABLED`, which defaults to **0**.
+> While it is 0 the healer **removes** `.mcp.servers.sentry` on every main gateway
+> start (ExecStartPre) and the watchdog removes it again on its next tick. If you
+> follow the recipe below, you will hot-reload an **unscoped** Sentry server into a
+> fleet where every agent can reach the write-capable `sentry__update_issue`, and it
+> will be torn out from under you minutes later — the worst of both worlds.
+>
+> **Why it is off:** PR #929 removed the `tools.deny: ["sentry__*"]` entries because on
+> openclaw >= 2026.8 any non-core-safe deny silently disables that agent's entire
+> native codex tool surface, including web search
+> (`dist/selection-Bge6N4vD.js:789`). Disabling the registration keeps the write
+> surface exactly where it was — zero — instead of widening it. **Aaron has not yet
+> ruled** on whether fleet-wide `sentry__update_issue` access is acceptable.
+>
+> **To re-enable, do NOT run this recipe.** Flip `ESM_ENABLED` to `1` in
+> `scripts/lib/ensure-sentry-mcp.sh` in a PR carrying Aaron's decision, and let the
+> healer register it at the next start. That is the ONLY control: `.mcp` is absent
+> from the repo configs, `scripts/lib/sync-profile-config.sh` preserves the live
+> `.mcp.servers` across deploys, and the healer re-converges on every start — so a
+> hand-written live registration is not durable state, it is a race you lose.
+>
+> Everything below is retained for the re-enable path and for understanding how the
+> entry is shaped. It is **not** a live procedure while `ESM_ENABLED=0`.
+
+
 `.mcp.servers` is deliberately absent from the repo configs so tokens never land
 in git. `sync_profile_config()` in `scripts/deploy.sh` **preserves** the live
 `.mcp.servers` across deploys, so this is a one-time runtime registration on
@@ -1572,26 +1599,33 @@ tmp=$(mktemp -p "$(dirname "$cfg")")
 read -rsp 'Sentry token (input hidden): ' SENTRY_TOKEN; echo
 [ -n "$SENTRY_TOKEN" ] || { echo "no token entered - aborting" >&2; exit 1; }
 
-# ONE transform, ONE rename: register the server AND deny it to every agent
-# except cto/qa in the same atomic write. Doing the deny as a second command
-# would leave a window where the server is live (the rename triggers a restart)
-# and unscoped - and if that second command failed, the window would be
-# permanent. `tools.deny` entries are GLOB patterns (verified in the 2026.7.1
-# runtime: compileGlobPattern turns a pattern containing `*` into
-# /^...$/), so prefer `sentry__*` over enumerating ids -- an enumeration silently
-# exposes any tool the remote server adds later. The ids below remain useful for
-# the RECONCILIATION step, which proves what the catalog actually contains. Ids are `<safeServerName>__<toolName>`; confirm the safe name in
-# the gateway log (`[bundle-mcp] server key "<raw>" registered as "<safeName>"`)
+# DO NOT ADD A PER-AGENT `tools.deny` HERE. This recipe used to register the
+# server AND deny `sentry__*` to every agent except cto/qa in the same atomic
+# write. On openclaw >= 2026.8 that deny is a SILENT KILL SWITCH for the whole
+# codex native tool surface: `sentry__*` fails `isKnownCoreToolId`, so
+# toolPolicyRestrictsHarnessNativeTools() marks the policy restricted,
+# shouldEnableCodexAppServerNativeToolSurface() returns false on its first line,
+# and the agent loses web_search, shell_tool, unified_exec, image_generation,
+# browser_use, skill_search, memories and the rest of CODEX_RING_ZERO. That is
+# incident 2026-09-10 (Scout told a user its web research provider was
+# unavailable, five more agents downgraded silently). A narrowing `tools.allow`
+# trips the identical path, and `alsoAllow` cannot exempt.
+#
+# There is no config-level way to scope an MCP server to a subset of agents:
+# canonicalizeConfiguredMcpServer accepts no agent field and the schema calls
+# these "Global MCP server definitions". The choice is "every agent sees it" or
+# "nobody does" -- so the server is registered UNSCOPED and the sentry tools are
+# visible fleet-wide. That is the accepted trade: the surface is read-heavy and
+# its only mutator is `sentry__update_issue` (internal, reversible).
+#
+# `scripts/validate-config-matrix.sh` check #8 fails the build if a `sentry__*`
+# deny ever reappears in a repo config. See docs/lessons/openclaw-and-codex.md.
+#
+# Tool ids are `<safeServerName>__<toolName>`; confirm the safe name in the
+# gateway log (`[bundle-mcp] server key "<raw>" registered as "<safeName>"`)
 # before trusting the `sentry__` prefix - a second server colliding on the safe
-# name gets a `-2` suffix.
-# ONE wildcard, not an enumeration. `tools.deny` entries are compiled as glob
-# patterns (verified in the 2026.7.1 runtime), so `sentry__*` denies every
-# current AND future sentry tool. Installing the literal ids here would REPLACE
-# that durable protection: the next tool Sentry adds would be available to every
-# excluded agent, and this recipe would have been the thing that opened it.
-# The explicit ids still matter, but only for the reconciliation step below,
-# which proves what the live catalog actually contains.
-deny_glob='["sentry__*"]'
+# name gets a `-2` suffix. The explicit ids still matter for the RECONCILIATION
+# step below, which proves what the live catalog actually contains.
 
 # NOTE the shape: agents live at `.agents.list` (an array of {id, ...}), NOT at
 # `.agents`. `.agents` is an object {defaults, list}, so `.agents |= map(...)`
@@ -1602,32 +1636,29 @@ deny_glob='["sentry__*"]'
 # below) that empty config was announced, renamed over the live file and the
 # gateway restarted, leaving every Sentry request failing auth.
 SENTRY_TOKEN="$SENTRY_TOKEN" \
-jq --arg hdr "Sentry-Bearer" --argjson ids "$deny_glob" '
+jq --arg hdr "Sentry-Bearer" '
   .mcp.servers.sentry = {
     "transport": "streamable-http",
     "url": "https://mcp.sentry.dev/mcp",
     "headers": { "Authorization": ($hdr + " " + env.SENTRY_TOKEN) }
   }
-  | .agents.list |= map(
-      if .id == "cto" or .id == "qa" then .
-      else .tools.deny = (((.tools.deny // []) + $ids) | unique) end)
 ' "$cfg" > "$tmp" || {
   rm -f "$tmp"; unset SENTRY_TOKEN; echo "jq failed - live config untouched" >&2; exit 1; }
 unset SENTRY_TOKEN   # out of the shell as soon as it is in $tmp
 
-# Validate BOTH halves before announcing or renaming: the server must be there,
-# and every non-cto/qa agent must carry all nine ids. Fail closed - a partial
-# result must never reach the live config.
-jq -e --argjson ids "$deny_glob" '
+# Validate before announcing or renaming: the server must be there with a real
+# token, and NO agent may carry a sentry deny (see the kill-switch note above -
+# a leftover one from the pre-2026.8 shape would silently strip that agent's
+# native codex surface). Fail closed - a partial result must never reach the
+# live config.
+jq -e '
   (.mcp.servers.sentry.url == "https://mcp.sentry.dev/mcp")
   and (.mcp.servers.sentry.headers.Authorization
        | test("^Sentry-Bearer .+$"))          # non-empty token, not just the prefix
-  and ([ .agents.list[] | select(.id != "cto" and .id != "qa")
-         | ((((.tools.deny // []) | index("sentry__*")) == null) | if . then 1 else 0 end) ] | add == 0)
-  and ([ .agents.list[] | select(.id == "cto" or .id == "qa")
+  and ([ (.agents.list // [])[]
          | ((.tools.deny // []) | map(select(startswith("sentry__"))) | length) ] | add == 0)
 ' "$tmp" >/dev/null || {
-  rm -f "$tmp"; echo "server entry or deny set incomplete - aborting" >&2; exit 1; }
+  rm -f "$tmp"; echo "server entry missing/invalid, or a sentry deny is present - aborting" >&2; exit 1; }
 
 # Guard the ANNOUNCE like everything else: this block has no `set -e`, so an
 # unguarded announce that fails (log unwritable or full) would still fall
@@ -1641,8 +1672,8 @@ if ! ANNOUNCE_SHA="$(sha256sum "$tmp" | awk '{print $1}')" \
   exit 1
 fi
 
-# Atomic rename - this is what actually registers the server and scopes it, and
-# it registers and scopes. Nothing above changes the live config.
+# Atomic rename - this is what actually registers the server. Nothing above
+# changes the live config.
 #
 # It does NOT restart the gateway: openclaw watches this file and HOT RELOADS
 # it. Observed 2026-08-25 registering the sentry server -- the journal shows
@@ -1651,111 +1682,41 @@ fi
 # with MainPID unchanged from the previous deploy. Do not wait for a restart
 # that never comes, and do not restart by hand to "make it take".
 mv "$tmp" "$cfg" || { rm -f "$tmp"; echo "rename failed - live config untouched" >&2; exit 1; }
-echo "registered and scoped; openclaw hot-reloads this file (no restart, PID unchanged)"
+echo "registered (unscoped by design); openclaw hot-reloads this file (no restart, PID unchanged)"
 ```
 
-**The nine ids above are a FLOOR, not the authority.** They are what this
-endpoint exposed when the runbook was written; the remote server serves whatever
-MCP skills are active for the token, so the real inventory can be larger (the
-catalog also reaches further tools *through* `sentry__execute_sentry_tool`,
-which is why denying that one matters most). A literal list written ahead of
-registration can only ever be a guess - so **reconcile against what the gateway
-actually registered**, after the restart drains, and fail loud on any gap:
+**RETIRED 2026-09-10: there is no deny list to reconcile.** This runbook used to
+enumerate the catalog and prove that every non-cto/qa agent's `sentry__*` deny
+COVERED every registered tool. On openclaw >= 2026.8 that deny is not a scoping
+mechanism, it is a kill switch for the agent's entire codex native tool surface
+(see the note in the registration block above and
+docs/lessons/openclaw-and-codex.md). The denies were removed, the server is
+registered unscoped, and `validate-config-matrix.sh` check #8 now fails the build
+if one reappears.
+
+The one thing still worth doing after registration is confirming the server
+actually connected and that no stale deny survived:
 
 ```bash
-cfg=/root/.openclaw-main/openclaw.json
-
-# Enumerate from the CONNECTED catalog. `mcp list --json` returns the configured
-# mcp.servers definitions and has NO .tools[] (verified: it returns `{}` here),
-# and a journal grep can only prove that SOME id appeared in recent lines - if
-# the window happens to mention one tool, a naive check passes and reports
-# "reconciled" while every other tool stays un-denied. That false green is worse
-# than the hardcoded list it replaced, so journal output stays diagnostic only.
-#
-# `mcp probe` connects and lists real capabilities. Its shape is
-# {generatedAt, servers, tools:[], diagnostics:[]} and it exits 0 WITH AN EMPTY
-# tools[] when nothing is reachable - so rc is not the gate, emptiness is.
-probe=$(openclaw --profile main mcp probe sentry --json) \
-  || { echo "mcp probe failed - cannot prove the deny list is complete; STOP" >&2; exit 1; }
-
-actual=$(jq -r '
-  (.tools // [])
-  | map(if type == "string" then . else (.id // .name // empty) end)
-  | map(select(. != null and . != ""))
-  | map(if startswith("sentry") then . else "sentry__" + . end)
-  | unique[]' <<<"$probe" | sort -u)
-
-[ -n "$actual" ] || {
-  echo "mcp probe returned NO tools for sentry - the catalog is unproven, so the" >&2
-  echo "deny list cannot be called complete. Do NOT proceed on the assumption" >&2
-  echo "that the nine hardcoded ids cover it." >&2
-  exit 1; }
-echo "probed catalog ($(printf '%s\n' "$actual" | wc -l | tr -d ' ') tools): $(printf '%s ' $actual)"
-
-# Capture and VALIDATE the agent list before the loop. `for agent in $(jq ...)`
-# fails OPEN: if $cfg is unreadable or has no .agents.list, the substitution is
-# empty, the loop body never runs, gap stays 0, and the block reports
-# "reconciled" having checked nothing. Same false-green shape as the journal
-# fallback above -- an absent result must never read as a clean result.
-agents=$(jq -e -r '
-  if (.agents.list | type) != "array" or (.agents.list | length) == 0
-  then error("no .agents.list array")
-  else .agents.list[].id end' "$cfg") \
-  || { echo "cannot read .agents.list from $cfg - scoping is UNVERIFIED; STOP" >&2; exit 1; }
-
-# and there must be at least one non-cto/qa agent to check, or the pass is vacuous
-[ "$(printf '%s\n' "$agents" | grep -vcE '^(cto|qa)$')" -gt 0 ] \
-  || { echo "no non-cto/qa agents found - refusing to report a vacuous pass" >&2; exit 1; }
-
-# Every probed id must be COVERED for every agent except cto/qa.
-#
-# Covered, not literally present: `tools.deny` entries are compiled as GLOB
-# patterns, so `sentry__*` denies each of these without any of them appearing in
-# the array. A plain `comm -23` of probed ids against deny entries reports every
-# single tool as a GAP against a config that is in fact fully scoped - it fails
-# CLOSED, which is the safe direction, but it makes the documented sequence
-# unrunnable and sends the operator off adding literals that undo the wildcard.
-# Evaluate the same way the runtime does.
-covers() {  # covers <deny-pattern> <tool-id>
-  case "$1" in
-    *"*"*) case "$2" in ${1}) return 0 ;; *) return 1 ;; esac ;;
-    *)     [ "$1" = "$2" ] ;;
-  esac
-}
-
-gap=0
-for agent in $agents; do
-  case "$agent" in cto|qa) continue ;; esac
-  denied=$(jq -r --arg a "$agent" '.agents.list[] | select(.id==$a) | (.tools.deny // [])[]' "$cfg")
-  missing=""
-  while IFS= read -r tool; do
-    [ -n "$tool" ] || continue
-    hit=0
-    while IFS= read -r pat; do
-      [ -n "$pat" ] || continue
-      covers "$pat" "$tool" && { hit=1; break; }
-    done <<< "$denied"
-    [ "$hit" -eq 1 ] || missing="${missing}${missing:+ }$tool"
-  done <<< "$actual"
-  [ -n "$missing" ] && { echo "GAP $agent: $missing" >&2; gap=1; }
-done
-[ "$gap" -eq 0 ] || { echo "deny list does not COVER the probed catalog - widen it and re-apply" >&2; exit 1; }
-
 openclaw --profile main mcp list | grep -i sentry
-echo "scoping reconciled against the probed catalog"
+jq -r '[ (.agents.list // [])[]
+         | select(((.tools.deny // []) | map(select(startswith("sentry__"))) | length) > 0)
+         | .id ] | if length == 0 then "clean: no sentry denies"
+                   else "STALE SENTRY DENY on: " + join(", ") end' \
+  /root/.openclaw-main/openclaw.json
 ```
 
-If this reports a gap, the wildcard is missing for that agent - restore
-`sentry__*` in `deny_glob` above and re-apply. **Do not "fix" a gap by adding
-the individual ids**: that replaces durable coverage with a snapshot, and the
-next tool Sentry adds is open again. The probed ids are inventory here, not the
-policy.
+Note the catalog reaches further tools *through* `sentry__execute_sentry_tool`,
+so any inventory written ahead of registration was always a guess. That is now
+moot for policy purposes; it still matters for understanding what the token can
+do, which is the section below.
 
-### The deny list is required, but it is NOT an isolation boundary
 
-The transform above denies the Sentry tools to every agent except `cto` and
-`qa`. Do that - but do not mistake it for containment. Two things are true on
-this host today:
+### The Sentry MCP has never had an isolation boundary
+
+The deny list that used to sit here was **defence in depth at best, and the
+evidence below is why removing it in 2026-09 cost so little.** Two things are
+true on this host today, and both were true while the deny was in force:
 
 - every agent runs with `tools.exec.security: "full"` and `ask: "off"`, and no
   agent denies `exec`, so a prompt-injected agent can reach `/tools/invoke`
@@ -1772,9 +1733,10 @@ this host today:
   fix this; it only resets the clock, because the next read puts the new one
   there too. Treat the token's SCOPES as the only real bound.
 
-So the deny is **defence in depth**: it stops ordinary and accidental use by the
-other seven agents and makes the intent explicit. The control that actually
-bounds the blast radius is the **token's own scopes**:
+So the deny only ever stopped ordinary and accidental use, and it demonstrably
+did not stop the token from reaching three of the agents it excluded. The control
+that actually bounds the blast radius is, and always was, the **token's own
+scopes**:
 
 - **The live token is WRITE-CAPABLE as of 2026-08-26, by Nick's explicit
   decision** ("I want hydra to do shit" - the agents should be able to act in

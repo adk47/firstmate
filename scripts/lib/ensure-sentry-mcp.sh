@@ -49,6 +49,41 @@ ESM_SECRETS="${ENSURE_SENTRY_MCP_SECRETS:-/opt/hydra/secrets/sentry.env}"
 ESM_URL="${ENSURE_SENTRY_MCP_URL:-https://mcp.sentry.dev/mcp}"
 ESM_ANNOUNCE="${ENSURE_SENTRY_MCP_ANNOUNCE:-$ESM_LIB_DIR/announce-legit-write.sh}"
 
+# ── THE KILL SWITCH (PR #929, 2026-09-11) ────────────────────────────────────
+# 0 = the sentry MCP server is DISABLED: this healer removes .mcp.servers.sentry
+# from the live config instead of registering it. 1 = normal registration.
+#
+# WHY IT LIVES HERE and not in the repo config: `.mcp` is deliberately ABSENT
+# from openclaw-main.json / openclaw-edge.json so the token never lands in git,
+# AND scripts/lib/sync-profile-config.sh copies every field EXCEPT .mcp.servers
+# (it emits "preserved N live MCP server(s)"), so a repo-config edit is
+# discarded at deploy. On top of that THIS script re-registers the server on
+# every main gateway start (openclaw-pre-start-heal.sh:124, ExecStartPre), so
+# even removing the live entry by hand is undone at the next restart. The only
+# place a PR can actually control the registration is this constant.
+#
+# WHY IT IS OFF: on openclaw >= 2026.8 any non-core-safe `tools.deny` marks an
+# agent's codex harness restricted and kills its native web search
+# (dist/selection-Bge6N4vD.js:789 — the test is satisfied by
+# `!isKnownCoreToolId(name)` alone, so an exact-name deny behaves exactly like
+# the `sentry__*` wildcard; there is no narrow-deny middle option). #929 removes
+# those denies to restore web search, which would otherwise expose the
+# write-capable `sentry__update_issue` to all nine agents. Disabling the server
+# keeps the write surface at exactly what it is today — ZERO, since the server
+# has not started since 2026-09-11 06:21:28Z ("[bundle-mcp] failed to start
+# server \"sentry\": MCP tool listing timed out after 1500ms") and no agent,
+# including deny-free cto/qa, carries a sentry__* tool in its catalog.
+#
+# COST, stated plainly: cto/qa Sentry triage stays off (already non-functional),
+# and cto's #sentry-alerts binding (1d8d732d) now fails loudly instead of
+# silently. Flip this back to 1 in a one-line PR once Aaron rules on whether
+# fleet-wide `sentry__update_issue` access is acceptable.
+#
+# EDGE IS NOT AFFECTED (verified 2026-09-11, not assumed): this healer is gated
+# to the main profile (openclaw-pre-start-heal.sh:124, `[ "$PROFILE" = "main" ]`)
+# and the live edge config has no `.mcp.servers` at all.
+ESM_ENABLED="${ENSURE_SENTRY_MCP_ENABLED:-0}"
+
 # The lock-path helper lives in sync-profile-config.sh so the healer and the
 # deploy/rollback sync compute the SAME path. Two writers agreeing on a lock by
 # coincidence is not a lock. Fall back to the same formula if the lib is absent
@@ -87,6 +122,70 @@ ensure_sentry_mcp_main() {
   if ! jq -e . "$ESM_CFG" >/dev/null 2>&1; then
     esm_log "ERROR: $ESM_CFG is not valid JSON — refusing to touch it (pre-start-heal owns that repair)."
     return 2
+  fi
+
+  # ── Disabled: strip the entry instead of converging it ──────────────────────
+  # Removes ONLY .mcp.servers.sentry; every other live MCP server is preserved
+  # (del() on one key, never a rewrite of the block). Idempotent: when the entry
+  # is already absent this writes nothing at all — no temp file, no announce, no
+  # rename — so repeat ExecStartPre runs are silent no-ops rather than a write
+  # storm against the audit watcher.
+  if [ "$ESM_ENABLED" != "1" ]; then
+    if ! jq -e 'has("mcp") and (.mcp | has("servers")) and (.mcp.servers | has("sentry"))' \
+         "$ESM_CFG" >/dev/null 2>&1; then
+      esm_log "OK: sentry MCP is disabled (ESM_ENABLED=$ESM_ENABLED) and already absent from $ESM_CFG — nothing to do."
+      return 0
+    fi
+    # Exit 3, NOT 1. The watchdog's rc=1 branch means "registration drifted,
+    # re-register it" and its Slack copy says so; in disabled mode running the
+    # healer REMOVES the server, so reusing 1 would make the watchdog heal by
+    # deleting while announcing that it re-registered — backwards, and exactly
+    # the kind of silent contradiction this whole block exists to prevent.
+    # A distinct code lets the caller word it correctly (QA #929 v3 finding 1).
+    [ "$mode" = "--check" ] && { esm_log "VIOLATION: sentry MCP is disabled but still registered in $ESM_CFG."; return 3; }
+
+    local _esm_lock_d
+    _esm_lock_d="$(spc_config_lock_path "$ESM_CFG")"
+    (
+      exec 9>"$_esm_lock_d" || { esm_log "ERROR: cannot open lock $_esm_lock_d"; exit 2; }
+      flock -w "${ENSURE_SENTRY_MCP_LOCK_WAIT:-60}" 9 || {
+        esm_log "ERROR: timed out waiting for $_esm_lock_d — refusing to write unlocked"; exit 2; }
+
+      local tmp_d others_before
+      others_before="$(jq -r '[.mcp.servers | keys[] | select(. != "sentry")] | length' "$ESM_CFG" 2>/dev/null || echo 0)"
+      tmp_d="$(mktemp -p "$(dirname "$ESM_CFG")")" || { esm_log "ERROR: mktemp failed"; exit 2; }
+
+      if ! jq 'del(.mcp.servers.sentry)' "$ESM_CFG" > "$tmp_d"; then
+        rm -f "$tmp_d"; esm_log "ERROR: jq del failed — live config untouched."; exit 2
+      fi
+
+      # Validate what we are about to install: sentry gone, every OTHER server
+      # still present, agents.list intact. A del() that took the whole block with
+      # it would strip unrelated servers silently.
+      if ! jq -e --argjson n "$others_before" '
+            ((.mcp.servers.sentry // null) == null)
+            and (([.mcp.servers // {} | keys[]] | length) == $n)
+            and ((.agents.list | type) == "array")
+          ' "$tmp_d" >/dev/null 2>&1; then
+        rm -f "$tmp_d"; esm_log "ERROR: rendered config failed validation — live config untouched."; exit 2
+      fi
+
+      if [ -x "$ESM_ANNOUNCE" ]; then
+        if ! ANNOUNCE_SHA="$(sha256sum "$tmp_d" | awk '{print $1}')" \
+             "$ESM_ANNOUNCE" ensure-sentry-mcp "$ESM_CFG"; then
+          rm -f "$tmp_d"
+          esm_log "ERROR: announce-legit-write failed — live config untouched (an unannounced write pages #clio_devops)."
+          exit 2
+        fi
+      fi
+
+      if ! mv "$tmp_d" "$ESM_CFG"; then
+        rm -f "$tmp_d"; esm_log "ERROR: rename failed — live config untouched."; exit 2
+      fi
+      esm_log "DISABLED: removed sentry MCP from $ESM_CFG (${others_before} other MCP server(s) preserved)."
+      exit 0
+    )
+    return $?
   fi
 
   # Well-formed means: right url AND a non-empty token. `test("^Sentry-Bearer")`

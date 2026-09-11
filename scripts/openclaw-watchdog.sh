@@ -253,6 +253,17 @@ elif [ -x "$_WATCHDOG_DIR/lib/ensure-sentry-mcp.sh" ]; then
        else
          slack_notify_critical ":satellite: *Sentry MCP registration is GONE and could not be restored* — \`cto\`/\`qa\` have no Sentry tools. Usually \`/opt/hydra/secrets/sentry.env\` is missing (root, 0600, \`SENTRY_API_TOKEN=...\`). See RUNBOOK §Sentry issue triage.\n\`\`\`${SENTRY_MCP_OUT}\`\`\`"
        fi ;;
+    3) # exit 3 = the sentry MCP is DISABLED by the healer's ESM_ENABLED
+       # constant but is still registered in the live config. Healing here
+       # REMOVES the server; it does not restore it. Kept as its own branch
+       # because the rc=1 copy below says "re-registered", which would be the
+       # exact opposite of what just happened (QA #929 v3 finding 1).
+       log "SENTRY MCP DISABLED-BUT-PRESENT: ${SENTRY_MCP_OUT}"
+       if "$_WATCHDOG_DIR/lib/ensure-sentry-mcp.sh" >/dev/null 2>&1; then
+         slack_notify ":satellite: *Sentry MCP was still registered while disabled* — the watchdog REMOVED it from \`/root/.openclaw-main/openclaw.json\`. The server is off by design (PR #929: removing the \`sentry__*\` denies restored native web search, and disabling the registration keeps the write surface unchanged until Aaron rules on fleet-wide \`sentry__update_issue\` access). \`cto\`/\`qa\` have no Sentry tools and that is expected. If you INTENDED to re-enable it, flip \`ESM_ENABLED\` in \`scripts/lib/ensure-sentry-mcp.sh\` in a PR — a live re-registration will just be removed again on the next tick."
+       else
+         slack_notify_critical ":satellite: *Sentry MCP is disabled but could NOT be removed* from \`/root/.openclaw-main/openclaw.json\` — the write surface is wider than intended until this is fixed.\n\`\`\`${SENTRY_MCP_OUT}\`\`\`"
+       fi ;;
     *) # exit 2 = cannot tell (unreadable/invalid config, no secrets file). This
        # used to only log, which meant Sentry could be unavailable INDEFINITELY
        # with nothing paging -- the exact silent-failure shape this block exists

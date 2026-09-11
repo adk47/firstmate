@@ -28,6 +28,14 @@ setup() {
 
   cfg_without_sentry
   secrets_ok
+  # The healer's ESM_ENABLED constant now DEFAULTS TO DISABLED (PR #929: the
+  # sentry MCP is switched off until Aaron rules on fleet-wide
+  # sentry__update_issue access). Every test below this line exercises the
+  # REGISTRATION path, so it must opt in explicitly; the disabled-branch tests
+  # at the end of this file override it back to 0. Exported in setup rather
+  # than prefixed onto `run` — a `VAR=x run ...` prefix is not reliably
+  # delivered to the process under test.
+  export ENSURE_SENTRY_MCP_ENABLED=1
 }
 
 cfg_without_sentry() {
@@ -240,4 +248,123 @@ authz() { jq -r '.mcp.servers.sentry.headers.Authorization // "ABSENT"' "$ENSURE
 @test "the token never appears in the healer's own output" {
   run "$HEALER"
   [[ "$output" != *"sntryu_realtoken123"* ]]
+}
+
+# ──────────────────────────────────────────────────────────────
+# The kill switch (PR #929). ESM_ENABLED=0 makes the healer STRIP the entry
+# instead of registering it — the only place a PR can control the registration,
+# because `.mcp` is absent from the repo configs, sync-profile-config.sh
+# preserves the live `.mcp.servers` across deploys, and this healer re-registers
+# on every main start (openclaw-pre-start-heal.sh:124).
+# ──────────────────────────────────────────────────────────────
+
+cfg_with_sentry_and_other() {
+  cfg_with '{"agents":{"list":[{"id":"cto"},{"id":"qa"}]},"mcp":{"servers":{"sentry":{"transport":"streamable-http","url":"https://mcp.sentry.dev/mcp","headers":{"Authorization":"Sentry-Bearer sntryu_realtoken123"}},"othersrv":{"transport":"streamable-http","url":"https://example.invalid/mcp"}}}}'
+}
+
+@test "disabled: STRIPS the sentry entry" {
+  export ENSURE_SENTRY_MCP_ENABLED=0
+  cfg_with_sentry_and_other
+  run bash -c ". '$HEALER'; ensure_sentry_mcp_main converge"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.mcp.servers.sentry // "ABSENT"' "$ENSURE_SENTRY_MCP_CFG")" = "ABSENT" ]
+  [[ "$output" == *"DISABLED: removed sentry MCP"* ]]
+}
+
+@test "disabled: leaves OTHER mcp servers untouched" {
+  export ENSURE_SENTRY_MCP_ENABLED=0
+  cfg_with_sentry_and_other
+  run bash -c ". '$HEALER'; ensure_sentry_mcp_main converge"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.mcp.servers.othersrv.url' "$ENSURE_SENTRY_MCP_CFG")" = "https://example.invalid/mcp" ]
+  [ "$(jq -r '.mcp.servers | keys | length' "$ENSURE_SENTRY_MCP_CFG")" -eq 1 ]
+}
+
+@test "disabled: preserves the rest of the config" {
+  export ENSURE_SENTRY_MCP_ENABLED=0
+  cfg_with_sentry_and_other
+  run bash -c ". '$HEALER'; ensure_sentry_mcp_main converge"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.agents.list | length' "$ENSURE_SENTRY_MCP_CFG")" -eq 2 ]
+}
+
+@test "disabled: is IDEMPOTENT — a second run writes nothing at all" {
+  export ENSURE_SENTRY_MCP_ENABLED=0
+  cfg_with_sentry_and_other
+  run bash -c ". '$HEALER'; ensure_sentry_mcp_main converge"
+  [ "$status" -eq 0 ]
+  local before; before="$(sha256sum "$ENSURE_SENTRY_MCP_CFG" | cut -d' ' -f1)"
+  : > "$TMP_ANNOUNCE_LOG"
+  run bash -c ". '$HEALER'; ensure_sentry_mcp_main converge"
+  [ "$status" -eq 0 ]
+  [ "$(sha256sum "$ENSURE_SENTRY_MCP_CFG" | cut -d' ' -f1)" = "$before" ]
+  [[ "$output" == *"already absent"* ]]
+  # no announce on a no-op: an unannounced-write page is only avoided by not writing
+  [ ! -s "$TMP_ANNOUNCE_LOG" ]
+}
+
+@test "disabled: ANNOUNCES the strip before renaming" {
+  export ENSURE_SENTRY_MCP_ENABLED=0
+  cfg_with_sentry_and_other
+  run bash -c ". '$HEALER'; ensure_sentry_mcp_main converge"
+  [ "$status" -eq 0 ]
+  grep -q "ensure-sentry-mcp" "$TMP_ANNOUNCE_LOG"
+}
+
+@test "disabled: --check REPORTS a still-registered server as a violation" {
+  export ENSURE_SENTRY_MCP_ENABLED=0
+  cfg_with_sentry_and_other
+  run bash -c ". '$HEALER'; ensure_sentry_mcp_main --check"
+  # 3, not 1: the watchdog's rc=1 branch re-registers and says so. Disabled mode
+  # heals by REMOVING, so it needs its own code or the Slack copy is backwards.
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"VIOLATION"* ]]
+  # --check must not mutate
+  [ "$(jq -r '.mcp.servers.sentry.url' "$ENSURE_SENTRY_MCP_CFG")" = "https://mcp.sentry.dev/mcp" ]
+}
+
+@test "disabled: --check is clean once the entry is gone" {
+  export ENSURE_SENTRY_MCP_ENABLED=0
+  cfg_without_sentry
+  run bash -c ". '$HEALER'; ensure_sentry_mcp_main --check"
+  [ "$status" -eq 0 ]
+}
+
+@test "enabled: still registers, and still preserves other servers" {
+  export ENSURE_SENTRY_MCP_ENABLED=1
+  cfg_with '{"agents":{"list":[{"id":"cto"}]},"mcp":{"servers":{"othersrv":{"transport":"streamable-http","url":"https://example.invalid/mcp"}}}}'
+  run bash -c ". '$HEALER'; ensure_sentry_mcp_main converge"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.mcp.servers.sentry.url' "$ENSURE_SENTRY_MCP_CFG")" = "https://mcp.sentry.dev/mcp" ]
+  [ "$(jq -r '.mcp.servers.othersrv.url' "$ENSURE_SENTRY_MCP_CFG")" = "https://example.invalid/mcp" ]
+}
+
+@test "the DEFAULT is disabled — an unset ENSURE_SENTRY_MCP_ENABLED strips the entry" {
+  # This pins the constant's default value, which is the entire point of the
+  # switch: the PR alone must be the control, so re-enabling has to be a visible
+  # one-line change and not an environment accident. Without this case, flipping
+  # ESM_ENABLED's default back to 1 passes the whole suite (verified by
+  # mutation, 2026-09-11).
+  unset ENSURE_SENTRY_MCP_ENABLED
+  cfg_with_sentry_and_other
+  run bash -c ". '$HEALER'; ensure_sentry_mcp_main converge"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.mcp.servers.sentry // "ABSENT"' "$ENSURE_SENTRY_MCP_CFG")" = "ABSENT" ]
+  [[ "$output" == *"DISABLED: removed sentry MCP"* ]]
+}
+
+@test "disabled: REFUSES to install a rendered config that fails validation" {
+  # The pre-rename validation is the last thing standing between a bad transform
+  # and an irreversible rename of the LIVE gateway config. Exercised here via the
+  # agents.list clause: a config whose agents.list is not an array is valid JSON,
+  # so it reaches validation, and the healer must refuse and leave the original
+  # byte-identical rather than install it.
+  export ENSURE_SENTRY_MCP_ENABLED=0
+  cfg_with '{"agents":{"list":{"not":"an-array"}},"mcp":{"servers":{"sentry":{"transport":"streamable-http","url":"https://mcp.sentry.dev/mcp","headers":{"Authorization":"Sentry-Bearer sntryu_realtoken123"}}}}}'
+  local before; before="$(sha256sum "$ENSURE_SENTRY_MCP_CFG" | cut -d' ' -f1)"
+  run bash -c ". '$HEALER'; ensure_sentry_mcp_main converge"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"failed validation"* ]]
+  [[ "$output" == *"live config untouched"* ]]
+  [ "$(sha256sum "$ENSURE_SENTRY_MCP_CFG" | cut -d' ' -f1)" = "$before" ]
 }

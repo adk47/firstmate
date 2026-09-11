@@ -18,8 +18,19 @@ setup() {
 
   BLOCK="$BATS_TEST_TMPDIR/register.sh"
   awk '/^cfg=\/root\/\.openclaw-main\/openclaw\.json$/ {grab=1}
-       grab {print; if ($0 ~ /^echo "registered and scoped/) exit}' "$DOC" > "$BLOCK"
-  [ -s "$BLOCK" ] || fail "could not extract the registration block"
+       grab {print; if ($0 ~ /^echo "registered/) exit}' "$DOC" > "$BLOCK"
+  # `[ -s ]` alone is NOT enough, and that is not hypothetical: when the runbook's
+  # closing line changed from `echo "registered and scoped...` to
+  # `echo "registered (unscoped by design)...` on 2026-09-10, awk never hit its
+  # terminator, grabbed the whole REST of the runbook as "the block", and every
+  # case here failed for a reason none of them named. Assert the extraction
+  # actually STOPPED where it was meant to, and fail loud (not `fail`, which is a
+  # bats-assert helper this suite does not load — calling it yields a bare 127).
+  if [ ! -s "$BLOCK" ] || ! tail -n 1 "$BLOCK" | grep -q '^echo "registered'; then
+    echo "could not extract the registration block from $DOC — the terminator" >&2
+    echo "line (^echo \"registered) is gone or moved; fix this awk, do not skip." >&2
+    return 1
+  fi
 
   # a realistic config: agents live at .agents.list, one already has denies
   CFG="$BATS_TEST_TMPDIR/openclaw.json"
@@ -71,30 +82,37 @@ run_block() { printf '%s\n' "$1" | bash "$BLOCK"; }
   [ ! -f "$BATS_TEST_TMPDIR/announced" ]
 }
 
-@test "registration and scoping land in ONE write: server + denies together" {
+@test "the block registers the server and adds NO deny to any agent" {
+  # INVERTED 2026-09-10. This recipe used to add `sentry__*` to every non-cto/qa
+  # agent in the same atomic write. On openclaw >= 2026.8 that deny fails
+  # isKnownCoreToolId, marks the agent's policy restricted, and silently strips
+  # its entire codex native tool surface (web search, shell, images, browser,
+  # skill search, memories). See validate-config-matrix.sh check #8.
   run run_block "tok-abc123"
   [ "$status" -eq 0 ]
-  # ONE wildcard per agent, not nine literals. `tools.deny` compiles to glob
-  # patterns, so `sentry__*` covers tools that do not exist yet; an enumeration
-  # would leave the next tool Sentry adds available to every excluded agent --
-  # and this recipe would have been what opened it.
-  run jq -r '[.agents.list[] | select(.id!="cto" and .id!="qa")
-             | ((.tools.deny // []) | index("sentry__*")) != null] | unique | @csv' "$CFG"
-  [ "$output" = "true" ]
-  # and no brittle literal ids sneaked back in alongside it
+  run jq -r '.mcp.servers.sentry.url' "$CFG"
+  [ "$output" = "https://mcp.sentry.dev/mcp" ]
   run jq -r '[.agents.list[] | (.tools.deny // [])[]
-             | select(startswith("sentry__")) | select(. != "sentry__*")] | length' "$CFG"
-  [ "$output" = "0" ]
-  run jq -r '[.agents.list[] | select(.id=="cto" or .id=="qa")
-             | ((.tools.deny // []) | map(select(startswith("sentry__"))) | length)] | add' "$CFG"
+             | select(startswith("sentry__"))] | length' "$CFG"
   [ "$output" = "0" ]
 }
 
-@test "pre-existing denies are preserved, not replaced" {
+@test "the block ABORTS if a pre-2026.8 sentry deny is still in the config" {
+  # Its own validation must fail closed on a leftover deny, so a config carrying
+  # one is never announced, renamed and hot-reloaded as if it were healthy.
+  jq '(.agents.list[] | select(.id=="clio") | .tools.deny) = ["sentry__*"]' \
+     "$CFG" > "$CFG.new" && mv "$CFG.new" "$CFG"
+  cp "$CFG" "$BATS_TEST_TMPDIR/original.json"
+  run run_block "tok-abc123"
+  [ "$status" -ne 0 ]
+  run diff -q "$CFG" "$BATS_TEST_TMPDIR/original.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "pre-existing non-sentry denies are preserved, not replaced" {
   run run_block "tok-abc123"
   [ "$status" -eq 0 ]
-  run jq -r '.agents.list[] | select(.id=="operations") | .tools.deny
-             | map(select(startswith("sentry__")|not)) | sort | @csv' "$CFG"
+  run jq -r '.agents.list[] | select(.id=="operations") | .tools.deny | sort | @csv' "$CFG"
   [ "$output" = '"web_fetch","web_search"' ]
 }
 
@@ -120,140 +138,27 @@ run_block() { printf '%s\n' "$1" | bash "$BLOCK"; }
   [ "$output" = "0" ]
 }
 
-# ---- deny-list reconciliation against the PROBED catalog -------------------
-# `mcp list --json` has no .tools[] (it returns the configured definitions), and
-# a journal grep only proves SOME id appeared recently -- if the window mentions
-# one tool, a naive check reports "reconciled" while the rest stay un-denied.
-# These cases pin that the enumeration comes from `mcp probe` and fails closed.
+# ---- deny-list reconciliation: RETIRED 2026-09-10 --------------------------
+# Nine cases used to live here, extracting the runbook's "Enumerate from the
+# CONNECTED catalog" block and proving the `sentry__*` deny COVERED every
+# registered tool. That block is gone: on openclaw >= 2026.8 the deny is not a
+# scoping mechanism, it is a kill switch for the agent's whole codex native tool
+# surface, so there is no deny list left to reconcile. Deleted rather than
+# skipped -- a suite that silently skips what it can no longer extract is the
+# false green those cases existed to prevent. The surviving invariant ("no
+# sentry deny may reappear in a committed config") is pinned by
+# scripts/tests/sentry-mcp-scoping.bats and validate-config-matrix.sh check #8.
 
-setup_reconcile() {
-  RCFG="$BATS_TEST_TMPDIR/rcfg.json"
-  cat > "$RCFG" <<'JSON'
-{"agents":{"list":[{"id":"cto"},{"id":"qa"},
- {"id":"cmo","tools":{"deny":["sentry__search_issues","sentry__find_projects"]}},
- {"id":"scout","tools":{"deny":["sentry__search_issues","sentry__find_projects","sentry__get_trace_details"]}}]}}
-JSON
-  RECON="$BATS_TEST_TMPDIR/recon.sh"
-  awk '/^# Enumerate from the CONNECTED catalog/ {grab=1}
-       grab {print; if ($0 ~ /^echo "scoping reconciled/) exit}'     "$HYDRA_REPO/docs/runbooks/RUNBOOK.md" > "$RECON"
-  [ -s "$RECON" ] || fail "could not extract the reconciliation block"
-  sed -i.bak '/^openclaw --profile main mcp list | grep -i sentry$/d' "$RECON"
-  mkdir -p "$BATS_TEST_TMPDIR/bin"
-}
-
-# $1 = JSON that the stubbed `openclaw mcp probe` should emit
-stub_probe() {
-  printf '#!/bin/sh
-cat <<'"'"'P'"'"'
-%s
-P
-exit 0
-' "$1" > "$BATS_TEST_TMPDIR/bin/openclaw"
-  chmod +x "$BATS_TEST_TMPDIR/bin/openclaw"
-}
-
-@test "reconcile: ALL probed tool ids are enumerated, not just one" {
-  setup_reconcile
-  stub_probe '{"tools":[{"name":"search_issues"},{"name":"find_projects"},{"name":"get_trace_details"},{"name":"execute_sentry_tool"}]}'
-  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
-  [ "$status" -ne 0 ]                       # cmo is missing two of them
-  [[ "$output" == *"probed catalog (4 tools)"* ]]
-  [[ "$output" == *"GAP cmo"* ]]
-  [[ "$output" == *"sentry__get_trace_details"* ]]
-  [[ "$output" == *"sentry__execute_sentry_tool"* ]]
-}
-
-@test "reconcile: passes only when every agent denies every probed id" {
-  setup_reconcile
-  stub_probe '{"tools":[{"name":"search_issues"},{"name":"find_projects"}]}'
-  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
+@test "the runbook REFUSES while the MCP is disabled (QA #929 v3 finding 3)" {
+  # An operator following the recipe would hot-reload an unscoped Sentry server
+  # into a fleet where every agent can reach sentry__update_issue — and the
+  # healer would tear it out on the next start anyway. The section must carry a
+  # stop-gate naming the real control, not a parallel live write.
+  local rb; rb="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/docs/runbooks/RUNBOOK.md"
+  [ -r "$rb" ]
+  run sed -n '/^### Register the Sentry MCP server$/,/^```bash$/p' "$rb"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"scoping reconciled against the probed catalog"* ]]
-}
-
-@test "reconcile: a WILDCARD deny covers every probed id (the documented policy)" {
-  # The regression this pins: the registration block writes `sentry__*`, but the
-  # reconciliation used to compare probed ids against deny entries with
-  # `comm -23`. Against a fully-scoped config that reported EVERY tool as a GAP
-  # and exited 1 -- fail-closed, but it made the documented sequence unrunnable
-  # and sent the operator off adding literals that undo the wildcard.
-  setup_reconcile
-  cat > "$RCFG" <<'JSON'
-{"agents":{"list":[{"id":"cto"},{"id":"qa"},
- {"id":"cmo","tools":{"deny":["sentry__*"]}},
- {"id":"scout","tools":{"deny":["sentry__*","web_search"]}}]}}
-JSON
-  stub_probe '{"tools":[{"name":"search_issues"},{"name":"find_projects"},{"name":"brand_new_tool"}]}'
-  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"reconciled"* ]]
-}
-
-@test "reconcile: a wildcard for SOME agents still flags the one without it" {
-  setup_reconcile
-  cat > "$RCFG" <<'JSON'
-{"agents":{"list":[{"id":"cto"},{"id":"qa"},
- {"id":"cmo","tools":{"deny":["sentry__*"]}},
- {"id":"scout","tools":{"deny":["sentry__search_issues"]}}]}}
-JSON
-  stub_probe '{"tools":[{"name":"search_issues"},{"name":"find_projects"}]}'
-  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"GAP scout"* ]]
-  [[ "$output" != *"GAP cmo"* ]]
-}
-
-@test "reconcile: an EMPTY probe refuses instead of reporting success" {
-  # probe exits 0 with tools:[] when nothing is reachable, so rc is not the gate
-  setup_reconcile
-  stub_probe '{"generatedAt":"x","servers":{},"tools":[],"diagnostics":[]}'
-  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"catalog is unproven"* ]]
-  [[ "$output" != *"reconciled"* ]]
-}
-
-@test "reconcile: a failing probe refuses" {
-  setup_reconcile
-  printf '#!/bin/sh
-exit 1
-' > "$BATS_TEST_TMPDIR/bin/openclaw"
-  chmod +x "$BATS_TEST_TMPDIR/bin/openclaw"
-  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"mcp probe failed"* ]]
-  [[ "$output" != *"reconciled"* ]]
-}
-
-@test "reconcile: an unreadable config refuses instead of a vacuous pass" {
-  # `for agent in $(jq ...)` fails OPEN: a broken cfg yields no loop items, gap
-  # stays 0, and the block would report "reconciled" having checked no agent.
-  setup_reconcile
-  stub_probe '{"tools":[{"name":"search_issues"}]}'
-  echo '{ not valid json' > "$RCFG"
-  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"scoping is UNVERIFIED"* ]]
-  [[ "$output" != *"reconciled"* ]]
-}
-
-@test "reconcile: a config with no .agents.list refuses" {
-  setup_reconcile
-  stub_probe '{"tools":[{"name":"search_issues"}]}'
-  echo '{"agents":{"defaults":{}}}' > "$RCFG"
-  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"scoping is UNVERIFIED"* ]]
-  [[ "$output" != *"reconciled"* ]]
-}
-
-@test "reconcile: a cto/qa-only fleet refuses a vacuous pass" {
-  # nothing to check is not the same as everything checked
-  setup_reconcile
-  stub_probe '{"tools":[{"name":"search_issues"}]}'
-  echo '{"agents":{"list":[{"id":"cto"},{"id":"qa"}]}}' > "$RCFG"
-  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" cfg="$RCFG" bash "$RECON"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"vacuous pass"* ]]
-  [[ "$output" != *"reconciled"* ]]
+  [[ "$output" == *"STOP"* ]]
+  [[ "$output" == *"ESM_ENABLED"* ]]
+  [[ "$output" == *"will NOT stick"* ]]
 }

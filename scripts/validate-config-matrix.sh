@@ -193,6 +193,202 @@ for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
     echo "ERROR: $cfg web_search misconfigured: $ws_err" >&2
     fail=1
   fi
+  # 8. No tool policy may restrict the codex harness's NATIVE tool surface.
+  #    On openclaw >= 2026.8 the codex harness declares
+  #    conversationToolPolicySupport:"exact", and openclaw then classifies an
+  #    agent's policy via toolPolicyRestrictsHarnessNativeTools()
+  #    (dist/selection-Bge6N4vD.js): the policy is RESTRICTED if any deny entry
+  #    is `!isKnownCoreToolId(name) || !safeDenyToolNames.has(name)`, or if
+  #    `allow` is a non-empty list without "*" (toolPolicyRestrictsTools, in
+  #    dist/tool-policy-Dh52Cnoz.js). A restricted policy sets
+  #    pluginHarnessToolPolicyRestricted, and the FIRST line of
+  #    shouldEnableCodexAppServerNativeToolSurface()
+  #    (@openclaw/codex dist/dynamic-tools-*.js) returns false on it. That drops
+  #    the whole CODEX_RING_ZERO feature set for the agent -- shell_tool,
+  #    unified_exec, standalone_web_search, web_search_request, multi_agent,
+  #    skill_search, memories, image_generation, browser_use, code_mode,
+  #    view_image -- and pushes resolveCodexWebSearchPlan() off "native-hosted"
+  #    onto "managed". With no managed provider configured (the SUPPORTED shape,
+  #    enforced by check #7 above) runWebSearch() then throws
+  #    "web_search is disabled or no provider is available."
+  #
+  #    Incident 2026-09-10: the 2026.8.2 cutover turned the long-standing
+  #    `tools.deny: ["sentry__*"]` (registered globally, denied to every agent
+  #    but cto/qa) into exactly this kill switch. Scout lost web search mid-task
+  #    and told a user its "web research provider is disabled/unavailable"; five
+  #    other agents were silently downgraded with nothing in the journal naming
+  #    the cause. UPGRADE-2026.8.1.md Gate N looked straight at this interaction
+  #    and closed it on "the refusal disappears" -- true, and the wrong
+  #    assertion: declaring "exact" replaces a LOUD refusal with a SILENT
+  #    capability downgrade.
+  #
+  #    The safe set is a CLOSED list in the codex plugin
+  #    (CODEX_TOOL_POLICY_SAFE_DENY_NAMES). MCP tool ids and globs can never
+  #    appear in it, so an MCP tool cannot be denied per-agent without paying
+  #    the whole native surface -- and MCP servers are global in 2026.8.2
+  #    (canonicalizeConfiguredMcpServer accepts no agent-scoping key), so there
+  #    is no config-level way to hide one from a subset of agents. Re-verify
+  #    this list on every openclaw/codex bump.
+  SAFE_DENY='["web_fetch","x_search","memory_search","memory_get","dashboard","canvas","show_widget","message","heartbeat_respond","automations","gateway","skill_workshop","image_generate","music_generate","video_generate","tts"]'
+  #    Deliberate exceptions, "<config-basename>:<agentId>:<tool>". Each one
+  #    ACCEPTS a restricted codex harness for that agent because the deny buys
+  #    something worth more than the native surface. Kept inline rather than in
+  #    a side file: there are two, not three.
+  #      - openclaw-edge.json:support:exec -- Caroline must not have a shell
+  #        (#408). Losing codex-native shell_tool/unified_exec with it is defense
+  #        in depth. Be honest about the rest of the bill though: she ALSO loses
+  #        skill_search, memories and native web search, and that part is pure
+  #        cost. It is accepted only because openclaw offers no per-agent knob
+  #        for the native surface -- an upstream gap that, unlike every other
+  #        workaround in this repo, has no issue number to cite yet. File one and
+  #        reference it here so this has an expiry condition.
+  #      - openclaw-main.json:operations:web_search -- credit-verification must
+  #        not free-text search. Note this deny is doing MORE than the
+  #        muso-credit-verification-enforcer plugin's redirect-web-search hook:
+  #        that hook is a `before_tool_call`, so it can only intercept the
+  #        openclaw tool path, while codex-native standalone_web_search runs
+  #        inside the codex app-server. The deny closes the native path too --
+  #        precisely BECAUSE it restricts the harness. So if `web_search` ever
+  #        joins the safe list, do NOT delete this exception as redundant: that
+  #        would silently reopen free-text search for the agent that must not
+  #        have it. The cost is real and unpriced elsewhere: operations is a
+  #        codex agent and stays permanently restricted, losing skill_search,
+  #        memories, image_generation and browser_use too.
+  HARNESS_DENY_EXCEPTIONS='["openclaw-edge.json:support:exec","openclaw-main.json:operations:web_search"]'
+
+  #    REACH OF THIS GATE, stated honestly: openclaw classifies over
+  #    explicitPolicies = [globalPolicy, globalProviderPolicy, agentPolicy,
+  #    agentProviderPolicy, groupPolicy, senderPolicy, sandboxPolicy,
+  #    subagentPolicy, inheritedToolPolicy, runtimeToolPolicyForInheritance,
+  #    requestedToolPolicy]. Only the first and third are expressible in a repo
+  #    config, and those are what this check reads; the rest are runtime-derived
+  #    and invisible to a static gate. Note `tools.alsoAllow` is deliberately NOT
+  #    checked -- it is absent from explicitPolicies (it only reaches
+  #    runtimePolicies via mergeAlsoAllowPolicy), so hydra's global
+  #    alsoAllow:["lobster"] does not restrict anything. Verified in
+  #    dist/selection-Bge6N4vD.js on 2026.8.2; re-check on bump.
+  #
+  #    Agent shape: the repo configs use `.agents.list[]`. On >=2026.8 the doctor
+  #    ALSO understands a keyed `.agents.entries{}` form and logs "Moved
+  #    agents.list to keyed agents.entries" at load -- but that normalization is
+  #    IN MEMORY: verified 2026-09-10 on 2026.8.2 that both live on-disk configs
+  #    (/root/.openclaw-{main,edge}/openclaw.json) are still `list`. So the
+  #    entries branch below is FORWARD-DEFENSIVE, not evidence that anything is
+  #    currently mis-reading its config -- checks #1/#2/#6 and
+  #    scripts/lib/ensure-sentry-mcp.sh all still read `.agents.list` and are all
+  #    still correct today. Read both anyway: if the shape ever does land on
+  #    disk, a gate that reads the wrong one finds zero agents and passes
+  #    silently, which is the exact failure this check exists to prevent. If
+  #    NEITHER shape is present, fail loud rather than "pass" -- an unparseable
+  #    config is a finding, not a clean bill of health. An EMPTY shape
+  #    (`entries: {}` / `list: []`) is the same finding wearing a parseable hat:
+  #    zero agents is zero evidence, so it fails too rather than reporting clean.
+  shape=$(jq -r '
+    if (.agents.entries | type) == "object" then (if (.agents.entries | length) > 0 then "entries" else "EMPTY" end)
+    elif (.agents.list | type) == "array" then (if (.agents.list | length) > 0 then "list" else "EMPTY" end)
+    else "NONE" end
+  ' "$cfg")
+  if [[ "$shape" == "NONE" || "$shape" == "EMPTY" ]]; then
+    if [[ "$shape" == "NONE" ]]; then
+      echo "ERROR: $cfg has neither .agents.list[] nor .agents.entries{} — cannot evaluate tool policies (refusing to report a config it cannot parse as clean)" >&2
+    else
+      echo "ERROR: $cfg declares an agents shape with ZERO agents — nothing was evaluated, so this is a finding, not a clean bill of health" >&2
+    fi
+    fail=1
+  else
+    bad=$(jq -r --argjson safe "$SAFE_DENY" --argjson exc "$HARNESS_DENY_EXCEPTIONS" \
+                 --arg base "$(basename "$cfg")" --arg shape "$shape" '
+      # Global tools.* counts too: it merges into the same explicitPolicies set
+      # openclaw classifies, so a global deny restricts EVERY agent at once.
+      # agents.defaults.tools is the SAME hazard by a quieter route: openclaw
+      # resolves every agent key as
+      # `resolveAgentConfig(cfg, agentId)?.<key> ?? cfg.agents.defaults.<key>`
+      # (the resolution this repo already relies on in
+      # scripts/check-soul-bootstrap-size.sh and scripts/memory-health-check.sh),
+      # so a deny parked there applies to every agent that has no `tools` of its
+      # own -- invisible to a gate that reads only `.tools` and `.agents.*.tools`.
+      # WHY THIS IS A GENERIC WALK AND NOT A LIST OF KNOWN KEYS.
+      # openclaw classifies over `explicitPolicies`
+      # (dist/selection-Bge6N4vD.js:746-758): globalPolicy, globalProviderPolicy,
+      # agentPolicy, agentProviderPolicy, groupPolicy, senderPolicy,
+      # sandboxPolicy, subagentPolicy, inheritedToolPolicy,
+      # runtimeToolPolicyForInheritance, requestedToolPolicy. ANY of them
+      # containing a non-core-safe deny (or a narrowing allow) restricts the
+      # codex harness and kills its native tool surface.
+      #
+      # Enumerating the config keys behind those holders one at a time is how
+      # this check got caught twice: round 1 read only `.tools.deny`, round 2
+      # added `byProvider` (globalProviderPolicy/agentProviderPolicy), and review
+      # immediately found `toolsBySender` (senderPolicy) next, with
+      # channel group `tools` (groupPolicy) behind it. Each fix closed one
+      # holder and left the next one open.
+      #
+      # So this no longer enumerates. It walks the WHOLE config for any object
+      # carrying a `deny` or `allow` array whose JSON path contains a `tools`
+      # segment, and evaluates every one. That covers all four
+      # currently-reachable holders, the channel-group and sender routes, and
+      # any FUTURE key openclaw adds under a tools subtree, without another
+      # round trip. The `tools`-segment condition is what keeps `plugins.allow`
+      # (a plugin allowlist, not a tool policy) out of scope — verified: a naive
+      # "any object with deny/allow" walk flags it.
+      #
+      # SCOPE, stated honestly: config-expressible holders only.
+      # inheritedToolPolicy, runtimeToolPolicyForInheritance and
+      # requestedToolPolicy are runtime-derived and cannot appear in a repo
+      # config, so a static gate cannot see them; sandboxPolicy and
+      # subagentPolicy are likewise resolved outside these files today. If any
+      # of those ever gains a config surface it will land under a `tools` path
+      # and this walk picks it up automatically.
+      #
+      # $shape is passed in rather than re-tested here so the shape decision has
+      # exactly ONE authority (the probe above) and the two cannot drift.
+      . as $root
+      | [ paths(type == "object" and ((.deny | type) == "array" or (.allow | type) == "array")) ]
+      | map(select(any(.[]; . == "tools")))
+      | map({ path: ., policy: (. as $pp | $root | getpath($pp)) })
+      | map(. + { id:
+          ( .path as $pp
+            | if ($pp[0] == "agents") and ($pp[1] == "list")
+              then ($root.agents.list[$pp[2]].id // ("agents.list[" + ($pp[2] | tostring) + "]"))
+              elif ($pp[0] == "agents") and ($pp[1] == "entries") then $pp[2]
+              elif ($pp[0] == "agents") and ($pp[1] == "defaults") then "<agents.defaults>"
+              elif ($pp[0] == "tools") then "<global>"
+              else "<" + ($pp[0] | tostring) + ">" end ) })
+      | map({ key: (.id + " @ " + (.path | join("."))), value: .policy, id: .id }) as $policies
+      | ( $policies[]
+          | .key as $label | .id as $id | .value as $p
+          | ( ($p.deny // [])[] as $d
+              | select(($safe | index($d)) == null
+                       and ($exc | index($base + ":" + $id + ":" + $d)) == null)
+              | "  - " + $label + ": deny \"" + $d + "\" is not in CODEX_TOOL_POLICY_SAFE_DENY_NAMES" ),
+            ( ($p.allow // []) | select(length > 0 and (index("*") == null))
+              | "  - " + $label + ": allow " + tostring + " is a narrowing allow-list (no \"*\")" ) ),
+        # Staleness, borrowed from the .skill-workspace-divergence.txt precedent:
+        # that file fails CI when an entry no longer diverges, so a reconciled
+        # exception cannot linger. Without the same rule here, deleting a deny
+        # would leave its exception behind as a standing pre-authorisation for a
+        # re-add that nobody reviews. Only exceptions naming THIS config are
+        # judged -- the others are simply not applicable to this file.
+        ( $exc[]
+          | select(startswith($base + ":"))
+          | . as $e
+          | ($e | split(":")) as $parts
+          | if ($parts | length) != 3
+            then "  - MALFORMED EXCEPTION \"" + $e + "\": expected <config>:<agent>:<tool>"
+            else $parts[1] as $xid | $parts[2] as $xtool
+              | select([ $policies[] | select(.id == $xid) | (.value.deny // []) | index($xtool) ]
+                       | map(select(. != null)) | length == 0)
+              | "  - STALE EXCEPTION \"" + $e + "\": " + $xid + " no longer denies \""
+                + $xtool + "\" — drop it from HARNESS_DENY_EXCEPTIONS"
+            end )
+    ' "$cfg")
+    if [[ -n "$bad" ]]; then
+      echo "ERROR: $cfg has tool policies that RESTRICT the codex harness and silently disable its native tool surface (web_search, shell_tool, image_generation, browser_use, skill_search, memories, ...) — incident 2026-09-10:" >&2
+      echo "$bad" >&2
+      echo "  Fix: drop the entry, or add \"<config>:<agent>:<tool>\" to HARNESS_DENY_EXCEPTIONS with a comment saying why losing the native surface is acceptable for that agent." >&2
+      fail=1
+    fi
+  fi
 done
 
 # 4. Cron payload thinking values must be in the allowed enum.

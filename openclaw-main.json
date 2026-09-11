@@ -266,12 +266,7 @@
             "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
-        "thinkingDefault": "high",
-        "tools": {
-          "deny": [
-            "sentry__*"
-          ]
-        }
+        "thinkingDefault": "high"
       },
       {
         "id": "ceo",
@@ -283,12 +278,7 @@
             "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
-        "thinkingDefault": "high",
-        "tools": {
-          "deny": [
-            "sentry__*"
-          ]
-        }
+        "thinkingDefault": "high"
       },
       {
         "id": "cmo",
@@ -300,12 +290,7 @@
             "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
-        "thinkingDefault": "high",
-        "tools": {
-          "deny": [
-            "sentry__*"
-          ]
-        }
+        "thinkingDefault": "high"
       },
       {
         "id": "cto",
@@ -341,12 +326,7 @@
             "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
-        "thinkingDefault": "medium",
-        "tools": {
-          "deny": [
-            "sentry__*"
-          ]
-        }
+        "thinkingDefault": "medium"
       },
       {
         "id": "operations",
@@ -383,7 +363,6 @@
         ],
         "tools": {
           "deny": [
-            "sentry__*",
             "web_fetch",
             "web_search"
           ]
@@ -399,12 +378,7 @@
             "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
-        "thinkingDefault": "high",
-        "tools": {
-          "deny": [
-            "sentry__*"
-          ]
-        }
+        "thinkingDefault": "high"
       },
       {
         "id": "scout",
@@ -416,12 +390,7 @@
             "openrouter/anthropic/claude-haiku-4.5"
           ]
         },
-        "thinkingDefault": "low",
-        "tools": {
-          "deny": [
-            "sentry__*"
-          ]
-        }
+        "thinkingDefault": "low"
       }
     ]
   },

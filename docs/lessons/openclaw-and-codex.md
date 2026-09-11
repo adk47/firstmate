@@ -664,6 +664,50 @@ reintroduces the #695 outage. Sources: `@openclaw/codex .../thread-lifecycle-*.j
 (`applyCodexAppServerAuthProfile` → api-key fallback); the "Reconnecting..." string lives in
 the codex-rs binary (`responses_retry`).
 
+**On openclaw >=2026.8 a non-core-safe `tools.deny` is a SILENT native-surface kill
+switch — and there is no config-level way to hide an MCP tool from one agent.** The codex
+harness declares `conversationToolPolicySupport:"exact"`, so openclaw classifies each
+agent's policy through `toolPolicyRestrictsHarnessNativeTools()`
+(`dist/selection-Bge6N4vD.js`): RESTRICTED if any deny entry is
+`!isKnownCoreToolId(name) || !safeDenyToolNames.has(name)`, or if `allow` is a non-empty
+list without `"*"` (`toolPolicyRestrictsTools`, `dist/tool-policy-Dh52Cnoz.js` — so a
+narrowing allow-list is NOT an escape hatch, and `alsoAllow` only widens `allow` and cannot
+exempt). That sets `pluginHarnessToolPolicyRestricted`, and the **first line** of
+`shouldEnableCodexAppServerNativeToolSurface()` (`@openclaw/codex dist/dynamic-tools-*.js`)
+returns false on it — dropping the entire `CODEX_RING_ZERO` feature set (`shell_tool`,
+`unified_exec`, `standalone_web_search`, `web_search_request`, `web_search_cached`,
+`multi_agent`, `skill_search`, `memories`, `image_generation`, `browser_use`, `code_mode`,
+`view_image`, 29 in total) and pushing `resolveCodexWebSearchPlan()` off `native-hosted`
+onto `managed`. With no managed provider — the SUPPORTED shape, per the 7.1 note above —
+`runWebSearch()` then throws `web_search is disabled or no provider is available.`
+**The safe set is a CLOSED 16-name list** (`CODEX_TOOL_POLICY_SAFE_DENY_NAMES`:
+`web_fetch, x_search, memory_search, memory_get, dashboard, canvas, show_widget, message,
+heartbeat_respond, automations, gateway, skill_workshop, image_generate, music_generate,
+video_generate, tts`). Note `web_fetch` is safe and **`web_search` is not** — they look
+interchangeable and are not. An MCP tool id or glob can never be in that list, and MCP
+servers are GLOBAL in 2026.8.2 (`canonicalizeConfiguredMcpServer`,
+`dist/mcp-config-normalize-*.js`, accepts only `transport`/`type`, `cwd`,
+`supportsParallelToolCalls`, `sslVerify`, `clientCert`, `clientKey` and a `codex` block
+holding just `defaultToolsApprovalMode`; the schema calls them *"Global MCP server
+definitions"*, and there is no `agents.entries.<id>.mcp`) — so **you cannot expose an MCP
+server to a subset of agents at all.** Deny it per-agent and you pay the whole native
+surface; the only choices are "everyone sees it" or "nobody does".
+**Incident 2026-09-10:** the 2026.8.2 cutover turned hydra's long-standing
+`tools.deny: ["sentry__*"]` (Sentry MCP registered globally, denied to every agent but
+cto/qa) into exactly this. Scout lost web search mid-task and told a user its "web research
+provider is disabled/unavailable"; five other agents were silently downgraded with nothing
+in the journal naming the cause. Fixed by deleting the denies (Sentry tools are read-heavy;
+the only mutator is `sentry__update_issue`) and gating it in
+`validate-config-matrix.sh` **check #8**, which also carries the two deliberate exceptions
+(`openclaw-edge.json:support:exec` — Caroline must not have a shell, and the extra
+`shell_tool`/`unified_exec` loss is defense in depth; `openclaw-main.json:operations:web_search`).
+**Do NOT "fix" this by setting `tools.web.search.provider`** — that kills native for every
+codex agent fleet-wide (the #695 trap above), including the ones that still work.
+`UPGRADE-2026.8.1.md` Gate N looked straight at this interaction and closed it on "the
+refusal disappears" — true, and the wrong assertion: declaring `"exact"` replaces a LOUD
+refusal with a SILENT capability downgrade. **Re-verify the 16-name list on every
+openclaw/codex bump.**
+
 **Codex refuses competitive-intel / scraping prompts (cyber-safety classifier).**
 `codex/gpt-5.5` returns a refusal flagged for "possible cybersecurity risk" on
 B2B-intel / company-scraping / competitor-list tasks; openclaw can't read the
