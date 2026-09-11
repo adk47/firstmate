@@ -210,26 +210,74 @@ PYEOF
   fi
 
   local prompt="Use web_search to find the official homepage URL of MusicBrainz. You MUST call the web_search tool. Reply with exactly: SEARCH_STATUS: <ok|error and the error text>"
-  local attempt result verdict detail
+
+  # DUAL PROBE (item i, 2026-09-11). The GLOBAL availability verdict comes from a
+  # DENY-FREE reference agent and stays a hard FAIL. scout is still probed, but a
+  # scout-ONLY failure degrades to WARN naming the policy that caused it.
+  #
+  # WHY: this check hardcoded `--agent scout`, and scout carries a `tools.deny`
+  # that on openclaw >= 2026.8 marks its codex harness restricted and disables
+  # its native tool surface INCLUDING web search (validate-config-matrix.sh
+  # check #8 is the authority for that rule). On 2026-09-11 that made Step 7
+  # hard-fail on a PER-AGENT policy while `qa` (deny-free) had a confirmed
+  # web_search_end at 14:44Z, after the cutover — blocking every deploy, and with
+  # it the token-refresh timer, on a restriction that was not a global outage.
+  #
+  # The rollout-event standard is UNCHANGED for both agents: a pass still
+  # requires a real web_search_end. Reply text is never evidence.
+  local reference restriction ref_verdict ref_detail scout_verdict scout_detail result attempt
+  reference="$(websearch_reference_agent "$profile")"
+
+  if [[ -z "$reference" ]]; then
+    # FAIL CLOSED. With no unrestricted agent there is no reference, so a scout
+    # failure cannot be attributed to a policy and keeps its original hard-fail
+    # semantics rather than being downgraded on an assumption.
+    log "  $label: no deny-free reference agent — scout-only probe (fail-closed)"
+    for attempt in 1 2; do
+      result="$(websearch_probe_attempt "$profile" "$prompt" scout)"
+      scout_verdict="$(echo "$result" | sed -n 's/^VERDICT=//p')"
+      scout_detail="$(echo "$result" | sed -n 's/^DETAIL=//p')"
+      case "$scout_verdict" in
+        fail) fail_check "$label: web_search BROKEN (${scout_detail}) — and no deny-free agent exists to prove otherwise"; return ;;
+        pass) pass_check "$label: web_search ok (${scout_detail})"; return ;;
+      esac
+    done
+    warn_check "$label: web_search probe inconclusive (${scout_detail}) — not treating as a break"
+    return
+  fi
+
   for attempt in 1 2; do
-    result="$(websearch_probe_attempt "$profile" "$prompt")"
-    verdict="$(echo "$result" | sed -n 's/^VERDICT=//p')"
-    detail="$(echo "$result" | sed -n 's/^DETAIL=//p')"
-    case "$verdict" in
-      fail)
-        fail_check "$label: web_search BROKEN (${detail}) — managed-provider misconfig or codex hosted-search failure (cf. #695/#701)"
-        return
-        ;;
-      pass)
-        pass_check "$label: web_search ok (${detail})"
-        return
-        ;;
-    esac
-    if [[ "$attempt" -eq 1 ]]; then
-      log "  $label: web_search probe inconclusive on attempt 1 (${detail}), retrying once..."
-    fi
+    result="$(websearch_probe_attempt "$profile" "$prompt" "$reference")"
+    ref_verdict="$(echo "$result" | sed -n 's/^VERDICT=//p')"
+    ref_detail="$(echo "$result" | sed -n 's/^DETAIL=//p')"
+    [[ "$ref_verdict" != "inconclusive" ]] && break
+    [[ "$attempt" -eq 1 ]] && log "  $label: reference probe (${reference}) inconclusive, retrying once..."
   done
-  warn_check "$label: web_search probe inconclusive (${detail}) — not treating as a break"
+
+  if [[ "$ref_verdict" == "fail" ]]; then
+    fail_check "$label: web_search BROKEN GLOBALLY (${ref_detail}) — confirmed on deny-free agent '${reference}', so this is not a per-agent policy restriction"
+    return
+  fi
+
+  result="$(websearch_probe_attempt "$profile" "$prompt" scout)"
+  scout_verdict="$(echo "$result" | sed -n 's/^VERDICT=//p')"
+  scout_detail="$(echo "$result" | sed -n 's/^DETAIL=//p')"
+  restriction="$(websearch_agent_restriction "$profile" scout)"
+
+  case "$(websearch_scoped_verdict "$ref_verdict" "$scout_verdict" "$restriction")" in
+    fail)
+      fail_check "$label: web_search BROKEN for scout (${scout_detail}) and NO tool policy explains it — not attributable to a restriction"
+      ;;
+    warn)
+      warn_check "$label: web_search is RESTRICTED for agent 'scout' by ${restriction} — deny-free agent '${reference}' searches fine, so this is a per-agent policy, not an outage. Deploy proceeds with the restriction visible. See validate-config-matrix.sh check #8."
+      ;;
+    pass)
+      pass_check "$label: web_search ok (${ref_detail}, via deny-free agent '${reference}')"
+      ;;
+    *)
+      warn_check "$label: web_search probe inconclusive (ref='${ref_detail}', scout='${scout_detail}') — not treating as a break"
+      ;;
+  esac
 }
 
 # -------------------------------------------------------------------

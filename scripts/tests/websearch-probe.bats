@@ -145,3 +145,231 @@ STUB
   [ "$status" -eq 0 ]
   [ "$output" = "1" ]
 }
+
+# ──────────────────────────────────────────────────────────────
+# Deny-aware scoping (item i, 2026-09-11). The GLOBAL verdict comes from a
+# deny-free reference agent and stays a hard FAIL; a scout-ONLY failure
+# degrades to WARN naming the policy. The rollout-event standard is unchanged:
+# a pass still requires a real web_search_end, never reply text.
+# ──────────────────────────────────────────────────────────────
+
+mk_cfg() {
+  export WEBSEARCH_PROBE_CONFIG="$TEST_TMPDIR/cfg.json"
+  printf '%s\n' "$1" > "$WEBSEARCH_PROBE_CONFIG"
+}
+
+@test "reference agent: prefers qa when it is deny-free" {
+  mk_cfg '{"agents":{"list":[{"id":"scout","tools":{"deny":["sentry__*"]}},{"id":"qa"},{"id":"cto"}]}}'
+  [ "$(websearch_reference_agent main)" = "qa" ]
+}
+
+@test "reference agent: falls back to cto when qa is restricted" {
+  mk_cfg '{"agents":{"list":[{"id":"qa","tools":{"deny":["sentry__*"]}},{"id":"cto"}]}}'
+  [ "$(websearch_reference_agent main)" = "cto" ]
+}
+
+@test "reference agent: falls back to ANY deny-free agent when qa and cto are both restricted" {
+  mk_cfg '{"agents":{"list":[{"id":"qa","tools":{"deny":["sentry__*"]}},{"id":"cto","tools":{"deny":["sentry__*"]}},{"id":"ceo"}]}}'
+  [ "$(websearch_reference_agent main)" = "ceo" ]
+}
+
+@test "reference agent: EMPTY when every agent is restricted (caller must fail closed)" {
+  mk_cfg '{"agents":{"list":[{"id":"qa","tools":{"deny":["sentry__*"]}},{"id":"cto","tools":{"deny":["sentry__*"]}}]}}'
+  [ -z "$(websearch_reference_agent main)" ]
+}
+
+@test "reference agent: a SAFE deny does not disqualify an agent" {
+  mk_cfg '{"agents":{"list":[{"id":"qa","tools":{"deny":["web_fetch"]}},{"id":"cto"}]}}'
+  [ "$(websearch_reference_agent main)" = "qa" ]
+}
+
+@test "restriction: names the agent policy path that causes it" {
+  mk_cfg '{"agents":{"list":[{"id":"scout","tools":{"deny":["sentry__*"]}}]}}'
+  run websearch_agent_restriction main scout
+  [[ "$output" == *"agents.list[id=scout].tools.deny"* ]]
+  [[ "$output" == *"sentry__*"* ]]
+}
+
+@test "restriction: sees a byProvider deny too" {
+  mk_cfg '{"agents":{"list":[{"id":"scout","tools":{"byProvider":{"openai":{"deny":["sentry__*"]}}}}]}}'
+  run websearch_agent_restriction main scout
+  [[ "$output" == *"byProvider.openai"* ]]
+}
+
+@test "restriction: empty for a deny-free agent" {
+  mk_cfg '{"agents":{"list":[{"id":"scout"}]}}'
+  [ -z "$(websearch_agent_restriction main scout)" ]
+}
+
+@test "restriction: a narrowing allow counts" {
+  mk_cfg '{"agents":{"list":[{"id":"scout","tools":{"allow":["exec"]}}]}}'
+  run websearch_agent_restriction main scout
+  [[ "$output" == *".allow"* ]]
+}
+
+@test "the rollout-event standard is unchanged: reply text alone is never a pass" {
+  # Guards the one thing item i must NOT relax.
+  [ "$(_websearch_probe_verdict 'SEARCH_STATUS: ok' 0)" = "inconclusive" ]
+  [ "$(_websearch_probe_verdict 'SEARCH_STATUS: ok' 1)" = "pass" ]
+}
+
+@test "the probe targets the agent it is given, not a hardcoded scout" {
+  # setup() exports WEBSEARCH_PROBE_ROLLOUT_GLOB, which deliberately overrides the
+  # per-agent path; unset it to assert the DEFAULT construction.
+  unset WEBSEARCH_PROBE_ROLLOUT_GLOB
+  run _websearch_rollout_glob main qa
+  [[ "$output" == *"/agents/qa/agent/codex-home/"* ]]
+  run _websearch_rollout_glob main scout
+  [[ "$output" == *"/agents/scout/agent/codex-home/"* ]]
+}
+
+@test "restriction: sees a toolsBySender deny (holder parity with check #8)" {
+  # A detector that knows fewer holders than the gate reports "no policy explains
+  # it" for a real restriction, which turns an attributable WARN back into a
+  # false hard FAIL — the exact failure this change exists to remove.
+  mk_cfg '{"agents":{"list":[{"id":"scout","tools":{"toolsBySender":{"*":{"deny":["sentry__*"]}}}}]}}'
+  run websearch_agent_restriction main scout
+  [[ "$output" == *"toolsBySender"* ]]
+  [[ "$output" == *"agents.list[id=scout]"* ]]
+}
+
+@test "restriction: sees a GLOBAL tools deny that reaches every agent" {
+  mk_cfg '{"tools":{"deny":["sentry__*"]},"agents":{"list":[{"id":"scout"}]}}'
+  run websearch_agent_restriction main scout
+  [[ "$output" == *"tools.deny"* ]]
+}
+
+@test "restriction: sees an agents.defaults deny" {
+  mk_cfg '{"agents":{"defaults":{"tools":{"deny":["sentry__*"]}},"list":[{"id":"scout"}]}}'
+  run websearch_agent_restriction main scout
+  [[ "$output" == *"agents.defaults.tools.deny"* ]]
+}
+
+@test "restriction: does NOT claim ANOTHER agent's policy" {
+  # Misattributing qa's deny to scout would name the wrong cause in the WARN.
+  mk_cfg '{"agents":{"list":[{"id":"qa","tools":{"deny":["sentry__*"]}},{"id":"scout"}]}}'
+  [ -z "$(websearch_agent_restriction main scout)" ]
+}
+
+@test "restriction: does NOT claim a channel-group policy (not statically attributable)" {
+  # Group policies are session-scoped — they depend on which group the turn
+  # arrives in. Claiming one would be a guess; unattributed means the caller
+  # fails closed, which is the safe direction.
+  mk_cfg '{"agents":{"list":[{"id":"scout"}]},"channels":{"slack":{"accounts":{"main":{"groups":{"G1":{"tools":{"deny":["sentry__*"]}}}}}}}}'
+  [ -z "$(websearch_agent_restriction main scout)" ]
+}
+
+# ──────────────────────────────────────────────────────────────
+# EXHAUSTIVE (ref, scout, restriction) MATRIX — every cell asserted.
+#
+# QA #933 round 2 found (inconclusive, fail, restriction) returning WARN: Step 7
+# would let a deploy proceed with NO deny-free agent having produced any
+# web_search_end evidence. It was the one combination the earlier ad-hoc cases
+# did not cover. Enumerating the whole space is the fix for the CLASS — a cell
+# cannot be missed if every cell is named.
+#
+# ref: pass | fail | inconclusive | "" (no deny-free agent exists)
+# scout: pass | fail | inconclusive
+# restriction: "" (none attributable) | named
+#
+# RULES: a failed deny-free reference is a global outage (fail, always). WARN
+# requires ref == pass — POSITIVE evidence — AND a named restriction. Every other
+# broken-scout cell fails closed. With scout not broken, only a passing reference
+# yields pass; anything else is inconclusive.
+# ──────────────────────────────────────────────────────────────
+
+assert_verdict() { # <ref> <scout> <restriction> <expected>
+  local got; got="$(websearch_scoped_verdict "$1" "$2" "$3")"
+  if [ "$got" != "$4" ]; then
+    echo "($1, $2, '$3') => $got, expected $4" >&2
+    return 1
+  fi
+}
+
+@test "matrix: ref=fail is a global outage in EVERY cell" {
+  for sc in pass fail inconclusive; do
+    assert_verdict fail "$sc" ""      fail
+    assert_verdict fail "$sc" "named" fail
+  done
+}
+
+@test "matrix: ref=pass, scout=fail — WARN only with a named restriction" {
+  assert_verdict pass fail "named" warn
+  assert_verdict pass fail ""      fail
+}
+
+@test "matrix: ref=pass, scout not broken => pass" {
+  for sc in pass inconclusive; do
+    assert_verdict pass "$sc" ""      pass
+    assert_verdict pass "$sc" "named" pass
+  done
+}
+
+@test "matrix: ref=inconclusive NEVER yields WARN (QA #933 round 2)" {
+  # The reported hole. An unproven reference is not evidence the fleet is fine,
+  # so a broken scout must not be downgraded on it however well-named the policy.
+  assert_verdict inconclusive fail "named" fail
+  assert_verdict inconclusive fail ""      fail
+}
+
+@test "matrix: ref=inconclusive, scout not broken => inconclusive" {
+  for sc in pass inconclusive; do
+    assert_verdict inconclusive "$sc" ""      inconclusive
+    assert_verdict inconclusive "$sc" "named" inconclusive
+  done
+}
+
+@test "matrix: no reference agent at all NEVER yields WARN" {
+  assert_verdict "" fail "named" fail
+  assert_verdict "" fail ""      fail
+}
+
+@test "matrix: no reference agent, scout not broken => inconclusive" {
+  for sc in pass inconclusive; do
+    assert_verdict "" "$sc" ""      inconclusive
+    assert_verdict "" "$sc" "named" inconclusive
+  done
+}
+
+@test "matrix: WARN is reachable from EXACTLY ONE of the 24 cells" {
+  # Guards against a future loosening that quietly widens the deploy-proceeds
+  # path: count every cell and assert exactly one warn.
+  local warns=0 total=0 v
+  for r in pass fail inconclusive ""; do
+    for sc in pass fail inconclusive; do
+      for rest in "" "named"; do
+        v="$(websearch_scoped_verdict "$r" "$sc" "$rest")"
+        total=$((total + 1))
+        [ "$v" = "warn" ] && warns=$((warns + 1))
+      done
+    done
+  done
+  [ "$total" -eq 24 ]
+  [ "$warns" -eq 1 ]
+}
+
+@test "defaults: a restrictive agents.defaults is SHADOWED by an agent-level tools:{} (QA #933 r3)" {
+  # openclaw resolves agent keys with NULLISH coalescing:
+  #   resolveAgentConfig(cfg, agentId)?.tools ?? cfg.agents.defaults.tools
+  # so a PRESENT but deny-free agent tools:{} shadows a restrictive default.
+  # Treating defaults as unconditional would reject qa as a reference and turn a
+  # per-agent restriction into a hard deploy block.
+  mk_cfg '{"agents":{"defaults":{"tools":{"deny":["sentry__*"]}},"list":[{"id":"qa","tools":{}},{"id":"scout"}]}}'
+  [ -z "$(websearch_agent_restriction main qa)" ]
+  [ "$(websearch_reference_agent main)" = "qa" ]
+}
+
+@test "defaults: the INVERSE — no agent-level tools means defaults DO apply" {
+  mk_cfg '{"agents":{"defaults":{"tools":{"deny":["sentry__*"]}},"list":[{"id":"qa"},{"id":"scout"}]}}'
+  run websearch_agent_restriction main qa
+  [[ "$output" == *"agents.defaults.tools.deny"* ]]
+  [ -z "$(websearch_reference_agent main)" ]
+}
+
+@test "defaults: an agent-level tools with its OWN unsafe deny is still restricted" {
+  # Shadowing the default must not make a genuinely restrictive agent look clean.
+  mk_cfg '{"agents":{"defaults":{"tools":{}},"list":[{"id":"qa","tools":{"deny":["sentry__*"]}},{"id":"cto"}]}}'
+  run websearch_agent_restriction main qa
+  [[ "$output" == *"sentry__*"* ]]
+  [ "$(websearch_reference_agent main)" = "cto" ]
+}

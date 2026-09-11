@@ -37,8 +37,8 @@
 # bats can point this at a throwaway fixture dir instead of the real
 # /root/.openclaw-<profile> store on node-8.
 _websearch_rollout_glob() {
-  local profile="$1"
-  echo "${WEBSEARCH_PROBE_ROLLOUT_GLOB:-/root/.openclaw-${profile}/agents/scout/agent/codex-home/sessions/*/*/*/rollout-*.jsonl}"
+  local profile="$1" agent="${2:-scout}"
+  echo "${WEBSEARCH_PROBE_ROLLOUT_GLOB:-/root/.openclaw-${profile}/agents/${agent}/agent/codex-home/sessions/*/*/*/rollout-*.jsonl}"
 }
 
 # _websearch_newest_rollout <glob> — path of the most-recently-modified file
@@ -74,9 +74,9 @@ _websearch_rollout_hits() {
 # "model replied without actually calling the tool" case FINDING 2 (PR #704
 # QA review) exists to catch.
 _websearch_real_call_ran() {
-  local profile="$1" baseline_path="$2" baseline_hits="$3"
+  local profile="$1" agent="$2" baseline_path="$3" baseline_hits="$4"
   local glob after_path after_hits
-  glob="$(_websearch_rollout_glob "$profile")"
+  glob="$(_websearch_rollout_glob "$profile" "$agent")"
   after_path="$(_websearch_newest_rollout "$glob")"
   after_hits="$(_websearch_rollout_hits "$after_path")"
   if [ "$after_path" != "$baseline_path" ]; then
@@ -131,19 +131,19 @@ _websearch_probe_verdict() {
 # WITHOUT clobbering the captured output on a nonzero exit (FINDING 1), then
 # classifies via _websearch_probe_verdict.
 websearch_probe_attempt() {
-  local profile="$1" prompt="$2"
+  local profile="$1" prompt="$2" agent="${3:-scout}"
   local glob baseline_path baseline_hits response rc real_ran verdict detail
-  glob="$(_websearch_rollout_glob "$profile")"
+  glob="$(_websearch_rollout_glob "$profile" "$agent")"
   baseline_path="$(_websearch_newest_rollout "$glob")"
   baseline_hits="$(_websearch_rollout_hits "$baseline_path")"
 
-  if response=$(timeout 150 openclaw --profile "$profile" agent --agent scout --json --message "$prompt" 2>&1); then
+  if response=$(timeout 150 openclaw --profile "$profile" agent --agent "$agent" --json --message "$prompt" 2>&1); then
     rc=0
   else
     rc=$?
   fi
 
-  real_ran="$(_websearch_real_call_ran "$profile" "$baseline_path" "$baseline_hits")"
+  real_ran="$(_websearch_real_call_ran "$profile" "$agent" "$baseline_path" "$baseline_hits")"
   verdict="$(_websearch_probe_verdict "$response" "$real_ran")"
 
   case "$verdict" in
@@ -151,7 +151,7 @@ websearch_probe_attempt() {
       detail="$(echo "$response" | grep -ioE 'Reconnecting[^"]*|disabled or no provider is available|provider reconnection failed' | head -1)"
       ;;
     pass)
-      detail="confirmed via scout rollout web_search_end event"
+      detail="confirmed via ${agent} rollout web_search_end event"
       ;;
     *)
       detail="rc=${rc}, no confirmed tool call (agent may not have searched, or timed out)"
@@ -160,4 +160,172 @@ websearch_probe_attempt() {
 
   echo "VERDICT=${verdict}"
   echo "DETAIL=${detail}"
+}
+
+# ──────────────────────────────────────────────────────────────
+# Deny-aware scoping (item i, 2026-09-11)
+#
+# WHY: the Step-7 probe hardcoded `--agent scout`, and scout carries
+# `tools.deny: ["sentry__*"]`. On openclaw >= 2026.8 ANY deny outside the
+# closed CODEX_TOOL_POLICY_SAFE_DENY_NAMES list (or a narrowing `allow`)
+# marks that agent's codex harness restricted, which disables its native
+# tool surface INCLUDING web search — see validate-config-matrix.sh check
+# #8, which is the authority for that rule, and
+# docs/lessons/openclaw-and-codex.md. So a scout-only failure proves the
+# AGENT is restricted, not that web_search is down fleet-wide. On
+# 2026-09-11 that distinction blocked every deploy: Step 7 hard-failed on a
+# per-agent policy while `qa` (deny-free) still had a confirmed
+# web_search_end at 14:44Z, after the cutover.
+#
+# So: the GLOBAL availability verdict comes from a DENY-FREE reference
+# agent and stays a hard FAIL. The scout probe is kept, but a scout-only
+# failure degrades to WARN that names the agent and the exact policy path.
+#
+# The rollout-event standard is UNCHANGED: a pass still requires a real
+# `web_search_end` event. Reply text is never evidence, for either agent.
+# ──────────────────────────────────────────────────────────────
+
+# Mirrors CODEX_TOOL_POLICY_SAFE_DENY_NAMES from @openclaw/codex. Denying one
+# of these does NOT restrict the harness. validate-config-matrix.sh check #8
+# is the authority; re-verify both on every openclaw/codex bump.
+WEBSEARCH_SAFE_DENY_NAMES="web_fetch x_search memory_search memory_get dashboard canvas show_widget message heartbeat_respond automations gateway skill_workshop image_generate music_generate video_generate tts"
+
+# _websearch_config_path <profile> — the profile config to read policies from.
+# Env-overridable so bats can point at a fixture.
+_websearch_config_path() {
+  echo "${WEBSEARCH_PROBE_CONFIG:-/opt/hydra/openclaw-$1.json}"
+}
+
+# websearch_agent_restriction <profile> <agent> — echoes a human-readable
+# "<policy path> = <json>" when that agent's tool policy restricts the codex
+# harness, or empty when it does not. Reads the same policy holders check #8
+# does: the agent's own tools, agents.defaults, global, and any byProvider
+# sub-policy of those. Empty output means "not restricted (or unreadable)" —
+# callers must treat unreadable as non-attributing, never as proof.
+websearch_agent_restriction() {
+  local profile="$1" agent="$2" cfg
+  cfg="$(_websearch_config_path "$profile")"
+  [ -r "$cfg" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  # Same GENERIC WALK as validate-config-matrix.sh check #8 (PR #929): find every
+  # object carrying a deny/allow array whose JSON path contains a `tools`
+  # segment, rather than enumerating known keys. Enumerating is what let
+  # `byProvider`, then `toolsBySender`, then channel-group `tools` each slip
+  # through check #8 in turn; a detector that knows fewer holders than the gate
+  # would report "no policy explains it" for a real restriction and turn an
+  # attributable WARN back into a false hard FAIL — the exact failure this whole
+  # change exists to remove.
+  #
+  # ATTRIBUTION BOUNDARY, deliberately narrower than the gate: only policies that
+  # provably apply to THIS agent — global `tools`, `agents.defaults.tools`, and
+  # the agent's own subtree. Channel-group policies are session-scoped (they
+  # depend on which group the turn arrives in) and cannot be pinned to an agent
+  # statically, so they are NOT claimed here. A restriction we cannot attribute
+  # stays unattributed, and the caller fails closed on it.
+  jq -r --arg a "$agent" --arg safe "$WEBSEARCH_SAFE_DENY_NAMES" '
+    ($safe | split(" ")) as $safe
+    | . as $root
+    # The tools value the agent itself carries, read exactly as openclaw reads
+    # it before falling back to defaults. null/absent => defaults apply.
+    | ( if ($root.agents.entries | type) == "object"
+        then ($root.agents.entries[$a].tools // null)
+        else ([ ($root.agents.list // [])[] | select(.id == $a) | .tools ] | first // null) end
+      ) as $agentOwnTools
+    | [ paths(type == "object" and ((.deny | type) == "array" or (.allow | type) == "array")) ]
+    | map(select(any(.[]; . == "tools")))
+    | map(select(
+        (.[0] == "tools")
+        # agents.defaults.tools applies ONLY when the agent has no tools of its
+        # own. openclaw resolves it with NULLISH coalescing:
+        #   resolveAgentConfig(cfg, agentId)?.tools ?? cfg.agents.defaults.tools
+        # so an agent-level tools:{} (deny-free but PRESENT) shadows a
+        # restrictive default entirely. Treating defaults as unconditional would
+        # reject a deny-free agent as the reference and turn a per-agent
+        # restriction into a hard deploy block (QA #933 round 3).
+        or ((.[0] == "agents" and .[1] == "defaults") and ($agentOwnTools == null))
+        or (.[0] == "agents" and .[1] == "list"
+            and (($root.agents.list[.[2]].id // "") == $a))
+        or (.[0] == "agents" and .[1] == "entries" and .[2] == $a)))
+    | map({ p: (. as $pp
+                | if ($pp[0] == "agents" and $pp[1] == "list")
+                  then "agents.list[id=" + $a + "]." + ($pp[3:] | join("."))
+                  else ($pp | join(".")) end),
+            t: (. as $pp | $root | getpath($pp)) })
+    | .[]
+    | .p as $p | .t as $t
+    | ( ( ($t.deny // []) | map(select(. as $d | ($safe | index($d)) == null))
+          | select(length > 0) | ($p + ".deny = " + tostring) ),
+        ( ($t.allow // []) | select(length > 0 and (index("*") == null))
+          | ($p + ".allow = " + tostring) ) )
+  ' "$cfg" 2>/dev/null | head -1
+}
+
+# websearch_reference_agent <profile> [preferred...] — echoes the first
+# DENY-FREE agent to use for the global availability verdict. Prefers the
+# names passed (default: qa then cto), then any other deny-free agent, so the
+# probe keeps working if the roster changes. Echoes empty when EVERY agent is
+# restricted — callers must fail closed there, because with no unrestricted
+# reference a failure cannot be attributed to a policy.
+websearch_reference_agent() {
+  local profile="$1"; shift
+  local preferred=("$@") cfg candidates=() a
+  [ ${#preferred[@]} -eq 0 ] && preferred=(qa cto)
+  cfg="$(_websearch_config_path "$profile")"
+  [ -r "$cfg" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  # shellcheck disable=SC2207
+  candidates=($(jq -r '
+    if (.agents.entries | type) == "object" then (.agents.entries | keys[])
+    else ((.agents.list // [])[] | .id) end' "$cfg" 2>/dev/null))
+  for a in "${preferred[@]}"; do
+    for c in "${candidates[@]}"; do
+      if [ "$a" = "$c" ] && [ -z "$(websearch_agent_restriction "$profile" "$a")" ]; then
+        echo "$a"; return 0
+      fi
+    done
+  done
+  for c in "${candidates[@]}"; do
+    if [ -z "$(websearch_agent_restriction "$profile" "$c")" ]; then
+      echo "$c"; return 0
+    fi
+  done
+  return 0
+}
+
+# websearch_scoped_verdict <reference_verdict> <scout_verdict> <restriction>
+# — combines the two probe verdicts into the Step-7 outcome. Echoes one of:
+#   fail  — global break (the reference agent, which is deny-free, is broken),
+#           or scout is broken with NO usable reference (fail closed: we
+#           cannot attribute it, so we must not downgrade it)
+#   warn  — scout broken but the deny-free reference works => per-agent
+#           restriction, named, deploy proceeds with it visible
+#   pass  — reference confirmed a real web_search_end
+#   inconclusive — nothing proven either way; caller retries then warns
+websearch_scoped_verdict() {
+  local ref="$1" scout="$2" restriction="$3"
+
+  # A deny-free reference that FAILED is a real global outage. Hard fail first,
+  # before anything else can soften it.
+  if [ "$ref" = "fail" ]; then echo fail; return; fi
+
+  if [ "$scout" = "fail" ]; then
+    # WARN requires ref == "pass" — POSITIVE evidence, not merely "not failed".
+    # The contract is "a deny-free agent searches fine, so this is a per-agent
+    # policy"; only a pass carries that, because a pass is the one verdict backed
+    # by a real web_search_end event in the reference agent's rollout.
+    #
+    # QA #933: an earlier version accepted any non-fail ref here, so
+    # (inconclusive, fail, restriction) returned WARN — Step 7 would let a deploy
+    # proceed with NO deny-free agent having produced search evidence at all.
+    # That is the same fail-closed rule this function already applies to a missing
+    # reference and to an unattributed scout failure, just one combination further
+    # out, and it was the one cell not covered.
+    if [ "$ref" = "pass" ] && [ -n "$restriction" ]; then echo warn; return; fi
+    # Everything else with a broken scout fails closed: no reference at all, a
+    # reference that never proved itself, or a failure no policy explains.
+    echo fail; return
+  fi
+
+  if [ "$ref" = "pass" ]; then echo pass; return; fi
+  echo inconclusive
 }
