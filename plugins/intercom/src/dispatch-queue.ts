@@ -14,6 +14,11 @@
  * memory-only (a restart drops queued-not-yet-dispatched items; messages
  * persist in Intercom and the next customer ping re-triggers a webhook —
  * the dispatch-timeout page and stuck-lane watchdog cover true silence).
+ *
+ * The drain is launched fire-and-forget, so on openclaw >= 2026.8 it MUST be
+ * started on its own admitted gateway work root — see `deps.detach`. Without
+ * that, the drain inherits the webhook request's root-work admission, outlives
+ * it, and every dispatch is refused as if the gateway were draining.
  */
 
 export interface DispatchQueueDeps<T> {
@@ -27,6 +32,22 @@ export interface DispatchQueueDeps<T> {
    */
   runBatch: (key: string, batch: T[]) => Promise<void>;
   onError?: (key: string, err: unknown) => void;
+  /**
+   * Runs the detached drain on its OWN admitted gateway work root.
+   *
+   * openclaw >= 2026.8 refuses queue work whose async context carries an
+   * already-RELEASED root-work admission: `isGatewaySubordinateWorkAdmissionClosed()`
+   * returns `current.released`, surfacing as `GatewayDrainingError: Gateway is
+   * draining; new tasks are not accepted` while nothing is actually draining.
+   * The drain below is fire-and-forget, so it inherits — and outlives — the
+   * webhook request's admission; without this wrapper EVERY coalesced dispatch
+   * fails (incident 2026-09-10: Caroline silent ~6h45m, 41 dropped messages).
+   *
+   * MUST be invoked synchronously from `enqueue()`, while the request still
+   * holds its admission. Omitted on runtimes with no admission model
+   * (<= 2026.7.x), where calling `drain` directly is correct.
+   */
+  detach?: <R>(run: () => Promise<R>) => Promise<R>;
 }
 
 interface KeyState<T> {
@@ -62,7 +83,26 @@ export class DispatchQueue<T> {
     state.pending.push(item);
     if (state.running) return "queued";
     state.running = true;
-    void this.drain(key, state);
+    // Synchronous by construction: `detach` is CALLED here, inside enqueue,
+    // while the webhook request still holds its admission. Awaiting anything
+    // before this point would release it and reintroduce the drain error.
+    const detach = this.deps.detach;
+    const started = detach
+      ? detach(() => this.drain(key, state))
+      : this.drain(key, state);
+    // drain() never rejects (it routes runBatch failures to onError), but
+    // `detach` CAN: it reserves an admission and throws when the gateway really
+    // is draining/restarting. Without this catch that rejection is unhandled
+    // AND `running` stays true forever — wedging this conversation's queue for
+    // the life of the process, which is the exact silent-stall shape the
+    // dispatch-timeout page exists to avoid. Release the key instead and report.
+    void started.catch((err) => {
+      state.running = false;
+      if (this.keys.get(key) === state && state.pending.length === 0) {
+        this.keys.delete(key);
+      }
+      this.deps.onError?.(key, err);
+    });
     return "started";
   }
 

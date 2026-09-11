@@ -313,3 +313,129 @@ describe("burst coalescing through the channel helpers", () => {
     expect(order).toEqual(["A-image", "B-text"]); // send order preserved, not reversed
   });
 });
+
+describe("DispatchQueue detached work root (openclaw >= 2026.8 admission model)", () => {
+  it("calls detach SYNCHRONOUSLY inside enqueue, while the request is still admitted", () => {
+    // THE property that fixes the outage. openclaw >= 2026.8 refuses queue work
+    // whose async context carries an already-released root-work admission, so the
+    // independent root must be reserved while the webhook request still holds
+    // its own. Reserve it one await later and the admission is already gone —
+    // which is exactly how every Intercom message failed on 2026-09-10.
+    let calledSynchronously = false;
+    const q = new DispatchQueue<string>({
+      runBatch: async () => {
+        await new Promise<void>(() => {}); // never resolves: batch stays in flight
+      },
+      detach: (run) => {
+        calledSynchronously = true;
+        return run();
+      },
+    });
+
+    q.enqueue("conv-1", "x");
+    // No await: detach must already have been invoked.
+    expect(calledSynchronously).toBe(true);
+  });
+
+  it("runs the batch INSIDE the detach wrapper", async () => {
+    const seen: string[] = [];
+    const q = new DispatchQueue<string>({
+      runBatch: async () => {
+        seen.push("batch");
+      },
+      detach: async (run) => {
+        seen.push("enter");
+        const out = await run();
+        seen.push("exit");
+        return out;
+      },
+    });
+
+    q.enqueue("conv-1", "a");
+    await flush();
+
+    expect(seen).toEqual(["enter", "batch", "exit"]);
+  });
+
+  it("reserves ONE root per drain: items riding the in-flight batch do not re-detach", async () => {
+    // Coalescing must still hold. A burst is one drain, so it is one admission —
+    // not one per message.
+    const gate = deferred();
+    const batches: string[][] = [];
+    let detachCalls = 0;
+    const q = new DispatchQueue<string>({
+      runBatch: async (_key, batch) => {
+        batches.push([...batch]);
+        await gate.promise;
+      },
+      detach: (run) => {
+        detachCalls++;
+        return run();
+      },
+    });
+
+    expect(q.enqueue("conv-1", "a")).toBe("started");
+    expect(q.enqueue("conv-1", "b")).toBe("queued");
+    expect(q.enqueue("conv-1", "c")).toBe("queued");
+    expect(detachCalls).toBe(1);
+
+    gate.resolve();
+    await flush();
+
+    // b+c coalesced into the follow-up batch of the SAME drain.
+    expect(batches).toEqual([["a"], ["b", "c"]]);
+    expect(detachCalls).toBe(1);
+  });
+
+  it("without detach, behaves exactly as before (rollback to a runtime with no admission model)", async () => {
+    // scripts/downgrade-openclaw-runtime.sh can put us back on 2026.7.x, where
+    // there is no admission model and no helper to import. Calling drain
+    // directly is the correct behavior there, not a degraded one.
+    const batches: string[][] = [];
+    const q = new DispatchQueue<string>({
+      runBatch: async (_key, batch) => {
+        batches.push([...batch]);
+      },
+    });
+
+    expect(q.enqueue("conv-1", "a")).toBe("started");
+    await flush();
+
+    expect(batches).toEqual([["a"]]);
+    expect(q.size()).toBe(0); // key reclaimed
+  });
+
+  it("a REJECTING detach reports the error and releases the key instead of wedging it", async () => {
+    // detach throws when the gateway genuinely is draining. drain() never
+    // rejects, so without explicit handling this would be an unhandled rejection
+    // AND would strand running=true forever — the conversation would go
+    // permanently silent with no further dispatch ever attempted.
+    const errors: unknown[] = [];
+    let failNext = true;
+    const batches: string[][] = [];
+    const q = new DispatchQueue<string>({
+      runBatch: async (_key, batch) => {
+        batches.push([...batch]);
+      },
+      onError: (_key, err) => errors.push(err),
+      detach: (run) => {
+        if (failNext) return Promise.reject(new Error("gateway is draining"));
+        return run();
+      },
+    });
+
+    q.enqueue("conv-1", "a");
+    await flush();
+
+    expect(errors).toHaveLength(1);
+    expect(String(errors[0])).toContain("draining");
+    expect(batches).toEqual([]); // nothing dispatched
+    expect(q.inFlight("conv-1")).toBe(false); // key RELEASED, not wedged
+
+    // The key still works: a later message starts a fresh drain.
+    failNext = false;
+    expect(q.enqueue("conv-1", "b")).toBe("started");
+    await flush();
+    expect(batches).toEqual([["a", "b"]]); // the stranded item rides the next batch
+  });
+});

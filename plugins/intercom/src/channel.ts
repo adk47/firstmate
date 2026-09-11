@@ -51,6 +51,40 @@ import { DEFAULT_JUDGE_MIN_TURNS, DEFAULT_TURN_HARD_CAP, DEFAULT_JUDGE_MODEL, DE
 import { buildKbRetrieveFn, renderKnowledgeBaseBlock, stripKnowledgeBase } from "./kb-retrieval.js";
 import { DispatchQueue } from "./dispatch-queue.js";
 
+/**
+ * Resolve openclaw's detached-work helper for the coalesced dispatch drain.
+ *
+ * The drain is fire-and-forget, so it inherits the webhook request's root-work
+ * admission and outlives it. On openclaw >= 2026.8 that makes every coalesced
+ * dispatch fail with `GatewayDrainingError: Gateway is draining` while nothing
+ * is draining (incident 2026-09-10; upstream openclaw#107732 is the same shape
+ * for LINE). `runDetachedWebhookWork` reserves an independent root instead, so
+ * the work stays ACCEPTED and a real restart drain still waits for it.
+ *
+ * Loaded dynamically on purpose: `scripts/downgrade-openclaw-runtime.sh` can
+ * put us back on 2026.7.x, which has no admission model and no such subpath. A
+ * static import would throw at plugin load and take Intercom down on rollback —
+ * there, `undefined` is the correct answer and the queue calls drain directly.
+ */
+export type DetachedWorkRootResolution =
+  | { ok: true; detach: <R>(run: () => Promise<R>) => Promise<R> }
+  | { ok: false; detail: string };
+
+export async function loadDetachedWebhookWork(): Promise<DetachedWorkRootResolution> {
+  try {
+    const mod = await import("openclaw/plugin-sdk/webhook-request-guards");
+    const fn = (mod as { runDetachedWebhookWork?: unknown })?.runDetachedWebhookWork;
+    if (typeof fn === "function") {
+      return { ok: true, detach: fn as <R>(run: () => Promise<R>) => Promise<R> };
+    }
+    // Resolved but does not export it: an upstream rename/removal, NOT a rollback.
+    return { ok: false, detail: "subpath resolved but exports no runDetachedWebhookWork" };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    return { ok: false, detail: code ? String(code) : String(err) };
+  }
+}
+
 // Module-level session store shared between startAccount (inbound) and sendText (outbound).
 // Keyed by accountId → conversationId → session state.
 // Persisted to disk via state-store.ts; loaded on startup, saved on every state mutation.
@@ -1507,15 +1541,37 @@ export const intercomPlugin = createChatChannelPlugin({
           }
         };
 
-        const coalesceOn = account.coalesceDispatch !== false;
+        const detachResolution = await loadDetachedWebhookWork();
+        // Coalescing REQUIRES an independent work root on openclaw >= 2026.8:
+        // without one the detached drain inherits the webhook's soon-released
+        // admission and EVERY message fails with GatewayDrainingError.
+        //
+        // We cannot tell a supported 2026.7 rollback (helper legitimately
+        // absent) from an unexpected failure on a current runtime (subpath
+        // renamed, module threw while evaluating, broken install). Assuming the
+        // benign case would SILENTLY restore the 2026-09-10 outage, so assume
+        // neither: drop to INLINE dispatch, which has no detached drain to be
+        // refused and is the path prod ran on during recovery. Coalescing is
+        // lost — worse burst behaviour, but it cannot reproduce the outage —
+        // and it is announced, not left to be rediscovered from a silent queue.
+        const coalesceRequested = account.coalesceDispatch !== false;
+        const coalesceOn = coalesceRequested && detachResolution.ok;
+        if (coalesceRequested && !detachResolution.ok) {
+          log?.error?.(
+            `[intercom:ALERT] [${tag}] detached work root UNAVAILABLE (${detachResolution.detail}) — coalescing DISABLED, dispatching inline instead. Expected ONLY on openclaw <= 2026.7.x; on a 2026.8+ runtime this is a real defect — investigate before trusting burst behaviour.`,
+          );
+        }
         const dispatchQueue = new DispatchQueue<QueuedInboundMessage>({
           runBatch: runDispatchBatch,
+          ...(detachResolution.ok ? { detach: detachResolution.detach } : {}),
           onError: (conversationId, err) =>
             log?.error?.(
               `[intercom:ALERT] [${tag}] coalesced dispatch batch failed conv=${conversationId}: ${err}`,
             ),
         });
-        ctx.log?.info?.(`[${tag}] dispatch coalescing=${coalesceOn ? "on" : "off"}`);
+        ctx.log?.info?.(
+          `[${tag}] dispatch coalescing=${coalesceOn ? "on" : "off"} detachedWorkRoot=${detachResolution.ok ? "on" : "unavailable"}`,
+        );
 
         await runPassiveAccountLifecycle({
           abortSignal: ctx.abortSignal,
