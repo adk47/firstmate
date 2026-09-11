@@ -474,16 +474,27 @@ for (const r of db.prepare("select store_key, store_json from auth_profile_store
   console.log("cleared fan-out row: "+process.argv[1]+" ["+r.store_key+"]");
 }' "$db"
 done
-# FULL GATE (both profiles) — edge now has its cell, holding 0 profiles until
-# the Phase 5 device logins. CODEX_EXPECTED_PROFILES_EDGE=0 SKIPS the edge
-# count check (it does not assert "zero"), so this same command stays correct
-# after Phase 5 puts 3 profiles there.
+# FULL GATE (both profiles). Edge holds NO profiles until the Phase 5 device
+# logins — and doctor writes NO authProfiles.store cell at all when it has
+# nothing to import, so expect the row to be ABSENT here, not present-and-empty.
+# (An earlier revision of this block claimed doctor creates the cell. It does
+# not, and the checker's CRITICAL-on-absent-row made this gate impossible to
+# pass on a correctly scrubbed edge — observed 2026-09-10, when the only way
+# past it was to step over the gate by hand. codex-auth-invariants.sh now
+# reports an absent row as INFO when 0 profiles are expected, and keeps it
+# CRITICAL when profiles ARE expected.)
+# CODEX_EXPECTED_PROFILES_EDGE=0 SKIPS the edge count check (it does not assert
+# "zero"), so this same command stays correct after Phase 5 puts 3 profiles
+# there — but see Phase 5: set it to 3 once they land, or edge's count is
+# never checked again.
 /opt/hydra/scripts/lib/codex-auth-invariants.sh --check \
   || { echo "REFUSING to boot edge: codex auth invariants not clean"; exit 1; }
 # EXACTLY-ZERO gate for edge (Option B: edge gets its OWN device logins in
 # Phase 5). The checker above validates SHAPE; CODEX_EXPECTED_PROFILES_EDGE=0
 # means "skip the count", not "assert zero" — so a structurally valid profile
 # that doctor imported from a missed source would pass it. Read the cell.
+# An ABSENT row is expected here and passes (n defaults to 0); this gate exists
+# to catch a row that holds credentials a missed pre-doctor scrub let through.
 node --experimental-sqlite --no-warnings -e '
 const {DatabaseSync}=require("node:sqlite");
 const db=new DatabaseSync("/root/.openclaw-edge/state/openclaw.sqlite",{readOnly:true});
@@ -547,7 +558,12 @@ exits 1 with "requires an interactive TTY". Run it 3 × (one per account;
 Aaron opens the URL in HIS browser, signed into that account, and enters the
 code), then `openclaw --profile edge models auth list` must show 3
 `openai:*` profiles and `codex-auth-invariants.sh --check` must be clean
-with `CODEX_EXPECTED_PROFILES_EDGE=3`. Caroline answers in Intercom;
+with `CODEX_EXPECTED_PROFILES_EDGE=3`.
+**Then change the DEFAULT to 3**, don't just pass it once: the checker ships
+with `CODEX_EXPECTED_PROFILES_EDGE=0`, which SKIPS edge's count check entirely.
+Leave it at 0 after Phase 5 and edge's profile count is never verified again —
+a silently unguarded invariant is how the fan-out this checker exists to catch
+gets back in. Caroline answers in Intercom;
 `hydra-maintenance.sh stop`. Keep the archive ≥ 7
 days; 48h quiet watchdogs before trusting steady state.
 

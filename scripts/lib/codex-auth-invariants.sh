@@ -138,6 +138,25 @@ if (cmd === "read_state") {
     }
     if (r) process.stdout.write(r.state_json);
   } catch (e) { console.error(String(e.message)); process.exit(3); }
+} else if (cmd === "classify_state") {
+  // read_state deliberately collapses db-absent, table-absent and row-absent
+  // into the same empty/exit-0 answer. That is fine for "give me the row", but
+  // it is NOT safe to relax a missing row to INFO on the strength of it: a
+  // state DB that doctor never created would read identically to a correctly
+  // scrubbed edge. Report WHICH absence it is so the caller can tell a
+  // pre-login state from a structurally broken one.
+  if (!fs.existsSync(dbPath)) { process.stdout.write("db_absent"); process.exit(0); }
+  try {
+    const db = new DatabaseSync(dbPath, {readOnly: true});
+    let r;
+    try {
+      r = db.prepare("select value_json from config_machine_state where state_key=?").get(key);
+    } catch (e) {
+      if (/no such table/i.test(String(e.message))) { process.stdout.write("table_absent"); process.exit(0); }
+      throw e;
+    }
+    process.stdout.write(r ? "present" : "row_absent");
+  } catch (e) { console.error(String(e.message)); process.exit(3); }
 } else if (cmd === "read_agent_store") {
   if (!fs.existsSync(dbPath)) process.exit(0);
   try {
@@ -157,10 +176,22 @@ sqlite_helper() { "$NODE_BIN" --experimental-sqlite --no-warnings -e "$NODE_HELP
 
 # ── collectors ────────────────────────────────────────────────────────────
 
+# _expected_profiles_for <profile> — how many profiles this profile SHOULD
+# hold. "0" means "skip the count check" (edge before its Option B device
+# logins), NOT "assert zero". Resolved in one place because the absent-row
+# classification and the count check must never disagree about it.
+_expected_profiles_for() {
+  case "$1" in
+    main) printf '%s' "$CODEX_EXPECTED_PROFILES_MAIN" ;;
+    edge) printf '%s' "$CODEX_EXPECTED_PROFILES_EDGE" ;;
+    *) printf '0' ;;
+  esac
+}
+
 # _check_shared_store <profile> — emits "SEV\tmsg" lines on stdout, one per
 # finding, for the machine-wide authProfiles.store row of one profile.
 _check_shared_store() {
-  local profile="$1" state_dir sqlite rc row expected
+  local profile="$1" state_dir sqlite rc row expected presence presence_rc
   state_dir="$CODEX_AUTH_ROOT/.openclaw-$profile"
   sqlite="$state_dir/state/openclaw.sqlite"
 
@@ -169,6 +200,8 @@ _check_shared_store() {
     return
   fi
 
+  expected="$(_expected_profiles_for "$profile")"
+
   rc=0
   row="$(sqlite_helper read_state "$sqlite" "authProfiles.store")" || rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -176,7 +209,49 @@ _check_shared_store() {
     return
   fi
   if [ -z "$row" ]; then
-    printf 'CRITICAL\tprofile %s: %s has no authProfiles.store row — shared codex auth is MISSING\n' "$profile" "$sqlite"
+    # An ABSENT row is not automatically a violation. `doctor --fix` writes no
+    # authProfiles.store cell at all when it has nothing to import, which is
+    # exactly the designed state for edge between its pre-doctor scrub and its
+    # Option B device logins (UPGRADE-2026.8.1 Phase 4 EDGE: "auth starts empty
+    # by design"). Reporting that as CRITICAL made the runbook's own
+    # "REFUSING to boot edge" gate impossible to pass on a correctly-scrubbed
+    # edge — observed live during the 2026-09-10 cutover.
+    #
+    # Only stay CRITICAL where profiles are genuinely expected: there a missing
+    # store IS the outage. `auth.sharedStore` is identical on both profiles, so
+    # absent-vs-empty carries no functional difference here.
+    #
+    # `read_state` answers empty/exit-0 for THREE different states — row
+    # absent, config_machine_state absent, and the sqlite file absent — so the
+    # relaxation below MUST NOT key off that emptiness alone. A state DB doctor
+    # never created reads exactly like a correctly scrubbed edge, and calling
+    # that INFO would let the Phase 4 gate boot edge with no shared auth
+    # database at all. Classify which absence it is first.
+    presence_rc=0
+    presence="$(sqlite_helper classify_state "$sqlite" "authProfiles.store")" || presence_rc=$?
+    if [ "$presence_rc" -ne 0 ]; then
+      printf 'UNEVALUATED\tprofile %s: %s UNREADABLE while classifying the missing authProfiles.store row\n' "$profile" "$sqlite"
+      return
+    fi
+    case "$presence" in
+      db_absent)
+        printf 'CRITICAL\tprofile %s: %s does not exist — the shared state database was never created (doctor did not run or failed)\n' "$profile" "$sqlite"
+        ;;
+      table_absent)
+        printf 'CRITICAL\tprofile %s: %s has no config_machine_state table — the store is un-migrated, not merely empty\n' "$profile" "$sqlite"
+        ;;
+      row_absent)
+        # ONLY here is absence the designed pre-login state.
+        if [ "$expected" -eq 0 ] 2>/dev/null; then
+          printf 'INFO\tprofile %s: no authProfiles.store row yet, and 0 profiles expected — pre-login state, not a violation\n' "$profile"
+        else
+          printf 'CRITICAL\tprofile %s: %s has no authProfiles.store row — shared codex auth is MISSING\n' "$profile" "$sqlite"
+        fi
+        ;;
+      *)
+        printf 'UNEVALUATED\tprofile %s: could not classify the missing authProfiles.store row in %s (got "%s")\n' "$profile" "$sqlite" "$presence"
+        ;;
+    esac
     return
   fi
   if ! printf '%s' "$row" | jq -e . >/dev/null 2>&1; then
@@ -253,13 +328,8 @@ _check_shared_store() {
       "$profile" "$(printf '%s' "$incomplete" | tr '\n' ' ')"
   fi
 
-  # Expected profile count, per-profile configurable ("0" on edge = skip
-  # until Option B logins land there).
-  case "$profile" in
-    main) expected="$CODEX_EXPECTED_PROFILES_MAIN" ;;
-    edge) expected="$CODEX_EXPECTED_PROFILES_EDGE" ;;
-    *) expected=0 ;;
-  esac
+  # Expected profile count (resolved above by _expected_profiles_for):
+  # "0" = skip this check, e.g. edge until its Option B logins land.
   if [ "$expected" -gt 0 ] 2>/dev/null; then
     local count
     count="$(printf '%s' "$row" | jq -r '(.profiles // {}) | length')"
@@ -368,6 +438,7 @@ main() {
     case "$sev" in
       CRITICAL) viol=1; log "VIOLATION: $msg"; echo "  - [$sev] $msg" ;;
       UNEVALUATED) uneval=1; log "UNEVALUATED: $msg"; echo "  - [$sev] $msg" ;;
+      INFO) log "INFO: $msg"; echo "  - [$sev] $msg" ;;
     esac
   done <<< "$findings"
 

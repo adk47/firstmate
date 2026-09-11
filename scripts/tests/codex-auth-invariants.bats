@@ -428,3 +428,116 @@ db.prepare('insert into config_machine_state values (?,?,?)').run('authProfiles.
   [ "$status" -eq 2 ]
   [[ "$output" == *"UNREADABLE"* ]]
 }
+
+# ── absent row vs. expected count ─────────────────────────────────────────
+# `doctor --fix` writes NO authProfiles.store cell at all when it has nothing
+# to import. That is exactly the designed edge state between the Phase 2
+# pre-doctor scrub and the Phase 5 device logins (UPGRADE-2026.8.1: "EDGE
+# (auth starts empty by design)"). Classifying it CRITICAL made the runbook's
+# own "REFUSING to boot edge: codex auth invariants not clean" gate impossible
+# to pass on a CORRECTLY scrubbed edge — hit live during the 2026-09-10
+# cutover, where the only way forward was to step past the gate by hand.
+
+# _seed_rowless_shared_store <profile> — a real state DB with the right schema
+# and NO authProfiles.store row (what doctor leaves behind with nothing to import).
+_seed_rowless_shared_store() {
+  local profile="$1"
+  local dir="$INV_ROOT/.openclaw-$profile/state"
+  mkdir -p "$dir"
+  rm -f "$dir/openclaw.sqlite"
+  node --experimental-sqlite --no-warnings -e "
+const {DatabaseSync}=require('node:sqlite');
+const db=new DatabaseSync('$dir/openclaw.sqlite');
+db.exec('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT, updated_at_ms INTEGER)');
+"
+}
+
+@test "absent authProfiles.store row is INFO, not CRITICAL, when 0 profiles are expected (edge pre-Phase-5)" {
+  export CODEX_AUTH_PROFILES="main edge"
+  export CODEX_EXPECTED_PROFILES_EDGE=0
+  mkdir -p "$INV_ROOT/.openclaw-edge/agents/support/agent"
+  _seed_rowless_shared_store edge
+
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean"* ]]
+  # The finding is RENDERED, not swallowed: main()'s case drops unknown
+  # severities, so an unwired INFO would vanish silently.
+  [[ "$output" == *"[INFO]"* ]]
+  [[ "$output" == *"0 profiles expected"* ]]
+  [[ "$output" != *"shared codex auth is MISSING"* ]]
+}
+
+@test "absent authProfiles.store row stays CRITICAL when profiles ARE expected" {
+  # The guard must still catch a genuinely missing store — this is the case
+  # that would be a real fleet outage.
+  export CODEX_AUTH_PROFILES="main edge"
+  export CODEX_EXPECTED_PROFILES_EDGE=3
+  mkdir -p "$INV_ROOT/.openclaw-edge/agents/support/agent"
+  _seed_rowless_shared_store edge
+
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"has no authProfiles.store row"* ]]
+}
+
+@test "the absent-row rule keys off the expected COUNT, not the profile name" {
+  # Nothing edge-specific: main with 0 expected is the same pre-login state.
+  export CODEX_AUTH_PROFILES="main"
+  export CODEX_EXPECTED_PROFILES_MAIN=0
+  _seed_rowless_shared_store main
+
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[INFO]"* ]]
+}
+
+@test "an UNREADABLE store is still UNEVALUATED even when 0 profiles are expected" {
+  # "could not read it" must never collapse into "fine" just because the
+  # expected count is 0 — that is the absent-row relaxation overreaching.
+  export CODEX_AUTH_PROFILES="main edge"
+  export CODEX_EXPECTED_PROFILES_EDGE=0
+  mkdir -p "$INV_ROOT/.openclaw-edge/state" "$INV_ROOT/.openclaw-edge/agents/support/agent"
+  printf 'not a sqlite database' > "$INV_ROOT/.openclaw-edge/state/openclaw.sqlite"
+
+  run "$SCRIPT" --check
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"UNEVALUATED"* ]]
+}
+
+# ── structural absence is NOT the pre-login state ─────────────────────────
+# QA review finding on PR #927 (Critical): `read_state` answers empty/exit-0
+# for THREE different states — row absent, config_machine_state absent, and the
+# sqlite file absent. Relaxing a missing row to INFO on that emptiness alone
+# would mark a state DB doctor never created as "fine", and the runbook's
+# Phase 4 gate would then boot edge with no shared auth database at all.
+
+@test "CRITICAL (never INFO) when the state sqlite file itself is absent, even at 0 expected" {
+  export CODEX_AUTH_PROFILES="main edge"
+  export CODEX_EXPECTED_PROFILES_EDGE=0
+  # state DIR exists (so the dir-absent guard does not fire) but the DB does not:
+  # exactly what a doctor run that failed before creating it leaves behind.
+  mkdir -p "$INV_ROOT/.openclaw-edge/state" "$INV_ROOT/.openclaw-edge/agents/support/agent"
+
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"was never created"* ]]
+  [[ "$output" != *"[INFO]"* ]]
+}
+
+@test "CRITICAL (never INFO) when config_machine_state does not exist, even at 0 expected" {
+  export CODEX_AUTH_PROFILES="main edge"
+  export CODEX_EXPECTED_PROFILES_EDGE=0
+  mkdir -p "$INV_ROOT/.openclaw-edge/state" "$INV_ROOT/.openclaw-edge/agents/support/agent"
+  # A real sqlite file with SOME other table — un-migrated, not merely empty.
+  node --experimental-sqlite --no-warnings -e "
+const {DatabaseSync}=require('node:sqlite');
+const db=new DatabaseSync('$INV_ROOT/.openclaw-edge/state/openclaw.sqlite');
+db.exec('CREATE TABLE something_else (k TEXT)');
+"
+
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"un-migrated"* ]]
+  [[ "$output" != *"[INFO]"* ]]
+}
