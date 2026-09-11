@@ -237,7 +237,7 @@ Report sections (use Slack bullet format, not tables):
 
 *5️⃣ PRODUCT ACTIVITY* — Amplitude: last active, events/sessions, key pages (analytics tiles, profiles, catalog), activity pattern and level (🔴 None / 🟠 Low / 🟡 Medium / 🟢 High).
 
-*6️⃣ PRORATION* — Original charge, proration credits, credit balance, net amount owed. Never refund more than credit balance.
+*6️⃣ PRORATION* — Original charge, proration credits, live credit balance, and which SINGLE concession we are making (credit OR cash, never both). Never refund more than the live credit balance.
 
 *7️⃣ CLIO'S TAKE* — 2-4 sentences, plain English. Recommendation: REFUND APPROVED ✅ / PARTIAL 🟡 / NOT RECOMMENDED 🟠 / NOT ALLOWED ⛔ + reason.
 
@@ -250,41 +250,92 @@ When a user switches plans (e.g. annual → monthly), Stripe automatically:
 2. Applies that credit toward the new plan's first charge
 3. Leaves any remaining credit on the customer's balance
 
-**This means the original charge may already be partially "refunded" via proration.**
+**A live credit balance is already a concession.** It is unused-time money we have
+given back in product form, and it will silently pay the customer's next invoices
+until it runs out. It is not a number that tells you what to refund — it is a
+payment we have already made.
+
+### ⛔ Never both: one unused period, one concession
+
+**NEVER both a cash refund and a credit balance for the same unused period.**
+
+A 2026-09-09 Stripe audit found 223 customers who got both: $4,827.65 of duplicate
+concession, invisible for years because the credit quietly paid later invoices. The
+exemplar is `re_3SacfBLsjTo3Ar3l1nCLgQ5C` — $107.50 refunded to the card on
+2025-12-05, plus a $117.72 `invoice_too_small` credit that went on to pay nine
+monthly invoices from January to September 2026. That customer used Pro for nine
+months essentially free *and* got the cash back.
+
+**The credit balance is NOT the correct refund amount. It is the amount that must be
+zeroed FIRST if we are paying cash instead.**
 
 ### How to check:
 
 ```bash
-# Check customer credit balance (negative = credit on account)
+# Live credit balance (NEGATIVE = credit we owe the customer; POSITIVE = they owe us)
 stripe customers retrieve cus_XXX | jq '.balance'
 
-# Check recent invoices for proration line items
+# WHERE that balance came from — this is what tells you if it is a concession
+stripe get /v1/customers/cus_XXX/balance_transactions -d "limit=100" \
+  | jq '.data[] | {id,type,amount,ending_balance,invoice,created}'
+
+# Recent invoices for proration line items
 stripe invoices list -d "customer=cus_XXX" --limit 5
 ```
 
-Look for invoice lines like:
-- "Unused time on [Plan] after [date]" → this is the proration credit
-- Negative amounts → credits applied
+Reading the transaction types:
+- `invoice_too_small` / `invoice_too_large` / `unapplied_from_invoice` / `credit_note`
+  — Stripe minted this itself from a proration or an invoice correction. **This is a
+  concession.**
+- `adjustment` — a manual credit. If it carries no metadata it was typed in by hand
+  (goodwill), and **that is also a concession**. If it carries metadata it is one of
+  ours (referral reward, offer) and is unrelated to this charge's unused time.
+- Anything at or behind a transaction whose `ending_balance` is `0` is already
+  **spent**. We do not claw back spent credit; it reached the customer as service.
 
 ### Refund calculation:
 
-*Refund only what the customer is actually out of pocket — not the full original charge.*
+*Refund only what the customer is actually out of pocket — and make sure they end up
+with exactly ONE concession, not two.*
 
-Example:
-- User charged $120 for annual plan
-- User switches to monthly 2 days later
-- Stripe prorates: -$119.23 credit, +$12.50 first month = $106.73 credit balance
-- ✅ Correct refund: $106.73 (the credit balance)
-- ❌ Wrong refund: $120 (would over-refund — they already got $12.50 worth of service)
+Same $120 annual → monthly switch, $106.73 of unused time:
+
+| | Action | Result |
+|---|---|---|
+| ✅ | Leave the $106.73 credit on the account, pay no cash | **one** concession |
+| ✅ | Zero the $106.73 credit **first**, then refund $106.73 to the card | **one** concession |
+| ❌ | Refund $106.73 **and** leave the $106.73 credit live | **two** concessions — $213.46 for one unused period. This is the 223-customer bug. |
+| ❌ | Refund the full $120 | wrong amount — they already consumed $12.50 of service |
+
+So: **zero the credit balance BEFORE the cash refund**, and verify it landed:
+
+```bash
+# 1. zero it (amount is POSITIVE to debit the credit away)
+bash /opt/hydra/scripts/muso-stripe-write.sh post "/v1/customers/cus_XXX/balance_transactions" \
+  -d "amount=10673" -d "currency=usd" -d "description=zeroed before cash refund on ch_XXX"
+
+# 2. VERIFY before going near the refund
+bash -c 'source /opt/hydra/scripts/lib/stripe-credit.sh; customer_live_concession_amount cus_XXX'   # must print 0
+# NOT `.balance == 0`: a customer may legitimately still hold a tagged referral
+# or offer credit, so a NEGATIVE balance here is correct. Zeroing to 0 would
+# claw back money that was never a duplicate concession.
+
+# 3. only now the refund (muso-refund-processor Step 3)
+```
+
+**The money gate refuses `refunds create` while a live concession credit remains**, so
+this is not advice you can skip — but do it in the right order rather than discovering
+it from a REFUSED.
 
 ### In the report:
 
 Always include a *Proration Analysis* section:
 - Original charge amount
-- Proration credits applied (with dates)
-- Current account credit balance
-- Net amount the user is actually owed
-- Recommended refund amount (should match credit balance, not original charge)
+- Proration credits applied (with dates) and their transaction `type`
+- Current live account credit balance, and whether it is spent or still live
+- Net amount the user is actually out of pocket
+- **Which single concession we are making**: leave the credit as-is, OR zero $X and
+  refund $X. Never both.
 
 ## Recommendation Guidelines
 

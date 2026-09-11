@@ -40,7 +40,7 @@ Based on investigation results, make one of these decisions:
 | Decision | When |
 |---|---|
 | **APPROVED — Full Refund** | No prior refunds + minimal/no activity + recent charge |
-| **APPROVED — Partial Refund** | No prior refunds + some activity but clear overpayment (proration credit balance) |
+| **APPROVED — Partial Refund** | No prior refunds + some activity but clear overpayment (cash the customer is actually out of pocket) |
 | **DENIED** | Prior refund exists (one-time policy), repeat offender, heavy usage, or value clearly extracted |
 
 > A **DENIED** on the one-time / daily-limit policy is not automatically final: if the
@@ -50,12 +50,14 @@ Based on investigation results, make one of these decisions:
 #### Partial Refund Logic
 
 Partial refunds are the preferred path when:
-- User has a **credit balance** on their Stripe account from proration (refund the credit balance, not the original charge)
+- User has a **live credit balance** from proration — that credit already IS the
+  concession. Do NOT add cash on top of it. If the requester wants cash instead, zero
+  the credit first (Step 3, "Credit-balance disposition"), then refund that amount.
 - User had **some but limited** usage — refund prorated unused portion
 - User is within **7 days** of charge but did use the product lightly — refund minus a fair-use deduction
 
 Calculate partial amounts based on:
-1. **Credit balance** (`stripe customers retrieve cus_XXX | jq '.balance'`) — if negative, that's owed to the customer
+1. **Credit balance** (`stripe customers retrieve cus_XXX | jq '.balance'`) — if negative, that is a concession we have ALREADY made. It is a ceiling on any cash conversion, never an amount to hand out on top.
 2. **Days used** — prorate: `refund = charge × (remaining_days / total_days)`
 3. **Never refund more than the original charge minus any value already received**
 
@@ -96,6 +98,45 @@ One-off charges (plaques, merch) are exempt — do not cancel a subscription ove
 non-subscription refund. If a subscription cannot be canceled or verified, the refund
 workflow is NOT complete: say so plainly and @-mention Nick (`U0AL36NADEY`).
 
+#### Credit-balance disposition — AFTER cancelling, BEFORE any refund
+
+Order matters, and it is this way round for a reason: **cancelling a subscription is
+often what MINTS the proration credit.** Read the balance after the cancel, never
+before, or you will clear a credit that the cancel then re-creates.
+
+A live credit balance is a concession we have already made. Cash on top of it pays the
+same unused period twice — the 2026-09-09 audit found 223 customers in exactly that
+state, $4,827.65, because the credit silently paid their later invoices.
+
+1. Read the balance AND where it came from:
+   ```bash
+   stripe customers retrieve cus_XXX | jq '.balance'    # negative = live credit
+   stripe get /v1/customers/cus_XXX/balance_transactions -d "limit=100" \
+     | jq '.data[] | {id,type,amount,ending_balance}'
+   ```
+   Credit at or behind an `ending_balance: 0` is already spent — leave it alone.
+   `adjustment` rows carrying metadata are ours (referral/offer), not this charge's
+   unused time.
+2. If a live concession credit remains, **zero the credit balance BEFORE the cash
+   refund** (positive amount debits it away), then VERIFY:
+   ```bash
+   bash /opt/hydra/scripts/muso-stripe-write.sh post "/v1/customers/cus_XXX/balance_transactions" \
+     -d "amount=AMOUNT_IN_CENTS" -d "currency=usd" -d "description=zeroed before cash refund on ch_XXX"
+   bash -c 'source /opt/hydra/scripts/lib/stripe-credit.sh; customer_live_concession_amount cus_XXX'   # must print 0
+   # NOT `.balance == 0`: a customer may legitimately still hold a tagged referral
+   # or offer credit, so a NEGATIVE balance here is correct. Zeroing to 0 would
+   # claw back money that was never a duplicate concession.
+   ```
+3. **Keep-credit exception** — the requester deliberately wants the customer to have
+   BOTH the credit and the cash. Rare, and it is a double concession by definition, so
+   only an allowlisted requester (Aaron/Jan/Nick) can waive it, captured from their
+   in-thread ask, by passing `--keep-credit-confirmed-by <slack_id> --approval-msg-id <ts>`.
+   Never assume "keep" silently. This waiver does NOT waive the one-time refund policy
+   or the subscription-cancel rule; each wall needs its own token.
+
+The money gate enforces this below you: `refunds create` REFUSES while a live
+concession credit remains, unless the keep-credit waiver is passed.
+
 #### If APPROVED (full or partial):
 
 Execute refund writes through the **`muso-stripe-write.sh` gate**, NOT `stripe`
@@ -122,6 +163,16 @@ After execution, verify:
 ```bash
 stripe refunds retrieve re_XXX
 ```
+
+If the gate prints **`POST-REFUND-CREDIT-LIVE`**, the refund **DID** happen — do NOT
+re-run it. Stripe minted a proration credit during the refund itself (it did not exist
+when the gate checked), so the customer now holds both. Zero the credit it names using
+the command in that message, verify the live CONCESSION is 0 (not the balance —
+a tagged referral or offer credit may legitimately remain, and clawing that back
+is the mixed-balance error this whole section exists to prevent), and report both
+actions.
+`POST-REFUND-CREDIT-UNVERIFIED` means the same "refund succeeded, do not re-run" but the
+follow-up read failed — check the balance by hand.
 
 #### If OVERRIDE-confirmed (an allowlisted requester waived a soft wall):
 
@@ -191,6 +242,7 @@ Post the full investigation report to the channel, then append the action taken:
 > • Charge: `ch_XXX`
 > • Customer: `cus_XXX` (email)
 > • Subscription: canceled `sub_XXX` / kept (waived by <who>, msg <ts>) / n/a (one-off charge)
+> • Credit balance: zeroed $X.XX (`cbtxn_XXX`) / none / kept (waived by <who>, msg <ts>)
 > • Reason: [brief explanation]
 
 **If denied:**
@@ -207,9 +259,10 @@ After every refund decision (approved or denied), append a record to the refund 
 # Create log dir if needed
 mkdir -p memory/refund-log
 
-# Append to monthly log — always include the subscription disposition
-# (subscription_canceled=sub_XXX, or subscription_kept=sub_XXX waived by <who>, or subscription=n/a one-off charge):
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] | DECISION | email | cus_XXX | ch_XXX | $AMOUNT | REASON | subscription_canceled=sub_XXX" >> memory/refund-log/$(date +%Y-%m).log
+# Append to monthly log — always include the subscription AND credit-balance disposition
+# (subscription_canceled=sub_XXX, or subscription_kept=sub_XXX waived by <who>, or subscription=n/a one-off charge;
+#  credit_zeroed=$X, or credit_kept=$X waived by <who>, or credit=none):
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] | DECISION | email | cus_XXX | ch_XXX | $AMOUNT | REASON | subscription_canceled=sub_XXX | credit_zeroed=$X" >> memory/refund-log/$(date +%Y-%m).log
 
 # For an authorized override, record WHO waived the policy and the approval message ts:
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] | OVERRIDE | email | cus_XXX | ch_XXX | $AMOUNT | one-time policy waived by <approver> (msg <approval_msg_id>) | subscription_canceled=sub_XXX" >> memory/refund-log/$(date +%Y-%m).log
@@ -231,7 +284,16 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] | DECISION | email | cus_XXX | ch_XXX | $
    attributable allowlisted waiver. The money gate (`muso-stripe-write.sh`) enforces this
    independently.
 7. **Log everything.** Every decision gets logged, approved or denied, including the
-   subscription disposition (`subscription_canceled=sub_XXX`, or kept-by-waiver, or n/a).
+   subscription disposition (`subscription_canceled=sub_XXX`, or kept-by-waiver, or n/a)
+   and the credit disposition (`credit_zeroed=$X`, or kept-by-waiver, or none).
+8. **No cash refund on top of a live credit.** One unused period, one concession. A live
+   concession credit (negative `customer.balance` from `invoice_too_small`,
+   `invoice_too_large`, `unapplied_from_invoice`, `credit_note`, or an untagged
+   `adjustment`) must be zeroed and VERIFIED at 0 before any cash refund. A deliberate
+   both needs `--keep-credit-confirmed-by` from an allowlisted requester. The money gate
+   enforces this independently. **The highest-risk case is a kept subscription**: the
+   customer stays on the plan, so a leftover credit silently pays their next invoices —
+   which is exactly how 223 customers went unnoticed for years.
 
 ## Escalation
 

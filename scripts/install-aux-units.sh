@@ -44,6 +44,13 @@
 #     detection lag was the dominant component of the outage's
 #     ops-silent window.
 #
+#   /etc/cron.d/refund-credit-overlap-watchdog
+#     Schedules scripts/refund-credit-overlap-watchdog.sh daily to page
+#     #clio_devops when a customer holds BOTH a cash refund and a live
+#     customer-balance credit. This is the ONLY layer that sees the human
+#     Stripe-dashboard path, where all 223 cases in the 2026-09-09 audit
+#     came from; the money gate covers only the agent/CLI path.
+#
 #   /etc/cron.d/cron-health-watchdog
 #     Schedules scripts/cron-health-watchdog.sh every 5 minutes to
 #     alert #clio_devops on any errored cron run (the missing
@@ -1481,6 +1488,27 @@ cat > /etc/cron.d/cron-health-watchdog << CRONHEALTH
 */5 * * * * root $HYDRA_ROOT/scripts/cron-health-watchdog.sh >> /var/log/cron-health-watchdog.log 2>&1
 CRONHEALTH
 chmod 644 /etc/cron.d/cron-health-watchdog
+
+# ─── Refund + credit-balance overlap watchdog, daily ──────────
+# Pages #clio_devops when a cash refund and a live customer-balance concession
+# credit exist for the same customer — one unused period paid for twice.
+#
+# DAILY, not 5-minutely, on purpose. This is a finance-reconciliation signal,
+# not a liveness one: nothing is on fire while a duplicate credit sits there,
+# and the 2026-09-09 audit's oldest case had been sitting since 2022. A tight
+# cadence would just re-read Stripe 288x a day for a class that changes a
+# handful of times a month.
+#
+# It is DETECT-ONLY and never moves money — remediation is
+# scripts/remediate-refund-credit-overlap.sh, which is dry-run by default and
+# requires an allowlisted approver, because zeroing a real customer's balance
+# is a human decision. Same ownership rule: edit here + re-run
+# install-aux-units.sh, never edit the file on node-8.
+cat > /etc/cron.d/refund-credit-overlap-watchdog << REFUNDOVERLAP
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+17 7 * * * root $HYDRA_ROOT/scripts/refund-credit-overlap-watchdog.sh >> /var/log/refund-credit-overlap-watchdog.log 2>&1
+REFUNDOVERLAP
+chmod 644 /etc/cron.d/refund-credit-overlap-watchdog
 
 # Fallback-swallow watchdog: alerts #clio_devops when an agent turn ends in an
 # empty completion surfaced as an error — the residual of openclaw's

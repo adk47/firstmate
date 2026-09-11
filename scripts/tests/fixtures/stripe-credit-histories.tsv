@@ -1,0 +1,34 @@
+# Realistic Stripe customer-balance histories for scripts/lib/stripe-credit.sh.
+#
+# WHY THIS TABLE EXISTS
+# Three separate holes were found in credit_live_window_eval by review, each one a
+# case the existing fixtures could not express:
+#   round 2 — a mixed balance (concession + tagged referral) over-reclaimed
+#   round 4 — a post-remediation history reported spent concession as live
+#   round 5 — netting ignored chronology, so a debit cancelled a concession that
+#             did not exist yet
+# Every one was a MISSING FIXTURE before it was a missing guard. So the shapes are
+# enumerated here as data rather than as prose, and each new shape is cheap to add.
+#
+# FORMAT: <name> <TAB> <expected_net_cents> <TAB> <expected_live_row_ids|-> <TAB> <json>
+# Rows are newest-first, exactly as the Stripe API returns them.
+# `created` is present on every row: the helper must order by it, not by array
+# position, so a payload that arrives out of order still nets correctly.
+single-live-concession	11772	cbtxn_P	{"data":[{"id":"cbtxn_P","type":"invoice_too_small","amount":-11772,"ending_balance":-11772,"created":300,"metadata":{}}]}
+concession-fully-consumed	0	-	{"data":[{"id":"cbtxn_INV","type":"applied_to_invoice","amount":11772,"ending_balance":0,"created":400,"metadata":{}},{"id":"cbtxn_P","type":"invoice_too_small","amount":-11772,"ending_balance":-11772,"created":300,"metadata":{}}]}
+concession-partly-consumed	6772	cbtxn_P	{"data":[{"id":"cbtxn_INV","type":"applied_to_invoice","amount":5000,"ending_balance":-6772,"created":400,"metadata":{}},{"id":"cbtxn_P","type":"invoice_too_small","amount":-11772,"ending_balance":-11772,"created":300,"metadata":{}}]}
+mixed-concession-plus-tagged-referral	11772	cbtxn_P	{"data":[{"id":"cbtxn_REF","type":"adjustment","amount":-2000,"ending_balance":-13772,"created":400,"metadata":{"referralId":"r1"}},{"id":"cbtxn_P","type":"invoice_too_small","amount":-11772,"ending_balance":-11772,"created":300,"metadata":{}}]}
+post-remediation-mixed	0	-	{"data":[{"id":"cbtxn_FIX","type":"adjustment","amount":11772,"ending_balance":-2000,"created":500,"metadata":{"hydra_remediation":"r1"}},{"id":"cbtxn_REF","type":"adjustment","amount":-2000,"ending_balance":-13772,"created":400,"metadata":{"referralId":"r1"}},{"id":"cbtxn_P","type":"invoice_too_small","amount":-11772,"ending_balance":-11772,"created":300,"metadata":{}}]}
+debit-predates-newer-concession	10000	cbtxn_NEW	{"data":[{"id":"cbtxn_NEW","type":"invoice_too_small","amount":-10000,"ending_balance":-15000,"created":300,"metadata":{}},{"id":"cbtxn_INV","type":"applied_to_invoice","amount":15000,"ending_balance":-5000,"created":200,"metadata":{}},{"id":"cbtxn_REF","type":"adjustment","amount":-20000,"ending_balance":-20000,"created":100,"metadata":{"referralId":"r1"}}]}
+two-concessions-partial-consumption	4000	cbtxn_C1 cbtxn_C2	{"data":[{"id":"cbtxn_C2","type":"invoice_too_small","amount":-3000,"ending_balance":-4000,"created":300,"metadata":{}},{"id":"cbtxn_INV","type":"applied_to_invoice","amount":4000,"ending_balance":-1000,"created":200,"metadata":{}},{"id":"cbtxn_C1","type":"invoice_too_small","amount":-5000,"ending_balance":-5000,"created":100,"metadata":{}}]}
+old-concession-spent-then-new-one	7000	cbtxn_C2	{"data":[{"id":"cbtxn_C2","type":"invoice_too_small","amount":-7000,"ending_balance":-7000,"created":300,"metadata":{}},{"id":"cbtxn_INV","type":"applied_to_invoice","amount":5000,"ending_balance":0,"created":200,"metadata":{}},{"id":"cbtxn_C1","type":"invoice_too_small","amount":-5000,"ending_balance":-5000,"created":100,"metadata":{}}]}
+tagged-referral-only	0	-	{"data":[{"id":"cbtxn_REF","type":"adjustment","amount":-2000,"ending_balance":-2000,"created":300,"metadata":{"referralId":"r1"}}]}
+untagged-adjustment-july-shape	1000	cbtxn_J	{"data":[{"id":"cbtxn_J","type":"adjustment","amount":-1000,"ending_balance":-1000,"created":300,"metadata":{}}]}
+credit-note	5000	cbtxn_CN	{"data":[{"id":"cbtxn_CN","type":"credit_note","amount":-5000,"ending_balance":-5000,"created":300,"metadata":{}}]}
+debit-exceeds-everything	0	-	{"data":[{"id":"cbtxn_BIG","type":"applied_to_invoice","amount":99999,"ending_balance":88227,"created":400,"metadata":{}},{"id":"cbtxn_P","type":"invoice_too_small","amount":-11772,"ending_balance":-11772,"created":300,"metadata":{}}]}
+interleaved-concession-referral-debit	2000	cbtxn_C1 cbtxn_C3	{"data":[{"id":"cbtxn_C3","type":"invoice_too_small","amount":-1000,"ending_balance":-4000,"created":400,"metadata":{}},{"id":"cbtxn_REF","type":"adjustment","amount":-2000,"ending_balance":-3000,"created":300,"metadata":{"referralId":"r1"}},{"id":"cbtxn_INV","type":"applied_to_invoice","amount":3000,"ending_balance":-1000,"created":200,"metadata":{}},{"id":"cbtxn_C1","type":"invoice_too_small","amount":-4000,"ending_balance":-4000,"created":100,"metadata":{}}]}
+zero-boundary-hides-older-history	5000	cbtxn_NEW	{"data":[{"id":"cbtxn_NEW","type":"invoice_too_small","amount":-5000,"ending_balance":-5000,"created":400,"metadata":{}},{"id":"cbtxn_SETTLE","type":"applied_to_invoice","amount":9999,"ending_balance":0,"created":300,"metadata":{}},{"id":"cbtxn_OLD","type":"invoice_too_small","amount":-9999,"ending_balance":-9999,"created":200,"metadata":{}}]}
+empty-history	0	-	{"data":[]}
+customer-in-debit-only	0	-	{"data":[{"id":"cbtxn_D","type":"adjustment","amount":20000,"ending_balance":20000,"created":300,"metadata":{}}]}
+debit-with-no-prior-credit-then-concession	5000	cbtxn_P	{"data":[{"id":"cbtxn_P","type":"invoice_too_small","amount":-5000,"ending_balance":-4000,"created":400,"metadata":{}},{"id":"cbtxn_D","type":"adjustment","amount":1000,"ending_balance":1000,"created":300,"metadata":{}}]}
+out-of-order-payload-is-sorted-by-created	10000	cbtxn_NEW	{"data":[{"id":"cbtxn_INV","type":"applied_to_invoice","amount":15000,"ending_balance":-5000,"created":200,"metadata":{}},{"id":"cbtxn_NEW","type":"invoice_too_small","amount":-10000,"ending_balance":-15000,"created":300,"metadata":{}},{"id":"cbtxn_REF","type":"adjustment","amount":-20000,"ending_balance":-20000,"created":100,"metadata":{"referralId":"r1"}}]}
