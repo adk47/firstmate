@@ -239,6 +239,73 @@ test_spent_budget_declares_an_external_wait_not_a_wedge() {
   pass "a spent budget declares a keyed external wait rather than a wedge"
 }
 
+# What the real consumer of a status log says is still open on it, so these
+# assertions are the fleet snapshot's own verdict rather than a grep.
+open_activity_keys() {  # <status-file>
+  bash -c '. "$1"; status_open_activities "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$1"
+}
+
+test_a_recovered_agent_closes_its_declared_gateway_wait() {
+  local st status open
+  st=$(new_state resolved-line)
+  status="$st/task-r.status"
+  printf 'working: implementing the fix\n' > "$status"
+  fm_gateway_note_stall "$st" task-r || fail "could not open a stall record"
+  fm_gateway_record_attempt "$st" task-r || fail "could not charge an attempt"
+  printf '%s\n' "$(fm_gateway_paused_status_line "$st" task-r)" >> "$status"
+  fm_gateway_mark_notified "$st" task-r || fail "could not mark the declaration made"
+  open=$(open_activity_keys "$status")
+  case "$open" in
+    *gateway-503*) : ;;
+    *) fail "the declared wait did not open a keyed phase to begin with, got: $open" ;;
+  esac
+
+  # The gateway recovers: the pane no longer shows the error, so the record is
+  # dropped - and the phase that record declared must go with it, or a finished
+  # crew is reported as still waiting on the gateway for the life of the log.
+  fm_gateway_stalled_now "$st" task-r "$(ordinary_lines 3)" \
+    && fail "a recovered pane still reads as stalled"
+  printf 'done: shipped\n' >> "$status"
+  open=$(open_activity_keys "$status")
+  case "$open" in
+    *gateway-503*) fail "a recovered crew is still declared as waiting on the gateway: $open" ;;
+  esac
+
+  # The primary has no status log of its own, and none is invented for it.
+  fm_gateway_note_stall "$st" "$FM_GATEWAY_PRIMARY_SCOPE" || fail "could not open the primary's record"
+  fm_gateway_mark_notified "$st" "$FM_GATEWAY_PRIMARY_SCOPE" || fail "could not mark the primary notified"
+  fm_gateway_stalled_now "$st" "$FM_GATEWAY_PRIMARY_SCOPE" "$(ordinary_lines 3)" \
+    && fail "a recovered primary pane still reads as stalled"
+  [ ! -e "$st/$FM_GATEWAY_PRIMARY_SCOPE.status" ] \
+    || fail "the clear path invented a status log for a scope that has none"
+  pass "a recovered agent's declared gateway wait is closed, leaving no open gateway-503 phase"
+}
+
+test_a_notice_never_buries_an_unresolved_notice_of_another_kind() {
+  local st
+  st=$(new_state notice-kinds)
+  fm_keepalive_notice_write "$st" outage "the gateway kept this primary stalled; check 127.0.0.1:8080" \
+    || fail "could not record an outage notice"
+  # The install notice's condition is real, but so is the outage's, and only
+  # the outage's own writer may retire it.
+  fm_keepalive_notice_write "$st" install "the installer refused" \
+    && fail "an install notice displaced an unresolved outage notice"
+  [ "$(fm_keepalive_notice_kind "$st")" = outage ] \
+    || fail "the unresolved outage notice did not survive a competing write"
+  # The same kind is the same condition, so its newest reason still wins.
+  fm_keepalive_notice_write "$st" outage "the gateway is still down" \
+    || fail "a same-kind update was refused"
+  [ "$(fm_keepalive_notice_read "$st")" = 'the gateway is still down' ] \
+    || fail "a same-kind update did not replace the recorded reason"
+  # Once its own writer resolves it, the slot is free for the other condition.
+  fm_keepalive_notice_clear "$st" outage
+  fm_keepalive_notice_write "$st" install "the installer refused" \
+    || fail "a resolved slot refused the other writer's condition"
+  [ "$(fm_keepalive_notice_kind "$st")" = install ] \
+    || fail "the install notice was not recorded once the outage cleared"
+  pass "an unresolved notice is never buried by the other writer's condition"
+}
+
 # --- the out-of-session primary keep-alive agent ------------------------------
 #
 # Driven over a real fake backend rather than asserted on its source, because
@@ -536,12 +603,15 @@ test_endpoint_detects_a_cmux_primary_in_the_shape_the_backend_parses() {
     [ "$FM_BACKEND_CMUX_WORKSPACE" = ws-1 ] && [ "$FM_BACKEND_CMUX_SURFACE" = sf-1 ]
   ) || fail "the recorded cmux target is not the <workspace>:<surface> the adapter parses"
 
-  out=$(endpoint_record "$sdir" CMUX_TAB_ID=ws-2 CMUX_PANEL_ID=sf-2) \
-    || fail "cmux's legacy identifier spellings proved no endpoint"
-  [ "$out" = 'cmux ws-2:sf-2' ] || fail "expected 'cmux ws-2:sf-2', got '$out'"
+  # cmux injects its modern and legacy identifiers together and marks all five
+  # non-overridable, so the legacy pair on its own is not a cmux surface and
+  # proves nothing (bin/fm-backend.sh records that contract).
+  rm -f "$sdir/.primary-endpoint"
+  endpoint_record "$sdir" CMUX_TAB_ID=ws-2 CMUX_PANEL_ID=sf-2 >/dev/null 2>&1 \
+    && fail "cmux's legacy identifier spellings alone proved an endpoint"
+  [ ! -e "$sdir/.primary-endpoint" ] || fail "a failed detection still wrote a record"
 
   # Half a pair is not a pane: nothing to prove, so nothing is recorded.
-  rm -f "$sdir/.primary-endpoint"
   endpoint_record "$sdir" CMUX_WORKSPACE_ID=ws-3 >/dev/null 2>&1 \
     && fail "a workspace with no surface must not prove an endpoint"
   [ ! -e "$sdir/.primary-endpoint" ] || fail "a failed detection still wrote a record"
@@ -941,6 +1011,8 @@ test_first_attempt_waits_out_its_backoff
 test_backoff_ladder_repeats_its_last_step
 test_pane_is_the_single_detector
 test_spent_budget_declares_an_external_wait_not_a_wedge
+test_a_recovered_agent_closes_its_declared_gateway_wait
+test_a_notice_never_buries_an_unresolved_notice_of_another_kind
 test_primary_agent_re_rings_a_stalled_primary
 test_primary_agent_never_types_into_a_busy_primary
 test_primary_agent_drops_the_record_once_the_primary_recovered
