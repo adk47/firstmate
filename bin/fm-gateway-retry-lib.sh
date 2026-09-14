@@ -300,10 +300,15 @@ _fm_keepalive_notice_line() {  # <state-dir>
 }
 
 fm_keepalive_notice_write() {  # <state-dir> <kind> <reason>
-  local state=$1 kind=$2 reason=$3 rec tmp
+  local state=$1 kind=$2 reason=$3 rec tmp recorded
   [ -d "$state" ] || mkdir -p "$state" 2>/dev/null || return 1
   reason=$(printf '%s' "$reason" | tr '\n\t' '  ')
   [ -n "$reason" ] || return 1
+  # The mirror of the kind-scoped clear below. A notice of the OTHER kind is a
+  # condition its own writer has not resolved yet, so it is never displaced and
+  # the caller is told its condition went unrecorded; the slot stays single.
+  recorded=$(fm_keepalive_notice_kind "$state" 2>/dev/null) || recorded=''
+  [ -z "$recorded" ] || [ "$recorded" = "$kind" ] || return 1
   rec=$(fm_keepalive_notice_path "$state")
   tmp="$rec.tmp.$$"
   printf 'v1 ts=%s kind=%s reason=%s\n' "$(date +%s)" "$kind" "$reason" > "$tmp" 2>/dev/null \
@@ -348,6 +353,7 @@ fm_gateway_stalled_now() {  # <state-dir> <scope> <pane-text>
     fm_gateway_note_stall "$state" "$scope" pane || return 1
     return 0
   fi
+  _fm_gateway_close_declared_wait "$state" "$scope"
   fm_gateway_clear "$state" "$scope"
   return 1
 }
@@ -380,4 +386,24 @@ fm_gateway_attempt_due() {  # <state-dir> <scope>
 fm_gateway_paused_status_line() {  # <state-dir> <scope>
   printf 'paused [key=gateway-503]: inference gateway still returning transient errors after %s continue attempts over %ss; waiting for account pool capacity' \
     "$(fm_gateway_attempts "$1" "$2")" "$(fm_gateway_stall_age "$1" "$2")"
+}
+
+# The close for the line above, so a declared wait ends the way every other
+# keyed phase ends rather than outliving the condition it declared.
+fm_gateway_resolved_status_line() {  # <state-dir> <scope>
+  printf 'resolved [key=gateway-503]: the pane stopped showing the transient gateway error after %ss; the agent is working again' \
+    "$(fm_gateway_stall_age "$1" "$2")"
+}
+
+# Close the declared wait at the one transition that proves it is over: a
+# record that declared it being dropped because its pane recovered. Only a
+# record marked notified ever opened a phase, and only a scope with a status
+# log has one to close - the primary has no status log of its own, so nothing
+# is written for it and none is invented.
+_fm_gateway_close_declared_wait() {  # <state-dir> <scope>
+  local state=$1 scope=$2 status
+  status="$state/$scope.status"
+  [ -f "$status" ] || return 0
+  fm_gateway_notified "$state" "$scope" || return 0
+  printf '%s\n' "$(fm_gateway_resolved_status_line "$state" "$scope")" >> "$status" 2>/dev/null || true
 }

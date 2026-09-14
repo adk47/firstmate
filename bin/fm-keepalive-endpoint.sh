@@ -80,8 +80,8 @@ detect_endpoint() {  # prints "<backend>\t<target>", or fails
     printf '%s\t%s' "$backend" "$target"
     return 0
   fi
-  workspace=${CMUX_WORKSPACE_ID:-${CMUX_TAB_ID:-}}
-  surface=${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}
+  workspace=${CMUX_WORKSPACE_ID:-}
+  surface=${CMUX_SURFACE_ID:-}
   if [ -n "$workspace" ] && [ -n "$surface" ]; then
     printf '%s\t%s:%s' cmux "$workspace" "$surface"
     return 0

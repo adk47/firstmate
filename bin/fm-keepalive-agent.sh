@@ -38,11 +38,10 @@
 # lock, and every action it can take is bounded by a durable budget that
 # survives its own restart.
 #
-# Usage: fm-keepalive-agent.sh [--home <dir>] [--dry-run] [--verbose]
+# Usage: fm-keepalive-agent.sh [--home <dir>] [--dry-run]
 #   --home     the firstmate home to supervise; defaults to FM_HOME, then the
 #              repository root this script lives in
 #   --dry-run  classify and log, deliver nothing
-#   --verbose  also write the log line to stderr
 #
 # Exit status is always 0 unless its own arguments are wrong: launchd treats a
 # non-zero exit as a failed job and this agent must not accumulate failures for
@@ -54,13 +53,11 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 HOME_DIR=''
 DRY_RUN=0
-VERBOSE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --home) HOME_DIR=${2:-}; shift 2 || exit 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
-    --verbose) VERBOSE=1; shift ;;
-    -h|--help) sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,44p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "error: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
@@ -97,7 +94,6 @@ log() {  # <message>
   if [ "$(wc -l < "$LOG" 2>/dev/null || echo 0)" -gt 2000 ]; then
     tail -n 500 "$LOG" > "$LOG.trim" 2>/dev/null && mv -f "$LOG.trim" "$LOG" 2>/dev/null || true
   fi
-  [ "$VERBOSE" -eq 0 ] || printf '%s\n' "$line" >&2
 }
 
 # Single-flight. launchd will happily start a second copy while the first is
@@ -168,10 +164,14 @@ if ! pane_is_busy && fm_gateway_stalled_now "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE"
   if fm_gateway_budget_spent "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE"; then
     if ! fm_gateway_notified "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE"; then
       log "OUTAGE: the inference gateway has kept the primary stalled through $(fm_gateway_attempts "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE") continue attempts over $(fm_gateway_stall_age "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE")s; no longer re-ringing"
-      fm_keepalive_notice_write "$STATE" outage \
-        "the inference gateway kept this home's primary stalled through $(fm_gateway_attempts "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE") continue attempts and the keep-alive stopped re-ringing it; check the gateway at 127.0.0.1:8080, then tell the primary to continue" \
-        || true
-      fm_gateway_mark_notified "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE" || true
+      # Only an outage the captain will actually be told about counts as
+      # reported. When the notice slot still holds another writer's unresolved
+      # condition this one goes unrecorded, so it stays unnotified and is
+      # recorded on a later pass instead of being lost.
+      if fm_keepalive_notice_write "$STATE" outage \
+        "the inference gateway kept this home's primary stalled through $(fm_gateway_attempts "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE") continue attempts and the keep-alive stopped re-ringing it; check the gateway at 127.0.0.1:8080, then tell the primary to continue"; then
+        fm_gateway_mark_notified "$STATE" "$FM_GATEWAY_PRIMARY_SCOPE" || true
+      fi
     fi
     exit 0
   fi

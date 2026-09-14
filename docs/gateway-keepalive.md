@@ -39,6 +39,7 @@ A gateway that is simply unreachable is deliberately outside the transient class
    Either bound alone is insufficient, because one stops a fast loop and the other stops a slow one spread across a real outage.
    The gateway ladder owns every re-ring and both bounds; nothing else re-rings the record.
 4. **Declare.** When either bound is spent, the stall stops being re-rung and is declared once as an external wait (`paused [key=gateway-503]: ...`), so the pane takes the long declared-wait cadence instead of a wedge escalation.
+   That declaration is closed (`resolved [key=gateway-503]: ...`) at the transition that proves it is over - the pane recovering, which drops the record that declared it - so a crew that carries on is not left reported as still waiting on the gateway.
 
 A successful re-ring is silent.
 An agent that carries on is not news, and the whole point is that the captain stops being the retry mechanism.
