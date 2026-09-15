@@ -134,7 +134,11 @@ main() {
     return 2
   }
 
-  local key row rc measured=0 failed=0
+  local key row rc measured=0 failed=0 listed
+  listed="$(cqp_list_accounts)" || {
+    log "FATAL: canonical auth store became unreadable while listing accounts"
+    return 2
+  }
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     row="$(cqp_probe_account "$key" "$bin")"; rc=$?
@@ -155,6 +159,10 @@ main() {
       log "FATAL: safety violation probing $key — aborting"
       return 2
     fi
+    if [ "$rc" -eq 2 ]; then
+      log "FATAL: canonical auth store became unreadable while probing $key"
+      return 2
+    fi
     if [ "$rc" -ne 0 ] || [ -z "$row" ]; then
       failed=$(( failed + 1 ))
       log "no measurement for $key"
@@ -166,7 +174,7 @@ main() {
     else
       log "WARN: could not persist measurement for $key"
     fi
-  done < <(cqp_list_accounts)
+  done <<< "$listed"
 
   if [ "$measured" -eq 0 ]; then
     local stamp="$CODEX_QUOTA_STATE_DIR/codex-quota-allfailed.cooldown"

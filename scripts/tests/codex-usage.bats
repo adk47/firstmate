@@ -113,6 +113,24 @@ measure() {
 
 run_report() { run env CODEX_USAGE_ROOT="$ROOT" "$SCRIPT" "$@"; }
 
+seed_sqlite_auth() {
+  local db="$ROOT/.openclaw-main/state/openclaw.sqlite"
+  mkdir -p "$(dirname "$db")"
+  rm -f "$db"
+  CODEX_USAGE_SQLITE="$db" node --experimental-sqlite --no-warnings -e '
+const {DatabaseSync}=require("node:sqlite");
+const db=new DatabaseSync(process.env.CODEX_USAGE_SQLITE);
+db.exec("CREATE TABLE config_machine_state(state_key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at_ms INTEGER NOT NULL)");
+const put=db.prepare("INSERT INTO config_machine_state VALUES(?,?,?)");
+put.run("auth.sharedStore",JSON.stringify({location:"state-db"}),Date.now());
+put.run("authProfiles.store",JSON.stringify({version:1,profiles:{
+  "openai:aaron@muso.ai":{provider:"openai",type:"oauth",email:"aaron@muso.ai",chatgptPlanType:"pro",access:"SQLITE-ACCESS-SECRET",refresh:"SQLITE-REFRESH-SECRET"},
+  "openai:aaronkaufman@me.com":{provider:"openai",type:"oauth",email:"aaronkaufman@me.com",chatgptPlanType:"pro"}
+}}),Date.now());
+put.run("authProfiles.state",JSON.stringify({version:1,lastGood:{openai:"openai:aaronkaufman@me.com"}}),Date.now());
+'
+}
+
 # ── integration: report script ────────────────────────────────
 
 @test "happy path: active shows its own measured %, standby shows quota UNKNOWN, non-codex filtered, no tables" {
@@ -163,9 +181,22 @@ run_report() { run env CODEX_USAGE_ROOT="$ROOT" "$SCRIPT" "$@"; }
 
 @test "malformed auth-profiles.json does not crash, exits 0" {
   printf '%s' '{ this is not valid json ' > "$CANON/auth-profiles.json"
-  run_report
+  AUTH_DIR="$CANON" run_report
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q 'no codex accounts found'
+  echo "$output" | grep -q 'report unavailable: codex auth store could not be read'
+  ! echo "$output" | grep -q 'aaron@muso.ai'
+}
+
+@test "SQLite-only auth store lists accounts, translates ids, and reads active state without leaking tokens" {
+  rm -f "$CANON/auth-profiles.json" "$CANON/auth-state.json" "$CODEX_ACTIVE_ACCOUNT_FILE"
+  seed_sqlite_auth
+  run_report --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.active_account == "openai-codex:aaronkaufman@me.com"' >/dev/null
+  echo "$output" | jq -e '.accounts | length == 2' >/dev/null
+  echo "$output" | jq -e '.accounts[] | select(.email=="aaronkaufman@me.com") | .role=="active"' >/dev/null
+  [[ "$output" != *"SQLITE-ACCESS-SECRET"* ]]
+  [[ "$output" != *"SQLITE-REFRESH-SECRET"* ]]
 }
 
 @test "redaction: access/refresh tokens never appear in text or json output" {

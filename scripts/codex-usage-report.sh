@@ -43,9 +43,20 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # every number in this report carry its age and provenance.
 # shellcheck source=scripts/lib/codex-quota.sh
 . "$HERE/lib/codex-quota.sh"
+# shellcheck source=scripts/lib/codex-auth-store.sh
+. "$HERE/lib/codex-auth-store.sh"
 
 CODEX_USAGE_ROOT="${CODEX_USAGE_ROOT:-/root}"
+AUTH_DIR_EXPLICIT=0
+[ "${AUTH_DIR+x}" = x ] && AUTH_DIR_EXPLICIT=1
 AUTH_DIR="${AUTH_DIR:-$CODEX_USAGE_ROOT/.openclaw-main/agents/main/agent}"
+CAS_ROOT="${CAS_ROOT:-$CODEX_USAGE_ROOT}"
+if [ "$AUTH_DIR_EXPLICIT" -eq 1 ]; then
+  # shellcheck disable=SC2034 # Read by the sourced codex-auth-store helpers.
+  CAS_LEGACY_JSON="$AUTH_DIR/auth-profiles.json"
+  # shellcheck disable=SC2034 # Read by the sourced codex-auth-store helpers.
+  CAS_LEGACY_STATE="$AUTH_DIR/auth-state.json"
+fi
 FRESHNESS_HOURS="${FRESHNESS_HOURS:-6}"
 ROLLOUT_LOOKBACK_HOURS="${ROLLOUT_LOOKBACK_HOURS:-48}"
 # Per-account snapshot archive written by codex-account-rotate.sh at rotation
@@ -79,8 +90,20 @@ main() {
     return 0
   fi
 
-  local profiles="$AUTH_DIR/auth-profiles.json"
-  local state="$AUTH_DIR/auth-state.json"
+  # OpenClaw 2026.8 archived auth-profiles.json and moved the shared store to
+  # state/openclaw.sqlite. Materialize only the redacted id/email/plan view that
+  # the existing report helpers consume; token fields never leave the adapter.
+  local profiles rc=0
+  profiles="$(mktemp "${TMPDIR:-/tmp}/codex-usage-profiles.XXXXXX")" || {
+    echo "*Codex usage* — report unavailable: could not create a temp file"
+    return 0
+  }
+  cas_profiles_redacted main > "$profiles" 2>/dev/null || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$profiles"
+    echo "*Codex usage* — report unavailable: codex auth store could not be read"
+    return 0
+  fi
   # Active account: the rotation state file is authoritative when present and
   # valid; auth-state.json's lastGood is the fallback — the 7.x runtime no
   # longer maintains it, so after an account rotation it names the OLD account
@@ -88,7 +111,9 @@ main() {
   # subscription (observed live 2026-07-21).
   local active
   active="$(caa_state_key "$profiles" 2>/dev/null)" || active=""
-  [ -n "$active" ] || active="$(cu_active_account "$state")"
+  if [ -z "$active" ]; then
+    active="$(cas_active_key main 2>/dev/null)" || active=""
+  fi
 
   # No rollout scan here any more. This report used to derive the active
   # account's numbers from the freshest rate_limits snapshot anywhere in the
@@ -108,13 +133,14 @@ main() {
   else
     emit_text
   fi
+  rm -f "$profiles"
   return 0
 }
 
 emit_text() {
   printf '*Codex usage* — %s\n' "$(report_timestamp)"
   if [ "${#acct_rows[@]}" -eq 0 ]; then
-    printf '\n• no codex accounts found in auth-profiles.json\n'
+    printf '\n• no codex accounts found in the canonical auth store\n'
     return
   fi
   # Every account is now reported from its OWN measurement, taken by

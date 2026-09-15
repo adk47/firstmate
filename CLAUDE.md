@@ -169,12 +169,23 @@ and `scripts/lib/acknowledge-hot-patch-drift.sh`.
 ## Codex / OAuth auth is centralized
 
 Codex (`openai/gpt-5.6-sol`/`-luna` via the codex agentRuntime, ChatGPT OAuth)
-credentials live in ONE canonical store: the `main` agent at
-`/root/.openclaw-main/agents/main/agent/auth-profiles.json`. That file is OUR
-source of truth (written by `codex-oauth-refresh.sh`, the sole refresher).
-How the RUNTIME consumes it depends on the openclaw version:
+credentials live in ONE canonical store. How that store is selected and
+refreshed depends on the openclaw version:
 
-- **openclaw >= 2026.7 (current)**: the runtime never reads
+- **openclaw >= 2026.8 (current)**: read main's
+  `/root/.openclaw-main/state/openclaw.sqlite` ownership row
+  `config_machine_state['auth.sharedStore']` first. `location:"state-db"`
+  makes that same DB's `authProfiles.store`/`authProfiles.state` rows canonical;
+  `location:"legacy-main"` makes
+  `agents/main/agent/openclaw-agent.sqlite` (`auth_profile_store` /
+  `auth_profile_state`, row `primary`) canonical. Both SQLite modes key OAuth
+  profiles as `openai:<email>`; accept only `provider:"openai",type:"oauth"`.
+  The runtime refreshes the canonical token in-process. Legacy
+  `auth-profiles.json`, `auth-state.json`, and `codex-home/auth.json` are
+  archived migration inputs, not recovery or verification surfaces.
+- **openclaw 2026.7 (history)**: the canonical source for our tooling was
+  `/root/.openclaw-main/agents/main/agent/auth-profiles.json`, written by
+  `codex-oauth-refresh.sh`; the runtime itself never reads
   `auth-profiles.json`. It reads (a) the hardcoded inheritance base
   `agents/main/agent/openclaw-agent.sqlite` (`auth_profile_store` row
   `'primary'`, profiles keyed `openai:*`) and (b) each agent's
@@ -198,24 +209,24 @@ How the RUNTIME consumes it depends on the openclaw version:
   **On 7.x, `openclaw doctor --fix` DOES exactly this fan-out** (it migrates
   every agent's JSON into that agent's own DB) — never use it for auth
   migration; use `codex-auth-sync.sh`.
-- **Detect**: `scripts/lib/ensure-codex-auth.sh --check` (exit 1 + names the
-  offending stores). **Remediate**: `scripts/lib/ensure-codex-auth.sh`
-  (converges every derived store back to canonical). The codex-health
-  watchdog independently alerts on `authentication token has been
-  invalidated`.
-- **Re-auth GOTCHA**: `openclaw models auth login --provider openai-codex`
+- **Detect (current)**: `scripts/lib/ensure-codex-auth.sh --check` delegates to
+  the read-only `codex-auth-invariants.sh` on 2026.8 and verifies the selected
+  SQLite ownership/store shape. A confirmed violation needs targeted repair or
+  re-auth; there is no JSON fan-out to converge. On 2026.7, the same command
+  delegates to `codex-auth-sync.sh`, and `ensure-codex-auth.sh` is the
+  remediation. The codex-health watchdog independently alerts on
+  `authentication token has been invalidated`.
+- **Re-auth GOTCHA (pre-2026.8 history)**: `openclaw models auth login --provider openai-codex`
   with no `--agent` writes to the CONFIGURED-default agent (`clio`), NOT
   `main`. Re-auth MUST land in the canonical `main` store — pass
   `--agent main`. On 7.x, follow ANY re-auth with `codex-auth-sync.sh` (the
   login wrote a store the runtime reads, but canonical + the other derived
   stores must be reconverged). **All THREE accounts** (`aaron@muso.ai`,
   `aarondkaufman@gmail.com`, `aaronkaufman@me.com`) must be logged in — a
-  third was linked as of 2026-07-28. Verify with
+  third was linked as of 2026-07-28. On current 2026.8, verify with
   `openclaw --profile main models auth list` (expect three `openai:<email>`
-  oauth profiles) and `jq -r '.profiles|keys[]'` on canonical
-  `auth-profiles.json` (expect the same three under `openai-codex:`).
-  Any account missing from EITHER namespace is invisible to that half of the
-  system — see the profile-ID namespace rule below.
+  OAuth profiles) plus `codex-auth-invariants.sh --check`; inspect the SQLite
+  cell selected by `auth.sharedStore` only when diagnosing a failed invariant.
 
 This generalizes PR #376 (edge/Caroline symlink self-heal + fail-loud
 codex-health watchdog) to the whole fleet. Prose alone is not enforcement —
@@ -266,25 +277,24 @@ The watchdog pages on the `invalid_api_key` signature (main+edge), on the
 **Re-verify codex still serves gpt-5.6 on EVERY openclaw bump.** See RUNBOOK
 §Troubleshooting → "Codex Plugin Floated Off Pin".
 
-**The token LAPSE is a FOURTH, distinct failure — a consequence of keeping the bundled
-`openai` plugin DISABLED.** `authentication token is expired` (`auth error code:
-token_expired`, all three guards CLEAN, `refresh_token_reused`/`invalid_api_key` = 0) is a
-pure OAuth credential lapse. The `openai` plugin stays disabled (on 6.x to dodge #90925; on
-7.x because it loads DESPITE `plugins.allow` and hijacks provider `openai` onto the api-key
-route — hence the explicit `plugins.entries.openai={enabled:false}` in both repo configs).
-That plugin owns BOTH the refresh-on-use machinery AND the device-code login — so nothing
-in-process auto-refreshes codex (it lapses ~every 10 days; upstream openclaw#57399 wontfix)
-AND `openclaw models auth login --provider openai-codex --device-code` fails "No provider
-plugins found" (there is also NO `openclaw models auth refresh` command).
-**Recovery = `scripts/lib/codex-oauth-refresh.sh`** — we do the `grant_type=refresh_token` POST
-to `auth.openai.com/oauth/token` ourselves, write the rotated token into canonical, fan the
-new access token out via `codex-auth-sync.sh` (7.x), then restart (the gateway only loads the
-token at startup). **Prevention = the twice-weekly `codex-token-refresh.timer`** (Sun+Wed
-04:00 UTC, refresh + sync + restart) keeps it always fresh — and on 7.x it is also what makes
-the single-refresher invariant safe: derived stores carry a sentinel refresh token, so only
-this script can ever rotate the chain. `scripts/codex-keepalive.sh` (15m) is the safety-net pager. (`models status --check` always
-exits 1 here — it flags the disabled `openai` provider as "missing", NOT a codex signal.) See
-RUNBOOK §Troubleshooting → "Codex Token Lapse (`token_expired`)" and `docs/lessons/openclaw-and-codex.md`.
+**The token LAPSE was a FOURTH, distinct failure on 6.x/7.x — a consequence of
+keeping the bundled `openai` plugin disabled.** In that historical topology,
+`authentication token is expired` (`auth error code: token_expired`, all three
+guards clean, `refresh_token_reused`/`invalid_api_key` = 0) meant a pure OAuth
+credential lapse. Recovery used `codex-oauth-refresh.sh` to rotate the JSON
+canonical, `codex-auth-sync.sh` to fan out the new access token, and a restart;
+the twice-weekly `codex-token-refresh.timer` prevented recurrence.
+
+**On current 2026.8, the runtime is the sole in-process refresher and that timer
+must remain disabled.** A token-expired incident is diagnosed against the
+SQLite cell selected by `auth.sharedStore`: run
+`scripts/lib/ensure-codex-auth.sh --check`, then
+`openclaw --profile main models auth list`. If native refresh reports the
+session ended, re-auth through the runtime-owned main store with
+`openclaw --profile main models auth login --provider openai --device-code`,
+then re-run both checks and `codex-edge-mirror.sh --check`. Do not use
+`codex-oauth-refresh.sh`, `codex-auth-sync.sh`, or archived JSON as the normal
+2026.8 recovery path; those are pre-2026.8/rollback tools.
 
 **The usage CAP is a FIFTH failure mode — quota, not auth, and the fix is switching
 ACCOUNTS, not tokens.** `You've reached your Codex subscription usage limit` fallback
@@ -353,25 +363,27 @@ action). The access token is well-formed and unexpired, the refresh chain is dea
 (`codex-oauth-refresh.sh` answers `refresh_token_invalidated`, "Your session has ended"),
 and **all three `ensure-*` guards read CLEAN for the entire outage** — nothing is
 structurally wrong, the credential is simply revoked. 2026-07-27: the fleet rode openrouter
-~2h. **Recovery needs a browser**: `scripts/lib/codex-reauth.sh` drives the codex CLI's own
-`login --device-auth` (the vendored binary under `@openclaw/codex`), merges into canonical,
-shreds the scratch credential, syncs and restarts. **`openclaw models auth login --provider
-openai-codex --device-code` does NOT work here** — the `openai` plugin owns that flow and is
-disabled AND off `plugins.allow`; enabling it transiently reintroduces #90925 while main
-self-restarts on memory pressure every ~40-60min. A raw curl to
-`auth.openai.com/oauth/device/code` is Cloudflare-blocked (403).
+~2h. On current 2026.8, recovery needs the runtime-owned `openai` device login
+described above; it writes the SQLite store selected by `auth.sharedStore`.
+`scripts/lib/codex-reauth.sh` and the `openai-codex` login/provider namespace are
+pre-2026.8 recovery paths only. A raw curl to `auth.openai.com/oauth/device/code`
+is Cloudflare-blocked (403).
 
-**Codex profile IDs live in THREE namespaces — do not "unify" them.**
-(1) canonical `auth-profiles.json` uses **`openai-codex:<email>`** — `codex-auth-sync.sh`
-selects on that prefix; (2) the derived runtime store (`auth_profile_store` sqlite) and
-(3) `auth.order.openai` in `openclaw-*.json` both use **`openai:<email>`**. openclaw
+**Codex profile IDs are versioned — do not apply the 7.x namespace split to 2026.8.**
+On current 2026.8, the canonical SQLite store selected by `auth.sharedStore` and
+`auth.order.openai` both use **`openai:<email>`**. On 2026.7, IDs lived in THREE
+namespaces: (1) canonical `auth-profiles.json` used
+**`openai-codex:<email>`** — `codex-auth-sync.sh` selected on that prefix; (2) the
+derived runtime store (`auth_profile_store` SQLite) and (3) `auth.order.openai` in
+`openclaw-*.json` used **`openai:<email>`**. openclaw
 resolves auth.order ids with an EXACT key lookup (`store.profiles[profileId]`) — only the
 provider KEY is normalized, never the id — so an `openai-codex:` entry in auth.order
 resolves to NOTHING and the fallback list is silently empty. That is why nothing failed over
 on 2026-07-27. Conversely, an `openai:`-keyed profile in *canonical* is invisible to
 `codex-auth-sync.sh` (this swallowed a valid recovery credential for 23min the same day).
-Verify live ids with `openclaw --profile main models auth list`; the namespace is gated in
-CI by `scripts/validate-shared-config.sh`.
+Verify current live IDs with `openclaw --profile main models auth list` and
+`codex-auth-invariants.sh --check`; config namespace is gated in CI by
+`scripts/validate-shared-config.sh`.
 
 **DR layer 2 — when the code-level healers themselves fail, an AI healer escalates.**
 `scripts/dr-ai-healer.sh` ("AI-decides, code-executes"): the watchdog fires it when a

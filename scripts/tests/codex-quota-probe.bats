@@ -56,8 +56,8 @@ JSON
   # No `find` shim here on purpose. cqp_resolve_binary used to depend on
   # `find -printf` (a GNU extension BSD/macOS find lacks), and a shim made this
   # suite pass while the real function silently returned nothing on macOS — a
-  # test that proves the shim works, not the code. The function now sorts with
-  # POSIX `ls -t`, so this suite exercises it directly on both platforms.
+  # test that proves the shim works, not the code. The function now consumes
+  # find's null-delimited output directly and selects an executable by mtime.
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
 
   # shellcheck disable=SC1090
@@ -240,6 +240,65 @@ JSON
 @test "cqp_preflight returns 2 when 'app-server --help' fails" {
   STUB_HELP_FAILS=1 run cqp_preflight "$BIN"
   [ "$status" -eq 2 ]
+}
+
+@test "binary resolver accepts the current @openai/codex platform package" {
+  rm -rf "$CODEX_PLUGIN_ROOT/@openclaw"
+  local current="$CODEX_PLUGIN_ROOT/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+  mkdir -p "$(dirname "$current")"
+  cp "$TEST_TMPDIR/bin/codex" "$current"
+  chmod +x "$current"
+  run cqp_resolve_binary
+  [ "$status" -eq 0 ]
+  [ "$output" = "$current" ]
+}
+
+@test "cqp_main fails loud when account enumeration becomes unreadable" {
+  cqp_list_accounts() { printf '%s\n' 'openai-codex:test@x.com'; return 2; }
+  run cqp_main --all
+  [ "$status" -eq 2 ]
+}
+
+@test "cqp_main fails loud when a profile read fails mid-run" {
+  cqp_list_accounts() { printf '%s\n' 'openai-codex:test@x.com'; }
+  cqp_probe_account() { return 2; }
+  run cqp_main --all
+  [ "$status" -eq 2 ]
+}
+
+@test "direct account probe never invokes codex for a SQLite API-key profile" {
+  unset CODEX_AUTH_STORE CAS_LEGACY_JSON
+  export CAS_ROOT="$TEST_TMPDIR/root"
+  local db="$CAS_ROOT/.openclaw-main/state/openclaw.sqlite"
+  local far_future_ms=$(( ($(date +%s) + 100000000) * 1000 ))
+  mkdir -p "$(dirname "$db")"
+  CAS_FIXTURE_EXPIRES="$far_future_ms" node --experimental-sqlite --no-warnings -e '
+const {DatabaseSync}=require("node:sqlite");
+const db=new DatabaseSync(process.argv[1]);
+db.exec("CREATE TABLE config_machine_state(state_key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at_ms INTEGER NOT NULL)");
+const put=db.prepare("INSERT INTO config_machine_state VALUES(?,?,?)");
+put.run("auth.sharedStore",JSON.stringify({location:"state-db"}),Date.now());
+put.run("authProfiles.store",JSON.stringify({profiles:{
+  "openai:api@example.com":{provider:"openai",type:"api_key",access:"API-SECRET",accountId:"acct-api",expires:Number(process.env.CAS_FIXTURE_EXPIRES)}
+}}),Date.now());
+' "$db"
+
+  local marker="$TEST_TMPDIR/api-key-stub-invoked"
+  STUB_MARKER="$marker" run cqp_main --account api@example.com
+  [ "$status" -eq 1 ]
+  [ ! -e "$marker" ]
+}
+
+@test "binary resolver returns non-zero on no matches even from an executable directory" {
+  rm -rf "$CODEX_PLUGIN_ROOT"
+  mkdir -p "$CODEX_PLUGIN_ROOT/executable-cwd"
+  chmod +x "$CODEX_PLUGIN_ROOT/executable-cwd"
+  local previous="$PWD"
+  cd "$CODEX_PLUGIN_ROOT/executable-cwd"
+  run cqp_resolve_binary
+  cd "$previous"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
 }
 
 # ── 7. kill switch ─────────────────────────────────────────────────────────

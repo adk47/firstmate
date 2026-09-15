@@ -65,8 +65,17 @@ umask 077
 CQP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=codex-quota.sh
 . "$CQP_DIR/codex-quota.sh"
+# shellcheck source=codex-auth-store.sh
+. "$CQP_DIR/codex-auth-store.sh"
 
+CQP_AUTH_STORE_EXPLICIT=0
+[ "${CODEX_AUTH_STORE+x}" = x ] && CQP_AUTH_STORE_EXPLICIT=1
 CANON="${CODEX_AUTH_STORE:-/root/.openclaw-main/agents/main/agent/auth-profiles.json}"
+CQP_AUTH_PROFILE="${CQP_AUTH_PROFILE:-main}"
+if [ "$CQP_AUTH_STORE_EXPLICIT" -eq 1 ]; then
+  # shellcheck disable=SC2034 # Read by the sourced codex-auth-store helpers.
+  CAS_LEGACY_JSON="$CANON"
+fi
 PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-/root/.openclaw-main/npm/projects}"
 # MUST match codex-auth-sync.sh:87 byte for byte. scripts/tests/codex-quota-probe.bats
 # asserts that with a drift sentinel — if one file changes alone, CI fails.
@@ -135,16 +144,20 @@ trap '_cqp_cleanup; exit 143' TERM
 # leaves the previous tree in place, so "first glob hit" would silently pin an
 # old binary; same resolution shape as codex-reauth.sh.
 #
-# Sorted with `ls -t` rather than `find -printf '%T@'`: -printf is a GNU
-# extension that BSD/macOS find does not support, and because the caller
-# redirects stderr it fails SILENTLY there (empty output, rc 1) — which reads
-# downstream as "no codex binary" and would take the whole measurement layer
-# offline on a dev machine with no visible reason. `ls -t` is POSIX-portable.
+# Avoid `find -printf '%T@'`: -printf is a GNU extension that BSD/macOS find
+# does not support, and because the caller redirects stderr it fails SILENTLY
+# there (empty output, rc 1) — which reads downstream as "no codex binary" and
+# would take the whole measurement layer offline on a dev machine with no
+# visible reason. Consume null-delimited paths directly, require an executable
+# file, and retain the newest match.
 cqp_resolve_binary() {
-  local b
-  b="$(find "$PLUGIN_ROOT" -type f -path '*@openclaw/codex*' -path '*vendor*' \
-        -name codex -print 2>/dev/null | tr '\n' '\0' \
-      | xargs -0 ls -1t 2>/dev/null | head -n1)"
+  local b="" candidate
+  while IFS= read -r -d '' candidate; do
+    [ -x "$candidate" ] || continue
+    if [ -z "$b" ] || [ "$candidate" -nt "$b" ]; then b="$candidate"; fi
+  done < <(find "$PLUGIN_ROOT" -type f \
+    \( -path '*@openclaw/codex*' -o -path '*@openai/codex*' \) \
+    -path '*vendor*' -name codex -print0 2>/dev/null)
   [ -n "$b" ] && [ -x "$b" ] || return 1
   printf '%s' "$b"
 }
@@ -166,15 +179,24 @@ cqp_preflight() {
 cqp_probe_account() {
   local key="$1" bin="$2"
   local access account expires now_ms min_exp_ms out row src sc
-  access="$(jq -r --arg k "$key" '.profiles[$k].access // empty' "$CANON" 2>/dev/null)"
-  account="$(jq -r --arg k "$key" '.profiles[$k].accountId // empty' "$CANON" 2>/dev/null)"
+  access="$(cas_profile_field "$CQP_AUTH_PROFILE" "$key" access)" || {
+    cqp_log "FATAL: canonical auth store became unreadable while reading $key"
+    return 2
+  }
+  account="$(cas_profile_field "$CQP_AUTH_PROFILE" "$key" accountId)" || {
+    cqp_log "FATAL: canonical auth store became unreadable while reading $key"
+    return 2
+  }
   if [ -z "$access" ]; then
     cqp_log "skip $key: no access token in canonical"
     return 1
   fi
 
   # Layer 2 — expiry margin.
-  expires="$(jq -r --arg k "$key" '(.profiles[$k].expires // 0) | tostring' "$CANON" 2>/dev/null)"
+  expires="$(cas_profile_field "$CQP_AUTH_PROFILE" "$key" expires)" || {
+    cqp_log "FATAL: canonical auth store became unreadable while reading $key"
+    return 2
+  }
   [[ "$expires" =~ ^[0-9]+$ ]] || expires=0
   now_ms=$(( $(date +%s) * 1000 ))
   min_exp_ms=$(( now_ms + CODEX_PROBE_MIN_TOKEN_MIN * 60 * 1000 ))
@@ -258,7 +280,10 @@ cqp_probe_account() {
   fi
   # (b) the real refresh token must appear nowhere in the scratch tree.
   local real_refresh
-  real_refresh="$(jq -r --arg k "$key" '.profiles[$k].refresh // empty' "$CANON" 2>/dev/null)"
+  real_refresh="$(cas_profile_field "$CQP_AUTH_PROFILE" "$key" refresh)" || {
+    cqp_log "SAFETY VIOLATION: canonical auth store became unreadable while verifying the refresh-token boundary for $key"
+    _cqp_cleanup; return 9
+  }
   if [ -n "$real_refresh" ] && [ "$real_refresh" != "$CQP_SENTINEL_REFRESH" ]; then
     # Pattern via STDIN (`-f -`), not argv — same /proc/<pid>/cmdline exposure
     # as above, and it would be absurd for the check that proves the refresh
@@ -287,7 +312,7 @@ cqp_probe_account() {
 
 # cqp_list_accounts — canonical codex profile keys, one per line.
 cqp_list_accounts() {
-  jq -r '.profiles | keys[] | select(startswith("openai-codex:"))' "$CANON" 2>/dev/null
+  cas_list_canonical_keys "$CQP_AUTH_PROFILE"
 }
 
 # cqp_normalize_key <email-or-key>
@@ -317,17 +342,25 @@ cqp_main() {
     return 1
   fi
   command -v jq >/dev/null 2>&1 || { cqp_log "FATAL: jq not found"; return 2; }
-  [ -r "$CANON" ] || { cqp_log "FATAL: canonical store not readable: $CANON"; return 2; }
+  cas_store_available "$CQP_AUTH_PROFILE" || {
+    cqp_log "FATAL: canonical auth store is missing, malformed, or unreadable"
+    return 2
+  }
 
   local bin
   bin="$(cqp_resolve_binary)" || { cqp_log "FATAL: no vendored codex binary under $PLUGIN_ROOT"; return 2; }
   cqp_preflight "$bin" || return 2
 
   local -a keys=()
+  local listed
   if [ "$mode" = one ]; then
     keys=( "$(cqp_normalize_key "$want")" )
   else
-    while IFS= read -r k; do [ -n "$k" ] && keys+=("$k"); done < <(cqp_list_accounts)
+    listed="$(cqp_list_accounts)" || {
+      cqp_log "FATAL: canonical auth store became unreadable while listing accounts"
+      return 2
+    }
+    while IFS= read -r k; do [ -n "$k" ] && keys+=("$k"); done <<< "$listed"
   fi
   [ "${#keys[@]}" -gt 0 ] || { cqp_log "no codex accounts in canonical"; return 1; }
 
@@ -335,6 +368,10 @@ cqp_main() {
   for key in "${keys[@]}"; do
     row="$(cqp_probe_account "$key" "$bin")"; rc=$?
     if [ "$rc" -eq 9 ]; then return 9; fi
+    if [ "$rc" -eq 2 ]; then
+      cqp_log "FATAL: canonical auth store became unreadable while probing $key"
+      return 2
+    fi
     [ "$rc" -eq 0 ] && [ -n "$row" ] || continue
     any=1
     if [ "$json" -eq 1 ]; then
