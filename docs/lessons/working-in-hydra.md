@@ -26,6 +26,41 @@ merged files and muddles the diff). The sequence is `git fetch origin main` then
 `git checkout -B <new-branch> origin/main`, then edit. Exception: intentional PR
 stacking, where you branch B off A and say so explicitly.
 
+**`git reset --soft origin/main` in a long-lived worktree silently REVERTS whatever
+merged since that worktree was created.** `reset --soft` moves HEAD only — it never
+refreshes the working tree — so `reset --soft origin/main` followed by `git add -A`
+stages the worktree's **stale** copies as a diff against the *new* `main`. The result is
+a revert wearing a feature commit's clothes: `git log` and `git show` on the branch tip
+read perfectly fine.
+
+2026-09-16, PR #955: a worktree created off `244fb6da` was re-committed this way across
+several revisions while three of its own sibling PRs merged. The head it produced would
+have set `memory.search.provider` back to `"openai"` on both profiles (re-breaking
+retrieval for six agents, #952), undone the retention stderr/SIGPIPE fix (#953), reverted
+the edge auth-store version gate and **deleted that gate's 266-line test suite outright**
+(#954). CI was fully green on it — every check passed, because the reverted code is
+self-consistent.
+
+Two rules come out of it:
+
+- **Read `git diff origin/main...HEAD --stat` before every push.** More files, or
+  different files, than the PR owns = **stop**. On #955 it showed 11 files for a 3-file
+  PR, which is unmissable once looked at. This is the only cheap tell.
+- **Never `reset --soft origin/main` after `main` has moved.** Either
+  `git rebase origin/main`, or rebuild: fresh worktree off current `main`, then
+  `git checkout <old-branch> -- <only the files the PR owns>`. After a rebuild, *assert*
+  the merged fixes are intact — read the values back, grep for the merged guard, confirm
+  any deleted test files exist again and run them. An absent merge conflict is not
+  evidence of preservation.
+
+`git worktree add origin/main` pins that base forever and does not track later merges,
+so prefer a fresh worktree per PR over reusing one across a merge.
+
+**The QA bot's `REBASE WARNING` is a finding, not procedural noise.** It is the check
+that caught the above, and it was the only thing that did. Treat it like any other
+blocking finding: reproduce it from the diff stat before answering it, and never wave it
+through as a stale-base artifact.
+
 **Reply in-thread to every PR review comment, including the automated QA bot's.** A
 chat-only summary leaves the review thread looking unaddressed; the in-thread reply
 closes the loop visibly for the reviewer and the next reader. Reference the resolving
