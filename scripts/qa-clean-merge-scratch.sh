@@ -54,6 +54,7 @@ KEEP_GLOBS=(
   '*tmp*'                              # any 'tmp'-marked scratch: .tmp-*, tmp_*, *.tmp
   '.bridge-*.json'                     # agent-bridge in-flight request state (#877)
   'bridge-request-*.json'              # same, un-dotted agent-named variant (2026-09-15, #943)
+  'bridge-*.json'                      # agent names bridge payloads by case too (2026-09-16, #950)
   'final-*.json'                       # scout company-finder run scratch (2026-07-21, #719)
   '.company-finder-*.json'             # same, dot-prefixed variant (2026-07-30, #772)
   'finder-input-*.json'                # outreach-discovery dated stage input (2026-08-05, #794)
@@ -65,7 +66,7 @@ KEEP_GLOBS=(
   'package-lock.json'                  # npm install artifact, any workspace (2026-09-08, #915)
   'TOOLS.md.bak-*' '*.md.bak-*'
   'write-activity.log'
-  '*.jpeg' '*.jpg' '*.webp' '*.gif' '*.png' '*.pdf' '*.csv' '*.txt' '*.py' '*.sql'
+  '*.jpeg' '*.jpg' '*.webp' '*.gif' '*.png' '*.pdf' '*.csv' '*.txt' '*.py' '*.sql' '*.sh'
   '.env'
 )
 

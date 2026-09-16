@@ -272,10 +272,19 @@ _cron_store_gateway_read() {
   for (( i = 1; i <= CRON_STORE_READ_TRIES; i++ )); do
     rc=0
     raw=$("$bin" --profile "$profile" cron list --all --json 2>"$err") || rc=$?
-    if [ "$rc" -eq 0 ]; then
+    # An rc-0 read with EMPTY stdout is a failed attempt too, not a store with
+    # no jobs: deploy run 35116340141 (2026-09-16 15:44Z) got exactly that
+    # ~2 min after the Step 6 restart, the smoke test took it as a verdict and
+    # rolled the deploy back while Step 6b's cron.list RPC had succeeded 90 s
+    # earlier and the same command answered 98 KB seconds later. A real empty
+    # store still prints JSON ({"jobs":[]}), never nothing.
+    if [ "$rc" -eq 0 ] && [ -n "$raw" ]; then
       printf '%s' "$raw"
       rm -f "$err"
       return 0
+    fi
+    if [ "$rc" -eq 0 ]; then
+      printf 'cron list --all --json exited 0 with EMPTY output (attempt %s of %s)\n' "$i" "$CRON_STORE_READ_TRIES" >> "$err"
     fi
     [ "$i" -lt "$CRON_STORE_READ_TRIES" ] && sleep "$CRON_STORE_READ_POLL_SECS"
   done

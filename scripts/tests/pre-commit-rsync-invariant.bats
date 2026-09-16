@@ -1983,11 +1983,26 @@ BODY
 # stay registered, or a cleanup can silently expose an open escalation to
 # rsync --delete.
 @test "both agent-bridge request shapes are registered in required_excludes and present in deploy.sh" {
-  for pat in 'workspaces/*/.bridge-*.json' 'workspaces/*/bridge-request-*.json'; do
+  for pat in 'workspaces/*/.bridge-*.json' 'workspaces/*/bridge-request-*.json' 'workspaces/*/bridge-*.json'; do
     run awk '/^required_excludes=\(/{f=1;next} f&&/^\)/{f=0;exit} f' "$HOOK"
     [ "$status" -eq 0 ]
     [[ "$output" == *"\"$pat\""* ]]
     run grep -Fx -- "  --exclude='$pat'" "$HYDRA_REPO/scripts/deploy.sh"
     [ "$status" -eq 0 ]
+  done
+}
+
+# Runtime files an agent writes at a workspace root live in THREE lists that
+# must agree: deploy.sh RSYNC_EXCLUDES (rsync --delete spares them), the hook's
+# required_excludes (a refactor cannot drop the exclude), and .gitignore (an
+# operator's `git add -A` cannot commit a live escalation payload or a one-off
+# poll script). QA on PR #950 found the third list missing for the new shapes.
+@test "workspace-root runtime shapes are in all three lists: deploy excludes, hook required_excludes, .gitignore" {
+  root="${BATS_TEST_DIRNAME}/../.."
+  for pat in 'workspaces/*/bridge-request-*.json' 'workspaces/*/bridge-*.json' 'workspaces/*/*.sh'; do
+    grep -Fxq -- "  --exclude='$pat'" "$root/scripts/deploy.sh"
+    run awk '/^required_excludes=\(/{f=1;next} f&&/^\)/{f=0;exit} f' "$HOOK"
+    [[ "$output" == *"\"$pat\""* ]]
+    grep -Fxq -- "$pat" "$root/.gitignore"
   done
 }

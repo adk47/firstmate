@@ -592,29 +592,30 @@ if needs_target "main"; then
     # is missing channelConfigs metadata (separate tech debt to fix at
     # the plugin source), but the smoke test should not block deploys
     # on stderr-only warnings.
-    LOADED_RAW=$(openclaw --profile main cron list --all --json 2>/dev/null) || LOADED_RAW=""
-    if [ -z "$LOADED_RAW" ]; then
-      fail_check "Main: openclaw cron list --all --json returned nothing (gateway not running?)"
+    # Read through lib/cron-store.sh's retried gateway read (the same helper
+    # deploy.sh Step 6b uses), never a bare single-shot CLI call: run
+    # 35116340141 (2026-09-16 15:44Z) rolled a healthy deploy back on ONE empty
+    # read taken ~2 min after the restart. The helper retries a refused
+    # connection AND an rc-0 empty read, and reports WHY on stderr, which is
+    # kept for the failure message instead of being discarded. rc 2 =
+    # paginated: the durable count cannot be derived from a truncated page, so
+    # it is UNKNOWN and gets its own message rather than a parse failure.
+    CRON_LIST_ERR="$(mktemp)"
+    CRON_COUNT_RC=0
+    LOADED_CRONS=$(cron_store_gateway_durable_count main 2>"$CRON_LIST_ERR") || CRON_COUNT_RC=$?
+    (( CRON_COUNT_RC == 0 )) || LOADED_CRONS="?"
+    if (( CRON_COUNT_RC == 2 )); then
+      fail_check "Main: cron list came back PAGINATED (hasMore=true) — the durable cron count is unobtainable, so the store is unverifiable."
+    elif (( CRON_COUNT_RC != 0 )); then
+      fail_check "Main: cron store read failed after ${CRON_STORE_READ_TRIES} attempt(s): $(tr '\n' ' ' < "$CRON_LIST_ERR" | sed 's/  */ /g')"
+    elif [[ "$EXPECTED_CRONS" == "?" ]]; then
+      fail_check "Main: cron count check failed (expected=? loaded=$LOADED_CRONS) — could not parse /opt/hydra/cron-jobs.json"
+    elif [[ "$LOADED_CRONS" == "$EXPECTED_CRONS" ]]; then
+      pass_check "Main: cron scheduler loaded $LOADED_CRONS jobs (matches repo)"
     else
-      # The durable-cron filter lives ONCE in lib/cron-store.sh so this check
-      # and deploy.sh's Step 6b convergence heal can never drift apart and
-      # disagree about what "loaded" means. rc 2 = paginated: the durable count
-      # cannot be derived from a truncated page (and this openclaw build has no
-      # paging flag), so it is UNKNOWN and gets its own message rather than
-      # being reported as a parse failure.
-      CRON_COUNT_RC=0
-      LOADED_CRONS=$(cron_store_durable_count_from_json "$LOADED_RAW") || CRON_COUNT_RC=$?
-      (( CRON_COUNT_RC == 0 )) || LOADED_CRONS="?"
-      if (( CRON_COUNT_RC == 2 )); then
-        fail_check "Main: cron list came back PAGINATED (hasMore=true) — the durable cron count is unobtainable, so the store is unverifiable. Raw output: $LOADED_RAW"
-      elif [[ "$EXPECTED_CRONS" == "?" || "$LOADED_CRONS" == "?" ]]; then
-        fail_check "Main: cron count check failed (expected=$EXPECTED_CRONS loaded=$LOADED_CRONS) — could not parse JSON. Raw output: $LOADED_RAW"
-      elif [[ "$LOADED_CRONS" == "$EXPECTED_CRONS" ]]; then
-        pass_check "Main: cron scheduler loaded $LOADED_CRONS jobs (matches repo)"
-      else
-        fail_check "Main: cron count mismatch — repo has $EXPECTED_CRONS, gateway loaded $LOADED_CRONS (was the cron file written to the wrong path?)"
-      fi
+      fail_check "Main: cron count mismatch — repo has $EXPECTED_CRONS, gateway loaded $LOADED_CRONS (was the cron file written to the wrong path?)"
     fi
+    rm -f "$CRON_LIST_ERR"
   fi
 
   # -------------------------------------------------------------------

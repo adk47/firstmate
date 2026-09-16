@@ -1550,3 +1550,44 @@ _jobs_full_plus_live_extra() {
   [ "$actual" = "32" ]
   [ "$expected" != "$actual" ]
 }
+
+# --- rc-0 EMPTY output (deploy run 35116340141, 2026-09-16 15:44Z) ----------
+# Serve NOTHING with exit 0 for the first $1 invocations, then $2. This is
+# the shape the smoke test took as a verdict and rolled a deploy back on.
+stub_openclaw_empty_then() {
+  local empty_times="$1" payload="$2"
+  local stub="$TEST_TMPDIR/bin/openclaw"
+  {
+    echo '#!/bin/bash'
+    printf 'n=$(cat %s/attempts 2>/dev/null || echo 0)\n' "$TEST_TMPDIR"
+    printf 'n=$((n+1)); printf "%%s" "$n" > %s/attempts\n' "$TEST_TMPDIR"
+    printf 'if [ "$n" -le %s ]; then exit 0; fi\n' "$empty_times"
+    printf 'cat <<%s\n%s\nPAYLOAD\n' "'PAYLOAD'" "$payload"
+  } > "$stub"
+  chmod +x "$stub"
+  export OPENCLAW_BIN="$stub"
+}
+
+@test "an rc-0 EMPTY read is a failed attempt, not an empty store: retried and recovered (run 35116340141)" {
+  export CRON_STORE_READ_POLL_SECS=0
+  stub_openclaw_empty_then 2 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}'
+  run cron_store_gateway_durable_count main
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+  run cat "$TEST_TMPDIR/attempts"
+  [ "$output" = "3" ]
+}
+
+@test "all attempts rc-0 EMPTY -> fails and says EMPTY output on stderr" {
+  export CRON_STORE_READ_TRIES=2 CRON_STORE_READ_POLL_SECS=0
+  stub_openclaw_empty_then 99 '{"jobs":[]}'
+  run --separate-stderr cron_store_gateway_durable_count main
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"EMPTY output"* ]]
+}
+
+@test "smoke-test.sh reads the cron store through the retried helper, not a bare single-shot CLI call" {
+  smoke="${BATS_TEST_DIRNAME}/../smoke-test.sh"
+  grep -q 'cron_store_gateway_durable_count main' "$smoke"
+  if grep -qE 'LOADED_RAW=\$\(openclaw --profile main cron list --all --json' "$smoke"; then false; fi
+}
