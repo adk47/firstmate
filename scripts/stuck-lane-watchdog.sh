@@ -1,6 +1,65 @@
 #!/bin/bash
 # ──────────────────────────────────────────────────────────────
-# Stuck-Lane Watchdog  (Caroline / edge support)
+# Stuck-Lane Watchdog  (Caroline / edge support  +  live lane-wedge detection)
+#
+# TWO detectors, separate functions, separate state files, separate suites:
+#
+#   1. scan_stuck_lanes        EDGE journal. An abort that did not free the lane
+#                              (action=abort_embedded_run … released=0) —
+#                              Caroline's generated reply discarded.
+#   2. scan_wedged_lanes_live  LIVE gateway state via `diagnostics.lanes`. A lane
+#                              with work QUEUED and NOTHING ACTIVE, observed for
+#                              several consecutive ticks.
+#
+# ── Detector 2 reads STATE, not logs, and that is the whole point ───────────
+# An earlier revision of this detector parsed `lane wait exceeded` from the
+# journal and treated `activeAhead=1 activeNow=0` as a phantom lane owner. That
+# was WRONG, and a QA review caught it. In dist/command-queue-*.js the line is
+# emitted inside `drainLane` AFTER `dequeueLaneQueue(...)`, as a queued task is
+# being STARTED:
+#
+#     const entry = dequeueLaneQueue(state.queue);
+#     const waitedMs = Date.now() - entry.enqueuedAt;
+#     const activeBeforeStart = state.activeTaskIds.size;
+#     ...
+#     if (waitedMs >= entry.warnAfterMs) diagnosticLogger.warn(`lane wait exceeded: …
+#         activeAhead=${entry.activeAheadAtEnqueue} activeNow=${activeBeforeStart} …`)
+#
+# so `activeNow` is the count immediately BEFORE that start and `activeAhead` is
+# a snapshot from ENQUEUE time. `activeAhead=1 activeNow=0` therefore means "one
+# was active when this was enqueued, the lane has since gone idle, and this task
+# is now starting" — a RECOVERY record. Measured 221 of 221 lines carried that
+# pair over 24h, because it is the ordinary shape. Paging on it would alert for
+# lanes that already recovered and prompt a customer-visible gateway restart.
+#
+# `drainLane blocked: … draining=true active=0 queue=N` IS a genuine
+# admission-blocked line, but it fires 0 times in 24h on both gateways (it needs
+# a re-entrant drainLane), so it is not a usable surface either.
+#
+# What IS authoritative is the gateway's own state:
+#
+#   $ openclaw --profile main gateway call diagnostics.lanes --json
+#   {"ts":…,"lanes":[{"lane":"session:agent:ops:main","queuedCount":3,
+#                     "activeCount":0,"maxConcurrent":1,"draining":false,
+#                     "generation":0,"blockedBy":null}, …]}
+#
+# A wedge is then directly observable: queuedCount > 0 with activeCount == 0.
+# Session lanes are safe to read this way because `retireIdleScopedCommandLane`
+# only removes a `session:`-prefixed lane when it is NOT draining, has zero
+# active tasks AND **queue.length == 0** — so a lane with anything queued cannot
+# be reaped and is always present in this list.
+#
+# Two exclusions, both load-bearing:
+#   - `maxConcurrent == 0` is an administratively disabled lane (hook-dispatch
+#     reads q=0 a=0 max=0 blockedBy=lane today). It can never run anything, so
+#     queued work there is a config question, not a wedge.
+#   - a single observation is not enough. A dequeue leaves a sub-millisecond
+#     window where queued>0 and active==0 legitimately, so a lane must be seen
+#     wedged on STUCK_LANE_LIVE_MIN_TICKS consecutive ticks (default 3, i.e.
+#     ~4-6 min at the 2-minute cron cadence) before it pages.
+#
+# DETECTION ONLY — no auto-heal. A gateway restart is the only known clearer and
+# main restarts are customer-visible, so that stays a human decision.
 #
 # Alerts #clio_devops when the EDGE gateway's stuck-session recovery
 # force-aborts a wedged agent run WITHOUT freeing the lane — the moment a
@@ -38,10 +97,21 @@
 # journald and the devops bot token.
 #
 # Flags:
-#   --dry-run   compute + print the alert block to stdout, do NOT post to Slack.
-#               State IS still advanced (faithful dedupe rehearsal); point
-#               STUCK_LANE_STATE_FILE at a throwaway path to rehearse without
-#               consuming watermarks.
+#   --dry-run   compute + print the alert block to stdout, do NOT post to Slack,
+#               and NEVER mutate a production watermark.
+#
+#               Each detector keeps its own state file, and a rehearsal that
+#               wrote an alert epoch would suppress the next REAL page for the
+#               whole cooldown while looking like a successful rehearsal. So any
+#               state path still at its DEFAULT is shadowed by a temp COPY for
+#               the run: reads stay faithful, so dedupe and streak behaviour are
+#               genuinely rehearsed, and writes land in the copy.
+#
+#               A path supplied EXPLICITLY via STUCK_LANE_STATE_FILE or
+#               STUCK_LANE_LIVE_STATE_FILE is used as given and IS written — that
+#               is how the bats suites rehearse multi-tick behaviour. Relying on
+#               "remember to redirect the env var" was the old contract, and it
+#               was a footgun: it only named ONE of the two state files.
 #
 # Env knobs (mainly for tests — defaults target the live edge gateway):
 #   STUCK_LANE_JOURNAL_FILE        pre-captured journal text (tests). Default:
@@ -55,10 +125,22 @@
 #   STUCK_LANE_EDGE_CONFIG         edge openclaw.json (default /root/.openclaw-edge/openclaw.json)
 #   STUCK_LANE_LOCKFILE            single-run lock
 #   STUCK_LANE_SKIP_HOST_GUARD     1 = skip the ovh-node-8 guard (tests)
+#   STUCK_LANE_LIVE_PROFILES       profiles to poll (default "main edge")
+#   STUCK_LANE_LIVE_SNAPSHOT_DIR   pre-captured diagnostics.lanes JSON per
+#                                  profile (tests): <dir>/<profile>.json.
+#                                  Default: live `gateway call`.
+#   STUCK_LANE_LIVE_STATE_FILE     per-lane streak + last-alert store
+#   STUCK_LANE_LIVE_MIN_TICKS      consecutive wedged observations before paging
+#                                  (default 3)
+#   OPENCLAW_BIN                   openclaw binary (tests stub this)
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
 LOGPREFIX="[stuck-lane-watchdog $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
+# Whether each state path was EXPLICITLY supplied. --dry-run uses this to
+# refuse to mutate a PRODUCTION watermark (see the dry-run block below).
+EDGE_STATE_EXPLICIT=0; [ -n "${STUCK_LANE_STATE_FILE+x}" ] && EDGE_STATE_EXPLICIT=1
+LIVE_STATE_EXPLICIT=0; [ -n "${STUCK_LANE_LIVE_STATE_FILE+x}" ] && LIVE_STATE_EXPLICIT=1
 JOURNAL_FILE="${STUCK_LANE_JOURNAL_FILE:-}"
 LOOKBACK="${STUCK_LANE_LOOKBACK:-15 min ago}"
 STATE_FILE="${STUCK_LANE_STATE_FILE:-/var/lib/stuck-lane-watchdog/seen.json}"
@@ -68,6 +150,13 @@ EDGE_CONFIG="${STUCK_LANE_EDGE_CONFIG:-/root/.openclaw-edge/openclaw.json}"
 SKIP_HOST_GUARD="${STUCK_LANE_SKIP_HOST_GUARD:-0}"
 GATEWAY_UNIT="openclaw-gateway-edge"
 DRY_RUN=0
+
+# ── Detector 2: live lane state ─────────────────────────────────────────────
+LIVE_PROFILES="${STUCK_LANE_LIVE_PROFILES:-main edge}"
+LIVE_SNAPSHOT_DIR="${STUCK_LANE_LIVE_SNAPSHOT_DIR:-}"
+LIVE_STATE_FILE="${STUCK_LANE_LIVE_STATE_FILE:-/var/lib/stuck-lane-watchdog/live-lanes.json}"
+LIVE_MIN_TICKS="${STUCK_LANE_LIVE_MIN_TICKS:-3}"
+OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
 
 # slack-notify.sh reads this (target channel).
 export SLACK_CHANNEL="${STUCK_LANE_SLACK_CHANNEL:-C0ADV2W76G4}"  # #clio_devops
@@ -193,12 +282,24 @@ for conv_id, info in pending.items():
     prev = state.get(conv_id)
     prev_epoch = prev.get("epoch", 0.0) if isinstance(prev, dict) else 0.0
     # Alert unless we paged this conv within the cooldown window.
-    within_cooldown = prev is not None and info["epoch"] and prev_epoch and (info["epoch"] - prev_epoch) < cooldown
-    new_state[conv_id] = {"ts": info["ts"], "epoch": info["epoch"]}
+    # `0 <= elapsed`, not just `elapsed < cooldown`: a FUTURE-dated watermark
+    # (clock correction, manual state repair) makes elapsed NEGATIVE, and every
+    # negative value satisfies `< cooldown`, so a real wedge would be suppressed
+    # until wall time caught up. A negative elapsed is corrupt state and falls
+    # through to alert, which rewrites and self-heals it.
+    _elapsed = (info["epoch"] - prev_epoch) if (info["epoch"] and prev_epoch) else None
+    within_cooldown = prev is not None and _elapsed is not None and 0 <= _elapsed < cooldown
     if not seeded:
-        continue  # first-ever run: seed silently, no backlog page-storm
-    if within_cooldown:
+        # First-ever run: seed EVERY observed conv so the backlog never pages.
+        new_state[conv_id] = {"ts": info["ts"], "epoch": info["epoch"]}
         continue
+    if within_cooldown:
+        # Do NOT advance the watermark on a suppressed tick. This is the
+        # last-ALERT epoch, not last-seen: a conv that stays wedged emits fresh
+        # aborts every tick, so advancing here slides the window forward forever
+        # and the conv pages once and then never again.
+        continue
+    new_state[conv_id] = {"ts": info["ts"], "epoch": info["epoch"]}
     alerts.append((conv_id, info["count"], info["ts"]))
 
 # Prune the conv set so it can't grow unbounded (keep most recent 2000 by epoch).
@@ -247,6 +348,163 @@ PYEOF
 }
 
 # ──────────────────────────────────────────────────────────────
+# capture_live_lanes <profile> <out_file>
+# Snapshot one profile's live lane table. Returns the gateway call's status —
+# never `|| true`. An unreadable snapshot means we observed NOTHING, which is
+# not the same as nothing being wrong, and the caller refuses on it.
+# ──────────────────────────────────────────────────────────────
+capture_live_lanes() {
+  local profile="$1" out="$2"
+  if [ -n "$LIVE_SNAPSHOT_DIR" ]; then
+    # Test seam: a pre-captured snapshot stands in for the gateway.
+    [ -f "$LIVE_SNAPSHOT_DIR/$profile.json" ] || return 3
+    cat "$LIVE_SNAPSHOT_DIR/$profile.json" > "$out" || return 3
+    return 0
+  fi
+  "$OPENCLAW_BIN" --profile "$profile" gateway call diagnostics.lanes --json > "$out" 2>/dev/null
+}
+
+# ──────────────────────────────────────────────────────────────
+# scan_wedged_lanes_live — detector 2's pure core (see header).
+#   $1 snapshot_dir  $2 state_file  $3 payload_out  $4 persist(0|1)
+# Reads <snapshot_dir>/<profile>.json for each profile in $LIVE_PROFILES,
+# advances a per-lane consecutive-wedge streak, and alerts on lanes whose streak
+# reaches LIVE_MIN_TICKS and whose last alert is older than COOLDOWN.
+# ──────────────────────────────────────────────────────────────
+scan_wedged_lanes_live() {
+  SNAPSHOT_DIR="$1" STATE_FILE="$2" PAYLOAD_OUT="$3" PERSIST="$4" \
+  SLACK_CHANNEL="$SLACK_CHANNEL" COOLDOWN="$COOLDOWN" MIN_TICKS="$LIVE_MIN_TICKS" \
+  PROFILES="$LIVE_PROFILES" python3 - <<'PYLIVE'
+import json, os, time
+
+snapshot_dir = os.environ["SNAPSHOT_DIR"]
+state_file   = os.environ["STATE_FILE"]
+payload_out  = os.environ["PAYLOAD_OUT"]
+persist      = os.environ.get("PERSIST", "1") == "1"
+channel      = os.environ["SLACK_CHANNEL"]
+cooldown     = int(os.environ.get("COOLDOWN", "21600"))
+min_ticks    = max(1, int(os.environ.get("MIN_TICKS", "3")))
+profiles     = os.environ.get("PROFILES", "main edge").split()
+
+now = time.time()
+seeded = os.path.exists(state_file)
+try:
+    with open(state_file) as f:
+        state = json.load(f)
+    if not isinstance(state, dict):
+        state = {}
+except Exception:
+    state = {}
+
+new_state = {}
+alerts = []
+
+for profile in profiles:
+    path = os.path.join(snapshot_dir, f"{profile}.json")
+    try:
+        with open(path) as f:
+            snap = json.load(f)
+    except Exception:
+        # The caller already refused on a failed capture; a snapshot that is
+        # missing HERE would silently drop a profile, so skip it without
+        # touching its lanes' streaks rather than resetting them to healthy.
+        for key, val in state.items():
+            if key.startswith(f"{profile}\t"):
+                new_state[key] = val
+        continue
+    lanes = snap.get("lanes")
+    if not isinstance(lanes, list):
+        for key, val in state.items():
+            if key.startswith(f"{profile}\t"):
+                new_state[key] = val
+        continue
+
+    for lane in lanes:
+        if not isinstance(lane, dict):
+            continue
+        name = lane.get("lane")
+        if not isinstance(name, str) or not name:
+            continue
+        queued = lane.get("queuedCount")
+        active = lane.get("activeCount")
+        maxc   = lane.get("maxConcurrent")
+        if not all(isinstance(v, int) for v in (queued, active, maxc)):
+            continue   # malformed row: never guess
+        key = f"{profile}\t{name}"
+        prev = state.get(key) if isinstance(state.get(key), dict) else {}
+        prev_epoch = prev.get("epoch", 0.0) or 0.0
+
+        # maxConcurrent == 0 is an administratively DISABLED lane. It can never
+        # run anything, so queued work there is a config question, not a wedge.
+        wedged = queued > 0 and active == 0 and maxc > 0
+        if not wedged:
+            continue   # healthy: drop the key, which resets the streak
+
+        streak = int(prev.get("streak", 0) or 0) + 1
+        entry = {"streak": streak, "epoch": prev_epoch, "queued": queued,
+                 "draining": bool(lane.get("draining")),
+                 "blockedBy": lane.get("blockedBy")}
+
+        if streak < min_ticks:
+            new_state[key] = entry      # building toward the threshold
+            continue
+
+        _elapsed = (now - prev_epoch) if prev_epoch else None
+        within_cooldown = _elapsed is not None and 0 <= _elapsed < cooldown
+        if not seeded:
+            entry["epoch"] = now        # first-ever run seeds silently
+            new_state[key] = entry
+            continue
+        if within_cooldown:
+            new_state[key] = entry      # keep the streak, do NOT re-arm epoch
+            continue
+        entry["epoch"] = now
+        new_state[key] = entry
+        alerts.append((profile, name, entry))
+
+if persist:
+    d = os.path.dirname(state_file)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = state_file + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(new_state, f, indent=2)
+    os.replace(tmp, state_file)
+
+if not alerts:
+    raise SystemExit(0)
+
+alerts.sort(key=lambda a: -a[2]["queued"])
+lines_out = [
+    f":warning: *Wedged lane(s) — work queued with nothing running ({len(alerts)})*",
+    f"Read from the gateway's own `diagnostics.lanes`, not inferred from logs: each lane "
+    f"below has `queuedCount > 0` and `activeCount == 0` on {min_ticks} consecutive checks "
+    f"(~{min_ticks * 2} min), so admission is genuinely stalled rather than momentarily between tasks.",
+]
+for profile, name, e in alerts:
+    extra = []
+    if e.get("draining"):
+        extra.append("draining=true")
+    if e.get("blockedBy"):
+        extra.append(f"blockedBy={e['blockedBy']}")
+    suffix = f" ({', '.join(extra)})" if extra else ""
+    lines_out.append(f"• *{profile}* — `{name}` queued={e['queued']} active=0, "
+                     f"{e['streak']} consecutive checks{suffix}")
+lines_out.append(
+    "_Detection only — no auto-heal._ Confirm with "
+    "`openclaw --profile <p> gateway call diagnostics.lanes --json` before acting. A gateway "
+    "restart is the only known clearer and restarts are customer-visible, so that is a human call."
+)
+text = "\n".join(lines_out)
+
+with open(payload_out, "w") as f:
+    json.dump({"channel": channel, "text": text}, f)
+
+print(text)
+PYLIVE
+}
+
+# ──────────────────────────────────────────────────────────────
 # Inline self-test — runs on EVERY invocation (~30ms). Guards the failure that
 # would make THIS watchdog itself rot silently: a detector that no longer
 # detects, or one that fires on a lane that WAS released. Throwaway temp paths.
@@ -280,8 +538,53 @@ JNL
   return 0
 }
 
+# Detector 2's own self-test. Four synthetic lanes pin the whole discriminator:
+# wedged-and-over-threshold must FIRE; nothing-queued, something-active, and a
+# maxConcurrent=0 disabled lane must all be SUPPRESSED.
+_self_test_live_lanes() {
+  local td out bullets
+  td="$(mktemp -d)"
+  trap 'rm -rf "$td"' RETURN
+  mkdir -p "$td/snap"
+  cat > "$td/snap/main.json" <<'SNAP'
+{"ts":1,"lanes":[
+ {"lane":"session:agent:wedged:main","queuedCount":3,"activeCount":0,"maxConcurrent":1,"draining":false,"generation":0,"blockedBy":null},
+ {"lane":"session:agent:emptyqueue:main","queuedCount":0,"activeCount":0,"maxConcurrent":1,"draining":false,"generation":0,"blockedBy":null},
+ {"lane":"session:agent:busy:main","queuedCount":3,"activeCount":1,"maxConcurrent":1,"draining":false,"generation":0,"blockedBy":null},
+ {"lane":"hook-dispatch","queuedCount":3,"activeCount":0,"maxConcurrent":0,"draining":false,"generation":0,"blockedBy":"lane"}
+]}
+SNAP
+  # Pre-seeded state: the wedged lane already has streak 2, so this tick is its
+  # third consecutive observation and it crosses MIN_TICKS.
+  printf '%s\n' '{"main\tsession:agent:wedged:main":{"streak":2,"epoch":0}}' > "$td/state.json"
+  out="$(COOLDOWN=21600 LIVE_MIN_TICKS=3 LIVE_PROFILES=main \
+        scan_wedged_lanes_live "$td/snap" "$td/state.json" "$td/payload.json" 0 2>/dev/null || true)"
+  if ! printf '%s' "$out" | grep -q "session:agent:wedged:main"; then
+    echo "$LOGPREFIX SELF-TEST FAIL: live detector missed a wedged lane at its threshold" >&2
+    return 1
+  fi
+  local bad
+  for bad in emptyqueue busy hook-dispatch; do
+    if printf '%s' "$out" | grep -q "$bad"; then
+      echo "$LOGPREFIX SELF-TEST FAIL: live detector flagged '$bad' (must be suppressed)" >&2
+      return 1
+    fi
+  done
+  bullets="$(printf '%s\n' "$out" | grep -c '^• ' || true)"
+  if [ "$bullets" != "1" ]; then
+    echo "$LOGPREFIX SELF-TEST FAIL: live detector expected 1 alert bullet, got $bullets" >&2
+    return 1
+  fi
+  return 0
+}
+
 if ! _self_test; then
   log "ABORT: self-test failed — refusing to run with a broken detector"
+  exit 3
+fi
+
+if ! _self_test_live_lanes; then
+  log "ABORT: live-lane self-test failed — refusing to run with a broken detector"
   exit 3
 fi
 
@@ -300,48 +603,128 @@ if [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 # Capture the journal window (unless a fixture was supplied for tests).
+# The capture STATUS is preserved, not `|| true`: an unreadable journal yields an
+# empty file, the scan reads zero lines, and the detector would report "nothing
+# new" having observed NOTHING. An EMPTY but SUCCESSFUL capture (rc 0, no
+# matching lines) is healthy-quiet and stays silent.
 CLEANUP_JOURNAL=0
+EDGE_CAPTURE_RC=0
 if [ -z "$JOURNAL_FILE" ]; then
   JOURNAL_FILE="$(mktemp)"
   CLEANUP_JOURNAL=1
-  journalctl -u "$GATEWAY_UNIT" --since "$LOOKBACK" --no-pager -o short-iso 2>/dev/null > "$JOURNAL_FILE" || true
+  journalctl -u "$GATEWAY_UNIT" --since "$LOOKBACK" --no-pager -o short-iso 2>/dev/null > "$JOURNAL_FILE" || EDGE_CAPTURE_RC=$?
 fi
 
-PAYLOAD_FILE="$(mktemp)"
-trap '[ "$CLEANUP_JOURNAL" -eq 1 ] && rm -f "$JOURNAL_FILE"; rm -f "$PAYLOAD_FILE"' EXIT
+# Snapshot each profile's live lane table. Same rule: a failed capture refuses.
+LIVE_SNAP_DIR="$(mktemp -d)"
+LIVE_CAPTURE_RC=0
+if [ -z "$LIVE_SNAPSHOT_DIR" ]; then
+  for _p in $LIVE_PROFILES; do
+    # `|| LIVE_CAPTURE_RC=$?`, NOT `if ! capture …; then rc=$?`. Inside the body
+    # of a negated condition `$?` is the status of the NEGATION, which is always
+    # 0 — so the failure would be recorded as success. My own capture-failure
+    # test caught exactly that.
+    LIVE_CAPTURE_RC=0
+    capture_live_lanes "$_p" "$LIVE_SNAP_DIR/$_p.json" || LIVE_CAPTURE_RC=$?
+    if [ "$LIVE_CAPTURE_RC" -ne 0 ]; then
+      # Name the profile HERE — the shared _run_detector cannot know which one
+      # failed, and "the capture failed" without a profile is a worse page.
+      log "LANE-SNAPSHOT-FAILED: \`gateway call diagnostics.lanes\` for profile '$_p' exited $LIVE_CAPTURE_RC"
+      break
+    fi
+  done
+  LIVE_SNAPSHOT_DIR="$LIVE_SNAP_DIR"
+fi
 
-# Detect WITHOUT persisting (PERSIST=0): the watermark may only advance once
-# the alert is actually delivered, else a token/channel/CLI outage marks the
-# wedge "seen" and the only out-of-process page is never retried. The commit
-# re-runs the scan over the SAME captured journal with PERSIST=1 (deterministic:
-# identical input + unchanged state ⇒ identical detection, now written).
-alert_block="$(scan_stuck_lanes "$JOURNAL_FILE" "$STATE_FILE" "$PAYLOAD_FILE" 0 || true)"
-commit_watermark() {
-  scan_stuck_lanes "$JOURNAL_FILE" "$STATE_FILE" /dev/null 1 >/dev/null || true
+PAYLOAD_DIR="$(mktemp -d)"
+DRY_STATE_DIR=""
+trap '[ "$CLEANUP_JOURNAL" -eq 1 ] && rm -f "$JOURNAL_FILE"; rm -rf "$PAYLOAD_DIR" "$LIVE_SNAP_DIR" ${DRY_STATE_DIR:+"$DRY_STATE_DIR"}' EXIT
+
+# --dry-run must not consume a production watermark. Shadow any state path still
+# at its DEFAULT with a temp copy; an absent source stays absent in the copy, so
+# first-run semantics are rehearsed faithfully too.
+if [ "$DRY_RUN" -eq 1 ]; then
+  DRY_STATE_DIR="$(mktemp -d)"
+  if [ "$EDGE_STATE_EXPLICIT" -eq 0 ]; then
+    cp "$STATE_FILE" "$DRY_STATE_DIR/edge.json" 2>/dev/null || true
+    STATE_FILE="$DRY_STATE_DIR/edge.json"
+    log "DRY-RUN: edge watermark shadowed (production state will NOT be mutated)."
+  fi
+  if [ "$LIVE_STATE_EXPLICIT" -eq 0 ]; then
+    cp "$LIVE_STATE_FILE" "$DRY_STATE_DIR/live.json" 2>/dev/null || true
+    LIVE_STATE_FILE="$DRY_STATE_DIR/live.json"
+    log "DRY-RUN: live-lane watermark shadowed (production state will NOT be mutated)."
+  fi
+fi
+
+# ──────────────────────────────────────────────────────────────
+# _run_detector <label> <scan_fn> <input> <state_file> <quiet_msg> <capture_rc>
+# One detector's detect → deliver → commit cycle. Returns 0 on nothing-to-do or
+# a confirmed delivery, 1 when a capture failed, the scan crashed, or a post was
+# attempted and NOT confirmed.
+#
+# Detect WITHOUT persisting (PERSIST=0): the watermark may only advance once the
+# alert is actually delivered, else a token/channel/CLI outage marks the wedge
+# "seen" and the only out-of-process page is never retried. The commit re-runs
+# the scan over the SAME captured input with PERSIST=1 (deterministic: identical
+# input + unchanged state ⇒ identical detection, now written).
+#
+# quiet_msg is a PARAMETER, not derived from the label: the edge detector's
+# "OK: no new stuck/discarded lanes." is an operator-visible log contract that
+# existing tests assert on.
+# ──────────────────────────────────────────────────────────────
+_run_detector() {
+  local label="$1" scan_fn="$2" input="$3" state="$4" quiet_msg="$5" capture_rc="${6:-0}"
+  local alert_block payload rc=0 crc=0
+
+  if [ "$capture_rc" -ne 0 ]; then
+    log "CAPTURE-FAILED[$label]: input capture exited $capture_rc, so this tick observed NOTHING and that is not the same as nothing being wrong. State NOT advanced; the next cron tick retries."
+    return 1
+  fi
+
+  payload="${PAYLOAD_DIR}/${label}.json"
+  # Capture the scan's STATUS, never `|| true`. The scan exits 0 both with and
+  # without alerts, so a non-zero status is a genuine crash.
+  alert_block="$("$scan_fn" "$input" "$state" "$payload" 0)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "DETECTOR-FAILED[$label]: $scan_fn exited $rc — this tick detected NOTHING. State NOT advanced."
+    return 1
+  fi
+
+  if [ -z "$alert_block" ]; then
+    "$scan_fn" "$input" "$state" /dev/null 1 >/dev/null || crc=$?
+    if [ "$crc" -ne 0 ]; then
+      log "STATE-COMMIT-FAILED[$label]: $scan_fn exited $crc while persisting."
+      return 1
+    fi
+    log "$quiet_msg"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "DRY-RUN[$label]: would post the following to ${SLACK_CHANNEL}:"
+    printf '%s\n' "$alert_block"
+    "$scan_fn" "$input" "$state" /dev/null 1 >/dev/null || crc=$?
+    [ "$crc" -eq 0 ] || { log "STATE-COMMIT-FAILED[$label]: exited $crc"; return 1; }
+    return 0
+  fi
+
+  log "Posting [$label] alert to ${SLACK_CHANNEL}."
+  printf '%s\n' "$alert_block"
+  if slack_notify_payload_file_status "$payload"; then
+    "$scan_fn" "$input" "$state" /dev/null 1 >/dev/null || crc=$?
+    [ "$crc" -eq 0 ] || { log "STATE-COMMIT-FAILED[$label]: alert WAS delivered but persisting exited $crc — expect a duplicate page next tick."; return 1; }
+    return 0
+  fi
+  log "ALERT-DELIVERY-FAILED[$label]: Slack post not confirmed — state NOT advanced; the next cron tick will re-detect and retry."
+  return 1
 }
 
-if [ -z "$alert_block" ]; then
-  # Nothing to deliver — safe to commit (this is also the first-run seeding
-  # path, which MUST persist or every run stays "first run" and never alerts).
-  commit_watermark
-  log "OK: no new stuck/discarded lanes."
-  exit 0
-fi
-
-if [ "$DRY_RUN" -eq 1 ]; then
-  log "DRY-RUN: would post the following to ${SLACK_CHANNEL}:"
-  printf '%s\n' "$alert_block"
-  # Documented dry-run contract: state IS still advanced (faithful dedupe
-  # rehearsal; use a throwaway STUCK_LANE_STATE_FILE to rehearse for free).
-  commit_watermark
-  exit 0
-fi
-
-log "Posting stuck-lane alert to ${SLACK_CHANNEL}."
-printf '%s\n' "$alert_block"
-if slack_notify_payload_file_status "$PAYLOAD_FILE"; then
-  commit_watermark
-else
-  log "ALERT-DELIVERY-FAILED: Slack post not confirmed — watermark NOT advanced; the next cron tick will re-detect and retry."
-  exit 1
-fi
+# Both detectors always run: they cover different surfaces, and the edge
+# reply-loss alarm is the one with a customer on the other end.
+RC=0
+_run_detector "edge-intercom" scan_stuck_lanes "$JOURNAL_FILE" "$STATE_FILE" \
+  "OK: no new stuck/discarded lanes." "$EDGE_CAPTURE_RC" || RC=1
+_run_detector "live-lanes" scan_wedged_lanes_live "$LIVE_SNAPSHOT_DIR" "$LIVE_STATE_FILE" \
+  "OK[live-lanes]: no lane queued with nothing running." "$LIVE_CAPTURE_RC" || RC=1
+exit "$RC"

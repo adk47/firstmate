@@ -65,12 +65,20 @@
 #     incident, PR #450) that the chain-reshape CI gate can't reach.
 #
 #   /etc/cron.d/stuck-lane-watchdog
-#     Schedules scripts/stuck-lane-watchdog.sh every 2 minutes to alert
-#     #clio_devops when the EDGE gateway force-aborts a wedged agent run
-#     without releasing the lane (action=abort_embedded_run … released=0)
-#     — the moment Caroline's generated reply is discarded (upstream
-#     openclaw #97538). Ops backstop to the in-plugin dispatch-timeout
-#     page; fires from journald even if the plugin path is down.
+#     Schedules scripts/stuck-lane-watchdog.sh every 2 minutes. TWO detectors:
+#       EDGE journal — an abort that did not release the lane
+#         (action=abort_embedded_run … released=0), the moment Caroline's
+#         generated reply is discarded (upstream openclaw #97538). Ops backstop
+#         to the in-plugin dispatch-timeout page; fires from journald even if
+#         the plugin path is down.
+#       LIVE lane state — polls each profile's `diagnostics.lanes` and alerts on
+#         a lane with work QUEUED and NOTHING ACTIVE across several consecutive
+#         ticks. Reads current gateway state, NOT the journal: the
+#         `lane wait exceeded` line is emitted as a queued task STARTS, so it is
+#         a recovery record and cannot prove a lane is stuck now. Detection
+#         only — a restart is the only known clearer and restarts are
+#         customer-visible, so that stays a human decision.
+#     Both always run; a capture failure in one does not silence the other.
 #
 #   /etc/cron.d/prod-log-alert-watchdog
 #     Schedules scripts/prod-log-alert-watchdog.sh every 5 minutes

@@ -48,10 +48,20 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 
 # $1 (optional): override STUCK_LANE_COOLDOWN_SECONDS
 run_wd() {
+  # Pin the LIVE-lane detector at an empty snapshot dir. This is hermeticity,
+  # not tidiness: unset, the script shells out to
+  # `openclaw --profile <p> gateway call diagnostics.lanes`, and this suite runs
+  # ON node-8 — it would poll the real gateways mid-test. Its own cases live in
+  # stuck-lane-watchdog-live-lanes.bats.
+  mkdir -p "$TEST_TMPDIR/snap-empty"
+  printf '%s\n' '{"ts":1,"lanes":[]}' > "$TEST_TMPDIR/snap-empty/main.json"
+  printf '%s\n' '{"ts":1,"lanes":[]}' > "$TEST_TMPDIR/snap-empty/edge.json"
   run env \
     STUCK_LANE_SKIP_HOST_GUARD=1 \
     STUCK_LANE_JOURNAL_FILE="$JNL" \
     STUCK_LANE_STATE_FILE="$STATE" \
+    STUCK_LANE_LIVE_SNAPSHOT_DIR="$TEST_TMPDIR/snap-empty" \
+    STUCK_LANE_LIVE_STATE_FILE="$TEST_TMPDIR/live-state.json" \
     STUCK_LANE_EDGE_CONFIG="$TEST_TMPDIR/absent.json" \
     STUCK_LANE_INTERCOM_WORKSPACE="wkspc" \
     STUCK_LANE_COOLDOWN_SECONDS="${1:-21600}" \
@@ -129,10 +139,16 @@ run_wd() {
 
 # Live-path runner (no --dry-run). $1 = extra env assignments via env(1) args.
 run_wd_live() {
+  # Same pin, and it matters MORE here: this is the live delivery path.
+  mkdir -p "$TEST_TMPDIR/snap-empty-live"
+  printf '%s\n' '{"ts":1,"lanes":[]}' > "$TEST_TMPDIR/snap-empty-live/main.json"
+  printf '%s\n' '{"ts":1,"lanes":[]}' > "$TEST_TMPDIR/snap-empty-live/edge.json"
   run env \
     STUCK_LANE_SKIP_HOST_GUARD=1 \
     STUCK_LANE_JOURNAL_FILE="$JNL" \
     STUCK_LANE_STATE_FILE="$STATE" \
+    STUCK_LANE_LIVE_SNAPSHOT_DIR="$TEST_TMPDIR/snap-empty-live" \
+    STUCK_LANE_LIVE_STATE_FILE="$TEST_TMPDIR/live-state-live.json" \
     STUCK_LANE_LOCKFILE="$TEST_TMPDIR/lock" \
     STUCK_LANE_EDGE_CONFIG="$TEST_TMPDIR/absent.json" \
     STUCK_LANE_INTERCOM_WORKSPACE="wkspc" \
