@@ -93,9 +93,14 @@
 #             (the disk reaper is already eating cron entries)
 #   CRITICAL  agent PROTECTED entry count >= maxEntries
 #             (the entry reaper can spare nothing removable — issue #829)
-#   CRITICAL  agent has >=1 ENABLED cron but ZERO ":cron:" keys in sessions.json
+#   CRITICAL  agent has >=1 ENABLED cron that HAS FIRED under its current
+#             registration, but ZERO **base** ":cron:<jobId>" keys
 #             (the decisive wedge signature — this is what a live outage looks
-#             like, and what would have caught 2026-07-27 on day one)
+#             like, and what would have caught 2026-07-27 on day one. "Base"
+#             excludes the ":run:<runId>" children, which openclaw 2.0's cron
+#             reaper deletes after cron.sessionRetention (24h default) as
+#             designed — see _cron_key_count for why counting them together
+#             made this read as a false positive on 2026-09-16)
 #   WARN      agent sessions bytes > SESSION_BUDGET_WARN_RATIO * maxDiskBytes
 #   WARN      agent protected entries > SESSION_BUDGET_WARN_RATIO * maxEntries
 #
@@ -366,18 +371,50 @@ _agent_bytes() {
   _dir_bytes "$STATE_ROOT/.openclaw-$profile/agents/$agent/sessions"
 }
 
-# _cron_key_count <profile> <agent> — number of ":cron:" keys for this agent.
-# 7.1: reads the agent's sessions.json. 2026.8+: filters the cached
+# _cron_key_count <profile> <agent> — number of BASE cron session keys for this
+# agent. 7.1: reads the agent's sessions.json. 2026.8+: filters the cached
 # `sessions --all-agents --json` array by agentId instead (see the header
 # comment on the `.sessions[]` shape assumption). Prints -1 when the source is
 # unreadable/unparseable so callers can distinguish "no data" from a genuine
 # zero (a genuine zero IS the wedge).
+#
+# BASE ONLY — this is the whole correctness of the wedge signature. A cron has
+# TWO session shapes and they have opposite meanings:
+#
+#   agent:<id>:cron:<jobId>              the PERSISTENT base session, one per
+#                                        job. Losing it IS the wedge: the next
+#                                        fire dies at setup with
+#                                        CronSessionLifecycleClaimError.
+#   agent:<id>:cron:<jobId>:run:<runId>  a PER-RUN session, disposable by
+#                                        design. openclaw 2.0's own reaper
+#                                        (dist src/cron/session-reaper.ts,
+#                                        DEFAULT_RETENTION_MS = 864e5 = 24h,
+#                                        knob cron.sessionRetention) deletes
+#                                        these on purpose.
+#
+# Counting both together is why this guard looked like it was false-positiving
+# on 2026-09-16: an agent whose crons run less often than daily has zero `:run:`
+# children and the combined count reads 0 even while its base sessions are
+# intact. Measured on live main the same day, base vs run:
+#
+#     ceo 0/0   clio 2/1   cmo 0/0   cto 12/0   devops 3/4
+#     finance 1/1   operations 6/32   qa 522/12   scout 2/1
+#
+# operations/caroline-weekly-rollup, operations/credit-fleet-fraud-scan-weekly,
+# finance/daily-dispute-handler and cto/caroline-autonomy-improver all hold a
+# BASE session while running far less often than daily — the reaper never
+# touches it. ceo and cmo were the only agents with enabled crons and NO base
+# session, i.e. genuinely wedged, which is what the guard had been saying.
+#
+# So do NOT "fix" this by gating on how long ago the cron last ran. That models
+# per-run expiry as base-session loss and suppresses the one signature that
+# catches the outage; it was proposed, built, and rejected on PR #946.
 _cron_key_count() {
   local profile="$1" agent="$2"
   if [ "$SESSION_BUDGET_2026_8_PLUS" -eq 1 ]; then
     _sessions_json "$profile" | jq -r --arg a "$agent" '
       [ .sessions[]? | select(.agentId == $a) | (.key // "")
-        | select(type == "string" and test(":cron:")) ] | length' \
+        | select(type == "string" and test(":cron:") and (test(":run:") | not)) ] | length' \
       2>/dev/null || printf '%s' -1
     return
   fi
@@ -385,7 +422,7 @@ _cron_key_count() {
   [ -r "$f" ] || { printf '%s' -1; return; }
   jq -r '(.entries // .)
          | (if type == "object" then keys else [.[].key] end)
-         | [ .[] | select(type == "string" and test(":cron:")) ] | length' \
+         | [ .[] | select(type == "string" and test(":cron:") and (test(":run:") | not)) ] | length' \
     "$f" 2>/dev/null || printf '%s' -1
 }
 
@@ -447,12 +484,24 @@ _enabled_cron_counts() {
   local profile="$1" out
   out="$(openclaw --profile "$profile" cron list --all --json 2>/dev/null)" || return 1
   [ -n "$out" ] || return 1
+  # Third field = how many of that agent's enabled model-turn crons have FIRED
+  # under their CURRENT registration (a numeric lastRunAtMs). It rides this
+  # existing call rather than a second `cron list`, which would be a second
+  # chance to disagree with the first.
+  #
+  # `fired` must be built as a NULLABLE field, never a filtered stream: jq's
+  # `numbers` yields EMPTY on a non-match and an `empty` inside an object
+  # constructor deletes the WHOLE object, which silently drops the agent from
+  # this inventory and takes its entry-cap CRITICAL and WARN with it. That
+  # exact bug was written and caught on this PR — see
+  # docs/lessons/working-in-hydra.md.
   printf '%s' "$out" | jq -r '
       (.jobs // [])
       | map(select(.enabled == true and ((.payload.kind? // "") != "command"))
-            | .agentId // "default")
-      | group_by(.)[]
-      | "\(.[0]) \(length)"' 2>/dev/null || return 1
+            | { agent: (.agentId // "default"),
+                ran: ([ .lastRunAtMs?, .state?.lastRunAtMs? ] | map(numbers) | .[0]) })
+      | group_by(.agent)[]
+      | "\(.[0].agent) \(length) \([ .[].ran | numbers ] | length)"' 2>/dev/null || return 1
 }
 
 # collect_findings — emit "SEV<TAB>profile/agent<TAB>message" per finding on
@@ -471,7 +520,7 @@ _enabled_cron_counts() {
 #   0  nothing at all     -> clean
 collect_findings() {
   local viol=0 uneval=0 profile agent maxb bytes warn_at ckeys ecount
-  local maxe pkeys entry_warn_at disk_dormant
+  local maxe pkeys entry_warn_at disk_dormant cfired
   local sessions_raw sessions_hasmore sessions_count sessions_totalcount
   for profile in $PROFILES; do
     [ -n "$profile" ] || continue
@@ -640,6 +689,9 @@ collect_findings() {
       [ "$have_inventory" -eq 1 ] || continue
       ecount="$(printf '%s\n' "$enabled_map" | awk -v a="$agent" '$1 == a {print $2; exit}')"
       [ -n "$ecount" ] && [ "$ecount" -gt 0 ] || continue
+      # How many of them have fired under their current registration.
+      cfired="$(printf '%s\n' "$enabled_map" | awk -v a="$agent" '$1 == a {print $3; exit}')"
+      case "$cfired" in ''|*[!0-9]*) cfired=0 ;; esac
 
       pkeys="$(_protected_key_count "$profile" "$agent")"
       ckeys="$(_cron_key_count "$profile" "$agent")"
@@ -687,8 +739,29 @@ collect_findings() {
         fi
       fi
 
-      # Wedge signature: owns enabled crons but has no cron session entries.
-      if [ "$ckeys" = "0" ]; then
+      # Wedge signature: owns enabled crons that HAVE FIRED under their current
+      # registration, yet has no base cron session.
+      #
+      # The "have fired" half is load-bearing, and it is why this reported
+      # main/ceo and main/cmo on 2026-09-16 while both were fine. A base session
+      # is created BY a run (dist isolated-agent-*.js resolves
+      # `cron:${input.job.id}` inside the run path), and it is deleted with its
+      # owning job id (`removeCronJobBaseSession`: "Removes the reusable base
+      # session whose owning isolated cron job was deleted"). Declaration-keyed
+      # crons — every `skill-collection-review-<agent>` — are re-registered with
+      # a FRESH uuid on every boot, so after a restart the old base session goes
+      # with the old job id and the new job legitimately has none until it fires.
+      # Verified after the 09:41Z restart: all nine skill-collection-review jobs
+      # showed lastRunAtMs ABSENT with next fires days out, and the only agents
+      # flagged were ceo and cmo because a declaration-keyed cron is the ONLY
+      # cron each of them owns. Proof that the first fire is enough:
+      # operations/support-email-triage-hourly held a base session for a job that
+      # had run since that same restart.
+      #
+      # So a job with no run under its current id tells us nothing, and paging on
+      # it makes every restart an outage for every weekly cron. Only a job that
+      # HAS fired and still has no base session is evidence of eviction.
+      if [ "$ckeys" = "0" ] && [ "${cfired:-0}" -gt 0 ]; then
         printf 'CRITICAL\t%s/%s\t%s enabled model-turn cron(s) but ZERO ":cron:" session keys — cron sessions have been evicted; fires will die at setup with CronSessionLifecycleClaimError\n' \
           "$profile" "$agent" "$ecount"
         viol=1

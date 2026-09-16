@@ -243,6 +243,32 @@ are not). (Real incident: `.apply.dry_run // "true"` turned an explicit `false` 
 the boolean distinction, use `| tostring` and test the literal string, or an explicit
 `if/then/else`, never `// <default>`.
 
+**A cron has TWO session shapes with opposite meanings — count the BASE, never the total.**
+`agent:<id>:cron:<jobId>` is the persistent base session, one per job. `agent:<id>:cron:<jobId>:run:<runId>`
+is a per-run child, and openclaw 2.0's cron reaper deletes those on purpose after
+`cron.sessionRetention` (`dist src/cron/session-reaper.ts`, `DEFAULT_RETENTION_MS = 864e5` = 24h).
+Counting both together makes any agent whose crons run less often than daily read as having zero
+cron sessions. (Real incident, PR #946: I read that combined zero as a false positive and built a
+"the reaper explains it" gate that would have permanently suppressed the wedge signature. Measured
+base/run on live main the same day: ceo 0/0, cmo 0/0 against clio 2/1, cto 12/0, devops 3/4,
+finance 1/1, operations 6/32, qa 522/12, scout 2/1 — base sessions clearly survive the reaper.)
+**The base session's lifecycle, since the obvious reading of a zero is wrong twice over:** a RUN
+creates it (`dist isolated-agent-*.js` resolves `cron:${input.job.id}` inside the run path), and it
+is deleted with its owning job id (`removeCronJobBaseSession`: *"Removes the reusable base session
+whose owning isolated cron job was deleted"*). Declaration-keyed crons — every
+`skill-collection-review-<agent>`, `heartbeat:<agent>`, `memory-core:*` — are re-registered with a
+FRESH uuid on every boot, so after a restart the old base session goes with the old job and the new
+job legitimately has none until its first fire. Verified after the 2026-09-16 09:41Z restart: all
+nine `skill-collection-review-*` jobs showed `lastRunAtMs` ABSENT with next fires days out, while
+repo-declared `support-email-triage-hourly` had a real run and a base session. So **"enabled cron +
+zero base keys" is the EXPECTED state for any declaration-keyed cron that has not fired under its
+current registration** — a guard must skip those and flag only a job that HAS fired and still has
+none. Also note `CronSessionLifecycleClaimError` is
+`Session "<key>" changed while starting work. Retry.` with `admissionDisposition:"session-conflict"`
+— a retryable RACE, not a missing-session error, so it is not evidence of an absent base session
+either. (Beware mixing censuses across a restart: the 75.4h/52.3h `lastRunAtMs` values that made
+this look like a long-standing wedge were pre-restart readings of job ids that no longer existed.)
+
 **jq `any(generator; cond)` rebinds `.` inside a pipe in `cond`.** `any(["bass"][]; .
 != "" and ("pau romero" | contains(.)))` returns true because `contains(.)` sees the
 post-pipe value. Bind the iterator first: `any($items[] | . as $x |

@@ -76,12 +76,48 @@ PY
 }
 
 # _set_enabled_crons <agent> <count>
+# _set_enabled_crons <agent> <n> [fired]
+#
+# <fired> = "yes" (default) stamps lastRunAtMs, i.e. these crons HAVE run under
+# their current registration. "no" leaves it absent, which is what a
+# declaration-keyed cron looks like after a boot regenerates its uuid.
+#
+# The default is "yes" because every caller below is asserting the genuine
+# wedge, and a job with no run under its current id is EXPECTED to have no base
+# session — so leaving lastRunAtMs absent would make those tests pass for the
+# wrong reason once the fired-gate exists.
 _set_enabled_crons() {
-  python3 - "$FAKE_CRON_JSON" "$1" "$2" <<'PY'
-import json, sys
-path, agent, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
-jobs = [{"id": f"j{i}", "enabled": True, "agentId": agent} for i in range(n)]
+  python3 - "$FAKE_CRON_JSON" "$1" "$2" "${3:-yes}" <<'PY'
+import json, sys, time
+path, agent, n, fired = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+now = int(time.time() * 1000)
+jobs = []
+for i in range(n):
+    j = {"id": f"j{i}", "enabled": True, "agentId": agent}
+    if fired == "yes":
+        j["lastRunAtMs"] = now - 3600_000
+    jobs.append(j)
 json.dump({"jobs": jobs}, open(path, "w"))
+PY
+}
+
+# _add_run_keys <profile> <agent> <n> [job]
+#
+# Appends `agent:<id>:cron:<job>:run:<i>` PER-RUN children to an existing 7.1
+# store. These must never count toward the wedge signature: openclaw 2.0's cron
+# reaper deletes them after cron.sessionRetention (24h default) by design, so
+# their presence or absence says nothing about whether the agent's cron surface
+# survived. Only the base `agent:<id>:cron:<job>` key does.
+_add_run_keys() {
+  local p="$1" a="$2" n="$3" job="${4:-job-0}"
+  local f="$SESSION_BUDGET_STATE_ROOT/.openclaw-$p/agents/$a/sessions/sessions.json"
+  python3 - "$f" "$a" "$n" "$job" <<'PY'
+import json, sys
+path, agent, n, job = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+store = json.load(open(path))
+for i in range(n):
+    store[f"agent:{agent}:cron:{job}:run:{i}"] = {"updatedAt": 1}
+open(path, "w").write(json.dumps(store))
 PY
 }
 
@@ -440,6 +476,144 @@ PY
   # The over-budget disk finding must still be reported, not swallowed.
   [[ "$output" == *"maxDiskBytes"* ]]
   [[ "$output" == *"main/ops"* ]]
+}
+
+
+
+# ── not-yet-fired registrations are NOT a wedge ─────────────────────────────
+# A base session is created BY a run, and it is deleted with its owning job id.
+# Declaration-keyed crons (every skill-collection-review-<agent>) get a FRESH
+# uuid on every boot, so after a restart the old base session goes with the old
+# job and the new job legitimately has none until it fires. Verified after the
+# 2026-09-16 09:41Z restart: all nine skill-collection-review jobs had
+# lastRunAtMs ABSENT with next fires days out, and the guard flagged exactly
+# ceo and cmo — the two agents whose ONLY cron is declaration-keyed.
+@test "a cron that has not fired under its CURRENT registration is not a wedge" {
+  # The live ceo/cmo shape: one enabled cron, no run history, zero base keys.
+  _mk_agent main ceo 1024 0
+  _set_enabled_crons ceo 1 no
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"ZERO"* ]]
+}
+
+@test "a cron that HAS fired under its current registration still pages" {
+  # The discriminator: identical fixture, one recorded run. The base session
+  # should exist and does not, so this is real eviction and must page.
+  _mk_agent main ceo 1024 0
+  _set_enabled_crons ceo 1 yes
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"1 enabled model-turn cron(s) but ZERO"* ]]
+}
+
+@test "one fired cron among several not-yet-fired ones is enough to page" {
+  # The signature is per-AGENT while the rule is per-JOB, so an agent must not
+  # be excused just because SOME of its crons are freshly registered.
+  _mk_agent main ops 1024 0
+  python3 - "$FAKE_CRON_JSON" <<'PY'
+import json, sys, time
+now = int(time.time() * 1000)
+jobs = [{"id": "fresh1", "enabled": True, "agentId": "ops"},
+        {"id": "fresh2", "enabled": True, "agentId": "ops"},
+        {"id": "ran1", "enabled": True, "agentId": "ops", "lastRunAtMs": now - 7200_000}]
+json.dump({"jobs": jobs}, open(sys.argv[1], "w"))
+PY
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"3 enabled model-turn cron(s) but ZERO"* ]]
+}
+
+@test "the entry-cap finding still fires for an agent whose crons have never run" {
+  # The fired-gate must narrow ONLY the wedge line. Regression for the jq trap
+  # that deleted such an agent from the inventory entirely and silently took
+  # its entry-cap CRITICAL with it.
+  _mk_profile main 4gb 10
+  _mk_agent main ceo 1024 0 25
+  _set_enabled_crons ceo 1 no
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"protected (non-removable) entries >= maxEntries"* ]]
+  [[ "$output" != *"ZERO"* ]]
+}
+
+@test "a fired cron WITH a base session is clean" {
+  _mk_agent main ops 1024 2
+  _set_enabled_crons ops 2 yes
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"ZERO"* ]]
+}
+
+# ── base vs per-run cron sessions ───────────────────────────────────────────
+# A cron has TWO session shapes with OPPOSITE meanings:
+#   agent:<id>:cron:<jobId>              persistent base -- losing it IS the wedge
+#   agent:<id>:cron:<jobId>:run:<runId>  per-run, deleted by openclaw 2.0's own
+#                                        reaper after cron.sessionRetention (24h)
+# Counting them together made this guard look like it was false-positiving on
+# 2026-09-16 (main/ceo and main/cmo). It was not: measured base/run on live main
+# that day was ceo 0/0, cmo 0/0 against clio 2/1, cto 12/0, devops 3/4,
+# finance 1/1, operations 6/32, qa 522/12, scout 2/1 -- and
+# operations/caroline-weekly-rollup, credit-fleet-fraud-scan-weekly,
+# finance/daily-dispute-handler and cto/caroline-autonomy-improver all hold a
+# BASE session while running far less often than daily. ceo and cmo were the
+# only agents with enabled crons and no base session: genuinely wedged.
+@test "per-run sessions alone are NOT a cron surface: base=0 run=many still pages" {
+  # The decisive case. An agent mid-run whose base session was evicted looks
+  # busy -- ten live per-run children -- and is nevertheless wedged: the next
+  # fire has no base session to claim.
+  _mk_agent main ops 1024 0
+  _add_run_keys main ops 10
+  _set_enabled_crons ops 3
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"3 enabled model-turn cron(s) but ZERO"* ]]
+}
+
+@test "a base session with NO per-run children is healthy, not a wedge" {
+  # The case that looked like a false positive: an agent whose crons run less
+  # often than daily has had every per-run child reaped, and that is correct
+  # behaviour. Its base session is intact, so nothing is wrong.
+  _mk_agent main ceo 1024 1
+  _set_enabled_crons ceo 1
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"ZERO"* ]]
+}
+
+@test "per-run children do not mask a missing base session for ONE of two jobs" {
+  # Guards the aggregate: the signature is per-AGENT, so an agent keeping one
+  # base session plus many run children for a busy job still reads as having a
+  # cron surface. This pins that the count is of BASE keys, not of all keys --
+  # base=1 with 20 run children must be 1, which is why this stays clean rather
+  # than tripping any count-based threshold.
+  _mk_agent main ops 1024 1
+  _add_run_keys main ops 20
+  _set_enabled_crons ops 2
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"ZERO"* ]]
+}
+
+@test "2026.8+: per-run sessions alone still page (same rule through the CLI path)" {
+  # The 2.0 reader is a different code path (cached sessions --all-agents JSON,
+  # not sessions.json), so the rule is pinned on both sides.
+  export FAKE_OPENCLAW_VERSION=2026.8.2
+  _mk_profile main 4gb
+  _mk_agent_2026_8 ops 1024 0 1
+  python3 - "$FAKE_SESSIONS_DIR/ops.sqlite" <<'PY'
+import sys
+from sqlite3 import connect
+con = connect(sys.argv[1])
+for i in range(8):
+    con.execute("insert into sessions (key, chatType) values (?, ?)",
+                ("agent:ops:cron:job-0:run:%d" % i, None))
+con.commit(); con.close()
+PY
+  _set_enabled_crons ops 2
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"2 enabled model-turn cron(s) but ZERO"* ]]
 }
 
 @test "command-kind crons do not count toward the wedge signature" {
