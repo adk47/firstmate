@@ -9,10 +9,10 @@ Transfer an exact, evidence-backed set of track credits between two distinct pro
 
 ## Procedure
 
-1. Resolve and name both profiles, then confirm the source and target direction from the customer evidence. Stop if either identity or direction is ambiguous.
-2. Freeze a manifest containing each exact track UUID, title, artists, source roles, target roles, and missing target roles. Record a whole-file hash and a sorted-ID-set hash; completion requires unique IDs and zero unmatched or ambiguous evidence rows.
+1. Resolve and name both profiles, then confirm the source and target direction from the customer evidence. When the customer identifies the same-name profiles as different artists, preserve them as separate profiles and use a targeted credit transfer rather than a merge. Stop if either identity or direction is ambiguous.
+2. Normalize submitted track URLs to UUIDs and deduplicate repeated links before counting the requested set. Freeze a manifest containing each exact track UUID, title, artists, source roles, target roles, and missing target roles. Record a whole-file hash and a sorted-ID-set hash; completion requires unique IDs and zero unmatched or ambiguous evidence rows.
 3. Read both profiles through paginated `GET /admin/profile/:profileId/credits?limit=500&page=N`, deduplicating by track UUID. Do not use cached `creditCount` as proof.
-4. Compare live state with the frozen manifest. Stop on missing source IDs, source-role drift, duplicate IDs, or an unapproved overlap. Log the intended writes before execution and anchor bulk destructive calls to the approving message.
+4. Compare live state with the frozen manifest. Stop on missing source IDs, source-role drift, duplicate IDs, or an unapproved overlap. Log the intended writes before execution and anchor bulk destructive calls to the approving message. When the bulk-delete threshold pauses the batch, re-read the manifest tracks to identify exactly which deletions landed, then continue only the remaining rows with both `--confirmed-by <allowlisted-handle>` and `--approval-msg-id <message-ts>`; `--requester` and approval-author metadata do not replace the explicit bulk-gate confirmation fields.
 5. Add only missing roles with `POST /admin/track/:trackId/profile/:profileId/credits` and body `{"credits":["Role", ...]}`. The live handler requires the `credits` array; do not use a singular `role` field.
 6. Re-read the target and require every frozen source role on every manifest track before deleting anything from the source. Stop unless parity is complete.
 7. Delete one source-track canary, then read both profiles. Continue only when the canary is absent from the source and complete on the target.
