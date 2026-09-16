@@ -789,7 +789,7 @@
   "memory": {
     "search": {
       "enabled": true,
-      "provider": "openai",
+      "provider": "openai-compatible",
       "model": "text-embedding-3-small",
       "remote": {
         "baseUrl": "https://openrouter.ai/api/v1",
