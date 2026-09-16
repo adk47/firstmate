@@ -671,6 +671,7 @@
       "browser",
       "codex",
       "lobster",
+      "memory-wiki",
       "muso-credit-verification-enforcer",
       "openrouter",
       "slack",
@@ -731,6 +732,14 @@
       },
       "lobster": {
         "enabled": true
+      },
+      "memory-wiki": {
+        "enabled": true,
+        "config": {
+          "vault": {
+            "scope": "agent"
+          }
+        }
       }
     },
     "load": {

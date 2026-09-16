@@ -223,6 +223,48 @@ print('true' if 'active-memory' in allow else 'false')
 ")
 caroline_check "main.plugins.allow.active-memory-absent" "false" "$main_am"
 
+# 8. memory-wiki, WHEN ENABLED, must pin vault.scope="agent" on every profile.
+# openclaw 2026.8.2's DEFAULT_WIKI_VAULT_SCOPE is **"global"** (verified in
+# dist/config-CK1FkstX.js), and resolveMemoryWikiAgentConfig() returns the SAME
+# config for every agent under that scope — so a bare `{"enabled": true}` points
+# all of a profile's agents at one shared vault (<stateDir>/wiki/main) and
+# `wiki_search` returns any other agent's `wiki_apply` writes. Finance payout
+# context would be readable by qa.
+#
+# That is the same per-agent-isolation break that keeps memory-lancedb off
+# plugins.allow above, so it gets the same kind of gate rather than a comment:
+# the unsafe shape here is an ABSENT key, which no "is it in the allowlist"
+# check can catch. QA finding on PR #956 — the PR claimed per-agent isolation
+# and the default gave the opposite.
+for _wiki_profile in main edge; do
+  case "$_wiki_profile" in
+    main) _wiki_file="$MAIN" ;;
+    edge) _wiki_file="$EDGE" ;;
+  esac
+  _wiki_scope=$(python3 -c "
+import json, sys
+with open('$_wiki_file') as f:
+    c = json.load(f)
+p = c.get('plugins', {})
+e = p.get('entries', {}).get('memory-wiki')
+if not e or not e.get('enabled'):
+    print('not-enabled')
+elif 'memory-wiki' not in p.get('allow', []):
+    # Enabled in entries but NOT trusted in plugins.allow. openclaw loads
+    # NOTHING: \`config validate\` says 'plugin disabled (not in allowlist) but
+    # config is present' and exits 0 with only a warning, so without this branch
+    # CI stays green while the feature silently stops registering its tools.
+    # Reported as a scope value so one caroline_check covers both shapes.
+    print('ENABLED-BUT-NOT-IN-plugins.allow')
+else:
+    print(e.get('config', {}).get('vault', {}).get('scope') or 'MISSING-defaults-to-global')
+")
+  case "$_wiki_scope" in
+    not-enabled) : ;;   # disabled is safe; nothing to assert
+    *) caroline_check "$_wiki_profile.memory-wiki.vault.scope" '"agent"' "\"$_wiki_scope\"" ;;
+  esac
+done
+
 # 8. memory-core dreaming disabled on main.
 main_dreaming=$(python3 -c "
 import json
