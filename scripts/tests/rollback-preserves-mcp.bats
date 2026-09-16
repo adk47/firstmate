@@ -37,7 +37,7 @@ setup() {
   cp "${ROLLBACK_SH:-$REPO_ROOT/scripts/rollback.sh}" "$SRC/scripts/rollback.sh"
   cp "$REPO_ROOT/scripts/deploy.sh" "$SRC/scripts/deploy.sh"
   # the shared preservation lib, if the implementation under test has one
-  for lib in sync-profile-config.sh announce-legit-write.sh; do
+  for lib in sync-profile-config.sh announce-legit-write.sh deploy-mutation-marker.sh; do
     [ -f "$REPO_ROOT/scripts/lib/$lib" ] && cp "$REPO_ROOT/scripts/lib/$lib" "$SRC/scripts/lib/$lib"
   done
   chmod +x "$SRC/scripts/rollback.sh"

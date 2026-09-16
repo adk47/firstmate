@@ -55,6 +55,8 @@ source "$SCRIPT_DIR/lib/codex-version.sh"
 # behind one orphaned lock (incident 2026-07-01).
 # shellcheck source=lib/deploy-lock.sh
 source "$SCRIPT_DIR/lib/deploy-lock.sh"
+# shellcheck source=lib/deploy-mutation-marker.sh
+source "$SCRIPT_DIR/lib/deploy-mutation-marker.sh"
 
 # Effective systemd EnvironmentFile validation for the muso CLI credentials
 # used by the main gateway (unit-tested in scripts/tests/muso-env-preflight.bats).
@@ -841,6 +843,9 @@ RSYNC_EXCLUDES=(
   --exclude='secrets/'
   # Drift baseline file (server-managed, not part of the repo)
   --exclude='.deployed-sha'
+  # In-progress marker (server-owned, written/removed by deploy.sh and
+  # rollback.sh); must survive rsync --delete like .deployed-sha above.
+  --exclude='.deploy-mutating'
   # Decommissioned CLIProxyAPI sidecar (PR #224). Files no longer in the
   # repo but may still exist on /opt/hydra/ until ops cleanup. Excluded
   # so rsync --delete doesn't trip the deploy pre-flight gate; safe to
@@ -1395,6 +1400,30 @@ unset cfg_dir cfg_skill cfg_rule cfg_idx cfg_include_idx cfg_exclude_idx oa_idx 
 DEPLOY_CHANGED_FILES=""
 # shellcheck disable=SC2034  # consumed by sourced lib/edge-restart-gate.sh
 DEPLOY_DIFF_COMPUTED=0
+
+# A leftover .deploy-mutating marker means a PREVIOUS run wrote it (right
+# after its Step 4a passed) and never reached a clean end state (neither
+# the .deployed-sha baseline write nor rollback.sh cleared it). That is a
+# WARN, not a halt: Step 0/4a below still run and will make their own
+# decision, but it's worth flagging: a halt in THIS run will trigger the
+# workflow's rollback step (see scripts/lib/deploy-rollback-gate.sh), which
+# is not what a fresh Step 0/4a halt normally does.
+marker_precheck=false
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+  if [[ -f "$DEPLOY_PATH/.deploy-mutating" ]]; then
+    marker_precheck=true
+  fi
+else
+  if ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" \
+    "[ -f '$DEPLOY_PATH/.deploy-mutating' ]" 2>/dev/null; then
+    marker_precheck=true
+  fi
+fi
+if $marker_precheck; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+  log "WARN: $DEPLOY_PATH/.deploy-mutating already exists (owner: $(cat "$DEPLOY_PATH/.deploy-mutating" 2>/dev/null || echo unreadable)); a previous deploy never completed or rolled back, or another deploy is mid-flight."
+  log "WARN: a halt in this run will therefore trigger a rollback (the marker looks the same either way)."
+fi
+unset marker_precheck
 
 # -------------------------------------------------------------------
 # Step 0: Drift check (deploy-equivalent of `git pull` before `git push`)
@@ -1982,6 +2011,7 @@ DEL_BRIEFING
 }
 preflight_drift_check
 
+
 # -------------------------------------------------------------------
 # Step 4a.5: pin the muso CLI — BEFORE anything is synced.
 # -------------------------------------------------------------------
@@ -2004,6 +2034,47 @@ if needs_target "main" || needs_target "edge"; then
     fail "muso CLI pin failed (target ${MUSO_CLI_VERSION}) — aborting BEFORE any sync, fleet unchanged"
   fi
 fi
+
+# -------------------------------------------------------------------
+# Mark the deploy as mutating: every read-only gate (Step 0 drift check,
+# Step 4a pre-flight) and the pre-sync muso CLI pin (Step 4a.5, which fails
+# "BEFORE any sync, fleet unchanged") are behind us, so the next thing that
+# happens is the Step 4b rsync. From here on a failure genuinely means
+# node-8 may have been touched, so the workflow's rollback step should run
+# scripts/rollback.sh. Before this point it should not. The marker carries
+# an OWNER token: the workflow passes its run id as HYDRA_DEPLOY_RUN_ID and
+# hands the same token to scripts/lib/deploy-rollback-gate.sh, which only
+# answers rollback=true for a marker this run wrote. A marker owned by some
+# other deploy (a manual one mid-flight while a scheduled run fails to get
+# the lock) must never trigger a rollback underneath it. Removed once the
+# .deployed-sha baseline write below is verified, and by rollback.sh after
+# a successful rollback.
+# -------------------------------------------------------------------
+DEPLOY_RUN_TOKEN="${HYDRA_DEPLOY_RUN_ID:-manual-$(hostname 2>/dev/null || echo host)-$$-$(date -u +%Y%m%dT%H%M%SZ)}"
+# The claim is ATOMIC on the server and owner-aware (lib/deploy-mutation-
+# marker.sh): the deploy lock above is per source host, so a laptop deploy
+# and the node-8 runner can both reach this line for the same baseline. A
+# marker held by another live owner is a refusal, never an overwrite; a
+# dead owner is cleared by hand or compare-and-swapped away with
+# HYDRA_TAKEOVER_MUTATION_MARKER=<that owner's token>.
+log "Claiming the mutation marker ($DEPLOY_PATH/.deploy-mutating, owner $DEPLOY_RUN_TOKEN)"
+marker_rc=0
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+  claim_mutation_marker "$DEPLOY_PATH/.deploy-mutating" "$DEPLOY_RUN_TOKEN" "${HYDRA_TAKEOVER_MUTATION_MARKER:-}" || marker_rc=$?
+else
+  # Stream the lib to node-8 and run the claim THERE, so noclobber's O_EXCL
+  # applies on the server's filesystem, not on a copy.
+  ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" \
+    "bash -s -- claim '$DEPLOY_PATH/.deploy-mutating' '$DEPLOY_RUN_TOKEN' '${HYDRA_TAKEOVER_MUTATION_MARKER:-}'" \
+    < "$SCRIPT_DIR/lib/deploy-mutation-marker.sh" || marker_rc=$?
+fi
+case "$marker_rc" in
+  0) ;;
+  2) fail "another deploy holds $DEPLOY_PATH/.deploy-mutating (see the owner above); refusing to sync underneath it. If that deploy is dead, remove the marker on node-8 or rerun with HYDRA_TAKEOVER_MUTATION_MARKER=<that owner token> (a compare-and-swap; a bare 1 is refused)." ;;
+  4) fail "$DEPLOY_PATH/.deploy-mutating exists but cannot be read; owner unknown, refusing to sync. Inspect it on node-8." ;;
+  *) fail "could not claim the mutation marker (rc=$marker_rc)" ;;
+esac
+unset marker_rc
 
 # -------------------------------------------------------------------
 # Step 4b: rsync repo to Node 8
@@ -3321,6 +3392,23 @@ if command -v git >/dev/null 2>&1 \
   fi
   log "  Drift baseline updated: .deployed-sha → $DEPLOYED_SHA"
 fi
+
+# The baseline landed, so this deploy reached a clean end state; clear the
+# mutation marker written above (right after Step 4a passed). See
+# scripts/lib/deploy-rollback-gate.sh for why this must happen before the
+# workflow can ever decide "no rollback needed" on a LATER run.
+# A leftover marker blocks every later deploy (foreign owner), so the clear
+# is checked on BOTH paths and retried once by the lib helper.
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+  clear_mutation_marker "$DEPLOY_PATH/.deploy-mutating" \
+    || fail "deploy landed but could not clear $DEPLOY_PATH/.deploy-mutating; remove it by hand or every later deploy refuses to claim it"
+else
+  ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" \
+    "bash -s -- clear '$DEPLOY_PATH/.deploy-mutating'" \
+    < "$SCRIPT_DIR/lib/deploy-mutation-marker.sh" \
+    || fail "deploy landed but could not clear $DEPLOY_PATH/.deploy-mutating on node-8; remove it by hand or every later deploy refuses to claim it"
+fi
+log "  Cleared mutation marker"
 
 # -------------------------------------------------------------------
 # Post-flight: rebuild Caroline's RAG vector index (edge/support)

@@ -35,6 +35,8 @@ setup() {
   # rollback.sh sources these; without them the script dies at `source` under
   # `set -e` and every assertion below fails for the wrong reason.
   cp "$REPO_ROOT/scripts/lib/sync-profile-config.sh" "$SRC/scripts/lib/sync-profile-config.sh"
+  # rollback.sh sources the mutation-marker lib (PR #948); the synthetic repo needs it too.
+  cp "$REPO_ROOT/scripts/lib/deploy-mutation-marker.sh" "$SRC/scripts/lib/deploy-mutation-marker.sh"
   [ -f "$REPO_ROOT/scripts/lib/announce-legit-write.sh" ] \
     && cp "$REPO_ROOT/scripts/lib/announce-legit-write.sh" "$SRC/scripts/lib/announce-legit-write.sh"
   chmod +x "$SRC/scripts/rollback.sh"
@@ -92,6 +94,28 @@ run_rollback() {
   [ -f "$DEPLOY/skills-all/marker.md" ]
   # The regression: this used to be BAD (the failed commit's content).
   [ "$(cat "$DEPLOY/skills-all/marker.md")" = "GOOD" ]
+}
+
+@test "a mutation marker present before a successful rollback is absent afterwards" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  : > "$DEPLOY/.deploy-mutating"
+
+  run_rollback
+
+  [ ! -f "$DEPLOY/.deploy-mutating" ]
+}
+
+@test "a marker the rollback cannot clear FAILS the rollback before the success notice (QA Important round 4, PR #948)" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  # rm -f cannot remove a non-empty directory: stands in for a transient
+  # cleanup failure on the server.
+  mkdir -p "$DEPLOY/.deploy-mutating/keep"; : > "$DEPLOY/.deploy-mutating/keep/x"
+
+  run_rollback
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not clear"* ]]
+  if [[ "$output" == *"Rollback complete."* ]]; then false; fi
 }
 
 @test "does not leave the failed commit's content on the server" {

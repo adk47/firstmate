@@ -1,8 +1,21 @@
 name: Deploy HYDRA
 
+# Push-triggered deploys restarted both gateways on every merge to main.
+# The daily schedule batches the day's merges into one restart instead;
+# workflow_dispatch is the button for an urgent deploy that can't wait for
+# the next tick. The stale-deploy guard below is unaffected: a schedule
+# or dispatch run still checks out the tip of main, so "Refuse stale
+# deploys" keeps refusing anything that isn't that tip.
 on:
-  push:
-    branches: [main]
+  schedule:
+    - cron: '0 4 * * *'   # 04:00 UTC = 06:00 Rome (CEST); one deploy of main per day
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Deploy target'
+        type: choice
+        options: [all, main, edge]
+        default: all
 
 # Serialize deploys: without this, a queued run for an OLDER commit can start
 # after a newer commit's run finishes and rsync the stale tree over node-8
@@ -80,53 +93,29 @@ jobs:
           ./scripts/lib/deploy-stale-guard.sh "$CUR" "$TIP" >> "$GITHUB_OUTPUT"
 
       - name: Detect deploy target
+        # The old HEAD~1 diff/case logic only ever made sense for a push
+        # event carrying exactly one commit. A scheduled run's HEAD can be
+        # any number of commits ahead of the server's last deploy, so there
+        # is no single "changed files" set to case over, so deploy everything.
+        # A dispatch run still lets a human scope it via the `target` input.
         id: detect
         if: steps.stale_check.outputs.proceed == 'true'
         run: |
-          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
-
-          if [ -z "$CHANGED" ]; then
-            echo "target=all" >> $GITHUB_OUTPUT
-            echo "Deploy target: all (unable to detect changes)"
-            exit 0
-          fi
-
-          NEEDS_MAIN=false
-          NEEDS_EDGE=false
-
-          while IFS= read -r file; do
-            case "$file" in
-              openclaw-edge.json|plugins/intercom/*|plugins/support-tools/*|workspaces/support/*)
-                NEEDS_EDGE=true ;;
-              openclaw-main.json|workspaces/ceo/*|workspaces/cmo/*|workspaces/cto/*|workspaces/coordinator/*|workspaces/qa/*|workspaces/finance/*|workspaces/operations/*|workspaces/devops/*|workspaces/scout/*|workspaces/neutral/*)
-                NEEDS_MAIN=true ;;
-              scripts/*|policies/*|skills-all/*|.github/workflows/*)
-                NEEDS_MAIN=true; NEEDS_EDGE=true ;;
-              plugins/*)
-                NEEDS_MAIN=true ;;
-            esac
-          done <<< "$CHANGED"
-
-          # Build comma-separated target from flags
-          TARGETS=""
-          $NEEDS_MAIN && TARGETS="${TARGETS:+$TARGETS,}main"
-          $NEEDS_EDGE && TARGETS="${TARGETS:+$TARGETS,}edge"
-
-          # Default to all if nothing matched
-          TARGET="${TARGETS:-all}"
-          # Simplify: if both profiles are set, just use "all"
-          if [ "$TARGET" = "main,edge" ]; then TARGET="all"; fi
-
+          TARGET="${{ github.event.inputs.target || 'all' }}"
           echo "target=$TARGET" >> $GITHUB_OUTPUT
           echo "Deploy target: $TARGET"
-          echo "Changed files:"
-          echo "$CHANGED"
 
       # Note: mention gate patch removed — no longer needed on OpenClaw 2026.4.2+
 
       - name: Deploy with target
         id: deploy
         if: steps.stale_check.outputs.proceed == 'true'
+        env:
+          # Owner token for the .deploy-mutating marker; the rollback step
+          # passes the SAME value to deploy-rollback-gate.sh so it only rolls
+          # back a mutation THIS run started (never one a concurrent manual
+          # deploy owns).
+          HYDRA_DEPLOY_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           echo "::group::Running deploy script"
           TARGET="${{ steps.detect.outputs.target }}"
@@ -162,10 +151,33 @@ jobs:
       - name: Rollback on failure
         if: failure() && steps.stale_check.outputs.proceed == 'true'
         run: |
-          echo "::error::Deployment failed — initiating rollback"
-          if [ -f scripts/rollback.sh ]; then
-            chmod +x scripts/rollback.sh
-            ./scripts/rollback.sh || echo "Rollback script failed"
+          # deploy.sh Step 0 (drift check) and Step 4a (pre-flight) are
+          # READ-ONLY and halt with exit 1 BEFORE any rsync when the server
+          # has agent-edited files, which is common now that deploys run
+          # unattended on a daily schedule. Running rollback.sh unconditionally
+          # on any failure() would rsync the last-known-good tree over
+          # /opt/hydra and restart both gateways for a halt that never mutated
+          # node-8 in the first place. The marker `.deploy-mutating` (written
+          # by deploy.sh right after Step 4a passes, removed after the
+          # `.deployed-sha` baseline write) tells us whether a rollback has
+          # anything to undo, and its OWNER token tells us whether it was THIS
+          # run that wrote it; see scripts/lib/deploy-rollback-gate.sh.
+          chmod +x scripts/lib/deploy-rollback-gate.sh
+          # The gate is contractually exit-0, but this is the unattended
+          # failure handler: if it ever crashes, treat that as "no rollback"
+          # and still page, rather than dying before deploy-notify.sh runs.
+          DECISION=$(bash scripts/lib/deploy-rollback-gate.sh /opt/hydra "gha-${{ github.run_id }}-${{ github.run_attempt }}") \
+            || { echo "::error::deploy-rollback-gate.sh crashed (rc=$?); treating as no rollback"; DECISION="rollback=false"; }
+          if [ "$DECISION" = "rollback=true" ]; then
+            echo "::error::Deployment failed, initiating rollback"
+            ACTION="Rollback initiated"
+            if [ -f scripts/rollback.sh ]; then
+              chmod +x scripts/rollback.sh
+              ./scripts/rollback.sh || echo "Rollback script failed"
+            fi
+          else
+            echo "::error::no rollback: deploy.sh halted before mutating node-8 (pre-flight/drift/pin), or the mutation marker belongs to another deploy (see the gate's stderr above)"
+            ACTION="No rollback (halted before mutation, or marker owned by another deploy)"
           fi
           # deploy-notify.sh prepends REAL <@UID> mentions for Nick and Aaron
           # and RETURNS the true delivery status. The former payload hardcoded
@@ -179,7 +191,7 @@ jobs:
             ":rotating_light: *HYDRA Deploy FAILED* (target: ${{ steps.detect.outputs.target }})" \
             "*Commit:* \`${{ github.sha }}\`" \
             "*Author:* ${{ github.actor }}" \
-            "*Action:* Rollback initiated" \
+            "*Action:* $ACTION" \
             "*Run:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
           bash scripts/lib/deploy-notify.sh critical "$MSG" \
             || echo "::error::Deploy FAILED and the Slack page did NOT post — nobody was notified. Check MUSO_SLACK_BOT_TOKEN_DEVOPS in /etc/openclaw/main.env and the devops bot's channel membership."

@@ -6,6 +6,8 @@ set -euo pipefail
 # Reverts gateway configs to previous version, restarts all gateways, validates.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/deploy-mutation-marker.sh
+source "$SCRIPT_DIR/lib/deploy-mutation-marker.sh"
 HYDRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/ovh_muso}"
@@ -390,6 +392,30 @@ if ! "$SCRIPT_DIR/smoke-test.sh" all; then
   fail "Smoke test FAILED after rollback. System may be in a bad state."
 fi
 log "  Smoke test passed."
+
+# -------------------------------------------------------------------
+# Step 3b: Clear the mutation marker BEFORE announcing success
+# -------------------------------------------------------------------
+# The tree is restored and the gateways are back, so the marker deploy.sh
+# wrote when it started mutating must go: a leftover marker is a foreign
+# owner to every later deploy, which then refuses to claim it and the daily
+# schedule stays blocked. That is why this runs BEFORE the success
+# notification and why a failure here is a FATAL, not a swallowed rc
+# (QA Important, PR #948 round 4). The helper retries once; the ssh path
+# streams the lib so the retry runs on node-8.
+log "Step 3b/4: Clearing the mutation marker..."
+marker_clear_rc=0
+if $HYDRA_LOCAL; then
+  clear_mutation_marker "$DEPLOY_PATH/.deploy-mutating" || marker_clear_rc=$?
+else
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
+    "bash -s -- clear '$DEPLOY_PATH/.deploy-mutating'" \
+    < "$SCRIPT_DIR/lib/deploy-mutation-marker.sh" || marker_clear_rc=$?
+fi
+if [ "$marker_clear_rc" -ne 0 ]; then
+  fail "rollback restored $PREVIOUS_SHA and restarted the gateways, but could not clear $DEPLOY_PATH/.deploy-mutating (rc=$marker_clear_rc). Every scheduled deploy will refuse to claim it: run  rm -f $DEPLOY_PATH/.deploy-mutating  on node-8, then re-check with scripts/lib/deploy-rollback-gate.sh."
+fi
+log "  Mutation marker cleared."
 
 # -------------------------------------------------------------------
 # Step 4: Post rollback status
