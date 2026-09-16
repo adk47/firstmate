@@ -22,10 +22,21 @@ if [[ " $* " == *" --version "* || "${*: -1}" == "--version" ]]; then
 fi
 
 if [[ " $* " == *" sessions --all-agents --json --limit all "* ]]; then
+  # openclaw >= 2026.8 prints a config-migration notice to stderr on every call.
+  [[ -n "${OPENCLAW_STUB_STDERR:-}" ]] && printf '%s\n' "$OPENCLAW_STUB_STDERR" >&2
+  [[ -n "${OPENCLAW_STUB_LIST_RC:-}" ]] && exit "$OPENCLAW_STUB_LIST_RC"
   [[ "${OPENCLAW_HOME:-}" == "/root" ]] || { echo 'OpenClaw home was not pinned' >&2; exit 98; }
   [[ -z "${OPENCLAW_STATE_DIR:-}${OPENCLAW_CONFIG_PATH:-}${OPENCLAW_PROFILE:-}${OPENCLAW_GATEWAY_URL:-}${OPENCLAW_GATEWAY_PORT:-}${OPENCLAW_GATEWAY_TOKEN:-}${OPENCLAW_GATEWAY_PASSWORD:-}" ]] \
     || { echo 'inherited OpenClaw selector leaked into stub' >&2; exit 98; }
-  printf '%s\n' "$OPENCLAW_STUB_SESSIONS"
+  # A payload big enough to close the error path's pipe cannot travel in the
+  # environment: Linux caps a single execve entry at MAX_ARG_STRLEN (128KB), so
+  # exporting one silently turns every later `run` into E2BIG. Large fixtures come
+  # from a file instead.
+  if [[ -n "${OPENCLAW_STUB_SESSIONS_FILE:-}" ]]; then
+    cat "$OPENCLAW_STUB_SESSIONS_FILE"
+  else
+    printf '%s\n' "$OPENCLAW_STUB_SESSIONS"
+  fi
   exit 0
 fi
 
@@ -322,4 +333,58 @@ STUB
   [ "$status" -ne 0 ]
   [[ "$output" == *"could not determine openclaw runtime version"* ]]
   [ ! -e "$OPENCLAW_STUB_LOG" ]
+}
+
+# Regression: openclaw >= 2026.8 prints "Config (...): Moved agents.list to keyed
+# agents.entries." to stderr on EVERY CLI call while the on-disk config still uses the
+# old shape. The list capture used `2>&1`, so those prose lines were prepended to the
+# JSON, `.sessions | type == "array"` failed, and the sweep pruned NOTHING from the
+# 2026.8.2 cutover onward while reporting only a broken pipe.
+@test "a config-migration notice on stderr does not corrupt the session list" {
+  export OPENCLAW_STUB_STDERR="Config (/root/.openclaw-main/openclaw.json): Moved agents.list to keyed agents.entries.
+Config (/root/.openclaw-main/openclaw.json): Removed retired agents.entries.*.default markers."
+
+  run bash "$SUT" --profile main
+
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.mode' <<<"$output")" = "dry-run" ]
+  [ "$(jq -r '.eligible' <<<"$output")" -eq 2 ]
+}
+
+# The error path itself used `printf '%s' "$json" | head -c 500`. Under `set -euo
+# pipefail` head closes the pipe at 500 bytes, printf takes SIGPIPE (141), and pipefail
+# promoted that to the script's status — so a genuine list failure aborted with a bare
+# "write error: Broken pipe" and the SESSION_LIST_FAILED diagnostic never printed.
+# The payload here is deliberately longer than 500 bytes to close that pipe.
+@test "a failing session list reports SESSION_LIST_FAILED instead of dying on a broken pipe" {
+  # The payload MUST exceed the 64KB pipe buffer or printf completes before head
+  # exits and no SIGPIPE is raised — at 4KB this test passed against the very bug it
+  # exists to catch. Production saw 1.7MB.
+  #
+  # It is delivered through a FILE, not the environment. An earlier revision
+  # exported 200KB here, which exceeds Linux's per-entry MAX_ARG_STRLEN (32 pages
+  # = 131072 bytes): execve then fails E2BIG for every subsequent `run` in this
+  # file and the whole suite reds out before it can test the fix. A file has no
+  # such ceiling, so the payload can stay comfortably above the pipe buffer.
+  export OPENCLAW_STUB_SESSIONS_FILE="$BATS_TEST_TMPDIR/big-sessions.json"
+  head -c 200000 < /dev/zero | tr '\0' 'x' > "$OPENCLAW_STUB_SESSIONS_FILE"
+
+  run bash "$SUT" --profile main
+
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"Broken pipe"* ]]
+  [ "$(jq -r '.error' <<<"$output")" = "SESSION_LIST_FAILED" ]
+  [ "$(jq -r '.detail' <<<"$output" | wc -c)" -le 520 ]
+}
+
+# A real failure must keep its diagnostic even though stderr is no longer folded in.
+@test "SESSION_LIST_FAILED carries the CLI stderr for diagnosis" {
+  export OPENCLAW_STUB_STDERR="boom: gateway unreachable"
+  export OPENCLAW_STUB_LIST_RC=3
+
+  run bash "$SUT" --profile main
+
+  [ "$status" -eq 1 ]
+  [ "$(jq -r '.error' <<<"$output")" = "SESSION_LIST_FAILED" ]
+  [[ "$(jq -r '.stderr' <<<"$output")" == *"gateway unreachable"* ]]
 }

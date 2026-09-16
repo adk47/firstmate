@@ -110,11 +110,25 @@ if version_at_least "2026.8" "$RUNTIME_VER"; then
 fi
 
 rc=0
-sessions_json=$(run_openclaw sessions --all-agents --json --limit all 2>&1) || rc=$?
+# Keep stderr OUT of the JSON capture. openclaw >= 2026.8 prints a config-migration
+# notice ("Moved agents.list to keyed agents.entries.") to stderr on EVERY CLI call
+# while the on-disk config still uses the old shape, so `2>&1` prepended two prose
+# lines to the payload and the `.sessions` check below failed on every run — the
+# retention sweep has not pruned anything since the 2026.8.2 cutover. stderr is still
+# captured, just separately, so a genuine failure keeps its diagnostic.
+sessions_err="$(mktemp)"
+sessions_json=$(run_openclaw sessions --all-agents --json --limit all 2>"$sessions_err") || rc=$?
+sessions_stderr="$(cat "$sessions_err" 2>/dev/null)"
+rm -f "$sessions_err"
 if ((rc != 0)) || ! jq -e '.sessions | type == "array"' >/dev/null 2>&1 <<<"$sessions_json"; then
-  detail=$(printf '%s' "$sessions_json" | head -c 500)
-  jq -nc --arg profile "$PROFILE" --arg detail "$detail" --argjson exit "$rc" \
-    '{error:"SESSION_LIST_FAILED",profile:$profile,exit:$exit,detail:$detail}'
+  # Bash substring, not `printf | head -c`: under `set -euo pipefail` head closes the
+  # pipe at the limit, printf takes SIGPIPE (141), and pipefail made THAT the exit
+  # status — so this error path aborted the script with a bare "write error: Broken
+  # pipe" and the SESSION_LIST_FAILED diagnostic it exists to emit was never printed.
+  detail="${sessions_json:0:500}"
+  err_detail="${sessions_stderr:0:500}"
+  jq -nc --arg profile "$PROFILE" --arg detail "$detail" --arg stderr "$err_detail" --argjson exit "$rc" \
+    '{error:"SESSION_LIST_FAILED",profile:$profile,exit:$exit,detail:$detail,stderr:$stderr}'
   exit 1
 fi
 
