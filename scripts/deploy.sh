@@ -1294,6 +1294,11 @@ RSYNC_EXCLUDES=(
   # otherwise delete the state of a live escalation -- and the pre-flight
   # dry-run fails on it, which twice blocked THIS PR on an unrelated lane.
   --exclude='workspaces/*/.bridge-*.json'
+  # Same state, un-dotted: the AGENT names its request payload at runtime and
+  # wrote workspaces/operations/bridge-request-<conversationId>.json (2026-09-15,
+  # blocked #943). Top-level workspace files never auto-classify, so the shape
+  # needs its own exclude. Mirrored KEEP glob in qa-clean-merge-scratch.sh.
+  --exclude='workspaces/*/bridge-request-*.json'
   # Agent ad-hoc scratch python at the workspace top level (NOT skills/scripts,
   # which are tracked). Iterative throwaway investigations — hardcoded test
   # filenames, demo API keys, near-duplicate files. Same category as the

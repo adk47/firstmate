@@ -53,6 +53,7 @@ KEEP_GLOBS=(
   'openclaw-workspace-state.json'
   '*tmp*'                              # any 'tmp'-marked scratch: .tmp-*, tmp_*, *.tmp
   '.bridge-*.json'                     # agent-bridge in-flight request state (#877)
+  'bridge-request-*.json'              # same, un-dotted agent-named variant (2026-09-15, #943)
   'final-*.json'                       # scout company-finder run scratch (2026-07-21, #719)
   '.company-finder-*.json'             # same, dot-prefixed variant (2026-07-30, #772)
   'finder-input-*.json'                # outreach-discovery dated stage input (2026-08-05, #794)

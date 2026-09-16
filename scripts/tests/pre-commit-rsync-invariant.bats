@@ -1973,3 +1973,21 @@ PROFILE=main AGENT=cmo "$SCRIPT_DIR/validate.sh" || rc=$?  # hydra-hook: reviewe
 BODY
   [ "$status" -eq 0 ]
 }
+
+# Live-state protections must be REGISTERED, not just present in deploy.sh:
+# the hook's check is one-directional (every required_excludes entry must be
+# in RSYNC_EXCLUDES), so an exclude that protects server state but is not
+# listed here can be dropped from deploy.sh without failing any commit. The
+# agent-bridge request payload has two shapes on node-8 (the dotted state
+# file and the un-dotted agent-named payload, 2026-09-15, #943); both must
+# stay registered, or a cleanup can silently expose an open escalation to
+# rsync --delete.
+@test "both agent-bridge request shapes are registered in required_excludes and present in deploy.sh" {
+  for pat in 'workspaces/*/.bridge-*.json' 'workspaces/*/bridge-request-*.json'; do
+    run awk '/^required_excludes=\(/{f=1;next} f&&/^\)/{f=0;exit} f' "$HOOK"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"\"$pat\""* ]]
+    run grep -Fx -- "  --exclude='$pat'" "$HYDRA_REPO/scripts/deploy.sh"
+    [ "$status" -eq 0 ]
+  done
+}
