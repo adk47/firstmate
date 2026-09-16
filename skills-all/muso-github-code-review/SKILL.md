@@ -581,7 +581,8 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> \
 - **You approve; you never merge.** A human merges — say so to the requester.
 - If the wrapper exits non-zero, relay the reason and do NOT retry blindly:
   `exit 3` = not a Muso-AI repo; `exit 4` = PR authored by the gateway account (GitHub
-  blocks self-approval — another reviewer is needed); `exit 5` = requester not authorized
+  blocks self-approval — another reviewer is needed; this one must ALSO be posted
+  on the PR — see "A refusal has to leave a trace ON THE PR"); `exit 5` = requester not authorized
   — either they are not on the allowlist at all (e.g. **Serhii**, review-only since
   2026-08-13) or they are a **scoped** approver and this PR is outside their scope (e.g.
   Mariia on a repo outside {`web-credits-next`, `auth`, `ads-manager`}, on a base other
@@ -640,6 +641,51 @@ Then report the wrapper's post-check (`reviewDecision` / `mergeStateStatus`). If
 GitHub still shows the PR blocked (required checks pending, a real CODEOWNERS
 gap), tell the requester what is outstanding — and if it does NOT, do not invent
 a blocker the post-check did not report.
+
+### A refusal has to leave a trace ON THE PR, not only in the DM
+
+**Added 2026-09-16 after Muso-AI/H-DevOps#3114.** Step 6 posts the review body
+**before** Step 7 runs the wrapper, so the body can never carry the approval
+outcome — and the follow-up comment below fires only when the wrapper printed
+`⚠️ ALERT` lines. A clean `GO` that the wrapper **declines with no alerts**
+therefore leaves **nothing on the PR at all**: the verdict reads `GO`, no
+approval appears, and the reason exists only in the cron journal and the Slack
+DM to the author.
+
+That is measured, not hypothetical. `Muso-AI/H-DevOps#3114` carried **17 reviews
+over six days**, two of them clean `GO` with every required check green, and
+never one approval — the PR is authored by the gateway account, so Guard 3
+refuses `exit 4`. Its only comment in four days was the dispatch ack. **The
+author was an agent**, which has no Slack DM to read, so the single channel
+carrying the reason reached nobody who could act on it. The PR read as "GO,
+approval withheld, no reason given" and sat.
+
+So: **when the wrapper exits 4, post the reason as a PR comment**, alerts or no
+alerts. Use the same one-post-path block below — it already carries a heading for
+the refusal case — with the wrapper's own message verbatim:
+
+```
+## ⛔ Not approved — a different reviewer must sign this one off
+<the wrapper's exit-4 message, verbatim>
+
+This PR is authored by the same account the QA bot reviews as, and GitHub
+forbids approving your own pull request. Re-running the review cannot change
+it. A different reviewer must approve.
+```
+
+**ONE comment, never two.** The block below is deliberately a single post path.
+If the wrapper *also* printed alerts, do **not** post this as a second comment —
+that path already uses `## ⚠️ Alerts (NOT approved — <exit code / reason>)`, so
+put the exit-4 explanation in **that** comment's body and post once. This section
+only changes what happens when there are **no** alerts, which today is silence.
+
+**Scoped to `exit 4` on purpose, not to every decline.** The other refusals reach
+a human requester who gets the DM, and `exit 5` in particular is a deliberate
+per-person policy (Serhii is review-only since 2026-08-13) — publishing that on
+his PR every time would annotate a person's work with a policy notice they did
+not ask for, which is noise at best. `exit 4` is the case where the author
+*cannot* read a DM and the refusal is structural: it will never resolve on a
+retry, on a new head, or on CI going green.
 
 ### Relay every ⚠️ ALERT the wrapper prints
 
